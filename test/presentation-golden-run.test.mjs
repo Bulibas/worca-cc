@@ -21,6 +21,8 @@ test('wf_presentation runs offline end to end and leaves the golden run-folder s
   assert.deepEqual(st.warnings, []);
 
   const dir = orch.pipeline.dir;
+  // Cycle shape: both verifier mocks block once (cycle 1), builder fixes, then clean.
+  const ordinals = Object.fromEntries(st.steps.filter((s) => s.nodeId).map((s) => [s.nodeId, Math.max(s.ordinal, 0)]));
   for (const f of ['deck-clarify.json', 'spine.md', 'visual-system.md', 'deck-manifest.md', 'deck/deck.html', 'deck/proof.html',
     'deck-audit-cycle1.json', 'deck-audit-cycle1.md', 'deck-audit-cycle2.json', 'deck-review-cycle1.json', 'shots/s01.png']) {
     await access(join(dir, f));
@@ -45,6 +47,16 @@ test('wf_presentation runs offline end to end and leaves the golden run-folder s
   assert.ok(kinds.includes('deck-clarify:deck-clarify.json'), kinds.join('\n'));
   assert.ok(kinds.includes('deck:deck/deck.pdf'), kinds.join('\n'));
   assert.ok(kinds.includes('deck:deck/deck.standalone.html'), kinds.join('\n'));
+
+  // The bundle card owns the single file now, and the export step gates on it.
+  // Under the mock the card writes only its report, so the standalone comes from
+  // the export agent's FALLBACK — the same branch a host with no interpreter
+  // takes, which is exactly what is worth pinning here. The card's own program is
+  // covered for real by test/deck-bundle-script.test.mjs.
+  await access(join(dir, 'deck-bundle-cycle1.md'));
+  assert.equal(ordinals.n_bundle, 1, 'the bundle step runs once, after a clean review');
+  const bundleKinds = kinds.filter((k) => k.startsWith('deck-bundle:'));
+  assert.deepEqual(bundleKinds, ['deck-bundle:deck-bundle-cycle1.md'], kinds.join('\n'));
 
   // The port's extraFiles entries are FIRST-MATCH-WINS: the deliverables take the
   // browsable `deck` kind, and the catch-all sweeps the rest into `deck-asset` —
@@ -72,6 +84,9 @@ test('wf_presentation runs offline end to end and leaves the golden run-folder s
   }
   // ...and the exporter keeps its own deliverables.
   assert.equal(nodeOf('deck/deck.pdf'), 'n_export');
+  // Under the mock deckBundle writes only its report, so this file comes from the
+  // export agent's FALLBACK branch — the same one a Python-less host takes — and
+  // is still stamped n_export, not n_bundle.
   assert.equal(nodeOf('deck/deck.standalone.html'), 'n_export');
 
   // EVERY indexed row must resolve to a real file. `allocateOutputs` allocates a
@@ -110,8 +125,6 @@ test('wf_presentation runs offline end to end and leaves the golden run-folder s
   // kit shipped inside worca, and a run only found it by globbing the filesystem.
   await access(join(dir, 'deck-kit', 'build-standalone.mjs'));
   await access(join(dir, 'deck-kit', 'CONTRACT.md'));
-  // Cycle shape: both verifier mocks block once (cycle 1), builder fixes, then clean.
-  const ordinals = Object.fromEntries(st.steps.filter((s) => s.nodeId).map((s) => [s.nodeId, Math.max(s.ordinal, 0)]));
   assert.equal(ordinals.n_review, 2);
   assert.equal(ordinals.n_build, 3);
   assert.equal(ordinals.n_audit, 3);

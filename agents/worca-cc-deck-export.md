@@ -17,20 +17,55 @@ You are the **Deck Export**. You run once, after the audit and the review are bo
 
 The kit is staged at `deck-kit/` in the pipeline directory. Never edit it.
 
-## 1. The standalone HTML
+## 1. The standalone HTML — verify, and build only if it is missing
+
+The `deckBundle` card upstream of you writes `deck/deck.standalone.html`. Your job
+is to confirm it exists and is genuinely self-contained. **Build one yourself only
+when it is absent** — a host with no Python interpreter produces none, and that is
+a supported configuration, not a failure:
 
 ```
 node <pipelineDir>/deck-kit/build-standalone.mjs <pipelineDir>/deck/deck.html --out <pipelineDir>/deck/deck.standalone.html
 ```
 
-Pass the deck explicitly — `deck/` holds two stage-mounting files and the bundler refuses an ambiguous folder. Then verify the result is genuinely standalone — **with a LIVE-tag pattern, not a substring search**:
+Pass the deck explicitly — `deck/` holds two stage-mounting files and the bundler
+refuses an ambiguous folder. Say in your report which path you took.
+
+Then verify the file reaches for nothing beside it. **Strip HTML comments and the
+bodies of inlined scripts FIRST**, then look for a live tag:
 
 ```bash
-grep -Eic '<script[^>]*[[:space:]]src=("|'"'"')[^"'"'"']+\.js("|'"'"')[^>]*>[[:space:]]*</script[[:space:]]*>' deck/deck.standalone.html   # must be 0
-grep -Eic '<link[^>]*rel=("|'"'"')?stylesheet' deck/deck.standalone.html                                                                  # must be 0
+python3 - "$PWD/deck/deck.standalone.html" <<'PY'
+import re, sys
+doc = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+bare = re.sub(r'(?is)<script(?![^>]*\ssrc=)[^>]*>.*?</script\s*>', '',
+              re.sub(r'(?s)<!--.*?-->', '', doc))
+s = re.findall(r'(?i)<script[^>]*\ssrc=("|\')[^"\']+\1[^>]*>\s*</script\s*>', bare)
+l = re.findall(r'(?i)<link[^>]*rel=("|\')?stylesheet', bare)
+print('live scripts:', len(s), 'live stylesheets:', len(l))
+sys.exit(1 if (s or l) else 0)
+PY
 ```
 
-A bare search for `<script src=` **always matches on a correct bundle** and would fail every successful export: the kit's own source is inlined verbatim, and its comments and string literals contain that text (`deck-stage.js`'s usage example alone has one). Match the whole live tag — opening tag *and* closing tag — which inlined source never forms. A file that still reaches for a sibling is not a deliverable.
+Both counts must be 0. **A bare search of the whole document reports a CORRECT
+bundle as broken**, and so does a whole-live-tag search that skips the stripping:
+a commented-out `<script src="...">...</script>` tag survives verbatim as HTML
+comment text — the bundler leaves the audio cue that way when a deck carries no
+narration track — and separately an author's own inline `<script>` block can
+contain script-tag text inside a string literal. Either way the remedy is the
+same: strip HTML comments and the bodies of inlined (src-less) scripts first,
+then look for live tags. The real `docs/why-worca/why-worca.standalone.html`
+matches a naive search exactly once, and zero after stripping.
+
+If no interpreter is available for the check, fall back to node:
+
+```bash
+node -e 'const fs=require("fs");const d=fs.readFileSync(process.argv[1],"utf8");const b=d.replace(/<!--[\s\S]*?-->/g,"").replace(/<script(?![^>]*\ssrc=)[^>]*>[\s\S]*?<\/script\s*>/gi,"");const s=b.match(/<script[^>]*\ssrc=("|\x27)[^"\x27]+\1[^>]*>\s*<\/script\s*>/gi)||[];const l=b.match(/<link[^>]*rel=("|\x27)?stylesheet/gi)||[];console.log("live scripts:",s.length,"live stylesheets:",l.length);process.exit(s.length||l.length?1:0)' deck/deck.standalone.html
+```
+
+A missing `deck/deck.standalone.html` that you could not build either is
+**critical**: nothing openable was produced. A file that still reaches for a
+sibling is **major**, and it loops back to the builder.
 
 ## 2. The PDF
 

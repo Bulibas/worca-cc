@@ -49,7 +49,7 @@ import { hostGuardEnabled, hostGuardHookEntry, hostGuardSystemPrompt } from './h
 import { mockShapeFor } from './auto/recipes.mjs';
 import { normalizeShape } from '../shared/graph/assemble.mjs';
 import { writeFile, mkdir, appendFile, readFile, access, readdir } from 'node:fs/promises';
-import { constants as FS, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { constants as FS, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -1626,10 +1626,16 @@ async function mockDeckExport(m, cycle, onEvent) {
   const deckDir = join(pdir, 'deck');
   await mkdir(deckDir, { recursive: true });
   const src = await readFile(join(deckDir, 'deck.html'), 'utf8').catch(() => '<!DOCTYPE html>\n');
-  // A real standalone inlines every companion; the mock mirrors the property the
-  // golden run asserts, rather than the bundler's actual output.
-  await writeFile(join(deckDir, 'deck.standalone.html'),
-    src.replace(/<script src="([^"]+)"><\/script>/g, (_m2, f) => `<script>/* inlined ${f} */</script>`), 'utf8');
+  // FALLBACK ONLY, mirroring the real agent: the deckBundle card owns the single
+  // file, and this step builds one itself only when the card left none — a host
+  // with no python interpreter, or a mock run, where the card writes just its
+  // report. A real standalone inlines every companion; the mock mirrors the
+  // property the golden run asserts, not the bundler's actual output.
+  const standalone = join(deckDir, 'deck.standalone.html');
+  if (!existsSync(standalone)) {
+    await writeFile(standalone,
+      src.replace(/<script src="([^"]+)"><\/script>/g, (_m2, f) => `<script>/* inlined ${f} */</script>`), 'utf8');
+  }
   await writeFile(join(deckDir, 'deck.pdf'), MOCK_PDF);
   const verdict = { issues: [], summary: '3 slides, 3 PDF pages, standalone has no external refs. task.md named no extra deliverable.' };
   if (jsonPath) { await ensureDir(jsonPath); await writeFile(jsonPath, `${JSON.stringify(verdict, null, 2)}\n`, 'utf8'); }
