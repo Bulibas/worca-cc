@@ -155,14 +155,25 @@ test('the injected sheet declares the animation vocabulary with fill-mode both',
 
 test('the proof copy and the print sheet both force the animation final state', () => {
   const src = readFileSync(join(KIT, 'deck-stage.js'), 'utf8');
+  // Every declaration a final-state block must force. clip-path is what `wipe`
+  // animates and stroke-dashoffset is what `draw` animates — drop either from a
+  // final-state block and a proof screenshot catches a clipped-away element or
+  // an undrawn stroke: blank content at the correct page count, the exact
+  // silent failure this whole vocabulary exists to make impossible.
+  const REQUIRED = ['animation: none', 'opacity: 1', 'transform: none', 'clip-path: none', 'stroke-dashoffset: 0'];
   // The proof copy — what the audit measures and screenshots — carries `noscale`.
   assert.match(src, /deck-stage\[noscale\] \[data-deck-anim\][^']*animation: none !important/,
     'a screenshot of the proof copy must never catch an animation mid-flight');
   assert.match(src, /deck-stage\[noscale\] \[data-deck-anim\][^']*opacity: 1 !important/);
+  const noscaleRules = src.match(/deck-stage\[noscale\] \[data-deck-anim\][^']*/);
+  assert.ok(noscaleRules, 'the noscale sheet has no [data-deck-anim] rule');
+  for (const decl of REQUIRED) {
+    assert.ok(noscaleRules[0].includes(decl), `the noscale rule does not force ${decl}`);
+  }
   // ...and the PDF.
   const printRules = src.match(/@media print \{ \[data-deck-anim\][^']*/);
   assert.ok(printRules, 'the print sheet has no [data-deck-anim] rule');
-  for (const decl of ['animation: none', 'opacity: 1', 'transform: none']) {
+  for (const decl of REQUIRED) {
     assert.ok(printRules[0].includes(decl), `the print rule does not force ${decl}`);
   }
 });

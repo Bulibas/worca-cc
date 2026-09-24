@@ -1182,8 +1182,7 @@
         // FINAL STATE, unconditionally, in the two places a still frame is taken.
         // proof.html carries `noscale` and is what the audit measures and shoots.
         'deck-stage[noscale] [data-deck-anim] { animation: none !important; animation-play-state: running !important; opacity: 1 !important; transform: none !important; clip-path: none !important; stroke-dashoffset: 0 !important; } ' +
-        '@media print { [data-deck-anim] { animation: none !important; opacity: 1 !important; transform: none !important; '
-          + 'clip-path: none !important; stroke-dashoffset: 0 !important; } }';
+        '@media print { [data-deck-anim] { animation: none !important; opacity: 1 !important; transform: none !important; clip-path: none !important; stroke-dashoffset: 0 !important; } }';
     }
 
     _onSlotChange() {
