@@ -20,14 +20,14 @@ import * as presentationModule from '../src/core/graph/presentation-workflow.mjs
 const rowFor = (db, id) => db.prepare('SELECT * FROM workflows WHERE id = ?').get(id);
 const freshMigrated = () => { const db = new DatabaseSync(':memory:'); migrate(db); return db; };
 
-test('a fresh DB carries wf_presentation as a v2 presentation graph with 10 nodes', () => {
+test('a fresh DB carries wf_presentation as a v2 presentation graph with 11 nodes', () => {
   const db = freshMigrated();
   const row = rowFor(db, 'wf_presentation');
   assert.ok(row, 'seeded');
   assert.equal(row.version, 2);
   assert.equal(row.domain, 'presentation');
   const graph = JSON.parse(row.graph);
-  assert.equal(graph.nodes.length, 10);
+  assert.equal(graph.nodes.length, 11);
   assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
   db.close();
 });
@@ -84,17 +84,27 @@ test('assertRunnableWorkflow resolves wf_presentation from the seeded store', as
 // and were then silently discarded, which is not what "a user-edited row is never
 // touched" promises. The refresh exists to fix WIRING; settings the product
 // offers an API to set are not its business.
+// Wires whose id is no longer present in the current constant because a later
+// shape retired them (rather than merely re-pointing them). The v1 fixture
+// references w16, which the deckBundle wiring removed entirely (the export now
+// gates on n_bundle, not on n_review directly) — so the current constant alone
+// can no longer reconstruct it.
+const RETIRED_WIRES = [
+  { id: 'w16', from: { node: 'n_review', port: 'pass' }, to: { node: 'n_export', port: 'await' } },
+];
+
 test('refresh rewires an older shipped seed WITHOUT discarding node defaults or canvas', () => {
   const { GRAPH_PRESENTATION_WORKFLOW, PRESENTATION_SHIPPED_FINGERPRINTS } = presentationModule;
   const [v1fp] = PRESENTATION_SHIPPED_FINGERPRINTS;
   const [nodeIds, wireIds] = v1fp.split('|').map((s) => new Set(s.split(',')));
   const t = GRAPH_PRESENTATION_WORKFLOW;
+  const allWires = [...t.wires, ...RETIRED_WIRES.filter((w) => !t.wires.some((c) => c.id === w.id))];
 
   const db = freshMigrated();
   // Put the row back to the older shipped shape, with a user's pin and viewport.
   const nodes = t.nodes.filter((n) => nodeIds.has(n.id)).map((n) => (n.id === 'n_build'
     ? { ...n, config: { ...(n.config || {}), model: 'opus-pinned', askQuestions: false } } : n));
-  const wires = t.wires.filter((w) => wireIds.has(w.id));
+  const wires = allWires.filter((w) => wireIds.has(w.id));
   db.prepare('UPDATE workflows SET graph = ? WHERE id = ?')
     .run(JSON.stringify({ nodes, wires, canvas: { x: 40, y: 12, scale: 0.8 } }), t.id);
   db.exec('PRAGMA user_version = 31');

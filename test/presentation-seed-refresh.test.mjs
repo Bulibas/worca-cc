@@ -22,6 +22,14 @@ import {
 const PRIOR = PRESENTATION_SHIPPED_FINGERPRINTS[0];
 const graphOf = (db) => JSON.parse(db.prepare("SELECT graph FROM workflows WHERE id='wf_presentation'").get().graph);
 
+// Wires whose id is no longer present in CUR because a later shape retired them
+// (rather than merely re-pointing them). The v1 fixture (PRIOR) references w16,
+// which Task 4 removed from CUR entirely (the export now gates on n_bundle, not
+// on n_review directly) — so CUR alone can no longer reconstruct it.
+const RETIRED_WIRES = [
+  { id: 'w16', from: { node: 'n_review', port: 'pass' }, to: { node: 'n_export', port: 'await' } },
+];
+
 /** A migrated DB whose wf_presentation row has been rolled back to a prior
  *  shipped shape — exactly what an install that first seeded then looks like. */
 function dbHoldingPriorShape() {
@@ -29,9 +37,10 @@ function dbHoldingPriorShape() {
   migrate(db);
   const keptWires = new Set(PRIOR.split('|')[1].split(','));
   const keptNodes = new Set(PRIOR.split('|')[0].split(','));
+  const allWires = [...CUR.wires, ...RETIRED_WIRES.filter((w) => !CUR.wires.some((c) => c.id === w.id))];
   const old = {
     nodes: CUR.nodes.filter((n) => keptNodes.has(n.id)),
-    wires: CUR.wires.filter((w) => keptWires.has(w.id)),
+    wires: allWires.filter((w) => keptWires.has(w.id)),
   };
   assert.equal(presentationGraphFingerprint(old), PRIOR, 'reconstructed the prior shipped shape');
   db.prepare("UPDATE workflows SET graph=? WHERE id='wf_presentation'").run(JSON.stringify(old));
@@ -90,7 +99,7 @@ test('the current shape is not listed as a prior one, or every open would rewrit
 // own version, so a DB stamped there skips the seed and must still be refreshed —
 // which is precisely the "one fixed version" trap, and the only stamp at which
 // the two halves of the migration disagree.
-for (const stamped of [29, 30, 31, 35, 36]) {
+for (const stamped of [29, 30, 31, 35, 36, 37]) {
   test(`a DB stamped ${stamped} holding the prior shape is refreshed to the current one`, () => {
     const db = dbHoldingPriorShape();
     db.exec(`PRAGMA user_version = ${stamped}`);

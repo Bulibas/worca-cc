@@ -20,9 +20,10 @@ export const GRAPH_PRESENTATION_WORKFLOW = deepFreeze({
     { id: 'n_build', kind: 'agent', key: 'deckBuilder', x: 1160, y: 200, config: { awaitAll: true } },
     { id: 'n_audit', kind: 'agent', key: 'deckAudit', x: 1440, y: 200, config: {} },
     { id: 'n_review', kind: 'agent', key: 'deckReviewer', x: 1720, y: 200, config: {} },
-    { id: 'n_export', kind: 'agent', key: 'deckExport', x: 2000, y: 200, config: {} },
-    { id: 'n_or', kind: 'or', x: 1580, y: 430, config: { arity: 3 } },
-    { id: 'n_end', kind: 'end', x: 2280, y: 200, config: {} },
+    { id: 'n_bundle', kind: 'script', key: 'deckBundle', x: 2000, y: 200, config: {} },
+    { id: 'n_export', kind: 'agent', key: 'deckExport', x: 2280, y: 200, config: {} },
+    { id: 'n_or', kind: 'or', x: 1580, y: 430, config: { arity: 4 } },
+    { id: 'n_end', kind: 'end', x: 2560, y: 200, config: {} },
   ],
   wires: [
     { id: 'w1', from: { node: 'n_task', port: 'task' }, to: { node: 'n_clarify', port: 'task' } },
@@ -40,12 +41,20 @@ export const GRAPH_PRESENTATION_WORKFLOW = deepFreeze({
     // The export step runs ONCE, after the review is clean — the builder has no
     // signal for "this is the final cycle", so producing deliverables there meant
     // rebuilding them on every fix pass.
-    { id: 'w16', from: { node: 'n_review', port: 'pass' }, to: { node: 'n_export', port: 'await' } },
     { id: 'w17', from: { node: 'n_build', port: 'built' }, to: { node: 'n_export', port: 'built' } },
     { id: 'w18', from: { node: 'n_task', port: 'task' }, to: { node: 'n_export', port: 'task' } },
     { id: 'w19', from: { node: 'n_export', port: 'findings' }, to: { node: 'n_or', port: 'in3' }, config: { maxCycles: 2 } },
     { id: 'w20', from: { node: 'n_export', port: 'pass' }, to: { node: 'n_end', port: 'result' } },
     { id: 'w21', from: { node: 'n_task', port: 'task' }, to: { node: 'n_review', port: 'task' } },
+    // The bundle step runs ONCE, after the review is clean, and the export gates on
+    // IT rather than on the review — so a deck whose companions could not be inlined
+    // never reaches the deliverable check. It also takes `built` straight from the
+    // builder: gated on `await`, so a fresh payload from inside the fix loop cannot
+    // re-fire it (test/graph-scheduler.test.mjs pins exactly this shape).
+    { id: 'w22', from: { node: 'n_review', port: 'pass' }, to: { node: 'n_bundle', port: 'await' } },
+    { id: 'w23', from: { node: 'n_build', port: 'built' }, to: { node: 'n_bundle', port: 'built' } },
+    { id: 'w24', from: { node: 'n_bundle', port: 'pass' }, to: { node: 'n_export', port: 'await' } },
+    { id: 'w25', from: { node: 'n_bundle', port: 'findings' }, to: { node: 'n_or', port: 'in4' }, config: { maxCycles: 2 } },
   ],
 });
 
@@ -92,4 +101,8 @@ export const PRESENTATION_SHIPPED_FINGERPRINTS = Object.freeze([
   // wire fed n_review.task; adding one made every existing seed invalid.
   'n_audit,n_build,n_clarify,n_end,n_narr,n_or,n_review,n_system,n_task'
     + '|w1,w12,w14,w15,w16,w2,w3,w4,w5,w6,w7,w8,w9',
+  // v2 — before the deckBundle card. The export step gated on n_review.pass (w16)
+  // and the or card had arity 3.
+  'n_audit,n_build,n_clarify,n_end,n_export,n_narr,n_or,n_review,n_system,n_task'
+    + '|w1,w12,w14,w15,w16,w17,w18,w19,w2,w20,w21,w3,w4,w5,w6,w7,w8,w9',
 ]);
