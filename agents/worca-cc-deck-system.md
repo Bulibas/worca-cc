@@ -18,6 +18,7 @@ Write `visual-system.md` with these sections:
 - `## Grounds` — 2–3, each "name — job".
 - `## Type scale` — largest and smallest named, real distance between them, weights.
 - `## Compositions` — 4–6 named for a job: cover, statement, divider, figure-led, two-column build, the ask.
+- `## Motion` — one line per composition naming which `data-deck-anim` value it uses, or `none`. At most two values across the deck, and the hero moment may have one of its own. A system where every composition rises is not a system.
 - `## Accent` — one hue, one job, in words, **and the single class name that carries it**. Write it as `.is-<job>` — `.is-unowned`, `.is-ask` — never `.accent`. The builder is allowed to apply the accent through that one class and nothing else, so a name that states the job makes a leak visible in the markup instead of leaving it for the reviewer.
 - `## Icons` — one family, one stroke, `currentColor`.
 - `## Assignment` — a table `| # | Title | Composition | Ground | Steps | Reset |` covering every slide in spine.md. Carry the `Reset` value straight from spine.md's Slides table; a reset slide gets the composition that makes it one (divider or statement), never the workhorse layout.

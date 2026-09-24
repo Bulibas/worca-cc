@@ -99,6 +99,36 @@ canvas's numbers. A stage authored at any other size is reported as
 and advances the slide only when none are left. **Read-alone decks use no
 `data-step` at all** (everything visible).
 
+## Animation
+
+Tag any element with `data-deck-anim` and the kit animates it. One attribute is
+the whole author surface:
+
+| value | what it does |
+|---|---|
+| `rise` | fades up 24px — the default for a line or a block arriving |
+| `draw` | draws an SVG stroke (`pathLength="1"` on the path) |
+| `wipe` | wipes in from the left — bars, rules, timelines |
+| `pop` | scales up from 92% — a single number or badge |
+| `count` | fades in only; a digit tween is your own script's job |
+
+**Never write your own `animation`, `@keyframes`, `animation-fill-mode` or
+`transition` for a `[data-deck-anim]` element.** The kit owns all of it, for the
+same reason it owns the caption band's visibility and harder: an animation that
+starts at `opacity: 0` and loses its fill-mode — or that a still frame catches
+mid-flight — renders **blank slides with the correct page count**, and the page
+count is the only thing the PDF check can assert. `deck-stage.js` forces the
+final state under `<deck-stage noscale>` (the proof copy the audit measures and
+screenshots) and under `@media print` (the PDF), so neither still frame can catch
+motion. Write your own rules and you are back to the silent failure.
+
+Motion composes with reveals: an element that is both `[data-step]` and
+`[data-deck-anim]` animates when its step reveals it, not at mount. Respect
+`prefers-reduced-motion` is automatic — the kit disables the animations there.
+
+Assign motion in `visual-system.md` per composition, not per slide. A deck where
+every element rises is as undesigned as one where nothing moves.
+
 ## The caption band — `Mode: both` and read-alone decks
 
 A projected slide has a 30-word budget; a document has to be complete. A deck

@@ -137,3 +137,45 @@ test('the parsed speaker notes are actually reachable, not parsed and dropped', 
   const slotChange = src.slice(src.indexOf('_onSlotChange()'));
   assert.match(slotChange.slice(0, 400), /this\._loadNotes\(\)/, 'a late notes block is re-read');
 });
+
+// The kit owns the slide animation vocabulary so a deck cannot forget the one
+// rule that matters. An authored animation starting at opacity:0 without
+// animation-fill-mode — or simply captured mid-flight — produces BLANK SLIDES
+// WITH THE CORRECT PAGE COUNT, which is the one failure mode that passes the
+// only PDF assertion the contract defines. The audit screenshots proof.html
+// (noscale) and the export prints; both are forced to final state here.
+test('the injected sheet declares the animation vocabulary with fill-mode both', () => {
+  const src = readFileSync(join(KIT, 'deck-stage.js'), 'utf8');
+  for (const name of ['deck-rise', 'deck-draw', 'deck-wipe', 'deck-pop', 'deck-count']) {
+    assert.match(src, new RegExp(`@keyframes ${name}\\b`), `${name} is missing`);
+  }
+  assert.match(src, /\[data-deck-anim\][^']*animation-fill-mode: both/,
+    'without fill-mode an animation snaps back to its from-state');
+});
+
+test('the proof copy and the print sheet both force the animation final state', () => {
+  const src = readFileSync(join(KIT, 'deck-stage.js'), 'utf8');
+  // The proof copy — what the audit measures and screenshots — carries `noscale`.
+  assert.match(src, /deck-stage\[noscale\] \[data-deck-anim\][^']*animation: none !important/,
+    'a screenshot of the proof copy must never catch an animation mid-flight');
+  assert.match(src, /deck-stage\[noscale\] \[data-deck-anim\][^']*opacity: 1 !important/);
+  // ...and the PDF.
+  const printRules = src.match(/@media print \{ \[data-deck-anim\][^']*/);
+  assert.ok(printRules, 'the print sheet has no [data-deck-anim] rule');
+  for (const decl of ['animation: none', 'opacity: 1', 'transform: none']) {
+    assert.ok(printRules[0].includes(decl), `the print rule does not force ${decl}`);
+  }
+});
+
+test('reduced motion disables the animations', () => {
+  const src = readFileSync(join(KIT, 'deck-stage.js'), 'utf8');
+  assert.match(src, /@media \(prefers-reduced-motion: reduce\) \{ \[data-deck-anim\] \{ animation: none/);
+});
+
+test('the contract documents the animation vocabulary it now owns', () => {
+  const contract = readFileSync(join(KIT, 'CONTRACT.md'), 'utf8');
+  assert.match(contract, /## Animation/);
+  for (const v of ['rise', 'draw', 'wipe', 'pop', 'count']) {
+    assert.ok(contract.includes(`\`${v}\``), `CONTRACT.md does not name ${v}`);
+  }
+});

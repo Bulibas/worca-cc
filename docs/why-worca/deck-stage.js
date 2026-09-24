@@ -704,7 +704,7 @@
       if (/[?&]_snthumb=/.test(location.search)) this.setAttribute('no-rail', '');
       this._render();
       this._loadNotes();
-      this._syncPrintPageRule();
+      this._syncDocumentSheet();
       window.addEventListener('keydown', this._onKey);
       window.addEventListener('resize', this._onResize);
       // A ResizeObserver re-fits on ANY size change of the stage, including ones
@@ -937,7 +937,7 @@
         }
         this._fit();
         this._scaleThumbs();
-        this._syncPrintPageRule();
+        this._syncDocumentSheet();
       }
     }
 
@@ -1133,8 +1133,10 @@
     /** @page must live in the document stylesheet — it's a no-op inside
      *  shadow DOM. Inject/update a single <head> style tag so the print
      *  sheet matches the design size and Save-as-PDF yields one slide per
-     *  page with no margins. */
-    _syncPrintPageRule() {
+     *  page with no margins. Also carries the caption band and the slide
+     *  animation vocabulary, for the same reason: both are light-DOM rules
+     *  that a shadow-DOM sheet can never reach. */
+    _syncDocumentSheet() {
       const id = 'deck-stage-print-page';
       let tag = document.getElementById(id);
       if (!tag) {
@@ -1153,7 +1155,35 @@
         // gets forgotten, and the failure is silent and total in both
         // directions (captions on the projector, or no captions in the PDF).
         '[data-deck-caption] { display: none; } ' +
-        '@media print { [data-deck-caption] { display: block; } }';
+        '@media print { [data-deck-caption] { display: block; } } ' +
+        // ── Slide animation, kit-owned ────────────────────────────────────────
+        // Declared here, not in the deck's own <style>, for the caption band's
+        // reason and one worse: a missed animation-fill-mode, or a still frame
+        // taken mid-flight, yields BLANK SLIDES AT THE RIGHT PAGE COUNT — and the
+        // page-count assertion is the only one the contract defines for the PDF,
+        // so the failure passes every gate. The two final-state blocks at the
+        // bottom make that unreachable rather than merely unlikely.
+        '@keyframes deck-rise { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: none; } } ' +
+        '@keyframes deck-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } } ' +
+        '@keyframes deck-wipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0); } } ' +
+        '@keyframes deck-pop { from { opacity: 0; transform: scale(.92); } to { opacity: 1; transform: none; } } ' +
+        '@keyframes deck-count { from { opacity: 0; } to { opacity: 1; } } ' +
+        '[data-deck-anim] { animation-duration: .55s; animation-timing-function: cubic-bezier(.2,.8,.2,1); animation-fill-mode: both; } ' +
+        '[data-deck-anim="rise"] { animation-name: deck-rise; } ' +
+        '[data-deck-anim="draw"] { animation-name: deck-draw; } ' +
+        '[data-deck-anim="wipe"] { animation-name: deck-wipe; } ' +
+        '[data-deck-anim="pop"] { animation-name: deck-pop; } ' +
+        '[data-deck-anim="count"] { animation-name: deck-count; } ' +
+        // A tagged element that is ALSO a [data-step] waits for its reveal instead
+        // of animating at mount: deck-enhance.js toggles .step-visible, and the
+        // deck's own stylesheet owns whether an unrevealed step is hidden at all.
+        '[data-step]:not(.step-visible)[data-deck-anim] { animation-play-state: paused; } ' +
+        '@media (prefers-reduced-motion: reduce) { [data-deck-anim] { animation: none !important; } } ' +
+        // FINAL STATE, unconditionally, in the two places a still frame is taken.
+        // proof.html carries `noscale` and is what the audit measures and shoots.
+        'deck-stage[noscale] [data-deck-anim] { animation: none !important; animation-play-state: running !important; opacity: 1 !important; transform: none !important; clip-path: none !important; stroke-dashoffset: 0 !important; } ' +
+        '@media print { [data-deck-anim] { animation: none !important; opacity: 1 !important; transform: none !important; '
+          + 'clip-path: none !important; stroke-dashoffset: 0 !important; } }';
     }
 
     _onSlotChange() {
