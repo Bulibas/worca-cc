@@ -95,6 +95,18 @@ export function presentationGraphFingerprint(graph) {
  * agent sidecar gains a required input that graph does not wire, those runs fail
  * validation (V9) with no way forward but re-wiring by hand. Only a fresh DB
  * would be correct, which is the worst way to find out.
+ *
+ * A hazard for whoever appends the NEXT entry: the tests that prove a prior
+ * shape is refreshed (test/presentation-seed-refresh.test.mjs,
+ * test/db-migrate-v36.test.mjs) reconstruct that shape by filtering the CURRENT
+ * constant's nodes/wires down to the ids this entry names. That only works while
+ * every id an old fingerprint names still exists somewhere in the current
+ * constant. RE-POINTING a wire (same id, new from/to) is fine. RETIRING one
+ * outright — as w16 was here, when the export stopped gating on n_review
+ * directly — is not: the id vanishes from the current constant, so the
+ * reconstruction can no longer find it, and the fixture silently stops matching
+ * its own fingerprint unless the retired wire's shape is supplied explicitly
+ * (see `RETIRED_WIRES` in both test files above).
  */
 export const PRESENTATION_SHIPPED_FINGERPRINTS = Object.freeze([
   // v1 — before the deckExport step. deckReviewer had no `task` input, so no
