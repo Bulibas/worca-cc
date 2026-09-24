@@ -1,0 +1,32 @@
+{
+  "key": "deckBundle",
+  "metaVersion": 2,
+  "displayName": "Deck bundle",
+  "description": "Inlines a built deck into one self-contained HTML file with worca's privileges: every local script, stylesheet, image and font becomes a data URI. Verifies the result reaches for nothing beside it.",
+  "domain": "presentation",
+  "color": "green",
+  "icon": "<path d=\"M4 7h16v13H4z\" fill=\"none\"/><path d=\"M4 7l2-3h12l2 3\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M12 11v5M9.5 13.5L12 16l2.5-2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>",
+  "order": 40,
+  "runtime": "python",
+  "file": "deck-bundle.py",
+  "timeoutMs": 300000,
+  "inputs": [
+    { "id": "built", "type": "md" }
+  ],
+  "outputs": [
+    { "id": "bundle", "type": "md", "when": "always", "filename": "deck-bundle-cycle{cycle}.md",
+      "artifactKind": "deck-bundle",
+      "extraFiles": [{ "kind": "deck", "glob": "deck/deck*.html" }] },
+    { "id": "findings", "type": "md", "when": "blocking", "filename": "deck-bundle-cycle{cycle}.md",
+      "artifactKind": "deck-bundle" },
+    { "id": "pass", "type": "void", "when": "clean" }
+  ],
+  "verdict": { "filename": "deck-bundle-cycle{cycle}.json" },
+  "mock": {
+    "summary": "1 deck bundled (mock): deck/deck.standalone.html.",
+    "verdict": { "issues": [] },
+    "outputs": {
+      "bundle": { "text": "# Deck bundle — mock\n\n- deck/deck.standalone.html — self-contained\n\nNo blocking findings.\n" }
+    }
+  }
+}
