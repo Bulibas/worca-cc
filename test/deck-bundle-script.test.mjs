@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runScriptExecution } from '../src/core/graph/script-runner.mjs';
@@ -55,7 +56,7 @@ async function fixtureDeck() {
   return { pdir, deck };
 }
 
-function ctxFor(pdir) {
+function ctxFor(pdir, { bindings } = {}) {
   const ports = { inputs: META.inputs, outputs: META.outputs };
   const outputs = {
     bundle: { path: join(pdir, 'deck-bundle-cycle1.md') },
@@ -65,7 +66,7 @@ function ctxFor(pdir) {
     node: { id: 'n_bundle', kind: 'script', key: 'deckBundle' },
     ordinal: 1,
     ports,
-    bindings: { built: { path: join(pdir, 'deck-manifest.md') } },
+    bindings: bindings === undefined ? { built: { path: join(pdir, 'deck-manifest.md') } } : bindings,
     outputs,
     verdict: { path: join(pdir, 'deck-bundle-cycle1.json') },
     pipelineDir: pdir,
@@ -155,4 +156,258 @@ test('a data: script src and stylesheet href are already self-contained and neve
 
   const res = await runScriptExecution(ctxFor(pdir));
   assert.deepEqual(res.verdict.issues, [], JSON.stringify(res.verdict));
+});
+
+// ── I1 ────────────────────────────────────────────────────────────────────────
+// A remote <img src> was inlined by nobody and reported by nobody: the image
+// branch returned early on is_remote WITHOUT recording it, and the live-reference
+// sweep only ever looked at scripts and stylesheets. The deliverable kept the live
+// CDN URL and the verdict was []. A remote image is the most likely CDN reach a
+// deck makes, and CONTRACT bans CDNs because they fail SILENTLY under the artifact
+// CSP — a silently-broken image in a file certified self-contained.
+test('a remote <img src> is a blocking finding, not a silent CDN reach', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir, deck } = await fixtureDeck();
+  await writeFile(join(pdir, 'deck-manifest.md'), '# Deck manifest\nMode: live   Slides: 1\n', 'utf8');
+  const html = await readFile(join(deck, 'deck.html'), 'utf8');
+  await writeFile(join(deck, 'deck.html'),
+    html.replace('<p>after</p>', '<img src="https://cdn.example.com/a.png" alt="remote"><p>after</p>'), 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  assert.ok(res.verdict.issues.some((i) => /cdn\.example\.com\/a\.png/.test(i.detail || '')),
+    `a remote image must be reported: ${JSON.stringify(res.verdict.issues)}`);
+  const out = await readFile(join(deck, 'deck.standalone.html'), 'utf8');
+  assert.ok(out.includes('https://cdn.example.com/a.png'),
+    'the remote URL is left as written — it is reported, not rewritten');
+});
+
+// ── I2 ────────────────────────────────────────────────────────────────────────
+// `<script src="a.js">body</script>` matched NEITHER pattern: SCRIPT_TAG (so it
+// was never inlined) nor the old LIVE_SCRIPT, whose `>\s*</script` body required
+// the tag to be empty. The file it points at exists here on purpose, so the
+// `missing` branch cannot be what reports it — only the live-reference sweep can,
+// and before the fix it did not: 0 findings, with a live sibling reference.
+test('a <script src> that also carries a body is still reported as live', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir, deck } = await fixtureDeck();
+  await writeFile(join(pdir, 'deck-manifest.md'), '# Deck manifest\nMode: live   Slides: 1\n', 'utf8');
+  await writeFile(join(deck, 'present.js'), 'window.__present = 1;\n', 'utf8');
+  const html = await readFile(join(deck, 'deck.html'), 'utf8');
+  await writeFile(join(deck, 'deck.html'), html.replace('</body>',
+    '<script src="present.js">console.log("ignored by every browser");</script>\n</body>'), 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  assert.ok(res.verdict.issues.some((i) => /still reaches for a sibling/i.test(i.title || '')),
+    `a src-plus-body script is a live reference: ${JSON.stringify(res.verdict.issues)}`);
+});
+
+// ── I3 ────────────────────────────────────────────────────────────────────────
+// SECURITY. The card runs unsandboxed with worca's privileges over markup an LLM
+// wrote from user-supplied material, and its product is meant to be SENT to
+// people. Stripping a leading `/` normalises nothing, so `../` walked out of the
+// deck folder and base64-embedded any readable file into the deliverable — with
+// zero findings. Every path the program resolves is confined: script, stylesheet,
+// media and CSS url() alike.
+test('a reference that walks out of the deck folder is reported and never embedded', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir, deck } = await fixtureDeck();
+  await writeFile(join(pdir, 'deck-manifest.md'), '# Deck manifest\nMode: live   Slides: 1\n', 'utf8');
+  await writeFile(join(pdir, 'outside-secret.js'), 'window.__SECRET = "EXFILTRATED-JS";\n', 'utf8');
+  await writeFile(join(pdir, 'outside-secret.css'), '.x { content: "EXFILTRATED-CSS" }\n', 'utf8');
+  await writeFile(join(pdir, 'outside-secret.woff2'), 'EXFILTRATED-FONT', 'utf8');
+  const html = await readFile(join(deck, 'deck.html'), 'utf8');
+  await writeFile(join(deck, 'deck.html'), html
+    .replace('</head>', '<link rel="stylesheet" href="../outside-secret.css">'
+      + '<style>@font-face { font-family: Y; src: url("../outside-secret.woff2"); }</style></head>')
+    .replace('</body>', '<script src="../outside-secret.js"></script>\n</body>'), 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  const details = res.verdict.issues.map((i) => `${i.severity}|${i.title}|${i.detail}`).join('\n');
+  for (const ref of ['../outside-secret.js', '../outside-secret.css', '../outside-secret.woff2']) {
+    assert.ok(res.verdict.issues.some((i) => i.severity === 'major' && (i.detail || '').includes(ref)),
+      `${ref} escapes deck/ and must be a major finding: ${details}`);
+  }
+  const out = await readFile(join(deck, 'deck.standalone.html'), 'utf8');
+  for (const secret of ['EXFILTRATED-JS', 'EXFILTRATED-CSS',
+    Buffer.from('EXFILTRATED-FONT', 'utf8').toString('base64')]) {
+    assert.ok(!out.includes(secret), `the bundle embedded a file from outside deck/: ${secret}`);
+  }
+});
+
+// A relative path that stays inside the folder is NOT an escape — the check has to
+// resolve `..`, not ban it, or a deck that reaches into its own subfolder breaks.
+test('a relative reference that stays inside the deck folder still inlines', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir, deck } = await fixtureDeck();
+  await writeFile(join(pdir, 'deck-manifest.md'), '# Deck manifest\nMode: live   Slides: 1\n', 'utf8');
+  await mkdir(join(deck, 'vendor'), { recursive: true });
+  await writeFile(join(deck, 'vendor', 'in.js'), 'window.__inside = 1;\n', 'utf8');
+  const html = await readFile(join(deck, 'deck.html'), 'utf8');
+  await writeFile(join(deck, 'deck.html'), html.replace('</body>',
+    '<script src="vendor/../vendor/in.js"></script>\n</body>'), 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  assert.deepEqual(res.verdict.issues, [], JSON.stringify(res.verdict.issues));
+  const out = await readFile(join(deck, 'deck.standalone.html'), 'utf8');
+  assert.ok(out.includes('window.__inside = 1;'), 'an in-folder `..` hop was refused');
+});
+
+// ── I4 ────────────────────────────────────────────────────────────────────────
+// build-standalone.mjs:274-278 records the unquoted form as a shipped bug that
+// "slipped through with NO log line", and :68-78 special-cases the narration audio
+// by hand. This program's header claims to mirror those gotchas; `<img src=x.png>`
+// and a local <audio>/<video>/<source> were neither inlined nor reported, so a
+// narrated deck's audio was dropped from a file called self-contained.
+test('an unquoted <img src> and local audio/video sources are inlined', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir, deck } = await fixtureDeck();
+  await writeFile(join(pdir, 'deck-manifest.md'), '# Deck manifest\nMode: live   Slides: 1\n', 'utf8');
+  await writeFile(join(deck, 'tone.mp3'), 'ID3-TONE-BYTES', 'utf8');
+  await writeFile(join(deck, 'clip.mp4'), 'FTYP-CLIP-BYTES', 'utf8');
+  const html = await readFile(join(deck, 'deck.html'), 'utf8');
+  await writeFile(join(deck, 'deck.html'), html
+    // Unquoted, with an attribute after it: the value ends at whitespace, and
+    // everything after `src` (including the tag's own `>`) has to survive.
+    .replace('<img src="logo.png" alt="logo" class="mark">', '<img src=logo.png alt="logo" class="mark">')
+    .replace('</body>', '<audio src="tone.mp3" controls></audio>\n'
+      + '<video controls><source src=\'clip.mp4\' type="video/mp4"></video>\n</body>'), 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  assert.deepEqual(res.verdict.issues, [], JSON.stringify(res.verdict.issues));
+  const out = await readFile(join(deck, 'deck.standalone.html'), 'utf8');
+  assert.match(out, /<img src="data:image\/png;base64,[^"]*" alt="logo" class="mark">/,
+    'an unquoted <img src> was not inlined (or the tag was truncated)');
+  assert.ok(out.includes(`data:audio/mpeg;base64,${Buffer.from('ID3-TONE-BYTES').toString('base64')}`),
+    'a local <audio src> was not inlined');
+  assert.ok(out.includes(`data:video/mp4;base64,${Buffer.from('FTYP-CLIP-BYTES').toString('base64')}`),
+    'a <source src> inside <video> was not inlined');
+  assert.ok(out.includes('controls></audio>'), 'the <audio> tag lost its later attributes');
+});
+
+// ── M6 ───────────────────────────────────────────────────────────────────────
+// The self-check strips HTML comments AND inlined script bodies; doing it as two
+// sequential substitutions is wrong in either order. Comments first: an inlined
+// payload's unbalanced `<!--` (deck-export.js carries `<!--` tokens today) eats
+// forward to the next real `-->` and swallows whatever sits between — here a
+// genuinely live reference, which then goes unreported.
+test('an inlined payload containing an unbalanced <!-- cannot hide a live reference', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir, deck } = await fixtureDeck();
+  await writeFile(join(pdir, 'deck-manifest.md'), '# Deck manifest\nMode: live   Slides: 1\n', 'utf8');
+  await writeFile(join(deck, 'odd.js'), 'var opener = "<!--";\n', 'utf8');
+  await writeFile(join(deck, 'present.js'), 'window.__present = 1;\n', 'utf8');
+  const html = await readFile(join(deck, 'deck.html'), 'utf8');
+  await writeFile(join(deck, 'deck.html'), html.replace('</body>',
+    '<script src="odd.js"></script>\n'
+    + '<script src="present.js">console.log("live");</script>\n'
+    + '<!-- a later, perfectly ordinary comment -->\n</body>'), 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  const out = await readFile(join(deck, 'deck.standalone.html'), 'utf8');
+  assert.ok(out.includes('var opener = "<!--"'), 'the fixture no longer carries the unbalanced token');
+  assert.ok(res.verdict.issues.some((i) => /still reaches for a sibling/i.test(i.title || '')),
+    `the live reference between the two tokens was swallowed: ${JSON.stringify(res.verdict.issues)}`);
+});
+
+// ── M3 ───────────────────────────────────────────────────────────────────────
+// The card declared and the graph wired a `built` input the program never read.
+// The manifest's one useful fact here is the slide count: it belongs in the
+// summary a human reads beside the byte count, never in a gate.
+test('the slide count from the bound manifest reaches the summary', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir } = await fixtureDeck();
+  await writeFile(join(pdir, 'deck-manifest.md'),
+    '# Deck manifest\nMode: both   Slides: 14   Kit: 1.2.0\n', 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  assert.deepEqual(res.verdict.issues, [], JSON.stringify(res.verdict.issues));
+  assert.match(res.summary, /14 slide\(s\)/, `the manifest slide count is missing: ${res.summary}`);
+});
+
+// …and every way that input can be useless is a missing slide count, not a failed
+// card: an unbound port, a file that is not there, prose that says nothing.
+test('an unbound, absent or unparseable manifest never fails the card', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  for (const variant of ['unbound', 'absent', 'unparseable']) {
+    const { pdir } = await fixtureDeck();
+    if (variant === 'unparseable') {
+      await writeFile(join(pdir, 'deck-manifest.md'), 'nothing about slides here\n', 'utf8');
+    }
+    const res = await runScriptExecution(ctxFor(pdir, variant === 'unbound' ? { bindings: {} } : {}));
+    assert.deepEqual(res.verdict.issues, [], `${variant}: ${JSON.stringify(res.verdict.issues)}`);
+    assert.match(res.summary, /self-contained/, `${variant}: ${res.summary}`);
+    assert.doesNotMatch(res.summary, /slide\(s\)/, `${variant}: invented a slide count`);
+  }
+});
+
+// ── M7 ───────────────────────────────────────────────────────────────────────
+// The export agent runs this same verification in prose, over the same file, and
+// its gate was the weaker of the two: `rel=("|')?stylesheet` is blind to
+// `rel="preload stylesheet"`, and its script pattern required both quotes and an
+// EMPTY tag. A deliverable escapes through whichever gate is weaker, so run the
+// agent's OWN snippet here and hold it to the card's answer.
+test("the export agent's prose gate agrees with the card on the same file", async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const agent = await readFile(new URL('../agents/worca-cc-deck-export.md', import.meta.url), 'utf8');
+  const m = /python3 - "\$PWD\/deck\/deck\.standalone\.html" <<'PY'\n([\s\S]*?)\nPY\n/.exec(agent);
+  assert.ok(m, 'the export agent no longer carries a python verification heredoc to check');
+  // `-c CODE file` puts the file at sys.argv[1], exactly as `python3 - file` does.
+  const gate = (file) => spawnSync(py.command[0], [...py.command.slice(1), '-c', m[1], file], { encoding: 'utf8' });
+
+  const clean = await fixtureDeck();
+  await writeFile(join(clean.pdir, 'deck-manifest.md'), '# Deck manifest\nMode: live   Slides: 1\n', 'utf8');
+  const cleanRes = await runScriptExecution(ctxFor(clean.pdir));
+  const cleanGate = gate(join(clean.deck, 'deck.standalone.html'));
+  assert.deepEqual(cleanRes.verdict.issues, [], JSON.stringify(cleanRes.verdict.issues));
+  assert.equal(cleanGate.status, 0, `the agent's gate fails a bundle the card passes: ${cleanGate.stdout}${cleanGate.stderr}`);
+  assert.match(cleanGate.stdout, /live scripts: 0 live stylesheets: 0/);
+
+  const dirty = await fixtureDeck();
+  await writeFile(join(dirty.pdir, 'deck-manifest.md'), '# Deck manifest\nMode: live   Slides: 1\n', 'utf8');
+  await writeFile(join(dirty.deck, 'present.js'), 'window.__present = 1;\n', 'utf8');
+  const html = await readFile(join(dirty.deck, 'deck.html'), 'utf8');
+  await writeFile(join(dirty.deck, 'deck.html'), html
+    // Both shapes the old prose gate waved through: a multi-value rel, and a src
+    // tag that carries a body (which every browser ignores in favour of the src).
+    .replace('</head>', '<link rel="preload stylesheet" href="https://cdn.example.com/f.css"></head>')
+    .replace('</body>', '<script src=present.js>console.log("live");</script>\n</body>'), 'utf8');
+
+  const dirtyRes = await runScriptExecution(ctxFor(dirty.pdir));
+  const dirtyGate = gate(join(dirty.deck, 'deck.standalone.html'));
+  assert.ok(dirtyRes.verdict.issues.length > 0, 'the card must block this deck');
+  assert.equal(dirtyGate.status, 1, `the agent's gate passed a deck the card blocks: ${dirtyGate.stdout}${dirtyGate.stderr}`);
+  assert.match(dirtyGate.stdout, /live scripts: 1 live stylesheets: 1/,
+    `the agent's gate must see both: ${dirtyGate.stdout}`);
+});
+
+// ── M4 ───────────────────────────────────────────────────────────────────────
+// The export agent's fallback was EXISTENCE-only. A fix cycle rewrites deck.html
+// after this card has run, so the previous cycle's standalone survives on disk and
+// goes out beside a PDF printed from the new deck: identical page count, different
+// slides, and nothing else in the pipeline compares the two.
+test('the export agent rebuilds a standalone older than the deck, not just a missing one', async () => {
+  const agent = await readFile(new URL('../agents/worca-cc-deck-export.md', import.meta.url), 'utf8');
+  assert.match(agent, /absent or stale/i, 'the build trigger is still existence-only');
+  assert.match(agent, /Existence is not freshness/, 'the staleness rule is not stated');
+  assert.match(agent, /mtime/i, 'nothing tells the exporter to compare mtimes');
+  assert.match(agent, /deck\/deck\.html\s+deck\/deck\.standalone\.html|deck\.standalone\.html is the\s*\n?older/i,
+    'the two files to compare are not named');
 });

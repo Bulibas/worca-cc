@@ -234,7 +234,7 @@
       // `<li><span>…</span></li>` IS the copy — the wrapper owns every word, and
       // requiring the text-owning element to be p/li/blockquote let 32px body copy
       // through clean. But a span carrying only PART of the line is an inline
-      // accent: a meta label, a footnote marker, a <code> run. Applying the 48px
+      // accent: a meta label, a footnote marker, a <code> run. Applying the 36px
       // copy floor to every descendant made a designed 24px label a BLOCKING
       // finding on markup the deck renders as intended, and the audit is the
       // loop-back gate, so that costs a builder fix cycle on correct copy.

@@ -17,12 +17,13 @@ You are the **Deck Export**. You run once, after the audit and the review are bo
 
 The kit is staged at `deck-kit/` in the pipeline directory. Never edit it.
 
-## 1. The standalone HTML — verify, and build only if it is missing
+## 1. The standalone HTML — verify; build it only if it is missing or stale
 
 The `deckBundle` card upstream of you writes `deck/deck.standalone.html`. Your job
-is to confirm it exists and is genuinely self-contained. **Build one yourself only
-when it is absent** — a host with no Python interpreter produces none, and that is
-a supported configuration, not a failure:
+is to confirm it exists, is **not older than the deck it claims to bundle**, and is
+genuinely self-contained. **Build one yourself when it is absent or stale** — a host
+with no Python interpreter produces none, and that is a supported configuration,
+not a failure:
 
 ```
 node <pipelineDir>/deck-kit/build-standalone.mjs <pipelineDir>/deck/deck.html --out <pipelineDir>/deck/deck.standalone.html
@@ -31,17 +32,39 @@ node <pipelineDir>/deck-kit/build-standalone.mjs <pipelineDir>/deck/deck.html --
 Pass the deck explicitly — `deck/` holds two stage-mounting files and the bundler
 refuses an ambiguous folder. Say in your report which path you took.
 
+**Existence is not freshness.** Compare the two mtimes — `ls -lT deck/deck.html
+deck/deck.standalone.html` (or `stat`) — and rebuild whenever the standalone is the
+older file. A fix cycle rewrites `deck.html` after the bundle card has run, so the
+previous cycle's standalone survives on disk and ships beside a PDF printed from
+the NEW deck: identical page count, different slides, and nothing else in this
+pipeline compares the two. Rebuilding costs a second; shipping last cycle's deck as
+the single-file deliverable is silent and unrecoverable.
+
 Then verify the file reaches for nothing beside it. **Strip HTML comments and the
-bodies of inlined scripts FIRST**, then look for a live tag:
+bodies of inlined scripts FIRST**, then look for a live tag. This is the
+`deckBundle` card's own check, spelled for a shell — **keep the two identical**: the
+gates run over the same file, and the weaker of the two is the one a broken
+deliverable escapes through.
 
 ```bash
 python3 - "$PWD/deck/deck.standalone.html" <<'PY'
 import re, sys
 doc = open(sys.argv[1], encoding='utf-8', errors='replace').read()
-bare = re.sub(r'(?is)<script(?![^>]*\ssrc=)[^>]*>.*?</script\s*>', '',
-              re.sub(r'(?s)<!--.*?-->', '', doc))
-s = re.findall(r'(?i)<script[^>]*\ssrc=("|\')[^"\']+\1[^>]*>\s*</script\s*>', bare)
-l = re.findall(r'(?i)<link[^>]*rel=("|\')?stylesheet', bare)
+# ONE left-to-right pass, never two substitutions: whichever of an HTML comment /
+# an inlined (src-less) script STARTS first claims its whole region, so an inlined
+# payload's stray `<!--` cannot eat a live tag and a comment cannot eat a script.
+bare = re.sub(r'(?is)<!--.*?-->|<script(?![^>]*\ssrc=)[^>]*>.*?</script\s*>', '', doc)
+# ANY surviving script tag that still carries a src is live — quoted, unquoted, and
+# body or no body (a browser ignores the body of a script that has a src).
+s = re.findall(r'(?i)<script\b[^>]*\ssrc\s*=[^>]*>[\s\S]*?</script\s*>', bare)
+# `stylesheet` is a SUBSTRING of the rel value, not the whole of it: `rel="preload
+# stylesheet"` and `rel="stylesheet alternate"` are both real and both load a sheet.
+# (\x22 and \x27 are just " and ', spelled so this heredoc needs no escaping.)
+REL = re.compile(r'(?i)\brel\s*=\s*(?:\x22([^\x22]*)\x22|\x27([^\x27]*)\x27|([^\s>]+))')
+def rel(tag):
+    m = REL.search(tag)
+    return ''.join(g for g in (m.groups() if m else ()) if g).lower()
+l = [t for t in re.findall(r'(?i)<link\b[^>]*>', bare) if 'stylesheet' in rel(t)]
 print('live scripts:', len(s), 'live stylesheets:', len(l))
 sys.exit(1 if (s or l) else 0)
 PY
@@ -60,7 +83,7 @@ matches a naive search exactly once, and zero after stripping.
 If no interpreter is available for the check, fall back to node:
 
 ```bash
-node -e 'const fs=require("fs");const d=fs.readFileSync(process.argv[1],"utf8");const b=d.replace(/<!--[\s\S]*?-->/g,"").replace(/<script(?![^>]*\ssrc=)[^>]*>[\s\S]*?<\/script\s*>/gi,"");const s=b.match(/<script[^>]*\ssrc=("|\x27)[^"\x27]+\1[^>]*>\s*<\/script\s*>/gi)||[];const l=b.match(/<link[^>]*rel=("|\x27)?stylesheet/gi)||[];console.log("live scripts:",s.length,"live stylesheets:",l.length);process.exit(s.length||l.length?1:0)' deck/deck.standalone.html
+node -e 'const fs=require("fs");const d=fs.readFileSync(process.argv[1],"utf8");const b=d.replace(/<!--[\s\S]*?-->|<script(?![^>]*\ssrc=)[^>]*>[\s\S]*?<\/script\s*>/gi,"");const s=b.match(/<script\b[^>]*\ssrc\s*=[^>]*>[\s\S]*?<\/script\s*>/gi)||[];const rel=t=>(((/\brel\s*=\s*(?:"([^"]*)"|\x27([^\x27]*)\x27|([^\s>]+))/i.exec(t)||[]).slice(1).find(Boolean))||"").toLowerCase();const l=(b.match(/<link\b[^>]*>/gi)||[]).filter(t=>rel(t).includes("stylesheet"));console.log("live scripts:",s.length,"live stylesheets:",l.length);process.exit(s.length||l.length?1:0)' deck/deck.standalone.html
 ```
 
 A missing `deck/deck.standalone.html` that you could not build either is

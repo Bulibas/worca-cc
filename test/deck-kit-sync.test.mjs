@@ -190,3 +190,43 @@ test('the contract documents the animation vocabulary it now owns', () => {
     assert.ok(contract.includes(`\`${v}\``), `CONTRACT.md does not name ${v}`);
   }
 });
+
+// M1: the kit forces `transform: none` and `clip-path: none` in BOTH still-frame
+// contexts — the proof copy the audit measures and screenshots, and the PDF. That
+// is deliberate (a half-played transform must not freeze into a still frame), and
+// it silently deletes an author's STATIC transform in exactly the two places the
+// deck is checked and shipped: an element nudged out of the slide box with
+// `translate` is measured un-transformed and passes every geometry check. The CSS
+// stays; the contract has to say so, and so does the agent that writes the deck.
+test('the forced final state is documented where a builder will read it', () => {
+  const stage = readFileSync(join(KIT, 'deck-stage.js'), 'utf8');
+  const forced = stage.match(/transform: none !important; clip-path: none !important/g) || [];
+  assert.equal(forced.length, 2,
+    'the noscale and @media print final-state blocks are what the contract clause describes');
+  assert.match(stage, /deck-stage\[noscale\] \[data-deck-anim\][^\n]*transform: none !important/);
+  assert.match(stage, /@media print \{ \[data-deck-anim\][^\n]*transform: none !important/);
+  for (const [label, file] of [
+    ['CONTRACT.md', join(KIT, 'CONTRACT.md')],
+    ['worca-cc-deck-builder.md', join(ROOT, 'agents', 'worca-cc-deck-builder.md')],
+  ]) {
+    const text = readFileSync(file, 'utf8');
+    assert.match(text, /static `transform` or\s*\n?`?clip-path`?|no static `transform` or `clip-path`/,
+      `${label} does not forbid a static transform/clip-path on a [data-deck-anim] element`);
+  }
+});
+
+// M8: the legibility floors moved to 20px / 36px and the prose around them did
+// not — `deck-audit.js` still called it "the 48px copy floor" two lines above
+// `px < 36`, and a test's own assertion MESSAGE said "the 27px floor", which a
+// future debugger reads as fact. The numbers in the words track the numbers in the
+// code, or they are worse than no comment at all.
+test('the audit only names the floors it actually enforces', () => {
+  const audit = readFileSync(join(KIT, 'deck-audit.js'), 'utf8');
+  assert.match(audit, /if \(px < 20\) issues\.push\(\{ check: 'small'/);
+  assert.match(audit, /if \(px < 36 && isBodyCopy\(el, section\)\)/);
+  for (const file of [join(KIT, 'deck-audit.js'), join(ROOT, 'test', 'deck-audit-dom.test.mjs')]) {
+    const text = readFileSync(file, 'utf8');
+    assert.doesNotMatch(text, /\b(?:48|27)px (?:copy |body |`small` )?floor/,
+      `${file} names a floor the audit no longer enforces (they are 20px and 36px)`);
+  }
+});

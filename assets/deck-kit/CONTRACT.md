@@ -122,6 +122,18 @@ final state under `<deck-stage noscale>` (the proof copy the audit measures and
 screenshots) and under `@media print` (the PDF), so neither still frame can catch
 motion. Write your own rules and you are back to the silent failure.
 
+**And do not give a `[data-deck-anim]` element a static `transform` or
+`clip-path` either.** That same forced final state is `transform: none
+!important; clip-path: none !important` — it has to be, or a half-played
+transform freezes into the still frame — so a transform or crop you wrote as
+*layout* is live on screen and **gone in both places the deck is checked and
+shipped**: the proof copy the audit measures and screenshots, and the PDF. An
+element nudged into position with `translate` is therefore measured
+un-transformed, so it can hang outside the slide box on screen and still pass
+every geometry check clean; a `clip-path` crop simply opens in the PDF. Put the
+offset in the layout (margin, padding, grid placement, `inset`) and the crop in
+the asset — or in a wrapper that carries no `data-deck-anim`.
+
 Motion composes with reveals: an element that is both `[data-step]` and
 `[data-deck-anim]` animates when its step reveals it, not at mount. Respect
 `prefers-reduced-motion` is automatic — the kit disables the animations there.

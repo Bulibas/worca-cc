@@ -209,7 +209,7 @@ test('a hidden icon sprite contributes no words either', () => {
 
 test('a caption subtree is not measured for legibility either', () => {
   // Caption prose is print copy in a flowing document, not a fixed rectangle:
-  // the 27px floor and the 48px body floor are live-surface rules.
+  // the 20px floor and the 36px body floor are live-surface rules.
   const win = stage(
     `<section ${SLIDE_BOX} data-label="07">`
     + `<h1 data-r="160,160,1600,120" style="font-size:72px">Title</h1>`
@@ -218,8 +218,8 @@ test('a caption subtree is not measured for legibility either', () => {
     + `</section>`,
   );
   const [slide] = DeckAudit.run(win.document, win).slides;
-  assert.deepEqual(checksOf(slide, 'small'), [], 'the caption does not trip the 27px floor');
-  assert.deepEqual(checksOf(slide, 'body'), [], 'the caption does not trip the 48px body floor');
+  assert.deepEqual(checksOf(slide, 'small'), [], 'the caption does not trip the 20px floor');
+  assert.deepEqual(checksOf(slide, 'body'), [], 'the caption does not trip the 36px body floor');
   assert.equal(slide.minFontPx, 72, 'the smallest LIVE type is the 72px title');
 });
 
@@ -397,10 +397,10 @@ test('a slide that paints its own dark ground still wins over the canvas', () =>
   assert.deepEqual(checksOf(slide, 'contrast'), [], JSON.stringify(slide.issues));
 });
 
-// The 48px body floor required the TEXT-OWNING element to be p/li/blockquote, but
+// The 36px body floor required the TEXT-OWNING element to be p/li/blockquote, but
 // the usual shape wraps the copy: <li><span>…</span></li>. The <li> owns no direct
 // text and the <span> fails the tag test, so 32px body copy passed clean — only
-// the 27px `small` floor still fired, and that one it clears.
+// the 20px `small` floor still applied, and that one it clears.
 test('the body floor applies to copy wrapped inside a p or li', () => {
   const win = stage(
     `<section ${SLIDE_BOX} data-label="01">`
@@ -490,7 +490,7 @@ test('text owned directly by the section is measured too', () => {
   assert.match(checksOf(slide, 'small')[0].selector, /^section/);
 });
 
-// SLIDE is pinned to 1920×1080 and the 27/48px floors are that canvas's numbers.
+// SLIDE is pinned to 1920×1080 and the 20/36px floors are that canvas's numbers.
 // A stage authored at another size was measured against the wrong box (nothing
 // could escape a 1920-wide box on a 1280 slide) and the wrong type floors —
 // silently. The report now says so.
