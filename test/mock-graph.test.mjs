@@ -78,15 +78,16 @@ test('the 12 builtins pin roles the switch already handles — no new case strin
     const meta = JSON.parse(readFileSync(join(AGENTS_DIR, file), 'utf8'));
     pinned[meta.key] = meta.mockRole ?? null;
   }
-  assert.equal(Object.keys(pinned).length, 12, 'the 12 builtin sidecars');
+  assert.equal(Object.keys(pinned).length, 19, 'the 19 builtin sidecars');
   for (const [key, role] of Object.entries(pinned)) {
     assert.notEqual(role, null, `${key} pins an explicit mockRole`);
     assert.ok(MOCK_WRITER_ROLES.has(role), `${key} -> ${role} is a handled writer role`);
   }
   // Nothing in the switch is orphaned either: what the builtins do not claim is
-  // exactly the three roles no sidecar can pin.
+  // now only agent-gen (the presentation sidecars pin generic-producer/-verifier
+  // and the two new deck roles, so those are all claimed).
   const unclaimed = [...MOCK_WRITER_ROLES].filter((r) => !Object.values(pinned).includes(r));
-  assert.deepEqual(unclaimed.sort(), ['agent-gen', 'generic-producer', 'generic-verifier'],
+  assert.deepEqual(unclaimed.sort(), ['agent-gen'],
     'the switch carries no case the chain can never reach');
 });
 

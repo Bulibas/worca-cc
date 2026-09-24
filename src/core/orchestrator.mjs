@@ -11,7 +11,8 @@
 // state.steps[] IS the execution ledger: one row per execution, key ===
 // executionId. There is no separate executions[] array.
 import { join, isAbsolute, extname } from 'node:path';
-import { rm, readFile } from 'node:fs/promises';
+import { rm, readFile, readdir, access, stat } from 'node:fs/promises';
+import { readDirections, pendingDirections } from './directions.mjs';
 
 import {
   RunHarness, isAbort, isPause, pauseErr, firstLine, jsonClone,
@@ -44,7 +45,8 @@ import { buildProposal, sanitizeProposalAnswer, remapTunables, mintAutoWorkflowI
 import { resolveAutoModel } from './auto/model.mjs';
 import {
   appendAudit, writeReview, reviewKindOf, writeDecomposition, updateTaskStatus,
-  updatePhaseStatus, writeStepQuestions, readStepQuestions,
+  updatePhaseStatus, writeStepQuestions, readStepQuestions, forgetMissingArtifacts,
+  indexedNamesUnder, forgetOtherKinds,
 } from './artifacts.mjs';
 import { readAskFile } from './protocol.mjs';
 import { prepareFormAsk, formAnswerValidator, downgradeQuestion } from './ask-forms.mjs';
@@ -965,9 +967,11 @@ export class GraphOrchestrator extends RunHarness {
         return result;
       }
       this._primeQuestions(nc, ctx);
+      await this._primeDirections(ctx);
       let result = await this._runNodeAttempts(nc, ctx);
       result = await this._questionsLoop(nc, ctx, result);
       await this._afterExecution(nc, ctx, result);
+      await this._reconcileDirections(ctx);
       return result;
     } catch (err) {
       if (isPause(err) || (this.pauseRequested && (isAbort(err) || this.pauseAbort.signal.aborted))) {
@@ -1112,6 +1116,11 @@ export class GraphOrchestrator extends RunHarness {
       model: nc.kind === 'script' ? null : (nc.model || this.claude.model),
     };
     return {
+      // When this execution began. _indexExtraFiles compares it against each
+      // candidate's mtime to tell the files this execution WROTE from the ones it
+      // merely globbed — the deck ports declare identical globs, so without it
+      // whichever node swept last stole every row's attribution.
+      startedMs: Date.now(),
       // Consumed as `cwd` by phases.mjs (runOpts). runCwd is the run root on a
       // detached workspace run, the member worktree on a detached single run,
       // today's workDir under legacy.
@@ -1408,9 +1417,23 @@ export class GraphOrchestrator extends RunHarness {
       const path = ctx.outputs?.[port?.id]?.path;
       if (!path || seen.has(path)) continue;
       seen.add(path);
+      // A path was ALLOCATED for every port carrying a `filename` — including the
+      // `when: "blocking"` ones (deckAudit.findings, deckExport.findings, every
+      // reviewer.review) — and a clean verdict leaves those unwritten. Indexing
+      // on allocation alone put rows in the Artifacts tab that render `0 B` and
+      // 404 when clicked, and that list_run_artifacts hands the model for
+      // read_run_artifact to fail on. Index what the agent actually wrote.
+      try { await access(path); } catch { continue; }
       this._artifact(port.artifactKind || port.id, path, {
         nodeId: ctx.nodeId, executionId: ctx.executionId, port: port.id, cycle: ctx.ordinal,
       });
+    }
+    // Before the script early-return: `extraFiles` is declared on an output PORT and
+    // readOutputs is shared by both sidecars, so a script card that ships files beside
+    // its output (the deck bundler's single-file deliverable) gets them indexed like
+    // an agent's.
+    for (const port of ctx.ports?.outputs || []) {
+      if (Array.isArray(port?.extraFiles) && port.extraFiles.length) await this._indexExtraFiles(ctx, port);
     }
     if (nc.kind === 'script') {
       // The envelope audit copy is an artifact under scripts/ (§6.5); the row gets the runtime facts (D17).
@@ -1427,6 +1450,145 @@ export class GraphOrchestrator extends RunHarness {
     // Agent memory (§5): sync the mount back after EVERY execution, slices included.
     await this._syncMemory(nc, ctx);
     if (nc.meta?.sideEffect === 'code' && !ctx.slice) await this._stageWorkingTree();
+  }
+
+  /** Deterministic delivery: read the inbox at step start and hang the pending
+   *  list on ctx (phases.directionsPromptBlock renders it). Slices see them too —
+   *  a slice is a real agent that can act on a direction. */
+  async _primeDirections(ctx) {
+    ctx.directionsPending = [];
+    if (!this.pipeline?.dir) return;
+    try {
+      const parsed = await readDirections(this.pipeline.dir);
+      // pendingDirections() is BY DEFINITION the ids with no consumption record,
+      // so a `seen` set built from parsed.consumed.keys() is disjoint from it by
+      // construction and the de-dup it fed could never fire. Removed rather than
+      // left in place reading like a guard that does something.
+      ctx.directionsPending = pendingDirections(parsed);
+    } catch { /* an unreadable inbox never blocks a step */ }
+  }
+
+  /** After the step: log every direction the agent consumed during it. The agent
+   *  writes the consumption record (it alone knows which directions were in its
+   *  job); the engine makes the delivery deterministic and the ledger visible. */
+  async _reconcileDirections(ctx) {
+    if (!this.pipeline?.dir || !ctx.directionsPending?.length) return;
+    try {
+      const parsed = await readDirections(this.pipeline.dir);
+      for (const d of ctx.directionsPending) {
+        const by = parsed.consumed.get(d.id);
+        if (by) {
+          this._log('directions', 'info', `direction:applied ${d.id} by ${by[by.length - 1]}`, { nodeId: ctx.nodeId, executionId: ctx.executionId, cycle: ctx.ordinal });
+        }
+      }
+    } catch { /* best effort */ }
+  }
+
+  /** Index the files an output port declared as `extraFiles` (agent-meta.mjs):
+   *  one-level globs under the pipeline dir, matched by basename, sorted, each
+   *  recorded with the entry's `kind`. Best-effort: a missing dir indexes nothing;
+   *  a declared-but-unwritten file is not an error (mirrors declared ports).
+   *
+   *  Entries are FIRST-MATCH-WINS: a file claimed by an earlier entry is skipped
+   *  by every later one, so a port can name its deliverables precisely and end
+   *  with a catch-all for the rest. That is how the deck ports separate the two
+   *  files a human opens from the kit scripts, webfonts and proof copy the deck
+   *  merely LOADS — which still have to be indexed, because the raw-bytes route
+   *  resolves `rel` only among indexed rows. Without the rule the catch-all would
+   *  re-index the deliverables under a second kind and double every row. */
+  /** Did THIS execution write the file? mtime at or after the moment the context
+   *  was built (immediately before the agent was dispatched). A file the previous
+   *  node wrote keeps that node's attribution.
+   *
+   *  KNOWN LIMIT — coarse mtime granularity. `startedMs` is a wall clock and the
+   *  mtime comes from the filesystem, so on a 1-second-granularity volume (HFS+,
+   *  FAT, some network mounts) a file this execution genuinely wrote can report an
+   *  mtime just BELOW it, and the re-attribution is then skipped: the row keeps the
+   *  previous step's stamp. That is the safe direction of the two — the row still
+   *  exists and still resolves, it is only labelled with an earlier step — whereas
+   *  a tolerance wide enough to cover a second would let a node claim files the
+   *  PREVIOUS node wrote, which is the bug this comparison was added to fix
+   *  (deckBuilder and deckExport declare identical globs). A same-filesystem marker
+   *  written per execution would remove the clock mismatch but not the granularity,
+   *  so it trades a silent under-attribution for a silent over-attribution at the
+   *  same cost. Left conservative, deliberately. */
+  async _writtenDuring(abs, ctx) {
+    if (!Number.isFinite(ctx?.startedMs)) return true;     // no stamp: behave as before
+    try {
+      return (await stat(abs)).mtimeMs >= ctx.startedMs;
+    } catch (err) {
+      // The name came from a readdir a moment ago, so ENOENT means the file was
+      // unlinked in between — and answering "yes, written" would index a row for a
+      // file that is gone: the 0-byte row that 404s on click, which
+      // forgetMissingArtifacts exists to remove. Any OTHER error is unknown, and
+      // there the permissive answer is still the safe one (a missed row breaks the
+      // raw-bytes route, which resolves `rel` only among indexed rows).
+      if (err && err.code === 'ENOENT') return false;
+      return true;
+    }
+  }
+
+  async _indexExtraFiles(ctx, port) {
+    const pdir = this.pipeline?.dir;
+    if (!pdir) return;
+    const claimed = new Set();
+    const known = new Map();                               // dir -> already-indexed basenames
+    for (const { kind, glob } of port.extraFiles) {
+      const [dir, pattern] = glob.split('/');
+      const re = new RegExp('^' + pattern.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+      let names = [];
+      try { names = (await readdir(join(pdir, dir), { withFileTypes: true })).filter((d) => d.isFile()).map((d) => d.name); } catch { continue; }
+      // Drop rows for files this directory no longer holds. The audit deletes and
+      // recreates shots/ every cycle, so a fix cycle that cuts a slide otherwise
+      // leaves the dropped slide's screenshot indexed forever — a 0 B row that
+      // 404s. Keyed on the listing, so a second port sweeping the same directory
+      // computes the same answer.
+      // Tell an open browser what went. The client artifact list only ever grew,
+      // so a pruned shot kept rendering and 404d when clicked — the very failure
+      // this prune exists to prevent. Absolute paths, the same shape `artifact`
+      // events carry, so the client matches them the same way.
+      const gone = forgetMissingArtifacts(this.pipeline.id, dir, new Set(names), pdir);
+      if (gone.length) this._emit('artifact-gone', { paths: gone.map((rel) => join(pdir, rel)) });
+      // Which of these are already indexed — read ONCE per directory, and only for
+      // directories this port actually sweeps.
+      if (!known.has(dir)) known.set(dir, indexedNamesUnder(this.pipeline.id, dir));
+      const alreadyIndexed = known.get(dir);
+      for (const name of names.filter((n) => re.test(n)).sort()) {
+        if (claimed.has(`${dir}/${name}`)) continue;
+        claimed.add(`${dir}/${name}`);
+        // A glob matches whatever is ON DISK, not what this execution produced —
+        // and deckBuilder and deckExport declare IDENTICAL globs, so the export
+        // sweep re-stamped the builder's deck.html and every kit script onto the
+        // export node. Re-attribute only a file this execution actually wrote.
+        // An unindexed file is always recorded: nobody else has claimed it, and
+        // skipping it on a coarse-grained mtime would lose the row entirely —
+        // which the raw-bytes route resolves `rel` against, so it would 404.
+        // Per KIND. `alreadyIndexed` maps name -> kinds, because a row is keyed by
+        // (kind, rel_path): a file settled under kind A is not settled for kind B,
+        // and treating it as such kept the A row forever on a re-kind (a sidecar
+        // edit, or a run spanning the V32 deck/deck-asset split).
+        const kinds = alreadyIndexed.get(name);
+        if (kinds && kinds.has(kind) && !(await this._writtenDuring(join(pdir, dir, name), ctx))) continue;
+        // `cycle` matters as much here as on the port's own output: without it
+        // every extra file is recorded with cycle null, and artifactsByNodeCycle
+        // (`cycle ?? 0`) files them all under a phantom "cycle 0" beside the same
+        // node's real cycles in both Artifacts tabs.
+        // One kind per file: retire whatever it was indexed as before, or the
+        // Artifacts tab and list_run_artifacts show the same file twice.
+        if (kinds && [...kinds].some((k) => k !== kind)) {
+          // Tell the browser too, exactly as the prune above does: the client's
+          // dedupe is kind-scoped, so without this it keeps the superseded row and
+          // lists the same file twice. Emitted BEFORE the artifact event below, so
+          // the row is dropped and then re-added under its current kind.
+          if (forgetOtherKinds(this.pipeline.id, `${dir}/${name}`, kind).length) {
+            this._emit('artifact-gone', { paths: [join(pdir, dir, name)] });
+          }
+        }
+        this._artifact(kind, join(pdir, dir, name), {
+          nodeId: ctx.nodeId, executionId: ctx.executionId, port: port.id, cycle: ctx.ordinal,
+        });
+      }
+    }
   }
 
   /** reviews.kind, derived from the verdict FILENAME minus `-cycle{cycle}.json`

@@ -18,7 +18,16 @@ import { resolveModelEnv, bridgedModelInfo } from './config.mjs';
 import { SUBAGENT_AUTO, SUBAGENT_INHERIT, SUBAGENT_MODELS, effectiveSubagentModel } from './model-env.mjs';
 import { readClarify, readReview } from './protocol.mjs';
 import { writeClarify, readClarifyRow } from './artifacts.mjs';
+import { renderDirectionsBlock } from './directions.mjs';
 import { join } from 'node:path';
+
+/** Phase 3 (deterministic delivery): the pending directions the orchestrator
+ *  primed on ctx, rendered for THIS execution. '' when none — byte-identical
+ *  prompts otherwise (test/graph-prompt-parity). */
+export function directionsPromptBlock(ctx) {
+  const pending = Array.isArray(ctx?.directionsPending) ? ctx.directionsPending : [];
+  return renderDirectionsBlock(pending, ctx?.executionId || 'this-step', ctx?.pipelineDir);
+}
 
 // ── allowedTools per role ──────────────────────────────────────────────────────
 // `Skill` lets agents invoke project (.claude/skills) and personal (~/.claude/skills)
@@ -574,7 +583,7 @@ export function runOpts(ctx, { role, prompt, systemPrompt, allowedTools }) {
     cwd: ctx.projectDir,
     systemPrompt,
     prompt: (ctx.resumeSessionId ? RESUME_HEADER + prompt : prompt)
-      + questionsPromptBlock(ctx) + formRepairBlock(ctx),
+      + questionsPromptBlock(ctx) + formRepairBlock(ctx) + directionsPromptBlock(ctx),
     resumeSessionId: ctx.resumeSessionId,
     // Grant the role's baseline tools PLUS whatever the agent declared in its
     // frontmatter (e.g. the Playwright MCP browser_* tools). ctx.node is present

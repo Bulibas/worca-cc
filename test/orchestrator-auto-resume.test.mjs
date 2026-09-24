@@ -1,7 +1,7 @@
 // test/orchestrator-auto-resume.test.mjs
 import { test, after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
@@ -339,4 +339,30 @@ test('finding 3: a failure inside _autoAdopt keeps the accepted proposal on the 
   assert.equal(second.getState().stepper.auto.rounds, 1, 'a replay is not a new round');
   assert.deepEqual(listSubAgents(second.getState().id).filter((s) => s.subagentType === 'auto-classify').map((s) => s.id), ['auto-classify-1'], 'no second cost row');
   assert.equal(readPipelineForResume(second.getState().id).row.resume_point, null, 'decided + done: the point is gone');
+});
+
+// _replaySetup re-runs the skills gate on a run that paused BEFORE _setupDone,
+// but it never staged `requiresAssets`. A presentation run that pauses during
+// setup and is resumed therefore reaches deckBuilder with no deck-kit/ in the
+// run folder, and the builder's "copy the kit flat from deck-kit/" instruction
+// has nothing to copy — exactly the path-guessing failure staging removes.
+const DECK = { name: 'Deck', taskKind: 'prompt', stages: [S('deckNarrative'), S('deckSystem'), S('deckBuilder')] };
+
+test('the setup replay stages requiresAssets, not only the skills gate', { timeout: 120000 }, async () => {
+  const dir = gitDir('auto-resume-assets');
+  const first = orchFor(dir, { classify: failing('no reply from the model', 0) });
+  const r1 = await first.run();
+  assert.equal(r1.status, 'paused', JSON.stringify(r1));
+  const saved = readPipelineForResume(first.getState().id);
+  assert.equal(saved.resumePoint.setupIncomplete, true, 'this is the setup-replay path');
+
+  const second = createOrchestrator({ projectDir: dir, claude: { mock: true }, resume: saved, classify: shapeOf(DECK) });
+  const { order } = spy(second);
+  const r2 = await second.resume();
+  assert.equal(r2.status, 'done', r2.error);
+  assert.ok(order.includes('_replaySetup'), 'the setup was replayed');
+  assert.ok([...second._engineAgentKeys()].includes('deckBuilder'), 'an agent declaring requiresAssets was adopted');
+
+  await access(join(second.pipeline.dir, 'deck-kit', 'CONTRACT.md'));
+  await access(join(second.pipeline.dir, 'deck-kit', 'deck-stage.js'));
 });

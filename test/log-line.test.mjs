@@ -172,3 +172,11 @@ test('projectLogRecord leaves absent attribution absent (no undefined keys)', ()
   const rec = projectLogRecord({ source: 'git', level: 'info', text: 'x', ts: TS });
   assert.deepEqual(Object.keys(rec).sort(), ['level', 'source', 'sub', 'text', 'ts']);
 });
+
+test('projectLogRecord preserves an artifact line\'s path/kind so History replay keeps the link', () => {
+  const rec = projectLogRecord({
+    source: 'orch', level: 'artifact', text: 'wrote deck/deck.html', ts: TS, path: 'deck/deck.html', kind: 'deck',
+  });
+  assert.equal(rec.path, 'deck/deck.html');
+  assert.equal(rec.kind, 'deck');
+});

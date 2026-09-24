@@ -229,3 +229,18 @@ test('renderQuestion recovery: cause + retry/pause reply line; renderTest is val
   const q = renderQuestion(META, { id: 'r1', kind: 'recovery', recovery: { cls: 'auth', message: 'x' } });
   assert.match(q.body[0].value, /\/abort \*2951 to pause the run/);
 });
+
+// renderDone reports directions the run never applied, but the chat notifier's
+// meta() omitted `directions` entirely — so the warning was unreachable from the
+// one surface /direct is used from. The CLI twin reads orch.state directly and
+// always showed it.
+test('renderDone surfaces unapplied directions when the notifier passes them', () => {
+  const none = renderDone({ runId: 'r1', title: 't' }, { status: 'done' });
+  assert.doesNotMatch(JSON.stringify(none.body), /Directions pending/);
+
+  const some = renderDone({
+    runId: 'r1', title: 't',
+    directions: { posted: 2, applied: 1, pending: [{ id: 'd2', text: 'cut the roadmap' }] },
+  }, { status: 'done' });
+  assert.match(JSON.stringify(some.body), /Directions pending:\*\* 1/);
+});

@@ -44,8 +44,12 @@ import {
 useTempHome(after);
 
 const AGENTS_DIR = fileURLToPath(new URL('../agents/', import.meta.url));
-/** Builtin layer only — the pin is about the 11 files that ship in agents/. */
-const REGISTRY = loadAgentRegistry(AGENTS_DIR, { userAgentsDir: null, includePlugins: false });
+/** Builtin layer only — the pin is about the 11 coding/workspace files that ship
+ *  in agents/. The presentation-domain builtins (wf_presentation) embed the
+ *  designing-presentations criteria and their own directions block; they are not
+ *  part of this byte-for-byte coding-prompt pin, so they are excluded here. */
+const RAW_REGISTRY = loadAgentRegistry(AGENTS_DIR, { userAgentsDir: null, includePlugins: false });
+const REGISTRY = Object.fromEntries(Object.entries(RAW_REGISTRY).filter(([, m]) => m.domain !== 'presentation'));
 const portsFn = registryPortsFn(REGISTRY);
 
 const scratch = [];

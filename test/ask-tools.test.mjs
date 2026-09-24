@@ -11,7 +11,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipeline, seedWorkspacePipeline } from './helpers/db-seed.mjs';
-import { createAskTools, AskToolError, splitUnifiedDiff, isProtectedBasename, sliceBytes } from '../src/core/ask/tools.mjs';
+import { createAskTools, AskToolError, splitUnifiedDiff, isProtectedBasename, sliceBytes, isByteArtifact } from '../src/core/ask/tools.mjs';
+import { viewerKindFor, BINARY_KINDS } from '../src/shared/artifact-kinds.mjs';
 import { defaultToolDeps } from '../src/core/ask/tool-deps.mjs';
 import { closeDb } from '../src/core/db.mjs';
 import { addProject } from '../src/core/projects.mjs';
@@ -801,6 +802,9 @@ test('list_run_artifacts / read_run_artifact / get_run_progress over real deps',
   writeFileSync(join(seeded.dir, 'extras', 'notes.txt'), 'hi');
   recordArtifact(seeded.id, 'plan', 'plan.md', { stepKey: 'exec-1', nodeId: 'planner', cycle: 0 });
   recordArtifact(seeded.id, 'extra', 'extras/notes.txt', { stepKey: 'exec-2', nodeId: 'refiner', cycle: 1 });
+  // A kit subresource: indexed so the deck viewer can serve it, but never worth a
+  // row of the model's budget — the HTTP twin drops these in SQL before the LIMIT.
+  recordArtifact(seeded.id, 'deck-asset', 'deck/kit/deck-stage.js', { stepKey: 'exec-3', nodeId: 'builder', cycle: 1 });
   writeDecomposition(seeded.id, [{ ordinal: 0, tasks: [{ id: 't1', title: 'leak ghp_abcdefghijklmnopqrstuvwxyz0123456789', file: 'x', nodeId: 'n' }] }]);
 
   const thread = createThread();
@@ -818,10 +822,27 @@ test('list_run_artifacts / read_run_artifact / get_run_progress over real deps',
   assert.equal((await real.call('list_run_artifacts', { runId: seeded.id, kind: 'plan' })).artifacts.length, 1);
   assert.equal((await real.call('list_run_artifacts', { runId: seeded.id, stepKey: 'exec-2' })).artifacts.length, 1);
   // plan + extra above, plus the prompt.md row seedPipeline indexes — nothing transient
-  assert.deepEqual(listed.artifacts.map((a) => a.kind).sort(), ['extra', 'plan', 'prompt']);
+  assert.deepEqual(listed.artifacts.map((a) => a.kind).sort(), ['extra', 'plan', 'prompt'],
+    'the deck-asset subresource never reaches the model, the way the HTTP twin drops it');
   const capped = await real.call('list_run_artifacts', { runId: seeded.id, limit: 1 });
   assert.equal(capped.artifacts.length, 1);
   assert.equal(capped.truncated, true);
+
+  // Rows come back oldest-first, so the row budget is spent on the OLDEST rows and
+  // the ones cut are the newest — on a presentation run, the deliverables. The
+  // model got `truncated: true` and no way past it; paging by offset is the way.
+  const page1 = await real.call('list_run_artifacts', { runId: seeded.id, limit: 2 });
+  assert.equal(page1.artifacts.length, 2);
+  assert.equal(page1.truncated, true);
+  assert.equal(page1.nextOffset, 2, 'a truncated page says where the next one starts');
+  const page2 = await real.call('list_run_artifacts', { runId: seeded.id, limit: 2, offset: page1.nextOffset });
+  assert.equal(page2.truncated, false, 'the last page is not truncated');
+  assert.equal(page2.nextOffset, undefined, 'and carries no cursor');
+  assert.deepEqual(
+    [...page1.artifacts, ...page2.artifacts].map((a) => a.relPath).sort(),
+    listed.artifacts.map((a) => a.relPath).sort(),
+    'paging reaches every row the uncapped list returns',
+  );
 
   // read_run_artifact: indexed read, plus refusal of unindexed / traversing paths
   const read = await real.call('read_run_artifact', { runId: seeded.id, relPath: 'plan.md' });
@@ -919,4 +940,55 @@ test('#397: a missing or failing pinnedScope dep means "nothing pinned", never a
 test('propose_schedule_change accepts after / afterPolicy / sourceFromPrevious (run chains)', () => {
   const ps = tools.list().find((d) => d.name === 'propose_schedule_change');
   for (const k of ['after', 'afterPolicy', 'sourceFromPrevious']) assert.ok(k in ps.inputSchema.properties, k);
+});
+
+// list_run_artifacts lists every indexed row, screenshots and PDFs included, and
+// read_run_artifact decoded all of them with readFile(…, 'utf8') — so asking for
+// a slide render charged up to 200KB of replacement-character mojibake to the
+// turn's context. The UI has a raw-bytes route for these; the tool refuses them
+// and says where the bytes are instead.
+test('read_run_artifact refuses the byte kinds instead of decoding them as text', async () => {
+  const tools = createAskTools({
+    limits: ASK_LIMITS,
+    redact: (t) => t,
+    findPipelineRowById: () => ({ id: 'p1' }),
+    readRunArtifact: async () => { throw new Error('must not be read'); },
+  });
+  for (const rel of ['shots/s01.png', 'deck/deck.pdf', 'deck/poppins-400.woff2']) {
+    await assert.rejects(
+      () => tools.call('read_run_artifact', { runId: 'p1', relPath: rel }),
+      (e) => e instanceof AskToolError && /not text/i.test(e.message), rel,
+    );
+  }
+});
+
+test('read_run_artifact still reads the text kinds', async () => {
+  const tools = createAskTools({
+    limits: ASK_LIMITS,
+    redact: (t) => t,
+    findPipelineRowById: () => ({ id: 'p1' }),
+    lookupPipelineRow: () => ({ id: 'p1' }),
+    readRunArtifact: async (_row, rel) => ({ rel, text: '# the plan\n' }),
+  });
+  const out = await tools.call('read_run_artifact', { runId: 'p1', relPath: 'plan.md' });
+  assert.equal(out.text, '# the plan\n');
+});
+
+// tools.mjs is import-free by contract (two source scans assert it), so its byte
+// extensions are restated rather than imported. This pins the two sets together:
+// every extension the SHARED table decodes as bytes must be refused here, and
+// nothing else may be. An extension added to one side and not the other fails.
+test('isByteArtifact agrees with the shared artifact-kind table', () => {
+  const exts = [
+    'md', 'markdown', 'txt', 'json', 'csv', 'log', 'ndjson', 'diff', 'patch', 'html', 'htm', 'js', 'mjs', 'css',
+    'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'pdf',
+    'pptx', 'docx', 'xlsx', 'key', 'zip', 'tar', 'woff2', 'woff', 'ttf', 'otf', 'mp3', 'mp4',
+    'xyz', 'gitignore',
+  ];
+  for (const ext of exts) {
+    const rel = `deck/file.${ext}`;
+    assert.equal(isByteArtifact(rel), BINARY_KINDS.has(viewerKindFor(rel)), `.${ext}`);
+  }
+  assert.equal(isByteArtifact('Makefile'), false, 'no extension is not bytes');
+  assert.equal(isByteArtifact('shots/S01.PNG'), true, 'the extension match is case-insensitive');
 });

@@ -8,10 +8,11 @@
 // timeline and machine state live in the DB (pipeline_events + the pipelines row),
 // which is the authoritative store (no more pipeline.md / state.json on disk).
 
-import { mkdir, writeFile, readFile, copyFile, readdir } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, copyFile, readdir, access, stat } from 'node:fs/promises';
+import { NON_BROWSABLE_KIND_LIST } from '../shared/artifact-kinds.mjs';
 import { join, basename, resolve, isAbsolute } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { realpathSync, existsSync, statSync } from 'node:fs';
+import { realpathSync, existsSync, statSync, constants as fsConstants } from 'node:fs';
 import { hostname } from 'node:os';
 import { projectKey, projectStorePath, canonicalProjectRoot, workspaceStorePath } from './store.mjs';
 import { listProjects } from './projects.mjs';
@@ -82,13 +83,14 @@ export function deleteStoreMeta(key) {
  * checklist | webui; `relPath` is relative to the pipeline dir for pipeline-local
  * files (prompt.md, extras/*, manual-tests-checklist.md, webui-review-cycleN.md)
  * and relative to the store root for the shared plan/review markdown (which live
- * in plans//reviews/, siblings of pipelines/). Idempotent (INSERT OR IGNORE on the
- * (pipeline_id, kind, rel_path) PK), best-effort: a logging failure never breaks a
+ * in plans//reviews/, siblings of pipelines/). Idempotent on the
+ * (pipeline_id, kind, rel_path) PK, best-effort: a logging failure never breaks a
  * run. A null/empty path is a no-op. The pipelines row must already exist (FK).
- * Optional per-step attribution (step_key/node_id/cycle/created_at) is stamped on
- * the FIRST insert only — the conflict behavior stays byte-for-byte INSERT OR
- * IGNORE (first write wins), so a re-record never clobbers an existing row's
- * attribution. The 3-arg form still works (attr defaults to {}, columns NULL).
+ * One row per FILE, carrying the attribution of whoever LAST wrote it: a
+ * re-record upserts step_key/node_id/cycle (see the conflict clause below), so a
+ * deck rebuilt on cycle 3 stops claiming it came from cycle 1. `created_at` is
+ * first-seen and never moves — listRunArtifacts orders by it. A re-record that
+ * carries NO attribution (the 3-arg form) leaves what is already there alone.
  * @param {string} pipelineId
  * @param {string} kind
  * @param {string} relPath
@@ -102,12 +104,160 @@ export function recordArtifact(pipelineId, kind, relPath, attr = {}) {
   const createdAt = new Date().toISOString();
   try {
     tx(() => {
+      // The PK is the FILE (pipeline, kind, rel_path), and a loop rewrites the
+      // same paths every cycle: the deck build -> audit -> fix loop rewrites
+      // deck-manifest.md, deck/deck.html and deck/deck.pdf, and the audit DELETES
+      // and recreates every shots/sNN.png. Under INSERT OR IGNORE the row kept
+      // its first cycle forever, so a three-cycle run filed its rebuilt
+      // deliverables under cycle 1 beside the genuinely cycle-suffixed reports —
+      // and for the reshot screenshots cycle 1 was not stale, it was false.
+      // The row therefore describes whoever LAST wrote the bytes.
+      //
+      // COALESCE, so a 2-arg legacy call (no attribution) cannot erase what an
+      // attributed call established. created_at is deliberately NOT touched: it
+      // is first-seen, and listRunArtifacts orders by it.
       getDb().prepare(
-        'INSERT OR IGNORE INTO artifacts (pipeline_id, kind, rel_path, step_key, node_id, cycle, created_at) '
-        + 'VALUES (?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO artifacts (pipeline_id, kind, rel_path, step_key, node_id, cycle, created_at) '
+        + 'VALUES (?, ?, ?, ?, ?, ?, ?) '
+        + 'ON CONFLICT(pipeline_id, kind, rel_path) DO UPDATE SET '
+        + '  step_key = COALESCE(excluded.step_key, artifacts.step_key), '
+        + '  node_id  = COALESCE(excluded.node_id,  artifacts.node_id), '
+        + '  cycle    = COALESCE(excluded.cycle,    artifacts.cycle)',
       ).run(pipelineId, kind, relPath, stepKey, nodeId, cycle, createdAt);
     });
   } catch { /* artifact indexing is best-effort; never break a run on it */ }
+}
+
+/**
+ * Drop index rows for files that are no longer in `dir`. One level only — the
+ * extraFiles globs are one level by construction, so a nested row belongs to
+ * nobody here and is left alone.
+ *
+ * Indexing only ever ADDED rows, but the deck audit deletes and recreates
+ * `shots/` every cycle: a fix cycle that cuts a slide (very reachable now that
+ * `/direct` can say "cut the roadmap slide") left `shots/s21..s24.png` indexed —
+ * rows that render `0 B`, 404 when clicked, and that `list_run_artifacts` hands
+ * the model for `read_run_artifact` to fail on. Keyed on what is ACTUALLY on
+ * disk rather than on what a glob matched, so two ports sweeping the same
+ * directory can never prune each other's rows — and, with `runDir` given, nor
+ * can two EXECUTIONS sweeping it concurrently, whose snapshots differ.
+ *
+ * @param {string} pipelineId
+ * @param {string} dir      one path segment, relative to the pipeline dir
+ * @param {Set<string>} present  the file names currently in it
+ * @returns {string[]} the rel paths removed — the caller emits them so an open
+ *   browser can drop the rows too (a client list that only grows keeps
+ *   rendering a pruned file, which then 404s when clicked).
+ */
+export function forgetMissingArtifacts(pipelineId, dir, present, runDir = null) {
+  if (!pipelineId || !dir || !(present instanceof Set)) return [];
+  const prefix = `${String(dir).replace(/[\\/]+$/, '')}/`;
+  // `_` and `%` are WILDCARDS in SQLite LIKE, and EXTRA_GLOB_RE admits `_` in a
+  // directory name — so sweeping `my_dir/` also selected rows under `myXdir/`,
+  // whose basenames are absent from my_dir's listing and were then deleted:
+  // an index row removed for a file still on disk, 404ing from the raw route
+  // ever after. ESCAPE makes the prefix a literal.
+  const literal = prefix.replace(/[\\%_]/g, (c) => `\\${c}`);
+  try {
+    return tx(() => {
+      const rows = getDb().prepare(
+        "SELECT kind, rel_path FROM artifacts WHERE pipeline_id = ? AND rel_path LIKE ? ESCAPE '\\'",
+      ).all(pipelineId, `${literal}%`);
+      const del = getDb().prepare('DELETE FROM artifacts WHERE pipeline_id = ? AND kind = ? AND rel_path = ?');
+      // `present` is the RUN DIR's listing, but a row resolves run-dir-first and
+      // then STORE ROOT — that is where plan/review markdown lives. A row absent
+      // from the run dir is therefore not necessarily missing, and deleting it
+      // unindexed a file still on disk: it then 404s from the artifact routes and
+      // vanishes from History. EXTRA_GLOB_RE accepts `reviews/*` and `plans/*`, so
+      // any agent declaring one would have swept them away on its first execution.
+      // Resolved lazily: the store root is only consulted for rows about to go.
+      const existsAsFile = (abs) => { try { return statSync(abs).isFile(); } catch { return false; } };
+      let storeRoot = null;
+      const atStoreRoot = (rel) => {
+        if (storeRoot === null) {
+          const row = findPipelineRowById(pipelineId);
+          const isWs = row && (row.target === 'workspace' || !!row.workspace_key);
+          storeRoot = row ? (isWs ? workspaceStorePath(row.workspace_key) : projectStorePath(row.project_key)) : '';
+        }
+        if (!storeRoot) return false;
+        return existsAsFile(join(storeRoot, rel));
+      };
+      // The REL PATHS removed, not a count: the caller emits them so an open
+      // browser can drop the rows too. A client list that only ever grows kept
+      // rendering a pruned shot, and clicking it 404s from a route that resolves
+      // only among indexed rows — the exact failure this prune exists to prevent.
+      const removed = [];
+      for (const r of rows) {
+        const name = r.rel_path.slice(prefix.length);
+        if (!name || name.includes('/') || present.has(name)) continue;
+        if (atStoreRoot(r.rel_path)) continue;
+        // `present` is a readdir SNAPSHOT taken before this sweep's own awaits, and
+        // sweeps interleave (run-harness names a workspace fan-out of an
+        // extraFiles-declaring agent). So a row can be absent from the snapshot and
+        // still have a file — written by the OTHER execution after the listing —
+        // and deleting it 404s a file that exists, since the raw route resolves
+        // `rel` only among indexed rows. The file on disk is the truth; the listing
+        // is only the fast path that spares a stat for rows plainly still there.
+        if (runDir && existsAsFile(join(runDir, r.rel_path))) continue;
+        del.run(pipelineId, r.kind, r.rel_path);
+        removed.push(r.rel_path);
+      }
+      return removed;
+    });
+  } catch { return []; }           // best-effort, like recordArtifact
+}
+
+/** Drop any row for `relPath` whose kind is NOT `keepKind`. A file has ONE kind
+ *  at a time — that is the whole reason the deck ports are first-match-wins ("the
+ *  catch-all would re-index the deliverables under a second kind and double every
+ *  row") — but nothing enforced it across EXECUTIONS, so a sidecar edit that
+ *  re-kinds a glob, or a run spanning the V32 deck/deck-asset split, left the old
+ *  row beside the new one. Never throws: an indexing miss must not fail a run. */
+export function forgetOtherKinds(pipelineId, relPath, keepKind) {
+  if (!pipelineId || !relPath || !keepKind) return [];
+  try {
+    return tx(() => {
+      const rows = getDb().prepare(
+        'SELECT kind FROM artifacts WHERE pipeline_id = ? AND rel_path = ? AND kind != ?',
+      ).all(pipelineId, relPath, keepKind);
+      const del = getDb().prepare('DELETE FROM artifacts WHERE pipeline_id = ? AND kind = ? AND rel_path = ?');
+      for (const r of rows) del.run(pipelineId, r.kind, relPath);
+      return rows.map((r) => r.kind);
+    });
+  } catch { return []; }
+}
+
+/** The basenames this pipeline already has indexed directly under `dir/`, each
+ *  mapped to the KINDS it is indexed under.
+ *  _indexExtraFiles needs it to tell "this execution wrote the file" from "this
+ *  execution merely globbed a file someone else wrote": a file that is not yet
+ *  indexed is always recorded (nobody else has claimed it, and skipping it would
+ *  lose a row), while one that IS indexed is only re-attributed when this
+ *  execution actually touched it. Same literal-prefix escaping as
+ *  forgetMissingArtifacts — `_` and `%` are LIKE wildcards and a directory name
+ *  may contain `_`. Never throws: an indexing miss must not fail a run. */
+export function indexedNamesUnder(pipelineId, dir) {
+  // A MAP, not a set of names: recordArtifact's PK is (pipeline_id, kind, rel_path),
+  // so "already indexed" is only meaningful per kind. Kind-blind, a file indexed
+  // under kind A that a later port claims under kind B was treated as settled and
+  // kept its A row — or gained a second row under B while the A row survived, and
+  // the file then appeared twice in the Artifacts tab and in list_run_artifacts.
+  const out = new Map();
+  if (!pipelineId || !dir) return out;
+  const prefix = `${String(dir).replace(/[\\/]+$/, '')}/`;
+  const literal = prefix.replace(/[\\%_]/g, (c) => `\\${c}`);
+  try {
+    const rows = getDb().prepare(
+      "SELECT kind, rel_path FROM artifacts WHERE pipeline_id = ? AND rel_path LIKE ? ESCAPE '\\'",
+    ).all(pipelineId, `${literal}%`);
+    for (const r of rows) {
+      const name = r.rel_path.slice(prefix.length);
+      if (!name || name.includes('/')) continue;
+      if (!out.has(name)) out.set(name, new Set());
+      out.get(name).add(r.kind);
+    }
+  } catch { /* best-effort, like recordArtifact */ }
+  return out;
 }
 
 /**
@@ -131,9 +281,12 @@ export async function listArtifacts(pipelineId) {
  * base order); a missing file reports bytes: 0. Optional { stepKey, kind } filter.
  * An optional `limit` caps the SQL result so the per-row statSync only runs on
  * rows the caller keeps (pass limit+1 to detect truncation); omit it to size
- * every row.
+ * every row. `offset` skips rows before that cap and works with or without a
+ * limit. `browsableOnly` drops the kinds no viewer lists (NON_BROWSABLE_KIND_LIST)
+ * in SQL, BEFORE the limit — rows are oldest-first, so spending the budget on
+ * rows nobody opens cuts the newest, which are the deliverables.
  * @param {string} pipelineId
- * @param {{stepKey?:string, kind?:string, limit?:number}} [filter]
+ * @param {{stepKey?:string, kind?:string, limit?:number, offset?:number, browsableOnly?:boolean}} [filter]
  * @returns {Promise<Array<{kind:string, stepKey:string|null, nodeId:string|null, cycle:number|null, relPath:string, bytes:number, createdAt:string|null}>>}
  */
 export async function listRunArtifacts(pipelineId, filter = {}) {
@@ -145,18 +298,69 @@ export async function listRunArtifacts(pipelineId, filter = {}) {
   const args = [row.id];
   if (filter.stepKey) { clauses.push('step_key = ?'); args.push(filter.stepKey); }
   if (filter.kind) { clauses.push('kind = ?'); args.push(filter.kind); }
-  const hasLimit = Number.isInteger(filter.limit) && filter.limit > 0;
+  // `browsableOnly` drops the kinds the viewer never lists BEFORE the LIMIT.
+  // Rows come back oldest-first, and a deck run indexes one hidden subresource
+  // per kit file and one screenshot per slide — so the row budget was spent on
+  // rows nobody sees and the rows cut were the newest, i.e. the deliverables
+  // (deck.pdf, the closing review). Filtering in SQL spends the budget on what
+  // the caller will actually render.
+  if (filter.browsableOnly) {
+    clauses.push(`kind NOT IN (${NON_BROWSABLE_KIND_LIST.map(() => '?').join(', ')})`);
+    args.push(...NON_BROWSABLE_KIND_LIST);
+  }
+  // isSafeInteger for the same reason as `offset` below: node:sqlite refuses to
+  // bind a non-safe integer, and Number.isInteger(1e20) is true. Same statement,
+  // same binding — an absurd limit is simply no limit rather than a throw.
+  // PAGING IS OFFSET-BASED, over a row set forgetMissingArtifacts DELETES from:
+  // the audit clears shots/ at the start of each fix cycle and prunes those rows.
+  // A page-2 fetch at offset N taken after such a prune skips the rows that shifted
+  // below the cut. A keyset cursor would be stable, but the sort key here is
+  // three-part with NULLs first, which makes one fiddly enough to be its own risk;
+  // the window is between two fetches of the same list, and re-opening the list
+  // re-reads it whole. Known, bounded, and not silently assumed away.
+  //
+  // ORDER BY puts NULL `created_at` FIRST, then oldest-first by timestamp. That
+  // column is newer than some rows: anything indexed before it existed has NULL and
+  // sorts by rel_path, so on such a run the paging cut is alphabetical, not
+  // chronological — the callers' "the newest are past the cut" holds for rows
+  // indexed since, and is softened in the tool description for those that aren't.
+  // Not backfilled: stamping every legacy row with the pipeline's own created_at
+  // would make them all equal and leave the order alphabetical anyway, for the
+  // cost of rewriting every historical row.
+  const hasLimit = Number.isSafeInteger(filter.limit) && filter.limit > 0;
+  // `offset` pages the row budget. Rows are oldest-first, so a run that indexes
+  // past the caller's limit loses its NEWEST rows — the deliverables — and a bare
+  // `truncated` flag gives the caller no way to reach them.
+  //
+  // SQLite accepts OFFSET only alongside LIMIT, and gating it on `hasLimit`
+  // SILENTLY returned page 1 to anyone who passed an offset alone — the shape a
+  // caller naturally reaches for after reading `nextOffset` out of a response.
+  // `LIMIT -1` is SQLite's own spelling of "no limit", so the offset stands up
+  // by itself instead of being dropped without a word.
+  // isSafeInteger, not isInteger: Number.isInteger(1e20) is TRUE and node:sqlite
+  // then refuses to bind it (`datatype mismatch`), which surfaced as a 500 from
+  // the HTTP route. Guard where the value meets the statement, so no caller can
+  // reintroduce it.
+  const hasOffset = Number.isSafeInteger(filter.offset) && filter.offset > 0;
+  const limitSql = hasLimit ? ' LIMIT ?' : (hasOffset ? ' LIMIT -1' : '');
   const raw = getDb().prepare(
     `SELECT kind, rel_path, step_key, node_id, cycle, created_at FROM artifacts
      WHERE ${clauses.join(' AND ')}
-     ORDER BY (created_at IS NULL) DESC, created_at ASC, rel_path ASC${hasLimit ? ' LIMIT ?' : ''}`,
-  ).all(...args, ...(hasLimit ? [filter.limit] : []));
+     ORDER BY (created_at IS NULL) DESC, created_at ASC, rel_path ASC${limitSql}${hasOffset ? ' OFFSET ?' : ''}`,
+  ).all(...args, ...(hasLimit ? [filter.limit] : []), ...(hasOffset ? [filter.offset] : []));
   const isWs = row.target === 'workspace' || !!row.workspace_key;
   const storeRoot = isWs ? workspaceStorePath(row.workspace_key) : projectStorePath(row.project_key);
   const runDir = await runDirForRow(row);
+  // isFile(), for the same reason resolveIndexedArtifactFileForRow requires it: a
+  // DIRECTORY at <runDir>/<rel> stats fine and would fix the base here, so the
+  // row would report a directory's inode size while the viewer reads the
+  // store-root file. The two must agree on which copy they mean.
   const sizeOf = (rel) => {
     for (const base of [runDir, storeRoot]) {
-      try { return statSync(join(base, rel)).size; } catch { /* try next base */ }
+      try {
+        const st = statSync(join(base, rel));
+        if (st.isFile()) return st.size;
+      } catch { /* try next base */ }
     }
     return 0;
   };
@@ -2316,6 +2520,25 @@ export async function findRunDir(pipelinesDir, id) {
  * index row or the file is missing.
  */
 export async function resolveIndexedArtifactForRow(row, rel) {
+  const f = await resolveIndexedArtifactFileForRow(row, rel);
+  if (!f) return null;
+  // Guarded: the selection stats the file, but a live run rewrites its artifacts
+  // (deck-manifest.md every fix cycle, and the audit clears shots/ wholesale), so
+  // the file can vanish between the stat and this read. Before the selection was
+  // split out, a failed read simply fell through and the route answered 404;
+  // letting it throw here turns that race into a 500.
+  try {
+    return { rel: f.rel, text: await readFile(f.file, 'utf8') };
+  } catch {
+    return null;
+  }
+}
+
+/** Selection half of resolveIndexedArtifactForRow: the indexed row + the first
+ *  base dir where the file exists, WITHOUT reading it. { rel, file } | null.
+ *  Used by the raw-bytes artifact route, which streams the file rather than
+ *  decoding it as UTF-8. */
+export async function resolveIndexedArtifactFileForRow(row, rel) {
   const norm = (p) => String(p || '').replace(/\\/g, '/');
   const want = norm(rel);
   if (!row || !want) return null;
@@ -2332,7 +2555,17 @@ export async function resolveIndexedArtifactForRow(row, rel) {
   const storeRoot = isWs ? workspaceStorePath(row.workspace_key) : projectStorePath(row.project_key);
   const runDir = await runDirForRow(row);
   for (const base of [runDir, storeRoot]) {
-    try { return { rel: hit.relPath, text: await readFile(join(base, hit.relPath), 'utf8') }; } catch { /* try the next base */ }
+    const file = join(base, hit.relPath);
+    // A readable FILE, not merely an existing path. access() defaults to F_OK,
+    // which a DIRECTORY passes: a run folder holding `plans/plan.md` as a
+    // directory would fix the base here and then fail the caller's readFile with
+    // EISDIR — a 500 — instead of falling through to the store-root copy that
+    // actually holds the artifact.
+    try {
+      if (!(await stat(file)).isFile()) continue;
+      await access(file, fsConstants.R_OK);
+      return { rel: hit.relPath, file };
+    } catch { /* try the next base */ }
   }
   return null;
 }

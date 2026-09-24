@@ -79,6 +79,8 @@ export function renderDone(meta, payload = {}) {
   if (dur) parts.push(`   **Duration:** ${dur}`);
   const cost = fmtUsd(meta.totalCostUsd);
   if (cost) parts.push(`   **Cost:** ${cost}`);
+  const pending = meta.directions?.pending?.length;
+  if (pending) parts.push(`   **Directions pending:** ${pending}`);
   return mdMsg(parts.join('\n'), 'success');
 }
 

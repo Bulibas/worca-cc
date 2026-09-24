@@ -56,20 +56,22 @@ test('both workspace agents declare fanOut:true', () => {
   assert.equal(reg.workspaceReviewer.fanOut, true);
 });
 
-test('NON-NEGOTIABLE: registryToSteps still returns EXACTLY the 10 project steps', () => {
-  // The scope:'workspace-only' exclusion is mandatory — without it the registry's 12
-  // entries would push this to 12 and break the single-project UI stepper / config keys.
+test('NON-NEGOTIABLE: registryToSteps returns the 10 coding + 7 presentation project steps', () => {
+  // The scope:'workspace-only' exclusion is mandatory — without it the registry's
+  // workspace entries would push into the single-project UI stepper / config keys.
+  // Project-scoped presentation agents DO belong (they run in a project checkout).
   const steps = registryToSteps(loadAgentRegistry());
-  assert.equal(steps.length, 10, 'workspace-only agents are excluded from the step list');
+  assert.equal(steps.length, 17, 'workspace-only agents are excluded from the step list');
   assert.deepEqual(steps.map((s) => s.key), [
     'clarify', 'planner', 'refiner', 'decomposer', 'implementer', 'reviewer', 'manualTestsChecklist', 'manualWebUiTesting', 'planReviewer', 'memoryDefragmenter',
+    'deckClarify', 'deckNarrative', 'deckSystem', 'deckBuilder', 'deckAudit', 'deckReviewer', 'deckExport',
   ]);
   assert.ok(!steps.some((s) => s.key === 'workspaceScanner'), 'scanner excluded');
   assert.ok(!steps.some((s) => s.key === 'workspaceReviewer'), 'workspace reviewer excluded');
 });
 
-test('AGENT_STEPS (derived from the registry) is byte-identical to registryToSteps and has 10 entries', () => {
-  assert.equal(AGENT_STEPS.length, 10);
+test('AGENT_STEPS (derived from the registry) is byte-identical to registryToSteps and has 17 entries', () => {
+  assert.equal(AGENT_STEPS.length, 17);
   assert.deepEqual(AGENT_STEPS, registryToSteps(loadAgentRegistry()));
 });
 

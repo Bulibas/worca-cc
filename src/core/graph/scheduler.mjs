@@ -947,6 +947,17 @@ export function createScheduler(opts) {
    * first-run barrier over wired non-loop inputs (the synthesized `await` port
    * included), then any-fresh (default) or awaitAll.
    */
+  // Said ONCE per node: isReady runs on every scheduling pass, and a held node is
+  // re-examined on each of them.
+  const gateHeldSaid = new Set();
+  function noteGateHold(nodeId) {
+    if (gateHeldSaid.has(nodeId)) return;
+    gateHeldSaid.add(nodeId);
+    log(`${nodeId}: a fresh input arrived but its \`await\` gate has not re-opened, `
+      + 'so it keeps its previous output instead of re-running. Wire the gate from inside '
+      + 'the loop if it should re-run on every cycle.');
+  }
+
   function isReady(node) {
     const inputs = portsOfNode(node).inputs || [];
     const wired = wiredIn.get(node.id) || new Map();
@@ -989,6 +1000,38 @@ export function createScheduler(opts) {
       return true;
     }
 
+    // A node whose `await` gate is wired RE-fires only when the GATE is fresh. The
+    // first-run barrier above already covers `await`, but re-firing was plain
+    // any-fresh — so a gated node also re-fired on a fresh payload, and the
+    // presentation graph has exactly that shape: `n_export` is gated on
+    // `n_review.pass` and also takes `built` straight from `n_build`, the target
+    // of the fix loop. Once the export had run and reported a blocking finding,
+    // the builder's next `built` fired it again — concurrently with the audit, on
+    // a deck nothing had re-checked, and its `pass` then ended the run with the
+    // audit still in flight. A fresh LOOP token still re-fires either way: the
+    // loop path is the whole point of a loop input.
+    //
+    // COMPATIBILITY: this narrows re-firing for EVERY saved graph, not just the
+    // shipped one, and there is no version gate on it — a stored graph in which a
+    // node has `await` wired from one branch and also takes a payload from inside
+    // a fix loop used to re-run on that fresh payload and now keeps its first-cycle
+    // output until the gate itself re-opens. That is the intended reading of a gate
+    // (an `await` that has not re-fired has not re-opened), and the alternative is
+    // the concurrency bug described above; but it is a real behaviour change to
+    // graphs nobody re-saved, with no signal in the Composer that a wire has
+    // stopped re-firing. Wire the gate from inside the loop to restore the old
+    // behaviour for such a graph.
+    if (wired.has(AWAIT_ID) && !isFresh(AWAIT_ID)) {
+      const viaLoop = inputs.some((inp) => isLoopPort(node.id, inp) && isFresh(inp.id));
+      // SAY SO when this rule is what held the node back. Without a line here the
+      // only symptom of the narrowing is a downstream consumer quietly reading a
+      // first-cycle artifact for the rest of the run — and for a graph built in the
+      // Composer before this rule, nothing else signals that a wire stopped firing.
+      if (!viaLoop && everRan && inputs.some((inp) => inp.id !== AWAIT_ID && isFresh(inp.id))) {
+        noteGateHold(node.id);
+      }
+      return viaLoop;
+    }
     if (!awaitAll) return inputs.some((inp) => isFresh(inp.id));
 
     // awaitAll: a fresh loop token alone always re-fires (the loop path is the point).

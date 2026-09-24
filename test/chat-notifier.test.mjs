@@ -163,3 +163,23 @@ test('chatPrefs/setChatPrefs: defaults ON, merge-patch, unknown keys rejected', 
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// meta() omitted `directions`, so renderDone's "Directions pending" warning was
+// unreachable from chat — the one surface /direct is posted from, i.e. the user
+// who posted the direction was the only one who could not be told it went unread.
+test('the done notification warns about directions the run never applied', async () => {
+  const { orch, sent, settle } = fixture();
+  orch.state.directions = { posted: 2, applied: 1, pending: [{ id: 'd2', text: 'cut the roadmap' }] };
+  orch.emit('done', { status: 'done' });
+  await settle();
+  assert.ok(sent.length > 0);
+  assert.match(JSON.stringify(sent[0]), /Directions pending:\*\* 1/);
+});
+
+test('a run that applied every direction carries no such warning', async () => {
+  const { orch, sent, settle } = fixture();
+  orch.state.directions = { posted: 2, applied: 2, pending: [] };
+  orch.emit('done', { status: 'done' });
+  await settle();
+  assert.doesNotMatch(JSON.stringify(sent[0]), /Directions pending/);
+});

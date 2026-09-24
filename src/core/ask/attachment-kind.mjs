@@ -14,47 +14,19 @@
 // upload rather than stored wrong. SVG is deliberately absent: it is scriptable
 // markup, and the download route serves attachment bodies with their real mime.
 
-/** Extension -> {kind, mime} for the text kinds (the pre-#398 allowlist). */
-const TEXT_TYPES = Object.freeze({
-  '.md': 'text/markdown',
-  '.markdown': 'text/markdown',
-  '.txt': 'text/plain',
-  '.json': 'application/json',
-  '.csv': 'text/csv',
-  '.log': 'text/plain',
-});
-
-/** Extension -> mime for the binary kinds. Every mime here MUST be sniffable. */
-const BINARY_TYPES = Object.freeze({
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.pdf': 'application/pdf',
-});
-
-export const TEXT_EXTENSIONS = Object.freeze(Object.keys(TEXT_TYPES));
-export const BINARY_EXTENSIONS = Object.freeze(Object.keys(BINARY_TYPES));
-
-const kindForMime = (mime) => (mime.startsWith('image/') ? 'image' : 'binary');
+// The extension allowlists + classifyExtension + extensionForAttachment now live
+// in the shared, browser-safe src/shared/artifact-kinds.mjs (the viewer needs the
+// same tables). This module re-exports them unchanged and keeps sniffMime here,
+// which needs Buffer and so cannot live under src/shared.
+import {
+  TEXT_EXTENSIONS, BINARY_EXTENSIONS, classifyExtension, extensionForAttachment,
+} from '../../shared/artifact-kinds.mjs';
+export { TEXT_EXTENSIONS, BINARY_EXTENSIONS, classifyExtension, extensionForAttachment };
 
 /** ISO 32000-1 §7.5.2 (implementation note 13): the `%PDF-` header may be
  *  preceded by up to 1024 bytes of junk (a UTF-8 BOM, print-driver or mail-
  *  gateway preamble). Acrobat and pdf.js accept such files, so the sniff does too. */
 const PDF_HEADER_WINDOW = 1024;
-
-/**
- * Classify a lower-cased extension (with the leading dot) into {kind, mime},
- * or null when it is not on either allowlist.
- */
-export function classifyExtension(ext) {
-  if (typeof ext !== 'string') return null;
-  const e = ext.toLowerCase();
-  if (Object.prototype.hasOwnProperty.call(TEXT_TYPES, e)) return { kind: 'text', mime: TEXT_TYPES[e] };
-  if (Object.prototype.hasOwnProperty.call(BINARY_TYPES, e)) return { kind: kindForMime(BINARY_TYPES[e]), mime: BINARY_TYPES[e] };
-  return null;
-}
 
 /**
  * Sniff the real mime of a binary body from its magic number, or null when the
@@ -81,15 +53,4 @@ export function sniffMime(buf) {
     if (at !== -1 && at <= PDF_HEADER_WINDOW) return 'application/pdf';
   }
   return null;
-}
-
-/** The on-disk extension for a stored body: derived from the SNIFFED mime (or
- *  '.txt' for text kinds), never from the user-supplied name — the path stays a
- *  function of row data the store minted (store.mjs traversal guard). */
-export function extensionForAttachment(kind, mime) {
-  if (kind === 'text' || kind == null) return '.txt';
-  for (const [ext, m] of Object.entries(BINARY_TYPES)) {
-    if (m === mime) return ext; // first match: '.jpg' wins over '.jpeg' for image/jpeg
-  }
-  return '.bin';
 }

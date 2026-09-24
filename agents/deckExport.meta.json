@@ -1,0 +1,68 @@
+{
+  "key": "deckExport",
+  "metaVersion": 2,
+  "mockRole": "deck-export",
+  "promptHints": "Build deck/deck.pdf and deck/deck.standalone.html from the finished deck, assert the PDF page count equals the slide count, then check every deliverable task.md names. Pipeline directory: {pipelineDir}. Cycle: {cycle}.",
+  "verdict": {
+    "filename": "deck-export-cycle{cycle}.json"
+  },
+  "inputs": [
+    {
+      "id": "built",
+      "type": "md"
+    },
+    {
+      "id": "task",
+      "type": "md"
+    }
+  ],
+  "outputs": [
+    {
+      "id": "report",
+      "type": "md",
+      "when": "always",
+      "filename": "deck-export-cycle{cycle}.md",
+      "artifactKind": "deck-export",
+      "extraFiles": [
+        {
+          "kind": "deck",
+          "glob": "deck/deck*.html"
+        },
+        {
+          "kind": "deck",
+          "glob": "deck/deck*.pdf"
+        },
+        {
+          "kind": "deck-asset",
+          "glob": "deck/*"
+        }
+      ]
+    },
+    {
+      "id": "findings",
+      "type": "md",
+      "when": "blocking",
+      "filename": "deck-export-findings-cycle{cycle}.md",
+      "artifactKind": "deck-export"
+    },
+    {
+      "id": "pass",
+      "type": "void",
+      "when": "clean"
+    }
+  ],
+  "domain": "presentation",
+  "displayName": "Deck Export",
+  "description": "Turns the finished deck into the single files a human opens \u2014 a PDF and a self-contained HTML \u2014 and is the only step that checks the run against what the task actually asked for.",
+  "color": "green",
+  "icon": "<path d=\"M12 3v10\" stroke-linecap=\"round\"/><path d=\"M8 9.5l4 4 4-4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M4 16v3.5h16V16\" stroke-linecap=\"round\" fill=\"none\"/>",
+  "agentFile": "worca-cc-deck-export.md",
+  "runnerType": "verifier",
+  "requiresAssets": [
+    "deck-kit"
+  ],
+  "asksQuestions": false,
+  "questionsLocked": false,
+  "questionsDefault": false,
+  "order": 16
+}

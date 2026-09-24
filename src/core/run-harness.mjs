@@ -34,6 +34,7 @@ import {
 } from './results.mjs';
 import { resolveTaskInput, retryWriteback } from './sources.mjs';
 import { projectKey, projectStorePath, workspaceStorePath } from './store.mjs';
+import { appendDirection, readDirections, pendingDirections, DIRECTIONS_FILE, DIRECTIONS_KIND } from './directions.mjs';
 import { worcaHome } from './projects.mjs';
 import {
   runRootMode, getProjectsRoot,
@@ -59,7 +60,9 @@ import { resolveStepModels, observeModelCost, resolveModelCost, modelCostConfig,
 import { bridgeCallsFor, forgetBridgeTag } from './bridge/telemetry.mjs';
 import { readGuardrailSet } from './guardrail-store.mjs';
 import { unionGuardrails, guardrailsToPermissionRules, mergePermissionRules } from './guardrails.mjs';
-import { collectRequiredSkills, validateSkills, injectSkills, pluginSkillDirs } from './skills.mjs';
+import { collectRequiredSkills, validateSkills, injectSkills, pluginSkillDirs, pluginAssetDirs } from './skills.mjs';
+import { isBrowsableKind, BULK_ARTIFACT_THRESHOLD } from '../shared/artifact-kinds.mjs';
+import { collectRequiredAssets, stageAssets } from './run-assets.mjs';
 import { loadAgentRegistry, DEFAULT_AGENTS_DIR } from './agent-registry.mjs';
 import {
   createWorktree, removeWorktree, suggestBranchName, sanitizeBranchName, resolveDefaultBranch,
@@ -781,6 +784,7 @@ export class RunHarness extends EventEmitter {
       // status, startedAt, finishedAt, durationMs?, tokens?, costUsd? };
       // status ∈ 'running'|'finished'|'error'|'stopped'.
       subAgents: [],
+      directions: null,   // { posted, applied, pending: [{id,text}] } — set at done from directions.ndjson
     };
   }
 
@@ -835,6 +839,8 @@ export class RunHarness extends EventEmitter {
   stop() {
     if (this.state.status === 'done' || this.state.status === 'stopped') return;
     this._setStatus('stopped');
+    // No inbox summary here: stop() only REQUESTS the abort. The run loop then
+    // unwinds into the async stopped path below, which reports it.
     try {
       this.abort.abort();
     } catch {
@@ -1165,6 +1171,21 @@ export class RunHarness extends EventEmitter {
       }
       this._checkAbort();
 
+      // 3d') Stage declared agent assets into the RUN FOLDER. Unlike a skill —
+      //      which must land on a `claude -p` scan path inside a worktree — an
+      //      asset is plain files the agent reads or copies, and the run folder
+      //      is the one directory every agent reaches under both run-root modes.
+      //      Staging removes path guessing entirely: before this, the deck kit
+      //      shipped inside worca while the builder prompt said "cp from the
+      //      project checkout", and a run whose project was an unrelated repo
+      //      only found the kit by globbing the filesystem.
+      const requiredAssets = collectRequiredAssets(this.registry, topology.agentKeys);
+      if (requiredAssets.length) {
+        const staged = await stageAssets(requiredAssets, { root: REPO_ROOT, target: this.pipeline.dir, pluginDirs: pluginAssetDirs() });
+        await appendAudit(this.pipeline.dir, `Assets: staged ${staged.join(', ')} into the run folder.`);
+      }
+      this._checkAbort();
+
       // 3e) Context assembly — UNCONDITIONAL on detached runs. Gated ONLY on the
       // recorded mode, NEVER on requiredSkills.length (nesting it back under that
       // guard would silently void R1(a)-(d) and R2 on every default pipeline while
@@ -1209,6 +1230,7 @@ export class RunHarness extends EventEmitter {
       this._setStatus('done');
       this.state.resumePoint = null; // finished rows are not resumable (clears the boundary trail)
       this._bookend('done', 'done');
+      await this._finalizeDirections();
       await this._persist();
       await appendAudit(this.pipeline.dir, `Pipeline finished with status **done**.`);
       await this._buildResults();          // refs + worktree still live here
@@ -1235,11 +1257,13 @@ export class RunHarness extends EventEmitter {
         }
         // No pipeline yet: nothing to resume; treat as stopped.
         this._setStatus('stopped');
+        await this._finalizeDirections();   // report an unread inbox on every terminal outcome
         this._emit('done', { status: 'stopped', pipelineDir: null });
         return { status: 'stopped', pipelineDir: null };
       }
       if (isAbort(err) || this.state.status === 'stopped') {
         this._setStatus('stopped');
+        await this._finalizeDirections();   // report an unread inbox on every terminal outcome
         // Stopped runs are not resumable: never persist a resume point (e.g. one
         // _dispatch assigned before stop won the race) alongside a torn-down worktree.
         this.state.resumePoint = null;
@@ -1282,6 +1306,7 @@ export class RunHarness extends EventEmitter {
       // enactable verdict is a terminal error — there is nothing to resume into.
       else this._launchVerdict(err);
       this._setStatus('error');
+      await this._finalizeDirections();   // report an unread inbox on every terminal outcome
       const message = err?.message || String(err);
       this._emit('error', { message });
       if (this.pipeline) {
@@ -1568,6 +1593,7 @@ export class RunHarness extends EventEmitter {
       this._setStatus('done');
       this.state.resumePoint = null; // finished rows are not resumable (clears the boundary trail)
       this._bookend('done', 'done');
+      await this._finalizeDirections();
       await this._persist();
       await appendAudit(this.pipeline.dir, `Pipeline finished with status **done**.`);
       await this._buildResults();          // refs + worktree still live here
@@ -1591,6 +1617,7 @@ export class RunHarness extends EventEmitter {
       }
       if (isAbort(err) || this.state.status === 'stopped') {
         this._setStatus('stopped');
+        await this._finalizeDirections();   // report an unread inbox on every terminal outcome
         // Stopped runs are not resumable: never persist a resume point alongside
         // a torn-down worktree (mirrors run()'s stopped branch).
         this.state.resumePoint = null;
@@ -1628,6 +1655,7 @@ export class RunHarness extends EventEmitter {
         }
       }
       this._setStatus('error');
+      await this._finalizeDirections();   // report an unread inbox on every terminal outcome
       const message = err?.message || String(err);
       this._emit('error', { message });
       if (this.pipeline) {
@@ -3794,6 +3822,53 @@ export class RunHarness extends EventEmitter {
     this._emit('state', this.getState());
   }
 
+  /** Public, non-blocking: append a user direction to the pipeline dir, index
+   *  the inbox, and log `direction:posted`. Never touches pendingQuestion/_askTail —
+   *  a question blocks the run and freezes clocks; a direction must not. */
+  async direct(text, source = 'ui') {
+    if (!this.pipeline?.dir) throw new Error('direct(): the run has no pipeline dir yet');
+    const rec = await appendDirection(this.pipeline.dir, { text, source });
+    recordArtifact(this.pipeline.id, DIRECTIONS_KIND, DIRECTIONS_FILE);
+    this._log('directions', 'info', `direction:posted ${rec.id} (${rec.source}): ${rec.text}`);
+    // On a PAUSED run the orchestrator's finally has already closed the log writer,
+    // and push() is a documented no-op after close — so that line went nowhere and
+    // History showed the direction being APPLIED after the resume with no record of
+    // it ever having been posted. The audit is the ledger that still accepts one.
+    // (The `_log` above is kept regardless: it also EMITS, which is what a watching
+    // UI sees.)
+    if (this.logWriter?.isClosed?.()) {
+      await appendAudit(this.pipeline.dir, `Direction **${rec.id}** posted (${rec.source}): ${rec.text}`).catch(() => {});
+    }
+    return rec;
+  }
+
+  /** The done-summary numbers, computed from the file (the file is the ledger). */
+  /** Summarise the direction inbox at the END of a run, for every terminal
+   *  outcome — not just `done`.
+   *
+   *  A direction is accepted for a PAUSED run because resume replays the inbox;
+   *  if that run is then stopped, or errors, or is simply never resumed, nobody
+   *  reads it. Computing this only on the done paths meant renderDone (chat),
+   *  formatRunSummary (CLI) and the audit line all reported nothing, so the one
+   *  user who needs telling — the one who posted the direction — was not told.
+   *  Best-effort: a summary must never be what fails a finished run. */
+  async _finalizeDirections() {
+    try {
+      this.state.directions = await this._directionsSummary();
+      const pending = this.state.directions?.pending || [];
+      if (pending.length) {
+        await appendAudit(this.pipeline.dir, `Pipeline finished with **${pending.length}** direction(s) never applied: `
+          + pending.map((d) => `${d.id} "${d.text}"`).join('; ') + '.');
+      }
+    } catch { /* never block a terminal transition on the inbox */ }
+  }
+
+  async _directionsSummary() {
+    const parsed = await readDirections(this.pipeline.dir);
+    const pending = pendingDirections(parsed);
+    return { posted: parsed.directions.length, applied: parsed.directions.length - pending.length, pending: pending.map((d) => ({ id: d.id, text: d.text })) };
+  }
+
   _log(source, level, text, attr = null) {
     const evt = { source, level, text, ts: new Date().toISOString() };
     if (attr) {
@@ -3827,16 +3902,48 @@ export class RunHarness extends EventEmitter {
       if (attr.cycle != null) evt.cycle = attr.cycle;
     }
     this._emit('artifact', evt);
+    // PERSIST one log record too, so History — and any live run reloaded in the
+    // browser — shows the same clickable artifact links the live view does.
+    // Only `_log` pushes to the logWriter, so live-log.ndjson carried no artifact
+    // records at all and those panes rebuilt from records with no path/kind.
+    //
+    // Capped per (kind, execution, node) burst on the SAME threshold the
+    // Artifacts tab collapses on: a folder sweep indexes one file per slide, and
+    // persisting 43 lines would put back into History exactly the flood the live
+    // view suppresses. Kinds nobody can open are skipped — a link to the run DIR
+    // or to the deleted questions scratch file only ever 404s.
+    if (isBrowsableKind(kind) && path && this.logWriter) {
+      // ONE slot keyed by the burst reset its count whenever the key changed, so
+      // two executions sweeping folders CONCURRENTLY (a workspace fan-out of an
+      // extraFiles-declaring agent; _indexExtraFiles awaits between files, so they
+      // interleave) flipped the key on every event and nothing was ever suppressed.
+      // A Map counts each burst on its own. Bounded by the run's distinct
+      // (kind, execution, node) triples, which is what a burst IS.
+      const burst = `${kind}\u0000${attr?.executionId ?? ''}\u0000${attr?.nodeId ?? ''}`;
+      if (!this._artifactLogRuns) this._artifactLogRuns = new Map();
+      const n = (this._artifactLogRuns.get(burst) || 0) + 1;
+      this._artifactLogRuns.set(burst, n);
+      if (n <= BULK_ARTIFACT_THRESHOLD) {
+        this.logWriter.push({
+          source: 'artifact', level: 'artifact', text: `${kind}: ${path}`,
+          ts: new Date().toISOString(), path, kind,
+          ...(attr?.nodeId != null ? { nodeId: attr.nodeId } : {}),
+          ...(attr?.executionId != null ? { executionId: attr.executionId } : {}),
+          ...(attr?.cycle != null ? { cycle: attr.cycle } : {}),
+        });
+      }
+    }
     // ALSO index FS markdown/extra paths so pipeline-delete can unlink the EXACT
     // files later, per-step attribution rides along (best-effort; never blocks a
     // run). Every kind with a durable on-disk relPath is recorded. Skipped:
-    // 'pipeline' (the run DIR itself, no single file) and 'questions' (a scratch
-    // file the orchestrator deletes once the round is answered — the Q&A lives in
-    // the step_questions table, so an index row would only ever 404). The WS
-    // event above still carries 'questions' for the live view. plan/review
-    // markdown live under <store>/<key>/{plans,reviews} (store-root-relative);
-    // prompt/checklist/webui live in the pipeline dir (dir-relative).
-    if (!this.pipeline || !path || kind === 'pipeline' || kind === 'questions') return;
+    // 'pipeline' (the run DIR itself, no single file), 'clarify' (the Q&A lives in
+    // the clarify table, not in a file this row could resolve) and 'questions' (a
+    // scratch file the orchestrator deletes once the round is answered — the Q&A
+    // lives in the step_questions table, so an index row would only ever 404).
+    // The WS event above still carries all three kinds for the live view. plan/
+    // review markdown live under <store>/<key>/{plans,reviews} (store-root-
+    // relative); prompt/checklist/webui live in the pipeline dir (dir-relative).
+    if (!this.pipeline || !path || kind === 'pipeline' || kind === 'clarify' || kind === 'questions') return;
     let relPath = null;
     const pdir = this.pipeline.dir;
     if (path.startsWith(pdir + sep)) {
@@ -4626,6 +4733,18 @@ export class RunHarness extends EventEmitter {
           await appendAudit(this.pipeline.dir, `Skills: injected ${injected.join(', ')} into ${worktrees.length} worktree(s).`);
         }
       }
+    }
+    this._checkAbort();
+    // 3d-bis) declared assets — run()'s block, same reason it exists there. The
+    // skills gate alone is not enough: a run that paused during setup and is
+    // resumed would reach an agent whose `requiresAssets` folder was never
+    // staged, and the agent's "copy it from the run folder" instruction would
+    // have nothing to copy. stageAssets overwrites by design, so replaying it is
+    // both safe and the point (the shipped asset is canonical).
+    const requiredAssets = collectRequiredAssets(this.registry, this._engineAgentKeys());
+    if (requiredAssets.length) {
+      const staged = await stageAssets(requiredAssets, { root: REPO_ROOT, target: this.pipeline.dir, pluginDirs: pluginAssetDirs() });
+      await appendAudit(this.pipeline.dir, `Assets: staged ${staged.join(', ')} into the run folder.`);
     }
     this._checkAbort();
     await appendAudit(this.pipeline.dir, 'Setup replayed on resume (the paused run never finished it).').catch(() => {});

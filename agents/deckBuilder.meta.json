@@ -1,0 +1,60 @@
+{
+  "key": "deckBuilder",
+  "metaVersion": 2,
+  "mockRole": "deck-builder",
+  "promptHints": "Author deck/deck.html and deck/proof.html under the pipeline directory against the OpenDeck kit (copy the *.js files flat out of the staged deck-kit/ folder in the pipeline directory into deck/; never hunt the filesystem for them and never edit them). Add a [data-deck-caption] band per argued slide when Mode is both or read-alone. Write deck-manifest.md describing every slide. Pipeline directory: {pipelineDir}. Cycle: {cycle}.",
+  "inputs": [
+    {
+      "id": "spine",
+      "type": "md"
+    },
+    {
+      "id": "system",
+      "type": "md"
+    },
+    {
+      "id": "fixes",
+      "type": "md",
+      "required": false,
+      "loop": true,
+      "as": "fix-review",
+      "directive": "## Fix cycle\n\nAddress EVERY critical and major finding in the review named below. Edit deck/deck.html and deck/proof.html in place; keep slides the review did not mention byte-identical; list what changed in deck-manifest.md under \"Changed this cycle\"."
+    }
+  ],
+  "outputs": [
+    {
+      "id": "built",
+      "type": "md",
+      "filename": "deck-manifest.md",
+      "artifactKind": "deck-manifest",
+      "extraFiles": [
+        {
+          "kind": "deck",
+          "glob": "deck/deck*.html"
+        },
+        {
+          "kind": "deck",
+          "glob": "deck/deck*.pdf"
+        },
+        {
+          "kind": "deck-asset",
+          "glob": "deck/*"
+        }
+      ]
+    }
+  ],
+  "domain": "presentation",
+  "displayName": "Deck Builder",
+  "description": "Authors the HTML deck and its proof copy against the OpenDeck kit, one section per slide, from the spine and the visual system.",
+  "color": "green",
+  "icon": "<rect x=\"3\" y=\"4\" width=\"18\" height=\"12\" rx=\"1.5\"/><path d=\"M7 20h10M12 16v4\" stroke-linecap=\"round\"/><path d=\"M7 11l3-3 3 3 4-4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+  "agentFile": "worca-cc-deck-builder.md",
+  "requiresAssets": [
+    "deck-kit"
+  ],
+  "runnerType": "producer",
+  "asksQuestions": false,
+  "questionsLocked": false,
+  "questionsDefault": false,
+  "order": 13
+}
