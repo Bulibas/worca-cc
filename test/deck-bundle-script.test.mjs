@@ -45,7 +45,11 @@ async function fixtureDeck() {
     + '<script>window.NOTES = [\'usage: <script src=\\\'x.js\\\'></script>\'];</script>\n'
     + '<!-- <script src="narration-audio.js"></script> -->\n'
     + '<deck-stage width="1920" height="1080"><section data-label="01"><h1>One</h1>'
-    + '<img src="logo.png" alt="logo"></section></deck-stage>\n'
+    // Attributes AFTER src, plus a sibling element right after the tag: this is
+    // exactly what a prefix-only rewrite (return only up through the src value)
+    // corrupts — everything from `alt` onward, including the tag's own `>`, is
+    // discarded, and the following <p> gets swallowed as bogus <img> attributes.
+    + '<img src="logo.png" alt="logo" class="mark"><p>after</p></section></deck-stage>\n'
     + '<script src="deck-stage.js"></script>\n<script src="deck-enhance.js"></script>\n'
     + '</body></html>\n', 'utf8');
   return { pdir, deck };
@@ -87,6 +91,12 @@ test('deckBundle inlines a deck into one file and reports it clean', async (t) =
   assert.ok(out.includes('window.__enhance = 1;'), 'deck-enhance.js was not inlined');
   assert.ok(out.includes('data:image/png;base64,'), 'the image was not embedded');
   assert.ok(!/<img[^>]+src=("|')logo\.png/.test(out), 'the img still points at a sibling');
+  // The embedded <img> must still be a well-formed, TERMINATED tag: everything
+  // after `src` — here `alt` and `class`, and the tag's own closing `>` — has
+  // to survive, or the next sibling element gets swallowed as bogus attributes.
+  assert.match(out, /<img src="data:image\/png;base64,[^"]*" alt="logo" class="mark">/,
+    'the img tag was truncated — attributes after src (or the closing ">") were dropped');
+  assert.ok(out.includes('<p>after</p>'), 'the sibling element after <img> was swallowed');
 });
 
 // THE TRAP. The bundler leaves HTML comments untouched (a commented-out tag is
@@ -126,4 +136,23 @@ test('a deck that still reaches for a sibling it cannot inline is a blocking fin
   assert.ok(res.verdict.issues.length > 0, 'a remote script must block');
   assert.ok(res.verdict.issues.some((i) => /cdn\.example\.com/.test(i.detail || '')),
     JSON.stringify(res.verdict.issues));
+});
+
+// M6: a data: src/href is already self-contained. swap_script and swap_sheet
+// already exempt it from `remote`; the live-ref self-check must agree, or a
+// deck that legitimately carries a tiny inline script/stylesheet as a data:
+// URI blocks on a "live reference" to nothing.
+test('a data: script src and stylesheet href are already self-contained and never block', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir, deck } = await fixtureDeck();
+  await writeFile(join(pdir, 'deck-manifest.md'), '# Deck manifest\nMode: live   Slides: 1\n', 'utf8');
+  const html = await readFile(join(deck, 'deck.html'), 'utf8');
+  await writeFile(join(deck, 'deck.html'), html.replace('</body>',
+    '<script src="data:text/javascript,window.__data=1;"></script>\n'
+    + '<link rel="stylesheet" href="data:text/css,body{color:red}">\n</body>'), 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  assert.deepEqual(res.verdict.issues, [], JSON.stringify(res.verdict));
 });

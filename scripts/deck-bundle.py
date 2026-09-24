@@ -217,17 +217,25 @@ def bundle(html, base_dir, missing, remote):
         return '<style>/* ' + href + ' */\n' + inline_css_urls(css, base_dir) + '\n</style>'
 
     def handle_img(tag):
-        m = IMG_SRC.match(tag)
-        if not m:
-            return tag
-        href = m.group(3)
-        if is_remote(href) or href.startswith('data:'):
-            return tag
-        try:
-            return m.group(1) + '"' + data_uri(base_dir, href) + '"'
-        except OSError:
-            missing.append(href)
-            return tag
+        # IMG_SRC only matches the `<img …src=` PREFIX up through the src value's
+        # closing quote — by design, so it can also drive live_refs-style checks
+        # on a partial span. Using `.match()` here and reconstructing from
+        # `m.group(1)` alone silently discarded everything after the src
+        # attribute, including the tag's own closing `>` — corrupting every
+        # `<img>` that had any attribute after `src`, or any sibling markup right
+        # after the tag. `.sub()` on the FULL tag replaces only the matched span
+        # and leaves everything else — later attributes, `alt`, a trailing `/>`,
+        # whatever follows in the document — untouched.
+        def swap(m):
+            href = m.group(3)
+            if is_remote(href) or href.startswith('data:'):
+                return m.group(0)
+            try:
+                return m.group(1) + '"' + data_uri(base_dir, href) + '"'
+            except OSError:
+                missing.append(href)
+                return m.group(0)
+        return IMG_SRC.sub(swap, tag, count=1)
 
     def dispatch(m):
         if m.group('comment') is not None:
@@ -298,9 +306,17 @@ def main(api):
     # docs/why-worca/why-worca.html, the Google Fonts <link> is correctly ONE
     # remote finding, not one remote finding plus a duplicate generic one.
     explained = set(remote) | set(missing)
+
+    def is_live(href):
+        # A `data:` reference is already self-contained — swap_script/swap_sheet
+        # exempt it from `remote` for exactly this reason, and the self-check
+        # must agree, or a deck that legitimately inlines its own tiny script or
+        # stylesheet as a data: URI blocks on a live reference to nothing.
+        return href is not None and not href.startswith('data:') and href not in explained
+
     scripts, sheets = live_refs(bundled)
-    scripts = [s for s in scripts if attr_val(SRC_ATTR, s) not in explained]
-    sheets = [s for s in sheets if attr_val(HREF_ATTR, s) not in explained]
+    scripts = [s for s in scripts if is_live(attr_val(SRC_ATTR, s))]
+    sheets = [s for s in sheets if is_live(attr_val(HREF_ATTR, s))]
     if scripts or sheets:
         issues.append({
             'severity': 'major',
