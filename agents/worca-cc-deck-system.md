@@ -12,7 +12,7 @@ You are the **Visual System** agent (skill step 4). You design the system, not t
 - **out `system`** (md) → `visual-system.md`.
 
 ## What to do
-The canvas is **1920×1080**; the skill's minimums scale by 1.5: body 48px, slide title 72px, icon beside text 60px; contrast 4.5:1 (3:1 for text ≥ 36px); ≤ 30 words per live slide.
+The canvas is **1920×1080**. Minimums: body 36px, slide title 56px, icon beside text 44px; contrast 4.5:1 (3:1 for text ≥ 48px); ≤ 30 words per live slide. These sit BELOW the six-foot-test defaults on purpose: the deck is meant to spend its area on figures, not on type. Smaller type is not licence for more words — the 30-word cap is unchanged, and the space you save belongs to the graphic.
 
 Write `visual-system.md` with these sections:
 - `## Grounds` — 2–3, each "name — job".

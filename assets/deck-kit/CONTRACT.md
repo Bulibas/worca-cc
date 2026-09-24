@@ -1,6 +1,6 @@
 # OpenDeck kit — builder contract
 
-Kit version: **1.1.0**
+Kit version: **1.2.0**
 
 The deck builder authors exactly two HTML files and copies the kit scripts flat
 beside them. It never edits a kit script.
@@ -88,9 +88,9 @@ deck and the manifest's `Kit:` line disagree the moment the kit is bumped.
 canvas's numbers. A stage authored at any other size is reported as
 `canvasMismatch` and audited as a blocking finding rather than mismeasured.
 
-- body text ≥ 48px, slide title ≥ 72px, icon beside text ≥ 60px.
-- text contrast ≥ 4.5:1 (≥ 3:1 for text ≥ 36px).
-- no text under 27px.
+- body text ≥ 36px, slide title ≥ 56px, icon beside text ≥ 44px.
+- text contrast ≥ 4.5:1 (≥ 3:1 for text ≥ 48px).
+- no text under 20px.
 - ≤ 30 words on a live slide.
 
 ## Reveals
@@ -123,8 +123,8 @@ that must do both carries the completeness in a caption band:
   projector, or no captions in the PDF).
 - **The audit excludes it entirely** — from the word count and from every
   geometry and legibility check. The caption is print copy in a flowing
-  document, not a fixed rectangle: the 1920×1080 box, the 27px floor and the
-  48px body floor are live-surface rules.
+  document, not a fixed rectangle: the 1920×1080 box, the 20px floor and the
+  36px body floor are live-surface rules.
 - **It is not speaker notes.** Notes are for the presenter and never print;
   the caption is what a reader gets instead of the narration.
 - **Live-only decks use no caption band.** The mode decides: `live` has none,

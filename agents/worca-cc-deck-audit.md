@@ -17,7 +17,7 @@ You are the **Deck Audit**. You measure; you do not judge. The reviewer that run
 
    If the report carries `stageError`, **nothing was measured** — the page had no usable `<deck-stage>` (the script 404'd, or the builder emitted the wrong root). Report one `critical` quoting it and stop. An empty report is not a clean deck.
 
-   If the report carries `canvasMismatch`, the deck was authored at a size the kit does not audit (it measures against 1920×1080, and the 27px/48px floors are that canvas's numbers). Report one `critical` naming both sizes and stop — every geometry and type number in that report is measured against the wrong box.
+   If the report carries `canvasMismatch`, the deck was authored at a size the kit does not audit (it measures against 1920×1080, and the 20px/36px floors are that canvas's numbers). Report one `critical` naming both sizes and stop — every geometry and type number in that report is measured against the wrong box.
 
    Check the report's slide count against the DECK, not against itself — `slides.length === slideCount` compares two numbers the kit derives from the same array and can never disagree. Count the deck's own slides (`grep -c '<section' deck/proof.html`, adjusting for any `<section>` that is not a slide) and compare that. If it is short, say so as a `critical` rather than reporting the slides you did get as the deck — a partial report that reads as clean is the one failure this step must never produce. (Kit ≥ 1.1.0 measures every slide from one load and ignores the URL hash. Against an older kit the report covers slide 1 only, and you must fall back to one load per slide with an explicit `#N` and merge.)
 

@@ -6,9 +6,9 @@
  *   escapes   element box leaves the 1920×1080 slide box (1px tolerance)
  *   clipped   scrollWidth > clientWidth on an element that owns text
  *   overlaps  two non-nested text-owning boxes land on each other
- *   contrast  computed fg/bg ratio below 4.5:1 (< 36px text) or 3:1 (>= 36px)
- *   small     text below 27px
- *   body      p/li/blockquote text below 48px
+ *   contrast  computed fg/bg ratio below 4.5:1 (< 48px text) or 3:1 (>= 48px)
+ *   small     text below 20px
+ *   body      p/li/blockquote text below 36px
  *   words     visible word count per slide, LIVE SURFACE ONLY
  *
  * Measurement waits for `document.fonts.ready` (capped) — at DOMContentLoaded
@@ -39,7 +39,7 @@
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   // The ONE canvas this kit audits. CONTRACT.md pins the builder to 1920×1080 and
-  // the floors below (27px / 48px) are that canvas's numbers — the header used to
+  // the floors below (20px / 36px) are that canvas's numbers — the header used to
   // advertise a 1280 variant that was never implemented, so a 1280 proof measured
   // its escapes against a 1920-wide box (nothing could ever escape) while every
   // 20px label tripped `small` against the wrong floor. Audited loudly instead:
@@ -294,12 +294,12 @@
         texts.push({ el, sel, boxes: boxes.length ? boxes : [r] });
         if (el.scrollWidth > el.clientWidth + TOL) issues.push({ check: 'clipped', selector: sel, detail: `scrollWidth ${el.scrollWidth} > clientWidth ${el.clientWidth}` });
         minFontPx = Math.min(minFontPx, px);
-        if (px < 27) issues.push({ check: 'small', selector: sel, detail: `${px}px text (floor 27px)` });
+        if (px < 20) issues.push({ check: 'small', selector: sel, detail: `${px}px text (floor 20px)` });
         // The floor follows the COPY, not the tag that happens to own the text
         // node: `<li><span>…</span></li>` is the usual shape, and requiring the
         // text-owning element itself to be p/li/blockquote let 32px body copy
         // through clean.
-        if (px < 48 && isBodyCopy(el, section)) issues.push({ check: 'body', selector: sel, detail: `${px}px body text (floor 48px)` });
+        if (px < 36 && isBodyCopy(el, section)) issues.push({ check: 'body', selector: sel, detail: `${px}px body text (floor 36px)` });
         const fg = parseColor(cs.color);
         if (fg && fg.a === 0) {
           // `color: transparent` paints no glyphs from `color`. The canonical
@@ -324,7 +324,12 @@
         } else if (fg) {
           const bg = effectiveBackground(el, win, fallbackBg, section);
           const ratio = contrastRatio(over(fg, bg), bg);
-          const floor = px >= 36 ? 3 : 4.5;
+          // The pivot is the BODY FLOOR, not a number of its own. WCAG relaxes
+          // contrast for large text, and with the body floor at 36px a pivot of 36
+          // would hand every piece of body copy set at its floor the 3:1 allowance —
+          // so lowering the type would quietly lower the contrast requirement too,
+          // with nothing reported. 48px is where type is genuinely large.
+          const floor = px >= 48 ? 3 : 4.5;
           if (ratio < floor) issues.push({ check: 'contrast', selector: sel, detail: `${ratio.toFixed(2)}:1 at ${px}px (floor ${floor}:1)` });
         }
       }

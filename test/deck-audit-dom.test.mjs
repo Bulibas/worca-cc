@@ -420,7 +420,7 @@ test('a heading nested in a non-body element is not held to the body floor', () 
     + `</section>`,
   );
   const [slide] = DeckAudit.run(win.document, win).slides;
-  assert.deepEqual(checksOf(slide, 'body'), [], 'only p/li/blockquote copy carries the 48px floor');
+  assert.deepEqual(checksOf(slide, 'body'), [], 'only p/li/blockquote copy carries the 36px floor');
 });
 
 // firstOpaque returned any colour with a > 0 and handed it to effectiveBackground
@@ -482,7 +482,7 @@ test('words separated by real whitespace across elements still count separately'
 // a stray 20px line before the heading passed `small`, `body` and `contrast`.
 test('text owned directly by the section is measured too', () => {
   const win = stage(
-    `<section ${SLIDE_BOX} data-label="03" style="font-size:20px;color:rgb(250,250,250)">`
+    `<section ${SLIDE_BOX} data-label="03" style="font-size:19px;color:rgb(250,250,250)">`
     + `Rough numbers, Q3<h1 data-r="40,200,800,90" style="font-size:72px">Cost</h1></section>`,
   );
   const [slide] = DeckAudit.run(win.document, win).slides;
@@ -752,4 +752,69 @@ test('a deck with no caption band is unaffected', () => {
   const win = stage(`<section ${SLIDE_BOX} data-label="01"><h1 data-r="40,40,800,90">One</h1></section>`);
   const [slide] = DeckAudit.run(win.document, win).slides;
   assert.deepEqual(slide.issues.filter((i) => i.check === 'caption'), []);
+});
+
+// The floors this kit measures were lowered so a slide can spend its area on
+// figures instead of type: `small` 27 -> 20, `body` 48 -> 36. Only these two are
+// measured; the 72px title and 60px icon in CONTRACT.md are guidance and no check
+// has ever read them.
+test('the small floor is 20px: 20px passes, 19px reports', () => {
+  const win = stage(
+    `<section ${SLIDE_BOX} data-label="01">`
+    + `<p data-r="40,200,800,30"><span data-r="40,200,800,30" style="font-size:20px">At the floor</span></p>`
+    + `</section>`,
+    `<section ${SLIDE_BOX} data-label="02">`
+    + `<p data-r="40,200,800,30"><span data-r="40,200,800,30" style="font-size:19px">Under it</span></p>`
+    + `</section>`,
+  );
+  const [ok, under] = DeckAudit.run(win.document, win).slides;
+  assert.deepEqual(checksOf(ok, 'small'), [], '20px is legal now');
+  assert.equal(checksOf(under, 'small').length, 1, '19px is not');
+  assert.match(checksOf(under, 'small')[0].detail, /floor 20px/);
+});
+
+test('the body floor is 36px: 36px passes, 35px reports', () => {
+  const win = stage(
+    `<section ${SLIDE_BOX} data-label="01">`
+    + `<p data-r="40,200,800,50"><span data-r="40,200,800,50" style="font-size:36px">At the floor</span></p>`
+    + `</section>`,
+    `<section ${SLIDE_BOX} data-label="02">`
+    + `<p data-r="40,200,800,50"><span data-r="40,200,800,50" style="font-size:35px">Under it</span></p>`
+    + `</section>`,
+  );
+  const [ok, under] = DeckAudit.run(win.document, win).slides;
+  assert.deepEqual(checksOf(ok, 'body'), [], '36px body copy is legal now');
+  assert.equal(checksOf(under, 'body').length, 1, '35px is not');
+  assert.match(checksOf(under, 'body')[0].detail, /floor 36px/);
+});
+
+// THE REGRESSION THE PIVOT MOVE PREVENTS. The contrast floor is relaxed from
+// 4.5:1 to 3:1 for "large" text. With the pivot left at 36px, body copy set at
+// its new 36px floor would land on `px >= 36` and silently inherit the 3:1
+// allowance — smaller AND lower-contrast type from one edit, with nothing
+// reported. The pivot moves to 48px so 36px copy keeps the real requirement.
+test('36px text keeps the 4.5:1 contrast floor', () => {
+  // MEASURED on white: #767676 is 4.542:1 (legal either way) and #8a8a8a is
+  // 3.452:1 — legal under a 3:1 floor, a failure under 4.5:1. That gap is the
+  // whole discriminator, so use this exact grey.
+  const win = stage(
+    `<section ${SLIDE_BOX} data-label="01" style="background-color:rgb(255,255,255)">`
+    + `<p data-r="40,200,800,50"><span data-r="40,200,800,50" style="font-size:36px;color:rgb(138,138,138)">Mid grey</span></p>`
+    + `</section>`,
+  );
+  win.document.body.style.backgroundColor = UNSTYLED_BODY;
+  const [slide] = DeckAudit.run(win.document, win).slides;
+  assert.equal(checksOf(slide, 'contrast').length, 1, '3.45:1 at 36px must fail the 4.5:1 floor');
+  assert.match(checksOf(slide, 'contrast')[0].detail, /floor 4\.5:1/);
+});
+
+test('48px text gets the relaxed 3:1 floor', () => {
+  const win = stage(
+    `<section ${SLIDE_BOX} data-label="01" style="background-color:rgb(255,255,255)">`
+    + `<h1 data-r="40,40,800,60" style="font-size:48px;color:rgb(138,138,138)">Large grey</h1>`
+    + `</section>`,
+  );
+  win.document.body.style.backgroundColor = UNSTYLED_BODY;
+  const [slide] = DeckAudit.run(win.document, win).slides;
+  assert.deepEqual(checksOf(slide, 'contrast'), [], '3.45:1 at 48px clears the 3:1 floor');
 });
