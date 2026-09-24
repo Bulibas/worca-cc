@@ -37,6 +37,12 @@ async function fixtureDeck() {
   await writeFile(join(deck, 'deck.html'),
     '<!DOCTYPE html>\n<html><head><meta charset="utf-8"><meta name="generator" content="OpenDeck 1.2.0">'
     + '<style>@font-face { font-family: X; src: url("logo.png"); }</style></head><body>\n'
+    // An author-written INLINE script whose own payload (not an inlined FILE's
+    // payload) contains a literal, unescaped script tag pair. Real: the actual
+    // standalone's notes data block sits right before its audio comment. Without
+    // stripping inlined script BODIES (not just files this program itself
+    // inlines), this alone is a false live-ref.
+    + '<script>window.NOTES = [\'usage: <script src=\\\'x.js\\\'></script>\'];</script>\n'
     + '<!-- <script src="narration-audio.js"></script> -->\n'
     + '<deck-stage width="1920" height="1080"><section data-label="01"><h1>One</h1>'
     + '<img src="logo.png" alt="logo"></section></deck-stage>\n'
