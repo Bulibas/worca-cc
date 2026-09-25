@@ -68,7 +68,12 @@
     return ({
       woff2: "font/woff2", woff: "font/woff", ttf: "font/ttf", otf: "font/otf",
       jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
-      webp: "image/webp", avif: "image/avif", svg: "image/svg+xml"
+      webp: "image/webp", avif: "image/avif", svg: "image/svg+xml",
+      // <audio>/<video> reach the matcher too now; without these a narrated deck
+      // embedded its voiceover under application/octet-stream and no browser
+      // played it back.
+      mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav", ogg: "audio/ogg",
+      mp4: "video/mp4", webm: "video/webm"
     })[ext] || "application/octet-stream";
   }
 
@@ -162,21 +167,38 @@
     while ((cm = cre.exec(html)) !== null) comments.push([cm.index, cm.index + cm[0].length]);
     var inComment = function (i) { return comments.some(function (r) { return i >= r[0] && i < r[1]; }); };
     while ((m = re.exec(html)) !== null) { if (!inComment(m.index)) hits.push({ full: m[0], src: m[1] || m[2] }); }
+    // Build the replacements first, then rewrite in ONE offset-aware pass.
+    //
+    // `html.split(tag).join(payload)` is a document-wide SUBSTRING replace, so it
+    // also hit the identical occurrences this loop had just deliberately skipped —
+    // the ones inside HTML comments. The kit's own sources quote live tags in their
+    // headers and the bundler comments out the audio tag, so the collision is
+    // routine, and when the pasted payload contains `-->` (this very file has
+    // three) the comment ENDS EARLY and raw JavaScript spills into the document as
+    // visible text, while the log still says "inlined". String.replace with a
+    // function scans the original string, so its offsets line up with the comment
+    // ranges measured above — no index drift to track.
+    var payloads = new Map();
     for (var i = 0; i < hits.length; i++) {
       var src = hits[i].src;
+      if (payloads.has(hits[i].full)) continue;
       if (/^(https?:)?\/\//.test(src)) continue; // leave CDN scripts as links
       try {
         var code = await fetchText(abs(src));
         // Neutralize any literal </script> inside the code (e.g. in doc-comments),
         // which would otherwise close the inline block early and corrupt the file.
         code = code.replace(/<\/script/gi, "<\\/script");
-        html = html.split(hits[i].full).join("<script" + keepAttrs(hits[i].full) + ">\n" + code + "\n<\/script>");
+        payloads.set(hits[i].full, "<script" + keepAttrs(hits[i].full) + ">\n" + code + "\n<\/script>");
         log("  + inlined " + src);
       } catch (e) {
         log("  ! skipped " + src + " (" + e.message + ")");
       }
     }
-    return html;
+    if (!payloads.size) return html;
+    re.lastIndex = 0;
+    return html.replace(re, function (full, q, bare, offset) {
+      return inComment(offset) ? full : (payloads.get(full) || full);
+    });
   }
 
   // 3) Embed the Google Fonts CSS + woff2 files as base64 (best-effort).
@@ -238,34 +260,66 @@
   // 5) Inline same-origin stylesheet <link>s as <style>, embedding their url()
   //    fonts/images. CDN / Google-Fonts links are left for embedFonts.
   async function inlineStylesheets(html, log) {
+    // Comment-aware, and rewritten in ONE pass, for the reason inlineScripts is:
+    // a document-wide substring replace also rewrites commented-out copies, and
+    // replacing inside the loop shifts every later offset out of step with the
+    // comment ranges. A commented-out tag is not live and must not be substituted.
+    var cre = /<!--[\s\S]*?-->/g, cm, comments = [];
+    while ((cm = cre.exec(html)) !== null) comments.push([cm.index, cm.index + cm[0].length]);
+    var inComment = function (i) { return comments.some(function (r) { return i >= r[0] && i < r[1]; }); };
     var re = /<link\b[^>]*>/gi, m, tags = [];
-    while ((m = re.exec(html)) !== null) tags.push(m[0]);
+    while ((m = re.exec(html)) !== null) { if (!inComment(m.index)) tags.push(m[0]); }
+    var payloads = new Map();
     for (var i = 0; i < tags.length; i++) {
       var tag = tags[i];
+      if (payloads.has(tag)) continue;
       if (!/rel=["']?stylesheet/i.test(tag)) continue;
-      var hm = tag.match(/href="([^"]+)"/i);
-      if (!hm || isRemote(hm[1])) continue;
+      // Single-quoted and unquoted too, like the script and media matchers. The
+      // rel test already tolerated a single-quoted rel while this one demanded
+      // double quotes, so a link tag spelling BOTH its rel and its href with
+      // single quotes fell out at the `!hm` guard BEFORE the "skipped" log — not
+      // inlined and not reported, leaving a dead relative reference in a file
+      // whose entire purpose is to have none.
+      // (Spelled in prose, not as a literal tag: this file is inlined into its
+      //  own output, so a literal example here IS a match for anything scanning
+      //  the bundle for live references — the kit's tests included.)
+      var hm = tag.match(/\shref\s*=\s*(?:["\x27]([^"\x27]+)["\x27]|([^\s>]+))/i);
+      if (!hm) { log("• stylesheet skipped " + tag + " (no href)"); continue; }
+      var href = hm[1] || hm[2];
+      if (isRemote(href)) continue;
       try {
-        var css = await embedCssUrls(await fetchText(abs(hm[1])), abs(hm[1]));
-        html = html.split(tag).join("<style>\n" + css + "\n</style>");
-        log("• inlined stylesheet " + hm[1]);
-      } catch (e) { log("• stylesheet skipped " + hm[1] + " (" + e.message + ")"); }
+        var css = await embedCssUrls(await fetchText(abs(href)), abs(href));
+        payloads.set(tag, "<style>\n" + css + "\n</style>");
+        log("• inlined stylesheet " + href);
+      } catch (e) { log("• stylesheet skipped " + href + " (" + e.message + ")"); }
     }
-    return html;
+    if (!payloads.size) return html;
+    re.lastIndex = 0;
+    return html.replace(re, function (full, offset) {
+      return inComment(offset) ? full : (payloads.get(full) || full);
+    });
   }
 
-  // 6) Inline same-origin <img src="…"> as base64 data URLs.
-  async function inlineImages(html, log) {
+  // 6) Inline same-origin <img|audio|video|source src="…"> as base64 data URLs.
+  //
+  // img|audio|video|source, not img alone. A narrated deck's audio element
+  // passed through untouched and unlogged — the baked-audio step only ever
+  // handled the narration-audio.js SCRIPT form — so the export went out with a
+  // dead relative reference to its own soundtrack.
+  // scripts/deck-bundle.py matches the same four under one pattern; this is the
+  // side that diverged. <source> is matched in its own right because <audio> and
+  // <video> have children and the real src is usually on the child.
+  async function inlineMedia(html, log) {
     // Single-quoted and unquoted too, like the script matcher above: both are legal
     // HTML and slipped through with no log line at all.
-    var re = /<img\b[^>]*?\ssrc\s*=\s*(?:["\x27]([^"\x27]+)["\x27]|([^\s>]+))[^>]*>/gi, m, srcs = [], seen = {}, n = 0;
+    var re = /<(?:img|audio|video|source)\b[^>]*?\ssrc\s*=\s*(?:["\x27]([^"\x27]+)["\x27]|([^\s>]+))[^>]*>/gi, m, srcs = [], n = 0;
     while ((m = re.exec(html)) !== null) srcs.push(m[1] || m[2]);
     var embedded = new Map();
     for (var i = 0; i < srcs.length; i++) {
       var src = srcs[i];
-      if (embedded.has(src) || isRemote(src)) continue;
+      if (embedded.has(src) || isRemote(src) || src.indexOf("data:") === 0) continue;
       try { embedded.set(src, await toDataUrl(abs(src))); n++; }
-      catch (e) { log("• image skipped " + src + " (" + e.message + ")"); }
+      catch (e) { log("• media skipped " + src + " (" + e.message + ")"); }
     }
     if (!embedded.size) return html;
     // Rewrite the matched TOKEN: a single-quoted or unquoted src would never be
@@ -276,7 +330,7 @@
       var url = embedded.get(q || bare);
       return url ? full.replace(/(\ssrc\s*=\s*)(?:["\x27][^"\x27]*["\x27]|[^\s>]+)/i, '$1"' + url + '"') : full;
     });
-    log("• embedded " + n + " image" + (n === 1 ? "" : "s"));
+    log("• embedded " + n + " media file" + (n === 1 ? "" : "s"));
     return html;
   }
 
@@ -318,14 +372,14 @@
     // deck-stage.js's doc comment leaves an unbalanced `<style …>` for it to
     // span from.
     // inlineScripts runs LAST of the document-wide passes: once code is pasted in,
-    // every scanner also sees the JavaScript. inlineImages rewrites
+    // every scanner also sees the JavaScript. inlineMedia rewrites
     // `src="X"` across the whole file, which would splice a base64 blob into any
     // source line mentioning one of the deck's own images — and the kit's own
     // sources do exactly that in doc comments.
     html = await inlineStyleBlocks(html, log);
     html = await inlineStylesheets(html, log);   // same-origin <link> + its url() assets
     html = await embedFonts(html, log);          // remote Google-Fonts <link>
-    html = await inlineImages(html, log);        // same-origin <img>
+    html = await inlineMedia(html, log);         // same-origin <img>/<audio>/<video>
     html = await inlineScripts(html, log);
     return html;
   }

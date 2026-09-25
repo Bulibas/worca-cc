@@ -59,19 +59,27 @@ const HELP_TEXT = [
 
 const LIVE = new Set(['running', 'starting', 'pausing']);
 
-// Runs that can still READ a direction — LIVE plus `paused`, which is the state
-// the inbox exists for: resume replays directions.ndjson. Derived from LIVE and
-// from the shared DIRECTIONS_CLOSED rather than restated, so /direct and the HTTP
-// route cannot drift again (they had: this surface refused what that one filed).
-// An allowlist, not `!DIRECTIONS_CLOSED.has(s)` — a run whose status is empty or
-// unknown must not become directable by default.
+// Runs that can still READ a direction — LIVE plus the two SETTLED states resume
+// accepts, which is what the inbox exists for: resume replays directions.ndjson.
+//
+// `interrupted` belongs here for the same reason `paused` does, and leaving it out
+// was the drift this comment claimed to prevent. reconcileStaleRunning stamps
+// every dead-owner run `interrupted` on server restart (artifacts.mjs), resumeRun
+// explicitly accepts it (ui/server.mjs: `!== 'paused' && !== 'interrupted'`), and
+// postDirection gates on the DENYLIST DIRECTIONS_CLOSED = {done,error,stopped} —
+// so after any restart the UI filed a direction (201, replayed on resume) while
+// /direct answered "No running or paused runs." for the very same row.
+//
+// Still an allowlist, not `!DIRECTIONS_CLOSED.has(s)` — a run whose status is
+// empty or unknown must not become directable by default — but the filter keeps
+// the two surfaces from disagreeing about the states both actually name.
 // How far back /direct will recognise a run id. History is the only place a run
 // from before the last server restart still exists, and the whole table is not
 // worth scanning on a chat command — but the horizon is real, so it is named
 // rather than buried as a literal at the call site.
 const DIRECT_REF_HISTORY = 500;
 
-const DIRECTABLE = new Set([...LIVE, 'paused'].filter((s) => !DIRECTIONS_CLOSED.has(s)));
+const DIRECTABLE = new Set([...LIVE, 'paused', 'interrupted'].filter((s) => !DIRECTIONS_CLOSED.has(s)));
 
 /**
  * Resolve which run a command targets (resolveRunId port: wildcard suffix,

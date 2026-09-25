@@ -430,3 +430,136 @@ test('defer/async are dropped when a script is inlined, not carried through', as
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// CONFINEMENT. `localPath` was a bare `resolve(baseDir, href)`, so `../` walked
+// out of deck/ and an absolute href discarded baseDir altogether. This bundler
+// runs unsandboxed over markup an LLM wrote from user-supplied material and its
+// product is a file meant to be SENT to people, so "it embedded whatever it could
+// read" is a disclosure bug, not a tidiness one. scripts/deck-bundle.py carried
+// the guard — and a comment naming this exact hole — for a release before it was
+// closed here.
+test('a reference that escapes the deck folder is never embedded', async () => {
+  const dir = await deckDir();
+  try {
+    await writeFile(join(dir, '..', 'worca-standalone-secret.txt'), 'TOP-SECRET-BYTES', 'utf8');
+    let html = await readFile(join(dir, 'deck.html'), 'utf8');
+    html = html
+      .replace('<h1>One</h1>', '<h1>One</h1><img src="/etc/passwd">')
+      .replace('</body>', '<script src="../worca-standalone-secret.txt"></script></body>');
+    await writeFile(join(dir, 'deck.html'), html, 'utf8');
+
+    const { stderr } = await run('node', [join(dir, 'build-standalone.mjs'), join(dir, 'deck.html'), '--out', join(dir, 'out.html')]);
+    const out = await readFile(join(dir, 'out.html'), 'utf8');
+
+    assert.ok(!out.includes('TOP-SECRET-BYTES'), 'the escaping file was inlined verbatim');
+    for (const b64 of out.match(/base64,([A-Za-z0-9+/=]+)/g) || []) {
+      const decoded = Buffer.from(b64.slice(7), 'base64').toString('latin1');
+      assert.ok(!decoded.includes('TOP-SECRET-BYTES'), 'the escaping file was inlined as a data URI');
+      assert.ok(!decoded.includes('root:'), '/etc/passwd was inlined as a data URI');
+    }
+    // Silently skipping is its own failure: the deliverable then carries a dead
+    // reference no one was told about.
+    assert.match(stderr, /resolves outside the deck folder/, 'the escape was not reported');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The rel test already tolerated `rel='stylesheet'` while the href match demanded
+// double quotes, so a single-quoted link fell out at the `!hm` guard BEFORE the
+// "skipped" log: not inlined, and not reported either.
+test('a stylesheet link is inlined however its href is quoted', async () => {
+  const dir = await deckDir();
+  try {
+    await writeFile(join(dir, 'extra.css'), '.from-linked-sheet { color: rebeccapurple; }', 'utf8');
+    let html = await readFile(join(dir, 'deck.html'), 'utf8');
+    html = html.replace('<title>D</title>', "<title>D</title><link rel='stylesheet' href='extra.css'>");
+    await writeFile(join(dir, 'deck.html'), html, 'utf8');
+
+    await run('node', [join(dir, 'build-standalone.mjs'), join(dir, 'deck.html'), '--out', join(dir, 'out.html')]);
+    const out = await readFile(join(dir, 'out.html'), 'utf8');
+
+    assert.match(out, /\.from-linked-sheet/, 'the single-quoted stylesheet was not inlined');
+    assert.doesNotMatch(out, /<link\b[^>]*rel=["']?stylesheet[^>]*extra\.css/i,
+      'the dead <link> survived into the standalone');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Only <img src> was inlined, so a narrated deck's <audio src="narration.mp3">
+// survived as a dead relative reference with no log line — bakeAudio only ever
+// handled the narration-audio.js SCRIPT form. mimeFor had no audio/video entries
+// either, so even a matched file would have been embedded as octet-stream and
+// played back nowhere. scripts/deck-bundle.py matches img|audio|video|source
+// under one pattern; this side had diverged.
+test('audio and video sources are embedded too, not just <img>', async () => {
+  const dir = await deckDir();
+  try {
+    await writeFile(join(dir, 'narration.mp3'), Buffer.from('ID3-audio-bytes'));
+    await writeFile(join(dir, 'clip.webm'), Buffer.from('webm-bytes'));
+    let html = await readFile(join(dir, 'deck.html'), 'utf8');
+    html = html.replace('<h1>One</h1>',
+      '<h1>One</h1><audio src="narration.mp3"></audio><video><source src="clip.webm"></video>');
+    await writeFile(join(dir, 'deck.html'), html, 'utf8');
+
+    await run('node', [join(dir, 'build-standalone.mjs'), join(dir, 'deck.html'), '--out', join(dir, 'out.html')]);
+    const out = await readFile(join(dir, 'out.html'), 'utf8');
+
+    assert.match(out, /data:audio\/mpeg;base64,/, 'the voiceover is not embedded, or not as audio');
+    assert.match(out, /data:video\/webm;base64,/, 'the <source> clip is not embedded, or not as video');
+    assert.doesNotMatch(out, /src=["']?narration\.mp3/, 'a dead audio reference survived');
+    assert.doesNotMatch(out, /src=["']?clip\.webm/, 'a dead video reference survived');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ROUND 2, N4. The collection loop carefully skips tags inside HTML comments,
+// and then `html.split(tag).join(payload)` — a document-wide SUBSTRING replace —
+// rewrote them anyway. The kit's own sources quote live tags in their headers and
+// the bundler comments out the audio tag, so the collision is routine; when the
+// payload contains `-->` (deck-export.js has three) the comment ENDS EARLY and
+// raw JavaScript spills into the document as visible text, with the log still
+// reading "inlined".
+test('a commented-out tag is left alone, payload `-->` and all', async () => {
+  const dir = await deckDir();
+  try {
+    await writeFile(join(dir, 'lib.js'), '/* a --> b */\nwindow.__lib = 1;\n', 'utf8');
+    await writeFile(join(dir, 'sheet.css'), '.live-sheet{color:red} /* --> */\n', 'utf8');
+    let html = await readFile(join(dir, 'deck.html'), 'utf8');
+    html = html
+      .replace('<title>D</title>', '<title>D</title><link rel="stylesheet" href="sheet.css">')
+      .replace('</body>',
+        '<!-- it used to load: <script src="lib.js"></script> -->\n'
+        + '<!-- and style: <link rel="stylesheet" href="sheet.css"> -->\n'
+        + '<script src="lib.js"></script>\n</body>');
+    await writeFile(join(dir, 'deck.html'), html, 'utf8');
+
+    await run('node', [join(dir, 'build-standalone.mjs'), join(dir, 'deck.html'), '--out', join(dir, 'out.html')]);
+    const out = await readFile(join(dir, 'out.html'), 'utf8');
+
+    // Both comments survive intact — unsubstituted, and still terminated.
+    assert.match(out, /<!-- it used to load: <script src="lib\.js"><\/script> -->/,
+      'the commented-out script tag was substituted');
+    assert.match(out, /<!-- and style: <link rel="stylesheet" href="sheet\.css"> -->/,
+      'the commented-out link tag was substituted');
+    // ...and the LIVE ones were still inlined.
+    assert.match(out, /window\.__lib = 1;/, 'the live script was not inlined');
+    assert.match(out, /\.live-sheet\{color:red\}/, 'the live stylesheet was not inlined');
+    // Nothing escaped a comment into the rendered page.
+    const { JSDOM } = await import('jsdom');
+    const doc = new JSDOM(out).window.document;
+    const walker = doc.createTreeWalker(doc.body, 4);
+    const loose = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const tag = n.parentElement && n.parentElement.tagName;
+      if (tag === 'SCRIPT' || tag === 'STYLE') continue;
+      const t = n.textContent.replace(/\s+/g, ' ').trim();
+      if (t) loose.push(t);
+    }
+    assert.deepEqual(loose, ['One'], `code or CSS spilled into the page: ${JSON.stringify(loose)}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

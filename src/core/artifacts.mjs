@@ -1991,6 +1991,16 @@ export async function listAllPipelines(opts = {}, { batchSize = 16 } = {}) {
         projectName: m?.name ?? row.workspace_key,
         workspaceName: m?.name ?? row.workspace_key, // explicit field the History UI prefers
         projectDir: primary,
+        // EVERY member, not just the primary. `projectDir` is the primary member's
+        // path, so a consumer that scopes by project — chat's /direct, which
+        // matches lastPathSegment(projectDir) or projectNames — could not see a
+        // workspace run from any OTHER member's scope once the run left the
+        // in-memory Map (i.e. after any restart), and refused a direction the HTTP
+        // route accepts. The live runs-Map entry has carried projectNames all
+        // along; the history row is what was missing it.
+        projectNames: Array.isArray(m?.projectPaths)
+          ? m.projectPaths.map((pp) => String(pp || '').split(/[\\/]/).filter(Boolean).pop() || '').filter(Boolean)
+          : [],
         target: 'workspace',
       };
       repoDir = primary;

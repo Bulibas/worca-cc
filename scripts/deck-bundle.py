@@ -26,7 +26,15 @@ MIME = {
     '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
     '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
     '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf',
-    '.otf': 'font/otf', '.mp3': 'audio/mpeg', '.mp4': 'video/mp4',
+    '.otf': 'font/otf', '.avif': 'image/avif',
+    # MEDIA_SRC matches audio|video|source, so the table has to cover what they
+    # carry. With only mp3/mp4 here an .m4a, .wav, .ogg or .webm was embedded as
+    # application/octet-stream — no browser plays that back — while the card
+    # still certified the bundle self-contained, because an unknown extension is
+    # not a `missing`, `remote` or `escaped` finding anywhere. Kept in step with
+    # mimeFor in build-standalone.mjs and deck-export.js.
+    '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.wav': 'audio/wav',
+    '.ogg': 'audio/ogg', '.mp4': 'video/mp4', '.webm': 'video/webm',
 }
 
 # The quoted-OR-unquoted alternation matters: `<script src=deck-stage.js>` is
@@ -41,7 +49,15 @@ MIME = {
 SCRIPT_TAG = re.compile(
     r'<script\b(?![^>]*\btype\s*=\s*["\']?(?:application/json|application/ld\+json|text/template))'
     r'([^>]*)\ssrc\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))([^>]*)>\s*</script\s*>', re.I)
-SHEET_TAG = re.compile(r'<link([^>]*?)\shref=("|\')([^"\']+)\2([^>]*?)>', re.I)
+# Quoted, single-quoted AND unquoted, with optional whitespace around `=`, like
+# SCRIPT_TAG / MEDIA_SRC / HREF_ATTR / REL_ATTR — every other matcher in this file
+# already tolerates all three spellings, and this one demanding `href="..."`
+# exactly was not a stricter policy, just a gap. `<link rel=stylesheet
+# href=theme.css>` was left verbatim and then surfaced as the generic blocking
+# "the bundle still reaches for a sibling file", with no actionable detail, on a
+# deck that was perfectly correct.
+SHEET_TAG = re.compile(
+    r'<link([^>]*?)\shref\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))([^>]*?)>', re.I)
 # Quoted, single-quoted AND unquoted, over every element that fetches a file
 # through a plain `src`. build-standalone.mjs:274-278 records the unquoted form as
 # a SHIPPED bug — `<img src=logo.png>` "slipped through with NO log line", so the
@@ -74,7 +90,14 @@ DEFER_ASYNC = re.compile(r'(^|\s)(?:defer|async)(\s*=\s*("[^"]*"|\'[^\']*\'|[^\s
 # CORRECT bundle as broken. Unquoted src, again, for the same reason as above:
 # a live but unquoted reference must be DETECTED, not silently certified clean.
 HTML_COMMENT = re.compile(r'<!--.*?-->', re.S)
-INLINED_SCRIPT = re.compile(r'<script(?![^>]*\ssrc=)[^>]*>.*?</script\s*>', re.I | re.S)
+# `\ssrc\s*=`, never `\ssrc=`: every other matcher in this file tolerates
+# whitespace around the `=`, and this one alone did not. `<script src = "a.js">…`
+# failed the lookahead, so BARE_TOKEN mistook a LIVE external script for an
+# inlined one and erased it to `<script></script>` before live_refs ever looked —
+# and SCRIPT_TAG misses it too (a non-empty body), so there was no `missing`
+# finding either. A bundle that still fetched a sibling file was certified
+# self-contained, which is the one verdict this whole self-check exists to prevent.
+INLINED_SCRIPT = re.compile(r'<script(?![^>]*\ssrc\s*=)[^>]*>.*?</script\s*>', re.I | re.S)
 # The BODY is `[\s\S]*?`, not `\s*`: `<script src="a.js">code</script>` — a src tag
 # that also carries text — is matched by NEITHER SCRIPT_TAG nor the old
 # `>\s*</script` form, so it stayed live and the bundle was still certified clean.
@@ -97,10 +120,22 @@ SRC_ATTR = re.compile(r'\ssrc\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))', re.I)
 # unbalanced `<!--` (deck-export.js carries `<!--` tokens today) eat forward to the
 # next real `-->`, swallowing a genuinely live tag on the way; script bodies first
 # lets an HTML comment containing a lone `<script>` swallow one the same way. One
-# pass gives each region to whichever token STARTS first and never descends into a
+# pass gives each token region to whichever STARTS first and never descends into a
 # claimed region — the BUNDLE_TOKEN rule, one layer down.
+#
+# A <style> BODY is claimed for the same reason a script body is. handle_link
+# turns every local sheet into `<style>…the sheet's own CSS…</style>`, and
+# live_sheets then ran LINK_TAG over that CSS as if it were markup: a stylesheet
+# carrying a usage header that quotes its own <link> — the exact idiom the kit's
+# own sources use, and the reason script bodies are opaque here — surfaced as a
+# blocking "the bundle still reaches for a sibling file" on a deck that is
+# perfectly self-contained. is_live() cannot rescue it either: the href WAS
+# inlined successfully, so it appears in none of remote/missing/escaped.
+STYLE_BODY = re.compile(r'<style\b[^>]*>.*?</style\s*>', re.I | re.S)
 BARE_TOKEN = re.compile(
-    '(?P<comment>' + HTML_COMMENT.pattern + ')|(?P<inlined>' + INLINED_SCRIPT.pattern + ')',
+    '(?P<comment>' + HTML_COMMENT.pattern + ')'
+    + '|(?P<inlined>' + INLINED_SCRIPT.pattern + ')'
+    + '|(?P<style>' + STYLE_BODY.pattern + ')',
     re.I | re.S)
 
 
@@ -123,13 +158,21 @@ def mime_for(path):
 # separators and symlinks (a symlink out of deck/ is exactly as much an escape as
 # `..`, and CONTRACT.md tells the builder to COPY companions into deck/), and
 # `+ os.sep` is what stops `/deck-evil/x` passing as inside `/deck`.
-# build-standalone.mjs:51 has the identical hole.
-def resolve_local(base_dir, href):
-    """The absolute path a local href names, or None when it escapes base_dir."""
+# build-standalone.mjs:localPath is the twin of this and now closes it the same way.
+def resolve_local(base_dir, href, root=None):
+    """The absolute path a local href names, or None when it escapes.
+
+    `base_dir` is what the href is RELATIVE to; `root` is what it must stay
+    INSIDE, defaulting to base_dir. They differ for a linked stylesheet, whose
+    url()s resolve against its own folder but may legitimately point anywhere in
+    the deck: conflating the two rejected `url("../img/a.png")` from
+    `deck/css/theme.css` — a correct reference to `deck/img/a.png` — as an escape.
+    """
     rel = href.split('?')[0].split('#')[0].lstrip('/')
-    root = os.path.realpath(base_dir)
-    path = os.path.realpath(os.path.join(root, rel))
-    if path != root and not path.startswith(root + os.sep):
+    base = os.path.realpath(base_dir)
+    top = base if root is None else os.path.realpath(root)
+    path = os.path.realpath(os.path.join(base, rel))
+    if path != top and not path.startswith(top + os.sep):
         return None
     return path
 
@@ -152,25 +195,34 @@ def keep_attrs(attrs):
     return (' ' + re.sub(r'\s+', ' ', kept)) if kept else ''
 
 
-def inline_css_urls(css, base_dir, escaped):
+def inline_css_urls(css, base_dir, escaped, missing, remote, root=None):
     """Every local url() in a stylesheet becomes a data URI (webfonts, sprites).
-    Unresolvable and in-document (#fragment) references are left exactly as
-    written, SILENTLY — this runs only over genuine CSS text (a <style> block's
-    own content, or a stylesheet file's own content), never over the document
-    at large, so "silent" here can never hide a real missing script or image.
-    A reference that escapes the deck folder is the one thing never left silent:
-    a url() is a path this program would otherwise read and embed."""
+    In-document (#fragment) and data: references are left exactly as written.
+
+    Everything else is REPORTED, and that is the whole point of the three lists.
+    Silence here used to be defended as harmless — "it can never hide a real
+    missing script or image" — but `background: url(hero.png)` is exactly a real
+    missing image, and `@font-face { src: url("https://fonts.gstatic.com/...") }`
+    is exactly the CDN reach CONTRACT.md bans because it fails silently under the
+    artifact CSP. Neither was caught anywhere else either: the live-reference
+    sweep only ever inspects <script src> and <link rel=stylesheet>. A deck that
+    still fetched its fonts and its artwork over the network was certified
+    self-contained. This is the same fix handle_media already carries."""
     def swap(m):
         href = m.group(2)
-        if not href or href.startswith('#') or href.startswith('data:') or is_remote(href):
+        if not href or href.startswith('#') or href.startswith('data:'):
             return m.group(0)
-        path = resolve_local(base_dir, href)
+        if is_remote(href):
+            remote.append(href)
+            return m.group(0)
+        path = resolve_local(base_dir, href, root)
         if path is None:
             escaped.append(href)
             return m.group(0)
         try:
             return 'url("' + data_uri(path, href) + '")'
         except OSError:
+            missing.append(href)
             return m.group(0)
     return CSS_URL.sub(swap, css)
 
@@ -238,7 +290,7 @@ def bundle(html, base_dir, missing, remote, escaped):
         open_tag, css, close_tag = m.group(1), m.group(2), m.group(3)
         if 'url(' not in css.lower():
             return tag
-        return open_tag + inline_css_urls(css, base_dir, escaped) + close_tag
+        return open_tag + inline_css_urls(css, base_dir, escaped, missing, remote) + close_tag
 
     def handle_script(tag):
         m = SCRIPT_TAG.match(tag)
@@ -273,8 +325,9 @@ def bundle(html, base_dir, missing, remote, escaped):
         m = SHEET_TAG.match(tag)
         if not m:
             return tag
-        attrs = (m.group(1) or '') + (m.group(4) or '')
-        href = m.group(3)
+        attrs = (m.group(1) or '') + (m.group(5) or '')
+        href = m.group(2) if m.group(2) is not None else (
+            m.group(3) if m.group(3) is not None else m.group(4))
         if 'stylesheet' not in attrs.lower():
             return tag
         if href.startswith('data:'):
@@ -291,7 +344,20 @@ def bundle(html, base_dir, missing, remote, escaped):
         except OSError:
             missing.append(href)
             return tag
-        return '<style>/* ' + href + ' */\n' + inline_css_urls(css, base_dir, escaped) + '\n</style>'
+        # THE STYLESHEET'S OWN FOLDER. A url() in a linked sheet is relative to
+        # the sheet, not to the document: `<link href="css/theme.css">` carrying
+        # `url("fonts/I.woff2")` means deck/css/fonts/I.woff2, and resolving it
+        # against deck/ missed the file — which, before the fix above, was
+        # swallowed in silence and shipped an unembedded font. The same
+        # conflation turned `url("../img/a.png")` — a correct reference to
+        # deck/img/a.png — into a BLOCKING "outside its own folder" finding that
+        # sent a perfectly good deck back into the fix loop. The deck folder
+        # stays the confinement root, which is what keeps both halves true.
+        # build-standalone.mjs has resolved against the sheet's own folder all
+        # along; this card, now the primary path, had not.
+        return '<style>/* ' + href + ' */\n' \
+            + inline_css_urls(css, os.path.dirname(path), escaped, missing, remote, base_dir) \
+            + '\n</style>'
 
     def handle_media(tag):
         # MEDIA_SRC only matches the `<img|audio|video|source …src=` PREFIX up
@@ -348,8 +414,13 @@ def live_refs(doc):
     # an empty carcass so the document still parses as it did. Never two
     # substitutions — either order lets one construct eat the other's region, and
     # what gets eaten is a live reference this check exists to find.
-    bare = BARE_TOKEN.sub(
-        lambda m: '' if m.group('comment') is not None else '<script></script>', doc)
+    def strip(m):
+        if m.group('comment') is not None:
+            return ''
+        # An empty carcass for both, so the document still parses as it did: a
+        # <style> region must not collapse into a <script> one.
+        return '<style></style>' if m.group('style') is not None else '<script></script>'
+    bare = BARE_TOKEN.sub(strip, doc)
     return LIVE_SCRIPT.findall(bare), live_sheets(bare)
 
 

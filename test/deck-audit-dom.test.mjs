@@ -818,3 +818,223 @@ test('48px text gets the relaxed 3:1 floor', () => {
   const [slide] = DeckAudit.run(win.document, win).slides;
   assert.deepEqual(checksOf(slide, 'contrast'), [], '3.45:1 at 48px clears the 3:1 floor');
 });
+
+// A GRADIENT GROUND IS NOT A TRANSPARENT ONE. effectiveBackground read only
+// `backgroundColor`, and for `section { background: linear-gradient(...) }` —
+// the canonical dark ground — that is `rgba(0,0,0,0)`. No layer was pushed, the
+// walk fell through to the white STAGE_CANVAS fallback, and white copy scored
+// 1.00:1: every heading and every line of body text on a slide that renders
+// perfectly became a blocking `contrast` finding. The audit is the blocking gate,
+// so a dark deck burned all three fix cycles on findings its builder could not
+// resolve.
+test('a dark gradient ground is not a contrast failure for the light copy on it', () => {
+  const win = stage(
+    `<section ${SLIDE_BOX} data-label="01" style="background:linear-gradient(rgb(11,11,15),rgb(26,26,46))">`
+    + `<h1 data-r="40,40,800,80" style="font-size:64px;color:rgb(255,255,255)">Title</h1>`
+    + `<p data-r="40,200,800,50" style="font-size:36px;color:rgb(255,255,255)">Body copy</p>`
+    + `</section>`,
+  );
+  win.document.body.style.backgroundColor = UNSTYLED_BODY;
+  const [slide] = DeckAudit.run(win.document, win).slides;
+  assert.deepEqual(checksOf(slide, 'contrast'), [], JSON.stringify(slide.issues));
+});
+
+// ...and the gate does NOT go blind to pay for it. The stops are read, and the
+// WORST one decides: the audit cannot know which band of the wash a given line
+// sits over, and the pale end of a light gradient is exactly where white copy
+// stops being legible.
+test('white copy on a pale gradient is still caught', () => {
+  const win = stage(
+    `<section ${SLIDE_BOX} data-label="01" style="background:linear-gradient(rgb(255,255,255),rgb(244,244,244))">`
+    + `<h1 data-r="40,40,800,80" style="font-size:64px;color:rgb(255,255,255)">Title</h1>`
+    + `</section>`,
+  );
+  win.document.body.style.backgroundColor = UNSTYLED_BODY;
+  const [slide] = DeckAudit.run(win.document, win).slides;
+  assert.equal(checksOf(slide, 'contrast').length, 1, 'white on a white-ish wash must not pass');
+});
+
+// A ground this DOM cannot read at all — a url() photo, a cross-fade — is
+// UNMEASURABLE, and a ratio needs two colours. Inventing one is precisely what
+// produced the false failure above, so the blocking gate stays quiet rather than
+// failing a slide on a colour it made up. (The transparent-TEXT branch already
+// treats background-image as the portable "something else paints this" signal.)
+test('an unreadable image ground is not reported as a contrast failure', () => {
+  const win = stage(
+    `<section ${SLIDE_BOX} data-label="01" style="background:url(hero.jpg)">`
+    + `<h1 data-r="40,40,800,80" style="font-size:64px;color:rgb(255,255,255)">Title</h1>`
+    + `</section>`,
+  );
+  win.document.body.style.backgroundColor = UNSTYLED_BODY;
+  const [slide] = DeckAudit.run(win.document, win).slides;
+  assert.deepEqual(checksOf(slide, 'contrast'), [], JSON.stringify(slide.issues));
+});
+
+// ROUND 2, N1. The first pass at the gradient fix regex-scraped `rgba?(…)` out of
+// the whole background-image declaration, which reads colours that are not
+// grounds and mistakes one readable layer for a readable stack.
+test('a colour inside a url() is not mistaken for the ground', () => {
+  // An inline SVG background is a mainstream deck idiom, and the fill colour of a
+  // shape inside it is not what is painted behind the text. Scraped, it turned a
+  // near-black slide into a blocking 1.04:1 failure for its white copy.
+  const svg = `url("data:image/svg+xml,%3Csvg%3E%3Cpath fill='rgb(250,250,250)'/%3E%3C/svg%3E")`;
+  const win = stage(
+    `<section ${SLIDE_BOX} data-label="01" style="background-color:rgb(11,11,15);background-image:${svg}">`
+    + `<h1 data-r="40,40,800,80" style="font-size:60px;color:rgb(255,255,255)">Title</h1>`
+    + `</section>`,
+  );
+  win.document.body.style.backgroundColor = UNSTYLED_BODY;
+  const [slide] = DeckAudit.run(win.document, win).slides;
+  assert.deepEqual(checksOf(slide, 'contrast'), [], JSON.stringify(slide.issues));
+});
+
+test('a gradient layered on a photo is still unmeasurable', () => {
+  // ANY unreadable layer poisons the stack — it paints over everything below it.
+  // With the guard reachable only when NO stop parsed, adding a scrim to a photo
+  // flipped the gate from "skip, cannot measure" to a false blocking failure.
+  const win = stage(
+    `<section ${SLIDE_BOX} data-label="01" style="background-image:linear-gradient(rgba(0,0,0,.7),rgba(0,0,0,0)),url(hero.jpg)">`
+    + `<h1 data-r="40,40,800,80" style="font-size:60px;color:rgb(20,20,20)">Title</h1>`
+    + `</section>`,
+  );
+  win.document.body.style.backgroundColor = UNSTYLED_BODY;
+  const [slide] = DeckAudit.run(win.document, win).slides;
+  assert.deepEqual(checksOf(slide, 'contrast'), [], JSON.stringify(slide.issues));
+});
+
+test('a translucent gradient stop is composited, not read as solid', () => {
+  // White copy over a transparent-to-60%-black wash ON WHITE is illegible at the
+  // transparent end. Treating the stop as opaque black (luminance ignores alpha)
+  // discarded the white section underneath and certified the slide CLEAN — the
+  // exact failure the gate exists for, now reported by the worst candidate.
+  const win = stage(
+    `<section ${SLIDE_BOX} data-label="01" style="background-color:rgb(255,255,255);background-image:linear-gradient(rgba(0,0,0,0),rgba(0,0,0,0.6))">`
+    + `<h1 data-r="40,40,800,80" style="font-size:60px;color:rgb(255,255,255)">Title</h1>`
+    + `</section>`,
+  );
+  win.document.body.style.backgroundColor = UNSTYLED_BODY;
+  const [slide] = DeckAudit.run(win.document, win).slides;
+  assert.equal(checksOf(slide, 'contrast').length, 1, 'white on the transparent end must be caught');
+});
+
+// ROUND 3, F1. parseColor speaks rgb()/rgba() only, and a CSS Color 4 value keeps
+// its colour space when computed (Chromium and jsdom agree), so a null parse was
+// taken to mean "paints nothing": the walk fell through to the white STAGE_CANVAS
+// and every line on a perfectly-rendered dark slide became a blocking failure.
+// The same false-block as the gradient case, arriving via the other property.
+test('a ground in a colour space we cannot read is skipped, not failed', () => {
+  const win = stage(
+    `<section ${SLIDE_BOX} data-label="01" style="background-color:oklch(0.15 0.02 260)">`
+    + `<h1 data-r="40,40,800,80" style="font-size:60px;color:rgb(255,255,255)">Title</h1>`
+    + `<p data-r="40,200,800,50" style="font-size:36px;color:rgb(255,255,255)">Body copy</p>`
+    + `</section>`,
+  );
+  win.document.body.style.backgroundColor = UNSTYLED_BODY;
+  const [slide] = DeckAudit.run(win.document, win).slides;
+  assert.deepEqual(checksOf(slide, 'contrast'), [], JSON.stringify(slide.issues));
+});
+
+// ...and the SAME hole ran the other way inside the gradient reader: keeping only
+// the stops that happen to match `rgba?(…)` silently dropped the rest, so the
+// worst-case minimum was taken over an INCOMPLETE set. A dark-to-near-white wash
+// whose pale end is written in oklch reported CLEAN for white copy that is
+// invisible at that end — a false clean on a blocking gate, strictly worse than
+// the false failure this helper replaced. Every stop, or none of them.
+test('a gradient with one unreadable stop is skipped, never partially measured', () => {
+  const partial = (ground) => {
+    const win = stage(
+      `<section ${SLIDE_BOX} data-label="01" style="background-image:${ground}">`
+      + `<h1 data-r="40,40,800,80" style="font-size:60px;color:rgb(255,255,255)">Title</h1>`
+      + `</section>`,
+    );
+    win.document.body.style.backgroundColor = UNSTYLED_BODY;
+    return checksOf(DeckAudit.run(win.document, win).slides[0], 'contrast');
+  };
+  // The all-rgb control: the pale end IS measured, and IS a failure.
+  assert.equal(partial('linear-gradient(rgb(11,11,15),rgb(250,250,250))').length, 1,
+    'the readable pale end must still be caught');
+  // One unreadable stop ⇒ the whole stack is unmeasurable. Silence here is the
+  // honest answer; reporting the dark end alone would be a false clean.
+  assert.deepEqual(partial('linear-gradient(rgb(11,11,15),oklch(0.98 0.01 250))'), []);
+  assert.deepEqual(partial('linear-gradient(rgb(11,11,15),color-mix(in srgb, white 90%, blue))'), []);
+});
+
+// The gradient reader must still understand the shapes a deck actually writes —
+// an angle or geometry head, a bare colour hint between stops, and a `none` layer
+// (what `var(--overlay, none)` resolves to), which paints nothing and must not be
+// mistaken for something unreadable.
+test('gradient heads, colour hints and a none layer stay measurable', () => {
+  const clean = (ground) => {
+    const win = stage(
+      `<section ${SLIDE_BOX} data-label="01" style="background-image:${ground}">`
+      + `<h1 data-r="40,40,800,80" style="font-size:60px;color:rgb(255,255,255)">Title</h1>`
+      + `</section>`,
+    );
+    win.document.body.style.backgroundColor = UNSTYLED_BODY;
+    return checksOf(DeckAudit.run(win.document, win).slides[0], 'contrast');
+  };
+  for (const g of [
+    'linear-gradient(45deg,rgb(11,11,15),rgb(26,26,46))',
+    'linear-gradient(rgb(11,11,15),50%,rgb(26,26,46))',
+    'radial-gradient(circle at center,rgb(11,11,15),rgb(26,26,46))',
+    'none,linear-gradient(rgb(11,11,15),rgb(26,26,46))',
+  ]) assert.deepEqual(clean(g), [], `white copy on ${g} is legible and must pass`);
+});
+
+// ROUND 4, R4-1. The colourless head was recognised by an enumerated PREFIX list,
+// which missed the sized radial — `radial-gradient(50% 50% at 50% 50%, …)` and
+// `radial-gradient(800px 400px at 20% 0%, …)`, what Figma's CSS export writes and
+// what every "glow" on a slide is. The head fell through to parseColor, failed,
+// and took the whole stack to `null`: silence on the blocking gate, so white on
+// white was certified clean — while the keyword spelling of the same gradient was
+// caught. Geometry is recognised by TOKEN now; a colour is never made only of
+// geometry tokens, so the test cannot swallow one.
+test('a sized radial head is geometry, not an unreadable colour', () => {
+  const check = (ground, color = 'rgb(255,255,255)') => {
+    const win = stage(
+      `<section ${SLIDE_BOX} data-label="01" style="background-image:${ground}">`
+      + `<h1 data-r="40,40,800,80" style="font-size:60px;color:${color}">Title</h1>`
+      + `</section>`,
+    );
+    win.document.body.style.backgroundColor = UNSTYLED_BODY;
+    return checksOf(DeckAudit.run(win.document, win).slides[0], 'contrast');
+  };
+  const PALE = 'rgb(255,255,255),rgb(244,244,244)';
+  const DARK = 'rgb(11,11,15),rgb(26,26,46)';
+  // Every head spelling must reach the same verdict as the keyword control.
+  for (const head of ['circle at center', '50% 50% at 50% 50%', '800px 400px at 20% 0%', 'farthest-corner at 50% 50%']) {
+    assert.equal(check(`radial-gradient(${head},${PALE})`).length, 1,
+      `white on a pale wash is invisible, whatever the head: ${head}`);
+    assert.deepEqual(check(`radial-gradient(${head},${DARK})`), [], `and legible on a dark one: ${head}`);
+  }
+  assert.deepEqual(check(`conic-gradient(from 45deg at 50% 50%,${DARK})`), []);
+});
+
+// ROUND 4, R4-2. Every layer's stops were pooled into ONE list, so layer n was
+// never composited over layer n+1: each stop became an independent candidate over
+// whatever sat below the WHOLE stack, and the bottom layer's raw colours vetoed
+// the top layer covering them. The standard "dark scrim so the copy reads over a
+// light ground" was reported 1.00:1 on a slide that reads at ~14:1, and an OPAQUE
+// top layer could not hide the one underneath it.
+test('background-image layers composite, top over bottom', () => {
+  const check = (ground, color = 'rgb(255,255,255)') => {
+    const win = stage(
+      `<section ${SLIDE_BOX} data-label="01" style="background-image:${ground}">`
+      + `<h1 data-r="40,40,800,80" style="font-size:60px;color:${color}">Title</h1>`
+      + `</section>`,
+    );
+    win.document.body.style.backgroundColor = UNSTYLED_BODY;
+    return checksOf(DeckAudit.run(win.document, win).slides[0], 'contrast');
+  };
+  const scrim = (a) => `linear-gradient(rgba(0,0,0,${a}),rgba(0,0,0,${a}))`;
+  assert.deepEqual(check(`${scrim('.85')},linear-gradient(rgb(255,255,255),rgb(244,244,244))`), [],
+    'a dark scrim over a light wash reads ~14:1 and must not block');
+  assert.deepEqual(check(`${scrim('.2')},linear-gradient(rgb(11,11,15),rgb(26,26,46))`), [],
+    'a faint scrim over a dark wash reads ~19:1');
+  assert.deepEqual(check('linear-gradient(rgb(11,11,15),rgb(26,26,46)),linear-gradient(rgb(255,255,255),rgb(255,255,255))'), [],
+    'an OPAQUE top layer hides the layer beneath it entirely');
+  // ...and the composite is still measured, not waved through: a PALE scrim over
+  // a dark ground genuinely destroys white copy.
+  assert.equal(check('linear-gradient(rgba(255,255,255,.85),rgba(255,255,255,.85)),linear-gradient(rgb(11,11,15),rgb(26,26,46))').length, 1,
+    'a pale scrim over a dark wash must still be caught');
+});

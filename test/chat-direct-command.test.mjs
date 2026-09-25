@@ -358,3 +358,39 @@ test('/direct reads History only when it can change the answer', async () => {
   await f.send('/direct cut the roadmap slide');
   assert.equal(queries, 1, 'with no live candidate it still looks');
 });
+
+// ROUND 2, N5. DIRECTABLE was an allowlist built from LIVE + 'paused', while the
+// HTTP route (postDirection) gates on the DENYLIST DIRECTIONS_CLOSED =
+// {done,error,stopped}. `interrupted` fell in the gap, and it is not a rare state:
+// reconcileStaleRunning stamps every dead-owner run `interrupted` on server
+// restart, and resumeRun explicitly accepts it and replays directions.ndjson. So
+// after any restart the UI filed a direction (201, read on resume) while /direct
+// answered "No running or paused runs." for the same row — the exact drift the
+// comment above DIRECTABLE claims its derivation prevents.
+test('/direct files against an interrupted run, live or from history', async () => {
+  for (const where of ['live', 'history']) {
+    const { send, calls, state } = fixture();
+    const row = { runId: 'run-9999aaaa', pipelineId: 'pipe-9999aaaa', id: 'pipe-9999aaaa',
+      title: 'interrupted by a restart', status: 'interrupted', projectDir: '/x/worca' };
+    if (where === 'live') state.live = [row];
+    else { state.live = []; state.rows = [row]; }
+
+    const out = await send('/direct cut the roadmap slide');
+    assert.equal(out.severity, 'success', `${where}: ${JSON.stringify(out)}`);
+    assert.equal(calls.length, 1, `${where}: nothing was filed`);
+    assert.equal(calls[0][2], 'cut the roadmap slide');
+  }
+});
+
+// The allowlist must stay an allowlist: an unknown or empty status is not
+// directable by default, whatever DIRECTIONS_CLOSED happens to list.
+test('/direct still refuses a finished or unknown status', async () => {
+  for (const status of ['done', 'error', 'stopped', 'weird-new-state', '']) {
+    const { send, calls, state } = fixture();
+    state.live = [];
+    state.rows = [{ id: 'pipe-7777bbbb', title: 'not directable', status, projectDir: '/x/worca' }];
+    const out = await send('/direct cut the roadmap slide');
+    assert.notEqual(out.severity, 'success', `${status || '(empty)'} must not be directable`);
+    assert.deepEqual(calls, [], `nothing may be filed for ${status || '(empty)'}`);
+  }
+});

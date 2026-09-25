@@ -6,8 +6,8 @@
  * no server — so an agent can run it wherever the deck's files sit together
  * on a filesystem (the Claude web app's code sandbox, a local checkout, CI).
  * It inlines every local <script>, the baked narration audio, same-origin
- * stylesheets + their url() assets, <img> sources, and the Google fonts into
- * ONE self-contained .html.
+ * stylesheets + their url() assets, <img>/<audio>/<video>/<source> sources, and
+ * the Google fonts into ONE self-contained .html.
  *
  * TWO MODES (the only difference is whether authoring stays on):
  *   • publish (default) → final share-ready file: Studio removed, audio baked.
@@ -30,8 +30,8 @@
  * succeeds). Zero npm dependencies.
  */
 import { readFile, writeFile, readdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { dirname, resolve, basename, extname, join } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, resolve, basename, extname, join, sep } from "node:path";
 
 const AUDIO_SRC = "narration-audio.js";
 
@@ -44,15 +44,60 @@ function mimeFor(url) {
     woff2: "font/woff2", woff: "font/woff", ttf: "font/ttf", otf: "font/otf",
     jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
     webp: "image/webp", avif: "image/avif", svg: "image/svg+xml",
+    // <audio>/<video> reach the matcher too now; without these a narrated deck
+    // embedded its voiceover under application/octet-stream and no browser
+    // played it back.
+    mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav", ogg: "audio/ogg",
+    mp4: "video/mp4", webm: "video/webm",
   })[ext] || "application/octet-stream";
 }
 
-// Resolve a local href against the deck's folder; return its absolute path.
-function localPath(baseDir, href) { return resolve(baseDir, href.split("?")[0].split("#")[0]); }
+// os.path.realpath's contract, which node's realpathSync does not have: resolve
+// the symlinks on the part of the path that EXISTS and keep the rest verbatim,
+// instead of throwing ENOENT on a path that is merely absent.
+function realpathish(p) {
+  let cur = resolve(p);
+  const tail = [];
+  for (;;) {
+    try { return join(realpathSync(cur), ...tail.slice().reverse()); } catch (e) {}
+    const parent = dirname(cur);
+    if (parent === cur) return resolve(p);
+    tail.push(basename(cur));
+    cur = parent;
+  }
+}
 
-async function readMaybe(p) { try { return await readFile(p); } catch { return null; } }
-async function dataUrl(baseDir, href) {
-  const buf = await readFile(localPath(baseDir, href));
+// Resolve a local href against `baseDir`; return its absolute path, or NULL when
+// it lands outside `root` (which defaults to baseDir).
+//
+// CONFINEMENT, and it is a security boundary rather than tidiness. This runs
+// unsandboxed over markup an LLM wrote from user-supplied material, and its
+// product is a file meant to be SENT to people. A bare resolve() let
+// `<script src="../../../../etc/hosts">` base64 itself into the deliverable, and
+// an absolute href discarded baseDir entirely — `url("/etc/passwd")` in a
+// <style> shipped as a data: URI. Stripping the leading `/` normalises nothing
+// on its own; it only turns an absolute href into a relative one that walks
+// straight back out with `..`, so the realpath comparison is what actually
+// closes it. realpath on BOTH sides resolves `..`, `.`, doubled separators and
+// symlinks (a symlink out of deck/ is exactly as much an escape as `..`, and
+// CONTRACT.md tells the builder to COPY companions into deck/), and the `+ sep`
+// is what stops `/deck-evil/x` passing as inside `/deck`.
+// scripts/deck-bundle.py:resolve_local is the twin of this, and said so for a
+// release while this side still had the hole.
+function localPath(baseDir, href, root) {
+  const rel = href.split("?")[0].split("#")[0].replace(/^\/+/, "");
+  const base = realpathish(baseDir);
+  const top = root === undefined ? base : realpathish(root);
+  const p = realpathish(resolve(base, rel));
+  if (p !== top && !p.startsWith(top + sep)) return null;
+  return p;
+}
+
+async function readMaybe(p) { if (!p) return null; try { return await readFile(p); } catch { return null; } }
+async function dataUrl(baseDir, href, root) {
+  const p = localPath(baseDir, href, root);
+  if (!p) throw new Error("resolves outside the deck folder");
+  const buf = await readFile(p);
   return "data:" + mimeFor(href) + ";base64," + buf.toString("base64");
 }
 
@@ -156,26 +201,53 @@ async function inlineScripts(html, baseDir) {
     if (insideComment(comments, m.index)) continue;
     hits.push({ full: m[0], src: m[1] || m[2] });
   }
+  // Build the replacements first, then rewrite in ONE offset-aware pass.
+  //
+  // `html.split(hit.full).join(payload)` is a document-wide SUBSTRING replace, so
+  // it also hit identical occurrences the collection loop above had deliberately
+  // skipped — the ones inside HTML comments. The kit's own sources quote live tags
+  // in their headers and this bundler comments out the audio tag, so the collision
+  // is routine, and when the pasted payload contains `-->` (deck-export.js has
+  // three) the comment ENDS EARLY and raw JavaScript spills into the document as
+  // visible text. The log still said "inlined". `String.replace` with a function
+  // scans the original string, so the offsets it reports line up with the ranges
+  // commentRanges measured — no index drift to track.
+  const payloads = new Map();
   for (const hit of hits) {
-    if (isRemote(hit.src)) continue;
-    const buf = await readMaybe(localPath(baseDir, hit.src));
+    if (payloads.has(hit.full) || isRemote(hit.src)) continue;
+    const p = localPath(baseDir, hit.src);
+    if (!p) { log("  ! skipped " + hit.src + " (resolves outside the deck folder)"); continue; }
+    const buf = await readMaybe(p);
     if (!buf) { log("  ! skipped " + hit.src + " (not found)"); continue; }
     const code = buf.toString("utf8").replace(/<\/script/gi, "<\\/script");
-    html = html.split(hit.full).join("<script" + keepAttrs(hit.full) + ">\n" + code + "\n<\/script>");
+    payloads.set(hit.full, "<script" + keepAttrs(hit.full) + ">\n" + code + "\n<\/script>");
     log("  + inlined " + hit.src);
   }
-  return html;
+  if (!payloads.size) return html;
+  re.lastIndex = 0;
+  return html.replace(re, (full, _q, _bare, offset) => (
+    insideComment(comments, offset) ? full : (payloads.get(full) || full)
+  ));
 }
 
 // Embed same-origin url(...) assets inside a CSS string as data URLs.
-async function embedCssUrls(css, baseDir) {
+// `baseDir` is what the url()s are RELATIVE to (a linked sheet's own folder);
+// `root` is the deck folder they must stay inside. They differ for a <link>, and
+// conflating them would reject `url("../img/a.png")` from `deck/css/theme.css` —
+// a legitimate reference to `deck/img/a.png`.
+async function embedCssUrls(css, baseDir, root) {
   const RE = /url\(\s*['"]?([^'")]+)['"]?\s*\)/g;
   const refs = [];
   css.replace(RE, (_, u) => { refs.push(u); return _; });
   const embedded = new Map();
   for (const u of refs) {
     if (embedded.has(u) || isRemote(u) || u.charAt(0) === "#") continue;
-    try { embedded.set(u, await dataUrl(baseDir, u)); } catch { /* leave as-is */ }
+    // LOGGED, never swallowed. A url() that cannot be embedded is a live
+    // reference left in a file whose entire purpose is self-containment, and
+    // `background: url(hero.png)` failing in silence is how a "standalone"
+    // shipped without its artwork.
+    try { embedded.set(u, await dataUrl(baseDir, u, root)); }
+    catch (e) { log("  ! css url() skipped " + u + " (" + e.message + ")"); }
   }
   if (!embedded.size) return css;
   // ONE pass over the url() TOKENS. The old form replaced every SUBSTRING
@@ -192,23 +264,54 @@ async function embedCssUrls(css, baseDir) {
 
 // Inline same-origin stylesheet <link>s as <style> (embedding their url() assets).
 async function inlineStylesheets(html, baseDir) {
-  const tags = html.match(/<link\b[^>]*>/gi) || [];
+  // Comment-aware for the reason inlineScripts is (see there): the rewrite below
+  // is a document-wide substring replace, and a commented-out <link> whose CSS
+  // happens to contain `-->` would end the comment early and spill stylesheet text
+  // into the page. A commented-out tag is not live and must not be substituted.
+  const comments = commentRanges(html);
+  const tagRe = /<link\b[^>]*>/gi;
+  const tags = [];
+  let lm;
+  while ((lm = tagRe.exec(html)) !== null) {
+    if (!insideComment(comments, lm.index)) tags.push(lm[0]);
+  }
+  const payloads = new Map();
   for (const tag of tags) {
+    if (payloads.has(tag)) continue;
     if (!/rel=["']?stylesheet/i.test(tag)) continue;
-    const hm = tag.match(/href="([^"]+)"/i);
-    if (!hm || isRemote(hm[1])) continue;
-    const buf = await readMaybe(localPath(baseDir, hm[1]));
-    if (!buf) { log("• stylesheet skipped " + hm[1] + " (not found)"); continue; }
+    // Single-quoted and unquoted too, like the script and media matchers. The
+    // rel test already tolerated a single-quoted rel while this one demanded
+    // double quotes, so a link tag spelling BOTH its rel and its href with
+    // single quotes fell out at the `!hm` guard BEFORE the "skipped" log — not
+    // inlined and not reported, leaving a dead relative reference in a file
+    // whose entire purpose is to have none.
+    const hm = tag.match(/\shref\s*=\s*(?:["\x27]([^"\x27]+)["\x27]|([^\s>]+))/i);
+    if (!hm) { log("• stylesheet skipped " + tag + " (no href)"); continue; }
+    const href = hm[1] || hm[2];
+    if (isRemote(href)) continue;
+    const sheet = localPath(baseDir, href);
+    if (!sheet) { log("• stylesheet skipped " + href + " (resolves outside the deck folder)"); continue; }
+    const buf = await readMaybe(sheet);
+    if (!buf) { log("• stylesheet skipped " + href + " (not found)"); continue; }
     // The stylesheet's OWN folder: its url() refs are relative to it, not to the
     // deck. Resolving `css/deck.css`'s `fonts/I.woff2` against the deck folder
     // missed the file, and dataUrl's throw is swallowed — so the bundler logged
     // "inlined stylesheet" and shipped an unembedded font. The browser twin
     // (deck-export.js) already resolves against the stylesheet's own URL.
-    const css = await embedCssUrls(buf.toString("utf8"), dirname(localPath(baseDir, hm[1])));
-    html = html.split(tag).join("<style>\n" + css + "\n</style>");
-    log("• inlined stylesheet " + hm[1]);
+    // The deck folder stays the CONFINEMENT root: `../img/a.png` from
+    // `deck/css/` is a legitimate reference to `deck/img/a.png`, not an escape.
+    const css = await embedCssUrls(buf.toString("utf8"), dirname(sheet), baseDir);
+    payloads.set(tag, "<style>\n" + css + "\n</style>");
+    log("• inlined stylesheet " + href);
   }
-  return html;
+  // ONE pass, for the reason inlineScripts does it this way: rewriting inside the
+  // loop shifts every later offset out of step with the comment ranges measured
+  // on the original document, and the guard then tests the wrong bytes.
+  if (!payloads.size) return html;
+  tagRe.lastIndex = 0;
+  return html.replace(tagRe, (full, offset) => (
+    insideComment(comments, offset) ? full : (payloads.get(full) || full)
+  ));
 }
 
 // Embed url() assets in the deck's OWN inline <style> blocks. embedCssUrls used
@@ -229,7 +332,7 @@ async function inlineStyleBlocks(html, baseDir) {
     const close = block.toLowerCase().lastIndexOf('</style>');
     const css = block.slice(open.length, close);
     if (!/url\(/i.test(css)) continue;
-    const embedded = await embedCssUrls(css, baseDir);
+    const embedded = await embedCssUrls(css, baseDir, baseDir);
     if (embedded === css) continue;
     html = html.split(block).join(open + embedded + block.slice(close));
   }
@@ -269,21 +372,29 @@ async function embedFonts(html) {
   return html;
 }
 
-// Inline same-origin <img src="…"> as base64 data URLs.
-async function inlineImages(html, baseDir) {
+// Inline same-origin <img|audio|video|source src="…"> as base64 data URLs.
+//
+// img|audio|video|source, not img alone. A narrated deck's audio element
+// passed through untouched and unlogged — bakeAudio only ever handled the
+// narration-audio.js SCRIPT form — so the "standalone" went out with a dead
+// relative reference to its own soundtrack.
+// scripts/deck-bundle.py matches the same four under one pattern; this is the
+// side that diverged. <source> is matched in its own right because <audio> and
+// <video> have children and the real src is usually on the child.
+async function inlineMedia(html, baseDir) {
   // Single-quoted and unquoted too, like the script matcher: `<img src='logo.png'>`
   // and `<img src=logo.png>` are legal HTML and slipped through with NO log line
-  // ("image skipped" only fires on a failed fetch of a MATCHED src), so the
+  // ("media skipped" only fires on a failed fetch of a MATCHED src), so the
   // "standalone" went out with a dead relative reference.
-  const re = /<img\b[^>]*?\ssrc\s*=\s*(?:["\x27]([^"\x27]+)["\x27]|([^\s>]+))[^>]*>/gi;
+  const re = /<(?:img|audio|video|source)\b[^>]*?\ssrc\s*=\s*(?:["\x27]([^"\x27]+)["\x27]|([^\s>]+))[^>]*>/gi;
   const srcs = [];
   let m;
   while ((m = re.exec(html)) !== null) srcs.push(m[1] || m[2]);
   const embedded = new Map();
   for (const src of srcs) {
-    if (embedded.has(src) || isRemote(src)) continue;
-    try { embedded.set(src, await dataUrl(baseDir, src)); }
-    catch { log("• image skipped " + src + " (not found)"); }
+    if (embedded.has(src) || isRemote(src) || src.startsWith("data:")) continue;
+    try { embedded.set(src, await dataUrl(baseDir, src, baseDir)); }
+    catch (e) { log("• media skipped " + src + " (" + e.message + ")"); }
   }
   if (!embedded.size) return html;
   // Rewrite the matched TOKEN, not `src="X"` as a literal: the token may be
@@ -294,7 +405,7 @@ async function inlineImages(html, baseDir) {
     const url = embedded.get(q || bare);
     return url ? full.replace(/(\ssrc\s*=\s*)(?:["\x27][^"\x27]*["\x27]|[^\s>]+)/i, `$1"${url}"`) : full;
   });
-  log("• embedded " + embedded.size + " image" + (embedded.size === 1 ? "" : "s"));
+  log("• embedded " + embedded.size + " media file" + (embedded.size === 1 ? "" : "s"));
   return html;
 }
 
@@ -335,7 +446,7 @@ async function main() {
   // needs no second pass.
   //
   // The SAME hazard applies to every other document-wide pass, so inlineScripts
-  // runs LAST of all of them. inlineImages rewrites with
+  // runs LAST of all of them. inlineMedia rewrites with
   // `html.split('src="X"').join(dataUrl)` across the whole file — after code is
   // pasted in, that splices a base64 blob into any source line mentioning one of
   // the deck's own images (a doc comment, a usage example), and the kit's sources
@@ -344,7 +455,7 @@ async function main() {
   html = await inlineStyleBlocks(html, baseDir);
   html = await inlineStylesheets(html, baseDir);
   html = await embedFonts(html);
-  html = await inlineImages(html, baseDir);
+  html = await inlineMedia(html, baseDir);
   html = await inlineScripts(html, baseDir);
 
   const stem = basename(deckPath).replace(/\.html?$/i, "");

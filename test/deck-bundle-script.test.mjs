@@ -411,3 +411,157 @@ test('the export agent rebuilds a standalone older than the deck, not just a mis
   assert.match(agent, /deck\/deck\.html\s+deck\/deck\.standalone\.html|deck\.standalone\.html is the\s*\n?older/i,
     'the two files to compare are not named');
 });
+
+// A url() IN CSS IS A LIVE REFERENCE LIKE ANY OTHER. inline_css_urls reported
+// only `escaped`: a remote url() returned early with nothing recorded, and a
+// local one whose file is absent was swallowed by `except OSError`. Nothing else
+// caught either — the live-reference sweep only ever inspects <script src> and
+// <link rel=stylesheet> — so a deck that still fetched its webfont from a CDN and
+// its artwork from a file that is not there was certified SELF-CONTAINED. The
+// docstring defended the silence as unable to "hide a real missing script or
+// image"; `background: url(hero.png)` is exactly a real missing image.
+test('a CSS url() that is remote, or missing, blocks the bundle', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir, deck } = await fixtureDeck();
+  let html = await readFile(join(deck, 'deck.html'), 'utf8');
+  html = html.replace('<style>', '<style>@font-face{font-family:Y;src:url("https://fonts.gstatic.com/p.woff2")}'
+    + ' .hero{background:url("missing-hero.png")}');
+  await writeFile(join(deck, 'deck.html'), html, 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  const details = res.verdict.issues.map((i) => i.detail).join('\n');
+  assert.match(details, /fonts\.gstatic\.com/, 'a CDN webfont was certified self-contained');
+  assert.match(details, /missing-hero\.png/, 'a missing background image was certified self-contained');
+});
+
+// A url() IN A LINKED SHEET IS RELATIVE TO THE SHEET, NOT TO THE DOCUMENT.
+// `inline_css_urls(css, base_dir, …)` was handed deck_dir for external sheets, so
+// `<link href="css/theme.css">` carrying `url("fonts/I.woff2")` resolved to
+// deck/fonts/ and missed the file — which, before the fix above, was swallowed in
+// silence and shipped an unembedded font. The same conflation turned
+// `url("../img/a.png")` — a correct reference to deck/img/a.png — into a BLOCKING
+// "outside its own folder" finding, sending a good deck back into the fix loop.
+// The deck folder stays the confinement root, which is what keeps both true.
+// build-standalone.mjs has resolved against the sheet's own folder all along.
+test('a linked stylesheet resolves its url() refs against its own folder', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir, deck } = await fixtureDeck();
+  await mkdir(join(deck, 'css', 'fonts'), { recursive: true });
+  await mkdir(join(deck, 'img'), { recursive: true });
+  await writeFile(join(deck, 'css', 'fonts', 'I.woff2'), 'woff2-bytes');
+  await writeFile(join(deck, 'img', 'a.png'), 'png-bytes');
+  await writeFile(join(deck, 'css', 'theme.css'),
+    '@font-face{font-family:I;src:url("fonts/I.woff2")}\nbody{background:url("../img/a.png")}\n', 'utf8');
+  let html = await readFile(join(deck, 'deck.html'), 'utf8');
+  html = html.replace('<style>', '<link rel="stylesheet" href="css/theme.css"><style>');
+  await writeFile(join(deck, 'deck.html'), html, 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  const out = await readFile(join(deck, 'deck.standalone.html'), 'utf8');
+
+  assert.ok(out.includes(Buffer.from('woff2-bytes').toString('base64')),
+    'the sheet\'s own-folder webfont was not embedded');
+  assert.ok(out.includes(Buffer.from('png-bytes').toString('base64')),
+    'a ../ reference that stays inside deck/ was not embedded');
+  assert.deepEqual(res.verdict.issues, [], JSON.stringify(res.verdict));
+});
+
+// ROUND 2, N2. MEDIA_SRC matches img|audio|video|source, but the MIME table
+// listed only mp3/mp4 — so an .m4a, .wav, .ogg, .webm or .avif was embedded as
+// application/octet-stream, which no browser plays or paints, while the card
+// certified the bundle self-contained: an unknown extension is not a `missing`,
+// `remote` or `escaped` finding anywhere. build-standalone.mjs and deck-export.js
+// carry the same table and must agree with it.
+test('every media type the matcher reaches gets a real MIME type', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir, deck } = await fixtureDeck();
+  const media = { 'a.m4a': 'audio/mp4', 'a.wav': 'audio/wav', 'a.ogg': 'audio/ogg',
+    'v.webm': 'video/webm', 'i.avif': 'image/avif' };
+  for (const name of Object.keys(media)) await writeFile(join(deck, name), `bytes-of-${name}`);
+  let html = await readFile(join(deck, 'deck.html'), 'utf8');
+  html = html.replace('<h1>One</h1>', '<h1>One</h1>'
+    + '<audio src="a.m4a"></audio><audio src="a.wav"></audio><audio src="a.ogg"></audio>'
+    + '<video><source src="v.webm"></video><img src="i.avif">');
+  await writeFile(join(deck, 'deck.html'), html, 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  const out = await readFile(join(deck, 'deck.standalone.html'), 'utf8');
+  for (const [name, mime] of Object.entries(media)) {
+    assert.ok(out.includes(`data:${mime};base64,`), `${name} was not embedded as ${mime}`);
+  }
+  assert.ok(!out.includes('application/octet-stream'), 'a media file fell back to octet-stream');
+  assert.deepEqual(res.verdict.issues, [], JSON.stringify(res.verdict));
+});
+
+// ROUND 2, N3. SHEET_TAG demanded `href="…"` exactly, while SCRIPT_TAG,
+// MEDIA_SRC, HREF_ATTR and REL_ATTR all accept unquoted values and whitespace
+// around `=`. That was not a stricter policy, just a gap: the link was left
+// verbatim and then surfaced as the generic blocking "the bundle still reaches
+// for a sibling file", with no actionable detail, on a correct deck.
+test('a stylesheet link is inlined however its href is spelled', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir, deck } = await fixtureDeck();
+  await writeFile(join(deck, 'theme.css'), '.from-sheet{color:rebeccapurple}', 'utf8');
+  let html = await readFile(join(deck, 'deck.html'), 'utf8');
+  html = html.replace('<style>', '<link rel=stylesheet href=theme.css><style>');
+  await writeFile(join(deck, 'deck.html'), html, 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  const out = await readFile(join(deck, 'deck.standalone.html'), 'utf8');
+  assert.match(out, /\.from-sheet/, 'the unquoted-href stylesheet was not inlined');
+  assert.doesNotMatch(out, /<link[^>]*theme\.css/i, 'a dead <link> survived');
+  assert.deepEqual(res.verdict.issues, [], JSON.stringify(res.verdict));
+});
+
+// ROUND 3, F3. INLINED_SCRIPT's lookahead was `\ssrc=` with no `\s*`, alone among
+// this file's matchers. `<script src = "a.js">…</script>` failed it, so BARE_TOKEN
+// mistook a LIVE external script for an inlined one and erased it to
+// `<script></script>` before live_refs ever looked — and SCRIPT_TAG misses it too
+// (non-empty body), so there was no `missing` finding either. A bundle still
+// fetching a sibling file was certified self-contained: the one verdict the
+// self-check exists to prevent.
+test('a live script with spaces around src= is caught, not erased', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir, deck } = await fixtureDeck();
+  let html = await readFile(join(deck, 'deck.html'), 'utf8');
+  html = html.replace('</body>', '<script src = "gone.js">console.log(1)</script>\n</body>');
+  await writeFile(join(deck, 'deck.html'), html, 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  const blocking = res.verdict.issues.filter((i) => ['critical', 'major'].includes(i.severity));
+  assert.ok(blocking.length > 0, 'a live external script was certified self-contained');
+});
+
+// ROUND 3, F6. handle_link turns every local sheet into `<style>…css…</style>`,
+// and live_sheets then ran LINK_TAG over that CSS as if it were markup. A
+// stylesheet carrying a usage header that quotes its own <link> — the idiom that
+// is exactly why script bodies are opaque to this sweep — surfaced as a blocking
+// "the bundle still reaches for a sibling file" on a perfectly self-contained
+// deck. is_live() cannot rescue it: the href WAS inlined, so it is in none of
+// remote/missing/escaped.
+test('a link quoted inside a stylesheet is not a live reference', async (t) => {
+  const py = await probePython();
+  if (!py.ok) return t.skip(`no python on this host: ${py.reason}`);
+
+  const { pdir, deck } = await fixtureDeck();
+  await writeFile(join(deck, 'theme.css'),
+    '/* usage: <link rel="stylesheet" href="theme.css"> */\n.ok{color:red}\n', 'utf8');
+  let html = await readFile(join(deck, 'deck.html'), 'utf8');
+  html = html.replace('<style>', '<link rel="stylesheet" href="theme.css"><style>');
+  await writeFile(join(deck, 'deck.html'), html, 'utf8');
+
+  const res = await runScriptExecution(ctxFor(pdir));
+  const out = await readFile(join(deck, 'deck.standalone.html'), 'utf8');
+  assert.match(out, /\.ok\{color:red\}/, 'the sheet was not inlined');
+  assert.deepEqual(res.verdict.issues, [], JSON.stringify(res.verdict));
+});

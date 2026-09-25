@@ -246,7 +246,8 @@ const BYTE_EXTENSIONS = new Set([
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg',          // image
   'pdf',                                                // pdf
   'pptx', 'docx', 'xlsx', 'key', 'zip', 'tar',          // opaque documents/archives
-  'woff2', 'woff', 'ttf', 'otf', 'mp3', 'mp4',          // fonts and media
+  'woff2', 'woff', 'ttf', 'otf',                        // fonts
+  'mp3', 'm4a', 'wav', 'ogg', 'mp4', 'webm', 'avif',    // media a deck can reference
 ]);
 
 /** Is this artifact path bytes rather than text? Pure, extension-only. */

@@ -50,3 +50,42 @@ test('missing file reads as empty; the prompt block is "" when nothing is pendin
   assert.match(block, /- \*\*d1\*\* \(ui, 2026-09-15T10:22:31Z\): cut the roadmap/);
   assert.match(block, /"consumedBy":"x:n_build:2"/);
 }));
+
+// ROUND 3, F4. THE SETTLE WINDOW. postDirection gates on the DB ROW, but a
+// terminal run sets its in-memory status first and only persists after
+// _finalizeDirections has already computed the done summary: for that whole window
+// (a readFile, sometimes an appendAudit) the row still reads `running`, the route
+// answered 201, and the record landed in directions.ndjson where nothing would
+// ever read it — `pending` was already empty, so chat, the CLI and the audit all
+// reported nothing. A write nobody reads and nobody is told about is worse than a
+// refusal, and every caller already renders RUN_FINISHED.
+test('direct() refuses once the run has settled, even before the row is persisted', async () => {
+  const { RunHarness } = await import('../src/core/run-harness.mjs');
+  const dir = await mkdtemp(join(tmpdir(), 'worca-settle-'));
+  try {
+    const harness = Object.create(RunHarness.prototype);
+    harness.pipeline = { dir, id: 'pipe-settle01' };
+
+    for (const status of ['done', 'error', 'stopped']) {
+      harness.state = { status };
+      await assert.rejects(
+        () => harness.direct('cut the roadmap slide'),
+        (e) => e.code === 'RUN_FINISHED',
+        `a direction was accepted for a ${status} run`,
+      );
+    }
+    // Nothing was written for any of them.
+    assert.deepEqual((await readDirections(dir)).directions, [], 'a refused direction still hit the inbox');
+
+    // `paused` is NOT closed — replaying the inbox on resume is the whole point —
+    // so it must get past the guard. (It then fails deeper, on the un-wired
+    // harness; what matters is that it is not RUN_FINISHED.)
+    harness.state = { status: 'paused' };
+    await harness.direct('still readable').catch((e) => {
+      assert.notEqual(e.code, 'RUN_FINISHED', 'a paused run must still take a direction');
+    });
+    assert.equal((await readDirections(dir)).directions.length, 1, 'the paused run did not record it');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

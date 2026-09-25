@@ -68,3 +68,23 @@ test('every kind the engine refuses to index is also non-browsable', () => {
     assert.equal(isBrowsableKind(kind), false, `${kind} is never indexed, so it must never be listed`);
   }
 });
+
+// ROUND 3, F2. The deck bundlers were widened to match img|audio|video|source and
+// their MIME tables gained the media types; these three artifact-side tables were
+// not. An .m4a/.wav/.ogg/.webm/.avif a deck references then had no mime (the raw
+// route answers 415, so the framed deck/deck.html preview renders without its
+// voiceover, clip or artwork while the bundle embeds all three) and no binary
+// kind (so read_run_artifact UTF-8-decodes the bytes — the exact case its guard
+// exists for).
+test('every media type a deck can reference has a mime and is treated as bytes', () => {
+  const expected = {
+    'narration.mp3': 'audio/mpeg', 'narration.m4a': 'audio/mp4', 'narration.wav': 'audio/wav',
+    'narration.ogg': 'audio/ogg', 'clip.mp4': 'video/mp4', 'clip.webm': 'video/webm',
+    'art.avif': 'image/avif',
+  };
+  for (const [name, mime] of Object.entries(expected)) {
+    assert.equal(mimeForPath(name), mime, `${name} has no Content-Type, so the raw route 415s`);
+    assert.equal(BINARY_KINDS.has(viewerKindFor(name)), true, `${name} would be decoded as UTF-8 text`);
+    assert.equal(RAW_KINDS.has(viewerKindFor(name)), true, `${name} cannot be streamed by the raw route`);
+  }
+});

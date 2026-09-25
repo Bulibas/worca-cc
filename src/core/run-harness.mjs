@@ -34,7 +34,7 @@ import {
 } from './results.mjs';
 import { resolveTaskInput, retryWriteback } from './sources.mjs';
 import { projectKey, projectStorePath, workspaceStorePath } from './store.mjs';
-import { appendDirection, readDirections, pendingDirections, DIRECTIONS_FILE, DIRECTIONS_KIND } from './directions.mjs';
+import { appendDirection, readDirections, pendingDirections, DIRECTIONS_FILE, DIRECTIONS_KIND, DIRECTIONS_CLOSED } from './directions.mjs';
 import { worcaHome } from './projects.mjs';
 import {
   runRootMode, getProjectsRoot,
@@ -3827,6 +3827,19 @@ export class RunHarness extends EventEmitter {
    *  a question blocks the run and freezes clocks; a direction must not. */
   async direct(text, source = 'ui') {
     if (!this.pipeline?.dir) throw new Error('direct(): the run has no pipeline dir yet');
+    // THE SETTLE WINDOW. postDirection gates on the DB row, but a terminal run
+    // sets its in-memory status first and only persists after _finalizeDirections
+    // has already run: for that whole window the row still reads `running`, the
+    // route said 201, and the record landed in directions.ndjson where nothing
+    // would ever read it — the done summary was computed before it arrived, so
+    // `pending` came back empty and chat, CLI and the audit all reported nothing.
+    // A write nobody reads and nobody is told about is worse than a refusal, and
+    // the caller already knows how to render this error (RUN_FINISHED).
+    if (DIRECTIONS_CLOSED.has(String(this.state?.status || ''))) {
+      const e = new Error('run is finished; a direction would never be read');
+      e.code = 'RUN_FINISHED';
+      throw e;
+    }
     const rec = await appendDirection(this.pipeline.dir, { text, source });
     recordArtifact(this.pipeline.id, DIRECTIONS_KIND, DIRECTIONS_FILE);
     this._log('directions', 'info', `direction:posted ${rec.id} (${rec.source}): ${rec.text}`);

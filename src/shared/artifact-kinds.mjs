@@ -32,7 +32,16 @@ const OPAQUE_TYPES = Object.freeze({
  *  never a viewer kind of their own (js/css view as text, the rest as binary). */
 const SUBRESOURCE_TYPES = Object.freeze({
   '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
-  '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf', '.otf': 'font/otf', '.mp3': 'audio/mpeg', '.mp4': 'video/mp4',
+  '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf', '.otf': 'font/otf',
+  // Everything the deck bundlers now match and embed (img|audio|video|source).
+  // With only mp3/mp4 here the raw route answered 415 for an .m4a, .wav, .ogg,
+  // .webm or .avif a deck references, so the framed deck/deck.html preview
+  // rendered without its voiceover, its clip or its artwork while the bundle
+  // embedded all three perfectly — and isByteArtifact was false for them, so
+  // read_run_artifact UTF-8-decoded the bytes. Kept in step with the MIME tables
+  // in scripts/deck-bundle.py, build-standalone.mjs and deck-export.js.
+  '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.avif': 'image/avif',
 });
 
 export const TEXT_EXTENSIONS = Object.freeze(Object.keys(TEXT_TYPES));

@@ -111,10 +111,12 @@
 
   // Track active slide via deck-stage's postMessage
   let currentIdx = 0;
+  let currentSlide = null;
 
   function initAll() {
     slides().forEach(initSlide);
     currentIdx = currentIndex();
+    currentSlide = slides()[currentIdx] || null;
     activate(currentIdx);
   }
 
@@ -122,17 +124,25 @@
 
   window.addEventListener('message', (e) => {
     if (e.data && typeof e.data.slideIndexChanged === 'number') {
-      // Zero the reveals only on an actual CHANGE of slide. deck-stage
-      // re-broadcasts the UNCHANGED index after any rail mutation — _toggleSkip,
-      // and _deleteSlide/_moveSlide via _applyIndex({broadcast:true}) — so the
-      // popup's thumbnails re-pick; treating those as a slide change silently
-      // rewound the reveals of the slide being presented when the user skipped
-      // some OTHER slide. A Reset is the deliberate exception and says so: it
-      // re-applies the same index with `deckReset`, which is what makes "Reset"
-      // on the current slide still zero its steps.
-      const changed = e.data.slideIndexChanged !== currentIdx || e.data.deckReset === true;
+      // Zero the reveals only when DIFFERENT CONTENT is now on screen — which is
+      // a question about the slide ELEMENT, never about the index. The index is
+      // not a stable name for a slide: _deleteSlide and _moveSlide deliberately
+      // RENUMBER _index so the same section stays on screen across a rail
+      // mutation, so an index-equality test read "5 -> 4" as a navigation and
+      // blanked every built-up reveal of the slide being presented the moment the
+      // user deleted or reordered some other thumbnail. Comparing the element
+      // gets every case right at once: it is unchanged across delete/move/skip of
+      // another slide (keep the reveals), and it genuinely changes both on a real
+      // navigation and when the presented slide is itself deleted and some other
+      // section takes its index (zero them).
+      //
+      // A Reset is the deliberate exception and says so: it re-applies the same
+      // index, on the same element, with `deckReset` — which is what makes
+      // "Reset" on the current slide still zero its steps.
       currentIdx = e.data.slideIndexChanged;
-      const s = slides()[currentIdx];
+      const s = slides()[currentIdx] || null;
+      const changed = s !== currentSlide || e.data.deckReset === true;
+      currentSlide = s;
       if (s && changed) applyStep(s, 0);
       activate(currentIdx);
     }
@@ -147,6 +157,16 @@
     if (document.body && (document.body.classList.contains('om-editing') ||
                           document.body.classList.contains('om-edit-mode') ||
                           document.body.dataset.editMode === 'true')) return true;
+    return false;
+  }
+
+  /** Is the real innermost target a rail thumbnail inside deck-stage's shadow
+   *  root? `.thumb` is that shadow tree's own class; nothing in a slide uses it. */
+  function inRail(e) {
+    const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+    for (const n of path) {
+      if (n && n.classList && n.classList.contains('thumb')) return true;
+    }
     return false;
   }
 
@@ -167,6 +187,22 @@
         if (navKey || k === 'f' || k === 'F' || k === 's' || k === 'S') e.stopImmediatePropagation();
         return;
       }
+
+      // THE RAIL OWNS UP/DOWN WHEN A THUMBNAIL HAS FOCUS. This listener is on
+      // `window` with capture:true, so it runs before anything closer to the
+      // target and every branch below ends in stopImmediatePropagation() — which
+      // meant deck-stage's per-thumbnail keydown handler (its header documents
+      // "↑/↓ with a thumbnail focused to step between slides") was unreachable
+      // whenever deck-enhance.js is loaded, i.e. always in deck.html. Worse than
+      // dead: ArrowDown fell through to stage.next(), which advances from _index
+      // rather than from the focused thumb and never moves focus, so a second
+      // press repeated the same jump and walking the rail by keyboard was
+      // impossible. Bail BEFORE the step branches — ArrowUp/ArrowDown are also
+      // FWD/BACK for reveals, so a later check would never be reached.
+      //
+      // composedPath(): at window level the event is retargeted to the
+      // <deck-stage> host, so e.target cannot tell a thumbnail from the stage.
+      if ((k === 'ArrowUp' || k === 'ArrowDown') && inRail(e)) return;
 
       if (k === 'f' || k === 'F') {
         e.stopImmediatePropagation();

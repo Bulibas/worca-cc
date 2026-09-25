@@ -302,7 +302,14 @@ export function readInputs(raw, err, warn, opts = {}) {
   return out;
 }
 
-const EXTRA_GLOB_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.*-]+$/;   // exactly one dir, `*` only in the basename
+// Exactly one dir, `*` only in the basename. The dir segment must carry a
+// non-dot character: `[A-Za-z0-9_.-]+` alone accepts a bare `.`, and the `..`
+// check below does not catch it — so `./deck.html` validated, and
+// _indexExtraFiles then keyed its prune on the prefix `"./"`, which matches no
+// stored row (a top-level file is stored under its bare name). Every top-level
+// file would be re-attributed on every sweep. No shipped sidecar spells it that
+// way, but sidecars are agent-written, so the validator is the place to say no.
+const EXTRA_GLOB_RE = /^(?=[^/]*[A-Za-z0-9_-])[A-Za-z0-9_.-]+\/[A-Za-z0-9_.*-]+$/;
 const EXTRA_KIND_RE = /^[a-z][a-z0-9-]{0,31}$/;
 
 /** Optional `extraFiles: [{ kind, glob }]` on a non-void output port — one-level

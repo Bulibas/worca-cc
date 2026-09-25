@@ -244,3 +244,26 @@ test('renderDone surfaces unapplied directions when the notifier passes them', (
   }, { status: 'done' });
   assert.match(JSON.stringify(some.body), /Directions pending:\*\* 1/);
 });
+
+// ROUND 3, F8. _finalizeDirections was moved onto EVERY terminal path — its call
+// sites say "report an unread inbox on every terminal outcome" — but the line that
+// reports it was reachable only from the completed branch: `stopped` returns above
+// it and renderError never had it at all. On the two outcomes that comment singles
+// out (a run that is then stopped, or errors) the person who posted the direction
+// was never told it went unread, while the CLI and the audit line report it
+// regardless of status.
+test('renderDone/renderError: an unread direction is reported on every terminal outcome', () => {
+  const meta = { ...META, directions: { pending: [{ id: 'd1' }, { id: 'd2' }] } };
+  for (const status of ['done', 'stopped']) {
+    assert.match(renderDone(meta, { status }).body[0].value, /\*\*Directions pending:\*\* 2/,
+      `${status} does not report the unread inbox`);
+  }
+  assert.match(renderError(meta, { message: 'boom' }).body[0].value, /\*\*Directions pending:\*\* 2/,
+    'a failed run does not report the unread inbox');
+
+  // ...and no line at all when the inbox was read, on any of them.
+  for (const r of [renderDone(META, { status: 'done' }), renderDone(META, { status: 'stopped' }),
+    renderError(META, { message: 'boom' })]) {
+    assert.doesNotMatch(r.body[0].value, /Directions pending/);
+  }
+});

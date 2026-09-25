@@ -65,8 +65,106 @@
     const a = fg.a == null ? 1 : fg.a;
     return { r: fg.r * a + bg.r * (1 - a), g: fg.g * a + bg.g * (1 - a), b: fg.b * a + bg.b * (1 - a), a: 1 };
   }
+  /** A computed background-image's top-level LAYERS. Splitting on every comma is
+   *  wrong twice over — `rgb(11, 11, 15)` and `url(a,b.png)` both carry commas
+   *  that are not layer separators — so the split is paren-depth aware. */
+  function splitTopLevel(str) {
+    const s = String(str || '');
+    const out = [];
+    let depth = 0, start = 0;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      else if (ch === ',' && depth === 0) { out.push(s.slice(start, i)); start = i + 1; }
+    }
+    out.push(s.slice(start));
+    return out.map((l) => l.trim()).filter(Boolean);
+  }
+  const imageLayers = (cssImage) => splitTopLevel(cssImage);
+  const GRADIENT = /^(?:repeating-)?(?:linear|radial|conic)-gradient\((.*)\)\s*$/i;
+  // A gradient's argument list carries two kinds of colourless segment: the
+  // leading geometry / interpolation head, and a bare position between two stops
+  // (a colour HINT). Both are legitimately colourless; every OTHER segment has to
+  // be a colour we can actually read, or the stop set is incomplete.
+  //
+  // Recognised by TOKEN, not by a prefix. An enumerated prefix list missed the
+  // sized radial head — `radial-gradient(50% 50% at 50% 50%, …)` and
+  // `radial-gradient(800px 400px at 20% 0%, …)`, which is what Figma's CSS export
+  // writes and what every "glow" on a slide is — so the head fell through to
+  // parseColor, failed, and took the whole stack to `null`. Silence on the only
+  // blocking legibility gate: white-on-white certified clean, while the keyword
+  // spelling of the same gradient was caught.
+  const GEOMETRY_TOKEN = new RegExp('^(?:to|in|at|from|circle|ellipse|top|bottom|left|right|center'
+    + '|closest-side|closest-corner|farthest-side|farthest-corner'
+    + '|srgb|srgb-linear|display-p3|a98-rgb|prophoto-rgb|rec2020|xyz|xyz-d50|xyz-d65'
+    + '|oklab|oklch|lab|lch|hsl|hwb|longer|shorter|increasing|decreasing|hue'
+    + '|[-+\\d.]+(?:deg|rad|grad|turn|%|px|em|rem|vw|vh|vmin|vmax|ch|ex|cm|mm|in|pt|pc)?)$', 'i');
+  /** Is this whole segment geometry — a head, or a bare colour hint? A colour is
+   *  never made only of geometry tokens, so this can never swallow one. */
+  const isGeometry = (seg) => seg.split(/\s+/).filter(Boolean).every((t) => GEOMETRY_TOKEN.test(t));
+  /** One entry PER LAYER — its stops — topmost layer first, or NULL when the
+   *  declaration paints something this DOM cannot read. The distinction is the
+   *  whole contract: `[]` means "paints nothing, keep walking", `null` means
+   *  "unmeasurable, report nothing".
+   *
+   *  Per layer, not flattened. Pooling every layer's stops into one list meant
+   *  layer n was never composited over layer n+1: each stop became an independent
+   *  candidate over whatever sat below the WHOLE stack, so the bottom layer's raw
+   *  colours vetoed the top layer covering them. The standard "dark scrim so the
+   *  copy reads over a light ground" was reported 1.00:1 — a blocking failure on a
+   *  slide that reads at ~14:1 — and an OPAQUE top layer could not hide the one
+   *  underneath it.
+   *
+   *  Layer-aware, and it has to be. Scraping `rgba?\(…\)` out of the whole
+   *  declaration read colours that are not grounds at all: an inline
+   *  `url("data:image/svg+xml,…fill='rgb(250,250,250)'…")` — a mainstream deck
+   *  idiom — handed back the fill colour of some shape inside the SVG and scored
+   *  white copy on a near-black slide 1.04:1, a blocking false failure. It also
+   *  made the unreadable-ground guard unreachable whenever a gradient sat ON a
+   *  photo (`linear-gradient(…), url(hero.jpg)`): one readable layer was enough
+   *  to stop the walk returning null, so adding a scrim flipped the gate from
+   *  "skip, cannot measure" to "fail". ANY layer we cannot read poisons the whole
+   *  stack, because it paints over everything below it.
+   *
+   *  Stops keep their alpha — a translucent stop is composited by the caller, not
+   *  treated as solid. Measuring `rgba(0,0,0,.6)` as opaque black certified white
+   *  copy on a white section CLEAN, which is the failure this gate exists for. */
+  function imagePaint(cssImage) {
+    const s = String(cssImage || '');
+    if (!s || s === 'none') return [];
+    const out = [];
+    for (const layer of imageLayers(s)) {
+      // `none` is a legal LAYER (`background-image: none, linear-gradient(…)`,
+      // and what `var(--overlay, none)` resolves to). It paints nothing, which is
+      // not the same as painting something unreadable — treating it as the latter
+      // blinded the gate on a deck that was perfectly measurable.
+      if (layer.toLowerCase() === 'none') continue;
+      const g = GRADIENT.exec(layer);
+      if (!g) return null;
+      // EVERY stop, or none of them. Keeping only the tokens that happen to match
+      // `rgba?(…)` silently dropped the ones that do not — `oklch()`, `lab()`,
+      // `color(display-p3 …)`, `color-mix()`, a hex literal — and the caller then
+      // took its worst-case minimum over an INCOMPLETE set. A dark-to-near-white
+      // wash whose pale end was written in oklch reported CLEAN for white copy
+      // that is invisible at that end, which is a false clean on the blocking
+      // gate: strictly worse than the false failure this whole helper replaced.
+      const stops = [];
+      for (const seg of splitTopLevel(g[1])) {
+        if (isGeometry(seg)) continue;                         // head, or a colour hint
+        const c = parseColor(seg);
+        if (!c) return null;                                   // a stop we cannot read
+        stops.push(c);
+      }
+      if (!stops.length) return null;
+      out.push(stops);
+    }
+    return out;
+  }
   /** What is actually PAINTED behind `el`: every translucent ancestor ground
    *  composited over the next, down to the first opaque one — or to `fallback`.
+   *  Returns the CANDIDATE grounds (a gradient paints more than one) or `null`
+   *  when something paints a ground computed style cannot read.
    *
    *  Returning the first non-transparent ancestor raw measured a 45% scrim as if
    *  it were solid (`luminance` ignores alpha): white text over
@@ -74,11 +172,50 @@
    *  about 3.4, under the floor. The audit is the blocking gate, so the
    *  illegible slide shipped. */
   function effectiveBackground(el, win, fallback, root) {
-    const layers = [];
+    // The paints between the text and the canvas, outermost LAST. Within one
+    // element the background-IMAGE paints above the background-COLOR, so it is
+    // pushed first — get that order wrong and a scrim is composited under the
+    // thing it is scrimming.
+    const paints = [];
     for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
-      const c = parseColor(win.getComputedStyle(node).backgroundColor);
+      const cs = win.getComputedStyle(node);
+      // A background-IMAGE paints too. Reading only backgroundColor measured the
+      // canonical dark ground — `section { background: linear-gradient(...) }` —
+      // as fully transparent, fell through to the white STAGE_CANVAS, and scored
+      // white copy 1.00:1: every heading and every line of body text on a slide
+      // that renders perfectly became a blocking `contrast` finding, which burns
+      // all three fix cycles on something the builder cannot resolve.
+      const img = imagePaint(cs.backgroundImage);
+      // An image whose paint CANNOT be read (a url() photo, a cross-fade) leaves
+      // the ground unmeasurable. A ratio needs two colours; inventing one is what
+      // produced the false failure above, so say "unknown" and let the caller
+      // skip. This is the same portable signal the transparent-TEXT branch below
+      // already trusts to mean "something other than `color` is painting here".
+      if (img === null) return null;
+      // ONE ENTRY PER LAYER, topmost first, so the composite below folds each
+      // layer over the one beneath it. An opaque layer hides everything after it —
+      // the rest of the stack AND this element's own background-color AND every
+      // ancestor — so it ends the walk outright.
+      let sealed = false;
+      for (const layer of img) {
+        paints.push(layer);
+        if (layer.every((c) => c.a >= 1)) { sealed = true; break; }
+      }
+      if (sealed) break;
+      // An UNREADABLE colour is not a transparent one. parseColor speaks
+      // rgb()/rgba() only, and CSS Color 4 values keep their colour space when
+      // computed (`oklch(0.15 0.02 260)` stays oklch in Chromium and in jsdom), so
+      // a null parse was silently taken to mean "paints nothing": the walk fell
+      // through to the white STAGE_CANVAS and every line on a perfectly-rendered
+      // dark slide became a blocking contrast failure. Same false-block as the
+      // gradient case this helper was written for, arriving via the other
+      // property. `transparent` and the empty string are the only spellings that
+      // genuinely paint nothing.
+      const rawBg = String(cs.backgroundColor || '').trim();
+      const c = parseColor(rawBg);
+      if (!c && rawBg && rawBg.toLowerCase() !== 'transparent') return null;
       if (c && c.a > 0) {
-        layers.push(c);
+        paints.push([c]);
         if (c.a >= 1) break;                     // opaque: nothing behind it shows
       }
       // The SLIDE is the last light-DOM layer that can paint behind its own text.
@@ -98,11 +235,26 @@
       // ground, which is the conservative direction: it over-reports, never under.
       if (root && node === root) break;
     }
-    let ground = fallback;
-    for (let i = layers.length - 1; i >= 0; i--) {
-      ground = layers[i].a >= 1 ? layers[i] : over(layers[i], ground);
+    // Composite bottom-up. A gradient contributes SEVERAL candidate grounds — the
+    // audit cannot know which band of the wash a given line sits over — so the
+    // result is a list; every other paint keeps it at one. Duplicates are dropped
+    // so a many-stop gradient under a scrim cannot multiply out.
+    let grounds = [fallback];
+    for (let i = paints.length - 1; i >= 0; i--) {
+      const seen = new Set();
+      const next = [];
+      for (const g of grounds) {
+        for (const c of paints[i]) {
+          const v = c.a >= 1 ? c : over(c, g);
+          const k = Math.round(v.r) + ',' + Math.round(v.g) + ',' + Math.round(v.b);
+          if (seen.has(k)) continue;
+          seen.add(k);
+          next.push(v);
+        }
+      }
+      grounds = next;
     }
-    return ground;
+    return grounds;
   }
   const ownsText = (el) => Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim());
   const words = (text) => String(text || '').trim().split(/\s+/).filter(Boolean).length;
@@ -322,8 +474,19 @@
             issues.push({ check: 'contrast', selector: sel, detail: 'color is transparent and nothing paints the glyphs' });
           }
         } else if (fg) {
-          const bg = effectiveBackground(el, win, fallbackBg, section);
-          const ratio = contrastRatio(over(fg, bg), bg);
+          const grounds = effectiveBackground(el, win, fallbackBg, section);
+          // `null` = a ground this DOM cannot read (a url() photo, a cross-fade).
+          // Not measurable, so not reportable: the blocking gate must never fail a
+          // slide on a colour it had to invent.
+          //
+          // The WORST candidate a gradient passes through decides the verdict. The
+          // audit cannot know which band of the ground a given line sits over, and
+          // the pale end of a light->dark wash is exactly where white copy stops
+          // being legible — so the dark deck stops being a false failure without
+          // the gate going blind to the real one.
+          let ratio = Infinity;
+          for (const bg of (grounds || [])) ratio = Math.min(ratio, contrastRatio(over(fg, bg), bg));
+          if (grounds) {
           // The pivot is the BODY FLOOR, not a number of its own. WCAG relaxes
           // contrast for large text, and with the body floor at 36px a pivot of 36
           // would hand every piece of body copy set at its floor the 3:1 allowance —
@@ -331,6 +494,7 @@
           // with nothing reported. 48px is where type is genuinely large.
           const floor = px >= 48 ? 3 : 4.5;
           if (ratio < floor) issues.push({ check: 'contrast', selector: sel, detail: `${ratio.toFixed(2)}:1 at ${px}px (floor ${floor}:1)` });
+          }
         }
       }
     }

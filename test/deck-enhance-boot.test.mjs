@@ -17,10 +17,13 @@ import { JSDOM } from 'jsdom';
 const SRC = readFileSync(fileURLToPath(new URL('../assets/deck-kit/deck-enhance.js', import.meta.url)), 'utf8');
 
 /** A mounted stage: seven slides, with deck-stage's own active marker on one. */
-function boot({ hash = '', activeIndex = null, steps = 0 } = {}) {
+function boot({ hash = '', activeIndex = null, steps = 0, stepsOn = 0 } = {}) {
   const sections = Array.from({ length: 7 }, (_, i) => {
     const active = i === activeIndex ? ' data-deck-active=""' : '';
-    const reveals = i === 0 && steps
+    // `stepsOn` defaults to slide 1 because the boot tests below deliberately put
+    // the reveals on a slide that is NOT showing; the rail-mutation tests need
+    // them on the slide that is.
+    const reveals = i === stepsOn && steps
       ? Array.from({ length: steps }, (_, n) => `<p data-step="${n + 1}">r${n + 1}</p>`).join('')
       : '';
     return `<section data-label="0${i + 1}"${active}><h1>S${i + 1}</h1>${reveals}</section>`;
@@ -101,4 +104,80 @@ test('a re-broadcast of the same slide index does not rewind its reveals', async
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(slide.querySelectorAll('[data-step].step-visible').length, revealed,
     'an unrelated rail mutation leaves the reveals where they were');
+});
+
+// THE INDEX IS NOT A STABLE NAME FOR A SLIDE. _deleteSlide and _moveSlide
+// deliberately RENUMBER _index so the same section stays on screen across a rail
+// mutation, and the postMessage payload carries no `reason` — so an
+// index-equality test read "5 -> 4" as a navigation and blanked every built-up
+// reveal of the slide being presented the moment the user deleted or reordered
+// some OTHER thumbnail. Mid-presentation. Comparing the slide ELEMENT gets every
+// case right at once, including the one an index test cannot get right at all:
+// when the presented slide is itself deleted, a DIFFERENT section takes its index
+// and the reveals must zero (the test below this one).
+test('deleting another slide leaves the presented slide\'s reveals intact', async () => {
+  const win = await booted({ activeIndex: 4, steps: 3, stepsOn: 4 });
+  const sections = [...win.document.querySelectorAll('section')];
+  const presented = sections[4];
+  win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  await new Promise((r) => setTimeout(r, 10));
+  const revealed = presented.querySelectorAll('[data-step].step-visible').length;
+  assert.ok(revealed > 0, `steps revealed to begin with: ${revealed}`);
+
+  // _deleteSlide(1), exactly as deck-stage performs it: the section leaves the
+  // DOM and _index goes 4 -> 3 so the same content stays on screen.
+  sections[1].remove();
+  win.postMessage({ slideIndexChanged: 3, deckTotal: 6, deckSkipped: [] }, '*');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(presented.querySelectorAll('[data-step].step-visible').length, revealed,
+    'deleting an unrelated thumbnail rewound the slide being presented');
+});
+
+test('the slide that inherits the index starts from nothing', async () => {
+  const win = await booted({ activeIndex: 4, steps: 3, stepsOn: 4 });
+  const sections = [...win.document.querySelectorAll('section')];
+  const heir = sections[5];
+  heir.innerHTML += '<p data-step="1" class="step-visible">stale</p>';
+
+  // _deleteSlide(4) on the slide being presented: the index does NOT move, so
+  // slide 6 slides into it and is now on screen — different content, and its
+  // reveals must not be inherited from whatever state it was left in.
+  sections[4].remove();
+  win.postMessage({ slideIndexChanged: 4, deckTotal: 6, deckSkipped: [] }, '*');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(heir.querySelectorAll('[data-step].step-visible').length, 0,
+    'the slide that took the index kept a stale reveal');
+});
+
+// This listener is on `window` with capture:true and every branch ends in
+// stopImmediatePropagation(), so deck-stage's per-thumbnail keydown handler — its
+// header documents "↑/↓ with a thumbnail focused to step between slides" — was
+// unreachable whenever deck-enhance.js is loaded, i.e. always in deck.html.
+// Worse than dead: ArrowDown fell through to stage.next(), which advances from
+// _index rather than from the focused thumb and never moves focus, so a second
+// press repeated the same jump and walking the rail by keyboard was impossible.
+test('a focused rail thumbnail keeps ArrowUp/ArrowDown for itself', async () => {
+  const win = await booted({ activeIndex: 0, steps: 3 });
+  const slide = win.document.querySelectorAll('section')[0];
+
+  // Off the rail, deck-enhance owns the key: it reveals a step and consumes it.
+  const loose = win.document.createElement('div');
+  win.document.body.appendChild(loose);
+  const consumed = loose.dispatchEvent(
+    new win.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true, composed: true }));
+  assert.equal(consumed, false, 'deck-enhance no longer owns ArrowDown off the rail');
+  const revealed = slide.querySelectorAll('[data-step].step-visible').length;
+  assert.ok(revealed > 0, 'ArrowDown off the rail should have revealed a step');
+
+  // On a thumbnail it passes straight through — unconsumed, and with the reveals
+  // of the slide on screen left exactly where they were.
+  const thumb = win.document.createElement('div');
+  thumb.className = 'thumb';
+  win.document.body.appendChild(thumb);
+  const passed = thumb.dispatchEvent(
+    new win.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true, composed: true }));
+  assert.equal(passed, true, 'the rail\'s own navigation key is still swallowed before it arrives');
+  assert.equal(slide.querySelectorAll('[data-step].step-visible').length, revealed,
+    'walking the rail must not also step the reveals of the slide on screen');
 });

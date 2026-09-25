@@ -1008,14 +1008,20 @@
       // so off-screen drop targets are reachable. Native dragover fires
       // continuously while the pointer is stationary, so a per-event nudge
       // (ramped by edge proximity) is enough — no rAF loop needed.
+      // Along the axis the rail actually scrolls. In portrait _fit() sets
+      // [data-rail-top] and the rail becomes a horizontal strip that scrolls on
+      // overflow-x — nudging scrollTop there moves nothing, so an off-screen drop
+      // target stayed unreachable exactly when the rail is at its shortest.
       rail.addEventListener('dragover', (e) => {
         if (this._dragFrom == null) return;
         const r = rail.getBoundingClientRect();
         const EDGE = 40;
-        const dt = e.clientY - r.top;
-        const db = r.bottom - e.clientY;
-        if (dt < EDGE) rail.scrollTop -= Math.ceil((EDGE - dt) / 3);
-        else if (db < EDGE) rail.scrollTop += Math.ceil((EDGE - db) / 3);
+        const horiz = this.hasAttribute('data-rail-top');
+        const lead = horiz ? e.clientX - r.left : e.clientY - r.top;
+        const trail = horiz ? r.right - e.clientX : r.bottom - e.clientY;
+        const prop = horiz ? 'scrollLeft' : 'scrollTop';
+        if (lead < EDGE) rail[prop] -= Math.ceil((EDGE - lead) / 3);
+        else if (trail < EDGE) rail[prop] += Math.ceil((EDGE - trail) / 3);
       });
 
       const menu = document.createElement('div');
@@ -1169,11 +1175,23 @@
         '@keyframes deck-pop { from { opacity: 0; transform: scale(.92); } to { opacity: 1; transform: none; } } ' +
         '@keyframes deck-count { from { opacity: 0; } to { opacity: 1; } } ' +
         '[data-deck-anim] { animation-duration: .55s; animation-timing-function: cubic-bezier(.2,.8,.2,1); animation-fill-mode: both; } ' +
-        '[data-deck-anim="rise"] { animation-name: deck-rise; } ' +
-        '[data-deck-anim="draw"] { animation-name: deck-draw; } ' +
-        '[data-deck-anim="wipe"] { animation-name: deck-wipe; } ' +
-        '[data-deck-anim="pop"] { animation-name: deck-pop; } ' +
-        '[data-deck-anim="count"] { animation-name: deck-count; } ' +
+        // SCOPED TO THE ACTIVE SLIDE, and that scope is what makes the motion
+        // real. A non-active slide is `visibility:hidden; opacity:0` — still
+        // RENDERED, so its animations run. Unscoped, every rise/wipe/pop on
+        // slides 2..N played out ~550ms after load while invisible and, with
+        // `animation-fill-mode: both`, sat frozen on its final frame by the time
+        // the presenter arrived: the whole vocabulary was dead on every slide but
+        // the one shown at load, and completely dead on a read-alone deck (no
+        // [data-step] anywhere). _applyIndex moves [data-deck-active] on every
+        // navigation, which adds animation-name to the arriving slide and drops
+        // it from the leaving one — so the motion re-triggers, forwards and back.
+        // Both halves of each pair: the tag can sit on the SECTION itself, which
+        // a descendant combinator alone would never match.
+        '[data-deck-active][data-deck-anim="rise"], [data-deck-active] [data-deck-anim="rise"] { animation-name: deck-rise; } ' +
+        '[data-deck-active][data-deck-anim="draw"], [data-deck-active] [data-deck-anim="draw"] { animation-name: deck-draw; } ' +
+        '[data-deck-active][data-deck-anim="wipe"], [data-deck-active] [data-deck-anim="wipe"] { animation-name: deck-wipe; } ' +
+        '[data-deck-active][data-deck-anim="pop"], [data-deck-active] [data-deck-anim="pop"] { animation-name: deck-pop; } ' +
+        '[data-deck-active][data-deck-anim="count"], [data-deck-active] [data-deck-anim="count"] { animation-name: deck-count; } ' +
         // A tagged element that is ALSO a [data-step] waits for its reveal instead
         // of animating at mount: deck-enhance.js toggles .step-visible, and the
         // deck's own stylesheet owns whether an unrevealed step is hidden at all.
@@ -1181,8 +1199,25 @@
         '@media (prefers-reduced-motion: reduce) { [data-deck-anim] { animation: none !important; } } ' +
         // FINAL STATE, unconditionally, in the two places a still frame is taken.
         // proof.html carries `noscale` and is what the audit measures and shoots.
-        'deck-stage[noscale] [data-deck-anim] { animation: none !important; animation-play-state: running !important; opacity: 1 !important; transform: none !important; clip-path: none !important; stroke-dashoffset: 0 !important; } ' +
-        '@media print { [data-deck-anim] { animation: none !important; opacity: 1 !important; transform: none !important; clip-path: none !important; stroke-dashoffset: 0 !important; } }';
+        //
+        // [data-step] IS PART OF THE FINAL STATE. Covering only [data-deck-anim]
+        // left the reveals out: deck-enhance's initSlide() -> applyStep(slide, 0)
+        // strips .step-visible from every step on every slide, and CONTRACT hands
+        // the hiding of an unrevealed step to the deck's own stylesheet
+        // (`deck-stage [data-step]{opacity:0}`), which nothing here overrode. A
+        // deck with reveals printed one page per slide carrying step-0 content
+        // only — BLANK SLIDES AT THE RIGHT PAGE COUNT, the exact failure the
+        // comment above says these two blocks make unreachable, and the page-count
+        // assertion is the only PDF gate so it passed. It was internally
+        // inconsistent too: a [data-step][data-deck-anim] element was rescued by
+        // the opacity rule while its plain [data-step] sibling beside it was not,
+        // so the PDF showed an arbitrary subset of each build.
+        //
+        // visibility, not just opacity: a deck is equally free to hide an
+        // unrevealed step with `visibility:hidden`, and a still frame must not
+        // depend on which of the two the builder reached for.
+        'deck-stage[noscale] [data-deck-anim], deck-stage[noscale] [data-step] { animation: none !important; animation-play-state: running !important; opacity: 1 !important; visibility: visible !important; transform: none !important; clip-path: none !important; stroke-dashoffset: 0 !important; } ' +
+        '@media print { [data-deck-anim], [data-step] { animation: none !important; opacity: 1 !important; visibility: visible !important; transform: none !important; clip-path: none !important; stroke-dashoffset: 0 !important; } }';
     }
 
     _onSlotChange() {
@@ -1251,6 +1286,29 @@
       }
     }
 
+    /** `i` clamped into range and moved off a skipped slide — forward first, then
+     *  back, so Home reaches the first live slide and End the last. If every slide
+     *  is skipped there is nowhere else to be and the clamp stands.
+     *
+     *  A skipped slide is not a destination. _advance walks past them, and every
+     *  other entry point — Home, End, R, the 1-9 jumps, the overlay Reset, the
+     *  public goTo()/reset() — goes through _go, which shares this. CONTRACT says
+     *  skipped slides are skipped IN NAVIGATION, not only in one of its
+     *  directions. */
+    _liveIndex(i) {
+      let clamped = Math.max(0, Math.min(this._slides.length - 1, i));
+      if (this._slides[clamped] && this._slides[clamped].hasAttribute('data-deck-skip')) {
+        let j = clamped;
+        while (j < this._slides.length && this._slides[j].hasAttribute('data-deck-skip')) j += 1;
+        if (j >= this._slides.length) {
+          j = clamped;
+          while (j >= 0 && this._slides[j].hasAttribute('data-deck-skip')) j -= 1;
+        }
+        if (j >= 0 && j < this._slides.length) clamped = j;
+      }
+      return clamped;
+    }
+
     _restoreIndex() {
       // The host's ?slide= param is delivered as a #<int> hash (1-indexed) on
       // the iframe src. No hash → slide 1; the deck itself keeps no position
@@ -1260,6 +1318,13 @@
         const n = parseInt(h[1], 10) - 1;
         if (n >= 0 && n < this._slides.length) this._index = n;
       }
+      // MOUNT AND DEEP-LINK RESTORE GO THROUGH THE SKIP SEARCH TOO. They reach
+      // _applyIndex directly, never _go, so a deck whose first slide is skipped
+      // OPENED on that slide — dimmed in the rail, display:none at print, absent
+      // from the PDF, and prev() cannot leave it. Reachable with no exotic setup:
+      // skip slide 1 from the rail, reload (the `#1` _applyIndex itself stamps
+      // restores index 0).
+      this._index = this._liveIndex(this._index);
     }
 
     _applyIndex({ showOverlay = true, broadcast = true, reason = 'init', reset = false } = {}) {
@@ -1562,24 +1627,7 @@
 
     _go(i, reason = 'api', force = false) {
       if (!this._slides.length) return;
-      let clamped = Math.max(0, Math.min(this._slides.length - 1, i));
-      // A skipped slide is not a destination. _advance walks past them, but every
-      // other entry point — Home, End, R, the 1-9 jumps, the overlay Reset and the
-      // public goTo()/reset() — comes straight here, and landed on a slide that is
-      // dimmed in the rail, hidden at print, and unreachable with the arrow keys:
-      // CONTRACT says skipped slides are skipped IN NAVIGATION, not only in one of
-      // its directions. Search forward first, then back, so Home reaches the first
-      // live slide and End the last. If every slide is skipped there is nowhere
-      // else to be, and the clamp stands.
-      if (this._slides[clamped] && this._slides[clamped].hasAttribute('data-deck-skip')) {
-        let j = clamped;
-        while (j < this._slides.length && this._slides[j].hasAttribute('data-deck-skip')) j += 1;
-        if (j >= this._slides.length) {
-          j = clamped;
-          while (j >= 0 && this._slides[j].hasAttribute('data-deck-skip')) j -= 1;
-        }
-        if (j >= 0 && j < this._slides.length) clamped = j;
-      }
+      const clamped = this._liveIndex(i);
       // Normally a no-op (just flash) when already on the target slide. But a
       // reset must re-apply even then, so the broadcast re-fires and listeners
       // (e.g. deck-enhance) zero the current slide's in-slide step reveals —
@@ -1742,15 +1790,13 @@
         if (this._dragFrom == null) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
-        const r = thumb.getBoundingClientRect();
-        this._setDrop(idx(), e.clientY < r.top + r.height / 2 ? 'before' : 'after');
+        this._setDrop(idx(), this._dropSide(thumb, e));
       });
       thumb.addEventListener('drop', (e) => {
         if (this._dragFrom == null) return;
         e.preventDefault();
         const i = idx();
-        const r = thumb.getBoundingClientRect();
-        let to = e.clientY >= r.top + r.height / 2 ? i + 1 : i;
+        let to = this._dropSide(thumb, e) === 'after' ? i + 1 : i;
         if (this._dragFrom < to) to--;
         const from = this._dragFrom;
         this._clearDrop();
@@ -1761,6 +1807,19 @@
       if (this._railObserver) this._railObserver.observe(frame);
       frame.__deckThumb = entry;
       return entry;
+    }
+
+    /** Which side of `thumb` a drop at this pointer lands on, measured along the
+     *  axis the rail is laid out on. The midpoint test was hardcoded to Y while
+     *  the drop INDICATOR already followed the orientation ([data-rail-top]
+     *  re-points it to left/right), so with the rail docked to the top the two
+     *  disagreed: dragging to the right of a thumb while holding the pointer high
+     *  drew "after" and committed "before", landing the slide one position off. */
+    _dropSide(thumb, e) {
+      const r = thumb.getBoundingClientRect();
+      return this.hasAttribute('data-rail-top')
+        ? (e.clientX < r.left + r.width / 2 ? 'before' : 'after')
+        : (e.clientY < r.top + r.height / 2 ? 'before' : 'after');
     }
 
     /** Lazily build the clone for a thumb that has scrolled into view. */
@@ -1960,6 +2019,13 @@
       slide.remove();
       this._emitDeckChange({ action: 'delete', from: i, slide });
       this._collectSlides();
+      // The arithmetic above keeps the same CONTENT on screen; it cannot know the
+      // slide it lands on is skipped. Deleting slide 1 of `01, 02[skip], 03` left
+      // the stage presenting 02 — display:none at print, dimmed in the rail,
+      // absent from the PDF — which is the invariant _liveIndex exists to hold.
+      // _go and _restoreIndex both go through it; this path reaches _applyIndex
+      // directly, so it has to ask for itself.
+      this._index = this._liveIndex(this._index);
       this._applyIndex({ showOverlay: true, broadcast: true, reason: 'mutation' });
     }
 
