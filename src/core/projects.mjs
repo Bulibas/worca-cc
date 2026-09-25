@@ -110,15 +110,12 @@ export function countProjects() {
 }
 
 /**
- * Add a project. Validates and persists to the projects table. Returns the
- * updated annotated list. Keyed by projectKey(path) (store.mjs), so every worktree
- * of a repo maps to one row. Name uniqueness is case-insensitive (checked here AND
- * backed by the NOCASE unique index).
- * @param {{name:string, path:string}} input
+ * Validate one {name, path} and insert it in its own tx(). Synchronous (node:sqlite).
+ * @returns {{key:string, name:string, path:string}} the stored row
  * @throws {Error} on empty name/path, a path that exists but is not a directory,
  *   a duplicate name (case-insensitive), or a duplicate path/key.
  */
-export async function addProject(input) {
+function insertProject(input) {
   const name = (input && typeof input.name === 'string' ? input.name : '').trim();
   if (!name) throw new Error('project name is required');
   const path = normalizeProjectPath(input && input.path);
@@ -140,7 +137,49 @@ export async function addProject(input) {
       'INSERT INTO projects (key, name, path, created_at) VALUES (?, ?, ?, ?)'
     ).run(key, name, path, createdAt);
   });
+  return { key, name, path };
+}
+
+/**
+ * Add a project. Validates and persists to the projects table. Returns the
+ * updated annotated list. Keyed by projectKey(path) (store.mjs), so every worktree
+ * of a repo maps to one row. Name uniqueness is case-insensitive (checked here AND
+ * backed by the NOCASE unique index).
+ * @param {{name:string, path:string}} input
+ * @throws {Error} on empty name/path, a path that exists but is not a directory,
+ *   a duplicate name (case-insensitive), or a duplicate path/key.
+ */
+export async function addProject(input) {
+  insertProject(input);
   return listProjects();
+}
+
+/**
+ * Add several projects in one call (the multi-folder "Add projects" review).
+ * Each item is validated and inserted in its OWN transaction (tx() cannot nest),
+ * so one bad row never rolls back the others; a later row sees the rows committed
+ * before it, so a duplicate name or repo WITHIN the batch is skipped too. Unlike
+ * addProject, a bulk row's folder must exist: every row came from a folder picker,
+ * so a missing folder vanished since it was picked. Never throws for a bad row.
+ * @param {Array<{name:string, path:string}>} items
+ * @returns {Promise<{results: Array<{index:number, status:'added'|'skipped', name:string,
+ *   path:string, key?:string, reason?:string}>, projects: Array<{key,name,path,exists}>}>}
+ */
+export async function addProjects(items) {
+  const list = Array.isArray(items) ? items : [];
+  const results = list.map((item, index) => {
+    const name = item && typeof item.name === 'string' ? item.name.trim() : '';
+    const rawPath = item && typeof item.path === 'string' ? item.path : '';
+    const path = normalizeProjectPath(rawPath);
+    try {
+      if (path && !existsSync(path)) throw new Error('folder does not exist');
+      const row = insertProject({ name, path: rawPath });
+      return { index, status: 'added', key: row.key, name: row.name, path: row.path };
+    } catch (err) {
+      return { index, status: 'skipped', name, path: path || rawPath, reason: err && err.message ? err.message : String(err) };
+    }
+  });
+  return { results, projects: await listProjects() };
 }
 
 /**

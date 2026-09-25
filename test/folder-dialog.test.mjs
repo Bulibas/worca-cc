@@ -115,3 +115,63 @@ test('purpose picks the dialog title from a closed set; unknown purpose falls ba
     'Select a project folder',
   ]);
 });
+
+test('darwin multiple: runs choose folder with multiple selections and returns every path', async () => {
+  _testing.set({ platform: 'darwin', env: {} });
+  const calls = runner({ ok: true, stdout: '/Users/me/dev/a/\n/Users/me/dev/b/\n\n', stderr: '', code: 0, timedOut: false });
+  assert.deepEqual(await pickFolderNative({ multiple: true }), {
+    status: 'picked', path: '/Users/me/dev/a', paths: ['/Users/me/dev/a', '/Users/me/dev/b'],
+  });
+  const script = calls[0].args.join('\n');
+  assert.match(script, /with multiple selections allowed/);
+  assert.match(script, /prompt "Select a project folder"/, 'title still comes from the closed set');
+});
+
+test('darwin multiple: cancel (-128) still maps to canceled', async () => {
+  _testing.set({ platform: 'darwin', env: {} });
+  runner({ ok: false, stdout: '', stderr: 'execution error: User canceled. (-128)', code: 1, timedOut: false });
+  assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'canceled' });
+});
+
+test('single mode keeps its exact reply shape (no paths key)', async () => {
+  _testing.set({ platform: 'darwin', env: {} });
+  runner({ ok: true, stdout: '/Users/me/dev/a/\n', stderr: '', code: 0, timedOut: false });
+  assert.deepEqual(await pickFolderNative(), { status: 'picked', path: '/Users/me/dev/a' });
+});
+
+test('multiple: duplicate lines are collapsed', async () => {
+  _testing.set({ platform: 'darwin', env: {} });
+  runner({ ok: true, stdout: '/x/a\n/x/a/\n', stderr: '', code: 0, timedOut: false });
+  assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'picked', path: '/x/a', paths: ['/x/a'] });
+});
+
+test('linux multiple: zenity gets --multiple with a newline separator', async () => {
+  const calls = [];
+  _testing.set({
+    platform: 'linux', env: { DISPLAY: ':0' },
+    runner: async (cmd, args) => { calls.push({ cmd, args }); return { ok: true, stdout: '/home/me/a\n/home/me/b\n', stderr: '', code: 0, timedOut: false }; },
+  });
+  assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'picked', path: '/home/me/a', paths: ['/home/me/a', '/home/me/b'] });
+  assert.ok(calls[0].args.includes('--multiple'));
+  assert.ok(calls[0].args.includes('--separator=\n'));
+});
+
+test('linux multiple: kdialog fallback is single-select and returns a one-element list', async () => {
+  const calls = [];
+  _testing.set({
+    platform: 'linux', env: { DISPLAY: ':0', HOME: '/home/me' },
+    runner: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === 'zenity') return { ok: false, stdout: '', stderr: 'spawn zenity ENOENT', code: -1, timedOut: false };
+      return { ok: true, stdout: '/home/me/dev\n', stderr: '', code: 0, timedOut: false };
+    },
+  });
+  assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'picked', path: '/home/me/dev', paths: ['/home/me/dev'] });
+  assert.ok(!calls[1].args.includes('--multiple'));
+});
+
+test('win32 multiple: FolderBrowserDialog is single-select; one path comes back as a list', async () => {
+  _testing.set({ platform: 'win32', env: {} });
+  runner({ ok: true, stdout: 'C:\\dev\\app\r\n', stderr: '', code: 0, timedOut: false });
+  assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'picked', path: 'C:\\dev\\app', paths: ['C:\\dev\\app'] });
+});
