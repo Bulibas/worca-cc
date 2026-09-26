@@ -4,11 +4,29 @@
 
 import identity from './identity.mjs';
 import pkgNpm from './pkg-npm.mjs';
+// P3 — boundary detectors (manifests, deploy, config, API specs); alphabetical by id.
+import apiAsyncapi from './api-asyncapi.mjs';
+import apiGraphql from './api-graphql.mjs';
+import apiOpenapi from './api-openapi.mjs';
+import apiProto from './api-proto.mjs';
+import configEnv from './config-env.mjs';
+import deployCompose from './deploy-compose.mjs';
+import deployK8s from './deploy-k8s.mjs';
+import gitSubmodules from './git-submodules.mjs';
+import pkgCargo from './pkg-cargo.mjs';
+import pkgDotnet from './pkg-dotnet.mjs';
+import pkgGo from './pkg-go.mjs';
+import pkgGradle from './pkg-gradle.mjs';
+import pkgMaven from './pkg-maven.mjs';
+import pkgPython from './pkg-python.mjs';
 
 export const DETECTORS = Object.freeze([
   // P1
   identity,
   pkgNpm,
+  // P3 — boundary detectors
+  apiAsyncapi, apiGraphql, apiOpenapi, apiProto, configEnv, deployCompose, deployK8s,
+  gitSubmodules, pkgCargo, pkgDotnet, pkgGo, pkgGradle, pkgMaven, pkgPython,
 ]);
 
 /** → the registered Detector with this id, or null */
