@@ -84,6 +84,9 @@ export const FAILURE_POLICY = Object.freeze({
     // A self-parked auto run pauses as RECOVERABLE (the class is kept: "resume when
     // it clears"); a user who gives up on the prompt pauses as ERROR (a verdict).
     auth:        cell(pause(REASON.RECOVERABLE), prompt(pause(REASON.ERROR))),
+    // The model id itself was refused — retrying the same id is futile. The
+    // run parks as an error; resume retries the node once the model is fixed.
+    model:       both(pause(REASON.ERROR)),
     quota:       cell(pause(REASON.RECOVERABLE), prompt(pause(REASON.ERROR))),
     rate_limit:  cell(retry(RECOVERY_MAX_AUTO_ATTEMPTS, pause(REASON.RECOVERABLE)), prompt(pause(REASON.ERROR))),
     network:     cell(retry(RECOVERY_MAX_AUTO_ATTEMPTS, pause(REASON.RECOVERABLE)), prompt(pause(REASON.ERROR))),

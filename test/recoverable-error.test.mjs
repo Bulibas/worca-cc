@@ -86,6 +86,35 @@ test('rateLimitHint names the shared pool (not max-concurrent) only for a shared
   assert.equal(rateLimitHint(new Error('API Error: 429 rate_limit_error')), '');
 });
 
+test('classifies the model id itself being refused as model', () => {
+  // The API's refusal when the endpoint does not serve the id, and the CLI's
+  // catalog-miss wording.
+  assert.equal(classifyError(new Error('claude exited with code 1: API Error: 403 No access to this model: claude-opus-5-5')), 'model');
+  assert.equal(
+    classifyError(new Error('"claude-opus-5-5" isn\'t described by this version\'s model catalog; update Claude Code')),
+    'model',
+  );
+  assert.equal(classifyError(new Error('the endpoint replied: model not found')), 'model');
+  // The stderr notice `[claude-code:unrecognized_model]` is a BENIGN notice
+  // (claude-runner BENIGN_STDERR_PATTERNS): it fires on every spawn whose id the
+  // CLI does not know and never states the cause, so alone it stays unclassified.
+  assert.equal(
+    classifyError(new Error('[claude-code:unrecognized_model] {"model":"claude-opus-5-5","query_source":"sdk"}')),
+    null,
+  );
+});
+
+test('model classification does not swallow neighbouring classes or ordinary mentions', () => {
+  // An ordinary message that merely mentions a model stays unclassified.
+  assert.equal(classifyError(new Error('the agent edited model.ts and broke the build')), null);
+  // A 401 credential failure stays auth even though a model may be named.
+  assert.equal(classifyError(new Error('claude exited with code 1: API Error: 401 for model claude-opus-5-5')), 'auth');
+  // A connection drop stays network even when the request named a model.
+  assert.equal(classifyError(new Error('connection error while sending model claude-opus-5-5')), 'network');
+  // A rate limit stays rate_limit.
+  assert.equal(classifyError(new Error('API Error: 429 rate_limit_error')), 'rate_limit');
+});
+
 test('returns null for a plain bug and accepts a raw string / nullish', () => {
   assert.equal(classifyError(new Error('TypeError: x is not a function')), null);
   assert.equal(classifyError('401 Invalid authentication credentials'), 'auth');

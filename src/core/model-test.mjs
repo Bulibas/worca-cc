@@ -22,6 +22,7 @@ const SYSTEM = 'You are a connectivity check. Reply with exactly OK.';
 export function hintFor(errorClass) {
   switch (errorClass) {
     case 'auth': return 'authentication failed — check the token/secret for this model';
+    case 'model': return 'this model id is not served by the endpoint — pick a model the endpoint serves, or add yours in Settings › Models';
     case 'network': return 'endpoint unreachable — check ANTHROPIC_BASE_URL';
     case 'rate_limit': return 'the endpoint is rate-limiting or overloaded — try again shortly';
     case 'quota': return 'quota/billing problem — check the account behind this endpoint';

@@ -8,7 +8,7 @@ import { resolve as pathResolve } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 import { getDb } from '../src/core/db.mjs';
-import { createAskTurn } from '../src/core/ask/turn.mjs';
+import { createAskTurn, humanErrorText } from '../src/core/ask/turn.mjs';
 import {
   createThread, appendMessage, getMessage, getThread,
   updateThread, setThreadTitle, deleteThread,
@@ -377,6 +377,78 @@ test('a failure on a signed-out CLI ends the turn with ask-error code claude-sig
   assert.equal(last.message, message, 'the raw message still travels');
   assert.equal(last.code, 'claude-signed-out');
   assert.deepEqual(asked, [{ message, model: 'claude-opus-5-5' }]);
+});
+
+test('a classified error persists a human notice block carrying errorClass + detail', async () => {
+  const s = seed();
+  const raw = 'claude exited with code 1: [claude-code:unrecognized_model] {"model":"claude-opus-5-5","query_source":"sdk"}';
+  const { turn, frames } = makeTurn(s, {}, {
+    runClaudeImpl: async () => {
+      throw Object.assign(new Error(raw), { errorClass: 'model' });
+    },
+  });
+  await turn.run();
+  const last = frames.at(-1);
+  assert.equal(last.type, 'ask-error');
+  assert.equal(last.errorClass, 'model');
+  const blocks = getMessage(s.asst.id).blocks;
+  const notice = blocks.find((b) => b && b.kind === 'notice' && b.errorClass === 'model');
+  assert.ok(notice, 'the classified notice block is persisted');
+  assert.equal(notice.text, humanErrorText('model'));
+  assert.equal(notice.detail, raw, 'the raw runner message rides the block for the Details expander');
+  // The frame mirrors ask-done: the terminal blocks ride along, so the LIVE
+  // client renders the classified notice without waiting for a reload.
+  assert.ok(Array.isArray(last.blocks), 'ask-error carries the terminal blocks');
+  assert.ok(last.blocks.some((b) => b && b.kind === 'notice' && b.errorClass === 'model'),
+    'the classified notice is among the frame blocks');
+});
+
+test('a CLI synthetic error line never becomes the answer text; it rides the notice detail instead', async () => {
+  const s = seed();
+  const apiLine = 'Failed to authenticate. API Error: 403 No access to this model: claude-opus-5-5';
+  const stderr = 'claude exited with code 1: [claude-code:unrecognized_model] {"model":"claude-opus-5-5","query_source":"sdk"}';
+  const { turn, frames } = makeTurn(s, {}, {
+    runClaudeImpl: async (opts) => {
+      const onEvent = opts.onEvent;
+      push(onEvent, { type: 'system', subtype: 'init', session_id: 'sess-x', tools: [] });
+      push(onEvent, { type: 'assistant', message: { id: 'synth-1', model: '<synthetic>', content: [{ type: 'text', text: apiLine }] }, parent_tool_use_id: null });
+      push(onEvent, { type: 'result', subtype: 'success', is_error: true, result: apiLine, total_cost_usd: 0, usage: {}, session_id: 'sess-x' });
+      throw Object.assign(new Error(stderr), { errorClass: 'model' });
+    },
+  });
+  await turn.run();
+  const msg = getMessage(s.asst.id);
+  assert.equal(msg.text, '', 'the API refusal line is not persisted as the answer');
+  const notice = (msg.blocks || []).find((b) => b && b.kind === 'notice' && b.errorClass === 'model');
+  assert.ok(notice, 'the classified notice is persisted');
+  assert.match(notice.detail, new RegExp(`${stderr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'the runner verdict is in the detail');
+  assert.match(notice.detail, /Failed to authenticate/, 'the CLI refusal line rides the detail too');
+  const last = frames.at(-1);
+  assert.equal(last.type, 'ask-error');
+  assert.equal(last.text ?? '', '');
+});
+
+test('an unclassified error persists NO notice block (raw message stays the only evidence)', async () => {
+  const s = seed();
+  const { turn, frames } = makeTurn(s, {}, {
+    runClaudeImpl: async () => {
+      throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: undefined });
+    },
+  });
+  await turn.run();
+  const blocks = getMessage(s.asst.id).blocks;
+  assert.equal(blocks.filter((b) => b && b.kind === 'notice').length, 0);
+  assert.ok(Array.isArray(frames.at(-1).blocks), 'ask-error still carries the terminal blocks');
+  assert.equal(frames.at(-1).blocks.filter((b) => b && b.kind === 'notice').length, 0);
+});
+
+test('humanErrorText: known classes map to their line, unknown/undefined is null', () => {
+  for (const cls of ['auth', 'model', 'usage_limit', 'rate_limit', 'quota', 'network']) {
+    assert.equal(typeof humanErrorText(cls), 'string');
+    assert.ok(humanErrorText(cls).length > 0);
+  }
+  assert.equal(humanErrorText('unknown-class'), null);
+  assert.equal(humanErrorText(undefined), null);
 });
 
 test('B-4 guard: an abort rejection NEVER enters the resume fallback', async () => {

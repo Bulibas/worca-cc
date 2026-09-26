@@ -205,6 +205,49 @@ test('ask-panel-render: a signed-out Claude error shows one line whose Sign in�
   assert.equal(opened, 1);
 });
 
+test('ask-panel-render: a classified notice renders the human line, raw detail expert-only', async () => {
+  const detail = 'claude exited with code 1: [claude-code:unrecognized_model] {"model":"claude-opus-5-5","query_source":"sdk"}';
+  const snap = snapBody([
+    asstRow('askm_00000001', 1, {
+      status: 'error',
+      text: 'partial',
+      errorMessage: undefined,
+      blocks: [{
+        kind: 'notice',
+        text: "This model isn't available in your environment — try another model.",
+        errorClass: 'model',
+        detail,
+      }],
+    }),
+  ]);
+  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+  await openThread(ctx);
+  // No raw red line: the classified notice IS the explanation.
+  assert.equal(ctx.doc.querySelector('.ask-error-line'), null);
+  const notice = ctx.doc.querySelector('.ask-notice');
+  assert.ok(notice, 'the classified notice renders');
+  const det = notice.querySelector('details.ask-error-details');
+  assert.equal(det.dataset.minLevel, 'expert', 'the raw detail is gated to expert');
+  assert.match(det.querySelector('.ask-error-detail-text').textContent, /unrecognized_model/);
+  assert.equal(notice.querySelector('.ask-error-action'), null, 'no inline action hijacks the notice');
+});
+
+test('ask-panel-render: a classified notice survives a reload untouched (persisted block)', async () => {
+  const snap = snapBody([
+    asstRow('askm_00000001', 1, {
+      status: 'error',
+      blocks: [{ kind: 'notice', text: 'The endpoint was unreachable — check your connection and retry.', errorClass: 'network', detail: 'connection reset' }],
+    }),
+  ]);
+  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+  await openThread(ctx);
+  // openThread already IS the reload path (GET → load(snapshot) → render), so
+  // this asserts the re-derived render from the persisted block alone.
+  assert.ok(ctx.doc.querySelector('.ask-notice'));
+  assert.equal(ctx.doc.querySelector('.ask-error-action'), null);
+  assert.equal(ctx.doc.querySelector('.ask-error-line'), null);
+});
+
 test('ask-panel-render: notice with href renders an in-app link', async () => {
   const snap = snapBody([asstRow('askm_00000001', 1, { blocks: [{ kind: 'notice', text: 'Run started — "Fix login"', href: '#running/abc-123' }] })]);
   const ctx = makePanel({ fetchHandler: handlerFor(snap) });

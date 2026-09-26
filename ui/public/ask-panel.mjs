@@ -1770,6 +1770,16 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       a.setAttribute('href', b.href);
       n.appendChild(a);
     }
+    // The raw failure evidence, for those who debug: expert only — the human
+    // line above is the explanation at every level.
+    if (b.errorClass && b.detail) {
+      const det = doc.createElement('details');
+      det.className = 'ask-error-details';
+      det.dataset.minLevel = 'expert';
+      det.appendChild(make('summary', null, 'Details'));
+      det.appendChild(make('div', 'ask-error-detail-text', b.detail));
+      n.appendChild(det);
+    }
     return n;
   }
 
@@ -3638,7 +3648,6 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
           else if (b.kind === 'card') wrap.appendChild(buildCard(b, cur));
         }
         if (cur.status === 'error') {
-          const explained = (cur.blocks || []).some((b) => b && b.kind === 'notice');
           if (cur.errorCode === 'claude-signed-out' && typeof openClaudeSetup === 'function') {
             // The CLI's raw "Not logged in" → one line whose link opens Connect Claude Code.
             const line = make('div', 'ask-error-line', "Claude Code isn't signed in. ");
@@ -3647,8 +3656,17 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
             link.addEventListener('click', (e) => { e.preventDefault(); openClaudeSetup(); });
             line.appendChild(link);
             wrap.appendChild(line);
-          } else if (cur.errorMessage) wrap.appendChild(make('div', 'ask-error-line', cur.errorMessage));
-          else if (!explained) wrap.appendChild(make('div', 'ask-error-line', 'This turn ended with an error.'));
+          } else {
+            // A classified notice (errorClass on the block) IS the explanation —
+            // it renders the human line and, at expert, the raw detail in its
+            // own expander. The raw line here is only for the unclassified case.
+            const classified = (cur.blocks || []).some((b) => b && b.kind === 'notice' && b.errorClass);
+            if (!classified) {
+              const explained = (cur.blocks || []).some((b) => b && b.kind === 'notice');
+              if (cur.errorMessage) wrap.appendChild(make('div', 'ask-error-line', cur.errorMessage));
+              else if (!explained) wrap.appendChild(make('div', 'ask-error-line', 'This turn ended with an error.'));
+            }
+          }
         }
         if (isLiveRow(cur)) {
           wrap.appendChild(ensureThinking());   // last child: the bottom of the message
