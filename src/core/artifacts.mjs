@@ -1794,7 +1794,10 @@ export async function listPipelines(projectDir, opts = {}, workspaceKey) {
   const out = [];
   for (const row of rows) {
     row.dir = dirById.get(row.id) || join(pipelinesDir, row.id);
-    out.push(await rowToHistoryEntry(row, projectDir, opts));
+    // A workspace run reads ITS OWN primary member (frozen in workspace_meta at start), never
+    // the registry's current one: the member set can change after the run finished.
+    const ownPrimary = workspaceKey ? j(row.workspace_meta, null)?.projects?.[0]?.projectDir : null;
+    out.push(await rowToHistoryEntry(row, ownPrimary || projectDir, opts));
   }
   out.sort((a, b) => b.mtime - a.mtime);
   return out;

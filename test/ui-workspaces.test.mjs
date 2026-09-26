@@ -1,8 +1,8 @@
 // test/ui-workspaces.test.mjs — jsdom boot tests for the Workspaces view: the list (one row per
 // workspace, the Projects list's shape), the empty placeholder, the stale badge, and the workspace
 // page (#workspaces/<id>[/team]) where all editing happens: the description editor and PATCH,
-// delete (200 + 409-keep), re-scan, the metrics home block and routing, and the
-// no-add/remove-project invariant (read-only set).
+// delete (200 + 409-keep), re-scan, the metrics home block and routing, adding / removing
+// member projects on the page (never from the list), and the list's no-add/remove invariant.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -25,8 +25,8 @@ const PROJECTS = [
 // A WebSocket stub that actually stores listeners (unlike the bare no-op below), so a test
 // can deliver a 'team-metrics-changed' server frame into app.js's 'message' listener.
 class WSStub {
-  constructor() { this.readyState = 1; this._listeners = {}; WSStub.last = this; }
-  send() {} close() {}
+  constructor() { this.readyState = 1; this._listeners = {}; this.sent = []; WSStub.last = this; }
+  send(t) { this.sent.push(t); } close() {}
   addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); }
   deliver(obj) { (this._listeners.message || []).forEach((fn) => fn({ data: JSON.stringify(obj) })); }
 }
@@ -55,7 +55,8 @@ async function boot({ fetchHandler, workspaces = WS, hooks } = {}) {
     const u = String(url);
     if (fetchHandler) { const r = fetchHandler(u, opts || {}); if (r) return r; }
     if (u.includes('/api/projects')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ projects: PROJECTS }) });
-    if (u.endsWith('/api/workspaces') || u.includes('/api/workspaces?')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ workspaces }) });
+    // A copy, as a real response is: the app replaces entries of its list in place.
+    if (u.endsWith('/api/workspaces') || u.includes('/api/workspaces?')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ workspaces: structuredClone(workspaces) }) });
     return Promise.resolve({ ok: true, status: 200, json: async () => ({ config: { steps: {}, customModels: [] }, models: [], efforts: [] }) });
   };
   for (const k of ['window', 'document', 'location', 'localStorage', 'WebSocket', 'fetch', 'navigator', 'requestAnimationFrame']) {
@@ -480,4 +481,172 @@ test('a broken persisted /scopes copy is forgotten, never thrown on: the rows ge
   assert.equal(window.localStorage.getItem('worca-cc.tm.scopes.v1') === '{not json', false, 'the blob is dropped on first read');
   const alpha = rowOf(window.document, 'wks-alpha-00000001');
   assert.match(alpha.querySelector('.ws-projects').textContent, /acme\/gateway/);
+});
+
+// ---- member changes on the page: Add projects (registered non-members) and a Remove per member ----
+
+const THIRD = { name: 'svc-api', path: '/a/svc-api', exists: true, key: 'k5' };
+const withThird = (u) => (u.includes('/api/projects') ? Promise.resolve({ ok: true, status: 200, json: async () => ({ projects: [...PROJECTS, THIRD] }) }) : null);
+
+test('the Projects card offers Add projects and a Remove per member; Remove is disabled at two members', async () => {
+  const { window, show } = await boot({ fetchHandler: withThird });
+  show('workspaces/wks-alpha-00000001');
+  await settle(8);
+  const card = window.document.querySelector('#ws-detail .wd-members');
+  assert.ok(card.querySelector('.wd-members-add'), 'Add projects');
+  const removes = [...card.querySelectorAll('.wd-member-remove')];
+  assert.equal(removes.length, 2, 'one Remove per member');
+  assert.ok(removes.every((b) => b.disabled), 'a workspace keeps at least two members');
+  assert.equal(card.querySelector('.wd-member .wd-member-remove'), null, 'never nested in the member row button');
+});
+
+test('Add projects lists registered non-members; Save posts {add} and the page shows the new member', async () => {
+  const posts = [];
+  const grown = { ...WS[0], projectPaths: [...WS[0].projectPaths, THIRD.path], projectKeys: ['k1', 'k2', 'k5'], exists: [true, true, true] };
+  const { window, show } = await boot({ fetchHandler: (u, opts) => {
+    if (/\/api\/workspaces\/wks-alpha-00000001\/members$/.test(u) && opts.method === 'POST') {
+      posts.push(JSON.parse(opts.body));
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ workspace: grown, clearedHomes: [], rescan: { scanId: 'scan_a' } }) });
+    }
+    return withThird(u);
+  } });
+  show('workspaces/wks-alpha-00000001');
+  await settle(8);
+  const doc = window.document;
+  click(window, doc.querySelector('#ws-detail .wd-members-add'));
+  await settle();
+  const boxes = [...doc.querySelectorAll('#plugin-modal .wd-add-row input[type="checkbox"]')];
+  assert.deepEqual(boxes.map((b) => b.value), [THIRD.path], 'only projects that are not members yet');
+  const addBtn = () => [...doc.querySelectorAll('#plugin-modal button')].find((b) => b.textContent === 'Add');
+  assert.equal(addBtn().disabled, true, 'Add waits for a pick');
+  assert.deepEqual([...doc.querySelectorAll('#plugin-modal-actions button')].map((b) => b.textContent), ['Add'], 'the header\'s Close is the way out');
+  boxes[0].checked = true;
+  boxes[0].dispatchEvent(new window.Event('change', { bubbles: true }));
+  assert.equal(addBtn().disabled, false);
+  click(window, addBtn());
+  await settle(8);
+  assert.deepEqual(posts, [{ add: [THIRD.path] }]);
+  assert.equal(doc.querySelectorAll('#ws-detail .wd-member').length, 3, 'the page shows the new member');
+  assert.ok(doc.querySelector('#ws-detail .wd-members .wd-rescan.is-running'), 'the re-scan loader shows');
+});
+
+/** Open alpha, add THIRD, and return the page's re-scan loader accessor (the members POST starts scan_1). */
+async function addWithRescan(extra = {}) {
+  const grown = { ...WS[0], projectPaths: [...WS[0].projectPaths, THIRD.path], projectKeys: ['k1', 'k2', 'k5'], exists: [true, true, true] };
+  const booted = await boot({ fetchHandler: (u, opts) => {
+    if (/\/api\/workspaces\/wks-alpha-00000001\/members$/.test(u) && opts.method === 'POST') {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ workspace: grown, clearedHomes: [], rescan: { scanId: 'scan_1' }, ...extra }) });
+    }
+    return withThird(u);
+  } });
+  const { window, show } = booted;
+  show('workspaces/wks-alpha-00000001');
+  await settle(8);
+  const doc = window.document;
+  click(window, doc.querySelector('#ws-detail .wd-members-add'));
+  await settle();
+  const box = doc.querySelector('#plugin-modal .wd-add-row input[type="checkbox"]');
+  box.checked = true;
+  box.dispatchEvent(new window.Event('change', { bubbles: true }));
+  click(window, [...doc.querySelectorAll('#plugin-modal button')].find((b) => b.textContent === 'Add'));
+  await settle(8);
+  return { ...booted, doc, loader: () => doc.querySelector('#ws-detail .wd-members .wd-rescan') };
+}
+
+test('a member change shows the re-scan loader: spinner, status, live phase and progress, the Team-tab hint', async () => {
+  const { ws, loader } = await addWithRescan();
+  const el = loader();
+  assert.ok(el.classList.contains('is-running'));
+  assert.equal(el.getAttribute('role'), 'status');
+  assert.ok(el.querySelector('.spinner'), 'the wizard\'s spinner');
+  assert.match(el.querySelector('.status-label').textContent, /re-scanning the workspace/i);
+  assert.deepEqual([...el.querySelectorAll('[data-phase]')].map((n) => n.textContent), ['Graph', 'Investigate', 'Synthesize']);
+  assert.match(el.querySelector('.wd-rescan-hint').textContent, /Team tab/);
+  assert.ok(ws().sent.some((t) => JSON.parse(t).type === 'subscribe' && JSON.parse(t).scanId === 'scan_1'), 'subscribed to the scan');
+  ws().deliver({ type: 'scan-progress', scanId: 'scan_other', phase: 'synthesize', message: 'not ours' });
+  ws().deliver({ type: 'scan-progress', scanId: 'scan_1', phase: 'investigate', message: 'investigating relations…', projectsDone: 1, projectsTotal: 3 });
+  await settle(4);
+  const now = loader();
+  assert.deepEqual([...now.querySelectorAll('[data-phase].active')].map((n) => n.dataset.phase), ['investigate']);
+  assert.equal(now.querySelector('.status-sub').textContent, 'investigating relations… · 1 / 3 projects');
+});
+
+test('the re-scan loader turns done on the saved description and failed on rescan-failed; another workspace changes nothing', async () => {
+  const { ws, loader } = await addWithRescan();
+  ws().deliver({ type: 'workspaces-changed', action: 'rescan-failed', workspaceId: 'wks-other-00000009' });
+  await settle(8);
+  assert.ok(loader().classList.contains('is-running'), 'another workspace\'s frame changes nothing');
+  ws().deliver({ type: 'workspaces-changed', action: 'rescan-failed', workspaceId: 'wks-alpha-00000001' });
+  await settle(8);
+  assert.ok(loader().classList.contains('is-failed'));
+  assert.equal(loader().querySelector('.spinner'), null, 'no spinner once it ended');
+  assert.match(loader().textContent, /Re-scan failed/);
+  ws().deliver({ type: 'workspaces-changed', action: 'description', workspaceId: 'wks-alpha-00000001' });
+  await settle(8);
+  assert.ok(loader().classList.contains('is-done'));
+  assert.match(loader().textContent, /description was refreshed/i);
+});
+
+test('a cleared home is named in the loader', async () => {
+  const { loader } = await addWithRescan({ clearedHomes: ['metrics'] });
+  assert.match(loader().querySelector('.wd-rescan-hint').textContent, /metrics home was cleared/);
+});
+
+test('a re-scan still running when the page loads shows its loader and resubscribes', async () => {
+  const { window, show, ws } = await boot({ workspaces: [{ ...WS[0], rescan: { scanId: 'scan_live', phase: 'graph', message: 'building graph for svc-ui…' } }, WS[1]] });
+  show('workspaces/wks-alpha-00000001');
+  await settle(8);
+  const el = window.document.querySelector('#ws-detail .wd-rescan.is-running');
+  assert.ok(el, 'the loader is back after a reload');
+  assert.deepEqual([...el.querySelectorAll('[data-phase].active')].map((n) => n.dataset.phase), ['graph']);
+  assert.match(el.querySelector('.status-sub').textContent, /building graph for svc-ui/);
+  assert.ok(ws().sent.some((t) => JSON.parse(t).scanId === 'scan_live'));
+});
+
+test('Remove confirms, posts {remove}; a 409 (live run) keeps the member and shows the error on the header', async () => {
+  const three = { ...WS[0], projectPaths: [...WS[0].projectPaths, THIRD.path], projectKeys: ['k1', 'k2', 'k5'], exists: [true, true, true] };
+  const posts = [];
+  let status = 409;
+  const { window, show } = await boot({ workspaces: [three, WS[1]], fetchHandler: (u, opts) => {
+    if (/\/api\/workspaces\/wks-alpha-00000001\/members$/.test(u) && opts.method === 'POST') {
+      posts.push(JSON.parse(opts.body));
+      return Promise.resolve(status === 409
+        ? { ok: false, status: 409, json: async () => ({ error: 'cannot change the members of a workspace with a live run or scan' }) }
+        : { ok: true, status: 200, json: async () => ({ workspace: { ...WS[0] }, clearedHomes: [] }) });
+    }
+    return withThird(u);
+  } });
+  show('workspaces/wks-alpha-00000001');
+  await settle(8);
+  const doc = window.document;
+  const removeOf = (path) => [...doc.querySelectorAll('#ws-detail .wd-member-remove')].find((b) => b.dataset.path === path);
+  assert.equal(removeOf(THIRD.path).disabled, false);
+  click(window, removeOf(THIRD.path));
+  await confirmDialog(window);
+  await settle(8);
+  assert.deepEqual(posts, [{ remove: THIRD.path }]);
+  assert.equal(doc.querySelectorAll('#ws-detail .wd-member').length, 3, 'still a member');
+  assert.match(doc.querySelector('#ws-detail .pd-error').textContent, /live run/);
+  status = 200;
+  click(window, removeOf(THIRD.path));
+  await confirmDialog(window);
+  await settle(8);
+  assert.equal(doc.querySelectorAll('#ws-detail .wd-member').length, 2, 'removed');
+});
+
+test('Add projects with nothing left to add leads to the Projects page and starts its Add project flow', async () => {
+  const { window, show } = await boot({ fetchHandler: (u) => (u.includes('/api/fs/pick')
+    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ status: 'canceled' }) }) : null) });
+  show('workspaces/wks-alpha-00000001');
+  await settle(8);
+  const doc = window.document;
+  click(window, doc.querySelector('#ws-detail .wd-members-add'));
+  await settle();
+  assert.match(doc.querySelector('#plugin-modal .wd-add-list').textContent, /already a member/);
+  const buttons = [...doc.querySelectorAll('#plugin-modal-actions button')];
+  assert.deepEqual(buttons.map((b) => b.textContent), ['Add project'], 'one way forward; the header\'s Close is the way out');
+  click(window, buttons[0]);
+  await settle(8);
+  assert.equal(window.location.hash, '#projects', 'on the Projects page');
+  assert.equal(doc.getElementById('plugin-modal').classList.contains('hidden'), true, 'the dialog closed');
 });

@@ -245,3 +245,124 @@ test('updateWorkspace omitting metricsProject leaves the existing home untouched
   const up = await updateWorkspace(ws.id, { description: 'new desc' });
   assert.equal(up.metricsProject, a, 'home survives an update that does not mention it');
 });
+
+// ---- membership changes: addWorkspaceMembers / removeWorkspaceMember ----
+import { addWorkspaceMembers, removeWorkspaceMember } from '../src/core/workspaces.mjs';
+
+test('addWorkspaceMembers appends new members, keeps the frozen id, stamps updatedAt', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const ws = await createWorkspace({ name: 'Grow', projectPaths: [a, b] });
+  await new Promise((r) => setTimeout(r, 5));
+  const up = await addWorkspaceMembers(ws.id, [c]);
+  assert.equal(up.id, ws.id, 'id frozen across a membership change');
+  assert.deepEqual([...up.projectPaths].sort(), [a, b, c].sort());
+  assert.notEqual(up.updatedAt, ws.updatedAt, 'updatedAt advanced');
+  const rows = getDb().prepare('SELECT project_key, ordinal FROM workspace_projects WHERE workspace_id = ? ORDER BY ordinal').all(ws.id);
+  assert.deepEqual(rows.map((r) => r.project_key), [a, b, c], 'appended after the existing ordinals');
+  assert.deepEqual([...(await readWorkspace(ws.id)).projectPaths].sort(), [a, b, c].sort(), 'persisted');
+});
+
+test('addWorkspaceMembers refuses an existing member, a non-dir, a non-git dir and an unknown id', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const ws = await createWorkspace({ name: 'Picky', projectPaths: [a, b] });
+  await assert.rejects(() => addWorkspaceMembers(ws.id, [a]), (e) => e.code === 'BAD_REQUEST' && /already a member/.test(e.message));
+  await assert.rejects(() => addWorkspaceMembers(ws.id, []), (e) => e.code === 'BAD_REQUEST');
+  await assert.rejects(() => addWorkspaceMembers(ws.id, [join(a, 'nope')]), (e) => e.code === 'BAD_REQUEST' && /does not exist/.test(e.message));
+  const plain = await mkdtemp(join(tmpdir(), 'worca-cc-wsdb-plain-'));
+  created.push(plain);
+  await assert.rejects(() => addWorkspaceMembers(ws.id, [plain]), (e) => e.code === 'BAD_REQUEST' && /not a git repository/.test(e.message));
+  await assert.rejects(() => addWorkspaceMembers('wks-ghost-00000000', [a]), (e) => e.code === 'NOT_FOUND');
+  assert.equal((await readWorkspace(ws.id)).projectPaths.length, 2, 'nothing written on a refusal');
+});
+
+test('addWorkspaceMembers refuses a set another workspace already has (DUPLICATE_SET)', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  await createWorkspace({ name: 'Three', projectPaths: [a, b, c] });
+  const two = await createWorkspace({ name: 'Two', projectPaths: [a, b] });
+  await assert.rejects(() => addWorkspaceMembers(two.id, [c]), (e) => e.code === 'DUPLICATE_SET');
+});
+
+test('removeWorkspaceMember drops one member, keeps the id, refuses going below 2', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const ws = await createWorkspace({ name: 'Shrink', projectPaths: [a, b, c] });
+  const up = await removeWorkspaceMember(ws.id, b);
+  assert.equal(up.id, ws.id);
+  assert.deepEqual([...up.projectPaths].sort(), [a, c].sort());
+  assert.deepEqual([...(await readWorkspace(ws.id)).projectPaths].sort(), [a, c].sort(), 'persisted');
+  await assert.rejects(() => removeWorkspaceMember(ws.id, a), (e) => e.code === 'BAD_REQUEST' && /at least 2/.test(e.message));
+  await assert.rejects(() => removeWorkspaceMember(ws.id, b), (e) => e.code === 'BAD_REQUEST' && /not a member/.test(e.message));
+  await assert.rejects(() => removeWorkspaceMember('wks-ghost-00000000', a), (e) => e.code === 'NOT_FOUND');
+});
+
+test('removeWorkspaceMember works for a member that vanished from disk', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const ws = await createWorkspace({ name: 'Gone', projectPaths: [a, b, c] });
+  await rm(c, { recursive: true, force: true });
+  const up = await removeWorkspaceMember(ws.id, c);
+  assert.deepEqual([...up.projectPaths].sort(), [a, b].sort());
+});
+
+test('removeWorkspaceMember clears the metrics / policy home it removes; other homes stay', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const ws = await createWorkspace({ name: 'Homes', projectPaths: [a, b, c], metricsProject: a, policyProject: b });
+  const up = await removeWorkspaceMember(ws.id, a);
+  assert.equal(up.metricsProject, null, 'the removed metrics home is cleared');
+  assert.equal(up.policyProject, b, 'the policy home is untouched');
+  const again = await removeWorkspaceMember((await addWorkspaceMembers(ws.id, [a])).id, b);
+  assert.equal(again.policyProject, null, 'the removed policy home is cleared');
+  assert.equal((await readWorkspace(ws.id)).policyProject, null, 'persisted');
+});
+
+test('removeWorkspaceMember refuses a set another workspace already has (DUPLICATE_SET)', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  await createWorkspace({ name: 'Pair', projectPaths: [a, b] });
+  const three = await createWorkspace({ name: 'Trio', projectPaths: [a, b, c] });
+  await assert.rejects(() => removeWorkspaceMember(three.id, c), (e) => e.code === 'DUPLICATE_SET');
+});
+
+test('a finished workspace run keeps reading its own primary member after the member set changes', async () => {
+  const { seedWorkspacePipeline } = await import('./helpers/db-seed.mjs');
+  const { listWorkspacePipelines } = await import('../src/core/artifacts.mjs');
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const ws = await createWorkspace({ name: 'History', projectPaths: [a, b] });
+  const primary = ws.projectPaths[0];
+  spawnSync('git', ['branch', 'worca/feature-x'], { cwd: primary });
+  const projects = ws.projectKeys.map((k, i) => ({ projectKey: k, projectDir: ws.projectPaths[i], projectName: 'm' }));
+  await seedWorkspacePipeline(primary, ws.id, {
+    title: 'old run', status: 'done', projects, branch: { feature: 'worca/feature-x', source: 'main' },
+  }, projects);
+  // The live registry's primary may now be another member (projectPaths re-sort by key):
+  // the run's branch lives only in ITS primary, which the history row must still read.
+  await addWorkspaceMembers(ws.id, [c]);
+  const [row] = await listWorkspacePipelines(ws.id, c);
+  assert.equal(row.survived, true, 'the branch is found in the run\'s own primary, not the live one');
+});
+
+test('createWorkspace refuses cleanly when its key is still held by a workspace whose set changed since', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const first = await createWorkspace({ name: 'Same Name', projectPaths: [a, b] });
+  await addWorkspaceMembers(first.id, [c]);
+  // "Same-Name" is a different name (the NOCASE guard passes) with the same slug, over the
+  // first workspace's ORIGINAL set: the same key — a coded refusal, never a raw PK error.
+  await assert.rejects(
+    () => createWorkspace({ name: 'Same-Name', projectPaths: [a, b] }),
+    (e) => e.code === 'DUPLICATE_NAME' && /choose another name/.test(e.message),
+  );
+});

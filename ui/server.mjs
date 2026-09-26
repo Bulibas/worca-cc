@@ -99,14 +99,14 @@ import { getStats, budgetWindowSavings } from '../src/core/stats.mjs';
 import {
   enableTeamMetrics, setRecordMyRuns, flushSlug, flushAll, flushProject, scheduleFlush, discoverProject,
   discoverAll, scanMembers, routeWorkspaceMembers, projectMetricsStatus, startTeamMetricsBackground,
-  metricsEvents, slugDirName, autoMetricsHome,
+  metricsEvents, slugDirName,
 } from '../src/core/metrics/sync.mjs';
 import { readScope, scopeSources, listScopes, parseScopeParam, aggregate, resolveRange, GROUP_BYS, PROJECT_KEY_RE as TM_PROJECT_KEY_RE } from '../src/core/metrics/read.mjs';
 import { resolveRunPrs, listPrEvents, MAX_LOOKUPS as TM_MAX_PR_LOOKUPS } from '../src/core/metrics/prs.mjs';
 // Team policy (team-policy design §9, §11): the worca-policy branch, its gates and its pages.
 import {
   policyEvents, discoverPolicy, discoverAllPolicies, resolveProjectPolicy, resolveWorkspacePolicy, enableTeamPolicy, publishPolicy,
-  projectPolicyStatus, listPolicyScopes, routeWorkspaceMembersPolicy, autoPolicyHome, startTeamPolicyBackground,
+  projectPolicyStatus, listPolicyScopes, routeWorkspaceMembersPolicy, startTeamPolicyBackground,
 } from '../src/core/policy/sync.mjs';
 import { deviationsFor, fieldsForRun, capSummary } from '../src/core/policy/effective.mjs';
 import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
@@ -165,6 +165,8 @@ import { scheduleEventPrompt, scheduleNoticeText } from '../src/core/ask/schedul
 import { applyModelChange } from '../src/core/ask/model-deps.mjs';
 import { modelEventPrompt, modelNoticeText } from '../src/core/ask/model-proposal.mjs';
 import { cloneEventPrompt, cloneNoticeText } from '../src/core/ask/clone-proposal.mjs';
+import { workspaceEventPrompt, workspaceNoticeText } from '../src/core/ask/workspace-proposal.mjs';
+import { applyWorkspaceChange, createWorkspaceWithHomes } from '../src/core/ask/workspace-deps.mjs';
 import { registryPortsFn } from '../src/core/graph/registry-ports.mjs';
 import { sweepV1Runs, V1_RUN_RETIRED, getDb } from '../src/core/db.mjs';
 import { exportWorkflow, exportWorkflowPlugin, ON_CONFLICT_MODES, RESOLUTION_CHOICES } from '../src/core/workflow-export.mjs';
@@ -181,8 +183,9 @@ import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, lis
 import { isSyntacticRef } from '../src/core/ask/proposal.mjs';
 import { archivePipeline, discardRetainedWorktrees } from '../src/core/pipeline-delete.mjs';
 import {
-  listWorkspaces, readWorkspace, createWorkspace,
+  listWorkspaces, readWorkspace,
   updateWorkspace, deleteWorkspace, isGitRepo, WORKSPACE_KEY_RE, countWorkspaces,
+  addWorkspaceMembers, removeWorkspaceMember, rootsHash,
 } from '../src/core/workspaces.mjs';
 import { listWorkspacePipelines, readWorkspacePipeline, appendAuditById } from '../src/core/artifacts.mjs';
 import { generateOverview } from '../src/core/overview-agent.mjs';
@@ -932,6 +935,13 @@ function wireScan(entry) {
       else if (name === 'scan-done') entry.status = 'done';
       else if (name === 'scan-error') entry.status = 'error';
       record(event);
+      if (entry.autoRescan && name === 'scan-done') {
+        saveRescanDescription({ workspaceId: entry.workspaceId, projectPaths: entry.scanPaths }, event.description)
+          .then((saved) => { if (saved) broadcast({ type: 'workspaces-changed', action: 'description', workspaceId: entry.workspaceId }); })
+          .catch((err) => console.error(`[worca-ui] saving the re-scan description failed: ${err && err.message ? err.message : err}`));
+      } else if (entry.autoRescan && name === 'scan-error' && event.message !== 'stopped') {
+        broadcast({ type: 'workspaces-changed', action: 'rescan-failed', workspaceId: entry.workspaceId });
+      }
     });
   }
 }
@@ -2156,7 +2166,9 @@ async function fireTicket(ticket) {
         for (const dir of ws.projectPaths) {
           const key = projectKey(dir);
           const br = prev.sourceBranchByKey[key];
-          if (!br) return { ok: false, error: `the run before it has no branch for ${path.basename(dir)}`, transient: false };
+          // A member added after the run before it: no branch of its own yet, so it starts from
+          // its default source branch (buildWorkspaceMembers' fallback for a key the map lacks).
+          if (!br) continue;
           if (!(await isValidSourceRef(dir, br))) return { ok: false, error: `branch ${br} no longer exists in ${path.basename(dir)}`, transient: false };
         }
       }
@@ -4553,9 +4565,25 @@ app.get('/api/fs/dirs', async (req, res) => {
 // /api/projects + /api/workflows. The :id is the workspaceKey, validated against
 // WORKSPACE_KEY_RE before any disk touch (a stale/crafted id reads as 404).
 // ---------------------------------------------------------------------------
+/** The automatic re-scan still running for a workspace, with its last progress (the page's loader
+ *  after a reload; it resubscribes to the scanId for the rest), or null. */
+function liveRescanOf(id) {
+  for (const r of runs.values()) {
+    if (r.workspaceId !== id || r.kind !== 'scan' || !r.autoRescan) continue;
+    if (!['running', 'scanning'].includes(String(r.status || '').toLowerCase())) continue;
+    const last = [...(r.events || [])].reverse().find((e) => e && e.type === 'scan-progress') || {};
+    return {
+      scanId: r.scanId || r.id, phase: last.phase || 'graph', message: last.message || '',
+      ...(last.projectsTotal != null ? { projectsDone: last.projectsDone || 0, projectsTotal: last.projectsTotal } : {}),
+    };
+  }
+  return null;
+}
+const withRescan = (w) => { const rescan = w && liveRescanOf(w.id); return rescan ? { ...w, rescan } : w; };
+
 app.get('/api/workspaces', async (_req, res) => {
   try {
-    res.json({ workspaces: await listWorkspaces() });
+    res.json({ workspaces: (await listWorkspaces()).map(withRescan) });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -4567,7 +4595,7 @@ app.get('/api/workspaces/:id', async (req, res) => {
   try {
     const workspace = await readWorkspace(id);
     if (!workspace) return res.status(404).json({ error: 'workspace not found' });
-    res.json({ workspace });
+    res.json({ workspace: withRescan(workspace) });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -4585,18 +4613,16 @@ app.post('/api/workspaces', async (req, res) => {
   try {
     // No explicit home (the create wizard no longer asks): adopt the one member that already
     // records, if there is exactly one; every other case is "Choose…" on the workspace card.
-    const explicit = typeof body.metricsProject === 'string' && body.metricsProject ? body.metricsProject : null;
-    const metricsProject = explicit ?? await autoMetricsHome(projectPaths);
     // Team policy home (design §9): defaults to the metrics home when that member's policy
-    // resolves, else the one member (or shared home) whose policy does; else unset.
-    let policyProject = typeof body.policyProject === 'string' && body.policyProject ? body.policyProject : null;
-    if (!policyProject) {
-      const viaMetrics = metricsProject ? await resolveProjectPolicy(metricsProject, { discover: false }).catch(() => null) : null;
-      policyProject = viaMetrics?.ok ? metricsProject : await autoPolicyHome({ projectPaths }).catch(() => null);
-    }
-    const workspace = await createWorkspace({ name: body.name, projectPaths, description: body.description, metricsProject, policyProject });
+    // resolves, else the one member (or shared home) whose policy does; else unset. The same
+    // rules create a workspace from Ask's workspace card (workspace-deps.mjs).
+    const { workspace, metricsHomeAuto } = await createWorkspaceWithHomes({
+      name: body.name, projectPaths, description: body.description,
+      metricsProject: typeof body.metricsProject === 'string' && body.metricsProject ? body.metricsProject : null,
+      policyProject: typeof body.policyProject === 'string' && body.policyProject ? body.policyProject : null,
+    });
     emitChanged('workspaces-changed', 'created');
-    res.status(201).json({ workspace, metricsHomeAuto: !explicit && !!metricsProject });
+    res.status(201).json({ workspace, metricsHomeAuto });
   } catch (err) {
     const status = workspaceErrorStatus(err && err.code);
     return res.status(status).json({ error: err && err.message ? err.message : String(err) });
@@ -4607,9 +4633,10 @@ app.patch('/api/workspaces/:id', async (req, res) => {
   const id = req.params.id;
   if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
   const body = req.body || {};
-  // Immutability (defense-in-depth, §2.3): the project set never changes via PATCH.
+  // The member set never changes via PATCH (defense-in-depth, §2.3): it has its own
+  // route, POST /api/workspaces/:id/members, behind the live-run guard.
   if ('projectPaths' in body || 'projectKeys' in body) {
-    return badRequest(res, 'a workspace project set is immutable; PATCH accepts only name/description/metricsProject');
+    return badRequest(res, 'PATCH accepts only name/description/metricsProject/policyProject; change members with POST /api/workspaces/:id/members');
   }
   // Pass through only the editable fields.
   const patch = {};
@@ -4638,15 +4665,94 @@ app.patch('/api/workspaces/:id', async (req, res) => {
   }
 });
 
+/** A live run, or a scan the USER started (the wizard's re-scan), of this workspace in THIS
+ *  process (the runs Map) blocks a member change or a delete; an automatic re-scan does not —
+ *  the change supersedes it (supersedeRescans). */
+function workspaceMembersBusy(id) {
+  return [...runs.values()].some((r) =>
+    r.workspaceId === id && !(r.kind === 'scan' && r.autoRescan) &&
+    ['running', 'starting', 'created', 'scanning', 'pausing'].includes(String(r.status || '').toLowerCase()));
+}
+
+/** Stop the automatic re-scans still running for a workspace: their member set is out of date. */
+function supersedeRescans(id) {
+  for (const r of runs.values()) {
+    if (r.workspaceId !== id || r.kind !== 'scan' || !r.autoRescan) continue;
+    if (!['running', 'scanning'].includes(String(r.status || '').toLowerCase())) continue;
+    try { r.orch && typeof r.orch.stop === 'function' && r.orch.stop(); } catch { /* best-effort */ }
+    r.status = 'stopped';
+  }
+}
+
+/**
+ * Save an automatic re-scan's description — only while the workspace still has exactly the
+ * member set the scan looked at (a later change started its own re-scan). Returns whether it saved.
+ */
+async function saveRescanDescription({ workspaceId, projectPaths }, description) {
+  const ws = await readWorkspace(workspaceId);
+  if (!ws || typeof description !== 'string' || !description.trim()) return false;
+  if (rootsHash(ws.projectPaths) !== rootsHash(projectPaths)) return false;
+  await updateWorkspace(workspaceId, { description });
+  return true;
+}
+
+/**
+ * After a member change (the members route and Ask's workspace card): discover the added
+ * members' metrics / policy branches (so the Team tab and the homes read them at once), then
+ * re-scan the workspace — per-member graphify graphs and a new description, saved when it
+ * finishes. Runs build their own graphs per member worktree from the registry at start, so the
+ * next run already covers the new set. Returns {scanId}.
+ */
+function afterMembersChanged(workspace, added = []) {
+  supersedeRescans(workspace.id);
+  for (const dir of added) {
+    discoverProject(dir, { force: true }).then(() => emitChanged('team-metrics-changed', 'discovered')).catch(() => { /* retried hourly */ });
+    discoverPolicy(dir, { force: true }).then(() => emitChanged('team-policy-changed', 'discovered')).catch(() => { /* retried hourly */ });
+  }
+  const scanId = startScan({ projectPaths: workspace.projectPaths, name: workspace.name, workspaceId: workspace.id, autoRescan: true });
+  return { scanId };
+}
+
+// Change the member set: body {add: [paths]} or {remove: path}. The id stays frozen
+// (workspaces.mjs D1). 409 while a run (or a scan the user started) of the workspace is
+// live — a live run keeps its own frozen members, but the metrics / policy home it
+// resolves at its end must not move under it. Removing the home member clears that home
+// (clearedHomes). Every change re-scans the workspace (afterMembersChanged -> rescan).
+app.post('/api/workspaces/:id/members', async (req, res) => {
+  const id = req.params.id;
+  if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
+  const body = req.body || {};
+  const adding = Array.isArray(body.add);
+  const removing = typeof body.remove === 'string';
+  if (adding === removing) return badRequest(res, 'give add (an array of project paths) or remove (one project path)');
+  if (workspaceMembersBusy(id)) return res.status(409).json({ error: 'cannot change the members of a workspace with a live run or scan' });
+  try {
+    const before = await readWorkspace(id);
+    if (!before) return res.status(404).json({ error: 'workspace not found' });
+    const workspace = adding
+      ? await addWorkspaceMembers(id, body.add.map((p) => resolveProjectDir(p)).filter(Boolean))
+      : await removeWorkspaceMember(id, body.remove);
+    const rescan = afterMembersChanged(workspace, workspace.projectPaths.filter((p) => !before.projectPaths.includes(p)));
+    const clearedHomes = [
+      ...(before.metricsProject && !workspace.metricsProject ? ['metrics'] : []),
+      ...(before.policyProject && !workspace.policyProject ? ['policy'] : []),
+    ];
+    emitChanged('workspaces-changed', 'members');
+    if (clearedHomes.includes('policy')) emitChanged('team-policy-changed', 'policy-home');
+    res.json({ workspace, clearedHomes, rescan });
+  } catch (err) {
+    const status = workspaceErrorStatus(err && err.code);
+    return res.status(status).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
 app.delete('/api/workspaces/:id', async (req, res) => {
   const id = req.params.id;
   if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
   // 409 while a live workspace run OR live scan for this workspace exists. The
   // module-level deleteWorkspace has no runs map, so this guard lives here (§2.3).
-  const live = [...runs.values()].some((r) =>
-    r.workspaceId === id &&
-    ['running', 'starting', 'created', 'scanning', 'pausing'].includes(String(r.status || '').toLowerCase()));
-  if (live) return res.status(409).json({ error: 'cannot delete a workspace with a live run or scan' });
+  if (workspaceMembersBusy(id)) return res.status(409).json({ error: 'cannot delete a workspace with a live run or scan' });
+  supersedeRescans(id);   // an automatic re-scan has nothing left to describe
   try {
     const report = await deleteWorkspace(id);
     try { if (cancelForTarget({ workspaceId: id })) emitChanged('schedules-changed', 'target-removed'); }
@@ -4675,7 +4781,7 @@ app.delete('/api/workspaces/:id', async (req, res) => {
  * @param {{projectPaths:string[], name?:string, workspaceId?:string}} args
  * @returns {string} scanId
  */
-function startScan({ projectPaths, name, workspaceId }) {
+function startScan({ projectPaths, name, workspaceId, autoRescan = false }) {
   const orch = createWorkspaceScan({
     projectPaths,
     name,
@@ -4698,6 +4804,9 @@ function startScan({ projectPaths, name, workspaceId }) {
     startedAt: new Date().toISOString(),
     events: [],
     pendingQuestion: null,
+    // A re-scan the server started after a member change: it saves its own description
+    // (saveRescanDescription) and a newer member change supersedes it.
+    ...(autoRescan ? { autoRescan: true, scanPaths: [...projectPaths] } : {}),
   };
   runs.set(scanId, entry);
   wireScan(entry);
@@ -4751,6 +4860,7 @@ app.post('/api/workspaces/:id/scan', async (req, res) => {
       r.workspaceId === id && r.kind === 'workspace-run' &&
       ['running', 'starting', 'created'].includes(String(r.status || '').toLowerCase()));
     if (liveRun) return res.status(409).json({ error: 'a live run exists for this workspace' });
+    supersedeRescans(ws.id);   // the user's own re-scan replaces an automatic one
     const scanId = startScan({ projectPaths: ws.projectPaths, name: ws.name, workspaceId: ws.id });
     res.json({ scanId });
   } catch (err) {
@@ -6629,7 +6739,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
         // workflowId once the user saved it; a run card keeps its pre-P3 line byte for byte.
         const wf = !!(b.card && b.card.type === 'workflow');
         if (wf && b.state === 'building') continue;   // transient (no name yet) — never worth a header line
-        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone')) {
+        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'workspace')) {
           cards.push({ id: b.id, type: b.card.type, state: b.state, summary: b.card.summary || '' });
           continue;
         }
@@ -7069,9 +7179,9 @@ async function startMetricsEventTurn(threadId, block) {
   const state = block.state === 'declined' ? 'declined' : block.state === 'failed' ? 'failed' : 'applied';
   const result = card.result || null;
   // One event turn for every non-workflow card; the type picks the wording. Metrics is the fallback.
-  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' ? card.type : 'metrics';
-  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, metrics: metricsEventPrompt }[kind];
-  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, metrics: metricsNoticeText }[kind];
+  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'workspace' ? card.type : 'metrics';
+  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, workspace: workspaceEventPrompt, metrics: metricsEventPrompt }[kind];
+  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, workspace: workspaceNoticeText, metrics: metricsNoticeText }[kind];
   const text = eventPrompt({ cardId: block.id, state, card, result });
   const notice = noticeText({ state, card, result });
   let mv = await validateModelEffort(thread.model, thread.effort);
@@ -7167,6 +7277,47 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
         let result;
         try { result = await applyModelChange(found.block.card); emitChanged('settings-changed'); }
         catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err) }; }
+        block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
+      } finally { askCardBusy.delete(cardId); }
+      if (!block) return res.status(409).json({ error: 'card vanished' });
+      const turn = await startMetricsEventTurn(id, block);
+      return res.json({ block, turn });
+    }
+    if (found.block.card && found.block.card.type === 'workspace') {
+      // Workspace card: proposed → applied | failed | declined. The registry write happens HERE, behind the
+      // click, through the same core functions as the workspace routes — and behind the same live-run guard.
+      if (body.state !== 'applied' && body.state !== 'declined') return badRequest(res, 'state must be "applied" or "declined"');
+      if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
+      if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
+      if (body.state === 'declined') {
+        const block = flipCard(id, cardId, { state: 'declined' });
+        if (!block) return res.status(409).json({ error: 'card vanished' });
+        const turn = await startMetricsEventTurn(id, block);
+        return res.json({ block, turn });
+      }
+      askCardBusy.add(cardId);
+      let block;
+      try {
+        const card = found.block.card;
+        const wid = card.change && card.change.workspaceId;
+        let result;
+        try {
+          if (card.kind !== 'create' && card.kind !== 'rename' && wid && workspaceMembersBusy(wid)) {
+            throw new Error('cannot change the members of a workspace with a live run or scan');
+          }
+          const before = wid ? await readWorkspace(wid) : null;
+          result = await applyWorkspaceChange(card);
+          if (card.kind !== 'rename') {
+            // A new or changed member set: discover the new members and re-scan (graphs + description).
+            const ws = await readWorkspace(result.workspaceId);
+            if (ws) {
+              const { scanId } = afterMembersChanged(ws, ws.projectPaths.filter((p) => !(before?.projectPaths || []).includes(p)));
+              result = { ...result, scanId, detail: `${result.detail} · re-scanning the description` };
+            }
+          }
+          emitChanged('workspaces-changed', card.kind === 'create' ? 'created' : card.kind === 'rename' ? 'renamed' : 'members');
+          if (result.clearedHomes.includes('policy')) emitChanged('team-policy-changed', 'policy-home');
+        } catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err), code: (err && err.code) || 'ERROR' }; }
         block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
       } finally { askCardBusy.delete(cardId); }
       if (!block) return res.status(409).json({ error: 'card vanished' });
@@ -8828,7 +8979,7 @@ if (isMain) {
 
 export { app, server, runs };
 export const _testing = {
-  wireRun, wireScan, summarizeRuns, startScan, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
+  wireRun, wireScan, summarizeRuns, startScan, saveRescanDescription, fireTicket, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
   chatActions, chatRouter, channelHost, handleChatInbound, enqueueChatWork, answerRun,
   chatNotifier, resumeRun, resolveHljsAssets, resolveEsmAsset, askJobs, askFollowers, askDeleting, resolveAskContext, flipCard,
   startCloneJob, followCloneCard, CLONE_JOBS,

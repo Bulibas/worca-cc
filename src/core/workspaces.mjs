@@ -219,59 +219,96 @@ function normalizeMembers(projectPaths) {
   return out;
 }
 
+/** Throw DUPLICATE_SET when a workspace other than `selfId` (null: any) already spans exactly `paths`. */
+function assertUniqueSet(paths, selfId) {
+  const hash = rootsHash(paths);
+  for (const row of prepare('SELECT id FROM workspaces').all()) {
+    if (row.id !== selfId && rootsHash(memberPaths(row.id)) === hash) {
+      throw err('a workspace over this exact project set already exists', 'DUPLICATE_SET');
+    }
+  }
+}
+
+/** A trimmed, non-empty name no OTHER workspace holds (case-insensitive). */
+function checkName(raw, selfId) {
+  const name = (typeof raw === 'string' ? raw : '').trim();
+  if (!name) throw err('workspace name is required', 'BAD_REQUEST');
+  if (prepare('SELECT 1 FROM workspaces WHERE name = ? COLLATE NOCASE AND id <> ?').get(name, selfId ?? '')) {
+    throw err(`a workspace named "${name}" already exists`, 'DUPLICATE_NAME');
+  }
+  return name;
+}
+
+/** Each NEW member must be an existing directory inside a git work tree. */
+function checkNewMembers(paths) {
+  for (const p of paths) {
+    if (!isDir(p)) throw err(`member path does not exist or is not a directory: ${p}`, 'BAD_REQUEST');
+    if (!isGitRepo(p)) throw err(`member path is not a git repository: ${p}`, 'BAD_REQUEST');
+  }
+}
+
+/** The persisted entry, or NOT_FOUND. */
+function entryOrThrow(id) {
+  getDb();
+  const entry = typeof id === 'string' && id ? readEntry(id) : null;
+  if (!entry) throw err(`workspace not found: ${id}`, 'NOT_FOUND');
+  return entry;
+}
+
 /**
- * Create a workspace. Validates name (non-empty + unique case-insensitive),
- * a 2+ distinct-git-repo member set (de-duped by canonical root), and a unique
- * project set (D1, by rootsHash). Persists the workspaces row + ordered
- * workspace_projects member rows (member PATH stored in the project_key column)
- * in ONE tx(). id is the frozen workspaceKey, computed once. Returns the
+ * Validate a new workspace without writing anything (createWorkspace runs it inside
+ * its tx; Ask's workspace card runs it to propose). Name non-empty + unique
+ * case-insensitive, a 2+ distinct-git-repo member set (de-duped by canonical root), a
+ * unique project set (D1, by rootsHash), homes that are members, and a free key.
+ * @returns {{id, name, description, members:string[], metricsProject, policyProject}}
+ * @throws err(code: BAD_REQUEST | DUPLICATE_NAME | DUPLICATE_SET)
+ */
+export function planWorkspaceCreate(input = {}) {
+  getDb();
+  const inp = input && typeof input === 'object' ? input : {};
+  const name = checkName(inp.name, null);
+  const members = normalizeMembers(inp.projectPaths);
+  if (members.length < 2) throw err('a workspace needs at least 2 distinct member projects', 'BAD_REQUEST');
+  checkNewMembers(members);
+  const metricsProject = memberPathFor(members, inp.metricsProject ?? null);
+  const policyProject = memberPathFor(members, inp.policyProject ?? null, 'policyProject');
+  assertUniqueSet(members, null);
+  const id = workspaceKey({ name, projectPaths: members });
+  // The key is frozen at create, so a workspace whose member set changed since still holds
+  // the key of its ORIGINAL set: a same-slug name over that set would collide on the id.
+  if (prepare('SELECT 1 FROM workspaces WHERE id = ?').get(id)) {
+    throw err(`a workspace with a name like "${name}" once spanned this project set; choose another name`, 'DUPLICATE_NAME');
+  }
+  const description = typeof inp.description === 'string' ? inp.description : '';
+  return { id, name, description, members, metricsProject, policyProject };
+}
+
+/**
+ * Create a workspace (rules: planWorkspaceCreate). Persists the workspaces row +
+ * ordered workspace_projects member rows (member PATH stored in the project_key
+ * column) in ONE tx(). id is the frozen workspaceKey, computed once. Returns the
  * annotated entry.
  * @param {{name:string, projectPaths:string[], description?:string}} input
  * @throws err(code: BAD_REQUEST | DUPLICATE_NAME | DUPLICATE_SET)
  */
 export async function createWorkspace(input = {}) {
-  const name = (input && typeof input.name === 'string' ? input.name : '').trim();
-  if (!name) throw err('workspace name is required', 'BAD_REQUEST');
-  const description = typeof input.description === 'string' ? input.description : '';
-
-  const members = normalizeMembers(input.projectPaths);
-  if (members.length < 2) {
-    throw err('a workspace needs at least 2 distinct member projects', 'BAD_REQUEST');
-  }
-  for (const p of members) {
-    if (!isDir(p)) throw err(`member path does not exist or is not a directory: ${p}`, 'BAD_REQUEST');
-    if (!isGitRepo(p)) throw err(`member path is not a git repository: ${p}`, 'BAD_REQUEST');
-  }
-
-  const metricsProject = memberPathFor(members, input.metricsProject ?? null);
-  const policyProject = memberPathFor(members, input.policyProject ?? null, 'policyProject');
-  const id = workspaceKey({ name, projectPaths: members });
-  const hash = rootsHash(members);
   const now = new Date().toISOString();
-
   getDb();
-  tx(() => {
-    // Case-insensitive duplicate-name guard (matches the legacy check + NOCASE index).
-    if (prepare('SELECT 1 FROM workspaces WHERE name = ? COLLATE NOCASE').get(name)) {
-      throw err(`a workspace named "${name}" already exists`, 'DUPLICATE_NAME');
-    }
-    // D1 duplicate-SET guard: compare rootsHash over existing members.
-    for (const row of prepare('SELECT id FROM workspaces').all()) {
-      if (rootsHash(memberPaths(row.id)) === hash) {
-        throw err('a workspace over this exact project set already exists', 'DUPLICATE_SET');
-      }
-    }
+  const plan = tx(() => {
+    const p = planWorkspaceCreate(input);
     prepare(
       'INSERT INTO workspaces (id, name, description, metrics_project, policy_project, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(id, name, description, metricsProject, policyProject, now, now);
+    ).run(p.id, p.name, p.description, p.metricsProject, p.policyProject, now, now);
     const insMember = prepare(
       'INSERT INTO workspace_projects (workspace_id, project_key, ordinal) VALUES (?, ?, ?)'
     );
     // projectPaths persisted in input order (ordinal = index); annotate() re-sorts by key.
-    members.forEach((p, i) => insMember.run(id, p, i));
+    p.members.forEach((m, i) => insMember.run(p.id, m, i));
+    return p;
   });
 
   // Return the annotated entry (derived fields recomputed from the persisted paths).
+  const { id, name, description, members, metricsProject, policyProject } = plan;
   return annotate({
     id, name, description, projectPaths: members, metricsProject, policyProject, createdAt: now, updatedAt: now,
   });
@@ -279,23 +316,17 @@ export async function createWorkspace(input = {}) {
 
 /**
  * Update a workspace's name and/or description. NEVER touches projectPaths (the
- * project set is immutable) and NEVER recomputes the id (D1). Re-validates a new
- * name for case-insensitive uniqueness. Stamps updatedAt.
+ * member set changes only through addWorkspaceMembers / removeWorkspaceMember) and
+ * NEVER recomputes the id (D1). Re-validates a new name for case-insensitive
+ * uniqueness. Stamps updatedAt.
  * @param {string} id
  * @param {{name?:string, description?:string}} patch
  * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_NAME)
  */
 export async function updateWorkspace(id, patch = {}) {
-  getDb();
-  const entry = readEntry(id);
-  if (!entry) throw err(`workspace not found: ${id}`, 'NOT_FOUND');
+  const entry = entryOrThrow(id);
 
-  let { name, description } = entry;
-  if (patch && typeof patch.name === 'string') {
-    const next = patch.name.trim();
-    if (!next) throw err('workspace name is required', 'BAD_REQUEST');
-    name = next;
-  }
+  let { description } = entry;
   if (patch && typeof patch.description === 'string') {
     description = patch.description; // cap-on-freeze, not cap-on-store: persisted whole
   }
@@ -307,18 +338,113 @@ export async function updateWorkspace(id, patch = {}) {
     : entry.policyProject ?? null;
   const now = new Date().toISOString();
 
-  tx(() => {
+  const name = tx(() => {
     // Re-check NOCASE name clash against OTHER rows (exclude self).
-    const clash = prepare(
-      'SELECT 1 FROM workspaces WHERE name = ? COLLATE NOCASE AND id <> ?'
-    ).get(name, id);
-    if (clash) throw err(`a workspace named "${name}" already exists`, 'DUPLICATE_NAME');
+    const n = patch && typeof patch.name === 'string' ? checkName(patch.name, id) : entry.name;
     prepare(
       'UPDATE workspaces SET name = ?, description = ?, metrics_project = ?, policy_project = ?, updated_at = ? WHERE id = ?'
-    ).run(name, description, metricsProject, policyProject, now, id);
+    ).run(n, description, metricsProject, policyProject, now, id);
+    return n;
   });
 
   return annotate({ ...entry, name, description, metricsProject, policyProject, updatedAt: now });
+}
+
+/**
+ * Validate a rename without writing (Ask's workspace card; updateWorkspace applies it).
+ * @returns {{entry, name:string}}
+ * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_NAME)
+ */
+export function planWorkspaceRename(id, name) {
+  const entry = entryOrThrow(id);
+  const next = checkName(name, id);
+  if (next === entry.name) throw err(`the workspace is already named "${next}"`, 'BAD_REQUEST');
+  return { entry, name: next };
+}
+
+/**
+ * Validate adding member projects without writing. Same rules as create: each new
+ * path must be an existing git repo (de-duped by canonical root, and not already a
+ * member), and the resulting set must be unique among the OTHER workspaces.
+ * @returns {{entry, added:string[], next:string[]}}
+ * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_SET)
+ */
+export function planMembersAdd(id, projectPaths) {
+  const entry = entryOrThrow(id);
+  const current = new Set(entry.projectPaths.map((p) => canonicalProjectRoot(p)));
+  const added = normalizeMembers(projectPaths);
+  if (!added.length) throw err('name at least one project to add', 'BAD_REQUEST');
+  for (const p of added) {
+    if (current.has(canonicalProjectRoot(p))) throw err(`already a member of this workspace: ${p}`, 'BAD_REQUEST');
+  }
+  checkNewMembers(added);
+  const next = [...entry.projectPaths, ...added];
+  assertUniqueSet(next, id);
+  return { entry, added, next };
+}
+
+/**
+ * Validate removing one member without writing. The path must be a member (exact or
+ * same canonical root; a member that vanished from disk can still be removed), at
+ * least 2 members must remain, and the remaining set must be unique among the OTHER
+ * workspaces. A removed metricsProject / policyProject home comes back null: the home
+ * is CLEARED, never silently moved to another member (the user picks a new one).
+ * @returns {{entry, removed:string, next:string[], metricsProject, policyProject}}
+ * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_SET)
+ */
+export function planMemberRemove(id, projectPath) {
+  const entry = entryOrThrow(id);
+  const want = typeof projectPath === 'string' ? normalizeProjectPath(projectPath) : null;
+  if (!want) throw err('name the member project to remove', 'BAD_REQUEST');
+  const removed = entry.projectPaths.find((p) => p === want || canonicalProjectRoot(p) === canonicalProjectRoot(want));
+  if (!removed) throw err(`not a member of this workspace: ${want}`, 'BAD_REQUEST');
+  const next = entry.projectPaths.filter((p) => p !== removed);
+  if (next.length < 2) throw err('a workspace needs at least 2 distinct member projects', 'BAD_REQUEST');
+  assertUniqueSet(next, id);
+  return {
+    entry, removed, next,
+    metricsProject: entry.metricsProject === removed ? null : entry.metricsProject ?? null,
+    policyProject: entry.policyProject === removed ? null : entry.policyProject ?? null,
+  };
+}
+
+/**
+ * Add member projects to an existing workspace (rules: planMembersAdd). New rows are
+ * appended after the current ordinals in ONE tx(); the id is NOT recomputed (D1: the
+ * store dir, runs, schedules, metrics and policy all hang off it). Runs already started
+ * keep the member set frozen in their own pipeline row (workspace_meta). The live-run
+ * 409 guard lives in the server route.
+ * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_SET)
+ */
+export async function addWorkspaceMembers(id, projectPaths) {
+  const now = new Date().toISOString();
+  const { entry, next } = tx(() => {
+    const plan = planMembersAdd(id, projectPaths);
+    const base = prepare('SELECT COALESCE(MAX(ordinal), -1) AS m FROM workspace_projects WHERE workspace_id = ?').get(id).m;
+    const ins = prepare('INSERT INTO workspace_projects (workspace_id, project_key, ordinal) VALUES (?, ?, ?)');
+    plan.added.forEach((p, i) => ins.run(id, p, base + 1 + i));
+    prepare('UPDATE workspaces SET updated_at = ? WHERE id = ?').run(now, id);
+    return plan;
+  });
+  return annotate({ ...entry, projectPaths: next, updatedAt: now });
+}
+
+/**
+ * Remove one member project from an existing workspace (rules: planMemberRemove —
+ * a removed metrics / policy home is cleared). One tx(); the id is NOT recomputed.
+ * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_SET)
+ */
+export async function removeWorkspaceMember(id, projectPath) {
+  const now = new Date().toISOString();
+  const plan = tx(() => {
+    const p = planMemberRemove(id, projectPath);
+    prepare('DELETE FROM workspace_projects WHERE workspace_id = ? AND project_key = ?').run(id, p.removed);
+    prepare('UPDATE workspaces SET metrics_project = ?, policy_project = ?, updated_at = ? WHERE id = ?')
+      .run(p.metricsProject, p.policyProject, now, id);
+    return p;
+  });
+  const { entry, next, metricsProject, policyProject } = plan;
+  return annotate({ ...entry, projectPaths: next, metricsProject, policyProject, updatedAt: now });
 }
 
 /** Thin setter: edit only the description. */

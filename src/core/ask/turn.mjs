@@ -28,6 +28,7 @@ import { validateMetricsChange } from './metrics-deps.mjs';
 import { validatePolicyChange } from './policy-deps.mjs';
 import { validateModelChange } from './model-deps.mjs';
 import { validateCloneProposal } from './clone-deps.mjs';
+import { validateWorkspaceChange } from './workspace-deps.mjs';
 import { validateScheduleChange } from './schedule-deps.mjs';
 import { lookupTask } from './source-deps.mjs';
 import { effectiveTimeZone } from './schedule-spec.mjs';
@@ -98,6 +99,7 @@ class AskTurn extends EventEmitter {
       validateScheduleChange: deps.validateScheduleChange ?? validateScheduleChange,
       validateModelChange: deps.validateModelChange ?? validateModelChange,
       validateCloneProposal: deps.validateCloneProposal ?? validateCloneProposal,
+      validateWorkspaceChange: deps.validateWorkspaceChange ?? validateWorkspaceChange,
       scheduleDefaults: deps.scheduleDefaults ?? scheduleDefaults,
       // A proposed plugin task is looked up here, once: it must exist, and the card shows its title.
       lookupTask: deps.lookupTask === undefined ? lookupTask : deps.lookupTask,
@@ -373,6 +375,35 @@ class AskTurn extends EventEmitter {
     this._persistBlocks();
   }
 
+  /**
+   * propose_workspace_change RESULT: the model card's split — the child validated for the model, the parent
+   * re-validates the same INPUT against the live registry and mints the card. The child's pinned-workspace
+   * default is replayed (tools.mjs propose_workspace_change) so the card matches what the model saw. A child
+   * {ok:false} already reached the model as text: no card, no notice.
+   */
+  async _onWorkspaceProposal(input, text, isError) {
+    if (isError) return;
+    let out = null;
+    try { out = JSON.parse(text); } catch { out = null; }
+    if (!out || out.ok !== true) return;
+    const d = this.deps;
+    const raw = input && typeof input === 'object' ? input : {};
+    const pin = this.pinnedScope;
+    const inp = pin && pin.workspaceId && raw.kind !== 'create' && !(typeof raw.workspaceId === 'string' && raw.workspaceId.trim())
+      ? { ...raw, workspaceId: pin.workspaceId } : raw;
+    try {
+      const r = await d.validateWorkspaceChange(inp);
+      if (r && r.ok) this.reducer.addBlock({ kind: 'card', id: d.newAskId('card'), state: 'proposed', card: r.card });
+      else {
+        const errors = (r && Array.isArray(r.errors) && r.errors.length) ? r.errors : ['invalid proposal'];
+        this.reducer.addBlock({ kind: 'notice', text: `Workspace change rejected: ${errors.join('; ')}` });
+      }
+    } catch (err) {
+      this.reducer.addBlock({ kind: 'notice', text: `Workspace change rejected: ${err?.message || err}` });
+    }
+    this._persistBlocks();
+  }
+
   /** The card exists from the tool_use on (spec §8.2, PD7): a building block with the four-step trace, persisted. */
   _onWorkflowStart(toolUseId, input) {
     const d = this.deps;
@@ -461,6 +492,7 @@ class AskTurn extends EventEmitter {
       onScheduleProposal: ({ input, text, isError }) => this._onScheduleProposal(input, text, isError),
       onModelProposal: ({ input, text, isError }) => this._onModelProposal(input, text, isError),
       onCloneProposal: ({ input, text, isError }) => this._onCloneProposal(input, text, isError),
+      onWorkspaceProposal: ({ input, text, isError }) => this._onWorkspaceProposal(input, text, isError),
       // pause / resume / skip / mark-read in the child → the server's schedules-changed frames.
       onScheduleMutation: (e) => { try { this.deps.onScheduleMutation(e); } catch { /* a broken sink never breaks the turn */ } },
       // The MCP child cannot broadcast; the parent turns its comment writes into
