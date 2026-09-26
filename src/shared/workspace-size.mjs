@@ -35,7 +35,8 @@ export const SCAN_DESCRIPTION_BUDGETS = Object.freeze([
 
 /**
  * @param {number} count distinct member projects
- * @returns {number} the upper guideline, in lines, the scanner scales its description to
+ * @returns {number} the hard ceiling, in lines, the render card (scripts/workspace-map-render.mjs)
+ *   holds the generated description to
  */
 export function scanDescriptionBudget(count) {
   const n = Number(count) || 0;

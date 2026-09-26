@@ -1,21 +1,25 @@
 // test/orchestrator-workspace-scan.test.mjs
 // A wf_workspace_scan run is READ-ONLY (nothing committed, every member's run branch
-// deleted at teardown) and, on done, saves the scanner output as the workspace.
+// deleted at teardown) and, on done, saves the render stage's description as the workspace.
+// The scan is the hybrid map pipeline (wsmap P2): in mock mode the four scripts run FOR REAL
+// and the three agents write their mock JSON, so extract -> survey -> catalog -> usage -> join
+// -> synth -> render -> finalize runs end to end, in both run-root modes.
 // Sandboxed like orchestrator-workspace.test.mjs: throwaway repos, temp WORCA_HOME,
 // a product-repo leak guard.
 import { test, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join, basename } from 'node:path';
+import { join, basename, resolve } from 'node:path';
 
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { projectKey } from '../src/core/store.mjs';
 import { workspaceKey, createWorkspace, readWorkspace } from '../src/core/workspaces.mjs';
 import { WORKSPACE_SCAN_WORKFLOW_ID } from '../src/core/graph/builtin-workflows.mjs';
 import { WORKSPACE_SCAN_OUTPUT_FILE } from '../src/core/workspace-scan-run.mjs';
+import { checkSurvey, checkUsage, checkSynthesis } from '../src/shared/workspace-map/schema.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 
 useTempHome(after);
@@ -36,12 +40,13 @@ const gitLines = (args) => spawnSync('git', ['-C', PRODUCT_REPO, ...args]).stdou
 const baselineBranches = gitLines(['branch', '--list', 'worca-cc/*']);
 after(() => assert.deepEqual(gitLines(['branch', '--list', 'worca-cc/*']), baselineBranches, 'no branch leaked into the product repo'));
 
-async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-wsscan-'));
+/** A throwaway committed repo; `files` are top-level names -> contents. */
+async function freshRepo(label = 'm', files = { 'seed.txt': 'seed\n' }) {
+  const dir = await mkdtemp(join(tmpdir(), `worca-cc-wsscan-${label}-`));
   created.push(dir);
   const g = (a) => spawnSync('git', a, { cwd: dir });
   g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'seed.txt'), 'seed\n');
+  for (const [rel, text] of Object.entries(files)) await writeFile(join(dir, rel), text);
   g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
@@ -220,28 +225,51 @@ test('_isWorkspaceScan reads workflowId live (resume() restores it after constru
 
 const scanNode = (orch) => orch.state.stepper.graph.nodes.find((n) => n.id === 'n_scan');
 
-test('scan models pin the scan node and its investigators (the manifest records them)', async () => {
+const manifestNode = (orch, id) => orch.state.stepper.graph.nodes.find((n) => n.id === id);
+
+/** orch.run() that a node:test timeout stops: the scan's cards are children with 30-minute timeouts,
+ *  and without a stop a hung one keeps the file alive long past the test. node:test also aborts
+ *  `t.signal` after a NORMAL end, so the listener lives only while the run is pending. */
+async function runUntilAbort(t, orch) {
+  const stop = () => orch.stop();
+  t.signal.addEventListener('abort', stop, { once: true });
+  try {
+    return await orch.run();
+  } finally {
+    t.signal.removeEventListener('abort', stop);
+  }
+}
+
+test('scan models pin all three agent nodes and the investigators of both fan-out stages (D10; the manifest records them)', async (t) => {
   const a = await freshRepo();
   const b = await freshRepo();
   const orch = createOrchestrator({
     ...scanOpts([a, b], 'Pinned WS'),
     scanModels: { scanModel: 'claude-opus-5-5', scanEffort: 'high', agentModel: 'fable', agentEffort: 'max', source: 'explicit', warning: null },
   });
-  assert.equal((await orch.run()).status, 'done');
+  assert.equal((await runUntilAbort(t, orch)).status, 'done');
   const n = scanNode(orch);
   assert.equal(n.model, 'claude-opus-5-5');
   assert.equal(n.effort, 'high');
   assert.equal(n.subagentModel, 'fable');
   assert.equal(n.subagentEffort, 'max');
+  const u = manifestNode(orch, 'n_usage');
+  assert.deepEqual([u.model, u.effort, u.subagentModel, u.subagentEffort, u.fanOut], ['claude-opus-5-5', 'high', 'fable', 'max', true]);
+  const y = manifestNode(orch, 'n_synth');
+  assert.deepEqual([y.model, y.effort, y.fanOut], ['claude-opus-5-5', 'high', false]);
 });
 
-test('no scan models: the template defaults (Sonnet 5 · medium, sonnet · medium)', async () => {
+test('no scan models: the template defaults on all three agent nodes (Sonnet 5 · medium, sonnet · medium)', async (t) => {
   const a = await freshRepo();
   const b = await freshRepo();
   const orch = createOrchestrator(scanOpts([a, b], 'Default Models WS'));
-  assert.equal((await orch.run()).status, 'done');
-  const n = scanNode(orch);
-  assert.deepEqual([n.model, n.effort, n.subagentModel, n.subagentEffort], ['claude-sonnet-5', 'medium', 'sonnet', 'medium']);
+  assert.equal((await runUntilAbort(t, orch)).status, 'done');
+  for (const id of ['n_scan', 'n_usage']) {
+    const n = manifestNode(orch, id);
+    assert.deepEqual([n.model, n.effort, n.subagentModel, n.subagentEffort], ['claude-sonnet-5', 'medium', 'sonnet', 'medium'], id);
+  }
+  const y = manifestNode(orch, 'n_synth');
+  assert.deepEqual([y.model, y.effort], ['claude-sonnet-5', 'medium']);
 });
 
 test('a stale stored pick runs on the defaults and says so in the run log (Review Focus 5)', async () => {
@@ -258,4 +286,144 @@ test('a stale stored pick runs on the defaults and says so in the run log (Revie
   assert.equal((await orch.run()).status, 'done');
   assert.ok(logs.some((e) => e.level === 'warn' && e.text === warning), 'the warning is in the run log');
   assert.ok(logs.some((e) => e.text === 'Workspace scan models: scan agent claude-sonnet-5 · medium, project agents sonnet · medium (default)'));
+});
+
+// ── the hybrid map, end to end (wsmap P2) ────────────────────────────────────
+// Two members with a real npm dependency: static extraction finds it (pkg-npm), the catalog lists
+// lib's package, the mock usage confirms the candidate, the join makes it an exact edge and the
+// render lists it under ## Interconnections — then the finalize saves exactly that description.
+
+const LIB_PKG = `${JSON.stringify({ name: '@wsmap/lib', version: '1.0.0' }, null, 2)}\n`;
+const APP_PKG = `${JSON.stringify({ name: '@wsmap/app', version: '1.0.0', dependencies: { '@wsmap/lib': '^1.0.0' } }, null, 2)}\n`;
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const V3_FILES = ['extract.json', 'survey-brief.md', 'survey.json', 'catalog.json', 'usage-brief.md', 'usage.json',
+  'workspace-map.json', 'synth-brief.md', 'synthesis.json', WORKSPACE_SCAN_OUTPUT_FILE];
+
+async function npmPair() {
+  const lib = await freshRepo('lib', { 'package.json': LIB_PKG, 'README.md': '# lib\n\nShared helpers for the app.\n' });
+  const app = await freshRepo('app', { 'package.json': APP_PKG, 'README.md': '# app\n\nThe web app.\n' });
+  return { lib, app };
+}
+
+/** Every stage's file is in the run folder, every agent document passes P1's checker, the npm
+ *  dependency is an exact app -> lib edge and a line under ## Interconnections. */
+async function assertMapped(orch, { lib, app }) {
+  const dir = orch.getState().pipelineDir;
+  for (const f of V3_FILES) assert.ok(existsSync(join(dir, f)), `${f} written`);
+  const keys = [projectKey(app), projectKey(lib)].sort();
+  for (const k of keys) assert.ok(existsSync(join(dir, 'usage-briefs', `${k}.md`)), `usage-briefs/${k}.md written`);
+  const read = async (f) => JSON.parse(await readFile(join(dir, f), 'utf8'));
+  const survey = checkSurvey(await read('survey.json'), { memberKeys: keys });
+  assert.equal(survey.ok, true, survey.errors.join('\n'));
+  const entryIds = (await read('catalog.json')).entries.map((e) => e.id);
+  const usage = checkUsage(await read('usage.json'), { memberKeys: keys, entryIds });
+  assert.equal(usage.ok, true, usage.errors.join('\n'));
+  const synthesis = checkSynthesis(await read('synthesis.json'), { memberKeys: keys });
+  assert.equal(synthesis.ok, true, synthesis.errors.join('\n'));
+  const map = await read('workspace-map.json');
+  const edge = map.edges.find((e) => e.from === projectKey(app) && e.to === projectKey(lib) && e.kind === 'pkg');
+  assert.ok(edge, `the npm dependency is an edge: ${JSON.stringify(map.edges)}`);
+  assert.equal(edge.confidence, 'exact');
+  const md = await readFile(join(dir, WORKSPACE_SCAN_OUTPUT_FILE), 'utf8');
+  const inter = md.split('\n## Interconnections\n')[1]?.split('\n## ')[0] ?? '';
+  // Case-insensitive: a projectKey lower-cases the dir name the member's display name keeps.
+  assert.match(inter, new RegExp(`^- .*${esc(basename(app))}.* -> .*${esc(basename(lib))}`, 'mi'), md);
+  return { dir, keys, md };
+}
+
+/** The extract card's audit envelope (script-runner.mjs envelopeAuditPath) — what the program saw. */
+async function extractEnvelope(dir) {
+  return JSON.parse(await readFile(join(dir, 'scripts', 'n_extract-c1.envelope.json'), 'utf8'));
+}
+
+test('v3 end to end (detached): the npm dependency is an exact edge in the map and a line in the saved description', async (t) => {
+  const pair = await npmPair();
+  const opts = scanOpts([pair.app, pair.lib], 'Map WS');
+  const orch = createOrchestrator(opts);
+  assert.equal((await runUntilAbort(t, orch)).status, 'done');
+  const { dir, keys, md } = await assertMapped(orch, pair);
+  const env = await extractEnvelope(dir);
+  assert.deepEqual(env.ctx.workspace.members.map((m) => m.key), keys, 'members sorted by key');
+  assert.equal(env.ctx.workspace.id, opts.workspace.id);
+  assert.equal(env.ctx.workspace.name, 'Map WS');
+  for (const m of env.ctx.workspace.members) {
+    // endsWith, not equal: on macOS the checkout is realpath'd (/private/var/…) while runRoot is not.
+    assert.ok(m.dir.endsWith(join('.worca-cc', 'runs', basename(env.ctx.runRoot), 'repos', m.key)), `detached: the run-root checkout, got ${m.dir}`);
+    assert.equal(m.projectDir, resolve(m.key === projectKey(pair.app) ? pair.app : pair.lib), 'the live project');
+  }
+  assert.deepEqual(env.ctx.repos.map((r) => r.key), keys);
+  const ex = JSON.parse(await readFile(join(dir, 'extract.json'), 'utf8'));
+  for (const m of env.ctx.workspace.members) assert.equal(ex.members[m.key].dir, m.dir, 'extract scans the run checkout, not the live project');
+  assert.equal((await readWorkspace(opts.workspace.id)).description, md.trim(), 'the finalize saved the rendered description');
+});
+
+test('v3 end to end (legacy run-root): the scripts still see every member — ctx.workspace, not ctx.repos — and map the edge', async (t) => {
+  process.env.WORCA_RUN_ROOT = 'legacy';
+  const pair = await npmPair();
+  const opts = scanOpts([pair.app, pair.lib], 'Legacy Map WS');
+  const orch = createOrchestrator(opts);
+  assert.equal((await runUntilAbort(t, orch)).status, 'done');
+  const { dir, keys } = await assertMapped(orch, pair);
+  const env = await extractEnvelope(dir);
+  assert.equal(env.ctx.runRoot, null);
+  assert.equal(env.ctx.repos, null, 'legacy: no repos list');
+  assert.deepEqual(env.ctx.workspace.members.map((m) => m.key), keys);
+  for (const m of env.ctx.workspace.members) {
+    assert.ok(m.dir.includes(join('.worca-cc', 'worktrees')), `legacy checkout: ${m.dir}`);
+    assert.equal(m.projectDir, resolve(m.key === projectKey(pair.app) ? pair.app : pair.lib));
+  }
+  assert.equal(orch.state.workspaceScan.outcome, 'created');
+});
+
+// The P1 ↔ P2 mock seam: the npm pair above yields NO candidate (P1 never searches a member for an
+// entry it already consumes statically), so its usage.json is always empty. Here `tool` uses lib in
+// code with no manifest dependency: the candidate scan finds the literal, the usage mock confirms it,
+// and the join verifies the cited line into a `verified` edge.
+test('v3 end to end: a literal use the candidate scan finds is confirmed by the usage mock and joined as a verified edge', async (t) => {
+  const lib = await freshRepo('lib', { 'package.json': LIB_PKG, 'README.md': '# lib\n\nShared helpers for the app.\n' });
+  const tool = await freshRepo('tool', { 'run.js': "const lib = require('@wsmap/lib');\nmodule.exports = lib;\n" });
+  const orch = createOrchestrator(scanOpts([tool, lib], 'Candidate WS'));
+  assert.equal((await runUntilAbort(t, orch)).status, 'done');
+  const dir = orch.getState().pipelineDir;
+  const read = async (f) => JSON.parse(await readFile(join(dir, f), 'utf8'));
+  const keys = [projectKey(lib), projectKey(tool)].sort();
+  const catalog = await read('catalog.json');
+  const cands = catalog.candidates[projectKey(tool)] || [];
+  assert.ok(cands.length >= 1, `the candidate scan finds the literal: ${JSON.stringify(catalog.candidates)}`);
+  const usage = await read('usage.json');
+  const checked = checkUsage(usage, { memberKeys: keys, entryIds: catalog.entries.map((e) => e.id) });
+  assert.equal(checked.ok, true, checked.errors.join('\n'));
+  assert.equal(usage.members[projectKey(tool)].uses.length, cands.length, 'every candidate confirmed');
+  const map = await read('workspace-map.json');
+  const edge = map.edges.find((e) => e.from === projectKey(tool) && e.to === projectKey(lib) && e.kind === 'pkg');
+  assert.ok(edge, JSON.stringify(map.edges));
+  assert.equal(edge.confidence, 'verified');
+  assert.deepEqual(edge.sources, ['candidate', 'usage']);
+});
+
+// Review Focus 1 through the engine: an agent node that "finishes" without its file still publishes
+// its output token, and every awaitAll card downstream runs on the missing input.
+test('v3 end to end: survey, usage and synthesis files that never appear still end the scan done with a description', async (t) => {
+  const pair = await npmPair();
+  const opts = scanOpts([pair.app, pair.lib], 'Missing Files WS');
+  const orch = createOrchestrator(opts);
+  // The agents "finish" but their files are gone by the time the next card reads them.
+  const drop = { n_catalog: 'survey.json', n_join: 'usage.json', n_render: 'synthesis.json' };
+  const orig = orch._execCtx.bind(orch);
+  orch._execCtx = (node, nc, args) => {
+    if (drop[node.id]) rmSync(join(orch.getState().pipelineDir, drop[node.id]), { force: true });
+    return orig(node, nc, args);
+  };
+  assert.equal((await runUntilAbort(t, orch)).status, 'done');
+  const dir = orch.getState().pipelineDir;
+  const map = JSON.parse(await readFile(join(dir, 'workspace-map.json'), 'utf8'));
+  assert.ok(map.edges.some((e) => e.from === projectKey(pair.app) && e.to === projectKey(pair.lib) && e.confidence === 'exact'), 'static edges survive');
+  assert.ok(map.members.every((m) => m.coverage.usageStatus === 'failed'), 'no usage.json: every member counts as usage failed');
+  const catalog = JSON.parse(await readFile(join(dir, 'catalog.json'), 'utf8'));
+  assert.ok(catalog.errors.some((e) => /^survey: missing/.test(e)), `no survey.json: the catalog ran on a failed survey: ${JSON.stringify(catalog.errors)}`);
+  const ws = await readWorkspace(opts.workspace.id);
+  assert.match(ws.description, /## Interconnections/);
+  assert.match(ws.description, /Workspace of 2 projects/, 'no synthesis: the fallback overview');
+  const inter = ws.description.split('\n## Interconnections\n')[1]?.split('\n## ')[0] ?? '';
+  assert.match(inter, new RegExp(`^- .*${esc(basename(pair.app))}.* -> .*${esc(basename(pair.lib))}`, 'mi'), 'rendered from the map, not the minimal fallback');
 });

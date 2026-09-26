@@ -187,8 +187,9 @@ export class GraphOrchestrator extends RunHarness {
   /**
    * Workspace scan (D19): the four picks the scan started with — POST /api/workspaces/scan resolved
    * them (the Create workspace column, else Settings › General › Workspaces, else Sonnet · medium) —
-   * become the scanner's pair and its investigators' pin. Start only: resume() rebuilds from the
-   * manifest, which froze them on the node. No picks (a hand-built run) ⇒ the template's defaults.
+   * become the pair of every scan agent node (survey, usage, synthesis) and the pin of the fan-out
+   * stages' investigators. Start only: resume() rebuilds from the manifest, which froze them on the
+   * node. No picks (a hand-built run) ⇒ the template's defaults.
    * @returns {{agentPair:{model:string, effort:(string|null)}, subagentPin:{model:string, effort:string}}|null}
    */
   _scanModelPins() {

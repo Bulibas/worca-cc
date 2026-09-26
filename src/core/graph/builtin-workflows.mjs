@@ -101,14 +101,27 @@ export const WORKSPACE_SCAN_DEFAULT_MODELS = deepFreeze({
   scanModel: 'claude-sonnet-5', scanEffort: 'medium', agentModel: 'sonnet', agentEffort: 'medium',
 });
 
-/** The Workspace scan workflow: the one agent that maps how a workspace's member projects
- *  interconnect. Reserved like wf_memory_defrag, but NEVER listed (GET /api/workflows, the Ask
+/** The Workspace scan workflow — the hybrid interconnection map (wsmap spec D5, "v3" of the scan):
+ *  task -> extract (script) -> survey (agent workspaceScanner, node n_scan, fan-out) -> catalog
+ *  (script) -> usage (agent workspaceUsageMapper, fan-out) -> join (script) -> synth (agent
+ *  workspaceSynthesizer) -> render (script) -> End. Code extracts, verifies and joins; the agents only
+ *  fill gaps, confirm uses and write prose; render writes workspace-scan.md under the member-count
+ *  line budget. Every card is placeable:false — only a RESERVED workflow may carry them
+ *  (workflows.mjs). Reserved like wf_memory_defrag, but NEVER listed (GET /api/workflows, the Ask
  *  catalog and the composer leave it out): only POST /api/workspaces/scan and
- *  /api/workspaces/:id/scan start it. run-harness treats it as READ-ONLY (nothing committed,
- *  every member's run branch deleted at teardown) and, on `done`, saves the scanner's output as
- *  the workspace's description (workspace-scan-run.mjs finalizeWorkspaceScan). */
+ *  /api/workspaces/:id/scan start it. run-harness treats it as READ-ONLY (nothing committed, every
+ *  member's run branch deleted at teardown) and, on `done`, saves render's output as the
+ *  workspace's description (workspace-scan-run.mjs finalizeWorkspaceScan).
+ *  `version: 2` is the TEMPLATE FORMAT (resolveGraph runs version 2 only), not the scan's revision. */
 export const WORKSPACE_SCAN_WORKFLOW_ID = 'wf_workspace_scan';
 export const WORKSPACE_SCAN_WORKFLOW_NAME = 'Workspace scan';
+/** The model config of the scan's fan-out agents (survey, usage): the D15/D16 defaults. */
+const SCAN_FANOUT_CONFIG = {
+  model: WORKSPACE_SCAN_DEFAULT_MODELS.scanModel,
+  effort: WORKSPACE_SCAN_DEFAULT_MODELS.scanEffort,
+  subagentModel: WORKSPACE_SCAN_DEFAULT_MODELS.agentModel,
+  subagentEffort: WORKSPACE_SCAN_DEFAULT_MODELS.agentEffort,
+};
 export const GRAPH_WORKSPACE_SCAN_WORKFLOW = deepFreeze({
   id: WORKSPACE_SCAN_WORKFLOW_ID,
   name: WORKSPACE_SCAN_WORKFLOW_NAME,
@@ -118,17 +131,31 @@ export const GRAPH_WORKSPACE_SCAN_WORKFLOW = deepFreeze({
   updatedAt: '1970-01-01T00:00:00.000Z',
   nodes: [
     { id: 'n_task', kind: 'task', x: 40, y: 200, config: {} },
-    { id: 'n_scan', kind: 'agent', key: 'workspaceScanner', x: 320, y: 200, config: {
+    { id: 'n_extract', kind: 'script', key: 'workspaceMapExtract', x: 280, y: 200, config: {} },
+    { id: 'n_scan', kind: 'agent', key: 'workspaceScanner', x: 520, y: 80, config: { ...SCAN_FANOUT_CONFIG } },
+    // The two-input stages wait for BOTH inputs (awaitAll): the V18 double-fire guard.
+    { id: 'n_catalog', kind: 'script', key: 'workspaceMapCatalog', x: 760, y: 200, config: { awaitAll: true } },
+    { id: 'n_usage', kind: 'agent', key: 'workspaceUsageMapper', x: 1000, y: 80, config: { ...SCAN_FANOUT_CONFIG } },
+    { id: 'n_join', kind: 'script', key: 'workspaceMapJoin', x: 1240, y: 200, config: { awaitAll: true } },
+    { id: 'n_synth', kind: 'agent', key: 'workspaceSynthesizer', x: 1480, y: 80, config: {
       model: WORKSPACE_SCAN_DEFAULT_MODELS.scanModel,
       effort: WORKSPACE_SCAN_DEFAULT_MODELS.scanEffort,
-      subagentModel: WORKSPACE_SCAN_DEFAULT_MODELS.agentModel,
-      subagentEffort: WORKSPACE_SCAN_DEFAULT_MODELS.agentEffort,
     } },
-    { id: 'n_end', kind: 'end', x: 600, y: 200, config: {} },
+    { id: 'n_render', kind: 'script', key: 'workspaceMapRender', x: 1720, y: 200, config: { awaitAll: true } },
+    { id: 'n_end', kind: 'end', x: 1960, y: 200, config: {} },
   ],
   wires: [
-    { id: 'w1', from: { node: 'n_task', port: 'task' }, to: { node: 'n_scan', port: 'task' } },
-    { id: 'w2', from: { node: 'n_scan', port: 'workspace' }, to: { node: 'n_end', port: 'result' } },
+    { id: 'w1', from: { node: 'n_task', port: 'task' }, to: { node: 'n_extract', port: 'task' } },
+    { id: 'w2', from: { node: 'n_extract', port: 'brief' }, to: { node: 'n_scan', port: 'brief' } },
+    { id: 'w3', from: { node: 'n_extract', port: 'extract' }, to: { node: 'n_catalog', port: 'extract' } },
+    { id: 'w4', from: { node: 'n_scan', port: 'survey' }, to: { node: 'n_catalog', port: 'survey' } },
+    { id: 'w5', from: { node: 'n_catalog', port: 'brief' }, to: { node: 'n_usage', port: 'brief' } },
+    { id: 'w6', from: { node: 'n_catalog', port: 'catalog' }, to: { node: 'n_join', port: 'catalog' } },
+    { id: 'w7', from: { node: 'n_usage', port: 'usage' }, to: { node: 'n_join', port: 'usage' } },
+    { id: 'w8', from: { node: 'n_join', port: 'brief' }, to: { node: 'n_synth', port: 'brief' } },
+    { id: 'w9', from: { node: 'n_join', port: 'map' }, to: { node: 'n_render', port: 'map' } },
+    { id: 'w10', from: { node: 'n_synth', port: 'synthesis' }, to: { node: 'n_render', port: 'synthesis' } },
+    { id: 'w11', from: { node: 'n_render', port: 'workspace' }, to: { node: 'n_end', port: 'result' } },
   ],
 });
 

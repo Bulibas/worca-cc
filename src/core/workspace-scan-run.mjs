@@ -18,8 +18,9 @@ import { assertWorkspaceScanInput } from './settings.mjs';
 import { WORKSPACE_SCAN_DEFAULT_MODELS } from './graph/builtin-workflows.mjs';
 import { scanDescriptionBudget } from '../shared/workspace-size.mjs';
 
-/** The scanner node's output file (agents/workspaceScanner.meta.json outputs[0].filename).
- *  Not workspace-description.md: createPipeline writes the run's frozen snapshot there. */
+/** The render stage's output file (scripts/workspaceMapRender.meta.json outputs[0].filename) — the
+ *  workspace description the finalize saves. Not workspace-description.md: createPipeline writes the
+ *  run's frozen snapshot there. */
 export const WORKSPACE_SCAN_OUTPUT_FILE = 'workspace-scan.md';
 
 /** @param {string} name */
@@ -28,7 +29,9 @@ export function scanRunTitle(name) {
 }
 
 /**
- * The scan run's request (the task node's prompt → the scanner's "## Original request").
+ * The scan run's request: the task node's prompt, kept in the run's History and bound to the extract
+ * card's `task` input (no card reads its text). Its `Length budget:` line names the ceiling the render
+ * card enforces (scanDescriptionBudget).
  * @param {{name:string, projectNames?:string[], rescan?:boolean}} opts
  */
 export function scanRunPrompt({ name, projectNames = [], rescan = false } = {}) {

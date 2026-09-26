@@ -14,7 +14,7 @@ import { checkNewWorkspace, createWorkspace, readWorkspace, workspaceKey } from 
 import {
   WORKSPACE_SCAN_OUTPUT_FILE, scanRunTitle, scanRunPrompt, createWorkspaceWithHomes, finalizeWorkspaceScan,
 } from '../src/core/workspace-scan-run.mjs';
-import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
+import { loadScriptRegistry } from '../src/core/script-registry.mjs';
 
 useTempHome(after);
 const created = [];
@@ -37,8 +37,8 @@ async function pipelineDirWith(text) {
 }
 const DESC = '# Workspace: X\n## Overview\nTwo services.\n## Interconnections\n- a -> b: REST API; /v1\n';
 
-test('WORKSPACE_SCAN_OUTPUT_FILE is the scanner sidecar output filename', () => {
-  assert.equal(WORKSPACE_SCAN_OUTPUT_FILE, loadAgentRegistry().workspaceScanner.outputs[0].filename);
+test('WORKSPACE_SCAN_OUTPUT_FILE is the render stage\'s output filename', () => {
+  assert.equal(WORKSPACE_SCAN_OUTPUT_FILE, loadScriptRegistry({ agentKeys: null }).workspaceMapRender.outputs[0].filename);
 });
 
 test('scanRunTitle / scanRunPrompt name the workspace and every member', () => {

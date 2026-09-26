@@ -19,6 +19,7 @@ import { SUBAGENT_AUTO, SUBAGENT_INHERIT, SUBAGENT_MODELS, EFFORTS, effectiveSub
 import { readClarify, readReview } from './protocol.mjs';
 import { writeClarify, readClarifyRow } from './artifacts.mjs';
 import { join } from 'node:path';
+import { LIMITS } from '../shared/workspace-map/limits.mjs';
 
 // ── allowedTools per role ──────────────────────────────────────────────────────
 // `Skill` lets agents invoke project (.claude/skills) and personal (~/.claude/skills)
@@ -74,6 +75,27 @@ export function effectiveAllowedTools(base, declared, fanOut = false) {
 export function ctxFanOut(ctx) {
   if (!ctx || typeof ctx !== 'object') return false;
   return !!(ctx.node ? ctx.node.fanOut : ctx.fanOut);
+}
+
+/**
+ * D9 (wsmap spec): the run-level spawn env of a fan-out node — Claude Code runs a batch of
+ * concurrency-safe tool calls (the Agent tool is one) at most CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY
+ * at a time (default 10), so every fan-out spawn carries a cap of at most 8 investigators: 8, or
+ * the parent env's own LOWER value when it sets the variable to a positive integer (a higher, zero,
+ * fractional or unreadable value becomes 8). undefined for every node that cannot fan out ⇒ that
+ * spawn env stays byte-identical. Never part of modelEnv: a catalog entry that sets the same
+ * variable wins over it (claude-runner.mjs runReal merge order). Pure (the env is a parameter) +
+ * exported for testing.
+ * @param {object} ctx
+ * @param {Record<string, string|undefined>} [env] the parent env
+ * @returns {{CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: string}|undefined}
+ */
+export function fanOutSpawnEnv(ctx, env = process.env) {
+  if (!ctxFanOut(ctx)) return undefined;
+  const cap = LIMITS.INVESTIGATOR_CONCURRENCY;
+  const raw = String(env?.CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY ?? '').trim();
+  const ambient = /^\d+$/.test(raw) ? Number(raw) : 0;
+  return { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: String(ambient > 0 ? Math.min(cap, ambient) : cap) };
 }
 
 /**
@@ -324,7 +346,8 @@ export function fanOutDirective(fanOut, { omitProjectAgents = false, subagentMod
  * after the toolInstruction and before the role body. Pure + exported. Returns ''
  * when there is no workspace (or no description), so single-project system prompts
  * are byte-identical. The frozen description is injected VERBATIM — no length cap
- * (its size is bounded by the workspace-scanner prompt). Accepts either the bus
+ * (a scan's description is held to its line budget by the render card; a hand edit has no cap).
+ * Accepts either the bus
  * channel shape (`workspaceDescription`, see orchestrator.mjs#_workspaceChannel) or
  * a plain `description` field.
  * @param {{workspaceDescription?:string, description?:string, projects?:Array<{projectName?:string}>}|null|undefined} ws
@@ -645,6 +668,10 @@ export function runOpts(ctx, { role, prompt, systemPrompt, allowedTools }) {
     // touch this env: its wires are the prompt block (subagentModelDirective) and, for a pinned effort, the --agents definition (investigatorAgents),
     // and CLAUDE_CODE_SUBAGENT_MODEL is a reserved model-env key.
     modelEnv: resolveDispatchModelEnv(c, ctx),
+    // D9 (wsmap): the fan-out concurrency cap (8, or the parent env's lower value), merged OVER the
+    // guardrail env and UNDER modelEnv. undefined for every non-fan-out node ⇒ nothing merged ⇒
+    // that spawn env is byte-identical.
+    spawnEnv: fanOutSpawnEnv(ctx),
     // Model bridge (model-bridge-design.md §5.3): a translated model has no
     // server-side web tools, so the runner withholds them. undefined for every
     // non-bridged model ⇒ nothing emitted ⇒ argv byte-identical.

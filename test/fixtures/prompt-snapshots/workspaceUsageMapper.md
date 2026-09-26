@@ -1,4 +1,4 @@
-# Task: Workspace Survey
+# Task: Workspace Usage
 
 Project directory (your cwd): <PROJECT_DIR>
 Pipeline directory (shared artifacts): <PIPELINE_DIR>
@@ -42,10 +42,10 @@ When unsure between two tiers, take the lower one only if you will verify the re
 
 ### Outputs
 
-- Write **survey** to: <PIPELINE_DIR>/survey.json
+- Write **usage** to: <PIPELINE_DIR>/usage.json
 
-MOCK_ROLE: workspace-scan
+MOCK_ROLE: workspace-usage
 MOCK_CYCLE: 2
 MOCK_BASE: feature
-MOCK_OUT: <PIPELINE_DIR>/survey.json
+MOCK_OUT: <PIPELINE_DIR>/usage.json
 MOCK_IN: /abs/brief.md

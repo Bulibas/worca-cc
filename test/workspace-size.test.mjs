@@ -62,9 +62,9 @@ test('the cap counts DISTINCT members: 41 paths naming 40 repos pass', () => {
   assert.equal(ok.projectPaths.length, 40);
 });
 
-test('the scanner body takes its budget from the prompt and covers every member in waves of up to 8', async () => {
+test('the budget is the render stage\'s (wsmap P2): the survey body never sizes a description and covers every member in waves of at most 8', async () => {
   const body = await readFile(new URL('../agents/worca-cc-workspace-scanner.md', import.meta.url), 'utf8');
-  assert.match(body, /`Length budget:` line/);
-  assert.match(body, /waves of up to 8/);
+  assert.doesNotMatch(body, /Length budget/, 'workspaceMapRender applies scanDescriptionBudget — no agent sizes the description');
+  assert.match(body, /waves of at most 8/);
   assert.doesNotMatch(body, /200–300/, 'the fixed 200–300 ceiling is gone');
 });

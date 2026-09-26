@@ -668,7 +668,9 @@ export async function resolveGraph(projectDir, workflowId, registry, agentsDir =
     if (node.kind === 'script') {
       const meta = scripts[node.key];
       if (!meta) throw new Error(`unknown script "${node.key}" — no such key in the registry`);
-      if (meta.placeable === false) throw new Error(`script "${node.key}" declares placeable: false and cannot be a graph node`);
+      // Like an agent: a placeable:false card rides only a RESERVED built-in (wf_workspace_scan's map
+      // stages); a saved row carrying one is refused — here and by the run gate's V4.
+      if (meta.placeable === false && !isReservedWorkflowId(stored.id)) throw new Error(`script "${node.key}" declares placeable: false and cannot be a graph node`);
       // v4 T5: ONE builder for the run-time facts of a placed card — the resume path (Task 9), the offline runner
       // (Task 13) and P1c's bench build the same object from the same function, so they cannot drift apart.
       nodes[node.id] = scriptNodeCtx(node, meta);

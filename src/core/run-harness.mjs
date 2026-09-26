@@ -3273,9 +3273,15 @@ export class RunHarness extends EventEmitter {
     return {
       kind: 'metadata',
       workspaceDescription: this.workspaceDescription,
+      // wsmap P2: what the script envelope's ctx.workspace is built from (script-runner.mjs
+      // workspaceEnvelope) — the target's id (a first scan's is the future workspaceKey) and name,
+      // and each member's LIVE project dir beside its checkout.
+      workspaceId: this.workspace?.id || this.workspaceKey || null,
+      workspaceName: this.workspace?.name || null,
       projects: this.members.map((m) => ({
         projectKey: m.projectKey,
         projectName: m.projectName,
+        projectDir: m.projectDir ? resolve(m.projectDir) : null,
         worktreeDir: this.workDirs.get(m.projectKey),
         checkpointRef: this.checkpointRefs[m.projectKey],
         graphInstruction: this.toolInstructions.get(m.projectKey) || '',
