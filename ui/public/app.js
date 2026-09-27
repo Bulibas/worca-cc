@@ -773,7 +773,7 @@ function paintBudget() {
     topAmt.classList.toggle('over', !!b.blocked);
   }
   applyBudgetToNewView();
-  if (currentView() === 'settings') paintBudgetReadout();
+  if (currentView() === 'settings' && currentSettingsTab === 'runs') paintBudgetReadout();
   repaintCostBanners();
 }
 
@@ -1066,7 +1066,7 @@ function handleServerMessage(msg) {
     if (currentView() === 'projects') paintProjectPolicyCells(true);
     if (currentView() === 'workspaces') paintWsPolicyLines(true);
     if (currentView() === 'team-policy' && !tpState.editing) loadTeamPolicyView();
-    if (currentView() === 'settings') paintTeamCapsReadout(true);
+    if (currentView() === 'settings' && currentSettingsTab === 'runs') paintTeamCapsReadout(true);
     if (currentView() === 'settings' && currentSettingsTab === 'plugins') paintPluginsPolicy(true);
     if (currentView() === 'new') schedulePolicyLine();
     return;
@@ -10953,7 +10953,7 @@ try {
   if (mq && typeof mq.addEventListener === 'function') mq.addEventListener('change', () => applyTheme(document.documentElement.dataset.theme));
 } catch { /* no media queries here */ }
 
-// Settings › General › Scheduled runs: the defaults a new schedule inherits.
+// Settings › Runs › Scheduled runs: the defaults a new schedule inherits.
 function setSchedDefaultsMsg(text, kind) { setHintMsg('schedDefaultsMsg', text, kind); }
 function paintScheduleSettings(data) {
   const d = data && data.schedule;
@@ -12702,6 +12702,7 @@ async function loadModelsView() {
     const pdata = await safeJson(pres);
     mvState.providers = pres.ok ? pdata : null;
     renderModelsViewBody();
+    void paintHelperModelCards();
     // "+ Add model…" from a picker on another page: the dialog opens once the catalog is here.
     if (mvState.openEditorOnLoad) { mvState.openEditorOnLoad = false; openModelEditorDialog(); }
     // Copilot's models feed the editor's upstream-id datalist; fetched in the
@@ -12714,6 +12715,18 @@ async function loadModelsView() {
   } catch (e) {
     setModelsMsg(e.message, 'err');
   }
+}
+
+// Settings › Models › Title generation + Auto workflow model: both pickers list the catalog, so they
+// repaint whenever it loads — a model added a moment ago is selectable without leaving the tab.
+async function paintHelperModelCards() {
+  try {
+    const res = await fetch('/api/settings');
+    if (!res.ok) return;
+    const data = await safeJson(res);
+    await paintTitleModelSettings(data);
+    await paintAutoModelSettings(data);
+  } catch { /* the cards keep their last paint */ }
 }
 
 /** The Providers tab: the same card, on a page of its own (§8.1). */
@@ -13886,7 +13899,7 @@ if (runListEl) {
       if (runId) confirmCostOverride(runId, overrideBtn);
       return;
     }
-    if (e.target.closest && e.target.closest('.cb-settings')) { location.hash = 'settings'; return; }
+    if (e.target.closest && e.target.closest('.cb-settings')) { location.hash = 'settings/runs'; return; }
     // Team-cap banner (team-policy design board 9): continue past, or open the page.
     const pastBtn = e.target.closest && e.target.closest('.cb-past-team-cap');
     if (pastBtn) {
@@ -14575,7 +14588,7 @@ if (tpSection) tpSection.addEventListener('click', async (e) => {
   await handlePolicyPluginClick(e);
 });
 
-// Settings › Budget (board 7): each home's caps as a readout, the tightest as a chip on the labels.
+// Settings › Runs › Budget (board 7): each home's caps as a readout, the tightest as a chip on the labels.
 async function paintTeamCapsReadout(force = false) {
   if (!el.teamCapsReadout) return;
   const data = await loadTpScopes({ force });
@@ -17377,7 +17390,7 @@ function paintHdBanners(screen, record, data) {
       { pauseReason, pauseDetail, pipelineId: record.id, totalCostUsd: st.totalCostUsd },
       { budget: budgetState.budget || {}, fmt: { usd: fmtUsd, usd4: fmtUsd4, duration: fmtDuration, estTitle } });
     const settingsBtn = banner.querySelector('.cb-settings');
-    if (settingsBtn) settingsBtn.addEventListener('click', () => { location.hash = 'settings'; });
+    if (settingsBtn) settingsBtn.addEventListener('click', () => { location.hash = 'settings/runs'; });
     const overrideBtn = banner.querySelector('.cb-override');
     if (overrideBtn) {
       overrideBtn.addEventListener('click', () => {
@@ -22537,7 +22550,7 @@ el.runDetail?.addEventListener('click', (e) => {
   if (!r) return;
   const override = e.target.closest && e.target.closest('.cb-override');
   if (override) { confirmCostOverride(r.runId, override); return; }   // async, fire-and-forget
-  if (e.target.closest && e.target.closest('.cb-settings')) { location.hash = 'settings'; return; }
+  if (e.target.closest && e.target.closest('.cb-settings')) { location.hash = 'settings/runs'; return; }
   const past = e.target.closest && e.target.closest('.cb-past-team-cap');
   if (past) { confirmPastTeamCap(r.runId, past); return; }             // team-policy board 9
   if (e.target.closest && e.target.closest('.cb-policy-open')) { location.hash = 'team-policy'; return; }
@@ -23654,11 +23667,11 @@ const VIEW_MIN_LEVEL = Object.freeze({
   'team-metrics': 'expert', 'team-policy': 'expert', agents: 'expert', scripts: 'expert',
   schedules: 'advanced',
 });
-const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ guardrails: 'advanced', plugins: 'advanced', memory: 'advanced', models: 'expert', providers: 'expert' });
+const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ ask: 'advanced', guardrails: 'advanced', plugins: 'advanced', memory: 'advanced', models: 'expert', providers: 'expert' });
 const VIEW_TITLES = Object.freeze({
   stats: 'Statistics', composer: 'Workflow Composer', workspaces: 'Workspaces', 'workspace-create': 'Workspaces',
   'agent-create': 'Create agent', 'team-metrics': 'Team metrics', 'team-policy': 'Team policy', agents: 'Agents', scripts: 'Scripts',
-  guardrails: 'Guardrails', plugins: 'Plugins', memory: 'Memory', models: 'Models', providers: 'Providers',
+  guardrails: 'Guardrails', plugins: 'Plugins', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
   schedules: 'Schedules',
 });
 function pageMinLevel() {
@@ -23715,7 +23728,10 @@ document.addEventListener('worca:level', () => {
 // The tab is the Settings view's hash param; a guardrail deep link nests its id
 // behind it (#settings/guardrails/<id>). parseHash splits on the FIRST '/' only,
 // so that is view 'settings', param 'guardrails/<id>' — no parseHash change.
-const SETTINGS_TABS = ['general', 'guardrails', 'models', 'providers', 'plugins', 'memory'];
+const SETTINGS_TABS = ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'models', 'providers'];
+// The tabs whose cards GET /api/settings paints (loadSettings paints every card, wherever it sits).
+// Models is not one: loadModelsView repaints its two helper-model cards with the catalog.
+const SETTINGS_FORM_TABS = ['general', 'runs', 'ask'];
 const settingsPanes = $$('[data-view="settings"] .settings-pane');
 // Old top-level hashes keep working. The hashchange listener DROPS any view it
 // does not know, so without this map a bookmark or an old in-app link would
@@ -23965,7 +23981,7 @@ function showSettingsTab(param = '') {
   // request, and re-entry refetches (which is what lets grvExitWizard's
   // '#settings/guardrails/<id>' -> '#settings/guardrails' hop reset the wizard).
   paintLevelBanner();
-  if (tab === 'general') loadSettings();
+  if (SETTINGS_FORM_TABS.includes(tab)) loadSettings();
   if (tab === 'guardrails') loadGuardrailsView(sub);
   if (tab === 'models') loadModelsView(sub);
   if (tab === 'providers') loadProvidersView();
