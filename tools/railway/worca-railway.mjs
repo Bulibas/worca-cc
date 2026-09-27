@@ -449,9 +449,18 @@ export async function main(argv, ctx) {
       const s = forService(t, a.flags.service);
       const key = a.pos[0];
       if (!KEY_RE.test(String(key || ''))) throw new Error('unset <target> <KEY>');
-      const r = await ctx.exec('railway', ['variable', 'delete', key, ...svcArgs(s), ...(a.flags['skip-deploys'] ? ['--skip-deploys'] : [])]);
+      if (a.flags['skip-deploys']) {
+        // `railway variable delete` has no --skip-deploys (and refuses the flag); the API's
+        // variableDelete removes the variable without deploying, which is exactly that.
+        const d = await gql(ctx, 'mutation($i:VariableDeleteInput!){ variableDelete(input:$i) }',
+          { i: { projectId: t.projectId, environmentId: t.environmentId, serviceId: s.serviceId, name: key } });
+        if (d?.variableDelete !== true) throw new Error(`railway api did not remove ${key}`);
+        ctx.out(`removed ${key} from ${s.service} (no deploy; run redeploy when done)`);
+        return 0;
+      }
+      const r = await ctx.exec('railway', ['variable', 'delete', key, ...svcArgs(s)]);
       if (r.code !== 0) throw new Error(`railway variable delete ${key} failed: ${redact(r.stderr).trim().split('\n').pop()}`);
-      ctx.out(`removed ${key} from ${s.service}`);
+      ctx.out(`removed ${key} from ${s.service} (deploying)`);
       return 0;
     }
     case 'mock': {

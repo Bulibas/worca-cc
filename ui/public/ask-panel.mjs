@@ -1234,7 +1234,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const flagged = !!entry && (entry.costUnreliable === true
       || (Array.isArray(entry.secretsMissing) && entry.secretsMissing.length > 0));
     el.modelBtnLabel.textContent = (entry ? entry.label : st.picker.model) + (flagged ? ' ⚠' : '');
-    el.modelBtnEffort.textContent = st.picker.effort;
+    // A model that takes no reasoning effort shows none (the bridge leaves it out).
+    el.modelBtnEffort.textContent = entry && entry.noEffort ? '' : st.picker.effort;
+    el.modelBtnEffort.hidden = !!(entry && entry.noEffort);
   }
 
   function coerceEffort(entry, effort) {
@@ -1311,8 +1313,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       .catch(() => { /* the next message stores the pick anyway */ });
   }
 
-  function loadCatalog() {
-    if (st.catalog) return Promise.resolve(st.catalog);
+  // fresh: fetch again even with a catalog in hand. Models imported (or keys set on the key
+  // page) after the first load reach the menu when it next opens, without a page reload.
+  function loadCatalog({ fresh = false } = {}) {
+    if (st.catalog && !fresh) return Promise.resolve(st.catalog);
     if (st.catalogLoading) return st.catalogLoading;
     st.catalogLoading = Promise.resolve()
       .then(() => fetch('/api/ask/models'))
@@ -1420,7 +1424,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       if (m.id === st.picker.model) item.appendChild(make('span', 'ask-model-check', '✓'));
       return item;
     };
+    let shownPane = 'main';
     const renderPane = (pane) => {
+      shownPane = pane;
       panel.replaceChildren();
       if (pane === 'effort') {
         const back = menuItem('ask-pane-back', () => renderPane('main'));
@@ -1446,11 +1452,19 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         const { primary, rest } = splitCatalog();
         for (const m of primary) panel.appendChild(modelItem(m));
         panel.appendChild(make('div', 'ask-pop-divider'));
-        const effortRow = menuItem('ask-effort-row', () => renderPane('effort'));
+        const noEffort = !!catalogEntry(st.picker.model)?.noEffort;
+        const effortRow = menuItem('ask-effort-row', noEffort ? null : () => renderPane('effort'));
         effortRow.setAttribute('data-ask-effort-row', '');
         effortRow.appendChild(make('span', null, 'Effort'));
-        effortRow.appendChild(make('span', 'ask-pop-row-value', st.picker.effort));
-        effortRow.appendChild(make('span', 'ask-pop-row-chev', '›'));
+        if (noEffort) {
+          // The model's provider refused a reasoning effort; worca leaves it out of the request.
+          effortRow.disabled = true;
+          effortRow.title = 'This model takes no reasoning effort, so none is sent.';
+          effortRow.appendChild(make('span', 'ask-pop-row-value', 'not supported'));
+        } else {
+          effortRow.appendChild(make('span', 'ask-pop-row-value', st.picker.effort));
+          effortRow.appendChild(make('span', 'ask-pop-row-chev', '›'));
+        }
         panel.appendChild(effortRow);
         if (rest.length) {
           const moreRow = menuItem('ask-more-models', () => renderPane('more'));
@@ -1462,7 +1476,11 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       }
       focusFirst();
     };
-    loadCatalog().then(() => { if (st.popover && st.popover.panel === panel) renderPane('main'); });
+    // What we have paints at once; the refetch repaints the main pane if it is still showing.
+    const had = st.catalog;
+    loadCatalog({ fresh: true }).then((c) => {
+      if (c !== had && shownPane === 'main' && st.popover && st.popover.panel === panel) renderPane('main');
+    });
     renderPane('main');
   }
 

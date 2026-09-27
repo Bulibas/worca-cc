@@ -73,6 +73,7 @@ function world({ vars = { GH_TOKEN: SECRET, WORCA_MOCK: '1', SEALED: null, RAILW
       const q = args[1];
       const v = JSON.parse(args[3]);
       if (q.includes('serviceInstanceUpdate')) { img = v.i.source.image; return { code: 0, stdout: '{"data":{"serviceInstanceUpdate":true}}' }; }
+      if (q.includes('variableDelete')) return { code: 0, stdout: '{"data":{"variableDelete":true}}' };
       if (q.includes('serviceInstanceDeploy')) { n += 1; return { code: 0, stdout: '{"data":{"serviceInstanceDeploy":true}}' }; }
       if (q.includes('serviceInstance(')) return { code: 0, stdout: JSON.stringify({ data: { serviceInstance: { source: { image: img } } } }) };
       if (q.includes('deployments(')) return { code: 0, stdout: JSON.stringify({ data: { deployments: { edges: [{ node: { id: `d${n}`, status: 'SUCCESS', createdAt: new Date(Date.now() + 1000).toISOString() } }] } } }) };
@@ -131,8 +132,25 @@ test('mock on/off, unset', async () => {
   assert.deepEqual([w.calls[0].args.slice(0, 4), w.calls[0].input], [['variable', 'set', 'WORCA_MOCK', '--stdin'], '1']);
   await assert.rejects(main(['mock', 't1', 'maybe', '--yes'], world().ctx), /on\|off/);
   w = world();
-  await main(['unset', 't1', 'WORCA_CLONE_ALLOW', '--yes', '--skip-deploys'], w.ctx);
-  assert.ok(w.calls[0].args.includes('--skip-deploys') && w.calls[0].args.includes('--service'));
+  await main(['unset', 't1', 'WORCA_CLONE_ALLOW', '--yes'], w.ctx);
+  assert.deepEqual(w.calls[0].args, ['variable', 'delete', 'WORCA_CLONE_ALLOW', '--service', 'worca', '--environment', 'env-1', '--project', 'proj-1']);
+  assert.match(w.text(), /\(deploying\)/);
+});
+
+test('unset --skip-deploys: the API removes it without a deploy (the CLI has no such flag)', async () => {
+  let w = world();
+  assert.equal(await main(['unset', 't1', 'WORCA_CLONE_ALLOW', '--yes', '--skip-deploys'], w.ctx), 0);
+  assert.equal(w.calls.length, 1);
+  assert.deepEqual(w.calls[0].args.slice(0, 1), ['api']);
+  assert.match(w.calls[0].args[1], /variableDelete\(input:\$i\)/);
+  assert.deepEqual(JSON.parse(w.calls[0].args[3]), { i: { projectId: 'proj-1', environmentId: 'env-1', serviceId: 'svc-1', name: 'WORCA_CLONE_ALLOW' } });
+  assert.ok(!allArgs(w.calls).includes('--skip-deploys'), 'the CLI flag is never passed');
+  assert.ok(!w.calls.some((c) => c.args[0] === 'api' && c.args[1].includes('serviceInstanceDeploy')), 'no deploy');
+  assert.match(w.text(), /no deploy; run redeploy when done/);
+  // A refusal from the API is an error, not a silent success.
+  w = world();
+  w.ctx.exec = async (cmd, args) => (args[0] === 'api' ? { code: 0, stdout: '{"errors":[{"message":"Not Authorized"}]}' } : { code: 0, stdout: '' });
+  await assert.rejects(main(['unset', 't1', 'WORCA_CLONE_ALLOW', '--yes', '--skip-deploys'], w.ctx), /Not Authorized/);
 });
 
 test('upgrade records history; rollback returns to the previous image', async () => {
