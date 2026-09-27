@@ -10,7 +10,7 @@ import { getDb } from '../src/core/db.mjs';
 import { worcaHome } from '../src/core/projects.mjs';
 import {
   ASK_ID_RE, newAskId, askRoot, attachmentsDir,
-  createThread, getThread, listThreads, updateThread, setThreadTitle, addThreadTotals, deleteThread, sweepEmptyThreads,
+  createThread, getThread, listThreads, updateThread, setThreadTitle, addThreadTotals, addThreadContexts, deleteThread, sweepEmptyThreads,
   countThreads, listThreadIds, countWorktrees, countAttachments,
   appendMessage, getMessage, listMessages, finishMessage, setMessageBlocks, findCard, updateCardBlock, sweepStreamingMessages,
   addAttachment, listAttachments, getAttachment, readAttachmentText, readAttachmentRaw,
@@ -36,11 +36,12 @@ test('createThread / getThread / updateThread / setThreadTitle', () => {
   const t = createThread({ model: 'claude-opus-5-5', effort: 'high' });
   assert.match(t.id, /^ask_[0-9a-f]{8}$/);
   assert.deepEqual(Object.keys(t).sort(),
-    ['context', 'createdAt', 'createdBy', 'effort', 'id', 'model', 'sessionId', 'title', 'totals', 'updatedAt']);
+    ['context', 'contexts', 'createdAt', 'createdBy', 'effort', 'id', 'model', 'sessionId', 'title', 'totals', 'updatedAt']);
   assert.equal(t.createdBy, null, 'ownerless unless created with an owner');
   assert.equal(t.title, null);
   assert.equal(t.sessionId, null);
   assert.equal(t.context, null);
+  assert.deepEqual(t.contexts, []);
   assert.deepEqual(t.totals, { costUsd: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, turns: 0, agents: 0 });
   assert.deepEqual(getThread(t.id), t);
   assert.equal(getThread('ask_ffffffff'), null);
@@ -474,4 +475,20 @@ test('boot sweep: a streaming row\'s building workflow card turns failed with th
   assert.equal(sweepStreamingMessages(), 1);
   const blocks = getMessage(m.id).blocks;
   assert.deepEqual(blocks.map((b) => [b.kind, b.state ?? null, b.error ?? null]), [['card', 'failed', 'interrupted by restart'], ['card', 'proposed', null], ['notice', null, null]]);
+});
+
+test('addThreadContexts accumulates; updateThread/scope writes never touch contexts', () => {
+  const t = createThread();
+  assert.deepEqual(t.contexts, [], 'no contexts yet');
+  const p = { kind: 'project', id: 'p-00000001', label: 'Proj' };
+  const s = { kind: 'page', id: 'settings', label: 'Settings' };
+  assert.deepEqual(addThreadContexts(t.id, [p]), [p]);
+  const before = getThread(t.id).updatedAt;
+  assert.deepEqual(addThreadContexts(t.id, [s, p]), [p, s], 'origin first, deduped');
+  assert.equal(getThread(t.id).updatedAt, before, 'recording contexts does not reorder the history list');
+  updateThread(t.id, { context: { pinned: true, workspaceId: 'wks-team-0000abcd' }, contexts: [] });
+  assert.deepEqual(getThread(t.id).contexts, [p, s], 'updateThread ignores contexts (not a patch column)');
+  assert.deepEqual(listThreads().find((x) => x.id === t.id).contexts, [p, s], 'the list carries them too');
+  assert.equal(addThreadContexts('ask_ffffffff', [p]), null);
+  assert.deepEqual(addThreadContexts(t.id, []), [p, s], 'an empty turn is a no-op');
 });

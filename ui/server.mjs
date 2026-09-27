@@ -67,7 +67,7 @@ import { describeTitleModel } from '../src/core/title.mjs';
 import { effectiveHumanRateUsd } from '../src/core/human-rate.mjs';
 import {
   ASK_ID_RE, createThread as askCreateThread, getThread as askGetThread,
-  listThreads as askListThreads, updateThread as askUpdateThread,
+  listThreads as askListThreads, updateThread as askUpdateThread, addThreadContexts as askAddThreadContexts,
   deleteThread as askDeleteThread, sweepEmptyThreads, sweepStreamingMessages, sweepCloningCards,
   countThreads as askCountThreads, listThreadIds as askListThreadIds,
   countWorktrees as askCountWorktrees, countAttachments as askCountAttachments,
@@ -82,6 +82,7 @@ import {
 } from '../src/core/ask/store.mjs';
 import { sanitizeTitle as askSanitizeTitle } from '../src/core/title.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
+import { contextEntries as askContextEntries } from '../src/core/ask/contexts.mjs';
 import { askWebAccess, WEB_OFF } from '../src/core/ask/web-access.mjs';
 import { askCatalog, validateModelEffort } from '../src/core/ask/models.mjs';
 import { buildCatalog as askBuildCatalog } from '../src/core/ask/catalog.mjs';
@@ -8022,12 +8023,21 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
     if (ctx.pipelineId) {
       const key = ctx.workspaceId ? `workspaces/${ctx.workspaceId}` : out.project?.key;
       const row = (key ? lookupPipelineRow(key, ctx.pipelineId) : null) || findPipelineRowById(ctx.pipelineId);
-      if (row) out.run = askRunFromPipelineRow(row);
+      if (row) {
+        // `home` = the run's #history route prefix (context chips); never rendered into the header.
+        const home = row.workspace_key ? `workspaces/${row.workspace_key}` : (row.project_key || null);
+        out.run = { ...askRunFromPipelineRow(row), home };
+      }
     } else if (ctx.runId && runs.has(ctx.runId)) {
       const entry = runs.get(ctx.runId);
+      // `home` (context chips) only once the pipeline id is known: the run-id prefix fallback
+      // is not the id a later turn resolves, so contextEntries skips a run without one.
+      const home = !entry.pipelineId ? null
+        : entry.workspaceId ? `workspaces/${entry.workspaceId}`
+          : (entry.projectDir ? projectKey(entry.projectDir) : null);
       out.run = {
         id: entry.pipelineId || ctx.runId.slice(0, 8), title: entry.title || '',
-        status: entry.status || '', startedAt: entry.startedAt || '', branch: null,
+        status: entry.status || '', startedAt: entry.startedAt || '', branch: null, home,
       };
     }
   } catch { /* absent line */ }
@@ -8190,6 +8200,11 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     const withText = attRows.map((a, i) => ({ id: a.id, name: a.name, bytes: a.bytes, kind: a.kind, mime: a.mime, text: files[i].text }));
     const { inline, listed } = askSelectInlineAttachments(withText);
     const headerCtx = await resolveAskContext(id, ctx, listed, userMsg.id, { signedIn });
+    // Context chips: accumulate the project/run/workspace/named page this turn ran in
+    // (origin first, deduped; contexts.mjs). Cosmetic — a failure must never fail the turn.
+    try { askAddThreadContexts(id, askContextEntries(ctx, headerCtx)); } catch (e) {
+      console.error(`[worca-ui] ask contexts not recorded: ${e && e.message ? e.message : e}`);
+    }
     // Web access (docs/guardrails.md "Web access"): resolved ONCE per turn — local settings ⊕ the pinned project's
     // team policy — so the prompt section, the sub-agent note and the MCP child's tools agree.
     const pinned = askPinnedScope(ctx);
@@ -8365,7 +8380,11 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
     // `attachments` carries the store-minted ids so the sender's own echo can key
     // image thumbnails and the thread budget off them (the ask-message broadcast
     // may have raced ahead of this response, or been missed on a brand-new thread).
-    res.status(202).json({ userMessageId: r.userMessageId, assistantMessageId: r.assistantMessageId, attachments: r.attachments });
+    res.status(202).json({
+      userMessageId: r.userMessageId, assistantMessageId: r.assistantMessageId, attachments: r.attachments,
+      // the thread's context chips after this turn's merge, so the header repaints without a re-fetch
+      contexts: askGetThread(id)?.contexts ?? [],
+    });
   } catch (err) {
     // startAskTurn never throws (it returns {ok:false,…}); only the route's own
     // pre-checks can land here, so there is no slot to release.

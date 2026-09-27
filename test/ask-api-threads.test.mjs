@@ -245,6 +245,43 @@ test('#397: a message whose context lacks `pinned` inherits the thread pin, per 
   assert.equal(snap2.thread.context.projectKey, undefined);
 });
 
+const settle = async (id) => {             // the mock turn must finish before the next POST (409 'turn in flight')
+  for (let i = 0; i < 200; i++) {
+    const s = await (await fetch(`${base}/api/ask/threads/${id}`)).json();
+    if (!s.inFlight) return s;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error('mock turn never settled');
+};
+
+test('context chips: accumulate across turns, dedupe, survive scope PATCH, ride list + GET + 202', async () => {
+  const { thread } = await (await post('/api/ask/threads', {})).json();
+  assert.deepEqual(thread.contexts, [], 'a fresh chat has no chips');
+  const send = (context) => post(`/api/ask/threads/${thread.id}/messages`, { text: 'hi', model: 'claude-opus-5-5', effort: 'high', context });
+
+  let r = await send({ view: 'settings' });
+  assert.equal(r.status, 202);
+  assert.deepEqual((await r.json()).contexts, [{ kind: 'page', id: 'settings', label: 'Settings' }]);
+  await settle(thread.id);
+
+  r = await send({ view: 'team-metrics' });
+  assert.deepEqual((await r.json()).contexts.map((c) => c.id), ['settings', 'team-metrics']);
+  await settle(thread.id);
+
+  // a scope PATCH rewrites `context` but never the chips
+  await patch(`/api/ask/threads/${thread.id}`, { scope: { pinned: true, projectKey: 'demo-00000001' } });
+  r = await send({ view: 'settings', pinned: false });         // settings again: deduped, origin stays first
+  assert.deepEqual((await r.json()).contexts.map((c) => c.id), ['settings', 'team-metrics']);
+  await settle(thread.id);
+
+  r = await send({ view: 'history' });                          // a list view adds nothing
+  assert.deepEqual((await r.json()).contexts.map((c) => c.id), ['settings', 'team-metrics']);
+  const snap = await settle(thread.id);
+  assert.deepEqual(snap.thread.contexts.map((c) => c.id), ['settings', 'team-metrics']);
+  const list = await (await fetch(`${base}/api/ask/threads?limit=50`)).json();
+  assert.deepEqual(list.threads.find((t) => t.id === thread.id).contexts.map((c) => c.id), ['settings', 'team-metrics']);
+});
+
 test('DELETE removes rows and the attachment directory; unknown is 404', async () => {
   assert.equal((await del('/api/ask/threads/ask_ffffffff')).status, 404);
   const store = await import('../src/core/ask/store.mjs');

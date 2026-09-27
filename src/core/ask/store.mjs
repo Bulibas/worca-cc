@@ -13,6 +13,7 @@ import { basename, join } from 'node:path';
 import { getDb, prepare, tx } from '../db.mjs';
 import { worcaHome } from '../projects.mjs';
 import { extensionForAttachment } from './attachment-kind.mjs';
+import { mergeContexts } from './contexts.mjs';
 
 export const ASK_ID_RE = /^[a-z]+_[0-9a-f]{8}$/;
 const ROLES = new Set(['user', 'assistant', 'system']);
@@ -40,10 +41,14 @@ const emptyTotals = () => ({ costUsd: 0, input: 0, output: 0, cacheRead: 0, cach
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
 
 function rowToThread(r) {
+  const contexts = parse(r.contexts, null);
   return {
     id: r.id, title: r.title ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
     model: r.model ?? null, effort: r.effort ?? null, sessionId: r.session_id ?? null,
     context: parse(r.context, null),
+    // Context chips (contexts.mjs): accumulated across turns, origin first. NULL (a chat from
+    // before v45) reads as [] — no indicator.
+    contexts: Array.isArray(contexts) ? contexts : [],
     totals: { ...emptyTotals(), ...(parse(r.totals, {}) || {}) },
     // The thread's owner (identity.mjs actor); null = ownerless (before attribution).
     createdBy: r.created_by ?? null,
@@ -174,6 +179,23 @@ export function addThreadTotals(id, { costUsd = null, usage = null, agents = 0 }
     t.agents += Number.isInteger(agents) && agents > 0 ? agents : 0;
     prepare('UPDATE ask_threads SET totals = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(t), now(), id);
     return t;
+  });
+}
+
+/** Merge one turn's context chips into the thread (mergeContexts: origin first, deduped).
+ *  The ONLY writer of ask_threads.contexts; leaves updated_at alone (the turn already bumped it).
+ *  Returns the stored list, or null for an unknown thread. */
+export function addThreadContexts(id, entries) {
+  return tx(() => {
+    const row = prepare('SELECT contexts FROM ask_threads WHERE id = ?').get(id);
+    if (!row) return null;
+    const cur = parse(row.contexts, []);
+    const next = mergeContexts(cur, entries);
+    // a legacy NULL row with an empty turn stays NULL; anything that changes the list is written
+    if (JSON.stringify(next) !== JSON.stringify(Array.isArray(cur) ? cur : [])) {
+      prepare('UPDATE ask_threads SET contexts = ? WHERE id = ?').run(JSON.stringify(next), id);
+    }
+    return next;
   });
 }
 

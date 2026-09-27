@@ -36,9 +36,22 @@ const ICONS = {
   mic: ['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M19 11a7 7 0 0 1-14 0', 'M12 18v3'],
   voiceTalk: ['M7.9 20A9 9 0 1 0 4 16.1L2 22z', 'M8 10h8M8 14h5'],           // chat bubble with text lines: speak in, read the reply
   voiceHandsFree: ['M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4'],               // waveform: a live conversation
+  pin: ['M12 17v5', 'M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z'],
 };
 // One icon per voice mode; the mic button and the ▾ menu both draw from this.
 const VOICE_MODE_ICONS = { dictate: ICONS.mic, talk: ICONS.voiceTalk, handsfree: ICONS.voiceHandsFree };
+
+const CTX_KINDS = { project: 'project', run: 'run', workspace: 'workspace' };   // page chips show no prefix
+
+/** A context chip's in-app route, or null when it has none (a run with no known home). */
+function contextHref(c) {
+  const e = encodeURIComponent;
+  if (c.kind === 'project') return `#projects/${e(c.id)}`;
+  if (c.kind === 'workspace') return `#workspaces/${e(c.id)}`;
+  if (c.kind === 'page') return `#${e(c.id)}`;
+  if (c.kind === 'run' && typeof c.home === 'string' && c.home) return `#history/${c.home.split('/').map(e).join('/')}/${e(c.id)}`;
+  return null;
+}
 
 export function fmtTokens(n) {
   if (!Number.isFinite(n) || n <= 0) return null;
@@ -398,6 +411,13 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     header.appendChild(newBtn);
     header.appendChild(iconButton('ask-icon-btn', 'Close', ICONS.chevronDown, closeSheet));
     sheet.appendChild(header);
+    // Context chips: what this chat was asked in (project/run/workspace/named page), origin first.
+    el.ctxRow = make('div', 'ask-ctx-row');
+    el.ctxRow.setAttribute('data-ask-ctx-row', '');
+    el.ctxRow.setAttribute('role', 'group');   // a bare div's aria-label is ignored
+    el.ctxRow.setAttribute('aria-label', 'Chat context');
+    el.ctxRow.hidden = true;
+    sheet.appendChild(el.ctxRow);
 
     el.transcript = make('div', 'ask-transcript');
     el.transcript.setAttribute('data-ask-scroll', '');
@@ -828,6 +848,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         st.threadId = id;
         st.model = createThreadModel({ threadId: id });
         st.model.load({ thread: body.thread, messages: [], attachments: [], runLinks: [], inFlight: null });
+        renderContextChips(body.thread && body.thread.contexts);
         renderTranscript();
         storeThread(id);
       }
@@ -854,7 +875,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         setComposerMsg(msg);
         return false;
       }
-      const { userMessageId, attachments: stored } = await res.json();
+      const { userMessageId, attachments: stored, contexts } = await res.json();
+      if (Array.isArray(contexts)) renderContextChips(contexts);   // an older server omits it: keep what is shown
       // Prefer the server's rows: they carry the store-minted ids that key the
       // image thumbnail (#398) and the thread's attachment ledger. The pending
       // files are the fallback for a server that predates the field.
@@ -1345,6 +1367,49 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   }
 
   // ---- threads popover (list; switching/delete land in Task 7) -------------
+  /** One context chip. `link` → an <a> that closes the sheet and routes (header);
+   *  otherwise a plain span (history rows: the row itself is the click target). */
+  function contextChip(c, { link }) {
+    const href = link ? contextHref(c) : null;
+    const chip = make(href ? 'a' : 'span', `ask-ctx-chip${c.pinned ? ' is-pinned' : ''}`);
+    chip.dataset.kind = c.kind;
+    if (c.pinned) chip.appendChild(svgIcon(ICONS.pin, 11, 2));
+    const prefix = CTX_KINDS[c.kind];
+    if (prefix) chip.appendChild(make('span', 'ask-ctx-kind', prefix));
+    chip.appendChild(make('span', 'ask-ctx-name', c.label || c.id));
+    chip.title = `${prefix ? `${prefix} ${c.id} — ` : ''}${c.label || c.id}${c.pinned ? ' (pinned)' : ''}`;
+    if (href) {
+      chip.setAttribute('href', href);
+      chip.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        closeSheet();                                            // openNewPipeline / progress-card precedent: close, then route
+        if (win.location.hash !== href) win.location.hash = href.slice(1);
+      });
+    }
+    return chip;
+  }
+
+  const validContexts = (list) => (Array.isArray(list) ? list : [])
+    .filter((c) => c && typeof c.kind === 'string' && typeof c.id === 'string' && c.id);
+
+  /** Header chip row for the open chat; hidden when the chat has none (legacy / fresh). */
+  function renderContextChips(list) {
+    if (!el.ctxRow) return;
+    el.ctxRow.replaceChildren(...validContexts(list).map((c) => contextChip(c, { link: true })));
+    el.ctxRow.hidden = el.ctxRow.childElementCount === 0;
+  }
+
+  const HISTORY_CHIPS = 3;
+  /** History-row chips: display-only, first three plus "+N". */
+  function threadContextChips(t) {
+    const list = validContexts(t.contexts);
+    if (!list.length) return null;
+    const holder = make('span', 'ask-thread-ctx');
+    for (const c of list.slice(0, HISTORY_CHIPS)) holder.appendChild(contextChip(c, { link: false }));
+    if (list.length > HISTORY_CHIPS) holder.appendChild(make('span', 'ask-ctx-more', `+${list.length - HISTORY_CHIPS}`));
+    return holder;
+  }
+
   // The start date leads the meter line, bold and on the primary ink, so the eye
   // scans it down the list while the cost/agent figures keep the meter's grey.
   // Hence an element rather than a string: only the date changes weight and
@@ -1448,6 +1513,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       // A null title = the haiku title has not landed yet (the message route
       // stamps nothing); "New chat" is the same label the turn falls back to.
       col.appendChild(make('span', 'ask-thread-title', t.title || 'New chat'));
+      const chips = threadContextChips(t);
+      if (chips) col.appendChild(chips);
       col.appendChild(threadMeter(t));
       pick.appendChild(col);
       row.appendChild(pick);
@@ -1958,6 +2025,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     storeThread(null);
     el.title.textContent = 'Ask Worca';
     applyThreadScope(null);             // #397: a brand-new chat starts on Auto
+    renderContextChips([]);
     restoreBrowserPick();               // …and on the browser-level pick, not the last chat's
     pruneCardEls();                     // st.model is already null — renderTranscript's keep set cannot see the old ids
     renderTranscript();
@@ -4155,6 +4223,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     st.model.load(snap);
     el.title.textContent = (snap.thread && snap.thread.title) || 'Ask Worca';
     applyThreadScope(snap.thread && snap.thread.context);   // #397: restore the pin
+    renderContextChips(snap.thread && snap.thread.contexts);
     // The picker follows the chat — on a SWITCH only: a resync of the same thread
     // would otherwise clobber a pick the user just made (its PATCH may not have landed).
     if (switched) applyThreadPick(snap.thread);
