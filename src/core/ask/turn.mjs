@@ -658,7 +658,11 @@ class AskTurn extends EventEmitter {
       await d.fs.writeFile(
         mcpConfigPath,
         JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, ...(this.reader ? { reader: this.reader } : {}), ...(this.relay ? { relay: this.relay } : {}), ...(this.web ? { web: this.web } : {}) }), null, 2),
-        { encoding: 'utf8', mode: 0o600 },          // never a key value (webKeyVar: the key rides the process env)
+        // Never a key value (webKeyVar: the key rides the process env). A relayed turn runs as
+        // the person's agent user (agent-pool.mjs), which reads this file through its group: the
+        // scratch dir is setgid worca-share (2770), so 0640 reaches the agent users and nobody
+        // else. It carries this turn's relay token, which that agent must present anyway.
+        { encoding: 'utf8', mode: this.relay ? 0o640 : 0o600 },
       );
       // One 30-minute budget for the whole turn, retry included. The timedOut
       // flag and abort() run in ONE synchronous callback, so R-C always reads
