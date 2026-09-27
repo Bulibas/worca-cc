@@ -106,9 +106,46 @@ export function needsSignInPill(m, { doc = globalThis.document } = {}) {
 // ── Providers card (§8.1) ────────────────────────────────────────────────────
 
 function providerStatePill(doc, c) {
-  if (!c.termsCurrent) return h(doc, 'span', 'badge grey', 'sign-in blocked until acknowledged');
+  if (!c.termsCurrent) {
+    // What unblocks sign-in, in the "Read notice" button's own words — and it opens that notice.
+    const pill = h(doc, 'button', 'badge grey mv-cp-terms mv-cp-terms-pill',
+      c.acknowledgedTerms ? 'please re-read the updated notice' : 'please read the notice first');
+    pill.type = 'button';
+    pill.title = 'Sign-in is blocked until you acknowledge the GitHub Copilot notice. Click to read it.';
+    return pill;
+  }
   if (!c.connected) return h(doc, 'span', 'badge grey', 'not connected');
   return h(doc, 'span', 'badge green', `connected${c.login ? ` as @${c.login}` : ''}`);
+}
+
+/**
+ * With the credential broker: the viewer's own state in the slot `name` spends from (key page),
+ * not worca's settings, which hold no key. A missing key links to the key page.
+ */
+function brokerPill(doc, b, name) {
+  const p = (b.providers || {})[name] || {};
+  const what = name === 'copilot' ? 'sign-in' : 'key';
+  if (b.signInNeeded) return h(doc, 'span', 'badge grey', `sign in to see your ${what}`);
+  if (p.state === 'none') {
+    const x = h(doc, 'span', 'badge red', 'no broker slot for this URL');
+    x.title = p.error || 'The credential broker has no slot for this base URL.';
+    return x;
+  }
+  if (p.state === 'keyless') return h(doc, 'span', 'badge green', 'local — no key needed');
+  if (b.error) {
+    const x = h(doc, 'span', 'badge grey', 'key page unreachable');
+    x.title = b.error;
+    return x;
+  }
+  if (p.state === 'set') return h(doc, 'span', 'badge green', `your ${what}${p.suffix ? ` ••••${p.suffix}` : ''}`);
+  if (p.state === 'operator') return h(doc, 'span', 'badge green', 'team key');
+  const label = p.state === 'invalid' ? `your ${what} was rejected` : `add your ${what} on the key page`;
+  const cls = p.state === 'invalid' ? 'badge red' : 'badge grey';
+  if (!b.keyPage) return h(doc, 'span', cls, label);
+  const a = h(doc, 'a', `${cls} mv-broker-pill`, label);
+  a.href = b.keyPage; a.target = '_blank'; a.rel = 'noopener';
+  a.title = 'Opens the key page in a new tab. Reopen this tab afterwards to see the change.';
+  return a;
 }
 
 function quotaLine(q) {
@@ -181,7 +218,9 @@ export function renderProvidersCard(providers, { doc = globalThis.document, sign
   const cpMain = h(doc, 'div', 'mv-pv-main');
   const cpHead = h(doc, 'div', 'mv-head');
   cpHead.appendChild(h(doc, 'b', 'mv-name', 'GitHub Copilot'));
-  cpHead.appendChild(providerStatePill(doc, c));
+  const brokered = !!(p.broker && p.broker.enabled);
+  // The notice gates Copilot models either way; past it, the broker's view of your sign-in.
+  cpHead.appendChild(brokered && c.termsCurrent ? brokerPill(doc, p.broker, 'copilot') : providerStatePill(doc, c));
   cpMain.appendChild(cpHead);
   cpMain.appendChild(h(doc, 'small', 'hint',
     c.acknowledgedTerms
@@ -215,7 +254,6 @@ export function renderProvidersCard(providers, { doc = globalThis.document, sign
   const cpBtns = h(doc, 'div', 'mv-pv-btns');
   const imp = h(doc, 'button', 'btn-ghost mv-cp-fetch-models', 'Import models…');
   // With the broker, the import runs with the viewer's own Copilot sign-in (on the key page).
-  const brokered = !!(p.broker && p.broker.enabled);
   imp.type = 'button'; imp.disabled = !c.connected && !brokered;
   if (imp.disabled) imp.title = 'Sign in first';
   cpBtns.appendChild(imp);
@@ -245,7 +283,7 @@ export function renderProvidersCard(providers, { doc = globalThis.document, sign
     const main = h(doc, 'div', 'mv-pv-main');
     const rh = h(doc, 'div', 'mv-head');
     rh.appendChild(h(doc, 'b', 'mv-name', PROVIDER_LABELS[name]));
-    rh.appendChild(k.configured ? h(doc, 'span', 'badge green', 'key set')
+    rh.appendChild(p.broker && p.broker.enabled ? brokerPill(doc, p.broker, name) : k.configured ? h(doc, 'span', 'badge green', 'key set')
       : k.keySet ? h(doc, 'span', 'badge red', 'key ${VAR} not set')
         : k.keyOptional ? h(doc, 'span', 'badge green', 'local — no key needed') : h(doc, 'span', 'badge grey', 'no key'));
     main.appendChild(rh);

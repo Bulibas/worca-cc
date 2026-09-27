@@ -1200,3 +1200,16 @@ test('relay: the turn hands its web access to the relay and marks the spawn rela
   assert.deepEqual(relayArgs.web, web);
   assert.equal(relayed, true);
 });
+
+test('the MCP config is readable by the agent user on a relayed turn, by worca alone otherwise', async () => {
+  // worca-01, 1.6.0-rc.1: a relayed turn runs as the person's agent user, which read a 0600
+  // file owned by worca — "Invalid MCP configuration: … EACCES: permission denied".
+  const modes = [];
+  const fs = { mkdir: async () => {}, writeFile: async (p, _d, o) => { if (/mcp-.*\.json$/.test(p)) modes.push(o.mode); }, unlink: async () => {} };
+  const fail = async () => { throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' }); };
+  const relayedTurn = makeTurn(seed(), {}, { fs, agentRelay: () => ({ url: 'http://127.0.0.1:1/api/ask/relay', token: 't', dispose: () => {} }), runClaudeImpl: fail }).turn;
+  await relayedTurn.run();
+  const plainTurn = makeTurn(seed(), {}, { fs, runClaudeImpl: fail }).turn;
+  await plainTurn.run();
+  assert.deepEqual(modes, [0o640, 0o600]);
+});
