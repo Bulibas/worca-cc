@@ -84,8 +84,8 @@ RUN usermod -l worca -d /home/worca -m node \
 # signed-in person, so one person's agents cannot read another's processes (and the broker
 # token in their environment). Same group, same rule: sudo to these users only, never root.
 RUN groupadd -g 1001 worca-share \
- && useradd -u 1001 -g worca-share -M -d /nonexistent -s /bin/bash worca-agent \
- && for i in $(seq -w 1 16); do useradd -u "11$i" -g worca-share -M -d /nonexistent -s /bin/bash "worca-agent-$i"; done \
+ && useradd -l -u 1001 -g worca-share -M -d /nonexistent -s /bin/bash worca-agent \
+ && for i in $(seq -w 1 16); do useradd -l -u "11$i" -g worca-share -M -d /nonexistent -s /bin/bash "worca-agent-$i"; done \
  && usermod -aG worca-share worca \
  && printf '%s\n' \
       'Defaults:worca !lecture, !syslog, !secure_path, umask=0007, umask_override' \
