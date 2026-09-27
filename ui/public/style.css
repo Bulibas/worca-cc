@@ -2357,6 +2357,13 @@ section[data-view="team-metrics"] .topbar{align-items:flex-start;}
 /* Actor and Started never wrap: with the Saved column in, Title (ellipsis) and Workflow give way first. */
 .tm-run-tbl td:nth-last-child(-n+2){white-space:nowrap;}
 .badge.grey{background:var(--field);color:var(--ink-2);}
+/* The Copilot card's "read the notice first" pill is a button: it opens the notice (bridge-view.mjs). */
+.mv-cp-terms-pill{border:0;font-family:inherit;cursor:pointer;}
+.mv-cp-terms-pill:hover{background:var(--line);color:var(--ink);}
+.mv-cp-terms-pill:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+/* With the credential broker, a provider pill for a missing key links to the key page. */
+.mv-broker-pill{text-decoration:none;cursor:pointer;}
+.mv-broker-pill:hover{text-decoration:underline;}
 .tm-empty{display:grid;grid-template-columns:1fr 1fr;gap:14px;} .tm-empty .card{padding:22px;}
 .tm-step{font-size:11px;letter-spacing:.08em;font-weight:700;color:var(--ink-2);}
 .tm-empty-foot{display:block;margin-top:14px;}

@@ -19,7 +19,7 @@ import {
 } from './providers/copilot.mjs';
 import { keyOptional } from './registry.mjs';
 import { listEndpointModels, catalogEntryForEndpointModel, importableModel } from './providers/endpoint.mjs';
-import { brokerEnabled, brokerInfo, cachedBrokerInfo, mintSpawnToken, revokeSpawnToken, slotBaseUrl } from '../broker-client.mjs';
+import { brokerEnabled, brokerInfo, cachedBrokerInfo, mintSpawnToken, revokeSpawnToken, slotBaseUrl, personSlots } from '../broker-client.mjs';
 import { routeUpstream } from '../broker-routing.mjs';
 import { resolveBillTo } from '../billing.mjs';
 
@@ -129,7 +129,7 @@ const secretSource = (v) => (!v ? null : modelEnvRef(v) ? 'env' : 'stored');
  * a network call to GitHub — and is null when the account exposes none.
  * @param {{quota?:boolean, fetch?:typeof fetch}} [opts]
  */
-export async function providersState({ quota = false, fetch: f } = {}) {
+export async function providersState({ quota = false, fetch: f, person = resolveBillTo(null) } = {}) {
   const all = allProviders();
   const c = all.copilot;
   const token = resolveProviderSecret(c.githubToken);
@@ -161,9 +161,45 @@ export async function providersState({ quota = false, fetch: f } = {}) {
       maxConcurrent: p.maxConcurrent,
     };
   };
-  // With the credential broker on, keys and the Copilot sign-in are per person on its key page.
-  const broker = brokerEnabled() ? { enabled: true, keyPage: cachedBrokerInfo()?.publicUrl || null, mode: cachedBrokerInfo()?.mode || null } : { enabled: false };
+  // With the credential broker on, keys and the Copilot sign-in are per person on its key page:
+  // each provider's state is the viewer's own slot there, not worca's (empty) settings.
+  const broker = brokerEnabled() ? await brokerProviders(all, person) : { enabled: false };
   return { copilot, openai: keyed('openai'), anthropic: keyed('anthropic'), broker };
+}
+
+/**
+ * The Providers card's view of the broker: which slot each provider spends from and the viewer's
+ * state in it — {slot, state:'set'|'missing'|'invalid'|'operator'|'keyless'|'none', suffix?, error?}.
+ * Never throws: an unreachable broker leaves the states out and says why.
+ */
+async function brokerProviders(all, person) {
+  const info = cachedBrokerInfo() || await brokerInfo().catch(() => null);
+  const out = { enabled: true, keyPage: info?.publicUrl || null, mode: info?.mode || null, providers: {} };
+  const slots = info?.slots || [];
+  const route = (name) => {
+    if (name === 'copilot') {
+      const s = slots.find((x) => x.auth === 'copilot');
+      return s ? { slot: s.id } : { state: 'none', error: 'the credential broker has no GitHub Copilot slot' };
+    }
+    const r = routeUpstream({ provider: name, baseUrl: all[name].baseUrl || null }, { slots });
+    return r.slot ? { slot: r.slot } : r.keyless ? { state: 'keyless' } : { state: 'none', error: r.error };
+  };
+  for (const name of ['copilot', 'openai', 'anthropic']) out.providers[name] = route(name);
+  const who = out.mode === 'multi' ? person : 'local';
+  if (!who || (out.mode === 'multi' && who === 'local')) { out.signInNeeded = true; return out; }
+  try {
+    const mine = new Map(((await personSlots(who)).slots || []).map((x) => [x.id, x]));
+    for (const p of Object.values(out.providers)) {
+      if (!p.slot) continue;
+      const s = mine.get(p.slot);
+      p.state = s ? s.state : 'missing';
+      if (s && s.suffix) p.suffix = s.suffix;
+      if (s && s.label) p.label = s.label;
+    }
+  } catch (err) {
+    out.error = err.message;
+  }
+  return out;
 }
 
 /** Patch a provider from the UI/CLI; masked key echoes are dropped ("keep"). */
