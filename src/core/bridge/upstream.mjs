@@ -12,6 +12,8 @@ import { ResponsesStreamTranslator, toMessagesResponseFromResponses } from './tr
 import { mapUpstreamError, mapNetworkError, bridgeErrors, anthropicError, isFailedResponseOverflow, PAYLOAD_CEILING_BYTES } from './errors.mjs';
 import { copilotToken, invalidateCopilotToken, copilotApiHost, copilotHeaders, bodyHasImage, requestInitiator } from './providers/copilot.mjs';
 import { upstreamSettings, providerReadiness } from './registry.mjs';
+import { brokerEnabled, slotBaseUrl } from '../broker-client.mjs';
+import { routeBridgedUpstream } from '../broker-routing.mjs';
 import { KeyedSemaphore } from './semaphore.mjs';
 import { recordBridgeCall, recordBridgeError, recordBridgeCost } from './telemetry.mjs';
 import { isOpenRouter, adaptOpenRouterChatBody, OPENROUTER_HEADERS } from './openrouter.mjs';
@@ -45,6 +47,19 @@ export function _resetBridgeWarnings() { warned.clear(); }
  * @returns {Promise<{url:string, headers:object, provider:string, retryAuth?:() => Promise<object>}>}
  */
 async function prepareUpstream(us, body, { fetch: f, requestHeaders }) {
+  // Credential broker: the request goes to <broker>/p/<slot>… with the spawn's token; the
+  // broker adds the person's key (or runs the Copilot exchange). us.baseUrl keeps the real
+  // provider URL: dialect decisions (OpenRouter's body and headers) still key on it.
+  if (us.brokerToken && us.provider === 'copilot') {
+    const initiator = requestInitiator(body);
+    const path = us.api === 'anthropic' ? '/v1/messages' : us.api === 'openai-responses' ? '/responses' : '/chat/completions';
+    const headers = { ...copilotHeaders(us.brokerToken, { vision: bodyHasImage(body), initiator }), ...us.headers };
+    if (us.api === 'anthropic') {
+      headers['anthropic-version'] = requestHeaders['anthropic-version'] || '2023-06-01';
+      if (requestHeaders['anthropic-beta']) headers['anthropic-beta'] = requestHeaders['anthropic-beta'];
+    }
+    return { url: `${us.brokerBase}${path}`, headers, provider: 'copilot', initiator };
+  }
   if (us.provider === 'copilot') {
     const initiator = requestInitiator(body);
     const vision = bodyHasImage(body);
@@ -64,11 +79,11 @@ async function prepareUpstream(us, body, { fetch: f, requestHeaders }) {
   }
   const initiator = requestInitiator(body);
   if (us.api === 'anthropic') {
-    const base = (us.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '');
+    const base = (us.brokerBase || us.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '');
     const url = /\/v1$/.test(base) ? `${base}/messages` : `${base}/v1/messages`;
     const headers = {
       'content-type': 'application/json',
-      'x-api-key': us.apiKey,
+      'x-api-key': us.brokerToken || us.apiKey,
       'anthropic-version': requestHeaders['anthropic-version'] || '2023-06-01',
       ...(requestHeaders['anthropic-beta'] ? { 'anthropic-beta': requestHeaders['anthropic-beta'] } : {}),
       ...us.headers,
@@ -76,11 +91,12 @@ async function prepareUpstream(us, body, { fetch: f, requestHeaders }) {
     return { url, headers, provider: us.provider, initiator };
   }
   const base = (us.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '');
+  const key = us.brokerToken || us.apiKey;
   return {
-    url: `${base}/${us.api === 'openai-responses' ? 'responses' : 'chat/completions'}`,
+    url: `${(us.brokerBase || base).replace(/\/+$/, '')}/${us.api === 'openai-responses' ? 'responses' : 'chat/completions'}`,
     headers: {
       'content-type': 'application/json',
-      ...(us.apiKey ? { authorization: `Bearer ${us.apiKey}` } : {}),
+      ...(key ? { authorization: `Bearer ${key}` } : {}),
       ...(isOpenRouter(base) ? OPENROUTER_HEADERS : {}),   // an entry's own headers still win
       ...us.headers,
     },
@@ -101,7 +117,7 @@ async function prepareUpstream(us, body, { fetch: f, requestHeaders }) {
  * @param {(line:string)=>void} [args.log]
  * @param {object} reply  { status(code, headers), write(chunk), end(), json(status, obj, headers?) }
  */
-export async function handleMessages({ entry, body, requestHeaders = {}, tag = '', signal, fetch: f = globalThis.fetch, log }, reply) {
+export async function handleMessages({ entry, body, requestHeaders = {}, tag = '', signal, fetch: f = globalThis.fetch, log, brokerToken = null }, reply) {
   const upstream = entry.upstream;
   const ready = providerReadiness(upstream);
   if (!ready.ok) {
@@ -110,6 +126,26 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
     return reply.json(e.status, e.body);
   }
   const us = upstreamSettings(upstream);
+  // Credential broker: route through the model's slot with the spawn's token.
+  if (brokerEnabled()) {
+    const route = routeBridgedUpstream(upstream);
+    if (route.error) {
+      const e = anthropicError(403, 'permission_error', `worca-broker: ${route.error}`);
+      recordBridgeError({ tag, catalogId: entry.id, provider: us.provider, status: e.status, message: e.body.error.message });
+      return reply.json(e.status, e.body);
+    }
+    if (!route.keyless) {
+      if (!brokerToken) {
+        const e = anthropicError(403, 'authentication_error', 'worca-broker: this spawn has no broker token');
+        recordBridgeError({ tag, catalogId: entry.id, provider: us.provider, status: e.status, message: e.body.error.message });
+        return reply.json(e.status, e.body);
+      }
+      us.brokerToken = brokerToken;
+      us.brokerBase = `${slotBaseUrl(route.slot)}${route.prefix || ''}`;
+      us.apiKey = '';
+      us.githubToken = null;
+    }
+  }
 
   // Body → upstream body.
   let outBody;

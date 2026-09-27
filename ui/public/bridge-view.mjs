@@ -151,6 +151,19 @@ export function renderProvidersCard(providers, { doc = globalThis.document, sign
   }
   root.appendChild(h(doc, 'small', 'hint mv-providers-hint',
     "Providers let Worca run models that don't speak the Anthropic API — through its own in-process bridge. Sign in or set a key once; then import or add models on the Models tab and pick them anywhere a model is picked."));
+  // Credential broker: keys and the Copilot sign-in are per person, on the broker's key page.
+  // This card keeps the shared settings (base URLs, concurrency, the Copilot notice, imports);
+  // its key fields, sign-in and key test are hidden (style.css .mv-providers--broker).
+  if (p.broker && p.broker.enabled) {
+    root.classList.add('mv-providers--broker');
+    const note = h(doc, 'p', 'hint mv-broker-note', 'Keys and the GitHub Copilot sign-in are held by the credential broker: each person adds their own on the key page. Imports list models with your own key.');
+    if (p.broker.keyPage) {
+      const a = h(doc, 'a', 'mv-broker-link', 'Open the key page');
+      a.href = p.broker.keyPage; a.target = '_blank'; a.rel = 'noopener';
+      note.append(' ', a);
+    }
+    root.appendChild(note);
+  }
   /** One provider's row, in its own card when the tab hosts it. */
   const place = (row, title) => {
     if (!split) { root.appendChild(row); return; }
@@ -201,8 +214,10 @@ export function renderProvidersCard(providers, { doc = globalThis.document, sign
 
   const cpBtns = h(doc, 'div', 'mv-pv-btns');
   const imp = h(doc, 'button', 'btn-ghost mv-cp-fetch-models', 'Import models…');
-  imp.type = 'button'; imp.disabled = !c.connected;
-  if (!c.connected) imp.title = 'Sign in first';
+  // With the broker, the import runs with the viewer's own Copilot sign-in (on the key page).
+  const brokered = !!(p.broker && p.broker.enabled);
+  imp.type = 'button'; imp.disabled = !c.connected && !brokered;
+  if (imp.disabled) imp.title = 'Sign in first';
   cpBtns.appendChild(imp);
   const quotaBtn = h(doc, 'button', 'btn-ghost mv-cp-quota-refresh', 'Refresh usage');
   quotaBtn.type = 'button'; quotaBtn.disabled = !c.connected;

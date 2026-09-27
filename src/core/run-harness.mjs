@@ -66,7 +66,11 @@ import {
   isValidSourceRef, snapshotWorktreePatch,
 } from './worktree.mjs';
 import { readPluginsLock, pluginCurrentDir } from './plugins-lock.mjs'; // §9.4 disabled-plugin hint
-import { classifyError, rateLimitHint } from './recoverable-error.mjs';
+import { classifyError, rateLimitHint, brokerHint } from './recoverable-error.mjs';
+import { withBillTo, currentBillTo } from './billing.mjs';
+import { brokerEnabled, brokerInfo, personSlots } from './broker-client.mjs';
+import { mockEnabled } from './claude-runner.mjs';
+import { modelSlot, manifestModels, missingCredentials, describeMissing } from './broker-routing.mjs';
 import { recoveryDelayMs, sleepAbortable } from './recovery-backoff.mjs';
 import {
   resolveFailure, isTerminal, markTerminal, answerFromDecision,
@@ -989,7 +993,9 @@ export class RunHarness extends EventEmitter {
     const line = firstLine(err?.message || (err == null ? '' : String(err))) || 'unknown error';
     // A shared-pool 429 (OpenRouter `:free`) names its real cause and fixes —
     // otherwise "rate limited" reads as worca's own max-concurrent setting.
-    const hint = reason === REASON.RECOVERABLE && cls === 'rate_limit' ? rateLimitHint(err) : '';
+    // A credential-broker refusal (a missing key, a spent cap) says where to fix it.
+    const hint = reason !== REASON.RECOVERABLE ? ''
+      : cls === 'rate_limit' ? rateLimitHint(err) : brokerHint(err, cls);
     const text = detail ?? (reason === REASON.ERROR ? errorDetail(err)
       : reason === REASON.RECOVERABLE ? `${cls || 'recoverable'}: ${line}${hint ? ` — ${hint}` : ''}` : line);
     if (reason === REASON.ERROR) {
@@ -1024,8 +1030,15 @@ export class RunHarness extends EventEmitter {
   /**
    * Execute the full pipeline. Resolves with { status, pipelineDir } on success
    * or stop; rejects only on unexpected internal errors (it emits 'error' too).
+   *
+   * Every spawn of the run is billed to the person who started it (billing.mjs,
+   * credential broker): the whole loop runs inside that async context.
    */
-  async run() {
+  run() {
+    return withBillTo(this.opts.startedBy || currentBillTo(), () => this._run());
+  }
+
+  async _run() {
     try {
       this.state.startedAt = new Date().toISOString();
       this._setStatus('running');
@@ -1064,6 +1077,9 @@ export class RunHarness extends EventEmitter {
       this.toolInstruction = tools.instruction || '';
       this.state.tools = tools;
       this.stepModels = stepModels;
+      // Credential broker: every model this run will spawn needs its person's key; refuse
+      // NOW, naming what's missing, instead of pausing mid-run at the first node that needs it.
+      await this._brokerPreflight(topology.manifest, stepModels);
       await this._resolveGuardrails();
       await this._resolvePolicy();
       this._log(
@@ -1396,8 +1412,18 @@ export class RunHarness extends EventEmitter {
    * artifacts exist from the original run, unless the point is stamped
    * `setupIncomplete` (D7 replay), which re-runs whatever setup never finished.
    * Resolves like run().
+   *
+   * Billed to whoever resumed it (the request's person, billing.mjs); a resume with
+   * no person behind it (a restart's auto-resume) stays with the run's starter.
    */
-  async resume() {
+  resume() {
+    const who = currentBillTo();
+    const starter = this.resumeOpts?.row?.started_by ?? this.opts.startedBy ?? null;
+    // Pays: whoever resumed. Runs as: the starter's agent user, whose HOME holds the sessions.
+    return withBillTo(who && who !== 'local' ? who : (starter || who), () => this._resume(), { owner: starter || who });
+  }
+
+  async _resume() {
     const saved = this.resumeOpts;
     if (!saved?.row || !saved?.resumePoint) throw new Error('resume(): no saved pipeline provided');
     const { row, resumePoint: rp, steps } = saved;
@@ -3049,6 +3075,33 @@ export class RunHarness extends EventEmitter {
    * recoverable-error gate surfaces it cleanly.
    * @param {Iterable<string>} agentKeys the run's distinct agent keys, in launch order
    */
+  /**
+   * Credential-broker preflight (docs/credential-broker.md): the models in the manifest
+   * (plus the step defaults and the run's own model, which an empty node model falls back
+   * to) mapped to broker slots, checked against the paying person's keys. Throws a
+   * Preflight error naming every missing key; a broker it can't ask never blocks here
+   * (the first spawn reports that instead).
+   */
+  async _brokerPreflight(manifest, stepModels) {
+    if (!brokerEnabled() || mockEnabled({ mock: this.claude.mock })) return;
+    let info;
+    try { info = await brokerInfo(); } catch { return; }
+    const person = info.mode === 'multi' ? currentBillTo() : 'local';
+    if (info.mode === 'multi' && (!person || person === 'local') && !process.env.WORCA_BROKER_SYSTEM_BILL_TO) {
+      throw Object.assign(new Error('Preflight failed: this run has no signed-in person to charge. Start it from the web UI, or set WORCA_BROKER_SYSTEM_BILL_TO.'), { errorClass: 'auth' });
+    }
+    const models = manifestModels(manifest);
+    for (const m of Object.values(stepModels || {})) if (typeof m === 'string' && m.trim()) models.add(m.trim());
+    if (this.claude?.model) models.add(this.claude.model);
+    if (!models.size) models.add('claude-sonnet-5');   // nothing named: the CLI's own default is a Claude model
+    let status;
+    try { status = (await personSlots(person === 'local' || !person ? (process.env.WORCA_BROKER_SYSTEM_BILL_TO || 'local') : person)).slots || []; } catch { return; }
+    const r = missingCredentials([...models], modelSlot, status);
+    if (r.missing.length || r.errors.length) {
+      throw Object.assign(new Error(`Preflight failed: ${describeMissing(r, info.publicUrl)}`), { errorClass: 'auth' });
+    }
+  }
+
   _preflightAgentKeys(agentKeys) {
     const reg = this.registry || {};
     const missing = [];

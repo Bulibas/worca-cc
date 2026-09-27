@@ -280,7 +280,10 @@ Subcommands:
                               See: worca models help
   container <cmd> [...]       Run Worca in a container: init|up|down|status|logs|pull|login|shell|run|where.
                               See: worca container help (docs/docker.md)
-  help                        Print this help (same as --help).
+  broker [serve|secrets|revoke --person <email>]
+                              The credential broker: holds model keys outside worca's container
+                              (docs/credential-broker.md)
+  help                       Print this help (same as --help).
   version                     Print the version (same as --version).
 
 Options:
@@ -3107,7 +3110,7 @@ async function drainMetricsFlushes() {
 
 // ── main ──────────────────────────────────────────────────────────────────────────
 
-const SUBCOMMANDS = new Set(['add', 'list', 'remove', 'resume', 'runs', 'doctor', 'plugin', 'marketplace', 'config', 'ui', 'workflow', 'metrics', 'script', 'policy', 'schedule', 'models', 'container']);
+const SUBCOMMANDS = new Set(['add', 'list', 'remove', 'resume', 'runs', 'doctor', 'plugin', 'marketplace', 'config', 'ui', 'workflow', 'metrics', 'script', 'policy', 'schedule', 'models', 'container', 'broker']);
 
 /** Levenshtein distance, two-row. Only ever called on short argv tokens. */
 function editDistance(a, b) {
@@ -3174,6 +3177,11 @@ async function main() {
     if (sub === 'schedule') return cmdSchedule(rest, { out, c, fail });
     if (sub === 'models') return cmdModels(rest, { out, c, fail });
     if (sub === 'container') return cmdContainer(rest, { out, c, fail });
+    if (sub === 'broker') {
+      // Loaded lazily: the broker is its own process and needs none of the core graph.
+      const { runBrokerCli } = await import('../broker/main.mjs');
+      return runBrokerCli(rest);
+    }
   }
   // `worca --ui [...]` is the historical spelling of `worca ui start [...]`; hand the
   // remaining tokens to the ui parser so --port/--open/--mock work with either.

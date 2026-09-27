@@ -2266,6 +2266,21 @@ button.pd-ov-card:hover{border-color:var(--ink-3);}
    without this the rows touch while every other gap is 14px. */
 .charts-grid + .charts-grid{margin-top:14px;}
 .chart-card{padding:20px 22px;}
+/* Stats › By person (credential broker): one full-width card, a table with a share bar. */
+.people-grid{grid-template-columns:1fr;}
+.people-scroll{overflow-x:auto;}
+.people-table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums;}
+.people-table th{text-align:left;font-weight:500;color:var(--ink-3);font-size:12px;padding:6px 10px 6px 0;border-bottom:1px solid var(--line);white-space:nowrap;}
+.people-table td{padding:8px 10px 8px 0;border-bottom:1px solid var(--line);vertical-align:middle;}
+.people-table tr:last-child td{border-bottom:none;}
+.people-table td.num{white-space:nowrap;color:var(--ink-2);}
+.people-name{overflow-wrap:anywhere;}
+.people-spend{min-width:160px;}
+.people-usd{display:inline-block;min-width:64px;font-weight:600;}
+.people-bar{display:inline-block;vertical-align:middle;width:90px;height:6px;border-radius:3px;background:var(--line);margin-left:8px;overflow:hidden;}
+.people-bar-fill{display:block;height:100%;background:var(--blue);}
+.people-slots{color:var(--ink-2);}
+.people-card > .hint{display:block;margin-top:10px;}
 .chart-fig{margin:0;}
 .chart-svg{display:block;width:100%;height:auto;}
 .chart-empty{display:grid;place-items:center;min-height:180px;}
@@ -2604,6 +2619,22 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 /* One width/centering/gap rule for every Settings card. */
 .settings-card{max-width:760px;padding:22px;margin-left:auto;margin-right:auto;}
 .settings-card + .settings-card{margin-top:18px;}
+.settings-card[hidden]{display:none;}
+
+/* My model credentials (credential broker): one row per slot, a state chip on the right. */
+.cred-list{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
+.cred-row{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:13px;}
+.cred-name{min-width:0;overflow-wrap:anywhere;}
+.cred-chip{font-size:12px;font-weight:600;padding:3px 9px;border-radius:999px;white-space:nowrap;}
+.cred-chip.tone-green{background:var(--green-bg);color:var(--green-ink);}
+.cred-chip.tone-red{background:var(--red-bg);color:var(--red-ink);}
+.cred-chip.tone-blue{background:var(--blue-bg);color:var(--blue-ink);}
+.cred-chip.tone-slate{background:var(--slate-bg);color:var(--slate-ink);}
+.cred-actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:14px;}
+/* Providers card with the credential broker: keys, sign-in and key tests live on the key page. */
+.mv-providers--broker .mv-cp-signin,.mv-providers--broker .mv-cp-signout,.mv-providers--broker .mv-cp-quota-refresh,
+.mv-providers--broker .mv-cp-quota,.mv-providers--broker .mv-pv-test,.mv-providers--broker .mv-field:has(.mv-pv-key){display:none;}
+.mv-broker-note{display:block;margin:6px 0 12px;}
 
 /* About card rows. .about-val and .about-link share specificity on one anchor, so
    .about-link must stay AFTER .about-val (test/ui-settings-about.test.mjs pins it). */
@@ -4828,6 +4859,7 @@ body.rail-collapsed .ask-dock{left:76px;}
   border-radius:999px;white-space:nowrap;background:var(--field);color:var(--ink-3);}
 .ask-model-tag.is-warn{flex:0 0 auto;max-width:none;background:var(--amber-bg);color:var(--amber-ink);}
 .ask-model-tag.is-err{flex:0 0 auto;max-width:none;background:var(--red-bg);color:var(--red-ink);}
+.ask-model-tag.is-key{flex:0 0 auto;max-width:none;background:var(--green-bg);color:var(--green-ink);}
 .ask-model-item .ask-model-name{flex:0 1 auto;min-width:4.5ch;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;}
 /* The threads list is the only scrollport in a popover: /api/ask/threads returns up

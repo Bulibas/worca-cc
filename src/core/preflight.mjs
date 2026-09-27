@@ -569,6 +569,10 @@ export async function probeClaudeAuth({
 } = {}) {
   const isMock = mock ?? (flagOn(env.WORCA_MOCK ?? env.ORCH_MOCK));
   if (isMock) return { state: 'unknown', source: 'mock', detail: null };
+  // Credential broker (broker-client.mjs): the CLI is signed in per spawn with a
+  // broker token, never by worca's env or a stored login. Whether the PERSON has a
+  // key is the broker's per-slot status, not this probe's question.
+  if (typeof env.WORCA_BROKER_URL === 'string' && env.WORCA_BROKER_URL.trim()) return { state: 'signed-in', source: 'broker', detail: 'broker' };
   const envKey = claudeAuthFromEnv(env);
   if (envKey) return { state: 'signed-in', source: 'env', detail: envKey };
   const name = bin && String(bin).trim() ? String(bin).trim() : 'claude';

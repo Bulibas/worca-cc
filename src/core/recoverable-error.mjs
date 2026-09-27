@@ -24,6 +24,10 @@ export function classifyError(err) {
   // stamp — including an explicit null — is authoritative.
   if (err && typeof err === 'object' && err.errorClass !== undefined) return err.errorClass;
   const msg = String((err && err.message) || err || '');
+  // The credential broker's refusals (a missing or rejected key, a dead token, nobody to
+  // bill) arrive as a 403 the CLI prints as "Failed to authenticate. API Error: 403
+  // worca-broker: …" — no 401, no authentication_error left in the text. Same class.
+  if (BROKER_AUTH_RE.test(msg)) return 'auth';
   if (/\b401\b|invalid authentication|authentication_error|please run .*login|not logged in/i.test(msg)) return 'auth';
   // Session/usage caps that only clear after a multi-hour reset (the CLI prints
   // "You've hit your session limit · resets 6pm"). Distinct from rate_limit (a
@@ -56,6 +60,29 @@ export function rateLimitHint(err) {
   return "the provider's shared free pool is saturated — every user of this free model shares it, " +
     "so this is not worca's max-concurrent setting. Use the paid variant, add your own provider key " +
     '(BYOK) on the provider, or give the model a fallback model list';
+}
+
+// The credential broker (src/broker/) answers in the provider's own error envelope
+// with a `worca-broker:` message, so its refusals already land in the right class:
+// a missing/rejected key or a dead token is `auth` (401), a spent budget is `quota`
+// (its message says "quota reached"), a busy slot is `rate_limit` (429). Only the
+// pause text differs: it says what to do, which is never "sign in to Claude Code".
+const BROKER_RE = /worca-broker:/i;
+/** The broker's credential refusals (classifyError reads them as `auth`). */
+const BROKER_AUTH_RE = /worca-broker: (?:no .+ for \S+|your .+ was rejected|.+ key for \S+: |token expired or revoked|no token|this action has no signed-in person|cannot get a token)/i;
+
+/** Whether an error came from the credential broker. */
+export function isBrokerError(err) {
+  const msg = String((err && typeof err === 'object' ? err.message : err) ?? '');
+  return BROKER_RE.test(msg);
+}
+
+/** The fix text a pause caused by the broker carries ('' for any other error). */
+export function brokerHint(err, cls = classifyError(err)) {
+  if (!isBrokerError(err)) return '';
+  if (cls === 'auth') return 'the credential broker refused this spawn: add or replace the key on the key page (Settings › My credentials links to it), then resume';
+  if (cls === 'quota') return 'a spending cap on the credential broker was reached: raise it on the key page or wait for the reset, then resume';
+  return '';
 }
 
 // Precedence for folding per-line classes into the one whole-text class — the

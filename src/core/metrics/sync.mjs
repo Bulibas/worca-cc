@@ -89,7 +89,8 @@ async function defaultGit(cwd, args, { timeoutMs = 60_000, env = null } = {}) {
   // Local commands (commit, worktree, read-tree…) get no credential at all.
   let base;
   if (NETWORK_GIT.has(args[0])) {
-    const cred = await githubEnv('write', { repo: await originRepo(cwd) });
+    // Team data, not a person's work: always worca's own credential, never "push as me".
+    const cred = await githubEnv('write', { repo: await originRepo(cwd), asPerson: false });
     if (cred.error) console.warn(`[worca] metrics/policy git ${args[0]}: ${cred.error}`);
     base = cred.env;
   } else {

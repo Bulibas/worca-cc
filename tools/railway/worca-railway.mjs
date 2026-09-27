@@ -11,6 +11,9 @@
 //             upgrade <t> <image ref | version> | rollback <t> | deploy-branch <t> --tag <tag>
 //             | redeploy <t> | set <t> <KEY> [--from-file <path>] [--skip-deploys]
 //             | unset <t> <KEY> [--skip-deploys] | mock <t> on|off
+// With a credential broker in the target (RAILWAY_BROKER_SERVICE[_ID], KEYS_URL): upgrade,
+// rollback and deploy-branch move both services to one image (broker first); logs, redeploy,
+// set and unset take --service broker; status and verify cover the broker and its key page.
 //
 // Secret rules (enforced here, not left to the caller):
 //  - a secret VALUE never appears on a command line, in output or in this process's logs:
@@ -62,10 +65,15 @@ export function loadTarget(name, { dir = TARGETS_DIR, read = readFileSync, exist
   const missing = REQUIRED.filter((k) => !t[k]);
   if (missing.length) throw new Error(`target "${name}" is missing ${missing.join(', ')} (${file})`);
   if (!/^https:\/\/[a-z0-9.-]+\/?$/i.test(t.WORCA_URL)) throw new Error(`WORCA_URL must be https://<host> (${file})`);
+  // The credential broker (docs/credential-broker.md): optional; both ids or neither.
+  if (!!t.RAILWAY_BROKER_SERVICE_ID !== !!t.RAILWAY_BROKER_SERVICE) throw new Error(`set both RAILWAY_BROKER_SERVICE and RAILWAY_BROKER_SERVICE_ID, or neither (${file})`);
+  if (t.KEYS_URL && !/^https:\/\/[a-z0-9.-]+\/?$/i.test(t.KEYS_URL)) throw new Error(`KEYS_URL must be https://<host> (${file})`);
   return {
     name, file,
     projectId: t.RAILWAY_PROJECT_ID, environmentId: t.RAILWAY_ENVIRONMENT_ID,
     service: t.RAILWAY_WORCA_SERVICE, serviceId: t.RAILWAY_WORCA_SERVICE_ID,
+    brokerService: t.RAILWAY_BROKER_SERVICE || null, brokerServiceId: t.RAILWAY_BROKER_SERVICE_ID || null,
+    keysUrl: t.KEYS_URL ? t.KEYS_URL.replace(/\/$/, '') : null,
     cloudflaredService: t.RAILWAY_CLOUDFLARED_SERVICE || 'cloudflared',
     url: t.WORCA_URL.replace(/\/$/, ''), host: new URL(t.WORCA_URL).hostname,
     imageRepo: t.IMAGE_REPO || 'ghcr.io/sinishadjukic/worca',
@@ -85,6 +93,8 @@ export function redact(text, known = []) {
     .replace(/eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+){1,2}/g, '<redacted jwt>')
     .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g, '<redacted github token>')
     .replace(/\bsk-ant-[A-Za-z0-9_-]{10,}/g, '<redacted anthropic key>')
+    .replace(/\bsk-(?:proj-|or-v1-|or-)?[A-Za-z0-9_-]{16,}/g, '<redacted api key>')
+    .replace(/\bwbt_[A-Za-z0-9_-]{20,}/g, '<redacted broker token>')
     .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/g, '$1<redacted>@');
 }
 
@@ -97,8 +107,19 @@ export function imageRef(target, spec) {
   return ref;
 }
 
+/**
+ * The service a command acts on: worca (default) or, with `--service broker`, the credential
+ * broker. Returns a target-shaped object whose service/serviceId name that service.
+ */
+export function forService(t, which) {
+  if (!which || which === true || which === 'worca') return t;
+  if (which !== 'broker') throw new Error('--service must be worca or broker');
+  if (!t.brokerService) throw new Error(`target ${t.name} has no broker (set RAILWAY_BROKER_SERVICE and RAILWAY_BROKER_SERVICE_ID)`);
+  return { ...t, service: t.brokerService, serviceId: t.brokerServiceId };
+}
+
 /** Parse argv: command, target, positionals, and --flags (value flags listed in VALUE_FLAGS). */
-const VALUE_FLAGS = new Set(['--lines', '--clone', '--from-file', '--tag']);
+const VALUE_FLAGS = new Set(['--lines', '--clone', '--from-file', '--tag', '--service']);
 export function parseArgs(argv) {
   const out = { cmd: argv[0] || null, target: null, pos: [], flags: {}, rest: [] };
   const a = argv.slice(1);
@@ -198,19 +219,32 @@ function previousImage(t, current) {
   return null;
 }
 
-async function setImage(ctx, t, image) {
+async function setImage(ctx, t, image, { record = true } = {}) {
   const before = await currentImage(ctx, t);
-  if (before) recordImage(t, before);
+  if (before && record) recordImage(t, before);
   await gql(ctx, 'mutation($s:String!,$e:String!,$i:ServiceInstanceUpdateInput!){ serviceInstanceUpdate(serviceId:$s, environmentId:$e, input:$i) }',
     { s: t.serviceId, e: t.environmentId, i: { source: { image } } });
   const started = Date.now();
   await deploy(ctx, t);
-  recordImage(t, image);
-  ctx.out(`image ${before || '(none)'} -> ${image}; deploying…`);
+  if (record) recordImage(t, image);
+  ctx.out(`${t.service}: image ${before || '(none)'} -> ${image}; deploying…`);
   const dep = await waitDeployment(ctx, t, { after: started - 60_000 });
-  ctx.out(`deployment ${dep?.status || 'unknown'}`);
+  ctx.out(`${t.service}: deployment ${dep?.status || 'unknown'}`);
   for (const l of (dep ? await deploymentLogs(ctx, dep.id, 30) : []).slice(-15)) ctx.out(`  ${l}`);
   return dep;
+}
+
+/**
+ * Move worca AND its credential broker to one image (they ship together: the broker's
+ * internal API and worca's client change in the same release). The broker goes first:
+ * worca waits for it at boot, and a new worca may need the new broker's endpoints.
+ */
+async function setImageBoth(ctx, t, image) {
+  if (t.brokerService) {
+    const b = await setImage(ctx, forService(t, 'broker'), image, { record: false });
+    if (b?.status !== 'SUCCESS') { ctx.out('the broker did not come up: worca left on its current image'); return b; }
+  }
+  return setImage(ctx, t, image);
 }
 
 // ── verify through Access ────────────────────────────────────────────────────
@@ -260,6 +294,32 @@ async function verifyAccess(ctx, t, { clone = null } = {}) {
   return fails;
 }
 
+/**
+ * The credential broker from outside (docs/credential-broker.md §9.6): the key page is behind
+ * its own Access application, its broker answers, and worca names it. Returns the FAIL count.
+ */
+async function verifyBroker(ctx, t) {
+  if (!t.brokerService && !t.keysUrl) return 0;
+  let fails = 0;
+  const check = (label, ok, detail = '') => { ctx.out(`${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? ` (${detail})` : ''}`); if (!ok) fails += 1; };
+  if (!t.keysUrl) { ctx.out('skip  key page checks (no KEYS_URL in the target)'); return 0; }
+  const anon = await ctx.fetch(`${t.keysUrl}/api/me`, { redirect: 'manual' }).catch((e) => ({ status: `error ${e.code || e.message}` }));
+  check('key page: anonymous request is sent to sign-in', anon.status === 302 || anon.status === 401 || anon.status === 403, String(anon.status));
+  const H = accessHeaders(t, ctx.read);
+  if (!H) { ctx.out('skip  key page checks through Access (no ACCESS_SERVICE_TOKEN_FILE)'); return fails; }
+  const get = async (url) => {
+    const r = await ctx.fetch(url, { redirect: 'manual', headers: H });
+    let body = null; try { body = await r.json(); } catch { /* not JSON */ }
+    return { status: r.status, body };
+  };
+  const hz = await get(`${t.keysUrl}/healthz`);
+  check('key page: the broker answers through Access', hz.status === 200 && hz.body?.ok === true, hz.status === 200 ? `mode ${hz.body?.mode}` : `${hz.status}: add a Service Auth policy for the verify token to the key page's Access application`);
+  const cred = await get(`${t.url}/api/credentials`);
+  check('worca runs with the broker and names this key page', cred.status === 200 && cred.body?.enabled === true && cred.body?.keyPage === t.keysUrl,
+    cred.status === 200 ? `enabled=${cred.body?.enabled} keyPage=${cred.body?.keyPage}` : String(cred.status));
+  return fails;
+}
+
 // ── ssh ──────────────────────────────────────────────────────────────────────
 
 async function sshConfig(ctx, t) {
@@ -289,7 +349,7 @@ const needYes = (a, what) => { if (!a.flags.yes) throw new Error(`${what} change
 export async function main(argv, ctx) {
   const a = parseArgs(argv);
   const cmd = a.cmd;
-  if (!cmd || cmd === 'help' || a.flags.help) { ctx.out(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 22).map((l) => l.replace(/^\/\/ ?/, '')).join('\n')); return 0; }
+  if (!cmd || cmd === 'help' || a.flags.help) { ctx.out(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 25).map((l) => l.replace(/^\/\/ ?/, '')).join('\n')); return 0; }
   if (cmd === 'targets') {
     let names = [];
     try { names = readdirSync(TARGETS_DIR).filter((f) => f.endsWith('.env')).map((f) => f.slice(0, -4)); } catch { /* none */ }
@@ -307,17 +367,29 @@ export async function main(argv, ctx) {
       const vars = await variableNames(ctx, t);
       ctx.out(`variables  ${vars.filter((v) => !v.name.startsWith('RAILWAY_')).map((v) => v.name + (v.sealed ? ' (sealed)' : '')).join(', ')}`);
       if (dep) for (const l of (await deploymentLogs(ctx, dep.id, 40)).filter((l) => /worca-entrypoint|worca-ui|error/i.test(l)).slice(-12)) ctx.out(`  ${l}`);
+      if (t.brokerService) {
+        const b = forService(t, 'broker');
+        const bimage = await currentImage(ctx, b);
+        const bdep = await latestDeployment(ctx, b);
+        ctx.out(`broker     ${b.service}${t.keysUrl ? ` (key page ${t.keysUrl})` : ''}`);
+        ctx.out(`  image      ${bimage || '(none)'}${bimage && image && bimage !== image ? '  ≠ worca\'s image: run upgrade to align them' : ''}`);
+        ctx.out(`  deployment ${bdep ? `${bdep.status} ${bdep.createdAt}` : '(none)'}`);
+        const bvars = await variableNames(ctx, t, b.service);
+        ctx.out(`  variables  ${bvars.filter((v) => !v.name.startsWith('RAILWAY_')).map((v) => v.name + (v.sealed ? ' (sealed)' : '')).join(', ')}`);
+        if (bdep) for (const l of (await deploymentLogs(ctx, bdep.id, 40)).filter((l) => /worca broker|vault|error/i.test(l)).slice(-6)) ctx.out(`    ${l}`);
+      }
       return 0;
     }
     case 'logs': {
-      const dep = await latestDeployment(ctx, t);
+      const s = forService(t, a.flags.service);
+      const dep = await latestDeployment(ctx, s);
       if (!dep) { ctx.out('no deployment'); return 1; }
       for (const l of await deploymentLogs(ctx, dep.id, Math.min(Number(a.flags.lines) || 100, 500))) ctx.out(l);
       return 0;
     }
     case 'upgrade': {
       needYes(a, 'upgrade');
-      const dep = await setImage(ctx, t, imageRef(t, a.pos[0]));
+      const dep = await setImageBoth(ctx, t, imageRef(t, a.pos[0]));
       return dep?.status === 'SUCCESS' ? 0 : 1;
     }
     case 'rollback': {
@@ -325,7 +397,7 @@ export async function main(argv, ctx) {
       const current = await currentImage(ctx, t);
       const prev = previousImage(t, current);
       if (!prev) throw new Error(`no earlier image recorded for ${t.name} (${historyFile(t)}); use upgrade <ref>`);
-      const dep = await setImage(ctx, t, prev);
+      const dep = await setImageBoth(ctx, t, prev);
       return dep?.status === 'SUCCESS' ? 0 : 1;
     }
     case 'deploy-branch': {
@@ -339,19 +411,21 @@ export async function main(argv, ctx) {
       if (b.code !== 0) { ctx.out(redact(b.stdout + b.stderr).split('\n').slice(-15).join('\n')); throw new Error('image build failed'); }
       const p = await ctx.exec('docker', ['push', ref]);
       if (p.code !== 0) throw new Error(`docker push failed: ${redact(p.stderr).trim().split('\n').pop()} (logged in to the registry?)`);
-      const dep = await setImage(ctx, t, ref);
+      const dep = await setImageBoth(ctx, t, ref);
       return dep?.status === 'SUCCESS' ? 0 : 1;
     }
     case 'redeploy': {
       needYes(a, 'redeploy');
+      const s = forService(t, a.flags.service);
       const started = Date.now();
-      await deploy(ctx, t);
-      const dep = await waitDeployment(ctx, t, { after: started - 60_000 });
-      ctx.out(`deployment ${dep?.status || 'unknown'}`);
+      await deploy(ctx, s);
+      const dep = await waitDeployment(ctx, s, { after: started - 60_000 });
+      ctx.out(`${s.service}: deployment ${dep?.status || 'unknown'}`);
       return dep?.status === 'SUCCESS' ? 0 : 1;
     }
     case 'set': {
       needYes(a, 'set');
+      const s = forService(t, a.flags.service);
       const key = a.pos[0];
       if (!KEY_RE.test(String(key || ''))) throw new Error('set <target> <KEY>: KEY must be an environment variable name');
       if (key.startsWith('RAILWAY_')) throw new Error('RAILWAY_* variables are Railway\'s own; set them in the dashboard');
@@ -361,18 +435,23 @@ export async function main(argv, ctx) {
       } else value = await ctx.stdin();
       value = String(value).replace(/\r?\n$/, '');
       if (!value) throw new Error(`no value for ${key} on stdin${a.flags['from-file'] ? ' / in the file' : ''}`);
-      const r = await ctx.exec('railway', ['variable', 'set', key, '--stdin', ...svcArgs(t), ...(a.flags['skip-deploys'] ? ['--skip-deploys'] : [])], { input: value });
+      // A model key never goes to worca once it has a broker: that is exactly what the broker is for.
+      if (s === t && t.brokerService && /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|OPENROUTER_API_KEY)$/.test(key)) {
+        throw new Error(`${key} does not belong on worca: it has a credential broker (each person adds their key on the key page; single mode: set WORCA_BROKER_KEY_* on --service broker)`);
+      }
+      const r = await ctx.exec('railway', ['variable', 'set', key, '--stdin', ...svcArgs(s), ...(a.flags['skip-deploys'] ? ['--skip-deploys'] : [])], { input: value });
       if (r.code !== 0) throw new Error(`railway variable set ${key} failed (exit ${r.code})`);   // no stderr: it could echo the value
-      ctx.out(`set ${key} on ${t.service}${a.flags['skip-deploys'] ? ' (no deploy; run redeploy when done)' : ' (deploying)'}; seal it in the dashboard if it is a secret`);
+      ctx.out(`set ${key} on ${s.service}${a.flags['skip-deploys'] ? ' (no deploy; run redeploy when done)' : ' (deploying)'}; seal it in the dashboard if it is a secret`);
       return 0;
     }
     case 'unset': {
       needYes(a, 'unset');
+      const s = forService(t, a.flags.service);
       const key = a.pos[0];
       if (!KEY_RE.test(String(key || ''))) throw new Error('unset <target> <KEY>');
-      const r = await ctx.exec('railway', ['variable', 'delete', key, ...svcArgs(t), ...(a.flags['skip-deploys'] ? ['--skip-deploys'] : [])]);
+      const r = await ctx.exec('railway', ['variable', 'delete', key, ...svcArgs(s), ...(a.flags['skip-deploys'] ? ['--skip-deploys'] : [])]);
       if (r.code !== 0) throw new Error(`railway variable delete ${key} failed: ${redact(r.stderr).trim().split('\n').pop()}`);
-      ctx.out(`removed ${key} from ${t.service}`);
+      ctx.out(`removed ${key} from ${s.service}`);
       return 0;
     }
     case 'mock': {
@@ -388,6 +467,7 @@ export async function main(argv, ctx) {
     }
     case 'verify': {
       let fails = await verifyAccess(ctx, t, { clone: a.flags.clone || null });
+      fails += await verifyBroker(ctx, t);
       if (a.flags['in-container']) {
         const probe = readFileSync(join(HERE, 'in-container-probe.sh'), 'utf8');
         const r = await sshRun(ctx, t, ['sh', '-s', '--', t.host], probe);

@@ -145,6 +145,7 @@ export async function generateTitle(prompt, opts = {}) {
       permissionMode: opts.permissionMode || 'acceptEdits',
       allowedTools: [],            // empty → no --allowedTools flag → claude defaults; pure text gen
       signal: opts.signal,
+      spawnKind: 'aux',            // credential broker: a short-lived token (broker-client.mjs)
       // Title generation runs DURING a pipeline run, so it must honor the same
       // guardrails as the run itself. All three are undefined when absent, and
       // runClaude treats undefined as "not passed" — existing callers are unchanged.

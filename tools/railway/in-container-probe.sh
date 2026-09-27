@@ -71,5 +71,36 @@ printf 'info  github mode %s\n' "${mode:-unknown}"
 mint=$(printf '%s\n' "$out" | sed -n 's/^mint //p')
 if [ -n "$mint" ]; then want "GitHub credential works" "$mint" 200; fi
 
+# 4. The credential broker (docs/credential-broker.md), when worca runs with one: no model key
+#    anywhere an agent runs, and the broker's ports refuse an agent that has no token.
+envof() { tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null; }
+B=$(envof "$P" | sed -n 's/^WORCA_BROKER_URL=//p')
+if [ -n "$B" ]; then
+  keys=$(envof "$P" | grep -E '^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|OPENROUTER_API_KEY)=.' | cut -d= -f1 | tr '\n' ' ' | sed 's/ $//')
+  want "no model key in worca's environment" "${keys:-none}" none
+  if id worca-agent >/dev/null 2>&1; then
+    want "broker proxy refuses an agent without a token" "$(su -s /bin/sh worca-agent -c "curl -s -o /dev/null -w '%{http_code}' $B/p/anthropic/v1/models")" 403
+    want "broker internal API refuses an agent" "$(su -s /bin/sh worca-agent -c "curl -s -o /dev/null -w '%{http_code}' $B/internal/info")" 401
+  fi
+else
+  printf 'info  no credential broker (WORCA_BROKER_URL unset)\n'
+fi
+
+# 5. One agent user per person (the pool): one person's agents can't read another's processes.
+if [ -n "$(envof "$P" | sed -n 's/^WORCA_AGENT_POOL=//p')" ] && id worca-agent-01 >/dev/null 2>&1; then
+  su -s /bin/sh worca -c 'sudo -n -u worca-agent-02 -- sleep 15' >/dev/null 2>&1 &
+  sleep 1
+  other=$(pgrep -u worca-agent-02 -n sleep)
+  if [ -n "$other" ]; then
+    r=$(su -s /bin/sh worca -c "sudo -n -u worca-agent-01 -- sh -c 'cat /proc/$other/environ >/dev/null 2>&1 && echo read || echo denied'")
+    want "a pool user reading another pool user's process" "$r" denied
+    kill "$other" 2>/dev/null
+  else
+    fail "could not start a process as worca-agent-02"
+  fi
+else
+  printf 'info  no agent pool (one shared agent user)\n'
+fi
+
 [ "$fails" -eq 0 ] && echo "ALL PASS" || echo "$fails FAILED"
 exit "$fails"

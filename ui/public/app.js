@@ -108,6 +108,8 @@ import {
   renderOrphanList, channelBadge, renderAvailableList, renderMarketplaceList,
 } from './plugins-view.mjs';
 import { renderChatSettings, collectChatSettings, renderScriptToolsToggle, collectScriptToolsToggle } from './chat-settings-view.mjs';
+import { renderCredentials } from './credentials-view.mjs';
+import { loadCredentials, credentialSuffix } from './credential-badges.mjs';
 import { PORT_ID_RE, MAX_PORTS_PER_SIDE, PORT_TYPES, FLOW_LABEL, KEYED_KINDS } from '../../src/shared/graph/constants.mjs';
 import { FORM_ID_RE, validateFormDef, normalizeAskBlock } from '../../src/shared/forms/form-def.mjs';
 import { ASK_LIMITS } from '../../src/shared/forms/catalog.mjs';
@@ -2792,7 +2794,7 @@ function renderModelEffortPair(modelSel, effortSel, caption, sel = {}) {
       const ambiguous = m.custom === 'plugin' && labelCounts.get((m.label || m.id).toLowerCase()) > 1;
       const viaSuffix = m.bridged && !(m.label || m.id).toLowerCase().includes(m.bridged) ? ` · ${m.bridged}` : '';
       og.appendChild(option(m.id,
-        m.label + (ambiguous ? ` (${m.plugin})` : '') + viaSuffix + (m.costUnreliable ? ' ⚠cost' : '') + (m.needsSignIn ? ' (needs sign-in)' : '')));
+        m.label + (ambiguous ? ` (${m.plugin})` : '') + viaSuffix + (m.costUnreliable ? ' ⚠cost' : '') + (m.needsSignIn ? ' (needs sign-in)' : '') + credentialSuffix(m.id)));
     }
     modelSel.appendChild(og);
   };
@@ -10494,6 +10496,7 @@ async function loadSettings() {
     paintTeamCapsReadout();                 // team policy (design board 7): each home's caps, read-only
     refreshBudget();
     paintChatSettings(data.chat);
+    paintCredentials();
     loadAskHistory();
     setSettingsMsg('');
   } catch (e) { setSettingsMsg(e.message, 'err'); }
@@ -10505,6 +10508,19 @@ function setChatSettingsMsg(text, cls) {
   if (!el.chatSettingsMsg) return;
   el.chatSettingsMsg.textContent = text || '';
   el.chatSettingsMsg.className = `hint${cls ? ` ${cls}` : ''}`;
+}
+
+// Settings › My model credentials (credential broker, docs/credential-broker.md): the card
+// stays hidden unless worca runs with a broker. Status only; keys live on the key page.
+async function paintCredentials() {
+  const card = document.getElementById('credentials-card');
+  const host = document.getElementById('credentialsHost');
+  if (!card || !host) return;
+  let data;
+  try { data = await safeJson(await fetch('/api/credentials')); } catch { data = { enabled: false }; }
+  card.hidden = !data || data.enabled !== true;
+  if (card.hidden) return;
+  host.replaceChildren(renderCredentials(data));
 }
 
 async function paintChatSettings(prefs) {
@@ -12608,7 +12624,7 @@ async function loadModelsView() {
   if (!el.modelsList) return;
   setModelsMsg('');
   try {
-    const [res, pres] = await Promise.all([fetch('/api/models'), fetch('/api/providers')]);
+    const [res, pres] = await Promise.all([fetch('/api/models'), fetch('/api/providers'), loadCredentials()]);
     const data = await safeJson(res);
     if (!res.ok) return setModelsMsg(data.error || `HTTP ${res.status}`, 'err');
     mvState.data = data;
@@ -24191,6 +24207,17 @@ refreshAllCounts();
 refreshBudget();
 startBudgetTick();
 loadWhoami();
+// Credential broker badges ("your key / no key" on model pickers): fetched at boot and
+// again when the tab regains focus — people add keys on the key page in another tab.
+// Pickers already on screen repaint once the answer changes what they show.
+{
+  const repaintPickers = () => {
+    if (currentView() === 'new') refreshNewPipelinePickers();
+    if (currentView() === 'settings' && currentSettingsTab === 'models') loadModelsView();
+  };
+  loadCredentials().then((d) => { if (d) repaintPickers(); });
+  window.addEventListener('focus', () => { loadCredentials().then((d) => { if (d) repaintPickers(); }); });
+}
 
 // Ask Worca mount (§10.2 seam 1): a JS-built body-level overlay — index.html is
 // untouched so ui-shell's routed-view census stays at 11. No network happens here;

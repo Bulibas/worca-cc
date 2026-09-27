@@ -15,9 +15,46 @@ import { modelEnvRef, maskModelEnvValue, COPILOT_TERMS_VERSION, UPSTREAM_PROVIDE
 import {
   startDeviceFlow, pollDeviceFlow, githubLogin, copilotToken, invalidateCopilotToken,
   listCopilotModels, copilotUsage, catalogEntryForCopilotModel, copilotApiFor,
+  copilotHeaders, normalizeCopilotModel,
 } from './providers/copilot.mjs';
 import { keyOptional } from './registry.mjs';
 import { listEndpointModels, catalogEntryForEndpointModel, importableModel } from './providers/endpoint.mjs';
+import { brokerEnabled, brokerInfo, cachedBrokerInfo, mintSpawnToken, revokeSpawnToken, slotBaseUrl } from '../broker-client.mjs';
+import { routeUpstream } from '../broker-routing.mjs';
+import { resolveBillTo } from '../billing.mjs';
+
+// ── credential broker (docs/credential-broker.md) ────────────────────────────
+
+/** With the broker on, provider keys and sign-ins live on its key page, never in worca. */
+function refuseWithBroker(what) {
+  if (!brokerEnabled()) return;
+  const keyPage = cachedBrokerInfo()?.publicUrl;
+  throw Object.assign(new Error(`worca can't ${what}: with the credential broker, each person does that on the key page${keyPage ? ` (${keyPage})` : ''}`), { code: 'BROKER' });
+}
+
+/**
+ * Run `fn(token)` with a short-lived broker token for `slot`, billed to the person behind
+ * the current request (billing.mjs), revoked afterwards. Model discovery and imports use it.
+ */
+async function withAuxBrokerToken(slot, fn) {
+  const info = await brokerInfo();
+  let billTo = resolveBillTo(null);
+  if (info.mode === 'multi' && (!billTo || billTo === 'local')) {
+    throw Object.assign(new Error('sign in through the identity proxy first: the provider is asked with your own key'), { code: 'BROKER' });
+  }
+  const minted = await mintSpawnToken({ billTo: billTo || 'local', slots: [slot], kind: 'aux' });
+  try { return await fn(minted.token); } finally { revokeSpawnToken(minted.spawnId); }
+}
+
+/** A broker refusal's own words (`worca-broker: …`), else a generic status line. */
+async function brokerFailure(res, what) {
+  try {
+    const j = await res.json();
+    const m = j?.error?.message;
+    if (typeof m === 'string' && m) return m;
+  } catch { /* not JSON */ }
+  return `${what} answered ${res.status}`;
+}
 import { isOpenRouter } from './openrouter.mjs';
 
 /** The OpenRouter API base a preset / `worca models set openrouter` points the openai provider at. */
@@ -36,6 +73,7 @@ function sweepSessions(now = Date.now()) {
  * @returns {Promise<{deviceCode, userCode, verificationUri, interval, expiresIn}>}
  */
 export async function beginCopilotLogin({ fetch: f } = {}) {
+  refuseWithBroker('sign in to GitHub Copilot');
   if (!copilotTermsAcknowledged()) {
     throw Object.assign(new Error('acknowledge the GitHub Copilot notice before signing in'), { code: 'TERMS' });
   }
@@ -123,7 +161,9 @@ export async function providersState({ quota = false, fetch: f } = {}) {
       maxConcurrent: p.maxConcurrent,
     };
   };
-  return { copilot, openai: keyed('openai'), anthropic: keyed('anthropic') };
+  // With the credential broker on, keys and the Copilot sign-in are per person on its key page.
+  const broker = brokerEnabled() ? { enabled: true, keyPage: cachedBrokerInfo()?.publicUrl || null, mode: cachedBrokerInfo()?.mode || null } : { enabled: false };
+  return { copilot, openai: keyed('openai'), anthropic: keyed('anthropic'), broker };
 }
 
 /** Patch a provider from the UI/CLI; masked key echoes are dropped ("keep"). */
@@ -131,6 +171,8 @@ export async function patchProvider(name, patch = {}) {
   if (!UPSTREAM_PROVIDERS.includes(name)) throw new Error(`unknown provider ${JSON.stringify(name)}`);
   const p = { ...patch };
   for (const k of ['apiKey', 'githubToken']) if (typeof p[k] === 'string' && p[k].startsWith('••')) delete p[k];
+  // Credential broker: keys are per person, on the key page; worca stores none.
+  if (brokerEnabled() && ['apiKey', 'githubToken'].some((k) => typeof p[k] === 'string' && p[k].trim())) refuseWithBroker('store a provider key');
   return updateProvider(name, p);
 }
 
@@ -138,10 +180,24 @@ export async function patchProvider(name, patch = {}) {
 
 /** Copilot's models for the import sheet, each with `inCatalog` (§8.4). */
 export async function copilotModelsForImport({ fetch: f } = {}) {
-  const c = providerConfig('copilot');
-  const token = resolveProviderSecret(c.githubToken);
-  if (!token) throw Object.assign(new Error('not signed in to GitHub Copilot'), { code: 'NOT_SIGNED_IN' });
-  const list = await listCopilotModels(token, { accountType: c.accountType, fetch: f });
+  let list;
+  if (brokerEnabled()) {
+    // The signed-in person's Copilot, through the broker (their GitHub sign-in lives there).
+    const route = routeUpstream({ provider: 'copilot' }, { slots: (await brokerInfo()).slots || [] });
+    if (route.error) throw new Error(route.error);
+    list = await withAuxBrokerToken(route.slot, async (token) => {
+      const r = await (f || globalThis.fetch)(`${slotBaseUrl(route.slot)}/models`, { headers: copilotHeaders(token) });
+      if (!r.ok) throw Object.assign(new Error(await brokerFailure(r, 'Copilot /models')), { status: r.status });
+      const j = await r.json();
+      const data = Array.isArray(j.data) ? j.data : (Array.isArray(j) ? j : []);
+      return data.map(normalizeCopilotModel).filter((m) => m && (!m.type || m.type === 'chat'));
+    });
+  } else {
+    const c = providerConfig('copilot');
+    const token = resolveProviderSecret(c.githubToken);
+    if (!token) throw Object.assign(new Error('not signed in to GitHub Copilot'), { code: 'NOT_SIGNED_IN' });
+    list = await listCopilotModels(token, { accountType: c.accountType, fetch: f });
+  }
   const have = new Set(listGlobalModels().map((m) => m.id.toLowerCase()));
   return list.map((m) => ({ ...m, api: copilotApiFor(m), catalogId: `copilot-${m.id}`, inCatalog: have.has(`copilot-${m.id}`.toLowerCase()) }))
     .sort((a, b) => (Number(b.pickerEnabled) - Number(a.pickerEnabled)) || a.name.localeCompare(b.name));
@@ -208,8 +264,19 @@ function endpointBase(baseUrl) {
 export async function endpointModelsForImport({ baseUrl, fetch: f } = {}) {
   const base = endpointBase(baseUrl);
   const p = providerConfig('openai');
-  const key = resolveProviderSecret(p.apiKey);
-  const out = await listEndpointModels(base, { apiKey: key, fetch: f });
+  let out;
+  const route = brokerEnabled() ? routeUpstream({ provider: 'openai', baseUrl: base }, { slots: (await brokerInfo()).slots || [] }) : null;
+  if (route && route.error) throw new Error(route.error);
+  if (route && route.slot) {
+    // An endpoint behind a broker slot is asked with the clicking person's key; the listing
+    // then names the REAL base URL, so the imported entries point at it.
+    out = await withAuxBrokerToken(route.slot, (token) => listEndpointModels(`${slotBaseUrl(route.slot)}${route.prefix}`, { apiKey: token, fetch: f, realBaseUrl: base }));
+    out = { ...out, baseUrl: base };
+  } else {
+    // Keyless local endpoints are reached directly, as without the broker.
+    const key = brokerEnabled() ? '' : resolveProviderSecret(p.apiKey);
+    out = await listEndpointModels(base, { apiKey: key, fetch: f });
+  }
   const have = new Set(listGlobalModels().map((m) => m.id.toLowerCase()));
   return {
     ...out,
@@ -337,6 +404,11 @@ export function formatOpenRouterKeyInfo(info) {
  * @returns {Promise<{ok:true, models?:number}|{ok:false, message:string}>}
  */
 export async function testProviderConnection(name, { fetch: f = globalThis.fetch, baseUrl = '', apiKey } = {}) {
+  // Credential broker: keys are per person and tested where they are saved.
+  if (brokerEnabled()) {
+    const keyPage = cachedBrokerInfo()?.publicUrl;
+    return { ok: false, message: `keys are held by the credential broker: test yours on the key page${keyPage ? ` (${keyPage})` : ''}` };
+  }
   if (name === 'copilot') {
     const c = providerConfig('copilot');
     const token = resolveProviderSecret(c.githubToken);
