@@ -3,7 +3,7 @@
 // stop. Frames asserted BARE (the server stamps threadId/messageId/seq).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve as pathResolve } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
@@ -104,6 +104,53 @@ test('happy path: frames ordered, session stored immediately, row + totals persi
   const done = frames.at(-1);
   assert.equal(done.status, 'done');
   assert.deepEqual(done.threadTotals, totals);
+});
+
+test('web access: the turn hands WORCA_ASK_WEB to the child, writes the config 0600, and swaps the sub-agent note', async () => {
+  const s = seed();
+  let cfg = null; let mode = null; let note = null;
+  const { turn } = makeTurn(s, { web: { enabled: true, allowedDomains: ['docs.example.com'], search: null } }, {
+    runClaudeImpl: async (opts) => {
+      cfg = JSON.parse(readFileSync(opts.mcpConfigPath, 'utf8'));
+      mode = statSync(opts.mcpConfigPath).mode & 0o777;
+      note = opts.appendSubagentSystemPrompt;
+      throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+    },
+  });
+  await turn.run();
+  assert.deepEqual(JSON.parse(cfg.mcpServers.worca.env.WORCA_ASK_WEB), { allowedDomains: ['docs.example.com'] });
+  if (process.platform !== 'win32') assert.equal(mode, 0o600);
+  assert.match(note, /network is reachable ONLY through the worca web tools/);
+});
+
+test('web search key: the value never lands in the written mcp json; its var rides the process env allowlist', async () => {
+  const s = seed();
+  process.env.ASKTEST_SEARCH_KEY = 'sekrit-key-value-123';
+  let raw = null; let allow = null;
+  const { turn } = makeTurn(s, { web: { enabled: true, allowedDomains: ['docs.example.com'],
+    search: { url: 'https://s.example/?q={query}', keyVar: 'ASKTEST_SEARCH_KEY', keyHeader: 'X-K', keyPrefix: '' } } }, {
+    runClaudeImpl: async (opts) => {
+      raw = readFileSync(opts.mcpConfigPath, 'utf8');
+      allow = opts.envAllowlist;
+      throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+    },
+  });
+  try { await turn.run(); } finally { delete process.env.ASKTEST_SEARCH_KEY; }
+  assert.ok(!raw.includes('sekrit-key-value-123'));
+  assert.deepEqual(allow, ['SSH_AUTH_SOCK', 'ASKTEST_SEARCH_KEY']);
+});
+
+test('web access off: no WORCA_ASK_WEB reaches the child', async () => {
+  const s = seed();
+  let cfg = null;
+  const { turn } = makeTurn(s, { web: { enabled: false, allowedDomains: [], search: null } }, {
+    runClaudeImpl: async (opts) => {
+      cfg = JSON.parse(readFileSync(opts.mcpConfigPath, 'utf8'));
+      throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+    },
+  });
+  await turn.run();
+  assert.ok(!('WORCA_ASK_WEB' in cfg.mcpServers.worca.env));
 });
 
 test('R-G: mcp config written (resolved home, argv twins), deleted in finally even on rejection', async () => {
@@ -1115,4 +1162,41 @@ test('memory: the turn refreshes the mount for its project before spawning and h
   assert.equal((await broken.run()).status, 'done');
   assert.equal(broken.memoryDir, null);
   assert.equal(seenOpts.addDirs, undefined);
+});
+
+test('web card: the parent re-validates against the turn\'s access — a host inside the team cap mints a card, one outside becomes a notice', async () => {
+  const s = seed();
+  const { turn } = makeTurn(s, { web: { enabled: true, allowedDomains: ['a.team.com'], search: null, teamCap: ['*.team.com'] } }, {
+    runClaudeImpl: async (opts) => {
+      // the child said ok to both (it never sees the team cap); the parent decides
+      toolUse(opts.onEvent, 'msg_1', 'toolu_w1', 'mcp__worca__propose_web_access', { url: 'https://docs.team.com/x', reason: 'docs' });
+      toolResult(opts.onEvent, 'toolu_w1', '{"ok":true,"card":{}}');
+      toolUse(opts.onEvent, 'msg_1', 'toolu_w2', 'mcp__worca__propose_web_access', { url: 'https://evil.example/' });
+      toolResult(opts.onEvent, 'toolu_w2', '{"ok":true,"card":{}}');
+      push(opts.onEvent, RESULT());
+      return { text: '', exitCode: 0 };
+    },
+  });
+  await turn.run();
+  const blocks = getMessage(s.asst.id).blocks;
+  const cards = blocks.filter((b) => b.kind === 'card');
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].state, 'proposed'); assert.equal(cards[0].card.type, 'web'); assert.equal(cards[0].card.host, 'docs.team.com');
+  assert.ok(blocks.some((b) => b.kind === 'notice' && /Web access request rejected: evil\.example is outside the team policy/.test(b.text)));
+});
+
+test('relay: the turn hands its web access to the relay and marks the spawn relayed', async () => {
+  const s = seed();
+  const web = { enabled: true, allowedDomains: ['docs.example.com'], search: null };
+  let relayArgs = null; let relayed = null;
+  const { turn } = makeTurn(s, { web }, {
+    agentRelay: (a) => { relayArgs = a; return { url: 'http://127.0.0.1:1/api/ask/relay', token: 't', dispose: () => {} }; },
+    runClaudeImpl: async (opts) => {
+      relayed = opts.asAgent;
+      throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+    },
+  });
+  await turn.run();
+  assert.deepEqual(relayArgs.web, web);
+  assert.equal(relayed, true);
 });

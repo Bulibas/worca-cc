@@ -8,9 +8,9 @@ import { join, resolve, isAbsolute } from 'node:path';
 import {
   buildAskSpawnOptions, buildMcpConfig, buildMockMarkers, MCP_FORWARD_ENV,
   ASK_DENY_RULES, ASK_SPAWN_ENV, SANDBOX_NOTE, ASK_PERMISSION_MODE, ASK_MCP_SERVER_PATH,
-  ASK_BUILTIN_TOOLS, askWorktreeAllowRules,
+  ASK_BUILTIN_TOOLS, askWorktreeAllowRules, webMcpEnv, webKeyVar, SANDBOX_NOTE_WEB,
 } from '../src/core/ask/spawn.mjs';
-import { buildClaudeArgs, runClaude } from '../src/core/claude-runner.mjs';
+import { buildClaudeArgs, runClaude, buildSpawnEnv } from '../src/core/claude-runner.mjs';
 
 const POSIX_SHIM = { skip: process.platform === 'win32' ? 'fake claude shim is a POSIX shell script (no .exe stand-in on Windows)' : false };
 
@@ -70,7 +70,7 @@ test('deny rules: spec list, every path rule // or ~/ anchored, the resolved hom
     'Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Skill',
     'Read(//**/worca-cc.db*)', 'Read(//**/worca.db*)', 'Read(//**/secrets.json)', 'Read(//**/.env*)',
     'Read(//**/.worca-cc/settings.json)', 'Read(//**/.worca-cc/store/**)', 'Read(//**/.worca-cc/runs/**)',
-    'Read(//**/.worca-cc/plugins/**)', 'Read(//**/.worca-cc/tmp/**)',
+    'Read(//**/.worca-cc/plugins/**)', 'Read(//**/.worca-cc/tmp/**)', 'Read(//**/.worca-cc/logs/**)',
     'Read(~/.ssh/**)', 'Read(~/.aws/**)', 'Read(~/.gnupg/**)', 'Read(~/.kube/**)', 'Read(~/.docker/**)',
     'Read(~/.claude/**)', 'Read(~/.netrc)', 'Read(~/.npmrc)', 'Read(~/.config/gh/**)', 'Read(//proc/**)',
   ]);
@@ -259,4 +259,62 @@ test('fake bin: a memoryDir puts CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 
     `the override reaches the spawned env: ${env.filter((l) => l.startsWith('CLAUDE_')).join(' ')}`);
   const argv = (await readFile(argvOut, 'utf8')).split('\0'); argv.pop();
   assert.deepEqual(argv.slice(-2), ['--add-dir', memoryDir], 'and --add-dir is the last pair of the argv');
+});
+
+test('regression guard: native WebFetch/WebSearch stay denied and never allowed', () => {
+  assert.ok(ASK_DENY_RULES.includes('WebFetch')); assert.ok(ASK_DENY_RULES.includes('WebSearch'));
+  const on = buildAskSpawnOptions({ ...base(), web: { enabled: true, allowedDomains: ['a.com'], search: null } });
+  for (const t of ['WebFetch', 'WebSearch']) { assert.ok(!on.allowedTools.includes(t)); assert.ok(!on.tools.includes(t)); assert.ok(on.permissionRules.deny.includes(t)); }
+  assert.deepEqual(on.mcpServerGrants, ['mcp__worca']);
+});
+
+test('sub-agent note: web variant only when web is on', () => {
+  assert.equal(buildAskSpawnOptions(base()).appendSubagentSystemPrompt, SANDBOX_NOTE);
+  const on = buildAskSpawnOptions({ ...base(), web: { enabled: true, allowedDomains: ['a.com'], search: null } }).appendSubagentSystemPrompt;
+  assert.equal(on, SANDBOX_NOTE_WEB); assert.notEqual(SANDBOX_NOTE_WEB, SANDBOX_NOTE);
+  assert.match(SANDBOX_NOTE_WEB, /network is reachable ONLY through the worca web tools/);
+  assert.ok(!SANDBOX_NOTE_WEB.includes('or use the network'));
+});
+
+test('buildMcpConfig: unchanged without web; WORCA_ASK_WEB with web, never the key value (M1: the json sits in the chat cwd)', () => {
+  const plain = buildMcpConfig({ homeBase: '/h', threadId: 't', serverPath: '/s.mjs', env: {} });
+  assert.ok(!('WORCA_ASK_WEB' in plain.mcpServers.worca.env));
+  const cfg = buildMcpConfig({ homeBase: '/h', threadId: 't', serverPath: '/s.mjs', env: { BRAVE_API_KEY: 'sekrit-key-value', OTHER_SECRET: 'x' },
+    web: { enabled: true, allowedDomains: ['a.com'], search: { url: 'https://s/?q={query}', keyVar: 'BRAVE_API_KEY', keyHeader: 'X-K', keyPrefix: '' } } });
+  const env = cfg.mcpServers.worca.env;
+  assert.deepEqual(JSON.parse(env.WORCA_ASK_WEB), { allowedDomains: ['a.com'], search: { url: 'https://s/?q={query}', keyHeader: 'X-K', keyPrefix: '', keyVar: 'BRAVE_API_KEY' } });
+  assert.ok(!('BRAVE_API_KEY' in env) && !('OTHER_SECRET' in env));
+  assert.ok(!JSON.stringify(cfg).includes('sekrit-key-value'), 'the written mcp json never carries the key value');
+});
+
+test('the search key var rides the claude process env allowlist (inherited by the MCP child), never the json', () => {
+  const web = { enabled: true, allowedDomains: ['a.com'], search: { url: 'https://s/?q={query}', keyVar: 'BRAVE_API_KEY', keyHeader: 'X-K', keyPrefix: '' } };
+  assert.equal(webKeyVar(web), 'BRAVE_API_KEY');
+  assert.deepEqual(buildAskSpawnOptions({ ...base(), web }).envAllowlist, ['SSH_AUTH_SOCK', 'BRAVE_API_KEY']);
+  assert.deepEqual(buildAskSpawnOptions({ ...base(), web: { ...web, enabled: false } }).envAllowlist, ['SSH_AUTH_SOCK']);
+  assert.deepEqual(buildAskSpawnOptions({ ...base(), web: { ...web, search: null } }).envAllowlist, ['SSH_AUTH_SOCK']);
+  assert.deepEqual(buildAskSpawnOptions({ ...base(), web: { ...web, allowedDomains: [] } }).envAllowlist, ['SSH_AUTH_SOCK', 'BRAVE_API_KEY'], 'on with an empty list is still on (hosts come through cards)');
+});
+
+// The last hop (claude hands its own env to a stdio MCP child, merged with the config's `env`) is
+// Claude Code behaviour, verified live against 2.1.282; this pins worca's side of the chain.
+test('the search key VALUE reaches the scrubbed claude env only through the web allowlist entry', (t) => {
+  t.after(() => { delete process.env.BRAVE_API_KEY; });
+  process.env.BRAVE_API_KEY = 'sekrit-key-value';
+  const web = { enabled: true, allowedDomains: ['a.com'], search: { url: 'https://s/?q={query}', keyVar: 'BRAVE_API_KEY', keyHeader: 'X-K', keyPrefix: '' } };
+  const on = buildAskSpawnOptions({ ...base(), web });
+  assert.equal(on.envScrub, true);
+  assert.equal(buildSpawnEnv(on.envScrub, on.envAllowlist).BRAVE_API_KEY, 'sekrit-key-value');
+  const off = buildAskSpawnOptions({ ...base(), web: { ...web, enabled: false } });
+  assert.ok(!('BRAVE_API_KEY' in buildSpawnEnv(off.envScrub, off.envAllowlist)));
+});
+
+test('webKeyVar refuses reserved and malformed key var names defensively (any case)', () => {
+  const w = (keyVar) => ({ enabled: true, allowedDomains: ['a.com'], search: { url: 'https://s/?q={query}', keyVar } });
+  for (const kv of ['ANTHROPIC_API_KEY', 'anthropic_api_key', 'Worca_x', 'PATH', 'path', '1BAD', 'A-B', '', null]) assert.equal(webKeyVar(w(kv)), null, String(kv));
+  assert.deepEqual(Object.keys(webMcpEnv(w('ANTHROPIC_API_KEY'), { ANTHROPIC_API_KEY: 'x' })), ['WORCA_ASK_WEB']);
+});
+
+test('the web request log is denied to Read', () => {
+  assert.ok(ASK_DENY_RULES.includes('Read(//**/.worca-cc/logs/**)'));
 });

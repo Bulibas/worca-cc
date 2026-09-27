@@ -21,7 +21,7 @@ Every value in a policy carries a **kind**:
 | `soft` | An expectation. For a cap, the tighter of team and local applies; you can go past it after a confirmation, and the overshoot is recorded to team metrics. For a list (allowed models, required plugins, a minimum guardrail tier), a deviation is a warning plus a record. |
 | `hard` | Reserved. Accepted and treated as soft with a note in the run log; the editor does not offer it. A later version can enforce it without a format change. |
 
-No run is ever blocked by a policy. A soft cap that would pause an **unattended** run
+No run is ever blocked by a policy. The two Ask Worca web fields are the exception to "you can go past it": they only narrow (off, or a cap on hosts) and they bind, because web access is each developer's own opt-in. A soft cap that would pause an **unattended** run
 (`--yes`) warns instead — nobody is there to click "continue past" — and the record says so.
 
 ## What a policy can set
@@ -33,6 +33,8 @@ No run is ever blocked by a policy. A soft cap that would pause an **unattended*
 | Reset period | weekly / monthly, when you have not stored one | default |
 | Pooled budget (USD) | the whole team's figure, read from team metrics; advisory only | soft |
 | Ask Worca turn limit, per-turn cap | Settings › Ask Worca, when you have not stored them | default |
+| Ask Worca web access | off switches web access off for chats pinned to the project; a policy can never switch it on | soft (off only) |
+| Ask Worca web allowlist | the most a developer may allow: hosts outside it are dropped from their own list for chats pinned to the project; it never adds a host | soft |
 | Guardrails default set / minimum tier | what the New pipeline picker starts on; a run below the tier warns | default / soft |
 | Allowed models, step defaults, hide built-ins | pickers warn on an off-list model; roles you have not configured start from the team's | soft / default |
 | Marketplaces, required plugins, blocked plugins | marketplaces are added once (metadata only); required plugins go through the setup checklist with consent; blocked ones warn | default / soft |

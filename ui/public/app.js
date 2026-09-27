@@ -107,7 +107,7 @@ import {
   renderConfigForm, collectConfigForm, renderConnectResult, renderDoctorReport, renderReferences409,
   renderOrphanList, channelBadge, renderAvailableList, renderMarketplaceList,
 } from './plugins-view.mjs';
-import { renderChatSettings, collectChatSettings, renderScriptToolsToggle, collectScriptToolsToggle } from './chat-settings-view.mjs';
+import { renderChatSettings, collectChatSettings, renderScriptToolsToggle, collectScriptToolsToggle, renderAskWebFields, collectAskWebFields } from './chat-settings-view.mjs';
 import { renderCredentials } from './credentials-view.mjs';
 import { loadCredentials, credentialSuffix } from './credential-badges.mjs';
 import { renderFreeDaily, freeRequestsSuffix, typicalFreeRun, newRunFreeWarning, providerFreeLine } from './openrouter-free-view.mjs';
@@ -10997,6 +10997,9 @@ function paintAskSettings(data) {
   // the GET and from every save response without a second fetch.
   const scriptHost = document.getElementById('ask-script-tools-host');
   if (scriptHost) scriptHost.replaceChildren(renderScriptToolsToggle({ prefs: data.chat || {} }, { doc: document }));
+  // Web access: repainted from every GET and save response, which also resets its dirty flag.
+  const webHost = document.getElementById('ask-web-host');
+  if (webHost) webHost.replaceChildren(renderAskWebFields({ askWeb: data.askWeb }, { doc: document }));
 }
 function postAskLimits(body) {
   return postSettingsCard(body, { setMsg: setAskLimitsMsg, paint: paintAskSettings });
@@ -11019,7 +11022,11 @@ function saveAskLimits() {
     askMaxBudgetUsd = b;
   }
   const scriptHost = document.getElementById('ask-script-tools-host');
-  postAskLimits({ askMaxTurns, askMaxBudgetUsd, ...(scriptHost ? { chat: collectScriptToolsToggle(scriptHost) } : {}) });
+  const webHost = document.getElementById('ask-web-host');
+  const askWebBody = webHost ? collectAskWebFields(webHost) : null;   // null = the web fields were not touched
+  postAskLimits({ askMaxTurns, askMaxBudgetUsd,
+    ...(scriptHost ? { chat: collectScriptToolsToggle(scriptHost) } : {}),
+    ...(askWebBody ? { askWeb: askWebBody } : {}) });
 }
 document.getElementById('askLimitsSave')?.addEventListener('click', saveAskLimits);
 document.getElementById('askLimitsReset')?.addEventListener('click', () => postAskLimits({ askMaxTurns: '', askMaxBudgetUsd: '' }));

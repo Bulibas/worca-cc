@@ -4,6 +4,7 @@
 // snapshot of local settings comes from policy/local.mjs, the document from policy/sync.mjs.
 
 import { FIELDS, effectiveKind, tierRank, semverAtLeast } from './registry.mjs';
+import { capDomainList } from '../web-allowlist.mjs';
 
 /**
  * The team entries that apply to ONE run kind: `workspaceRuns` replaces `fields` for
@@ -45,6 +46,14 @@ export function effectiveDefault({ local = null, team = null } = {}) {
   return { value: local ? local.value : null, source: local ? 'default' : 'none' };
 }
 
+/** Ask web access on/off: only the developer switches it on; a team value can only switch it off. */
+export function effectiveWebEnabled({ local = null, team = null } = {}) {
+  if (team && team.value === false) return false;
+  return !!(local && local.value === true);
+}
+/** The Ask web allowlist: the developer's own list, capped by the team's when the policy sets one. */
+export function capWebDomains(local, team) { return capDomainList(local, Array.isArray(team) ? team : null); }
+
 const fmtUsd = (n) => `$${Number(n).toFixed(2)}`;
 // Built-in guardrail ids render as their display names everywhere (`secure` shows as "Strict",
 // the guardrail-store.mjs BUILTIN_META rule); a policy set reads "gp:<id>".
@@ -75,7 +84,15 @@ export function effectiveRows({ doc = null, workspaceRun = false, local = {} } =
     const t = team[meta.key] || null;
     const l = local[meta.key] || null;
     let effective; let note = null;
-    if (meta.cap) {
+    if (meta.key === 'ask.webEnabled') {
+      const v = effectiveWebEnabled({ local: l, team: t });
+      effective = { value: v, display: fmtValue(meta, v), source: t && t.value === false ? 'team' : 'local' };
+    } else if (meta.key === 'ask.webAllowedDomains') {
+      const v = capWebDomains(l?.value, t?.value);
+      effective = { value: v, display: fmtValue(meta, v), source: t ? 'team' : 'local' };
+      const dropped = (Array.isArray(l?.value) ? l.value.length : 0) - v.length;
+      if (t && dropped > 0) note = `${dropped} of yours ${dropped === 1 ? 'is' : 'are'} outside the team list`;
+    } else if (meta.cap) {
       const r = effectiveCap({ local: l?.set ? l.value : null, team: t });
       effective = { value: r.cap, display: fmtValue(meta, r.cap), source: r.binding || 'none' };
       if (r.binding === 'team' && l?.set && l.value > t.value) note = `yours (${fmtUsd(l.value)}) is looser; the team cap applies`;

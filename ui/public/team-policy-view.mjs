@@ -696,6 +696,7 @@ function valueControl(doc, meta, entry, row) {
     case 'bool': {
       const lab = h(doc, 'label', 'switch-row'); const cb = h(doc, 'input', 'sw-input tp-val'); cb.type = 'checkbox'; cb.checked = v === true;
       cb.setAttribute('aria-label', meta.label);
+      if (meta.offOnly) cb.disabled = true;             // a policy can only switch it off (registry: offOnly)
       lab.append(cb, h(doc, 'span', 'switch switch-sm'), h(doc, 'span', 'txt', v === true ? 'on' : 'off'));
       cb.addEventListener('change', () => { lab.querySelector('.txt').textContent = cb.checked ? 'on' : 'off'; });
       wrap.append(lab); break;
@@ -713,7 +714,7 @@ function valueControl(doc, meta, entry, row) {
     case 'string[]': {
       writeItems(row, Array.isArray(v) ? v : []);
       wrap.append(h(doc, 'div', 'tp-list'));
-      const add = h(doc, 'div', 'path-row tp-add-row'); const inp = h(doc, 'input', 'input tp-add'); inp.type = 'text'; inp.placeholder = meta.key === 'plugins.marketplaces' ? 'owner/repo or URL' : meta.key === 'models.allowed' ? 'model id' : 'plugin name';
+      const add = h(doc, 'div', 'path-row tp-add-row'); const inp = h(doc, 'input', 'input tp-add'); inp.type = 'text'; inp.placeholder = meta.key === 'plugins.marketplaces' ? 'owner/repo or URL' : meta.key === 'models.allowed' ? 'model id' : meta.key === 'ask.webAllowedDomains' ? 'example.com or *.example.com' : 'plugin name';
       const b = h(doc, 'button', 'btn btn-ghost btn-mini tp-add-btn', '+ add'); b.type = 'button';
       add.append(inp, b); wrap.append(add);
       break;

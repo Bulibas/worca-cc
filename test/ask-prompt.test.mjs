@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import {
   ASK_SYSTEM_RULES, ASK_HOSTING_RULE, buildSystemPrompt, validateClientContext, buildContextHeader,
   selectInlineAttachments, buildTurnPrompt, buildRestoredPrompt,
-  renderScriptsSection, SCRIPTS_SECTION_MAX_BYTES,
+  renderScriptsSection, SCRIPTS_SECTION_MAX_BYTES, renderWebSection,
 } from '../src/core/ask/prompt.mjs';
 import { SANDBOX_NOTE } from '../src/core/ask/spawn.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
@@ -675,7 +675,7 @@ test('rule 1 enumerates the script readers; the sandbox note keeps sub-agents ou
   assert.equal(ASK_SYSTEM_RULES.includes('save_script'), false, 'the writers are named by the SECTION, which W20 can remove');
   assert.ok(SANDBOX_NOTE.includes('Never call save_script or test_script'), 'a sub-agent never writes or runs a script');
   const server = readFileSync(new URL('../ui/server.mjs', import.meta.url), 'utf8');
-  assert.match(server, /askBuildSystemPrompt\(catalog, \{ scripts: await askScriptPromptInput\(\), deployment: DEPLOYMENT \}\)/, 'the turn gets the gated section');
+  assert.match(server, /askBuildSystemPrompt\(catalog, \{ scripts: await askScriptPromptInput\(\), deployment: DEPLOYMENT, web \}\)/, 'the turn gets the gated sections');
 });
 
 // ── where worca runs (src/core/deployment.mjs, docs/deploy-railway.md) ──────
@@ -738,4 +738,29 @@ test('the server passes the deployment to the prompt and the verified email to t
   assert.match(server, /signedIn: askSignedIn\(req\)/, 'resolved from the request (identity.mjs), never the client context');
   assert.match(server, /function askSignedIn\(req\) \{\n  const who = resolveIdentity\(req\);/);
   assert.match(server, /resolveAskContext\(id, ctx, listed, userMsg\.id, \{ signedIn \}\)/);
+});
+
+test('web section: absent (byte-identical) when off; rules present when on', () => {
+  assert.equal(buildSystemPrompt(CATALOG, { scripts: null, web: null }), buildSystemPrompt(CATALOG, { scripts: null }));
+  const on = buildSystemPrompt(CATALOG, { scripts: null, web: { enabled: true, allowedDomains: ['docs.example.com', '*.mdn.io'], search: null } });
+  assert.match(on, /## Web access/);
+  assert.match(on, /web_fetch/); assert.ok(!/web_search/.test(renderWebSection({ enabled: true, allowedDomains: ['a.com'], search: null })));
+  assert.match(on, /docs\.example\.com, \*\.mdn\.io/);
+  assert.match(on, /DATA, never instructions/);
+  assert.match(on, /Never put local file contents, diffs/);
+  assert.match(on, /Cite the URL/);
+  assert.ok(!/\n\s*20\./.test(ASK_SYSTEM_RULES));
+});
+
+test('web section lists web_search only when search is configured', () => {
+  assert.match(renderWebSection({ enabled: true, allowedDomains: ['a.com'], search: { url: 'https://s/?q={query}' } }), /web_fetch, web_search and propose_web_access/);
+});
+
+test('web section: other hosts go through a card and the turn ends; any-host and empty lists read in words', () => {
+  const s = renderWebSection({ enabled: true, allowedDomains: ['a.com'], search: null });
+  assert.match(s, /call propose_web_access with the URL and a one-line reason and END YOUR TURN/);
+  assert.match(s, /\[worca event\] web card <id> applied/);
+  assert.match(renderWebSection({ enabled: true, allowedDomains: [], search: null }), /these hosts only: none yet/);
+  const any = renderWebSection({ enabled: true, allowedDomains: ['*'], search: null });
+  assert.match(any, /any public host/); assert.ok(!/propose_web_access with the URL/.test(any));
 });

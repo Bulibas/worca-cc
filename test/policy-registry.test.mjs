@@ -150,3 +150,15 @@ test('cost.humanRateUsd is a default-kind usd field governing humanRateUsdPerHou
   assert.equal(validateValue(f, 95), null);
   assert.match(validateValue(f, -1), /positive/);
 });
+
+test('ask.webEnabled / ask.webAllowedDomains', () => {
+  const e = fieldMeta('ask.webEnabled');
+  assert.equal(e.type, 'bool'); assert.deepEqual(e.kinds, ['soft']); assert.equal(e.group, 'ask');
+  assert.equal(validateValue(e, false), null);
+  assert.match(validateValue(e, true), /only switch web access off/, 'a team can never switch web access on');
+  const d = fieldMeta('ask.webAllowedDomains');
+  assert.equal(d.type, 'string[]'); assert.deepEqual(d.kinds, ['soft']); assert.equal(d.domains, true);
+  assert.match(validateValue(d, ['*.github.io']), /anyone can host/);
+  assert.equal(validateValue(d, ['docs.example.com', '*.mdn.io']), null);
+  assert.match(validateValue(d, ['not a host']), /host name/);
+});

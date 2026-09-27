@@ -30,6 +30,7 @@ import { validateMetricsChange } from './metrics-deps.mjs';
 import { validatePolicyChange } from './policy-deps.mjs';
 import { validateModelChange } from './model-deps.mjs';
 import { validateCloneProposal } from './clone-deps.mjs';
+import { createWebValidator } from './web-proposal.mjs';
 import { validateScheduleChange } from './schedule-deps.mjs';
 import { lookupTask } from './source-deps.mjs';
 import { effectiveTimeZone } from './schedule-spec.mjs';
@@ -57,12 +58,15 @@ class AskTurn extends EventEmitter {
     memoryProject = null,
     timeZone = null,
     reader = null,
+    web = null,
     deps = {},
   } = {}) {
     super();
     this.threadId = threadId;
     // A shared sign-in's name (identity.mjs): the MCP child's per-person reads (notifications).
     this.reader = typeof reader === 'string' && reader ? reader : null;
+    // askWebAccess() for this turn (docs/guardrails.md "Web access"): the MCP child's web tools + the sub-agent note.
+    this.web = web && web.enabled === true ? web : null;
     this.assistantMessageId = assistantMessageId;
     this.userMessageId = userMessageId;
     this.prompt = prompt;
@@ -101,6 +105,9 @@ class AskTurn extends EventEmitter {
       validateScheduleChange: deps.validateScheduleChange ?? validateScheduleChange,
       validateModelChange: deps.validateModelChange ?? validateModelChange,
       validateCloneProposal: deps.validateCloneProposal ?? validateCloneProposal,
+      // The web card's authoritative check runs against THIS turn's resolved access (allowlist + team cap).
+      validateWebProposal: deps.validateWebProposal ?? ((input) => createWebValidator({
+        allowed: () => (this.web ? this.web.allowedDomains : []), teamCap: () => (this.web ? this.web.teamCap ?? null : null) })(input)),
       scheduleDefaults: deps.scheduleDefaults ?? scheduleDefaults,
       // A proposed plugin task is looked up here, once: it must exist, and the card shows its title.
       lookupTask: deps.lookupTask === undefined ? lookupTask : deps.lookupTask,
@@ -112,7 +119,7 @@ class AskTurn extends EventEmitter {
       resolveModelCost: deps.resolveModelCost ?? resolveModelCost,
       worcaHome: deps.worcaHome ?? worcaHome,
       buildMcpConfig: deps.buildMcpConfig ?? buildMcpConfig,
-      // ({threadId, reader}) => {url, token, dispose()} | null. Set by the server when agents run
+      // ({threadId, reader, web}) => {url, token, dispose()} | null. Set by the server when agents run
       // under their own users (agent-pool.mjs): the chat's claude then runs as the person's
       // agent user and its worca tools run in the server through this relay. null = classic.
       agentRelay: deps.agentRelay ?? null,
@@ -380,6 +387,26 @@ class AskTurn extends EventEmitter {
     this._persistBlocks();
   }
 
+  /** propose_web_access RESULT: the clone card's split — a child {ok:false} already reached the model as text. */
+  async _onWebProposal(input, text, isError) {
+    if (isError || !this.web) return;
+    let out = null;
+    try { out = JSON.parse(text); } catch { out = null; }
+    if (!out || out.ok !== true) return;
+    const d = this.deps;
+    try {
+      const r = await d.validateWebProposal(input && typeof input === 'object' ? input : {});
+      if (r && r.ok) this.reducer.addBlock({ kind: 'card', id: d.newAskId('card'), state: 'proposed', card: r.card });
+      else {
+        const errors = (r && Array.isArray(r.errors) && r.errors.length) ? r.errors : ['invalid proposal'];
+        this.reducer.addBlock({ kind: 'notice', text: `Web access request rejected: ${errors.join('; ')}` });
+      }
+    } catch (err) {
+      this.reducer.addBlock({ kind: 'notice', text: `Web access request rejected: ${err?.message || err}` });
+    }
+    this._persistBlocks();
+  }
+
   /** The card exists from the tool_use on (spec §8.2, PD7): a building block with the four-step trace, persisted. */
   _onWorkflowStart(toolUseId, input) {
     const d = this.deps;
@@ -468,6 +495,7 @@ class AskTurn extends EventEmitter {
       onScheduleProposal: ({ input, text, isError }) => this._onScheduleProposal(input, text, isError),
       onModelProposal: ({ input, text, isError }) => this._onModelProposal(input, text, isError),
       onCloneProposal: ({ input, text, isError }) => this._onCloneProposal(input, text, isError),
+      onWebProposal: ({ input, text, isError }) => this._onWebProposal(input, text, isError),
       // pause / resume / skip / mark-read in the child → the server's schedules-changed frames.
       onScheduleMutation: (e) => { try { this.deps.onScheduleMutation(e); } catch { /* a broken sink never breaks the turn */ } },
       // The MCP child cannot broadcast; the parent turns its comment writes into
@@ -626,11 +654,11 @@ class AskTurn extends EventEmitter {
         ? pathResolve(process.env.WORCA_HOME)
         : dirname(d.worcaHome());
       mcpConfigPath = join(scratchDir, `mcp-${this.assistantMessageId}.json`);
-      this.relay = d.agentRelay ? d.agentRelay({ threadId: this.threadId, reader: this.reader || null }) : null;
+      this.relay = d.agentRelay ? d.agentRelay({ threadId: this.threadId, reader: this.reader || null, web: this.web }) : null;
       await d.fs.writeFile(
         mcpConfigPath,
-        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, ...(this.reader ? { reader: this.reader } : {}), ...(this.relay ? { relay: this.relay } : {}) }), null, 2),
-        'utf8',
+        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, ...(this.reader ? { reader: this.reader } : {}), ...(this.relay ? { relay: this.relay } : {}), ...(this.web ? { web: this.web } : {}) }), null, 2),
+        { encoding: 'utf8', mode: 0o600 },          // never a key value (webKeyVar: the key rides the process env)
       );
       // One 30-minute budget for the whole turn, retry included. The timedOut
       // flag and abort() run in ONE synchronous callback, so R-C always reads
@@ -689,6 +717,8 @@ class AskTurn extends EventEmitter {
         mcpConfigPath,
         scratchDir,
         memoryDir: this.memoryDir,
+        web: this.web,
+        relayed: !!this.relay,
       });
       // With the relay, the chat's claude runs as the person's agent user (agent-pool.mjs).
       if (this.relay) options.asAgent = true;

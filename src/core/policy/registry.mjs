@@ -15,6 +15,8 @@
 // accepted on read, downgraded to soft with a warning — a later version enforces it without a
 // format change). Every field lists the kinds it accepts; the editor disables the rest.
 
+import { domainError } from '../web-allowlist.mjs';
+
 export const POLICY_SCHEMA = 1;
 export const KINDS = Object.freeze(['default', 'soft', 'hard']);
 export const ON_BREACH = Object.freeze(['pause', 'warn']);
@@ -41,6 +43,10 @@ export const FIELDS = Object.freeze([
   { key: 'cost.humanRateUsd', group: 'cost', label: 'Developer rate (USD/h)', help: 'Prices the estimated human hours behind "Saved". A developer\'s own rate wins when set.', type: 'usd', kinds: ['default'], local: 'humanRateUsdPerHour' },
   { key: 'ask.maxTurns', group: 'ask', label: 'Turn limit', help: 'Ask Worca agentic turns per chat turn.', type: 'int', min: 1, max: 500, kinds: ['default'], local: 'askMaxTurns' },
   { key: 'ask.maxBudgetUsd', group: 'ask', label: 'Per-turn cost cap (USD)', help: 'Ask Worca per-turn cap; null means no cap.', type: 'usd-or-null', min: 0.1, max: 100, kinds: ['default'], local: 'askMaxBudgetUsd' },
+  // The two web fields only ever NARROW, and bind (no "go past it"): web access is opt-in per developer, and the policy
+  // branch is writable by whoever can push to the repo — so a policy may switch it off or cap the hosts, never widen.
+  { key: 'ask.webEnabled', group: 'ask', label: 'Web access', help: 'Off switches Ask Worca web access off for chats pinned to this project. A policy can never switch it on — each developer opts in.', type: 'bool', kinds: ['soft'], offOnly: true, local: 'askWeb.enabled' },
+  { key: 'ask.webAllowedDomains', group: 'ask', label: 'Web allowlist', help: 'The most a developer may allow (example.com or *.example.com): hosts outside this list are dropped from their own Ask web allowlist. It never adds a host.', type: 'string[]', kinds: ['soft'], domains: true, local: 'askWeb.allowedDomains' },
   { key: 'guardrails.default', group: 'guardrails', label: 'Default set', help: 'What the New pipeline picker starts on. A built-in id, a user set id, or gp:<name> for a set this policy ships.', type: 'string', kinds: ['default'] },
   { key: 'guardrails.minimum', group: 'guardrails', label: 'Minimum tier', help: 'A run whose set ranks below this warns and is recorded.', type: 'enum', values: TIERS, kinds: ['soft'] },
   { key: 'models.allowed', group: 'models', label: 'Allowed models', help: 'A chosen step model outside this list warns and is recorded. Others still run.', type: 'string[]', kinds: ['soft'] },
@@ -98,13 +104,17 @@ export function validateValue(meta, value) {
       if (value === null) return null;
       return finiteNum(value) && value >= (meta.min ?? 0) && value <= (meta.max ?? Infinity) ? null : `must be null or a number between ${meta.min} and ${meta.max}`;
     case 'int': return Number.isInteger(value) && value >= (meta.min ?? -Infinity) && value <= (meta.max ?? Infinity) ? null : `must be an integer between ${meta.min} and ${meta.max}`;
-    case 'bool': return typeof value === 'boolean' ? null : 'must be true or false';
+    case 'bool':
+      if (typeof value !== 'boolean') return 'must be true or false';
+      return meta.offOnly && value !== false ? 'a team policy can only switch web access off — turning it on is each developer\'s own choice' : null;
     case 'enum': return meta.values.includes(value) ? null : `must be one of ${meta.values.join(' | ')}`;
     case 'string': return typeof value === 'string' && value.trim() && value.length <= TEXT_MAX ? null : 'must be a non-empty string';
     case 'semver': return typeof value === 'string' && SEMVER_RE.test(value) ? null : 'must be a version like 1.4.0';
     case 'string[]':
       if (!Array.isArray(value)) return 'must be a list';
-      return value.every((x) => typeof x === 'string' && x.trim() && x.length <= TEXT_MAX) ? null : 'every entry must be a non-empty string';
+      if (!value.every((x) => typeof x === 'string' && x.trim() && x.length <= TEXT_MAX)) return 'every entry must be a non-empty string';
+      if (meta.domains) { for (const x of value) { const e = domainError(x); if (e) return e; } }
+      return null;
     case 'steps': {
       if (!isPlainObject(value)) return 'must be an object of role → { model, effort }';
       for (const [role, sel] of Object.entries(value)) {

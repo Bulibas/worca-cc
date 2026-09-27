@@ -44,6 +44,7 @@ import {
   setPipelineCostLimitUsd, setTotalCostLimitUsd, setCostLimitResetPeriod, assertCostLimitInputs,
   humanRateUsdPerHour, setHumanRateUsdPerHour, assertHumanRateInput,
   askMaxTurns, askMaxBudgetUsd, setAskMaxTurns, setAskMaxBudgetUsd, assertAskLimitInputs,
+  askWeb, assertAskWebInput, setAskWeb, addAskWebHost,
   chatPrefs, setChatPrefs,
   debugSpawnEnabled as storedDebugSpawnEnabled, effectiveDebugSpawn, setDebugSpawnEnabled, assertDebugSpawnInput, SETTINGS_POST_KEYS,
   titleModel as storedTitleModel, setTitleModel, assertTitleModelInput,
@@ -74,6 +75,7 @@ import {
 } from '../src/core/ask/store.mjs';
 import { sanitizeTitle as askSanitizeTitle } from '../src/core/title.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
+import { askWebAccess, WEB_OFF } from '../src/core/ask/web-access.mjs';
 import { askCatalog, validateModelEffort } from '../src/core/ask/models.mjs';
 import { buildCatalog as askBuildCatalog } from '../src/core/ask/catalog.mjs';
 import {
@@ -124,6 +126,7 @@ import { resolveIdentity, startedByOf, prAttributionFooter, actorOf, isSharedIde
 import { withBillTo, currentBillTo, currentOwner } from '../src/core/billing.mjs';
 import { agentIdentity } from '../src/core/agent-user.mjs';
 import { createAskToolServer } from '../src/core/ask/mcp-stdio.mjs';
+import { webMcpEnv as askWebMcpEnv } from '../src/core/ask/spawn.mjs';
 import { brokerEnabled, brokerInfo, personSlots, brokerUsageSummary, foldUsageByPerson } from '../src/core/broker-client.mjs';
 import { freeDailyStatus } from '../src/core/openrouter-free.mjs';
 import { checkBrokerAtBoot } from '../src/core/broker-boot.mjs';
@@ -172,6 +175,8 @@ import { scheduleEventPrompt, scheduleNoticeText } from '../src/core/ask/schedul
 import { applyModelChange } from '../src/core/ask/model-deps.mjs';
 import { modelEventPrompt, modelNoticeText } from '../src/core/ask/model-proposal.mjs';
 import { cloneEventPrompt, cloneNoticeText } from '../src/core/ask/clone-proposal.mjs';
+import { webEventPrompt, webNoticeText, chatWebHosts } from '../src/core/ask/web-proposal.mjs';
+import { hostAllowed as askHostAllowed } from '../src/core/web-allowlist.mjs';
 import { registryPortsFn } from '../src/core/graph/registry-ports.mjs';
 import { sweepV1Runs, V1_RUN_RETIRED, getDb } from '../src/core/db.mjs';
 import { exportWorkflow, exportWorkflowPlugin, ON_CONFLICT_MODES, RESOLUTION_CHOICES } from '../src/core/workflow-export.mjs';
@@ -4975,6 +4980,7 @@ const settingsState = () => ({
   humanRateUsdPerHour: humanRateUsdPerHour(),
   askMaxTurns: askMaxTurns(),
   askMaxBudgetUsd: askMaxBudgetUsd(),
+  askWeb: askWeb(),                                       // Ask Worca web access (off by default)
   debugSpawnEnabled: storedDebugSpawnEnabled(),          // what is STORED (the checkbox)
   debugSpawnEffective: effectiveDebugSpawn(),             // what the next spawn will DO, and why
   titleModel: storedTitleModel(),                         // the STORED id (the select), null = run's model
@@ -5075,11 +5081,14 @@ app.get('/api/credentials', async (req, res) => {
 // billing context. One token per turn, loopback callers only, dropped when the turn ends.
 const askRelays = new Map();   // token -> { rpc, out, billTo, owner }
 
-function askAgentRelay({ threadId, reader }) {
+function askAgentRelay({ threadId, reader, web = null }) {
   const token = randomBytes(24).toString('base64url');
   const life = new AbortController();
   const entry = { out: [], billTo: currentBillTo(), owner: currentOwner() };
-  entry.rpc = createAskToolServer({ threadId, reader, signal: life.signal, write: (s) => { entry.out.push(s); } });
+  // The tools run here, so this turn's web access rides a private env copy (never process.env itself);
+  // the search key is read from worca's own environment, where it was set.
+  const env = { ...process.env, ...askWebMcpEnv(web) };
+  entry.rpc = createAskToolServer({ threadId, reader, signal: life.signal, env, write: (s) => { entry.out.push(s); } });
   askRelays.set(token, entry);
   const port = server.address()?.port || PORT;
   return { url: `http://127.0.0.1:${port}/api/ask/relay`, token, dispose: () => { life.abort(); askRelays.delete(token); } };
@@ -5176,6 +5185,7 @@ app.post('/api/settings', async (req, res) => {
   const hasBudgetKey = has('pipelineCostLimitUsd') || has('totalCostLimitUsd') || has('costLimitResetPeriod');
   const hasHumanRateKey = has('humanRateUsdPerHour');
   const hasAskKey = has('askMaxTurns') || has('askMaxBudgetUsd');
+  const hasAskWeb = has('askWeb');                // null clears back to unset (a team default applies)
   const hasDebugSpawnKey = has('debugSpawnEnabled');
   const hasTitleModelKey = has('titleModel');
   const hasHideBuiltinKey = has('hideBuiltinModels');
@@ -5212,6 +5222,7 @@ app.post('/api/settings', async (req, res) => {
     assertCostLimitInputs(budget);
     if (hasHumanRateKey) assertHumanRateInput(body.humanRateUsdPerHour ?? '');
     assertAskLimitInputs(ask);
+    if (hasAskWeb && body.askWeb !== null) assertAskWebInput(body.askWeb);
     if (hasDebugSpawnKey) assertDebugSpawnInput(body.debugSpawnEnabled);
     if (hasTitleModelKey) {
       assertTitleModelInput(titleModelInput);
@@ -5242,6 +5253,7 @@ app.post('/api/settings', async (req, res) => {
     if (hasHumanRateKey) await setHumanRateUsdPerHour(body.humanRateUsdPerHour ?? '');
     if (has('askMaxTurns')) await setAskMaxTurns(ask.askMaxTurns);
     if (has('askMaxBudgetUsd')) await setAskMaxBudgetUsd(ask.askMaxBudgetUsd);
+    if (hasAskWeb) await setAskWeb(body.askWeb);
     if (hasDebugSpawnKey) await setDebugSpawnEnabled(body.debugSpawnEnabled);
     if (hasTitleModelKey) await setTitleModel(titleModelInput);
     if (hasHideBuiltinKey) await setHideBuiltinModels(body.hideBuiltinModels);
@@ -5253,7 +5265,7 @@ app.post('/api/settings', async (req, res) => {
     if (hasBudgetKey) emitChanged('budget-changed');
     // Other open tabs repaint their Settings cards (a stale tab could otherwise
     // "save" its old checkbox state over this one with no feedback to either).
-    if (hasAskKey || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasHumanRateKey || hasMemoryDefragKey || has('schedule')) emitChanged('settings-changed');
+    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasHumanRateKey || hasMemoryDefragKey || has('schedule')) emitChanged('settings-changed');
     res.json({ ...settingsState(), ...(await autoModelState()), chat: chatPrefs() });
   } catch (err) {
     // The setters throw only on an unusable path -> client error (400).
@@ -6700,11 +6712,24 @@ function askValidateScope(raw) {
   return { ok: true, scope: { pinned: true, [keys[0]]: cv.context[keys[0]] } };
 }
 
+/** One chat turn's web access: settings ⊕ the pinned project's team policy ⊕ the hosts this chat's web
+ *  cards allowed "for this chat". Never throws: a failure reads as off. */
+function askWebAccessFor(threadId, ctx) {
+  try {
+    const pinned = askPinnedScope(ctx || {});
+    return askWebAccess({ projectKey: pinned?.projectKey || null, chatHosts: chatWebHosts(askListMessages(threadId)) });
+  } catch (err) {
+    console.warn(`[worca-ask] web access resolve failed (${err?.message || err}) — web stays off`);
+    return WEB_OFF;
+  }
+}
+
 /** The system prompt of ONE Ask turn: the rules, the catalog, and — only when the chat's
  *  "Create and run scripts" pref is on (W20) — the scripts section with the runtimes this host
- *  actually has (the python probe, cached 60 s). Memory is mounted, not rendered. */
-async function askSystemPromptFor(catalog) {
-  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT });
+ *  actually has (the python probe, cached 60 s); plus the web section when `web` (askWebAccess()
+ *  for this turn) is on. Memory is mounted, not rendered. */
+async function askSystemPromptFor(catalog, { web = null } = {}) {
+  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT, web });
 }
 
 /** "scheduled Sat Sep 19, 02:00 (run 1a2b…)" / "repeats: Every weekday at 02:00 (sch_…)" / "proposes: …" — or ''. */
@@ -6825,7 +6850,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
         // workflowId once the user saved it; a run card keeps its pre-P3 line byte for byte.
         const wf = !!(b.card && b.card.type === 'workflow');
         if (wf && b.state === 'building') continue;   // transient (no name yet) — never worth a header line
-        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone')) {
+        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web')) {
           cards.push({ id: b.id, type: b.card.type, state: b.state, summary: b.card.summary || '' });
           continue;
         }
@@ -6963,7 +6988,11 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     const withText = attRows.map((a, i) => ({ id: a.id, name: a.name, bytes: a.bytes, kind: a.kind, mime: a.mime, text: files[i].text }));
     const { inline, listed } = askSelectInlineAttachments(withText);
     const headerCtx = await resolveAskContext(id, ctx, listed, userMsg.id, { signedIn });
-    const systemPrompt = await askSystemPromptFor(catalog);
+    // Web access (docs/guardrails.md "Web access"): resolved ONCE per turn — local settings ⊕ the pinned project's
+    // team policy — so the prompt section, the sub-agent note and the MCP child's tools agree.
+    const pinned = askPinnedScope(ctx);
+    const web = askWebAccessFor(id, ctx);
+    const systemPrompt = await askSystemPromptFor(catalog, { web });
     const header = askBuildContextHeader(headerCtx);
     const prompt = askBuildTurnPrompt(header, text, inline);
     const prior = askListMessages(id).filter((m) => m.seq < userMsg.seq);
@@ -6981,7 +7010,8 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
       firstTurn: !synthetic && userMsg.seq === 1 && titleWasAuto, // P3: an event never titles the thread (D13 guard kept)
       firstText: text,
       deterministicTitle,
-      pinnedScope: askPinnedScope(ctx),             // #397: proposal defaulting + mismatch flag
+      pinnedScope: pinned,                          // #397: proposal defaulting + mismatch flag
+      web,
       timeZone: ctx.timeZone || (thread.context && thread.context.timeZone) || null,   // scheduled runs: the user's clock
       memoryProject: headerCtx.project ? { key: headerCtx.project.key, name: headerCtx.project.name || '' } : null,   // native-rules revision: the turn mounts global + this project through --add-dir
       mock: mockEnabled({}) ? { card: mockAskCard(ctx, text) } : null, // R-F
@@ -7272,9 +7302,9 @@ async function startMetricsEventTurn(threadId, block) {
   const state = block.state === 'declined' ? 'declined' : block.state === 'failed' ? 'failed' : 'applied';
   const result = card.result || null;
   // One event turn for every non-workflow card; the type picks the wording. Metrics is the fallback.
-  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' ? card.type : 'metrics';
-  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, metrics: metricsEventPrompt }[kind];
-  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, metrics: metricsNoticeText }[kind];
+  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' ? card.type : 'metrics';
+  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, metrics: metricsEventPrompt }[kind];
+  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, metrics: metricsNoticeText }[kind];
   const text = eventPrompt({ cardId: block.id, state, card, result });
   const notice = noticeText({ state, card, result });
   let mv = await validateModelEffort(thread.model, thread.effort);
@@ -7370,6 +7400,38 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
         let result;
         try { result = await applyModelChange(found.block.card); emitChanged('settings-changed'); }
         catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err) }; }
+        block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
+      } finally { askCardBusy.delete(cardId); }
+      if (!block) return res.status(409).json({ error: 'card vanished' });
+      const turn = await startMetricsEventTurn(id, block);
+      return res.json({ block, turn });
+    }
+    if (found.block.card && found.block.card.type === 'web') {
+      // Web card (docs/guardrails.md "Web access"): proposed → applied | failed | declined. "For this chat" is
+      // recorded on the card itself (chatWebHosts reads it back each turn); "always" adds the exact host to
+      // settings. Re-checked HERE against the chat's current web access: off, or outside the team cap, fails.
+      if (body.state !== 'applied' && body.state !== 'declined') return badRequest(res, 'state must be "applied" or "declined"');
+      if (body.state === 'applied' && body.scope !== 'chat' && body.scope !== 'always') return badRequest(res, 'scope must be "chat" or "always"');
+      if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
+      if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
+      if (body.state === 'declined') {
+        const block = flipCard(id, cardId, { state: 'declined' });
+        if (!block) return res.status(409).json({ error: 'card vanished' });
+        const turn = await startMetricsEventTurn(id, block);
+        return res.json({ block, turn });
+      }
+      askCardBusy.add(cardId);
+      let block;
+      try {
+        let result;
+        try {
+          const host = found.block.card.change?.host;
+          const now = askWebAccessFor(id, askGetThread(id)?.context || {});
+          if (!now.enabled) throw new Error('web access is off for this chat — switch it on in Settings → Ask Worca → Web access');
+          if (Array.isArray(now.teamCap) && !askHostAllowed(host, now.teamCap)) throw new Error(`${host} is outside the team policy's web allowlist`);
+          if (body.scope === 'always') { await addAskWebHost(host); emitChanged('settings-changed'); }
+          result = { ok: true, scope: body.scope };
+        } catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err) }; }
         block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
       } finally { askCardBusy.delete(cardId); }
       if (!block) return res.status(409).json({ error: 'card vanished' });
@@ -9052,7 +9114,7 @@ export { app, server, runs };
 export const _testing = {
   wireRun, wireScan, summarizeRuns, startScan, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
   chatActions, chatRouter, channelHost, handleChatInbound, enqueueChatWork, answerRun,
-  chatNotifier, resumeRun, resolveHljsAssets, resolveEsmAsset, askJobs, askFollowers, askDeleting, resolveAskContext, flipCard,
+  chatNotifier, resumeRun, resolveHljsAssets, resolveEsmAsset, askJobs, askFollowers, askDeleting, resolveAskContext, flipCard, askWebAccessFor,
   startCloneJob, followCloneCard, CLONE_JOBS,
   emitDiffCommentsChanged, emitAskWorktrees, askWorktreesEnvelope, deleteAskThreadFully,
   askTrackRun, liveRunEntry, liveDefragRun, memoryScopeKey, startRunHandler, emitMemoryChanged, askSystemPromptFor,
