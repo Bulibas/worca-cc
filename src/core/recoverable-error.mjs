@@ -15,7 +15,7 @@
 // recoverable and retried. Structured error-code detection is out of scope.
 //
 // @param {Error|string|unknown} err
-// @returns {'auth'|'usage_limit'|'rate_limit'|'quota'|'network'|null}
+// @returns {'auth'|'model'|'usage_limit'|'rate_limit'|'quota'|'network'|null}
 export function classifyError(err) {
   // A producer that saw MORE evidence than the message carries stamps the
   // verdict directly: claude-runner classifies the FULL stderr stream line-by-
@@ -32,6 +32,15 @@ export function classifyError(err) {
   // it, so it pauses like the session limit below instead of retrying as a 429.
   if (FREE_DAILY_RE.test(msg)) return 'usage_limit';
   if (/\b401\b|invalid authentication|authentication_error|please run .*login|not logged in/i.test(msg)) return 'auth';
+  // The model id itself is the problem — refused by the endpoint it was sent to,
+  // or named by a catalog-miss error. The remedy is a different model id, never
+  // a retry. The stderr notice `[claude-code:unrecognized_model]` is deliberately
+  // NOT classified here: the runner treats it as a benign notice
+  // (claude-runner BENIGN_STDERR_PATTERNS) — it fires on every spawn whose id the
+  // CLI does not know, and never states the cause. The phrases are specific
+  // CLI/API wordings so an ordinary message that merely mentions a model stays
+  // unclassified.
+  if (/no access to this model|isn't described by this version's model catalog|model not found/i.test(msg)) return 'model';
   // Session/usage caps that only clear after a multi-hour reset (the CLI prints
   // "You've hit your session limit · resets 6pm"). Distinct from rate_limit (a
   // few-second 429/overloaded burst) because retrying is futile — the orchestrator
@@ -136,7 +145,7 @@ export function brokerHint(err, cls = classifyError(err)) {
 // SAME order as the regex chain above. First-match-wins there equals
 // strongest-class-wins here, because every per-line match (the patterns are
 // unanchored) is also a whole-text match.
-const CLASS_ORDER = ['auth', 'usage_limit', 'rate_limit', 'quota', 'network'];
+const CLASS_ORDER = ['auth', 'model', 'usage_limit', 'rate_limit', 'quota', 'network'];
 
 /** Fold two classification results, keeping the higher-precedence class. */
 export function strongestClass(a, b) {

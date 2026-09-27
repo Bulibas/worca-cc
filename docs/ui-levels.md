@@ -230,6 +230,8 @@ Everything on the page: the list, the runtime step, the workspace and the bench 
 | Ask: a proposal's own schedule (the "Schedule" action and its time), schedule-change cards | S — the answer the user asked for |
 | Ask: a proposal's tracker task (id, title, link) in place of the brief; the "Auto" workflow option when Ask proposed it | S |
 | Ask: "Schedule…" on a plain run proposal | A |
+| Ask: a classified failure's human notice (what happened and where the remedy lives) | all — recovery instructions are never hidden (rule 1); Simple gets no Models-view navigation, the copy names the mode instead |
+| Ask: a classified failure's raw-detail expander ("Details") | E |
 | Ask: proposal cards themselves | all (rule 4) |
 | Ask: model picker, scope, ctx and cost meter, tool rows, branches, guardrails, "Open in New Pipeline" | A |
 | Ask: per-agent lane, worktrees, agents popover, sub-agent logs | E |

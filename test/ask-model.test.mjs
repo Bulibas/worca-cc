@@ -251,6 +251,20 @@ test('ask-model: ask-error keeps the frame code (claude-signed-out)', () => {
   assert.equal(m.messages()[0].errorCode, 'claude-signed-out');
 });
 
+test('ask-model: ask-error blocks land on the row, so the classified notice renders live', () => {
+  const m = createThreadModel({ threadId: TID });
+  const notice = { id: 'blk_00000001', kind: 'notice', text: 'The endpoint was unreachable — check your connection and retry.', errorClass: 'network', detail: 'connection reset' };
+  const bare = [
+    { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
+    { type: 'ask-error', message: 'claude exited with code 1: connection reset', errorClass: 'network', blocks: [notice] },
+  ];
+  for (const f of stampFrames(bare, { threadId: TID, messageId: MID })) m.apply(f);
+  const row = m.messages()[0];
+  assert.equal(row.status, 'error');
+  assert.ok(row.blocks.some((b) => b && b.kind === 'notice' && b.errorClass === 'network'),
+    'the frame blocks reach the row like on ask-done');
+});
+
 test('ask-model: dirty tracking drains once and is per-kind', () => {
   const m = createThreadModel({ threadId: TID });
   const bare = [

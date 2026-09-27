@@ -47,6 +47,27 @@ export function createAskTurn(opts) { return new AskTurn(opts); }
 
 const TERMINAL = new Set(['done', 'stopped', 'error']);
 
+// The classified notice's raw-detail cap — the runner's own reject is already
+// tail-capped tighter than this; the slice(-N) here only bounds the unusual
+// non-runner error paths so a huge message can never bloat the persisted block.
+const ERROR_DETAIL_MAX = 2000;
+
+/** The human line a classified failure carries. The block is persisted and
+ *  shared by every viewer, so the wording is level-neutral: it names where a
+ *  remedy lives (including which interface mode gates it) instead of assuming
+ *  one. Pure, exported for tests. */
+export function humanErrorText(errorClass) {
+  switch (errorClass) {
+    case 'model': return "This model isn't available in your environment — Claude Code couldn't use it. Try another model, or add your custom model in Settings › Models (Expert mode).";
+    case 'auth': return 'Authentication failed — check the credentials behind this model.';
+    case 'usage_limit': return 'A usage limit was reached — wait for it to reset.';
+    case 'rate_limit': return 'The endpoint is rate-limiting — try again shortly.';
+    case 'quota': return 'A quota/billing problem was reported — check the account behind this model.';
+    case 'network': return 'The endpoint was unreachable — check your connection and retry.';
+    default: return null;
+  }
+}
+
 class AskTurn extends EventEmitter {
   constructor({
     threadId, assistantMessageId, userMessageId,
@@ -546,6 +567,28 @@ class AskTurn extends EventEmitter {
     for (const b of this.reducer.snapshot().blocks) {
       if (b && b.kind === 'card' && b.state === 'building') this.reducer.updateBlock(b.id, { state: 'failed', error: 'the reply ended before the proposal was ready' });
     }
+    // A classified failure tells the user what happened and what to do, as a
+    // notice block: it rides the terminal write below (like _limitNotice's
+    // notice), so the human line survives a reload, and the extra fields
+    // (errorClass, detail) let the chat render its recovery affordance. The
+    // wording is level-neutral — the block is shared by every viewer — and
+    // an UNCLASSIFIED error adds nothing: the raw message stays the only
+    // evidence, exactly as before.
+    if (kind === 'error' && errorClass) {
+      // The detail carries the full evidence: the runner's exit verdict, plus
+      // the CLI's own refusal line when it spoke synthetically (it is often
+      // the clearest statement of the cause). Skipped when the runner message
+      // already contains it — an empty stderr makes the runner echo it verbatim.
+      const cli = this.reducer.snapshot().cliErrorText;
+      const extra = cli && message && !String(message).includes(cli) ? cli : null;
+      const detail = [message, extra].filter((s) => s && String(s).trim()).join('\n');
+      this.reducer.addBlock({
+        kind: 'notice',
+        text: humanErrorText(errorClass),
+        errorClass,
+        detail: detail ? String(detail).slice(-ERROR_DETAIL_MAX) : null,
+      });
+    }
     const summary = this.reducer.finish();
     const finalStatus = kind === 'error' ? 'error' : status;
     // Already AUTHORITATIVE: the reducer applied this turn's per-model cost
@@ -594,8 +637,11 @@ class AskTurn extends EventEmitter {
       // out, the CLI may not even say so (`unrecognized_model` on a first-party id),
       // so claude-auth asks `claude auth status` instead of trusting the text.
       const signedOut = await d.failedBecauseSignedOut({ message, model: this.model }).catch(() => false);
+      // The persisted blocks ride along, mirroring ask-done: the live client
+      // must render the same classified notice a reload re-derives — an
+      // ask-error frame without them shows the raw message until refresh.
       this._frame({
-        type: 'ask-error', message: message || 'unknown error',
+        type: 'ask-error', message: message || 'unknown error', blocks: summary.blocks,
         ...(errorClass !== undefined ? { errorClass } : {}),
         ...(signedOut ? { code: CLAUDE_SIGNED_OUT_CODE } : {}),
       });

@@ -188,6 +188,9 @@ export function createThreadModel({ threadId }) {
         break;
       case 'ask-error':
         row.text = live.text;
+        // The terminal blocks ride the frame (as on ask-done): the classified
+        // notice arrives live, so the chat renders it without waiting for a reload.
+        if (Array.isArray(frame.blocks)) row.blocks = frame.blocks;
         row.status = 'error';
         row.errorMessage = frame.message || 'unknown error';
         row.errorCode = frame.code || null;
