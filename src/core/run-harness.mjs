@@ -66,7 +66,8 @@ import {
   isValidSourceRef, snapshotWorktreePatch,
 } from './worktree.mjs';
 import { readPluginsLock, pluginCurrentDir } from './plugins-lock.mjs'; // §9.4 disabled-plugin hint
-import { classifyError, rateLimitHint, brokerHint } from './recoverable-error.mjs';
+import { classifyError, rateLimitHint, brokerHint, freeDailyHint } from './recoverable-error.mjs';
+import { cachedFreeDailyCounts } from './openrouter-free.mjs';
 import { withBillTo, currentBillTo } from './billing.mjs';
 import { brokerEnabled, brokerInfo, personSlots } from './broker-client.mjs';
 import { mockEnabled } from './claude-runner.mjs';
@@ -996,8 +997,11 @@ export class RunHarness extends EventEmitter {
     // A credential-broker refusal (a missing key, a spent cap) says where to fix it.
     const hint = reason !== REASON.RECOVERABLE ? ''
       : cls === 'rate_limit' ? rateLimitHint(err) : brokerHint(err, cls);
+    // OpenRouter's spent daily free requests: say what ran out and when it comes back,
+    // not the raw 429 line (freeDailyHint is '' for any other usage limit).
+    const freeDaily = reason === REASON.USAGE_LIMIT ? freeDailyHint(err, cachedFreeDailyCounts(currentBillTo())) : '';
     const text = detail ?? (reason === REASON.ERROR ? errorDetail(err)
-      : reason === REASON.RECOVERABLE ? `${cls || 'recoverable'}: ${line}${hint ? ` — ${hint}` : ''}` : line);
+      : reason === REASON.RECOVERABLE ? `${cls || 'recoverable'}: ${line}${hint ? ` — ${hint}` : ''}` : (freeDaily || line));
     if (reason === REASON.ERROR) {
       // The ONE error-level line, written BEFORE the pause sentinel the caller
       // throws next (a pause/abort is never logged as a failure).
@@ -4482,6 +4486,8 @@ export class RunHarness extends EventEmitter {
     if (!step) return;
     step.bridgeCalls = (step.bridgeCalls || 0) + calls.initiated;
     step.bridgeContinued = (step.bridgeContinued || 0) + calls.continued;
+    // OpenRouter `:free` calls (continuations too): what the step spent of the day's allowance.
+    if (calls.free) step.bridgeFreeCalls = (step.bridgeFreeCalls || 0) + calls.free;
     this.state.updatedAt = new Date().toISOString();
     this._emit('state', this.getState());
     this._persist().catch(() => {});

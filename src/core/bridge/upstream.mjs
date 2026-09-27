@@ -17,6 +17,7 @@ import { routeBridgedUpstream } from '../broker-routing.mjs';
 import { KeyedSemaphore } from './semaphore.mjs';
 import { recordBridgeCall, recordBridgeError, recordBridgeCost } from './telemetry.mjs';
 import { isOpenRouter, adaptOpenRouterChatBody, OPENROUTER_HEADERS } from './openrouter.mjs';
+import { isOpenRouterFree, keyAccount } from '../openrouter-free.mjs';
 import { unsupportedSchemaKeyword, withToolSchemaKeywordsDropped, refusedToolName, withoutTools } from './translate/schema-keywords.mjs';
 
 export const semaphore = new KeyedSemaphore();
@@ -147,6 +148,11 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
     }
   }
 
+  // An OpenRouter `:free` model: every call spends one of the day's free requests of the
+  // key it goes out with (openrouter-free.mjs). Through the broker that key is unknown here.
+  const free = isOpenRouterFree(us);
+  const account = free && !us.brokerToken ? keyAccount(us.apiKey) : null;
+
   // Body → upstream body.
   let outBody;
   if (us.api === 'anthropic') {
@@ -198,7 +204,7 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
       recordBridgeError({ tag, catalogId: entry.id, provider: us.provider, status: e.status, message: e.body.error.message });
       return reply.json(e.status, e.body);
     }
-    recordBridgeCall({ tag, catalogId: entry.id, provider: us.provider, api: us.api, initiator: prep.initiator });
+    recordBridgeCall({ tag, catalogId: entry.id, provider: us.provider, api: us.api, initiator: prep.initiator, free, account });
 
     const doFetch = (p) => f(p.url, { method: 'POST', headers: p.headers, body: payload, signal });
     let res;
@@ -240,7 +246,7 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       const e = mapUpstreamError(res.status, text, { provider: us.provider, retryAfter: res.headers.get('retry-after') });
-      recordBridgeError({ tag, catalogId: entry.id, provider: us.provider, status: res.status, message: e.body.error.message });
+      recordBridgeError({ tag, catalogId: entry.id, provider: us.provider, status: res.status, message: e.body.error.message, account });
       if (log) log(`[worca] bridge: ${us.provider} answered ${res.status} for ${JSON.stringify(entry.id)}: ${e.body.error.message}`);
       return reply.json(e.status, e.body, e.headers);
     }

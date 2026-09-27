@@ -110,6 +110,7 @@ import {
 import { renderChatSettings, collectChatSettings, renderScriptToolsToggle, collectScriptToolsToggle } from './chat-settings-view.mjs';
 import { renderCredentials } from './credentials-view.mjs';
 import { loadCredentials, credentialSuffix } from './credential-badges.mjs';
+import { renderFreeDaily, freeRequestsSuffix, typicalFreeRun, newRunFreeWarning, providerFreeLine } from './openrouter-free-view.mjs';
 import { PORT_ID_RE, MAX_PORTS_PER_SIDE, PORT_TYPES, FLOW_LABEL, KEYED_KINDS } from '../../src/shared/graph/constants.mjs';
 import { FORM_ID_RE, validateFormDef, normalizeAskBlock } from '../../src/shared/forms/form-def.mjs';
 import { ASK_LIMITS } from '../../src/shared/forms/catalog.mjs';
@@ -605,6 +606,7 @@ function setSidebarCollapsed(v) {
   updateNavCounts();             // Running's title/aria-label (both states)
   renderPipelineTabs();          // child rows <-> initials tiles (phase 3)
   paintBudget();                 // spend block <-> budget ring (phase 4)
+  paintFreeDaily();              // the free-request line shows only in the full rail
 }
 
 $('#side-toggle')?.addEventListener('click', () => setSidebarCollapsed(!sidebarCollapsed));
@@ -677,7 +679,63 @@ let startSubmitInFlight = false;
 // budgetState.budget until a reload. Record the request instead and run one
 // trailing fetch per in-flight window — any number of requests made during a
 // fetch collapse into that single trailing fetch.
+// ── OpenRouter free-model requests (openrouter-free-view.mjs) ────────────────
+// Refreshed with the budget (every spend-moving event and its tick), at most every 20s:
+// the server keeps its own reading of OpenRouter and lowers it per :free call.
+const freeDailyState = { status: null, lastFetchMs: 0, fetching: false };
+
+async function refreshFreeDaily({ force = false } = {}) {
+  if (freeDailyState.fetching || (!force && Date.now() - freeDailyState.lastFetchMs < 20_000)) return;
+  freeDailyState.fetching = true;
+  freeDailyState.lastFetchMs = Date.now();
+  try {
+    const res = await fetch(`/api/openrouter/free-daily${force ? '?refresh=1' : ''}`);
+    if (res.ok) freeDailyState.status = await safeJson(res);
+  } catch { /* transient: keep the last one */ } finally { freeDailyState.fetching = false; }
+  paintFreeDaily();
+}
+
+/** The free-request line rides the spend mount, under the spend block (full rail only). */
+function paintFreeDaily() {
+  const mount = document.getElementById('side-spend');
+  if (!mount) return;
+  mount.querySelector('.free-ind')?.remove();
+  const node = sidebarCollapsed ? null : renderFreeDaily(freeDailyState.status);
+  if (node) mount.appendChild(node);
+  applyFreeDailyToNewView();
+  if (currentView() === 'settings' && currentSettingsTab === 'providers') paintProviderFreeDaily();
+}
+
+/** The new-run form: warn when a node's model is :free and fewer requests are left than a run takes. */
+function applyFreeDailyToNewView() {
+  const note = document.getElementById('newFreeNote');
+  if (!note) return;
+  const s = freeDailyState.status;
+  const free = new Set((s && Array.isArray(s.models) ? s.models : []).map((m) => String(m).toLowerCase()));
+  const usesFree = Object.values(agentRowsById || {}).some((r) => r && r.model && free.has(String(r.model).toLowerCase()));
+  const msg = newRunFreeWarning(s, { typical: typicalFreeRun(recentRunsForFree()), usesFree });
+  note.hidden = !msg;
+  note.textContent = msg || '';
+}
+
+/** The runs this page holds, newest first, for the typical-run figure. */
+function recentRunsForFree() {
+  return [...runs.values()].sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || '')));
+}
+
+/** The Providers card: the allowance under the OpenAI-compatible row, without pressing Test. */
+function paintProviderFreeDaily() {
+  const line = providerFreeLine(freeDailyState.status);
+  const root = providerRoot();
+  const row = root && root.querySelector('.mv-pv-row[data-provider="openai"] .mv-pv-msg');
+  if (!row || !line || (row.textContent && !row.dataset.freeDaily)) return;
+  row.textContent = line;
+  row.dataset.freeDaily = '1';
+  row.className = 'hint mv-pv-msg';
+}
+
 async function refreshBudget() {
+  refreshFreeDaily();
   if (budgetState.fetching) { budgetState.pending = true; return; }
   budgetState.fetching = true;
   try {
@@ -705,6 +763,7 @@ function paintBudget() {
     const render = sidebarCollapsed ? renderBudgetRing : renderBudgetIndicator;
     mount.replaceChildren(render(b,
       { fmt: { usd: fmtUsd, usd4: fmtUsd4, duration: fmtDuration, estTitle } }));
+    paintFreeDaily();   // the free-request line sits under the block this just replaced
   }
   if (topAmt) {
     topAmt.hidden = false;
@@ -860,7 +919,9 @@ function repaintPeople() {
 // <nav> that navLinks snapshots at boot — so route it from a container listener
 // rather than the [data-nav] delegation.
 document.getElementById('side-spend').addEventListener('click', (e) => {
-  if (e.target.closest('.spend-ind')) location.hash = 'stats';
+  // The OpenRouter free-request line (same mount) opens the Providers tab, where its key lives.
+  if (e.target.closest('.free-ind')) location.hash = 'settings/providers';
+  else if (e.target.closest('.spend-ind')) location.hash = 'stats';
 });
 
 // ---------------------------------------------------------------------------
@@ -3355,6 +3416,7 @@ function renderAgentRows(rows) {
     if (row.pinned) lockPinnedPair(modelSel, effortSel);
     host.appendChild(card);
   });
+  applyFreeDailyToNewView();   // a :free model among the rows may need the allowance warning
 }
 
 // Fill a sub-agent model dropdown. '' is "unset" — the run resolves it to the
@@ -12671,6 +12733,8 @@ function setProvidersMsg(text, kind) {
 function renderProvidersViewBody() {
   if (!el.providersList) return;
   el.providersList.replaceChildren(renderProvidersCard(mvState.providers, { signIn: mvState.signIn, split: true }));
+  // OpenRouter's free-model allowance, read afresh each time the card opens.
+  refreshFreeDaily({ force: true });
 }
 
 /** A page-level message, on whichever of the two tabs is showing. */
@@ -19866,6 +19930,8 @@ function rdStateCopy(r, stepName) {
     return `Paused on a recoverable error${why}. Once it clears, Resume retries the step — the worktree and progress are kept.`;
   }
   if (r.pauseReason === 'usage_limit') {
+    // OpenRouter's daily free requests: the detail already says when they come back and what to do.
+    if (/^OpenRouter's free-model requests/.test(r.pauseDetail || '')) return `Paused — ${r.pauseDetail}.`;
     return `Paused — session/usage limit reached${r.pauseDetail ? ` (${r.pauseDetail})` : ''}. Resume after the reset.`;
   }
   if (r.pauseReason && (r.status === 'paused' || r.status === 'pausing' || r.status === 'interrupted')) {
@@ -22539,7 +22605,7 @@ function paintRdHeader(screen, r) {
     // Model bridge (model-bridge-design.md §8.6): a run that went through the
     // bridge shows its request count beside the dollars, so a "$0" reads as a
     // unit mismatch (Copilot bills requests), not as free.
-    ['rd-cost', fmtUsd(r.totalCostUsd || 0) + bridgeRequestsSuffix(r.steps), true],
+    ['rd-cost', fmtUsd(r.totalCostUsd || 0) + (freeRequestsSuffix(r.steps) || bridgeRequestsSuffix(r.steps)), true],
     ['rd-step', stepText, false],
   ];
   segs.forEach(([cls, txt, strong]) => {
@@ -22548,7 +22614,8 @@ function paintRdHeader(screen, r) {
     const seg = document.createElement('span');
     seg.className = cls + (strong ? ' strong' : '');
     seg.textContent = txt;
-    if (cls === 'rd-cost') seg.title = estTitle(r.totalCostUsd || 0) + (bridgeRequestsSuffix(r.steps) ? ' Requests: calls this run initiated through the model bridge (Copilot bills premium requests, not tokens); tool-loop continuations are not counted.' : '');
+    if (cls === 'rd-cost' && freeRequestsSuffix(r.steps)) seg.title = estTitle(r.totalCostUsd || 0) + ' Free requests: calls this run made to OpenRouter :free models (every call, tool-loop continuations too), out of the day\'s free allowance.';
+    else if (cls === 'rd-cost') seg.title = estTitle(r.totalCostUsd || 0) + (bridgeRequestsSuffix(r.steps) ? ' Requests: calls this run initiated through the model bridge (Copilot bills premium requests, not tokens); tool-loop continuations are not counted.' : '');
     meta.appendChild(seg);
   });
 

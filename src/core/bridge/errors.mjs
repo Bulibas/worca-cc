@@ -60,9 +60,14 @@ function routerMetadata(text) {
   try {
     const m = JSON.parse(text)?.error?.metadata;
     if (!m || typeof m !== 'object') return {};
+    // A rate limit's own headers ride the body too: X-RateLimit-Reset is when it lifts (ms).
+    const h = m.headers && typeof m.headers === 'object' ? m.headers : {};
+    const resetRaw = Object.entries(h).find(([k]) => k.toLowerCase() === 'x-ratelimit-reset')?.[1];
+    const reset = Number(resetRaw);
     return {
       providerName: typeof m.provider_name === 'string' ? m.provider_name : '',
       limitSource: typeof m.limit_source === 'string' ? m.limit_source : '',
+      resetAt: Number.isFinite(reset) && reset > 1e12 ? new Date(reset).toISOString() : '',
     };
   } catch { return {}; }
 }
@@ -150,10 +155,12 @@ export function mapUpstreamError(status, text, { provider = 'upstream', retryAft
     // (OpenRouter's `:free` models), not from this install's traffic: name the
     // provider behind it and the limit's source, so the run surfaces can say
     // that lowering Max concurrent requests will not help.
-    const { providerName, limitSource } = routerMetadata(text);
+    const { providerName, limitSource, resetAt } = routerMetadata(text);
     const via = providerName ? ` via ${providerName}` : '';
     const source = limitSource ? ` [${limitSource}]` : '';
-    const e = anthropicError(429, 'rate_limit_error', `${who}: rate limited (429)${via}${msg ? ` — ${msg}` : ''}${source}`);
+    // When the limit lifts, if the router said: a daily allowance pauses the run until then.
+    const reset = resetAt ? ` resets ${resetAt}` : '';
+    const e = anthropicError(429, 'rate_limit_error', `${who}: rate limited (429)${via}${msg ? ` — ${msg}` : ''}${source}${reset}`);
     if (retryAfter) e.headers = { 'retry-after': String(retryAfter) };
     return e;
   }

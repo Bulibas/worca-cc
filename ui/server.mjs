@@ -125,6 +125,7 @@ import { withBillTo, currentBillTo, currentOwner } from '../src/core/billing.mjs
 import { agentIdentity } from '../src/core/agent-user.mjs';
 import { createAskToolServer } from '../src/core/ask/mcp-stdio.mjs';
 import { brokerEnabled, brokerInfo, personSlots, brokerUsageSummary, foldUsageByPerson } from '../src/core/broker-client.mjs';
+import { freeDailyStatus } from '../src/core/openrouter-free.mjs';
 import { checkBrokerAtBoot } from '../src/core/broker-boot.mjs';
 import { modelSlot, missingCredentials, describeMissing } from '../src/core/broker-routing.mjs';
 import { planClone, cloneProject, CloneError } from '../src/core/clone-project.mjs';
@@ -5033,6 +5034,17 @@ app.get('/api/whoami', (req, res) => {
 // The signed-in person's model credentials, as the credential broker sees them
 // (docs/credential-broker.md). Status only: which slots have a key, never a key.
 // { enabled:false } with the broker off.
+// OpenRouter's daily allowance of `:free` requests (src/core/openrouter-free.mjs), for the
+// signed-in person with the credential broker, else for the install's key. The sidebar line,
+// the new-run warning and the Providers card read it; ?refresh=1 asks OpenRouter now.
+app.get('/api/openrouter/free-daily', async (req, res) => {
+  try {
+    res.json(await freeDailyStatus({ person: currentBillTo(), force: req.query.refresh === '1' }));
+  } catch (err) {
+    res.status(500).json({ enabled: false, error: err && err.message ? err.message : String(err) });
+  }
+});
+
 app.get('/api/credentials', async (req, res) => {
   if (!brokerEnabled()) return res.json({ enabled: false });
   try {

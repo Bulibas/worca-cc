@@ -2609,6 +2609,8 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
    fill (--line), under verify:theme's 4.5:1. A loss keeps neutral ink (--red-ink is
    4.07:1 there); its "−" carries it. */
 .spend-ind-saved{margin-top:6px;}
+/* OpenRouter free-model requests (openrouter-free-view.mjs): a second block under the spend block. */
+.free-ind{margin-top:8px;}
 .spend-ind-saved.pos .spend-ind-label,.spend-ind-saved.pos .spend-ind-amt{color:var(--green-ink-strong);}
 .topnav-amt{margin-left:7px;font-family:var(--mono);font-weight:600;}
 .topnav-amt.warn{color:var(--amber-ink);}

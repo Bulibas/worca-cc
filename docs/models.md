@@ -231,6 +231,30 @@ failing the run. Settings › General picks the model for each helper call — *
 *Auto workflow model* (`WORCA_AUTO_MODEL` overrides the latter) — so pointing both at
 a steadier model leaves a flaky free model touching only the pipeline steps.
 
+**The daily allowance.** Separately, OpenRouter caps how many `:free` requests a key
+sends per day: **1000** on an account that has bought at least $10 of credit, **50**
+below, reset at 00:00 UTC. Every model call is one request — each agent turn, each
+tool round trip, each helper call and each retry — so a small pipeline run takes about
+90 and a real feature run with review rounds several hundred. Worca shows what is left:
+
+| Where | Shows |
+| --- | --- |
+| Sidebar, under the spend block | *OpenRouter free today 941 / 1000*; amber below 10%, red at 0, the reset on hover. Only with a `:free` model in the catalog |
+| A run's cost pill | *$0 · 87 free requests* for a run that used `:free` models |
+| New pipeline form | a warning when a node's model is `:free` and fewer requests are left than this install's typical run (the median of its recent runs; 90 before it has any) |
+| Settings › Providers | the allowance under the OpenAI-compatible card, read when the tab opens |
+
+The count is OpenRouter's own (`GET /api/v1/key`, `free_model_daily_requests`), read
+every 5 minutes; between readings every `:free` call through the bridge lowers it. With
+the [credential broker](credential-broker.md) each person has their own key and
+allowance, read through the broker every minute. When the allowance runs out, the 429
+(`free-models-per-day…`, `limit_source: openrouter_free_tier_daily`) is a **usage
+limit**, not a rate limit: the run pauses at once — no retries, no recovery prompt,
+and an Auto run whose classifier hit it pauses instead of falling back to a default
+workflow that would hit it too — saying when the allowance comes back: *"OpenRouter's
+free-model requests for today are used up (1000 / 1000) — they reset at 00:00 UTC, in
+3h 12m. Resume after the reset, or switch this step to a paid model."*
+
 **Routing and fallbacks.** An OpenRouter model's *Connection › Advanced* takes
 fallback models — tried in order when the first is rate-limited or down (e.g.
 `qwen/qwen3.8-27b:free` falling back to `qwen/qwen3.8-27b`) — and OpenRouter's
@@ -368,6 +392,10 @@ click Apply.
   tokens can be revoked on GitHub's side.
 - **OpenRouter 429 on a `:free` model** — OpenRouter's shared free pool is busy,
   not your concurrency cap; see [OpenRouter](#openrouter).
+- **"OpenRouter's free-model requests for today are used up"** — the key's daily
+  allowance (1000, or 50 below $10 of credit bought) is spent; the run paused and
+  resumes after 00:00 UTC, or switch the step to a paid model. See
+  [OpenRouter › The daily allowance](#openrouter).
 - **`[claude-code:unrecognized_model]` in a bridged run's log** — harmless: the
   CLI prints it for every model id it does not know, which is every bridged id.
   Worca never reports it as a failure's cause; the real error follows it.

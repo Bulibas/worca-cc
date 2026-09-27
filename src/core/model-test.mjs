@@ -8,7 +8,7 @@
 import { runClaude } from './claude-runner.mjs';
 import { resolveModelEnv } from './config.mjs';
 import { AUX_EFFORT } from './model-env.mjs';
-import { classifyError } from './recoverable-error.mjs';
+import { classifyError, isFreeDailyLimit, freeDailyHint } from './recoverable-error.mjs';
 import { failedBecauseSignedOut } from './claude-auth.mjs';
 import { bridgeEvents } from './bridge/telemetry.mjs';
 
@@ -118,6 +118,7 @@ export async function testModel(id, { signal, bin, run = runClaude, signedOut = 
     const hint = err && err.bridgeReason ? bridgeHintFor(err.bridgeReason, err.bridgeProvider)
       : bridgeFailure && bridgeFailure.message && errorClass === 'network' ? ''
       : cliSignedOut ? CLAUDE_SIGNED_OUT_HINT
+      : isFreeDailyLimit(message) ? freeDailyHint(message)
       : hintFor(errorClass);
     return { ok: false, errorClass, message, ...(hint ? { hint } : {}) };
   } finally {

@@ -103,13 +103,15 @@ export const FAILURE_POLICY = Object.freeze({
   }),
   // run()'s setup — checkout, graph build, skills gate — failed with the pipeline
   // row already created. A pause here stamps `setupIncomplete`; resume replays it.
-  setup: Object.freeze({ '*': both(pause(REASON.ERROR)) }),
+  // A usage limit (OpenRouter's daily free requests spent by the Auto classifier, say)
+  // is not a setup bug: it pauses as a usage limit, resumable after the reset.
+  setup: Object.freeze({ usage_limit: both(pause(REASON.USAGE_LIMIT)), '*': both(pause(REASON.ERROR)) }),
   // Before the pipeline row exists (topology, preflight, tool detection) there is
   // nothing to resume into: a launch error is the only enactable verdict.
   launch: Object.freeze({ '*': both(error()) }),
   // Anything that escaped the engine after setup (a scheduler throw, a persist
   // failure, a bookkeeping bug).
-  shell: Object.freeze({ '*': both(pause(REASON.ERROR)) }),
+  shell: Object.freeze({ usage_limit: both(pause(REASON.USAGE_LIMIT)), '*': both(pause(REASON.ERROR)) }),
   // resume() could not REHYDRATE the paused run — the checkout is gone, run.json
   // is corrupt, a guardrail set or agent prompt no longer loads. The point on disk
   // is already the best the run can offer: parking it again would re-persist the

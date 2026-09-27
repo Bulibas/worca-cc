@@ -155,7 +155,7 @@ test('openai-responses streaming: the upstream gets a Responses body (reasoning 
   assert.deepEqual(ev[5].data.content_block, { type: 'tool_use', id: 'call_1', name: 'Read', input: {} });
   assert.equal(ev[8].data.delta.stop_reason, 'tool_use');
   assert.deepEqual(ev[8].data.usage, { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 2, cache_creation_input_tokens: 0 });
-  assert.deepEqual(bridgeCallsFor('exec-r'), { initiated: 0, continued: 1, errors: 0 });
+  assert.deepEqual(bridgeCallsFor('exec-r'), { initiated: 0, continued: 1, errors: 0, free: 0 });
 });
 
 test('openai-responses non-streaming → a Messages JSON object; max_output_tokens floored at 16', async () => {

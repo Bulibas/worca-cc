@@ -28,6 +28,9 @@ export function classifyError(err) {
   // bill) arrive as a 403 the CLI prints as "Failed to authenticate. API Error: 403
   // worca-broker: …" — no 401, no authentication_error left in the text. Same class.
   if (BROKER_AUTH_RE.test(msg)) return 'auth';
+  // OpenRouter's daily allowance of `:free` requests is spent: only its daily reset clears
+  // it, so it pauses like the session limit below instead of retrying as a 429.
+  if (FREE_DAILY_RE.test(msg)) return 'usage_limit';
   if (/\b401\b|invalid authentication|authentication_error|please run .*login|not logged in/i.test(msg)) return 'auth';
   // Session/usage caps that only clear after a multi-hour reset (the CLI prints
   // "You've hit your session limit · resets 6pm"). Distinct from rate_limit (a
@@ -60,6 +63,50 @@ export function rateLimitHint(err) {
   return "the provider's shared free pool is saturated — every user of this free model shares it, " +
     "so this is not worca's max-concurrent setting. Use the paid variant, add your own provider key " +
     '(BYOK) on the provider, or give the model a fallback model list';
+}
+
+// OpenRouter's daily allowance for `:free` models (1000 requests a day on an account that
+// bought $10 of credit, 50 below): its 429 names the limit ("Rate limit exceeded:
+// free-models-per-day-high-balance", limit_source openrouter_free_tier_daily) and clears
+// only at the daily reset, 00:00 UTC. The bridge adds "resets <ISO>" when OpenRouter says.
+const FREE_DAILY_RE = /openrouter_free_tier_daily|free-models-per-day/i;
+const FREE_DAILY_RESET_RE = /resets (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/;
+
+/** Whether an error is OpenRouter's spent daily allowance of free-model requests. */
+export function isFreeDailyLimit(err) {
+  const msg = String((err && typeof err === 'object' ? err.message : err) ?? '');
+  return FREE_DAILY_RE.test(msg);
+}
+
+/** When the free-model allowance comes back (ms): the reset the error names, else the next 00:00 UTC. */
+export function freeDailyResetAt(err, now = Date.now()) {
+  const msg = String((err && typeof err === 'object' ? err.message : err) ?? '');
+  const m = FREE_DAILY_RESET_RE.exec(msg);
+  const named = m ? Date.parse(m[1]) : NaN;
+  if (Number.isFinite(named) && named > now) return named;
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+}
+
+/** "3h 12m" / "12m" / "under a minute". Pure. */
+export function untilText(ms) {
+  const min = Math.floor(Math.max(0, ms) / 60_000);
+  if (min < 1) return 'under a minute';
+  const h = Math.floor(min / 60);
+  return h ? `${h}h ${min % 60}m` : `${min}m`;
+}
+
+/**
+ * The pause text for a spent free-model allowance ('' for any other error): what ran out,
+ * when it comes back, and the two ways on. `used`/`limit` when a key reading has them.
+ */
+export function freeDailyHint(err, { now = Date.now(), used = null, limit = null } = {}) {
+  if (!isFreeDailyLimit(err)) return '';
+  const at = freeDailyResetAt(err, now);
+  const hhmm = new Date(at).toISOString().slice(11, 16);
+  const count = Number.isFinite(limit) && limit > 0 ? ` (${Number.isFinite(used) ? used : limit} / ${limit})` : '';
+  return `OpenRouter's free-model requests for today are used up${count} — they reset at ${hhmm} UTC, in ${untilText(at - now)}. ` +
+    'Resume after the reset, or switch this step to a paid model';
 }
 
 // The credential broker (src/broker/) answers in the provider's own error envelope
