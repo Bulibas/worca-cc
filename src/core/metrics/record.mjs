@@ -158,6 +158,7 @@ const strList = (arr) => unique(Array.isArray(arr) ? arr.filter((x) => typeof x 
  */
 function buildPolicy(p, attribution) {
   if (!p || typeof p !== 'object' || !p.home) return null;
+  const n = p.night && typeof p.night === 'object' ? p.night : null;
   return {
     home: cleanText(p.home, 120),
     sha: typeof p.sha === 'string' && /^[0-9a-f]{7,40}$/i.test(p.sha) ? p.sha.slice(0, 7).toLowerCase() : null,
@@ -165,6 +166,8 @@ function buildPolicy(p, attribution) {
     exceeded: strList(p.exceeded),
     deviations: strList(p.deviations),
     unattended: p.unattended === true,
+    // Night mode (additive: only on a run night mode decided anything in).
+    ...(n ? { night: { decisions: Math.max(0, Number(n.decisions) || 0), flagged: Math.max(0, Number(n.flagged) || 0) } } : {}),
     reason: attribution === 'none' ? null : cleanText(redactPaths(p.reason)),
   };
 }
@@ -383,7 +386,8 @@ export async function snapshotFromHarness(harness, { status, error = null } = {}
     // The run's policy state (pipelines.policy_state) as the gates and the resume flow left it;
     // `unattended` is the harness's own auto flag, which the record needs even when nothing else
     // was written (a --yes run that stayed under every cap still carries no state row).
-    policy: (() => { const p = readPolicyState(runId); return p.home ? { ...p, unattended: p.unattended === true || !!harness.auto } : null; })(),
+    // …and a run night mode decided anything in was unattended too.
+    policy: (() => { const p = readPolicyState(runId); return p.home ? { ...p, unattended: p.unattended === true || !!harness.auto || harness.state?.night?.decisions > 0 } : null; })(),
   };
 }
 

@@ -59,7 +59,11 @@ import {
   memoryDefragModel, setMemoryDefragModel, assertMemoryDefragModelInput,
   workspaceScanModels, setWorkspaceScanModels, assertWorkspaceScanInput,
   scheduleDefaults, setScheduleDefaults,
+  nightModeSettings, setNightMode, nightModeToggle, setNightModeToggle, assertNightModeToggleInput,
 } from '../src/core/settings.mjs';
+import { resolveNightConfig, validateNightPatch } from '../src/core/night/config.mjs';
+import { effectiveNightConfig } from '../src/core/night/effective.mjs';
+import { readNightDecisions } from '../src/core/night/store.mjs';
 import { resolveDefragModel, defragDefaultModel, defragWorkflowView, checkStartPair } from '../src/core/memory-defrag-model.mjs';
 import { describeTitleModel } from '../src/core/title.mjs';
 import { effectiveHumanRateUsd } from '../src/core/human-rate.mjs';
@@ -144,6 +148,7 @@ import {
   readRunConfig, setNodeModel, setFeedbackCycles, setWireCycles, setActiveWorkflow, setHumanInLoop, resetWorkflowConfig,
   globalModelRefs, removeGlobalModelAndRefs, promoteCustomModel, costUnreliableModelIds,
   readPrRemotePrefs, setPrRemotePrefs, modelHasBaseUrlRouting,
+  readNightModePrefs, writeNightModePrefs,
 } from '../src/core/config.mjs';
 import { listGlobalModels, addGlobalModel, updateGlobalModel } from '../src/core/settings.mjs';
 import { modelEnvRef, maskModelEnvValue, SUBAGENT_MODEL_VALUES, subagentModelIssue, UPSTREAM_PROVIDERS } from '../src/core/model-env.mjs';
@@ -443,7 +448,7 @@ function liveRunIds() {
 // engine AND for the v2 shim until the graph cut-over retires it.
 // `artifact-gone` is this branch's: an indexed artifact whose file the run later
 // removed, so the client can drop the row instead of leaving one that 404s.
-const EVENT_NAMES = ['exec', 'token', 'log', 'question', 'artifact', 'artifact-gone', 'state', 'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title'];
+const EVENT_NAMES = ['exec', 'token', 'log', 'question', 'artifact', 'artifact-gone', 'state', 'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title', 'night-decision'];
 // The agentgen-* WS family (Agent Platform, Phase 2): a NEW family in the SAME
 // runs Map. createAgentGen emits many agentgen-progress then exactly one terminal
 // agentgen-done OR agentgen-error. (The scan-* family is gone: dev made a
@@ -803,6 +808,8 @@ function summarizeRuns() {
     // Who last stopped / paused / resumed it ({ kind, by, at }), or null.
     lastAction: r.lastAction || r.orch?.state?.lastAction || null,
     pendingQuestion: r.pendingQuestion || null,
+    // Night mode switches + counters ({optIn, override, decisions, flagged}), so a reconnect paints the run-view switch.
+    night: r.orch?.state?.night || null,
     // kind discriminator so the client routes runs vs agent generations vs
     // workspace runs without guessing; genId/workspaceId are the matching
     // attribution fields.
@@ -876,6 +883,13 @@ function wireRun(entry) {
 
       if (name === 'question') {
         entry.pendingQuestion = event;
+      }
+      if (name === 'night-decision') {
+        (entry.nightDecisions ||= []).push(payload.record);
+        // The harness emits night-decision only AFTER answer() accepted the payload, so the
+        // card can go. A guardrail row answered nothing: its pause's `done` frame clears the
+        // card, and a refused pause leaves the question open for the user.
+        if (!payload.record?.guardrail) resolvePending(entry, { id: payload.id, reason: 'night-mode' });
       }
       if (name === 'done') {
         entry.status = (payload && payload.status) || 'done';
@@ -1735,6 +1749,10 @@ const startRunHandler = async (req, res) => {
     // Human in the loop (spec D15): the body wins, else the project's stored
     // switch, else on. Resolved per target below (it needs the project dir).
     const bodyHumanInLoop = typeof body.humanInLoop === 'boolean' ? body.humanInLoop : null;
+    // Night mode per-run opt-in (src/core/night/*). A scheduled ticket keeps the whole request
+    // body, so the flag survives the wait.
+    if (body.nightMode !== undefined && typeof body.nightMode !== 'boolean') return badRequest(res, 'nightMode must be true or false');
+    const nightMode = body.nightMode === true;
 
     // Optional guardrailsId selects the named guardrail set that IS this run's
     // policy (applied uniformly to every member — guardrails are per-run only).
@@ -1864,6 +1882,7 @@ const startRunHandler = async (req, res) => {
         claude: { permissionMode: stored.permissionMode || 'acceptEdits', ...(stored.model ? { model: stored.model } : {}), mock },
         // A CLI-made ticket may carry `--yes`: the explicit non-interactive choice survives the wait.
         ...(stored.auto ? { auto: true } : {}),
+        ...(nightMode ? { nightMode: true } : {}),
       });
 
       entry = {
@@ -1953,6 +1972,7 @@ const startRunHandler = async (req, res) => {
         },
         // A CLI-made ticket may carry `--yes`: the explicit non-interactive choice survives the wait.
         ...(stored.auto ? { auto: true } : {}),
+        ...(nightMode ? { nightMode: true } : {}),
       });
 
       entry = {
@@ -2847,6 +2867,35 @@ app.post('/api/stop', (req, res) => {
 // in-flight node children, persists a resume point, and lands on status 'paused'
 // (announced via the normal state/done events; wireRun mirrors entry.status).
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// POST /api/run/night { runId, mode: 'auto'|'on'|'off' } — the run-view night mode switch
+// of a LIVE run (a paused run re-arms from its resume point on resume).
+// ---------------------------------------------------------------------------
+function setRunNightMode(runId, mode, by = 'local') {
+  const entry = runs.get(runId);
+  if (!entry) throw new Error('unknown runId');
+  if (typeof entry.orch?.setNightOverride !== 'function') throw Object.assign(new Error('run does not support night mode'), { code: 'BAD_NIGHT_MODE' });
+  entry.orch.setNightOverride(mode, by || 'local');
+}
+app.post('/api/run/night', (req, res) => {
+  const { runId, mode } = req.body || {};
+  if (!runId || !runs.has(runId)) return badRequest(res, 'unknown runId');
+  try {
+    setRunNightMode(runId, mode, actorOf(req));
+    res.json({ ok: true });
+  } catch (err) {
+    if (err?.code === 'BAD_NIGHT_MODE') return badRequest(res, err.message);
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+// GET /api/night-decisions?pipelineId=… | ?runId=… — what night mode decided on one run.
+app.get('/api/night-decisions', (req, res) => {
+  const pipelineId = String(req.query.pipelineId || '') || runs.get(String(req.query.runId || ''))?.orch?.pipeline?.id;
+  if (!pipelineId) return badRequest(res, 'pipelineId or runId required');
+  res.json({ decisions: readNightDecisions(pipelineId) });
+});
+
 app.post('/api/pause', (req, res) => {
   const { runId } = req.body || {};
   if (!runId || !runs.has(runId)) return badRequest(res, 'unknown runId');
@@ -5357,6 +5406,9 @@ const settingsState = () => ({
   memoryDefragDefault: defragDefaultModel(),              // what "(default)" means there: the built-in's own model
   workspaceScan: workspaceScanModels(),                   // Settings › Runs › Workspaces: the STORED pick (null = the defaults)
   workspaceScanDefault: WORKSPACE_SCAN_DEFAULT_MODELS,    // what null means: Sonnet 5 · medium, project agents sonnet · medium
+  nightMode: nightModeSettings(),                         // night mode: the user layer (only the fields set)
+  nightModeEffective: resolveNightConfig({ user: nightModeSettings() }).config,   // no project: the global view
+  nightModeToggle: nightModeToggle(),                     // auto | on | off (live switch)
 });
 
 /** Settings ▸ Auto workflow model: the stored id + what the classifier will actually use
@@ -5578,6 +5630,7 @@ app.post('/api/settings', async (req, res) => {
   const hasThemeKey = has('theme');
   const hasUiLevelKey = has('uiLevel');
   const hasAutoKey = has('autoWorkflowModel');
+  const hasNightKey = has('nightMode') || has('nightModeToggle');
   const autoModels = hasAutoKey ? await listModels('') : null;
   const hasPrDescKey = has('prDescriptionModel');
   const prDescModels = hasPrDescKey ? (autoModels || await listModels('')) : null;
@@ -5627,6 +5680,13 @@ app.post('/api/settings', async (req, res) => {
     if (hasPrDescKey) assertPrDescriptionModelInput(body.prDescriptionModel ?? '', prDescModels);
     if (hasMemoryDefragKey) assertMemoryDefragModelInput(body.memoryDefrag, defragModels);
     if (hasWorkspaceScanKey) assertWorkspaceScanInput(body.workspaceScan, wsScanModels);
+    if (has('nightMode') && body.nightMode !== null) {
+      const { __unset, ...patch } = body.nightMode && typeof body.nightMode === 'object' && !Array.isArray(body.nightMode) ? body.nightMode : { __invalid: true };
+      if (patch.__invalid) throw new Error('nightMode must be an object or null');
+      if (__unset !== undefined && !Array.isArray(__unset)) throw new Error('nightMode.__unset must be a list of field names');
+      validateNightPatch(patch);
+    }
+    if (has('nightModeToggle')) assertNightModeToggleInput(body.nightModeToggle);
     // Root first: it is the one key whose setter can still fail AFTER the asserts
     // above (an unusable path), so every other key's write must come after it or
     // a mixed POST would answer 400 with those keys already applied on disk.
@@ -5656,10 +5716,14 @@ app.post('/api/settings', async (req, res) => {
     if (hasMemoryDefragKey) await setMemoryDefragModel(body.memoryDefrag, { models: defragModels });
     if (hasWorkspaceScanKey) await setWorkspaceScanModels(body.workspaceScan, { models: wsScanModels });
     if (has('schedule')) await setScheduleDefaults(body.schedule && typeof body.schedule === 'object' ? body.schedule : {});
+    if (has('nightMode')) await setNightMode(body.nightMode);
+    if (has('nightModeToggle')) await setNightModeToggle(body.nightModeToggle);
+    // Live runs re-evaluate their open question against the new night settings.
+    if (hasNightKey) for (const e of runs.values()) e.orch?.nightConfigChanged?.();
     if (hasBudgetKey) emitChanged('budget-changed');
     // Other open tabs repaint their Settings cards (a stale tab could otherwise
     // "save" its old checkbox state over this one with no feedback to either).
-    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule')) emitChanged('settings-changed');
+    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule') || hasNightKey) emitChanged('settings-changed');
     res.json({ ...settingsState(), ...(await autoModelState()), ...(await prDescriptionModelState()), chat: chatPrefs() });
   } catch (err) {
     // The setters throw only on an unusable path -> client error (400).
@@ -5671,6 +5735,11 @@ app.post('/api/settings', async (req, res) => {
 // Per-project model/effort config + custom-model registry. Validation lives in
 // src/core/config.mjs; these routes are thin delegation (mirror /api/projects).
 // ---------------------------------------------------------------------------
+/** A project's night mode view: its own layer and the resolved config with per-field sources. */
+function projectNightMode(projectDir) {
+  return { project: readNightModePrefs(projectKey(projectDir)), ...effectiveNightConfig(projectDir) };
+}
+
 app.get('/api/config', async (req, res) => {
   const raw = req.query.projectDir;
   // No project selected yet (e.g. a fresh clone): still return the catalog so
@@ -5700,6 +5769,9 @@ app.get('/api/config', async (req, res) => {
     ]);
     res.json({
       config, models, steps: agentSteps(), efforts: EFFORTS,
+      // Night mode: the project's own layer plus what applies ({config, sources}) per field.
+      // Beside `config`, not in it: clients assign `config` to their whole config state.
+      nightMode: projectNightMode(projectDir),
       // The sub-agent model policy vocabulary is a FIXED alias enum (the CLI's Task
       // tool refuses catalog ids), so it ships beside `efforts` rather than being
       // derived from `models`.
@@ -5790,8 +5862,13 @@ app.patch('/api/config', async (req, res) => {
       await setActiveWorkflow(projectDir, active);
     }
     if (typeof body.humanInLoop === 'boolean') await setHumanInLoop(projectDir, body.humanInLoop);
+    if (body.nightMode !== undefined) {
+      // Night mode project layer (a patch; `null` resets to inherited). Validation errors → 400 below.
+      writeNightModePrefs(projectKey(projectDir), body.nightMode);
+      for (const e of runs.values()) if (e.projectDir === projectDir) e.orch?.nightConfigChanged?.();
+    }
     const config = await readRunConfig(projectDir);
-    res.json({ config });
+    res.json({ config, nightMode: projectNightMode(projectDir) });
   } catch (err) {
     // The config.mjs setters throw only on validation (unknown model/effort,
     // maxCycles < 1) -> client error, mirroring POST /api/config.

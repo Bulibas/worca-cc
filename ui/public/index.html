@@ -367,6 +367,13 @@
                       <span class="txt">Human in the loop — Auto shows its proposal, clarifies, and agents may ask</span>
                     </label>
                     <small class="hint" id="hitlHint">Off: the proposal is accepted as proposed, no clarify card, no agent questions. A loop that runs out of cycles, a recovery prompt, a cost cap or an error still pause the run.</small>
+                    <!-- Night mode per-run opt-in (src/core/night/*): the decider may answer this run's
+                         questions while you are away (Settings › Night mode sets when and how). -->
+                    <label class="switch-row" id="night-row">
+                      <input id="nightMode" class="sw-input" type="checkbox">
+                      <span class="switch"></span>
+                      <span class="txt">Night mode: let worca answer for me if I'm away</span>
+                    </label>
 
                     <!-- Guardrails picker (built-ins + named sets; the selection IS the
                          run's policy, applied uniformly to every member). app.js populates
@@ -561,6 +568,9 @@
                 <!-- The run's name: the glance's headline carries its state. -->
                 <span class="rd-bar-mid"><span class="rd-bar-title"></span></span>
                 <span class="rd-bar-end">
+                  <!-- Night mode for this run (POST /api/run/night); live runs only. -->
+                  <label class="rd-night-wrap" title="Night mode for this run" hidden><span class="txt">Night</span>
+                    <select class="rd-night select input-mini" aria-label="Night mode for this run"><option value="auto">Auto</option><option value="on">On</option><option value="off">Off</option></select></label>
                   <!-- One control for Pause/Resume. The label lives in its own span so a busy
                        state swaps only the word and the inline SVG survives. -->
                   <button type="button" class="rd-pause" data-action="pause" hidden>
@@ -627,6 +637,8 @@
                   <h3 class="rd-ask-head"></h3>
                   <div class="qpanel hidden"></div>
                 </div>
+                <!-- What night mode decided on this run; flagged rows need review. -->
+                <section class="rd-night-sec" hidden><h3>Night decisions <span class="rd-night-count"></span></h3><ol class="rd-night-decisions"></ol></section>
               </section>
 
               <section class="rd-details" hidden aria-label="Run details">
@@ -1640,6 +1652,33 @@
                 <button type="button" id="budgetSave" class="btn btn-primary btn-mini">Save</button>
               </div>
               <small class="hint" id="budgetMsg"></small>
+            </section>
+
+            <!-- Night mode (src/core/night/*): the user layer of the night config, rendered by
+                 night-mode-form.mjs, plus the live global switch. -->
+            <section class="card settings-card" id="night-settings-card" data-min-level="advanced">
+              <div class="card-head">
+                <div class="label-row">
+                  <h2>Night mode</h2>
+                  <button type="button" class="info-tip" aria-label="About night mode">i<span class="tip-content hidden">
+                    While you are away, a decider answers a run's open questions for you: inside the night window, once a question has waited the grace time, or when switched on. Every decision is recorded, and the unsure ones are flagged for your review. A project can override these values; a team policy supplies defaults.
+                  </span></button>
+                </div>
+              </div>
+              <div class="field">
+                <div class="label-row"><label for="nightModeToggle">Right now</label></div>
+                <select id="nightModeToggle" class="select">
+                  <option value="auto">Auto (follow the window and grace)</option>
+                  <option value="on">Force on now</option>
+                  <option value="off">Force off</option>
+                </select>
+              </div>
+              <div id="night-mode-host"></div>
+              <div class="add-project-actions" style="margin-top:14px">
+                <button type="button" id="nightModeReset" class="btn btn-ghost btn-mini">Use defaults</button>
+                <button type="button" id="nightModeSave" class="btn btn-primary btn-mini">Save</button>
+              </div>
+              <small class="hint" id="nightModeMsg"></small>
             </section>
 
             <!-- Scheduled runs: the defaults a NEW schedule inherits. Each schedule keeps

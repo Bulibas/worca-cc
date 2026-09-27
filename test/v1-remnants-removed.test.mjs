@@ -160,7 +160,7 @@ test("ui/server.mjs's EVENT_NAMES is the v2 list and never carries 'phase'", () 
   // rows for files that no longer exist (the audit recreates shots/ every cycle)
   // and the browser has to drop them too, or it keeps rendering a row that 404s.
   assert.deepEqual(names, ['exec', 'token', 'log', 'question', 'artifact', 'artifact-gone', 'state',
-    'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title']);
+    'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title', 'night-decision']);
 });
 
 // 2. migrate-fs-to-db.mjs is the ONE module that still WRITES a v1-shaped

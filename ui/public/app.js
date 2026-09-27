@@ -172,6 +172,7 @@ import { createSchedulesView } from './schedules-view.mjs';
 import { createLevelController, levelAtLeast, currentLevel, tagLevel, keepVisible, minLevelFor, LEVEL_INFO, UI_LEVELS } from './ui-level.mjs';
 import { registerAskRenderer, askRendererFor, askKindOf } from './ask/registry.mjs';
 import { renderAskForm } from './ask/form-renderer.mjs';
+import { renderNightForm, readNightForm } from './night-mode-form.mjs';
 import { visibleFields as visibleAnswerFields } from '../../src/shared/forms/layout.mjs';
 
 const diffHljsLoader = window.__worcaTestHooks?.hljsLoader ?? createHljsLoader();
@@ -277,6 +278,7 @@ const el = {
   agentRows: $('#agents-rows'),
   hitlRow: $('#hitl-row'),
   humanInLoop: $('#humanInLoop'),
+  nightMode: $('#nightMode'),
   memoryScopeRow: $('#memory-scope-row'),
   memoryScopeSeg: $('#memory-scope-seg'),
   agentsWorkflow: $('#agentsWorkflow'),
@@ -1240,7 +1242,7 @@ function handleServerMessage(msg) {
   // MATERIALIZE a run: each only attaches to one this tab already knows. (A
   // resolution for an unknown run is meaningless, and auto-creating a card would
   // resurrect the phantom.)
-  if ((msg.type === 'subagent' || msg.type === 'stepskills' || msg.type === 'stepgraphify' || msg.type === 'question-resolved') && !runs.has(msg.runId)) return;
+  if ((msg.type === 'subagent' || msg.type === 'stepskills' || msg.type === 'stepgraphify' || msg.type === 'question-resolved' || msg.type === 'night-decision') && !runs.has(msg.runId)) return;
   const r = upsertRun({ runId: msg.runId });
   // A reconnect re-subscribes and the server replays the run's buffer: skip what this page
   // already applied, or every earlier log line shows twice (ws-seq.mjs).
@@ -1255,6 +1257,9 @@ function handleServerMessage(msg) {
       break;
     case 'question-resolved':
       onQuestionResolved(r, msg);
+      break;
+    case 'night-decision':
+      onNightDecision(r, msg);
       break;
     case 'artifact':
       onArtifact(r, msg);
@@ -1340,6 +1345,7 @@ function onHello(msg) {
       lastAction: r0.lastAction || undefined,
       workspaceId: r0.workspaceId || undefined,
       projectNames: Array.isArray(r0.projectNames) && r0.projectNames.length ? r0.projectNames : undefined,
+      night: r0.night || undefined,
     });
     // Seed the run's stepper from the hello summary so the live card resolves
     // sub-agents to their real nodes BEFORE any subagent delta paints — closing
@@ -1940,6 +1946,23 @@ function cycleAwareLabel(stepper, subAgents, groupKeys, steps = []) {
   };
 }
 
+// Night mode decided (or hit a guardrail) on this run: append the record to the run-view list.
+// The pending card itself goes away through the server's question-resolved frame.
+function onNightDecision(r, msg) {
+  if (!msg || !msg.record || typeof msg.record !== 'object') return;
+  addNightDecisions(r, [msg.record]);
+  r._decorSeq = (r._decorSeq || 0) + 1;
+}
+
+/** Merge decision records into r.nightDecisions, once each (a history fetch and a live frame may carry the same one). */
+function addNightDecisions(r, list) {
+  const key = (d) => `${d.questionId}|${d.guardrail || ''}|${d.choice == null ? '' : d.choice}`;
+  const cur = Array.isArray(r.nightDecisions) ? r.nightDecisions : [];
+  const seen = new Set(cur.map(key));
+  for (const d of list) { if (d && !seen.has(key(d))) { seen.add(key(d)); cur.push(d); } }
+  r.nightDecisions = cur;
+}
+
 function onState(r, msg) {
   if (msg.status) r.status = msg.status;
   if (msg.startedAt) r.startedAt = msg.startedAt;
@@ -1985,6 +2008,8 @@ function onState(r, msg) {
   if (typeof msg.totalCostUsd === 'number') r.totalCostUsd = msg.totalCostUsd;
   // What the open preflight is doing (the glance's status line); null once it ends.
   if (msg.setupStage !== undefined) r.setupStage = msg.setupStage;
+  // Night mode switches + counters (run-harness _nightSnapshot): the run-view switch paints from them.
+  if (msg.night && typeof msg.night === 'object') r.night = msg.night;
   // Sub-agents: the state snapshot is authoritative (covers late-join/replay and
   // any missed `subagent` delta). Replace wholesale when present; a snapshot that
   // omits the field (older runs / partial snapshots) leaves the delta-built array.
@@ -4767,6 +4792,24 @@ function renderClarifyBody(r, panel, pq) {
       free.placeholder = 'Or type your own answer… (e.g. "B but change the port")';
     }
 
+    // Night mode (Step 14): the agent's confidence per option (one bar each, keyed by
+    // option order) and its recommendation, which is preselected — the user can change it.
+    const conf = Array.isArray(q.confidence) && q.confidence.length === opts.length ? q.confidence : null;
+    const rec = conf && typeof q.recommended === 'string' && opts.includes(q.recommended) ? q.recommended : null;
+    const select = (btn, optText) => {
+      // Select this option, clear siblings + the free-text field (if present).
+      optsWrap.querySelectorAll('.qopt').forEach((b) => {
+        const on = b === btn;
+        b.classList.toggle('sel', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+      if (free) {
+        free.value = '';
+        free.classList.remove('has');
+      }
+      slot.choice = optText;
+      recount();
+    };
     opts.forEach((optText, optIdx) => {
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -4774,24 +4817,31 @@ function renderClarifyBody(r, panel, pq) {
       btn.setAttribute('aria-pressed', 'false');
       // A/B/C/D key (MAX_CLARIFY_OPTIONS is 4) so a free-text answer can refer
       // back to an option by name, e.g. "B but change the port". The stylesheet
-      // draws it as the option's key square, so the text node is the option alone.
+      // draws it as the option's key square, so the label is the option alone.
       btn.dataset.key = String.fromCharCode(65 + optIdx);
-      btn.textContent = optText;
-      btn.addEventListener('click', () => {
-        // Select this option, clear siblings + the free-text field (if present).
-        optsWrap.querySelectorAll('.qopt').forEach((b) => {
-          const on = b === btn;
-          b.classList.toggle('sel', on);
-          b.setAttribute('aria-pressed', String(on));
-        });
-        if (free) {
-          free.value = '';
-          free.classList.remove('has');
-        }
-        slot.choice = optText;
-        recount();
-      });
+      const label = document.createElement('span');
+      label.className = 'qopt-txt';
+      label.textContent = optText;
+      btn.appendChild(label);
+      if (optText === rec) {
+        const badge = document.createElement('span');
+        badge.className = 'qrec';
+        badge.textContent = 'Recommended';
+        btn.appendChild(badge);
+      }
+      if (conf) {
+        const bar = document.createElement('span');
+        bar.className = 'qconf';
+        bar.setAttribute('aria-label', `${conf[optIdx]}% confidence`);
+        const fill = document.createElement('span');
+        fill.className = 'qconf-fill';
+        fill.style.width = `${conf[optIdx]}%`;
+        bar.appendChild(fill);
+        btn.appendChild(bar);
+      }
+      btn.addEventListener('click', () => select(btn, optText));
       optsWrap.appendChild(btn);
+      if (optText === rec) select(btn, optText);
     });
     if (opts.length) block.appendChild(optsWrap);
 
@@ -9862,9 +9912,51 @@ function buildPdOverview(sec, key) {
     grid.appendChild(tagLevel(card, 'expert'));
   }
   sec.appendChild(grid);
+  sec.appendChild(tagLevel(buildPdNightCard(p), 'advanced'));
   ensureHistoryLoaded();
   void paintProjectTmCells();
   void paintProjectPolicyCells();
+}
+
+// The project's night mode layer (project_config.extra.nightMode): fields set here beat the
+// developer's and the team's; empty fields inherit (the placeholders say what and from where).
+function buildPdNightCard(p) {
+  const card = document.createElement('section');
+  card.className = 'card pd-night-card';
+  const head = document.createElement('div');
+  head.className = 'card-head';
+  const b = document.createElement('b'); b.textContent = 'Night mode';
+  const h = document.createElement('small'); h.className = 'hint';
+  h.textContent = 'This project\'s own night mode values. Empty fields inherit your settings, then the team policy.';
+  head.append(b, h);
+  const host = document.createElement('div');
+  host.className = 'pd-night-form';
+  const actions = document.createElement('div');
+  actions.className = 'add-project-actions';
+  const reset = Object.assign(document.createElement('button'), { type: 'button', className: 'btn btn-ghost btn-mini pd-night-reset', textContent: 'Reset to inherited' });
+  const save = Object.assign(document.createElement('button'), { type: 'button', className: 'btn btn-primary btn-mini pd-night-save', textContent: 'Save' });
+  actions.append(reset, save);
+  const msg = Object.assign(document.createElement('small'), { className: 'hint pd-night-msg' });
+  card.append(head, host, actions, msg);
+  const paint = (nm) => renderNightForm(host, { level: 'project', values: (nm && nm.project) || {}, effective: (nm && nm.config) || {}, sources: (nm && nm.sources) || {} });
+  const send = async (nightMode) => {
+    msg.textContent = ''; msg.className = 'hint pd-night-msg';
+    try {
+      const res = await fetch('/api/config', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: p.path, nightMode }) });
+      const data = await safeJson(res);
+      if (!res.ok) { msg.textContent = data.error || `HTTP ${res.status}`; msg.className = 'hint pd-night-msg err'; return; }
+      paint(data.nightMode);
+      msg.textContent = 'Saved.';
+    } catch (err) { msg.textContent = err.message || 'network error'; msg.className = 'hint pd-night-msg err'; }
+  };
+  save.addEventListener('click', () => send(readNightForm(host, { level: 'project' })));
+  reset.addEventListener('click', () => send(null));
+  paint(null);
+  fetch(`/api/config?projectDir=${encodeURIComponent(p.path)}`)
+    .then((res) => (res.ok ? safeJson(res) : null))
+    .then((data) => { if (data && data.nightMode) paint(data.nightMode); })
+    .catch(() => {});
+  return card;
 }
 
 // ---- Team tab ----
@@ -10809,6 +10901,8 @@ el.form.addEventListener('submit', async (e) => {
     humanInLoop: state.workflowId === AUTO_WORKFLOW_ID ? !!(el.humanInLoop && el.humanInLoop.checked) : undefined,
     // Only this workflow carries it: every other run body stays byte-identical to the legacy one.
     memoryScope: isDefragRun ? state.memoryScope : undefined,
+    // Night mode per-run opt-in: only when ticked, so every other run body stays byte-identical.
+    nightMode: el.nightMode && el.nightMode.checked ? true : undefined,
   };
   if (target === 'workspace') {
     body.workspaceId = workspaceId;
@@ -11217,6 +11311,7 @@ async function loadSettings() {
     paintBudgetSettings(data);
     paintAskSettings(data);
     paintScheduleSettings(data);
+    paintNightSettings(data);
     paintDebugSpawnSettings(data);
     await paintTitleModelSettings(data);
     await paintAutoModelSettings(data);
@@ -11623,6 +11718,25 @@ try {
 
 // Settings › Runs › Scheduled runs: the defaults a new schedule inherits.
 function setSchedDefaultsMsg(text, kind) { setHintMsg('schedDefaultsMsg', text, kind); }
+// ---- Night mode (Settings › General) ----
+// The user layer of the night config (night-mode-form.mjs) plus the live global switch.
+function setNightModeMsg(text, kind) { setHintMsg('nightModeMsg', text, kind); }
+function paintNightSettings(data) {
+  const host = document.getElementById('night-mode-host');
+  const toggle = document.getElementById('nightModeToggle');
+  if (!host || !toggle) return;
+  toggle.value = data.nightModeToggle || 'auto';
+  renderNightForm(host, { level: 'user', values: data.nightMode || {}, effective: data.nightModeEffective || {}, sources: {} });
+}
+function postNightSettings(body) {
+  return postSettingsCard(body, { setMsg: setNightModeMsg, paint: paintNightSettings });
+}
+document.getElementById('nightModeSave')?.addEventListener('click', () => {
+  const host = document.getElementById('night-mode-host');
+  postNightSettings({ nightMode: readNightForm(host, { level: 'user' }), nightModeToggle: document.getElementById('nightModeToggle').value });
+});
+document.getElementById('nightModeReset')?.addEventListener('click', () => postNightSettings({ nightMode: null, nightModeToggle: 'auto' }));
+
 function paintScheduleSettings(data) {
   const d = data && data.schedule;
   const missed = document.getElementById('schedIfMissed');
@@ -21166,6 +21280,7 @@ function rdStateCopy(r, stepName) {
   if (r.pauseReason === 'cost_total') return 'Paused — total budget reached.';
   if (r.pauseReason === 'cost_pipeline_policy') return 'Paused — team cost cap reached.';
   if (r.pauseReason === 'cost_total_policy') return 'Paused — team total cap reached.';
+  if (r.pauseReason === 'night_guardrail') return 'Paused — night mode guardrail (review flagged decisions).';
   if (r.pauseReason === 'error') {
     const why = r.pauseDetail ? `: ${r.pauseDetail}` : '';
     return `Paused after an error${why}. Fix the cause, then Resume — the worktree and progress are kept.`;
@@ -22294,6 +22409,7 @@ function statusPill(r) {
     // A team cap names its source too (team-policy design board 9).
     if (r.pauseReason === 'cost_pipeline_policy') return { family: 'amber', text: 'Paused · team cap' };
     if (r.pauseReason === 'cost_total_policy') return { family: 'amber', text: 'Paused · team total' };
+    if (r.pauseReason === 'night_guardrail') return { family: 'amber', text: 'Paused · night guardrail' };
     // An error pause is parked and resumable (never dead), so it stays in the amber family.
     if (r.pauseReason === 'error') return { family: 'amber', text: 'Paused · error' };
     if (r.pauseReason === 'recoverable') return { family: 'amber', text: 'Paused · recoverable' };
@@ -23824,6 +23940,22 @@ function openRunDetail(runId, { instant = false } = {}) {
   screen.querySelector('.rd-stop').addEventListener('click', () => {
     openStopModal(runDetailState.runId);
   });
+  // Night mode for this run (POST /api/run/night). Reads the run at CHANGE time, like Stop.
+  screen.querySelector('.rd-night').addEventListener('change', async (e) => {
+    const sel = e.currentTarget;
+    sel.disabled = true;
+    try {
+      const res = await fetch('/api/run/night', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: runDetailState.runId, mode: sel.value }) });
+      if (!res.ok) {
+        const err = await safeJson(res);
+        const run = runs.get(runDetailState.runId);
+        if (run) onLog(run, { source: 'ui', level: 'error', text: `night mode: ${err.error || res.status}`, ts: Date.now() });
+      }
+    } catch (err) {
+      const run = runs.get(runDetailState.runId);
+      if (run) onLog(run, { source: 'ui', level: 'error', text: `night mode: ${err.message || err}`, ts: Date.now() });
+    } finally { sel.disabled = false; }
+  });
 
   const r = runs.get(runId);
   if (r) repaintRunDetail(r);
@@ -23831,6 +23963,7 @@ function openRunDetail(runId, { instant = false } = {}) {
     screen.querySelector('.rd-title').textContent = runId;
     screen.querySelector('.rd-now-title').textContent = runId;
   }
+  if (r) loadNightDecisions(r);
 
   if (instant) shell.classList.add('no-anim');
   shell.classList.add('detail-open');
@@ -23916,6 +24049,42 @@ function paintRunDetail(r) {
   paintRdGraph(screen, r);
   paintRdQuestions(screen, r);
   paintRdGlance(screen, r);
+  paintNightDecisions(screen, r);
+}
+
+/** The night decisions already stored for this run (history), merged with the live frames. */
+async function loadNightDecisions(r) {
+  if (!r.pipelineId) return;
+  try {
+    const res = await fetch(`/api/night-decisions?pipelineId=${encodeURIComponent(r.pipelineId)}`);
+    if (!res.ok) return;
+    const data = await safeJson(res);
+    if (!Array.isArray(data.decisions) || !data.decisions.length) return;
+    addNightDecisions(r, data.decisions);
+    if (runDetailState && runDetailState.runId === r.runId && runDetailState.screen) paintNightDecisions(runDetailState.screen, r);
+  } catch { /* the list stays live-only */ }
+}
+
+function paintNightDecisions(screen, r) {
+  const sec = screen.querySelector('.rd-night-sec');
+  if (!sec) return;
+  const list = Array.isArray(r.nightDecisions) ? r.nightDecisions : [];
+  sec.hidden = !list.length;
+  screen.querySelector('.rd-night-count').textContent = list.length ? `(${list.length}, ${list.filter((d) => d.flagged).length} flagged)` : '';
+  const ol = screen.querySelector('.rd-night-decisions');
+  ol.replaceChildren();
+  for (const d of list) {
+    const li = document.createElement('li');
+    if (d.flagged) li.classList.add('flagged');
+    const head = document.createElement('div');
+    head.className = 'rd-nd-head';
+    head.textContent = `${d.kind} · ${d.choice == null ? `guardrail: ${d.guardrail}` : d.choice}${d.confidence != null ? ` · ${d.confidence}%` : ''} · ${d.strategy}${d.flagged ? ' · flagged' : ''}`;
+    const why = document.createElement('div');
+    why.className = 'rd-nd-why';
+    why.textContent = d.rationale || '';
+    li.append(head, why);
+    ol.appendChild(li);
+  }
 }
 
 // ── The glance: status line, trail, sheet ───────────────────────────────────
@@ -24830,6 +24999,13 @@ function paintRdHeader(screen, r) {
     ? `Total budget reached — blocked until ${fmtResetAtLocal(budgetState.budget.windowEndMs)} or a higher total limit`
     : (paused ? 'Resume — restart this paused pipeline where it left off'
               : 'Pause — gracefully stop the session so it can be resumed');
+
+  // Night mode switch: live runs only (a paused run re-arms from its resume point).
+  const ns = screen.querySelector('.rd-night');
+  if (ns) {
+    ns.closest('.rd-night-wrap').hidden = terminal || paused;
+    if (document.activeElement !== ns) ns.value = (r.night && r.night.override) || 'auto';
+  }
 }
 
 let runningCollapsed = false; // in-memory only; auto-expanded whenever ≥1 child exists

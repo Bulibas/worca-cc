@@ -622,8 +622,11 @@ export function questionsPromptBlock(ctx) {
     'If a decision materially shapes the outcome and you cannot resolve it from the task, ' +
     'the inputs, or the codebase — including anything material you are about to silently ' +
     'assume:\n' +
-    '1. Write {"questions":[{"id","question","options":[2-4 strings],"allowFreeText":true}]} ' +
+    '1. Write {"questions":[{"id","question","options":[2-4 strings],"allowFreeText":true,' +
+    '"confidence":[one integer 0-100 per option, summing to 100],"recommended":"<one option verbatim>"}]} ' +
     `(max 8 questions) to: ${ctx.questionsFile}\n` +
+    '   `confidence` is how likely you think each option is the right one; `recommended` is your pick. ' +
+    'Both are optional but strongly preferred: they let an unattended run decide for the user.\n' +
     '2. STOP immediately — do no further work. You will be resumed with the answers.\n' +
     'Assume freely on minor choices; on material ones, ask instead of assuming. Never pad, ' +
     'and never re-ask an answered question.\n\n' +

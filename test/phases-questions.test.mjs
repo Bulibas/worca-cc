@@ -74,3 +74,15 @@ test('runMock MOCK_ASK: writes one canned question and performs NO role side eff
   assert.equal(questions.length, 1);
   await assert.rejects(readFile(outPath, 'utf8'), undefined, 'role side effect must be skipped when asking');
 });
+
+test('questions prompt asks for confidence and recommended', () => {
+  const s = questionsPromptBlock({ questionsEnabled: true, questionsFile: '/tmp/q.json', questionsAnswered: [] });
+  assert.match(s, /"confidence":\[/);
+  assert.match(s, /"recommended"/);
+});
+
+test('clarify agent doc documents confidence/recommended', async () => {
+  const md = await readFile(new URL('../agents/worca-cc-clarify.md', import.meta.url), 'utf8');
+  assert.match(md, /"confidence"/);
+  assert.match(md, /"recommended"/);
+});

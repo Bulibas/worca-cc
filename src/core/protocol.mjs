@@ -126,12 +126,32 @@ const MAX_CLARIFY_QUESTIONS = 8;
 const MAX_CLARIFY_OPTIONS = 4;
 
 /**
+ * Scale non-negative weights to integers summing to exactly 100; the rounding
+ * remainder lands on the largest entry (first on ties). null when the sum is 0.
+ * @param {number[]} values
+ * @returns {number[]|null}
+ */
+export function scaleConfidence(values) {
+  const clamped = values.map((v) => (v > 0 ? v : 0));
+  const sum = clamped.reduce((a, b) => a + b, 0);
+  if (!(sum > 0)) return null;
+  const out = clamped.map((v) => Math.floor((v / sum) * 100));
+  let top = 0;
+  for (let i = 1; i < clamped.length; i++) if (clamped[i] > clamped[top]) top = i;
+  out[top] += 100 - out.reduce((a, b) => a + b, 0);
+  return out;
+}
+
+/**
  * Coerce arbitrary parsed data into the canonical clarify shape:
- *   { questions: [ { id, question, options:[2–4 strings], allowFreeText:true } ] }
+ *   { questions: [ { id, question, options:[2–4 strings], allowFreeText:true,
+ *                    confidence?:[int per option, sum 100], recommended?:option } ] }
  * Always returns at least { questions: [] }. Caps questions at MAX_CLARIFY_QUESTIONS
  * and options at MAX_CLARIFY_OPTIONS; blank options are trimmed away (the UI/CLI also
  * filter them), so binary/assumption questions keep exactly their real choices —
- * nothing is padded.
+ * nothing is padded. `confidence` is kept only when it has one finite number per RAW
+ * option (zipped before blanks are dropped, so it stays aligned); `recommended` only
+ * exists alongside `confidence`.
  */
 export function normalizeClarify(data) {
   if (!data || typeof data !== 'object') return { questions: [] };
@@ -143,13 +163,27 @@ export function normalizeClarify(data) {
     const id = asString(q.id).trim() || `q${i + 1}`;
     const question = asString(q.question).trim();
     if (!question) continue;
+    const raw = Array.isArray(q.options) ? q.options.map(asString) : [];
+    const conf = Array.isArray(q.confidence) && q.confidence.length === raw.length
+      && q.confidence.every((c) => typeof c === 'number' && Number.isFinite(c))
+      ? q.confidence : null;
     // Allow 2–4 options: trim, drop blanks, cap at MAX_CLARIFY_OPTIONS. No padding.
     // asString does not trim, so trim explicitly here before dropping empties.
-    const options = (Array.isArray(q.options) ? q.options.map(asString) : [])
-      .map((o) => o.trim())
-      .filter(Boolean)
+    const pairs = raw.map((o, k) => ({ o: o.trim(), c: conf ? conf[k] : 0 }))
+      .filter((p) => p.o)
       .slice(0, MAX_CLARIFY_OPTIONS);
-    questions.push({ id, question, options, allowFreeText: true });
+    const options = pairs.map((p) => p.o);
+    const out = { id, question, options, allowFreeText: true };
+    const scaled = conf && options.length ? scaleConfidence(pairs.map((p) => p.c)) : null;
+    if (scaled) {
+      out.confidence = scaled;
+      // The agent's pick when it is an option, else the highest-confidence option (first on ties).
+      const pick = asString(q.recommended).trim();
+      let best = 0;
+      for (let k = 1; k < scaled.length; k++) if (scaled[k] > scaled[best]) best = k;
+      out.recommended = options.includes(pick) ? pick : options[best];
+    }
+    questions.push(out);
   }
   return { questions: questions.slice(0, MAX_CLARIFY_QUESTIONS) };
 }

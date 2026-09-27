@@ -26,6 +26,7 @@ import { listPluginModels, allPluginModels, flattenPluginModelEnv } from './plug
 // Team policy defaults (team-policy design §6, §8): read from the discovery CACHE only (a leaf module).
 import { policyCatalogModels, teamDefault } from './policy/cache.mjs';
 import { PREDEFINED_LIST_PRICES } from './list-prices.mjs';
+import { validateNightPatch } from './night/config.mjs';
 
 /**
  * Recompute the agent step list FRESH from the layered registry (repo agents/ +
@@ -973,7 +974,7 @@ export async function readRunConfig(projectDir) {
   // Forward any OTHER unknown keys verbatim too (future-proof, matches "preserve unknown").
   // prRemotes is the ship-it dialog's own preference (readPrRemotePrefs), not run config.
   for (const [k, v] of Object.entries(extra)) {
-    if (k !== 'webUiTesting' && k !== PR_REMOTES_KEY && k !== TEAM_METRICS_KEY && k !== TEAM_POLICY_KEY && k !== 'humanInLoopSet' && !(k in out)) out[k] = v;
+    if (k !== 'webUiTesting' && k !== PR_REMOTES_KEY && k !== TEAM_METRICS_KEY && k !== TEAM_POLICY_KEY && k !== NIGHT_MODE_KEY && k !== 'humanInLoopSet' && !(k in out)) out[k] = v;
   }
   const active = row && typeof row.active_workflow_id === 'string' ? row.active_workflow_id.trim() : '';
   // Spec §6.1 / D16: a project with no remembered New-pipeline choice starts on Auto — unless a
@@ -1273,6 +1274,42 @@ export function writeTeamPolicyPrefs(key, patch) {
     const cur = extra[TEAM_POLICY_KEY] && typeof extra[TEAM_POLICY_KEY] === 'object' ? extra[TEAM_POLICY_KEY] : {};
     next = { ...cur, ...patch };
     extra[TEAM_POLICY_KEY] = next;
+    prepare(`
+      INSERT INTO project_config (project_key, steps, custom_models, active_workflow_id, extra)
+      VALUES (?, '{}', '[]', NULL, ?)
+      ON CONFLICT(project_key) DO UPDATE SET extra = excluded.extra
+    `).run(key, JSON.stringify(extra));
+  });
+  return next;
+}
+
+// ── Night mode project layer (project_config.extra.nightMode) ────────────────
+// The project's own night mode fields (night/config.mjs); precedence project > user > team.
+export const NIGHT_MODE_KEY = 'nightMode';
+
+/** @returns {object|null} the project's night mode layer (only fields it set) */
+export function readNightModePrefs(key) {
+  assertProjectKey(key);
+  const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
+  const v = row ? parseJson(row.extra, {})[NIGHT_MODE_KEY] : null;
+  return v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length ? v : null;
+}
+
+/** Merge a validated patch (`__unset: [...]` removes fields; `null` clears the block). */
+export function writeNightModePrefs(key, patch) {
+  assertProjectKey(key);
+  const { __unset = [], ...rest } = patch || {};
+  const clean = patch === null ? null : validateNightPatch(rest, { level: 'project' });
+  let next = null;
+  tx(() => {
+    const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
+    const extra = row ? parseJson(row.extra, {}) : {};
+    if (clean === null) delete extra[NIGHT_MODE_KEY];
+    else {
+      next = { ...(extra[NIGHT_MODE_KEY] || {}), ...clean };
+      for (const k of Array.isArray(__unset) ? __unset : []) delete next[k];
+      if (Object.keys(next).length) extra[NIGHT_MODE_KEY] = next; else { delete extra[NIGHT_MODE_KEY]; next = null; }
+    }
     prepare(`
       INSERT INTO project_config (project_key, steps, custom_models, active_workflow_id, extra)
       VALUES (?, '{}', '[]', NULL, ?)

@@ -58,7 +58,7 @@ const OPEN_BACKOFF_MS = 15;
 /** Latest schema version. Bump + append a new migration step when the DDL grows.
  *  Exported so migration tests assert "reached the module's current version"
  *  instead of hardcoding the number — a schema bump then touches no test file. */
-export const SCHEMA_VERSION = 43;
+export const SCHEMA_VERSION = 44;
 
 /** Absolute path to the database file: <worcaHome>/worca-cc.db. */
 export function dbPath() {
@@ -902,6 +902,22 @@ CREATE TABLE IF NOT EXISTS notification_reads (
 );
 `;
 
+/** night_decisions (v44): one row per ask the night mode decider answered (src/core/night/*).
+ *  `record` is the JSON decision record {choice, strategy, confidence, scores, rationale,
+ *  reversible, flagged, questions?, guardrail?, meta?}. Pipelines are soft-deleted, so the
+ *  cascade only matters for test DBs. */
+const NIGHT_DECISIONS_DDL = `
+CREATE TABLE IF NOT EXISTS night_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pipeline_id TEXT NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+  question_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  record TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_night_decisions_pipeline ON night_decisions(pipeline_id, id);
+`;
+
 const INCREMENTAL_TABLES = {
   config_workflow_wires: CONFIG_WORKFLOW_WIRES_DDL,
   step_questions:    STEP_QUESTIONS_DDL,
@@ -921,6 +937,7 @@ const INCREMENTAL_TABLES = {
   scheduled_runs:    SCHEDULED_RUNS_DDL,
   notifications:     SCHEDULED_RUNS_DDL,
   notification_reads: NOTIFICATION_READS_DDL,
+  night_decisions:   NIGHT_DECISIONS_DDL,
 };
 
 /**
@@ -1486,6 +1503,11 @@ function applySchemaV42(db) {
        AND rel_path NOT LIKE 'deck/deck%.pdf'`).run();
 }
 
+/** v44 (night mode): night_decisions (INCREMENTAL_TABLES), one row per night-decided ask. */
+function applySchemaV44(db) {
+  db.exec(NIGHT_DECISIONS_DDL);
+}
+
 /** Move every stored pin on model id `from` (lower-case) to `to`. Each table
  *  is guarded like V24's: hand-seeded upgrade fixtures (and a DB from before the
  *  fs->db import) reach this step without some of them. */
@@ -1909,6 +1931,7 @@ export function migrate(db) {
     if (current < 41) applySchemaV41(db);
     if (current < SCHEMA_VERSION) refreshPresentationSeed(db);
     if (current < 42) applySchemaV42(db);            // deck subresources -> the unlisted deck-asset kind
+    if (current < 44) applySchemaV44(db);            // night mode: one row per night-decided ask
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {

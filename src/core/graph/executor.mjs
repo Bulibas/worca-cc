@@ -780,7 +780,8 @@ export async function runClarifierExecution(ctx) {
         });
         await writeClarify(ctx.pipelineId, { questions: gate.ask });
         const formBy = clarifyAnswerer(ctx, `${CLARIFY_ASK_KIND}-${node.id}-${ordinal}`);
-        const answerRow = { kind: 'form', form: gate.ask.form, version: gate.ask.version, values, ...(formBy ? { answeredBy: formBy } : {}) };
+        const formNight = clarifyNightDecision(ctx, `${CLARIFY_ASK_KIND}-${node.id}-${ordinal}`);
+        const answerRow = { kind: 'form', form: gate.ask.form, version: gate.ask.version, values, ...(formBy ? { answeredBy: formBy } : {}), ...(formNight ? { night: formNight } : {}) };
         auditClarify(ctx, meta, node, formBy);
         await writeStepQuestions(ctx.pipelineId, ctx.executionId, ordinal, {
           agentKey: node?.key, nodeId: node?.id, answers: answerRow,
@@ -815,7 +816,8 @@ export async function runClarifierExecution(ctx) {
     answers = normalizeAnswers(answerPayload, questions);
     if (ctx.pipelineId) {
       const by = clarifyAnswerer(ctx, `${CLARIFY_ASK_KIND}-${node.id}-${ordinal}`);
-      const row = { answers, ...(by ? { answeredBy: by } : {}) };
+      const night = clarifyNightDecision(ctx, `${CLARIFY_ASK_KIND}-${node.id}-${ordinal}`);
+      const row = { answers, ...(by ? { answeredBy: by } : {}), ...(night ? { night } : {}) };
       await writeStepQuestions(ctx.pipelineId, ctx.executionId, ordinal, {
         agentKey: node?.key, nodeId: node?.id, answers: row,
       });
@@ -827,6 +829,12 @@ export async function runClarifierExecution(ctx) {
   await mkdir(dirname(answersPath), { recursive: true }).catch(() => {});
   await writeFile(answersPath, JSON.stringify({ questions, answers }, null, 2) + '\n', 'utf8');
   return { outputs: publishable(ports, outputs), questions, answers, sessionId, prompt, warnings };
+}
+
+/** The night mode decision record behind a clarifier ask (the orchestrator's nightDecision
+ *  seam, keyed by the ASK id — never the form's route-safe askId), or null. */
+function clarifyNightDecision(ctx, id) {
+  try { const d = typeof ctx.nightDecision === 'function' ? ctx.nightDecision(id) : null; return d && typeof d === 'object' ? d : null; } catch { return null; }
 }
 
 /** Who answered a clarifier question (the orchestrator's answeredBy seam), or null. */

@@ -27,6 +27,7 @@ export const TEXT_MAX = 200;
 
 const GROUPS = Object.freeze({
   cost: 'Cost', ask: 'Ask Worca', guardrails: 'Guardrails', models: 'Models', plugins: 'Plugins', runs: 'Runs',
+  night: 'Night mode',
 });
 
 /**
@@ -59,6 +60,21 @@ export const FIELDS = Object.freeze([
   { key: 'run.humanInLoop', group: 'runs', label: 'Human in the loop', help: 'Applies until the project sets its own switch.', type: 'bool', kinds: ['default'] },
   { key: 'metrics.record', group: 'runs', label: 'Record runs to team metrics', help: 'Expected on: the Projects cell hints when "Include my runs" is off.', type: 'bool', kinds: ['soft'] },
   { key: 'worca.minVersion', group: 'runs', label: 'Minimum Worca version', help: 'An older client shows a banner and logs a note.', type: 'semver', kinds: ['soft'] },
+  // Night mode (src/core/night/*): `night: true` makes validateValue run the night leaf's own
+  // field rules after the base-type check, so the rules live in one place.
+  { key: 'night.enabled', group: 'night', label: 'Night mode', help: 'Lets a decider answer pending questions while the developer is away. A project or developer value wins.', type: 'bool', kinds: ['default'], night: true },
+  { key: 'night.window', group: 'night', label: 'Night window', help: 'HH:MM-HH:MM (24 h), in the developer\'s time zone.', type: 'string', kinds: ['default'], night: true },
+  { key: 'night.timeZone', group: 'night', label: 'Time zone', help: 'IANA name, e.g. Europe/Berlin; unset = the developer\'s machine.', type: 'string', kinds: ['default'], night: true },
+  { key: 'night.graceMinutes', group: 'night', label: 'Grace (minutes)', help: 'A question open this long is decided, even outside the window.', type: 'int', min: 1, max: 1440, kinds: ['default'], night: true },
+  { key: 'night.strategy', group: 'night', label: 'Strategy', help: 'weights | analysis | mixed', type: 'enum', values: ['weights', 'analysis', 'mixed'], kinds: ['default'], night: true },
+  { key: 'night.minConfidence', group: 'night', label: 'Min confidence', help: '0-100', type: 'int', min: 0, max: 100, kinds: ['default'], night: true },
+  { key: 'night.minMargin', group: 'night', label: 'Min margin', help: '0-100', type: 'int', min: 0, max: 100, kinds: ['default'], night: true },
+  { key: 'night.criteria', group: 'night', label: 'Criteria weights', help: 'matchesMemory, reversible, smallestScope, codebaseConventions, cost (0-10); unset ones keep their default.', type: 'criteria', kinds: ['default'], night: true },
+  { key: 'night.neverDecide', group: 'night', label: 'Never decide', help: 'Question kinds that always wait for the developer: clarify, questions, form, gate, workflow, recovery.', type: 'string[]', kinds: ['default'], night: true },
+  { key: 'night.spendCapUsd', group: 'night', label: 'Night spend cap (USD)', help: 'Across all runs since the night started; null = no cap.', type: 'usd-or-null', min: 0.1, max: 10000, kinds: ['default'], night: true },
+  { key: 'night.maxDecisions', group: 'night', label: 'Max decisions per run', help: '1-500', type: 'int', min: 1, max: 500, kinds: ['default'], night: true },
+  { key: 'night.maxExtraCycles', group: 'night', label: 'Extra review cycles', help: 'Per loop, granted while critical issues remain.', type: 'int', min: 0, max: 10, kinds: ['default'], night: true },
+  { key: 'night.allowCostCapOverride', group: 'night', label: 'Continue past team soft caps', help: 'Off by default. Never overrides a developer\'s own caps.', type: 'bool', kinds: ['default'], night: true },
 ]);
 
 const BY_KEY = new Map(FIELDS.map((f) => [f.key, f]));
@@ -72,9 +88,10 @@ const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:\-[\]]{0,199}$/;
 const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]{0,63}$/;
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
-// The one import: the zero-import model-env leaf, for the bridged-model
-// `upstream` validator every catalog layer shares (model-bridge-design.md §6.3).
+// Zero-import leaves only: model-env for the bridged-model `upstream` validator every
+// catalog layer shares (model-bridge-design.md §6.3), night/config for the night.* rules.
 import { assertModelUpstream, upstreamEnvConflict } from '../model-env.mjs';
+import { fieldError as nightFieldError } from '../night/config.mjs';
 
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const clip = (v, max = TEXT_MAX) => {
@@ -98,6 +115,12 @@ export function looksLikeSecret(v) {
  * Shared by the editor (before publish) and the reader (dropping bad fields with a warning).
  */
 export function validateValue(meta, value) {
+  const err = baseError(meta, value);
+  if (err || !meta.night) return err;
+  return nightFieldError(meta.key.slice('night.'.length), value);
+}
+
+function baseError(meta, value) {
   switch (meta.type) {
     case 'usd': return finiteNum(value) && value > 0 ? null : 'must be a positive number of USD';
     case 'usd-or-null':
@@ -142,6 +165,7 @@ export function validateValue(meta, value) {
       }
       return null;
     }
+    case 'criteria': return isPlainObject(value) ? null : 'must be an object of criterion → weight';
     default: return 'unknown field type';
   }
 }
