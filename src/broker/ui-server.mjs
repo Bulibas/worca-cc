@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createAccessVerifier } from '../core/cf-access.mjs';
 import { safeEqual, normalizeBillTo } from './tokens.mjs';
 import { startOfUtcDay, startOfUtcMonth } from './limits.mjs';
-import { startDeviceFlow, pollDeviceFlow } from './copilot.mjs';
+import { startDeviceFlow, pollDeviceFlow, githubSecretOf } from './copilot.mjs';
 
 const UI_DIR = fileURLToPath(new URL('./ui/', import.meta.url));
 const STATIC = Object.freeze({
@@ -146,7 +146,7 @@ export function createUiHandler({ config, service, store, identity = createIdent
       const key = `${email}|${slotId}`;
       if (sub === '/device') {
         try {
-          const f = await startDeviceFlow({ fetchImpl: service.fetchImpl, ...(slot.deviceBaseUrl ? { baseUrl: slot.deviceBaseUrl } : {}) });
+          const f = await startDeviceFlow({ fetchImpl: service.fetchImpl, ...(slot.deviceBaseUrl ? { baseUrl: slot.deviceBaseUrl } : {}), ...(slot.clientId ? { clientId: slot.clientId, scope: slot.scope } : {}) });
           deviceFlows.set(key, { deviceCode: f.deviceCode, expiresAt: now() + f.expiresIn * 1000 });
           send(res, 200, { userCode: f.userCode, verificationUri: f.verificationUri, interval: f.interval, expiresIn: f.expiresIn });
         } catch (err) { send(res, 502, { error: err.message }); }
@@ -155,14 +155,15 @@ export function createUiHandler({ config, service, store, identity = createIdent
       const flow = deviceFlows.get(key);
       if (!flow || flow.expiresAt < now()) { deviceFlows.delete(key); send(res, 410, { error: 'the sign-in code expired: start again' }); return; }
       let r;
-      try { r = await pollDeviceFlow(flow.deviceCode, { fetchImpl: service.fetchImpl, ...(slot.deviceBaseUrl ? { baseUrl: slot.deviceBaseUrl } : {}) }); }
+      try { r = await pollDeviceFlow(flow.deviceCode, { fetchImpl: service.fetchImpl, ...(slot.deviceBaseUrl ? { baseUrl: slot.deviceBaseUrl } : {}), ...(slot.clientId ? { clientId: slot.clientId } : {}) }); }
       catch (err) { send(res, 502, { error: err.message }); return; }
       if (r.pending) { send(res, 200, { pending: true, slowDown: !!r.slowDown }); return; }
       deviceFlows.delete(key);
       if (r.error) { send(res, 422, { error: `GitHub sign-in failed: ${r.error}` }); return; }
-      const saved = await service.saveCredential(email, slotId, r.token);
+      // A GitHub App user token comes with a refresh token: stored together, renewed by the broker.
+      const saved = await service.saveCredential(email, slotId, slot.auth === 'github-user' ? githubSecretOf(r, now()) : r.token);
       if (!saved.ok) { send(res, saved.status || 422, { error: saved.error }); return; }
-      send(res, 200, { state: 'set', suffix: saved.suffix });
+      send(res, 200, { state: 'set', suffix: saved.suffix, kind: saved.kind });
       return;
     }
 
@@ -171,7 +172,7 @@ export function createUiHandler({ config, service, store, identity = createIdent
       try { body = await readJson(req); } catch { send(res, 400, { error: 'body must be JSON' }); return; }
       const r = await service.saveCredential(email, slotId, body.secret);
       if (!r.ok) { send(res, r.status || 422, { error: r.error }); return; }
-      send(res, 200, { state: 'set', suffix: r.suffix });
+      send(res, 200, { state: 'set', suffix: r.suffix, kind: r.kind });
       return;
     }
     if (kind === 'slots' && req.method === 'POST' && test) {

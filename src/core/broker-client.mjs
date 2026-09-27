@@ -87,9 +87,9 @@ export async function brokerInfo({ force = false } = {}) {
 export function cachedBrokerInfo() { return _info ? _info.value : null; }
 
 /** Mint a spawn token. Returns {token, expiresAt, spawnId}. */
-export async function mintSpawnToken({ billTo, slots, runId = null, threadId = null, kind = 'phase', ttlSec, budgetUsd } = {}) {
+export async function mintSpawnToken({ billTo, slots, runId = null, threadId = null, kind = 'phase', ttlSec, budgetUsd, isolated = false } = {}) {
   const spawnId = `sp-${randomUUID()}`;
-  const body = { billTo, slots, spawnId, kind, issuer: BOOT_ID };
+  const body = { billTo, slots, spawnId, kind, issuer: BOOT_ID, isolated: isolated === true };
   if (runId) body.runId = String(runId);
   if (threadId) body.threadId = String(threadId);
   if (ttlSec) body.ttlSec = ttlSec;
@@ -108,6 +108,21 @@ export async function revokeSpawnToken(spawnId) {
 /** Revoke every token an earlier worca process issued (their spawns died with it). */
 export async function revokeStaleTokens() {
   return call('POST', '/internal/tokens/revoke', { exceptIssuer: BOOT_ID });
+}
+
+/**
+ * "Push as me": `person`'s GitHub user token for ONE git or gh call worca makes itself.
+ * Rejects with .code 'not_connected' | 'not_configured' | 'expired' when there is none.
+ */
+export async function personGithubToken(person) {
+  try {
+    return await call('POST', '/internal/github-token', { person });
+  } catch (err) {
+    // call() folds the broker's {error, code} into the message; recover the code.
+    const m = /not connected|not set up|renew|sign in again/i.exec(err.message || '');
+    err.code = !m ? err.code : /not set up/i.test(m[0]) ? 'not_configured' : /not connected/i.test(m[0]) ? 'not_connected' : 'expired';
+    throw err;
+  }
 }
 
 /** Slot status for one person: {person, keyPage, slots:[{id,label,state,…}]}. */
@@ -146,7 +161,7 @@ export function foldUsageByPerson(rows = []) {
     p.outputTokens += Number(r.outputTokens) || 0;
     p.cacheReadTokens += Number(r.cacheReadTokens) || 0;
     if (!p.lastAt || (r.lastAt && r.lastAt > p.lastAt)) p.lastAt = r.lastAt || p.lastAt;
-    p.slots.push({ slot: r.slot, usd: Number(r.usd) || 0, requests: Number(r.requests) || 0 });
+    p.slots.push({ slot: r.slot, plan: r.plan || 'api', usd: Number(r.usd) || 0, requests: Number(r.requests) || 0 });
     by.set(r.billTo, p);
   }
   return [...by.values()].sort((a, b) => b.usd - a.usd || b.requests - a.requests);

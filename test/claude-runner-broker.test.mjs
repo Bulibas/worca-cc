@@ -98,7 +98,7 @@ test('the person in the async context is who the broker bills (multi mode); no p
   // No key saved for ada: the broker's "no key" error comes back as an auth failure.
   const err = await withBillTo('ada@acme.dev', () => runClaude({ bin: stub, prompt: 'hi', model: 'claude-sonnet-5' })).catch((e) => e);
   assert.ok(err instanceof Error);
-  assert.match(err.message, /worca-broker: no Anthropic API key for ada@acme\.dev/);
+  assert.match(err.message, /worca-broker: no Anthropic API key or Claude subscription for ada@acme\.dev/);
   assert.equal(classifyError(err), 'auth');
   const row = multi.store.db.prepare('SELECT bill_to FROM tokens ORDER BY created_at DESC LIMIT 1').get();
   assert.equal(row.bill_to, 'ada@acme.dev');
@@ -148,7 +148,7 @@ test('run preflight: every node\'s model is checked against the paying person\'s
   // Ada has no Anthropic key in this broker: refused, naming the key and the model.
   const err = await withBillTo('ada@acme.dev', () => RunHarness.prototype._brokerPreflight.call(fake, manifest, {})).catch((e) => e);
   assert.ok(err instanceof Error);
-  assert.match(err.message, /^Preflight failed: missing credentials: Anthropic API key \(not added; needed by claude-sonnet-5\)/);
+  assert.match(err.message, /^Preflight failed: missing credentials: Anthropic API key or Claude subscription \(not added; needed by claude-sonnet-5\)/);
   assert.equal(err.errorClass, 'auth');
   // No person behind the run in multi mode: refused.
   const none = await RunHarness.prototype._brokerPreflight.call(fake, manifest, {}).catch((e) => e);

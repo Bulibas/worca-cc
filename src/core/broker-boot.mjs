@@ -44,8 +44,14 @@ export async function checkBrokerAtBoot({ env = process.env, shared = false, log
     models,
     providers,
     brokerUrl: c.url,
-    slotOrigins: (info.slots || []).filter((s) => s.auth !== 'copilot').map((s) => s.upstream),
+    slotOrigins: (info.slots || []).filter((s) => s.auth !== 'copilot' && s.auth !== 'github-user').map((s) => s.upstream),
   });
   if (findings.length) return { on: true, fatal: [guardMessage(findings, info.publicUrl)], warnings: [] };
-  return { on: true, fatal: [], warnings: [], info };
+  const warnings = [];
+  const asPerson = String(env.WORCA_GH_AS_PERSON || '').trim().toLowerCase();
+  if (asPerson && !['prefer', 'required', 'off', '0'].includes(asPerson)) warnings.push(`WORCA_GH_AS_PERSON must be prefer or required (got ${JSON.stringify(asPerson)}); pushes use worca's own GitHub credential`);
+  if ((asPerson === 'prefer' || asPerson === 'required') && !(info.slots || []).some((s) => s.auth === 'github-user')) {
+    warnings.push(`WORCA_GH_AS_PERSON=${asPerson}, but the broker has no GitHub slot (set WORCA_BROKER_GITHUB_CLIENT_ID on it)${asPerson === 'required' ? ': every push will fail' : ''}`);
+  }
+  return { on: true, fatal: [], warnings, info };
 }

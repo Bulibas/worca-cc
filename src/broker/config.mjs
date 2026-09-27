@@ -159,6 +159,14 @@ export function readBrokerConfig(env = process.env, { readFile = readFileSync } 
     else tokenMaxTtlMs = t;
   }
 
+  // "Push as me" (optional): each person signs in with GitHub on the key page through the
+  // operator's GitHub App or OAuth App; worca's pushes and PRs then go out as them.
+  const githubClientId = String(env.WORCA_BROKER_GITHUB_CLIENT_ID || '').trim() || null;
+  const ghSecret = readSecret(env, 'WORCA_BROKER_GITHUB_CLIENT_SECRET', readFile);
+  if (ghSecret.error) errors.push(ghSecret.error);
+  if (ghSecret.value && !githubClientId) errors.push('WORCA_BROKER_GITHUB_CLIENT_SECRET needs WORCA_BROKER_GITHUB_CLIENT_ID');
+  if (githubClientId && !/^[A-Za-z0-9._-]{8,64}$/.test(githubClientId)) errors.push('WORCA_BROKER_GITHUB_CLIENT_ID does not look like a GitHub client ID');
+
   const keys = singleKeys(env, readFile, errors);
   const dataDir = String(env.WORCA_BROKER_DATA_DIR || '').trim() || null;
 
@@ -177,6 +185,11 @@ export function readBrokerConfig(env = process.env, { readFile = readFileSync } 
     identity,
     slotsFile: String(env.WORCA_BROKER_SLOTS_FILE || '').trim() || null,
     localUrl: String(env.WORCA_BROKER_LOCAL_URL || '').trim() || null,
+    github: githubClientId ? Object.freeze({
+      clientId: githubClientId,
+      clientSecret: ghSecret.value || null,
+      scope: String(env.WORCA_BROKER_GITHUB_SCOPES ?? 'repo').trim(),
+    }) : null,
     singleKeys: Object.freeze(keys),
     allowTeamKeys: /^(1|true|yes|on)$/i.test(String(env.WORCA_BROKER_ALLOW_TEAM_KEYS || '')),
     defaultDailyUsd: Number.isNaN(defaultDailyUsd) ? null : defaultDailyUsd,

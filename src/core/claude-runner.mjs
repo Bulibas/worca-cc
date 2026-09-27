@@ -570,11 +570,19 @@ async function runViaBroker(opts) {
   }
   const kind = ['aux', 'test', 'ask', 'phase'].includes(opts.spawnKind) ? opts.spawnKind
     : (opts.permissionMode === 'dontAsk' ? 'ask' : 'phase');
+  // Whether this spawn runs where no other person's agent can read it: an agent spawn under
+  // the paying person's own pool user (not a resumed run's starter's), or a server-side spawn
+  // when agents run under their own users (they can't read the server's processes). The
+  // broker uses a personal Claude subscription only for such spawns.
+  const owner = normalizeBillTo(currentOwner()) || billTo;
+  const isolated = opts.asAgent
+    ? owner === billTo && !!agentIdentityFor(owner)?.dedicated
+    : !!agentIdentity();
   let minted;
   try {
     minted = await mintSpawnToken({
       billTo: billTo || 'local', slots: [bridgeSlot || route.slot], kind, ttlSec: SPAWN_TTL_SEC[kind],
-      runId: opts.runId || null, threadId: opts.threadId || null,
+      runId: opts.runId || null, threadId: opts.threadId || null, isolated,
     });
   } catch (err) {
     throw brokerSpawnError(`cannot get a token for this spawn: ${err.message}`, err.status === 401 ? 'auth' : 'network');

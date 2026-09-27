@@ -42,6 +42,15 @@ export function openStore(path = ':memory:') {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
+  // Columns added after the first release, on existing databases too:
+  //   credentials.kind   'api-key' | 'subscription' | 'github' (shown without decrypting)
+  //   tokens.isolated    the spawn runs under its person's own agent user (a subscription
+  //                      is only ever used by such a spawn in multi mode)
+  //   usage.plan         'subscription' for calls on a Claude plan (no per-call price)
+  const cols = (t) => new Set(db.prepare(`PRAGMA table_info(${t})`).all().map((r) => r.name));
+  if (!cols('credentials').has('kind')) db.exec('ALTER TABLE credentials ADD COLUMN kind TEXT');
+  if (!cols('tokens').has('isolated')) db.exec('ALTER TABLE tokens ADD COLUMN isolated INTEGER NOT NULL DEFAULT 0');
+  if (!cols('usage').has('plan')) db.exec('ALTER TABLE usage ADD COLUMN plan TEXT');
   const q = (sql) => db.prepare(sql);
 
   const s = {
@@ -49,19 +58,19 @@ export function openStore(path = ':memory:') {
     close() { try { db.close(); } catch { /* already closed */ } },
 
     // ── credentials ──
-    putCredential({ billTo, slot, sealed, suffix, verifiedAt = null, now = Date.now() }) {
-      q(`INSERT INTO credentials (bill_to, slot, ciphertext, iv, tag, key_id, suffix, created_at, updated_at, verified_at, verify_error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    putCredential({ billTo, slot, sealed, suffix, kind = null, verifiedAt = null, now = Date.now() }) {
+      q(`INSERT INTO credentials (bill_to, slot, ciphertext, iv, tag, key_id, suffix, kind, created_at, updated_at, verified_at, verify_error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT (bill_to, slot) DO UPDATE SET ciphertext = excluded.ciphertext, iv = excluded.iv, tag = excluded.tag,
-           key_id = excluded.key_id, suffix = excluded.suffix, updated_at = excluded.updated_at,
+           key_id = excluded.key_id, suffix = excluded.suffix, kind = excluded.kind, updated_at = excluded.updated_at,
            verified_at = excluded.verified_at, verify_error = NULL`)
-        .run(billTo, slot, sealed.ciphertext, sealed.iv, sealed.tag, sealed.keyId, suffix, iso(now), iso(now), verifiedAt ? iso(verifiedAt) : null);
+        .run(billTo, slot, sealed.ciphertext, sealed.iv, sealed.tag, sealed.keyId, suffix, kind, iso(now), iso(now), verifiedAt ? iso(verifiedAt) : null);
     },
     getCredential(billTo, slot) {
       return q('SELECT * FROM credentials WHERE bill_to = ? AND slot = ?').get(billTo, slot) || null;
     },
     listCredentials(billTo) {
-      return q('SELECT bill_to, slot, suffix, key_id, created_at, updated_at, last_used_at, verified_at, verify_error, daily_usd, monthly_usd FROM credentials WHERE bill_to = ? ORDER BY slot').all(billTo);
+      return q('SELECT bill_to, slot, suffix, kind, key_id, created_at, updated_at, last_used_at, verified_at, verify_error, daily_usd, monthly_usd FROM credentials WHERE bill_to = ? ORDER BY slot').all(billTo);
     },
     allCredentials() {
       return q('SELECT * FROM credentials').all();
@@ -87,10 +96,10 @@ export function openStore(path = ':memory:') {
 
     // ── tokens ──
     insertToken(row) {
-      q(`INSERT INTO tokens (hash, spawn_id, run_id, thread_id, kind, bill_to, slots, issuer, created_at, expires_at, budget_usd)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      q(`INSERT INTO tokens (hash, spawn_id, run_id, thread_id, kind, bill_to, slots, issuer, created_at, expires_at, budget_usd, isolated)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(row.hash, row.spawnId, row.runId ?? null, row.threadId ?? null, row.kind, row.billTo,
-          JSON.stringify(row.slots), row.issuer, iso(row.createdAt), iso(row.expiresAt), row.budgetUsd ?? null);
+          JSON.stringify(row.slots), row.issuer, iso(row.createdAt), iso(row.expiresAt), row.budgetUsd ?? null, row.isolated ? 1 : 0);
     },
     tokenByHash(hash) {
       return q('SELECT * FROM tokens WHERE hash = ?').get(hash) || null;
@@ -121,10 +130,10 @@ export function openStore(path = ':memory:') {
 
     // ── usage ──
     insertUsage(u) {
-      q(`INSERT INTO usage (at, bill_to, slot, spawn_id, run_id, model, status, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, usd, ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      q(`INSERT INTO usage (at, bill_to, slot, spawn_id, run_id, model, status, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, usd, ms, plan)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(iso(u.at ?? Date.now()), u.billTo, u.slot, u.spawnId ?? null, u.runId ?? null, u.model ?? null, u.status ?? null,
-          u.inputTokens ?? 0, u.outputTokens ?? 0, u.cacheReadTokens ?? 0, u.cacheWriteTokens ?? 0, u.usd ?? 0, u.ms ?? null);
+          u.inputTokens ?? 0, u.outputTokens ?? 0, u.cacheReadTokens ?? 0, u.cacheWriteTokens ?? 0, u.usd ?? 0, u.ms ?? null, u.plan ?? null);
     },
     spentSince(billTo, slot, sinceMs) {
       const r = q('SELECT COALESCE(SUM(usd), 0) AS usd FROM usage WHERE bill_to = ? AND slot = ? AND at >= ?').get(billTo, slot, iso(sinceMs));
@@ -147,12 +156,12 @@ export function openStore(path = ':memory:') {
       const where = []; const args = [];
       if (since) { where.push('at >= ?'); args.push(since); }
       if (until) { where.push('at < ?'); args.push(until); }
-      return q(`SELECT bill_to AS billTo, slot, COUNT(*) AS requests, COALESCE(SUM(usd), 0) AS usd,
+      return q(`SELECT bill_to AS billTo, slot, COALESCE(plan, 'api') AS plan, COUNT(*) AS requests, COALESCE(SUM(usd), 0) AS usd,
           COALESCE(SUM(input_tokens), 0) AS inputTokens, COALESCE(SUM(output_tokens), 0) AS outputTokens,
           COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens, COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens,
           COUNT(DISTINCT run_id) AS runs, MAX(at) AS lastAt
         FROM usage ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-        GROUP BY bill_to, slot ORDER BY usd DESC`).all(...args);
+        GROUP BY bill_to, slot, COALESCE(plan, 'api') ORDER BY usd DESC`).all(...args);
     },
     deleteOldUsage(now = Date.now()) {
       return q('DELETE FROM usage WHERE at < ?').run(iso(now - 400 * 86_400_000)).changes;

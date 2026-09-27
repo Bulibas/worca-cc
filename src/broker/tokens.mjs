@@ -67,6 +67,9 @@ export function parseMintRequest(body, { slotIds, maxTtlMs }) {
       billTo, slots: [...new Set(b.slots)], spawnId: String(b.spawnId), issuer: String(b.issuer),
       runId: b.runId != null ? String(b.runId) : null, threadId: b.threadId != null ? String(b.threadId) : null,
       kind, ttlMs, budgetUsd,
+      // worca says so when the spawn runs under its person's own agent user (agent-pool.mjs):
+      // only then may a personal Claude subscription be used for it in multi mode.
+      isolated: b.isolated === true,
     },
   };
 }

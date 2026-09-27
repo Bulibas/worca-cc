@@ -11,7 +11,7 @@ import { resolveToken, tokenFromHeaders, parseMintRequest, mintToken, safeEqual,
 import { createUsageTap, priceUsage } from './usage.mjs';
 import { scrubText } from './scrub.mjs';
 import { createLimits } from './limits.mjs';
-import { createCopilotExchange } from './copilot.mjs';
+import { createCopilotExchange, parseGithubSecret, refreshGithubToken } from './copilot.mjs';
 
 export const MAX_REQUEST_BYTES = 32 << 20;
 const MAX_ERROR_BODY = 64 << 10;
@@ -76,6 +76,23 @@ function readBody(req, limit) {
 /** A human name for a slot in messages: "Anthropic API key". */
 const slotName = (slot) => slot.label || slot.id;
 
+/** The beta header a Claude subscription (OAuth) token needs on every API call. */
+export const OAUTH_BETA = 'oauth-2025-04-20';
+
+/** 'subscription' (sk-ant-oat…, from `claude setup-token`), 'github', or 'api-key'. Pure. */
+export function credentialKind(slot, secret) {
+  if (slot && slot.auth === 'github-user') return 'github';
+  if (slot && slot.protocol === 'anthropic' && /^sk-ant-oat\d*-/.test(String(secret || ''))) return 'subscription';
+  return 'api-key';
+}
+
+/** Comma-joined betas without duplicates. Pure. */
+export function mergeBetas(...lists) {
+  const out = [];
+  for (const l of lists) for (const b of String(l || '').split(',').map((s) => s.trim()).filter(Boolean)) if (!out.includes(b)) out.push(b);
+  return out.join(',');
+}
+
 /**
  * @param {{config:object, slots:object[], store:object, log?:(line:string)=>void, now?:()=>number,
  *          requestImpl?:(url:URL, opts:object)=>import('node:http').ClientRequest}} o
@@ -98,12 +115,12 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
   };
 
   /** Where a request for `slot` goes and the credential headers it carries. May throw (Copilot exchange). */
-  async function upstreamAuth(slot, secret, { force = false } = {}) {
+  async function upstreamAuth(slot, secret, { force = false, incoming = {} } = {}) {
     if (slot.auth === 'copilot') {
       const t = await copilotFor(slot).token(secret, { force });
       return { origin: t.host, headers: { authorization: `Bearer ${t.token}` }, secrets: [t.token] };
     }
-    return { origin: new URL(slot.upstream).origin, headers: authHeaders(slot, secret), secrets: [] };
+    return { origin: new URL(slot.upstream).origin, headers: authHeaders(slot, secret, incoming), secrets: [] };
   }
 
   const whereToAdd = (slot) => (config.mode === 'multi' && config.publicUrl
@@ -137,9 +154,15 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
     return value;
   }
 
-  function authHeaders(slot, secret) {
+  function authHeaders(slot, secret, incoming = {}) {
     if (!secret || slot.auth === 'none') return {};
+    // A Claude subscription token goes as a Bearer with the OAuth beta the API requires
+    // for it (merged with the betas the CLI asked for), never as x-api-key.
+    if (credentialKind(slot, secret) === 'subscription') {
+      return { authorization: `Bearer ${secret}`, 'anthropic-beta': mergeBetas(incoming['anthropic-beta'], OAUTH_BETA) };
+    }
     if (slot.auth === 'x-api-key') return { 'x-api-key': secret };
+    if (slot.auth === 'github-user') return { authorization: `token ${parseGithubSecret(secret).token}` };
     return { authorization: `Bearer ${secret}` };
   }
 
@@ -149,12 +172,19 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
     if (slot.auth === 'copilot') {
       return copilotFor(slot).token(secret, { force: true }).then(() => ({ ok: true }), (err) => ({ ok: false, status: err.status, error: scrubText(err.message, [secret]) }));
     }
+    // What to ask: the slot's verify request; a Claude subscription can't list models, so it
+    // gets the smallest possible message (one output token of the smallest model); GitHub: /user.
+    const sub = credentialKind(slot, secret) === 'subscription';
+    const spec = sub
+      ? { method: 'POST', path: '/v1/messages', body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }) }
+      : slot.auth === 'github-user' ? { method: 'GET', path: '/user' } : slot.verify;
     return new Promise((resolveP) => {
-      const url = new URL(slot.verify.path, slot.upstream);
-      const headers = { accept: 'application/json', 'accept-encoding': 'identity', ...authHeaders(slot, secret) };
+      const url = new URL(spec.path, slot.upstream);
+      const headers = { accept: 'application/json', 'accept-encoding': 'identity', ...authHeaders(slot, secret), ...(spec.body ? { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(spec.body)) } : {}) };
       if (slot.protocol === 'anthropic') headers['anthropic-version'] = '2023-06-01';
+      if (slot.auth === 'github-user') headers['user-agent'] = 'worca-broker';
       let req;
-      try { req = doRequest(url, { method: slot.verify.method || 'GET', headers, timeout: 15_000 }); }
+      try { req = doRequest(url, { method: spec.method || 'GET', headers, timeout: 15_000 }); }
       catch (err) { resolveP({ ok: false, error: `cannot reach ${url.host}: ${err.message}` }); return; }
       req.on('timeout', () => req.destroy(new Error('timed out')));
       req.on('error', (err) => resolveP({ ok: false, error: `cannot reach ${url.host}: ${err.message}` }));
@@ -165,11 +195,11 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
           if (r.statusCode >= 200 && r.statusCode < 300) { resolveP({ ok: true }); return; }
           let detail = Buffer.concat(parts).toString('utf8');
           try { const j = JSON.parse(detail); detail = j?.error?.message || j?.message || detail; } catch { /* text */ }
-          resolveP({ ok: false, status: r.statusCode, error: scrubText(`${r.statusCode}: ${String(detail).slice(0, 300)}`, [secret]) });
+          resolveP({ ok: false, status: r.statusCode, error: scrubText(`${r.statusCode}: ${String(detail).slice(0, 300)}`, [secret, parseGithubSecret(secret).token]) });
         });
         r.on('error', (err) => resolveP({ ok: false, error: err.message }));
       });
-      req.end();
+      req.end(spec.body);
     });
   }
 
@@ -182,10 +212,12 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
     if (s.length < 8 || s.length > 4096 || /\s/.test(s)) return { ok: false, status: 422, error: 'that does not look like a key: paste the whole value, without spaces' };
     const v = await verifyCredential(slot, s);
     if (!v.ok) return { ok: false, status: 422, error: `${slotName(slot)} was not accepted: ${v.error}` };
-    store.putCredential({ billTo, slot: slotId, sealed: seal(config.vaultKey, s, { billTo, slot: slotId }), suffix: suffixOf(s), verifiedAt: now(), now: now() });
+    const kind = credentialKind(slot, s);
+    const suffix = suffixOf(slot.auth === 'github-user' ? parseGithubSecret(s).token : s);
+    store.putCredential({ billTo, slot: slotId, sealed: seal(config.vaultKey, s, { billTo, slot: slotId }), suffix, kind, verifiedAt: now(), now: now() });
     credCache.delete(`${billTo}|${slotId}`);
-    log(`${new Date(now()).toISOString()} credential saved: ${billTo} ${slotId}`);
-    return { ok: true, suffix: suffixOf(s) };
+    log(`${new Date(now()).toISOString()} credential saved: ${billTo} ${slotId} (${kind})`);
+    return { ok: true, suffix, kind };
   }
 
   async function testCredential(billTo, slotId) {
@@ -212,7 +244,10 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
     return slots.map((slot) => {
       const base = { id: slot.id, label: slot.label, protocol: slot.protocol, credential: slot.credential, keyHint: slot.keyHint || '', ...(slot.signIn ? { signIn: slot.signIn } : {}) };
       if (slot.credential === 'none' || slot.auth === 'none') return { ...base, state: 'keyless' };
-      if (config.mode === 'single') return { ...base, state: config.singleKeys[slot.id] ? 'set' : 'missing' };
+      if (config.mode === 'single') {
+        const k = config.singleKeys[slot.id];
+        return { ...base, state: k ? 'set' : 'missing', ...(k ? { kind: credentialKind(slot, k) } : {}) };
+      }
       if (slot.credential === 'operator') return { ...base, state: config.allowTeamKeys && config.singleKeys[slot.id] ? 'operator' : 'missing' };
       const r = rows.get(slot.id);
       if (!r) return { ...base, state: 'missing' };
@@ -220,7 +255,7 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
       return {
         ...base,
         state: stale ? 'invalid' : (r.verify_error ? 'invalid' : 'set'),
-        suffix: r.suffix, createdAt: r.created_at, updatedAt: r.updated_at, lastUsedAt: r.last_used_at,
+        suffix: r.suffix, kind: r.kind || null, createdAt: r.created_at, updatedAt: r.updated_at, lastUsedAt: r.last_used_at,
         verifiedAt: r.verified_at, verifyError: stale ? 'the vault key changed: enter this key again' : r.verify_error,
         dailyUsd: r.daily_usd, monthlyUsd: r.monthly_usd,
       };
@@ -284,6 +319,15 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
     const cred = resolveCredential(tok.bill_to, slot);
     if (cred.missing) { refuseAuth(`no ${slotName(slot)} for ${tok.bill_to}. ${capital(whereToAdd(slot))}`); return; }
     if (cred.error) { refuseAuth(`${slotName(slot)} for ${tok.bill_to}: ${cred.error}`); return; }
+    // A Claude subscription belongs to one person. On a shared instance it is only used by a
+    // spawn under that person's own agent user; any other spawn could hand it to someone
+    // else, which for a subscription is account sharing, not just a wrong bill.
+    const subscription = credentialKind(slot, cred.secret) === 'subscription';
+    if (subscription && config.mode === 'multi' && !tok.isolated) {
+      refuseAuth(`${tok.bill_to}'s Claude subscription is only used by agents that run under their own user, and this spawn doesn't. ` +
+        'Use an API key on the key page, or ask the operator to run agents under their own users (docs/credential-broker.md)');
+      return;
+    }
 
     const admit = limits.acquire({ tokenRow: tok, slot, credentialRow: cred.row });
     if (!admit.release) {
@@ -309,12 +353,14 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
     const finish = (status, usage) => {
       if (settled) return; settled = true;
       admit.release();
-      const usd = usage ? priceUsage(usage) : 0;
+      // A subscription call has no per-call price: tokens are recorded, dollars are not.
+      const usd = usage && !subscription ? priceUsage(usage) : 0;
       try {
         store.insertUsage({
           at: now(), billTo: tok.bill_to, slot: slot.id, spawnId: tok.spawn_id, runId: tok.run_id,
           model: usage?.model ?? null, status, inputTokens: usage?.inputTokens, outputTokens: usage?.outputTokens,
           cacheReadTokens: usage?.cacheReadTokens, cacheWriteTokens: usage?.cacheWriteTokens, usd, ms: now() - started,
+          plan: subscription ? 'subscription' : null,
         });
         store.addSpend(tok.hash, usd);
         if (cred.row) store.markUsed(tok.bill_to, slot.id, now());
@@ -330,7 +376,7 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
     /** One attempt. Copilot gets exactly one retry with a fresh exchange on a 401 (its token expired early). */
     const send = async (attempt) => {
       let auth;
-      try { auth = await upstreamAuth(slot, cred.secret, { force: attempt > 0 }); }
+      try { auth = await upstreamAuth(slot, cred.secret, { force: attempt > 0, incoming: req.headers }); }
       catch (err) {
         finish(err.status || 502, null);
         if (err.status === 401 || err.status === 403) {
@@ -444,6 +490,35 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
       const who = normalizeBillTo(decodeURIComponent(m[1]));
       if (!who) { sendJson(res, 400, { error: 'bad person' }); return; }
       sendJson(res, 200, { person: who, keyPage: config.publicUrl, slots: slotStatus(who) });
+      return;
+    }
+    // "Push as me": the acting person's GitHub user token, for ONE git or gh call worca makes
+    // itself (never an agent). A GitHub App user token close to expiry is renewed first.
+    if (req.method === 'POST' && p === '/internal/github-token') {
+      const slot = [...slotById.values()].find((s) => s.auth === 'github-user');
+      if (!slot) { sendJson(res, 404, { error: '"push as me" is not set up on the broker (WORCA_BROKER_GITHUB_CLIENT_ID)', code: 'not_configured' }); return; }
+      const who = normalizeBillTo(body?.person);
+      if (!who || who === 'local') { sendJson(res, 400, { error: 'person must be a signed-in person\'s email' }); return; }
+      const c = resolveCredential(who, slot);
+      if (c.missing) { sendJson(res, 404, { error: `${who} has not connected GitHub${config.publicUrl ? ` (key page: ${config.publicUrl})` : ''}`, code: 'not_connected' }); return; }
+      if (c.error) { sendJson(res, 409, { error: c.error }); return; }
+      let g = parseGithubSecret(c.secret);
+      if (g.refreshToken && g.expiresAt && g.expiresAt - now() < 5 * 60_000) {
+        try {
+          const next = await refreshGithubToken({ refreshToken: g.refreshToken, clientId: slot.clientId, clientSecret: config.github?.clientSecret, fetchImpl, ...(slot.deviceBaseUrl ? { baseUrl: slot.deviceBaseUrl } : {}), now: now() });
+          g = parseGithubSecret(next);
+          store.putCredential({ billTo: who, slot: slot.id, sealed: seal(config.vaultKey, next, { billTo: who, slot: slot.id }), suffix: suffixOf(g.token), kind: 'github', verifiedAt: now(), now: now() });
+          credCache.delete(`${who}|${slot.id}`);
+        } catch (err) {
+          store.setVerify(who, slot.id, { ok: false, error: err.message, now: now() });
+          credCache.delete(`${who}|${slot.id}`);
+          sendJson(res, 409, { error: err.message, code: 'expired' });
+          return;
+        }
+      }
+      store.markUsed(who, slot.id, now());
+      log(`${new Date(now()).toISOString()} github token handed to worca for ${who}`);
+      sendJson(res, 200, { token: g.token, expiresAt: g.expiresAt ? new Date(g.expiresAt).toISOString() : null });
       return;
     }
     if (req.method === 'GET' && p === '/internal/usage/summary') {

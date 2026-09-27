@@ -26,6 +26,10 @@ services:
       WORCA_BROKER_URL: http://broker:8080
       WORCA_BROKER_SECRET: ${WORCA_BROKER_SECRET:?set WORCA_BROKER_SECRET in .env}
       WORCA_BROKER_SYSTEM_BILL_TO: ${WORCA_BROKER_SYSTEM_BILL_TO:-}
+      # Optional: pushes and pull requests as the person who acted (prefer | required),
+      # and what to do with MCP servers that carry a literal secret (block | warn | off).
+      WORCA_GH_AS_PERSON: ${WORCA_GH_AS_PERSON:-}
+      WORCA_MCP_SECRETS: ${WORCA_MCP_SECRETS:-}
       # The key lives in the broker now; these stay empty in worca.
       ANTHROPIC_API_KEY: ""
       CLAUDE_CODE_OAUTH_TOKEN: ""
@@ -47,6 +51,10 @@ services:
       WORCA_IDENTITY_HEADER: ${WORCA_BROKER_IDENTITY_HEADER:-}
       WORCA_BROKER_DEFAULT_DAILY_USD: ${WORCA_BROKER_DEFAULT_DAILY_USD:-}
       WORCA_BROKER_DEFAULT_MONTHLY_USD: ${WORCA_BROKER_DEFAULT_MONTHLY_USD:-}
+      # "Push as me": the GitHub App or OAuth App people sign in with on the key page.
+      WORCA_BROKER_GITHUB_CLIENT_ID: ${WORCA_BROKER_GITHUB_CLIENT_ID:-}
+      WORCA_BROKER_GITHUB_CLIENT_SECRET: ${WORCA_BROKER_GITHUB_CLIENT_SECRET:-}
+      WORCA_BROKER_GITHUB_SCOPES: ${WORCA_BROKER_GITHUB_SCOPES:-repo}
       # The image's /worca is owned by the worca user, so a named volume there is too.
       WORCA_BROKER_DATA_DIR: /worca/broker
     volumes:

@@ -4,8 +4,8 @@
 // nothing on worca's side (the catalog, an Ask proposal, an agent's env) can send a
 // key anywhere else (guarantee K2). Pure.
 
-export const PROTOCOLS = Object.freeze(['anthropic', 'openai']);
-export const AUTH_STYLES = Object.freeze(['x-api-key', 'bearer', 'copilot', 'none']);
+export const PROTOCOLS = Object.freeze(['anthropic', 'openai', 'github']);
+export const AUTH_STYLES = Object.freeze(['x-api-key', 'bearer', 'copilot', 'github-user', 'none']);
 const HEADER_NAME_RE = /^[a-z0-9-]{1,64}$/;
 /** Request headers Copilot's gateway needs beyond the common allowlist (the editor identity). */
 const COPILOT_HEADERS = Object.freeze([
@@ -26,14 +26,19 @@ const OPENAI_PATHS = Object.freeze([
   ['GET', '/v1/models'],
 ]);
 
-/** The built-in slots. `local` exists only when the operator names its upstream. */
-export function builtinSlots({ localUrl = null } = {}) {
+/**
+ * The built-in slots. `local` exists only when the operator names its upstream; `github`
+ * ("push as me") only when the operator configured a GitHub App or OAuth App for it.
+ */
+export function builtinSlots({ localUrl = null, github = null } = {}) {
   const slots = [
     {
-      id: 'anthropic', label: 'Anthropic API key', protocol: 'anthropic',
+      // An API key (sk-ant-api…) or a Claude subscription token from `claude setup-token`
+      // (sk-ant-oat…): the broker tells them apart and sends each the way it must be sent.
+      id: 'anthropic', label: 'Anthropic API key or Claude subscription', protocol: 'anthropic',
       upstream: 'https://api.anthropic.com', auth: 'x-api-key', credential: 'per-person',
       paths: ANTHROPIC_PATHS, verify: { method: 'GET', path: '/v1/models' },
-      keyHint: 'sk-ant-…',
+      keyHint: 'sk-ant-api… or, from `claude setup-token`, sk-ant-oat…',
     },
     {
       id: 'openai', label: 'OpenAI API key', protocol: 'openai',
@@ -57,6 +62,16 @@ export function builtinSlots({ localUrl = null } = {}) {
       headers: COPILOT_HEADERS, verify: { exchange: true }, keyHint: '', signIn: 'github-device',
     },
   ];
+  if (github && github.clientId) {
+    // Never proxied (no paths): worca asks the broker for a short-lived token for ONE
+    // git or gh call of the acting person (/internal/github-token), and makes the call.
+    slots.push({
+      id: 'github', label: 'GitHub (push as me)', protocol: 'github',
+      upstream: 'https://api.github.com', auth: 'github-user', credential: 'per-person',
+      paths: Object.freeze([]), verify: { github: true }, keyHint: 'or paste a fine-grained token (github_pat_…)',
+      signIn: 'github-device', clientId: github.clientId, scope: github.scope,
+    });
+  }
   if (localUrl) {
     slots.push({
       id: 'local', label: 'Local models', protocol: 'anthropic',
@@ -120,16 +135,17 @@ export function mergeSlots(builtins, extra) {
       const issue = upstreamIssue(s.upstream);
       if (issue) throw new Error(`${where}: ${issue}`);
       s.upstream = new URL(s.upstream).origin;
-      s.paths = normPaths(s.paths || (s.protocol === 'openai' ? OPENAI_PATHS : ANTHROPIC_PATHS), where);
+      // A GitHub ("push as me") slot is never proxied: it keeps no paths.
+      s.paths = s.auth === 'github-user' ? Object.freeze([]) : normPaths(s.paths || (s.protocol === 'openai' ? OPENAI_PATHS : ANTHROPIC_PATHS), where);
       s.label = typeof s.label === 'string' && s.label.trim() ? s.label.trim() : s.id;
-      if (s.verify && (typeof s.verify !== 'object' || (!s.verify.path && !s.verify.exchange))) throw new Error(`${where}: verify must be {method, path}`);
+      if (s.verify && (typeof s.verify !== 'object' || (!s.verify.path && !s.verify.exchange && !s.verify.github))) throw new Error(`${where}: verify must be {method, path}`);
       if (s.headers !== undefined) {
         if (!Array.isArray(s.headers) || !s.headers.every((x) => HEADER_NAME_RE.test(String(x).toLowerCase()))) throw new Error(`${where}: headers must be a list of header names`);
         if (s.headers.some((x) => /^(authorization|x-api-key|cookie|host|proxy-.*)$/i.test(x))) throw new Error(`${where}: headers may not include credential or routing headers`);
         s.headers = Object.freeze(s.headers.map((x) => String(x).toLowerCase()));
       }
       for (const k of ['exchangeUrl', 'deviceBaseUrl']) {
-        if (s.auth !== 'copilot' || s[k] === undefined) continue;
+        if ((s.auth !== 'copilot' && s.auth !== 'github-user') || s[k] === undefined) continue;
         let origin;
         try { origin = new URL(s[k]).origin; } catch { throw new Error(`${where}: ${k} is not a URL`); }
         const issue = upstreamIssue(origin);

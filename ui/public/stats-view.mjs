@@ -718,7 +718,7 @@ export function renderPeopleCard(byPerson, rangeLabel, { doc = globalThis.docume
     tr.appendChild(spend);
     tr.appendChild(h(doc, 'td', 'num', compactCount(p.requests)));
     tr.appendChild(h(doc, 'td', 'num', `${compactCount(p.inputTokens + (p.cacheReadTokens || 0))} / ${compactCount(p.outputTokens)}`));
-    tr.appendChild(h(doc, 'td', 'people-slots', p.slots.map((s) => SLOT_NAMES[s.slot] || s.slot).join(', ')));
+    tr.appendChild(h(doc, 'td', 'people-slots', [...new Set(p.slots.map((s) => `${SLOT_NAMES[s.slot] || s.slot}${s.plan === 'subscription' ? ' (subscription)' : ''}`))].join(', ')));
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);

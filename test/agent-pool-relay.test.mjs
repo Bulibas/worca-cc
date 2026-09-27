@@ -40,7 +40,7 @@ test('identity: each person gets their own user and HOME, stored; nobody in part
   const file = join(dir, 'agent-pool.json');
   assert.deepEqual(agentPool(ENV), { users: ['worca-agent-01', 'worca-agent-02'], homes: '/data/agent-homes' });
   const ada = agentIdentityFor('Ada@Acme.dev', ENV, { file });
-  assert.deepEqual(ada, { user: 'worca-agent-01', home: '/data/agent-homes/worca-agent-01', gid: 1001 });
+  assert.deepEqual(ada, { user: 'worca-agent-01', home: '/data/agent-homes/worca-agent-01', gid: 1001, dedicated: true });
   const bob = agentIdentityFor('bob@acme.dev', ENV, { file });
   assert.equal(bob.user, 'worca-agent-02');
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).people, { 'ada@acme.dev': 'worca-agent-01', 'bob@acme.dev': 'worca-agent-02' });
@@ -49,6 +49,11 @@ test('identity: each person gets their own user and HOME, stored; nobody in part
   assert.deepEqual(agentIdentityFor(null, ENV, { file }).user, 'worca-agent');
   assert.equal(agentIdentityFor('ada@acme.dev', { ...ENV, WORCA_AGENT_POOL: '' }, { file }).user, 'worca-agent', 'no pool: the shared user');
   assert.equal(agentIdentityFor('ada@acme.dev', {}, { file }), null, 'no isolation: agents run as the server');
+  // A third person with a pool of two shares a user: not dedicated (no Claude subscription for them).
+  const cy = agentIdentityFor('cy@acme.dev', ENV, { file });
+  assert.ok(['worca-agent-01', 'worca-agent-02'].includes(cy.user));
+  assert.equal(cy.dedicated, false);
+  assert.equal(agentIdentityFor('bob@acme.dev', ENV, { file }).dedicated, true);
 });
 
 test('relay config: the child gets the relay URL and this turn\'s token, nothing that points at worca\'s files', () => {

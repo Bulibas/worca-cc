@@ -101,7 +101,7 @@ test('a run started with an explicit model is refused up front when that model\'
   const bob = await call('POST', '/api/run', 'bob@example.com', { projectDir, prompt: 'do it', model: 'claude-sonnet-5' });
   assert.equal(bob.status, 409);
   assert.equal(bob.body.code, 'credential-missing');
-  assert.match(bob.body.error, /You haven't added your Anthropic API key yet, and claude-sonnet-5 needs it.*https:\/\/worca-01-keys\.example\.com/);
+  assert.match(bob.body.error, /You haven't added your Anthropic API key or Claude subscription yet, and claude-sonnet-5 needs it.*https:\/\/worca-01-keys\.example\.com/);
   const ada = await call('POST', '/api/run', 'ada@example.com', { projectDir: '/definitely/not/a/project', prompt: 'do it', model: 'claude-sonnet-5' });
   assert.notEqual(ada.body?.code, 'credential-missing', 'Ada has a key: whatever else happens, it is not this refusal');
 });

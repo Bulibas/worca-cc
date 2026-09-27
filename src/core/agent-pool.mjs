@@ -71,5 +71,6 @@ export function agentIdentityFor(person, env = process.env, { file = null } = {}
     warnedFull = true;
     console.warn(`[worca] agent pool: all ${pool.users.length} agent users are assigned; more people now share one. Their agents can read each other's processes.`);
   }
-  return { user: r.user, home: join(pool.homes, r.user), gid: base.gid };
+  // dedicated: this person's user is theirs alone (not the shared fallback, not hash-shared)
+  return { user: r.user, home: join(pool.homes, r.user), gid: base.gid, dedicated: !r.shared };
 }

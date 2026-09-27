@@ -85,7 +85,7 @@ test('a good key is stored encrypted, shown only as its last 4 characters, and n
   const { call } = await session('ada@acme.dev');
   const res = await call('PUT', '/api/slots/anthropic', { secret: GOOD_KEY });
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { state: 'set', suffix: GOOD_KEY.slice(-4) });
+  assert.deepEqual(await res.json(), { state: 'set', suffix: GOOD_KEY.slice(-4), kind: 'api-key' });
   const row = store.getCredential('ada@acme.dev', 'anthropic');
   assert.ok(!Buffer.from(row.ciphertext).toString('latin1').includes(GOOD_KEY));
   const me = await (await fetch(`${base}/api/me`, { headers: { 'cf-access-jwt-assertion': jwt('ada@acme.dev') } })).json();
@@ -115,7 +115,7 @@ test('a spawn billed to Ada uses Ada\'s key; one billed to Bob gets a clear "no 
     assert.equal(up.requests.at(-1).headers['x-api-key'], GOOD_KEY);
     const bob = await fetch(`${pbase}/p/anthropic/v1/models`, { headers: { 'x-api-key': mk('bob@acme.dev', 'sp-bob') } });
     assert.equal(bob.status, 403, 'a 403, not a 401: the CLI retries a 401 for minutes');
-    assert.match((await bob.json()).error.message, new RegExp(`no Anthropic API key for bob@acme\\.dev\\. Add one at ${PUBLIC.replace(/\./g, '\\.')}`));
+    assert.match((await bob.json()).error.message, new RegExp(`no Anthropic API key or Claude subscription for bob@acme\\.dev\\. Add one at ${PUBLIC.replace(/\./g, '\\.')}`));
   } finally {
     privateServer.closeAllConnections?.();
     privateServer.close();

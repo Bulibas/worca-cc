@@ -52,7 +52,10 @@ function slotCard(slot) {
   const card = el('article', { class: 'slot', id: `slot-${slot.id}` });
   const msg = el('p', { class: 'msg', hidden: true, role: 'status' });
   const say = (text, ok) => { msg.textContent = text; msg.className = `msg ${ok ? 'ok' : 'err'}`; msg.hidden = !text; };
-  const chipText = slot.state === 'set' && slot.suffix ? `Set ••••${slot.suffix}` : STATE_TEXT[slot.state] || slot.state;
+  const kindText = slot.kind === 'subscription' ? ' · Claude subscription' : '';
+  const chipText = (slot.state === 'set' && slot.suffix ? `Set ••••${slot.suffix}` : STATE_TEXT[slot.state] || slot.state) + (slot.state === 'set' ? kindText : '');
+  // GitHub ("push as me"): a GitHub sign-in, or a pasted fine-grained token, both.
+  const pasteToo = slot.id === 'github' || slot.protocol === 'github';
 
   const metaParts = [];
   if (slot.updatedAt) metaParts.push(`added ${when(slot.updatedAt)}`);
@@ -66,9 +69,13 @@ function slotCard(slot) {
 
   if (slot.credential === 'per-person' && slot.signIn === 'github-device') {
     card.append(githubSignIn(slot, say));
-  } else if (slot.credential === 'per-person') {
+    if (slot.protocol === 'github') {
+      card.append(el('p', { class: 'meta' }, "worca's pushes and pull requests for runs you start go out as you. Nothing here is ever given to an agent."));
+    }
+  }
+  if (slot.credential === 'per-person' && (slot.signIn !== 'github-device' || pasteToo)) {
     const input = el('input', { type: 'password', id: `key-${slot.id}`, autocomplete: 'off', spellcheck: 'false', placeholder: slot.keyHint ? `Paste your key (${slot.keyHint})` : 'Paste your key', 'aria-label': `${slot.label}` });
-    const form = el('div', { class: 'row', hidden: slot.state === 'set' });
+    const form = el('div', { class: 'row', hidden: slot.state === 'set' || (pasteToo && slot.state !== 'invalid') });
     const save = el('button', { class: 'primary', type: 'button' }, 'Save');
     save.addEventListener('click', async () => {
       if (!input.value.trim()) { say('Paste the key first.', false); return; }
@@ -76,7 +83,7 @@ function slotCard(slot) {
       try {
         await api('PUT', `/api/slots/${slot.id}`, { secret: input.value });
         input.value = '';
-        await load(`Saved. The provider accepted your ${slot.label}.`, slot.id);
+        await load(slot.protocol === 'github' ? 'Saved. GitHub accepted the token.' : `Saved. The provider accepted your ${slot.label}.`, slot.id);
       } catch (err) { say(err.message, false); save.disabled = false; }
     });
     form.append(el('div', { class: 'grow' }, input), save);
@@ -92,7 +99,7 @@ function slotCard(slot) {
       catch (err) { say(err.message, false); }
       test.disabled = false;
     });
-    const replace = el('button', { type: 'button', onclick: () => { form.hidden = false; actions.hidden = true; input.focus(); } }, 'Replace');
+    const replace = el('button', { type: 'button', onclick: () => { form.hidden = false; actions.hidden = true; input.focus(); } }, pasteToo ? 'Paste a token instead' : 'Replace');
     const del = el('button', { type: 'button', class: 'danger' }, 'Delete');
     const confirmRow = el('div', { class: 'row', hidden: true },
       el('span', { class: 'grow' }, `Delete your ${slot.label}? Runs using it will pause until you add another.`),
@@ -102,11 +109,18 @@ function slotCard(slot) {
       } }, 'Delete key'),
       el('button', { type: 'button', onclick: () => { confirmRow.hidden = true; actions.hidden = false; } }, 'Keep it'));
     del.addEventListener('click', () => { confirmRow.hidden = false; actions.hidden = true; say('', true); });
-    actions.append(test, replace, del);
+    // GitHub: the sign-in box above already has "Sign in again" and "Sign out"; here only
+    // pasting a token is offered (always shown when nothing is set yet).
+    if (pasteToo) {
+      actions.append(replace);
+      actions.hidden = false;
+    } else actions.append(test, replace, del);
     if (slot.state === 'invalid') form.hidden = false;
     card.append(form, actions, confirmRow);
 
-    if (slot.state === 'set' || slot.state === 'invalid') {
+    if (slot.kind === 'subscription' && slot.state === 'set') {
+      card.append(el('p', { class: 'usage' }, "Runs on your Claude plan: no per-call cost, and your plan's usage limits apply. Only agents that run under your own user use it."));
+    } else if (!pasteToo && (slot.state === 'set' || slot.state === 'invalid')) {
       const u = me.usage?.[slot.id] || { todayUsd: 0, monthUsd: 0 };
       card.append(el('p', { class: 'usage' }, `Today ${usd(u.todayUsd)} · This month ${usd(u.monthUsd)}`));
       const dIn = el('input', { type: 'number', min: '0', step: '1', id: `daily-${slot.id}`, value: slot.dailyUsd ?? '', placeholder: me.defaults?.dailyUsd != null ? String(me.defaults.dailyUsd) : 'none' });

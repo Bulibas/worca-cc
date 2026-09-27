@@ -71,7 +71,7 @@ test('device flow: code shown, pending while unapproved, then the sign-in is ver
   assert.deepEqual(await (await post('/api/slots/copilot/device/poll')).json(), { pending: true, slowDown: false });
   approved = true;
   const done = await (await post('/api/slots/copilot/device/poll')).json();
-  assert.deepEqual(done, { state: 'set', suffix: GH.slice(-4) });
+  assert.deepEqual(done, { state: 'set', suffix: GH.slice(-4), kind: 'api-key' });
   const row = store.getCredential('ada@acme.dev', 'copilot');
   assert.ok(row && !Buffer.from(row.ciphertext).toString('latin1').includes(GH));
   assert.equal((await post('/api/slots/copilot/device/poll')).status, 410, 'a finished flow cannot be polled again');

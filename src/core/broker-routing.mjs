@@ -24,7 +24,7 @@ const DEFAULT_BASE = Object.freeze({ openai: 'https://api.openai.com/v1', anthro
 export function slotForBaseUrl(baseUrl, slots = [], protocol = null) {
   let u;
   try { u = new URL(String(baseUrl || '').trim()); } catch { return null; }
-  const same = slots.filter((x) => x.auth !== 'copilot' && x.upstream === u.origin);
+  const same = slots.filter((x) => x.auth !== 'copilot' && x.auth !== 'github-user' && x.upstream === u.origin);
   const s = (protocol && same.find((x) => x.protocol === protocol)) || same[0];
   if (!s) return null;
   return { slot: s.id, prefix: u.pathname.replace(/\/+$/, '') };
