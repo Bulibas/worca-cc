@@ -76,11 +76,11 @@ async function boot({ settings = okSettings } = {}) {
   return { window, tick, $, openSettings };
 }
 
-test('About is the LAST settings card, read-only, with no version baked into the markup', () => {
+test('About is the LAST General card, read-only, with no version baked into the markup', () => {
   const view = settingsView();
-  const cards = [...view.querySelectorAll('section.card.settings-card')];
+  const cards = [...view.querySelectorAll('.settings-pane[data-tab="general"] section.card.settings-card')];
   const about = cards[cards.length - 1];
-  assert.equal(cards.length, 13, 'Appearance, My model credentials (hidden without a broker), Interface mode, the eight cards (Scheduled runs included), Getting started, then About');
+  assert.equal(cards.length, 7, 'Appearance, My model credentials (hidden without a broker), Interface mode, folders, spawn diagnostics, Getting started, then About — Runs, Ask Worca and Models hold the rest');
   assert.equal(about.id, 'about-card', 'About sits after the Getting started card');
   assert.equal(about.querySelector('.label-row > h2').textContent.trim(), 'About');
 

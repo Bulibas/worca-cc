@@ -44,12 +44,12 @@ test('every sidebar and top-nav item carries an explicit level', () => {
   }
 });
 
-test('every Settings tab and every Settings › General card carries an explicit level', () => {
+test('every Settings tab and every Settings card carries an explicit level', () => {
   const doc = shell();
   const tabs = [...doc.querySelectorAll('#settings-tabs button[data-tab]')];
   assert.ok(tabs.length >= 5);
   for (const b of tabs) assert.match(b.dataset.minLevel || '', LEVEL_RE, `Settings tab "${b.dataset.tab}"`);
-  const cards = [...doc.querySelectorAll('.settings-pane[data-tab="general"] > .settings-card')];
+  const cards = [...doc.querySelectorAll('.settings-pane .settings-card')];
   assert.ok(cards.length >= 10);
   for (const c of cards) {
     const name = c.id || (c.querySelector('h2') || {}).textContent;

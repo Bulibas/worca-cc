@@ -214,7 +214,7 @@ the caller's zone — and so is a time in the past.
   badge and resolve themselves when you act on them; completed, late and skipped
   items arrive read. Notifications are purged after 90 days, ended tickets after 30.
 - **Running** shows what is due within 24 hours. **History** marks a run *Started by
-  schedule*. **Settings › General › Scheduled runs** holds the defaults a new
+  schedule*. **Settings › Runs › Scheduled runs** holds the defaults a new
   schedule inherits.
 - Removing a project or workspace cancels its schedules; the confirmation names them.
 - **Interface mode** ([ui-levels.md](ui-levels.md)): the Schedules entry, *Start run*'s

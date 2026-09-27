@@ -2622,6 +2622,10 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .settings-card{max-width:760px;padding:22px;margin-left:auto;margin-right:auto;}
 .settings-card + .settings-card{margin-top:18px;}
 .settings-card[hidden]{display:none;}
+/* Settings › Models: Title generation + Auto workflow model side by side above the catalog, so two
+   short cards do not push it a screen down; one column once they would squeeze. */
+.models-helpers{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:18px;margin-bottom:18px;}
+.models-helpers > .settings-card{max-width:none;margin:0;}
 
 /* My model credentials (credential broker): one row per slot, a state chip on the right. */
 .cred-list{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
@@ -5536,10 +5540,6 @@ a.ask-card-task-title:hover{text-decoration-color:currentColor;}
 :root[data-level="advanced"] [data-max-level="simple"],
 :root[data-level="expert"] [data-max-level="simple"],
 :root[data-level="expert"] [data-max-level="advanced"]{display:none !important;}
-
-/* Simple shows General only: a one-button segmented control is noise, so the bar goes — unless a
-   deep link parked us on a higher tab, whose button is then kept (paintLevelBanner). */
-:root[data-level="simple"] #settings-tabs:not(:has([data-level-keep])){display:none !important;}
 
 /* The icon: a stack of layers, unlit ones ghosted. currentColor, so hover, the
    dark active fill and both themes come for free. */
