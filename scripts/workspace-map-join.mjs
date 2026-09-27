@@ -6,6 +6,8 @@
 // map and says why. The card fails only when it cannot write its outputs at all.
 import { joinMap, synthBrief } from '../src/core/workspace-map/join.mjs';
 import { outPath, readJsonInput, writeJson, writeText, workspaceOf, isObj, checkerFor, briefHead } from './workspace-map-io.mjs';
+import { dirname, join } from 'node:path';
+import { workspaceGraphEnricher } from '../src/core/workspace-map/graph.mjs';
 
 /** The empty catalog (the shape P1's catalog.mjs builds) a missing or unreadable catalog.json joins as. */
 const emptyCatalog = (name) => ({
@@ -43,7 +45,13 @@ export default async function ({ inputs, outputs, ctx, log }) {
     const usage = await readJsonInput(inputs?.usage);
     if (usage === null) notes.push('usage.json is missing or unreadable (static and candidate edges only)');
     for (const note of notes) log('warn', note);
-    const map = await joinMap({ catalog, usage, runId });
+    // P7: graphify enrichment + the merged cross-repo graph, written next to the map (the pipeline
+    // dir). Mock runs never build member graphs, so there it is a no-op (graph.mode 'none').
+    const enrich = workspaceGraphEnricher({
+      members: ws.members.map((m) => ({ key: m.key, dir: m.dir })),
+      outPath: join(dirname(mapPath), 'workspace-graph.json'),
+    });
+    const map = await joinMap({ catalog, usage, runId, enrich });
     await writeJson(mapPath, map);
     await writeText(briefPath, synthBrief(map, { mapPath, checkerCmd: checker }));
     const members = Array.isArray(map?.members) ? map.members.length : 0;
