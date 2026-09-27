@@ -35,6 +35,23 @@ function applySchemaDrops(body, d) {
   return d ? withoutTools(withToolSchemaKeywordsDropped(body, d.keywords), d.tools) : body;
 }
 
+// Models that refused a reasoning effort on the Anthropic passthrough (Copilot serves
+// claude-haiku-4.5 without one): the CLI's output_config.effort is left out of their
+// requests. Learned like schemaDrops, and listed so the Ask picker can grey the effort out.
+const effortDrops = new Set();   // catalog ids
+const EFFORT_REFUSED_RE = /does not support (?:reasoning )?effort|effort[^.]{0,40}not supported/i;
+export function _resetEffortDrops() { effortDrops.clear(); }
+/** Catalog ids whose upstream refused a reasoning effort since boot. */
+export function effortlessModels() { return new Set(effortDrops); }
+function withoutEffort(body) {
+  const oc = body && body.output_config;
+  if (!oc || typeof oc !== 'object' || !('effort' in oc)) return body;
+  const { effort: _drop, ...rest } = oc;
+  const out = { ...body };
+  if (Object.keys(rest).length) out.output_config = rest; else delete out.output_config;
+  return out;
+}
+
 /** Once-per-process warning (dropped fields, queue notices). */
 function warnOnce(key, line, log) {
   if (warned.has(key)) return;
@@ -157,6 +174,7 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
   let outBody;
   if (us.api === 'anthropic') {
     outBody = { ...body, model: us.model };
+    if (effortDrops.has(entry.id)) outBody = withoutEffort(outBody);
   } else {
     const responses = us.api === 'openai-responses';
     const t = (responses ? toResponsesRequest : toChatRequest)(body, { upstreamModel: us.model, capabilities: us.capabilities });
@@ -235,6 +253,17 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
         outBody = applySchemaDrops(outBody, d);
         payload = JSON.stringify(outBody);
         res = await doFetch(prep);
+      }
+      // A reasoning effort the model does not take: leave it out, remember that, retry once.
+      if (res.status === 400 && us.api === 'anthropic' && outBody.output_config && 'effort' in outBody.output_config) {
+        const text = await res.clone().text().catch(() => '');
+        if (EFFORT_REFUSED_RE.test(text)) {
+          effortDrops.add(entry.id);
+          warnOnce(`effort:${entry.id}`, `[worca] bridge: model ${JSON.stringify(entry.id)} takes no reasoning effort — leaving it out of its requests`, log);
+          outBody = withoutEffort(outBody);
+          payload = JSON.stringify(outBody);
+          res = await doFetch(prep);
+        }
       }
     } catch (err) {
       if (signal && signal.aborted) return reply.end();
