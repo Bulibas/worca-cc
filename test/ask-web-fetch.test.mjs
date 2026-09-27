@@ -5,6 +5,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkWebUrl, looksLikeData, isBlockedAddress, makeGuardedLookup, createWebFetcher, httpsTransport, WebAccessError, WEB_LIMITS } from '../src/core/ask/web-fetch.mjs';
 
+// A request that never answers until it is aborted. It holds a ref'd timer: the fetcher's deadline is
+// AbortSignal.timeout(), which Node ≤ 22 does not let keep the process alive, so without it a test
+// awaiting only that deadline ends with "the event loop has already resolved" (a real socket keeps
+// the loop alive in production).
+const hangUntilAbort = ({ signal }) => new Promise((_, rej) => {
+  const keepAlive = setTimeout(() => {}, 60_000);
+  signal.addEventListener('abort', () => { clearTimeout(keepAlive); rej(signal.reason); });
+});
+
 const ALLOW = ['docs.example.com', '*.mdn.io'];
 const res = (status, headers, body = '') => ({ status, headers, body: (async function* () { if (body) yield Buffer.from(body); })(), destroy() {} });
 
@@ -81,7 +90,7 @@ test('size cap truncates; timeout aborts; unsupported type and non-2xx error', a
   const r = await big.fetch('https://docs.example.com/');
   assert.equal(r.text, 'x'.repeat(10)); assert.equal(r.truncated, true);
   const slow = createWebFetcher({ allowedDomains: ALLOW, limits: { ...WEB_LIMITS, timeoutMs: 30 },
-    transport: ({ signal }) => new Promise((_, rej) => signal.addEventListener('abort', () => rej(signal.reason))) });
+    transport: hangUntilAbort });
   await assert.rejects(slow.fetch('https://docs.example.com/'), /timed out after/);
   await assert.rejects(createWebFetcher({ allowedDomains: ALLOW, transport: async () => res(200, { 'content-type': 'application/pdf' }) }).fetch('https://docs.example.com/'), /unsupported content type/);
   await assert.rejects(createWebFetcher({ allowedDomains: ALLOW, transport: async () => res(404, { 'content-type': 'text/html' }) }).fetch('https://docs.example.com/'), /HTTP 404/);
@@ -101,11 +110,11 @@ test('an unreachable host says this worca may have no internet access; the log k
     (e) => e.message === 'network error: ECONNRESET');
   // A timeout before the host answered hints too; one after it answered (a slow body) does not.
   const hang = createWebFetcher({ allowedDomains: ALLOW, limits: { ...WEB_LIMITS, timeoutMs: 30 },
-    transport: ({ signal }) => new Promise((_, rej) => signal.addEventListener('abort', () => rej(signal.reason))) });
+    transport: hangUntilAbort });
   await assert.rejects(hang.fetch('https://docs.example.com/'), /timed out after .* may not have internet access/);
   const slowBody = createWebFetcher({ allowedDomains: ALLOW, limits: { ...WEB_LIMITS, timeoutMs: 30 },
     transport: async ({ signal }) => ({ status: 200, headers: { 'content-type': 'text/plain' }, destroy() {},
-      body: (async function* () { await new Promise((_, rej) => signal.addEventListener('abort', () => rej(signal.reason))); })() }) });
+      body: (async function* () { await hangUntilAbort({ signal }); })() }) });
   await assert.rejects(slowBody.fetch('https://docs.example.com/'), (e) => /^timed out after [\d.]+ s$/.test(e.message));
 });
 
