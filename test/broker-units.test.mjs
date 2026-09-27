@@ -126,7 +126,8 @@ test('vault: round trip; a row moved to another person or slot, a tampered row, 
   assert.throws(() => open(key, s, { billTo: 'bob@acme.dev', slot: 'anthropic' }));
   assert.throws(() => open(key, s, { billTo: 'ada@acme.dev', slot: 'openai' }));
   assert.throws(() => open(randomBytes(32), s, { billTo: 'ada@acme.dev', slot: 'anthropic' }));
-  const tampered = { ...s, ciphertext: Buffer.from(s.ciphertext).fill(1, 0, 1) };
+  const flipped = Buffer.from(s.ciphertext); flipped[0] ^= 0xff; // always a change (fill(1) was a no-op 1 time in 256)
+  const tampered = { ...s, ciphertext: flipped };
   assert.throws(() => open(key, tampered, { billTo: 'ada@acme.dev', slot: 'anthropic' }));
   assert.equal(s.keyId, keyId(key));
   assert.equal(suffixOf('sk-ant-secret-value-1234'), '1234');

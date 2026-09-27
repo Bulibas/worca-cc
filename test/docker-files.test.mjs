@@ -73,11 +73,11 @@ test('entrypoint.sh: single-volume mode prepares the volume as root, then drops 
 
 test('agent isolation: a worca-agent user, sudo only to it, set up on single-volume hosts', () => {
   const d = read('docker/Dockerfile');
-  assert.match(d, /useradd -u 1001 -g worca-share .* worca-agent/);
+  assert.match(d, /useradd -l -u 1001 -g worca-share .* worca-agent/);
   assert.match(d, /usermod -aG worca-share worca/);
   assert.match(d, /'worca ALL=\(WORCA_AGENTS\) NOPASSWD:SETENV: ALL'/, 'worca may become the agent users and nothing else');
   assert.match(d, /Runas_Alias WORCA_AGENTS = worca-agent, \$\(seq -w 1 16 \| sed 's\/\^\/worca-agent-\/'/, 'the alias names worca-agent and the pool, and only them');
-  assert.match(d, /useradd -u "11\$i" -g worca-share -M -d \/nonexistent -s \/bin\/bash "worca-agent-\$i"/, 'the pool users share the agent group, no home, no password');
+  assert.match(d, /useradd -l -u "11\$i" -g worca-share -M -d \/nonexistent -s \/bin\/bash "worca-agent-\$i"/, 'the pool users share the agent group, no home, no password');
   assert.doesNotMatch(d, /\(root\)|\(ALL\)/, 'never root');
   assert.match(d, /umask=0007, umask_override/, 'agent files stay group-writable, never world-readable');
   assert.match(d, /visudo -cf \/etc\/sudoers\.d\/worca-agent/, 'a broken rule fails the build');
