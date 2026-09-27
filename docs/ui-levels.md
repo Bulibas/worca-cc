@@ -199,6 +199,7 @@ Everything on the page: the list, the runtime step, the workspace and the bench 
 | Projects list, add, project page Overview, remove | S |
 | Project Memory tab (view and edit files) | A |
 | Workspaces list, create wizard, workspace page Overview (projects, description, re-scan, delete) | A |
+| Workspace page Map tab (coverage, graph, edges, confirm / reject / clear, add / delete manual edges, Regenerate description) | A |
 | Memory health, Defragment, snapshot restore | E — the health card stays visible when overdue or failing |
 | Projects-row team chips; project page Team tab and its TEAM METRICS / TEAM POLICY cards; KEY card | E |
 | Workspace page Team tab (members table, metrics home, policy home) and its METRICS HOME / POLICY HOME cards | E |

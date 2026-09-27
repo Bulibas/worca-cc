@@ -151,6 +151,7 @@ import { buildWorkItems, prLookupFor } from '../../src/shared/team-metrics/timel
 import { renderTimeline, renderTimelinePopover, timelineWindow, shiftAnchor, TL_MODES, TL_ZOOMS } from './team-metrics-timeline.mjs';
 import {
   renderProjectTmCell, renderProjectTmChip, projectTmSummary, renderEnableDialogBody, renderMetricsHomePicker, renderWsMetricsRow, renderWsSummary, renderRouteResults, renderWsMetricsPending } from './team-metrics-surfaces.mjs';
+import { renderMapTab, emptyMapFilters } from './workspace-map-view.mjs';
 import { paintAboutInto } from './about-links.mjs';
 import { renderReasonOptions, renderOptIns, previewText, reportBlobParts } from './report-run.mjs';
 import { openScheduleSheet, closeScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
@@ -969,7 +970,7 @@ function handleServerMessage(msg) {
     // rebuilds the picker. keepMembers: a still-selected workspace keeps its member rows and branch
     // picks (a half-built workspace run is not reset by another tab's scan).
     const before = state.workspaces.map((w) => w.id).join('\n');
-    const refreshed = currentView() === 'workspaces' ? refreshWorkspacesPage() : loadWorkspaces();
+    const refreshed = currentView() === 'workspaces' ? refreshWorkspacesPage(msg.action) : loadWorkspaces();
     void refreshed.then(() => {
       const changed = state.workspaces.map((w) => w.id).join('\n') !== before;
       if (changed && state.runTarget === 'workspace') void ensureWorkspaceOptions({ keepMembers: true });
@@ -6843,11 +6844,14 @@ if (el.wsList) {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace page (#workspaces/<id>[/team]) — the project page's twin: the same two-screen
+// Workspace page (#workspaces/<id>[/map|/team]) — the project page's twin: the same two-screen
 // slide, the same header card, pills and stat cards (it rides the pd- classes), and all
-// editing — description, re-scan, delete, metrics home, policy home, routing — lives here.
+// editing — description, re-scan, delete, metrics home, policy home, routing, the map's overrides —
+// lives here.
 // ---------------------------------------------------------------------------
-const WS_TABS = ['overview', 'team'];
+const WS_TABS = ['overview', 'map', 'team'];
+// workspaces-changed actions that can change the Map tab: an override (P5 routes) or a scan's save.
+const WD_MAP_ACTIONS = new Set(['map', 'scan-created', 'scan-updated']);
 function parseWsParam(param = '') {
   const s = String(param || '');
   if (!s) return null;
@@ -6856,7 +6860,7 @@ function parseWsParam(param = '') {
   const tab = i === -1 ? '' : s.slice(i + 1);
   return { id, tab: WS_TABS.includes(tab) && tab !== 'overview' ? tab : 'overview' };
 }
-const wsParamFor = (id, tab = 'overview') => (tab === 'team' ? `${id}/team` : id);
+const wsParamFor = (id, tab = 'overview') => (WS_TABS.includes(tab) && tab !== 'overview' ? `${id}/${tab}` : id);
 const workspaceById = (id) => state.workspaces.find((x) => x && x.id === id) || null;
 
 let wsDetail = null;        // { id, screen } while a page is open
@@ -6874,14 +6878,20 @@ async function loadWorkspacesView() {
   if (view === 'workspaces') routeWsDetail(param, { instant: true });
 }
 // A workspaces-changed frame while the page is open: rebuild the list under the user and keep the
-// open page — unless its workspace went away, which closes it with a note.
-async function refreshWorkspacesPage() {
+// open page — unless its workspace went away, which closes it with a note. `action` is the frame's
+// action: a map override or a finished scan also reloads a built Map tab (WD_MAP_ACTIONS).
+async function refreshWorkspacesPage(action = null) {
   await loadWorkspaces();
   if (currentShownView !== 'workspaces') return;
   renderWorkspaces();
   if (!wsDetail) return;
   const w = workspaceById(wsDetail.id);
-  if (w) { paintWsHeader(wsDetail.screen, w); refreshWdOverview(); return; }
+  if (w) {
+    paintWsHeader(wsDetail.screen, w);
+    refreshWdOverview();
+    if (WD_MAP_ACTIONS.has(action)) await refreshWdMap();
+    return;
+  }
   const name = wsDetail.name;
   showView('workspaces', '');
   setWsMsg(`workspace "${name}" was removed`, 'err');
@@ -6975,6 +6985,7 @@ function closeWsDetail({ instant = false } = {}) {
 // ---- tabs ----
 const WD_TABS = [
   { key: 'overview', label: 'Overview', level: 'simple', badge: () => null, visible: () => true, build: (sec, id) => buildWdOverview(sec, id) },
+  { key: 'map', label: 'Map', level: 'advanced', badge: () => null, visible: () => true, build: (sec, id) => buildWdMap(sec, id) },
   { key: 'team', label: 'Team', level: 'expert', badge: () => null, visible: () => true, build: (sec, id) => buildWdTeam(sec, id) },
 ];
 function initWdTabs(screen, w) {
@@ -7144,8 +7155,206 @@ function buildWdTeam(sec, id) {
   void paintWsPolicyLines();
 }
 
+// ---- Map tab: the scan's interconnection map (spec D17) ----
+// GET /api/workspaces/:id/map when the tab is built and on a map / scan frame (WD_MAP_ACTIONS).
+// Filters live on wsDetail and die with the page.
+let wdMapToken = 0;
+function buildWdMap(sec, id) {
+  sec.innerHTML = '';
+  sec.classList.add('wd-sec-map');
+  sec.appendChild(Object.assign(document.createElement('small'), { className: 'hint', textContent: 'Loading…' }));
+  // (mapFocus: defensive — a reopened page is a new wsDetail; this covers a builder retry on the same page.)
+  if (wsDetail) { wsDetail.map = null; wsDetail.mapError = ''; wsDetail.mapFilters = emptyMapFilters(); wsDetail.mapFocus = null; }
+  void loadWdMap(id);
+}
+// The newest request wins: an older answer that lands last is dropped (wdMapToken).
+async function loadWdMap(id) {
+  const token = ++wdMapToken;
+  let payload = null;
+  let error = '';
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}/map`);
+    const data = await safeJson(res);
+    if (res.ok && data && typeof data === 'object') payload = data;
+    else error = (data && data.error) || `HTTP ${res.status}`;
+  } catch (err) {
+    error = (err && err.message) || 'could not load the map';
+  }
+  if (token !== wdMapToken || !wsDetail || wsDetail.id !== id) return;
+  if (payload) wsDetail.map = payload;
+  wsDetail.mapError = error;
+  paintWdMap();
+  // An override's keyboard target (wdMapMutation) waits for the first paint of a map loaded after
+  // its answer: its own reload, or a frame's newer one that overtook it. An older load that still
+  // paints (it began before the answer) shows the old table and must not take it.
+  const pending = wsDetail.mapFocus;
+  if (pending && token >= pending.from) { wsDetail.mapFocus = null; focusWdMapRow(pending.edge, pending.action); }
+}
+// Reload the Map tab when it has been built; never builds it (a lazy tab stays lazy).
+function refreshWdMap() {
+  const sec = wsDetail && wsDetail.screen && wsDetail.screen.querySelector('.pd-sec[data-sec="map"]');
+  if (!sec || sec.dataset.loaded !== '1') return Promise.resolve();
+  return loadWdMap(wsDetail.id);
+}
+// Repaint from wsDetail.map + filters. The add-form draft, the horizontal scroll of the graph and
+// of the edge table (its last column holds the actions) and the focused control survive the
+// repaint (a frame can land while the user types).
+function paintWdMap({ focus = '' } = {}) {
+  const sec = wsDetail && wsDetail.screen && wsDetail.screen.querySelector('.pd-sec[data-sec="map"]');
+  if (!sec) return;
+  const draft = {};
+  for (const f of sec.querySelectorAll('.wm-add-form [name]')) draft[f.name] = f.value;
+  const active = document.activeElement && sec.contains(document.activeElement) ? document.activeElement : null;
+  const again = wdMapFocusSelector(active);
+  const scroll = sec.querySelector('.wm-graph-scroll');
+  const left = scroll ? scroll.scrollLeft : 0;
+  const tableScroll = sec.querySelector('.wm-table-scroll');
+  const tableLeft = tableScroll ? tableScroll.scrollLeft : 0;
+  const data = { ...(wsDetail.map || { map: null, edges: [] }), workspace: workspaceById(wsDetail.id), error: wsDetail.mapError || '' };
+  sec.replaceChildren(renderMapTab(data, { doc: document, filters: wsDetail.mapFilters || emptyMapFilters() }));
+  for (const f of sec.querySelectorAll('.wm-add-form [name]')) {
+    if (!(f.name in draft)) continue;
+    if (f.tagName === 'SELECT' && ![...f.options].some((o) => o.value === draft[f.name])) continue;
+    f.value = draft[f.name];
+  }
+  const next = sec.querySelector('.wm-graph-scroll');
+  if (next && left) next.scrollLeft = left;
+  const nextTable = sec.querySelector('.wm-table-scroll');
+  if (nextTable && tableLeft) nextTable.scrollLeft = tableLeft;
+  const target = (focus && sec.querySelector(focus)) || (again && sec.querySelector(again)) || null;
+  if (target && typeof target.focus === 'function') target.focus({ preventScroll: true });
+}
+// A selector that finds the focused control again in the repainted tab ('' = nothing to restore):
+// an add-form field, a filter select, a row action, a graph pair, a coverage chip, or one of the
+// tab's single buttons. A frame (another window, a finished scan) repaints under the keyboard.
+function wdMapFocusSelector(el) {
+  if (!el || !el.closest) return '';
+  const q = (v) => `"${cssEscape(String(v || ''))}"`;
+  if (el.closest('.wm-add-form') && el.name) return `.wm-add-form [name=${q(el.name)}]`;
+  if (el.matches('select.wm-filter')) return `select.wm-filter[data-filter=${q(el.dataset.filter)}]`;
+  const act = el.matches('.wm-actions button') && [...el.classList].find((c) => /^wm-(confirm|reject|clear|del)$/.test(c));
+  if (act) return `.wm-row[data-edge=${q(el.dataset.edge)}] .${act}`;
+  if (el.matches('.wm-pair')) return `.wm-pair[data-from=${q(el.dataset.from)}][data-to=${q(el.dataset.to)}]`;
+  if (el.matches('.wm-chip')) return `.wm-chip[data-value=${q(el.dataset.value)}]`;
+  if (el.matches('button.wm-filter[data-filter="all"]')) return 'button.wm-filter[data-filter="all"]';
+  const one = ['wm-add', 'wm-regen', 'wm-rescan', 'wm-pair-chip'].find((c) => el.classList.contains(c));
+  return one ? `.${one}` : '';
+}
+function setWdMapFilters(patch, focus = '') {
+  if (!wsDetail) return;
+  wsDetail.mapFilters = patch === null ? emptyMapFilters() : { ...emptyMapFilters(), ...(wsDetail.mapFilters || {}), ...patch };
+  paintWdMap({ focus });
+}
+// A pair in the graph (click, Enter or Space): filter the table to it; the same pair again clears.
+function toggleWdMapPair(from, to) {
+  const cur = wsDetail && wsDetail.mapFilters && wsDetail.mapFilters.pair;
+  const same = cur && cur.from === from && cur.to === to;
+  setWdMapFilters({ pair: same ? null : { from, to } }, `.wm-pair[data-from="${cssEscape(from)}"][data-to="${cssEscape(to)}"]`);
+}
+// A filter button: a coverage chip or a graph node (member, toggles), the pair chip, Clear filters.
+function clickWdMapFilter(node) {
+  const key = node.dataset.filter;
+  const value = node.dataset.value || '';
+  if (key === 'all') return setWdMapFilters(null, 'select.wm-filter[data-filter="member"]');
+  if (key === 'pair') return setWdMapFilters({ pair: null }, 'select.wm-filter[data-filter="member"]');
+  if (key !== 'member') return;
+  const cur = (wsDetail && wsDetail.mapFilters && wsDetail.mapFilters.member) || '';
+  setWdMapFilters({ member: cur === value ? '' : value }, node.classList.contains('wm-chip') ? `.wm-chip[data-value="${cssEscape(value)}"]` : '');
+}
+// One override call (P5 routes). The button is busy while it runs and a second press is ignored;
+// an error lands on the page header (or on `onError`), gives a button that held the keyboard its
+// focus back, and on a 404 (the edge or the workspace is gone) also reloads the tab; success
+// clears it, runs `onOk`, reloads the list (the description may have been re-rendered) and the
+// Map tab, and puts the keyboard back on the pressed row or button (`wsDetail.mapFocus`, taken
+// by the first newer paint in loadWdMap).
+async function wdMapMutation(btn, url, opts, { onError = null, onOk = null } = {}) {
+  const screen = wsDetail && wsDetail.screen;
+  if (!screen || (btn && btn.disabled)) return false;
+  const fail = (text) => (onError ? onError(text) : setWdError(screen, text));
+  const edge = (btn && btn.dataset && btn.dataset.edge) || '';
+  // The pressed control, for the keyboard: a row action (with its edge) or a single button.
+  const action = (btn && btn.classList && [...btn.classList].find((c) => /^wm-(confirm|reject|clear|del|add|regen)$/.test(c))) || '';
+  const hadFocus = Boolean(btn) && document.activeElement === btn;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(url, opts);
+    const data = await safeJson(res);
+    if (!res.ok) {
+      fail((data && data.error) || `HTTP ${res.status}`);
+      if (res.status === 404) void refreshWdMap();
+      return false;
+    }
+    setWdError(screen, '');
+    if (onOk) onOk(data);
+    // The keyboard goes back to the row (or the pressed single button) in the first paint of a map
+    // loaded AFTER this answer: our own reload, or a frame's newer reload that overtook it (newest
+    // wins) — loadWdMap takes it.
+    if (action && wsDetail) wsDetail.mapFocus = { edge, action, from: wdMapToken + 1 };
+    await refreshWorkspacesPage();
+    await refreshWdMap();
+    return true;
+  } catch (err) {
+    fail((err && err.message) || 'request failed');
+    return false;
+  } finally {
+    if (btn && btn.isConnected) {
+      btn.disabled = false;
+      // A refused press keeps its button: hand the keyboard back to it (Chrome drops the focus of a
+      // button that turns disabled), unless the press did not hold the focus or the user moved on.
+      const cur = document.activeElement;
+      if (hadFocus && (!cur || cur === document.body || !cur.isConnected)) btn.focus({ preventScroll: true });
+    }
+  }
+}
+// After an override the tab is rebuilt: a keyboard user whose control went away stays where it was
+// — on the same row: the same action if the row still has it, else Clear (never the opposite
+// verdict, so a second Enter cannot flip what was just decided), else its first action; on the
+// same single button (Add edge); else on the tab panel (initDetailTabs gives it tabindex 0).
+function focusWdMapRow(edge, action = '') {
+  const sec = wsDetail && wsDetail.screen && wsDetail.screen.querySelector('.pd-sec[data-sec="map"]');
+  const cur = document.activeElement;
+  if (!sec || (cur && cur !== document.body && cur.isConnected)) return;
+  const row = edge ? sec.querySelector(`.wm-row[data-edge="${cssEscape(edge)}"]`) : null;
+  const pick = (sel) => (row ? row.querySelector(sel) : null);
+  const target = (action && pick(`.wm-actions .${action}`)) || pick('.wm-actions .wm-clear') || pick('.wm-actions button')
+    || (!edge && action ? sec.querySelector(`.${action}`) : null) || sec;
+  target.focus({ preventScroll: true });
+}
+const wdMapUrl = (tail = '') => `/api/workspaces/${encodeURIComponent(wsDetail.id)}/map${tail}`;
+const WD_JSON_HEADERS = { 'Content-Type': 'application/json' };
+function setWdEdgeState(btn, state) {
+  return wdMapMutation(btn, wdMapUrl(`/edges/${encodeURIComponent(btn.dataset.edge || '')}`),
+    { method: 'PUT', headers: WD_JSON_HEADERS, body: JSON.stringify({ state }) });
+}
+function deleteWdManualEdge(btn) {
+  return wdMapMutation(btn, wdMapUrl(`/edges/${encodeURIComponent(btn.dataset.edge || '')}`), { method: 'DELETE' });
+}
+function addWdManualEdge(btn) {
+  const box = btn.closest('.wm-add-box');
+  if (!box) return Promise.resolve(false);
+  // The LIVE add box: a frame may repaint the tab while the request runs, so the answer (an error
+  // to show, or a saved form to clear) goes to the box on screen, not to the one that was pressed.
+  const liveBox = () => (wsDetail && wsDetail.screen && wsDetail.screen.querySelector('.pd-sec[data-sec="map"] .wm-add-box')) || box;
+  const val = (name) => ((box.querySelector(`[name="${name}"]`) || {}).value || '').trim();
+  const say = (text) => { const msg = liveBox().querySelector('.wm-add-msg'); if (msg) { msg.textContent = text; msg.hidden = !text; } };
+  const body = { from: val('wm-from'), to: val('wm-to'), kind: val('wm-kind'), display: val('wm-display'), detail: val('wm-detail') };
+  if (!body.from || !body.to || body.from === body.to) { say('Pick two different projects'); return Promise.resolve(false); }
+  if (!body.display) { say('Name the edge'); return Promise.resolve(false); }
+  say('');
+  return wdMapMutation(btn, wdMapUrl('/edges'), { method: 'POST', headers: WD_JSON_HEADERS, body: JSON.stringify(body) }, {
+    onError: say,
+    onOk: () => {
+      const live = liveBox();
+      for (const n of ['wm-display', 'wm-detail']) { const f = live.querySelector(`[name="${n}"]`); if (f) f.value = ''; }
+    },
+  });
+}
+function regenerateWdDescription(btn) {
+  return wdMapMutation(btn, wdMapUrl('/render'), { method: 'POST', headers: WD_JSON_HEADERS, body: '{}' });
+}
+
 // Delegated actions on the workspace page: the metrics home sheet and routing, the policy home
-// sheet and routing, the description editor, a member row.
+// sheet and routing, the description editor, a member row, the Map tab.
 if (el.wsDetail) {
   el.wsDetail.addEventListener('click', async (e) => {
     if (!wsDetail) return;
@@ -7186,11 +7395,40 @@ if (el.wsDetail) {
       await paintWsMetricsRows(true); // fresh counts + the saved result list
       return;
     }
+    const pair = e.target.closest('.wm-pair');
+    if (pair) { toggleWdMapPair(pair.dataset.from, pair.dataset.to); return; }
+    const filt = e.target.closest('button.wm-filter, .wm-node.wm-filter');
+    if (filt) { clickWdMapFilter(filt); return; }
+    const act = e.target.closest('.wm-confirm, .wm-reject, .wm-clear');
+    if (act) { void setWdEdgeState(act, act.classList.contains('wm-confirm') ? 'confirmed' : act.classList.contains('wm-reject') ? 'rejected' : null); return; }
+    if (e.target.closest('.wm-del')) { void deleteWdManualEdge(e.target.closest('.wm-del')); return; }
+    if (e.target.closest('.wm-add')) { void addWdManualEdge(e.target.closest('.wm-add')); return; }
+    if (e.target.closest('.wm-regen')) { void regenerateWdDescription(e.target.closest('.wm-regen')); return; }
+    const rescan = e.target.closest('.wm-rescan');
+    if (rescan) {                       // rescanWorkspace disables only the header's Re-scan
+      if (rescan.disabled) return;
+      rescan.disabled = true;
+      try { await rescanWorkspace(w); } finally { if (rescan.isConnected) rescan.disabled = false; }
+      return;
+    }
     if (e.target.closest('.ws-edit')) { openWsEdit(wsDetail.screen, w); return; }
     const tab = e.target.closest('.ws-desc-tab');
     if (tab) { setMdEditMode(wsDetail.screen.querySelector('.ws-desc-edit'), tab.dataset.mode === 'preview'); return; }
     if (e.target.closest('.ws-desc-cancel')) { closeWsEdit(wsDetail.screen); setWdError(wsDetail.screen, ''); refreshWdOverview(); return; }
     if (e.target.closest('.ws-desc-save')) { void saveWsDescription(wsDetail.screen, w); }
+  });
+  // Map tab: the four filter selects, and Enter / Space on a focused graph pair.
+  el.wsDetail.addEventListener('change', (e) => {
+    const s = e.target.closest && e.target.closest('select.wm-filter');
+    if (!s || !wsDetail || !['member', 'kind', 'confidence', 'state'].includes(s.dataset.filter)) return;
+    setWdMapFilters({ [s.dataset.filter]: s.value }, `select.wm-filter[data-filter="${s.dataset.filter}"]`);
+  });
+  el.wsDetail.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+    const pair = e.target.closest && e.target.closest('.wm-pair');
+    if (!pair || !wsDetail) return;
+    e.preventDefault();
+    toggleWdMapPair(pair.dataset.from, pair.dataset.to);
   });
 }
 
@@ -7251,6 +7489,7 @@ async function saveWsDescription(screen, w) {
     setWdError(screen, '');
     closeWsEdit(screen);
     refreshWdOverview();
+    void refreshWdMap();              // the description is 'edited' now: the Map tab offers Regenerate
   } catch (err) {
     setWdError(screen, err.message);
   } finally {
@@ -9128,6 +9367,7 @@ async function removeProjectFromPage(key) {
 const PD_TAB_ICONS = {
   overview: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect></svg>',
   memory: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"></path><path d="M4 20.5V5.5M8 7h8M8 10.5h6"></path></svg>',
+  map: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"></circle><circle cx="19" cy="5" r="2.5"></circle><circle cx="19" cy="19" r="2.5"></circle><path d="M7.3 10.9l9.4-4.8M7.3 13.1l9.4 4.8"></path></svg>',
   team: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"></circle><path d="M3.5 19c.6-3 2.8-4.6 5.5-4.6S13.9 16 14.5 19"></path><circle cx="17.5" cy="9.5" r="2.4"></circle><path d="M15.5 14.6c2.7 0 4.4 1.4 5 4.4"></path></svg>',
 };
 // Table-driven, like HD_TABS. `build(sec, key)` takes the KEY (buildArgs), never the project object.
