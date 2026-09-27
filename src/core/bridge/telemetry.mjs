@@ -13,7 +13,7 @@ import { EventEmitter } from 'node:events';
 export const bridgeEvents = new EventEmitter();
 bridgeEvents.setMaxListeners(50);
 
-const calls = new Map();   // tag -> { initiated, continued, errors }
+const calls = new Map();   // tag -> { initiated, continued, errors, free }
 const MAX_TAGS = 5000;
 
 function slot(tag) {
@@ -21,29 +21,34 @@ function slot(tag) {
   let s = calls.get(k);
   if (!s) {
     if (calls.size >= MAX_TAGS) calls.delete(calls.keys().next().value);
-    s = { initiated: 0, continued: 0, errors: 0 };
+    s = { initiated: 0, continued: 0, errors: 0, free: 0 };
     calls.set(k, s);
   }
   return s;
 }
 
-/** Book one upstream call. `initiator` is 'user' | 'agent' (§7.1). */
-export function recordBridgeCall({ tag, catalogId, provider, api, initiator }) {
+/**
+ * Book one upstream call. `initiator` is 'user' | 'agent' (§7.1). `free`: an OpenRouter
+ * `:free` model, where EVERY call (continuations too) spends one of the day's free requests
+ * (openrouter-free.mjs); `account` names the key it spent from, when the bridge knows it.
+ */
+export function recordBridgeCall({ tag, catalogId, provider, api, initiator, free = false, account = null }) {
   const s = slot(tag);
   if (initiator === 'agent') s.continued += 1; else s.initiated += 1;
-  bridgeEvents.emit('call', { tag: tag || '', catalogId, provider, api, initiator });
+  if (free) s.free += 1;
+  bridgeEvents.emit('call', { tag: tag || '', catalogId, provider, api, initiator, free, account });
 }
 
 /** Book one failed upstream call. */
-export function recordBridgeError({ tag, catalogId, provider, status, message }) {
+export function recordBridgeError({ tag, catalogId, provider, status, message, account = null }) {
   slot(tag).errors += 1;
-  bridgeEvents.emit('failure', { tag: tag || '', catalogId, provider, status, message });
+  bridgeEvents.emit('failure', { tag: tag || '', catalogId, provider, status, message, account });
 }
 
-/** Counters for a tag: {initiated, continued, errors}; zeros when unseen. */
+/** Counters for a tag: {initiated, continued, errors, free}; zeros when unseen. */
 export function bridgeCallsFor(tag) {
   const s = calls.get(tag || '');
-  return s ? { ...s } : { initiated: 0, continued: 0, errors: 0 };
+  return s ? { ...s } : { initiated: 0, continued: 0, errors: 0, free: 0 };
 }
 
 // The USD an upstream itself reported for a tag's calls (OpenRouter's
