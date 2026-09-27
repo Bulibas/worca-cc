@@ -184,7 +184,10 @@ import { archivePipeline, discardRetainedWorktrees } from '../src/core/pipeline-
 import {
   listWorkspaces, readWorkspace, checkNewWorkspace,
   updateWorkspace, deleteWorkspace, isGitRepo, WORKSPACE_KEY_RE, countWorkspaces,
+  readWorkspaceMap, setWorkspaceEdgeState, addWorkspaceManualEdge, removeWorkspaceManualEdge,
+  regenerateWorkspaceDescription,
 } from '../src/core/workspaces.mjs';
+import { effectiveEdges } from '../src/shared/workspace-map/overrides.mjs';
 import { WORKSPACE_SCAN_WORKFLOW_ID, WORKSPACE_SCAN_DEFAULT_MODELS } from '../src/core/graph/builtin-workflows.mjs';
 import { scanRunPrompt, scanRunTitle, createWorkspaceWithHomes, resolveScanModels } from '../src/core/workspace-scan-run.mjs';
 import { listWorkspacePipelines, readWorkspacePipeline, appendAuditById } from '../src/core/artifacts.mjs';
@@ -1253,6 +1256,11 @@ function workspaceErrorStatus(code) {
   if (code === 'NOT_FOUND') return 404;
   if (code === 'BAD_REQUEST') return 400;
   return 500;
+}
+
+/** Answer a workspaces.mjs coded error with its HTTP status (workspaceErrorStatus). */
+function workspaceFail(res, err) {
+  return res.status(workspaceErrorStatus(err && err.code)).json({ error: err && err.message ? err.message : String(err) });
 }
 
 // Single source of truth for path normalization lives in the core registry.
@@ -4598,6 +4606,9 @@ app.patch('/api/workspaces/:id', async (req, res) => {
   }
   try {
     const workspace = await updateWorkspace(id, patch);
+    // A description edit may flip the origin to 'edited' (Regenerate appears); a rename re-renders a
+    // generated description (its title line). Either way open Map tabs and editors re-read it.
+    if ('description' in patch || 'name' in patch) emitChanged('workspaces-changed', 'map');
     if ('metricsProject' in patch) emitChanged('workspaces-changed', 'metrics-home');
     if ('policyProject' in patch) { emitChanged('workspaces-changed', 'policy-home'); emitChanged('team-policy-changed', 'policy-home'); }
     res.json({ workspace });
@@ -4624,6 +4635,82 @@ app.delete('/api/workspaces/:id', async (req, res) => {
   } catch (err) {
     const status = workspaceErrorStatus(err && err.code);
     return res.status(status).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Workspace map: the last scan's structured result and its review. Validation and the
+// read-modify-write of the overrides live in workspaces.mjs (one transaction each, so two
+// quick clicks never lose one another); every change broadcasts workspaces-changed{map}.
+//   GET    /api/workspaces/:id/map                 { map, synthesis, overrides, edges, descriptionOrigin }
+//   PUT    /api/workspaces/:id/map/edges/:edgeId   { state: 'confirmed'|'rejected'|null } (scanned x_ edges)
+//   POST   /api/workspaces/:id/map/edges           { from, to, kind, display, detail? } -> 201 (200 when it exists)
+//   DELETE /api/workspaces/:id/map/edges/:edgeId   manual m_ edges only (x_ -> 400)
+//   POST   /api/workspaces/:id/map/render          "Regenerate description"
+// ---------------------------------------------------------------------------
+app.get('/api/workspaces/:id/map', async (req, res) => {
+  const id = req.params.id;
+  if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
+  try {
+    const data = await readWorkspaceMap(id);
+    if (!data) return res.status(404).json({ error: 'workspace not found' });
+    res.json({ ...data, edges: effectiveEdges(data.map, data.overrides) });
+  } catch (err) {
+    return workspaceFail(res, err);
+  }
+});
+
+app.put('/api/workspaces/:id/map/edges/:edgeId', async (req, res) => {
+  const id = req.params.id;
+  if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
+  const body = req.body || {};
+  if (!Object.prototype.hasOwnProperty.call(body, 'state')) return badRequest(res, 'state must be "confirmed", "rejected" or null');
+  try {
+    const out = await setWorkspaceEdgeState(id, req.params.edgeId, body.state);
+    emitChanged('workspaces-changed', 'map');
+    res.json({ edge: out.edge, overrides: out.overrides, rerendered: out.rerendered, workspace: out.workspace });
+  } catch (err) {
+    return workspaceFail(res, err);
+  }
+});
+
+app.post('/api/workspaces/:id/map/edges', async (req, res) => {
+  const id = req.params.id;
+  if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
+  const body = req.body || {};
+  try {
+    const out = await addWorkspaceManualEdge(id, {
+      from: body.from, to: body.to, kind: body.kind, display: body.display, detail: body.detail,
+    });
+    if (out.created) emitChanged('workspaces-changed', 'map');
+    res.status(out.created ? 201 : 200)
+      .json({ edge: out.edge, overrides: out.overrides, rerendered: out.rerendered, workspace: out.workspace });
+  } catch (err) {
+    return workspaceFail(res, err);
+  }
+});
+
+app.delete('/api/workspaces/:id/map/edges/:edgeId', async (req, res) => {
+  const id = req.params.id;
+  if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
+  try {
+    const out = await removeWorkspaceManualEdge(id, req.params.edgeId);
+    emitChanged('workspaces-changed', 'map');
+    res.json({ ok: true, overrides: out.overrides, rerendered: out.rerendered, workspace: out.workspace });
+  } catch (err) {
+    return workspaceFail(res, err);
+  }
+});
+
+app.post('/api/workspaces/:id/map/render', async (req, res) => {
+  const id = req.params.id;
+  if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
+  try {
+    const workspace = await regenerateWorkspaceDescription(id);
+    emitChanged('workspaces-changed', 'map');
+    res.json({ workspace });
+  } catch (err) {
+    return workspaceFail(res, err);
   }
 });
 

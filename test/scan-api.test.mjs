@@ -287,3 +287,21 @@ test('41 member projects: 400 from both create routes, before any run or row exi
   const { workspaces } = await (await fetch(`${base}/api/workspaces`)).json();
   assert.ok(!workspaces.some((w) => w.name === 'Too big'), 'no workspace row');
 });
+
+test('a scan stores its map: GET /map answers the members, the list carries mapSummary, origin generated', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const res = await post('/api/workspaces/scan', { name: 'Mapped Scan', projectPaths: [a, b] });
+  assert.equal(res.status, 200);
+  const { runId, workspaceId } = await res.json();
+  assert.equal((await settled(runId)).status, 'done');
+  const m = await (await fetch(`${base}/api/workspaces/${workspaceId}/map`)).json();
+  const ws = (await (await fetch(`${base}/api/workspaces/${workspaceId}`)).json()).workspace;
+  assert.ok(m.map, 'the scan stored its map');
+  assert.deepEqual(m.map.members.map((x) => x.key).sort(), [...ws.projectKeys].sort(),
+    'map member keys are the workspace projectKeys (manual edges validate against them)');
+  assert.equal(m.descriptionOrigin, 'generated');
+  assert.equal(ws.mapSummary.members, 2);
+  assert.match(ws.description, /^# Workspace: Mapped Scan/);
+  await branchesGone(a, b);
+});

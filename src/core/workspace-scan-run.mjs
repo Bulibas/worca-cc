@@ -6,22 +6,33 @@
 //   resolveScanModels              the models ONE scan runs with (+ describeScanModels)
 //   createWorkspaceWithHomes       createWorkspace + the metrics/policy home adoption
 //                                  POST /api/workspaces has always done
-//   finalizeWorkspaceScan          read the scanner's output, create or update, never throw
+//   finalizeWorkspaceScan          save a finished scan from the pipeline's outputs (the render
+//                                  card's description, the join's map, the synth's synthesis,
+//                                  the merged graph): create or update, never throw
 
-import { readFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { checkNewWorkspace, createWorkspace, readWorkspace, updateWorkspaceDescription } from './workspaces.mjs';
+import {
+  checkNewWorkspace, createWorkspace, readWorkspace, saveWorkspaceScanResult, isWorkspaceMap,
+} from './workspaces.mjs';
+import { workspaceStorePath } from './store.mjs';
 import { autoMetricsHome } from './metrics/sync.mjs';
 import { resolveProjectPolicy, autoPolicyHome } from './policy/sync.mjs';
 import { assertWorkspaceScanInput } from './settings.mjs';
 import { WORKSPACE_SCAN_DEFAULT_MODELS } from './graph/builtin-workflows.mjs';
 import { scanDescriptionBudget } from '../shared/workspace-size.mjs';
 
-/** The render stage's output file (scripts/workspaceMapRender.meta.json outputs[0].filename) — the
- *  workspace description the finalize saves. Not workspace-description.md: createPipeline writes the
- *  run's frozen snapshot there. */
+/** The render card's output file (scripts/workspaceMapRender.meta.json outputs[0].filename): the
+ *  description the pipeline rendered WITHOUT the workspace's overrides. The finalize saves it as-is
+ *  only when the scan wrote no map; with a map it re-renders (stored overrides applied). Not
+ *  workspace-description.md: createPipeline writes the run's frozen snapshot there. */
 export const WORKSPACE_SCAN_OUTPUT_FILE = 'workspace-scan.md';
+
+/** The join's map, the synth's synthesis (run folder) and the merged graph's copy (workspace store). */
+export const WORKSPACE_MAP_FILE = 'workspace-map.json';
+export const WORKSPACE_SYNTHESIS_FILE = 'synthesis.json';
+export const WORKSPACE_GRAPH_FILE = 'workspace-graph.json';
 
 /** @param {string} name */
 export function scanRunTitle(name) {
@@ -98,10 +109,80 @@ export async function createWorkspaceWithHomes({ name, projectPaths, description
   return { workspace, metricsHomeAuto: !explicit && !!metrics };
 }
 
+/** Parsed JSON of a file, or null (missing, unreadable, invalid). */
+async function readJsonFile(path) {
+  try { return JSON.parse(await readFile(path, 'utf8')); } catch { return null; }
+}
+
 /**
- * Save a finished scan: read the scanner's output from the run folder, then UPDATE the
+ * The join's map + the synth's synthesis from a finished scan's run folder. null when there is
+ * no run folder or no usable map (a scan from before the map, or a join that wrote nothing). A
+ * missing or unreadable synthesis is null; a present one is returned as read —
+ * saveWorkspaceScanResult checks it (checkSynthesis: invalid items dropped, every kept string
+ * redacted) before anything is stored. Never throws.
+ * @param {string} pipelineDir
+ * @returns {Promise<{map:object, synthesis:object|null}|null>}
+ */
+export async function readScanMap(pipelineDir) {
+  if (typeof pipelineDir !== 'string' || !pipelineDir) return null;
+  const map = await readJsonFile(join(pipelineDir, WORKSPACE_MAP_FILE));
+  if (!isWorkspaceMap(map)) return null;
+  const raw = await readJsonFile(join(pipelineDir, WORKSPACE_SYNTHESIS_FILE));
+  const synthesis = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null;
+  return { map, synthesis };
+}
+
+/** map.graph.file as the join writes it: a bare file name inside the run folder, never a path. */
+const GRAPH_FILE_NAME_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
+
+/**
+ * Keep the merged cross-project graph (P7) past the run: copy <pipelineDir>/<map.graph.file> to
+ * <storeDir>/workspace-graph.json and point map.graph.file at the copy (absolute). The copy is
+ * written beside the old one (<dest>.tmp) and renamed over it, so an agent reading the graph
+ * sees the old file or the new one, never half of one; when the rename is refused (Windows: a
+ * reader holds the old copy open — EPERM / EBUSY / EACCES) it falls back to a direct copy. A
+ * missing file, a symlink (never followed: it could point anywhere on the machine), a name that
+ * is not a bare file name, or a copy that fails leaves no graph (file: null; mode kept) and
+ * removes a previous scan's copy. The temp file never outlives the call. Never throws.
+ * @param {object} map
+ * @param {{pipelineDir:string, storeDir:string, renameFile?:(from:string, to:string) => Promise<void>}} dirs
+ *   renameFile: a test seam for a refused rename (default: fs rename)
+ * @returns {Promise<object>} the map to store
+ */
+export async function adoptGraphFile(map, { pipelineDir, storeDir, renameFile = rename }) {
+  const graph = map.graph && typeof map.graph === 'object' && !Array.isArray(map.graph) ? map.graph : null;
+  const name = graph && typeof graph.file === 'string' ? graph.file : '';
+  const dest = join(storeDir, WORKSPACE_GRAPH_FILE);
+  const tmp = `${dest}.tmp`;
+  let copied = false;
+  if (GRAPH_FILE_NAME_RE.test(name)) {
+    try {
+      const src = join(pipelineDir, name);
+      if ((await lstat(src)).isFile()) {
+        await mkdir(storeDir, { recursive: true });
+        await copyFile(src, tmp);
+        try { await renameFile(tmp, dest); } catch { await copyFile(src, dest); }
+        copied = true;
+      }
+    } catch { /* missing, unreadable or not writable: no graph */ }
+  }
+  // `recursive` only so that Node honours maxRetries (it retries nothing without it): on Windows an
+  // antivirus scanner may hold the fresh temp file for a moment. `dest` stays non-recursive — a
+  // directory at that path is never ours to remove.
+  await rm(tmp, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+  if (!copied) await rm(dest, { force: true }).catch(() => {});
+  return graph ? { ...map, graph: { ...graph, file: copied ? dest : null } } : map;
+}
+
+/**
+ * Save a finished scan from the scan pipeline's outputs in the run folder, then UPDATE the
  * workspace when one with this id exists (a re-scan — or one created under the same name and
- * project set while the scan ran) or CREATE it. Never throws.
+ * project set while the scan ran) or CREATE it. With a map (the join card's workspace-map.json)
+ * the map + synthesis are stored and the description is RE-RENDERED from them with the
+ * workspace's stored overrides (saveWorkspaceScanResult), so confirm / reject / manual edges
+ * survive the re-scan; the merged graph is copied into the workspace store. Without a map the
+ * render card's markdown (workspace-scan.md) is saved as before. Either way the description is
+ * marked 'generated'. Never throws.
  * @param {{workspaceId:string, name:string, projectPaths:string[], pipelineDir:string}} opts
  * @returns {Promise<{outcome:'created'|'updated'|'failed', workspaceId:string, error?:string, code?:string|null}>}
  */
@@ -110,14 +191,19 @@ export async function finalizeWorkspaceScan({ workspaceId, name, projectPaths, p
   try {
     description = (await readFile(join(pipelineDir, WORKSPACE_SCAN_OUTPUT_FILE), 'utf8')).trim();
   } catch { /* missing output reads as empty */ }
-  if (!description) return { outcome: 'failed', workspaceId, error: 'the scan wrote no description', code: null };
+  const scan = await readScanMap(pipelineDir);
+  if (!description && !scan) return { outcome: 'failed', workspaceId, error: 'the scan wrote no description', code: null };
   try {
-    if (await readWorkspace(workspaceId)) {
-      await updateWorkspaceDescription(workspaceId, description);
-      return { outcome: 'updated', workspaceId };
+    let id = workspaceId;
+    let outcome = 'updated';
+    if (!(await readWorkspace(workspaceId))) {
+      const { workspace } = await createWorkspaceWithHomes({ name, projectPaths, description });
+      id = workspace.id;
+      outcome = 'created';
     }
-    const { workspace } = await createWorkspaceWithHomes({ name, projectPaths, description });
-    return { outcome: 'created', workspaceId: workspace.id };
+    const map = scan ? await adoptGraphFile(scan.map, { pipelineDir, storeDir: workspaceStorePath(id) }) : null;
+    await saveWorkspaceScanResult(id, { description, map, synthesis: scan ? scan.synthesis : null });
+    return { outcome, workspaceId: id };
   } catch (err) {
     return { outcome: 'failed', workspaceId, error: (err && err.message) || String(err), code: (err && err.code) || null };
   }

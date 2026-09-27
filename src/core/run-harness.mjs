@@ -2902,10 +2902,10 @@ export class RunHarness extends EventEmitter {
     return this.isWorkspace && this.workflowId === WORKSPACE_SCAN_WORKFLOW_ID;
   }
 
-  /** Workspace scan: save the scanner's description as the workspace's — create it on a first
-   *  scan, replace the description on a re-scan (workspace-scan-run.mjs). The `done` path of
-   *  run() and resume() only, BEFORE the status flips, so the run log carries the outcome. A
-   *  failure is a warning on a done run (the description stays in the run folder), never an error. */
+  /** Workspace scan: save the scan's map + description as the workspace's (workspace-scan-run.mjs
+   *  finalizeWorkspaceScan) — create it on a first scan, update it on a re-scan. The `done` path
+   *  of run() and resume() only, BEFORE the status flips, so the run log carries the outcome. A
+   *  failure is a warning on a done run (the outputs stay in the run folder), never an error. */
   async _finalizeWorkspaceScan() {
     if (!this._isWorkspaceScan() || !this.pipeline) return;
     const res = await finalizeWorkspaceScan({
