@@ -242,3 +242,36 @@ Changelog entry ready
   Artifact:   <url>   |   not published (--no-publish)
   Files:      uncommitted on <branch> — 9 files under docs/changelog/
 ```
+
+Then, always, print a **release announcement** in one fenced block the user
+can copy straight into a team chat:
+
+````
+```
+Worca <VERSION> released
+
+Changes:
+1. <one sentence per section, in the page's order>
+2. …
+
+npm install -g @worca/app@<VERSION>
+
+<artifact url>
+```
+````
+
+- One numbered item per feature section (not the receipts), in page order.
+  Fold the small changes that only got a chip into the closest item or one
+  last "also" item, never a list of their own.
+- Each item is one sentence (two at most) that says what a teammate can do now
+  and why it matters, in the same plain words as the page: *Your team can
+  share one hosted Worca while each person's runs are charged to their own
+  key or Claude subscription. Keys are kept in a separate key service, so
+  neither Worca nor its agents can read them, which is a strong protection
+  against prompt injection.* No PR numbers, internal names or flags. A
+  command the reader types, such as `worca runs`, stays in backticks.
+- The install line pins the exact version, even for an RC:
+  `npm install -g @worca/app@1.2.0-rc.3`.
+- With `--no-publish`, leave out the link line and say below the block that
+  the page is not published. When it is published, note below the block that
+  the Artifact is private until it is shared from the page's Share menu.
