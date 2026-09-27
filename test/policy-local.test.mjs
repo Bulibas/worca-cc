@@ -9,7 +9,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
-import { setPipelineCostLimitUsd, setAskMaxBudgetUsd } from '../src/core/settings.mjs';
+import { setPipelineCostLimitUsd, setAskMaxBudgetUsd, setAskWeb } from '../src/core/settings.mjs';
 import { setHumanInLoop, setActiveWorkflow } from '../src/core/config.mjs';
 import { writePluginsLock } from '../src/core/plugins-lock.mjs';
 import { readMarketplaces, writeMarketplaces } from '../src/core/marketplaces.mjs';
@@ -47,6 +47,16 @@ test('localSnapshot: `set` means the developer stored a value; project keys need
   assert.deepEqual(s['workflows.default'], { value: 'wf_default', set: true });
   assert.match(WORCA_VERSION, /^\d+\.\d+\.\d+/);
   await setPipelineCostLimitUsd('');
+});
+
+test('localSnapshot: Ask web access is unset by default; an explicit off is a stored choice', async () => {
+  let s = localSnapshot(null);
+  assert.deepEqual(s['ask.webEnabled'], { value: false, set: false });
+  assert.deepEqual(s['ask.webAllowedDomains'], { value: [], set: false });
+  await setAskWeb({ enabled: false, allowedDomains: [], search: null });
+  s = localSnapshot(null);
+  assert.deepEqual(s['ask.webEnabled'], { value: false, set: true });
+  await setAskWeb(null);
 });
 
 const homes = () => [{ slug: 'acme/gateway', doc: normalizePolicyDoc({ schema: 1, fields: {

@@ -111,3 +111,21 @@ test('relay: a refused or unreachable relay answers every request with an error 
   assert.equal(m.id, 7);
   assert.match(m.error.message, /worca is not reachable/);
 });
+
+test('relay + web access: the server-side tool server lists the web tools only when its env carries the turn\'s web access', async () => {
+  const { webMcpEnv, buildAskSpawnOptions } = await import('../src/core/ask/spawn.mjs');
+  const web = { enabled: true, allowedDomains: ['docs.example.com'], search: { url: 'https://s.example/?q={query}', keyVar: 'RELAY_SEARCH_KEY', keyHeader: 'X-K', keyPrefix: '' } };
+  const names = async (env) => {
+    const out = [];
+    const rpc = createAskToolServer({ threadId: 'ask_relayweb', env, write: (s) => out.push(s), log: () => {} });
+    await rpc.feed(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })); await rpc.idle();
+    return JSON.parse(out.join('').trim()).result.tools.map((t) => t.name);
+  };
+  const on = await names({ ...process.env, ...webMcpEnv(web), RELAY_SEARCH_KEY: 'k' });
+  assert.ok(['propose_web_access', 'web_fetch', 'web_search'].every((n) => on.includes(n)), on.join(','));
+  assert.ok(!(await names({ ...process.env })).includes('web_fetch'), 'no WORCA_ASK_WEB: no web tools');
+  // Relayed, the agent user's claude never gets the search key: the tools that need it run in the server.
+  const base = { thread: {}, turn: { systemPrompt: 's', prompt: 'p', model: 'm' }, limits: {}, mcpConfigPath: '/tmp/m.json', scratchDir: '/tmp/s' };
+  assert.deepEqual(buildAskSpawnOptions({ ...base, web, relayed: true }).envAllowlist, ['SSH_AUTH_SOCK']);
+  assert.deepEqual(buildAskSpawnOptions({ ...base, web }).envAllowlist, ['SSH_AUTH_SOCK', 'RELAY_SEARCH_KEY']);
+});

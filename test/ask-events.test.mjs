@@ -795,3 +795,24 @@ test('propose_clone_project: labelled, and its RESULT reaches onCloneProposal wi
   h.push(uresult('toolu_cl2', '{"ok":true}', { ptu: 'toolu_task' }));
   assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
 });
+
+test('labelForTool: web tools name the host, never the full URL', () => {
+  assert.equal(labelForTool('mcp__worca__web_fetch', { url: 'https://docs.example.com/x' }), 'Reading docs.example.com');
+  assert.equal(labelForTool('mcp__worca__web_fetch', { url: 'bad' }), 'Reading a web page');
+  assert.equal(labelForTool('mcp__worca__web_search', { query: 'q' }), 'Searching the web');
+});
+
+test('propose_web_access: labelled, and its RESULT reaches onWebProposal with the full input; a sub-agent call never does', () => {
+  assert.equal(labelForTool('mcp__worca__propose_web_access', {}), 'Asking to read a new site');
+  const seen = [];
+  const h = harness({ onWebProposal: (e) => { seen.push(e); return Promise.resolve(); } });
+  const input = { url: 'https://jev.example.dev/', reason: 'docs' };
+  h.push(session(), init(), mstart('msg_1'), atool('msg_1', 'toolu_w', 'mcp__worca__propose_web_access', input));
+  assert.deepEqual(seen, []);
+  h.push(uresult('toolu_w', '{"ok":true,"card":{}}'));
+  assert.deepEqual(seen, [{ toolUseId: 'toolu_w', input, text: '{"ok":true,"card":{}}', isError: false }]);
+  h.push(atool('msg_1', 'toolu_task', 'Agent', { description: 'helper', subagent_type: 'general-purpose', prompt: 'x' }));
+  h.push(atool('msg_c', 'toolu_w2', 'mcp__worca__propose_web_access', input, 'toolu_task'));
+  h.push(uresult('toolu_w2', '{"ok":true}', { ptu: 'toolu_task' }));
+  assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
+});

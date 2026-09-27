@@ -2467,6 +2467,55 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return { el: rootEl };
   }
 
+  /** The web card (propose_web_access): proposed → applied | failed, or declined. The exact URL is shown, so a
+   *  request that smuggles data is visible before the click. Every value is text. */
+  function buildWebCard(block) {
+    const card = block.card || {};
+    const host = card.host || 'a website';
+    if (block.state === 'declined') return { el: make('div', 'ask-card-stub', `Declined — ${card.summary || `Read ${host}`}`) };
+    const rootEl = make('div', `ask-card ask-mcard ask-webcard is-${block.state}`);
+    rootEl.setAttribute('data-ask-webcard', block.state);
+    const result = card.result || null;
+    const head = make('div', 'ask-mcard-head');
+    const title = block.state === 'failed' ? 'Web access not granted'
+      : block.state === 'applied' ? (result && result.scope === 'always' ? 'Always allowed' : 'Allowed for this chat')
+        : 'Ask Worca wants to read a new site';
+    head.appendChild(make('span', 'ask-mcard-title', title));
+    head.appendChild(make('span', 'ask-mcard-kind', 'Web'));
+    rootEl.appendChild(head);
+    const body = make('div', 'ask-mcard-body');
+    const sum = make('div', 'ask-mcard-summary');
+    if (block.state === 'applied') sum.appendChild(svgIcon(WF_ICO.check, 15, 2.4));
+    sum.appendChild(make('span', null, host));
+    body.appendChild(sum);
+    if (card.reason) body.appendChild(make('div', 'ask-mcard-note', card.reason));
+    const ul = make('ul', 'ask-mcard-changes');
+    const li = make('li');
+    li.appendChild(make('span', 'ask-mcard-change-label', 'URL'));
+    const val = make('span', 'ask-mcard-change-val');
+    val.appendChild(make('span', 'ask-mcard-after', String(card.url || '')));
+    li.appendChild(val);
+    ul.appendChild(li);
+    body.appendChild(ul);
+    if (block.state === 'failed') body.appendChild(make('div', 'ask-mcard-failed', `Could not allow: ${block.error || (result && result.error) || 'unknown error'}`));
+    rootEl.appendChild(body);
+    rootEl.appendChild(make('div', 'ask-card-err'));
+    if (block.state === 'proposed') {
+      const actions = make('div', 'ask-mcard-actions');
+      const btn = (cls, text, attr) => { const b = make('button', cls, text); b.type = 'button'; b.setAttribute(attr, ''); return b; };
+      const decline = btn('ask-card-not-now', 'Deny', 'data-ask-web-decline');
+      decline.addEventListener('click', () => postCard(block, rootEl, { state: 'declined' }, decline));
+      const always = btn('ask-card-not-now', 'Always allow', 'data-ask-web-always');
+      always.title = `Adds ${host} to Settings → Ask Worca → Web access`;
+      always.addEventListener('click', () => postCard(block, rootEl, { state: 'applied', scope: 'always' }, always));
+      const chat = btn('ask-card-start', 'Allow for this chat', 'data-ask-web-chat');
+      chat.addEventListener('click', () => postCard(block, rootEl, { state: 'applied', scope: 'chat' }, chat));
+      actions.append(make('span', 'ask-card-actions-spacer'), decline, always, chat);
+      rootEl.appendChild(actions);
+    }
+    return { el: rootEl };
+  }
+
   /** The clone card (propose_clone_project): proposed → cloning → applied | failed, or declined. Every value is text. */
   function buildCloneCard(block) {
     const card = block.card || {};
@@ -3191,7 +3240,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   function isProgressBlock(block) {
     const card = block.card || {};
     if (card.type === PROGRESS_CARD_TYPE) return true;
-    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone') return false;
+    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web') return false;
     return block.state === 'started' || (block.state === 'failed' && !!block.runId);
   }
   function buildCard(block) {
@@ -3203,14 +3252,16 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const isSchedule = !!(block.card && block.card.type === 'schedule');
     const isModel = !!(block.card && block.card.type === 'model');
     const isClone = !!(block.card && block.card.type === 'clone');
+    const isWeb = !!(block.card && block.card.type === 'web');
     const isProgress = isProgressBlock(block);
-    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isProgress || block.state === 'proposed')) return cached.el;
+    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isWeb || isProgress || block.state === 'proposed')) return cached.el;
     if (cached) disposeCardEntry(cached);
     const built = isWorkflow ? buildWorkflowCard(block, cached)
       : isMetrics ? buildMetricsCard(block)
       : isSchedule ? buildScheduleCard(block)
       : isModel ? buildModelCard(block)
       : isClone ? buildCloneCard(block)
+      : isWeb ? buildWebCard(block)
       : isProgress ? buildProgressCard(block)
         : { el: block.state === 'proposed' ? buildCardForm(block) : buildCardTerminal(block) };
     st.cardEls.set(block.id, { el: built.el, state: block.state, handle: built.handle || null, dispose: built.dispose || null, animate: !!built.animate, cancelAnim: null, lastW: -1 });

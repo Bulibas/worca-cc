@@ -6,7 +6,7 @@
 
 import { createRequire } from 'node:module';
 import {
-  readSettings, pipelineCostLimitUsd, totalCostLimitUsd, costLimitResetPeriod, humanRateUsdPerHour, askMaxTurns, askMaxBudgetUsd, hideBuiltinModels,
+  readSettings, pipelineCostLimitUsd, totalCostLimitUsd, costLimitResetPeriod, humanRateUsdPerHour, askMaxTurns, askMaxBudgetUsd, hideBuiltinModels, askWeb,
 } from '../settings.mjs';
 import { readConfigRow, readTeamMetricsPrefs } from '../config.mjs';
 import { projectKey } from '../store.mjs';
@@ -27,6 +27,7 @@ const parseJson = (s, fallback) => { try { const v = JSON.parse(s); return v ?? 
 export function localSnapshot(projectDir = null) {
   const raw = readSettings();
   const has = (k) => raw[k] !== undefined && raw[k] !== null && raw[k] !== '';
+  const web = askWeb();
   const out = {
     'cost.pipelineLimitUsd': { value: pipelineCostLimitUsd(), set: pipelineCostLimitUsd() != null },
     'cost.totalLimitUsd': { value: totalCostLimitUsd(), set: totalCostLimitUsd() != null },
@@ -34,6 +35,8 @@ export function localSnapshot(projectDir = null) {
     'cost.humanRateUsd': { value: humanRateUsdPerHour(), set: humanRateUsdPerHour() != null },
     'ask.maxTurns': { value: askMaxTurns(), set: has('askMaxTurns') },
     'ask.maxBudgetUsd': { value: askMaxBudgetUsd(), set: raw.askMaxBudgetUsd !== undefined },   // literal null = "no cap", a choice
+    'ask.webEnabled': { value: web.enabled, set: typeof raw.askWeb?.enabled === 'boolean' },
+    'ask.webAllowedDomains': { value: web.allowedDomains, set: web.allowedDomains.length > 0 },
     'models.hideBuiltins': { value: hideBuiltinModels(), set: has('hideBuiltinModels') || raw.hideBuiltinModelsChosen === true },
     'plugins.marketplaces': { value: Object.values(readMarketplaces().marketplaces).map((m) => m.url), set: true },
     'plugins.required': { value: Object.entries(readPluginsLock()).map(([name, e]) => ({ name, version: e?.version ?? null, enabled: e?.enabled !== false })), set: true },

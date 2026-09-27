@@ -34,6 +34,7 @@ import { defaultScheduleDeps } from './schedule-deps.mjs';
 import { defaultSourceDeps } from './source-deps.mjs';
 import { defaultModelDeps } from './model-deps.mjs';
 import { defaultCloneDeps } from './clone-deps.mjs';
+import { defaultWebDeps } from './web-deps.mjs';
 
 const SUPPORTED_PROTOCOLS = Object.freeze(['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25']);
 const DEFAULT_PROTOCOL = '2025-06-18';
@@ -56,7 +57,7 @@ export function parseArgv(argv) {
  * server (ui/server.mjs /api/ask/relay), when the chat's claude runs as an agent user that
  * cannot read that database (agent-pool.mjs, credential broker).
  */
-export function createAskToolServer({ threadId, reader = null, signal, write, log }) {
+export function createAskToolServer({ threadId, reader = null, signal, write, log, env = process.env }) {
   return createRpcServer({
     tools: createAskTools({
       ...defaultToolDeps({ threadId, viewer: reader }),
@@ -73,6 +74,9 @@ export function createAskToolServer({ threadId, reader = null, signal, write, lo
       ...defaultSourceDeps(),
       ...defaultModelDeps({ threadId }),
       ...defaultCloneDeps(),
+      // Web access: present only when this turn's env carries WORCA_ASK_WEB (web-deps.mjs) — the
+      // child's env (classic), or the relay's own copy built from the turn's web access (ui/server.mjs).
+      ...defaultWebDeps({ threadId, signal, env }),
     }),
     write,
     ...(log ? { log } : {}),
@@ -190,7 +194,7 @@ export async function main({ argv = process.argv.slice(2), env = process.env, st
   // (its result could never be delivered), so the drain below returns promptly instead of after the classifier's timeout.
   const life = new AbortController();
   const server = createAskToolServer({
-    threadId, reader: process.env.WORCA_ASK_READER || null, signal: life.signal,
+    threadId, reader: process.env.WORCA_ASK_READER || null, signal: life.signal, env,
     write: (s) => stdout.write(s),
   });
   const rl = createInterface({ input: stdin });
