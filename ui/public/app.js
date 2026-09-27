@@ -15390,8 +15390,10 @@ function cssEscape(s) {
 // inserted BEFORE `.hist-open` so the chevron stays last in the aside.
 function resetPrCluster(card) {
   const aside = card.querySelector('.hist-aside');
-  if (!aside) return;
-  const freshPr = $('#hist-card-tpl').content.querySelector('.hist-pr').cloneNode(true);
+  // A PR batch can land after its document is gone (a test harness swapping pages): nothing to patch.
+  const tpl = $('#hist-card-tpl');
+  if (!aside || !tpl) return;
+  const freshPr = tpl.content.querySelector('.hist-pr').cloneNode(true);
   const curPr = aside.querySelector('.hist-pr, .hist-pr-link');         // button OR the swapped-in link
   if (curPr) curPr.replaceWith(freshPr);
   else aside.insertBefore(freshPr, aside.querySelector('.hist-open'));
