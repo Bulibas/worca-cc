@@ -19,6 +19,11 @@ import pkgGo from './pkg-go.mjs';
 import pkgGradle from './pkg-gradle.mjs';
 import pkgMaven from './pkg-maven.mjs';
 import pkgPython from './pkg-python.mjs';
+// P4 — code detectors; alphabetical by id.
+import db from './db.mjs';
+import httpClients from './http-clients.mjs';
+import httpRoutes from './http-routes.mjs';
+import messaging from './messaging.mjs';
 
 export const DETECTORS = Object.freeze([
   // P1
@@ -27,6 +32,8 @@ export const DETECTORS = Object.freeze([
   // P3 — boundary detectors
   apiAsyncapi, apiGraphql, apiOpenapi, apiProto, configEnv, deployCompose, deployK8s,
   gitSubmodules, pkgCargo, pkgDotnet, pkgGo, pkgGradle, pkgMaven, pkgPython,
+  // P4 — code detectors
+  db, httpClients, httpRoutes, messaging,
 ]);
 
 /** → the registered Detector with this id, or null */
