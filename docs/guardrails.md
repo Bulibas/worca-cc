@@ -269,6 +269,11 @@ enforces the set's latest definition.
     the chat in pages of 20 000 characters, 30 000 at most (Claude Code moves a
     larger tool result into a file the chat cannot read). Node's `https`
     ignores `HTTPS_PROXY`, so a proxy-only network cannot use web access in v1.
+    On a worca with no route to the internet (`compose.egress.yml` puts it on an
+    internal network) every fetch fails; when the host name does not resolve, or
+    the connection is refused or times out before the host answers, the error
+    says this worca may not have internet access instead of only the network
+    code (the log entry keeps the code).
   - **Search** is any GET JSON API: an https URL template with `{query}` (and
     optionally `{key}`), plus an optional key header and prefix. The key is always
     a `${VAR}` reference read from worca's environment — never stored in

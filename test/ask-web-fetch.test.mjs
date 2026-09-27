@@ -87,6 +87,28 @@ test('size cap truncates; timeout aborts; unsupported type and non-2xx error', a
   await assert.rejects(createWebFetcher({ allowedDomains: ALLOW, transport: async () => res(404, { 'content-type': 'text/html' }) }).fetch('https://docs.example.com/'), /HTTP 404/);
 });
 
+test('an unreachable host says this worca may have no internet access; the log keeps the code', async () => {
+  const fail = (code) => async () => { throw Object.assign(new Error(`connect ${code}`), { code }); };
+  for (const code of ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH']) {
+    const entries = [];
+    const f = createWebFetcher({ allowedDomains: ALLOW, transport: fail(code), log: (e) => entries.push(e) });
+    await assert.rejects(f.fetch('https://docs.example.com/'), (e) => e.code === 'network'
+      && e.message.startsWith(`network error: ${code} — could not reach docs.example.com.`) && /may not have internet access/.test(e.message));
+    assert.match(entries[0].error, new RegExp(`^network error: ${code}`));
+  }
+  // Any other failure keeps the bare code.
+  await assert.rejects(createWebFetcher({ allowedDomains: ALLOW, transport: fail('ECONNRESET') }).fetch('https://docs.example.com/'),
+    (e) => e.message === 'network error: ECONNRESET');
+  // A timeout before the host answered hints too; one after it answered (a slow body) does not.
+  const hang = createWebFetcher({ allowedDomains: ALLOW, limits: { ...WEB_LIMITS, timeoutMs: 30 },
+    transport: ({ signal }) => new Promise((_, rej) => signal.addEventListener('abort', () => rej(signal.reason))) });
+  await assert.rejects(hang.fetch('https://docs.example.com/'), /timed out after .* may not have internet access/);
+  const slowBody = createWebFetcher({ allowedDomains: ALLOW, limits: { ...WEB_LIMITS, timeoutMs: 30 },
+    transport: async ({ signal }) => ({ status: 200, headers: { 'content-type': 'text/plain' }, destroy() {},
+      body: (async function* () { await new Promise((_, rej) => signal.addEventListener('abort', () => rej(signal.reason))); })() }) });
+  await assert.rejects(slowBody.fetch('https://docs.example.com/'), (e) => /^timed out after [\d.]+ s$/.test(e.message));
+});
+
 test('HTML is converted; every call is logged (refusals too)', async () => {
   const entries = [];
   const f = createWebFetcher({ allowedDomains: ALLOW, log: (e) => entries.push(e), transport: async () => res(200, { 'content-type': 'text/html; charset=utf-8' }, '<title>T</title><main><h2>Hi</h2></main>') });

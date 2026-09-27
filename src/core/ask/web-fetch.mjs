@@ -145,12 +145,22 @@ function decodeText(buf, charset, mime) {
   try { return new TextDecoder(label || 'utf-8').decode(buf); } catch { return new TextDecoder('utf-8').decode(buf); }
 }
 
-function wrapNetError(err, deadline, limits) {
+// Failures that mean the host could not be reached at all: on a worca with no route to the
+// internet (compose.egress.yml's internal network, a firewall) every public host fails this way.
+const UNREACHABLE = new Set(['ENOTFOUND', 'EAI_AGAIN', 'EAI_FAIL', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH', 'EHOSTUNREACH']);
+const noInternetHint = (host) => ` — could not reach ${host || 'the host'}. This worca may not have internet access (the operator may have locked outbound traffic down); check the host name, or ask them.`;
+
+/** `reached`: whether the host answered at all (a timeout before that is a connection timeout). */
+function wrapNetError(err, deadline, limits, { host = null, reached = false } = {}) {
   if (err instanceof WebAccessError) return err;
-  if (deadline.aborted) return new WebAccessError(`timed out after ${limits.timeoutMs / 1000} s`, { code: 'timeout' });
+  if (deadline.aborted) {
+    const hint = reached ? '' : noInternetHint(host);
+    return new WebAccessError(`timed out after ${limits.timeoutMs / 1000} s${hint}`, { code: 'timeout' });
+  }
   if (err && err.code === 'EWORCA_BLOCKED') return new WebAccessError(err.message, { code: 'blocked-address' });
   if (err && err.name === 'AbortError') return new WebAccessError('the chat turn ended', { code: 'aborted' });
-  return new WebAccessError(`network error: ${err?.code || err?.message || err}`, { code: 'network' });
+  const hint = UNREACHABLE.has(err?.code) ? noInternetHint(host) : '';
+  return new WebAccessError(`network error: ${err?.code || err?.message || err}${hint}`, { code: 'network' });
 }
 
 export function createWebFetcher({ allowedDomains, transport = httpsTransport, lookup = guardedLookup, signal = null, limits = WEB_LIMITS, log = () => {} }) {
@@ -158,11 +168,14 @@ export function createWebFetcher({ allowedDomains, transport = httpsTransport, l
     const entry = { tool: 'web_fetch', url: String(raw ?? '').slice(0, 512), finalUrl: null, status: null, bytes: 0, ok: false, error: null };
     const deadline = AbortSignal.timeout(limits.timeoutMs);
     const sig = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    const net = { host: null, reached: false };
     try {
       let url = checkWebUrl(raw, allowedDomains, { limits });
       let res; let hops = 0;
       for (;;) {
+        net.host = url.hostname; net.reached = false;
         res = await transport({ url, signal: sig, lookup, headers: { ...FETCH_HEADERS } });
+        net.reached = true;
         if (!REDIRECTS.has(res.status)) break;
         res.destroy();
         hops += 1;
@@ -181,12 +194,12 @@ export function createWebFetcher({ allowedDomains, transport = httpsTransport, l
       entry.bytes = buf.length;
       const decodedText = decodeText(buf, type.charset, type.mime);
       const isHtml = type.mime === 'text/html' || type.mime === 'application/xhtml+xml';
-      const conv = isHtml ? htmlToText(decodedText, url.href, { maxChars: limits.maxTextChars })
+      const conv = isHtml ? await htmlToText(decodedText, url.href, { maxChars: limits.maxTextChars })
         : { title: null, text: decodedText.slice(0, limits.maxTextChars), truncated: decodedText.length > limits.maxTextChars };
       entry.ok = true;
       return { url: String(raw).trim(), finalUrl: url.href, status: res.status, contentType: type.mime, title: conv.title, text: conv.text, truncated: rawCut || conv.truncated, bytes: buf.length };
     } catch (err) {
-      const e = wrapNetError(err, deadline, limits);
+      const e = wrapNetError(err, deadline, limits, net);
       entry.error = e.message.slice(0, 300);
       throw e;
     } finally {
@@ -217,7 +230,7 @@ export function createWebSearcher({ search, key = '', allowedDomains = [], trans
   async function run(query, count = 5) {
     const q = String(query ?? '').trim();
     const n = Math.max(1, Math.min(limits.searchMaxResults, Number.isInteger(count) ? count : 5));
-    let host = null;
+    let host = null; let reached = false;
     const entry = { tool: 'web_search', url: null, queryChars: q.length, finalUrl: null, status: null, bytes: 0, ok: false, error: null };
     const deadline = AbortSignal.timeout(limits.timeoutMs);
     const sig = signal ? AbortSignal.any([signal, deadline]) : deadline;
@@ -235,6 +248,7 @@ export function createWebSearcher({ search, key = '', allowedDomains = [], trans
       const headers = { 'user-agent': USER_AGENT, accept: 'application/json', 'accept-encoding': 'gzip, deflate, br' };
       if (search.keyHeader && key) headers[search.keyHeader.toLowerCase()] = `${search.keyPrefix || ''}${key}`;
       const res = await transport({ url, signal: sig, lookup, headers });
+      reached = true;
       entry.status = res.status;
       if (REDIRECTS.has(res.status)) { res.destroy(); throw new WebAccessError('the search endpoint redirected — configure its final URL in Settings'); }
       if (res.status < 200 || res.status >= 300) { res.destroy(); throw new WebAccessError(`the search endpoint answered HTTP ${res.status}`, { code: 'http', status: res.status }); }
@@ -246,7 +260,7 @@ export function createWebSearcher({ search, key = '', allowedDomains = [], trans
       entry.ok = true;
       return { query: q, results };
     } catch (err) {
-      const e = wrapNetError(err, deadline, limits);
+      const e = wrapNetError(err, deadline, limits, { host, reached });
       entry.error = e.message.slice(0, 300);
       throw e;
     } finally {

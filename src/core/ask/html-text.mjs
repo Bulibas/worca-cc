@@ -1,8 +1,11 @@
 // src/core/ask/html-text.mjs
 // Untrusted HTML → readable markdown-ish text for web_fetch (docs/guardrails.md "Web access"). htmlparser2's
 // streaming tokenizer: no DOM, no scripts, no CSS, no recursion. Hostile input is bounded by a
-// depth cap, O(1) output bookkeeping, and a wall-clock budget checked between input chunks
+// depth cap, O(1) output bookkeeping, and a parse-time budget checked between input chunks
 // (htmlparser2's own tag stack is O(depth) per tag, so deep nesting is quadratic inside it).
+// It yields to the event loop after every chunk: in relay mode (docs/credential-broker.md) this
+// runs on the worca server's main thread, and one heavy page must not stall everyone else. The
+// budget counts only time spent parsing, so a busy server does not cut pages short.
 import { Parser } from 'htmlparser2';
 
 const SKIP = new Set(['script', 'style', 'noscript', 'template', 'svg', 'math', 'iframe', 'object', 'canvas',
@@ -22,7 +25,7 @@ function safeHref(href, baseUrl) {
   } catch { return null; }
 }
 
-export function htmlToText(html, baseUrl = null, { maxChars = 100_000, scope = true, budgetMs = 1500 } = {}) {
+export async function htmlToText(html, baseUrl = null, { maxChars = 100_000, scope = true, budgetMs = 1500 } = {}) {
   const src = String(html ?? '');
   const scoped = scope && /<(main|article)[\s>]/i.test(src);
   let out = ''; let started = false; let nl = 0; let full = false; let cut = false;
@@ -89,10 +92,13 @@ export function htmlToText(html, baseUrl = null, { maxChars = 100_000, scope = t
       while (stack.length > i) close(stack.pop());
     },
   }, { decodeEntities: true, lowerCaseTags: true, lowerCaseAttributeNames: true });
-  const t0 = performance.now();
+  let spent = 0;
   for (let i = 0; i < src.length && !full; i += CHUNK) {
+    if (i > 0) await new Promise(setImmediate);
+    const t0 = performance.now();
     parser.write(src.slice(i, i + CHUNK));
-    if (performance.now() - t0 > budgetMs) { cut = true; break; }
+    spent += performance.now() - t0;
+    if (spent > budgetMs) { cut = true; break; }
   }
   parser.end();
   full = false;                                   // closing fences/blocks of still-open elements get through
