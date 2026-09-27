@@ -251,7 +251,7 @@ function warningsFor(server, models, props) {
  * @returns {Promise<{server:string, serverLabel:string, baseUrl:string, models:Array<object>, warnings:string[]}>}
  * @throws {Error} when nothing answers at all (the caller shows it as the connection failure it is)
  */
-export async function listEndpointModels(baseUrl, { apiKey = '', fetch: f = globalThis.fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function listEndpointModels(baseUrl, { apiKey = '', fetch: f = globalThis.fetch, timeoutMs = DEFAULT_TIMEOUT_MS, realBaseUrl = null } = {}) {
   const base = String(baseUrl || '').trim().replace(/\/+$/, '');
   if (!base) throw new Error('baseUrl is required');
   const root = endpointRoot(base);
@@ -261,7 +261,9 @@ export async function listEndpointModels(baseUrl, { apiKey = '', fetch: f = glob
   let models = [];
   let props = null;
 
-  if (isOpenRouter(base)) {
+  // `realBaseUrl`: the provider URL when `baseUrl` is the credential broker's slot for it —
+  // what the server IS (OpenRouter or not) is decided by the real one.
+  if (isOpenRouter(realBaseUrl || base)) {
     // A hosted API: probing it for llama.cpp / Ollama / LM Studio would cost three requests for
     // three 404s. Its own /models is the whole answer.
     const list = await json(f, `${base}/models`, opt);

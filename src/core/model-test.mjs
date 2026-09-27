@@ -84,6 +84,7 @@ export async function testModel(id, { signal, bin, run = runClaude, signedOut = 
       signal: ctrl.signal,
       bin,
       onEvent: () => {},
+      spawnKind: 'test',         // credential broker: a 10-minute token (broker-client.mjs)
     });
     const reply = String(text || '').split(/\r?\n/).map((l) => l.trim()).find((l) => l) || '';
     if (!reply) {

@@ -75,7 +75,9 @@ test('agent isolation: a worca-agent user, sudo only to it, set up on single-vol
   const d = read('docker/Dockerfile');
   assert.match(d, /useradd -u 1001 -g worca-share .* worca-agent/);
   assert.match(d, /usermod -aG worca-share worca/);
-  assert.match(d, /'worca ALL=\(worca-agent\) NOPASSWD:SETENV: ALL'/, 'worca may become worca-agent and nothing else');
+  assert.match(d, /'worca ALL=\(WORCA_AGENTS\) NOPASSWD:SETENV: ALL'/, 'worca may become the agent users and nothing else');
+  assert.match(d, /Runas_Alias WORCA_AGENTS = worca-agent, \$\(seq -w 1 16 \| sed 's\/\^\/worca-agent-\/'/, 'the alias names worca-agent and the pool, and only them');
+  assert.match(d, /useradd -u "11\$i" -g worca-share -M -d \/nonexistent -s \/bin\/bash "worca-agent-\$i"/, 'the pool users share the agent group, no home, no password');
   assert.doesNotMatch(d, /\(root\)|\(ALL\)/, 'never root');
   assert.match(d, /umask=0007, umask_override/, 'agent files stay group-writable, never world-readable');
   assert.match(d, /visudo -cf \/etc\/sudoers\.d\/worca-agent/, 'a broken rule fails the build');
@@ -240,4 +242,41 @@ test('egress proxy survives a client that resets a denied CONNECT (the sidecar u
     proxy.close();
     o.server.close();
   }
+});
+
+test('compose.broker.yml: worca gets the broker address and no key; the broker publishes no port', () => {
+  const b = read('docker/compose.broker.yml');
+  assert.match(b, /WORCA_BROKER_URL: http:\/\/broker:8080/);
+  assert.match(b, /ANTHROPIC_API_KEY: ""/, 'the key is blanked in worca');
+  assert.match(b, /CLAUDE_CODE_OAUTH_TOKEN: ""/);
+  assert.match(b, /command: \["worca", "broker"\]/);
+  assert.match(b, /WORCA_BROKER_KEY_ANTHROPIC/, 'the key goes to the broker under its own name');
+  const broker = b.slice(b.indexOf('\n  broker:'));
+  assert.doesNotMatch(broker, /^\s+ports:/m, 'no published ports: worca reaches it on the compose network');
+  assert.match(broker, /cap_drop:\s*\n\s*- ALL/);
+  assert.match(broker, /\/healthz/, 'its own healthcheck (the image\'s targets worca\'s port)');
+});
+
+test('compose.isolation.yml: one volume, root only to prepare it, sudo to agents without no-new-privileges, the capabilities it needs', () => {
+  const c = read('docker/compose.isolation.yml');
+  assert.match(c, /user: "0:0"/);
+  assert.match(c, /WORCA_DATA_DIR: \/data/);
+  assert.match(c, /security_opt: !reset \[\]/, 'no-new-privileges lifted: sudo is setuid');
+  assert.match(c, /cap_drop:\s*\n\s*- ALL/);
+  for (const cap of ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'SETUID', 'SETGID']) assert.match(c, new RegExp(`- ${cap}\\b`), `${cap} kept`);
+  assert.doesNotMatch(c, /SYS_ADMIN|SYS_PTRACE|NET_ADMIN|privileged/, 'nothing broader');
+  const e = read('docker/entrypoint.sh');
+  assert.match(e, /WORCA_AGENT_POOL:-1/, 'the pool is on by default, with an off switch');
+  assert.match(e, /if \[ ! -g "\$wh\/tmp\/ask" \]/, 'a lost setgid bit is reported, not silent');
+});
+
+test('entrypoint.sh: `worca broker` skips worca\'s preparation and drops to worca after preparing its volume', () => {
+  const e = read('docker/entrypoint.sh');
+  const start = e.indexOf('if [ "${1:-}" = "worca" ] && [ "${2:-}" = "broker" ]');
+  assert.ok(start > 0, 'the broker branch exists');
+  assert.ok(start < e.indexOf('WORCA_DATA_DIR:-'), 'it runs before the single-volume block');
+  const block = e.slice(start, e.indexOf('\nfi\n', start));
+  assert.match(block, /chown worca:worca "\$WORCA_BROKER_DATA_DIR"/);
+  assert.match(block, /exec setpriv --reuid=worca --regid=worca --init-groups -- "\$0" "\$@"/);
+  assert.match(e, /credential broker \(\$\{WORCA_BROKER_URL\}\); worca holds no model key/);
 });

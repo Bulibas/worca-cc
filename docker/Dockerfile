@@ -79,12 +79,18 @@ RUN usermod -l worca -d /home/worca -m node \
 # `worca` start commands as `worca-agent`, never as root. The entrypoint turns this
 # on for single-volume hosts (WORCA_DATA_DIR); a bind-mount compose setup keeps one
 # uid, so the files agents write on the host keep your uid.
+#
+# The agent POOL (credential broker, docs/credential-broker.md): worca-agent-01..16, one per
+# signed-in person, so one person's agents cannot read another's processes (and the broker
+# token in their environment). Same group, same rule: sudo to these users only, never root.
 RUN groupadd -g 1001 worca-share \
  && useradd -u 1001 -g worca-share -M -d /nonexistent -s /bin/bash worca-agent \
+ && for i in $(seq -w 1 16); do useradd -u "11$i" -g worca-share -M -d /nonexistent -s /bin/bash "worca-agent-$i"; done \
  && usermod -aG worca-share worca \
  && printf '%s\n' \
       'Defaults:worca !lecture, !syslog, !secure_path, umask=0007, umask_override' \
-      'worca ALL=(worca-agent) NOPASSWD:SETENV: ALL' \
+      "Runas_Alias WORCA_AGENTS = worca-agent, $(seq -w 1 16 | sed 's/^/worca-agent-/' | paste -sd, - | sed 's/,/, /g')" \
+      'worca ALL=(WORCA_AGENTS) NOPASSWD:SETENV: ALL' \
       > /etc/sudoers.d/worca-agent \
  && chmod 0440 /etc/sudoers.d/worca-agent \
  && visudo -cf /etc/sudoers.d/worca-agent

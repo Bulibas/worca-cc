@@ -121,6 +121,12 @@ import {
 } from '../src/core/remote-access.mjs';
 import { detectDeployment, deploymentFacts } from '../src/core/deployment.mjs';
 import { resolveIdentity, startedByOf, prAttributionFooter, actorOf, isSharedIdentity, byActor } from '../src/core/identity.mjs';
+import { withBillTo, currentBillTo, currentOwner } from '../src/core/billing.mjs';
+import { agentIdentity } from '../src/core/agent-user.mjs';
+import { createAskToolServer } from '../src/core/ask/mcp-stdio.mjs';
+import { brokerEnabled, brokerInfo, personSlots, brokerUsageSummary, foldUsageByPerson } from '../src/core/broker-client.mjs';
+import { checkBrokerAtBoot } from '../src/core/broker-boot.mjs';
+import { modelSlot, missingCredentials, describeMissing } from '../src/core/broker-routing.mjs';
 import { planClone, cloneProject, CloneError } from '../src/core/clone-project.mjs';
 import { listFolders } from '../src/core/fs-browse.mjs';
 import {
@@ -1189,6 +1195,11 @@ app.post('/api/ask/threads/:id/messages', express.json({ limit: '64mb' }));
 app.put('/api/scripts/:key/cases', express.json({ limit: '64mb' }));
 app.use(express.json({ limit: '8mb' }));
 
+// Credential broker billing (src/core/billing.mjs): every claude spawn a request causes —
+// a run it starts, an Ask turn, a model Test — is billed to the person behind the request.
+// AFTER the body parsers: their stream callbacks would otherwise run outside this context.
+app.use((req, _res, next) => withBillTo(resolveIdentity(req).name, next));
+
 if (HLJS_ASSETS) {
   const sendHljsModule = (file) => (_req, res, next) => {
     res.type('text/javascript');
@@ -1591,6 +1602,14 @@ const startRunHandler = async (req, res) => {
     }
     if (!hasWorkspace && !hasProjectDir) {
       return badRequest(res, 'workspaceId or projectDir is required');
+    }
+
+    // Credential broker: the run's own model, when the request names one, is checked here
+    // (an instant refusal); the harness then checks every node's model before it spawns
+    // anything (run-harness.mjs#_brokerPreflight).
+    if (!internal && body.mock !== true && !mockEnabled({}) && typeof body.model === 'string' && body.model.trim()) {
+      const refusal = await brokerStartRefusal(req, [body.model.trim()]);
+      if (refusal) return res.status(409).json({ error: refusal, code: 'credential-missing' });
     }
 
     // Ask Worca card link (§8.1): both or neither; the thread must exist and
@@ -3339,15 +3358,33 @@ app.get('/api/counts', (req, res) => {
 // GET /api/stats?range=today|week|month|all  -> the Statistics view payload (§6.9).
 // Pure DB reads; an unknown range is the caller's fault, so getStats' RangeError
 // maps to 400 while anything else keeps bubbling to the error handler.
-app.get('/api/stats', (req, res) => {
+app.get('/api/stats', async (req, res) => {
+  let stats;
   try {
     const range = typeof req.query.range === 'string' && req.query.range ? req.query.range : 'month';
-    res.json(getStats({ range }));
+    stats = getStats({ range });
   } catch (err) {
     if (err instanceof RangeError) return badRequest(res, err.message);
     throw err;
   }
+  // Credential broker: model spend per person in the same window, as the broker metered it
+  // (the authoritative figure: it saw every request). Absent with the broker off.
+  if (brokerEnabled()) stats.byPerson = await statsByPerson(stats.windowStartMs, stats.windowEndMs);
+  res.json(stats);
 });
+
+/** Broker usage in [startMs, endMs) folded per person: {people:[…]} or {error}. */
+async function statsByPerson(startMs, endMs) {
+  try {
+    const { rows } = await brokerUsageSummary({
+      since: Number.isFinite(startMs) ? new Date(startMs).toISOString() : undefined,
+      until: Number.isFinite(endMs) ? new Date(endMs).toISOString() : undefined,
+    });
+    return { people: foldUsageByPerson(rows) };
+  } catch (err) {
+    return { error: err && err.message ? err.message : String(err) };
+  }
+}
 
 // ---- Team metrics (team-metrics-design.md §4.6–§4.10) ----------------------------------
 function metricsErrorStatus(code) {
@@ -4992,6 +5029,98 @@ app.get('/api/whoami', (req, res) => {
   const who = resolveIdentity(req);
   res.json(who.source === 'local' ? { name: null, source: 'local', shared: false } : { ...who, shared: isSharedIdentity(who.source) });
 });
+
+// The signed-in person's model credentials, as the credential broker sees them
+// (docs/credential-broker.md). Status only: which slots have a key, never a key.
+// { enabled:false } with the broker off.
+app.get('/api/credentials', async (req, res) => {
+  if (!brokerEnabled()) return res.json({ enabled: false });
+  try {
+    const info = await brokerInfo();
+    const who = resolveIdentity(req);
+    // Which slot each catalog model spends from: the pickers' "your key / no key" badges.
+    const models = {};
+    try {
+      for (const m of await listModels()) {
+        const r = modelSlot(m.id);
+        if (r) models[m.id] = r.slot ? { slot: r.slot } : r.keyless ? { keyless: true } : { error: r.error };
+      }
+    } catch { /* badges are a nicety: an unreadable catalog leaves them off */ }
+    const base = { enabled: true, mode: info.mode, keyPage: info.publicUrl || null, models };
+    if (info.mode !== 'multi') return res.json({ ...base, person: null, slots: (await personSlots('local')).slots });
+    if (!isSharedIdentity(who.source)) return res.json({ ...base, person: null, slots: [] });
+    const r = await personSlots(who.name);
+    res.json({ ...base, person: r.person, slots: r.slots });
+  } catch (err) {
+    res.status(502).json({ enabled: true, error: err && err.message ? err.message : String(err) });
+  }
+});
+
+// ── Ask Worca tool relay (agent users, agent-pool.mjs) ───────────────────────────────
+// When agents run under their own users, a chat's claude runs as the person's agent user,
+// which cannot read worca's database. Its MCP child then only relays each JSON-RPC line
+// here; the worca tools run in this process (createAskToolServer), in the chat owner's
+// billing context. One token per turn, loopback callers only, dropped when the turn ends.
+const askRelays = new Map();   // token -> { rpc, out, billTo, owner }
+
+function askAgentRelay({ threadId, reader }) {
+  const token = randomBytes(24).toString('base64url');
+  const life = new AbortController();
+  const entry = { out: [], billTo: currentBillTo(), owner: currentOwner() };
+  entry.rpc = createAskToolServer({ threadId, reader, signal: life.signal, write: (s) => { entry.out.push(s); } });
+  askRelays.set(token, entry);
+  const port = server.address()?.port || PORT;
+  return { url: `http://127.0.0.1:${port}/api/ask/relay`, token, dispose: () => { life.abort(); askRelays.delete(token); } };
+}
+
+app.post('/api/ask/relay', async (req, res) => {
+  if (!isInContainer(req)) return res.status(403).json({ error: 'relay: loopback callers only' });
+  const entry = askRelays.get(String(req.headers['x-worca-relay'] || ''));
+  if (!entry) return res.status(403).json({ error: 'relay: unknown or finished turn' });
+  const line = req.body && typeof req.body.line === 'string' ? req.body.line : null;
+  if (line === null) return badRequest(res, 'relay: line is required');
+  // One line at a time per turn (the child sends sequentially), so the output collected
+  // between feed and idle is this line's answer.
+  await withBillTo(entry.billTo, async () => {
+    entry.out = [];
+    await entry.rpc.feed(line);
+    await entry.rpc.idle();
+  }, { owner: entry.owner });
+  res.json({ out: entry.out });
+});
+
+/**
+ * Credential-broker preflight for starting work with known models (an Ask message, a run
+ * started with an explicit model): refused up front, naming each missing key and the key
+ * page, instead of the first spawn failing. In single mode the one set of keys is checked.
+ * Never blocks on a broker that can't be asked.
+ * @param {string[]} modelIds
+ * @returns {Promise<string|null>} the refusal, or null to proceed
+ */
+async function brokerStartRefusal(req, modelIds) {
+  if (!brokerEnabled() || !modelIds || !modelIds.length) return null;
+  try {
+    const info = await brokerInfo();
+    let person = 'local';
+    if (info.mode === 'multi') {
+      const who = resolveIdentity(req);
+      if (!isSharedIdentity(who.source)) return null;
+      person = who.name;
+    }
+    const r = missingCredentials(modelIds, modelSlot, (await personSlots(person)).slots || []);
+    if (!r.missing.length && !r.errors.length) return null;
+    const one = r.missing.length === 1 && !r.errors.length ? r.missing[0] : null;
+    const where = info.publicUrl ? ` Add it on the key page (${info.publicUrl}), then try again.` : ' Add it to the credential broker, then try again.';
+    if (one) {
+      return one.state === 'invalid'
+        ? `Your ${one.label} was rejected by the provider.${where}`
+        : `You haven't added your ${one.label} yet, and ${one.models.join(', ')} needs it.${where}`;
+    }
+    return `Can't start: ${describeMissing(r, info.publicUrl)}`;
+  } catch {
+    return null;
+  }
+}
 
 /** Constant-time bearer check; `expected` is the boot-time token from ui.json. */
 function bearerMatches(header, expected) {
@@ -6846,6 +6975,9 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
       mock: mockEnabled({}) ? { card: mockAskCard(ctx, text) } : null, // R-F
       attachmentNames,
       deps: {
+        // Agents under their own users (agent-pool.mjs): the chat runs as the person's agent
+        // user and its worca tools run here, through the relay. null = the classic MCP child.
+        agentRelay: agentIdentity() ? askAgentRelay : null,
         onFrame: stampAskFrames(id, job),
         onOutOfTurn: (f) => broadcast({ ...f, threadId: id }),
         onCommentMutation: ({ runId }) => { emitDiffCommentsChanged(runId); },
@@ -6924,6 +7056,10 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
     if (!text.trim()) return badRequest(res, 'text is required');
     const mv = await validateModelEffort(body.model, body.effort);
     if (!mv.ok) return badRequest(res, mv.error);
+    if (!mockEnabled({})) {
+      const refusal = await brokerStartRefusal(req, [String(body.model)]);
+      if (refusal) return res.status(409).json({ error: refusal, code: 'credential-missing' });
+    }
     const cv = validateClientContext(body.context);
     if (!cv.ok) return badRequest(res, cv.error);
     // #397: explicit pin beats page context, per field. A context carrying its own
@@ -8794,6 +8930,24 @@ if (isMain) {
     process.exit(1);
   }
   for (const w of REMOTE_ACCESS_CHECK.warnings) console.warn(`[worca-ui] remote access: ${w}`);
+
+  // Credential broker (docs/credential-broker.md): with WORCA_BROKER_URL set, worca holds no
+  // model credential. Refuse to serve while one is still reachable by agents, or while the
+  // broker can't be reached.
+  {
+    const shared = !!identityCheck || !!String(process.env.WORCA_IDENTITY_HEADER || '').trim();
+    const b = await checkBrokerAtBoot({ shared, log: (l) => console.log(l) });
+    for (const w of b.warnings) console.warn(`[worca-ui] credentials: ${w}`);
+    if (b.fatal.length) {
+      for (const e of b.fatal) console.error(e.startsWith('worca:') ? e : `[worca-ui] credentials: ${e}`);
+      console.error('[worca-ui] not starting.');
+      process.exit(78);
+    }
+    if (b.on) {
+      const slots = (b.info?.slots || []).map((s) => s.id).join(', ');
+      console.log(`[worca-ui] credentials: broker ${b.info?.mode}${b.info?.publicUrl ? `, key page ${b.info.publicUrl}` : ''}, slots ${slots}`);
+    }
+  }
 
   try {
     seedBuiltinMarketplace();

@@ -124,6 +124,13 @@ export function isFailedResponseOverflow(code, message) {
 export function mapUpstreamError(status, text, { provider = 'upstream', retryAfter } = {}) {
   const msg = upstreamMessage(text);
   const who = provider;
+  // The credential broker's own refusals (a missing key, a spent cap, a dead token) keep
+  // their 403 and their words: re-wrapped as a 401 the CLI would retry for minutes, and the
+  // `worca-broker:` prefix is what run pauses and the key-page hint key on.
+  if (/^worca-broker:/.test(msg)) {
+    const type = /quota reached|not allowed/.test(msg) ? 'permission_error' : 'authentication_error';
+    return anthropicError(status === 429 ? 429 : 403, status === 429 ? 'rate_limit_error' : type, msg);
+  }
   // A 403 whose body names something other than the credential is a POLICY
   // refusal (OpenRouter gates some :free models to listed agent apps: "only
   // available on agentic harnesses"). Calling that an auth failure sends the

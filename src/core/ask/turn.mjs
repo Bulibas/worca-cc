@@ -112,6 +112,10 @@ class AskTurn extends EventEmitter {
       resolveModelCost: deps.resolveModelCost ?? resolveModelCost,
       worcaHome: deps.worcaHome ?? worcaHome,
       buildMcpConfig: deps.buildMcpConfig ?? buildMcpConfig,
+      // ({threadId, reader}) => {url, token, dispose()} | null. Set by the server when agents run
+      // under their own users (agent-pool.mjs): the chat's claude then runs as the person's
+      // agent user and its worca tools run in the server through this relay. null = classic.
+      agentRelay: deps.agentRelay ?? null,
       serverPath: deps.serverPath ?? ASK_MCP_SERVER_PATH,
       newAskId: deps.newAskId ?? newAskId,
       setPendingCardComments: deps.setPendingCardComments ?? setPendingCardComments,
@@ -622,9 +626,10 @@ class AskTurn extends EventEmitter {
         ? pathResolve(process.env.WORCA_HOME)
         : dirname(d.worcaHome());
       mcpConfigPath = join(scratchDir, `mcp-${this.assistantMessageId}.json`);
+      this.relay = d.agentRelay ? d.agentRelay({ threadId: this.threadId, reader: this.reader || null }) : null;
       await d.fs.writeFile(
         mcpConfigPath,
-        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, ...(this.reader ? { reader: this.reader } : {}) }), null, 2),
+        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, ...(this.reader ? { reader: this.reader } : {}), ...(this.relay ? { relay: this.relay } : {}) }), null, 2),
         'utf8',
       );
       // One 30-minute budget for the whole turn, retry included. The timedOut
@@ -641,6 +646,7 @@ class AskTurn extends EventEmitter {
     } finally {
       if (timer != null) d.clearTimeout(timer);
       if (mcpConfigPath) await d.fs.unlink(mcpConfigPath).catch(() => {});
+      if (this.relay) { try { this.relay.dispose(); } catch { /* already gone */ } this.relay = null; }
     }
     this._kickoffTitle();
     return out;
@@ -684,6 +690,8 @@ class AskTurn extends EventEmitter {
         scratchDir,
         memoryDir: this.memoryDir,
       });
+      // With the relay, the chat's claude runs as the person's agent user (agent-pool.mjs).
+      if (this.relay) options.asAgent = true;
       try {
         await d.runClaudeImpl(options);
         // Resolve path. Future-proofing: if a later CLI exits 0 on a limit,

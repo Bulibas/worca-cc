@@ -157,11 +157,26 @@ export const MCP_FORWARD_ENV = Object.freeze(['WORCA_CLAUDE_BIN', 'ORCH_CLAUDE_B
  * (path.resolve(process.env.WORCA_HOME) or dirname(worcaHome())) — never
  * worcaHome() itself. The argv twins make the child independent of env forwarding.
  */
-export function buildMcpConfig({ homeBase, threadId, execPath = process.execPath, serverPath, env = process.env, reader = null }) {
+export function buildMcpConfig({ homeBase, threadId, execPath = process.execPath, serverPath, env = process.env, reader = null, relay = null }) {
   if (!serverPath) throw new Error('buildMcpConfig: serverPath is required');
   if (typeof homeBase !== 'string' || !homeBase.trim()) throw new Error('buildMcpConfig: homeBase is required');
   const base = resolvePath(homeBase);
   const thread = String(threadId ?? '');
+  // Relay mode (the chat runs as an agent user, agent-pool.mjs): the child only forwards to
+  // the worca server, which runs the tools; it gets the relay URL and this turn's token,
+  // and nothing that points at worca's own files.
+  if (relay && relay.url && relay.token) {
+    return {
+      mcpServers: {
+        worca: {
+          type: 'stdio',
+          command: execPath,
+          args: ['--disable-warning=ExperimentalWarning', serverPath, '--relay', relay.url, '--thread', thread],
+          env: { WORCA_ASK_RELAY_TOKEN: relay.token, WORCA_ASK_THREAD_ID: thread },
+        },
+      },
+    };
+  }
   const forwarded = {};
   for (const k of MCP_FORWARD_ENV) if (env && typeof env[k] === 'string' && env[k] !== '') forwarded[k] = env[k];
   return {

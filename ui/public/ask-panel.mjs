@@ -7,6 +7,7 @@
 import { openScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
 import { formatInstant, describeRule } from '../../src/shared/schedule/recurrence.mjs';
 import { createThreadModel } from './ask-model.mjs';
+import { credentialBadge } from './credential-badges.mjs';
 import { createMarkdownRenderer } from './ask-markdown.mjs';
 import { createThinkingOrb } from './thinking-orb.mjs';
 import { workflowPickerLabel } from './results-view.mjs';
@@ -1413,6 +1414,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       if (m.needsSignIn) {
         item.appendChild(tag('needs sign-in', 'is-err', m.signInMessage || 'The provider behind this model is not usable yet — Settings › Models › Providers.'));
       }
+      // Credential broker: whether the signed-in person has the key this model spends from.
+      const cb = credentialBadge(m.id);
+      if (cb) item.appendChild(tag(cb.text, cb.missing ? 'is-err' : 'is-key', cb.title));
       if (m.id === st.picker.model) item.appendChild(make('span', 'ask-model-check', '✓'));
       return item;
     };
@@ -2539,6 +2543,12 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
             closePopover({ focusTrigger: true });
           });
           item.appendChild(make('span', 'ask-model-name', m.label || m.id));
+          const cb = credentialBadge(m.id);
+          if (cb) {
+            const t = make('span', `ask-model-tag ${cb.missing ? 'is-err' : 'is-key'}`, cb.text);
+            t.title = cb.title;
+            item.appendChild(t);
+          }
           if (m.id === cur().model) item.appendChild(make('span', 'ask-model-check', '✓'));
           p.appendChild(item);
         }

@@ -39,10 +39,11 @@ function harness() {
   return { server, out, logs, parsed: () => out.map((s) => { assert.ok(s.endsWith('\n') && !s.slice(0, -1).includes('\n'), 'one JSON object per line'); return JSON.parse(s); }) };
 }
 
-test('parseArgv: --home / --thread, missing values ignored', () => {
-  assert.deepEqual(parseArgv(['--home', '/b', '--thread', 'ask_00000001']), { home: '/b', thread: 'ask_00000001' });
-  assert.deepEqual(parseArgv([]), { home: null, thread: null });
-  assert.deepEqual(parseArgv(['--home']), { home: null, thread: null });
+test('parseArgv: --home / --thread / --relay, missing values ignored', () => {
+  assert.deepEqual(parseArgv(['--home', '/b', '--thread', 'ask_00000001']), { home: '/b', thread: 'ask_00000001', relay: null });
+  assert.deepEqual(parseArgv([]), { home: null, thread: null, relay: null });
+  assert.deepEqual(parseArgv(['--home']), { home: null, thread: null, relay: null });
+  assert.deepEqual(parseArgv(['--relay', 'http://127.0.0.1:4317/api/ask/relay', '--thread', 'ask_1']), { home: null, thread: 'ask_1', relay: 'http://127.0.0.1:4317/api/ask/relay' });
 });
 
 test('handshake: initialize echoes a supported protocolVersion, falls back otherwise; notifications are never answered; ids may be 0', async () => {
