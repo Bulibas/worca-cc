@@ -746,7 +746,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .log-src{font-weight:600;color:var(--ink-2);flex:0 0 auto;}
 .log-msg{color:var(--ink-2);flex:1;}
 .lvl-phase .log-msg{color:var(--green-ink);font-weight:600;}
-.lvl-artifact .log-msg{color:var(--blue-ink);}
+.lvl-artifact .log-msg{color:var(--blue-ink-strong);}   /* link-like text at 12.5px: the strong token is the accessible one (5.9:1 vs 3.8:1) */
 .lvl-error .log-msg{color:var(--red-ink);}
 .lvl-warn .log-msg{color:var(--amber-ink);}
 .lvl-system .log-msg{color:var(--ink-3);font-style:italic;}
@@ -1291,7 +1291,10 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .artifact-view embed{width:100%;height:70vh;border-radius:12px;}
 .artifact-view.kind-image img{max-width:100%;cursor:zoom-in;border-radius:12px;}
 .artifact-view.kind-image.zoomed img{max-width:none;cursor:zoom-out;}
-.log-artifact{color:var(--blue-ink);text-decoration:underline;cursor:pointer;}
+/* --blue-ink-strong, not --blue-ink: inline link text at a small size is what that
+   token is for (5.9:1 on white vs 3.8:1), and the light contrast gate flags these
+   artifact links in the History run detail. */
+.log-artifact{color:var(--blue-ink-strong);text-decoration:underline;cursor:pointer;}
 
 /* ---------- scrollbars ---------- */
 ::-webkit-scrollbar{width:10px;height:10px;}
@@ -6356,7 +6359,9 @@ input.gv-name:focus-visible{outline:none;}
 .artifact-kind{flex:0 0 auto;font-size:10px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;
   padding:2px 8px;border-radius:6px;background:var(--violet-bg);color:var(--violet-ink);}
 .artifact-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.artifact-bytes{margin-left:auto;flex:0 0 auto;font-size:11px;color:var(--ink-3);}
+/* --ink-2 at 11px: --ink-3 is 2.8:1 on white, which the light contrast gate flags
+   once the artifacts tab paints a byte size. Still the quiet, secondary ink. */
+.artifact-bytes{margin-left:auto;flex:0 0 auto;font-size:11px;color:var(--ink-2);}
 
 /* Typed viewers rendered by renderArtifact into the .artifact-view host
    (#viewer, a <pre>, is kept only for plain error strings). The bare
