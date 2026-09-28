@@ -5,6 +5,7 @@ Each entry is a self-contained page in the ship-log design, built with
 
 | Version | Since | Date | Page | Artifact |
 | --- | --- | --- | --- | --- |
+| 1.6.0 | 1.5.0 | 2026-09-27 | [worca-app-v1.6.0.html](worca-app-v1.6.0.html) | https://claude.ai/artifact/4pVncX5v9a8KgYvBxbTSag |
 | 1.5.0 | 1.4.0 | 2026-09-24 | [worca-app-v1.5.0.html](worca-app-v1.5.0.html) | https://claude.ai/artifact/LHKZRPGh5ZtwcKyW7YRZPG |
 | 1.4.0 | 1.3.0 | 2026-09-23 | [worca-app-v1.4.0.html](worca-app-v1.4.0.html) | https://claude.ai/artifact/SZ2nVLSqWYwLkxUjgjEpaC |
 | 1.3.0 | 1.2.0 | 2026-09-17 | [worca-app-v1.3.0.html](worca-app-v1.3.0.html) | https://claude.ai/artifact/KDoEDcSbdrsupBCyRpiieh |

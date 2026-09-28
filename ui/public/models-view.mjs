@@ -8,6 +8,7 @@
 // delegated listener on the list container.
 
 import { bridgedBadge, needsSignInPill, degradationLine, renderConnectionSection, collectConnection, applyConnectionMode } from './bridge-view.mjs';
+import { credentialBadge } from './credential-badges.mjs';
 
 function h(doc, tag, cls, text) {
   const n = doc.createElement(tag);
@@ -17,6 +18,15 @@ function h(doc, tag, cls, text) {
 }
 
 /** "medium · high" or "all efforts" (the full set carries no signal). */
+/** Credential broker: "your key / no key" for the signed-in person, after a model's name. */
+function keyBadge(parent, m, doc) {
+  const b = credentialBadge(m.id);
+  if (!b) return;
+  const el = h(doc, 'span', `badge ${b.tone} mv-key-badge`, b.text);
+  el.title = b.title;
+  parent.appendChild(el);
+}
+
 export function effortsSummary(efforts, allEfforts) {
   const list = Array.isArray(efforts) ? efforts : [];
   if (!list.length || (allEfforts && list.length === allEfforts.length)) return 'all efforts';
@@ -112,7 +122,10 @@ export function renderModelsList({ globals = [], legacy = [], plugins = [], poli
     const btn = h(doc, 'button', 'mv-sec-toggle');
     btn.type = 'button';
     btn.dataset.section = key;
-    btn.appendChild(h(doc, 'span', 'mv-sec-caret', '▾'));
+    // The shared disclosure chevron (style.css .adv-chev), turned down while the group is open.
+    const caret = h(doc, 'span', 'mv-sec-caret adv-chev');
+    caret.setAttribute('aria-hidden', 'true');
+    btn.appendChild(caret);
     btn.appendChild(h(doc, 'h3', 'mv-section-title', title));
     btn.appendChild(h(doc, 'span', 'mv-sec-count', ''));
     head.appendChild(btn);
@@ -185,6 +198,7 @@ export function renderModelsList({ globals = [], legacy = [], plugins = [], poli
     const body = h(doc, 'div', 'mv-body');
     const head = h(doc, 'div', 'mv-head');
     head.appendChild(h(doc, 'b', 'mv-name', m.label || m.id));
+    keyBadge(head, m, doc);
     if (predefLc.has(m.id.toLowerCase())) head.appendChild(h(doc, 'span', 'badge violet mv-shadow', 'overrides built-in'));
     else if (pluginLc.has(m.id.toLowerCase())) head.appendChild(h(doc, 'span', 'badge violet mv-shadow', 'overrides plugin'));
     const rb = routedBadge(m);
@@ -238,6 +252,7 @@ export function renderModelsList({ globals = [], legacy = [], plugins = [], poli
       const body = h(doc, 'div', 'mv-body');
       const head = h(doc, 'div', 'mv-head');
       head.appendChild(h(doc, 'b', 'mv-name', m.label || m.id));
+    keyBadge(head, m, doc);
       head.appendChild(h(doc, 'span', 'badge waiting mv-origin', 'project (legacy)'));
       body.appendChild(head);
       body.appendChild(h(doc, 'small', 'mv-summary hint', m.id));
@@ -262,6 +277,7 @@ export function renderModelsList({ globals = [], legacy = [], plugins = [], poli
       const body = h(doc, 'div', 'mv-body');
       const head = h(doc, 'div', 'mv-head');
       head.appendChild(h(doc, 'b', 'mv-name', m.label || m.id));
+    keyBadge(head, m, doc);
       head.appendChild(h(doc, 'span', 'badge waiting mv-origin', `plugin: ${m.plugin}`));
       if (globalLc.has(m.id.toLowerCase())) head.appendChild(h(doc, 'span', 'badge violet mv-shadowed', 'overridden by your copy'));
       const prb = routedBadge(m);
@@ -311,6 +327,7 @@ export function renderModelsList({ globals = [], legacy = [], plugins = [], poli
       const body = h(doc, 'div', 'mv-body');
       const head = h(doc, 'div', 'mv-head');
       head.appendChild(h(doc, 'b', 'mv-name', m.label || m.id));
+    keyBadge(head, m, doc);
       const badge = h(doc, 'span', 'badge blue mv-origin', 'policy');
       badge.title = `Team policy on ${m.home}`;
       head.appendChild(badge);
@@ -339,6 +356,7 @@ export function renderModelsList({ globals = [], legacy = [], plugins = [], poli
     const row = h(doc, 'div', 'mv-builtin');
     row.dataset.id = m.id;
     row.appendChild(h(doc, 'b', 'mv-name', m.label));
+    keyBadge(row, m, doc);
     if (globalLc.has(m.id.toLowerCase()) || pluginLc.has(m.id.toLowerCase())) {
       row.appendChild(h(doc, 'span', 'badge violet mv-shadowed', 'overridden'));
     }

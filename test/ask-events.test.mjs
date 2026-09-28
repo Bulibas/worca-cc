@@ -102,6 +102,26 @@ test('text comes from the main stream only; result.result is a fallback when no 
   assert.equal(h2.r.finish().text, 'from result');
 });
 
+test('a synthetic CLI error message is never answer text; an is_error result never feeds the fallback', () => {
+  const apiLine = 'Failed to authenticate. API Error: 403 No access to this model: claude-opus-5-5';
+  const h = harness();
+  // The real failure shape: init → synthetic assistant (model "<synthetic>") carrying
+  // the refusal → is_error result whose `result` repeats it.
+  h.push(
+    init(),
+    ev({ type: 'assistant', message: { id: 'synth-1', model: '<synthetic>', role: 'assistant', content: [{ type: 'text', text: apiLine }], usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } }, parent_tool_use_id: null, session_id: SID }),
+    result({ is_error: true, result: apiLine, total_cost_usd: 0, num_turns: 0 }),
+  );
+  const s = h.r.finish();
+  assert.equal(s.text, '', 'neither the synthetic line nor the error result becomes the answer');
+  assert.equal(s.cliErrorText, apiLine, 'the synthetic line is kept aside for the error notice');
+  assert.equal(s.isError, true);
+  // An error result must not feed the result-text fallback either.
+  const h2 = harness();
+  h2.push(result({ is_error: true, result: apiLine }));
+  assert.equal(h2.r.finish().text, '');
+});
+
 test('usage dedupe: repeated per-block assistant usage is never summed; message ids are summed; result wins', () => {
   const h = harness();
   h.push(atext('msg_1', 'a', { input_tokens: 100, output_tokens: 5 }), atext('msg_1', 'b', { input_tokens: 100, output_tokens: 5 }));
@@ -793,5 +813,26 @@ test('propose_clone_project: labelled, and its RESULT reaches onCloneProposal wi
   h.push(atool('msg_1', 'toolu_task', 'Agent', { description: 'helper', subagent_type: 'general-purpose', prompt: 'x' }));
   h.push(atool('msg_c', 'toolu_cl2', 'mcp__worca__propose_clone_project', input, 'toolu_task'));
   h.push(uresult('toolu_cl2', '{"ok":true}', { ptu: 'toolu_task' }));
+  assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
+});
+
+test('labelForTool: web tools name the host, never the full URL', () => {
+  assert.equal(labelForTool('mcp__worca__web_fetch', { url: 'https://docs.example.com/x' }), 'Reading docs.example.com');
+  assert.equal(labelForTool('mcp__worca__web_fetch', { url: 'bad' }), 'Reading a web page');
+  assert.equal(labelForTool('mcp__worca__web_search', { query: 'q' }), 'Searching the web');
+});
+
+test('propose_web_access: labelled, and its RESULT reaches onWebProposal with the full input; a sub-agent call never does', () => {
+  assert.equal(labelForTool('mcp__worca__propose_web_access', {}), 'Asking to read a new site');
+  const seen = [];
+  const h = harness({ onWebProposal: (e) => { seen.push(e); return Promise.resolve(); } });
+  const input = { url: 'https://jev.example.dev/', reason: 'docs' };
+  h.push(session(), init(), mstart('msg_1'), atool('msg_1', 'toolu_w', 'mcp__worca__propose_web_access', input));
+  assert.deepEqual(seen, []);
+  h.push(uresult('toolu_w', '{"ok":true,"card":{}}'));
+  assert.deepEqual(seen, [{ toolUseId: 'toolu_w', input, text: '{"ok":true,"card":{}}', isError: false }]);
+  h.push(atool('msg_1', 'toolu_task', 'Agent', { description: 'helper', subagent_type: 'general-purpose', prompt: 'x' }));
+  h.push(atool('msg_c', 'toolu_w2', 'mcp__worca__propose_web_access', input, 'toolu_task'));
+  h.push(uresult('toolu_w2', '{"ok":true}', { ptu: 'toolu_task' }));
   assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
 });

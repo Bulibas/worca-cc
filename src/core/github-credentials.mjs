@@ -13,6 +13,8 @@
 //    variable only worca sets. No global `gh auth setup-git` is needed.
 // credentialEnv is pure (token modes); githubEnv also mints in App mode.
 import { appConfigured, loadAppConfig, mintInstallationToken } from './github-app.mjs';
+import { currentBillTo } from './billing.mjs';
+import { personGithubToken } from './broker-client.mjs';
 
 /** Every variable that carries a GitHub credential. Never reaches an agent. */
 export const GITHUB_CREDENTIAL_KEYS = Object.freeze([
@@ -67,13 +69,54 @@ export function credentialEnv(role, base = process.env) {
  * for this one call (`repo` "owner/name" helps find the installation). Never throws:
  * `{ env, error }`, where a failed mint leaves a credential-free env and says why.
  */
-export async function githubEnv(role, { base = process.env, repo = null, fetchImpl = fetch, now = Date.now() } = {}) {
+export async function githubEnv(role, { base = process.env, repo = null, fetchImpl = fetch, now = Date.now(), asPerson = true, person = undefined } = {}) {
+  // "Push as me" (optional, docs/credential-broker.md): a write (push, pull request) goes out
+  // with the acting person's own GitHub token, from the credential broker, for this call only.
+  //   WORCA_GH_AS_PERSON=prefer    their token when they connected GitHub, else the App/token below
+  //   WORCA_GH_AS_PERSON=required  their token or nothing: the push fails and says how to connect
+  if (role === 'write' && asPerson) {
+    const p = await personWriteEnv(base, person === undefined ? currentBillTo() : person);
+    if (p) return p;
+  }
   if (readGithubCredentials(base).mode !== 'app') return { env: credentialEnv(role, base), error: null };
   try {
     const { token } = await mintInstallationToken(loadAppConfig(base), { role, repo, fetchImpl, now });
     return { env: withToken(base, token), error: null };
   } catch (e) {
     return { env: stripGithubCredentials(base), error: e.message };
+  }
+}
+
+/** WORCA_GH_AS_PERSON: 'prefer' | 'required' | null (off). Needs the credential broker. */
+export function asPersonMode(env = process.env) {
+  const v = String(env.WORCA_GH_AS_PERSON || '').trim().toLowerCase();
+  if (!(typeof env.WORCA_BROKER_URL === 'string' && env.WORCA_BROKER_URL.trim())) return null;
+  return v === 'prefer' || v === 'required' ? v : null;
+}
+
+/**
+ * The write env with `person`'s own token, `{env, error}` when "push as me" decides the
+ * call (their token, or — in required mode — a refusal), or null to fall through to
+ * worca's own credential (off, or prefer mode without a connected GitHub).
+ */
+async function personWriteEnv(base, person) {
+  const mode = asPersonMode(base);
+  if (!mode) return null;
+  const who = typeof person === 'string' && person.includes('@') ? person : null;
+  if (!who) {
+    return mode === 'required'
+      ? { env: stripGithubCredentials(base), error: 'pushes go out as the person who acted (WORCA_GH_AS_PERSON=required), and nobody signed in is behind this one' }
+      : null;
+  }
+  try {
+    const { token } = await personGithubToken(who);
+    return { env: withToken(base, token), error: null, as: who };
+  } catch (err) {
+    if (mode === 'required') {
+      return { env: stripGithubCredentials(base), error: `pushing as ${who}: ${err.message.replace(/^credential broker: /, '')}` };
+    }
+    if (err.code !== 'not_connected') console.warn(`[worca] push as ${who}: ${err.message}; using worca's own GitHub credential`);
+    return null;
   }
 }
 

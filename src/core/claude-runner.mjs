@@ -39,9 +39,10 @@
 
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { prepareModelEnv, envFlag, describeModelEnv } from './model-env.mjs';
+import { prepareModelEnv, envFlag, describeModelEnv, withProviderModesOff } from './model-env.mjs';
 import { effectiveDebugSpawn } from './settings.mjs';
 import { classifyError, strongestClass } from './recoverable-error.mjs';
+import { bridgeEvents } from './bridge/telemetry.mjs';
 import { explainUnspawnableClaude, resolveClaudeBin } from './preflight.mjs';
 import { hostGuardEnabled, hostGuardHookEntry, hostGuardSystemPrompt } from './host-guard.mjs';
 // The offline classifier and the shape normalizer the mock ask role answers
@@ -54,6 +55,12 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { stripGithubCredentials } from './github-credentials.mjs';
 import { agentIdentity, agentSpawn, killAgentGroup, shareWithAgent } from './agent-user.mjs';
+import { agentIdentityFor } from './agent-pool.mjs';
+import { brokerEnabled, brokerInfo, mintSpawnToken, revokeSpawnToken, slotBaseUrl, slotOfBaseUrl } from './broker-client.mjs';
+import { resolveBillTo, normalizeBillTo, currentOwner } from './billing.mjs';
+import { redactSecrets, redactDeep } from './redact.mjs';
+import { MODEL_CREDENTIAL_ENV_KEYS } from './broker-guard.mjs';
+import { modelSlot } from './broker-routing.mjs';
 
 const DEFAULT_BIN = process.env.WORCA_CLAUDE_BIN || process.env.ORCH_CLAUDE_BIN || 'claude';
 
@@ -162,6 +169,39 @@ function spawnFailure(bin, err, prefix) {
 // does NOT ride on the capped message: recovery markers are classified line-by-
 // line as stderr streams (see rlErr) and stamped on the error as `errorClass`.
 const STDERR_DETAIL_MAX = 2000;
+
+// stderr lines the CLI prints on spawns that go on to succeed, which are never
+// the cause of a failure. `[claude-code:unrecognized_model]` fires on EVERY spawn
+// whose model id the CLI does not know — every bridged or endpoint-routed catalog
+// id — so as exit detail it masked the real cause (a 429 carried on the stdout
+// result) and classified null, which kept the rate-limit retry from running.
+// Such a line is still streamed as a stderr event; it only stops being evidence.
+export const BENIGN_STDERR_PATTERNS = Object.freeze([
+  /^\[claude-code:unrecognized_model\]/,
+]);
+
+/** Whether a stderr line is a known-benign CLI notice (BENIGN_STDERR_PATTERNS). */
+export function isBenignStderrLine(line) {
+  const t = String(line ?? '').trim();
+  return !!t && BENIGN_STDERR_PATTERNS.some((re) => re.test(t));
+}
+
+// A bridged spawn's base URL names its catalog id and run tag (bridge/server.mjs
+// bridgeBaseUrl: …/m/<id>[/r/<tag>]). Null for any other endpoint.
+const BRIDGE_PATH_RE = /\/m\/([^/?#]+)(?:\/r\/([^/?#]+))?\/?$/;
+function bridgeSpawnKey(modelEnv) {
+  const url = modelEnv && typeof modelEnv.ANTHROPIC_BASE_URL === 'string' ? modelEnv.ANTHROPIC_BASE_URL : '';
+  const m = /^https?:\/\/127\.0\.0\.1:\d+\//.test(url) ? BRIDGE_PATH_RE.exec(url) : null;
+  if (!m) return null;
+  try {
+    return { catalogId: decodeURIComponent(m[1]).toLowerCase(), tag: m[2] ? decodeURIComponent(m[2]) : '' };
+  } catch { return null; }
+}
+
+// The CLI reports an upstream API failure as an assistant text block ("API Error:
+// Request rejected (429) · …"), usually repeated in the is_error result. The
+// assistant copy is kept as the fallback detail for an exit without a result.
+const API_ERROR_TEXT_RE = /^API Error\b/;
 
 /**
  * Translate a pipeline "effort" level into claude CLI argv additions. This is
@@ -400,6 +440,13 @@ export async function runClaude(o = {}) {
     // A pipeline agent (phases.mjs): runs as WORCA_AGENT_USER when the container set one
     // up (agent-user.mjs). Server-side helpers and Ask Worca leave it unset.
     asAgent,
+    // Credential broker (broker-client.mjs): who pays for this spawn, what kind it is (sets
+    // its token's lifetime), and the run/thread it belongs to. All optional: the person
+    // otherwise comes from the async context (billing.mjs). Ignored with the broker off.
+    billTo,
+    spawnKind,
+    runId,
+    threadId,
     bin = DEFAULT_BIN,
   } = o;
 
@@ -417,7 +464,7 @@ export async function runClaude(o = {}) {
     return runMock({ cwd, systemPrompt, prompt, onEvent, signal, resumeSessionId, workspaceWriteTargets, permissionMode });
   }
 
-  return runReal({
+  return (brokerEnabled() ? runViaBroker : runReal)({
     cwd,
     systemPrompt,
     prompt,
@@ -447,7 +494,118 @@ export async function runClaude(o = {}) {
     addDirs,
     argvInlineLimit,
     asAgent,
+    billTo,
+    spawnKind,
+    runId,
+    threadId,
   });
+}
+
+// ── Credential broker ────────────────────────────────────────────────────────
+// With WORCA_BROKER_URL set (plans/credential-broker-design.html §5.2), worca holds
+// no model credential. Each spawn gets its own short-lived token from the broker and
+// talks to `<broker>/p/<slot>`; the broker adds the paying person's key on the way
+// out. The token is revoked when the process exits, and never survives in anything
+// worca stores: events and error text pass through redactSecrets.
+
+/** Error in the recovery classes the orchestrator already knows (auth pauses, never retries blindly). */
+function brokerSpawnError(message, errorClass = 'auth') {
+  const err = new Error(`worca-broker: ${message}`);
+  err.errorClass = errorClass;
+  return err;
+}
+
+function isLoopbackUrl(v) {
+  try {
+    const h = new URL(v).hostname.replace(/^\[|\]$/g, '');
+    return h === '127.0.0.1' || h === 'localhost' || h === '::1';
+  } catch { return false; }
+}
+
+/** Which broker slot a spawn's model env routes to: {slot}, {bridge:true}, or {error}. */
+export function brokerRouteFor(modelEnv, env = process.env) {
+  const base = modelEnv && typeof modelEnv.ANTHROPIC_BASE_URL === 'string' ? modelEnv.ANTHROPIC_BASE_URL.trim() : '';
+  if (!base) return { slot: 'anthropic' };
+  const slot = slotOfBaseUrl(base, env);
+  if (slot) return { slot };
+  // worca's own in-process bridge (bridge/server.mjs): it reaches a keyless local
+  // endpoint itself; the broker guard refuses any bridged entry that holds a key.
+  if (isLoopbackUrl(base)) return { bridge: true };
+  let host = base;
+  try { host = new URL(base).host; } catch { /* keep the raw value */ }
+  return { error: `this model routes to ${host} directly; with the credential broker on, a model must use a broker slot (set its credential in Settings › Models)` };
+}
+
+const SPAWN_TTL_SEC = { aux: 600, test: 600, ask: 7200, phase: 86400 };
+
+async function runViaBroker(opts) {
+  const route = brokerRouteFor(opts.modelEnv);
+  if (route.error) throw brokerSpawnError(route.error);
+  const onEvent = opts.onEvent;
+  const redactingOnEvent = (e) => onEvent(redactDeep(e));
+
+  let info;
+  try { info = await brokerInfo(); }
+  catch (err) { throw brokerSpawnError(err.message, 'network'); }
+
+  // A bridged model (OpenAI, OpenRouter, Copilot, a gateway): the CLI still talks to worca's
+  // loopback bridge, which translates, but it presents THIS spawn's broker token and the
+  // bridge forwards it to the model's slot. A keyless local endpoint needs no token.
+  let bridgeSlot = null;
+  if (route.bridge) {
+    const ms = modelSlot(opts.model);
+    if (ms && ms.error) throw brokerSpawnError(ms.error);
+    if (!ms || ms.keyless) {
+      try {
+        const r = await runReal({ ...opts, onEvent: redactingOnEvent });
+        return { ...r, text: redactSecrets(r.text) };
+      } catch (err) { if (err && typeof err.message === 'string') err.message = redactSecrets(err.message); throw err; }
+    }
+    bridgeSlot = ms.slot;
+  }
+  let billTo = resolveBillTo(opts.billTo);
+  if (info.mode === 'multi' && (!billTo || billTo === 'local')) {
+    billTo = normalizeBillTo(process.env.WORCA_BROKER_SYSTEM_BILL_TO);
+    if (!billTo) throw brokerSpawnError('this action has no signed-in person to bill it to. Start it from the web UI, or set WORCA_BROKER_SYSTEM_BILL_TO for work nobody in particular starts');
+  }
+  const kind = ['aux', 'test', 'ask', 'phase'].includes(opts.spawnKind) ? opts.spawnKind
+    : (opts.permissionMode === 'dontAsk' ? 'ask' : 'phase');
+  // Whether this spawn runs where no other person's agent can read it: an agent spawn under
+  // the paying person's own pool user (not a resumed run's starter's), or a server-side spawn
+  // when agents run under their own users (they can't read the server's processes). The
+  // broker uses a personal Claude subscription only for such spawns.
+  const owner = normalizeBillTo(currentOwner()) || billTo;
+  const isolated = opts.asAgent
+    ? owner === billTo && !!agentIdentityFor(owner)?.dedicated
+    : !!agentIdentity();
+  let minted;
+  try {
+    minted = await mintSpawnToken({
+      billTo: billTo || 'local', slots: [bridgeSlot || route.slot], kind, ttlSec: SPAWN_TTL_SEC[kind],
+      runId: opts.runId || null, threadId: opts.threadId || null, isolated,
+    });
+  } catch (err) {
+    throw brokerSpawnError(`cannot get a token for this spawn: ${err.message}`, err.status === 401 ? 'auth' : 'network');
+  }
+  const modelEnv = bridgeSlot
+    // Bridged: keep the bridge URL (and the rest of the resolved env); swap the bridge's own
+    // secret for the spawn token.
+    ? { ...opts.modelEnv, ANTHROPIC_AUTH_TOKEN: minted.token }
+    : withProviderModesOff({
+      ENABLE_TOOL_SEARCH: 'true',
+      ...(opts.modelEnv || {}),
+      ANTHROPIC_BASE_URL: slotBaseUrl(route.slot),
+      ANTHROPIC_AUTH_TOKEN: minted.token,
+    });
+  try {
+    const r = await runReal({ ...opts, modelEnv, onEvent: redactingOnEvent });
+    return { ...r, text: redactSecrets(r.text) };
+  } catch (err) {
+    if (err && typeof err.message === 'string') err.message = redactSecrets(err.message);
+    throw err;
+  } finally {
+    revokeSpawnToken(minted.spawnId);
+  }
 }
 
 // ── Real execution ───────────────────────────────────────────────────────────
@@ -601,7 +759,7 @@ export function stageClaudeInvocation(opts, { bin = DEFAULT_BIN, limit = ARGV_IN
   return { ...plan, dir };
 }
 
-function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, model, effort, onEvent, signal, bin, resumeSessionId, mcpConfigPath, mcpServerGrants, permissionRules, envScrub, envAllowlist, modelEnv, disallowedTools, tools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages, maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, addDirs, argvInlineLimit, asAgent }) {
+function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, model, effort, onEvent, signal, bin, resumeSessionId, mcpConfigPath, mcpServerGrants, permissionRules, envScrub, envAllowlist, modelEnv, disallowedTools, tools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages, maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, addDirs, argvInlineLimit, asAgent }) { // billTo/spawnKind/runId/threadId are consumed by runViaBroker
   return new Promise((resolveP, rejectP) => {
     // Per-model routing env (design §4.4), prepared BEFORE argv: reserved keys
     // are re-dropped here defensively — the write path already rejects them, so
@@ -713,6 +871,14 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
     // No GitHub credential reaches claude, in any guardrail tier, from a per-project allowlist or a
     // model env alike (src/core/github-credentials.mjs): pushes and PRs are worca's own calls.
     spawnEnv = stripGithubCredentials(spawnEnv ?? process.env);
+    // The broker's own secret never reaches an agent. With the broker on, neither does any
+    // ambient model credential (the boot guard refuses them; this is the second line): the
+    // spawn's broker token is the only one it holds, and it wins over nothing.
+    delete spawnEnv.WORCA_BROKER_SECRET;
+    delete spawnEnv.WORCA_BROKER_SECRET_FILE;
+    if (brokerEnabled()) {
+      for (const k of MODEL_CREDENTIAL_ENV_KEYS) if (k !== 'ANTHROPIC_AUTH_TOKEN' || !safeModelEnv?.ANTHROPIC_AUTH_TOKEN) delete spawnEnv[k];
+    }
 
     // Opt-in spawn diagnostics (WORCA_DEBUG_SPAWN, default off — byte-identical spawn
     // path when unset). Everything here is derived from values already computed above
@@ -735,7 +901,7 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
 
     // Agent isolation (agent-user.mjs): the same command under the agent's uid, via sudo, in its
     // own process group so a stuck agent can still be SIGKILLed through sudo.
-    const agentId = asAgent ? agentIdentity() : null;
+    const agentId = asAgent ? agentIdentityFor(currentOwner()) : null;   // the owner's pool user (agent-pool.mjs)
     let child;
     try {
       let file = resolved.bin;
@@ -771,6 +937,19 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
     // STDOUT and exits non-zero with EMPTY stderr. Capture that text so a
     // non-zero exit surfaces the real cause instead of an opaque "no stderr".
     let errorDetail = '';
+    let apiErrorText = '';   // the last "API Error: …" assistant text (API_ERROR_TEXT_RE)
+    // A bridged spawn: the in-process bridge records the upstream's own reason
+    // (bridge/telemetry.mjs 'failure'), matched on this spawn's catalog id + tag
+    // as model-test.mjs does. The last fallback before the CLI's bare notice, so
+    // a CLI that exits without an API Error line still names the real cause.
+    let bridgeFailureText = '';
+    const bridgeKey = bridgeSpawnKey(modelEnv);
+    const onBridgeFailure = (e) => {
+      if (e && e.message && String(e.catalogId || '').toLowerCase() === bridgeKey.catalogId && (e.tag || '') === bridgeKey.tag) {
+        bridgeFailureText = String(e.message);
+      }
+    };
+    if (bridgeKey) bridgeEvents.on('failure', onBridgeFailure);
     let settled = false;
 
     const onAbort = () => {
@@ -800,6 +979,7 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
       if (settled) return;
       settled = true;
       if (signal) signal.removeEventListener?.('abort', onAbort);
+      if (bridgeKey) bridgeEvents.off('failure', onBridgeFailure);
       cleanupStaged();
       fn(arg);
     };
@@ -822,7 +1002,10 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
       if (evt?.type === 'system' && evt?.subtype === 'init' && typeof evt.session_id === 'string') {
         safeEmit(onEvent, { type: 'session', sessionId: evt.session_id });
       }
-      if (evt?.type === 'assistant' && text) assistantText += text;
+      if (evt?.type === 'assistant' && text) {
+        assistantText += text;
+        if (API_ERROR_TEXT_RE.test(text.trim())) apiErrorText = text.trim();
+      }
       if (evt?.type === 'result' && typeof evt.result === 'string') resultText += evt.result;
       // Remember the most specific error text we see, for the non-zero-exit path.
       if (evt?.type === 'result' && evt.is_error) {
@@ -867,7 +1050,7 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
       // Classify BEFORE buffering: the class must see every line ever printed —
       // an early 401 or session-limit notice followed by hundreds of KB of MCP
       // chatter would otherwise scroll past both the trim and the tail cap.
-      stderrClass = strongestClass(stderrClass, classifyError(line));
+      if (!isBenignStderrLine(line)) stderrClass = strongestClass(stderrClass, classifyError(line));
       stderrBuf += line + '\n';        // still the source of the exit-code detail
       // Rolling tail: bound memory against chatty MCP servers. Trim at 4x the
       // cap down to 2x — amortized, and the kept tail always exceeds
@@ -893,8 +1076,12 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
         return;
       }
       if (code !== 0) {
-        const fromStderr = stderrBuf.trim();
-        const raw = fromStderr || errorDetail || 'no stderr';
+        // Benign notices are not evidence (BENIGN_STDERR_PATTERNS): stderr feeds
+        // the detail only when something else is left, else the stream's own
+        // error wins. A notice alone still beats the opaque "no stderr".
+        const fromStderr = stderrBuf.split('\n').filter((l) => !isBenignStderrLine(l)).join('\n').trim();
+        const streamDetail = errorDetail || apiErrorText || bridgeFailureText;
+        const raw = fromStderr || streamDetail || stderrBuf.trim() || 'no stderr';
         // Tail, not head: the terminal cause sits at the END of a long stderr.
         const detail = raw.length > STDERR_DETAIL_MAX ? `… ${raw.slice(-STDERR_DETAIL_MAX)}` : raw;
         const err = new Error(`${bin} exited with code ${code}: ${detail}`);
@@ -903,7 +1090,11 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
         // stdout errorDetail. classifyError() returns this stamp verbatim, so
         // the tail cap above can never starve recovery — or flip an early auth
         // failure into 'network' because connection chatter filled the tail.
-        err.errorClass = fromStderr ? stderrClass : classifyError(raw);
+        // A stream-borne API error (a 429 in the result) counts even when real
+        // stderr chatter fed the message.
+        err.errorClass = fromStderr
+          ? strongestClass(stderrClass, streamDetail ? classifyError(streamDetail) : null)
+          : classifyError(raw);
         // Mark the origin channel so the orchestrator can tag its `error` log
         // line with stream:'err' without sniffing the message. Absent when the
         // detail came from the stdout `result` envelope (the common case — see

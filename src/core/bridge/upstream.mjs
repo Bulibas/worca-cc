@@ -12,12 +12,45 @@ import { ResponsesStreamTranslator, toMessagesResponseFromResponses } from './tr
 import { mapUpstreamError, mapNetworkError, bridgeErrors, anthropicError, isFailedResponseOverflow, PAYLOAD_CEILING_BYTES } from './errors.mjs';
 import { copilotToken, invalidateCopilotToken, copilotApiHost, copilotHeaders, bodyHasImage, requestInitiator } from './providers/copilot.mjs';
 import { upstreamSettings, providerReadiness } from './registry.mjs';
+import { brokerEnabled, slotBaseUrl } from '../broker-client.mjs';
+import { routeBridgedUpstream } from '../broker-routing.mjs';
 import { KeyedSemaphore } from './semaphore.mjs';
-import { recordBridgeCall, recordBridgeError } from './telemetry.mjs';
+import { recordBridgeCall, recordBridgeError, recordBridgeCost } from './telemetry.mjs';
+import { isOpenRouter, adaptOpenRouterChatBody, OPENROUTER_HEADERS } from './openrouter.mjs';
+import { isOpenRouterFree, keyAccount } from '../openrouter-free.mjs';
+import { unsupportedSchemaKeyword, withToolSchemaKeywordsDropped, refusedToolName, withoutTools } from './translate/schema-keywords.mjs';
 
 export const semaphore = new KeyedSemaphore();
 const PING_INTERVAL_MS = 15_000;
 const warned = new Set();
+
+// What an upstream model's tool grammar refused (translate/schema-keywords.mjs):
+// schema keywords to drop, and whole tools no drop can fix. Learned per provider
+// + base URL + upstream model for the life of the process, so only the first
+// request after a boot pays each refusal round trip.
+const schemaDrops = new Map();   // key -> { keywords:Set<string>, tools:Set<string> }
+const MAX_SCHEMA_RETRIES = 6;
+export function _resetSchemaKeywordDrops() { schemaDrops.clear(); }
+function applySchemaDrops(body, d) {
+  return d ? withoutTools(withToolSchemaKeywordsDropped(body, d.keywords), d.tools) : body;
+}
+
+// Models that refused a reasoning effort on the Anthropic passthrough (Copilot serves
+// claude-haiku-4.5 without one): the CLI's output_config.effort is left out of their
+// requests. Learned like schemaDrops, and listed so the Ask picker can grey the effort out.
+const effortDrops = new Set();   // catalog ids
+const EFFORT_REFUSED_RE = /does not support (?:reasoning )?effort|effort[^.]{0,40}not supported/i;
+export function _resetEffortDrops() { effortDrops.clear(); }
+/** Catalog ids whose upstream refused a reasoning effort since boot. */
+export function effortlessModels() { return new Set(effortDrops); }
+function withoutEffort(body) {
+  const oc = body && body.output_config;
+  if (!oc || typeof oc !== 'object' || !('effort' in oc)) return body;
+  const { effort: _drop, ...rest } = oc;
+  const out = { ...body };
+  if (Object.keys(rest).length) out.output_config = rest; else delete out.output_config;
+  return out;
+}
 
 /** Once-per-process warning (dropped fields, queue notices). */
 function warnOnce(key, line, log) {
@@ -32,6 +65,19 @@ export function _resetBridgeWarnings() { warned.clear(); }
  * @returns {Promise<{url:string, headers:object, provider:string, retryAuth?:() => Promise<object>}>}
  */
 async function prepareUpstream(us, body, { fetch: f, requestHeaders }) {
+  // Credential broker: the request goes to <broker>/p/<slot>… with the spawn's token; the
+  // broker adds the person's key (or runs the Copilot exchange). us.baseUrl keeps the real
+  // provider URL: dialect decisions (OpenRouter's body and headers) still key on it.
+  if (us.brokerToken && us.provider === 'copilot') {
+    const initiator = requestInitiator(body);
+    const path = us.api === 'anthropic' ? '/v1/messages' : us.api === 'openai-responses' ? '/responses' : '/chat/completions';
+    const headers = { ...copilotHeaders(us.brokerToken, { vision: bodyHasImage(body), initiator }), ...us.headers };
+    if (us.api === 'anthropic') {
+      headers['anthropic-version'] = requestHeaders['anthropic-version'] || '2023-06-01';
+      if (requestHeaders['anthropic-beta']) headers['anthropic-beta'] = requestHeaders['anthropic-beta'];
+    }
+    return { url: `${us.brokerBase}${path}`, headers, provider: 'copilot', initiator };
+  }
   if (us.provider === 'copilot') {
     const initiator = requestInitiator(body);
     const vision = bodyHasImage(body);
@@ -51,11 +97,11 @@ async function prepareUpstream(us, body, { fetch: f, requestHeaders }) {
   }
   const initiator = requestInitiator(body);
   if (us.api === 'anthropic') {
-    const base = (us.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '');
+    const base = (us.brokerBase || us.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '');
     const url = /\/v1$/.test(base) ? `${base}/messages` : `${base}/v1/messages`;
     const headers = {
       'content-type': 'application/json',
-      'x-api-key': us.apiKey,
+      'x-api-key': us.brokerToken || us.apiKey,
       'anthropic-version': requestHeaders['anthropic-version'] || '2023-06-01',
       ...(requestHeaders['anthropic-beta'] ? { 'anthropic-beta': requestHeaders['anthropic-beta'] } : {}),
       ...us.headers,
@@ -63,9 +109,15 @@ async function prepareUpstream(us, body, { fetch: f, requestHeaders }) {
     return { url, headers, provider: us.provider, initiator };
   }
   const base = (us.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '');
+  const key = us.brokerToken || us.apiKey;
   return {
-    url: `${base}/${us.api === 'openai-responses' ? 'responses' : 'chat/completions'}`,
-    headers: { 'content-type': 'application/json', ...(us.apiKey ? { authorization: `Bearer ${us.apiKey}` } : {}), ...us.headers },
+    url: `${(us.brokerBase || base).replace(/\/+$/, '')}/${us.api === 'openai-responses' ? 'responses' : 'chat/completions'}`,
+    headers: {
+      'content-type': 'application/json',
+      ...(key ? { authorization: `Bearer ${key}` } : {}),
+      ...(isOpenRouter(base) ? OPENROUTER_HEADERS : {}),   // an entry's own headers still win
+      ...us.headers,
+    },
     provider: us.provider,
     initiator,
   };
@@ -83,7 +135,7 @@ async function prepareUpstream(us, body, { fetch: f, requestHeaders }) {
  * @param {(line:string)=>void} [args.log]
  * @param {object} reply  { status(code, headers), write(chunk), end(), json(status, obj, headers?) }
  */
-export async function handleMessages({ entry, body, requestHeaders = {}, tag = '', signal, fetch: f = globalThis.fetch, log }, reply) {
+export async function handleMessages({ entry, body, requestHeaders = {}, tag = '', signal, fetch: f = globalThis.fetch, log, brokerToken = null }, reply) {
   const upstream = entry.upstream;
   const ready = providerReadiness(upstream);
   if (!ready.ok) {
@@ -92,11 +144,37 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
     return reply.json(e.status, e.body);
   }
   const us = upstreamSettings(upstream);
+  // Credential broker: route through the model's slot with the spawn's token.
+  if (brokerEnabled()) {
+    const route = routeBridgedUpstream(upstream);
+    if (route.error) {
+      const e = anthropicError(403, 'permission_error', `worca-broker: ${route.error}`);
+      recordBridgeError({ tag, catalogId: entry.id, provider: us.provider, status: e.status, message: e.body.error.message });
+      return reply.json(e.status, e.body);
+    }
+    if (!route.keyless) {
+      if (!brokerToken) {
+        const e = anthropicError(403, 'authentication_error', 'worca-broker: this spawn has no broker token');
+        recordBridgeError({ tag, catalogId: entry.id, provider: us.provider, status: e.status, message: e.body.error.message });
+        return reply.json(e.status, e.body);
+      }
+      us.brokerToken = brokerToken;
+      us.brokerBase = `${slotBaseUrl(route.slot)}${route.prefix || ''}`;
+      us.apiKey = '';
+      us.githubToken = null;
+    }
+  }
+
+  // An OpenRouter `:free` model: every call spends one of the day's free requests of the
+  // key it goes out with (openrouter-free.mjs). Through the broker that key is unknown here.
+  const free = isOpenRouterFree(us);
+  const account = free && !us.brokerToken ? keyAccount(us.apiKey) : null;
 
   // Body → upstream body.
   let outBody;
   if (us.api === 'anthropic') {
     outBody = { ...body, model: us.model };
+    if (effortDrops.has(entry.id)) outBody = withoutEffort(outBody);
   } else {
     const responses = us.api === 'openai-responses';
     const t = (responses ? toResponsesRequest : toChatRequest)(body, { upstreamModel: us.model, capabilities: us.capabilities });
@@ -111,9 +189,11 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
         : `${w} has no ${responses ? 'Responses API' : 'chat/completions'} equivalent — dropped`;
       warnOnce(`${entry.id}:${w}`, `[worca] bridge: model ${JSON.stringify(entry.id)}: ${line}`, log);
     }
-    outBody = t.body;
+    outBody = !responses && isOpenRouter(us.baseUrl) ? adaptOpenRouterChatBody(t.body, us) : t.body;
   }
-  const payload = JSON.stringify(outBody);
+  const dropKey = `${us.provider}|${us.baseUrl || ''}|${us.model}`;
+  if (us.api !== 'anthropic') outBody = applySchemaDrops(outBody, schemaDrops.get(dropKey));
+  let payload = JSON.stringify(outBody);
   if (Buffer.byteLength(payload) > PAYLOAD_CEILING_BYTES) {
     const e = bridgeErrors.tooLarge();
     return reply.json(e.status, e.body);
@@ -142,7 +222,7 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
       recordBridgeError({ tag, catalogId: entry.id, provider: us.provider, status: e.status, message: e.body.error.message });
       return reply.json(e.status, e.body);
     }
-    recordBridgeCall({ tag, catalogId: entry.id, provider: us.provider, api: us.api, initiator: prep.initiator });
+    recordBridgeCall({ tag, catalogId: entry.id, provider: us.provider, api: us.api, initiator: prep.initiator, free, account });
 
     const doFetch = (p) => f(p.url, { method: 'POST', headers: p.headers, body: payload, signal });
     let res;
@@ -151,6 +231,39 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
       if (res.status === 401 && prep.retryAuth) {
         const again = await prep.retryAuth();
         res = await doFetch(again);
+      }
+      // A tool schema the upstream's grammar cannot take: drop the keyword it
+      // names from every tool schema — or, when no keyword is named, leave that
+      // one tool out — remember it for this model, and retry. Once per new
+      // keyword / tool, so a refusal that survives the fix is answered, not looped.
+      for (let i = 0; i < MAX_SCHEMA_RETRIES && res.status === 400 && us.api !== 'anthropic' && Array.isArray(outBody.tools) && outBody.tools.length; i++) {
+        const text = await res.clone().text().catch(() => '');
+        const msg = mapUpstreamError(400, text, { provider: us.provider }).body.error.message;
+        const kw = unsupportedSchemaKeyword(msg);
+        const tool = kw ? null : refusedToolName(msg);
+        const d = schemaDrops.get(dropKey) || { keywords: new Set(), tools: new Set() };
+        if (kw && !d.keywords.has(kw)) {
+          d.keywords.add(kw);
+          warnOnce(`schema-kw:${dropKey}:${kw}`, `[worca] bridge: ${us.provider} model ${JSON.stringify(us.model)} refuses the tool-schema keyword "${kw}" — dropping it from tool schemas`, log);
+        } else if (tool && !d.tools.has(tool)) {
+          d.tools.add(tool);
+          warnOnce(`schema-tool:${dropKey}:${tool}`, `[worca] bridge: ${us.provider} model ${JSON.stringify(us.model)} cannot take the schema of tool "${tool}" — leaving it out of this model's requests`, log);
+        } else break;
+        schemaDrops.set(dropKey, d);
+        outBody = applySchemaDrops(outBody, d);
+        payload = JSON.stringify(outBody);
+        res = await doFetch(prep);
+      }
+      // A reasoning effort the model does not take: leave it out, remember that, retry once.
+      if (res.status === 400 && us.api === 'anthropic' && outBody.output_config && 'effort' in outBody.output_config) {
+        const text = await res.clone().text().catch(() => '');
+        if (EFFORT_REFUSED_RE.test(text)) {
+          effortDrops.add(entry.id);
+          warnOnce(`effort:${entry.id}`, `[worca] bridge: model ${JSON.stringify(entry.id)} takes no reasoning effort — leaving it out of its requests`, log);
+          outBody = withoutEffort(outBody);
+          payload = JSON.stringify(outBody);
+          res = await doFetch(prep);
+        }
       }
     } catch (err) {
       if (signal && signal.aborted) return reply.end();
@@ -162,7 +275,7 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       const e = mapUpstreamError(res.status, text, { provider: us.provider, retryAfter: res.headers.get('retry-after') });
-      recordBridgeError({ tag, catalogId: entry.id, provider: us.provider, status: res.status, message: e.body.error.message });
+      recordBridgeError({ tag, catalogId: entry.id, provider: us.provider, status: res.status, message: e.body.error.message, account });
       if (log) log(`[worca] bridge: ${us.provider} answered ${res.status} for ${JSON.stringify(entry.id)}: ${e.body.error.message}`);
       return reply.json(e.status, e.body, e.headers);
     }
@@ -188,6 +301,7 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
         recordBridgeError({ tag, catalogId: entry.id, provider: us.provider, status: 200, message: e.body.error.message });
         return reply.json(e.status, e.body);
       }
+      if (us.api === 'openai-chat') recordBridgeCost({ tag, costUsd: j && j.usage ? j.usage.cost : undefined });
       return reply.json(200, us.api === 'openai-responses'
         ? toMessagesResponseFromResponses(j, { model: entry.id, upstreamModel: us.model })
         : toMessagesResponse(j, { model: entry.id }));
@@ -197,14 +311,13 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
     const translator = us.api === 'openai-responses'
       ? new ResponsesStreamTranslator({ model: entry.id, upstreamModel: us.model })
       : new ChatStreamTranslator({ model: entry.id });
-    // A Responses stream can fail mid-flight (response.failed / error): book it
-    // like an upstream refusal, so the Test button can name the reason. The
-    // chat stream's events pass through untouched.
+    // A stream can fail mid-flight (a Responses response.failed / error, a chat
+    // stream cut short or ending with no output): book it like an upstream
+    // refusal, so the Test button — and a run whose CLI exits without an API
+    // Error line (claude-runner's bridge-failure fallback) — can name the reason.
     const booked = (events) => {
-      if (us.api === 'openai-responses') {
-        for (const e of events) {
-          if (e.event === 'error') recordBridgeError({ tag, catalogId: entry.id, provider: us.provider, status: 200, message: e.data.error.message });
-        }
+      for (const e of events) {
+        if (e.event === 'error') recordBridgeError({ tag, catalogId: entry.id, provider: us.provider, status: 200, message: e.data.error.message });
       }
       return events;
     };
@@ -226,6 +339,7 @@ export async function handleMessages({ entry, body, requestHeaders = {}, tag = '
         for (const obj of parser.end()) reply.write(serializeSse(booked(translator.push(obj))));
       }
       reply.write(serializeSse(booked(translator.finish())));
+      if (translator.costUsd != null) recordBridgeCost({ tag, costUsd: translator.costUsd });
     } finally {
       clearInterval(ping);
     }

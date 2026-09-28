@@ -678,6 +678,57 @@ export function renderRunsChart(spec, { doc = globalThis.document, fmt = DEFAULT
 }
 
 /** Full Statistics body: KPI row + the two chart cards (or empty notes). */
+const SLOT_NAMES = { anthropic: 'Anthropic', openai: 'OpenAI', openrouter: 'OpenRouter', copilot: 'Copilot', local: 'Local' };
+const compactCount = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
+
+/**
+ * "By person" (credential broker, docs/credential-broker.md): model spend per person in the
+ * stats window, as the broker metered it — every call is charged to whoever caused it.
+ * @param {{people?:object[], error?:string}} byPerson
+ */
+export function renderPeopleCard(byPerson, rangeLabel, { doc = globalThis.document, fmt = DEFAULT_FMT } = {}) {
+  const card = chartCard(doc, 'By person', rangeLabel);
+  card.classList.add('people-card');
+  if (byPerson?.error) {
+    card.appendChild(h(doc, 'p', 'hint err', `The credential broker didn't answer: ${byPerson.error}`));
+    return card;
+  }
+  const people = byPerson?.people || [];
+  if (!people.length) {
+    card.appendChild(h(doc, 'p', 'chart-empty hint', 'No model calls in this period.'));
+    return card;
+  }
+  const top = Math.max(...people.map((p) => p.usd), 0);
+  const total = people.reduce((a, p) => a + p.usd, 0);
+  const table = h(doc, 'table', 'people-table');
+  const head = h(doc, 'tr', null);
+  for (const t of ['Person', 'Spend', 'Requests', 'Tokens in / out', 'Providers']) head.appendChild(h(doc, 'th', null, t));
+  const thead = h(doc, 'thead', null); thead.appendChild(head); table.appendChild(thead);
+  const tbody = h(doc, 'tbody', null);
+  for (const p of people) {
+    const tr = h(doc, 'tr', null);
+    tr.appendChild(h(doc, 'td', 'people-name', p.person === 'local' ? 'No signed-in person' : p.person));
+    const spend = h(doc, 'td', 'people-spend');
+    const bar = h(doc, 'span', 'people-bar');
+    const fill = h(doc, 'span', 'people-bar-fill');
+    fill.style.width = `${top > 0 ? Math.max(2, Math.round((p.usd / top) * 100)) : 0}%`;
+    bar.appendChild(fill);
+    spend.appendChild(h(doc, 'span', 'people-usd', fmt.usd(p.usd)));
+    spend.appendChild(bar);
+    tr.appendChild(spend);
+    tr.appendChild(h(doc, 'td', 'num', compactCount(p.requests)));
+    tr.appendChild(h(doc, 'td', 'num', `${compactCount(p.inputTokens + (p.cacheReadTokens || 0))} / ${compactCount(p.outputTokens)}`));
+    tr.appendChild(h(doc, 'td', 'people-slots', [...new Set(p.slots.map((s) => `${SLOT_NAMES[s.slot] || s.slot}${s.plan === 'subscription' ? ' (subscription)' : ''}`))].join(', ')));
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  const scroll = h(doc, 'div', 'people-scroll');
+  scroll.appendChild(table);
+  card.appendChild(scroll);
+  card.appendChild(h(doc, 'small', 'hint', `${fmt.usd(total)} in total, metered by the credential broker. Each call is charged to the person whose action caused it.`));
+  return card;
+}
+
 export function renderStatsBody(model, opts = {}) {
   const { doc = globalThis.document } = opts;
   const wrap = h(doc, 'div', null);
@@ -706,5 +757,10 @@ export function renderStatsBody(model, opts = {}) {
       currentBucketStartMs, rangeLabel }, opts));
   }
   wrap.appendChild(grid);
+  if (model.byPerson) {
+    const people = h(doc, 'div', 'charts-grid people-grid');
+    people.appendChild(renderPeopleCard(model.byPerson, rangeLabel, opts));
+    wrap.appendChild(people);
+  }
   return wrap;
 }

@@ -172,6 +172,9 @@ export function labelForTool(name, input = {}, attachmentNames = {}) {
     case 'list_copilot_models': return 'Listing Copilot models';
     case 'propose_model_change': return 'Proposing a model change';
     case 'propose_clone_project': return 'Proposing a project clone';
+    case 'web_fetch': { let host = ''; try { host = new URL(String(input?.url ?? '')).hostname; } catch { /* label only */ } return host ? `Reading ${host}` : 'Reading a web page'; }
+    case 'web_search': return 'Searching the web';
+    case 'propose_web_access': return 'Asking to read a new site';
     default: return `Using ${n}`;
   }
 }
@@ -249,6 +252,7 @@ export function createTurnReducer({
   onScheduleProposal = null,     // propose_schedule_change RESULT (schedule card; the parent re-validates the input)
   onModelProposal = null,        // propose_model_change RESULT (model card; same split)
   onCloneProposal = null,        // propose_clone_project RESULT (clone card; same split)
+  onWebProposal = null,          // propose_web_access RESULT (web card; same split)
   onScheduleMutation = null,     // a direct schedule write succeeded in the MCP child
   onTrackRun = null,
   onCommentMutation = null,
@@ -287,6 +291,7 @@ export function createTurnReducer({
   let lastResult = null;
   let reducerErrors = 0;
   let summary = null;
+  let cliErrorText = '';          // what a <synthetic> CLI message said (its API-error line)
   const pendingHooks = [];         // promises returned by onProposal — settle() awaits them
 
   // ── helpers ──
@@ -416,7 +421,18 @@ export function createTurnReducer({
     const content = Array.isArray(msg.content) ? msg.content : [];
     if (isMain) {
       sawAssistant = true;
-      if (id) {
+      // A `<synthetic>` message is the CLI speaking for itself — the API-refusal
+      // line it fabricates when a call fails (model: "<synthetic>"). It is not
+      // the model's answer: it must never enter the answer text (it would read
+      // as a reply above the failure notice), so it is kept aside for the error
+      // notice's detail instead.
+      if (msg.model === '<synthetic>') {
+        const t = content
+          .filter((c) => c && c.type === 'text' && typeof c.text === 'string')
+          .map((c) => c.text)
+          .join('');
+        if (t) cliErrorText = cliErrorText ? `${cliErrorText}\n${t}` : t;
+      } else if (id) {
         if (messages.has('__main__') && !messages.has(id)) {              // deltas arrived before any message_start: adopt them
           messages.set(id, messages.get('__main__'));
           messages.delete('__main__');
@@ -609,6 +625,13 @@ export function createTurnReducer({
           if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
         } catch { reducerErrors += 1; }
       }
+      if (b.name === 'mcp__worca__propose_web_access' && typeof onWebProposal === 'function') {
+        // Same split as the clone card: the parent re-validates the INPUT against this turn's web access (web-proposal.mjs).
+        try {
+          const ret = onWebProposal({ toolUseId: b.id, input: fullInputs.get(b.id) ?? {}, text, isError: !!c.is_error });
+          if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
+        } catch { reducerErrors += 1; }
+      }
       if (b.name === 'mcp__worca__propose_clone_project' && typeof onCloneProposal === 'function') {
         // Same split as the model card: the parent re-validates the INPUT and adds how GitHub is reached (clone-proposal.mjs).
         try {
@@ -699,7 +722,7 @@ export function createTurnReducer({
       return {
         text: mainText(), blocks: blocks.map(clone), usage: currentUsage(), costUsd: currentCost(), sessionId,
         ...terminal(), sawInit, sawAssistant, sawResult, agents: blocks.filter((b) => b.kind === 'agent').length,
-        runningAgents, labels: [...labels], reducerErrors,
+        runningAgents, labels: [...labels], reducerErrors, cliErrorText: cliErrorText || null,
       };
     },
     finish() {
@@ -725,10 +748,13 @@ export function createTurnReducer({
           a.costUsd = est[i].costUsd == null ? null : Math.round(est[i].costUsd * scale * 1e6) / 1e6;
         });
       }
-      const text = mainText() || (lastResult && typeof lastResult.result === 'string' ? lastResult.result : '');
+      // The result-text fallback only speaks for a REAL answer: an is_error
+      // result carries the API's refusal line, never the model's reply.
+      const text = mainText() || (lastResult && !lastResult.is_error && typeof lastResult.result === 'string' ? lastResult.result : '');
       summary = {
         text: redact(text), blocks: blocks.map(clone), usage: currentUsage(), costUsd: currentCost(), sessionId,
         ...terminal(), sawInit, sawAssistant, sawResult, agents: agents.length, labels: [...labels], reducerErrors,
+        cliErrorText: cliErrorText || null,
       };
       return summary;
     },

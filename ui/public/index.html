@@ -408,6 +408,8 @@
 
                 <!-- Actions -->
                 <div class="hint err" id="newBlockedNote" hidden></div>
+                <!-- OpenRouter free requests left today vs what a run here takes (openrouter-free-view.mjs). -->
+                <div class="hint warn" id="newFreeNote" hidden></div>
                 <div class="actions" style="justify-content:flex-end">
                   <!-- A time picked BEFORE the task (Schedules › Schedule a run, or Change… here):
                        it waits on the form and Start run becomes Schedule. -->
@@ -1348,12 +1350,16 @@
              literal routing attribute name, so never spell it out in a comment. -->
         <section class="view hidden" data-view="settings">
           <div class="seg settings-tabs" id="settings-tabs" role="group" aria-label="Settings section">
+            <!-- Ordered by mode (Simple, Advanced, Expert) so each mode sees a gap-free prefix of the
+                 strip; Models sits next to Providers. -->
             <button type="button" class="on" data-tab="general" data-min-level="simple" aria-pressed="true">General</button>
+            <button type="button" data-tab="runs" data-min-level="simple" aria-pressed="false">Runs</button>
+            <button type="button" data-tab="ask" data-min-level="advanced" aria-pressed="false">Ask Worca</button>
             <button type="button" data-tab="guardrails" data-min-level="advanced" aria-pressed="false">Guardrails</button>
+            <button type="button" data-tab="memory" data-min-level="advanced" aria-pressed="false">Memory</button>
+            <button type="button" data-tab="plugins" data-min-level="advanced" aria-pressed="false">Plugins</button>
             <button type="button" data-tab="models" data-min-level="expert" aria-pressed="false">Models</button>
             <button type="button" data-tab="providers" data-min-level="expert" aria-pressed="false">Providers</button>
-            <button type="button" data-tab="plugins" data-min-level="advanced" aria-pressed="false">Plugins</button>
-            <button type="button" data-tab="memory" data-min-level="advanced" aria-pressed="false">Memory</button>
           </div>
 
           <section class="settings-pane" data-tab="general">
@@ -1379,6 +1385,20 @@
                 <button type="button" data-theme-mode="dark" aria-pressed="false">Dark</button>
               </div>
               <small class="hint" id="themeMsg"></small>
+            </section>
+
+            <!-- Credential broker (docs/credential-broker.md): shown only when worca runs with one. -->
+            <section class="card settings-card" id="credentials-card" data-min-level="simple" hidden>
+              <div class="card-head">
+                <div class="label-row">
+                  <h2>My model credentials</h2>
+                  <button type="button" class="info-tip" aria-label="About model credentials">i<span class="tip-content hidden">
+                    Model keys are held by the credential broker, not by Worca. Agents never see them.
+                    Each person uses their own keys, and what a run costs is charged to whoever started it.
+                  </span></button>
+                </div>
+              </div>
+              <div id="credentialsHost"></div>
             </section>
 
             <!-- Interface mode (docs/ui-levels.md): the same setting as the sidebar item, same dialog. -->
@@ -1435,6 +1455,97 @@
               </div>
               <small class="hint" id="settingsMsg"></small>
             </section>
+
+            <!-- Spawn-debug diagnostics: the stored side of WORCA_DEBUG_SPAWN.
+                 claude-runner.mjs reads the setting per spawn (UI server AND CLI);
+                 a non-empty env var overrides it. This card only flips the gate —
+                 the runner decides what is printable (routing keys readable,
+                 credentials as "<set, N chars>"). -->
+            <section class="card settings-card" id="debug-spawn-settings-card" data-min-level="expert">
+              <div class="card-head">
+                <div class="label-row">
+                  <h2>Spawn diagnostics</h2>
+                  <button type="button" class="info-tip" aria-label="About spawn diagnostics">i<span class="tip-content hidden">
+                    Logs the exact claude binary, argv and routing env handed to every spawn, in the run
+                    log. Credentials never appear: routing keys (endpoint, wire model) print readable,
+                    every other value as <code>&lt;set, N chars&gt;</code>. Applies to runs started here
+                    and from the CLI, with no restart. A non-empty <code>WORCA_DEBUG_SPAWN</code> in the
+                    environment overrides this setting.
+                  </span></button>
+                </div>
+              </div>
+              <div class="field">
+                <label class="check-row" for="debugSpawnEnabled"><input id="debugSpawnEnabled" type="checkbox" /> Log claude spawn details (binary, argv, routing env)</label>
+              </div>
+              <small class="hint" id="debugSpawnEnvNote"></small>
+              <div class="add-project-actions" style="margin-top:14px">
+                <button type="button" id="debugSpawnReset" class="btn btn-ghost btn-mini">Reset to default</button>
+                <button type="button" id="debugSpawnSave" class="btn btn-primary btn-mini">Save</button>
+              </div>
+              <small class="hint" id="debugSpawnMsg"></small>
+            </section>
+
+            <!-- Getting started: the checklist's Hide is undone here. Only the checklist —
+                 the welcome dialog stays seen. No info-tip (the row explains itself);
+                 the .hint is painted by app.js like every other settings status line. -->
+            <section class="card settings-card" id="getting-started-card" data-min-level="simple">
+              <div class="label-row">
+                <h2>Getting started</h2>
+              </div>
+              <div class="gs-settings-row">
+                <p class="gs-settings-text">The checklist on New pipeline walks through the first nine things to do with Worca. Hidden it, or want the guided tour back?</p>
+                <button type="button" id="gsShowAgain" class="btn btn-ghost btn-mini">Show again</button>
+              </div>
+              <small class="hint" id="gsSettingsMsg"></small>
+            </section>
+
+            <!-- About: intentionally no info-tip and no .hint (test/ui-settings-tooltips.test.mjs pins both). -->
+            <section class="card settings-card" id="about-card" data-min-level="simple">
+              <div class="label-row">
+                <h2>About</h2>
+              </div>
+              <div class="about-row">
+                <span class="about-key">Version</span>
+                <!-- href is painted from app.releaseUrl (the worca-app-v<version> tag);
+                     without one the anchor is plain text, so the placeholder never links. -->
+                <a class="about-val about-version" id="aboutVersion"
+                   target="_blank" rel="noopener noreferrer">&mdash;</a>
+              </div>
+              <div class="about-row">
+                <span class="about-key">Repository</span>
+                <a class="about-val about-link" id="aboutRepoLink"
+                   href="https://github.com/SinishaDjukic/worca-cc"
+                   target="_blank" rel="noopener noreferrer">github.com/SinishaDjukic/worca-cc</a>
+              </div>
+              <div class="about-row">
+                <span class="about-key">Feedback</span>
+                <!-- hrefs are repainted from app.bugsUrl (package.json bugs.url); the
+                     static fallback keeps the links usable before /api/settings lands.
+                     Anchors only: ui-settings-about.test.mjs forbids a control here,
+                     and neither the label nor the href carries a version string. -->
+                <a class="about-val about-link" id="aboutBugLink"
+                   href="https://github.com/SinishaDjukic/worca-cc/issues/new?labels=bug"
+                   target="_blank" rel="noopener noreferrer">Report a bug</a>
+              </div>
+              <div class="about-row">
+                <span class="about-key"></span>
+                <a class="about-val about-link" id="aboutIdeaLink"
+                   href="https://github.com/SinishaDjukic/worca-cc/issues/new?labels=enhancement"
+                   target="_blank" rel="noopener noreferrer">Suggest an improvement</a>
+              </div>
+            </section>
+          </section>
+          <!-- /pane general -->
+
+          <!-- ===== TAB: RUNS — how pipeline runs are capped, scheduled and reported.
+               Simple, for Budget; the two Advanced cards keep their own level. ===== -->
+          <section class="settings-pane hidden" data-tab="runs">
+            <div class="topbar">
+              <div>
+                <h1>Runs</h1>
+                <div class="sub">Cost limits and defaults for your pipeline runs</div>
+              </div>
+            </div>
 
             <section class="card settings-card" id="budget-settings-card" data-min-level="simple">
               <div class="card-head">
@@ -1494,60 +1605,6 @@
               <small class="hint" id="budgetMsg"></small>
             </section>
 
-            <!-- Ask Worca (ask-worca-design §6.9): per-turn guards for the
-                 assistant chat. Read fresh on every turn (D12); a stored null
-                 budget means "no cap". Posted ALONE — never with root/budget keys. -->
-            <section class="card settings-card" id="ask-settings-card" data-min-level="advanced">
-              <div class="card-head">
-                <div class="label-row">
-                  <h2>Ask Worca</h2>
-                  <button type="button" class="info-tip" aria-label="About Ask Worca limits">i<span class="tip-content hidden">
-                    Per-turn guards for the Ask Worca assistant chat. A chat turn stops when it reaches the turn limit or the per-turn cost cap; both are read fresh on every turn.
-                  </span></button>
-                </div>
-              </div>
-              <div class="field">
-                <div class="label-row">
-                  <label for="askMaxTurns">Turn limit</label>
-                  <button type="button" class="info-tip" aria-label="About Turn limit">i<span class="tip-content hidden">
-                    Maximum assistant/tool turns one chat message may use (1&ndash;500). Leave empty to restore the default of 400.
-                  </span></button>
-                </div>
-                <input id="askMaxTurns" class="input" type="number" min="1" max="500" step="1" inputmode="numeric" placeholder="400" autocomplete="off" />
-              </div>
-              <div class="field">
-                <div class="label-row">
-                  <label for="askMaxBudgetUsd">Per-turn cost cap (USD)</label>
-                  <button type="button" class="info-tip" aria-label="About Per-turn cost cap">i<span class="tip-content hidden">
-                    There is no cap by default. Untick No cap and enter an amount (0.1&ndash;100) to turn the guard on: a chat turn then stops when its estimated cost reaches it. Leaving the amount empty, or pressing Use defaults, means no cap.
-                  </span></button>
-                </div>
-                <input id="askMaxBudgetUsd" class="input" type="number" min="0.1" max="100" step="0.1" inputmode="decimal" placeholder="No cap" autocomplete="off" />
-                <label class="check-row" for="askNoCap"><input id="askNoCap" type="checkbox" /> No cap</label>
-              </div>
-              <!-- Scripts workbench W20: the chat's save_script / test_script switch. Body
-                   rendered by chat-settings-view.mjs; saved with this card's Save button. -->
-              <div class="field" id="ask-script-tools-host"></div>
-              <div class="add-project-actions" style="margin-top:14px">
-                <button type="button" id="askLimitsReset" class="btn btn-ghost btn-mini">Use defaults</button>
-                <button type="button" id="askLimitsSave" class="btn btn-primary btn-mini">Save</button>
-              </div>
-              <small class="hint" id="askLimitsMsg"></small>
-              <!-- Chat history: the counts paint with the view; the button opens a
-                   danger confirm quoting FRESH counts, then DELETE /api/ask/threads. -->
-              <div class="field" style="margin-top:14px">
-                <div class="label-row">
-                  <label for="askHistoryDelete">Chat history</label>
-                  <button type="button" class="info-tip" aria-label="About Chat history">i<span class="tip-content hidden">
-                    Every saved Ask Worca chat: transcripts, attachments and the git worktrees checked out for them. Runs started from a chat are not affected.
-                  </span></button>
-                </div>
-                <button type="button" id="askHistoryDelete" class="ask-history-delete" disabled>Delete all chat history</button>
-                <small class="hint" id="askHistoryCounts"></small>
-                <small class="hint" id="askHistoryMsg"></small>
-              </div>
-            </section>
-
             <!-- Scheduled runs: the defaults a NEW schedule inherits. Each schedule keeps
                  its own copy, so a change here never rewrites an existing one. -->
             <section class="card settings-card" id="schedule-settings-card" data-min-level="advanced">
@@ -1599,95 +1656,6 @@
               <small class="hint" id="schedDefaultsMsg"></small>
             </section>
 
-            <!-- Title generation (#422): which model writes run/chat titles.
-                 Empty = the model of the run or chat itself (title.mjs
-                 resolveTitleModel), so a first-party-free install needs no setup.
-                 The select is built from the project-less catalog; a stored id
-                 that left the catalog paints disabled + "not installed". -->
-            <section class="card settings-card" id="title-model-settings-card" data-min-level="expert">
-              <div class="card-head">
-                <div class="label-row">
-                  <h2>Title generation</h2>
-                  <button type="button" class="info-tip" aria-label="About title generation">i<span class="tip-content hidden">
-                    Every run and chat gets a short LLM-written title. By default it is written by the
-                    model the run or chat itself uses, so an install without a first-party Anthropic
-                    account needs no setup here. Pick a model to write every title with it instead;
-                    the change applies to the next title, no restart. A non-empty
-                    <code>WORCA_TITLE_MODEL</code> in the environment overrides this setting.
-                  </span></button>
-                </div>
-              </div>
-              <div class="field">
-                <div class="label-row">
-                  <label for="titleModel">Model</label>
-                </div>
-                <select id="titleModel" class="select" aria-label="Title model"></select>
-              </div>
-              <small class="hint" id="titleModelEnvNote"></small>
-              <div class="add-project-actions" style="margin-top:14px">
-                <button type="button" id="titleModelTest" class="btn btn-ghost btn-mini" title="Send one tiny prompt to the selected model">Test</button>
-                <button type="button" id="titleModelReset" class="btn btn-ghost btn-mini">Use default</button>
-                <button type="button" id="titleModelSave" class="btn btn-primary btn-mini">Save</button>
-              </div>
-              <small class="hint" id="titleModelMsg"></small>
-            </section>
-
-            <!-- Auto workflow model (spec D14 / §7.7): which model classifies a task into a workflow.
-                 Empty = the Sonnet-class default; WORCA_AUTO_MODEL in the environment wins. -->
-            <section class="card settings-card" id="auto-model-settings-card" data-min-level="expert">
-              <div class="card-head">
-                <div class="label-row">
-                  <h2>Auto workflow model</h2>
-                  <button type="button" class="info-tip" aria-label="About the Auto workflow model">i<span class="tip-content hidden">
-                    When a run starts on <b>Auto</b>, one short model call reads the task and picks the workflow.
-                    Pick the model that makes that call; empty means the Sonnet-class default. A non-empty
-                    <code>WORCA_AUTO_MODEL</code> in the environment overrides this setting. Each call is billed to the
-                    run as a sub-agent row named "Auto workflow (round n)".
-                  </span></button>
-                </div>
-              </div>
-              <div class="field">
-                <div class="label-row"><label for="autoModel">Model</label></div>
-                <select id="autoModel" class="select" aria-label="Auto workflow model"></select>
-              </div>
-              <small class="hint" id="autoModelEnvNote"></small>
-              <div class="add-project-actions" style="margin-top:14px">
-                <button type="button" id="autoModelTest" class="btn btn-ghost btn-mini" title="Send one tiny prompt to the selected model">Test</button>
-                <button type="button" id="autoModelReset" class="btn btn-ghost btn-mini">Use default</button>
-                <button type="button" id="autoModelSave" class="btn btn-primary btn-mini">Save</button>
-              </div>
-              <small class="hint" id="autoModelMsg"></small>
-            </section>
-
-            <!-- Spawn-debug diagnostics: the stored side of WORCA_DEBUG_SPAWN.
-                 claude-runner.mjs reads the setting per spawn (UI server AND CLI);
-                 a non-empty env var overrides it. This card only flips the gate —
-                 the runner decides what is printable (routing keys readable,
-                 credentials as "<set, N chars>"). -->
-            <section class="card settings-card" id="debug-spawn-settings-card" data-min-level="expert">
-              <div class="card-head">
-                <div class="label-row">
-                  <h2>Spawn diagnostics</h2>
-                  <button type="button" class="info-tip" aria-label="About spawn diagnostics">i<span class="tip-content hidden">
-                    Logs the exact claude binary, argv and routing env handed to every spawn, in the run
-                    log. Credentials never appear: routing keys (endpoint, wire model) print readable,
-                    every other value as <code>&lt;set, N chars&gt;</code>. Applies to runs started here
-                    and from the CLI, with no restart. A non-empty <code>WORCA_DEBUG_SPAWN</code> in the
-                    environment overrides this setting.
-                  </span></button>
-                </div>
-              </div>
-              <div class="field">
-                <label class="check-row" for="debugSpawnEnabled"><input id="debugSpawnEnabled" type="checkbox" /> Log claude spawn details (binary, argv, routing env)</label>
-              </div>
-              <small class="hint" id="debugSpawnEnvNote"></small>
-              <div class="add-project-actions" style="margin-top:14px">
-                <button type="button" id="debugSpawnReset" class="btn btn-ghost btn-mini">Reset to default</button>
-                <button type="button" id="debugSpawnSave" class="btn btn-primary btn-mini">Save</button>
-              </div>
-              <small class="hint" id="debugSpawnMsg"></small>
-            </section>
-
             <!-- Chat notifications (chat-connectivity-design.md §4.8): which run
                  events ping which chat channels. Body rendered by
                  chat-settings-view.mjs; app.js owns fetch/save/Test wiring. -->
@@ -1701,58 +1669,78 @@
               </div>
               <small class="hint" id="chatSettingsMsg"></small>
             </section>
+          </section>
+          <!-- /pane runs -->
 
-            <!-- Getting started: the checklist's Hide is undone here. Only the checklist —
-                 the welcome dialog stays seen. No info-tip (the row explains itself);
-                 the .hint is painted by app.js like every other settings status line. -->
-            <section class="card settings-card" id="getting-started-card" data-min-level="simple">
-              <div class="label-row">
-                <h2>Getting started</h2>
+          <!-- ===== TAB: ASK WORCA — the assistant chat's limits, tools, web access and history ===== -->
+          <section class="settings-pane hidden" data-tab="ask">
+            <div class="topbar">
+              <div>
+                <h1>Ask Worca</h1>
+                <div class="sub">The assistant chat: how far one turn may go, which tools and websites it may use, and its saved history</div>
               </div>
-              <div class="gs-settings-row">
-                <p class="gs-settings-text">The checklist on New pipeline walks through the first nine things to do with Worca. Hidden it, or want the guided tour back?</p>
-                <button type="button" id="gsShowAgain" class="btn btn-ghost btn-mini">Show again</button>
-              </div>
-              <small class="hint" id="gsSettingsMsg"></small>
-            </section>
+            </div>
 
-            <!-- About: intentionally no info-tip and no .hint (test/ui-settings-tooltips.test.mjs pins both). -->
-            <section class="card settings-card" id="about-card" data-min-level="simple">
-              <div class="label-row">
-                <h2>About</h2>
+            <!-- Ask Worca (ask-worca-design §6.9): per-turn guards for the
+                 assistant chat. Read fresh on every turn (D12); a stored null
+                 budget means "no cap". Posted ALONE — never with root/budget keys. -->
+            <!-- Simple on purpose: the Ask Worca tab (Advanced) already gates it, and a deep link at a lower mode
+                 must still show the card under the level banner (docs/ui-levels.md rule 3). -->
+            <section class="card settings-card" id="ask-settings-card" data-min-level="simple">
+              <div class="card-head">
+                <div class="label-row">
+                  <h2>Limits &amp; access</h2>
+                  <button type="button" class="info-tip" aria-label="About Ask Worca limits">i<span class="tip-content hidden">
+                    Per-turn guards for the Ask Worca assistant chat. A chat turn stops when it reaches the turn limit or the per-turn cost cap; both are read fresh on every turn.
+                  </span></button>
+                </div>
               </div>
-              <div class="about-row">
-                <span class="about-key">Version</span>
-                <!-- href is painted from app.releaseUrl (the worca-app-v<version> tag);
-                     without one the anchor is plain text, so the placeholder never links. -->
-                <a class="about-val about-version" id="aboutVersion"
-                   target="_blank" rel="noopener noreferrer">&mdash;</a>
+              <div class="field">
+                <div class="label-row">
+                  <label for="askMaxTurns">Turn limit</label>
+                  <button type="button" class="info-tip" aria-label="About Turn limit">i<span class="tip-content hidden">
+                    Maximum assistant/tool turns one chat message may use (1&ndash;500). Leave empty to restore the default of 400.
+                  </span></button>
+                </div>
+                <input id="askMaxTurns" class="input" type="number" min="1" max="500" step="1" inputmode="numeric" placeholder="400" autocomplete="off" />
               </div>
-              <div class="about-row">
-                <span class="about-key">Repository</span>
-                <a class="about-val about-link" id="aboutRepoLink"
-                   href="https://github.com/SinishaDjukic/worca-cc"
-                   target="_blank" rel="noopener noreferrer">github.com/SinishaDjukic/worca-cc</a>
+              <div class="field">
+                <div class="label-row">
+                  <label for="askMaxBudgetUsd">Per-turn cost cap (USD)</label>
+                  <button type="button" class="info-tip" aria-label="About Per-turn cost cap">i<span class="tip-content hidden">
+                    There is no cap by default. Untick No cap and enter an amount (0.1&ndash;100) to turn the guard on: a chat turn then stops when its estimated cost reaches it. Leaving the amount empty, or pressing Use defaults, means no cap.
+                  </span></button>
+                </div>
+                <input id="askMaxBudgetUsd" class="input" type="number" min="0.1" max="100" step="0.1" inputmode="decimal" placeholder="No cap" autocomplete="off" />
+                <label class="check-row" for="askNoCap"><input id="askNoCap" type="checkbox" /> No cap</label>
               </div>
-              <div class="about-row">
-                <span class="about-key">Feedback</span>
-                <!-- hrefs are repainted from app.bugsUrl (package.json bugs.url); the
-                     static fallback keeps the links usable before /api/settings lands.
-                     Anchors only: ui-settings-about.test.mjs forbids a control here,
-                     and neither the label nor the href carries a version string. -->
-                <a class="about-val about-link" id="aboutBugLink"
-                   href="https://github.com/SinishaDjukic/worca-cc/issues/new?labels=bug"
-                   target="_blank" rel="noopener noreferrer">Report a bug</a>
+              <!-- Scripts workbench W20: the chat's save_script / test_script switch. Body
+                   rendered by chat-settings-view.mjs; saved with this card's Save button. -->
+              <div class="field" id="ask-script-tools-host"></div>
+              <!-- Ask web access (off by default): rendered by chat-settings-view.mjs; saved with this
+                   card's Save button, and only when one of its fields was touched. -->
+              <div class="field" id="ask-web-host"></div>
+              <div class="add-project-actions" style="margin-top:14px">
+                <button type="button" id="askLimitsReset" class="btn btn-ghost btn-mini">Use defaults</button>
+                <button type="button" id="askLimitsSave" class="btn btn-primary btn-mini">Save</button>
               </div>
-              <div class="about-row">
-                <span class="about-key"></span>
-                <a class="about-val about-link" id="aboutIdeaLink"
-                   href="https://github.com/SinishaDjukic/worca-cc/issues/new?labels=enhancement"
-                   target="_blank" rel="noopener noreferrer">Suggest an improvement</a>
+              <small class="hint" id="askLimitsMsg"></small>
+              <!-- Chat history: the counts paint with the view; the button opens a
+                   danger confirm quoting FRESH counts, then DELETE /api/ask/threads. -->
+              <div class="field" style="margin-top:14px">
+                <div class="label-row">
+                  <label for="askHistoryDelete">Chat history</label>
+                  <button type="button" class="info-tip" aria-label="About Chat history">i<span class="tip-content hidden">
+                    Every saved Ask Worca chat: transcripts, attachments and the git worktrees checked out for them. Runs started from a chat are not affected.
+                  </span></button>
+                </div>
+                <button type="button" id="askHistoryDelete" class="ask-history-delete" disabled>Delete all chat history</button>
+                <small class="hint" id="askHistoryCounts"></small>
+                <small class="hint" id="askHistoryMsg"></small>
               </div>
             </section>
           </section>
-          <!-- /pane general -->
+          <!-- /pane ask -->
 
           <!-- ===== TAB: GUARDRAILS (was the top-level Guardrails view) ===== -->
           <section class="settings-pane hidden" data-tab="guardrails">
@@ -1771,41 +1759,42 @@
           </section>
           <!-- /pane guardrails -->
 
-          <!-- ===== TAB: MODELS (was the top-level Models view) ===== -->
-          <section class="settings-pane hidden" data-tab="models">
+          <!-- ===== TAB: MEMORY (agent-memory-design.md §10) ===== -->
+          <section class="settings-pane hidden" data-tab="memory">
             <div class="topbar">
               <div>
-                <h1>Models</h1>
-                <div class="sub">The global model catalog — available in every project; entries can override built-ins, route through a provider, or carry per-model routing env. Sign-ins and endpoints live on the Providers tab.</div>
-              </div>
-              <div style="display:flex;gap:8px;flex:0 0 auto">
-                <button type="button" id="model-share-btn" class="btn-ghost" style="padding:11px 20px;white-space:nowrap">Share as plugin…</button>
-                <button type="button" id="model-import-btn" class="btn-ghost" style="padding:11px 20px;white-space:nowrap">Import models…</button>
-                <button type="button" id="model-create-btn" class="btn-go" style="padding:11px 20px;white-space:nowrap">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
-                  Add model
-                </button>
+                <h1>Memory</h1>
+                <div class="sub">What worca remembers across runs and chats — the global rules and preferences every agent sees. A project's own memory lives on its project page (Projects → open a project → Memory).</div>
               </div>
             </div>
-            <p id="models-msg" class="form-msg" aria-live="polite"></p>
-            <div class="run-list" id="models-list"></div>
-          </section>
-          <!-- /pane models -->
-
-          <!-- ===== TAB: PROVIDERS (model-bridge-design.md §8.1) =====
-               Split out of Models: the card is account-level setup you touch rarely, and at
-               1000+px it buried the catalog it unlocks. Expert only, like Models. -->
-          <section class="settings-pane hidden" data-tab="providers">
-            <div class="topbar">
-              <div>
-                <h1>Providers</h1>
-                <div class="sub">Sign-ins, endpoints and keys for the models Worca bridges — GitHub Copilot, any OpenAI-compatible server (llama.cpp, Ollama, LM Studio, vLLM), an Anthropic-compatible gateway. The models themselves live on the Models tab.</div>
+            <!-- Settings › Memory: the model + effort EVERY Memory defragment run uses (memory-defrag-model.mjs).
+                 Expert, like the health card's Defragment. No ⓘ and empty hints: the settings-view census
+                 (test/ui-settings-tooltips.test.mjs) pins both. A plain .card like the health card, NOT a
+                 .settings-card: that census (About last) counts the Settings cards. -->
+            <section class="card mem-model-card" id="mem-defrag-model-card" data-min-level="expert">
+              <div class="label-row"><h2>Defragment model</h2></div>
+              <p class="mem-model-text">The model every Memory defragment run uses — from the Defragment button, New pipeline, an Ask Worca card or the CLI. A model named when the run starts (<code>worca --model</code>) still wins.</p>
+              <div class="mem-model-row">
+                <div class="field">
+                  <div class="label-row"><label for="memDefragModel">Model</label></div>
+                  <select id="memDefragModel" class="select" aria-label="Defragment model"></select>
+                </div>
+                <div class="field">
+                  <div class="label-row"><label for="memDefragEffort">Effort</label></div>
+                  <select id="memDefragEffort" class="select" aria-label="Defragment effort"></select>
+                </div>
               </div>
-            </div>
-            <p id="providers-msg" class="form-msg" aria-live="polite"></p>
-            <div class="run-list" id="providers-list"></div>
+              <small class="hint" id="memDefragModelNote"></small>
+              <div class="add-project-actions" style="margin-top:14px">
+                <button type="button" id="memDefragModelReset" class="btn btn-ghost btn-mini">Use default</button>
+                <button type="button" id="memDefragModelSave" class="btn btn-primary btn-mini">Save</button>
+              </div>
+              <small class="hint" id="memDefragModelMsg"></small>
+            </section>
+            <p id="memory-msg" class="form-msg" aria-live="polite"></p>
+            <div id="memory-host" class="mem-host"></div>
           </section>
-          <!-- /pane providers -->
+          <!-- /pane memory -->
 
           <!-- ===== TAB: PLUGINS (was the top-level Plugins view) ===== -->
           <section class="settings-pane hidden" data-tab="plugins">
@@ -1837,42 +1826,104 @@
           </section>
           <!-- /pane plugins -->
 
-          <!-- ===== TAB: MEMORY (agent-memory-design.md §10) ===== -->
-          <section class="settings-pane hidden" data-tab="memory">
+          <!-- ===== TAB: MODELS (was the top-level Models view) ===== -->
+          <section class="settings-pane hidden" data-tab="models">
             <div class="topbar">
               <div>
-                <h1>Memory</h1>
-                <div class="sub">What worca remembers across runs and chats — the global rules and preferences every agent sees. A project's own memory lives on its project page (Projects → open a project → Memory).</div>
+                <h1>Models</h1>
+                <div class="sub">The global model catalog — available in every project; entries can override built-ins, route through a provider, or carry per-model routing env. The two cards on top pick the models Worca's own titles and Auto classifier use. Sign-ins and endpoints live on the Providers tab.</div>
+              </div>
+              <div style="display:flex;gap:8px;flex:0 0 auto">
+                <button type="button" id="model-share-btn" class="btn-ghost" style="padding:11px 20px;white-space:nowrap">Share as plugin…</button>
+                <button type="button" id="model-import-btn" class="btn-ghost" style="padding:11px 20px;white-space:nowrap">Import models…</button>
+                <button type="button" id="model-create-btn" class="btn-go" style="padding:11px 20px;white-space:nowrap">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+                  Add model
+                </button>
               </div>
             </div>
-            <!-- Settings › Memory: the model + effort EVERY Memory defragment run uses (memory-defrag-model.mjs).
-                 Expert, like the health card's Defragment. No ⓘ and empty hints: the settings-view census
-                 (test/ui-settings-tooltips.test.mjs) pins both. A plain .card like the health card, NOT a
-                 .settings-card: that census (About last, twelve cards) counts the General tab's cards. -->
-            <section class="card mem-model-card" id="mem-defrag-model-card" data-min-level="expert">
-              <div class="label-row"><h2>Defragment model</h2></div>
-              <p class="mem-model-text">The model every Memory defragment run uses — from the Defragment button, New pipeline, an Ask Worca card or the CLI. A model named when the run starts (<code>worca --model</code>) still wins.</p>
-              <div class="mem-model-row">
-                <div class="field">
-                  <div class="label-row"><label for="memDefragModel">Model</label></div>
-                  <select id="memDefragModel" class="select" aria-label="Defragment model"></select>
+            <!-- The models Worca's own helper calls use (titles, the Auto classifier). Two columns on a
+                 wide screen so the catalog below is not pushed a screen down. -->
+            <div class="models-helpers" data-min-level="expert">
+              <!-- Title generation (#422): which model writes run/chat titles.
+                   Empty = the model of the run or chat itself (title.mjs
+                   resolveTitleModel), so a first-party-free install needs no setup.
+                   The select is built from the project-less catalog; a stored id
+                   that left the catalog paints disabled + "not installed". -->
+              <section class="card settings-card" id="title-model-settings-card" data-min-level="expert">
+                <div class="card-head">
+                  <div class="label-row">
+                    <h2>Title generation</h2>
+                    <button type="button" class="info-tip" aria-label="About title generation">i<span class="tip-content hidden">
+                      Every run and chat gets a short LLM-written title. By default it is written by the
+                      model the run or chat itself uses, so an install without a first-party Anthropic
+                      account needs no setup here. Pick a model to write every title with it instead;
+                      the change applies to the next title, no restart. A non-empty
+                      <code>WORCA_TITLE_MODEL</code> in the environment overrides this setting.
+                    </span></button>
+                  </div>
                 </div>
                 <div class="field">
-                  <div class="label-row"><label for="memDefragEffort">Effort</label></div>
-                  <select id="memDefragEffort" class="select" aria-label="Defragment effort"></select>
+                  <div class="label-row">
+                    <label for="titleModel">Model</label>
+                  </div>
+                  <select id="titleModel" class="select" aria-label="Title model"></select>
                 </div>
-              </div>
-              <small class="hint" id="memDefragModelNote"></small>
-              <div class="add-project-actions" style="margin-top:14px">
-                <button type="button" id="memDefragModelReset" class="btn btn-ghost btn-mini">Use default</button>
-                <button type="button" id="memDefragModelSave" class="btn btn-primary btn-mini">Save</button>
-              </div>
-              <small class="hint" id="memDefragModelMsg"></small>
-            </section>
-            <p id="memory-msg" class="form-msg" aria-live="polite"></p>
-            <div id="memory-host" class="mem-host"></div>
+                <small class="hint" id="titleModelEnvNote"></small>
+                <div class="add-project-actions" style="margin-top:14px">
+                  <button type="button" id="titleModelTest" class="btn btn-ghost btn-mini" title="Send one tiny prompt to the selected model">Test</button>
+                  <button type="button" id="titleModelReset" class="btn btn-ghost btn-mini">Use default</button>
+                  <button type="button" id="titleModelSave" class="btn btn-primary btn-mini">Save</button>
+                </div>
+                <small class="hint" id="titleModelMsg"></small>
+              </section>
+
+              <!-- Auto workflow model (spec D14 / §7.7): which model classifies a task into a workflow.
+                   Empty = the Sonnet-class default; WORCA_AUTO_MODEL in the environment wins. -->
+              <section class="card settings-card" id="auto-model-settings-card" data-min-level="expert">
+                <div class="card-head">
+                  <div class="label-row">
+                    <h2>Auto workflow model</h2>
+                    <button type="button" class="info-tip" aria-label="About the Auto workflow model">i<span class="tip-content hidden">
+                      When a run starts on <b>Auto</b>, one short model call reads the task and picks the workflow.
+                      Pick the model that makes that call; empty means the Sonnet-class default. A non-empty
+                      <code>WORCA_AUTO_MODEL</code> in the environment overrides this setting. Each call is billed to the
+                      run as a sub-agent row named "Auto workflow (round n)".
+                    </span></button>
+                  </div>
+                </div>
+                <div class="field">
+                  <div class="label-row"><label for="autoModel">Model</label></div>
+                  <select id="autoModel" class="select" aria-label="Auto workflow model"></select>
+                </div>
+                <small class="hint" id="autoModelEnvNote"></small>
+                <div class="add-project-actions" style="margin-top:14px">
+                  <button type="button" id="autoModelTest" class="btn btn-ghost btn-mini" title="Send one tiny prompt to the selected model">Test</button>
+                  <button type="button" id="autoModelReset" class="btn btn-ghost btn-mini">Use default</button>
+                  <button type="button" id="autoModelSave" class="btn btn-primary btn-mini">Save</button>
+                </div>
+                <small class="hint" id="autoModelMsg"></small>
+              </section>
+            </div>
+            <p id="models-msg" class="form-msg" aria-live="polite"></p>
+            <div class="run-list" id="models-list"></div>
           </section>
-          <!-- /pane memory -->
+          <!-- /pane models -->
+
+          <!-- ===== TAB: PROVIDERS (model-bridge-design.md §8.1) =====
+               Split out of Models: the card is account-level setup you touch rarely, and at
+               1000+px it buried the catalog it unlocks. Expert only, like Models. -->
+          <section class="settings-pane hidden" data-tab="providers">
+            <div class="topbar">
+              <div>
+                <h1>Providers</h1>
+                <div class="sub">Sign-ins, endpoints and keys for the models Worca bridges — GitHub Copilot, any OpenAI-compatible server (llama.cpp, Ollama, LM Studio, vLLM), an Anthropic-compatible gateway. The models themselves live on the Models tab.</div>
+              </div>
+            </div>
+            <p id="providers-msg" class="form-msg" aria-live="polite"></p>
+            <div class="run-list" id="providers-list"></div>
+          </section>
+          <!-- /pane providers -->
         </section>
         <!-- /view settings -->
       </main>
@@ -2239,7 +2290,8 @@
     </div>
 
     <!-- Connect Claude Code: the one checklist step with no control to ring. The
-         tick is derived (the CLI resolves on PATH); "Check again" refetches it. -->
+         tick is derived (the CLI resolves on PATH and is not signed out); "Check
+         again" refetches it with a fresh sign-in check. -->
     <div id="claude-setup-modal" class="viewer-modal hidden" role="dialog" aria-modal="true" aria-labelledby="claude-setup-title">
       <div class="card ob-claude">
         <div class="card-head">
@@ -2249,6 +2301,9 @@
         <p class="ob-claude-lead">Worca drives the <strong>Claude Code</strong> CLI. Real runs need it on your <code>PATH</code>; mock runs need nothing.</p>
         <pre class="ob-claude-cmd"><code>npm install -g @anthropic-ai/claude-code</code></pre>
         <p class="ob-claude-note">On native Windows the <a href="https://docs.anthropic.com/en/docs/claude-code/setup" target="_blank" rel="noopener noreferrer">native installer</a> works too. A binary elsewhere: set <code>WORCA_CLAUDE_BIN</code> to its full path and restart the UI.</p>
+        <p class="ob-claude-lead ob-claude-step"><strong>Then sign it in.</strong> Start it once in a terminal and type <code>/login</code>:</p>
+        <pre class="ob-claude-cmd"><code>claude</code></pre>
+        <p class="ob-claude-note">Signing in to the Claude desktop app does not carry over — the CLI keeps its own sign-in.</p>
         <div class="ob-claude-status" id="claude-setup-status" aria-live="polite"></div>
         <div class="stop-actions">
           <button type="button" id="claude-setup-check" class="btn btn-primary btn-mini">Check again</button>

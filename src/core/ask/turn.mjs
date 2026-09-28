@@ -16,6 +16,8 @@ import { join, dirname, resolve as pathResolve } from 'node:path';
 import { mkdir, writeFile, unlink } from 'node:fs/promises';
 
 import { runClaude } from '../claude-runner.mjs';
+import { CLAUDE_SIGNED_OUT_CODE } from '../preflight.mjs';
+import { failedBecauseSignedOut } from '../claude-auth.mjs';
 import { resolveModelEnv, resolveModelCost, estimateCost, liveCostRates as defaultLiveCostRates } from '../config.mjs';
 import { worcaHome } from '../projects.mjs';
 import { generateTitle } from '../title.mjs';
@@ -28,6 +30,7 @@ import { validateMetricsChange } from './metrics-deps.mjs';
 import { validatePolicyChange } from './policy-deps.mjs';
 import { validateModelChange } from './model-deps.mjs';
 import { validateCloneProposal } from './clone-deps.mjs';
+import { createWebValidator } from './web-proposal.mjs';
 import { validateScheduleChange } from './schedule-deps.mjs';
 import { lookupTask } from './source-deps.mjs';
 import { effectiveTimeZone } from './schedule-spec.mjs';
@@ -44,6 +47,27 @@ export function createAskTurn(opts) { return new AskTurn(opts); }
 
 const TERMINAL = new Set(['done', 'stopped', 'error']);
 
+// The classified notice's raw-detail cap — the runner's own reject is already
+// tail-capped tighter than this; the slice(-N) here only bounds the unusual
+// non-runner error paths so a huge message can never bloat the persisted block.
+const ERROR_DETAIL_MAX = 2000;
+
+/** The human line a classified failure carries. The block is persisted and
+ *  shared by every viewer, so the wording is level-neutral: it names where a
+ *  remedy lives (including which interface mode gates it) instead of assuming
+ *  one. Pure, exported for tests. */
+export function humanErrorText(errorClass) {
+  switch (errorClass) {
+    case 'model': return "This model isn't available in your environment — Claude Code couldn't use it. Try another model, or add your custom model in Settings › Models (Expert mode).";
+    case 'auth': return 'Authentication failed — check the credentials behind this model.';
+    case 'usage_limit': return 'A usage limit was reached — wait for it to reset.';
+    case 'rate_limit': return 'The endpoint is rate-limiting — try again shortly.';
+    case 'quota': return 'A quota/billing problem was reported — check the account behind this model.';
+    case 'network': return 'The endpoint was unreachable — check your connection and retry.';
+    default: return null;
+  }
+}
+
 class AskTurn extends EventEmitter {
   constructor({
     threadId, assistantMessageId, userMessageId,
@@ -55,12 +79,15 @@ class AskTurn extends EventEmitter {
     memoryProject = null,
     timeZone = null,
     reader = null,
+    web = null,
     deps = {},
   } = {}) {
     super();
     this.threadId = threadId;
     // A shared sign-in's name (identity.mjs): the MCP child's per-person reads (notifications).
     this.reader = typeof reader === 'string' && reader ? reader : null;
+    // askWebAccess() for this turn (docs/guardrails.md "Web access"): the MCP child's web tools + the sub-agent note.
+    this.web = web && web.enabled === true ? web : null;
     this.assistantMessageId = assistantMessageId;
     this.userMessageId = userMessageId;
     this.prompt = prompt;
@@ -86,6 +113,7 @@ class AskTurn extends EventEmitter {
     this.extraCostUsd = 0;            // PD2: money the MCP child spent on the workflow classifier, booked by this turn
     this.deps = {
       runClaudeImpl: deps.runClaudeImpl ?? runClaude,
+      failedBecauseSignedOut: deps.failedBecauseSignedOut ?? failedBecauseSignedOut,
       memoryMount: deps.memoryMount ?? refreshAskMemoryMount,
       store: {
         finishMessage, setMessageBlocks, addThreadTotals, updateThread, setThreadTitle, listAttachments,
@@ -98,6 +126,9 @@ class AskTurn extends EventEmitter {
       validateScheduleChange: deps.validateScheduleChange ?? validateScheduleChange,
       validateModelChange: deps.validateModelChange ?? validateModelChange,
       validateCloneProposal: deps.validateCloneProposal ?? validateCloneProposal,
+      // The web card's authoritative check runs against THIS turn's resolved access (allowlist + team cap).
+      validateWebProposal: deps.validateWebProposal ?? ((input) => createWebValidator({
+        allowed: () => (this.web ? this.web.allowedDomains : []), teamCap: () => (this.web ? this.web.teamCap ?? null : null) })(input)),
       scheduleDefaults: deps.scheduleDefaults ?? scheduleDefaults,
       // A proposed plugin task is looked up here, once: it must exist, and the card shows its title.
       lookupTask: deps.lookupTask === undefined ? lookupTask : deps.lookupTask,
@@ -109,6 +140,10 @@ class AskTurn extends EventEmitter {
       resolveModelCost: deps.resolveModelCost ?? resolveModelCost,
       worcaHome: deps.worcaHome ?? worcaHome,
       buildMcpConfig: deps.buildMcpConfig ?? buildMcpConfig,
+      // ({threadId, reader, web}) => {url, token, dispose()} | null. Set by the server when agents run
+      // under their own users (agent-pool.mjs): the chat's claude then runs as the person's
+      // agent user and its worca tools run in the server through this relay. null = classic.
+      agentRelay: deps.agentRelay ?? null,
       serverPath: deps.serverPath ?? ASK_MCP_SERVER_PATH,
       newAskId: deps.newAskId ?? newAskId,
       setPendingCardComments: deps.setPendingCardComments ?? setPendingCardComments,
@@ -373,6 +408,26 @@ class AskTurn extends EventEmitter {
     this._persistBlocks();
   }
 
+  /** propose_web_access RESULT: the clone card's split — a child {ok:false} already reached the model as text. */
+  async _onWebProposal(input, text, isError) {
+    if (isError || !this.web) return;
+    let out = null;
+    try { out = JSON.parse(text); } catch { out = null; }
+    if (!out || out.ok !== true) return;
+    const d = this.deps;
+    try {
+      const r = await d.validateWebProposal(input && typeof input === 'object' ? input : {});
+      if (r && r.ok) this.reducer.addBlock({ kind: 'card', id: d.newAskId('card'), state: 'proposed', card: r.card });
+      else {
+        const errors = (r && Array.isArray(r.errors) && r.errors.length) ? r.errors : ['invalid proposal'];
+        this.reducer.addBlock({ kind: 'notice', text: `Web access request rejected: ${errors.join('; ')}` });
+      }
+    } catch (err) {
+      this.reducer.addBlock({ kind: 'notice', text: `Web access request rejected: ${err?.message || err}` });
+    }
+    this._persistBlocks();
+  }
+
   /** The card exists from the tool_use on (spec §8.2, PD7): a building block with the four-step trace, persisted. */
   _onWorkflowStart(toolUseId, input) {
     const d = this.deps;
@@ -461,6 +516,7 @@ class AskTurn extends EventEmitter {
       onScheduleProposal: ({ input, text, isError }) => this._onScheduleProposal(input, text, isError),
       onModelProposal: ({ input, text, isError }) => this._onModelProposal(input, text, isError),
       onCloneProposal: ({ input, text, isError }) => this._onCloneProposal(input, text, isError),
+      onWebProposal: ({ input, text, isError }) => this._onWebProposal(input, text, isError),
       // pause / resume / skip / mark-read in the child → the server's schedules-changed frames.
       onScheduleMutation: (e) => { try { this.deps.onScheduleMutation(e); } catch { /* a broken sink never breaks the turn */ } },
       // The MCP child cannot broadcast; the parent turns its comment writes into
@@ -511,6 +567,28 @@ class AskTurn extends EventEmitter {
     for (const b of this.reducer.snapshot().blocks) {
       if (b && b.kind === 'card' && b.state === 'building') this.reducer.updateBlock(b.id, { state: 'failed', error: 'the reply ended before the proposal was ready' });
     }
+    // A classified failure tells the user what happened and what to do, as a
+    // notice block: it rides the terminal write below (like _limitNotice's
+    // notice), so the human line survives a reload, and the extra fields
+    // (errorClass, detail) let the chat render its recovery affordance. The
+    // wording is level-neutral — the block is shared by every viewer — and
+    // an UNCLASSIFIED error adds nothing: the raw message stays the only
+    // evidence, exactly as before.
+    if (kind === 'error' && errorClass) {
+      // The detail carries the full evidence: the runner's exit verdict, plus
+      // the CLI's own refusal line when it spoke synthetically (it is often
+      // the clearest statement of the cause). Skipped when the runner message
+      // already contains it — an empty stderr makes the runner echo it verbatim.
+      const cli = this.reducer.snapshot().cliErrorText;
+      const extra = cli && message && !String(message).includes(cli) ? cli : null;
+      const detail = [message, extra].filter((s) => s && String(s).trim()).join('\n');
+      this.reducer.addBlock({
+        kind: 'notice',
+        text: humanErrorText(errorClass),
+        errorClass,
+        detail: detail ? String(detail).slice(-ERROR_DETAIL_MAX) : null,
+      });
+    }
     const summary = this.reducer.finish();
     const finalStatus = kind === 'error' ? 'error' : status;
     // Already AUTHORITATIVE: the reducer applied this turn's per-model cost
@@ -555,7 +633,18 @@ class AskTurn extends EventEmitter {
       console.warn(`[worca-ask] turn ${this.assistantMessageId}: ${summary.reducerErrors} reducer error(s) absorbed`);
     }
     if (kind === 'error') {
-      this._frame({ type: 'ask-error', message: message || 'unknown error', ...(errorClass !== undefined ? { errorClass } : {}) });
+      // `code` lets the panel swap the CLI's raw error for a Sign in… line. Signed
+      // out, the CLI may not even say so (`unrecognized_model` on a first-party id),
+      // so claude-auth asks `claude auth status` instead of trusting the text.
+      const signedOut = await d.failedBecauseSignedOut({ message, model: this.model }).catch(() => false);
+      // The persisted blocks ride along, mirroring ask-done: the live client
+      // must render the same classified notice a reload re-derives — an
+      // ask-error frame without them shows the raw message until refresh.
+      this._frame({
+        type: 'ask-error', message: message || 'unknown error', blocks: summary.blocks,
+        ...(errorClass !== undefined ? { errorClass } : {}),
+        ...(signedOut ? { code: CLAUDE_SIGNED_OUT_CODE } : {}),
+      });
       this._emit('error', { message: message || 'unknown error' });
     } else {
       this._frame({
@@ -611,10 +700,15 @@ class AskTurn extends EventEmitter {
         ? pathResolve(process.env.WORCA_HOME)
         : dirname(d.worcaHome());
       mcpConfigPath = join(scratchDir, `mcp-${this.assistantMessageId}.json`);
+      this.relay = d.agentRelay ? d.agentRelay({ threadId: this.threadId, reader: this.reader || null, web: this.web }) : null;
       await d.fs.writeFile(
         mcpConfigPath,
-        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, ...(this.reader ? { reader: this.reader } : {}) }), null, 2),
-        'utf8',
+        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, ...(this.reader ? { reader: this.reader } : {}), ...(this.relay ? { relay: this.relay } : {}), ...(this.web ? { web: this.web } : {}) }), null, 2),
+        // Never a key value (webKeyVar: the key rides the process env). A relayed turn runs as
+        // the person's agent user (agent-pool.mjs), which reads this file through its group: the
+        // scratch dir is setgid worca-share (2770), so 0640 reaches the agent users and nobody
+        // else. It carries this turn's relay token, which that agent must present anyway.
+        { encoding: 'utf8', mode: this.relay ? 0o640 : 0o600 },
       );
       // One 30-minute budget for the whole turn, retry included. The timedOut
       // flag and abort() run in ONE synchronous callback, so R-C always reads
@@ -630,6 +724,7 @@ class AskTurn extends EventEmitter {
     } finally {
       if (timer != null) d.clearTimeout(timer);
       if (mcpConfigPath) await d.fs.unlink(mcpConfigPath).catch(() => {});
+      if (this.relay) { try { this.relay.dispose(); } catch { /* already gone */ } this.relay = null; }
     }
     this._kickoffTitle();
     return out;
@@ -672,7 +767,11 @@ class AskTurn extends EventEmitter {
         mcpConfigPath,
         scratchDir,
         memoryDir: this.memoryDir,
+        web: this.web,
+        relayed: !!this.relay,
       });
+      // With the relay, the chat's claude runs as the person's agent user (agent-pool.mjs).
+      if (this.relay) options.asAgent = true;
       try {
         await d.runClaudeImpl(options);
         // Resolve path. Future-proofing: if a later CLI exits 0 on a limit,

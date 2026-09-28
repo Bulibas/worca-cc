@@ -60,11 +60,11 @@ async function boot({ configOk = true } = {}) {
   return { window, posts, tick, openSettings, setSettings };
 }
 
-test('the card sits after Title generation, before About; options come from the catalog; the note names the effective source', async () => {
+test('the card sits after Title generation on the Models tab; options come from the catalog; the note names the effective source', async () => {
   const { window, openSettings } = await boot(); await openSettings();
   const ids = [...window.document.querySelectorAll('.view[data-view="settings"] section.card.settings-card')].map((c) => c.id);
   assert.equal(ids[ids.indexOf('title-model-settings-card') + 1], 'auto-model-settings-card');
-  assert.equal(ids.at(-1), 'about-card');
+  assert.equal(window.document.getElementById('auto-model-settings-card').closest('.settings-pane').dataset.tab, 'models');
   const sel = window.document.getElementById('autoModel');
   assert.deepEqual([...sel.options].map((o) => o.value), ['', 'claude-opus-5-5', 'claude-sonnet-5']);
   assert.equal(sel.options[0].textContent, 'Default (Sonnet-class)');

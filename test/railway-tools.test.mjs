@@ -73,6 +73,7 @@ function world({ vars = { GH_TOKEN: SECRET, WORCA_MOCK: '1', SEALED: null, RAILW
       const q = args[1];
       const v = JSON.parse(args[3]);
       if (q.includes('serviceInstanceUpdate')) { img = v.i.source.image; return { code: 0, stdout: '{"data":{"serviceInstanceUpdate":true}}' }; }
+      if (q.includes('variableDelete')) return { code: 0, stdout: '{"data":{"variableDelete":true}}' };
       if (q.includes('serviceInstanceDeploy')) { n += 1; return { code: 0, stdout: '{"data":{"serviceInstanceDeploy":true}}' }; }
       if (q.includes('serviceInstance(')) return { code: 0, stdout: JSON.stringify({ data: { serviceInstance: { source: { image: img } } } }) };
       if (q.includes('deployments(')) return { code: 0, stdout: JSON.stringify({ data: { deployments: { edges: [{ node: { id: `d${n}`, status: 'SUCCESS', createdAt: new Date(Date.now() + 1000).toISOString() } }] } } }) };
@@ -131,8 +132,25 @@ test('mock on/off, unset', async () => {
   assert.deepEqual([w.calls[0].args.slice(0, 4), w.calls[0].input], [['variable', 'set', 'WORCA_MOCK', '--stdin'], '1']);
   await assert.rejects(main(['mock', 't1', 'maybe', '--yes'], world().ctx), /on\|off/);
   w = world();
-  await main(['unset', 't1', 'WORCA_CLONE_ALLOW', '--yes', '--skip-deploys'], w.ctx);
-  assert.ok(w.calls[0].args.includes('--skip-deploys') && w.calls[0].args.includes('--service'));
+  await main(['unset', 't1', 'WORCA_CLONE_ALLOW', '--yes'], w.ctx);
+  assert.deepEqual(w.calls[0].args, ['variable', 'delete', 'WORCA_CLONE_ALLOW', '--service', 'worca', '--environment', 'env-1', '--project', 'proj-1']);
+  assert.match(w.text(), /\(deploying\)/);
+});
+
+test('unset --skip-deploys: the API removes it without a deploy (the CLI has no such flag)', async () => {
+  let w = world();
+  assert.equal(await main(['unset', 't1', 'WORCA_CLONE_ALLOW', '--yes', '--skip-deploys'], w.ctx), 0);
+  assert.equal(w.calls.length, 1);
+  assert.deepEqual(w.calls[0].args.slice(0, 1), ['api']);
+  assert.match(w.calls[0].args[1], /variableDelete\(input:\$i\)/);
+  assert.deepEqual(JSON.parse(w.calls[0].args[3]), { i: { projectId: 'proj-1', environmentId: 'env-1', serviceId: 'svc-1', name: 'WORCA_CLONE_ALLOW' } });
+  assert.ok(!allArgs(w.calls).includes('--skip-deploys'), 'the CLI flag is never passed');
+  assert.ok(!w.calls.some((c) => c.args[0] === 'api' && c.args[1].includes('serviceInstanceDeploy')), 'no deploy');
+  assert.match(w.text(), /no deploy; run redeploy when done/);
+  // A refusal from the API is an error, not a silent success.
+  w = world();
+  w.ctx.exec = async (cmd, args) => (args[0] === 'api' ? { code: 0, stdout: '{"errors":[{"message":"Not Authorized"}]}' } : { code: 0, stdout: '' });
+  await assert.rejects(main(['unset', 't1', 'WORCA_CLONE_ALLOW', '--yes', '--skip-deploys'], w.ctx), /Not Authorized/);
 });
 
 test('upgrade records history; rollback returns to the previous image', async () => {
@@ -196,4 +214,58 @@ test('the repo carries no deployment detail: the example target is a template', 
     const s = readFileSync(new URL(`../${f}`, import.meta.url), 'utf8');
     assert.ok(!/worca-01|5fa6d30a|1cee1493|92410215/.test(s), `${f} names no real deployment`);
   }
+});
+
+// ── the credential broker (docs/credential-broker.md) ────────────────────────
+const BROKER_TARGET = `${TARGET_TEXT}\nRAILWAY_BROKER_SERVICE=broker\nRAILWAY_BROKER_SERVICE_ID=svc-b\nKEYS_URL=https://worca-keys.example.com/`;
+writeFileSync(join(DIR, 'tb.env'), BROKER_TARGET);
+
+test('broker target: both ids or neither; KEYS_URL https; --service picks the broker', async () => {
+  const t = loadTarget('tb', { dir: DIR });
+  assert.deepEqual([t.brokerService, t.brokerServiceId, t.keysUrl], ['broker', 'svc-b', 'https://worca-keys.example.com']);
+  writeFileSync(join(DIR, 'tbhalf.env'), `${TARGET_TEXT}\nRAILWAY_BROKER_SERVICE=broker`);
+  assert.throws(() => loadTarget('tbhalf', { dir: DIR }), /set both RAILWAY_BROKER_SERVICE and RAILWAY_BROKER_SERVICE_ID/);
+  const w = world({ stdin: 'x'.repeat(40) });
+  assert.equal(await main(['set', 'tb', 'WORCA_BROKER_SECRET', '--service', 'broker', '--yes'], w.ctx), 0);
+  const set = w.calls.find((c) => c.args[1] === 'set');
+  assert.deepEqual(set.args.slice(4, 6), ['--service', 'broker']);
+  await assert.rejects(main(['set', 't1', 'X', '--service', 'broker', '--yes'], world({ stdin: 'v' }).ctx), /has no broker/);
+  await assert.rejects(main(['set', 'tb', 'X', '--service', 'other', '--yes'], world({ stdin: 'v' }).ctx), /worca or broker/);
+});
+
+test('with a broker, a model key is refused on worca (it belongs to the broker)', async () => {
+  const w = world({ stdin: 'sk-ant-api03-aaaaaaaaaaaaaaaaaaaa' });
+  await assert.rejects(main(['set', 'tb', 'ANTHROPIC_API_KEY', '--yes'], w.ctx), /does not belong on worca/);
+  assert.equal(w.calls.length, 0);
+});
+
+test('upgrade moves the broker first, then worca, to the same image', async () => {
+  writeFileSync(join(DIR, 'tb.history'), '');
+  const w = world({ image: 'ghcr.io/sinishadjukic/worca:1.5.0' });
+  assert.equal(await main(['upgrade', 'tb', '1.6.0', '--yes'], w.ctx), 0);
+  const updates = w.calls.filter((c) => c.args[0] === 'api' && c.args[1].includes('serviceInstanceUpdate')).map((c) => JSON.parse(c.args[3]).s);
+  assert.deepEqual(updates, ['svc-b', 'svc-1'], 'broker, then worca');
+  assert.match(w.text(), /broker: image .* -> ghcr\.io\/sinishadjukic\/worca:1\.6\.0/);
+  assert.match(w.text(), /worca: image .* -> ghcr\.io\/sinishadjukic\/worca:1\.6\.0/);
+});
+
+test('verify: the key page is behind Access, its broker answers, worca names it', async () => {
+  const fetchImpl = async (url, init) => {
+    const u = String(url);
+    const authed = !!init?.headers?.['CF-Access-Client-Id'];
+    if (!authed) return { status: 302, json: async () => ({}) };
+    if (u.endsWith('/healthz')) return { status: 200, json: async () => ({ ok: true, mode: 'multi' }) };
+    if (u.endsWith('/api/credentials')) return { status: 200, json: async () => ({ enabled: true, keyPage: 'https://worca-keys.example.com' }) };
+    if (u.endsWith('/api/health')) return { status: 200, json: async () => ({ name: '@worca/app', version: '1.6.0' }) };
+    if (u.endsWith('/api/projects/clone')) return { status: 400, json: async () => ({}) };
+    return { status: 200, json: async () => ({}) };
+  };
+  const w = world({ fetchImpl });
+  assert.equal(await main(['verify', 'tb'], w.ctx), 0, w.text());
+  const text = w.text();
+  for (const re of [/PASS {2}key page: anonymous request is sent to sign-in/, /PASS {2}key page: the broker answers through Access \(mode multi\)/, /PASS {2}worca runs with the broker and names this key page/]) assert.match(text, re);
+});
+
+test('redact covers broker tokens and API keys', () => {
+  assert.equal(redact(`x wbt_${'a'.repeat(43)} sk-proj-${'b'.repeat(30)}`), 'x <redacted broker token> <redacted api key>');
 });

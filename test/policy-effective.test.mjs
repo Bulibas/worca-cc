@@ -3,7 +3,7 @@
 // document with the developer's settings, per run kind; the deviation codes a run records.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fieldsForRun, effectiveCap, effectiveDefault, effectiveRows, deviationsFor, capSummary, fieldCount } from '../src/core/policy/effective.mjs';
+import { fieldsForRun, effectiveCap, effectiveDefault, effectiveRows, deviationsFor, capSummary, fieldCount, effectiveWebEnabled } from '../src/core/policy/effective.mjs';
 import { normalizePolicyDoc } from '../src/core/policy/registry.mjs';
 
 const doc = normalizePolicyDoc({
@@ -102,4 +102,30 @@ test('capSummary and fieldCount', () => {
   assert.equal(s.total.kind, 'default'); assert.equal(s.resetPeriod, 'weekly'); assert.deepEqual(s.pooled, { value: 1200, window: 'monthly' });
   assert.equal(capSummary(doc, { workspaceRun: true }).pipeline.value, 25);
   assert.equal(fieldCount(doc), 14); assert.equal(fieldCount(null), 0);
+});
+
+test('effectiveWebEnabled: a team can only switch it off; enabling is always the developer\'s own choice', () => {
+  assert.equal(effectiveWebEnabled({ local: { value: true, set: true }, team: { kind: 'soft', value: false } }), false);
+  assert.equal(effectiveWebEnabled({ local: { value: false, set: false }, team: { kind: 'default', value: true } }), false);
+  assert.equal(effectiveWebEnabled({ local: { value: false, set: false }, team: { kind: 'soft', value: true } }), false);
+  assert.equal(effectiveWebEnabled({ local: { value: true, set: true }, team: { kind: 'soft', value: true } }), true);
+  assert.equal(effectiveWebEnabled({ local: { value: true, set: true }, team: null }), true);
+});
+
+test('effectiveRows: web rows only ever narrow (off wins, the team list caps yours)', () => {
+  const doc = normalizePolicyDoc({ schema: 1, fields: { 'ask.webEnabled': { kind: 'soft', value: false }, 'ask.webAllowedDomains': { kind: 'soft', value: ['*.example.com'] } } }).doc;
+  const rows = effectiveRows({ doc, local: { 'ask.webEnabled': { value: true, set: true }, 'ask.webAllowedDomains': { value: ['me.example.com', 'other.org'], set: true } } });
+  const en = rows.find((r) => r.key === 'ask.webEnabled'); const dom = rows.find((r) => r.key === 'ask.webAllowedDomains');
+  assert.equal(en.effective.value, false); assert.equal(en.effective.source, 'team');
+  assert.deepEqual(dom.effective.value, ['me.example.com']); assert.equal(dom.effective.source, 'team');
+  assert.match(dom.note, /1 of yours is outside the team list/);
+  const free = effectiveRows({ doc: null, local: { 'ask.webEnabled': { value: true, set: true }, 'ask.webAllowedDomains': { value: ['a.com'], set: true } } });
+  assert.equal(free.find((r) => r.key === 'ask.webEnabled').effective.source, 'local');
+  assert.deepEqual(free.find((r) => r.key === 'ask.webAllowedDomains').effective, { value: ['a.com'], display: free.find((r) => r.key === 'ask.webAllowedDomains').effective.display, source: 'local' });
+});
+
+test('policy docs from before the fix: a team "default" on web fields is dropped, never applied', () => {
+  const r = normalizePolicyDoc({ schema: 1, fields: { 'ask.webEnabled': { kind: 'default', value: true }, 'ask.webAllowedDomains': { kind: 'default', value: ['evil.example'] } } });
+  assert.equal(r.doc.fields['ask.webEnabled'], undefined);
+  assert.equal(r.doc.fields['ask.webAllowedDomains'], undefined);
 });

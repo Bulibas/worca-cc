@@ -440,6 +440,10 @@ const states = [
   // card inserted above the root-folder one would silently swap which bubble the identity
   // baseline holds (its <code>/<b> rows would read as vanished pairs).
   ['settings-tooltip', async () => { await ev(`(()=>{const t=document.querySelector('.settings-pane[data-tab="general"] .info-tip[aria-label="About Worca root folder"]');if(!t)throw new Error('no info-tip');t.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));return 1;})()`); await until(`document.querySelector('#info-bubble:not(.hidden)')`, 'a live tooltip'); await freeze('tooltip'); }, async () => { await ev(`(()=>{const t=document.querySelector('.settings-pane[data-tab="general"] .info-tip[aria-label="About Worca root folder"]');if(t)t.dispatchEvent(new MouseEvent('mouseout',{bubbles:true}));document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return 1;})()`); }],
+  // Budget, Scheduled runs and Chat notifications, and the Ask Worca card, left General for tabs of
+  // their own; each is audited where it now lives.
+  ['settings-runs', async () => { await go('settings/runs'); await until(`document.querySelector('.settings-pane[data-tab="runs"]:not(.hidden) #budget-settings-card')`, 'runs pane'); }],
+  ['settings-ask', async () => { await go('settings/ask'); await until(`document.querySelector('.settings-pane[data-tab="ask"]:not(.hidden) #ask-web-host .ask-web')`, 'ask pane'); }],
   ['settings-guardrails', async () => { await go('settings/guardrails'); }],
   ['settings-models', async () => { await go('settings/models'); }],
   // The catalog's two dialogs (§4.10, §8.4). They render their own content, so the audit would
