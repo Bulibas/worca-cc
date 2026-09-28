@@ -82,6 +82,41 @@ export function withProviderModesOff(env) {
   return out;
 }
 
+// Claude Code's request timeout and stream watchdogs (CLI 2.1.281). Off first
+// party a response whose first byte has not arrived within 300s (+1s per 32 KB of
+// request, capped by API_TIMEOUT_MS, default 600s) is aborted as "Request timed
+// out." and retried FROM SCRATCH. A gateway that buffers the stream (Vertex via
+// the Bosch farm, 2026-09-28) sends nothing until a long xhigh turn is done, so
+// every retry died at the same wall. 30 min is the CLI's own clamp ceiling for
+// the watchdogs; API_TIMEOUT_MS matches it so it never undercuts them.
+export const STREAM_TIMEOUT_ENV_KEYS = Object.freeze([
+  'API_TIMEOUT_MS', 'CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS',
+  'CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS', 'CLAUDE_STREAM_IDLE_TIMEOUT_MS',
+]);
+export const STREAM_TIMEOUT_MS = '1800000';
+
+// The CLI's own truthiness for its CLAUDE_CODE_USE_* switches.
+const cliTruthy = (v) => typeof v === 'string' && ['1', 'true', 'yes', 'on'].includes(v.trim().toLowerCase());
+
+/**
+ * A spawn env routed off first party (a cloud transport switched on, or a custom
+ * ANTHROPIC_BASE_URL) with every stream timeout it left unset raised to the CLI
+ * ceiling. Pure: a first-party env comes back untouched (the same object) — the
+ * CLI's defaults there are right, since the API streams its first byte at once —
+ * and an explicit key, from the operator's shell or a model entry, is never
+ * overwritten.
+ * @param {Record<string,string>|undefined|null} env  the FINAL spawn env
+ * @returns {Record<string,string>|undefined|null}
+ */
+export function withStreamTimeouts(env) {
+  if (!env || typeof env !== 'object') return env;
+  const routed = PROVIDER_MODE_ENV_KEYS.some((k) => cliTruthy(env[k])) || !!env.ANTHROPIC_BASE_URL;
+  if (!routed) return env;
+  const out = { ...env };
+  for (const k of STREAM_TIMEOUT_ENV_KEYS) if (!(k in out)) out[k] = STREAM_TIMEOUT_MS;
+  return out;
+}
+
 // Env keys a model entry may NOT set (§4.4): process fundamentals and worca's
 // own runtime knobs, any of which injection could otherwise subvert (mock
 // mode, the claude binary path, the effort flag name). Everything else —

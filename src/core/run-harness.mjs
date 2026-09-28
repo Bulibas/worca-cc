@@ -330,6 +330,29 @@ function describeToolResults(raw) {
   return lines;
 }
 
+/**
+ * Describe a `system`/`api_retry` frame: the CLI retries a failed API call on its
+ * own and this frame is its ONLY report of it (no text, nothing on stderr). Shape
+ * on 2.1.281: {attempt, max_retries, retry_delay_ms, error_status: number|null,
+ * error: 'overloaded'|'rate_limit'|'authentication_failed'|'server_error'|
+ * 'cloud_credential_error'|'unknown', no_response?: {waited_ms}}. The error
+ * message itself is not carried; a status-less 'unknown' is a request that never
+ * got an HTTP response — a timeout or a dropped connection. null for any other frame.
+ */
+function describeApiRetry(raw) {
+  if (raw?.type !== 'system' || raw?.subtype !== 'api_retry') return null;
+  const secs = (ms) => `${(Number(ms) / 1000).toFixed(1)}s`;
+  const status = Number.isFinite(raw.error_status) ? raw.error_status : null;
+  const category = typeof raw.error === 'string' && raw.error ? raw.error : 'unknown';
+  let reason = status != null
+    ? `${category} (HTTP ${status})`
+    : category === 'unknown' ? 'no HTTP response (timeout or connection error)' : category;
+  if (Number.isFinite(raw.no_response?.waited_ms)) reason += ` after ${secs(raw.no_response.waited_ms)}`;
+  const of = Number.isFinite(raw.max_retries) ? `/${raw.max_retries}` : '';
+  const wait = Number.isFinite(raw.retry_delay_ms) ? ` in ${secs(raw.retry_delay_ms)}` : '';
+  return `API call failed: ${reason}; retry ${raw.attempt ?? '?'}${of}${wait}`;
+}
+
 /** The tools whose `file_path` can be a memory write. */
 const MEMORY_WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 
@@ -4245,6 +4268,11 @@ export class RunHarness extends EventEmitter {
         this._persist().catch(() => {});
       }
     }
+
+    // The CLI's silent API retries (`system`/`api_retry`): without this line a call
+    // that keeps timing out leaves the run log dead for as long as the retries last.
+    const retry = describeApiRetry(e.raw);
+    if (retry) this._log(source, 'warn', retry, logAttr);
 
     // Concrete tool calls the agent made this turn (assistant.tool_use blocks).
     for (const call of describeToolUses(e.raw, this.projectDir)) {

@@ -39,7 +39,7 @@
 
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { prepareModelEnv, envFlag, describeModelEnv, isReservedModelEnvKey, withProviderModesOff } from './model-env.mjs';
+import { prepareModelEnv, envFlag, describeModelEnv, isReservedModelEnvKey, withProviderModesOff, withStreamTimeouts } from './model-env.mjs';
 import { effectiveDebugSpawn } from './settings.mjs';
 import { classifyError, strongestClass } from './recoverable-error.mjs';
 import { bridgeEvents } from './bridge/telemetry.mjs';
@@ -915,6 +915,11 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
     if (brokerEnabled()) {
       for (const k of MODEL_CREDENTIAL_ENV_KEYS) if (k !== 'ANTHROPIC_AUTH_TOKEN' || !safeModelEnv?.ANTHROPIC_AUTH_TOKEN) delete spawnEnv[k];
     }
+    // Routed off first party, a long turn behind a stream-buffering gateway must
+    // not hit the CLI's 5-min first-byte watchdog (model-env.mjs#withStreamTimeouts).
+    // Read off the FINAL env so the ambient shell, the run env and the model entry
+    // all count for both the route and an explicit value.
+    spawnEnv = withStreamTimeouts(spawnEnv);
 
     // Opt-in spawn diagnostics (WORCA_DEBUG_SPAWN, default off — byte-identical spawn
     // path when unset). Everything here is derived from values already computed above
