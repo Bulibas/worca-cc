@@ -4624,15 +4624,17 @@ function renderClarifyBody(r, panel, pq) {
       free = document.createElement('input');
       free.className = 'qfree';
       free.type = 'text';
-      free.placeholder = 'Or type your own answer…';
+      free.placeholder = 'Or type your own answer… (e.g. "B but change the port")';
     }
 
-    opts.forEach((optText) => {
+    opts.forEach((optText, optIdx) => {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'qopt';
       btn.setAttribute('aria-pressed', 'false');
-      btn.textContent = optText;
+      // A/B/C/D prefix (MAX_CLARIFY_OPTIONS is 4) so a free-text answer can
+      // refer back to an option by name, e.g. "B but change the port".
+      btn.textContent = `${String.fromCharCode(65 + optIdx)}. ${optText}`;
       btn.addEventListener('click', () => {
         // Select this option, clear siblings + the free-text field (if present).
         optsWrap.querySelectorAll('.qopt').forEach((b) => {
