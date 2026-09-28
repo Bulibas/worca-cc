@@ -655,6 +655,7 @@ test('propose_run schema names note + attachmentIds', () => {
   assert.equal(props.attachmentIds.type, 'array');
   assert.deepEqual(props.attachmentIds.items, { type: 'string' });
   assert.match(props.attachmentIds.description, /extra files/);
+  assert.match(props.brief.description, new RegExp(`≤ ${ASK_LIMITS.briefMaxChars} chars`));
 });
 
 test('propose_run hands the thread\'s attachment ledger to the validator', async () => {
