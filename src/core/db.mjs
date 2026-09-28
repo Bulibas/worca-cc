@@ -58,7 +58,7 @@ const OPEN_BACKOFF_MS = 15;
 /** Latest schema version. Bump + append a new migration step when the DDL grows.
  *  Exported so migration tests assert "reached the module's current version"
  *  instead of hardcoding the number — a schema bump then touches no test file. */
-export const SCHEMA_VERSION = 41;
+export const SCHEMA_VERSION = 42;
 
 /** Absolute path to the database file: <worcaHome>/worca-cc.db. */
 export function dbPath() {
@@ -857,7 +857,10 @@ const INCREMENTAL_COLUMNS = {
   ask_threads:            { created_by: 'TEXT' },    // v37: the thread's owner (identity.mjs actor); NULL = ownerless (legacy)
   pipeline_events:        { actor: 'TEXT' },         // v38: who did it (identity.mjs actor); NULL = the run itself / before attribution
   workspaces:             { metrics_project: 'TEXT',    // v30: team-metrics home (member absolute path); NULL = no home
-                            policy_project: 'TEXT' },   // v32: team-policy home (member absolute path); NULL = no home
+                            policy_project: 'TEXT',     // v32: team-policy home (member absolute path); NULL = no home
+                            map_json: 'TEXT',           // v40: the last scan's { map, synthesis } (workspace map); NULL = none yet
+                            map_overrides_json: 'TEXT', // v40: confirm / reject / manual edge overrides; NULL = none
+                            description_origin: 'TEXT' },   // v40: 'generated' | 'edited'; NULL = before v40
   schedules:              { ask_thread_id: 'TEXT', ask_card_id: 'TEXT',   // v31: the Ask Worca card a series came from
                             created_by: 'TEXT', updated_by: 'TEXT' },   // v39: who made / last changed it (identity.mjs actor)
   scheduled_runs:         { after_kind: 'TEXT', after_id: 'TEXT', after_policy: "TEXT NOT NULL DEFAULT 'done'",
@@ -1360,11 +1363,18 @@ function applySchemaV39(db) {
   }
 }
 
-/** v40: seed the shipped Presentation workflow on EVERY DB (fresh included —
+/** v40 (workspace map): workspaces.map_json + map_overrides_json + description_origin — plain
+ *  additive columns declared in INCREMENTAL_COLUMNS, applySchemaV30's shape. NULL on every
+ *  existing row = no map yet, no overrides, a description of unknown origin (never re-rendered). */
+function applySchemaV40(db) {
+  repairSchemaGaps(db, schemaGaps(db));
+}
+
+/** v41: seed the shipped Presentation workflow on EVERY DB (fresh included —
  *  a deck run is picked explicitly, so the row must exist to be picked). INSERT
  *  OR IGNORE: a user's own live row with the id wins; an archived row keeps the
  *  id and the seed is skipped, exactly like V24's SEED_TEMPLATES pass. */
-function applySchemaV40(db) {
+function applySchemaV41(db) {
   if (!presentationSeedable(db)) return;
   const t = GRAPH_PRESENTATION_WORKFLOW;
   const graph = JSON.stringify({ nodes: t.nodes, wires: t.wires });
@@ -1446,7 +1456,7 @@ function refreshPresentationSeed(db) {
   db.prepare('UPDATE workflows SET graph = ?, updated_at = ? WHERE id = ?').run(carried, now, t.id);
 }
 
-/** v41: re-kind the deck subresources already indexed on finished runs.
+/** v42: re-kind the deck subresources already indexed on finished runs.
  *
  *  Until now both deck ports swept `deck/*` under one `deck` kind, so a finished
  *  presentation run indexed its kit scripts, webfonts and instrumented proof copy
@@ -1461,7 +1471,7 @@ function refreshPresentationSeed(db) {
  *  `UPDATE OR REPLACE` because (pipeline_id, kind, rel_path) is the PK — a
  *  divergently-stamped DB that already holds the deck-asset row would otherwise
  *  fail the whole migration on a constraint. */
-function applySchemaV41(db) {
+function applySchemaV42(db) {
   // The ladder repairs the incremental schema before this step (see migrate):
   // `artifacts`' step_key/node_id/cycle/created_at are INCREMENTAL_COLUMNS, and an
   // install stamped anywhere in 29..40 may have skipped the repair that declares
@@ -1474,7 +1484,6 @@ function applySchemaV41(db) {
        AND rel_path LIKE 'deck/%'
        AND rel_path NOT LIKE 'deck/deck%.html'
        AND rel_path NOT LIKE 'deck/deck%.pdf'`).run();
-
 }
 
 /** Move every stored pin on model id `from` (lower-case) to `to`. Each table
@@ -1872,11 +1881,12 @@ export function migrate(db) {
     if (current < 37) applySchemaV37(db);            // attribution: comment authors, thread owners, per-person reads
     if (current < 38) applySchemaV38(db);            // attribution: who did each human action on a run
     if (current < 39) applySchemaV39(db);            // attribution: schedules/tickets created_by + updated_by
+    if (current < 40) applySchemaV40(db);            // workspace map: map_json, map_overrides_json, description_origin
     // The presentation steps below depend on a WHOLE incremental schema: V40 bails out
     // if `workflows` is missing a declared column, and V41 rewrites `artifacts`. Every
     // step from V30 up repairs the gaps itself, but an install stamped anywhere in that
     // range entered none of them, so the repair is hoisted here as well (idempotent).
-    // Gated on SCHEMA_VERSION, never a literal: with `current < 41` a DB stamped 41
+    // Gated on SCHEMA_VERSION, never a literal: with `current < 42` a DB stamped 42
     // would, at the next bump, skip every earlier step (current >= each) AND skip this
     // line, so a newly declared incremental column would never arrive unless the author
     // of the next migration remembered to re-add a repair. Self-maintaining.
@@ -1890,14 +1900,15 @@ export function migrate(db) {
     // hand). The refresh is guarded on the stored shape being one worca shipped,
     // so a user-edited row is never touched, and a deleted row has nothing to
     // refresh — which is exactly right for the user who deleted it.
-    // WHY 40: the seed needs a rung no released install is already stamped at, or
-    // every one of them skips it and never gets the workflow. `origin/dev` ships
-    // SCHEMA_VERSION 39 (V36..V39 are its attribution steps), so 40 is the first free
-    // rung. (This branch carried the seed at V30, then V31, then V36 while dev's ladder
-    // was shorter; each was occupied in turn, which is why it has moved again.)
-    if (current < 40) applySchemaV40(db);
+    // WHY 41: the seed needs a rung no released install is already stamped at, or
+    // every one of them skips it and never gets the workflow. `origin/dev` now ships
+    // SCHEMA_VERSION 40 (V40 is its workspace-map step), so 41 is the first free rung
+    // and the deck re-kind follows at 42. (This branch carried the seed at V30, then
+    // V31, then V36, then V40 while dev's ladder was shorter; each was occupied in
+    // turn, which is why it has moved again.)
+    if (current < 41) applySchemaV41(db);
     if (current < SCHEMA_VERSION) refreshPresentationSeed(db);
-    if (current < 41) applySchemaV41(db);            // deck subresources -> the unlisted deck-asset kind
+    if (current < 42) applySchemaV42(db);            // deck subresources -> the unlisted deck-asset kind
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {

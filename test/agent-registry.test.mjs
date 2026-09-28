@@ -8,16 +8,17 @@ import { fileURLToPath } from 'node:url';
 import { loadAgentRegistry, registryToSteps, normalizeMeta, collectDomains } from '../src/core/agent-registry.mjs';
 import { AGENT_STEPS } from '../src/core/config.mjs';
 
-test('loadAgentRegistry returns all shipped agents (10 coding + 7 presentation + 2 workspace)', () => {
+test('loadAgentRegistry returns all shipped agents (10 coding + 7 presentation + 4 workspace)', () => {
   const reg = loadAgentRegistry();
   assert.deepEqual(
     Object.keys(reg).sort(),
     ['clarify', 'deckAudit', 'deckBuilder', 'deckClarify', 'deckExport', 'deckNarrative', 'deckReviewer', 'deckSystem',
       'decomposer', 'implementer', 'manualTestsChecklist', 'manualWebUiTesting', 'memoryDefragmenter',
-      'planReviewer', 'planner', 'refiner', 'reviewer', 'workspaceReviewer', 'workspaceScanner'],
+      'planReviewer', 'planner', 'refiner', 'reviewer', 'workspaceReviewer', 'workspaceScanner',
+      'workspaceSynthesizer', 'workspaceUsageMapper'],
   );
-  assert.equal(Object.keys(reg).length, 19);
-  // The two workspace agents are scope:'workspace-only'; the other 17 are 'project'.
+  assert.equal(Object.keys(reg).length, 21);
+  // The four workspace agents are scope:'workspace-only'; the other 17 are 'project'.
   const projectScoped = Object.values(reg).filter((m) => m.scope !== 'workspace-only').map((m) => m.key).sort();
   assert.deepEqual(projectScoped,
     ['clarify', 'deckAudit', 'deckBuilder', 'deckClarify', 'deckExport', 'deckNarrative', 'deckReviewer', 'deckSystem',
@@ -85,10 +86,11 @@ test('registry insertion order follows .order ascending', () => {
   const reg = loadAgentRegistry();
   const orders = Object.values(reg).map((m) => m.order);
   assert.deepEqual(orders, [...orders].sort((a, b) => a - b));
-  // clarify (order 0) sorts first; workspaceScanner (order 0.5) sorts next;
-  // workspaceReviewer (order 4.5) sorts between reviewer (4) and manualTestsChecklist (5).
+  // clarify (order 0) sorts first; the scan's workspaceScanner (0.5), workspaceUsageMapper (0.6) and
+  // workspaceSynthesizer (0.7) sort next; workspaceReviewer (order 4.5) sorts between reviewer (4) and
+  // manualTestsChecklist (5).
   assert.deepEqual(Object.keys(reg), [
-    'clarify', 'workspaceScanner', 'planner', 'refiner', 'decomposer', 'implementer', 'reviewer', 'workspaceReviewer',
+    'clarify', 'workspaceScanner', 'workspaceUsageMapper', 'workspaceSynthesizer', 'planner', 'refiner', 'decomposer', 'implementer', 'reviewer', 'workspaceReviewer',
     'manualTestsChecklist', 'manualWebUiTesting', 'planReviewer', 'memoryDefragmenter',
     'deckClarify', 'deckNarrative', 'deckSystem', 'deckBuilder', 'deckAudit', 'deckReviewer', 'deckExport',
   ]);
