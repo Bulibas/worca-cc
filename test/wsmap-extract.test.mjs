@@ -44,7 +44,7 @@ test('extractWorkspace: facts, roles, aliases (incl. origin remote), coverage le
   assert.equal(billing.provides.find((f) => f.key === 'npm:fixture-pkg').test, true);
   assert.ok(billing.aliases.some((a) => a.value === 'github.com/acme/billing-svc' && a.source === 'git-remote'));
   assert.ok(billing.aliases.some((a) => a.value === 'billing-svc'));
-  assert.deepEqual(billing.aliases.filter((a) => a.value === 'billing'), [{ value: 'billing', source: 'package.json' }], 'deduped, first source wins');
+  assert.deepEqual(billing.aliases.filter((a) => a.value === 'billing'), [{ value: 'billing', source: 'identity' }], 'deduped, the strongest source wins: the checkout\'s own name over the package tail read first (M7)');
   assert.equal(rusty.coverage.level, 'none', 'stack not recognised and no facts');
   assert.deepEqual(rusty.needs, ['role', 'aliases', 'provides', 'consumes']);
   assert.equal(rusty.role, 'A Rust service.');

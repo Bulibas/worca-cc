@@ -84,14 +84,14 @@ test('entries: provides only, non-test, stable ids, terms, sorted', () => {
   assert.deepEqual(cat.entries.map((e) => e.confidence), [null, 'exact', null, 'exact'], 'a static provide carries its confidence; a survey-only one none');
 });
 
-test('alias index: an alias two members claim is ambiguous and unused (killer: alias collision)', () => {
-  assert.deepEqual(cat.ambiguousAliases, { api: ['billing-api', 'ops'] });
-  assert.equal(cat.aliasIndex.api, undefined);
+test('alias index: a survey alias counts only for a member whose needs list aliases, so `api` names ops alone', () => {
+  assert.deepEqual(cat.ambiguousAliases, {}, 'billing-api is partial (its needs do not list aliases): its survey alias `api` is no claim');
+  assert.equal(cat.aliasIndex.api, 'ops');
   assert.equal(cat.aliasIndex.billing, 'billing-api');
   assert.equal(cat.aliasIndex['@acme/web'], 'web');
   assert.equal(cat.aliasIndex.ops, 'ops');
   const svc = cat.consumes.web.find((c) => c.kind === 'service');
-  assert.deepEqual([svc.entry, svc.toMember], [null, null], 'the ambiguous host resolves to nobody');
+  assert.deepEqual([svc.entry, svc.toMember], [null, 'ops'], 'the host names the one member whose claim counts');
 });
 
 test('static resolution: exact norm in one other member → entry; a URL key resolves by norm', () => {
@@ -208,10 +208,12 @@ test('the candidate scan names a public host through a whole-host alias only, an
     web: { 'src/a.ts': "fetch('https://api.acme.com/v1/x');\nfetch('https://api.stripe.com/v1/charges');\nfetch('http://api:8080/v1/x');\n" },
   });
   try {
+    // gateway's whole public host is a deploy alias (its Ingress host): a survey alias no longer counts for a member
+    // whose needs do not list aliases (M7).
     const svc = { id: 'svc', claims: (rel) => rel === 'package.json', detect: (file, ctx) => ({ facts: ctx.member.key === 'web' ? [] : [{ kind: 'service',
-      dir: 'provides', key: ctx.member.key === 'gateway' ? 'api.acme.com' : 'api', file: 'package.json', line: 1, match: '{' }] }) };
-    const sv = { version: 1, members: { gateway: { status: 'investigated', aliases: ['api.acme.com'], provides: [], consumes: [] } } };
-    const cat = await buildCatalog({ extract: await extractWorkspace({ name: 'S', members: w.members, detectors: [...P1_DETECTORS, svc] }), survey: sv });
+      dir: 'provides', key: ctx.member.key === 'gateway' ? 'api.acme.com' : 'api', file: 'package.json', line: 1, match: '{' }],
+      aliases: ctx.member.key === 'gateway' ? [{ value: 'api.acme.com', source: 'k8s-ingress' }] : [] }) };
+    const cat = await buildCatalog({ extract: await extractWorkspace({ name: 'S', members: w.members, detectors: [...P1_DETECTORS, svc] }), survey: null });
     const owner = (id) => cat.entries.find((e) => e.id === id).member;
     assert.deepEqual(cat.candidates.web.filter((c) => c.via === 'host').map((c) => [c.line, owner(c.entry)]), [[1, 'gateway'], [3, 'api'], [3, 'gateway']]);
   } finally {

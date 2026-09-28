@@ -182,7 +182,7 @@ import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, lis
 import { isSyntacticRef } from '../src/core/ask/proposal.mjs';
 import { archivePipeline, discardRetainedWorktrees } from '../src/core/pipeline-delete.mjs';
 import {
-  listWorkspaces, readWorkspace, checkNewWorkspace,
+  listWorkspaces, readWorkspace, checkNewWorkspace, scanMemberProblems,
   updateWorkspace, deleteWorkspace, isGitRepo, WORKSPACE_KEY_RE, countWorkspaces,
   readWorkspaceMap, setWorkspaceEdgeState, addWorkspaceManualEdge, removeWorkspaceManualEdge,
   regenerateWorkspaceDescription,
@@ -4806,6 +4806,9 @@ app.post('/api/workspaces/scan', async (req, res) => {
   } catch (err) {
     return res.status(workspaceErrorStatus(err && err.code)).json({ error: err && err.message ? err.message : String(err) });
   }
+  // A scan never inits or commits a member (scan D5): every member must be its own repository with a commit.
+  const problems = scanMemberProblems(target.projectPaths);
+  if (problems.length) return badRequest(res, `read-only workspace scan: ${problems.join('; ')}`);
   let models;
   try { models = await scanModelsFor(body, target.projectPaths); }
   catch (err) { return badRequest(res, err && err.message ? err.message : String(err)); }
@@ -4820,6 +4823,9 @@ app.post('/api/workspaces/:id/scan', async (req, res) => {
     const ws = await readWorkspace(id);
     if (!ws) return res.status(404).json({ error: 'workspace not found' });
     // ws.id is the stored id (a renamed workspace keeps its id; never recompute workspaceKey here).
+    // Plain create accepts any git work tree; a scan also needs each member to be its own repository with a commit.
+    const problems = scanMemberProblems(ws.projectPaths);
+    if (problems.length) return badRequest(res, `read-only workspace scan: ${problems.join('; ')}`);
     let models;
     try { models = await scanModelsFor(req.body || {}, ws.projectPaths); }
     catch (err) { return badRequest(res, err && err.message ? err.message : String(err)); }

@@ -3,7 +3,7 @@
 // parsing at a call site, URL-expression analysis and brace scopes. Pure; never throws.
 // Every scanner is a single forward pass (indexOf / char loop): no regex here re-scans
 // the rest of a file from each opener, so a 1 MiB minified bundle stays linear.
-import { blankComments, onePerKey, cleanUnresolved, isMinified } from './text.mjs';
+import { blankComments, onePerKey, cleanUnresolved, isMinified, authorityEnd, notPort } from './text.mjs';
 import { envStems, hostName } from '../../../../shared/workspace-map/keys.mjs';
 
 export const CODE_RE = /\.(js|jsx|mjs|cjs|ts|tsx|vue|svelte|py|java|kt|kts|scala|groovy|go|cs|rb|php|rs)$/i;
@@ -115,8 +115,8 @@ export function argAt(code, pos, lang) {
     const prefix = code.slice(i, k);
     const l = readLiteral(code, k, lang, prefix);
     if (!l) return null;
-    // "/users/" + id is a concatenation, not a literal: read the whole argument as an expression.
-    if (!/^\s*\+/.test(code.slice(l.end + 1, l.end + 40))) return { kind: 'literal', value: l.value, start: l.start, template: q === '`' || /[fF$]/.test(prefix) };
+    // "/users/" + id is a concatenation, not a literal: read the whole argument as an expression (PHP: '/users/' . $id).
+    if (!(lang === 'php' ? /^\s*[+.]/ : /^\s*\+/).test(code.slice(l.end + 1, l.end + 40))) return { kind: 'literal', value: l.value, start: l.start, template: q === '`' || /[fF$]/.test(prefix) };
   }
   let depth = 0;
   let j = i;
@@ -147,7 +147,20 @@ export function envKeyOf(expr) {
   return null;
 }
 
-const hostOf = (u) => u.replace(/^https?:\/\//, '').replace(/^[^@]*@/, '');
+// M2: a URL's authority ends where authorityEnd says (a password may hold '?' or '#'); `query`: a query follows it
+// …and a "host" holding a ':' no port follows is a password's head (`svc:ab#cd#ef@billing`: authorityEnd stops at the first
+// '#'): the host is the one after the last '@', as the redactor's USERINFO reads the userinfo
+export const authOf = (u) => {
+  const a = u.replace(/^https?:\/\//, '');
+  const end = authorityEnd(a);
+  const host = (end === -1 ? a : a.slice(0, end)).replace(/^.*@/, '');
+  const at = a.lastIndexOf('@');
+  if (end === -1 || at < end || !notPort(host)) return { host, query: end !== -1 };
+  const r = a.slice(at + 1);
+  const q = r.search(/[?#]/);
+  return { host: q === -1 ? r : r.slice(0, q), query: q !== -1 };
+};
+const hostOf = (u) => authOf(u).host;
 /** The binding a name refers to. A bare name reads every binding; a qualified one (`this.baseUrl`,
  *  `environment.apiUrl`) reads its last segment among the bindings that are NOT JS locals — a local
  *  `const baseUrl = \`${this.baseUrl}/reports\`` is not the field it shadows. */
@@ -192,8 +205,8 @@ export function concatBase(expr, bindings) {
   const env = lit || inner ? null : envKeyOf(head);
   const origin = !lit && !inner && !!(env || named) && hostShapedName(env || named);
   const target = lit ? hostOf(lit[2]) : inner ? inner.target : origin ? null : env || named;
-  if (!target && !inner) return lit0 || origin ? { target: null, confidence: 'heuristic', prefix: joinPath(lit0 ? lit0[3] : '', tail[2]).replace(/^\/$/, ''), ...(origin ? { absolute: true } : {}) } : null;
-  return { target, confidence: lit ? 'exact' : 'heuristic', prefix: joinPath(lit ? lit[3] : inner?.prefix || '', tail[2]).replace(/^\/$/, ''), ...(inner?.absolute ? { absolute: true } : {}) };
+  if (!target && !inner) return lit0 || origin ? { target: null, confidence: 'heuristic', prefix: joinPath(lit0 ? lit0[3] : '', tail[2]).replace(/^\/$/, ''), ...(origin ? { absolute: true } : {}), ...(lit0 ? { tplHost: true } : {}) } : null;
+  return { target, confidence: lit ? 'exact' : 'heuristic', prefix: joinPath(lit ? lit[3] : inner?.prefix || '', tail[2]).replace(/^\/$/, ''), ...(inner?.absolute ? { absolute: true } : {}), ...(inner?.tplHost ? { tplHost: true } : {}) };
 }
 
 /** The literal path after the ONE placeholder of a template whose host is an env read →
@@ -203,6 +216,30 @@ export function envTail(expr) {
   if ((s.match(/\{/g) || []).length !== 1 || !/^[fr$@]?["'`](?:\$?\{|(?:[A-Za-z]+:)?\/\/[^/"'`]*\{)/.test(s)) return '';
   const m = /\}[^"'`/\s{}]{0,40}(\/[^"'`\s?#${}]{0,200})["'`]$/.exec(s);
   return m ? m[1].replace(/\/+$/, '') : '';
+}
+
+// Parameter lists: JS `function f(…)`, `constructor(…)`, `(…) =>` (a TS return type too) and `x =>`; Python and Ruby
+// `def f(…)`; Go `func f(…)` / `func (r *T) f(…)`. Every gap is a bounded run: `func` then `[ \t]*` on both sides of an
+// optional name was quadratic on a run of spaces.
+// A `function` right after a quote is a string (`typeof cb === 'function' ? cb(url)`), and a `?` right after a word,
+// `]` or `>` is a C# nullable type (`string? BaseUrl =>`): neither opens a parameter list.
+const PARAMS_RE = /(?<!['"`])\b(?:function\b[^(\n]{0,80}|constructor[ \t]{0,8}|def[ \t]{1,8}\w{1,80}[ \t]{0,8}|func\b(?:[ \t]{0,8}\([^()]{0,100}\))?[ \t]{0,8}(?:\w{1,80}[ \t]{0,8})?)\(([^()]{0,300})\)|\(([^()]{0,300})\)(?:[ \t]{0,8}:[^=;(){}\n]{1,100})?[ \t]{0,8}=>|(?:[(,=:]|(?<![\w\]>])\?|\breturn\b)[ \t]{0,8}(?:async[ \t]{1,8})?([A-Za-z_$][\w$]{0,60})[ \t]{0,8}=>/g;
+/** Every name a parameter list in the file declares: the first identifier of each item, a destructured one
+ *  (`{ baseUrl, token }`) too; a default value (`page = API`) is no parameter. `names.defaults`: the offsets of the
+ *  names whose item carries a default (`constructor(baseUrl = process.env.X)`, `base_url: str = "http://…"`). */
+function paramNames(code) {
+  const names = new Set();
+  names.defaults = new Set();
+  for (const m of code.matchAll(PARAMS_RE)) {
+    // where the list starts: group 1 ends right before the match's closing ')', group 2 starts right after its '('
+    let at = m[1] != null ? m.index + m[0].length - 1 - m[1].length : m[2] != null ? m.index + 1 : -1;
+    for (const piece of (m[1] ?? m[2] ?? m[3] ?? '').split(',')) {
+      const n = /^([\s{[]*)([A-Za-z_$][\w$]{0,60})/.exec(piece);
+      if (n) { names.add(n[2]); if (at !== -1 && piece.includes('=')) names.defaults.add(at + n[1].length); }
+      if (at !== -1) at += piece.length + 1;
+    }
+  }
+  return names;
 }
 
 /** Per-file base-URL bindings: NAME = <literal URL | env read | derived base | @Value("${key}")>.
@@ -233,7 +270,23 @@ export function baseBindings(code) {
   // a prefix longer than any one right-hand side is built only by chaining (`A = A + '/x'` 10 000 times, `A2 = A1 + '/x'` …):
   // dropped, so every derivation costs O(rhs), never O(file) — the chain was quadratic (7 s per MiB)
   const tooLong = (v) => (v.prefix || '').length > 500;
-  const put = (name, v, local = false) => { if (tooLong(v)) { drop(name, local); return; } put1(map, clash, name, v); if (!local) put1(members, membersClash, name, v); };
+  // a bare name that is also a parameter somewhere in the file (`makeClient(baseUrl)` beside a module `baseUrl`) is
+  // ambiguous: that function reads its argument, never the other binding — so every bare use is a dynamic url, a
+  // base derived from it clashes too, and `this.baseUrl = baseUrl` copies nothing. Qualified reads (`this.x`) keep theirs.
+  const params = paramNames(code);
+  // …except the parameter's own default (`constructor(baseUrl = process.env.X)`, `def __init__(self, base_url: str =
+  // "http://…")`): the value it holds unless a caller passes another, as at 15486564 (any other binding still clashes)
+  let dflt = false;
+  // the names a member is given a value of its own (a class field, a Python class attribute, a constructor's `this.x = '…'`:
+  // assigned off column 0, never a parameter's default or a copy of a parameter): `this.x = param` / `self.x = param` may
+  // replace it but never erases it, as at 15486564
+  const ownMembers = new Set();
+  let own = true;
+  const put = (name, v, local = false) => {
+    if (tooLong(v)) { drop(name, local); return; }
+    if (params.has(name) && !dflt) { map.delete(name); clash.add(name); } else put1(map, clash, name, v);
+    if (!local) { put1(members, membersClash, name, v); if (own) ownMembers.add(name); }
+  };
   // a reassignment derived from the name itself (`API = API + '/api/v1'`) replaces the base, never clashes with it
   const replace = (name, v, local) => { if (tooLong(v)) { drop(name, local); return; } if (!clash.has(name)) map.set(name, v); if (!local && !membersClash.has(name)) members.set(name, v); };
   // @Value("${key}") fields and constructor parameters first: an assignment may derive from them
@@ -246,6 +299,8 @@ export function baseBindings(code) {
   const ASSIGN_RE = /\b([A-Za-z_$][\w$]{0,60})(?:\s*:[ \t]{0,4}[\w<>?,.[\]|]{1,40}(?:[ \t]{1,4}[\w<>?,.[\]|]{1,40}){0,4})?\s*:?=(?!=)\s*([^;\n]{1,300})/g;
   for (const m of code.matchAll(ASSIGN_RE)) {
     const name = m[1];
+    dflt = params.defaults.has(m.index);
+    own = !dflt && m.index > 0 && code[m.index - 1] !== '\n'; // column 0: a module-level binding (a Python module name)
     const before = code.slice(Math.max(0, m.index - 12), m.index);
     let rhs = m[2];
     if (rhs[0] === '>') {
@@ -262,7 +317,7 @@ export function baseBindings(code) {
       const inner = bindingOf(map, x);
       const env = inner ? null : envKeyOf(x);
       const origin = !inner && hostShapedName(env || x);
-      const v = { target: inner ? inner.target : origin ? null : env || x, confidence: 'heuristic', prefix: joinPath(inner?.prefix || '', tpl[2]).replace(/^\/$/, ''), ...(origin || inner?.absolute ? { absolute: true } : {}) };
+      const v = { target: inner ? inner.target : origin ? null : env || x, confidence: 'heuristic', prefix: joinPath(inner?.prefix || '', tpl[2]).replace(/^\/$/, ''), ...(origin || inner?.absolute ? { absolute: true } : {}), ...(inner?.tplHost ? { tplHost: true } : {}) };
       if (x === name) replace(name, v, local); else put(name, v, local);
       continue;
     }
@@ -271,7 +326,8 @@ export function baseBindings(code) {
     if (cat?.ambiguous) { drop(name, local); continue; }
     if (cat) { if (rhs.slice(0, rhs.lastIndexOf('+')).trim() === name) replace(name, cat, local); else put(name, cat, local); continue; }
     // a literal URL with a literal host before an env read: `https://api.acme.com/${process.env.TENANT}/v1` is acme's
-    const url = /^\s*(?:new\s+Uri\(\s*)?[fr$@]?["'`](https?:\/\/[^"'`\s/]+)([^"'`\s?#]*)/.exec(rhs);
+    const url0 = /^\s*(?:new\s+Uri\(\s*)?[fr$@]?["'`](https?:\/\/[^"'`\s/]+)([^"'`\s?#]*)/.exec(rhs);
+    const url = url0 && authOf(url0[1]).query ? [url0[0], url0[1], ''] : url0;
     const templatedHost = !!url && PLACEHOLDER_HOST.test(url[1].slice(url[1].indexOf('//') + 2));
     const env = envKeyOf(rhs);
     // … but `"http://localhost:8000" if DEBUG else os.environ["X"]` is an env base: the env read is outside the literal
@@ -279,13 +335,18 @@ export function baseBindings(code) {
     const inLit = open === -1 ? '' : rhs.slice(open, rhs.indexOf(rhs[open], open + 1) + 1 || rhs.length); // the whole literal, query too
     if (url && !templatedHost && (!env || envKeyOf(inLit))) { put(name, { target: hostOf(url[1]), confidence: 'exact', prefix: url[2].replace(/\/+$/, '') }, local); continue; }
     if (env) { const prefix = envTail(rhs); put(name, { target: hostShapedName(env) ? null : env, confidence: 'heuristic', ...(prefix ? { prefix } : {}), ...(hostShapedName(env) ? { absolute: true } : {}) }, local); continue; }
-    // a templated host with no env read (`http://127.0.0.1:${port}`): the path is known, the host is not — no target (P4-2)
-    if (templatedHost) { put(name, { target: null, confidence: 'heuristic', prefix: url[2].replace(/\/+$/, '') }, local); continue; }
+    // a templated host with no env read (`http://127.0.0.1:${port}`): the path is known, the host is not — no target (P4-2);
+    // `tplHost`: a URL built from it is absolute, so no receiver or file base prefixes it (never `absolute`: baseOf reads that as an origin)
+    if (templatedHost) { put(name, { target: null, confidence: 'heuristic', prefix: url[2].replace(/\/+$/, ''), tplHost: true }, local); continue; }
     // a relative-path constant (`API_PREFIX = '/api/v1'`): the page's host, a known path — so `API_PREFIX + '/users'` keeps it
     const relPath = /^\s*[fr]?(["'`])(\/[^"'`\s?#$\\{}]{0,200})\1\s*$/.exec(rhs);
     if (relPath) { put(name, { target: null, confidence: 'exact', prefix: relPath[2].replace(/\/+$/, '') }, local); continue; }
     // `this.baseUrl = baseUrl`: a member assigned a bound local takes its base (qualified lookups skip locals)
     const alias = /^\s*([A-Za-z_$][\w$]{0,60})\s*$/.exec(rhs);
+    // `self.base_url = base_url`: a member assigned a PARAMETER holds the argument, never a same-named module binding
+    // (a Python module-level name is not a JS local, so it reached `members`) — a value of the member's own stays
+    if (alias && params.has(alias[1]) && !map.has(alias[1])) { if (!local && !ownMembers.has(name)) members.delete(name); continue; }
+    own = false;
     if (alias && map.has(alias[1])) put(name, map.get(alias[1]), local);
   }
   return map;
@@ -305,11 +366,28 @@ function tplPath(p, lang) {
  *  → { path, target, confidence, needle } | { dynamic: true, raw } | null (not a URL/path) */
 export function urlOf(arg, bindings = new Map(), lang = null) {
   if (!arg) return null;
-  const r = urlOfRaw(arg, bindings);
+  const r = urlOfRaw(arg, bindings, lang);
   return r && r.path ? { ...r, path: tplPath(r.path, lang) } : r;
 }
 
-function urlOfRaw(arg, bindings) {
+/** The pieces of a concatenation: `+`, and in PHP `.` too — split outside quotes only, so a host's dots stay
+ *  (`'http://users.internal/users/' . $id`). One pass over a ≤ 400-char argument. */
+function concatPieces(e, lang) {
+  if (lang !== 'php') return e.split(/\s*\+\s*/);
+  const out = [];
+  let q = null;
+  let from = 0;
+  for (let i = 0; i < e.length; i += 1) {
+    const c = e[i];
+    if (q) { if (c === q) q = null; } else if (c === '"' || c === "'") { q = c; } else if (c === '.' || c === '+') { out.push(e.slice(from, i).trim()); from = i + 1; }
+  }
+  out.push(e.slice(from).trim());
+  return out;
+}
+/** Ruby's `#{id}` is a path parameter, not a fragment: rewritten before the query / fragment is cut. */
+const rubyVars = (s) => s.replace(/#\{([^}]{0,120})\}/g, '{$1}');
+
+function urlOfRaw(arg, bindings, lang = null) {
   // `root`: `new URL('/x', B)` / `urljoin(B, '/x')` resolve a leading '/' from the host (RFC 3986): B's path is dropped.
   const fromBase = (base, rest, needle, root = false) => {
     if (ambiguousIn(bindings, base)) return { dynamic: true, raw: needle }; // bound to two bases: never a path under the bare name
@@ -319,19 +397,33 @@ function urlOfRaw(arg, bindings) {
     const target = b ? b.target : origin ? null : env || base;
     const path = rest.startsWith('/') ? (b?.prefix && !root ? joinPath(b.prefix, rest) : rest) : null;
     if (!path) return { dynamic: true, raw: needle };
-    return { path, target, confidence: b?.confidence === 'exact' ? 'exact' : 'heuristic', needle, ...(origin || b?.absolute ? { absolute: true } : {}) };
+    return { path, target, confidence: b?.confidence === 'exact' ? 'exact' : 'heuristic', needle, ...(origin || b?.absolute ? { absolute: true } : {}), ...(b?.tplHost ? { tplHost: true } : {}) };
   };
   if (arg.kind === 'literal') {
     const v = arg.value.trim();
-    const abs = /^(https?):\/\/([^/?#\s]+)((?:[/?#]\S*)?)$/.exec(v);
+    // M2: the authority ends where authorityEnd says: a URL password may hold '?' or '#' (`http://svc:pa?ss@host/x`).
+    const abs0 = /^(https?):\/\/(\S+)$/.exec(v);
+    let cut = abs0 ? authorityEnd(abs0[2]) : -1;
+    // …and a "host" holding a ':' no port follows is a password's head (`svc:ab#cd#ef@billing/x`: authorityEnd stopped at
+    // its first '#'): the authority runs past the last '@' before the path, as authOf reads a base URL
+    if (cut > 0 && notPort(abs0[2].slice(0, cut).replace(/^.*@/, ''))) {
+      const r = abs0[2];
+      const at1 = r.indexOf('@', cut);
+      const slash = at1 === -1 ? -1 : r.indexOf('/', at1);
+      const at = at1 === -1 ? -1 : r.lastIndexOf('@', slash === -1 ? r.length : slash);
+      // …never an '@' behind a '/' (a path or a query after a non-numeric port: `host:PORT/x?cc=ops@acme.com`)
+      if (at !== -1 && !r.slice(cut, at1).includes('/')) { const q = r.slice(at + 1).search(/[/?#]/); cut = q === -1 ? -1 : at + 1 + q; }
+    }
+    const abs = abs0 && cut !== 0 ? [abs0[0], abs0[1], cut === -1 ? abs0[2] : abs0[2].slice(0, cut), cut === -1 ? '' : abs0[2].slice(cut)] : null;
     if (abs) {
-      const host = abs[2].replace(/^[^@]*@/, '');
-      const path = abs[3].replace(/[?#].*$/, '');
-      // `http://${host}:${port}/x`: the host is unknown but the path is literal — keep it, no target.
-      if (/[{$%]/.test(host)) return path && path !== '/' ? { path, target: null, confidence: 'exact', needle: v.slice(0, 200) } : { dynamic: true, raw: v };
+      const host = abs[2].replace(/^.*@/, '');
+      const path = rubyVars(abs[3]).replace(/[?#].*$/, '');
+      // `http://${host}:${port}/x`: the host is unknown but the path is literal — keep it, no target; `tplHost`: the
+      // URL is absolute, so no receiver or file base prefixes it (never `absolute`: baseOf reads that as an origin)
+      if (/[{$%]/.test(host)) return path && path !== '/' ? { path, target: null, confidence: 'exact', needle: v.slice(0, 200), tplHost: true } : { dynamic: true, raw: v };
       return { path: path || '/', target: host, confidence: 'exact', needle: v.slice(0, 200) };
     }
-    if (v.startsWith('/')) return { path: v.replace(/[?#].*$/, ''), target: null, confidence: 'exact', needle: v.slice(0, 200) };
+    if (v.startsWith('/')) return { path: rubyVars(v).replace(/[?#].*$/, ''), target: null, confidence: 'exact', needle: v.slice(0, 200) };
     // `${BASE}/x`, {BASE}/x (f-string / C# $""), %s/x (printf) — a leading placeholder names the base
     // `${BASE}/x` (JS, Kotlin), {BASE}/x (f-string, C# $""), #{BASE}/x (Ruby), $BASE/x (Kotlin, Groovy, PHP)
     const tpl = /^\$\{\s*([^}]{1,120}?)\s*\}(.*)$/.exec(v) || /^#\{\s*([^}]{1,120}?)\s*\}(.*)$/.exec(v)
@@ -342,7 +434,7 @@ function urlOfRaw(arg, bindings) {
   const e = arg.text;
   // BASE + "/x/" + id + "/y" and "/x/" + id: literal pieces kept, every other piece → {}; a leading
   // non-literal piece names the base. Bounded: ≤ 12 pieces of a ≤ 400-char argument.
-  const pieces = e.split(/\s*\+\s*/);
+  const pieces = concatPieces(e, lang);
   if (pieces.length > 1 && pieces.length <= 12) {
     const lit = (p) => /^[fr]?(["'`])([^"'`]*)\1$/.exec(p);
     const head = lit(pieces[0]) ? null : pieces[0];

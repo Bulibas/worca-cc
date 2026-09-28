@@ -37,7 +37,7 @@ test('L0 at a roomy budget: sections, roles, evidence, marks, order', () => {
   for (const h of ['## Overview', '## Projects', '## Interconnections', '## Change-coordination notes', '## Suggested change order']) assert.ok(lines.includes(h), h);
   assert.ok(!lines.includes('## Coverage'), 'no gaps → no Coverage section');
   assert.ok(lines.includes('- Billing API (`billing-api`): Bills customers'), 'synth role fills a missing role');
-  assert.ok(lines.includes('- web (`web`): Role of web'));
+  assert.ok(lines.includes('- web (`web`): repo: "Role of web"'), 'a static role of unknown file: quoted, the neutral label (M1)');
   assert.ok(lines.includes('- web -> Billing API: REST API; GET /invoices/{id}, POST /invoices — src/web.ts:7'), text);
   assert.ok(lines.includes('- web -> Billing API: message/queue; orders (inferred)'), text);
   assert.ok(lines.includes('1. shared-lib') && lines.includes('3. web'));
@@ -170,7 +170,7 @@ test('an escaped tag, a tag glued to a bare URL and a note that starts with inli
   // every later section with it. A bare URL swallows a backslash, so inside one the opener is an entity.
   assert.equal(/(^|[^\\])(\\\\)*<[A-Za-z!?/]/m.test(text), false, text);
   const lines = text.split('\n');
-  assert.ok(lines.includes('- web (`web`): A drop-in \\<textarea> replacement'), 'an escaped tag gains no second backslash');
+  assert.ok(lines.includes('- web (`web`): repo: "A drop-in \\<textarea> replacement"'), 'an escaped tag gains no second backslash');
   assert.ok(text.includes('Escaped \\\\\\<style> and www.x.io&lt;textarea> stay text.'));
   assert.ok(lines.some((l) => l.includes('GET https://api.acme.io/users/&lt;id>')));
   assert.equal(/(?:https?:\/\/|www\.)\S*\\</i.test(text), false, 'inside a bare URL a backslash is a URL character, never an escape (the evidence line too)');

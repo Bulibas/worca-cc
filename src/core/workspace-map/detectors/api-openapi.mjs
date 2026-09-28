@@ -11,8 +11,8 @@
 // A spec under third_party/, thirdparty/, external/ or vendor*/ describes a third party's API:
 // no facts, one `unresolved` item (a vendored Stripe spec is not what this member serves).
 import { basename } from 'node:path';
-import { splitLines, fact, blankComments, onePerKey, cleanUnresolved } from './lib/text.mjs';
-import { loadYaml, nodeAt, entries } from './lib/yaml.mjs';
+import { splitLines, fact, blankComments, onePerKey, cleanUnresolved, clip } from './lib/text.mjs';
+import { loadYaml, nodeAt, entries, yamlProblem, fileBudget } from './lib/yaml.mjs';
 import { splitAuthority, aliasOf, internalHost } from './lib/urls.mjs';
 import { hostName } from '../../../shared/workspace-map/keys.mjs';
 import { LIMITS } from '../../../shared/workspace-map/limits.mjs';
@@ -48,11 +48,12 @@ function detect({ rel, text }, ctx) {
   const lines = splitLines(text);
   const json = /\.json$/i.test(rel);
   const y = loadYaml(json ? blankComments(text, { slash: true, quotes: '"' }) : text, { json, maxBytes: LIMITS.MAX_FILE_BYTES });
-  const unresolved = y.errors.length ? [{ kind: 'http', raw: rel, file: rel, line: 1, reason: `parse error: ${y.errors[0]}` }] : [];
+  const walk = fileBudget(text); // ONE budget for every walk of this file: `paths` all aliasing one map stay linear
   const facts = [];
   for (const { doc, root, js } of y.docs) {
     if (!js || typeof js !== 'object' || (!js.openapi && !js.swagger)) continue;
-    const serverUrls = Array.isArray(js.servers) ? js.servers.map((s) => s?.url).filter((u) => typeof u === 'string') : [];
+    // one URL once: `servers` of one aliased long server object, N times, read its URL N times (quadratic)
+    const serverUrls = [...new Set(Array.isArray(js.servers) ? js.servers.map((s) => s?.url).filter((u) => typeof u === 'string') : [])];
     if (typeof js.host === 'string') serverUrls.push(`http://${js.host}${typeof js.basePath === 'string' ? js.basePath : ''}`);
     let target = null;
     let prefix = typeof js.basePath === 'string' ? js.basePath : '';
@@ -62,19 +63,22 @@ function detect({ rel, text }, ctx) {
       if (!prefix && path && path !== '/') prefix = path;
       if (!target && host && otherMemberForHost(ctx, host)) target = host;
     }
+    prefix = clip(prefix, LIMITS.DETAIL_MAX); // detail keeps DETAIL_MAX chars: a long server path is never rebuilt (and kept) per operation
     const dir = target ? 'consumes' : 'provides';
-    for (const p of entries(doc, nodeAt(doc, root, ['paths']))) {
+    for (const p of entries(doc, nodeAt(doc, root, ['paths'], walk), walk)) {
       if (!p.key.startsWith('/')) continue;
       const line = y.lineOf(p.keyNode);
-      for (const op of entries(doc, p.value)) {
-        if (!METHODS.has(op.key.toLowerCase())) continue;
+      for (const op of entries(doc, p.value, walk)) {
+        if (op.key.length > 7 || !METHODS.has(op.key.toLowerCase())) continue; // an aliased long key is never lower-cased per path
         const method = op.key.toUpperCase();
-        const opId = nodeAt(doc, op.value, ['operationId']);
-        const detail = [js.swagger ? 'Swagger' : 'OpenAPI', prefix && `prefix ${prefix}`, opId?.value && `operationId ${opId.value}`].filter(Boolean).join(', ');
+        const opId = nodeAt(doc, op.value, ['operationId'], walk);
+        const detail = [js.swagger ? 'Swagger' : 'OpenAPI', prefix && `prefix ${prefix}`, opId?.value && `operationId ${clip(opId.value, LIMITS.DETAIL_MAX)}`].filter(Boolean).join(', ');
         facts.push(fact({ kind: 'http', dir, key: `${method} ${p.key}`, rel, lines, line, needle: p.key, detail, target: target || undefined, confidence: 'exact' }));
       }
     }
   }
+  const problem = yamlProblem(y, walk);
+  const unresolved = problem ? [{ kind: 'http', raw: rel, file: rel, line: 1, reason: `parse error: ${problem}` }] : [];
   return { facts: onePerKey(facts), unresolved: cleanUnresolved(ctx?.state, rel, unresolved) };
 }
 

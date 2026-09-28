@@ -82,7 +82,7 @@ test('code: urlOf — literal URL, literal path, template/f-string/concat/printf
   assert.equal(urlOf({ kind: 'expr', text: "API + '/users/' + id + '/orders'" }).path, '/users/{}/orders');
   assert.deepEqual(urlOf(argAt("f('http://orders:8080/orders/' + id)", 2, 'js')), { path: '/orders/{}', target: 'orders:8080', confidence: 'exact', needle: "'http://orders:8080/orders/' + id" }, 'an absolute URL built by concatenation');
   // a templated host keeps its literal path (no target); a ${…} glued to the last segment is a query suffix
-  assert.deepEqual(urlOf({ kind: 'literal', value: 'http://127.0.0.1:${PORT}/json/list', template: true }, undefined, 'js'), { path: '/json/list', target: null, confidence: 'exact', needle: 'http://127.0.0.1:${PORT}/json/list' });
+  assert.deepEqual(urlOf({ kind: 'literal', value: 'http://127.0.0.1:${PORT}/json/list', template: true }, undefined, 'js'), { path: '/json/list', target: null, confidence: 'exact', needle: 'http://127.0.0.1:${PORT}/json/list', tplHost: true });
   assert.deepEqual(urlOf({ kind: 'literal', value: 'http://${host}', template: true }), { dynamic: true, raw: 'http://${host}' });
   assert.equal(urlOf({ kind: 'literal', value: '/api/config${qs}', template: true }, undefined, 'js').path, '/api/config');
   assert.equal(urlOf({ kind: 'literal', value: '/api/users/${id}', template: true }, undefined, 'js').path, '/api/users/${id}');
@@ -179,11 +179,12 @@ test('code: one route/client rule for both HTTP detectors; JS-family minified fi
 test('code: v6 bindings — a concatenation names an unknown base, a templated host is no host, a literal host wins over an env read in its path, typed C# properties, @Value first, self-derived reassignments, locals never answer this.x', () => {
   assert.deepEqual(baseBindings("export class S {\n  private apiUrl = environment.apiUrl + '/api/v1';\n}\n").get('apiUrl'), { target: 'environment.apiUrl', confidence: 'heuristic', prefix: '/api/v1' }, 'the Angular idiom');
   assert.deepEqual(baseBindings("const API = `http://${process.env.HOST}:3000` + '/api/v1';\n").get('API'), { target: 'HOST', confidence: 'heuristic', prefix: '/api/v1' }, 'a placeholder host is an env base, never a literal host');
-  assert.deepEqual(baseBindings('const base = `http://127.0.0.1:${port}`;\n').get('base'), { target: null, confidence: 'heuristic', prefix: '' }, 'a templated host with no env read has no target (P4-2)');
-  assert.deepEqual(baseBindings("const API = `http://${host}:3000` + '/api/v1';\n").get('API'), { target: null, confidence: 'heuristic', prefix: '/api/v1' }, 'the concatenation form of a templated host keeps its path');
+  assert.deepEqual(baseBindings('const base = `http://127.0.0.1:${port}`;\n').get('base'), { target: null, confidence: 'heuristic', prefix: '', tplHost: true }, 'a templated host with no env read has no target (P4-2)');
+  assert.deepEqual(baseBindings("const API = `http://${host}:3000` + '/api/v1';\n").get('API'), { target: null, confidence: 'heuristic', prefix: '/api/v1', tplHost: true }, 'the concatenation form of a templated host keeps its path');
   assert.deepEqual(baseBindings('const API = `https://api.acme.com/${process.env.TENANT}/v1`;\n').get('API'), { target: 'api.acme.com', confidence: 'exact', prefix: '/${process.env.TENANT}/v1' }, 'an env read in the path is not the host');
   assert.deepEqual(baseBindings('private string BaseUrl => _configuration["Orders:BaseUrl"];\n').get('BaseUrl'), { target: 'Orders:BaseUrl', confidence: 'heuristic' }, 'a typed C# expression-bodied property');
-  assert.deepEqual(baseBindings("const API = process.env.API_URL;\n[1].forEach(API => process.env.OTHER_URL);\n").get('API'), { target: 'API_URL', confidence: 'heuristic' }, 'a JS arrow parameter is no assignment');
+  const arrow = baseBindings("const API = process.env.API_URL;\n[1].forEach(API => process.env.OTHER_URL);\n");
+  assert.deepEqual([arrow.get('API'), arrow.ambiguous.has('API'), arrow.members.has('API')], [undefined, true, false], 'a JS arrow parameter is no assignment (never OTHER_URL); it shadows the const, so a bare API is ambiguous (M6)');
   assert.deepEqual([envTail('`http://${process.env.HOST}:3000/api/`'), envTail('`/api/${process.env.VERSION}/v1`')], ['/api', ''], 'the placeholder must sit in the host');
   assert.deepEqual(baseBindings('public OrdersClient(@Value("${orders.url}") String ordersUrl) { this.baseUrl = ordersUrl + "/api/v1"; }\n').get('baseUrl'), { target: 'orders.url', confidence: 'heuristic', prefix: '/api/v1' }, '@Value is read before the assignment deriving from it');
   const self = baseBindings("let API = process.env.X;\nAPI = API + '/api/v1';\n");

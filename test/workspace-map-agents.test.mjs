@@ -55,7 +55,7 @@ test('the scan agents: sidecars exactly as the index pins them', () => {
 const CHECKER_NEEDLES = ['<!-- worca:check=', 'Replace `<OUT>` with the absolute path', 'Never finish with a failing checker', 'one short line naming the path',
   'cannot start, do not loop'];
 /** …and every fan-out body (the waves, the evidence rules). */
-const FANOUT_NEEDLES = ['waves of at most 8', 'never in the background', 'EVERY member', '1-based', 'character for character', 'RELATIVE to',
+const FANOUT_NEEDLES = ['waves of at most 8', 'Dispatch normally and wait for every result', 'EVERY member', '1-based', 'character for character', 'RELATIVE to',
   'guardrails refuse to Read', 'not through Bash'];
 
 test('the usage mapper body: every member, waves of at most 8 in the foreground, evidence rules, the checker loop', () => {

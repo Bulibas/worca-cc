@@ -10,7 +10,7 @@
 // Intra-build project(':x') dependencies never leave the member and are not facts. A test-path
 // build or settings file (a TestKit fixture) sets no stack, name, group or include.
 import { posix } from 'node:path';
-import { splitLines, lineIndex, blankComments, fact, memberForPath, aliasable, onePerKey, cleanUnresolved } from './lib/text.mjs';
+import { splitLines, lineIndex, blankComments, fact, memberForPath, aliasable, onePerKey, cleanUnresolved, isSampleManifest } from './lib/text.mjs';
 import { loadToml, tomlSections, keyLine } from './lib/toml.mjs';
 import { isTestPath } from '../files.mjs';
 
@@ -172,7 +172,9 @@ function finish(ctx) {
   if (group) {
     for (const inc of st.includes || []) {
       const name = leaf(inc.path);
-      if (!name) continue;
+      // M8: an included sample subproject (`:examples:billing`, or a projectDir under samples/) is no package of this member
+      const dir = st.projectDirs?.[inc.path.replace(/^:?/, ':')]?.dir ?? inc.path.split(':').filter(Boolean).join('/');
+      if (!name || isSampleManifest(`${dir}/`)) continue;
       facts.push(fact({ kind: 'pkg', dir: 'provides', key: `maven:${group}:${name}`, rel: inc.rel, lines: inc.lines, line: inc.line, needle: inc.path, detail: 'Gradle subproject', confidence: 'exact' }));
     }
   }
@@ -197,7 +199,7 @@ function finish(ctx) {
 
 export default Object.freeze({
   id: 'pkg-gradle',
-  claims: (rel) => /(^|\/)(settings|build)\.gradle(\.kts)?$/.test(rel) || /(^|\/)gradle\/libs\.versions\.toml$/.test(rel),
+  claims: (rel) => (/(^|\/)(settings|build)\.gradle(\.kts)?$/.test(rel) || /(^|\/)gradle\/libs\.versions\.toml$/.test(rel)) && !isSampleManifest(rel),
   detect,
   finish,
 });

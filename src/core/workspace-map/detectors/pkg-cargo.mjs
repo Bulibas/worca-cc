@@ -7,7 +7,7 @@
 // A virtual workspace root has no [package] and provides nothing; its member crates are
 // read from their own Cargo.toml files (every Cargo.toml is claimed). A test-path crate (a
 // fixture) sets no stack and no role.
-import { splitLines, fact, memberForPath, aliasable, onePerKey, cleanUnresolved } from './lib/text.mjs';
+import { splitLines, fact, memberForPath, aliasable, onePerKey, cleanUnresolved, isSampleManifest } from './lib/text.mjs';
 import { loadToml, tomlSections, keyLine } from './lib/toml.mjs';
 import { isTestPath } from '../files.mjs';
 import { LIMITS } from '../../../shared/workspace-map/limits.mjs';
@@ -64,6 +64,6 @@ function detect({ rel, text }, ctx) {
 
 export default Object.freeze({
   id: 'pkg-cargo',
-  claims: (rel) => /(^|\/)Cargo\.toml$/.test(rel),
+  claims: (rel) => /(^|\/)Cargo\.toml$/.test(rel) && !isSampleManifest(rel),
   detect,
 });

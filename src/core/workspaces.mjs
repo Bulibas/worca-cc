@@ -18,10 +18,10 @@
 // the server can map codes -> HTTP (BAD_REQUEST->400, DUPLICATE_*->409,
 // NOT_FOUND->404). workspacesFile() is retained (vestigial) for import-compat.
 
-import { statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
 import { worcaHome, normalizeProjectPath } from './projects.mjs';
@@ -32,7 +32,7 @@ import { WORKSPACE_MAX_PROJECTS, scanDescriptionBudget } from '../shared/workspa
 import { KINDS, checkOverrides, checkSynthesis } from '../shared/workspace-map/schema.mjs';
 import { LIMITS } from '../shared/workspace-map/limits.mjs';
 import {
-  emptyOverrides, effectiveEdges, setEdgeState, addManualEdge, removeManualEdge,
+  emptyOverrides, effectiveEdges, setEdgeState, addManualEdge, removeManualEdge, rekeyOverrides,
 } from '../shared/workspace-map/overrides.mjs';
 import { renderWorkspaceDescription } from '../shared/workspace-map/render.mjs';
 import { mapSummary } from '../shared/workspace-map/summary.mjs';
@@ -99,6 +99,31 @@ export function isGitRepo(p) {
       { cwd: p, stdio: ['ignore', 'pipe', 'ignore'] });
     return true;
   } catch { return false; }
+}
+
+/**
+ * Why a READ-ONLY Workspace scan cannot run over each member: a scan never `git init`s or commits
+ * a member (run-harness `_ensureGitCheckpointFor` refuses), so each member must BE the top folder of
+ * its own git repository — the harness's test: `git rev-parse --show-toplevel` is the folder itself,
+ * both realpath'd (a folder inside a monorepo is not; neither is a bare repository) — and have a
+ * commit. Both scan routes check it before a run starts; plain create keeps its own contract
+ * (isGitRepo). Never throws.
+ * @param {string[]} projectPaths
+ * @returns {string[]} one `<path> <why>` per member a scan cannot run over ([] = every member can)
+ */
+export function scanMemberProblems(projectPaths) {
+  const git = (cwd, args) => {
+    try { return execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch { return null; }
+  };
+  const real = (p) => { try { return realpathSync.native(p); } catch { return resolve(p); } };
+  const out = [];
+  for (const p of Array.isArray(projectPaths) ? projectPaths : []) {
+    if (!isDir(p)) { out.push(`${p} does not exist`); continue; }
+    const top = git(p, ['rev-parse', '--show-toplevel']);
+    if (!top || real(top) !== real(p)) out.push(`${p} is not its own git repository`);
+    else if (git(p, ['rev-parse', '--verify', '-q', 'HEAD']) === null) out.push(`${p} has no commit`);
+  }
+  return out;
 }
 
 /**
@@ -459,10 +484,11 @@ export async function readWorkspaceMap(id) {
 
 /**
  * Save a finished scan (finalize, D7): the map + synthesis replace the stored ones, the
- * description is replaced and marked 'generated'. map_overrides_json is NEVER touched, so
- * confirm / reject / manual edges survive every re-scan. With a map the description is
- * RE-RENDERED here, inside the write transaction, from the map + the overrides stored at
- * that moment (an override saved while the scan ran is never lost); `description` is used
+ * description is replaced and marked 'generated'. Confirm / reject / manual edges survive every
+ * re-scan: map_overrides_json changes only to MOVE an override whose edge an agent reworded onto
+ * the new edge (rekeyOverrides: a unique match both ways; never a drop). With a map the
+ * description is RE-RENDERED here, inside the write transaction, from the map + the overrides
+ * stored at that moment (an override saved while the scan ran is never lost); `description` is used
  * as-is only without a map (a scan whose join wrote nothing). The synthesis is stored
  * CHECKED: P1's checkSynthesis over the workspace's project keys drops every invalid item and
  * redacts every string it keeps (D21 — the synthesizer is an LLM that may quote a credential it
@@ -483,10 +509,13 @@ export async function saveWorkspaceScanResult(id, { description = '', map = null
   const entry = tx(() => {
     const cur = readEntry(id);
     if (!cur) throw err(`workspace not found: ${id}`, 'NOT_FOUND');
-    const text = mapDoc ? renderFor(cur, mapDoc, cur.overrides) : (typeof description === 'string' ? description : '');
+    // M14: moved under this lock and before the render, so the description applies the moved override.
+    const overrides = mapDoc ? rekeyOverrides(cur.overrides, mapDoc.map) : cur.overrides;
+    const text = mapDoc ? renderFor(cur, mapDoc, overrides) : (typeof description === 'string' ? description : '');
     prepare('UPDATE workspaces SET description = ?, map_json = ?, description_origin = ?, updated_at = ? WHERE id = ?')
       .run(text, mapDoc ? JSON.stringify(mapDoc) : null, 'generated', now, id);
-    return { ...cur, description: text, mapDoc, descriptionOrigin: 'generated', updatedAt: now };
+    if (overrides !== cur.overrides) prepare('UPDATE workspaces SET map_overrides_json = ? WHERE id = ?').run(JSON.stringify(overrides), id);
+    return { ...cur, overrides, description: text, mapDoc, descriptionOrigin: 'generated', updatedAt: now };
   });
   return annotate(entry);
 }

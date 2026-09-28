@@ -7,11 +7,14 @@
 
 import { LIMITS, MAP_VERSION } from '../../shared/workspace-map/limits.mjs';
 import { CONFIDENCE, KINDS, KIND_LABELS, checkUsage, confidenceRank, storedCheckError } from '../../shared/workspace-map/schema.mjs';
-import { normBody, normKey, pathSuffixMatch, topicMatches } from '../../shared/workspace-map/keys.mjs';
+import { cutQuery, normBody, normKey, pathSuffixMatch, topicMatches } from '../../shared/workspace-map/keys.mjs';
 import { edgeId } from '../../shared/workspace-map/ids.mjs';
 import { changeOrder } from '../../shared/workspace-map/order.mjs';
+import { effectiveEdges, rekeyOverrides } from '../../shared/workspace-map/overrides.mjs';
 import { redactSecrets } from '../../shared/workspace-map/redact.mjs';
+import { QUOTED_TEXT_NOTE, quoteRole, roleQuoteLabel } from '../../shared/workspace-map/render.mjs';
 import { createFileCache, verifyFact } from './verify.mjs';
+import { isTestPath } from './files.mjs';
 import { displayOf, one, routeIndex } from './catalog.mjs';
 
 const byStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -62,7 +65,15 @@ const httpParts = (norm) => {
   return { method: body.slice(0, i), path: body.slice(i + 1) };
 };
 
-/** Collects edges keyed by id: the strongest confidence wins, sources and evidence union. */
+/** M14: an entry only the survey provided carries a norm an agent worded (a re-scan may word it anew). */
+const surveyKeyed = (e) => Array.isArray(e.sources) && !e.sources.includes('static');
+/** M14: an `other` edge is keyed by the label the Map tab shows, when it has one — never by the longer
+ *  description an agent rewords from scan to scan. */
+const labelNorm = (f) => (txt(f.label).trim() ? normKey('other', f.label) : null);
+
+/** Collects edges keyed by id: the strongest confidence wins, sources and evidence union. `agentKeyed`
+ *  (M14): an agent chose the norm, so a re-scan may give the same relation a new id — only when every
+ *  rule that made the edge keyed it that way. */
 function edgeSink(limits) {
   const edges = new Map();
   const unionEv = (a, b) => {
@@ -79,7 +90,7 @@ function edgeSink(limits) {
       if (!e.from || !e.to || e.from === e.to || !KINDS.includes(e.kind) || !e.norm) return;
       const id = edgeId(e.from, e.to, e.kind, e.norm);
       const next = { id, from: e.from, to: e.to, kind: e.kind, norm: e.norm, display: e.display || normBody(e.norm),
-        label: e.label ?? null, detail: e.detail ?? null, confidence: e.confidence, sources: [...e.sources],
+        label: e.label ?? null, detail: e.detail ?? null, confidence: e.confidence, sources: [...e.sources], agentKeyed: e.agentKeyed === true,
         evidence: { from: (e.evidenceFrom || []).slice(0, limits.EVIDENCE_PER_SIDE), to: (e.evidenceTo || []).slice(0, limits.EVIDENCE_PER_SIDE) } };
       const prev = edges.get(id);
       if (!prev) { edges.set(id, next); return; }
@@ -90,6 +101,7 @@ function edgeSink(limits) {
         detail: win.detail ?? lose.detail,
         label: win.label ?? lose.label,
         sources: SOURCE_ORDER.filter((s) => win.sources.includes(s) || lose.sources.includes(s)),
+        agentKeyed: win.agentKeyed && lose.agentKeyed,
         evidence: { from: unionEv([...win.evidence.from], lose.evidence.from), to: unionEv([...win.evidence.to], lose.evidence.to) },
       });
     },
@@ -97,9 +109,19 @@ function edgeSink(limits) {
   };
 }
 
+/** M15: the edges a review leaves standing — `edges` with the workspace's overrides applied: first moved
+ *  onto an edge an agent reworded this scan (rekeyOverrides, as finalize will), then merged
+ *  (effectiveEdges). A rejected edge and a confirmed one the scan no longer finds are gone, a manual edge
+ *  is in. An allowlist: any other state (stale, or a later one) never orders or briefs anything. */
+const LIVE_STATES = Object.freeze(['auto', 'confirmed', 'manual']);
+const liveEdges = (edges, overrides) => effectiveEdges({ edges }, rekeyOverrides(overrides, { edges })).filter((e) => LIVE_STATES.includes(e.state));
+
 /** spec §6.5. usage may be null/garbage. enrich: optional async (map, {catalog}) => map (P7
- *  plugs graphify in; errors inside enrich are caught and recorded in map.errors). Never throws. */
-export async function joinMap({ catalog, usage, runId = null, now = () => new Date(), enrich = null, limits = LIMITS } = {}) {
+ *  plugs graphify in; errors inside enrich are caught and recorded in map.errors). overrides (M15):
+ *  the workspace's overrides a re-scan froze at run start (null on a first scan) — the stored change
+ *  order and cycles follow the live edges, so they are the order the synth brief shows; map.edges
+ *  keeps every scanned edge. Never throws. */
+export async function joinMap({ catalog, usage, runId = null, now = () => new Date(), enrich = null, limits = LIMITS, overrides = null } = {}) {
   const map = emptyMap(catalog?.workspace?.name, runId, now);
   try {
     const cat = catalog && typeof catalog === 'object' ? catalog : {};
@@ -130,6 +152,11 @@ export async function joinMap({ catalog, usage, runId = null, now = () => new Da
     const uses = new Map();
     const others = new Map();
     const rejectedCands = new Map();
+    // M9: a schema file extract judged a client's copy (the usage brief lists it as unresolved) is no evidence of a
+    // use: a use or relation citing it is rejected, like a survey fact (catalog step 1). Paths compare case-folded.
+    const copiesBy = new Map(members.map((m) => [m.key, new Set((Array.isArray(m.unresolved) ? m.unresolved : [])
+      .filter((x) => x && x.kind === 'graphql' && x.reason === 'client copy of a GraphQL schema' && typeof x.file === 'string').map((x) => x.file.toLowerCase()))]));
+    const cited = (k, v) => v.ok && copiesBy.get(k).has(v.fact.file.toLowerCase());
     for (const k of keys) {
       const u = Object.hasOwn(checked.value.members, k) ? checked.value.members[k] : null;
       status.set(k, u ? u.status : 'failed');
@@ -138,7 +165,11 @@ export async function joinMap({ catalog, usage, runId = null, now = () => new Da
       for (const x of u?.uses || []) {
         if (entryById.get(x.entry).member === k) continue;
         const v = await verifyFact(dirOf.get(k), x, { cache });
-        if (v.ok) ok.push(v.fact);
+        // §5.1: a use cited from test code never makes an edge; it is counted (only a verified citation has a file).
+        if (v.ok && isTestPath(v.fact.file)) { testFacts += 1; continue; }
+        // D21: a use of an HTTP entry cites no query, as a static call does not.
+        if (v.ok && entryById.get(x.entry).kind === 'http') v.fact.match = cutQuery(v.fact.match);
+        if (v.ok && !cited(k, v)) ok.push(v.fact);
         else { factsRejected += 1; rejectedBy.set(k, rejectedBy.get(k) + 1); }
       }
       // C31: the agent's order never picks an edge's detail, label or evidence order — place does.
@@ -146,7 +177,10 @@ export async function joinMap({ catalog, usage, runId = null, now = () => new Da
       const rel = [];
       for (const x of u?.other || []) {
         const v = await verifyFact(dirOf.get(k), x, { cache });
-        if (v.ok) rel.push(v.fact);
+        if (v.ok && isTestPath(v.fact.file)) { testFacts += 1; continue; }
+        // D21: an HTTP relation keyed by a full URL keeps no query in its key (the edge's display) or its citation.
+        if (v.ok && v.fact.kind === 'http') { v.fact.key = cutQuery(v.fact.key); v.fact.match = cutQuery(v.fact.match); }
+        if (v.ok && !cited(k, v)) rel.push(v.fact);
         else { factsRejected += 1; rejectedBy.set(k, rejectedBy.get(k) + 1); }
       }
       others.set(k, rel.sort(byPlace));
@@ -200,7 +234,7 @@ export async function joinMap({ catalog, usage, runId = null, now = () => new Da
         if (e && e.member !== k) {
           // (a) exact norm (static) — or a survey consume the catalog resolved (verified).
           sink.add({ from: k, to: e.member, kind: e.kind, norm: e.norm, display: e.display, detail: c.detail,
-            ...ruleA(c, e), evidenceFrom: fromEv, evidenceTo: e.evidence });
+            ...ruleA(c, e), agentKeyed: surveyKeyed(e), evidenceFrom: fromEv, evidenceTo: e.evidence });
           continue;
         }
         // (b) static fuzzy: path suffix / topic glob, only when it lands in ONE member, or in the member the
@@ -222,15 +256,16 @@ export async function joinMap({ catalog, usage, runId = null, now = () => new Da
             for (const x of hits.filter((h) => h.member === owner)) {
               sink.add({ from: k, to: owner, kind: x.kind, norm: x.norm, display: x.display, detail: c.detail,
                 confidence: owner === c.toMember ? capAt('exact', c.confidence, x.confidence) : 'heuristic',
-                sources: ['static'], evidenceFrom: fromEv, evidenceTo: x.evidence });
+                sources: ['static'], agentKeyed: surveyKeyed(x), evidenceFrom: fromEv, evidenceTo: x.evidence });
             }
             continue;
           }
         }
         if (c.toMember && c.toMember !== k && dirOf.has(c.toMember)) {
-          // static alias resolution (exact) or a survey consume naming its target (inferred).
-          sink.add({ from: k, to: c.toMember, kind: c.kind, norm: c.norm, display: displayOf(c.kind, c.key, c.label), label: c.label ?? null,
-            detail: c.detail, confidence: staticSrc ? capAt('exact', c.confidence) : 'inferred', sources: [staticSrc ? 'static' : 'survey'], evidenceFrom: fromEv, evidenceTo: [] });
+          // static alias resolution (exact) or a survey consume naming its target (inferred; the agent worded its key).
+          sink.add({ from: k, to: c.toMember, kind: c.kind, norm: (c.kind === 'other' && labelNorm(c)) || c.norm, display: displayOf(c.kind, c.key, c.label), label: c.label ?? null,
+            detail: c.detail, confidence: staticSrc ? capAt('exact', c.confidence) : 'inferred', sources: [staticSrc ? 'static' : 'survey'], agentKeyed: !staticSrc,
+            evidenceFrom: fromEv, evidenceTo: [] });
         }
       }
       // (c) usage uses — verified.
@@ -238,7 +273,7 @@ export async function joinMap({ catalog, usage, runId = null, now = () => new Da
       for (const u of uses.get(k)) {
         const e = entryById.get(u.entry);
         sink.add({ from: k, to: e.member, kind: e.kind, norm: e.norm, display: e.display, detail: u.detail ?? null, confidence: capAt('verified', e.confidence),
-          sources: candAt.has(`${u.entry}|${u.file}|${u.line}`) ? ['candidate', 'usage'] : ['usage'], evidenceFrom: [ev(u)], evidenceTo: e.evidence });
+          sources: candAt.has(`${u.entry}|${u.file}|${u.line}`) ? ['candidate', 'usage'] : ['usage'], agentKeyed: surveyKeyed(e), evidenceFrom: [ev(u)], evidenceTo: e.evidence });
       }
       // (d) distinctive candidates stand in ONLY when the usage pass failed for this member —
       //     and a candidate it rejected never becomes an edge.
@@ -249,25 +284,27 @@ export async function joinMap({ catalog, usage, runId = null, now = () => new Da
           if (e.kind === 'pkg' && c.via !== 'import') continue; // a bare package-name literal ('config') is not distinctive
           if (rejectedCands.get(k).has(`${c.entry}|${c.file}|${c.line}`)) continue;
           sink.add({ from: k, to: e.member, kind: e.kind, norm: e.norm, display: e.display, confidence: 'heuristic',
-            sources: ['candidate'], evidenceFrom: [ev(c)], evidenceTo: e.evidence });
+            sources: ['candidate'], agentKeyed: surveyKeyed(e), evidenceFrom: [ev(c)], evidenceTo: e.evidence });
         }
       }
       // (e) relations to named members outside the catalog — inferred.
       for (const o of others.get(k)) {
         const keyed = normKey(o.kind, o.key);
         const kind = keyed ? o.kind : 'other';
-        sink.add({ from: k, to: o.to, kind, norm: keyed || normKey('other', o.key), display: displayOf(kind, o.key, o.label), label: o.label ?? null,
-          detail: o.detail ?? null, confidence: 'inferred', sources: ['usage'], evidenceFrom: [ev(o)], evidenceTo: [] });
+        sink.add({ from: k, to: o.to, kind, norm: (kind === 'other' && labelNorm(o)) || keyed || normKey('other', o.key), display: displayOf(kind, o.key, o.label),
+          label: o.label ?? null, detail: o.detail ?? null, confidence: 'inferred', sources: ['usage'], agentKeyed: true, evidenceFrom: [ev(o)], evidenceTo: [] });
       }
     }
     map.edges = sink.list();
 
     // Step 3: change order. Step 5: members + coverage, stats.
-    const { order, cycles } = changeOrder(keys, map.edges);
+    const { order, cycles } = changeOrder(keys, liveEdges(map.edges, overrides));
     map.order = order;
     map.cycles = cycles;
     map.members = members.map((m) => ({
       key: m.key, name: m.name || m.key, role: m.role ?? null, roleSource: m.role ? (m.roleSource === 'survey' ? 'survey' : 'static') : null,
+      // M1: the file a static role was copied from — 'readme' | 'manifest', else null (render.mjs roleQuoteLabel).
+      roleFrom: m.role && m.roleSource !== 'survey' && (m.roleFrom === 'readme' || m.roleFrom === 'manifest') ? m.roleFrom : null,
       aliases: Array.isArray(m.aliases) ? m.aliases : [], stack: Array.isArray(m.stack) ? m.stack : [],
       coverage: {
         level: m.coverage?.level ?? 'none', files: m.coverage?.files ?? 0, scannedFiles: m.coverage?.scannedFiles ?? 0,
@@ -313,17 +350,21 @@ export async function joinMap({ catalog, usage, runId = null, now = () => new Da
  *    <!-- worca:map=<abs workspace-map.json> -->
  *    <!-- worca:check=<checker command line> -->
  *  then members (key, name, role or "(missing)"), pair summaries, order, cycles, coverage gaps.
+ *  overrides (M15): the pairs and the edge count are the live edges (liveEdges) — what the description
+ *  will list; the order and cycles are map.order / map.cycles, which joinMap computed over the same.
  *  ≤ SYNTH_BRIEF_MAX_BYTES. */
-export function synthBrief(map, { mapPath, checkerCmd, limits = LIMITS } = {}) {
+export function synthBrief(map, { mapPath, checkerCmd, limits = LIMITS, overrides = null } = {}) {
   const m = map && typeof map === 'object' ? map : {};
   const arr = (v) => (Array.isArray(v) ? v : []);
   const isObj = (v) => v !== null && typeof v === 'object';
   const members = arr(m.members).filter(isObj);
-  const edges = arr(m.edges).filter(isObj);
+  const edges = liveEdges(arr(m.edges), overrides);
+  // M1: a role copied from the member's own files is quoted with its source, as in the description.
+  const quoted = (x) => (one(x.role) && roleQuoteLabel(x) ? quoteRole(roleQuoteLabel(x), one(x.role)) : null);
   const head = ['# Workspace synthesis brief', `<!-- worca:map=${mapPath} -->`, `<!-- worca:check=${checkerCmd} -->`, '',
     `Workspace "${one(m.workspace?.name)}": ${members.length} member projects, ${edges.length} edges. Full map: \`${mapPath}\`.`, '',
-    `## Members (${members.length})`, '',
-    ...members.map((x) => `- ${one(x.key)} (${one(x.name)}): ${one(x.role) || '(missing)'} — stack ${arr(x.stack).join(', ') || 'unknown'}; coverage ${x.coverage?.level ?? 'none'}`), ''];
+    `## Members (${members.length})`, '', ...(members.some(quoted) ? [QUOTED_TEXT_NOTE, ''] : []),
+    ...members.map((x) => `- ${one(x.key)} (${one(x.name)}): ${quoted(x) || one(x.role) || '(missing)'} — stack ${arr(x.stack).join(', ') || 'unknown'}; coverage ${x.coverage?.level ?? 'none'}`), ''];
   const pairs = new Map();
   for (const e of edges) {
     const k = `${e.from}${SEP}${e.to}`;
@@ -332,9 +373,11 @@ export function synthBrief(map, { mapPath, checkerCmd, limits = LIMITS } = {}) {
   }
   const pairLines = [...pairs.values()].map((p) => {
     const kinds = new Map();
-    for (const e of p.edges) { if (!kinds.has(e.kind)) kinds.set(e.kind, []); kinds.get(e.kind).push(e.display); }
+    // D21: a manual edge's display is a person's text, stored as typed (the description redacts it on render).
+    for (const e of p.edges) { if (!kinds.has(e.kind)) kinds.set(e.kind, []); kinds.get(e.kind).push(e.state === 'manual' ? redactSecrets(txt(e.display)) : e.display); }
     const parts = [...kinds].map(([k, ds]) => `${(Object.hasOwn(KIND_LABELS, k) && KIND_LABELS[k]) || k} ${ds.length} (${ds.slice(0, 3).join(', ')}${ds.length > 3 ? ', …' : ''})`);
-    const conf = CONFIDENCE.map((c) => [c, p.edges.filter((e) => e.confidence === c).length]).filter(([, n]) => n).map(([c, n]) => `${c} ${n}`).join(', ');
+    const conf = [...CONFIDENCE.map((c) => [c, p.edges.filter((e) => e.confidence === c).length]), ['manual', p.edges.filter((e) => e.state === 'manual').length]]
+      .filter(([, n]) => n).map(([c, n]) => `${c} ${n}`).join(', ');
     return one(`- ${p.from} -> ${p.to}: ${parts.join('; ')} [${conf}]`);
   });
   const gaps = members.filter((x) => x.coverage?.level === 'none' || x.coverage?.usageStatus === 'failed' || x.coverage?.surveyed === 'failed')

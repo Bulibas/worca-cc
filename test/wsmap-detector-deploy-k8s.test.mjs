@@ -201,8 +201,8 @@ test('deploy-k8s (GitOps List): an image naming another member aliases that memb
 test('deploy-k8s: infrastructure (official images, selector-less Services, vendored subcharts) and test-path samples alias nobody; a namespace adds <name>.<ns>', async () => {
   const r = await runDetector(detector, member('ops'), ws.members);
   assert.deepEqual(r.aliases.map((a) => [a.value, a.source]).sort(), [
-    ['ops-api', 'k8s'], ['ops-api.payments', 'k8s'], ['ops-chart', 'helm'], ['ops-svc', 'k8s'], ['ops-svc.payments', 'k8s'],
-  ], 'no redis, postgres, postgresql or ledger (testdata/) alias');
+    ['ops-api', 'deploy-self'], ['ops-api.payments', 'deploy-self'], ['ops-chart', 'deploy-self'], ['ops-svc', 'deploy-self'], ['ops-svc.payments', 'deploy-self'],
+  ], 'no redis, postgres, postgresql or ledger (testdata/) alias; ops has no code, so its own names are deploy-self guesses (M7)');
   assert.deepEqual(keysOf(r, 'service', 'consumes'), ['ledger'], 'the chart\'s own ingress host is no consume; redis:7\'s env is nobody\'s');
   assertEvidence(member('ops'), r);
 });

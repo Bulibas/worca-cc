@@ -24,9 +24,10 @@ import { WORKSPACE_SCAN_DEFAULT_MODELS } from './graph/builtin-workflows.mjs';
 import { scanDescriptionBudget } from '../shared/workspace-size.mjs';
 
 /** The render card's output file (scripts/workspaceMapRender.meta.json outputs[0].filename): the
- *  description the pipeline rendered WITHOUT the workspace's overrides. The finalize saves it as-is
- *  only when the scan wrote no map; with a map it re-renders (stored overrides applied). Not
- *  workspace-description.md: createPipeline writes the run's frozen snapshot there. */
+ *  description the pipeline rendered with the overrides the run froze at start (wsmap M15; none on a
+ *  first scan). The finalize saves it as-is only when the scan wrote no map; with a map it re-renders
+ *  (the overrides stored at that moment applied). Not workspace-description.md: createPipeline writes
+ *  the run's frozen snapshot there. */
 export const WORKSPACE_SCAN_OUTPUT_FILE = 'workspace-scan.md';
 
 /** The join's map, the synth's synthesis (run folder) and the merged graph's copy (workspace store). */
@@ -177,7 +178,9 @@ export async function adoptGraphFile(map, { pipelineDir, storeDir, renameFile = 
 /**
  * Save a finished scan from the scan pipeline's outputs in the run folder, then UPDATE the
  * workspace when one with this id exists (a re-scan — or one created under the same name and
- * project set while the scan ran) or CREATE it. With a map (the join card's workspace-map.json)
+ * project set while the scan ran) or CREATE it — under this id only: a project set that keys
+ * differently now (a member's repository root moved) fails with code 'ID_MISMATCH' and creates
+ * nothing. With a map (the join card's workspace-map.json)
  * the map + synthesis are stored and the description is RE-RENDERED from them with the
  * workspace's stored overrides (saveWorkspaceScanResult), so confirm / reject / manual edges
  * survive the re-scan; the merged graph is copied into the workspace store. Without a map the
@@ -197,6 +200,12 @@ export async function finalizeWorkspaceScan({ workspaceId, name, projectPaths, p
     let id = workspaceId;
     let outcome = 'updated';
     if (!(await readWorkspace(workspaceId))) {
+      // The run is filed under the id the launch froze (scan D3): a workspace created under any
+      // other id — a member's repository root moved while the scan ran — would never list it.
+      const fresh = checkNewWorkspace({ name, projectPaths }).id;
+      if (fresh !== workspaceId) {
+        return { outcome: 'failed', workspaceId, error: `the project set now keys as ${fresh}, not ${workspaceId}: a member's repository root changed during the scan; nothing saved`, code: 'ID_MISMATCH' };
+      }
       const { workspace } = await createWorkspaceWithHomes({ name, projectPaths, description });
       id = workspace.id;
       outcome = 'created';

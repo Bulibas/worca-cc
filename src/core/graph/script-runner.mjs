@@ -70,7 +70,9 @@ export function envelopeAuditPath(ctx) {
  *  run spans, built from the run harness's workspace channel on EVERY workspace run, detached and
  *  legacy run-root modes alike (`ctx.repos` stays detached-only). `dir` = the member's checkout for
  *  this run, `projectDir` = the live project; members sorted by key, a keyless entry dropped, a
- *  missing field null. null when the run spans no workspace (a single-project run, a bench run). */
+ *  missing field null. `overrides` (wsmap M15) = the workspace's edge overrides a scan froze at run
+ *  start — present only when the channel carries them (a re-scan). null when the run spans no
+ *  workspace (a single-project run, a bench run). */
 export function workspaceEnvelope(ws) {
   if (!ws || typeof ws !== 'object' || !Array.isArray(ws.projects)) return null;
   const str = (v) => (typeof v === 'string' && v ? v : null);
@@ -78,7 +80,8 @@ export function workspaceEnvelope(ws) {
     .filter((p) => p && str(p.projectKey))
     .map((p) => ({ key: p.projectKey, name: str(p.projectName) || p.projectKey, dir: str(p.worktreeDir), projectDir: str(p.projectDir) }))
     .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  return { id: str(ws.workspaceId), name: str(ws.workspaceName), members };
+  const overrides = ws.overrides && typeof ws.overrides === 'object' ? ws.overrides : null;
+  return { id: str(ws.workspaceId), name: str(ws.workspaceName), members, ...(overrides ? { overrides } : {}) };
 }
 
 /** The envelope (§4.1): BOUND inputs only (never the synthesized await), every

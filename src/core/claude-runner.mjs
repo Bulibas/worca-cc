@@ -375,9 +375,10 @@ export function mockEnabled(opts) {
  *   (model bridge §5.3: WebSearch/WebFetch for a translated model). Absent/empty ⇒ flag omitted.
  * @param {Record<string, object>} [o.agents]  run-scoped sub-agent definitions (--agents; phases.mjs investigatorAgents)
  * @param {Record<string,string>} [o.spawnEnv]  run-level spawn env (wsmap D9: runOpts sets
- *   CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY on every fan-out node). Merged OVER the guardrail env and
- *   UNDER modelEnv (a catalog entry that sets the same key wins); string values only, reserved keys
- *   (isReservedModelEnvKey) dropped (cleanRunEnv). Absent ⇒ the spawn env is byte-identical.
+ *   CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY on every fan-out node, and CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
+ *   on the scan's two). Merged OVER the guardrail env and UNDER modelEnv (a catalog entry that sets the
+ *   same key wins); string values only, reserved keys (isReservedModelEnvKey) dropped (cleanRunEnv).
+ *   Absent ⇒ the spawn env is byte-identical.
  * @returns {Promise<{text:string, exitCode:number}>}
  */
 export async function runClaude(o = {}) {

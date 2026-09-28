@@ -31,8 +31,8 @@ const ROWS = [
   ['producer-record', JVM, /new\s+ProducerRecord(?:\s*<[^<>\n]{0,100}>)?\s*\(/g, 'provides', 'arg'],
   ['kafka-streams', JVM, /\b\w*[Bb]uilder\.stream\s*\(/g, 'consumes', 'arg'],
   ['kafka-consumer', JVM, /\b\w*[Cc]onsumer\.subscribe\s*\(\s*(?:Collections\.singletonList|Collections\.singleton|Arrays\.asList|List\.of|Set\.of|listOf|setOf|mutableListOf)\s*\(/g, 'consumes', 'list'],
-  ['kafkajs-send', ['js'], /\b\w*(?:[Pp]roducer|[Kk]afka\w*)\.send\s*\(\s*(?=\{)/g, 'provides', 'obj:topic'], // not res.send({ … })
-  ['kafkajs-subscribe', ['js'], /\b\w*(?:[Cc]onsumer|[Kk]afka\w*)\.subscribe\s*\(\s*(?=\{)/g, 'consumes', 'obj:topics|topic'], // not Apollo client.subscribe({ variables })
+  ['kafkajs-send', ['js'], /\b\w{0,60}(?:[Pp]roducer|[Kk]afka\w{0,60})\.send\s*\(\s*(?=\{)/g, 'provides', 'obj:topic'], // not res.send({ … })
+  ['kafkajs-subscribe', ['js'], /\b\w{0,60}(?:[Cc]onsumer|[Kk]afka\w{0,60})\.subscribe\s*\(\s*(?=\{)/g, 'consumes', 'obj:topics|topic'], // not Apollo client.subscribe({ variables })
   ['rdkafka-produce', ['js', 'py'], /\b(?:p|\w*[Pp]roducer)\.produce\s*\(/g, 'provides', 'arg'],
   ['kafka-python-send', ['py'], /\b\w*[Pp]roducer\.send(?:_and_wait)?\s*\(/g, 'provides', 'arg'],
   ['kafka-python-consumer', ['py'], /\b(?:KafkaConsumer|AIOKafkaConsumer)\s*\(/g, 'consumes', 'args'],

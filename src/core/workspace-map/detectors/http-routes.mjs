@@ -261,7 +261,7 @@ function annotations(code, lang, rel, lines, lineOf, st, facts, unresolved) {
         for (const p of lits) {
           const path = p.startsWith('~/') ? joinPath(tokens(p).slice(1)) : joinPath(pre, tokens(p));
           const needle = p || (prefixAnn && pre) || va.name;
-          const at = p ? code.indexOf(p, carrier.start) : carrier.start;
+          const at = p ? code.slice(0, carrier.end).indexOf(p, carrier.start) : carrier.start;
           const line = lineOf(at >= 0 && at < carrier.end ? at : carrier.start);
           for (const method of methods) add(facts, st, rel, lines, line, method.toUpperCase(), path, needle, `${va.name} (${lang})`);
         }
@@ -283,22 +283,22 @@ function railsRoutes(text, rel, lines, facts) {
   lines.forEach((raw, i) => {
     // `only: %i[index show]` (RuboCop's default symbol-array style) → `only: [:index, :show]`
     const line = raw.replace(/#.*$/, '').replace(/%[iIwW][[(]([^\])]{0,300})[\])]/g, (_, w) => `[${w.split(/\s+/).filter(Boolean).map((x) => `:${x}`).join(', ')}]`);
-    const opensBlock = /\bdo\s*(\|[^|]*\|)?\s*$/.test(line);
+    const opensBlock = /\bdo(?:\s*\|[^|]*\|)?\s*$/.test(line);
     if (overflow || (opensBlock && stack.length >= 16)) {
       if (opensBlock) overflow += 1; else if (/^\s*end\b/.test(line)) overflow -= 1;
       return;
     }
     const res = /^\s*(resources?)\s+:(\w+)(.*)$/.exec(line);
     const ns = /^\s*namespace\s+:(\w+)/.exec(line);
-    const scope = /^\s*scope\s+(?:path:\s*)?['"]([^'"]+)['"]/.exec(line) || /^\s*scope\s+.*\bpath:\s*['"]([^'"]+)['"]/.exec(line);
+    const scope = /^\s*scope\s+(?:path:\s*)?['"]([^'"]+)['"]/.exec(line) || (/^\s*scope\s/.test(line) ? /\bpath:\s*['"]([^'"]+)['"]/.exec(line) : null);
     const verbLine = /^\s*(get|post|put|patch|delete|match)\s+(?:['"]([^'"]+)['"]|:(\w+))(.*)$/.exec(line);
     const root = /^\s*root\b/.exec(line);
     const top = stack[stack.length - 1];
     if (res) {
       const plural = res[1] === 'resources';
       const base = joinPath(prefix(), res[2]);
-      const only = /only:\s*\[([^\]]*)\]|only:\s*(:\w+)/.exec(res[3]);
-      const except = /except:\s*\[([^\]]*)\]|except:\s*(:\w+)/.exec(res[3]);
+      const only = /only:\s*\[([^\]]{0,500})\]|only:\s*(:\w+)/.exec(res[3]); // bounded: a line of `only: [` runs stays linear
+      const except = /except:\s*\[([^\]]{0,500})\]|except:\s*(:\w+)/.exec(res[3]);
       const keep = (a) => (only ? symbols(only[1] ?? only[2]).includes(a) : true) && !(except && symbols(except[1] ?? except[2]).includes(a));
       for (const [action, method, suffix] of plural ? RAILS_ACTIONS : RAILS_SINGULAR) {
         if (keep(action)) facts.push(fact({ kind: 'http', dir: 'provides', key: `${method} ${base}${suffix}`, rel, lines, line: i + 1, needle: `:${res[2]}`, detail: `rails ${res[1]} #${action}`, confidence: 'exact' }));
@@ -312,7 +312,7 @@ function railsRoutes(text, rel, lines, facts) {
     if (scope) { if (opensBlock) stack.push({ path: scope[1], kind: 'scope' }); return; }
     if (verbLine) {
       const p = verbLine[2] ?? verbLine[3];
-      const via = /via:\s*(\[[^\]]*\]|:\w+)/.exec(verbLine[4] || '');
+      const via = /via:\s*(\[[^\]]{0,500}\]|:\w+)/.exec(verbLine[4] || '');
       const methods = verbLine[1] === 'match' ? (via ? symbols(via[1]).map((x) => x.toUpperCase()) : ['*']) : [verbLine[1].toUpperCase()];
       for (const method of methods) facts.push(fact({ kind: 'http', dir: 'provides', key: `${method} ${joinPath(prefix(), p)}`, rel, lines, line: i + 1, needle: p, detail: 'rails route', confidence: 'exact' }));
       if (opensBlock) stack.push({ path: '', kind: 'other' });

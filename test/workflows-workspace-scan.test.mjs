@@ -103,8 +103,9 @@ test('the fan-out stages spawn with the concurrency cap, the synthesizer without
   const r = await resolveGraph(projectDir, 'wf_workspace_scan', loadAgentRegistry(), DEFAULT_AGENTS_DIR, { isWorkspace: true });
   const call = { role: 'r', prompt: 'p', systemPrompt: 's', allowedTools: ['Read'] };
   const spawnEnvOf = (id) => runOpts({ projectDir, claudeOpts: {}, node: r.nodes[id] }, call).spawnEnv;
-  assert.deepEqual(spawnEnvOf('n_scan'), { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: '8' });
-  assert.deepEqual(spawnEnvOf('n_usage'), { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: '8' });
+  const fanOutEnv = { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: '8', CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' };
+  assert.deepEqual(spawnEnvOf('n_scan'), fanOutEnv);
+  assert.deepEqual(spawnEnvOf('n_usage'), fanOutEnv);
   assert.equal(spawnEnvOf('n_synth'), undefined);
 });
 

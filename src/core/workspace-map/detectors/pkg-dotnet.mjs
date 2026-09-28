@@ -9,7 +9,7 @@
 // facts (marked test by extract) but sets no stack.
 import { basename } from 'node:path';
 import { scanXml } from './lib/xml.mjs';
-import { splitLines, fact, memberForPath, onePerKey, cleanUnresolved } from './lib/text.mjs';
+import { splitLines, fact, memberForPath, onePerKey, cleanUnresolved, isSampleManifest } from './lib/text.mjs';
 import { isTestPath } from '../files.mjs';
 
 const PROJECT_RE = /\.(cs|fs|vb)proj$/i;
@@ -51,6 +51,6 @@ function detect({ rel, text }, ctx) {
 
 export default Object.freeze({
   id: 'pkg-dotnet',
-  claims: (rel) => PROJECT_RE.test(rel) || /(^|\/)(Directory\.Build\.props|packages\.config)$/i.test(rel),
+  claims: (rel) => (PROJECT_RE.test(rel) || /(^|\/)(Directory\.Build\.props|packages\.config)$/i.test(rel)) && !isSampleManifest(rel),
   detect,
 });

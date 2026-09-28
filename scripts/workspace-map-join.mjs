@@ -51,9 +51,12 @@ export default async function ({ inputs, outputs, ctx, log }) {
       members: ws.members.map((m) => ({ key: m.key, dir: m.dir })),
       outPath: join(dirname(mapPath), 'workspace-graph.json'),
     });
-    const map = await joinMap({ catalog, usage, runId, enrich });
+    // M15: the overrides the run froze at start (ctx.workspace.overrides — absent on a first scan): the
+    // stored change order and the synth brief follow the edges a review left standing.
+    const overrides = ctx?.workspace?.overrides ?? null;
+    const map = await joinMap({ catalog, usage, runId, enrich, overrides });
     await writeJson(mapPath, map);
-    await writeText(briefPath, synthBrief(map, { mapPath, checkerCmd: checker }));
+    await writeText(briefPath, synthBrief(map, { mapPath, checkerCmd: checker, overrides }));
     const members = Array.isArray(map?.members) ? map.members.length : 0;
     const edges = Array.isArray(map?.edges) ? map.edges.length : 0;
     return { summary: `map: ${members} members, ${edges} edges${notes.length ? ` — ${notes.join('; ')}` : ''}` };

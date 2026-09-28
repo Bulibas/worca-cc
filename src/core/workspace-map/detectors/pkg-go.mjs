@@ -5,16 +5,17 @@
 //             requirements are transitive and skipped. A `replace <mod> => ../path`
 //             (local directory) sets target = the member that directory belongs to;
 //             a replaced module that is not required is still a consume.
-import { splitLines, fact, memberForPath, aliasable, onePerKey } from './lib/text.mjs';
+import { splitLines, fact, memberForPath, aliasable, onePerKey, isSampleManifest } from './lib/text.mjs';
 import { isTestPath } from '../files.mjs';
 
-// Linear, anchored line regexes (lines are ≤ 1 MB; every quantifier is over one class).
+// Linear, anchored line regexes (lines are ≤ 1 MB; every quantifier is over one class, and neither the
+// module nor a version token of a replace holds `=`: a line of `=>` runs splits at its first `=>` only).
 const RE = {
   module: /^\s*module\s+"?([^\s"]+)"?/,
   blockOpen: /^\s*(require|replace|exclude|retract|tool|godebug)\s*\(\s*$/,
   blockClose: /^\s*\)\s*$/,
   require: /^\s*(?:require\s+)?"?([^\s"()]+)"?\s+(v[^\s/]+)(\s*\/\/.*)?$/,
-  replace: /^\s*(?:replace\s+)?"?([^\s"()]+)"?(?:\s+v\S+)?\s*=>\s*"?([^\s"]+)"?(?:\s+v\S+)?\s*$/,
+  replace: /^\s*(?:replace\s+)?"?([^\s"()=]+)"?(?:\s+v[^\s=]+)?\s*=>\s*"?([^\s"]+)"?(?:\s+v[^\s=]+)?\s*$/,
 };
 const LOCAL = /^(\.{1,2}[\\/]|\/|[A-Za-z]:[\\/])/;
 const aliasOf = (mod) => mod.split('/').filter((s) => !/^v\d+$/.test(s)).pop() || null;
@@ -69,6 +70,6 @@ function detect({ rel, text }, ctx) {
 
 export default Object.freeze({
   id: 'pkg-go',
-  claims: (rel) => /(^|\/)go\.mod$/.test(rel),
+  claims: (rel) => /(^|\/)go\.mod$/.test(rel) && !isSampleManifest(rel),
   detect,
 });

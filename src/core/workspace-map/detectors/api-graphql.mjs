@@ -8,12 +8,42 @@
 //             field name) from operation documents and gql`…` / graphql(`…`) / gql("""…""")
 // A document is SDL when a definition keyword stands at depth 0 (a selected field named `type` is
 // not SDL). Code-first schemas (resolver decorators) are not read here; a minified JS bundle is skipped.
-import { splitLines, fact, lineIndex, isMinified, onePerKey } from './lib/text.mjs';
+// A client keeps a copy of its server's schema (Apollo Kotlin / iOS, Relay, graphql-codegen): an SDL FILE whose
+// root fields the member's own (non-test) operations select provides nothing and yields one unresolved item,
+// 'client copy of a GraphQL schema' — unless the member shows server evidence, or the file sits in a JVM server's
+// resources (Spring GraphQL, DGS, graphql-java-kickstart). Operations under a root docs/ examples/ samples/ folder
+// document the API: never the member's own. SDL in code (typeDefs) provides.
+import { splitLines, fact, lineIndex, isMinified, onePerKey, cleanUnresolved } from './lib/text.mjs';
+import { isTestPath } from '../files.mjs';
+import { LIMITS } from '../../../shared/workspace-map/limits.mjs';
 
 const DOC_EXT_RE = /\.(graphql|graphqls|gql)$/i;
 const CODE_EXT_RE = /\.(js|jsx|ts|tsx|mjs|cjs|vue|svelte|py)$/i;
 const ROOTS = { query: 'Query', mutation: 'Mutation', subscription: 'Subscription' };
 const SDL_RE = /(^|[\s}])(?:extend\s+)?(?:type|schema|interface|input|enum|scalar|union|directive)\s+[@\w{]/;
+// Server evidence: a GraphQL server library imported by the member's own JS / TS / Python code (never by a test or
+// a mock server: MOCK_RE, api-proto's rule), or a file only a server has, for the servers whose code no detector
+// here reads (gqlgen's config, a graphql-ruby schema class, Lighthouse's config, a Laravel app/GraphQL/ class).
+// Yoga's client packages (`@graphql-yoga/apollo-link`, `@graphql-yoga/urql-exchange`) are no evidence.
+// Bounded runs only: each scan is linear on 1 MiB.
+const SERVER_JS_RE = /(?:\bfrom[ \t]{0,20}|\brequire[ \t]{0,20}\([ \t]{0,20}|\bimport[ \t]{0,20}(?:\([ \t]{0,20})?)['"](?:apollo-server(?:-[a-z]{1,20}){0,3}|@apollo\/(?:server|subgraph|gateway|federation)|graphql-yoga|@graphql-yoga\/(?!apollo-link\b|urql-exchange\b)[\w-]{1,40}|mercurius|express-graphql|koa-graphql|graphql-http\/lib\/use\/[\w-]{1,40}|@nestjs\/(?:graphql|apollo|mercurius)|type-graphql|@pothos\/core|nexus|graphql-compose|graphql-helix|@envelop\/core|@redwoodjs\/graphql-server|aws-cdk-lib\/aws-appsync|@aws-cdk\/aws-appsync(?:-alpha)?|postgraphile|@keystone-6\/core|@neo4j\/graphql|graphql-modules|@hono\/graphql-server)(?:\/[\w.@-]{1,100}){0,6}['"]/;
+const SERVER_PY_RE = /^[ \t]{0,40}(?:from|import)[ \t]{1,20}(?:strawberry(?:_django)?|graphene(?:_django|_sqlalchemy|_mongo|_federation)?|ariadne|tartiflette|graphql_server|flask_graphql)\b/m;
+const SERVER_FILE_RE = /(?:^|\/)(?:\.?gqlgen\.ya?ml|app\/graphql\/[^/]{0,200}schema\.rb|config\/lighthouse\.php|app\/GraphQL\/(?:[^/]{1,200}\/){0,20}[^/]{1,200}\.php)$/i;
+const MOCK_RE = /(?:^|\/)[^/]{0,200}(?:mock|fake|stub)/i;
+// …and the schema-first servers whose code no parser here reads: Go graph-gophers/graphql-go (MustParseSchema over an
+// embedded schema.graphql), gqlgen's handler, graphql-go/handler; .NET Hot Chocolate / GraphQL.NET; PHP graphql-php;
+// Rust async-graphql / juniper; Elixir Absinthe; graphql-java's SchemaParser, DGS. Evidence only: these files add no fact.
+const SERVER_CODE_EXT_RE = /\.(go|cs|php|rs|ex|exs|java|kt)$/i;
+const SERVER_OTHER_RE = /"github\.com\/(?:graph-gophers\/graphql-go|99designs\/gqlgen\/graphql\/handler|graphql-go\/handler)"|\bAddGraphQL(?:Server)?[ \t]{0,20}\(|\busing[ \t]{1,20}(?:HotChocolate|GraphQL\.Server)\b|\bGraphQL\\(?:Utils\\BuildSchema|Server\\StandardServer)\b|\buse[ \t]{1,20}(?:async_graphql(?:_\w{1,40})?|juniper)::|\buse[ \t]{1,20}Absinthe\.Schema\b|\bgraphql\.schema\.idl\.SchemaParser\b|\bcom\.netflix\.graphql\.dgs\b(?!\.client\b)/;
+// Operations under a ROOT docs / examples / samples folder document the API; they are not the member's own client
+// operations (the root only: isSamplePath also matches a Java package such as `src/main/java/com/example/`).
+const DOCS_RE = /^(?:docs?|examples?|samples?)\//i;
+// At most this many distinct root fields of the member's own operations are kept for the copy verdict.
+const OPS_MAX = 50000;
+// A JVM server's classpath resources: SDL there (Spring GraphQL's graphql/, DGS's schema/, graphql-java-kickstart's
+// resources root) is the member's own schema, never a copy (Apollo Kotlin keeps its copy under src/main/graphql/).
+// …and Hasura's actions SDL (`metadata/actions.graphql`): the custom mutations and queries the Hasura server itself serves.
+const JVM_SERVER_SDL_RE = /(?:^|\/)src\/main\/resources\/|(?:^|\/)metadata\/actions\.graphql$/;
 
 /** Blank "strings", """block strings""" and # comments (newlines kept, offsets stable). */
 export function blankGraphql(text) {
@@ -194,18 +224,55 @@ function fromDocument(t, rel, lines, lineOf, base, facts) {
   for (const f of operationFields(clean)) facts.push(fact({ kind: 'graphql', dir: 'consumes', key: f.key, rel, lines, line: lineOf(base + f.offset), needle: f.field, detail: f.op, confidence: 'exact' }));
 }
 
-function detect({ rel, text }) {
+function detect({ rel, text }, ctx) {
   if (isMinified(rel, text)) return { facts: [] }; // a bundle's gql templates belong to third-party code
+  const st = ctx && typeof ctx.state === 'object' && ctx.state ? ctx.state : {};
+  st.sdl ??= [];
+  st.ops ??= new Set();
+  const own = !isTestPath(rel); // test code neither queries for the member nor serves
+  const doc = DOC_EXT_RE.test(rel);
+  if (own && !st.server && CODE_EXT_RE.test(rel) && !MOCK_RE.test(rel) && (/\.py$/i.test(rel) ? SERVER_PY_RE : SERVER_JS_RE).test(text)) st.server = true;
+  // (read only in a member whose listing holds a schema file: evidence decides nothing else)
+  if (SERVER_CODE_EXT_RE.test(rel)) {
+    st.sdlListed ??= Array.isArray(ctx?.files) && ctx.files.some((f) => typeof f === 'string' && DOC_EXT_RE.test(f));
+    if (st.sdlListed && own && !st.server && !MOCK_RE.test(rel) && SERVER_OTHER_RE.test(text)) st.server = true;
+    return { facts: [] };
+  }
   const lines = splitLines(text);
   const lineOf = lineIndex(text);
   const facts = [];
-  if (DOC_EXT_RE.test(rel)) fromDocument(text, rel, lines, lineOf, 0, facts);
+  if (doc) fromDocument(text, rel, lines, lineOf, 0, facts);
   else if (/gql|graphql/.test(text)) for (const tpl of templates(text)) fromDocument(tpl.body, rel, lines, lineOf, tpl.start, facts);
-  return { facts: onePerKey(facts) };
+  // at most OPS_MAX root fields in all: crafted operation files never grow the member's state without bound
+  if (own && !DOCS_RE.test(rel)) for (const f of facts) if (f.dir === 'consumes' && st.ops.size < OPS_MAX) st.ops.add(f.key);
+  if (!doc) return { facts: onePerKey(facts) };
+  // An SDL file waits for finish(): it may be a client's copy of its server's schema. At most the member's fact cap in
+  // all (extract keeps no more): a crafted schema of 100 000 root fields per file is never held for every file.
+  const sdl = onePerKey(facts.filter((f) => f.dir === 'provides')).slice(0, Math.max(0, LIMITS.MAX_FACTS_PER_MEMBER - (st.sdlFacts ?? 0)));
+  if (sdl.length) { st.sdl.push({ file: rel, facts: sdl }); st.sdlFacts = (st.sdlFacts ?? 0) + sdl.length; }
+  return { facts: onePerKey(facts.filter((f) => f.dir === 'consumes')) };
+}
+
+/** The SDL files, once every file was read: a schema whose root fields the member's own (non-test) operations
+ *  select is a client's copy of its server's schema — no provides, one unresolved item — unless the member shows
+ *  server evidence or the file sits in a JVM server's schema folder. Every other schema provides. */
+function finish(ctx) {
+  const st = ctx && typeof ctx.state === 'object' && ctx.state ? ctx.state : {};
+  if (!st.sdl?.length) return undefined;
+  const server = st.server === true
+    || (Array.isArray(ctx.files) && ctx.files.some((f) => typeof f === 'string' && SERVER_FILE_RE.test(f) && !isTestPath(f)));
+  const facts = [];
+  const unresolved = [];
+  for (const { file, facts: provides } of st.sdl) {
+    if (!server && !JVM_SERVER_SDL_RE.test(file) && provides.some((f) => st.ops.has(f.key))) unresolved.push({ kind: 'graphql', raw: file, file, line: 1, reason: 'client copy of a GraphQL schema' });
+    else for (const f of provides) facts.push(f); // never a spread: 100 000 arguments overflow the stack
+  }
+  return { facts: onePerKey(facts), unresolved: cleanUnresolved(st, null, unresolved) };
 }
 
 export default Object.freeze({
   id: 'api-graphql',
-  claims: (rel) => DOC_EXT_RE.test(rel) || CODE_EXT_RE.test(rel),
+  claims: (rel) => DOC_EXT_RE.test(rel) || CODE_EXT_RE.test(rel) || SERVER_CODE_EXT_RE.test(rel),
   detect,
+  finish,
 });

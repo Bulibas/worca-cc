@@ -20,6 +20,7 @@ import { readClarify, readReview } from './protocol.mjs';
 import { writeClarify, readClarifyRow } from './artifacts.mjs';
 import { join } from 'node:path';
 import { LIMITS } from '../shared/workspace-map/limits.mjs';
+import { QUOTED_TEXT_NOTE, ROLE_QUOTE_LABELS } from '../shared/workspace-map/render.mjs';
 
 // ── allowedTools per role ──────────────────────────────────────────────────────
 // `Skill` lets agents invoke project (.claude/skills) and personal (~/.claude/skills)
@@ -77,25 +78,36 @@ export function ctxFanOut(ctx) {
   return !!(ctx.node ? ctx.node.fanOut : ctx.fanOut);
 }
 
+/** wsmap M3: the scan's two fan-out nodes (agent keys). Their bodies dispatch investigators in waves, so
+ *  they alone run with background tasks off; every other fan-out node keeps them (a separate decision). */
+const FOREGROUND_FANOUT = Object.freeze(['workspaceScanner', 'workspaceUsageMapper']);
+
 /**
  * D9 (wsmap spec): the run-level spawn env of a fan-out node — Claude Code runs a batch of
  * concurrency-safe tool calls (the Agent tool is one) at most CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY
  * at a time (default 10), so every fan-out spawn carries a cap of at most 8 investigators: 8, or
  * the parent env's own LOWER value when it sets the variable to a positive integer (a higher, zero,
- * fractional or unreadable value becomes 8). undefined for every node that cannot fan out ⇒ that
- * spawn env stays byte-identical. Never part of modelEnv: a catalog entry that sets the same
- * variable wins over it (claude-runner.mjs runReal merge order). Pure (the env is a parameter) +
- * exported for testing.
+ * fractional or unreadable value becomes 8). That cap bounds FOREGROUND calls only: the CLI runs an
+ * Agent call in the background unless background tasks are off. The scan's two fan-out nodes
+ * (FOREGROUND_FANOUT, by the node's agent key, or the key a workspace variant stands in for: the
+ * exec ctx's `meta.workspaceVariantOf`) therefore also get CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
+ * (as Ask Worca's ASK_SPAWN_ENV does): every dispatch runs in the foreground, and the CLI drops
+ * `run_in_background` from the Agent, Bash and PowerShell tools' schemas. undefined for every node
+ * that cannot fan out ⇒ that spawn env stays byte-identical. Never part of modelEnv: a catalog entry
+ * that sets either variable wins over it (claude-runner.mjs runReal merge order). Pure (the env is a
+ * parameter) + exported for testing.
  * @param {object} ctx
  * @param {Record<string, string|undefined>} [env] the parent env
- * @returns {{CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: string}|undefined}
+ * @returns {{CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: string, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS?: '1'}|undefined}
  */
 export function fanOutSpawnEnv(ctx, env = process.env) {
   if (!ctxFanOut(ctx)) return undefined;
   const cap = LIMITS.INVESTIGATOR_CONCURRENCY;
   const raw = String(env?.CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY ?? '').trim();
   const ambient = /^\d+$/.test(raw) ? Number(raw) : 0;
-  return { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: String(ambient > 0 ? Math.min(cap, ambient) : cap) };
+  const out = { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: String(ambient > 0 ? Math.min(cap, ambient) : cap) };
+  if (FOREGROUND_FANOUT.includes(ctx.node?.key) || FOREGROUND_FANOUT.includes(ctx.meta?.workspaceVariantOf)) out.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1';
+  return out;
 }
 
 /**
@@ -346,7 +358,8 @@ export function fanOutDirective(fanOut, { omitProjectAgents = false, subagentMod
  * after the toolInstruction and before the role body. Pure + exported. Returns ''
  * when there is no workspace (or no description), so single-project system prompts
  * are byte-identical. The frozen description is injected VERBATIM — no length cap
- * (a scan's description is held to its line budget by the render card; a hand edit has no cap).
+ * (a scan's description is held to its line budget by the render card; a hand edit has no cap) —
+ * after one framing sentence (QUOTED_TEXT_NOTE) when it quotes project text (`README: "…"`).
  * Accepts either the bus
  * channel shape (`workspaceDescription`, see orchestrator.mjs#_workspaceChannel) or
  * a plain `description` field.
@@ -357,7 +370,11 @@ export function workspaceContextBlock(ws) {
   const desc = String((ws && (ws.workspaceDescription ?? ws.description)) || '').trim();
   if (!desc) return '';
   const names = (ws.projects || []).map((p) => p.projectName).filter(Boolean).join(', ');
-  return `## Workspace Context\n\n${desc}\n\nMember projects: ${names}.\n`;
+  // M1: a scan quotes every role it copied from a member's own files (`README: "…"`); only then does
+  // the block say such text is data. Any other description (a hand edit, or one rendered before roles
+  // were quoted) passes through byte-identical.
+  const note = ROLE_QUOTE_LABELS.some((l) => desc.includes(`${l}: "`)) ? `${QUOTED_TEXT_NOTE}\n\n` : '';
+  return `## Workspace Context\n\n${note}${desc}\n\nMember projects: ${names}.\n`;
 }
 
 /**
@@ -668,9 +685,10 @@ export function runOpts(ctx, { role, prompt, systemPrompt, allowedTools }) {
     // touch this env: its wires are the prompt block (subagentModelDirective) and, for a pinned effort, the --agents definition (investigatorAgents),
     // and CLAUDE_CODE_SUBAGENT_MODEL is a reserved model-env key.
     modelEnv: resolveDispatchModelEnv(c, ctx),
-    // D9 (wsmap): the fan-out concurrency cap (8, or the parent env's lower value), merged OVER the
-    // guardrail env and UNDER modelEnv. undefined for every non-fan-out node ⇒ nothing merged ⇒
-    // that spawn env is byte-identical.
+    // D9 (wsmap): the fan-out concurrency cap (8, or the parent env's lower value), plus background
+    // tasks off on the scan's two fan-out nodes (so the cap holds there), merged OVER the guardrail env
+    // and UNDER modelEnv. undefined for every non-fan-out node ⇒ nothing merged ⇒ that spawn env is
+    // byte-identical.
     spawnEnv: fanOutSpawnEnv(ctx),
     // Model bridge (model-bridge-design.md §5.3): a translated model has no
     // server-side web tools, so the runner withholds them. undefined for every

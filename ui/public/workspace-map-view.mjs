@@ -11,12 +11,13 @@ import { mapSummary } from '../../src/shared/workspace-map/summary.mjs';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const CONF_TONE = { exact: 'green', verified: 'blue', heuristic: 'amber', inferred: 'grey' };
-const STATE_TONE = { auto: 'grey', confirmed: 'green', rejected: 'red', manual: 'violet', missing: 'amber' };
+const STATE_TONE = { auto: 'grey', confirmed: 'green', rejected: 'red', manual: 'violet', missing: 'amber', stale: 'amber' };
 const ACTIONS = {
   auto: [['wm-confirm', 'Confirm'], ['wm-reject', 'Reject']],
   confirmed: [['wm-reject', 'Reject'], ['wm-clear', 'Clear']],
   rejected: [['wm-confirm', 'Confirm'], ['wm-clear', 'Clear']],
   missing: [['wm-clear', 'Clear']],
+  stale: [['wm-clear', 'Clear']],
   manual: [['wm-del', 'Delete']],
 };
 const NAME_MAX = 20;

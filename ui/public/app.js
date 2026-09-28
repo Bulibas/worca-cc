@@ -7358,6 +7358,8 @@ function regenerateWdDescription(btn) {
 if (el.wsDetail) {
   el.wsDetail.addEventListener('click', async (e) => {
     if (!wsDetail) return;
+    // The second click of a double-click lands on the repainted Map tab: a different verdict or another row.
+    if (e.detail > 1 && e.target.closest('.wm-actions, .wm-add, .wm-regen, .wm-filters, .wm-coverage, .wm-graph')) return;
     const id = wsDetail.id;
     const w = workspaceById(id);
     const member = e.target.closest && e.target.closest('.wd-member[data-key]');

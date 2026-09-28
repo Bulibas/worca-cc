@@ -7,6 +7,7 @@
 import { MAP_VERSION } from './limits.mjs';
 import { KINDS, checkOverrides } from './schema.mjs';
 import { manualEdgeId } from './ids.mjs';
+import { normBody, normKey } from './keys.mjs';
 
 const byStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const clean = (overrides) => checkOverrides(overrides ?? emptyOverrides()).value;
@@ -19,18 +20,20 @@ export function emptyOverrides() {
 }
 
 /** A manual edge is a person's assertion: no scan measured it, so its confidence is null. A
- *  missing edge was confirmed by a person on an earlier scan: 'verified'. */
+ *  missing edge was confirmed by a person on an earlier scan: 'verified'. A stale review (a
+ *  rejection whose edge is gone) asserts no edge at all: null. */
 const synthetic = (o, state, extra) => ({
   id: o.id, from: o.from, to: o.to, kind: o.kind, norm: null, display: o.display, label: null,
-  detail: o.detail ?? '', confidence: state === 'manual' ? null : 'verified', sources: [state === 'manual' ? 'manual' : 'override'],
+  detail: o.detail ?? '', confidence: state === 'missing' ? 'verified' : null, sources: [state === 'manual' ? 'manual' : 'override'],
   evidence: { from: [], to: [] }, ...extra, state,
 });
 
-/** map.edges merged with overrides. Each returned edge = the map edge (or manual/missing
+/** map.edges merged with overrides. Each returned edge = the map edge (or manual/missing/stale
  *  synthetic edge) + { state }. auto: no override; confirmed/rejected: override on a present
  *  edge; manual: overrides.manual (synthetic edge, confidence null, no evidence); missing: a
  *  CONFIRMED override whose id is absent from map.edges (synthetic edge from the snapshot,
- *  confidence 'verified', no evidence). A REJECTED override whose id is absent is ignored.
+ *  confidence 'verified', no evidence); stale: a REJECTED override whose id is absent (synthetic
+ *  edge from the snapshot, confidence null, no evidence) — a review to clear, never an edge.
  *  Synthetic edges carry norm: null. Sorted by from, to, kind, display. map may be null. */
 export function effectiveEdges(map, overrides) {
   const ov = clean(overrides);
@@ -40,7 +43,7 @@ export function effectiveEdges(map, overrides) {
   const present = new Set(edges.map((e) => e.id));
   const out = edges.map((e) => ({ ...e, state: Object.hasOwn(ov.edges, e.id) ? ov.edges[e.id].state : 'auto' }));
   for (const [id, o] of Object.entries(ov.edges)) {
-    if (o.state === 'confirmed' && !present.has(id)) out.push(synthetic({ id, ...o }, 'missing', { at: o.at }));
+    if (!present.has(id)) out.push(synthetic({ id, ...o }, o.state === 'confirmed' ? 'missing' : 'stale', { at: o.at }));
   }
   for (const m of ov.manual) out.push(synthetic(m, 'manual', { createdAt: m.createdAt }));
   return out.sort((a, b) => byStr(a.from, b.from) || byStr(a.to, b.to) || byStr(a.kind, b.kind)
@@ -90,4 +93,63 @@ export function removeManualEdge(overrides, id) {
   const next = clean(overrides);
   next.manual = next.manual.filter((m) => m.id !== id);
   return next;
+}
+
+/** Separates the parts of a match key: no member key, kind or soft key holds a NUL. */
+const SEP = String.fromCharCode(0);
+
+/** What an agent may reword while the relation stays the same (M14): the key read from the display (for
+ *  `other` its folded label), for http the path without its method; a display its kind cannot key is folded
+ *  as text. null for an empty display, which never matches. */
+function softKey(kind, display) {
+  const d = text(display).replace(/\s+/g, ' ').trim();
+  if (!d) return null;
+  const norm = normKey(kind, d);
+  if (!norm) return `text:${d.toLowerCase()}`;
+  if (kind !== 'http') return norm;
+  const body = normBody(norm);
+  return `http:${body.slice(body.indexOf(' ') + 1)}`;
+}
+
+/** The method an http display names ('*' when it names none; '*' for every other kind). */
+function methodOf(kind, display) {
+  const body = kind === 'http' ? normBody(normKey('http', text(display))) : '';
+  return body ? body.slice(0, body.indexOf(' ')) : '*';
+}
+
+/** Finalize (D7, M14): an override whose edge id the new map lacks (an orphan) moves onto the map edge an
+ *  agent reworded it into, only on a UNIQUE match both ways: exactly one orphan and exactly one map edge
+ *  marked `agentKeyed` share (from, to, kind, soft key) — a reviewed one counts — that edge carries no
+ *  override of its own, and for http their methods agree (the same, or either one unnamed). The moved override
+ *  keeps its state and `at` and takes the edge's snapshot. Every other orphan stays under its old id: never
+ *  dropped, never applied to another edge. → a new doc, or `overrides` itself when nothing moves (the input is never mutated).
+ *  Never throws: finalize runs it inside its write transaction. */
+export function rekeyOverrides(overrides, map) {
+  const ov = clean(overrides);
+  const edges = Array.isArray(map?.edges)
+    ? map.edges.filter((e) => e && typeof e.id === 'string' && typeof e.from === 'string' && typeof e.to === 'string' && typeof e.kind === 'string')
+    : [];
+  const present = new Set(edges.map((e) => e.id));
+  const keyOf = (x) => { const s = softKey(x.kind, x.display); return s === null ? null : `${x.from}${SEP}${x.to}${SEP}${x.kind}${SEP}${s}`; };
+  const put = (into, k, v) => { if (k === null) return; if (!into.has(k)) into.set(k, []); into.get(k).push(v); };
+  const orphans = new Map();
+  for (const [id, o] of Object.entries(ov.edges)) if (!present.has(id)) put(orphans, keyOf(o), id);
+  if (!orphans.size) return overrides;
+  const targets = new Map();
+  for (const e of edges) if (e.agentKeyed === true && /^x_[0-9a-f]{12}$/.test(e.id)) put(targets, keyOf(e), e);
+  let moved = false;
+  for (const [k, ids] of orphans) {
+    const hits = targets.get(k) || [];
+    // a reviewed edge of the same soft key counts too: beside it, the unreviewed one is no unique match
+    if (ids.length !== 1 || hits.length !== 1 || Object.hasOwn(ov.edges, hits[0].id)) continue;
+    const o = ov.edges[ids[0]];
+    const e = hits[0];
+    const a = methodOf(o.kind, o.display);
+    const b = methodOf(e.kind, e.display);
+    if (a !== b && a !== '*' && b !== '*') continue;
+    delete ov.edges[ids[0]];
+    ov.edges[e.id] = { state: o.state, from: e.from, to: e.to, kind: e.kind, display: text(e.display).slice(0, 300), at: o.at };
+    moved = true;
+  }
+  return moved ? ov : overrides;
 }

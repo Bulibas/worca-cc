@@ -82,6 +82,8 @@ import { readSettings as readRawSettings } from './settings.mjs';
 import { byActor } from './identity.mjs';
 import { WORKSPACE_SCAN_WORKFLOW_ID } from './graph/builtin-workflows.mjs';
 import { finalizeWorkspaceScan } from './workspace-scan-run.mjs';
+import { readWorkspaceMap } from './workspaces.mjs';
+import { redactSecrets } from '../shared/workspace-map/redact.mjs';
 
 // worca-cc repo root; holds skills/. fileURLToPath, never URL.pathname: the
 // latter is `/C:/…` on Windows and %-encoded everywhere (see DEFAULT_AGENTS_DIR
@@ -618,6 +620,7 @@ export class RunHarness extends EventEmitter {
     this.branchInfos = new Map();      // projectKey -> createWorktree() result
     this.toolInstructions = new Map(); // projectKey -> per-project graph instruction
     this.workspaceDescription = '';    // frozen at run start (after createPipeline)
+    this.workspaceOverrides = null;    // wsmap M15: a re-scan's stored overrides, read at run start / resume
 
     // primaryCwd: the lowest-projectKey member in workspace mode, else the scalar
     // projectDir. resolve() keeps the single-project behavior byte-identical.
@@ -1118,6 +1121,7 @@ export class RunHarness extends EventEmitter {
         this.workspaceDescription = await readFile(
           join(this.pipeline.dir, 'workspace-description.md'), 'utf8',
         ).catch(() => this.workspace.description || '');
+        this.workspaceOverrides = await this._scanOverrides();
         this.state.target = 'workspace';
         this.state.workspaceId = this.workspace.id;
         this.state.workspaceKey = this.workspaceKey;
@@ -1527,6 +1531,7 @@ export class RunHarness extends EventEmitter {
       // ── workspace rehydration (no-op on single-project) ──
       if (this.isWorkspace && meta) {
         this.workspaceDescription = meta.workspaceDescription || '';
+        this.workspaceOverrides = await this._scanOverrides();
         this.checkpointRefs = meta.checkpointRefs || {};
         for (const p of rehydrated.memberWorktrees) {
           if (p.projectKey && p.worktreeDir) {
@@ -3263,6 +3268,19 @@ export class RunHarness extends EventEmitter {
     return ++this._recoverySeq;
   }
 
+  /** wsmap M15: the overrides a Workspace scan's join and render cards apply (its stored change order,
+   *  its synth brief and its run-folder description follow the edges a review left standing) — the
+   *  stored overrides of the workspace finalize will write (the same id: `workspace.id`, else
+   *  `workspaceKey`), read ONCE when the run starts and again when it resumes. null off a scan, and on a
+   *  first scan (the workspace does not exist yet). A manual edge's display and detail are a person's text,
+   *  stored as typed: this doc reaches every script card's envelope file (a run artifact), so it carries
+   *  them redacted, as the description shows them (D21). The join and render cards read no manual text. */
+  async _scanOverrides() {
+    if (!this._isWorkspaceScan()) return null;
+    const ov = (await readWorkspaceMap(this.workspace.id || this.workspaceKey))?.overrides ?? null;
+    return ov && { ...ov, manual: ov.manual.map((m) => ({ ...m, display: redactSecrets(m.display).slice(0, 300), detail: redactSecrets(m.detail).slice(0, 200) })) };
+  }
+
   /**
    * Build the read-only `workspace` metadata channel handle (the bus value for the
    * workspace channel): the frozen description + the member set with each member's
@@ -3273,6 +3291,8 @@ export class RunHarness extends EventEmitter {
     return {
       kind: 'metadata',
       workspaceDescription: this.workspaceDescription,
+      // wsmap M15: a re-scan's frozen overrides (null otherwise) — the envelope's ctx.workspace.overrides.
+      overrides: this.workspaceOverrides ?? null,
       // wsmap P2: what the script envelope's ctx.workspace is built from (script-runner.mjs
       // workspaceEnvelope) — the target's id (a first scan's is the future workspaceKey) and name,
       // and each member's LIVE project dir beside its checkout.
@@ -3448,6 +3468,14 @@ export class RunHarness extends EventEmitter {
       topReal = await realpath(top.stdout.trim()).catch(() => top.stdout.trim());
     }
     const isOwnRepo = topReal === projReal;
+    // A read-only Workspace scan (scan D5) never `git init`s or commits a member. Both scan routes
+    // refuse such a member up front (workspaces.mjs scanMemberProblems); this refuses one that
+    // changed since, on the first run and on the setup replay alike.
+    if (this._isWorkspaceScan()) {
+      const why = !isOwnRepo ? 'is not its own git repository'
+        : (await this._git(['rev-parse', '--verify', '-q', 'HEAD'], { cwd: dir })).ok ? null : 'has no commit';
+      if (why) throw new Error(`read-only workspace scan: ${dir} ${why}`);
+    }
     if (!isOwnRepo) {
       if (topReal) {
         this._log(

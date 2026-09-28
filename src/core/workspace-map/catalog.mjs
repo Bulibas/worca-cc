@@ -1,21 +1,23 @@
 // src/core/workspace-map/catalog.mjs
 // Stage 3 (spec §6.3): everything the workspace PROVIDES, as one catalog of stable entries.
 // Verifies the survey's facts (D4), merges them with the static ones, builds the alias index
-// (an alias two members claim is ambiguous and unused), resolves static consumes by exact norm
-// or host alias, runs the language-agnostic candidate scan (D13), and writes one bounded usage
-// brief per member for the closed usage lookup (§6.4). Never throws.
+// (the strongest claim of an alias names its member; a tie there leaves it unused), resolves static
+// consumes by exact norm or host alias, runs the language-agnostic candidate scan (D13), and writes one
+// bounded usage brief per member for the closed usage lookup (§6.4). Never throws.
 
 import { realpath } from 'node:fs/promises';
 
 import { LIMITS, MAP_VERSION } from '../../shared/workspace-map/limits.mjs';
 import { KIND_LABELS, checkSurvey, storedCheckError } from '../../shared/workspace-map/schema.mjs';
-import { envStems, hostAlias, hostName, httpTerm, normBody, normKey, normPath, pathSuffixMatch } from '../../shared/workspace-map/keys.mjs';
+import { cutQuery, envStems, hostAlias, hostName, httpTerm, normBody, normKey, normPath, pathSuffixMatch } from '../../shared/workspace-map/keys.mjs';
 import { entryId } from '../../shared/workspace-map/ids.mjs';
 import { redactSecrets } from '../../shared/workspace-map/redact.mjs';
 import { mapWithCap } from '../fanout.mjs';
+import { blankGraphql, sdlFields } from './detectors/api-graphql.mjs';
 import { isTestPath, listMemberFiles, readText } from './files.mjs';
 import { createFileCache, verifyFact } from './verify.mjs';
 import { extractLiterals } from './lexer.mjs';
+import { aliasTier, GUESS_SOURCES } from './alias-tiers.mjs';
 
 const byStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const msg = (err) => redactSecrets(String((err && err.message) || err || 'unknown error')).slice(0, 300);
@@ -156,7 +158,7 @@ function extractMembers(extract) {
 const evidenceOf = (f) => ({ file: f.file, line: f.line, match: f.match });
 /** What a rejected LLM fact keeps: never its match, detail or target (they may hold a secret the
  *  verifier never saw on a real line). */
-const rejectedFact = (f) => ({ kind: f.kind, key: redactSecrets(String(f.key ?? '')).slice(0, 200), file: redactSecrets(String(f.file ?? '')).slice(0, 300), line: f.line });
+const rejectedFact = (f) => ({ kind: f.kind, key: (f.kind === 'http' ? cutQuery(redactSecrets(String(f.key ?? ''))) : redactSecrets(String(f.key ?? ''))).slice(0, 200), file: redactSecrets(String(f.file ?? '')).slice(0, 300), line: f.line });
 
 /** Spec §6.3 step 2: one fact per (dir, norm), non-test static evidence first, ≤ 3 evidence. A
  *  third-party call (`external`, X2) never merges with an internal call of the same norm, and calls of
@@ -361,6 +363,9 @@ async function scanMember(m, entries, resolved, limits, aliasIndex) {
         // A cut inside a kept URL ('…&redirect_auth=http') redacts unlike the whole line: shorten it until it
         // is its own redaction, so the usage agent's citation of it verifies (C2).
         let match = lit.raw.slice(0, limits.MATCH_MAX);
+        // A query parameter of any name may carry a credential and no match needs one: cut before the query and a '#'
+        // fragment (keys.mjs cutQuery) — never inside a placeholder, never before Ruby's '#{' interpolation.
+        match = cutQuery(match);
         while (match.length < lit.raw.length && match.length > 1 && redactSecrets(match) !== match) match = match.slice(0, -1);
         list.push({ entry: e.id, file: rel, line: lit.line, match, via });
       }
@@ -398,13 +403,22 @@ export async function buildCatalog({ extract, survey, limits = LIMITS } = {}) {
         .filter((f) => f && typeof f.norm === 'string' && typeof f.file === 'string');
       const llm = [];
       const sv = surveyOf(m.key);
+      // M9: a GraphQL schema file extract judged a client's copy of its server's schema is neither this member's
+      // API nor its operations: a survey fact citing it would give every root field a second owner again. Paths
+      // compare case-folded: a macOS or Windows checkout verifies the file in any letter case.
+      const copies = new Set((Array.isArray(m.unresolved) ? m.unresolved : [])
+        .filter((u) => u && u.kind === 'graphql' && u.reason === 'client copy of a GraphQL schema' && typeof u.file === 'string')
+        .map((u) => u.file.toLowerCase()));
       for (const dir of ['provides', 'consumes']) {
         for (const f of sv ? sv[dir] : []) {
           const v = await verifyFact(m.dir, f, { cache });
           if (!v.ok) { out.rejected.push({ member: m.key, source: 'survey', reason: v.reason, fact: rejectedFact(f) }); continue; }
           const x = v.fact;
+          // An agent may key an HTTP call by the full URL it read: neither its key nor its citation keeps the query (D21).
+          if (x.kind === 'http') { x.key = cutQuery(x.key); x.match = cutQuery(x.match); }
           const norm = normKey(x.kind, x.key);
           if (!norm) { out.rejected.push({ member: m.key, source: 'survey', reason: 'unkeyable', fact: rejectedFact(x) }); continue; }
+          if (x.kind === 'graphql' && copies.has(x.file.toLowerCase())) { out.rejected.push({ member: m.key, source: 'survey', reason: 'client copy of a GraphQL schema', fact: rejectedFact(x) }); continue; }
           llm.push({ kind: x.kind, dir, key: x.key, norm, file: x.file, line: x.line, match: x.match,
             detail: x.detail ?? null, label: x.kind === 'other' ? x.label ?? null : null,
             target: dir === 'consumes' ? x.target ?? null : null,
@@ -414,24 +428,46 @@ export async function buildCatalog({ extract, survey, limits = LIMITS } = {}) {
       counts.set(m.key, { static: statics.length, llm: llm.length });
       observed.set(m.key, [...statics, ...llm]);
     }
-    // Step 3: aliases. Every member's key is its own alias; an alias two members claim is unused.
+    // Step 3: aliases, each claim with its tier (alias-tiers.mjs): a member's key and name are identity claims
+    // (0), a detector alias takes its source's tier, a survey alias is the weakest (3) and counts only for a
+    // member whose needs list aliases. The claimants of an alias's strongest tier own it: one → aliasIndex,
+    // two or more → ambiguousAliases (unused). A guess (`GUESS_SOURCES`: a member's own default name for a workload or
+    // a stub, an npm scope tail, a survey alias) never settles a collision with a manifest-tier name either way: the two
+    // tie, as at 15486564, so neither a client library's package name nor the guess takes a host the service answers to.
+    // A member's own deploy name by default (`deploy-self`: a monorepo's per-service build or a workload whose image does
+    // not name it) ties with another member's deploy name too, as at 15486564: a peer's `api: build: .` never takes the
+    // host a monorepo's own `api` answers to, so the monorepo's calls to it stay its own.
     const claims = new Map();
-    const claim = (alias, key) => {
+    const guessed = new Map(); // alias → the members that claim it by a guess
+    const selfGuessed = new Map(); // alias → the members that claim it by a `deploy-self` guess
+    const MANIFEST_TIER = aliasTier('package.json');
+    const DEPLOY_TIER = aliasTier('compose');
+    const claim = (alias, key, tier, source = null) => {
       const a = typeof alias === 'string' ? alias.trim().toLowerCase() : '';
       if (!a || a.length > 100 || /\s/.test(a) || a === '__proto__') return;
-      if (!claims.has(a)) claims.set(a, new Set());
-      claims.get(a).add(key);
+      if (!claims.has(a)) claims.set(a, new Map());
+      const byKey = claims.get(a);
+      if (!byKey.has(key) || tier < byKey.get(key)) byKey.set(key, tier);
+      if (GUESS_SOURCES.includes(source)) { if (!guessed.has(a)) guessed.set(a, new Set()); guessed.get(a).add(key); }
+      if (source === 'deploy-self') { if (!selfGuessed.has(a)) selfGuessed.set(a, new Set()); selfGuessed.get(a).add(key); }
     };
     for (const m of members) {
-      claim(m.key, m.key);
-      for (const a of Array.isArray(m.aliases) ? m.aliases : []) claim(a?.value, m.key);
-      for (const a of surveyOf(m.key)?.aliases || []) claim(redactSecrets(a), m.key);
+      claim(m.key, m.key, 0);
+      claim(m.name, m.key, 0);
+      for (const a of Array.isArray(m.aliases) ? m.aliases : []) {
+        claim(a?.value, m.key, aliasTier(a?.source), a?.source);
+        // …and the member's own deploy guess of that value, which extract's one-source-per-value dedupe folded into it
+        if (a?.selfGuess === true) claim(a.value, m.key, aliasTier('deploy-self'), 'deploy-self');
+      }
+      if (Array.isArray(m.needs) && m.needs.includes('aliases')) for (const a of surveyOf(m.key)?.aliases || []) claim(redactSecrets(a), m.key, aliasTier('survey'), 'survey');
     }
     const aliasesOf = new Map(keys.map((k) => [k, []]));
-    for (const [a, set] of [...claims.entries()].sort((x, y) => byStr(x[0], y[0]))) {
-      for (const k of set) aliasesOf.get(k).push(a);
-      if (set.size === 1) out.aliasIndex[a] = [...set][0];
-      else out.ambiguousAliases[a] = [...set].sort(byStr);
+    for (const [a, byKey] of [...claims.entries()].sort((x, y) => byStr(x[0], y[0]))) {
+      const top = Math.min(...byKey.values());
+      const owners = [...byKey].filter(([k, t]) => t === top || (top === MANIFEST_TIER && guessed.get(a)?.has(k)) || (top === DEPLOY_TIER && selfGuessed.get(a)?.has(k))).map(([k]) => k).sort(byStr);
+      for (const k of owners) aliasesOf.get(k).push(a);
+      if (owners.length === 1) out.aliasIndex[a] = owners[0];
+      else out.ambiguousAliases[a] = owners;
     }
     // Step 2, after the aliases (X2 and C28 read them): one fact per (dir, norm, external, named).
     // A target may be a host[:port], a member key, a repo slug, an env / config key or a variable
@@ -510,6 +546,23 @@ export async function buildCatalog({ extract, survey, limits = LIMITS } = {}) {
     // A consume of a norm the member itself provides is internal: it never resolves to another member —
     // unless its host names that other member (C28).
     const ownNorms = new Map(members.map((m) => [m.key, new Set(out.entries.filter((e) => e.member === m.key).map((e) => e.norm))]));
+    // M9: a client copy that describes a schema no other member serves (fewer than half of its root fields: an outside
+    // API's — GitHub, Shopify, a SaaS) still keeps the member's own operations on its fields internal, as its provides
+    // did at 15486564: they never join a member that happens to serve `Query.node` or `Query.viewer` too.
+    const outsideCopy = new Map();
+    for (const m of members) {
+      const norms = new Set();
+      for (const u of Array.isArray(m.unresolved) ? m.unresolved : []) {
+        if (!u || u.kind !== 'graphql' || u.reason !== 'client copy of a GraphQL schema' || typeof u.file !== 'string') continue;
+        const text = await readText(m.dir, u.file, { maxBytes: limits.MAX_FILE_BYTES }).catch(() => null);
+        if (typeof text !== 'string') continue;
+        let keys = [];
+        try { keys = [...new Set(sdlFields(blankGraphql(text)).map((x) => normKey('graphql', x.key)).filter(Boolean))]; } catch { continue; }
+        const served = keys.filter((n) => (byNorm.get(n) || []).some((e) => e.member !== m.key)).length;
+        if (served * 2 < keys.length) for (const n of keys) norms.add(n);
+      }
+      outsideCopy.set(m.key, norms);
+    }
     for (const m of members) {
       out.consumes[m.key] = merged.get(m.key).filter((x) => x.dir === 'consumes').map(({ named: hostNamed, guess, ...c }) => {
         // X2: a third-party call (step 2) never joins a member that happens to serve the same path — here,
@@ -524,9 +577,14 @@ export async function buildCatalog({ extract, survey, limits = LIMITS } = {}) {
         const hint = strict ? null : hintOf(c, m.key);
         const named = strict ? hostNamed : hint ? out.aliasIndex[hint] : null;
         if (strict && named === m.key) return { ...c, entry: null, toMember: null, self: true };
+        // an http path with no literal segment (`GET /`, `GET /{}`) names no route: only a host naming a member joins it —
+        // an outside host (`http://legacy-crm:8080/` + id) or a Feign service id never lands it on whichever member serves `GET /{}`
+        const httpPath = /^http:\S+ (\S+)$/.exec(c.norm)?.[1];
+        if (!strict && httpPath && !httpPath.split('/').some((s) => s && s !== '{}')) return { ...c, entry: null, toMember: null };
         // C22, after C28: a host naming ANOTHER member names the provider even for a norm this member serves
         // itself (a gateway that serves /graphql forwards it to billing's /graphql).
         if (ownNorms.get(m.key).has(c.norm) && !strict) return { ...c, entry: null, toMember: null };
+        if (c.kind === 'graphql' && !strict && outsideCopy.get(m.key).has(c.norm)) return { ...c, entry: null, toMember: null };
         // X6: a service keyed from a public dotted host (`api.stripe.com` → service:api) never meets a
         // provider through that first-label norm.
         const hits = c.kind === 'service' && publicHost(c.key, out.aliasIndex) ? [] : (byNorm.get(c.norm) || []).filter((e) => e.member !== m.key);
@@ -556,6 +614,8 @@ export async function buildCatalog({ extract, survey, limits = LIMITS } = {}) {
         key: m.key, name: typeof m.name === 'string' ? m.name : m.key, dir: m.dir,
         role: m.role || (sv?.role ? redactSecrets(sv.role) : null),
         roleSource: m.role ? 'static' : sv?.role ? 'survey' : null,
+        // M1: the file a static role was copied from (extract's roleSource: 'readme' | 'manifest' | null).
+        roleFrom: m.roleSource ?? null,
         aliases: aliasesOf.get(m.key),
         stack: Array.isArray(m.stack) ? m.stack : [],
         coverage: m.coverage && typeof m.coverage === 'object' ? m.coverage : { level: 'none', files: 0, scannedFiles: 0, truncated: false, detectors: {} },
@@ -624,8 +684,8 @@ export function usageBriefs(catalog, { catalogPath, checkerCmd, limits = LIMITS 
       `Checkout: \`${one(m.dir)}\`. Catalog: \`${catalogPath}\` (look up any entry id in \`entries\`).`, '',
       '## Task', '',
       '1. Confirm or reject every candidate below by reading the cited line in the checkout.',
-      '2. Find further uses of the other members\' entries: dynamic URLs, base-URL constants, generated clients, config.',
-      '3. Report relations to named members that the catalog does not list (`other`, with evidence from this checkout).', ''];
+      '2. Find further uses of the other members\' entries: dynamic URLs, base-URL constants, generated clients, config. Never cite test code (`test/`, `*.test.*`, `spec/`, fixtures): worca drops it.',
+      '3. Report relations to named members that the catalog does not list (`other`, with evidence from this checkout). Never cite test code here either.', ''];
     const tail = [`## Output for ${one(m.key)}`, '',
       `\`"${one(m.key)}": { "status": "investigated", "uses": [...], "rejected": [...], "other": [...] }\` — see usage-brief.md for the entry shapes.`];
     const others = members.filter((o) => o.key !== m.key).map((o) => {

@@ -32,7 +32,7 @@
 import { posix } from 'node:path';
 import { isSeq } from 'yaml';
 import { splitLines, fact, memberForImage, imageRepo, isLibraryImage, onePerKey, cleanUnresolved, isSamplePath, aliasable, hasCode } from './lib/text.mjs';
-import { loadYaml, nodeAt, entries, walkScalars } from './lib/yaml.mjs';
+import { loadYaml, nodeAt, entries, walkScalars, yamlProblem } from './lib/yaml.mjs';
 import { classifyValue, isPlaceholder, PEER_KEY_RE, shellTarget, unresolvedValue } from './lib/urls.mjs';
 import { hostName } from '../../../shared/workspace-map/keys.mjs';
 import { isTestPath } from '../files.mjs';
@@ -49,6 +49,10 @@ const get = (o, path) => path.reduce((a, k) => (a && typeof a === 'object' ? a[k
 const dirOf = (rel) => posix.dirname(rel);
 const isObj = (o) => o && typeof o === 'object' && !Array.isArray(o);
 const NAMESPACE_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+// No Kubernetes name (253), image reference or host is longer: one long scalar aliased by every item of a `kind: List`
+// was re-read per workload (words, imageRepo, memberForImage: 25 s of CPU at 250 KiB).
+const VALUE_MAX = 4096;
+const fits = (v) => typeof v === 'string' && v.length <= VALUE_MAX;
 
 /** The member named like `name` (key, name, dir / projectDir basename), for charts. */
 const memberNamed = (ctx, name) => memberForImage(ctx, name);
@@ -85,7 +89,7 @@ function manifest(y, doc, root, js, rel, lines, st) {
   const docs = js?.kind === 'List' && Array.isArray(js.items) ? js.items.map((it, i) => [it, ['items', i]]) : [[js, []]];
   for (const [obj, prefix] of docs) {
     if (!isObj(obj) || typeof obj.kind !== 'string') continue;
-    const name = get(obj, ['metadata', 'name']);
+    const name = fits(get(obj, ['metadata', 'name'])) ? obj.metadata.name : null;
     const ns = get(obj, ['metadata', 'namespace']);
     const namespace = typeof ns === 'string' && NAMESPACE_RE.test(ns) ? ns : null;
     const spec = podSpecPath(obj.kind, obj.apiVersion);
@@ -100,13 +104,13 @@ function manifest(y, doc, root, js, rel, lines, st) {
           // from the root per entry costs the pod spec's key count every time).
           const envNode = Array.isArray(c.env) && c.env.length ? nodeAt(doc, root, [...prefix, ...spec, group, ci, 'env']) : null;
           (Array.isArray(c.env) ? c.env : []).forEach((e, ei) => {
-            if (!isObj(e) || typeof e.name !== 'string') return;
+            if (!isObj(e) || !fits(e.name)) return;
             const cmRef = get(e, ['valueFrom', 'configMapKeyRef', 'name']);
             if (typeof e.value === 'string') env.push({ name: e.name, value: e.value, line: y.lineOf(nodeAt(doc, isSeq(envNode) ? envNode.items[ei] : null, ['value'])) });
             if (typeof cmRef === 'string') env.push({ configMap: cmRef });
           });
           const refs = [...(Array.isArray(c.envFrom) ? c.envFrom : []).map((f) => get(f, ['configMapRef', 'name'])), ...env.map((e) => e.configMap)].filter((x) => typeof x === 'string');
-          containers.push({ image: typeof c.image === 'string' ? c.image : null, env: env.filter((e) => !e.configMap), refs });
+          containers.push({ image: fits(c.image) ? c.image : null, env: env.filter((e) => !e.configMap), refs });
         });
       }
       const volumeRefs = (Array.isArray(pod.volumes) ? pod.volumes : []).map((v) => get(v, ['configMap', 'name'])).filter((x) => typeof x === 'string');
@@ -123,7 +127,7 @@ function manifest(y, doc, root, js, rel, lines, st) {
       for (const r of Array.isArray(get(obj, ['spec', 'rules'])) ? obj.spec.rules : []) {
         const backends = backendsOf(r?.http);
         if (!backends.length && typeof def === 'string') backends.push(def);
-        if (typeof r?.host === 'string' && backends.length) st.ingress.push({ host: r.host, backends, test });
+        if (fits(r?.host) && backends.length) st.ingress.push({ host: r.host, backends, test });
       }
     } else if (obj.kind === 'ConfigMap' && typeof name === 'string' && isObj(obj.data)) {
       const data = [];
@@ -169,13 +173,15 @@ function detect({ rel, text }, ctx) {
           st.values.push({ chartDir, key: path.join('.'), shells: classifyValue(value, key), rel, lines, line });
         }, budget)) { y.errors.push('yaml too large'); break; }
       }
-      return y.errors.length ? { unresolved: cleanUnresolved(st, rel, [{ kind: 'service', raw: rel, file: rel, line: 1, reason: `yaml parse error: ${y.errors[0]}` }]) } : undefined;
+      const problem = yamlProblem(y);
+      return problem ? { unresolved: cleanUnresolved(st, rel, [{ kind: 'service', raw: rel, file: rel, line: 1, reason: `yaml parse error: ${problem}` }]) } : undefined;
     }
   }
   if (!/^[ \t]*kind[ \t]*:/m.test(text) || !/^[ \t]*apiVersion[ \t]*:/m.test(text)) return undefined;
   const y = loadYaml(text);
   for (const { doc, root, js } of y.docs) manifest(y, doc, root, js, rel, lines, st);
-  return y.errors.length ? { unresolved: cleanUnresolved(st, rel, [{ kind: 'service', raw: rel, file: rel, line: 1, reason: `yaml parse error: ${y.errors[0]}` }]) } : undefined;
+  const problem = yamlProblem(y);
+  return problem ? { unresolved: cleanUnresolved(st, rel, [{ kind: 'service', raw: rel, file: rel, line: 1, reason: `yaml parse error: ${problem}` }]) } : undefined;
 }
 
 function finish(ctx) {
@@ -205,6 +211,8 @@ function finish(ctx) {
     }
   };
   const subjectOfWorkload = new Map(); // name → the subject of its image-bearing documents (a patch never overrides it)
+  const guessOfWorkload = new Map(); // name → true when that subject is this member by default only (M7, below)
+  const ownImage = new Map(); // image → whether it names this member: one image aliased by every workload is read once (M7's guess)
   const byLabel = new Map(); // `key\0value` → workloads carrying that label
   const workloads = st.workloads || [];
   const imaged = (w) => w.containers.some((c) => typeof c.image === 'string' && c.image.trim());
@@ -229,19 +237,25 @@ function finish(ctx) {
     // deploy repo's `cart` Deployment of an image built elsewhere: never this member by default, which would make
     // the other member's key ambiguous); else nobody when every image is an official one (redis:7, postgres:
     // infrastructure — no alias, no consumes); else this member.
-    w.subject = w.imageMember ?? imageMember.get(w.name) ?? (imageNamesWorkload(w, ctx, guard) || !hasCode(ctx) ? memberNamed(ctx, w.name)?.key : null) ?? (w.containers.every((c) => isLibraryImage(c.image)) ? null : own);
-    if (!subjectOfWorkload.get(w.name)) subjectOfWorkload.set(w.name, w.subject);
+    const tied = w.imageMember ?? imageMember.get(w.name) ?? (imageNamesWorkload(w, ctx, guard) || !hasCode(ctx) ? memberNamed(ctx, w.name)?.key : null);
+    w.subject = tied ?? (w.containers.every((c) => isLibraryImage(c.image)) ? null : own);
+    // M7: nothing ties the workload to a member (no image or name names one): this member by default. That is a guess in a
+    // member without code (a deploy repo), and in a member with code when no image names this member either (a local-dev
+    // stub or mock of a peer, `billing` running `wiremock/wiremock`): its names are `deploy-self` aliases (tier 3), never
+    // above another member's package name.
+    w.guess = tied == null && w.subject === own && (!hasCode(ctx) || !w.containers.some((c) => { if (!ownImage.has(c.image)) ownImage.set(c.image, namesOwn(c, ctx)); return ownImage.get(c.image); }));
+    if (!subjectOfWorkload.get(w.name)) { subjectOfWorkload.set(w.name, w.subject); guessOfWorkload.set(w.name, w.guess); }
   }
   for (const w of workloads) {
     // A patch document: the subject of the workload it patches, else nobody (never `own` by default).
-    if (!imaged(w)) w.subject = subjectOfWorkload.get(w.name) ?? null;
+    if (!imaged(w)) { w.subject = subjectOfWorkload.get(w.name) ?? null; w.guess = guessOfWorkload.get(w.name) === true; }
     const subject = w.subject;
     for (const [k, v] of Object.entries(w.labels)) {
       const key = `${k}\u0000${v}`;
       if (!byLabel.has(key)) byLabel.set(key, []);
       byLabel.get(key).push(w);
     }
-    if (!w.test) alias(w.name, subject, 'k8s', w.namespace);
+    if (!w.test) alias(w.name, subject, w.guess ? 'deploy-self' : 'k8s', w.namespace);
     if (subject !== own) continue;
     for (const c of w.containers) {
       for (const e of c.env) {
@@ -267,7 +281,7 @@ function finish(ctx) {
     const w = (pool || []).find((x) => pairs.every(([k, v]) => x.labels[k] === v));
     const subject = w ? w.subject : code ? own : null;
     subjectOfService.set(s.name, subject);
-    if (!s.test) alias(s.name, subject, 'k8s', s.namespace);
+    if (!s.test) alias(s.name, subject, w?.guess ? 'deploy-self' : 'k8s', s.namespace);
   }
   // A host routed to backends of two subjects (a gateway host: /billing → billing, /orders → orders) names nobody. In a
   // member without code (a deploy repo) a selector-less Service (ExternalName) or a backend no document defines is
@@ -295,7 +309,9 @@ function finish(ctx) {
   for (const [dir, name] of st.charts || []) {
     const m = memberNamed(ctx, name);
     const subject = m ? m.key : own;
-    alias(name, subject, 'helm');
+    // M7: a chart named like no member is a guess in a deploy repo, and in a member with code unless its name holds this
+    // member's own name (`orders-chart` in orders; never a peer's stub chart `billing-api`).
+    alias(name, subject, !m && (!code || !ownNames(ctx).some((n) => words(name).includes(n))) ? 'deploy-self' : 'helm');
     if (subject !== own) continue;
     // An umbrella chart's (one named like no member) per-service values file (`values-billing.yaml`) configures THAT
     // member, not this one; a member's own chart keeps `values-prod.yaml` even when a member is named `prod` (a

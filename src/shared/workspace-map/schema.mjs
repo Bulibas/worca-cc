@@ -16,7 +16,7 @@ export const DIRS = Object.freeze(['provides', 'consumes']);
 export const CONFIDENCE = Object.freeze(['exact', 'verified', 'heuristic', 'inferred']); // strongest first
 export const COVERAGE_LEVELS = Object.freeze(['rich', 'partial', 'none']);
 export const NEEDS = Object.freeze(['role', 'aliases', 'provides', 'consumes', 'unresolved']);
-export const EDGE_STATES = Object.freeze(['auto', 'confirmed', 'rejected', 'manual', 'missing']);
+export const EDGE_STATES = Object.freeze(['auto', 'confirmed', 'rejected', 'manual', 'missing', 'stale']);
 
 const SURVEY_STATUSES = Object.freeze(['investigated', 'failed', 'skipped']);
 const USAGE_STATUSES = Object.freeze(['investigated', 'failed']);

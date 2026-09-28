@@ -44,7 +44,8 @@ before(async () => {
     ledger: { 'swagger.json': SWAGGER_JSON },
     web: {
       'clients/billing.yaml': CLIENT_COPY, 'test/fixtures/spec.yaml': 'openapi: 3.0.0\npaths:\n  /mock:\n    get: {}\n',
-      'third_party/stripe/openapi.yaml': 'openapi: 3.0.0\nservers:\n  - url: https://api.stripe.com\npaths:\n  /v1/charges:\n    post: {}\n',
+      // Nested: the file layer skips a third_party/ folder at the member root before any detector runs (M8).
+      'clients/third_party/stripe/openapi.yaml': 'openapi: 3.0.0\nservers:\n  - url: https://api.stripe.com\npaths:\n  /v1/charges:\n    post: {}\n',
     },
     broken: { 'openapi.yaml': 'openapi: 3.0.0\npaths:\n  /a:\n    get: [\n' },
     // billing-api's own spec lists the in-cluster name `billing` and its public host; a member named `billing` exists.
@@ -78,8 +79,8 @@ test('api-openapi: a spec whose server names another member is consumed, target 
   const c = r.facts.filter((f) => f.file === 'clients/billing.yaml');
   assert.deepEqual(c.map((f) => [f.dir, f.key, f.target]), [['consumes', 'GET /invoices/{id}', 'billing:8080']]);
   assert.equal(r.facts.find((f) => f.file === 'test/fixtures/spec.yaml').test, true);
-  assert.ok(!r.facts.some((f) => f.file.startsWith('third_party/')), 'a vendored third-party spec is not this member\'s API');
-  assert.deepEqual(r.unresolved.map((u) => [u.file, u.reason]), [['third_party/stripe/openapi.yaml', 'third-party spec (vendored)']]);
+  assert.ok(!r.facts.some((f) => f.file.includes('third_party/')), 'a vendored third-party spec is not this member\'s API');
+  assert.deepEqual(r.unresolved.map((u) => [u.file, u.reason]), [['clients/third_party/stripe/openapi.yaml', 'third-party spec (vendored)']]);
 });
 
 test('api-openapi: a member\'s own spec stays provides — its in-cluster name is one of its own name words, a public host names a member only whole (P1 host rule)', async () => {

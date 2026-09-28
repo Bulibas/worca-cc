@@ -10,6 +10,13 @@ import { isTestPath } from '../../files.mjs';
  *  never this member's own wiring — the deploy and config detectors read nothing there. */
 export const isSamplePath = (rel) => /(?:^|\/)(?:docs?|examples?|samples?|quickstarts?|tutorials?)\//i.test(rel);
 
+/** A sample app's package manifest (M8): under a sample folder at the member root (`examples/checkout-demo/package.json`,
+ *  `docs/requirements.txt`), or in a folder of its own below an examples / samples folder anywhere (`sdk/examples/demo/package.json`;
+ *  never below a nested `docs/`, a monorepo's grouping folder: Nx's `libs/docs/data-access/package.json`).
+ *  A package that IS such a folder below the root (Turborepo's `apps/docs/package.json`, `services/docs/go.mod`) is a
+ *  real package of this member. The manifest detectors only: code and API specs there are read. */
+export const isSampleManifest = (rel) => /^(?:docs?|examples?|samples?|quickstarts?|tutorials?)\/|(?:^|\/)(?:examples?|samples?|quickstarts?|tutorials?)\/[^/]{1,255}\//i.test(rel);
+
 // Source code a service runs. Tooling a deploy repo carries — Go tool pins (`internal/tools/tools.go`), CI helpers,
 // scripts — and test code are no service's code: opentelemetry-demo's root holds `internal/tools/sanitycheck.py`.
 const CODE_RE = /\.(?:go|java|kt|kts|scala|sc|groovy|py|ipynb|rb|php|js|mjs|cjs|jsx|ts|mts|cts|tsx|vue|svelte|astro|cs|fs|fsx|vb|rs|c|cc|cpp|cxx|h|hpp|mm|swift|m|ex|exs|erl|gleam|clj|cljs|cljc|dart|lua|pl|pm|hs|ml|jl|r|cr|nim|zig|elm|sol)$/i;
@@ -120,16 +127,21 @@ export function authorityEnd(rest) {
   return next === -1 ? -1 : at + 1 + next;
 }
 
+/** The userinfo as redaction reads it (redact.mjs USERINFO): to the last '@' before a '/', a space or a quote. */
+const USERINFO_AT = /^[^\s/:'"`]{0,256}:[^\s/'"`]{0,2048}@/;
 /** A needle as cited: itself when it fits in 200 chars; else, for a URL with userinfo (a long token as the
  *  password — a JWT, a SAS signature — would be cut before its `@host`, which leaves it unrecognisable to
- *  redaction), the URL from its host on; else its first 200 chars. */
+ *  redaction), the URL from its host on; else its first 200 chars. The userinfo ends at the later of the
+ *  authority's last '@' and the one redaction reads: an e-mail / Azure-style user whose password holds '#' or
+ *  '?' (`reports@acme.com:pw#24@billing`) ends past the authority authorityEnd reads. */
 function clipNeedle(needle) {
   if (needle.length <= LIMITS.MATCH_MAX) return needle;
   const s = needle.indexOf('://');
   if (s !== -1) {
     const rest = needle.slice(s + 3);
     const end = authorityEnd(rest);
-    const at = (end === -1 ? rest : rest.slice(0, end)).lastIndexOf('@');
+    const u = USERINFO_AT.exec(rest);
+    const at = Math.max((end === -1 ? rest : rest.slice(0, end)).lastIndexOf('@'), u ? u[0].length - 1 : -1);
     if (at !== -1) return clip(rest.slice(at + 1)) || needle.slice(0, 1);
   }
   return clip(needle);

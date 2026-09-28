@@ -3,7 +3,7 @@
 // ${project.groupId} / ${project.version} / <properties> are substituted; an
 // unresolvable ${…} in a coordinate becomes an `unresolved` item, not a fact.
 import { scanXml } from './lib/xml.mjs';
-import { splitLines, fact, aliasable, onePerKey, cleanUnresolved } from './lib/text.mjs';
+import { splitLines, fact, aliasable, onePerKey, cleanUnresolved, isSampleManifest } from './lib/text.mjs';
 import { isTestPath } from '../files.mjs';
 import { LIMITS } from '../../../shared/workspace-map/limits.mjs';
 
@@ -69,6 +69,6 @@ function detect({ rel, text }, ctx) {
 
 export default Object.freeze({
   id: 'pkg-maven',
-  claims: (rel) => /(^|\/)pom\.xml$/.test(rel),
+  claims: (rel) => /(^|\/)pom\.xml$/.test(rel) && !isSampleManifest(rel),
   detect,
 });

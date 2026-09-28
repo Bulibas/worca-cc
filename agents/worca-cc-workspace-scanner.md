@@ -32,7 +32,7 @@ The rest of the brief lists the members that need investigation (key, name, abso
 **No member to investigate?** When the brief's `## Members to investigate` list is empty (`- none`), dispatch nobody — this overrides the task prompt's generic Fan-out block and its "DISPATCH … NOW": write `survey.json` with every member `skipped` (step 4), run the checker (step 5) and finish (step 6).
 
 1. **Plan the waves.** Take every member the brief lists as needing investigation, in the brief's order. Each of them gets exactly one investigator (a failed one is re-dispatched once, alone — step 4): never skip a member, never merge two members into one investigator, never investigate a member the brief lists as needing nothing.
-2. **Dispatch in waves of at most 8.** Send up to 8 investigator dispatches in ONE message, wait until every one of them has returned, then send the next wave — until every listed member has been investigated. Every dispatch is a normal foreground call whose result you wait for — never in the background (no `run_in_background`, no background tasks): a background dispatch escapes worca's concurrency cap. Use the `subagent_type` and the `model` exactly as the task prompt's Fan-out block says.
+2. **Dispatch in waves of at most 8.** Send up to 8 investigator dispatches in ONE message, wait until every one of them has returned, then send the next wave — until every listed member has been investigated. Dispatch normally and wait for every result: worca runs every dispatch in the foreground, which is what holds each wave to 8. Use the `subagent_type` and the `model` exactly as the task prompt's Fan-out block says.
 3. **Brief each investigator** with this text, filled in for its member:
 
    > You are investigating ONE project of a multi-project workspace, read-only. Project `<key>` ("<name>"), checkout `<absolute dir>`. Read only inside that directory. Never edit, write, commit or branch anything, and never dispatch sub-agents of your own.
@@ -41,7 +41,7 @@ The rest of the brief lists the members that need investigation (key, name, abso
    > The other workspace members (for `target` hints only): <name (key): aliases — one per member>.
    > Report only the needed parts:
    > - `role`: one line (at most 160 characters) saying what this project is, from its README, its manifest or its main entry points.
-   > - `aliases`: other names this project is reached by — service names, hostnames, package names, container image names.
+   > - `aliases`: the names OTHER projects use to reach THIS project — its own service name, hostname or package name. Never the name of a service it deploys, runs or calls: a deploy repo's compose or k8s services are other projects' names.
    > - `provides`: what this project exposes to others. `consumes`: what it uses from outside itself — another service's API, a topic, a package, a shared database, a named host.
    > Every fact is `{"kind", "key", "file", "line", "match"}` plus the optional `"detail"`, `"label"`, `"target"`, following these fact rules: <the fact rules below, copied verbatim>.
    > Return ONLY one fenced json block: `{"role": "…", "aliases": ["…"], "provides": [ … ], "consumes": [ … ], "notes": "…"}` — `notes` is one short line on what you could not determine.

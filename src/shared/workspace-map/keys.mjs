@@ -14,6 +14,78 @@ const PATH_CHARS = /^\/[\w.~!$&'()*+,;=:@%{}\-/]*$/;
  *  Spring, ASP.NET, Laravel). Bounded and alternation-disjoint: linear. */
 const BRACE_PARAM = /\{\*{0,2}[A-Za-z_][\w-]{0,64}(?:\?|:(?:[^{}]|\{[^{}]{0,20}\}){0,200})?\}/g;
 
+/** Where a URL's query or fragment starts in a path or a cited text: the first '?' or '#' outside every placeholder
+ *  (`${…}`, C# / Python / route '{…}', Ruby '#{…}' — never the '#' opening one) and never inside the userinfo of the
+ *  text's first URL (`http://svc:pa?ss@host/x`: a password may hold '?' or '#'; a URL inside the query moves nothing).
+ *  A placeholder's code is scanned whole, with its braces and string literals, so '{id?}', '{user?.Id}', `${this.#base}`,
+ *  `${u?.type === 'org' ? a : b}`, `${xs.find((x) => x?.id === id)?.slug}` and Kotlin's `${user?.let { it.id }}` start
+ *  none. A query in a string inside a placeholder (`${q ? '?sig=…' : ''}`, `${a ? '#top' : ''}` — a '?' or '#' before a
+ *  name, so `split('?')` is none) starts at the outermost placeholder once that placeholder closes. An unclosed
+ *  placeholder (a literal the lexer ended at a nested quote) is kept: its '?' is code, not a query — unless one of its
+ *  strings held a '?' / '#' before a name (a regex literal `/'/g` misread the quotes): then the query starts there.
+ *  The userinfo is skipped only when the scan reaches it (a URL inside a query moves nothing). -1 when there is none.
+ *  One pass: linear. */
+const USERINFO_END = /:\/\/[^\s/?#'"`]{0,256}:(?!\d{1,5}(?:[/?#]|$))[^\s/'"`@]{0,2048}@/y;
+export function queryAt(s) {
+  if (typeof s !== 'string') return -1;
+  const at = s.indexOf('://');
+  USERINFO_END.lastIndex = at;
+  const u = at === -1 ? null : USERINFO_END.exec(s);
+  const open = []; // '{': a placeholder, or a brace in its code; a quote: a string literal in a placeholder's code
+  let outer = -1; // where the outermost open placeholder starts
+  let quoted = -1; // a '?' / '#' before a name in a string of the open placeholder: the query starts at `outer` once it closes
+  for (let i = 0; i < s.length; i += 1) {
+    // the userinfo of the text's first URL, reached by the scan: skipped whole (a password may hold '?' or '#');
+    // a URL inside a query (`/cb?next=http://u:p@h/y`) is never reached — the query cut came first
+    if (u && i === at) { i = u.index + u[0].length - 1; continue; }
+    const c = s[i];
+    const top = open.length ? open[open.length - 1] : '';
+    if (top === '{') {
+      if (c === '{') open.push('{');
+      else if (c === '}') { open.pop(); if (!open.length && quoted !== -1) return outer; }
+      else if (c === '"' || c === "'" || c === '`') open.push(c);
+      continue;
+    }
+    // URL text: outside every placeholder, or a string literal in a placeholder's code
+    if (top && c === '\\') { i += 1; continue; }
+    if (top && c === top) { open.pop(); continue; }
+    const opens = c === '{' ? 1 : (c === '$' || c === '#') && s[i + 1] === '{' ? 2 : 0;
+    if (opens) {
+      if (!open.length) outer = i;
+      open.push('{');
+      i += opens - 1;
+    } else if (c === '?' || c === '#') {
+      if (!top) return i;
+      if (quoted === -1 && /[\w${]/.test(s[i + 1] ?? '')) quoted = i;
+    }
+  }
+  // -1, or the text ended inside that placeholder: a quote was misread (a regex literal `/'/g` in its code), so the
+  // '?' / '#' was URL text
+  return quoted;
+}
+/** The text before its query, trailing blanks dropped; a text that starts with its query keeps its first name only
+ *  (`?hmac=…` → `?hmac=`): a query value of any name may be a credential (D21). Non-strings unchanged. */
+export function cutQuery(s) {
+  const c = queryAt(s);
+  return c > 0 ? s.slice(0, c).trimEnd() || s.slice(0, c) : c === 0 ? s.replace(/=[^]*$/, '=') : s;
+}
+/** cutQuery for a code expression (`BASE + '/x?sig=' + s`, `fmt.Sprintf("%s/x?sig=%s", b, s)`): a query starts inside one of
+ *  its string pieces only — a '?' or '#' between them is an operator (`cfg?.api`, `a ? B : C`, `x ?? D`, `this.#base`).
+ *  Each piece is read once (to its closing quote) and cut as cutQuery reads it: linear. Non-strings unchanged. */
+export function cutCode(e) {
+  if (typeof e !== 'string') return e;
+  for (let i = 0; i < e.length; i += 1) {
+    const q = e[i];
+    if (q !== '"' && q !== "'" && q !== '`') continue;
+    let j = i + 1;
+    while (j < e.length && e[j] !== q) j += e[j] === '\\' ? 2 : 1;
+    const at = queryAt(e.slice(i + 1, j));
+    if (at !== -1) return e.slice(0, i + 1 + at).trimEnd();
+    i = j;
+  }
+  return e;
+}
+
 /** '/users/:id?x=1' → '/users/{}'. Accepts a full URL (scheme + host stripped), a relative path
  *  (Retrofit's "users/{id}" → '/users/{}') and a leading base-URL placeholder ('${base}/users').
  *  Every parameter style becomes '{}': :id, :id?, {id}, {0}, {id:[0-9]+}, {id?}, {*path}, {**rest},

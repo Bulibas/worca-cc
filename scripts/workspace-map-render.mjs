@@ -7,6 +7,7 @@
 // it cannot write its output at all.
 import { renderWorkspaceDescription, countLines } from '../src/shared/workspace-map/render.mjs';
 import { checkSynthesis } from '../src/shared/workspace-map/schema.mjs';
+import { rekeyOverrides } from '../src/shared/workspace-map/overrides.mjs';
 import { scanDescriptionBudget } from '../src/shared/workspace-size.mjs';
 import { outPath, readJsonInput, writeText, workspaceOf, isObj } from './workspace-map-io.mjs';
 
@@ -51,7 +52,11 @@ export default async function ({ inputs, outputs, ctx, log }) {
     const count = Math.max(ws.members.length, memberKeys.length);
     const budget = scanDescriptionBudget(count);
     const name = ws.name || (typeof map?.workspace?.name === 'string' && map.workspace.name) || 'Workspace';
-    const text = String(renderWorkspaceDescription({ name, map, synthesis, overrides: null, budget }));
+    // M15: the overrides the run froze at start (ctx.workspace.overrides, absent on a first scan), moved first as the
+    // join card (liveEdges) and finalize move them: this file shows the map's stored change order and the order notes
+    // beside it, and a rejection whose edge an agent reworded this scan stays rejected.
+    const overrides = isObj(ctx?.workspace?.overrides) ? rekeyOverrides(ctx.workspace.overrides, map) : null;
+    const text = String(renderWorkspaceDescription({ name, map, synthesis, overrides, budget }));
     await writeText(outFile, text.endsWith('\n') ? text : `${text}\n`);
     return { summary: `description: ${countLines(text)} lines (budget ${budget}, ${count} members)` };
   } catch (err) {

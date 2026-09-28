@@ -15,6 +15,7 @@ import { redactLines, redactSecrets } from '../../shared/workspace-map/redact.mj
 import { mapWithCap } from '../fanout.mjs';
 import { gitOutput, isTestPath, listMemberFiles, readText } from './files.mjs';
 import { DETECTORS } from './detectors/index.mjs';
+import { aliasTier } from './alias-tiers.mjs';
 
 const GRAPH_PARSE_MAX_BYTES = 16 * 1024 * 1024;
 const GRAPH_TAIL_BYTES = 65536;
@@ -246,8 +247,18 @@ export async function extractWorkspace({ name, members, detectors = DETECTORS, l
     }
     const out = { version: MAP_VERSION, workspace: { name: String(name ?? '') }, createdAt: iso(now), members: {} };
     for (const x of results) {
-      const seen = new Set();
-      x.aliases = x.aliases.filter((a) => !seen.has(a.value) && seen.add(a.value)).sort((a, b) => byStr(a.value, b.value));
+      // One alias per value, its strongest source kept (alias-tiers.mjs): the checkout's own name `billing` never
+      // reaches the catalog tagged `go.mod` because go.mod was read before identity's finish ran.
+      // A member's own default deploy name (`deploy-self`) survives as `selfGuess` when another of its claims of the value
+      // is kept (a package name, a remote, a scope tail read first): the catalog's tie with a peer's deploy name reads it.
+      const best = new Map();
+      const selfGuessed = new Set();
+      for (const a of x.aliases) {
+        if (a.source === 'deploy-self') selfGuessed.add(a.value);
+        if (!best.has(a.value) || aliasTier(a.source) < aliasTier(best.get(a.value).source)) best.set(a.value, a);
+      }
+      x.aliases = [...best.values()].map((a) => (selfGuessed.has(a.value) && a.source !== 'deploy-self' ? { ...a, selfGuess: true } : a))
+        .sort((a, b) => byStr(a.value, b.value));
       const { level, needs } = classify(x);
       x.coverage.level = level;
       x.needs = needs;
@@ -314,6 +325,7 @@ export function surveyBrief(extractDoc, { extractPath, checkerCmd } = {}) {
   L.push('- file = path relative to that member\'s checkout, `/` separators, never `..`; line = 1-based; match = a literal substring of that line (≤ 200 chars). A fact without real evidence is dropped.');
   L.push('- target (consumes only) = the host, alias or member the consumer points at, when the code names it.');
   L.push('- role = one line (≤ 160 chars): what the project is for.');
+  L.push('- aliases (only for a member whose Needs lists aliases) = the names OTHER members use to reach this member: its service name, hostname or package name. Never the name of a service it deploys, runs or calls.');
   L.push(`- Validate before finishing: \`${checkerCmd}\` — replace <OUT> with the path of your survey.json; fix every reported line and re-run until it prints OK.`);
   return L.join('\n') + '\n';
 }

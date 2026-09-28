@@ -20,7 +20,7 @@
 import { posix } from 'node:path';
 import { splitLines, fact, blankComments, onePerKey, cleanUnresolved, isSamplePath, memberForImage, hasCode } from './lib/text.mjs';
 import { isTestPath } from '../files.mjs';
-import { loadYaml, walkScalars } from './lib/yaml.mjs';
+import { loadYaml, walkScalars, yamlProblem } from './lib/yaml.mjs';
 import { classifyValue, isPlaceholder, PEER_KEY_RE, shellTarget, unresolvedValue } from './lib/urls.mjs';
 import { COMPOSE_FILE_RE } from './deploy-compose.mjs';
 
@@ -121,7 +121,8 @@ export function configPairs(rel, text) {
     }, budget);
     if (cut) { y.errors.push('config too large'); break; }
   }
-  return { pairs: out, errors: y.errors };
+  const problem = yamlProblem(y);
+  return { pairs: out, errors: problem ? [problem] : [] };
 }
 
 // A member without code (lib/text hasCode: a deploy repo of compose files, manifests, a `.env` and tooling)

@@ -182,7 +182,7 @@ test('a confirmed edge a re-scan lost stays in the overrides as missing and can 
   assert.ok(!(ids.pkg in cleared.overrides.edges));
 });
 
-test('a rejected edge a re-scan dropped is hidden, and its override can still be cleared', async () => {
+test('a rejected edge a re-scan dropped becomes a stale review, and its override can still be cleared', async () => {
   const { ws, ids, map, synthesis } = await scanned();
   await setWorkspaceEdgeState(ws.id, ids.pkg, 'rejected');
   const rescan = sampleMap({ keys: ws.projectKeys, names: map.members.map((m) => m.name), name: ws.name, drop: ['pkg'] });

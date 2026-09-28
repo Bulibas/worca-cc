@@ -35,13 +35,13 @@ test('overrides survive a re-scan: same edge id after a code move (killer: overr
   assert.equal(eff[0].evidence.from[0].file, 'src/moved/new.ts');
 });
 
-test('a confirmed edge the new scan lacks is surfaced as missing; a rejected one is ignored (killer: missing confirmed)', () => {
+test('a confirmed edge the new scan lacks is surfaced as missing; a rejected one as stale (killer: missing confirmed)', () => {
   const gone = edge('web', 'api', 'topic', 'topic:orders', 'orders');
   const goneRejected = edge('web', 'lib', 'pkg', 'pkg:npm:lib', 'lib');
   let ov = setEdgeState(emptyOverrides(), gone, 'confirmed', AT);
   ov = setEdgeState(ov, goneRejected, 'rejected', AT);
   const eff = effectiveEdges(mapOf([]), ov);
-  assert.equal(eff.length, 1);
+  assert.deepEqual(eff.map((e) => `${e.id}:${e.state}`), [`${gone.id}:missing`, `${goneRejected.id}:stale`], 'M14: a stale review, never dropped');
   assert.equal(eff[0].id, gone.id);
   assert.equal(eff[0].state, 'missing');
   assert.equal(eff[0].confidence, 'verified');
@@ -101,7 +101,7 @@ test('mapSummary: counts effective edges, states, gaps and kinds', () => {
   ov = setEdgeState(ov, gone, 'confirmed', AT);
   ov = addManualEdge(ov, { from: 'lib', to: 'api', kind: 'db', display: 'shop' }, AT).overrides;
   assert.deepEqual(mapSummary(mapOf([a, b]), ov), {
-    scannedAt: AT, members: 3, edges: 2, gaps: 2, confirmed: 0, rejected: 1, manual: 1, missing: 1, byKind: { http: 1, db: 1 } });
+    scannedAt: AT, members: 3, edges: 2, gaps: 2, confirmed: 0, rejected: 1, manual: 1, missing: 1, stale: 0, byKind: { http: 1, db: 1 } });
   assert.equal(mapSummary(null, ov), null);
 });
 

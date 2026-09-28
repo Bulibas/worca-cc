@@ -32,8 +32,8 @@ function roundedPath(pts, r) {
   return `${d} L${r1(lx)} ${r1(ly)}`;
 }
 
-/** Effective edges (GET /map `edges`) → one pair per ordered (from, to). Rejected and missing
- *  edges are excluded; self edges and edges without both ends are dropped. kinds: most edges
+/** Effective edges (GET /map `edges`) → one pair per ordered (from, to). Rejected, missing and
+ *  stale edges are excluded; self edges and edges without both ends are dropped. kinds: most edges
  *  first, ties in KINDS order (unknown kinds count as 'other'); confidence: the strongest one
  *  among its non-manual edges (null when none names one: a manual edge has no confidence, whatever
  *  P1 stamped on it); state: 'confirmed' when any edge is confirmed, 'manual' when every edge is
@@ -46,7 +46,7 @@ export function pairsOf(edges) {
     const to = str(e.to);
     if (!from || !to || from === to) continue;
     const state = str(e.state) || 'auto';
-    if (state === 'rejected' || state === 'missing') continue;
+    if (state === 'rejected' || state === 'missing' || state === 'stale') continue;
     const id = `${from}\u0000${to}`;
     let p = acc.get(id);
     if (!p) { p = { from, to, byKind: new Map(), confidence: null, count: 0, states: new Set() }; acc.set(id, p); }

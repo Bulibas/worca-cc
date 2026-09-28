@@ -14,7 +14,7 @@ test('vocabularies are frozen and complete', () => {
   assert.deepEqual([...KINDS], ['http', 'grpc', 'graphql', 'topic', 'pkg', 'db', 'service', 'other']);
   assert.deepEqual(Object.keys(KIND_LABELS), [...KINDS]);
   assert.deepEqual([...CONFIDENCE], ['exact', 'verified', 'heuristic', 'inferred']);
-  assert.deepEqual([...EDGE_STATES], ['auto', 'confirmed', 'rejected', 'manual', 'missing']);
+  assert.deepEqual([...EDGE_STATES], ['auto', 'confirmed', 'rejected', 'manual', 'missing', 'stale']);
   assert.deepEqual(CONFIDENCE.map(confidenceRank), [0, 1, 2, 3]);
   assert.equal(confidenceRank('bogus'), 99);
 });

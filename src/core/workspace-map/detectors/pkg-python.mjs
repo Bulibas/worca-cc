@@ -12,7 +12,7 @@
 // Names are emitted as written; normKey applies PEP 503 (lower-case, runs of -_. → -). A test-path
 // manifest sets no stack and no role.
 import { basename } from 'node:path';
-import { splitLines, fact, memberForPath, aliasable, onePerKey, cleanUnresolved } from './lib/text.mjs';
+import { splitLines, fact, memberForPath, aliasable, onePerKey, cleanUnresolved, isSampleManifest } from './lib/text.mjs';
 import { loadToml, tomlSections, keyLine } from './lib/toml.mjs';
 import { isTestPath } from '../files.mjs';
 import { LIMITS } from '../../../shared/workspace-map/limits.mjs';
@@ -172,8 +172,8 @@ function fromPyproject({ rel, text }, ctx) {
 export default Object.freeze({
   id: 'pkg-python',
   // pyproject.toml; requirements.txt, requirements-dev.txt, dev-requirements.txt, requirements.in (pip-tools),
-  // requirements/*.txt|in
-  claims: (rel) => /(^|\/)pyproject\.toml$/.test(rel) || /(^|\/)([\w.-]*[-_.])?requirements([-_.][\w.-]*)?\.(txt|in)$/i.test(rel)
-    || /(^|\/)requirements\/[^/]+\.(txt|in)$/i.test(rel),
+  // requirements/*.txt|in — never a sample folder's (docs/requirements.txt is the docs build's)
+  claims: (rel) => (/(^|\/)pyproject\.toml$/.test(rel) || /(^|\/)([\w.-]*[-_.])?requirements([-_.][\w.-]*)?\.(txt|in)$/i.test(rel)
+    || /(^|\/)requirements\/[^/]+\.(txt|in)$/i.test(rel)) && !isSampleManifest(rel),
   detect: (file, ctx) => (file.rel.endsWith('.toml') ? fromPyproject(file, ctx) : fromRequirements(file, ctx)),
 });

@@ -246,7 +246,7 @@ test('render holds the description to scanDescriptionBudget(member count): 40 me
   const md = readFileSync(rd.outputs.workspace.path, 'utf8');
   assert.ok(countLines(md) <= 800, `${countLines(md)} lines — over the 40-member budget`);
   assert.match(md, /\n## Interconnections\n/);
-  assert.match(md, /^- m00 \(`m00`\): Service m00$/m, 'the BOM-prefixed map was read, not rendered as missing');
+  assert.match(md, /^- m00 \(`m00`\): repo: "Service m00"$/m, 'the BOM-prefixed map was read, not rendered as missing');
 });
 
 // The extract card races extractWorkspace against this helper (extractWithin, EXTRACT_DEADLINE_MS):

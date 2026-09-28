@@ -86,7 +86,7 @@ test('end to end: static exact edges, a candidate confirmed into a verified edge
   const text = renderWorkspaceDescription({ name: 'Shop', map, synthesis, budget: scanDescriptionBudget(3) });
   assert.ok(countLines(text) <= 300);
   assert.ok(text.includes("- web -> billing-api: REST API; GET /invoices/:id — src/api.ts:1"), text);
-  assert.ok(text.includes('- shared-lib (`shared-lib`): Shared helpers'));
+  assert.ok(text.includes('- shared-lib (`shared-lib`): manifest: "Shared helpers"'), 'the package.json description, quoted with its source (M1)');
   assert.ok(text.includes('1. shared-lib\n2. billing-api\n3. web'));
 });
 
@@ -111,7 +111,7 @@ test('re-scan after a code move: same edge ids, overrides still apply, a vanishe
   assert.equal(eff.find((e) => e.id === http.id).state, 'confirmed');
   assert.equal(eff.find((e) => e.id === pkg.id).state, 'missing');
   assert.deepEqual(mapSummary(second.map, ov), { scannedAt: second.map.scannedAt, members: 3, edges: 2, gaps: 0,
-    confirmed: 1, rejected: 0, manual: 0, missing: 1, byKind: { http: 1, pkg: 1 } });
+    confirmed: 1, rejected: 0, manual: 0, missing: 1, stale: 0, byKind: { http: 1, pkg: 1 } });
   const text = renderWorkspaceDescription({ name: 'Shop', map: second.map, synthesis: second.synthesis, overrides: ov, budget: 300 });
   assert.ok(text.includes('(confirmed)'));
   assert.ok(!text.includes('build dep; @acme/billing'), 'a missing edge never reaches the description');

@@ -34,8 +34,10 @@ const AUTH_TUPLE = /(\b(?:auth\s{0,8}=\s{0,8}\(|\w{0,32}(?:Auth|Credentials?|Aut
 // A builder's literal that STARTS as a URL (`configureAuthentication("jwt", "http://auth-svc/jwks")`) is no credential; a third literal
 // is (AWS session token, Azure client secret): redacting only the second left it with no secret-named neighbour.
 const tupleLit = (lit) => { const v = lit.slice(1, -1); return !v || URL_START.test(v) ? lit : `${lit[0]}***${lit[0]}`; };
-/** Credential query parameters whose names carry no secret word: Azure SAS `sig`, Azure Functions `code`, `key`. */
-const QUERY_CRED = /([?&](?:sig|code|key)=)[^\s"'`&#;<>]{1,4096}/gi;
+/** Credential query parameters whose names carry no secret word: Azure SAS `sig`, Azure Functions `code`, `key`,
+ *  a JWT (`jwt`), a session (`session`, `sessionid`, `session_id`, `sid`), a CAS / SSO `ticket`, an Azure API
+ *  Management `subscription-key`. */
+const QUERY_CRED = /([?&](?:sig|code|key|jwt|session(?:_?id)?|sid|ticket|subscription-key)=)[^\s"'`&#;<>]{1,4096}/gi;
 /** A secret-named header / setting passed positionally, and XML forms. */
 const HEADER_PAIR = new RegExp(`((["'])(${KEY})\\2\\s{0,8},\\s{0,8})(["'])((?:\\\\[\\s\\S]|(?!\\4)[^\\\\]){1,4096})\\4`, 'gi');
 const XML_KV = new RegExp(`(<(${KEY})>)([^<]{1,4096})(<\\/\\2>)`, 'gi');
@@ -136,7 +138,16 @@ function codeRun(v, strict = false) {
 /** LINE_KV keeps a URL only when the value STARTS as one (a `${VAR:-default}` wrapper allowed): a `://`
  *  further along the run (`pw,x&next=http://…`) proves nothing, and keepUrl may remove it (idempotency). */
 const URL_START = /^(?:\$\{[\w.]{1,64}:-?)?[a-z][\w+.:-]{0,64}:\/\//i;
-const USER_TOKEN = new RegExp(`(:\\/\\/)(?:${TOKEN_SHAPES})@`, 'g');
+/** A user-only userinfo that is a token: a known shape, or any run of ≥ 16 `[A-Za-z0-9_-]` mixing letters and
+ *  digits (a classic 40-hex GitHub PAT, an Azure DevOps PAT, a Sentry DSN key). A name stays (`git@`, `deploy@`,
+ *  `gitlab-ci-token@`, `oauth2@`); a long one holding digits (`svc-billing-prod-01@`) is masked too. */
+const USER_TOKEN = new RegExp(`(:\\/\\/)(?:${TOKEN_SHAPES}|(?=[A-Za-z0-9_-]{0,255}[0-9])(?=[A-Za-z0-9_-]{0,255}[A-Za-z])[A-Za-z0-9_-]{16,255})@`, 'g');
+/** NATS token auth puts the token where the user goes (`nats://<token>@host`), however short: a user-only
+ *  userinfo of a nats:// URL is always a credential. No `\b` before it: a key id just before (`ASIA…nats://`)
+ *  becomes `***` only later in the chain, and one pass must mask both. */
+const NATS_USER = /(nats:\/\/)[^\s/:@'"`]{1,256}@/gi;
+/** A JWT anywhere (a `?token=` value, a path segment): anchored at a token boundary, every run bounded. */
+const JWT = /(?<![\w-])eyJ[\w-]{8,2048}\.eyJ[\w-]{2,2048}\.[\w-]{0,2048}/g;
 /** Webhook URLs whose path IS the credential: the host and the fixed prefix stay. */
 const WEBHOOKS = [
   /(https?:\/\/hooks\.slack\.com\/services\/)[A-Za-z0-9_/-]{1,256}/gi,
@@ -158,7 +169,7 @@ const WEBHOOK_PATHS = [
 const AUTH_HEADER = /\b(Bearer|Basic|bearer)\s{1,16}(?=[A-Za-z0-9._~+/=-]{8})(?=[A-Za-z0-9._~+/=-]{0,4096}?(?:[0-9_~+/=]|[a-z][A-Z]|\.[A-Za-z0-9]))[A-Za-z0-9._~+/=-]{8,4096}/g;
 const AUTH_SCHEME = /(\bAuthorization\s{0,16}[:=]\s{0,16}["']?)([A-Za-z][A-Za-z0-9_-]{0,31})\s{1,16}[A-Za-z0-9._~+/=-]{1,4096}/gi;
 const TOKEN = new RegExp(`(?<![A-Za-z0-9])(?:${TOKEN_SHAPES})`, 'g');
-const AWS_KEY = /AKIA[0-9A-Z]{16}/g;
+const AWS_KEY = /(AKIA|ASIA)[0-9A-Z]{16}/g;
 const QUOTED_KV = new RegExp(`(["'])(${KEY})\\1(\\s*:\\s*)(["'])((?:\\\\[\\s\\S]|(?!\\4)[^\\\\]){0,4096})\\4`, 'gi');
 // A backtick template and a prefixed string (`f"…"`, `b'…'`) are quoted values too; an unclosed one is
 // never eaten as a bare value (LINE_KV would then redact the rest on a second pass).
@@ -186,8 +197,10 @@ const keepUrl = (v) => v.replace(QUERY_SECRET, '$1***');
 
 /** Replaces secrets in any string with '***' while keeping the text recognisable:
  *  URL userinfo `scheme://user:pass@host` → `scheme://***@host` (so `x-access-token:…@` and
- *  `oauth2:…@` too); a user-only userinfo that is a known token shape (below) → `***@`; any other
- *  user-only `user@` is kept (`git@github.com`);
+ *  `oauth2:…@` too); a user-only userinfo that is a known token shape (below) or any run of ≥ 16
+ *  `[A-Za-z0-9_-]` mixing letters and digits (a 40-hex PAT, an Azure DevOps PAT, a Sentry DSN key)
+ *  → `***@`, and a nats:// one of any length (`nats://***@nats`); any other user-only `user@` is kept
+ *  (`git@github.com`, `deploy@`, `oauth2@`);
  *  key/value secrets where the key matches /pass(word)?|pwd|secret|token|api[_-]?key|access[_-]?key|
  *  private[_-]?key|client[_-]?secret|auth/i in `k=v`, `k: v`, `k:'v'`, `"k": "v"`, `?k=v&` forms →
  *  value '***' (`k: v` needs the space unless the value is quoted, so `auth:8080` stays a host and
@@ -205,9 +218,11 @@ const keepUrl = (v) => v.replace(QUERY_SECRET, '$1***');
  *  — and the same credentials without a host (an http fact keyed by its path):
  *  `/services/T…/B…/<token>` → `/services/***`, `/api/webhooks/<id>/<token>` → `/api/webhooks/***`,
  *  `/bot<id>:<token>` → `/bot***`, `/webhookb2/<guid>@<guid>/IncomingWebhook/<token>/…` → `/webhookb2/***`;
- *  AWS access key ids /AKIA[0-9A-Z]{16}/ → 'AKIA***'; PEM blocks → '-----BEGIN ***-----';
+ *  AWS access key ids /(AKIA|ASIA)[0-9A-Z]{16}/ → 'AKIA***' / 'ASIA***'; a JWT anywhere → 'eyJ***';
+ *  PEM blocks → '-----BEGIN ***-----';
  *  more token shapes (`rk_live_…`, `whsec_…`, `sk-proj-…` / `sk-ant-…` / `sk-…`, `npm_…`); credential
- *  query parameters with no secret word in their name (`?sig=`, `?code=`, `?key=` → `***`; `signature`
+ *  query parameters with no secret word in their name (`?sig=`, `?code=`, `?key=`, `?jwt=`, `?session=`,
+ *  `?sessionid=`, `?session_id=`, `?sid=`, `?ticket=`, `?subscription-key=` → `***`; `signature`
  *  and `account[_-]?key` are secret words: `X-Amz-Signature=***`, Azure `AccountKey=***`); a userinfo
  *  whose user holds '@' (Azure `user@server:pass@host`); Go MySQL DSNs `user:***@tcp(…)`, Oracle
  *  `jdbc:oracle:thin:user/***@…`, `curl -u user:***`, Python `auth=('u', '***')`; a secret-named
@@ -225,6 +240,7 @@ export function redactSecrets(text) {
     .replace(PEM_LINE, '-----$1 ***-----')
     .replace(USERINFO, '$1***@')
     .replace(USER_TOKEN, '$1***@')
+    .replace(NATS_USER, '$1***@')
     .replace(GO_DSN, '$1***$2')
     .replace(ORACLE, '$1***@')
     .replace(CLI_USER, '$1***')
@@ -237,10 +253,11 @@ export function redactSecrets(text) {
     .replace(WEBHOOK_PATHS[2][0], WEBHOOK_PATHS[2][1])
     .replace(WEBHOOK_PATHS[3][0], WEBHOOK_PATHS[3][1])
     // AWS first: its '***' is a boundary AUTH_HEADER's \b and TOKEN's lookbehind must see in THIS pass (idempotency).
-    .replace(AWS_KEY, 'AKIA***')
+    .replace(AWS_KEY, '$1***')
     .replace(AUTH_HEADER, '$1 ***')
     .replace(AUTH_SCHEME, '$1$2 ***')
     .replace(TOKEN, (all, ...groups) => `${groups.slice(0, TOKEN_GROUPS).find((g) => typeof g === 'string')}***`)
+    .replace(JWT, 'eyJ***')
     // After TOKEN: a glued token ahead of the call (`npm_…Buffer.from(`) is a boundary in THIS pass (idempotency).
     .replace(BASIC_ENCODED, '$1***$2')
     .replace(QUERY_CRED, '$1***')

@@ -102,11 +102,11 @@ function labelWarnings(map, labels, read) {
   return out;
 }
 
-/** The edges the map predicts: its own, or — with overrides — the reviewed map (rejected and
- *  missing edges dropped, manual edges added). */
+/** The edges the map predicts: its own, or — with overrides — the reviewed map (rejected, missing
+ *  and stale edges dropped, manual edges added). */
 function predictedEdges(map, overrides) {
   const edges = overrides
-    ? effectiveEdges(map, overrides).filter((e) => e.state !== 'rejected' && e.state !== 'missing')
+    ? effectiveEdges(map, overrides).filter((e) => e.state !== 'rejected' && e.state !== 'missing' && e.state !== 'stale')
       .map((e) => (e.state === 'manual' ? { ...e, confidence: 'manual' } : e))   // a person's edge, not the scan's
     : (map && Array.isArray(map.edges) ? map.edges : []);
   return edges.filter(isEdge);

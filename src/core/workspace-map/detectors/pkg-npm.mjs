@@ -7,6 +7,7 @@
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import { LIMITS } from '../../../shared/workspace-map/limits.mjs';
+import { isSampleManifest } from './lib/text.mjs';
 
 const SECTIONS = Object.freeze(['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']);
 const FOLD = process.platform === 'win32' || process.platform === 'darwin';
@@ -92,7 +93,8 @@ function localTarget(spec, rel, ctx) {
 
 export default {
   id: 'pkg-npm',
-  claims: (rel) => rel === 'package.json' || rel.endsWith('/package.json'),
+  // A sample app's manifest (docs/, examples/) is no package of this member.
+  claims: (rel) => (rel === 'package.json' || rel.endsWith('/package.json')) && !isSampleManifest(rel),
   detect(file, ctx) {
     let pkg;
     try {
@@ -117,7 +119,9 @@ export default {
       if (root) {
         out.aliases.push({ value: name.toLowerCase(), source: 'package.json' });
         const tail = /^@[^/]+\/(.+)$/.exec(name);
-        if (tail) out.aliases.push({ value: tail[1].toLowerCase(), source: 'package.json' });
+        // M7: a scope tail is derived from the name, and an SDK (`@acme/billing`) carries it as often as the service it
+        // calls: tier 3 (alias-tiers.mjs), never above a survey alias of a member no code maps.
+        if (tail) out.aliases.push({ value: tail[1].toLowerCase(), source: 'npm-scope-tail' });
       }
     }
     if (root && typeof pkg.description === 'string' && pkg.description.trim()) {

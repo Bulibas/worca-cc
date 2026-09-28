@@ -4,7 +4,8 @@
 // written. Merge keys (`<<: *anchor`) are expanded, aliases resolved through a
 // per-document anchor index (the package's Alias.resolve() re-walks the whole
 // document per call — quadratic on an alias-heavy file), and every walk is bounded
-// (MAX_NODES), so an alias bomb costs at most MAX_NODES visits.
+// (MAX_NODES): the walks of a file share ONE budget (fileBudget), so a multi-document alias
+// bomb costs MAX_NODES visits in all (the file's length when larger), and the cut is reported.
 // Never throws: a malformed file yields whatever documents parsed plus errors[].
 import { parseAllDocuments, LineCounter, isMap, isSeq, isScalar, isAlias, visit } from 'yaml';
 
@@ -14,6 +15,9 @@ const MAX_DEPTH = 64;
  *  are far smaller, and the yaml package's worst-case throughput is ~2 s per adversarial MiB.
  *  Spec detectors (OpenAPI / AsyncAPI) pass maxBytes = LIMITS.MAX_FILE_BYTES. */
 export const YAML_MAX_BYTES = 262144;
+/** ONE node budget for every walk of a file (pass it to entries / nodeAt / keyLine): MAX_NODES, or the file's length
+ *  when larger. A node of alias-free YAML takes 2 bytes or more, so it never cuts one; only aliases fan out past it. */
+export const fileBudget = (src) => ({ n: Math.max(MAX_NODES, String(src ?? '').length) });
 
 function jsonDepthOk(v) {
   const stack = [[v, 0]];
@@ -27,13 +31,15 @@ function jsonDepthOk(v) {
 const firstLine = (s) => String(s ?? '').split(/\r?\n/)[0];
 const isMergeKey = (k) => isScalar(k) && (k.value === '<<' || (typeof k.value === 'symbol' && k.value.description === '<<'));
 
-/** → { docs: [{ doc, root, js }], errors: string[], lineOf(node) → 1-based line | 0 }
+/** → { docs: [{ doc, root, js }], errors: string[], cut: boolean, lineOf(node) → 1-based line | 0 }
  *  json: true → the text must be JSON (comments already blanked by the caller; trailing commas
  *  tolerated) with nesting ≤ MAX_DEPTH, checked with JSON.parse BEFORE the slower YAML parse,
- *  so adversarial input fails fast. Plain YAML over maxBytes is refused ('yaml too large'). */
+ *  so adversarial input fails fast. Plain YAML over maxBytes is refused ('yaml too large').
+ *  cut: the file's node budget left a `js` short (never an entry of errors: callers report
+ *  errors[0] as is; yamlProblem() gives what to report). */
 export function loadYaml(text, { json = false, maxBytes = YAML_MAX_BYTES } = {}) {
   const lc = new LineCounter();
-  const out = { docs: [], errors: [], lineOf: (node) => (node && node.range ? lc.linePos(node.range[0]).line : 0) };
+  const out = { docs: [], errors: [], cut: false, lineOf: (node) => (node && node.range ? lc.linePos(node.range[0]).line : 0) };
   const src = String(text ?? '').replace(/^\uFEFF/, ''); // editors on Windows write a BOM; JSON.parse rejects it
   if (json) {
     let v;
@@ -52,14 +58,22 @@ export function loadYaml(text, { json = false, maxBytes = YAML_MAX_BYTES } = {})
     out.errors.push(firstLine(e?.message || e));
     return out;
   }
+  const budget = fileBudget(src); // ONE budget for every document of the file
   for (const doc of Array.from(parsed || [])) {
     for (const e of doc.errors || []) out.errors.push(firstLine(e.message));
     const root = doc.contents ?? null;
     let js = null;
-    try { js = plain(doc, root, { n: MAX_NODES }, 0); } catch (e) { out.errors.push(firstLine(e?.message || e)); }
+    try { js = plain(doc, root, budget, 0); } catch (e) { out.errors.push(firstLine(e?.message || e)); }
     out.docs.push({ doc, root, js });
   }
+  out.cut = budget.n < 0;
   return out;
+}
+
+/** What to report for a loaded file, the way a parse error is reported: its first error, else 'yaml too large'
+ *  when the node budget cut it (loadYaml's `cut`) or cut one of the detector's own walks; null when it read whole. */
+export function yamlProblem(y, ...walks) {
+  return y?.errors?.[0] ?? (y?.cut || walks.some((b) => b && b.n < 0) ? 'yaml too large' : null);
 }
 
 const ANCHORS = new WeakMap();
@@ -112,7 +126,8 @@ export function entries(doc, mapNode, budget = { n: MAX_NODES }, depth = 0) {
     if (isMergeKey(p.key)) {
       const src = deref(doc, p.value);
       const list = isSeq(src) ? src.items : [src];
-      for (const s of list) for (const e of entries(doc, s, budget, depth + 1)) if (!out.has(e.key)) out.set(e.key, e);
+      // each merge source costs a visit: a map merging F aliases of an empty map, referenced F times, is F² work for no entry
+      for (const s of list) { if (budget.n-- <= 0) break; for (const e of entries(doc, s, budget, depth + 1)) if (!out.has(e.key)) out.set(e.key, e); }
       continue;
     }
     const k = deref(doc, p.key);
@@ -138,25 +153,26 @@ function plain(doc, node, budget, depth) {
   return null;
 }
 
-/** The node at path (string keys / number indices), aliases and merges resolved; null when absent. */
-export function nodeAt(doc, root, path) {
+/** The node at path (string keys / number indices), aliases and merges resolved; null when absent. `budget`: the
+ *  file's walk budget (fileBudget), shared with every other walk of the file; a fresh MAX_NODES when omitted. */
+export function nodeAt(doc, root, path, budget) {
   let n = deref(doc, root);
   for (const seg of path) {
     if (n == null) return null;
     if (typeof seg === 'number') { n = isSeq(n) ? deref(doc, n.items[seg]) : null; continue; }
-    const e = entries(doc, n).find((x) => x.key === seg);
+    const e = entries(doc, n, budget).find((x) => x.key === seg);
     n = e ? deref(doc, e.value) : null;
   }
   return n;
 }
 
-/** Line of the KEY that holds path's last segment (a seq index → the item's line). 0 when absent. */
-export function keyLine(y, doc, root, path) {
+/** Line of the KEY that holds path's last segment (a seq index → the item's line). 0 when absent. `budget`: as nodeAt. */
+export function keyLine(y, doc, root, path, budget) {
   if (!path.length) return y.lineOf(root);
-  const parent = nodeAt(doc, root, path.slice(0, -1));
+  const parent = nodeAt(doc, root, path.slice(0, -1), budget);
   const last = path[path.length - 1];
   if (typeof last === 'number') return isSeq(parent) ? y.lineOf(parent.items[last]) : 0;
-  const e = entries(doc, parent).find((x) => x.key === last);
+  const e = entries(doc, parent, budget).find((x) => x.key === last);
   return e ? y.lineOf(e.keyNode) : 0;
 }
 
@@ -184,7 +200,8 @@ export function walkScalars(y, doc, root, cb, budget = {}) {
       return;
     }
     const down = (k) => len + (path.length ? 1 : 0) + String(k).length; // the flattened key's length one level down
-    if (isSeq(n)) { n.items.forEach((it, i) => { if (down(i) <= KEY_MAX) visit(it, [...path, i], down(i), depth + 1); }); return; }
+    // down(i) never shrinks as i grows: stop at the first item over KEY_MAX (every later one is too), never iterate the rest
+    if (isSeq(n)) { for (let i = 0; i < n.items.length && down(i) <= KEY_MAX; i += 1) visit(n.items[i], [...path, i], down(i), depth + 1); return; }
     if (isMap(n)) for (const e of entries(doc, n, budget, depth)) if (down(e.key) <= KEY_MAX) visit(e.value, [...path, e.key], down(e.key), depth + 1);
   };
   visit(root, [], 0, 0);

@@ -12,7 +12,7 @@ import { LIMITS } from '../../shared/workspace-map/limits.mjs';
 
 export const SKIP_DIRS = Object.freeze(['.git', 'node_modules', 'vendor', 'dist', 'build', 'target', 'out',
   '.next', '.nuxt', 'coverage', 'graphify-out', '.venv', 'venv', '__pycache__', '.gradle', '.idea', '.vscode',
-  'bin', 'obj', 'Pods', 'DerivedData', '.terraform', '.worca-cc']);
+  'bin', 'obj', 'Pods', 'DerivedData', '.terraform', '.worca-cc', 'bower_components', 'jspm_packages']);
 
 /** Case-insensitive file systems (win32, darwin): `Node_Modules/` and `Bin/` are the skipped dirs too. */
 const FOLD = process.platform === 'win32' || process.platform === 'darwin';
@@ -40,7 +40,23 @@ export function isTestPath(rel) {
   return SPEC_TEST_RE.test(rel) && !CONTRACT_RE.test(rel);
 }
 
-const skipped = (rel) => rel.split('/').some((seg) => SKIP.has(fold(seg)));
+/** Third-party code vendored at the member root (D12), in any case: `third_party/` (Bazel, Chromium, Go's project
+ *  layout), `third-party/`, `thirdparty/`, `3rdparty/`, `3rd_party/`, `3rd-party/`, and `external/` (vendored
+ *  libraries and submodules of C/C++, Android and ML trees). The first path segment only: a nested `external/` or
+ *  `vendors/` package (`src/main/java/com/acme/orders/external/`, `com/shop/vendors/`) is a service's own code. */
+const ROOT_VENDORED_RE = /^(?:(?:third|3rd)[-_]?party|external)\//i;
+/** …except a vendored contract: a client keeps its peer service's `.proto` there (grpc-gateway, Go's project layout),
+ *  or the protoc / buf output generated from it (Go `.pb.go` / `.connect.go`, Python `_pb2_grpc.py`, grpc-java and
+ *  grpc-kotlin `…Grpc.java` / `…GrpcKt.kt`, grpc-dotnet `…Grpc.cs`, grpc-js `_grpc_pb.js`, grpclib `_grpc.py`, grpc-web
+ *  `_grpc_web_pb.js` / `…ServiceClientPb.ts`), and api-proto keys the client's calls with it. A requirements file stays
+ *  too: Pants (`3rdparty/python/requirements.txt`) and Bazel (`third_party/requirements_lock.txt`) keep the member's
+ *  own Python dependencies there, and Pants' `poetry_requirements` (`3rdparty/python/pyproject.toml`), cargo-raze
+ *  (`third_party/cargo/Cargo.toml`), reindeer (`third-party/Cargo.toml`) and crate_universe (`third_party/rust/Cargo.toml`)
+ *  the member's own crate or Poetry list: only directly in the folder or in a language folder of it (a vendored crate or
+ *  library sits in a folder of its own, or in `vendor/`). */
+const VENDORED_CONTRACT_RE = /\.proto$|\.pb\.go$|\.connect\.go$|_grpc\.py$|Grpc(?:Kt)?\.(?:java|kt|cs)$|_grpc(?:_web)?_pb\.[cm]?[jt]s$|ServiceClientPb\.ts$|(?:^|\/)(?:[\w.-]{0,100}[-_.])?requirements(?:[-_.][\w.-]{0,100})?\.(?:txt|in)$|(?:^|\/)requirements\/[^/]{1,255}\.(?:txt|in)$|^(?:third|3rd)[-_]?party\/(?:(?:python|py|pip|pypi|rust|rust_crates|cargo|crates)\/)?(?:pyproject|Cargo)\.toml$/i;
+const rootVendored = (rel) => ROOT_VENDORED_RE.test(rel) && !VENDORED_CONTRACT_RE.test(rel);
+const skipped = (rel) => rootVendored(rel) || rel.split('/').some((seg) => SKIP.has(fold(seg)));
 
 /** true when absolute `abs` lies strictly inside absolute `root` (a name such as `..env` is inside). */
 const inside = (root, abs) => {
@@ -84,7 +100,7 @@ async function walk(dir, maxFiles) {
       if (visited > maxFiles * 4) return { files, truncated: true };
       const rel = relDir ? `${relDir}/${e.name}` : e.name;
       if (e.isDirectory()) { if (!SKIP.has(fold(e.name))) queue.push(rel); continue; }
-      if (!e.isFile()) continue;
+      if (!e.isFile() || rootVendored(rel)) continue;
       if (files.length >= maxFiles) { truncated = true; continue; }
       files.push(rel);
     }
