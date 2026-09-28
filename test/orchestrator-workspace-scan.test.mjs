@@ -275,7 +275,7 @@ test('no scan models: the template defaults on all three agent nodes (Sonnet 5 �
 test('a stale stored pick runs on the defaults and says so in the run log (Review Focus 5)', async () => {
   const a = await freshRepo();
   const b = await freshRepo();
-  const warning = 'Workspace scan models (Settings › General › Workspaces) no longer fit: unknown model "gone-model"';
+  const warning = 'Workspace scan models (Settings › Runs › Workspaces) no longer fit: unknown model "gone-model"';
   const orch = createOrchestrator({
     ...scanOpts([a, b], 'Stale Pick WS'),
     // What resolveScanModels hands back for a stored pick that left the catalog.

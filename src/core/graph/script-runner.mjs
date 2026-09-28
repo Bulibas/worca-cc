@@ -21,6 +21,8 @@ import { DEFAULT_EXIT_CODES, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS,
 import { probePython } from './python-probe.mjs';
 import { stripGithubCredentials } from '../github-credentials.mjs';
 import { agentIdentity, agentSpawn, killAgentGroupSync } from '../agent-user.mjs';
+import { agentIdentityFor } from '../agent-pool.mjs';
+import { currentOwner } from '../billing.mjs';
 
 const CHILD_PATH = fileURLToPath(new URL('./script-child.mjs', import.meta.url));
 /** The `python` harness (workbench spec §7), spawned as `<python> -u worca_script.py <program.py>`. */
@@ -302,7 +304,7 @@ export function spawnScript({ file, args, cwd, env, stdin = null, timeoutMs, sig
   return new Promise((resolve, reject) => {
     const started = Date.now();
     // Scripts run the agents' code (tests, builds): under the agent's uid when the container has one.
-    const agent = platform !== 'win32' ? agentIdentity() : null;
+    const agent = platform !== 'win32' ? agentIdentityFor(currentOwner()) : null;   // the owner's pool user (agent-pool.mjs)
     let spawnFile = file;
     let spawnArgs = args;
     let spawnEnv = env;

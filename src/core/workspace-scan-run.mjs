@@ -66,7 +66,7 @@ export function describeScanModels(m) {
 
 /**
  * The models ONE scan runs with (D18): the pick sent with the scan (checked strictly — a bad one is
- * the caller's 400), else Settings › General › Workspaces (a pick that no longer fits this catalog
+ * the caller's 400), else Settings › Runs › Workspaces (a pick that no longer fits this catalog
  * degrades to the defaults with a warning, never a refused scan), else Sonnet · medium for both.
  * `models` = the catalog of the scan's primary member (what the run resolves against).
  * @returns {{scanModel:string, scanEffort:(string|null), agentModel:string, agentEffort:string,
@@ -82,7 +82,7 @@ export function resolveScanModels({ explicit, stored = null, models = null } = {
     } catch (err) {
       return {
         ...WORKSPACE_SCAN_DEFAULT_MODELS, source: 'default',
-        warning: `Workspace scan models (Settings › General › Workspaces) no longer fit: ${err.message} — this scan uses ${describeScanModels(WORKSPACE_SCAN_DEFAULT_MODELS)}`,
+        warning: `Workspace scan models (Settings › Runs › Workspaces) no longer fit: ${err.message} — this scan uses ${describeScanModels(WORKSPACE_SCAN_DEFAULT_MODELS)}`,
       };
     }
   }

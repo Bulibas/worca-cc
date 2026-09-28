@@ -21,7 +21,7 @@ test('yaml and smol-toml are exact-pinned runtime dependencies, locked with inte
     assert.notEqual(entry.dev, true);
   }
   if (pkg.name === '@worca/app') {
-    assert.deepEqual(Object.keys(pkg.dependencies).sort(), ['@highlightjs/cdn-assets', 'dompurify', 'express', 'marked', 'smol-toml', 'ws', 'yaml']);
+    assert.deepEqual(Object.keys(pkg.dependencies).sort(), ['@highlightjs/cdn-assets', 'dompurify', 'express', 'htmlparser2', 'marked', 'smol-toml', 'ws', 'yaml']);
   }
 });
 

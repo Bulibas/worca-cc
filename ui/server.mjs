@@ -44,6 +44,7 @@ import {
   setPipelineCostLimitUsd, setTotalCostLimitUsd, setCostLimitResetPeriod, assertCostLimitInputs,
   humanRateUsdPerHour, setHumanRateUsdPerHour, assertHumanRateInput,
   askMaxTurns, askMaxBudgetUsd, setAskMaxTurns, setAskMaxBudgetUsd, assertAskLimitInputs,
+  askWeb, assertAskWebInput, setAskWeb, addAskWebHost,
   chatPrefs, setChatPrefs,
   debugSpawnEnabled as storedDebugSpawnEnabled, effectiveDebugSpawn, setDebugSpawnEnabled, assertDebugSpawnInput, SETTINGS_POST_KEYS,
   titleModel as storedTitleModel, setTitleModel, assertTitleModelInput,
@@ -75,6 +76,7 @@ import {
 } from '../src/core/ask/store.mjs';
 import { sanitizeTitle as askSanitizeTitle } from '../src/core/title.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
+import { askWebAccess, WEB_OFF } from '../src/core/ask/web-access.mjs';
 import { askCatalog, validateModelEffort } from '../src/core/ask/models.mjs';
 import { buildCatalog as askBuildCatalog } from '../src/core/ask/catalog.mjs';
 import {
@@ -122,6 +124,14 @@ import {
 } from '../src/core/remote-access.mjs';
 import { detectDeployment, deploymentFacts } from '../src/core/deployment.mjs';
 import { resolveIdentity, startedByOf, prAttributionFooter, actorOf, isSharedIdentity, byActor } from '../src/core/identity.mjs';
+import { withBillTo, currentBillTo, currentOwner } from '../src/core/billing.mjs';
+import { agentIdentity } from '../src/core/agent-user.mjs';
+import { createAskToolServer } from '../src/core/ask/mcp-stdio.mjs';
+import { webMcpEnv as askWebMcpEnv } from '../src/core/ask/spawn.mjs';
+import { brokerEnabled, brokerInfo, personSlots, brokerUsageSummary, foldUsageByPerson } from '../src/core/broker-client.mjs';
+import { freeDailyStatus } from '../src/core/openrouter-free.mjs';
+import { checkBrokerAtBoot } from '../src/core/broker-boot.mjs';
+import { modelSlot, missingCredentials, describeMissing } from '../src/core/broker-routing.mjs';
 import { planClone, cloneProject, CloneError } from '../src/core/clone-project.mjs';
 import { listFolders } from '../src/core/fs-browse.mjs';
 import {
@@ -166,6 +176,8 @@ import { scheduleEventPrompt, scheduleNoticeText } from '../src/core/ask/schedul
 import { applyModelChange } from '../src/core/ask/model-deps.mjs';
 import { modelEventPrompt, modelNoticeText } from '../src/core/ask/model-proposal.mjs';
 import { cloneEventPrompt, cloneNoticeText } from '../src/core/ask/clone-proposal.mjs';
+import { webEventPrompt, webNoticeText, chatWebHosts } from '../src/core/ask/web-proposal.mjs';
+import { hostAllowed as askHostAllowed } from '../src/core/web-allowlist.mjs';
 import { registryPortsFn } from '../src/core/graph/registry-ports.mjs';
 import { sweepV1Runs, V1_RUN_RETIRED, getDb } from '../src/core/db.mjs';
 import { exportWorkflow, exportWorkflowPlugin, ON_CONFLICT_MODES, RESOLUTION_CHOICES } from '../src/core/workflow-export.mjs';
@@ -200,7 +212,9 @@ import {
 } from '../src/core/memory-store.mjs';
 import { memoryCaps } from '../src/core/settings.mjs';
 import { onboardingPrefs, setOnboardingPrefs } from '../src/core/settings.mjs';
-import { onboardingStatus } from '../src/core/onboarding.mjs';   // a THIRD settings import line (the two blocks above are unrelated readers)
+import { configuredClaudeBin, onboardingStatus } from '../src/core/onboarding.mjs';   // a THIRD settings import line (the two blocks above are unrelated readers)
+import { probeClaudeAuth, CLAUDE_SIGNED_OUT_CODE, CLAUDE_SIGNED_OUT_MESSAGE } from '../src/core/preflight.mjs';
+import { failedBecauseSignedOut } from '../src/core/claude-auth.mjs';
 import { createAgentGen } from '../src/core/agent-gen.mjs';
 import { listAgents, readAgent, createAgent, updateAgent, deleteAgent, AGENT_KEY_RE } from '../src/core/agent-store.mjs';
 import {
@@ -460,6 +474,32 @@ wss.on('error', () => {});
 /** All currently connected sockets. */
 const sockets = new Set();
 
+/** This process's id, sent in `hello`: a client that sees it change knows event seqs restarted. */
+const BOOT_ID = randomUUID();
+
+// Heartbeat. A proxy in front of worca (Cloudflare closes an idle WebSocket after ~100 s)
+// drops a socket that carries no frames — a run parked on an open Auto proposal is silent
+// for minutes — and every reconnect re-subscribes and replays. A ping every 30 s keeps the
+// socket busy; one that has not answered the previous ping is dead and is terminated.
+const HEARTBEAT_MS = 30_000;
+function trackHeartbeat(ws) {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+}
+function heartbeatTick(set = sockets) {
+  for (const ws of set) {
+    if (ws.isAlive === false) {
+      try { ws.terminate(); } catch { /* already gone */ }
+      set.delete(ws);
+      continue;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch { /* closing */ }
+  }
+}
+const heartbeat = setInterval(() => heartbeatTick(), HEARTBEAT_MS);
+heartbeat.unref();
+
 // server.close() only calls back once every connection is gone, and Node's
 // closeAllConnections() skips UPGRADED sockets — a WebSocket whose close
 // handshake has not completed (a client that vanished, or a test tearing down
@@ -482,6 +522,7 @@ wss.on('connection', (ws, req) => {
     return;
   }
   sockets.add(ws);
+  trackHeartbeat(ws);
   // Whose Ask threads this socket may see (a shared sign-in's name, else null = all).
   ws.worcaViewer = askViewer(req);
   // Optional ?runId=... (or ?genId=/?benchId=) -> replay that entry's buffered
@@ -506,7 +547,7 @@ wss.on('connection', (ws, req) => {
   }
   const id = requestedRunId || requestedGenId || requestedBenchId;
 
-  send(ws, { type: 'hello', runs: summarizeRuns(), ask: askHello(ws) });
+  send(ws, { type: 'hello', bootId: BOOT_ID, runs: summarizeRuns(), ask: askHello(ws) });
 
   if (id && runs.has(id)) {
     replayEntry(ws, runs.get(id));
@@ -658,8 +699,12 @@ function emitDiffCommentsChanged(runId) {
 // Append a tagged event to an entry's ring buffer (runId LAST so the runs-Map key
 // always wins over any id the orchestrator stamped). Shared by the live wire
 // (record) and out-of-band resolutions (resolvePending) so both honor MAX_BUFFER.
+// `seq` numbers the entry's events so a client that reconnects (and is replayed the whole
+// buffer) skips what it already applied (ui/public/ws-seq.mjs); BOOT_ID in `hello` tells it
+// when a restarted server numbers from 1 again.
 function bufferEvent(entry, event) {
-  const tagged = { ...event, runId: entry.id };
+  entry.seq = (entry.seq || 0) + 1;
+  const tagged = { ...event, runId: entry.id, seq: entry.seq };
   entry.events.push(tagged);
   if (entry.events.length > MAX_BUFFER) entry.events.splice(0, entry.events.length - MAX_BUFFER);
   return tagged;
@@ -1124,6 +1169,11 @@ app.post('/api/ask/threads/:id/messages', express.json({ limit: '64mb' }));
 app.put('/api/scripts/:key/cases', express.json({ limit: '64mb' }));
 app.use(express.json({ limit: '8mb' }));
 
+// Credential broker billing (src/core/billing.mjs): every claude spawn a request causes —
+// a run it starts, an Ask turn, a model Test — is billed to the person behind the request.
+// AFTER the body parsers: their stream callbacks would otherwise run outside this context.
+app.use((req, _res, next) => withBillTo(resolveIdentity(req).name, next));
+
 if (HLJS_ASSETS) {
   const sendHljsModule = (file) => (_req, res, next) => {
     res.type('text/javascript');
@@ -1534,6 +1584,14 @@ const startRunHandler = async (req, res) => {
     }
     if (!hasWorkspace && !hasProjectDir) {
       return badRequest(res, 'workspaceId or projectDir is required');
+    }
+
+    // Credential broker: the run's own model, when the request names one, is checked here
+    // (an instant refusal); the harness then checks every node's model before it spawns
+    // anything (run-harness.mjs#_brokerPreflight).
+    if (!internal && body.mock !== true && !mockEnabled({}) && typeof body.model === 'string' && body.model.trim()) {
+      const refusal = await brokerStartRefusal(req, [body.model.trim()]);
+      if (refusal) return res.status(409).json({ error: refusal, code: 'credential-missing' });
     }
 
     // Ask Worca card link (§8.1): both or neither; the thread must exist and
@@ -3204,7 +3262,9 @@ app.get('/api/runs/:id/recovery-patch', async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/runs/:id/overview  -> Layer-2 on-demand overview agent.
 // Accepts ?key=<storeKey> (preferred; history detail uses it) or ?projectDir=...
-// ?force=1 bypasses the cached overview.json. 200 { overview } | 404 | 500.
+// ?force=1 bypasses the cached overview.json. 200 { overview } | 404 | 500, or
+// 409 code 'claude-signed-out' when the CLI is signed out (a cached overview
+// needs no Claude, so this maps the failure instead of probing up front).
 // ---------------------------------------------------------------------------
 app.post('/api/runs/:id/overview', async (req, res) => {
   const id = req.params.id;
@@ -3220,6 +3280,9 @@ app.post('/api/runs/:id/overview', async (req, res) => {
     res.json({ overview });
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
+    if (msg !== 'pipeline not found' && await failedBecauseSignedOut({ message: msg })) {
+      return res.status(409).json({ code: CLAUDE_SIGNED_OUT_CODE, error: CLAUDE_SIGNED_OUT_MESSAGE });
+    }
     const code = msg === 'pipeline not found' ? 404 : 500;
     res.status(code).json({ error: msg });
   }
@@ -3253,8 +3316,9 @@ app.get('/api/history', async (_req, res) => {
 // POST writes ONLY those flags ({hidden?, welcomeSeen?}; booleans; unknown keys
 // 400) and answers with the same full payload, so one round trip repaints.
 // ---------------------------------------------------------------------------
-app.get('/api/onboarding', async (_req, res) => {
-  try { res.json(await onboardingStatus()); }
+// ?recheck=1 skips the remembered Claude sign-in answer (the dialog's Check again).
+app.get('/api/onboarding', async (req, res) => {
+  try { res.json(await onboardingStatus({ recheck: isTruthy(req.query.recheck) })); }
   catch (err) { res.status(500).json({ error: err && err.message ? err.message : String(err) }); }
 });
 app.post('/api/onboarding', async (req, res) => {
@@ -3285,15 +3349,33 @@ app.get('/api/counts', (req, res) => {
 // GET /api/stats?range=today|week|month|all  -> the Statistics view payload (§6.9).
 // Pure DB reads; an unknown range is the caller's fault, so getStats' RangeError
 // maps to 400 while anything else keeps bubbling to the error handler.
-app.get('/api/stats', (req, res) => {
+app.get('/api/stats', async (req, res) => {
+  let stats;
   try {
     const range = typeof req.query.range === 'string' && req.query.range ? req.query.range : 'month';
-    res.json(getStats({ range }));
+    stats = getStats({ range });
   } catch (err) {
     if (err instanceof RangeError) return badRequest(res, err.message);
     throw err;
   }
+  // Credential broker: model spend per person in the same window, as the broker metered it
+  // (the authoritative figure: it saw every request). Absent with the broker off.
+  if (brokerEnabled()) stats.byPerson = await statsByPerson(stats.windowStartMs, stats.windowEndMs);
+  res.json(stats);
 });
+
+/** Broker usage in [startMs, endMs) folded per person: {people:[…]} or {error}. */
+async function statsByPerson(startMs, endMs) {
+  try {
+    const { rows } = await brokerUsageSummary({
+      since: Number.isFinite(startMs) ? new Date(startMs).toISOString() : undefined,
+      until: Number.isFinite(endMs) ? new Date(endMs).toISOString() : undefined,
+    });
+    return { people: foldUsageByPerson(rows) };
+  } catch (err) {
+    return { error: err && err.message ? err.message : String(err) };
+  }
+}
 
 // ---- Team metrics (team-metrics-design.md §4.6–§4.10) ----------------------------------
 function metricsErrorStatus(code) {
@@ -4758,7 +4840,21 @@ function primaryMemberOf(paths) {
   return [...paths].sort((x, y) => { const a = projectKey(x), b = projectKey(y); return a < b ? -1 : a > b ? 1 : 0; })[0];
 }
 
-/** The scan's models (D18): the request's pick, else Settings › General › Workspaces, else the
+/**
+ * Refuse a detached Claude job (workspace scan, agent generation) up front when
+ * the CLI is signed out (preflight probeClaudeAuth): otherwise it starts and its
+ * first agent dies ~30 s in with "Not logged in". Only a definite 'signed-out'
+ * refuses — mock, an auth env var, or an unknown answer (an older CLI) all pass.
+ * Sends the 409 and returns true when it refused.
+ */
+async function refuseSignedOutClaude(res) {
+  const { state } = await probeClaudeAuth({ bin: configuredClaudeBin(), mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK) });
+  if (state !== 'signed-out') return false;
+  res.status(409).json({ code: CLAUDE_SIGNED_OUT_CODE, error: CLAUDE_SIGNED_OUT_MESSAGE });
+  return true;
+}
+
+/** The scan's models (D18): the request's pick, else Settings › Runs › Workspaces, else the
  *  defaults — checked against the primary member's catalog. Throws on a bad explicit pick (400). */
 async function scanModelsFor(body, projectPaths) {
   return resolveScanModels({ explicit: body && body.models, stored: workspaceScanModels(), models: await listModels(primaryMemberOf(projectPaths)) });
@@ -4812,6 +4908,7 @@ app.post('/api/workspaces/scan', async (req, res) => {
   let models;
   try { models = await scanModelsFor(body, target.projectPaths); }
   catch (err) { return badRequest(res, err && err.message ? err.message : String(err)); }
+  if (await refuseSignedOutClaude(res)) return;
   return scanRequest(req, res, { ...target, rescan: false, models });
 });
 
@@ -4829,6 +4926,7 @@ app.post('/api/workspaces/:id/scan', async (req, res) => {
     let models;
     try { models = await scanModelsFor(req.body || {}, ws.projectPaths); }
     catch (err) { return badRequest(res, err && err.message ? err.message : String(err)); }
+    if (await refuseSignedOutClaude(res)) return;
     return await scanRequest(req, res, { id: ws.id, name: ws.name, projectPaths: ws.projectPaths, rescan: true, models });
   } catch (err) {
     if (!res.headersSent) res.status(500).json({ error: err && err.message ? err.message : String(err) });
@@ -4945,6 +5043,7 @@ const settingsState = () => ({
   humanRateUsdPerHour: humanRateUsdPerHour(),
   askMaxTurns: askMaxTurns(),
   askMaxBudgetUsd: askMaxBudgetUsd(),
+  askWeb: askWeb(),                                       // Ask Worca web access (off by default)
   debugSpawnEnabled: storedDebugSpawnEnabled(),          // what is STORED (the checkbox)
   debugSpawnEffective: effectiveDebugSpawn(),             // what the next spawn will DO, and why
   titleModel: storedTitleModel(),                         // the STORED id (the select), null = run's model
@@ -4955,7 +5054,7 @@ const settingsState = () => ({
   uiLevel: effectiveUiLevel(),                            // simple | advanced | expert (docs/ui-levels.md)
   memoryDefrag: memoryDefragModel(),                      // Settings › Memory: the STORED { model, effort } (null = the workflow default)
   memoryDefragDefault: defragDefaultModel(),              // what "(default)" means there: the built-in's own model
-  workspaceScan: workspaceScanModels(),                   // Settings › General › Workspaces: the STORED pick (null = the defaults)
+  workspaceScan: workspaceScanModels(),                   // Settings › Runs › Workspaces: the STORED pick (null = the defaults)
   workspaceScanDefault: WORKSPACE_SCAN_DEFAULT_MODELS,    // what null means: Sonnet 5 · medium, project agents sonnet · medium
 });
 
@@ -5003,6 +5102,112 @@ app.get('/api/whoami', (req, res) => {
   res.json(who.source === 'local' ? { name: null, source: 'local', shared: false } : { ...who, shared: isSharedIdentity(who.source) });
 });
 
+// The signed-in person's model credentials, as the credential broker sees them
+// (docs/credential-broker.md). Status only: which slots have a key, never a key.
+// { enabled:false } with the broker off.
+// OpenRouter's daily allowance of `:free` requests (src/core/openrouter-free.mjs), for the
+// signed-in person with the credential broker, else for the install's key. The sidebar line,
+// the new-run warning and the Providers card read it; ?refresh=1 asks OpenRouter now.
+app.get('/api/openrouter/free-daily', async (req, res) => {
+  try {
+    res.json(await freeDailyStatus({ person: currentBillTo(), force: req.query.refresh === '1' }));
+  } catch (err) {
+    res.status(500).json({ enabled: false, error: err && err.message ? err.message : String(err) });
+  }
+});
+
+app.get('/api/credentials', async (req, res) => {
+  if (!brokerEnabled()) return res.json({ enabled: false });
+  try {
+    const info = await brokerInfo();
+    const who = resolveIdentity(req);
+    // Which slot each catalog model spends from: the pickers' "your key / no key" badges.
+    const models = {};
+    try {
+      for (const m of await listModels()) {
+        const r = modelSlot(m.id);
+        if (r) models[m.id] = r.slot ? { slot: r.slot } : r.keyless ? { keyless: true } : { error: r.error };
+      }
+    } catch { /* badges are a nicety: an unreadable catalog leaves them off */ }
+    const base = { enabled: true, mode: info.mode, keyPage: info.publicUrl || null, models };
+    if (info.mode !== 'multi') return res.json({ ...base, person: null, slots: (await personSlots('local')).slots });
+    if (!isSharedIdentity(who.source)) return res.json({ ...base, person: null, slots: [] });
+    const r = await personSlots(who.name);
+    res.json({ ...base, person: r.person, slots: r.slots });
+  } catch (err) {
+    res.status(502).json({ enabled: true, error: err && err.message ? err.message : String(err) });
+  }
+});
+
+// ── Ask Worca tool relay (agent users, agent-pool.mjs) ───────────────────────────────
+// When agents run under their own users, a chat's claude runs as the person's agent user,
+// which cannot read worca's database. Its MCP child then only relays each JSON-RPC line
+// here; the worca tools run in this process (createAskToolServer), in the chat owner's
+// billing context. One token per turn, loopback callers only, dropped when the turn ends.
+const askRelays = new Map();   // token -> { rpc, out, billTo, owner }
+
+function askAgentRelay({ threadId, reader, web = null }) {
+  const token = randomBytes(24).toString('base64url');
+  const life = new AbortController();
+  const entry = { out: [], billTo: currentBillTo(), owner: currentOwner() };
+  // The tools run here, so this turn's web access rides a private env copy (never process.env itself);
+  // the search key is read from worca's own environment, where it was set.
+  const env = { ...process.env, ...askWebMcpEnv(web) };
+  entry.rpc = createAskToolServer({ threadId, reader, signal: life.signal, env, write: (s) => { entry.out.push(s); } });
+  askRelays.set(token, entry);
+  const port = server.address()?.port || PORT;
+  return { url: `http://127.0.0.1:${port}/api/ask/relay`, token, dispose: () => { life.abort(); askRelays.delete(token); } };
+}
+
+app.post('/api/ask/relay', async (req, res) => {
+  if (!isInContainer(req)) return res.status(403).json({ error: 'relay: loopback callers only' });
+  const entry = askRelays.get(String(req.headers['x-worca-relay'] || ''));
+  if (!entry) return res.status(403).json({ error: 'relay: unknown or finished turn' });
+  const line = req.body && typeof req.body.line === 'string' ? req.body.line : null;
+  if (line === null) return badRequest(res, 'relay: line is required');
+  // One line at a time per turn (the child sends sequentially), so the output collected
+  // between feed and idle is this line's answer.
+  await withBillTo(entry.billTo, async () => {
+    entry.out = [];
+    await entry.rpc.feed(line);
+    await entry.rpc.idle();
+  }, { owner: entry.owner });
+  res.json({ out: entry.out });
+});
+
+/**
+ * Credential-broker preflight for starting work with known models (an Ask message, a run
+ * started with an explicit model): refused up front, naming each missing key and the key
+ * page, instead of the first spawn failing. In single mode the one set of keys is checked.
+ * Never blocks on a broker that can't be asked.
+ * @param {string[]} modelIds
+ * @returns {Promise<string|null>} the refusal, or null to proceed
+ */
+async function brokerStartRefusal(req, modelIds) {
+  if (!brokerEnabled() || !modelIds || !modelIds.length) return null;
+  try {
+    const info = await brokerInfo();
+    let person = 'local';
+    if (info.mode === 'multi') {
+      const who = resolveIdentity(req);
+      if (!isSharedIdentity(who.source)) return null;
+      person = who.name;
+    }
+    const r = missingCredentials(modelIds, modelSlot, (await personSlots(person)).slots || []);
+    if (!r.missing.length && !r.errors.length) return null;
+    const one = r.missing.length === 1 && !r.errors.length ? r.missing[0] : null;
+    const where = info.publicUrl ? ` Add it on the key page (${info.publicUrl}), then try again.` : ' Add it to the credential broker, then try again.';
+    if (one) {
+      return one.state === 'invalid'
+        ? `Your ${one.label} was rejected by the provider.${where}`
+        : `You haven't added your ${one.label} yet, and ${one.models.join(', ')} needs it.${where}`;
+    }
+    return `Can't start: ${describeMissing(r, info.publicUrl)}`;
+  } catch {
+    return null;
+  }
+}
+
 /** Constant-time bearer check; `expected` is the boot-time token from ui.json. */
 function bearerMatches(header, expected) {
   if (!expected || typeof header !== 'string') return false;
@@ -5045,6 +5250,7 @@ app.post('/api/settings', async (req, res) => {
   const hasBudgetKey = has('pipelineCostLimitUsd') || has('totalCostLimitUsd') || has('costLimitResetPeriod');
   const hasHumanRateKey = has('humanRateUsdPerHour');
   const hasAskKey = has('askMaxTurns') || has('askMaxBudgetUsd');
+  const hasAskWeb = has('askWeb');                // null clears back to unset (a team default applies)
   const hasDebugSpawnKey = has('debugSpawnEnabled');
   const hasTitleModelKey = has('titleModel');
   const hasHideBuiltinKey = has('hideBuiltinModels');
@@ -5083,6 +5289,7 @@ app.post('/api/settings', async (req, res) => {
     assertCostLimitInputs(budget);
     if (hasHumanRateKey) assertHumanRateInput(body.humanRateUsdPerHour ?? '');
     assertAskLimitInputs(ask);
+    if (hasAskWeb && body.askWeb !== null) assertAskWebInput(body.askWeb);
     if (hasDebugSpawnKey) assertDebugSpawnInput(body.debugSpawnEnabled);
     if (hasTitleModelKey) {
       assertTitleModelInput(titleModelInput);
@@ -5114,6 +5321,7 @@ app.post('/api/settings', async (req, res) => {
     if (hasHumanRateKey) await setHumanRateUsdPerHour(body.humanRateUsdPerHour ?? '');
     if (has('askMaxTurns')) await setAskMaxTurns(ask.askMaxTurns);
     if (has('askMaxBudgetUsd')) await setAskMaxBudgetUsd(ask.askMaxBudgetUsd);
+    if (hasAskWeb) await setAskWeb(body.askWeb);
     if (hasDebugSpawnKey) await setDebugSpawnEnabled(body.debugSpawnEnabled);
     if (hasTitleModelKey) await setTitleModel(titleModelInput);
     if (hasHideBuiltinKey) await setHideBuiltinModels(body.hideBuiltinModels);
@@ -5126,7 +5334,7 @@ app.post('/api/settings', async (req, res) => {
     if (hasBudgetKey) emitChanged('budget-changed');
     // Other open tabs repaint their Settings cards (a stale tab could otherwise
     // "save" its old checkbox state over this one with no feedback to either).
-    if (hasAskKey || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule')) emitChanged('settings-changed');
+    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule')) emitChanged('settings-changed');
     res.json({ ...settingsState(), ...(await autoModelState()), chat: chatPrefs() });
   } catch (err) {
     // The setters throw only on an unusable path -> client error (400).
@@ -6573,11 +6781,24 @@ function askValidateScope(raw) {
   return { ok: true, scope: { pinned: true, [keys[0]]: cv.context[keys[0]] } };
 }
 
+/** One chat turn's web access: settings ⊕ the pinned project's team policy ⊕ the hosts this chat's web
+ *  cards allowed "for this chat". Never throws: a failure reads as off. */
+function askWebAccessFor(threadId, ctx) {
+  try {
+    const pinned = askPinnedScope(ctx || {});
+    return askWebAccess({ projectKey: pinned?.projectKey || null, chatHosts: chatWebHosts(askListMessages(threadId)) });
+  } catch (err) {
+    console.warn(`[worca-ask] web access resolve failed (${err?.message || err}) — web stays off`);
+    return WEB_OFF;
+  }
+}
+
 /** The system prompt of ONE Ask turn: the rules, the catalog, and — only when the chat's
  *  "Create and run scripts" pref is on (W20) — the scripts section with the runtimes this host
- *  actually has (the python probe, cached 60 s). Memory is mounted, not rendered. */
-async function askSystemPromptFor(catalog) {
-  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT });
+ *  actually has (the python probe, cached 60 s); plus the web section when `web` (askWebAccess()
+ *  for this turn) is on. Memory is mounted, not rendered. */
+async function askSystemPromptFor(catalog, { web = null } = {}) {
+  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT, web });
 }
 
 /** "scheduled Sat Sep 19, 02:00 (run 1a2b…)" / "repeats: Every weekday at 02:00 (sch_…)" / "proposes: …" — or ''. */
@@ -6698,7 +6919,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
         // workflowId once the user saved it; a run card keeps its pre-P3 line byte for byte.
         const wf = !!(b.card && b.card.type === 'workflow');
         if (wf && b.state === 'building') continue;   // transient (no name yet) — never worth a header line
-        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone')) {
+        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web')) {
           cards.push({ id: b.id, type: b.card.type, state: b.state, summary: b.card.summary || '' });
           continue;
         }
@@ -6836,7 +7057,11 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     const withText = attRows.map((a, i) => ({ id: a.id, name: a.name, bytes: a.bytes, kind: a.kind, mime: a.mime, text: files[i].text }));
     const { inline, listed } = askSelectInlineAttachments(withText);
     const headerCtx = await resolveAskContext(id, ctx, listed, userMsg.id, { signedIn });
-    const systemPrompt = await askSystemPromptFor(catalog);
+    // Web access (docs/guardrails.md "Web access"): resolved ONCE per turn — local settings ⊕ the pinned project's
+    // team policy — so the prompt section, the sub-agent note and the MCP child's tools agree.
+    const pinned = askPinnedScope(ctx);
+    const web = askWebAccessFor(id, ctx);
+    const systemPrompt = await askSystemPromptFor(catalog, { web });
     const header = askBuildContextHeader(headerCtx);
     const prompt = askBuildTurnPrompt(header, text, inline);
     const prior = askListMessages(id).filter((m) => m.seq < userMsg.seq);
@@ -6854,12 +7079,16 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
       firstTurn: !synthetic && userMsg.seq === 1 && titleWasAuto, // P3: an event never titles the thread (D13 guard kept)
       firstText: text,
       deterministicTitle,
-      pinnedScope: askPinnedScope(ctx),             // #397: proposal defaulting + mismatch flag
+      pinnedScope: pinned,                          // #397: proposal defaulting + mismatch flag
+      web,
       timeZone: ctx.timeZone || (thread.context && thread.context.timeZone) || null,   // scheduled runs: the user's clock
       memoryProject: headerCtx.project ? { key: headerCtx.project.key, name: headerCtx.project.name || '' } : null,   // native-rules revision: the turn mounts global + this project through --add-dir
       mock: mockEnabled({}) ? { card: mockAskCard(ctx, text) } : null, // R-F
       attachmentNames,
       deps: {
+        // Agents under their own users (agent-pool.mjs): the chat runs as the person's agent
+        // user and its worca tools run here, through the relay. null = the classic MCP child.
+        agentRelay: agentIdentity() ? askAgentRelay : null,
         onFrame: stampAskFrames(id, job),
         onOutOfTurn: (f) => broadcast({ ...f, threadId: id }),
         onCommentMutation: ({ runId }) => { emitDiffCommentsChanged(runId); },
@@ -6938,6 +7167,10 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
     if (!text.trim()) return badRequest(res, 'text is required');
     const mv = await validateModelEffort(body.model, body.effort);
     if (!mv.ok) return badRequest(res, mv.error);
+    if (!mockEnabled({})) {
+      const refusal = await brokerStartRefusal(req, [String(body.model)]);
+      if (refusal) return res.status(409).json({ error: refusal, code: 'credential-missing' });
+    }
     const cv = validateClientContext(body.context);
     if (!cv.ok) return badRequest(res, cv.error);
     // #397: explicit pin beats page context, per field. A context carrying its own
@@ -7138,9 +7371,9 @@ async function startMetricsEventTurn(threadId, block) {
   const state = block.state === 'declined' ? 'declined' : block.state === 'failed' ? 'failed' : 'applied';
   const result = card.result || null;
   // One event turn for every non-workflow card; the type picks the wording. Metrics is the fallback.
-  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' ? card.type : 'metrics';
-  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, metrics: metricsEventPrompt }[kind];
-  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, metrics: metricsNoticeText }[kind];
+  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' ? card.type : 'metrics';
+  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, metrics: metricsEventPrompt }[kind];
+  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, metrics: metricsNoticeText }[kind];
   const text = eventPrompt({ cardId: block.id, state, card, result });
   const notice = noticeText({ state, card, result });
   let mv = await validateModelEffort(thread.model, thread.effort);
@@ -7236,6 +7469,38 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
         let result;
         try { result = await applyModelChange(found.block.card); emitChanged('settings-changed'); }
         catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err) }; }
+        block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
+      } finally { askCardBusy.delete(cardId); }
+      if (!block) return res.status(409).json({ error: 'card vanished' });
+      const turn = await startMetricsEventTurn(id, block);
+      return res.json({ block, turn });
+    }
+    if (found.block.card && found.block.card.type === 'web') {
+      // Web card (docs/guardrails.md "Web access"): proposed → applied | failed | declined. "For this chat" is
+      // recorded on the card itself (chatWebHosts reads it back each turn); "always" adds the exact host to
+      // settings. Re-checked HERE against the chat's current web access: off, or outside the team cap, fails.
+      if (body.state !== 'applied' && body.state !== 'declined') return badRequest(res, 'state must be "applied" or "declined"');
+      if (body.state === 'applied' && body.scope !== 'chat' && body.scope !== 'always') return badRequest(res, 'scope must be "chat" or "always"');
+      if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
+      if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
+      if (body.state === 'declined') {
+        const block = flipCard(id, cardId, { state: 'declined' });
+        if (!block) return res.status(409).json({ error: 'card vanished' });
+        const turn = await startMetricsEventTurn(id, block);
+        return res.json({ block, turn });
+      }
+      askCardBusy.add(cardId);
+      let block;
+      try {
+        let result;
+        try {
+          const host = found.block.card.change?.host;
+          const now = askWebAccessFor(id, askGetThread(id)?.context || {});
+          if (!now.enabled) throw new Error('web access is off for this chat — switch it on in Settings → Ask Worca → Web access');
+          if (Array.isArray(now.teamCap) && !askHostAllowed(host, now.teamCap)) throw new Error(`${host} is outside the team policy's web allowlist`);
+          if (body.scope === 'always') { await addAskWebHost(host); emitChanged('settings-changed'); }
+          result = { ok: true, scope: body.scope };
+        } catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err) }; }
         block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
       } finally { askCardBusy.delete(cardId); }
       if (!block) return res.status(409).json({ error: 'card vanished' });
@@ -7443,6 +7708,7 @@ app.post('/api/agents/generate', async (req, res) => {
     const allAgents = await listAgents();
     const byKey = Object.fromEntries(allAgents.map((m) => [m.key, m]));
     const pick = (keys) => (Array.isArray(keys) ? keys : []).map((k) => byKey[k]).filter(Boolean);
+    if (await refuseSignedOutClaude(res)) return;
     const genId = startAgentGen({
       name, purpose: String(body.purpose || ''), details: String(body.details || ''),
       expectedBefore: pick(body.expectedBefore), expectedAfter: pick(body.expectedAfter),
@@ -8807,6 +9073,24 @@ if (isMain) {
   }
   for (const w of REMOTE_ACCESS_CHECK.warnings) console.warn(`[worca-ui] remote access: ${w}`);
 
+  // Credential broker (docs/credential-broker.md): with WORCA_BROKER_URL set, worca holds no
+  // model credential. Refuse to serve while one is still reachable by agents, or while the
+  // broker can't be reached.
+  {
+    const shared = !!identityCheck || !!String(process.env.WORCA_IDENTITY_HEADER || '').trim();
+    const b = await checkBrokerAtBoot({ shared, log: (l) => console.log(l) });
+    for (const w of b.warnings) console.warn(`[worca-ui] credentials: ${w}`);
+    if (b.fatal.length) {
+      for (const e of b.fatal) console.error(e.startsWith('worca:') ? e : `[worca-ui] credentials: ${e}`);
+      console.error('[worca-ui] not starting.');
+      process.exit(78);
+    }
+    if (b.on) {
+      const slots = (b.info?.slots || []).map((s) => s.id).join(', ');
+      console.log(`[worca-ui] credentials: broker ${b.info?.mode}${b.info?.publicUrl ? `, key page ${b.info.publicUrl}` : ''}, slots ${slots}`);
+    }
+  }
+
   try {
     seedBuiltinMarketplace();
   } catch (err) {
@@ -8898,10 +9182,11 @@ export { app, server, runs };
 export const _testing = {
   wireRun, summarizeRuns, scanRequest, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
   chatActions, chatRouter, channelHost, handleChatInbound, enqueueChatWork, answerRun,
-  chatNotifier, resumeRun, resolveHljsAssets, resolveEsmAsset, askJobs, askFollowers, askDeleting, resolveAskContext, flipCard,
+  chatNotifier, resumeRun, resolveHljsAssets, resolveEsmAsset, askJobs, askFollowers, askDeleting, resolveAskContext, flipCard, askWebAccessFor,
   startCloneJob, followCloneCard, CLONE_JOBS,
   emitDiffCommentsChanged, emitAskWorktrees, askWorktreesEnvelope, deleteAskThreadFully,
   askTrackRun, liveRunEntry, liveDefragRun, memoryScopeKey, startRunHandler, emitMemoryChanged, askSystemPromptFor,
   uiControl, bearerMatches,
   broadcast, askFilesRunDir,
+  trackHeartbeat, heartbeatTick, BOOT_ID,
 };

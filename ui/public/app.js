@@ -65,6 +65,7 @@ const state = {
 
 import { logLineClass, logLineTime, serializeLog, cycleSeparatorBefore, newCycleState, projectLogRecord } from './log-line.mjs';
 import { logLineVisible, logFacets, compileLogFilter } from './log-filter.mjs';
+import { alreadyApplied, noteBoot } from './ws-seq.mjs';
 import { decorFromState, applyDecor, isGraphManifest } from './graph/run-decor.mjs';
 import { mountRunGraph } from './graph/run-hosts.mjs';
 // Import list only — `statusChip`/`diffBadges`/`mergeFindings`/`reportResultControl`
@@ -103,7 +104,10 @@ import {
   renderConfigForm, collectConfigForm, renderConnectResult, renderDoctorReport, renderReferences409,
   renderOrphanList, channelBadge, renderAvailableList, renderMarketplaceList,
 } from './plugins-view.mjs';
-import { renderChatSettings, collectChatSettings, renderScriptToolsToggle, collectScriptToolsToggle } from './chat-settings-view.mjs';
+import { renderChatSettings, collectChatSettings, renderScriptToolsToggle, collectScriptToolsToggle, renderAskWebFields, collectAskWebFields } from './chat-settings-view.mjs';
+import { renderCredentials } from './credentials-view.mjs';
+import { loadCredentials, credentialSuffix } from './credential-badges.mjs';
+import { renderFreeDaily, freeRequestsSuffix, typicalFreeRun, newRunFreeWarning, providerFreeLine } from './openrouter-free-view.mjs';
 import { PORT_ID_RE, MAX_PORTS_PER_SIDE, PORT_TYPES, FLOW_LABEL, KEYED_KINDS } from '../../src/shared/graph/constants.mjs';
 import { FORM_ID_RE, validateFormDef, normalizeAskBlock } from '../../src/shared/forms/form-def.mjs';
 import { ASK_LIMITS } from '../../src/shared/forms/catalog.mjs';
@@ -119,6 +123,7 @@ import {
 } from './models-view.mjs';
 import {
   renderProvidersCard, collectProviderRow, renderImportSheet, renderEndpointSheet, collectImportSheet, applyImportSelectAll,
+  applyProviderPreset, endpointRowMatches,
   setModelUpstream, COPILOT_TERMS,
 } from './bridge-view.mjs';
 import {
@@ -594,6 +599,7 @@ function setSidebarCollapsed(v) {
   updateNavCounts();             // Running's title/aria-label (both states)
   renderPipelineTabs();          // child rows <-> initials tiles (phase 3)
   paintBudget();                 // spend block <-> budget ring (phase 4)
+  paintFreeDaily();              // the free-request line shows only in the full rail
 }
 
 $('#side-toggle')?.addEventListener('click', () => setSidebarCollapsed(!sidebarCollapsed));
@@ -666,7 +672,63 @@ let startSubmitInFlight = false;
 // budgetState.budget until a reload. Record the request instead and run one
 // trailing fetch per in-flight window — any number of requests made during a
 // fetch collapse into that single trailing fetch.
+// ── OpenRouter free-model requests (openrouter-free-view.mjs) ────────────────
+// Refreshed with the budget (every spend-moving event and its tick), at most every 20s:
+// the server keeps its own reading of OpenRouter and lowers it per :free call.
+const freeDailyState = { status: null, lastFetchMs: 0, fetching: false };
+
+async function refreshFreeDaily({ force = false } = {}) {
+  if (freeDailyState.fetching || (!force && Date.now() - freeDailyState.lastFetchMs < 20_000)) return;
+  freeDailyState.fetching = true;
+  freeDailyState.lastFetchMs = Date.now();
+  try {
+    const res = await fetch(`/api/openrouter/free-daily${force ? '?refresh=1' : ''}`);
+    if (res.ok) freeDailyState.status = await safeJson(res);
+  } catch { /* transient: keep the last one */ } finally { freeDailyState.fetching = false; }
+  paintFreeDaily();
+}
+
+/** The free-request line rides the spend mount, under the spend block (full rail only). */
+function paintFreeDaily() {
+  const mount = document.getElementById('side-spend');
+  if (!mount) return;
+  mount.querySelector('.free-ind')?.remove();
+  const node = sidebarCollapsed ? null : renderFreeDaily(freeDailyState.status);
+  if (node) mount.appendChild(node);
+  applyFreeDailyToNewView();
+  if (currentView() === 'settings' && currentSettingsTab === 'providers') paintProviderFreeDaily();
+}
+
+/** The new-run form: warn when a node's model is :free and fewer requests are left than a run takes. */
+function applyFreeDailyToNewView() {
+  const note = document.getElementById('newFreeNote');
+  if (!note) return;
+  const s = freeDailyState.status;
+  const free = new Set((s && Array.isArray(s.models) ? s.models : []).map((m) => String(m).toLowerCase()));
+  const usesFree = Object.values(agentRowsById || {}).some((r) => r && r.model && free.has(String(r.model).toLowerCase()));
+  const msg = newRunFreeWarning(s, { typical: typicalFreeRun(recentRunsForFree()), usesFree });
+  note.hidden = !msg;
+  note.textContent = msg || '';
+}
+
+/** The runs this page holds, newest first, for the typical-run figure. */
+function recentRunsForFree() {
+  return [...runs.values()].sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || '')));
+}
+
+/** The Providers card: the allowance under the OpenAI-compatible row, without pressing Test. */
+function paintProviderFreeDaily() {
+  const line = providerFreeLine(freeDailyState.status);
+  const root = providerRoot();
+  const row = root && root.querySelector('.mv-pv-row[data-provider="openai"] .mv-pv-msg');
+  if (!row || !line || (row.textContent && !row.dataset.freeDaily)) return;
+  row.textContent = line;
+  row.dataset.freeDaily = '1';
+  row.className = 'hint mv-pv-msg';
+}
+
 async function refreshBudget() {
+  refreshFreeDaily();
   if (budgetState.fetching) { budgetState.pending = true; return; }
   budgetState.fetching = true;
   try {
@@ -694,6 +756,7 @@ function paintBudget() {
     const render = sidebarCollapsed ? renderBudgetRing : renderBudgetIndicator;
     mount.replaceChildren(render(b,
       { fmt: { usd: fmtUsd, usd4: fmtUsd4, duration: fmtDuration, estTitle } }));
+    paintFreeDaily();   // the free-request line sits under the block this just replaced
   }
   if (topAmt) {
     topAmt.hidden = false;
@@ -703,7 +766,7 @@ function paintBudget() {
     topAmt.classList.toggle('over', !!b.blocked);
   }
   applyBudgetToNewView();
-  if (currentView() === 'settings') paintBudgetReadout();
+  if (currentView() === 'settings' && currentSettingsTab === 'runs') paintBudgetReadout();
   repaintCostBanners();
 }
 
@@ -849,7 +912,9 @@ function repaintPeople() {
 // <nav> that navLinks snapshots at boot — so route it from a container listener
 // rather than the [data-nav] delegation.
 document.getElementById('side-spend').addEventListener('click', (e) => {
-  if (e.target.closest('.spend-ind')) location.hash = 'stats';
+  // The OpenRouter free-request line (same mount) opens the Providers tab, where its key lives.
+  if (e.target.closest('.free-ind')) location.hash = 'settings/providers';
+  else if (e.target.closest('.spend-ind')) location.hash = 'stats';
 });
 
 // ---------------------------------------------------------------------------
@@ -997,7 +1062,7 @@ function handleServerMessage(msg) {
     if (currentView() === 'projects') paintProjectPolicyCells(true);
     if (currentView() === 'workspaces') paintWsPolicyLines(true);
     if (currentView() === 'team-policy' && !tpState.editing) loadTeamPolicyView();
-    if (currentView() === 'settings') paintTeamCapsReadout(true);
+    if (currentView() === 'settings' && currentSettingsTab === 'runs') paintTeamCapsReadout(true);
     if (currentView() === 'settings' && currentSettingsTab === 'plugins') paintPluginsPolicy(true);
     if (currentView() === 'new') schedulePolicyLine();
     return;
@@ -1081,6 +1146,9 @@ function handleServerMessage(msg) {
   // resurrect the phantom.)
   if ((msg.type === 'subagent' || msg.type === 'stepskills' || msg.type === 'stepgraphify' || msg.type === 'question-resolved') && !runs.has(msg.runId)) return;
   const r = upsertRun({ runId: msg.runId });
+  // A reconnect re-subscribes and the server replays the run's buffer: skip what this page
+  // already applied, or every earlier log line shows twice (ws-seq.mjs).
+  if (alreadyApplied(r, msg)) return;
 
   switch (msg.type) {
     case 'log':
@@ -1144,6 +1212,7 @@ function handleServerMessage(msg) {
 function onHello(msg) {
   const ws = state.ws;
   const list = Array.isArray(msg.runs) ? msg.runs : [];
+  noteBoot(state, msg.bootId, runs);   // a restarted server numbers run events from 1 again
 
   if (!helloSeeded) {
     helloSeeded = true;
@@ -2782,7 +2851,7 @@ function renderModelEffortPair(modelSel, effortSel, caption, sel = {}) {
       const ambiguous = m.custom === 'plugin' && labelCounts.get((m.label || m.id).toLowerCase()) > 1;
       const viaSuffix = m.bridged && !(m.label || m.id).toLowerCase().includes(m.bridged) ? ` · ${m.bridged}` : '';
       og.appendChild(option(m.id,
-        m.label + (ambiguous ? ` (${m.plugin})` : '') + viaSuffix + (m.costUnreliable ? ' ⚠cost' : '') + (m.needsSignIn ? ' (needs sign-in)' : '')));
+        m.label + (ambiguous ? ` (${m.plugin})` : '') + viaSuffix + (m.costUnreliable ? ' ⚠cost' : '') + (m.needsSignIn ? ' (needs sign-in)' : '') + credentialSuffix(m.id)));
     }
     modelSel.appendChild(og);
   };
@@ -3343,6 +3412,7 @@ function renderAgentRows(rows) {
     if (row.pinned) lockPinnedPair(modelSel, effortSel);
     host.appendChild(card);
   });
+  applyFreeDailyToNewView();   // a :free model among the rows may need the allowance warning
 }
 
 // Fill a sub-agent model dropdown. '' is "unset" — the run resolves it to the
@@ -7643,7 +7713,7 @@ async function enterWizard() {
   wizModelsPainted = paintWizardModels();
 }
 
-// The Models column starts from Settings › General › Workspaces every time the wizard opens.
+// The Models column starts from Settings › Runs › Workspaces every time the wizard opens.
 async function paintWizardModels() {
   let data = {};
   try {
@@ -7673,11 +7743,7 @@ function renderWizardProjects() {
   const projects = Array.isArray(state.projects) ? state.projects : [];
   const usable = projects.filter((p) => p && p.exists);
 
-  if (el.wizStep1Hint) {
-    el.wizStep1Hint.textContent = usable.length < 2
-      ? 'Onboard at least two projects (in New Pipeline) to create a workspace.'
-      : 'Select two or more projects to scan their interconnections.';
-  }
+  resetWizStep1Hint();
 
   projects.forEach((p) => {
     if (!p || !p.path) return;
@@ -7795,7 +7861,7 @@ async function startWizardScan() {
       body: JSON.stringify({ projectPaths: state.wizard.selectedPaths, name, models: readScanModelPickers(WIZ_MODEL_IDS) }),
     });
     const data = await safeJson(res);
-    if (!res.ok || !data.runId) { setWizStep1Error(data.error || `Scan failed (${res.status})`); return; }
+    if (!res.ok || !data.runId) { setWizStep1Error(data.error || `Scan failed (${res.status})`, data.code); return; }
     beginScanRun(data, name);
   } catch (err) {
     setWizStep1Error(err.message);
@@ -7805,8 +7871,39 @@ async function startWizardScan() {
   }
 }
 
-function setWizStep1Error(message) {
-  if (el.wizStep1Hint) el.wizStep1Hint.textContent = `Scan error: ${message}`;
+function resetWizStep1Hint() {
+  const hint = el.wizStep1Hint;
+  if (!hint) return;
+  const usable = (Array.isArray(state.projects) ? state.projects : []).filter((p) => p && p.exists);
+  hint.classList.remove('err');
+  claudeSignedOutHints.delete(hint);
+  hint.textContent = usable.length < 2
+    ? 'Onboard at least two projects (in New Pipeline) to create a workspace.'
+    : 'Select two or more projects to scan their interconnections.';
+}
+
+// A signed-out Claude CLI (409 code 'claude-signed-out') gets one short red line
+// whose link opens the Connect Claude Code dialog. `restore` repaints the hint's
+// normal text once Check again there finds the CLI signed in (paintClaudeSetupStatus).
+const claudeSignedOutHints = new Map();   // hint element -> restore()
+function showClaudeSignedOut(hint, restore) {
+  const link = document.createElement('a');
+  link.href = '#';
+  link.textContent = 'Sign in…';
+  link.addEventListener('click', (e) => { e.preventDefault(); openClaudeSetup(); });
+  hint.classList.add('err');
+  hint.replaceChildren("Claude Code isn't signed in. ", link);
+  claudeSignedOutHints.set(hint, restore);
+}
+
+// Any other refusal keeps the "Scan error: …" text.
+function setWizStep1Error(message, code) {
+  const hint = el.wizStep1Hint;
+  if (!hint) return;
+  if (code === 'claude-signed-out') { showClaudeSignedOut(hint, resetWizStep1Hint); return; }
+  claudeSignedOutHints.delete(hint);
+  hint.classList.add('err');
+  hint.textContent = `Scan error: ${message}`;
 }
 
 // A scan run starts like any run this tab started: its card on Running.
@@ -10041,7 +10138,7 @@ async function startAgentGenerate() {
     if (!res.ok || !data.genId) {
       state.agentWizard.abort = null;
       showAgentWizardStep(1);
-      if (el.agwStep1Hint) el.agwStep1Hint.textContent = `Generation error: ${data.error || res.status}`;
+      setAgwStep1Error(data.error || res.status, data.code);
       return;
     }
     state.agentWizard.genId = data.genId;
@@ -10051,8 +10148,25 @@ async function startAgentGenerate() {
     if (err && err.name === 'AbortError') return;
     state.agentWizard.abort = null;
     showAgentWizardStep(1);
-    if (el.agwStep1Hint) el.agwStep1Hint.textContent = `Generation error: ${err.message}`;
+    setAgwStep1Error(err.message);
   }
+}
+
+const AGW_STEP1_HINT = 'Name + purpose are required (or paste your own markdown).';
+function resetAgwStep1Hint() {
+  const hint = el.agwStep1Hint;
+  if (!hint) return;
+  claudeSignedOutHints.delete(hint);
+  hint.classList.remove('err');
+  hint.textContent = AGW_STEP1_HINT;
+}
+function setAgwStep1Error(message, code) {
+  const hint = el.agwStep1Hint;
+  if (!hint) return;
+  if (code === 'claude-signed-out') { showClaudeSignedOut(hint, resetAgwStep1Hint); return; }
+  claudeSignedOutHints.delete(hint);
+  hint.classList.add('err');
+  hint.textContent = `Generation error: ${message}`;
 }
 
 function onAgentGenEvent(msg) {
@@ -10079,7 +10193,7 @@ function onAgentGenEvent(msg) {
     state.agentWizard.abort = null;
     state.agentWizard.genId = '';
     showAgentWizardStep(1);
-    if (el.agwStep1Hint) el.agwStep1Hint.textContent = `Generation error: ${msg.message || 'failed'}`;
+    setAgwStep1Error(msg.message || 'failed');
   }
 }
 
@@ -10631,6 +10745,7 @@ async function loadSettings() {
     paintTeamCapsReadout();                 // team policy (design board 7): each home's caps, read-only
     refreshBudget();
     paintChatSettings(data.chat);
+    paintCredentials();
     loadAskHistory();
     setSettingsMsg('');
   } catch (e) { setSettingsMsg(e.message, 'err'); }
@@ -10642,6 +10757,19 @@ function setChatSettingsMsg(text, cls) {
   if (!el.chatSettingsMsg) return;
   el.chatSettingsMsg.textContent = text || '';
   el.chatSettingsMsg.className = `hint${cls ? ` ${cls}` : ''}`;
+}
+
+// Settings › My model credentials (credential broker, docs/credential-broker.md): the card
+// stays hidden unless worca runs with a broker. Status only; keys live on the key page.
+async function paintCredentials() {
+  const card = document.getElementById('credentials-card');
+  const host = document.getElementById('credentialsHost');
+  if (!card || !host) return;
+  let data;
+  try { data = await safeJson(await fetch('/api/credentials')); } catch { data = { enabled: false }; }
+  card.hidden = !data || data.enabled !== true;
+  if (card.hidden) return;
+  host.replaceChildren(renderCredentials(data));
 }
 
 async function paintChatSettings(prefs) {
@@ -11012,7 +11140,7 @@ try {
   if (mq && typeof mq.addEventListener === 'function') mq.addEventListener('change', () => applyTheme(document.documentElement.dataset.theme));
 } catch { /* no media queries here */ }
 
-// Settings › General › Scheduled runs: the defaults a new schedule inherits.
+// Settings › Runs › Scheduled runs: the defaults a new schedule inherits.
 function setSchedDefaultsMsg(text, kind) { setHintMsg('schedDefaultsMsg', text, kind); }
 function paintScheduleSettings(data) {
   const d = data && data.schedule;
@@ -11056,6 +11184,9 @@ function paintAskSettings(data) {
   // the GET and from every save response without a second fetch.
   const scriptHost = document.getElementById('ask-script-tools-host');
   if (scriptHost) scriptHost.replaceChildren(renderScriptToolsToggle({ prefs: data.chat || {} }, { doc: document }));
+  // Web access: repainted from every GET and save response, which also resets its dirty flag.
+  const webHost = document.getElementById('ask-web-host');
+  if (webHost) webHost.replaceChildren(renderAskWebFields({ askWeb: data.askWeb }, { doc: document }));
 }
 function postAskLimits(body) {
   return postSettingsCard(body, { setMsg: setAskLimitsMsg, paint: paintAskSettings });
@@ -11078,7 +11209,11 @@ function saveAskLimits() {
     askMaxBudgetUsd = b;
   }
   const scriptHost = document.getElementById('ask-script-tools-host');
-  postAskLimits({ askMaxTurns, askMaxBudgetUsd, ...(scriptHost ? { chat: collectScriptToolsToggle(scriptHost) } : {}) });
+  const webHost = document.getElementById('ask-web-host');
+  const askWebBody = webHost ? collectAskWebFields(webHost) : null;   // null = the web fields were not touched
+  postAskLimits({ askMaxTurns, askMaxBudgetUsd,
+    ...(scriptHost ? { chat: collectScriptToolsToggle(scriptHost) } : {}),
+    ...(askWebBody ? { askWeb: askWebBody } : {}) });
 }
 document.getElementById('askLimitsSave')?.addEventListener('click', saveAskLimits);
 document.getElementById('askLimitsReset')?.addEventListener('click', () => postAskLimits({ askMaxTurns: '', askMaxBudgetUsd: '' }));
@@ -11440,7 +11575,7 @@ document.getElementById('memDefragModelSave')?.addEventListener('click', () => {
 });
 document.getElementById('memDefragModelReset')?.addEventListener('click', () => postMemDefragModel({ memoryDefrag: null }));
 
-// ---- Settings › General › Workspaces: the models every scan starts with (D17). Create workspace
+// ---- Settings › Runs › Workspaces: the models every scan starts with (D17). Create workspace
 // can change them for one scan; Re-scan uses them.
 function setWsScanModelsMsg(text, kind) { setHintMsg('wsScanModelsMsg', text, kind); }
 async function paintWorkspaceScanModelsSettings(data) {
@@ -12774,7 +12909,7 @@ async function loadModelsView() {
   if (!el.modelsList) return;
   setModelsMsg('');
   try {
-    const [res, pres] = await Promise.all([fetch('/api/models'), fetch('/api/providers')]);
+    const [res, pres] = await Promise.all([fetch('/api/models'), fetch('/api/providers'), loadCredentials()]);
     const data = await safeJson(res);
     if (!res.ok) return setModelsMsg(data.error || `HTTP ${res.status}`, 'err');
     mvState.data = data;
@@ -12783,6 +12918,7 @@ async function loadModelsView() {
     const pdata = await safeJson(pres);
     mvState.providers = pres.ok ? pdata : null;
     renderModelsViewBody();
+    void paintHelperModelCards();
     // "+ Add model…" from a picker on another page: the dialog opens once the catalog is here.
     if (mvState.openEditorOnLoad) { mvState.openEditorOnLoad = false; openModelEditorDialog(); }
     // Copilot's models feed the editor's upstream-id datalist; fetched in the
@@ -12795,6 +12931,18 @@ async function loadModelsView() {
   } catch (e) {
     setModelsMsg(e.message, 'err');
   }
+}
+
+// Settings › Models › Title generation + Auto workflow model: both pickers list the catalog, so they
+// repaint whenever it loads — a model added a moment ago is selectable without leaving the tab.
+async function paintHelperModelCards() {
+  try {
+    const res = await fetch('/api/settings');
+    if (!res.ok) return;
+    const data = await safeJson(res);
+    await paintTitleModelSettings(data);
+    await paintAutoModelSettings(data);
+  } catch { /* the cards keep their last paint */ }
 }
 
 /** The Providers tab: the same card, on a page of its own (§8.1). */
@@ -12821,6 +12969,8 @@ function setProvidersMsg(text, kind) {
 function renderProvidersViewBody() {
   if (!el.providersList) return;
   el.providersList.replaceChildren(renderProvidersCard(mvState.providers, { signIn: mvState.signIn, split: true }));
+  // OpenRouter's free-model allowance, read afresh each time the card opens.
+  refreshFreeDaily({ force: true });
 }
 
 /** A page-level message, on whichever of the two tabs is showing. */
@@ -12973,7 +13123,9 @@ async function testProviderFlow(btn) {
     const unsaved = hasUnsavedProviderEdits(name, typed);
     if (data.ok) {
       setProviderResult(name, 'ok', `Reachable${data.models != null ? ` — ${data.models} model${data.models === 1 ? '' : 's'}` : ''}`);
-      setProviderMsg(name, `${where}${data.models != null ? ` answered with ${data.models} model${data.models === 1 ? '' : 's'}` : ' answered'}.${unsaved ? ' Press Save to keep these settings.' : ''}`);
+      // `detail` is what the endpoint says about the key itself — OpenRouter's credit, free-model
+      // allowance and rate limit (provider-ops formatOpenRouterKeyInfo); never the key.
+      setProviderMsg(name, `${where}${data.models != null ? ` answered with ${data.models} model${data.models === 1 ? '' : 's'}` : ' answered'}.${data.detail ? ` Key: ${data.detail}.` : ''}${unsaved ? ' Press Save to keep these settings.' : ''}`);
     } else {
       const why = data.message || data.error || `HTTP ${res.status}`;
       setProviderResult(name, 'err', 'Failed');
@@ -13084,20 +13236,21 @@ function applyImportFilter() {
   const sheet = el.mimpBody && el.mimpBody.querySelector('.mvi');
   if (!sheet) return;
   const q = (el.mimpFilter?.value || '').trim().toLowerCase();
-  let shown = 0;
+  let shown = 0; let total = 0;
   for (const tr of sheet.querySelectorAll('tbody tr')) {
-    const hit = !q || tr.textContent.toLowerCase().includes(q) || String(tr.dataset.id || '').toLowerCase().includes(q);
+    const hit = endpointRowMatches(tr, sheet, q);   // text, plus a hosted sheet's Free / Tools / window
     tr.classList.toggle('is-filtered', !hit);
+    total += 1;
     if (hit) shown += 1;
   }
-  const none = sheet.querySelector('.mimp-nohits');
-  if (!shown && q) {
+  let none = sheet.querySelector('.mimp-nohits');
+  if (!shown && total) {
     if (!none) {
-      const d = document.createElement('div');
-      d.className = 'hist-empty mimp-nohits';
-      d.textContent = `Nothing here matches “${el.mimpFilter.value.trim()}”.`;
-      sheet.appendChild(d);
+      none = document.createElement('div');
+      none.className = 'hist-empty mimp-nohits';
+      sheet.appendChild(none);
     }
+    none.textContent = q ? `Nothing here matches “${el.mimpFilter.value.trim()}”.` : 'Nothing here matches these filters.';
   } else if (none) none.remove();
 }
 
@@ -13377,7 +13530,11 @@ if (el.providersList) {
       const body = collectProviderRow(providerRoot(), t.dataset.provider);
       if (body) patchProviderFlow(t.dataset.provider, body);
     } else if (t.classList.contains('mv-pv-test')) testProviderFlow(t);
-    else if (t.classList.contains('mv-pv-browse')) {
+    else if (t.classList.contains('mv-pv-preset')) {
+      // Fills the fields only; the row's Test / Save do the rest, exactly as for a typed URL.
+      applyProviderPreset(providerRoot(), t.dataset.provider, t.dataset.preset);
+      setProviderMsg(t.dataset.provider, 'OpenRouter filled in. Set the key (or keep ${OPENROUTER_KEY} and export it where Worca starts), Test connection, then Save.');
+    } else if (t.classList.contains('mv-pv-browse')) {
       // The import lands in the CATALOG, so it opens there — with this row's endpoint filled in.
       const row = t.closest('.mv-pv-row');
       const input = row && row.querySelector('.mv-pv-baseurl');
@@ -13536,7 +13693,7 @@ if (el.modelImportModal) {
       const sheet = t.closest('.mvi');
       // Select-all means what is ON SCREEN: ticking a row the filter hides would import a surprise.
       if (sheet) for (const c of sheet.querySelectorAll('tbody tr:not(.is-filtered) .mvi-cb')) { if (!c.disabled) c.checked = t.checked; }
-    }
+    } else if (t && t.closest && t.closest('.mvi-or-filters')) applyImportFilter();   // Free / Tools / window
   });
   // Backdrop click and Escape close it, like every other overlay in this file.
   el.modelImportModal.addEventListener('mousedown', (ev) => { if (ev.target === el.modelImportModal) closeImportDialog(); });
@@ -13958,7 +14115,7 @@ if (runListEl) {
       if (runId) confirmCostOverride(runId, overrideBtn);
       return;
     }
-    if (e.target.closest && e.target.closest('.cb-settings')) { location.hash = 'settings'; return; }
+    if (e.target.closest && e.target.closest('.cb-settings')) { location.hash = 'settings/runs'; return; }
     // Team-cap banner (team-policy design board 9): continue past, or open the page.
     const pastBtn = e.target.closest && e.target.closest('.cb-past-team-cap');
     if (pastBtn) {
@@ -14647,7 +14804,7 @@ if (tpSection) tpSection.addEventListener('click', async (e) => {
   await handlePolicyPluginClick(e);
 });
 
-// Settings › Budget (board 7): each home's caps as a readout, the tightest as a chip on the labels.
+// Settings › Runs › Budget (board 7): each home's caps as a readout, the tightest as a chip on the labels.
 async function paintTeamCapsReadout(force = false) {
   if (!el.teamCapsReadout) return;
   const data = await loadTpScopes({ force });
@@ -15469,8 +15626,10 @@ function cssEscape(s) {
 // inserted BEFORE `.hist-open` so the chevron stays last in the aside.
 function resetPrCluster(card) {
   const aside = card.querySelector('.hist-aside');
-  if (!aside) return;
-  const freshPr = $('#hist-card-tpl').content.querySelector('.hist-pr').cloneNode(true);
+  // A PR batch can land after its document is gone (a test harness swapping pages): nothing to patch.
+  const tpl = $('#hist-card-tpl');
+  if (!aside || !tpl) return;
+  const freshPr = tpl.content.querySelector('.hist-pr').cloneNode(true);
   const curPr = aside.querySelector('.hist-pr, .hist-pr-link');         // button OR the swapped-in link
   if (curPr) curPr.replaceWith(freshPr);
   else aside.insertBefore(freshPr, aside.querySelector('.hist-open'));
@@ -17447,7 +17606,7 @@ function paintHdBanners(screen, record, data) {
       { pauseReason, pauseDetail, pipelineId: record.id, totalCostUsd: st.totalCostUsd },
       { budget: budgetState.budget || {}, fmt: { usd: fmtUsd, usd4: fmtUsd4, duration: fmtDuration, estTitle } });
     const settingsBtn = banner.querySelector('.cb-settings');
-    if (settingsBtn) settingsBtn.addEventListener('click', () => { location.hash = 'settings'; });
+    if (settingsBtn) settingsBtn.addEventListener('click', () => { location.hash = 'settings/runs'; });
     const overrideBtn = banner.querySelector('.cb-override');
     if (overrideBtn) {
       overrideBtn.addEventListener('click', () => {
@@ -20009,6 +20168,8 @@ function rdStateCopy(r, stepName) {
     return `Paused on a recoverable error${why}. Once it clears, Resume retries the step — the worktree and progress are kept.`;
   }
   if (r.pauseReason === 'usage_limit') {
+    // OpenRouter's daily free requests: the detail already says when they come back and what to do.
+    if (/^OpenRouter's free-model requests/.test(r.pauseDetail || '')) return `Paused — ${r.pauseDetail}.`;
     return `Paused — session/usage limit reached${r.pauseDetail ? ` (${r.pauseDetail})` : ''}. Resume after the reset.`;
   }
   if (r.pauseReason && (r.status === 'paused' || r.status === 'pausing' || r.status === 'interrupted')) {
@@ -21146,6 +21307,7 @@ function paintAutoBadge(el, stepper) {
   el.hidden = false;
   el.textContent = decided ? `Auto → ${name}` : 'Auto';
   el.title = !decided ? 'Auto is deciding the workflow'
+    : auto.via === 'fallback' ? `The Auto classifier was unreachable${auto.reason ? ` (${auto.reason})` : ''} — running the default workflow "${name}"`
     : auto.via === 'reused' ? `Auto reused the saved workflow "${name}"` : `Auto created the workflow "${name}"`;
   el.classList.toggle('is-deciding', !decided);
 }
@@ -22604,7 +22766,7 @@ el.runDetail?.addEventListener('click', (e) => {
   if (!r) return;
   const override = e.target.closest && e.target.closest('.cb-override');
   if (override) { confirmCostOverride(r.runId, override); return; }   // async, fire-and-forget
-  if (e.target.closest && e.target.closest('.cb-settings')) { location.hash = 'settings'; return; }
+  if (e.target.closest && e.target.closest('.cb-settings')) { location.hash = 'settings/runs'; return; }
   const past = e.target.closest && e.target.closest('.cb-past-team-cap');
   if (past) { confirmPastTeamCap(r.runId, past); return; }             // team-policy board 9
   if (e.target.closest && e.target.closest('.cb-policy-open')) { location.hash = 'team-policy'; return; }
@@ -22681,7 +22843,7 @@ function paintRdHeader(screen, r) {
     // Model bridge (model-bridge-design.md §8.6): a run that went through the
     // bridge shows its request count beside the dollars, so a "$0" reads as a
     // unit mismatch (Copilot bills requests), not as free.
-    ['rd-cost', fmtUsd(r.totalCostUsd || 0) + bridgeRequestsSuffix(r.steps), true],
+    ['rd-cost', fmtUsd(r.totalCostUsd || 0) + (freeRequestsSuffix(r.steps) || bridgeRequestsSuffix(r.steps)), true],
     ['rd-step', stepText, false],
   ];
   segs.forEach(([cls, txt, strong]) => {
@@ -22690,7 +22852,8 @@ function paintRdHeader(screen, r) {
     const seg = document.createElement('span');
     seg.className = cls + (strong ? ' strong' : '');
     seg.textContent = txt;
-    if (cls === 'rd-cost') seg.title = estTitle(r.totalCostUsd || 0) + (bridgeRequestsSuffix(r.steps) ? ' Requests: calls this run initiated through the model bridge (Copilot bills premium requests, not tokens); tool-loop continuations are not counted.' : '');
+    if (cls === 'rd-cost' && freeRequestsSuffix(r.steps)) seg.title = estTitle(r.totalCostUsd || 0) + ' Free requests: calls this run made to OpenRouter :free models (every call, tool-loop continuations too), out of the day\'s free allowance.';
+    else if (cls === 'rd-cost') seg.title = estTitle(r.totalCostUsd || 0) + (bridgeRequestsSuffix(r.steps) ? ' Requests: calls this run initiated through the model bridge (Copilot bills premium requests, not tokens); tool-loop continuations are not counted.' : '');
     meta.appendChild(seg);
   });
 
@@ -23068,10 +23231,10 @@ function gsEnsurePillHost() {
   return gsPillHost;
 }
 
-async function loadOnboarding() {
+async function loadOnboarding({ recheck = false } = {}) {
   let data;
   try {
-    const res = await fetch('/api/onboarding');
+    const res = await fetch(recheck ? '/api/onboarding?recheck=1' : '/api/onboarding');
     data = await safeJson(res);
     if (!res.ok) return;
   } catch { return; }
@@ -23178,10 +23341,13 @@ function paintClaudeSetupStatus() {
   if (!box || !gs.status) return;
   const c = gs.status.claude || {};
   const ok = !!gs.status.steps.claude;
+  const bin = c.bin || 'claude';
   box.className = `ob-claude-status ${ok ? 'ok' : 'err'}`;
-  box.textContent = ok
-    ? `Found ${c.bin || 'claude'} — you're set.`
-    : (c.hint || `"${c.bin || 'claude'}" is not on the PATH of the Worca server. Install it, then check again (restart the UI if PATH changed).`);
+  if (ok) box.textContent = c.auth === 'signed-in' ? `Found ${bin}, installed and signed in — you're set.` : `Found ${bin} — you're set.`;
+  else if (c.auth === 'signed-out') box.textContent = `Found ${bin}, installed but not signed in yet. Run claude in a terminal, type /login, then check again.`;
+  else box.textContent = c.hint || `"${bin}" is not on the PATH of the Worca server. Install it, then check again (restart the UI if PATH changed).`;
+  // The wizards' signed-out lines are stale once the CLI checks out.
+  if (ok) for (const restore of [...claudeSignedOutHints.values()]) restore();
 }
 function openClaudeSetup() {
   const modal = document.getElementById('claude-setup-modal');
@@ -23196,7 +23362,7 @@ document.getElementById('claude-setup-modal')?.addEventListener('click', (e) => 
 document.getElementById('claude-setup-check')?.addEventListener('click', async () => {
   const btn = document.getElementById('claude-setup-check');
   btn.disabled = true;
-  try { await loadOnboarding(); } finally { btn.disabled = false; }
+  try { await loadOnboarding({ recheck: true }); } finally { btn.disabled = false; }
   paintClaudeSetupStatus();
 });
 document.addEventListener('keydown', (e) => {
@@ -23712,11 +23878,11 @@ const VIEW_MIN_LEVEL = Object.freeze({
   'team-metrics': 'expert', 'team-policy': 'expert', agents: 'expert', scripts: 'expert',
   schedules: 'advanced',
 });
-const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ guardrails: 'advanced', plugins: 'advanced', memory: 'advanced', models: 'expert', providers: 'expert' });
+const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ ask: 'advanced', guardrails: 'advanced', plugins: 'advanced', memory: 'advanced', models: 'expert', providers: 'expert' });
 const VIEW_TITLES = Object.freeze({
   stats: 'Statistics', composer: 'Workflow Composer', workspaces: 'Workspaces', 'workspace-create': 'Workspaces',
   'agent-create': 'Create agent', 'team-metrics': 'Team metrics', 'team-policy': 'Team policy', agents: 'Agents', scripts: 'Scripts',
-  guardrails: 'Guardrails', plugins: 'Plugins', memory: 'Memory', models: 'Models', providers: 'Providers',
+  guardrails: 'Guardrails', plugins: 'Plugins', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
   schedules: 'Schedules',
 });
 function pageMinLevel() {
@@ -23773,7 +23939,10 @@ document.addEventListener('worca:level', () => {
 // The tab is the Settings view's hash param; a guardrail deep link nests its id
 // behind it (#settings/guardrails/<id>). parseHash splits on the FIRST '/' only,
 // so that is view 'settings', param 'guardrails/<id>' — no parseHash change.
-const SETTINGS_TABS = ['general', 'guardrails', 'models', 'providers', 'plugins', 'memory'];
+const SETTINGS_TABS = ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'models', 'providers'];
+// The tabs whose cards GET /api/settings paints (loadSettings paints every card, wherever it sits).
+// Models is not one: loadModelsView repaints its two helper-model cards with the catalog.
+const SETTINGS_FORM_TABS = ['general', 'runs', 'ask'];
 const settingsPanes = $$('[data-view="settings"] .settings-pane');
 // Old top-level hashes keep working. The hashchange listener DROPS any view it
 // does not know, so without this map a bookmark or an old in-app link would
@@ -24019,7 +24188,7 @@ function showSettingsTab(param = '') {
   // request, and re-entry refetches (which is what lets grvExitWizard's
   // '#settings/guardrails/<id>' -> '#settings/guardrails' hop reset the wizard).
   paintLevelBanner();
-  if (tab === 'general') loadSettings();
+  if (SETTINGS_FORM_TABS.includes(tab)) loadSettings();
   if (tab === 'guardrails') loadGuardrailsView(sub);
   if (tab === 'models') loadModelsView(sub);
   if (tab === 'providers') loadProvidersView();
@@ -24337,6 +24506,17 @@ refreshAllCounts();
 refreshBudget();
 startBudgetTick();
 loadWhoami();
+// Credential broker badges ("your key / no key" on model pickers): fetched at boot and
+// again when the tab regains focus — people add keys on the key page in another tab.
+// Pickers already on screen repaint once the answer changes what they show.
+{
+  const repaintPickers = () => {
+    if (currentView() === 'new') refreshNewPipelinePickers();
+    if (currentView() === 'settings' && currentSettingsTab === 'models') loadModelsView();
+  };
+  loadCredentials().then((d) => { if (d) repaintPickers(); });
+  window.addEventListener('focus', () => { loadCredentials().then((d) => { if (d) repaintPickers(); }); });
+}
 
 // Ask Worca mount (§10.2 seam 1): a JS-built body-level overlay — index.html is
 // untouched so ui-shell's routed-view census stays at 11. No network happens here;
@@ -24355,6 +24535,7 @@ askPanel = createAskPanel({
   getPageContext,
   openNewPipeline,
   openComposer: (id) => { openComposerFromAsk(id); },
+  openClaudeSetup: () => { openClaudeSetup(); },
   loadMarkdown: loadAskMarkdown,
   hljsLoader: diffHljsLoader,
   storage: window.localStorage,

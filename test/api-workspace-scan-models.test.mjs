@@ -1,4 +1,4 @@
-// test/api-workspace-scan-models.test.mjs — Settings › General › Workspaces over HTTP: the
+// test/api-workspace-scan-models.test.mjs — Settings › Runs › Workspaces over HTTP: the
 // workspaceScan round trip (root left alone), 400s, null clears, and a Re-scan that starts on
 // the stored pick. settings.json lives under HOME: HOME sandboxed, the runner's HOME guard lifted.
 import { test, before, after } from 'node:test';

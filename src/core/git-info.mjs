@@ -6,9 +6,9 @@
 // never shell out to real git/gh/GitHub. Nothing here ever throws.
 
 import { spawn } from 'node:child_process';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, isAbsolute } from 'node:path';
 import { githubEnv, readGithubCredentials } from './github-credentials.mjs';
 
 /** Default runner: spawn `cmd args` in `cwd`, resolve { ok, stdout, stderr, code }. */
@@ -175,13 +175,57 @@ const ownerRepoOfPrUrl = (url) => { const m = /^https:\/\/github\.com\/([^/]+\/[
 /** "owner/name" from gh's `[HOST/]OWNER/REPO`, or null. */
 const ownerRepo = (repo) => (repo ? String(repo).split('/').slice(-2).join('/') : null);
 
-/** Push the branch to `remote` (default origin) and set upstream. Idempotent; surfaces stderr. */
-export async function pushBranch(projectDir, branch, remote = 'origin') {
+/**
+ * The remote could not read the pack we sent ("remote: error: inflate: data stream error",
+ * "pack has bad object at offset N", "unpack failed: index-pack failed"). git streams stored
+ * objects to a remote without re-checking them, so this surfaces only there. Seen once on a
+ * hosted worca (a blob:none partial clone, 2026-09-27) while other git writers were busy in
+ * the same object store — a background `gc --auto` repacking ~12,500 loose objects and the
+ * team-metrics flush; the same push rebuilt afterwards was clean. Pure.
+ */
+export function isRemotePackFailure(stderr) {
+  return /unpack failed|index-pack (?:failed|abnormal exit)|pack has bad object|inflate: data stream error|bad pack header|unpacker error|did not receive expected object/i.test(String(stderr || ''));
+}
+
+/** A `git gc` running in this repository right now (its gc.pid names a live process here). */
+async function gcRunning(projectDir) {
+  const r = await _run('git', ['rev-parse', '--git-common-dir'], { cwd: projectDir });
+  if (!r.ok) return false;
+  const common = r.stdout.trim();
+  let text;
+  try { text = await readFile(join(isAbsolute(common) ? common : join(projectDir, common), 'gc.pid'), 'utf8'); } catch { return false; }
+  const pid = Number.parseInt(String(text).trim().split(/\s+/)[0], 10);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (err) { return err.code === 'EPERM'; }
+}
+
+/** Wait (up to `maxMs`) for a running `git gc` in the repository to finish. */
+async function waitForGc(projectDir, { maxMs = 120_000, stepMs = 2_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const until = Date.now() + maxMs;
+  while (Date.now() < until && await gcRunning(projectDir)) await sleep(stepMs);
+}
+
+/**
+ * Push the branch to `remote` (default origin) and set upstream. Idempotent; surfaces stderr.
+ * A pack the remote could not read (isRemotePackFailure) is pushed once more, after any running
+ * `git gc` in the repository finished, as a self-contained pack (--no-thin: no delta against
+ * objects the remote has, which a partial clone may not hold).
+ */
+export async function pushBranch(projectDir, branch, remote = 'origin', { gcWait = {} } = {}) {
   const r0 = remote || 'origin';
   const cred = await githubEnv('write', { repo: await githubRepoOf(projectDir, r0) });
   if (cred.error) return { ok: false, stderr: cred.error };
   const r = await _run('git', ['push', '-u', r0, branch], { cwd: projectDir, env: cred.env });
-  return { ok: r.ok, stderr: (r.stderr || '').trim() };
+  if (r.ok || !isRemotePackFailure(r.stderr)) return { ok: r.ok, stderr: (r.stderr || '').trim() };
+  await waitForGc(projectDir, gcWait);
+  const again = await _run('git', ['push', '--no-thin', '-u', r0, branch], { cwd: projectDir, env: cred.env });
+  if (again.ok) return { ok: true, stderr: (again.stderr || '').trim(), retried: true };
+  return {
+    ok: false,
+    retried: true,
+    stderr: `${(again.stderr || '').trim()}\n(the remote could not read the pack git sent, twice — a second push waited for ` +
+      'any running git gc and sent a self-contained pack. Check the local repository with `git fsck --full`.)',
+  };
 }
 
 /**

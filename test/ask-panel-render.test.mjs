@@ -180,6 +180,74 @@ test('ask-panel-render: error rows show the red line with a fallback text', asyn
   assert.match(ctx.doc.querySelector('.ask-error-line').textContent, /This turn ended with an error\./);
 });
 
+test('ask-panel-render: an error turn with no (or a ~0 s) duration says Stopped, not a dangling "Stopped after"', async () => {
+  for (const durationMs of [null, 0, 20]) {
+    const snap = snapBody([
+      asstRow('askm_00000001', 1, { status: 'error', text: '', blocks: [], durationMs, errorMessage: 'claude exited with code 1: boom' }),
+    ]);
+    const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+    await openThread(ctx);
+    assert.equal(ctx.doc.querySelector('.ask-activity-label').textContent, 'Stopped', `durationMs ${durationMs}`);
+    assert.equal(ctx.doc.querySelector('.ask-activity-elapsed').textContent, '');
+  }
+});
+
+test('ask-panel-render: a signed-out Claude error shows one line whose Sign in… link opens Connect Claude Code', async () => {
+  const snap = snapBody([
+    asstRow('askm_00000001', 1, { status: 'error', text: '', blocks: [], errorMessage: 'claude exited with code 1: Not logged in · Please run /login', errorCode: 'claude-signed-out' }),
+  ]);
+  let opened = 0;
+  const ctx = makePanel({ fetchHandler: handlerFor(snap), deps: { openClaudeSetup: () => { opened += 1; } } });
+  await openThread(ctx);
+  const line = ctx.doc.querySelector('.ask-error-line');
+  assert.equal(line.textContent, "Claude Code isn't signed in. Sign in…");
+  line.querySelector('a').dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true, cancelable: true }));
+  assert.equal(opened, 1);
+});
+
+test('ask-panel-render: a classified notice renders the human line, raw detail expert-only', async () => {
+  const detail = 'claude exited with code 1: [claude-code:unrecognized_model] {"model":"claude-opus-5-5","query_source":"sdk"}';
+  const snap = snapBody([
+    asstRow('askm_00000001', 1, {
+      status: 'error',
+      text: 'partial',
+      errorMessage: undefined,
+      blocks: [{
+        kind: 'notice',
+        text: "This model isn't available in your environment — try another model.",
+        errorClass: 'model',
+        detail,
+      }],
+    }),
+  ]);
+  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+  await openThread(ctx);
+  // No raw red line: the classified notice IS the explanation.
+  assert.equal(ctx.doc.querySelector('.ask-error-line'), null);
+  const notice = ctx.doc.querySelector('.ask-notice');
+  assert.ok(notice, 'the classified notice renders');
+  const det = notice.querySelector('details.ask-error-details');
+  assert.equal(det.dataset.minLevel, 'expert', 'the raw detail is gated to expert');
+  assert.match(det.querySelector('.ask-error-detail-text').textContent, /unrecognized_model/);
+  assert.equal(notice.querySelector('.ask-error-action'), null, 'no inline action hijacks the notice');
+});
+
+test('ask-panel-render: a classified notice survives a reload untouched (persisted block)', async () => {
+  const snap = snapBody([
+    asstRow('askm_00000001', 1, {
+      status: 'error',
+      blocks: [{ kind: 'notice', text: 'The endpoint was unreachable — check your connection and retry.', errorClass: 'network', detail: 'connection reset' }],
+    }),
+  ]);
+  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+  await openThread(ctx);
+  // openThread already IS the reload path (GET → load(snapshot) → render), so
+  // this asserts the re-derived render from the persisted block alone.
+  assert.ok(ctx.doc.querySelector('.ask-notice'));
+  assert.equal(ctx.doc.querySelector('.ask-error-action'), null);
+  assert.equal(ctx.doc.querySelector('.ask-error-line'), null);
+});
+
 test('ask-panel-render: notice with href renders an in-app link', async () => {
   const snap = snapBody([asstRow('askm_00000001', 1, { blocks: [{ kind: 'notice', text: 'Run started — "Fix login"', href: '#running/abc-123' }] })]);
   const ctx = makePanel({ fetchHandler: handlerFor(snap) });

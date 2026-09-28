@@ -185,6 +185,30 @@ test('a refused scan (409) stays in the wizard with the error as TEXT and Scan r
   assert.equal(doc.querySelector('#wiz-start-scan').disabled, false);
 });
 
+test('a signed-out Claude refusal (409 claude-signed-out) shows one red line whose link opens Connect Claude Code', async () => {
+  const { window } = await boot({
+    fetchHandler: (u, opts) => (u.endsWith('/api/workspaces/scan') && opts.method === 'POST'
+      ? Promise.resolve({ ok: false, status: 409, json: async () => ({ code: 'claude-signed-out', error: "Claude Code isn't signed in. Run `claude` in a terminal and type /login, then try again." }) }) : null),
+  });
+  goCreate(window);
+  await tick();
+  const doc = window.document;
+  doc.querySelector('#wiz-name').value = 'A';
+  pick(window, ['/a/svc-iam', '/a/svc-ui']);
+  click(window, doc.querySelector('#wiz-start-scan'));
+  await tick(); await tick();
+  assert.ok(viewShown(doc, 'workspace-create'), 'stays in the wizard');
+  const hint = doc.querySelector('#wiz-step1-hint');
+  assert.equal(hint.textContent, "Claude Code isn't signed in. Sign in…");
+  assert.ok(hint.classList.contains('err'), 'red');
+  assert.doesNotMatch(hint.textContent, /Scan error/);
+  assert.equal(doc.querySelector('#wiz-start-scan').disabled, false, 'Scan re-enabled');
+  const setup = doc.getElementById('claude-setup-modal');
+  assert.equal(setup.classList.contains('hidden'), true);
+  click(window, hint.querySelector('a'));
+  assert.equal(setup.classList.contains('hidden'), false, 'Sign in… opens the dialog');
+});
+
 test('leaving and re-entering the wizard starts clean', async () => {
   const { window } = await boot();
   goCreate(window);
@@ -270,7 +294,7 @@ const withModels = (posts, settings = WS_SETTINGS) => (u, opts) => {
   return scanOk(posts)(u, opts);
 };
 
-test('the Models column sits right of the projects and starts from Settings › General › Workspaces', async () => {
+test('the Models column sits right of the projects and starts from Settings › Runs › Workspaces', async () => {
   const { window } = await boot({ fetchHandler: withModels([]) });
   goCreate(window);
   await tick(); await tick(); await tick();

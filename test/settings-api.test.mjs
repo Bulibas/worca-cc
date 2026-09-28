@@ -139,7 +139,7 @@ test('every SETTINGS_POST_KEYS key is exempt from the legacy "no known key clear
     // key, each with a value its setter accepts as "no change / default".
     const probes = {
       projectsRoot: '', chat: {}, pipelineCostLimitUsd: '', totalCostLimitUsd: '', costLimitResetPeriod: '', humanRateUsdPerHour: '',
-      askMaxTurns: '', askMaxBudgetUsd: '', debugSpawnEnabled: false,
+      askMaxTurns: '', askMaxBudgetUsd: '', askWeb: null, debugSpawnEnabled: false,
       titleModel: '', hideBuiltinModels: false, theme: '', uiLevel: '',
       autoWorkflowModel: '',
       memoryDefrag: null,
@@ -226,4 +226,14 @@ test('a mixed POST whose root is unusable answers 400 with the theme NOT applied
   assert.equal(r.status, 400);
   const j = await (await fetch(`${base}/api/settings`)).json();
   assert.equal(j.theme, 'system', 'the theme write must come after the root write, which failed');
+});
+
+test('GET has askWeb; POST askWeb validates, saves, and null clears', async () => {
+  const get = async () => (await fetch(`${base}/api/settings`)).json();
+  assert.deepEqual((await get()).askWeb, { enabled: false, anyHost: false, allowedDomains: [], search: null });
+  const r = await postJson({ askWeb: { enabled: true, allowedDomains: ['docs.example.com'], search: null } });
+  assert.equal(r.status, 200); assert.deepEqual((await r.json()).askWeb.allowedDomains, ['docs.example.com']);
+  const bad = await postJson({ askWeb: { enabled: true, allowedDomains: ['nope'] } });
+  assert.equal(bad.status, 400); assert.match((await bad.json()).error, /not a host name/);
+  assert.deepEqual((await (await postJson({ askWeb: null })).json()).askWeb, { enabled: false, anyHost: false, allowedDomains: [], search: null });
 });

@@ -1432,3 +1432,32 @@ test('kind:"memory" injected entry — never rescued (sync-back is its rescue), 
     await rm(base, { recursive: true, force: true }); await rm(pipelineDir, { recursive: true, force: true });
   }
 });
+
+test('§5.5: an MCP server with a literal secret is left out with the broker on (WORCA_MCP_SECRETS), named only', async () => {
+  const saved = { url: process.env.WORCA_BROKER_URL, mode: process.env.WORCA_MCP_SECRETS };
+  const real = await writeTree(await tmp('worca-cc-rc-mcpsecret-'), {
+    '.mcp.json': JSON.stringify({ mcpServers: {
+      linear: { command: 'node', args: ['linear.js'], env: { LINEAR_API_KEY: 'lin_api_literalsecretvalue' } },
+      fs: { command: 'node', args: ['fs.js'], env: { TOKEN: '${FS_TOKEN}' } },
+    } }),
+  });
+  const member = () => [{ projectKey: 'k1', projectName: 'P', projectDir: real, worktreeDir: null }];
+  try {
+    process.env.WORCA_BROKER_URL = 'http://broker:8080';
+    delete process.env.WORCA_MCP_SECRETS;
+    const rc = await assemble({ runRoot: await mkRunRoot('mcpsec1'), members: member(), isWorkspace: true });
+    assert.deepEqual(rc.mcpServerNames, ['fs']);
+    const w = rc.warnings.join('\n');
+    assert.match(w, /MCP server `linear` was left out of this run: it carries a secret \(env LINEAR_API_KEY\)/);
+    assert.ok(!w.includes('lin_api_literalsecretvalue'));
+    assert.ok(!(await readFile(rc.mcpConfigPath, 'utf8')).includes('lin_api_literalsecretvalue'));
+
+    process.env.WORCA_MCP_SECRETS = 'warn';
+    const rc2 = await assemble({ runRoot: await mkRunRoot('mcpsec2'), members: member(), isWorkspace: true });
+    assert.deepEqual(rc2.mcpServerNames, ['fs', 'linear']);
+    assert.match(rc2.warnings.join('\n'), /`linear` carries a secret \(env LINEAR_API_KEY\); the run's agents can read it/);
+  } finally {
+    if (saved.url === undefined) delete process.env.WORCA_BROKER_URL; else process.env.WORCA_BROKER_URL = saved.url;
+    if (saved.mode === undefined) delete process.env.WORCA_MCP_SECRETS; else process.env.WORCA_MCP_SECRETS = saved.mode;
+  }
+});

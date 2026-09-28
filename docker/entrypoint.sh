@@ -12,6 +12,20 @@ set -euo pipefail
 
 log() { printf 'worca-entrypoint: %s\n' "$*" >&2; }
 
+# The credential broker (`worca broker`, docs/credential-broker.md) is its own container
+# from this same image. It needs none of the worca preparation below: only, on a host
+# that gives it one root-owned volume (Railway), that volume made writable by `worca`
+# before dropping to that user.
+if [ "${1:-}" = "worca" ] && [ "${2:-}" = "broker" ]; then
+  if [ -n "${WORCA_BROKER_DATA_DIR:-}" ] && [ "$(id -u)" = 0 ]; then
+    mkdir -p "$WORCA_BROKER_DATA_DIR"
+    chown worca:worca "$WORCA_BROKER_DATA_DIR"
+    chmod 0700 "$WORCA_BROKER_DATA_DIR"
+    exec setpriv --reuid=worca --regid=worca --init-groups -- "$0" "$@"
+  fi
+  exec "$@"
+fi
+
 # 0. Single-volume mode (WORCA_DATA_DIR, e.g. /data): for hosts that give a
 #    service ONE volume, mounted root-owned (Railway; docs/deploy-railway.md).
 #    Everything lives on it, HOME included, so Claude Code's ~/.claude.json
@@ -56,6 +70,44 @@ if [ -n "${WORCA_DATA_DIR:-}" ]; then
       printf '[safe]\n\tdirectory = *\n[core]\n\tsharedRepository = group\n' > "$ah/.gitconfig"
       chown worca-agent:worca-share "$ah/.gitconfig"
       export WORCA_AGENT_USER=worca-agent WORCA_AGENT_HOME="$ah"
+      # One agent user per signed-in person (the pool, worca-agent-01..): their agents
+      # can't read each other's processes. Each gets its own HOME (Claude Code's sessions).
+      # Ask Worca runs as the person's agent user too, so its folders join the shared group.
+      # WORCA_AGENT_POOL=0 keeps the single shared agent user.
+      if [ "${WORCA_AGENT_POOL:-1}" != 0 ]; then
+        homes="$data/agent-homes"
+        mkdir -p "$homes" "$wh/ask" "$wh/tmp/ask"
+        chown worca:worca-share "$homes"
+        chmod 0711 "$homes"
+        pool=""
+        for u in $(getent passwd | cut -d: -f1 | grep -E '^worca-agent-[0-9]{2}$' | sort); do
+          mkdir -p "$homes/$u"
+          chown "$u:worca-share" "$homes/$u"
+          chmod 0700 "$homes/$u"
+          printf '[safe]\n\tdirectory = *\n[core]\n\tsharedRepository = group\n' > "$homes/$u/.gitconfig"
+          chown "$u:worca-share" "$homes/$u/.gitconfig"
+          pool="$pool${pool:+,}$u"
+        done
+        chown worca:worca-share "$wh/ask" "$wh/tmp" "$wh/tmp/ask"
+        chmod 2770 "$wh/ask" "$wh/tmp/ask"
+        chmod 0751 "$wh/tmp"
+        if [ ! -e "$wh/.agent-pool" ]; then
+          chgrp -R worca-share "$wh/ask" "$wh/tmp/ask"
+          chmod -R g+rwX "$wh/ask" "$wh/tmp/ask"
+          find "$wh/ask" "$wh/tmp/ask" -type d -exec chmod g+s {} +
+          touch "$wh/.agent-pool"
+          chown worca:worca "$wh/.agent-pool"
+        fi
+        if [ -n "$pool" ]; then export WORCA_AGENT_POOL="$pool" WORCA_AGENT_HOMES="$homes"; else unset WORCA_AGENT_POOL; fi
+        # Without CAP_FSETID the kernel drops the setgid bit silently: new files then get worca's
+        # own group and agent users can't read them (Ask's tool config, run checkouts).
+        if [ ! -g "$wh/tmp/ask" ] || [ ! -g "$wh/runs" ]; then
+          log "the shared folders did not keep their setgid bit (the container lacks CAP_FSETID?):"
+          log "  agent users may not be able to read files worca writes for them. Add cap FSETID."
+        fi
+      else
+        unset WORCA_AGENT_POOL
+      fi
       WORCA_AGENT_GID="$(getent group worca-share | cut -d: -f3)"
       export WORCA_AGENT_GID
       umask 0007
@@ -74,13 +126,22 @@ if [ -n "${WORCA_DATA_DIR:-}" ]; then
     git config --global core.sharedRepository group
     if sudo -n -u "$WORCA_AGENT_USER" -- true 2>/dev/null; then
       log "agents run as $WORCA_AGENT_USER; they cannot read worca's settings, database or environment"
+      if [ -n "${WORCA_AGENT_POOL:-}" ]; then
+        first="${WORCA_AGENT_POOL%%,*}"
+        if sudo -n -u "$first" -- true 2>/dev/null; then
+          log "each signed-in person's agents run as their own user ($(printf '%s\n' "$WORCA_AGENT_POOL" | tr ',' '\n' | wc -l | tr -d ' ') in the pool)"
+        else
+          log "cannot start commands as $first (sudo refused); every person's agents share $WORCA_AGENT_USER"
+          unset WORCA_AGENT_POOL WORCA_AGENT_HOMES
+        fi
+      fi
     elif [ -n "${WORCA_ALLOWED_HOSTS:-}" ]; then
       log "cannot start commands as $WORCA_AGENT_USER (sudo refused). A hosted worca does not run agents"
       log "  as the server; fix the runtime, or set WORCA_AGENT_ISOLATION=0 to accept it explicitly."
       exit 78   # EX_CONFIG
     else
       log "cannot start commands as $WORCA_AGENT_USER (sudo refused); agents run as worca instead"
-      unset WORCA_AGENT_USER WORCA_AGENT_HOME WORCA_AGENT_GID
+      unset WORCA_AGENT_USER WORCA_AGENT_HOME WORCA_AGENT_GID WORCA_AGENT_POOL WORCA_AGENT_HOMES
     fi
   fi
 fi
@@ -116,7 +177,8 @@ fi
 
 # 3. Claude Code auth state (informational; never blocks).
 auth="none"
-if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then auth="CLAUDE_CODE_OAUTH_TOKEN"
+if [ -n "${WORCA_BROKER_URL:-}" ]; then auth="credential broker (${WORCA_BROKER_URL}); worca holds no model key"
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then auth="CLAUDE_CODE_OAUTH_TOKEN"
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then auth="ANTHROPIC_API_KEY"
 elif [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then auth="ANTHROPIC_AUTH_TOKEN"
 elif [ "${CLAUDE_CODE_USE_BEDROCK:-}" = "1" ]; then auth="Bedrock"

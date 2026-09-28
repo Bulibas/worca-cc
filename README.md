@@ -237,7 +237,7 @@ See [`docs/team-policy.md`](docs/team-policy.md).
   into that model's agent spawns. Share a model catalog as a plugin, with
   secrets required at install time.
 - **No first-party account needed** — run and chat titles are written by the
-  model the run or chat itself uses (Settings › General › Title generation picks
+  model the run or chat itself uses (Settings › Models › Title generation picks
   a fixed one instead), endpoint-routed models carry Claude Code's internal
   haiku/sonnet/opus/fable tier keys so nothing falls back to the Anthropic API,
   and *Hide built-in models* (Settings › Models) drops the built-ins from every
@@ -355,6 +355,11 @@ worca --project /path/to/your/project --prompt "Add a /search endpoint" --workfl
 # pause with Ctrl+C, continue later (survives restarts)
 worca resume <pipelineId>
 
+# see every run from the terminal — no browser, no Worca server needed
+worca runs
+worca runs --status paused
+worca runs <pipelineId>    # one run in detail (any unique prefix; --json for machines)
+
 # run it later: once, from this terminal, or on a repeat (needs `worca ui` up, or --wait)
 worca --project /path/to/your/project --prompt "Upgrade dependencies" --at "tomorrow 02:00"
 worca --project /path/to/your/project --prompt "Upgrade dependencies" --at 02:00 --wait --yes
@@ -397,7 +402,8 @@ interactive run paused and you can resume it); `1` a hard error, a stop, or an
 interactive pause an error forced; `2` a usage error; `3` a `--yes` run that
 parked itself — auth, quota, a usage or cost limit, exhausted retries, or a
 step error — with nobody attached to resume it. Nothing is discarded on a
-pause: `worca resume <pipelineId>` picks the run up where it stopped, and the
+pause: `worca resume <pipelineId>` picks the run up where it stopped — on the
+model it was started with (`--model`, or the one picked in the UI) — and the
 cause is printed with the pause block on stdout.
 
 ### `/worca` skill (inside Claude Code)

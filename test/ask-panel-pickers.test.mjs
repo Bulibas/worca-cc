@@ -791,3 +791,39 @@ test('ask-panel-pickers (#422): a STORED pick on a hidden built-in stays visible
   const names = [...ctx.doc.querySelectorAll('.ask-pop-model .ask-model-name')].map((n) => n.textContent);
   assert.deepEqual(names, ['Opus 5.5', 'Corp']);
 });
+
+test('ask-panel-pickers: opening the model menu refetches the catalog, so a model imported since shows without a reload', async () => {
+  let catalog = CATALOG;
+  const base = handler();
+  const ctx = makePanel({ fetchHandler: (url, opts) => (url === '/api/ask/models' ? { ok: true, status: 200, json: async () => catalog } : base(url, opts)) });
+  ctx.panel.open();
+  await ctx.tick(); await ctx.tick();
+  catalog = { ...CATALOG, models: [...CATALOG.models, { id: 'copilot-gpt-5', label: 'GPT-5 (Copilot)', efforts: ['medium'], custom: 'global' }] };
+  ctx.doc.querySelector('[data-ask-model-btn]').click();
+  await ctx.tick(); await ctx.tick();
+  assert.equal(ctx.fetchCalls.filter((c) => c.url === '/api/ask/models').length, 2);
+  const names = [...ctx.doc.querySelectorAll('.ask-pop-model .ask-model-name')].map((n) => n.textContent);
+  assert.ok(names.includes('GPT-5 (Copilot)'), names.join(', '));
+});
+
+test('ask-panel-pickers: a model that takes no effort greys the Effort row out and drops the effort from the button', async () => {
+  const noEff = { ...CATALOG, models: [{ id: 'copilot-claude-haiku-4.5', label: 'Claude Haiku 4.5 (Copilot)', efforts: ['medium', 'high'], custom: 'global', noEffort: true }, ...CATALOG.models] };
+  const base = handler();
+  const ctx = makePanel({ fetchHandler: (url, opts) => (url === '/api/ask/models' ? { ok: true, status: 200, json: async () => noEff } : base(url, opts)) });
+  ctx.panel.open();
+  await ctx.tick(); await ctx.tick();
+  ctx.doc.querySelector('[data-ask-model-btn]').click();
+  await ctx.tick(); await ctx.tick();
+  const pick = [...ctx.doc.querySelectorAll('.ask-pop-model [role="menuitem"]')].find((b) => b.textContent.includes('Claude Haiku 4.5 (Copilot)'));
+  pick.click();
+  await ctx.tick();
+  const btnEffort = ctx.doc.querySelector('.ask-model-btn-effort');
+  assert.equal(btnEffort.hidden, true);
+  ctx.doc.querySelector('[data-ask-model-btn]').click();
+  await ctx.tick(); await ctx.tick();
+  const row = ctx.doc.querySelector('[data-ask-effort-row]');
+  assert.equal(row.disabled, true);
+  assert.match(row.textContent, /not supported/);
+  row.click();
+  assert.equal(ctx.doc.querySelector('.ask-effort-item'), null, 'no effort pane');
+});

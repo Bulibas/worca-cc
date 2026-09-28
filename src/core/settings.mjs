@@ -38,7 +38,8 @@
 // bootstrap value or a plain scalar toggle, so a table would buy nothing.
 //
 // IMPORTANT: this module imports NOTHING from the core graph (Node builtins
-// plus the zero-import model-env.mjs leaf only). projects.mjs imports it, so
+// plus the zero-import model-env.mjs leaf and the web-allowlist.mjs leaf, which
+// imports only node:net and node:url). projects.mjs imports it, so
 // importing projects.mjs back would make worcaHome() -> getWorcaRoot() ->
 // projects.mjs an infinite cycle.
 //
@@ -57,6 +58,7 @@ import {
   UPSTREAM_PROVIDERS, COPILOT_ACCOUNT_TYPES, DEFAULT_PROVIDER_CONCURRENCY, MAX_PROVIDER_CONCURRENCY,
   COPILOT_TERMS_VERSION, isUpstreamBaseUrl,
 } from './model-env.mjs';
+import { normalizeDomainList, normalizeDomainPattern, domainError, DOMAIN_LIST_MAX, RESERVED_KEY_VAR } from './web-allowlist.mjs';
 
 /**
  * The real OS home base, honoring HOME/USERPROFILE so tests can sandbox it.
@@ -442,7 +444,7 @@ export async function setMemoryDefragModel(input, { models = null } = {}) {
   return { memoryDefrag: memoryDefragModel() };
 }
 
-// `workspaces.scan`: the models a Workspace scan starts with (Settings › General › Workspaces) —
+// `workspaces.scan`: the models a Workspace scan starts with (Settings › Runs › Workspaces) —
 // the scan agent's catalog model + effort and its project agents' sub-agent alias + effort. Unset
 // = WORKSPACE_SCAN_DEFAULT_MODELS (builtin-workflows.mjs). Create workspace can override it for one
 // scan; Re-scan uses it (workspace-scan-run.mjs resolveScanModels).
@@ -702,6 +704,86 @@ export async function setAskMaxBudgetUsd(input) {
   return { askMaxBudgetUsd: askMaxBudgetUsd() };
 }
 
+// ── Ask Worca web access (docs/guardrails.md "Web access") ─────────────────────────────────
+// `askWeb` = { enabled, allowedDomains, search? }. Off by default; the allowlist is enforced by
+// worca's own MCP server (web-fetch.mjs). The search key is only ever a ${VAR} reference read from
+// worca's environment — a literal key is refused so settings.json never holds one.
+const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+function normalizeAskWebSearch(s) {
+  if (s === null || s === undefined || s === '') return null;
+  if (!isObj(s)) throw new Error('askWeb.search must be an object or null');
+  const url = typeof s.url === 'string' ? s.url.trim() : '';
+  if (!url) return null;                                     // an empty URL field = search off
+  let u; try { u = new URL(url.replace('{query}', 'q').replace('{key}', 'k')); } catch { throw new Error('askWeb.search.url is not a valid URL'); }
+  if (u.protocol !== 'https:') throw new Error('askWeb.search.url must be an https URL');
+  if (u.username || u.password) throw new Error('askWeb.search.url must not carry credentials');
+  if (!url.includes('{query}')) throw new Error('askWeb.search.url must contain {query}');
+  if (url.length > 500) throw new Error('askWeb.search.url is longer than 500 characters');
+  const key = typeof s.key === 'string' ? s.key.trim() : '';
+  const keyVar = key ? modelEnvRef(key) : null;
+  if (key && !keyVar) throw new Error('askWeb.search.key must be a ${VAR} reference — worca never stores a search API key in settings.json');
+  if (keyVar && RESERVED_KEY_VAR.test(keyVar)) throw new Error(`askWeb.search.key: ${keyVar} is a reserved variable name`);
+  const keyHeader = typeof s.keyHeader === 'string' ? s.keyHeader.trim() : '';
+  if (keyHeader && !/^[A-Za-z0-9-]{1,64}$/.test(keyHeader)) throw new Error('askWeb.search.keyHeader must be an HTTP header name');
+  const keyPrefix = typeof s.keyPrefix === 'string' ? s.keyPrefix : '';
+  if (keyPrefix.length > 20 || /[\r\n]/.test(keyPrefix)) throw new Error('askWeb.search.keyPrefix must be at most 20 characters on one line');
+  if ((keyHeader || url.includes('{key}')) && !keyVar) throw new Error('askWeb.search.key is required when a key header or {key} is used');
+  return { url, key, keyVar, keyHeader, keyPrefix };
+}
+
+/** Throws a 400-able message; returns the normalized value. */
+export function assertAskWebInput(input) {
+  if (!isObj(input)) throw new Error('askWeb must be an object');
+  if (typeof input.enabled !== 'boolean') throw new Error('askWeb.enabled must be true or false');
+  if (input.anyHost !== undefined && typeof input.anyHost !== 'boolean') throw new Error('askWeb.anyHost must be true or false');
+  if (!Array.isArray(input.allowedDomains)) throw new Error('askWeb.allowedDomains must be a list');
+  if (input.allowedDomains.length > DOMAIN_LIST_MAX) throw new Error(`askWeb.allowedDomains holds at most ${DOMAIN_LIST_MAX} entries`);
+  const { domains, invalid } = normalizeDomainList(input.allowedDomains);
+  if (invalid.length) throw new Error(`askWeb.allowedDomains: ${domainError(invalid[0])}`);
+  return { enabled: input.enabled, anyHost: input.anyHost === true, allowedDomains: domains, search: normalizeAskWebSearch(input.search) };
+}
+
+let askWebWarned = null;
+/** The local Ask web settings; invalid stored data falls back to off (never throws). */
+export function askWeb() {
+  const raw = readSettings().askWeb;
+  const off = { enabled: false, anyHost: false, allowedDomains: [], search: null };
+  if (raw === undefined || raw === null) return off;
+  try { return assertAskWebInput(isObj(raw) ? { enabled: raw.enabled, anyHost: raw.anyHost ?? false, allowedDomains: raw.allowedDomains ?? [], search: raw.search ?? null } : raw); }
+  catch (err) {
+    // Read on every turn and settings view: warn once per distinct problem, not on every read.
+    if (err.message !== askWebWarned) { askWebWarned = err.message; console.warn(`[worca] invalid askWeb setting (${err.message}) — web access stays off`); }
+    return off;
+  }
+}
+
+/** Stores exactly what the user saved; `null` clears the key (back to "unset" = off). */
+export async function setAskWeb(input) {
+  const settings = readSettings();
+  if (input === null) { delete settings.askWeb; await persistSettings(settings); return { askWeb: askWeb() }; }
+  const next = assertAskWebInput(input);
+  settings.askWeb = {
+    enabled: next.enabled,
+    ...(next.anyHost ? { anyHost: true } : {}),
+    allowedDomains: next.allowedDomains,
+    ...(next.search ? { search: { url: next.search.url, key: next.search.key, keyHeader: next.search.keyHeader, keyPrefix: next.search.keyPrefix } } : {}),
+  };
+  await persistSettings(settings);
+  return { askWeb: askWeb() };
+}
+
+/** The web card's "Always allow": one exact host joins the stored allowlist; everything else is kept. */
+export async function addAskWebHost(host) {
+  const h = normalizeDomainPattern(host);
+  if (!h || h.startsWith('*.')) throw new Error(`askWeb: "${host}" is not an exact host name`);
+  const cur = askWeb();
+  if (cur.allowedDomains.includes(h)) return { askWeb: cur };
+  const s = cur.search;
+  return setAskWeb({ enabled: cur.enabled, anyHost: cur.anyHost, allowedDomains: [...cur.allowedDomains, h],
+    search: s ? { url: s.url, key: s.key, keyHeader: s.keyHeader, keyPrefix: s.keyPrefix } : null });
+}
+
 /** Write (or clear) a USD cap key. @throws {Error} unless positive finite number (or empty). */
 async function setUsdCap(key, input) {
   assertUsdCapInput(key, input);
@@ -842,13 +924,14 @@ export const SETTINGS_POST_KEYS = Object.freeze([
   'root', 'projectsRoot', 'chat',
   'pipelineCostLimitUsd', 'totalCostLimitUsd', 'costLimitResetPeriod', 'humanRateUsdPerHour',
   'askMaxTurns', 'askMaxBudgetUsd',
+  'askWeb',                                  // Ask Worca web access { enabled, allowedDomains, search }
   'debugSpawnEnabled',
   'titleModel', 'hideBuiltinModels',
   'theme',
   'uiLevel',                                 // interface mode (docs/ui-levels.md)
   'autoWorkflowModel',                       // auto-workflow spec D14
   'memoryDefrag',                            // Settings › Memory: the defragment model + effort
-  'workspaceScan',                           // Settings › General › Workspaces: the scan's models
+  'workspaceScan',                           // Settings › Runs › Workspaces: the scan's models
   'schedule',                                // scheduled-run defaults { graceMin, ifMissed, maxFailures }
 ]);
 

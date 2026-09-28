@@ -3,12 +3,12 @@
 // stop. Frames asserted BARE (the server stamps threadId/messageId/seq).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve as pathResolve } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 import { getDb } from '../src/core/db.mjs';
-import { createAskTurn } from '../src/core/ask/turn.mjs';
+import { createAskTurn, humanErrorText } from '../src/core/ask/turn.mjs';
 import {
   createThread, appendMessage, getMessage, getThread,
   updateThread, setThreadTitle, deleteThread,
@@ -59,6 +59,7 @@ function makeTurn({ thread, user, asst }, over = {}, deps = {}) {
       onFrame: (f) => frames.push(f),
       onOutOfTurn: (f) => outOfTurn.push(f),
       generateTitle: async () => '',
+      failedBecauseSignedOut: async () => false,   // never ask the real CLI
       ...deps,
     },
   });
@@ -103,6 +104,53 @@ test('happy path: frames ordered, session stored immediately, row + totals persi
   const done = frames.at(-1);
   assert.equal(done.status, 'done');
   assert.deepEqual(done.threadTotals, totals);
+});
+
+test('web access: the turn hands WORCA_ASK_WEB to the child, writes the config 0600, and swaps the sub-agent note', async () => {
+  const s = seed();
+  let cfg = null; let mode = null; let note = null;
+  const { turn } = makeTurn(s, { web: { enabled: true, allowedDomains: ['docs.example.com'], search: null } }, {
+    runClaudeImpl: async (opts) => {
+      cfg = JSON.parse(readFileSync(opts.mcpConfigPath, 'utf8'));
+      mode = statSync(opts.mcpConfigPath).mode & 0o777;
+      note = opts.appendSubagentSystemPrompt;
+      throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+    },
+  });
+  await turn.run();
+  assert.deepEqual(JSON.parse(cfg.mcpServers.worca.env.WORCA_ASK_WEB), { allowedDomains: ['docs.example.com'] });
+  if (process.platform !== 'win32') assert.equal(mode, 0o600);
+  assert.match(note, /network is reachable ONLY through the worca web tools/);
+});
+
+test('web search key: the value never lands in the written mcp json; its var rides the process env allowlist', async () => {
+  const s = seed();
+  process.env.ASKTEST_SEARCH_KEY = 'sekrit-key-value-123';
+  let raw = null; let allow = null;
+  const { turn } = makeTurn(s, { web: { enabled: true, allowedDomains: ['docs.example.com'],
+    search: { url: 'https://s.example/?q={query}', keyVar: 'ASKTEST_SEARCH_KEY', keyHeader: 'X-K', keyPrefix: '' } } }, {
+    runClaudeImpl: async (opts) => {
+      raw = readFileSync(opts.mcpConfigPath, 'utf8');
+      allow = opts.envAllowlist;
+      throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+    },
+  });
+  try { await turn.run(); } finally { delete process.env.ASKTEST_SEARCH_KEY; }
+  assert.ok(!raw.includes('sekrit-key-value-123'));
+  assert.deepEqual(allow, ['SSH_AUTH_SOCK', 'ASKTEST_SEARCH_KEY']);
+});
+
+test('web access off: no WORCA_ASK_WEB reaches the child', async () => {
+  const s = seed();
+  let cfg = null;
+  const { turn } = makeTurn(s, { web: { enabled: false, allowedDomains: [], search: null } }, {
+    runClaudeImpl: async (opts) => {
+      cfg = JSON.parse(readFileSync(opts.mcpConfigPath, 'utf8'));
+      throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+    },
+  });
+  await turn.run();
+  assert.ok(!('WORCA_ASK_WEB' in cfg.mcpServers.worca.env));
 });
 
 test('R-G: mcp config written (resolved home, argv twins), deleted in finally even on rejection', async () => {
@@ -358,6 +406,96 @@ test('retry also fails: session cleared, ask-error with the runner message + err
   assert.equal(last.type, 'ask-error');
   assert.equal(last.message, 'claude exited with code 1: auth');
   assert.equal(last.errorClass, 'auth');
+  assert.equal(last.code, undefined, 'a generic auth failure is not the CLI sign-in');
+});
+
+test('a failure on a signed-out CLI ends the turn with ask-error code claude-signed-out, whatever the CLI said', async () => {
+  const s = seed();
+  const asked = [];
+  // Signed out, the CLI can fail a first-party id as unrecognized_model, not "Not logged in".
+  const message = 'claude exited with code 1: [claude-code:unrecognized_model] {"model":"claude-opus-5-5","query_source":"sdk"}';
+  const { turn, frames } = makeTurn(s, {}, {
+    runClaudeImpl: async () => { throw new Error(message); },
+    failedBecauseSignedOut: async (o) => { asked.push(o); return true; },
+  });
+  await turn.run();
+  const last = frames.at(-1);
+  assert.equal(last.type, 'ask-error');
+  assert.equal(last.message, message, 'the raw message still travels');
+  assert.equal(last.code, 'claude-signed-out');
+  assert.deepEqual(asked, [{ message, model: 'claude-opus-5-5' }]);
+});
+
+test('a classified error persists a human notice block carrying errorClass + detail', async () => {
+  const s = seed();
+  const raw = 'claude exited with code 1: [claude-code:unrecognized_model] {"model":"claude-opus-5-5","query_source":"sdk"}';
+  const { turn, frames } = makeTurn(s, {}, {
+    runClaudeImpl: async () => {
+      throw Object.assign(new Error(raw), { errorClass: 'model' });
+    },
+  });
+  await turn.run();
+  const last = frames.at(-1);
+  assert.equal(last.type, 'ask-error');
+  assert.equal(last.errorClass, 'model');
+  const blocks = getMessage(s.asst.id).blocks;
+  const notice = blocks.find((b) => b && b.kind === 'notice' && b.errorClass === 'model');
+  assert.ok(notice, 'the classified notice block is persisted');
+  assert.equal(notice.text, humanErrorText('model'));
+  assert.equal(notice.detail, raw, 'the raw runner message rides the block for the Details expander');
+  // The frame mirrors ask-done: the terminal blocks ride along, so the LIVE
+  // client renders the classified notice without waiting for a reload.
+  assert.ok(Array.isArray(last.blocks), 'ask-error carries the terminal blocks');
+  assert.ok(last.blocks.some((b) => b && b.kind === 'notice' && b.errorClass === 'model'),
+    'the classified notice is among the frame blocks');
+});
+
+test('a CLI synthetic error line never becomes the answer text; it rides the notice detail instead', async () => {
+  const s = seed();
+  const apiLine = 'Failed to authenticate. API Error: 403 No access to this model: claude-opus-5-5';
+  const stderr = 'claude exited with code 1: [claude-code:unrecognized_model] {"model":"claude-opus-5-5","query_source":"sdk"}';
+  const { turn, frames } = makeTurn(s, {}, {
+    runClaudeImpl: async (opts) => {
+      const onEvent = opts.onEvent;
+      push(onEvent, { type: 'system', subtype: 'init', session_id: 'sess-x', tools: [] });
+      push(onEvent, { type: 'assistant', message: { id: 'synth-1', model: '<synthetic>', content: [{ type: 'text', text: apiLine }] }, parent_tool_use_id: null });
+      push(onEvent, { type: 'result', subtype: 'success', is_error: true, result: apiLine, total_cost_usd: 0, usage: {}, session_id: 'sess-x' });
+      throw Object.assign(new Error(stderr), { errorClass: 'model' });
+    },
+  });
+  await turn.run();
+  const msg = getMessage(s.asst.id);
+  assert.equal(msg.text, '', 'the API refusal line is not persisted as the answer');
+  const notice = (msg.blocks || []).find((b) => b && b.kind === 'notice' && b.errorClass === 'model');
+  assert.ok(notice, 'the classified notice is persisted');
+  assert.match(notice.detail, new RegExp(`${stderr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'the runner verdict is in the detail');
+  assert.match(notice.detail, /Failed to authenticate/, 'the CLI refusal line rides the detail too');
+  const last = frames.at(-1);
+  assert.equal(last.type, 'ask-error');
+  assert.equal(last.text ?? '', '');
+});
+
+test('an unclassified error persists NO notice block (raw message stays the only evidence)', async () => {
+  const s = seed();
+  const { turn, frames } = makeTurn(s, {}, {
+    runClaudeImpl: async () => {
+      throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: undefined });
+    },
+  });
+  await turn.run();
+  const blocks = getMessage(s.asst.id).blocks;
+  assert.equal(blocks.filter((b) => b && b.kind === 'notice').length, 0);
+  assert.ok(Array.isArray(frames.at(-1).blocks), 'ask-error still carries the terminal blocks');
+  assert.equal(frames.at(-1).blocks.filter((b) => b && b.kind === 'notice').length, 0);
+});
+
+test('humanErrorText: known classes map to their line, unknown/undefined is null', () => {
+  for (const cls of ['auth', 'model', 'usage_limit', 'rate_limit', 'quota', 'network']) {
+    assert.equal(typeof humanErrorText(cls), 'string');
+    assert.ok(humanErrorText(cls).length > 0);
+  }
+  assert.equal(humanErrorText('unknown-class'), null);
+  assert.equal(humanErrorText(undefined), null);
 });
 
 test('B-4 guard: an abort rejection NEVER enters the resume fallback', async () => {
@@ -1096,4 +1234,54 @@ test('memory: the turn refreshes the mount for its project before spawning and h
   assert.equal((await broken.run()).status, 'done');
   assert.equal(broken.memoryDir, null);
   assert.equal(seenOpts.addDirs, undefined);
+});
+
+test('web card: the parent re-validates against the turn\'s access — a host inside the team cap mints a card, one outside becomes a notice', async () => {
+  const s = seed();
+  const { turn } = makeTurn(s, { web: { enabled: true, allowedDomains: ['a.team.com'], search: null, teamCap: ['*.team.com'] } }, {
+    runClaudeImpl: async (opts) => {
+      // the child said ok to both (it never sees the team cap); the parent decides
+      toolUse(opts.onEvent, 'msg_1', 'toolu_w1', 'mcp__worca__propose_web_access', { url: 'https://docs.team.com/x', reason: 'docs' });
+      toolResult(opts.onEvent, 'toolu_w1', '{"ok":true,"card":{}}');
+      toolUse(opts.onEvent, 'msg_1', 'toolu_w2', 'mcp__worca__propose_web_access', { url: 'https://evil.example/' });
+      toolResult(opts.onEvent, 'toolu_w2', '{"ok":true,"card":{}}');
+      push(opts.onEvent, RESULT());
+      return { text: '', exitCode: 0 };
+    },
+  });
+  await turn.run();
+  const blocks = getMessage(s.asst.id).blocks;
+  const cards = blocks.filter((b) => b.kind === 'card');
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].state, 'proposed'); assert.equal(cards[0].card.type, 'web'); assert.equal(cards[0].card.host, 'docs.team.com');
+  assert.ok(blocks.some((b) => b.kind === 'notice' && /Web access request rejected: evil\.example is outside the team policy/.test(b.text)));
+});
+
+test('relay: the turn hands its web access to the relay and marks the spawn relayed', async () => {
+  const s = seed();
+  const web = { enabled: true, allowedDomains: ['docs.example.com'], search: null };
+  let relayArgs = null; let relayed = null;
+  const { turn } = makeTurn(s, { web }, {
+    agentRelay: (a) => { relayArgs = a; return { url: 'http://127.0.0.1:1/api/ask/relay', token: 't', dispose: () => {} }; },
+    runClaudeImpl: async (opts) => {
+      relayed = opts.asAgent;
+      throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+    },
+  });
+  await turn.run();
+  assert.deepEqual(relayArgs.web, web);
+  assert.equal(relayed, true);
+});
+
+test('the MCP config is readable by the agent user on a relayed turn, by worca alone otherwise', async () => {
+  // worca-01, 1.6.0-rc.1: a relayed turn runs as the person's agent user, which read a 0600
+  // file owned by worca — "Invalid MCP configuration: … EACCES: permission denied".
+  const modes = [];
+  const fs = { mkdir: async () => {}, writeFile: async (p, _d, o) => { if (/mcp-.*\.json$/.test(p)) modes.push(o.mode); }, unlink: async () => {} };
+  const fail = async () => { throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' }); };
+  const relayedTurn = makeTurn(seed(), {}, { fs, agentRelay: () => ({ url: 'http://127.0.0.1:1/api/ask/relay', token: 't', dispose: () => {} }), runClaudeImpl: fail }).turn;
+  await relayedTurn.run();
+  const plainTurn = makeTurn(seed(), {}, { fs, runClaudeImpl: fail }).turn;
+  await plainTurn.run();
+  assert.deepEqual(modes, [0o640, 0o600]);
 });

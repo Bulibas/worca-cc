@@ -1,6 +1,6 @@
 // test/workspace-scan-models.test.mjs
 // The models a Workspace scan starts with (D15–D18): the Sonnet · medium defaults, the stored
-// Settings › General › Workspaces pick, and the per-scan resolution. settings.json lives under
+// Settings › Runs › Workspaces pick, and the per-scan resolution. settings.json lives under
 // HOME, so HOME is sandboxed and the test runner's HOME guard lifted.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';

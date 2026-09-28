@@ -245,3 +245,59 @@ enforces the set's latest definition.
   call is a line in the thread. Sub-agents are told never to call either writer. Turn
   the switch off and `save_script` / `test_script` are not registered for the
   session at all — the two readers stay, and the prompt section goes with them.
+  **Web access (off by default).** Settings → Ask Worca → Web access gives the
+  assistant `web_fetch` (GET one https page, HTML converted to text) and, when a
+  search endpoint is configured, `web_search`. They are worca MCP tools; the
+  native `WebFetch`/`WebSearch` stay denied. Every rule is enforced by worca's
+  server, not by the prompt:
+  - **The allowlist is the control.** One host per line: `example.com`, or
+    `*.example.com` for its subdomains only. Any other host is refused before a
+    connection, and so is a redirect to one (at most 3 hops, each re-checked).
+    A wildcard over a domain where anyone can host a site is refused
+    (`*.github.io`, `*.vercel.app`, `*.co.uk`, …); list the exact host instead.
+  - **New sites are approved in the chat.** When Ask wants a host that is not
+    allowed, it calls `propose_web_access` and ends its turn. The card shows the
+    host, the reason and the exact URL: **Allow for this chat** (recorded on the
+    card; other chats are unaffected), **Always allow** (the exact host joins the
+    allowlist above) or **Deny**. The click is re-checked against the chat's
+    current web access, so a card fails if web access was switched off or the
+    host is outside the team's cap. Web access with an empty allowlist is on,
+    with every site going through a card. Sub-agents cannot ask.
+  - **Any site, without asking** (off by default) skips the allowlist and the
+    cards; every other rule below still applies. It is risky: a page or a file
+    Ask reads can then make it send data to any site inside a URL. A team
+    allowlist cap still binds it.
+  - **Data-in-URL rule** (defence in depth): https only, the default port, no
+    credentials, no IP-literal hosts, a query of at most 256 characters, a path of
+    at most 512, and no long token that looks like encoded data (base64, hex,
+    keys). Short runs of data still pass, so a site sees every URL Ask requests
+    from it — only allowlist hosts you trust with that.
+  - **SSRF:** a host that resolves to any loopback, private, link-local
+    (cloud metadata), CGNAT, ULA or other reserved address is refused; the check
+    runs on the address actually dialled. Pages are capped at 2 MiB and 100 000
+    characters of text, 15 s per call; only text types are read. The text reaches
+    the chat in pages of 20 000 characters, 30 000 at most (Claude Code moves a
+    larger tool result into a file the chat cannot read). Node's `https`
+    ignores `HTTPS_PROXY`, so a proxy-only network cannot use web access in v1.
+    On a worca with no route to the internet (`compose.egress.yml` puts it on an
+    internal network) every fetch fails; when the host name does not resolve, or
+    the connection is refused or times out before the host answers, the error
+    says this worca may not have internet access instead of only the network
+    code (the log entry keeps the code).
+  - **Search** is any GET JSON API: an https URL template with `{query}` (and
+    optionally `{key}`), plus an optional key header and prefix. The key is always
+    a `${VAR}` reference read from worca's environment — never stored in
+    `settings.json`, and never a `WORCA_*`, `ANTHROPIC_*` or `CLAUDE_*` variable.
+    Its value is never written to disk either: the named variable is passed
+    through the chat's process environment to worca's MCP server, so no file the
+    chat can read holds it. When agents run under their own users, the web tools run in
+    the worca server itself (the tool relay), and the key never reaches the
+    agent user's process.
+  - **Team policy only narrows it.** `ask.webEnabled` can only be "off" (it
+    switches web access off for chats pinned to the project) and
+    `ask.webAllowedDomains` caps each developer's own list (hosts outside it are
+    dropped). A policy never switches web access on or adds a host: the policy
+    branch is writable by anyone who can push to the repository.
+  - **Log:** every call, refused ones included, is one JSON line in
+    `~/.worca-cc/logs/ask-web.jsonl` (redacted, clipped URLs; never page text,
+    queries or keys; rotated at 5 MB). The chat is denied `Read` on `logs/`.

@@ -1228,7 +1228,9 @@ export async function writeState(pipelineDir, stateObj) {
               taskIndex: st.taskIndex ?? null, taskTotal: st.taskTotal ?? null,
               nodeKey: st.nodeKey ?? null, runtime: st.runtime ?? null, exitCode: st.exitCode ?? null,
               // Model bridge (§8.6): requests the node initiated through the bridge.
-              ...(st.bridgeCalls != null ? { bridgeCalls: st.bridgeCalls, bridgeContinued: st.bridgeContinued ?? 0 } : {}) })
+              ...(st.bridgeCalls != null ? { bridgeCalls: st.bridgeCalls, bridgeContinued: st.bridgeContinued ?? 0 } : {}),
+              // OpenRouter `:free` requests the node spent (openrouter-free.mjs).
+              ...(st.bridgeFreeCalls ? { bridgeFreeCalls: st.bridgeFreeCalls } : {}) })
         : null;
       ins.run(
         id, st.key, st.nodeId ?? null, st.phase ?? null,
@@ -1961,6 +1963,7 @@ function stepRowToStep(r) {
     if (em.runtime != null) step.runtime = em.runtime;
     if (em.exitCode != null) step.exitCode = em.exitCode;
     if (em.bridgeCalls != null) { step.bridgeCalls = em.bridgeCalls; step.bridgeContinued = em.bridgeContinued ?? 0; }
+    if (em.bridgeFreeCalls) step.bridgeFreeCalls = em.bridgeFreeCalls;
   }
   return step;
 }

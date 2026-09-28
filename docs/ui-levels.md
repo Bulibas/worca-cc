@@ -96,7 +96,7 @@ and three selectors in `ui/public/style.css` are the whole gate.
 | Copy that stands in for a control a higher mode shows | `data-max-level="simple"` (rare) |
 | A detail tab | add `level:` to its entry in `RD_TABS` / `HD_TABS` / `PD_TABS` |
 | A new page | add it to `VIEW_MIN_LEVEL` and `VIEW_TITLES` in `app.js` and tag its nav buttons |
-| A new Settings tab | add it to `SETTINGS_TAB_MIN_LEVEL` and tag its tab button |
+| A new Settings tab | add it to `SETTINGS_TABS` and `SETTINGS_TAB_MIN_LEVEL`, tag its tab button, and keep the strip ordered Simple → Advanced → Expert |
 | A Getting started step | add `level:` to its entry in `GETTING_STARTED_STEPS` |
 
 `test/ui-levels.test.mjs` fails when a nav item, Settings tab, Settings card or
@@ -208,10 +208,11 @@ Everything on the page: the list, the runtime step, the workspace and the bench 
 
 | Element | Level |
 |---|---|
-| General: Appearance, Interface mode, Budget & cost limits, Getting started, About | S |
-| General: root folders, Ask Worca limits, chat notifications, Scheduled runs defaults, Workspaces (scan models) | A |
+| General: Appearance, Interface mode, Getting started, About | S |
+| Runs tab: Budget & cost limits | S |
+| General: root folders; Runs tab: Scheduled runs defaults, Workspaces (scan models), chat notifications; Ask Worca tab (limits, tools, web access, chat history) | A |
 | Guardrails tab (list, details); Plugins tab (installed, available, install); Memory tab (files) | A |
-| General: title model, Auto workflow model, spawn diagnostics; Memory tab: Defragment model | E — the Defragment model card stays visible while a model is set |
+| General: spawn diagnostics; Models tab: Title generation, Auto workflow model; Memory tab: Defragment model | E — the Defragment model card stays visible while a model is set |
 | Guardrails create / delete; Models tab; Providers tab; marketplaces, Doctor, leftover data | E |
 | Models tab: the catalog toolbar (search, filter chips, folding groups), the editor dialog's Connection section, the Import-models dialog (Copilot and OpenAI-compatible sources) | E |
 | Providers tab: Providers card (Copilot sign-in, account type, concurrency cap, key rows) and its Import-models shortcuts | E |
@@ -230,6 +231,8 @@ Everything on the page: the list, the runtime step, the workspace and the bench 
 | Ask: a proposal's own schedule (the "Schedule" action and its time), schedule-change cards | S — the answer the user asked for |
 | Ask: a proposal's tracker task (id, title, link) in place of the brief; the "Auto" workflow option when Ask proposed it | S |
 | Ask: "Schedule…" on a plain run proposal | A |
+| Ask: a classified failure's human notice (what happened and where the remedy lives) | all — recovery instructions are never hidden (rule 1); Simple gets no Models-view navigation, the copy names the mode instead |
+| Ask: a classified failure's raw-detail expander ("Details") | E |
 | Ask: proposal cards themselves | all (rule 4) |
 | Ask: model picker, scope, ctx and cost meter, tool rows, branches, guardrails, "Open in New Pipeline" | A |
 | Ask: per-agent lane, worktrees, agents popover, sub-agent logs | E |

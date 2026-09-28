@@ -39,7 +39,7 @@ extracts facts and does all the matching; agents fill the gaps code leaves and c
   what it has. Without a survey or usage result the static facts remain; without a synthesis
   the overview is generated.
 - The scan agent model runs survey, usage and synth; the project agent model runs their
-  investigators (Settings › General › Workspaces, or the scan's own Models pick).
+  investigators (Settings › Runs › Workspaces, or the scan's own Models pick).
 - A scan changes no member: it never creates a repository and never commits. Each member must be
   the top folder of its own git repository and have a commit; a scan or re-scan with any other
   member (a folder inside a monorepo, a repository with no commit) is refused and names it: add

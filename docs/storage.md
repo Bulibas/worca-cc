@@ -47,7 +47,9 @@ project's working tree, so nothing is ever committed to your repo.
                                         checkouts the assistant opens (registry: ask_worktrees;
                                         removed with the thread, reconciled at boot)
   tmp/ask/                              the Ask Worca assistant's scratch cwd + per-turn
-                                        mcp-<messageId>.json (never a project folder)
+                                        mcp-<messageId>.json, mode 0600 (never a project folder)
+  logs/ask-web.jsonl                    Ask Worca web access: one line per web_fetch/web_search
+                                        call (redacted URL, status, bytes); rotated to .1 at 5 MB
   runs/<pipelineId>/                    detached run roots: run.json, repos/<projectKey>/ worktrees
   metrics/
     repos/<owner~repo>/                  git worktree of the project repo, detached at origin/worca-metrics

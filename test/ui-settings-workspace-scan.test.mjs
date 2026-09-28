@@ -1,4 +1,4 @@
-// test/ui-settings-workspace-scan.test.mjs — Settings › General › Workspaces (the scan models card). Boot preamble copied from test/ui-settings-auto-model.test.mjs:4-61 (house convention).
+// test/ui-settings-workspace-scan.test.mjs — Settings › Runs › Workspaces (the scan models card). Boot preamble copied from test/ui-settings-auto-model.test.mjs:4-61 (house convention).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -65,11 +65,11 @@ async function boot({ configOk = true } = {}) {
 
 const vals = (doc) => ['wsScanModel', 'wsScanEffort', 'wsAgentModel', 'wsAgentEffort'].map((id) => doc.getElementById(id).value);
 
-test('the Workspaces card sits in General after the Auto workflow model card and shows the defaults', async () => {
+test('the Workspaces card sits on the Runs tab between Scheduled runs and Chat notifications and shows the defaults', async () => {
   const { window, openSettings } = await boot(); await openSettings();
   const doc = window.document;
-  const ids = [...doc.querySelectorAll('.view[data-view="settings"] section.card.settings-card')].map((c) => c.id);
-  assert.equal(ids[ids.indexOf('auto-model-settings-card') + 1], 'ws-scan-models-card');
+  const runsIds = [...doc.querySelectorAll('.settings-pane[data-tab="runs"] section.card.settings-card')].map((c) => c.id);
+  assert.deepEqual(runsIds, ['budget-settings-card', 'schedule-settings-card', 'ws-scan-models-card', 'chat-settings-card']);
   assert.equal(doc.querySelector('#ws-scan-models-card h2').textContent.trim(), 'Workspaces');
   assert.equal(doc.getElementById('ws-scan-models-card').dataset.minLevel, 'advanced');
   assert.deepEqual(vals(doc), ['claude-sonnet-5', 'medium', 'sonnet', 'medium']);

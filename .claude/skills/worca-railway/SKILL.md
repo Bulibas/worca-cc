@@ -74,6 +74,26 @@ seal option), and run `status <t>`: a variable whose value Railway no longer ret
 `(sealed)`. If a secret the user sealed is not marked, say so and ask them to check it in the
 dashboard.
 
+### With a credential broker
+
+A target with `RAILWAY_BROKER_SERVICE`, `RAILWAY_BROKER_SERVICE_ID` and `KEYS_URL` has a
+second service holding the model keys (`docs/credential-broker.md`). Then:
+
+- `upgrade`, `rollback` and `deploy-branch` move **both** services to the same image,
+  the broker first; if the broker does not come up, worca is left alone.
+- `logs`, `redeploy`, `set` and `unset` take `--service broker`.
+- Model keys never go on worca: `set <t> ANTHROPIC_API_KEY` (or the OAuth token, OpenAI,
+  OpenRouter) is refused. In multi mode each person adds their own key on the key page;
+  in single mode it is `WORCA_BROKER_KEY_ANTHROPIC` on `--service broker`.
+- The broker's secrets, set by the user from stdin on BOTH services where named:
+  `WORCA_BROKER_SECRET` (worca and broker, the same value) and `WORCA_BROKER_VAULT_KEY`
+  (broker only). `docker run --rm <image> worca broker secrets` prints fresh ones.
+- `status` shows the broker's image (and warns when it differs from worca's) and its
+  variable names; `verify` adds the key page checks (behind Access, the broker answers,
+  worca names it) and, with `--in-container`, that no model key is in worca's
+  environment, the broker refuses an agent with no token, and one person's agent user
+  cannot read another's processes.
+
 ## Procedures
 
 - **Upgrade:** `status` → confirm the version with the user → `upgrade … --yes` →
