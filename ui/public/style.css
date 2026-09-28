@@ -952,7 +952,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .qtune th:first-child,.qtune td:first-child{padding-left:0;}
 .qtune td:first-child{font-weight:500;color:var(--ink);}
 .qtune .select-wrap{width:150px;max-width:100%;}
-.qtune .select-wrap select{height:34px;border-radius:10px;}
+.qtune .select-wrap select{height:34px;padding:0 40px 0 12px;border-radius:10px;}
 .qtune-sw{display:inline-block;position:relative;vertical-align:middle;}
 /* (no disabled rule here: `.sw-input:disabled + .switch{opacity:.5;cursor:not-allowed}` already exists) */
 .qfree-area{margin-top:12px;min-height:64px;resize:vertical;line-height:1.5;}
