@@ -139,7 +139,7 @@ import {
   PREDEFINED_MODELS, agentSteps, EFFORTS, catalogHasModel,
   readRunConfig, setNodeModel, setFeedbackCycles, setWireCycles, setActiveWorkflow, setHumanInLoop, resetWorkflowConfig,
   globalModelRefs, removeGlobalModelAndRefs, promoteCustomModel, costUnreliableModelIds,
-  readPrRemotePrefs, setPrRemotePrefs,
+  readPrRemotePrefs, setPrRemotePrefs, modelHasBaseUrlRouting,
 } from '../src/core/config.mjs';
 import { listGlobalModels, addGlobalModel, updateGlobalModel } from '../src/core/settings.mjs';
 import { modelEnvRef, maskModelEnvValue, SUBAGENT_MODEL_VALUES, subagentModelIssue, UPSTREAM_PROVIDERS } from '../src/core/model-env.mjs';
@@ -4854,6 +4854,17 @@ async function refuseSignedOutClaude(res) {
   return true;
 }
 
+/**
+ * The gate for a workspace scan: only a first-party scan agent needs the CLI signed in. On an
+ * endpoint-routed scan model (the stamp the orchestrator puts on the node, endpointRouted) the
+ * investigators stay on that endpoint too (phases.mjs sameEndpointSubagentDirective), so a
+ * signed-out install that reaches its models through a gateway (auto/runnable.mjs) still scans.
+ */
+async function refuseSignedOutScan(res, models) {
+  if (models && modelHasBaseUrlRouting(models.scanModel)) return false;
+  return refuseSignedOutClaude(res);
+}
+
 /** The scan's models (D18): the request's pick, else Settings › Runs › Workspaces, else the
  *  defaults — checked against the primary member's catalog. Throws on a bad explicit pick (400). */
 async function scanModelsFor(body, projectPaths) {
@@ -4908,7 +4919,7 @@ app.post('/api/workspaces/scan', async (req, res) => {
   let models;
   try { models = await scanModelsFor(body, target.projectPaths); }
   catch (err) { return badRequest(res, err && err.message ? err.message : String(err)); }
-  if (await refuseSignedOutClaude(res)) return;
+  if (await refuseSignedOutScan(res, models)) return;
   return scanRequest(req, res, { ...target, rescan: false, models });
 });
 
@@ -4926,7 +4937,7 @@ app.post('/api/workspaces/:id/scan', async (req, res) => {
     let models;
     try { models = await scanModelsFor(req.body || {}, ws.projectPaths); }
     catch (err) { return badRequest(res, err && err.message ? err.message : String(err)); }
-    if (await refuseSignedOutClaude(res)) return;
+    if (await refuseSignedOutScan(res, models)) return;
     return await scanRequest(req, res, { id: ws.id, name: ws.name, projectPaths: ws.projectPaths, rescan: true, models });
   } catch (err) {
     if (!res.headersSent) res.status(500).json({ error: err && err.message ? err.message : String(err) });
