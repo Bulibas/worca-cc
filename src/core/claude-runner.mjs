@@ -916,7 +916,8 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
       for (const k of MODEL_CREDENTIAL_ENV_KEYS) if (k !== 'ANTHROPIC_AUTH_TOKEN' || !safeModelEnv?.ANTHROPIC_AUTH_TOKEN) delete spawnEnv[k];
     }
     // Routed off first party, a long turn behind a stream-buffering gateway must
-    // not hit the CLI's 5-min first-byte watchdog (model-env.mjs#withStreamTimeouts).
+    // not hit Bun's ~5-min fetch timeout or the CLI's first-byte watchdog
+    // (model-env.mjs#withStreamTimeouts).
     // Read off the FINAL env so the ambient shell, the run env and the model entry
     // all count for both the route and an explicit value.
     spawnEnv = withStreamTimeouts(spawnEnv);

@@ -1,17 +1,18 @@
 // test/stream-timeouts.test.mjs
-// Claude Code aborts a response whose first byte has not arrived within its
-// stream watchdog (300s off first party on CLI 2.1.281, capped by API_TIMEOUT_MS,
-// default 600s) as "Request timed out." and retries it from scratch. A gateway
-// that buffers the stream (Vertex through the Bosch farm, 2026-09-28) sends
-// nothing until a long xhigh turn is done, so every retry died at the same
-// wall. Every spawn routed off first party now carries the CLI's ceiling (30 min)
-// for those knobs unless the operator's env or the model entry already sets one.
+// A response that sends no bytes for ~5 min is aborted as "Request timed out."
+// and retried from scratch: by Bun's own fetch timeout (CLI 2.1.281 lifts it
+// only under its stream watchdog, or with API_FORCE_IDLE_TIMEOUT=0), by the CLI
+// watchdog where that runs, and by API_TIMEOUT_MS (600s). A gateway that buffers
+// the stream (Vertex through the Bosch farm, 2026-09-28) sends nothing until a
+// long xhigh turn is done, so every retry died at the same wall. Every spawn
+// routed off first party now lifts Bun's timeout and carries the CLI's ceiling
+// (30 min) for the rest, unless the operator's env or the model entry sets one.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, readFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { withStreamTimeouts, STREAM_TIMEOUT_ENV_KEYS, STREAM_TIMEOUT_MS } from '../src/core/model-env.mjs';
+import { withStreamTimeouts, STREAM_TIMEOUT_ENV, STREAM_TIMEOUT_ENV_KEYS, STREAM_TIMEOUT_MS } from '../src/core/model-env.mjs';
 import { runClaude } from '../src/core/claude-runner.mjs';
 
 const POSIX_SHIM = { skip: process.platform === 'win32' ? 'fake claude shim is a POSIX shell script' : false };
@@ -27,20 +28,24 @@ const withEnv = (kv, fn) => {
   try { const r = fn(); if (r && typeof r.finally === 'function') return r.finally(restore); restore(); return r; } catch (e) { restore(); throw e; }
 };
 
-const allRaised = () => Object.fromEntries(STREAM_TIMEOUT_ENV_KEYS.map((k) => [k, STREAM_TIMEOUT_MS]));
+const allRaised = () => ({ ...STREAM_TIMEOUT_ENV });
 // The ambient routing a developer shell may export; cleared so each case states its own route.
 const FIRST_PARTY = {
   CLAUDE_CODE_USE_VERTEX: undefined, CLAUDE_CODE_USE_BEDROCK: undefined, CLAUDE_CODE_USE_FOUNDRY: undefined,
   ANTHROPIC_BASE_URL: undefined,
-  ...Object.fromEntries(['API_TIMEOUT_MS', 'CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS', 'CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS', 'CLAUDE_STREAM_IDLE_TIMEOUT_MS'].map((k) => [k, undefined])),
+  ...Object.fromEntries(['API_FORCE_IDLE_TIMEOUT', 'API_TIMEOUT_MS', 'CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS', 'CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS', 'CLAUDE_STREAM_IDLE_TIMEOUT_MS'].map((k) => [k, undefined])),
 };
 
-test('STREAM_TIMEOUT_ENV_KEYS: the request timeout and all three stream watchdogs, at the CLI ceiling', () => {
-  assert.deepEqual([...STREAM_TIMEOUT_ENV_KEYS], [
-    'API_TIMEOUT_MS', 'CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS',
-    'CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS', 'CLAUDE_STREAM_IDLE_TIMEOUT_MS',
-  ]);
+test('STREAM_TIMEOUT_ENV: Bun\'s fetch timeout lifted; the request timeout and the three stream watchdogs at the CLI ceiling', () => {
   assert.equal(STREAM_TIMEOUT_MS, '1800000');
+  assert.deepEqual({ ...STREAM_TIMEOUT_ENV }, {
+    API_FORCE_IDLE_TIMEOUT: '0',
+    API_TIMEOUT_MS: '1800000',
+    CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS: '1800000',
+    CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS: '1800000',
+    CLAUDE_STREAM_IDLE_TIMEOUT_MS: '1800000',
+  });
+  assert.deepEqual([...STREAM_TIMEOUT_ENV_KEYS], Object.keys(STREAM_TIMEOUT_ENV));
 });
 
 test('withStreamTimeouts: a Vertex-routed env gets every unset key', () => {
@@ -68,6 +73,7 @@ test('withStreamTimeouts: an explicit value is never overwritten, and the input 
   assert.equal(out.CLAUDE_STREAM_IDLE_TIMEOUT_MS, '300000');
   assert.equal(out.CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS, STREAM_TIMEOUT_MS);
   assert.equal(out.CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS, STREAM_TIMEOUT_MS);
+  assert.equal(out.API_FORCE_IDLE_TIMEOUT, '0');
   assert.deepEqual(env, snapshot);
 });
 
