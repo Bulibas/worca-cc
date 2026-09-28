@@ -424,7 +424,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   // Mirrors src/core/ask/attachment-kind.mjs + limits.mjs (#398): text kinds are
   // UTF-8 capped at 512 KB, binary kinds (images + PDF) at 5 MB; the server
   // re-validates everything, these are just early clear messages.
-  const ASK_ATTACH_EXT = ['.md', '.markdown', '.txt', '.json', '.csv', '.log'];
+  const ASK_ATTACH_EXT = ['.md', '.markdown', '.txt', '.json', '.csv', '.log', '.html', '.htm'];
   const ASK_ATTACH_BINARY = {
     '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
     '.gif': 'image/gif', '.webp': 'image/webp', '.pdf': 'application/pdf',

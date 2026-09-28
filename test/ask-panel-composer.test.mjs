@@ -125,6 +125,26 @@ test('ask-panel-composer (#398): png accepted with a thumbnail chip, pdf accepte
   for (const e of ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf']) assert.ok(accept.includes(e), `accept carries ${e}`);
 });
 
+test('ask-panel-composer: .html and .htm are accepted as text attachments; the file input advertises them', async () => {
+  const bodies = [];
+  const calls = {
+    messages: (url, opts) => { bodies.push(JSON.parse(opts.body)); return { ok: true, status: 202, json: async () => ({ userMessageId: 'askm_u0000001', assistantMessageId: MID }) }; },
+  };
+  const ctx = makePanel({ fetchHandler: apiHandler(calls) });
+  ctx.panel.open();
+  injectFiles(ctx, [new ctx.window.File(['<p>hi</p>'], 'page.html', { type: 'text/html' }), new ctx.window.File(['<p>old</p>'], 'OLD.HTM', { type: 'text/html' })]);
+  await ctx.tick(); await ctx.tick();
+  assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 2, 'both HTML files become chips');
+  assert.equal(ctx.doc.querySelectorAll('.ask-chip img.ask-chip-thumb').length, 0, 'no thumbnail: HTML is a text kind');
+  const accept = ctx.doc.querySelector('.ask-composer input[type="file"]').accept.split(',');
+  for (const e of ['.html', '.htm']) assert.ok(accept.includes(e), `accept carries ${e}`);
+  ctx.doc.querySelector('textarea.ask-input').value = 'read it';
+  ctx.doc.querySelector('[data-ask-send]').click();
+  await ctx.tick(); await ctx.tick(); await ctx.tick();
+  assert.deepEqual(bodies[0].attachments.map((a) => [a.name, a.dataBase64]),
+    [['page.html', Buffer.from('<p>hi</p>').toString('base64')], ['OLD.HTM', Buffer.from('<p>old</p>').toString('base64')]]);
+});
+
 test('ask-panel-composer: at most 8 attachments', async () => {
   const ctx = makePanel({ fetchHandler: apiHandler() });
   ctx.panel.open();

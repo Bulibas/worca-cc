@@ -6704,9 +6704,12 @@ app.get('/api/ask/threads/:id/attachments/:attId', (req, res) => {
     const file = att ? askAttachmentPath(id, attId) : null;
     if (!file) return res.status(404).json({ error: 'attachment not found' });
     // Text bodies serve as utf-8 text/plain (pre-#398, byte-for-byte: the body
-    // was UTF-8-validated at upload and stored verbatim). Only sniff-verified
-    // allowlisted mimes are ever stored (never scriptable markup like SVG/HTML),
-    // so serving the real mime inline is safe — and it is what lets the
+    // was UTF-8-validated at upload and stored verbatim) whatever their mime —
+    // this is what makes an HTML attachment (a text kind labelled text/html)
+    // safe: with nosniff it is shown as source, never rendered or run on the
+    // worca origin, so text/html must never be served here. Binary bodies are
+    // sniff-verified allowlisted mimes only (never scriptable markup like SVG),
+    // so serving their real mime inline is safe — and it is what lets the
     // transcript render <img> thumbnails (#398).
     const type = att.kind === 'text' ? 'text/plain; charset=utf-8' : (att.mime || 'application/octet-stream');
     // Streamed, not readFileSync + send: a body is immutable under its
