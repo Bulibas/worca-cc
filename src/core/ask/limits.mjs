@@ -57,7 +57,7 @@ export const ASK_LIMITS = Object.freeze({
   scriptTestMaxTimeoutSec: 600,            // …and its ceiling (= the engine's 10-minute default)
   scriptVerdictMaxIssues: 50,              // test_script: verdict issues sent (the rest is counted, not sent)
   scriptResultFieldMaxChars: 2000,         // test_script: per verdict field / warning / diff / error line (chars)
-  briefMaxChars: 8000,
+  briefMaxChars: 32_000,                   // propose_run brief (= workflowTaskMaxChars: a saved workflow's task must fit the run card that follows)
   metricsRunsDefaultLimit: 20,             // list_team_metrics_runs page (= listRunsDefaultLimit)
   metricsRunsMaxLimit: 100,                // list_team_metrics_runs page cap (= listRunsMaxLimit)
   metricsBreakdownMaxRows: 20,             // get_team_metrics rows per breakdown dimension

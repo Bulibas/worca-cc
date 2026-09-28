@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
 import { createProposalValidator, isSyntacticRef, PROPOSAL_ERRORS, pickCardAttachments } from '../src/core/ask/proposal.mjs';
 
 const dirA = mkdtempSync(join(tmpdir(), 'worca-ask-prop-a-'));
@@ -111,8 +112,8 @@ test('workflow, guardrails, brief, branches: errors accumulate in order', async 
   assert.deepEqual(errs(await validateProposal({ projectKey: 'demo-00000001', brief: 'x', guardrailsId: 'ghost' })), ['unknown guardrailsId "ghost"']);
   assert.equal(ok(await validateProposal({ projectKey: 'demo-00000001', brief: 'x', guardrailsId: 'custom1' })).guardrailsId, 'custom1');
   assert.equal(ok(await validateProposal({ projectKey: 'demo-00000001', brief: 'x', guardrailsId: '' })).guardrailsId, 'normal');
-  assert.deepEqual(errs(await validateProposal({ projectKey: 'demo-00000001', brief: 'x'.repeat(8001) })), ['brief exceeds 8000 characters']);
-  assert.equal(ok(await validateProposal({ projectKey: 'demo-00000001', brief: 'x'.repeat(8000) })).brief.length, 8000);
+  assert.deepEqual(errs(await validateProposal({ projectKey: 'demo-00000001', brief: 'x'.repeat(ASK_LIMITS.briefMaxChars + 1) })), [`brief exceeds ${ASK_LIMITS.briefMaxChars} characters`]);
+  assert.equal(ok(await validateProposal({ projectKey: 'demo-00000001', brief: 'x'.repeat(ASK_LIMITS.briefMaxChars) })).brief.length, ASK_LIMITS.briefMaxChars);
   assert.deepEqual(errs(await validateProposal({ workspaceId: 'wks-team-0000abcd', brief: 'x', sourceBranchByKey: { 'nope-00000009': 'main', 'alpha-00000001': 'bad..ref' } })),
     ['sourceBranchByKey has an unknown project key: nope-00000009', 'unknown or invalid sourceBranch: bad..ref']);
   assert.equal(ok(await validateProposal({ workspaceId: 'wks-team-0000abcd', brief: 'x', sourceBranchByKey: 'junk' })).sourceBranchByKey, null, 'non-object ignored like the route');
