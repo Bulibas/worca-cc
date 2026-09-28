@@ -269,6 +269,43 @@ test('attachments: stored + block on the user message; caps enforced', async () 
   ws.close();
 });
 
+test('HTML attachments: .html / .htm accepted as TEXT, stored as .txt, served back as text/plain + nosniff; non-UTF-8 or NUL HTML refused', async () => {
+  const page = '<!doctype html><html><head><title>Hi</title><script>alert(1)</script></head><body><p>hello</p></body></html>';
+  const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
+  const t = await newThread();
+  const { ws, msgs, opened } = openWs(`?threadId=${t.id}`);
+  await opened;
+  const ok = await post(`/api/ask/threads/${t.id}/messages`, {
+    text: 'read the page', ...MODEL,
+    attachments: [{ name: 'page.html', dataBase64: b64(page) }, { name: 'old.HTM', dataBase64: b64('<p>old</p>') }],
+  });
+  assert.equal(ok.status, 202);
+  const okBody = await ok.json();
+  assert.deepEqual(okBody.attachments.map((a) => [a.name, a.kind, a.mime, a.bytes]),
+    [['page.html', 'text', 'text/html', Buffer.byteLength(page)], ['old.HTM', 'text', 'text/html', 10]]);
+  await waitFor(() => framesFor(msgs, t.id).some((f) => f.type === 'ask-done'));
+  const pageId = okBody.attachments[0].id;
+  assert.ok(existsSync(join(homeDir, '.worca-cc', 'ask', t.id, 'att', `${pageId}.txt`)), 'the body lands as <id>.txt like every text kind');
+  // Security invariant: HTML is NEVER served as HTML from the worca origin.
+  const dl = await fetch(`${base}/api/ask/threads/${t.id}/attachments/${pageId}`);
+  assert.equal(dl.status, 200);
+  assert.equal(dl.headers.get('content-type'), 'text/plain; charset=utf-8');
+  assert.equal(dl.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(await dl.text(), page, 'the markup comes back verbatim, as text');
+
+  const t2 = await newThread();
+  const send = (atts) => post(`/api/ask/threads/${t2.id}/messages`, { text: 'x', ...MODEL, attachments: atts });
+  const latin1 = await send([{ name: 'legacy.html', dataBase64: Buffer.from('<p>caf\xe9</p>', 'latin1').toString('base64') }]);
+  assert.equal(latin1.status, 400);
+  assert.match((await latin1.json()).error, /not valid UTF-8: legacy\.html/);
+  assert.equal((await send([{ name: 'nul.htm', dataBase64: Buffer.from('<p>a\u0000b</p>', 'utf8').toString('base64') }])).status, 400);
+  assert.equal((await send([{ name: 'big.html', dataBase64: Buffer.alloc(513 * 1024, 97).toString('base64') }])).status, 413, 'the 512 KB text cap applies');
+  const after2 = await snapshot(t2.id);
+  assert.deepEqual(after2.messages, [], 'no message rows written');
+  assert.deepEqual(after2.attachments, [], 'no attachment rows written');
+  ws.close();
+});
+
 test('binary attachments (#398): png + pdf stored with kind/mime, served with their real type; spoofed or oversized bodies refused', async () => {
   const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from([0, 1, 2, 0xfe, 0xff])]);
   const pdf = Buffer.from('%PDF-1.7\nfake body\n%%EOF\n', 'latin1');

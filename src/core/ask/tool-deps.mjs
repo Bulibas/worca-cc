@@ -14,6 +14,7 @@ import { buildCatalog } from './catalog.mjs';
 import { validateProposal } from './proposal.mjs';
 import { readAttachmentText, getAttachment, attachmentPath, getThread, listAttachments } from './store.mjs';
 import { redactAskText } from './redact.mjs';
+import { htmlToText } from './html-text.mjs';
 import { ASK_LIMITS } from './limits.mjs';
 import { askProgress } from '../ask-projection.mjs';
 import { getDb } from '../db.mjs';
@@ -108,7 +109,8 @@ export function defaultToolDeps({ threadId, viewer = null }) {
       if (!row) return null;
       if (row.kind === 'text') {
         const a = readAttachmentText(threadId, id);
-        return a ? { name: a.name, kind: 'text', text: a.text } : null;
+        // mime lets read_attachment recognise HTML (text/html) for its `as: "text"` view
+        return a ? { name: a.name, kind: 'text', mime: a.mime, text: a.text } : null;
       }
       // Binary kinds (#398): metadata plus the on-disk path — the model views the
       // body with its own Read tool; sliceBytes over raw bytes would be garbage.
@@ -118,6 +120,9 @@ export function defaultToolDeps({ threadId, viewer = null }) {
       const path = attachmentPath(threadId, id);
       return path ? { name: row.name, kind: row.kind, mime: row.mime, bytes: row.bytes, path } : null;
     },
+    // read_attachment `as: "text"`: HTML attachment -> readable text (the web_fetch
+    // converter). Injected, never imported — tools.mjs stays import-free by house rule.
+    htmlToText,
     validateProposal,
     // The run card's attachment pills (propose_run attachmentIds): the ledger of
     // the owning thread only — never another thread's files. An unreadable DB means

@@ -18,7 +18,7 @@ const WEBP = Buffer.concat([Buffer.from('RIFF'), Buffer.from([4, 0, 0, 0]), Buff
 const PDF = Buffer.concat([Buffer.from('%PDF-1.7\n%'), Buffer.from([0xe2, 0xe3, 0xcf, 0xd3]), Buffer.from('\n')]);
 
 test('the two allowlists carry the spec extensions and stay disjoint', () => {
-  assert.deepEqual([...TEXT_EXTENSIONS], ['.md', '.markdown', '.txt', '.json', '.csv', '.log']);
+  assert.deepEqual([...TEXT_EXTENSIONS], ['.md', '.markdown', '.txt', '.json', '.csv', '.log', '.html', '.htm']);
   assert.deepEqual([...BINARY_EXTENSIONS], ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf']);
   for (const e of TEXT_EXTENSIONS) assert.ok(!BINARY_EXTENSIONS.includes(e), `${e} in one list only`);
 });
@@ -35,6 +35,14 @@ test('classifyExtension: text kinds, image kinds, pdf as binary, case-insensitiv
   assert.equal(classifyExtension('.exe'), null);
   assert.equal(classifyExtension(''), null);
   assert.equal(classifyExtension(undefined), null);
+});
+
+test('classifyExtension: HTML is a TEXT kind (stored as .txt, served as text/plain), case-insensitive', () => {
+  assert.deepEqual(classifyExtension('.html'), { kind: 'text', mime: 'text/html' });
+  assert.deepEqual(classifyExtension('.htm'), { kind: 'text', mime: 'text/html' });
+  assert.deepEqual(classifyExtension('.HTML'), { kind: 'text', mime: 'text/html' });
+  assert.equal(extensionForAttachment('text', 'text/html'), '.txt', 'the body lands as <id>.txt like every text kind');
+  assert.equal(classifyExtension('.xhtml'), null, 'only .html and .htm');
 });
 
 test('sniffMime: recognises each accepted magic number and nothing else', () => {

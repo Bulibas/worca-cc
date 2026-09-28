@@ -370,6 +370,20 @@ test('attachment download: text/plain + nosniff + inline; wrong thread 404; bad 
   assert.equal((await fetch(`${base}/api/ask/threads/${thread.id}/attachments/zzz`)).status, 400);
 });
 
+test('attachment download: an HTML attachment (mime text/html) is served as text/plain + nosniff, never as text/html', async () => {
+  const store = await import('../src/core/ask/store.mjs');
+  const thread = store.createThread();
+  const msg = store.appendMessage(thread.id, { role: 'user', text: 'x' });
+  const html = '<html><body><script>alert(document.cookie)</script><p>x</p></body></html>';
+  const att = store.addAttachment(thread.id, msg.id, { name: 'page.html', mime: 'text/html', text: html });
+  assert.equal(att.mime, 'text/html', 'the row keeps its HTML label');
+  const r = await fetch(`${base}/api/ask/threads/${thread.id}/attachments/${att.id}`);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-type'), 'text/plain; charset=utf-8', 'serving text/html from the worca origin would be an XSS hole');
+  assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(await r.text(), html);
+});
+
 test('GET /api/ask/models returns the chat catalog', async () => {
   const j = await (await fetch(`${base}/api/ask/models`)).json();
   assert.ok(Array.isArray(j.models) && j.models.length > 0);
