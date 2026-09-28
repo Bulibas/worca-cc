@@ -145,13 +145,17 @@ test('B: a reading, lowered per forwarded :free call, emptied by a daily-limit r
   await withSettings(OR_SETTINGS, async () => {
     assert.deepEqual(freeModelIds(), ['nemo-free']);
     const reads = [];
-    let t = Date.parse('2026-09-27T04:39:00Z');
+    // The fake clock sits on the REAL UTC day: the bridge's call listener lowers the
+    // count with the real clock, and a fixed date turned every later day into "a new
+    // day, drop the reading" (this test started failing the day after it was written).
+    const today = nextUtcMidnight(Date.now()) - 86_400_000;
+    let t = today + (4 * 60 + 39) * 60_000;
     const now = () => t;
     const s1 = await freeDailyStatus({ fetch: fakeKeyFetch(reads), now });
     assert.equal(reads.length, 1);
     assert.equal(reads[0].url, 'https://openrouter.ai/api/v1/key');
     assert.equal(reads[0].auth, 'Bearer sk-or-v1-testkey0000000000000001');
-    assert.deepEqual({ ...s1, readAt: undefined }, { enabled: true, known: true, models: ['nemo-free'], used: 59, limit: 1000, remaining: 941, resetAt: '2026-09-28T00:00:00.000Z', readAt: undefined });
+    assert.deepEqual({ ...s1, readAt: undefined }, { enabled: true, known: true, models: ['nemo-free'], used: 59, limit: 1000, remaining: 941, resetAt: new Date(today + 86_400_000).toISOString(), readAt: undefined });
 
     // Two :free calls through the bridge with this key, one with another key, one not free.
     const account = keyAccount('sk-or-v1-testkey0000000000000001');

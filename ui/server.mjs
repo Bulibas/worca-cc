@@ -18,6 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import { preflightNode } from '../src/core/preflight-node.mjs';
+import { preflightDeps } from '../src/core/preflight-deps.mjs';
 import { createOrchestratorFor } from '../src/core/engine-select.mjs';
 import {
   listPipelines, readPipeline, listAllPipelines, readPipelineByKey,
@@ -290,6 +291,11 @@ process.on('warning', (w) => {
 });
 // Fail fast on an unsupported Node / missing node:sqlite BEFORE any DB is opened.
 preflightNode();
+// Backstop for `npm start` / `node ui/server.mjs`, which bypass the CLI's check:
+// refuse to start on stale dependencies rather than fail mid-run on a lazy import.
+// (express, ws and htmlparser2 are imported statically above, so a missing one of
+// those still fails at load, before this line.)
+preflightDeps();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
