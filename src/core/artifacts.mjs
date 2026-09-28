@@ -22,6 +22,7 @@ import { RUN_LOG_FILE } from './run-log.mjs';
 import { readRunLedger } from './metrics/ledger.mjs';
 import { readPolicyState } from './policy/state.mjs';
 import { memoryTotals } from './memory-sync.mjs';
+import { actorLabel } from './identity.mjs';
 
 // ── DB row <-> state object mapping (Phase 3) ──────────────────────────────────
 // JSON columns are TEXT; (de)serialize at THIS boundary only. Reads are fail-safe:
@@ -473,6 +474,12 @@ function formAskOf(qWrap, aWrap) {
 
 /** The two form fields a reader row carries — `{}` for a legacy row, so no legacy
  *  payload gains a key (test/step-questions-db.test.mjs pins the exact row shape). */
+/** `{answeredBy}` when the answer row names who answered (identity.mjs actor), else {} —
+ *  additive, so a row answered before attribution keeps its exact wire shape. */
+function answeredByOf(aWrap) {
+  return aWrap && typeof aWrap.answeredBy === 'string' && aWrap.answeredBy ? { answeredBy: aWrap.answeredBy } : {};
+}
+
 function formFieldsOf(qWrap, aWrap) {
   const ask = formAskOf(qWrap, aWrap);
   return ask ? { ask, formAnswer: formAnswerOf(aWrap) } : {};
@@ -509,6 +516,7 @@ export function readStepQuestions(pipelineId) {
       // gains no key at all, so its wire shape (History, get_run_progress) stays
       // byte-identical; consumers test `row.ask`, never `'ask' in row`.
       ...formFieldsOf(qWrap, aWrap),
+      ...answeredByOf(aWrap),
     };
   });
 }
@@ -588,6 +596,7 @@ export function readPipelineExtras(pipelineId) {
     questions: Array.isArray(qWrap?.questions) ? qWrap.questions : [],
     answers: Array.isArray(aWrap?.answers) ? aWrap.answers : [],
     ...formFieldsOf(qWrap, aWrap),   // spec §9: `ask` + `formAnswer` on a form row only
+    ...answeredByOf(aWrap),
   };
   const reviews = getDb().prepare(
     'SELECT kind, cycle, verdict FROM reviews WHERE pipeline_id = ? ORDER BY kind, cycle'
@@ -1137,7 +1146,7 @@ export async function createPipeline(projectDir, opts = {}) {
   const {
     prompt, promptFile, extras = [], title,
     promptText: precomputedPromptText = null, sourceType = null, sourceMeta = null,
-    guardrailsId = null,
+    guardrailsId = null, startedBy = null,
     workspaceKey = null, workspaceId = null, workspaceName = null,
     workspaceDescription = '', projects = null,
   } = opts;
@@ -1234,6 +1243,8 @@ export async function createPipeline(projectDir, opts = {}) {
     // unguarded runs). Creation-immutable, like sourceType: written on INSERT,
     // never touched by updates. NULL = legacy/pre-entity or non-orchestrator row.
     guardrailsId: guardrailsId || null,
+    // Who started the run (identity.mjs): creation-immutable like guardrailsId. NULL = unknown.
+    startedBy: startedBy || null,
   };
 
   // Workspace runs carry the §5.2 superset, discriminated by target:'workspace'.
@@ -1299,15 +1310,30 @@ function firstMeaningfulLine(text) {
  * @param {string} markdownLine
  * @returns {Promise<void>}
  */
-export async function appendAudit(pipelineDir, markdownLine) {
-  const id = resolvePipelineId(pipelineDir);
+export async function appendAudit(pipelineDir, markdownLine, { actor = null } = {}) {
+  appendAuditById(resolvePipelineId(pipelineDir), markdownLine, { actor });
+}
+
+/**
+ * appendAudit by pipeline id (the server's human actions: PRs, archive, cap overrides).
+ * `actor` = who did it (identity.mjs; 'local' allowed), stored in its own column always;
+ * the line's text names the person only when they are not 'local' (byActor), so the
+ * History view and the markdown export read "Paused by ada@example.com." Best-effort.
+ */
+export function appendAuditById(id, markdownLine, { actor = null } = {}) {
   if (!id) return;
   const ts = new Date().toISOString();
   const text = String(markdownLine ?? '').trim();
+  const who = typeof actor === 'string' && actor ? actor.slice(0, 200) : null;
   try {
     tx(() => {
-      getDb().prepare('INSERT INTO pipeline_events (pipeline_id, ts, text) VALUES (?, ?, ?)')
-        .run(id, ts, text);
+      if (who) {
+        getDb().prepare('INSERT INTO pipeline_events (pipeline_id, ts, text, actor) VALUES (?, ?, ?, ?)')
+          .run(id, ts, text, who);
+      } else {
+        getDb().prepare('INSERT INTO pipeline_events (pipeline_id, ts, text) VALUES (?, ?, ?)')
+          .run(id, ts, text);
+      }
     });
   } catch { /* audit is best-effort; never break a run on a logging failure */ }
 }
@@ -1368,11 +1394,11 @@ export async function writeState(pipelineDir, stateObj) {
       INSERT INTO pipelines (id, project_key, workspace_key, target, title, base_name,
         date_prefix, status, phase, cycle, started_at, updated_at, total_cost_usd,
         total_active_ms, prompt, branch, workspace_meta, stepper, tools, resume_point,
-        source_type, source_ref, guardrails_id, outcome, human_hours)
+        source_type, source_ref, guardrails_id, outcome, human_hours, started_by)
       VALUES (@id,@project_key,@workspace_key,@target,@title,@base_name,@date_prefix,
         @status,@phase,@cycle,@started_at,@updated_at,@total_cost_usd,@total_active_ms,
         @prompt,@branch,@workspace_meta,@stepper,@tools,@resume_point,
-        @source_type,@source_ref,@guardrails_id,@outcome,@human_hours)
+        @source_type,@source_ref,@guardrails_id,@outcome,@human_hours,@started_by)
       ON CONFLICT(id) DO UPDATE SET
         status=excluded.status, phase=excluded.phase, cycle=excluded.cycle,
         updated_at=excluded.updated_at, total_cost_usd=excluded.total_cost_usd,
@@ -1756,6 +1782,7 @@ function toPipelineRow(o) {
     source_type: o.sourceType ?? 'prompt',
     source_ref: s(o.sourceMeta),
     guardrails_id: o.guardrailsId ?? null,
+    started_by: o.startedBy ?? null,
     // §5.9 outcome: the derived run-level v2 facts, so a rehydrated state matches
     // a live one. NULL for a v1 run (nothing to say), so v1 rows are unchanged.
     outcome: (o.engine === 2 || o.endReached !== undefined)
@@ -1831,32 +1858,60 @@ export function retainedWorkFor(row) {
   return { reason: members[0].code || 'unknown', members };
 }
 
+// Kept local, not imported: results.mjs (which exports RESULTS_FILE) imports this module.
+const RESULTS_FILE = 'results.json';
+
+/**
+ * A run's frozen line counts from `<dir>/results.json` — persistResults writes it when
+ * the run ends (or error-pauses), and a workspace run's summary is the rollup across
+ * its members. Null when the file is absent or unparseable, or its summary lacks
+ * numeric counts.
+ * @param {string|undefined} dir the on-disk run dir
+ * @returns {Promise<{added:number, removed:number}|null>}
+ */
+async function frozenDiffCounts(dir) {
+  if (!dir) return null;
+  try {
+    const sum = JSON.parse(await readFile(join(dir, RESULTS_FILE), 'utf8'))?.summary;
+    if (!Number.isFinite(sum?.linesAdded) || !Number.isFinite(sum?.linesRemoved)) return null;
+    return { added: sum.linesAdded, removed: sum.linesRemoved };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Build a history row from a pipelines DB row. Mirrors the legacy pipelineEntry
  * wire shape EXACTLY: { id, dir, title, status, startedAt, branch, sourceBranch,
- * survived, added, removed, totalCostUsd, totalActiveMs, mtime[, pr] }. Git/PR work
- * (branchExists / diffShortstat / findPrForBranch) is UNCHANGED — it still shells
- * out — and is fed the DB row's branch JSON instead of a parsed state.json.
+ * survived, added, removed, diffFrozen, totalCostUsd, totalActiveMs, mtime[, pr] }.
+ * Git/PR work (branchExists / diffShortstat / findPrForBranch) is UNCHANGED — it
+ * still shells out — and is fed the DB row's branch JSON instead of a parsed state.json.
  *  - `branch` (wire) = state.branch.feature; `sourceBranch` = state.branch.source.
  *  - `mtime` maps to updated_at parsed to ms (a SORT KEY only; never displayed).
  *  - `row.dir` is attached by the caller (the real on-disk run dir).
  *  - `guardrailsId` (additive, v14+): the run's selected guardrail set id
  *    ('permissive' = unguarded) or null for legacy rows.
  *  - `retainedWork` is non-null only while a commit-failed worktree still exists.
+ *  - `added`/`removed` come from the run dir's results.json summary when it has one
+ *    (`diffFrozen: true`), whatever became of the branch since — a merge empties the
+ *    live three-dot diff. Otherwise (a run still going, a legacy run) they are the
+ *    live source...feature counts while the branch survives. `survived` is always
+ *    the live "branch exists" fact. `lite` skips the file read like the git work.
  * @param {object} row a pipelines row (incl. row.dir set by the caller)
  * @param {string|null} repoDir git repo root for live branch facts
- * @param {object} opts { withPr? }
+ * @param {object} opts { withPr?, lite? }
  */
 async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
   const branchObj = j(row.branch, null);
   const feature = branchObj?.feature ?? (typeof branchObj === 'string' ? branchObj : null);
   const source = branchObj?.source ?? null;
+  const frozen = opts.lite ? null : await frozenDiffCounts(row.dir);
   let survived = false;
-  let added = 0;
-  let removed = 0;
+  let added = frozen ? frozen.added : 0;
+  let removed = frozen ? frozen.removed : 0;
   if (repoDir && feature) {
     survived = await branchExists(repoDir, feature);
-    if (survived && source) {
+    if (!frozen && survived && source) {
       const d = await diffShortstat(repoDir, source, feature);
       added = d.added;
       removed = d.removed;
@@ -1872,12 +1927,14 @@ async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
     branch: feature,
     sourceBranch: source,
     guardrailsId: row.guardrails_id ?? null,
+    startedBy: row.started_by ?? null,
     pauseReason: row.pause_reason ?? null,
     pauseDetail: row.pause_detail ?? null,
     retainedWork: retainedWorkFor(row),
     survived,
     added,
     removed,
+    diffFrozen: !!frozen,
     totalCostUsd: cost,
     totalActiveMs: active,
     mtime: row.updated_at ? (Date.parse(row.updated_at) || 0) : 0,
@@ -1931,7 +1988,7 @@ export async function listPipelines(projectDir, opts = {}, workspaceKey) {
   const dirById = await runDirIndex(pipelinesDir);
   const rows = getDb().prepare(`
     SELECT id, project_key, target, title, status, started_at, updated_at, total_cost_usd, total_active_ms,
-           branch, workspace_meta, guardrails_id, pr_url,
+           branch, workspace_meta, guardrails_id, started_by, pr_url,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pauseReason') AS pause_reason,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pauseDetail') AS pause_detail
     FROM pipelines
@@ -1960,7 +2017,7 @@ export async function listPipelines(projectDir, opts = {}, workspaceKey) {
 export async function listAllPipelines(opts = {}, { batchSize = 16 } = {}) {
   const rows = getDb().prepare(`
     SELECT id, project_key, workspace_key, target, title, status, started_at, updated_at,
-           total_cost_usd, total_active_ms, branch, workspace_meta, guardrails_id, pr_url,
+           total_cost_usd, total_active_ms, branch, workspace_meta, guardrails_id, started_by, pr_url,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pauseReason') AS pause_reason,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pauseDetail') AS pause_detail
     FROM pipelines
@@ -2152,6 +2209,7 @@ function rowToState(row) {
     stepper: j(row.stepper, null),
     tools: j(row.tools, null),
     guardrailsId: row.guardrails_id ?? null,
+    startedBy: row.started_by ?? null,
     // v31 provenance: set when a schedule started this run (NULL = started by hand).
     scheduledFor: row.scheduled_for ?? null,
     scheduleId: row.schedule_id ?? null,
@@ -2171,6 +2229,8 @@ function rowToState(row) {
   // too, so a deep-linked History detail no longer waits for the LIST row.
   const rp = j(row.resume_point, null);
   state.pauseReason = typeof rp?.pauseReason === 'string' ? rp.pauseReason : null;
+  // Who paused it (run-harness _recordAction): { kind, by, at } or null.
+  state.lastAction = rp && rp.lastAction && typeof rp.lastAction.by === 'string' ? { ...rp.lastAction } : null;
   state.pauseDetail = typeof rp?.pauseDetail === 'string' ? rp.pauseDetail : null;
   const outcome = j(row.outcome, null);
   if (outcome) {
@@ -2222,6 +2282,7 @@ function buildAuditMarkdown(row) {
     `- **id**: ${row.id}\n` +
     `- **project**: ${(readStoreMeta(row.project_key)?.path) ?? ''}\n` +
     `- **started**: ${row.started_at ?? ''}\n` +
+    (actorLabel(row.started_by) ? `- **started by**: ${actorLabel(row.started_by)}\n` : '') +
     `- **prompt file**: prompt.md\n\n` +
     `## Prompt\n\n` +
     (row.prompt && row.prompt.trim() ? row.prompt.trim() + '\n' : '_(empty prompt)_\n') +

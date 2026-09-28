@@ -252,6 +252,8 @@ Usage:
 
 Subcommands:
   add [name] [--path <dir>]   Register a project. Defaults: name = basename(path), path = cwd.
+  add --clone <https-url> [--branch <b>] [--name <folder>]
+                              Clone a repository into the projects folder and register it.
   list                        List registered projects (tab-separated; missing dirs are flagged).
   remove <name>               Remove a registered project by name (case-insensitive).
   resume <pipelineId>         Continue a paused pipeline (re-attaches Claude sessions).
@@ -267,6 +269,7 @@ Subcommands:
                               Run the web UI (default http://localhost:4317). See: worca ui help
   workflow <cmd> [...]        Export a workflow (Claude Code skill, JSON, or plugin) / import JSON: list|export|import. See: worca workflow help
   metrics push [--project <path>]   Push pending team-metrics run records (headless flush)
+  metrics pr-workflow [--project <path>]   Add the GitHub Action that records PR merges for the Timeline
   policy <cmd> [...]          Team policy from the worca-policy branch: show|pull|init|setup. See: worca policy help
   schedule <cmd> [...]        Manage scheduled runs: list|show|run-now|move|cancel|skip|pause|resume|log.
                               See: worca schedule help
@@ -1052,10 +1055,12 @@ function runInstall(targetDir, passthrough) {
 
 // ── project registry subcommands ──────────────────────────────────────────────
 
-/** Parse a tiny argv slice for the `add` subcommand. Supports --path/--path=<dir>. */
+/** Parse a tiny argv slice for the `add` subcommand. Supports --path/--path=<dir> and
+ *  --clone <url> [--branch <b>] [--name <folder>]. */
 function parseAddArgs(argv) {
   const positionals = [];
   let pathArg = null;
+  const clone = { url: null, branch: null, name: null };
   for (let i = 0; i < argv.length; i++) {
     let a = argv[i];
     let inline;
@@ -1068,17 +1073,44 @@ function parseAddArgs(argv) {
       const v = inline !== undefined ? inline : argv[++i];
       if (v === undefined) fail('Flag --path requires a value.');
       pathArg = v;
+    } else if (a === '--clone' || a === '--branch' || a === '--name') {
+      const v = inline !== undefined ? inline : argv[++i];
+      if (v === undefined) fail(`Flag ${a} requires a value.`);
+      clone[a === '--clone' ? 'url' : a.slice(2)] = v;
     } else if (a.startsWith('-')) {
       fail(`Unknown flag: ${a}`);
     } else {
       positionals.push(a);
     }
   }
-  return { name: positionals[0], path: pathArg };
+  if ((clone.branch || clone.name) && !clone.url) fail('--branch and --name go with --clone.');
+  if (clone.url && pathArg) fail('--clone and --path cannot be combined: the clone goes into the projects folder.');
+  return { name: positionals[0], path: pathArg, clone: clone.url ? clone : null };
+}
+
+/** `worca add --clone`: the same path as the UI's Clone from URL (src/core/clone-project.mjs). */
+async function cmdAddClone(clone, positionalName) {
+  const { cloneProject } = await import('../core/clone-project.mjs');
+  const { getProjectsRoot } = await import('../core/settings.mjs');
+  try {
+    out(`Cloning ${clone.url} …`);
+    const { project } = await cloneProject({ url: clone.url, branch: clone.branch, name: clone.name || positionalName || null },
+      { projectsRoot: getProjectsRoot(), listProjects, addProject });
+    out(`Added project "${project.name}" -> ${project.path}`);
+    try {
+      const m = await import('../core/metrics/sync.mjs');
+      await m.discoverProject(project.path, { force: true });
+    } catch { /* metrics never block `worca add` */ }
+    return 0;
+  } catch (err) {
+    process.stderr.write(`worca: ${err?.message || err}${err?.code ? ` (${err.code})` : ''}\n`);
+    return 1;
+  }
 }
 
 async function cmdAdd(argv) {
-  const { name: rawName, path: rawPath } = parseAddArgs(argv);
+  const { name: rawName, path: rawPath, clone } = parseAddArgs(argv);
+  if (clone) return cmdAddClone(clone, rawName);
   // Always route through normalizeProjectPath so display, storage, and
   // basename() all see exactly the same string addProject will persist.
   const target = normalizeProjectPath(rawPath) || resolve(process.cwd());
@@ -2882,6 +2914,12 @@ const METRICS_HELP = `worca metrics — team metrics (git-backed, team-wide run 
 Usage:
   worca metrics push [--project <path>]   Flush pending run records to their worca-metrics branch.
                                           Without --project, every outbox on this machine is flushed.
+  worca metrics pr-workflow [--project <path>] [--force] [--print]
+                                          Add the GitHub Action that records pull-request events
+                                          (opened, merged, closed) on worca-metrics, so the Team
+                                          metrics Timeline knows when work shipped without gh.
+                                          Commit and push the file afterwards. --print writes it
+                                          to stdout instead.
   worca metrics help
 
 Exit codes: 0 all pushed (or nothing pending) · 1 at least one outbox could not be pushed.
@@ -2914,6 +2952,22 @@ async function cmdMetrics(argv) {
           }
         }
         return failed ? 1 : 0;
+      }
+      case 'pr-workflow': {
+        const a = pluginArgs(rest, ['--project'], ['--force', '--print']);
+        if (a._.length) fail(`unexpected argument "${a._[0]}" — see: worca metrics help`);
+        const prs = await import('../core/metrics/prs.mjs');
+        if (a.print) { process.stdout.write(await prs.prWorkflowText()); return 0; }
+        const dir = resolve(a.project || process.cwd());
+        const r = await prs.installPrWorkflow(dir, { force: !!a.force });
+        const rel = prs.PR_WORKFLOW_PATH;
+        if (r.status === 'differs') {
+          process.stderr.write(`worca metrics pr-workflow: ${rel} already exists and differs — re-run with --force to replace it\n`);
+          return 1;
+        }
+        out(r.status === 'unchanged' ? `${c('green', '✓')} ${rel} is up to date` : `${c('green', '✓')} ${r.status} ${rel}`);
+        if (r.status !== 'unchanged') out(`  Commit and push it to the default branch. Run it once from the Actions tab ("Run workflow") to backfill recent pull requests.`);
+        return 0;
       }
       default:
         fail(`unknown metrics verb "${verb}" — see: worca metrics help`);

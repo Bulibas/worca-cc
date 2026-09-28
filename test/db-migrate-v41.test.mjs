@@ -1,6 +1,6 @@
-// v32: re-kind the deck subresources already indexed on finished runs.
+// v41: re-kind the deck subresources already indexed on finished runs.
 //
-// Until v31 the deck ports swept `deck/*` under one `deck` kind, so a finished
+// Until v40 the deck ports swept `deck/*` under one `deck` kind, so a finished
 // presentation run indexed its kit scripts, fonts and instrumented proof copy
 // beside the two files a human actually opens — 8 rows where 3 were meaningful,
 // on top of one row per screenshot. The sidecars now split deliverables from
@@ -33,13 +33,13 @@ function seeded() {
   db.prepare("INSERT INTO pipelines (id, project_key) VALUES ('p1', 'proj-0cea65fb')").run();
   const ins = db.prepare('INSERT INTO artifacts (pipeline_id, kind, rel_path) VALUES (?, ?, ?)');
   for (const [kind, rel] of KINDS) ins.run('p1', kind, rel);
-  db.exec('PRAGMA user_version = 31');
+  db.exec('PRAGMA user_version = 40');
   return db;
 }
 const kindOf = (db, rel) => db.prepare('SELECT kind FROM artifacts WHERE pipeline_id = ? AND rel_path = ?').get('p1', rel)?.kind;
 
 test('the ladder re-kinds deck subresources and leaves the deliverables alone', () => {
-  assert.ok(SCHEMA_VERSION >= 32);
+  assert.ok(SCHEMA_VERSION >= 41);
   const db = seeded();
   migrate(db);
 
@@ -61,7 +61,7 @@ test('re-running the step is idempotent, even against an existing deck-asset row
   db.prepare("INSERT INTO artifacts (pipeline_id, kind, rel_path) VALUES ('p1', 'deck-asset', 'deck/deck-stage.js')").run();
   migrate(db);
   assert.equal(kindOf(db, 'deck/deck-stage.js'), 'deck-asset');
-  db.exec('PRAGMA user_version = 31');
+  db.exec('PRAGMA user_version = 40');
   migrate(db);
   assert.equal(kindOf(db, 'deck/deck-stage.js'), 'deck-asset');
   assert.equal(db.prepare("SELECT count(*) n FROM artifacts WHERE rel_path = 'deck/deck-stage.js'").get().n, 1);
@@ -72,7 +72,7 @@ test('re-running the step is idempotent, even against an existing deck-asset row
 // `artifacts` table; step_key/node_id/cycle/created_at are declared only in
 // INCREMENTAL_COLUMNS and materialise through repairSchemaGaps, whose last
 // ladder call lives in applySchemaV29. Upgrading 29 -> 32 skips V29 (current is
-// not < 29), runs V31/V32, stamps 32, and never reaches reconcileSchema (that
+// not < 29), runs V40/V41, stamps 32, and never reaches reconcileSchema (that
 // is the current >= SCHEMA_VERSION fast path) — so the columns never arrive.
 //
 // The blast radius is the whole first session after upgrade, because the handle
@@ -128,10 +128,10 @@ test('and the attributed INSERT recordArtifact uses actually runs after that upg
   db.close();
 });
 
-// applySchemaV32 repairs incremental gaps because nothing between V29 and V32
-// does — but V31 runs FIRST and returns early when any of `workflows`' declared
+// applySchemaV32 repairs incremental gaps because nothing between V29 and V41
+// does — but V40 runs FIRST and returns early when any of `workflows`' declared
 // columns is absent. On a divergently-stamped DB missing one, the presentation
-// seed is skipped, V32 then adds the column, the version is stamped, and the
+// seed is skipped, V41 then adds the column, the version is stamped, and the
 // ladder never re-enters `current < 31`: wf_presentation is never seeded on that
 // install. The repair has to happen before the step that depends on it.
 test('a DB missing a workflows column still gets wf_presentation seeded', () => {
@@ -160,7 +160,7 @@ test('a DB missing a workflows column still gets wf_presentation seeded', () => 
   db.close();
 });
 
-// The hoisted repair exists because nothing between V29 and V31/V32 heals the
+// The hoisted repair exists because nothing between V29 and V40/V41 heals the
 // INCREMENTAL_COLUMNS, and it was gated on a LITERAL 32. On the next bump a DB
 // stamped 32 skips applySchemaV29 (current >= 29) and skips the repair too
 // (32 < 32 is false), so a newly declared incremental column never arrives —

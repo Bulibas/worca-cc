@@ -1,14 +1,14 @@
-// v31: seed AND refresh the shipped Presentation workflow (wf_presentation) as a
+// v40: seed AND refresh the shipped Presentation workflow (wf_presentation) as a
 // v2 row — a fresh DB gains it, a DB stamped lower gains it on the ladder, an
 // archived row with the id is not resurrected, and a user's own live row with the
 // id is left untouched.
 //
-// It is v31 rather than v30 for two reasons. Upstream already ships a DIFFERENT
-// v30 (repairSchemaGaps for team metrics), so sharing the number would collide on
-// merge. And an `INSERT OR IGNORE` seed writes once, at first reach of its
-// version: a DB already stamped 30 would never pick up a later change to the
-// shipped graph, which is exactly how a stored 9-node copy survived the constant
-// gaining a 10th node and started failing validation (V9) at run start.
+// It is v40 because 30..39 are all taken by unrelated upstream steps (36..39 are
+// its attribution ladder), and a seed on an occupied rung is skipped by every
+// released install. And an `INSERT OR IGNORE` seed writes once, at first reach of
+// its version: a DB already stamped at it would never pick up a later change to
+// the shipped graph, which is exactly how a stored 9-node copy survived the
+// constant gaining a 10th node and started failing validation (V9) at run start.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -33,7 +33,7 @@ test('a fresh DB carries wf_presentation as a v2 presentation graph with 11 node
 });
 
 test('ladder: a DB stamped 29 gains wf_presentation', () => {
-  assert.ok(SCHEMA_VERSION >= 31);
+  assert.ok(SCHEMA_VERSION >= 40);
   const db = freshMigrated();
   db.prepare('DELETE FROM workflows WHERE id = ?').run('wf_presentation');
   db.exec('PRAGMA user_version = 29');
@@ -107,7 +107,7 @@ test('refresh rewires an older shipped seed WITHOUT discarding node defaults or 
   const wires = allWires.filter((w) => wireIds.has(w.id));
   db.prepare('UPDATE workflows SET graph = ? WHERE id = ?')
     .run(JSON.stringify({ nodes, wires, canvas: { x: 40, y: 12, scale: 0.8 } }), t.id);
-  db.exec('PRAGMA user_version = 31');
+  db.exec('PRAGMA user_version = 40');
 
   migrate(db);
 

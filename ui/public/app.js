@@ -11,6 +11,9 @@ const AUTO_WORKFLOW_ID = AUTO_WORKFLOW.id;
 // Memory scope control for it and the run body carries `memoryScope`. Built-in, never a saved row.
 const MEMORY_DEFRAG_WORKFLOW_ID = 'wf_memory_defrag';
 
+// Before any request: turns an expired identity-proxy sign-in into a banner.
+const sessionGuard = installSessionGuard();
+
 // ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
@@ -40,6 +43,7 @@ const state = {
   historyAll: [],    // full /api/history dataset; client-side filter cache
   commentCounts: {}, // "<storeKey>/<pipelineId>" -> unresolved diff-comment count
   historyFilter: '', // active projectKey filter for History; '' === All Projects
+  historyPerson: '', // active "Started by" filter (lower-cased name); '' === everyone. Shared deployments only.
   ghAvailable: false,// gh CLI availability, from the last /api/history load
 
   // --- Workspaces ---
@@ -95,6 +99,7 @@ import { exportSlugPreview } from './export-slug.mjs';
 import { createCodeEditor } from './code-editor.mjs';
 import { previewAskFromDef, previewFileUrl } from './ask/form-preview.mjs';
 import { projectForm } from '../../src/shared/forms/project.mjs';
+import { installSessionGuard } from './session-guard.mjs';
 import {
   renderPluginList, renderInstallConsent, renderUpdatePreview,
   renderConfigForm, collectConfigForm, renderConnectResult, renderDoctorReport, renderReferences409,
@@ -148,6 +153,8 @@ import {
   renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel,
 } from './team-policy-view.mjs';
 import { aggregate, toCsv } from '../../src/shared/team-metrics/aggregate.mjs';
+import { buildWorkItems, prLookupFor } from '../../src/shared/team-metrics/timeline.mjs';
+import { renderTimeline, renderTimelinePopover, timelineWindow, shiftAnchor, TL_MODES, TL_ZOOMS } from './team-metrics-timeline.mjs';
 import {
   renderProjectTmCell, renderProjectTmChip, projectTmSummary, renderEnableDialogBody, renderMetricsHomePicker, renderWsMetricsRow, renderWsSummary, renderRouteResults, renderWsMetricsPending } from './team-metrics-surfaces.mjs';
 import { paintAboutInto } from './about-links.mjs';
@@ -298,6 +305,7 @@ const el = {
   // Wizard
   wizName: $('#wiz-name'),
   wizProjects: $('#wiz-projects'),
+  wizSelectAll: $('#wiz-select-all'),
   wizStep1Hint: $('#wiz-step1-hint'),
   wizStartScan: $('#wiz-start-scan'),
   wizStatus: $('#wiz-status'),
@@ -374,6 +382,12 @@ const el = {
   projAddSave: $('#proj-add-save'),
   projAddCancel: $('#proj-add-cancel'),
   projAddMsg: $('#proj-add-msg'),
+  projAddTabs: $('#proj-add-tabs'),
+  projAddFolderPane: $('#proj-add-folder-pane'),
+  projAddClonePane: $('#proj-add-clone-pane'),
+  projCloneUrl: $('#proj-clone-url'),
+  projCloneBranch: $('#proj-clone-branch'),
+  projCloneName: $('#proj-clone-name'),
 
   // Agent creation wizard
   agwName: $('#agw-name'),
@@ -501,6 +515,7 @@ function connectWS() {
 
   ws.addEventListener('close', () => {
     state.wsReady = false;
+    sessionGuard.check(); // behind an identity proxy, a dropped socket may be an expired sign-in
     scheduleReconnect();
   });
 
@@ -757,6 +772,90 @@ function startBudgetTick() {
   budgetState.timer.unref?.();                 // no-op in browsers/jsdom (number)
 }
 
+// Who started a run (the server's identity.mjs): the name to show, or '' when there is
+// nobody in particular — null, or 'local' on a local install / the CLI.
+function attributedName(v) {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return s && s !== 'local' ? s : '';
+}
+
+// Who is looking (GET /api/whoami, fetched once at boot). People are shown ONLY on a shared
+// deployment — a real per-person sign-in (Cloudflare Access or a trusted header). A local
+// install, or a one-person WORCA_IDENTITY_NAME deployment, stores who started a run but
+// shows none of it: there is only ever one answer to "who".
+const viewer = { shared: false, name: null };
+
+/** The person to show for a stored name, or '' (not shared, nobody, or 'local'). */
+function personShown(v) {
+  return viewer.shared ? attributedName(v) : '';
+}
+/** True when `name` is the signed-in viewer (case-insensitive). */
+function isViewer(name) {
+  return !!(viewer.name && name && name.toLowerCase() === viewer.name.toLowerCase());
+}
+/** The short label for cards and banners: 'you' for the viewer, else the name, else ''. */
+function personLabel(v) {
+  const n = personShown(v);
+  return !n ? '' : isViewer(n) ? 'you' : n;
+}
+/** Up to two initials: an email's local part (or a display name) split on . _ - and spaces. */
+function personInitials(name) {
+  const base = String(name || '').trim().split('@')[0];
+  const parts = base.split(/[\s._-]+/).filter(Boolean);
+  const ini = parts.slice(0, 2).map((w) => w[0]).join('').toUpperCase();
+  return /^[A-Z0-9]{1,2}$/.test(ini) ? ini : (ini ? ini.replace(/[^A-Z0-9]/g, '').slice(0, 2) || '?' : '?');
+}
+/** A neutral initials circle; `title` is the full sentence. Text only, never markup. */
+function personIni(name, title) {
+  const el = document.createElement('span');
+  el.className = 'person-ini';
+  el.textContent = personInitials(name);
+  el.setAttribute('aria-hidden', 'true');
+  if (title) el.title = title;
+  return el;
+}
+/** The detail-header person chip: initials circle + the full name (never "you"). */
+function personChip(name, verb = 'Started by') {
+  const chip = document.createElement('span');
+  chip.className = 'person-chip';
+  chip.title = `${verb} ${name}`;
+  chip.append(personIni(name));
+  const t = document.createElement('span');
+  t.className = 'person-chip-name';
+  t.textContent = name;
+  chip.append(t);
+  return chip;
+}
+
+// "Signed in as" in the rail foot, and the viewer every people-label compares against.
+async function loadWhoami() {
+  const box = document.getElementById('side-who');
+  try {
+    const res = await fetch('/api/whoami');
+    if (!res.ok) return;
+    const who = await res.json();
+    const name = attributedName(who && who.name);
+    viewer.shared = !!(who && who.shared === true && name);
+    viewer.name = viewer.shared ? name : null;
+    if (box) {
+      box.querySelector('.side-who-name').textContent = viewer.shared ? name : '';
+      box.title = viewer.shared ? `Signed in as ${name}` : '';
+      box.hidden = !viewer.shared;
+    }
+    if (viewer.shared) repaintPeople();
+  } catch { /* nobody is shown */ }
+}
+
+// Everything that shows a person, repainted once the viewer is known (boot races the
+// hello snapshot and the History fetch). Each painter is idempotent.
+function repaintPeople() {
+  try { for (const r of runs.values()) if (r.el) paintRunCard(r); } catch { /* not booted */ }
+  try { const tabs = $('#nav-running-children'); if (tabs) tabs.dataset.tabsSig = ''; renderPipelineTabs(); } catch { /* not booted */ }
+  try { if (runDetailState.screen && runs.get(runDetailState.runId)) repaintRunDetail(runs.get(runDetailState.runId)); } catch { /* none open */ }
+  try { if (Array.isArray(state.historyAll) && state.historyAll.length) paintHistory(); } catch { /* not loaded */ }
+  try { schedulesView.repaint(); paintScheduledGroup(); } catch { /* not booted */ }
+}
+
 // The indicator is re-rendered on every paint, and .side-foot sits OUTSIDE the
 // <nav> that navLinks snapshots at boot — so route it from a container listener
 // rather than the [data-nav] delegation.
@@ -868,6 +967,10 @@ function handleServerMessage(msg) {
     scheduleOnboardingRefresh();
     return;
   }
+  if (msg.type === 'clone-changed') {
+    onCloneJob(msg.job);
+    return;
+  }
   if (msg.type === 'projects-changed') {
     scheduleOnboardingRefresh();
     refreshAllCounts();
@@ -963,6 +1066,8 @@ function handleServerMessage(msg) {
       projectDir: msg.projectDir,
       status: msg.status || 'starting',
       startedAt: msg.startedAt,
+      startedBy: msg.startedBy || undefined,
+      lastAction: msg.lastAction || undefined,
       kind: msg.kind || 'run',
       workspaceId: msg.workspaceId || undefined,
       projectNames: Array.isArray(msg.projectNames) && msg.projectNames.length ? msg.projectNames : undefined,
@@ -1074,6 +1179,8 @@ function onHello(msg) {
       pipelineId: r0.pipelineId || null,
       pauseReason: r0.pauseReason || null,
       pauseDetail: r0.pauseDetail || null,
+      startedBy: r0.startedBy || undefined,
+      lastAction: r0.lastAction || undefined,
       workspaceId: r0.workspaceId || undefined,
       projectNames: Array.isArray(r0.projectNames) && r0.projectNames.length ? r0.projectNames : undefined,
     });
@@ -1203,7 +1310,7 @@ function nowHMS() {
 function makeRun({
   runId, title, projectDir, status = 'running', startedAt, local = false,
   pendingQuestion = null, kind = 'run', pipelineId = null, pauseReason = null,
-  pauseDetail = null,
+  pauseDetail = null, startedBy = null, lastAction = null,
   workspaceId = undefined, workspaceName = undefined, projectNames = null,
 }) {
   return {
@@ -1219,6 +1326,8 @@ function makeRun({
     pauseReason,          // why it paused, or null — ANY orchestrator pause code rides here
                           // (e.g. 'usage_limit'); only the cost pair renders a cost banner
     pauseDetail,          // the human-readable cause behind an 'error' pause, or null
+    startedBy,            // who started it (identity.mjs), or null; 'local' is never shown
+    lastAction,           // who last stopped / paused / resumed it: { kind, by, at } or null
     workspaceId,
     workspaceName,
     // Stable ordering key: assigned once per runId, never bumped by activity
@@ -1677,6 +1786,11 @@ function cycleAwareLabel(stepper, subAgents, groupKeys, steps = []) {
 function onState(r, msg) {
   if (msg.status) r.status = msg.status;
   if (msg.startedAt) r.startedAt = msg.startedAt;
+  // The harness mirrors startedBy onto its state (creation-immutable), so a live card
+  // learns who started the run from the first state snapshot.
+  if (typeof msg.startedBy === 'string' && msg.startedBy) r.startedBy = msg.startedBy;
+  // Who stopped / paused / resumed it (run-harness _recordAction), on every state snapshot.
+  if (msg.lastAction === null || (msg.lastAction && typeof msg.lastAction.by === 'string')) r.lastAction = msg.lastAction;
   // Mirror the on-disk pipeline short id the orchestrator stamps onto state.id
   // after createPipeline. The server captures the same field (ui/server.mjs
   // wireRun); without this the run model only ever gets a pipelineId from the
@@ -7404,7 +7518,36 @@ function renderWizardProjects() {
 function syncWizardStartEnabled() {
   const next = document.getElementById('wiz-start-scan');
   if (next) next.disabled = state.wizard.selectedPaths.length < 2;
+  syncWizardSelectAll();
 }
+
+// The enabled (existing) project checkboxes: the only rows Select all may touch.
+function wizardUsableBoxes() {
+  return el.wizProjects ? [...el.wizProjects.querySelectorAll('.wiz-proj-cb:not(:disabled)')] : [];
+}
+
+// Select all reads checked when every usable project is picked, indeterminate when some are.
+function syncWizardSelectAll() {
+  const all = el.wizSelectAll;
+  if (!all) return;
+  const boxes = wizardUsableBoxes();
+  const picked = boxes.filter((b) => b.checked).length;
+  all.disabled = boxes.length < 2;
+  all.checked = boxes.length > 0 && picked === boxes.length;
+  all.indeterminate = picked > 0 && picked < boxes.length;
+}
+
+// Check or clear every usable project at once; a missing project's selection is left as is.
+if (el.wizSelectAll) el.wizSelectAll.addEventListener('change', () => {
+  const on = el.wizSelectAll.checked;
+  const set = new Set(state.wizard.selectedPaths);
+  for (const cb of wizardUsableBoxes()) {
+    cb.checked = on;
+    if (on) set.add(cb.value); else set.delete(cb.value);
+  }
+  state.wizard.selectedPaths = [...set];
+  syncWizardStartEnabled();
+});
 
 // The team-metrics home is no longer a wizard step: POST /api/workspaces adopts the one
 // member that already records (autoMetricsHome), and every other case is "Choose…" on the
@@ -9495,15 +9638,118 @@ function setProjAddMsg(text, kind) {
   el.projAddMsg.className = 'hint' + (kind ? ' ' + kind : '');
 }
 
-function openProjectAddModal(path) {
+function openProjectAddModal(path, { mode = 'folder' } = {}) {
   el.projAddPath.value = path || '';
   el.projAddName.value = path ? basenameOf(path) : '';
+  if (el.projCloneUrl) {
+    el.projCloneUrl.value = '';
+    el.projCloneBranch.value = '';
+    el.projCloneName.value = '';
+    el.projCloneName.placeholder = 'the repository name';
+  }
+  el.projectAddModal.classList.remove('hidden');
+  setProjAddMode(mode);
+  // A clone still in flight from an earlier open keeps its progress line.
+  if (cloneFollow) { setProjAddMode('clone'); setProjAddMsg(`Cloning ${cloneFollow.url} …`); lockCloneForm(true); return; }
   // Informational hint only when there is no path (manual-entry fallback);
   // neutral default .hint styling (no .hint.warn class exists).
-  setProjAddMsg(path ? '' : 'Native folder picker unavailable — enter the project folder path, or browse with Choose folder….');
-  el.projectAddModal.classList.remove('hidden');
-  el.projAddName.focus();
-  el.projAddName.select();
+  if (mode === 'folder') {
+    setProjAddMsg(path ? '' : 'Native folder picker unavailable — enter the project folder path, or browse with Choose folder….');
+    el.projAddName.focus();
+    el.projAddName.select();
+  }
+}
+
+// ---- Add project: the Folder / Clone from URL tabs ------------------------------
+let projAddMode = 'folder';
+
+function setProjAddMode(mode) {
+  projAddMode = mode === 'clone' && el.projAddClonePane ? 'clone' : 'folder';
+  if (!el.projAddTabs) return;
+  for (const t of el.projAddTabs.querySelectorAll('.md-tab')) t.setAttribute('aria-selected', String(t.dataset.mode === projAddMode));
+  el.projAddFolderPane.hidden = projAddMode !== 'folder';
+  el.projAddClonePane.hidden = projAddMode !== 'clone';
+  el.projAddSave.textContent = projAddMode === 'clone' ? 'Clone and add' : 'Add project';
+  setProjAddMsg(projAddMode === 'clone' ? 'Worca clones the repository into its projects folder with the deployment\'s GitHub credential.' : '');
+  if (projAddMode === 'clone') el.projCloneUrl.focus();
+}
+
+/** "https://github.com/acme/api(.git)" -> "api", or '' when the URL does not name one repository. */
+function repoNameFromUrl(url) {
+  const m = /^https:\/\/[^/\s]+\/[^/\s]+\/([^/\s?#]+?)(?:\.git)?\/?$/i.exec(String(url || '').trim());
+  return m ? m[1] : '';
+}
+
+// The clone being followed: { id, url } while a job runs. WS 'clone-changed' is the fast path,
+// a GET every 2 s the fallback (a dropped socket must not strand the dialog).
+let cloneFollow = null;
+let clonePoll = null;
+
+function lockCloneForm(locked) {
+  for (const n of [el.projCloneUrl, el.projCloneBranch, el.projCloneName, el.projAddSave]) if (n) n.disabled = locked;
+  if (el.projAddTabs) for (const t of el.projAddTabs.querySelectorAll('.md-tab')) t.disabled = locked;
+}
+
+async function saveProjectClone() {
+  const url = el.projCloneUrl.value.trim();
+  if (!url) return setProjAddMsg('Repository URL is required.', 'err');
+  const body = { url };
+  const branch = el.projCloneBranch.value.trim();
+  const name = el.projCloneName.value.trim();
+  if (branch) body.branch = branch;
+  if (name) body.name = name;
+  lockCloneForm(true);
+  setProjAddMsg(`Cloning ${url} …`);
+  try {
+    const res = await fetch('/api/projects/clone', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const data = await safeJson(res);
+    if (!res.ok || !data.jobId) { lockCloneForm(false); setProjAddMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
+    cloneFollow = { id: data.jobId, url };
+    if (data.job && data.job.state !== 'running') { onCloneJob(data.job); return; }
+    clonePoll = setInterval(pollCloneJob, 2000);
+  } catch (e) {
+    lockCloneForm(false);
+    setProjAddMsg(e.message, 'err');
+  }
+}
+
+async function pollCloneJob() {
+  if (!cloneFollow) return;
+  try {
+    const res = await fetch(`/api/projects/clone/${encodeURIComponent(cloneFollow.id)}`);
+    const data = await safeJson(res);
+    if (res.ok && data.job) onCloneJob(data.job);
+    else if (res.status === 404) onCloneJob({ id: cloneFollow.id, state: 'error', error: 'the clone job is gone (the server restarted?)' });
+  } catch { /* the next tick retries */ }
+}
+
+/** A job update from the WS or the poll: only the one this dialog started counts. */
+function onCloneJob(job) {
+  if (!job || !cloneFollow || job.id !== cloneFollow.id || job.state === 'running') return;
+  clearInterval(clonePoll);
+  clonePoll = null;
+  cloneFollow = null;
+  lockCloneForm(false);
+  const open = el.projectAddModal && !el.projectAddModal.classList.contains('hidden');
+  if (job.state === 'error') {
+    if (open) { setProjAddMode('clone'); setProjAddMsg(job.error || 'The clone failed.', 'err'); }
+    else setProjectsMsg(`Clone failed: ${job.error || 'unknown error'}`, 'err');
+    return;
+  }
+  const name = (job.project && job.project.name) || job.name || '';
+  if (open) closeProjectAddModal();
+  void (async () => {
+    try {
+      const res = await fetch('/api/projects');
+      const data = await safeJson(res);
+      if (res.ok && Array.isArray(data.projects)) state.projects = data.projects;
+    } catch { /* the projects-changed frame refreshes it too */ }
+    renderProjectsList();
+    renderProjectOptions(localStorage.getItem(LAST_PROJECT_KEY) || '');
+    setProjectsMsg(name ? `Cloned and added “${name}”.` : 'Cloned and added the project.');
+  })();
 }
 
 function closeProjectAddModal() {
@@ -9516,10 +9762,13 @@ async function addProjectFlow() {
   if (data && data.status === 'picked' && data.path) { openProjectAddModal(data.path); return; }
   if (data && data.status === 'canceled') return;                 // respect the cancel
   if (data && data.status === 'busy') { setProjectsMsg('A folder dialog is already open — finish or cancel it first.', 'err'); return; }
-  openProjectAddModal('');                                        // unsupported / error -> manual entry
+  // No folder picker at all (a container or hosted worca): the repository is the way in.
+  if (data && data.status === 'unsupported') { openProjectAddModal('', { mode: 'clone' }); return; }
+  openProjectAddModal('');                                        // error -> manual entry
 }
 
 async function saveProjectAdd() {
+  if (projAddMode === 'clone') return saveProjectClone();
   const name = el.projAddName.value.trim();
   const path = el.projAddPath.value.trim();
   if (!name) return setProjAddMsg('Name is required.', 'err');
@@ -9626,6 +9875,16 @@ if (el.projAddSave) {
       el.projAddBrowse.disabled = false;
     }
   });
+  if (el.projAddTabs) {
+    el.projAddTabs.addEventListener('click', (e) => {
+      const tab = e.target.closest && e.target.closest('.md-tab');
+      if (tab && !tab.disabled) setProjAddMode(tab.dataset.mode);
+    });
+    el.projCloneUrl.addEventListener('input', () => {
+      el.projCloneName.placeholder = repoNameFromUrl(el.projCloneUrl.value) || 'the repository name';
+    });
+    el.projCloneUrl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void saveProjectAdd(); } });
+  }
   el.projectAddModal.addEventListener('click', (e) => { if (e.target === el.projectAddModal) closeProjectAddModal(); });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && el.projectAddModal && !el.projectAddModal.classList.contains('hidden')) closeProjectAddModal();
@@ -14509,6 +14768,15 @@ const tmState = {
   filter: {}, sort: {}, data: null, loading: false, loadSeq: 0,
   runLimit: TM_RUN_PAGE,            // raised by "Show all N runs" (§4.9 "every record in range")
   cache: new Map(),                 // scopeId → last payload this session: switching back paints at once
+  tab: 'overview',                  // 'overview' | 'timeline' — the hash param (#team-metrics/timeline)
+  // Timeline: calendar position, grouping (kept per viewer) and the tile filter.
+  tl: {
+    zoom: 'month', anchor: Date.now(), filter: null,
+    mode: TL_MODES.includes(localStorage.getItem('worca.teamMetrics.tlMode')) ? localStorage.getItem('worca.teamMetrics.tlMode') : 'items',
+    outside: localStorage.getItem('worca.teamMetrics.tlOutside') !== '0',   // PRs with no Worca run behind them
+  },
+  // scopeId → { map: runId → PRs|null, asked:Set, status, inflight, loading, events: PR events|null, eventsInflight }
+  prs: new Map(),
 };
 
 // The chip while a load is out: hold Refresh and spin, keep the words. Cleared by the next
@@ -14552,6 +14820,7 @@ async function loadTeamMetricsView({ refresh = false } = {}) {
     body.classList.remove('is-loading');
     body.removeAttribute('aria-busy');
     body.replaceChildren(renderTmEmptyState({ doc: document }));
+    applyTmTab();
     return;
   }
   // Instant paint (docs/team-metrics.md "Loading"): this scope's last payload of the session when
@@ -14566,6 +14835,7 @@ async function loadTeamMetricsView({ refresh = false } = {}) {
   } else if (!tmState.data) {
     body.replaceChildren(renderTmSkeleton({ doc: document, scopeKind: tmState.scopeId.startsWith('workspace:') ? 'workspace' : 'project' }));
   }
+  applyTmTab();
   // aggregate=0: this page always re-aggregates the records itself (range/group/filter are local).
   // defer=1: the worktree answers now; a due fetch runs after the response and its `changed`
   // event reloads the page — the chip says "Checking origin…" meanwhile.
@@ -14587,14 +14857,194 @@ async function loadTeamMetricsView({ refresh = false } = {}) {
     body.classList.remove('is-loading');
     body.removeAttribute('aria-busy');
     body.replaceChildren(Object.assign(document.createElement('small'), { className: 'hint err', textContent: `Could not load team metrics: ${err.message}` }));
+    applyTmTab();
     return;
   }
   tmState.data = data;
   tmState.cache.set(tmState.scopeId, data);
   chip.hidden = false;
   chip.replaceChildren(renderSyncChip(data, { doc: document, now: Date.now() }));
+  if (refresh) { const p = tmPrsFor(tmState.scopeId); p.asked.clear(); p.events = null; }   // Refresh re-asks for the PRs too
   renderTeamMetrics();
   body.removeAttribute('aria-busy');
+  applyTmTab();
+}
+
+// ---- Team metrics → Timeline (docs/team-metrics.md "Timeline") -----------------------------
+const TL_DAY = 86_400_000;
+const TL_PR_LOOKBACK = 60 * TL_DAY;   // runs this far before the window can still have bars in it
+const TL_PR_CHUNK = 500;
+
+function tmPrsFor(scopeId) {
+  if (!tmState.prs.has(scopeId)) tmState.prs.set(scopeId, { map: new Map(), asked: new Set(), status: null, inflight: false, loading: false, events: null, eventsInflight: false });
+  return tmState.prs.get(scopeId);
+}
+
+/**
+ * Every PR the merge-tracking Action recorded for the scope, once per scope per session (Refresh
+ * asks again). The ones no run points at are drawn as work outside Worca. Without the Action
+ * the list is empty and nothing changes.
+ */
+async function ensureTmPrEvents() {
+  const scopeId = tmState.scopeId;
+  const pr = tmPrsFor(scopeId);
+  if (pr.events || pr.eventsInflight || !tmState.data || tmState.tab !== 'timeline') return;
+  pr.eventsInflight = true;
+  try {
+    const res = await fetch(`/api/team-metrics/pr-events?${new URLSearchParams({ scope: scopeId })}`);
+    const d = await safeJson(res);
+    pr.events = res.ok && d && Array.isArray(d.prs) ? d.prs : [];
+  } catch { pr.events = []; }
+  finally { pr.eventsInflight = false; }
+  if (pr.events.length && tmState.scopeId === scopeId && tmState.tab === 'timeline' && currentView() === 'team-metrics') { tmState.tlKeepScroll = true; renderTmTimeline(); }
+}
+
+/** Tabs: Overview keeps the range/filter controls; the Timeline has its own calendar. */
+function applyTmTab() {
+  const tl = tmState.tab === 'timeline';
+  $$('#tm-tabs [data-tm-tab]').forEach((b) => {
+    const on = b.dataset.tmTab === tmState.tab;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-selected', String(on));
+  });
+  const range = document.getElementById('tm-range');
+  if (range) range.hidden = tl;
+  const custom = document.getElementById('tm-custom');
+  if (custom) custom.hidden = tl || tmState.range !== 'custom';
+  const chips = document.getElementById('tm-filters');
+  if (chips && tl) chips.hidden = true;
+  // No data yet (skeleton, empty state, an error): #tm-body says so on either tab.
+  const showTl = tl && !!tmState.data;
+  const body = document.getElementById('tm-body');
+  const host = document.getElementById('tm-timeline');
+  if (body) body.hidden = showTl;
+  if (host) host.hidden = !showTl;
+  if (showTl) { renderTmTimeline(); tlScrollToNow(); }
+}
+
+/** px the calendar can fill: the card's width minus the sticky label column (style.css --tl-lab). */
+function tlFit(host) {
+  const lab = window.matchMedia && window.matchMedia('(max-width:720px)').matches ? 176 : 300;
+  return Math.max(0, (host.clientWidth || 0) - lab - 2);
+}
+
+function renderTmTimeline() {
+  const host = document.getElementById('tm-timeline');
+  const data = tmState.data;
+  if (!host || !data) return;
+  const pr = tmPrsFor(tmState.scopeId);
+  const now = Date.now();
+  tmState.tlItems = buildWorkItems(data.records || [], { prs: Object.fromEntries(pr.map), outside: pr.events || [], now });
+  const scroll = host.querySelector('.tl-scroll');
+  const keepScroll = scroll ? scroll.scrollLeft : 0;
+  tmState.tlFit = tlFit(host);
+  host.replaceChildren(renderTimeline({ ...tmState.tl, items: tmState.tlItems, now, prStatus: pr.status, prLoading: pr.loading, fit: tmState.tlFit }, { doc: document }));
+  const next = host.querySelector('.tl-scroll');
+  if (next && tmState.tlKeepScroll) next.scrollLeft = keepScroll;
+  tmState.tlKeepScroll = false;
+  void ensureTmPrs();
+  void ensureTmPrEvents();
+}
+
+function mergePrStatus(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  return {
+    ...b,
+    gh: b.gh !== 'unused' ? b.gh : a.gh,
+    ghDetail: b.ghDetail ?? a.ghDetail,
+    ghError: b.ghError ?? a.ghError,
+    actionRepos: [...new Set([...(a.actionRepos || []), ...(b.actionRepos || [])])],
+    unsupportedRepos: [...new Set([...(a.unsupportedRepos || []), ...(b.unsupportedRepos || [])])],
+  };
+}
+
+/**
+ * Asks the server for the pull requests behind the runs the window can show (and a lookback
+ * for work that started earlier), once per run per session. The page paints without them first;
+ * "Checking pull requests…" shows meanwhile, and the answer repaints the timeline.
+ */
+async function ensureTmPrs() {
+  const scopeId = tmState.scopeId;
+  const pr = tmPrsFor(scopeId);
+  if (pr.inflight || !tmState.data || tmState.tab !== 'timeline') return;
+  const win = timelineWindow(tmState.tl.zoom, tmState.tl.anchor);
+  const lo = win.s - TL_PR_LOOKBACK;
+  const need = (tmState.data.records || []).filter((r) => {
+    const t = Date.parse(r.startedAt);
+    return t >= lo && t < win.e && !pr.asked.has(r.id);
+  });
+  if (!need.length) return;
+  pr.inflight = true; pr.loading = true;
+  // Asked once per session, answer or not: a failing lookup must not loop (render → ask → fail →
+  // render). Refresh clears the set and tries again.
+  for (const r of need) pr.asked.add(r.id);
+  renderTmTimeline();
+  try {
+    for (let i = 0; i < need.length; i += TL_PR_CHUNK) {
+      const chunk = need.slice(i, i + TL_PR_CHUNK);
+      const res = await fetch('/api/team-metrics/prs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: scopeId, runs: chunk.map(prLookupFor) }) });
+      const d = await safeJson(res);
+      if (!res.ok) { pr.status = mergePrStatus(pr.status, { gh: 'unused', ghError: (d && d.error) || `HTTP ${res.status}` }); break; }
+      for (const [id, v] of Object.entries(d.prs || {})) pr.map.set(id, v);
+      pr.status = mergePrStatus(pr.status, d.status);
+    }
+  } catch (err) {
+    pr.status = mergePrStatus(pr.status, { gh: 'unused', ghError: err.message });
+  } finally {
+    pr.inflight = false; pr.loading = false;
+  }
+  if (tmState.scopeId === scopeId && tmState.tab === 'timeline' && currentView() === 'team-metrics') { tmState.tlKeepScroll = true; renderTmTimeline(); }
+}
+
+function closeTlPopover() { document.querySelectorAll('.tl-pop').forEach((p) => p.remove()); }
+
+function openTlPopover(hit) {
+  closeTlPopover();
+  const it = (tmState.tlItems || []).find((x) => x.key === hit.dataset.tlItem);
+  if (!it) return;
+  const pop = renderTimelinePopover(it, { doc: document, now: Date.now() });
+  document.getElementById('tm-timeline').append(pop);
+  const r = hit.getBoundingClientRect();
+  const pw = pop.offsetWidth || 340; const ph = pop.offsetHeight || 300;
+  const x = Math.min(Math.max(16, r.left + Math.min(r.width, 60)), window.innerWidth - pw - 16);
+  let y = r.bottom + 8;
+  if (y + ph > window.innerHeight - 16) y = Math.max(16, r.top - ph - 8);
+  pop.style.left = `${x}px`; pop.style.top = `${y}px`;
+  pop.querySelector('.tl-pop-x')?.focus();
+}
+
+function tlScrollToNow() {
+  const sc = document.querySelector('#tm-timeline .tl-scroll');
+  const win = timelineWindow(tmState.tl.zoom, tmState.tl.anchor, { fit: tmState.tlFit });
+  const now = Date.now();
+  if (!sc || now < win.s || now >= win.e) return;
+  sc.scrollLeft = Math.max(0, ((now - win.s) / (win.e - win.s)) * win.W - sc.clientWidth / 2);
+}
+
+/** Delegated clicks inside #tm-timeline. Returns true when the click was the timeline's. */
+function onTimelineClick(e) {
+  const t = e.target;
+  if (t.closest('[data-tl-close]')) { closeTlPopover(); return true; }
+  if (t.closest('.tl-pop')) return true;
+  const hit = t.closest('[data-tl-item]');
+  if (hit) { openTlPopover(hit); return true; }
+  const tl = tmState.tl;
+  const ctl = t.closest('[data-tl-filter],[data-tl-mode],[data-tl-shift],[data-tl-today],[data-tl-zoom],[data-tl-day],[data-tl-week]');
+  closeTlPopover();
+  if (!ctl) return false;
+  const d = ctl.dataset;
+  if (d.tlFilter) tl.filter = tl.filter === d.tlFilter ? null : d.tlFilter;
+  else if (d.tlMode) { tl.mode = d.tlMode; try { localStorage.setItem('worca.teamMetrics.tlMode', tl.mode); } catch { /* private mode */ } }
+  else if (d.tlShift) tl.anchor = shiftAnchor(tl.zoom, tl.anchor, Number(d.tlShift));
+  else if (d.tlToday) tl.anchor = Date.now();
+  else if (d.tlZoom && TL_ZOOMS.includes(d.tlZoom)) tl.zoom = d.tlZoom;
+  else if (d.tlDay) { tl.zoom = 'day'; tl.anchor = Number(d.tlDay) + 12 * 3_600_000; }
+  else if (d.tlWeek) { tl.zoom = 'week'; tl.anchor = Number(d.tlWeek) + 12 * 3_600_000; }
+  tmState.tlKeepScroll = !!(d.tlFilter || d.tlMode);
+  renderTmTimeline();
+  if (d.tlToday) tlScrollToNow();
+  return true;
 }
 
 function renderTeamMetrics() {
@@ -14638,6 +15088,14 @@ function renderTeamMetrics() {
 const tmSection = document.querySelector('section[data-view="team-metrics"]');
 if (tmSection) {
   tmSection.addEventListener('change', (e) => {
+    if (e.target.id === 'tl-outside') {
+      tmState.tl.outside = e.target.checked;
+      try { localStorage.setItem('worca.teamMetrics.tlOutside', tmState.tl.outside ? '1' : '0'); } catch { /* private mode */ }
+      closeTlPopover();
+      tmState.tlKeepScroll = true;
+      renderTmTimeline();
+      return;
+    }
     if (e.target.id === 'tm-scope') {
       tmState.scopeId = e.target.value;
       tmState.filter = {};
@@ -14652,6 +15110,14 @@ if (tmSection) {
     else if (e.target.id === 'tm-from' || e.target.id === 'tm-to') { tmState[e.target.id === 'tm-from' ? 'from' : 'to'] = e.target.value; if (tmState.from && tmState.to) renderTeamMetrics(); }
   });
   tmSection.addEventListener('click', async (e) => {
+    const tabBtn = e.target.closest('[data-tm-tab]');
+    if (tabBtn) {
+      closeTlPopover();
+      location.hash = tabBtn.dataset.tmTab === 'timeline' ? 'team-metrics/timeline' : 'team-metrics';
+      return;
+    }
+    if (e.target.closest('#tm-timeline')) { onTimelineClick(e); return; }
+    closeTlPopover();
     const rangeBtn = e.target.closest('#tm-range button');
     if (rangeBtn) {
       tmState.range = rangeBtn.dataset.range;
@@ -14696,12 +15162,30 @@ if (tmSection) {
     }
   });
   tmSection.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.querySelector('.tl-pop')) { closeTlPopover(); return; }
     if (e.key !== 'Enter' && e.key !== ' ') return;
     const t = e.target.closest('tr[data-filter-dim], table.tm-tbl th[data-sort]');
     if (t) { e.preventDefault(); t.click(); }
   });
   // Chart tooltip: reuse the Stats pattern (pointerover/focusin on .ch-hit → #tm-tip).
   bindChartTips(tmSection, document.getElementById('tm-tip'));
+  // The Timeline's calendar fills the card: repaint it at the new width (debounced). Watching the
+  // host, not the window, also catches the page's scrollbar appearing when the rows grow.
+  let tlResizeTimer = null;
+  const tlOnResize = () => {
+    clearTimeout(tlResizeTimer);
+    tlResizeTimer = setTimeout(() => {
+      const host = document.getElementById('tm-timeline');
+      if (!host || host.hidden || currentView() !== 'team-metrics' || tmState.tab !== 'timeline' || !tmState.data) return;
+      if (tlFit(host) === tmState.tlFit) return;
+      closeTlPopover();
+      tmState.tlKeepScroll = true;
+      renderTmTimeline();
+    }, 150);
+  };
+  const tlHost = document.getElementById('tm-timeline');
+  if (tlHost && typeof window.ResizeObserver === 'function') new window.ResizeObserver(tlOnResize).observe(tlHost);
+  else window.addEventListener('resize', tlOnResize);
 }
 
 // ---------------------------------------------------------------------------
@@ -14894,8 +15378,8 @@ function patchHistoryPr({ projectKey, id, pr }) {
   if (!card) return;                                         // off-screen (filtered out) — model is enough
   resetPrCluster(card);
   setupPrButton(card, row?.projectDir || null, row || { id, projectKey, pr }, state.ghAvailable);
-  // A MERGED enrichment retires the diff pill — merged work is already in the base
-  // branch, so its line counts stop being the story.
+  // A MERGED enrichment hides only a LIVE diff pill (the merge emptied its
+  // source...feature diff); a row with frozen counts (`diffFrozen`) keeps showing them.
   renderHistDiffPill(card.querySelector('.hist-diff-pill'), row || { id, projectKey, pr });
   // No setMergePill: clarification B — merged-or-not is shown by the link swap inside
   // setupPrButton (OPEN->"View PR", MERGED->"Merged"); the pill is detail-only now.
@@ -14989,10 +15473,55 @@ function renderHistoryPills() {
   host.appendChild(mkPill('', 'All Projects', state.historyAll.length));
   for (const pr of historyProjects()) host.appendChild(mkPill(pr.key, pr.name, pr.count, pr.workspace));
 
+  // "Started by" pills (shared deployments only): the distinct starters in the loaded
+  // history, the viewer first as "you". A second, independent filter.
+  const people = historyPeople();
+  if (people.length) {
+    const lab = document.createElement('span');
+    lab.className = 'hist-pill-label';
+    lab.textContent = 'Started by';
+    host.appendChild(lab);
+    for (const pp of people) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      const active = state.historyPerson === pp.key;
+      b.className = 'hist-pill person' + (active ? ' active' : '');
+      b.dataset.person = pp.key;
+      b.setAttribute('aria-pressed', active ? 'true' : 'false');
+      b.title = active ? 'Show runs by everyone' : `Only runs started by ${pp.name}`;
+      b.appendChild(personIni(pp.name));
+      const txt = document.createElement('span');
+      txt.textContent = pp.label;
+      b.appendChild(txt);
+      b.appendChild(document.createTextNode(' '));
+      const c = document.createElement('span');
+      c.className = 'pill-count';
+      c.textContent = String(pp.count);
+      b.appendChild(c);
+      b.addEventListener('click', () => { state.historyPerson = active ? '' : pp.key; paintHistory(); });
+      host.appendChild(b);
+    }
+  }
+
   // Keep the sticky project header offset in sync with the toolbar's height
   // (also re-measures on resize, when pills wrap to more/fewer rows).
   ensureHistToolbarObserver();
   syncHistToolbarHeight();
+}
+
+/** The distinct people who started loaded runs: [{ key, name, label, count }], the viewer first. */
+function historyPeople() {
+  if (!viewer.shared) return [];
+  const byKey = new Map();
+  for (const p of state.historyAll || []) {
+    const n = personShown(p && p.startedBy);
+    if (!n) continue;
+    const key = n.toLowerCase();
+    const e = byKey.get(key) || { key, name: n, label: isViewer(n) ? 'you' : n, count: 0 };
+    e.count += 1;
+    byKey.set(key, e);
+  }
+  return [...byKey.values()].sort((a, b) => (isViewer(b.name) - isViewer(a.name)) || b.count - a.count || a.name.localeCompare(b.name));
 }
 
 // Switch the active project filter, persist it (so it survives reloads), repaint.
@@ -15013,6 +15542,7 @@ function paintHistory() {
     state.historyFilter = '';
     localStorage.removeItem(HISTORY_FILTER_KEY);
   }
+  if (state.historyPerson && !historyPeople().some((pp) => pp.key === state.historyPerson)) state.historyPerson = '';
   renderHistoryPills();
   renderHistory();
   // An open detail screen re-reads its (possibly late-arriving, possibly mutated)
@@ -15041,10 +15571,13 @@ function renderHistory() {
   const visible = hiddenPids.size ? all.filter((p) => !hiddenPids.has(p.id)) : all;
 
   const filter = state.historyFilter;
-  const records = filter ? visible.filter((p) => p && p.projectKey === filter) : visible;
+  const person = viewer.shared ? state.historyPerson : '';
+  const byProject = filter ? visible.filter((p) => p && p.projectKey === filter) : visible;
+  const records = person ? byProject.filter((p) => personShown(p && p.startedBy).toLowerCase() === person) : byProject;
 
   if (!records.length) {
-    host.appendChild(histEmpty(filter ? 'No saved pipelines for this project yet.' : 'No saved pipelines yet.'));
+    host.appendChild(histEmpty(person ? 'No saved pipelines started by this person here yet.'
+      : filter ? 'No saved pipelines for this project yet.' : 'No saved pipelines yet.'));
     return;
   }
 
@@ -15439,6 +15972,15 @@ function buildHistCard(projectDir, p, ghAvailable = false) {
   seg('clock', clock);
   seg('time', typeof p.totalActiveMs === 'number' ? fmtDuration(p.totalActiveMs) : '');
   seg('total', typeof p.totalCostUsd === 'number' ? fmtUsd(p.totalCostUsd) : '');
+  // Who started it (shared deployments only): an initials circle + "by you" / "by <name>".
+  const by = personLabel(p.startedBy);
+  seg('by', by ? `by ${by}` : '');
+  if (by) {
+    const full = personShown(p.startedBy);
+    const byEl = node.querySelector('.hist-by');
+    byEl.title = `Started by ${full}`;
+    byEl.before(personIni(full));
+  }
   if (typeof p.totalCostUsd === 'number') node.querySelector('.hist-total').title = estTitle(p.totalCostUsd);
 
   renderHistDiffPill(node.querySelector('.hist-diff-pill'), p);
@@ -15579,14 +16121,18 @@ function renderHistCommentPill(pill, p) {
   pill.title = `${n} unresolved diff comment${n === 1 ? '' : 's'}`;
 }
 
-// Diff pill: merged PR -> hidden ("the diff is no longer the story"); survived
-// with changes -> +A −R; survived with none -> "no diff"; branch gone -> hidden.
+// Diff pill: frozen counts (`diffFrozen`, the run's own results.json summary) always
+// show — merged PR and branch gone alike — as +A −R, or "no diff" when the run
+// really changed nothing. Without them (a live or legacy run) the counts are the
+// live source...feature diff: survived with changes -> +A −R; survived with none ->
+// "no diff"; merged PR or branch gone -> hidden (that diff is empty or unknowable).
 // NOTE: the minus glyph is U+2212 (−), not an ASCII hyphen; the jsdom test
 // asserts it byte-for-byte, so keep this exact character.
 function renderHistDiffPill(pill, p) {
   if (!pill) return;
+  const frozen = !!(p && p.diffFrozen);
   const merged = p && p.pr && typeof p.pr === 'object' && String(p.pr.state || '').toUpperCase() === 'MERGED';
-  if (!p || !p.survived || merged) { pill.hidden = true; return; }
+  if (!p || (!frozen && (!p.survived || merged))) { pill.hidden = true; return; }
   pill.hidden = false;
   const added = Number.isFinite(+p.added) ? +p.added : 0;
   const removed = Number.isFinite(+p.removed) ? +p.removed : 0;
@@ -15600,7 +16146,9 @@ function renderHistDiffPill(pill, p) {
     const add = document.createElement('span'); add.className = 'diff-add'; add.textContent = `+${added}`;
     const del = document.createElement('span'); del.className = 'diff-del'; del.textContent = `−${removed}`; // U+2212
     diffEl.append(add, ' ', del);
-    pill.title = `${added} added, ${removed} removed vs ${p.sourceBranch || 'source'}`;
+    pill.title = frozen
+      ? `${added} added, ${removed} removed by this run`
+      : `${added} added, ${removed} removed vs ${p.sourceBranch || 'source'}`;
   }
 }
 
@@ -16504,6 +17052,12 @@ function paintHdHeaderMeta(screen, record, data) {
     a.title = `Scheduled for ${fmtDate(st.scheduledFor)}`;
     meta.appendChild(a);
   }
+  // Who started it (shared deployments only): the person chip at the end of the status row,
+  // the full name (never "you"); for a scheduled run, who scheduled it.
+  const row2 = screen.querySelector('.hd-row2');
+  row2?.querySelector('.person-chip')?.remove();
+  const by = personShown(st.startedBy) || personShown(record && record.startedBy);
+  if (by && row2) row2.appendChild(personChip(by, st.scheduledFor ? 'Scheduled by' : 'Started by'));
   // spec §8: the End card's result chip, repeated in the header meta (History D5
   // untouched — no model/effort). A path links through the keyed artifact route.
   if (st.endReached === true && st.result) {
@@ -17475,7 +18029,10 @@ function hdCommentCard(doc, comment, ctx, { detached = false, reply = false, las
   }
   const who = doc.createElement('span');
   who.className = 'hd-cmt-author';
-  who.textContent = comment.author === 'ask' ? 'Worca' : 'You';
+  // A person's comment names them once attribution knows who (identity.mjs); else the old "You".
+  // Shared deployments name the author ("You" for the viewer); elsewhere every human comment is "You".
+  const author = personLabel(comment.authorName);
+  who.textContent = comment.author === 'ask' ? 'Worca' : (!author || author === 'you' ? 'You' : author);
   const when = doc.createElement('time');
   when.className = 'hd-cmt-time';
   when.dateTime = comment.createdAt || '';
@@ -18982,12 +19539,27 @@ function buildHdClarify(sec, record, data) {
     card.append(qRow, aRow);
     wrap.appendChild(card);
   };
+  // Who answered (step 3): shown under step 2's rule (shared sign-ins only, "you" for the viewer).
+  const answeredByLine = (by) => {
+    const who = personLabel(by);
+    if (!who) return null;
+    const el = document.createElement('div');
+    el.className = 'hint hd-cl-by';
+    el.textContent = `answered by ${who}`;
+    el.title = `Answered by ${personShown(by)}`;
+    return el;
+  };
   for (const q of questions) addCard(q, byId.get(q.id));
+  if (questions.length && data.clarify) { const by = answeredByLine(data.clarify.answeredBy); if (by) wrap.appendChild(by); }
   if (data.clarify && data.clarify.ask) wrap.appendChild(hdRenderAskForm(record, data.clarify.ask));
   for (const r of Array.isArray(data.stepQuestions) ? data.stepQuestions : []) {
     const roundLabel = `${r && (r.agentKey || r.nodeId) ? (r.agentKey || r.nodeId) : 'agent'} — round ${r && r.round}`
       + (String((r && r.stepKey) || '').split('#')[1] ? ` · cycle ${String(r.stepKey).split('#')[1]}` : '');
-    if (r && r.ask) wrap.appendChild(hdRenderAskForm(record, r.ask, roundLabel));
+    if (r && r.ask) {
+      wrap.appendChild(hdRenderAskForm(record, r.ask, roundLabel));
+      const by = answeredByLine(r.answeredBy);
+      if (by) wrap.appendChild(by);
+    }
     if (!((r && r.questions) || []).length) continue;
     const caption = document.createElement('div');
     caption.className = 'hint hd-cl-caption';
@@ -18995,6 +19567,8 @@ function buildHdClarify(sec, record, data) {
     wrap.appendChild(caption);
     const rById = new Map((r.answers || []).map((a) => [a.id, a]));
     for (const q of r.questions) addCard(q, rById.get(q.id));
+    const by = answeredByLine(r.answeredBy);
+    if (by) wrap.appendChild(by);
   }
 }
 
@@ -19334,7 +19908,9 @@ function rdStateCopy(r, stepName) {
     return `Paused — ${r.pauseReason}. Resume once it clears.`;
   }
   if (r.status === 'paused' || r.status === 'pausing' || r.status === 'interrupted') {
-    return 'Paused by you. Agents in flight finished their checkpoint; nothing new is dispatched.';
+    // Who paused it (shared deployments only): "by you" when it was the viewer, else the name.
+    const by = r.lastAction && r.lastAction.kind === 'pause' ? personLabel(r.lastAction.by) : '';
+    return `Paused${by ? ` by ${by}` : ''}. Agents in flight finished their checkpoint; nothing new is dispatched.`;
   }
   if (RD_TERMINAL.includes(r.status)) {
     // finishedAtMs is stamped by finishRun (Task 9). Absent on a run this tab
@@ -19343,7 +19919,8 @@ function rdStateCopy(r, stepName) {
     const at = r.finishedAtMs
       ? ` Finished at ${startedLabel(new Date(r.finishedAtMs).toISOString())}.`
       : '';
-    return `${runStatusMeta(r).word}.${at}`;
+    const by = r.status === 'stopped' && r.lastAction && r.lastAction.kind === 'stop' ? personLabel(r.lastAction.by) : '';
+    return `${runStatusMeta(r).word}${by ? ` by ${by}` : ''}.${at}`;
   }
   // The ACTIVE agent names the line (the v1 phase/cycle scalars are gone).
   return `${activeCopy(r).text}.`;
@@ -20595,6 +21172,17 @@ function renderRunMeta(r, root = r.el) {
   if (!root) return;
   const metaEl = root.querySelector('.rm-text');
   if (metaEl) metaEl.textContent = `started ${startedLabel(r.startedAt)}`;
+  const byEl = root.querySelector('.rc-by');
+  if (byEl) {
+    // Shared deployments only: an initials circle + "by you" / "by <name>".
+    const by = personLabel(r.startedBy);
+    const full = personShown(r.startedBy);
+    byEl.hidden = !by;
+    byEl.querySelector('.rc-by-text').textContent = by ? `by ${by}` : '';
+    const ini = byEl.querySelector('.person-ini');
+    if (ini) ini.textContent = full ? personInitials(full) : '';
+    byEl.title = full ? `Started by ${full}` : '';
+  }
 
   // D15: progress is a NUMBER, never a bar. Hidden on every v1 run. This sits
   // ABOVE the `if (!branchEl) return` exit, or a branch-less card never gets it.
@@ -21911,6 +22499,10 @@ const schedulesView = createSchedulesView({
       return { wf_default: 'Default', wf_auto: 'Auto', wf_memory_defrag: 'Memory defragment' }[id] || id;
     },
     onCounts: (c) => paintScheduleCounts(c),
+    // Who made / changed a schedule, under the same display rule as runs (shared sign-ins only).
+    personLabel: (v) => personLabel(v),
+    personShown: (v) => personShown(v),
+    personIni: (name, title) => personIni(name, title),
     // A started run opens its live monitor (the ticket id IS the runId); a finished one opens History.
     openRun: ({ runId, pipelineId, projectDir }) => {
       if (runId) { location.hash = `running/${runId}`; return; }
@@ -22347,6 +22939,12 @@ function paintRdHeader(screen, r) {
   pill.className = `rd-status pill-run ${family}` + (parked ? ' parked' : '');
   pill.querySelector('.rd-status-word').textContent = text;
 
+  // Who started it (shared deployments only): the person chip beside the status pill, with
+  // the full name — the one place that never says "you".
+  screen.querySelector('.rd-row1 .person-chip')?.remove();
+  const starter = personShown(r.startedBy);
+  if (starter) pill.before(personChip(starter));
+
   // Meta: project · started · elapsed · cost · step n/m · step name.
   const meta = screen.querySelector('.rd-meta');
   meta.innerHTML = '';
@@ -22576,6 +23174,7 @@ function renderPipelineTabs() {
     // aria-label. Costs the expanded state one extra (identical) repaint on that
     // one transition and nothing else.
     tabStatusWord(r),
+    personShown(r.startedBy),
   ])]);
   if (host.dataset.tabsSig === sig) return;
   host.dataset.tabsSig = sig;
@@ -22617,6 +23216,13 @@ function renderPipelineTabs() {
 
     body.append(title, hint);
     row.append(dot, body);
+    // Who started it (shared deployments only): just the initials; space is tight.
+    const starter = personShown(r.startedBy);
+    if (starter) {
+      const ini = personIni(starter, `Started by ${starter}`);
+      ini.classList.add('child-by');
+      row.appendChild(ini);
+    }
 
     // End-of-row marker (same slot, three mutually exclusive states):
     //  - pending input  → pulsing amber "?"   (needs your answer)
@@ -23627,7 +24233,13 @@ function showView(name, param = '') {
   }
   if (name === 'stats') loadStatsView();
   if (name === 'schedules') { schedulesView.showTab(param); void withWorkspaces().then(() => schedulesView.load()); }
-  if (name === 'team-metrics') loadTeamMetricsView();
+  if (name === 'team-metrics') {
+    // #team-metrics/timeline opens the Timeline tab. Switching tabs inside the page only repaints:
+    // the records are the same, so there is nothing to fetch again.
+    tmState.tab = param === 'timeline' ? 'timeline' : 'overview';
+    if (prevView === 'team-metrics' && tmState.data) { closeTlPopover(); applyTmTab(); if (tmState.tab === 'overview') renderTeamMetrics(); }
+    else loadTeamMetricsView();
+  } else closeTlPopover();
   if (name === 'team-policy') loadTeamPolicyView(param);
   if (name === 'workspaces') {
     setWsMsg('');
@@ -24018,6 +24630,7 @@ else showView(VIEW_NAMES.includes(bootView) ? bootView : 'new', VIEW_NAMES.inclu
 refreshAllCounts();
 refreshBudget();
 startBudgetTick();
+loadWhoami();
 
 // Ask Worca mount (§10.2 seam 1): a JS-built body-level overlay — index.html is
 // untouched so ui-shell's routed-view census stays at 11. No network happens here;

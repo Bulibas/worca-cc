@@ -197,6 +197,11 @@ and durations, the clarify Q&A, agent transcripts, and logs:
   another project (or a workspace's metrics home) that already records.
 - **A Team metrics page** — project and workspace scope, spend/runs/duration/autonomy/review
   KPIs, breakdowns and a CSV export.
+- **A Timeline for planners** — work items as bars on a calendar (month → week → day), grouped
+  by work item or person: what shipped (the PR merged), what waits for review, what needs
+  attention. Merge dates come from an optional GitHub Action (`worca metrics pr-workflow`) or the
+  GitHub CLI, and the page still works without either. With the Action, pull requests made
+  outside Worca show too, so the calendar covers the whole team's delivery.
 - **`worca metrics push`** — flush pending run records from the CLI, e.g. on a headless machine.
 
 See [`docs/team-metrics.md`](docs/team-metrics.md).
@@ -286,6 +291,15 @@ or, without npm, download `docker/compose.yml`, set `WORCA_PROJECTS` in a
 for login options, git credentials, the egress allowlist, clone-in mode and
 the Windows/WSL2 notes.
 
+### Hosted, behind Cloudflare Access
+
+The same image runs as an always-on service: on Railway (or any host), reachable only through a
+Cloudflare Tunnel with Cloudflare Access in front, and worca verifying the Access token itself.
+Step by step: [`docs/deploy-railway.md`](docs/deploy-railway.md); the Cloudflare side and the
+security model: [`docs/remote-access.md`](docs/remote-access.md). Upgrades, configuration and checks of a running
+deployment: [Operate your deployment](docs/deploy-railway.md#operate-your-deployment), with the
+`tools/railway/worca-railway.mjs` tool and the `/worca-railway` skill for Claude Code.
+
 ## Quick start
 
 ### Web UI
@@ -350,6 +364,9 @@ worca --project /path/to/your/project --prompt "demo task" --mock --yes
 # flush pending team-metrics run records (headless machines with no UI server)
 worca metrics push
 
+# record PR merges for the Team metrics Timeline (adds a GitHub Action; commit and push it)
+worca metrics pr-workflow
+
 # team policy: what applies to this project, fetch the branch now, meet the setup checklist
 worca policy show
 worca policy pull
@@ -403,6 +420,8 @@ The skill starts the same deterministic orchestrator.
 - [Models](docs/models.md) — the catalog, providers (GitHub Copilot, OpenAI-compatible) and the built-in bridge
 - [Getting started](docs/getting-started.md) — the in-app checklist, welcome and spotlight guides
 - [Storage](docs/storage.md) — where state lives, project keys, migration
+- [Remote access](docs/remote-access.md) — opt-in, behind Cloudflare Access, with worca checking the token
+- [Deploy on Railway](docs/deploy-railway.md) — the container as a hosted service behind Cloudflare Access
 - [Releasing](docs/RELEASING.md) — how `@worca/app` versions are published
 - [Contributing](CONTRIBUTING.md) — developing Worca from source
 

@@ -165,20 +165,21 @@ const PILL_MORPH_OUT_MS = 800;
 const PILL_SETTLE_FALLBACK_MS = PILL_MORPH_OUT_MS + 150;
 
 export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null }) {
-  const storedPick = readStoredModel();   // hoisted declaration (defined below); null when nothing is stored
+  const homePick = browserPick();         // hoisted declaration (defined below)
   const st = {
     open: false,
     threadId: null,
     model: null,              // createThreadModel for the active thread (Task 4+)
-    picker: {
-      model: storedPick && storedPick.model ? storedPick.model : FALLBACK_PICK.model,
-      effort: storedPick ? storedPick.effort : FALLBACK_PICK.effort,
-    },
+    picker: homePick.picker,
     // D11 provenance, tracked per slot: only a MODEL the user actually picked
     // outranks the backend default. An effort-only record leaves the model slot
     // unclaimed, so a later change to ASK_LIMITS.defaultModel still reaches here.
-    pickerFromStore: !!(storedPick && storedPick.model),
-    effortFromStore: storedPick !== null,
+    pickerFromStore: homePick.pickerFromStore,
+    effortFromStore: homePick.effortFromStore,
+    // The picker shows the open thread's own last pick (its row's model/effort).
+    // It outranks the backend default like a stored pick, but it is the chat's,
+    // not the browser's: nothing sourced from a thread reaches worca-cc.ask.model.
+    pickerFromThread: false,
     catalog: null,
     // #397: the thread's project/workspace scope. pinned:false = Auto (follow the
     // page — today's behaviour). label caches the display name once resolved.
@@ -237,11 +238,28 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     } catch { /* storage unavailable */ }
     return null;                                    // no stored pick — the catalog decides (D5/D6/D11)
   }
+  /** The browser-level pick — what a new chat starts with: the stored record over the cold-start literal, with each slot's provenance. */
+  function browserPick() {
+    const stored = readStoredModel();
+    return {
+      picker: {
+        model: stored && stored.model ? stored.model : FALLBACK_PICK.model,
+        effort: stored ? stored.effort : FALLBACK_PICK.effort,
+      },
+      pickerFromStore: !!(stored && stored.model),
+      effortFromStore: stored !== null,
+    };
+  }
   function storeModel() {
     // Provenance travels with the record: writing st.picker.model when the user never
     // chose one would pin the cold-start literal (or a default they merely saw), and
-    // the backend would be authoritative exactly once per browser.
-    const rec = { model: st.pickerFromStore ? st.picker.model : null, effort: st.picker.effort };
+    // the backend would be authoritative exactly once per browser. A thread's model
+    // is not the user's browser-level choice either: an effort picked on it leaves
+    // the record's model slot as it was.
+    const model = st.pickerFromThread
+      ? (readStoredModel() || { model: null }).model
+      : (st.pickerFromStore ? st.picker.model : null);
+    const rec = { model, effort: st.picker.effort };
     try { storage.setItem('worca-cc.ask.model', JSON.stringify(rec)); } catch { /* ignore */ }
   }
   function readStoredThread() { try { return storage.getItem('worca-cc.ask.thread') || null; } catch { return null; } }
@@ -1231,15 +1249,20 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   }
 
   function applyCatalogToPicker() {
+    const list = st.catalog && Array.isArray(st.catalog.models) ? st.catalog.models : [];
+    // A thread's model the catalog no longer has (a removed user model) falls back
+    // to the browser-level pick, then the backend default. The thread is not
+    // patched: its next send stores whatever is used.
+    if (st.pickerFromThread && list.length && !catalogEntry(st.picker.model)) { restoreBrowserPick(); return; }
     const fallback = catalogDefault();
     // Each slot is decided by its own provenance: a stored MODEL outranks the backend
     // default, and a stored EFFORT survives even when the model comes from the default.
     // (effortFromStore ⊇ pickerFromStore — a stored model always carries its effort.)
+    // A thread's pick claims both slots.
     const wanted = {
-      model: st.pickerFromStore ? st.picker.model : fallback.model,
-      effort: st.effortFromStore ? st.picker.effort : fallback.effort,
+      model: st.pickerFromThread || st.pickerFromStore ? st.picker.model : fallback.model,
+      effort: st.pickerFromThread || st.effortFromStore ? st.picker.effort : fallback.effort,
     };
-    const list = st.catalog && Array.isArray(st.catalog.models) ? st.catalog.models : [];
     const wantedEntry = catalogEntry(wanted.model);
     // Unknown stored/default id -> the backend default -> the first model we do
     // have that is not a hidden built-in (#422; a hidden id is still a valid pick).
@@ -1250,9 +1273,41 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const changed = next.model !== st.picker.model || next.effort !== st.picker.effort;
     st.picker = next;
     // D11: persist ONLY a repair of a pick the user actually made. Writing the
-    // backend default here would make it authoritative exactly once, ever.
-    if (changed && st.pickerFromStore) storeModel();
+    // backend default here would make it authoritative exactly once, ever — and a
+    // thread's pick is never the browser's.
+    if (changed && st.pickerFromStore && !st.pickerFromThread) storeModel();
     updatePickerButton();
+  }
+
+  /** Back to the browser-level pick (new chat, a thread with no model of its own). */
+  function restoreBrowserPick() {
+    const home = browserPick();
+    st.picker = home.picker;
+    st.pickerFromStore = home.pickerFromStore;
+    st.effortFromStore = home.effortFromStore;
+    st.pickerFromThread = false;
+    if (st.catalog) applyCatalogToPicker();
+    else updatePickerButton();
+  }
+
+  /** A thread SWITCH shows that thread's last model/effort; a row without one gets the browser-level pick. */
+  function applyThreadPick(thread) {
+    const t = thread && typeof thread === 'object' ? thread : null;
+    if (!t || typeof t.model !== 'string' || !t.model || typeof t.effort !== 'string' || !t.effort) { restoreBrowserPick(); return; }
+    st.picker = { model: t.model, effort: t.effort };
+    st.pickerFromThread = true;
+    if (st.catalog) applyCatalogToPicker();   // effort coerced against the entry; a dropped model falls back
+    else updatePickerButton();               // the raw id shows until the catalog lands
+  }
+
+  /** Keep the pick on the open thread, so switching away and back finds it before any send. */
+  function persistThreadPick() {
+    const id = st.threadId;
+    if (!id) return;                           // a brand-new chat: the first send stores it
+    const body = JSON.stringify({ model: st.picker.model, effort: st.picker.effort });
+    Promise.resolve()
+      .then(() => fetch(`/api/ask/threads/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }))
+      .catch(() => { /* the next message stores the pick anyway */ });
   }
 
   function loadCatalog() {
@@ -1313,7 +1368,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     st.picker = { model: id, effort: coerceEffort(catalogEntry(id), st.picker.effort) };
     st.pickerFromStore = true;                      // an explicit model choice claims the slot (D11)
     st.effortFromStore = true;
+    st.pickerFromThread = false;                    // the user's own pick now, not the thread's
     storeModel();
+    persistThreadPick();
     updatePickerButton();
     closePopover({ focusTrigger: false });
     focusComposer();
@@ -1323,6 +1380,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     st.picker = { ...st.picker, effort };
     st.effortFromStore = true;                      // the effort only — the model slot is untouched (D11)
     storeModel();
+    persistThreadPick();
     updatePickerButton();
     closePopover({ focusTrigger: false });
     focusComposer();
@@ -1640,6 +1698,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     storeThread(null);
     el.title.textContent = 'Ask Worca';
     applyThreadScope(null);             // #397: a brand-new chat starts on Auto
+    restoreBrowserPick();               // …and on the browser-level pick, not the last chat's
     pruneCardEls();                     // st.model is already null — renderTranscript's keep set cannot see the old ids
     renderTranscript();
     updateMeters();
@@ -2404,6 +2463,61 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return { el: rootEl };
   }
 
+  /** The clone card (propose_clone_project): proposed → cloning → applied | failed, or declined. Every value is text. */
+  function buildCloneCard(block) {
+    const card = block.card || {};
+    const summary = card.summary || 'clone a repository';
+    if (block.state === 'declined') return { el: make('div', 'ask-card-stub', `Declined — ${summary}`) };
+    const rootEl = make('div', `ask-card ask-mcard ask-clonecard is-${block.state}`);
+    rootEl.setAttribute('data-ask-clonecard', block.state);
+    const head = make('div', 'ask-mcard-head');
+    const title = block.state === 'applied' ? 'Project cloned' : block.state === 'failed' ? 'Clone failed'
+      : block.state === 'cloning' ? 'Cloning…' : 'Proposed project';
+    head.appendChild(make('span', 'ask-mcard-title', title));
+    head.appendChild(make('span', 'ask-mcard-kind', 'Clone'));
+    rootEl.appendChild(head);
+    const body = make('div', 'ask-mcard-body');
+    const sum = make('div', 'ask-mcard-summary');
+    if (block.state === 'applied') sum.appendChild(svgIcon(WF_ICO.check, 15, 2.4));
+    sum.appendChild(make('span', null, summary));
+    body.appendChild(sum);
+    if (card.note) body.appendChild(make('div', 'ask-mcard-note', card.note));
+    const rows = [['Repository', card.url], ['Branch', card.branch || 'default branch'], ['Folder', card.dir], ['GitHub', card.github]];
+    const ul = make('ul', 'ask-mcard-changes');
+    for (const [label, value] of rows) {
+      if (!value) continue;
+      const li = make('li');
+      li.appendChild(make('span', 'ask-mcard-change-label', label));
+      const val = make('span', 'ask-mcard-change-val');
+      val.appendChild(make('span', 'ask-mcard-after', String(value)));
+      li.appendChild(val);
+      ul.appendChild(li);
+    }
+    body.appendChild(ul);
+    const result = card.result || null;
+    if (block.state === 'failed') body.appendChild(make('div', 'ask-mcard-failed', `Could not clone: ${block.error || (result && result.error) || 'unknown error'}`));
+    else if (block.state === 'applied' && result && result.project && result.project.path) {
+      body.appendChild(make('div', 'ask-mcard-detail', `Registered as ${result.project.name || card.name} at ${result.project.path}`));
+    }
+    rootEl.appendChild(body);
+    rootEl.appendChild(make('div', 'ask-card-err'));
+    if (block.state === 'proposed') {
+      const actions = make('div', 'ask-mcard-actions');
+      const btn = (cls, text, attr, icon) => {
+        const b = make('button', cls, text); b.type = 'button'; b.setAttribute(attr, '');
+        if (icon) b.prepend(svgIcon(icon, 12, 2.2));
+        return b;
+      };
+      const decline = btn('ask-card-not-now', 'Decline', 'data-ask-clone-decline');
+      decline.addEventListener('click', () => postCard(block, rootEl, { state: 'declined' }, decline));
+      const apply = btn('ask-card-start', 'Clone', 'data-ask-clone-apply', WF_ICO.save);
+      apply.addEventListener('click', () => postCard(block, rootEl, { state: 'applied' }, apply));
+      actions.append(make('span', 'ask-card-actions-spacer'), decline, apply);
+      rootEl.appendChild(actions);
+    }
+    return { el: rootEl };
+  }
+
   /** The model · effort picker (mockup §C): the panel's popover chrome, anchored under the chip. Rows are menuitems (PD28). */
   function openChipPicker(chip, nodeId, card, wf, handle) {
     const node = card.nodes && card.nodes[nodeId];
@@ -3067,7 +3181,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   function isProgressBlock(block) {
     const card = block.card || {};
     if (card.type === PROGRESS_CARD_TYPE) return true;
-    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model') return false;
+    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone') return false;
     return block.state === 'started' || (block.state === 'failed' && !!block.runId);
   }
   function buildCard(block) {
@@ -3078,13 +3192,15 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const isMetrics = !!(block.card && (block.card.type === 'metrics' || block.card.type === 'policy'));
     const isSchedule = !!(block.card && block.card.type === 'schedule');
     const isModel = !!(block.card && block.card.type === 'model');
+    const isClone = !!(block.card && block.card.type === 'clone');
     const isProgress = isProgressBlock(block);
-    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isProgress || block.state === 'proposed')) return cached.el;
+    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isProgress || block.state === 'proposed')) return cached.el;
     if (cached) disposeCardEntry(cached);
     const built = isWorkflow ? buildWorkflowCard(block, cached)
       : isMetrics ? buildMetricsCard(block)
       : isSchedule ? buildScheduleCard(block)
       : isModel ? buildModelCard(block)
+      : isClone ? buildCloneCard(block)
       : isProgress ? buildProgressCard(block)
         : { el: block.state === 'proposed' ? buildCardForm(block) : buildCardTerminal(block) };
     st.cardEls.set(block.id, { el: built.el, state: block.state, handle: built.handle || null, dispose: built.dispose || null, animate: !!built.animate, cancelAnim: null, lastW: -1 });
@@ -3586,12 +3702,16 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // A SWITCH starts a fresh ledger, so the new chat rises in. A resync or a
     // reconnect re-loads the SAME thread and must keep it: those repaint rows the
     // user is already reading, mid-turn.
-    if (st.threadId !== id) st.seenRows = new Set();
+    const switched = st.threadId !== id;
+    if (switched) st.seenRows = new Set();
     st.threadId = id;
     st.model = createThreadModel({ threadId: id });
     st.model.load(snap);
     el.title.textContent = (snap.thread && snap.thread.title) || 'Ask Worca';
     applyThreadScope(snap.thread && snap.thread.context);   // #397: restore the pin
+    // The picker follows the chat — on a SWITCH only: a resync of the same thread
+    // would otherwise clobber a pick the user just made (its PATCH may not have landed).
+    if (switched) applyThreadPick(snap.thread);
     renderTranscript();
     updateMeters();
     // P4: the count rides the snapshot loadThread ALREADY fetched — no extra GET.
@@ -3704,7 +3824,12 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
   function pushServerFrame(frame) {
     if (st.destroyed || !frame) return;
-    if (frame.type === 'ask-history-cleared') { onHistoryCleared(); return; }
+    if (frame.type === 'ask-history-cleared') {
+      // A shared deployment's clear names the threads it removed: only a tab showing one of them resets.
+      if (Array.isArray(frame.threadIds) && !frame.threadIds.includes(st.threadId)) { scheduleThreadsRefresh(); return; }
+      onHistoryCleared();
+      return;
+    }
     if (THREADS_REFRESH_FRAMES.has(frame.type)) scheduleThreadsRefresh();
     // Defence-in-depth: the model's own threadId filter is the real router — this early return only saves an apply() call and cannot be observed from tests (the model would drop the frame identically).
     if (!st.model || frame.threadId !== st.threadId) return;

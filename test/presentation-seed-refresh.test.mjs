@@ -151,7 +151,7 @@ test('a workflow the user deleted is not resurrected by a later version bump', (
   const db = new DatabaseSync(':memory:');
   migrate(db);
   db.prepare("DELETE FROM workflows WHERE id = 'wf_presentation'").run();
-  db.exec('PRAGMA user_version = 36');                 // at the seed's own version, so it will not re-fire
+  db.exec('PRAGMA user_version = 40');                 // at the seed's own version, so it will not re-fire
   migrate(db);
   assert.equal(db.prepare("SELECT id FROM workflows WHERE id = 'wf_presentation'").get(), undefined,
     'the deletion stands');
