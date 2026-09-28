@@ -74,6 +74,9 @@ export { EFFORTS };
  * (verified to resolve via `claude --model`, CLI 2.1.280); db.mjs V35 moved the
  * stored pins the same way. Opus 5 came back beside it on 2026-09-23 so both can
  * be picked; V35 is shipped and stays, so pins it already moved stay on Opus 5.5.
+ * Sonnet 5.5 (`claude-sonnet-5-5`, 1M-only, no `[1m]` twin) joined beside Sonnet 5
+ * on 2026-09-28 (verified to resolve via `claude --model`, CLI 2.1.284); nothing
+ * is renamed, and the Sonnet 5 defaults (Auto classifier, defrag, scan) stay put.
  */
 export const PREDEFINED_MODELS = [
   { id: 'claude-opus-5-5',        label: 'Opus 5.5',        efforts: ['medium', 'high', 'xhigh', 'max'] },
@@ -85,6 +88,7 @@ export const PREDEFINED_MODELS = [
   { id: 'claude-opus-4-7[1m]',    label: 'Opus 4.7 (1M)',   efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-opus-4-6',        label: 'Opus 4.6',        efforts: ['medium', 'high', 'max'] },
   { id: 'claude-opus-4-6[1m]',    label: 'Opus 4.6 (1M)',   efforts: ['medium', 'high', 'max'] },
+  { id: 'claude-sonnet-5-5',      label: 'Sonnet 5.5',      efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-sonnet-5',        label: 'Sonnet 5',        efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-sonnet-4-6',      label: 'Sonnet 4.6',      efforts: ['medium', 'high', 'max'] },
   { id: 'claude-sonnet-4-6[1m]',  label: 'Sonnet 4.6 (1M)', efforts: ['medium', 'high', 'max'] },
@@ -491,7 +495,7 @@ export function resolveModelCost(modelId, cliCostUsd, usage, costCfg = undefined
 // ── display-only list prices ──────────────────────────────────────────────────
 // USD per MILLION tokens for the built-in ids, from Anthropic's published
 // pricing (platform.claude.com/docs/en/pricing — snapshot 2026-06-24; Opus 5.5
-// added 2026-09-22). DISPLAY
+// added 2026-09-22, Sonnet 5.5 2026-09-28). DISPLAY
 // APPROXIMATION ONLY: it feeds the chat footer's live "≈" estimate while a turn
 // streams (ask/events.mjs `estimatedCostUsd`). The CLI's result.total_cost_usd,
 // re-priced by resolveModelCost, stays the ONLY figure any message row, thread

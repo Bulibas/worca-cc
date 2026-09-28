@@ -15,6 +15,10 @@ test('resolveAutoModel: env wins verbatim, then the setting (catalog only), then
   assert.equal(resolveAutoModel(MODELS.filter((m) => m.id !== 'claude-sonnet-5'), { env: {}, setting: '' }), 'claude-sonnet-4-6');
   assert.equal(resolveAutoModel([{ id: 'my-proxy' }], { env: {}, setting: '' }), 'my-proxy');
   assert.equal(resolveAutoModel([], { env: {}, setting: '' }), '');
+  assert.equal(resolveAutoModel([{ id: 'claude-sonnet-5-5' }, ...MODELS], { env: {}, setting: '' }), 'claude-sonnet-5',
+    'Sonnet 5.5 ahead of Sonnet 5 in the catalog does not take the default');
+  assert.equal(resolveAutoModel([{ id: 'claude-sonnet-5-5' }, { id: 'claude-sonnet-4-6' }], { env: {}, setting: '' }), 'claude-sonnet-5-5',
+    'without Sonnet 5, the first Sonnet wins');
 });
 
 // The settings tier: sandbox HOME (settings.json lives under HOME, not WORCA_HOME).
