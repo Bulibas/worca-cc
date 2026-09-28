@@ -36,7 +36,7 @@ import {
   deleteDiffComment, unresolvedCounts, onDiffCommentsChanged, stampSentRunId,
   peekPendingCardComments, clearPendingCardComments, DiffCommentError, DC_ID_RE,
 } from '../src/core/diff-comments.mjs';
-import { listProjects, addProject, removeProject, normalizeProjectPath, countProjects, worcaHome } from '../src/core/projects.mjs';
+import { listProjects, addProject, addProjects, removeProject, normalizeProjectPath, countProjects, worcaHome } from '../src/core/projects.mjs';
 import { renderIndexHtml, INDEX_THEME_ANCHOR } from '../src/core/index-html.mjs';
 import {
   getWorcaRoot, setWorcaRoot, setProjectsRoot, defaultRoot,
@@ -4357,6 +4357,37 @@ app.post('/api/projects', async (req, res) => {
   }
 });
 
+// POST /api/projects/bulk {projects:[{name, path}]} -> 200 {projects, results}: register several
+// folders at once (the multi-folder Add review). Each row is added or skipped on its own
+// (src/core/projects.mjs#addProjects); `results[i]` answers `projects[i]` of the request, with a
+// `reason` on a skipped row. 200 even when every row was skipped — the request itself was valid.
+const MAX_BULK_PROJECTS = 100;
+app.post('/api/projects/bulk', async (req, res) => {
+  const items = req.body && req.body.projects;
+  if (!Array.isArray(items) || !items.length) return badRequest(res, 'projects must be a non-empty array of {name, path}');
+  if (items.length > MAX_BULK_PROJECTS) return badRequest(res, `at most ${MAX_BULK_PROJECTS} projects per request`);
+  try {
+    await pinUiLevel();                        // before the first project ends "fresh install"
+    const { results, projects } = await addProjects(items);
+    const addedPaths = results.filter((r) => r.status === 'added').map((r) => r.path);
+    if (addedPaths.length) {
+      emitChanged('projects-changed', 'created');
+      // One discovery at a time: N parallel remote probes would stampede the network.
+      void (async () => {
+        for (const p of addedPaths) {
+          try {
+            await discoverProject(p, { force: true });
+            emitChanged('team-metrics-changed', 'discovered');
+          } catch { /* offline or not a git repo: discovery retries hourly */ }
+        }
+      })();
+    }
+    res.json({ projects, results });
+  } catch (err) {
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
 // POST /api/projects/clone {url, branch?, name?} -> 202 {jobId}: clone a repository into the
 // projects folder and register it (src/core/clone-project.mjs). A job, because a large clone
 // outlives a proxied request (Cloudflare closes at 100 s). GET /api/projects/clone/:id polls it;
@@ -4602,9 +4633,11 @@ registerMemoryRoutes('/api/memory/projects/:key', { family: 'projects' });
 // (global isLocalRequest middleware).
 app.post('/api/fs/pick-folder', async (req, res) => {
   try {
-    // `purpose` only picks the dialog title from a closed set (folder-dialog.mjs).
+    // `purpose` only picks the dialog title from a closed set (folder-dialog.mjs);
+    // `multiple` (strictly true) asks for a multi-select dialog where the OS has one.
     const purpose = typeof req.body?.purpose === 'string' ? req.body.purpose : undefined;
-    res.json(await pickFolderNative({ purpose }));
+    const multiple = req.body?.multiple === true;
+    res.json(await pickFolderNative({ purpose, multiple }));
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }

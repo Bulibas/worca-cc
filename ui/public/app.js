@@ -218,13 +218,17 @@ const el = {
   addProjectCancel: $('#addProjectCancel'),
   addProjectMsg: $('#addProjectMsg'),
   newProjectBrowse: $('#newProjectBrowse'),
+  newProjectBrowseMany: $('#newProjectBrowseMany'),
   folderBrowser: $('#folder-browser'),
+  folderBrowserTitle: $('#folderBrowserTitle'),
   folderBrowserClose: $('#folderBrowserClose'),
   folderUp: $('#folderUp'),
   folderHome: $('#folderHome'),
   folderCurrent: $('#folderCurrent'),
   folderList: $('#folderList'),
   folderSelect: $('#folderSelect'),
+  folderPickCount: $('#folderPickCount'),
+  folderSelectMany: $('#folderSelectMany'),
   folderMsg: $('#folderMsg'),
   title: $('#title'),
   sourceBranch: $('#sourceBranch'),
@@ -373,6 +377,7 @@ const el = {
   projAddName: $('#proj-add-name'),
   projAddPath: $('#proj-add-path'),
   projAddBrowse: $('#proj-add-browse'),
+  projAddBrowseMany: $('#proj-add-browse-many'),
   projAddSave: $('#proj-add-save'),
   projAddCancel: $('#proj-add-cancel'),
   projAddMsg: $('#proj-add-msg'),
@@ -382,6 +387,13 @@ const el = {
   projCloneUrl: $('#proj-clone-url'),
   projCloneBranch: $('#proj-clone-branch'),
   projCloneName: $('#proj-clone-name'),
+  // Add several projects (review list)
+  projectBulkModal: $('#project-bulk-modal'),
+  projBulkTitle: $('#proj-bulk-title'),
+  projBulkClose: $('#proj-bulk-close'),
+  projBulkList: $('#proj-bulk-list'),
+  projBulkMsg: $('#proj-bulk-msg'),
+  projBulkSave: $('#proj-bulk-save'),
 
   // Agent creation wizard
   agwName: $('#agw-name'),
@@ -6380,22 +6392,40 @@ el.addProjectSave.addEventListener('click', async () => {
 // --- Folder selector (Browse…): native OS dialog, in-app modal fallback ----
 let folderState = { path: '', parent: null, home: '' };
 
+// New Pipeline's inline form: one picked folder fills it (as before); several open the
+// review list — the form hides, and on close the dropdown selects the first added project
+// (the single Save's auto-select), else it falls back to the last project.
+function newPipelinePicks(paths) {
+  routePickedFolders(paths, {
+    single: applyPickedFolder,
+    many: (list) => {
+      hideAddProject();
+      openProjectBulkModal(list, {
+        onDone: ({ added }) => renderProjectOptions(added[0] || localStorage.getItem(LAST_PROJECT_KEY) || ''),
+      });
+    },
+  });
+}
+
+function browseNewProjectInWorca() {
+  return openFolderBrowser(el.newProjectPath.value.trim(), applyPickedFolder, { multiple: true, onSelectMany: newPipelinePicks });
+}
+
 el.newProjectBrowse.addEventListener('click', async () => {
   el.newProjectBrowse.disabled = true;
   setAddMsg('');
   try {
-    const res = await fetch('/api/fs/pick-folder', { method: 'POST' });
-    const data = await safeJson(res);
-    if (res.ok && data.status === 'picked' && data.path) applyPickedFolder(data.path);
-    else if (res.ok && data.status === 'canceled') { /* user dismissed the dialog */ }
-    else if (res.ok && data.status === 'busy') setAddMsg('A folder dialog is already open — finish or cancel it first.', 'err');
-    else await openFolderBrowser(el.newProjectPath.value.trim()); // unsupported / error -> in-app fallback
-  } catch {
-    await openFolderBrowser(el.newProjectPath.value.trim());
+    const data = await pickFolder('project', { multiple: true });   // never throws
+    if (data.status === 'picked' && pickedPaths(data).length) newPipelinePicks(pickedPaths(data));
+    else if (data.status === 'canceled') { /* user dismissed the dialog */ }
+    else if (data.status === 'busy') setAddMsg('A folder dialog is already open — finish or cancel it first.', 'err');
+    else await browseNewProjectInWorca();                            // unsupported / error -> in-app fallback
   } finally {
     el.newProjectBrowse.disabled = false;
   }
 });
+// Worca's own browser, straight away: multi-select where the native dialog has none (Windows).
+if (el.newProjectBrowseMany) el.newProjectBrowseMany.addEventListener('click', () => { void browseNewProjectInWorca(); });
 
 // Fill the path field; prefill an EMPTY name with the folder's basename.
 function applyPickedFolder(path) {
@@ -6409,14 +6439,38 @@ function applyPickedFolder(path) {
 // The in-app browser is shared by every Browse… button, so each opener names
 // where "Select this folder" lands. Default sink = the add-project fields.
 let folderSink = applyPickedFolder;
+// Multi mode: set only by an opener that passes { multiple: true, onSelectMany }.
+// Ticked folders (path -> name) survive navigation; every open starts empty.
+let folderManySink = null;
+const folderPicks = new Map();
 
-async function openFolderBrowser(seedPath, onSelect) {
+async function openFolderBrowser(seedPath, onSelect, { multiple = false, onSelectMany = null } = {}) {
   folderSink = onSelect || applyPickedFolder;
+  folderManySink = multiple && typeof onSelectMany === 'function' ? onSelectMany : null;
+  folderPicks.clear();
+  el.folderBrowser.classList.toggle('multi', !!folderManySink);
+  if (el.folderBrowserTitle) el.folderBrowserTitle.textContent = folderManySink ? 'Select folders' : 'Select a folder';
+  syncFolderPicks();
   el.folderBrowser.classList.remove('hidden');
   // A stale or mistyped seed path from the text field 400s; fall back to home.
   // Only the SEED gets this retry — navigation failures keep the current
   // listing (loadFolders shows the error) instead of yanking the user home.
   if (!(await loadFolders(seedPath)) && seedPath) await loadFolders('');
+}
+
+// Footer state for multi mode: the count line and "Add N selected"; hidden in single mode.
+function syncFolderPicks() {
+  if (!el.folderSelectMany) return;
+  const multi = !!folderManySink;
+  const n = folderPicks.size;
+  el.folderSelectMany.classList.toggle('hidden', !multi);
+  el.folderPickCount.classList.toggle('hidden', !multi);
+  el.folderSelectMany.disabled = n === 0;
+  el.folderSelectMany.textContent = n ? `Add ${n} selected` : 'Add selected';
+  el.folderPickCount.textContent = n === 1 ? '1 folder selected' : `${n} folders selected`;
+  // One primary action: in multi mode "Add N selected" is it, "Select this folder" steps back.
+  el.folderSelect.classList.toggle('btn-primary', !multi);
+  el.folderSelect.classList.toggle('btn-ghost', multi);
 }
 
 function closeFolderBrowser() {
@@ -6456,6 +6510,19 @@ function renderFolders(data) {
   }
   for (const d of data.dirs) {
     const li = document.createElement('li');
+    if (folderManySink) {
+      li.className = 'folder-row';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'folder-pick';
+      cb.checked = folderPicks.has(d.path);
+      cb.setAttribute('aria-label', `Select ${d.name}`);
+      cb.addEventListener('change', () => {
+        if (cb.checked) folderPicks.set(d.path, d.name); else folderPicks.delete(d.path);
+        syncFolderPicks();
+      });
+      li.appendChild(cb);
+    }
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'folder-item';
@@ -6476,6 +6543,12 @@ el.folderHome.addEventListener('click', () => loadFolders(''));
 el.folderSelect.addEventListener('click', () => {
   if (folderState.path) folderSink(folderState.path);
   closeFolderBrowser();
+});
+el.folderSelectMany.addEventListener('click', () => {
+  const sink = folderManySink;
+  const paths = [...folderPicks.keys()];
+  closeFolderBrowser();
+  if (sink && paths.length) sink(paths);
 });
 el.folderBrowserClose.addEventListener('click', closeFolderBrowser);
 // Backdrop click (the overlay itself, not the inner card) and Escape close it,
@@ -9071,16 +9144,31 @@ function basenameOf(p) {
   return String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
 }
 
-// Thin wrapper over the native picker endpoint; never throws.
-async function pickFolder(purpose = 'project') {
+// Thin wrapper over the native picker endpoint; never throws. `multiple` asks for a
+// multi-select dialog where the OS has one (the reply then also carries `paths`).
+async function pickFolder(purpose = 'project', { multiple = false } = {}) {
   try {
+    const body = multiple ? { purpose, multiple: true } : { purpose };
     const res = await fetch('/api/fs/pick-folder', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ purpose }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    return await safeJson(res); // {status:'picked',path} | {status:'canceled'} | {status:'unsupported'} | {status:'busy'}
+    return await safeJson(res); // {status:'picked',path,paths?} | {status:'canceled'} | {status:'unsupported'} | {status:'busy'}
   } catch {
     return { status: 'unsupported' };
   }
+}
+
+// Every folder a 'picked' reply names: `paths` from a multi-select dialog, else the one `path`.
+function pickedPaths(data) {
+  if (data && Array.isArray(data.paths) && data.paths.length) return data.paths.filter((p) => typeof p === 'string' && p);
+  return data && typeof data.path === 'string' && data.path ? [data.path] : [];
+}
+
+// One picked folder goes to the caller's single-folder form; several go to the review list.
+function routePickedFolders(paths, { single, many }) {
+  const list = [...new Set((paths || []).filter(Boolean))];
+  if (list.length === 1) single(list[0]);
+  else if (list.length > 1) many(list);
 }
 
 // #projects entry: refetch the registry, paint the list, then route the detail half of the hash
@@ -9941,8 +10029,11 @@ function closeProjectAddModal() {
 
 async function addProjectFlow() {
   setProjectsMsg('');
-  const data = await pickFolder();
-  if (data && data.status === 'picked' && data.path) { openProjectAddModal(data.path); return; }
+  const data = await pickFolder('project', { multiple: true });
+  if (data && data.status === 'picked') {
+    const paths = pickedPaths(data);
+    if (paths.length) { projectsViewPicks(paths); return; }   // one -> Add dialog, several -> review
+  }
   if (data && data.status === 'canceled') return;                 // respect the cancel
   if (data && data.status === 'busy') { setProjectsMsg('A folder dialog is already open — finish or cancel it first.', 'err'); return; }
   // No folder picker at all (a container or hosted worca): the repository is the way in.
@@ -9974,6 +10065,168 @@ async function saveProjectAdd() {
   } finally {
     el.projAddSave.disabled = false;
   }
+}
+
+// ---- Add several projects: the review list ------------------------------------
+// Opened with 2+ picked folders (native multi-select, or the folder browser's ticks) from the
+// Projects view or New Pipeline's inline form. `onDone({added, skipped})` runs ONCE when the
+// dialog closes — however it closes — so each entry point repaints its own surface.
+let projBulk = null;   // { rows:[{path, name, include, status:''|'added'|'skipped', reason}], addedNames, onDone, saving }
+
+function setProjBulkMsg(text, kind) {
+  if (!el.projBulkMsg) return;
+  el.projBulkMsg.textContent = text || '';
+  el.projBulkMsg.className = 'hint' + (kind ? ' ' + kind : '');
+}
+
+function openProjectBulkModal(paths, { onDone = null } = {}) {
+  const known = new Map((state.projects || []).map((p) => [p.path, p.name]));
+  const rows = [];
+  for (const path of new Set((paths || []).filter(Boolean))) {
+    const registeredAs = known.get(path);
+    rows.push({
+      path,
+      name: basenameOf(path),
+      include: !registeredAs,                           // an already-registered folder starts unticked
+      status: '',
+      reason: registeredAs ? `already registered as “${registeredAs}”` : '',
+    });
+  }
+  projBulk = { rows, addedNames: [], onDone, saving: false };
+  if (el.projBulkTitle) el.projBulkTitle.textContent = `Add ${rows.length} projects`;
+  setProjBulkMsg('');
+  renderProjectBulkRows();
+  el.projectBulkModal.classList.remove('hidden');
+  const first = el.projBulkList.querySelector('.pb-name:not(:disabled)');
+  if (first) first.focus();
+}
+
+// Rows that the next Add sends: ticked and not added yet.
+function projBulkPending() {
+  return projBulk ? projBulk.rows.filter((r) => r.include && r.status !== 'added') : [];
+}
+
+function syncProjBulkSave() {
+  const n = projBulkPending().length;
+  el.projBulkSave.disabled = n === 0 || !!(projBulk && projBulk.saving);
+  el.projBulkSave.textContent = n === 1 ? 'Add 1 project' : `Add ${n} projects`;
+}
+
+function renderProjectBulkRows() {
+  el.projBulkList.textContent = '';
+  if (!projBulk) return;
+  for (const row of projBulk.rows) {
+    const added = row.status === 'added';
+    const li = document.createElement('li');
+    li.className = 'pb-row' + (added ? ' added' : '') + (row.status === 'skipped' ? ' skipped' : '');
+    li.dataset.path = row.path;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'pb-include';
+    cb.checked = row.include && !added;
+    cb.disabled = added;
+    cb.setAttribute('aria-label', `Add ${basenameOf(row.path)}`);
+    cb.addEventListener('change', () => { row.include = cb.checked; syncProjBulkSave(); });
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.className = 'input pb-name';
+    name.spellcheck = false;
+    name.value = row.name;
+    name.disabled = added;
+    name.setAttribute('aria-label', `Project name for ${row.path}`);
+    name.addEventListener('input', () => { row.name = name.value; });
+    name.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void saveProjectBulk(); } });
+    const path = document.createElement('code');
+    path.className = 'pb-path';
+    path.textContent = row.path;
+    path.title = row.path;
+    const status = document.createElement('small');
+    status.className = 'pb-status' + (row.status === 'skipped' ? ' err' : added ? ' ok' : '');
+    status.textContent = added ? 'Added' : row.reason;
+    li.append(cb, name, path, status);
+    el.projBulkList.appendChild(li);
+  }
+  syncProjBulkSave();
+}
+
+async function saveProjectBulk() {
+  if (!projBulk || projBulk.saving) return;
+  const pending = projBulkPending();
+  if (!pending.length) return setProjBulkMsg('Tick at least one folder to add.', 'err');
+  projBulk.saving = true;
+  syncProjBulkSave();
+  setProjBulkMsg(`Adding ${pending.length} …`);
+  const bulk = projBulk;
+  try {
+    const res = await fetch('/api/projects/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projects: pending.map((r) => ({ name: r.name.trim(), path: r.path })) }),
+    });
+    const data = await safeJson(res);
+    if (!res.ok) { setProjBulkMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
+    if (Array.isArray(data.projects)) state.projects = data.projects;
+    let addedNow = 0;
+    for (const r of Array.isArray(data.results) ? data.results : []) {
+      const row = pending[r.index];                     // results answer the request BY INDEX
+      if (!row) continue;
+      if (r.status === 'added') {
+        row.status = 'added'; row.reason = ''; row.name = r.name || row.name;
+        bulk.addedNames.push(row.name);
+        addedNow += 1;
+      } else {
+        row.status = 'skipped'; row.reason = r.reason || 'not added';
+      }
+    }
+    if (projBulk !== bulk) return;                      // closed while the request was in flight
+    const skipped = bulk.rows.filter((r) => r.status === 'skipped');
+    if (!skipped.length) { closeProjectBulkModal(); return; }
+    renderProjectBulkRows();
+    setProjBulkMsg(`${addedNow ? `Added ${addedNow}. ` : ''}${skipped.length} could not be added — see the reason on each row. Rename and press Add again, or close.`, 'err');
+  } catch (e) {
+    setProjBulkMsg(e.message, 'err');
+  } finally {
+    bulk.saving = false;
+    if (projBulk === bulk) syncProjBulkSave();
+  }
+}
+
+function closeProjectBulkModal() {
+  if (!projBulk) return;
+  const { onDone, addedNames, rows } = projBulk;
+  projBulk = null;
+  el.projectBulkModal.classList.add('hidden');
+  el.projBulkList.textContent = '';
+  if (onDone) onDone({ added: addedNames, skipped: rows.filter((r) => r.status === 'skipped') });
+}
+
+// "Added 3 projects. Skipped 1: beta (a project named "beta" already exists)."
+function bulkAddSummary(added, skipped) {
+  const parts = [];
+  if (added.length === 1) parts.push(`Added “${added[0]}”.`);
+  else if (added.length > 1) parts.push(`Added ${added.length} projects.`);
+  if (skipped.length) {
+    parts.push(`Skipped ${skipped.length}: ${skipped.map((r) => `${r.name.trim() || basenameOf(r.path)} (${r.reason})`).join('; ')}.`);
+  }
+  return parts.join(' ');
+}
+
+// Projects view: repaint the list + New Pipeline dropdown, and say what happened.
+function onProjectsBulkDone({ added, skipped }) {
+  if (added.length) {
+    renderProjectsList();
+    renderProjectOptions(localStorage.getItem(LAST_PROJECT_KEY) || ''); // keep New-pipeline dropdown in sync
+  }
+  const text = bulkAddSummary(added, skipped);
+  if (text) setProjectsMsg(text, skipped.length ? 'warn' : 'ok');
+}
+
+// The Projects view's routing for picked folders: one -> the single Add dialog, several -> review.
+function projectsViewPicks(paths, { fill } = {}) {
+  routePickedFolders(paths, {
+    single: fill || ((p) => openProjectAddModal(p)),
+    many: (list) => { closeProjectAddModal(); openProjectBulkModal(list, { onDone: onProjectsBulkDone }); },
+  });
 }
 
 // ---- Event wiring (guarded so non-UI test imports don't throw) --------------
@@ -10041,23 +10294,28 @@ if (el.projectAddBtn) el.projectAddBtn.addEventListener('click', addProjectFlow)
 if (el.projAddSave) {
   el.projAddSave.addEventListener('click', saveProjectAdd);
   el.projAddCancel.addEventListener('click', closeProjectAddModal);
+  const fillProjAdd = (p) => {
+    el.projAddPath.value = p;
+    if (!el.projAddName.value.trim()) el.projAddName.value = basenameOf(p);
+    setProjAddMsg('');
+  };
+  const browseProjAddInWorca = () => openFolderBrowser(el.projAddPath.value.trim(), fillProjAdd, {
+    multiple: true, onSelectMany: (paths) => projectsViewPicks(paths, { fill: fillProjAdd }),
+  });
   el.projAddBrowse.addEventListener('click', async () => {
     el.projAddBrowse.disabled = true;
     try {
-      const fill = (p) => {
-        el.projAddPath.value = p;
-        if (!el.projAddName.value.trim()) el.projAddName.value = basenameOf(p);
-        setProjAddMsg('');
-      };
-      const data = await pickFolder();
-      if (data && data.status === 'picked' && data.path) fill(data.path);
+      const data = await pickFolder('project', { multiple: true });
+      if (data && data.status === 'picked' && pickedPaths(data).length) projectsViewPicks(pickedPaths(data), { fill: fillProjAdd });
       else if (data && data.status === 'canceled') { /* user dismissed the dialog */ }
       else if (data && data.status === 'busy') setProjAddMsg('A folder dialog is already open — finish or cancel it first.', 'err');
-      else await openFolderBrowser(el.projAddPath.value.trim(), fill); // unsupported / error -> in-app browser
+      else await browseProjAddInWorca();                          // unsupported / error -> in-app browser
     } finally {
       el.projAddBrowse.disabled = false;
     }
   });
+  // Worca's own browser, straight away: multi-select where the native dialog has none (Windows).
+  if (el.projAddBrowseMany) el.projAddBrowseMany.addEventListener('click', () => { void browseProjAddInWorca(); });
   if (el.projAddTabs) {
     el.projAddTabs.addEventListener('click', (e) => {
       const tab = e.target.closest && e.target.closest('.md-tab');
@@ -10073,12 +10331,21 @@ if (el.projAddSave) {
     if (e.key === 'Escape' && el.projectAddModal && !el.projectAddModal.classList.contains('hidden')) closeProjectAddModal();
   });
 }
+if (el.projectBulkModal) {
+  el.projBulkSave.addEventListener('click', () => { void saveProjectBulk(); });
+  el.projBulkClose.addEventListener('click', closeProjectBulkModal);
+  el.projectBulkModal.addEventListener('click', (e) => { if (e.target === el.projectBulkModal) closeProjectBulkModal(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !el.projectBulkModal.classList.contains('hidden')) closeProjectBulkModal();
+  });
+}
 
 // Test hook (mirrors window.__agents at app.js:4219).
 if (typeof window !== 'undefined') {
   window.__projects = {
     loadProjectsView, renderProjectsList, buildProjectRow, deleteProject,
     confirmModal, addProjectFlow, openProjectAddModal, saveProjectAdd,
+    openProjectBulkModal, saveProjectBulk, closeProjectBulkModal, openFolderBrowser,
   };
 }
 
@@ -20644,6 +20911,7 @@ document.addEventListener('keydown', (e) => {
   if (el.confirmModal && !el.confirmModal.classList.contains('hidden')) return;
   if (el.pluginModal && !el.pluginModal.classList.contains('hidden')) return;
   if (el.projectAddModal && !el.projectAddModal.classList.contains('hidden')) return;
+  if (el.projectBulkModal && !el.projectBulkModal.classList.contains('hidden')) return;
   if (e.target && typeof e.target.closest === 'function' && e.target.closest('.mem-editor')) return;
   void leaveProjDetail();
 }, true);
