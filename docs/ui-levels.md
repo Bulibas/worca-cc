@@ -153,7 +153,9 @@ be skipped by forgetting it.
 | "Scheduled" group (runs due within 24 h) | S — it only exists when something is scheduled |
 | Needs-input pill and banner; clarify questions; Auto proposal and Accept | S |
 | Recovery prompt, cycle gate, cost-pause banner, retained-work banner | all |
-| Workflow graph with status colours, gate pip, End result; Overview tab | S |
+| Run page glance: status line, step trail, Now / Earlier rows, result sheet, Details mini bar | S |
+| Workflow graph with status colours, gate pip, End result; Workflow, Overview and Q&A tabs | S |
+| Diff tab (live worktree while running, the final patch after) | A |
 | Density toggle, live log pane, log search / copy / auto-scroll | A |
 | Branch chip, progress n/m, model · effort pill, graph zoom cluster | A |
 | Auto proposal Revise; Artifacts tab | A |

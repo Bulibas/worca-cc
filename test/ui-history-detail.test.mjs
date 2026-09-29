@@ -752,7 +752,7 @@ test('tabs render with badges; default = Diff when results exist, else Overview'
 
   assert.deepEqual(
     tabsOf(doc).map((b) => b.dataset.sec),
-    ['diff', 'overview', 'agents', 'clarify', 'logs'],
+    ['workflow', 'overview', 'clarify', 'diff', 'logs', 'agents'],   // one order on both run pages, grouped by level
   );
   // filesNew(1) + filesChanged(13). NEVER + filesDeleted: results.mjs:32 buckets
   // 'D' rows into changedFiles (NEW_STATUS is {A,C}) while :29 ALSO counts them in
@@ -772,7 +772,7 @@ test('tabs render with badges; default = Diff when results exist, else Overview'
   const bare = await bootDetail();
   await openDetail(bare);
   const bareDoc = bare.window.document;
-  assert.deepEqual(tabsOf(bareDoc).map((b) => b.dataset.sec), ['diff', 'overview', 'agents']);
+  assert.deepEqual(tabsOf(bareDoc).map((b) => b.dataset.sec), ['workflow', 'overview', 'diff', 'agents']);
   assert.equal(secOf(bareDoc, 'clarify'), null, 'no Q&A -> no Clarify section either');
   assert.equal(secOf(bareDoc, 'logs'), null, 'no live-log artifact -> no Logs section either');
   assert.ok(bareDoc.querySelector('#hist-detail .hd-tab[data-sec="overview"]').classList.contains('active'));
@@ -887,7 +887,7 @@ test('tabs are wired for a11y', async () => {
 
   assert.equal(doc.querySelector('#hist-detail .hd-tabs').getAttribute('role'), 'tablist');
   const tabs = tabsOf(doc);
-  assert.equal(tabs.length, 5);
+  assert.equal(tabs.length, 6);
   for (const btn of tabs) {
     const key = btn.dataset.sec;
     const sec = secOf(doc, key);
@@ -2714,4 +2714,90 @@ test('Clarify: a run with ONLY legacy rows is byte-for-byte what it was', async 
   const sec = await openTab(ctx, 'clarify');
   assert.equal(sec.querySelectorAll('.hd-cl-form').length, 0);
   assert.equal(sec.querySelector('.hd-cl-a').textContent, 'ANS(none)');
+});
+
+// --- the glance (same two modes as the Running page) ------------------------
+
+const G_MANIFEST = {
+  version: 2, template: { id: 'wf', name: 'WF' },
+  graph: {
+    nodes: [
+      { id: 'n_plan', kind: 'agent', key: 'planner', label: 'Plan', color: 'blue', x: 0, y: 0, ports: { inputs: [], outputs: [], await: true } },
+      { id: 'n_impl', kind: 'agent', key: 'implementer', label: 'Implement', color: 'blue', x: 300, y: 0, ports: { inputs: [], outputs: [], await: true } },
+    ],
+    wires: [],
+  },
+};
+const gRow = (node, ord, m0, m1) => ({ key: `x:${node}:${ord}`, executionId: `x:${node}:${ord}`, nodeId: node, ordinal: ord, cycle: ord,
+  kind: 'cycle', status: 'done', startedAt: `2026-08-17T20:0${m0}:00Z`, endedAt: `2026-08-17T20:0${m1}:00Z`, activeMs: 60000, costUsd: 0.1 });
+const GLANCE_DETAIL = {
+  ...DETAIL,
+  state: { ...DETAIL.state, stepper: G_MANIFEST, steps: [gRow('n_plan', 1, 0, 1), gRow('n_impl', 1, 1, 2), gRow('n_impl', 2, 2, 3)] },
+  results: { ...RESULTS, keyThingsToCheck: [{ id: 'c1', severity: 'major', title: 'Uploads fall back to IP' }] },
+};
+
+test('History opens on the glance: status line, trail, result sheet; Details is a route', async () => {
+  const ctx = await bootDetail({ detail: GLANCE_DETAIL });
+  await openDetail(ctx);
+  await settle(ctx.window, 6);
+  const doc = ctx.window.document;
+  const hd = doc.querySelector('#hist-detail .hd');
+  assert.equal(hd.dataset.mode, 'glance');
+  assert.equal(hd.querySelector('.hd-glance').hidden, false);
+  assert.equal(hd.querySelector('.hd-details').hidden, true);
+  assert.equal(hd.querySelector('.rd-now-title').textContent, 'Ready to review');
+  assert.equal(hd.querySelector('.rd-now-sub').textContent, '1 thing to check before you merge');
+  assert.equal(hd.querySelectorAll('.rd-trail-btn .rg-td').length, 3, 'one dot per execution (Implement looped)');
+  assert.equal(hd.querySelector('.hd-bar-word').textContent, 'Done');
+  assert.equal(hd.querySelectorAll('.hd-result .rd-stats > div').length, 3);
+  assert.match(hd.querySelector('.hd-result .issues').textContent, /Uploads fall back to IP/);
+  assert.equal(hd.querySelector('.rd-nowlist').textContent, '', 'no step list: the trail shows what ran');
+  const act = [...hd.querySelectorAll('.hd-result .rd-sgroup')].find((g) => g.querySelector('.rd-slabel').textContent === 'Activity');
+  assert.deepEqual([...act.querySelectorAll('[data-rd-tab]')].map((b) => b.querySelector('.rd-srow-tx').firstChild.textContent), ['Overview', 'Diff'], 'named like the tabs, in tab order (no log on this run)');
+  assert.ok([...act.querySelectorAll('[data-rd-tab]')].every((b) => b.querySelector('svg.rd-srow-ico')), 'each row carries its tab icon');
+  assert.doesNotMatch(hd.querySelector('.hd-glance').textContent, /\b\d+ of \d+\b/);
+
+  // A result row deep-links into Details › that tab; the graph moved into Workflow.
+  hd.querySelector('.hd-result [data-rd-tab="overview"]').dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
+  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+  await settle(ctx.window, 4);
+  assert.equal(ctx.window.location.hash, `#${detailHash}/details/overview`);
+  assert.equal(hd.dataset.mode, 'details');
+  assert.ok(doc.querySelector('#hist-detail .hd-tab[data-sec="overview"]').classList.contains('active'));
+  doc.querySelector('#hist-detail .hd-tab[data-sec="workflow"]').dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
+  assert.ok(secOf(doc, 'workflow').querySelector('.hd-graph .run-flow'), 'the graph lives in Workflow');
+  assert.equal(ctx.window.location.hash, `#${detailHash}/details/workflow`, 'a tab click rewrites the address');
+
+  // Escape: Details -> glance -> the list.
+  doc.dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+  await settle(ctx.window, 4);
+  assert.equal(ctx.window.location.hash, `#${detailHash}`);
+  assert.equal(hd.dataset.mode, 'glance');
+});
+
+test('History glance mirrors the header actions: Resume on a paused run clicks the real control', async () => {
+  const ctx = await bootDetail({ detail: PAUSED_DETAIL, rows: [{ ...ROW, status: 'paused' }] });
+  await openDetail(ctx);
+  await settle(ctx.window, 6);
+  const hd = ctx.window.document.querySelector('#hist-detail .hd');
+  assert.equal(hd.querySelector('.rd-now-title').textContent, 'Paused');
+  const real = hd.querySelector('.hd-resume');
+  const mirror = hd.querySelector('.hd-result .hd-g-resume');
+  assert.equal(!!mirror, !real.hidden, 'the glance offers Resume exactly when the header does');
+  if (mirror) {
+    let clicked = 0;
+    real.addEventListener('click', () => { clicked += 1; });
+    mirror.dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
+    assert.equal(clicked, 1);
+  }
+});
+
+test('a deep link to a History Details tab opens it once the run loads', async () => {
+  const ctx = await bootDetail({ detail: GLANCE_DETAIL });
+  go(ctx.window, `${detailHash}/details/agents`);
+  await settle(ctx.window, 8);
+  const doc = ctx.window.document;
+  assert.equal(doc.querySelector('#hist-detail .hd').dataset.mode, 'details');
+  assert.ok(doc.querySelector('#hist-detail .hd-tab[data-sec="agents"]').classList.contains('active'));
 });

@@ -146,6 +146,37 @@ export async function diffPatch(projectDir, base, head, pathspecs = []) {
   return r.ok ? r.stdout : '';
 }
 
+/**
+ * Files git does not track yet and does not ignore (`ls-files --others --exclude-standard`).
+ * A LIVE run has not staged anything with `add -N`, so `git diff <base>` cannot see a file an
+ * agent created; the live diff lists these separately. Read-only: never touches the index.
+ * @returns {Promise<string[]>}
+ */
+export async function untrackedFiles(projectDir, pathspecs = []) {
+  if (!projectDir) return [];
+  const args = ['-c', 'core.quotePath=false', 'ls-files', '--others', '--exclude-standard', '-z', '--', '.', ...pathspecs];
+  const r = await _run('git', args, { cwd: projectDir, timeout: DIFF_TIMEOUT_MS });
+  if (!r.ok) return [];
+  return r.stdout.split('\0').filter(Boolean);
+}
+
+/**
+ * The creation patch of one untracked file (`git diff --no-index /dev/null <path>`), with the
+ * same pinned header shape as diffPatch. `--no-index` exits 1 when the files differ, which is
+ * the success case here, so the exit code is ignored and stdout decides.
+ * @returns {Promise<{patch:string, added:number, binary:boolean}>}
+ */
+export async function untrackedPatch(projectDir, relPath) {
+  const args = ['-c', 'core.quotePath=false', 'diff', '--no-index', '--no-color', '--no-ext-diff',
+    '--src-prefix=a/', '--dst-prefix=b/', '--', '/dev/null', relPath];
+  const r = await _run('git', args, { cwd: projectDir, timeout: DIFF_TIMEOUT_MS });
+  const patch = r.code === 0 || r.code === 1 ? r.stdout : '';
+  const binary = /^Binary files /m.test(patch);
+  let added = 0;
+  if (!binary) for (const line of patch.split('\n')) if (line.startsWith('+') && !line.startsWith('+++')) added += 1;
+  return { patch, added, binary };
+}
+
 /** True iff `branch` exists locally in `projectDir`. False on a missing repo/branch. */
 export async function branchExists(projectDir, branch) {
   if (!projectDir || !branch) return false;

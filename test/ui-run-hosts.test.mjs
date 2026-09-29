@@ -974,11 +974,13 @@ test('applyRunLogFilter assigns onto r.logFilter and repaints; focusLogExecution
   // The Live log is the detail's FIRST tab (C1): park the screen on Overview so
   // the activation is observable.
   np.detailTabsOf(screen).activate('overview');
-  const sec = screen.querySelector('.rd-sec-logs');
+  const sec = screen.querySelector('.rd-sec[data-sec="logs"]');
   assert.equal(sec.hidden, true, 'the Logs tab is hidden behind Overview');
   np.focusLogExecution({ run: r, runId: 'r1' }, 'x:n_a:1', 'n_a');
   assert.equal(sec.hidden, false, 'a footer-row click activates the Logs tab');
   assert.equal(screen.querySelector('.rd-tab[data-sec="logs"]').classList.contains('active'), true);
+  assert.equal(screen.dataset.mode, 'details', 'and opens Details when the glance was showing');
+  assert.equal(screen.querySelector('.rd-details').hidden, false);
   assert.equal(r.logFilter.execution, 'x:n_a:1');
   window.location.hash = '';
 });
@@ -1075,7 +1077,7 @@ test('the card meta shows `n/m` and the compact chip `n/m done` on a v2 run; a v
   np.setRunDensity('detailed');
 });
 
-test('the detail header .rd-step reads `n/m done · <who>` on a v2 run (C16: only the meta list changes)', async () => {
+test('the detail header .rd-step names what runs on a v2 run, with no step count', async () => {
   const window = await bootApp();
   const np = window.__np;
   const screen = window.document.querySelector('#run-detail-tpl').content.firstElementChild.cloneNode(true);
@@ -1083,7 +1085,7 @@ test('the detail header .rd-step reads `n/m done · <who>` on a v2 run (C16: onl
   const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
   np.onState(r, { status: 'running', stepper: MANIFEST, active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }], steps: [] });
   np.paintRdHeader(screen, r);
-  assert.equal(screen.querySelector('.rd-meta .rd-step').textContent, '0/1 done · Planner');
+  assert.equal(screen.querySelector('.rd-meta .rd-step').textContent, 'Planner');
   assert.ok(screen.querySelector('.rd-pause'), 'the single toggling control stays');
   assert.equal(screen.querySelector('.rd-resume'), null, 'C6: there is no .rd-resume');
   const v1 = np.makeRun({ runId: 'r2', title: 't', projectDir: '/p', status: 'running' });

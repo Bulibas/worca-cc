@@ -238,7 +238,7 @@ async function runDetail(extra, whoami = SHARED) {
 
 test('live run detail: a person chip beside the status pill with the full name, never "you"', async () => {
   const ctx = await runDetail({ startedBy: 'ada.lovelace@example.com' });
-  const chip = ctx.doc.querySelector('.rd-row1 .person-chip');
+  const chip = ctx.doc.querySelector('.rd-bar .person-chip');
   assert.ok(chip);
   assert.equal(chip.nextElementSibling.classList.contains('rd-status'), true, 'right beside the status pill');
   assert.equal(chip.querySelector('.person-ini').textContent, 'AL');
@@ -247,9 +247,9 @@ test('live run detail: a person chip beside the status pill with the full name, 
   assert.doesNotMatch(ctx.doc.querySelector('.rd-meta').textContent, /\bby\b/, 'the meta line no longer repeats it');
 
   const own = await runDetail({ startedBy: ME });
-  assert.equal(own.doc.querySelector('.rd-row1 .person-chip-name').textContent, ME, 'the full name, even for the viewer');
-  assert.equal((await runDetail({ startedBy: 'local' })).doc.querySelector('.rd-row1 .person-chip'), null);
-  assert.equal((await runDetail({ startedBy: 'ada@example.com' }, SOLO)).doc.querySelector('.rd-row1 .person-chip'), null);
+  assert.equal(own.doc.querySelector('.rd-bar .person-chip-name').textContent, ME, 'the full name, even for the viewer');
+  assert.equal((await runDetail({ startedBy: 'local' })).doc.querySelector('.rd-bar .person-chip'), null);
+  assert.equal((await runDetail({ startedBy: 'ada@example.com' }, SOLO)).doc.querySelector('.rd-bar .person-chip'), null);
 });
 
 test('run detail banner: "Paused by <name>" / "Paused by you" / "Stopped by <name>" when shared; plain otherwise', async () => {

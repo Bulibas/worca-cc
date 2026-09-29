@@ -3387,6 +3387,31 @@ function resolveRunScope(req, res) {
   return { workspaceId, projectKey: projectKey_, projectDir, key };
 }
 
+// GET /api/runs/:id/live-diff -> { results, patch, untrackedCapped, at } for a run that is
+// still in flight: its worktree(s) against the pre-run checkpoint, computed on demand by the
+// harness (run-harness.mjs#liveDiff, read-only). `:id` is the runs-Map UUID or the pipeline
+// id (liveRunEntry). 404 once the entry is gone (a finished run reads its persisted
+// diff through /api/history/:key/:id/diff) or before setup made a worktree. A short
+// per-entry cache keeps a polling client from spawning git on every tick.
+const LIVE_DIFF_TTL_MS = 3000;
+app.get('/api/runs/:id/live-diff', async (req, res) => {
+  const entry = liveRunEntry(req.params.id);
+  if (!entry || !entry.orch || typeof entry.orch.liveDiff !== 'function') {
+    return res.status(404).json({ error: 'run not live' });
+  }
+  try {
+    const now = Date.now();
+    const cached = entry._liveDiff;
+    if (cached && now - cached.at < LIVE_DIFF_TTL_MS) return res.json(cached);
+    const out = await entry.orch.liveDiff();
+    if (!out) return res.status(404).json({ error: 'no worktree yet' });
+    entry._liveDiff = { ...out, at: now };
+    res.json(entry._liveDiff);
+  } catch (err) {
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
 // Download the durable done-path diff as an alternate recovery route for a
 // retained worktree. The filename is fixed; callers cannot supply a path.
 app.get('/api/runs/:id/recovery-patch', async (req, res) => {

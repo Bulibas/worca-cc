@@ -1230,8 +1230,6 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hist-head .h-meta b{display:block;font-weight:600;font-size:14.5px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .hist-head .hash{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);}
-.hist-head .h-meta b{cursor:pointer;}
-.hist-head .h-meta b:hover{text-decoration:underline;}
 .retained-banner{margin:0 0 18px;padding:16px 18px;border:1.5px solid var(--amber);
   border-radius:var(--r-card);background:var(--amber-bg);color:var(--amber-ink);font-size:12.5px;line-height:1.55;}
 .retained-banner[hidden]{display:none;}
@@ -3131,6 +3129,9 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
   display:flex;flex-direction:column;gap:2px;padding:6px;background:var(--panel);
   border:1px solid var(--line-2);border-radius:var(--r-card);box-shadow:var(--shadow-menu);}
 .hd-menu[hidden]{display:none;}
+/* The menu drops over the sticky .hd-tabs (same z-index, later in the DOM): lift the
+   header above them only while it is open, so scrolled tabs still cover the header. */
+.hd-header:has(.hd-menu:not([hidden])){position:relative;z-index:6;}
 /* Both items shed their pill dressing in here and become full-width rows. Higher
    specificity than the standalone rules above, which still hold nowhere else. */
 .hd-menu .hd-archive,.hd-menu .hd-report{width:100%;justify-content:flex-start;gap:10px;
@@ -3498,6 +3499,15 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .hd-ov-chip.warn,.hd-ov-chip.st-paused{background:var(--amber-bg);color:var(--amber-ink);}
 .hd-ov-chip.st-stopped,.hd-ov-chip.st-error{background:var(--red-bg);color:var(--red-ink);}
 .hd-ov-grid,.pd-ov-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px;}
+/* The worktree: one full-width line (label · state · shortened copyable path), spanning
+   the stat grid on the Running Overview and sitting under it on History's. */
+.hd-ov-wt{grid-column:1/-1;display:flex;align-items:center;gap:12px;min-width:0;padding:12px 20px;
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);}
+.hd-ov-wt .hd-ov-label{margin:0;}
+.hd-ov-wt-state{font:600 13px var(--mono);color:var(--ink);white-space:nowrap;}
+.hd-ov-wt-note{font-size:13px;color:var(--ink-2);min-width:0;}
+.hd-ov-wt-path{margin-left:auto;max-width:60%;font-weight:500;}
+@media (max-width:640px){ .hd-ov-wt{flex-wrap:wrap;} .hd-ov-wt-path{margin-left:0;max-width:100%;} }
 .hd-ov-card,.pd-ov-card{padding:20px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);}
 /* Agent memory (agent-memory-design.md §6): what this run wrote into worca's memory. */
 .hd-ov-mem{padding:16px 20px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);display:flex;flex-direction:column;gap:8px;}
@@ -3592,7 +3602,9 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hd-cl-a{margin-top:12px;color:var(--ink-2);}
 .hd-cl-q > span:last-child{font:600 13.5px/1.6 var(--sans);}
 .hd-cl-a > span:last-child{font:400 13.5px/1.7 var(--sans);}
-.hd-cl-chip{flex:0 0 auto;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:600;}
+/* One letter (Q / A) in a fixed square, so the question and answer rows line up. */
+.hd-cl-chip{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;
+  border-radius:7px;font-size:12px;font-weight:700;}
 .hd-cl-chip.ask{background:var(--field);color:var(--ink-2);}
 .hd-cl-chip.ans{background:var(--green-bg);color:var(--green-ink);}
 /* `.hint` (:283) ships `margin-top:7px`; the shorthand replaces it outright so the
@@ -3954,6 +3966,155 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
   .rd-status .pdot,.rd-status.parked .pdot{animation:none;}
 }
 
+/* ---------- Running detail: bar, glance and Details modes ---------- */
+/* One screen, two modes (`.rd[data-mode]`): the glance (status line, trail, sheet)
+   and Details (header card, tabs, mini bar). The bar is shared and sticky. Every
+   control on it is one height so the row reads as one strip. */
+.rd-bar,.hd-bar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;
+  padding:12px 32px;background:var(--bg);border-bottom:1px solid var(--line);}
+.rd-bar-mid{flex:1 1 auto;display:flex;justify-content:center;align-items:center;gap:8px;min-width:0;}
+/* The run's name. Details has it as its header's title, so the bar leaves it blank there. */
+.rd-bar-title{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font:600 14px var(--sans);color:var(--ink);}
+.rd[data-mode="details"] .rd-bar-title,.hd[data-mode="details"] .rd-bar-title{visibility:hidden;}
+.rd-bar-end{display:flex;align-items:center;gap:8px;}
+.rd-bar .rd-back,.rd-bar .rd-to-run,.hd-bar .hd-back,.hd-bar .hd-to-run,.rd-bar .rd-pause,.rd-bar .rd-stop{height:36px;box-sizing:border-box;}
+.rd-to-run,.hd-to-run{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;}
+.rd-to-run.ask{background:var(--panel);border-color:var(--amber);color:var(--amber-ink);}   /* a question waits on the glance */
+.rd-back[hidden],.hd-bar .hd-back[hidden],.hd-to-run[hidden],.rd-to-run[hidden]{display:none;}
+.rd-to-run:focus-visible,.hd-to-run:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.rd > .rd-error{margin:12px 32px 0;}
+.rd-glance[hidden],.rd-details[hidden]{display:none;}
+
+.rd-glance{max-width:640px;margin:0 auto;padding:28px 32px var(--ask-dock-clearance);display:flex;flex-direction:column;gap:22px;}
+.rd-now{display:flex;flex-direction:column;gap:12px;}
+.rd-now-top{display:flex;align-items:center;gap:16px;min-width:0;}
+.rd-orb{flex:none;display:flex;}
+.rd-now-text{min-width:0;}
+.rd-now-title{margin:0;font:700 30px/1.15 var(--sans);letter-spacing:-.02em;overflow-wrap:anywhere;}
+.rd-now-sub{margin:4px 0 0;color:var(--ink-2);font-size:14.5px;line-height:1.45;overflow-wrap:anywhere;}
+
+/* The status glyph (run-glance.mjs renderOrb): colour is the state. */
+.rg-orb-bg{fill:var(--blue-bg);}
+.rg-orb-core{fill:var(--blue);transform-box:fill-box;transform-origin:center;animation:rg-breathe 2.4s ease-in-out infinite;}
+.rg-orb-start .rg-orb-bg{fill:var(--peach-bg);}
+.rg-orb-start .rg-orb-core{fill:var(--peach);}
+.rg-orb-ask .rg-orb-bg{fill:var(--amber-bg);}
+.rg-orb-ask .rg-orb-mark{stroke:var(--amber-ink);stroke-width:3.2;stroke-linecap:round;stroke-linejoin:round;}
+.rg-orb-dot{fill:var(--amber-ink);}
+.rg-orb-paused .rg-orb-bg{fill:var(--amber-bg);}
+.rg-orb-fill{fill:var(--amber-ink);}
+.rg-orb-done .rg-orb-bg{fill:var(--green-bg);}
+.rg-orb-done .rg-orb-mark{stroke:var(--green-ink);stroke-width:3.2;stroke-linecap:round;stroke-linejoin:round;}
+/* A finished run: one glyph per headline. Colour answers "is this mine to deal with?":
+   green good to go, amber wants you, blue with someone else, violet shipped, grey nothing to do. */
+.rg-orb-line{stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round;}
+.rg-orb-ship .rg-orb-bg{fill:var(--green-bg);}
+.rg-orb-ship .rg-orb-line{stroke:var(--green-ink);}
+.rg-orb-review .rg-orb-bg{fill:var(--amber-bg);}
+.rg-orb-review .rg-orb-line{stroke:var(--amber-ink);stroke-width:3;}
+.rg-orb-pr-open .rg-orb-bg{fill:var(--blue-bg);}
+.rg-orb-pr-open .rg-orb-line{stroke:var(--blue-ink-strong);}
+.rg-orb-merged .rg-orb-bg{fill:var(--violet-bg);}
+.rg-orb-merged .rg-orb-line{stroke:var(--violet-ink);}
+.rg-orb-pr-closed .rg-orb-bg,.rg-orb-finished .rg-orb-bg{fill:var(--field);}
+.rg-orb-pr-closed .rg-orb-line{stroke:var(--ink-2);}
+.rg-orb-finished .rg-orb-mark{stroke:var(--ink-2);stroke-width:3.2;stroke-linecap:round;stroke-linejoin:round;}
+.rg-orb-fail .rg-orb-bg,.rg-orb-stop .rg-orb-bg{fill:var(--red-bg);}
+.rg-orb-fail .rg-orb-mark{stroke:var(--red-ink);stroke-width:3.4;stroke-linecap:round;}
+.rg-orb-stop .rg-orb-mark{fill:var(--red-ink);stroke:none;}
+@keyframes rg-breathe{0%,100%{transform:scale(.78);}50%{transform:scale(1);}}
+
+/* The trail: one dot per step execution; overlapping executions stack. */
+.rg-trail{display:inline-flex;align-items:center;flex-wrap:wrap;gap:5px;}
+.rg-td{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--green);flex:none;}
+.rg-td-act{background:var(--blue);animation:wr-pulse 1.6s ease-in-out infinite;}
+.rg-td-ask{background:var(--amber);}
+.rg-td-fail{background:var(--red);}
+.rg-td-stop{background:var(--ink-3);}
+.rg-tstack{display:inline-flex;flex-direction:column;align-items:center;gap:3px;}
+.rg-tmore{font:600 9.5px/1 var(--mono);color:var(--ink-2);}
+
+/* The sheet under the status line: banners, the waiting question, the result,
+   what runs now, and the way into Details. */
+.rd-sheet{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);box-shadow:var(--shadow);
+  padding:18px;display:flex;flex-direction:column;gap:16px;}
+.rd-sheet .rd-banners:has(> :not([hidden])){margin-top:0;}
+.rd-sheet .rd-banners:not(:has(> :not([hidden]))){display:none;}
+.rd-nowlist{display:flex;flex-direction:column;gap:16px;}
+.rd-nowlist:empty{display:none;}
+.rd-sgroup{display:flex;flex-direction:column;gap:6px;}
+.rd-slabel{font:600 11px var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);padding:0 4px;}
+.rd-slist{background:var(--field);border-radius:var(--r-ctrl);overflow:hidden;display:flex;flex-direction:column;}
+.rd-srow{all:unset;box-sizing:border-box;width:100%;display:flex;align-items:center;gap:12px;padding:12px 14px;
+  font:400 14px var(--sans);color:var(--ink);border-top:1px solid var(--line);}
+.rd-srow:first-child{border-top:0;}
+button.rd-srow{cursor:pointer;}
+button.rd-srow:hover{background:var(--blue-bg);}
+.rd-srow:focus-visible,.rd-details-row:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
+.rd-srow-tx{flex:1;min-width:0;overflow-wrap:anywhere;}
+.rd-srow-ico{flex:none;color:var(--ink-2);}   /* the tab icon the row leads to */
+.rd-srow-tx small{display:block;color:var(--ink-2);font-size:12.5px;}
+.rd-srow-v{color:var(--ink-2);font-size:12.5px;white-space:nowrap;}
+.rd-srow.chv::after,.rd-details-row::after{content:"›";color:var(--ink-2);font-size:20px;line-height:1;}
+.rd-slist .issues{margin:0;padding:10px 14px;}
+.rd-details-row{all:unset;box-sizing:border-box;width:100%;display:flex;align-items:center;gap:12px;padding:12px 14px;
+  background:var(--field);border-radius:var(--r-ctrl);cursor:pointer;font:600 14px var(--sans);color:var(--blue-ink-strong);}
+.rd-details-row:hover{background:var(--blue-bg);}
+.rd-details-row-tabs{margin-left:auto;min-width:0;color:var(--ink-2);font-weight:400;font-size:12.5px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
+.rd-result{display:flex;flex-direction:column;gap:16px;}
+.rd-result[hidden]{display:none;}
+.rd-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;text-align:center;}
+.rd-facts:empty{display:none;}
+.rd-stats[data-n="2"]{grid-template-columns:repeat(2,minmax(0,1fr));}
+.rd-stats[data-n="1"]{grid-template-columns:minmax(0,1fr);}
+.rd-stats > div{background:var(--field);border-radius:var(--r-ctrl);padding:12px 6px;display:flex;flex-direction:column;gap:2px;min-width:0;}
+.rd-stats b{font:700 20px var(--sans);font-variant-numeric:tabular-nums;letter-spacing:-.01em;overflow-wrap:anywhere;}
+.rd-stats b .hd-diff-counts{font-size:inherit;font-weight:700;}   /* large text: the counts sit on --field */
+.rd-stats > div > span{font-size:11.5px;color:var(--ink-2);}
+.rd-result-actions{display:flex;flex-direction:column;gap:8px;}
+.rd-cta{display:block;box-sizing:border-box;width:100%;text-align:center;font:600 15px var(--sans);border:0;border-radius:var(--r-ctrl);
+  padding:13px;cursor:pointer;background:var(--ink);color:var(--on-ink);text-decoration:none;}
+.rd-cta.alt{background:var(--field);color:var(--blue-ink-strong);}
+.rd-cta:hover{filter:brightness(1.08);}
+.rd-cta:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+/* Details: the header card and the tabs. The shared bar above carries the status and the way back. */
+.rd-details{display:flex;flex-direction:column;min-height:100%;}
+.rd-details .rd-body{flex:1 0 auto;}
+
+/* History uses the same two modes. Its graph is painted into the page body before the
+   tabs exist and moves into the Workflow tab on first open; until then it stays out of
+   the way. */
+.hd-body > .hd-graph{display:none;}
+.hd > .hd-error{margin:12px 32px 0;}
+
+/* Details › Diff and Q&A */
+.rd-diff-note{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;color:var(--ink-2);font-size:12.5px;}
+.rd-diff-refresh[hidden]{display:none;}
+.rd-diff-row{all:unset;box-sizing:border-box;width:100%;display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:9px;cursor:pointer;font-size:12.5px;}
+.rd-diff-row:hover{background:var(--field);}
+.rd-diff-row.active{background:var(--blue-bg);}
+.rd-diff-row:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
+.rd-diff-row-path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.rd-diff-new{font:600 10.5px var(--sans);padding:1px 7px;border-radius:999px;background:var(--green-bg);color:var(--green-ink);}
+.rd-empty{color:var(--ink-2);font-size:13px;padding:18px 4px;}
+
+@media (max-width:640px){
+  .rd-bar,.hd-bar{padding:10px 16px;flex-wrap:wrap;gap:8px;}
+  .rd-bar-mid{justify-content:flex-start;flex-basis:0;}   /* the name truncates beside the back button */
+  .rd-bar-end{margin-left:auto;gap:6px;}
+  .rd-bar-end:empty{display:none;}
+  .rd-bar .rd-pause,.rd-bar .rd-stop{padding:0 11px;}
+  .rd-glance{padding:20px 16px var(--ask-dock-clearance);}
+  .rd-now-title{font-size:26px;}
+  .rd-details .rd-header{margin:16px 16px 0;}
+  .rd-details .rd-body{padding-inline:16px;}
+}
+@media (prefers-reduced-motion: reduce){
+  .rg-orb-core,.rg-td-act{animation:none;}
+}
+
 /* ---------- Running detail: pipeline graph ---------- */
 /* The dot-grid panel spec §5.3 asks for is already `.run-flow-wrap` —
    radial-gradient var(--line-2) 1.1px at 22px 22px, --r-card radius, horizontal
@@ -3979,7 +4140,7 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
 /* ---------- Running detail: question panel ---------- */
 /* Container only — the panel's own restyle (larger metrics, green-tinted picked
    options, the "N of M answered" footer, "Open run") is T11 for BOTH mounts. */
-.rd-questions{margin-top:18px;animation:wr-rise .3s cubic-bezier(.2,.7,.3,1) both;}
+.rd-questions{margin-top:0;animation:wr-rise .3s cubic-bezier(.2,.7,.3,1) both;}
 /* Explicit twin: the UA [hidden] rule is (0,0,0) and loses to any author
    `display`, so without this the panel would render even while hidden. */
 .rd-questions[hidden]{display:none;}
@@ -4018,7 +4179,7 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
 .rd-tab:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .rd-tab-badge{padding:2px 8px;border-radius:999px;background:var(--field);color:var(--ink-3);
   font:600 10.5px var(--mono);}
-.rd-tab.active .rd-tab-badge{background:var(--blue-bg);color:var(--blue-ink);}
+.rd-tab.active .rd-tab-badge{background:var(--blue-bg);color:var(--blue-ink-strong);}
 /* .rd-sections needs no rule of its own — the inset comes from .rd-body's
    padding, exactly as .hd-sections does. */
 .rd-sec{margin-top:4px;}

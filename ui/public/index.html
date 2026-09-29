@@ -562,37 +562,24 @@
 
           <!-- clone target for the Running detail screen (#running/<runId>) -->
           <template id="run-detail-tpl">
-            <div class="rd">
-              <header class="rd-header">
-                <div class="rd-row1">
-                  <button type="button" class="rd-back btn-ghost" aria-label="Back to running list">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
-                    Back
-                  </button>
-                  <h1 class="rd-title"></h1>
-                  <span class="auto-badge" hidden></span>
-                  <span class="rd-status pill-run"><span class="pdot"></span><span class="rd-status-word"></span></span>
-                </div>
-                <div class="rd-meta mono"></div>
-                <div class="rd-row3">
-                  <span class="rd-base mono" hidden data-min-level="advanced"></span>
-                  <button type="button" class="rd-branch-copy mono" hidden data-min-level="advanced" title="Copy branch name" aria-label="Copy branch name">
-                    <span class="rd-branch-name"></span>
-                    <svg class="ico-copy" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2.5"></rect><path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5" stroke-linecap="round"></path></svg>
-                    <svg class="ico-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M4 12.5l5.5 5.5L20 6.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
-                  </button>
-                  <!-- NO `hidden`: the caption is driven purely by the CSS sibling rule
-                       off copyBranchToClipboard's own 1200ms `.copied` window
-                       (app.js:3666-3672), exactly as .hd-copied does (index.html:501). -->
-                  <span class="rd-copied">Copied</span>
-                  <span class="rd-spacer"></span>
-                  <!-- One control for Pause/Resume (spec §5.2 row 3). The label lives in
-                       its own span so a busy state swaps only the word and the inline SVG
-                       survives — the .hd-btn-label idiom. NB none of the three wired
-                       handlers actually swaps the label today (pauseRun:7831-7850 and
-                       stopRun:7806-7825 only set `disabled`; resumeRunFromCard:7920
-                       replaces the whole textContent), so the span is for
-                       paintRdHeader's Pause/Resume swap, not for a busy state. -->
+            <!-- Two modes on one screen (docs: Run page glance). `data-mode="glance"` shows the
+                 status line, the trail and the sheet; `data-mode="details"` shows the tabs.
+                 The route picks the mode: #running/<id> vs #running/<id>/details[/<tab>]. -->
+            <div class="rd" data-mode="glance">
+              <div class="rd-bar">
+                <button type="button" class="rd-back btn-ghost" aria-label="Back to running list">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                  Runs
+                </button>
+                <button type="button" class="rd-to-run btn-ghost" hidden aria-label="Back to the run">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                  <span class="rd-to-run-label">Run</span>
+                </button>
+                <!-- The run's name: the glance's headline carries its state. -->
+                <span class="rd-bar-mid"><span class="rd-bar-title"></span></span>
+                <span class="rd-bar-end">
+                  <!-- One control for Pause/Resume. The label lives in its own span so a busy
+                       state swaps only the word and the inline SVG survives. -->
                   <button type="button" class="rd-pause" data-action="pause" hidden>
                     <svg class="ico-pause" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.5"></rect><rect x="14" y="5" width="4" height="14" rx="1.5"></rect></svg>
                     <svg class="ico-play" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
@@ -602,26 +589,63 @@
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
                     <span class="rd-btn-label">Stop</span>
                   </button>
-                </div>
-                <!-- Inline error slot for failed actions, on the HEADER so it is never
-                     pushed below the fold by the graph or a tab body (mirrors .hd-error). -->
-                <div class="rd-error" hidden></div>
-              </header>
-              <div class="rd-body">
-                <div class="rd-banners">
-                  <div class="retained-banner" role="alert" hidden></div>
-                  <button type="button" class="hist-discard btn-ghost" hidden>Discard worktree</button>
-                </div>
-                <div class="rd-graph"><div class="run-flow-wrap"><div class="run-flow"></div></div></div>
-                <div class="rd-questions" hidden><div class="qpanel hidden"></div></div>
-                <!-- C12: the tab engine does `screen.querySelector('.rd-tabs').innerHTML = ''`.
-                     These two hosts MUST exist in the template or Task 7's tab bar
-                     silently paints NOTHING (initDetailTabs returns early on a
-                     missing host). Mirrors index.html:528-529 (.hd-tabs / .hd-sections),
-                     including the role="tablist" the engine does NOT set itself. -->
-                <div class="rd-tabs" role="tablist"></div>
-                <div class="rd-sections"></div>
+                </span>
               </div>
+              <!-- Inline error slot for failed actions, under the bar so the graph or a tab
+                   body never pushes it below the fold (mirrors .hd-error). -->
+              <div class="rd-error" hidden></div>
+
+              <section class="rd-glance" aria-label="Run status">
+                <div class="rd-now">
+                  <div class="rd-now-top">
+                    <span class="rd-orb"></span>
+                    <div class="rd-now-text">
+                      <h1 class="rd-now-title"></h1>
+                      <p class="rd-now-sub"></p>
+                    </div>
+                  </div>
+                </div>
+                <div class="rd-sheet">
+                  <div class="rd-banners">
+                    <div class="retained-banner" role="alert" hidden></div>
+                    <button type="button" class="hist-discard btn-ghost" hidden>Discard worktree</button>
+                  </div>
+                  <div class="rd-questions" hidden><div class="qpanel hidden"></div></div>
+                  <!-- Time · Cost · Changes, in every state (the time ticks while live). -->
+                  <div class="rd-facts"></div>
+                  <div class="rd-nowlist"></div>
+                  <div class="rd-result" hidden></div>
+                </div>
+              </section>
+
+              <section class="rd-details" hidden aria-label="Run details">
+                <header class="rd-header">
+                  <div class="rd-row1">
+                    <h2 class="rd-title"></h2>
+                    <span class="auto-badge" hidden></span>
+                    <span class="rd-status pill-run"><span class="pdot"></span><span class="rd-status-word"></span></span>
+                  </div>
+                  <div class="rd-meta mono"></div>
+                  <div class="rd-row3">
+                    <span class="rd-base mono" hidden data-min-level="advanced"></span>
+                    <button type="button" class="rd-branch-copy mono" hidden data-min-level="advanced" title="Copy branch name" aria-label="Copy branch name">
+                      <span class="rd-branch-name"></span>
+                      <svg class="ico-copy" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2.5"></rect><path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5" stroke-linecap="round"></path></svg>
+                      <svg class="ico-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M4 12.5l5.5 5.5L20 6.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                    </button>
+                    <!-- NO `hidden`: the caption is driven purely by the CSS sibling rule
+                         off copyBranchToClipboard's own 1200ms `.copied` window. -->
+                    <span class="rd-copied">Copied</span>
+                    <span class="rd-spacer"></span>
+                  </div>
+                </header>
+                <div class="rd-body">
+                  <!-- The tab engine does `screen.querySelector('.rd-tabs').innerHTML = ''`;
+                       both hosts MUST exist or the bar silently paints nothing. -->
+                  <div class="rd-tabs" role="tablist"></div>
+                  <div class="rd-sections"></div>
+                </div>
+              </section>
             </div>
           </template>
         </section>
@@ -711,13 +735,45 @@
 
           <!-- clone target for the History detail screen (#history/<projectKey>/<id>) -->
           <template id="hist-detail-tpl">
-            <div class="hd">
+            <div class="hd" data-mode="glance">
+              <!-- Two modes on one screen, as on the Running page: the glance (#history/<key>/<id>)
+                   and Details (#history/<key>/<id>/details[/<tab>]). The bar is shared. -->
+              <div class="hd-bar">
+                <button type="button" class="hd-back btn-ghost" aria-label="Back to history">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                  History
+                </button>
+                <button type="button" class="hd-to-run btn-ghost" hidden aria-label="Back to the run">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                  Run
+                </button>
+                <span class="rd-bar-mid"><span class="rd-bar-title"></span></span>
+                <span class="rd-bar-end"></span>
+              </div>
+              <!-- The inline error sits under the shared bar so both modes show it (a load
+                   failure, an archive failure); writers resolve it with screen.querySelector. -->
+              <div class="hd-error" hidden></div>
+              <section class="rd-glance hd-glance" aria-label="Run status">
+                <div class="rd-now">
+                  <div class="rd-now-top">
+                    <span class="rd-orb"></span>
+                    <div class="rd-now-text"><h1 class="rd-now-title"></h1><p class="rd-now-sub"></p></div>
+                  </div>
+                </div>
+                <div class="rd-sheet">
+                  <div class="hd-banners">
+                    <span class="badge hist-retained-badge" hidden>Work retained</span>
+                    <div class="retained-banner" role="alert" hidden></div>
+                    <button type="button" class="hist-discard btn-ghost" hidden>Discard worktree</button>
+                  </div>
+                  <div class="rd-facts"></div>
+                  <div class="rd-nowlist"></div>
+                  <div class="rd-result hd-result"></div>
+                </div>
+              </section>
+              <section class="rd-details hd-details" hidden aria-label="Run details">
               <header class="hd-header">
                 <div class="hd-row1">
-                  <button type="button" class="hd-back btn-ghost" aria-label="Back to history">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
-                    Back
-                  </button>
                   <h1 class="hd-title"></h1>
                   <span class="auto-badge" hidden></span>
                   <span class="hist-merge" hidden data-min-level="expert"></span>
@@ -781,22 +837,13 @@
                     </div>
                   </span>
                 </div>
-                <!-- The inline error lives on the HEADER, not in .hd-body, so an archive
-                     failure is not pushed below the fold by a long Diff or Logs tab.
-                     Both writers (the load-failure path and the archive catch) resolve
-                     it with screen.querySelector, so the position is free to be correct. -->
-                <div class="hd-error" hidden></div>
               </header>
               <div class="hd-body">
-                <div class="hd-banners">
-                  <span class="badge hist-retained-badge" hidden>Work retained</span>
-                  <div class="retained-banner" role="alert" hidden></div>
-                  <button type="button" class="hist-discard btn-ghost" hidden>Discard worktree</button>
-                </div>
                 <div class="hd-graph"><div class="run-flow-wrap"><div class="run-flow"></div></div></div>
                 <div class="hd-tabs" role="tablist"></div>
                 <div class="hd-sections"></div>
               </div>
+              </section>
             </div>
           </template>
         </section>
