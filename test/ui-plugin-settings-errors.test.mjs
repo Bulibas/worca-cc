@@ -13,6 +13,7 @@ import { JSDOM } from 'jsdom';
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
+const cssPath = fileURLToPath(new URL('../ui/public/style.css', import.meta.url));
 
 const json = (body, status = 200) =>
   Promise.resolve({ ok: status < 400, status, json: async () => body });
@@ -151,6 +152,8 @@ test('a rejected profile Add re-asks with the typed id and the error; nothing la
     && doc.getElementById('confirm-f-id'), 'the prompt to re-open');
   assert.match(doc.getElementById('confirm-message').textContent, /profile id must be lowercase letters/);
   assert.equal(doc.getElementById('confirm-message').hidden, false);
+  assert.ok(doc.getElementById('confirm-message').classList.contains('err'),
+    'the re-ask message is rendered in the error colour, not grey');
   assert.equal(doc.getElementById('confirm-f-id').value, 'Bad Id', 'the typed id survives');
   assert.equal(doc.getElementById('confirm-f-label').value, 'My label', 'the typed label survives');
   assert.ok(modalOpen(doc, 'plugin-modal'), 'the Settings modal is still open underneath');
@@ -161,6 +164,16 @@ test('a rejected profile Add re-asks with the typed id and the error; nothing la
   await waitFor(() => posts.length === 2 && !modalOpen(doc, 'confirm-modal'), 'the second attempt');
   assert.deepEqual(posts[1], { sourceId: 'jira', id: 'good-id', label: 'My label' });
   assert.equal(doc.getElementById('plugins-msg').textContent, '');
+  // The confirm modal is shared: the err tone must be dropped when the prompt
+  // closes, so the next ordinary confirm is not painted red.
+  assert.equal(doc.getElementById('confirm-message').classList.contains('err'), false,
+    'the err tone is cleared when the prompt closes');
+  await waitFor(() => modalOpen(doc, 'plugin-modal') && doc.querySelector('.pl-profile-del'),
+    'the settings modal to re-open after a successful add');
+  doc.querySelector('.pl-profile-del').click();
+  await waitFor(() => modalOpen(doc, 'confirm-modal'), 'an ordinary confirm');
+  assert.equal(doc.getElementById('confirm-message').classList.contains('err'), false,
+    'an ordinary confirm is not toned as an error');
 });
 
 test('a rejected profile Remove is reported inside the Settings modal', async () => {
@@ -181,6 +194,19 @@ test('a rejected profile Remove is reported inside the Settings modal', async ()
     return e && !e.hidden && e.textContent ? e : null;
   }, 'the in-modal error');
   assert.match(err.textContent, /profile is locked by the team policy/);
+  assert.ok(err.classList.contains('hint') && err.classList.contains('err'),
+    'the in-modal error line carries hint+err so it picks up the error colour');
   assert.ok(modalOpen(doc, 'plugin-modal'));
   assert.equal(doc.getElementById('plugins-msg').textContent, '', 'nothing posted behind the modal');
+});
+
+// jsdom does not apply the stylesheet, so the colours are asserted by reading
+// style.css directly: the shared confirm message must have an error tone, and the
+// in-modal error line's classes must map to an existing red-ink rule.
+test('the error colour rules exist in style.css', () => {
+  const css = readFileSync(cssPath, 'utf8').replace(/\s+/g, ' ');
+  assert.match(css, /\.confirm-message\.err\s*\{[^}]*color:\s*var\(--red-ink\)/,
+    '.confirm-message.err is coloured with --red-ink');
+  assert.match(css, /\.hint\.err\s*\{[^}]*color:\s*var\(--red-ink\)/,
+    '.hint.err (used by .pl-settings-err) is coloured with --red-ink');
 });

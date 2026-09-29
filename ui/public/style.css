@@ -2178,6 +2178,7 @@ button.pd-ov-card:hover{border-color:var(--ink-3);}
 /* MUST come after .viewer-modal .card (style.css:514) — equal specificity, later wins. */
 .confirm-modal .card{width:min(440px,100%);}
 .confirm-message{margin:4px 0 18px;color:var(--ink-2);font-size:14px;line-height:1.5;white-space:pre-line;}
+.confirm-message.err{color:var(--red-ink);}
 .confirm-actions{display:flex;gap:9px;justify-content:flex-end;margin-top:14px;}
 .gv-import-scripts p{margin:0 0 12px;color:var(--ink-2);font-size:13.5px;}
 .gv-import-script-h{font-size:12px;font-weight:700;margin:10px 0 4px;}

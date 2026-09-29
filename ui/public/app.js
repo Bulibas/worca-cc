@@ -9655,13 +9655,17 @@ function buildPdMemory(sec, key) {
 // neither the tint nor a leftover field may leak into the next, harmless call.
 function modalShell({
   title = 'Confirm', message = '', confirmLabel = 'Confirm', cancelLabel = 'Cancel',
-  checkbox = null, danger = false, fields = null,
+  checkbox = null, danger = false, fields = null, messageTone = null,
 } = {}) {
   return new Promise((resolve) => {
     el.confirmTitle.textContent = title;
     el.confirmTitle.classList.toggle('danger', !!danger);
     el.confirmMessage.textContent = message;
     el.confirmMessage.hidden = !message;
+    // messageTone:'err' paints the shared message in the app's error colour
+    // (.confirm-message.err → --red-ink); done() always drops it again so the
+    // tint never leaks to the next caller of this shared modal.
+    el.confirmMessage.classList.toggle('err', messageTone === 'err');
     el.confirmOk.textContent = confirmLabel;
     el.confirmCancel.textContent = cancelLabel;
     el.confirmOk.classList.toggle('danger', !!danger);
@@ -9715,6 +9719,7 @@ function modalShell({
       for (const i of inputs) values[i.dataset.fieldId] = i.value.trim();
       el.confirmOk.classList.remove('danger');   // never leak the tint to the next caller
       el.confirmTitle.classList.remove('danger');
+      el.confirmMessage.classList.remove('err');
       el.confirmOk.disabled = false;
       el.confirmMessage.hidden = false;
       el.confirmFields.replaceChildren();
@@ -11870,6 +11875,7 @@ async function addPluginProfile(name, sourceId) {
       title: 'New profile',
       confirmLabel: 'Create',
       message: error,
+      messageTone: error ? 'err' : null,
       fields: [
         { id: 'id', label: 'Profile id', placeholder: 'work', mono: true, required: true, value: answers.id,
           hint: 'Lowercase letters, digits and dashes — e.g. "work".' },
