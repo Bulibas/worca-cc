@@ -14374,6 +14374,14 @@ if (runListEl) {
       if (runId) resumeRunFromCard(runId, resumeBtn);
       return;
     }
+    const resumeAtBtn = e.target.closest && e.target.closest('.btn-resume-at');
+    if (resumeAtBtn) {
+      const card = resumeAtBtn.closest('.run-card');
+      const runId = card && card.dataset.runId;
+      const run = runId && runs.get(runId);
+      if (run && run.pipelineId) scheduleResumeAt({ pipelineId: run.pipelineId, title: run.title, projectDir: run.projectDir || '', workspaceId: run.workspaceId || null }, resumeAtBtn);
+      return;
+    }
     // Cost-banner actions. This handler is a plain sync arrow — the override
     // confirm is async, so fire-and-forget it exactly like .btn-resume above.
     const overrideBtn = e.target.closest && e.target.closest('.cb-override');
@@ -17771,6 +17779,41 @@ async function resumePipeline(p, projectDir, btn, { ignoreCostCap = false, pastT
 
 const HD_RESUMABLE = new Set(['paused', 'interrupted']);
 
+/** Pause reasons that never get a scheduled resume (clarify: caps are live decisions). */
+const SCHEDULE_REFUSED_PAUSE = new Set(['cost_pipeline', 'cost_total', 'cost_pipeline_policy', 'cost_total_policy']);
+
+/**
+ * "Resume at…" — schedule a one-off resume of a paused run. Uses the schedule sheet
+ * (one-off time; missed-slot policy pre-selected to Skip per the clarify answer — the
+ * user may still pick "Start it late"), then POSTs the ticket.
+ */
+async function scheduleResumeAt({ pipelineId, title, projectDir = null, workspaceId = null }, btn) {
+  const res = await openScheduleSheet({
+    mode: 'ticket',
+    allowAfter: false,                    // a resume ticket can never chain (createTicket throws)
+    initial: { ifMissed: 'skip' },        // pre-selected, not locked — "Start it late" stays available
+    runTitle: `Resume ‘${title || pipelineId}’`,
+  });
+  if (!res || !res.scheduledFor) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/schedules/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pipelineId, scheduledFor: res.scheduledFor, ifMissed: res.ifMissed,
+        ...(res.ifMissed === 'run' && res.graceMin != null ? { graceMin: res.graceMin } : {}),
+      }),
+    });
+    const data = await safeJson(r);
+    if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
+    showView('schedules');
+  } catch (err) {
+    if (btn) { btn.disabled = false; btn.dataset.resumeState = 'error'; btn.dataset.resumeError = `Could not schedule the resume: ${err.message}`; }
+    return;
+  }
+}
+
 // { screen, record } the Discard-worktree listener is currently bound to, so
 // paintHdBanners can re-bind when either changes (see the comment inside it).
 let hdDiscardBound = null;
@@ -17983,6 +18026,18 @@ function setupHdActions(screen, record, data) {
     resumeBtn.addEventListener('click', () => {
       const r = hdCurrentRecord(record);              // never the load-time object
       resumePipeline(r, r.projectDir || null, resumeBtn);
+    });
+  }
+
+  // Scheduled resume: every resumable pause EXCEPT cap pauses (clarify: both cap kinds
+  // always need a live decision — the affordance is never offered for them).
+  const resumeAtBtn = screen.querySelector('#hd-resume-at');
+  const pauseReasonForSchedule = screen.dataset.pauseReason || '';
+  if (HD_RESUMABLE.has(status) && st.resumable !== false && !SCHEDULE_REFUSED_PAUSE.has(pauseReasonForSchedule)) {
+    resumeAtBtn.hidden = false;
+    resumeAtBtn.addEventListener('click', () => {
+      const r = hdCurrentRecord(record);              // never the load-time object
+      scheduleResumeAt({ pipelineId: r.id, title: r.title, projectDir: r.projectDir || null, workspaceId: r.workspaceId || null }, resumeAtBtn);
     });
   }
 
@@ -22480,6 +22535,11 @@ function paintRunCard(r) {
   const resumeBtn = r.el.querySelector('.btn-resume');
   if (pauseBtn) pauseBtn.hidden = paused;
   if (resumeBtn) resumeBtn.hidden = !paused;
+  const resumeAtBtn = r.el.querySelector('#btn-resume-at');
+  if (resumeAtBtn) {
+    const refused = typeof r.pauseReason === 'string' && SCHEDULE_REFUSED_PAUSE.has(r.pauseReason);
+    resumeAtBtn.hidden = !paused || !r.pipelineId || refused;
+  }
   // A total-budget pause cannot be resumed at all until the window resets or the
   // limit is raised — the server 403s it, so the button says so up front.
   const totalBlocked = r.pauseReason === 'cost_total' && budgetState.budget?.blocked;
@@ -22650,9 +22710,17 @@ const schedulesView = createSchedulesView({
     personIni: (name, title) => personIni(name, title),
     // A started run opens its live monitor (the ticket id IS the runId); a finished one opens History.
     openRun: ({ runId, pipelineId, projectDir }) => {
-      if (runId) { location.hash = `running/${runId}`; return; }
+      // A resume ticket's runId is the TICKET id — no live run carries it, so fall
+      // through to the resumed pipeline's History detail instead of a bogus card.
+      if (runId && runs.has(runId)) { location.hash = `running/${runId}`; return; }
       const proj = (state.projects || []).find((x) => x && x.path === projectDir);
       location.hash = proj && pipelineId ? `history/${histDetailParam({ id: pipelineId, projectKey: proj.key })}` : 'history';
+    },
+    // A resume ticket names its target: "Resumes '<title>' · paused".
+    labelResumeTarget: (pipelineId) => {
+      const row = (state.historyAll || []).find((p) => p && p.id === pipelineId);
+      const statusWord = row ? (PAUSED_STATUSES.includes(String(row.status || '').toLowerCase()) ? 'paused' : String(row.status || 'unknown')) : 'unknown';
+      return { title: (row && row.title) || pipelineId, statusWord };
     },
   },
 });
