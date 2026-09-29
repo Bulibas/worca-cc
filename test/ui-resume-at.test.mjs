@@ -1,6 +1,7 @@
 // test/ui-resume-at.test.mjs — "Resume at…" (scheduled resume of a paused run):
-// the paused run-card affordance + its cap-pause refusal, the History-detail
-// variant, and the schedule sheet opening with the missed-slot policy pre-selected
+// the paused run-card split (Resume + caret → "Resume at…"), its cap-pause refusal
+// (arrow kept, item disabled), the History-detail split, the simple-level gate
+// contract, and the schedule sheet opening with the missed-slot policy pre-selected
 // to Skip (changeable). Harness: jsdom boot of the REAL index.html + app.js with
 // the dispatchable WebSocket stub from test/ui-cost-paused.test.mjs:37-42, the
 // URL-armed fetch mock (most-specific arm FIRST), and the afterEach window-close
@@ -21,8 +22,12 @@ afterEach(() => { while (live.length) { try { live.pop().close(); } catch {} } }
 
 const ok = (body, status = 200) => Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body });
 
-async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+async function boot({ fetchHandler, level } = {}) {
+  // `level`: the server-rendered interface mode (docs/ui-levels.md); null = no attribute (gates nothing).
+  let html = readFileSync(htmlPath, 'utf8');
+  if (level) html = html.replace('<html lang="en" data-theme="system">',
+    `<html lang="en" data-theme="system" data-level="${level}">`);
+  const dom = new JSDOM(html, { url: 'http://localhost:4317/' });
   live.push(dom);
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
@@ -99,15 +104,27 @@ async function confirmSheet(ctx) {
   await settle(6);
 }
 
-test('paused card offers "Resume at…", the sheet pre-selects skip, and the POST carries the pipeline', async () => {
+test('paused card offers Resume + a caret; "Resume at…" opens the sheet and posts', async () => {
   const ctx = await boot({});
   const card = await pausedCard(ctx);
-  const btn = card.querySelector('.btn-resume-at');
-  assert.ok(btn, 'the affordance exists on the card');
-  assert.equal(btn.hidden, false, 'shown for a plain pause');
-  btn.click();
+  const split = card.querySelector('.rc-resume-split');
+  assert.ok(split, 'the split exists on the card');
+  assert.equal(split.hidden, false, 'wrapper shown for a plain pause');
+  assert.equal(card.querySelector('.btn-resume').hidden, false, 'default Resume is shown');
+  const more = card.querySelector('.rc-resume-more');
+  assert.ok(more, 'the caret exists');
+  assert.equal(more.hidden, false, 'caret shown for a plain pause');
+  const menu = card.querySelector('.rc-resume-menu');
+  assert.equal(menu.hidden, true, 'menu closed initially');
+  more.click();                                          // open the menu
   await ctx.settle();
-  await confirmSheet(ctx);
+  assert.equal(menu.hidden, false, 'caret opens the menu');
+  const item = card.querySelector('.rc-resume-at');
+  assert.equal(item.disabled, false, 'item enabled for a plain pause');
+  assert.equal(more.getAttribute('aria-expanded'), 'true');
+  item.click();                                          // schedule
+  await ctx.settle();
+  await confirmSheet(ctx);                               // unchanged helper
   const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/schedules/resume'));
   assert.equal(posts.length, 1);
   const body = JSON.parse(posts[0].opts.body);
@@ -116,22 +133,31 @@ test('paused card offers "Resume at…", the sheet pre-selects skip, and the POS
   assert.ok(/^\d{4}-\d{2}-\d{2}T/.test(body.scheduledFor), 'an ISO instant is posted');
 });
 
-test('cap-paused cards never offer "Resume at…" (all four cap reasons)', async () => {
+test('cap-paused cards keep the arrow but disable "Resume at…" (all four cap reasons)', async () => {
   for (const reason of ['cost_pipeline', 'cost_total', 'cost_pipeline_policy', 'cost_total_policy']) {
     const ctx = await boot({});
     const card = await pausedCard(ctx, { reason, detail: 'cap reached' });
-    const btn = card.querySelector('.btn-resume-at');
-    assert.ok(btn, 'button exists in the template');
-    assert.equal(btn.hidden, true, `hidden for ${reason}`);
-    // The normal Resume stays offered (its own gating applies).
+    const more = card.querySelector('.rc-resume-more');
+    assert.ok(more, 'caret exists');
+    assert.equal(more.hidden, false, `caret is KEPT for ${reason} (clarify: arrow stays)`);
+    more.click();
+    await ctx.settle();
+    const item = card.querySelector('.rc-resume-at');
+    assert.equal(item.disabled, true, `item disabled for ${reason}`);
+    item.click();                                        // a disabled item must not schedule
+    await ctx.settle();
+    const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/schedules/resume'));
+    assert.equal(posts.length, 0, `no schedule POST for ${reason}`);
     assert.equal(card.querySelector('.btn-resume').hidden, false, `Resume still offered for ${reason}`);
   }
 });
 
-test('usage_limit pause offers "Resume at…" (the quota-reset case the feature exists for)', async () => {
+test('usage_limit pause keeps "Resume at…" enabled (the quota-reset case)', async () => {
   const ctx = await boot({});
   const card = await pausedCard(ctx, { reason: 'usage_limit', detail: 'quota resets at 02:00' });
-  assert.equal(card.querySelector('.btn-resume-at').hidden, false);
+  const item = card.querySelector('.rc-resume-at');
+  assert.ok(item);
+  assert.equal(item.disabled, false);
 });
 
 // ── History detail ───────────────────────────────────────────────────────────
@@ -154,21 +180,27 @@ const rowFor = ({ pauseReason = null } = {}) => ({
   pauseReason, retainedWork: null,
 });
 
-test('History detail offers "Resume at…" for a plain pause, and the sheet opens', async () => {
-  const ctx = await boot({
-    fetchHandler: (url) => {
-      if (url.endsWith('/api/history')) return ok({ pipelines: [rowFor({})], live: [], ghAvailable: false });
-      if (url.endsWith(`/api/history/${KEY}/fcec04e8`)) return ok(detailFor({}));
-      if (url.endsWith('/api/budget')) return ok({ blocked: false });
-      return null;
-    },
-  });
+const histFetch = (pauseReason = null) => (url) => {
+  if (url.endsWith('/api/history')) return ok({ pipelines: [rowFor({ pauseReason })], live: [], ghAvailable: false });
+  if (url.endsWith(`/api/history/${KEY}/fcec04e8`)) return ok(detailFor({ pauseReason }));
+  if (url.endsWith('/api/budget')) return ok({ blocked: false });
+  return null;
+};
+
+test('History detail offers the Resume split; "Resume at…" opens the sheet and posts', async () => {
+  const ctx = await boot({ fetchHandler: histFetch() });
   ctx.go(`history/${KEY}/fcec04e8`);
   await ctx.settle(8);
-  const btn = ctx.doc.querySelector('#hd-resume-at');
-  assert.ok(btn, 'the detail affordance exists');
-  assert.equal(btn.hidden, false, 'shown for a plain pause');
-  btn.click();
+  const split = ctx.doc.querySelector('.hd-resume-split');
+  assert.ok(split, 'the split exists on the detail');
+  assert.equal(split.hidden, false, 'shown for a plain pause');
+  const more = ctx.doc.querySelector('.hd-resume-more');
+  more.click();
+  await ctx.settle();
+  const item = ctx.doc.querySelector('.hd-resume-at-item');
+  assert.equal(item.disabled, false, 'enabled for a plain pause');
+  assert.equal(ctx.doc.querySelector('.hd-resume-menu').hidden, false, 'menu opened');
+  item.click();
   await ctx.settle();
   await confirmSheet(ctx);
   const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/schedules/resume'));
@@ -176,20 +208,32 @@ test('History detail offers "Resume at…" for a plain pause, and the sheet open
   assert.equal(JSON.parse(posts[0].opts.body).pipelineId, 'fcec04e8');
 });
 
-test('History detail hides "Resume at…" for every cap pause', async () => {
+test('History detail keeps the split for every cap pause but disables "Resume at…"', async () => {
   for (const reason of ['cost_pipeline', 'cost_total', 'cost_pipeline_policy', 'cost_total_policy']) {
-    const ctx = await boot({
-      fetchHandler: (url) => {
-        if (url.endsWith('/api/history')) return ok({ pipelines: [rowFor({ pauseReason: reason })], live: [], ghAvailable: false });
-        if (url.endsWith(`/api/history/${KEY}/fcec04e8`)) return ok(detailFor({ pauseReason: reason }));
-        if (url.endsWith('/api/budget')) return ok({ blocked: false });
-        return null;
-      },
-    });
+    const ctx = await boot({ fetchHandler: histFetch(reason) });
     ctx.go(`history/${KEY}/fcec04e8`);
     await ctx.settle(8);
-    const btn = ctx.doc.querySelector('#hd-resume-at');
-    assert.ok(btn, 'button exists in the markup');
-    assert.equal(btn.hidden, true, `hidden for ${reason}`);
+    const split = ctx.doc.querySelector('.hd-resume-split');
+    assert.ok(split, 'the split exists on the detail');
+    assert.equal(split.hidden, false, `split kept for ${reason}`);
+    const item = ctx.doc.querySelector('.hd-resume-at-item');
+    assert.equal(item.disabled, true, `item disabled for ${reason}`);
+    assert.equal(ctx.doc.querySelector('.hd-resume').hidden, false, `Resume kept for ${reason}`);
+    item.click();                                        // a disabled item must not schedule
+    await ctx.settle();
+    const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/schedules/resume'));
+    assert.equal(posts.length, 0, `no schedule POST for ${reason}`);
   }
+});
+
+test('at data-level="simple" the resume carets carry data-min-level="advanced" (the CSS gate)', async () => {
+  const ctx = await boot({ level: 'simple' });
+  const card = await pausedCard(ctx);
+  assert.equal(card.querySelector('.rc-resume-more').getAttribute('data-min-level'), 'advanced');
+  assert.ok(card.querySelector('.rc-resume-split'), 'split wrapper still ships (Resume alone at simple)');
+  // History detail too
+  const ctx2 = await boot({ level: 'simple', fetchHandler: histFetch() });
+  ctx2.go(`history/${KEY}/fcec04e8`);
+  await ctx2.settle(8);
+  assert.equal(ctx2.doc.querySelector('.hd-resume-more').getAttribute('data-min-level'), 'advanced');
 });

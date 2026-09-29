@@ -79,15 +79,3 @@ test('every multi-folder add #id the JS addresses exists in index.html', () => {
     assert.ok(js.includes(`'#${id}'`), `app.js never addresses #${id}`);
   }
 });
-
-// Scheduled resume of a paused run ("Resume at…"): every #id the JS addresses.
-const RESUME_AT_IDS = [
-  'hd-resume-at',
-  'btn-resume-at',
-];
-test('every scheduled-resume #id the JS addresses exists in index.html', () => {
-  for (const id of RESUME_AT_IDS) {
-    assert.ok(html.includes(`id="${id}"`), `markup missing #${id}`);
-    assert.ok(js.includes(`'#${id}'`), `app.js never addresses #${id}`);
-  }
-});

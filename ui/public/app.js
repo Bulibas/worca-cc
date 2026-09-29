@@ -14554,6 +14554,20 @@ async function resumeRunFromCard(runId, btn, { ignoreCostCap = false, pastTeamCa
   }
 }
 
+// Resume splits (run card + History detail): a click outside any split closes every
+// open resume menu. One listener covers both locations; the caret/item clicks already
+// stopPropagation, so the parity with #start-split's click-away holds (closeStartMenu).
+document.addEventListener('click', (e) => {
+  if (e.target.closest && e.target.closest('.rc-resume-split, .hd-resume-split')) return;
+  for (const menu of document.querySelectorAll('.rc-resume-menu, .hd-resume-menu')) {
+    if (!menu.hidden) {
+      menu.hidden = true;
+      const more = menu.closest('.btn-split')?.querySelector('.btn-split-more');
+      more?.setAttribute('aria-expanded', 'false');
+    }
+  }
+});
+
 // Delegated controls on the dynamic run-card list: per-card Stop/Pause + per-card
 // auto-scroll switch. Scoped to each card via closest('.run-card').
 const runListEl = $('#run-list');
@@ -14579,14 +14593,6 @@ if (runListEl) {
       const card = resumeBtn.closest('.run-card');
       const runId = card && card.dataset.runId;
       if (runId) resumeRunFromCard(runId, resumeBtn);
-      return;
-    }
-    const resumeAtBtn = e.target.closest && e.target.closest('.btn-resume-at');
-    if (resumeAtBtn) {
-      const card = resumeAtBtn.closest('.run-card');
-      const runId = card && card.dataset.runId;
-      const run = runId && runs.get(runId);
-      if (run && run.pipelineId) scheduleResumeAt({ pipelineId: run.pipelineId, title: run.title, projectDir: run.projectDir || '', workspaceId: run.workspaceId || null }, resumeAtBtn);
       return;
     }
     // Cost-banner actions. This handler is a plain sync arrow — the override
@@ -18239,16 +18245,44 @@ function setupHdActions(screen, record, data) {
     });
   }
 
-  // Scheduled resume: every resumable pause EXCEPT cap pauses (clarify: both cap kinds
-  // always need a live decision — the affordance is never offered for them).
-  const resumeAtBtn = screen.querySelector('#hd-resume-at');
+  // Scheduled resume ("Resume at…" in the split's menu): every resumable pause; cap
+  // pauses KEEP the arrow but DISABLE the item (clarify: caps are live decisions).
+  const resumeSplit = screen.querySelector('.hd-resume-split');
+  const resumeMore = screen.querySelector('.hd-resume-more');
+  const resumeMenu = screen.querySelector('.hd-resume-menu');
+  const resumeAtItem = screen.querySelector('.hd-resume-at-item');
   const pauseReasonForSchedule = screen.dataset.pauseReason || '';
-  if (HD_RESUMABLE.has(status) && st.resumable !== false && !SCHEDULE_REFUSED_PAUSE.has(pauseReasonForSchedule)) {
-    resumeAtBtn.hidden = false;
-    resumeAtBtn.addEventListener('click', () => {
-      const r = hdCurrentRecord(record);              // never the load-time object
-      scheduleResumeAt({ pipelineId: r.id, title: r.title, projectDir: r.projectDir || null, workspaceId: r.workspaceId || null }, resumeAtBtn);
-    });
+  if (HD_RESUMABLE.has(status) && st.resumable !== false) {
+    if (resumeSplit) resumeSplit.hidden = false;
+    const refused = SCHEDULE_REFUSED_PAUSE.has(pauseReasonForSchedule);
+    if (resumeAtItem) {
+      resumeAtItem.disabled = refused;
+      resumeAtItem.title = refused
+        ? 'This run paused on a cost cap — continuing past it is a live decision and cannot be scheduled.'
+        : '';
+    }
+    if (resumeMore && resumeMenu && resumeAtItem) {
+      const closeResumeMenu = () => {
+        if (!resumeMenu.hidden) { resumeMenu.hidden = true; resumeMore.setAttribute('aria-expanded', 'false'); }
+      };
+      resumeMore.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const open = resumeMenu.hidden;
+        resumeMenu.hidden = !open;
+        resumeMore.setAttribute('aria-expanded', open ? 'true' : 'false');
+        (open ? resumeAtItem : resumeMore).focus();
+      });
+      resumeAtItem.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (resumeAtItem.disabled) return;
+        closeResumeMenu();
+        const r = hdCurrentRecord(record);   // never the load-time object (record-identity rule)
+        scheduleResumeAt({ pipelineId: r.id, title: r.title, projectDir: r.projectDir || null, workspaceId: r.workspaceId || null }, resumeAtItem);
+      });
+      resumeMenu.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') { e.stopPropagation(); closeResumeMenu(); resumeMore.focus(); }
+      });
+    }
   }
 
   // Archive: honest copy (D2), confirmModal (not window.confirm). Deletability is
@@ -22043,6 +22077,32 @@ function buildRunCard(r) {
   });
   node.querySelector('.rc-open').addEventListener('click', (e) => { e.stopPropagation(); go(); });
   node.querySelector('.rc-after')?.addEventListener('click', (e) => { e.stopPropagation(); if (r.pipelineId) location.hash = `#new/after/${r.pipelineId}`; });
+  // Resume split: the caret toggles the menu; "Resume at…" schedules. Direct-bound
+  // with stopPropagation like .rc-after — the delegated #run-list handler owns .btn-resume.
+  const resumeMore = node.querySelector('.rc-resume-more');
+  const resumeMenu = node.querySelector('.rc-resume-menu');
+  const resumeAtItem = node.querySelector('.rc-resume-at');
+  if (resumeMore && resumeMenu && resumeAtItem) {
+    const closeResumeMenu = () => {
+      if (!resumeMenu.hidden) { resumeMenu.hidden = true; resumeMore.setAttribute('aria-expanded', 'false'); }
+    };
+    resumeMore.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = resumeMenu.hidden;
+      resumeMenu.hidden = !open;
+      resumeMore.setAttribute('aria-expanded', open ? 'true' : 'false');
+      (open ? resumeAtItem : resumeMore).focus();
+    });
+    resumeAtItem.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (resumeAtItem.disabled) return;
+      closeResumeMenu();
+      if (r.pipelineId) scheduleResumeAt({ pipelineId: r.pipelineId, title: r.title, projectDir: r.projectDir || '', workspaceId: r.workspaceId || null }, resumeAtItem);
+    });
+    resumeMenu.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); closeResumeMenu(); resumeMore.focus(); }
+    });
+  }
   // D5: on a v2 run the card's graph is scenery (the world is pointer-events:none),
   // so the WRAP takes the click and opens the detail. Decided at CLICK time — the
   // manifest may arrive after the card is built; a v1 card's graph stays inert.
@@ -23143,10 +23203,15 @@ function paintRunCard(r) {
   const resumeBtn = r.el.querySelector('.btn-resume');
   if (pauseBtn) pauseBtn.hidden = paused;
   if (resumeBtn) resumeBtn.hidden = !paused;
-  const resumeAtBtn = r.el.querySelector('#btn-resume-at');
-  if (resumeAtBtn) {
+  const resumeSplit = r.el.querySelector('.rc-resume-split');
+  const resumeAtItem = r.el.querySelector('.rc-resume-at');
+  if (resumeSplit) resumeSplit.hidden = !paused || !r.pipelineId;
+  if (resumeAtItem) {
     const refused = typeof r.pauseReason === 'string' && SCHEDULE_REFUSED_PAUSE.has(r.pauseReason);
-    resumeAtBtn.hidden = !paused || !r.pipelineId || refused;
+    resumeAtItem.disabled = refused;   // clarify: caps keep the arrow, the item is disabled
+    resumeAtItem.title = refused
+      ? 'This run paused on a cost cap — continuing past it is a live decision and cannot be scheduled.'
+      : '';
   }
   // A total-budget pause cannot be resumed at all until the window resets or the
   // limit is raised — the server 403s it, so the button says so up front.

@@ -347,17 +347,6 @@ body.view-workspaces .main{display:flex;flex-direction:column;overflow:hidden;pa
    UA [hidden]{display:none} rule — same footgun as .questions-toggle[hidden]). */
 .btn-pause[hidden],.btn-resume[hidden]{display:none;}
 
-/* "Resume at…" (scheduled resume): a mini ghost pill next to the card's Resume icon,
-   and a .btn-ghost sibling of .hd-resume on the History detail. Both are toggled with
-   .hidden — the [hidden] guard has to outrank the author display rules below. */
-.btn-resume-at{display:inline-flex;align-items:center;gap:5px;padding:0 10px;height:30px;
-  border-radius:9px;border:1px solid var(--line-2);background:var(--surface);color:var(--ink);
-  font-family:inherit;font-weight:600;font-size:11.5px;cursor:pointer;white-space:nowrap;transition:background .15s;}
-.btn-resume-at:hover:not(:disabled){background:var(--field);}
-.btn-resume-at:disabled{opacity:.45;cursor:not-allowed;}
-.hd-resume-at{display:inline-flex;}
-.btn-resume-at[hidden],.hd-resume-at[hidden]{display:none;}
-
 /* ---------- Views ---------- */
 .view{display:block;}
 
@@ -5571,6 +5560,35 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 /* Simple mode hides the caret (Schedule… is Advanced): the Start pill closes up again. */
 :root[data-level="simple"] .btn-split > .btn-go:first-child:not(:has(~ [data-level-keep])){border-radius:999px;padding-right:28px;}
 :root[data-level="simple"] .btn-split.mini > .btn-go:first-child:not(:has(~ [data-level-keep])){padding-right:14px;}
+/* Resume split (run card + History detail): the location's own Resume keeps its look;
+   the caret is its right half, colored to match. The [hidden] guard has to outrank the
+   author display rules (same footgun as .btn-split-menu / .btn-resume). */
+.rc-resume-split > .btn-resume{border-radius:9px;}
+/* The .btn-split prefix ties (.btn-split.mini > .btn-split-more) at the same
+   specificity (which pins padding:0 12px 0 9px) and wins on source order — without
+   it the mini caret padding would override the centered 26px caret below. */
+.btn-split.rc-resume-split > .rc-resume-more{
+  display:inline-flex;align-items:center;justify-content:center;gap:0;
+  width:26px;padding:0;margin-left:-1px;              /* fuse over Resume's right border */
+  background:var(--panel);color:var(--amber-ink);
+  border:1px solid var(--amber);border-left:none;border-radius:9px;
+  font-family:inherit;cursor:pointer;transition:background .15s;}
+.btn-split.rc-resume-split > .rc-resume-more:hover{background:var(--amber-bg);}
+.btn-split.rc-resume-split > .rc-resume-more:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.rc-resume-split[hidden],.rc-resume-split > .rc-resume-more[hidden]{display:none;}
+.hd-resume-split > .hd-resume{border-radius:9px 0 0 9px;}
+.btn-split.hd-resume-split > .hd-resume-more{
+  display:inline-flex;align-items:center;justify-content:center;gap:0;
+  padding:0 11px;margin-left:-1.5px;                  /* fuse over the .btn-ghost 1.5px border */
+  background:var(--surface);color:var(--ink);
+  border:1.5px solid var(--line-2);border-left:none;border-radius:0 9px 9px 0;
+  font-family:inherit;cursor:pointer;transition:background .15s;}
+.btn-split.hd-resume-split > .hd-resume-more:hover{background:var(--field);}
+.btn-split.hd-resume-split > .hd-resume-more:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.hd-resume-split[hidden],.hd-resume-split > .hd-resume-more[hidden]{display:none;}
+/* Disabled "Resume at…" menu item: greyed, and its hover must not light it up. */
+.btn-split-menu button:disabled{opacity:.45;cursor:not-allowed;}
+.btn-split-menu button:disabled:hover,.btn-split-menu button:disabled:focus-visible{background:transparent;outline:none;}
 
 /* the schedule sheet */
 .sched-modal .card.sched-card{width:min(600px,100%);animation:wr-rise .28s cubic-bezier(.2,.7,.3,1) both;}
