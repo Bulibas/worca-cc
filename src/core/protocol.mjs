@@ -132,10 +132,18 @@ const MAX_CLARIFY_OPTIONS = 4;
  * @returns {number[]|null}
  */
 export function scaleConfidence(values) {
-  const clamped = values.map((v) => (v > 0 ? v : 0));
-  const sum = clamped.reduce((a, b) => a + b, 0);
+  let clamped = values.map((v) => (v > 0 ? v : 0));
+  if (!clamped.every(Number.isFinite)) return null;
+  let sum = clamped.reduce((a, b) => a + b, 0);
   if (!(sum > 0)) return null;
-  const out = clamped.map((v) => Math.floor((v / sum) * 100));
+  if (!Number.isFinite(sum * 100)) {
+    // Huge values: pre-scale by the largest so neither the sum nor v * 100 overflows.
+    const max = Math.max(...clamped);
+    clamped = clamped.map((v) => v / max);
+    sum = clamped.reduce((a, b) => a + b, 0);
+  }
+  // v * 100 / sum, not (v / sum) * 100: the latter turns [29, 71] into [28, 72].
+  const out = clamped.map((v) => Math.floor((v * 100) / sum));
   let top = 0;
   for (let i = 1; i < clamped.length; i++) if (clamped[i] > clamped[top]) top = i;
   out[top] += 100 - out.reduce((a, b) => a + b, 0);

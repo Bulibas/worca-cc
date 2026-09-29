@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { normalizeClarify } from '../src/core/protocol.mjs';
+import { normalizeClarify, scaleConfidence } from '../src/core/protocol.mjs';
 import { writeStepQuestions, readStepQuestions } from '../src/core/artifacts.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
@@ -63,4 +63,11 @@ test('step questions round-trip confidence and recommended', async () => {
   const [row] = readStepQuestions(id);
   assert.deepEqual(row.questions[0].confidence, [30, 70]);
   assert.equal(row.questions[0].recommended, 'B');
+});
+
+test('scaleConfidence keeps exact integer shares (no float drift) and survives huge values', () => {
+  assert.deepEqual(scaleConfidence([29, 71]), [29, 71]);
+  assert.deepEqual(scaleConfidence([57, 43]), [57, 43]);
+  assert.deepEqual(scaleConfidence([1e308, 1e308]), [50, 50]);
+  assert.equal(scaleConfidence([Infinity, 1]), null);
 });
