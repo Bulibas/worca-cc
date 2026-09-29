@@ -3669,7 +3669,12 @@ export class RunHarness extends EventEmitter {
     q = this._night.q;
     if (!q || this.pendingQuestion?.id !== q.id) return;
     const { config } = effectiveNightConfig(this.projectDir);
-    if (config.neverDecide.includes(q.kind)) return;
+    if (config.neverDecide.includes(q.kind)) {
+      // The kind joined neverDecide after a --yes run handed the ask to night mode: nobody else
+      // will answer, so give today's --yes answer rather than hang.
+      if (this.auto) this._nightAutoFallback(q, `${q.kind} is on the never-decide list`);
+      return;
+    }
     const st = this.auto ? { eligible: true, active: true, graceOn: false, wakeOn: false } : this._nightStateNow(config);
     const delay = decideDelayMs({ state: st, config, openedAt: this._night.openedAt, now: this._nightClock.now() });
     if (delay == null) return;

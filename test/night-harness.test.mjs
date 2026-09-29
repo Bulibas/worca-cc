@@ -396,3 +396,17 @@ test('a human answer ends the unattended stretch the spend cap counts', async ()
   await p2;
   assert.equal(orch._night.since, null);
 });
+
+test('a night-owned --yes run never hangs when its open kind joins neverDecide: the --yes answer', async () => {
+  await setNightMode({ enabled: true, graceMinutes: 1, strategy: 'weights' });
+  const clock = fakeClock();
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h22', nightClock: clock, auto: true });
+  const p = orch._ask({ id: 'c22', kind: 'clarify', questions: Q });
+  assert.ok(orch.pendingQuestion, 'night mode owns the ask');
+  await setNightMode({ enabled: true, graceMinutes: 1, strategy: 'weights', neverDecide: ['clarify'] });
+  orch._nightArm();                    // what a settings change (or a dropped decision's 'rearm') does
+  await clock.tick(0);
+  assert.equal(orch.pendingQuestion, null, 'answered, not left waiting in an unattended run');
+  assert.deepEqual(await p, { answers: [{ id: 'a', choice: 'x' }] });
+  assert.equal(orch.nightDecision('c22').strategy, 'auto');
+});
