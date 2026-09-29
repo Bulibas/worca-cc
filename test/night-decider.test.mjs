@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decideAsk } from '../src/core/night/decider.mjs';
 import { NIGHT_DEFAULTS } from '../src/core/night/config.mjs';
+import { RECOVERY_MAX_AUTO_ATTEMPTS } from '../src/core/failure-policy.mjs';
 
 const cfg = { ...NIGHT_DEFAULTS, strategy: 'weights' };
 
@@ -52,9 +53,18 @@ test('workflow accepts the proposal by name', async () => {
 
 test('recovery waits the backoff then retries', async () => {
   let waited = 0;
-  const r = await decideAsk({ kind: 'recovery', id: 'r', recovery: { cls: 'network' } }, { config: cfg, recoveryAttempts: () => 1, sleep: async (ms) => { waited = ms; } });
+  const r = await decideAsk({ kind: 'recovery', id: 'r', recovery: { cls: 'network', attempt: 2 } }, { config: cfg, sleep: async (ms) => { waited = ms; } });
   assert.deepEqual(r.payload, { decision: 'retry' });
   assert.ok(waited > 0);
+});
+
+test('the recovery retry budget is per node execution (the failed attempt), not per run', async () => {
+  const decide = (attempt) => decideAsk({ kind: 'recovery', id: 'r', recovery: { cls: 'rate_limit', attempt } }, { config: cfg, sleep: async () => {} });
+  assert.equal((await decide(1)).payload.decision, 'retry', 'a fresh execution always gets its retries, however many other steps failed tonight');
+  assert.equal((await decide(RECOVERY_MAX_AUTO_ATTEMPTS)).payload.decision, 'retry');
+  const spent = await decide(RECOVERY_MAX_AUTO_ATTEMPTS + 1);
+  assert.equal(spent.payload.decision, 'pause');
+  assert.equal(spent.record.flagged, true);
 });
 
 test('neverDecide kinds return null (wait for the user)', async () => {

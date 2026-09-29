@@ -27,7 +27,7 @@ function memoAnalyze(analyze, questions) {
 
 /**
  * @param {object} q the ask as _ask received it
- * @param {{config, analyze?, gateCyclesUsed?, recoveryAttempts?, budget?, sleep?}} env
+ * @param {{config, analyze?, gateCyclesUsed?, budget?, sleep?}} env
  *   `analyze(questions)` resolves to {[questionId]: analysis}; a missing entry reads as
  *   "analysis unavailable".
  * @returns {Promise<{payload:object, record:object}|null>} null = this kind waits for the user
@@ -65,7 +65,9 @@ export async function decideAsk(q, env) {
     }
     case 'recovery': {
       const cls = q.recovery?.cls || 'unknown';
-      const attempts = env.recoveryAttempts ? env.recoveryAttempts(cls) : 0;
+      // Retries already spent on THIS node execution (the orchestrator's 1-based failed attempt),
+      // the same budget --yes gets — never a run-wide count, so one flaky step cannot exhaust another's.
+      const attempts = Math.max(0, (Number(q.recovery?.attempt) || 1) - 1);
       const r = recoveryRule({ attempts, max: RECOVERY_MAX_AUTO_ATTEMPTS });
       if (r.decision === 'retry' && env.sleep) await env.sleep(recoveryDelayMs({ cls, attempt: attempts + 1 }));
       return { payload: { decision: r.decision }, record: { choice: r.decision, strategy: 'rule', confidence: null, flagged: r.flagged,

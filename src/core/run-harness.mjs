@@ -888,7 +888,6 @@ export class RunHarness extends EventEmitter {
       override: NIGHT_TOGGLES.includes(savedNight?.override) ? savedNight.override : 'auto',
       q: null, timer: null, openedAt: null, deciding: false,
       since: null,                         // start of the unattended stretch (spend-cap anchor); a human answer ends it
-      recovery: new Map(),                 // cls -> night retries this run
       decisions: new Map(),                // question id -> decision record (for the answer writers)
       count: 0, flagged: 0,
     };
@@ -3422,7 +3421,7 @@ export class RunHarness extends EventEmitter {
 
     this._recovery ||= new Map();
     if (!this._recovery.has(cls)) {
-      const p = this._enqueueRecoveryPrompt(cls, firstLine(err.message), verdict.options)
+      const p = this._enqueueRecoveryPrompt(cls, firstLine(err.message), verdict.options, attempt)
         .finally(() => { if (this._recovery) this._recovery.delete(cls); });
       this._recovery.set(cls, p);
     }
@@ -3435,12 +3434,12 @@ export class RunHarness extends EventEmitter {
    *  distinct classes must queue — see the clarify answer). The prompt carries the
    *  row's options (what the give-up choice does); resolves the policy answer
    *  'retry' | 'giveup' (the legacy `{ decision: 'abort' }` wire value is a give-up). */
-  _enqueueRecoveryPrompt(cls, message, options) {
+  _enqueueRecoveryPrompt(cls, message, options, attempt = 1) {
     const run = () =>
       this._ask({
         id: `recovery-${cls}-${this._recoveryNonce()}`,
         kind: 'recovery',
-        recovery: { cls, message, options },
+        recovery: { cls, message, options, attempt },
       }).then((ans) => answerFromDecision(ans && ans.decision));
     return this._enqueueAsk(run);
   }
@@ -3753,7 +3752,6 @@ export class RunHarness extends EventEmitter {
       config,
       analyze: (qs) => this._nightAnalyze(qs, q),
       gateCyclesUsed: (wireId) => (this.pipeline?.id ? nightGateCycles(this.pipeline.id, wireId) : 0),
-      recoveryAttempts: (cls) => this._night.recovery.get(cls) || 0,
       budget: config.spendCapUsd != null ? { spent: this._nightSpentUsd(config), cap: config.spendCapUsd } : null,
       // sleepAbortable RESOLVES early on a pause; pause() has then nulled pendingQuestion, so
       // the check below drops the decision.
@@ -3766,10 +3764,6 @@ export class RunHarness extends EventEmitter {
     if (nowConfig.neverDecide.includes(q.kind) || !this._nightDue(nowConfig)) {
       this._log('night', 'info', `night mode was switched off while deciding ${q.kind} ${q.id}; it waits for the user`);
       return 'rearm';
-    }
-    if (q.kind === 'recovery') {
-      const cls = q.recovery?.cls || 'unknown';
-      this._night.recovery.set(cls, (this._night.recovery.get(cls) || 0) + 1);
     }
     let record = result.record;
     // The record must be readable by nightDecision(id) BEFORE answer() resolves the ask (the
