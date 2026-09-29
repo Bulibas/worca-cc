@@ -32,9 +32,10 @@ test('mimeForPath', () => {
 });
 
 test('the Ask allowlist is unchanged by the promotion', () => {
-  assert.deepEqual(TEXT_EXTENSIONS, ['.md', '.markdown', '.txt', '.json', '.csv', '.log']);
+  assert.deepEqual(TEXT_EXTENSIONS, ['.md', '.markdown', '.txt', '.json', '.csv', '.log', '.html', '.htm']);
   assert.deepEqual(BINARY_EXTENSIONS, ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf']);
-  assert.equal(classifyExtension('.html'), null, 'html is still not an Ask attachment');
+  assert.deepEqual(classifyExtension('.html'), { kind: 'text', mime: 'text/html' }, 'html is an Ask TEXT attachment (dev) — the viewer still renders it as html');
+  assert.equal(viewerKindFor('deck/deck.html'), 'html');
   assert.deepEqual(classifyExtension('.PNG'), { kind: 'image', mime: 'image/png' });
 });
 
