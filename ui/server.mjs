@@ -25,8 +25,10 @@ import {
   enrichPipelinesPr, reconcileStaleRunning, readPipelineForResume, persistPrState, readPrState,
   readRunLogText, readRunArtifactText, countPipelines, runRootSweepLookups, legacySweepLookups, slugify,
   listArtifacts, listRunArtifacts, lookupPipelineRow, findPipelineRowById, readPipelineStateById, resolveIndexedArtifact, resolveIndexedArtifactForRow,
-  readPromptFile, runDirForRow,
+  resolveIndexedArtifactFileForRow, readPromptFile, runDirForRow, recordArtifact, appendAudit,
 } from '../src/core/artifacts.mjs';
+import { mimeForPath, viewerKindFor } from '../src/shared/artifact-kinds.mjs';
+import { appendDirection, DIRECTION_MAX_CHARS, DIRECTIONS_KIND, DIRECTIONS_FILE, DIRECTIONS_CLOSED } from '../src/core/directions.mjs';
 import { DIFF_PATCH_FILE } from '../src/core/results.mjs';
 import { readAskFileEntry, ASK_FILE_MIMES } from '../src/core/ask-files.mjs';
 import { ASK_FILES_DIR } from '../src/core/ask-forms.mjs';
@@ -437,10 +439,13 @@ function liveRunIds() {
 // persisted column) and never live. It rides the same pass-through as `stepskills`.
 // `exec` and `token` are the graph engine's (§5.7). `phase` stays for the v1
 // engine AND for the v2 shim until the graph cut-over retires it.
-const EVENT_NAMES = ['exec', 'token', 'log', 'question', 'artifact', 'state', 'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title'];
+// `artifact-gone` is this branch's: an indexed artifact whose file the run later
+// removed, so the client can drop the row instead of leaving one that 404s.
+const EVENT_NAMES = ['exec', 'token', 'log', 'question', 'artifact', 'artifact-gone', 'state', 'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title'];
 // The agentgen-* WS family (Agent Platform, Phase 2): a NEW family in the SAME
 // runs Map. createAgentGen emits many agentgen-progress then exactly one terminal
-// agentgen-done OR agentgen-error.
+// agentgen-done OR agentgen-error. (The scan-* family is gone: dev made a
+// workspace scan an ordinary pipeline run, so it rides the run events above.)
 const AGENTGEN_EVENT_NAMES = ['agentgen-progress', 'agentgen-done', 'agentgen-error'];
 // The scriptbench-* family (Scripts workbench §4.1): one more family in the same
 // runs Map. createBench emits many scriptbench-line then exactly one terminal
@@ -2652,6 +2657,15 @@ const chatActions = {
   pendingQuestion: (runId) => runs.get(runId)?.pendingQuestion ?? null,
   // `by` = the chat actor ("ada via Slack", identity.mjs chatActor): attribution text only.
   answer: (runId, id, payload, by) => answerRun(runId, id, payload, by || 'local'),
+  direct: async (runId, text, platform) => {
+    // A run that has left the Map is not unknown — it is in the DB, and if it is
+    // paused its inbox is replayed on resume, which is exactly what postDirection
+    // resolves from the row. Requiring the Map entry made chat refuse what the
+    // HTTP route accepts, for every run outside it. postDirection answers null on
+    // a row that really is gone, which the caller already reports properly.
+    const entry = runs.get(runId);
+    return postDirection(entry ? (entry.pipelineId || entry.id) : runId, text, `chat:${platform || 'chat'}`);
+  },
   stop: (runId, by) => stopRun(runId, by || 'local'),
   pause: (runId, by) => pauseRun(runId, by || 'local'),
   // The long chain of budget/worktree/double-resume guards lives in resumeRun();
@@ -3137,9 +3151,31 @@ app.get('/api/runs/:id/artifacts', async (req, res) => {
     const row = findPipelineRowById(req.params.id);
     if (!row) return res.status(404).json({ error: 'pipeline not found' });
     // Cap the row set (each row costs a synchronous statSync for its byte size, on
-    // the event loop) at the same ceiling the ask tool uses.
-    const artifacts = await listRunArtifacts(row.id, { limit: ASK_LIMITS.artifactsListMaxLimit });
-    res.json({ runId: row.id, artifacts });
+    // the event loop) at the same ceiling the ask tool uses — and fetch one extra
+    // row to SAY so, the way list_run_artifacts does. A three-deck presentation
+    // run indexes past 200, and a partial list the client cannot tell is partial
+    // renders as the whole run.
+    const limit = ASK_LIMITS.artifactsListMaxLimit;
+    // ...and hand back the cursor, so the cap is a page boundary rather than a
+    // wall. Rows are oldest-first, so what a truncated list omits is the NEWEST —
+    // the deliverables — and `truncated` alone left the Artifacts tab saying "this
+    // run indexed more" with nothing behind it. Junk clamps to 0 rather than
+    // reaching SQL: Number('abc') is NaN and a negative offset is meaningless.
+    const asked = Number(req.query.offset);
+    // Clamped to MAX_SAFE_INTEGER, the way the ask tool's clampInt does: a finite
+    // but absurd `?offset=1e20` is still an integer to Number.isInteger, and
+    // node:sqlite refuses to bind it — which came back as a 500 rather than the
+    // empty page an offset past the end should be.
+    const offset = Number.isFinite(asked) && asked > 0
+      ? Math.min(Math.floor(asked), Number.MAX_SAFE_INTEGER) : 0;
+    const rows = await listRunArtifacts(row.id, { limit: limit + 1, offset, browsableOnly: true });
+    const truncated = rows.length > limit;
+    res.json({
+      runId: row.id,
+      artifacts: rows.slice(0, limit),
+      truncated,
+      ...(truncated ? { nextOffset: offset + limit } : {}),
+    });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -3186,6 +3222,53 @@ async function serveAskFile(res, runDir, askId, index) {
   });
 }
 
+const ARTIFACT_RAW_MAX_BYTES = 25 * 1024 * 1024;   // the text route caps at 2 MB; why-worca.standalone.html is 7 MB
+const safeFilename = (rel) => String(rel).split('/').pop().replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'artifact';
+
+/** Stream one indexed artifact's bytes. `rel` only SELECTS among the run's
+ *  indexed rows (never a filesystem path); a stored `..` row is unreachable. */
+async function sendArtifactRaw(res, row, rel) {
+  const hit = await resolveIndexedArtifactFileForRow(row, rel);
+  if (!hit) return res.status(404).json({ error: 'artifact not found' });
+  const mime = mimeForPath(hit.rel);
+  if (!mime) return res.status(415).json({ error: 'no preview for this file type', rel: hit.rel });
+  let size;
+  try { size = (await fsp.stat(hit.file)).size; } catch { return res.status(404).json({ error: 'artifact not found' }); }
+  if (size > ARTIFACT_RAW_MAX_BYTES) return res.status(413).json({ error: 'artifact too large to preview', rel: hit.rel, size });
+  const kind = viewerKindFor(hit.rel);
+  // Set Content-Type explicitly so express/send does not re-derive it from the ext.
+  res.set('Content-Type', mime);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Content-Disposition', `${kind === 'binary' ? 'attachment' : 'inline'}; filename="${safeFilename(hit.rel)}"`);
+  res.set('Cache-Control', 'no-store');                       // artifacts are mutable while a run is live
+  // Defense in depth for scriptable markup: even opened in a top-level tab the
+  // document runs in an opaque origin. The viewer's <iframe sandbox> is the primary guard.
+  if (kind === 'html') res.set('Content-Security-Policy', 'sandbox allow-scripts');
+  else if (mime === 'image/svg+xml') res.set('Content-Security-Policy', 'sandbox');
+  // NO Access-Control-Allow-Origin, deliberately.
+  //
+  // The viewer frames a deck with sandbox="allow-scripts" and no
+  // allow-same-origin, so it has an opaque origin and its CORS-mode `@font-face`
+  // requests carry `Origin: null` — which the localhost-only guard refuses. A
+  // previewed deck therefore renders in FALLBACK TYPE. That is the accepted
+  // cost: the PDF and the standalone HTML (what actually gets sent to anyone)
+  // embed their fonts correctly.
+  //
+  // An earlier attempt exempted `Origin: null` from that guard so the header
+  // could work. It was a hole: every condition is attacker-controllable — any
+  // page can produce `Origin: null` from `<iframe sandbox="allow-scripts">`, and
+  // `Host: localhost:PORT` is simply what the browser sends — so any site the
+  // user visited while worca ran could read a run's font/media bytes and probe
+  // artifact paths for existence. Serving these to an opaque origin safely needs
+  // an unforgeable token in the PATH (so relative subresource URLs inherit it),
+  // not a header the caller chooses.
+  res.sendFile(path.basename(hit.file), { root: path.dirname(hit.file), dotfiles: 'allow', cacheControl: false }, (err) => {
+    if (!err || res.headersSent) return;
+    if (err.code === 'ENOENT' || err.status === 404) return res.status(404).json({ error: 'artifact not found' });
+    res.status(500).json({ error: err.message || String(err) });
+  });
+}
+
 /** The run dir behind a LIVE id: the pipeline id (what /api/runs/:id/artifact
  *  takes) or the WebSocket run UUID (what the browser holds). */
 async function askFilesRunDir(id) {
@@ -3199,6 +3282,75 @@ app.get('/api/runs/:id/ask-files/:askId/:index', async (req, res) => {
   try {
     await serveAskFile(res, await askFilesRunDir(req.params.id), req.params.askId, req.params.index);
   } catch (err) {
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+app.get('/api/runs/:id/artifact-raw/*', async (req, res) => {
+  try {
+    const row = findPipelineRowById(req.params.id);
+    if (!row) return res.status(404).json({ error: 'pipeline not found' });
+    await sendArtifactRaw(res, row, req.params[0]);
+  } catch (err) { res.status(500).json({ error: err && err.message ? err.message : String(err) }); }
+});
+
+// DIRECTIONS_CLOSED (and the reasoning about why `paused` is not in it) lives in
+// src/core/directions.mjs, because chat's /direct resolves against the same set.
+// It was stated in both places and they drifted: this route accepted a paused run
+// while /direct refused it.
+
+/** Append a direction for a run by PIPELINE id (a run that is merely paused
+ *  included — a live run's own direct() logs + indexes; otherwise append + index
+ *  directly). Throws RUN_FINISHED when nothing will ever read it; returns null
+ *  when the run, or its reclaimed run folder, is gone. */
+async function postDirection(pipelineId, text, source) {
+  const row = findPipelineRowById(pipelineId);
+  if (!row) return null;
+  // BEFORE the live branch. A finished run stays parked in the runs Map — that is
+  // the very reason resolveTarget takes `wantLive` — so liveRunEntry still hands
+  // back an orchestrator for a run whose status is done, and its direct() would
+  // append and answer 201 for a direction no step will ever read. Putting this
+  // check after the live branch made it dead code for every run still in the Map,
+  // which is every run anyone would plausibly post to.
+  if (row.archived_at || DIRECTIONS_CLOSED.has(String(row.status || ''))) {
+    const err = new Error('run is finished; a direction would never be read');
+    err.code = 'RUN_FINISHED';
+    throw err;
+  }
+  const live = liveRunEntry(row.id);
+  if (live?.orch && typeof live.orch.direct === 'function') return live.orch.direct(text, source);
+  try {
+    const dir = await runDirForRow(row);
+    const rec = await appendDirection(dir, { text, source });
+    recordArtifact(row.id, DIRECTIONS_KIND, DIRECTIONS_FILE);
+    // Leave a record, the way RunHarness.direct does. There is no live orchestrator
+    // here — no log writer, no emit — so without this a direction posted to a paused
+    // run that has left the runs Map (any server restart) shows up in History as
+    // `direction:applied` after the resume with nothing saying it was ever posted.
+    // That is the same gap the live branch falls back to appendAudit to close.
+    await appendAudit(dir, `Direction **${rec.id}** posted (${rec.source}): ${rec.text}`).catch(() => {});
+    return rec;
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return null;   // run folder reclaimed → 404, not 500
+    throw err;
+  }
+}
+
+app.post('/api/runs/:id/directions', async (req, res) => {
+  const { text } = req.body || {};
+  if (text === undefined || text === null || text === '') return badRequest(res, 'text is required');
+  if (typeof text !== 'string') return badRequest(res, 'text must be a string');
+  // Whitespace-only is a bad request, not a server error: appendDirection throws
+  // EMPTY_DIRECTION on it, which the generic catch below would turn into a 500.
+  // Same guard the ask route uses.
+  if (!text.trim()) return badRequest(res, 'text is required');
+  if (text.length > DIRECTION_MAX_CHARS) return badRequest(res, `text must be at most ${DIRECTION_MAX_CHARS} characters`);
+  try {
+    const rec = await postDirection(req.params.id, text, 'ui');
+    if (!rec) return res.status(404).json({ error: 'pipeline not found' });
+    res.status(201).json({ id: rec.id });
+  } catch (err) {
+    if (err && err.code === 'RUN_FINISHED') return res.status(409).json({ error: err.message });
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
 });
@@ -3968,6 +4120,17 @@ app.get('/api/history/:key/:id/ask-files/:askId/:index', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
+});
+
+app.get('/api/history/:key/:id/artifact-raw/*', async (req, res) => {
+  if (!/^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/.test(req.params.key)) {
+    return res.status(404).json({ error: 'pipeline not found' });
+  }
+  try {
+    const row = lookupPipelineRow(req.params.key, req.params.id);
+    if (!row) return res.status(404).json({ error: 'artifact not found' });
+    await sendArtifactRaw(res, row, req.params[0]);
+  } catch (err) { res.status(500).json({ error: err && err.message ? err.message : String(err) }); }
 });
 
 // ---------------------------------------------------------------------------
@@ -5053,6 +5216,15 @@ app.get('/api/workspaces/:wid/runs/:id/ask-files/:askId/:index', async (req, res
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
+});
+
+app.get('/api/workspaces/:id/runs/:runId/artifact-raw/*', async (req, res) => {
+  if (!WORKSPACE_KEY_RE.test(req.params.id)) return res.status(404).json({ error: 'pipeline not found' });
+  try {
+    const row = lookupPipelineRow(`workspaces/${req.params.id}`, req.params.runId);
+    if (!row) return res.status(404).json({ error: 'artifact not found' });
+    await sendArtifactRaw(res, row, req.params[0]);
+  } catch (err) { res.status(500).json({ error: err && err.message ? err.message : String(err) }); }
 });
 
 // ---------------------------------------------------------------------------

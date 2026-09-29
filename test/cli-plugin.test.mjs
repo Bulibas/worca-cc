@@ -266,7 +266,9 @@ function workflowRows(home) {
   const mod = pathToFileURL(resolve(__dirname, '..', 'src', 'core', 'workflows.mjs')).href;
   const src = `const m = await import(${JSON.stringify(mod)});`
     + 'const ws = await m.listWorkflows();'
-    + 'process.stdout.write(JSON.stringify(ws.map((w) => ({ id: w.id, name: w.name }))));';
+    // wf_presentation is a shipped seed (schema V30) on every store; this helper
+    // is about plugin-authored rows, so drop it.
+    + 'process.stdout.write(JSON.stringify(ws.filter((w) => w.id !== "wf_presentation").map((w) => ({ id: w.id, name: w.name }))));';
   const r = spawnSync(process.execPath,
     ['--input-type=module', '--disable-warning=ExperimentalWarning', '-e', src],
     { encoding: 'utf8', env: { ...process.env, WORCA_HOME: home, WORCA_MOCK: '1' } });

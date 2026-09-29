@@ -1,0 +1,60 @@
+{
+  "key": "deckPdf",
+  "metaVersion": 2,
+  "displayName": "Deck PDF",
+  "description": "Prints the finished deck to deck/deck.pdf with headless Chrome and asserts the page count equals the slide count. Skipped when the Clarify answers deselect the PDF. Runs with worca's privileges.",
+  "domain": "presentation",
+  "color": "green",
+  "icon": "<path d=\"M4 7h16v13H4z\" fill=\"none\"/><path d=\"M4 7l2-3h12l2 3\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M12 11v5M9.5 13.5L12 16l2.5-2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>",
+  "order": 38,
+  "runtime": "python",
+  "file": "deck-pdf.py",
+  "timeoutMs": 300000,
+  "inputs": [
+    {
+      "id": "built",
+      "type": "md"
+    }
+  ],
+  "outputs": [
+    {
+      "id": "report",
+      "type": "md",
+      "when": "always",
+      "filename": "deck-pdf-cycle{cycle}.md",
+      "artifactKind": "deck-pdf",
+      "extraFiles": [
+        {
+          "kind": "deck",
+          "glob": "deck/deck*.pdf"
+        }
+      ]
+    },
+    {
+      "id": "findings",
+      "type": "md",
+      "when": "blocking",
+      "filename": "deck-pdf-cycle{cycle}.md",
+      "artifactKind": "deck-pdf"
+    },
+    {
+      "id": "pass",
+      "type": "void",
+      "when": "clean"
+    }
+  ],
+  "verdict": {
+    "filename": "deck-pdf-cycle{cycle}.json"
+  },
+  "mock": {
+    "summary": "PDF printed (mock): deck/deck.pdf.",
+    "verdict": {
+      "issues": []
+    },
+    "outputs": {
+      "report": {
+        "text": "# Deck PDF — mock\n\nNo blocking findings.\n"
+      }
+    }
+  }
+}

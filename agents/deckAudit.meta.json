@@ -1,0 +1,49 @@
+{
+  "key": "deckAudit",
+  "metaVersion": 2,
+  "mockRole": "deck-audit",
+  "promptHints": "Mechanical facts only: render deck/proof.html headless (one load reports every slide), read the deck-audit.js report, screenshot every slide of deck/proof.html into shots/sNN.png — never deck.html, which mounts the presenter shell. Clear shots/ first and verify your own shots are complete, fresh and non-blank. Report escapes, clipped text, low contrast, small text and the word count; never taste. Pipeline directory: {pipelineDir}. Cycle: {cycle}.",
+  "verdict": {
+    "filename": "deck-audit-cycle{cycle}.json"
+  },
+  "inputs": [
+    {
+      "id": "built",
+      "type": "md"
+    }
+  ],
+  "outputs": [
+    {
+      "id": "findings",
+      "type": "md",
+      "when": "blocking",
+      "filename": "deck-audit-cycle{cycle}.md",
+      "artifactKind": "deck-audit",
+      "extraFiles": [
+        {
+          "kind": "deck-shot",
+          "glob": "shots/*.png"
+        }
+      ]
+    },
+    {
+      "id": "pass",
+      "type": "void",
+      "when": "clean"
+    }
+  ],
+  "domain": "presentation",
+  "displayName": "Deck Audit",
+  "description": "Renders the proof copy headless and reports mechanical facts: boxes that escape the slide, clipped text, contrast, text size, word counts. Screenshots every slide.",
+  "color": "blue",
+  "icon": "<rect x=\"3\" y=\"4\" width=\"18\" height=\"12\" rx=\"1.5\"/><path d=\"M7 13l3-3 2 2 5-5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><circle cx=\"17\" cy=\"18\" r=\"3\"/><path d=\"M19.2 20.2L21 22\" stroke-linecap=\"round\"/>",
+  "agentFile": "worca-cc-deck-audit.md",
+  "requiresAssets": [
+    "deck-kit"
+  ],
+  "runnerType": "verifier",
+  "asksQuestions": false,
+  "questionsLocked": false,
+  "questionsDefault": false,
+  "order": 14
+}

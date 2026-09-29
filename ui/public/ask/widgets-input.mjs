@@ -122,11 +122,22 @@ export function segmented(ctx, opts, current, onPick, { tones = null, small = fa
 function textWidget(item, ctx) {
   const s = ctx.schemaOf(item.field);
   const input = ctx.doc.createElement('input');
-  input.type = 'text';
+  const current = ctx.get(item.field) == null ? '' : String(ctx.get(item.field));
+  // `secret`: masked, never autofilled or spell-checked. A stored answer carries only a marker
+  // (`[typed]`, `[env:NAME]`), so a History view shows that marker as plain text, not dots.
+  const masked = item.secret === true && !/^\[.*\]$/.test(current);
+  input.type = masked ? 'password' : 'text';
+  if (masked) { input.autocomplete = 'new-password'; input.spellcheck = false; }
   input.className = item.mono ? 'af-inp mono' : 'af-inp';
   if (item.placeholder) input.placeholder = String(item.placeholder);
+  // The engine tells the surface ONLY that the variable is set (`envSet`) — never its value.
+  if (item.secret === true && item.envDefault) {
+    input.placeholder = item.envSet
+      ? 'Using $' + item.envDefault + ' from the environment — type to override'
+      : '$' + item.envDefault + ' is not set — paste a key or leave empty to skip';
+  }
   if (s.maxLength != null) input.maxLength = Number(s.maxLength);
-  input.value = ctx.get(item.field) == null ? '' : String(ctx.get(item.field));
+  input.value = current;
   prepControl(input, item, ctx);
   input.addEventListener('input', () => ctx.set(item.field, input.value));
   return fieldShell(item, ctx, input);

@@ -932,6 +932,23 @@ test('openRunArtifact reads the End chip through the by-id route on Running and 
   assert.equal(window.document.querySelector('#viewer-card').classList.contains('hidden'), false);
 });
 
+// The text branch titles the viewer with the server's run-relative `rel`; the raw
+// branch used the caller's `rel` verbatim, and a `.log-artifact` click carries the
+// artifact event's ABSOLUTE path — so the same file opened from a log line was
+// titled with the user's home directory while the Artifacts tab titled it
+// `Artifact: deck.html`.
+test('openRunArtifact titles the raw viewer with the file, never the absolute run path', async () => {
+  const window = await bootApp();
+  const np = window.__np;
+  const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
+  r.pipelineId = 'abcd1234';
+  await np.openRunArtifact({ run: r, runId: 'r1' }, '/Users/me/.worca-cc/runs/proj-00000001/run1/deck/deck.html');
+  assert.equal(window.document.querySelector('#viewer-title').textContent, 'Saved: deck.html');
+  // An already-relative rel keeps its shape — that is the more informative title.
+  await np.openRunArtifact({ run: r, runId: 'r1' }, 'deck/deck.html');
+  assert.equal(window.document.querySelector('#viewer-title').textContent, 'Saved: deck/deck.html');
+});
+
 test('applyRunLogFilter assigns onto r.logFilter and repaints; focusLogExecution narrows the Running log and activates the detail\'s Logs tab', async () => {
   const window = await bootApp();
   const np = window.__np;
@@ -1203,4 +1220,33 @@ test('MAJ-20: rows that vanish are removed, new ones are appended in order, and 
   assert.equal(card.querySelectorAll('.xrow').length, 0);
   assert.equal(card.querySelector('.xtoggle'), toggle, 'the toggle is never rebuilt by a collapse');
   assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+});
+
+// buildLogLine stamps `data-kind` on a `.log-artifact` anchor, but the delegated
+// click handler passed only the path — so openRunArtifact fell through to the
+// extension table. For an artifact with NO extension, viewerKindFor's kind-based
+// fallback (plan/review -> markdown, result -> diff) could never fire from a log
+// line, and the same file rendered as plain text there while the Artifacts tab,
+// which does pass the kind, rendered it correctly.
+test('a log-line artifact click carries its kind, so an extension-less plan renders as markdown', async () => {
+  const window = await bootApp();
+  const np = window.__np;
+  globalThis.fetch = window.fetch = () => Promise.resolve({
+    ok: true, status: 200, json: async () => ({ rel: 'PLAN', text: '# heading' }),
+  });
+  const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
+  r.pipelineId = 'abcd1234';
+  await np.openRunArtifact({ run: r, runId: 'r1' }, 'PLAN', 'plan');
+  // renderArtifact stamps the RESOLVED view as a `kind-*` class; that is the
+  // property under test. (Whether the markdown then renders to HTML depends on the
+  // injected marked/DOMPurify seam, which is a different test's subject.)
+  const host = window.document.querySelector('.artifact-view');
+  assert.ok(host, 'a typed viewer mounted');
+  assert.ok(host.classList.contains('kind-markdown'),
+    `resolved as markdown, not text: ${[...host.classList].join(' ')}`);
+
+  // ...and with no kind to go on, the extension table still decides, as before.
+  await np.openRunArtifact({ run: r, runId: 'r1' }, 'PLAN');
+  const bare = window.document.querySelector('.artifact-view');
+  assert.ok(bare.classList.contains('kind-text'), [...bare.classList].join(' '));
 });

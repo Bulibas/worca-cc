@@ -22,7 +22,10 @@ export const ASK_LIMITS = Object.freeze({
  *  Gate 1 refuses anything else, and the renderer reads nothing else — one table, no drift. */
 export const COMMON_ITEM_KEYS = Object.freeze(['widget', 'field', 'bind', 'label', 'help', 'when', 'requires', 'fallback']);
 export const LAYOUT_ITEM_KEYS = Object.freeze({
-  text: Object.freeze(['placeholder', 'mono']),
+  // `secret`: the value is masked in every surface and NEVER persisted (the engine swaps it for a
+  // marker before any write). `envDefault`: an environment variable NAME the engine resolves
+  // server-side — the value never reaches a browser, an LLM or the stored ask.
+  text: Object.freeze(['placeholder', 'mono', 'secret', 'envDefault']),
   textarea: Object.freeze(['placeholder', 'rows']),
   number: Object.freeze(['unit', 'placeholder']),
   slider: Object.freeze(['unit', 'minLabel', 'maxLabel']),

@@ -180,7 +180,10 @@ test('every layout key the widgets read is in P1 LAYOUT_ITEM_KEYS (X6 / C15)', (
   for (const keys of Object.values(LAYOUT_ITEM_KEYS)) for (const k of keys) allowed.add(k);
   // Keys the ENGINE owns on a column/tab descriptor, never on a layout item.
   const notItemKeys = new Set(['key', 'align', 'mono', 'unit', 'format', 'tones', 'value',
-    'description', 'from', 'id', 'verdict', 'note', 'children']);
+    'description', 'from', 'id', 'verdict', 'note', 'children',
+    // Stamped onto a secret text item by the engine (applyEnvDefaults) — "is the env var set?" —
+    // never authored, so it is deliberately NOT a P1 item key.
+    'envSet']);
   const offenders = [];
   for (const [f, p] of files) {
     const src = readFileSync(p, 'utf8')
@@ -348,4 +351,28 @@ test('gallery with a field is a picker: <img> per row, aria-pressed, one winner'
   assert.equal(f.snapshot().picked, 'b');
   assert.equal(cards[1].getAttribute('aria-pressed'), 'true');
   assert.equal(cards[0].getAttribute('aria-pressed'), 'false');
+});
+
+test('text: a secret field is masked, and says where the value will come from — never the value', () => {
+  const layout = [{ widget: 'text', field: 'k', label: 'Key', secret: true, envDefault: 'MY_KEY', envSet: true }];
+  const f = mount(askOf(layout, { k: { type: 'string' } }));
+  const el = f.el.querySelector('input');
+  assert.equal(el.type, 'password');
+  assert.equal(el.getAttribute('autocomplete'), 'new-password');
+  assert.match(el.placeholder, /Using \$MY_KEY from the environment/);
+  assert.equal(el.value, '', 'the surface is never handed the value');
+  assert.deepEqual(f.collect().values, {}, 'an untouched secret collects nothing — the engine uses the environment');
+  el.value = 'typed';
+  input(el);
+  assert.equal(f.collect().values.k, 'typed');
+});
+
+test('text: a secret whose variable is unset says so, and a stored marker is shown as text', () => {
+  const layout = [{ widget: 'text', field: 'k', secret: true, envDefault: 'MY_KEY', envSet: false }];
+  const f = mount(askOf(layout, { k: { type: 'string' } }));
+  assert.match(f.el.querySelector('input').placeholder, /\$MY_KEY is not set/);
+  const g = mount(askOf(layout, { k: { type: 'string' } }), { values: { k: '[env:MY_KEY]' }, readonly: true });
+  const shown = g.el.querySelector('input');
+  assert.equal(shown.type, 'text', 'History shows the marker, not dots');
+  assert.equal(shown.value, '[env:MY_KEY]');
 });

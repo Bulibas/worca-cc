@@ -40,11 +40,12 @@ test('GET /api/agents excludes scope:"workspace-only" agents from the palette', 
   const keys = agents.map((a) => a.key);
   assert.ok(!keys.includes('workspaceScanner'), 'scanner is non-composable (excluded)');
   assert.ok(!keys.includes('workspaceReviewer'), 'workspace reviewer excluded from single-project palette');
-  // The original 9 project agents must all still be offered (the 10th is memoryDefragmenter).
-  for (const k of ['clarify', 'planner', 'refiner', 'decomposer', 'implementer', 'reviewer', 'manualTestsChecklist', 'manualWebUiTesting', 'planReviewer']) {
+  // The 10 coding project agents plus the 7 presentation agents must be offered.
+  for (const k of ['clarify', 'planner', 'refiner', 'decomposer', 'implementer', 'reviewer', 'manualTestsChecklist', 'manualWebUiTesting', 'planReviewer', 'memoryDefragmenter',
+    'deckClarify', 'deckNarrative', 'deckSystem', 'deckBuilder', 'deckAudit', 'deckReviewer', 'deckExport']) {
     assert.ok(keys.includes(k), `palette must still offer ${k}`);
   }
-  assert.equal(agents.length, 10, 'exactly the 10 project agents are composable');
+  assert.equal(agents.length, 18, 'exactly the 18 project agents are composable');
 });
 
 test('GET /api/agents returns palette order (ascending .order)', async () => {

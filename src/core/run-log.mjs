@@ -58,6 +58,10 @@ export function createRunLogWriter({ flushMs = 1000, maxBuffer = 256 } = {}) {
       flush();
       await chain;
     },
+    /** Has close() run? `push` is a no-op after it, so a caller that can still be
+     *  reached once the run has settled (direct(), on a PAUSED run) needs to know
+     *  its line will go nowhere and record it somewhere that still accepts one. */
+    isClosed() { return closed; },
     /** @internal test hook */
     _pending() { return buf.length; },
   };

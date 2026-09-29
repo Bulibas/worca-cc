@@ -29,7 +29,9 @@ function fakeRun(replies, { costUsd = 0.01 } = {}) {
 const base = (over = {}) => ({ taskText: 'Build the thing', models: MODELS, registry: REG, model: 'claude-sonnet-5', cwd: process.cwd(), ...over });
 
 test('agentVocabulary: placeable project agents in registry order; sidecar + frontmatter both labelled; tools folded; body never read', () => {
-  const v = agentVocabulary(REG);
+  // domain 'coding' keeps the coding agents and the 'shared'/'general' ones
+  // (domainOk in classify.mjs); the seven presentation agents are filtered out.
+  const v = agentVocabulary(REG, { domain: 'coding' });
   assert.deepEqual(v.map((a) => a.key), ['clarify', 'planner', 'refiner', 'decomposer', 'implementer', 'reviewer', 'manualTestsChecklist', 'manualWebUiTesting', 'planReviewer', 'memoryDefragmenter']);
   assert.ok(!v.some((a) => a.key === 'workspaceScanner' || a.key === 'workspaceReviewer'), 'placeable:false and workspace-only are out');
   const web = v.find((a) => a.key === 'manualWebUiTesting');

@@ -388,6 +388,11 @@ body.view-workspaces .topnav{margin:12px 32px 0;flex:0 0 auto;}
 .hint.warn{color:var(--amber-ink);}
 .stat-tile .stat-value.is-neg{color:var(--red-ink);}
 .stat-tile .stat-value.is-pos{color:var(--green-ink);}
+/* The History Artifacts truncation notice is a BUTTON — it loads the next page —
+   so it must not carry platform button chrome inside a list of artifact rows. It
+   keeps the muted .hint register and says it is clickable by being underlined. */
+button.hint.artifact-truncated{appearance:none;-webkit-appearance:none;background:none;border:0;padding:0;margin-top:7px;width:100%;text-align:left;font:inherit;font-size:12px;color:var(--ink-3);cursor:pointer;text-decoration:underline;}
+button.hint.artifact-truncated:disabled{cursor:default;text-decoration:none;opacity:.6;}
 
 .input,.select,.textarea,.ta-hl-back,
 input[type="text"],input[type="number"],textarea,select{
@@ -741,7 +746,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .log-src{font-weight:600;color:var(--ink-2);flex:0 0 auto;}
 .log-msg{color:var(--ink-2);flex:1;}
 .lvl-phase .log-msg{color:var(--green-ink);font-weight:600;}
-.lvl-artifact .log-msg{color:var(--blue-ink);}
+.lvl-artifact .log-msg{color:var(--blue-ink-strong);}   /* link-like text at 12.5px: the strong token is the accessible one (5.9:1 vs 3.8:1) */
 .lvl-error .log-msg{color:var(--red-ink);}
 .lvl-warn .log-msg{color:var(--amber-ink);}
 .lvl-system .log-msg{color:var(--ink-3);font-style:italic;}
@@ -1274,6 +1279,22 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 /* ---------- Saved-markdown viewer ---------- */
 .viewer{font-family:var(--mono);font-size:12.5px;line-height:1.7;background:var(--canvas-2);border:1px solid var(--line);
   border-radius:var(--r-card);padding:18px 20px;max-height:480px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;}
+
+/* ---------- typed artifact viewer ---------- */
+/* The typed host mounts inside <pre class="viewer">, whose max-height:480px
+   otherwise clamps the 80vh host and the 70vh <embed> a PDF renders into. Drop
+   the <pre>'s markdown shell while it is holding one (showViewerHost adds the
+   class, hideViewer removes it) rather than leaning on :has(). */
+.viewer.holds-artifact{max-height:none;overflow:visible;padding:0;background:none;border:0;}
+.artifact-view{max-height:80vh;overflow:auto;}
+.artifact-view iframe{width:100%;aspect-ratio:16/9;border:0;background:var(--bg);border-radius:12px;}
+.artifact-view embed{width:100%;height:70vh;border-radius:12px;}
+.artifact-view.kind-image img{max-width:100%;cursor:zoom-in;border-radius:12px;}
+.artifact-view.kind-image.zoomed img{max-width:none;cursor:zoom-out;}
+/* --blue-ink-strong, not --blue-ink: inline link text at a small size is what that
+   token is for (5.9:1 on white vs 3.8:1), and the light contrast gate flags these
+   artifact links in the History run detail. */
+.log-artifact{color:var(--blue-ink-strong);text-decoration:underline;cursor:pointer;}
 
 /* ---------- scrollbars ---------- */
 ::-webkit-scrollbar{width:10px;height:10px;}
@@ -6417,6 +6438,23 @@ input.gv-name:focus-visible{outline:none;}
    restated here or the toggle can never close the list. */
 .artifact-list[hidden]{display:none;}
 
+/* One kind too bulky to list flat (a deck audit indexes a screenshot per slide):
+   a summary row that reads like an artifact row and expands into real ones. Its
+   rows are built on first expand, so the collapsed state has no children at all
+   — but restate [hidden] anyway, the way .artifact-list has to. */
+.artifact-bulk-toggle{display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+  appearance:none;border:none;background:transparent;cursor:pointer;
+  padding:11px 20px;font:500 12.5px var(--sans);color:var(--ink-2);}
+.artifact-group .artifact-bulk-toggle{border-top:1px solid var(--line);}
+.artifact-group-head + .artifact-bulk-toggle,.artifact-cycle + .artifact-bulk-toggle{border-top:none;}
+.artifact-bulk-toggle:hover{background:var(--field);color:var(--ink);}
+.artifact-bulk-toggle::after{content:"▸";margin-left:auto;font-size:10px;color:var(--ink-3);}
+.artifact-bulk-toggle[aria-expanded="true"]::after{content:"▾";}
+.artifact-list .artifact-bulk-toggle{padding:8px 12px;border:1px solid var(--line-2);border-radius:10px;background:var(--field);}
+.artifact-bulk-list{display:flex;flex-direction:column;}
+.artifact-bulk-list[hidden]{display:none;}
+.artifact-group .artifact-bulk-list .artifact-row{padding-left:32px;}
+
 /* A single clickable artifact row (kind chip · name · byte size). */
 .artifact-group .artifact-row{border-top:1px solid var(--line);}
 .artifact-group-head + .artifact-row,.artifact-cycle + .artifact-row{border-top:none;}
@@ -6429,10 +6467,14 @@ input.gv-name:focus-visible{outline:none;}
 .artifact-kind{flex:0 0 auto;font-size:10px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;
   padding:2px 8px;border-radius:6px;background:var(--violet-bg);color:var(--violet-ink);}
 .artifact-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.artifact-bytes{margin-left:auto;flex:0 0 auto;font-size:11px;color:var(--ink-3);}
+/* --ink-2 at 11px: --ink-3 is 2.8:1 on white, which the light contrast gate flags
+   once the artifacts tab paints a byte size. Still the quiet, secondary ink. */
+.artifact-bytes{margin-left:auto;flex:0 0 auto;font-size:11px;color:var(--ink-2);}
 
-/* Typed viewers rendered into the shared #viewer modal by renderArtifact. The
-   host resets the enclosing <pre>'s white-space:pre so each viewer owns its own. */
+/* Typed viewers rendered by renderArtifact into the .artifact-view host
+   (#viewer, a <pre>, is kept only for plain error strings). The bare
+   .artifact-view rule stays because the host also serves anywhere a <pre> could
+   enclose it; each viewer owns its own white-space below. */
 .artifact-view{white-space:normal;}
 .artifact-text,.artifact-json,.artifact-diff{margin:0;font-family:var(--mono);font-size:12px;line-height:1.55;
   white-space:pre-wrap;word-break:break-word;color:var(--ink);}

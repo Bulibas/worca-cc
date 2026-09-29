@@ -138,6 +138,9 @@ export function normalizeMeta(raw, { warn = console.warn, onDropForm = null } = 
     requiresSkills: Array.isArray(raw.requiresSkills)
       ? raw.requiresSkills.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim())
       : [],
+    requiresAssets: Array.isArray(raw.requiresAssets)
+      ? raw.requiresAssets.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim())
+      : [],
   };
   // ── meta v2 merge (dual shape, P2a..P8) ────────────────────────────────────
   // A v2 sidecar KEEPS every v1 field and GAINS typed ports + capabilities, so
@@ -164,7 +167,7 @@ export function normalizeMeta(raw, { warn = console.warn, onDropForm = null } = 
     portSummary: meta.portSummary,
   };
   for (const field of ['verdict', 'sideEffect', 'mockRole', 'wantsRequest', 'workspaceFanOut',
-    'workspaceStrategy', 'workspaceVariantOf', 'placeable', 'ask', 'humanEffort']) {
+    'workspaceStrategy', 'workspaceVariantOf', 'placeable', 'ask', 'humanEffort', 'requiresAssets']) {
     if (field in meta) merged[field] = meta[field];
   }
   return merged;

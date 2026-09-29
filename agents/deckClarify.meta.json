@@ -1,0 +1,19 @@
+{
+  "key": "deckClarify",
+  "metaVersion": 2,
+  "mockRole": "clarify",
+  "promptHints": "Step 1 of the skill inverts every rule downstream: presented live or read alone? Then audience, duration and the slide budget it implies (about one slide per minute), the single ask, sources, brand constraints.",
+  "inputs": [{ "id": "task", "type": "md" }],
+  "outputs": [{ "id": "answers", "type": "json", "filename": "deck-clarify.json", "artifactKind": "deck-clarify" }],
+  "domain": "presentation",
+  "displayName": "Deck Clarify",
+  "description": "Asks the questions that shape a deck before anything is written: live or read-alone, audience, duration, the ask, sources.",
+  "color": "red",
+  "icon": "<rect x=\"3\" y=\"5\" width=\"18\" height=\"12\" rx=\"1.5\"/><path d=\"M12 17v3M8 20h8\" stroke-linecap=\"round\"/><path d=\"M10.4 9.3a1.7 1.7 0 0 1 3.2.6c0 1.1-1.6 1.3-1.6 2.2\" stroke-linecap=\"round\" fill=\"none\"/>",
+  "agentFile": "worca-cc-deck-clarify.md",
+  "runnerType": "clarifier",
+  "asksQuestions": true,
+  "questionsLocked": true,
+  "questionsDefault": true,
+  "order": 10
+}

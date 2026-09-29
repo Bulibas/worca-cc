@@ -102,4 +102,4 @@ the loop between autonomy and understanding.
 
 A narrated slide deck of this document lives in [`docs/why-worca/`](why-worca/)
 — open `why-worca.html` in a browser, or bundle it into a single file with
-`node docs/why-worca/build-standalone.mjs docs/why-worca/why-worca.html`.
+`node assets/deck-kit/build-standalone.mjs docs/why-worca/why-worca.html`.

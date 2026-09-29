@@ -1,0 +1,114 @@
+{
+  "key": "deckOutputs",
+  "metaVersion": 2,
+  "mockRole": "clarify",
+  "promptHints": "Write exactly {\"form\":\"deck-outputs\",\"data\":{}} to the answers path and stop. The form carries every option; the engine fills the defaults and, for the ElevenLabs key and voice id, reads ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID itself.",
+  "inputs": [
+    {
+      "id": "task",
+      "type": "md"
+    }
+  ],
+  "outputs": [
+    {
+      "id": "answers",
+      "type": "json",
+      "filename": "deck-outputs.json",
+      "artifactKind": "deck-outputs"
+    }
+  ],
+  "domain": "presentation",
+  "displayName": "Deck Outputs",
+  "description": "Asks which deliverables to produce (PDF, single-file HTML) and whether to generate a narration voiceover. Defaults reproduce the standard pipeline: PDF + standalone HTML, no audio.",
+  "color": "red",
+  "icon": "<rect x=\"3\" y=\"5\" width=\"18\" height=\"12\" rx=\"1.5\"/><path d=\"M12 17v3M8 20h8\" stroke-linecap=\"round\"/><path d=\"M10.4 9.3a1.7 1.7 0 0 1 3.2.6c0 1.1-1.6 1.3-1.6 2.2\" stroke-linecap=\"round\" fill=\"none\"/>",
+  "agentFile": "worca-cc-deck-outputs.md",
+  "runnerType": "clarifier",
+  "asksQuestions": true,
+  "questionsLocked": true,
+  "questionsDefault": true,
+  "order": 17,
+  "ask": {
+    "forms": {
+      "deck-outputs": {
+        "version": 1,
+        "title": "What should this run produce?",
+        "data": {
+          "type": "object",
+          "properties": {}
+        },
+        "answer": {
+          "type": "object",
+          "properties": {
+            "deliverables": {
+              "type": "string",
+              "enum": [
+                "PDF + standalone HTML",
+                "PDF only",
+                "Standalone HTML only",
+                "Deck files only"
+              ],
+              "default": "PDF + standalone HTML"
+            },
+            "audio": {
+              "type": "string",
+              "enum": [
+                "No audio",
+                "Generate narration audio (ElevenLabs)"
+              ],
+              "default": "No audio"
+            },
+            "voiceId": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "apiKey": {
+              "type": "string",
+              "maxLength": 256
+            }
+          }
+        },
+        "layout": [
+          {
+            "widget": "select",
+            "field": "deliverables",
+            "label": "Deliverables",
+            "help": "The deck itself is always built. PDF and standalone HTML are the defaults; deselect what you do not need.",
+            "style": "cards"
+          },
+          {
+            "widget": "select",
+            "field": "audio",
+            "label": "Narration audio",
+            "help": "Optional. Generated from the deck's speaker notes with ElevenLabs. Unattended runs without a key skip it.",
+            "style": "segmented"
+          },
+          {
+            "widget": "text",
+            "field": "voiceId",
+            "label": "ElevenLabs voice ID",
+            "envDefault": "ELEVENLABS_VOICE_ID",
+            "mono": true,
+            "placeholder": "ElevenLabs → Voices → (voice) → ID",
+            "when": {
+              "audio": "Generate narration audio (ElevenLabs)"
+            }
+          },
+          {
+            "widget": "text",
+            "field": "apiKey",
+            "label": "ElevenLabs API key",
+            "secret": true,
+            "envDefault": "ELEVENLABS_API_KEY",
+            "mono": true,
+            "help": "Used for this run only and never written to disk or stored with the run.",
+            "when": {
+              "audio": "Generate narration audio (ElevenLabs)"
+            }
+          }
+        ],
+        "example": {}
+      }
+    }
+  }
+}
