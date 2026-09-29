@@ -84,6 +84,9 @@ export const FAILURE_POLICY = Object.freeze({
     // A self-parked auto run pauses as RECOVERABLE (the class is kept: "resume when
     // it clears"); a user who gives up on the prompt pauses as ERROR (a verdict).
     auth:        cell(pause(REASON.RECOVERABLE), prompt(pause(REASON.ERROR))),
+    // The model id itself was refused — retrying the same id is futile. The
+    // run parks as an error; resume retries the node once the model is fixed.
+    model:       both(pause(REASON.ERROR)),
     quota:       cell(pause(REASON.RECOVERABLE), prompt(pause(REASON.ERROR))),
     rate_limit:  cell(retry(RECOVERY_MAX_AUTO_ATTEMPTS, pause(REASON.RECOVERABLE)), prompt(pause(REASON.ERROR))),
     network:     cell(retry(RECOVERY_MAX_AUTO_ATTEMPTS, pause(REASON.RECOVERABLE)), prompt(pause(REASON.ERROR))),
@@ -103,13 +106,15 @@ export const FAILURE_POLICY = Object.freeze({
   }),
   // run()'s setup — checkout, graph build, skills gate — failed with the pipeline
   // row already created. A pause here stamps `setupIncomplete`; resume replays it.
-  setup: Object.freeze({ '*': both(pause(REASON.ERROR)) }),
+  // A usage limit (OpenRouter's daily free requests spent by the Auto classifier, say)
+  // is not a setup bug: it pauses as a usage limit, resumable after the reset.
+  setup: Object.freeze({ usage_limit: both(pause(REASON.USAGE_LIMIT)), '*': both(pause(REASON.ERROR)) }),
   // Before the pipeline row exists (topology, preflight, tool detection) there is
   // nothing to resume into: a launch error is the only enactable verdict.
   launch: Object.freeze({ '*': both(error()) }),
   // Anything that escaped the engine after setup (a scheduler throw, a persist
   // failure, a bookkeeping bug).
-  shell: Object.freeze({ '*': both(pause(REASON.ERROR)) }),
+  shell: Object.freeze({ usage_limit: both(pause(REASON.USAGE_LIMIT)), '*': both(pause(REASON.ERROR)) }),
   // resume() could not REHYDRATE the paused run — the checkout is gone, run.json
   // is corrupt, a guardrail set or agent prompt no longer loads. The point on disk
   // is already the best the run can offer: parking it again would re-persist the

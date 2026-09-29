@@ -74,7 +74,10 @@ export function degradationLine(m) {
   const limit = caps.maxPromptTokens ? `, prompt limit ~${Math.round(caps.maxPromptTokens / 1000)}k tokens` : '';
   const lead = m.upstream.api === 'openai-responses'
     ? 'translated — reasoning summaries only, no WebSearch/WebFetch'
-    : 'translated — no thinking blocks, no WebSearch/WebFetch';
+    : caps.reasoning
+      // A reasoning model's streamed reasoning arrives as thinking; chat completions takes none back.
+      ? 'translated — reasoning shown but not carried across turns, no WebSearch/WebFetch'
+      : 'translated — no thinking blocks, no WebSearch/WebFetch';
   return `${lead}${limit}`;
 }
 
@@ -103,9 +106,46 @@ export function needsSignInPill(m, { doc = globalThis.document } = {}) {
 // ── Providers card (§8.1) ────────────────────────────────────────────────────
 
 function providerStatePill(doc, c) {
-  if (!c.termsCurrent) return h(doc, 'span', 'badge grey', 'sign-in blocked until acknowledged');
+  if (!c.termsCurrent) {
+    // What unblocks sign-in, in the "Read notice" button's own words — and it opens that notice.
+    const pill = h(doc, 'button', 'badge grey mv-cp-terms mv-cp-terms-pill',
+      c.acknowledgedTerms ? 'please re-read the updated notice' : 'please read the notice first');
+    pill.type = 'button';
+    pill.title = 'Sign-in is blocked until you acknowledge the GitHub Copilot notice. Click to read it.';
+    return pill;
+  }
   if (!c.connected) return h(doc, 'span', 'badge grey', 'not connected');
   return h(doc, 'span', 'badge green', `connected${c.login ? ` as @${c.login}` : ''}`);
+}
+
+/**
+ * With the credential broker: the viewer's own state in the slot `name` spends from (key page),
+ * not worca's settings, which hold no key. A missing key links to the key page.
+ */
+function brokerPill(doc, b, name) {
+  const p = (b.providers || {})[name] || {};
+  const what = name === 'copilot' ? 'sign-in' : 'key';
+  if (b.signInNeeded) return h(doc, 'span', 'badge grey', `sign in to see your ${what}`);
+  if (p.state === 'none') {
+    const x = h(doc, 'span', 'badge red', 'no broker slot for this URL');
+    x.title = p.error || 'The credential broker has no slot for this base URL.';
+    return x;
+  }
+  if (p.state === 'keyless') return h(doc, 'span', 'badge green', 'local — no key needed');
+  if (b.error) {
+    const x = h(doc, 'span', 'badge grey', 'key page unreachable');
+    x.title = b.error;
+    return x;
+  }
+  if (p.state === 'set') return h(doc, 'span', 'badge green', `your ${what}${p.suffix ? ` ••••${p.suffix}` : ''}`);
+  if (p.state === 'operator') return h(doc, 'span', 'badge green', 'team key');
+  const label = p.state === 'invalid' ? `your ${what} was rejected` : `add your ${what} on the key page`;
+  const cls = p.state === 'invalid' ? 'badge red' : 'badge grey';
+  if (!b.keyPage) return h(doc, 'span', cls, label);
+  const a = h(doc, 'a', `${cls} mv-broker-pill`, label);
+  a.href = b.keyPage; a.target = '_blank'; a.rel = 'noopener';
+  a.title = 'Opens the key page in a new tab. Reopen this tab afterwards to see the change.';
+  return a;
 }
 
 function quotaLine(q) {
@@ -148,6 +188,19 @@ export function renderProvidersCard(providers, { doc = globalThis.document, sign
   }
   root.appendChild(h(doc, 'small', 'hint mv-providers-hint',
     "Providers let Worca run models that don't speak the Anthropic API — through its own in-process bridge. Sign in or set a key once; then import or add models on the Models tab and pick them anywhere a model is picked."));
+  // Credential broker: keys and the Copilot sign-in are per person, on the broker's key page.
+  // This card keeps the shared settings (base URLs, concurrency, the Copilot notice, imports);
+  // its key fields, sign-in and key test are hidden (style.css .mv-providers--broker).
+  if (p.broker && p.broker.enabled) {
+    root.classList.add('mv-providers--broker');
+    const note = h(doc, 'p', 'hint mv-broker-note', 'Keys and the GitHub Copilot sign-in are held by the credential broker: each person adds their own on the key page. Imports list models with your own key.');
+    if (p.broker.keyPage) {
+      const a = h(doc, 'a', 'mv-broker-link', 'Open the key page');
+      a.href = p.broker.keyPage; a.target = '_blank'; a.rel = 'noopener';
+      note.append(' ', a);
+    }
+    root.appendChild(note);
+  }
   /** One provider's row, in its own card when the tab hosts it. */
   const place = (row, title) => {
     if (!split) { root.appendChild(row); return; }
@@ -165,7 +218,9 @@ export function renderProvidersCard(providers, { doc = globalThis.document, sign
   const cpMain = h(doc, 'div', 'mv-pv-main');
   const cpHead = h(doc, 'div', 'mv-head');
   cpHead.appendChild(h(doc, 'b', 'mv-name', 'GitHub Copilot'));
-  cpHead.appendChild(providerStatePill(doc, c));
+  const brokered = !!(p.broker && p.broker.enabled);
+  // The notice gates Copilot models either way; past it, the broker's view of your sign-in.
+  cpHead.appendChild(brokered && c.termsCurrent ? brokerPill(doc, p.broker, 'copilot') : providerStatePill(doc, c));
   cpMain.appendChild(cpHead);
   cpMain.appendChild(h(doc, 'small', 'hint',
     c.acknowledgedTerms
@@ -198,8 +253,9 @@ export function renderProvidersCard(providers, { doc = globalThis.document, sign
 
   const cpBtns = h(doc, 'div', 'mv-pv-btns');
   const imp = h(doc, 'button', 'btn-ghost mv-cp-fetch-models', 'Import models…');
-  imp.type = 'button'; imp.disabled = !c.connected;
-  if (!c.connected) imp.title = 'Sign in first';
+  // With the broker, the import runs with the viewer's own Copilot sign-in (on the key page).
+  imp.type = 'button'; imp.disabled = !c.connected && !brokered;
+  if (imp.disabled) imp.title = 'Sign in first';
   cpBtns.appendChild(imp);
   const quotaBtn = h(doc, 'button', 'btn-ghost mv-cp-quota-refresh', 'Refresh usage');
   quotaBtn.type = 'button'; quotaBtn.disabled = !c.connected;
@@ -227,7 +283,7 @@ export function renderProvidersCard(providers, { doc = globalThis.document, sign
     const main = h(doc, 'div', 'mv-pv-main');
     const rh = h(doc, 'div', 'mv-head');
     rh.appendChild(h(doc, 'b', 'mv-name', PROVIDER_LABELS[name]));
-    rh.appendChild(k.configured ? h(doc, 'span', 'badge green', 'key set')
+    rh.appendChild(p.broker && p.broker.enabled ? brokerPill(doc, p.broker, name) : k.configured ? h(doc, 'span', 'badge green', 'key set')
       : k.keySet ? h(doc, 'span', 'badge red', 'key ${VAR} not set')
         : k.keyOptional ? h(doc, 'span', 'badge green', 'local — no key needed') : h(doc, 'span', 'badge grey', 'no key'));
     main.appendChild(rh);
@@ -245,6 +301,16 @@ export function renderProvidersCard(providers, { doc = globalThis.document, sign
     buIn.type = 'text'; buIn.value = k.baseUrl || ''; buIn.dataset.provider = name;
     buIn.placeholder = name === 'openai' ? 'https://api.openai.com/v1' : 'https://api.anthropic.com';
     bu.appendChild(buIn);
+    if (name === 'openai') {
+      // One click to a hosted catalog: fills the URL (and a ${VAR} key when none is set), then the
+      // user Tests and Saves as for any endpoint. Nothing is stored until Save.
+      const pre = h(doc, 'small', 'hint mv-pv-presets', 'Preset: ');
+      const or = h(doc, 'button', 'link-btn mv-pv-preset', 'OpenRouter');
+      or.type = 'button'; or.dataset.provider = name; or.dataset.preset = 'openrouter';
+      or.title = `Point this provider at OpenRouter (${OPENROUTER_PRESET.baseUrl})`;
+      pre.appendChild(or);
+      bu.appendChild(pre);
+    }
     ctl.appendChild(bu);
     const key = h(doc, 'label', 'mv-field');
     key.appendChild(h(doc, 'span', 'mv-field-label', 'API key'));
@@ -280,6 +346,25 @@ export function renderProvidersCard(providers, { doc = globalThis.document, sign
     place(row, PROVIDER_LABELS[name]);
   }
   return root;
+}
+
+/** The OpenRouter preset (docs/models.md "OpenRouter"); mirrors provider-ops OPENROUTER_BASE_URL. */
+export const OPENROUTER_PRESET = Object.freeze({ baseUrl: 'https://openrouter.ai/api/v1', keyRef: '${OPENROUTER_KEY}' });
+
+/**
+ * Apply a preset to a provider row's fields — the base URL always, the key only when the row has
+ * none (a stored or typed key is never replaced). Returns whether anything changed.
+ */
+export function applyProviderPreset(rootEl, name, preset) {
+  const p = preset === 'openrouter' ? OPENROUTER_PRESET : null;
+  const row = p && rootEl.querySelector(`.mv-pv-row[data-provider="${name}"]`);
+  if (!row) return false;
+  const bu = row.querySelector('.mv-pv-baseurl');
+  const key = row.querySelector('.mv-pv-key');
+  let changed = false;
+  if (bu && bu.value.trim() !== p.baseUrl) { bu.value = p.baseUrl; changed = true; }
+  if (key && !key.value.trim()) { key.value = p.keyRef; changed = true; }
+  return changed;
 }
 
 /** Collect a key-based provider row into a PATCH body (masked echo dropped). */
@@ -398,12 +483,38 @@ export function renderImportSheet(models, { doc = globalThis.document } = {}) {
 export function renderEndpointSheet(payload, { doc = globalThis.document } = {}) {
   const p = payload || {};
   const list = Array.isArray(p.models) ? p.models : [];
+  const hosted = p.server === 'openrouter';
   const root = h(doc, 'section', 'card mv-editor mvi mvi-ep');
   root.dataset.source = 'endpoint';
   root.dataset.baseurl = p.baseUrl || '';
+  if (p.server) root.dataset.server = p.server;
   root.appendChild(h(doc, 'h3', 'mv-editor-title', `Import from ${p.serverLabel || 'this endpoint'}`));
-  root.appendChild(h(doc, 'small', 'hint', `${p.baseUrl || ''} — these run through the translation layer (no thinking blocks, no web tools) and are priced free: a model on your own machine bills nothing. Worca pins the prompt limit only when the server reports the window it really serves.`));
+  root.appendChild(h(doc, 'small', 'hint', hosted
+    ? `${p.baseUrl || ''} — these run through the translation layer (no web tools). Worca reads each model's window, output cap, tool and reasoning support and its listed price, and pins them on the entry.`
+    : `${p.baseUrl || ''} — these run through the translation layer (no thinking blocks, no web tools) and are priced free: a model on your own machine bills nothing. Worca pins the prompt limit only when the server reports the window it really serves.`));
   for (const w of Array.isArray(p.warnings) ? p.warnings : []) root.appendChild(h(doc, 'small', 'hint mvi-warn', w));
+  // A hosted catalog lists hundreds of models: beside the dialog's text filter, narrow by what a
+  // pipeline decides on. The controls only mark the view — endpointRowMatches reads them.
+  if (hosted && list.length) {
+    const bar = h(doc, 'div', 'chip-select mvi-or-filters');
+    const chip = (cls, text) => {
+      const l = h(doc, 'label', 'mvi-chip');
+      const cb = h(doc, 'input', cls); cb.type = 'checkbox';
+      l.appendChild(cb); l.appendChild(h(doc, 'span', null, text));
+      bar.appendChild(l);
+    };
+    chip('mvi-f-free', 'Free');
+    chip('mvi-f-tools', 'Tools');
+    const ctxL = h(doc, 'label', 'mvi-chip');
+    ctxL.appendChild(h(doc, 'span', null, 'Window ≥'));
+    const ctx = h(doc, 'select', 'select mvi-f-ctx');
+    for (const [v, t] of [['0', 'any'], ['65536', '64k'], ['131072', '128k'], ['262144', '256k'], ['1000000', '1M']]) {
+      const o = h(doc, 'option', null, t); o.value = v; ctx.appendChild(o);
+    }
+    ctxL.appendChild(ctx);
+    bar.appendChild(ctxL);
+    root.appendChild(bar);
+  }
   if (!list.length) {
     root.appendChild(h(doc, 'div', 'hist-empty', 'This endpoint lists no models.'));
   } else {
@@ -421,6 +532,9 @@ export function renderEndpointSheet(payload, { doc = globalThis.document } = {})
     for (const m of list) {
       const tr = h(doc, 'tr');
       tr.dataset.id = m.id;
+      tr.dataset.free = m.free ? '1' : '0';
+      tr.dataset.tools = m.toolCalls === true ? '1' : '0';
+      tr.dataset.ctx = String(m.servedContext || 0);
       const blocked = m.importable === false;
       if (blocked) tr.className = 'mvi-disabled';
       const cbTd = h(doc, 'td');
@@ -470,12 +584,71 @@ export function collectImportSheet(rootEl) {
   return [...rootEl.querySelectorAll('.mvi-cb')].filter((c) => c.checked && !c.disabled).map((c) => c.value);
 }
 
+/**
+ * Whether an import-sheet row passes the dialog's text query and, on a hosted sheet, its Free /
+ * Tools / window filters. A view filter only — the tick on a hidden row is kept. Pure over the DOM.
+ */
+export function endpointRowMatches(tr, sheet, query = '') {
+  const q = String(query || '').trim().toLowerCase();
+  if (q && !tr.textContent.toLowerCase().includes(q) && !String(tr.dataset.id || '').toLowerCase().includes(q)) return false;
+  const bar = sheet && sheet.querySelector('.mvi-or-filters');
+  if (!bar) return true;
+  if (bar.querySelector('.mvi-f-free')?.checked && tr.dataset.free !== '1') return false;
+  if (bar.querySelector('.mvi-f-tools')?.checked && tr.dataset.tools !== '1') return false;
+  const min = Number(bar.querySelector('.mvi-f-ctx')?.value || 0);
+  return !(min > 0 && Number(tr.dataset.ctx || 0) < min);
+}
+
 /** The select-all box: tick every importable row. */
 export function applyImportSelectAll(rootEl, on) {
   for (const c of rootEl.querySelectorAll('.mvi-cb')) if (!c.disabled) c.checked = !!on;
 }
 
 // ── Editor: Connection section (§8.3) ───────────────────────────────────────
+
+/** Whether a base URL is OpenRouter's (mirrors model-env.mjs isOpenRouterBaseUrl; this module imports nothing). */
+export function isOpenRouterUrl(v) {
+  if (typeof v !== 'string' || !v.trim()) return false;
+  let host;
+  try { host = new URL(v.trim()).hostname.toLowerCase(); } catch { return false; }
+  return host === 'openrouter.ai' || host.endsWith('.openrouter.ai');
+}
+
+/** Whether the Connection form resolves to OpenRouter chat completions: its own base URL, else the provider's. */
+function openRouterApplies(conn) {
+  if ((conn.querySelector('.mv-conn-mode-rb:checked')?.value || 'direct') !== 'provider') return false;
+  if (conn.querySelector('.mv-conn-provider')?.value !== 'openai' || conn.querySelector('.mv-conn-api')?.value !== 'openai-chat') return false;
+  const own = (conn.querySelector('.mv-conn-baseurl')?.value || '').trim();
+  return isOpenRouterUrl(own || conn._providers?.openai?.baseUrl || '');
+}
+
+/** Load an `upstream.openrouter` block (or nothing: the defaults) into the routing fields. */
+function fillOpenRouter(root, or) {
+  const o = or || {};
+  const p = o.provider || {};
+  const set = (sel, v) => { const el = root.querySelector(sel); if (el) el.value = v; };
+  set('.mv-conn-or-models', Array.isArray(o.models) ? o.models.join(', ') : '');
+  set('.mv-conn-or-order', Array.isArray(p.order) ? p.order.join(', ') : '');
+  set('.mv-conn-or-sort', p.sort || '');
+  const fb = root.querySelector('.mv-conn-or-fallbacks');
+  if (fb) fb.checked = p.allow_fallbacks !== false;   // OpenRouter's default is on
+}
+
+/** The routing fields as an `upstream.openrouter` block, or undefined when all are at their defaults. */
+function collectOpenRouter(conn) {
+  const list = (sel) => (conn.querySelector(sel)?.value || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const out = {};
+  const models = list('.mv-conn-or-models');
+  if (models.length) out.models = models;
+  const provider = {};
+  const order = list('.mv-conn-or-order');
+  if (order.length) provider.order = order;
+  if (conn.querySelector('.mv-conn-or-fallbacks')?.checked === false) provider.allow_fallbacks = false;
+  const sort = conn.querySelector('.mv-conn-or-sort')?.value || '';
+  if (sort) provider.sort = sort;
+  if (Object.keys(provider).length) out.provider = provider;
+  return Object.keys(out).length ? out : undefined;
+}
 
 /**
  * The Connection block for the model editor. `model` is the MASKED entry or
@@ -552,7 +725,13 @@ export function renderConnectionSection(model, { doc = globalThis.document, prov
 
   // Advanced: per-entry overrides for the key-based providers.
   const adv = h(doc, 'details', 'advanced mv-conn-adv');
-  const sum = h(doc, 'summary', null, 'Advanced — base URL, API key, extra headers');
+  // Same summary as New pipeline's Advanced (index.html #advanced-config): the chevron is
+  // what says "expandable" — without it the label reads as a plain heading.
+  const sum = h(doc, 'summary');
+  const chev = h(doc, 'span', 'adv-chev');
+  chev.setAttribute('aria-hidden', 'true');
+  sum.appendChild(chev);
+  sum.appendChild(h(doc, 'span', null, 'Advanced — base URL, API key, extra headers'));
   adv.appendChild(sum);
   const advBody = h(doc, 'div', 'advanced-body mv-conn-adv-body');
   const bu = h(doc, 'input', 'input mv-conn-baseurl');
@@ -567,6 +746,28 @@ export function renderConnectionSection(model, { doc = globalThis.document, prov
   hdr.rows = 2; hdr.placeholder = 'One per line: Header-Name: value';
   hdr.value = upstream && upstream.headers ? Object.entries(upstream.headers).map(([k, v]) => `${k}: ${v}`).join('\n') : '';
   advBody.appendChild(field('Extra headers', hdr));
+  // OpenRouter routing: shown only while the entry resolves to OpenRouter (applyConnectionMode).
+  const orBox = h(doc, 'div', 'mv-conn-or');
+  orBox.appendChild(h(doc, 'small', 'hint', 'OpenRouter routing — fallback models are tried in order when this one is rate-limited or down (a :free model’s shared pool often is); provider order and sort pick who serves it.'));
+  const orModels = h(doc, 'input', 'input mv-conn-or-models');
+  orModels.type = 'text'; orModels.placeholder = 'e.g. qwen/qwen3.8-27b (comma-separated)';
+  orBox.appendChild(field('Fallback models', orModels));
+  const orOrder = h(doc, 'input', 'input mv-conn-or-order');
+  orOrder.type = 'text'; orOrder.placeholder = 'provider names, comma-separated — empty lets OpenRouter choose';
+  orBox.appendChild(field('Provider order', orOrder));
+  const orSort = h(doc, 'select', 'select mv-conn-or-sort');
+  for (const [value, text] of [['', 'OpenRouter default'], ['price', 'Price'], ['throughput', 'Throughput'], ['latency', 'Latency']]) {
+    const o = h(doc, 'option', null, text); o.value = value; orSort.appendChild(o);
+  }
+  orBox.appendChild(field('Sort providers by', orSort));
+  const orFbLab = h(doc, 'label', 'mv-conn-cap');
+  const orFb = h(doc, 'input', 'mv-conn-or-fallbacks');
+  orFb.type = 'checkbox';
+  orFbLab.appendChild(orFb);
+  orFbLab.appendChild(h(doc, 'span', null, 'Allow other providers when these are unavailable'));
+  orBox.appendChild(orFbLab);
+  advBody.appendChild(orBox);
+  fillOpenRouter(orBox, upstream && upstream.openrouter);
   adv.appendChild(advBody);
   body.appendChild(adv);
 
@@ -640,6 +841,8 @@ export function applyConnectionMode(connEl) {
   const api = apiSel ? apiSel.value : '';
   const adv = conn.querySelector('.mv-conn-adv');
   if (adv) adv.hidden = provider === 'copilot';
+  const orBox = conn.querySelector('.mv-conn-or');
+  if (orBox) orBox.hidden = !openRouterApplies(conn);
   const hint = conn.querySelector('.mv-conn-provider-hint');
   const p = conn._providers;
   if (hint) {
@@ -652,7 +855,7 @@ export function applyConnectionMode(connEl) {
   if (note) {
     const copilotPricing = provider === 'copilot' ? ' Copilot bills premium requests, so Pricing defaults to Free.' : '';
     note.textContent = mode !== 'provider' ? '' : api === 'openai-chat'
-      ? `Translated: no thinking blocks, WebSearch/WebFetch withheld, prompt limit per the capabilities above.${copilotPricing}`
+      ? `Translated: reasoning the endpoint streams (OpenRouter, vLLM) is shown as thinking but not carried across turns, WebSearch/WebFetch withheld, prompt limit per the capabilities above.${copilotPricing}`
       : api === 'openai-responses'
         ? `Translated to the Responses API: reasoning summaries arrive as thinking, WebSearch/WebFetch withheld, prompt limit per the capabilities above.${copilotPricing}`
         : provider === 'copilot' ? 'Copilot’s native Anthropic endpoint: thinking blocks and cache accounting arrive intact. Copilot bills premium requests, so Pricing defaults to Free.'
@@ -704,6 +907,7 @@ export function setModelUpstream(connEl, upstream) {
     const bu = conn.querySelector('.mv-conn-baseurl'); if (bu) bu.value = upstream.baseUrl || '';
     const key = conn.querySelector('.mv-conn-key'); if (key) { key.value = upstream.apiKey || ''; if (key.value) key.dataset.original = key.value; }
     const hdr = conn.querySelector('.mv-conn-headers'); if (hdr) hdr.value = upstream.headers ? Object.entries(upstream.headers).map(([k, v]) => `${k}: ${v}`).join('\n') : '';
+    fillOpenRouter(conn, upstream.openrouter);
     const caps = upstream.capabilities || {};
     for (const cb of conn.querySelectorAll('.mv-conn-cap-cb')) cb.checked = caps[cb.dataset.cap] === undefined ? cb.dataset.cap === 'toolCalls' : !!caps[cb.dataset.cap];
     for (const inp of conn.querySelectorAll('.mv-conn-limit-in')) inp.value = caps[inp.dataset.limit] ? String(caps[inp.dataset.limit]) : '';
@@ -737,6 +941,9 @@ export function collectConnection(connEl) {
       if (i > 0) headers[l.slice(0, i).trim()] = l.slice(i + 1).trim();
     }
     if (Object.keys(headers).length) upstream.headers = headers;
+    // Only while the entry resolves to OpenRouter: another endpoint would reject the fields.
+    const or = openRouterApplies(conn) ? collectOpenRouter(conn) : undefined;
+    if (or) upstream.openrouter = or;
   }
   const capabilities = {};
   for (const cb of conn.querySelectorAll('.mv-conn-cap-cb')) capabilities[cb.dataset.cap] = !!cb.checked;

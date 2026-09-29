@@ -1,0 +1,22 @@
+{
+  "key": "deckNarrative",
+  "metaVersion": 2,
+  "mockRole": "generic-producer",
+  "promptHints": "Write the hallway sentence, the three-to-five section spine, and a takeaway title for every planned slide. Nothing visual yet. Pipeline directory: {pipelineDir}",
+  "inputs": [
+    { "id": "task", "type": "md" },
+    { "id": "answers", "type": "json", "required": false, "as": "answers" }
+  ],
+  "outputs": [{ "id": "spine", "type": "md", "filename": "spine.md", "artifactKind": "deck-spine" }],
+  "domain": "presentation",
+  "displayName": "Narrative Spine",
+  "description": "Turns the brief and the clarify answers into one hallway sentence, a 3–5 section spine and a takeaway title per slide.",
+  "color": "amber",
+  "icon": "<path d=\"M5 6h14M5 12h10M5 18h7\" stroke-linecap=\"round\"/>",
+  "agentFile": "worca-cc-deck-narrative.md",
+  "runnerType": "producer",
+  "asksQuestions": true,
+  "questionsLocked": false,
+  "questionsDefault": true,
+  "order": 11
+}

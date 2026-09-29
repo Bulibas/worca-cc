@@ -50,11 +50,8 @@ const state = {
   workspaces: [],            // GET /api/workspaces read-model
   selectedWorkspaceId: '',   // '' === none; set ONLY in workspace target mode
   runTarget: 'project',      // 'project' | 'workspace' — New Pipeline target toggle
-  // --- Creation wizard (ephemeral; reset on wizard close) ---
-  wizard: {
-    step: 1, name: '', selectedPaths: [], scanId: '', description: '',
-    graphifyUsed: null, abort: null, editingId: '',
-  },
+  // --- Creation wizard (ephemeral; reset on wizard entry and exit) ---
+  wizard: { name: '', selectedPaths: [], starting: false },
   // --- Agent creation wizard (ephemeral; reset on wizard close) ---
   agentWizard: { step: 1, genId: '', abort: null, draft: null, ownMd: false },
   // --- Pluggable task sources (New Pipeline) ---
@@ -68,6 +65,7 @@ const state = {
 
 import { logLineClass, logLineTime, serializeLog, cycleSeparatorBefore, newCycleState, projectLogRecord } from './log-line.mjs';
 import { logLineVisible, logFacets, compileLogFilter } from './log-filter.mjs';
+import { alreadyApplied, noteBoot } from './ws-seq.mjs';
 import { decorFromState, applyDecor, isGraphManifest } from './graph/run-decor.mjs';
 import { mountRunGraph } from './graph/run-hosts.mjs';
 // Import list only — `statusChip`/`diffBadges`/`mergeFindings`/`reportResultControl`
@@ -90,7 +88,6 @@ import {
   langForPath, canHighlightParsed, highlightParsed,
 } from './syntax-highlight.mjs';
 import { createHljsLoader } from './hljs-loader.mjs';
-import { artifactsByNodeCycle, viewerKindFor, renderArtifact, renderMarkdown as renderArtifactMarkdown } from './artifact-view.mjs';
 import {
   buildFileTree, renderFileTree, firstFile,
 } from './file-tree.mjs';
@@ -106,10 +103,14 @@ import {
   renderConfigForm, collectConfigForm, renderConnectResult, renderDoctorReport, renderReferences409,
   renderOrphanList, channelBadge, renderAvailableList, renderMarketplaceList,
 } from './plugins-view.mjs';
-import { renderChatSettings, collectChatSettings, renderScriptToolsToggle, collectScriptToolsToggle } from './chat-settings-view.mjs';
+import { renderChatSettings, collectChatSettings, renderScriptToolsToggle, collectScriptToolsToggle, renderAskWebFields, collectAskWebFields } from './chat-settings-view.mjs';
+import { renderCredentials } from './credentials-view.mjs';
+import { loadCredentials, credentialSuffix } from './credential-badges.mjs';
+import { renderFreeDaily, freeRequestsSuffix, typicalFreeRun, newRunFreeWarning, providerFreeLine } from './openrouter-free-view.mjs';
 import { PORT_ID_RE, MAX_PORTS_PER_SIDE, PORT_TYPES, FLOW_LABEL, KEYED_KINDS } from '../../src/shared/graph/constants.mjs';
 import { FORM_ID_RE, validateFormDef, normalizeAskBlock } from '../../src/shared/forms/form-def.mjs';
 import { ASK_LIMITS } from '../../src/shared/forms/catalog.mjs';
+import { WORKSPACE_MAX_PROJECTS, workspaceSizeLevel } from '../../src/shared/workspace-size.mjs';
 import {
   guardrailSummary, renderGuardrailList, renderGuardrailEditor, collectGuardrailEditor,
   renderStartStep, collectStartStep, renderGuardrailReferences409, isReadOnlyGuardrailSet,
@@ -121,12 +122,13 @@ import {
 } from './models-view.mjs';
 import {
   renderProvidersCard, collectProviderRow, renderImportSheet, renderEndpointSheet, collectImportSheet, applyImportSelectAll,
+  applyProviderPreset, endpointRowMatches,
   setModelUpstream, COPILOT_TERMS,
 } from './bridge-view.mjs';
 import {
   renderSourcePane, collectSourcePane, renderProfileGate, renderProfileBar,
 } from './source-pane.mjs';
-import { renderStatsBody, renderBudgetIndicator, renderBudgetRing, renderBudgetReadout, renderCostPauseBanner, BUDGET_WARN_AT } from './stats-view.mjs';
+import { renderStatsBody, renderBudgetIndicator, renderBudgetRing, renderBudgetReadout, renderCostPauseBanner } from './stats-view.mjs';
 import { createComposer, isReservedWorkflowId, pluginOriginName } from './graph/composer.mjs';
 // mountStaticGraph is NOT imported here: the New-Pipeline workflow picker is a
 // bare <select> with no preview host on this branch (the v1 read-only mini-graph
@@ -138,6 +140,11 @@ import { renderAutoProposal, AUTO_PROPOSAL_ORDER_QPANEL } from './auto-proposal.
 import { portsFnFor } from '../../src/shared/graph/ports.mjs';
 import { indexByKey } from '../../src/shared/graph/agent-meta.mjs';
 import { classifyLoops } from '../../src/shared/graph/loops.mjs';
+import { BINARY_KINDS, isBrowsableKind } from '../../src/shared/artifact-kinds.mjs';
+// artifact-view-media.mjs re-exports artifact-view.mjs's whole surface and widens
+// dispatch to the byte kinds, so upstream's module stays byte-identical.
+import { artifactsByNodeCycle, groupArtifactsByKind, BULK_KIND_THRESHOLD, viewerKindFor, renderArtifact, rawArtifactUrl,
+  renderMarkdown as renderArtifactMarkdown } from './artifact-view-media.mjs';
 import { resolveNodeTunables, modifiedFieldsOf, pruneNodeSelection, buildGraphNodeRows as ntBuildGraphNodeRows, buildNodeConfigRows as ntBuildNodeConfigRows } from './node-tunables.mjs';
 import { renderScopeOptions, renderSyncChip, renderTeamMetricsBody, renderTmEmptyState, renderTmSkeleton, renderPooledBudgetTile } from './team-metrics-view.mjs';
 // Team policy (team-policy design §11): the Projects cell, the enable dialog, the page (read +
@@ -153,6 +160,7 @@ import { buildWorkItems, prLookupFor } from '../../src/shared/team-metrics/timel
 import { renderTimeline, renderTimelinePopover, timelineWindow, shiftAnchor, TL_MODES, TL_ZOOMS } from './team-metrics-timeline.mjs';
 import {
   renderProjectTmCell, renderProjectTmChip, projectTmSummary, renderEnableDialogBody, renderMetricsHomePicker, renderWsMetricsRow, renderWsSummary, renderRouteResults, renderWsMetricsPending } from './team-metrics-surfaces.mjs';
+import { renderMapTab, emptyMapFilters } from './workspace-map-view.mjs';
 import { paintAboutInto } from './about-links.mjs';
 import { renderReasonOptions, renderOptIns, previewText, reportBlobParts } from './report-run.mjs';
 import { openScheduleSheet, closeScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
@@ -214,13 +222,17 @@ const el = {
   addProjectCancel: $('#addProjectCancel'),
   addProjectMsg: $('#addProjectMsg'),
   newProjectBrowse: $('#newProjectBrowse'),
+  newProjectBrowseMany: $('#newProjectBrowseMany'),
   folderBrowser: $('#folder-browser'),
+  folderBrowserTitle: $('#folderBrowserTitle'),
   folderBrowserClose: $('#folderBrowserClose'),
   folderUp: $('#folderUp'),
   folderHome: $('#folderHome'),
   folderCurrent: $('#folderCurrent'),
   folderList: $('#folderList'),
   folderSelect: $('#folderSelect'),
+  folderPickCount: $('#folderPickCount'),
+  folderSelectMany: $('#folderSelectMany'),
   folderMsg: $('#folderMsg'),
   title: $('#title'),
   sourceBranch: $('#sourceBranch'),
@@ -303,18 +315,12 @@ const el = {
   wizProjects: $('#wiz-projects'),
   wizSelectAll: $('#wiz-select-all'),
   wizStep1Hint: $('#wiz-step1-hint'),
+  wizSizeNote: $('#wiz-size-note'),
   wizStartScan: $('#wiz-start-scan'),
-  wizStatus: $('#wiz-status'),
-  wizProgress: $('#wiz-progress'),
-  wizPhases: $('#wiz-phases'),
-  wizAbort: $('#wiz-abort'),
-  wizDesc: $('#wiz-desc'),
-  wizGraphifyNote: $('#wiz-graphify-note'),
-  wizMsg: $('#wiz-msg'),
-  wizRescan: $('#wiz-rescan'),
-  wizSave: $('#wiz-save'),
   wizClose: $('#wiz-close'),
   wizTitle: $('#wiz-title'),
+  wizScanModel: $('#wiz-scan-model'),
+  wizScanEffort: $('#wiz-scan-effort'),
 
   viewerCard: $('#viewer-card'),
   viewerTitle: $('#viewer-title'),
@@ -375,6 +381,7 @@ const el = {
   projAddName: $('#proj-add-name'),
   projAddPath: $('#proj-add-path'),
   projAddBrowse: $('#proj-add-browse'),
+  projAddBrowseMany: $('#proj-add-browse-many'),
   projAddSave: $('#proj-add-save'),
   projAddCancel: $('#proj-add-cancel'),
   projAddMsg: $('#proj-add-msg'),
@@ -384,6 +391,13 @@ const el = {
   projCloneUrl: $('#proj-clone-url'),
   projCloneBranch: $('#proj-clone-branch'),
   projCloneName: $('#proj-clone-name'),
+  // Add several projects (review list)
+  projectBulkModal: $('#project-bulk-modal'),
+  projBulkTitle: $('#proj-bulk-title'),
+  projBulkClose: $('#proj-bulk-close'),
+  projBulkList: $('#proj-bulk-list'),
+  projBulkMsg: $('#proj-bulk-msg'),
+  projBulkSave: $('#proj-bulk-save'),
 
   // Agent creation wizard
   agwName: $('#agw-name'),
@@ -536,11 +550,11 @@ function scheduleReconnect() {
 }
 
 // ---------------------------------------------------------------------------
-// Sidebar collapse (icon rail). One boolean, one class. The collapsed state is
-// a user PREFERENCE, unrelated to the <1080px breakpoint where the sidebar is
-// hidden outright in favour of .topnav — the two never overlap.
-// Persistence mirrors readRunDensity/setRunDensity (:12376, :12426),
-// the only existing private-mode-safe pair in this file.
+// Sidebar collapse (icon rail) + the responsive nav tiers. `sidebarCollapsed` is
+// the user's PREFERENCE and applies above 1080px only. Tablets (761-1080px) always
+// get the rail; phones (<=760px) get the FULL column as a drawer behind #mbar-menu.
+// railCollapsed() is the one reader every paint uses; nothing here persists a tier.
+// Persistence mirrors readRunDensity/setRunDensity, the private-mode-safe pair.
 // ---------------------------------------------------------------------------
 const SIDEBAR_KEY = 'worca-cc.sidebar.collapsed';
 
@@ -551,14 +565,34 @@ function readSidebarCollapsed() {
 
 let sidebarCollapsed = readSidebarCollapsed();
 
+// The same two queries as style.css "Responsive nav tiers". jsdom has no matchMedia:
+// both stay null there and every tier check below falls through to the desktop path.
+const PHONE_NAV_QUERY = '(max-width:760px)';
+const RAIL_TIER_QUERY = '(max-width:1080px)';
+function navMedia(q) {
+  try { return typeof window.matchMedia === 'function' ? window.matchMedia(q) : null; }
+  catch { return null; }
+}
+const phoneNavMq = navMedia(PHONE_NAV_QUERY);
+const railTierMq = navMedia(RAIL_TIER_QUERY);
+const isPhoneNav = () => !!(phoneNavMq && phoneNavMq.matches);
+/** The rail state every paint reads: phones never (the drawer is the full column),
+ *  tablets always, desktop by preference. */
+function railCollapsed() {
+  if (isPhoneNav()) return false;
+  if (railTierMq && railTierMq.matches) return true;
+  return sidebarCollapsed;
+}
+
 function applySidebarCollapsed() {
+  const collapsed = railCollapsed();
   const aside = $('.sidebar');
-  if (aside) aside.classList.toggle('collapsed', sidebarCollapsed);
-  document.body.classList.toggle('rail-collapsed', sidebarCollapsed);
+  if (aside) aside.classList.toggle('collapsed', collapsed);
+  document.body.classList.toggle('rail-collapsed', collapsed);
   const btn = $('#side-toggle');
   if (btn) {
-    btn.setAttribute('aria-expanded', String(!sidebarCollapsed));
-    const label = sidebarCollapsed ? 'Expand menu' : 'Collapse menu';
+    btn.setAttribute('aria-expanded', String(!collapsed));
+    const label = collapsed ? 'Expand menu' : 'Collapse menu';
     btn.title = label;
     btn.setAttribute('aria-label', label);
     // The glyph is one bare chevron pointing the way the rail will move: "<"
@@ -566,7 +600,7 @@ function applySidebarCollapsed() {
     // it back out). Rewriting `d` rather than mirroring in CSS keeps the arrow
     // optically centred — scaleX(-1) on a chevron shifts its visual mass.
     const chev = btn.querySelector('svg .chev');
-    if (chev) chev.setAttribute('d', sidebarCollapsed ? 'M9 6l6 6-6 6' : 'M15 6l-6 6 6 6');
+    if (chev) chev.setAttribute('d', collapsed ? 'M9 6l6 6-6 6' : 'M15 6l-6 6 6 6');
   }
   // The rail has no visible labels, so mirror each button's label into a native
   // tooltip while collapsed (the mock does this on all twelve). Written by JS,
@@ -581,7 +615,7 @@ function applySidebarCollapsed() {
   // span; an empty title would otherwise leave the button both tooltip-less and
   // silently "handled".
   for (const b of $$('.nav button[data-nav]:not([data-nav="running"])')) {
-    if (sidebarCollapsed) {
+    if (collapsed) {
       if (!b.dataset.railTitle) {
         const t = b.querySelector(':scope > span:not(.nav-count):not(.nav-rollup)');
         b.title = (t && t.textContent.trim()) || b.dataset.nav;
@@ -594,15 +628,22 @@ function applySidebarCollapsed() {
   }
 }
 
+/** Everything that renders differently on the rail: one call after the rail state moves
+ *  (the toggle, or a viewport crossing a tier). */
+function repaintNavMode() {
+  applySidebarCollapsed();
+  updateNavCounts();             // Running's title/aria-label (both states)
+  renderPipelineTabs();          // child rows <-> initials tiles
+  paintBudget();                 // spend block <-> budget ring
+  paintFreeDaily();              // the free-request line shows only in the full column
+}
+
 function setSidebarCollapsed(v) {
   sidebarCollapsed = !!v;
   // A write that throws (private mode) must not stop the in-memory flip.
   try { localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? '1' : '0'); }
   catch { /* private mode */ }
-  applySidebarCollapsed();
-  updateNavCounts();             // Running's title/aria-label (both states)
-  renderPipelineTabs();          // child rows <-> initials tiles (phase 3)
-  paintBudget();                 // spend block <-> budget ring (phase 4)
+  repaintNavMode();
 }
 
 $('#side-toggle')?.addEventListener('click', () => setSidebarCollapsed(!sidebarCollapsed));
@@ -640,7 +681,7 @@ paintNodesGroup(readNodesCollapsed());
 // slid 298px -> 76px on every reload (transitionstart at ~50ms, still 297px
 // wide). Suppress it for this one call, force the layout so the collapsed width
 // becomes the transition's start value, then hand the transition back.
-const railAtBoot = sidebarCollapsed ? $('.sidebar') : null;
+const railAtBoot = railCollapsed() ? $('.sidebar') : null;
 if (railAtBoot) railAtBoot.style.transition = 'none';
 applySidebarCollapsed();
 if (railAtBoot) {
@@ -648,9 +689,68 @@ if (railAtBoot) {
   railAtBoot.style.transition = '';
 }
 
+// ── Phone drawer (<=760px) ──────────────────────────────────────────────────
+// #mbar-menu slides the SAME aside in (style.css "Responsive nav tiers"). While it
+// is open the page behind is inert (inert, not aria-hidden: only inert removes
+// focusability — see the track screens), focus starts on #side-close and comes back
+// to the hamburger. Any route closes it: a drawer button here, and showView for
+// back/forward and deep links. The Nodes disclosure and the mode switch keep it open.
+let mobileNavOpen = false;
+const mbarMenu = $('#mbar-menu');
+const navScrim = $('#nav-scrim');
+function setMobileNavOpen(open) {
+  const next = !!open && isPhoneNav();
+  if (next === mobileNavOpen) return;
+  mobileNavOpen = next;
+  const aside = $('.sidebar');
+  const hadFocus = !!(aside && aside.contains(document.activeElement));
+  document.body.classList.toggle('nav-open', next);
+  mbarMenu?.setAttribute('aria-expanded', String(next));
+  if (navScrim) navScrim.hidden = !next;
+  for (const n of [$('.main'), $('#mbar'), $('body > .ask-dock')]) {
+    if (n) n.toggleAttribute('inert', next);
+  }
+  if (next) $('#side-close')?.focus();
+  else if (hadFocus) mbarMenu?.focus();
+}
+mbarMenu?.addEventListener('click', () => setMobileNavOpen(!mobileNavOpen));
+navScrim?.addEventListener('click', () => setMobileNavOpen(false));
+$('#side-close')?.addEventListener('click', () => setMobileNavOpen(false));
+$('.sidebar')?.addEventListener('click', (e) => {
+  if (!mobileNavOpen) return;
+  const b = e.target.closest && e.target.closest('button');
+  if (!b || b.matches('.nav-group, [data-mode-open]')) return;
+  setMobileNavOpen(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !mobileNavOpen || e.defaultPrevented) return;
+  // A dialog over the drawer (the interface-mode cards, a confirm) or a running tour owns Esc.
+  if (document.querySelector('.viewer-modal:not(.hidden), .guide-layer')) return;
+  setMobileNavOpen(false);
+});
+/** A viewport crossing 760px or 1080px: drop an open drawer, then re-lay the column out. */
+function onNavTierChange() {
+  if (!isPhoneNav()) setMobileNavOpen(false);
+  repaintNavMode();
+}
+for (const m of [phoneNavMq, railTierMq]) {
+  if (!m) continue;
+  if (typeof m.addEventListener === 'function') m.addEventListener('change', onNavTierChange);
+  else if (typeof m.addListener === 'function') m.addListener(onNavTierChange);   // Safari < 14
+}
+// Pages with no sidebar entry of their own still need a name in the phone bar.
+const MBAR_TITLES = { 'getting-started': 'Getting started', 'workspace-create': 'New workspace', 'agent-create': 'New agent' };
+function paintMobileBar(name) {
+  const t = $('#mbar-title');
+  if (!t) return;
+  const b = $(`.nav button[data-nav="${name}"]`);
+  const label = b && b.querySelector(':scope > span:not(.nav-count):not(.nav-rollup)');
+  t.textContent = (label && label.textContent.trim()) || MBAR_TITLES[name] || 'Worca';
+}
+
 // ---------------------------------------------------------------------------
-// Spend indicator. One /api/budget snapshot drives the sidebar block, the
-// compact topnav amount, and the New-view creation gate. Refreshed at boot, on
+// Spend indicator. One /api/budget snapshot drives the sidebar block (the
+// drawer on phones) and the New-view creation gate. Refreshed at boot, on
 // every `hello`, on `budget-changed`/`pipelines-changed`, and on a slow tick.
 // ---------------------------------------------------------------------------
 const budgetState = { budget: null, timer: null, fetching: false, pending: false, lastFetchMs: 0 };
@@ -675,7 +775,63 @@ let startSubmitInFlight = false;
 // budgetState.budget until a reload. Record the request instead and run one
 // trailing fetch per in-flight window — any number of requests made during a
 // fetch collapse into that single trailing fetch.
+// ── OpenRouter free-model requests (openrouter-free-view.mjs) ────────────────
+// Refreshed with the budget (every spend-moving event and its tick), at most every 20s:
+// the server keeps its own reading of OpenRouter and lowers it per :free call.
+const freeDailyState = { status: null, lastFetchMs: 0, fetching: false };
+
+async function refreshFreeDaily({ force = false } = {}) {
+  if (freeDailyState.fetching || (!force && Date.now() - freeDailyState.lastFetchMs < 20_000)) return;
+  freeDailyState.fetching = true;
+  freeDailyState.lastFetchMs = Date.now();
+  try {
+    const res = await fetch(`/api/openrouter/free-daily${force ? '?refresh=1' : ''}`);
+    if (res.ok) freeDailyState.status = await safeJson(res);
+  } catch { /* transient: keep the last one */ } finally { freeDailyState.fetching = false; }
+  paintFreeDaily();
+}
+
+/** The free-request line rides the spend mount, under the spend block (full rail only). */
+function paintFreeDaily() {
+  const mount = document.getElementById('side-spend');
+  if (!mount) return;
+  mount.querySelector('.free-ind')?.remove();
+  const node = railCollapsed() ? null : renderFreeDaily(freeDailyState.status);
+  if (node) mount.appendChild(node);
+  applyFreeDailyToNewView();
+  if (currentView() === 'settings' && currentSettingsTab === 'providers') paintProviderFreeDaily();
+}
+
+/** The new-run form: warn when a node's model is :free and fewer requests are left than a run takes. */
+function applyFreeDailyToNewView() {
+  const note = document.getElementById('newFreeNote');
+  if (!note) return;
+  const s = freeDailyState.status;
+  const free = new Set((s && Array.isArray(s.models) ? s.models : []).map((m) => String(m).toLowerCase()));
+  const usesFree = Object.values(agentRowsById || {}).some((r) => r && r.model && free.has(String(r.model).toLowerCase()));
+  const msg = newRunFreeWarning(s, { typical: typicalFreeRun(recentRunsForFree()), usesFree });
+  note.hidden = !msg;
+  note.textContent = msg || '';
+}
+
+/** The runs this page holds, newest first, for the typical-run figure. */
+function recentRunsForFree() {
+  return [...runs.values()].sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || '')));
+}
+
+/** The Providers card: the allowance under the OpenAI-compatible row, without pressing Test. */
+function paintProviderFreeDaily() {
+  const line = providerFreeLine(freeDailyState.status);
+  const root = providerRoot();
+  const row = root && root.querySelector('.mv-pv-row[data-provider="openai"] .mv-pv-msg');
+  if (!row || !line || (row.textContent && !row.dataset.freeDaily)) return;
+  row.textContent = line;
+  row.dataset.freeDaily = '1';
+  row.className = 'hint mv-pv-msg';
+}
+
 async function refreshBudget() {
+  refreshFreeDaily();
   if (budgetState.fetching) { budgetState.pending = true; return; }
   budgetState.fetching = true;
   try {
@@ -695,24 +851,17 @@ async function refreshBudget() {
 function paintBudget() {
   const b = budgetState.budget;
   const mount = document.getElementById('side-spend');
-  const topAmt = document.getElementById('topnav-spend');
-  if (!b) { if (topAmt) topAmt.hidden = true; return; }
+  if (!b) return;
   if (mount) {
     // The rail has room for a compact twin, not a labelled block: a 38px ring under a
     // total limit, the 40px Spent/Saved stack without one (renderBudgetRing picks).
-    const render = sidebarCollapsed ? renderBudgetRing : renderBudgetIndicator;
+    const render = railCollapsed() ? renderBudgetRing : renderBudgetIndicator;
     mount.replaceChildren(render(b,
       { fmt: { usd: fmtUsd, usd4: fmtUsd4, duration: fmtDuration, estTitle } }));
-  }
-  if (topAmt) {
-    topAmt.hidden = false;
-    topAmt.textContent = fmtUsd(b.windowSpendUsd);
-    topAmt.classList.toggle('warn', !b.blocked && b.totalLimitUsd != null
-      && b.windowSpendUsd / b.totalLimitUsd >= BUDGET_WARN_AT);
-    topAmt.classList.toggle('over', !!b.blocked);
+    paintFreeDaily();   // the free-request line sits under the block this just replaced
   }
   applyBudgetToNewView();
-  if (currentView() === 'settings') paintBudgetReadout();
+  if (currentView() === 'settings' && currentSettingsTab === 'runs') paintBudgetReadout();
   repaintCostBanners();
 }
 
@@ -858,7 +1007,9 @@ function repaintPeople() {
 // <nav> that navLinks snapshots at boot — so route it from a container listener
 // rather than the [data-nav] delegation.
 document.getElementById('side-spend').addEventListener('click', (e) => {
-  if (e.target.closest('.spend-ind')) location.hash = 'stats';
+  // The OpenRouter free-request line (same mount) opens the Providers tab, where its key lives.
+  if (e.target.closest('.free-ind')) location.hash = 'settings/providers';
+  else if (e.target.closest('.spend-ind')) location.hash = 'stats';
 });
 
 // ---------------------------------------------------------------------------
@@ -876,14 +1027,6 @@ function handleServerMessage(msg) {
 
   if (msg.type === 'channel-status') {
     onChannelStatus(msg);
-    return;
-  }
-
-  // Scan events are tagged by scanId (not runId) and ride the same broadcast
-  // socket. Handle them BEFORE the !msg.runId early-return below.
-  if (msg.type === 'scan-progress' || msg.type === 'scan-done' || msg.type === 'scan-error') {
-    if (onWsRescanEvent(msg)) return;   // a workspace's automatic re-scan, not the wizard's
-    onScanEvent(msg);
     return;
   }
 
@@ -985,7 +1128,17 @@ function handleServerMessage(msg) {
     scheduleOnboardingRefresh();
     refreshAllCounts();
     tmCache.at = 0;
-    if (currentView() === 'workspaces') void refreshWorkspacesPage();
+    // A scan run saves its workspace in the background (D13): refetch the list (the Workspaces
+    // page repaints itself), then rebuild the New Pipeline picker whenever the SET of workspaces
+    // changed — on ANY view: the scan hand-off parks the user on Running, and re-entering New never
+    // rebuilds the picker. keepMembers: a still-selected workspace keeps its member rows and branch
+    // picks (a half-built workspace run is not reset by another tab's scan).
+    const before = state.workspaces.map((w) => w.id).join('\n');
+    const refreshed = currentView() === 'workspaces' ? refreshWorkspacesPage(msg.action) : loadWorkspaces();
+    void refreshed.then(() => {
+      const changed = state.workspaces.map((w) => w.id).join('\n') !== before;
+      if (changed && state.runTarget === 'workspace') void ensureWorkspaceOptions({ keepMembers: true });
+    });
     return;
   }
   if (msg.type === 'team-metrics-changed') {
@@ -1008,7 +1161,7 @@ function handleServerMessage(msg) {
     if (currentView() === 'projects') paintProjectPolicyCells(true);
     if (currentView() === 'workspaces') paintWsPolicyLines(true);
     if (currentView() === 'team-policy' && !tpState.editing) loadTeamPolicyView();
-    if (currentView() === 'settings') paintTeamCapsReadout(true);
+    if (currentView() === 'settings' && currentSettingsTab === 'runs') paintTeamCapsReadout(true);
     if (currentView() === 'settings' && currentSettingsTab === 'plugins') paintPluginsPolicy(true);
     if (currentView() === 'new') schedulePolicyLine();
     return;
@@ -1092,6 +1245,9 @@ function handleServerMessage(msg) {
   // resurrect the phantom.)
   if ((msg.type === 'subagent' || msg.type === 'stepskills' || msg.type === 'stepgraphify' || msg.type === 'question-resolved') && !runs.has(msg.runId)) return;
   const r = upsertRun({ runId: msg.runId });
+  // A reconnect re-subscribes and the server replays the run's buffer: skip what this page
+  // already applied, or every earlier log line shows twice (ws-seq.mjs).
+  if (alreadyApplied(r, msg)) return;
 
   switch (msg.type) {
     case 'log':
@@ -1105,6 +1261,9 @@ function handleServerMessage(msg) {
       break;
     case 'artifact':
       onArtifact(r, msg);
+      break;
+    case 'artifact-gone':
+      onArtifactGone(r, msg);
       break;
     case 'state':
       onState(r, msg);
@@ -1155,6 +1314,7 @@ function handleServerMessage(msg) {
 function onHello(msg) {
   const ws = state.ws;
   const list = Array.isArray(msg.runs) ? msg.runs : [];
+  noteBoot(state, msg.bootId, runs);   // a restarted server numbers run events from 1 again
 
   if (!helloSeeded) {
     helloSeeded = true;
@@ -1321,7 +1481,7 @@ function makeRun({
     status,
     startedAt: startedAt || nowHMS(),
     local,
-    kind,                 // 'run' | 'workspace-run' | 'scan' | 'agentgen' (only first two get tabs)
+    kind,                 // 'run' | 'workspace-run' | 'agentgen' (only first two get tabs)
     pipelineId,           // matches a History row id once persisted; used to hide lingerers from History
     pauseReason,          // why it paused, or null — ANY orchestrator pause code rides here
                           // (e.g. 'usage_limit'); only the cost pair renders a cost banner
@@ -2751,6 +2911,7 @@ if (typeof window !== 'undefined') {
     detailTabsOf,
     openNewPipeline,
     onArtifact,
+    onArtifactGone,
     artifactsByNodeCycle,
     viewerKindFor,
     renderArtifact,
@@ -2793,7 +2954,7 @@ function renderModelEffortPair(modelSel, effortSel, caption, sel = {}) {
       const ambiguous = m.custom === 'plugin' && labelCounts.get((m.label || m.id).toLowerCase()) > 1;
       const viaSuffix = m.bridged && !(m.label || m.id).toLowerCase().includes(m.bridged) ? ` · ${m.bridged}` : '';
       og.appendChild(option(m.id,
-        m.label + (ambiguous ? ` (${m.plugin})` : '') + viaSuffix + (m.costUnreliable ? ' ⚠cost' : '') + (m.needsSignIn ? ' (needs sign-in)' : '')));
+        m.label + (ambiguous ? ` (${m.plugin})` : '') + viaSuffix + (m.costUnreliable ? ' ⚠cost' : '') + (m.needsSignIn ? ' (needs sign-in)' : '') + credentialSuffix(m.id)));
     }
     modelSel.appendChild(og);
   };
@@ -3354,6 +3515,7 @@ function renderAgentRows(rows) {
     if (row.pinned) lockPinnedPair(modelSel, effortSel);
     host.appendChild(card);
   });
+  applyFreeDailyToNewView();   // a :free model among the rows may need the allowance warning
 }
 
 // Fill a sub-agent model dropdown. '' is "unset" — the run resolves it to the
@@ -3837,7 +3999,7 @@ const MAX_LOG_LINES = 4000;
 
 // Build one .log-line node from a normalized log record. (Same DOM shape the
 // old global appendLog produced: ts/src/msg spans + lvl class.)
-function buildLogLine({ source, level, text, ts, sub }) {
+function buildLogLine({ source, level, text, ts, sub, path, kind }) {
   const line = document.createElement('div');
   line.className = logLineClass(level, sub);
 
@@ -3849,8 +4011,19 @@ function buildLogLine({ source, level, text, ts, sub }) {
   s.className = 'log-src';
   s.textContent = source ? `[${source}]` : '';
 
-  const m = document.createElement('span');
-  m.className = 'log-msg';
+  // An artifact line with a path becomes a link: the delegated handler on the log
+  // pane opens it in the viewer (resolving the run from the pane's _artifactCtx).
+  let m;
+  if (level === 'artifact' && path) {
+    m = document.createElement('a');
+    m.className = 'log-msg log-artifact';
+    m.href = '#';
+    m.dataset.path = String(path);
+    if (kind) m.dataset.kind = String(kind);
+  } else {
+    m = document.createElement('span');
+    m.className = 'log-msg';
+  }
   m.textContent = String(text);
 
   line.append(t, s, m);
@@ -4083,6 +4256,8 @@ function onLog(r, msg) {
     ...(msg.stepIndex != null ? { stepIndex: msg.stepIndex } : {}),
     ...(msg.cycle != null ? { cycle: msg.cycle } : {}),
     ...(msg.stream ? { stream: msg.stream } : {}),
+    ...(msg.path != null ? { path: msg.path } : {}),
+    ...(msg.kind != null ? { kind: msg.kind } : {}),
   };
   r.logLines.push(rec);
   if (r.logLines.length > MAX_LOG_LINES) r.logLines.shift();
@@ -4094,6 +4269,7 @@ function onLog(r, msg) {
     const repainted = maybePaintLogFilters(r, rec);
     const logEl = r.el.querySelector('.log');
     if (logEl && !repainted && logLineVisible(rec, r.logFilter)) {
+      logEl._artifactCtx = { run: r, runId: r.pipelineId || r.id, record: r.record || null };
       clearLogPlaceholder(logEl);
       r._cycleState = appendLogRec(logEl, rec, r._cycleState ?? null);
       trimLogDom(logEl);
@@ -4274,6 +4450,13 @@ function repaintFilteredLog(r, root = r.el) {
   if (!r || !root) return;
   const logEl = root.querySelector('.log');
   if (!logEl) return;
+  // Every pane that renders log lines passes through here — the dashboard card,
+  // the open run detail, a finished run's card — so this is where the artifact
+  // link context belongs. onLog only ever stamped the CARD's pane, and only on a
+  // live line, so `.log-artifact` links in the detail (rdLogBox) and on any
+  // finished card were silently inert: the delegated handler walks up for
+  // _artifactCtx, finds none, and does nothing at all.
+  logEl._artifactCtx = { run: r, runId: r.pipelineId || r.id, record: r.record || null };
   // Auto-scroll OFF freezes the viewport: carry the position across the
   // wipe+rebuild (the browser clamps if the filtered content is shorter).
   // ON keeps its pin-to-bottom via maybeAutoscrollLog below.
@@ -4307,20 +4490,91 @@ function repaintFilteredLog(r, root = r.el) {
 function onArtifact(r, msg) {
   if (msg && msg.kind) {
     if (!Array.isArray(r.artifacts)) r.artifacts = [];
-    r.artifacts.push({
+    const rec = {
       kind: msg.kind,
       path: msg.path || '',
       nodeId: msg.nodeId ?? null,
       stepKey: msg.executionId ?? null,   // stepKey := executionId (WS field name)
       cycle: msg.cycle ?? null,
-    });
+    };
+    // A rewritten file is re-indexed and re-emitted, and hydration may already
+    // have seeded the same file from the server — one row per file either way,
+    // carrying the newest attribution.
+    // rec.path is absolute; an existing entry may be either — and several rows can
+    // suffix-match it, so bind to the CLOSEST rather than the first.
+    const at = closestArtifactIndex(r.artifacts, rec.path, (a) => a.kind === rec.kind);
+    // Attribution is all the event carries, and `bytes` is not attribution — it is
+    // a property of the FILE, which only the hydrated server row knows (sizing a
+    // row costs a statSync, so the WS event deliberately omits it). Replacing the
+    // row wholesale dropped the size chip the moment a file was rewritten, and
+    // hydrateRunArtifacts skips any row a live event already delivered, so it never
+    // came back. Carry it: a size from the last index is stale only by the delta of
+    // one rewrite, which beats the row claiming no size at all.
+    if (at >= 0) r.artifacts[at] = { ...(r.artifacts[at].bytes != null ? { bytes: r.artifacts[at].bytes } : {}), ...rec };
+    else r.artifacts.push(rec);
   }
+  // A step that indexes a whole FOLDER emits one event per file — a deck audit
+  // takes a screenshot per slide, so 43 arrive back to back and bury the run's
+  // narrative. Log the first few of such a run and drop the rest; the Artifacts
+  // tab above still receives every one of them.
+  //
+  // Counted, not de-duplicated: suppressing every adjacent same-kind event
+  // swallows distinct deliverables, because deckExport emits deck.html,
+  // deck.standalone.html and deck.pdf consecutively as one kind from one node.
+  // The threshold is the Artifacts tab's own BULK_KIND_THRESHOLD, so what
+  // collapses in the list is what goes quiet in the log.
+  // Keyed by EXECUTION as well as kind and node: the build/audit loop re-enters
+  // the same node on every fix cycle, and a key of kind+node alone stays over the
+  // threshold for the rest of the run — so cycle 2 would log none of its 43
+  // screenshots instead of its own first few.
+  // No log line for a kind nobody can open — a link to the run DIR or to the
+  // deleted questions scratch file only ever 404s. The engine skips the same
+  // kinds when it persists, so the live pane and History agree.
+  if (!isBrowsableKind(msg.kind)) return;
+  // ONE slot keyed by the burst reset its count whenever the key
+  // changed, so two executions sweeping folders CONCURRENTLY (a workspace fan-out
+  // of an extraFiles-declaring agent; _indexExtraFiles awaits between files, so
+  // they interleave) flipped the key on every event and nothing was ever
+  // suppressed. A Map counts each burst on its own. Bounded by the run's distinct
+  // (kind, execution, node) triples, which is what a burst IS.
+  const key = `${msg.kind || ''}\u0000${msg.executionId ?? ''}\u0000${msg.nodeId ?? ''}`;
+  if (!r._artifactRuns) r._artifactRuns = new Map();
+  const seen = (r._artifactRuns.get(key) || 0) + 1;
+  r._artifactRuns.set(key, seen);
+  if (seen > BULK_KIND_THRESHOLD) return;
   onLog(r, {
     source: 'artifact',
     level: 'artifact',
     text: `${msg.kind || 'file'}: ${msg.path || ''}`,
     ts: Date.now(),
+    path: msg.path || '',
+    kind: msg.kind || '',
   });
+}
+
+// The engine pruned index rows for files that are gone — the audit deletes and
+// recreates shots/ every cycle, so a fix cycle that cuts a slide drops one. The
+// client list only ever grew, so the browser kept rendering the pruned row and
+// clicking it 404s from a route that resolves only among indexed rows.
+function onArtifactGone(r, msg) {
+  const paths = msg && Array.isArray(msg.paths) ? msg.paths : [];
+  if (!paths.length || !Array.isArray(r.artifacts) || !r.artifacts.length) return;
+  let removed = 0;
+  for (const p of paths) {
+    // EVERY row for the file, not just the closest: a re-kind leaves the same path
+    // under two kinds (onArtifact's dedupe is kind-scoped), and the engine prunes
+    // the superseded one — dropping a single row here left the file listed twice
+    // and counted twice in the per-node badge. For the file-is-gone case, removing
+    // all of its rows is equally right.
+    for (let at = closestArtifactIndex(r.artifacts, p); at >= 0; at = closestArtifactIndex(r.artifacts, p)) {
+      r.artifacts.splice(at, 1);
+      removed += 1;
+    }
+  }
+  // Repaint NOW rather than waiting for the next state frame: a run that has
+  // finished sends no more, so the stale row would stay clickable for the life of
+  // the page. rdUpdateSections self-guards on there being an open screen.
+  if (removed && rdOpenRun() === r) rdUpdateSections(r);
 }
 
 // Non-run-scoped UI notices (config/answer/install errors). There is no global
@@ -4553,15 +4807,17 @@ function renderClarifyBody(r, panel, pq) {
       free = document.createElement('input');
       free.className = 'qfree';
       free.type = 'text';
-      free.placeholder = 'Or type your own answer…';
+      free.placeholder = 'Or type your own answer… (e.g. "B but change the port")';
     }
 
-    opts.forEach((optText) => {
+    opts.forEach((optText, optIdx) => {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'qopt';
       btn.setAttribute('aria-pressed', 'false');
-      btn.textContent = optText;
+      // A/B/C/D prefix (MAX_CLARIFY_OPTIONS is 4) so a free-text answer can
+      // refer back to an option by name, e.g. "B but change the port".
+      btn.textContent = `${String.fromCharCode(65 + optIdx)}. ${optText}`;
       btn.addEventListener('click', () => {
         // Select this option, clear siblings + the free-text field (if present).
         optsWrap.querySelectorAll('.qopt').forEach((b) => {
@@ -6321,22 +6577,40 @@ el.addProjectSave.addEventListener('click', async () => {
 // --- Folder selector (Browse…): native OS dialog, in-app modal fallback ----
 let folderState = { path: '', parent: null, home: '' };
 
+// New Pipeline's inline form: one picked folder fills it (as before); several open the
+// review list — the form hides, and on close the dropdown selects the first added project
+// (the single Save's auto-select), else it falls back to the last project.
+function newPipelinePicks(paths) {
+  routePickedFolders(paths, {
+    single: applyPickedFolder,
+    many: (list) => {
+      hideAddProject();
+      openProjectBulkModal(list, {
+        onDone: ({ added }) => renderProjectOptions(added[0] || localStorage.getItem(LAST_PROJECT_KEY) || ''),
+      });
+    },
+  });
+}
+
+function browseNewProjectInWorca() {
+  return openFolderBrowser(el.newProjectPath.value.trim(), applyPickedFolder, { multiple: true, onSelectMany: newPipelinePicks });
+}
+
 el.newProjectBrowse.addEventListener('click', async () => {
   el.newProjectBrowse.disabled = true;
   setAddMsg('');
   try {
-    const res = await fetch('/api/fs/pick-folder', { method: 'POST' });
-    const data = await safeJson(res);
-    if (res.ok && data.status === 'picked' && data.path) applyPickedFolder(data.path);
-    else if (res.ok && data.status === 'canceled') { /* user dismissed the dialog */ }
-    else if (res.ok && data.status === 'busy') setAddMsg('A folder dialog is already open — finish or cancel it first.', 'err');
-    else await openFolderBrowser(el.newProjectPath.value.trim()); // unsupported / error -> in-app fallback
-  } catch {
-    await openFolderBrowser(el.newProjectPath.value.trim());
+    const data = await pickFolder('project', { multiple: true });   // never throws
+    if (data.status === 'picked' && pickedPaths(data).length) newPipelinePicks(pickedPaths(data));
+    else if (data.status === 'canceled') { /* user dismissed the dialog */ }
+    else if (data.status === 'busy') setAddMsg('A folder dialog is already open — finish or cancel it first.', 'err');
+    else await browseNewProjectInWorca();                            // unsupported / error -> in-app fallback
   } finally {
     el.newProjectBrowse.disabled = false;
   }
 });
+// Worca's own browser, straight away: multi-select where the native dialog has none (Windows).
+if (el.newProjectBrowseMany) el.newProjectBrowseMany.addEventListener('click', () => { void browseNewProjectInWorca(); });
 
 // Fill the path field; prefill an EMPTY name with the folder's basename.
 function applyPickedFolder(path) {
@@ -6350,14 +6624,38 @@ function applyPickedFolder(path) {
 // The in-app browser is shared by every Browse… button, so each opener names
 // where "Select this folder" lands. Default sink = the add-project fields.
 let folderSink = applyPickedFolder;
+// Multi mode: set only by an opener that passes { multiple: true, onSelectMany }.
+// Ticked folders (path -> name) survive navigation; every open starts empty.
+let folderManySink = null;
+const folderPicks = new Map();
 
-async function openFolderBrowser(seedPath, onSelect) {
+async function openFolderBrowser(seedPath, onSelect, { multiple = false, onSelectMany = null } = {}) {
   folderSink = onSelect || applyPickedFolder;
+  folderManySink = multiple && typeof onSelectMany === 'function' ? onSelectMany : null;
+  folderPicks.clear();
+  el.folderBrowser.classList.toggle('multi', !!folderManySink);
+  if (el.folderBrowserTitle) el.folderBrowserTitle.textContent = folderManySink ? 'Select folders' : 'Select a folder';
+  syncFolderPicks();
   el.folderBrowser.classList.remove('hidden');
   // A stale or mistyped seed path from the text field 400s; fall back to home.
   // Only the SEED gets this retry — navigation failures keep the current
   // listing (loadFolders shows the error) instead of yanking the user home.
   if (!(await loadFolders(seedPath)) && seedPath) await loadFolders('');
+}
+
+// Footer state for multi mode: the count line and "Add N selected"; hidden in single mode.
+function syncFolderPicks() {
+  if (!el.folderSelectMany) return;
+  const multi = !!folderManySink;
+  const n = folderPicks.size;
+  el.folderSelectMany.classList.toggle('hidden', !multi);
+  el.folderPickCount.classList.toggle('hidden', !multi);
+  el.folderSelectMany.disabled = n === 0;
+  el.folderSelectMany.textContent = n ? `Add ${n} selected` : 'Add selected';
+  el.folderPickCount.textContent = n === 1 ? '1 folder selected' : `${n} folders selected`;
+  // One primary action: in multi mode "Add N selected" is it, "Select this folder" steps back.
+  el.folderSelect.classList.toggle('btn-primary', !multi);
+  el.folderSelect.classList.toggle('btn-ghost', multi);
 }
 
 function closeFolderBrowser() {
@@ -6397,6 +6695,19 @@ function renderFolders(data) {
   }
   for (const d of data.dirs) {
     const li = document.createElement('li');
+    if (folderManySink) {
+      li.className = 'folder-row';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'folder-pick';
+      cb.checked = folderPicks.has(d.path);
+      cb.setAttribute('aria-label', `Select ${d.name}`);
+      cb.addEventListener('change', () => {
+        if (cb.checked) folderPicks.set(d.path, d.name); else folderPicks.delete(d.path);
+        syncFolderPicks();
+      });
+      li.appendChild(cb);
+    }
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'folder-item';
@@ -6417,6 +6728,12 @@ el.folderHome.addEventListener('click', () => loadFolders(''));
 el.folderSelect.addEventListener('click', () => {
   if (folderState.path) folderSink(folderState.path);
   closeFolderBrowser();
+});
+el.folderSelectMany.addEventListener('click', () => {
+  const sink = folderManySink;
+  const paths = [...folderPicks.keys()];
+  closeFolderBrowser();
+  if (sink && paths.length) sink(paths);
 });
 el.folderBrowserClose.addEventListener('click', closeFolderBrowser);
 // Backdrop click (the overlay itself, not the inner card) and Escape close it,
@@ -6579,10 +6896,11 @@ function renderWorkspaceSourceBranches() {
 // Populate #workspaceSelect from state.workspaces (loading them if empty).
 // Workspaces with any missing member are rendered disabled "+ (incomplete)".
 // Restores LAST_WORKSPACE_KEY when valid.
-async function ensureWorkspaceOptions() {
+async function ensureWorkspaceOptions({ keepMembers = false } = {}) {
   const sel = el.workspaceSelect;
   if (!sel) return;
   if (!state.workspaces.length) await loadWorkspaces();
+  const shown = state.selectedWorkspaceId;
 
   sel.innerHTML = '';
   const placeholder = document.createElement('option');
@@ -6611,6 +6929,9 @@ async function ensureWorkspaceOptions() {
     state.selectedWorkspaceId = '';
     placeholder.selected = true;
   }
+  // A background list refresh (keepMembers) leaves a still-selected workspace's member rows and
+  // branch picks alone; only a changed selection repaints them.
+  if (keepMembers && state.selectedWorkspaceId && state.selectedWorkspaceId === shown) return;
   renderWorkspaceMembers();
   renderWorkspaceSourceBranches();
 }
@@ -6853,11 +7174,14 @@ if (el.wsList) {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace page (#workspaces/<id>[/team]) — the project page's twin: the same two-screen
+// Workspace page (#workspaces/<id>[/map|/team]) — the project page's twin: the same two-screen
 // slide, the same header card, pills and stat cards (it rides the pd- classes), and all
-// editing — description, re-scan, delete, metrics home, policy home, routing — lives here.
+// editing — description, re-scan, delete, metrics home, policy home, routing, the map's overrides —
+// lives here.
 // ---------------------------------------------------------------------------
-const WS_TABS = ['overview', 'team'];
+const WS_TABS = ['overview', 'map', 'team'];
+// workspaces-changed actions that can change the Map tab: an override (P5 routes) or a scan's save.
+const WD_MAP_ACTIONS = new Set(['map', 'scan-created', 'scan-updated']);
 function parseWsParam(param = '') {
   const s = String(param || '');
   if (!s) return null;
@@ -6866,7 +7190,7 @@ function parseWsParam(param = '') {
   const tab = i === -1 ? '' : s.slice(i + 1);
   return { id, tab: WS_TABS.includes(tab) && tab !== 'overview' ? tab : 'overview' };
 }
-const wsParamFor = (id, tab = 'overview') => (tab === 'team' ? `${id}/team` : id);
+const wsParamFor = (id, tab = 'overview') => (WS_TABS.includes(tab) && tab !== 'overview' ? `${id}/${tab}` : id);
 const workspaceById = (id) => state.workspaces.find((x) => x && x.id === id) || null;
 
 let wsDetail = null;        // { id, screen } while a page is open
@@ -6884,14 +7208,20 @@ async function loadWorkspacesView() {
   if (view === 'workspaces') routeWsDetail(param, { instant: true });
 }
 // A workspaces-changed frame while the page is open: rebuild the list under the user and keep the
-// open page — unless its workspace went away, which closes it with a note.
-async function refreshWorkspacesPage() {
+// open page — unless its workspace went away, which closes it with a note. `action` is the frame's
+// action: a map override or a finished scan also reloads a built Map tab (WD_MAP_ACTIONS).
+async function refreshWorkspacesPage(action = null) {
   await loadWorkspaces();
   if (currentShownView !== 'workspaces') return;
   renderWorkspaces();
   if (!wsDetail) return;
   const w = workspaceById(wsDetail.id);
-  if (w) { paintWsHeader(wsDetail.screen, w); refreshWdOverview(); return; }
+  if (w) {
+    paintWsHeader(wsDetail.screen, w);
+    refreshWdOverview();
+    if (WD_MAP_ACTIONS.has(action)) await refreshWdMap();
+    return;
+  }
   const name = wsDetail.name;
   showView('workspaces', '');
   setWsMsg(`workspace "${name}" was removed`, 'err');
@@ -6985,6 +7315,7 @@ function closeWsDetail({ instant = false } = {}) {
 // ---- tabs ----
 const WD_TABS = [
   { key: 'overview', label: 'Overview', level: 'simple', badge: () => null, visible: () => true, build: (sec, id) => buildWdOverview(sec, id) },
+  { key: 'map', label: 'Map', level: 'advanced', badge: () => null, visible: () => true, build: (sec, id) => buildWdMap(sec, id) },
   { key: 'team', label: 'Team', level: 'expert', badge: () => null, visible: () => true, build: (sec, id) => buildWdTeam(sec, id) },
 ];
 function initWdTabs(screen, w) {
@@ -7116,7 +7447,15 @@ function refreshWdOverview() {
   const sec = wsDetail.screen.querySelector('.pd-sec[data-sec="overview"]');
   if (!sec || sec.dataset.loaded !== '1') return;
   const pane = sec.querySelector('.ws-desc-edit');
-  if (pane && !pane.hidden) return;
+  if (pane && !pane.hidden) {
+    // Never repaint under an open editor. When the description changed underneath the draft (a
+    // scan finished), say so — Save would replace the new text with the draft.
+    const w = workspaceById(wsDetail.id);
+    if (w && typeof wsDetail.editBase === 'string' && (w.description || '') !== wsDetail.editBase) {
+      setWdError(wsDetail.screen, 'The description changed while you were editing (a scan finished). Cancel shows it; Save replaces it with your draft.');
+    }
+    return;
+  }
   buildWdOverview(sec, wsDetail.id);
 }
 // The description is markdown; the bundle loads lazily, so the first paint may be plain. Repaint
@@ -7158,11 +7497,211 @@ function buildWdTeam(sec, id) {
   void paintWsPolicyLines();
 }
 
+// ---- Map tab: the scan's interconnection map (spec D17) ----
+// GET /api/workspaces/:id/map when the tab is built and on a map / scan frame (WD_MAP_ACTIONS).
+// Filters live on wsDetail and die with the page.
+let wdMapToken = 0;
+function buildWdMap(sec, id) {
+  sec.innerHTML = '';
+  sec.classList.add('wd-sec-map');
+  sec.appendChild(Object.assign(document.createElement('small'), { className: 'hint', textContent: 'Loading…' }));
+  // (mapFocus: defensive — a reopened page is a new wsDetail; this covers a builder retry on the same page.)
+  if (wsDetail) { wsDetail.map = null; wsDetail.mapError = ''; wsDetail.mapFilters = emptyMapFilters(); wsDetail.mapFocus = null; }
+  void loadWdMap(id);
+}
+// The newest request wins: an older answer that lands last is dropped (wdMapToken).
+async function loadWdMap(id) {
+  const token = ++wdMapToken;
+  let payload = null;
+  let error = '';
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}/map`);
+    const data = await safeJson(res);
+    if (res.ok && data && typeof data === 'object') payload = data;
+    else error = (data && data.error) || `HTTP ${res.status}`;
+  } catch (err) {
+    error = (err && err.message) || 'could not load the map';
+  }
+  if (token !== wdMapToken || !wsDetail || wsDetail.id !== id) return;
+  if (payload) wsDetail.map = payload;
+  wsDetail.mapError = error;
+  paintWdMap();
+  // An override's keyboard target (wdMapMutation) waits for the first paint of a map loaded after
+  // its answer: its own reload, or a frame's newer one that overtook it. An older load that still
+  // paints (it began before the answer) shows the old table and must not take it.
+  const pending = wsDetail.mapFocus;
+  if (pending && token >= pending.from) { wsDetail.mapFocus = null; focusWdMapRow(pending.edge, pending.action); }
+}
+// Reload the Map tab when it has been built; never builds it (a lazy tab stays lazy).
+function refreshWdMap() {
+  const sec = wsDetail && wsDetail.screen && wsDetail.screen.querySelector('.pd-sec[data-sec="map"]');
+  if (!sec || sec.dataset.loaded !== '1') return Promise.resolve();
+  return loadWdMap(wsDetail.id);
+}
+// Repaint from wsDetail.map + filters. The add-form draft, the horizontal scroll of the graph and
+// of the edge table (its last column holds the actions) and the focused control survive the
+// repaint (a frame can land while the user types).
+function paintWdMap({ focus = '' } = {}) {
+  const sec = wsDetail && wsDetail.screen && wsDetail.screen.querySelector('.pd-sec[data-sec="map"]');
+  if (!sec) return;
+  const draft = {};
+  for (const f of sec.querySelectorAll('.wm-add-form [name]')) draft[f.name] = f.value;
+  const active = document.activeElement && sec.contains(document.activeElement) ? document.activeElement : null;
+  const again = wdMapFocusSelector(active);
+  const scroll = sec.querySelector('.wm-graph-scroll');
+  const left = scroll ? scroll.scrollLeft : 0;
+  const tableScroll = sec.querySelector('.wm-table-scroll');
+  const tableLeft = tableScroll ? tableScroll.scrollLeft : 0;
+  const data = { ...(wsDetail.map || { map: null, edges: [] }), workspace: workspaceById(wsDetail.id), error: wsDetail.mapError || '' };
+  sec.replaceChildren(renderMapTab(data, { doc: document, filters: wsDetail.mapFilters || emptyMapFilters() }));
+  for (const f of sec.querySelectorAll('.wm-add-form [name]')) {
+    if (!(f.name in draft)) continue;
+    if (f.tagName === 'SELECT' && ![...f.options].some((o) => o.value === draft[f.name])) continue;
+    f.value = draft[f.name];
+  }
+  const next = sec.querySelector('.wm-graph-scroll');
+  if (next && left) next.scrollLeft = left;
+  const nextTable = sec.querySelector('.wm-table-scroll');
+  if (nextTable && tableLeft) nextTable.scrollLeft = tableLeft;
+  const target = (focus && sec.querySelector(focus)) || (again && sec.querySelector(again)) || null;
+  if (target && typeof target.focus === 'function') target.focus({ preventScroll: true });
+}
+// A selector that finds the focused control again in the repainted tab ('' = nothing to restore):
+// an add-form field, a filter select, a row action, a graph pair, a coverage chip, or one of the
+// tab's single buttons. A frame (another window, a finished scan) repaints under the keyboard.
+function wdMapFocusSelector(el) {
+  if (!el || !el.closest) return '';
+  const q = (v) => `"${cssEscape(String(v || ''))}"`;
+  if (el.closest('.wm-add-form') && el.name) return `.wm-add-form [name=${q(el.name)}]`;
+  if (el.matches('select.wm-filter')) return `select.wm-filter[data-filter=${q(el.dataset.filter)}]`;
+  const act = el.matches('.wm-actions button') && [...el.classList].find((c) => /^wm-(confirm|reject|clear|del)$/.test(c));
+  if (act) return `.wm-row[data-edge=${q(el.dataset.edge)}] .${act}`;
+  if (el.matches('.wm-pair')) return `.wm-pair[data-from=${q(el.dataset.from)}][data-to=${q(el.dataset.to)}]`;
+  if (el.matches('.wm-chip')) return `.wm-chip[data-value=${q(el.dataset.value)}]`;
+  if (el.matches('button.wm-filter[data-filter="all"]')) return 'button.wm-filter[data-filter="all"]';
+  const one = ['wm-add', 'wm-regen', 'wm-rescan', 'wm-pair-chip'].find((c) => el.classList.contains(c));
+  return one ? `.${one}` : '';
+}
+function setWdMapFilters(patch, focus = '') {
+  if (!wsDetail) return;
+  wsDetail.mapFilters = patch === null ? emptyMapFilters() : { ...emptyMapFilters(), ...(wsDetail.mapFilters || {}), ...patch };
+  paintWdMap({ focus });
+}
+// A pair in the graph (click, Enter or Space): filter the table to it; the same pair again clears.
+function toggleWdMapPair(from, to) {
+  const cur = wsDetail && wsDetail.mapFilters && wsDetail.mapFilters.pair;
+  const same = cur && cur.from === from && cur.to === to;
+  setWdMapFilters({ pair: same ? null : { from, to } }, `.wm-pair[data-from="${cssEscape(from)}"][data-to="${cssEscape(to)}"]`);
+}
+// A filter button: a coverage chip or a graph node (member, toggles), the pair chip, Clear filters.
+function clickWdMapFilter(node) {
+  const key = node.dataset.filter;
+  const value = node.dataset.value || '';
+  if (key === 'all') return setWdMapFilters(null, 'select.wm-filter[data-filter="member"]');
+  if (key === 'pair') return setWdMapFilters({ pair: null }, 'select.wm-filter[data-filter="member"]');
+  if (key !== 'member') return;
+  const cur = (wsDetail && wsDetail.mapFilters && wsDetail.mapFilters.member) || '';
+  setWdMapFilters({ member: cur === value ? '' : value }, node.classList.contains('wm-chip') ? `.wm-chip[data-value="${cssEscape(value)}"]` : '');
+}
+// One override call (P5 routes). The button is busy while it runs and a second press is ignored;
+// an error lands on the page header (or on `onError`), gives a button that held the keyboard its
+// focus back, and on a 404 (the edge or the workspace is gone) also reloads the tab; success
+// clears it, runs `onOk`, reloads the list (the description may have been re-rendered) and the
+// Map tab, and puts the keyboard back on the pressed row or button (`wsDetail.mapFocus`, taken
+// by the first newer paint in loadWdMap).
+async function wdMapMutation(btn, url, opts, { onError = null, onOk = null } = {}) {
+  const screen = wsDetail && wsDetail.screen;
+  if (!screen || (btn && btn.disabled)) return false;
+  const fail = (text) => (onError ? onError(text) : setWdError(screen, text));
+  const edge = (btn && btn.dataset && btn.dataset.edge) || '';
+  // The pressed control, for the keyboard: a row action (with its edge) or a single button.
+  const action = (btn && btn.classList && [...btn.classList].find((c) => /^wm-(confirm|reject|clear|del|add|regen)$/.test(c))) || '';
+  const hadFocus = Boolean(btn) && document.activeElement === btn;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(url, opts);
+    const data = await safeJson(res);
+    if (!res.ok) {
+      fail((data && data.error) || `HTTP ${res.status}`);
+      if (res.status === 404) void refreshWdMap();
+      return false;
+    }
+    setWdError(screen, '');
+    if (onOk) onOk(data);
+    // The keyboard goes back to the row (or the pressed single button) in the first paint of a map
+    // loaded AFTER this answer: our own reload, or a frame's newer reload that overtook it (newest
+    // wins) — loadWdMap takes it.
+    if (action && wsDetail) wsDetail.mapFocus = { edge, action, from: wdMapToken + 1 };
+    await refreshWorkspacesPage();
+    await refreshWdMap();
+    return true;
+  } catch (err) {
+    fail((err && err.message) || 'request failed');
+    return false;
+  } finally {
+    if (btn && btn.isConnected) {
+      btn.disabled = false;
+      // A refused press keeps its button: hand the keyboard back to it (Chrome drops the focus of a
+      // button that turns disabled), unless the press did not hold the focus or the user moved on.
+      const cur = document.activeElement;
+      if (hadFocus && (!cur || cur === document.body || !cur.isConnected)) btn.focus({ preventScroll: true });
+    }
+  }
+}
+// After an override the tab is rebuilt: a keyboard user whose control went away stays where it was
+// — on the same row: the same action if the row still has it, else Clear (never the opposite
+// verdict, so a second Enter cannot flip what was just decided), else its first action; on the
+// same single button (Add edge); else on the tab panel (initDetailTabs gives it tabindex 0).
+function focusWdMapRow(edge, action = '') {
+  const sec = wsDetail && wsDetail.screen && wsDetail.screen.querySelector('.pd-sec[data-sec="map"]');
+  const cur = document.activeElement;
+  if (!sec || (cur && cur !== document.body && cur.isConnected)) return;
+  const row = edge ? sec.querySelector(`.wm-row[data-edge="${cssEscape(edge)}"]`) : null;
+  const pick = (sel) => (row ? row.querySelector(sel) : null);
+  const target = (action && pick(`.wm-actions .${action}`)) || pick('.wm-actions .wm-clear') || pick('.wm-actions button')
+    || (!edge && action ? sec.querySelector(`.${action}`) : null) || sec;
+  target.focus({ preventScroll: true });
+}
+const wdMapUrl = (tail = '') => `/api/workspaces/${encodeURIComponent(wsDetail.id)}/map${tail}`;
+const WD_JSON_HEADERS = { 'Content-Type': 'application/json' };
+function setWdEdgeState(btn, state) {
+  return wdMapMutation(btn, wdMapUrl(`/edges/${encodeURIComponent(btn.dataset.edge || '')}`),
+    { method: 'PUT', headers: WD_JSON_HEADERS, body: JSON.stringify({ state }) });
+}
+function deleteWdManualEdge(btn) {
+  return wdMapMutation(btn, wdMapUrl(`/edges/${encodeURIComponent(btn.dataset.edge || '')}`), { method: 'DELETE' });
+}
+function addWdManualEdge(btn) {
+  const box = btn.closest('.wm-add-box');
+  if (!box) return Promise.resolve(false);
+  // The LIVE add box: a frame may repaint the tab while the request runs, so the answer (an error
+  // to show, or a saved form to clear) goes to the box on screen, not to the one that was pressed.
+  const liveBox = () => (wsDetail && wsDetail.screen && wsDetail.screen.querySelector('.pd-sec[data-sec="map"] .wm-add-box')) || box;
+  const val = (name) => ((box.querySelector(`[name="${name}"]`) || {}).value || '').trim();
+  const say = (text) => { const msg = liveBox().querySelector('.wm-add-msg'); if (msg) { msg.textContent = text; msg.hidden = !text; } };
+  const body = { from: val('wm-from'), to: val('wm-to'), kind: val('wm-kind'), display: val('wm-display'), detail: val('wm-detail') };
+  if (!body.from || !body.to || body.from === body.to) { say('Pick two different projects'); return Promise.resolve(false); }
+  if (!body.display) { say('Name the edge'); return Promise.resolve(false); }
+  say('');
+  return wdMapMutation(btn, wdMapUrl('/edges'), { method: 'POST', headers: WD_JSON_HEADERS, body: JSON.stringify(body) }, {
+    onError: say,
+    onOk: () => {
+      const live = liveBox();
+      for (const n of ['wm-display', 'wm-detail']) { const f = live.querySelector(`[name="${n}"]`); if (f) f.value = ''; }
+    },
+  });
+}
+function regenerateWdDescription(btn) {
+  return wdMapMutation(btn, wdMapUrl('/render'), { method: 'POST', headers: WD_JSON_HEADERS, body: '{}' });
+}
+
 // Delegated actions on the workspace page: the metrics home sheet and routing, the policy home
-// sheet and routing, the description editor, a member row.
+// sheet and routing, the description editor, a member row, the Map tab.
 if (el.wsDetail) {
   el.wsDetail.addEventListener('click', async (e) => {
     if (!wsDetail) return;
+    // The second click of a double-click lands on the repainted Map tab: a different verdict or another row.
+    if (e.detail > 1 && e.target.closest('.wm-actions, .wm-add, .wm-regen, .wm-filters, .wm-coverage, .wm-graph')) return;
     const id = wsDetail.id;
     const w = workspaceById(id);
     const member = e.target.closest && e.target.closest('.wd-member[data-key]');
@@ -7203,11 +7742,40 @@ if (el.wsDetail) {
       await paintWsMetricsRows(true); // fresh counts + the saved result list
       return;
     }
+    const pair = e.target.closest('.wm-pair');
+    if (pair) { toggleWdMapPair(pair.dataset.from, pair.dataset.to); return; }
+    const filt = e.target.closest('button.wm-filter, .wm-node.wm-filter');
+    if (filt) { clickWdMapFilter(filt); return; }
+    const act = e.target.closest('.wm-confirm, .wm-reject, .wm-clear');
+    if (act) { void setWdEdgeState(act, act.classList.contains('wm-confirm') ? 'confirmed' : act.classList.contains('wm-reject') ? 'rejected' : null); return; }
+    if (e.target.closest('.wm-del')) { void deleteWdManualEdge(e.target.closest('.wm-del')); return; }
+    if (e.target.closest('.wm-add')) { void addWdManualEdge(e.target.closest('.wm-add')); return; }
+    if (e.target.closest('.wm-regen')) { void regenerateWdDescription(e.target.closest('.wm-regen')); return; }
+    const rescan = e.target.closest('.wm-rescan');
+    if (rescan) {                       // rescanWorkspace disables only the header's Re-scan
+      if (rescan.disabled) return;
+      rescan.disabled = true;
+      try { await rescanWorkspace(w); } finally { if (rescan.isConnected) rescan.disabled = false; }
+      return;
+    }
     if (e.target.closest('.ws-edit')) { openWsEdit(wsDetail.screen, w); return; }
     const tab = e.target.closest('.ws-desc-tab');
     if (tab) { setMdEditMode(wsDetail.screen.querySelector('.ws-desc-edit'), tab.dataset.mode === 'preview'); return; }
-    if (e.target.closest('.ws-desc-cancel')) { closeWsEdit(wsDetail.screen); return; }
+    if (e.target.closest('.ws-desc-cancel')) { closeWsEdit(wsDetail.screen); setWdError(wsDetail.screen, ''); refreshWdOverview(); return; }
     if (e.target.closest('.ws-desc-save')) { void saveWsDescription(wsDetail.screen, w); }
+  });
+  // Map tab: the four filter selects, and Enter / Space on a focused graph pair.
+  el.wsDetail.addEventListener('change', (e) => {
+    const s = e.target.closest && e.target.closest('select.wm-filter');
+    if (!s || !wsDetail || !['member', 'kind', 'confidence', 'state'].includes(s.dataset.filter)) return;
+    setWdMapFilters({ [s.dataset.filter]: s.value }, `select.wm-filter[data-filter="${s.dataset.filter}"]`);
+  });
+  el.wsDetail.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+    const pair = e.target.closest && e.target.closest('.wm-pair');
+    if (!pair || !wsDetail) return;
+    e.preventDefault();
+    toggleWdMapPair(pair.dataset.from, pair.dataset.to);
   });
 }
 
@@ -7399,6 +7967,8 @@ function openWsEdit(screen, w) {
   const pane = screen.querySelector('.ws-desc-edit');
   const input = screen.querySelector('.ws-desc-input');
   if (input) input.value = w.description || '';
+  // What the draft started from: refreshWdOverview compares it when the list refreshes underneath.
+  if (wsDetail) wsDetail.editBase = w.description || '';
   if (pane) { pane.hidden = false; setMdEditMode(pane, false); }
   if (input) input.focus();
 }
@@ -7449,6 +8019,7 @@ async function saveWsDescription(screen, w) {
     setWdError(screen, '');
     closeWsEdit(screen);
     refreshWdOverview();
+    void refreshWdMap();              // the description is 'edited' now: the Map tab offers Regenerate
   } catch (err) {
     setWdError(screen, err.message);
   } finally {
@@ -7463,21 +8034,29 @@ function setWdError(screen, text) {
   e.hidden = !text;
 }
 
-// Re-scan: POST /api/workspaces/:id/scan and jump into the wizard at Step 2 with
-// editingId set, so Step 3 Save issues a PATCH (not a POST).
+// Re-scan: start the Workspace scan run over the saved workspace and follow it on Running; the
+// run replaces the description when it finishes (D12). 409 (a live run) stays on the page.
 async function rescanWorkspace(w) {
-  if (!w) return;
-  state.wizard.editingId = w.id;
-  state.wizard.name = w.name || '';
-  state.wizard.selectedPaths = Array.isArray(w.projectPaths) ? [...w.projectPaths] : [];
-  location.hash = 'workspace-create';
-  // Re-scan also refreshes member discovery (§4.8) — the home is changed from the page
-  // (decision 23), not the wizard, so this fires-and-continues straight into the scan.
+  if (!w || !wsDetail) return;
+  const screen = wsDetail.screen;
+  const btn = screen.querySelector('.ws-rescan');
+  if (btn) btn.disabled = true;
+  // Re-scan also refreshes member discovery (§4.8) — the home is changed from the page.
   await fetch('/api/workspaces/metrics-scan', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectPaths: state.wizard.selectedPaths }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectPaths: w.projectPaths || [] }),
   }).catch(() => {});
-  // showView('workspace-create') runs enterWizard(); kick off the scan after.
-  await startWizardScan();
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(w.id)}/scan`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    const data = await safeJson(res);
+    if (!res.ok || !data.runId) { setWdError(screen, data.error || `HTTP ${res.status}`); return; }
+    beginScanRun(data, w.name || w.id);
+  } catch (err) {
+    setWdError(screen, err.message);
+  } finally {
+    if (btn && btn.isConnected) btn.disabled = false;
+  }
 }
 
 // Delete, from the page: confirm, then DELETE. 200 closes the page and removes the row;
@@ -7516,56 +8095,102 @@ async function deleteWorkspaceFromPage(id) {
 
 if (el.wsCreateBtn) el.wsCreateBtn.addEventListener('click', () => { location.hash = 'workspace-create'; });
 
+// ---- Workspace scan models (D15–D18): the scan agent (a catalog model + effort) and its project
+// agents (a sub-agent alias + effort). One painter for Create workspace and Settings › General.
+const SCAN_AGENT_ALIASES = [['sonnet', 'Sonnet'], ['opus', 'Opus'], ['fable', 'Fable']];
+const SCAN_EFFORTS = ['medium', 'high', 'xhigh', 'max'];
+const SCAN_MODELS_FALLBACK = { scanModel: 'claude-sonnet-5', scanEffort: 'medium', agentModel: 'sonnet', agentEffort: 'medium' };
+const WIZ_MODEL_IDS = { scanModel: 'wiz-scan-model', scanEffort: 'wiz-scan-effort', agentModel: 'wiz-agent-model', agentEffort: 'wiz-agent-effort' };
+const WS_SCAN_SETTINGS_IDS = { scanModel: 'wsScanModel', scanEffort: 'wsScanEffort', agentModel: 'wsAgentModel', agentEffort: 'wsAgentEffort' };
+let wizModelCatalog = [];
+// The wizard's Models column paint in flight (enterWizard): Scan awaits it, so a quick click never
+// sends the four still-empty selects (the scan route answers 400 to an empty pick).
+let wizModelsPainted = Promise.resolve();
+let wsScanCatalog = [];
+
+/** The pick a surface starts from: the stored one over the server's default (else Sonnet · medium). */
+function scanModelsFrom(data) {
+  const def = data && data.workspaceScanDefault && typeof data.workspaceScanDefault === 'object' ? data.workspaceScanDefault : SCAN_MODELS_FALLBACK;
+  const stored = data && data.workspaceScan && typeof data.workspaceScan === 'object' ? data.workspaceScan : null;
+  return { ...def, ...(stored || {}), scanEffort: (stored ? stored.scanEffort : def.scanEffort) || '' };
+}
+
+/** The scan agent's effort list is its model's own (the pair rule); a model the catalog does not
+ *  know (a failed GET) keeps the value it had. '' = the model's default. */
+function paintScanEffort(ids, keep, catalog) {
+  const sm = document.getElementById(ids.scanModel);
+  const se = document.getElementById(ids.scanEffort);
+  if (!sm || !se) return;
+  const m = catalog.find((x) => x && x.id === sm.value);
+  const efforts = m ? (Array.isArray(m.efforts) ? m.efforts : []) : (keep ? [keep] : []);
+  se.innerHTML = '';
+  if (!efforts.length) se.appendChild(option('', '(model default)'));
+  for (const e of efforts) se.appendChild(option(e, e));
+  se.value = efforts.includes(keep) ? keep : (efforts.includes('medium') ? 'medium' : (efforts[0] || ''));
+}
+
+/** Paint the four selects. The scan model list is the Auto card's (buildAutoModelOptions) without
+ *  its "(default)" row — a scan always names its model. */
+function paintScanModelPickers(ids, pick, catalog) {
+  const sm = document.getElementById(ids.scanModel);
+  const am = document.getElementById(ids.agentModel);
+  const ae = document.getElementById(ids.agentEffort);
+  if (!sm || !am || !ae) return;
+  const stale = !!pick.scanModel && catalog.length > 0 && !catalog.some((m) => m && m.id === pick.scanModel);
+  buildAutoModelOptions(sm, pick.scanModel || '', catalog, stale);
+  if (sm.options[0] && sm.options[0].value === '') sm.remove(0);
+  sm.value = pick.scanModel || '';
+  paintScanEffort(ids, pick.scanEffort || '', catalog);
+  am.innerHTML = '';
+  for (const [v, label] of SCAN_AGENT_ALIASES) am.appendChild(option(v, label));
+  am.value = pick.agentModel;
+  ae.innerHTML = '';
+  for (const e of SCAN_EFFORTS) ae.appendChild(option(e, e));
+  ae.value = pick.agentEffort;
+}
+
+/** The four selects as the POST shape. */
+function readScanModelPickers(ids) {
+  const v = (k) => document.getElementById(ids[k])?.value || '';
+  return { scanModel: v('scanModel'), scanEffort: v('scanEffort'), agentModel: v('agentModel'), agentEffort: v('agentEffort') };
+}
+
 // ---- Creation wizard -------------------------------------------------------
 
-// Reset the ephemeral wizard state to defaults, preserving a re-scan's editingId
-// + selectedPaths so Step 2/3 still know what they're scanning.
-function resetWizard(preserveEditing = false) {
-  const keepId = preserveEditing ? state.wizard.editingId : '';
-  const keepPaths = preserveEditing ? state.wizard.selectedPaths : [];
-  state.wizard = {
-    step: 1, name: preserveEditing ? state.wizard.name : '', selectedPaths: keepPaths,
-    scanId: '', description: '', graphifyUsed: null, abort: null, editingId: keepId,
-  };
+// Reset the ephemeral wizard state.
+function resetWizard() {
+  state.wizard = { name: '', selectedPaths: [], starting: false };
 }
 
-// enterWizard is idempotent: it does NOT reset if a scan is already live;
-// otherwise it resets (preserving a re-scan's editingId/selectedPaths), loads the
-// project list, and shows the current step.
+// Every entry starts clean: the wizard only collects a name and the projects.
 async function enterWizard() {
-  const liveScan = !!state.wizard.scanId || !!state.wizard.abort;
-  if (!liveScan) {
-    const editing = !!state.wizard.editingId;
-    if (!editing) resetWizard(false);
-  }
-  if (el.wizTitle) el.wizTitle.textContent = state.wizard.editingId ? 'Re-scan workspace' : 'Create workspace';
-  if (el.wizName) {
-    el.wizName.value = state.wizard.name || '';
-    el.wizName.disabled = !!state.wizard.editingId; // name immutable on re-scan
-  }
+  resetWizard();
+  if (el.wizName) el.wizName.value = '';
   if (!state.projects.length) await loadProjects();
   renderWizardProjects();
-  showWizardStep(state.wizard.step || 1);
+  wizModelsPainted = paintWizardModels();
 }
 
-const WIZ_PANES = { 1: 'wiz-step-1', 2: 'wiz-step-2', 3: 'wiz-step-3' };
-const WIZ_TRACK = { 1: 0, 2: 1, 3: 2 };
-// Toggle the three wizard step panes (+ the tracker above them).
-function showWizardStep(step) {
-  state.wizard.step = step;
-  if (String(step) === '3') setMdEditMode(document.getElementById('wiz-step-3'), false);
-  for (const [k, id] of Object.entries(WIZ_PANES)) {
-    const pane = document.getElementById(id);
-    if (pane) pane.classList.toggle('hidden', String(k) !== String(step));
+// The Models column starts from Settings › Runs › Workspaces every time the wizard opens.
+async function paintWizardModels() {
+  let data = {};
+  try {
+    const [catalog, res] = await Promise.all([fetchTitleModelCatalog(), fetch('/api/settings')]);
+    wizModelCatalog = catalog;
+    if (res.ok) data = await safeJson(res);
+  } catch { /* the fallback pick below */ }
+  let pick = scanModelsFrom(data);
+  // A stored scan model that left the catalog is never offered as this scan's pick: the scan
+  // route checks a SENT pick strictly (400), so it would refuse every scan. Start from the
+  // default scan model instead — what a Re-scan does with the same stale setting (D18).
+  // An EMPTY catalog is a failed GET, not an empty catalog: it condemns nothing.
+  if (wizModelCatalog.length && !wizModelCatalog.some((m) => m && m.id === pick.scanModel)) {
+    const def = scanModelsFrom({ workspaceScanDefault: data.workspaceScanDefault });
+    pick = { ...pick, scanModel: def.scanModel, scanEffort: def.scanEffort };
   }
-  const items = document.querySelectorAll('#wiz-track li');
-  items.forEach((li, i) => { li.classList.toggle('on', i === WIZ_TRACK[step]); li.classList.toggle('done', i < WIZ_TRACK[step]); });
+  paintScanModelPickers(WIZ_MODEL_IDS, pick, wizModelCatalog);
 }
-
-// Step 3's Text / Preview tabs: the same editor idiom as the workspace card.
-document.querySelectorAll('#wiz-desc-tabs .md-tab').forEach((b) => {
-  b.addEventListener('click', () => setMdEditMode(document.getElementById('wiz-step-3'), b.dataset.mode === 'preview'));
-});
+if (el.wizScanModel) el.wizScanModel.addEventListener('change', () => paintScanEffort(WIZ_MODEL_IDS, el.wizScanEffort?.value || '', wizModelCatalog));
 
 // Render one checkbox per onboarded project (disabled for !exists). Pre-checks
 // anything already in selectedPaths (re-scan). Enables Start only at 2+.
@@ -7576,11 +8201,7 @@ function renderWizardProjects() {
   const projects = Array.isArray(state.projects) ? state.projects : [];
   const usable = projects.filter((p) => p && p.exists);
 
-  if (el.wizStep1Hint) {
-    el.wizStep1Hint.textContent = usable.length < 2
-      ? 'Onboard at least two projects (in New Pipeline) to create a workspace.'
-      : 'Select two or more projects to scan their interconnections.';
-  }
+  resetWizStep1Hint();
 
   projects.forEach((p) => {
     if (!p || !p.path) return;
@@ -7622,9 +8243,30 @@ function renderWizardProjects() {
   syncWizardStartEnabled();
 }
 
+// Workspace size (D24): one line under the list once the pick passes 10 (a bit big) or 20 (big);
+// past 40 it turns red and Scan stays off. data-level drives the tone; hidden when nothing to say.
+const WIZ_SIZE_NOTES = {
+  big: (n) => `A bit big — ${n} projects: the scan takes longer and costs more.`,
+  'very-big': (n) => `Big workspace — ${n} projects: a long, costly scan, and a long description added to every run.`,
+  over: (n) => `Too many — ${n} selected; a workspace holds up to ${WORKSPACE_MAX_PROJECTS} projects.`,
+};
+
+function paintWizardSizeNote() {
+  const note = el.wizSizeNote;
+  if (!note) return;
+  const count = state.wizard.selectedPaths.length;
+  const level = workspaceSizeLevel(count);
+  note.dataset.level = level;
+  note.textContent = level === 'ok' ? '' : WIZ_SIZE_NOTES[level](count);
+  note.hidden = level === 'ok';
+}
+
 function syncWizardStartEnabled() {
   const next = document.getElementById('wiz-start-scan');
-  if (next) next.disabled = state.wizard.selectedPaths.length < 2;
+  const count = state.wizard.selectedPaths.length;
+  // A workspace holds 2–40 projects (D22): Scan stays off outside that range.
+  if (next) next.disabled = count < 2 || count > WORKSPACE_MAX_PROJECTS;
+  paintWizardSizeNote();
   syncWizardSelectAll();
 }
 
@@ -7661,134 +8303,80 @@ if (el.wizSelectAll) el.wizSelectAll.addEventListener('change', () => {
 // workspace card — so creating a workspace never blocks on a feature most users have not
 // turned on, and a member that is not a git repository no longer fails the flow.
 
-// Start (or restart) the scan. Validates name + 2+ projects, shows Step 2,
-// creates an AbortController, POSTs (pre-persist for new / :id/scan for re-scan),
-// stores scanId, and subscribes. The scan runs BEFORE the workspace is persisted.
+// Start the Workspace scan run and follow it on Running (D12). The server creates the
+// workspace when the run finishes, so the wizard is done the moment the run starts.
 async function startWizardScan() {
-  const editing = !!state.wizard.editingId;
-  const name = el.wizName ? el.wizName.value.trim() : state.wizard.name;
-  state.wizard.name = name;
-  if (!editing && !name) { showWizardStep(1); setStatusText(''); if (el.wizName) el.wizName.focus(); return; }
-  if (state.wizard.selectedPaths.length < 2) { showWizardStep(1); return; }
-
-  // Clear any prior scanId BEFORE the POST resolves, so a buffered/duplicate
-  // scan-* for the OLD scan can never match (onScanEvent gates on scanId).
-  state.wizard.scanId = '';
-
-  // Reset Step 2 surface.
-  setStatusText('Starting scan…');
-  if (el.wizProgress) el.wizProgress.textContent = '';
-  markScanPhase('');
-  if (el.wizMsg) el.wizMsg.textContent = '';
-  showWizardStep(2);
-
-  const abort = new AbortController();
-  state.wizard.abort = abort;
-
-  const url = editing
-    ? `/api/workspaces/${encodeURIComponent(state.wizard.editingId)}/scan`
-    : '/api/workspaces/scan';
-  const body = editing ? {} : { projectPaths: state.wizard.selectedPaths, name };
-
+  const name = el.wizName ? el.wizName.value.trim() : '';
+  if (!name) { if (el.wizName) el.wizName.focus(); return; }
+  const count = state.wizard.selectedPaths.length;
+  if (count < 2 || count > WORKSPACE_MAX_PROJECTS || state.wizard.starting) return;
+  state.wizard.starting = true;
+  if (el.wizStartScan) el.wizStartScan.disabled = true;
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: abort.signal,
+    await wizModelsPainted;   // never rejects (paintWizardModels catches its own fetches)
+    const res = await fetch('/api/workspaces/scan', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectPaths: state.wizard.selectedPaths, name, models: readScanModelPickers(WIZ_MODEL_IDS) }),
     });
     const data = await safeJson(res);
-    if (!res.ok || !data.scanId) {
-      state.wizard.abort = null;
-      setStatusText('');
-      showWizardStep(1);
-      setWizStep1Error(data.error || `Scan failed (${res.status})`);
-      return;
-    }
-    state.wizard.scanId = data.scanId;
-    subscribeScan(data.scanId);
+    if (!res.ok || !data.runId) { setWizStep1Error(data.error || `Scan failed (${res.status})`, data.code); return; }
+    beginScanRun(data, name);
   } catch (err) {
-    if (err && err.name === 'AbortError') return; // user aborted; leave-guard handled state
-    state.wizard.abort = null;
-    setStatusText('');
-    showWizardStep(1);
     setWizStep1Error(err.message);
-  }
-}
-
-function setWizStep1Error(message) {
-  if (el.wizStep1Hint) el.wizStep1Hint.textContent = `Scan error: ${message}`;
-}
-
-// Persist at Step 3 Save: new → POST /api/workspaces; re-scan → PATCH :id.
-// On 200 reset + navigate to #workspaces. On 409 (dup name OR dup set) surface
-// data.error verbatim and KEEP the user on Step 3 with their edited text intact.
-async function saveWorkspace() {
-  const description = el.wizDesc ? el.wizDesc.value : '';
-  state.wizard.description = description;
-  const editing = !!state.wizard.editingId;
-  if (el.wizMsg) el.wizMsg.textContent = '';
-  if (el.wizSave) el.wizSave.disabled = true;
-
-  const url = editing
-    ? `/api/workspaces/${encodeURIComponent(state.wizard.editingId)}`
-    : '/api/workspaces';
-  const method = editing ? 'PATCH' : 'POST';
-  const body = editing
-    ? { description }
-    : {
-        name: state.wizard.name, projectPaths: state.wizard.selectedPaths, description,
-        // No metricsProject: the server adopts the single recording member, if any.
-      };
-
-  try {
-    const res = await fetch(url, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await safeJson(res);
-    if (res.status === 409) { setWizMsg(data.error || 'Duplicate workspace.', 'err'); return; }
-    if (!res.ok) { setWizMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
-    const backTo = state.wizard.editingId || (data.workspace && data.workspace.id) || '';
-    resetWizard(false);
-    await loadWorkspaces();
-    location.hash = backTo && state.workspaces.some((x) => x && x.id === backTo) ? `workspaces/${backTo}` : 'workspaces';
-  } catch (err) {
-    setWizMsg(err.message, 'err');
   } finally {
-    if (el.wizSave) el.wizSave.disabled = false;
+    state.wizard.starting = false;
+    syncWizardStartEnabled();
   }
 }
 
-function setWizMsg(text, kind) {
-  if (!el.wizMsg) return;
-  el.wizMsg.textContent = text || '';
-  el.wizMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+function resetWizStep1Hint() {
+  const hint = el.wizStep1Hint;
+  if (!hint) return;
+  const usable = (Array.isArray(state.projects) ? state.projects : []).filter((p) => p && p.exists);
+  hint.classList.remove('err');
+  claudeSignedOutHints.delete(hint);
+  hint.textContent = usable.length < 2
+    ? 'Onboard at least two projects (in New Pipeline) to create a workspace.'
+    : 'Select two or more projects to scan their interconnections.';
 }
 
-// Abort a live scan: abort the fetch, unsubscribe, clear wizard scan state.
-// Invoked by the leave-guard, #wiz-abort, and Cancel.
-function abortWizardScan() {
-  const scanId = state.wizard.scanId;
-  if (state.wizard.abort) { try { state.wizard.abort.abort(); } catch { /* ignore */ } }
-  if (scanId) {
-    const ws = state.ws;
-    if (ws && state.wsReady) { try { ws.send(JSON.stringify({ type: 'unsubscribe', scanId })); } catch { /* ignore */ } }
-  }
-  state.wizard.abort = null;
-  state.wizard.scanId = '';
+// A signed-out Claude CLI (409 code 'claude-signed-out') gets one short red line
+// whose link opens the Connect Claude Code dialog. `restore` repaints the hint's
+// normal text once Check again there finds the CLI signed in (paintClaudeSetupStatus).
+const claudeSignedOutHints = new Map();   // hint element -> restore()
+function showClaudeSignedOut(hint, restore) {
+  const link = document.createElement('a');
+  link.href = '#';
+  link.textContent = 'Sign in…';
+  link.addEventListener('click', (e) => { e.preventDefault(); openClaudeSetup(); });
+  hint.classList.add('err');
+  hint.replaceChildren("Claude Code isn't signed in. ", link);
+  claudeSignedOutHints.set(hint, restore);
+}
+
+// Any other refusal keeps the "Scan error: …" text.
+function setWizStep1Error(message, code) {
+  const hint = el.wizStep1Hint;
+  if (!hint) return;
+  if (code === 'claude-signed-out') { showClaudeSignedOut(hint, resetWizStep1Hint); return; }
+  claudeSignedOutHints.delete(hint);
+  hint.classList.add('err');
+  hint.textContent = `Scan error: ${message}`;
+}
+
+// A scan run starts like any run this tab started: its card on Running.
+function beginScanRun(data, name) {
+  beginRun(data.runId, data.projectDir || '', data.title || `Workspace scan: ${name}`, {
+    workspaceId: data.workspaceId, workspaceName: name, projectNames: data.projectNames,
+  });
 }
 
 if (el.wizStartScan) el.wizStartScan.addEventListener('click', () => startWizardScan());
-if (el.wizAbort) el.wizAbort.addEventListener('click', () => { abortWizardScan(); showWizardStep(1); });
-if (el.wizRescan) el.wizRescan.addEventListener('click', () => startWizardScan());
-if (el.wizSave) el.wizSave.addEventListener('click', () => saveWorkspace());
-if (el.wizClose) el.wizClose.addEventListener('click', () => { location.hash = state.wizard.editingId ? 'workspaces' : 'new'; });
+if (el.wizClose) el.wizClose.addEventListener('click', () => { location.hash = 'new'; });
 if (el.wizName) el.wizName.addEventListener('input', () => { state.wizard.name = el.wizName.value; });
 
 // A11y: Escape in the wizard view triggers #wiz-close (which navigates away;
-// the showView leave-guard aborts any live scan). Scoped to the wizard view so
+// the showView leave-guard resets the wizard). Scoped to the wizard view so
 // it never collides with the viewer-modal Escape handler.
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
@@ -7798,67 +8386,12 @@ document.addEventListener('keydown', (e) => {
   if (el.wizClose) el.wizClose.click();
 });
 
-// ---- Scan WebSocket wiring -------------------------------------------------
-
-// Bind the live, CHANGING status text. .ws-loader carries role="status"
-// aria-live="polite", so each update is announced.
-function setStatusText(text) {
-  if (el.wizStatus) el.wizStatus.textContent = text || '';
-}
-
-// Light up the phase track; phases progress graph → investigate → synthesize.
-function markScanPhase(phase) {
-  if (!el.wizPhases) return;
-  el.wizPhases.querySelectorAll('[data-phase]').forEach((n) => {
-    n.classList.toggle('active', !!phase && n.dataset.phase === phase);
-  });
-}
-
-// Subscribe to a scan's buffered events on the shared socket.
-function subscribeScan(scanId) {
-  const ws = state.ws;
-  if (ws && state.wsReady) { try { ws.send(JSON.stringify({ type: 'subscribe', scanId })); } catch { /* ignore */ } }
-}
-
-// Route a scan-* event. Ignores events for a different/aborted scan.
-function onScanEvent(msg) {
-  if (!msg || !msg.scanId || msg.scanId !== state.wizard.scanId) return; // stale/aborted scan
-  if (msg.type === 'scan-progress') {
-    setStatusText(msg.message || '');
-    if (el.wizProgress && (msg.projectsTotal != null)) {
-      el.wizProgress.textContent = `${msg.projectsDone || 0} / ${msg.projectsTotal} projects`;
-    }
-    markScanPhase(msg.phase || '');
-    return;
-  }
-  if (msg.type === 'scan-done') {
-    state.wizard.abort = null;
-    state.wizard.description = typeof msg.description === 'string' ? msg.description : '';
-    state.wizard.graphifyUsed = !!(msg.graphify && msg.graphify.used);
-    if (el.wizDesc) el.wizDesc.value = state.wizard.description; // .value only — never innerHTML
-    if (el.wizGraphifyNote) {
-      el.wizGraphifyNote.textContent = state.wizard.graphifyUsed
-        ? 'Generated with graphify-assisted analysis.'
-        : 'Generated from source reading (graphify not available).';
-    }
-    showWizardStep(3);
-    return;
-  }
-  if (msg.type === 'scan-error') {
-    state.wizard.abort = null;
-    state.wizard.scanId = '';
-    showWizardStep(1);
-    setWizStep1Error(msg.message || 'scan failed');
-  }
-}
-
 // Test hook: expose the wizard helpers + workspace renderers for jsdom tests.
 if (typeof window !== 'undefined') {
   window.__ws = {
     setRunTarget, ensureWorkspaceOptions, loadWorkspaces, loadWorkspacesView,
-    renderWorkspaces, buildWorkspaceRow, routeWsDetail, enterWizard, showWizardStep,
-    renderWizardProjects, startWizardScan, saveWorkspace, abortWizardScan,
-    onScanEvent, subscribeScan, setStatusText, resetWizard,
+    renderWorkspaces, buildWorkspaceRow, routeWsDetail, enterWizard,
+    renderWizardProjects, startWizardScan, resetWizard,
     renderWorkspaceSourceBranches,
   };
 }
@@ -8996,16 +9529,31 @@ function basenameOf(p) {
   return String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
 }
 
-// Thin wrapper over the native picker endpoint; never throws.
-async function pickFolder(purpose = 'project') {
+// Thin wrapper over the native picker endpoint; never throws. `multiple` asks for a
+// multi-select dialog where the OS has one (the reply then also carries `paths`).
+async function pickFolder(purpose = 'project', { multiple = false } = {}) {
   try {
+    const body = multiple ? { purpose, multiple: true } : { purpose };
     const res = await fetch('/api/fs/pick-folder', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ purpose }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    return await safeJson(res); // {status:'picked',path} | {status:'canceled'} | {status:'unsupported'} | {status:'busy'}
+    return await safeJson(res); // {status:'picked',path,paths?} | {status:'canceled'} | {status:'unsupported'} | {status:'busy'}
   } catch {
     return { status: 'unsupported' };
   }
+}
+
+// Every folder a 'picked' reply names: `paths` from a multi-select dialog, else the one `path`.
+function pickedPaths(data) {
+  if (data && Array.isArray(data.paths) && data.paths.length) return data.paths.filter((p) => typeof p === 'string' && p);
+  return data && typeof data.path === 'string' && data.path ? [data.path] : [];
+}
+
+// One picked folder goes to the caller's single-folder form; several go to the review list.
+function routePickedFolders(paths, { single, many }) {
+  const list = [...new Set((paths || []).filter(Boolean))];
+  if (list.length === 1) single(list[0]);
+  else if (list.length > 1) many(list);
 }
 
 // #projects entry: refetch the registry, paint the list, then route the detail half of the hash
@@ -9391,6 +9939,7 @@ async function removeProjectFromPage(key) {
 const PD_TAB_ICONS = {
   overview: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect></svg>',
   memory: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"></path><path d="M4 20.5V5.5M8 7h8M8 10.5h6"></path></svg>',
+  map: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"></circle><circle cx="19" cy="5" r="2.5"></circle><circle cx="19" cy="19" r="2.5"></circle><path d="M7.3 10.9l9.4-4.8M7.3 13.1l9.4 4.8"></path></svg>',
   team: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"></circle><path d="M3.5 19c.6-3 2.8-4.6 5.5-4.6S13.9 16 14.5 19"></path><circle cx="17.5" cy="9.5" r="2.4"></circle><path d="M15.5 14.6c2.7 0 4.4 1.4 5 4.4"></path></svg>',
 };
 // Table-driven, like HD_TABS. `build(sec, key)` takes the KEY (buildArgs), never the project object.
@@ -9579,13 +10128,17 @@ function buildPdMemory(sec, key) {
 // neither the tint nor a leftover field may leak into the next, harmless call.
 function modalShell({
   title = 'Confirm', message = '', confirmLabel = 'Confirm', cancelLabel = 'Cancel',
-  checkbox = null, danger = false, fields = null,
+  checkbox = null, danger = false, fields = null, messageTone = null,
 } = {}) {
   return new Promise((resolve) => {
     el.confirmTitle.textContent = title;
     el.confirmTitle.classList.toggle('danger', !!danger);
     el.confirmMessage.textContent = message;
     el.confirmMessage.hidden = !message;
+    // messageTone:'err' paints the shared message in the app's error colour
+    // (.confirm-message.err → --red-ink); done() always drops it again so the
+    // tint never leaks to the next caller of this shared modal.
+    el.confirmMessage.classList.toggle('err', messageTone === 'err');
     el.confirmOk.textContent = confirmLabel;
     el.confirmCancel.textContent = cancelLabel;
     el.confirmOk.classList.toggle('danger', !!danger);
@@ -9639,6 +10192,7 @@ function modalShell({
       for (const i of inputs) values[i.dataset.fieldId] = i.value.trim();
       el.confirmOk.classList.remove('danger');   // never leak the tint to the next caller
       el.confirmTitle.classList.remove('danger');
+      el.confirmMessage.classList.remove('err');
       el.confirmOk.disabled = false;
       el.confirmMessage.hidden = false;
       el.confirmFields.replaceChildren();
@@ -9865,8 +10419,11 @@ function closeProjectAddModal() {
 
 async function addProjectFlow() {
   setProjectsMsg('');
-  const data = await pickFolder();
-  if (data && data.status === 'picked' && data.path) { openProjectAddModal(data.path); return; }
+  const data = await pickFolder('project', { multiple: true });
+  if (data && data.status === 'picked') {
+    const paths = pickedPaths(data);
+    if (paths.length) { projectsViewPicks(paths); return; }   // one -> Add dialog, several -> review
+  }
   if (data && data.status === 'canceled') return;                 // respect the cancel
   if (data && data.status === 'busy') { setProjectsMsg('A folder dialog is already open — finish or cancel it first.', 'err'); return; }
   // No folder picker at all (a container or hosted worca): the repository is the way in.
@@ -9898,6 +10455,168 @@ async function saveProjectAdd() {
   } finally {
     el.projAddSave.disabled = false;
   }
+}
+
+// ---- Add several projects: the review list ------------------------------------
+// Opened with 2+ picked folders (native multi-select, or the folder browser's ticks) from the
+// Projects view or New Pipeline's inline form. `onDone({added, skipped})` runs ONCE when the
+// dialog closes — however it closes — so each entry point repaints its own surface.
+let projBulk = null;   // { rows:[{path, name, include, status:''|'added'|'skipped', reason}], addedNames, onDone, saving }
+
+function setProjBulkMsg(text, kind) {
+  if (!el.projBulkMsg) return;
+  el.projBulkMsg.textContent = text || '';
+  el.projBulkMsg.className = 'hint' + (kind ? ' ' + kind : '');
+}
+
+function openProjectBulkModal(paths, { onDone = null } = {}) {
+  const known = new Map((state.projects || []).map((p) => [p.path, p.name]));
+  const rows = [];
+  for (const path of new Set((paths || []).filter(Boolean))) {
+    const registeredAs = known.get(path);
+    rows.push({
+      path,
+      name: basenameOf(path),
+      include: !registeredAs,                           // an already-registered folder starts unticked
+      status: '',
+      reason: registeredAs ? `already registered as “${registeredAs}”` : '',
+    });
+  }
+  projBulk = { rows, addedNames: [], onDone, saving: false };
+  if (el.projBulkTitle) el.projBulkTitle.textContent = `Add ${rows.length} projects`;
+  setProjBulkMsg('');
+  renderProjectBulkRows();
+  el.projectBulkModal.classList.remove('hidden');
+  const first = el.projBulkList.querySelector('.pb-name:not(:disabled)');
+  if (first) first.focus();
+}
+
+// Rows that the next Add sends: ticked and not added yet.
+function projBulkPending() {
+  return projBulk ? projBulk.rows.filter((r) => r.include && r.status !== 'added') : [];
+}
+
+function syncProjBulkSave() {
+  const n = projBulkPending().length;
+  el.projBulkSave.disabled = n === 0 || !!(projBulk && projBulk.saving);
+  el.projBulkSave.textContent = n === 1 ? 'Add 1 project' : `Add ${n} projects`;
+}
+
+function renderProjectBulkRows() {
+  el.projBulkList.textContent = '';
+  if (!projBulk) return;
+  for (const row of projBulk.rows) {
+    const added = row.status === 'added';
+    const li = document.createElement('li');
+    li.className = 'pb-row' + (added ? ' added' : '') + (row.status === 'skipped' ? ' skipped' : '');
+    li.dataset.path = row.path;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'pb-include';
+    cb.checked = row.include && !added;
+    cb.disabled = added;
+    cb.setAttribute('aria-label', `Add ${basenameOf(row.path)}`);
+    cb.addEventListener('change', () => { row.include = cb.checked; syncProjBulkSave(); });
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.className = 'input pb-name';
+    name.spellcheck = false;
+    name.value = row.name;
+    name.disabled = added;
+    name.setAttribute('aria-label', `Project name for ${row.path}`);
+    name.addEventListener('input', () => { row.name = name.value; });
+    name.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void saveProjectBulk(); } });
+    const path = document.createElement('code');
+    path.className = 'pb-path';
+    path.textContent = row.path;
+    path.title = row.path;
+    const status = document.createElement('small');
+    status.className = 'pb-status' + (row.status === 'skipped' ? ' err' : added ? ' ok' : '');
+    status.textContent = added ? 'Added' : row.reason;
+    li.append(cb, name, path, status);
+    el.projBulkList.appendChild(li);
+  }
+  syncProjBulkSave();
+}
+
+async function saveProjectBulk() {
+  if (!projBulk || projBulk.saving) return;
+  const pending = projBulkPending();
+  if (!pending.length) return setProjBulkMsg('Tick at least one folder to add.', 'err');
+  projBulk.saving = true;
+  syncProjBulkSave();
+  setProjBulkMsg(`Adding ${pending.length} …`);
+  const bulk = projBulk;
+  try {
+    const res = await fetch('/api/projects/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projects: pending.map((r) => ({ name: r.name.trim(), path: r.path })) }),
+    });
+    const data = await safeJson(res);
+    if (!res.ok) { setProjBulkMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
+    if (Array.isArray(data.projects)) state.projects = data.projects;
+    let addedNow = 0;
+    for (const r of Array.isArray(data.results) ? data.results : []) {
+      const row = pending[r.index];                     // results answer the request BY INDEX
+      if (!row) continue;
+      if (r.status === 'added') {
+        row.status = 'added'; row.reason = ''; row.name = r.name || row.name;
+        bulk.addedNames.push(row.name);
+        addedNow += 1;
+      } else {
+        row.status = 'skipped'; row.reason = r.reason || 'not added';
+      }
+    }
+    if (projBulk !== bulk) return;                      // closed while the request was in flight
+    const skipped = bulk.rows.filter((r) => r.status === 'skipped');
+    if (!skipped.length) { closeProjectBulkModal(); return; }
+    renderProjectBulkRows();
+    setProjBulkMsg(`${addedNow ? `Added ${addedNow}. ` : ''}${skipped.length} could not be added — see the reason on each row. Rename and press Add again, or close.`, 'err');
+  } catch (e) {
+    setProjBulkMsg(e.message, 'err');
+  } finally {
+    bulk.saving = false;
+    if (projBulk === bulk) syncProjBulkSave();
+  }
+}
+
+function closeProjectBulkModal() {
+  if (!projBulk) return;
+  const { onDone, addedNames, rows } = projBulk;
+  projBulk = null;
+  el.projectBulkModal.classList.add('hidden');
+  el.projBulkList.textContent = '';
+  if (onDone) onDone({ added: addedNames, skipped: rows.filter((r) => r.status === 'skipped') });
+}
+
+// "Added 3 projects. Skipped 1: beta (a project named "beta" already exists)."
+function bulkAddSummary(added, skipped) {
+  const parts = [];
+  if (added.length === 1) parts.push(`Added “${added[0]}”.`);
+  else if (added.length > 1) parts.push(`Added ${added.length} projects.`);
+  if (skipped.length) {
+    parts.push(`Skipped ${skipped.length}: ${skipped.map((r) => `${r.name.trim() || basenameOf(r.path)} (${r.reason})`).join('; ')}.`);
+  }
+  return parts.join(' ');
+}
+
+// Projects view: repaint the list + New Pipeline dropdown, and say what happened.
+function onProjectsBulkDone({ added, skipped }) {
+  if (added.length) {
+    renderProjectsList();
+    renderProjectOptions(localStorage.getItem(LAST_PROJECT_KEY) || ''); // keep New-pipeline dropdown in sync
+  }
+  const text = bulkAddSummary(added, skipped);
+  if (text) setProjectsMsg(text, skipped.length ? 'warn' : 'ok');
+}
+
+// The Projects view's routing for picked folders: one -> the single Add dialog, several -> review.
+function projectsViewPicks(paths, { fill } = {}) {
+  routePickedFolders(paths, {
+    single: fill || ((p) => openProjectAddModal(p)),
+    many: (list) => { closeProjectAddModal(); openProjectBulkModal(list, { onDone: onProjectsBulkDone }); },
+  });
 }
 
 // ---- Event wiring (guarded so non-UI test imports don't throw) --------------
@@ -9965,23 +10684,28 @@ if (el.projectAddBtn) el.projectAddBtn.addEventListener('click', addProjectFlow)
 if (el.projAddSave) {
   el.projAddSave.addEventListener('click', saveProjectAdd);
   el.projAddCancel.addEventListener('click', closeProjectAddModal);
+  const fillProjAdd = (p) => {
+    el.projAddPath.value = p;
+    if (!el.projAddName.value.trim()) el.projAddName.value = basenameOf(p);
+    setProjAddMsg('');
+  };
+  const browseProjAddInWorca = () => openFolderBrowser(el.projAddPath.value.trim(), fillProjAdd, {
+    multiple: true, onSelectMany: (paths) => projectsViewPicks(paths, { fill: fillProjAdd }),
+  });
   el.projAddBrowse.addEventListener('click', async () => {
     el.projAddBrowse.disabled = true;
     try {
-      const fill = (p) => {
-        el.projAddPath.value = p;
-        if (!el.projAddName.value.trim()) el.projAddName.value = basenameOf(p);
-        setProjAddMsg('');
-      };
-      const data = await pickFolder();
-      if (data && data.status === 'picked' && data.path) fill(data.path);
+      const data = await pickFolder('project', { multiple: true });
+      if (data && data.status === 'picked' && pickedPaths(data).length) projectsViewPicks(pickedPaths(data), { fill: fillProjAdd });
       else if (data && data.status === 'canceled') { /* user dismissed the dialog */ }
       else if (data && data.status === 'busy') setProjAddMsg('A folder dialog is already open — finish or cancel it first.', 'err');
-      else await openFolderBrowser(el.projAddPath.value.trim(), fill); // unsupported / error -> in-app browser
+      else await browseProjAddInWorca();                          // unsupported / error -> in-app browser
     } finally {
       el.projAddBrowse.disabled = false;
     }
   });
+  // Worca's own browser, straight away: multi-select where the native dialog has none (Windows).
+  if (el.projAddBrowseMany) el.projAddBrowseMany.addEventListener('click', () => { void browseProjAddInWorca(); });
   if (el.projAddTabs) {
     el.projAddTabs.addEventListener('click', (e) => {
       const tab = e.target.closest && e.target.closest('.md-tab');
@@ -9997,12 +10721,21 @@ if (el.projAddSave) {
     if (e.key === 'Escape' && el.projectAddModal && !el.projectAddModal.classList.contains('hidden')) closeProjectAddModal();
   });
 }
+if (el.projectBulkModal) {
+  el.projBulkSave.addEventListener('click', () => { void saveProjectBulk(); });
+  el.projBulkClose.addEventListener('click', closeProjectBulkModal);
+  el.projectBulkModal.addEventListener('click', (e) => { if (e.target === el.projectBulkModal) closeProjectBulkModal(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !el.projectBulkModal.classList.contains('hidden')) closeProjectBulkModal();
+  });
+}
 
 // Test hook (mirrors window.__agents at app.js:4219).
 if (typeof window !== 'undefined') {
   window.__projects = {
     loadProjectsView, renderProjectsList, buildProjectRow, deleteProject,
     confirmModal, addProjectFlow, openProjectAddModal, saveProjectAdd,
+    openProjectBulkModal, saveProjectBulk, closeProjectBulkModal, openFolderBrowser,
   };
 }
 
@@ -10062,7 +10795,7 @@ async function startAgentGenerate() {
     if (!res.ok || !data.genId) {
       state.agentWizard.abort = null;
       showAgentWizardStep(1);
-      if (el.agwStep1Hint) el.agwStep1Hint.textContent = `Generation error: ${data.error || res.status}`;
+      setAgwStep1Error(data.error || res.status, data.code);
       return;
     }
     state.agentWizard.genId = data.genId;
@@ -10072,8 +10805,25 @@ async function startAgentGenerate() {
     if (err && err.name === 'AbortError') return;
     state.agentWizard.abort = null;
     showAgentWizardStep(1);
-    if (el.agwStep1Hint) el.agwStep1Hint.textContent = `Generation error: ${err.message}`;
+    setAgwStep1Error(err.message);
   }
+}
+
+const AGW_STEP1_HINT = 'Name + purpose are required (or paste your own markdown).';
+function resetAgwStep1Hint() {
+  const hint = el.agwStep1Hint;
+  if (!hint) return;
+  claudeSignedOutHints.delete(hint);
+  hint.classList.remove('err');
+  hint.textContent = AGW_STEP1_HINT;
+}
+function setAgwStep1Error(message, code) {
+  const hint = el.agwStep1Hint;
+  if (!hint) return;
+  if (code === 'claude-signed-out') { showClaudeSignedOut(hint, resetAgwStep1Hint); return; }
+  claudeSignedOutHints.delete(hint);
+  hint.classList.add('err');
+  hint.textContent = `Generation error: ${message}`;
 }
 
 function onAgentGenEvent(msg) {
@@ -10100,7 +10850,7 @@ function onAgentGenEvent(msg) {
     state.agentWizard.abort = null;
     state.agentWizard.genId = '';
     showAgentWizardStep(1);
-    if (el.agwStep1Hint) el.agwStep1Hint.textContent = `Generation error: ${msg.message || 'failed'}`;
+    setAgwStep1Error(msg.message || 'failed');
   }
 }
 
@@ -10647,10 +11397,12 @@ async function loadSettings() {
     paintDebugSpawnSettings(data);
     await paintTitleModelSettings(data);
     await paintAutoModelSettings(data);
+    await paintWorkspaceScanModelsSettings(data);
     paintBudgetReadout();
     paintTeamCapsReadout();                 // team policy (design board 7): each home's caps, read-only
     refreshBudget();
     paintChatSettings(data.chat);
+    paintCredentials();
     loadAskHistory();
     setSettingsMsg('');
   } catch (e) { setSettingsMsg(e.message, 'err'); }
@@ -10662,6 +11414,19 @@ function setChatSettingsMsg(text, cls) {
   if (!el.chatSettingsMsg) return;
   el.chatSettingsMsg.textContent = text || '';
   el.chatSettingsMsg.className = `hint${cls ? ` ${cls}` : ''}`;
+}
+
+// Settings › My model credentials (credential broker, docs/credential-broker.md): the card
+// stays hidden unless worca runs with a broker. Status only; keys live on the key page.
+async function paintCredentials() {
+  const card = document.getElementById('credentials-card');
+  const host = document.getElementById('credentialsHost');
+  if (!card || !host) return;
+  let data;
+  try { data = await safeJson(await fetch('/api/credentials')); } catch { data = { enabled: false }; }
+  card.hidden = !data || data.enabled !== true;
+  if (card.hidden) return;
+  host.replaceChildren(renderCredentials(data));
 }
 
 async function paintChatSettings(prefs) {
@@ -11032,7 +11797,7 @@ try {
   if (mq && typeof mq.addEventListener === 'function') mq.addEventListener('change', () => applyTheme(document.documentElement.dataset.theme));
 } catch { /* no media queries here */ }
 
-// Settings › General › Scheduled runs: the defaults a new schedule inherits.
+// Settings › Runs › Scheduled runs: the defaults a new schedule inherits.
 function setSchedDefaultsMsg(text, kind) { setHintMsg('schedDefaultsMsg', text, kind); }
 function paintScheduleSettings(data) {
   const d = data && data.schedule;
@@ -11076,6 +11841,9 @@ function paintAskSettings(data) {
   // the GET and from every save response without a second fetch.
   const scriptHost = document.getElementById('ask-script-tools-host');
   if (scriptHost) scriptHost.replaceChildren(renderScriptToolsToggle({ prefs: data.chat || {} }, { doc: document }));
+  // Web access: repainted from every GET and save response, which also resets its dirty flag.
+  const webHost = document.getElementById('ask-web-host');
+  if (webHost) webHost.replaceChildren(renderAskWebFields({ askWeb: data.askWeb }, { doc: document }));
 }
 function postAskLimits(body) {
   return postSettingsCard(body, { setMsg: setAskLimitsMsg, paint: paintAskSettings });
@@ -11098,7 +11866,11 @@ function saveAskLimits() {
     askMaxBudgetUsd = b;
   }
   const scriptHost = document.getElementById('ask-script-tools-host');
-  postAskLimits({ askMaxTurns, askMaxBudgetUsd, ...(scriptHost ? { chat: collectScriptToolsToggle(scriptHost) } : {}) });
+  const webHost = document.getElementById('ask-web-host');
+  const askWebBody = webHost ? collectAskWebFields(webHost) : null;   // null = the web fields were not touched
+  postAskLimits({ askMaxTurns, askMaxBudgetUsd,
+    ...(scriptHost ? { chat: collectScriptToolsToggle(scriptHost) } : {}),
+    ...(askWebBody ? { askWeb: askWebBody } : {}) });
 }
 document.getElementById('askLimitsSave')?.addEventListener('click', saveAskLimits);
 document.getElementById('askLimitsReset')?.addEventListener('click', () => postAskLimits({ askMaxTurns: '', askMaxBudgetUsd: '' }));
@@ -11460,6 +12232,35 @@ document.getElementById('memDefragModelSave')?.addEventListener('click', () => {
 });
 document.getElementById('memDefragModelReset')?.addEventListener('click', () => postMemDefragModel({ memoryDefrag: null }));
 
+// ---- Settings › Runs › Workspaces: the models every scan starts with (D17). Create workspace
+// can change them for one scan; Re-scan uses them.
+function setWsScanModelsMsg(text, kind) { setHintMsg('wsScanModelsMsg', text, kind); }
+async function paintWorkspaceScanModelsSettings(data) {
+  if (!document.getElementById('wsScanModel')) return;
+  wsScanCatalog = await fetchTitleModelCatalog();
+  const pick = scanModelsFrom(data);
+  paintScanModelPickers(WS_SCAN_SETTINGS_IDS, pick, wsScanCatalog);
+  // An EMPTY catalog is a failed GET, not an empty catalog: it condemns nothing (the Auto card's rule).
+  const stale = !!pick.scanModel && wsScanCatalog.length > 0 && !wsScanCatalog.some((m) => m && m.id === pick.scanModel);
+  keepVisible(document.getElementById('ws-scan-models-card'), !!(data && data.workspaceScan));
+  setHintMsg('wsScanModelsNote', stale ? `Model "${pick.scanModel}" is no longer in the catalog — scans fall back to the default.` : '', stale ? 'warn' : '');
+}
+function postWorkspaceScanModels(body) {
+  return postSettingsCard(body, { setMsg: setWsScanModelsMsg, paint: paintWorkspaceScanModelsSettings, savedText: 'Saved. Applies to the next scan.' });
+}
+document.getElementById('wsScanModel')?.addEventListener('change', () => {
+  paintScanEffort(WS_SCAN_SETTINGS_IDS, document.getElementById('wsScanEffort')?.value || '', wsScanCatalog);
+});
+document.getElementById('wsScanModelsSave')?.addEventListener('click', () => {
+  if (!wsScanCatalog.length) { setWsScanModelsMsg('the model list did not load — reload the page to change this', 'err'); return; }
+  const sel = document.getElementById('wsScanModel');
+  const opt = sel && sel.options[sel.selectedIndex];
+  if (opt && opt.disabled) { setWsScanModelsMsg('that model is no longer installed — pick another or use the default', 'err'); return; }
+  const pick = readScanModelPickers(WS_SCAN_SETTINGS_IDS);
+  postWorkspaceScanModels({ workspaceScan: { ...pick, scanEffort: pick.scanEffort || null } });
+});
+document.getElementById('wsScanModelsReset')?.addEventListener('click', () => postWorkspaceScanModels({ workspaceScan: null }));
+
 // Browse… for the projects root: native OS dialog, in-app modal fallback —
 // the same two endpoints the add-project Browse button uses (app.js:3793).
 if (el.settingsProjectsRootBrowse) {
@@ -11715,27 +12516,37 @@ async function savePluginConfigForms(name, body) {
 
 // Creating a profile is its own call: the roster entry has to exist before the
 // config form has anything to write into. Reopens on the NEW profile, which is
-// what the user wants to fill in next.
+// what the user wants to fill in next. A rejected id re-asks with what was typed
+// and the server's reason, so the user corrects it in place — the Settings modal
+// underneath stays as it was.
 async function addPluginProfile(name, sourceId) {
-  const answers = await promptModal({
-    title: 'New profile',
-    confirmLabel: 'Create',
-    fields: [
-      { id: 'id', label: 'Profile id', placeholder: 'work', mono: true, required: true,
-        hint: 'Lowercase letters, digits and dashes — e.g. "work".' },
-      { id: 'label', label: 'Display name', placeholder: 'optional' },
-    ],
-  });
-  if (!answers) return;
-  const id = answers.id;
-  const label = answers.label;
-  const r = await pluginApi('POST', `/api/plugins/${encodeURIComponent(name)}/profiles`, { sourceId, id, label });
-  if (!r.ok) return setPluginsMsg(r.data.error || 'could not create the profile', 'err');
+  let answers = { id: '', label: '' };
+  let error = '';
+  for (;;) {
+    answers = await promptModal({
+      title: 'New profile',
+      confirmLabel: 'Create',
+      message: error,
+      messageTone: error ? 'err' : null,
+      fields: [
+        { id: 'id', label: 'Profile id', placeholder: 'work', mono: true, required: true, value: answers.id,
+          hint: 'Lowercase letters, digits and dashes — e.g. "work".' },
+        { id: 'label', label: 'Display name', placeholder: 'optional', value: answers.label },
+      ],
+    });
+    if (!answers) return;
+    const r = await pluginApi('POST', `/api/plugins/${encodeURIComponent(name)}/profiles`,
+      { sourceId, id: answers.id, label: answers.label });
+    if (r.ok) break;
+    error = r.data.error || 'could not create the profile';
+  }
   loadTaskSources();               // the New Pipeline profile bar lists this roster
-  openPluginSettings(name, id);
+  openPluginSettings(name, answers.id);
 }
 
-async function deletePluginProfile(name, sourceId, profile) {
+// showErr: the Settings modal's error line — a failure is reported where the
+// user is looking, not on the Plugins page behind the modal.
+async function deletePluginProfile(name, sourceId, profile, showErr) {
   if (!profile) return;
   // The server also drops every project binding that named it, so this is not
   // just a settings delete — say so before it happens, not after.
@@ -11746,7 +12557,7 @@ async function deletePluginProfile(name, sourceId, profile) {
   if (!ok) return;
   const url = `/api/plugins/${encodeURIComponent(name)}/profiles/${encodeURIComponent(profile)}?sourceId=${encodeURIComponent(sourceId)}`;
   const r = await pluginApi('DELETE', url);
-  if (!r.ok) return setPluginsMsg(r.data.error || 'could not delete the profile', 'err');
+  if (!r.ok) return showErr(r.data.error || 'could not delete the profile');
   // Deleting also drops the bindings that named it, so the pane may fall back
   // to the gate — refresh it rather than leaving a profile that no longer exists.
   loadTaskSources();
@@ -11862,9 +12673,20 @@ async function openPluginSettings(name, profile, { seeds = null } = {}) {
   body.querySelectorAll('.pl-profile-add').forEach((btn) => {
     btn.addEventListener('click', () => addPluginProfile(name, btn.dataset.sourceId));
   });
+  // A failed Save / profile removal lands here, next to the actions, and the
+  // modal stays open so the offending value can be fixed without reopening it.
+  const errLine = document.createElement('p');
+  errLine.className = 'hint err pl-settings-err';
+  errLine.hidden = true;
+  const showErr = (msg) => {
+    errLine.textContent = msg || '';
+    errLine.hidden = !msg;
+    if (msg) errLine.scrollIntoView({ block: 'nearest' });
+  };
   body.querySelectorAll('.pl-profile-del').forEach((btn) => {
-    btn.addEventListener('click', () => deletePluginProfile(name, btn.dataset.sourceId, sourceById(btn.dataset.sourceId).profile));
+    btn.addEventListener('click', () => deletePluginProfile(name, btn.dataset.sourceId, sourceById(btn.dataset.sourceId).profile, showErr));
   });
+  body.appendChild(errLine);
   const slot = document.createElement('div');
   slot.className = 'pl-connect-slot';
   body.appendChild(slot);
@@ -11905,9 +12727,11 @@ async function openPluginSettings(name, profile, { seeds = null } = {}) {
       }
     }]] : []),
     ['Save', 'btn btn-primary btn-mini', async () => {
+      showErr('');
       const failed = await savePluginConfigForms(name, body);
+      if (failed) return showErr(failed);
       closePluginModal();
-      setPluginsMsg(failed || 'Settings saved.', failed ? 'err' : 'ok');
+      setPluginsMsg('Settings saved.', 'ok');
     }],
   ]);
 }
@@ -12765,7 +13589,7 @@ async function loadModelsView() {
   if (!el.modelsList) return;
   setModelsMsg('');
   try {
-    const [res, pres] = await Promise.all([fetch('/api/models'), fetch('/api/providers')]);
+    const [res, pres] = await Promise.all([fetch('/api/models'), fetch('/api/providers'), loadCredentials()]);
     const data = await safeJson(res);
     if (!res.ok) return setModelsMsg(data.error || `HTTP ${res.status}`, 'err');
     mvState.data = data;
@@ -12774,6 +13598,7 @@ async function loadModelsView() {
     const pdata = await safeJson(pres);
     mvState.providers = pres.ok ? pdata : null;
     renderModelsViewBody();
+    void paintHelperModelCards();
     // "+ Add model…" from a picker on another page: the dialog opens once the catalog is here.
     if (mvState.openEditorOnLoad) { mvState.openEditorOnLoad = false; openModelEditorDialog(); }
     // Copilot's models feed the editor's upstream-id datalist; fetched in the
@@ -12786,6 +13611,18 @@ async function loadModelsView() {
   } catch (e) {
     setModelsMsg(e.message, 'err');
   }
+}
+
+// Settings › Models › Title generation + Auto workflow model: both pickers list the catalog, so they
+// repaint whenever it loads — a model added a moment ago is selectable without leaving the tab.
+async function paintHelperModelCards() {
+  try {
+    const res = await fetch('/api/settings');
+    if (!res.ok) return;
+    const data = await safeJson(res);
+    await paintTitleModelSettings(data);
+    await paintAutoModelSettings(data);
+  } catch { /* the cards keep their last paint */ }
 }
 
 /** The Providers tab: the same card, on a page of its own (§8.1). */
@@ -12812,6 +13649,8 @@ function setProvidersMsg(text, kind) {
 function renderProvidersViewBody() {
   if (!el.providersList) return;
   el.providersList.replaceChildren(renderProvidersCard(mvState.providers, { signIn: mvState.signIn, split: true }));
+  // OpenRouter's free-model allowance, read afresh each time the card opens.
+  refreshFreeDaily({ force: true });
 }
 
 /** A page-level message, on whichever of the two tabs is showing. */
@@ -12964,7 +13803,9 @@ async function testProviderFlow(btn) {
     const unsaved = hasUnsavedProviderEdits(name, typed);
     if (data.ok) {
       setProviderResult(name, 'ok', `Reachable${data.models != null ? ` — ${data.models} model${data.models === 1 ? '' : 's'}` : ''}`);
-      setProviderMsg(name, `${where}${data.models != null ? ` answered with ${data.models} model${data.models === 1 ? '' : 's'}` : ' answered'}.${unsaved ? ' Press Save to keep these settings.' : ''}`);
+      // `detail` is what the endpoint says about the key itself — OpenRouter's credit, free-model
+      // allowance and rate limit (provider-ops formatOpenRouterKeyInfo); never the key.
+      setProviderMsg(name, `${where}${data.models != null ? ` answered with ${data.models} model${data.models === 1 ? '' : 's'}` : ' answered'}.${data.detail ? ` Key: ${data.detail}.` : ''}${unsaved ? ' Press Save to keep these settings.' : ''}`);
     } else {
       const why = data.message || data.error || `HTTP ${res.status}`;
       setProviderResult(name, 'err', 'Failed');
@@ -13075,20 +13916,21 @@ function applyImportFilter() {
   const sheet = el.mimpBody && el.mimpBody.querySelector('.mvi');
   if (!sheet) return;
   const q = (el.mimpFilter?.value || '').trim().toLowerCase();
-  let shown = 0;
+  let shown = 0; let total = 0;
   for (const tr of sheet.querySelectorAll('tbody tr')) {
-    const hit = !q || tr.textContent.toLowerCase().includes(q) || String(tr.dataset.id || '').toLowerCase().includes(q);
+    const hit = endpointRowMatches(tr, sheet, q);   // text, plus a hosted sheet's Free / Tools / window
     tr.classList.toggle('is-filtered', !hit);
+    total += 1;
     if (hit) shown += 1;
   }
-  const none = sheet.querySelector('.mimp-nohits');
-  if (!shown && q) {
+  let none = sheet.querySelector('.mimp-nohits');
+  if (!shown && total) {
     if (!none) {
-      const d = document.createElement('div');
-      d.className = 'hist-empty mimp-nohits';
-      d.textContent = `Nothing here matches “${el.mimpFilter.value.trim()}”.`;
-      sheet.appendChild(d);
+      none = document.createElement('div');
+      none.className = 'hist-empty mimp-nohits';
+      sheet.appendChild(none);
     }
+    none.textContent = q ? `Nothing here matches “${el.mimpFilter.value.trim()}”.` : 'Nothing here matches these filters.';
   } else if (none) none.remove();
 }
 
@@ -13368,7 +14210,11 @@ if (el.providersList) {
       const body = collectProviderRow(providerRoot(), t.dataset.provider);
       if (body) patchProviderFlow(t.dataset.provider, body);
     } else if (t.classList.contains('mv-pv-test')) testProviderFlow(t);
-    else if (t.classList.contains('mv-pv-browse')) {
+    else if (t.classList.contains('mv-pv-preset')) {
+      // Fills the fields only; the row's Test / Save do the rest, exactly as for a typed URL.
+      applyProviderPreset(providerRoot(), t.dataset.provider, t.dataset.preset);
+      setProviderMsg(t.dataset.provider, 'OpenRouter filled in. Set the key (or keep ${OPENROUTER_KEY} and export it where Worca starts), Test connection, then Save.');
+    } else if (t.classList.contains('mv-pv-browse')) {
       // The import lands in the CATALOG, so it opens there — with this row's endpoint filled in.
       const row = t.closest('.mv-pv-row');
       const input = row && row.querySelector('.mv-pv-baseurl');
@@ -13527,7 +14373,7 @@ if (el.modelImportModal) {
       const sheet = t.closest('.mvi');
       // Select-all means what is ON SCREEN: ticking a row the filter hides would import a surprise.
       if (sheet) for (const c of sheet.querySelectorAll('tbody tr:not(.is-filtered) .mvi-cb')) { if (!c.disabled) c.checked = t.checked; }
-    }
+    } else if (t && t.closest && t.closest('.mvi-or-filters')) applyImportFilter();   // Free / Tools / window
   });
   // Backdrop click and Escape close it, like every other overlay in this file.
   el.modelImportModal.addEventListener('mousedown', (ev) => { if (ev.target === el.modelImportModal) closeImportDialog(); });
@@ -13949,7 +14795,7 @@ if (runListEl) {
       if (runId) confirmCostOverride(runId, overrideBtn);
       return;
     }
-    if (e.target.closest && e.target.closest('.cb-settings')) { location.hash = 'settings'; return; }
+    if (e.target.closest && e.target.closest('.cb-settings')) { location.hash = 'settings/runs'; return; }
     // Team-cap banner (team-policy design board 9): continue past, or open the page.
     const pastBtn = e.target.closest && e.target.closest('.cb-past-team-cap');
     if (pastBtn) {
@@ -14638,7 +15484,7 @@ if (tpSection) tpSection.addEventListener('click', async (e) => {
   await handlePolicyPluginClick(e);
 });
 
-// Settings › Budget (board 7): each home's caps as a readout, the tightest as a chip on the labels.
+// Settings › Runs › Budget (board 7): each home's caps as a readout, the tightest as a chip on the labels.
 async function paintTeamCapsReadout(force = false) {
   if (!el.teamCapsReadout) return;
   const data = await loadTpScopes({ force });
@@ -15460,8 +16306,10 @@ function cssEscape(s) {
 // inserted BEFORE `.hist-open` so the chevron stays last in the aside.
 function resetPrCluster(card) {
   const aside = card.querySelector('.hist-aside');
-  if (!aside) return;
-  const freshPr = $('#hist-card-tpl').content.querySelector('.hist-pr').cloneNode(true);
+  // A PR batch can land after its document is gone (a test harness swapping pages): nothing to patch.
+  const tpl = $('#hist-card-tpl');
+  if (!aside || !tpl) return;
+  const freshPr = tpl.content.querySelector('.hist-pr').cloneNode(true);
   const curPr = aside.querySelector('.hist-pr, .hist-pr-link');         // button OR the swapped-in link
   if (curPr) curPr.replaceWith(freshPr);
   else aside.insertBefore(freshPr, aside.querySelector('.hist-open'));
@@ -16387,6 +17235,9 @@ async function loadLiveLogs(panel, logUrl, st = null) {
       }
       let cycleState = newCycleState();
       for (const rec of shown) cycleState = appendLogRec(frag, rec, cycleState);
+      // Artifact log lines here open via /api/runs/:id (record:null), which the
+      // server resolves by pipeline id for a live OR finished run.
+      if (st && (st.id || st.pipelineId)) box._artifactCtx = { run: st, runId: st.pipelineId || st.id, record: null };
       box.appendChild(frag);
       if (matches.length === 0) box.textContent = recs.length ? '(no lines match the filter)' : '(no log lines)';
     };
@@ -17438,7 +18289,7 @@ function paintHdBanners(screen, record, data) {
       { pauseReason, pauseDetail, pipelineId: record.id, totalCostUsd: st.totalCostUsd },
       { budget: budgetState.budget || {}, fmt: { usd: fmtUsd, usd4: fmtUsd4, duration: fmtDuration, estTitle } });
     const settingsBtn = banner.querySelector('.cb-settings');
-    if (settingsBtn) settingsBtn.addEventListener('click', () => { location.hash = 'settings'; });
+    if (settingsBtn) settingsBtn.addEventListener('click', () => { location.hash = 'settings/runs'; });
     const overrideBtn = banner.querySelector('.cb-override');
     if (overrideBtn) {
       overrideBtn.addEventListener('click', () => {
@@ -17870,7 +18721,7 @@ const HD_TABS = [
 
 function initHdTabs(screen, record, data) {
   // HD_TABS carries no `icon` key (the old initHdTabs injected HD_TAB_ICONS[key]
-  // itself). Map it on here rather than editing five table entries — the engine
+  // itself). Map it on here rather than editing six table entries — the engine
   // reads `t.icon`.
   initDetailTabs(screen, HD_TABS.map((t) => ({ ...t, icon: HD_TAB_ICONS[t.key] })), data, {
     tabsSel: '.hd-tabs', secsSel: '.hd-sections',
@@ -19715,7 +20566,7 @@ function rdCtx(r) {
   return { run: r, screen: (runDetailState && runDetailState.screen) || null };
 }
 
-// THREE tabs, Live log first and default (§5.5). No Diff (D1 — a live run has no
+// FOUR tabs, Live log first and default (§5.5). No Diff (D1 — a live run has no
 // persisted patch and no live-diff endpoint is added) and no Clarify (a live
 // question renders as a panel above the tabs, not as a tab).
 const RD_TABS = [
@@ -19750,7 +20601,7 @@ const RD_TABS = [
   },
 ];
 
-// Build the pill row + the three lazy panels into an open detail screen. Called
+// Build the pill row + the four lazy panels into an open detail screen. Called
 // once per screen build; live frames go through rdUpdateSections (Task 8), never
 // through a rebuild.
 function initRdTabs(screen, r) {
@@ -19804,6 +20655,11 @@ function rdAutoscrollLog(sec, r) {
 function rdRepaintLog(sec, r) {
   const box = rdLogBox(sec);
   if (!box) return;
+  // The Running detail keeps its OWN log pane, and this is what rebuilds it —
+  // the default tab of the screen people actually watch a run on. Without the
+  // click context every `.log-artifact` link here is inert: the delegated
+  // handler walks up, finds nothing, preventDefaults and stops.
+  box._artifactCtx = { run: r, runId: r.pipelineId || r.id, record: r.record || null };
   const savedTop = box.scrollTop;
   box.innerHTML = '';
   delete box.dataset.empty;
@@ -20000,6 +20856,8 @@ function rdStateCopy(r, stepName) {
     return `Paused on a recoverable error${why}. Once it clears, Resume retries the step — the worktree and progress are kept.`;
   }
   if (r.pauseReason === 'usage_limit') {
+    // OpenRouter's daily free requests: the detail already says when they come back and what to do.
+    if (/^OpenRouter's free-model requests/.test(r.pauseDetail || '')) return `Paused — ${r.pauseDetail}.`;
     return `Paused — session/usage limit reached${r.pauseDetail ? ` (${r.pauseDetail})` : ''}. Resume after the reset.`;
   }
   if (r.pauseReason && (r.status === 'paused' || r.status === 'pausing' || r.status === 'interrupted')) {
@@ -20224,8 +21082,14 @@ function rdAgentsBody(sec, r) {
     if (!cardsByNode.has(nodeId)) cardsByNode.set(nodeId, card);
     sec.appendChild(card);
   }
-  // Per-node "Artifacts (N)" affordance from the live, attributed r.artifacts.
-  attachNodeArtifactAffordances(cardsByNode, r.artifacts, r.pipelineId || r.id);
+  // Per-node "Artifacts (N)" affordance from the live, attributed r.artifacts —
+  // which only live WS events fill, so a browser reload mid-run (or a UI started
+  // after the run began) left every node card without one until the user happened
+  // to open the separate Artifacts tab. Seed here too; it no-ops once done.
+  attachNodeArtifactAffordances(cardsByNode, r.artifacts, r.pipelineId || r.id, sec);
+  hydrateRunArtifacts(r).then((added) => {
+    if (added) attachNodeArtifactAffordances(cardsByNode, r.artifacts, r.pipelineId || r.id, sec);
+  });
 }
 
 function buildRdAgents(sec, ctx) {
@@ -20474,6 +21338,7 @@ document.addEventListener('keydown', (e) => {
   if (el.confirmModal && !el.confirmModal.classList.contains('hidden')) return;
   if (el.pluginModal && !el.pluginModal.classList.contains('hidden')) return;
   if (el.projectAddModal && !el.projectAddModal.classList.contains('hidden')) return;
+  if (el.projectBulkModal && !el.projectBulkModal.classList.contains('hidden')) return;
   if (e.target && typeof e.target.closest === 'function' && e.target.closest('.mem-editor')) return;
   void leaveProjDetail();
 }, true);
@@ -20748,6 +21613,10 @@ async function viewPipeline(projectDir, id, title, record) {
 // The shared viewer with a plain string: errors, notices, anything that is text.
 function showViewer(title, text) {
   el.viewerTitle.textContent = title ? `Saved: ${title}` : 'Saved pipeline';
+  // Only hideViewer cleared this, so an artifact fetch that failed rendered its
+  // error string — and any saved pipeline opened next without closing the modal —
+  // in a shell with no padding, border or scroll container.
+  el.viewer.classList.remove('holds-artifact');
   el.viewer.textContent = text;
   el.viewerCard.classList.remove('hidden');
   el.viewerCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -20768,8 +21637,36 @@ async function showViewerTyped(title, artifact) {
   el.viewerCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   try { await renderArtifact(artifact, host, artifactViewerDeps()); } catch (e) { host.textContent = `Error: ${e.message}`; }
 }
+
+/** Prepare the modal for a typed artifact render and return the mount host.
+ *  Mounts a host div inside the <pre id="viewer">, exactly as upstream does, so
+ *  upstream's DOM tests describe this path unchanged. The <pre>'s white-space is
+ *  neutralised by `.artifact-view{white-space:normal}`, which is why an
+ *  iframe/img/embed is safe in here.
+ *  `title` is the FULL heading text: unlike showViewerNode/showViewer, which
+ *  prepend "Saved: " themselves, callers here pass their own
+ *  "Saved: "/"Artifact: " prefix. */
+function showViewerHost(title) {
+  el.viewerTitle.textContent = title || 'Saved pipeline';
+  const host = document.createElement('div');
+  host.className = 'artifact-view';
+  el.viewer.replaceChildren(host);
+  // The host mounts INSIDE <pre class="viewer">, whose 480px max-height would
+  // clamp .artifact-view's 80vh and the 70vh <embed> a PDF renders into —
+  // nested scrollbars and a PDF squeezed under half its intended height. The
+  // <pre>'s own typographic shell is for saved markdown, not for a typed viewer.
+  el.viewer.classList.add('holds-artifact');
+  el.viewerCard.classList.remove('hidden');
+  el.viewerCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  return host;
+}
 function hideViewer() {
   el.viewerCard.classList.add('hidden');
+  el.viewer.classList.remove('holds-artifact');
+  // `.hidden{display:none}` does NOT unload an iframe: a framed deck keeps its
+  // timers running, keeps fetching and keeps any narration audio playing until
+  // the modal is next opened with different content. Same for an <embed> PDF.
+  el.viewer.replaceChildren();
 }
 el.viewerClose.addEventListener('click', hideViewer);
 // Close the modal on backdrop click (overlay itself, not its inner card)...
@@ -20779,6 +21676,18 @@ el.viewerCard.addEventListener('click', (e) => {
 // ...and on Escape, when it's open.
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !el.viewerCard.classList.contains('hidden')) hideViewer();
+});
+
+// Delegated: an artifact log line (`.log-artifact`) opens in the viewer. The run
+// context rides on the enclosing log pane's `_artifactCtx` (set by the live card
+// and the History detail), so one listener serves every pane.
+document.addEventListener('click', (e) => {
+  const a = e.target.closest && e.target.closest('.log-artifact');
+  if (!a || !a.dataset.path) return;
+  e.preventDefault();
+  let node = a, ctx = null;
+  while (node) { if (node._artifactCtx) { ctx = node._artifactCtx; break; } node = node.parentElement; }
+  if (ctx) openRunArtifact(ctx, a.dataset.path, a.dataset.kind || null);
 });
 
 // ---------------------------------------------------------------------------
@@ -21137,6 +22046,7 @@ function paintAutoBadge(el, stepper) {
   el.hidden = false;
   el.textContent = decided ? `Auto → ${name}` : 'Auto';
   el.title = !decided ? 'Auto is deciding the workflow'
+    : auto.via === 'fallback' ? `The Auto classifier was unreachable${auto.reason ? ` (${auto.reason})` : ''} — running the default workflow "${name}"`
     : auto.via === 'reused' ? `Auto reused the saved workflow "${name}"` : `Auto created the workflow "${name}"`;
   el.classList.toggle('is-deciding', !decided);
 }
@@ -21682,20 +22592,51 @@ function focusQuestionPanel(ctx) {
 /** End result chip -> the saved-artifact viewer, through the indexed routes:
  *  Running knows only the run's pipeline id (`/api/runs/:id/artifact`); History
  *  carries its record and takes the keyed project/workspace route. */
-async function openRunArtifact(ctx, path) {
+async function openRunArtifact(ctx, path, srcKind) {
   const r = ctx && ctx.run;
   if (!r || !path) return;
-  const name = String(path).split('/').filter(Boolean).pop();
-  const rel = encodeURIComponent(String(path));
+  const rel = String(path);
+  const name = rel.split('/').filter(Boolean).pop();
   const pid = r.pipelineId || r.id || ctx.runId;
-  const url = ctx.record
-    ? `${historyRunUrl(pid, ctx.record, 'artifact')}?rel=${rel}`
-    : `/api/runs/${encodeURIComponent(pid)}/artifact?rel=${rel}`;
+  const base = ctx.record ? historyRunUrl(pid, ctx.record, '').replace(/\/$/, '') : `/api/runs/${encodeURIComponent(pid)}`;
+  // The artifact KIND when the caller has one. A `.log-artifact` anchor carries it
+  // in `data-kind` and the click handler used to drop it, so this always fell
+  // through to the extension table — and for a file with no extension
+  // viewerKindFor's kind fallback (plan/review -> markdown, result -> diff) could
+  // never fire from a log line, while the Artifacts tab rendered the same file
+  // correctly. Absent, the extension table decides, exactly as before.
+  //
+  // `view` picks the BRANCH; the SOURCE kind is what reaches renderArtifact,
+  // which resolves the view itself. Handing it the already-resolved value lost
+  // the mapping — viewerKindFor('markdown', 'PLAN') is 'text', because 'markdown'
+  // is not one of the plan/review/result kinds the extension-less fallback knows.
+  // showArtifactViewer always passed the source kind; that is the other half of
+  // why the Artifacts tab rendered these correctly and this path did not.
+  const view = viewerKindFor(srcKind || null, rel);
+  // Bytes the viewer frames/embeds/downloads go through the raw route; text kinds
+  // still fetch the JSON {rel,text} the existing route returns. The gate is kept
+  // byte-for-byte as it already was (BINARY_KINDS + 'html'); artifact-kinds.mjs
+  // also exports RAW_KINDS, the same set as one token, but switching is a
+  // gratuitous diff here.
+  if (BINARY_KINDS.has(view) || view === 'html') {
+    // The text branch below titles with the server's run-relative `rel`. Here there
+    // is no server round-trip to supply one, and a `.log-artifact` click hands us
+    // the artifact event's ABSOLUTE path — which put the user's home directory in
+    // the modal heading for a file the Artifacts tab titles `deck.html`. Keep an
+    // already-relative rel (`deck/deck.html` says more than the basename does).
+    const url = rawArtifactUrl(base, rel);
+    const err = await rawArtifactError(url);
+    if (err) { showViewer(name, `Error: ${err}`); return; }
+    await renderArtifact({ kind: srcKind || null, relPath: rel, url },
+      showViewerHost(`Saved: ${isAbsoluteArtifactPath(rel) ? name : rel}`));
+    return;
+  }
   try {
-    const res = await fetch(url);
+    const res = await fetch(`${base}/artifact?rel=${encodeURIComponent(rel)}`);
     const data = await safeJson(res);
     if (!res.ok) { showViewer(name, `Error: ${data.error || res.status}`); return; }
-    await showViewerTyped(data.rel || name, { kind: undefined, relPath: data.rel || String(path), text: data.text || '' });
+    await renderArtifact({ kind: srcKind || null, relPath: rel, text: data.text || '' },
+      showViewerHost(`Saved: ${data.rel || name}`), artifactViewerDeps());
   } catch (e) { showViewer(name, `Error: ${e.message}`); }
 }
 
@@ -21725,8 +22666,57 @@ function artifactNodeIdOf(key) {
 // The rel/path the artifact routes want. Live WS artifacts carry `path` (from the
 // artifact event); the plural endpoint / DB rows carry `relPath`. Both resolve
 // through the id-based GET /api/runs/:id/artifact route.
+/** Does an ABSOLUTE live artifact path (the WS event carries the filesystem
+ *  path) denote the same file as a server row's run-relative `relPath`?
+ *
+ *  One-directional, exactly like resolveIndexedArtifactForRow: the ABSOLUTE side
+ *  may end with the relative one, never the reverse. Testing both ways made a
+ *  root-level `index.html` equal `deck/index.html` — basenames collide across
+ *  directories, which is the very reason the server matches in one direction —
+ *  so hydration skipped one of the two and the live dedupe overwrote the other,
+ *  leaving one file unreachable. */
+function sameArtifactFile(absPath, rel) {
+  const x = String(absPath || '').replace(/\\/g, '/');
+  const y = String(rel || '').replace(/\\/g, '/');
+  if (!x || !y) return false;
+  return x === y || x.endsWith(`/${y}`);
+}
+
 function artifactRelOf(a) {
   return String((a && (a.relPath || a.path)) || '');
+}
+
+// Among rows that suffix-match `path`, the one that MEANS the same file is the
+// one closest in length. This is resolveIndexedArtifactFileForRow's "exact first,
+// then the LONGEST suffix" rule, written to work in EITHER direction because a
+// live row carries an absolute path while a server row carries a relative one —
+// so whichever side is longer, the right answer is the smallest leftover prefix.
+// Both callers below used to take the first suffix hit: with rows `index.html`
+// and `deck/index.html`, a live `<run>/deck/index.html` matched both, merging two
+// different files into one row and leaving the other unreachable. Returns -1 for
+// no match.
+function closestArtifactIndex(list, path, accept = null) {
+  const want = String(path || '');
+  let best = -1;
+  let bestGap = Infinity;
+  if (!want) return best;
+  for (let i = 0; i < list.length; i += 1) {
+    const a = list[i];
+    if (accept && !accept(a)) continue;
+    const rel = artifactRelOf(a);
+    if (!rel || !(sameArtifactFile(want, rel) || sameArtifactFile(rel, want))) continue;
+    const gap = Math.abs(rel.length - want.length);      // 0 on an exact hit
+    if (gap < bestGap) { bestGap = gap; best = i; }
+  }
+  return best;
+}
+
+// Artifact paths reach the UI as BOTH shapes: indexed rows carry a run-relative
+// `relPath`, live WS events carry an absolute `path`. Anything a user should read
+// is run-relative, so callers that display one need to tell them apart. POSIX
+// root, a Windows drive, or a UNC share.
+function isAbsoluteArtifactPath(p) {
+  return /^(\/|\\\\|[A-Za-z]:[\\/])/.test(String(p || ''));
 }
 
 // Synthetic/transient markers reach the UI (as live WS artifact events and, for
@@ -21736,11 +22726,12 @@ function artifactRelOf(a) {
 // orchestrator deletes once the round is answered (never indexed; the Q&A lives
 // in the step_questions table / get_run_progress) — clicking it would 404.
 // All four detail gates (HD badge/visible, RD badge, grouped browser)
-// share THIS predicate so they can never drift; it also requires a resolvable path
-// so a row that carries no file is never offered.
+// share THIS predicate so they can never drift. It checks the KIND and that a
+// path string is present — it cannot tell whether the file exists, so that is
+// enforced where the row is created instead (orchestrator._afterExecution
+// indexes only ports the agent actually wrote).
 function isDisplayableArtifact(a) {
-  return !!a && !!(a.relPath || a.path)
-    && a.kind !== 'pipeline' && a.kind !== 'live-log' && a.kind !== 'questions';
+  return !!a && !!(a.relPath || a.path) && isBrowsableKind(a.kind);
 }
 
 // Compact human byte size for an artifact row (0 renders as "0 B").
@@ -21751,27 +22742,49 @@ function fmtArtifactBytes(n) {
   return `${(b / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// Fetch one artifact's text by the run's pipeline id and render it into the shared
-// viewer modal with the typed viewer. Resolved by id ALONE through
-// GET /api/runs/:id/artifact?rel= — the same gate openRunArtifact uses — so live
-// and History share one path.
+// Open one artifact in the shared viewer modal with the typed viewer. Resolved by
+// pipeline id ALONE — GET /api/runs/:id/artifact?rel= for the decoded text kinds,
+/** Probe a raw-artifact URL before framing it. The byte branches hand the URL
+ *  straight to an <iframe>/<embed>/<img>, which render the route's JSON error
+ *  body as a blank frame, an empty embed or a broken-image icon — so a file that
+ *  went between listing and click (routine: the audit clears shots/ every cycle
+ *  and the builder rewrites deck/), one with no previewable type (415) or one
+ *  over the 25 MB ceiling (413) left the modal open on an empty shell saying
+ *  nothing, while the text branch beside it has always shown `Error: …`.
+ *  HEAD carries no body on the happy path — it does not pull a 25 MB PDF twice —
+ *  and only a failure spends a second request reading the message. Returns null
+ *  when the bytes are servable. */
+async function rawArtifactError(url) {
+  try {
+    const head = await fetch(url, { method: 'HEAD' });
+    if (head.ok) return null;
+    const body = await safeJson(await fetch(url));
+    return (body && body.error) || `HTTP ${head.status}`;
+  } catch (e) { return (e && e.message) || 'could not be loaded'; }
+}
+
+// GET /api/runs/:id/artifact-raw/<segments> for the byte kinds — the same gates
+// openRunArtifact uses, so live and History share one path.
 async function showArtifactViewer(pid, artifact) {
   const rel = artifactRelOf(artifact);
   const name = rel.split('/').filter(Boolean).pop() || (artifact && artifact.kind) || 'artifact';
-  el.viewerTitle.textContent = `Artifact: ${name}`;
-  // #viewer is a <pre> (white-space:pre); mount into a host div so the typed
-  // viewers own their own whitespace instead of inheriting the pre's.
-  const host = document.createElement('div');
-  host.className = 'artifact-view';
+  const srcKind = artifact && artifact.kind;
+  const view = viewerKindFor(srcKind, rel);
+  const base = `/api/runs/${encodeURIComponent(pid)}`;
+  const host = showViewerHost(`Artifact: ${name}`);
+  if (BINARY_KINDS.has(view) || view === 'html') {
+    const url = rawArtifactUrl(base, rel);
+    const err = await rawArtifactError(url);
+    if (err) { host.textContent = `Error: ${err}`; return; }
+    await renderArtifact({ kind: srcKind, relPath: rel, url }, host);
+    return;
+  }
   host.textContent = 'Loading…';
-  el.viewer.replaceChildren(host);
-  el.viewerCard.classList.remove('hidden');
-  el.viewerCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   try {
-    const res = await fetch(`/api/runs/${encodeURIComponent(pid)}/artifact?rel=${encodeURIComponent(rel)}`);
+    const res = await fetch(`${base}/artifact?rel=${encodeURIComponent(rel)}`);
     const data = await safeJson(res);
     if (!res.ok) { host.textContent = `Error: ${data.error || res.status}`; return; }
-    await renderArtifact({ kind: artifact && artifact.kind, relPath: rel, text: data.text || '' }, host, artifactViewerDeps());
+    await renderArtifact({ kind: srcKind, relPath: rel, text: data.text || '' }, host, artifactViewerDeps());
   } catch (e) {
     host.textContent = `Error: ${e.message}`;
   }
@@ -21791,9 +22804,49 @@ function buildArtifactRow(a, pid) {
   return row;
 }
 
+// Append one bucket's artifacts to `mount`, collapsing any kind bulky enough to
+// bury the rest (groupArtifactsByKind) behind a single summary toggle. The
+// collapsed rows are built on FIRST EXPAND, not up front: a three-deck run
+// indexes 84 screenshots, and eagerly building 84 buttons nobody opens is the
+// cost this whole affordance exists to avoid.
+function appendArtifactRows(mount, list, pid, expanded = null, keyPrefix = '') {
+  for (const g of groupArtifactsByKind(list)) {
+    if (!g.collapsed) {
+      for (const a of g.items) mount.appendChild(buildArtifactRow(a, pid));
+      continue;
+    }
+    // Which groups are open lives OUTSIDE the DOM: every state frame repaints
+    // this pane from scratch (renderRunArtifacts starts with innerHTML = ''),
+    // so DOM-held state would snap the group shut on the next frame — while the
+    // run is live, which is the only time 43 screenshots are arriving.
+    const stateKey = `${keyPrefix}\u0000${g.kind}`;
+    const open0 = !!expanded && expanded.has(stateKey);
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'artifact-bulk-toggle';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.innerHTML =
+      `<span class="artifact-kind mono">${escapeHtml(g.kind)}</span>`
+      + `<span class="artifact-name">${g.items.length} files</span>`;
+    const body = document.createElement('div');
+    body.className = 'artifact-bulk-list';
+    const fill = () => { if (!body.childElementCount) for (const a of g.items) body.appendChild(buildArtifactRow(a, pid)); };
+    body.hidden = !open0;
+    if (open0) { fill(); toggle.setAttribute('aria-expanded', 'true'); }
+    toggle.addEventListener('click', () => {
+      const open = body.hidden;
+      if (open) fill();
+      body.hidden = !open;
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (expanded) { if (open) expanded.add(stateKey); else expanded.delete(stateKey); }
+    });
+    mount.append(toggle, body);
+  }
+}
+
 // A collapsed "Artifacts (N)" affordance for one node's artifacts, expanding to a
 // list of clickable rows. Returns null when the node produced none.
-function buildNodeArtifactAffordance(list, pid) {
+function buildNodeArtifactAffordance(list, pid, expanded = null, keyPrefix = '') {
   if (!Array.isArray(list) || !list.length) return null;
   const wrap = document.createElement('div');
   wrap.className = 'node-artifacts';
@@ -21804,15 +22857,27 @@ function buildNodeArtifactAffordance(list, pid) {
   toggle.textContent = `Artifacts (${list.length})`;
   const body = document.createElement('div');
   body.className = 'artifact-list';
-  body.hidden = true;
-  for (const a of list) body.appendChild(buildArtifactRow(a, pid));
+  appendArtifactRows(body, list, pid, expanded, keyPrefix);
+  const stateKey = `${keyPrefix}\u0000__node__`;
+  const open0 = !!expanded && expanded.has(stateKey);
+  body.hidden = !open0;
+  if (open0) toggle.setAttribute('aria-expanded', 'true');
   toggle.addEventListener('click', () => {
     const open = body.hidden;
     body.hidden = !open;
     toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (expanded) { if (open) expanded.add(stateKey); else expanded.delete(stateKey); }
   });
   wrap.append(toggle, body);
   return wrap;
+}
+
+/** The open-group set for a pane, hung on the PERSISTENT host element (the tab
+ *  section outlives every repaint of its contents). */
+function expandedArtifactSet(host) {
+  if (!host) return null;
+  if (!host.__artifactExpanded) host.__artifactExpanded = new Set();
+  return host.__artifactExpanded;
 }
 
 // Append per-node "Artifacts (N)" affordances to already-built agent group cards.
@@ -21820,17 +22885,21 @@ function buildNodeArtifactAffordance(list, pid) {
 // artifacts (flattened across its cycles) render once, on its first card. Legacy
 // artifacts with nodeId == null land in artifactsByNodeCycle's '__run__' bucket
 // and are surfaced by the run-level Artifacts tab, not here.
-function attachNodeArtifactAffordances(cardsByNode, artifacts, pid) {
+function attachNodeArtifactAffordances(cardsByNode, artifacts, pid, host = null) {
   if (!(cardsByNode instanceof Map) || !cardsByNode.size) return;
   // Same display gate as the Artifacts tab (isDisplayableArtifact): transient
   // markers (questions/live-log/pipeline) never become a clickable, 404-able row.
   const groups = artifactsByNodeCycle((Array.isArray(artifacts) ? artifacts : []).filter(isDisplayableArtifact));
   for (const [nodeId, card] of cardsByNode) {
+    // Idempotent: this runs once synchronously and again when hydration lands,
+    // and appending both times left two "Artifacts (N)" toggles on every node
+    // card until the next state frame happened to repaint the tab.
+    for (const old of card.querySelectorAll(':scope > .node-artifacts')) old.remove();
     const byCyc = groups.get(nodeId);
     if (!byCyc) continue;
     const list = [];
     for (const arr of byCyc.values()) for (const a of arr) list.push(a);
-    const aff = buildNodeArtifactAffordance(list, pid);
+    const aff = buildNodeArtifactAffordance(list, pid, expandedArtifactSet(host), `node:${nodeId}`);
     if (aff) card.appendChild(aff);
   }
 }
@@ -21881,7 +22950,7 @@ function renderRunArtifacts(mount, artifacts, pid, stateLike = {}) {
         cap.textContent = `cycle ${cyc}`;
         card.appendChild(cap);
       }
-      for (const a of byCyc.get(cyc)) card.appendChild(buildArtifactRow(a, pid));
+      appendArtifactRows(card, byCyc.get(cyc), pid, expandedArtifactSet(mount), `${nid}:${cyc}`);
     }
     mount.appendChild(card);
   }
@@ -21894,9 +22963,134 @@ function buildRdArtifacts(sec, ctx) {
     const r = c.run;
     renderRunArtifacts(sec, r.artifacts, r.pipelineId || r.id,
       { subAgents: r.subAgents, steps: r.steps, stepper: r.stepper });
+    // Seeding is attempted from the REPAINT, not once at build: the section is
+    // built a single time, so a hydration that failed at that moment (a server
+    // hiccup) would never be retried and a reloaded run would read "(no
+    // artifacts recorded)" for the life of the page. hydrateRunArtifacts no-ops
+    // once it has succeeded and while a request is in flight, so this settles
+    // into nothing; a persistent failure costs one cheap GET per state frame.
+    hydrateRunArtifacts(r).then((added) => { if (added) paint(c); });
+    // Seeding stops at a page ceiling. Rows are oldest-first, so what is missing
+    // is the NEWEST — say so rather than letting a capped list read as the run.
+    if (r.__artifactsCapped) {
+      const note = document.createElement('div');
+      note.className = 'hint artifact-truncated';
+      // No count. The flag is never cleared and this list KEEPS GROWING as live
+      // `artifact` events append to it, so "the first N" drifted past the number
+      // actually fetched and eventually claimed a first-N larger than any page
+      // boundary. What is true either way is that seeding stopped short.
+      note.textContent = 'This run indexed more artifacts than could be loaded here.';
+      sec.appendChild(note);
+    }
   };
   paint(ctx);
   sec.__update = paint;
+}
+
+// `r.artifacts` is built ONLY from live WS `artifact` events, and the state
+// snapshot carries none — so reloading the browser mid-run left the Artifacts
+// tab reading "(no artifacts recorded)", the badge gone and every per-node
+// affordance vanished, while the server had the full attributed list all along.
+// Seed from the same route History uses, skipping anything a live event already
+// delivered (a rewritten file is re-indexed, so the same rel can arrive twice).
+// 5 pages x the route's 200-row cap = 1,000 rows. A ceiling, not a target: it
+// exists so a pathological run cannot turn one tab activation into an unbounded
+// request loop. Deliberately LOW — the route sizes every row with a synchronous
+// statSync and caps each request at 200 precisely to bound that, so a pager that
+// follows 25 cursors back-to-back defeats the cap it is paging under (5,000
+// blocking stats, on a server concurrently streaming a live run). Beyond a
+// thousand rows the tab collapses bursts anyway, and the notice says the list is
+// short.
+const MAX_ARTIFACT_HYDRATE_PAGES = 5;
+
+function hydrateRunArtifacts(r) {
+  // The PIPELINE id specifically, never the launcher UUID `r.id` falls back to.
+  // Early in a run pipelineId is unset, the route 404s on the UUID, and the
+  // failure path clears the memo so the next state frame tries again — one dead
+  // GET per state event, from a tab that is visible from the very first frame.
+  // No pipeline row yet means nothing to seed; the state event that creates one
+  // also sets this, and `paint` runs on that same frame.
+  const pid = r && r.pipelineId;
+  if (!pid) return Promise.resolve(false);
+  // ONE shared promise, handed to every caller. Two panes seed from this (the
+  // Artifacts tab and the Agents tab's per-node affordances), and a plain
+  // "already started" guard made whichever asked second resolve false and skip
+  // its repaint — so it rendered the empty state it had built a moment earlier.
+  // A failure clears the slot so the next repaint retries: marking the run
+  // hydrated up front let one server hiccup disable seeding for the life of the
+  // page, which is the failure this exists to prevent.
+  if (r.__artifactsHydrate) return r.__artifactsHydrate;
+  // Where a previous walk stopped. An incomplete walk stays retryable, and this
+  // pane repaints per state frame — restarting at 0 each time re-read the whole
+  // prefix (200 rows, 200 server-side statSyncs) on every frame, where the design
+  // here budgets ONE cheap GET for a persistent failure. The rows already merged
+  // are already in r.artifacts, so resuming costs exactly the page that failed.
+  const resumeFrom = Number.isSafeInteger(r.__artifactsHydrateFrom) ? r.__artifactsHydrateFrom : 0;
+  // FOLLOW THE CURSOR. The route caps at 200 and rows are oldest-first, so what a
+  // truncated page omits is the NEWEST — on a deck run, deck.pdf, the standalone
+  // and the closing review. Reading only `artifacts` seeded the 200 oldest and
+  // dropped the deliverables silently, on the live tab, which is the one actually
+  // being watched while a run produces them. Bounded so a pathological run cannot
+  // spin the tab; History's own pager shows the same cap the same way.
+  const base = `/api/runs/${encodeURIComponent(pid)}/artifacts`;
+  const readPage = (offset, acc, depth) => fetch(offset ? `${base}?offset=${offset}` : base)
+    .then((res) => (res.ok ? res.json() : null))
+    .catch(() => null)                       // a THROWN failure is the same "could not load"
+    .then((body) => {
+      // A LATER page failing must not discard the pages already in hand. Returning
+      // null from here propagated as the value of the whole recursive chain, so a
+      // run whose first 200 rows had arrived rendered "(no artifacts recorded)"
+      // because page 2 hit a transient error. Only a first-page failure is a total
+      // failure; anything after it seeds what arrived and stays RETRYABLE, since
+      // the merge below is idempotent (it dedupes by closest match).
+      if (!body) {
+        r.__artifactsHydrateFrom = offset;                 // pick up here next time
+        return { rows: offset === resumeFrom && !acc.length ? null : acc, complete: false };
+      }
+      for (const a of (Array.isArray(body.artifacts) ? body.artifacts : [])) acc.push(a);
+      if (body.truncated && body.nextOffset != null) {
+        if (depth + 1 < MAX_ARTIFACT_HYDRATE_PAGES) return readPage(body.nextOffset, acc, depth + 1);
+        // Stopping AT the ceiling is not finishing — but it is not a failure to
+        // retry either. Marking it incomplete would re-walk all 25 pages on every
+        // repaint, and this pane repaints per state frame: the design here budgets
+        // ONE cheap GET per frame for a failure, not 25. So memoise it and RECORD
+        // the cap, and let the tab say the list is short the way History does.
+        r.__artifactsCapped = true;
+        r.__artifactsHydrateFrom = body.nextOffset;
+        return { rows: acc, complete: true };
+      }
+      return { rows: acc, complete: true };
+    });
+  r.__artifactsHydrate = readPage(resumeFrom, [], 0)
+    .then(({ rows, complete }) => {
+      if (!rows) { r.__artifactsHydrate = null; return false; }
+      // Settled: every caller ALREADY holding this promise still learns whether
+      // rows arrived (so each pane repaints once), while every later call gets
+      // false. Without this the repaint each caller performs asks again, gets
+      // the same `true` back, and repaints forever. An INCOMPLETE walk is left
+      // unmemoised instead, so a later repaint picks up the pages that failed.
+      r.__artifactsHydrate = complete ? Promise.resolve(false) : null;
+      if (!rows.length) return false;
+      if (!Array.isArray(r.artifacts)) r.artifacts = [];
+      // Each live row (absolute path) names exactly ONE server row (relative): its
+      // closest match. Asking the question the other way — "does any live path end
+      // with this row's rel?" — let a live `<run>/deck/index.html` claim the root
+      // `index.html` row as delivered too, so a real file was never seeded.
+      const delivered = new Set();
+      for (const live of r.artifacts) {
+        const at = closestArtifactIndex(rows, artifactRelOf(live));
+        if (at >= 0) delivered.add(at);
+      }
+      let added = 0;
+      for (let i = 0; i < rows.length; i += 1) {
+        if (delivered.has(i) || !artifactRelOf(rows[i])) continue;
+        r.artifacts.push(rows[i]);
+        added += 1;
+      }
+      return added > 0;
+    })
+    .catch(() => { r.__artifactsHydrate = null; return false; });
+  return r.__artifactsHydrate;
 }
 
 // History Artifacts tab: fetch the ATTRIBUTED list (GET /api/runs/:id/artifacts,
@@ -21913,13 +23107,72 @@ function buildHdArtifacts(sec, record, data) {
   const st = (data && data.state) || {};
   const stateLike = { subAgents: st.subAgents, steps: st.steps, stepper: st.stepper };
   if (!pid) { renderRunArtifacts(sec, [], null, stateLike); return; }
-  fetch(`/api/runs/${encodeURIComponent(pid)}/artifacts`)
+  // Accumulated across pages: renderRunArtifacts rebuilds the mount from one array
+  // (and clears it, which is what removes the control below), so a page is appended
+  // here and the whole set re-grouped.
+  const seen = [];
+  const loadPage = (offset) => fetch(`/api/runs/${encodeURIComponent(pid)}/artifacts${offset ? `?offset=${offset}` : ''}`)
     .then((res) => (res.ok ? res.json() : null))
+    // A THROWN failure — the server restarting, the browser offline, res.json()
+    // on a malformed body — is the same "could not load" as a non-ok response.
+    // It used to fall through to the trailing .catch, which re-rendered with no
+    // notice at all: an empty run on page 0, and on a later page the rows WITHOUT
+    // the truncation notice, so a partial list read as the whole run.
+    .catch(() => null)
     .then((body) => {
+      // A failed page is NOT "no more rows". Re-render what we have and put the
+      // notice back with the SAME cursor, so the list keeps declaring itself
+      // partial and the reader can try again — dropping the notice here made a
+      // partial list read as the whole run, the one thing it exists to prevent.
+      const failed = !body;
+      // An outright failure on the FIRST page is not "this run has no artifacts".
+      // Rendering the empty state first put both on screen at once, which reads as
+      // the run being empty with a footnote.
+      if (failed && !offset) {
+        sec.innerHTML = '';
+        const err = document.createElement('div');
+        err.className = 'hint artifact-empty';
+        err.textContent = 'Could not load this run\u2019s artifacts.';
+        sec.appendChild(err);
+        return;
+      }
       const arts = body && Array.isArray(body.artifacts) ? body.artifacts : [];
-      renderRunArtifacts(sec, arts, pid, stateLike);
+      for (const a of arts) seen.push(a);
+      renderRunArtifacts(sec, seen, pid, stateLike);
+      if (failed) {
+        if (offset) {
+          const retry = document.createElement('button');
+          retry.type = 'button';
+          retry.className = 'hint artifact-truncated';
+          retry.textContent = `Showing the first ${seen.length} — this run indexed more. Loading the next page failed; try again.`;
+          retry.addEventListener('click', () => { retry.disabled = true; loadPage(offset); });
+          sec.appendChild(retry);
+        }
+        return;
+      }
+      // The route caps the row set; say so rather than letting a partial list read
+      // as the whole run (a three-deck presentation run goes past the cap). Rows
+      // are oldest-first, so the rows past the cut are the NEWEST — the
+      // deliverables — which is why this has to be reachable and not just stated.
+      if (body && body.truncated) {
+        // Saying so is the floor and does not depend on a cursor: a response that
+        // reports truncation without one (an older server, a proxy dropping the
+        // field) must still not read as the whole run. The cursor only decides
+        // whether the notice is also a control.
+        const more = body.nextOffset != null;
+        const note = document.createElement(more ? 'button' : 'div');
+        note.className = 'hint artifact-truncated';
+        note.textContent = `Showing the first ${seen.length} — this run indexed more.`;
+        if (more) {
+          note.type = 'button';
+          note.textContent += ' Load the next page.';
+          note.addEventListener('click', () => { note.disabled = true; loadPage(body.nextOffset); });
+        }
+        sec.appendChild(note);
+      }
     })
-    .catch(() => { renderRunArtifacts(sec, [], pid, stateLike); });
+    .catch(() => { renderRunArtifacts(sec, seen, pid, stateLike); });
+  loadPage(0);
 }
 
 function paintStepper(r) {
@@ -22595,7 +23848,7 @@ el.runDetail?.addEventListener('click', (e) => {
   if (!r) return;
   const override = e.target.closest && e.target.closest('.cb-override');
   if (override) { confirmCostOverride(r.runId, override); return; }   // async, fire-and-forget
-  if (e.target.closest && e.target.closest('.cb-settings')) { location.hash = 'settings'; return; }
+  if (e.target.closest && e.target.closest('.cb-settings')) { location.hash = 'settings/runs'; return; }
   const past = e.target.closest && e.target.closest('.cb-past-team-cap');
   if (past) { confirmPastTeamCap(r.runId, past); return; }             // team-policy board 9
   if (e.target.closest && e.target.closest('.cb-policy-open')) { location.hash = 'team-policy'; return; }
@@ -22672,7 +23925,7 @@ function paintRdHeader(screen, r) {
     // Model bridge (model-bridge-design.md §8.6): a run that went through the
     // bridge shows its request count beside the dollars, so a "$0" reads as a
     // unit mismatch (Copilot bills requests), not as free.
-    ['rd-cost', fmtUsd(r.totalCostUsd || 0) + bridgeRequestsSuffix(r.steps), true],
+    ['rd-cost', fmtUsd(r.totalCostUsd || 0) + (freeRequestsSuffix(r.steps) || bridgeRequestsSuffix(r.steps)), true],
     ['rd-step', stepText, false],
   ];
   segs.forEach(([cls, txt, strong]) => {
@@ -22681,7 +23934,8 @@ function paintRdHeader(screen, r) {
     const seg = document.createElement('span');
     seg.className = cls + (strong ? ' strong' : '');
     seg.textContent = txt;
-    if (cls === 'rd-cost') seg.title = estTitle(r.totalCostUsd || 0) + (bridgeRequestsSuffix(r.steps) ? ' Requests: calls this run initiated through the model bridge (Copilot bills premium requests, not tokens); tool-loop continuations are not counted.' : '');
+    if (cls === 'rd-cost' && freeRequestsSuffix(r.steps)) seg.title = estTitle(r.totalCostUsd || 0) + ' Free requests: calls this run made to OpenRouter :free models (every call, tool-loop continuations too), out of the day\'s free allowance.';
+    else if (cls === 'rd-cost') seg.title = estTitle(r.totalCostUsd || 0) + (bridgeRequestsSuffix(r.steps) ? ' Requests: calls this run initiated through the model bridge (Copilot bills premium requests, not tokens); tool-loop continuations are not counted.' : '');
     meta.appendChild(seg);
   });
 
@@ -22839,11 +24093,13 @@ function railTileEl(r) {
 function renderPipelineTabs() {
   const rows = pipelineTabRuns();
 
-  // Roll-up amber dot = ANY child needs input. Visible from every view.
+  // Roll-up amber dot = ANY child needs input. Visible from every view — on phones it
+  // rides the hamburger, whose name says so while the drawer (and its "?" rows) is shut.
   const needs = rows.some((r) => r.pendingQuestion != null);
-  for (const id of ['#nav-running-rollup', '#topnav-running-rollup']) {
+  for (const id of ['#nav-running-rollup', '#mbar-rollup']) {
     const dot = $(id); if (dot) dot.hidden = !needs;
   }
+  $('#mbar-menu')?.setAttribute('aria-label', needs ? 'Menu — a pipeline needs your input' : 'Menu');
 
   const host = $('#nav-running-children');
   if (!host) return;
@@ -22859,10 +24115,11 @@ function renderPipelineTabs() {
   // collapsed — changes the signature and repaints as before. JSON.stringify
   // is the encoding: titles/labels are free text, so a hand-joined concat
   // could alias two different states; JSON escaping is unambiguous.
-  // sidebarCollapsed is FIRST and load-bearing: this function early-returns on an
+  // railCollapsed() is FIRST and load-bearing: this function early-returns on an
   // unchanged signature, so without it a collapse/expand leaves the previous
   // mode's markup on screen until the next server event happens to arrive.
-  const sig = JSON.stringify([sidebarCollapsed, runningCollapsed, rows.map((r) => [
+  const rail = railCollapsed();
+  const sig = JSON.stringify([rail, runningCollapsed, rows.map((r) => [
     r.runId,
     runDotClass(r),
     r.title,
@@ -22889,7 +24146,7 @@ function renderPipelineTabs() {
   host.classList.toggle('collapsed', runningCollapsed);  // auto-expanded: default false
   host.innerHTML = '';
   for (const r of rows) {
-    if (sidebarCollapsed) { host.appendChild(railTileEl(r)); continue; }
+    if (rail) { host.appendChild(railTileEl(r)); continue; }
     const row = document.createElement('button');
     row.type = 'button';
     row.className = 'nav-child';
@@ -23059,10 +24316,10 @@ function gsEnsurePillHost() {
   return gsPillHost;
 }
 
-async function loadOnboarding() {
+async function loadOnboarding({ recheck = false } = {}) {
   let data;
   try {
-    const res = await fetch('/api/onboarding');
+    const res = await fetch(recheck ? '/api/onboarding?recheck=1' : '/api/onboarding');
     data = await safeJson(res);
     if (!res.ok) return;
   } catch { return; }
@@ -23169,10 +24426,13 @@ function paintClaudeSetupStatus() {
   if (!box || !gs.status) return;
   const c = gs.status.claude || {};
   const ok = !!gs.status.steps.claude;
+  const bin = c.bin || 'claude';
   box.className = `ob-claude-status ${ok ? 'ok' : 'err'}`;
-  box.textContent = ok
-    ? `Found ${c.bin || 'claude'} — you're set.`
-    : (c.hint || `"${c.bin || 'claude'}" is not on the PATH of the Worca server. Install it, then check again (restart the UI if PATH changed).`);
+  if (ok) box.textContent = c.auth === 'signed-in' ? `Found ${bin}, installed and signed in — you're set.` : `Found ${bin} — you're set.`;
+  else if (c.auth === 'signed-out') box.textContent = `Found ${bin}, installed but not signed in yet. Run claude in a terminal, type /login, then check again.`;
+  else box.textContent = c.hint || `"${bin}" is not on the PATH of the Worca server. Install it, then check again (restart the UI if PATH changed).`;
+  // The wizards' signed-out lines are stale once the CLI checks out.
+  if (ok) for (const restore of [...claudeSignedOutHints.values()]) restore();
 }
 function openClaudeSetup() {
   const modal = document.getElementById('claude-setup-modal');
@@ -23187,7 +24447,7 @@ document.getElementById('claude-setup-modal')?.addEventListener('click', (e) => 
 document.getElementById('claude-setup-check')?.addEventListener('click', async () => {
   const btn = document.getElementById('claude-setup-check');
   btn.disabled = true;
-  try { await loadOnboarding(); } finally { btn.disabled = false; }
+  try { await loadOnboarding({ recheck: true }); } finally { btn.disabled = false; }
   paintClaudeSetupStatus();
 });
 document.addEventListener('keydown', (e) => {
@@ -23203,12 +24463,11 @@ document.addEventListener('keydown', (e) => {
 // is itself a hop: the sidebar entry is ringed and the user's own click routes,
 // so they learn where things live. `final` hops end the guide on the click.
 const onView = (v) => currentShownView === v;
-/** Ring the sidebar entry for `view` (the compact top-nav twin below 1080px). A view the
- *  user is already on is never a stop: the hop passes on arrival, without a ring. */
+/** Ring the sidebar entry for `view` (on a phone gsPhoneNavHop rings the menu button first).
+ *  A view the user is already on is never a stop: the hop passes on arrival, without a ring. */
 const NAV = (view, text, also = []) => ({
   id: `nav:${view}`, nav: view, views: [view, ...also], text,   // `also`: views reached from it that count as "there" (a wizard)
-  target: [`.nav button[data-nav="${view}"]`, `.topnav button[data-nav="${view}"]`],
-  lift: ['.topnav'],
+  target: [`.nav button[data-nav="${view}"]`],
 });
 const noProjectPicked = () => {
   const sel = document.getElementById('projectSelect');
@@ -23348,12 +24607,27 @@ function gsRaiseLevelHop(hop) {
   if (dialogUp) {
     return { target: `#mode-cards [data-level-choice="${need}"]`, mode: 'pointer', text: `Choose ${label}, then Done.` };
   }
-  return { target: ['#nav-mode', '.topnav-mode'], lift: ['.topnav'],
+  return { target: ['#nav-mode'],
     text: `This step is part of ${label} mode. Open the mode switch to show it.` };
+}
+/** On a phone the sidebar is a shut drawer whose buttons still have a box, so guide-spot
+ *  would ring them off-screen. A hop whose control lives in #side-rail first rings the
+ *  menu button — a stand-in with no id, so it is never "passed" and opening the drawer
+ *  re-derives the real hop — and, once the drawer is open, lifts the drawer above the scrim. */
+function gsPhoneNavHop(hop) {
+  if (!hop || !isPhoneNav()) return hop;
+  const sels = Array.isArray(hop.target) ? hop.target : [hop.target];
+  const inDrawer = sels.some((s) => typeof s === 'string' && !!document.querySelector(s)?.closest('#side-rail'));
+  if (!inDrawer) return hop;
+  if (!mobileNavOpen) {
+    const t = Array.isArray(hop.text) ? hop.text[0] : hop.text;
+    return { target: '#mbar-menu', lift: ['.mbar'], text: `Open the menu. ${t || ''}`.trim() };
+  }
+  return { ...hop, lift: [...(hop.lift || []), '.sidebar'] };
 }
 function gsNextHop(step, g = gs.guide || {}) {
   const hop = gsWalk(gsHops(step, g), g);
-  return hop ? gsRaiseLevelHop(hop) : hop;
+  return hop ? gsPhoneNavHop(gsRaiseLevelHop(hop)) : hop;
 }
 // Every tour runs to its LOGICAL end — the thing the tile promises — not to the first click of
 // a multi-step action: a project is registered (not just the dialog opened), a run is on its card
@@ -23428,7 +24702,6 @@ function gsHops(step, g) {
     }
     case 'workspace': {
       const checked = () => document.querySelectorAll('#wiz-projects input:checked').length;
-      const stepShowing = (n) => { const s = document.getElementById(`wiz-step-${n}`); return !!(s && !s.classList.contains('hidden')); };
       return [
         ...(projects < 2 ? gsAddProjectHops(g, 'A workspace needs at least two projects.', 'Add another one here: pick its folder in the chooser that opens.') : []),
         NAV('workspaces', 'Workspaces live here.', ['workspace-create']),   // the wizard is part of the way
@@ -23439,12 +24712,8 @@ function gsHops(step, g) {
         { id: 'members', target: '#wiz-projects', met: () => checked() >= 2,
           text: 'Tick the projects that belong together — two or more.',
           already: 'The projects that belong together — two or more are ticked.' },
-        { id: 'scan', target: '#wiz-start-scan', met: () => !stepShowing(1),
-          text: 'Scan them: Worca maps how the projects connect and drafts the workspace description.' },
-        { id: 'scanning', target: '#wiz-step-2 .status-label', met: () => stepShowing(3),
-          text: 'Worca is reading the projects — this takes a moment. The description arrives when it is done.' },
-        { id: 'save', target: '#wiz-save', final: true,
-          text: 'Read the draft, edit what you like, then save. Every run can now target the workspace as a whole.' },
+        { id: 'scan', target: '#wiz-start-scan', final: true,
+          text: 'Scan them. Worca starts a scan run you can follow under Running; when it finishes, the workspace appears here with its description, ready to edit.' },
       ];
     }
     case 'teamMetrics': {
@@ -23680,7 +24949,7 @@ function onboardingViewChanged(name) {
 loadOnboarding();
 
 const views = $$('.view');
-const navLinks = $$('.nav button[data-nav], .topnav button[data-nav]');
+const navLinks = $$('.nav button[data-nav]');
 // [v2/C1] composer is PRESERVED; workspaces + workspace-create are appended.
 // workspace-create is in the array (so deep-links resolve) but has no nav link.
 // plugins/guardrails/models LEFT this array: they are Settings tabs now, reached
@@ -23708,11 +24977,11 @@ const VIEW_MIN_LEVEL = Object.freeze({
   'team-metrics': 'expert', 'team-policy': 'expert', agents: 'expert', scripts: 'expert',
   schedules: 'advanced',
 });
-const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ guardrails: 'advanced', plugins: 'advanced', memory: 'advanced', models: 'expert', providers: 'expert' });
+const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ ask: 'advanced', guardrails: 'advanced', plugins: 'advanced', memory: 'advanced', models: 'expert', providers: 'expert' });
 const VIEW_TITLES = Object.freeze({
   stats: 'Statistics', composer: 'Workflow Composer', workspaces: 'Workspaces', 'workspace-create': 'Workspaces',
   'agent-create': 'Create agent', 'team-metrics': 'Team metrics', 'team-policy': 'Team policy', agents: 'Agents', scripts: 'Scripts',
-  guardrails: 'Guardrails', plugins: 'Plugins', memory: 'Memory', models: 'Models', providers: 'Providers',
+  guardrails: 'Guardrails', plugins: 'Plugins', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
   schedules: 'Schedules',
 });
 function pageMinLevel() {
@@ -23725,9 +24994,9 @@ function paintLevelBanner() {
   const above = !levelAtLeast(min);
   // The page you are on keeps its menu entry until you leave it, so "where am I" never vanishes.
   // Simple is the one exception: the Nodes group (Agents, Scripts) stays hidden as a whole —
-  // in the rail AND the topnav — and the banner alone says where you are. Advanced keeps it.
+  // in the rail AND the drawer — and the banner alone says where you are. Advanced keeps it.
   const hideNodes = currentLevel() === 'simple';
-  for (const b of $$('.nav button[data-nav], .topnav button[data-nav]')) {
+  for (const b of $$('.nav button[data-nav]')) {
     const nav = b.dataset.nav;
     // Schedules is Advanced, but a run scheduled from Ask Worca in Simple keeps its entry (rule 2).
     keepVisible(b, (above && nav === currentShownView && !(hideNodes && NODES_GROUP_VIEWS.includes(nav)))
@@ -23769,7 +25038,10 @@ document.addEventListener('worca:level', () => {
 // The tab is the Settings view's hash param; a guardrail deep link nests its id
 // behind it (#settings/guardrails/<id>). parseHash splits on the FIRST '/' only,
 // so that is view 'settings', param 'guardrails/<id>' — no parseHash change.
-const SETTINGS_TABS = ['general', 'guardrails', 'models', 'providers', 'plugins', 'memory'];
+const SETTINGS_TABS = ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'models', 'providers'];
+// The tabs whose cards GET /api/settings paints (loadSettings paints every card, wherever it sits).
+// Models is not one: loadModelsView repaints its two helper-model cards with the catalog.
+const SETTINGS_FORM_TABS = ['general', 'runs', 'ask'];
 const settingsPanes = $$('[data-view="settings"] .settings-pane');
 // Old top-level hashes keep working. The hashchange listener DROPS any view it
 // does not know, so without this map a bookmark or an old in-app link would
@@ -23807,12 +25079,8 @@ function showView(name, param = '') {
   // Same guard for the composer: unbind its keyboard and cancel any live gesture
   // so Delete/arrows/⌘Z can never edit the graph from another view.
   if (currentShownView === 'composer' && name !== 'composer') composerExit();
-  // Leave-guard: navigating away from the wizard while a scan is live aborts the
-  // scan + resets wizard state (addresses orphaned-background-request risk).
-  if (currentShownView === 'workspace-create' && name !== 'workspace-create') {
-    if (state.wizard.scanId || state.wizard.abort) abortWizardScan();
-    resetWizard();
-  }
+  // Leaving the wizard resets it (a scan, once started, is a run on Running — nothing to abort).
+  if (currentShownView === 'workspace-create' && name !== 'workspace-create') resetWizard();
   // Same guard for the agent wizard: stop a live generation on the way out.
   if (currentShownView === 'agent-create' && name !== 'agent-create') {
     if (state.agentWizard.genId || state.agentWizard.abort) abortAgentGen();
@@ -23899,8 +25167,10 @@ function showView(name, param = '') {
     if (on) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   });
+  paintMobileBar(name);
+  setMobileNavOpen(false);   // any route (a drawer tap, back/forward, a deep link) puts the drawer away
   // Nodes (Agents, Scripts): tint the parent while a child page is open, and
-  // unfold it — a deep link or a topnav click must never land on a hidden row.
+  // unfold it — a deep link or a drawer click must never land on a hidden row.
   if (nodesGroup) {
     const inNodes = NODES_GROUP_VIEWS.includes(name);
     nodesGroup.classList.toggle('has-active', inNodes);
@@ -24019,7 +25289,7 @@ function showSettingsTab(param = '') {
   // request, and re-entry refetches (which is what lets grvExitWizard's
   // '#settings/guardrails/<id>' -> '#settings/guardrails' hop reset the wizard).
   paintLevelBanner();
-  if (tab === 'general') loadSettings();
+  if (SETTINGS_FORM_TABS.includes(tab)) loadSettings();
   if (tab === 'guardrails') loadGuardrailsView(sub);
   if (tab === 'models') loadModelsView(sub);
   if (tab === 'providers') loadProvidersView();
@@ -24337,6 +25607,17 @@ refreshAllCounts();
 refreshBudget();
 startBudgetTick();
 loadWhoami();
+// Credential broker badges ("your key / no key" on model pickers): fetched at boot and
+// again when the tab regains focus — people add keys on the key page in another tab.
+// Pickers already on screen repaint once the answer changes what they show.
+{
+  const repaintPickers = () => {
+    if (currentView() === 'new') refreshNewPipelinePickers();
+    if (currentView() === 'settings' && currentSettingsTab === 'models') loadModelsView();
+  };
+  loadCredentials().then((d) => { if (d) repaintPickers(); });
+  window.addEventListener('focus', () => { loadCredentials().then((d) => { if (d) repaintPickers(); }); });
+}
 
 // Ask Worca mount (§10.2 seam 1): a JS-built body-level overlay — index.html is
 // untouched so ui-shell's routed-view census stays at 11. No network happens here;
@@ -24355,6 +25636,7 @@ askPanel = createAskPanel({
   getPageContext,
   openNewPipeline,
   openComposer: (id) => { openComposerFromAsk(id); },
+  openClaudeSetup: () => { openClaudeSetup(); },
   loadMarkdown: loadAskMarkdown,
   hljsLoader: diffHljsLoader,
   storage: window.localStorage,

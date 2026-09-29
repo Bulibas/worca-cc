@@ -21,6 +21,8 @@ import { DEFAULT_EXIT_CODES, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS,
 import { probePython } from './python-probe.mjs';
 import { stripGithubCredentials } from '../github-credentials.mjs';
 import { agentIdentity, agentSpawn, killAgentGroupSync } from '../agent-user.mjs';
+import { agentIdentityFor } from '../agent-pool.mjs';
+import { currentOwner } from '../billing.mjs';
 
 const CHILD_PATH = fileURLToPath(new URL('./script-child.mjs', import.meta.url));
 /** The `python` harness (workbench spec §7), spawned as `<python> -u worca_script.py <program.py>`. */
@@ -66,6 +68,24 @@ export function envelopeAuditPath(ctx) {
   return join(ctx.pipelineDir, 'scripts', `${ctx.node.id}-c${ctx.ordinal ?? 1}${slice}.envelope.json`);
 }
 
+/** The envelope's `ctx.workspace` (wsmap P2, additive — apiVersion stays 1): the workspace the
+ *  run spans, built from the run harness's workspace channel on EVERY workspace run, detached and
+ *  legacy run-root modes alike (`ctx.repos` stays detached-only). `dir` = the member's checkout for
+ *  this run, `projectDir` = the live project; members sorted by key, a keyless entry dropped, a
+ *  missing field null. `overrides` (wsmap M15) = the workspace's edge overrides a scan froze at run
+ *  start — present only when the channel carries them (a re-scan). null when the run spans no
+ *  workspace (a single-project run, a bench run). */
+export function workspaceEnvelope(ws) {
+  if (!ws || typeof ws !== 'object' || !Array.isArray(ws.projects)) return null;
+  const str = (v) => (typeof v === 'string' && v ? v : null);
+  const members = ws.projects
+    .filter((p) => p && str(p.projectKey))
+    .map((p) => ({ key: p.projectKey, name: str(p.projectName) || p.projectKey, dir: str(p.worktreeDir), projectDir: str(p.projectDir) }))
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  const overrides = ws.overrides && typeof ws.overrides === 'object' ? ws.overrides : null;
+  return { id: str(ws.workspaceId), name: str(ws.workspaceName), members, ...(overrides ? { overrides } : {}) };
+}
+
 /** The envelope (§4.1): BOUND inputs only (never the synthesized await), every
  *  declared output with its allocated path, the params, the run context. */
 export function buildEnvelope(ctx) {
@@ -107,6 +127,7 @@ export function buildEnvelope(ctx) {
       projectDir: ctx.runCtx?.projectDir ?? ctx.projectDir,
       runRoot: ctx.runRoot ?? null,
       repos,
+      workspace: workspaceEnvelope(ctx.workspace),       // wsmap P2: BOTH run-root modes (repos: detached only)
       checkpointRef: ctx.checkpointRef ?? null,
       baseName: ctx.runCtx?.baseName ?? null,
       runId: ctx.pipelineId ?? null,
@@ -283,7 +304,7 @@ export function spawnScript({ file, args, cwd, env, stdin = null, timeoutMs, sig
   return new Promise((resolve, reject) => {
     const started = Date.now();
     // Scripts run the agents' code (tests, builds): under the agent's uid when the container has one.
-    const agent = platform !== 'win32' ? agentIdentity() : null;
+    const agent = platform !== 'win32' ? agentIdentityFor(currentOwner()) : null;   // the owner's pool user (agent-pool.mjs)
     let spawnFile = file;
     let spawnArgs = args;
     let spawnEnv = env;
@@ -503,7 +524,10 @@ export async function runScriptExecution(ctx) {
   await writeFile(envelopePath, JSON.stringify(envelope, null, 2) + '\n', 'utf8');
   for (const p of Object.values(outputs)) if (p?.path) await mkdir(dirname(p.path), { recursive: true });
   if (verdict?.path) await mkdir(dirname(verdict.path), { recursive: true });
-  const env = { ...envForShell(envelope, scriptBaseEnv(ctx.claudeOpts, platform)), WORCA_ENVELOPE: envelopePath };
+  // `runCtx.secretEnv` is the in-memory home of a typed `secret` form field (see the clarifier
+  // executor): merged into the CHILD's environment only. It is deliberately absent from the
+  // envelope, its audit copy on disk, `params` and every log line.
+  const env = { ...envForShell(envelope, scriptBaseEnv(ctx.claudeOpts, platform)), ...(ctx.runCtx?.secretEnv || {}), WORCA_ENVELOPE: envelopePath };
   // Clamped as well as validated (v4 T3): the bench and the CLI build a ctx without going through V22, and a delay
   // past 2^31-1 ms makes the timer fire after one millisecond.
   const timeoutMs = Number.isInteger(script.timeoutMs) && script.timeoutMs >= MIN_TIMEOUT_MS ? Math.min(script.timeoutMs, MAX_TIMEOUT_MS) : DEFAULT_TIMEOUT_MS;

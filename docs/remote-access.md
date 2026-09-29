@@ -265,5 +265,8 @@ Access.
   named emails, and use one deployment per person or per set of credentials, never one per project.
 - Scope the secrets: a fine-grained `GH_TOKEN`, a spend limit on an Anthropic API key, and worca's
   per-run cost caps.
+- To share one deployment as a team without sharing a model key, run the
+  [credential broker](credential-broker.md) in multi mode: each person saves their own keys on
+  its key page, agents never hold a key, and costs are charged to whoever caused them.
 - Desktop features act on the server: the folder picker becomes a text field
   (`WORCA_NO_NATIVE_DIALOG=1`).

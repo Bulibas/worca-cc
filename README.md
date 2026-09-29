@@ -80,13 +80,13 @@ and durations, the clarify Q&A, agent transcripts, and logs:
 
 ### Agents
 
-- **11 data-driven agents** — planner, plan refiner, plan reviewer,
+- **13 data-driven agents** — planner, plan refiner, plan reviewer,
   implementer, code reviewer, clarify, decomposer (splits a plan into
   vertical-slice tasks, one implementer each), manual-tests checklist, manual
-  web-UI testing (drives a browser via Playwright), workspace scanner, and
-  workspace reviewer. Each agent is a markdown prompt plus a metadata sidecar
-  declaring its typed input/output ports — new agents drop in without engine
-  changes.
+  web-UI testing (drives a browser via Playwright), the three workspace-scan
+  agents (survey, usage mapper, synthesizer), and workspace reviewer. Each
+  agent is a markdown prompt plus a metadata sidecar declaring its typed
+  input/output ports — new agents drop in without engine changes.
 - **AI-assisted agent creation** — describe a new agent in the UI and Worca
   generates both its system prompt and metadata (or paste your own prompt and
   let it infer just the wiring); edit, regenerate, and save.
@@ -143,11 +143,14 @@ and durations, the clarify Q&A, agent transcripts, and logs:
 
 ### Workspaces
 
-- **Multi-project runs** — group related repos into a workspace; a scanner
-  maps how they interconnect (shared APIs, schemas, build deps) into an
-  editable description, and a workspace run fans the pipeline out across all
-  members — one branch and worktree per member, one cross-project review
-  verdict at the end.
+- **Multi-project runs** — group 2–40 related repos into a workspace; a scan
+  maps how they interconnect (APIs, message topics, packages, shared tables)
+  from code, with file:line evidence on every edge it finds and agents
+  filling what code cannot see. Review the map on the workspace's **Map** tab
+  (confirm, reject, add edges); its rendered description reaches every agent.
+  A workspace run fans the pipeline out across all members — one branch and
+  worktree per member, one cross-project review verdict at the end. See
+  [`docs/workspace-map.md`](docs/workspace-map.md).
 
 ### Plugins & chat
 
@@ -234,7 +237,7 @@ See [`docs/team-policy.md`](docs/team-policy.md).
   into that model's agent spawns. Share a model catalog as a plugin, with
   secrets required at install time.
 - **No first-party account needed** — run and chat titles are written by the
-  model the run or chat itself uses (Settings › General › Title generation picks
+  model the run or chat itself uses (Settings › Models › Title generation picks
   a fixed one instead), endpoint-routed models carry Claude Code's internal
   haiku/sonnet/opus/fable tier keys so nothing falls back to the Anthropic API,
   and *Hide built-in models* (Settings › Models) drops the built-ins from every
@@ -352,6 +355,11 @@ worca --project /path/to/your/project --prompt "Add a /search endpoint" --workfl
 # pause with Ctrl+C, continue later (survives restarts)
 worca resume <pipelineId>
 
+# see every run from the terminal — no browser, no Worca server needed
+worca runs
+worca runs --status paused
+worca runs <pipelineId>    # one run in detail (any unique prefix; --json for machines)
+
 # run it later: once, from this terminal, or on a repeat (needs `worca ui` up, or --wait)
 worca --project /path/to/your/project --prompt "Upgrade dependencies" --at "tomorrow 02:00"
 worca --project /path/to/your/project --prompt "Upgrade dependencies" --at 02:00 --wait --yes
@@ -394,7 +402,8 @@ interactive run paused and you can resume it); `1` a hard error, a stop, or an
 interactive pause an error forced; `2` a usage error; `3` a `--yes` run that
 parked itself — auth, quota, a usage or cost limit, exhausted retries, or a
 step error — with nobody attached to resume it. Nothing is discarded on a
-pause: `worca resume <pipelineId>` picks the run up where it stopped, and the
+pause: `worca resume <pipelineId>` picks the run up where it stopped — on the
+model it was started with (`--model`, or the one picked in the UI) — and the
 cause is printed with the pause block on stdout.
 
 ### `/worca` skill (inside Claude Code)
@@ -420,6 +429,7 @@ The skill starts the same deterministic orchestrator.
 - [Models](docs/models.md) — the catalog, providers (GitHub Copilot, OpenAI-compatible) and the built-in bridge
 - [Getting started](docs/getting-started.md) — the in-app checklist, welcome and spotlight guides
 - [Storage](docs/storage.md) — where state lives, project keys, migration
+- [Workspace map](docs/workspace-map.md) — how a workspace scan maps relations, reviewing them, measuring a scan
 - [Remote access](docs/remote-access.md) — opt-in, behind Cloudflare Access, with worca checking the token
 - [Deploy on Railway](docs/deploy-railway.md) — the container as a hosted service behind Cloudflare Access
 - [Releasing](docs/RELEASING.md) — how `@worca/app` versions are published

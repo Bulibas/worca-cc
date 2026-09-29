@@ -18,6 +18,7 @@ import { findBridgedEntry } from './registry.mjs';
 import { handleMessages } from './upstream.mjs';
 import { estimateInputTokens } from './translate/response.mjs';
 import { bridgeErrors, PAYLOAD_CEILING_BYTES } from './errors.mjs';
+import { brokerEnabled } from '../broker-client.mjs';
 
 let state = null;   // { server, port, secret, listening: Promise<number>, log }
 const ROUTE_RE = /^\/m\/([^/]+)(?:\/r\/([^/]+))?\/v1\/(messages|messages\/count_tokens|models)\/?$/;
@@ -132,18 +133,30 @@ function sendJson(res, status, obj, headers) {
   res.end(JSON.stringify(obj));
 }
 
+const BROKER_TOKEN_RE = /^wbt_[A-Za-z0-9_-]{43}$/;
+
+/**
+ * The caller's credential: the bridge's own secret, or — with the credential broker on —
+ * the spawn's broker token, which the bridge forwards to the broker (it is the broker
+ * that checks it; the bridge never holds a provider key then). null = refused.
+ * @returns {{brokerToken:string|null}|null}
+ */
 function authorized(req) {
   const h = req.headers;
   const bearer = typeof h.authorization === 'string' && /^bearer\s+/i.test(h.authorization) ? h.authorization.replace(/^bearer\s+/i, '').trim() : '';
   const key = typeof h['x-api-key'] === 'string' ? h['x-api-key'].trim() : '';
-  return (bearer && bearer === state.secret) || (key && key === state.secret);
+  if ((bearer && bearer === state.secret) || (key && key === state.secret)) return { brokerToken: null };
+  const tok = bearer || key;
+  if (brokerEnabled() && BROKER_TOKEN_RE.test(tok)) return { brokerToken: tok };
+  return null;
 }
 
 async function handle(req, res) {
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   const m = ROUTE_RE.exec(url.pathname);
   if (!m) { const e = bridgeErrors.notFound(); return sendJson(res, e.status, e.body); }
-  if (!authorized(req)) { const e = bridgeErrors.unauthorized(); return sendJson(res, e.status, e.body); }
+  const auth = authorized(req);
+  if (!auth) { const e = bridgeErrors.unauthorized(); return sendJson(res, e.status, e.body); }
   const catalogId = decodeURIComponent(m[1]);
   const tag = m[2] ? decodeURIComponent(m[2]) : '';
   const route = m[3];
@@ -180,5 +193,5 @@ async function handle(req, res) {
   };
   const headers = {};
   for (const [k, v] of Object.entries(req.headers)) if (typeof v === 'string') headers[k.toLowerCase()] = v;
-  await handleMessages({ entry, body, requestHeaders: headers, tag, signal: ctrl.signal, fetch: state.fetch, log: state.log }, reply);
+  await handleMessages({ entry, body, requestHeaders: headers, tag, signal: ctrl.signal, fetch: state.fetch, log: state.log, brokerToken: auth.brokerToken }, reply);
 }

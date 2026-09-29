@@ -119,7 +119,7 @@ test('ASK_LIMITS is frozen and carries the spec figures', () => {
   assert.deepEqual(ASK_LIMITS.attachment, {
     maxFiles: 8, maxBytesPerFile: 512 * 1024, maxBytesPerBinaryFile: 5 * 1024 * 1024,
     maxBytesPerThread: 25 * 1024 * 1024,
-    extensions: ['.md', '.markdown', '.txt', '.json', '.csv', '.log'],
+    extensions: ['.md', '.markdown', '.txt', '.json', '.csv', '.log', '.html', '.htm'],
     binaryExtensions: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf'],
   });
   assert.equal(ASK_LIMITS.contextHeaderMaxChars, 1024);
@@ -129,7 +129,8 @@ test('ASK_LIMITS is frozen and carries the spec figures', () => {
   assert.equal(ASK_LIMITS.agentLogMaxLines, 50);
   assert.equal(ASK_LIMITS.listRunsMaxLimit, 100);
   assert.equal(ASK_LIMITS.diffMaxBytes, 200_000);
-  assert.equal(ASK_LIMITS.briefMaxChars, 8000);
+  assert.equal(ASK_LIMITS.briefMaxChars, 32_000);
+  assert.equal(ASK_LIMITS.briefMaxChars, ASK_LIMITS.workflowTaskMaxChars);
   assert.equal(ASK_LIMITS.defaultModel, 'claude-opus-5-5');
   assert.equal(ASK_LIMITS.defaultEffort, 'high');
 });

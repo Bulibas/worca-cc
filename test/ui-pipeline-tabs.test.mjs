@@ -55,6 +55,7 @@ test('a pending question shows pulsing "?" marker + parent roll-up', async () =>
   assert.ok(q, 'awaiting-input "?" marker present');
   assert.equal(q.textContent, '?');
   assert.equal(window.document.querySelector('#nav-running-rollup').hidden, false);
+  assert.equal(window.document.querySelector('#mbar-rollup').hidden, false, 'the phone bar mirrors it on the menu button');
 });
 
 test('#running/<id> opens the detail screen and leaves the list intact', async () => {

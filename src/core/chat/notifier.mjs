@@ -71,6 +71,12 @@ export function createNotifier({ channelHost, getPrefs, chatContext, logger = ()
         title: entry?.title || orch?.state?.title || '',
         totalCostUsd: orch?.state?.totalCostUsd,
         totalActiveMs: orch?.state?.totalActiveMs,
+        // renderDone reports directions the run never applied. Omitting this made
+        // that warning unreachable from chat — which is the one surface where
+        // /direct is used, so the user who posted a direction was the one user who
+        // could not be told it went unread. The CLI twin (cli/render.mjs) reads
+        // orch.state directly and has always shown it.
+        directions: orch?.state?.directions,
       });
       const guard = (fn) => (payload) => {
         try { fn(payload); } catch (err) { logger('error', `chat notifier: ${err?.message || err}`); }

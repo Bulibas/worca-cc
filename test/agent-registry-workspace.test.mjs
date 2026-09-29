@@ -1,5 +1,5 @@
 // test/agent-registry-workspace.test.mjs
-// M4: the two workspace agents in the registry — scope coercion, the
+// M4: the workspace agents in the registry — scope coercion, the
 // produces===['workspace'] canary (the §6.9 highest-risk hazard), the DEFAULT_SPEC
 // channel wiring, and the mandatory registryToSteps `scope:'workspace-only'`
 // exclusion that keeps AGENT_STEPS at EXACTLY 8 (single-project byte-identity).
@@ -17,7 +17,7 @@ after(async () => {
   await Promise.all(tmpDirs.map((d) => rm(d, { recursive: true, force: true })));
 });
 
-test('the two workspace agents load with scope:"workspace-only"', () => {
+test('the scanner and the reviewer load with scope:"workspace-only"', () => {
   const reg = loadAgentRegistry();
   assert.ok(reg.workspaceScanner, 'workspaceScanner present');
   assert.ok(reg.workspaceReviewer, 'workspaceReviewer present');
@@ -32,13 +32,13 @@ test('every original project agent stays scope:"project" (coercion default)', ()
   }
 });
 
-test('CANARY: the workspaceScanner sidecar declares its typed ports', () => {
+test('CANARY: the workspaceScanner sidecar declares its typed ports (the scan\'s survey stage)', () => {
   // The v1 channel-id list is gone; the ports ARE the wiring vocabulary now, and
   // an un-ported sidecar is refused outright by resolveGraph.
   const reg = loadAgentRegistry();
   assert.equal(reg.workspaceScanner.metaVersion, 2);
-  assert.deepEqual(reg.workspaceScanner.inputs.map((p) => p.id), ['task']);
-  assert.deepEqual(reg.workspaceScanner.outputs.map((p) => p.id), ['workspace']);
+  assert.deepEqual(reg.workspaceScanner.inputs.map((p) => p.id), ['brief']);
+  assert.deepEqual(reg.workspaceScanner.outputs.map((p) => p.id), ['survey']);
   assert.equal(reg.workspaceScanner.placeable, false, 'off-pipeline: never placeable on a canvas');
 });
 
@@ -56,20 +56,22 @@ test('both workspace agents declare fanOut:true', () => {
   assert.equal(reg.workspaceReviewer.fanOut, true);
 });
 
-test('NON-NEGOTIABLE: registryToSteps still returns EXACTLY the 10 project steps', () => {
-  // The scope:'workspace-only' exclusion is mandatory — without it the registry's 12
-  // entries would push this to 12 and break the single-project UI stepper / config keys.
+test('NON-NEGOTIABLE: registryToSteps returns the 10 coding + 8 presentation project steps', () => {
+  // The scope:'workspace-only' exclusion is mandatory — without it the registry's
+  // workspace entries would push into the single-project UI stepper / config keys.
+  // Project-scoped presentation agents DO belong (they run in a project checkout).
   const steps = registryToSteps(loadAgentRegistry());
-  assert.equal(steps.length, 10, 'workspace-only agents are excluded from the step list');
+  assert.equal(steps.length, 18, 'workspace-only agents are excluded from the step list');
   assert.deepEqual(steps.map((s) => s.key), [
     'clarify', 'planner', 'refiner', 'decomposer', 'implementer', 'reviewer', 'manualTestsChecklist', 'manualWebUiTesting', 'planReviewer', 'memoryDefragmenter',
+    'deckClarify', 'deckNarrative', 'deckSystem', 'deckBuilder', 'deckAudit', 'deckReviewer', 'deckExport', 'deckOutputs',
   ]);
   assert.ok(!steps.some((s) => s.key === 'workspaceScanner'), 'scanner excluded');
   assert.ok(!steps.some((s) => s.key === 'workspaceReviewer'), 'workspace reviewer excluded');
 });
 
-test('AGENT_STEPS (derived from the registry) is byte-identical to registryToSteps and has 10 entries', () => {
-  assert.equal(AGENT_STEPS.length, 10);
+test('AGENT_STEPS (derived from the registry) is byte-identical to registryToSteps and has 18 entries', () => {
+  assert.equal(AGENT_STEPS.length, 18);
   assert.deepEqual(AGENT_STEPS, registryToSteps(loadAgentRegistry()));
 });
 

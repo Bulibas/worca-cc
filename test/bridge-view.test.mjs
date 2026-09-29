@@ -47,10 +47,25 @@ test('providers card: connected copilot shows login, quota, import + sign-out; k
 test('providers card: not connected / not acknowledged states; sign-in block replaces the button', () => {
   const card = renderProvidersCard({ copilot: { connected: false, termsCurrent: false, accountType: 'individual', maxConcurrent: 4 } }, { doc });
   const cp = card.querySelector('.mv-pv-row[data-provider="copilot"]');
-  assert.match(cp.querySelector('.badge').textContent, /blocked until acknowledged/);
+  // The state pill says what unblocks sign-in in the notice button's words, and IS a notice
+  // button: the same .mv-cp-terms class the Providers delegation opens the notice for.
+  const pill = cp.querySelector('.badge');
+  assert.equal(pill.tagName, 'BUTTON');
+  assert.equal(pill.type, 'button');
+  assert.equal(pill.textContent, 'please read the notice first');
+  assert.ok(pill.classList.contains('mv-cp-terms'));
+  assert.match(pill.title, /blocked until you acknowledge/);
   assert.ok(cp.querySelector('.mv-cp-signin'));
   assert.equal(cp.querySelector('.mv-cp-fetch-models').disabled, true);
-  assert.equal(cp.querySelector('.mv-cp-terms').textContent, 'Read notice');
+  const noticeButtons = [...cp.querySelectorAll('.mv-cp-terms')];
+  assert.equal(noticeButtons.length, 2);
+  assert.equal(noticeButtons.at(-1).textContent, 'Read notice');
+  // An acknowledgement of an older notice: the pill asks for the updated one.
+  const stale = renderProvidersCard({ copilot: { connected: false, termsCurrent: false, acknowledgedTerms: '2026-01-01T00:00:00.000Z' } }, { doc });
+  assert.equal(stale.querySelector('.mv-pv-row[data-provider="copilot"] .badge').textContent, 'please re-read the updated notice');
+  // Once acknowledged the pill is plain status again, not a button.
+  const ok = renderProvidersCard({ copilot: { connected: false, termsCurrent: true } }, { doc });
+  assert.equal(ok.querySelector('.mv-pv-row[data-provider="copilot"] .badge').tagName, 'SPAN');
   const flowCard = renderProvidersCard({ copilot: { connected: false, termsCurrent: true } }, { doc, signIn: { userCode: 'ABCD-1234', verificationUri: 'https://github.com/login/device' } });
   assert.equal(flowCard.querySelector('.mv-cp-signin'), null);
   assert.equal(flowCard.querySelector('.mv-cp-code').textContent, 'ABCD-1234');
@@ -119,6 +134,10 @@ test('connection: create defaults to direct with the provider block hidden; prov
   assert.deepEqual([...api.options].map((o) => o.value), ['openai-chat', 'openai-responses']);
   assert.equal(api.disabled, false);
   assert.equal(conn.querySelector('.mv-conn-adv').hidden, false);
+  // Expandable like every other disclosure (New pipeline's Advanced): the chevron says so without a hover.
+  const sum = conn.querySelector('.mv-conn-adv > summary');
+  assert.ok(sum.querySelector('.adv-chev[aria-hidden="true"]'), 'the Advanced summary carries the disclosure chevron');
+  assert.equal(sum.textContent.trim(), 'Advanced — base URL, API key, extra headers');
   assert.match(conn.querySelector('.mv-conn-note').textContent, /Translated/);
   conn.querySelector('.mv-conn-provider').value = 'anthropic';
   applyConnectionMode(conn);
@@ -312,4 +331,38 @@ test('editor: an imported Responses entry keeps its effort list on save, offers 
   const conn = renderConnectionSection(stored, { doc });
   setModelUpstream(conn, { provider: 'copilot', api: 'openai-responses', model: 'gpt-5.4', capabilities: { reasoning: true } });
   assert.equal('reasoningEfforts' in collectConnection(conn).upstream.capabilities, false);
+});
+
+test('providers card with the credential broker: each pill is the viewer\'s own key-page state', () => {
+  const pill = (card, name) => card.querySelector(`.mv-pv-row[data-provider="${name}"] .mv-head .badge`);
+  const broker = (providers, extra = {}) => ({ enabled: true, mode: 'multi', keyPage: 'https://keys.example.com', providers, ...extra });
+  const base = { copilot: { connected: false, termsCurrent: true, acknowledgedTerms: '2026-09-27T00:00:00.000Z' }, openai: { configured: false, baseUrl: 'https://openrouter.ai/api/v1' }, anthropic: { configured: false, baseUrl: '' } };
+
+  // worca holds no key, yet the viewer's keys are set on the key page: that is what shows.
+  const set = renderProvidersCard({ ...base, broker: broker({ copilot: { slot: 'copilot', state: 'set', suffix: 'ztYC' }, openai: { slot: 'openrouter', state: 'set', suffix: '9d92' }, anthropic: { slot: 'anthropic', state: 'missing' } }) }, { doc });
+  assert.equal(pill(set, 'copilot').textContent, 'your sign-in ••••ztYC');
+  assert.ok(pill(set, 'copilot').classList.contains('green'));
+  assert.equal(pill(set, 'openai').textContent, 'your key ••••9d92');
+  // A missing key links to the key page instead of saying "no key".
+  const missing = pill(set, 'anthropic');
+  assert.equal(missing.tagName, 'A');
+  assert.equal(missing.textContent, 'add your key on the key page');
+  assert.equal(missing.href, 'https://keys.example.com/');
+  assert.equal(missing.target, '_blank');
+
+  const other = renderProvidersCard({ ...base, broker: broker({ copilot: { slot: 'copilot', state: 'invalid' }, openai: { state: 'keyless' }, anthropic: { state: 'none', error: 'no credential slot for gw.example' } }) }, { doc });
+  assert.equal(pill(other, 'copilot').textContent, 'your sign-in was rejected');
+  assert.ok(pill(other, 'copilot').classList.contains('red'));
+  assert.equal(pill(other, 'openai').textContent, 'local — no key needed');
+  assert.equal(pill(other, 'anthropic').textContent, 'no broker slot for this URL');
+  assert.match(pill(other, 'anthropic').title, /gw\.example/);
+
+  const anon = renderProvidersCard({ ...base, broker: broker({ openai: { slot: 'openrouter' } }, { signInNeeded: true }) }, { doc });
+  assert.equal(pill(anon, 'openai').textContent, 'sign in to see your key');
+  const down = renderProvidersCard({ ...base, broker: broker({ openai: { slot: 'openrouter' } }, { error: 'cannot reach the credential broker' }) }, { doc });
+  assert.equal(pill(down, 'openai').textContent, 'key page unreachable');
+
+  // The Copilot notice still gates Copilot models: before it is acknowledged, its pill wins.
+  const notice = renderProvidersCard({ ...base, copilot: { connected: false, termsCurrent: false }, broker: broker({ copilot: { slot: 'copilot', state: 'set' } }) }, { doc });
+  assert.equal(pill(notice, 'copilot').textContent, 'please read the notice first');
 });

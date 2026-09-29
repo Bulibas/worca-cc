@@ -1,6 +1,6 @@
 ---
 name: worca-release
-description: Cut a release candidate or a stable release of @worca/app — bumps the version, commits, tags `worca-app-v<version>`, and pushes so CI publishes to npm with provenance. Triggers on "cut a release", "cut an RC", "release candidate", "bump RC", "stable release", "worca-release", or any request to release @worca/app.
+description: Cut a release candidate or a stable release of @worca/app — bumps the version, commits, tags `worca-app-v<version>`, and pushes so CI publishes to npm with provenance — and, with --publish-changelog, commit a /worca-changelog entry to dev and put it on docs.worca.dev. Triggers on "cut a release", "cut an RC", "release candidate", "bump RC", "stable release", "worca-release", "publish the changelog", or any request to release @worca/app.
 ---
 
 # Release @worca/app
@@ -21,6 +21,11 @@ something here doesn't fit; do not restate its contents back to the user.
 - `/worca-release --stable` — close out the current RC line
 - `/worca-release --version:micro` — stable release from stable, patch bump
 - `/worca-release --version:minor` — stable release from stable, minor bump
+- `/worca-release --publish-changelog` — commit the changelog entry
+  `/worca-changelog` left in `docs/changelog/`, push it to `dev`, and put it
+  on docs.worca.dev (see *Changelog mode* at the end). Add `--version:<V>` to
+  name the entry; the default is the newest one in `entries.json`. It does not
+  cut a release and does not combine with `--rc` / `--stable`.
 
 `--version:` also accepts a **literal target** — `--version:1.0.0` — which
 pairs with either mode and says the number outright instead of relying on
@@ -274,3 +279,104 @@ Release complete
 ```
 
 Only claim `attested` when Step 6 actually showed an `attestations` field.
+
+For a stable (`latest`) release, end with the next step: *"Next:
+`/worca-changelog` for the What's-new page. It offers to commit and publish
+the entry when it is done; to do that later, after changing something, run
+`/worca-release --publish-changelog`."*
+
+---
+
+## Changelog mode: `--publish-changelog`
+
+Takes the entry `/worca-changelog` left uncommitted in `docs/changelog/`,
+commits it to `dev`, and publishes docs.worca.dev. It is the "commit and
+publish" answer at the end of `/worca-changelog`, and the separate call when
+the entry needed changes first. Steps 1–7 above do not run in this mode.
+
+### C1: Find the entry
+
+```bash
+node -e 'const e=require("./docs/changelog/entries.json");console.log(e.map(x=>x.version).join(" "))'
+git status --porcelain -- docs/changelog/
+```
+
+The version is `--version:<V>` when given, otherwise the first record in
+`entries.json` (newest first). The entry is exactly these paths:
+
+```
+docs/changelog/entries.json
+docs/changelog/worca-app-v<V>.src.html
+docs/changelog/shots/<V>/
+```
+
+Stop when `worca-app-v<V>.src.html` does not exist, or when none of the three
+paths has a change to commit (`git status --porcelain -- <paths>` is empty):
+the entry is already committed, so say so and skip to C4 to publish it.
+
+Other uncommitted files are never part of the commit. List them in the
+summary so the user knows they were left alone.
+
+### C2: Preconditions
+
+```bash
+[ "$(git branch --show-current)" = "dev" ] || { echo "ERROR: not on dev"; exit 1; }
+git fetch --quiet origin
+git pull --quiet --rebase --autostash origin dev   # dev moves often; land on its tip
+node docs-site/build.mjs                          # the site builds with the entry
+node --test test/docs-site-changelog.test.mjs
+```
+
+Stop on any failure and report it. A build failure names the problem: a
+missing image, or a page and an `entries.json` record that disagree.
+
+### C3: Commit and push
+
+```bash
+git add -- docs/changelog/entries.json docs/changelog/worca-app-v<V>.src.html docs/changelog/shots/<V>
+git commit -m "Changelog: What's new in <V>"
+git push origin dev
+```
+
+Add only those paths. Never `git add -A`: the built
+`worca-app-v<V>.html` is git-ignored, and anything else in the working tree
+belongs to someone else. End the commit message with the attribution lines
+this session's instructions give.
+
+### C4: Publish the docs
+
+```bash
+npm run docs:publish -- --dry-run
+npm run docs:publish
+```
+
+The dry run shows the pointer move (`docs-live: <old> -> <new>`); stop if it
+fails. The real run fast-forwards `docs-live` to `origin/dev`.
+
+### C5: Confirm it is live
+
+Workers Builds takes a few minutes. Poll the page, for up to ten minutes:
+
+```bash
+for i in $(seq 1 40); do
+  [ "$(curl -s -o /dev/null -w '%{http_code}' https://docs.worca.dev/changelog/<V>/)" = 200 ] && break
+  sleep 15
+done
+curl -s -o /dev/null -w '%{http_code}\n' https://docs.worca.dev/changelog/<V>/
+```
+
+Still not 200 means the Cloudflare build did not deploy. Say so and point at
+the `worca-docs` build log in the Cloudflare dashboard (Workers & Pages →
+worca-docs → Deployments). An expired or rolled build token is the usual cause.
+
+### C6: Summary
+
+```
+Changelog published
+
+  Entry:      <V>  (since <SINCE>)
+  Commit:     <sha> "Changelog: What's new in <V>" on dev
+  docs-live:  <old> → <new>
+  Live:       https://docs.worca.dev/changelog/<V>/   (200 | not yet — see the build log)
+  Left alone: <other uncommitted files, or "nothing">
+```

@@ -8,17 +8,22 @@ import { fileURLToPath } from 'node:url';
 import { loadAgentRegistry, registryToSteps, normalizeMeta, collectDomains } from '../src/core/agent-registry.mjs';
 import { AGENT_STEPS } from '../src/core/config.mjs';
 
-test('loadAgentRegistry returns all shipped agents (10 project + 2 workspace)', () => {
+test('loadAgentRegistry returns all shipped agents (10 coding + 8 presentation + 4 workspace)', () => {
   const reg = loadAgentRegistry();
   assert.deepEqual(
     Object.keys(reg).sort(),
-    ['clarify', 'decomposer', 'implementer', 'manualTestsChecklist', 'manualWebUiTesting', 'memoryDefragmenter', 'planReviewer', 'planner', 'refiner', 'reviewer', 'workspaceReviewer', 'workspaceScanner'],
+    ['clarify', 'deckAudit', 'deckBuilder', 'deckClarify', 'deckExport', 'deckNarrative', 'deckOutputs', 'deckReviewer', 'deckSystem',
+      'decomposer', 'implementer', 'manualTestsChecklist', 'manualWebUiTesting', 'memoryDefragmenter',
+      'planReviewer', 'planner', 'refiner', 'reviewer', 'workspaceReviewer', 'workspaceScanner',
+      'workspaceSynthesizer', 'workspaceUsageMapper'],
   );
-  assert.equal(Object.keys(reg).length, 12);
-  // The two workspace agents are scope:'workspace-only'; the original 9 are 'project'.
+  assert.equal(Object.keys(reg).length, 22);
+  // The four workspace agents are scope:'workspace-only'; the other 18 are 'project'.
   const projectScoped = Object.values(reg).filter((m) => m.scope !== 'workspace-only').map((m) => m.key).sort();
   assert.deepEqual(projectScoped,
-    ['clarify', 'decomposer', 'implementer', 'manualTestsChecklist', 'manualWebUiTesting', 'memoryDefragmenter', 'planReviewer', 'planner', 'refiner', 'reviewer']);
+    ['clarify', 'deckAudit', 'deckBuilder', 'deckClarify', 'deckExport', 'deckNarrative', 'deckOutputs', 'deckReviewer', 'deckSystem',
+      'decomposer', 'implementer', 'manualTestsChecklist', 'manualWebUiTesting', 'memoryDefragmenter',
+      'planReviewer', 'planner', 'refiner', 'reviewer']);
 });
 
 test('normalizeMeta.domain: default general, sentinel shared, malformed→general, valid kebab passes', () => {
@@ -81,11 +86,13 @@ test('registry insertion order follows .order ascending', () => {
   const reg = loadAgentRegistry();
   const orders = Object.values(reg).map((m) => m.order);
   assert.deepEqual(orders, [...orders].sort((a, b) => a - b));
-  // clarify (order 0) sorts first; workspaceScanner (order 0.5) sorts next;
-  // workspaceReviewer (order 4.5) sorts between reviewer (4) and manualTestsChecklist (5).
+  // clarify (order 0) sorts first; the scan's workspaceScanner (0.5), workspaceUsageMapper (0.6) and
+  // workspaceSynthesizer (0.7) sort next; workspaceReviewer (order 4.5) sorts between reviewer (4) and
+  // manualTestsChecklist (5).
   assert.deepEqual(Object.keys(reg), [
-    'clarify', 'workspaceScanner', 'planner', 'refiner', 'decomposer', 'implementer', 'reviewer', 'workspaceReviewer',
+    'clarify', 'workspaceScanner', 'workspaceUsageMapper', 'workspaceSynthesizer', 'planner', 'refiner', 'decomposer', 'implementer', 'reviewer', 'workspaceReviewer',
     'manualTestsChecklist', 'manualWebUiTesting', 'planReviewer', 'memoryDefragmenter',
+    'deckClarify', 'deckNarrative', 'deckSystem', 'deckBuilder', 'deckAudit', 'deckReviewer', 'deckExport', 'deckOutputs',
   ]);
 });
 
@@ -109,12 +116,17 @@ test('registryToSteps matches the legacy AGENT_STEPS for the original 4', () => 
 
 test('registryToSteps appends the new agents with their display names', () => {
   const steps = registryToSteps(loadAgentRegistry());
-  assert.equal(steps.length, 10);
+  assert.equal(steps.length, 18);
   assert.deepEqual(steps[0], { key: 'clarify', label: 'Clarify', fanOut: true, asksQuestions: true, questionsLocked: true, questionsDefault: true });
   assert.deepEqual(steps[3], { key: 'decomposer', label: 'Decompose', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false });
   assert.deepEqual(steps[6], { key: 'manualTestsChecklist', label: 'Manual Tests Checklist', fanOut: false, asksQuestions: true, questionsLocked: false, questionsDefault: false });
   assert.deepEqual(steps[7], { key: 'manualWebUiTesting', label: 'Manual web UI testing', fanOut: false, asksQuestions: true, questionsLocked: false, questionsDefault: false });
   assert.deepEqual(steps[8], { key: 'planReviewer', label: 'Plan Review', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false });
+  // memoryDefragmenter sits at index 9 (upstream's tenth coding step); the seven
+  // presentation steps append after it.
+  assert.equal(steps[9].key, 'memoryDefragmenter');
+  assert.deepEqual(steps.slice(10).map((s) => s.key),
+    ['deckClarify', 'deckNarrative', 'deckSystem', 'deckBuilder', 'deckAudit', 'deckReviewer', 'deckExport', 'deckOutputs']);
 });
 
 test('every agentFile points at an existing prompt under agents/', () => {
@@ -151,7 +163,7 @@ test('exactly the loop sources carry a verdict, and each declares both arms', ()
   // v1 `runnerType === 'verifier' => loopSource` rule could not express.
   const reg = loadAgentRegistry();
   const withVerdict = Object.values(reg).filter((m) => m.verdict).map((m) => m.key).sort();
-  assert.deepEqual(withVerdict, ['manualWebUiTesting', 'planReviewer', 'refiner', 'reviewer', 'workspaceReviewer']);
+  assert.deepEqual(withVerdict, ['deckAudit', 'deckExport', 'deckReviewer', 'manualWebUiTesting', 'planReviewer', 'refiner', 'reviewer', 'workspaceReviewer']);
   for (const m of Object.values(reg)) {
     if (m.runnerType === 'verifier') assert.ok(m.verdict, `${m.key} verifier declares a verdict`);
     if (!m.verdict) continue;

@@ -25,6 +25,7 @@ const readSettingsHideStored = () => { const s = readSettings(); return typeof s
 import { listPluginModels, allPluginModels, flattenPluginModelEnv } from './plugin-models.mjs';
 // Team policy defaults (team-policy design §6, §8): read from the discovery CACHE only (a leaf module).
 import { policyCatalogModels, teamDefault } from './policy/cache.mjs';
+import { PREDEFINED_LIST_PRICES } from './list-prices.mjs';
 
 /**
  * Recompute the agent step list FRESH from the layered registry (repo agents/ +
@@ -73,6 +74,9 @@ export { EFFORTS };
  * (verified to resolve via `claude --model`, CLI 2.1.280); db.mjs V35 moved the
  * stored pins the same way. Opus 5 came back beside it on 2026-09-23 so both can
  * be picked; V35 is shipped and stays, so pins it already moved stay on Opus 5.5.
+ * Sonnet 5.5 (`claude-sonnet-5-5`, 1M-only, no `[1m]` twin) joined beside Sonnet 5
+ * on 2026-09-28 (verified to resolve via `claude --model`, CLI 2.1.284); nothing
+ * is renamed, and the Sonnet 5 defaults (Auto classifier, defrag, scan) stay put.
  */
 export const PREDEFINED_MODELS = [
   { id: 'claude-opus-5-5',        label: 'Opus 5.5',        efforts: ['medium', 'high', 'xhigh', 'max'] },
@@ -84,6 +88,7 @@ export const PREDEFINED_MODELS = [
   { id: 'claude-opus-4-7[1m]',    label: 'Opus 4.7 (1M)',   efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-opus-4-6',        label: 'Opus 4.6',        efforts: ['medium', 'high', 'max'] },
   { id: 'claude-opus-4-6[1m]',    label: 'Opus 4.6 (1M)',   efforts: ['medium', 'high', 'max'] },
+  { id: 'claude-sonnet-5-5',      label: 'Sonnet 5.5',      efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-sonnet-5',        label: 'Sonnet 5',        efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-sonnet-4-6',      label: 'Sonnet 4.6',      efforts: ['medium', 'high', 'max'] },
   { id: 'claude-sonnet-4-6[1m]',  label: 'Sonnet 4.6 (1M)', efforts: ['medium', 'high', 'max'] },
@@ -281,6 +286,10 @@ function composeCatalog(projectCustom = [], { projectDir = null } = {}) {
 export function modelHasBaseUrlRouting(modelId) {
   const id = typeof modelId === 'string' ? modelId.trim() : '';
   if (!id) return false;
+  // With the credential broker on, EVERY model is routed (to <broker>/p/<slot>), and the
+  // broker, not a CLI sign-in, authenticates it (claude-auth.mjs must never call a broker
+  // failure "signed out").
+  if (typeof process.env.WORCA_BROKER_URL === 'string' && process.env.WORCA_BROKER_URL.trim()) return true;
   const lc = id.toLowerCase();
   const entry = listGlobalModels().find((m) => m.id.toLowerCase() === lc);
   if (entry) return !!entry.upstream || !!(entry.env && 'ANTHROPIC_BASE_URL' in entry.env);
@@ -486,7 +495,7 @@ export function resolveModelCost(modelId, cliCostUsd, usage, costCfg = undefined
 // ── display-only list prices ──────────────────────────────────────────────────
 // USD per MILLION tokens for the built-in ids, from Anthropic's published
 // pricing (platform.claude.com/docs/en/pricing — snapshot 2026-06-24; Opus 5.5
-// added 2026-09-22). DISPLAY
+// added 2026-09-22, Sonnet 5.5 2026-09-28). DISPLAY
 // APPROXIMATION ONLY: it feeds the chat footer's live "≈" estimate while a turn
 // streams (ask/events.mjs `estimatedCostUsd`). The CLI's result.total_cost_usd,
 // re-priced by resolveModelCost, stays the ONLY figure any message row, thread
@@ -496,18 +505,10 @@ export function resolveModelCost(modelId, cliCostUsd, usage, costCfg = undefined
 // is not modelled). cacheWrite = 1.25× input (5-minute TTL), cacheWrite1h = 2×
 // input, cacheRead = 0.1× input except Fable 5.1 (0.025×) and Opus 5.5 (0.05×). Refresh by hand when
 // Anthropic moves a price. PREDEFINED_MODELS itself stays untouched — its entry
-// shape is pinned (test/config-models-global.test.mjs:205).
-export const PREDEFINED_LIST_PRICES = Object.freeze({
-  'claude-fable-5-1':  { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5, cacheWrite1h: 20 },
-  'claude-opus-5-5':   { input: 4,  output: 20, cacheRead: 0.2,  cacheWrite: 5,    cacheWrite1h: 8 },
-  'claude-opus-5':     { input: 5,  output: 25, cacheRead: 0.5,  cacheWrite: 6.25, cacheWrite1h: 10 },
-  'claude-opus-4-8':   { input: 5,  output: 25, cacheRead: 0.5,  cacheWrite: 6.25, cacheWrite1h: 10 },
-  'claude-opus-4-7':   { input: 5,  output: 25, cacheRead: 0.5,  cacheWrite: 6.25, cacheWrite1h: 10 },
-  'claude-opus-4-6':   { input: 5,  output: 25, cacheRead: 0.5,  cacheWrite: 6.25, cacheWrite1h: 10 },
-  'claude-sonnet-5':   { input: 2,  output: 10, cacheRead: 0.2,  cacheWrite: 2.5,  cacheWrite1h: 4 },
-  'claude-sonnet-4-6': { input: 3,  output: 15, cacheRead: 0.3,  cacheWrite: 3.75, cacheWrite1h: 6 },
-  'claude-haiku-4-5':  { input: 1,  output: 5,  cacheRead: 0.1,  cacheWrite: 1.25, cacheWrite1h: 2 },
-});
+// shape is pinned (test/config-models-global.test.mjs:205). The table itself lives
+// in the zero-import leaf list-prices.mjs (the credential broker prices budgets from
+// it too) and is re-exported here for existing importers.
+export { PREDEFINED_LIST_PRICES };
 
 const FREE_RATES = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 });
 

@@ -1,6 +1,8 @@
 // Which model runs the Auto classifier (spec D14): WORCA_AUTO_MODEL (verbatim,
-// an operator override) > the Settings pick (catalog ids only) > the cheapest
-// Sonnet-class catalog entry > the first catalog entry.
+// an operator override) > the Settings pick (catalog ids only) > Sonnet 5 (the
+// model the classifier's costs were measured on — exact id, so Sonnet 5.5 sitting
+// ahead of it in the catalog does not take the default) > any Sonnet > the first
+// catalog entry.
 import { autoWorkflowModel } from '../settings.mjs';
 
 export const AUTO_MODEL_ENV = 'WORCA_AUTO_MODEL';
@@ -16,7 +18,7 @@ export function resolveAutoModel(models, { env = process.env, setting = autoWork
   const ids = (Array.isArray(models) ? models : []).map((m) => m && m.id).filter((id) => typeof id === 'string' && id);
   const find = (id) => ids.find((x) => x.toLowerCase() === String(id || '').trim().toLowerCase());
   return find(setting)
-    || ids.find((id) => /^claude-sonnet-5/i.test(id))
+    || ids.find((id) => /^claude-sonnet-5$/i.test(id))
     || ids.find((id) => /^claude-sonnet/i.test(id))
     || ids[0]
     || '';

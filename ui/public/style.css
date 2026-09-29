@@ -188,7 +188,7 @@ body{
 .nav-count .pause-flag{position:absolute;top:-5px;right:-6px;width:13px;height:13px;padding:2px;
   border-radius:50%;background:var(--amber-ink);border:1.5px solid var(--panel);fill:var(--on-status);}
 
-/* Parent roll-up "needs you" dot on the Running nav item (sidebar + topnav) */
+/* Parent roll-up "needs you" dot on the Running nav item (sidebar + the phone bar's menu button) */
 .nav-rollup {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--amber); margin-left: 6px; flex: 0 0 auto;
@@ -316,18 +316,9 @@ body{
    toolbar + per-project headers pin flush to the very top of that scrollport —
    without it, .main's 26px top padding leaves a band above the stuck header
    where scrolled cards peek through (the reported bug). The inset is re-applied
-   on the topbar (below) so the unscrolled layout is unchanged.
-   The compact top-nav (<1080px) is a SIBLING above the views inside .main, so a
-   plain height:100% here would push the track past the viewport and
-   overflow:hidden would clip both screens' bottoms off-screen. */
+   on the topbar (below) so the unscrolled layout is unchanged. */
 body.view-history .main,body.view-projects .main{display:flex;flex-direction:column;overflow:hidden;padding:0;}
 body.view-workspaces .main{display:flex;flex-direction:column;overflow:hidden;padding:0;}   /* the Workspaces track: the same bounded column */
-/* .main's 32px gutter goes with padding:0, so the compact top-nav (<1080px, a
-   SIBLING of the views inside .main) must re-apply it or it lands 20px left of
-   the list content, which keeps its own 32px on .hist-screen. flex:0 0 auto
-   stops the wrapped 9-button nav from being squeezed once .main is a column. */
-body.view-history .topnav,body.view-projects .topnav{margin:12px 32px 0;flex:0 0 auto;}
-body.view-workspaces .topnav{margin:12px 32px 0;flex:0 0 auto;}
 .topbar{display:flex;align-items:flex-start;justify-content:space-between;
   gap:24px;margin-bottom:22px;}
 .topbar h1{font-size:26px;font-weight:700;letter-spacing:-.025em;margin:0 0 4px;}
@@ -388,6 +379,11 @@ body.view-workspaces .topnav{margin:12px 32px 0;flex:0 0 auto;}
 .hint.warn{color:var(--amber-ink);}
 .stat-tile .stat-value.is-neg{color:var(--red-ink);}
 .stat-tile .stat-value.is-pos{color:var(--green-ink);}
+/* The History Artifacts truncation notice is a BUTTON — it loads the next page —
+   so it must not carry platform button chrome inside a list of artifact rows. It
+   keeps the muted .hint register and says it is clickable by being underlined. */
+button.hint.artifact-truncated{appearance:none;-webkit-appearance:none;background:none;border:0;padding:0;margin-top:7px;width:100%;text-align:left;font:inherit;font-size:12px;color:var(--ink-3);cursor:pointer;text-decoration:underline;}
+button.hint.artifact-truncated:disabled{cursor:default;text-decoration:none;opacity:.6;}
 
 .input,.select,.textarea,.ta-hl-back,
 input[type="text"],input[type="number"],textarea,select{
@@ -741,7 +737,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .log-src{font-weight:600;color:var(--ink-2);flex:0 0 auto;}
 .log-msg{color:var(--ink-2);flex:1;}
 .lvl-phase .log-msg{color:var(--green-ink);font-weight:600;}
-.lvl-artifact .log-msg{color:var(--blue-ink);}
+.lvl-artifact .log-msg{color:var(--blue-ink-strong);}   /* link-like text at 12.5px: the strong token is the accessible one (5.9:1 vs 3.8:1) */
 .lvl-error .log-msg{color:var(--red-ink);}
 .lvl-warn .log-msg{color:var(--amber-ink);}
 .lvl-system .log-msg{color:var(--ink-3);font-style:italic;}
@@ -952,7 +948,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .qtune th:first-child,.qtune td:first-child{padding-left:0;}
 .qtune td:first-child{font-weight:500;color:var(--ink);}
 .qtune .select-wrap{width:150px;max-width:100%;}
-.qtune .select-wrap select{height:34px;border-radius:10px;}
+.qtune .select-wrap select{height:34px;padding:0 40px 0 12px;border-radius:10px;}
 .qtune-sw{display:inline-block;position:relative;vertical-align:middle;}
 /* (no disabled rule here: `.sw-input:disabled + .switch{opacity:.5;cursor:not-allowed}` already exists) */
 .qfree-area{margin-top:12px;min-height:64px;resize:vertical;line-height:1.5;}
@@ -1275,6 +1271,22 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .viewer{font-family:var(--mono);font-size:12.5px;line-height:1.7;background:var(--canvas-2);border:1px solid var(--line);
   border-radius:var(--r-card);padding:18px 20px;max-height:480px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;}
 
+/* ---------- typed artifact viewer ---------- */
+/* The typed host mounts inside <pre class="viewer">, whose max-height:480px
+   otherwise clamps the 80vh host and the 70vh <embed> a PDF renders into. Drop
+   the <pre>'s markdown shell while it is holding one (showViewerHost adds the
+   class, hideViewer removes it) rather than leaning on :has(). */
+.viewer.holds-artifact{max-height:none;overflow:visible;padding:0;background:none;border:0;}
+.artifact-view{max-height:80vh;overflow:auto;}
+.artifact-view iframe{width:100%;aspect-ratio:16/9;border:0;background:var(--bg);border-radius:12px;}
+.artifact-view embed{width:100%;height:70vh;border-radius:12px;}
+.artifact-view.kind-image img{max-width:100%;cursor:zoom-in;border-radius:12px;}
+.artifact-view.kind-image.zoomed img{max-width:none;cursor:zoom-out;}
+/* --blue-ink-strong, not --blue-ink: inline link text at a small size is what that
+   token is for (5.9:1 on white vs 3.8:1), and the light contrast gate flags these
+   artifact links in the History run detail. */
+.log-artifact{color:var(--blue-ink-strong);text-decoration:underline;cursor:pointer;}
+
 /* ---------- scrollbars ---------- */
 ::-webkit-scrollbar{width:10px;height:10px;}
 ::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:6px;}
@@ -1300,13 +1312,11 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 /* ---------- responsive ---------- */
 @media (max-width:1080px){
   .grid{grid-template-columns:1fr;}
-  .sidebar{display:none;}
 }
 
-/* ---------- viewer modal + responsive top-nav ---------- */
+/* ---------- viewer modal ---------- */
 /* Structural styles for markup added in the shell rewrite that are not part
-   of the (locked) Refined stylesheet: the viewer modal + the responsive
-   top-nav shown only when the sidebar is hidden (<1080px). */
+   of the (locked) Refined stylesheet: the viewer modal. */
 .viewer-modal{position:fixed;inset:0;z-index:50;display:grid;place-items:center;
   padding:24px;background:var(--scrim);}
 /* Confirm dialog must stack ABOVE the plugin/wizard modal (equal .viewer-modal z-index,
@@ -1331,18 +1341,11 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
   background:transparent;font-family:inherit;font-size:13px;color:var(--ink);cursor:pointer;}
 .folder-list .folder-item:hover{background:var(--line-2);}
 .folder-empty{padding:10px 12px;}
-.topnav{display:none;}
-@media (max-width:1080px){
-  .topnav{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:20px;background:var(--panel);
-    border:1px solid var(--line);border-radius:var(--r-card);padding:5px;}
-  .topnav button{flex:1;text-align:center;padding:9px 12px;border:0;border-radius:10px;
-    background:transparent;color:var(--ink-2);font-family:inherit;font-weight:600;font-size:13px;
-    cursor:pointer;transition:.15s;}
-  .topnav button:hover{background:var(--field);color:var(--ink);}
-  .topnav button.active{background:var(--ink);color:var(--on-ink);}
-  .topnav button:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-  .topnav-sep{flex:0 0 1px;background:var(--line-2);margin:6px 2px;}
-}
+/* Multi mode: a tick box left of each folder name (the name still opens the folder). */
+.folder-list .folder-row{display:flex;align-items:center;gap:2px;padding-left:10px;}
+.folder-list .folder-row .folder-item{flex:1 1 auto;min-width:0;}
+.folder-list .folder-pick{flex:0 0 auto;margin:0;}
+.folder-pick-count{margin-right:auto;align-self:center;}
 
 /* ---------- per-pipeline cost (per-node cost is the graph's .nrun .cost) ---------- */
 /* The `.run-meta .run-cost` pair that lived here went with `.run-meta` itself:
@@ -1558,6 +1561,91 @@ button.wd-member:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;
 .ws-desc-edit[hidden]{display:none;}
 .ws-desc-edit .md-tabs{margin-bottom:8px;}
 .ws-desc-preview[hidden]{display:none;}
+/* Workspace page › Map tab (workspace-map-view.mjs): coverage strip, layered graph, edge table,
+   add form. One colour family per edge kind, set as --wm-k on the element and read by the line,
+   the arrow, the swatch. */
+.wm{display:flex;flex-direction:column;gap:18px;}
+.wm-top{display:flex;align-items:center;flex-wrap:wrap;gap:8px 16px;}
+.wm-meta{font-size:12.5px;color:var(--ink-2);}
+.wm-top .wm-regen{margin-left:auto;}
+.wm-empty{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;}
+.wm .card-head{flex-wrap:wrap;gap:8px 12px;margin-bottom:12px;}
+.wm .card-head b{font-size:14px;}
+.wm-k-http{--wm-k:var(--blue);}
+.wm-k-grpc{--wm-k:var(--indigo);}
+.wm-k-graphql{--wm-k:var(--pink);}
+.wm-k-topic{--wm-k:var(--amber);}
+.wm-k-pkg{--wm-k:var(--slate);}
+.wm-k-db{--wm-k:var(--cocoa);}
+.wm-k-service{--wm-k:var(--teal);}
+.wm-k-other{--wm-k:var(--violet);}
+.wm-coverage{display:flex;flex-wrap:wrap;gap:8px;}
+.wm-chip{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:12.5px;color:var(--ink);background:var(--field);
+  border:1.5px solid transparent;border-radius:999px;padding:5px 11px;cursor:pointer;}
+.wm-chip:hover{border-color:var(--line-2);}
+.wm-chip.is-active{border-color:var(--ink);background:var(--surface);}
+.wm-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.wm-chip-name{font-weight:600;}
+.wm-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:var(--seq);}
+.wm-chip.lvl-rich .wm-dot{background:var(--green);}
+.wm-chip.lvl-partial .wm-dot{background:var(--amber);}
+.wm-chip.lvl-none .wm-dot{background:var(--red);}
+.wm-tag{font-size:11px;color:var(--ink-2);}
+.wm-tag.is-bad{color:var(--red-ink);}
+.wm-tag.is-off{color:var(--ink-3);}
+.wm-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--ink-2);}
+.wm-legend-item,.wm-kind{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;}
+.wm-swatch{display:inline-block;width:14px;height:3px;border-radius:2px;background:var(--wm-k);}
+/* The graph keeps its drawn size and scrolls inside its card on a narrow screen. */
+.wm-graph-scroll{overflow-x:auto;overflow-y:hidden;max-width:100%;}
+.wm-graph{display:block;max-width:none;}
+.wm-node{cursor:pointer;}
+.wm-node rect{fill:var(--surface);stroke:var(--line-2);stroke-width:1.5;}
+.wm-node.lvl-partial rect{stroke:var(--amber);}
+.wm-node.lvl-none rect{stroke:var(--red);stroke-dasharray:4 3;}
+.wm-node.is-selected rect{stroke:var(--ink);stroke-width:2;}
+.wm-node text{fill:var(--ink);font:600 12.5px var(--sans);pointer-events:none;}
+.wm-pair{cursor:pointer;outline:none;}
+.wm-hit{fill:none;stroke:transparent;stroke-width:14;pointer-events:stroke;}
+.wm-line{fill:none;stroke:var(--wm-k);stroke-width:1.8;pointer-events:none;}
+.wm-pair.is-dashed .wm-line{stroke-dasharray:6 4;}
+.wm-pair.is-confirmed .wm-line{stroke-width:3.2;}
+.wm-pair:hover .wm-hit,.wm-pair:focus-visible .wm-hit{stroke:var(--selection);}
+.wm-graph.has-focus .wm-pair.is-dim{opacity:.25;}
+.wm-arrow{fill:var(--wm-k);}
+.wm-filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px;}
+.wm-filters .select-wrap{flex:0 1 180px;min-width:140px;}
+.wm-add-form .select-wrap{flex:0 1 170px;min-width:130px;}
+.wm-filters .select,.wm-add-form .select{padding:8px 34px 8px 12px;font-size:12.5px;}
+.wm-filters .select-wrap::after,.wm-add-form .select-wrap::after{right:12px;}
+.wm-table-scroll{overflow-x:auto;}
+.wm-table{width:100%;border-collapse:collapse;font-size:12.5px;}
+.wm-table th{text-align:left;font-weight:600;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);
+  padding:6px 10px 6px 0;border-bottom:1px solid var(--line);white-space:nowrap;}
+.wm-table td{padding:8px 10px 8px 0;border-bottom:1px solid var(--line);vertical-align:top;color:var(--ink);}
+.wm-table tr:last-child td{border-bottom:0;}
+.wm-row.is-rejected td{color:var(--ink-3);}
+.wm-row.is-rejected .badge,.wm-row.is-rejected .wm-kind{opacity:.6;}
+/* Collapsed borders: a dashed top would lose to the solid bottom of the row above (CSS 2.1 §17.6.2.1),
+   so a missing row dashes its bottom border, on the last row too: this selector (0,3,1) outranks
+   .wm-table tr:last-child td{border-bottom:0} (0,2,2). Longhands: jsdom drops a shorthand with var(). */
+.wm-table .wm-row.is-missing td{border-bottom-width:1px;border-bottom-style:dashed;border-bottom-color:var(--line-2);font-style:italic;}
+/* A stale review (a rejection whose edge a re-scan no longer finds): greyed like a rejected row, dashed like a missing one. */
+.wm-table .wm-row.is-stale td{color:var(--ink-3);border-bottom-width:1px;border-bottom-style:dashed;border-bottom-color:var(--line-2);font-style:italic;}
+.wm-disp .mono{word-break:break-all;}
+.wm-sub,.wm-ctx{display:block;color:var(--ink-3);font-size:11.5px;margin-top:2px;}
+.wm-ev + .wm-ev{margin-top:6px;}
+.wm-ev-side{display:inline-block;min-width:34px;font-size:11px;color:var(--ink-3);}
+.wm-ev-loc{font-size:11.5px;margin-right:8px;color:var(--ink-2);word-break:break-all;}
+.wm-actions{white-space:nowrap;}
+.wm-actions .btn-mini{padding:5px 10px;font-size:12px;}
+.wm-actions .btn-mini + .btn-mini{margin-left:6px;}
+.wm-none td,.wm-more td{color:var(--ink-3);}
+.wm-add-box{margin-top:16px;padding-top:14px;border-top:1px solid var(--line);}
+.wm-add-box > b{display:block;font-size:13px;margin-bottom:8px;}
+.wm-add-form{display:flex;flex-wrap:wrap;align-items:center;gap:8px;}
+.wm-add-form .input{flex:1 1 160px;width:auto;padding:8px 12px;font-size:12.5px;}
+.wm-add-msg[hidden]{display:none;}
 /* A markdown-by-contract body (workspace description, its edit preview, a task-source
    body) keeps the .viewer frame but drops the pre look once it actually rendered:
    sans type, normal flow (marked emits its own breaks) and no stray outer margins. */
@@ -1571,8 +1659,6 @@ button.wd-member:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;
 .artifact-markdown p{margin:6px 0;}
 .md-preview{min-height:72px;}
 .md-preview:empty::before{content:'Nothing to preview yet';color:var(--ink-2);}
-#wiz-desc-tabs{margin-left:auto;}
-#wiz-desc-preview[hidden]{display:none;}
 .ws-delete{display:inline-flex;align-items:center;gap:6px;background:var(--red-ink);border:1.5px solid var(--red-ink);color:var(--on-status);font-family:inherit;font-weight:600;font-size:12px;padding:7px 12px;border-radius:8px;cursor:pointer;}
 .ws-delete:hover:not(:disabled){filter:brightness(0.95);}
 .ws-delete:disabled{opacity:.6;cursor:default;}
@@ -1588,6 +1674,19 @@ button.wd-member:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;
 .wiz-select-all{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-2);cursor:pointer;}
 .wiz-select-all input{margin:0;cursor:pointer;}
 .wiz-select-all:has(input:disabled){opacity:.5;cursor:not-allowed;}
+/* Workspace size (D24): the project list scrolls inside the card so the size note under it stays in
+   view while a big pick is made; the note's data-level picks the tone. */
+#wiz-projects{max-height:min(52vh,480px);overflow-y:auto;}
+.wiz-size-note{margin-top:8px;font-size:12.5px;line-height:1.45;border-radius:10px;}
+.wiz-size-note[hidden]{display:none;}
+.wiz-size-note[data-level="big"]{color:var(--amber-ink);}
+.wiz-size-note[data-level="very-big"]{color:var(--amber-ink);background:var(--amber-wash);border:1px solid var(--amber-line);padding:8px 11px;font-weight:600;}
+.wiz-size-note[data-level="over"]{color:var(--red-ink);background:var(--red-bg);padding:8px 11px;font-weight:600;}
+.wiz-grid{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:28px;align-items:start;}
+.wiz-models{border-left:1px solid var(--line);padding-left:24px;}
+.wiz-models-title{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-2);margin:2px 0 12px;}
+.wiz-model-pair{display:grid;grid-template-columns:minmax(0,1fr) 108px;gap:8px;}
+@media (max-width:760px){.wiz-grid{grid-template-columns:1fr;}.wiz-models{border-left:0;padding-left:0;border-top:1px solid var(--line);padding-top:16px;}}
 
 /* Live scan loader (role=status aria-live=polite). */
 .ws-loader{display:flex;flex-direction:column;align-items:center;gap:12px;padding:36px 24px;text-align:center;}
@@ -1604,11 +1703,6 @@ button.wd-member:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;
 }
 .status-label{font-weight:600;font-size:14.5px;color:var(--ink);max-width:520px;}
 .status-sub{font-family:var(--mono);font-size:12px;color:var(--ink-3);}
-
-/* Phase track: graph → investigate → synthesize. */
-.wiz-phase-track{display:flex;align-items:center;justify-content:center;gap:10px;margin:6px 0 14px;}
-.wiz-phase-track [data-phase]{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);background:var(--field);border:1px solid var(--line);border-radius:999px;padding:6px 14px;}
-.wiz-phase-track [data-phase].active{color:var(--on-ink);background:var(--ink);border-color:var(--ink);}
 
 /* History pill "WS" badge for workspace runs. */
 .hist-pill.ws::before{content:'WS';font-size:9px;font-weight:800;letter-spacing:.06em;background:var(--violet-bg);color:var(--violet-ink);border-radius:5px;padding:2px 5px;margin-right:2px;}
@@ -2108,7 +2202,23 @@ button.pd-ov-card:hover{border-color:var(--ink-3);}
 /* ===== Confirm + add-project modals (reuse .viewer-modal shell) ===== */
 /* MUST come after .viewer-modal .card (style.css:514) — equal specificity, later wins. */
 .confirm-modal .card{width:min(440px,100%);}
+/* Add several projects: the review list. Wider than a confirm (a name + a path per row). */
+.project-bulk-modal .card{width:min(620px,100%);}
+.proj-bulk-list{list-style:none;margin:10px 0;padding:0;max-height:50vh;overflow:auto;
+  border:1.5px solid var(--line-2);border-radius:var(--r-ctrl);background:var(--field);}
+.pb-row{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;align-items:center;
+  padding:9px 12px;border-top:1px solid var(--line-2);}
+.pb-row:first-child{border-top:0;}
+.pb-row .pb-name{width:100%;}
+.pb-path,.pb-status{grid-column:2;}
+.pb-path{font-size:12px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pb-status{font-size:12px;color:var(--ink-2);}
+.pb-status:empty{display:none;}
+.pb-status.ok{color:var(--green-ink);}
+.pb-status.err{color:var(--red-ink);}
+.pb-row.added{opacity:.65;}
 .confirm-message{margin:4px 0 18px;color:var(--ink-2);font-size:14px;line-height:1.5;white-space:pre-line;}
+.confirm-message.err{color:var(--red-ink);}
 .confirm-actions{display:flex;gap:9px;justify-content:flex-end;margin-top:14px;}
 .gv-import-scripts p{margin:0 0 12px;color:var(--ink-2);font-size:13.5px;}
 .gv-import-script-h{font-size:12px;font-weight:700;margin:10px 0 4px;}
@@ -2288,6 +2398,21 @@ button.pd-ov-card:hover{border-color:var(--ink-3);}
    without this the rows touch while every other gap is 14px. */
 .charts-grid + .charts-grid{margin-top:14px;}
 .chart-card{padding:20px 22px;}
+/* Stats › By person (credential broker): one full-width card, a table with a share bar. */
+.people-grid{grid-template-columns:1fr;}
+.people-scroll{overflow-x:auto;}
+.people-table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums;}
+.people-table th{text-align:left;font-weight:500;color:var(--ink-3);font-size:12px;padding:6px 10px 6px 0;border-bottom:1px solid var(--line);white-space:nowrap;}
+.people-table td{padding:8px 10px 8px 0;border-bottom:1px solid var(--line);vertical-align:middle;}
+.people-table tr:last-child td{border-bottom:none;}
+.people-table td.num{white-space:nowrap;color:var(--ink-2);}
+.people-name{overflow-wrap:anywhere;}
+.people-spend{min-width:160px;}
+.people-usd{display:inline-block;min-width:64px;font-weight:600;}
+.people-bar{display:inline-block;vertical-align:middle;width:90px;height:6px;border-radius:3px;background:var(--line);margin-left:8px;overflow:hidden;}
+.people-bar-fill{display:block;height:100%;background:var(--blue);}
+.people-slots{color:var(--ink-2);}
+.people-card > .hint{display:block;margin-top:10px;}
 .chart-fig{margin:0;}
 .chart-svg{display:block;width:100%;height:auto;}
 .chart-empty{display:grid;place-items:center;min-height:180px;}
@@ -2364,6 +2489,13 @@ section[data-view="team-metrics"] .topbar{align-items:flex-start;}
 /* Actor and Started never wrap: with the Saved column in, Title (ellipsis) and Workflow give way first. */
 .tm-run-tbl td:nth-last-child(-n+2){white-space:nowrap;}
 .badge.grey{background:var(--field);color:var(--ink-2);}
+/* The Copilot card's "read the notice first" pill is a button: it opens the notice (bridge-view.mjs). */
+.mv-cp-terms-pill{border:0;font-family:inherit;cursor:pointer;}
+.mv-cp-terms-pill:hover{background:var(--line);color:var(--ink);}
+.mv-cp-terms-pill:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+/* With the credential broker, a provider pill for a missing key links to the key page. */
+.mv-broker-pill{text-decoration:none;cursor:pointer;}
+.mv-broker-pill:hover{text-decoration:underline;}
 .tm-empty{display:grid;grid-template-columns:1fr 1fr;gap:14px;} .tm-empty .card{padding:22px;}
 .tm-step{font-size:11px;letter-spacing:.08em;font-weight:700;color:var(--ink-2);}
 .tm-empty-foot{display:block;margin-top:14px;}
@@ -2539,9 +2671,6 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .tm-warn{margin-top:14px;padding:10px 12px;border-radius:12px;background:var(--amber-bg);color:var(--amber-ink);}
 .tm-delegate-wrap{margin-top:8px;}
 /* Wizard (board 7) */
-.wiz-track{display:flex;gap:18px;list-style:none;padding:0;margin:0 0 18px;font-size:12.5px;color:var(--ink-2);}
-.wiz-track li span{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--field);margin-right:6px;font-weight:700;}
-.wiz-track li.on{color:var(--ink);font-weight:600;} .wiz-track li.on span{background:var(--ink);color:var(--on-ink);}
 .wiz-list{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:var(--r-ctrl);}
 .wiz-row{display:flex;align-items:center;gap:14px;padding:12px 14px;border-top:1px solid var(--line);}
 /* The metrics-home picker's radio + slug: the label had no rule, so the radio touched the text. */
@@ -2616,16 +2745,34 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
    fill (--line), under verify:theme's 4.5:1. A loss keeps neutral ink (--red-ink is
    4.07:1 there); its "−" carries it. */
 .spend-ind-saved{margin-top:6px;}
+/* OpenRouter free-model requests (openrouter-free-view.mjs): a second block under the spend block. */
+.free-ind{margin-top:8px;}
 .spend-ind-saved.pos .spend-ind-label,.spend-ind-saved.pos .spend-ind-amt{color:var(--green-ink-strong);}
-.topnav-amt{margin-left:7px;font-family:var(--mono);font-weight:600;}
-.topnav-amt.warn{color:var(--amber-ink);}
-.topnav-amt.over{color:var(--red-ink);}
-.topnav button.active .topnav-amt{color:inherit;}
 
 /* ---------- Settings cards ---------- */
 /* One width/centering/gap rule for every Settings card. */
 .settings-card{max-width:760px;padding:22px;margin-left:auto;margin-right:auto;}
 .settings-card + .settings-card{margin-top:18px;}
+.settings-card[hidden]{display:none;}
+/* Settings › Models: Title generation + Auto workflow model side by side above the catalog, so two
+   short cards do not push it a screen down; one column once they would squeeze. */
+.models-helpers{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:18px;margin-bottom:18px;}
+.models-helpers > .settings-card{max-width:none;margin:0;}
+
+/* My model credentials (credential broker): one row per slot, a state chip on the right. */
+.cred-list{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
+.cred-row{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:13px;}
+.cred-name{min-width:0;overflow-wrap:anywhere;}
+.cred-chip{font-size:12px;font-weight:600;padding:3px 9px;border-radius:999px;white-space:nowrap;}
+.cred-chip.tone-green{background:var(--green-bg);color:var(--green-ink);}
+.cred-chip.tone-red{background:var(--red-bg);color:var(--red-ink);}
+.cred-chip.tone-blue{background:var(--blue-bg);color:var(--blue-ink);}
+.cred-chip.tone-slate{background:var(--slate-bg);color:var(--slate-ink);}
+.cred-actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:14px;}
+/* Providers card with the credential broker: keys, sign-in and key tests live on the key page. */
+.mv-providers--broker .mv-cp-signin,.mv-providers--broker .mv-cp-signout,.mv-providers--broker .mv-cp-quota-refresh,
+.mv-providers--broker .mv-cp-quota,.mv-providers--broker .mv-pv-test,.mv-providers--broker .mv-field:has(.mv-pv-key){display:none;}
+.mv-broker-note{display:block;margin:6px 0 12px;}
 
 /* About card rows. .about-val and .about-link share specificity on one anchor, so
    .about-link must stay AFTER .about-val (test/ui-settings-about.test.mjs pins it). */
@@ -2753,6 +2900,9 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
    bridge's copy uses --ink-2 (6.5:1) so the theme proof passes without a new entry. */
 .mv-providers .hint,.mv-conn .hint,.mv-degradation,.mvi .hint,.mv-cp-signin-box .hint{color:var(--ink-2);}
 .mv-pv-row .input::placeholder,.mv-conn .input::placeholder,.mv-conn .textarea::placeholder{color:var(--ink-2);}
+/* Settings → Ask Worca → Web access: its fields are new, so their placeholders use --ink-2 like the rule
+   above instead of joining the legacy light contrast baseline (the allowlist textarea failed at 2.58:1). */
+.ask-web .input::placeholder{color:var(--ink-2);}
 .mv-providers .mv-providers-hint{margin:-6px 0 0;}
 .mv-pv-row{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:12px 18px;padding:14px 0 0;border-top:1px solid var(--line-2);}
 .mv-pv-main{display:grid;gap:6px;align-content:start;min-width:0;}
@@ -2811,12 +2961,12 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .mv-section-head{display:flex;align-items:center;gap:8px;}
 .mv-sec-toggle{display:flex;align-items:center;gap:8px;padding:2px 0;border:0;background:transparent;cursor:pointer;color:inherit;font:inherit;}
 .mv-sec-toggle .mv-section-title{margin:0;}
-.mv-sec-caret{color:var(--ink-2);font-size:11px;line-height:1;transition:transform .12s ease;}
+.mv-sec-caret{flex:0 0 auto;transform:rotate(90deg);}   /* .adv-chev: points right; a group is open unless folded */
 .mv-sec-count{padding:1px 8px;border-radius:999px;background:var(--field);color:var(--ink-2);font:600 11px var(--mono);}
-.mv-section.is-folded .mv-sec-caret{transform:rotate(-90deg);}
+.mv-section.is-folded .mv-sec-caret{transform:none;}
 .mv-section.is-folded .mv-sec-body,.mv-section.is-folded .mv-sec-hint{display:none;}
 .mv-no-hits{margin-top:6px;}
-@media (prefers-reduced-motion: reduce){.mv-sec-caret{transition:none;}}
+@media (prefers-reduced-motion: reduce){.mv-sec-caret,.advanced .adv-chev{transition:none;}}
 .mv-pv-btns .btn-ghost,.mv-pv-btns .btn-go{padding:7px 12px;font-size:12px;}
 .mv-pv-row .input,.mv-pv-row .select{font-family:var(--mono);font-size:12.5px;padding:9px 12px;}
 .mv-pv-row .mv-pv-conc{max-width:120px;}
@@ -2855,6 +3005,10 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .mv-conn-note{margin:0;}
 .mvi-tbl{margin-top:8px;}
 .mvi-tbl td{vertical-align:top;}
+/* A hosted catalog's filters (OpenRouter lists hundreds): the shared .chip-select pills, one row. */
+.mvi-or-filters{margin-top:10px;}
+.mvi-or-filters .mvi-f-ctx{padding:2px 6px;font-size:12.5px;min-height:0;}
+.mv-pv-presets{display:block;margin-top:4px;}
 .mvi-tbl .mvi-id{display:block;margin:2px 0 0;font-family:var(--mono);}
 .mvi-tbl tr.mvi-disabled{opacity:.55;}
 .mvi-status{color:var(--ink-3);font-size:12px;}
@@ -3755,12 +3909,9 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .run-shell.detail-open .run-screen-list{transform:translateX(-100%);}
 .run-shell.detail-open .run-screen-detail{transform:translateX(0);}
 .run-shell.no-anim .run-screen{transition:none;}
-/* Same reasoning as body.view-history .main (222) and .topnav (227): .main stops
-   scrolling and becomes the bounded column so each screen owns its scrollport,
-   and the compact top-nav (<1080px, a SIBLING of the views) re-applies the gutter
-   .main just dropped. */
+/* Same reasoning as body.view-history .main: .main stops scrolling and becomes
+   the bounded column so each screen owns its scrollport. */
 body.view-running .main{display:flex;flex-direction:column;overflow:hidden;padding:0;}
-body.view-running .topnav{margin:12px 32px 0;flex:0 0 auto;}
 /* style.css has no base .mono rule (only ancestor-scoped ones) — scope one to the
    new subtree, exactly as :1608 does for .hd/.hist-card/#shipit-modal. */
 .rd .mono{font-family:var(--mono);}
@@ -4040,9 +4191,10 @@ body.view-running .topnav{margin:12px 32px 0;flex:0 0 auto;}
 /* No rule here restyles anything the expanded 298px column already had: 21 of
    them are scoped under `.sidebar.collapsed`, and the rest (`.brand .logo-mark`,
    `.side-toggle*`, `.nav .rail-tile*`, `.spend-ring*`, `.spend-stack*`) style
-   nodes that exist only because of this feature. The <1080px breakpoint
-   (:920-922) still hides the sidebar outright and hands over to .topnav —
-   collapse is a preference that only exists above it, and the two never overlap.
+   nodes that exist only because of this feature. Below 1080px the rail is
+   forced (tablets) and at 760px the full column becomes the phone drawer;
+   app.js#railCollapsed decides, and the stored preference only applies above
+   1080px.
    HOUSE RULE for this whole block: no comment inside a rule body, and no
    closing brace in any comment — ruleBody() stops its capture at the first one
    and both would break the tests. */
@@ -4283,6 +4435,54 @@ body.view-running .topnav{margin:12px 32px 0;flex:0 0 auto;}
   white-space:nowrap;color:var(--ink);}
 .spend-stack-pair.pos .spend-stack-lbl,.spend-stack-pair.pos .spend-stack-val{color:var(--green-ink-strong);}
 
+/* ---------- Responsive nav tiers ---------- */
+/* Three tiers, one sidebar. Above 1080px nothing here applies. 761-1080px
+   (tablets) app.js#railCollapsed forces the 76px rail above, so the only rule
+   left is hiding the toggle that could not change anything. At 760px and below
+   the phone bar (#mbar) appears and the aside turns into an off-canvas drawer:
+   fixed, translated out, visibility:hidden so nothing in it is focusable until
+   body.nav-open slides it in. visibility waits for the slide out (0s delay .22s)
+   and flips at once on the way in. Layers: the Ask dock at z 40, .nav-scrim 41, the
+   drawer 42, the guide scrim 44-47 (a tour lifts .sidebar to 45), .viewer-modal
+   50 so the interface-mode dialog opens over the drawer. These overrides of
+   .app, .main and .sidebar must stay BELOW their base rules: ruleBody() in the
+   CSS tests reads the first occurrence of a selector, media blocks included.
+   HOUSE RULE, as in the rail block: no comment inside a rule body and no closing
+   brace in a comment. */
+.mbar,.nav-scrim,.side-close{display:none;}
+@media (max-width:1080px){
+  .sidebar .side-toggle{display:none;}
+}
+@media (max-width:760px){
+  .app{flex-direction:column;}
+  .main{flex:1 1 auto;min-height:0;}
+  .mbar{display:flex;align-items:center;gap:10px;flex:0 0 auto;height:52px;padding:0 10px;
+    background:var(--panel);border-bottom:1px solid var(--line);}
+  .mbar-menu{position:relative;display:flex;align-items:center;justify-content:center;flex:0 0 auto;
+    width:40px;height:40px;padding:0;border:0;border-radius:12px;background:transparent;color:var(--ink);cursor:pointer;}
+  .mbar-menu svg{width:22px;height:22px;}
+  .mbar-menu:hover{background:var(--field);}
+  .mbar-menu:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+  .mbar-menu .nav-rollup{position:absolute;top:6px;right:6px;margin:0;border:2px solid var(--panel);}
+  .mbar-mark{width:26px;height:26px;flex:0 0 auto;background:var(--ink);
+    -webkit-mask:url(/assets/worca-mark-mask.png) center/contain no-repeat;-webkit-mask-mode:luminance;
+    mask:url(/assets/worca-mark-mask.png) center/contain no-repeat;mask-mode:luminance;}
+  .mbar-title{min-width:0;font-size:15px;font-weight:700;letter-spacing:-.01em;color:var(--ink);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .sidebar{position:fixed;top:0;bottom:0;left:0;z-index:42;width:min(298px,86vw);
+    box-shadow:var(--shadow-sheet);transform:translateX(-100%);visibility:hidden;
+    transition:transform .22s cubic-bezier(.65,.02,.28,1),visibility 0s linear .22s;}
+  body.nav-open .sidebar{transform:none;visibility:visible;
+    transition:transform .22s cubic-bezier(.65,.02,.28,1);}
+  .nav-scrim{display:block;position:fixed;inset:0;z-index:41;background:var(--scrim);}
+  .nav-scrim[hidden]{display:none;}
+  .side-close{display:flex;align-items:center;justify-content:center;flex:0 0 auto;
+    width:36px;height:36px;padding:0;border:0;border-radius:10px;background:transparent;color:var(--ink);cursor:pointer;}
+  .side-close svg{width:20px;height:20px;}
+  .side-close:hover{background:var(--field);}
+  .side-close:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+}
+
 /* ---------- Ask Worca (spec §10.3-§10.6; tokens only, no hex) ---------- */
 /* Fixed full-height dock over the content column; children restore pointer
    events. z-40 sits above sticky tab lists (5) and below .viewer-modal (50)
@@ -4293,9 +4493,9 @@ body.view-running .topnav{margin:12px 32px 0;flex:0 0 auto;}
   display:flex;flex-direction:column;align-items:center;justify-content:flex-end;
   padding:0 28px 26px;transition:left .2s cubic-bezier(.65,.02,.28,1);}
 body.rail-collapsed .ask-dock{left:76px;}
-/* Below the rail breakpoint the sidebar is display:none while .collapsed may
-   still be present — restate the higher-specificity selector or left:76px wins. */
-@media (max-width:1080px){
+/* On phones the sidebar is an off-canvas drawer (Responsive nav tiers) while
+   .collapsed may still be present — restate the higher-specificity selector or left:76px wins. */
+@media (max-width:760px){
   .ask-dock,body.rail-collapsed .ask-dock{left:0;}
 }
 
@@ -4488,6 +4688,13 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-notice{font-size:12.5px;color:var(--ink-3);}
 .ask-notice-link{color:var(--blue-ink);}
 .ask-error-line{font-size:12.5px;color:var(--red-ink);}
+/* The classified-failure notice's raw-detail expander: expert only — the
+   human line is the explanation at every level (ui-levels rule 1 keeps it). */
+.ask-error-details{margin-top:3px;}
+.ask-error-details summary{cursor:pointer;color:var(--ink-3);font-size:11.5px;user-select:none;}
+.ask-error-detail-text{margin-top:3px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;
+  background:var(--field);color:var(--ink-3);font-family:var(--mono);
+  font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow-y:auto;}
 
 .ask-card{margin-top:2px;display:flex;flex-direction:column;gap:10px;padding:13px 15px;
   border:1.5px solid var(--line);border-radius:var(--r-card);background:var(--panel);}
@@ -4827,6 +5034,8 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-pop-item{display:flex;align-items:center;gap:10px;width:100%;padding:9px 11px;border:0;border-radius:12px;
   background:transparent;text-align:left;font-family:inherit;cursor:pointer;transition:.15s;}
 .ask-pop-item:hover,.ask-pop-item:focus-visible{background:var(--field);outline:none;}
+.ask-pop-item:disabled{cursor:default;color:var(--ink-3);}
+.ask-pop-item:disabled:hover{background:transparent;}
 .ask-model-name{font-weight:500;font-size:13.5px;color:var(--ink);}
 .ask-model-check{margin-left:auto;color:var(--blue-ink);font-weight:600;}
 .ask-pop-row-value{margin-left:auto;font-weight:400;font-size:12.5px;color:var(--ink-3);}
@@ -4846,6 +5055,7 @@ body.rail-collapsed .ask-dock{left:76px;}
   border-radius:999px;white-space:nowrap;background:var(--field);color:var(--ink-3);}
 .ask-model-tag.is-warn{flex:0 0 auto;max-width:none;background:var(--amber-bg);color:var(--amber-ink);}
 .ask-model-tag.is-err{flex:0 0 auto;max-width:none;background:var(--red-bg);color:var(--red-ink);}
+.ask-model-tag.is-key{flex:0 0 auto;max-width:none;background:var(--green-bg);color:var(--green-ink);}
 .ask-model-item .ask-model-name{flex:0 1 auto;min-width:4.5ch;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;}
 /* The threads list is the only scrollport in a popover: /api/ask/threads returns up
@@ -5273,6 +5483,7 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 .ob-claude-cmd{margin:12px 0;padding:12px 14px;background:var(--field);border-radius:12px;overflow:auto;}
 .ob-claude-cmd code{background:none;padding:0;font-size:12.5px;}
 .ob-claude-note a{color:var(--blue-ink-strong);}
+.ob-claude-step{margin-top:16px;}
 .ob-claude-status{min-height:18px;margin-top:12px;font-size:13px;line-height:1.45;}
 .ob-claude-status.ok{color:var(--green-ink);}
 .ob-claude-status.err{color:var(--red-ink);}
@@ -5517,10 +5728,6 @@ a.ask-card-task-title:hover{text-decoration-color:currentColor;}
 :root[data-level="expert"] [data-max-level="simple"],
 :root[data-level="expert"] [data-max-level="advanced"]{display:none !important;}
 
-/* Simple shows General only: a one-button segmented control is noise, so the bar goes — unless a
-   deep link parked us on a higher tab, whose button is then kept (paintLevelBanner). */
-:root[data-level="simple"] #settings-tabs:not(:has([data-level-keep])){display:none !important;}
-
 /* The icon: a stack of layers, unlit ones ghosted. currentColor, so hover, the
    dark active fill and both themes come for free. */
 /* An <i>, not a <span>: the collapsed rail visually hides every direct span child of a nav button
@@ -5532,9 +5739,6 @@ a.ask-card-task-title:hover{text-decoration-color:currentColor;}
 
 /* Sidebar item: a plain `.nav button`. It is an action, never the current view. */
 .nav button.nav-mode .lv-icon-slot{width:19px;height:19px;}
-/* Top-nav twin (<1080px, where the sidebar is hidden): icon + the mode's name. */
-.topnav button.topnav-mode{display:inline-flex;align-items:center;justify-content:center;gap:7px;}
-.topnav button.topnav-mode .lv-icon{width:16px;height:16px;}
 
 /* Level pill (banner, hidden-settings note). Colour is semantic to the level. */
 .lv-pill{display:inline-flex;align-items:center;padding:2px 10px;border-radius:999px;
@@ -6273,6 +6477,23 @@ input.gv-name:focus-visible{outline:none;}
    restated here or the toggle can never close the list. */
 .artifact-list[hidden]{display:none;}
 
+/* One kind too bulky to list flat (a deck audit indexes a screenshot per slide):
+   a summary row that reads like an artifact row and expands into real ones. Its
+   rows are built on first expand, so the collapsed state has no children at all
+   — but restate [hidden] anyway, the way .artifact-list has to. */
+.artifact-bulk-toggle{display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+  appearance:none;border:none;background:transparent;cursor:pointer;
+  padding:11px 20px;font:500 12.5px var(--sans);color:var(--ink-2);}
+.artifact-group .artifact-bulk-toggle{border-top:1px solid var(--line);}
+.artifact-group-head + .artifact-bulk-toggle,.artifact-cycle + .artifact-bulk-toggle{border-top:none;}
+.artifact-bulk-toggle:hover{background:var(--field);color:var(--ink);}
+.artifact-bulk-toggle::after{content:"▸";margin-left:auto;font-size:10px;color:var(--ink-3);}
+.artifact-bulk-toggle[aria-expanded="true"]::after{content:"▾";}
+.artifact-list .artifact-bulk-toggle{padding:8px 12px;border:1px solid var(--line-2);border-radius:10px;background:var(--field);}
+.artifact-bulk-list{display:flex;flex-direction:column;}
+.artifact-bulk-list[hidden]{display:none;}
+.artifact-group .artifact-bulk-list .artifact-row{padding-left:32px;}
+
 /* A single clickable artifact row (kind chip · name · byte size). */
 .artifact-group .artifact-row{border-top:1px solid var(--line);}
 .artifact-group-head + .artifact-row,.artifact-cycle + .artifact-row{border-top:none;}
@@ -6285,10 +6506,14 @@ input.gv-name:focus-visible{outline:none;}
 .artifact-kind{flex:0 0 auto;font-size:10px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;
   padding:2px 8px;border-radius:6px;background:var(--violet-bg);color:var(--violet-ink);}
 .artifact-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.artifact-bytes{margin-left:auto;flex:0 0 auto;font-size:11px;color:var(--ink-3);}
+/* --ink-2 at 11px: --ink-3 is 2.8:1 on white, which the light contrast gate flags
+   once the artifacts tab paints a byte size. Still the quiet, secondary ink. */
+.artifact-bytes{margin-left:auto;flex:0 0 auto;font-size:11px;color:var(--ink-2);}
 
-/* Typed viewers rendered into the shared #viewer modal by renderArtifact. The
-   host resets the enclosing <pre>'s white-space:pre so each viewer owns its own. */
+/* Typed viewers rendered by renderArtifact into the .artifact-view host
+   (#viewer, a <pre>, is kept only for plain error strings). The bare
+   .artifact-view rule stays because the host also serves anywhere a <pre> could
+   enclose it; each viewer owns its own white-space below. */
 .artifact-view{white-space:normal;}
 .artifact-text,.artifact-json,.artifact-diff{margin:0;font-family:var(--mono);font-size:12px;line-height:1.55;
   white-space:pre-wrap;word-break:break-word;color:var(--ink);}

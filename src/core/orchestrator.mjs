@@ -11,7 +11,8 @@
 // state.steps[] IS the execution ledger: one row per execution, key ===
 // executionId. There is no separate executions[] array.
 import { join, isAbsolute, extname } from 'node:path';
-import { rm, readFile } from 'node:fs/promises';
+import { rm, readFile, readdir, access, stat } from 'node:fs/promises';
+import { readDirections, pendingDirections } from './directions.mjs';
 
 import {
   RunHarness, isAbort, isPause, pauseErr, firstLine, jsonClone,
@@ -36,19 +37,25 @@ import { humanEstimateOverrides, memoryDefragModel } from './settings.mjs';
 import { renderPromptArtifact } from './phases.mjs';
 import { listModels, modelHasBaseUrlRouting, resolveRunConfig } from './config.mjs';
 import { resolveDefragModel, agentPairText } from './memory-defrag-model.mjs';
-import { assembleShape, ShapeError } from '../shared/graph/assemble.mjs';
+import { describeScanModels } from './workspace-scan-run.mjs';
+import { assembleShape, normalizeShape, ShapeError } from '../shared/graph/assemble.mjs';
+import { RECIPE_SHAPES } from './auto/recipes.mjs';
 import { fingerprintProject } from './auto/fingerprint.mjs';
 import { classifyTask, ClassifierError } from './auto/classify.mjs';
 import { autoCandidates, findEquivalentWorkflow } from './auto/match.mjs';
 import { buildProposal, sanitizeProposalAnswer, remapTunables, mintAutoWorkflowId } from './auto/proposal.mjs';
 import { resolveAutoModel } from './auto/model.mjs';
+import { autoModelsFor } from './auto/runnable.mjs';
+import { probeClaudeAuth } from './preflight.mjs';
 import {
   appendAudit, writeReview, reviewKindOf, writeDecomposition, updateTaskStatus,
-  updatePhaseStatus, writeStepQuestions, readStepQuestions,
+  updatePhaseStatus, writeStepQuestions, readStepQuestions, forgetMissingArtifacts,
+  indexedNamesUnder, forgetOtherKinds,
 } from './artifacts.mjs';
 import { readAskFile } from './protocol.mjs';
-import { prepareFormAsk, formAnswerValidator, downgradeQuestion } from './ask-forms.mjs';
+import { prepareFormAsk, formAnswerValidator, downgradeQuestion, redactSecrets } from './ask-forms.mjs';
 import { classifyError } from './recoverable-error.mjs';
+import { withRecoveryRetry, RETRYABLE_CLASSES, HELPER_RETRY_ATTEMPTS } from './recovery-backoff.mjs';
 import { resolveFailure, markTerminal, isTerminal } from './failure-policy.mjs';
 import { byActor } from './identity.mjs';
 
@@ -85,6 +92,7 @@ export class GraphOrchestrator extends RunHarness {
     this._resumeSessions = null; // Map executionId -> sessionId (one-shot)
     this._graphError = null;     // first genuine execution error (identity preserved)
     this._planVersion = 0;       // {vsuffix} ticks, carried across a resume
+    this._secretEnv = {};        // typed `secret` form fields, MEMORY ONLY: never persisted, so a resume after a restart falls back to the environment
     this._humanCursor = null;          // cumulative worktree numstat at the last agent/script terminal (money-saved §3.1)
     this._humanCursorReady = false;    // baseline measured at the first agent/script start, or restored from the resume point
     this._humanRun = serialQueue();    // measure-then-credit is atomic per execution: slices that end together split, never double
@@ -97,6 +105,9 @@ export class GraphOrchestrator extends RunHarness {
     // `classify` is the test seam.
     this._auto = { feedback: [], round: 0, prior: null, costUsd: 0, pending: null };
     this._classify = typeof opts?.classify === 'function' ? opts.classify : null;
+    // Whether Claude Code is signed in decides which models Auto may design with
+    // (auto/runnable.mjs). `claudeAuth` is the test seam.
+    this._claudeAuth = typeof opts?.claudeAuth === 'function' ? opts.claudeAuth : () => probeClaudeAuth({ bin: this.claude.bin || undefined });
     Object.assign(this.state, {
       engine: 2,
       active: [],                // [{nodeId, executionId}]
@@ -133,8 +144,10 @@ export class GraphOrchestrator extends RunHarness {
     // (the Memory view's button, New pipeline, an Ask card, a schedule and the CLI all construct
     // this class). resume() never calls this hook: the manifest froze the pair on the node.
     const defrag = this.memoryScope ? await this._defragAgentPair() : null;
+    const scan = this._scanModelPins();
     const resolved = await resolveGraph(this.projectDir, this.workflowId, registry, this.agentsDir, {
       isWorkspace: this.isWorkspace, scripts: this.scriptRegistry, ...(defrag && defrag.pair ? { agentPair: defrag.pair } : {}),
+      ...(scan ? { agentPair: scan.agentPair, subagentPin: scan.subagentPin } : {}),
     });
     this._adoptResolvedGraph(resolved);
     // A setting that failed the catalog check degrades — and says what the run uses INSTEAD, read
@@ -170,7 +183,7 @@ export class GraphOrchestrator extends RunHarness {
    * @returns {Promise<{pair: ({model:string, effort:(string|null)}|null), warning: (string|null)}>}
    */
   async _defragAgentPair() {
-    const explicit = { model: this.claude.model, effort: this.opts.claude?.effort };
+    const explicit = { model: this.claude.model, effort: this.claude.effort };
     const stored = memoryDefragModel();
     // The catalog read only when the setting is the one that decides.
     const models = !(typeof explicit.model === 'string' && explicit.model.trim()) && stored.model
@@ -179,6 +192,28 @@ export class GraphOrchestrator extends RunHarness {
     if (!r.model) return { pair: null, warning: r.warning };
     this._log('orchestrator', 'info', `Memory defragment model: ${r.model}${r.effort ? ` · ${r.effort}` : ''} (${r.source === 'explicit' ? 'named at start' : 'Settings › Memory'})`);
     return { pair: { model: r.model, effort: r.effort }, warning: r.warning };
+  }
+
+  /**
+   * Workspace scan (D19): the four picks the scan started with — POST /api/workspaces/scan resolved
+   * them (the Create workspace column, else Settings › Runs › Workspaces, else Sonnet · medium) —
+   * become the pair of every scan agent node (survey, usage, synthesis) and the pin of the fan-out
+   * stages' investigators. Start only: resume() rebuilds from the manifest, which froze them on the
+   * node. No picks (a hand-built run) ⇒ the template's defaults.
+   * @returns {{agentPair:{model:string, effort:(string|null)}, subagentPin:{model:string, effort:string}}|null}
+   */
+  _scanModelPins() {
+    const m = this.opts.scanModels;
+    if (!this._isWorkspaceScan() || !m || typeof m !== 'object' || !m.scanModel) return null;
+    this._log('orchestrator', 'info', `Workspace scan models: ${describeScanModels(m)} (${m.source || 'explicit'})`);
+    if (m.warning) {
+      this._log('orchestrator', 'warn', m.warning);
+      this._pendingAudits.push(`${m.warning}.`);
+    }
+    return {
+      agentPair: { model: m.scanModel, effort: m.scanEffort || null },
+      subagentPin: { model: m.agentModel, effort: m.agentEffort },
+    };
   }
 
   /** The Auto entry before the decision: an EMPTY graph tagged `deciding`, so
@@ -233,7 +268,14 @@ export class GraphOrchestrator extends RunHarness {
 
   async _decideTopologyInner() {
     const registry = this.registry;
-    const models = await listModels(this.projectDir);
+    // Only models this install can run (auto/runnable.mjs): signed out, a first-party pick —
+    // or the CLI default a stage without a model falls back to — dies at its first spawn.
+    let auth = 'unknown';
+    try { auth = (await this._claudeAuth())?.state || 'unknown'; } catch { /* unknown narrows nothing */ }
+    const runnable = autoModelsFor(await listModels(this.projectDir), { auth, routed: modelHasBaseUrlRouting });
+    const models = runnable.models;
+    const requireModel = runnable.requireModel;
+    if (runnable.note) this._log('orchestrator', requireModel ? 'info' : 'warn', `auto: ${runnable.note}`);
     const model = resolveAutoModel(models);
     const fingerprint = await fingerprintProject(this.projectDir);
     this._log('orchestrator', 'info', `auto: fingerprint ${Buffer.byteLength(fingerprint, 'utf8')} B`);
@@ -260,11 +302,11 @@ export class GraphOrchestrator extends RunHarness {
       } else {
         this._auto.round += 1;
         round = this._auto.round;
-        classifyFor = classify;
+        classifyFor = (input) => this._classifyWithRetry(classify, input);
       }
       let outcome;
       try {
-        outcome = await this._autoRound({ registry, models, model, fingerprint, extras, taskText, classify: classifyFor, round });
+        outcome = await this._autoRound({ registry, models, requireModel, model, fingerprint, extras, taskText, classify: classifyFor, round });
       } catch (err) {
         if (isAbort(err) || isPause(err)) throw err;
         if (pending && err instanceof ShapeError) {
@@ -273,6 +315,13 @@ export class GraphOrchestrator extends RunHarness {
           this._log('orchestrator', 'warn', `auto: the saved proposal no longer assembles (${firstLine(err.message)}); classifying afresh`);
           this._auto.pending = null;
           continue;
+        }
+        if (err instanceof ClassifierError && !pending && RETRYABLE_CLASSES.includes(classifyError(err))) {
+          // A provider 429 / dropped connection that outlasted _classifyWithRetry says
+          // nothing about the task: run the default workflow rather than park a run
+          // that has not started. Only a transient cause falls back — an unusable reply
+          // or a timeout keeps the D17 pause below.
+          return await this._autoFallbackDefault({ err, registry, round, nodeModel: requireModel ? model : null });
         }
         if (err instanceof ClassifierError || err instanceof ShapeError) {
           // spec D17 / §5.6: the shell's failure policy parks the run (setup site ⇒
@@ -318,9 +367,9 @@ export class GraphOrchestrator extends RunHarness {
   }
 
   /** One round: classifier call (one assembler-driven retry), match, proposal. */
-  async _autoRound({ registry, models, model, fingerprint, extras, taskText, classify, round }) {
+  async _autoRound({ registry, models, requireModel = false, model, fingerprint, extras, taskText, classify, round }) {
     const input = {
-      taskText, extras, fingerprint, models, registry,
+      taskText, extras, fingerprint, models, requireModel, registry,
       domain: 'coding',                                // the domain the assembler stamps: coding + shared + general agents are offered
       humanInLoop: this.humanInLoop, feedback: [...this._auto.feedback], priorShape: this._auto.prior,
       // D6 amendment (2026-09-07): the classifier may Grep/Glob/Read the RUN'S OWN checkout to
@@ -408,8 +457,9 @@ export class GraphOrchestrator extends RunHarness {
     return raw && raw.decision ? raw : validate(raw);   // auto mode answers { decision: 'accept' } without the validator
   }
 
-  /** Reuse the twin or save a new row, resolve it with the accepted tunables as the ONLY overlay, re-stamp the manifest. */
-  async _autoAdopt({ template, match, tunables, shape, answer, registry, round }) {
+  /** Reuse the twin or save a new row, resolve it with the accepted tunables as the ONLY overlay, re-stamp the manifest.
+   *  `fallback` = the classifier failure a default-workflow fallback adopts in place of a proposal (_autoFallbackDefault). */
+  async _autoAdopt({ template, match, tunables, shape, answer, registry, round, fallback = null }) {
     const name = answer.name || shape.name;
     if (!match) {
       // B3: the twin search ran at proposal time; another Auto run, the composer or the chat may
@@ -450,7 +500,10 @@ export class GraphOrchestrator extends RunHarness {
     const manifest = buildGraphManifest(this.resolved.template, this.resolved.agentsByKey, {
       overlays: { nodes: this.resolved.nodeCtx, wires: this.resolved.wires }, scripts: this.resolved.scriptsByKey,
     });
-    manifest.auto = { status: 'decided', via, rounds: round, humanInLoop: this.humanInLoop, workflowId };
+    // A fallback records what it saved (`saved`) and why (`reason`) beside via 'fallback'.
+    manifest.auto = fallback
+      ? { status: 'decided', via: 'fallback', saved: via, reason: fallback, rounds: round, humanInLoop: this.humanInLoop, workflowId }
+      : { status: 'decided', via, rounds: round, humanInLoop: this.humanInLoop, workflowId };
     this._preflightAgentKeys(this.resolved.agentKeys);
     this._preflightScriptKeys(this.resolved.scriptKeys);
     await this._preflightScriptRuntimes();
@@ -467,9 +520,67 @@ export class GraphOrchestrator extends RunHarness {
     this.state.resumePoint = null;                  // decided: the engine's onSnapshot owns the point from here
     this._emit('state', this.getState());
     await this._persist();
-    this._log('orchestrator', 'info', `auto: accepted → "${name}" (${workflowId}, ${via})`);
-    await appendAudit(this.pipeline.dir, `Auto workflow: **${name}** — ${via === 'reused' ? `reusing saved workflow ${workflowId}` : `saved as ${workflowId}`}.`).catch(() => {});
+    if (fallback) {
+      await appendAudit(this.pipeline.dir, `Auto workflow: the classifier was unreachable (${fallback}) — running the default workflow **${name}** (${via === 'reused' ? `saved workflow ${workflowId}` : `saved as ${workflowId}`}).`).catch(() => {});
+    } else {
+      this._log('orchestrator', 'info', `auto: accepted → "${name}" (${workflowId}, ${via})`);
+      await appendAudit(this.pipeline.dir, `Auto workflow: **${name}** — ${via === 'reused' ? `reusing saved workflow ${workflowId}` : `saved as ${workflowId}`}.`).catch(() => {});
+    }
     return { manifest, agentKeys: new Set(this.resolved.agentKeys), workflow: { id: workflowId, name: this.resolved.template.name || name } };
+  }
+
+  /**
+   * The Auto classifier call with the shared recovery backoff (recovery-backoff.mjs):
+   * a rate_limit / network failure — a provider 429 the CLI already retried, a dropped
+   * connection — is retried before the round gives up. What the failed attempts spent
+   * rides the result (or the final error), so the round books it once (D14).
+   */
+  async _classifyWithRetry(classify, input) {
+    let spent = 0;
+    try {
+      const res = await withRecoveryRetry(() => classify(input), {
+        signal: input.signal,
+        onRetry: ({ attempt, cls, delayMs, err }) => {
+          spent += Number(err?.costUsd) || 0;
+          this._log('orchestrator', 'warn',
+            `auto: classifier ${cls} — retrying in ${Math.round(delayMs / 100) / 10}s (retry ${attempt}/${HELPER_RETRY_ATTEMPTS}): ${firstLine(err?.detail || err?.message)}`);
+        },
+      });
+      if (spent) res.costUsd = (Number(res.costUsd) || 0) + spent;
+      return res;
+    } catch (err) {
+      if (spent && err && typeof err === 'object') err.costUsd = (Number(err.costUsd) || 0) + spent;
+      throw err;
+    }
+  }
+
+  /** The classifier stayed unreachable (a transient class after its retries): run the
+   *  default workflow — adopted like an accepted proposal, so it is saying why in the run
+   *  log, the audit and the manifest (auto.via 'fallback') — instead of parking a run
+   *  that has not started. With a human in the loop that is the standard recipe, whose
+   *  exact twin is the built-in Default (wf_default); with nobody in the loop it is the
+   *  same recipe without Clarify, because spec D3 forbids stopping the run to ask. */
+  async _autoFallbackDefault({ err, registry, round, nodeModel = null }) {
+    const cause = firstLine(err?.detail || err?.message);
+    const cls = classifyError(err);
+    const recipe = RECIPE_SHAPES.find((r) => r.id === (this.humanInLoop ? 'prompt' : 'plan-partial'));
+    const assembled = assembleShape(normalizeShape(jsonClone(recipe.shape)), { registry, humanInLoop: this.humanInLoop });
+    // Signed out (auto/runnable.mjs), the recipe's nodes have no model to fall back to: run
+    // every one on the model Auto itself runs on — routed by construction.
+    if (nodeModel) {
+      for (const n of assembled.template.nodes || []) {
+        if (n.kind === 'agent') assembled.tunables[n.id] = { ...(assembled.tunables[n.id] || {}), model: nodeModel, effort: '' };
+      }
+    }
+    const match = findEquivalentWorkflow(assembled.template, await autoCandidates());
+    this._log('orchestrator', 'warn',
+      `auto: the workflow classifier failed (${cls}) after ${HELPER_RETRY_ATTEMPTS} retries — running the default workflow "${match ? match.candidate.name : assembled.shape.name}" instead: ${cause}`);
+    return this._autoAdopt({
+      template: match ? match.candidate : assembled.template, match,
+      tunables: match ? remapTunables(assembled.tunables, match.nodeMap) : assembled.tunables,
+      shape: assembled.shape, answer: { decision: 'accept', name: assembled.shape.name, nodes: {} },
+      registry, round, fallback: `${cls}: ${cause}`,
+    });
   }
 
   /** Attached files as the classifier sees them: names, plus the first 2 KB of text files. */
@@ -752,6 +863,11 @@ export class GraphOrchestrator extends RunHarness {
       // advance it), so a resume credits the paused execution's pre-pause work at its terminal.
       humanCursor: this._humanCursorReady ? (this._humanCursor ?? { files: 0, insertions: 0, deletions: 0 }) : null,
       stepModels: this.stepModels,
+      // The run-level model the run was started with (restored by the harness
+      // constructor); only the fields that are set, so an older reader sees none.
+      ...(this.claude.model || this.claude.effort
+        ? { claude: { ...(this.claude.model ? { model: this.claude.model } : {}), ...(this.claude.effort ? { effort: this.claude.effort } : {}) } }
+        : {}),
       workflowId: this.workflowId,
       // Auto workflow: the decision state while UNDECIDED (spec §5.6); null once
       // the graph is adopted (workflowId is then the real id) and on saved workflows.
@@ -966,9 +1082,11 @@ export class GraphOrchestrator extends RunHarness {
         return result;
       }
       this._primeQuestions(nc, ctx);
+      await this._primeDirections(ctx);
       let result = await this._runNodeAttempts(nc, ctx);
       result = await this._questionsLoop(nc, ctx, result);
       await this._afterExecution(nc, ctx, result);
+      await this._reconcileDirections(ctx);
       return result;
     } catch (err) {
       if (isPause(err) || (this.pauseRequested && (isAbort(err) || this.pauseAbort.signal.aborted))) {
@@ -1095,6 +1213,9 @@ export class GraphOrchestrator extends RunHarness {
       // reads runCtx.slice as a STRING).
       slice: slice ? slice.id : undefined,
       planVersion: () => (this._planVersion += 1),
+      // ONE object for the whole run, shared by every execution's runCtx: where the clarifier
+      // parks a typed `secret` form field (memory only) and the script runner reads it back.
+      secretEnv: this._secretEnv,
     };
     const outputs = allocateOutputs({ node, ports, executionId, ordinal, runCtx });
     const verdict = allocateVerdict({ node, ports, ordinal, runCtx });
@@ -1113,6 +1234,11 @@ export class GraphOrchestrator extends RunHarness {
       model: nc.kind === 'script' ? null : (nc.model || this.claude.model),
     };
     return {
+      // When this execution began. _indexExtraFiles compares it against each
+      // candidate's mtime to tell the files this execution WROTE from the ones it
+      // merely globbed — the deck ports declare identical globs, so without it
+      // whichever node swept last stole every row's attribution.
+      startedMs: Date.now(),
       // Consumed as `cwd` by phases.mjs (runOpts). runCwd is the run root on a
       // detached workspace run, the member worktree on a detached single run,
       // today's workDir under legacy.
@@ -1145,6 +1271,7 @@ export class GraphOrchestrator extends RunHarness {
         key: nc.key,
         fanOut: !!nc.fanOut,
         subagentModel: nc.subagentModel || '',
+        subagentEffort: nc.subagentEffort || '',
         // Same fallback as claudeOpts.model below: the flag must describe the
         // model the spawn will actually use, global default included. Live
         // catalog on purpose — a resume re-resolves the env the same way. One
@@ -1412,9 +1539,23 @@ export class GraphOrchestrator extends RunHarness {
       const path = ctx.outputs?.[port?.id]?.path;
       if (!path || seen.has(path)) continue;
       seen.add(path);
+      // A path was ALLOCATED for every port carrying a `filename` — including the
+      // `when: "blocking"` ones (deckAudit.findings, deckExport.findings, every
+      // reviewer.review) — and a clean verdict leaves those unwritten. Indexing
+      // on allocation alone put rows in the Artifacts tab that render `0 B` and
+      // 404 when clicked, and that list_run_artifacts hands the model for
+      // read_run_artifact to fail on. Index what the agent actually wrote.
+      try { await access(path); } catch { continue; }
       this._artifact(port.artifactKind || port.id, path, {
         nodeId: ctx.nodeId, executionId: ctx.executionId, port: port.id, cycle: ctx.ordinal,
       });
+    }
+    // Before the script early-return: `extraFiles` is declared on an output PORT and
+    // readOutputs is shared by both sidecars, so a script card that ships files beside
+    // its output (the deck bundler's single-file deliverable) gets them indexed like
+    // an agent's.
+    for (const port of ctx.ports?.outputs || []) {
+      if (Array.isArray(port?.extraFiles) && port.extraFiles.length) await this._indexExtraFiles(ctx, port);
     }
     if (nc.kind === 'script') {
       // The envelope audit copy is an artifact under scripts/ (§6.5); the row gets the runtime facts (D17).
@@ -1431,6 +1572,145 @@ export class GraphOrchestrator extends RunHarness {
     // Agent memory (§5): sync the mount back after EVERY execution, slices included.
     await this._syncMemory(nc, ctx);
     if (nc.meta?.sideEffect === 'code' && !ctx.slice) await this._stageWorkingTree();
+  }
+
+  /** Deterministic delivery: read the inbox at step start and hang the pending
+   *  list on ctx (phases.directionsPromptBlock renders it). Slices see them too —
+   *  a slice is a real agent that can act on a direction. */
+  async _primeDirections(ctx) {
+    ctx.directionsPending = [];
+    if (!this.pipeline?.dir) return;
+    try {
+      const parsed = await readDirections(this.pipeline.dir);
+      // pendingDirections() is BY DEFINITION the ids with no consumption record,
+      // so a `seen` set built from parsed.consumed.keys() is disjoint from it by
+      // construction and the de-dup it fed could never fire. Removed rather than
+      // left in place reading like a guard that does something.
+      ctx.directionsPending = pendingDirections(parsed);
+    } catch { /* an unreadable inbox never blocks a step */ }
+  }
+
+  /** After the step: log every direction the agent consumed during it. The agent
+   *  writes the consumption record (it alone knows which directions were in its
+   *  job); the engine makes the delivery deterministic and the ledger visible. */
+  async _reconcileDirections(ctx) {
+    if (!this.pipeline?.dir || !ctx.directionsPending?.length) return;
+    try {
+      const parsed = await readDirections(this.pipeline.dir);
+      for (const d of ctx.directionsPending) {
+        const by = parsed.consumed.get(d.id);
+        if (by) {
+          this._log('directions', 'info', `direction:applied ${d.id} by ${by[by.length - 1]}`, { nodeId: ctx.nodeId, executionId: ctx.executionId, cycle: ctx.ordinal });
+        }
+      }
+    } catch { /* best effort */ }
+  }
+
+  /** Index the files an output port declared as `extraFiles` (agent-meta.mjs):
+   *  one-level globs under the pipeline dir, matched by basename, sorted, each
+   *  recorded with the entry's `kind`. Best-effort: a missing dir indexes nothing;
+   *  a declared-but-unwritten file is not an error (mirrors declared ports).
+   *
+   *  Entries are FIRST-MATCH-WINS: a file claimed by an earlier entry is skipped
+   *  by every later one, so a port can name its deliverables precisely and end
+   *  with a catch-all for the rest. That is how the deck ports separate the two
+   *  files a human opens from the kit scripts, webfonts and proof copy the deck
+   *  merely LOADS — which still have to be indexed, because the raw-bytes route
+   *  resolves `rel` only among indexed rows. Without the rule the catch-all would
+   *  re-index the deliverables under a second kind and double every row. */
+  /** Did THIS execution write the file? mtime at or after the moment the context
+   *  was built (immediately before the agent was dispatched). A file the previous
+   *  node wrote keeps that node's attribution.
+   *
+   *  KNOWN LIMIT — coarse mtime granularity. `startedMs` is a wall clock and the
+   *  mtime comes from the filesystem, so on a 1-second-granularity volume (HFS+,
+   *  FAT, some network mounts) a file this execution genuinely wrote can report an
+   *  mtime just BELOW it, and the re-attribution is then skipped: the row keeps the
+   *  previous step's stamp. That is the safe direction of the two — the row still
+   *  exists and still resolves, it is only labelled with an earlier step — whereas
+   *  a tolerance wide enough to cover a second would let a node claim files the
+   *  PREVIOUS node wrote, which is the bug this comparison was added to fix
+   *  (deckBuilder and deckExport declare identical globs). A same-filesystem marker
+   *  written per execution would remove the clock mismatch but not the granularity,
+   *  so it trades a silent under-attribution for a silent over-attribution at the
+   *  same cost. Left conservative, deliberately. */
+  async _writtenDuring(abs, ctx) {
+    if (!Number.isFinite(ctx?.startedMs)) return true;     // no stamp: behave as before
+    try {
+      return (await stat(abs)).mtimeMs >= ctx.startedMs;
+    } catch (err) {
+      // The name came from a readdir a moment ago, so ENOENT means the file was
+      // unlinked in between — and answering "yes, written" would index a row for a
+      // file that is gone: the 0-byte row that 404s on click, which
+      // forgetMissingArtifacts exists to remove. Any OTHER error is unknown, and
+      // there the permissive answer is still the safe one (a missed row breaks the
+      // raw-bytes route, which resolves `rel` only among indexed rows).
+      if (err && err.code === 'ENOENT') return false;
+      return true;
+    }
+  }
+
+  async _indexExtraFiles(ctx, port) {
+    const pdir = this.pipeline?.dir;
+    if (!pdir) return;
+    const claimed = new Set();
+    const known = new Map();                               // dir -> already-indexed basenames
+    for (const { kind, glob } of port.extraFiles) {
+      const [dir, pattern] = glob.split('/');
+      const re = new RegExp('^' + pattern.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+      let names = [];
+      try { names = (await readdir(join(pdir, dir), { withFileTypes: true })).filter((d) => d.isFile()).map((d) => d.name); } catch { continue; }
+      // Drop rows for files this directory no longer holds. The audit deletes and
+      // recreates shots/ every cycle, so a fix cycle that cuts a slide otherwise
+      // leaves the dropped slide's screenshot indexed forever — a 0 B row that
+      // 404s. Keyed on the listing, so a second port sweeping the same directory
+      // computes the same answer.
+      // Tell an open browser what went. The client artifact list only ever grew,
+      // so a pruned shot kept rendering and 404d when clicked — the very failure
+      // this prune exists to prevent. Absolute paths, the same shape `artifact`
+      // events carry, so the client matches them the same way.
+      const gone = forgetMissingArtifacts(this.pipeline.id, dir, new Set(names), pdir);
+      if (gone.length) this._emit('artifact-gone', { paths: gone.map((rel) => join(pdir, rel)) });
+      // Which of these are already indexed — read ONCE per directory, and only for
+      // directories this port actually sweeps.
+      if (!known.has(dir)) known.set(dir, indexedNamesUnder(this.pipeline.id, dir));
+      const alreadyIndexed = known.get(dir);
+      for (const name of names.filter((n) => re.test(n)).sort()) {
+        if (claimed.has(`${dir}/${name}`)) continue;
+        claimed.add(`${dir}/${name}`);
+        // A glob matches whatever is ON DISK, not what this execution produced —
+        // and deckBuilder and deckExport declare IDENTICAL globs, so the export
+        // sweep re-stamped the builder's deck.html and every kit script onto the
+        // export node. Re-attribute only a file this execution actually wrote.
+        // An unindexed file is always recorded: nobody else has claimed it, and
+        // skipping it on a coarse-grained mtime would lose the row entirely —
+        // which the raw-bytes route resolves `rel` against, so it would 404.
+        // Per KIND. `alreadyIndexed` maps name -> kinds, because a row is keyed by
+        // (kind, rel_path): a file settled under kind A is not settled for kind B,
+        // and treating it as such kept the A row forever on a re-kind (a sidecar
+        // edit, or a run spanning the V32 deck/deck-asset split).
+        const kinds = alreadyIndexed.get(name);
+        if (kinds && kinds.has(kind) && !(await this._writtenDuring(join(pdir, dir, name), ctx))) continue;
+        // `cycle` matters as much here as on the port's own output: without it
+        // every extra file is recorded with cycle null, and artifactsByNodeCycle
+        // (`cycle ?? 0`) files them all under a phantom "cycle 0" beside the same
+        // node's real cycles in both Artifacts tabs.
+        // One kind per file: retire whatever it was indexed as before, or the
+        // Artifacts tab and list_run_artifacts show the same file twice.
+        if (kinds && [...kinds].some((k) => k !== kind)) {
+          // Tell the browser too, exactly as the prune above does: the client's
+          // dedupe is kind-scoped, so without this it keeps the superseded row and
+          // lists the same file twice. Emitted BEFORE the artifact event below, so
+          // the row is dropped and then re-added under its current kind.
+          if (forgetOtherKinds(this.pipeline.id, `${dir}/${name}`, kind).length) {
+            this._emit('artifact-gone', { paths: [join(pdir, dir, name)] });
+          }
+        }
+        this._artifact(kind, join(pdir, dir, name), {
+          nodeId: ctx.nodeId, executionId: ctx.executionId, port: port.id, cycle: ctx.ordinal,
+        });
+      }
+    }
   }
 
   /** reviews.kind, derived from the verdict FILENAME minus `-cycle{cycle}.json`
@@ -1505,7 +1785,7 @@ export class GraphOrchestrator extends RunHarness {
         pipelineDir: this.pipeline.dir,
         askId: `questions-${ctx.executionId}-r${round}`,
       });
-      if (prepared.ok) return { ask: prepared.ask, autoValues: prepared.autoValues, questions: [], result };
+      if (prepared.ok) return { ask: prepared.ask, autoValues: prepared.autoValues, secrets: prepared.secrets || {}, questions: [], result };
 
       const why = prepared.errors.map((e) => `${e.path ? `${e.path}: ` : ''}${e.message}`).join('; ');
       this._log(agentLabel, 'warn', `form "${payload.form}" was refused: ${why}`, attr);
@@ -1574,6 +1854,7 @@ export class GraphOrchestrator extends RunHarness {
       let questions = read.kind === 'questions' ? read.questions : [];
       let formAsk = null;
       let autoValues = null;
+      let formSecrets = {};
       if (read.kind === 'form') {
         // Gate 2 (spec §5). It may spawn ONE repair round of its own, whose
         // result becomes this round's result; it never consumes a round.
@@ -1581,6 +1862,7 @@ export class GraphOrchestrator extends RunHarness {
         if (gate.result !== undefined) result = gate.result;
         formAsk = gate.ask;
         autoValues = gate.autoValues;
+        formSecrets = gate.secrets || {};
         questions = gate.questions;
       }
       if (!formAsk && !questions.length) break;
@@ -1613,7 +1895,10 @@ export class GraphOrchestrator extends RunHarness {
           validate: formAnswerValidator(formAsk),  // gate 3
         }));
         this._checkAbort();
-        const values = (answered && typeof answered === 'object' && answered.values) || {};
+        // A producer's resumed prompt carries `values` (ctx.formAnswers below), so a `secret` field must
+        // be swapped for its marker BEFORE anything reads them; the real value is held in memory only.
+        const { values, held } = redactSecrets((answered && typeof answered === 'object' && answered.values) || {}, formSecrets);
+        Object.assign(this._secretEnv, held);
         const formBy = this.answeredBy(`questions-${stepKey}-r${round}`);
         await writeStepQuestions(this.pipeline.id, stepKey, round, {
           agentKey: nc.key, nodeId: ctx.nodeId,
@@ -1812,7 +2097,7 @@ export class GraphOrchestrator extends RunHarness {
  * Rebuild a resolveGraph-shaped result from a PERSISTED manifest + the live
  * registry. The manifest is authoritative for topology, port identity (ids/
  * types/loop/expands/when), per-node model/effort/askQuestions/awaitAll/fanOut/subagentModel/
- * config and per-wire maxCycles; the registry supplies only what a manifest
+ * subagentEffort/config and per-wire maxCycles; the registry supplies only what a manifest
  * deliberately omits (runnerType, prompt body, frontmatter tools, per-port
  * as/directive/filename/store/artifactKind, the verdict filename, sideEffect,
  * mockRole, displayName).
@@ -1870,6 +2155,7 @@ export function resolvedFromManifest(manifest, registry, scripts = {}) {
       effort: mn.effort || undefined,
       fanOut: !!mn.fanOut,
       subagentModel: mn.subagentModel || '',
+      subagentEffort: mn.subagentEffort || '',
       askQuestions: !!mn.askQuestions,
       awaitAll: !!mn.awaitAll,
       duplicateKey: false,

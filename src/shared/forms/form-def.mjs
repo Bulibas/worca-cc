@@ -10,6 +10,7 @@ import { walkLayout } from './layout.mjs';
 import { autoAnswer, collectAnswer } from './answer.mjs';
 
 export const FORM_ID_RE = /^[a-z][a-z0-9-]{0,47}$/;
+export const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 export const FORM_SURFACES = Object.freeze(['any', 'web']);
 const MAX_TITLE = 120;
 
@@ -51,6 +52,8 @@ function valueErrors(item) {
   }
   if (isText(item.style) && Object.hasOwn(STYLES, w) && !STYLES[w].includes(item.style)) out.push(`"style" of "${w}" is one of: ${STYLES[w].join(', ')}`);
   if (item.mono !== undefined && typeof item.mono !== 'boolean') out.push('"mono" must be true or false');
+  if (item.secret !== undefined && typeof item.secret !== 'boolean') out.push('"secret" must be true or false');
+  if (item.envDefault !== undefined && !(isText(item.envDefault) && ENV_NAME_RE.test(item.envDefault))) out.push('"envDefault" is an environment variable NAME, e.g. ELEVENLABS_API_KEY');
   if (item.rows !== undefined && !(Number.isInteger(item.rows) && item.rows >= 1)) out.push('"rows" must be a whole number, 1 or more');
   if (item.options !== undefined) {
     if (!isObject(item.options)) out.push('"options" is { from, value, label, description }');
@@ -181,6 +184,18 @@ export function validateFormDef(def, { id } = {}) {
       if (typeof eff.field !== 'string') errors.push(err(at, 'unknown-field', `"${eff.widget}" needs a "field"`));
       else if (!s) errors.push(err(at, 'unknown-field', `"${eff.field}" is not an answer property`));
       else if (!widgetAcceptsType(eff.widget, s)) errors.push(err(at, 'bad-pairing', `"${eff.widget}" cannot fill "${eff.field}" (${s.type})`));
+      // A secret never has a value the schema could hold: a default or an enum would put
+      // it in the sidecar, the stored ask or a prompt, and `required` would make an empty
+      // field ("use the environment's") unanswerable.
+      if (s && eff.secret === true) {
+        if (s.type !== 'string') errors.push(err(at, 'bad-pairing', `"${eff.field}" is secret, so it is a string`));
+        for (const k of ['default', 'defaultFrom', 'enum', 'enumFrom']) {
+          if (s[k] !== undefined) errors.push(err(at, 'bad-secret', `"${eff.field}" is secret and cannot declare "${k}"`));
+        }
+        if (Array.isArray(def.answer.required) && def.answer.required.includes(eff.field)) {
+          errors.push(err(at, 'bad-secret', `"${eff.field}" is secret and cannot be required — empty means "use the environment"`));
+        }
+      }
       if (typeof eff.field === 'string') {
         if (fields.has(eff.field)) errors.push(err(at, 'dup-field', `"${eff.field}" is bound by more than one item`));
         else {

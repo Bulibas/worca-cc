@@ -39,9 +39,10 @@
 
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { prepareModelEnv, envFlag, describeModelEnv } from './model-env.mjs';
+import { prepareModelEnv, envFlag, describeModelEnv, isReservedModelEnvKey, withProviderModesOff, withStreamTimeouts } from './model-env.mjs';
 import { effectiveDebugSpawn } from './settings.mjs';
 import { classifyError, strongestClass } from './recoverable-error.mjs';
+import { bridgeEvents } from './bridge/telemetry.mjs';
 import { explainUnspawnableClaude, resolveClaudeBin } from './preflight.mjs';
 import { hostGuardEnabled, hostGuardHookEntry, hostGuardSystemPrompt } from './host-guard.mjs';
 // The offline classifier and the shape normalizer the mock ask role answers
@@ -49,11 +50,18 @@ import { hostGuardEnabled, hostGuardHookEntry, hostGuardSystemPrompt } from './h
 import { mockShapeFor } from './auto/recipes.mjs';
 import { normalizeShape } from '../shared/graph/assemble.mjs';
 import { writeFile, mkdir, appendFile, readFile, access, readdir } from 'node:fs/promises';
-import { constants as FS, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { constants as FS, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { stripGithubCredentials } from './github-credentials.mjs';
+import { writeMockSurvey, writeMockUsage, writeMockSynthesis } from './workspace-scan-mock.mjs';
 import { agentIdentity, agentSpawn, killAgentGroup, shareWithAgent } from './agent-user.mjs';
+import { agentIdentityFor } from './agent-pool.mjs';
+import { brokerEnabled, brokerInfo, mintSpawnToken, revokeSpawnToken, slotBaseUrl, slotOfBaseUrl } from './broker-client.mjs';
+import { resolveBillTo, normalizeBillTo, currentOwner } from './billing.mjs';
+import { redactSecrets, redactDeep } from './redact.mjs';
+import { MODEL_CREDENTIAL_ENV_KEYS } from './broker-guard.mjs';
+import { modelSlot } from './broker-routing.mjs';
 
 const DEFAULT_BIN = process.env.WORCA_CLAUDE_BIN || process.env.ORCH_CLAUDE_BIN || 'claude';
 
@@ -162,6 +170,39 @@ function spawnFailure(bin, err, prefix) {
 // does NOT ride on the capped message: recovery markers are classified line-by-
 // line as stderr streams (see rlErr) and stamped on the error as `errorClass`.
 const STDERR_DETAIL_MAX = 2000;
+
+// stderr lines the CLI prints on spawns that go on to succeed, which are never
+// the cause of a failure. `[claude-code:unrecognized_model]` fires on EVERY spawn
+// whose model id the CLI does not know — every bridged or endpoint-routed catalog
+// id — so as exit detail it masked the real cause (a 429 carried on the stdout
+// result) and classified null, which kept the rate-limit retry from running.
+// Such a line is still streamed as a stderr event; it only stops being evidence.
+export const BENIGN_STDERR_PATTERNS = Object.freeze([
+  /^\[claude-code:unrecognized_model\]/,
+]);
+
+/** Whether a stderr line is a known-benign CLI notice (BENIGN_STDERR_PATTERNS). */
+export function isBenignStderrLine(line) {
+  const t = String(line ?? '').trim();
+  return !!t && BENIGN_STDERR_PATTERNS.some((re) => re.test(t));
+}
+
+// A bridged spawn's base URL names its catalog id and run tag (bridge/server.mjs
+// bridgeBaseUrl: …/m/<id>[/r/<tag>]). Null for any other endpoint.
+const BRIDGE_PATH_RE = /\/m\/([^/?#]+)(?:\/r\/([^/?#]+))?\/?$/;
+function bridgeSpawnKey(modelEnv) {
+  const url = modelEnv && typeof modelEnv.ANTHROPIC_BASE_URL === 'string' ? modelEnv.ANTHROPIC_BASE_URL : '';
+  const m = /^https?:\/\/127\.0\.0\.1:\d+\//.test(url) ? BRIDGE_PATH_RE.exec(url) : null;
+  if (!m) return null;
+  try {
+    return { catalogId: decodeURIComponent(m[1]).toLowerCase(), tag: m[2] ? decodeURIComponent(m[2]) : '' };
+  } catch { return null; }
+}
+
+// The CLI reports an upstream API failure as an assistant text block ("API Error:
+// Request rejected (429) · …"), usually repeated in the is_error result. The
+// assistant copy is kept as the fallback detail for an exit without a result.
+const API_ERROR_TEXT_RE = /^API Error\b/;
 
 /**
  * Translate a pipeline "effort" level into claude CLI argv additions. This is
@@ -303,6 +344,20 @@ export function buildSpawnEnv(envScrub, envAllowlist) {
 }
 
 /**
+ * The run-level spawn env (runClaude's `spawnEnv`, wsmap D9) as it may reach a child: string
+ * values only, never a reserved key (isReservedModelEnvKey: PATH, HOME, NODE_OPTIONS, WORCA_*, …).
+ * null when nothing survives, so the caller merges nothing. Pure + exported for testing.
+ * @param {Record<string,*>|undefined} env
+ * @returns {Record<string,string>|null}
+ */
+export function cleanRunEnv(env) {
+  if (!env || typeof env !== 'object') return null;
+  const out = {};
+  for (const [k, v] of Object.entries(env)) if (typeof v === 'string' && !isReservedModelEnvKey(k)) out[k] = v;
+  return Object.keys(out).length ? out : null;
+}
+
+/**
  * Whether mock mode is active. Driven by WORCA_MOCK or an explicit opts.mock
  * passed through by the orchestrator (handled by caller mapping mock->env or
  * by passing systemPrompt/prompt markers; we also honor a `mock` field).
@@ -358,6 +413,12 @@ export function mockEnabled(opts) {
  * @param {number} [o.argvInlineLimit]     override ARGV_INLINE_LIMIT (GH #380; tests force the staged path)
  * @param {string[]} [o.disallowedTools]   --disallowedTools <list>: built-ins withheld from this spawn
  *   (model bridge §5.3: WebSearch/WebFetch for a translated model). Absent/empty ⇒ flag omitted.
+ * @param {Record<string, object>} [o.agents]  run-scoped sub-agent definitions (--agents; phases.mjs investigatorAgents)
+ * @param {Record<string,string>} [o.spawnEnv]  run-level spawn env (wsmap D9: runOpts sets
+ *   CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY on every fan-out node, and CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
+ *   on the scan's two). Merged OVER the guardrail env and UNDER modelEnv (a catalog entry that sets the
+ *   same key wins); string values only, reserved keys (isReservedModelEnvKey) dropped (cleanRunEnv).
+ *   Absent ⇒ the spawn env is byte-identical.
  * @returns {Promise<{text:string, exitCode:number}>}
  */
 export async function runClaude(o = {}) {
@@ -382,6 +443,7 @@ export async function runClaude(o = {}) {
     envScrub,
     envAllowlist,
     modelEnv,
+    spawnEnv,
     disallowedTools,
     workspaceWriteTargets,
     resumeSessionId,
@@ -396,10 +458,18 @@ export async function runClaude(o = {}) {
     maxBudgetUsd,
     appendSubagentSystemPrompt,
     addDirs,
+    agents,
     argvInlineLimit,
     // A pipeline agent (phases.mjs): runs as WORCA_AGENT_USER when the container set one
     // up (agent-user.mjs). Server-side helpers and Ask Worca leave it unset.
     asAgent,
+    // Credential broker (broker-client.mjs): who pays for this spawn, what kind it is (sets
+    // its token's lifetime), and the run/thread it belongs to. All optional: the person
+    // otherwise comes from the async context (billing.mjs). Ignored with the broker off.
+    billTo,
+    spawnKind,
+    runId,
+    threadId,
     bin = DEFAULT_BIN,
   } = o;
 
@@ -417,7 +487,7 @@ export async function runClaude(o = {}) {
     return runMock({ cwd, systemPrompt, prompt, onEvent, signal, resumeSessionId, workspaceWriteTargets, permissionMode });
   }
 
-  return runReal({
+  return (brokerEnabled() ? runViaBroker : runReal)({
     cwd,
     systemPrompt,
     prompt,
@@ -435,6 +505,7 @@ export async function runClaude(o = {}) {
     envScrub,
     envAllowlist,
     modelEnv,
+    spawnEnv,
     disallowedTools,
     tools,
     strictMcpConfig,
@@ -445,9 +516,121 @@ export async function runClaude(o = {}) {
     maxBudgetUsd,
     appendSubagentSystemPrompt,
     addDirs,
+    agents,
     argvInlineLimit,
     asAgent,
+    billTo,
+    spawnKind,
+    runId,
+    threadId,
   });
+}
+
+// ── Credential broker ────────────────────────────────────────────────────────
+// With WORCA_BROKER_URL set (plans/credential-broker-design.html §5.2), worca holds
+// no model credential. Each spawn gets its own short-lived token from the broker and
+// talks to `<broker>/p/<slot>`; the broker adds the paying person's key on the way
+// out. The token is revoked when the process exits, and never survives in anything
+// worca stores: events and error text pass through redactSecrets.
+
+/** Error in the recovery classes the orchestrator already knows (auth pauses, never retries blindly). */
+function brokerSpawnError(message, errorClass = 'auth') {
+  const err = new Error(`worca-broker: ${message}`);
+  err.errorClass = errorClass;
+  return err;
+}
+
+function isLoopbackUrl(v) {
+  try {
+    const h = new URL(v).hostname.replace(/^\[|\]$/g, '');
+    return h === '127.0.0.1' || h === 'localhost' || h === '::1';
+  } catch { return false; }
+}
+
+/** Which broker slot a spawn's model env routes to: {slot}, {bridge:true}, or {error}. */
+export function brokerRouteFor(modelEnv, env = process.env) {
+  const base = modelEnv && typeof modelEnv.ANTHROPIC_BASE_URL === 'string' ? modelEnv.ANTHROPIC_BASE_URL.trim() : '';
+  if (!base) return { slot: 'anthropic' };
+  const slot = slotOfBaseUrl(base, env);
+  if (slot) return { slot };
+  // worca's own in-process bridge (bridge/server.mjs): it reaches a keyless local
+  // endpoint itself; the broker guard refuses any bridged entry that holds a key.
+  if (isLoopbackUrl(base)) return { bridge: true };
+  let host = base;
+  try { host = new URL(base).host; } catch { /* keep the raw value */ }
+  return { error: `this model routes to ${host} directly; with the credential broker on, a model must use a broker slot (set its credential in Settings › Models)` };
+}
+
+const SPAWN_TTL_SEC = { aux: 600, test: 600, ask: 7200, phase: 86400 };
+
+async function runViaBroker(opts) {
+  const route = brokerRouteFor(opts.modelEnv);
+  if (route.error) throw brokerSpawnError(route.error);
+  const onEvent = opts.onEvent;
+  const redactingOnEvent = (e) => onEvent(redactDeep(e));
+
+  let info;
+  try { info = await brokerInfo(); }
+  catch (err) { throw brokerSpawnError(err.message, 'network'); }
+
+  // A bridged model (OpenAI, OpenRouter, Copilot, a gateway): the CLI still talks to worca's
+  // loopback bridge, which translates, but it presents THIS spawn's broker token and the
+  // bridge forwards it to the model's slot. A keyless local endpoint needs no token.
+  let bridgeSlot = null;
+  if (route.bridge) {
+    const ms = modelSlot(opts.model);
+    if (ms && ms.error) throw brokerSpawnError(ms.error);
+    if (!ms || ms.keyless) {
+      try {
+        const r = await runReal({ ...opts, onEvent: redactingOnEvent });
+        return { ...r, text: redactSecrets(r.text) };
+      } catch (err) { if (err && typeof err.message === 'string') err.message = redactSecrets(err.message); throw err; }
+    }
+    bridgeSlot = ms.slot;
+  }
+  let billTo = resolveBillTo(opts.billTo);
+  if (info.mode === 'multi' && (!billTo || billTo === 'local')) {
+    billTo = normalizeBillTo(process.env.WORCA_BROKER_SYSTEM_BILL_TO);
+    if (!billTo) throw brokerSpawnError('this action has no signed-in person to bill it to. Start it from the web UI, or set WORCA_BROKER_SYSTEM_BILL_TO for work nobody in particular starts');
+  }
+  const kind = ['aux', 'test', 'ask', 'phase'].includes(opts.spawnKind) ? opts.spawnKind
+    : (opts.permissionMode === 'dontAsk' ? 'ask' : 'phase');
+  // Whether this spawn runs where no other person's agent can read it: an agent spawn under
+  // the paying person's own pool user (not a resumed run's starter's), or a server-side spawn
+  // when agents run under their own users (they can't read the server's processes). The
+  // broker uses a personal Claude subscription only for such spawns.
+  const owner = normalizeBillTo(currentOwner()) || billTo;
+  const isolated = opts.asAgent
+    ? owner === billTo && !!agentIdentityFor(owner)?.dedicated
+    : !!agentIdentity();
+  let minted;
+  try {
+    minted = await mintSpawnToken({
+      billTo: billTo || 'local', slots: [bridgeSlot || route.slot], kind, ttlSec: SPAWN_TTL_SEC[kind],
+      runId: opts.runId || null, threadId: opts.threadId || null, isolated,
+    });
+  } catch (err) {
+    throw brokerSpawnError(`cannot get a token for this spawn: ${err.message}`, err.status === 401 ? 'auth' : 'network');
+  }
+  const modelEnv = bridgeSlot
+    // Bridged: keep the bridge URL (and the rest of the resolved env); swap the bridge's own
+    // secret for the spawn token.
+    ? { ...opts.modelEnv, ANTHROPIC_AUTH_TOKEN: minted.token }
+    : withProviderModesOff({
+      ENABLE_TOOL_SEARCH: 'true',
+      ...(opts.modelEnv || {}),
+      ANTHROPIC_BASE_URL: slotBaseUrl(route.slot),
+      ANTHROPIC_AUTH_TOKEN: minted.token,
+    });
+  try {
+    const r = await runReal({ ...opts, modelEnv, onEvent: redactingOnEvent });
+    return { ...r, text: redactSecrets(r.text) };
+  } catch (err) {
+    if (err && typeof err.message === 'string') err.message = redactSecrets(err.message);
+    throw err;
+  } finally {
+    revokeSpawnToken(minted.spawnId);
+  }
 }
 
 // ── Real execution ───────────────────────────────────────────────────────────
@@ -479,7 +662,7 @@ export function buildClaudeArgs({
   // way in because the legacy body below already owns a local `tools` (the
   // --allowedTools union).
   tools: builtinTools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages,
-  maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, hostGuard, addDirs, disallowedTools,
+  maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, hostGuard, addDirs, disallowedTools, agents,
 }, delivery = {}) {
   // delivery (GH #380, set only by planClaudeInvocation's staged branch):
   //   promptViaStdin   -> bare `-p`; the prompt is written to the child's stdin
@@ -546,6 +729,13 @@ export function buildClaudeArgs({
   if (typeof appendSubagentSystemPrompt === 'string' && appendSubagentSystemPrompt) {
     args.push('--append-subagent-system-prompt', appendSubagentSystemPrompt);
   }
+  // Run-scoped sub-agent definitions (the pinned investigator, phases.mjs investigatorAgents).
+  // ALWAYS inline JSON, on the staged branch too: Claude Code reads `--agents <file>` only from
+  // 2.1.281, and docker/CLAUDE_CODE_VERSION pins 2.1.278 (a path there fails at spawn with
+  // "Invalid --agents configuration"). The definition is ~600 chars. Before --add-dir (LAST).
+  if (agents && typeof agents === 'object' && Object.keys(agents).length) {
+    args.push('--agents', JSON.stringify(agents));
+  }
   // Native-rules revision (2026-09-13): Ask Worca's memory mount. LAST, so every earlier argv
   // stays a prefix; absent / [] / non-strings ⇒ nothing (the `names` filter above).
   for (const d of names(addDirs)) args.push('--add-dir', d);
@@ -601,7 +791,7 @@ export function stageClaudeInvocation(opts, { bin = DEFAULT_BIN, limit = ARGV_IN
   return { ...plan, dir };
 }
 
-function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, model, effort, onEvent, signal, bin, resumeSessionId, mcpConfigPath, mcpServerGrants, permissionRules, envScrub, envAllowlist, modelEnv, disallowedTools, tools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages, maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, addDirs, argvInlineLimit, asAgent }) {
+function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, model, effort, onEvent, signal, bin, resumeSessionId, mcpConfigPath, mcpServerGrants, permissionRules, envScrub, envAllowlist, modelEnv, spawnEnv: runSpawnEnv, disallowedTools, tools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages, maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, addDirs, agents, argvInlineLimit, asAgent }) { // billTo/spawnKind/runId/threadId are consumed by runViaBroker
   return new Promise((resolveP, rejectP) => {
     // Per-model routing env (design §4.4), prepared BEFORE argv: reserved keys
     // are re-dropped here defensively — the write path already rejects them, so
@@ -680,7 +870,7 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
         permissionMode, model: wireModel, effort, allowedTools, resumeSessionId,
         mcpConfigPath, mcpServerGrants, permissionRules,
         tools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages,
-        maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, addDirs, disallowedTools,
+        maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, addDirs, disallowedTools, agents,
       }, { bin: resolved.bin, limit });
     } catch (err) {
       rejectP(new Error(`Failed to stage the claude prompt files: ${err.message}`));
@@ -699,12 +889,16 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
     // spawn inherits process.env exactly as it did before guardrails existed.
     const guardrailEnv = buildSpawnEnv(envScrub, envAllowlist);
 
+    // wsmap D9: the run-level env (a fan-out node's concurrency cap) merges OVER the guardrail env —
+    // it survives scrub and replaces an ambient value — and UNDER the model env below.
     // Model env merges LAST: it survives scrub and wins collisions (explicit
-    // operator config outranks ambient-env hygiene). With no modelEnv (or
-    // nothing surviving the filter) the spawn env is byte-identical to the
+    // operator config outranks ambient-env hygiene — a catalog entry that sets the cap wins too).
+    // With neither (or nothing surviving the filters) the spawn env is byte-identical to the
     // pre-feature behavior, including the undefined -> inherit-process.env case.
+    const runEnv = cleanRunEnv(runSpawnEnv);
     let spawnEnv = guardrailEnv;
-    if (safeModelEnv) spawnEnv = { ...(guardrailEnv ?? process.env), ...safeModelEnv };
+    if (runEnv) spawnEnv = { ...(spawnEnv ?? process.env), ...runEnv };
+    if (safeModelEnv) spawnEnv = { ...(spawnEnv ?? process.env), ...safeModelEnv };
 
     // WORCA_HOST_PID rides every guarded spawn (the hook reads it; scrub would
     // drop it — WORCA_ is not an allowlisted prefix — so it is added AFTER).
@@ -713,6 +907,20 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
     // No GitHub credential reaches claude, in any guardrail tier, from a per-project allowlist or a
     // model env alike (src/core/github-credentials.mjs): pushes and PRs are worca's own calls.
     spawnEnv = stripGithubCredentials(spawnEnv ?? process.env);
+    // The broker's own secret never reaches an agent. With the broker on, neither does any
+    // ambient model credential (the boot guard refuses them; this is the second line): the
+    // spawn's broker token is the only one it holds, and it wins over nothing.
+    delete spawnEnv.WORCA_BROKER_SECRET;
+    delete spawnEnv.WORCA_BROKER_SECRET_FILE;
+    if (brokerEnabled()) {
+      for (const k of MODEL_CREDENTIAL_ENV_KEYS) if (k !== 'ANTHROPIC_AUTH_TOKEN' || !safeModelEnv?.ANTHROPIC_AUTH_TOKEN) delete spawnEnv[k];
+    }
+    // Routed off first party, a long turn behind a stream-buffering gateway must
+    // not hit Bun's ~5-min fetch timeout or the CLI's first-byte watchdog
+    // (model-env.mjs#withStreamTimeouts).
+    // Read off the FINAL env so the ambient shell, the run env and the model entry
+    // all count for both the route and an explicit value.
+    spawnEnv = withStreamTimeouts(spawnEnv);
 
     // Opt-in spawn diagnostics (WORCA_DEBUG_SPAWN, default off — byte-identical spawn
     // path when unset). Everything here is derived from values already computed above
@@ -735,7 +943,7 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
 
     // Agent isolation (agent-user.mjs): the same command under the agent's uid, via sudo, in its
     // own process group so a stuck agent can still be SIGKILLed through sudo.
-    const agentId = asAgent ? agentIdentity() : null;
+    const agentId = asAgent ? agentIdentityFor(currentOwner()) : null;   // the owner's pool user (agent-pool.mjs)
     let child;
     try {
       let file = resolved.bin;
@@ -771,6 +979,19 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
     // STDOUT and exits non-zero with EMPTY stderr. Capture that text so a
     // non-zero exit surfaces the real cause instead of an opaque "no stderr".
     let errorDetail = '';
+    let apiErrorText = '';   // the last "API Error: …" assistant text (API_ERROR_TEXT_RE)
+    // A bridged spawn: the in-process bridge records the upstream's own reason
+    // (bridge/telemetry.mjs 'failure'), matched on this spawn's catalog id + tag
+    // as model-test.mjs does. The last fallback before the CLI's bare notice, so
+    // a CLI that exits without an API Error line still names the real cause.
+    let bridgeFailureText = '';
+    const bridgeKey = bridgeSpawnKey(modelEnv);
+    const onBridgeFailure = (e) => {
+      if (e && e.message && String(e.catalogId || '').toLowerCase() === bridgeKey.catalogId && (e.tag || '') === bridgeKey.tag) {
+        bridgeFailureText = String(e.message);
+      }
+    };
+    if (bridgeKey) bridgeEvents.on('failure', onBridgeFailure);
     let settled = false;
 
     const onAbort = () => {
@@ -800,6 +1021,7 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
       if (settled) return;
       settled = true;
       if (signal) signal.removeEventListener?.('abort', onAbort);
+      if (bridgeKey) bridgeEvents.off('failure', onBridgeFailure);
       cleanupStaged();
       fn(arg);
     };
@@ -822,7 +1044,10 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
       if (evt?.type === 'system' && evt?.subtype === 'init' && typeof evt.session_id === 'string') {
         safeEmit(onEvent, { type: 'session', sessionId: evt.session_id });
       }
-      if (evt?.type === 'assistant' && text) assistantText += text;
+      if (evt?.type === 'assistant' && text) {
+        assistantText += text;
+        if (API_ERROR_TEXT_RE.test(text.trim())) apiErrorText = text.trim();
+      }
       if (evt?.type === 'result' && typeof evt.result === 'string') resultText += evt.result;
       // Remember the most specific error text we see, for the non-zero-exit path.
       if (evt?.type === 'result' && evt.is_error) {
@@ -867,7 +1092,7 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
       // Classify BEFORE buffering: the class must see every line ever printed —
       // an early 401 or session-limit notice followed by hundreds of KB of MCP
       // chatter would otherwise scroll past both the trim and the tail cap.
-      stderrClass = strongestClass(stderrClass, classifyError(line));
+      if (!isBenignStderrLine(line)) stderrClass = strongestClass(stderrClass, classifyError(line));
       stderrBuf += line + '\n';        // still the source of the exit-code detail
       // Rolling tail: bound memory against chatty MCP servers. Trim at 4x the
       // cap down to 2x — amortized, and the kept tail always exceeds
@@ -893,8 +1118,12 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
         return;
       }
       if (code !== 0) {
-        const fromStderr = stderrBuf.trim();
-        const raw = fromStderr || errorDetail || 'no stderr';
+        // Benign notices are not evidence (BENIGN_STDERR_PATTERNS): stderr feeds
+        // the detail only when something else is left, else the stream's own
+        // error wins. A notice alone still beats the opaque "no stderr".
+        const fromStderr = stderrBuf.split('\n').filter((l) => !isBenignStderrLine(l)).join('\n').trim();
+        const streamDetail = errorDetail || apiErrorText || bridgeFailureText;
+        const raw = fromStderr || streamDetail || stderrBuf.trim() || 'no stderr';
         // Tail, not head: the terminal cause sits at the END of a long stderr.
         const detail = raw.length > STDERR_DETAIL_MAX ? `… ${raw.slice(-STDERR_DETAIL_MAX)}` : raw;
         const err = new Error(`${bin} exited with code ${code}: ${detail}`);
@@ -903,7 +1132,11 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
         // stdout errorDetail. classifyError() returns this stamp verbatim, so
         // the tail cap above can never starve recovery — or flip an early auth
         // failure into 'network' because connection chatter filled the tail.
-        err.errorClass = fromStderr ? stderrClass : classifyError(raw);
+        // A stream-borne API error (a 429 in the result) counts even when real
+        // stderr chatter fed the message.
+        err.errorClass = fromStderr
+          ? strongestClass(stderrClass, streamDetail ? classifyError(streamDetail) : null)
+          : classifyError(raw);
         // Mark the origin channel so the orchestrator can tag its `error` log
         // line with stream:'err' without sniffing the message. Absent when the
         // detail came from the stdout `result` envelope (the common case — see
@@ -1027,7 +1260,8 @@ async function emitLog(onEvent, text) {
 export const MOCK_WRITER_ROLES = new Set([
   'clarify', 'planner-plan', 'refiner', 'decomposer', 'implementer', 'reviewer', 'plan-review',
   'workspace-scan', 'agent-gen', 'workspace-reviewer', 'manual-tests-checklist', 'manual-web-ui-testing', 'memory-defrag',
-  'generic-producer', 'generic-verifier',
+  'generic-producer', 'generic-verifier', 'deck-builder', 'deck-audit', 'deck-export',
+  'workspace-usage', 'workspace-synth',
 ]);
 
 /** Named so the executor's mock-role chain and the switch cannot drift apart. */
@@ -1044,7 +1278,7 @@ export const MOCK_ROLE_MEMORY_DEFRAG = 'memory-defrag';
  */
 const MOCK_FANOUT_ROLES = new Set([
   'planner-plan', 'refiner', 'implementer', 'plan-review',
-  'workspace-reviewer', 'workspace-scan',
+  'workspace-reviewer', 'workspace-scan', 'workspace-usage',
 ]);
 
 /**
@@ -1405,7 +1639,13 @@ async function runMock({ cwd, systemPrompt, prompt, onEvent, signal, resumeSessi
       text = await mockPlanReview(m, cycle, onEvent);
       break;
     case 'workspace-scan':
-      text = await mockWorkspaceScan(m, prompt, onEvent);
+      text = await mockWorkspaceSurvey(m, onEvent);
+      break;
+    case 'workspace-usage':
+      text = await mockWorkspaceUsage(m, onEvent);
+      break;
+    case 'workspace-synth':
+      text = await mockWorkspaceSynth(m, onEvent);
       break;
     case 'agent-gen':
       text = await mockAgentGen(m, onEvent);
@@ -1429,6 +1669,15 @@ async function runMock({ cwd, systemPrompt, prompt, onEvent, signal, resumeSessi
       // Reuses the reviewer mock: writes MOCK_OUT md + MOCK_JSON verdict with the
       // standard cycle-decreasing severity, so generic loops terminate offline.
       text = await mockReviewer(m, cycle, onEvent);
+      break;
+    case 'deck-builder':
+      text = await mockDeckBuilder(m, onEvent);
+      break;
+    case 'deck-audit':
+      text = await mockDeckAudit(m, cycle, onEvent);
+      break;
+    case 'deck-export':
+      text = await mockDeckExport(m, cycle, onEvent);
       break;
     default:
       await emitLog(onEvent, `[mock] no side effects for unknown role`);
@@ -1580,6 +1829,114 @@ async function mockMemoryDefrag(m, systemPrompt, onEvent) {
     safeEmit(onEvent, { type: 'tool_use', text: `wrote ${out}`, raw: { mock: true, file: out } });
   }
   return merged ? `[mock] memory defragment: merged ${merged[1]} into ${merged[0]}` : '[mock] memory defragment: nothing to merge';
+}
+
+/** A 1×1 opaque PNG — enough for a real image/png magic number and a viewer <img>. */
+const MOCK_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+
+const MOCK_KIT_FILES = ['deck-stage.js', 'deck-enhance.js', 'deck-export.js', 'deck-audit.js'];
+
+/** Smallest structurally-valid PDF: one empty page. The golden run asserts the
+ *  deliverable EXISTS and is a PDF; it never parses it. */
+const MOCK_PDF = Buffer.from(
+  '%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n'
+  + '2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n'
+  + '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 1920 1080]>>endobj\n'
+  + 'trailer<</Root 1 0 R>>\n%%EOF\n', 'latin1');
+
+/** Writes deck-manifest.md (MOCK_OUT) plus deck/{deck,proof}.html and stub kit
+ *  copies beside it — the subfolder tree the sidecar's extraFiles index. */
+async function mockDeckBuilder(m, onEvent) {
+  const out = m.MOCK_OUT;
+  if (!out) return '[mock] deck-builder: no MOCK_OUT given';
+  const pdir = dirname(out);
+  const deckDir = join(pdir, 'deck');
+  await mkdir(deckDir, { recursive: true });
+  const slides = ['Worca cuts review cost', 'Three loops, one gate', 'The ask'];
+  const sections = slides.map((t, i) => `  <section data-label="${String(i + 1).padStart(2, '0')} · ${t}"><h1>${t}</h1>${i === 1 ? '<p data-step="1">Reveal one</p>' : ''}</section>`).join('\n');
+  const html = (proof) =>
+    '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8"><meta name="generator" content="OpenDeck 1.0.0"><title>Mock deck</title>' +
+    '<style>section{font-size:48px}h1{font-size:72px}</style></head><body>\n' +
+    `<deck-stage width="1920" height="1080"${proof ? ' noscale' : ''}>\n${proof ? sections.replace(/data-step="1"/g, 'data-step="1" class="step-visible"') : sections}\n</deck-stage>\n` +
+    '<script type="application/json" id="speaker-notes">["", "", ""]</script>\n' +
+    '<script src="deck-stage.js"></script>\n' + (proof ? '<script src="deck-audit.js"></script>\n' : '<script src="deck-enhance.js"></script>\n<script src="deck-export.js"></script>\n') +
+    '</body></html>\n';
+  await writeFile(join(deckDir, 'deck.html'), html(false), 'utf8');
+  await writeFile(join(deckDir, 'proof.html'), html(true), 'utf8');
+  for (const f of MOCK_KIT_FILES) await writeFile(join(deckDir, f), `/* mock ${f} */\n`, 'utf8');
+  const manifest = '# Deck manifest\nMode: live   Slides: 3   Kit: 1.0.0\nDeck: deck/deck.html   Proof: deck/proof.html\n\n' +
+    '| # | Title | Composition | Ground | Steps | Skipped |\n|---|---|---|---|---|---|\n' +
+    slides.map((t, i) => `| ${i + 1} | ${t} | statement | dark | ${i === 1 ? 1 : 0} | no |`).join('\n') +
+    '\n\n## Changed this cycle\n- first build\n';
+  await ensureDir(out);
+  await writeFile(out, manifest, 'utf8');
+  safeEmit(onEvent, { type: 'tool_use', text: `wrote ${out}`, raw: { mock: true, file: out } });
+  return `[mock] deck written to ${deckDir}`;
+}
+
+/** Writes the two single-file deliverables beside the deck, then a clean
+ *  verdict. Mocked as bytes, not built — the offline run proves the pipeline
+ *  CARRIES deliverables to the end, which is the check that was missing when a
+ *  run finished "clean" having produced neither. */
+async function mockDeckExport(m, cycle, onEvent) {
+  const jsonPath = m.MOCK_JSON;
+  const mdPath = m.MOCK_OUT;
+  // Degrade the way mockDeckBuilder does: a graph that wires neither the verdict
+  // nor the report port would otherwise throw TypeError out of node:path.
+  if (!jsonPath && !mdPath) return '[mock] deck-export: no MOCK_JSON or MOCK_OUT given';
+  const pdir = dirname(jsonPath || mdPath);
+  const deckDir = join(pdir, 'deck');
+  await mkdir(deckDir, { recursive: true });
+  const src = await readFile(join(deckDir, 'deck.html'), 'utf8').catch(() => '<!DOCTYPE html>\n');
+  // FALLBACK ONLY, mirroring the real agent: the deckBundle card owns the single
+  // file, and this step builds one itself only when the card left none — a host
+  // with no python interpreter, or a mock run, where the card writes just its
+  // report. A real standalone inlines every companion; the mock mirrors the
+  // property the golden run asserts, not the bundler's actual output.
+  const standalone = join(deckDir, 'deck.standalone.html');
+  if (!existsSync(standalone)) {
+    await writeFile(standalone,
+      src.replace(/<script src="([^"]+)"><\/script>/g, (_m2, f) => `<script>/* inlined ${f} */</script>`), 'utf8');
+  }
+  await writeFile(join(deckDir, 'deck.pdf'), MOCK_PDF);
+  const verdict = { issues: [], summary: '3 slides, 3 PDF pages, standalone has no external refs. task.md named no extra deliverable.' };
+  if (jsonPath) { await ensureDir(jsonPath); await writeFile(jsonPath, `${JSON.stringify(verdict, null, 2)}\n`, 'utf8'); }
+  if (mdPath) {
+    await ensureDir(mdPath);
+    await writeFile(mdPath, `# Deck export — cycle ${cycle}\n\n- deck/deck.pdf — 3 pages\n- deck/deck.standalone.html — self-contained\n\nNo blocking findings.\n`, 'utf8');
+  }
+  safeEmit(onEvent, { type: 'tool_use', text: `wrote ${join(deckDir, 'deck.pdf')}`, raw: { mock: true, file: join(deckDir, 'deck.pdf') } });
+  return `[mock] deliverables written to ${deckDir}`;
+}
+
+/** Writes shots/s01..s03.png beside the verdict, then the standard
+ *  cycle-decreasing verdict (major on cycle 1, suggestion after). */
+async function mockDeckAudit(m, cycle, onEvent) {
+  const jsonPath = m.MOCK_JSON;
+  const mdPath = m.MOCK_OUT;
+  // Degrade the way mockDeckBuilder does: a graph that wires neither the verdict
+  // nor the report port would otherwise throw TypeError out of node:path.
+  if (!jsonPath && !mdPath) return '[mock] deck-audit: no MOCK_JSON or MOCK_OUT given';
+  const pdir = dirname(jsonPath || mdPath);
+  const shots = join(pdir, 'shots');
+  await mkdir(shots, { recursive: true });
+  for (let i = 1; i <= 3; i++) await writeFile(join(shots, `s${String(i).padStart(2, '0')}.png`), MOCK_PNG);
+  const review = cycle <= 1
+    ? { summary: '3 slides audited (mode live). 1 slide with clipped text. Screenshots in shots/.',
+        issues: [{ severity: 'major', title: 'Slide 2: clipped text', detail: 'p (scrollWidth 1980 > clientWidth 1840)', location: 'deck/deck.html slide 2 (shots/s02.png)' }] }
+    : { summary: '3 slides audited (mode live). No blocking facts. Screenshots in shots/.',
+        issues: [{ severity: 'suggestion', title: 'Slide 3 has 4 words', detail: 'below the 30-word budget', location: 'shots/s03.png' }] };
+  if (mdPath) {
+    await ensureDir(mdPath);
+    await writeFile(mdPath, `# Deck audit (cycle ${cycle})\n\n${review.summary}\n\n` + review.issues.map((i) => `- **[${i.severity}]** ${i.title} — ${i.detail}`).join('\n') + '\n', 'utf8');
+  }
+  if (jsonPath) {
+    await ensureDir(jsonPath);
+    await writeFile(jsonPath, JSON.stringify(review, null, 2) + '\n', 'utf8');
+    safeEmit(onEvent, { type: 'tool_use', text: `wrote ${jsonPath}`, raw: { mock: true, file: jsonPath } });
+  }
+  return JSON.stringify(review);
 }
 
 async function mockPlannerPlan(m, onEvent) {
@@ -1875,54 +2232,35 @@ async function mockPlanReview(m, cycle, onEvent) {
   return JSON.stringify(review);
 }
 
-/**
- * Mock the off-pipeline workspace scanner. Writes a deterministic interconnection
- * description following the §5.8 template (so the wizard textarea is populated in
- * mock mode) and emits one `INVESTIGATING <key> relations to <other>` log line per
- * project so the live-status UI can be exercised offline. Project keys are parsed
- * from the prompt's member lines (the runner does NOT spawn sub-agents — fan-out is
- * a prompt directive the mock ignores).
- */
-async function mockWorkspaceScan(m, prompt, onEvent) {
-  const out = m.MOCK_OUT;
-  const name = m.MOCK_BASE || 'Workspace';
-  // Parse `(`backtick-key`)` member markers the scan task prompt renders, in order.
-  const keys = [];
-  for (const line of String(prompt || '').split(/\r?\n/)) {
-    const mm = line.match(/^\s*-\s+\*\*.*\*\*\s+\(`([^`]+)`\)/);
-    if (mm) keys.push(mm[1]);
-  }
-  await emitLog(onEvent, `[mock] workspace scanner investigating ${keys.length} project(s)`);
-  // One INVESTIGATING line per project (paired with the next project, round-robin),
-  // then the synthesize line — the changing live-status text the server maps.
-  for (let i = 0; i < keys.length; i++) {
-    const other = keys[(i + 1) % keys.length] || keys[i];
-    await emitLog(onEvent, `INVESTIGATING ${keys[i]} relations to ${other}`);
-  }
-  await emitLog(onEvent, 'SYNTHESIZING workspace description');
+/** Mock the Workspace scan's survey stage (wsmap D20; role workspace-scan, the repurposed
+ *  workspaceScanner): survey.json off the extract the brief names (MOCK_IN = the survey brief) —
+ *  workspace-scan-mock.mjs writeMockSurvey. */
+async function mockWorkspaceSurvey(m, onEvent) {
+  if (!m.MOCK_OUT) return '[mock] workspace-scan: no MOCK_OUT given';
+  const r = await writeMockSurvey({ briefPath: m.MOCK_IN, outPath: m.MOCK_OUT });
+  await emitLog(onEvent, `[mock] workspace survey: ${r.investigated} investigated, ${r.skipped} skipped`);
+  safeEmit(onEvent, { type: 'tool_use', text: `wrote ${m.MOCK_OUT}`, raw: { mock: true, file: m.MOCK_OUT } });
+  return `[mock] workspace survey written to ${m.MOCK_OUT}`;
+}
 
-  const projects = keys.length ? keys : ['project-a', 'project-b'];
-  const md =
-    `# Workspace: ${name}\n` +
-    `## Overview\n` +
-    `Deterministic mock interconnection description for ${projects.length} member project(s). ` +
-    `The dominant integration theme is a shared REST contract.\n` +
-    `## Projects\n` +
-    projects.map((k) => `- ${k}: member project`).join('\n') + '\n' +
-    `## Interconnections\n` +
-    (projects.length >= 2
-      ? `- ${projects[0]} -> ${projects[1]}: REST API; ${projects[0]} calls ${projects[1]}'s HTTP endpoints.\n`
-      : `- (single project — no interconnections)\n`) +
-    `## Change-coordination notes\n` +
-    `- Changes that touch the shared REST contract must be coordinated across both members.\n` +
-    `## Suggested change order\n` +
-    (projects.length >= 2 ? `${projects[1]} before ${projects[0]} (provider before consumer).\n` : `no strict ordering\n`);
+/** Mock the Workspace scan's usage stage (wsmap D20): usage.json off the catalog the brief names
+ *  (MOCK_IN = the usage brief), every candidate confirmed — workspace-scan-mock.mjs writeMockUsage. */
+async function mockWorkspaceUsage(m, onEvent) {
+  if (!m.MOCK_OUT) return '[mock] workspace-usage: no MOCK_OUT given';
+  const r = await writeMockUsage({ briefPath: m.MOCK_IN, outPath: m.MOCK_OUT });
+  await emitLog(onEvent, `[mock] workspace usage: ${Object.keys(r.doc.members).length} member(s), ${r.uses} use(s) confirmed`);
+  safeEmit(onEvent, { type: 'tool_use', text: `wrote ${m.MOCK_OUT}`, raw: { mock: true, file: m.MOCK_OUT } });
+  return `[mock] workspace usage written to ${m.MOCK_OUT}`;
+}
 
-  if (!out) return '[mock] workspace-scan: no MOCK_OUT given';
-  await ensureDir(out);
-  await writeFile(out, md, 'utf8');
-  safeEmit(onEvent, { type: 'tool_use', text: `wrote ${out}`, raw: { mock: true, file: out } });
-  return `[mock] workspace description written to ${out}`;
+/** Mock the Workspace scan's synthesis stage (wsmap D20): synthesis.json off the map the brief names
+ *  (MOCK_IN = the synthesis brief) — workspace-scan-mock.mjs writeMockSynthesis. */
+async function mockWorkspaceSynth(m, onEvent) {
+  if (!m.MOCK_OUT) return '[mock] workspace-synth: no MOCK_OUT given';
+  const r = await writeMockSynthesis({ briefPath: m.MOCK_IN, outPath: m.MOCK_OUT });
+  await emitLog(onEvent, `[mock] workspace synthesis: ${Object.keys(r.doc.roles).length} role(s) filled`);
+  safeEmit(onEvent, { type: 'tool_use', text: `wrote ${m.MOCK_OUT}`, raw: { mock: true, file: m.MOCK_OUT } });
+  return `[mock] workspace synthesis written to ${m.MOCK_OUT}`;
 }
 
 /**

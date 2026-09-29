@@ -176,7 +176,8 @@ test('source scans: tools.mjs stays import-free and write-free; script-deps.mjs 
 
 test('source scan: the MCP child spreads the script bundle, and the turn forwards the write poke', () => {
   const stdio = readFileSync(new URL('../src/core/ask/mcp-stdio.mjs', import.meta.url), 'utf8');
-  assert.match(stdio, /createAskTools\(\{[\s\S]*?defaultScriptDeps\(\{ threadId, signal: life\.signal \}\)/, 'the child spreads the script bundle in, with the life signal');
+  assert.match(stdio, /createAskTools\(\{[\s\S]*?defaultScriptDeps\(\{ threadId, signal \}\)/, 'the tool server spreads the script bundle in, with the life signal');
+  assert.match(stdio, /createAskToolServer\(\{[\s\S]*?signal: life\.signal/, 'the child hands the tool server its life signal');
   const turn = readFileSync(new URL('../src/core/ask/turn.mjs', import.meta.url), 'utf8');
   assert.match(turn, /onScriptMutation: deps\.onScriptMutation \?\? \(\(\) => \{\}\)/);
   assert.match(turn, /onScriptMutation: \(e\) => \{ try \{ this\.deps\.onScriptMutation\(e\); \}/);

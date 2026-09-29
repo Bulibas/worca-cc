@@ -34,7 +34,7 @@ cat > /tmp/worca-probe-claude <<'F'
 #!/bin/sh
 p=$(pgrep -u worca -o node)
 r() { if cat "$1" >/dev/null 2>&1; then echo read; else echo denied; fi; }
-printf '{"type":"result","subtype":"success","is_error":false,"result":"user=%s environ=%s db=%s home=%s gh=%s app=%s"}\n' "$(id -un)" "$(r /proc/$p/environ)" "$(r /data/worca/.worca-cc/worca-cc.db)" "$(ls /data/home >/dev/null 2>&1 && echo read || echo denied)" "${GH_TOKEN:+set}" "${WORCA_GH_APP_KEY_B64:+set}"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"user=%s environ=%s db=%s home=%s gh=%s app=%s broker=%s"}\n' "$(id -un)" "$(r /proc/$p/environ)" "$(r /data/worca/.worca-cc/worca-cc.db)" "$(ls /data/home >/dev/null 2>&1 && echo read || echo denied)" "${GH_TOKEN:+set}" "${WORCA_GH_APP_KEY_B64:+set}" "${WORCA_BROKER_SECRET:+set}"
 F
 cat > /tmp/worca-probe.mjs <<'F'
 import { readFileSync } from 'node:fs';
@@ -43,6 +43,11 @@ for (const kv of readFileSync(`/proc/${process.argv[2]}/environ`, 'utf8').split(
   if (i > 0 && !(kv.slice(0, i) in process.env)) process.env[kv.slice(0, i)] = kv.slice(i + 1);
 }
 process.env.WORCA_MOCK = '0';
+// This checks the OS boundary between worca and its agents, not the broker (section 4 does
+// that): with a broker in multi mode a spawn needs a signed-in person to bill, and a probe has
+// none. The broker's secret stays in the environment, so the agent's view proves the runner
+// drops it.
+delete process.env.WORCA_BROKER_URL;
 const root = '/usr/local/lib/node_modules/@worca/app/src/core';
 const { runClaude } = await import(`${root}/claude-runner.mjs`);
 const r = await runClaude({ cwd: '/data/projects', prompt: 'x', bin: '/tmp/worca-probe-claude', asAgent: true });
@@ -62,7 +67,8 @@ out=$(su -s /bin/sh worca -c "cd /data/projects && umask 0007 && node --no-warni
 rm -f /tmp/worca-probe.mjs /tmp/worca-probe-claude
 agent=$(printf '%s\n' "$out" | sed -n 's/^agent //p')
 if id worca-agent >/dev/null 2>&1; then
-  want "agent sees" "$agent" "user=worca-agent environ=denied db=denied home=denied gh= app="
+  want "agent sees" "$agent" "user=worca-agent environ=denied db=denied home=denied gh= app= broker="
+  [ -n "$agent" ] || printf 'info  runner said: %s\n' "$(printf '%s\n' "$out" | tail -3 | tr '\n' ' ' | cut -c1-300)"
 else
   printf 'info  agent %s (no worca-agent user: isolation is off)\n' "$agent"
 fi
@@ -70,6 +76,38 @@ mode=$(printf '%s\n' "$out" | sed -n 's/^github //p')
 printf 'info  github mode %s\n' "${mode:-unknown}"
 mint=$(printf '%s\n' "$out" | sed -n 's/^mint //p')
 if [ -n "$mint" ]; then want "GitHub credential works" "$mint" 200; fi
+
+# 4. The credential broker (docs/credential-broker.md), when worca runs with one: no model key
+#    anywhere an agent runs, and the broker's ports refuse an agent that has no token.
+# Read as worca, which owns the process: Railway's container does not let root read it.
+envof() { su -s /bin/sh worca -c "cat /proc/$1/environ" 2>/dev/null | tr '\0' '\n'; }
+B=$(envof "$P" | sed -n 's/^WORCA_BROKER_URL=//p')
+if [ -n "$B" ]; then
+  keys=$(envof "$P" | grep -E '^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|OPENROUTER_API_KEY)=.' | cut -d= -f1 | tr '\n' ' ' | sed 's/ $//')
+  want "no model key in worca's environment" "${keys:-none}" none
+  if id worca-agent >/dev/null 2>&1; then
+    want "broker proxy refuses an agent without a token" "$(su -s /bin/sh worca-agent -c "curl -s -o /dev/null -w '%{http_code}' $B/p/anthropic/v1/models")" 403
+    want "broker internal API refuses an agent" "$(su -s /bin/sh worca-agent -c "curl -s -o /dev/null -w '%{http_code}' $B/internal/info")" 401
+  fi
+else
+  printf 'info  no credential broker (WORCA_BROKER_URL unset)\n'
+fi
+
+# 5. One agent user per person (the pool): one person's agents can't read another's processes.
+if [ -n "$(envof "$P" | sed -n 's/^WORCA_AGENT_POOL=//p')" ] && id worca-agent-01 >/dev/null 2>&1; then
+  su -s /bin/sh worca -c 'sudo -n -u worca-agent-02 -- sleep 15' >/dev/null 2>&1 &
+  sleep 1
+  other=$(pgrep -u worca-agent-02 -n sleep)
+  if [ -n "$other" ]; then
+    r=$(su -s /bin/sh worca -c "sudo -n -u worca-agent-01 -- sh -c 'cat /proc/$other/environ >/dev/null 2>&1 && echo read || echo denied'")
+    want "a pool user reading another pool user's process" "$r" denied
+    kill "$other" 2>/dev/null
+  else
+    fail "could not start a process as worca-agent-02"
+  fi
+else
+  printf 'info  no agent pool (one shared agent user)\n'
+fi
 
 [ "$fails" -eq 0 ] && echo "ALL PASS" || echo "$fails FAILED"
 exit "$fails"

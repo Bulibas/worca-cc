@@ -82,6 +82,50 @@ export function withProviderModesOff(env) {
   return out;
 }
 
+// What aborts a quiet API response in Claude Code (CLI 2.1.281) as "Request timed
+// out." and retries it FROM SCRATCH: Bun's own fetch timeout (~5 min without a
+// byte), which the CLI lifts only where its stream watchdog runs or when
+// API_FORCE_IDLE_TIMEOUT is falsy — probed against a held request: cut at 360s
+// with every other knob at 30 min, held past 420s with it '0'; the watchdog
+// itself (300s to first byte off first party, +1s per 32 KB of request); and
+// API_TIMEOUT_MS (default 600s), which caps the watchdog and is the only bound
+// left once Bun's timeout is lifted. A gateway that buffers the stream (Vertex
+// via the Bosch farm, 2026-09-28) sends nothing until a long xhigh turn is done,
+// so every retry died at the same wall. 30 min is the CLI's clamp ceiling for
+// the watchdogs; API_TIMEOUT_MS matches it so it never undercuts them.
+export const STREAM_TIMEOUT_MS = '1800000';
+export const STREAM_TIMEOUT_ENV = Object.freeze({
+  API_FORCE_IDLE_TIMEOUT: '0',
+  API_TIMEOUT_MS: STREAM_TIMEOUT_MS,
+  CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS: STREAM_TIMEOUT_MS,
+  CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS: STREAM_TIMEOUT_MS,
+  CLAUDE_STREAM_IDLE_TIMEOUT_MS: STREAM_TIMEOUT_MS,
+});
+export const STREAM_TIMEOUT_ENV_KEYS = Object.freeze(Object.keys(STREAM_TIMEOUT_ENV));
+
+// The CLI's own truthiness for its CLAUDE_CODE_USE_* switches.
+const cliTruthy = (v) => typeof v === 'string' && ['1', 'true', 'yes', 'on'].includes(v.trim().toLowerCase());
+
+/**
+ * A spawn env routed off first party (a cloud transport switched on, or a custom
+ * ANTHROPIC_BASE_URL) with Bun's fetch timeout lifted and every other stream
+ * timeout it left unset raised to the CLI ceiling (STREAM_TIMEOUT_ENV). Pure: a
+ * first-party env comes back untouched (the same object) — the
+ * CLI's defaults there are right, since the API streams its first byte at once —
+ * and an explicit key, from the operator's shell or a model entry, is never
+ * overwritten.
+ * @param {Record<string,string>|undefined|null} env  the FINAL spawn env
+ * @returns {Record<string,string>|undefined|null}
+ */
+export function withStreamTimeouts(env) {
+  if (!env || typeof env !== 'object') return env;
+  const routed = PROVIDER_MODE_ENV_KEYS.some((k) => cliTruthy(env[k])) || !!env.ANTHROPIC_BASE_URL;
+  if (!routed) return env;
+  const out = { ...env };
+  for (const [k, v] of Object.entries(STREAM_TIMEOUT_ENV)) if (!(k in out)) out[k] = v;
+  return out;
+}
+
 // Env keys a model entry may NOT set (§4.4): process fundamentals and worca's
 // own runtime knobs, any of which injection could otherwise subvert (mock
 // mode, the claude binary path, the effort flag name). Everything else —
@@ -263,7 +307,7 @@ export function assertModelCost(cost) {
 }
 
 // ── sub-agent model policy (per-node `subagentModel`) ─────────────────────────
-// What a fan-out node's Task/Agent children run on. ONE wire — a prompt block
+// What a fan-out node's Task/Agent children run on. ONE wire for the MODEL — a prompt block
 // (phases.mjs#subagentModelDirective) that tells the agent to pass `model` on
 // every Task call — because the CLI resolves a child's model as Task-call
 // `model` > the agent definition's own `model:` frontmatter > env default >
@@ -271,6 +315,7 @@ export function assertModelCost(cost) {
 // earlier CLAUDE_CODE_SUBAGENT_MODEL env floor was removed for exactly that
 // reason — it bound only agents with no model key — and the key is reserved
 // above so a catalog entry cannot resurrect it.)
+// (A pinned EFFORT is a second wire: a run-scoped --agents definition, phases.mjs investigatorAgents.)
 //
 // The vocabulary is deliberately NOT the worca catalog: the CLI's Task tool
 // accepts an ALIAS enum, so a catalog id (or an ANTHROPIC_MODEL wire id) would
@@ -407,6 +452,73 @@ export function isLocalBaseUrl(v) {
 }
 
 /**
+ * Whether a base URL is OpenRouter's (openrouter.ai or a subdomain). The
+ * bridge then speaks OpenRouter's dialect of chat completions: usage
+ * accounting, unified `reasoning`, provider routing and attribution headers.
+ */
+export function isOpenRouterBaseUrl(v) {
+  if (!isUpstreamBaseUrl(v)) return false;
+  const host = new URL(v.trim()).hostname.toLowerCase();
+  return host === 'openrouter.ai' || host.endsWith('.openrouter.ai');
+}
+
+/** OpenRouter's provider sort orders (provider routing). */
+export const OPENROUTER_SORTS = Object.freeze(['price', 'throughput', 'latency']);
+
+/** A list of non-empty trimmed strings, or a throw naming the field. */
+function stringList(v, field) {
+  if (!Array.isArray(v)) throw new Error(`${field} must be an array of strings`);
+  const out = [];
+  for (const s of v) {
+    if (typeof s !== 'string') throw new Error(`${field} must be an array of strings`);
+    if (s.trim()) out.push(s.trim());
+  }
+  return out;
+}
+
+/**
+ * Validate an `upstream.openrouter` block — OpenRouter's request options,
+ * sent only when the entry's base URL is OpenRouter's:
+ * `{ models?: string[], provider?: { order?: string[], allow_fallbacks?: boolean, sort?: 'price'|'throughput'|'latency' } }`.
+ * `models` is the fallback list tried after the entry's own model. Returns the
+ * normalized block, or undefined when nothing is set. Throws.
+ */
+export function assertOpenRouterOptions(o) {
+  if (o === undefined || o === null) return undefined;
+  if (typeof o !== 'object' || Array.isArray(o)) throw new Error('upstream.openrouter must be an object');
+  const out = {};
+  for (const k of Object.keys(o)) {
+    if (k !== 'models' && k !== 'provider') throw new Error(`unknown upstream.openrouter key ${JSON.stringify(k)} — allowed: models, provider`);
+  }
+  if (o.models !== undefined && o.models !== null) {
+    const models = stringList(o.models, 'upstream.openrouter.models');
+    if (models.length) out.models = models;
+  }
+  const p = o.provider;
+  if (p !== undefined && p !== null) {
+    if (typeof p !== 'object' || Array.isArray(p)) throw new Error('upstream.openrouter.provider must be an object');
+    const provider = {};
+    for (const k of Object.keys(p)) {
+      if (!['order', 'allow_fallbacks', 'sort'].includes(k)) throw new Error(`unknown upstream.openrouter.provider key ${JSON.stringify(k)} — allowed: order, allow_fallbacks, sort`);
+    }
+    if (p.order !== undefined && p.order !== null) {
+      const order = stringList(p.order, 'upstream.openrouter.provider.order');
+      if (order.length) provider.order = order;
+    }
+    if (p.allow_fallbacks !== undefined && p.allow_fallbacks !== null) {
+      if (typeof p.allow_fallbacks !== 'boolean') throw new Error('upstream.openrouter.provider.allow_fallbacks must be true or false');
+      provider.allow_fallbacks = p.allow_fallbacks;
+    }
+    if (p.sort !== undefined && p.sort !== null && p.sort !== '') {
+      if (!OPENROUTER_SORTS.includes(p.sort)) throw new Error(`upstream.openrouter.provider.sort must be one of ${OPENROUTER_SORTS.join(' | ')}`);
+      provider.sort = p.sort;
+    }
+    if (Object.keys(provider).length) out.provider = provider;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
  * Validate a model `upstream` block. Returns the normalized shape or undefined
  * (for null/undefined); THROWS on malformed input with a message naming the
  * field. Secrets (`apiKey`) are literal strings or whole-value `${VAR}` refs.
@@ -453,6 +565,11 @@ export function assertModelUpstream(upstream) {
   }
   const caps = assertModelCapabilities(upstream.capabilities);
   if (caps) out.capabilities = caps;
+  if (upstream.openrouter !== undefined && upstream.openrouter !== null) {
+    if (provider !== 'openai') throw new Error('upstream.openrouter is only for the openai provider (an OpenRouter base URL)');
+    const or = assertOpenRouterOptions(upstream.openrouter);
+    if (or) out.openrouter = or;
+  }
   return out;
 }
 

@@ -18,14 +18,17 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import { preflightNode } from '../src/core/preflight-node.mjs';
+import { preflightDeps } from '../src/core/preflight-deps.mjs';
 import { createOrchestratorFor } from '../src/core/engine-select.mjs';
 import {
   listPipelines, readPipeline, listAllPipelines, readPipelineByKey,
   enrichPipelinesPr, reconcileStaleRunning, readPipelineForResume, persistPrState, readPrState,
   readRunLogText, readRunArtifactText, countPipelines, runRootSweepLookups, legacySweepLookups, slugify,
   listArtifacts, listRunArtifacts, lookupPipelineRow, findPipelineRowById, readPipelineStateById, resolveIndexedArtifact, resolveIndexedArtifactForRow,
-  readPromptFile, runDirForRow,
+  resolveIndexedArtifactFileForRow, readPromptFile, runDirForRow, recordArtifact, appendAudit,
 } from '../src/core/artifacts.mjs';
+import { mimeForPath, viewerKindFor } from '../src/shared/artifact-kinds.mjs';
+import { appendDirection, DIRECTION_MAX_CHARS, DIRECTIONS_KIND, DIRECTIONS_FILE, DIRECTIONS_CLOSED } from '../src/core/directions.mjs';
 import { DIFF_PATCH_FILE } from '../src/core/results.mjs';
 import { readAskFileEntry, ASK_FILE_MIMES } from '../src/core/ask-files.mjs';
 import { ASK_FILES_DIR } from '../src/core/ask-forms.mjs';
@@ -35,7 +38,7 @@ import {
   deleteDiffComment, unresolvedCounts, onDiffCommentsChanged, stampSentRunId,
   peekPendingCardComments, clearPendingCardComments, DiffCommentError, DC_ID_RE,
 } from '../src/core/diff-comments.mjs';
-import { listProjects, addProject, removeProject, normalizeProjectPath, countProjects, worcaHome } from '../src/core/projects.mjs';
+import { listProjects, addProject, addProjects, removeProject, normalizeProjectPath, countProjects, worcaHome } from '../src/core/projects.mjs';
 import { renderIndexHtml, INDEX_THEME_ANCHOR } from '../src/core/index-html.mjs';
 import {
   getWorcaRoot, setWorcaRoot, setProjectsRoot, defaultRoot,
@@ -44,6 +47,7 @@ import {
   setPipelineCostLimitUsd, setTotalCostLimitUsd, setCostLimitResetPeriod, assertCostLimitInputs,
   humanRateUsdPerHour, setHumanRateUsdPerHour, assertHumanRateInput,
   askMaxTurns, askMaxBudgetUsd, setAskMaxTurns, setAskMaxBudgetUsd, assertAskLimitInputs,
+  askWeb, assertAskWebInput, setAskWeb, addAskWebHost,
   chatPrefs, setChatPrefs,
   debugSpawnEnabled as storedDebugSpawnEnabled, effectiveDebugSpawn, setDebugSpawnEnabled, assertDebugSpawnInput, SETTINGS_POST_KEYS,
   titleModel as storedTitleModel, setTitleModel, assertTitleModelInput,
@@ -52,6 +56,7 @@ import {
   uiLevel as storedUiLevel, setUiLevel, assertUiLevelInput, defaultUiLevel,
   autoWorkflowModel as storedAutoWorkflowModel, setAutoWorkflowModel, assertAutoWorkflowModelInput,
   memoryDefragModel, setMemoryDefragModel, assertMemoryDefragModelInput,
+  workspaceScanModels, setWorkspaceScanModels, assertWorkspaceScanInput,
   scheduleDefaults, setScheduleDefaults,
 } from '../src/core/settings.mjs';
 import { resolveDefragModel, defragDefaultModel, defragWorkflowView, checkStartPair } from '../src/core/memory-defrag-model.mjs';
@@ -74,6 +79,7 @@ import {
 } from '../src/core/ask/store.mjs';
 import { sanitizeTitle as askSanitizeTitle } from '../src/core/title.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
+import { askWebAccess, WEB_OFF } from '../src/core/ask/web-access.mjs';
 import { askCatalog, validateModelEffort } from '../src/core/ask/models.mjs';
 import { buildCatalog as askBuildCatalog } from '../src/core/ask/catalog.mjs';
 import {
@@ -121,6 +127,14 @@ import {
 } from '../src/core/remote-access.mjs';
 import { detectDeployment, deploymentFacts } from '../src/core/deployment.mjs';
 import { resolveIdentity, startedByOf, prAttributionFooter, actorOf, isSharedIdentity, byActor } from '../src/core/identity.mjs';
+import { withBillTo, currentBillTo, currentOwner } from '../src/core/billing.mjs';
+import { agentIdentity } from '../src/core/agent-user.mjs';
+import { createAskToolServer } from '../src/core/ask/mcp-stdio.mjs';
+import { webMcpEnv as askWebMcpEnv } from '../src/core/ask/spawn.mjs';
+import { brokerEnabled, brokerInfo, personSlots, brokerUsageSummary, foldUsageByPerson } from '../src/core/broker-client.mjs';
+import { freeDailyStatus } from '../src/core/openrouter-free.mjs';
+import { checkBrokerAtBoot } from '../src/core/broker-boot.mjs';
+import { modelSlot, missingCredentials, describeMissing } from '../src/core/broker-routing.mjs';
 import { planClone, cloneProject, CloneError } from '../src/core/clone-project.mjs';
 import { listFolders } from '../src/core/fs-browse.mjs';
 import {
@@ -128,7 +142,7 @@ import {
   PREDEFINED_MODELS, agentSteps, EFFORTS, catalogHasModel,
   readRunConfig, setNodeModel, setFeedbackCycles, setWireCycles, setActiveWorkflow, setHumanInLoop, resetWorkflowConfig,
   globalModelRefs, removeGlobalModelAndRefs, promoteCustomModel, costUnreliableModelIds,
-  readPrRemotePrefs, setPrRemotePrefs,
+  readPrRemotePrefs, setPrRemotePrefs, modelHasBaseUrlRouting,
 } from '../src/core/config.mjs';
 import { listGlobalModels, addGlobalModel, updateGlobalModel } from '../src/core/settings.mjs';
 import { modelEnvRef, maskModelEnvValue, SUBAGENT_MODEL_VALUES, subagentModelIssue, UPSTREAM_PROVIDERS } from '../src/core/model-env.mjs';
@@ -166,7 +180,9 @@ import { applyModelChange } from '../src/core/ask/model-deps.mjs';
 import { modelEventPrompt, modelNoticeText } from '../src/core/ask/model-proposal.mjs';
 import { cloneEventPrompt, cloneNoticeText } from '../src/core/ask/clone-proposal.mjs';
 import { workspaceEventPrompt, workspaceNoticeText } from '../src/core/ask/workspace-proposal.mjs';
-import { applyWorkspaceChange, createWorkspaceWithHomes } from '../src/core/ask/workspace-deps.mjs';
+import { applyWorkspaceChange } from '../src/core/ask/workspace-deps.mjs';
+import { webEventPrompt, webNoticeText, chatWebHosts } from '../src/core/ask/web-proposal.mjs';
+import { hostAllowed as askHostAllowed } from '../src/core/web-allowlist.mjs';
 import { registryPortsFn } from '../src/core/graph/registry-ports.mjs';
 import { sweepV1Runs, V1_RUN_RETIRED, getDb } from '../src/core/db.mjs';
 import { exportWorkflow, exportWorkflowPlugin, ON_CONFLICT_MODES, RESOLUTION_CHOICES } from '../src/core/workflow-export.mjs';
@@ -183,10 +199,15 @@ import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, lis
 import { isSyntacticRef } from '../src/core/ask/proposal.mjs';
 import { archivePipeline, discardRetainedWorktrees } from '../src/core/pipeline-delete.mjs';
 import {
-  listWorkspaces, readWorkspace,
+  listWorkspaces, readWorkspace, checkNewWorkspace, scanMemberProblems,
   updateWorkspace, deleteWorkspace, isGitRepo, WORKSPACE_KEY_RE, countWorkspaces,
-  addWorkspaceMembers, removeWorkspaceMember, rootsHash,
+  readWorkspaceMap, setWorkspaceEdgeState, addWorkspaceManualEdge, removeWorkspaceManualEdge,
+  regenerateWorkspaceDescription,
+  addWorkspaceMembers, removeWorkspaceMember,
 } from '../src/core/workspaces.mjs';
+import { effectiveEdges } from '../src/shared/workspace-map/overrides.mjs';
+import { WORKSPACE_SCAN_WORKFLOW_ID, WORKSPACE_SCAN_DEFAULT_MODELS } from '../src/core/graph/builtin-workflows.mjs';
+import { scanRunPrompt, scanRunTitle, createWorkspaceWithHomes, resolveScanModels } from '../src/core/workspace-scan-run.mjs';
 import { listWorkspacePipelines, readWorkspacePipeline, appendAuditById } from '../src/core/artifacts.mjs';
 import { generateOverview } from '../src/core/overview-agent.mjs';
 import { projectKey, PROJECT_KEY_RE } from '../src/core/store.mjs';
@@ -197,8 +218,9 @@ import {
 } from '../src/core/memory-store.mjs';
 import { memoryCaps } from '../src/core/settings.mjs';
 import { onboardingPrefs, setOnboardingPrefs } from '../src/core/settings.mjs';
-import { onboardingStatus } from '../src/core/onboarding.mjs';   // a THIRD settings import line (the two blocks above are unrelated readers)
-import { createWorkspaceScan } from '../src/core/workspace-scan.mjs';
+import { configuredClaudeBin, onboardingStatus } from '../src/core/onboarding.mjs';   // a THIRD settings import line (the two blocks above are unrelated readers)
+import { probeClaudeAuth, CLAUDE_SIGNED_OUT_CODE, CLAUDE_SIGNED_OUT_MESSAGE } from '../src/core/preflight.mjs';
+import { failedBecauseSignedOut } from '../src/core/claude-auth.mjs';
 import { createAgentGen } from '../src/core/agent-gen.mjs';
 import { listAgents, readAgent, createAgent, updateAgent, deleteAgent, AGENT_KEY_RE } from '../src/core/agent-store.mjs';
 import {
@@ -274,6 +296,11 @@ process.on('warning', (w) => {
 });
 // Fail fast on an unsupported Node / missing node:sqlite BEFORE any DB is opened.
 preflightNode();
+// Backstop for `npm start` / `node ui/server.mjs`, which bypass the CLI's check:
+// refuse to start on stale dependencies rather than fail mid-run on a lazy import.
+// (express, ws and htmlparser2 are imported statically above, so a missing one of
+// those still fails at load, before this line.)
+preflightDeps();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -415,14 +442,13 @@ function liveRunIds() {
 // persisted column) and never live. It rides the same pass-through as `stepskills`.
 // `exec` and `token` are the graph engine's (§5.7). `phase` stays for the v1
 // engine AND for the v2 shim until the graph cut-over retires it.
-const EVENT_NAMES = ['exec', 'token', 'log', 'question', 'artifact', 'state', 'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title'];
-// The scan-* WS family (Workspaces M5, §5.4). A NEW family in the SAME runs Map;
-// the 7-event run plumbing above is untouched. createWorkspaceScan emits many
-// scan-progress then exactly one terminal scan-done OR scan-error.
-const SCAN_EVENT_NAMES = ['scan-progress', 'scan-done', 'scan-error'];
-// The agentgen-* WS family (Agent Platform, Phase 2). Same pattern as scan-*:
-// a NEW family in the SAME runs Map. createAgentGen emits many agentgen-progress
-// then exactly one terminal agentgen-done OR agentgen-error.
+// `artifact-gone` is this branch's: an indexed artifact whose file the run later
+// removed, so the client can drop the row instead of leaving one that 404s.
+const EVENT_NAMES = ['exec', 'token', 'log', 'question', 'artifact', 'artifact-gone', 'state', 'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title'];
+// The agentgen-* WS family (Agent Platform, Phase 2): a NEW family in the SAME
+// runs Map. createAgentGen emits many agentgen-progress then exactly one terminal
+// agentgen-done OR agentgen-error. (The scan-* family is gone: dev made a
+// workspace scan an ordinary pipeline run, so it rides the run events above.)
 const AGENTGEN_EVENT_NAMES = ['agentgen-progress', 'agentgen-done', 'agentgen-error'];
 // The scriptbench-* family (Scripts workbench §4.1): one more family in the same
 // runs Map. createBench emits many scriptbench-line then exactly one terminal
@@ -462,6 +488,32 @@ wss.on('error', () => {});
 /** All currently connected sockets. */
 const sockets = new Set();
 
+/** This process's id, sent in `hello`: a client that sees it change knows event seqs restarted. */
+const BOOT_ID = randomUUID();
+
+// Heartbeat. A proxy in front of worca (Cloudflare closes an idle WebSocket after ~100 s)
+// drops a socket that carries no frames — a run parked on an open Auto proposal is silent
+// for minutes — and every reconnect re-subscribes and replays. A ping every 30 s keeps the
+// socket busy; one that has not answered the previous ping is dead and is terminated.
+const HEARTBEAT_MS = 30_000;
+function trackHeartbeat(ws) {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+}
+function heartbeatTick(set = sockets) {
+  for (const ws of set) {
+    if (ws.isAlive === false) {
+      try { ws.terminate(); } catch { /* already gone */ }
+      set.delete(ws);
+      continue;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch { /* closing */ }
+  }
+}
+const heartbeat = setInterval(() => heartbeatTick(), HEARTBEAT_MS);
+heartbeat.unref();
+
 // server.close() only calls back once every connection is gone, and Node's
 // closeAllConnections() skips UPGRADED sockets — a WebSocket whose close
 // handshake has not completed (a client that vanished, or a test tearing down
@@ -484,34 +536,32 @@ wss.on('connection', (ws, req) => {
     return;
   }
   sockets.add(ws);
+  trackHeartbeat(ws);
   // Whose Ask threads this socket may see (a shared sign-in's name, else null = all).
   ws.worcaViewer = askViewer(req);
-  // Optional ?runId=... (or ?scanId=.../?genId=...) -> replay that entry's buffered
-  // events so a reconnecting client immediately sees the full state. Scan + agentgen
-  // entries live in the SAME runs Map keyed by scanId/genId, so a single id lookup
-  // serves all families.
+  // Optional ?runId=... (or ?genId=/?benchId=) -> replay that entry's buffered
+  // events so a reconnecting client immediately sees the full state. Agentgen and
+  // bench entries live in the SAME runs Map keyed by genId/benchId, so a single id
+  // lookup serves all families.
   let requestedRunId = null;
-  let requestedScanId = null;
   let requestedGenId = null;
   let requestedBenchId = null;
   let requestedThreadId = null;
   try {
     const u = new URL(req.url, 'http://localhost');
     requestedRunId = u.searchParams.get('runId');
-    requestedScanId = u.searchParams.get('scanId');
     requestedGenId = u.searchParams.get('genId');
     requestedBenchId = u.searchParams.get('benchId');
     requestedThreadId = u.searchParams.get('threadId');
   } catch {
     requestedRunId = null;
-    requestedScanId = null;
     requestedGenId = null;
     requestedBenchId = null;
     requestedThreadId = null;
   }
-  const id = requestedRunId || requestedScanId || requestedGenId || requestedBenchId;
+  const id = requestedRunId || requestedGenId || requestedBenchId;
 
-  send(ws, { type: 'hello', runs: summarizeRuns(), ask: askHello(ws) });
+  send(ws, { type: 'hello', bootId: BOOT_ID, runs: summarizeRuns(), ask: askHello(ws) });
 
   if (id && runs.has(id)) {
     replayEntry(ws, runs.get(id));
@@ -524,16 +574,16 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => sockets.delete(ws));
   ws.on('error', () => sockets.delete(ws));
   ws.on('message', (data) => {
-    // Clients may ask to (re)subscribe / replay an entry's history. A scan's
-    // {type:'subscribe', scanId} and an agent generation's {type:'subscribe',
-    // genId} are accepted identically to a run's runId.
+    // Clients may ask to (re)subscribe / replay an entry's history. An agent
+    // generation's {type:'subscribe', genId} (or a bench's benchId) is accepted
+    // identically to a run's runId.
     let msg = null;
     try {
       msg = JSON.parse(String(data));
     } catch {
       return;
     }
-    const subId = msg && msg.type === 'subscribe' ? (msg.runId || msg.scanId || msg.genId || msg.benchId) : null;
+    const subId = msg && msg.type === 'subscribe' ? (msg.runId || msg.genId || msg.benchId) : null;
     if (subId && runs.has(subId)) {
       replayEntry(ws, runs.get(subId));
     }
@@ -558,9 +608,8 @@ function send(ws, obj) {
 // late-joining socket always has the latest stepper + subAgents even if the run's
 // initial 'state' frame was evicted from the ring buffer (MAX_BUFFER = 5000). For a
 // RUN this re-seeds the stepper, and is idempotent with any replayed 'state' frame
-// (onState merges). SCAN entries DO expose getState() but have no `.state` property,
-// so the `orch.state &&` guard below skips them on purpose: a scan has no stepper to
-// seed, and its scanId/phase/... state is already delivered via scan-* events.
+// (onState merges). An entry whose orch has no `.state` property has no stepper to
+// seed, so the `orch.state &&` guard below skips it on purpose.
 // getState() returns a clone with an `id` key (not `runId`) and no `type` key, so the
 // explicit { runId, type } below are not clobbered by the spread.
 function sendStateSnapshot(ws, entry) {
@@ -664,8 +713,12 @@ function emitDiffCommentsChanged(runId) {
 // Append a tagged event to an entry's ring buffer (runId LAST so the runs-Map key
 // always wins over any id the orchestrator stamped). Shared by the live wire
 // (record) and out-of-band resolutions (resolvePending) so both honor MAX_BUFFER.
+// `seq` numbers the entry's events so a client that reconnects (and is replayed the whole
+// buffer) skips what it already applied (ui/public/ws-seq.mjs); BOOT_ID in `hello` tells it
+// when a restarted server numbers from 1 again.
 function bufferEvent(entry, event) {
-  const tagged = { ...event, runId: entry.id };
+  entry.seq = (entry.seq || 0) + 1;
+  const tagged = { ...event, runId: entry.id, seq: entry.seq };
   entry.events.push(tagged);
   if (entry.events.length > MAX_BUFFER) entry.events.splice(0, entry.events.length - MAX_BUFFER);
   return tagged;
@@ -751,11 +804,10 @@ function summarizeRuns() {
     // Who last stopped / paused / resumed it ({ kind, by, at }), or null.
     lastAction: r.lastAction || r.orch?.state?.lastAction || null,
     pendingQuestion: r.pendingQuestion || null,
-    // kind discriminator so the client routes runs vs scans vs agent generations
-    // vs workspace runs without guessing; scanId/genId/workspaceId are the
-    // matching attribution fields.
+    // kind discriminator so the client routes runs vs agent generations vs
+    // workspace runs without guessing; genId/workspaceId are the matching
+    // attribution fields.
     kind: r.kind || 'run',
-    scanId: r.scanId || null,
     genId: r.genId || null,
     workspaceId: r.workspaceId || null,
     projectNames: r.projectNames || null,
@@ -845,6 +897,10 @@ function wireRun(entry) {
         if (payload?.reason === 'cost_pipeline' || payload?.reason === 'cost_total') {
           emitChanged('budget-changed');
         }
+        // Workspace scan: the run just created or updated its workspace (run-harness
+        // _finalizeWorkspaceScan, which ran before this event) — refresh every open list (D13).
+        const scanOutcome = orch.state?.workspaceScan?.outcome;
+        if (scanOutcome === 'created' || scanOutcome === 'updated') emitChanged('workspaces-changed', `scan-${scanOutcome}`);
       }
       if (name === 'error') {
         // The launch-error channel (a failure BEFORE the pipeline row exists). A
@@ -908,48 +964,9 @@ function wireRun(entry) {
 }
 
 // ---------------------------------------------------------------------------
-// Wire a WorkspaceScan's events onto the WebSocket, tagged with scanId. A NEW
-// family in the SAME runs Map — the 7-event run plumbing (wireRun) is untouched.
-// Maps scan-progress->running, scan-done->done, scan-error->error so the hello
-// snapshot + DELETE-while-live guard see a live scan as "running" and a finished
-// one as terminal. createWorkspaceScan emits many scan-progress then exactly one
-// terminal scan-done OR scan-error (§5.4).
-// ---------------------------------------------------------------------------
-function wireScan(entry) {
-  const { scanId, orch } = entry;
-
-  const record = (event) => {
-    // scanId LAST so the runs-Map key always wins (the engine already tags its
-    // payload with the same id; this is a defensive override against any drift).
-    const tagged = { ...event, scanId };
-    entry.events.push(tagged);
-    if (entry.events.length > MAX_BUFFER) entry.events.splice(0, entry.events.length - MAX_BUFFER);
-    broadcast(tagged);
-    return tagged;
-  };
-
-  for (const name of SCAN_EVENT_NAMES) {
-    subscribe(orch, name, (payload) => {
-      const event = { type: name, ...(payload && typeof payload === 'object' ? payload : { value: payload }) };
-      if (name === 'scan-progress') entry.status = 'running';
-      else if (name === 'scan-done') entry.status = 'done';
-      else if (name === 'scan-error') entry.status = 'error';
-      record(event);
-      if (entry.autoRescan && name === 'scan-done') {
-        saveRescanDescription({ workspaceId: entry.workspaceId, projectPaths: entry.scanPaths }, event.description)
-          .then((saved) => { if (saved) broadcast({ type: 'workspaces-changed', action: 'description', workspaceId: entry.workspaceId }); })
-          .catch((err) => console.error(`[worca-ui] saving the re-scan description failed: ${err && err.message ? err.message : err}`));
-      } else if (entry.autoRescan && name === 'scan-error' && event.message !== 'stopped') {
-        broadcast({ type: 'workspaces-changed', action: 'rescan-failed', workspaceId: entry.workspaceId });
-      }
-    });
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Wire an AgentGen's events onto the WebSocket, tagged with genId. The
-// agentgen-* family: same runs Map, same ring-buffer/replay plumbing as
-// wireScan; the 7-event run plumbing (wireRun) is untouched. createAgentGen
+// agentgen-* family: same runs Map, same ring-buffer/replay plumbing as a
+// run; the 7-event run plumbing (wireRun) is untouched. createAgentGen
 // emits many agentgen-progress then exactly one terminal agentgen-done OR
 // agentgen-error (run() never throws).
 // ---------------------------------------------------------------------------
@@ -1166,6 +1183,11 @@ app.post('/api/ask/threads/:id/messages', express.json({ limit: '64mb' }));
 app.put('/api/scripts/:key/cases', express.json({ limit: '64mb' }));
 app.use(express.json({ limit: '8mb' }));
 
+// Credential broker billing (src/core/billing.mjs): every claude spawn a request causes —
+// a run it starts, an Ask turn, a model Test — is billed to the person behind the request.
+// AFTER the body parsers: their stream callbacks would otherwise run outside this context.
+app.use((req, _res, next) => withBillTo(resolveIdentity(req).name, next));
+
 if (HLJS_ASSETS) {
   const sendHljsModule = (file) => (_req, res, next) => {
     res.type('text/javascript');
@@ -1298,6 +1320,11 @@ function workspaceErrorStatus(code) {
   if (code === 'NOT_FOUND') return 404;
   if (code === 'BAD_REQUEST') return 400;
   return 500;
+}
+
+/** Answer a workspaces.mjs coded error with its HTTP status (workspaceErrorStatus). */
+function workspaceFail(res, err) {
+  return res.status(workspaceErrorStatus(err && err.code)).json({ error: err && err.message ? err.message : String(err) });
 }
 
 // Single source of truth for path normalization lives in the core registry.
@@ -1551,6 +1578,9 @@ const startRunHandler = async (req, res) => {
     // due ticket being started through this same gate. It carries the ticket, whose id
     // IS the runId, plus the CLI-only options a stored request may hold.
     const internal = req._internal && typeof req._internal === 'object' ? req._internal : null;
+    // Workspace scan (wf_workspace_scan): scanRequest hands the target in-process — a workspace
+    // that may not exist yet ({ id, name, projectPaths, description:'' }, D3). Never from HTTP.
+    const scanTarget = req._workspaceScan && typeof req._workspaceScan === 'object' ? req._workspaceScan : null;
     const stored = internal && body.internal && typeof body.internal === 'object' ? body.internal : {};
     // Who started it (identity.mjs): this request's resolved identity; a scheduled run keeps the
     // identity of whoever scheduled it (stored with the request, never taken from an HTTP body).
@@ -1568,6 +1598,14 @@ const startRunHandler = async (req, res) => {
     }
     if (!hasWorkspace && !hasProjectDir) {
       return badRequest(res, 'workspaceId or projectDir is required');
+    }
+
+    // Credential broker: the run's own model, when the request names one, is checked here
+    // (an instant refusal); the harness then checks every node's model before it spawns
+    // anything (run-harness.mjs#_brokerPreflight).
+    if (!internal && body.mock !== true && !mockEnabled({}) && typeof body.model === 'string' && body.model.trim()) {
+      const refusal = await brokerStartRefusal(req, [body.model.trim()]);
+      if (refusal) return res.status(409).json({ error: refusal, code: 'credential-missing' });
     }
 
     // Ask Worca card link (§8.1): both or neither; the thread must exist and
@@ -1674,6 +1712,11 @@ const startRunHandler = async (req, res) => {
     if (workflowId === AUTO_WORKFLOW_ID && hasWorkspace) {
       return badRequest(res, 'Auto workflow is not available for workspace targets yet');
     }
+    // The Workspace scan workflow starts only through scanRequest: a hand-built body would run
+    // a read-only scan the launch never validated (D2).
+    if (workflowId === WORKSPACE_SCAN_WORKFLOW_ID && !scanTarget) {
+      return badRequest(res, 'the workspace scan starts from the Workspaces view');
+    }
     // Agent memory (§7.3): the defragment run option — ONE gate for every entry point (the CLI
     // and Ask's proposal validator call the same helper). Before the target lookup, like Auto.
     if (body.memoryScope != null && typeof body.memoryScope !== 'string') return badRequest(res, 'memoryScope must be "global" or "project"');
@@ -1743,7 +1786,7 @@ const startRunHandler = async (req, res) => {
       if (!WORKSPACE_KEY_RE.test(workspaceId)) {
         return res.status(404).json({ error: 'workspace not found' });
       }
-      const ws = await readWorkspace(workspaceId);
+      const ws = scanTarget || await readWorkspace(workspaceId);
       if (!ws) return res.status(404).json({ error: 'workspace not found' });
 
       // Team total cap (design §7): soft — `pastTeamCap` acknowledges it once per window per home.
@@ -1815,6 +1858,7 @@ const startRunHandler = async (req, res) => {
         agentsDir: AGENTS_DIR,
         workflowId,
         template: workflowRow,
+        ...(scanTarget && scanTarget.models ? { scanModels: scanTarget.models } : {}),
         guardrailsId,
         startedBy,
         branch,
@@ -1988,7 +2032,10 @@ const startRunHandler = async (req, res) => {
         broadcast(event);
       });
 
-    res.json({ runId });
+    // A scan's launcher needs the card attribution the wizard cannot compute (the key is a hash).
+    res.json(scanTarget
+      ? { runId, workspaceId: entry.workspaceId, title: entry.title, projectDir: entry.projectDir, projectNames: entry.projectNames }
+      : { runId });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -2615,6 +2662,15 @@ const chatActions = {
   pendingQuestion: (runId) => runs.get(runId)?.pendingQuestion ?? null,
   // `by` = the chat actor ("ada via Slack", identity.mjs chatActor): attribution text only.
   answer: (runId, id, payload, by) => answerRun(runId, id, payload, by || 'local'),
+  direct: async (runId, text, platform) => {
+    // A run that has left the Map is not unknown — it is in the DB, and if it is
+    // paused its inbox is replayed on resume, which is exactly what postDirection
+    // resolves from the row. Requiring the Map entry made chat refuse what the
+    // HTTP route accepts, for every run outside it. postDirection answers null on
+    // a row that really is gone, which the caller already reports properly.
+    const entry = runs.get(runId);
+    return postDirection(entry ? (entry.pipelineId || entry.id) : runId, text, `chat:${platform || 'chat'}`);
+  },
   stop: (runId, by) => stopRun(runId, by || 'local'),
   pause: (runId, by) => pauseRun(runId, by || 'local'),
   // The long chain of budget/worktree/double-resume guards lives in resumeRun();
@@ -3100,9 +3156,31 @@ app.get('/api/runs/:id/artifacts', async (req, res) => {
     const row = findPipelineRowById(req.params.id);
     if (!row) return res.status(404).json({ error: 'pipeline not found' });
     // Cap the row set (each row costs a synchronous statSync for its byte size, on
-    // the event loop) at the same ceiling the ask tool uses.
-    const artifacts = await listRunArtifacts(row.id, { limit: ASK_LIMITS.artifactsListMaxLimit });
-    res.json({ runId: row.id, artifacts });
+    // the event loop) at the same ceiling the ask tool uses — and fetch one extra
+    // row to SAY so, the way list_run_artifacts does. A three-deck presentation
+    // run indexes past 200, and a partial list the client cannot tell is partial
+    // renders as the whole run.
+    const limit = ASK_LIMITS.artifactsListMaxLimit;
+    // ...and hand back the cursor, so the cap is a page boundary rather than a
+    // wall. Rows are oldest-first, so what a truncated list omits is the NEWEST —
+    // the deliverables — and `truncated` alone left the Artifacts tab saying "this
+    // run indexed more" with nothing behind it. Junk clamps to 0 rather than
+    // reaching SQL: Number('abc') is NaN and a negative offset is meaningless.
+    const asked = Number(req.query.offset);
+    // Clamped to MAX_SAFE_INTEGER, the way the ask tool's clampInt does: a finite
+    // but absurd `?offset=1e20` is still an integer to Number.isInteger, and
+    // node:sqlite refuses to bind it — which came back as a 500 rather than the
+    // empty page an offset past the end should be.
+    const offset = Number.isFinite(asked) && asked > 0
+      ? Math.min(Math.floor(asked), Number.MAX_SAFE_INTEGER) : 0;
+    const rows = await listRunArtifacts(row.id, { limit: limit + 1, offset, browsableOnly: true });
+    const truncated = rows.length > limit;
+    res.json({
+      runId: row.id,
+      artifacts: rows.slice(0, limit),
+      truncated,
+      ...(truncated ? { nextOffset: offset + limit } : {}),
+    });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -3149,6 +3227,53 @@ async function serveAskFile(res, runDir, askId, index) {
   });
 }
 
+const ARTIFACT_RAW_MAX_BYTES = 25 * 1024 * 1024;   // the text route caps at 2 MB; why-worca.standalone.html is 7 MB
+const safeFilename = (rel) => String(rel).split('/').pop().replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'artifact';
+
+/** Stream one indexed artifact's bytes. `rel` only SELECTS among the run's
+ *  indexed rows (never a filesystem path); a stored `..` row is unreachable. */
+async function sendArtifactRaw(res, row, rel) {
+  const hit = await resolveIndexedArtifactFileForRow(row, rel);
+  if (!hit) return res.status(404).json({ error: 'artifact not found' });
+  const mime = mimeForPath(hit.rel);
+  if (!mime) return res.status(415).json({ error: 'no preview for this file type', rel: hit.rel });
+  let size;
+  try { size = (await fsp.stat(hit.file)).size; } catch { return res.status(404).json({ error: 'artifact not found' }); }
+  if (size > ARTIFACT_RAW_MAX_BYTES) return res.status(413).json({ error: 'artifact too large to preview', rel: hit.rel, size });
+  const kind = viewerKindFor(hit.rel);
+  // Set Content-Type explicitly so express/send does not re-derive it from the ext.
+  res.set('Content-Type', mime);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Content-Disposition', `${kind === 'binary' ? 'attachment' : 'inline'}; filename="${safeFilename(hit.rel)}"`);
+  res.set('Cache-Control', 'no-store');                       // artifacts are mutable while a run is live
+  // Defense in depth for scriptable markup: even opened in a top-level tab the
+  // document runs in an opaque origin. The viewer's <iframe sandbox> is the primary guard.
+  if (kind === 'html') res.set('Content-Security-Policy', 'sandbox allow-scripts');
+  else if (mime === 'image/svg+xml') res.set('Content-Security-Policy', 'sandbox');
+  // NO Access-Control-Allow-Origin, deliberately.
+  //
+  // The viewer frames a deck with sandbox="allow-scripts" and no
+  // allow-same-origin, so it has an opaque origin and its CORS-mode `@font-face`
+  // requests carry `Origin: null` — which the localhost-only guard refuses. A
+  // previewed deck therefore renders in FALLBACK TYPE. That is the accepted
+  // cost: the PDF and the standalone HTML (what actually gets sent to anyone)
+  // embed their fonts correctly.
+  //
+  // An earlier attempt exempted `Origin: null` from that guard so the header
+  // could work. It was a hole: every condition is attacker-controllable — any
+  // page can produce `Origin: null` from `<iframe sandbox="allow-scripts">`, and
+  // `Host: localhost:PORT` is simply what the browser sends — so any site the
+  // user visited while worca ran could read a run's font/media bytes and probe
+  // artifact paths for existence. Serving these to an opaque origin safely needs
+  // an unforgeable token in the PATH (so relative subresource URLs inherit it),
+  // not a header the caller chooses.
+  res.sendFile(path.basename(hit.file), { root: path.dirname(hit.file), dotfiles: 'allow', cacheControl: false }, (err) => {
+    if (!err || res.headersSent) return;
+    if (err.code === 'ENOENT' || err.status === 404) return res.status(404).json({ error: 'artifact not found' });
+    res.status(500).json({ error: err.message || String(err) });
+  });
+}
+
 /** The run dir behind a LIVE id: the pipeline id (what /api/runs/:id/artifact
  *  takes) or the WebSocket run UUID (what the browser holds). */
 async function askFilesRunDir(id) {
@@ -3162,6 +3287,75 @@ app.get('/api/runs/:id/ask-files/:askId/:index', async (req, res) => {
   try {
     await serveAskFile(res, await askFilesRunDir(req.params.id), req.params.askId, req.params.index);
   } catch (err) {
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+app.get('/api/runs/:id/artifact-raw/*', async (req, res) => {
+  try {
+    const row = findPipelineRowById(req.params.id);
+    if (!row) return res.status(404).json({ error: 'pipeline not found' });
+    await sendArtifactRaw(res, row, req.params[0]);
+  } catch (err) { res.status(500).json({ error: err && err.message ? err.message : String(err) }); }
+});
+
+// DIRECTIONS_CLOSED (and the reasoning about why `paused` is not in it) lives in
+// src/core/directions.mjs, because chat's /direct resolves against the same set.
+// It was stated in both places and they drifted: this route accepted a paused run
+// while /direct refused it.
+
+/** Append a direction for a run by PIPELINE id (a run that is merely paused
+ *  included — a live run's own direct() logs + indexes; otherwise append + index
+ *  directly). Throws RUN_FINISHED when nothing will ever read it; returns null
+ *  when the run, or its reclaimed run folder, is gone. */
+async function postDirection(pipelineId, text, source) {
+  const row = findPipelineRowById(pipelineId);
+  if (!row) return null;
+  // BEFORE the live branch. A finished run stays parked in the runs Map — that is
+  // the very reason resolveTarget takes `wantLive` — so liveRunEntry still hands
+  // back an orchestrator for a run whose status is done, and its direct() would
+  // append and answer 201 for a direction no step will ever read. Putting this
+  // check after the live branch made it dead code for every run still in the Map,
+  // which is every run anyone would plausibly post to.
+  if (row.archived_at || DIRECTIONS_CLOSED.has(String(row.status || ''))) {
+    const err = new Error('run is finished; a direction would never be read');
+    err.code = 'RUN_FINISHED';
+    throw err;
+  }
+  const live = liveRunEntry(row.id);
+  if (live?.orch && typeof live.orch.direct === 'function') return live.orch.direct(text, source);
+  try {
+    const dir = await runDirForRow(row);
+    const rec = await appendDirection(dir, { text, source });
+    recordArtifact(row.id, DIRECTIONS_KIND, DIRECTIONS_FILE);
+    // Leave a record, the way RunHarness.direct does. There is no live orchestrator
+    // here — no log writer, no emit — so without this a direction posted to a paused
+    // run that has left the runs Map (any server restart) shows up in History as
+    // `direction:applied` after the resume with nothing saying it was ever posted.
+    // That is the same gap the live branch falls back to appendAudit to close.
+    await appendAudit(dir, `Direction **${rec.id}** posted (${rec.source}): ${rec.text}`).catch(() => {});
+    return rec;
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return null;   // run folder reclaimed → 404, not 500
+    throw err;
+  }
+}
+
+app.post('/api/runs/:id/directions', async (req, res) => {
+  const { text } = req.body || {};
+  if (text === undefined || text === null || text === '') return badRequest(res, 'text is required');
+  if (typeof text !== 'string') return badRequest(res, 'text must be a string');
+  // Whitespace-only is a bad request, not a server error: appendDirection throws
+  // EMPTY_DIRECTION on it, which the generic catch below would turn into a 500.
+  // Same guard the ask route uses.
+  if (!text.trim()) return badRequest(res, 'text is required');
+  if (text.length > DIRECTION_MAX_CHARS) return badRequest(res, `text must be at most ${DIRECTION_MAX_CHARS} characters`);
+  try {
+    const rec = await postDirection(req.params.id, text, 'ui');
+    if (!rec) return res.status(404).json({ error: 'pipeline not found' });
+    res.status(201).json({ id: rec.id });
+  } catch (err) {
+    if (err && err.code === 'RUN_FINISHED') return res.status(409).json({ error: err.message });
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
 });
@@ -3231,7 +3425,9 @@ app.get('/api/runs/:id/recovery-patch', async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/runs/:id/overview  -> Layer-2 on-demand overview agent.
 // Accepts ?key=<storeKey> (preferred; history detail uses it) or ?projectDir=...
-// ?force=1 bypasses the cached overview.json. 200 { overview } | 404 | 500.
+// ?force=1 bypasses the cached overview.json. 200 { overview } | 404 | 500, or
+// 409 code 'claude-signed-out' when the CLI is signed out (a cached overview
+// needs no Claude, so this maps the failure instead of probing up front).
 // ---------------------------------------------------------------------------
 app.post('/api/runs/:id/overview', async (req, res) => {
   const id = req.params.id;
@@ -3247,6 +3443,9 @@ app.post('/api/runs/:id/overview', async (req, res) => {
     res.json({ overview });
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
+    if (msg !== 'pipeline not found' && await failedBecauseSignedOut({ message: msg })) {
+      return res.status(409).json({ code: CLAUDE_SIGNED_OUT_CODE, error: CLAUDE_SIGNED_OUT_MESSAGE });
+    }
     const code = msg === 'pipeline not found' ? 404 : 500;
     res.status(code).json({ error: msg });
   }
@@ -3280,8 +3479,9 @@ app.get('/api/history', async (_req, res) => {
 // POST writes ONLY those flags ({hidden?, welcomeSeen?}; booleans; unknown keys
 // 400) and answers with the same full payload, so one round trip repaints.
 // ---------------------------------------------------------------------------
-app.get('/api/onboarding', async (_req, res) => {
-  try { res.json(await onboardingStatus()); }
+// ?recheck=1 skips the remembered Claude sign-in answer (the dialog's Check again).
+app.get('/api/onboarding', async (req, res) => {
+  try { res.json(await onboardingStatus({ recheck: isTruthy(req.query.recheck) })); }
   catch (err) { res.status(500).json({ error: err && err.message ? err.message : String(err) }); }
 });
 app.post('/api/onboarding', async (req, res) => {
@@ -3312,15 +3512,33 @@ app.get('/api/counts', (req, res) => {
 // GET /api/stats?range=today|week|month|all  -> the Statistics view payload (§6.9).
 // Pure DB reads; an unknown range is the caller's fault, so getStats' RangeError
 // maps to 400 while anything else keeps bubbling to the error handler.
-app.get('/api/stats', (req, res) => {
+app.get('/api/stats', async (req, res) => {
+  let stats;
   try {
     const range = typeof req.query.range === 'string' && req.query.range ? req.query.range : 'month';
-    res.json(getStats({ range }));
+    stats = getStats({ range });
   } catch (err) {
     if (err instanceof RangeError) return badRequest(res, err.message);
     throw err;
   }
+  // Credential broker: model spend per person in the same window, as the broker metered it
+  // (the authoritative figure: it saw every request). Absent with the broker off.
+  if (brokerEnabled()) stats.byPerson = await statsByPerson(stats.windowStartMs, stats.windowEndMs);
+  res.json(stats);
 });
+
+/** Broker usage in [startMs, endMs) folded per person: {people:[…]} or {error}. */
+async function statsByPerson(startMs, endMs) {
+  try {
+    const { rows } = await brokerUsageSummary({
+      since: Number.isFinite(startMs) ? new Date(startMs).toISOString() : undefined,
+      until: Number.isFinite(endMs) ? new Date(endMs).toISOString() : undefined,
+    });
+    return { people: foldUsageByPerson(rows) };
+  } catch (err) {
+    return { error: err && err.message ? err.message : String(err) };
+  }
+}
 
 // ---- Team metrics (team-metrics-design.md §4.6–§4.10) ----------------------------------
 function metricsErrorStatus(code) {
@@ -3612,7 +3830,7 @@ app.post('/api/workspaces/:id/policy-route', async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/history/pr  -> enrich the skeleton with live PR state, pushed back
 // over the WS as batched `history-pr` events (reuses broadcast(), the same
-// fire-to-every-socket primitive wireRun/wireScan use). The body's `token`
+// fire-to-every-socket primitive wireRun uses). The body's `token`
 // echoes the client's load token so it can drop stale batches after a newer
 // Refresh. Responds 200 immediately; results arrive asynchronously.
 // ---------------------------------------------------------------------------
@@ -3907,6 +4125,17 @@ app.get('/api/history/:key/:id/ask-files/:askId/:index', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
+});
+
+app.get('/api/history/:key/:id/artifact-raw/*', async (req, res) => {
+  if (!/^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/.test(req.params.key)) {
+    return res.status(404).json({ error: 'pipeline not found' });
+  }
+  try {
+    const row = lookupPipelineRow(req.params.key, req.params.id);
+    if (!row) return res.status(404).json({ error: 'artifact not found' });
+    await sendArtifactRaw(res, row, req.params[0]);
+  } catch (err) { res.status(500).json({ error: err && err.message ? err.message : String(err) }); }
 });
 
 // ---------------------------------------------------------------------------
@@ -4296,6 +4525,37 @@ app.post('/api/projects', async (req, res) => {
   }
 });
 
+// POST /api/projects/bulk {projects:[{name, path}]} -> 200 {projects, results}: register several
+// folders at once (the multi-folder Add review). Each row is added or skipped on its own
+// (src/core/projects.mjs#addProjects); `results[i]` answers `projects[i]` of the request, with a
+// `reason` on a skipped row. 200 even when every row was skipped — the request itself was valid.
+const MAX_BULK_PROJECTS = 100;
+app.post('/api/projects/bulk', async (req, res) => {
+  const items = req.body && req.body.projects;
+  if (!Array.isArray(items) || !items.length) return badRequest(res, 'projects must be a non-empty array of {name, path}');
+  if (items.length > MAX_BULK_PROJECTS) return badRequest(res, `at most ${MAX_BULK_PROJECTS} projects per request`);
+  try {
+    await pinUiLevel();                        // before the first project ends "fresh install"
+    const { results, projects } = await addProjects(items);
+    const addedPaths = results.filter((r) => r.status === 'added').map((r) => r.path);
+    if (addedPaths.length) {
+      emitChanged('projects-changed', 'created');
+      // One discovery at a time: N parallel remote probes would stampede the network.
+      void (async () => {
+        for (const p of addedPaths) {
+          try {
+            await discoverProject(p, { force: true });
+            emitChanged('team-metrics-changed', 'discovered');
+          } catch { /* offline or not a git repo: discovery retries hourly */ }
+        }
+      })();
+    }
+    res.json({ projects, results });
+  } catch (err) {
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
 // POST /api/projects/clone {url, branch?, name?} -> 202 {jobId}: clone a repository into the
 // projects folder and register it (src/core/clone-project.mjs). A job, because a large clone
 // outlives a proxied request (Cloudflare closes at 100 s). GET /api/projects/clone/:id polls it;
@@ -4541,9 +4801,11 @@ registerMemoryRoutes('/api/memory/projects/:key', { family: 'projects' });
 // (global isLocalRequest middleware).
 app.post('/api/fs/pick-folder', async (req, res) => {
   try {
-    // `purpose` only picks the dialog title from a closed set (folder-dialog.mjs).
+    // `purpose` only picks the dialog title from a closed set (folder-dialog.mjs);
+    // `multiple` (strictly true) asks for a multi-select dialog where the OS has one.
     const purpose = typeof req.body?.purpose === 'string' ? req.body.purpose : undefined;
-    res.json(await pickFolderNative({ purpose }));
+    const multiple = req.body?.multiple === true;
+    res.json(await pickFolderNative({ purpose, multiple }));
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -4611,15 +4873,9 @@ app.post('/api/workspaces', async (req, res) => {
     : [];
   if (projectPaths.length < 2) return badRequest(res, 'a workspace needs at least 2 member projects');
   try {
-    // No explicit home (the create wizard no longer asks): adopt the one member that already
-    // records, if there is exactly one; every other case is "Choose…" on the workspace card.
-    // Team policy home (design §9): defaults to the metrics home when that member's policy
-    // resolves, else the one member (or shared home) whose policy does; else unset. The same
-    // rules create a workspace from Ask's workspace card (workspace-deps.mjs).
     const { workspace, metricsHomeAuto } = await createWorkspaceWithHomes({
       name: body.name, projectPaths, description: body.description,
-      metricsProject: typeof body.metricsProject === 'string' && body.metricsProject ? body.metricsProject : null,
-      policyProject: typeof body.policyProject === 'string' && body.policyProject ? body.policyProject : null,
+      metricsProject: body.metricsProject, policyProject: body.policyProject,
     });
     emitChanged('workspaces-changed', 'created');
     res.status(201).json({ workspace, metricsHomeAuto });
@@ -4656,6 +4912,9 @@ app.patch('/api/workspaces/:id', async (req, res) => {
   }
   try {
     const workspace = await updateWorkspace(id, patch);
+    // A description edit may flip the origin to 'edited' (Regenerate appears); a rename re-renders a
+    // generated description (its title line). Either way open Map tabs and editors re-read it.
+    if ('description' in patch || 'name' in patch) emitChanged('workspaces-changed', 'map');
     if ('metricsProject' in patch) emitChanged('workspaces-changed', 'metrics-home');
     if ('policyProject' in patch) { emitChanged('workspaces-changed', 'policy-home'); emitChanged('team-policy-changed', 'policy-home'); }
     res.json({ workspace });
@@ -4749,10 +5008,11 @@ app.post('/api/workspaces/:id/members', async (req, res) => {
 app.delete('/api/workspaces/:id', async (req, res) => {
   const id = req.params.id;
   if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
-  // 409 while a live workspace run OR live scan for this workspace exists. The
-  // module-level deleteWorkspace has no runs map, so this guard lives here (§2.3).
-  if (workspaceMembersBusy(id)) return res.status(409).json({ error: 'cannot delete a workspace with a live run or scan' });
-  supersedeRescans(id);   // an automatic re-scan has nothing left to describe
+  // 409 while a live workspace run exists — a paused Workspace scan included: it would re-create
+  // the workspace when resumed (ownsWorkspaceTarget). The module-level deleteWorkspace has no runs
+  // map, so this guard lives here (§2.3).
+  const live = [...runs.values()].some((r) => r.workspaceId === id && ownsWorkspaceTarget(r));
+  if (live) return res.status(409).json({ error: 'cannot delete a workspace with a live run' });
   try {
     const report = await deleteWorkspace(id);
     try { if (cancelForTarget({ workspaceId: id })) emitChanged('schedules-changed', 'target-removed'); }
@@ -4766,120 +5026,227 @@ app.delete('/api/workspaces/:id', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Scan endpoints (the wizard's backend, §2.4 / §5.4). Both fire-and-forget:
-// mint scanId, register a kind:'scan' entry in the SAME runs Map, wire its
-// scan-* events, start createWorkspaceScan(...).run() detached, return {scanId}.
-// The scan NEVER persists workspaces.json — persistence is the wizard's explicit
-// follow-up CRUD call (POST create / PATCH re-scan).
+// Workspace map: the last scan's structured result and its review. Validation and the
+// read-modify-write of the overrides live in workspaces.mjs (one transaction each, so two
+// quick clicks never lose one another); every change broadcasts workspaces-changed{map}.
+//   GET    /api/workspaces/:id/map                 { map, synthesis, overrides, edges, descriptionOrigin }
+//   PUT    /api/workspaces/:id/map/edges/:edgeId   { state: 'confirmed'|'rejected'|null } (scanned x_ edges)
+//   POST   /api/workspaces/:id/map/edges           { from, to, kind, display, detail? } -> 201 (200 when it exists)
+//   DELETE /api/workspaces/:id/map/edges/:edgeId   manual m_ edges only (x_ -> 400)
+//   POST   /api/workspaces/:id/map/render          "Regenerate description"
 // ---------------------------------------------------------------------------
-
-/**
- * Shared launcher for both scan routes (DRY, §2.4). Mints scanId, registers the
- * entry, wires events, starts the engine detached with a .catch backstop that
- * converts an unexpected throw into a broadcast scan-error (status 'error') so
- * the process never crashes on a fire-and-forget scan.
- * @param {{projectPaths:string[], name?:string, workspaceId?:string}} args
- * @returns {string} scanId
- */
-function startScan({ projectPaths, name, workspaceId, autoRescan = false }) {
-  const orch = createWorkspaceScan({
-    projectPaths,
-    name,
-    agentsDir: AGENTS_DIR,
-    claude: { permissionMode: 'acceptEdits', mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK) },
-  });
-  // The engine mints its own scanId (scan_<uuid>) and tags every emitted event
-  // with it; use THAT as the runs-Map key + the returned id so the entry, its
-  // buffered events, and WS reconnect/replay (?scanId=) all agree on one id.
-  const scanId = orch.getState().scanId;
-  const entry = {
-    id: scanId,
-    scanId,
-    orch,
-    kind: 'scan',
-    projectDir: (Array.isArray(projectPaths) && projectPaths[0]) || null,
-    workspaceId: workspaceId || null,
-    title: name || 'workspace scan',
-    status: 'scanning',
-    startedAt: new Date().toISOString(),
-    events: [],
-    pendingQuestion: null,
-    // A re-scan the server started after a member change: it saves its own description
-    // (saveRescanDescription) and a newer member change supersedes it.
-    ...(autoRescan ? { autoRescan: true, scanPaths: [...projectPaths] } : {}),
-  };
-  runs.set(scanId, entry);
-  wireScan(entry);
-
-  Promise.resolve()
-    .then(() => orch.run())
-    .catch((err) => {
-      // run() should never throw (it emits scan-error), but a defensive backstop
-      // mirrors POST /api/run: surface an unexpected throw as a tagged scan-error.
-      const event = { scanId, type: 'scan-error', message: err && err.message ? err.message : String(err) };
-      entry.status = 'error';
-      entry.events.push(event);
-      broadcast(event);
-    });
-
-  return scanId;
-}
-
-// POST /api/workspaces/scan (pre-persist, Step 2->3). Takes projectPaths directly:
-// validate >=2 paths + fs.existsSync each + reject non-git-repos (400); the deep
-// git work happens inside the engine.
-app.post('/api/workspaces/scan', async (req, res) => {
+app.get('/api/workspaces/:id/map', async (req, res) => {
+  const id = req.params.id;
+  if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
   try {
-    const body = req.body || {};
-    const projectPaths = Array.isArray(body.projectPaths)
-      ? body.projectPaths.map((p) => resolveProjectDir(p)).filter(Boolean)
-      : [];
-    if (projectPaths.length < 2) return badRequest(res, 'a workspace scan needs at least 2 member projects');
-    for (const dir of projectPaths) {
-      if (!fs.existsSync(dir)) return badRequest(res, `member path is missing: ${dir}`);
-      if (!isGitRepo(dir)) return badRequest(res, `member is not a git repository: ${dir}`);
-    }
-    const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : undefined;
-    const scanId = startScan({ projectPaths, name });
-    res.json({ scanId });
+    const data = await readWorkspaceMap(id);
+    if (!data) return res.status(404).json({ error: 'workspace not found' });
+    res.json({ ...data, edges: effectiveEdges(data.map, data.overrides) });
   } catch (err) {
-    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+    return workspaceFail(res, err);
   }
 });
 
-// POST /api/workspaces/:id/scan (re-scan). Reads the workspace (404 if absent),
-// scans ws.projectPaths, tags the entry with workspaceId. 409 if a live run for
-// that workspace already exists (avoid graphify-build contention).
+app.put('/api/workspaces/:id/map/edges/:edgeId', async (req, res) => {
+  const id = req.params.id;
+  if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
+  const body = req.body || {};
+  if (!Object.prototype.hasOwnProperty.call(body, 'state')) return badRequest(res, 'state must be "confirmed", "rejected" or null');
+  try {
+    const out = await setWorkspaceEdgeState(id, req.params.edgeId, body.state);
+    emitChanged('workspaces-changed', 'map');
+    res.json({ edge: out.edge, overrides: out.overrides, rerendered: out.rerendered, workspace: out.workspace });
+  } catch (err) {
+    return workspaceFail(res, err);
+  }
+});
+
+app.post('/api/workspaces/:id/map/edges', async (req, res) => {
+  const id = req.params.id;
+  if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
+  const body = req.body || {};
+  try {
+    const out = await addWorkspaceManualEdge(id, {
+      from: body.from, to: body.to, kind: body.kind, display: body.display, detail: body.detail,
+    });
+    if (out.created) emitChanged('workspaces-changed', 'map');
+    res.status(out.created ? 201 : 200)
+      .json({ edge: out.edge, overrides: out.overrides, rerendered: out.rerendered, workspace: out.workspace });
+  } catch (err) {
+    return workspaceFail(res, err);
+  }
+});
+
+app.delete('/api/workspaces/:id/map/edges/:edgeId', async (req, res) => {
+  const id = req.params.id;
+  if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
+  try {
+    const out = await removeWorkspaceManualEdge(id, req.params.edgeId);
+    emitChanged('workspaces-changed', 'map');
+    res.json({ ok: true, overrides: out.overrides, rerendered: out.rerendered, workspace: out.workspace });
+  } catch (err) {
+    return workspaceFail(res, err);
+  }
+});
+
+app.post('/api/workspaces/:id/map/render', async (req, res) => {
+  const id = req.params.id;
+  if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
+  try {
+    const workspace = await regenerateWorkspaceDescription(id);
+    emitChanged('workspaces-changed', 'map');
+    res.json({ workspace });
+  } catch (err) {
+    return workspaceFail(res, err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Workspace scan (wf_workspace_scan): a regular pipeline run over a workspace target that may
+// not exist yet. The routes validate, then hand startRunHandler an in-process target; the run
+// harness creates/updates the workspace when the run ends done (workspace-scan-run.mjs).
+// ---------------------------------------------------------------------------
+
+/** Roots hashes of scans between their 409 check and their runs entry: startRunHandler awaits
+ *  several things (workflow + guardrail lookups, the team gate, the orchestrator build) before
+ *  `runs.set`, so a second tab's POST in that window would otherwise pass the check too
+ *  (Review Focus 3). Taken synchronously right after the check, dropped once startRunHandler
+ *  has answered — by then the runs entry exists. */
+const pendingScans = new Set();
+
+/** The 8-hex roots hash a workspace id ends in (workspaces.mjs workspaceKey) — name-independent. */
+const setHashOf = (id) => String(id).slice(-8);
+
+/** A run entry that still owns its workspace target: any ACTIVE run (no workflowId test — a
+ *  just-resumed entry reads `wf_default` until resume() restores it), or a PAUSED Workspace scan
+ *  (it resumes into the target and saves it when done; its entry kept the workflowId it was built
+ *  with). A paused ordinary run holds the target no more than it did before scans were runs: it
+ *  blocks neither a re-scan nor a delete. The DELETE guard (Step 8) uses it too. */
+function ownsWorkspaceTarget(r) {
+  const s = String(r.status || '').toLowerCase();
+  return ['created', 'starting', 'running', 'pausing'].includes(s)
+    || (s === 'paused' && r.orch?.workflowId === WORKSPACE_SCAN_WORKFLOW_ID);
+}
+
+/** A run over this PROJECT SET that owns it, or a scan of it still launching. For a first scan the
+ *  set has no workspace (checkNewWorkspace refused a duplicate set), so any such run IS a scan,
+ *  under any name; for a re-scan it is any active run of that workspace or a paused scan of it (D4). */
+function liveOverSet(id) {
+  const hash = setHashOf(id);
+  if (pendingScans.has(hash)) return true;
+  return [...runs.values()].some((r) => r.kind === 'workspace-run' && typeof r.workspaceId === 'string'
+    && setHashOf(r.workspaceId) === hash && ownsWorkspaceTarget(r));
+}
+
+/** The run's primary member: the lowest projectKey — startRunHandler sorts members the same way,
+ *  and the run resolves its models against THIS member's catalog. checkNewWorkspace returns the
+ *  paths in request order, so never take [0]. */
+function primaryMemberOf(paths) {
+  return [...paths].sort((x, y) => { const a = projectKey(x), b = projectKey(y); return a < b ? -1 : a > b ? 1 : 0; })[0];
+}
+
+/**
+ * Refuse a detached Claude job (workspace scan, agent generation) up front when
+ * the CLI is signed out (preflight probeClaudeAuth): otherwise it starts and its
+ * first agent dies ~30 s in with "Not logged in". Only a definite 'signed-out'
+ * refuses — mock, an auth env var, or an unknown answer (an older CLI) all pass.
+ * Sends the 409 and returns true when it refused.
+ */
+async function refuseSignedOutClaude(res) {
+  const { state } = await probeClaudeAuth({ bin: configuredClaudeBin(), mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK) });
+  if (state !== 'signed-out') return false;
+  res.status(409).json({ code: CLAUDE_SIGNED_OUT_CODE, error: CLAUDE_SIGNED_OUT_MESSAGE });
+  return true;
+}
+
+/**
+ * The gate for a workspace scan: only a first-party scan agent needs the CLI signed in. On an
+ * endpoint-routed scan model (the stamp the orchestrator puts on the node, endpointRouted) the
+ * investigators stay on that endpoint too (phases.mjs sameEndpointSubagentDirective), so a
+ * signed-out install that reaches its models through a gateway (auto/runnable.mjs) still scans.
+ */
+async function refuseSignedOutScan(res, models) {
+  if (models && modelHasBaseUrlRouting(models.scanModel)) return false;
+  return refuseSignedOutClaude(res);
+}
+
+/** The scan's models (D18): the request's pick, else Settings › Runs › Workspaces, else the
+ *  defaults — checked against the primary member's catalog. Throws on a bad explicit pick (400). */
+async function scanModelsFor(body, projectPaths) {
+  return resolveScanModels({ explicit: body && body.models, stored: workspaceScanModels(), models: await listModels(primaryMemberOf(projectPaths)) });
+}
+
+/** Start a scan through the ONE run handler (the defragRequest pattern). startRunHandler reads
+ *  req.body once at its top, so rewriting it here is sound. The body names no source/feature
+ *  branch: every member runs from its default branch on a run-owned `worca-cc/…` branch, which
+ *  teardown deletes (D5). The live check and the reservation are the first two statements, with
+ *  NO await between them: a second request for the same set, arriving while this one is still
+ *  inside startRunHandler's awaits, finds the reservation and gets 409 (Review Focus 3). */
+async function scanRequest(req, res, { id, name, projectPaths, rescan, models }) {
+  if (liveOverSet(id)) {
+    return res.status(409).json({ error: rescan ? 'a live run exists for this workspace' : 'a scan of this project set is already running' });
+  }
+  const hash = setHashOf(id);
+  pendingScans.add(hash);
+  try {
+    const mock = !!(req.body && req.body.mock === true);
+    req._workspaceScan = { id, name, projectPaths, description: '', models };   // D9: no Workspace Context
+    req.body = {
+      workspaceId: id,
+      prompt: scanRunPrompt({ name, projectNames: projectPaths.map((p) => path.basename(p)), rescan }),
+      title: scanRunTitle(name),
+      workflowId: WORKSPACE_SCAN_WORKFLOW_ID,
+      guardrailsId: 'normal',
+      ...(mock ? { mock: true } : {}),
+    };
+    return await startRunHandler(req, res);
+  } finally {
+    pendingScans.delete(hash);
+  }
+}
+
+// POST /api/workspaces/scan (first scan): validated exactly as the save will be (D4).
+app.post('/api/workspaces/scan', async (req, res) => {
+  const body = req.body || {};
+  const projectPaths = Array.isArray(body.projectPaths)
+    ? body.projectPaths.map((p) => resolveProjectDir(p)).filter(Boolean)
+    : [];
+  if (projectPaths.length < 2) return badRequest(res, 'a workspace scan needs at least 2 member projects');
+  let target;
+  try {
+    target = checkNewWorkspace({ name: body.name, projectPaths });
+  } catch (err) {
+    return res.status(workspaceErrorStatus(err && err.code)).json({ error: err && err.message ? err.message : String(err) });
+  }
+  // A scan never inits or commits a member (scan D5): every member must be its own repository with a commit.
+  const problems = scanMemberProblems(target.projectPaths);
+  if (problems.length) return badRequest(res, `read-only workspace scan: ${problems.join('; ')}`);
+  let models;
+  try { models = await scanModelsFor(body, target.projectPaths); }
+  catch (err) { return badRequest(res, err && err.message ? err.message : String(err)); }
+  if (await refuseSignedOutScan(res, models)) return;
+  return scanRequest(req, res, { ...target, rescan: false, models });
+});
+
+// POST /api/workspaces/:id/scan (re-scan): the description is replaced when the run ends done.
 app.post('/api/workspaces/:id/scan', async (req, res) => {
   const id = req.params.id;
   if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
   try {
     const ws = await readWorkspace(id);
     if (!ws) return res.status(404).json({ error: 'workspace not found' });
-    const liveRun = [...runs.values()].some((r) =>
-      r.workspaceId === id && r.kind === 'workspace-run' &&
-      ['running', 'starting', 'created'].includes(String(r.status || '').toLowerCase()));
-    if (liveRun) return res.status(409).json({ error: 'a live run exists for this workspace' });
-    supersedeRescans(ws.id);   // the user's own re-scan replaces an automatic one
-    const scanId = startScan({ projectPaths: ws.projectPaths, name: ws.name, workspaceId: ws.id });
-    res.json({ scanId });
+    // ws.id is the stored id (a renamed workspace keeps its id; never recompute workspaceKey here).
+    // Plain create accepts any git work tree; a scan also needs each member to be its own repository with a commit.
+    const problems = scanMemberProblems(ws.projectPaths);
+    if (problems.length) return badRequest(res, `read-only workspace scan: ${problems.join('; ')}`);
+    let models;
+    try { models = await scanModelsFor(req.body || {}, ws.projectPaths); }
+    catch (err) { return badRequest(res, err && err.message ? err.message : String(err)); }
+    if (await refuseSignedOutScan(res, models)) return;
+    return await scanRequest(req, res, { id: ws.id, name: ws.name, projectPaths: ws.projectPaths, rescan: true, models });
   } catch (err) {
-    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+    if (!res.headersSent) res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
-});
-
-// POST /api/scan/stop  body:{scanId} -> entry.orch.stop() (aborts in-flight
-// investigators + best-effort scan-worktree/branch cleanup in the engine's
-// finally, D4); marks the entry 'stopped'. Idempotent: an unknown/finished scan
-// still returns ok.
-app.post('/api/scan/stop', (req, res) => {
-  const scanId = req.body && typeof req.body.scanId === 'string' ? req.body.scanId : '';
-  const entry = scanId ? runs.get(scanId) : null;
-  if (entry && entry.kind === 'scan' && entry.orch && typeof entry.orch.stop === 'function') {
-    try { entry.orch.stop(); } catch { /* best-effort */ }
-    entry.status = 'stopped';
-  }
-  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -4954,6 +5321,15 @@ app.get('/api/workspaces/:wid/runs/:id/ask-files/:askId/:index', async (req, res
   }
 });
 
+app.get('/api/workspaces/:id/runs/:runId/artifact-raw/*', async (req, res) => {
+  if (!WORKSPACE_KEY_RE.test(req.params.id)) return res.status(404).json({ error: 'pipeline not found' });
+  try {
+    const row = lookupPipelineRow(`workspaces/${req.params.id}`, req.params.runId);
+    if (!row) return res.status(404).json({ error: 'artifact not found' });
+    await sendArtifactRaw(res, row, req.params[0]);
+  } catch (err) { res.status(500).json({ error: err && err.message ? err.message : String(err) }); }
+});
+
 // ---------------------------------------------------------------------------
 // GET /api/settings  -> { root, projectsRoot, projectsRootDefault, default }
 //   root                : the configured Worca CC data-root base, '' when unset
@@ -4992,6 +5368,7 @@ const settingsState = () => ({
   humanRateUsdPerHour: humanRateUsdPerHour(),
   askMaxTurns: askMaxTurns(),
   askMaxBudgetUsd: askMaxBudgetUsd(),
+  askWeb: askWeb(),                                       // Ask Worca web access (off by default)
   debugSpawnEnabled: storedDebugSpawnEnabled(),          // what is STORED (the checkbox)
   debugSpawnEffective: effectiveDebugSpawn(),             // what the next spawn will DO, and why
   titleModel: storedTitleModel(),                         // the STORED id (the select), null = run's model
@@ -5002,6 +5379,8 @@ const settingsState = () => ({
   uiLevel: effectiveUiLevel(),                            // simple | advanced | expert (docs/ui-levels.md)
   memoryDefrag: memoryDefragModel(),                      // Settings › Memory: the STORED { model, effort } (null = the workflow default)
   memoryDefragDefault: defragDefaultModel(),              // what "(default)" means there: the built-in's own model
+  workspaceScan: workspaceScanModels(),                   // Settings › Runs › Workspaces: the STORED pick (null = the defaults)
+  workspaceScanDefault: WORKSPACE_SCAN_DEFAULT_MODELS,    // what null means: Sonnet 5 · medium, project agents sonnet · medium
 });
 
 /** Settings ▸ Auto workflow model: the stored id + what the classifier will actually use
@@ -5048,6 +5427,112 @@ app.get('/api/whoami', (req, res) => {
   res.json(who.source === 'local' ? { name: null, source: 'local', shared: false } : { ...who, shared: isSharedIdentity(who.source) });
 });
 
+// The signed-in person's model credentials, as the credential broker sees them
+// (docs/credential-broker.md). Status only: which slots have a key, never a key.
+// { enabled:false } with the broker off.
+// OpenRouter's daily allowance of `:free` requests (src/core/openrouter-free.mjs), for the
+// signed-in person with the credential broker, else for the install's key. The sidebar line,
+// the new-run warning and the Providers card read it; ?refresh=1 asks OpenRouter now.
+app.get('/api/openrouter/free-daily', async (req, res) => {
+  try {
+    res.json(await freeDailyStatus({ person: currentBillTo(), force: req.query.refresh === '1' }));
+  } catch (err) {
+    res.status(500).json({ enabled: false, error: err && err.message ? err.message : String(err) });
+  }
+});
+
+app.get('/api/credentials', async (req, res) => {
+  if (!brokerEnabled()) return res.json({ enabled: false });
+  try {
+    const info = await brokerInfo();
+    const who = resolveIdentity(req);
+    // Which slot each catalog model spends from: the pickers' "your key / no key" badges.
+    const models = {};
+    try {
+      for (const m of await listModels()) {
+        const r = modelSlot(m.id);
+        if (r) models[m.id] = r.slot ? { slot: r.slot } : r.keyless ? { keyless: true } : { error: r.error };
+      }
+    } catch { /* badges are a nicety: an unreadable catalog leaves them off */ }
+    const base = { enabled: true, mode: info.mode, keyPage: info.publicUrl || null, models };
+    if (info.mode !== 'multi') return res.json({ ...base, person: null, slots: (await personSlots('local')).slots });
+    if (!isSharedIdentity(who.source)) return res.json({ ...base, person: null, slots: [] });
+    const r = await personSlots(who.name);
+    res.json({ ...base, person: r.person, slots: r.slots });
+  } catch (err) {
+    res.status(502).json({ enabled: true, error: err && err.message ? err.message : String(err) });
+  }
+});
+
+// ── Ask Worca tool relay (agent users, agent-pool.mjs) ───────────────────────────────
+// When agents run under their own users, a chat's claude runs as the person's agent user,
+// which cannot read worca's database. Its MCP child then only relays each JSON-RPC line
+// here; the worca tools run in this process (createAskToolServer), in the chat owner's
+// billing context. One token per turn, loopback callers only, dropped when the turn ends.
+const askRelays = new Map();   // token -> { rpc, out, billTo, owner }
+
+function askAgentRelay({ threadId, reader, web = null }) {
+  const token = randomBytes(24).toString('base64url');
+  const life = new AbortController();
+  const entry = { out: [], billTo: currentBillTo(), owner: currentOwner() };
+  // The tools run here, so this turn's web access rides a private env copy (never process.env itself);
+  // the search key is read from worca's own environment, where it was set.
+  const env = { ...process.env, ...askWebMcpEnv(web) };
+  entry.rpc = createAskToolServer({ threadId, reader, signal: life.signal, env, write: (s) => { entry.out.push(s); } });
+  askRelays.set(token, entry);
+  const port = server.address()?.port || PORT;
+  return { url: `http://127.0.0.1:${port}/api/ask/relay`, token, dispose: () => { life.abort(); askRelays.delete(token); } };
+}
+
+app.post('/api/ask/relay', async (req, res) => {
+  if (!isInContainer(req)) return res.status(403).json({ error: 'relay: loopback callers only' });
+  const entry = askRelays.get(String(req.headers['x-worca-relay'] || ''));
+  if (!entry) return res.status(403).json({ error: 'relay: unknown or finished turn' });
+  const line = req.body && typeof req.body.line === 'string' ? req.body.line : null;
+  if (line === null) return badRequest(res, 'relay: line is required');
+  // One line at a time per turn (the child sends sequentially), so the output collected
+  // between feed and idle is this line's answer.
+  await withBillTo(entry.billTo, async () => {
+    entry.out = [];
+    await entry.rpc.feed(line);
+    await entry.rpc.idle();
+  }, { owner: entry.owner });
+  res.json({ out: entry.out });
+});
+
+/**
+ * Credential-broker preflight for starting work with known models (an Ask message, a run
+ * started with an explicit model): refused up front, naming each missing key and the key
+ * page, instead of the first spawn failing. In single mode the one set of keys is checked.
+ * Never blocks on a broker that can't be asked.
+ * @param {string[]} modelIds
+ * @returns {Promise<string|null>} the refusal, or null to proceed
+ */
+async function brokerStartRefusal(req, modelIds) {
+  if (!brokerEnabled() || !modelIds || !modelIds.length) return null;
+  try {
+    const info = await brokerInfo();
+    let person = 'local';
+    if (info.mode === 'multi') {
+      const who = resolveIdentity(req);
+      if (!isSharedIdentity(who.source)) return null;
+      person = who.name;
+    }
+    const r = missingCredentials(modelIds, modelSlot, (await personSlots(person)).slots || []);
+    if (!r.missing.length && !r.errors.length) return null;
+    const one = r.missing.length === 1 && !r.errors.length ? r.missing[0] : null;
+    const where = info.publicUrl ? ` Add it on the key page (${info.publicUrl}), then try again.` : ' Add it to the credential broker, then try again.';
+    if (one) {
+      return one.state === 'invalid'
+        ? `Your ${one.label} was rejected by the provider.${where}`
+        : `You haven't added your ${one.label} yet, and ${one.models.join(', ')} needs it.${where}`;
+    }
+    return `Can't start: ${describeMissing(r, info.publicUrl)}`;
+  } catch {
+    return null;
+  }
+}
+
 /** Constant-time bearer check; `expected` is the boot-time token from ui.json. */
 function bearerMatches(header, expected) {
   if (!expected || typeof header !== 'string') return false;
@@ -5090,6 +5575,7 @@ app.post('/api/settings', async (req, res) => {
   const hasBudgetKey = has('pipelineCostLimitUsd') || has('totalCostLimitUsd') || has('costLimitResetPeriod');
   const hasHumanRateKey = has('humanRateUsdPerHour');
   const hasAskKey = has('askMaxTurns') || has('askMaxBudgetUsd');
+  const hasAskWeb = has('askWeb');                // null clears back to unset (a team default applies)
   const hasDebugSpawnKey = has('debugSpawnEnabled');
   const hasTitleModelKey = has('titleModel');
   const hasHideBuiltinKey = has('hideBuiltinModels');
@@ -5101,6 +5587,8 @@ app.post('/api/settings', async (req, res) => {
   // project-less catalog the Settings pickers offer (a run re-checks it against its own).
   const hasMemoryDefragKey = has('memoryDefrag');
   const defragModels = hasMemoryDefragKey ? (autoModels || await listModels('')) : null;
+  const hasWorkspaceScanKey = has('workspaceScan');
+  const wsScanModels = hasWorkspaceScanKey ? (autoModels || defragModels || await listModels('')) : null;
   // #422: the title model is a SELECT over the catalog, so an id that is not a
   // catalog member is a client bug (or a stale option) — refuse it here rather
   // than store an id resolveModelEnv could never route.
@@ -5126,6 +5614,7 @@ app.post('/api/settings', async (req, res) => {
     assertCostLimitInputs(budget);
     if (hasHumanRateKey) assertHumanRateInput(body.humanRateUsdPerHour ?? '');
     assertAskLimitInputs(ask);
+    if (hasAskWeb && body.askWeb !== null) assertAskWebInput(body.askWeb);
     if (hasDebugSpawnKey) assertDebugSpawnInput(body.debugSpawnEnabled);
     if (hasTitleModelKey) {
       assertTitleModelInput(titleModelInput);
@@ -5138,6 +5627,7 @@ app.post('/api/settings', async (req, res) => {
     if (hasUiLevelKey) assertUiLevelInput(body.uiLevel);
     if (hasAutoKey) assertAutoWorkflowModelInput(body.autoWorkflowModel ?? '', autoModels);
     if (hasMemoryDefragKey) assertMemoryDefragModelInput(body.memoryDefrag, defragModels);
+    if (hasWorkspaceScanKey) assertWorkspaceScanInput(body.workspaceScan, wsScanModels);
     // Root first: it is the one key whose setter can still fail AFTER the asserts
     // above (an unusable path), so every other key's write must come after it or
     // a mixed POST would answer 400 with those keys already applied on disk.
@@ -5156,6 +5646,7 @@ app.post('/api/settings', async (req, res) => {
     if (hasHumanRateKey) await setHumanRateUsdPerHour(body.humanRateUsdPerHour ?? '');
     if (has('askMaxTurns')) await setAskMaxTurns(ask.askMaxTurns);
     if (has('askMaxBudgetUsd')) await setAskMaxBudgetUsd(ask.askMaxBudgetUsd);
+    if (hasAskWeb) await setAskWeb(body.askWeb);
     if (hasDebugSpawnKey) await setDebugSpawnEnabled(body.debugSpawnEnabled);
     if (hasTitleModelKey) await setTitleModel(titleModelInput);
     if (hasHideBuiltinKey) await setHideBuiltinModels(body.hideBuiltinModels);
@@ -5163,11 +5654,12 @@ app.post('/api/settings', async (req, res) => {
     if (hasUiLevelKey) await setUiLevel(body.uiLevel);
     if (hasAutoKey) await setAutoWorkflowModel(body.autoWorkflowModel ?? '', { models: autoModels });
     if (hasMemoryDefragKey) await setMemoryDefragModel(body.memoryDefrag, { models: defragModels });
+    if (hasWorkspaceScanKey) await setWorkspaceScanModels(body.workspaceScan, { models: wsScanModels });
     if (has('schedule')) await setScheduleDefaults(body.schedule && typeof body.schedule === 'object' ? body.schedule : {});
     if (hasBudgetKey) emitChanged('budget-changed');
     // Other open tabs repaint their Settings cards (a stale tab could otherwise
     // "save" its old checkbox state over this one with no feedback to either).
-    if (hasAskKey || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasHumanRateKey || hasMemoryDefragKey || has('schedule')) emitChanged('settings-changed');
+    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule')) emitChanged('settings-changed');
     res.json({ ...settingsState(), ...(await autoModelState()), chat: chatPrefs() });
   } catch (err) {
     // The setters throw only on an unusable path -> client error (400).
@@ -6520,9 +7012,12 @@ app.get('/api/ask/threads/:id/attachments/:attId', (req, res) => {
     const file = att ? askAttachmentPath(id, attId) : null;
     if (!file) return res.status(404).json({ error: 'attachment not found' });
     // Text bodies serve as utf-8 text/plain (pre-#398, byte-for-byte: the body
-    // was UTF-8-validated at upload and stored verbatim). Only sniff-verified
-    // allowlisted mimes are ever stored (never scriptable markup like SVG/HTML),
-    // so serving the real mime inline is safe — and it is what lets the
+    // was UTF-8-validated at upload and stored verbatim) whatever their mime —
+    // this is what makes an HTML attachment (a text kind labelled text/html)
+    // safe: with nosniff it is shown as source, never rendered or run on the
+    // worca origin, so text/html must never be served here. Binary bodies are
+    // sniff-verified allowlisted mimes only (never scriptable markup like SVG),
+    // so serving their real mime inline is safe — and it is what lets the
     // transcript render <img> thumbnails (#398).
     const type = att.kind === 'text' ? 'text/plain; charset=utf-8' : (att.mime || 'application/octet-stream');
     // Streamed, not readFileSync + send: a body is immutable under its
@@ -6614,11 +7109,24 @@ function askValidateScope(raw) {
   return { ok: true, scope: { pinned: true, [keys[0]]: cv.context[keys[0]] } };
 }
 
+/** One chat turn's web access: settings ⊕ the pinned project's team policy ⊕ the hosts this chat's web
+ *  cards allowed "for this chat". Never throws: a failure reads as off. */
+function askWebAccessFor(threadId, ctx) {
+  try {
+    const pinned = askPinnedScope(ctx || {});
+    return askWebAccess({ projectKey: pinned?.projectKey || null, chatHosts: chatWebHosts(askListMessages(threadId)) });
+  } catch (err) {
+    console.warn(`[worca-ask] web access resolve failed (${err?.message || err}) — web stays off`);
+    return WEB_OFF;
+  }
+}
+
 /** The system prompt of ONE Ask turn: the rules, the catalog, and — only when the chat's
  *  "Create and run scripts" pref is on (W20) — the scripts section with the runtimes this host
- *  actually has (the python probe, cached 60 s). Memory is mounted, not rendered. */
-async function askSystemPromptFor(catalog) {
-  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT });
+ *  actually has (the python probe, cached 60 s); plus the web section when `web` (askWebAccess()
+ *  for this turn) is on. Memory is mounted, not rendered. */
+async function askSystemPromptFor(catalog, { web = null } = {}) {
+  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT, web });
 }
 
 /** "scheduled Sat Sep 19, 02:00 (run 1a2b…)" / "repeats: Every weekday at 02:00 (sch_…)" / "proposes: …" — or ''. */
@@ -6739,7 +7247,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
         // workflowId once the user saved it; a run card keeps its pre-P3 line byte for byte.
         const wf = !!(b.card && b.card.type === 'workflow');
         if (wf && b.state === 'building') continue;   // transient (no name yet) — never worth a header line
-        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'workspace')) {
+        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'workspace')) {
           cards.push({ id: b.id, type: b.card.type, state: b.state, summary: b.card.summary || '' });
           continue;
         }
@@ -6877,7 +7385,11 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     const withText = attRows.map((a, i) => ({ id: a.id, name: a.name, bytes: a.bytes, kind: a.kind, mime: a.mime, text: files[i].text }));
     const { inline, listed } = askSelectInlineAttachments(withText);
     const headerCtx = await resolveAskContext(id, ctx, listed, userMsg.id, { signedIn });
-    const systemPrompt = await askSystemPromptFor(catalog);
+    // Web access (docs/guardrails.md "Web access"): resolved ONCE per turn — local settings ⊕ the pinned project's
+    // team policy — so the prompt section, the sub-agent note and the MCP child's tools agree.
+    const pinned = askPinnedScope(ctx);
+    const web = askWebAccessFor(id, ctx);
+    const systemPrompt = await askSystemPromptFor(catalog, { web });
     const header = askBuildContextHeader(headerCtx);
     const prompt = askBuildTurnPrompt(header, text, inline);
     const prior = askListMessages(id).filter((m) => m.seq < userMsg.seq);
@@ -6895,12 +7407,16 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
       firstTurn: !synthetic && userMsg.seq === 1 && titleWasAuto, // P3: an event never titles the thread (D13 guard kept)
       firstText: text,
       deterministicTitle,
-      pinnedScope: askPinnedScope(ctx),             // #397: proposal defaulting + mismatch flag
+      pinnedScope: pinned,                          // #397: proposal defaulting + mismatch flag
+      web,
       timeZone: ctx.timeZone || (thread.context && thread.context.timeZone) || null,   // scheduled runs: the user's clock
       memoryProject: headerCtx.project ? { key: headerCtx.project.key, name: headerCtx.project.name || '' } : null,   // native-rules revision: the turn mounts global + this project through --add-dir
       mock: mockEnabled({}) ? { card: mockAskCard(ctx, text) } : null, // R-F
       attachmentNames,
       deps: {
+        // Agents under their own users (agent-pool.mjs): the chat runs as the person's agent
+        // user and its worca tools run here, through the relay. null = the classic MCP child.
+        agentRelay: agentIdentity() ? askAgentRelay : null,
         onFrame: stampAskFrames(id, job),
         onOutOfTurn: (f) => broadcast({ ...f, threadId: id }),
         onCommentMutation: ({ runId }) => { emitDiffCommentsChanged(runId); },
@@ -6979,6 +7495,10 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
     if (!text.trim()) return badRequest(res, 'text is required');
     const mv = await validateModelEffort(body.model, body.effort);
     if (!mv.ok) return badRequest(res, mv.error);
+    if (!mockEnabled({})) {
+      const refusal = await brokerStartRefusal(req, [String(body.model)]);
+      if (refusal) return res.status(409).json({ error: refusal, code: 'credential-missing' });
+    }
     const cv = validateClientContext(body.context);
     if (!cv.ok) return badRequest(res, cv.error);
     // #397: explicit pin beats page context, per field. A context carrying its own
@@ -7179,9 +7699,9 @@ async function startMetricsEventTurn(threadId, block) {
   const state = block.state === 'declined' ? 'declined' : block.state === 'failed' ? 'failed' : 'applied';
   const result = card.result || null;
   // One event turn for every non-workflow card; the type picks the wording. Metrics is the fallback.
-  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'workspace' ? card.type : 'metrics';
-  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, workspace: workspaceEventPrompt, metrics: metricsEventPrompt }[kind];
-  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, workspace: workspaceNoticeText, metrics: metricsNoticeText }[kind];
+  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' ? card.type : 'metrics';
+  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, workspace: workspaceEventPrompt, metrics: metricsEventPrompt }[kind];
+  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, workspace: workspaceNoticeText, metrics: metricsNoticeText }[kind];
   const text = eventPrompt({ cardId: block.id, state, card, result });
   const notice = noticeText({ state, card, result });
   let mv = await validateModelEffort(thread.model, thread.effort);
@@ -7277,6 +7797,38 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
         let result;
         try { result = await applyModelChange(found.block.card); emitChanged('settings-changed'); }
         catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err) }; }
+        block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
+      } finally { askCardBusy.delete(cardId); }
+      if (!block) return res.status(409).json({ error: 'card vanished' });
+      const turn = await startMetricsEventTurn(id, block);
+      return res.json({ block, turn });
+    }
+    if (found.block.card && found.block.card.type === 'web') {
+      // Web card (docs/guardrails.md "Web access"): proposed → applied | failed | declined. "For this chat" is
+      // recorded on the card itself (chatWebHosts reads it back each turn); "always" adds the exact host to
+      // settings. Re-checked HERE against the chat's current web access: off, or outside the team cap, fails.
+      if (body.state !== 'applied' && body.state !== 'declined') return badRequest(res, 'state must be "applied" or "declined"');
+      if (body.state === 'applied' && body.scope !== 'chat' && body.scope !== 'always') return badRequest(res, 'scope must be "chat" or "always"');
+      if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
+      if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
+      if (body.state === 'declined') {
+        const block = flipCard(id, cardId, { state: 'declined' });
+        if (!block) return res.status(409).json({ error: 'card vanished' });
+        const turn = await startMetricsEventTurn(id, block);
+        return res.json({ block, turn });
+      }
+      askCardBusy.add(cardId);
+      let block;
+      try {
+        let result;
+        try {
+          const host = found.block.card.change?.host;
+          const now = askWebAccessFor(id, askGetThread(id)?.context || {});
+          if (!now.enabled) throw new Error('web access is off for this chat — switch it on in Settings → Ask Worca → Web access');
+          if (Array.isArray(now.teamCap) && !askHostAllowed(host, now.teamCap)) throw new Error(`${host} is outside the team policy's web allowlist`);
+          if (body.scope === 'always') { await addAskWebHost(host); emitChanged('settings-changed'); }
+          result = { ok: true, scope: body.scope };
+        } catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err) }; }
         block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
       } finally { askCardBusy.delete(cardId); }
       if (!block) return res.status(409).json({ error: 'card vanished' });
@@ -7468,7 +8020,7 @@ function agentErrorBody(err) {
 }
 
 /**
- * Fire-and-forget agent generation (mirrors startScan). Mints genId, registers
+ * Fire-and-forget agent generation. Mints genId, registers
  * a kind:'agentgen' entry in the SAME runs Map, wires its agentgen-* events,
  * starts createAgentGen(...).run() detached with a .catch backstop, returns
  * genId. The draft is NEVER saved — persistence is the wizard's explicit
@@ -7496,7 +8048,7 @@ function startAgentGen(input) {
     .then(() => orch.run())
     .catch((err) => {
       // run() should never throw (it emits agentgen-error), but a defensive
-      // backstop mirrors startScan: surface an unexpected throw as a tagged
+      // backstop surfaces an unexpected throw as a tagged
       // agentgen-error.
       const event = { genId, type: 'agentgen-error', message: err && err.message ? err.message : String(err) };
       entry.status = 'error';
@@ -7525,6 +8077,7 @@ app.post('/api/agents/generate', async (req, res) => {
     const allAgents = await listAgents();
     const byKey = Object.fromEntries(allAgents.map((m) => [m.key, m]));
     const pick = (keys) => (Array.isArray(keys) ? keys : []).map((k) => byKey[k]).filter(Boolean);
+    if (await refuseSignedOutClaude(res)) return;
     const genId = startAgentGen({
       name, purpose: String(body.purpose || ''), details: String(body.details || ''),
       expectedBefore: pick(body.expectedBefore), expectedAfter: pick(body.expectedAfter),
@@ -7538,8 +8091,7 @@ app.post('/api/agents/generate', async (req, res) => {
 
 // POST /api/agents/generate/stop  body:{genId} -> entry.orch.stop() (aborts the
 // in-flight runClaude; the engine's finally reaps its scratch dir); marks the
-// entry 'stopped'. Idempotent: an unknown/finished generation still returns ok
-// (mirrors POST /api/scan/stop).
+// entry 'stopped'. Idempotent: an unknown/finished generation still returns ok.
 app.post('/api/agents/generate/stop', (req, res) => {
   const genId = req.body && typeof req.body.genId === 'string' ? req.body.genId : '';
   const entry = genId ? runs.get(genId) : null;
@@ -7670,7 +8222,7 @@ function startScriptBench(request) {
   Promise.resolve()
     .then(() => orch.run())
     .catch((err) => {
-      // run() never throws (it emits scriptbench-error); this is startScan's
+      // run() never throws (it emits scriptbench-error); this is the launcher's
       // defensive backstop, surfacing an unexpected throw as a tagged error.
       // It carries the entry's next `seq` like every other frame (C17), or a
       // subscribe replay would deliver this one twice.
@@ -8890,6 +9442,24 @@ if (isMain) {
   }
   for (const w of REMOTE_ACCESS_CHECK.warnings) console.warn(`[worca-ui] remote access: ${w}`);
 
+  // Credential broker (docs/credential-broker.md): with WORCA_BROKER_URL set, worca holds no
+  // model credential. Refuse to serve while one is still reachable by agents, or while the
+  // broker can't be reached.
+  {
+    const shared = !!identityCheck || !!String(process.env.WORCA_IDENTITY_HEADER || '').trim();
+    const b = await checkBrokerAtBoot({ shared, log: (l) => console.log(l) });
+    for (const w of b.warnings) console.warn(`[worca-ui] credentials: ${w}`);
+    if (b.fatal.length) {
+      for (const e of b.fatal) console.error(e.startsWith('worca:') ? e : `[worca-ui] credentials: ${e}`);
+      console.error('[worca-ui] not starting.');
+      process.exit(78);
+    }
+    if (b.on) {
+      const slots = (b.info?.slots || []).map((s) => s.id).join(', ');
+      console.log(`[worca-ui] credentials: broker ${b.info?.mode}${b.info?.publicUrl ? `, key page ${b.info.publicUrl}` : ''}, slots ${slots}`);
+    }
+  }
+
   try {
     seedBuiltinMarketplace();
   } catch (err) {
@@ -8979,12 +9549,13 @@ if (isMain) {
 
 export { app, server, runs };
 export const _testing = {
-  wireRun, wireScan, summarizeRuns, startScan, saveRescanDescription, fireTicket, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
+  wireRun, summarizeRuns, scanRequest, fireTicket, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
   chatActions, chatRouter, channelHost, handleChatInbound, enqueueChatWork, answerRun,
-  chatNotifier, resumeRun, resolveHljsAssets, resolveEsmAsset, askJobs, askFollowers, askDeleting, resolveAskContext, flipCard,
+  chatNotifier, resumeRun, resolveHljsAssets, resolveEsmAsset, askJobs, askFollowers, askDeleting, resolveAskContext, flipCard, askWebAccessFor,
   startCloneJob, followCloneCard, CLONE_JOBS,
   emitDiffCommentsChanged, emitAskWorktrees, askWorktreesEnvelope, deleteAskThreadFully,
   askTrackRun, liveRunEntry, liveDefragRun, memoryScopeKey, startRunHandler, emitMemoryChanged, askSystemPromptFor,
   uiControl, bearerMatches,
   broadcast, askFilesRunDir,
+  trackHeartbeat, heartbeatTick, BOOT_ID,
 };

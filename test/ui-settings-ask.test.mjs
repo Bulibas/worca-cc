@@ -33,6 +33,7 @@ const GET_BODY = () => ({
   root: '/w', projectsRoot: '/p', projectsRootDefault: '/p', default: {}, chat: {},
   pipelineCostLimitUsd: null, totalCostLimitUsd: null, costLimitResetPeriod: 'monthly',
   askMaxTurns: 400, askMaxBudgetUsd: null,
+  askWeb: { enabled: false, allowedDomains: [], search: null },
 });
 
 // The server's storage semantics: '' clears to the default (400 turns / no cap),
@@ -47,7 +48,8 @@ const resolveAsk = (body) => {
 // GET /api/ask/history: the counts the "Delete all chat history" flow quotes.
 // `history` is MUTABLE — the DELETE arm zeroes it the way the server would, so
 // the refetch after a delete paints the empty state.
-async function boot({ postResponse, history = { threads: 3, worktrees: 2, attachments: 5, inFlight: 0 }, deleteResponse } = {}) {
+// `get` overrides keys of the GET /api/settings body (and of the save response built from it).
+async function boot({ postResponse, history = { threads: 3, worktrees: 2, attachments: 5, inFlight: 0 }, deleteResponse, get = {} } = {}) {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
@@ -74,9 +76,9 @@ async function boot({ postResponse, history = { threads: 3, worktrees: 2, attach
         const body = JSON.parse(opts.body);
         posts.push(body);
         return Promise.resolve(postResponse
-          || { ok: true, status: 200, json: async () => ({ ...GET_BODY(), ...resolveAsk(body) }) });
+          || { ok: true, status: 200, json: async () => ({ ...GET_BODY(), ...get, ...resolveAsk(body) }) });
       }
-      return Promise.resolve({ ok: true, status: 200, json: async () => GET_BODY() });
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ ...GET_BODY(), ...get }) });
     }
     if (u.includes('/api/budget'))
       return Promise.resolve({ ok: true, status: 200, json: async () => okBudget() });
@@ -317,4 +319,43 @@ test('ui-settings-ask: the script toggle paints from chat prefs and rides the ca
   $('#askLimitsSave').click();
   await tick();
   assert.deepEqual(posts[0].chat, { scriptTools: false });
+});
+
+test('ui-settings-ask: web fields paint, and a touched card posts askWeb (trimmed, blank lines dropped)', async () => {
+  const { window, $, posts, tick, openSettings } = await boot({ get: { askWeb: { enabled: true, allowedDomains: ['docs.example.com', '*.mdn.io'], search: { url: 'https://s.example/?q={query}', key: '${BRAVE_API_KEY}', keyVar: 'BRAVE_API_KEY', keyHeader: 'X-Subscription-Token', keyPrefix: '' } } } });
+  await openSettings();
+  assert.equal($('#askWebEnabled').checked, true);
+  assert.equal($('#askWebDomains').value, 'docs.example.com\n*.mdn.io');
+  assert.equal($('#askWebSearchKey').value, '${BRAVE_API_KEY}');
+  $('#askWebDomains').value = 'docs.example.com\n\n  new.example.org ';
+  $('#askWebDomains').dispatchEvent(new window.Event('input', { bubbles: true }));
+  $('#askWebSearchUrl').value = '';
+  $('#askWebSearchUrl').dispatchEvent(new window.Event('input', { bubbles: true }));
+  $('#askLimitsSave').click(); await tick();
+  assert.deepEqual(posts[0].askWeb, { enabled: true, anyHost: false, allowedDomains: ['docs.example.com', 'new.example.org'], search: null });
+});
+
+test('ui-settings-ask: an untouched web section is not posted', async () => {
+  const { $, posts, tick, openSettings } = await boot();
+  await openSettings();
+  $('#askLimitsSave').click(); await tick();
+  assert.ok(!('askWeb' in posts[0]));
+});
+
+test('ui-settings-ask: toggling web off posts an explicit off', async () => {
+  const { window, $, posts, tick, openSettings } = await boot();
+  await openSettings();
+  $('#askWebEnabled').checked = true; $('#askWebEnabled').dispatchEvent(new window.Event('change', { bubbles: true }));
+  $('#askWebEnabled').checked = false; $('#askWebEnabled').dispatchEvent(new window.Event('change', { bubbles: true }));
+  $('#askLimitsSave').click(); await tick();
+  assert.deepEqual(posts[0].askWeb, { enabled: false, anyHost: false, allowedDomains: [], search: null });
+});
+
+test('ui-settings-ask: "Any site, without asking" paints and posts anyHost', async () => {
+  const { window, $, posts, tick, openSettings } = await boot({ get: { askWeb: { enabled: true, anyHost: true, allowedDomains: [], search: null } } });
+  await openSettings();
+  assert.equal($('#askWebAnyHost').checked, true);
+  $('#askWebAnyHost').checked = false; $('#askWebAnyHost').dispatchEvent(new window.Event('change', { bubbles: true }));
+  $('#askLimitsSave').click(); await tick();
+  assert.equal(posts[0].askWeb.anyHost, false);
 });

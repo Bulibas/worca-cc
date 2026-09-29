@@ -8,7 +8,8 @@
 import { runClaude } from './claude-runner.mjs';
 import { resolveModelEnv } from './config.mjs';
 import { AUX_EFFORT } from './model-env.mjs';
-import { classifyError } from './recoverable-error.mjs';
+import { classifyError, isFreeDailyLimit, freeDailyHint } from './recoverable-error.mjs';
+import { failedBecauseSignedOut } from './claude-auth.mjs';
 import { bridgeEvents } from './bridge/telemetry.mjs';
 
 const TEST_TIMEOUT_MS = 60_000;
@@ -21,6 +22,7 @@ const SYSTEM = 'You are a connectivity check. Reply with exactly OK.';
 export function hintFor(errorClass) {
   switch (errorClass) {
     case 'auth': return 'authentication failed — check the token/secret for this model';
+    case 'model': return 'this model id is not served by the endpoint — pick a model the endpoint serves, or add yours in Settings › Models';
     case 'network': return 'endpoint unreachable — check ANTHROPIC_BASE_URL';
     case 'rate_limit': return 'the endpoint is rate-limiting or overloaded — try again shortly';
     case 'quota': return 'quota/billing problem — check the account behind this endpoint';
@@ -29,6 +31,8 @@ export function hintFor(errorClass) {
     default: return '';
   }
 }
+
+export const CLAUDE_SIGNED_OUT_HINT = "Claude Code isn't signed in — run `claude` in a terminal and type /login";
 
 /** Actionable hint for a bridge readiness failure (config.mjs resolveModelEnv). Pure. */
 export function bridgeHintFor(reason, provider = 'the provider') {
@@ -44,11 +48,11 @@ export function bridgeHintFor(reason, provider = 'the provider') {
  * Live connectivity check for a catalog model id (global or plugin — the
  * resolution precedence is resolveModelEnv's). Explicit user action only.
  * @param {string} id catalog model id
- * @param {{signal?:AbortSignal, bin?:string, run?:typeof runClaude}} [opts]
- *   `run` is injectable for unit tests.
+ * @param {{signal?:AbortSignal, bin?:string, run?:typeof runClaude, signedOut?:typeof failedBecauseSignedOut}} [opts]
+ *   `run` / `signedOut` are injectable for unit tests.
  * @returns {Promise<{ok:true, text:string}|{ok:false, errorClass:(string|null), message:string, hint?:string}>}
  */
-export async function testModel(id, { signal, bin, run = runClaude } = {}) {
+export async function testModel(id, { signal, bin, run = runClaude, signedOut = failedBecauseSignedOut } = {}) {
   const ctrl = new AbortController();
   const onOuterAbort = () => ctrl.abort();
   if (signal) {
@@ -81,6 +85,7 @@ export async function testModel(id, { signal, bin, run = runClaude } = {}) {
       signal: ctrl.signal,
       bin,
       onEvent: () => {},
+      spawnKind: 'test',         // credential broker: a 10-minute token (broker-client.mjs)
     });
     const reply = String(text || '').split(/\r?\n/).map((l) => l.trim()).find((l) => l) || '';
     if (!reply) {
@@ -106,8 +111,16 @@ export async function testModel(id, { signal, bin, run = runClaude } = {}) {
     // names the fix instead of the generic credential advice. A bridge failure
     // classed `network` ("endpoint unreachable", "upstream error (500)") is not
     // an ANTHROPIC_BASE_URL problem: no hint, so the UI shows the message.
+    // A signed-out CLI is not this model's token: a first-party model needs the
+    // Claude Code sign-in (and signed out the CLI may only say `unrecognized_model`),
+    // so say that instead of the generic advice.
+    const cliSignedOut = !(err && err.bridgeReason) && !bridgeFailure
+      && await signedOut({ message, model: id, ...(bin ? { bin } : {}) });
     const hint = err && err.bridgeReason ? bridgeHintFor(err.bridgeReason, err.bridgeProvider)
-      : bridgeFailure && bridgeFailure.message && errorClass === 'network' ? '' : hintFor(errorClass);
+      : bridgeFailure && bridgeFailure.message && errorClass === 'network' ? ''
+      : cliSignedOut ? CLAUDE_SIGNED_OUT_HINT
+      : isFreeDailyLimit(message) ? freeDailyHint(message)
+      : hintFor(errorClass);
     return { ok: false, errorClass, message, ...(hint ? { hint } : {}) };
   } finally {
     bridgeEvents.off('failure', onBridgeFailure);

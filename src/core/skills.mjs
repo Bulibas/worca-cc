@@ -37,6 +37,22 @@ export function pluginSkillDirs() {
   }
 }
 
+/** The enabled plugins' `assets/` folders, same order and same guards as
+ *  pluginSkillDirs. A plugin agent may declare `requiresAssets`, and without
+ *  this layer stageAssets could only ever look inside worca itself. */
+export function pluginAssetDirs() {
+  try {
+    const lock = readPluginsLock();
+    return Object.keys(lock)
+      .sort()
+      .filter((name) => lock[name] && lock[name].enabled !== false)
+      .map((name) => ({ plugin: name, dir: join(pluginCurrentDir(name), 'assets') }))
+      .filter(({ dir }) => existsSync(dir));
+  } catch {
+    return [];
+  }
+}
+
 /**
  * S2 (path-segment guard). A skill name is used as a PATH SEGMENT at both mount
  * sites — `injectSkills`' `join(t, '.claude', 'skills', skill)` and

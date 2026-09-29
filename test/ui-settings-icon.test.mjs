@@ -6,11 +6,8 @@ import { fileURLToPath } from 'node:url';
 
 const html = readFileSync(fileURLToPath(new URL('../ui/public/index.html', import.meta.url)), 'utf8');
 
-// Grab the SIDEBAR Settings nav link's <svg> specifically. The sidebar link is
-// `data-nav="settings">` immediately followed (after whitespace) by an <svg>; the
-// topnav link is `data-nav="settings">Settings` (text, no svg). String#match (no /g)
-// returns the FIRST match in document order — the sidebar link comes first AND is the
-// only one followed by <svg>, so this matches only the icon-bearing sidebar link.
+// Grab the SIDEBAR Settings nav link's <svg> specifically. The link is
+// `data-nav="settings">` immediately followed (after whitespace) by an <svg>.
 function settingsNavSvg() {
   const m = html.match(/data-nav="settings"[^>]*>\s*<svg[\s\S]*?<\/svg>/);
   assert.ok(m, 'sidebar Settings nav link with an <svg> not found');
@@ -42,11 +39,4 @@ test('Settings nav icon is a gear, not a sun', () => {
   // (4) icon stays in the shared sizing/coloring envelope used by `.nav button svg`.
   assert.ok(svg.includes('viewBox="0 0 24 24"'), 'icon must keep the 24x24 viewBox');
   assert.ok(svg.includes('stroke="currentColor"'), 'icon must inherit color via currentColor');
-});
-
-test('topnav Settings link stays text-only (icon not duplicated there)', () => {
-  // The compact topnav Settings link is text-only by design; guard against
-  // accidentally adding an <svg> to it during the swap.
-  assert.ok(/data-nav="settings"[^>]*>Settings<\/button>/.test(html),
-    'topnav text-only Settings button should remain unchanged');
 });

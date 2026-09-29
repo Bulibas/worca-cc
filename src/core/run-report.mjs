@@ -66,7 +66,7 @@ const TERMINAL_STATUSES = new Set(['done', 'error', 'stopped', 'interrupted']);
 
 // The ONLY stepper node fields that ever ship. A whitelist, not a blacklist: when
 // buildGraphManifest grows a key, this fails closed instead of leaking it.
-const NODE_STRINGS = ['model', 'effort', 'subagentModel'];
+const NODE_STRINGS = ['model', 'effort', 'subagentModel', 'subagentEffort'];
 const NODE_BOOLS = ['fanOut', 'askQuestions', 'awaitAll'];
 
 // Every workflow id worca itself ships: wf_default, wf_auto and the seven V17 seed
@@ -164,7 +164,8 @@ function templateShape(template, auto) {
   if (!template) return null;
   const id = template.id || '';
   const name = template.name || '';
-  const builtin = STOCK_WORKFLOW_NAMES.has(id) && auto?.via !== 'created';
+  // A classifier fallback records what it saved on `saved` (via is 'fallback').
+  const builtin = STOCK_WORKFLOW_NAMES.has(id) && auto?.via !== 'created' && auto?.saved !== 'created';
   const out = { builtin, id: builtin ? id : null };
   if (builtin) out.name = STOCK_WORKFLOW_NAMES.get(id) ?? '';
   else { out.id = id; out.name = name; }

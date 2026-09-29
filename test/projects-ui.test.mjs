@@ -51,7 +51,7 @@ test('the add-project folder selector exists in markup and is wired', () => {
 });
 
 test('the Projects management view + modals exist in markup and are wired', () => {
-  // nav (both sidebar + topnav reference data-nav="projects")
+  // nav (the sidebar references data-nav="projects")
   assert.ok(html.includes('data-nav="projects"'), 'missing Projects nav link');
   assert.ok(html.includes('data-view="projects"'), 'missing Projects view section');
   assert.ok(html.includes('id="projects-list"'), 'missing #projects-list host');
@@ -86,4 +86,10 @@ test('the projects card owns its row layout (bin button on the right, head align
   assert.match(rules('.pl-main'), /flex:\s*1/, '.pl-main must grow to push the bin button to the right edge');
   assert.match(rules('.pl-item'), /border-bottom/, 'rows must be separated by a rule');
   assert.match(rules('.pl-name'), /font-weight:\s*600/, 'project name keeps its weight');
+});
+
+test('multi-folder add: the bulk route, the multi-select picker and the review modal are wired', () => {
+  assert.ok(appjs.includes("fetch('/api/projects/bulk'"), 'app.js does not POST /api/projects/bulk');
+  assert.ok(appjs.includes('multiple: true'), 'app.js never asks the picker for multiple folders');
+  assert.ok(html.includes('id="project-bulk-modal"'), 'missing the review modal');
 });

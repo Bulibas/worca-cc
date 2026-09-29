@@ -62,6 +62,8 @@ export function projectLogRecord(rec) {
     ...(rec.nodeId != null ? { nodeId: rec.nodeId } : {}),
     ...(rec.executionId != null ? { executionId: rec.executionId } : {}),
     ...(rec.stream ? { stream: rec.stream } : {}),
+    ...(rec.path != null ? { path: rec.path } : {}),
+    ...(rec.kind != null ? { kind: rec.kind } : {}),
   };
 }
 

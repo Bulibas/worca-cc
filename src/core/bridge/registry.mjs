@@ -9,6 +9,8 @@ import { listGlobalModels, providerConfig, providerSecretSet, resolveProviderSec
 import { listPluginModels } from '../plugin-models.mjs';
 import { policyCatalogModels } from '../policy/cache.mjs';
 import { isLocalBaseUrl } from '../model-env.mjs';
+import { brokerEnabled } from '../broker-client.mjs';
+import { routeBridgedUpstream } from '../broker-routing.mjs';
 
 /** An OpenAI-compatible endpoint on this machine / a private network needs no key. */
 export function keyOptional(provider, baseUrl) {
@@ -42,6 +44,16 @@ export function findBridgedEntry(id) {
 export function providerReadiness(upstream) {
   if (!upstream) return { ok: true };
   const p = upstream.provider;
+  // Credential broker: worca holds no provider key or GitHub sign-in. Ready when the model
+  // maps to a broker slot (or is a keyless local endpoint); whether the PERSON has a key
+  // is the broker's question, answered per spawn. Copilot's terms stay an install setting.
+  if (brokerEnabled()) {
+    if (p === 'copilot' && !copilotTermsAcknowledged()) {
+      return { ok: false, reason: 'terms', message: 'provider copilot: terms not acknowledged — open Settings › Providers' };
+    }
+    const r = routeBridgedUpstream(upstream);
+    return r.error ? { ok: false, reason: 'no_key', message: `provider ${p}: ${r.error}` } : { ok: true };
+  }
   if (p === 'copilot') {
     if (!copilotTermsAcknowledged()) {
       return { ok: false, reason: 'terms', message: 'provider copilot: terms not acknowledged — open Settings › Providers' };
@@ -83,6 +95,7 @@ export function upstreamSettings(upstream) {
     accountType: p === 'copilot' ? cfg.accountType : null,
     headers: upstream.headers || {},
     capabilities: upstream.capabilities || {},
+    ...(upstream.openrouter ? { openrouter: upstream.openrouter } : {}),
     maxConcurrent: cfg.maxConcurrent,
   };
 }

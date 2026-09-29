@@ -71,6 +71,7 @@ export function renderDone(meta, payload = {}) {
   if (status === 'stopped') {
     const parts = head('⏹', meta);
     parts.push('   **Status:** stopped');
+    pushPending(parts, meta);
     return mdMsg(parts.join('\n'), 'warning');
   }
   const parts = head('✅', meta);
@@ -79,7 +80,21 @@ export function renderDone(meta, payload = {}) {
   if (dur) parts.push(`   **Duration:** ${dur}`);
   const cost = fmtUsd(meta.totalCostUsd);
   if (cost) parts.push(`   **Cost:** ${cost}`);
+  pushPending(parts, meta);
   return mdMsg(parts.join('\n'), 'success');
+}
+
+/** An unread direction, on EVERY terminal outcome. _finalizeDirections was moved
+ *  onto all of them ("report an unread inbox on every terminal outcome") for this
+ *  line's benefit, but it was reachable only from the completed branch: the
+ *  `stopped` branch returns above it and renderError never had it at all. So on
+ *  the two outcomes that comment singles out — a run that is then stopped, or
+ *  errors — the person who posted the direction was never told it went unread,
+ *  while the CLI (src/cli/render.mjs) and the audit line reported it regardless of
+ *  status. */
+function pushPending(parts, meta) {
+  const pending = meta.directions?.pending?.length;
+  if (pending) parts.push(`   **Directions pending:** ${pending}`);
 }
 
 /** error event: {message}. A separate done{status:'error'} follows; the
@@ -89,6 +104,7 @@ export function renderError(meta, payload = {}) {
   parts.push('   **Status:** failed');
   const msg = String(payload.message || 'unknown error');
   parts.push(`   **Error:** ${msg.length > 300 ? `${msg.slice(0, 300)}…` : msg}`);
+  pushPending(parts, meta);
   return mdMsg(parts.join('\n'), 'error');
 }
 

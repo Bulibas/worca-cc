@@ -966,6 +966,41 @@ test('clone card: repository, branch, folder and GitHub rows; Clone / Decline po
   assert.deepEqual(rec.cardPosts.at(-1), ['card_0000000f', { state: 'declined' }]);
 });
 
+test('web card: host, reason and exact URL as text; Deny / Always allow / Allow for this chat post the verbs; applied and failed read as such', async () => {
+  const rec = { cardPosts: [] };
+  const base = apiHandler(rec);
+  const ctx = await openWithCard(PROJECT_CARD, rec, { fetchHandler: (url, opts) => {
+    const m = /^\/api\/ask\/threads\/[^/]+\/cards\/(card_[0-9a-f]{8})$/.exec(url);
+    if (m && (opts.method || '').toUpperCase() === 'POST' && m[1] !== CARD_ID) { rec.cardPosts.push([m[1], JSON.parse(opts.body)]); return { ok: true, status: 200, json: async () => ({}) }; }
+    return base(url, opts);
+  } });
+  const card = { type: 'web', kind: 'web', summary: 'Read jev.example.dev', host: 'jev.example.dev', url: 'https://jev.example.dev/docs?v=2', reason: '<i>docs</i>', change: { host: 'jev.example.dev' } };
+  const push = (id, state, extra = {}, seq = 3) => { ctx.panel.pushServerFrame({ type: 'ask-card', block: { kind: 'card', id, state, card, ...extra }, threadId: TID, messageId: MID, seq }); ctx.flush(); };
+  push('card_00000010', 'proposed');
+  const el = ctx.doc.querySelector('[data-ask-webcard="proposed"]');
+  assert.ok(el);
+  assert.equal(el.querySelector('.ask-mcard-title').textContent, 'Ask Worca wants to read a new site');
+  assert.equal(el.querySelector('.ask-mcard-after').textContent, 'https://jev.example.dev/docs?v=2');
+  assert.equal(el.querySelector('.ask-mcard-note').textContent, '<i>docs</i>'); assert.equal(el.querySelector('.ask-mcard-note i'), null);
+  el.querySelector('[data-ask-web-chat]').click(); await ctx.tick();
+  assert.deepEqual(rec.cardPosts.at(-1), ['card_00000010', { state: 'applied', scope: 'chat' }]);
+  push('card_00000011', 'proposed', {}, 4);
+  const last = (sel) => [...ctx.doc.querySelectorAll(sel)].at(-1);
+  last('[data-ask-webcard="proposed"] [data-ask-web-always]').click(); await ctx.tick();
+  assert.deepEqual(rec.cardPosts.at(-1), ['card_00000011', { state: 'applied', scope: 'always' }]);
+  push('card_00000012', 'proposed', {}, 5);
+  last('[data-ask-webcard="proposed"] [data-ask-web-decline]').click(); await ctx.tick();
+  assert.deepEqual(rec.cardPosts.at(-1), ['card_00000012', { state: 'declined' }]);
+  ctx.panel.pushServerFrame({ type: 'ask-card', block: { kind: 'card', id: 'card_00000010', state: 'applied', card: { ...card, result: { ok: true, scope: 'chat' } } }, threadId: TID, messageId: MID, seq: 6 });
+  ctx.flush();
+  const done = ctx.doc.querySelector('[data-ask-webcard="applied"]');
+  assert.equal(done.querySelector('.ask-mcard-title').textContent, 'Allowed for this chat');
+  assert.equal(done.querySelector('[data-ask-web-chat]'), null);
+  ctx.panel.pushServerFrame({ type: 'ask-card', block: { kind: 'card', id: 'card_00000011', state: 'failed', error: 'web access is off', card }, threadId: TID, messageId: MID, seq: 7 });
+  ctx.flush();
+  assert.equal(ctx.doc.querySelector('[data-ask-webcard="failed"] .ask-mcard-failed').textContent, 'Could not allow: web access is off');
+});
+
 test('workspace card: members, warnings and effects as text; Apply / Decline post the verbs; applied and failed read as such', async () => {
   const rec = { cardPosts: [] };
   const base = apiHandler(rec);

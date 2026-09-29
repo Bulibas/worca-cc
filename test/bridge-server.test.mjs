@@ -264,7 +264,7 @@ test('bridge: openai-chat streaming → Anthropic SSE with the catalog id as mod
   assert.equal(up.url, '/v1/chat/completions');
   assert.equal(up.body.model, 'gpt-x');
   assert.equal(up.body.max_completion_tokens, 10);   // reasoning capability pinned on the entry
-  assert.deepEqual(bridgeCallsFor('exec-7'), { initiated: 1, continued: 0, errors: 0 });
+  assert.deepEqual(bridgeCallsFor('exec-7'), { initiated: 1, continued: 0, errors: 0, free: 0 });
 });
 
 test('bridge: a tool-result continuation is booked as continued, not initiated', async () => {
@@ -280,7 +280,7 @@ test('bridge: a tool-result continuation is booked as continued, not initiated',
   const ev = parseEvents(text);
   assert.equal(ev.find((e) => e.event === 'content_block_start').data.content_block.name, 'Read');
   assert.equal(ev.find((e) => e.event === 'message_delta').data.delta.stop_reason, 'tool_use');
-  assert.deepEqual(bridgeCallsFor('exec-8'), { initiated: 0, continued: 1, errors: 0 });
+  assert.deepEqual(bridgeCallsFor('exec-8'), { initiated: 0, continued: 1, errors: 0, free: 0 });
 });
 
 test('bridge: non-streaming → a Messages JSON object', async () => {

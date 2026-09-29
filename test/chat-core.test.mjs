@@ -229,3 +229,41 @@ test('renderQuestion recovery: cause + retry/pause reply line; renderTest is val
   const q = renderQuestion(META, { id: 'r1', kind: 'recovery', recovery: { cls: 'auth', message: 'x' } });
   assert.match(q.body[0].value, /\/abort \*2951 to pause the run/);
 });
+
+// renderDone reports directions the run never applied, but the chat notifier's
+// meta() omitted `directions` entirely — so the warning was unreachable from the
+// one surface /direct is used from. The CLI twin reads orch.state directly and
+// always showed it.
+test('renderDone surfaces unapplied directions when the notifier passes them', () => {
+  const none = renderDone({ runId: 'r1', title: 't' }, { status: 'done' });
+  assert.doesNotMatch(JSON.stringify(none.body), /Directions pending/);
+
+  const some = renderDone({
+    runId: 'r1', title: 't',
+    directions: { posted: 2, applied: 1, pending: [{ id: 'd2', text: 'cut the roadmap' }] },
+  }, { status: 'done' });
+  assert.match(JSON.stringify(some.body), /Directions pending:\*\* 1/);
+});
+
+// ROUND 3, F8. _finalizeDirections was moved onto EVERY terminal path — its call
+// sites say "report an unread inbox on every terminal outcome" — but the line that
+// reports it was reachable only from the completed branch: `stopped` returns above
+// it and renderError never had it at all. On the two outcomes that comment singles
+// out (a run that is then stopped, or errors) the person who posted the direction
+// was never told it went unread, while the CLI and the audit line report it
+// regardless of status.
+test('renderDone/renderError: an unread direction is reported on every terminal outcome', () => {
+  const meta = { ...META, directions: { pending: [{ id: 'd1' }, { id: 'd2' }] } };
+  for (const status of ['done', 'stopped']) {
+    assert.match(renderDone(meta, { status }).body[0].value, /\*\*Directions pending:\*\* 2/,
+      `${status} does not report the unread inbox`);
+  }
+  assert.match(renderError(meta, { message: 'boom' }).body[0].value, /\*\*Directions pending:\*\* 2/,
+    'a failed run does not report the unread inbox');
+
+  // ...and no line at all when the inbox was read, on any of them.
+  for (const r of [renderDone(META, { status: 'done' }), renderDone(META, { status: 'stopped' }),
+    renderError(META, { message: 'boom' })]) {
+    assert.doesNotMatch(r.body[0].value, /Directions pending/);
+  }
+});

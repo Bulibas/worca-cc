@@ -1,0 +1,44 @@
+{
+  "key": "deckReviewer",
+  "metaVersion": 2,
+  "mockRole": "generic-verifier",
+  "promptHints": "Open every screenshot in shots/ and judge against the skill's tests: render, six-foot, cover-the-title, competing. Titles state conclusions; one focal point; one hero moment; a system, not a template. Slide budget overruns are your call (minor or major), never the audit's. Pipeline directory: {pipelineDir}. Cycle: {cycle}.",
+  "verdict": {
+    "filename": "deck-review-cycle{cycle}.json"
+  },
+  "inputs": [
+    {
+      "id": "system",
+      "type": "md"
+    },
+    {
+      "id": "task",
+      "type": "md"
+    }
+  ],
+  "outputs": [
+    {
+      "id": "review",
+      "type": "md",
+      "when": "blocking",
+      "filename": "deck-review-cycle{cycle}.md",
+      "artifactKind": "deck-review"
+    },
+    {
+      "id": "pass",
+      "type": "void",
+      "when": "clean"
+    }
+  ],
+  "domain": "presentation",
+  "displayName": "Deck Review",
+  "description": "Looks at the rendered slides and judges them against the presentation skill: focal points, takeaway titles, the hero moment, system versus template. Runs only after the audit is clean.",
+  "color": "peach",
+  "icon": "<path d=\"M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z\"/><circle cx=\"12\" cy=\"12\" r=\"2.5\"/>",
+  "agentFile": "worca-cc-deck-reviewer.md",
+  "runnerType": "verifier",
+  "asksQuestions": false,
+  "questionsLocked": false,
+  "questionsDefault": false,
+  "order": 15
+}

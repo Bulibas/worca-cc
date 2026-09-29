@@ -68,3 +68,31 @@ test('POST /api/fs/pick-folder degrades to unsupported on a headless platform', 
   assert.equal(r.status, 200);
   assert.deepEqual(await r.json(), { status: 'unsupported' });
 });
+
+test('POST /api/fs/pick-folder {multiple:true} returns every picked path', async () => {
+  const a = join(fixture, 'sub-a');
+  const b = join(fixture, 'sub-b');
+  let args = null;
+  dialogTesting.set({
+    platform: 'darwin', env: {},
+    runner: async (_cmd, a2) => { args = a2; return { ok: true, stdout: `${a}\n${b}\n`, stderr: '', code: 0, timedOut: false }; },
+  });
+  const r = await fetch(`${base}/api/fs/pick-folder`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ purpose: 'project', multiple: true }),
+  });
+  assert.equal(r.status, 200);
+  assert.deepEqual(await r.json(), { status: 'picked', path: a, paths: [a, b] });
+  assert.match(args.join('\n'), /multiple selections allowed/);
+});
+
+test('POST /api/fs/pick-folder treats a non-boolean multiple as single', async () => {
+  dialogTesting.set({
+    platform: 'darwin', env: {},
+    runner: async () => ({ ok: true, stdout: `${fixture}\n`, stderr: '', code: 0, timedOut: false }),
+  });
+  const r = await fetch(`${base}/api/fs/pick-folder`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ multiple: 'yes' }),
+  });
+  assert.deepEqual(await r.json(), { status: 'picked', path: fixture });
+});

@@ -11,7 +11,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipeline, seedWorkspacePipeline } from './helpers/db-seed.mjs';
-import { createAskTools, AskToolError, splitUnifiedDiff, isProtectedBasename, sliceBytes } from '../src/core/ask/tools.mjs';
+import { createAskTools, AskToolError, splitUnifiedDiff, isProtectedBasename, sliceBytes, isByteArtifact } from '../src/core/ask/tools.mjs';
+import { viewerKindFor, BINARY_KINDS } from '../src/shared/artifact-kinds.mjs';
 import { defaultToolDeps } from '../src/core/ask/tool-deps.mjs';
 import { closeDb } from '../src/core/db.mjs';
 import { addProject } from '../src/core/projects.mjs';
@@ -19,6 +20,7 @@ import { createThread, appendMessage, addAttachment } from '../src/core/ask/stor
 import { GUARDRAIL_PRESETS } from '../src/core/guardrails.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
 import { redactAskText } from '../src/core/ask/redact.mjs';
+import { htmlToText } from '../src/core/ask/html-text.mjs';
 
 useTempHome(after);
 
@@ -337,6 +339,9 @@ const LITE = [
     projectKey: 'other-00000003', projectName: 'Other', projectDir: '/p/other' },
 ];
 const diffs = new Map([['4e1f2a9b', DIFF], ['8c3d12ab', `# app-00000001\n${DIFF}`]]);
+const HTML_PAGE = '<!doctype html><html><head><title>Deploy ghp_abcdefghijklmnopqrstuvwxyz0123456789 notes</title><style>body { color: red }</style>'
+  + '<script>window.secret = "never";</script></head><body><h1>Deploy</h1><p>token ghp_abcdefghijklmnopqrstuvwxyz0123456789 here</p>'
+  + '<ul><li>first step</li><li>second step</li></ul></body></html>';
 const calls = [];
 const fake = {
   buildCatalog: async () => ({ projects: [{ key: 'demo-00000001', name: 'Demo', path: '/p/demo' }], workspaces: [{ id: 'wks-team-0000abcd', name: 'Team', projectKeys: ['app-00000001', 'lib-00000002'] }],
@@ -357,7 +362,10 @@ const fake = {
     ? { name: 'notes.md', text: 'token ghp_abcdefghijklmnopqrstuvwxyz0123456789 here\nsecond line\n' }
     : id === 'att_00000002'
       ? { name: 'shot.png', kind: 'image', mime: 'image/png', bytes: 2048, path: '/home/ask/ask_00000001/att/att_00000002.png' }
-      : null),
+      : id === 'att_00000003'
+        ? { name: 'page.html', kind: 'text', mime: 'text/html', text: HTML_PAGE }
+        : null),
+  htmlToText,
   validateProposal: async (input) => ({ ok: true, card: { echoed: input } }),
   protectedPaths: GUARDRAIL_PRESETS.normal.protectedPaths,
   redact: redactAskText,
@@ -637,6 +645,67 @@ test('read_attachment (#398): a binary attachment returns metadata + path, never
   assert.ok(!('text' in r) && !('truncated' in r) && !('nextOffset' in r), 'no sliceBytes fields on a binary read');
 });
 
+test('read_attachment: an HTML attachment reads as raw markup by default (and with as: "raw"), redacted', async () => {
+  const r = await tools.call('read_attachment', { id: 'att_00000003' });
+  const raw = redactAskText(HTML_PAGE);
+  assert.deepEqual(r, { name: 'page.html', kind: 'text', text: raw, truncated: false, totalBytes: Buffer.byteLength(raw), nextOffset: Buffer.byteLength(raw) });
+  assert.ok(r.text.includes('<script>window.secret'), 'raw keeps the markup, scripts included');
+  assert.ok(!r.text.includes('ghp_abcdefghijklmnopqrstuvwxyz0123456789'), 'redaction applies to raw markup');
+  assert.deepEqual(await tools.call('read_attachment', { id: 'att_00000003', as: 'raw' }), r);
+});
+
+test('read_attachment: as "text" converts an HTML attachment (scripts/styles stripped, title), then redacts and pages the CONVERTED text', async () => {
+  const r = await tools.call('read_attachment', { id: 'att_00000003', as: 'text' });
+  const expected = '# Deploy\n\ntoken ghp_<redacted> here\n\n- first step\n- second step';
+  assert.deepEqual(r, {
+    name: 'page.html', kind: 'text', mime: 'text/html', as: 'text', title: 'Deploy ghp_<redacted> notes',
+    text: expected, truncated: false, totalBytes: Buffer.byteLength(expected), nextOffset: Buffer.byteLength(expected), conversionTruncated: false,
+  });
+  assert.ok(!/window\.secret|color: red|<\/?(html|head|title|style|script|body|h1|p|ul|li)\b/.test(r.text), 'no script, no style, no tags');
+  // offsets refer to the converted text: paging it back together yields exactly the one-shot read
+  let offset = 0; let joined = ''; let pages = 0;
+  for (;;) {
+    const p = await tools.call('read_attachment', { id: 'att_00000003', as: 'text', offset, maxBytes: 16 });
+    assert.equal(p.totalBytes, Buffer.byteLength(expected), 'totalBytes is the converted size, not the markup size');
+    joined += p.text; pages += 1; offset = p.nextOffset;
+    if (!p.truncated) break;
+  }
+  assert.ok(pages > 1, 'the small window really paged');
+  assert.equal(joined, expected);
+  await assert.rejects(() => tools.call('read_attachment', { id: 'att_00000003', as: 'markdown' }), { name: 'AskToolError', message: 'read_attachment: as must be raw or text' });
+});
+
+test('read_attachment: the converter\'s own truncation is reported as conversionTruncated', async () => {
+  const seen = [];
+  const t = createAskTools({ ...fake, htmlToText: async (html, baseUrl, opts) => { seen.push({ baseUrl, opts }); return { title: null, text: 'cut short', truncated: true }; } });
+  const r = await t.call('read_attachment', { id: 'att_00000003', as: 'text' });
+  assert.equal(r.conversionTruncated, true);
+  assert.equal(r.truncated, false, 'paging truncation is separate');
+  assert.equal(r.title, null);
+  assert.equal(seen[0].baseUrl, null, 'no base URL: an attachment has no origin');
+  assert.ok(seen[0].opts.maxChars >= ASK_LIMITS.attachment.maxBytesPerFile, 'maxChars covers a full 512 KB text attachment');
+});
+
+test('read_attachment: as is ignored for non-HTML attachments', async () => {
+  assert.deepEqual(await tools.call('read_attachment', { id: 'att_00000001', as: 'text' }), await tools.call('read_attachment', { id: 'att_00000001' }));
+  assert.deepEqual(await tools.call('read_attachment', { id: 'att_00000002', as: 'text' }), await tools.call('read_attachment', { id: 'att_00000002' }));
+  let converted = 0;
+  const t = createAskTools({ ...fake, htmlToText: async () => { converted += 1; return { title: null, text: '', truncated: false }; },
+    readAttachment: () => ({ name: 'data.json', kind: 'text', mime: 'application/json', text: '{"a":"<b>x</b>"}' }) });
+  const j = await t.call('read_attachment', { id: 'att_00000009', as: 'text' });
+  assert.equal(j.text, '{"a":"<b>x</b>"}', 'a JSON body holding markup is returned verbatim');
+  assert.equal(converted, 0, 'the converter never runs for a non-HTML mime');
+  assert.ok(!('as' in j) && !('title' in j));
+});
+
+test('read_attachment: the schema offers as = raw | text', () => {
+  const def = tools.list().find((d) => d.name === 'read_attachment');
+  assert.equal(def.inputSchema.properties.as.type, 'string');
+  assert.match(def.inputSchema.properties.as.description, /"raw".*"text"/);
+  assert.match(def.description, /as: "text"/);
+  assert.deepEqual(def.inputSchema.required, ['id']);
+});
+
 test('propose_run passes through validateProposal; unknown tools and bad input are AskToolErrors', async () => {
   assert.deepEqual(await tools.call('propose_run', { projectKey: 'demo-00000001', brief: 'b' }), { ok: true, card: { echoed: { projectKey: 'demo-00000001', brief: 'b' } } });
   await assert.rejects(() => tools.call('nope', {}), { name: 'AskToolError', message: 'unknown tool: nope' });
@@ -655,6 +724,7 @@ test('propose_run schema names note + attachmentIds', () => {
   assert.equal(props.attachmentIds.type, 'array');
   assert.deepEqual(props.attachmentIds.items, { type: 'string' });
   assert.match(props.attachmentIds.description, /extra files/);
+  assert.match(props.brief.description, new RegExp(`≤ ${ASK_LIMITS.briefMaxChars} chars`));
 });
 
 test('propose_run hands the thread\'s attachment ledger to the validator', async () => {
@@ -769,6 +839,14 @@ test('temp home: a seeded project run and a seeded workspace run round-trip thro
   const wsDiff = await real.call('get_run_diff', { id: wsSeed.id });
   assert.equal(wsDiff.files[0].projectKey, 'team-00000001');
   assert.equal((await real.call('read_attachment', { id: att.id })).text, 'hello');
+  // HTML through the real tool-deps: the text branch carries the mime, the converter is injected
+  assert.equal(typeof defaultToolDeps({ threadId: null }).htmlToText, 'function');
+  const page = addAttachment(thread.id, msg.id, { name: 'page.html', mime: 'text/html', text: '<html><head><title>T</title><script>x()</script></head><body><p>Hi there</p></body></html>' });
+  assert.equal(defaultToolDeps({ threadId: thread.id }).readAttachment(page.id).mime, 'text/html');
+  const pageText = await real.call('read_attachment', { id: page.id, as: 'text' });
+  assert.equal(pageText.text, 'Hi there');
+  assert.equal(pageText.title, 'T');
+  assert.ok((await real.call('read_attachment', { id: page.id })).text.startsWith('<html>'), 'raw stays the default');
   // #398: a real binary row through the real tool-deps — metadata + the on-disk path
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
   const bin = addAttachment(thread.id, msg.id, { name: 'shot.png', kind: 'image', mime: 'image/png', data: png });
@@ -801,6 +879,9 @@ test('list_run_artifacts / read_run_artifact / get_run_progress over real deps',
   writeFileSync(join(seeded.dir, 'extras', 'notes.txt'), 'hi');
   recordArtifact(seeded.id, 'plan', 'plan.md', { stepKey: 'exec-1', nodeId: 'planner', cycle: 0 });
   recordArtifact(seeded.id, 'extra', 'extras/notes.txt', { stepKey: 'exec-2', nodeId: 'refiner', cycle: 1 });
+  // A kit subresource: indexed so the deck viewer can serve it, but never worth a
+  // row of the model's budget — the HTTP twin drops these in SQL before the LIMIT.
+  recordArtifact(seeded.id, 'deck-asset', 'deck/kit/deck-stage.js', { stepKey: 'exec-3', nodeId: 'builder', cycle: 1 });
   writeDecomposition(seeded.id, [{ ordinal: 0, tasks: [{ id: 't1', title: 'leak ghp_abcdefghijklmnopqrstuvwxyz0123456789', file: 'x', nodeId: 'n' }] }]);
 
   const thread = createThread();
@@ -818,10 +899,27 @@ test('list_run_artifacts / read_run_artifact / get_run_progress over real deps',
   assert.equal((await real.call('list_run_artifacts', { runId: seeded.id, kind: 'plan' })).artifacts.length, 1);
   assert.equal((await real.call('list_run_artifacts', { runId: seeded.id, stepKey: 'exec-2' })).artifacts.length, 1);
   // plan + extra above, plus the prompt.md row seedPipeline indexes — nothing transient
-  assert.deepEqual(listed.artifacts.map((a) => a.kind).sort(), ['extra', 'plan', 'prompt']);
+  assert.deepEqual(listed.artifacts.map((a) => a.kind).sort(), ['extra', 'plan', 'prompt'],
+    'the deck-asset subresource never reaches the model, the way the HTTP twin drops it');
   const capped = await real.call('list_run_artifacts', { runId: seeded.id, limit: 1 });
   assert.equal(capped.artifacts.length, 1);
   assert.equal(capped.truncated, true);
+
+  // Rows come back oldest-first, so the row budget is spent on the OLDEST rows and
+  // the ones cut are the newest — on a presentation run, the deliverables. The
+  // model got `truncated: true` and no way past it; paging by offset is the way.
+  const page1 = await real.call('list_run_artifacts', { runId: seeded.id, limit: 2 });
+  assert.equal(page1.artifacts.length, 2);
+  assert.equal(page1.truncated, true);
+  assert.equal(page1.nextOffset, 2, 'a truncated page says where the next one starts');
+  const page2 = await real.call('list_run_artifacts', { runId: seeded.id, limit: 2, offset: page1.nextOffset });
+  assert.equal(page2.truncated, false, 'the last page is not truncated');
+  assert.equal(page2.nextOffset, undefined, 'and carries no cursor');
+  assert.deepEqual(
+    [...page1.artifacts, ...page2.artifacts].map((a) => a.relPath).sort(),
+    listed.artifacts.map((a) => a.relPath).sort(),
+    'paging reaches every row the uncapped list returns',
+  );
 
   // read_run_artifact: indexed read, plus refusal of unindexed / traversing paths
   const read = await real.call('read_run_artifact', { runId: seeded.id, relPath: 'plan.md' });
@@ -919,4 +1017,55 @@ test('#397: a missing or failing pinnedScope dep means "nothing pinned", never a
 test('propose_schedule_change accepts after / afterPolicy / sourceFromPrevious (run chains)', () => {
   const ps = tools.list().find((d) => d.name === 'propose_schedule_change');
   for (const k of ['after', 'afterPolicy', 'sourceFromPrevious']) assert.ok(k in ps.inputSchema.properties, k);
+});
+
+// list_run_artifacts lists every indexed row, screenshots and PDFs included, and
+// read_run_artifact decoded all of them with readFile(…, 'utf8') — so asking for
+// a slide render charged up to 200KB of replacement-character mojibake to the
+// turn's context. The UI has a raw-bytes route for these; the tool refuses them
+// and says where the bytes are instead.
+test('read_run_artifact refuses the byte kinds instead of decoding them as text', async () => {
+  const tools = createAskTools({
+    limits: ASK_LIMITS,
+    redact: (t) => t,
+    findPipelineRowById: () => ({ id: 'p1' }),
+    readRunArtifact: async () => { throw new Error('must not be read'); },
+  });
+  for (const rel of ['shots/s01.png', 'deck/deck.pdf', 'deck/poppins-400.woff2']) {
+    await assert.rejects(
+      () => tools.call('read_run_artifact', { runId: 'p1', relPath: rel }),
+      (e) => e instanceof AskToolError && /not text/i.test(e.message), rel,
+    );
+  }
+});
+
+test('read_run_artifact still reads the text kinds', async () => {
+  const tools = createAskTools({
+    limits: ASK_LIMITS,
+    redact: (t) => t,
+    findPipelineRowById: () => ({ id: 'p1' }),
+    lookupPipelineRow: () => ({ id: 'p1' }),
+    readRunArtifact: async (_row, rel) => ({ rel, text: '# the plan\n' }),
+  });
+  const out = await tools.call('read_run_artifact', { runId: 'p1', relPath: 'plan.md' });
+  assert.equal(out.text, '# the plan\n');
+});
+
+// tools.mjs is import-free by contract (two source scans assert it), so its byte
+// extensions are restated rather than imported. This pins the two sets together:
+// every extension the SHARED table decodes as bytes must be refused here, and
+// nothing else may be. An extension added to one side and not the other fails.
+test('isByteArtifact agrees with the shared artifact-kind table', () => {
+  const exts = [
+    'md', 'markdown', 'txt', 'json', 'csv', 'log', 'ndjson', 'diff', 'patch', 'html', 'htm', 'js', 'mjs', 'css',
+    'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'pdf',
+    'pptx', 'docx', 'xlsx', 'key', 'zip', 'tar', 'woff2', 'woff', 'ttf', 'otf', 'mp3', 'mp4',
+    'xyz', 'gitignore',
+  ];
+  for (const ext of exts) {
+    const rel = `deck/file.${ext}`;
+    assert.equal(isByteArtifact(rel), BINARY_KINDS.has(viewerKindFor(rel)), `.${ext}`);
+  }
+  assert.equal(isByteArtifact('Makefile'), false, 'no extension is not bytes');
+  assert.equal(isByteArtifact('shots/S01.PNG'), true, 'the extension match is case-insensitive');
 });

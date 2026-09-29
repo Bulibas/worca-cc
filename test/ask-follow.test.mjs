@@ -184,3 +184,38 @@ test('done{paused, reason:error}: the notice carries the error detail; the card 
   assert.equal(follower.detached, true);
   assert.equal(detached(), 1);
 });
+
+// The `state` handler mirrors LIVE progress, and a terminal status is not
+// progress — it is the run ending. The thread's terminal NOTICE is posted by the
+// `done` handler, which the orchestrator emits only after _persist, appendAudit,
+// _buildResults (git) and _reportToSource (the task-source write-back). Mirroring
+// a terminal status from `state` therefore published "this run finished" to
+// ask_run_links while the message saying so was still several awaits away, so a
+// consumer that stops reading once the link is terminal never saw one.
+test('state: a terminal status is left to the done handler, so the status and its notice land together', () => {
+  const { orch, posts, patches } = harness();
+  orch.emit('state', { id: 'a1b2c3d4', status: 'running', title: 'T' });
+  orch.emit('state', { id: 'a1b2c3d4', status: 'done', title: 'T' });
+  assert.deepEqual(patches.filter((p) => p.status).map((p) => p.status), ['running'],
+    'the terminal state frame mirrors no status');
+  assert.equal(posts.length, 0, 'and posts nothing');
+
+  orch.emit('done', { status: 'done' });
+  assert.equal(patches[patches.length - 1].status, 'done', 'the done handler supplies the terminal status');
+  assert.equal(posts.length, 1, 'together with the one terminal notice');
+  assert.equal(posts[0].kind, 'done');
+});
+
+// Same rule for every terminal value the orchestrator can stamp: stop() sets
+// 'stopped' synchronously and the run loop then unwinds into the async stopped
+// path that emits `done`, and _completePaused stamps 'paused' before its own
+// done{status:'paused'} — so in both cases the authoritative event is still coming.
+test('state: stopped/error/paused are withheld too — each has a done event behind it', () => {
+  for (const status of ['stopped', 'error', 'paused']) {
+    const { orch, patches } = harness();
+    orch.emit('state', { id: 'a1b2c3d4', status: 'running' });
+    orch.emit('state', { id: 'a1b2c3d4', status });
+    assert.deepEqual(patches.filter((p) => p.status).map((p) => p.status), ['running'],
+      `${status} is withheld from the state handler`);
+  }
+});

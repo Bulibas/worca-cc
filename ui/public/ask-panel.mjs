@@ -7,6 +7,7 @@
 import { openScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
 import { formatInstant, describeRule } from '../../src/shared/schedule/recurrence.mjs';
 import { createThreadModel } from './ask-model.mjs';
+import { credentialBadge } from './credential-badges.mjs';
 import { createMarkdownRenderer } from './ask-markdown.mjs';
 import { createThinkingOrb } from './thinking-orb.mjs';
 import { workflowPickerLabel } from './results-view.mjs';
@@ -164,7 +165,7 @@ const PILL_MORPH_IN_MS = 520;
 const PILL_MORPH_OUT_MS = 800;
 const PILL_SETTLE_FALLBACK_MS = PILL_MORPH_OUT_MS + 150;
 
-export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null }) {
+export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null }) {
   const homePick = browserPick();         // hoisted declaration (defined below)
   const st = {
     open: false,
@@ -423,7 +424,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   // Mirrors src/core/ask/attachment-kind.mjs + limits.mjs (#398): text kinds are
   // UTF-8 capped at 512 KB, binary kinds (images + PDF) at 5 MB; the server
   // re-validates everything, these are just early clear messages.
-  const ASK_ATTACH_EXT = ['.md', '.markdown', '.txt', '.json', '.csv', '.log'];
+  const ASK_ATTACH_EXT = ['.md', '.markdown', '.txt', '.json', '.csv', '.log', '.html', '.htm'];
   const ASK_ATTACH_BINARY = {
     '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
     '.gif': 'image/gif', '.webp': 'image/webp', '.pdf': 'application/pdf',
@@ -1233,7 +1234,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const flagged = !!entry && (entry.costUnreliable === true
       || (Array.isArray(entry.secretsMissing) && entry.secretsMissing.length > 0));
     el.modelBtnLabel.textContent = (entry ? entry.label : st.picker.model) + (flagged ? ' ⚠' : '');
-    el.modelBtnEffort.textContent = st.picker.effort;
+    // A model that takes no reasoning effort shows none (the bridge leaves it out).
+    el.modelBtnEffort.textContent = entry && entry.noEffort ? '' : st.picker.effort;
+    el.modelBtnEffort.hidden = !!(entry && entry.noEffort);
   }
 
   function coerceEffort(entry, effort) {
@@ -1310,8 +1313,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       .catch(() => { /* the next message stores the pick anyway */ });
   }
 
-  function loadCatalog() {
-    if (st.catalog) return Promise.resolve(st.catalog);
+  // fresh: fetch again even with a catalog in hand. Models imported (or keys set on the key
+  // page) after the first load reach the menu when it next opens, without a page reload.
+  function loadCatalog({ fresh = false } = {}) {
+    if (st.catalog && !fresh) return Promise.resolve(st.catalog);
     if (st.catalogLoading) return st.catalogLoading;
     st.catalogLoading = Promise.resolve()
       .then(() => fetch('/api/ask/models'))
@@ -1413,10 +1418,15 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       if (m.needsSignIn) {
         item.appendChild(tag('needs sign-in', 'is-err', m.signInMessage || 'The provider behind this model is not usable yet — Settings › Models › Providers.'));
       }
+      // Credential broker: whether the signed-in person has the key this model spends from.
+      const cb = credentialBadge(m.id);
+      if (cb) item.appendChild(tag(cb.text, cb.missing ? 'is-err' : 'is-key', cb.title));
       if (m.id === st.picker.model) item.appendChild(make('span', 'ask-model-check', '✓'));
       return item;
     };
+    let shownPane = 'main';
     const renderPane = (pane) => {
+      shownPane = pane;
       panel.replaceChildren();
       if (pane === 'effort') {
         const back = menuItem('ask-pane-back', () => renderPane('main'));
@@ -1442,11 +1452,19 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         const { primary, rest } = splitCatalog();
         for (const m of primary) panel.appendChild(modelItem(m));
         panel.appendChild(make('div', 'ask-pop-divider'));
-        const effortRow = menuItem('ask-effort-row', () => renderPane('effort'));
+        const noEffort = !!catalogEntry(st.picker.model)?.noEffort;
+        const effortRow = menuItem('ask-effort-row', noEffort ? null : () => renderPane('effort'));
         effortRow.setAttribute('data-ask-effort-row', '');
         effortRow.appendChild(make('span', null, 'Effort'));
-        effortRow.appendChild(make('span', 'ask-pop-row-value', st.picker.effort));
-        effortRow.appendChild(make('span', 'ask-pop-row-chev', '›'));
+        if (noEffort) {
+          // The model's provider refused a reasoning effort; worca leaves it out of the request.
+          effortRow.disabled = true;
+          effortRow.title = 'This model takes no reasoning effort, so none is sent.';
+          effortRow.appendChild(make('span', 'ask-pop-row-value', 'not supported'));
+        } else {
+          effortRow.appendChild(make('span', 'ask-pop-row-value', st.picker.effort));
+          effortRow.appendChild(make('span', 'ask-pop-row-chev', '›'));
+        }
         panel.appendChild(effortRow);
         if (rest.length) {
           const moreRow = menuItem('ask-more-models', () => renderPane('more'));
@@ -1458,7 +1476,11 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       }
       focusFirst();
     };
-    loadCatalog().then(() => { if (st.popover && st.popover.panel === panel) renderPane('main'); });
+    // What we have paints at once; the refetch repaints the main pane if it is still showing.
+    const had = st.catalog;
+    loadCatalog({ fresh: true }).then((c) => {
+      if (c !== had && shownPane === 'main' && st.popover && st.popover.panel === panel) renderPane('main');
+    });
     renderPane('main');
   }
 
@@ -1765,6 +1787,16 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       const a = make('a', 'ask-notice-link', 'open');
       a.setAttribute('href', b.href);
       n.appendChild(a);
+    }
+    // The raw failure evidence, for those who debug: expert only — the human
+    // line above is the explanation at every level.
+    if (b.errorClass && b.detail) {
+      const det = doc.createElement('details');
+      det.className = 'ask-error-details';
+      det.dataset.minLevel = 'expert';
+      det.appendChild(make('summary', null, 'Details'));
+      det.appendChild(make('div', 'ask-error-detail-text', b.detail));
+      n.appendChild(det);
     }
     return n;
   }
@@ -2463,6 +2495,55 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return { el: rootEl };
   }
 
+  /** The web card (propose_web_access): proposed → applied | failed, or declined. The exact URL is shown, so a
+   *  request that smuggles data is visible before the click. Every value is text. */
+  function buildWebCard(block) {
+    const card = block.card || {};
+    const host = card.host || 'a website';
+    if (block.state === 'declined') return { el: make('div', 'ask-card-stub', `Declined — ${card.summary || `Read ${host}`}`) };
+    const rootEl = make('div', `ask-card ask-mcard ask-webcard is-${block.state}`);
+    rootEl.setAttribute('data-ask-webcard', block.state);
+    const result = card.result || null;
+    const head = make('div', 'ask-mcard-head');
+    const title = block.state === 'failed' ? 'Web access not granted'
+      : block.state === 'applied' ? (result && result.scope === 'always' ? 'Always allowed' : 'Allowed for this chat')
+        : 'Ask Worca wants to read a new site';
+    head.appendChild(make('span', 'ask-mcard-title', title));
+    head.appendChild(make('span', 'ask-mcard-kind', 'Web'));
+    rootEl.appendChild(head);
+    const body = make('div', 'ask-mcard-body');
+    const sum = make('div', 'ask-mcard-summary');
+    if (block.state === 'applied') sum.appendChild(svgIcon(WF_ICO.check, 15, 2.4));
+    sum.appendChild(make('span', null, host));
+    body.appendChild(sum);
+    if (card.reason) body.appendChild(make('div', 'ask-mcard-note', card.reason));
+    const ul = make('ul', 'ask-mcard-changes');
+    const li = make('li');
+    li.appendChild(make('span', 'ask-mcard-change-label', 'URL'));
+    const val = make('span', 'ask-mcard-change-val');
+    val.appendChild(make('span', 'ask-mcard-after', String(card.url || '')));
+    li.appendChild(val);
+    ul.appendChild(li);
+    body.appendChild(ul);
+    if (block.state === 'failed') body.appendChild(make('div', 'ask-mcard-failed', `Could not allow: ${block.error || (result && result.error) || 'unknown error'}`));
+    rootEl.appendChild(body);
+    rootEl.appendChild(make('div', 'ask-card-err'));
+    if (block.state === 'proposed') {
+      const actions = make('div', 'ask-mcard-actions');
+      const btn = (cls, text, attr) => { const b = make('button', cls, text); b.type = 'button'; b.setAttribute(attr, ''); return b; };
+      const decline = btn('ask-card-not-now', 'Deny', 'data-ask-web-decline');
+      decline.addEventListener('click', () => postCard(block, rootEl, { state: 'declined' }, decline));
+      const always = btn('ask-card-not-now', 'Always allow', 'data-ask-web-always');
+      always.title = `Adds ${host} to Settings → Ask Worca → Web access`;
+      always.addEventListener('click', () => postCard(block, rootEl, { state: 'applied', scope: 'always' }, always));
+      const chat = btn('ask-card-start', 'Allow for this chat', 'data-ask-web-chat');
+      chat.addEventListener('click', () => postCard(block, rootEl, { state: 'applied', scope: 'chat' }, chat));
+      actions.append(make('span', 'ask-card-actions-spacer'), decline, always, chat);
+      rootEl.appendChild(actions);
+    }
+    return { el: rootEl };
+  }
+
   /** The clone card (propose_clone_project): proposed → cloning → applied | failed, or declined. Every value is text. */
   function buildCloneCard(block) {
     const card = block.card || {};
@@ -2615,6 +2696,12 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
             closePopover({ focusTrigger: true });
           });
           item.appendChild(make('span', 'ask-model-name', m.label || m.id));
+          const cb = credentialBadge(m.id);
+          if (cb) {
+            const t = make('span', `ask-model-tag ${cb.missing ? 'is-err' : 'is-key'}`, cb.text);
+            t.title = cb.title;
+            item.appendChild(t);
+          }
           if (m.id === cur().model) item.appendChild(make('span', 'ask-model-check', '✓'));
           p.appendChild(item);
         }
@@ -3257,7 +3344,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   function isProgressBlock(block) {
     const card = block.card || {};
     if (card.type === PROGRESS_CARD_TYPE) return true;
-    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'workspace') return false;
+    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace') return false;
     return block.state === 'started' || (block.state === 'failed' && !!block.runId);
   }
   function buildCard(block) {
@@ -3270,14 +3357,16 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const isModel = !!(block.card && block.card.type === 'model');
     const isClone = !!(block.card && block.card.type === 'clone');
     const isWorkspace = !!(block.card && block.card.type === 'workspace');
+    const isWeb = !!(block.card && block.card.type === 'web');
     const isProgress = isProgressBlock(block);
-    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isWorkspace || isProgress || block.state === 'proposed')) return cached.el;
+    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isWeb || isWorkspace || isProgress || block.state === 'proposed')) return cached.el;
     if (cached) disposeCardEntry(cached);
     const built = isWorkflow ? buildWorkflowCard(block, cached)
       : isMetrics ? buildMetricsCard(block)
       : isSchedule ? buildScheduleCard(block)
       : isModel ? buildModelCard(block)
       : isClone ? buildCloneCard(block)
+      : isWeb ? buildWebCard(block)
       : isWorkspace ? buildWorkspaceCard(block)
       : isProgress ? buildProgressCard(block)
         : { el: block.state === 'proposed' ? buildCardForm(block) : buildCardTerminal(block) };
@@ -3523,10 +3612,15 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       // Stopped after — and nothing more while the turn is live: the orb row at the
       // bottom of the message owns the elapsed and the meter, and printing either
       // set twice is the noise this replaced. A turn that ended badly says so
-      // instead of Done; nothing else marks a stop.
+      // instead of Done; nothing else marks a stop. A turn that ended before any
+      // result, or within a few ms (a signed-out CLI answers in ~20 ms), has no
+      // duration worth printing: plain Stopped, never a dangling "Stopped after"
+      // or "Stopped after 0.0s".
       if (!isLive) {
-        if (stopped) parts.push(make('span', 'ask-activity-label', 'Stopped after'));
-        parts.push(make('span', 'ask-activity-elapsed', fmtElapsed(r.durationMs) || ''));
+        const shown = fmtElapsed(r.durationMs);
+        const elapsed = shown && shown !== '0.0s' ? shown : '';
+        if (stopped) parts.push(make('span', 'ask-activity-label', elapsed ? 'Stopped after' : 'Stopped'));
+        parts.push(make('span', 'ask-activity-elapsed', elapsed));
         parts.push(make('span', 'ask-activity-spacer'));
         const meter = [fmtCtx(r.usage && r.usage.ctx), fmtUsd(r.costUsd)].filter(Boolean).join(' · ');
         parts.push(make('span', 'ask-activity-meter', meter));
@@ -3652,7 +3746,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       if (b.kind === 'notice') parts.push(`n:${b.id ?? ''}:${b.text || ''}:${b.href || ''}`);
       else if (b.kind === 'card') parts.push(`c:${b.id}:${b.state || ''}:${(b.card && b.card.type) || ''}:${b.runId || ''}:${b.error || ''}`);
     }
-    parts.push(`r:${row.status || ''}:${row.errorMessage || ''}:${isLiveRow(row) ? 1 : 0}`);
+    parts.push(`r:${row.status || ''}:${row.errorMessage || ''}:${row.errorCode || ''}:${isLiveRow(row) ? 1 : 0}`);
     return parts.join('|');
   }
 
@@ -3701,9 +3795,25 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
           else if (b.kind === 'card') wrap.appendChild(buildCard(b, cur));
         }
         if (cur.status === 'error') {
-          const explained = (cur.blocks || []).some((b) => b && b.kind === 'notice');
-          if (cur.errorMessage) wrap.appendChild(make('div', 'ask-error-line', cur.errorMessage));
-          else if (!explained) wrap.appendChild(make('div', 'ask-error-line', 'This turn ended with an error.'));
+          if (cur.errorCode === 'claude-signed-out' && typeof openClaudeSetup === 'function') {
+            // The CLI's raw "Not logged in" → one line whose link opens Connect Claude Code.
+            const line = make('div', 'ask-error-line', "Claude Code isn't signed in. ");
+            const link = make('a', '', 'Sign in…');
+            link.href = '#';
+            link.addEventListener('click', (e) => { e.preventDefault(); openClaudeSetup(); });
+            line.appendChild(link);
+            wrap.appendChild(line);
+          } else {
+            // A classified notice (errorClass on the block) IS the explanation —
+            // it renders the human line and, at expert, the raw detail in its
+            // own expander. The raw line here is only for the unclassified case.
+            const classified = (cur.blocks || []).some((b) => b && b.kind === 'notice' && b.errorClass);
+            if (!classified) {
+              const explained = (cur.blocks || []).some((b) => b && b.kind === 'notice');
+              if (cur.errorMessage) wrap.appendChild(make('div', 'ask-error-line', cur.errorMessage));
+              else if (!explained) wrap.appendChild(make('div', 'ask-error-line', 'This turn ended with an error.'));
+            }
+          }
         }
         if (isLiveRow(cur)) {
           wrap.appendChild(ensureThinking());   // last child: the bottom of the message

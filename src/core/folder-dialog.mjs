@@ -11,6 +11,8 @@
 //   win32  -> PowerShell System.Windows.Forms.FolderBrowserDialog (-STA)
 //   linux  -> zenity --file-selection --directory, falling back to kdialog;
 //             requires DISPLAY/WAYLAND_DISPLAY (headless -> unsupported)
+//   `multiple` -> multi-select on darwin and zenity (newline-separated paths);
+//             win32 and kdialog stay single-select and answer a one-element list
 //
 // Any failure that is not a recognized user-cancel degrades to
 // { status: 'unsupported' } so the web UI can fall back to its in-app folder
@@ -82,11 +84,16 @@ export const _testing = {
 /**
  * Open the platform's native folder picker and wait for the user.
  * Serialized: while one dialog is open, further calls resolve { status:'busy' }.
- * @param {{purpose?: 'project'|'export'|'plugin'}} [opts] picks the dialog title
- * @returns {Promise<{status:'picked', path:string} | {status:'canceled'}
+ * `multiple` asks for a multi-select dialog where the platform has one (macOS
+ * `choose folder … with multiple selections allowed`, zenity --multiple);
+ * Windows' FolderBrowserDialog and kdialog stay single-select. With `multiple`
+ * a pick answers { status:'picked', path: <first>, paths: [...] }; without it the
+ * reply keeps its historical { status:'picked', path } shape.
+ * @param {{purpose?: 'project'|'export'|'plugin', multiple?: boolean}} [opts]
+ * @returns {Promise<{status:'picked', path:string, paths?:string[]} | {status:'canceled'}
  *   | {status:'unsupported'} | {status:'busy'}>}
  */
-export async function pickFolderNative({ purpose } = {}) {
+export async function pickFolderNative({ purpose, multiple = false } = {}) {
   if (_inFlight) return { status: 'busy' };
   _inFlight = true;
   try {
@@ -94,34 +101,54 @@ export async function pickFolderNative({ purpose } = {}) {
     const env = _ov.env || process.env;
     const run = _ov.runner || defaultRun;
     const prompt = promptFor(purpose);
+    const multi = multiple === true;
     if ((env.WORCA_NO_NATIVE_DIALOG || '') === '1') return { status: 'unsupported' };
-    if (platform === 'darwin') return await pickMac(run, prompt);
-    if (platform === 'win32') return await pickWindows(run, prompt);
-    if (platform === 'linux') return await pickLinux(run, env, prompt);
-    return { status: 'unsupported' };
+    let r = { status: 'unsupported' };
+    if (platform === 'darwin') r = await pickMac(run, prompt, multi);
+    else if (platform === 'win32') r = await pickWindows(run, prompt);
+    else if (platform === 'linux') r = await pickLinux(run, env, prompt, multi);
+    if (r.status !== 'picked') return r;
+    return multi ? { status: 'picked', path: r.paths[0], paths: r.paths } : { status: 'picked', path: r.paths[0] };
   } finally {
     _inFlight = false;
   }
 }
 
-function pickedOrCanceled(stdoutRaw) {
-  const raw = stdoutRaw.trim();
-  const path = raw === '/' ? raw : raw.replace(/\/+$/, '');
-  return path ? { status: 'picked', path } : { status: 'canceled' };
+// One path per stdout line (a multi-select dialog prints several): trimmed, a
+// trailing slash dropped (a bare "/" kept), blanks skipped, duplicates collapsed.
+function parsePicked(stdoutRaw) {
+  const paths = [];
+  for (const line of String(stdoutRaw || '').split(/\r?\n/)) {
+    const raw = line.trim();
+    if (!raw) continue;
+    const path = raw === '/' ? raw : raw.replace(/\/+$/, '');
+    if (!paths.includes(path)) paths.push(path);
+  }
+  return paths.length ? { status: 'picked', paths } : { status: 'canceled' };
 }
 
-async function pickMac(run, prompt) {
-  const r = await run('osascript', [
-    '-e', 'tell application "System Events" to activate',
-    '-e', `POSIX path of (choose folder with prompt "${prompt}")`,
-  ]);
-  if (r.ok) return pickedOrCanceled(r.stdout);
+async function pickMac(run, prompt, multiple) {
+  // `choose folder … with multiple selections allowed` returns a LIST of aliases;
+  // POSIX path must be taken per item, one per line.
+  const pick = multiple
+    ? [
+        '-e', `set picked to (choose folder with prompt "${prompt}" with multiple selections allowed)`,
+        '-e', 'set out to ""',
+        '-e', 'repeat with f in picked',
+        '-e', 'set out to out & (POSIX path of f) & linefeed',
+        '-e', 'end repeat',
+        '-e', 'return out',
+      ]
+    : ['-e', `POSIX path of (choose folder with prompt "${prompt}")`];
+  const r = await run('osascript', ['-e', 'tell application "System Events" to activate', ...pick]);
+  if (r.ok) return parsePicked(r.stdout);
   // `choose folder` cancel: exit 1 + "execution error: User canceled. (-128)"
   if (/-128|User cancell?ed/i.test(r.stderr || '')) return { status: 'canceled' };
   return { status: 'unsupported' }; // no GUI session, automation denied, ...
 }
 
 async function pickWindows(run, prompt) {
+  // FolderBrowserDialog has no multi-select: a `multiple` caller gets a one-element list.
   const script =
     'Add-Type -AssemblyName System.Windows.Forms | Out-Null; ' +
     '$d = New-Object System.Windows.Forms.FolderBrowserDialog; ' +
@@ -131,17 +158,19 @@ async function pickWindows(run, prompt) {
   if (!r.ok) return { status: 'unsupported' };
   // OK exit either way; empty stdout means the user canceled.
   const path = r.stdout.trim();
-  return path ? { status: 'picked', path } : { status: 'canceled' };
+  return path ? { status: 'picked', paths: [path] } : { status: 'canceled' };
 }
 
-async function pickLinux(run, env, prompt) {
+async function pickLinux(run, env, prompt, multiple) {
   if (!env.DISPLAY && !env.WAYLAND_DISPLAY) return { status: 'unsupported' };
-  const zen = await run('zenity', ['--file-selection', '--directory', `--title=${prompt}`]);
-  if (zen.ok) return pickedOrCanceled(zen.stdout);
+  const zenArgs = ['--file-selection', '--directory', `--title=${prompt}`];
+  if (multiple) zenArgs.push('--multiple', '--separator=\n');
+  const zen = await run('zenity', zenArgs);
+  if (zen.ok) return parsePicked(zen.stdout);
   if (zen.code === 1 && !zen.timedOut) return { status: 'canceled' }; // user closed it
-  // zenity missing (spawn error -> code -1) or broken: try kdialog.
+  // zenity missing (spawn error -> code -1) or broken: try kdialog (single-select only).
   const kd = await run('kdialog', ['--title', prompt, '--getexistingdirectory', env.HOME || '/']);
-  if (kd.ok) return pickedOrCanceled(kd.stdout);
+  if (kd.ok) return parsePicked(kd.stdout);
   if (kd.code === 1 && !kd.timedOut) return { status: 'canceled' };
   return { status: 'unsupported' };
 }

@@ -31,6 +31,11 @@ export const ASK_LIMITS = Object.freeze({
   runsScanLimit: 200,                      // listAllPipelines({limit}) before JS filtering
   diffDefaultBytes: 60_000,
   diffMaxBytes: 200_000,
+  // web_fetch pages: Claude Code refuses an MCP result over its token limit and moves it into a file the chat
+  // may not read (seen live: a 62 107-character result refused, 30 000-character pages fine), so a page is
+  // returned in slices of the converted text (at most WEB_LIMITS.maxTextChars in all).
+  webPageDefaultChars: 20_000,
+  webPageMaxChars: 30_000,
   gitOutputMaxBytes: 200_000,              // per `git` tool call (P4 §8), sliceBytes window
   gitCaptureMaxBytes: 8_000_000,           // stdout CAPTURE cap per spawn — past it the child is killed and the output marked capped
   worktreesPerThread: 5,                   // P4 D9
@@ -52,7 +57,7 @@ export const ASK_LIMITS = Object.freeze({
   scriptTestMaxTimeoutSec: 600,            // …and its ceiling (= the engine's 10-minute default)
   scriptVerdictMaxIssues: 50,              // test_script: verdict issues sent (the rest is counted, not sent)
   scriptResultFieldMaxChars: 2000,         // test_script: per verdict field / warning / diff / error line (chars)
-  briefMaxChars: 8000,
+  briefMaxChars: 32_000,                   // propose_run brief (= workflowTaskMaxChars: a saved workflow's task must fit the run card that follows)
   metricsRunsDefaultLimit: 20,             // list_team_metrics_runs page (= listRunsDefaultLimit)
   metricsRunsMaxLimit: 100,                // list_team_metrics_runs page cap (= listRunsMaxLimit)
   metricsBreakdownMaxRows: 20,             // get_team_metrics rows per breakdown dimension

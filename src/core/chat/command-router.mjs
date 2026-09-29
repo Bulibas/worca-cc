@@ -11,6 +11,7 @@
 // this module never imports Express or the orchestrator.
 
 import { parseCommand } from './parser.mjs';
+import { DIRECTIONS_CLOSED, DIRECTION_MAX_CHARS } from '../directions.mjs';
 import { BOOKEND_EXECUTION_IDS } from '../../shared/graph/constants.mjs';
 import { createAllowlistGuard, parseIdList } from './allowlist.mjs';
 import { runRef, fmtUsd, fmtMs } from './renderers.mjs';
@@ -50,6 +51,7 @@ const HELP_TEXT = [
   '`/abort [*ref]` — give up on a recovery prompt (pauses the run; nothing is discarded)',
   '`/answer [*ref] <n|text> [| …]` — answer clarify questions (option number, or text for free-text)',
   '`/answer [*ref] field=value [| field2=a,b]` — answer a form (escape a literal `|`, `,`, `=` or `:` with `\\`)',
+  '`/direct [*ref] <text>` — push a direction to a live run (non-blocking; the next step reads it)',
   '`/projects` · `/use <name>` — scope commands to one project',
   '`/mute 30m|2h|1d` · `/unmute` — silence notifications for this chat',
   '`/whoami` · `/help`',
@@ -58,28 +60,51 @@ const HELP_TEXT = [
 
 const LIVE = new Set(['running', 'starting', 'pausing']);
 
+// Runs that can still READ a direction — LIVE plus the two SETTLED states resume
+// accepts, which is what the inbox exists for: resume replays directions.ndjson.
+//
+// `interrupted` belongs here for the same reason `paused` does, and leaving it out
+// was the drift this comment claimed to prevent. reconcileStaleRunning stamps
+// every dead-owner run `interrupted` on server restart (artifacts.mjs), resumeRun
+// explicitly accepts it (ui/server.mjs: `!== 'paused' && !== 'interrupted'`), and
+// postDirection gates on the DENYLIST DIRECTIONS_CLOSED = {done,error,stopped} —
+// so after any restart the UI filed a direction (201, replayed on resume) while
+// /direct answered "No running or paused runs." for the very same row.
+//
+// Still an allowlist, not `!DIRECTIONS_CLOSED.has(s)` — a run whose status is
+// empty or unknown must not become directable by default — but the filter keeps
+// the two surfaces from disagreeing about the states both actually name.
+// How far back /direct will recognise a run id. History is the only place a run
+// from before the last server restart still exists, and the whole table is not
+// worth scanning on a chat command — but the horizon is real, so it is named
+// rather than buried as a literal at the call site.
+const DIRECT_REF_HISTORY = 500;
+
+const DIRECTABLE = new Set([...LIVE, 'paused', 'interrupted'].filter((s) => !DIRECTIONS_CLOSED.has(s)));
+
 /**
  * Resolve which run a command targets (resolveRunId port: wildcard suffix,
  * disambiguation, no-arg single-active default).
  * @returns {{run?:object, row?:object, error?:object}} run = live entry summary,
  *          row = history row (when not live); error = NormalizedMessage reply
  */
-function resolveTarget(arg, live, rows, { wantLive = false } = {}) {
+function resolveTarget(arg, live, rows, { wantLive = false, targetable = LIVE, noun = 'live' } = {}) {
   // wantLive commands (/pause /stop /approve /answer…) must never bind to a
-  // finished entry still parked in the runs Map.
-  if (wantLive) live = live.filter((r) => LIVE.has(String(r.status || '')));
+  // finished entry still parked in the runs Map. `targetable` says which statuses
+  // count: /direct widens it to include `paused`, whose inbox resume replays.
+  if (wantLive) live = live.filter((r) => targetable.has(String(r.status || '')));
   const suffix = String(arg || '').replace(/^\*/, '').trim();
   if (!suffix) {
-    const active = live.filter((r) => LIVE.has(String(r.status || '')));
+    const active = live.filter((r) => targetable.has(String(r.status || '')));
     const pool = active.length ? active : live;
     if (pool.length === 1) return { run: pool[0] };
-    if (pool.length === 0) return { error: reply('No live runs. `/runs` lists them, `/last` shows the latest finished one.', 'warning') };
+    if (pool.length === 0) return { error: reply(`No ${noun} runs. \`/runs\` lists them, \`/last\` shows the latest finished one.`, 'warning') };
     return { error: disambiguate(pool.map((r) => ({ id: r.runId, title: r.title, status: r.status }))) };
   }
   const liveHits = live.filter((r) => String(r.runId).endsWith(suffix) || String(r.pipelineId || '').endsWith(suffix));
   if (liveHits.length === 1) return { run: liveHits[0] };
   if (liveHits.length > 1) return { error: disambiguate(liveHits.map((r) => ({ id: r.runId, title: r.title, status: r.status }))) };
-  if (wantLive) return { error: reply(`No live run matches \`*${suffix}\`.`, 'warning') };
+  if (wantLive) return { error: reply(`No ${noun} run matches \`*${suffix}\`.`, 'warning') };
   const rowHits = (rows || []).filter((r) => String(r.id).endsWith(suffix));
   if (rowHits.length === 1) return { row: rowHits[0] };
   if (rowHits.length > 1) return { error: disambiguate(rowHits.map((r) => ({ id: r.id, title: r.title, status: r.status }))) };
@@ -351,6 +376,131 @@ export function createCommandRouter({ actions, chatContext, logger = () => {} })
       }
       await actions.answer(t.run.runId, pq.id, { answers }, actor);
       return reply(`✅ Answered ${questions.length} question${questions.length === 1 ? '' : 's'} on \`${ref}\`.`, 'success');
+    },
+
+    // /direct [*ref] <free text> — a non-blocking direction for a live run. The
+    // text is sliced off msg.text, not rebuilt from args: parseCommand collapses
+    // whitespace and drops @mentions, and a direction must arrive verbatim.
+    direct: async ({ chatKey, args, msg, platform }) => {
+      // A ref is only a ref if it NAMES one of this chat's live runs. Shape alone
+      // is not enough to tell one from ordinary prose: `*never*` has a trailing
+      // asterisk, but `*please remove* the roadmap` opens with a bare `*please`
+      // that is perfectly id-shaped, and consuming it dropped the direction with
+      // "No live run matches `*please`". Resolving first costs nothing — the
+      // suffix either matches a live run or the whole line is the direction.
+      const scoped = scopedRuns(chatKey);
+      // At least four characters: run ids are hex, so a single-letter emphasis
+      // opener matched one in sixteen by accident — `/direct *a bit shorter`
+      // resolved a ref `*a`, stripped it, and handed the agent "bit shorter".
+      const token = args[0] && args[0].startsWith('*') ? args[0].slice(1).trim() : '';
+      const suffix = token.length >= 4 ? token : '';
+      // Matched against EVERY run in scope, not just the live ones. Those are two
+      // different answers: a token naming no run at all is prose (`*please
+      // remove* the roadmap`), while a token naming a run that exists but is not
+      // live is a ref the user got wrong — and resolveTarget's `wantLive` says so.
+      // Testing only live runs conflated them, so a stale ref fell through to "no
+      // ref given" and filed the direction against whichever run WAS live, with
+      // the literal `*a1b2c3d4` still sitting in the text the next agent reads.
+      // Recognised against the runs worca can still SEE — the live Map plus a window
+      // of History — not just the ones in scope:
+      // `runs` is scopedRuns(chatKey) — the active project's entries still in the
+      // server's in-memory Map — so a ref naming a real run outside that set read as
+      // prose and the command fell through to the no-ref path, filing against
+      // whichever run happened to be live with the literal `*a1b2c3d4` still in the
+      // text. Reachable with `/use projA` while reffing projB, and for any run from
+      // before the last server restart (the Map is empty after one; History is not).
+      // An id-shaped token matching nothing in that window stays prose, which is the
+      // decision the `*deadbeef99` case above encodes. The window is finite, so a
+      // ref older than it still reads as prose — the residual case, and the reason
+      // the resolver below is what actually refuses: a recognised ref that names no
+      // DIRECTABLE run errors rather than retargeting. Only queried when the first
+      // token is ref-shaped, so an ordinary /direct costs nothing.
+      // History is read only when it can CHANGE the answer: to tell a real ref from
+      // prose, or when nothing in the Map is directable (after a restart, the paused
+      // run the inbox exists for lives only in the DB). An ordinary `/direct <text>`
+      // with a run live — the common form — reads none of it. The previous comment
+      // claimed this while the fetch ran unconditionally, so the guard bought
+      // nothing and every /direct paid a 500-row query first.
+      const anyLiveDirectable = scoped.some((r) => DIRECTABLE.has(String(r.status || '')));
+      const history = (suffix || !anyLiveDirectable)
+        ? await actions.history({ limit: DIRECT_REF_HISTORY })
+        : [];
+      const known = suffix ? [...actions.listRuns(), ...history] : [];
+      // A paused run that has LEFT the in-memory Map — any server restart — is
+      // still directable: postDirection resolves it from the DB and resume replays
+      // the inbox, which is why the HTTP route accepts it. Widening recognition
+      // alone (last round) only changed the error text; the run has to be in the
+      // TARGET set too, or chat still refuses what the route files. Same status
+      // filter, so a finished row stays refused.
+      const scope = projectOf(chatKey);
+      const inScope = (r) => !scope || lastPathSegment(r.projectDir) === scope
+        || (r.projectNames || []).includes(scope);
+      const fromHistory = history
+        .filter((r) => DIRECTABLE.has(String(r.status || '')) && inScope(r)
+          && !scoped.some((x) => x.runId === r.id || x.pipelineId === r.id))
+        .map((r) => ({ runId: r.id, pipelineId: r.id, title: r.title, status: r.status, projectDir: r.projectDir }));
+      const runs = [...scoped, ...fromHistory];
+      const hasRef = !!suffix && known.some((x) => String(x.runId || x.id || '').endsWith(suffix)
+        || String(x.pipelineId || '').endsWith(suffix));
+      const t = resolveTarget(hasRef ? args[0] : '', runs, [], { wantLive: true, targetable: DIRECTABLE, noun: 'running or paused' });
+      if (t.error) return t.error;
+      // parseCommand drops @mentions ANYWHERE in the text, so `@bot /direct …`
+      // dispatches here — but anchoring the slice on `/direct` at position 0 left
+      // the mention AND the command literal inside the direction, and that string
+      // is what renderDirectionsBlock puts in the next agent's prompt. Addressing
+      // the bot by name is the normal form in a group channel, which is exactly
+      // where /direct is used. Strip leading mentions first.
+      // Strip mentions that come BEFORE the command ("@bot /direct …", the normal
+      // group-channel addressing form parseCommand already tolerates), and
+      // nothing after it. A mention following the command cannot be told apart
+      // from the direction's own subject, and deleting that is the worse error:
+      // "/direct @alice should sign off on slide 3" must not reach the agent as
+      // "should sign off on slide 3". A leading bot handle left in the text is
+      // noise; a deleted subject changes what the direction says.
+      const raw = String(msg.text || '')
+        .replace(/^\s*(?:@\S+\s+)*/, '')
+        .replace(/^\/direct(?:@\S+)?\s*/i, '');
+      // The consumed ref is not always the first token of `raw`: parseCommand
+      // strips mentions ANYWHERE, so `/direct @bot *a1b2c3d4 …` makes `*a1b2c3d4`
+      // args[0] while `raw` still opens with `@bot`. Step over any mentions to
+      // reach the ref and delete only the ref — putting them back with `$1`,
+      // because a mention after the command may be the direction's subject and
+      // deleting that is the worse error.
+      const text = (hasRef ? raw.replace(/^((?:@\S+\s+)*)\*\S+\s*/, '$1') : raw).trim();
+      if (!text) return reply('Usage: `/direct [*ref] <what to change>`', 'warning');
+      // appendDirection silently slices at DIRECTION_MAX_CHARS, and the HTTP twin
+      // 400s rather than let that happen quietly. Without this, chat confirmed a
+      // pasted over-long direction as "recorded" while the agent got a sentence cut
+      // off mid-word — the exact divergence DIRECTIONS_CLOSED was extracted to end.
+      if (text.length > DIRECTION_MAX_CHARS) {
+        return reply(`That direction is ${text.length} characters; the limit is ${DIRECTION_MAX_CHARS}. `
+          + 'Shorten it — a truncated direction reaches the agent cut off mid-sentence.', 'warning');
+      }
+      // postDirection throws RUN_FINISHED when the run settles between resolving it
+      // and posting — reachable simply by timing, since /direct targets live AND
+      // paused runs — and the actions wrapper throws on a run that has left the Map.
+      // Uncaught, both reached the router's generic wrapper as "Command failed: …",
+      // while the `!rec` path below already answers this shape of problem properly.
+      let rec;
+      try {
+        rec = await actions.direct(t.run.runId, text, platform);
+      } catch (err) {
+        if (err && err.code === 'RUN_FINISHED') {
+          return reply(`\`${runRef(t.run.runId)}\` has finished — a direction posted now would never be read.`, 'warning');
+        }
+        if (err && /unknown runId/.test(String(err.message || ''))) {
+          return reply(`\`${runRef(t.run.runId)}\` is no longer running. \`/runs\` lists what is.`, 'warning');
+        }
+        throw err;
+      }
+      // No record = the row could not be resolved (a run launched but not yet
+      // seen a `state` event still carries its UUID, not its pipeline id). The
+      // HTTP twin 404s on the same null; reporting success here would tell the
+      // user a direction was filed that no step will ever read.
+      if (!rec) {
+        return reply(`Could not file that direction for \`${runRef(t.run.runId)}\` — the run is not addressable yet. Try again in a moment.`, 'warning');
+      }
+      return reply(`Direction **${rec.id}** recorded for \`${runRef(t.run.runId)}\` — the next step will see it.`, 'success');
     },
 
     mute: async ({ chatKey, args }) => {

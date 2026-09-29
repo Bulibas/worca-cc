@@ -22,6 +22,7 @@ import { ASK_LIMITS } from '../shared/forms/catalog.mjs';
 import { resolveAnswerSchema } from '../shared/forms/schema.mjs';
 import { checkAskData, autoAnswer, collectAnswer, fileRefs } from '../shared/forms/answer.mjs';
 import { FORM_SURFACES } from '../shared/forms/form-def.mjs';
+import { walkLayout } from '../shared/forms/layout.mjs';
 import { snapshotAskFiles } from './ask-files.mjs';
 
 /** The snapshot root inside a pipeline dir: <pipelineDir>/ask-files/<askId>/. */
@@ -65,7 +66,7 @@ export function askIdToken(id) {
  *          cwd: string, pipelineDir: string, askId: string}} args
  * @returns {Promise<{ok: true, ask: object, autoValues: object}|{ok: false, errors: Array}>}
  */
-export async function prepareFormAsk({ agentMeta, payload, cwd, pipelineDir, askId }) {
+export async function prepareFormAsk({ agentMeta, payload, cwd, pipelineDir, askId, env = process.env }) {
   const forms = agentMeta?.ask?.forms || {};
   const id = typeof payload?.form === 'string' ? payload.form.trim() : '';
   const def = Object.hasOwn(forms, id) ? forms[id] : null;
@@ -149,7 +150,65 @@ export async function prepareFormAsk({ agentMeta, payload, cwd, pipelineDir, ask
   };
   // D10's auto answer travels BESIDE the ask, never inside it: the persisted
   // shape (§9) is exactly `ask` plus `values`.
-  return { ok: true, ask, autoValues: autoAnswer(def, data) };
+  const autoValues = autoAnswer(def, data);
+  const secrets = applyEnvDefaults(ask, autoValues, env);
+  return { ok: true, ask, autoValues, secrets };
+}
+
+/**
+ * `envDefault` (text widget): the ENGINE resolves the named environment variable —
+ * never an agent, never the browser. Two cases, decided by `secret`:
+ *
+ *   plain   the value becomes the field's `default` in the stored answer schema (the
+ *           renderer seeds from exactly that) and in the unattended auto answer. It is
+ *           not sensitive; it is persisted like any other default.
+ *   secret  the value stays HERE. The stored layout gets only `envSet` (is there one?),
+ *           so a surface can say "using $NAME from the environment" without ever being
+ *           handed it, and it comes back as `secrets` — `{ field: { env, value } }` —
+ *           for the caller to hold in memory and hand to whatever needs it. An empty
+ *           answer for a secret field means "use the environment's".
+ *
+ * Mutates `ask` (a fresh object built above) and `autoValues`; returns `secrets`.
+ * @returns {Record<string, {env: string, value: string}>}
+ */
+export function applyEnvDefaults(ask, autoValues, env = process.env) {
+  const secrets = {};
+  ask.layout = JSON.parse(JSON.stringify(ask.layout));           // never mutate the sidecar's def
+  walkLayout(ask.layout, (raw) => {
+    if (!raw || raw.widget !== 'text' || typeof raw.envDefault !== 'string' || typeof raw.field !== 'string') return;
+    const value = typeof env?.[raw.envDefault] === 'string' ? env[raw.envDefault] : '';
+    if (raw.secret === true) {
+      raw.envSet = value !== '';
+      secrets[raw.field] = { env: raw.envDefault, value };
+      return;
+    }
+    const prop = ask.answerSchema?.properties?.[raw.field];
+    if (value !== '' && prop && prop.default === undefined) {
+      prop.default = value;
+      autoValues[raw.field] = value;
+    }
+  });
+  return secrets;
+}
+
+/**
+ * Split a validated answer into what may be STORED and what may not. Every secret
+ * field's value is swapped for a marker — `[typed]`, `[env:NAME]`, or '' — and the
+ * real value goes into `held` as `{ NAME: value }`, an in-memory map the caller
+ * exports to script children. Typed wins over the environment. The stored answer
+ * therefore never carries a secret, yet still tells History which source was used.
+ * @returns {{ values: object, held: Record<string, string> }}
+ */
+export function redactSecrets(values, secrets) {
+  const out = { ...(values || {}) };
+  const held = {};
+  for (const [field, { env, value }] of Object.entries(secrets || {})) {
+    const typed = typeof out[field] === 'string' ? out[field] : '';
+    const effective = typed || value;
+    if (effective) held[env] = effective;
+    out[field] = typed ? '[typed]' : (value ? `[env:${env}]` : '');
+  }
+  return { values: out, held };
 }
 
 /**
