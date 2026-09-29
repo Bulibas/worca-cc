@@ -188,7 +188,7 @@ body{
 .nav-count .pause-flag{position:absolute;top:-5px;right:-6px;width:13px;height:13px;padding:2px;
   border-radius:50%;background:var(--amber-ink);border:1.5px solid var(--panel);fill:var(--on-status);}
 
-/* Parent roll-up "needs you" dot on the Running nav item (sidebar + topnav) */
+/* Parent roll-up "needs you" dot on the Running nav item (sidebar + the phone bar's menu button) */
 .nav-rollup {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--amber); margin-left: 6px; flex: 0 0 auto;
@@ -316,18 +316,9 @@ body{
    toolbar + per-project headers pin flush to the very top of that scrollport —
    without it, .main's 26px top padding leaves a band above the stuck header
    where scrolled cards peek through (the reported bug). The inset is re-applied
-   on the topbar (below) so the unscrolled layout is unchanged.
-   The compact top-nav (<1080px) is a SIBLING above the views inside .main, so a
-   plain height:100% here would push the track past the viewport and
-   overflow:hidden would clip both screens' bottoms off-screen. */
+   on the topbar (below) so the unscrolled layout is unchanged. */
 body.view-history .main,body.view-projects .main{display:flex;flex-direction:column;overflow:hidden;padding:0;}
 body.view-workspaces .main{display:flex;flex-direction:column;overflow:hidden;padding:0;}   /* the Workspaces track: the same bounded column */
-/* .main's 32px gutter goes with padding:0, so the compact top-nav (<1080px, a
-   SIBLING of the views inside .main) must re-apply it or it lands 20px left of
-   the list content, which keeps its own 32px on .hist-screen. flex:0 0 auto
-   stops the wrapped 9-button nav from being squeezed once .main is a column. */
-body.view-history .topnav,body.view-projects .topnav{margin:12px 32px 0;flex:0 0 auto;}
-body.view-workspaces .topnav{margin:12px 32px 0;flex:0 0 auto;}
 .topbar{display:flex;align-items:flex-start;justify-content:space-between;
   gap:24px;margin-bottom:22px;}
 .topbar h1{font-size:26px;font-weight:700;letter-spacing:-.025em;margin:0 0 4px;}
@@ -1321,13 +1312,11 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 /* ---------- responsive ---------- */
 @media (max-width:1080px){
   .grid{grid-template-columns:1fr;}
-  .sidebar{display:none;}
 }
 
-/* ---------- viewer modal + responsive top-nav ---------- */
+/* ---------- viewer modal ---------- */
 /* Structural styles for markup added in the shell rewrite that are not part
-   of the (locked) Refined stylesheet: the viewer modal + the responsive
-   top-nav shown only when the sidebar is hidden (<1080px). */
+   of the (locked) Refined stylesheet: the viewer modal. */
 .viewer-modal{position:fixed;inset:0;z-index:50;display:grid;place-items:center;
   padding:24px;background:var(--scrim);}
 /* Confirm dialog must stack ABOVE the plugin/wizard modal (equal .viewer-modal z-index,
@@ -1357,18 +1346,6 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .folder-list .folder-row .folder-item{flex:1 1 auto;min-width:0;}
 .folder-list .folder-pick{flex:0 0 auto;margin:0;}
 .folder-pick-count{margin-right:auto;align-self:center;}
-.topnav{display:none;}
-@media (max-width:1080px){
-  .topnav{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:20px;background:var(--panel);
-    border:1px solid var(--line);border-radius:var(--r-card);padding:5px;}
-  .topnav button{flex:1;text-align:center;padding:9px 12px;border:0;border-radius:10px;
-    background:transparent;color:var(--ink-2);font-family:inherit;font-weight:600;font-size:13px;
-    cursor:pointer;transition:.15s;}
-  .topnav button:hover{background:var(--field);color:var(--ink);}
-  .topnav button.active{background:var(--ink);color:var(--on-ink);}
-  .topnav button:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-  .topnav-sep{flex:0 0 1px;background:var(--line-2);margin:6px 2px;}
-}
 
 /* ---------- per-pipeline cost (per-node cost is the graph's .nrun .cost) ---------- */
 /* The `.run-meta .run-cost` pair that lived here went with `.run-meta` itself:
@@ -2748,10 +2725,6 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 /* OpenRouter free-model requests (openrouter-free-view.mjs): a second block under the spend block. */
 .free-ind{margin-top:8px;}
 .spend-ind-saved.pos .spend-ind-label,.spend-ind-saved.pos .spend-ind-amt{color:var(--green-ink-strong);}
-.topnav-amt{margin-left:7px;font-family:var(--mono);font-weight:600;}
-.topnav-amt.warn{color:var(--amber-ink);}
-.topnav-amt.over{color:var(--red-ink);}
-.topnav button.active .topnav-amt{color:inherit;}
 
 /* ---------- Settings cards ---------- */
 /* One width/centering/gap rule for every Settings card. */
@@ -3913,12 +3886,9 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .run-shell.detail-open .run-screen-list{transform:translateX(-100%);}
 .run-shell.detail-open .run-screen-detail{transform:translateX(0);}
 .run-shell.no-anim .run-screen{transition:none;}
-/* Same reasoning as body.view-history .main (222) and .topnav (227): .main stops
-   scrolling and becomes the bounded column so each screen owns its scrollport,
-   and the compact top-nav (<1080px, a SIBLING of the views) re-applies the gutter
-   .main just dropped. */
+/* Same reasoning as body.view-history .main: .main stops scrolling and becomes
+   the bounded column so each screen owns its scrollport. */
 body.view-running .main{display:flex;flex-direction:column;overflow:hidden;padding:0;}
-body.view-running .topnav{margin:12px 32px 0;flex:0 0 auto;}
 /* style.css has no base .mono rule (only ancestor-scoped ones) — scope one to the
    new subtree, exactly as :1608 does for .hd/.hist-card/#shipit-modal. */
 .rd .mono{font-family:var(--mono);}
@@ -4198,9 +4168,10 @@ body.view-running .topnav{margin:12px 32px 0;flex:0 0 auto;}
 /* No rule here restyles anything the expanded 298px column already had: 21 of
    them are scoped under `.sidebar.collapsed`, and the rest (`.brand .logo-mark`,
    `.side-toggle*`, `.nav .rail-tile*`, `.spend-ring*`, `.spend-stack*`) style
-   nodes that exist only because of this feature. The <1080px breakpoint
-   (:920-922) still hides the sidebar outright and hands over to .topnav —
-   collapse is a preference that only exists above it, and the two never overlap.
+   nodes that exist only because of this feature. Below 1080px the rail is
+   forced (tablets) and at 760px the full column becomes the phone drawer;
+   app.js#railCollapsed decides, and the stored preference only applies above
+   1080px.
    HOUSE RULE for this whole block: no comment inside a rule body, and no
    closing brace in any comment — ruleBody() stops its capture at the first one
    and both would break the tests. */
@@ -4441,6 +4412,54 @@ body.view-running .topnav{margin:12px 32px 0;flex:0 0 auto;}
   white-space:nowrap;color:var(--ink);}
 .spend-stack-pair.pos .spend-stack-lbl,.spend-stack-pair.pos .spend-stack-val{color:var(--green-ink-strong);}
 
+/* ---------- Responsive nav tiers ---------- */
+/* Three tiers, one sidebar. Above 1080px nothing here applies. 761-1080px
+   (tablets) app.js#railCollapsed forces the 76px rail above, so the only rule
+   left is hiding the toggle that could not change anything. At 760px and below
+   the phone bar (#mbar) appears and the aside turns into an off-canvas drawer:
+   fixed, translated out, visibility:hidden so nothing in it is focusable until
+   body.nav-open slides it in. visibility waits for the slide out (0s delay .22s)
+   and flips at once on the way in. Layers: the Ask dock at z 40, .nav-scrim 41, the
+   drawer 42, the guide scrim 44-47 (a tour lifts .sidebar to 45), .viewer-modal
+   50 so the interface-mode dialog opens over the drawer. These overrides of
+   .app, .main and .sidebar must stay BELOW their base rules: ruleBody() in the
+   CSS tests reads the first occurrence of a selector, media blocks included.
+   HOUSE RULE, as in the rail block: no comment inside a rule body and no closing
+   brace in a comment. */
+.mbar,.nav-scrim,.side-close{display:none;}
+@media (max-width:1080px){
+  .sidebar .side-toggle{display:none;}
+}
+@media (max-width:760px){
+  .app{flex-direction:column;}
+  .main{flex:1 1 auto;min-height:0;}
+  .mbar{display:flex;align-items:center;gap:10px;flex:0 0 auto;height:52px;padding:0 10px;
+    background:var(--panel);border-bottom:1px solid var(--line);}
+  .mbar-menu{position:relative;display:flex;align-items:center;justify-content:center;flex:0 0 auto;
+    width:40px;height:40px;padding:0;border:0;border-radius:12px;background:transparent;color:var(--ink);cursor:pointer;}
+  .mbar-menu svg{width:22px;height:22px;}
+  .mbar-menu:hover{background:var(--field);}
+  .mbar-menu:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+  .mbar-menu .nav-rollup{position:absolute;top:6px;right:6px;margin:0;border:2px solid var(--panel);}
+  .mbar-mark{width:26px;height:26px;flex:0 0 auto;background:var(--ink);
+    -webkit-mask:url(/assets/worca-mark-mask.png) center/contain no-repeat;-webkit-mask-mode:luminance;
+    mask:url(/assets/worca-mark-mask.png) center/contain no-repeat;mask-mode:luminance;}
+  .mbar-title{min-width:0;font-size:15px;font-weight:700;letter-spacing:-.01em;color:var(--ink);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .sidebar{position:fixed;top:0;bottom:0;left:0;z-index:42;width:min(298px,86vw);
+    box-shadow:var(--shadow-sheet);transform:translateX(-100%);visibility:hidden;
+    transition:transform .22s cubic-bezier(.65,.02,.28,1),visibility 0s linear .22s;}
+  body.nav-open .sidebar{transform:none;visibility:visible;
+    transition:transform .22s cubic-bezier(.65,.02,.28,1);}
+  .nav-scrim{display:block;position:fixed;inset:0;z-index:41;background:var(--scrim);}
+  .nav-scrim[hidden]{display:none;}
+  .side-close{display:flex;align-items:center;justify-content:center;flex:0 0 auto;
+    width:36px;height:36px;padding:0;border:0;border-radius:10px;background:transparent;color:var(--ink);cursor:pointer;}
+  .side-close svg{width:20px;height:20px;}
+  .side-close:hover{background:var(--field);}
+  .side-close:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+}
+
 /* ---------- Ask Worca (spec §10.3-§10.6; tokens only, no hex) ---------- */
 /* Fixed full-height dock over the content column; children restore pointer
    events. z-40 sits above sticky tab lists (5) and below .viewer-modal (50)
@@ -4451,9 +4470,9 @@ body.view-running .topnav{margin:12px 32px 0;flex:0 0 auto;}
   display:flex;flex-direction:column;align-items:center;justify-content:flex-end;
   padding:0 28px 26px;transition:left .2s cubic-bezier(.65,.02,.28,1);}
 body.rail-collapsed .ask-dock{left:76px;}
-/* Below the rail breakpoint the sidebar is display:none while .collapsed may
-   still be present — restate the higher-specificity selector or left:76px wins. */
-@media (max-width:1080px){
+/* On phones the sidebar is an off-canvas drawer (Responsive nav tiers) while
+   .collapsed may still be present — restate the higher-specificity selector or left:76px wins. */
+@media (max-width:760px){
   .ask-dock,body.rail-collapsed .ask-dock{left:0;}
 }
 
@@ -5697,9 +5716,6 @@ a.ask-card-task-title:hover{text-decoration-color:currentColor;}
 
 /* Sidebar item: a plain `.nav button`. It is an action, never the current view. */
 .nav button.nav-mode .lv-icon-slot{width:19px;height:19px;}
-/* Top-nav twin (<1080px, where the sidebar is hidden): icon + the mode's name. */
-.topnav button.topnav-mode{display:inline-flex;align-items:center;justify-content:center;gap:7px;}
-.topnav button.topnav-mode .lv-icon{width:16px;height:16px;}
 
 /* Level pill (banner, hidden-settings note). Colour is semantic to the level. */
 .lv-pill{display:inline-flex;align-items:center;padding:2px 10px;border-radius:999px;

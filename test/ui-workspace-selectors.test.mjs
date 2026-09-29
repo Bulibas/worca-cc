@@ -21,6 +21,7 @@ const IDS = [
   'wiz-close', 'wiz-title',
   'wiz-step-1',
   'wiz-scan-model', 'wiz-scan-effort', 'wiz-agent-model', 'wiz-agent-effort', 'ws-scan-models-card', 'wsScanModel', 'wsScanEffort', 'wsAgentModel', 'wsAgentEffort', 'wsScanModelsSave', 'wsScanModelsReset',
+  'mbar', 'mbar-menu', 'mbar-rollup', 'mbar-title', 'nav-scrim', 'side-close',
 ];
 
 test('every workspace #id the JS addresses exists in index.html', () => {

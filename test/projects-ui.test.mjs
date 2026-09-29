@@ -51,7 +51,7 @@ test('the add-project folder selector exists in markup and is wired', () => {
 });
 
 test('the Projects management view + modals exist in markup and are wired', () => {
-  // nav (both sidebar + topnav reference data-nav="projects")
+  // nav (the sidebar references data-nav="projects")
   assert.ok(html.includes('data-nav="projects"'), 'missing Projects nav link');
   assert.ok(html.includes('data-view="projects"'), 'missing Projects view section');
   assert.ok(html.includes('id="projects-list"'), 'missing #projects-list host');

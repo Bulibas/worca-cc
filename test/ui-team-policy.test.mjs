@@ -95,12 +95,11 @@ async function boot({ fetchHandler, scopes = SCOPES, policy = POLICY } = {}) {
   return { window, doc: window.document, fetchCalls, tick, settle, recv, go };
 }
 
-test('nav: Team policy sits in Manage after Workspaces, mirrored in the compact top-nav, and routes to its view', async () => {
+test('nav: Team policy sits in Manage after Workspaces and routes to its view', async () => {
   const { doc, go } = await boot();
   const side = [...doc.querySelectorAll('.nav button[data-nav]')].map((b) => b.dataset.nav);
   assert.equal(side[side.indexOf('workspaces') + 1], 'team-policy');
   assert.equal(doc.querySelector('.nav button[data-nav="team-policy"] span').textContent, 'Team policy');
-  assert.ok(doc.querySelector('.topnav button[data-nav="team-policy"]'));
   await go('team-policy');
   assert.equal(doc.querySelector('.view[data-view="team-policy"]').classList.contains('hidden'), false);
   assert.equal(doc.querySelector('.nav button[data-nav="team-policy"]').classList.contains('active'), true);
