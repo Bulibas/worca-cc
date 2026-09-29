@@ -1,19 +1,20 @@
 ---
 name: worca-changelog
-description: Build a "What's new in Worca" changelog page for @worca/app — a scroll-revealed, screenshot-led ship log in the established Worca design (hero ribbon, kicker/headline/chips per feature, live demo cards, receipts) — from the merged PRs since a reference version, then publish it as an Artifact. Triggers on "changelog", "what's new", "ship log", "release notes", "worca-changelog", or any request to write up what shipped since a version.
+description: Build a "What's new in Worca" changelog page for @worca/app — a scroll-revealed, screenshot-led ship log in the established Worca design (hero ribbon, kicker/headline/chips per feature, live demo cards, receipts) — from the merged PRs since a reference version, preview it as an Artifact, and record it for docs.worca.dev/changelog. Triggers on "changelog", "what's new", "ship log", "release notes", "worca-changelog", or any request to write up what shipped since a version.
 ---
 
 # Worca changelog entry
 
-A changelog entry is a **self-contained HTML page** in the ship-log design,
-built from the PRs merged since a reference version, and published as an
+A changelog entry is an **HTML page** in the ship-log design, built from the
+PRs merged since a reference version. It is served for good at
+`https://docs.worca.dev/changelog/<VERSION>/` and previewed first as a private
 Artifact. It is not a bullet list of commits: every section sells one
 user-facing capability with a headline, a screenshot, and a small live demo
 of the mechanism.
 
 The output is written into `docs/changelog/` **on the current branch, left
-uncommitted**. This skill never branches, commits, pushes, or opens a PR —
-see Step 7.
+uncommitted**. This skill never branches or opens a PR, and it commits,
+pushes and publishes only when the user says so at the end — see Step 7.
 
 The design, layout and writing rules live next to this file — read both
 before writing a line of copy or markup:
@@ -29,7 +30,7 @@ before writing a line of copy or markup:
 - `/worca-changelog` — offer the last stable release as the delta start
 - `/worca-changelog --from:1.1.1` — delta since that version (tag or bare version)
 - `/worca-changelog --from:1.1.1 --to:worca-app-v1.2.0-rc.3` — explicit end ref (default `HEAD`)
-- `/worca-changelog --no-publish` — build the file, skip the Artifact
+- `/worca-changelog --no-publish` — build the file, skip the Artifact preview
 
 ---
 
@@ -191,13 +192,25 @@ screenshot went in as PNG; go back to Step 4.
    horizontal scroll at 390 px wide; `prefers-reduced-motion` shows every
    demo in its final state. Fix in the `.src.html`, rebuild.
 
-The `.src.html` is the editable source and travels with the built file —
-the built one is what gets published, the source is what gets edited next
-time. Both are written into the working tree of the current branch (Step 7).
+7. After Step 6 has added the entry to `entries.json`, check that the docs
+   site builds with it:
+
+```bash
+node docs-site/build.mjs     # fails on a missing image, a page without an entry, or the reverse
+```
+
+The `.src.html` and `shots/<VERSION>/` are the entry: they are what gets
+committed, and what docs.worca.dev serves (`docs-site/build.mjs` gives the
+page a document shell and serves the screenshots as files). The built
+`worca-app-v<VERSION>.html`, with the screenshots embedded, exists only to
+publish the Artifact preview. It is git-ignored and never committed.
 
 ---
 
-## Step 6: Publish
+## Step 6: Publish the preview and record the entry
+
+The Artifact is a **private preview**, for reviewing the page before it goes
+out. The public, permanent address is the docs site (Step 7).
 
 Unless `--no-publish`:
 
@@ -208,22 +221,31 @@ Unless `--no-publish`:
    - title: `Worca — What's new in <VERSION>` (the `<title>` tag already says this)
    - favicon: `🚢` on first publish, omitted on redeploys
    - description: one sentence — the hero sub is usually right.
-3. Record it in the index, `docs/changelog/README.md` — one row per entry:
-   version, range, date, artifact URL. Create the file from the header in
-   `DESIGN.md` → *Index* if it does not exist.
+
+Always, with or without `--no-publish`, record the entry in
+`docs/changelog/entries.json`, newest first (see `DESIGN.md` → *Index*):
+
+```json
+{ "version": "1.7.0", "since": "1.6.0", "date": "2026-10-02", "artifact": "https://claude.ai/artifact/…" }
+```
+
+Leave `artifact` out when nothing was published. The docs site's release list
+reads its summary and headlines from the page itself, so nothing else goes
+into the record.
 
 Redeploys of the same version go to the same URL: edit the source, rebuild,
-publish the same path again. A new version is a new file and a new URL.
+publish the same path again. A new version is a new file, a new URL and a new
+record.
 
 ---
 
-## Step 7: Leave it on the current branch
+## Step 7: Leave it on the current branch, then ask
 
 The entry stays **in the working tree of the branch that is checked out**.
-Do not create a branch, a worktree, a commit, a push, or a PR for it — a
-changelog is release material, and the release engineer decides when and
-how it lands (folded into the release commit, its own PR, or not at all).
-One PR per changelog is exactly the churn this rule avoids.
+Do not create a branch, a worktree or a PR for it — a changelog is release
+material, and the release engineer decides when and how it lands. One PR per
+changelog is exactly the churn this rule avoids. It goes live on
+docs.worca.dev only once it is on `dev` **and** `docs-live` has moved.
 
 Show what is waiting, then stop:
 
@@ -238,9 +260,10 @@ Changelog entry ready
 
   Range:      worca-app-v1.1.1 → HEAD (1.2.0-rc.3)
   Sections:   6 features + receipts
-  Page:       docs/changelog/worca-app-v1.2.0-rc.3.html  (1.4 MB)
-  Artifact:   <url>   |   not published (--no-publish)
-  Files:      uncommitted on <branch> — 9 files under docs/changelog/
+  Page:       docs/changelog/worca-app-v1.2.0-rc.3.src.html  (+ 6 screenshots)
+  Preview:    <artifact url>   |   not published (--no-publish)
+  Docs:       https://docs.worca.dev/changelog/1.2.0-rc.3/  (live once published — see the question below)
+  Files:      uncommitted on <branch> — 8 files under docs/changelog/
 ```
 
 Then, always, print a **release announcement** in one fenced block the user
@@ -256,7 +279,7 @@ Changes:
 
 npm install -g @worca/app@<VERSION>
 
-<artifact url>
+https://docs.worca.dev/changelog/<VERSION>/
 ```
 ````
 
@@ -272,6 +295,23 @@ npm install -g @worca/app@<VERSION>
   command the reader types, such as `worca runs`, stays in backticks.
 - The install line pins the exact version, even for an RC:
   `npm install -g @worca/app@1.2.0-rc.3`.
-- With `--no-publish`, leave out the link line and say below the block that
-  the page is not published. When it is published, note below the block that
-  the Artifact is private until it is shared from the page's Share menu.
+- The link is the docs page, not the Artifact: the docs page is public and
+  permanent, while the Artifact is private until it is shared. Below the block,
+  say that the link works once the entry is published, and give the Artifact
+  URL as the preview to review before then.
+
+Last, ask with `AskUserQuestion` whether to commit and publish now:
+
+- **Commit and publish now (Recommended)** — commits the entry to `dev`,
+  pushes, and puts it on docs.worca.dev.
+- **Not yet** — leaves it uncommitted to review or change first.
+
+On *Commit and publish now*, read `.claude/skills/worca-release/SKILL.md` →
+*Changelog mode* and follow C1–C6 for this version. That is the same
+procedure `/worca-release --publish-changelog` runs, so there is one
+definition of it. The answer covers this one entry only.
+
+On *Not yet*, stop and say how to finish later, after any edits:
+`/worca-release --publish-changelog` (it takes the newest entry; add
+`--version:<VERSION>` to name it). Skip the question entirely when the
+current branch is not `dev`, and say the entry has to reach `dev` first.

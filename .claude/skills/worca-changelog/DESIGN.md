@@ -161,15 +161,18 @@ the script (`if (reduced) { … add the class …; return; }`).
 
 ## Index
 
-`docs/changelog/README.md` starts with this header and gains one row per
-entry, newest first:
+`docs/changelog/entries.json` holds one record per entry, newest first:
 
-```markdown
-# Changelog
-
-Each entry is a self-contained page in the ship-log design, built with
-`/worca-changelog` from the PRs merged since the previous release.
-
-| Version | Since | Date | Page | Artifact |
-| --- | --- | --- | --- | --- |
+```json
+[
+  { "version": "1.6.0", "since": "1.5.0", "date": "2026-09-27", "artifact": "https://claude.ai/artifact/…" }
+]
 ```
+
+`docs-site/build.mjs` builds the list at docs.worca.dev/changelog/ from it,
+taking each release's summary from the hero's `.sub` and its headlines from
+the `<h2>` of every `<section class="sec">` (the hero and the `polish`
+receipts are left out). So the hero sub must read on its own, and every
+feature section keeps the `class="sec"` + `id="sN"` shape of `template.html`.
+The build fails on a page without a record, a record without a page, or a
+missing image.
