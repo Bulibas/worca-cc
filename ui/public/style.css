@@ -1325,18 +1325,6 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .folder-list .folder-row .folder-item{flex:1 1 auto;min-width:0;}
 .folder-list .folder-pick{flex:0 0 auto;margin:0;}
 .folder-pick-count{margin-right:auto;align-self:center;}
-.topnav{display:none;}
-@media (max-width:1080px){
-  .topnav{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:20px;background:var(--panel);
-    border:1px solid var(--line);border-radius:var(--r-card);padding:5px;}
-  .topnav button{flex:1;text-align:center;padding:9px 12px;border:0;border-radius:10px;
-    background:transparent;color:var(--ink-2);font-family:inherit;font-weight:600;font-size:13px;
-    cursor:pointer;transition:.15s;}
-  .topnav button:hover{background:var(--field);color:var(--ink);}
-  .topnav button.active{background:var(--ink);color:var(--on-ink);}
-  .topnav button:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-  .topnav-sep{flex:0 0 1px;background:var(--line-2);margin:6px 2px;}
-}
 
 /* ---------- per-pipeline cost (per-node cost is the graph's .nrun .cost) ---------- */
 /* The `.run-meta .run-cost` pair that lived here went with `.run-meta` itself:
