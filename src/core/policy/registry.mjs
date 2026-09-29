@@ -70,7 +70,7 @@ export const FIELDS = Object.freeze([
   { key: 'night.minConfidence', group: 'night', label: 'Min confidence', help: '0-100', type: 'int', min: 0, max: 100, kinds: ['default'], night: true },
   { key: 'night.minMargin', group: 'night', label: 'Min margin', help: '0-100', type: 'int', min: 0, max: 100, kinds: ['default'], night: true },
   { key: 'night.criteria', group: 'night', label: 'Criteria weights', help: 'matchesMemory, reversible, smallestScope, codebaseConventions, cost (0-10); unset ones keep their default.', type: 'criteria', kinds: ['default'], night: true },
-  { key: 'night.neverDecide', group: 'night', label: 'Never decide', help: 'Question kinds that always wait for the developer: clarify, questions, form, gate, workflow, recovery.', type: 'string[]', kinds: ['default'], night: true },
+  { key: 'night.neverDecide', group: 'night', label: 'Never decide', help: 'Question kinds that always wait for the developer: clarify, questions, form, gate, workflow, recovery. Clarify and questions also cover the forms those steps ask with.', type: 'string[]', kinds: ['default'], night: true },
   { key: 'night.spendCapUsd', group: 'night', label: 'Night spend cap (USD)', help: 'Across all runs since night mode took over (the window start, or the first decision while you were away); null = no cap.', type: 'usd-or-null', min: 0.1, max: 10000, kinds: ['default'], night: true },
   { key: 'night.maxDecisions', group: 'night', label: 'Max decisions per run', help: '1-500', type: 'int', min: 1, max: 500, kinds: ['default'], night: true },
   { key: 'night.maxExtraCycles', group: 'night', label: 'Extra review cycles', help: 'Per loop, granted while critical issues remain.', type: 'int', min: 0, max: 10, kinds: ['default'], night: true },

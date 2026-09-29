@@ -757,7 +757,7 @@ export async function runClarifierExecution(ctx) {
           // prepareFormAsk minted from it, which may differ whenever a node id
           // carries a character outside [A-Za-z0-9_-] (ruling X1).
           id: `${CLARIFY_ASK_KIND}-${node.id}-${ordinal}`,
-          kind: 'form', nodeId: node.id, agent: meta.displayName || node.key,
+          kind: 'form', origin: 'clarify', nodeId: node.id, agent: meta.displayName || node.key,
           askId: gate.ask.askId, form: gate.ask.form, version: gate.ask.version, title: gate.ask.title,
           surface: gate.ask.surface,
           data: gate.ask.data, layout: gate.ask.layout, answerSchema: gate.ask.answerSchema,

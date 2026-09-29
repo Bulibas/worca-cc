@@ -117,7 +117,7 @@ export function renderNightForm(root, { level, values = {}, effective = {}, sour
   }
   root.append(cr);
 
-  const nd = field(doc, 'Never decide', 'These question kinds always wait for you.');
+  const nd = field(doc, 'Never decide', 'These question kinds always wait for you. Clarify and questions also cover the forms those steps ask with.');
   for (const k of NIGHT_KINDS) {
     const lab = el(doc, 'label', 'check-row');
     const cb = el(doc, 'input', 'night-never'); cb.type = 'checkbox'; cb.value = k;

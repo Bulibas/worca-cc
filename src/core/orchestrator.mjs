@@ -1886,6 +1886,7 @@ export class GraphOrchestrator extends RunHarness {
         const answered = await this._enqueueAsk(() => this._ask({
           id: `questions-${stepKey}-r${round}`,
           kind: 'form',
+          origin: 'questions',               // night mode: neverDecide 'questions' covers it
           agent: agentLabel,
           nodeId: ctx.nodeId,
           executionId: ctx.executionId,

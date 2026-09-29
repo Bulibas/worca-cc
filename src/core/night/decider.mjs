@@ -3,6 +3,7 @@
 import { decideQuestion, gateRule, workflowRule, recoveryRule } from './strategies.mjs';
 import { recoveryDelayMs } from '../recovery-backoff.mjs';
 import { RECOVERY_MAX_AUTO_ATTEMPTS } from '../failure-policy.mjs';
+import { nightNeverDecides } from './config.mjs';
 
 const agg = (decisions) => ({
   flagged: decisions.some((d) => d.flagged),
@@ -34,7 +35,7 @@ function memoAnalyze(analyze, questions) {
  */
 export async function decideAsk(q, env) {
   const { config } = env;
-  if (config.neverDecide.includes(q.kind)) return null;
+  if (nightNeverDecides(config, q)) return null;
   switch (q.kind) {
     case 'clarify': case 'questions': {
       const analyze = env.analyze ? memoAnalyze(env.analyze, q.questions || []) : undefined;

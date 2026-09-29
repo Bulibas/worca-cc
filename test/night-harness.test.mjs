@@ -410,3 +410,14 @@ test('a night-owned --yes run never hangs when its open kind joins neverDecide: 
   assert.deepEqual(await p, { answers: [{ id: 'a', choice: 'x' }] });
   assert.equal(orch.nightDecision('c22').strategy, 'auto');
 });
+
+test('neverDecide clarify leaves a clarifier FORM ask for the user', async () => {
+  await setNightMode({ enabled: true, graceMinutes: 1, neverDecide: ['clarify'] });
+  await setNightModeToggle('on');
+  const clock = fakeClock();
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h23', nightClock: clock });
+  orch._ask({ id: 'clarify-n-1', kind: 'form', origin: 'clarify', form: 'pick', version: 1, answerSchema: { type: 'object', properties: {} }, autoValues: {} }).catch(() => {});
+  await clock.tick(10 * 60_000);
+  assert.equal(orch.pendingQuestion?.id, 'clarify-n-1');
+  assert.equal(clock.pending(), 0, 'no decision armed');
+});

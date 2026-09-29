@@ -99,7 +99,7 @@ import { nightState, decideDelayMs, nightAnchorMs } from './night/activation.mjs
 import { decideAsk } from './night/decider.mjs';
 import { runNightAnalysis, readMemoryText } from './night/analysis.mjs';
 import { writeNightDecision, countNightDecisions, nightCounts, nightGateCycles, nightSpendSinceUsd } from './night/store.mjs';
-import { NIGHT_ACTOR, NIGHT_TOGGLES } from './night/config.mjs';
+import { NIGHT_ACTOR, NIGHT_TOGGLES, nightNeverDecides } from './night/config.mjs';
 import { nightModeToggle } from './settings.mjs';
 
 // worca-cc repo root; holds skills/. fileURLToPath, never URL.pathname: the
@@ -3531,7 +3531,7 @@ export class RunHarness extends EventEmitter {
    * @returns {Promise<any>} the answer payload
    */
   async _ask({ id, kind, questions, issues, recovery, agent, nodeId, wireId, executionId, deliveryNo, holdNo, workflow,
-    askId, form, version, title, surface, data, layout, answerSchema, fileRefs, files, autoValues, validate }) {
+    askId, form, version, title, surface, data, layout, answerSchema, fileRefs, files, autoValues, validate, origin }) {
     this._checkAbort();
     // No interactive prompt may OPEN on a pausing run. pause() rejects only the
     // prompt that is currently open; a queued ask (a parallel sibling's questions
@@ -3578,7 +3578,7 @@ export class RunHarness extends EventEmitter {
     try {
       // A night-eligible --yes run hands the ask to night mode: it is answered through the
       // same pendingQuestion + answer() path below (delay 0), so it is attributed and audited.
-      if (this.auto && !this._nightOwnsAuto(kind)) {
+      if (this.auto && !this._nightOwnsAuto({ kind, origin })) {
         if (kind === 'recovery') {
           // Auto mode handles recovery in _recover before ever calling _ask;
           // this is a defensive fallback so an auto run can never hang. Giving up
@@ -3608,7 +3608,7 @@ export class RunHarness extends EventEmitter {
         this.pendingQuestion = { id, kind, resolve: resolveP, reject: rejectP, validate: typeof validate === 'function' ? validate : null };
         // A throw inside a Promise executor REJECTS the ask (and fails the node): night mode
         // must never break a question the user could still answer.
-        const nq = { id, kind, questions, issues, recovery, wireId, executionId, deliveryNo, holdNo, workflow, form, version, answerSchema, autoValues, nodeId, agent };
+        const nq = { id, kind, questions, issues, recovery, wireId, executionId, deliveryNo, holdNo, workflow, form, version, answerSchema, autoValues, nodeId, agent, origin };
         try {
           this._nightArm(nq);
         } catch (err) { this._nightFailed(nq, `night mode could not arm ${kind} ${id}: ${err?.message || err}`); }
@@ -3641,11 +3641,11 @@ export class RunHarness extends EventEmitter {
   // answer(id, payload, NIGHT_ACTOR), so validation, answeredBy and every audit/persist
   // path run unchanged. The user can still answer first; _ask's finally disarms the timer.
 
-  /** A --yes run hands a kind to night mode when the run is night-eligible and the kind is decidable. */
-  _nightOwnsAuto(kind) {
+  /** A --yes run hands an ask to night mode when the run is night-eligible and the ask is decidable. */
+  _nightOwnsAuto(q) {
     try {
       const { config } = effectiveNightConfig(this.projectDir);
-      return this._nightStateNow(config).eligible && !config.neverDecide.includes(kind);
+      return this._nightStateNow(config).eligible && !nightNeverDecides(config, q);
     } catch { return false; }            // never let night mode break today's --yes behaviour
   }
 
@@ -3669,7 +3669,7 @@ export class RunHarness extends EventEmitter {
     q = this._night.q;
     if (!q || this.pendingQuestion?.id !== q.id) return;
     const { config } = effectiveNightConfig(this.projectDir);
-    if (config.neverDecide.includes(q.kind)) {
+    if (nightNeverDecides(config, q)) {
       // The kind joined neverDecide after a --yes run handed the ask to night mode: nobody else
       // will answer, so give today's --yes answer rather than hang.
       if (this.auto) this._nightAutoFallback(q, `${q.kind} is on the never-decide list`);
@@ -3766,7 +3766,7 @@ export class RunHarness extends EventEmitter {
     // The user may have switched night mode off while we thought (a slow analysis, a backoff):
     // re-resolve the switches and drop the decision unless night mode may still decide.
     const { config: nowConfig } = effectiveNightConfig(this.projectDir);
-    if (nowConfig.neverDecide.includes(q.kind) || !this._nightDue(nowConfig)) {
+    if (nightNeverDecides(nowConfig, q) || !this._nightDue(nowConfig)) {
       this._log('night', 'info', `night mode was switched off while deciding ${q.kind} ${q.id}; it waits for the user`);
       return 'rearm';
     }

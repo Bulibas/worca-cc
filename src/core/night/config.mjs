@@ -19,6 +19,12 @@ export const NIGHT_DEFAULTS = Object.freeze({
   allowCostCapOverride: false,
 });
 export const NIGHT_FIELDS = Object.freeze(Object.keys(NIGHT_DEFAULTS));
+
+/** Must night mode leave this ask to the user? A form the clarifier or an agent asked with
+ *  (`origin` 'clarify' | 'questions') follows that kind's entry as well as 'form'. */
+export function nightNeverDecides(config, { kind, origin } = {}) {
+  return config.neverDecide.includes(kind) || (kind === 'form' && origin != null && config.neverDecide.includes(origin));
+}
 /** Fields a project may NOT set: the spend cap is measured across all runs. */
 const USER_TEAM_ONLY = new Set(['spendCapUsd']);
 /** Fields where an explicit null is a meaningful "off". */

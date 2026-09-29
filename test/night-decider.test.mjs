@@ -70,3 +70,10 @@ test('the recovery retry budget is per node execution (the failed attempt), not 
 test('neverDecide kinds return null (wait for the user)', async () => {
   assert.equal(await decideAsk({ kind: 'gate', id: 'g', issues: [] }, { config: { ...cfg, neverDecide: ['gate'] } }), null);
 });
+
+test('neverDecide clarify/questions also covers a form the clarifier or an agent asked with', async () => {
+  const f = (origin) => ({ kind: 'form', origin, id: 'f', form: 'pick', version: 1, answerSchema: { type: 'object', properties: {} }, autoValues: {} });
+  assert.equal(await decideAsk(f('clarify'), { config: { ...cfg, neverDecide: ['clarify'] } }), null);
+  assert.equal(await decideAsk(f('questions'), { config: { ...cfg, neverDecide: ['questions'] } }), null);
+  assert.notEqual(await decideAsk(f('questions'), { config: { ...cfg, neverDecide: ['clarify'] } }), null, 'only the matching origin');
+});
