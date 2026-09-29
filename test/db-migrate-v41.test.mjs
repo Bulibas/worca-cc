@@ -21,14 +21,14 @@ import * as presentationModule from '../src/core/graph/presentation-workflow.mjs
 const rowFor = (db, id) => db.prepare('SELECT * FROM workflows WHERE id = ?').get(id);
 const freshMigrated = () => { const db = new DatabaseSync(':memory:'); migrate(db); return db; };
 
-test('a fresh DB carries wf_presentation as a v2 presentation graph with 11 nodes', () => {
+test('a fresh DB carries wf_presentation as a v2 presentation graph with 14 nodes', () => {
   const db = freshMigrated();
   const row = rowFor(db, 'wf_presentation');
   assert.ok(row, 'seeded');
   assert.equal(row.version, 2);
   assert.equal(row.domain, 'presentation');
   const graph = JSON.parse(row.graph);
-  assert.equal(graph.nodes.length, 11);
+  assert.equal(graph.nodes.length, 14);
   assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
   db.close();
 });

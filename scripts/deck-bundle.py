@@ -447,8 +447,37 @@ def slide_count(api):
         return None
 
 
+def wants_standalone(api):
+    """The single-file HTML is a default deliverable: only an explicit opt-out skips it.
+
+    Reads the Clarify answers the same way scripts/deck-pdf.py does — a form's flat
+    `values` map, or the clarifier's question records — and treats anything
+    unreadable as "yes", so a missing or malformed answers file never costs the
+    user their deliverable."""
+    try:
+        import json
+        # deck-outputs.json in the pipeline dir — by path, not by wire (see presentation-workflow.mjs w37).
+        with open(os.path.join(api.ctx.pipelineDir, 'deck-outputs.json'), encoding='utf-8') as fh:
+            answers = json.load(fh)
+        if not isinstance(answers, dict):
+            return True
+        values = answers.get('values')
+        if isinstance(values, dict):
+            d = str(values.get('deliverables', '')).lower()
+        else:
+            d = ''
+            for q in answers.get('questions') or []:
+                if isinstance(q, dict) and q.get('id') == 'deliverables' and isinstance(q.get('answer'), str):
+                    d = q['answer'].lower()
+        return not d or 'standalone' in d
+    except Exception:
+        return True
+
+
 def main(api):
     pdir = api.ctx.pipelineDir
+    if not wants_standalone(api):
+        return report(api, [], None, 0, None, skipped='the single-file HTML was not requested')
     deck_dir = os.path.join(pdir, 'deck')
     source = os.path.join(deck_dir, 'deck.html')
     out_path = os.path.join(deck_dir, 'deck.standalone.html')
@@ -533,10 +562,11 @@ def main(api):
     return report(api, issues, out_path, size, slides)
 
 
-def report(api, issues, out_path, size, slides=None):
+def report(api, issues, out_path, size, slides=None, skipped=None):
     blocking = [i for i in issues if i['severity'] in ('critical', 'major')]
     count = '' if slides is None else ', %d slide(s)' % slides
-    summary = ('deck/deck.standalone.html — %d bytes%s, self-contained.' % (size, count)) if not blocking \
+    summary = ('skipped: %s.' % skipped) if skipped else \
+        ('deck/deck.standalone.html — %d bytes%s, self-contained.' % (size, count)) if not blocking \
         else ('deck/deck.standalone.html%s — %d issue(s) block the deliverable.' % (count, len(blocking)))
     lines = ['# Deck bundle', '', summary, '']
     for i in issues:

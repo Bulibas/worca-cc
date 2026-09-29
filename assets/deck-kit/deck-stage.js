@@ -660,8 +660,29 @@
     }
   `;
 
+  // Extra document-level CSS contributed by extensions, keyed by id so a
+  // re-registration replaces rather than duplicates. See addDocumentStyle.
+  const documentSheets = new Map();
+  const liveStages = new Set();
+
   class DeckStage extends HTMLElement {
     static get observedAttributes() { return ['width', 'height', 'noscale', 'no-rail']; }
+
+    /** Extension seam: contribute CSS to the document-level sheet the stage
+     *  already injects for @page. Use it for rules that must exist in the light
+     *  DOM AND must not depend on the deck author remembering to paste them —
+     *  print/PDF fixups, kit-wide animation vocabularies, read-alone layers.
+     *
+     *  `css` is a string, or a function (stage) => string evaluated on every
+     *  sync (so it can follow the design size). Idempotent per `id`; pass
+     *  `null` to remove. Safe to call before or after the stage is connected:
+     *  every live stage re-syncs immediately. An extension is an ordinary
+     *  <script src> loaded after deck-stage.js — the standalone builder inlines
+     *  it like any other deck script. */
+    static addDocumentStyle(id, css) {
+      if (css == null) documentSheets.delete(id); else documentSheets.set(id, css);
+      liveStages.forEach((st) => st._syncDocumentSheet());
+    }
 
     constructor() {
       super();
@@ -704,6 +725,7 @@
       if (/[?&]_snthumb=/.test(location.search)) this.setAttribute('no-rail', '');
       this._render();
       this._loadNotes();
+      liveStages.add(this);
       this._syncDocumentSheet();
       window.addEventListener('keydown', this._onKey);
       window.addEventListener('resize', this._onResize);
@@ -907,6 +929,7 @@
     }
 
     disconnectedCallback() {
+      liveStages.delete(this);
       window.removeEventListener('keydown', this._onKey);
       window.removeEventListener('resize', this._onResize);
       window.removeEventListener('mousemove', this._onMouseMove);
@@ -1139,9 +1162,9 @@
     /** @page must live in the document stylesheet — it's a no-op inside
      *  shadow DOM. Inject/update a single <head> style tag so the print
      *  sheet matches the design size and Save-as-PDF yields one slide per
-     *  page with no margins. Also carries the caption band and the slide
-     *  animation vocabulary, for the same reason: both are light-DOM rules
-     *  that a shadow-DOM sheet can never reach. */
+     *  page with no margins. Also appends every sheet registered through
+     *  DeckStage.addDocumentStyle(), for the same reason: they are light-DOM
+     *  rules that a shadow-DOM sheet can never reach. */
     _syncDocumentSheet() {
       const id = 'deck-stage-print-page';
       let tag = document.getElementById(id);
@@ -1150,74 +1173,14 @@
         tag.id = id;
         document.head.appendChild(tag);
       }
-      tag.textContent =
+      let css =
         '@page { size: ' + this.designWidth + 'px ' + this.designHeight + 'px; margin: 0; } ' +
         '@media print { html, body { margin: 0 !important; padding: 0 !important; background: none !important; overflow: visible !important; height: auto !important; } ' +
-        '* { -webkit-print-color-adjust: exact; print-color-adjust: exact; } } ' +
-        // The read-alone layer of a `Mode: both` deck. A projected slide has a
-        // 30-word budget; a document has to be complete. A caption band carries
-        // the completeness: hidden on screen, printed with the slide. Injected
-        // here for the same reason @page is — left to the deck's own <style> it
-        // gets forgotten, and the failure is silent and total in both
-        // directions (captions on the projector, or no captions in the PDF).
-        '[data-deck-caption] { display: none; } ' +
-        '@media print { [data-deck-caption] { display: block; } } ' +
-        // ── Slide animation, kit-owned ────────────────────────────────────────
-        // Declared here, not in the deck's own <style>, for the caption band's
-        // reason and one worse: a missed animation-fill-mode, or a still frame
-        // taken mid-flight, yields BLANK SLIDES AT THE RIGHT PAGE COUNT — and the
-        // page-count assertion is the only one the contract defines for the PDF,
-        // so the failure passes every gate. The two final-state blocks at the
-        // bottom make that unreachable rather than merely unlikely.
-        '@keyframes deck-rise { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: none; } } ' +
-        '@keyframes deck-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } } ' +
-        '@keyframes deck-wipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0); } } ' +
-        '@keyframes deck-pop { from { opacity: 0; transform: scale(.92); } to { opacity: 1; transform: none; } } ' +
-        '@keyframes deck-count { from { opacity: 0; } to { opacity: 1; } } ' +
-        '[data-deck-anim] { animation-duration: .55s; animation-timing-function: cubic-bezier(.2,.8,.2,1); animation-fill-mode: both; } ' +
-        // SCOPED TO THE ACTIVE SLIDE, and that scope is what makes the motion
-        // real. A non-active slide is `visibility:hidden; opacity:0` — still
-        // RENDERED, so its animations run. Unscoped, every rise/wipe/pop on
-        // slides 2..N played out ~550ms after load while invisible and, with
-        // `animation-fill-mode: both`, sat frozen on its final frame by the time
-        // the presenter arrived: the whole vocabulary was dead on every slide but
-        // the one shown at load, and completely dead on a read-alone deck (no
-        // [data-step] anywhere). _applyIndex moves [data-deck-active] on every
-        // navigation, which adds animation-name to the arriving slide and drops
-        // it from the leaving one — so the motion re-triggers, forwards and back.
-        // Both halves of each pair: the tag can sit on the SECTION itself, which
-        // a descendant combinator alone would never match.
-        '[data-deck-active][data-deck-anim="rise"], [data-deck-active] [data-deck-anim="rise"] { animation-name: deck-rise; } ' +
-        '[data-deck-active][data-deck-anim="draw"], [data-deck-active] [data-deck-anim="draw"] { animation-name: deck-draw; } ' +
-        '[data-deck-active][data-deck-anim="wipe"], [data-deck-active] [data-deck-anim="wipe"] { animation-name: deck-wipe; } ' +
-        '[data-deck-active][data-deck-anim="pop"], [data-deck-active] [data-deck-anim="pop"] { animation-name: deck-pop; } ' +
-        '[data-deck-active][data-deck-anim="count"], [data-deck-active] [data-deck-anim="count"] { animation-name: deck-count; } ' +
-        // A tagged element that is ALSO a [data-step] waits for its reveal instead
-        // of animating at mount: deck-enhance.js toggles .step-visible, and the
-        // deck's own stylesheet owns whether an unrevealed step is hidden at all.
-        '[data-step]:not(.step-visible)[data-deck-anim] { animation-play-state: paused; } ' +
-        '@media (prefers-reduced-motion: reduce) { [data-deck-anim] { animation: none !important; } } ' +
-        // FINAL STATE, unconditionally, in the two places a still frame is taken.
-        // proof.html carries `noscale` and is what the audit measures and shoots.
-        //
-        // [data-step] IS PART OF THE FINAL STATE. Covering only [data-deck-anim]
-        // left the reveals out: deck-enhance's initSlide() -> applyStep(slide, 0)
-        // strips .step-visible from every step on every slide, and CONTRACT hands
-        // the hiding of an unrevealed step to the deck's own stylesheet
-        // (`deck-stage [data-step]{opacity:0}`), which nothing here overrode. A
-        // deck with reveals printed one page per slide carrying step-0 content
-        // only — BLANK SLIDES AT THE RIGHT PAGE COUNT, the exact failure the
-        // comment above says these two blocks make unreachable, and the page-count
-        // assertion is the only PDF gate so it passed. It was internally
-        // inconsistent too: a [data-step][data-deck-anim] element was rescued by
-        // the opacity rule while its plain [data-step] sibling beside it was not,
-        // so the PDF showed an arbitrary subset of each build.
-        //
-        // visibility, not just opacity: a deck is equally free to hide an
-        // unrevealed step with `visibility:hidden`, and a still frame must not
-        // depend on which of the two the builder reached for.
-        'deck-stage[noscale] [data-deck-anim], deck-stage[noscale] [data-step] { animation: none !important; animation-play-state: running !important; opacity: 1 !important; visibility: visible !important; transform: none !important; clip-path: none !important; stroke-dashoffset: 0 !important; } ' +
-        '@media print { [data-deck-anim], [data-step] { animation: none !important; opacity: 1 !important; visibility: visible !important; transform: none !important; clip-path: none !important; stroke-dashoffset: 0 !important; } }';
+        '* { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }';
+      for (const extra of documentSheets.values()) {
+        try { css += ' ' + (typeof extra === 'function' ? extra(this) : extra); } catch (e) { /* one bad sheet must not take the base sheet down */ }
+      }
+      tag.textContent = css;
     }
 
     _onSlotChange() {

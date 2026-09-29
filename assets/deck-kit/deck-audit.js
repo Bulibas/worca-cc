@@ -625,10 +625,19 @@
     const stageError = !stage
       ? 'no <deck-stage> element on the page — nothing was measured'
       : (sections.length === 0 ? '<deck-stage> holds no <section> slides — nothing was measured' : null);
+    // The pipeline extension is OPTIONAL to OpenDeck and required here: without
+    // deck-pipeline.js the caption band is unstyled (visible on the projector) and
+    // every data-deck-anim rule is missing — silent, and the page count still
+    // passes. It announces itself on `window.__DECK_PIPELINE`; a stage that
+    // measured fine but had no extension loaded is a blocking finding, not a clean.
+    const pluginError = (!stageError && !(win && win.__DECK_PIPELINE))
+      ? 'deck-pipeline.js is not loaded — add <script src="deck-pipeline.js"> right after deck-stage.js (the caption band and slide motion live there)'
+      : null;
     return {
       schema: 1, canvas: SLIDE, slideCount: sections.length, slides,
       ...(canvasMismatch ? { canvasMismatch } : {}),
       ...(stageError ? { stageError } : {}),
+      ...(pluginError ? { pluginError } : {}),
     };
   }
 

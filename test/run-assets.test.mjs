@@ -71,7 +71,9 @@ test('stageAssets throws rather than staging a partial set', async () => {
 
 test('the shipped deck agents declare the kit, so a run can never depend on finding it', async () => {
   const reg = JSON.parse(await readFile(new URL('../agents/deckBuilder.meta.json', import.meta.url), 'utf8'));
-  assert.deepEqual(reg.requiresAssets, ['deck-kit']);
+  // deck-narration is staged (never copied into a deck) so the optional deckAudio card finds the
+  // Audio Studio engine; only a run that asks for audio ever uses it.
+  assert.deepEqual(reg.requiresAssets, ['deck-kit', 'deck-narration']);
   for (const key of ['deckAudit', 'deckExport']) {
     const m = JSON.parse(await readFile(new URL(`../agents/${key}.meta.json`, import.meta.url), 'utf8'));
     assert.deepEqual(m.requiresAssets, ['deck-kit'], `${key} must declare the kit`);

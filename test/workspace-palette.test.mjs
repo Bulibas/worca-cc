@@ -45,7 +45,7 @@ test('GET /api/agents excludes scope:"workspace-only" agents from the palette', 
     'deckClarify', 'deckNarrative', 'deckSystem', 'deckBuilder', 'deckAudit', 'deckReviewer', 'deckExport']) {
     assert.ok(keys.includes(k), `palette must still offer ${k}`);
   }
-  assert.equal(agents.length, 17, 'exactly the 17 project agents are composable');
+  assert.equal(agents.length, 18, 'exactly the 18 project agents are composable');
 });
 
 test('GET /api/agents returns palette order (ascending .order)', async () => {

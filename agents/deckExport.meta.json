@@ -53,7 +53,7 @@
   ],
   "domain": "presentation",
   "displayName": "Deck Export",
-  "description": "Turns the finished deck into the single files a human opens \u2014 a PDF and a self-contained HTML \u2014 and is the only step that checks the run against what the task actually asked for.",
+  "description": "Turns the finished deck into the single files a human opens — a PDF and a self-contained HTML — and is the only step that checks the run against what the task actually asked for.",
   "color": "green",
   "icon": "<path d=\"M12 3v10\" stroke-linecap=\"round\"/><path d=\"M8 9.5l4 4 4-4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M4 16v3.5h16V16\" stroke-linecap=\"round\" fill=\"none\"/>",
   "agentFile": "worca-cc-deck-export.md",

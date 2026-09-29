@@ -20,10 +20,16 @@ export const GRAPH_PRESENTATION_WORKFLOW = deepFreeze({
     { id: 'n_build', kind: 'agent', key: 'deckBuilder', x: 1160, y: 200, config: { awaitAll: true } },
     { id: 'n_audit', kind: 'agent', key: 'deckAudit', x: 1440, y: 200, config: {} },
     { id: 'n_review', kind: 'agent', key: 'deckReviewer', x: 1720, y: 200, config: {} },
-    { id: 'n_bundle', kind: 'script', key: 'deckBundle', x: 2000, y: 200, config: {} },
-    { id: 'n_export', kind: 'agent', key: 'deckExport', x: 2280, y: 200, config: {} },
-    { id: 'n_or', kind: 'or', x: 1580, y: 430, config: { arity: 4 } },
-    { id: 'n_end', kind: 'end', x: 2560, y: 200, config: {} },
+    // The OPTIONAL outputs. Each card reads the deckOutputs answers and skips itself (a clean
+    // "skipped" report) when its deliverable was not selected, so the graph never branches: the
+    // defaults reproduce the standard pipeline (PDF + standalone HTML, no audio).
+    { id: 'n_outputs', kind: 'agent', key: 'deckOutputs', x: 320, y: 430, config: { askQuestions: true } },
+    { id: 'n_pdf', kind: 'script', key: 'deckPdf', x: 2000, y: 200, config: {} },
+    { id: 'n_audio', kind: 'script', key: 'deckAudio', x: 2280, y: 200, config: {} },
+    { id: 'n_bundle', kind: 'script', key: 'deckBundle', x: 2560, y: 200, config: {} },
+    { id: 'n_export', kind: 'agent', key: 'deckExport', x: 2840, y: 200, config: {} },
+    { id: 'n_or', kind: 'or', x: 1580, y: 430, config: { arity: 6 } },
+    { id: 'n_end', kind: 'end', x: 3120, y: 200, config: {} },
   ],
   wires: [
     { id: 'w1', from: { node: 'n_task', port: 'task' }, to: { node: 'n_clarify', port: 'task' } },
@@ -51,10 +57,26 @@ export const GRAPH_PRESENTATION_WORKFLOW = deepFreeze({
     // never reaches the deliverable check. It also takes `built` straight from the
     // builder: gated on `await`, so a fresh payload from inside the fix loop cannot
     // re-fire it (test/graph-scheduler.test.mjs pins exactly this shape).
-    { id: 'w22', from: { node: 'n_review', port: 'pass' }, to: { node: 'n_bundle', port: 'await' } },
+    // review -> pdf -> audio -> bundle -> export. The PDF is printed from the deck BEFORE the audio
+    // step wires the narration scripts into it, so the narration UI can never appear in the print.
+    { id: 'w22', from: { node: 'n_audio', port: 'pass' }, to: { node: 'n_bundle', port: 'await' } },
     { id: 'w23', from: { node: 'n_build', port: 'built' }, to: { node: 'n_bundle', port: 'built' } },
     { id: 'w24', from: { node: 'n_bundle', port: 'pass' }, to: { node: 'n_export', port: 'await' } },
     { id: 'w25', from: { node: 'n_bundle', port: 'findings' }, to: { node: 'n_or', port: 'in4' }, config: { maxCycles: 2 } },
+    { id: 'w26', from: { node: 'n_task', port: 'task' }, to: { node: 'n_outputs', port: 'task' } },
+    { id: 'w27', from: { node: 'n_review', port: 'pass' }, to: { node: 'n_pdf', port: 'await' } },
+    { id: 'w28', from: { node: 'n_build', port: 'built' }, to: { node: 'n_pdf', port: 'built' } },
+    { id: 'w30', from: { node: 'n_pdf', port: 'pass' }, to: { node: 'n_audio', port: 'await' } },
+    { id: 'w31', from: { node: 'n_build', port: 'built' }, to: { node: 'n_audio', port: 'built' } },
+    // The deliverables/audio answers reach the optional cards THROUGH THE FILE (deck-outputs.json in
+    // the pipeline dir), not through wires: a payload wire into a card that already takes `built`
+    // is a V18 double-fire hazard, and the card is gated on `await` anyway. This wire is the
+    // BARRIER — the builder cannot start until the user has answered, so by the time any card
+    // runs the file is final. (n_build.awaitAll: its first run waits for spine, system AND this;
+    // a fix cycle re-fires on the fixes loop token alone.)
+    { id: 'w37', from: { node: 'n_outputs', port: 'answers' }, to: { node: 'n_build', port: 'answers' } },
+    { id: 'w35', from: { node: 'n_pdf', port: 'findings' }, to: { node: 'n_or', port: 'in5' }, config: { maxCycles: 2 } },
+    { id: 'w36', from: { node: 'n_audio', port: 'findings' }, to: { node: 'n_or', port: 'in6' }, config: { maxCycles: 2 } },
   ],
 });
 
@@ -117,4 +139,7 @@ export const PRESENTATION_SHIPPED_FINGERPRINTS = Object.freeze([
   // and the or card had arity 3.
   'n_audit,n_build,n_clarify,n_end,n_export,n_narr,n_or,n_review,n_system,n_task'
     + '|w1,w12,w14,w15,w16,w17,w18,w19,w2,w20,w21,w3,w4,w5,w6,w7,w8,w9',
+  // v3 — before the optional outputs (deckOutputs form, deckPdf, deckAudio). The bundle
+  // gated on n_review.pass directly and had no `answers` input.
+  'n_audit,n_build,n_bundle,n_clarify,n_end,n_export,n_narr,n_or,n_review,n_system,n_task|w1,w12,w14,w15,w17,w18,w19,w2,w20,w21,w22,w23,w24,w25,w3,w4,w5,w6,w7,w8,w9',
 ]);

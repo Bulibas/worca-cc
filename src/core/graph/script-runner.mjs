@@ -524,7 +524,10 @@ export async function runScriptExecution(ctx) {
   await writeFile(envelopePath, JSON.stringify(envelope, null, 2) + '\n', 'utf8');
   for (const p of Object.values(outputs)) if (p?.path) await mkdir(dirname(p.path), { recursive: true });
   if (verdict?.path) await mkdir(dirname(verdict.path), { recursive: true });
-  const env = { ...envForShell(envelope, scriptBaseEnv(ctx.claudeOpts, platform)), WORCA_ENVELOPE: envelopePath };
+  // `runCtx.secretEnv` is the in-memory home of a typed `secret` form field (see the clarifier
+  // executor): merged into the CHILD's environment only. It is deliberately absent from the
+  // envelope, its audit copy on disk, `params` and every log line.
+  const env = { ...envForShell(envelope, scriptBaseEnv(ctx.claudeOpts, platform)), ...(ctx.runCtx?.secretEnv || {}), WORCA_ENVELOPE: envelopePath };
   // Clamped as well as validated (v4 T3): the bench and the CLI build a ctx without going through V22, and a delay
   // past 2^31-1 ms makes the timer fire after one millisecond.
   const timeoutMs = Number.isInteger(script.timeoutMs) && script.timeoutMs >= MIN_TIMEOUT_MS ? Math.min(script.timeoutMs, MAX_TIMEOUT_MS) : DEFAULT_TIMEOUT_MS;

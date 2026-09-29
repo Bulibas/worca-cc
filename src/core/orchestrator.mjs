@@ -53,7 +53,7 @@ import {
   indexedNamesUnder, forgetOtherKinds,
 } from './artifacts.mjs';
 import { readAskFile } from './protocol.mjs';
-import { prepareFormAsk, formAnswerValidator, downgradeQuestion } from './ask-forms.mjs';
+import { prepareFormAsk, formAnswerValidator, downgradeQuestion, redactSecrets } from './ask-forms.mjs';
 import { classifyError } from './recoverable-error.mjs';
 import { withRecoveryRetry, RETRYABLE_CLASSES, HELPER_RETRY_ATTEMPTS } from './recovery-backoff.mjs';
 import { resolveFailure, markTerminal, isTerminal } from './failure-policy.mjs';
@@ -92,6 +92,7 @@ export class GraphOrchestrator extends RunHarness {
     this._resumeSessions = null; // Map executionId -> sessionId (one-shot)
     this._graphError = null;     // first genuine execution error (identity preserved)
     this._planVersion = 0;       // {vsuffix} ticks, carried across a resume
+    this._secretEnv = {};        // typed `secret` form fields, MEMORY ONLY: never persisted, so a resume after a restart falls back to the environment
     this._humanCursor = null;          // cumulative worktree numstat at the last agent/script terminal (money-saved §3.1)
     this._humanCursorReady = false;    // baseline measured at the first agent/script start, or restored from the resume point
     this._humanRun = serialQueue();    // measure-then-credit is atomic per execution: slices that end together split, never double
@@ -1212,6 +1213,9 @@ export class GraphOrchestrator extends RunHarness {
       // reads runCtx.slice as a STRING).
       slice: slice ? slice.id : undefined,
       planVersion: () => (this._planVersion += 1),
+      // ONE object for the whole run, shared by every execution's runCtx: where the clarifier
+      // parks a typed `secret` form field (memory only) and the script runner reads it back.
+      secretEnv: this._secretEnv,
     };
     const outputs = allocateOutputs({ node, ports, executionId, ordinal, runCtx });
     const verdict = allocateVerdict({ node, ports, ordinal, runCtx });
@@ -1781,7 +1785,7 @@ export class GraphOrchestrator extends RunHarness {
         pipelineDir: this.pipeline.dir,
         askId: `questions-${ctx.executionId}-r${round}`,
       });
-      if (prepared.ok) return { ask: prepared.ask, autoValues: prepared.autoValues, questions: [], result };
+      if (prepared.ok) return { ask: prepared.ask, autoValues: prepared.autoValues, secrets: prepared.secrets || {}, questions: [], result };
 
       const why = prepared.errors.map((e) => `${e.path ? `${e.path}: ` : ''}${e.message}`).join('; ');
       this._log(agentLabel, 'warn', `form "${payload.form}" was refused: ${why}`, attr);
@@ -1850,6 +1854,7 @@ export class GraphOrchestrator extends RunHarness {
       let questions = read.kind === 'questions' ? read.questions : [];
       let formAsk = null;
       let autoValues = null;
+      let formSecrets = {};
       if (read.kind === 'form') {
         // Gate 2 (spec §5). It may spawn ONE repair round of its own, whose
         // result becomes this round's result; it never consumes a round.
@@ -1857,6 +1862,7 @@ export class GraphOrchestrator extends RunHarness {
         if (gate.result !== undefined) result = gate.result;
         formAsk = gate.ask;
         autoValues = gate.autoValues;
+        formSecrets = gate.secrets || {};
         questions = gate.questions;
       }
       if (!formAsk && !questions.length) break;
@@ -1889,7 +1895,10 @@ export class GraphOrchestrator extends RunHarness {
           validate: formAnswerValidator(formAsk),  // gate 3
         }));
         this._checkAbort();
-        const values = (answered && typeof answered === 'object' && answered.values) || {};
+        // A producer's resumed prompt carries `values` (ctx.formAnswers below), so a `secret` field must
+        // be swapped for its marker BEFORE anything reads them; the real value is held in memory only.
+        const { values, held } = redactSecrets((answered && typeof answered === 'object' && answered.values) || {}, formSecrets);
+        Object.assign(this._secretEnv, held);
         const formBy = this.answeredBy(`questions-${stepKey}-r${round}`);
         await writeStepQuestions(this.pipeline.id, stepKey, round, {
           agentKey: nc.key, nodeId: ctx.nodeId,

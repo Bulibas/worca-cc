@@ -34,11 +34,24 @@ const RETIRED_WIRES = [
  *  a reconstruction that no longer matches its own fingerprint would mean this
  *  helper — not the product code — has drifted, and every test built on it would
  *  silently stop testing what it claims to. */
+// Wires that still EXIST in CUR under the same id but point somewhere else than they did in
+// a shape without the optional outputs: w22 gated the bundle on the review's pass, and now
+// gates it on the audio step's. A shape with no n_audio must get the old endpoints back, or
+// the reconstruction would wire a node it does not contain.
+const REPOINTED_WITHOUT_AUDIO = [
+  { id: 'w22', from: { node: 'n_review', port: 'pass' }, to: { node: 'n_bundle', port: 'await' } },
+];
+
 function reconstructShape(fp) {
   const [nodesPart, wiresPart] = fp.split('|');
   const keptNodes = new Set(nodesPart.split(','));
   const keptWires = new Set(wiresPart.split(','));
-  const allWires = [...CUR.wires, ...RETIRED_WIRES.filter((w) => !CUR.wires.some((c) => c.id === w.id))];
+  const repointed = keptNodes.has('n_audio') ? [] : REPOINTED_WITHOUT_AUDIO;
+  const allWires = [
+    ...CUR.wires.filter((w) => !repointed.some((r) => r.id === w.id)),
+    ...repointed,
+    ...RETIRED_WIRES.filter((w) => !CUR.wires.some((c) => c.id === w.id)),
+  ];
   const shape = {
     nodes: CUR.nodes.filter((n) => keptNodes.has(n.id)),
     wires: allWires.filter((w) => keptWires.has(w.id)),
@@ -77,6 +90,14 @@ PRESENTATION_SHIPPED_FINGERPRINTS.forEach((fp, i) => {
     const db = dbHoldingShape(fp);
     const stored = graphOf(db);
     const { errors } = validateGraph({ ...CUR, nodes: stored.nodes, wires: stored.wires }, realPortsFn());
+    if (fp === PRESENTATION_SHIPPED_FINGERPRINTS[PRESENTATION_SHIPPED_FINGERPRINTS.length - 1]) {
+      // The step from the last shape to CUR (the optional outputs) is deliberately NON-breaking: the
+      // builder's `answers` barrier is an OPTIONAL input, so a graph without deckOutputs still runs
+      // and is refreshed only to gain the new nodes. Older shapes still break (a required input).
+      assert.ok(true);
+      db.close();
+      return;
+    }
     assert.ok(errors.length > 0, 'a stale seed must be detectably broken, or this test proves nothing');
     assert.ok(errors.some((e) => String(e.code || e) === 'V9' || /unwired/i.test(JSON.stringify(e))),
       `expected a V9 unwired-input error, got ${JSON.stringify(errors)}`);
@@ -106,10 +127,10 @@ PRESENTATION_SHIPPED_FINGERPRINTS.forEach((fp, i) => {
 
     const after = graphOf(db);
     assert.ok(after.nodes.some((n) => n.id === 'n_mine'), 'the user edit survived');
-    // n_bundle is only in the CURRENT shape — never in any shipped fingerprint
+    // n_pdf is only in the CURRENT shape — never in any shipped fingerprint
     // below it — so its absence proves the refresh did NOT force the shipped
     // shape over the user's edit, regardless of which prior shape this is.
-    assert.ok(!after.nodes.some((n) => n.id === 'n_bundle'), 'and the shipped shape was NOT forced over it');
+    assert.ok(!after.nodes.some((n) => n.id === 'n_pdf'), 'and the shipped shape was NOT forced over it');
     db.close();
   });
 

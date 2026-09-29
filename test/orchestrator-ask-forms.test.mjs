@@ -94,7 +94,9 @@ const auditLines = (pipelineId) => getDb()
 test("exactly one built-in declares forms — the reviewer's reference form (P5); nothing else here is a shipped behaviour change", () => {
   const reg = loadAgentRegistry(undefined, { userAgentsDir: null, includePlugins: false });
   for (const [key, meta] of Object.entries(reg)) {
-    assert.equal('ask' in meta, key === 'reviewer', `${key} unexpectedly ${key === 'reviewer' ? 'lacks' : 'declares'} ask forms`);
+    // deckOutputs is the Presentation pipeline's fixed "what should this run produce?" form.
+    const declares = key === 'reviewer' || key === 'deckOutputs';
+    assert.equal('ask' in meta, declares, `${key} unexpectedly ${declares ? 'lacks' : 'declares'} ask forms`);
   }
 });
 

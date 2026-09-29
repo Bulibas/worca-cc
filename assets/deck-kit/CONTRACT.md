@@ -1,6 +1,12 @@
 # OpenDeck kit — builder contract
 
-Kit version: **1.2.0**
+Kit version: **1.3.0** (the vendored OpenDeck release — see `UPSTREAM.json`)
+
+**Two layers.** `deck-stage.js`, `deck-enhance.js`, `deck-export.js` and
+`build-standalone.mjs` are OpenDeck's, byte-for-byte, pinned by `UPSTREAM.json`
+and never edited here. `deck-pipeline.js` and `deck-audit.js` are this
+pipeline's: `deck-pipeline.js` registers the caption band and the motion
+vocabulary through OpenDeck's `DeckStage.addDocumentStyle()` seam (1.3.0+).
 
 The deck builder authors exactly two HTML files and copies the kit scripts flat
 beside them. It never edits a kit script.
@@ -12,7 +18,7 @@ beside them. It never edits a kit script.
 - `deck-manifest.md` — one row per slide.
 - any images/fonts the deck needs, in `deck/`.
 
-Copy `deck-stage.js`, `deck-enhance.js`, `deck-export.js`, `deck-audit.js` from
+Copy `deck-stage.js`, `deck-pipeline.js`, `deck-enhance.js`, `deck-export.js`, `deck-audit.js` from
 the staged `deck-kit/` in the pipeline directory **flat** into `deck/`. The
 engine stages the kit there before the first node runs (`requiresAssets`), so
 never hunt the filesystem for it, and never edit a kit file.
@@ -70,8 +76,11 @@ contents of `deck-kit/VERSION` in the pipeline directory — never a literal, or
 deck and the manifest's `Kit:` line disagree the moment the kit is bumped.
 - `<deck-stage width="1920" height="1080">` with **one `<section data-label="…">`
   per slide** and nothing else inside the stage.
-- `<script src="deck-stage.js">`, `<script src="deck-enhance.js">`,
-  `<script src="deck-export.js">` after the stage.
+- `<script src="deck-stage.js">`, **`<script src="deck-pipeline.js">` immediately
+  after it**, then `<script src="deck-enhance.js">` and
+  `<script src="deck-export.js">`, all after the stage. Leave `deck-pipeline.js`
+  out and the caption band shows on the projector and the motion vocabulary is
+  dead — the audit fails a deck that does.
 - Styles in one `<style>` block. Fonts: system stacks or `@font-face` files
   copied into `deck/` — no CDNs (they fail silently under the artifact CSP).
 
@@ -117,7 +126,7 @@ the whole author surface:
 same reason it owns the caption band's visibility and harder: an animation that
 starts at `opacity: 0` and loses its fill-mode — or that a still frame catches
 mid-flight — renders **blank slides with the correct page count**, and the page
-count is the only thing the PDF check can assert. `deck-stage.js` forces the
+count is the only thing the PDF check can assert. `deck-pipeline.js` forces the
 final state under `<deck-stage noscale>` (the proof copy the audit measures and
 screenshots) and under `@media print` (the PDF), so neither still frame can catch
 motion. Write your own rules and you are back to the silent failure.
@@ -158,7 +167,7 @@ that must do both carries the completeness in a caption band:
 </section>
 ```
 
-- **The kit owns its visibility.** `deck-stage.js` injects
+- **The kit owns its visibility.** `deck-pipeline.js` injects
   `[data-deck-caption]{display:none}` plus a print override into the same
   `<head>` sheet as `@page`. Never restate those rules, and never rely on your
   own — a forgotten rule is silent in both directions (captions on the
@@ -197,8 +206,8 @@ skipped in navigation, hidden at print). Never delete a section in a fix cycle.
 
 The **same** `<section>` markup and `<style>`,
 `<deck-stage width="1920" height="1080" noscale>`, every `[data-step]` element
-also given `class="step-visible"`, **no** `deck-enhance.js`, and
-`<script src="deck-audit.js">` last. This is what the audit measures — all
+also given `class="step-visible"`, `<script src="deck-pipeline.js">` right after
+`deck-stage.js`, **no** `deck-enhance.js`, and `<script src="deck-audit.js">` last. This is what the audit measures — all
 fragments visible at once is the worst case for overflow.
 
 `deck-audit.js` measures **every slide in one load** and ignores the URL hash

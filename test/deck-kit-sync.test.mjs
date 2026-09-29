@@ -73,7 +73,9 @@ test('package.json publishes the kit', () => {
 // because a builder that forgets it fails silently in both directions: captions
 // on the projector, or the whole read-alone layer missing from the PDF.
 test('the injected print sheet hides the caption band on screen and prints it', () => {
-  const src = readFileSync(join(KIT, 'deck-stage.js'), 'utf8');
+  // Registered by the pipeline extension through OpenDeck's addDocumentStyle seam,
+  // into the same <head> sheet as @page — never by editing the vendored stage.
+  const src = readFileSync(join(KIT, 'deck-pipeline.js'), 'utf8');
   assert.match(src, /\[data-deck-caption\] \{ display: none; \}/);
   assert.match(src, /@media print \{ \[data-deck-caption\] \{ display: block; \} \}/);
 });
@@ -145,7 +147,7 @@ test('the parsed speaker notes are actually reachable, not parsed and dropped', 
 // only PDF assertion the contract defines. The audit screenshots proof.html
 // (noscale) and the export prints; both are forced to final state here.
 test('the injected sheet declares the animation vocabulary with fill-mode both', () => {
-  const src = readFileSync(join(KIT, 'deck-stage.js'), 'utf8');
+  const src = readFileSync(join(KIT, 'deck-pipeline.js'), 'utf8');
   for (const name of ['deck-rise', 'deck-draw', 'deck-wipe', 'deck-pop', 'deck-count']) {
     assert.match(src, new RegExp(`@keyframes ${name}\\b`), `${name} is missing`);
   }
@@ -154,7 +156,7 @@ test('the injected sheet declares the animation vocabulary with fill-mode both',
 });
 
 test('the proof copy and the print sheet both force the animation final state', () => {
-  const src = readFileSync(join(KIT, 'deck-stage.js'), 'utf8');
+  const src = readFileSync(join(KIT, 'deck-pipeline.js'), 'utf8');
   // Every declaration a final-state block must force. clip-path is what `wipe`
   // animates and stroke-dashoffset is what `draw` animates — drop either from a
   // final-state block and a proof screenshot catches a clipped-away element or
@@ -179,7 +181,7 @@ test('the proof copy and the print sheet both force the animation final state', 
 });
 
 test('reduced motion disables the animations', () => {
-  const src = readFileSync(join(KIT, 'deck-stage.js'), 'utf8');
+  const src = readFileSync(join(KIT, 'deck-pipeline.js'), 'utf8');
   assert.match(src, /@media \(prefers-reduced-motion: reduce\) \{ \[data-deck-anim\] \{ animation: none/);
 });
 
@@ -199,7 +201,7 @@ test('the contract documents the animation vocabulary it now owns', () => {
 // `translate` is measured un-transformed and passes every geometry check. The CSS
 // stays; the contract has to say so, and so does the agent that writes the deck.
 test('the forced final state is documented where a builder will read it', () => {
-  const stage = readFileSync(join(KIT, 'deck-stage.js'), 'utf8');
+  const stage = readFileSync(join(KIT, 'deck-pipeline.js'), 'utf8');
   const forced = stage.match(/transform: none !important; clip-path: none !important/g) || [];
   assert.equal(forced.length, 2,
     'the noscale and @media print final-state blocks are what the contract clause describes');

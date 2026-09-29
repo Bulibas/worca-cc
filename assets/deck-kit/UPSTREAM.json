@@ -1,0 +1,15 @@
+{
+  "source": "https://github.com/open-deck-org/opendeck",
+  "version": "1.3.0",
+  "path": "skills/opendeck/assets",
+  "files": {
+    "deck-stage.js": "60b8dc46976855cd5d62223260b123192df186528c50da76cb09dbb21c2104a3",
+    "deck-enhance.js": "a1b82e5b24c73721e357146b7cc378cb18386a85789ec504ae1b8f096c0c7be3",
+    "deck-export.js": "c197a429abd377187f6439e820aba4577919fd734d7027cb8e3461c6253697a9",
+    "build-standalone.mjs": "a678a6d2ce591cf1ed3e47558af88be64fc3d66fa8ab85330c316fe45024bedd"
+  },
+  "narration": {
+    "deck-narration.js": "bf6bc5cb2099fcc541a8ea0dc2b3dbad20f21d7a9b57f87e9043ecd15b8e87b4",
+    "narration-script.js": "e46c2f36ea4869a3f152d1e2263a0621ec962d9060069e94804bc0d88b6081c6"
+  }
+}
