@@ -67,3 +67,13 @@ test('recovery rule: retry until the per-class budget, then pause flagged', () =
   assert.deepEqual(recoveryRule({ attempts: 0, max: 3 }), { decision: 'retry', flagged: false });
   assert.deepEqual(recoveryRule({ attempts: 3, max: 3 }), { decision: 'pause', flagged: true });
 });
+
+test('an analysis choice outside the options is replaced by the best-scored one AND flagged', async () => {
+  const d = await decideQuestion(Q({}), { ...C, strategy: 'analysis' }, {
+    analyze: async () => ({ choice: 'D (made up)', confidence: 90, rationale: 'r', reversible: true,
+      scores: { B: { matchesMemory: 9, reversible: 9, smallestScope: 9, codebaseConventions: 9, cost: 9 } } }),
+  });
+  assert.equal(d.choice, 'B');
+  assert.equal(d.flagged, true);
+  assert.match(d.rationale, /not one of the options/);
+});

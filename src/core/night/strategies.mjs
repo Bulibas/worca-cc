@@ -67,9 +67,12 @@ export async function decideQuestion(q, cfg, { analyze } = {}) {
   const scores = a.scores && typeof a.scores === 'object' ? a.scores : {};
   const totals = weightedTotals(scores, cfg.criteria, opts);
   const conf = Number.isFinite(a.confidence) ? Math.round(a.confidence) : 0;
-  const pick = opts.includes(a.choice) ? a.choice : opts.reduce((b, o) => (totals[o] > totals[b] ? o : b), opts[0]);
+  const valid = opts.includes(a.choice);
+  const pick = valid ? a.choice : opts.reduce((b, o) => (totals[o] > totals[b] ? o : b), opts[0]);
   if (conf >= cfg.minConfidence) {
-    return { id: q.id, choice: pick, strategy: 'analysis', confidence: conf, scores, rationale: String(a.rationale || ''), reversible: a.reversible === true, flagged: false };
+    const rationale = valid ? String(a.rationale || '')
+      : `the analysis chose "${String(a.choice).slice(0, 80)}", not one of the options: took the best-scored option. ${String(a.rationale || '')}`.trim();
+    return { id: q.id, choice: pick, strategy: 'analysis', confidence: conf, scores, rationale, reversible: a.reversible === true, flagged: !valid };
   }
   // User decision "never park": continue with the most reversible option, flagged.
   const rev = mostReversible(opts, scores, totals);

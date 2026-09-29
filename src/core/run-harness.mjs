@@ -3926,16 +3926,29 @@ export class RunHarness extends EventEmitter {
   async _nightAnalyze(questions, q) {
     const startedAt = new Date().toISOString();
     const n = (this._nightSeq = (this._nightSeq || 0) + 1);
-    const res = await runNightAnalysis({
-      questions, cwd: this.runCwd || this.workDir || this.projectDir,
-      task: this.pipeline?.promptText ?? this.opts.prompt ?? '', planPaths: await this._nightPlanPaths(),
-      memory: await readMemoryText(projectKey(this.projectDir)), criteria: effectiveNightConfig(this.projectDir).config.criteria,
-      context: q.kind === 'questions' ? `Asked by ${q.agent || 'an agent'} mid-step.` : '', model: this.claude.model || null,
-      bin: this.claude.bin, mock: !!this.claude.mock, envScrub: this.guardrails?.envScrub, signal: this._nightSignal(),
-      run: this.opts.nightRunClaude,          // test seam; undefined → runClaude
-    });
+    let res;
+    try {
+      res = await runNightAnalysis({
+        questions, cwd: this.runCwd || this.workDir || this.projectDir,
+        task: this.pipeline?.promptText ?? this.opts.prompt ?? '', planPaths: await this._nightPlanPaths(),
+        memory: await readMemoryText(projectKey(this.projectDir)), criteria: effectiveNightConfig(this.projectDir).config.criteria,
+        context: q.kind === 'questions' ? `Asked by ${q.agent || 'an agent'} mid-step.` : '', model: this.claude.model || null,
+        bin: this.claude.bin, mock: !!this.claude.mock, envScrub: this.guardrails?.envScrub, signal: this._nightSignal(),
+        run: this.opts.nightRunClaude,          // test seam; undefined → runClaude
+      });
+    } catch (err) {
+      // Book what a failed call cost, then let the strategy fall back (flagged).
+      if (err?.costUsd > 0) this._nightBookAnalysis(n, q, startedAt, { costUsd: err.costUsd, usage: err.usage || {} }, 'error');
+      throw err;
+    }
+    this._nightBookAnalysis(n, q, startedAt, res, 'finished');
+    return res.byId;
+  }
+
+  /** One nightDecider call as a sub-agent row plus its cost on the run (like _recordAutoCost). */
+  _nightBookAnalysis(n, q, startedAt, res, status) {
     const stepKey = q.executionId || this._runningStepKeys()[0] || this.state.steps.at(-1)?.key || 'x:preflight:1';
-    const rec = { id: `night-decider-${n}`, label: `Night decider (${q.kind})`, status: 'finished', startedAt, finishedAt: new Date().toISOString(),
+    const rec = { id: `night-decider-${n}`, label: `Night decider (${q.kind})`, status, startedAt, finishedAt: new Date().toISOString(),
       costUsd: res.costUsd, tokens: (res.usage.input_tokens || 0) + (res.usage.output_tokens || 0), subagentType: 'night-decider',
       nodeId: q.nodeId || null, stepKey, runModel: this.claude.model || null };
     if (!this.state.subAgents.some((s) => s.id === rec.id)) this.state.subAgents.push(rec);
@@ -3943,7 +3956,6 @@ export class RunHarness extends EventEmitter {
     this._subAgentTransition('spawn', rec);
     this._subAgentTransition('finish', rec);
     this._recordCost(res.costUsd, stepKey);
-    return res.byId;
   }
 
   /** List the user's attached files copied into <pipeline>/extras/ (basename + abs

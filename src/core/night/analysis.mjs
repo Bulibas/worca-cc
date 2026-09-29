@@ -120,6 +120,10 @@ export async function runNightAnalysis({ questions, cwd, task, planPaths, memory
       },
     });
     return { byId: normalizeAnalysis(safeParseJson(String(res?.text || ''))), costUsd, usage };
+  } catch (err) {
+    // A failed or aborted call was still billed for what it ran: hand the cost to the caller.
+    if (err && typeof err === 'object') Object.assign(err, { costUsd, usage });
+    throw err;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener?.('abort', onAbort);

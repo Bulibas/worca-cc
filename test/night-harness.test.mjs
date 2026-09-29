@@ -480,3 +480,21 @@ test('the unattended stretch start survives a pause/resume (the spend cap keeps 
   assert.equal(saved.since, 1234);
   assert.equal(createOrchestrator({ projectDir: '/tmp/night-h29', resume: { resumePoint: { night: saved } } })._night.since, 1234);
 });
+
+test('a failed night analysis still books what it cost', async () => {
+  await setNightMode({ enabled: true, strategy: 'analysis', graceMinutes: 1 });
+  await setNightModeToggle('on');
+  const clock = fakeClock();
+  const nightRunClaude = async (o) => {
+    o.onEvent({ type: 'result', costUsd: 0.07, raw: { usage: { input_tokens: 3, output_tokens: 2 } } });
+    throw new Error('claude exited with code 1');
+  };
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h30', nightClock: clock, nightRunClaude });
+  const booked = [];
+  orch._recordCost = (usd) => booked.push(usd);
+  const p = orch._ask({ id: 'c30', kind: 'clarify', questions: QA });
+  for (let i = 0; i < 20 && orch.pendingQuestion; i++) await clock.tick(0);
+  await p;
+  assert.equal(orch.nightDecision('c30').flagged, true, 'analysis unavailable → flagged fallback');
+  assert.ok(booked.some((u) => u > 0), 'the failed call was billed and is booked');
+});
