@@ -11859,27 +11859,36 @@ async function savePluginConfigForms(name, body) {
 
 // Creating a profile is its own call: the roster entry has to exist before the
 // config form has anything to write into. Reopens on the NEW profile, which is
-// what the user wants to fill in next.
+// what the user wants to fill in next. A rejected id re-asks with what was typed
+// and the server's reason, so the user corrects it in place — the Settings modal
+// underneath stays as it was.
 async function addPluginProfile(name, sourceId) {
-  const answers = await promptModal({
-    title: 'New profile',
-    confirmLabel: 'Create',
-    fields: [
-      { id: 'id', label: 'Profile id', placeholder: 'work', mono: true, required: true,
-        hint: 'Lowercase letters, digits and dashes — e.g. "work".' },
-      { id: 'label', label: 'Display name', placeholder: 'optional' },
-    ],
-  });
-  if (!answers) return;
-  const id = answers.id;
-  const label = answers.label;
-  const r = await pluginApi('POST', `/api/plugins/${encodeURIComponent(name)}/profiles`, { sourceId, id, label });
-  if (!r.ok) return setPluginsMsg(r.data.error || 'could not create the profile', 'err');
+  let answers = { id: '', label: '' };
+  let error = '';
+  for (;;) {
+    answers = await promptModal({
+      title: 'New profile',
+      confirmLabel: 'Create',
+      message: error,
+      fields: [
+        { id: 'id', label: 'Profile id', placeholder: 'work', mono: true, required: true, value: answers.id,
+          hint: 'Lowercase letters, digits and dashes — e.g. "work".' },
+        { id: 'label', label: 'Display name', placeholder: 'optional', value: answers.label },
+      ],
+    });
+    if (!answers) return;
+    const r = await pluginApi('POST', `/api/plugins/${encodeURIComponent(name)}/profiles`,
+      { sourceId, id: answers.id, label: answers.label });
+    if (r.ok) break;
+    error = r.data.error || 'could not create the profile';
+  }
   loadTaskSources();               // the New Pipeline profile bar lists this roster
-  openPluginSettings(name, id);
+  openPluginSettings(name, answers.id);
 }
 
-async function deletePluginProfile(name, sourceId, profile) {
+// showErr: the Settings modal's error line — a failure is reported where the
+// user is looking, not on the Plugins page behind the modal.
+async function deletePluginProfile(name, sourceId, profile, showErr) {
   if (!profile) return;
   // The server also drops every project binding that named it, so this is not
   // just a settings delete — say so before it happens, not after.
@@ -11890,7 +11899,7 @@ async function deletePluginProfile(name, sourceId, profile) {
   if (!ok) return;
   const url = `/api/plugins/${encodeURIComponent(name)}/profiles/${encodeURIComponent(profile)}?sourceId=${encodeURIComponent(sourceId)}`;
   const r = await pluginApi('DELETE', url);
-  if (!r.ok) return setPluginsMsg(r.data.error || 'could not delete the profile', 'err');
+  if (!r.ok) return showErr(r.data.error || 'could not delete the profile');
   // Deleting also drops the bindings that named it, so the pane may fall back
   // to the gate — refresh it rather than leaving a profile that no longer exists.
   loadTaskSources();
@@ -12006,9 +12015,20 @@ async function openPluginSettings(name, profile, { seeds = null } = {}) {
   body.querySelectorAll('.pl-profile-add').forEach((btn) => {
     btn.addEventListener('click', () => addPluginProfile(name, btn.dataset.sourceId));
   });
+  // A failed Save / profile removal lands here, next to the actions, and the
+  // modal stays open so the offending value can be fixed without reopening it.
+  const errLine = document.createElement('p');
+  errLine.className = 'hint err pl-settings-err';
+  errLine.hidden = true;
+  const showErr = (msg) => {
+    errLine.textContent = msg || '';
+    errLine.hidden = !msg;
+    if (msg) errLine.scrollIntoView({ block: 'nearest' });
+  };
   body.querySelectorAll('.pl-profile-del').forEach((btn) => {
-    btn.addEventListener('click', () => deletePluginProfile(name, btn.dataset.sourceId, sourceById(btn.dataset.sourceId).profile));
+    btn.addEventListener('click', () => deletePluginProfile(name, btn.dataset.sourceId, sourceById(btn.dataset.sourceId).profile, showErr));
   });
+  body.appendChild(errLine);
   const slot = document.createElement('div');
   slot.className = 'pl-connect-slot';
   body.appendChild(slot);
@@ -12049,9 +12069,11 @@ async function openPluginSettings(name, profile, { seeds = null } = {}) {
       }
     }]] : []),
     ['Save', 'btn btn-primary btn-mini', async () => {
+      showErr('');
       const failed = await savePluginConfigForms(name, body);
+      if (failed) return showErr(failed);
       closePluginModal();
-      setPluginsMsg(failed || 'Settings saved.', failed ? 'err' : 'ok');
+      setPluginsMsg('Settings saved.', 'ok');
     }],
   ]);
 }
