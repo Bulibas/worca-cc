@@ -512,7 +512,7 @@ function connectWS() {
     // dedupe set so the new socket re-subscribes to still-live runs.
     state.helloSubscribed = new Set();
     // Automatic workspace re-scans the page is following: replay what this socket missed.
-    for (const r of wsRescans.values()) if (r.state === 'running') subscribeRescan(r.scanId);
+    for (const r of wsRescans.values()) if (r.state === 'running' && r.runId) subscribeRescan(r.runId);
   });
 
   ws.addEventListener('message', (e) => {
@@ -1122,9 +1122,7 @@ function handleServerMessage(msg) {
   }
   if (msg.type === 'workspaces-changed') {
     // The automatic re-scan after a member change (server afterMembersChanged) ends here.
-    if (msg.workspaceId && (msg.action === 'description' || msg.action === 'rescan-failed')) {
-      endWsRescan(msg.workspaceId, msg.action === 'description' ? 'done' : 'failed');
-    }
+    if (msg.workspaceId && WS_RESCAN_ENDS[msg.action]) endWsRescan(msg.workspaceId, WS_RESCAN_ENDS[msg.action], msg.runId || null);
     scheduleOnboardingRefresh();
     refreshAllCounts();
     tmCache.at = 0;
@@ -1211,6 +1209,7 @@ function handleServerMessage(msg) {
   }
 
   // Tagged per-run event. Ignore anything without a runId.
+  if (msg.runId && wsRescans.size) pokeWsRescanRun(msg.runId);   // a followed workspace re-scan run
   if (!msg.runId) return;
   // Run birth announcement: carries the metadata hello would have sent (projectDir,
   // kind, workspace attribution, member names) so a run started by ANOTHER tab or
@@ -6970,7 +6969,7 @@ async function loadWorkspaces() {
     state.workspaces = [];
   }
   // A re-scan still running (a reload, another tab's change): follow it on the page.
-  for (const w of state.workspaces) if (w && w.rescan && w.rescan.scanId) trackWsRescan(w.id, w.rescan);
+  for (const w of state.workspaces) if (w && w.rescan && w.rescan.runId) trackWsRescan(w.id, w.rescan);
   // Stale selection guard: a remembered workspace id not in the fetched list is
   // cleared, and we fall back to project target.
   const remembered = localStorage.getItem(LAST_WORKSPACE_KEY) || '';
@@ -7181,7 +7180,7 @@ if (el.wsList) {
 // ---------------------------------------------------------------------------
 const WS_TABS = ['overview', 'map', 'team'];
 // workspaces-changed actions that can change the Map tab: an override (P5 routes) or a scan's save.
-const WD_MAP_ACTIONS = new Set(['map', 'scan-created', 'scan-updated']);
+const WD_MAP_ACTIONS = new Set(['map', 'scan-created', 'scan-updated', 'members']);   // members: a removal prunes the map
 function parseWsParam(param = '') {
   const s = String(param || '');
   if (!s) return null;
@@ -7782,49 +7781,58 @@ if (el.wsDetail) {
 // ---- member changes: POST /api/workspaces/:id/members {add:[paths]} | {remove:path} ----
 // The id never changes; runs already started keep their own members. 409 while a run or scan
 // of the workspace is live. After a change the page says what to check next.
-// The automatic re-scan after a member change (server afterMembersChanged): graphs + description,
-// followed live on the Projects card with the wizard's loader (spinner, status, phase track).
-// id -> { scanId, state: running|done|failed, phase, message, projectsDone, projectsTotal, cleared }
+// The automatic re-scan after a member change (server afterMembersChanged): a Workspace scan run
+// of the new set — graphs, the map and a new description — followed on the Projects card with the
+// wizard's loader look (spinner, status, a stage track) and a link to the run.
+// id -> { runId, state: running|done|failed|stopped|paused|skipped, reason, cleared }
 const wsRescans = new Map();
-const WS_RESCAN_PHASES = [['graph', 'Graph'], ['investigate', 'Investigate'], ['synthesize', 'Synthesize']];
+const WS_RESCAN_ENDS = {
+  description: 'done', 'rescan-failed': 'failed', 'rescan-stopped': 'stopped', 'rescan-paused': 'paused',
+};
 
-function subscribeRescan(scanId) {
+function subscribeRescan(runId) {
   const ws = state.ws;
-  if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify({ type: 'subscribe', scanId })); } catch { /* ignore */ } }
+  if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify({ type: 'subscribe', runId })); } catch { /* ignore */ } }
 }
 
-/** Start (or keep) following a workspace's re-scan. A scanId already followed keeps its own state. */
+/** Start (or keep) following a workspace's re-scan: {runId} or {skipped: reason}. A run already
+ *  followed keeps its own state. */
 function trackWsRescan(id, rescan, cleared = null) {
   const cur = wsRescans.get(id);
-  if (cur && cur.scanId === rescan.scanId) { if (cleared) cur.cleared = cleared; return; }
-  wsRescans.set(id, {
-    scanId: rescan.scanId, state: 'running', phase: rescan.phase || 'graph', message: rescan.message || '',
-    projectsDone: rescan.projectsDone ?? null, projectsTotal: rescan.projectsTotal ?? null, cleared: cleared || [],
-  });
-  subscribeRescan(rescan.scanId);
+  if (rescan.runId && cur && cur.runId === rescan.runId) { if (cleared) cur.cleared = cleared; return; }
+  wsRescans.set(id, rescan.runId
+    ? { runId: rescan.runId, state: 'running', reason: '', cleared: cleared || [] }
+    : { runId: null, state: 'skipped', reason: String(rescan.skipped || ''), cleared: cleared || [] });
+  if (rescan.runId) subscribeRescan(rescan.runId);
 }
 
-/** A scan-* frame for a followed re-scan: update its loader. Returns whether the frame was one. */
-function onWsRescanEvent(msg) {
-  for (const [id, r] of wsRescans) {
-    if (r.scanId !== msg.scanId) continue;
-    if (msg.type === 'scan-progress' && r.state === 'running') {
-      if (msg.phase) r.phase = msg.phase;
-      if (msg.message) r.message = msg.message;
-      if (msg.projectsTotal != null) { r.projectsDone = msg.projectsDone || 0; r.projectsTotal = msg.projectsTotal; }
-      paintWsRescan(id);
-    }
-    // scan-done / scan-error: the saved description (or its failure) arrives as workspaces-changed.
-    return true;
-  }
-  return false;
+/** A run frame landed: repaint the loader following that run (after the frame is applied). */
+function pokeWsRescanRun(runId) {
+  for (const [id, r] of wsRescans) if (r.runId === runId && r.state === 'running') setTimeout(() => paintWsRescan(id), 0);
 }
 
-function endWsRescan(id, how) {
+function endWsRescan(id, how, runId = null) {
   const r = wsRescans.get(id);
-  if (!r) return;
+  if (!r || (runId && r.runId && r.runId !== runId)) return;
   r.state = how;
   paintWsRescan(id);
+}
+
+/** The scan run's stages from its own stepper (bookends left out), each with done / active. */
+function wsRescanStages(runId) {
+  const run = runId ? runs.get(runId) : null;
+  const steps = run && run.stepper && Array.isArray(run.stepper.steps) ? run.stepper.steps : [];
+  const records = run && Array.isArray(run.steps) ? run.steps : [];
+  const out = [];
+  for (const step of steps) {
+    if (!step || step.kind === 'preflight' || step.kind === 'done') continue;
+    for (const n of step.nodes || []) {
+      const mine = records.filter((x) => x && x.nodeId === n.id);
+      out.push({ id: n.id, label: n.label || n.id,
+        active: mine.some((x) => x.status === 'running'), done: mine.length > 0 && mine.every((x) => x.status === 'done') });
+    }
+  }
+  return out;
 }
 
 function renderWsRescan(r) {
@@ -7841,31 +7849,50 @@ function renderWsRescan(r) {
   }
   const body = document.createElement('div');
   body.className = 'wd-rescan-body';
+  const LABEL = {
+    running: 'Members changed — re-scanning the workspace', done: 'Workspace re-scanned', failed: 'Re-scan failed',
+    stopped: 'Re-scan stopped', paused: 'Re-scan paused', skipped: 'Members changed — not re-scanned',
+  };
+  const SUB = {
+    running: 'A Workspace scan run rebuilds the graphs, the map and the description.',
+    done: 'The map and the description were refreshed from the new member set.',
+    failed: 'Use Re-scan to refresh the map and the description.',
+    stopped: 'Use Re-scan to refresh the map and the description.',
+    paused: 'Resume it under Running, or use Re-scan.',
+    skipped: `${r.reason || 'The scan could not start'} — use Re-scan once that is fixed.`,
+  };
   const label = document.createElement('div');
   label.className = 'status-label';
-  label.textContent = r.state === 'running' ? 'Members changed — re-scanning the workspace'
-    : r.state === 'done' ? 'Workspace re-scanned' : 'Re-scan failed';
+  label.textContent = LABEL[r.state] || LABEL.running;
   const sub = document.createElement('div');
   sub.className = 'status-sub';
-  sub.textContent = r.state === 'running'
-    ? [r.message || 'starting…', r.projectsTotal != null ? `${r.projectsDone || 0} / ${r.projectsTotal} projects` : ''].filter(Boolean).join(' · ')
-    : r.state === 'done' ? 'The description was refreshed from the new member set.' : 'Use Re-scan to refresh the description.';
+  sub.textContent = SUB[r.state] || '';
   body.append(label, sub);
   if (r.state === 'running') {
-    const track = document.createElement('div');
-    track.className = 'wiz-phase-track wd-rescan-phases';
-    for (const [key, text] of WS_RESCAN_PHASES) {
-      const span = document.createElement('span');
-      span.dataset.phase = key; span.textContent = text;
-      if (key === r.phase) span.classList.add('active');
-      track.appendChild(span);
+    const stages = wsRescanStages(r.runId);
+    if (stages.length) {
+      const track = document.createElement('div');
+      track.className = 'wiz-phase-track wd-rescan-phases';
+      for (const st of stages) {
+        const span = document.createElement('span');
+        span.dataset.phase = st.id; span.textContent = st.label;
+        if (st.active) span.classList.add('active');
+        else if (st.done) span.classList.add('done');
+        track.appendChild(span);
+      }
+      body.appendChild(track);
     }
-    body.appendChild(track);
+  }
+  if (r.runId && r.state !== 'done') {
+    const open = document.createElement('a');
+    open.className = 'wd-rescan-open';
+    open.href = `#running/${r.runId}`;
+    open.textContent = 'Open the scan run';
+    body.appendChild(open);
   }
   const hint = document.createElement('small');
   hint.className = 'hint wd-rescan-hint';
-  hint.textContent = (r.state === 'running' ? 'Graphs and the description are rebuilt in the background. ' : '')
-    + 'Check the Team tab for members off the metrics or policy home.'
+  hint.textContent = 'Check the Team tab for members off the metrics or policy home.'
     + (r.cleared && r.cleared.length ? ` The ${r.cleared.join(' and ')} home was cleared — choose a new one there.` : '');
   body.appendChild(hint);
   box.append(lead, body);
@@ -7892,7 +7919,7 @@ async function postWsMembers(id, body) {
   const i = state.workspaces.findIndex((x) => x && x.id === id);
   if (i >= 0 && data.workspace) state.workspaces[i] = data.workspace;
   const cleared = Array.isArray(data.clearedHomes) ? data.clearedHomes : [];
-  if (data.rescan && data.rescan.scanId) trackWsRescan(id, data.rescan, cleared);
+  if (data.rescan && (data.rescan.runId || data.rescan.skipped)) trackWsRescan(id, data.rescan, cleared);
   if (wsDetail && wsDetail.id === id) { setWdError(wsDetail.screen, ''); refreshWdOverview(); }
   tpCache.at = 0;
   void paintWsMetricsRows(true);

@@ -546,7 +546,7 @@ test('Add projects lists registered non-members; Save posts {add} and the page s
   const { window, show } = await boot({ fetchHandler: (u, opts) => {
     if (/\/api\/workspaces\/wks-alpha-00000001\/members$/.test(u) && opts.method === 'POST') {
       posts.push(JSON.parse(opts.body));
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({ workspace: grown, clearedHomes: [], rescan: { scanId: 'scan_a' } }) });
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ workspace: grown, clearedHomes: [], rescan: { runId: 'run_a' } }) });
     }
     return withThird(u);
   } });
@@ -570,12 +570,12 @@ test('Add projects lists registered non-members; Save posts {add} and the page s
   assert.ok(doc.querySelector('#ws-detail .wd-members .wd-rescan.is-running'), 'the re-scan loader shows');
 });
 
-/** Open alpha, add THIRD, and return the page's re-scan loader accessor (the members POST starts scan_1). */
+/** Open alpha, add THIRD, and return the page's re-scan loader accessor (the members POST starts run_1). */
 async function addWithRescan(extra = {}) {
   const grown = { ...WS[0], projectPaths: [...WS[0].projectPaths, THIRD.path], projectKeys: ['k1', 'k2', 'k5'], exists: [true, true, true] };
   const booted = await boot({ fetchHandler: (u, opts) => {
     if (/\/api\/workspaces\/wks-alpha-00000001\/members$/.test(u) && opts.method === 'POST') {
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({ workspace: grown, clearedHomes: [], rescan: { scanId: 'scan_1' }, ...extra }) });
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ workspace: grown, clearedHomes: [], rescan: { runId: 'run_1' }, ...extra }) });
     }
     return withThird(u);
   } });
@@ -593,38 +593,58 @@ async function addWithRescan(extra = {}) {
   return { ...booted, doc, loader: () => doc.querySelector('#ws-detail .wd-members .wd-rescan') };
 }
 
-test('a member change shows the re-scan loader: spinner, status, live phase and progress, the Team-tab hint', async () => {
+/** A Workspace scan run's state frame: its stepper (bookends + three stages) and step records. */
+const SCAN_STEPPER = { version: 2, steps: [
+  { kind: 'preflight', nodes: [{ id: 'preflight', label: 'Preflight' }] },
+  { kind: 'script', nodes: [{ id: 'extract', label: 'Extract' }] },
+  { kind: 'agent', nodes: [{ id: 'survey', label: 'Survey' }] },
+  { kind: 'script', nodes: [{ id: 'render', label: 'Render' }] },
+  { kind: 'done', nodes: [{ id: 'done', label: 'Done' }] },
+] };
+
+test('a member change shows the re-scan loader: spinner, status, the scan run\'s own stages, a link to the run, the Team-tab hint', async () => {
   const { ws, loader } = await addWithRescan();
   const el = loader();
   assert.ok(el.classList.contains('is-running'));
   assert.equal(el.getAttribute('role'), 'status');
   assert.ok(el.querySelector('.spinner'), 'the wizard\'s spinner');
   assert.match(el.querySelector('.status-label').textContent, /re-scanning the workspace/i);
-  assert.deepEqual([...el.querySelectorAll('[data-phase]')].map((n) => n.textContent), ['Graph', 'Investigate', 'Synthesize']);
+  assert.equal(el.querySelector('a.wd-rescan-open').getAttribute('href'), '#running/run_1');
   assert.match(el.querySelector('.wd-rescan-hint').textContent, /Team tab/);
-  assert.ok(ws().sent.some((t) => JSON.parse(t).type === 'subscribe' && JSON.parse(t).scanId === 'scan_1'), 'subscribed to the scan');
-  ws().deliver({ type: 'scan-progress', scanId: 'scan_other', phase: 'synthesize', message: 'not ours' });
-  ws().deliver({ type: 'scan-progress', scanId: 'scan_1', phase: 'investigate', message: 'investigating relations…', projectsDone: 1, projectsTotal: 3 });
-  await settle(4);
+  assert.ok(ws().sent.some((t) => JSON.parse(t).type === 'subscribe' && JSON.parse(t).runId === 'run_1'), 'subscribed to the run');
+  ws().deliver({ type: 'state', runId: 'run_other', stepper: SCAN_STEPPER, steps: [{ nodeId: 'render', status: 'running' }] });
+  ws().deliver({ type: 'state', runId: 'run_1', stepper: SCAN_STEPPER, steps: [{ nodeId: 'extract', status: 'done' }, { nodeId: 'survey', status: 'running' }] });
+  await settle(6);
   const now = loader();
-  assert.deepEqual([...now.querySelectorAll('[data-phase].active')].map((n) => n.dataset.phase), ['investigate']);
-  assert.equal(now.querySelector('.status-sub').textContent, 'investigating relations… · 1 / 3 projects');
+  assert.deepEqual([...now.querySelectorAll('[data-phase]')].map((n) => n.textContent), ['Extract', 'Survey', 'Render'], 'the run\'s stages, bookends left out');
+  assert.deepEqual([...now.querySelectorAll('[data-phase].active')].map((n) => n.dataset.phase), ['survey']);
+  assert.deepEqual([...now.querySelectorAll('[data-phase].done')].map((n) => n.dataset.phase), ['extract']);
 });
 
-test('the re-scan loader turns done on the saved description and failed on rescan-failed; another workspace changes nothing', async () => {
+test('the re-scan loader ends on its workspace\'s frame: refreshed, failed, stopped or paused; another workspace changes nothing', async () => {
   const { ws, loader } = await addWithRescan();
   ws().deliver({ type: 'workspaces-changed', action: 'rescan-failed', workspaceId: 'wks-other-00000009' });
   await settle(8);
   assert.ok(loader().classList.contains('is-running'), 'another workspace\'s frame changes nothing');
-  ws().deliver({ type: 'workspaces-changed', action: 'rescan-failed', workspaceId: 'wks-alpha-00000001' });
-  await settle(8);
-  assert.ok(loader().classList.contains('is-failed'));
-  assert.equal(loader().querySelector('.spinner'), null, 'no spinner once it ended');
-  assert.match(loader().textContent, /Re-scan failed/);
-  ws().deliver({ type: 'workspaces-changed', action: 'description', workspaceId: 'wks-alpha-00000001' });
-  await settle(8);
-  assert.ok(loader().classList.contains('is-done'));
-  assert.match(loader().textContent, /description was refreshed/i);
+  for (const [action, cls, text] of [
+    ['rescan-failed', 'is-failed', /Re-scan failed/], ['rescan-stopped', 'is-stopped', /Re-scan stopped/],
+    ['rescan-paused', 'is-paused', /Re-scan paused/], ['description', 'is-done', /map and the description were refreshed/i],
+  ]) {
+    ws().deliver({ type: 'workspaces-changed', action, workspaceId: 'wks-alpha-00000001', runId: 'run_1' });
+    await settle(8);
+    assert.ok(loader().classList.contains(cls), action);
+    assert.match(loader().textContent, text);
+    assert.equal(loader().querySelector('.spinner'), null, 'no spinner once it ended');
+  }
+});
+
+test('a member change the scan cannot read shows why, with no spinner', async () => {
+  const { loader } = await addWithRescan({ rescan: { skipped: 'read-only workspace scan: /x has no commit' } });
+  const el = loader();
+  assert.ok(el.classList.contains('is-skipped'));
+  assert.equal(el.querySelector('.spinner'), null);
+  assert.match(el.textContent, /has no commit/);
+  assert.match(el.textContent, /Re-scan/);
 });
 
 test('a cleared home is named in the loader', async () => {
@@ -633,14 +653,13 @@ test('a cleared home is named in the loader', async () => {
 });
 
 test('a re-scan still running when the page loads shows its loader and resubscribes', async () => {
-  const { window, show, ws } = await boot({ workspaces: [{ ...WS[0], rescan: { scanId: 'scan_live', phase: 'graph', message: 'building graph for svc-ui…' } }, WS[1]] });
+  const { window, show, ws } = await boot({ workspaces: [{ ...WS[0], rescan: { runId: 'run_live', pipelineId: 'abcd1234' } }, WS[1]] });
   show('workspaces/wks-alpha-00000001');
   await settle(8);
   const el = window.document.querySelector('#ws-detail .wd-rescan.is-running');
   assert.ok(el, 'the loader is back after a reload');
-  assert.deepEqual([...el.querySelectorAll('[data-phase].active')].map((n) => n.dataset.phase), ['graph']);
-  assert.match(el.querySelector('.status-sub').textContent, /building graph for svc-ui/);
-  assert.ok(ws().sent.some((t) => JSON.parse(t).scanId === 'scan_live'));
+  assert.equal(el.querySelector('a.wd-rescan-open').getAttribute('href'), '#running/run_live');
+  assert.ok(ws().sent.some((t) => JSON.parse(t).runId === 'run_live'));
 });
 
 test('Remove confirms, posts {remove}; a 409 (live run) keeps the member and shows the error on the header', async () => {

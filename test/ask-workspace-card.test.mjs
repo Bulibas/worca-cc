@@ -94,7 +94,7 @@ test('add_members: a plain add names the new member, keeps the id and says it re
   assert.deepEqual(r.card.change, { workspaceId: WS.id, projectPaths: ['/r/docs'] });
   assert.equal(r.card.workspaceId, WS.id);
   assert.ok(r.card.effects.some((e) => /keeps its id/.test(e)));
-  assert.ok(r.card.effects.some((e) => /re-scans the workspace.*graphify.*description/.test(e)));
+  assert.ok(r.card.effects.some((e) => /Workspace scan run.*graphify.*map.*description/.test(e)), JSON.stringify(r.card.effects));
   assert.deepEqual(r.card.warnings, []);
   assert.deepEqual(r.card.followUps, []);
 });
@@ -127,6 +127,14 @@ test('add_members warns: a live run, a member off the metrics / policy home, sch
   assert.deepEqual(r.card.followUps, ['metrics_route_members', 'policy_route_members']);
 });
 
+test('a Workspace scan still running reads as one: an automatic re-scan is replaced, one the user started must end', async () => {
+  const { v } = validator({ liveRun: async () => 'scan' });
+  const r = await v({ kind: 'add_members', workspaceId: WS.id, projectKeys: ['kc'] });
+  assert.equal(r.ok, true);
+  assert.match(r.card.warnings.join('\n'), /A Workspace scan of Shop is running — an automatic re-scan is replaced by this change; a scan you started must end first/);
+  assert.doesNotMatch(r.card.warnings.join('\n'), /refused until it ends/);
+});
+
 test('remove_member: clears a home it removes, and warns about schedules naming the project', async () => {
   const { v, calls } = validator({
     scheduled: async () => [
@@ -144,6 +152,7 @@ test('remove_member: clears a home it removes, and warns about schedules naming 
   assert.match(w, /api is the metrics home — it is cleared/);
   assert.match(w, /api is the policy home — it is cleared/);
   assert.match(w, /Nightly.*api.*release/);
+  assert.ok(r.card.effects.some((e) => /Map tab drops api's edges and reviews/.test(e)), JSON.stringify(r.card.effects));
   assert.doesNotMatch(w, /Other/);
   assert.deepEqual(r.card.followUps, ['metrics_workspace_home', 'policy_workspace_home']);
 });
@@ -282,8 +291,9 @@ test('route: apply add_members then remove_member changes the registry, keeps th
   assert.equal(j.block.card.result.workspaceId, ws.id);
   assert.equal((await readWs(ws.id)).projectPaths.length, 3);
   const notices = await waitFor(async () => { const n = await noticeOf(add.threadId); return n.length ? n : null; });
-  assert.match(notices[0], /^Applied — Add p2 to Card WS · .*re-scanning the description/);
-  assert.ok(mod.runs.get(j.block.card.result.scanId)?.autoRescan, 'the card started the workspace re-scan');
+  assert.match(notices[0], /^Applied — Add p2 to Card WS · .*re-scanning the workspace/);
+  assert.ok(mod.runs.get(j.block.card.result.rescanRunId)?.autoRescan, 'the card started the workspace re-scan');
+  for (const [rid, r] of mod.runs) if (r.autoRescan) { try { r.orch.stop(); } catch { /* reap */ } mod.runs.delete(rid); }
 
   const del = await seedCard({ kind: 'remove_member', summary: 'Remove p0 from Card WS', change: { workspaceId: ws.id, projectPath: projects[0].path } });
   r = await post(`/api/ask/threads/${del.threadId}/cards/${del.cardId}`, { state: 'applied' });
@@ -313,7 +323,7 @@ test('route: a live run of the workspace fails the card, and nothing changes', a
   try {
     const j = await (await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied' })).json();
     assert.equal(j.block.state, 'failed');
-    assert.match(j.block.error, /live run/);
+    assert.match(j.block.error, /run or scan owns it/);
   } finally { mod.runs.delete('live-ws-card'); }
   assert.equal((await readWs(ws.id)).projectPaths.includes(projects[3].path), false);
 });
@@ -335,4 +345,53 @@ test('the parent validator (workspace-deps) reads the real registry and refuses 
   const dup = await validateWorkspaceChange({ kind: 'create', name: 'Dup', projectKeys: cur.projectKeys });
   assert.equal(dup.ok, false);
   assert.match(dup.errors[0], /exact project set already exists/);
+});
+
+test('an automatic re-scan run that ends tells its workspace page how: refreshed, failed, stopped — a superseded one says nothing', async () => {
+  const { WebSocket } = await import('ws');
+  const { EventEmitter } = await import('node:events');
+  const sock = new WebSocket(`${base.replace('http', 'ws')}/ws`, { headers: { host: '127.0.0.1', origin: 'http://127.0.0.1' } });
+  const msgs = [];
+  sock.on('message', (d) => { try { msgs.push(JSON.parse(String(d))); } catch { /* ignore */ } });
+  await new Promise((res, rej) => { sock.on('open', res); sock.on('error', rej); });
+  try {
+    const end = (id, { status, outcome = null, superseded = false }) => {
+      const orch = Object.assign(new EventEmitter(), { state: { workspaceScan: outcome ? { outcome } : null }, getState: () => ({}) });
+      const entry = { id, kind: 'workspace-run', workspaceId: 'wks-shop-0000abcd', status: 'running', autoRescan: true, superseded, orch, events: [], seq: 0 };
+      mod.runs.set(id, entry);
+      mod._testing.wireRun(entry);
+      orch.emit('done', { status });
+      mod.runs.delete(id);
+    };
+    end('auto-1', { status: 'done', outcome: 'updated' });
+    end('auto-2', { status: 'done', outcome: 'failed' });
+    end('auto-3', { status: 'stopped' });
+    end('auto-4', { status: 'stopped', superseded: true });
+    end('auto-5', { status: 'error' });
+    const seen = await waitFor(async () => {
+      const got = msgs.filter((m) => m.type === 'workspaces-changed' && m.workspaceId === 'wks-shop-0000abcd');
+      return got.length >= 4 ? got : null;
+    });
+    assert.deepEqual(seen.map((m) => [m.runId, m.action]), [
+      ['auto-1', 'description'], ['auto-2', 'rescan-failed'], ['auto-3', 'rescan-stopped'], ['auto-5', 'rescan-failed'],
+    ]);
+  } finally { sock.close(); }
+});
+
+test('the parent validator reads live runs from the pipeline rows: a running Workspace scan vs any other run', async () => {
+  const { validateWorkspaceChange } = await import('../src/core/ask/workspace-deps.mjs');
+  const { seedPipelineRow } = await import('./helpers/db-seed.mjs');
+  const { getDb } = await import('../src/core/db.mjs');
+  const cur = await readWs(ws.id);
+  const warn = async () => (await validateWorkspaceChange({ kind: 'add_members', workspaceId: ws.id, projectKeys: [projects[3].key] })).card.warnings.join('\n');
+  const row = (id, wf) => seedPipelineRow({ id, projectKey: cur.projectKeys[0], workspaceKey: ws.id, target: 'workspace', status: 'running',
+    startedAt: new Date().toISOString(), stepper: { version: 2, template: { id: wf, name: wf } } });
+  try {
+    row('5ca50001', 'wf_workspace_scan');
+    assert.match(await warn(), /A Workspace scan of .* is running/);
+    row('5ca50002', 'wf_default');
+    assert.match(await warn(), /A run of .* is live/);
+  } finally {
+    getDb().prepare("DELETE FROM pipelines WHERE id IN ('5ca50001', '5ca50002')").run();
+  }
 });

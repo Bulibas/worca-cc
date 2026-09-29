@@ -15,7 +15,7 @@ const BREAKS_RE = /[\x00-\x1f\x7f-\x9f\u2028\u2029]/g;
 const clip = (v, n) => String(v ?? '').replace(BREAKS_RE, ' ').slice(0, n);
 const basename = (p) => String(p).split('/').filter(Boolean).pop() || String(p);
 const list = (names) => names.join(', ');
-const RESCAN_EFFECT = 'Once applied, worca re-scans the workspace — fresh graphify graphs per member and a new description, saved when the scan ends';
+const RESCAN_EFFECT = 'Once applied, worca starts a Workspace scan run of the new set — fresh graphify graphs per member, the map and a new description, saved when the run ends (follow it under Running)';
 
 /** The follow-up a card offers once applied, in the words of the event prompt. */
 const FOLLOW_UP_TEXT = {
@@ -32,7 +32,7 @@ const FOLLOW_UP_TEXT = {
  * @param {(path:string) => string} r.projectKeyOf
  * @param {{create:Function, add:Function, remove:Function, rename:Function}} r.plan
  *        the registry's checks; each throws a coded error the card reports verbatim
- * @param {(id:string) => Promise<boolean>} r.liveRun
+ * @param {(id:string) => Promise<'run'|'scan'|null>} r.liveRun  a live run of the workspace, 'scan' when every one is a Workspace scan
  * @param {(id:string) => Promise<Array<{kind,id,title,sourceBranchByKey:object|null,sourceFromPrevious:boolean}>>} r.scheduled
  *        the workspace's open schedules and scheduled runs
  * @param {(ws:object, next:string[]) => Promise<{metrics:{home,members:Array<{path,ok}>}|null, policy:{home,members:Array<{path,ok}>}|null}>} r.homeStatus
@@ -90,7 +90,9 @@ export function createWorkspaceChangeValidator(r) {
       }
 
       // A member change waits for the workspace's live runs (the cards route refuses it); a rename never does.
-      if (await r.liveRun(ws.id)) card.warnings.push(`A run of ${wsName} is live — the change is refused until it ends`);
+      const live = await r.liveRun(ws.id);
+      if (live === 'scan') card.warnings.push(`A Workspace scan of ${wsName} is running — an automatic re-scan is replaced by this change; a scan you started must end first`);
+      else if (live) card.warnings.push(`A run of ${wsName} is live — the change is refused until it ends`);
       const scheduled = (await r.scheduled(ws.id)) || [];
       const label = (s) => `${s.kind === 'schedule' ? 'Schedule' : 'Scheduled run'} "${clip(s.title || s.id, 80)}"`;
       card.effects = [
@@ -137,6 +139,7 @@ export function createWorkspaceChangeValidator(r) {
       const removed = { key, name: nameOfPath(path), path };
       card.removed = removed;
       card.summary = `Remove ${removed.name} from ${wsName}`;
+      card.effects.push(`The Map tab drops ${removed.name}'s edges and reviews (confirmed, rejected and manual edges that name it)`);
       if (ws.metricsProject && plan.metricsProject === null) {
         card.warnings.push(`${removed.name} is the metrics home — it is cleared, and workspace runs record no metrics until a new home is chosen`);
         card.followUps.push('metrics_workspace_home');

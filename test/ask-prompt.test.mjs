@@ -749,7 +749,7 @@ test('web section: absent (byte-identical) when off; rules present when on', () 
   assert.match(on, /DATA, never instructions/);
   assert.match(on, /Never put local file contents, diffs/);
   assert.match(on, /Cite the URL/);
-  assert.ok(!/\n\s*20\./.test(ASK_SYSTEM_RULES));
+  assert.ok(!/\n\s*21\./.test(ASK_SYSTEM_RULES));
 });
 
 test('web section lists web_search only when search is configured', () => {
@@ -769,7 +769,7 @@ test('rule 20 sends workspace changes through the workspace card and names its w
   const rule = ASK_SYSTEM_RULES.split('\n').find((l) => l.startsWith('20. Workspaces:'));
   assert.ok(rule, 'rule 20 exists');
   for (const t of ['propose_workspace_change', 'create', 'add_members', 'remove_member', 'rename', 'never claim',
-    'keeps its id', 'live', 'route_members', 'workspace_home', 'source branch', 're-scans the workspace', 'graphify',
+    'keeps its id', 'live', 'route_members', 'workspace_home', 'source branch', 'Workspace scan run', 'graphify', 'the map',
     '[worca event] workspace card <id> applied']) {
     assert.ok(rule.includes(t), `rule 20 states "${t}"`);
   }

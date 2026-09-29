@@ -366,3 +366,56 @@ test('createWorkspace refuses cleanly when its key is still held by a workspace 
     (e) => e.code === 'DUPLICATE_NAME' && /choose another name/.test(e.message),
   );
 });
+
+// ---- a member change and the stored workspace map (schema v40) ----
+
+async function threeMemberMapped(name) {
+  const { sampleMap, DISPLAYS } = await import('./helpers/wsmap-stored.mjs');
+  const { saveWorkspaceScanResult, addWorkspaceManualEdge } = await import('../src/core/workspaces.mjs');
+  const [a, b, c] = [await freshRepo(), await freshRepo(), await freshRepo()];
+  const ws = await createWorkspace({ name, projectPaths: [a, b, c] });
+  const key = (p) => ws.projectKeys[ws.projectPaths.indexOf(p)];
+  // Every scanned edge: a uses c. A manual edge b uses c, and one a uses b.
+  const { map, synthesis } = sampleMap({ keys: [key(a), key(c)], names: ['a', 'c'], name });
+  map.members.push({ ...map.members[0], key: key(b), name: 'b' });
+  await saveWorkspaceScanResult(ws.id, { map, synthesis: { ...synthesis, roles: { [key(c)]: 'the c role' } } });
+  await addWorkspaceManualEdge(ws.id, { from: key(b), to: key(c), kind: 'http', display: 'zz-manual-b-to-c' });
+  await addWorkspaceManualEdge(ws.id, { from: key(a), to: key(b), kind: 'http', display: 'zz-manual-a-to-b' });
+  return { ws, a, b, c, key, DISPLAYS };
+}
+
+test('removeWorkspaceMember takes the member out of the stored map and its reviews, and re-renders a generated description', async () => {
+  const { readWorkspaceMap } = await import('../src/core/workspaces.mjs');
+  const { ws, c, key, DISPLAYS } = await threeMemberMapped('Mapped Remove');
+  const before = await readWorkspace(ws.id);
+  assert.match(before.description, new RegExp(DISPLAYS.http.replace(/[{}]/g, '.')), 'the scanned edge is rendered before');
+  const up = await removeWorkspaceMember(ws.id, c);
+  const stored = await readWorkspaceMap(ws.id);
+  assert.equal(stored.map.members.some((m) => m.key === key(c)), false, 'no longer a map member');
+  assert.equal(stored.map.edges.some((e) => e.from === key(c) || e.to === key(c)), false, 'no edge names it');
+  assert.equal(JSON.stringify(stored.map.order).includes(key(c)), false, 'not in the change order');
+  assert.equal(key(c) in (stored.synthesis.roles || {}), false, 'its role is gone');
+  assert.deepEqual(stored.overrides.manual.map((m) => m.display), ['zz-manual-a-to-b'], 'manual edges naming it are gone, others kept');
+  assert.equal(up.descriptionOrigin, 'generated');
+  assert.doesNotMatch(up.description, /zz-invoices|zz-manual-b-to-c/, 're-rendered without it');
+  assert.match(up.description, /zz-manual-a-to-b/, 'the kept manual edge is still rendered');
+});
+
+test('removeWorkspaceMember leaves a hand-edited description alone (D8), but still prunes the map', async () => {
+  const { readWorkspaceMap } = await import('../src/core/workspaces.mjs');
+  const { ws, c, key } = await threeMemberMapped('Mapped Edited');
+  await updateWorkspace(ws.id, { description: 'my own words about c' });
+  const up = await removeWorkspaceMember(ws.id, c);
+  assert.equal(up.description, 'my own words about c');
+  assert.equal(up.descriptionOrigin, 'edited');
+  assert.equal((await readWorkspaceMap(ws.id)).map.members.some((m) => m.key === key(c)), false);
+});
+
+test('addWorkspaceMembers keeps the stored map as it is (the new member has no edges until a re-scan)', async () => {
+  const { readWorkspaceMap } = await import('../src/core/workspaces.mjs');
+  const { ws } = await threeMemberMapped('Mapped Add');
+  const before = await readWorkspaceMap(ws.id);
+  const d = await freshRepo();
+  await addWorkspaceMembers(ws.id, [d]);
+  assert.deepEqual(await readWorkspaceMap(ws.id), before);
+});

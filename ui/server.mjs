@@ -901,6 +901,13 @@ function wireRun(entry) {
         // _finalizeWorkspaceScan, which ran before this event) — refresh every open list (D13).
         const scanOutcome = orch.state?.workspaceScan?.outcome;
         if (scanOutcome === 'created' || scanOutcome === 'updated') emitChanged('workspaces-changed', `scan-${scanOutcome}`);
+        // An automatic re-scan (afterMembersChanged) tells its workspace page how it ended; one a
+        // newer member change superseded says nothing — its successor reports instead.
+        if (entry.autoRescan && !entry.superseded) {
+          const how = entry.status === 'done' ? (scanOutcome === 'updated' ? 'description' : 'rescan-failed')
+            : entry.status === 'stopped' ? 'rescan-stopped' : entry.status === 'paused' ? 'rescan-paused' : 'rescan-failed';
+          broadcast({ type: 'workspaces-changed', action: how, workspaceId: entry.workspaceId, runId: entry.id });
+        }
       }
       if (name === 'error') {
         // The launch-error channel (a failure BEFORE the pipeline row exists). A
@@ -4827,19 +4834,15 @@ app.get('/api/fs/dirs', async (req, res) => {
 // /api/projects + /api/workflows. The :id is the workspaceKey, validated against
 // WORKSPACE_KEY_RE before any disk touch (a stale/crafted id reads as 404).
 // ---------------------------------------------------------------------------
-/** The automatic re-scan still running for a workspace, with its last progress (the page's loader
- *  after a reload; it resubscribes to the scanId for the rest), or null. */
-function liveRescanOf(id) {
-  for (const r of runs.values()) {
-    if (r.workspaceId !== id || r.kind !== 'scan' || !r.autoRescan) continue;
-    if (!['running', 'scanning'].includes(String(r.status || '').toLowerCase())) continue;
-    const last = [...(r.events || [])].reverse().find((e) => e && e.type === 'scan-progress') || {};
-    return {
-      scanId: r.scanId || r.id, phase: last.phase || 'graph', message: last.message || '',
-      ...(last.projectsTotal != null ? { projectsDone: last.projectsDone || 0, projectsTotal: last.projectsTotal } : {}),
-    };
-  }
+/** The automatic re-scan run (autoRescan: started after a member change) that still owns a
+ *  workspace, or null. The page's loader follows it after a reload. */
+function liveAutoRescan(id) {
+  for (const r of runs.values()) if (r.workspaceId === id && r.autoRescan && ownsWorkspaceTarget(r)) return r;
   return null;
+}
+function liveRescanOf(id) {
+  const r = liveAutoRescan(id);
+  return r ? { runId: r.id, pipelineId: r.pipelineId || null } : null;
 }
 const withRescan = (w) => { const rescan = w && liveRescanOf(w.id); return rescan ? { ...w, rescan } : w; };
 
@@ -4924,58 +4927,75 @@ app.patch('/api/workspaces/:id', async (req, res) => {
   }
 });
 
-/** A live run, or a scan the USER started (the wizard's re-scan), of this workspace in THIS
- *  process (the runs Map) blocks a member change or a delete; an automatic re-scan does not —
- *  the change supersedes it (supersedeRescans). */
+/** A run that owns this workspace (ownsWorkspaceTarget: any active run, or a paused Workspace
+ *  scan) in THIS process blocks a member change — except an automatic re-scan: the change
+ *  supersedes it (supersedeRescans). */
 function workspaceMembersBusy(id) {
-  return [...runs.values()].some((r) =>
-    r.workspaceId === id && !(r.kind === 'scan' && r.autoRescan) &&
-    ['running', 'starting', 'created', 'scanning', 'pausing'].includes(String(r.status || '').toLowerCase()));
+  return [...runs.values()].some((r) => r.workspaceId === id && !r.autoRescan && ownsWorkspaceTarget(r));
 }
 
-/** Stop the automatic re-scans still running for a workspace: their member set is out of date. */
+/** Stop the automatic re-scan still owning a workspace: its member set is out of date. */
 function supersedeRescans(id) {
   for (const r of runs.values()) {
-    if (r.workspaceId !== id || r.kind !== 'scan' || !r.autoRescan) continue;
-    if (!['running', 'scanning'].includes(String(r.status || '').toLowerCase())) continue;
-    try { r.orch && typeof r.orch.stop === 'function' && r.orch.stop(); } catch { /* best-effort */ }
-    r.status = 'stopped';
+    if (r.workspaceId !== id || !r.autoRescan || !ownsWorkspaceTarget(r)) continue;
+    r.superseded = true;
+    try { stopRun(r.id, 'worca'); } catch { /* best-effort: its save refuses a changed set anyway */ }
   }
 }
 
 /**
- * Save an automatic re-scan's description — only while the workspace still has exactly the
- * member set the scan looked at (a later change started its own re-scan). Returns whether it saved.
+ * Start a re-scan of a workspace from inside the server, through the same launch as
+ * POST /api/workspaces/:id/scan (scanRequest), and tag its run as automatic. A workspace the
+ * scan cannot read (a member that is not its own repository with a commit), a scan model that
+ * no longer fits, or a signed-out CLI skips it with the reason — the page offers Re-scan.
+ * @returns {Promise<{runId:string}|{skipped:string}>}
  */
-async function saveRescanDescription({ workspaceId, projectPaths }, description) {
-  const ws = await readWorkspace(workspaceId);
-  if (!ws || typeof description !== 'string' || !description.trim()) return false;
-  if (rootsHash(ws.projectPaths) !== rootsHash(projectPaths)) return false;
-  await updateWorkspace(workspaceId, { description });
-  return true;
+async function startAutoRescan(ws) {
+  const problems = scanMemberProblems(ws.projectPaths);
+  if (problems.length) return { skipped: `read-only workspace scan: ${problems.join('; ')}` };
+  let models;
+  try { models = await scanModelsFor({}, ws.projectPaths); }
+  catch (err) { return { skipped: err && err.message ? err.message : String(err) }; }
+  if (!(models && modelHasBaseUrlRouting(models.scanModel))) {
+    const { state } = await probeClaudeAuth({ bin: configuredClaudeBin(), mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK) });
+    if (state === 'signed-out') return { skipped: CLAUDE_SIGNED_OUT_MESSAGE };
+  }
+  let out = { status: 200, body: null };
+  const res = {
+    statusCode: 200, headersSent: false,
+    status(code) { this.statusCode = code; return this; },
+    json(payload) { out = { status: this.statusCode, body: payload }; this.headersSent = true; return this; },
+  };
+  await scanRequest({ body: {} }, res, { id: ws.id, name: ws.name, projectPaths: ws.projectPaths, rescan: true, models });
+  const runId = out.body && out.body.runId;
+  const entry = runId ? runs.get(runId) : null;
+  if (!entry) return { skipped: (out.body && out.body.error) || `the re-scan could not start (HTTP ${out.status})` };
+  entry.autoRescan = true;
+  return { runId };
 }
 
 /**
  * After a member change (the members route and Ask's workspace card): discover the added
- * members' metrics / policy branches (so the Team tab and the homes read them at once), then
- * re-scan the workspace — per-member graphify graphs and a new description, saved when it
- * finishes. Runs build their own graphs per member worktree from the registry at start, so the
- * next run already covers the new set. Returns {scanId}.
+ * members' metrics / policy branches (so the Team tab and the homes read them at once), stop an
+ * automatic re-scan of the old set, and re-scan the workspace — per-member graphify graphs, the
+ * map and a new description, saved when the run ends done. Runs build their own graphs per
+ * member worktree from the registry at start, so the next run already covers the new set.
+ * @returns {Promise<{runId:string}|{skipped:string}>}
  */
-function afterMembersChanged(workspace, added = []) {
-  supersedeRescans(workspace.id);
+async function afterMembersChanged(workspace, added = []) {
   for (const dir of added) {
     discoverProject(dir, { force: true }).then(() => emitChanged('team-metrics-changed', 'discovered')).catch(() => { /* retried hourly */ });
     discoverPolicy(dir, { force: true }).then(() => emitChanged('team-policy-changed', 'discovered')).catch(() => { /* retried hourly */ });
   }
-  const scanId = startScan({ projectPaths: workspace.projectPaths, name: workspace.name, workspaceId: workspace.id, autoRescan: true });
-  return { scanId };
+  supersedeRescans(workspace.id);
+  try { return await startAutoRescan(workspace); }
+  catch (err) { return { skipped: err && err.message ? err.message : String(err) }; }
 }
 
 // Change the member set: body {add: [paths]} or {remove: path}. The id stays frozen
-// (workspaces.mjs D1). 409 while a run (or a scan the user started) of the workspace is
-// live — a live run keeps its own frozen members, but the metrics / policy home it
-// resolves at its end must not move under it. Removing the home member clears that home
+// (workspaces.mjs D1). 409 while a run (or a scan the user started) owns the workspace —
+// a live run keeps its own frozen members, but the metrics / policy home it resolves at
+// its end must not move under it, and a scan would save a map of the old set. Removing the home member clears that home
 // (clearedHomes). Every change re-scans the workspace (afterMembersChanged -> rescan).
 app.post('/api/workspaces/:id/members', async (req, res) => {
   const id = req.params.id;
@@ -4984,14 +5004,14 @@ app.post('/api/workspaces/:id/members', async (req, res) => {
   const adding = Array.isArray(body.add);
   const removing = typeof body.remove === 'string';
   if (adding === removing) return badRequest(res, 'give add (an array of project paths) or remove (one project path)');
-  if (workspaceMembersBusy(id)) return res.status(409).json({ error: 'cannot change the members of a workspace with a live run or scan' });
+  if (workspaceMembersBusy(id)) return res.status(409).json({ error: 'cannot change the members of a workspace while a run or scan owns it' });
   try {
     const before = await readWorkspace(id);
     if (!before) return res.status(404).json({ error: 'workspace not found' });
     const workspace = adding
       ? await addWorkspaceMembers(id, body.add.map((p) => resolveProjectDir(p)).filter(Boolean))
       : await removeWorkspaceMember(id, body.remove);
-    const rescan = afterMembersChanged(workspace, workspace.projectPaths.filter((p) => !before.projectPaths.includes(p)));
+    const rescan = await afterMembersChanged(workspace, workspace.projectPaths.filter((p) => !before.projectPaths.includes(p)));
     const clearedHomes = [
       ...(before.metricsProject && !workspace.metricsProject ? ['metrics'] : []),
       ...(before.policyProject && !workspace.policyProject ? ['policy'] : []),
@@ -7855,7 +7875,7 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
         let result;
         try {
           if (card.kind !== 'create' && card.kind !== 'rename' && wid && workspaceMembersBusy(wid)) {
-            throw new Error('cannot change the members of a workspace with a live run or scan');
+            throw new Error('cannot change the members of a workspace while a run or scan owns it');
           }
           const before = wid ? await readWorkspace(wid) : null;
           result = await applyWorkspaceChange(card);
@@ -7863,8 +7883,10 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
             // A new or changed member set: discover the new members and re-scan (graphs + description).
             const ws = await readWorkspace(result.workspaceId);
             if (ws) {
-              const { scanId } = afterMembersChanged(ws, ws.projectPaths.filter((p) => !(before?.projectPaths || []).includes(p)));
-              result = { ...result, scanId, detail: `${result.detail} · re-scanning the description` };
+              const rescan = await afterMembersChanged(ws, ws.projectPaths.filter((p) => !(before?.projectPaths || []).includes(p)));
+              result = rescan.runId
+                ? { ...result, rescanRunId: rescan.runId, detail: `${result.detail} · re-scanning the workspace` }
+                : { ...result, detail: `${result.detail} · no re-scan (${rescan.skipped})` };
             }
           }
           emitChanged('workspaces-changed', card.kind === 'create' ? 'created' : card.kind === 'rename' ? 'renamed' : 'members');
@@ -9549,7 +9571,7 @@ if (isMain) {
 
 export { app, server, runs };
 export const _testing = {
-  wireRun, summarizeRuns, scanRequest, fireTicket, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
+  wireRun, summarizeRuns, scanRequest, fireTicket, afterMembersChanged, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
   chatActions, chatRouter, channelHost, handleChatInbound, enqueueChatWork, answerRun,
   chatNotifier, resumeRun, resolveHljsAssets, resolveEsmAsset, askJobs, askFollowers, askDeleting, resolveAskContext, flipCard, askWebAccessFor,
   startCloneJob, followCloneCard, CLONE_JOBS,

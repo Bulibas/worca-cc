@@ -5,26 +5,31 @@
 //     propose_workspace_change (validate only — the card is the user's to apply);
 //   • the parent: turn.mjs re-validates a proposal with validateWorkspaceChange, and the cards route
 //     applies a confirmed card with applyWorkspaceChange (behind its live-run guard).
-// createWorkspaceWithHomes is also POST /api/workspaces: a workspace made from a card picks its
-// metrics / policy homes exactly the way the Workspaces page does.
+// A workspace made from a card is created by workspace-scan-run.mjs createWorkspaceWithHomes, the
+// same call POST /api/workspaces makes, so it picks its metrics / policy homes the same way.
 import { basename } from 'node:path';
 import { listProjects } from '../projects.mjs';
 import {
-  readWorkspace, createWorkspace, updateWorkspace, addWorkspaceMembers, removeWorkspaceMember,
-  planWorkspaceCreate, planMembersAdd, planMemberRemove, planWorkspaceRename,
+  readWorkspace, updateWorkspace, addWorkspaceMembers, removeWorkspaceMember,
+  checkNewWorkspace, planMembersAdd, planMemberRemove, planWorkspaceRename,
 } from '../workspaces.mjs';
 import { projectKey } from '../store.mjs';
 import { getDb } from '../db.mjs';
 import { listSchedules, getSchedule, listTickets, getTicket } from '../scheduler.mjs';
-import { workspaceMetricsStatus, autoMetricsHome } from '../metrics/sync.mjs';
-import { workspacePolicyStatus, autoPolicyHome, resolveProjectPolicy } from '../policy/sync.mjs';
+import { workspaceMetricsStatus } from '../metrics/sync.mjs';
+import { workspacePolicyStatus } from '../policy/sync.mjs';
+import { createWorkspaceWithHomes } from '../workspace-scan-run.mjs';
+import { WORKSPACE_SCAN_WORKFLOW_ID } from '../graph/builtin-workflows.mjs';
 import { createWorkspaceChangeValidator } from './workspace-proposal.mjs';
 
-/** A run of the workspace that has not settled, by its pipeline row (any process: CLI, another UI). */
+/** A run of the workspace that has not settled, by its pipeline row (any process: CLI, another
+ *  UI): 'run', or 'scan' when every such run is a Workspace scan (its stepper names the template). */
 function liveRun(workspaceId) {
-  return !!getDb().prepare(
-    "SELECT 1 FROM pipelines WHERE workspace_key = ? AND archived_at IS NULL AND status IN ('created', 'starting', 'running', 'pausing') LIMIT 1",
-  ).get(workspaceId);
+  const rows = getDb().prepare(
+    "SELECT json_extract(CASE WHEN json_valid(stepper) THEN stepper END, '$.template.id') AS wf FROM pipelines WHERE workspace_key = ? AND archived_at IS NULL AND status IN ('created', 'starting', 'running', 'pausing')",
+  ).all(workspaceId);
+  if (!rows.length) return null;
+  return rows.every((r) => r.wf === WORKSPACE_SCAN_WORKFLOW_ID) ? 'scan' : 'run';
 }
 
 /** The workspace's open schedules and one-off scheduled runs, with the per-member bits of their stored request. */
@@ -61,28 +66,11 @@ export const validateWorkspaceChange = createWorkspaceChangeValidator({
   listProjects,
   readWorkspace,
   projectKeyOf: projectKey,
-  plan: { create: planWorkspaceCreate, add: planMembersAdd, remove: planMemberRemove, rename: planWorkspaceRename },
+  plan: { create: checkNewWorkspace, add: planMembersAdd, remove: planMemberRemove, rename: planWorkspaceRename },
   liveRun: async (id) => liveRun(id),
   scheduled: async (id) => scheduled(id),
   homeStatus,
 });
-
-/**
- * Create a workspace the way POST /api/workspaces does: no explicit metrics home adopts the one
- * member that already records (if exactly one); the policy home defaults to the metrics home when
- * its policy resolves, else the one member (or shared home) whose policy does; else unset.
- * @returns {Promise<{workspace:object, metricsHomeAuto:boolean}>}
- */
-export async function createWorkspaceWithHomes({ name, projectPaths, description, metricsProject: explicitMetrics = null, policyProject: explicitPolicy = null }) {
-  const metricsProject = explicitMetrics || await autoMetricsHome(projectPaths);
-  let policyProject = explicitPolicy || null;
-  if (!policyProject) {
-    const viaMetrics = metricsProject ? await resolveProjectPolicy(metricsProject, { discover: false }).catch(() => null) : null;
-    policyProject = viaMetrics?.ok ? metricsProject : await autoPolicyHome({ projectPaths }).catch(() => null);
-  }
-  const workspace = await createWorkspace({ name, projectPaths, description, metricsProject, policyProject });
-  return { workspace, metricsHomeAuto: !explicitMetrics && !!metricsProject };
-}
 
 /**
  * Apply a CONFIRMED workspace card (ui/server.mjs cards route, after the user's click and its

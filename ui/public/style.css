@@ -1539,8 +1539,13 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .wd-rescan-body{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1 1 auto;}
 .wd-rescan .status-label{font-size:13.5px;}
 .wd-rescan .status-sub{overflow-wrap:anywhere;}
-.wd-rescan .wd-rescan-phases{justify-content:flex-start;gap:6px;margin:6px 0 2px;}
-.wd-rescan .wd-rescan-phases [data-phase]{font-size:10px;padding:4px 10px;}
+.wd-rescan.is-stopped .wd-rescan-mark,.wd-rescan.is-paused .wd-rescan-mark,.wd-rescan.is-skipped .wd-rescan-mark{color:var(--amber-ink);background:var(--amber-bg);}
+/* The scan run's own stages, as pills: done ones muted-strong, the running one inverted. */
+.wd-rescan-phases{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 2px;}
+.wd-rescan-phases [data-phase]{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:4px 10px;}
+.wd-rescan-phases [data-phase].done{color:var(--ink-2);}
+.wd-rescan-phases [data-phase].active{color:var(--on-ink);background:var(--ink);border-color:var(--ink);}
+.wd-rescan-open{font-size:12.5px;width:fit-content;}
 .wd-rescan-hint{margin-top:2px;}
 .wd-add-list{display:flex;flex-direction:column;gap:2px;max-height:50vh;overflow:auto;}
 .wd-add-row{display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px;padding:8px 0;border-bottom:1px solid var(--line);cursor:pointer;}
