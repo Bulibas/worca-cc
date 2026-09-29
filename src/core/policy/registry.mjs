@@ -89,8 +89,13 @@ const finiteNum = (v) => typeof v === 'number' && Number.isFinite(v);
 export function looksLikeSecret(v) {
   const s = String(v ?? '');
   if (/^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(s)) return false;           // ${VAR} indirection is the sanctioned form
-  if (/^(sk-|xox[abp]-|ghp_|gho_|github_pat_|glpat-|AKIA|eyJ[A-Za-z0-9_-]{10,}\.)/.test(s)) return true;
-  return /^[A-Za-z0-9+/_=-]{40,}$/.test(s);                                 // a long opaque token
+  // No `{n,}` run over the text: V8 keeps a backtrack entry per character and throws RangeError on a run of
+  // about 5.5M characters (a policy doc, a manifest, an 8 MB body). `run` = the length of the leading run.
+  const run = (outside) => { const i = s.search(outside); return i < 0 ? s.length : i; };
+  if (/^(sk-|xox[abp]-|ghp_|gho_|github_pat_|glpat-|AKIA)/.test(s)) return true;
+  if (s.startsWith('eyJ') && run(/[^A-Za-z0-9_-]/) >= 13 && s[run(/[^A-Za-z0-9_-]/)] === '.') return true;
+  if (/^(\/|\.\/|~\/|[A-Za-z]:[\\/])/.test(s)) return false;                // a path, not a token
+  return s.length >= 40 && run(/[^A-Za-z0-9+/_=-]/) === s.length;          // a long opaque token
 }
 
 /**
