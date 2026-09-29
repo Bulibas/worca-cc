@@ -413,6 +413,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     el.jump.addEventListener('click', jumpToLatest);
     sheet.appendChild(el.jump);
     for (const edge of ['n', 'e', 'w', 'ne', 'nw']) sheet.appendChild(buildResizeHandle(edge));
+    sheet.appendChild(buildDropTarget(sheet));
     dock.appendChild(sheet);
     dock.appendChild(pill);
     el.pill = pill;
@@ -493,6 +494,78 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       st.pendingFiles = [...others, { name, bytes: f.size, dataBase64, attKind, mime: binMime || null }];
     }
     renderChips();
+  }
+
+  // Drag-and-drop and paste feed the same addFiles() as the "+" button: no
+  // validation of their own. Only drags that carry files are touched, so text
+  // and element drags (widgets-input.mjs list reordering) keep their defaults.
+  const carriesFiles = (dt) => !!dt && Array.from(dt.types || []).includes('Files');
+
+  /**
+   * The whole sheet is the drop target. dragenter/dragleave fire on every child
+   * crossed (enter on the new child lands before leave on the old one), so a
+   * depth counter — not the event target — decides when the pointer really left;
+   * drop and dragend reset it outright.
+   */
+  function buildDropTarget(sheet) {
+    const overlay = make('div', 'ask-drop');
+    overlay.setAttribute('data-ask-drop', '');
+    overlay.setAttribute('aria-hidden', 'true');
+    overlay.hidden = true;
+    overlay.appendChild(make('span', 'ask-drop-label', 'Drop files to attach'));
+    let depth = 0;
+    const show = (on) => {
+      overlay.hidden = !on;
+      sheet.classList.toggle('is-dropping', on);
+    };
+    const reset = () => { depth = 0; show(false); };
+    sheet.addEventListener('dragenter', (e) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      depth += 1;
+      show(true);
+    });
+    sheet.addEventListener('dragover', (e) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    });
+    sheet.addEventListener('dragleave', (e) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      depth = Math.max(0, depth - 1);
+      if (!depth) show(false);
+    });
+    sheet.addEventListener('drop', (e) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      reset();
+      addFiles(e.dataTransfer.files);
+    });
+    sheet.addEventListener('dragend', reset);
+    return overlay;
+  }
+
+  // A clipboard image is named "image.png" (or nothing) by the browser: every
+  // paste would then replace the last one through addFiles' name dedupe. Such
+  // files get a unique "pasted-<timestamp>.<ext>"; real copied files keep theirs.
+  let lastPasteStamp = 0;
+  function namePastedFiles(files) {
+    return [...files].map((f) => {
+      const name = String(f.name || '');
+      if (name && !/^image\.[a-z0-9]+$/i.test(name)) return f;
+      const dot = name.lastIndexOf('.');
+      const ext = dot >= 0 ? name.slice(dot).toLowerCase()
+        : (Object.keys(ASK_ATTACH_BINARY).find((k) => ASK_ATTACH_BINARY[k] === f.type) || '.txt');
+      lastPasteStamp = Math.max(Date.now(), lastPasteStamp + 1);
+      return new win.File([f], `pasted-${lastPasteStamp}${ext}`, { type: f.type });
+    });
+  }
+
+  function onComposerPaste(e) {
+    const cd = e.clipboardData;
+    if (!cd || !cd.files || !cd.files.length) return; // a text paste goes ahead natively
+    e.preventDefault();
+    addFiles(namePastedFiles(cd.files));
   }
 
   function updateSendStop() {
@@ -666,6 +739,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); }
     });
     el.input.addEventListener('input', fitInput);
+    el.input.addEventListener('paste', onComposerPaste);
     box.appendChild(el.input);
 
     el.composerMsg = make('div', 'ask-composer-msg');
