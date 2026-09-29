@@ -7,6 +7,7 @@ import { resolveModelEnv, resolveModelCost } from '../config.mjs';
 import { safeParseJson } from '../protocol.mjs';
 import { memoryRoot, GLOBAL_SCOPE, projectScope, listMemory, readMemory } from '../memory-store.mjs';
 import { NIGHT_CRITERIA } from './config.mjs';
+import { ASK_DENY_RULES } from '../ask/spawn.mjs';
 
 export const NIGHT_DECIDER_SYSTEM_PROMPT = `You are worca's nightDecider. The developer is away and a run is waiting on a question they would normally answer.
 Decide as THEY would. Their stated preferences (the "Worca memory" rules below) outrank everything else.
@@ -24,6 +25,9 @@ const MEMORY_MAX_BYTES = 24_000;
 const TIMEOUT_MS = 5 * 60_000;
 const MAX_TURNS = 12;
 const TOOLS = ['Read', 'Grep', 'Glob'];
+// Ask Worca's secret-path denies, minus the run store and checkouts: the decider's cwd is the
+// run's checkout (under .worca-cc/runs) and its plan files live in the store.
+export const NIGHT_DENY_RULES = Object.freeze(ASK_DENY_RULES.filter((r) => !/\.worca-cc\/(store|runs)\//.test(r)));
 
 /** Global + project memory bodies as one text block, capped. Never throws. */
 export async function readMemoryText(projectKeyValue) {
@@ -97,7 +101,11 @@ export async function runNightAnalysis({ questions, cwd, task, planPaths, memory
     const res = await run({
       cwd, systemPrompt: NIGHT_DECIDER_SYSTEM_PROMPT,
       prompt: buildAnalysisPrompt({ questions, task, planPaths, memory, criteria: criteria || {}, context }),
-      model, modelEnv: resolveModelEnv(model), effort: 'medium', permissionMode: 'acceptEdits',
+      model, modelEnv: resolveModelEnv(model), effort: 'medium',
+      // The prompt carries agent-written question text, so the spawn is sandboxed like Ask Worca's:
+      // no MCP servers, user hooks/plugins or slash commands, no edit mode, secret paths denied.
+      permissionMode: 'dontAsk', strictMcpConfig: true, settingSources: ['project'], disableSlashCommands: true,
+      permissionRules: { deny: [...NIGHT_DENY_RULES] },
       allowedTools: [...TOOLS], tools: [...TOOLS], maxTurns: MAX_TURNS,
       signal: ctrl.signal, bin, envScrub, envAllowlist, spawnKind: 'aux',
       onEvent: (e) => {

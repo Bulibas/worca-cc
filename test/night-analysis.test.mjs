@@ -34,6 +34,15 @@ test('runNightAnalysis parses the reply and reports cost', async () => {
   assert.ok(r.costUsd > 0);
   assert.deepEqual(r.usage, { input_tokens: 10, output_tokens: 5 });
   assert.deepEqual(seen.allowedTools, ['Read', 'Grep', 'Glob'], 'read-only tools only');
+  // Its prompt carries agent-written question text: no MCP servers, user hooks/plugins or
+  // slash commands, no edit mode, and the Ask Worca secret-path denies.
+  assert.equal(seen.permissionMode, 'dontAsk');
+  assert.equal(seen.strictMcpConfig, true);
+  assert.deepEqual(seen.settingSources, ['project']);
+  assert.equal(seen.disableSlashCommands, true);
+  for (const rule of ['Bash', 'Edit', 'Write', 'Read(~/.ssh/**)', 'Read(//**/.env*)']) assert.ok(seen.permissionRules.deny.includes(rule), rule);
+  // ...but it must still read the run's checkout and its plan files.
+  assert.ok(!seen.permissionRules.deny.some((r) => /\.worca-cc\/(store|runs)\//.test(r)), 'the run checkout and plan stay readable');
 });
 
 test('mock mode answers offline: recommended else first, confident', async () => {
