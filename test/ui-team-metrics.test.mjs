@@ -91,10 +91,10 @@ const TM_DATA = {
   refresh: { requested: false, fetched: true, limited: false, retryInMs: 0 }, fetchError: null,
 };
 
-test('nav entry sits directly below Stats in sidebar and compact top-nav; routes to the view', async () => {
+test('nav entry sits directly below Stats in the sidebar; routes to the view', async () => {
   const { window, tick } = await boot({ fetchHandler: tmHandler({ scopes: SCOPES_ON, data: TM_DATA }) });
   const doc = window.document;
-  for (const sel of ['.sidebar .nav', '.topnav']) {
+  for (const sel of ['.sidebar .nav']) {
     const btns = [...doc.querySelectorAll(`${sel} button[data-nav]`)].map((b) => b.dataset.nav);
     assert.equal(btns[btns.indexOf('stats') + 1], 'team-metrics', sel);
   }

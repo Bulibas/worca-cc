@@ -129,7 +129,7 @@ import {
 import {
   renderSourcePane, collectSourcePane, renderProfileGate, renderProfileBar,
 } from './source-pane.mjs';
-import { renderStatsBody, renderBudgetIndicator, renderBudgetRing, renderBudgetReadout, renderCostPauseBanner, BUDGET_WARN_AT } from './stats-view.mjs';
+import { renderStatsBody, renderBudgetIndicator, renderBudgetRing, renderBudgetReadout, renderCostPauseBanner } from './stats-view.mjs';
 import { createComposer, isReservedWorkflowId, pluginOriginName } from './graph/composer.mjs';
 // mountStaticGraph is NOT imported here: the New-Pipeline workflow picker is a
 // bare <select> with no preview host on this branch (the v1 read-only mini-graph
@@ -532,11 +532,11 @@ function scheduleReconnect() {
 }
 
 // ---------------------------------------------------------------------------
-// Sidebar collapse (icon rail). One boolean, one class. The collapsed state is
-// a user PREFERENCE, unrelated to the <1080px breakpoint where the sidebar is
-// hidden outright in favour of .topnav — the two never overlap.
-// Persistence mirrors readRunDensity/setRunDensity (:12376, :12426),
-// the only existing private-mode-safe pair in this file.
+// Sidebar collapse (icon rail) + the responsive nav tiers. `sidebarCollapsed` is
+// the user's PREFERENCE and applies above 1080px only. Tablets (761-1080px) always
+// get the rail; phones (<=760px) get the FULL column as a drawer behind #mbar-menu.
+// railCollapsed() is the one reader every paint uses; nothing here persists a tier.
+// Persistence mirrors readRunDensity/setRunDensity, the private-mode-safe pair.
 // ---------------------------------------------------------------------------
 const SIDEBAR_KEY = 'worca-cc.sidebar.collapsed';
 
@@ -547,14 +547,34 @@ function readSidebarCollapsed() {
 
 let sidebarCollapsed = readSidebarCollapsed();
 
+// The same two queries as style.css "Responsive nav tiers". jsdom has no matchMedia:
+// both stay null there and every tier check below falls through to the desktop path.
+const PHONE_NAV_QUERY = '(max-width:760px)';
+const RAIL_TIER_QUERY = '(max-width:1080px)';
+function navMedia(q) {
+  try { return typeof window.matchMedia === 'function' ? window.matchMedia(q) : null; }
+  catch { return null; }
+}
+const phoneNavMq = navMedia(PHONE_NAV_QUERY);
+const railTierMq = navMedia(RAIL_TIER_QUERY);
+const isPhoneNav = () => !!(phoneNavMq && phoneNavMq.matches);
+/** The rail state every paint reads: phones never (the drawer is the full column),
+ *  tablets always, desktop by preference. */
+function railCollapsed() {
+  if (isPhoneNav()) return false;
+  if (railTierMq && railTierMq.matches) return true;
+  return sidebarCollapsed;
+}
+
 function applySidebarCollapsed() {
+  const collapsed = railCollapsed();
   const aside = $('.sidebar');
-  if (aside) aside.classList.toggle('collapsed', sidebarCollapsed);
-  document.body.classList.toggle('rail-collapsed', sidebarCollapsed);
+  if (aside) aside.classList.toggle('collapsed', collapsed);
+  document.body.classList.toggle('rail-collapsed', collapsed);
   const btn = $('#side-toggle');
   if (btn) {
-    btn.setAttribute('aria-expanded', String(!sidebarCollapsed));
-    const label = sidebarCollapsed ? 'Expand menu' : 'Collapse menu';
+    btn.setAttribute('aria-expanded', String(!collapsed));
+    const label = collapsed ? 'Expand menu' : 'Collapse menu';
     btn.title = label;
     btn.setAttribute('aria-label', label);
     // The glyph is one bare chevron pointing the way the rail will move: "<"
@@ -562,7 +582,7 @@ function applySidebarCollapsed() {
     // it back out). Rewriting `d` rather than mirroring in CSS keeps the arrow
     // optically centred — scaleX(-1) on a chevron shifts its visual mass.
     const chev = btn.querySelector('svg .chev');
-    if (chev) chev.setAttribute('d', sidebarCollapsed ? 'M9 6l6 6-6 6' : 'M15 6l-6 6 6 6');
+    if (chev) chev.setAttribute('d', collapsed ? 'M9 6l6 6-6 6' : 'M15 6l-6 6 6 6');
   }
   // The rail has no visible labels, so mirror each button's label into a native
   // tooltip while collapsed (the mock does this on all twelve). Written by JS,
@@ -577,7 +597,7 @@ function applySidebarCollapsed() {
   // span; an empty title would otherwise leave the button both tooltip-less and
   // silently "handled".
   for (const b of $$('.nav button[data-nav]:not([data-nav="running"])')) {
-    if (sidebarCollapsed) {
+    if (collapsed) {
       if (!b.dataset.railTitle) {
         const t = b.querySelector(':scope > span:not(.nav-count):not(.nav-rollup)');
         b.title = (t && t.textContent.trim()) || b.dataset.nav;
@@ -590,16 +610,22 @@ function applySidebarCollapsed() {
   }
 }
 
+/** Everything that renders differently on the rail: one call after the rail state moves
+ *  (the toggle, or a viewport crossing a tier). */
+function repaintNavMode() {
+  applySidebarCollapsed();
+  updateNavCounts();             // Running's title/aria-label (both states)
+  renderPipelineTabs();          // child rows <-> initials tiles
+  paintBudget();                 // spend block <-> budget ring
+  paintFreeDaily();              // the free-request line shows only in the full column
+}
+
 function setSidebarCollapsed(v) {
   sidebarCollapsed = !!v;
   // A write that throws (private mode) must not stop the in-memory flip.
   try { localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? '1' : '0'); }
   catch { /* private mode */ }
-  applySidebarCollapsed();
-  updateNavCounts();             // Running's title/aria-label (both states)
-  renderPipelineTabs();          // child rows <-> initials tiles (phase 3)
-  paintBudget();                 // spend block <-> budget ring (phase 4)
-  paintFreeDaily();              // the free-request line shows only in the full rail
+  repaintNavMode();
 }
 
 $('#side-toggle')?.addEventListener('click', () => setSidebarCollapsed(!sidebarCollapsed));
@@ -637,7 +663,7 @@ paintNodesGroup(readNodesCollapsed());
 // slid 298px -> 76px on every reload (transitionstart at ~50ms, still 297px
 // wide). Suppress it for this one call, force the layout so the collapsed width
 // becomes the transition's start value, then hand the transition back.
-const railAtBoot = sidebarCollapsed ? $('.sidebar') : null;
+const railAtBoot = railCollapsed() ? $('.sidebar') : null;
 if (railAtBoot) railAtBoot.style.transition = 'none';
 applySidebarCollapsed();
 if (railAtBoot) {
@@ -645,9 +671,68 @@ if (railAtBoot) {
   railAtBoot.style.transition = '';
 }
 
+// ── Phone drawer (<=760px) ──────────────────────────────────────────────────
+// #mbar-menu slides the SAME aside in (style.css "Responsive nav tiers"). While it
+// is open the page behind is inert (inert, not aria-hidden: only inert removes
+// focusability — see the track screens), focus starts on #side-close and comes back
+// to the hamburger. Any route closes it: a drawer button here, and showView for
+// back/forward and deep links. The Nodes disclosure and the mode switch keep it open.
+let mobileNavOpen = false;
+const mbarMenu = $('#mbar-menu');
+const navScrim = $('#nav-scrim');
+function setMobileNavOpen(open) {
+  const next = !!open && isPhoneNav();
+  if (next === mobileNavOpen) return;
+  mobileNavOpen = next;
+  const aside = $('.sidebar');
+  const hadFocus = !!(aside && aside.contains(document.activeElement));
+  document.body.classList.toggle('nav-open', next);
+  mbarMenu?.setAttribute('aria-expanded', String(next));
+  if (navScrim) navScrim.hidden = !next;
+  for (const n of [$('.main'), $('#mbar'), $('body > .ask-dock')]) {
+    if (n) n.toggleAttribute('inert', next);
+  }
+  if (next) $('#side-close')?.focus();
+  else if (hadFocus) mbarMenu?.focus();
+}
+mbarMenu?.addEventListener('click', () => setMobileNavOpen(!mobileNavOpen));
+navScrim?.addEventListener('click', () => setMobileNavOpen(false));
+$('#side-close')?.addEventListener('click', () => setMobileNavOpen(false));
+$('.sidebar')?.addEventListener('click', (e) => {
+  if (!mobileNavOpen) return;
+  const b = e.target.closest && e.target.closest('button');
+  if (!b || b.matches('.nav-group, [data-mode-open]')) return;
+  setMobileNavOpen(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !mobileNavOpen || e.defaultPrevented) return;
+  // A dialog over the drawer (the interface-mode cards, a confirm) or a running tour owns Esc.
+  if (document.querySelector('.viewer-modal:not(.hidden), .guide-layer')) return;
+  setMobileNavOpen(false);
+});
+/** A viewport crossing 760px or 1080px: drop an open drawer, then re-lay the column out. */
+function onNavTierChange() {
+  if (!isPhoneNav()) setMobileNavOpen(false);
+  repaintNavMode();
+}
+for (const m of [phoneNavMq, railTierMq]) {
+  if (!m) continue;
+  if (typeof m.addEventListener === 'function') m.addEventListener('change', onNavTierChange);
+  else if (typeof m.addListener === 'function') m.addListener(onNavTierChange);   // Safari < 14
+}
+// Pages with no sidebar entry of their own still need a name in the phone bar.
+const MBAR_TITLES = { 'getting-started': 'Getting started', 'workspace-create': 'New workspace', 'agent-create': 'New agent' };
+function paintMobileBar(name) {
+  const t = $('#mbar-title');
+  if (!t) return;
+  const b = $(`.nav button[data-nav="${name}"]`);
+  const label = b && b.querySelector(':scope > span:not(.nav-count):not(.nav-rollup)');
+  t.textContent = (label && label.textContent.trim()) || MBAR_TITLES[name] || 'Worca';
+}
+
 // ---------------------------------------------------------------------------
-// Spend indicator. One /api/budget snapshot drives the sidebar block, the
-// compact topnav amount, and the New-view creation gate. Refreshed at boot, on
+// Spend indicator. One /api/budget snapshot drives the sidebar block (the
+// drawer on phones) and the New-view creation gate. Refreshed at boot, on
 // every `hello`, on `budget-changed`/`pipelines-changed`, and on a slow tick.
 // ---------------------------------------------------------------------------
 const budgetState = { budget: null, timer: null, fetching: false, pending: false, lastFetchMs: 0 };
@@ -693,7 +778,7 @@ function paintFreeDaily() {
   const mount = document.getElementById('side-spend');
   if (!mount) return;
   mount.querySelector('.free-ind')?.remove();
-  const node = sidebarCollapsed ? null : renderFreeDaily(freeDailyState.status);
+  const node = railCollapsed() ? null : renderFreeDaily(freeDailyState.status);
   if (node) mount.appendChild(node);
   applyFreeDailyToNewView();
   if (currentView() === 'settings' && currentSettingsTab === 'providers') paintProviderFreeDaily();
@@ -748,22 +833,14 @@ async function refreshBudget() {
 function paintBudget() {
   const b = budgetState.budget;
   const mount = document.getElementById('side-spend');
-  const topAmt = document.getElementById('topnav-spend');
-  if (!b) { if (topAmt) topAmt.hidden = true; return; }
+  if (!b) return;
   if (mount) {
     // The rail has room for a compact twin, not a labelled block: a 38px ring under a
     // total limit, the 40px Spent/Saved stack without one (renderBudgetRing picks).
-    const render = sidebarCollapsed ? renderBudgetRing : renderBudgetIndicator;
+    const render = railCollapsed() ? renderBudgetRing : renderBudgetIndicator;
     mount.replaceChildren(render(b,
       { fmt: { usd: fmtUsd, usd4: fmtUsd4, duration: fmtDuration, estTitle } }));
     paintFreeDaily();   // the free-request line sits under the block this just replaced
-  }
-  if (topAmt) {
-    topAmt.hidden = false;
-    topAmt.textContent = fmtUsd(b.windowSpendUsd);
-    topAmt.classList.toggle('warn', !b.blocked && b.totalLimitUsd != null
-      && b.windowSpendUsd / b.totalLimitUsd >= BUDGET_WARN_AT);
-    topAmt.classList.toggle('over', !!b.blocked);
   }
   applyBudgetToNewView();
   if (currentView() === 'settings' && currentSettingsTab === 'runs') paintBudgetReadout();
@@ -23013,11 +23090,13 @@ function railTileEl(r) {
 function renderPipelineTabs() {
   const rows = pipelineTabRuns();
 
-  // Roll-up amber dot = ANY child needs input. Visible from every view.
+  // Roll-up amber dot = ANY child needs input. Visible from every view — on phones it
+  // rides the hamburger, whose name says so while the drawer (and its "?" rows) is shut.
   const needs = rows.some((r) => r.pendingQuestion != null);
-  for (const id of ['#nav-running-rollup', '#topnav-running-rollup']) {
+  for (const id of ['#nav-running-rollup', '#mbar-rollup']) {
     const dot = $(id); if (dot) dot.hidden = !needs;
   }
+  $('#mbar-menu')?.setAttribute('aria-label', needs ? 'Menu — a pipeline needs your input' : 'Menu');
 
   const host = $('#nav-running-children');
   if (!host) return;
@@ -23033,10 +23112,11 @@ function renderPipelineTabs() {
   // collapsed — changes the signature and repaints as before. JSON.stringify
   // is the encoding: titles/labels are free text, so a hand-joined concat
   // could alias two different states; JSON escaping is unambiguous.
-  // sidebarCollapsed is FIRST and load-bearing: this function early-returns on an
+  // railCollapsed() is FIRST and load-bearing: this function early-returns on an
   // unchanged signature, so without it a collapse/expand leaves the previous
   // mode's markup on screen until the next server event happens to arrive.
-  const sig = JSON.stringify([sidebarCollapsed, runningCollapsed, rows.map((r) => [
+  const rail = railCollapsed();
+  const sig = JSON.stringify([rail, runningCollapsed, rows.map((r) => [
     r.runId,
     runDotClass(r),
     r.title,
@@ -23063,7 +23143,7 @@ function renderPipelineTabs() {
   host.classList.toggle('collapsed', runningCollapsed);  // auto-expanded: default false
   host.innerHTML = '';
   for (const r of rows) {
-    if (sidebarCollapsed) { host.appendChild(railTileEl(r)); continue; }
+    if (rail) { host.appendChild(railTileEl(r)); continue; }
     const row = document.createElement('button');
     row.type = 'button';
     row.className = 'nav-child';
@@ -23380,12 +23460,11 @@ document.addEventListener('keydown', (e) => {
 // is itself a hop: the sidebar entry is ringed and the user's own click routes,
 // so they learn where things live. `final` hops end the guide on the click.
 const onView = (v) => currentShownView === v;
-/** Ring the sidebar entry for `view` (the compact top-nav twin below 1080px). A view the
- *  user is already on is never a stop: the hop passes on arrival, without a ring. */
+/** Ring the sidebar entry for `view` (on a phone gsPhoneNavHop rings the menu button first).
+ *  A view the user is already on is never a stop: the hop passes on arrival, without a ring. */
 const NAV = (view, text, also = []) => ({
   id: `nav:${view}`, nav: view, views: [view, ...also], text,   // `also`: views reached from it that count as "there" (a wizard)
-  target: [`.nav button[data-nav="${view}"]`, `.topnav button[data-nav="${view}"]`],
-  lift: ['.topnav'],
+  target: [`.nav button[data-nav="${view}"]`],
 });
 const noProjectPicked = () => {
   const sel = document.getElementById('projectSelect');
@@ -23525,12 +23604,27 @@ function gsRaiseLevelHop(hop) {
   if (dialogUp) {
     return { target: `#mode-cards [data-level-choice="${need}"]`, mode: 'pointer', text: `Choose ${label}, then Done.` };
   }
-  return { target: ['#nav-mode', '.topnav-mode'], lift: ['.topnav'],
+  return { target: ['#nav-mode'],
     text: `This step is part of ${label} mode. Open the mode switch to show it.` };
+}
+/** On a phone the sidebar is a shut drawer whose buttons still have a box, so guide-spot
+ *  would ring them off-screen. A hop whose control lives in #side-rail first rings the
+ *  menu button — a stand-in with no id, so it is never "passed" and opening the drawer
+ *  re-derives the real hop — and, once the drawer is open, lifts the drawer above the scrim. */
+function gsPhoneNavHop(hop) {
+  if (!hop || !isPhoneNav()) return hop;
+  const sels = Array.isArray(hop.target) ? hop.target : [hop.target];
+  const inDrawer = sels.some((s) => typeof s === 'string' && !!document.querySelector(s)?.closest('#side-rail'));
+  if (!inDrawer) return hop;
+  if (!mobileNavOpen) {
+    const t = Array.isArray(hop.text) ? hop.text[0] : hop.text;
+    return { target: '#mbar-menu', lift: ['.mbar'], text: `Open the menu. ${t || ''}`.trim() };
+  }
+  return { ...hop, lift: [...(hop.lift || []), '.sidebar'] };
 }
 function gsNextHop(step, g = gs.guide || {}) {
   const hop = gsWalk(gsHops(step, g), g);
-  return hop ? gsRaiseLevelHop(hop) : hop;
+  return hop ? gsPhoneNavHop(gsRaiseLevelHop(hop)) : hop;
 }
 // Every tour runs to its LOGICAL end — the thing the tile promises — not to the first click of
 // a multi-step action: a project is registered (not just the dialog opened), a run is on its card
@@ -23852,7 +23946,7 @@ function onboardingViewChanged(name) {
 loadOnboarding();
 
 const views = $$('.view');
-const navLinks = $$('.nav button[data-nav], .topnav button[data-nav]');
+const navLinks = $$('.nav button[data-nav]');
 // [v2/C1] composer is PRESERVED; workspaces + workspace-create are appended.
 // workspace-create is in the array (so deep-links resolve) but has no nav link.
 // plugins/guardrails/models LEFT this array: they are Settings tabs now, reached
@@ -23897,9 +23991,9 @@ function paintLevelBanner() {
   const above = !levelAtLeast(min);
   // The page you are on keeps its menu entry until you leave it, so "where am I" never vanishes.
   // Simple is the one exception: the Nodes group (Agents, Scripts) stays hidden as a whole —
-  // in the rail AND the topnav — and the banner alone says where you are. Advanced keeps it.
+  // in the rail AND the drawer — and the banner alone says where you are. Advanced keeps it.
   const hideNodes = currentLevel() === 'simple';
-  for (const b of $$('.nav button[data-nav], .topnav button[data-nav]')) {
+  for (const b of $$('.nav button[data-nav]')) {
     const nav = b.dataset.nav;
     // Schedules is Advanced, but a run scheduled from Ask Worca in Simple keeps its entry (rule 2).
     keepVisible(b, (above && nav === currentShownView && !(hideNodes && NODES_GROUP_VIEWS.includes(nav)))
@@ -24070,8 +24164,10 @@ function showView(name, param = '') {
     if (on) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   });
+  paintMobileBar(name);
+  setMobileNavOpen(false);   // any route (a drawer tap, back/forward, a deep link) puts the drawer away
   // Nodes (Agents, Scripts): tint the parent while a child page is open, and
-  // unfold it — a deep link or a topnav click must never land on a hidden row.
+  // unfold it — a deep link or a drawer click must never land on a hidden row.
   if (nodesGroup) {
     const inNodes = NODES_GROUP_VIEWS.includes(name);
     nodesGroup.classList.toggle('has-active', inNodes);

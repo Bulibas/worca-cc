@@ -459,7 +459,7 @@ test('every collapsed nav button gains a tooltip, and loses it on expand', async
     'the tooltip is the label span verbatim — index.html:55');
   assert.equal(doc.querySelector('.nav button[data-nav="new"]').title, 'New pipeline');
   assert.equal(doc.querySelector('.nav button[data-nav="stats"]').title, 'Statistics',
-    'the SIDEBAR label is Statistics; Stats is the topnav variant (index.html:106)');
+    'the tooltip is the SIDEBAR label, Statistics (index.html)');
   assert.match(doc.querySelector('.nav button[data-nav="running"]').title, /^Running/,
     'Running keeps the count tooltip updateNavCounts owns (set at boot by '
     + 'refreshAllCounts, app.js:14034)');
@@ -899,16 +899,6 @@ test('clicking the ring really routes to #stats, not just carrying the class', a
   window.document.querySelector('#side-spend .spend-ring-val')
     .dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   assert.equal(window.location.hash, '#stats');
-});
-
-test('#topnav-spend is mode-independent', async () => {
-  const { window, click } = await boot({ seed: { [KEY]: '1' } });
-  const top = window.document.querySelector('#topnav-spend');
-  assert.equal(top.hidden, false);
-  const before = top.textContent;
-  click('#side-toggle');
-  assert.equal(top.textContent, before, 'the topnav twin must not follow the rail');
-  assert.equal(top.hidden, false);
 });
 
 // ---- The rest of the block: no rule here is reachable by NAME alone ----

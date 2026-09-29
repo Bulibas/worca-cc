@@ -1,8 +1,7 @@
 // test/ui-nav-sections.test.mjs — sidebar is grouped: New-pipeline CTA, then
 // Activity / Build / Manage sections, Settings pinned at the bottom behind a
-// divider. Topnav mirrors the order with thin separators. Markup+CSS only —
-// app.js wires nav via `.nav button[data-nav]`, so headers are divs and
-// Settings stays inside <nav class="nav">.
+// divider. Markup+CSS only — app.js wires nav via `.nav button[data-nav]`, so
+// headers are divs and Settings stays inside <nav class="nav">.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
@@ -17,7 +16,6 @@ const css = readFileSync(join(root, 'style.css'), 'utf8');
 const appPath = join(root, 'app.js');
 
 const sidebar = () => html.match(/<nav class="nav"[\s\S]*?<\/nav>/)[0];
-const topnav = () => html.match(/<nav class="topnav"[\s\S]*?<\/nav>/)[0];
 
 // ---- Task 1: sidebar structure ----
 
@@ -174,39 +172,6 @@ test('CTA is outlined at rest and compensates the border in its padding', () => 
   assert.match(active, /background:\s*var\(--ink\)/);
 });
 
-// ---- Task 3: compact topnav mirrors the grouping ----
-
-test('topnav order mirrors the sidebar, with a separator per group boundary', () => {
-  const tokens = [...topnav().matchAll(/data-nav="([a-z-]+)"|class="(topnav-sep)"/g)]
-    .map((m) => m[1] || m[2]);
-  assert.deepEqual(tokens, [
-    'new', 'topnav-sep',
-    'running', 'schedules', 'history', 'stats', 'team-metrics', 'topnav-sep',
-    'composer', 'agents', 'scripts', 'topnav-sep',
-    'projects', 'workspaces', 'team-policy', 'topnav-sep',
-    'settings',
-  ]);
-});
-
-test('separators are spans (button count and settings-text invariants hold)', () => {
-  // 13 routes (Schedules, Team policy and Scripts included) + the interface-mode twin (docs/ui-levels.md).
-  assert.equal((topnav().match(/<button type="button"/g) || []).length, 14);
-  assert.equal((topnav().match(/<span class="topnav-sep" aria-hidden="true"[^>]*><\/span>/g) || []).length, 4);
-  assert.match(topnav(), /data-nav="settings"[^>]*>Settings<\/button>/);
-});
-
-test('.topnav-sep is a hairline that cannot flex-grow', () => {
-  const sep = ruleBody('.topnav-sep');
-  assert.ok(sep, '.topnav-sep rule must exist');
-  assert.match(sep, /flex:\s*0 0 1px/);
-  assert.match(sep, /background:\s*var\(--line-2\)/);
-  // Placement: the rule must live inside the same media block that shows the topnav.
-  const media = [...css.matchAll(/@media[^{]*\{([\s\S]*?)\n\}/g)].map((m) => m[1]);
-  const topnavBlock = media.find((b) => /\.topnav\{[^}]*display:flex/.test(b));
-  assert.ok(topnavBlock, 'media block that shows .topnav must exist');
-  assert.match(topnavBlock, /\.topnav-sep\{/, '.topnav-sep must be defined inside that media block');
-});
-
 test('the toggle hangs off the spend card exactly as Settings hangs off the divider', () => {
   // Measured in Chrome, expanded: 10px above Settings, 10px below it, 10px above
   // the toggle, 10px below it. Three declarations produce those four gaps —
@@ -249,12 +214,4 @@ test('Settings sits the same distance from the divider as from the spend card', 
   const gap = ruleBody('.nav').match(/gap:\s*(\d+)px/);
   assert.equal(Number(below[1]) + Number(gap[1]), Number(pad[1]),
     'divider gap + .nav gap must equal the footer padding');
-});
-
-test('compact topnav wraps instead of spilling past its rounded box', () => {
-  const media = [...css.matchAll(/@media[^{]*\{([\s\S]*?)\n\}/g)].map((m) => m[1]);
-  const topnavBlock = media.find((b) => /\.topnav\{[^}]*display:flex/.test(b));
-  assert.ok(topnavBlock, 'media block that shows .topnav must exist');
-  assert.match(topnavBlock, /\.topnav\{[^}]*flex-wrap:\s*wrap/,
-    '9 buttons cannot shrink below min-content; without wrap they overflow the pill below ~965px');
 });
