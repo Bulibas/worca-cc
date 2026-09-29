@@ -32,6 +32,7 @@ const ICONS = {
   chevronDown: 'M6 9l6 6 6-6',
   send: 'M12 19V5M6 11l6-6 6 6',
   down: 'M12 5v14M6 13l6 6 6-6',
+  mic: ['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M19 11a7 7 0 0 1-14 0', 'M12 18v3'],
 };
 
 export function fmtTokens(n) {
@@ -165,7 +166,7 @@ const PILL_MORPH_IN_MS = 520;
 const PILL_MORPH_OUT_MS = 800;
 const PILL_SETTLE_FALLBACK_MS = PILL_MORPH_OUT_MS + 150;
 
-export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null }) {
+export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null, createVoice = null, voiceLongPressMs = 500 }) {
   const homePick = browserPick();         // hoisted declaration (defined below)
   const st = {
     open: false,
@@ -205,6 +206,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     resyncing: false,
     firstOpenDone: false,
     destroyed: false,
+    voice: null,              // the voice controller (ask-voice.mjs), made on first mic use — docs/speech.md
+    voicePendingSend: false,  // a hands-free transcript waiting for the live turn to end (barge-in)
+    voiceLongPress: null,     // the mic's long-press timer
+    voiceSwallowClick: false, // the click that ends a long-press must not also start dictation
     lastAnswerRender: 0,
     rowEls: null,
     seenRows: new Set(),      // message ids the transcript has already shown — see renderTranscript
@@ -574,11 +579,133 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       .catch(() => { /* the turn will end via its own frames */ });
   }
 
+  // ---- voice mode (docs/speech.md) ------------------------------------------
+  // One mic: click = one-shot dictation (text lands in the composer, not sent);
+  // long-press or the caret menu = hands-free (listen → send → speak → listen).
+  // The controller (ask-voice.mjs) owns audio; the panel owns the composer, the
+  // turn and the lifecycle (voice off on close / New chat / switch / destroy).
+  const VOICE_LABELS = { loading: 'Starting mic…', listening: 'Listening…', transcribing: 'Transcribing…', thinking: 'Thinking…', speaking: 'Speaking…', error: 'Voice error' };
+
+  function buildVoiceControls() {
+    const wrap = make('span', 'ask-voice');
+    el.voiceStatus = make('span', 'ask-voice-status');
+    el.voiceStatus.hidden = true;
+    el.voiceStatus.setAttribute('role', 'status');
+    wrap.appendChild(el.voiceStatus);
+
+    el.mic = make('button', 'ask-voice-mic');
+    el.mic.type = 'button';
+    el.mic.setAttribute('data-ask-mic', '');
+    el.mic.setAttribute('aria-pressed', 'false');
+    el.mic.title = 'Dictate (click) · hands-free conversation (hold) · talk with text replies (the arrow menu)';
+    el.mic.setAttribute('aria-label', 'Voice input');
+    el.mic.appendChild(svgIcon(ICONS.mic, 16, 1.9));
+    el.mic.addEventListener('pointerdown', (ev) => {
+      if (ev.button !== undefined && ev.button !== 0) return;
+      st.voiceSwallowClick = false;                 // a long-press that never produced a click must not eat the next one
+      clearTimeout(st.voiceLongPress);
+      st.voiceLongPress = setTimeout(() => {
+        st.voiceLongPress = null;
+        st.voiceSwallowClick = true;
+        toggleHandsFree();
+      }, voiceLongPressMs);
+    });
+    const cancelPress = () => { if (st.voiceLongPress) { clearTimeout(st.voiceLongPress); st.voiceLongPress = null; } };
+    el.mic.addEventListener('pointerup', cancelPress);
+    el.mic.addEventListener('pointerleave', cancelPress);
+    el.mic.addEventListener('click', () => {
+      if (st.voiceSwallowClick) { st.voiceSwallowClick = false; return; }
+      const v = voice();
+      if (v.active()) { stopVoice(); return; }
+      startVoice('dictate');
+    });
+    wrap.appendChild(el.mic);
+
+    const caret = make('button', 'ask-voice-caret');
+    caret.type = 'button';
+    caret.setAttribute('data-ask-voice-caret', '');
+    caret.setAttribute('aria-label', 'Voice options');
+    caret.title = 'Voice options';
+    caret.appendChild(svgIcon(ICONS.chevronDown, 11, 2));
+    caret.addEventListener('click', () => openVoicePopover(caret));
+    wrap.appendChild(caret);
+    return wrap;
+  }
+
+  function openVoicePopover(trigger) {
+    openPopover({ panelClass: 'ask-pop-voice', trigger, build: (p) => {
+      p.appendChild(make('div', 'ask-pop-caption', 'Voice'));
+      const item = (label, mode, onPick) => {
+        const it = menuItem('ask-voice-item', () => { closePopover({ focusTrigger: false }); onPick(); });
+        it.dataset.mode = mode;
+        it.appendChild(make('span', 'ask-model-name', label));
+        return it;
+      };
+      p.appendChild(item('Dictate once', 'dictate', () => startVoice('dictate')));
+      p.appendChild(item('Talk, read the replies', 'talk', () => startVoice('talk')));
+      p.appendChild(item('Hands-free conversation', 'handsfree', () => startVoice('handsfree')));
+      if (st.voice && st.voice.active()) p.appendChild(item('Turn voice off', 'off', () => stopVoice()));
+    } });
+  }
+
+  function voice() {
+    if (!st.voice) {
+      st.voice = createVoice({
+        onState: paintVoice,
+        onTranscript: voiceTranscript,
+        onBargeIn: () => { if (st.model && st.model.live()) stopTurn(); },
+        onNotice: (msg) => setComposerMsg(msg),
+      });
+    }
+    return st.voice;
+  }
+
+  const VOICE_USED_KEY = 'worca-cc.ask.voiceUsed';
+  function voiceUsedBefore() { try { return storage.getItem(VOICE_USED_KEY) === '1'; } catch { return false; } }
+
+  function startVoice(mode) { if (!st.destroyed) voice().start(mode); }
+  function toggleHandsFree() { const v = voice(); if (v.active() && v.mode() === 'handsfree') stopVoice(); else startVoice('handsfree'); }
+  function stopVoice() { st.voicePendingSend = false; if (st.voice && st.voice.active()) st.voice.stop(); }
+
+  function paintVoice(state, { mode, detail } = {}) {
+    if (!el.mic) return;
+    const on = state !== 'off' && state !== 'error';
+    el.mic.setAttribute('aria-pressed', on ? 'true' : 'false');
+    el.mic.classList.toggle('is-on', on);
+    el.mic.classList.toggle('is-handsfree', on && (mode === 'handsfree' || mode === 'talk'));
+    el.mic.classList.toggle('is-error', state === 'error');
+    el.voiceStatus.hidden = state === 'off';
+    el.voiceStatus.dataset.state = state;
+    el.voiceStatus.textContent = (state === 'loading' && detail) || VOICE_LABELS[state] || '';
+    if (state === 'error') { setComposerMsg(detail || 'voice stopped'); st.voicePendingSend = false; }
+    if (state === 'listening' || state === 'speaking' || state === 'error') announce(VOICE_LABELS[state]);
+    if (state === 'listening' && !voiceUsedBefore()) { try { storage.setItem(VOICE_USED_KEY, '1'); } catch { /* preload is a nicety */ } }
+  }
+
+  function voiceTranscript(text, { autoSend } = {}) {
+    const cur = el.input.value;
+    el.input.value = cur && !/\s$/.test(cur) ? `${cur} ${text}` : `${cur}${text}`;
+    fitInput();                                   // a programmatic write fires no input event
+    if (!autoSend) { focusComposer(); return; }
+    // A live (or loaded-but-not-yet-adopted, inFlight) turn: send once it ends. This covers barge-in.
+    if (st.sending || (st.model && (st.model.live() || st.model.inFlight()))) { st.voicePendingSend = true; return; }
+    voiceSend();
+  }
+
+  function voiceSend() {
+    Promise.resolve()
+      .then(() => sendMessage())
+      .catch(() => false)                          // sendMessage can throw on a malformed response body
+      .then((ok) => {
+        if (!ok && st.voice && st.voice.active()) st.voice.fail(el.composerMsg.hidden ? 'the message was not sent' : el.composerMsg.textContent);
+      });
+  }
+
   async function sendMessage() {
-    if (st.sending || st.destroyed) return;
-    if (st.model && st.model.live()) return; // a turn is streaming — the stop button is showing
+    if (st.sending || st.destroyed) return false;
+    if (st.model && st.model.live()) return false; // a turn is streaming — the stop button is showing
     const text = el.input.value.trim();
-    if (!text) return;
+    if (!text) return false;
     st.sending = true;
     setComposerMsg(null);
     updateSendStop();      // the pill lights the moment the user sends; Send/Stop do not move (nothing streams yet)
@@ -589,7 +716,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         try {
           r = await fetch('/api/ask/threads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
         } catch { r = null; }
-        if (!r || (r.status !== 201 && !r.ok)) { setComposerMsg('could not create the thread'); return; }
+        if (!r || (r.status !== 201 && !r.ok)) { setComposerMsg('could not create the thread'); return false; }
         const body = await r.json();
         id = body.thread.id;
         loadGen += 1;                     // a pending loadThread() must not replace this fresh model
@@ -611,16 +738,16 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       let res = null;
       try {
         res = await fetch(`/api/ask/threads/${id}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      } catch { setComposerMsg('network error — the message was not sent'); return; }
+      } catch { setComposerMsg('network error — the message was not sent'); return false; }
       // The user may have clicked New chat or switched threads during the POST: the
       // message is on the server and arrives with its thread; touching the composer
       // or the (now different or null) model here would be wrong (review of PR #376).
-      if (st.destroyed || st.model !== model || st.threadId !== id) return;
+      if (st.destroyed || st.model !== model || st.threadId !== id) return false;
       if (!res || res.status !== 202) {
         let msg = `request failed (${res ? res.status : 'network'})`;
         try { const b = await res.json(); if (b && b.error) msg = b.error; } catch { /* keep the fallback */ }
         setComposerMsg(msg);
-        return;
+        return false;
       }
       const { userMessageId, attachments: stored } = await res.json();
       // Prefer the server's rows: they carry the store-minted ids that key the
@@ -639,6 +766,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       subscribe(id);
       st.pinned = true;
       scheduleFlush();
+      return true;
     } finally {
       st.sending = false;
       updateSendStop();
@@ -755,6 +883,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     el.send.setAttribute('aria-label', 'Send');
     el.send.appendChild(svgIcon(ICONS.send, 15, 2.2));
     el.send.addEventListener('click', sendMessage);
+    if (createVoice) row.appendChild(buildVoiceControls());
     row.appendChild(el.send);
 
     el.stop = make('button', 'ask-stop');
@@ -800,6 +929,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     focusComposer();
     scheduleFlush();
     repaintProgressCards({ hydrate: true });
+    if (createVoice && voiceUsedBefore()) voice().preload();   // the mic is ready by the time it is clicked
   }
 
   /**
@@ -822,6 +952,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
   function closeSheet() {
     if (!st.open) return;
+    stopVoice();
     closePopover({ focusTrigger: false });
     st.open = false;
     el.sheet.hidden = true;
@@ -1711,6 +1842,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
   // ---- thread actions -------------------------------------------------------
   function newThread() {
+    stopVoice();
     loadGen += 1;                       // a load still in flight must not resurrect the old thread
     st.threadId = null;
     st.model = null;
@@ -3813,6 +3945,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // reconnect re-loads the SAME thread and must keep it: those repaint rows the
     // user is already reading, mid-turn.
     const switched = st.threadId !== id;
+    if (switched) stopVoice();
     if (switched) st.seenRows = new Set();
     st.threadId = id;
     st.model = createThreadModel({ threadId: id });
@@ -3919,6 +4052,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       // NOT live in updateSendStop() — that also runs from loadThread, so a
       // running→idle latch there fires a SECOND snapshot GET on every resync.
       refreshWorktrees();
+      if (st.voicePendingSend) { st.voicePendingSend = false; if (st.voice && st.voice.active()) voiceSend(); }
     }
     else if (frame.type === 'ask-message' && frame.message && typeof frame.message.text === 'string'
       && /is waiting for your answer/.test(frame.message.text)) announce('run needs an answer');
@@ -3946,6 +4080,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const r = st.model.apply(frame);
     if (r && r.gap) { resync(); return; }
     if (!r || !r.ok) return;
+    if (st.voice && st.voice.active() && frame.messageId) {
+      const live = st.model && st.model.live();
+      st.voice.onFrame(frame, live && live.messageId === frame.messageId ? live.text : null);
+    }
     afterFrame(frame);
     scheduleFlush();
   }
@@ -4099,6 +4237,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.runTick) { clearInterval(st.runTick); st.runTick = null; }
     if (st.runUnsub) { try { st.runUnsub(); } catch { /* ignore */ } st.runUnsub = null; }
     pruneCardEls();                                  // every card graph mount and its ResizeObserver goes with the sheet
+    clearTimeout(st.voiceLongPress);
+    if (st.voice) { const v = st.voice; st.voice = null; Promise.resolve(v.destroy()).catch(() => {}); }
     root.remove();
   }
 
