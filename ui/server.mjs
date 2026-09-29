@@ -2868,8 +2868,8 @@ app.post('/api/stop', (req, res) => {
 // (announced via the normal state/done events; wireRun mirrors entry.status).
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-// POST /api/run/night { runId, mode: 'auto'|'on'|'off' } — the run-view night mode switch
-// of a LIVE run (a paused run re-arms from its resume point on resume).
+// POST /api/run/night { runId, mode: 'auto'|'on'|'off' } — the run-view night mode switch.
+// A paused run stores it in its resume point; a finished run refuses it (400).
 // ---------------------------------------------------------------------------
 function setRunNightMode(runId, mode, by = 'local') {
   const entry = runs.get(runId);
@@ -2884,7 +2884,7 @@ app.post('/api/run/night', (req, res) => {
     setRunNightMode(runId, mode, actorOf(req));
     res.json({ ok: true });
   } catch (err) {
-    if (err?.code === 'BAD_NIGHT_MODE') return badRequest(res, err.message);
+    if (err?.code === 'BAD_NIGHT_MODE' || err?.code === 'NIGHT_NOT_LIVE') return badRequest(res, err.message);
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
 });

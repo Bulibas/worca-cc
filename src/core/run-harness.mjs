@@ -3889,8 +3889,18 @@ export class RunHarness extends EventEmitter {
   /** Run-view switch. @param {'auto'|'on'|'off'} mode */
   setNightOverride(mode, by = 'local') {
     if (!NIGHT_TOGGLES.includes(mode)) throw Object.assign(new Error('mode must be auto | on | off'), { code: 'BAD_NIGHT_MODE' });
+    const status = this.state.status;
+    if (status === 'done' || status === 'stopped' || status === 'error') {
+      throw Object.assign(new Error(`the run is ${status}: its night mode switch can no longer change`), { code: 'NIGHT_NOT_LIVE' });
+    }
     this._night.override = mode;
-    this._recordAction(`night-${mode}`, by);
+    // A paused run resumes from its saved point, which captured the switch at pause time.
+    if (status === 'paused' && this.state.resumePoint?.night) {
+      this.state.resumePoint.night.override = mode;
+      this._persist().catch(() => {});
+    }
+    // No _recordAction: lastAction is "who stopped / paused / resumed" (the Paused-by banner and
+    // _auditAction read it). The audit line below names who flipped the switch.
     if (this.pipeline?.dir) appendAudit(this.pipeline.dir, `- Night mode for this run set to **${mode}**${byActor(by)}.`, { actor: by }).catch(() => {});
     this.state.night = this._nightSnapshot();
     this._emit('state', this.getState());

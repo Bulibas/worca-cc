@@ -438,3 +438,29 @@ test('the user answering during a night analysis kills it, and the next question
   assert.equal(orch._night.deciding, false, 'the next question is free to be decided');
   assert.equal(orch.nightDecision('c24'), null);
 });
+
+test('the run-view switch on a PAUSED run lands in its resume point (not lost on resume)', () => {
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h25' });
+  orch.state.status = 'paused';
+  orch.state.resumePoint = { night: { optIn: false, override: 'auto' } };
+  orch._persist = async () => {};
+  orch.setNightOverride('on', 'alice');
+  assert.equal(orch.state.resumePoint.night.override, 'on');
+  const resumed = createOrchestrator({ projectDir: '/tmp/night-h25', resume: { resumePoint: orch.state.resumePoint } });
+  assert.equal(resumed._night.override, 'on');
+});
+
+test('the run-view switch is refused on a finished run', () => {
+  for (const status of ['done', 'stopped', 'error']) {
+    const orch = createOrchestrator({ projectDir: '/tmp/night-h26' });
+    orch.state.status = status;
+    assert.throws(() => orch.setNightOverride('on', 'alice'), (e) => e.code === 'NIGHT_NOT_LIVE', status);
+  }
+});
+
+test('flipping the night switch does not take over "who paused" (lastAction)', () => {
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h27' });
+  orch.state.lastAction = { kind: 'pause', by: 'alice', at: 't' };
+  orch.setNightOverride('on', 'bob');
+  assert.deepEqual(orch.state.lastAction, { kind: 'pause', by: 'alice', at: 't' });
+});
