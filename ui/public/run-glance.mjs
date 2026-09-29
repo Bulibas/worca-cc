@@ -147,17 +147,16 @@ export function glanceState(run) {
   return 'run';
 }
 
-function questionCount(pq) {
-  if (!pq) return 0;
-  if (Array.isArray(pq.questions)) return pq.questions.length;
-  if (Array.isArray(pq.issues)) return pq.issues.length;
-  return 1;
-}
-
 /**
- * The status line: { state, title, sub }. `pill` is statusPill's `{text}` (the paused reason
- * lives there); `checks` is the number of things to check once results are loaded (null
- * while unknown); `lastLine` is the newest log message, the sub line while one step runs.
+ * The status line under the run's name: { state, lead, rest, title, sub, icon? }.
+ * `lead` is the state word ("Running", "Waiting for you", "Paused", "Failed") and `rest`
+ * what it concerns ("2 questions", "cost limit"); `title` is the two joined with " · ".
+ * While running, the state word stands alone and `sub` names the step ("Step: Visual
+ * System"). A step is one run of a workflow node (an agent or a script).
+ *
+ * `pill` is statusPill's `{text}` (the paused reason lives there); `checks` is the number
+ * of things to check once results are loaded (null while unknown). `lastLine` (the newest
+ * log message) is accepted but no longer shown.
  * A finished run's headline is where the work stands NOW: `pr` is the pull request's
  * state ('OPEN' | 'MERGED' | 'CLOSED') and outranks the review, or what is known about
  * it: 'PENDING' (the lookup has not answered), 'UNAVAILABLE' (worca cannot tell or cannot
@@ -170,51 +169,67 @@ export function glanceCopy(run, { pill = null, checks = null, lastLine = '', pr 
   const now = nowRows(run);
   const names = now.map((x) => x.label);
   const join = (a) => (a.length <= 2 ? a.join(' and ') : `${a.slice(0, -1).join(', ')} and ${a[a.length - 1]}`);
+  const line = (lead, rest, sub, more = {}) => ({ state, lead, rest, title: rest ? `${lead} · ${rest}` : lead, sub, ...more });
+  // Line 1 is the state word alone; line 2 starts with the step, then the detail.
+  const cap = (s) => (s ? `${s.charAt(0).toUpperCase()}${s.slice(1)}` : s);
+  const oneLine = (s, max = 140) => {
+    const first = String(s || '').split('\n').map((x) => x.trim()).find(Boolean) || '';
+    return first.length > max ? `${first.slice(0, max - 1)}…` : first;
+  };
+  const stepLine = (who, detail) => (who ? `Step: ${who} · ${detail}` : cap(detail));
   switch (state) {
     case 'ask': {
       const pq = run.pendingQuestion;
-      const who = pq.nodeId ? nodeLabel(run.stepper, pq.nodeId) : (names[0] || 'The run');
-      if (pq.kind === 'gate') return { state, title: 'Decision needed', sub: `${who} used every cycle it was allowed` };
-      if (pq.kind === 'recovery') return { state, title: 'Something failed', sub: `${who} needs you to choose how to go on` };
-      if (pq.kind === 'workflow') return { state, title: 'Pick a workflow', sub: 'The run waits until you choose' };
-      if (pq.kind === 'form') return { state, title: 'Input needed', sub: pq.title ? String(pq.title) : `${who} is paused until you answer` };
-      const n = questionCount(pq);
-      return { state, title: n > 1 ? `${n} questions` : 'One question', sub: `${who} is paused until you answer` };
+      const who = pq.nodeId ? nodeLabel(run.stepper, pq.nodeId) : (names[0] || '');
+      const wait = 'Waiting for you';
+      if (pq.kind === 'gate') return line(wait, '', stepLine(who, 'used every cycle it was allowed'));
+      if (pq.kind === 'recovery') return line(wait, '', stepLine(who, 'failed, choose how to go on'));
+      if (pq.kind === 'workflow') return line(wait, '', 'Pick a workflow · the run waits until you choose');
+      // Questions and forms: the step alone — the panel right below shows what it asks
+      // (and counts it).
+      if (who) return line(wait, '', `Step: ${who}`);
+      return line(wait, '', pq.kind === 'form' ? 'Input needed' : 'Questions to answer');
     }
     case 'paused': {
-      if (run.status === 'pausing') return { state, title: 'Pausing', sub: 'Steps in flight finish first' };
-      if (run.status === 'interrupted') return { state, title: 'Interrupted', sub: 'The run stopped mid-step. Resume to continue' };
-      // statusPill says "Paused · cost limit": the reason is the part after the dot.
+      if (run.status === 'pausing') return line('Pausing', '', 'Steps in flight finish first');
+      if (run.status === 'interrupted') return line('Interrupted', '', 'Stopped mid-step · resume to continue');
+      // statusPill says "Paused · cost limit": the reason is the part after the dot. A
+      // pause is not one step's, so line 2 carries the reason.
       const text = pill && pill.text ? String(pill.text) : '';
       const reason = text.replace(/^Paused\s*·\s*/, '');
-      const sub = reason && reason !== text
-        ? `${reason.charAt(0).toUpperCase()}${reason.slice(1)}. Resume to continue`
-        : 'Resume to continue where it left off';
-      return { state, title: 'Paused', sub };
+      const why = reason && reason !== text ? reason : '';
+      return line('Paused', '', why ? `${cap(why)} · resume to continue` : 'Resume to continue where it left off');
     }
     case 'done': {
       const p = String(pr || '').toUpperCase();
       const nFiles = (n) => `${n} file${n === 1 ? '' : 's'} changed`;
-      if (p === 'MERGED') return { state, icon: 'merged', title: 'Merged', sub: 'The pull request was merged' };
-      if (p === 'OPEN') return { state, icon: 'pr-open', title: 'In review', sub: 'The pull request is open' };
-      if (p === 'CLOSED') return { state, icon: 'pr-closed', title: 'PR closed', sub: 'Closed without merging' };
-      if (files === 0) return { state, icon: 'finished', title: 'Finished', sub: 'No files changed' };
-      if (p === 'PENDING') return { state, icon: 'finished', title: 'Finished', sub: 'Checking for a pull request…' };
-      if (p === 'UNAVAILABLE') return { state, icon: 'finished', title: 'Finished', sub: files ? nFiles(files) : 'Review the changes in Diff' };
-      if (checks == null) return { state, icon: 'finished', title: 'Finished', sub: 'Review the changes before you open a pull request' };
-      if (checks === 0) return { state, icon: 'ship', title: 'Ready to ship', sub: 'The review flagged nothing' };
-      return { state, icon: 'review', title: 'Ready to review', sub: `${checks} thing${checks === 1 ? '' : 's'} to check before you open a pull request` };
+      const fin = (icon, lead, sub) => line(lead, '', sub, { icon });
+      if (p === 'MERGED') return fin('merged', 'Merged', 'The pull request was merged');
+      if (p === 'OPEN') return fin('pr-open', 'In review', 'The pull request is open');
+      if (p === 'CLOSED') return fin('pr-closed', 'PR closed', 'Closed without merging');
+      if (files === 0) return fin('finished', 'Finished', 'No files changed');
+      if (p === 'PENDING') return fin('finished', 'Finished', 'Checking for a pull request…');
+      if (p === 'UNAVAILABLE') return fin('finished', 'Finished', files ? nFiles(files) : 'Review the changes in Diff');
+      if (checks == null) return fin('finished', 'Finished', 'Review the changes before you open a pull request');
+      if (checks === 0) return fin('ship', 'Ready to ship', 'The review flagged nothing');
+      return fin('review', 'Ready to review', `${checks} thing${checks === 1 ? '' : 's'} to check before you open a pull request`);
     }
-    case 'fail':
-      return { state, title: 'Failed', sub: run.pauseDetail ? String(run.pauseDetail) : 'Open Details for the log' };
+    case 'fail': {
+      const failed = ledgerRows(run || {}).filter((r) => r.status === 'error').pop();
+      const where = failed && failed.nodeId ? nodeLabel(run.stepper, failed.nodeId) : '';
+      // One line of the error; the whole of it is in Logs.
+      return line('Failed', '', stepLine(where, run.pauseDetail ? oneLine(run.pauseDetail) : 'see Logs for the error'));
+    }
     case 'stop':
-      return { state, title: 'Stopped', sub: 'Stopped before it finished' };
+      return line('Stopped', '', 'Stopped before it finished');
     case 'start':
-      return { state, title: 'Starting', sub: 'Setting up the worktree' };
+      return line('Starting', '', 'Setting up the worktree');
     default:
-      if (now.length > 1) return { state, title: `${now.length} steps running`, sub: join(names) };
-      if (now.length === 1) return { state, title: names[0], sub: lastLine || 'Working' };
-      return { state, title: 'Running', sub: lastLine || 'Between steps' };
+      // The state word alone; the line under it names what runs (no time: the facts
+      // row carries the run's time, and a second, unlabelled one read as a contradiction).
+      if (now.length > 1) return line('Running', '', `Steps: ${join(names)}`);
+      if (now.length === 1) return line('Running', '', `Step: ${names[0]}`);
+      return line('Running', '', 'Between steps');
   }
 }
 

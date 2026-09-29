@@ -597,20 +597,26 @@
 
               <section class="rd-glance" aria-label="Run status">
                 <div class="rd-now">
+                  <!-- The run's name is the page title; the bar shows it only once this scrolls away. -->
+                  <header class="rd-page-head">
+                    <h1 class="rd-page-title"></h1>
+                    <p class="rd-page-meta"></p>
+                  </header>
                   <div class="rd-now-top">
                     <span class="rd-orb"></span>
                     <div class="rd-now-text">
-                      <h1 class="rd-now-title"></h1>
+                      <h2 class="rd-now-title"></h2>
                       <p class="rd-now-sub"></p>
                     </div>
                   </div>
                 </div>
+                <!-- A waiting question: its own panel above the run's, not inside it. -->
+                <div class="rd-questions" hidden><div class="qpanel hidden"></div></div>
                 <div class="rd-sheet">
                   <div class="rd-banners">
                     <div class="retained-banner" role="alert" hidden></div>
                     <button type="button" class="hist-discard btn-ghost" hidden>Discard worktree</button>
                   </div>
-                  <div class="rd-questions" hidden><div class="qpanel hidden"></div></div>
                   <!-- Time · Cost · Changes, in every state (the time ticks while live). -->
                   <div class="rd-facts"></div>
                   <div class="rd-nowlist"></div>
@@ -755,9 +761,13 @@
               <div class="hd-error" hidden></div>
               <section class="rd-glance hd-glance" aria-label="Run status">
                 <div class="rd-now">
+                  <header class="rd-page-head">
+                    <h1 class="rd-page-title"></h1>
+                    <p class="rd-page-meta"></p>
+                  </header>
                   <div class="rd-now-top">
                     <span class="rd-orb"></span>
-                    <div class="rd-now-text"><h1 class="rd-now-title"></h1><p class="rd-now-sub"></p></div>
+                    <div class="rd-now-text"><h2 class="rd-now-title"></h2><p class="rd-now-sub"></p></div>
                   </div>
                 </div>
                 <div class="rd-sheet">

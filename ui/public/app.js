@@ -5160,22 +5160,24 @@ function askFormHost(r, panel, ask) {
   body.className = 'qbody';
   const answered = document.createElement('span');
   answered.className = 'qanswered';
+  // progress() counts REQUIRED fields only; a form whose fields are all optional
+  // (each with a default) has nothing to count, and "0 of 0 answered" reads as broken.
+  const paintProgress = (p) => {
+    answered.textContent = p.total ? `${p.done} of ${p.total} answered` : '';
+    answered.hidden = !p.total;
+  };
   const handle = renderAskForm(ask, {
     doc: document,
     fileUrl: (index) => askFileUrl(r, ask, index),
     loadText: (index) => askLoadText(r, ask, index),
     markdown: pageMarkdown,
     highlight: (el) => hdMarkdown.highlight(el),
-    onChange: () => {
-      const p = handle.progress();
-      answered.textContent = `${p.done} of ${p.total} answered`;
-    },
+    onChange: () => paintProgress(handle.progress()),
   });
   panel.__askForm = handle;
   panel.__dispose = () => { handle.dispose(); panel.__askForm = null; };
   body.appendChild(handle.el);
-  const p0 = handle.progress();
-  answered.textContent = `${p0.done} of ${p0.total} answered`;
+  paintProgress(handle.progress());
 
   const foot = document.createElement('div');
   foot.className = 'qpanel-foot';
@@ -17277,6 +17279,7 @@ function openHistDetail(parsed, { instant = false } = {}) {
   const screen = $('#hist-detail-tpl').content.firstElementChild.cloneNode(true);
   host.appendChild(screen);
   histDetailState.screen = screen;
+  watchPageTitle(screen, 'hd');
 
   screen.querySelector('.hd-back').addEventListener('click', () => { location.hash = 'history'; });
   // Glance <-> Details are routes, so the browser's back and forward walk them.
@@ -17816,16 +17819,12 @@ function paintHdGlance(screen, record, data) {
 
   // The bar names the run; its state is the headline below.
   const hdTitle = screen.querySelector('.hd-title');
-  screen.querySelector('.hd-bar .rd-bar-title').textContent = (hdTitle && hdTitle.textContent) || record.title || '';
+  const runName = (hdTitle && hdTitle.textContent) || record.title || '';
+  screen.querySelector('.hd-bar .rd-bar-title').textContent = runName;
+  const { day, clock } = splitDateStamp(st.startedAt || record.startedAt || record.mtime);
+  paintPageHead(glance, runName, [projectName(record.projectDir), [day, clock].filter(Boolean).join(' ')]);
 
-  const orbHost = glance.querySelector('.rd-orb');
-  const glyph = copy.icon || copy.state;
-  if (orbHost.dataset.state !== glyph) {
-    orbHost.dataset.state = glyph;
-    orbHost.replaceChildren(renderOrb(document, glyph, 44));
-  }
-  glance.querySelector('.rd-now-title').textContent = copy.title;
-  glance.querySelector('.rd-now-sub').textContent = copy.sub;
+  paintGlanceStatus(glance, copy);
 
   // Time · Cost · Changes, as on the Running page in every state.
   const activeMs = typeof st.totalActiveMs === 'number' ? st.totalActiveMs : liveTotalMs(st.steps, 0);
@@ -23847,6 +23846,16 @@ function routeRunDetail(param, { instant = false } = {}) {
 // Show the glance or the Details screen of the open run. Idempotent: a hashchange echo
 // and a tab click that already matches do nothing. `tab` opens that Details tab when the
 // run's table has it and the interface level shows it (a hidden tab never opens by link).
+// Keyboard or pointer, whichever was used last. Opening a run page focuses its bar's
+// way back (setRdMode / setHdMode) so a keyboard user lands somewhere sensible; the
+// browser then paints that as :focus-visible even after a click, which reads as a
+// stuck hover. style.css hides the ring in the bars unless the keyboard is in use.
+document.documentElement.dataset.input = 'pointer';
+document.addEventListener('keydown', (e) => {
+  if (!e.metaKey && !e.ctrlKey) document.documentElement.dataset.input = 'keyboard';
+}, true);
+document.addEventListener('pointerdown', () => { document.documentElement.dataset.input = 'pointer'; }, true);
+
 function setRdMode(screen, mode, tab = '', { focus = true } = {}) {
   if (!screen) return;
   const details = mode === 'details';
@@ -23884,6 +23893,7 @@ function openRunDetail(runId, { instant = false } = {}) {
   const screen = $('#run-detail-tpl').content.firstElementChild.cloneNode(true);
   host.appendChild(screen);
   runDetailState = { runId, screen };
+  watchPageTitle(screen, 'rd');
 
   screen.querySelector('.rd-back').addEventListener('click', () => { location.hash = 'running'; });
   // Glance <-> Details are routes, so the browser's own back and forward walk them.
@@ -24086,14 +24096,7 @@ function paintRdGlance(screen, r) {
   });
   screen.dataset.glance = copy.state;
 
-  const orbHost = screen.querySelector('.rd-orb');
-  const glyph = copy.icon || copy.state;
-  if (orbHost.dataset.state !== glyph) {
-    orbHost.dataset.state = glyph;
-    orbHost.replaceChildren(renderOrb(document, glyph, 44));
-  }
-  screen.querySelector('.rd-now-title').textContent = copy.title;
-  screen.querySelector('.rd-now-sub').textContent = copy.sub;
+  paintGlanceStatus(screen.querySelector('.rd-glance'), copy);
 
   // Time · Cost · Changes. The time ticks (`run-time`, rdTickHosts) only while steps
   // execute; a finished run's clock is final (the ticker reads the live ledger, which a
@@ -24122,7 +24125,7 @@ function paintRdGlance(screen, r) {
   }
 }
 
-function rdSheetRow({ label, detail = '', value = '', tab = '', state = '', icon = null }) {
+function rdSheetRow({ label, detail = '', value = '', tab = '', state = '', icon = null, since = '' }) {
   const b = document.createElement(tab ? 'button' : 'div');
   if (tab) { b.type = 'button'; b.dataset.rdTab = tab; }
   b.className = 'rd-srow' + (tab ? ' chv' : '');
@@ -24148,6 +24151,7 @@ function rdSheetRow({ label, detail = '', value = '', tab = '', state = '', icon
   if (value) {
     const v = document.createElement('span');
     v.className = 'rd-srow-v mono';
+    if (since) v.dataset.since = since;   // a live elapsed time: _timerTick keeps it moving
     v.textContent = value;
     b.appendChild(v);
   }
@@ -24188,6 +24192,68 @@ function rdActivityGroups(screen, values = {}) {
     if (rows.length) out.push(rdSheetGroup(title, rows));
   }
   return out;
+}
+
+// The status line under the run's name (both glances): a 28px glyph, the state word in
+// bold, then what it concerns; a single running step's elapsed time rides at the end
+// (`data-since`: _timerTick keeps it moving).
+function paintGlanceStatus(glance, copy) {
+  if (!glance) return;
+  const orbHost = glance.querySelector('.rd-orb');
+  const glyph = copy.icon || copy.state;
+  if (orbHost.dataset.state !== glyph) {
+    orbHost.dataset.state = glyph;
+    orbHost.replaceChildren(renderOrb(document, glyph, 28));
+  }
+  const title = glance.querySelector('.rd-now-title');
+  const sig = `${copy.lead}|${copy.rest || ''}|${copy.since || ''}`;
+  if (title.dataset.sig !== sig) {
+    title.dataset.sig = sig;
+    const lead = document.createElement('span');
+    lead.className = 'rd-now-state';
+    lead.textContent = copy.lead || copy.title;
+    title.replaceChildren(lead);
+    if (copy.rest) title.append(` · ${copy.rest}`);
+    if (copy.since) {
+      const t = new Date(copy.since).getTime();
+      const el = document.createElement('span');
+      el.className = 'rd-now-elapsed';
+      el.dataset.since = copy.since;
+      el.textContent = Number.isFinite(t) ? fmtDuration(Math.max(0, Date.now() - t)) : '';
+      title.append(' · ', el);
+    }
+  }
+  glance.querySelector('.rd-now-sub').textContent = copy.sub;
+}
+
+// The run's name as the glance's page title, with a short meta line under it.
+function paintPageHead(glance, title, meta) {
+  if (!glance) return;
+  const h = glance.querySelector('.rd-page-title');
+  const m = glance.querySelector('.rd-page-meta');
+  if (h && h.textContent !== title) h.textContent = title;
+  if (m) {
+    const text = meta.filter(Boolean).join(' · ');
+    const node = m.firstChild && m.firstChild.nodeType === 3 ? m.firstChild : null;
+    if (!node) m.prepend(document.createTextNode(text)); else if (node.data !== text) node.data = text;
+  }
+}
+
+// The bar repeats the run's name only once the page title has scrolled under it
+// (CSS: [data-title-out]). One observer per page kind; a new screen replaces the old.
+const pageTitleWatch = { rd: null, hd: null };
+function watchPageTitle(screen, kind) {
+  if (pageTitleWatch[kind]) { pageTitleWatch[kind].disconnect(); pageTitleWatch[kind] = null; }
+  const h = screen && screen.querySelector('.rd-page-title');
+  if (!h || typeof IntersectionObserver !== 'function') return;
+  const io = new IntersectionObserver(([e]) => {
+    if (!e) return;
+    const bar = screen.querySelector('.rd-bar, .hd-bar');
+    const under = bar ? bar.getBoundingClientRect().bottom : 0;
+    screen.dataset.titleOut = !e.isIntersecting && e.boundingClientRect.bottom <= under + 1 ? '1' : '';
+  }, { rootMargin: '-64px 0px 0px 0px' });
+  io.observe(h);
+  pageTitleWatch[kind] = io;
 }
 
 // The Overview row's preview: what the review made of the run.
@@ -24292,15 +24358,18 @@ function paintRdNowList(screen, r, state) {
   const groups = [];
   const now = nowRows(r);
   const elapsed = (x) => (x.runningSince ? fmtDuration(Math.max(0, Date.now() - new Date(x.runningSince).getTime())) : '');
-  if (now.length && (state === 'run' || state === 'ask' || state === 'paused')) {
+  // One step is named (and timed) on the status line; the list is for steps in parallel.
+  if (now.length > 1 && (state === 'run' || state === 'ask' || state === 'paused')) {
     const waiting = state === 'ask' ? 'ask' : state === 'paused' ? 'stop' : 'act';
     groups.push(['Now', now.map((x) => ({
       label: x.label, detail: [x.detail, x.model].filter(Boolean).join(' · '),
       value: elapsed(x), tab: 'workflow', state: waiting, live: true,
+      // The 1 s ticker (_timerTick) advances this between frames, as it does the total.
+      since: x.runningSince || '',
     }))]);
   }
   // No "what already ran" list: the trail above shows it and opens the Workflow tab.
-  const sig = JSON.stringify(groups.map(([t, rows]) => [t, rows.map((x) => [x.label, x.detail, x.state, x.live ? '' : x.value])]));
+  const sig = JSON.stringify(groups.map(([t, rows]) => [t, rows.map((x) => [x.label, x.detail, x.state, x.since, x.live ? '' : x.value])]));
   if (host.dataset.sig === sig) {
     const vals = host.querySelectorAll('.rd-srow-v');
     let i = 0;
@@ -24613,6 +24682,8 @@ function rdDot() {
 function paintRdHeader(screen, r) {
   screen.querySelector('.rd-title').textContent = r.title || r.runId;
   screen.querySelector('.rd-bar-title').textContent = r.title || r.runId;
+  paintPageHead(screen.querySelector('.rd-glance'), r.title || r.runId,
+    [projectName(r.projectDir), r.startedAt ? `started ${startedLabel(r.startedAt)}` : '']);
   paintAutoBadge(screen.querySelector('.rd-row1 .auto-badge'), r.stepper);
 
   // Status pill: statusPill's family + word (spec §4.3 pins it as the source).
@@ -24631,11 +24702,11 @@ function paintRdHeader(screen, r) {
   pill.className = `rd-status pill-run ${family}` + (parked ? ' parked' : '');
   pill.querySelector('.rd-status-word').textContent = text;
 
-  // Who started it (shared deployments only): the person chip beside the run's name in the
-  // bar, with the full name — the one place that never says "you".
-  screen.querySelector('.rd-bar .person-chip')?.remove();
+  // Who started it (shared deployments only): the person chip at the end of the page
+  // title's meta line, with the full name — the one place that never says "you".
+  screen.querySelector('.rd-page-meta .person-chip')?.remove();
   const starter = personShown(r.startedBy);
-  if (starter) screen.querySelector('.rd-bar-title').before(personChip(starter));
+  if (starter) screen.querySelector('.rd-page-meta').append(personChip(starter));
 
   // Meta: project · started · elapsed · cost · step n/m · step name.
   const meta = screen.querySelector('.rd-meta');
@@ -24979,7 +25050,10 @@ function updateNavCounts() {
     const t = paused ? `Running — ${live} live, ${paused} paused`
       : live ? `Running — ${live} live`
       : 'Running';
-    rb.title = t;
+    // A tooltip only when it says more than the label beside it ("Running" over
+    // "Running" is noise); the collapsed rail has no label, so it always gets one.
+    const railed = !!rb.closest('.sidebar.collapsed');
+    if (t !== 'Running' || railed) rb.title = t; else rb.removeAttribute('title');
     rb.setAttribute('aria-label', t);
   }
 }
@@ -26114,6 +26188,11 @@ const _timerTick = setInterval(() => {
       // querySelectorAll, not querySelector: the detail screen carries the header
       // elapsed AND the Overview ELAPSED stat card, both tagged `.run-time`.
       for (const timeEl of host.querySelectorAll('.run-time')) timeEl.textContent = elapsed;
+      // The glance's step times (its status line and Now rows), each from when it started.
+      for (const el of host.querySelectorAll('[data-since]')) {
+        const t = new Date(el.dataset.since).getTime();
+        if (Number.isFinite(t)) el.textContent = fmtDuration(Math.max(0, now - t));
+      }
       for (const el of host.querySelectorAll('.run-node[data-id]')) {
         const durEl = el.querySelector('.dur');
         if (!durEl) continue;
