@@ -1,5 +1,5 @@
 // src/core/night/store.mjs
-// night_decisions rows (schema v40) and the counters night mode's guardrails read from them.
+// night_decisions rows (schema v44) and the counters night mode's guardrails read from them.
 // The counters live in the DB, not the harness, so they survive a pause/resume.
 import { prepare } from '../db.mjs';
 import { windowedSpendUsd } from '../cost-budget.mjs';

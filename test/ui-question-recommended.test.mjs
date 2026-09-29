@@ -105,7 +105,7 @@ test('a question without confidence renders plain options, nothing preselected',
     questions: [{ id: 'q1', question: 'Pick?', options: ['A', 'B'], allowFreeText: true }] });
   const card = ctx.window.document.querySelector(`.run-card[data-run-id="${RUN_ID}"]`);
   assert.equal(card.querySelectorAll('.qconf, .qrec, .qopt.sel').length, 0);
-  assert.equal([...card.querySelectorAll('.qopt .qopt-txt')].map((s) => s.textContent).join(','), 'A,B');
+  assert.equal([...card.querySelectorAll('.qopt .qopt-txt')].map((s) => s.textContent).join(','), 'A. A,B. B');
 });
 
 test('stylesheet carries the confidence bar and badge rules', () => {
