@@ -50,7 +50,7 @@ import { hostGuardEnabled, hostGuardHookEntry, hostGuardSystemPrompt } from './h
 import { mockShapeFor } from './auto/recipes.mjs';
 import { normalizeShape } from '../shared/graph/assemble.mjs';
 import { writeFile, mkdir, appendFile, readFile, access, readdir } from 'node:fs/promises';
-import { constants as FS, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { constants as FS, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { stripGithubCredentials } from './github-credentials.mjs';
@@ -1260,7 +1260,8 @@ async function emitLog(onEvent, text) {
 export const MOCK_WRITER_ROLES = new Set([
   'clarify', 'planner-plan', 'refiner', 'decomposer', 'implementer', 'reviewer', 'plan-review',
   'workspace-scan', 'agent-gen', 'workspace-reviewer', 'manual-tests-checklist', 'manual-web-ui-testing', 'memory-defrag',
-  'generic-producer', 'generic-verifier', 'workspace-usage', 'workspace-synth',
+  'generic-producer', 'generic-verifier', 'deck-builder', 'deck-audit', 'deck-export',
+  'workspace-usage', 'workspace-synth',
 ]);
 
 /** Named so the executor's mock-role chain and the switch cannot drift apart. */
@@ -1669,6 +1670,15 @@ async function runMock({ cwd, systemPrompt, prompt, onEvent, signal, resumeSessi
       // standard cycle-decreasing severity, so generic loops terminate offline.
       text = await mockReviewer(m, cycle, onEvent);
       break;
+    case 'deck-builder':
+      text = await mockDeckBuilder(m, onEvent);
+      break;
+    case 'deck-audit':
+      text = await mockDeckAudit(m, cycle, onEvent);
+      break;
+    case 'deck-export':
+      text = await mockDeckExport(m, cycle, onEvent);
+      break;
     default:
       await emitLog(onEvent, `[mock] no side effects for unknown role`);
       break;
@@ -1819,6 +1829,114 @@ async function mockMemoryDefrag(m, systemPrompt, onEvent) {
     safeEmit(onEvent, { type: 'tool_use', text: `wrote ${out}`, raw: { mock: true, file: out } });
   }
   return merged ? `[mock] memory defragment: merged ${merged[1]} into ${merged[0]}` : '[mock] memory defragment: nothing to merge';
+}
+
+/** A 1×1 opaque PNG — enough for a real image/png magic number and a viewer <img>. */
+const MOCK_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+
+const MOCK_KIT_FILES = ['deck-stage.js', 'deck-enhance.js', 'deck-export.js', 'deck-audit.js'];
+
+/** Smallest structurally-valid PDF: one empty page. The golden run asserts the
+ *  deliverable EXISTS and is a PDF; it never parses it. */
+const MOCK_PDF = Buffer.from(
+  '%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n'
+  + '2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n'
+  + '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 1920 1080]>>endobj\n'
+  + 'trailer<</Root 1 0 R>>\n%%EOF\n', 'latin1');
+
+/** Writes deck-manifest.md (MOCK_OUT) plus deck/{deck,proof}.html and stub kit
+ *  copies beside it — the subfolder tree the sidecar's extraFiles index. */
+async function mockDeckBuilder(m, onEvent) {
+  const out = m.MOCK_OUT;
+  if (!out) return '[mock] deck-builder: no MOCK_OUT given';
+  const pdir = dirname(out);
+  const deckDir = join(pdir, 'deck');
+  await mkdir(deckDir, { recursive: true });
+  const slides = ['Worca cuts review cost', 'Three loops, one gate', 'The ask'];
+  const sections = slides.map((t, i) => `  <section data-label="${String(i + 1).padStart(2, '0')} · ${t}"><h1>${t}</h1>${i === 1 ? '<p data-step="1">Reveal one</p>' : ''}</section>`).join('\n');
+  const html = (proof) =>
+    '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8"><meta name="generator" content="OpenDeck 1.0.0"><title>Mock deck</title>' +
+    '<style>section{font-size:48px}h1{font-size:72px}</style></head><body>\n' +
+    `<deck-stage width="1920" height="1080"${proof ? ' noscale' : ''}>\n${proof ? sections.replace(/data-step="1"/g, 'data-step="1" class="step-visible"') : sections}\n</deck-stage>\n` +
+    '<script type="application/json" id="speaker-notes">["", "", ""]</script>\n' +
+    '<script src="deck-stage.js"></script>\n' + (proof ? '<script src="deck-audit.js"></script>\n' : '<script src="deck-enhance.js"></script>\n<script src="deck-export.js"></script>\n') +
+    '</body></html>\n';
+  await writeFile(join(deckDir, 'deck.html'), html(false), 'utf8');
+  await writeFile(join(deckDir, 'proof.html'), html(true), 'utf8');
+  for (const f of MOCK_KIT_FILES) await writeFile(join(deckDir, f), `/* mock ${f} */\n`, 'utf8');
+  const manifest = '# Deck manifest\nMode: live   Slides: 3   Kit: 1.0.0\nDeck: deck/deck.html   Proof: deck/proof.html\n\n' +
+    '| # | Title | Composition | Ground | Steps | Skipped |\n|---|---|---|---|---|---|\n' +
+    slides.map((t, i) => `| ${i + 1} | ${t} | statement | dark | ${i === 1 ? 1 : 0} | no |`).join('\n') +
+    '\n\n## Changed this cycle\n- first build\n';
+  await ensureDir(out);
+  await writeFile(out, manifest, 'utf8');
+  safeEmit(onEvent, { type: 'tool_use', text: `wrote ${out}`, raw: { mock: true, file: out } });
+  return `[mock] deck written to ${deckDir}`;
+}
+
+/** Writes the two single-file deliverables beside the deck, then a clean
+ *  verdict. Mocked as bytes, not built — the offline run proves the pipeline
+ *  CARRIES deliverables to the end, which is the check that was missing when a
+ *  run finished "clean" having produced neither. */
+async function mockDeckExport(m, cycle, onEvent) {
+  const jsonPath = m.MOCK_JSON;
+  const mdPath = m.MOCK_OUT;
+  // Degrade the way mockDeckBuilder does: a graph that wires neither the verdict
+  // nor the report port would otherwise throw TypeError out of node:path.
+  if (!jsonPath && !mdPath) return '[mock] deck-export: no MOCK_JSON or MOCK_OUT given';
+  const pdir = dirname(jsonPath || mdPath);
+  const deckDir = join(pdir, 'deck');
+  await mkdir(deckDir, { recursive: true });
+  const src = await readFile(join(deckDir, 'deck.html'), 'utf8').catch(() => '<!DOCTYPE html>\n');
+  // FALLBACK ONLY, mirroring the real agent: the deckBundle card owns the single
+  // file, and this step builds one itself only when the card left none — a host
+  // with no python interpreter, or a mock run, where the card writes just its
+  // report. A real standalone inlines every companion; the mock mirrors the
+  // property the golden run asserts, not the bundler's actual output.
+  const standalone = join(deckDir, 'deck.standalone.html');
+  if (!existsSync(standalone)) {
+    await writeFile(standalone,
+      src.replace(/<script src="([^"]+)"><\/script>/g, (_m2, f) => `<script>/* inlined ${f} */</script>`), 'utf8');
+  }
+  await writeFile(join(deckDir, 'deck.pdf'), MOCK_PDF);
+  const verdict = { issues: [], summary: '3 slides, 3 PDF pages, standalone has no external refs. task.md named no extra deliverable.' };
+  if (jsonPath) { await ensureDir(jsonPath); await writeFile(jsonPath, `${JSON.stringify(verdict, null, 2)}\n`, 'utf8'); }
+  if (mdPath) {
+    await ensureDir(mdPath);
+    await writeFile(mdPath, `# Deck export — cycle ${cycle}\n\n- deck/deck.pdf — 3 pages\n- deck/deck.standalone.html — self-contained\n\nNo blocking findings.\n`, 'utf8');
+  }
+  safeEmit(onEvent, { type: 'tool_use', text: `wrote ${join(deckDir, 'deck.pdf')}`, raw: { mock: true, file: join(deckDir, 'deck.pdf') } });
+  return `[mock] deliverables written to ${deckDir}`;
+}
+
+/** Writes shots/s01..s03.png beside the verdict, then the standard
+ *  cycle-decreasing verdict (major on cycle 1, suggestion after). */
+async function mockDeckAudit(m, cycle, onEvent) {
+  const jsonPath = m.MOCK_JSON;
+  const mdPath = m.MOCK_OUT;
+  // Degrade the way mockDeckBuilder does: a graph that wires neither the verdict
+  // nor the report port would otherwise throw TypeError out of node:path.
+  if (!jsonPath && !mdPath) return '[mock] deck-audit: no MOCK_JSON or MOCK_OUT given';
+  const pdir = dirname(jsonPath || mdPath);
+  const shots = join(pdir, 'shots');
+  await mkdir(shots, { recursive: true });
+  for (let i = 1; i <= 3; i++) await writeFile(join(shots, `s${String(i).padStart(2, '0')}.png`), MOCK_PNG);
+  const review = cycle <= 1
+    ? { summary: '3 slides audited (mode live). 1 slide with clipped text. Screenshots in shots/.',
+        issues: [{ severity: 'major', title: 'Slide 2: clipped text', detail: 'p (scrollWidth 1980 > clientWidth 1840)', location: 'deck/deck.html slide 2 (shots/s02.png)' }] }
+    : { summary: '3 slides audited (mode live). No blocking facts. Screenshots in shots/.',
+        issues: [{ severity: 'suggestion', title: 'Slide 3 has 4 words', detail: 'below the 30-word budget', location: 'shots/s03.png' }] };
+  if (mdPath) {
+    await ensureDir(mdPath);
+    await writeFile(mdPath, `# Deck audit (cycle ${cycle})\n\n${review.summary}\n\n` + review.issues.map((i) => `- **[${i.severity}]** ${i.title} — ${i.detail}`).join('\n') + '\n', 'utf8');
+  }
+  if (jsonPath) {
+    await ensureDir(jsonPath);
+    await writeFile(jsonPath, JSON.stringify(review, null, 2) + '\n', 'utf8');
+    safeEmit(onEvent, { type: 'tool_use', text: `wrote ${jsonPath}`, raw: { mock: true, file: jsonPath } });
+  }
+  return JSON.stringify(review);
 }
 
 async function mockPlannerPlan(m, onEvent) {

@@ -26,13 +26,43 @@ const until = async (fn, ms = 3000) => {
 };
 const click = (window, node) => node.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
 
+/** Only max-width / min-width queries can match; colour-scheme and reduced-motion stay false.
+ *  Same helper as test/ui-mobile-nav.test.mjs, needed here to drive the phone-guide test. */
+function mediaStub(width) {
+  let w = width;
+  const lists = [];
+  const evalQ = (q) => {
+    const max = /max-width:\s*(\d+)px/.exec(q);
+    const min = /min-width:\s*(\d+)px/.exec(q);
+    if (!max && !min) return false;
+    return (!max || w <= Number(max[1])) && (!min || w >= Number(min[1]));
+  };
+  const matchMedia = (q) => {
+    const l = {
+      media: q, matches: evalQ(q), fns: [],
+      addEventListener(t, fn) { if (t === 'change') this.fns.push(fn); },
+      removeEventListener() {}, addListener(fn) { this.fns.push(fn); }, removeListener() {},
+    };
+    lists.push(l);
+    return l;
+  };
+  const resize = (next) => {
+    w = next;
+    for (const l of lists) {
+      const m = evalQ(l.media);
+      if (m !== l.matches) { l.matches = m; for (const fn of l.fns) fn({ matches: m, media: l.media }); }
+    }
+  };
+  return { matchMedia, resize };
+}
+
 const STEPS = ['claude', 'project', 'run', 'ask', 'realRun', 'workflows', 'workspace', 'teamMetrics', 'teamPolicy'];
 const status = (done = [], flags = {}) => ({
   steps: Object.fromEntries(STEPS.map((id) => [id, done.includes(id)])),
   done: done.length, total: 9, claude: { bin: 'claude', hint: null }, hidden: false, welcomeSeen: false, ...flags,
 });
 
-async function boot({ onboarding = status(['claude']), projects = [], level = null } = {}) {
+async function boot({ onboarding = status(['claude']), projects = [], level = null, width = null } = {}) {
   // `level`: the server-rendered interface mode (docs/ui-levels.md); null = no attribute (gates nothing).
   const shellHtml = level ? html.replace('<html lang="en" data-theme="system">', `<html lang="en" data-theme="system" data-level="${level}">`) : html;
   // A guide left running by an earlier test (an assertion failed mid-tour) polls the GLOBAL
@@ -41,6 +71,9 @@ async function boot({ onboarding = status(['claude']), projects = [], level = nu
   const dom = new JSDOM(shellHtml, { url: 'http://localhost:4317/', pretendToBeVisual: true });
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
+  // jsdom has no matchMedia: a null width keeps every existing test on the desktop path;
+  // a real width installs the stub BEFORE app.js loads, exactly like ui-mobile-nav.test.mjs.
+  if (width != null) window.matchMedia = mediaStub(width).matchMedia;
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
   const posts = [];
   let current = onboarding;
@@ -151,13 +184,30 @@ test('welcome: Skip marks it seen and never returns; a door marks it seen and st
   let layer = doc.querySelector('.guide-layer.spotlight');
   assert.ok(layer, 'a spotlight is up');
   assert.ok(layer.dataset.target.startsWith('.nav button[data-nav="projects"]'), layer.dataset.target);
-  assert.ok(layer.dataset.target.includes('.topnav button[data-nav="projects"]'), 'the compact top-nav twin is the fallback');
+  assert.ok(!layer.dataset.target.includes('topnav'), 'there is no compact twin any more');
   // The user's own click on that entry routes, and the guide re-lights the next control.
   click(window, doc.querySelector('.nav button[data-nav="projects"]'));
   await settle();
   assert.equal(doc.querySelector('.view[data-view="projects"]').classList.contains('hidden'), false);
   layer = doc.querySelector('.guide-layer.spotlight');
   assert.equal(layer.dataset.target, '#project-add-btn');
+});
+
+test('guide on a phone: the Projects hop first rings the menu button, then the drawer entry', async () => {
+  let { doc, window, posts } = await boot({ width: 390 });
+  click(window, doc.querySelector('#welcome-modal [data-door="project"]'));
+  await settle();
+  let layer = doc.querySelector('.guide-layer.spotlight');
+  assert.equal(layer.dataset.target, '#mbar-menu', 'the shut drawer is reached through the hamburger');
+  click(window, doc.querySelector('#mbar-menu'));
+  await settle();
+  assert.ok(doc.body.classList.contains('nav-open'));
+  layer = doc.querySelector('.guide-layer.spotlight');
+  assert.ok(layer.dataset.target.startsWith('.nav button[data-nav="projects"]'), layer.dataset.target);
+  click(window, doc.querySelector('.nav button[data-nav="projects"]'));
+  await settle();
+  assert.equal(doc.body.classList.contains('nav-open'), false, 'routing puts the drawer away');
+  assert.equal(doc.querySelector('.view[data-view="projects"]').classList.contains('hidden'), false);
 });
 
 test('welcome: not shown again once seen; not shown when everything is already done (marked seen instead)', async () => {

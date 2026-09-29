@@ -38,10 +38,10 @@ test('ui-ask-style: the dock is a fixed, click-through layer at z-40 with the ra
   assert.match(ruleBody('.ask-pill') || '', /pointer-events:auto/);
 });
 
-test('ui-ask-style: below 1080px the dock spans the viewport EVEN with a collapsed rail', () => {
+test('ui-ask-style: on phones (<=760px) the dock spans the viewport EVEN with a collapsed rail', () => {
   // the media rule must carry the higher-specificity selector too, or
   // body.rail-collapsed .ask-dock{left:76px} wins below the breakpoint
-  const media = css.slice(css.indexOf('@media (max-width:1080px)', css.indexOf('.ask-dock')));
+  const media = css.slice(css.indexOf('@media (max-width:760px)', css.indexOf('.ask-dock')));
   const block = media.slice(0, media.indexOf('}', media.indexOf('{', media.indexOf('{') + 1)) + 1);
   assert.match(block, /body\.rail-collapsed \.ask-dock/, 'media rule restates the rail-collapsed selector');
   assert.match(block, /left:0/);

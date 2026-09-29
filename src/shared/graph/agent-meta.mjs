@@ -95,6 +95,12 @@ export function normalizeAgentMeta(raw, opts = {}) {
   if (!key) err('key is required');
   else if (!AGENT_KEY_RE.test(key)) err(`key "${key}" is not a valid agent key`);
   if (raw.metaVersion !== 2) err('sidecar requires metaVersion 2');
+  if (raw.requiresAssets !== undefined && !Array.isArray(raw.requiresAssets)) err('requiresAssets must be an array of strings');
+  for (const a of Array.isArray(raw.requiresAssets) ? raw.requiresAssets : []) {
+    if (typeof a !== 'string' || !/^[A-Za-z0-9._-]+$/.test(a) || a === '.' || a === '..') {
+      err(`requiresAssets entry "${a}" must match [A-Za-z0-9._-]+ (it is used as a path segment)`);
+    }
+  }
   if (!RUNNER_TYPES.has(raw.runnerType)) err(`runnerType must be one of ${[...RUNNER_TYPES].join(', ')}`);
   const runnerType = RUNNER_TYPES.has(raw.runnerType) ? raw.runnerType : 'producer';
 
@@ -186,6 +192,12 @@ export function normalizeAgentMeta(raw, opts = {}) {
     promptHints: typeof raw.promptHints === 'string' ? raw.promptHints : '',
     requiresSkills: Array.isArray(raw.requiresSkills)
       ? raw.requiresSkills.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim())
+      : [],
+    // Asset folders shipped under worca's own assets/, staged into the RUN
+    // FOLDER before the first node runs (run-assets.mjs). Validated here rather
+    // than at stage time so a bad name is a sidecar error, not a mid-run abort.
+    requiresAssets: Array.isArray(raw.requiresAssets)
+      ? raw.requiresAssets.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim())
       : [],
     inputs,
     outputs,
@@ -290,6 +302,34 @@ export function readInputs(raw, err, warn, opts = {}) {
   return out;
 }
 
+// Exactly one dir, `*` only in the basename. The dir segment must carry a
+// non-dot character: `[A-Za-z0-9_.-]+` alone accepts a bare `.`, and the `..`
+// check below does not catch it — so `./deck.html` validated, and
+// _indexExtraFiles then keyed its prune on the prefix `"./"`, which matches no
+// stored row (a top-level file is stored under its bare name). Every top-level
+// file would be re-attributed on every sweep. No shipped sidecar spells it that
+// way, but sidecars are agent-written, so the validator is the place to say no.
+const EXTRA_GLOB_RE = /^(?=[^/]*[A-Za-z0-9_-])[A-Za-z0-9_.-]+\/[A-Za-z0-9_.*-]+$/;
+const EXTRA_KIND_RE = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** Optional `extraFiles: [{ kind, glob }]` on a non-void output port — one-level
+ *  globs under the pipeline dir the engine indexes after the step. Returns the
+ *  cleaned array, or undefined when absent/invalid (pushing errors via `err`). */
+function readExtraFiles(p, portId, err) {
+  if (p.extraFiles === undefined) return undefined;
+  if (p.type === 'void') { err(`outputs.${portId}: void ports carry no extraFiles`); return undefined; }
+  if (!Array.isArray(p.extraFiles) || p.extraFiles.length > 8) { err(`outputs.${portId}: extraFiles must be an array of at most 8 entries`); return undefined; }
+  const out = [];
+  for (const e of p.extraFiles) {
+    const kind = typeof e?.kind === 'string' ? e.kind.trim() : '';
+    const glob = typeof e?.glob === 'string' ? e.glob.trim() : '';
+    if (!EXTRA_KIND_RE.test(kind)) { err(`outputs.${portId}: extraFiles kind "${kind}" is not a valid artifact kind`); continue; }
+    if (!EXTRA_GLOB_RE.test(glob) || glob.includes('..')) { err(`outputs.${portId}: extraFiles glob "${glob}" must be "<dir>/<name-or-*pattern>" under the pipeline dir`); continue; }
+    out.push({ kind, glob });
+  }
+  return out;
+}
+
 /**
  * @param {{allowEmptyOutputs?:boolean, who?:string}} [opts] scripts may declare zero
  *  outputs (a pure side effect); `who` names the declarer in the `when` error.
@@ -325,6 +365,8 @@ export function readOutputs(raw, hasVerdict, err, opts = {}) {
       else port.store = store;
       port.artifactKind = typeof p.artifactKind === 'string' && p.artifactKind.trim() ? p.artifactKind.trim() : port.id;
     }
+    const extraFiles = readExtraFiles(p, port.id, err);
+    if (extraFiles) port.extraFiles = extraFiles;
     out.push(port);
   }
   return out;

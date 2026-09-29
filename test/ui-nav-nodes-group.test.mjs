@@ -3,8 +3,7 @@
 // route: it folds its two children, remembers the choice, and opens itself
 // whenever a child page is shown so "where am I" never hides. The children keep
 // their #agents / #scripts hashes and their data-nav wiring (app.js snapshots
-// `.nav button[data-nav]`, which reaches nested buttons). The compact topnav is
-// a flat strip and stays flat.
+// `.nav button[data-nav]`, which reaches nested buttons).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
@@ -21,7 +20,6 @@ const appPath = join(root, 'app.js');
 const KEY = 'worca-cc.nav.nodes.collapsed';
 const SIDEBAR_KEY = 'worca-cc.sidebar.collapsed';
 const sidebar = () => html.match(/<nav class="nav"[\s\S]*?<\/nav>/)[0];
-const topnav = () => html.match(/<nav class="topnav"[\s\S]*?<\/nav>/)[0];
 
 // Same anchored idiom as test/ui-nav-sections.test.mjs.
 function ruleBody(selector) {
@@ -61,12 +59,6 @@ test('the children are nav-child rows inside the group box and keep their hashes
   assert.deepEqual(kids, ['agents', 'scripts']);
   assert.match(sidebar(), /data-nav-group="nodes"[^>]*>[\s\S]*?<\/button>\s*<div class="nav-children nav-group-children" id="nav-nodes-children" data-min-level="expert"/,
     'the box follows its parent row');
-});
-
-test('the compact topnav stays flat: Agents and Scripts remain direct buttons', () => {
-  assert.match(topnav(),
-    /<button type="button" data-nav="agents" data-min-level="expert">Agents<\/button>\s*<button type="button" data-nav="scripts" data-min-level="expert">Scripts<\/button>/);
-  assert.ok(!/nav-group/.test(topnav()));
 });
 
 // ---- jsdom ----
@@ -154,8 +146,8 @@ test('a deep link below the mode keeps the parent visible alongside its child', 
 });
 
 // Simple is the exception to "the page you are on keeps its menu entry": the
-// whole group stays hidden — parent, box, children, and the topnav twins — and
-// the level banner alone says where you are. Advanced keeps it (test above).
+// whole group stays hidden — parent, box and children — and the level banner
+// alone says where you are. Advanced keeps it (test above).
 test('Simple hides the whole group even while a child page is open', async () => {
   const { $, go } = await boot({ level: 'simple' });
   await go('#agents');
@@ -164,7 +156,6 @@ test('Simple hides the whole group even while a child page is open', async () =>
   assert.equal(group($).dataset.levelKeep, undefined);
   assert.equal(box($).dataset.levelKeep, undefined);
   assert.equal($('.nav button[data-nav="agents"]').dataset.levelKeep, undefined);
-  assert.equal($('.topnav button[data-nav="agents"]').dataset.levelKeep, undefined);
 });
 
 test('switching to Simple while on a child page drops the kept group', async () => {
@@ -182,7 +173,6 @@ test('switching to Simple while on a child page drops the kept group', async () 
   assert.equal(group($).dataset.levelKeep, undefined);
   assert.equal(box($).dataset.levelKeep, undefined);
   assert.equal($('.nav button[data-nav="scripts"]').dataset.levelKeep, undefined);
-  assert.equal($('.topnav button[data-nav="scripts"]').dataset.levelKeep, undefined);
   assert.equal($('#level-banner').hidden, false);
 });
 

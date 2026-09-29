@@ -297,13 +297,11 @@ async function boot({ scripts = SCRIPTS } = {}) {
   return { window, go, seen };
 }
 
-test('the rail and the topnav carry Scripts directly under Agents, and #scripts paints the list', async () => {
+test('the rail carries Scripts directly under Agents, and #scripts paints the list', async () => {
   const { window } = await boot();
   const d = window.document;
   const rail = [...d.querySelectorAll('.nav button[data-nav]')].map((b) => b.dataset.nav);
   assert.equal(rail[rail.indexOf('agents') + 1], 'scripts');
-  const top = [...d.querySelectorAll('.topnav button[data-nav]')].map((b) => b.dataset.nav);
-  assert.equal(top[top.indexOf('agents') + 1], 'scripts');
   assert.equal(d.querySelector('[data-view="scripts"]').classList.contains('hidden'), false);
   assert.ok(d.querySelector('.nav button[data-nav="scripts"]').classList.contains('active'));
   assert.deepEqual([...d.querySelectorAll('#scripts-host .script-card')].map((c) => c.dataset.scriptKey),

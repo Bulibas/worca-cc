@@ -60,3 +60,20 @@ Deep dives: [Guardrails](guardrails.md) · [Storage](storage.md) · [Scheduled r
   2400px-wide viewport with `document.body.style.zoom = 2` and every `.rv`
   element given the `in` class, then take a full-page PNG screenshot.
 -->
+
+
+### A gated node re-fires only when its gate re-opens
+
+A node with its `await` port wired re-fires when the **gate** is fresh, or when a
+fresh token arrives on one of its own loop inputs — not on any fresh input.
+Without that rule a gated node re-ran on a payload from inside a fix loop, i.e.
+concurrently with the very check it was waiting on, and its verdict could end the
+run while that check was still in flight.
+
+**This applies to graphs already saved**, with no version gate: a hand-built graph
+whose node is gated on a one-shot branch while also consuming a node inside a fix
+loop used to re-run each cycle and now keeps its first-cycle output, so downstream
+consumers read the first artifact for the rest of the run. The scheduler says so
+once per node in the run log ("its `await` gate has not re-opened"). To restore
+per-cycle re-firing, wire that node's gate from **inside** the loop, so the gate
+re-opens on every cycle along with the payload.

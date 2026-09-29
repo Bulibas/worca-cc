@@ -167,6 +167,9 @@ export function formatRunSummary(state) {
     activeMs: rows.reduce((a, s) => a + (Number(s.activeMs) || 0), 0),
     costUsd: st.totalCostUsd,
   }));
+  if (Array.isArray(st.directions?.pending) && st.directions.pending.length) {
+    lines.push(`${st.directions.pending.length} direction(s) never applied: ${st.directions.pending.map((d) => `${d.id} "${d.text}"`).join('; ')}`);
+  }
   return lines;
 }
 

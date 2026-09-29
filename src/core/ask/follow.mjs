@@ -17,6 +17,12 @@ import { fmtMs, fmtUsd } from '../chat/renderers.mjs';
 
 const MAX_QUESTION_NOTICES = 3;
 
+/** Statuses the `done`/`error` handlers own: each is stamped on the link together
+ *  with the one notice that announces it, so a reader can never see one without
+ *  the other. 'paused' is terminal for THIS orchestrator (a resume builds a new
+ *  one and re-attaches a fresh follower), which is why it belongs here too. */
+const TERMINAL_STATUS = new Set(['done', 'stopped', 'error', 'paused']);
+
 export function attachRunFollower(orch, {
   threadId, runId, cardId = null, post = () => {}, updateStatus = () => {}, onDetached = null,
 } = {}) {
@@ -55,7 +61,17 @@ export function attachRunFollower(orch, {
         seenPipelineId = true;
         patch.pipelineId = p.id;
       }
-      if (p.status) patch.status = p.status;
+      // LIVE progress only. A terminal status is not progress — it is the run
+      // ending, and the terminal NOTICE is posted by the `done`/`error` handlers
+      // below, which fire only after the orchestrator has persisted, audited,
+      // built its results (git) and written back to the task source. Mirroring a
+      // terminal status here stamped the link "finished" while the message saying
+      // so was still several awaits away, so anything that stops reading once the
+      // link is terminal saw a finished run that never announced itself. Every
+      // terminal `_setStatus` in run-harness.mjs has an `_emit('done')` behind it
+      // — stop() included, which only requests the abort and lets the run loop
+      // unwind into the async stopped path — so nothing is dropped by waiting.
+      if (p.status && !TERMINAL_STATUS.has(p.status)) patch.status = p.status;
       updateStatus(patch);
     }),
     exec: guard((p) => {

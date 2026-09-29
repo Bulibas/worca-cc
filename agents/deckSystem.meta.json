@@ -1,0 +1,19 @@
+{
+  "key": "deckSystem",
+  "metaVersion": 2,
+  "mockRole": "generic-producer",
+  "promptHints": "Write the visual system before any slide exists: two or three grounds with a stated job each, a type scale with named extremes, four to six named compositions, the accent's one job in words. Assign a composition and a ground to every slide in spine.md. Pipeline directory: {pipelineDir}",
+  "inputs": [{ "id": "spine", "type": "md" }],
+  "outputs": [{ "id": "system", "type": "md", "filename": "visual-system.md", "artifactKind": "deck-system" }],
+  "domain": "presentation",
+  "displayName": "Visual System",
+  "description": "Grounds, type scale, compositions and the accent — written down before the first slide.",
+  "color": "violet",
+  "icon": "<rect x=\"3\" y=\"4\" width=\"7\" height=\"7\" rx=\"1\"/><rect x=\"14\" y=\"4\" width=\"7\" height=\"7\" rx=\"1\"/><rect x=\"3\" y=\"15\" width=\"7\" height=\"5\" rx=\"1\"/><circle cx=\"17.5\" cy=\"17.5\" r=\"2.5\"/>",
+  "agentFile": "worca-cc-deck-system.md",
+  "runnerType": "producer",
+  "asksQuestions": true,
+  "questionsLocked": false,
+  "questionsDefault": true,
+  "order": 12
+}

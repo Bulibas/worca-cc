@@ -61,6 +61,17 @@ const AGENTS = {
     inputs: [{ id: 'plan', type: 'md', required: true }],
     outputs: [{ id: 'tasks', type: 'json', when: 'always' }],
   },
+  // The presentation graph's shape: a builder inside a fix loop, and a node
+  // gated by `await` that also consumes the builder's payload directly.
+  builder: {
+    inputs: [{ id: 'task', type: 'md', required: true }, { id: 'fixes', type: 'md', required: false, loop: true }],
+    outputs: [{ id: 'built', type: 'md', when: 'always' }],
+  },
+  gated: {
+    inputs: [{ id: 'built', type: 'md', required: true }, { id: 'task', type: 'md', required: true }],
+    outputs: [{ id: 'report', type: 'md', when: 'blocking' }, { id: 'pass', type: 'void', when: 'clean' }],
+    verdict: { filename: 'gated-cycle{cycle}.json' },
+  },
 };
 
 const portsFn = (node) => (node.kind === 'agent'
@@ -105,6 +116,7 @@ function harness({ template, script = {}, maxParallel, onAsk, onGate }) {
     return Promise.resolve(out).then((v) => { release(); return v; }, (e) => { release(); throw e; });
   };
 
+  const logs = [];
   const scheduler = createScheduler({
     template,
     portsFn,
@@ -114,10 +126,11 @@ function harness({ template, script = {}, maxParallel, onAsk, onGate }) {
     onSnapshot: (s) => snapshots.push(s),
     onAsk: onAsk || (async (a) => { asks.push(a); return a.kind === 'gate' ? 'continue' : []; }),
     onGate: onGate || ((g) => gates.push(g)),
+    log: (text) => logs.push(String(text)),
   });
 
   return {
-    scheduler, events, snapshots, calls, asks, gates,
+    scheduler, events, snapshots, calls, asks, gates, logs,
     maxInFlight: () => maxInFlight,
     execEvents: () => events.filter((e) => e.name === 'exec'),
     tokenEvents: () => events.filter((e) => e.name === 'token'),
@@ -150,6 +163,21 @@ const FLOW_TPL = TPL(
     W('w3', 'n_a.out', 'n_or.in1'), W('w4', 'n_b.out', 'n_or.in2'), W('w5', 'n_or.out', 'n_sink.plan'),
     W('w6', 'n_a.out', 'n_and.in1'), W('w7', 'n_b.out', 'n_and.in2'), W('w8', 'n_and.out', 'n_sink.await'),
     W('w9', 'n_sink.done', 'n_end.result')],
+);
+
+
+/** A node gated on a ONE-SHOT `await` that ALSO takes a payload from inside a fix
+ *  loop — the shape whose re-fire behaviour the gate rule changed for graphs
+ *  nobody re-saved. n_sink's gate comes from n_make (fires once); its payload
+ *  comes from n_work, which the loop re-runs. */
+const GATED_LOOP_TPL = TPL(
+  [N('n_task', 'task'), N('n_make', 'agent', 'maker'), N('n_work', 'agent', 'worker'),
+    N('n_check', 'agent', 'checker'), N('n_sink', 'agent', 'worker'), N('n_end', 'end')],
+  [W('w1', 'n_task.task', 'n_make.task'), W('w2', 'n_make.out', 'n_work.plan'),
+    W('w3', 'n_make.out', 'n_check.plan'), W('w4', 'n_work.done', 'n_check.done'),
+    W('w5', 'n_check.review', 'n_work.fix', { maxCycles: 3 }),
+    W('w6', 'n_make.out', 'n_sink.await'), W('w7', 'n_work.done', 'n_sink.plan'),
+    W('w8', 'n_check.pass', 'n_end.result')],
 );
 
 const md = (p) => ({ outputs: { out: { path: p } } });
@@ -1231,4 +1259,79 @@ test('maxParallelScripts defaults from WORCA_MAX_PARALLEL_SCRIPTS (else 2); reat
   } finally {
     if (prev === undefined) delete process.env.WORCA_MAX_PARALLEL_SCRIPTS; else process.env.WORCA_MAX_PARALLEL_SCRIPTS = prev;
   }
+});
+
+// A node whose `await` gate is wired must not RE-fire on a fresh payload alone.
+// The presentation graph has exactly this shape: `n_export` is gated on
+// `n_review.pass`, and also takes `built` straight from `n_build` — the target of
+// the fix loop. The first-run barrier covers `await`, but re-firing was plain
+// any-fresh, so once the export had run and then reported a blocking finding, the
+// builder's next `built` made the export ready again — firing it in parallel with
+// the audit on a deck nothing had re-checked, and its `pass` then ending the run
+// with the audit still in flight.
+test('a node gated on await does not re-fire on a fresh payload from inside the loop', async () => {
+  const template = TPL(
+    [
+      N('n_task', 'task'), N('n_build', 'agent', 'builder'), N('n_check', 'agent', 'checker'),
+      N('n_gate', 'agent', 'gated'), N('n_or', 'or', undefined, { arity: 2 }), N('n_end', 'end'),
+    ],
+    [
+      W('w1', 'n_task.task', 'n_build.task'),
+      W('w2', 'n_task.task', 'n_gate.task'),
+      W('w3', 'n_build.built', 'n_check.plan'),
+      W('w4', 'n_check.pass', 'n_gate.await'),
+      W('w5', 'n_build.built', 'n_gate.built'),          // the payload from inside the loop
+      W('w6', 'n_check.review', 'n_or.in1', { maxCycles: 4 }),
+      W('w7', 'n_gate.report', 'n_or.in2', { maxCycles: 4 }),
+      W('w8', 'n_or.out', 'n_build.fixes'),
+      W('w9', 'n_gate.pass', 'n_end.result'),
+    ],
+  );
+  const h = harness({
+    template,
+    script: {
+      // The check blocks once, then stays clean.
+      n_check: byOrdinal({ verdict: BLOCKING('audit') }, { verdict: CLEAN }),
+      // The gate blocks on its FIRST run — the only way to reach a fix cycle
+      // after it has already fired — then passes.
+      n_gate: byOrdinal({ verdict: BLOCKING('no renderer') }, { verdict: CLEAN }),
+    },
+  });
+  await h.scheduler.run();
+
+  const trace = h.calls.map((c) => `${c.nodeId}#${c.ordinal}`).join(' → ');
+  // Concurrency is the harm, not ordering: the gate must never be in flight
+  // beside the check whose verdict is supposed to release it.
+  assert.equal(h.maxInFlight(), 1, `nothing in this graph may overlap: ${trace}`);
+  // And exactly one gate execution per clean check — the loose rule also gave the
+  // gate a THIRD run, once on the builder's payload and again on the check's pass.
+  const gates = h.calls.filter((c) => c.nodeId === 'n_gate').length;
+  const checks = h.calls.filter((c) => c.nodeId === 'n_check').length;
+  assert.equal(checks, 3, trace);
+  assert.equal(gates, 2, `one gate run per release, not one per fresh payload: ${trace}`);
+  assert.match(trace, /n_gate#2 → n_end#1$/, trace);
+});
+
+// The gate rule narrows re-firing for EVERY stored graph, with no version gate and
+// no Composer signal: a node gated on a one-shot `await` that also takes a payload
+// from inside a fix loop used to re-run each cycle and now holds its first output.
+// That reading of a gate is the intended one (an `await` that has not re-fired has
+// not re-opened, and the alternative is running concurrently with the checker it
+// waits on) — but it must not be SILENT, or the only symptom is a downstream
+// consumer reading a stale artifact for the rest of the run.
+test('a node held back by an unrefreshed await gate says so in the run log', async () => {
+  const h = harness({
+    template: GATED_LOOP_TPL,
+    script: {
+      n_make: () => md('/p/plan.md'),
+      n_check: byOrdinal({ verdict: BLOCKING(), outputs: { review: { path: '/p/r1.md' } } }, { verdict: CLEAN }),
+    },
+  });
+  await h.scheduler.run();
+
+  assert.equal(h.callsFor('n_work').length, 2, 'the loop ran the worker twice');
+  assert.equal(h.callsFor('n_sink').length, 1, 'the gated node held its first-cycle output');
+  const held = h.logs.filter((l) => /n_sink/.test(l) && /await/.test(l));
+  assert.equal(held.length, 1, `said once, not per pass: ${JSON.stringify(h.logs)}`);
+  assert.match(held[0], /gate/i, held[0]);
 });

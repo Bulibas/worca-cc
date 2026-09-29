@@ -147,6 +147,11 @@ test('formatRunSummary: v1 renders nothing; v2 counts executions without the boo
   assert.deepEqual(
     formatRunSummary({ stepper: { version: 2 }, steps: [], status: 'stopped', endReached: false, totalActiveMs: 0, totalCostUsd: 0 }),
     ['Result: completed', '0 executions · 0s active · $0.00']);
+  // Unapplied directions add one trailing line; none present adds nothing.
+  assert.deepEqual(
+    formatRunSummary({ stepper: { version: 2 }, steps: [], endReached: true, result: { type: 'md', path: '/p.md' },
+      totalActiveMs: 0, totalCostUsd: 0, directions: { posted: 2, applied: 1, pending: [{ id: 'd9', text: 'darker accent' }] } }),
+    ['Result: /p.md', '0 executions · 0s active · $0.00', '1 direction(s) never applied: d9 "darker accent"']);
 });
 
 // ── the CLI wiring ──────────────────────────────────────────────────────────

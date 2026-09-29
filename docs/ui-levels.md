@@ -109,7 +109,8 @@ be skipped by forgetting it.
   `data-nav` (it is an action, not a page). Its icon is the state readout: a
   stack of layers, the second lit from Advanced, the third from Expert. On the
   collapsed rail the icon is all that shows.
-- Below 1080 px the sidebar is hidden; `.topnav-mode` is the same control.
+- Below 1080 px the sidebar is the icon rail (tablets) and the rail's `#nav-mode` icon is the control; at
+  760 px and below it becomes a drawer behind the phone bar's ☰ button, where `#nav-mode` shows in full.
 - Click opens `#mode-modal`: three radio cards. Choosing one applies at once
   (the app re-lays out behind the dialog), `POST /api/settings {uiLevel}`
   persists it, and a failed save reverts.

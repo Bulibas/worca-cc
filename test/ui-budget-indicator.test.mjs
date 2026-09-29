@@ -1,6 +1,6 @@
 // test/ui-budget-indicator.test.mjs
-// Always-visible spend indicator: the sidebar mount, the topnav amount, the
-// New-view creation gate, click-through to #stats, and the countdown tick
+// Always-visible spend indicator: the sidebar mount, the New-view creation
+// gate, click-through to #stats, and the countdown tick
 // (idle recompute vs. rolled-over refetch). Boots the REAL app.js against the
 // REAL index.html under jsdom (harness from test/ui-stats.test.mjs) with the
 // dispatchable WebSocket stub from test/ui-history-cache.test.mjs so
@@ -126,16 +126,14 @@ async function boot({ budget = okBudget(), tickMs, idleRefetchMs } = {}) {
   return { window, box, counts, statsCalls, wsBox, tick, wait, pushBudgetChanged, showView, stopTimers };
 }
 
-test('boot paints the sidebar indicator and topnav amount', async () => {
+test('boot paints the sidebar indicator', async () => {
   const { window } = await boot();
   const amt = window.document.querySelector('#side-spend .spend-ind-amt');
   assert.ok(amt, 'the sidebar indicator is mounted in #side-spend');
   assert.equal(amt.textContent, '$41.23');
-  const top = window.document.querySelector('#topnav-spend');
-  assert.equal(top.hidden, false, 'the topnav amount is revealed once a budget is known');
-  assert.equal(top.textContent, '$41.23');
-  assert.equal(top.classList.contains('warn'), true, '82% of the cap is the warn band');
-  assert.equal(top.classList.contains('over'), false);
+  const ind = window.document.querySelector('#side-spend .spend-ind');
+  assert.equal(ind.classList.contains('warn'), true, '82% of the cap is the warn band');
+  assert.equal(ind.classList.contains('over'), false);
 });
 
 test('budget-changed repaints; blocked disables #start-btn with a visible reason', async () => {
@@ -147,7 +145,6 @@ test('budget-changed repaints; blocked disables #start-btn with a visible reason
   await ctx.pushBudgetChanged();
 
   assert.ok(ctx.window.document.querySelector('#side-spend .spend-ind').classList.contains('over'));
-  assert.equal(ctx.window.document.querySelector('#topnav-spend').classList.contains('over'), true);
   assert.equal(ctx.window.document.querySelector('#start-btn').disabled, true);
   const note = ctx.window.document.querySelector('#newBlockedNote');
   assert.equal(note.hidden, false);
@@ -256,8 +253,8 @@ test('a refresh asked for mid-flight runs a trailing fetch and the newer snapsho
   assert.equal(doc.querySelector('#start-btn').disabled, false,
     'the newer, unblocked snapshot is painted — the stale blocked one must not latch');
   assert.equal(doc.querySelector('#newBlockedNote').hidden, true);
-  assert.equal(doc.querySelector('#topnav-spend').classList.contains('over'), false);
-  assert.equal(doc.querySelector('#topnav-spend').textContent, '$41.23');
+  assert.equal(doc.querySelector('#side-spend .spend-ind').classList.contains('over'), false);
+  assert.equal(doc.querySelector('#side-spend .spend-ind-amt').textContent, '$41.23');
 });
 
 // ---- collapsed-rail budget ring ----

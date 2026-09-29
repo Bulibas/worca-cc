@@ -34,7 +34,6 @@
   },
   "artifacts": [
     "checklist:manual-tests-checklist.md",
-    "clarify:clarify.json",
     "decomposition:decomposition.json",
     "diff-patch:diff-patch.patch",
     "live-log:live-log.ndjson",

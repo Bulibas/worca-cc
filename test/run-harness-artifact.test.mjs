@@ -67,3 +67,84 @@ test('_artifact 2-arg form emits the byte-identical {kind, path} payload', async
   const evt = events.find((e) => e.name === 'artifact').evt;
   assert.deepEqual(evt, { kind: 'pipeline', path: dir });
 });
+
+test('_artifact emits a clarify event for the live view but never indexes it', async () => {
+  const { id, dir } = await seedPipeline(process.cwd(), { title: 'C', status: 'running' });
+  const h = Object.create(RunHarness.prototype);
+  h.pipeline = { id, dir };
+  h.isWorkspace = false;
+  h.projectDir = process.cwd();
+  const events = [];
+  h._emit = (name, evt) => events.push({ name, evt });
+
+  writeFileSync(join(dir, 'clarify.json'), '{}');
+  h._artifact('clarify', join(dir, 'clarify.json'), { nodeId: 'clarify', executionId: 'exec-5', port: null, cycle: 0 });
+
+  const evt = events.find((e) => e.name === 'artifact').evt;
+  assert.equal(evt.kind, 'clarify');
+  assert.equal(evt.cycle, 0);
+  // The Q&A lives in the clarify table, not in a file this index row could resolve.
+  assert.deepEqual(await listRunArtifacts(id, { kind: 'clarify' }), [], 'no clarify row in the artifacts index');
+});
+
+// Artifact events were emitted to the live socket but NEVER persisted: only
+// `_log` pushes to the logWriter. So live-log.ndjson held no artifact records,
+// and History — plus any live run reloaded in the browser — rendered its log
+// from records with no path/kind and therefore showed no clickable artifact
+// links at all. projectLogRecord already carries path/kind through; the records
+// just had to exist.
+//
+// Capped per burst, with the same threshold the Artifacts tab collapses on: a
+// folder sweep indexes one file per slide, and persisting 43 lines would put
+// back in History exactly the flood the live view suppresses.
+function bench(id, dir) {
+  const h = Object.create(RunHarness.prototype);
+  h.pipeline = { id, dir };
+  h.isWorkspace = false;
+  h.projectDir = process.cwd();
+  h._emit = () => {};
+  const pushed = [];
+  h.logWriter = { push: (rec) => pushed.push(rec) };
+  return { h, pushed };
+}
+
+test('_artifact persists a log record carrying path and kind', async () => {
+  const { id, dir } = await seedPipeline(process.cwd(), { title: 'P', status: 'running' });
+  const { h, pushed } = bench(id, dir);
+  writeFileSync(join(dir, 'deck-manifest.md'), '# m\n');
+
+  h._artifact('deck-manifest', join(dir, 'deck-manifest.md'), { nodeId: 'n_build', executionId: 'x:n_build:1', cycle: 1 });
+
+  assert.equal(pushed.length, 1);
+  assert.equal(pushed[0].level, 'artifact');
+  assert.equal(pushed[0].kind, 'deck-manifest');
+  assert.equal(pushed[0].path, join(dir, 'deck-manifest.md'));
+  assert.equal(pushed[0].nodeId, 'n_build');
+  assert.equal(pushed[0].executionId, 'x:n_build:1');
+  assert.ok(pushed[0].ts, 'and a timestamp, like every other log record');
+});
+
+test('_artifact caps a folder sweep instead of persisting one line per file', async () => {
+  const { id, dir } = await seedPipeline(process.cwd(), { title: 'Q', status: 'running' });
+  const { h, pushed } = bench(id, dir);
+  for (let i = 1; i <= 12; i++) {
+    writeFileSync(join(dir, `s${i}.png`), 'x');
+    h._artifact('deck-shot', join(dir, `s${i}.png`), { nodeId: 'n_audit', executionId: 'x:n_audit:1' });
+  }
+  assert.equal(pushed.length, 5, 'the first few of the sweep, not all twelve');
+
+  // A later cycle is its own sweep and logs its own first few.
+  for (let i = 1; i <= 12; i++) h._artifact('deck-shot', join(dir, `s${i}.png`), { nodeId: 'n_audit', executionId: 'x:n_audit:2' });
+  assert.equal(pushed.length, 10);
+});
+
+test('_artifact persists nothing for a kind no one can open', async () => {
+  const { id, dir } = await seedPipeline(process.cwd(), { title: 'R', status: 'running' });
+  const { h, pushed } = bench(id, dir);
+  // 'pipeline' is the run DIR, 'questions' a scratch file the orchestrator
+  // deletes — a link to either 404s, which is why the viewer never lists them.
+  h._artifact('pipeline', dir, {});
+  h._artifact('questions', join(dir, 'questions.json'), {});
+  h._artifact('live-log', join(dir, 'live-log.ndjson'), {});
+  assert.deepEqual(pushed, []);
+});

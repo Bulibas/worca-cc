@@ -35,10 +35,10 @@ const LEVEL_RE = /^(simple|advanced|expert)$/;
 
 // ── (1) the guard ─────────────────────────────────────────────────────────────
 
-test('every sidebar and top-nav item carries an explicit level', () => {
+test('every sidebar item carries an explicit level', () => {
   const doc = shell();
-  const items = [...doc.querySelectorAll('.nav button, .topnav button')];
-  assert.ok(items.length >= 20, 'both nav bars are present');
+  const items = [...doc.querySelectorAll('.nav button')];
+  assert.ok(items.length >= 15, 'the sidebar is present');
   for (const b of items) {
     assert.match(b.dataset.minLevel || '', LEVEL_RE, `nav item "${b.textContent.trim()}" has no data-min-level`);
   }
@@ -171,7 +171,7 @@ test('the sidebar mode item sits directly above Settings, looks like a nav item,
   // The icon is an <i>: the collapsed rail visually hides every direct <span> child (the labels).
   assert.equal(mode.querySelector(':scope > .lv-icon-slot').tagName, 'I');
   assert.ok(mode.querySelector(':scope > span.lv-name'), 'label is a span, so the rail hides it');
-  assert.ok(doc.querySelector('.topnav [data-mode-open]'), 'the compact top nav has the same control');
+  assert.equal(doc.querySelector('.topnav'), null, 'phones reach this item in the drawer; there is no compact twin');
 });
 
 test('the dialog: three radio cards, click applies at once and saves, a failed save reverts', async () => {

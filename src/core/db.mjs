@@ -23,6 +23,9 @@ import { worcaHome } from './projects.mjs';
 import { maybeMigrateFromFs } from './migrate-fs-to-db.mjs';
 import { backfillHumanHours } from './human-backfill.mjs';
 import { SEED_TEMPLATES, NODE_ID_MAP, FB_WIRE_MAP } from './graph/seed-templates.mjs';
+import { AGENT_TUNABLES } from '../shared/graph/validate.mjs';
+import { GRAPH_PRESENTATION_WORKFLOW, presentationGraphFingerprint, PRESENTATION_SHIPPED_FINGERPRINTS }
+  from './graph/presentation-workflow.mjs';
 
 const _require = createRequire(import.meta.url);
 let _DatabaseSync; // cached node:sqlite DatabaseSync ctor (lazy-loaded once)
@@ -55,7 +58,7 @@ const OPEN_BACKOFF_MS = 15;
 /** Latest schema version. Bump + append a new migration step when the DDL grows.
  *  Exported so migration tests assert "reached the module's current version"
  *  instead of hardcoding the number — a schema bump then touches no test file. */
-export const SCHEMA_VERSION = 41;
+export const SCHEMA_VERSION = 44;
 
 /** Absolute path to the database file: <worcaHome>/worca-cc.db. */
 export function dbPath() {
@@ -787,7 +790,7 @@ CREATE TABLE IF NOT EXISTS scheduled_runs (
   after_id     TEXT,                         -- v34: scheduled_runs.id | pipelines.id
   after_policy TEXT NOT NULL DEFAULT 'done', -- v34: done | any
   source_from_previous INTEGER NOT NULL DEFAULT 0,  -- v34: start on the predecessor's feature branch
-  resume_pipeline_id TEXT,                 -- v41: resume this paused pipeline instead of starting a new run
+  resume_pipeline_id TEXT,                 -- v44: resume this paused pipeline instead of starting a new run
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL
 );
@@ -864,7 +867,7 @@ const INCREMENTAL_COLUMNS = {
   scheduled_runs:         { after_kind: 'TEXT', after_id: 'TEXT', after_policy: "TEXT NOT NULL DEFAULT 'done'",
                             source_from_previous: 'INTEGER NOT NULL DEFAULT 0',   // v34: run chains
                             created_by: 'TEXT', updated_by: 'TEXT',   // v39: who made / last changed it
-                            resume_pipeline_id: 'TEXT' },   // v41: a one-off "resume this paused run" ticket (NULL = starts a new run)
+                            resume_pipeline_id: 'TEXT' },   // v44: a one-off "resume this paused run" ticket (NULL = starts a new run)
 };
 
 /** v23: per-loop-wire cycle budgets, the graph-engine twin of
@@ -1369,11 +1372,127 @@ function applySchemaV40(db) {
   repairSchemaGaps(db, schemaGaps(db));
 }
 
-/** v41 (scheduled resume): scheduled_runs.resume_pipeline_id — a plain additive column
+/** v41: seed the shipped Presentation workflow on EVERY DB (fresh included —
+ *  a deck run is picked explicitly, so the row must exist to be picked). INSERT
+ *  OR IGNORE: a user's own live row with the id wins; an archived row keeps the
+ *  id and the seed is skipped, exactly like V24's SEED_TEMPLATES pass. */
+function applySchemaV41(db) {
+  if (!presentationSeedable(db)) return;
+  const t = GRAPH_PRESENTATION_WORKFLOW;
+  const graph = JSON.stringify({ nodes: t.nodes, wires: t.wires });
+  const now = new Date().toISOString();
+  db.prepare(`INSERT OR IGNORE INTO workflows
+    (id, name, version, domain, origin, steps, feedbacks, graph, created_at, updated_at, archived_at)
+    VALUES (?, ?, 2, ?, NULL, '[]', '[]', ?, ?, ?, NULL)`)
+    .run(t.id, t.name, t.domain, graph, t.createdAt, now);
+}
+
+/** Guard shared by the seed and the refresh: minimal hand-seeded test schemas
+ *  carry `workflows(id, name)` only, and both statements name the full v2 column
+ *  set (mirrors reconcileV1Workflows's column guard). A real DB has them. */
+function presentationSeedable(db) {
+  if (!hasSqliteTable(db, 'workflows')) return false;
+  // Minimal hand-seeded test schemas carry `workflows(id, name)` only; the seed
+  // INSERT names the full v2 column set, so skip when any is absent (mirrors
+  // reconcileV1Workflows's column guard). A real DB ran the base DDL and has them.
+  const cols = new Set(db.prepare('PRAGMA table_info(workflows)').all().map((c) => c.name));
+  for (const need of ['version', 'domain', 'origin', 'steps', 'feedbacks', 'graph', 'created_at', 'updated_at', 'archived_at']) {
+    if (!cols.has(need)) return false;
+  }
+  return true;
+}
+
+/** Refresh an EXISTING seed to the current shipped shape. Runs on every version
+ *  bump (see migrate) — unlike the INSERT above, which must not, because
+ *  deleteWorkflow really DELETEs and re-seeding would resurrect a workflow the
+ *  user removed on purpose. No row = nothing to refresh, which is exactly right
+ *  for that user. */
+function refreshPresentationSeed(db) {
+  if (!presentationSeedable(db)) return;
+  const t = GRAPH_PRESENTATION_WORKFLOW;
+  const graph = JSON.stringify({ nodes: t.nodes, wires: t.wires });
+  const now = new Date().toISOString();
+
+  // REFRESH an existing seed. `INSERT OR IGNORE` fires once, when a DB first
+  // reaches this version; an install that already has the row keeps whatever
+  // shape shipped then, forever. That is not cosmetic: the graph is validated
+  // against the CURRENT agent sidecars at run start, so the moment an agent
+  // gains a required input the stored graph does not wire, the workflow stops
+  // starting (V9) and the only offered remedy is re-wiring it by hand.
+  //
+  // Guarded on the stored shape being one worca itself shipped
+  // (PRESENTATION_SHIPPED_FINGERPRINTS): a row the user has edited matches
+  // nothing and is left exactly as it is. `origin IS NULL` alone would not do —
+  // saving from the Composer preserves origin, so it does not distinguish a
+  // pristine seed from an edited one.
+  const row = db.prepare(
+    "SELECT graph FROM workflows WHERE id = ? AND origin IS NULL AND archived_at IS NULL",
+  ).get(t.id);
+  if (!row || !row.graph) return;
+  let stored = null;
+  try { stored = JSON.parse(row.graph); } catch { return; }   // unparseable: leave it alone
+  const fp = presentationGraphFingerprint(stored);
+  if (fp === presentationGraphFingerprint({ nodes: t.nodes, wires: t.wires })) return;  // already current
+  if (!PRESENTATION_SHIPPED_FINGERPRINTS.includes(fp)) return;                          // user-edited
+  // Rewire WITHOUT discarding settings. The fingerprint is node ids + wire ids, so
+  // it cannot see a config edit — setWorkflowNodeDefaults writes a model pin
+  // straight into graph.nodes[].config without touching ids, `origin` or
+  // `archived_at`, and the Composer stores the viewport under `canvas`. Both
+  // passed the guard and were then replaced along with the graph, which is not
+  // what "a user-edited row is never touched" promises. Only the AGENT_TUNABLES
+  // are carried: awaitAll/arity/planStoreSeed are TOPOLOGY, and topology is
+  // precisely what this refresh exists to bring up to date (setWorkflowNodeDefaults
+  // draws the same line). Node LAYOUT is left to the shipped shape too — the
+  // refresh only fires when the structure changed, and stale positions against a
+  // new node overlap.
+  const storedNodes = new Map((stored.nodes || []).filter((n) => n && n.id).map((n) => [n.id, n]));
+  const merged = t.nodes.map((n) => {
+    const prev = storedNodes.get(n.id);
+    if (!prev || !prev.config) return n;
+    const kept = Object.fromEntries(Object.entries(prev.config).filter(([k]) => AGENT_TUNABLES.includes(k)));
+    return Object.keys(kept).length ? { ...n, config: { ...(n.config || {}), ...kept } } : n;
+  });
+  const carried = JSON.stringify({
+    nodes: merged, wires: t.wires, ...(stored.canvas ? { canvas: stored.canvas } : {}),
+  });
+  db.prepare('UPDATE workflows SET graph = ?, updated_at = ? WHERE id = ?').run(carried, now, t.id);
+}
+
+/** v42: re-kind the deck subresources already indexed on finished runs.
+ *
+ *  Until now both deck ports swept `deck/*` under one `deck` kind, so a finished
+ *  presentation run indexed its kit scripts, webfonts and instrumented proof copy
+ *  beside the two or three files a human actually opens. The sidecars now split
+ *  the two (first-match-wins, _indexExtraFiles); this applies the SAME rule to
+ *  the rows that already exist — a deliverable is `deck/deck*.{html,pdf}`, and
+ *  everything else one level under `deck/` is a subresource.
+ *
+ *  The rows are RE-KINDED, never dropped: the raw-bytes route resolves `rel`
+ *  only among a run's indexed rows, so deleting them would 404 deck.html's own
+ *  <script src> and @font-face and leave every stored deck unviewable.
+ *  `UPDATE OR REPLACE` because (pipeline_id, kind, rel_path) is the PK — a
+ *  divergently-stamped DB that already holds the deck-asset row would otherwise
+ *  fail the whole migration on a constraint. */
+function applySchemaV42(db) {
+  // The ladder repairs the incremental schema before this step (see migrate):
+  // `artifacts`' step_key/node_id/cycle/created_at are INCREMENTAL_COLUMNS, and an
+  // install stamped anywhere in 29..40 may have skipped the repair that declares
+  // them, so without the hoisted call in migrate the columns would never arrive —
+  // recordArtifact's seven-column INSERT would throw into its own best-effort catch
+  // for the whole first session after the upgrade.
+  if (!hasSqliteTable(db, 'artifacts')) return;
+  db.prepare(`UPDATE OR REPLACE artifacts SET kind = 'deck-asset'
+     WHERE kind = 'deck'
+       AND rel_path LIKE 'deck/%'
+       AND rel_path NOT LIKE 'deck/deck%.html'
+       AND rel_path NOT LIKE 'deck/deck%.pdf'`).run();
+}
+
+/** v44 (scheduled resume): scheduled_runs.resume_pipeline_id — a plain additive column
  *  declared in INCREMENTAL_COLUMNS; repairSchemaGaps covers fresh DBs (addColumns re-probes
  *  after the table CREATE) and existing ones. NULL on every existing row = a ticket that
- *  starts a NEW run (the only kind before v41). */
-function applySchemaV41(db) {
+ *  starts a NEW run (the only kind before v44). */
+function applySchemaV44(db) {
   repairSchemaGaps(db, schemaGaps(db));
 }
 
@@ -1773,7 +1892,34 @@ export function migrate(db) {
     if (current < 38) applySchemaV38(db);            // attribution: who did each human action on a run
     if (current < 39) applySchemaV39(db);            // attribution: schedules/tickets created_by + updated_by
     if (current < 40) applySchemaV40(db);            // workspace map: map_json, map_overrides_json, description_origin
-    if (current < 41) applySchemaV41(db);            // scheduled resume: scheduled_runs.resume_pipeline_id
+    // The presentation steps below depend on a WHOLE incremental schema: V40 bails out
+    // if `workflows` is missing a declared column, and V41 rewrites `artifacts`. Every
+    // step from V30 up repairs the gaps itself, but an install stamped anywhere in that
+    // range entered none of them, so the repair is hoisted here as well (idempotent).
+    // Gated on SCHEMA_VERSION, never a literal: with `current < 42` a DB stamped 42
+    // would, at the next bump, skip every earlier step (current >= each) AND skip this
+    // line, so a newly declared incremental column would never arrive unless the author
+    // of the next migration remembered to re-add a repair. Self-maintaining.
+    if (current < SCHEMA_VERSION) repairSchemaGaps(db, schemaGaps(db));
+    // The shipped Presentation workflow, in two halves with different gates.
+    // The SEED is one-shot at its own version: deleteWorkflow really DELETEs, so
+    // re-running the INSERT on later bumps would resurrect a workflow the user
+    // removed on purpose. The REFRESH runs on every bump, or an install stamped
+    // at the version that introduced it never re-enters and keeps a graph that no
+    // longer wires the current sidecars (V9 at run start, remedy = re-wire by
+    // hand). The refresh is guarded on the stored shape being one worca shipped,
+    // so a user-edited row is never touched, and a deleted row has nothing to
+    // refresh — which is exactly right for the user who deleted it.
+    // WHY 41: the seed needs a rung no released install is already stamped at, or
+    // every one of them skips it and never gets the workflow. `origin/dev` now ships
+    // SCHEMA_VERSION 40 (V40 is its workspace-map step), so 41 is the first free rung
+    // and the deck re-kind follows at 42. (This branch carried the seed at V30, then
+    // V31, then V36, then V40 while dev's ladder was shorter; each was occupied in
+    // turn, which is why it has moved again.)
+    if (current < 41) applySchemaV41(db);
+    if (current < SCHEMA_VERSION) refreshPresentationSeed(db);
+    if (current < 42) applySchemaV42(db);            // deck subresources -> the unlisted deck-asset kind
+    if (current < 44) applySchemaV44(db);            // scheduled resume: scheduled_runs.resume_pipeline_id
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {

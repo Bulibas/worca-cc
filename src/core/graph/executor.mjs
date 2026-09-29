@@ -42,7 +42,7 @@ import {
 import { planPath, reviewPath, writeStepQuestions, writeClarify, appendAuditById } from '../artifacts.mjs';
 import { byActor } from '../identity.mjs';
 import { readReview, classifyAskPayload } from '../protocol.mjs';
-import { prepareFormAsk, formAnswerValidator, downgradeQuestion } from '../ask-forms.mjs';
+import { prepareFormAsk, formAnswerValidator, downgradeQuestion, redactSecrets } from '../ask-forms.mjs';
 import {
   taskHeader, buildSystemPrompt, resolveAgentBody, mockMarkers, runOpts,
   fanOutDirective, ctxFanOut, ctxSubagentModel, ctxSubagentEffort, ctxEndpointRouted, workspaceFanOutDirective, workspaceDiffInstruction,
@@ -689,7 +689,7 @@ async function prepareClarifierForm({ full, meta, node, ordinal, answersPath, pa
       pipelineDir: full.runCtx?.pipelineDir || full.pipelineDir,
       askId,
     });
-    if (prepared.ok) return { ask: prepared.ask, autoValues: prepared.autoValues, questions: [], sessionId };
+    if (prepared.ok) return { ask: prepared.ask, autoValues: prepared.autoValues, secrets: prepared.secrets || {}, questions: [], sessionId };
     const why = prepared.errors.map((e) => `${e.path ? `${e.path}: ` : ''}${e.message}`).join('; ');
     warnings.push(`${meta.displayName || node.key}: form "${current.form}" was refused — ${why}`);
     if (attempt === 2) break;
@@ -766,7 +766,14 @@ export async function runClarifierExecution(ctx) {
         })
         // No gate at all (auto): D10's auto answer, exactly what _ask would return.
         : Promise.resolve({ form: gate.ask.form, version: gate.ask.version, values: gate.autoValues || {} }));
-      const values = (answered && typeof answered === 'object' && answered.values) || {};
+      // A `secret` text field never leaves this function as typed: the stored answer, the
+      // port file below and the value returned to the scheduler carry a marker, and the real
+      // value is held on the run context — in memory only — for script children (see
+      // script-runner's env merge). Typed wins over the field's `envDefault`; an empty answer
+      // means "use the environment's", which is also what an unattended run gets.
+      const rawValues = (answered && typeof answered === 'object' && answered.values) || {};
+      const { values, held } = redactSecrets(rawValues, gate.secrets);
+      if (ctx.runCtx?.secretEnv && Object.keys(held).length) Object.assign(ctx.runCtx.secretEnv, held);
       if (ctx.pipelineId) {
         await writeStepQuestions(ctx.pipelineId, ctx.executionId, ordinal, {
           agentKey: node?.key, nodeId: node?.id, questions: gate.ask,

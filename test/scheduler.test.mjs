@@ -648,7 +648,7 @@ test('chainBaseBranchesOf stops where the predecessor\'s feature is not this run
   assert.deepEqual(chainBaseBranchesOf('c0000035'), []);
 });
 
-// ── scheduled resume (v41) ──────────────────────────────────────────────────
+// ── scheduled resume (v44) ──────────────────────────────────────────────────
 
 test('a resume ticket stores its target on the column and in the request marker', () => {
   const t = createTicket({

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { portsFnFor } from '../../src/shared/graph/ports.mjs';
 import { indexByKey, normalizeAgentMeta } from '../../src/shared/graph/agent-meta.mjs';
 import { MOCK_WRITER_ROLES } from '../../src/core/claude-runner.mjs';
+import { loadScriptRegistry } from '../../src/core/script-registry.mjs';
 
 const AGENTS_DIR = fileURLToPath(new URL('../../agents/', import.meta.url));
 
@@ -26,6 +27,12 @@ export function realRegistryIndex() {
   return indexByKey(realAgentMetas());
 }
 
+/** The BUILT-IN script layer only: a developer's ~/.worca-cc/scripts must never
+ *  change what the shipped graphs validate against. */
+export function realScriptIndex() {
+  return loadScriptRegistry({ userScriptsDir: null });
+}
+
 export function realPortsFn() {
-  return portsFnFor(realRegistryIndex());
+  return portsFnFor(realRegistryIndex(), realScriptIndex());
 }

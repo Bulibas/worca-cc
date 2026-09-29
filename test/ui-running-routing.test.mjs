@@ -513,7 +513,6 @@ test('the Running slide shell mirrors History\'s track', () => {
   assert.ok(main, 'body.view-running .main rule must exist');
   assert.match(main, /overflow:\s*hidden/);
   assert.match(main, /padding:\s*0/);
-  assert.ok(ruleBody('body.view-running .topnav'), 'the compact top-nav re-applies the gutter');
 });
 
 test('wr-pulse is defined exactly once and is neutralized under reduced motion', () => {

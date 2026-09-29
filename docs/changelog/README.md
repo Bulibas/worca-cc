@@ -1,12 +1,23 @@
 # Changelog
 
-Each entry is a self-contained page in the ship-log design, built with
-`/worca-changelog` from the PRs merged since the previous release.
+One page per release in the ship-log design, written by `/worca-changelog`
+from the PRs merged since the previous release. Read them at
+**https://docs.worca.dev/changelog/**.
 
-| Version | Since | Date | Page | Artifact |
-| --- | --- | --- | --- | --- |
-| 1.6.0 | 1.5.0 | 2026-09-27 | [worca-app-v1.6.0.html](worca-app-v1.6.0.html) | https://claude.ai/artifact/4pVncX5v9a8KgYvBxbTSag |
-| 1.5.0 | 1.4.0 | 2026-09-24 | [worca-app-v1.5.0.html](worca-app-v1.5.0.html) | https://claude.ai/artifact/LHKZRPGh5ZtwcKyW7YRZPG |
-| 1.4.0 | 1.3.0 | 2026-09-23 | [worca-app-v1.4.0.html](worca-app-v1.4.0.html) | https://claude.ai/artifact/SZ2nVLSqWYwLkxUjgjEpaC |
-| 1.3.0 | 1.2.0 | 2026-09-17 | [worca-app-v1.3.0.html](worca-app-v1.3.0.html) | https://claude.ai/artifact/KDoEDcSbdrsupBCyRpiieh |
-| 1.2.0-rc.3 | 1.1.1 | 2026-09-03 | [worca-app-v1.2.0-rc.3.html](worca-app-v1.2.0-rc.3.html) | https://claude.ai/code/artifact/1de5cdca-43e2-4866-9967-6466dd4256d7 |
+| File | What it is |
+| --- | --- |
+| `entries.json` | One record per release, newest first: `version`, `since`, `date`, and the Artifact preview's URL. The release list on the docs site is built from it. |
+| `worca-app-v<version>.src.html` | The page. Edit this one. |
+| `shots/<version>/` | The screenshots the page shows. |
+
+The list's summary and headlines come from the pages themselves (the hero's sub
+line and each section's headline), so they cannot drift from what a page says.
+
+`docs-site/build.mjs` turns each entry into `/changelog/<version>/`, with the
+screenshots as separate files. `worca-app-v<version>.html` — the same page
+with the screenshots embedded, which `/worca-changelog` publishes as a private
+Artifact preview — is a local build output and is git-ignored.
+
+A new entry goes live on docs.worca.dev once it is on `dev` and
+`npm run docs:publish` has moved the `docs-live` pointer (see
+`docs-site/README.md`).

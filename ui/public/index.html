@@ -11,11 +11,28 @@
   </head>
   <body>
     <div class="app">
+      <!-- ===================== Phone bar (<=760px) ===================== -->
+      <!-- Phones only (style.css "Responsive nav tiers"): the hamburger opens the SAME
+           <aside id="side-rail"> as a slide-in drawer, so every count, the live-run list,
+           the spend card and "Signed in as" come along. app.js#setMobileNavOpen owns
+           aria-expanded, the scrim and the inert page; paintMobileBar writes the title. -->
+      <header class="mbar" id="mbar">
+        <button type="button" class="mbar-menu" id="mbar-menu" aria-controls="side-rail" aria-expanded="false" aria-label="Menu" title="Menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
+          <span class="nav-rollup" id="mbar-rollup" hidden title="A pipeline needs your input"></span>
+        </button>
+        <span class="mbar-mark" role="img" aria-label="Worca"></span>
+        <span class="mbar-title" id="mbar-title">New pipeline</span>
+      </header>
+      <div class="nav-scrim" id="nav-scrim" hidden></div>
       <!-- ===================== Sidebar ===================== -->
       <aside class="sidebar" id="side-rail">
         <div class="brand">
           <span class="logo" role="img" aria-label="Worca"></span>
           <span class="logo-mark" role="img" aria-label="Worca"></span>
+          <button type="button" class="side-close" id="side-close" aria-label="Close menu" title="Close menu">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+          </button>
         </div>
 
         <nav class="nav" aria-label="Primary">
@@ -124,27 +141,6 @@
 
       <!-- ===================== Main ===================== -->
       <main class="main">
-        <!-- compact top-nav (shown <1080px, where the sidebar is hidden) -->
-        <nav class="topnav" aria-label="Primary compact">
-          <button type="button" class="active" data-nav="new" data-min-level="simple">New</button>
-          <span class="topnav-sep" aria-hidden="true"></span>
-          <button type="button" data-nav="running" data-min-level="simple">Running<span class="nav-rollup" id="topnav-running-rollup" hidden></span></button>
-          <button type="button" data-nav="schedules" data-min-level="advanced">Schedules</button>
-          <button type="button" data-nav="history" data-min-level="simple">History</button>
-          <button type="button" data-nav="stats" data-min-level="advanced">Stats<span class="topnav-amt mono" id="topnav-spend" hidden></span></button>
-          <button type="button" data-nav="team-metrics" data-min-level="expert">Team metrics</button>
-          <span class="topnav-sep" aria-hidden="true" data-min-level="advanced"></span>
-          <button type="button" data-nav="composer" data-min-level="advanced">Composer</button>
-          <button type="button" data-nav="agents" data-min-level="expert">Agents</button>
-          <button type="button" data-nav="scripts" data-min-level="expert">Scripts</button>
-          <span class="topnav-sep" aria-hidden="true"></span>
-          <button type="button" data-nav="projects" data-min-level="simple">Projects</button>
-          <button type="button" data-nav="workspaces" data-min-level="advanced">Workspaces</button>
-          <button type="button" data-nav="team-policy" data-min-level="expert">Team policy</button>
-          <span class="topnav-sep" aria-hidden="true"></span>
-          <button type="button" class="topnav-mode" data-mode-open="short" data-min-level="simple" aria-haspopup="dialog"><i class="lv-icon-slot"><svg class="lv-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5z"></path><path d="M3 12.5l9 5 9-5"></path><path d="M3 17l9 5 9-5"></path></svg></i><span class="lv-name">Expert</span></button>
-          <button type="button" data-nav="settings" data-min-level="simple">Settings</button>
-        </nav>
 
         <!-- Shown when the open page sits above the interface mode (a deep link, a guide, or a
              mode change while on it). app.js#paintLevelBanner fills and toggles it. -->
@@ -2026,7 +2022,7 @@
     </div>
 
     <!-- ===== Interface mode (docs/ui-levels.md) ===== -->
-    <!-- Opened by every [data-mode-open]: the sidebar item, its top-nav twin, Settings › General.
+    <!-- Opened by every [data-mode-open]: the sidebar item (also in the phone drawer), Settings › General.
          Choosing a card applies at once, so the app re-lays out behind the dialog as the preview.
          ui-level.mjs owns the cards, focus and keys. -->
     <div id="mode-modal" class="viewer-modal mode-modal hidden" role="dialog" aria-modal="true" aria-labelledby="mode-title" aria-describedby="mode-sub">

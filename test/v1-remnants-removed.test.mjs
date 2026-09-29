@@ -156,7 +156,10 @@ test("ui/server.mjs's EVENT_NAMES is the v2 list and never carries 'phase'", () 
   const names = JSON.parse(m[1].replace(/'/g, '"'));
   assert.equal(names.includes('phase'), false, 'the v1 phase event left the wire vocabulary');
   assert.ok(names.includes('exec'), 'exec is the execution vocabulary');
-  assert.deepEqual(names, ['exec', 'token', 'log', 'question', 'artifact', 'state',
+  // 'artifact-gone' joined the vocabulary with the index prune: the engine drops
+  // rows for files that no longer exist (the audit recreates shots/ every cycle)
+  // and the browser has to drop them too, or it keeps rendering a row that 404s.
+  assert.deepEqual(names, ['exec', 'token', 'log', 'question', 'artifact', 'artifact-gone', 'state',
     'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title']);
 });
 

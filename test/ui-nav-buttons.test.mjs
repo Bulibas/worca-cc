@@ -1,4 +1,4 @@
-// test/ui-nav-buttons.test.mjs — sidebar/topnav menu items are buttons, not links.
+// test/ui-nav-buttons.test.mjs — sidebar menu items are buttons, not links.
 // They must drive the hash router exactly like the anchors did (reload restore,
 // back/forward, deep links), while producing no browser status-bar link preview.
 import { test } from 'node:test';
@@ -51,16 +51,15 @@ const live = (runId, extra = {}) => ({
 
 // ---- static markup: no anchors left in either menu ----
 
-test('sidebar and topnav menus contain buttons, not links', () => {
+test('sidebar menu contains buttons, not links', () => {
   const sidebar = html.match(/<nav class="nav"[\s\S]*?<\/nav>/)[0];
-  const topnav = html.match(/<nav class="topnav"[\s\S]*?<\/nav>/)[0];
-  for (const [name, block] of [['sidebar', sidebar], ['topnav', topnav]]) {
+  for (const [name, block] of [['sidebar', sidebar]]) {
     assert.ok(!/<a[\s>]/.test(block), `${name} still contains an <a> (browser shows a link preview on hover)`);
     assert.ok(!/href="#/.test(block), `${name} still carries hash hrefs`);
     // 13 routes (team-metrics, team-policy, Schedules and Scripts joined the 9) + the
-    // interface-mode item (docs/ui-levels.md), which is an action, not a link. The sidebar
-    // adds the Nodes disclosure (test/ui-nav-nodes-group.test.mjs); the flat topnav does not.
-    const buttons = name === 'sidebar' ? 15 : 14;
+    // interface-mode item (docs/ui-levels.md), which is an action, not a link, plus the
+    // Nodes disclosure (test/ui-nav-nodes-group.test.mjs).
+    const buttons = 15;
     assert.equal((block.match(/<button type="button"/g) || []).length, buttons,
       `${name} should have exactly ${buttons} menu buttons`);
     assert.equal((block.match(/<button type="button"[^>]*data-nav=/g) || []).length, 13, `${name}: 13 route buttons`);
@@ -107,7 +106,7 @@ test('running child rows are buttons with no href and still deep-link', async ()
   click(window, row);
   await tick();
   assert.equal(window.location.hash, '#running/auth-fix', 'child row still focuses the run');
-  assert.equal(window.document.querySelectorAll('.nav a, .topnav a').length, 0,
+  assert.equal(window.document.querySelectorAll('.nav a, .mbar a').length, 0,
     'no anchors remain anywhere in the menus');
 });
 

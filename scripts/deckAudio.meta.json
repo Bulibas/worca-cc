@@ -1,0 +1,60 @@
+{
+  "key": "deckAudio",
+  "metaVersion": 2,
+  "displayName": "Deck audio",
+  "description": "Optional voiceover: reads the deck's speaker notes, generates one ElevenLabs clip per slide, and wires the narration scripts into the deck. Skipped unless the Clarify answers select it AND a key and voice id are available; the key is never written to disk. Runs with worca's privileges; the API key is passed in the environment only.",
+  "domain": "presentation",
+  "color": "purple",
+  "icon": "<path d=\"M4 7h16v13H4z\" fill=\"none\"/><path d=\"M4 7l2-3h12l2 3\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M12 11v5M9.5 13.5L12 16l2.5-2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>",
+  "order": 39,
+  "runtime": "python",
+  "file": "deck-audio.py",
+  "timeoutMs": 300000,
+  "inputs": [
+    {
+      "id": "built",
+      "type": "md"
+    }
+  ],
+  "outputs": [
+    {
+      "id": "report",
+      "type": "md",
+      "when": "always",
+      "filename": "deck-audio-cycle{cycle}.md",
+      "artifactKind": "deck-audio",
+      "extraFiles": [
+        {
+          "kind": "deck",
+          "glob": "deck/narration-audio.js"
+        }
+      ]
+    },
+    {
+      "id": "findings",
+      "type": "md",
+      "when": "blocking",
+      "filename": "deck-audio-cycle{cycle}.md",
+      "artifactKind": "deck-audio"
+    },
+    {
+      "id": "pass",
+      "type": "void",
+      "when": "clean"
+    }
+  ],
+  "verdict": {
+    "filename": "deck-audio-cycle{cycle}.json"
+  },
+  "mock": {
+    "summary": "audio skipped (mock).",
+    "verdict": {
+      "issues": []
+    },
+    "outputs": {
+      "report": {
+        "text": "# Deck audio — mock\n\nSkipped: mock run.\n"
+      }
+    }
+  }
+}

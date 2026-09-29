@@ -74,10 +74,9 @@ async function boot({ fetchHandler } = {}) {
   return { window, calls, wsBox, tick, showStats };
 }
 
-test('nav: sidebar + topnav carry data-nav="stats"; #stats opens the view and fetches', async () => {
+test('nav: the sidebar carries data-nav="stats"; #stats opens the view and fetches', async () => {
   const { window, calls, showStats } = await boot();
   assert.ok(window.document.querySelector('.sidebar [data-nav="stats"]'), 'sidebar Statistics button');
-  assert.ok(window.document.querySelector('.topnav [data-nav="stats"]'), 'topnav Stats button');
   await showStats();
   const section = window.document.querySelector('[data-view="stats"]');
   assert.ok(section, 'stats section exists');
