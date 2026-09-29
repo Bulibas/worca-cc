@@ -11126,9 +11126,12 @@ function beginRun(runId, projectDir, title, opts = {}) {
   });
   hideViewer();
   updateNavCounts();
-  gs.startedRunId = runId;   // the Getting-started tours end on THIS run's card
+  gs.startedRunId = runId;   // the Getting-started tours end on THIS run's page
+  // Straight onto the new run's own page (its glance), not the Running list: the list
+  // is where you pick among runs, and you just picked this one.
   showView('running');
   renderRunningView();
+  location.hash = rdHash(runId);
 }
 
 function setFormMsg(text, kind) {
@@ -20848,6 +20851,9 @@ function buildRdDiff(sec, ctx) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'rd-diff-row';
+      // What Ask Worca's page context reads as "the file open here" (getPageContext).
+      btn.dataset.path = entry.f.path;
+      if (entry.project) btn.dataset.project = entry.project;
       const name = document.createElement('span');
       name.className = 'rd-diff-row-path mono';
       name.textContent = entry.project ? `${entry.project}/${entry.f.path}` : entry.f.path;
@@ -25378,13 +25384,33 @@ function gsWalk(hops, g) {
 }
 /** The dialog is up (a .viewer-modal without `hidden`). */
 const gsDialogUp = (id) => { const m = document.getElementById(id); return !!(m && !m.classList.contains('hidden')); };
-/** The run just started, on the Running list: the closing stop of every tour that starts one. */
-const gsRunCardHop = (text) => ({
-  id: 'card', info: true, nextLabel: 'Done',
+/** The run just started, on its own page (beginRun opens it): the closing stops of every tour
+ *  that starts one — what it is doing, its numbers, a waiting question (only while one waits),
+ *  then the rows that open each part of it. `first` is the tour's own line for the first stop.
+ *  On the Running list instead (the user went back), one stop on the run's card. */
+const gsRunPageHops = (first) => {
   // The run Start just began (beginRun notes it) when it is on the list; the first card otherwise.
-  target: [...(gs.startedRunId ? [`#run-list [data-run-id="${gs.startedRunId}"]`] : []), '#run-list [data-run-id]'],
-  text,
-});
+  const card = [...(gs.startedRunId ? [`#run-list [data-run-id="${gs.startedRunId}"]`] : []), '#run-list [data-run-id]'];
+  const [view, param] = parseHash();
+  if (view !== 'running' || !param) {
+    return [{ id: 'card', info: true, nextLabel: 'Done', target: card,
+      text: 'This is your run. Open it to follow what it is doing; a question it needs answered shows there too. When it finishes it moves to History.' }];
+  }
+  const on = (sel) => [`#run-detail .rd[data-mode="glance"] ${sel}`, ...card];
+  const asking = !!document.querySelector('#run-detail .rd[data-mode="glance"] .rd-questions:not([hidden])');
+  return [
+    { id: 'card', info: true, target: on('.rd-now'), text: first },
+    { id: 'facts', info: true, target: on('.rd-facts'),
+      text: 'Time, cost and the files it has changed so far, kept current while it works.' },
+    asking ? { id: 'ask', info: true, target: on('.rd-questions .rd-ask-head'),
+      text: 'A question from the run lands here, below its panel. Answer, then Submit, and it carries on. The status line at the top leads here too.' } : null,
+    { id: 'rows', info: true, nextLabel: 'Done', target: on('.rd-result'),
+      text: 'Each row opens a part of the run: its Overview, the Diff of the changes so far, the Workflow, the Logs and more. When it finishes, it moves to History.' },
+  ].filter(Boolean);
+};
+// Test hook, added here: the object at the top of the file is built while this const is
+// still in its temporal dead zone.
+if (typeof window !== 'undefined') window.__np = Object.assign(window.__np || {}, { gsRunPageHops });
 /** The two run steps: nav → project → (workflow) → task → Mock → Start → Running → the run's card. */
 function gsRunHops(g, mock) {
   const prompt = document.getElementById('prompt');
@@ -25416,14 +25442,14 @@ function gsRunHops(g, mock) {
     // A refused form (the message under Start) keeps ringing Start.
     { id: 'start', target: '#start-btn', click: 'started', met: () => g.started && !(onView('new') && formErr()),
       text: mock
-        ? 'Start it. The run appears under Running in the sidebar.'
+        ? 'Start it. Its page opens, and it appears under Running in the sidebar.'
         : 'Start the run. Worca answers loop gates itself and pauses only for the questions that matter.' },
     NAV('running', mock
-      ? 'Follow the agents here. Questions and gates land in this list too.'
-      : 'Follow it here. When it finishes it moves to History.'),
-    gsRunCardHop(mock
-      ? 'This is your run. Open the card to follow each agent and its log; a question or a gate lands here too. When it finishes it moves to History.'
-      : 'This is your run. Open the card to follow each agent, its log and its spend; a question the planner needs answered lands here. When it finishes it moves to History.'),
+      ? 'Your runs live under Running. Open this one to follow it.'
+      : 'Your runs live under Running. Open this one to follow it; when it finishes it moves to History.'),
+    ...gsRunPageHops(mock
+      ? 'This is your run’s page. The line under its name says what it is doing: the state, then the step.'
+      : 'This is your run’s page. The line under its name says what it is doing: the state, then the step, and whether it waits for you.'),
   ];
 }
 /** Register a folder, through the Add project dialog: the prelude of every tour that needs a project. */
@@ -25557,7 +25583,7 @@ function gsHops(step, g) {
           already: 'The task goes here — a sentence or two; the planner asks when something matters.' },
         { ...run.start, text: 'Start the run with that workflow. Mock mode, beside it, tries the loop offline first.' },
         run.running,
-        gsRunCardHop('This is your run, on the workflow you picked. Open the card to follow each agent; when it finishes it moves to History.'),
+        ...gsRunPageHops('This is your run’s page, on the workflow you picked. The line under its name says what it is doing: the state, then the step.'),
       ];
     }
     case 'workspace': {
@@ -26278,17 +26304,38 @@ function askAboutDiffComment(comment, replyCount = 0) {
 
 // Server-resolvable page context only (§6.5 keys); the server re-validates and
 // resolves every id against its own rows — never send titles or names.
+// Which part of an open run page is showing: 'glance', or the active Details tab's key
+// (prompt.mjs RUN_PAGE_PARTS). Read from the live screen, since a tab click only
+// replaceState()s the hash.
+function runPagePart(screen, mode) {
+  if (mode !== 'details') return 'glance';
+  const tabs = screen ? detailTabsOf(screen) : null;
+  if (tabs) for (const [key, cell] of tabs.cells) if (cell.btn.classList.contains('active')) return key;
+  return 'overview';
+}
+
 function getPageContext() {
   const [view, param] = parseHash();
   const ctx = { view: VIEW_NAMES.includes(view) ? view : 'new' };
   if (ctx.view === 'running' && param) {
-    const runId = runDetailParts(param).runId;   // `<id>` or `<id>/details/<tab>`
+    const parts = runDetailParts(param);   // `<id>` or `<id>/details/<tab>`
+    const runId = parts.runId;
     const r = runs.get(runId);
     if (r) {
       ctx.runId = runId;
       if (r.pipelineId) ctx.pipelineId = r.pipelineId;
       if (r.kind === 'workspace-run' && r.workspaceId) ctx.workspaceId = r.workspaceId;
       else if (r.projectDir) ctx.projectDir = r.projectDir;
+      const screen = runDetailState && runDetailState.screen;
+      ctx.runPage = runPagePart(screen, parts.mode);
+      // The file open in the (live) Diff tab, as on History below.
+      const diffSec = screen && screen.querySelector('.rd-sec[data-sec="diff"]:not([hidden])');
+      const selected = ctx.runPage === 'diff' && diffSec ? diffSec.querySelector('.rd-diff-row.active') : null;
+      if (selected && selected.dataset.path) {
+        ctx.diffPath = selected.dataset.project
+          ? `${selected.dataset.path} (member ${selected.dataset.project})`
+          : selected.dataset.path;
+      }
       return ctx;
     }
   }
@@ -26299,6 +26346,7 @@ function getPageContext() {
       ctx.pipelineId = p.id;
       if (p.workspace) ctx.workspaceId = p.projectKey.slice('workspaces/'.length);
       else ctx.projectKey = p.projectKey;
+      ctx.runPage = runPagePart(histDetailState && histDetailState.screen, p.mode);
       // The file open in the Diff tab, so "this file" / "the comments here" resolve
       // without the user naming a path. A repo-relative path is server-resolvable
       // data — the "never a title, never a name" rule above holds.

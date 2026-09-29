@@ -36,7 +36,9 @@
      tinted semantic buttons outline in their own colour; links change colour. No blue
      fills, no brightness() (near-black x 1.08 is still near-black; a grey fill turns
      white on a white card). */
-  --hover:var(--line-2);            /* one hover grey, on white and on grey alike */
+  /* One hover grey, on white and on grey alike: clearly past --field, yet light enough that
+     the secondary text on a hovered row keeps its contrast (dark: 4.5:1 for --ink-3). */
+  --hover:light-dark(#EBEBE8,#353531);
   --hover-on-field:var(--hover);
   --hover-outline:var(--ink-3);
 
@@ -930,8 +932,6 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 /* A waiting question sits BELOW the run's panel, which never changes: a heading that says
    what is asked, then the panel. Its own header row (title + count badge) would repeat
    the heading, so it goes. */
-.rd-glance > .rd-questions{display:flex;flex-direction:column;gap:10px;}
-.rd-glance > .rd-questions[hidden]{display:none;}
 .rd-ask-head{margin:0;padding:0 4px;font:600 16px/1.35 var(--sans);color:var(--ink);overflow-wrap:anywhere;
   scroll-margin-top:84px;}   /* the sticky bar (~61px) plus air: "go to the questions" lands the heading below it */
 /* While a question waits, the status header leads to it: a borderless row, so the hover fill. */
@@ -3533,7 +3533,7 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
    the stat grid on the Running Overview and sitting under it on History's. */
 .hd-ov-wt{grid-column:1/-1;display:flex;align-items:center;gap:12px;min-width:0;padding:12px 20px;
   background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);}
-.hd-ov-wt .hd-ov-label{margin:0;}
+.hd-ov-wt .hd-ov-label{margin:0;color:var(--ink-2);}   /* new text: --ink-2, never --ink-3 (contrast) */
 .hd-ov-wt-state{font:600 13px var(--mono);color:var(--ink);white-space:nowrap;}
 .hd-ov-wt-note{font-size:13px;color:var(--ink-2);min-width:0;}
 .hd-ov-wt-path{margin-left:auto;max-width:60%;font-weight:500;}
@@ -4189,7 +4189,8 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 /* ---------- Running detail: question panel ---------- */
 /* Container only — the panel's own restyle (larger metrics, green-tinted picked
    options, the "N of M answered" footer, "Open run") is T11 for BOTH mounts. */
-.rd-questions{margin-top:0;animation:wr-rise .3s cubic-bezier(.2,.7,.3,1) both;}
+.rd-questions{margin-top:0;animation:wr-rise .3s cubic-bezier(.2,.7,.3,1) both;
+  display:flex;flex-direction:column;gap:10px;}   /* its heading, then the panel */
 /* Explicit twin: the UA [hidden] rule is (0,0,0) and loses to any author
    `display`, so without this the panel would render even while hidden. */
 .rd-questions[hidden]{display:none;}

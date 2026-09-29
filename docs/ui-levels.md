@@ -153,7 +153,7 @@ be skipped by forgetting it.
 | "Scheduled" group (runs due within 24 h) | S — it only exists when something is scheduled |
 | Needs-input pill and banner; clarify questions; Auto proposal and Accept | S |
 | Recovery prompt, cycle gate, cost-pause banner, retained-work banner | all |
-| Run page glance: status line, step trail, Now / Earlier rows, result sheet, Details mini bar | S |
+| Run page glance: the run's name as the page title, the status line (state, then the step), time · cost · changes, parallel steps (Now), one row per tab, a waiting question below its own heading, the result actions | S |
 | Workflow graph with status colours, gate pip, End result; Workflow, Overview and Q&A tabs | S |
 | Diff tab (live worktree while running, the final patch after) | A |
 | Density toggle, live log pane, log search / copy / auto-scroll | A |
@@ -161,7 +161,7 @@ be skipped by forgetting it.
 | Auto proposal Revise; Artifacts tab | A |
 | Log filters (source, level, node, cycle) | E |
 | Graph node totals, fan and execution strips, loop badges | E |
-| Agents tab, WORKTREE card, Auto proposal tunables table | E |
+| Agents tab, worktree row, Auto proposal tunables table | E |
 
 ### History
 
@@ -170,7 +170,7 @@ be skipped by forgetting it.
 | List, project filter, Refresh; Overview (verdict, findings, duration, cost, task); Clarify tab; Resume | S |
 | "Files changed" list on the Overview | S — the stand-in for the Diff tab |
 | Diff tab, diff pill, inline comments; Create PR / View PR; branch line; ⋯ menu (Archive, Report); Artifacts tab | A |
-| Mergeability pill; Logs tab; Agents tab; team-metrics status; MEMORY CHANGES; WORKTREE card | E |
+| Mergeability pill; Logs tab; Agents tab; team-metrics status; MEMORY CHANGES; worktree row | E |
 
 ### Workflow Composer (page: A)
 

@@ -211,9 +211,11 @@ test('a cost-paused run renders the cost banner above the graph', async () => {
   assert.ok(banner, 'the cost-pause banner renders on the detail page too (D11)');
   assert.ok(banner.classList.contains('cb-pipeline'));
   assert.match(banner.textContent, /pipeline cost limit reached/);
-  const graph = window.document.querySelector('#run-detail .rd-graph');
-  assert.equal(banners.compareDocumentPosition(graph) & window.Node.DOCUMENT_POSITION_FOLLOWING,
-    window.Node.DOCUMENT_POSITION_FOLLOWING, 'banners sit ABOVE the graph (spec §5.2)');
+  // The graph moved into Details › Workflow; on the glance the banners lead the run's
+  // sheet, above its facts (spec §5.2's "above everything the run shows").
+  const facts = window.document.querySelector('#run-detail .rd-glance .rd-facts');
+  assert.equal(banners.compareDocumentPosition(facts) & window.Node.DOCUMENT_POSITION_FOLLOWING,
+    window.Node.DOCUMENT_POSITION_FOLLOWING, 'banners sit ABOVE the run\'s facts');
 });
 
 test('"Continue without cap" confirms, then resumes with ignoreCostCap', async () => {
@@ -392,10 +394,18 @@ test('a clarify question renders the large panel on the detail page', async () =
   assert.equal(panel.querySelectorAll('.qblock').length, 2, 'renderClarifyBody ran into the detail host');
   assert.equal(panel.querySelectorAll('.qopt').length, 2, 'padding options are filtered out');
   assert.ok(panel.querySelector('.btn-go'), 'the submit button is present');
-  // It sits on the glance's sheet, never below the graph: a waiting question needs no scroll.
-  assert.ok(host.closest('.rd-glance .rd-sheet'), 'the panel lives in the glance sheet');
+  // It sits on the glance, BELOW the run's sheet (which never changes), under its own
+  // heading; the status line names the step and leads down to it.
+  assert.equal(host.parentElement, window.document.querySelector('#run-detail .rd-glance'), 'the panel is its own block on the glance');
+  const sheet = window.document.querySelector('#run-detail .rd-glance > .rd-sheet');
+  assert.equal(sheet.compareDocumentPosition(host) & window.Node.DOCUMENT_POSITION_FOLLOWING,
+    window.Node.DOCUMENT_POSITION_FOLLOWING, 'below the run\'s sheet');
+  assert.match(host.querySelector('.rd-ask-head').textContent, /^2 questions\b/);   // '… from <step>' when the question names its step
   assert.equal(window.document.querySelector('#run-detail .rd-glance').hidden, false, 'the glance is showing');
-  assert.equal(window.document.querySelector('#run-detail .rd-now-title').textContent, '2 questions');
+  assert.equal(window.document.querySelector('#run-detail .rd-now-title').textContent, 'Waiting for you');
+  assert.match(window.document.querySelector('#run-detail .rd-now-sub').textContent, /^(Step: .+|Questions to answer)$/);
+  const top = window.document.querySelector('#run-detail .rd-now-top');
+  assert.ok(top.classList.contains('is-link') && top.getAttribute('role') === 'button', 'the status header leads to the questions');
   // In Details the way back is the cue: it turns amber and reads "Answer".
   const back = window.document.querySelector('#run-detail .rd-to-run');
   assert.ok(back.classList.contains('ask'));
@@ -601,15 +611,15 @@ test('the question panel rises in and is neutralized under reduced motion', () =
 
 // --- T7: tabs ---------------------------------------------------------------
 
-test('Details has seven tabs, Workflow first; the route picks the open one', async () => {
+test('Details has seven tabs, results first; the route picks the open one', async () => {
   const ctx = await bootRunning();
   await openRun(ctx);
   const { window } = ctx;
   const tabs = [...window.document.querySelectorAll('#run-detail .rd-tab')];
-  assert.deepEqual(tabs.map((b) => b.dataset.sec), ['workflow', 'overview', 'qa', 'diff', 'artifacts', 'logs', 'agents']);
-  assert.match(tabs[0].textContent, /Workflow/);
+  assert.deepEqual(tabs.map((b) => b.dataset.sec), ['overview', 'diff', 'artifacts', 'workflow', 'qa', 'logs', 'agents']);
+  assert.match(tabs[0].textContent, /Overview/);
   assert.match(tabs[5].textContent, /Logs/);
-  assert.match(tabs[2].textContent, /Q&A/);
+  assert.match(tabs[4].textContent, /Q&A/);
   // openRun lands on #running/r1/details/logs.
   assert.equal(window.document.querySelector('#run-detail .rd').dataset.mode, 'details');
   assert.ok(tabOf(window, 'logs').classList.contains('active'), 'the routed tab is open');
@@ -910,6 +920,11 @@ test('a run that finishes while its detail is open keeps the page and goes termi
   frame(ctx, { type: 'log', runId: 'r1', source: 'planner', level: 'info', text: 'one', ts: 0, stepIndex: 0, cycle: 1 });
   await settle(window);
   assert.equal(rdBox(window).querySelectorAll('.log-line').length, 1);
+  // The graph is built when Workflow first opens (Overview leads the tabs): visit it, then
+  // come back to Logs so the address below still reads details/logs.
+  click(window, tabOf(window, 'workflow'));
+  click(window, tabOf(window, 'logs'));
+  await settle(window);
   // MAJ-30: the LIVE half of `.rd-graph.settled`. Only the terminal half was
   // pinned, so a paintRdTerminal that stamped `settled` unconditionally killed
   // the marching ants on every running graph with the suite still green — the
@@ -929,7 +944,7 @@ test('a run that finishes while its detail is open keeps the page and goes termi
   const bar = window.document.querySelector('#run-detail .rd-bar');
   assert.equal(bar.querySelector('.rd-pause').hidden, true);
   assert.equal(bar.querySelector('.rd-stop').hidden, true);
-  const pill = bar.querySelector('.rd-status');
+  const pill = header.querySelector('.rd-status');   // the bar names the run; Details' header carries the status
   assert.ok(pill.classList.contains('green'), 'the pill takes the terminal family');
   assert.ok(pill.classList.contains('parked'), 'and its dot stops pulsing');
   assert.ok(window.document.querySelector('#run-detail .rd-graph').classList.contains('settled'));
@@ -1107,6 +1122,8 @@ test('a running script card shows its last captured line; agent lines never repa
     ],
     subAgents: [],
   });
+  click(window, tabOf(window, 'workflow'));   // the graph is built when Workflow first opens
+  await settle(window);
   const liveOf = () => window.document.querySelector('#run-detail .rd-graph .node[data-node-id="n_tests"] .xfoot .xlive');
   assert.equal(liveOf(), null, 'no line captured yet');
   frame(ctx, { type: 'log', runId: 'r1', source: 'implementer', level: 'info', text: 'agent chatter', nodeId: 'n_impl' });
@@ -1170,46 +1187,55 @@ async function openGlance(ctx, hash = 'running/r1', over = {}) {
   return ctx.window.document.querySelector('#run-detail .rd');
 }
 
-test('the glance is the default: status line, trail and Now rows; Details stays hidden', async () => {
+test('the glance is the default: page title, status line, facts, parallel steps; Details stays hidden', async () => {
   const ctx = await bootRunning();
   const rd = await openGlance(ctx);
   assert.equal(rd.dataset.mode, 'glance');
   assert.equal(rd.querySelector('.rd-glance').hidden, false);
   assert.equal(rd.querySelector('.rd-details').hidden, true);
-  assert.equal(rd.querySelector('.rd-now-title').textContent, '2 steps running');
-  assert.equal(rd.querySelector('.rd-now-sub').textContent, 'Implement and Docs');
+  // The run's name is the page title; the bar repeats it (shown once scrolled away).
+  assert.equal(rd.querySelector('.rd-page-title').textContent, 'Rate limit uploads');
+  assert.equal(rd.querySelector('.rd-bar-title').textContent, 'Rate limit uploads');
+  assert.equal(rd.querySelector('.rd-to-details'), null, 'no Details button: every tab is a row');
+  // The state word alone; the line under it names what runs.
+  assert.equal(rd.querySelector('.rd-now-title').textContent, 'Running');
+  assert.equal(rd.querySelector('.rd-now-sub').textContent, 'Steps: Implement and Docs');
   assert.ok(rd.querySelector('.rd-orb .rg-orb-run'), 'the running glyph');
-  // Four executions: Plan twice (a loop), then Implement and Docs at once (stacked).
-  assert.equal(rd.querySelectorAll('.rd-trail-btn .rg-td').length, 4);
-  assert.equal(rd.querySelectorAll('.rd-trail-btn .rg-tstack .rg-td-act').length, 2);
-  assert.match(rd.querySelector('.rd-now-stats').textContent, /^4 steps so far/);
+  assert.equal(rd.querySelector('.rd-trail-btn'), null, 'no trail of dots');
+  // Time ticks (the 1 s ticker's hook) beside the cost.
+  const facts = rd.querySelector('.rd-facts .rd-stats');
+  assert.ok(facts.querySelector('b.run-time'), 'the time tile ticks while steps run');
+  assert.match(facts.textContent, /\$0\.50/);
   assert.doesNotMatch(rd.textContent, /\b\d+ of \d+\b/, 'no "n of m" anywhere on the glance');
-  const groups = [...rd.querySelectorAll('.rd-nowlist .rd-sgroup')];
-  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent), ['Now'], 'no Earlier list: the trail shows what ran');
-  assert.deepEqual([...groups[0].querySelectorAll('.rd-srow-tx')].map((n) => n.firstChild.textContent), ['Implement', 'Docs']);
-  const activity = [...rd.querySelectorAll('.rd-result .rd-sgroup')].find((g) => g.querySelector('.rd-slabel').textContent === 'Activity');
-  assert.deepEqual([...activity.querySelectorAll('[data-rd-tab]')].map((b) => b.dataset.rdTab), ['overview', 'diff', 'logs'], 'Activity rows follow the tab order');
-  assert.equal(rd.querySelector('.rd-details-row'), null, 'no separate Details row');
+  // Two steps at once: the Now list names them (one step would be on the status line).
+  const now = [...rd.querySelectorAll('.rd-nowlist .rd-sgroup')];
+  assert.deepEqual(now.map((g) => g.querySelector('.rd-slabel').textContent), ['Now']);
+  assert.deepEqual([...now[0].querySelectorAll('.rd-srow-tx')].map((n) => n.firstChild.textContent), ['Implement', 'Docs']);
+  // Every tab is a row, in tab order, under Results and How it ran.
+  const groups = [...rd.querySelectorAll('.rd-result .rd-sgroup')];
+  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent), ['Results', 'How it ran']);
+  assert.deepEqual([...rd.querySelectorAll('.rd-result [data-rd-tab]')].map((b) => b.dataset.rdTab),
+    [...rd.querySelectorAll('.rd-tab')].map((b) => b.dataset.sec), 'one row per tab, in the tab bar\'s order');
   // The details header names what runs and never counts steps.
   assert.doesNotMatch(rd.querySelector('.rd-meta').textContent, /\d+\/\d+ done/);
 });
 
-test('Details is a route: the button, the trail and a Now row open it; Escape and ‹ Run come back', async () => {
+test('Details is a route: a tab row and a Now row open it; Escape and ‹ Run come back', async () => {
   const ctx = await bootRunning();
   const { window } = ctx;
   const rd = await openGlance(ctx);
-  click(window, rd.querySelector('.rd-to-details'));
+  click(window, rd.querySelector('.rd-result [data-rd-tab="workflow"]'));
   window.dispatchEvent(new window.Event('hashchange'));
   await settle(window, 4);
-  assert.equal(window.location.hash, '#running/r1/details');
+  assert.equal(window.location.hash, '#running/r1/details/workflow');
   assert.equal(rd.dataset.mode, 'details');
   assert.equal(rd.querySelector('.rd-details').hidden, false);
   assert.equal(rd.querySelector('.rd-glance').hidden, true);
   assert.equal(rd.querySelector('.rd-to-run').hidden, false);
   assert.equal(rd.querySelector('.rd-back').hidden, true);
-  assert.ok(tabOf(window, 'workflow').classList.contains('active'), 'Workflow is the first tab');
+  assert.ok(tabOf(window, 'workflow').classList.contains('active'), 'the row\'s tab is open');
   assert.ok(secOf(window, 'workflow').querySelector('.rd-graph .run-flow'), 'the graph lives in Workflow');
-  assert.equal(rd.querySelector('.rd-mini'), null, 'no bottom bar: the shared bar carries status and the way back');
+  assert.equal(rd.querySelector('.rd-mini'), null, 'no bottom bar: the shared bar carries the way back');
 
   // Escape: Details -> glance (same run), then glance -> the list.
   window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
@@ -1233,7 +1259,7 @@ test('Details is a route: the button, the trail and a Now row open it; Escape an
   assert.equal(window.location.hash, '#running');
 });
 
-test('a finished run turns the sheet into the result: numbers, checks, Create Pull Request', async () => {
+test('a finished run: its headline, the facts, what to check, Create pull request', async () => {
   const results = {
     summary: { filesNew: 1, filesChanged: 1, filesDeleted: 0, linesAdded: 12, linesRemoved: 3, blockingIssues: 1, nitpicks: 0 },
     newFiles: [{ path: 'src/limiter.js', status: 'A', added: 10, removed: 0 }],
@@ -1258,15 +1284,23 @@ test('a finished run turns the sheet into the result: numbers, checks, Create Pu
   frame(ctx, { type: 'done', runId: 'r1', status: 'done' });
   await settle(window, 10);
   assert.equal(rd.dataset.glance, 'done');
+  // No PR yet and one could be opened: the review decides the headline and its glyph.
   assert.equal(rd.querySelector('.rd-now-title').textContent, 'Ready to review');
-  assert.equal(rd.querySelector('.rd-now-sub').textContent, '1 thing to check before you merge');
+  assert.equal(rd.querySelector('.rd-now-sub').textContent, '1 thing to check before you open a pull request');
+  assert.ok(rd.querySelector('.rd-orb .rg-orb-review'), 'the review glyph, not a tick');
+  // Time · Cost · Changes, each labelled once.
+  const facts = rd.querySelector('.rd-facts .rd-stats');
+  assert.equal(facts.children.length, 3);
+  assert.deepEqual([...facts.querySelectorAll('div > span')].map((s) => s.textContent), ['time', 'cost', '2 files changed']);
+  assert.match(facts.textContent, /\+12/);
   const result = rd.querySelector('.rd-result');
   assert.equal(result.hidden, false);
-  assert.equal(result.querySelectorAll('.rd-stats > div').length, 3);
-  assert.match(result.querySelector('.rd-stats').textContent, /\+12/);
   assert.match(result.querySelector('.issues').textContent, /Unauthenticated uploads/);
+  assert.equal(result.querySelector('[data-rd-tab="diff"] .rd-srow-v').textContent, '2 files');
   const pr = result.querySelector('.rd-create-pr');
-  assert.ok(pr, 'an eligible run offers Create Pull Request');
+  assert.ok(pr, 'an eligible run offers Create pull request');
+  assert.equal(pr.textContent, 'Create pull request');
+  assert.equal(result.querySelector('.rd-follow-up').textContent, 'Start a follow-up run');
   click(window, pr);
   assert.equal(window.location.hash, `#history/${KEY}/p1`, 'it hands over to the ship-it flow');
 });

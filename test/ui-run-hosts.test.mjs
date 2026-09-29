@@ -966,11 +966,15 @@ test('applyRunLogFilter assigns onto r.logFilter and repaints; focusLogExecution
   // The History arm never dereferences a null histDetailState (nothing is open).
   np.focusLogExecution({ run: { id: 'p1' }, runId: 'p1', record: { projectKey: 'k' } }, 'x:n_a:1', 'n_a');
   // Open this run's detail: a footer-row click must land on a VISIBLE Logs tab.
-  window.location.hash = 'running/r1';
+  // The graph is built when Details › Workflow first opens; then back to the glance.
+  window.location.hash = 'running/r1/details/workflow';
   window.dispatchEvent(new window.Event('hashchange'));
   await new Promise((res) => setTimeout(res, 0));
   const screen = window.document.querySelector('#run-detail').firstElementChild;   // the cloned #run-detail-tpl screen
   assert.ok(screen.querySelector('.rd-graph .run-flow .gv-world'), 'the detail host mounted the graph');
+  window.location.hash = 'running/r1';
+  window.dispatchEvent(new window.Event('hashchange'));
+  await new Promise((res) => setTimeout(res, 0));
   // The Live log is the detail's FIRST tab (C1): park the screen on Overview so
   // the activation is observable.
   np.detailTabsOf(screen).activate('overview');

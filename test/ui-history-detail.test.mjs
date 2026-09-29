@@ -211,8 +211,11 @@ async function bootDetail({
   return ctx;
 }
 
-async function openDetail(ctx) {
-  go(ctx.window, detailHash);
+// A run opens on its glance; these tests predate it and read the Details tabs, which
+// used to open on Diff when the run had results. `where` names the route: '' for the
+// glance, or a Details tab.
+async function openDetail(ctx, where = 'details/diff') {
+  go(ctx.window, where ? `${detailHash}/${where}` : detailHash);
   await settle(ctx.window);
 }
 
@@ -745,14 +748,14 @@ const badgeOf = (doc, key) => {
   return b ? b.textContent : null;
 };
 
-test('tabs render with badges; default = Diff when results exist, else Overview', async () => {
+test('tabs render with badges; Details opens on Overview, and a tab route opens that tab', async () => {
   const ctx = await bootDetail({ detail: TABS_DETAIL });
   await openDetail(ctx);
   const doc = ctx.window.document;
 
   assert.deepEqual(
     tabsOf(doc).map((b) => b.dataset.sec),
-    ['workflow', 'overview', 'clarify', 'diff', 'logs', 'agents'],   // one order on both run pages, grouped by level
+    ['overview', 'diff', 'workflow', 'clarify', 'logs', 'agents'],   // one order on both run pages: results, then how it ran
   );
   // filesNew(1) + filesChanged(13). NEVER + filesDeleted: results.mjs:32 buckets
   // 'D' rows into changedFiles (NEW_STATUS is {A,C}) while :29 ALSO counts them in
@@ -764,15 +767,16 @@ test('tabs render with badges; default = Diff when results exist, else Overview'
   assert.equal(badgeOf(doc, 'logs'), null, 'Logs carries no count');
 
   assert.ok(doc.querySelector('#hist-detail .hd-tab[data-sec="diff"]').classList.contains('active'),
-    'persisted results make Diff the default tab');
+    'the details/diff route opens Diff');
   assert.equal(secOf(doc, 'diff').hidden, false);
   assert.equal(secOf(doc, 'overview').hidden, true);
 
-  // ...and with nothing to show: DETAIL is results-null, clarify-empty, artifact-free.
+  // ...and with nothing to show: DETAIL is results-null, clarify-empty, artifact-free. The
+  // plain Details route opens on the first tab, Overview.
   const bare = await bootDetail();
-  await openDetail(bare);
+  await openDetail(bare, 'details');
   const bareDoc = bare.window.document;
-  assert.deepEqual(tabsOf(bareDoc).map((b) => b.dataset.sec), ['workflow', 'overview', 'diff', 'agents']);
+  assert.deepEqual(tabsOf(bareDoc).map((b) => b.dataset.sec), ['overview', 'diff', 'workflow', 'agents']);
   assert.equal(secOf(bareDoc, 'clarify'), null, 'no Q&A -> no Clarify section either');
   assert.equal(secOf(bareDoc, 'logs'), null, 'no live-log artifact -> no Logs section either');
   assert.ok(bareDoc.querySelector('#hist-detail .hd-tab[data-sec="overview"]').classList.contains('active'));
@@ -864,9 +868,9 @@ test('clicking a tab switches the visible section and lazy-builds exactly once',
   for (const k of ['diff', 'overview', 'clarify', 'logs']) {
     assert.equal(secOf(doc, k).hidden, true, `${k} is hidden while Agents is active`);
   }
-  // initHdTabs ends with activate(default), which stamps DIFF before any click —
-  // so exactly TWO sections are built at this point, never one.
-  assert.equal(doc.querySelectorAll('#hist-detail .hd-sec[data-loaded="1"]').length, 2);
+  // initHdTabs ends with activate(default), which stamps OVERVIEW, and the details/diff
+  // route then opens DIFF — so exactly THREE sections are built at this point.
+  assert.equal(doc.querySelectorAll('#hist-detail .hd-sec[data-loaded="1"]').length, 3);
   assert.equal(secOf(doc, 'clarify').dataset.loaded, undefined, 'an unvisited tab is never built');
   assert.equal(secOf(doc, 'logs').dataset.loaded, undefined);
 
@@ -876,7 +880,7 @@ test('clicking a tab switches the visible section and lazy-builds exactly once',
   click(window, doc.querySelector('#hist-detail .hd-tab[data-sec="agents"]'));
   assert.equal(secOf(doc, 'agents'), agents, 'the section node is reused, never re-created');
   assert.equal(agents.dataset.loaded, '1');
-  assert.equal(doc.querySelectorAll('#hist-detail .hd-sec[data-loaded="1"]').length, 2,
+  assert.equal(doc.querySelectorAll('#hist-detail .hd-sec[data-loaded="1"]').length, 3,
     'a second visit builds nothing new');
 });
 
@@ -1787,9 +1791,11 @@ test('Overview: clean verdict + stat cards + task card', async () => {
   assert.match(cost.textContent, /\$153\.21/);
   assert.match(cost.querySelector('.hd-ov-value').title, /Estimated cost/);
 
-  const wt = sec.querySelector('.hd-ov-card-worktree');
+  // The worktree is a one-line row under the cards: its path only while it is on disk.
+  const wt = sec.querySelector('.hd-ov-wt');
   assert.match(wt.textContent, /retained|released/);
-  assert.match(wt.querySelector('.hd-ov-sub').textContent, /^\/tmp\/wt$/);
+  if (/retained/.test(wt.textContent)) assert.equal(wt.querySelector('.hd-ov-wt-path').title, '/tmp/wt');
+  else assert.equal(wt.querySelector('.hd-ov-wt-path'), null, 'a released worktree has no path to show');
 
   const task = sec.querySelector('.hd-ov-task');
   assert.ok(task, 'the task card renders');
@@ -1903,14 +1909,14 @@ test('the WORKTREE card flips released -> retained without leaving the tab', asy
 
   const sec = secOf(doc, 'overview');
   assert.equal(sec.hidden, false, 'results-null -> Overview is the default tab');
-  assert.match(sec.querySelector('.hd-ov-card-worktree .hd-ov-value').textContent, /^released$/,
+  assert.match(sec.querySelector('.hd-ov-wt .hd-ov-wt-state').textContent, /^released$/,
     'the deep-link stub carries no retainedWork');
 
   await deliverRows(ctx, [retainedRow()]);
   assert.equal(secOf(doc, 'overview'), sec, 'the SAME section node is repainted in place');
   assert.equal(sec.hidden, false, 'and the user never left the tab');
-  assert.equal(sec.querySelector('.hd-ov-card-worktree .hd-ov-value').textContent, 'retained');
-  assert.equal(sec.querySelectorAll('.hd-ov-card-worktree').length, 1, 'the repaint replaces, never stacks');
+  assert.equal(sec.querySelector('.hd-ov-wt .hd-ov-wt-state').textContent, 'retained');
+  assert.equal(sec.querySelectorAll('.hd-ov-wt').length, 1, 'the repaint replaces, never stacks');
 });
 
 test('the WORKTREE card reads retained while the run is still running', async () => {
@@ -1921,11 +1927,11 @@ test('the WORKTREE card reads retained while the run is still running', async ()
     rows: [{ ...ROW, status: 'running' }],
     detail: { ...DETAIL, state: { ...DETAIL.state, status: 'running' } },
   });
-  await openDetail(ctx);
+  await openDetail(ctx, 'details/overview');
   const sec = secOf(ctx.window.document, 'overview');
-  const card = sec.querySelector('.hd-ov-card-worktree');
-  assert.equal(card.querySelector('.hd-ov-value').textContent, 'retained');
-  assert.match(card.textContent, /\/tmp\/wt/, 'and it names the worktree it just called retained');
+  const row = sec.querySelector('.hd-ov-wt');
+  assert.equal(row.querySelector('.hd-ov-wt-state').textContent, 'retained');
+  assert.match(row.textContent, /\/tmp\/wt/, 'and it names the worktree it just called retained');
 });
 
 test('rapid selection does not stack two bodies in the pane', async () => {
@@ -2153,7 +2159,7 @@ const CL_DETAIL = {
   }],
 };
 
-test('Clarify tab renders ASK/ANS cards + step rounds', async () => {
+test('Clarify tab renders Q/A cards + step rounds', async () => {
   const ctx = await bootDetail({ detail: CL_DETAIL });
   const sec = await openTab(ctx, 'clarify');
   const doc = ctx.window.document;
@@ -2163,8 +2169,8 @@ test('Clarify tab renders ASK/ANS cards + step rounds', async () => {
   assert.equal(cards.length, 2);
   assert.match(cards[0].textContent, /Which DB\?/);
   assert.match(cards[0].textContent, /sqlite/);
-  assert.equal(cards[0].querySelector('.hd-cl-chip.ask').textContent, 'ASK');
-  assert.equal(cards[0].querySelector('.hd-cl-chip.ans').textContent, 'ANS');
+  assert.equal(cards[0].querySelector('.hd-cl-chip.ask').textContent, 'Q');
+  assert.equal(cards[0].querySelector('.hd-cl-chip.ans').textContent, 'A');
   // An unanswered step question keeps its ANS row and says so.
   assert.match(cards[1].textContent, /Keep flag\?/);
   assert.match(cards[1].textContent, /\(none\)/);
@@ -2690,7 +2696,7 @@ test('Clarify: a workspace record uses the /api/workspaces arm for ask files', a
     `/api/workspaces/wk1/runs/${encodeURIComponent(ROW.id)}/ask-files/questions-x_1-r1/0`);
 });
 
-test('Clarify: the badge counts a form ask, and legacy rows still render as ASK/ANS', async () => {
+test('Clarify: the badge counts a form ask, and legacy rows still render as Q/A', async () => {
   const mixed = { ...DETAIL,
     clarify: { questions: [{ id: 'q1', question: 'Which DB?' }], answers: [{ id: 'q1', choice: 'Postgres' }] },
     stepQuestions: [{ stepKey: 'impl#1', round: 1, nodeId: 'impl', agentKey: 'implementer',
@@ -2701,8 +2707,8 @@ test('Clarify: the badge counts a form ask, and legacy rows still render as ASK/
   const sec = await openTab(ctx, 'clarify');
   assert.equal(badgeOf(ctx.window.document, 'clarify'), '2', 'one legacy question + one form ask');
   assert.equal(sec.querySelectorAll('.hd-cl-card').length, 1);
-  assert.equal(sec.querySelector('.hd-cl-q').textContent, 'ASKWhich DB?');
-  assert.equal(sec.querySelector('.hd-cl-a').textContent, 'ANSPostgres');
+  assert.equal(sec.querySelector('.hd-cl-q').textContent, 'QWhich DB?');
+  assert.equal(sec.querySelector('.hd-cl-a').textContent, 'APostgres');
   assert.equal(sec.querySelectorAll('.hd-cl-form').length, 1);
   assert.match(sec.querySelector('.hd-cl-form .hd-cl-caption').textContent, /implementer/);
   assert.match(sec.querySelector('.hd-cl-form .hd-cl-caption').textContent, /pick-approach/);
@@ -2713,7 +2719,7 @@ test('Clarify: a run with ONLY legacy rows is byte-for-byte what it was', async 
     clarify: { questions: [{ id: 'q1', question: 'Which DB?' }], answers: [] } } });
   const sec = await openTab(ctx, 'clarify');
   assert.equal(sec.querySelectorAll('.hd-cl-form').length, 0);
-  assert.equal(sec.querySelector('.hd-cl-a').textContent, 'ANS(none)');
+  assert.equal(sec.querySelector('.hd-cl-a').textContent, 'A(none)');
 });
 
 // --- the glance (same two modes as the Running page) ------------------------
@@ -2736,28 +2742,40 @@ const GLANCE_DETAIL = {
   results: { ...RESULTS, keyThingsToCheck: [{ id: 'c1', severity: 'major', title: 'Uploads fall back to IP' }] },
 };
 
-test('History opens on the glance: status line, trail, result sheet; Details is a route', async () => {
+test('History opens on the glance: page title, status line, facts, the tab rows; Details is a route', async () => {
   const ctx = await bootDetail({ detail: GLANCE_DETAIL });
-  await openDetail(ctx);
+  await openDetail(ctx, '');
   await settle(ctx.window, 6);
   const doc = ctx.window.document;
   const hd = doc.querySelector('#hist-detail .hd');
   assert.equal(hd.dataset.mode, 'glance');
   assert.equal(hd.querySelector('.hd-glance').hidden, false);
   assert.equal(hd.querySelector('.hd-details').hidden, true);
-  assert.equal(hd.querySelector('.rd-now-title').textContent, 'Ready to review');
-  assert.equal(hd.querySelector('.rd-now-sub').textContent, '1 thing to check before you merge');
-  assert.equal(hd.querySelectorAll('.rd-trail-btn .rg-td').length, 3, 'one dot per execution (Implement looped)');
-  assert.equal(hd.querySelector('.hd-bar-word').textContent, 'Done');
-  assert.equal(hd.querySelectorAll('.hd-result .rd-stats > div').length, 3);
+  // The run's name is the page title; the bar repeats it (shown only once scrolled away),
+  // with no status word and no Details button of its own.
+  const name = hd.querySelector('.hd-title').textContent;
+  assert.ok(name, 'the run has a name');
+  assert.equal(hd.querySelector('.rd-page-title').textContent, name);
+  assert.equal(hd.querySelector('.hd-bar .rd-bar-title').textContent, name);
+  assert.equal(hd.querySelector('.hd-bar-word'), null, 'the state lives in the status line, not the bar');
+  assert.equal(hd.querySelector('.rd-to-details'), null, 'every tab is a row on the glance: no Details button');
+  // A finished run: the state word alone (its own glyph), no trail, the facts as tiles.
+  assert.ok(hd.querySelector('.rd-now-title .rd-now-state'), 'the state word leads the status line');
+  assert.equal(hd.querySelector('.rd-trail-btn'), null, 'no trail of dots');
+  assert.equal(hd.querySelectorAll('.rd-facts .rd-stats > div').length, 3, 'time · cost · changes');
+  assert.deepEqual([...hd.querySelectorAll('.rd-facts .rd-stats > div > span')].map((s) => s.textContent).slice(0, 2), ['time', 'cost']);
   assert.match(hd.querySelector('.hd-result .issues').textContent, /Uploads fall back to IP/);
-  assert.equal(hd.querySelector('.rd-nowlist').textContent, '', 'no step list: the trail shows what ran');
-  const act = [...hd.querySelectorAll('.hd-result .rd-sgroup')].find((g) => g.querySelector('.rd-slabel').textContent === 'Activity');
-  assert.deepEqual([...act.querySelectorAll('[data-rd-tab]')].map((b) => b.querySelector('.rd-srow-tx').firstChild.textContent), ['Overview', 'Diff'], 'named like the tabs, in tab order (no log on this run)');
-  assert.ok([...act.querySelectorAll('[data-rd-tab]')].every((b) => b.querySelector('svg.rd-srow-ico')), 'each row carries its tab icon');
+  assert.equal(hd.querySelector('.rd-nowlist').textContent, '', 'no step list on a finished run');
+  // Every tab is a row, in tab order, under Results and How it ran.
+  const groups = [...hd.querySelectorAll('.hd-result .rd-sgroup')];
+  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent).filter((t) => t !== 'Things to check'), ['Results', 'How it ran']);
+  const rows = [...hd.querySelectorAll('.hd-result [data-rd-tab]')].map((b) => b.dataset.rdTab);
+  const tabs = [...doc.querySelectorAll('#hist-detail .hd-tab')].map((b) => b.dataset.sec);
+  assert.deepEqual(rows, tabs, 'one row per tab, in the tab bar\'s order');
+  assert.ok([...hd.querySelectorAll('.hd-result [data-rd-tab]')].every((b) => b.querySelector('svg.rd-srow-ico')), 'each row carries its tab icon');
   assert.doesNotMatch(hd.querySelector('.hd-glance').textContent, /\b\d+ of \d+\b/);
 
-  // A result row deep-links into Details › that tab; the graph moved into Workflow.
+  // A row deep-links into Details › that tab; the graph moved into Workflow.
   hd.querySelector('.hd-result [data-rd-tab="overview"]').dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
   ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
   await settle(ctx.window, 4);
@@ -2778,7 +2796,7 @@ test('History opens on the glance: status line, trail, result sheet; Details is 
 
 test('History glance mirrors the header actions: Resume on a paused run clicks the real control', async () => {
   const ctx = await bootDetail({ detail: PAUSED_DETAIL, rows: [{ ...ROW, status: 'paused' }] });
-  await openDetail(ctx);
+  await openDetail(ctx, '');
   await settle(ctx.window, 6);
   const hd = ctx.window.document.querySelector('#hist-detail .hd');
   assert.equal(hd.querySelector('.rd-now-title').textContent, 'Paused');

@@ -93,25 +93,64 @@ test('glance state and copy for every status', () => {
   assert.equal(glanceState({ status: 'stopped' }), 'stop');
   assert.equal(glanceState({ status: 'error' }), 'fail');
 
+  // Line 1 is the state word alone; line 2 names the step (or the reason).
   const two = glanceCopy(loopedBranched);
-  assert.deepEqual([two.title, two.sub], ['2 steps running', 'Implement and Docs']);
+  assert.deepEqual([two.title, two.lead, two.sub], ['Running', 'Running', 'Steps: Implement and Docs']);
   const one = glanceCopy({ ...loopedBranched, steps: loopedBranched.steps.slice(0, 7) }, { lastLine: 'Edited src/a.js' });
-  assert.deepEqual([one.title, one.sub], ['Implement', 'Edited src/a.js']);
+  assert.deepEqual([one.title, one.sub], ['Running', 'Step: Implement'], 'no log line, no time: the step alone');
 
   const ask = glanceCopy({ status: 'running', stepper, steps: [], pendingQuestion: { kind: 'questions', nodeId: 'n_clarify', questions: [{}, {}] } });
-  assert.deepEqual([ask.state, ask.title, ask.sub], ['ask', '2 questions', 'Clarify is paused until you answer']);
-  assert.equal(glanceCopy({ status: 'running', stepper, steps: [], pendingQuestion: { kind: 'gate', nodeId: 'n_refine' } }).title, 'Decision needed');
+  assert.deepEqual([ask.state, ask.title, ask.sub], ['ask', 'Waiting for you', 'Step: Clarify'], 'the panel below counts the questions');
+  const gate = glanceCopy({ status: 'running', stepper, steps: [], pendingQuestion: { kind: 'gate', nodeId: 'n_refine' } });
+  assert.deepEqual([gate.title, gate.sub], ['Waiting for you', 'Step: Refine']);
   const form = glanceCopy({ status: 'running', stepper, steps: [], pendingQuestion: { kind: 'form', nodeId: 'n_docs', title: 'What should this run produce?' } });
-  assert.deepEqual([form.title, form.sub], ['Input needed', 'What should this run produce?']);
+  assert.deepEqual([form.title, form.sub], ['Waiting for you', 'Step: Docs']);
+  assert.equal(glanceCopy({ status: 'running', stepper, steps: [], pendingQuestion: { kind: 'workflow' } }).sub, 'Pick a workflow');
+  assert.equal(glanceCopy({ status: 'running', stepper, steps: [], pendingQuestion: { kind: 'gate' } }).sub, 'A decision', 'no step known: what is asked');
 
-  assert.equal(glanceCopy({ status: 'paused' }, { pill: { text: 'Paused · cost limit' } }).sub, 'Cost limit. Resume to continue');
+  assert.deepEqual([glanceCopy({ status: 'paused' }, { pill: { text: 'Paused · cost limit' } }).title,
+    glanceCopy({ status: 'paused' }, { pill: { text: 'Paused · cost limit' } }).sub], ['Paused', 'Cost limit · resume to continue']);
   assert.equal(glanceCopy({ status: 'paused' }, { pill: { text: 'Paused' } }).sub, 'Resume to continue where it left off');
   assert.equal(glanceCopy({ status: 'pausing' }).title, 'Pausing');
   assert.equal(earlierRows({ stepper, steps: [row('n_plan', 1, 0, 1, 'paused')] }).length, 0, 'a paused step did not complete');
-  assert.equal(glanceCopy({ status: 'done' }).title, 'Finished');
-  assert.equal(glanceCopy({ status: 'done' }, { checks: 2 }).sub, '2 things to check before you merge');
-  assert.equal(glanceCopy({ status: 'done' }, { checks: 0 }).sub, 'The review found nothing to check');
+  const failed = glanceCopy({ status: 'error', stepper, pauseDetail: 'ENOENT: no such file\n  at x', steps: [row('n_impl', 1, 0, 1, 'error')] });
+  assert.deepEqual([failed.title, failed.sub], ['Failed', 'Step: Implement · ENOENT: no such file'], 'one line of the error');
   assert.equal(glanceCopy({ status: 'stopped' }).title, 'Stopped');
+
+  // A finished run: where the work stands NOW (the pull request outranks the review), one glyph each.
+  const fin = (o) => { const c = glanceCopy({ status: 'done' }, o); return [c.title, c.icon]; };
+  assert.deepEqual(fin({ pr: 'MERGED' }), ['Merged', 'merged']);
+  assert.deepEqual(fin({ pr: 'OPEN', checks: 3 }), ['In review', 'pr-open']);
+  assert.deepEqual(fin({ pr: 'CLOSED' }), ['PR closed', 'pr-closed']);
+  assert.deepEqual(fin({ pr: 'NONE', checks: 0, files: 2 }), ['Ready to ship', 'ship']);
+  assert.deepEqual(fin({ pr: 'NONE', checks: 2, files: 2 }), ['Ready to review', 'review']);
+  assert.equal(glanceCopy({ status: 'done' }, { checks: 2 }).sub, '2 things to check before you open a pull request');
+  assert.deepEqual(fin({ files: 0, checks: 0 }), ['Finished', 'finished'], 'nothing changed: nothing to ship');
+  assert.equal(glanceCopy({ status: 'done' }, { pr: 'PENDING', checks: 0 }).sub, 'Checking for a pull request…', 'never guesses while the lookup runs');
+  assert.deepEqual(fin({ pr: 'UNAVAILABLE', checks: 0, files: 2 }), ['Finished', 'finished'], 'no gh: never "Ready to ship"');
+  assert.equal(glanceCopy({ status: 'done' }).title, 'Finished');
+});
+
+test('DOM: every glyph is its own drawing, stroked, with its state class', () => {
+  const { document } = new JSDOM('').window;
+  const shapes = {};
+  for (const s of ['ship', 'review', 'pr-open', 'merged', 'pr-closed', 'finished', 'start', 'run', 'ask', 'paused', 'fail', 'stop']) {
+    const orb = renderOrb(document, s, 28);
+    assert.match(orb.getAttribute('class'), new RegExp(`rg-orb-${s}\\b`));
+    assert.equal(orb.getAttribute('width'), '28');
+    shapes[s] = [...orb.children].slice(1).map((n) => `${n.tagName}:${n.getAttribute('d') || ''}${n.getAttribute('cx') || ''}`).join('|');
+  }
+  const seen = new Map();
+  for (const [s, shape] of Object.entries(shapes)) {
+    if (s === 'finished') continue;   // the plain tick, shared only with the generic 'done'
+    if (s === 'start') continue;      // the running dot in peach: starting is running's first moment
+    assert.ok(!seen.has(shape), `${s} draws the same as ${seen.get(shape)}`);
+    seen.set(shape, s);
+  }
+  for (const s of ['ship', 'review', 'pr-open', 'merged', 'pr-closed']) {
+    const orb = renderOrb(document, s);
+    assert.ok([...orb.querySelectorAll('.rg-orb-line')].every((n) => n.getAttribute('fill') === 'none'), `${s} is stroked, never filled`);
+  }
 });
 
 test('DOM: trail stacks and the orb carries its state class', () => {
