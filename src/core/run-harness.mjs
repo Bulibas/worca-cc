@@ -884,10 +884,11 @@ export class RunHarness extends EventEmitter {
     // resume point (`resumePoint.night`) because a UI resume passes only `resume: saved`.
     const savedNight = this.resumeOpts?.resumePoint?.night || null;
     this._night = {
-      optIn: savedNight ? savedNight.optIn === true : this.opts.nightMode === true,
+      // A resume with --night opts in a run that was not; it never drops a saved opt-in.
+      optIn: savedNight?.optIn === true || this.opts.nightMode === true,
       override: NIGHT_TOGGLES.includes(savedNight?.override) ? savedNight.override : 'auto',
       q: null, timer: null, openedAt: null, deciding: false,
-      since: null,                         // start of the unattended stretch (spend-cap anchor); a human answer ends it
+      since: Number.isFinite(savedNight?.since) ? savedNight.since : null,   // start of the unattended stretch (spend-cap anchor); a human answer ends it
       decisions: new Map(),                // question id -> decision record (for the answer writers)
       count: 0, flagged: 0,
     };

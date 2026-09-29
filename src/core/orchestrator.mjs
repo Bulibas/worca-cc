@@ -882,7 +882,7 @@ export class GraphOrchestrator extends RunHarness {
         : null,
       // Night mode: the run's own switches (the start opt-in and the run-view override),
       // read back by the harness constructor. `auto` above is the Auto-workflow state.
-      night: { optIn: this._night.optIn, override: this._night.override },
+      night: { optIn: this._night.optIn, override: this._night.override, ...(this._night.since != null ? { since: this._night.since } : {}) },
       guardrailsId: this.guardrailsId,
       memoryScope: this.memoryScope || null,   // agent memory §7.3: a paused defrag resumes with ONE scope (B10)
       checkpointRef: this.checkpointRef || null,

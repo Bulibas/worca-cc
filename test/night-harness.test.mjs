@@ -464,3 +464,19 @@ test('flipping the night switch does not take over "who paused" (lastAction)', (
   orch.setNightOverride('on', 'bob');
   assert.deepEqual(orch.state.lastAction, { kind: 'pause', by: 'alice', at: 't' });
 });
+
+test('--night on a resume opts in a run that was not opted in; the saved opt-in is never dropped', () => {
+  const rp = (optIn) => ({ resumePoint: { night: { optIn, override: 'auto' } } });
+  assert.equal(createOrchestrator({ projectDir: '/tmp/night-h28', nightMode: true, resume: rp(false) })._night.optIn, true);
+  assert.equal(createOrchestrator({ projectDir: '/tmp/night-h28', resume: rp(true) })._night.optIn, true);
+  assert.equal(createOrchestrator({ projectDir: '/tmp/night-h28', resume: rp(false) })._night.optIn, false);
+});
+
+test('the unattended stretch start survives a pause/resume (the spend cap keeps counting it)', () => {
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h29' });
+  orch._night.since = 1234;
+  orch.pipeline = { id: 'p', dir: '/tmp/night-h29' };
+  const saved = orch._buildResumePoint(null).night;
+  assert.equal(saved.since, 1234);
+  assert.equal(createOrchestrator({ projectDir: '/tmp/night-h29', resume: { resumePoint: { night: saved } } })._night.since, 1234);
+});
