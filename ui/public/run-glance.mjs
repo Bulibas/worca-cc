@@ -182,13 +182,11 @@ export function glanceCopy(run, { pill = null, checks = null, lastLine = '', pr 
       const pq = run.pendingQuestion;
       const who = pq.nodeId ? nodeLabel(run.stepper, pq.nodeId) : (names[0] || '');
       const wait = 'Waiting for you';
-      if (pq.kind === 'gate') return line(wait, '', stepLine(who, 'used every cycle it was allowed'));
-      if (pq.kind === 'recovery') return line(wait, '', stepLine(who, 'failed, choose how to go on'));
-      if (pq.kind === 'workflow') return line(wait, '', 'Pick a workflow · the run waits until you choose');
-      // Questions and forms: the step alone — the panel right below shows what it asks
-      // (and counts it).
+      // The step alone: the panel right below says what it asks and why.
+      if (pq.kind === 'workflow') return line(wait, '', 'Pick a workflow');
       if (who) return line(wait, '', `Step: ${who}`);
-      return line(wait, '', pq.kind === 'form' ? 'Input needed' : 'Questions to answer');
+      const what = { form: 'Input needed', gate: 'A decision', recovery: 'A step failed' };
+      return line(wait, '', what[pq.kind] || 'Questions to answer');
     }
     case 'paused': {
       if (run.status === 'pausing') return line('Pausing', '', 'Steps in flight finish first');
