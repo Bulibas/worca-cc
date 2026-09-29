@@ -8,6 +8,7 @@ import { safeParseJson } from '../protocol.mjs';
 import { memoryRoot, GLOBAL_SCOPE, projectScope, listMemory, readMemory } from '../memory-store.mjs';
 import { NIGHT_CRITERIA } from './config.mjs';
 import { ASK_DENY_RULES } from '../ask/spawn.mjs';
+import { redactAskText } from '../ask/redact.mjs';
 
 export const NIGHT_DECIDER_SYSTEM_PROMPT = `You are worca's nightDecider. The developer is away and a run is waiting on a question they would normally answer.
 Decide as THEY would. Their stated preferences (the "Worca memory" rules below) outrank everything else.
@@ -72,7 +73,8 @@ export function normalizeAnalysis(parsed) {
     out[d.id] = {
       choice: typeof d.choice === 'string' ? d.choice : '',
       confidence: Number.isFinite(d.confidence) ? Math.min(100, Math.max(0, Math.round(d.confidence))) : 0,
-      rationale: typeof d.rationale === 'string' ? d.rationale.slice(0, 2000) : '',
+      // Redacted here, at the source: the rationale is stored, broadcast over WS and served by the API.
+      rationale: typeof d.rationale === 'string' ? redactAskText(d.rationale.slice(0, 2000)) : '',
       reversible: d.reversible === true,
       scores,
     };

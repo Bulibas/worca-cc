@@ -16,6 +16,13 @@ test('normalizeAnalysis maps per-question decisions and drops junk', () => {
   assert.deepEqual(out.q1.scores, { A: { reversible: 9 } });
 });
 
+test('normalizeAnalysis redacts secrets from the rationale (stored, broadcast and served)', () => {
+  const key = 'sk-ant-' + 'a'.repeat(24);
+  const out = normalizeAnalysis({ decisions: [{ id: 'q1', choice: 'A', confidence: 80, rationale: `the .env holds ${key}`, reversible: true, scores: {} }] });
+  assert.ok(!out.q1.rationale.includes(key));
+  assert.match(out.q1.rationale, /sk-ant-<redacted>/);
+});
+
 test('prompt carries question, options, criteria weights, memory and task', () => {
   const p = buildAnalysisPrompt({ questions: [{ id: 'q1', question: 'Store?', options: ['Redis', 'Postgres'] }],
     task: 'build it', planPaths: ['/p/plan.md'], memory: '- prefer Postgres', criteria: { matchesMemory: 3, cost: 1 } });
