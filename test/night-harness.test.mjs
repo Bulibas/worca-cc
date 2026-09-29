@@ -12,6 +12,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { setNightMode, setNightModeToggle } from '../src/core/settings.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
 import { writeNightDecision } from '../src/core/night/store.mjs';
+import { recordCostDelta } from '../src/core/cost-budget.mjs';
 
 useTempHome(after);                                  // sqlite under WORCA_HOME
 let home; const prev = {};                           // settings.json under HOME
@@ -356,4 +357,42 @@ test('night counters continue from the DB (a resumed run does not restart them a
     await p;
     assert.deepEqual([orch.state.night.decisions, orch.state.night.flagged], [3, 1], 'the new decision adds to the stored totals');
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('the night spend cap ignores attended daytime spend and counts the unattended stretch', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'worca-night-h20-'));
+  try {
+    const { id: pid } = await seedPipeline(dir);
+    const at = (iso) => Date.parse(iso);
+    recordCostDelta({ pipelineId: pid, amountUsd: 5, tsMs: at('2026-09-27T10:00:00Z') });   // attended morning spend
+    await setNightMode({ enabled: true, graceMinutes: 1, strategy: 'weights', window: '22:00-08:00', timeZone: 'UTC', spendCapUsd: 1 });
+    const clock = fakeClock(at('2026-09-27T15:00:00Z'));
+    const orch = createOrchestrator({ projectDir: '/tmp/night-h20', nightClock: clock });
+    orch.state.status = 'running';
+    const p1 = orch._ask({ id: 'c20a', kind: 'clarify', questions: Q });
+    await clock.tick(61_000);
+    assert.deepEqual(await p1, { answers: [{ id: 'a', choice: 'x' }] }, 'a grace decision at 15:00 is not charged the morning');
+
+    recordCostDelta({ pipelineId: pid, amountUsd: 2, tsMs: clock.now() });                   // spent while unattended
+    const p2 = orch._ask({ id: 'c20b', kind: 'clarify', questions: Q });
+    const rejected = assert.rejects(p2, (e) => isPause(e));
+    await clock.tick(61_000);
+    await rejected;
+    assert.equal(orch.pauseReason, 'night_guardrail');
+    assert.match(orch.pauseDetail, /\$2\.00 spent/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a human answer ends the unattended stretch the spend cap counts', async () => {
+  await setNightMode({ enabled: true, graceMinutes: 1, strategy: 'weights', window: null });
+  const clock = fakeClock();
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h21', nightClock: clock });
+  const p1 = orch._ask({ id: 'c21a', kind: 'clarify', questions: Q });
+  await clock.tick(61_000);
+  await p1;
+  assert.ok(orch._night.since != null, 'the night decision started a stretch');
+  const p2 = orch._ask({ id: 'c21b', kind: 'clarify', questions: Q });
+  orch.answer('c21b', { answers: [{ id: 'a', choice: 'y' }] }, 'local');
+  await p2;
+  assert.equal(orch._night.since, null);
 });

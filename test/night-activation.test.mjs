@@ -50,8 +50,19 @@ test('decideDelayMs: active → 0, else min(grace deadline, window start), none 
   assert.equal(decideDelayMs({ state: { ...st, graceOn: false, wakeOn: false }, config: c, openedAt: now, now }), null, 'global off: no wake');
 });
 
-test('nightAnchorMs: last window start, else rolling 12 h', () => {
+test('nightAnchorMs: inside the window, the window start (or an earlier unattended start)', () => {
   const now = at('2026-09-28T03:00:00Z');
-  assert.equal(nightAnchorMs(cfg({ window: '22:00-08:00', timeZone: 'UTC' }), now), at('2026-09-27T22:00:00Z'));
-  assert.equal(nightAnchorMs(cfg({ window: null }), now), now - 12 * 3_600_000);
+  const c = cfg({ window: '22:00-08:00', timeZone: 'UTC' });
+  assert.equal(nightAnchorMs(c, now), at('2026-09-27T22:00:00Z'));
+  assert.equal(nightAnchorMs(c, now, at('2026-09-27T21:00:00Z')), at('2026-09-27T21:00:00Z'), 'a grace stretch that began before the window');
+  assert.equal(nightAnchorMs(c, now, at('2026-09-28T01:00:00Z')), at('2026-09-27T22:00:00Z'));
+});
+
+test('nightAnchorMs: outside the window, only the unattended stretch counts (never the attended day)', () => {
+  const now = at('2026-09-28T15:00:00Z');
+  const c = cfg({ window: '22:00-08:00', timeZone: 'UTC' });
+  assert.equal(nightAnchorMs(c, now), now, 'first decision of the stretch: nothing spent yet');
+  assert.equal(nightAnchorMs(c, now, at('2026-09-28T14:10:00Z')), at('2026-09-28T14:10:00Z'));
+  assert.equal(nightAnchorMs(cfg({ window: null }), now), now);
+  assert.equal(nightAnchorMs(cfg({ window: null }), now, now - 60_000), now - 60_000);
 });

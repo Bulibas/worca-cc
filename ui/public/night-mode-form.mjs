@@ -127,7 +127,7 @@ export function renderNightForm(root, { level, values = {}, effective = {}, sour
   root.append(nd);
 
   if (level === 'user') {
-    const cap = field(doc, 'Night spend cap (USD)', `Across all runs since the night started. Reaching it pauses the run. ${inherited(effective, sources, 'spendCapUsd')}`);
+    const cap = field(doc, 'Night spend cap (USD)', `Across all runs since night mode took over (the window start, or the first decision while you were away). Reaching it pauses the run. ${inherited(effective, sources, 'spendCapUsd')}`);
     const inp = el(doc, 'input', 'input input-mini night-spend-cap'); inp.type = 'number'; inp.min = '0.1'; inp.step = '0.1';
     inp.value = values.spendCapUsd == null ? '' : String(values.spendCapUsd);
     cap.append(inp);

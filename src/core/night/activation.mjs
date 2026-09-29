@@ -36,10 +36,16 @@ export function msUntilWindowStart(w, tz, now) {
   return deltaMin * 60_000 - seconds * 1000 - ms;
 }
 
-/** Start of the current/most recent night (spend-cap anchor): the last window start, else now-12h. */
-export function nightAnchorMs(config, now) {
-  const next = msUntilWindowStart(config.window, config.timeZone, now);
-  return next == null ? now - 12 * HOUR : now + next - DAY;
+/** Spend-cap anchor: spend since this moment counts against the night cap. `since` = when the
+ *  current unattended stretch began (the first night-decided question since a human answer),
+ *  null when none has begun. Inside the window: the window start, or an earlier stretch start.
+ *  Outside it (grace, toggle, opt-in): the stretch alone — the attended day never counts. */
+export function nightAnchorMs(config, now, since = null) {
+  if (inWindow(config.window, config.timeZone, now)) {
+    const windowStart = now + msUntilWindowStart(config.window, config.timeZone, now) - DAY;
+    return since == null ? windowStart : Math.min(windowStart, since);
+  }
+  return since ?? now;
 }
 
 /**

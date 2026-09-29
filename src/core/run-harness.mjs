@@ -887,6 +887,7 @@ export class RunHarness extends EventEmitter {
       optIn: savedNight ? savedNight.optIn === true : this.opts.nightMode === true,
       override: NIGHT_TOGGLES.includes(savedNight?.override) ? savedNight.override : 'auto',
       q: null, timer: null, openedAt: null, deciding: false,
+      since: null,                         // start of the unattended stretch (spend-cap anchor); a human answer ends it
       recovery: new Map(),                 // cls -> night retries this run
       decisions: new Map(),                // question id -> decision record (for the answer writers)
       count: 0, flagged: 0,
@@ -911,6 +912,7 @@ export class RunHarness extends EventEmitter {
     // the answer (answeredBy on the row) and audited for decisions below.
     const settle = (value) => {
       if (typeof by === 'string' && by) this._answeredBy.set(id, by);
+      if (this._night && by !== NIGHT_ACTOR) this._night.since = null;   // someone is back: the unattended stretch ends
       this._auditDecision(pq, value, typeof by === 'string' && by ? by : null);
     };
     if (!pq || pq.id !== id) {
@@ -3723,6 +3725,8 @@ export class RunHarness extends EventEmitter {
   _nightCount() { return this.pipeline?.id ? countNightDecisions(this.pipeline.id) : this._night.count; }
 
   async _nightDecide(q, config) {
+    // The user was already away when this question opened: the stretch the spend cap counts starts there.
+    this._night.since ??= this._night.openedAt;
     // Guardrails: pause with a flagged reason.
     const guard = this._nightGuardrail(config);
     if (guard) {
@@ -3750,7 +3754,7 @@ export class RunHarness extends EventEmitter {
       analyze: (qs) => this._nightAnalyze(qs, q),
       gateCyclesUsed: (wireId) => (this.pipeline?.id ? nightGateCycles(this.pipeline.id, wireId) : 0),
       recoveryAttempts: (cls) => this._night.recovery.get(cls) || 0,
-      budget: config.spendCapUsd != null ? { spent: nightSpendSinceUsd(nightAnchorMs(config, this._nightClock.now())), cap: config.spendCapUsd } : null,
+      budget: config.spendCapUsd != null ? { spent: this._nightSpentUsd(config), cap: config.spendCapUsd } : null,
       // sleepAbortable RESOLVES early on a pause; pause() has then nulled pendingQuestion, so
       // the check below drops the decision.
       sleep: (ms) => sleepAbortable(ms, this._nightSignal()),
@@ -3812,13 +3816,18 @@ export class RunHarness extends EventEmitter {
     this._emit('night-decision', { id: q.id, kind: q.kind, record: rec });
   }
 
+  /** Spend across all runs since the night anchor (the window start and/or this run's unattended stretch). */
+  _nightSpentUsd(config) {
+    return nightSpendSinceUsd(nightAnchorMs(config, this._nightClock.now(), this._night.since));
+  }
+
   /** @returns {{code:'maxDecisions'|'spendCap', detail:string}|null} */
   _nightGuardrail(config) {
     const n = this._nightCount();
     if (n >= config.maxDecisions) return { code: 'maxDecisions', detail: `Night mode paused the run: ${n} decisions reached the per-run limit of ${config.maxDecisions}. Review the night decisions, then resume.` };
     if (config.spendCapUsd != null) {
-      const spent = nightSpendSinceUsd(nightAnchorMs(config, this._nightClock.now()));
-      if (spent >= config.spendCapUsd) return { code: 'spendCap', detail: `Night mode paused the run: $${spent.toFixed(2)} spent across all runs tonight reached the night cap of $${config.spendCapUsd.toFixed(2)}.` };
+      const spent = this._nightSpentUsd(config);
+      if (spent >= config.spendCapUsd) return { code: 'spendCap', detail: `Night mode paused the run: $${spent.toFixed(2)} spent across all runs while you were away reached the night cap of $${config.spendCapUsd.toFixed(2)}.` };
     }
     return null;
   }
