@@ -610,8 +610,6 @@
                     </div>
                   </div>
                 </div>
-                <!-- A waiting question: its own panel above the run's, not inside it. -->
-                <div class="rd-questions" hidden><div class="qpanel hidden"></div></div>
                 <div class="rd-sheet">
                   <div class="rd-banners">
                     <div class="retained-banner" role="alert" hidden></div>
@@ -621,6 +619,12 @@
                   <div class="rd-facts"></div>
                   <div class="rd-nowlist"></div>
                   <div class="rd-result" hidden></div>
+                </div>
+                <!-- A waiting question: below the run's panel (which never changes), led by
+                     a heading that says what is asked. -->
+                <div class="rd-questions" hidden>
+                  <h3 class="rd-ask-head"></h3>
+                  <div class="qpanel hidden"></div>
                 </div>
               </section>
 

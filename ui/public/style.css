@@ -927,8 +927,20 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
    file, so it still wins); this rule must not restate it. */
 .rd-questions .qpanel{padding:22px 24px 20px;background:var(--amber-wash-2);
   border:1.5px solid var(--amber-line);border-radius:var(--r-card);box-shadow:var(--shadow);}
-/* The question panel and the run's sheet are two stacked panels: the 18px panel gap. */
-.rd-glance > .rd-questions:not([hidden]) + .rd-sheet{margin-top:-4px;}
+/* A waiting question sits BELOW the run's panel, which never changes: a heading that says
+   what is asked, then the panel. Its own header row (title + count badge) would repeat
+   the heading, so it goes. */
+.rd-glance > .rd-questions{display:flex;flex-direction:column;gap:10px;}
+.rd-glance > .rd-questions[hidden]{display:none;}
+.rd-ask-head{margin:0;padding:0 4px;font:600 16px/1.35 var(--sans);color:var(--ink);overflow-wrap:anywhere;
+  scroll-margin-top:84px;}   /* the sticky bar (~61px) plus air: "go to the questions" lands the heading below it */
+/* While a question waits, the status header leads to it: a borderless row, so the hover fill. */
+.rd-now-top.is-link{cursor:pointer;margin:-8px -12px;padding:8px 12px;border-radius:var(--r-ctrl);transition:background .15s;}
+.rd-now-top.is-link:hover{background:var(--hover);}
+.rd-now-top.is-link:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}.rd-ask-head:empty{display:none;}
+.rd-glance > .rd-questions .qpanel-head{display:none;}
+.rd-glance > .rd-questions .qpanel > .qblock:first-of-type,
+.rd-glance > .rd-questions .qpanel .qbody > :first-child{padding-top:0;margin-top:0;}
 .rd-questions .qpanel-head{gap:12px;padding-bottom:16px;border-bottom:1px solid var(--amber-line);}
 .rd-questions .qpanel-head b{font-size:15px;color:var(--ink);}
 .rd-questions .qpanel-head .qcount{font-weight:600;font-size:11.5px;padding:5px 12px;}

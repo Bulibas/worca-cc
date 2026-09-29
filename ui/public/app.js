@@ -68,7 +68,7 @@ import { logLineVisible, logFacets, compileLogFilter } from './log-filter.mjs';
 import { alreadyApplied, noteBoot } from './ws-seq.mjs';
 import { decorFromState, applyDecor, isGraphManifest } from './graph/run-decor.mjs';
 import { mountRunGraph } from './graph/run-hosts.mjs';
-import { trailColumns, nowRows, glanceCopy, renderOrb } from './run-glance.mjs';
+import { trailColumns, nowRows, glanceCopy, renderOrb, nodeLabel } from './run-glance.mjs';
 // Import list only — `statusChip`/`diffBadges`/`mergeFindings`/`reportResultControl`
 // lost their last app.js caller with the retired card accordion. They stay EXPORTED
 // from results-view.mjs (test/results-view-helpers.test.mjs imports four of them).
@@ -4883,7 +4883,7 @@ function renderClarifyBody(r, panel, pq) {
   submit.type = 'button';
   submit.className = 'btn-go';
   submit.appendChild(playIcon());
-  submit.appendChild(document.createTextNode('Submit answers & resume'));
+  submit.appendChild(document.createTextNode('Submit'));
   foot.appendChild(submit);
   panel.appendChild(foot);
 }
@@ -5195,7 +5195,7 @@ function askFormHost(r, panel, ask) {
   submit.type = 'button';
   submit.className = 'btn-go';
   submit.appendChild(playIcon());
-  submit.appendChild(document.createTextNode('Submit & resume'));
+  submit.appendChild(document.createTextNode('Submit'));
   foot.appendChild(submit);
   body.appendChild(foot);
   panel.appendChild(body);
@@ -22866,9 +22866,22 @@ function focusQuestionPanel(ctx) {
     setRdMode(screen, 'glance', '', { focus: false });
     try { window.history.replaceState(null, '', `#${rdHash(runDetailState.runId)}`); } catch { /* ignore */ }
   }
+  if (screen && screen.contains(panel)) { scrollToQuestions(screen); return; }
   panel.scrollIntoView({ block: 'nearest' });
   const focusable = panel.querySelector('button, [tabindex]');
   if (focusable && typeof focusable.focus === 'function') focusable.focus();
+}
+
+// Bring the waiting question to the top of the view, its heading just under the sticky
+// bar (style.css: scroll-margin-top on .rd-ask-head), and put focus in the panel.
+function scrollToQuestions(screen) {
+  const host = screen && screen.querySelector('.rd-questions');
+  if (!host || host.hidden) return;
+  const head = host.querySelector('.rd-ask-head');
+  const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  (head && head.textContent ? head : host).scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' });
+  const focusable = host.querySelector('.qpanel button, .qpanel input, .qpanel [tabindex]');
+  if (focusable && typeof focusable.focus === 'function') focusable.focus({ preventScroll: true });
 }
 
 /** End result chip -> the saved-artifact viewer, through the indexed routes:
@@ -23900,6 +23913,13 @@ function openRunDetail(runId, { instant = false } = {}) {
   const toDetails = (tab = '') => { location.hash = rdHash(runDetailState.runId, 'details', tab); };
   const toRun = () => { location.hash = rdHash(runDetailState.runId); };
   screen.querySelector('.rd-to-run').addEventListener('click', toRun);
+  // While a question waits, the status header ("? Waiting for you / Step: …") is a way to it.
+  const statusTop = screen.querySelector('.rd-now-top');
+  const toQuestions = () => { if (screen.dataset.glance === 'ask') scrollToQuestions(screen); };
+  statusTop.addEventListener('click', toQuestions);
+  statusTop.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toQuestions(); }
+  });
   // A Now or Activity row opens its tab.
   screen.querySelector('.rd-sheet').addEventListener('click', (e) => {
     const row = e.target.closest && e.target.closest('[data-rd-tab]');
@@ -24097,6 +24117,21 @@ function paintRdGlance(screen, r) {
   screen.dataset.glance = copy.state;
 
   paintGlanceStatus(screen.querySelector('.rd-glance'), copy);
+  // Only while a question waits is the status header a control (see openRunDetail).
+  const statusTop = screen.querySelector('.rd-now-top');
+  const asking = copy.state === 'ask';
+  if (statusTop && statusTop.classList.contains('is-link') !== asking) {
+    statusTop.classList.toggle('is-link', asking);
+    if (asking) {
+      statusTop.setAttribute('role', 'button');
+      statusTop.tabIndex = 0;
+      statusTop.setAttribute('aria-label', 'Go to the questions');
+    } else {
+      statusTop.removeAttribute('role');
+      statusTop.removeAttribute('tabindex');
+      statusTop.removeAttribute('aria-label');
+    }
+  }
 
   // Time · Cost · Changes. The time ticks (`run-time`, rdTickHosts) only while steps
   // execute; a finished run's clock is final (the ticker reads the live ledger, which a
@@ -24472,6 +24507,22 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
   if (acts.childNodes.length) host.appendChild(acts);
 }
 
+// The heading over a waiting question on the glance: what is asked, by which step. It
+// replaces the panel's own header row (title + count badge).
+function askHeading(r, pq) {
+  const who = pq.nodeId ? nodeLabel(r.stepper, pq.nodeId) : '';
+  const n = Array.isArray(pq.questions) ? pq.questions.length : (Array.isArray(pq.issues) ? pq.issues.length : 1);
+  switch (pq.kind) {
+    case 'workflow': return 'Pick a workflow';
+    case 'form': return pq.title ? String(pq.title) : (who ? `${who} needs your input` : 'Your input is needed');
+    case 'gate': return who ? `${who} needs a decision` : 'A decision is needed';
+    case 'recovery': return who ? `${who} failed` : 'A step failed';
+    default:
+      if (!who) return n > 1 ? `${n} questions` : 'A question';
+      return n > 1 ? `${n} questions from ${who}` : `A question from ${who}`;
+  }
+}
+
 function paintRdQuestions(screen, r) {
   const host = screen.querySelector('.rd-questions');
   if (!host) return;
@@ -24508,6 +24559,8 @@ function paintRdQuestions(screen, r) {
   // out at the 702 default and the ResizeObserver would re-lay it a frame later — a
   // visible flash on top of the wr-rise entry. The card path already un-hides first.
   host.hidden = pq == null;                    // drives the wr-rise entry
+  const head = host.querySelector('.rd-ask-head');
+  if (head) head.textContent = pq ? askHeading(r, pq) : '';
   if (panel && panel.dataset.qid !== key) {
     renderQpanel(r, host);                     // host contains the .qpanel node
     // Stamp '' rather than deleting: `clearQpanel` already removed the attribute,
