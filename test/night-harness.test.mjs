@@ -421,3 +421,20 @@ test('neverDecide clarify leaves a clarifier FORM ask for the user', async () =>
   assert.equal(orch.pendingQuestion?.id, 'clarify-n-1');
   assert.equal(clock.pending(), 0, 'no decision armed');
 });
+
+test('the user answering during a night analysis kills it, and the next question is not held up', async () => {
+  await setNightMode({ enabled: true, strategy: 'analysis', graceMinutes: 1 });
+  await setNightModeToggle('on');
+  const clock = fakeClock();
+  const a = blockingAnalysis();
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h24', nightClock: clock, nightRunClaude: a.run });
+  const p = orch._ask({ id: 'c24', kind: 'clarify', questions: QA });
+  for (let i = 0; i < 5 && !a.seen.signal; i++) await clock.tick(0);
+  assert.ok(a.seen.signal, 'the analysis started');
+  orch.answer('c24', { answers: [{ id: 'a', choice: 'x' }] }, 'local');
+  assert.deepEqual(await p, { answers: [{ id: 'a', choice: 'x' }] });
+  assert.equal(a.seen.signal.aborted, true, 'the superseded nightDecider child is killed (no longer billed)');
+  for (let i = 0; i < 5 && orch._night.deciding; i++) await clock.tick(0);
+  assert.equal(orch._night.deciding, false, 'the next question is free to be decided');
+  assert.equal(orch.nightDecision('c24'), null);
+});

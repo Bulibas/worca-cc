@@ -3615,6 +3615,7 @@ export class RunHarness extends EventEmitter {
       });
     } finally {
       this._nightDisarm();
+      this._nightCancel(id);
       // Resume only the rows that are STILL running AND only while the run has not
       // gone terminal. stop() sets status before rejecting the pending promise, so
       // on a stop-while-blocked we must NOT resume (the terminal _setStatus already
@@ -3687,6 +3688,7 @@ export class RunHarness extends EventEmitter {
   /** Night mode broke on `q`: log it, and in a night-owned --yes run give today's auto answer
    *  (nobody else will answer — an unattended run must never hang). */
   _nightFailed(q, why) {
+    if (this.pendingQuestion?.id !== q.id) return;   // superseded (answered, paused, stopped): nothing failed
     this._log('night', 'warn', why);
     if (this.auto && this.pendingQuestion?.id === q.id) this._nightAutoFallback(q, why);
   }
@@ -3700,7 +3702,17 @@ export class RunHarness extends EventEmitter {
   }
 
   /** Stop kills this.abort, pause kills this.pauseAbort: night work started from a timer must honour both. */
-  _nightSignal() { return AbortSignal.any([this.abort.signal, this.pauseAbort.signal]); }
+  _nightSignal() {
+    const sigs = [this.abort.signal, this.pauseAbort.signal];
+    if (this._night?.decideAbort) sigs.push(this._night.decideAbort.signal);
+    return AbortSignal.any(sigs);
+  }
+
+  /** The ask `id` closed (answered by someone else, paused, stopped): kill its in-flight decision
+   *  (a running nightDecider child keeps billing, and `deciding` would hold up the next question). */
+  _nightCancel(id) {
+    if (this._night?.decideAbort && this._night.decidingId === id) this._night.decideAbort.abort();
+  }
 
   _nightDisarm() {
     if (!this._night) return;
@@ -3714,10 +3726,14 @@ export class RunHarness extends EventEmitter {
     const { config } = effectiveNightConfig(this.projectDir);
     if (!this._nightDue(config)) { this._nightArm(); return; }
     this._night.deciding = true;
+    this._night.decidingId = id;
+    this._night.decideAbort = new AbortController();
     let outcome;
     try { outcome = await this._nightDecide(this._night.q, config); }
     finally {
       this._night.deciding = false;
+      this._night.decidingId = null;
+      this._night.decideAbort = null;
       // A NEW question may have been armed (and its timer fired and returned early above)
       // while this decision was running — e.g. the user answered during a slow analysis.
       // Re-arm it, or it would never be decided. A dropped decision re-arms its own question.
