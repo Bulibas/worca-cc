@@ -13,8 +13,8 @@ user-facing capability with a headline, a screenshot, and a small live demo
 of the mechanism.
 
 The output is written into `docs/changelog/` **on the current branch, left
-uncommitted**. This skill never branches, commits, pushes, or opens a PR —
-see Step 7.
+uncommitted**. This skill never branches or opens a PR, and it commits,
+pushes and publishes only when the user says so at the end — see Step 7.
 
 The design, layout and writing rules live next to this file — read both
 before writing a line of copy or markup:
@@ -239,15 +239,13 @@ record.
 
 ---
 
-## Step 7: Leave it on the current branch
+## Step 7: Leave it on the current branch, then ask
 
 The entry stays **in the working tree of the branch that is checked out**.
-Do not create a branch, a worktree, a commit, a push, or a PR for it — a
-changelog is release material, and the release engineer decides when and
-how it lands (folded into the release commit, its own PR, or not at all).
-It goes live on docs.worca.dev only once it is on `dev` **and** someone runs
-`npm run docs:publish`, which moves the `docs-live` pointer.
-One PR per changelog is exactly the churn this rule avoids.
+Do not create a branch, a worktree or a PR for it — a changelog is release
+material, and the release engineer decides when and how it lands. One PR per
+changelog is exactly the churn this rule avoids. It goes live on
+docs.worca.dev only once it is on `dev` **and** `docs-live` has moved.
 
 Show what is waiting, then stop:
 
@@ -264,7 +262,7 @@ Changelog entry ready
   Sections:   6 features + receipts
   Page:       docs/changelog/worca-app-v1.2.0-rc.3.src.html  (+ 6 screenshots)
   Preview:    <artifact url>   |   not published (--no-publish)
-  Docs:       https://docs.worca.dev/changelog/1.2.0-rc.3/  (live after commit + push to dev + npm run docs:publish)
+  Docs:       https://docs.worca.dev/changelog/1.2.0-rc.3/  (live once published — see the question below)
   Files:      uncommitted on <branch> — 8 files under docs/changelog/
 ```
 
@@ -299,5 +297,21 @@ https://docs.worca.dev/changelog/<VERSION>/
   `npm install -g @worca/app@1.2.0-rc.3`.
 - The link is the docs page, not the Artifact: the docs page is public and
   permanent, while the Artifact is private until it is shared. Below the block,
-  say that the link works once the entry is on `dev` and `npm run docs:publish`
-  has run, and give the Artifact URL as the preview to review before then.
+  say that the link works once the entry is published, and give the Artifact
+  URL as the preview to review before then.
+
+Last, ask with `AskUserQuestion` whether to commit and publish now:
+
+- **Commit and publish now (Recommended)** — commits the entry to `dev`,
+  pushes, and puts it on docs.worca.dev.
+- **Not yet** — leaves it uncommitted to review or change first.
+
+On *Commit and publish now*, read `.claude/skills/worca-release/SKILL.md` →
+*Changelog mode* and follow C1–C6 for this version. That is the same
+procedure `/worca-release --publish-changelog` runs, so there is one
+definition of it. The answer covers this one entry only.
+
+On *Not yet*, stop and say how to finish later, after any edits:
+`/worca-release --publish-changelog` (it takes the newest entry; add
+`--version:<VERSION>` to name it). Skip the question entirely when the
+current branch is not `dev`, and say the entry has to reach `dev` first.

@@ -247,6 +247,10 @@ Then the changelog and the docs site, which trail the tag:
    deploys `https://docs.worca.dev/changelog/<version>/`. See
    `docs-site/README.md` for what the command checks.
 
+`/worca-changelog` offers to do 2 and 3 when it finishes. To do them later,
+after changing the entry, run `/worca-release --publish-changelog`: it commits
+only the entry's files, pushes, publishes, and waits for the page to go live.
+
 The entry always lands after its tag, so `docs-live` follows `dev`, never the
 tag. `docs:publish` warns when the newest stable tag has no changelog entry.
 
