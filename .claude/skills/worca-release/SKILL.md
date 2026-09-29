@@ -274,3 +274,7 @@ Release complete
 ```
 
 Only claim `attested` when Step 6 actually showed an `attestations` field.
+
+For a stable (`latest`) release, end with the next step, which this skill does
+not do itself: *"Next: `/worca-changelog` for the What's-new page, then once
+the entry is on `dev`, `npm run docs:publish` to put it on docs.worca.dev."*

@@ -22,3 +22,7 @@ __pycache__/
 *.pyc
 # local image builds (tools/docker-build.mjs)
 docker/.pack/
+# changelog Artifact builds (inline-assets.mjs): the .src.html + shots/ are the source,
+# docs-site/build.mjs serves them without this data-URI copy
+docs/changelog/worca-app-v*.html
+!docs/changelog/worca-app-v*.src.html

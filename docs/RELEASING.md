@@ -238,6 +238,18 @@ git push origin HEAD && git push origin worca-app-v0.2.0
 The workflow publishes under `latest`. It does **not** touch `rc` — see §5 for
 why, and for what `rc` therefore means.
 
+Then the changelog and the docs site, which trail the tag:
+
+1. `/worca-changelog` writes the entry into `docs/changelog/` (the page, its
+   screenshots and an `entries.json` record) and leaves it uncommitted.
+2. Commit it and get it onto `dev`.
+3. `npm run docs:publish` moves `docs-live` to `origin/dev`, and Workers Builds
+   deploys `https://docs.worca.dev/changelog/<version>/`. See
+   `docs-site/README.md` for what the command checks.
+
+The entry always lands after its tag, so `docs-live` follows `dev`, never the
+tag. `docs:publish` warns when the newest stable tag has no changelog entry.
+
 > **Do not use `npm version minor` to close out an RC line.** From
 > `0.2.0-rc.3`, semver's rules make `major`, `minor`, and `patch` all collapse
 > to `0.2.0` — you cannot tell from the command which you will get, and from
