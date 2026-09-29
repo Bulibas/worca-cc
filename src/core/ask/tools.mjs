@@ -382,7 +382,7 @@ export function createAskTools(deps) {
     { name: 'propose_run',
       description: 'Propose a pipeline run for the user to confirm — it never starts anything. Exactly one of projectKey / workspaceId; omitting both targets the scope the user pinned for this chat, when there is one. guardrailsId defaults to "normal"; "permissive" is not allowed. To run it LATER give `when` (once) or `every` (repeat) in the user\'s own words — the card then offers Schedule instead of Start; check the phrase with preview_schedule first when unsure. To run it when ANOTHER run ends give `after` (a run id) — `sourceFromPrevious: true` starts it on that run\'s branch. When the work IS a tracker task (an issue in an installed task source), give `source` INSTEAD of brief: the run fetches the task itself when it starts (find_tasks / get_task find it). workflowId "wf_auto" = Auto: the run picks its own workflow from the task when it starts (projects only). Returns {ok:true, card} or {ok:false, errors}.',
       inputSchema: SCHEMA.obj({ projectKey: SCHEMA.s('target project key'), workspaceId: SCHEMA.s('target workspace id'), workflowId: SCHEMA.s('workflow id (default wf_default; "wf_auto" = Auto, projects only)'),
-        brief: SCHEMA.s('the full task description for the run (≤ 8000 chars); omit when you give source'),
+        brief: SCHEMA.s(`the full task description for the run (≤ ${L.briefMaxChars} chars); omit when you give source`),
         source: { type: 'object', additionalProperties: false, required: ['plugin', 'sourceId', 'taskId'],
           description: 'a task in an installed task source (list_task_sources) — the run reads it at start',
           properties: { plugin: SCHEMA.s('plugin name'), sourceId: SCHEMA.s('task source id'), taskId: SCHEMA.s('the task id as find_tasks / get_task return it'),
@@ -408,8 +408,9 @@ export function createAskTools(deps) {
         note: SCHEMA.s('one line shown on the card: why this shape (≤ 200 chars)'),
       }) },
     { name: 'read_attachment',
-      description: 'Read an attachment of this conversation by id. Text attachments return their content, paged by byte offset (default 32000 bytes per page). Image and PDF attachments return metadata plus a file path — pass that path to your Read tool to view the content.',
-      inputSchema: SCHEMA.obj({ id: SCHEMA.s('attachment id'), offset: SCHEMA.i('byte offset', 0, Number.MAX_SAFE_INTEGER), maxBytes: SCHEMA.i('bytes per page', 1, L.attachmentReadMaxBytes) }, ['id']) },
+      description: 'Read an attachment of this conversation by id. Text attachments return their content, paged by byte offset (default 32000 bytes per page). HTML attachments (.html / .htm) return their raw markup by default; as: "text" converts them to readable text first (scripts, styles and page chrome dropped, the page title reported, conversionTruncated when the conversion itself was cut) and offset / nextOffset then count bytes of that converted text. Image and PDF attachments return metadata plus a file path — pass that path to your Read tool to view the content.',
+      inputSchema: SCHEMA.obj({ id: SCHEMA.s('attachment id'), offset: SCHEMA.i('byte offset', 0, Number.MAX_SAFE_INTEGER), maxBytes: SCHEMA.i('bytes per page', 1, L.attachmentReadMaxBytes),
+        as: SCHEMA.s('HTML attachments only: "raw" (default) = the markup as uploaded | "text" = converted to readable text; ignored for every other attachment') }, ['id']) },
     { name: 'list_diff_comments',
       description: 'List the internal review comments anchored to a run\'s diff lines as THREADS, ordered by file then line then when they were written. Every entry is a thread\'s first comment and carries that thread\'s replies nested under `replies`, oldest first; a reply is never returned on its own at the top level, and a thread\'s replies share its anchor and its resolved state. status filters them (all | unresolved | resolved, default all); path narrows to one file. Every comment carries line_text — the snapshot of the line it was anchored to, taken when it was written, so it stays readable even though the source branch has moved on. When the patch is still readable, a few surrounding hunk lines come with each thread root. Comments on credential files are never listed.',
       inputSchema: SCHEMA.obj({ id: SCHEMA.s('run id'), projectKey: SCHEMA.s('scope to a project'), workspaceId: SCHEMA.s('scope to a workspace'),
@@ -1625,6 +1626,8 @@ export function createAskTools(deps) {
     async read_attachment(input) {
       const id = str(input.id);
       if (!id) throw new AskToolError('read_attachment: id is required');
+      const as = str(input.as) || 'raw';
+      if (!['raw', 'text'].includes(as)) throw new AskToolError('read_attachment: as must be raw or text');
       const a = deps.readAttachment(id);
       if (!a) throw new AskToolError('read_attachment: attachment not found');
       if (a.kind && a.kind !== 'text') {
@@ -1636,6 +1639,18 @@ export function createAskTools(deps) {
       }
       const offset = clampInt(input.offset, 0, Number.MAX_SAFE_INTEGER, 0);
       const maxBytes = clampInt(input.maxBytes, 1, L.attachmentReadMaxBytes, L.attachmentReadDefaultBytes);
+      if (as === 'text' && a.mime === 'text/html') {
+        // Convert first, then redact and page, so offsets count bytes of the
+        // converted text. No base URL: an attachment has no origin, so relative
+        // links are dropped. maxChars = the text-attachment byte cap, so a real
+        // page converts whole; a cut (pathological nesting, the parse budget) is
+        // reported as conversionTruncated.
+        if (typeof deps.htmlToText !== 'function') throw new AskToolError('read_attachment: HTML to text conversion is unavailable');
+        const conv = await deps.htmlToText(a.text, null, { maxChars: L.attachment.maxBytesPerFile });
+        const { text, truncated, totalBytes, nextOffset } = sliceBytes(deps.redact(conv.text), offset, maxBytes);
+        return { name: a.name, kind: 'text', mime: a.mime, as: 'text', title: conv.title ? deps.redact(conv.title) : null,
+          text, truncated, totalBytes, nextOffset, conversionTruncated: conv.truncated === true };
+      }
       const { text, truncated, totalBytes, nextOffset } = sliceBytes(deps.redact(a.text), offset, maxBytes);
       return { name: a.name, kind: 'text', text, truncated, totalBytes, nextOffset };
     },

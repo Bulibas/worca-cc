@@ -137,3 +137,132 @@ test('a canceled native dialog changes nothing', async () => {
   assert.equal(doc.querySelector('#newProjectPath').value, '/keep/me');
   assert.ok(doc.querySelector('#folder-browser').classList.contains('hidden'));
 });
+
+const LISTINGS = {
+  '': { path: '/home/me', parent: '/home', home: '/home/me', dirs: [{ name: 'a', path: '/home/me/a' }, { name: 'dev', path: '/home/me/dev' }] },
+  '/home/me/dev': { path: '/home/me/dev', parent: '/home/me', home: '/home/me', dirs: [{ name: 'b', path: '/home/me/dev/b' }] },
+};
+// Any other path (the '' seed, '/home/me') answers the home listing.
+const dirsHandler = (status) => (u, opts) => {
+  if (u.endsWith('/api/fs/pick-folder') && opts.method === 'POST') {
+    return Promise.resolve({ ok: true, status: 200, json: async () => (typeof status === 'function' ? status(opts) : status) });
+  }
+  if (u.includes('/api/fs/dirs')) {
+    const q = decodeURIComponent(u.split('path=')[1] || '');
+    return Promise.resolve({ ok: true, status: 200, json: async () => LISTINGS[q] || LISTINGS[''] });
+  }
+  return null;
+};
+
+test('Browse asks the native dialog for multiple selections', async () => {
+  let sent = null;
+  const { window } = await boot({ fetchHandler: dirsHandler((opts) => { sent = JSON.parse(opts.body || '{}'); return { status: 'canceled' }; }) });
+  openAddForm(window);
+  click(window, window.document.querySelector('#newProjectBrowse'));
+  await tick(); await tick();
+  assert.deepEqual(sent, { purpose: 'project', multiple: true });
+});
+
+test('native multi-pick of 2 folders hides the inline form and opens the review list', async () => {
+  const { window } = await boot({ fetchHandler: dirsHandler({ status: 'picked', path: '/home/me/a', paths: ['/home/me/a', '/home/me/dev/b'] }) });
+  openAddForm(window);
+  const doc = window.document;
+  click(window, doc.querySelector('#newProjectBrowse'));
+  await tick(); await tick();
+  assert.ok(doc.querySelector('#add-project').classList.contains('hidden'), 'inline form hidden');
+  assert.ok(!doc.querySelector('#project-bulk-modal').classList.contains('hidden'), 'review list open');
+  const names = [...doc.querySelectorAll('#proj-bulk-list .pb-name')].map((i) => i.value);
+  assert.deepEqual(names, ['a', 'b'], 'names default to the folder basename');
+});
+
+test('unsupported dialog: the folder browser opens in multi mode; ticks survive navigation; Add N selected opens the review', async () => {
+  const { window } = await boot({ fetchHandler: dirsHandler({ status: 'unsupported' }) });
+  openAddForm(window);
+  const doc = window.document;
+  click(window, doc.querySelector('#newProjectBrowse'));
+  await tick(); await tick(); await tick();
+  assert.equal(doc.querySelector('#folderBrowserTitle').textContent, 'Select folders');
+  const many = doc.querySelector('#folderSelectMany');
+  assert.ok(!many.classList.contains('hidden'));
+  assert.equal(many.disabled, true, 'nothing ticked yet');
+  const pickA = doc.querySelector('#folderList .folder-pick');
+  pickA.checked = true; pickA.dispatchEvent(new window.Event('change', { bubbles: true }));
+  const dev = [...doc.querySelectorAll('#folderList .folder-item')].find((b) => b.textContent === 'dev');
+  click(window, dev);
+  await tick(); await tick();
+  const pickB = doc.querySelector('#folderList .folder-pick');
+  pickB.checked = true; pickB.dispatchEvent(new window.Event('change', { bubbles: true }));
+  assert.equal(doc.querySelector('#folderPickCount').textContent, '2 folders selected');
+  assert.equal(many.textContent, 'Add 2 selected');
+  click(window, many);
+  await tick();
+  assert.ok(doc.querySelector('#folder-browser').classList.contains('hidden'));
+  const paths = [...doc.querySelectorAll('#proj-bulk-list .pb-row')].map((r) => r.dataset.path);
+  assert.deepEqual(paths, ['/home/me/a', '/home/me/dev/b']);
+});
+
+test('one ticked folder fills the inline form instead of opening the review', async () => {
+  const { window } = await boot({ fetchHandler: dirsHandler({ status: 'unsupported' }) });
+  openAddForm(window);
+  const doc = window.document;
+  click(window, doc.querySelector('#newProjectBrowse'));
+  await tick(); await tick(); await tick();
+  const pick = doc.querySelector('#folderList .folder-pick');
+  pick.checked = true; pick.dispatchEvent(new window.Event('change', { bubbles: true }));
+  click(window, doc.querySelector('#folderSelectMany'));
+  await tick();
+  assert.equal(doc.querySelector('#newProjectPath').value, '/home/me/a');
+  assert.ok(doc.querySelector('#project-bulk-modal').classList.contains('hidden'));
+});
+
+test('Several folders… opens Worca\'s browser in multi mode without asking the native dialog', async () => {
+  let asked = 0;
+  const { window } = await boot({ fetchHandler: dirsHandler(() => { asked += 1; return { status: 'picked', path: '/x' }; }) });
+  openAddForm(window);
+  const doc = window.document;
+  click(window, doc.querySelector('#newProjectBrowseMany'));
+  await tick(); await tick(); await tick();
+  assert.equal(asked, 0);
+  assert.ok(!doc.querySelector('#folder-browser').classList.contains('hidden'));
+  assert.ok(doc.querySelector('#folderList .folder-pick'), 'checkboxes rendered');
+});
+
+test('a single-mode opener (Settings/export) gets no checkboxes and no Add-selected button', async () => {
+  const { window } = await boot({ fetchHandler: dirsHandler({ status: 'unsupported' }) });
+  const doc = window.document;
+  await window.__projects.openFolderBrowser('', () => {});
+  await tick();
+  assert.equal(doc.querySelector('#folderList .folder-pick'), null);
+  assert.ok(doc.querySelector('#folderSelectMany').classList.contains('hidden'));
+  assert.equal(doc.querySelector('#folderBrowserTitle').textContent, 'Select a folder');
+});
+
+test('bulk add from New Pipeline selects the first added project in the dropdown', async () => {
+  let posted = null;
+  const { window } = await boot({
+    fetchHandler: (u, opts) => {
+      if (u.endsWith('/api/projects/bulk')) {
+        posted = JSON.parse(opts.body);
+        const projects = [
+          { key: 'a-1', name: 'a', path: '/home/me/a', exists: true },
+          { key: 'b-2', name: 'b', path: '/home/me/dev/b', exists: true },
+        ];
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ projects, results: [
+          { index: 0, status: 'added', name: 'a', path: '/home/me/a' },
+          { index: 1, status: 'added', name: 'b', path: '/home/me/dev/b' },
+        ] }) });
+      }
+      return dirsHandler({ status: 'picked', path: '/home/me/a', paths: ['/home/me/a', '/home/me/dev/b'] })(u, opts);
+    },
+  });
+  openAddForm(window);
+  const doc = window.document;
+  click(window, doc.querySelector('#newProjectBrowse'));
+  await tick(); await tick();
+  click(window, doc.querySelector('#proj-bulk-save'));
+  await tick(); await tick(); await tick();
+  assert.deepEqual(posted, { projects: [{ name: 'a', path: '/home/me/a' }, { name: 'b', path: '/home/me/dev/b' }] });
+  assert.ok(doc.querySelector('#project-bulk-modal').classList.contains('hidden'), 'all added -> dialog closes');
+  const sel = doc.querySelector('#projectSelect');
+  assert.equal(sel.options[sel.selectedIndex].dataset.name, 'a');
+});

@@ -10,6 +10,10 @@
 const TEXT_TYPES = Object.freeze({
   '.md': 'text/markdown', '.markdown': 'text/markdown', '.txt': 'text/plain',
   '.json': 'application/json', '.csv': 'text/csv', '.log': 'text/plain',
+  // HTML is a TEXT attachment kind (stored as .txt, served text/plain + nosniff, never rendered on
+  // the worca origin); its text/html mime is only a label read_attachment uses to offer the markup
+  // as readable text. The viewer still renders it as 'html' — viewerKindFor keys on the extension.
+  '.html': 'text/html', '.htm': 'text/html',
 });
 const BINARY_TYPES = Object.freeze({
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',

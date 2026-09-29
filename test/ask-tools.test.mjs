@@ -20,6 +20,7 @@ import { createThread, appendMessage, addAttachment } from '../src/core/ask/stor
 import { GUARDRAIL_PRESETS } from '../src/core/guardrails.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
 import { redactAskText } from '../src/core/ask/redact.mjs';
+import { htmlToText } from '../src/core/ask/html-text.mjs';
 
 useTempHome(after);
 
@@ -338,6 +339,9 @@ const LITE = [
     projectKey: 'other-00000003', projectName: 'Other', projectDir: '/p/other' },
 ];
 const diffs = new Map([['4e1f2a9b', DIFF], ['8c3d12ab', `# app-00000001\n${DIFF}`]]);
+const HTML_PAGE = '<!doctype html><html><head><title>Deploy ghp_abcdefghijklmnopqrstuvwxyz0123456789 notes</title><style>body { color: red }</style>'
+  + '<script>window.secret = "never";</script></head><body><h1>Deploy</h1><p>token ghp_abcdefghijklmnopqrstuvwxyz0123456789 here</p>'
+  + '<ul><li>first step</li><li>second step</li></ul></body></html>';
 const calls = [];
 const fake = {
   buildCatalog: async () => ({ projects: [{ key: 'demo-00000001', name: 'Demo', path: '/p/demo' }], workspaces: [{ id: 'wks-team-0000abcd', name: 'Team', projectKeys: ['app-00000001', 'lib-00000002'] }],
@@ -358,7 +362,10 @@ const fake = {
     ? { name: 'notes.md', text: 'token ghp_abcdefghijklmnopqrstuvwxyz0123456789 here\nsecond line\n' }
     : id === 'att_00000002'
       ? { name: 'shot.png', kind: 'image', mime: 'image/png', bytes: 2048, path: '/home/ask/ask_00000001/att/att_00000002.png' }
-      : null),
+      : id === 'att_00000003'
+        ? { name: 'page.html', kind: 'text', mime: 'text/html', text: HTML_PAGE }
+        : null),
+  htmlToText,
   validateProposal: async (input) => ({ ok: true, card: { echoed: input } }),
   protectedPaths: GUARDRAIL_PRESETS.normal.protectedPaths,
   redact: redactAskText,
@@ -638,6 +645,67 @@ test('read_attachment (#398): a binary attachment returns metadata + path, never
   assert.ok(!('text' in r) && !('truncated' in r) && !('nextOffset' in r), 'no sliceBytes fields on a binary read');
 });
 
+test('read_attachment: an HTML attachment reads as raw markup by default (and with as: "raw"), redacted', async () => {
+  const r = await tools.call('read_attachment', { id: 'att_00000003' });
+  const raw = redactAskText(HTML_PAGE);
+  assert.deepEqual(r, { name: 'page.html', kind: 'text', text: raw, truncated: false, totalBytes: Buffer.byteLength(raw), nextOffset: Buffer.byteLength(raw) });
+  assert.ok(r.text.includes('<script>window.secret'), 'raw keeps the markup, scripts included');
+  assert.ok(!r.text.includes('ghp_abcdefghijklmnopqrstuvwxyz0123456789'), 'redaction applies to raw markup');
+  assert.deepEqual(await tools.call('read_attachment', { id: 'att_00000003', as: 'raw' }), r);
+});
+
+test('read_attachment: as "text" converts an HTML attachment (scripts/styles stripped, title), then redacts and pages the CONVERTED text', async () => {
+  const r = await tools.call('read_attachment', { id: 'att_00000003', as: 'text' });
+  const expected = '# Deploy\n\ntoken ghp_<redacted> here\n\n- first step\n- second step';
+  assert.deepEqual(r, {
+    name: 'page.html', kind: 'text', mime: 'text/html', as: 'text', title: 'Deploy ghp_<redacted> notes',
+    text: expected, truncated: false, totalBytes: Buffer.byteLength(expected), nextOffset: Buffer.byteLength(expected), conversionTruncated: false,
+  });
+  assert.ok(!/window\.secret|color: red|<\/?(html|head|title|style|script|body|h1|p|ul|li)\b/.test(r.text), 'no script, no style, no tags');
+  // offsets refer to the converted text: paging it back together yields exactly the one-shot read
+  let offset = 0; let joined = ''; let pages = 0;
+  for (;;) {
+    const p = await tools.call('read_attachment', { id: 'att_00000003', as: 'text', offset, maxBytes: 16 });
+    assert.equal(p.totalBytes, Buffer.byteLength(expected), 'totalBytes is the converted size, not the markup size');
+    joined += p.text; pages += 1; offset = p.nextOffset;
+    if (!p.truncated) break;
+  }
+  assert.ok(pages > 1, 'the small window really paged');
+  assert.equal(joined, expected);
+  await assert.rejects(() => tools.call('read_attachment', { id: 'att_00000003', as: 'markdown' }), { name: 'AskToolError', message: 'read_attachment: as must be raw or text' });
+});
+
+test('read_attachment: the converter\'s own truncation is reported as conversionTruncated', async () => {
+  const seen = [];
+  const t = createAskTools({ ...fake, htmlToText: async (html, baseUrl, opts) => { seen.push({ baseUrl, opts }); return { title: null, text: 'cut short', truncated: true }; } });
+  const r = await t.call('read_attachment', { id: 'att_00000003', as: 'text' });
+  assert.equal(r.conversionTruncated, true);
+  assert.equal(r.truncated, false, 'paging truncation is separate');
+  assert.equal(r.title, null);
+  assert.equal(seen[0].baseUrl, null, 'no base URL: an attachment has no origin');
+  assert.ok(seen[0].opts.maxChars >= ASK_LIMITS.attachment.maxBytesPerFile, 'maxChars covers a full 512 KB text attachment');
+});
+
+test('read_attachment: as is ignored for non-HTML attachments', async () => {
+  assert.deepEqual(await tools.call('read_attachment', { id: 'att_00000001', as: 'text' }), await tools.call('read_attachment', { id: 'att_00000001' }));
+  assert.deepEqual(await tools.call('read_attachment', { id: 'att_00000002', as: 'text' }), await tools.call('read_attachment', { id: 'att_00000002' }));
+  let converted = 0;
+  const t = createAskTools({ ...fake, htmlToText: async () => { converted += 1; return { title: null, text: '', truncated: false }; },
+    readAttachment: () => ({ name: 'data.json', kind: 'text', mime: 'application/json', text: '{"a":"<b>x</b>"}' }) });
+  const j = await t.call('read_attachment', { id: 'att_00000009', as: 'text' });
+  assert.equal(j.text, '{"a":"<b>x</b>"}', 'a JSON body holding markup is returned verbatim');
+  assert.equal(converted, 0, 'the converter never runs for a non-HTML mime');
+  assert.ok(!('as' in j) && !('title' in j));
+});
+
+test('read_attachment: the schema offers as = raw | text', () => {
+  const def = tools.list().find((d) => d.name === 'read_attachment');
+  assert.equal(def.inputSchema.properties.as.type, 'string');
+  assert.match(def.inputSchema.properties.as.description, /"raw".*"text"/);
+  assert.match(def.description, /as: "text"/);
+  assert.deepEqual(def.inputSchema.required, ['id']);
+});
+
 test('propose_run passes through validateProposal; unknown tools and bad input are AskToolErrors', async () => {
   assert.deepEqual(await tools.call('propose_run', { projectKey: 'demo-00000001', brief: 'b' }), { ok: true, card: { echoed: { projectKey: 'demo-00000001', brief: 'b' } } });
   await assert.rejects(() => tools.call('nope', {}), { name: 'AskToolError', message: 'unknown tool: nope' });
@@ -656,6 +724,7 @@ test('propose_run schema names note + attachmentIds', () => {
   assert.equal(props.attachmentIds.type, 'array');
   assert.deepEqual(props.attachmentIds.items, { type: 'string' });
   assert.match(props.attachmentIds.description, /extra files/);
+  assert.match(props.brief.description, new RegExp(`≤ ${ASK_LIMITS.briefMaxChars} chars`));
 });
 
 test('propose_run hands the thread\'s attachment ledger to the validator', async () => {
@@ -770,6 +839,14 @@ test('temp home: a seeded project run and a seeded workspace run round-trip thro
   const wsDiff = await real.call('get_run_diff', { id: wsSeed.id });
   assert.equal(wsDiff.files[0].projectKey, 'team-00000001');
   assert.equal((await real.call('read_attachment', { id: att.id })).text, 'hello');
+  // HTML through the real tool-deps: the text branch carries the mime, the converter is injected
+  assert.equal(typeof defaultToolDeps({ threadId: null }).htmlToText, 'function');
+  const page = addAttachment(thread.id, msg.id, { name: 'page.html', mime: 'text/html', text: '<html><head><title>T</title><script>x()</script></head><body><p>Hi there</p></body></html>' });
+  assert.equal(defaultToolDeps({ threadId: thread.id }).readAttachment(page.id).mime, 'text/html');
+  const pageText = await real.call('read_attachment', { id: page.id, as: 'text' });
+  assert.equal(pageText.text, 'Hi there');
+  assert.equal(pageText.title, 'T');
+  assert.ok((await real.call('read_attachment', { id: page.id })).text.startsWith('<html>'), 'raw stays the default');
   // #398: a real binary row through the real tool-deps — metadata + the on-disk path
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
   const bin = addAttachment(thread.id, msg.id, { name: 'shot.png', kind: 'image', mime: 'image/png', data: png });

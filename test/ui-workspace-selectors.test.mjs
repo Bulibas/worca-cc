@@ -66,3 +66,15 @@ test('the v1 composer is gone: no composer-core module, no composer-core script 
   assert.ok(!js.includes('composer-core.mjs'), 'app.js no longer imports composer-core.mjs');
   assert.ok(!html.includes('composer-core.mjs'), 'composer-core.mjs must not be a <script> in index.html');
 });
+
+// Multi-folder Add (the folder browser's multi mode + the review list): every #id the JS addresses.
+const MULTI_ADD_IDS = [
+  'folderBrowserTitle', 'folderPickCount', 'folderSelectMany', 'newProjectBrowseMany', 'proj-add-browse-many',
+  'project-bulk-modal', 'proj-bulk-title', 'proj-bulk-close', 'proj-bulk-list', 'proj-bulk-msg', 'proj-bulk-save',
+];
+test('every multi-folder add #id the JS addresses exists in index.html', () => {
+  for (const id of MULTI_ADD_IDS) {
+    assert.ok(html.includes(`id="${id}"`), `markup missing #${id}`);
+    assert.ok(js.includes(`'#${id}'`), `app.js never addresses #${id}`);
+  }
+});

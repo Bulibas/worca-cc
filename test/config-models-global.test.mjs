@@ -223,6 +223,14 @@ test('the built-in catalog offers Opus 5.5 and Opus 5 side by side, Opus 5.5 fir
     'Opus 5.5 stays the first (default) entry; Opus 5 sits right after it');
 });
 
+test('the built-in catalog offers Sonnet 5.5 right before Sonnet 5', () => {
+  const sonnet55 = PREDEFINED_MODELS.find((m) => m.id === 'claude-sonnet-5-5');
+  assert.deepEqual(sonnet55, { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', efforts: ['medium', 'high', 'xhigh', 'max'] });
+  const i = PREDEFINED_MODELS.findIndex((m) => m.id === 'claude-sonnet-5-5');
+  assert.equal(PREDEFINED_MODELS[i + 1]?.id, 'claude-sonnet-5', 'Sonnet 5 stays, right after it');
+  assert.equal(PREDEFINED_MODELS.some((m) => m.id === 'claude-sonnet-5-5[1m]'), false, '1M-only: no [1m] twin');
+});
+
 // Settings › Memory: the defragment model is a GLOBAL ref — listed by the refs preview and cleared
 // with the entry (its effort with it); a predefined shadow keeps resolving, so it stays.
 test('globalModelRefs / removeGlobalModelAndRefs: the Memory defragment model is listed and cleared with the entry', async () => {

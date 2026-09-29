@@ -87,3 +87,9 @@ test('the projects card owns its row layout (bin button on the right, head align
   assert.match(rules('.pl-item'), /border-bottom/, 'rows must be separated by a rule');
   assert.match(rules('.pl-name'), /font-weight:\s*600/, 'project name keeps its weight');
 });
+
+test('multi-folder add: the bulk route, the multi-select picker and the review modal are wired', () => {
+  assert.ok(appjs.includes("fetch('/api/projects/bulk'"), 'app.js does not POST /api/projects/bulk');
+  assert.ok(appjs.includes('multiple: true'), 'app.js never asks the picker for multiple folders');
+  assert.ok(html.includes('id="project-bulk-modal"'), 'missing the review modal');
+});

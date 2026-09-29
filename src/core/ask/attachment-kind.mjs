@@ -12,7 +12,13 @@
 // The extension names the CLAIMED type; for binary kinds the claim is verified
 // against the leading bytes (magic number) so a mislabeled body is refused at
 // upload rather than stored wrong. SVG is deliberately absent: it is scriptable
-// markup, and the download route serves attachment bodies with their real mime.
+// markup, and the download route serves BINARY bodies with their real mime.
+//
+// HTML is safe because it is a TEXT kind: the body is stored as `<id>.txt` and
+// the download route serves every text kind as `text/plain; charset=utf-8` with
+// `X-Content-Type-Options: nosniff`, so a browser never renders or runs it on the
+// worca origin. Its `text/html` mime is only a label — read_attachment uses it to
+// offer the markup as readable text (html-text.mjs), never to serve it.
 
 // The extension allowlists + classifyExtension + extensionForAttachment now live
 // in the shared, browser-safe src/shared/artifact-kinds.mjs (the viewer needs the
