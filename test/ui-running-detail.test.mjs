@@ -609,6 +609,18 @@ test('the question panel rises in and is neutralized under reduced motion', () =
   assert.ok(kill > at, 'the reduced-motion block sits AFTER the rule it neutralizes');
 });
 
+test('a waiting question gets twice the run panel\'s width; the header and panel keep theirs', () => {
+  const px = (re) => { const m = css.match(re); return m ? Number(m[1]) : NaN; };
+  // .rd-glance is border-box with 32px side padding: its content is max-width - 64.
+  const base = px(/\.rd-glance\{[^}]*max-width:(\d+)px/) - 64;
+  const wide = px(/\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\)\{[^}]*max-width:(\d+)px/) - 64;
+  assert.ok(wide >= 2 * base, `questions column ${wide}px is at least twice the panel's ${base}px`);
+  assert.match(css, /\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\) > :is\(\.rd-now,\.rd-sheet\)\{[^}]*max-width:(\d+)px/,
+    'the header and the run panel stay at their own measure while the column widens');
+  assert.equal(px(/\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\) > :is\(\.rd-now,\.rd-sheet\)\{[^}]*max-width:(\d+)px/), base,
+    'the run panel does not move when a question arrives');
+});
+
 // --- T7: tabs ---------------------------------------------------------------
 
 test('Details has seven tabs, results first; the route picks the open one', async () => {

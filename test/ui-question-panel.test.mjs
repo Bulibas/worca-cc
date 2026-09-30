@@ -1,8 +1,9 @@
 // test/ui-question-panel.test.mjs — the redesigned clarify/gate/recovery panel
-// (design §4.3 + §5.4): amber wash, numbered ink circles (19px card / 22px detail),
-// green-tinted picked options with a filled radio + white check, a free-text field
-// that turns white-on-green once it holds a non-option value, a right-aligned
-// footer, and the card-only "Open run" button.
+// (design §4.3 + §5.4): amber wash on the card, numbered ink circles (19px card /
+// 22px detail), lettered key squares that turn ink with a check when picked, a
+// free-text field that turns white-on-ink once it holds a non-option value, a
+// right-aligned footer, and the card-only "Open run" button. On the run page the
+// ask cards follow the "Worca Ask Cards Redesign" canvas (see the section below).
 //
 // ruleBody() is a verbatim copy of test/ui-run-flow-css.test.mjs:17-21.
 // boot()/dispatch()/showRunning() are a verbatim copy of test/ui-question.test.mjs:19-82.
@@ -150,46 +151,179 @@ test('card number circles are 19px, detail circles are 22px', () => {
   assert.match(detail, /height:\s*22px/);
 });
 
-test('a picked option goes green-tinted with a filled radio and a white check', () => {
+test('an option leads with its letter key; a picked one turns ink with a knocked-out check', () => {
+  const key = ruleBody('.qopt::before');
+  assert.ok(key, '.qopt::before key missing');
+  assert.match(key, /content:\s*attr\(data-key\)/, 'the key square prints the option letter');
+  assert.doesNotMatch(key, /border-radius:\s*50%/, 'a rounded square, not the old radio');
+  assert.match(key, /background:\s*var\(--field\)/);
+
   const sel = ruleBody('.qopt.sel');
   assert.ok(sel, '.qopt.sel rule missing');
-  assert.match(sel, /background:\s*var\(--green-bg\)/);
-  assert.match(sel, /border-color:\s*var\(--green\)/);
-
-  const radio = ruleBody('.qopt::before');
-  assert.ok(radio, '.qopt::before radio missing');
-  assert.match(radio, /border-radius:\s*50%/);
-  assert.match(radio, /border:\s*1\.5px solid var\(--radio-ring\)/);
+  assert.match(sel, /border-color:\s*var\(--ink\)/, 'the design picks ink, not green');
+  assert.doesNotMatch(sel, /--green/);
 
   const on = ruleBody('.qopt.sel::before');
   assert.ok(on, '.qopt.sel::before missing');
-  assert.match(on, /var\(--green\)/, 'the filled radio uses --green');
-  assert.match(on, /data:image\/svg\+xml/, 'the white check is a CSS-only data URI');
-  assert.match(on, /stroke='%23fff'/, 'the check strokes white');
+  assert.match(on, /content:\s*''/, 'the letter gives way to the check');
+  assert.match(on, /background:\s*var\(--ink\)/);
+  // The check is a HOLE in the ink square, so it shows the tile's own panel colour in
+  // both themes — a painted white check would vanish on the dark theme's light ink.
+  assert.match(on, /-webkit-mask:url\("data:image\/svg\+xml/);
+  assert.match(on, /(?:^|;)\s*mask:url\("data:image\/svg\+xml/);
 });
 
-test('the free-text field turns white with a green border once it holds a value', () => {
+test('the free-text field turns white with an ink border once it holds a value', () => {
   const base = ruleBody('.qfree');
   assert.ok(base, '.qfree rule missing');
   assert.match(base, /background:\s*var\(--field\)/);
   const has = ruleBody('.qfree.has');
   assert.ok(has, '.qfree.has rule missing');
   assert.match(has, /background:\s*var\(--panel\)/);
-  assert.match(has, /border-color:\s*var\(--green\)/);
+  assert.match(has, /border-color:\s*var\(--ink\)/);
+  assert.match(ruleBody('.qfree:focus'), /border-color:\s*var\(--ink\)/);
 });
 
-test('the footer is right-aligned on both surfaces; the detail panel rises', () => {
+test('the footer is right-aligned on both surfaces; the detail panel is a white card that rises', () => {
   const foot = ruleBody('.qpanel-foot');
   assert.ok(foot, '.qpanel-foot rule missing');
   assert.match(foot, /justify-content:\s*flex-end/);
   const detail = ruleBody('.rd-questions .qpanel');
   assert.ok(detail, '.rd-questions .qpanel rule missing');
-  assert.match(detail, /background:\s*var\(--amber-wash-2\)/);
-  assert.match(detail, /border:\s*1\.5px solid var\(--amber-line\)/);
+  assert.match(detail, /background:\s*var\(--panel\)/, 'the ask card is white, not the amber wash');
+  assert.match(detail, /border:\s*1px solid var\(--line\)/);
+  assert.match(detail, /box-shadow:\s*var\(--shadow\)/);
   // The rise lives on the WRAPPER (Task 6's `.rd-questions`), not on the panel:
   // animating both nests the transform and doubles the travel and the fade.
   assert.match(ruleBody('.rd-questions'), /animation:wr-rise/);
   assert.doesNotMatch(detail, /animation:/, 'the panel must not re-animate its own wrapper\'s entrance');
+});
+
+// ---------------------------------------------------------------------------
+// The run page's ask cards (the "Worca Ask Cards Redesign" canvas): one white
+// card per question, the question beside its answers, a pill footer below.
+// ---------------------------------------------------------------------------
+
+const CARDS = '.rd-questions .qpanel:is([data-kind="clarify"],[data-kind="form"])';
+const SINGLE = '.rd-questions .qpanel:is([data-kind="gate"],[data-kind="recovery"])';
+
+test('clarify and form panels shed their own card on the run page; each question is the card', () => {
+  const shell = ruleBody(CARDS);
+  assert.ok(shell, `${CARDS} rule missing`);
+  assert.match(shell, /background:\s*none/);
+  assert.match(shell, /border:\s*0/);
+  assert.match(shell, /padding:\s*0/);
+  assert.match(shell, /box-shadow:\s*none/);
+  assert.match(shell, /gap:\s*14px/, 'the cards stand apart');
+
+  const card = ruleBody('.rd-questions .qblock');
+  assert.ok(card, '.rd-questions .qblock rule missing');
+  assert.match(card, /background:\s*var\(--panel\)/);
+  assert.match(card, /border:\s*1px solid var\(--line\)/);
+  assert.match(card, /box-shadow:\s*var\(--shadow\)/);
+  assert.match(card, /grid-template-columns:\s*380px minmax\(0,\s*1fr\)/, 'the question beside its answers');
+  const q = ruleBody('.rd-questions .qtext');
+  assert.match(q, /grid-column:\s*1/);
+  assert.match(q, /font-weight:\s*500/, 'a question reads medium, not semibold: some run a whole paragraph');
+  assert.match(q, /font-size:\s*16px/);
+  // A long question spans both answer rows; the flexible second row soaks up its extra
+  // height, so the options and the write-your-own row stay packed at the top.
+  assert.match(card, /grid-template-rows:\s*auto 1fr/);
+  assert.match(ruleBody('.rd-questions .qopts'), /grid-column:\s*2/);
+  assert.match(ruleBody('.rd-questions .qblock > .qfree'), /grid-column:\s*2/);
+
+  const form = ruleBody('.rd-questions .qpanel[data-kind="form"] .af-form');
+  assert.ok(form, 'the form card rule is missing');
+  assert.match(form, /background:\s*var\(--panel\)/);
+  assert.match(form, /box-shadow:\s*var\(--shadow\)/);
+});
+
+test('the first question card keeps its top padding', () => {
+  // The old "no gap above the first block" rule outranked the card's padding (0,5,0 vs 0,2,0).
+  assert.ok(!/\.qblock:first-of-type/.test(css), 'no first-block padding reset left');
+  // Same trap for the form: its card is the body's first child, and the flush-top reset
+  // (0,5,0) would zero the card's own padding (0,4,0) — only the margin may go.
+  const reset = ruleBody('.rd-glance > .rd-questions .qpanel .qbody > :first-child');
+  assert.ok(reset, 'the flush-top reset is still there');
+  assert.doesNotMatch(reset, /padding/, 'the form card keeps its top padding');
+});
+
+test('below the cards the footer is a white pill bar', () => {
+  const pill = ruleBody(`${CARDS} .qpanel-foot`);
+  assert.ok(pill, 'the pill footer rule is missing');
+  assert.match(pill, /border-radius:\s*999px/);
+  assert.match(pill, /background:\s*var\(--panel\)/);
+  assert.match(pill, /box-shadow:\s*var\(--shadow\)/);
+  assert.match(pill, /(?:^|;)\s*border:\s*1px solid var\(--line\)/, 'the in-card divider gives way to the pill outline');
+});
+
+test('an answered question says so beside its number, from the picked state alone', () => {
+  const pill = ruleBody('.rd-questions .qblock:has(.qopt.sel,.qfree.has) .qtext::after');
+  assert.ok(pill, 'the Answered pill rule is missing');
+  assert.match(pill, /content:\s*'Answered'/);
+  assert.match(pill, /var\(--green-bg\)/);
+});
+
+test('the other-answer row reads as a dashed tile until it holds a value', () => {
+  const other = ruleBody('.rd-questions .qblock > .qfree');
+  assert.match(other, /border-style:\s*dashed/);
+  assert.match(other, /min-height:\s*52px/);
+  assert.match(ruleBody('.rd-questions .qblock > .qfree:is(:focus,.has)'), /border-style:\s*solid/);
+});
+
+test('gate and recovery put their decision beside the evidence, one column when there is none', () => {
+  const grid = ruleBody(SINGLE);
+  assert.ok(grid, `${SINGLE} rule missing`);
+  assert.match(grid, /display:\s*grid/);
+  assert.match(grid, /grid-template-columns:\s*380px minmax\(0,\s*1fr\)/);
+  assert.match(ruleBody(`${SINGLE} > :is(.issues,.issue-detail)`), /grid-column:\s*2/);
+  assert.match(ruleBody(`${SINGLE} > .qpanel-foot`), /grid-column:\s*1\s*\/\s*-1/);
+  assert.match(ruleBody(`${SINGLE}:not(:has(> .issues,> .issue-detail))`), /grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+});
+
+test('an issue row is a severity column beside its text, with no coloured stripe', () => {
+  const row = ruleBody('.rd-questions .issue');
+  assert.ok(row, '.rd-questions .issue rule missing');
+  assert.match(row, /grid-template-columns:\s*92px minmax\(0,\s*1fr\)/);
+  assert.match(row, /border-color:\s*var\(--line\)/, 'the per-severity left stripe is gone');
+  assert.match(row, /border-left-width:\s*1px/);
+  assert.match(ruleBody('.rd-questions .issue-head'), /display:\s*contents/);
+  // After the .sev-* stripe rules, so equal specificity resolves to the neutral border.
+  assert.ok(css.indexOf('.rd-questions .issue{') > css.indexOf('.issue.sev-suggestion{'));
+});
+
+test('the ask heading is the page\'s section title, led by an amber icon', () => {
+  assert.match(ruleBody('.rd-ask-head'), /font:\s*600 18px/, 'a section title, not louder than the run name');
+  const disc = ruleBody('.rd-ask-head::before');
+  assert.ok(disc, '.rd-ask-head::before missing');
+  assert.match(disc, /background:\s*var\(--amber-bg\)/);
+  assert.match(disc, /border-radius:\s*50%/);
+  const glyph = ruleBody('.rd-ask-head::after');
+  assert.ok(glyph, '.rd-ask-head::after missing');
+  assert.match(glyph, /background:\s*var\(--amber-ink\)/);
+  assert.match(glyph, /mask:url\("data:image\/svg\+xml/);
+});
+
+test('narrow screens stack the question over its answers', () => {
+  const m = css.match(/@media \(max-width:1080px\)\{\s*\.rd-questions \.qblock[^{]*\{([^}]*)\}/);
+  assert.ok(m, 'no narrow-screen stack for the question cards');
+  assert.match(m[1], /grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+});
+
+test('the panel is stamped with the kind it draws, on the card and the detail', async () => {
+  const ctx = await boot();
+  seedClarify(ctx);
+  const card = ctx.window.document.querySelector(`.run-card[data-run-id="${RUN_ID}"] .qpanel`);
+  assert.equal(card.dataset.kind, 'clarify');
+  ctx.window.location.hash = `running/${RUN_ID}`;
+  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(ctx.window.document.querySelector('#run-detail .rd-questions .qpanel').dataset.kind, 'clarify');
+
+  ctx.dispatch({ type: 'question', runId: RUN_ID, id: 'gate-1', kind: 'gate',
+    issues: [{ severity: 'major', title: 'Broken', detail: 'd' }] });
+  assert.equal(ctx.window.document.querySelector('#run-detail .rd-questions .qpanel').dataset.kind, 'gate',
+    'a new kind re-stamps the same node');
 });
 
 // ---------------------------------------------------------------------------
