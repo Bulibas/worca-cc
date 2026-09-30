@@ -921,6 +921,43 @@ test('Generate with AI posts the run + base branch, reads "Generating…" while 
   assert.equal(prPosts(ctx).length, 0);
 });
 
+test('while Generate with AI is in flight the description is veiled and locked: shimmer veil, aria-busy, read-only', async () => {
+  const g = gatedDescribe();
+  const ctx = await bootShip({ arms: g.arm });
+  const modal = await openModal(ctx);
+  const field = modal.querySelector('.shipit-desc-field');
+  const veil = modal.querySelector('.shipit-desc-busy');
+  assert.ok(field.contains(descOf(modal)) && field.contains(previewOf(modal)) && field.contains(veil),
+    'one box holds the editor, its preview and the veil laid over them');
+  assert.equal(veil.getAttribute('aria-hidden'), 'true', 'the veil is decoration; aria-busy carries the state');
+  assert.match(veil.textContent, /Drafting with AI/);
+  assert.equal(field.classList.contains('is-generating'), false);
+  assert.equal(field.getAttribute('aria-busy'), 'false');
+  assert.equal(descOf(modal).readOnly, false);
+
+  click(ctx.window, genBtnOf(modal));
+  await settle(ctx.window);
+  assert.equal(field.classList.contains('is-generating'), true, 'the shimmer veil is up');
+  assert.equal(field.getAttribute('aria-busy'), 'true');
+  assert.equal(descOf(modal).readOnly, true, 'nothing can be typed under the veil');
+
+  g.release({ ok: true, body: 'Drafted.' });
+  await settle(ctx.window, 6);
+  assert.equal(field.classList.contains('is-generating'), false, 'lifted once the draft lands');
+  assert.equal(field.getAttribute('aria-busy'), 'false');
+  assert.equal(descOf(modal).readOnly, false, 'editable again');
+
+  click(ctx.window, genBtnOf(modal));
+  await settle(ctx.window);
+  click(ctx.window, ctx.window.document.getElementById('confirm-ok'));   // replace "Drafted."
+  await settle(ctx.window);
+  assert.equal(field.classList.contains('is-generating'), true);
+  click(ctx.window, stopBtnOf(modal));
+  await settle(ctx.window, 6);
+  assert.equal(field.classList.contains('is-generating'), false, 'Stop lifts it too');
+  assert.equal(descOf(modal).readOnly, false);
+});
+
 test('Generate over a draft asks first: Escape on that confirm keeps the draft AND the modal; Replace overwrites it', async () => {
   const g = gatedDescribe();
   const ctx = await bootShip({ arms: g.arm });
