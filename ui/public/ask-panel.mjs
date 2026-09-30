@@ -33,7 +33,11 @@ const ICONS = {
   send: 'M12 19V5M6 11l6-6 6 6',
   down: 'M12 5v14M6 13l6 6 6-6',
   mic: ['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M19 11a7 7 0 0 1-14 0', 'M12 18v3'],
+  voiceTalk: ['M7.9 20A9 9 0 1 0 4 16.1L2 22z', 'M8 10h8M8 14h5'],           // chat bubble with text lines: speak in, read the reply
+  voiceHandsFree: ['M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4'],               // waveform: a live conversation
 };
+// One icon per voice mode; the mic button and the ▾ menu both draw from this.
+const VOICE_MODE_ICONS = { dictate: ICONS.mic, talk: ICONS.voiceTalk, handsfree: ICONS.voiceHandsFree };
 
 export function fmtTokens(n) {
   if (!Number.isFinite(n) || n <= 0) return null;
@@ -597,9 +601,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     el.mic.type = 'button';
     el.mic.setAttribute('data-ask-mic', '');
     el.mic.setAttribute('aria-pressed', 'false');
-    el.mic.title = 'Dictate (click) · hands-free conversation (hold) · talk with text replies (the arrow menu)';
     el.mic.setAttribute('aria-label', 'Voice input');
-    el.mic.appendChild(svgIcon(ICONS.mic, 16, 1.9));
     el.mic.addEventListener('pointerdown', (ev) => {
       if (ev.button !== undefined && ev.button !== 0) return;
       st.voiceSwallowClick = false;                 // a long-press that never produced a click must not eat the next one
@@ -617,8 +619,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       if (st.voiceSwallowClick) { st.voiceSwallowClick = false; return; }
       const v = voice();
       if (v.active()) { stopVoice(); return; }
-      startVoice('dictate');
+      startVoice(lastVoiceMode());
     });
+    paintMicMode(lastVoiceMode());
     wrap.appendChild(el.mic);
 
     const caret = make('button', 'ask-voice-caret');
@@ -635,10 +638,15 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   function openVoicePopover(trigger) {
     openPopover({ panelClass: 'ask-pop-voice', trigger, build: (p) => {
       p.appendChild(make('div', 'ask-pop-caption', 'Voice'));
+      // The check marks the mode that is on now, or, with voice off, the one a click will start.
+      const v = st.voice;
+      const current = v && v.active() ? v.mode() : lastVoiceMode();
       const item = (label, mode, onPick) => {
         const it = menuItem('ask-voice-item', () => { closePopover({ focusTrigger: false }); onPick(); });
         it.dataset.mode = mode;
+        if (VOICE_MODE_ICONS[mode]) it.appendChild(svgIcon(VOICE_MODE_ICONS[mode], 16, 1.9));
         it.appendChild(make('span', 'ask-model-name', label));
+        if (mode === current) it.appendChild(make('span', 'ask-model-check', '✓'));
         return it;
       };
       p.appendChild(item('Dictate once', 'dictate', () => startVoice('dictate')));
@@ -663,13 +671,32 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   const VOICE_USED_KEY = 'worca-cc.ask.voiceUsed';
   function voiceUsedBefore() { try { return storage.getItem(VOICE_USED_KEY) === '1'; } catch { return false; } }
 
-  function startVoice(mode) { if (!st.destroyed) voice().start(mode); }
+  // The mode a plain click starts: the last one started (menu, hold or click), remembered across
+  // reloads. Dictate until the user picks another.
+  const VOICE_MODE_KEY = 'worca-cc.ask.voiceMode';
+  const VOICE_MODE_NAMES = { dictate: 'Dictate once', talk: 'Talk, read the replies', handsfree: 'Hands-free conversation' };
+  function lastVoiceMode() {
+    try { const m = storage.getItem(VOICE_MODE_KEY); if (m && VOICE_MODE_NAMES[m]) return m; } catch { /* default */ }
+    return 'dictate';
+  }
+  function paintMicMode(shown) {
+    if (!el.mic) return;
+    el.mic.replaceChildren(svgIcon(VOICE_MODE_ICONS[shown] || ICONS.mic, 16, 1.9));
+    el.mic.title = `${VOICE_MODE_NAMES[lastVoiceMode()]} (click) · hands-free conversation (hold) · other modes (the arrow menu)`;
+  }
+  function startVoice(mode) {
+    if (st.destroyed) return;
+    try { storage.setItem(VOICE_MODE_KEY, mode); } catch { /* sticky is a nicety */ }
+    paintMicMode(mode);
+    voice().start(mode);
+  }
   function toggleHandsFree() { const v = voice(); if (v.active() && v.mode() === 'handsfree') stopVoice(); else startVoice('handsfree'); }
   function stopVoice() { st.voicePendingSend = false; if (st.voice && st.voice.active()) st.voice.stop(); }
 
   function paintVoice(state, { mode, detail } = {}) {
     if (!el.mic) return;
     const on = state !== 'off' && state !== 'error';
+    paintMicMode(on && mode ? mode : lastVoiceMode());
     el.mic.setAttribute('aria-pressed', on ? 'true' : 'false');
     el.mic.classList.toggle('is-on', on);
     el.mic.classList.toggle('is-handsfree', on && (mode === 'handsfree' || mode === 'talk'));

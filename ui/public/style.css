@@ -5437,7 +5437,8 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-voice-status[hidden]{display:none;}
 .ask-voice-status[data-state="speaking"],.ask-voice-status[data-state="listening"]{color:var(--ink);}
 .ask-voice-status[data-state="error"]{color:var(--red-ink);}
-.ask-pop-voice{right:var(--ask-col-inset);bottom:calc(var(--ask-box-top) + 6px);width:220px;}
+.ask-pop-voice{right:var(--ask-col-inset);bottom:calc(var(--ask-box-top) + 6px);width:260px;}
+.ask-voice-item svg{flex:0 0 auto;}
 .ask-composer :is(.ask-voice-mic,.ask-voice-caret):focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-composer :is(.ask-agents-btn,.ask-wt-btn,.ask-model-btn,.ask-send,.ask-stop,.ask-chip-x):focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 /* The button shares .ask-agents-btn, which is display:flex — that AUTHOR rule
