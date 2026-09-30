@@ -237,3 +237,90 @@ test('at data-level="simple" the resume carets carry data-min-level="advanced" (
   await ctx2.settle(8);
   assert.equal(ctx2.doc.querySelector('.hd-resume-more').getAttribute('data-min-level'), 'advanced');
 });
+
+// ── Run page header + History glance ─────────────────────────────────────────
+
+test('run page: the Pause/Resume toggle grows a caret only while paused; "Resume at…" posts', async () => {
+  const ctx = await boot({ level: 'advanced' });
+  const { doc, recv, settle, go } = ctx;
+  go('running');
+  recv({ type: 'hello', runs: [{ runId: 'r1', title: 'Feat', projectDir: PROJECT, status: 'running', startedAt: '00:00:00', pipelineId: 'pl_1' }] });
+  await settle();
+  go('running/r1');
+  await settle(8);
+  const more = doc.querySelector('.rd-resume-more');
+  assert.ok(more, 'the run page carries the caret');
+  assert.equal(more.hidden, true, 'no caret while the run is running (the toggle says Pause)');
+  recv({ type: 'done', runId: 'r1', status: 'paused' });
+  await settle(8);
+  assert.equal(doc.querySelector('.rd-pause').dataset.action, 'resume');
+  assert.equal(more.hidden, false, 'a paused run shows the caret');
+  more.click();
+  await settle();
+  assert.equal(doc.querySelector('.rd-resume-menu').hidden, false, 'caret opens the menu');
+  doc.querySelector('.rd-resume-at').click();
+  await settle();
+  assert.equal(doc.getElementById('sched-title').textContent, 'Schedule the resume', 'a new resume is not a "Change time"');
+  await confirmSheet(ctx);
+  const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/schedules/resume'));
+  assert.equal(posts.length, 1);
+  assert.equal(JSON.parse(posts[0].opts.body).pipelineId, 'pl_1');
+  assert.equal(ctx.window.location.hash, '#schedules/once', 'lands where the new ticket lives');
+});
+
+test('run page: a cap pause keeps the caret but disables "Resume at…"', async () => {
+  const ctx = await boot({ level: 'advanced' });
+  await pausedCard(ctx, { reason: 'cost_pipeline', detail: 'cap reached' });
+  ctx.go('running/r1');
+  await ctx.settle(8);
+  assert.equal(ctx.doc.querySelector('.rd-resume-more').hidden, false);
+  assert.equal(ctx.doc.querySelector('.rd-resume-at').disabled, true);
+});
+
+test('History glance: the Resume CTA is a split whose "Resume at…" posts', async () => {
+  const ctx = await boot({ level: 'advanced', fetchHandler: histFetch() });
+  ctx.go(`history/${KEY}/fcec04e8`);
+  await ctx.settle(8);
+  const split = ctx.doc.querySelector('.hd-g-resume-split');
+  assert.ok(split, 'the glance Resume is wrapped in a split');
+  assert.ok(split.querySelector('.hd-g-resume'), 'the Resume CTA is its left half');
+  split.querySelector('.hd-g-resume-more').click();
+  await ctx.settle();
+  assert.equal(split.querySelector('.hd-g-resume-menu').hidden, false, 'caret opens the menu');
+  split.querySelector('.hd-g-resume-at').click();
+  await ctx.settle();
+  await confirmSheet(ctx);
+  const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/schedules/resume'));
+  assert.equal(posts.length, 1);
+  assert.equal(JSON.parse(posts[0].opts.body).pipelineId, 'fcec04e8');
+});
+
+test('History glance: simple level keeps the plain Resume CTA; a cap pause disables the item', async () => {
+  const ctx = await boot({ level: 'simple', fetchHandler: histFetch() });
+  ctx.go(`history/${KEY}/fcec04e8`);
+  await ctx.settle(8);
+  assert.ok(ctx.doc.querySelector('.hd-g-resume'), 'Resume CTA shown');
+  assert.equal(ctx.doc.querySelector('.hd-g-resume-split'), null, 'no caret at simple');
+  const ctx2 = await boot({ level: 'advanced', fetchHandler: histFetch('cost_total') });
+  ctx2.go(`history/${KEY}/fcec04e8`);
+  await ctx2.settle(8);
+  assert.equal(ctx2.doc.querySelector('.hd-g-resume-at').disabled, true);
+});
+
+test('a refused schedule surfaces its reason in the confirm modal', async () => {
+  const ctx = await boot({
+    level: 'advanced',
+    fetchHandler: (url) => (url.includes('/api/schedules/resume')
+      ? ok({ error: 'a scheduled resume already exists for this run — change or cancel it in Schedules' }, 409) : null),
+  });
+  const card = await pausedCard(ctx);
+  card.querySelector('.rc-resume-more').click();
+  card.querySelector('.rc-resume-at').click();
+  await ctx.settle();
+  await confirmSheet(ctx);
+  const modal = ctx.doc.getElementById('confirm-modal');
+  assert.equal(modal.classList.contains('hidden'), false, 'the modal is up');
+  assert.match(ctx.doc.getElementById('confirm-message').textContent, /already exists/);
+  assert.equal(ctx.doc.getElementById('confirm-ok').textContent, 'Open Schedules');
+  assert.equal(card.querySelector('.rc-resume-at').disabled, false, 'the item is usable again');
+});

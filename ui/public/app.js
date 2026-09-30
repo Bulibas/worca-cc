@@ -14649,12 +14649,12 @@ async function resumeRunFromCard(runId, btn, { ignoreCostCap = false, pastTeamCa
   }
 }
 
-// Resume splits (run card + History detail): a click outside any split closes every
-// open resume menu. One listener covers both locations; the caret/item clicks already
+// Resume splits (run card, run page, History detail + its glance): a click outside any split closes every
+// open resume menu. One listener covers every location; the caret/item clicks already
 // stopPropagation, so the parity with #start-split's click-away holds (closeStartMenu).
 document.addEventListener('click', (e) => {
-  if (e.target.closest && e.target.closest('.rc-resume-split, .hd-resume-split')) return;
-  for (const menu of document.querySelectorAll('.rc-resume-menu, .hd-resume-menu')) {
+  if (e.target.closest && e.target.closest('.rc-resume-split, .hd-resume-split, .rd-resume-split, .hd-g-resume-split')) return;
+  for (const menu of document.querySelectorAll('.rc-resume-menu, .hd-resume-menu, .rd-resume-menu, .hd-g-resume-menu')) {
     if (!menu.hidden) {
       menu.hidden = true;
       const more = menu.closest('.btn-split')?.querySelector('.btn-split-more');
@@ -17960,10 +17960,66 @@ function paintHdGlance(screen, record, data) {
     acts.appendChild(b);
   };
   mirror('.hd-resume', 'Resume', 'hd-g-resume');
+  splitGlanceResume(screen, acts);
   mirror('.hd-pr', 'Create pull request', 'hd-g-pr');
   mirror('.hd-pr-link', 'View pull request', `hd-g-pr-link${pr === 'MERGED' ? ' alt' : ''}`);
   mirror('.hd-after', done || RD_TERMINAL.includes(st.status) ? 'Start a follow-up run' : 'Schedule a run after this', 'alt hd-g-after');
   if (acts.childNodes.length) host.appendChild(acts);
+}
+
+// The glance's Resume mirrors the Details split as well: a caret whose "Resume at…"
+// drives the Details item, so there is one scheduling path and one cap gate. Rebuilt
+// with the glance on every repaint, like the mirrors themselves.
+function splitGlanceResume(screen, acts) {
+  const cta = acts.querySelector('.hd-g-resume');
+  const split = screen.querySelector('.hd-resume-split');
+  const srcMore = screen.querySelector('.hd-resume-more');
+  const srcItem = screen.querySelector('.hd-resume-at-item');
+  if (!cta || !split || split.hidden || !srcMore || !srcItem || !levelAtLeast(srcMore.dataset.minLevel || 'simple')) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'btn-split hd-g-resume-split';
+  const more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'btn-split-more hd-g-resume-more';
+  more.setAttribute('aria-haspopup', 'menu');
+  more.setAttribute('aria-expanded', 'false');
+  more.title = 'Schedule the resume';
+  more.setAttribute('aria-label', 'Schedule the resume');
+  const caret = srcMore.querySelector('svg');
+  if (caret) more.append(caret.cloneNode(true));
+  const menu = document.createElement('div');
+  menu.className = 'btn-split-menu hd-g-resume-menu';
+  menu.setAttribute('role', 'menu');
+  menu.hidden = true;
+  const item = document.createElement('button');
+  item.type = 'button';
+  item.setAttribute('role', 'menuitem');
+  item.className = 'hd-g-resume-at';
+  const b = document.createElement('b'); b.textContent = 'Resume at…';
+  const small = document.createElement('small'); small.textContent = 'Schedule the resume';
+  item.append(b, small);
+  item.disabled = srcItem.disabled;
+  item.title = srcItem.title;
+  menu.append(item);
+  cta.replaceWith(wrap);
+  wrap.append(cta, more, menu);
+  const close = () => { if (!menu.hidden) { menu.hidden = true; more.setAttribute('aria-expanded', 'false'); } };
+  more.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = menu.hidden;
+    menu.hidden = !open;
+    more.setAttribute('aria-expanded', open ? 'true' : 'false');
+    (open ? item : more).focus();
+  });
+  item.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (item.disabled) return;
+    close();
+    srcItem.click();
+  });
+  menu.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); close(); more.focus(); }
+  });
 }
 
 // Detail-header PR control from the record's tri-state (undefined = enrichment
@@ -18250,6 +18306,8 @@ async function scheduleResumeAt({ pipelineId, title, projectDir = null, workspac
     allowAfter: false,                    // a resume ticket can never chain (createTicket throws)
     initial: { ifMissed: 'skip' },        // pre-selected, not locked — "Start it late" stays available
     runTitle: `Resume ‘${title || pipelineId}’`,
+    heading: 'Schedule the resume',
+    confirmLabel: 'Schedule resume',
   });
   if (!res || !res.scheduledFor) return;
   if (btn) btn.disabled = true;
@@ -18264,10 +18322,16 @@ async function scheduleResumeAt({ pipelineId, title, projectDir = null, workspac
     });
     const data = await safeJson(r);
     if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
-    showView('schedules');
+    if (btn) btn.disabled = false;
+    location.hash = 'schedules/once';   // where the new one-off ticket lives
   } catch (err) {
-    if (btn) { btn.disabled = false; btn.dataset.resumeState = 'error'; btn.dataset.resumeError = `Could not schedule the resume: ${err.message}`; }
-    return;
+    if (btn) btn.disabled = false;
+    // The menu has closed by now, so the reason needs a surface of its own.
+    const open = await confirmModal({
+      title: 'Could not schedule the resume', message: err.message, messageTone: 'err',
+      confirmLabel: 'Open Schedules', cancelLabel: 'Close',
+    });
+    if (open) location.hash = 'schedules/once';
   }
 }
 
@@ -23979,6 +24043,31 @@ function openRunDetail(runId, { instant = false } = {}) {
     if (btn.dataset.action === 'resume') resumeRunFromCard(runDetailState.runId, btn);
     else pauseRun(runDetailState.runId, btn);
   });
+  // Resume split: same menu as the run card's. The run is read at CLICK time (a
+  // detail->detail hop must never schedule the run that was open at bind time).
+  const rdResumeMore = screen.querySelector('.rd-resume-more');
+  const rdResumeMenu = screen.querySelector('.rd-resume-menu');
+  const rdResumeAt = screen.querySelector('.rd-resume-at');
+  const closeRdResumeMenu = () => {
+    if (!rdResumeMenu.hidden) { rdResumeMenu.hidden = true; rdResumeMore.setAttribute('aria-expanded', 'false'); }
+  };
+  rdResumeMore.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = rdResumeMenu.hidden;
+    rdResumeMenu.hidden = !open;
+    rdResumeMore.setAttribute('aria-expanded', open ? 'true' : 'false');
+    (open ? rdResumeAt : rdResumeMore).focus();
+  });
+  rdResumeAt.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (rdResumeAt.disabled) return;
+    closeRdResumeMenu();
+    const r = runs.get(runDetailState.runId);
+    if (r && r.pipelineId) scheduleResumeAt({ pipelineId: r.pipelineId, title: r.title, projectDir: r.projectDir || '', workspaceId: r.workspaceId || null }, rdResumeAt);
+  });
+  rdResumeMenu.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); closeRdResumeMenu(); rdResumeMore.focus(); }
+  });
   // D5: Stop confirms, from both places. The modal reads the run out of the
   // module state at CLICK time, so a detail->detail hop can never stop the run
   // that was open when the listener was bound.
@@ -24991,6 +25080,23 @@ function paintRdHeader(screen, r) {
     ? `Total budget reached — blocked until ${fmtResetAtLocal(budgetState.budget.windowEndMs)} or a higher total limit`
     : (paused ? 'Resume — restart this paused pipeline where it left off'
               : 'Pause — gracefully stop the session so it can be resumed');
+  // The split's caret: paused, live runs only (as on the run card); caps keep the
+  // caret but disable "Resume at…" (a cap is a live decision).
+  const resumeMore = screen.querySelector('.rd-resume-more');
+  const resumeAt = screen.querySelector('.rd-resume-at');
+  if (resumeMore) {
+    resumeMore.hidden = terminal || !paused || !r.pipelineId;
+    if (resumeMore.hidden) {
+      const menu = screen.querySelector('.rd-resume-menu');
+      if (menu) menu.hidden = true;
+      resumeMore.setAttribute('aria-expanded', 'false');
+    }
+  }
+  if (resumeAt) {
+    const refused = typeof r.pauseReason === 'string' && SCHEDULE_REFUSED_PAUSE.has(r.pauseReason);
+    resumeAt.disabled = refused;
+    resumeAt.title = refused ? 'This run paused on a cost cap — continuing past it is a live decision and cannot be scheduled.' : '';
+  }
 }
 
 let runningCollapsed = false; // in-memory only; auto-expanded whenever ≥1 child exists
