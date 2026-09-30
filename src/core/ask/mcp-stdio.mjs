@@ -184,6 +184,9 @@ export function createRpcServer({ tools, write, log = (s) => process.stderr.writ
 }
 
 export async function main({ argv = process.argv.slice(2), env = process.env, stdin = process.stdin, stdout = process.stdout } = {}) {
+  // MCP registry §5.5.2: the CLI hands this child every registry copy's secret (MCPSECRET_*); worca's own tools,
+  // the scripts test_script runs in-process and their nested spawns get none of them.
+  for (const e of new Set([process.env, env])) for (const k of Object.keys(e)) if (/^MCPSECRET_/i.test(k)) delete e[k];
   const { home, thread, relay } = parseArgv(argv);
   if (relay) {
     return relayMain({ url: relay, token: String(env.WORCA_ASK_RELAY_TOKEN || ''), stdin, stdout });

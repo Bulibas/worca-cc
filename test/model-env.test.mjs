@@ -58,6 +58,13 @@ test('prepareModelEnv: literals pass, reserved/non-string dropped, refs expand',
   assert.deepEqual(dropped.sort(), ['PATH', 'WORCA_MOCK', 'X_EMPTY', 'X_NUM', 'X_UNSET']);
 });
 
+test('prepareModelEnv drops MCP registry env names (MCPSECRET_*, MCPCHILD_*, any case); they stay unreserved so cleanRunEnv keeps the registry env', () => {
+  const { env, dropped } = prepareModelEnv({ MCPSECRET_A41C6F76: 'x', mcpchild_JIRA_TOKEN: 'y', MCP_TIMEOUT: '1', ANTHROPIC_MODEL: 'm' }, {});
+  assert.deepEqual(env, { MCP_TIMEOUT: '1', ANTHROPIC_MODEL: 'm' });
+  assert.deepEqual(dropped.sort(), ['MCPSECRET_A41C6F76', 'mcpchild_JIRA_TOKEN']);
+  assert.equal(isReservedModelEnvKey('MCPSECRET_A41C6F76'), false);
+  assert.equal(isReservedModelEnvKey('MCPCHILD_JIRA_TOKEN'), false);
+});
 test('prepareModelEnv: empty/absent input is a no-op', () => {
   assert.deepEqual(prepareModelEnv(undefined, {}), { env: {}, dropped: [] });
   assert.deepEqual(prepareModelEnv({}, {}), { env: {}, dropped: [] });

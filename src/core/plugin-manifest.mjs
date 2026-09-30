@@ -7,7 +7,7 @@ import { readFileSync, readdirSync, readlinkSync, existsSync, statSync } from 'n
 import { join, resolve, dirname, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WORCA_PLUGIN_API, WORCA_PLUGIN_APIS, WORCA_AGENT_DATA_API, WORCA_ASK_FORMS_API, WORCA_MCP_API } from './plugin-api.mjs';
-import { EFFORTS, isReservedModelEnvKey, assertModelCost, assertModelUpstream, upstreamEnvConflict } from './model-env.mjs';
+import { EFFORTS, isReservedModelEnvKey, isMcpRegistryEnvKey, assertModelCost, assertModelUpstream, upstreamEnvConflict } from './model-env.mjs';
 import { validateMetaV2, normalizeAgentMeta, indexByKey } from '../shared/graph/agent-meta.mjs';
 import { portsFnFor } from '../shared/graph/ports.mjs';
 import { validateGraph } from '../shared/graph/validate.mjs';
@@ -499,7 +499,7 @@ export function normalizeManifest(raw, { dir = '' } = {}) {
         // host that grows the reserved list (e.g. CLAUDE_CODE_SUBAGENT_MODEL)
         // must not retroactively brick installed/marketplace plugins. The
         // user's own catalog (settings.mjs) still hard-rejects: that author CAN fix it.
-        if (isReservedModelEnvKey(k)) { warnings.push(`${at} ("${id}"): env key ${JSON.stringify(k)} is reserved — ignored`); continue; }
+        if (isReservedModelEnvKey(k) || isMcpRegistryEnvKey(k)) { warnings.push(`${at} ("${id}"): env key ${JSON.stringify(k)} is reserved — ignored`); continue; }
         if (isSecretRef(v)) {
           if (!secretKeys.has(v.secret)) { errors.push(`${at} ("${id}"): env ${k} references undeclared modelSecrets key ${JSON.stringify(v.secret)}`); continue; }
           env[k] = { secret: v.secret };

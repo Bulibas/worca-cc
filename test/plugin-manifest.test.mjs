@@ -476,6 +476,14 @@ test('models: reserved env keys are dropped with a warning, not a rejection (bac
   assert.match(w, /env key "WORCA_MOCK" is reserved — ignored/);
 });
 
+test('models: MCP registry env names (MCPSECRET_*, MCPCHILD_*, any case) are dropped with a warning', () => {
+  const r = normalizeManifest({ name: 'p', modelSecrets: SECRETS,
+    models: [MODEL({ env: { ...MODEL().env, MCPSECRET_A41C6F76: 'x', McpChild_PATH: '/p' } })] });
+  assert.equal(r.ok, true, r.ok ? '' : r.errors.join('\n'));
+  assert.deepEqual(Object.keys(r.manifest.models[0].env), ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN']);
+  assert.match(r.warnings.join('\n'), /env key "MCPSECRET_A41C6F76" is reserved — ignored/);
+  assert.match(r.warnings.join('\n'), /env key "McpChild_PATH" is reserved — ignored/);
+});
 test('models: rejections — dup id, unknown effort, dangling secret, bad value', () => {
   const fail = (models, modelSecrets, re) => {
     const r = normalizeManifest({ name: 'p', models, ...(modelSecrets ? { modelSecrets } : {}) });
