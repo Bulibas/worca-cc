@@ -162,3 +162,15 @@ test('ask.webEnabled / ask.webAllowedDomains', () => {
   assert.equal(validateValue(d, ['docs.example.com', '*.mdn.io']), null);
   assert.match(validateValue(d, ['not a host']), /host name/);
 });
+
+test('the Away mode rows use the plain labels (src/shared/away-mode/labels.mjs)', async () => {
+  const { groupLabel } = await import('../src/core/policy/registry.mjs');
+  const { FIELD_LABELS } = await import('../src/shared/away-mode/labels.mjs');
+  assert.equal(groupLabel('night'), 'Away mode');
+  for (const f of FIELDS.filter((x) => x.night)) {
+    const name = f.key.slice('night.'.length);
+    assert.equal(f.label, FIELD_LABELS[name].label, f.key);
+    assert.ok(f.help, `${f.key} help`);
+  }
+  assert.equal(fieldMeta('night.graceMinutes').label, 'Marked runs by day');
+});

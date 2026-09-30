@@ -98,7 +98,7 @@ test('About is the LAST General card, read-only, with no version baked into the 
   assert.equal(version.getAttribute('rel'), 'noopener noreferrer');
 
   // The two existing settings-view invariants stay intact (ui-settings-tooltips).
-  assert.equal(view.querySelectorAll('button.info-tip').length, 21, 'About adds no ⓘ icon (21 = 14 + Interface mode + Scheduled runs heading and failures field + My model credentials + Workspaces + PR description model + Night mode)');
+  assert.equal(view.querySelectorAll('button.info-tip').length, 21, 'About adds no ⓘ icon (21 = 14 + Interface mode + Scheduled runs heading and failures field + My model credentials + Workspaces + PR description model + Away mode)');
   for (const hint of view.querySelectorAll('.hint')) assert.equal(hint.textContent.trim(), '');
 });
 

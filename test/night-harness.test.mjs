@@ -46,7 +46,7 @@ const Q = [{ id: 'a', question: 'A?', options: ['x', 'y'], confidence: [90, 10],
 test('grace timeout decides an open question with actor night-mode', async () => {
   await setNightMode({ enabled: true, graceMinutes: 1, strategy: 'weights', window: null });
   const clock = fakeClock();
-  const orch = createOrchestrator({ projectDir: '/tmp/night-h1', nightClock: clock });
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h1', nightClock: clock, nightMode: true });
   const p = orch._ask({ id: 'c1', kind: 'clarify', questions: Q });
   await clock.tick(59_000);
   assert.ok(orch.pendingQuestion, 'still waiting before grace');
@@ -75,7 +75,7 @@ test('a night-decision event is emitted only after the answer landed', async () 
 test('the user answering first cancels the timer', async () => {
   await setNightMode({ enabled: true, graceMinutes: 1, window: null });
   const clock = fakeClock();
-  const orch = createOrchestrator({ projectDir: '/tmp/night-h2', nightClock: clock });
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h2', nightClock: clock, nightMode: true });
   const p = orch._ask({ id: 'c2', kind: 'clarify', questions: Q });
   orch.answer('c2', { answers: [{ id: 'a', choice: 'y' }] }, 'local');
   await p;
@@ -122,7 +122,7 @@ test('max decisions reached → the run pauses with night_guardrail', async () =
   await clock.tick(0);
   await rejected;
   assert.equal(orch.pauseReason, 'night_guardrail');
-  assert.match(orch.pauseDetail, /per-run limit of 1/);
+  assert.match(orch.pauseDetail, /worca answered 1 times on this run, the limit you set/);
   assert.equal(orch._night.override, 'off', 'a guardrail pause turns night mode off for this run');
 });
 
@@ -207,7 +207,7 @@ test('window-only config (grace null) wakes the open question at the window star
 test('resume point carries night {optIn, override} and the constructor reads it back', () => {
   const orch = createOrchestrator({ projectDir: '/tmp/night-h10', resume: { resumePoint: { night: { optIn: true, override: 'on' } } } });
   assert.deepEqual([orch._night.optIn, orch._night.override], [true, 'on']);
-  assert.deepEqual(orch.state.night, { optIn: true, override: 'on', decisions: 0, flagged: 0 });
+  assert.deepEqual(orch.state.night, { optIn: true, override: 'on', decisions: 0, flagged: 0, openedAt: null });
 });
 
 test('setNightOverride on re-arms and decides', async () => {
@@ -367,7 +367,7 @@ test('the night spend cap ignores attended daytime spend and counts the unattend
     recordCostDelta({ pipelineId: pid, amountUsd: 5, tsMs: at('2026-09-27T10:00:00Z') });   // attended morning spend
     await setNightMode({ enabled: true, graceMinutes: 1, strategy: 'weights', window: '22:00-08:00', timeZone: 'UTC', spendCapUsd: 1 });
     const clock = fakeClock(at('2026-09-27T15:00:00Z'));
-    const orch = createOrchestrator({ projectDir: '/tmp/night-h20', nightClock: clock });
+    const orch = createOrchestrator({ projectDir: '/tmp/night-h20', nightClock: clock, nightMode: true });
     orch.state.status = 'running';
     const p1 = orch._ask({ id: 'c20a', kind: 'clarify', questions: Q });
     await clock.tick(61_000);
@@ -379,14 +379,15 @@ test('the night spend cap ignores attended daytime spend and counts the unattend
     await clock.tick(61_000);
     await rejected;
     assert.equal(orch.pauseReason, 'night_guardrail');
-    assert.match(orch.pauseDetail, /\$2\.00 spent/);
+    assert.match(orch.pauseDetail, /spending while away reached \$1\.00/);
+    assert.ok(Math.abs(orch._nightSpentUsd({ window: '22:00-08:00', timeZone: 'UTC', graceMinutes: 1 }) - 2) < 1e-9, 'only the unattended $2 counts');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('a human answer ends the unattended stretch the spend cap counts', async () => {
   await setNightMode({ enabled: true, graceMinutes: 1, strategy: 'weights', window: null });
   const clock = fakeClock();
-  const orch = createOrchestrator({ projectDir: '/tmp/night-h21', nightClock: clock });
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h21', nightClock: clock, nightMode: true });
   const p1 = orch._ask({ id: 'c21a', kind: 'clarify', questions: Q });
   await clock.tick(61_000);
   await p1;
@@ -497,4 +498,53 @@ test('a failed night analysis still books what it cost', async () => {
   await p;
   assert.equal(orch.nightDecision('c30').flagged, true, 'analysis unavailable → flagged fallback');
   assert.ok(booked.some((u) => u > 0), 'the failed call was billed and is booked');
+});
+
+test('an unmarked run with Which runs = All runs waits by day', async () => {
+  await setNightMode({ enabled: true, graceMinutes: 1, window: '22:00-07:00', timeZone: 'UTC' });
+  const clock = fakeClock(Date.parse('2026-09-27T12:00:00Z'));
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h40', nightClock: clock });
+  orch._ask({ id: 'c40', kind: 'clarify', questions: Q }).catch(() => {});
+  await clock.tick(10 * 60_000);
+  assert.equal(orch.pendingQuestion?.id, 'c40', 'not answered by day');
+  assert.equal(orch.state.night.openedAt, '2026-09-27T12:00:00.000Z');
+});
+
+test('"I\'m away now" answers an unmarked run with Which runs = Only runs I marked', async () => {
+  await setNightModeToggle('on');
+  await setNightMode({ strategy: 'weights' });
+  const clock = fakeClock();
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h41', nightClock: clock });
+  const p = orch._ask({ id: 'c41', kind: 'clarify', questions: Q });
+  await clock.tick(0);
+  assert.deepEqual(await p, { answers: [{ id: 'a', choice: 'x' }] });
+  assert.equal(orch.answeredBy('c41'), 'night-mode');
+});
+
+test('a --yes run is not handed to Away mode by "I\'m away now" alone (as today)', async () => {
+  await setNightModeToggle('on');
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h42', auto: true, nightClock: fakeClock() });
+  assert.deepEqual(await orch._ask({ id: 'c42', kind: 'gate', issues: [{ severity: 'critical' }] }), { decision: 'continue' });
+  assert.equal(orch.answeredBy('c42'), null);
+});
+
+test('a question on an always-wait kind reports no openedAt', async () => {
+  await setNightMode({ graceMinutes: 1, neverDecide: ['clarify'] });
+  const clock = fakeClock();
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h43', nightClock: clock, nightMode: true });
+  orch._ask({ id: 'c43', kind: 'clarify', questions: Q }).catch(() => {});
+  await clock.tick(0);
+  assert.equal(orch.state.night.openedAt, null);
+});
+
+test('openedAt follows the always-wait list while the question is open', async () => {
+  await setNightMode({ graceMinutes: 30, neverDecide: ['clarify'] });
+  const clock = fakeClock(Date.parse('2026-09-27T12:00:00Z'));
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h44', nightClock: clock, nightMode: true });
+  orch._ask({ id: 'c44', kind: 'clarify', questions: Q }).catch(() => {});
+  await clock.tick(0);
+  assert.equal(orch.state.night.openedAt, null);
+  await setNightMode({ graceMinutes: 30, neverDecide: [] });
+  orch.nightConfigChanged();
+  assert.equal(orch.state.night.openedAt, '2026-09-27T12:00:00.000Z', 'the re-arm publishes the open time');
 });

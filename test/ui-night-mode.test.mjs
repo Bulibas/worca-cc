@@ -7,15 +7,22 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
-import { renderNightForm, readNightForm } from '../ui/public/night-mode-form.mjs';
+import { renderNightForm, readNightForm, paintAwaySummary, updateAwaySummary } from '../ui/public/night-mode-form.mjs';
+import { NIGHT_DEFAULTS, resolveNightConfig } from '../src/core/night/config.mjs';
+import { RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP } from '../src/shared/away-mode/labels.mjs';
+import { describeNewRun } from '../src/shared/away-mode/describe.mjs';
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 
 const wins = [];
-afterEach(() => { for (const w of wins.splice(0)) { try { w.close(); } catch { /* already closed */ } } });
+const realNow = Date.now;
+afterEach(() => {
+  Date.now = realNow;                        // app.js runs in Node's realm: its Date.now is this one
+  for (const w of wins.splice(0)) { try { w.close(); } catch { /* already closed */ } }
+});
 
-async function boot({ settings = {}, decisions = [] } = {}) {
+async function boot({ settings = {}, decisions = [], away } = {}) {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
   const { window } = dom;
   wins.push(window);
@@ -30,6 +37,10 @@ async function boot({ settings = {}, decisions = [] } = {}) {
   };
 
   const posts = [];
+  const awayCalls = [];
+  // GET /api/away-mode: by default the stored user layer; `away` = a body, null (a 500) or (url) => body|null.
+  const defaultAway = () => ({ config: resolveNightConfig({ user: settings.nightMode }).config, sources: {}, inherited: resolveNightConfig({}),
+    toggle: settings.nightModeToggle || 'auto', user: settings.nightMode || {}, project: null });
   window.fetch = (u, opts) => {
     const url2 = String(u);
     const method = ((opts && opts.method) || 'GET').toUpperCase();
@@ -41,13 +52,18 @@ async function boot({ settings = {}, decisions = [] } = {}) {
       if (path.endsWith('/api/settings')) return ok({});
       return ok({ ok: true });
     }
+    if (path.endsWith('/api/away-mode')) {
+      awayCalls.push(url2);
+      const b = typeof away === 'function' ? away(url2) : away === undefined ? defaultAway() : away;
+      return b == null ? Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'boom' }) }) : ok(b);
+    }
     if (path.endsWith('/api/night-decisions')) return ok({ decisions });
     if (path.endsWith('/api/settings')) return ok({ nightMode: {}, nightModeToggle: 'auto', nightModeEffective: { strategy: 'mixed', criteria: {} }, ...settings });
     if (path.endsWith('/api/config')) return ok({ config: { steps: {}, customModels: [], activeWorkflowId: 'wf_default' }, models: [], efforts: [] });
     if (path.endsWith('/api/workflows')) return ok({ workflows: [{ id: 'wf_default', name: 'Default' }] });
     if (path.endsWith('/api/guardrails')) return ok({ guardrails: [{ id: 'permissive', name: 'Permissive' }] });
     if (path.endsWith('/api/branches')) return ok({ branches: ['main'], current: 'main' });
-    if (url2.includes('/api/projects')) return ok({ projects: [{ name: 'proj', path: '/repos/proj', exists: true }] });
+    if (url2.includes('/api/projects')) return ok({ projects: [{ name: 'proj', path: '/repos/proj', exists: true, key: 'proj-1' }] });
     return ok({ pipelines: 0, projects: 0, workspaces: 0 });
   };
 
@@ -64,7 +80,7 @@ async function boot({ settings = {}, decisions = [] } = {}) {
   lastWs._l.open?.forEach((fn) => fn());
   await settle();
   const dispatch = (msg) => lastWs._l.message?.forEach((fn) => fn({ data: JSON.stringify(msg) }));
-  return { window, posts, dispatch };
+  return { window, posts, dispatch, awayCalls };
 }
 async function settle(n = 4) { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); }
 
@@ -115,8 +131,17 @@ test('run view: stored decisions load on open; a night-decision frame appends; f
   assert.equal(rows.length, 2);
   assert.equal(rows[0].classList.contains('flagged'), false);
   assert.ok(rows[1].classList.contains('flagged'));
-  assert.match(rows[1].querySelector('.rd-nd-head').textContent, /gate · continue · rule · flagged/);
-  assert.equal(screen.querySelector('.rd-night-count').textContent, '(2, 1 flagged)');
+  assert.equal(rows[1].querySelector('.rd-nd-head').textContent, 'Fix again or continue, in a review loop');
+  assert.equal(rows[1].querySelector('.rd-nd-why').textContent, 'Answered for you, please check: "continue" — critical remain.');
+  assert.equal(rows[0].querySelector('.rd-nd-why').textContent, 'Answered for you: "Redis" — r1.');
+  assert.equal(screen.querySelector('.rd-night-count').textContent, '(2 answers, 1 to check)');
+  assert.equal(screen.querySelector('.rd-night-sec h3').firstChild.textContent.trim(), 'Answers while you were away');
+  ctx.dispatch({ type: 'night-decision', runId: RUN.runId, seq: 10, id: 'clarify-g-3', kind: 'clarify',
+    record: { questionId: 'clarify-g-3', kind: 'clarify', choice: null, strategy: 'guardrail', guardrail: 'maxDecisions', confidence: null, flagged: true, rationale: 'Paused: worca answered 1 times on this run, the limit you set.' } });
+  await settle();
+  const g = [...screen.querySelectorAll('.rd-night-decisions li')][2];
+  assert.equal(g.querySelector('.rd-nd-why').textContent, 'Paused: worca answered 1 times on this run, the limit you set.');
+  assert.equal(screen.querySelector('.rd-night-count').textContent, '(2 answers, 1 to check)');
 });
 
 test('start form: nightMode is sent only when the checkbox is ticked', async () => {
@@ -134,24 +159,59 @@ test('start form: nightMode is sent only when the checkbox is ticked', async () 
   assert.equal(ctx.posts.filter((p) => p.path.endsWith('/api/run')).at(-1).body.nightMode, true);
 });
 
-test('settings card: paints the stored layer and posts {nightMode, nightModeToggle}', async () => {
-  const ctx = await boot({ settings: { nightMode: { enabled: true, window: '22:00-07:00', strategy: 'weights' }, nightModeToggle: 'on' } });
+async function openSettings(ctx) {
   ctx.window.location.hash = 'settings';
   ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
   await settle(8);
-  const doc = ctx.window.document;
+  return ctx.window.document;
+}
+const click = (ctx, node) => node.dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
+const statusButton = (doc, label) => [...doc.querySelectorAll('#awayStatus button')].find((b) => b.textContent === label);
+
+test('settings card: paints the stored layer, Save posts {nightMode}, the status buttons post the toggle', async () => {
+  const ctx = await boot({ settings: { nightMode: { enabled: true, window: '22:00-07:00', strategy: 'weights' }, nightModeToggle: 'on' } });
+  const doc = await openSettings(ctx);
   const host = doc.getElementById('night-mode-host');
-  assert.equal(host.querySelector('.night-enabled').value, 'on');
+  const all = [...host.querySelectorAll('.away-which input')].find((i) => i.closest('label').textContent.trim() === 'All runs');
+  assert.equal(all.checked, true);
   assert.equal(host.querySelector('.night-window-start').value, '22:00');
-  assert.equal(doc.getElementById('nightModeToggle').value, 'on');
+  assert.deepEqual([...doc.querySelectorAll('#awayStatus button')].map((b) => b.textContent), ["I'm back"]);
   host.querySelector('.night-strategy').value = 'analysis';
-  doc.getElementById('nightModeSave').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
+  click(ctx, doc.getElementById('nightModeSave'));
   await settle();
   const post = ctx.posts.filter((p) => p.path.endsWith('/api/settings')).at(-1);
-  assert.equal(post.body.nightModeToggle, 'on');
+  assert.equal('nightModeToggle' in post.body, false, 'Save never changes the status');
   assert.equal(post.body.nightMode.strategy, 'analysis');
   assert.equal(post.body.nightMode.enabled, true);
   assert.equal(post.body.nightMode.window, '22:00-07:00');
+  click(ctx, statusButton(doc, "I'm back"));
+  await settle();
+  assert.deepEqual(ctx.posts.filter((p) => p.path.endsWith('/api/settings')).at(-1).body, { nightModeToggle: 'auto' });
+});
+
+test('settings card: "I\'m away now" and "Pause away mode" post the toggle alone', async () => {
+  // A second boot: the stub answers POST /api/settings with {}, so the strip is not repainted after a click.
+  const ctx = await boot({ settings: { nightMode: { window: '22:00-07:00' }, nightModeToggle: 'auto' } });
+  const doc = await openSettings(ctx);
+  assert.deepEqual([...doc.querySelectorAll('#awayStatus button')].map((b) => b.textContent), ["I'm away now", 'Pause away mode']);
+  click(ctx, statusButton(doc, "I'm away now"));
+  await settle();
+  assert.deepEqual(ctx.posts.filter((p) => p.path.endsWith('/api/settings')).at(-1).body, { nightModeToggle: 'on' });
+  click(ctx, statusButton(doc, 'Pause away mode'));
+  await settle();
+  assert.deepEqual(ctx.posts.filter((p) => p.path.endsWith('/api/settings')).at(-1).body, { nightModeToggle: 'off' });
+});
+
+test('settings card: when GET /api/away-mode fails, the stored fields still render (spec §7)', async () => {
+  // No `enabled` key: the default state of a real user.
+  const ctx = await boot({ away: null, settings: { nightMode: { window: '22:00-07:00' } } });
+  const doc = await openSettings(ctx);
+  const host = doc.getElementById('night-mode-host');
+  assert.ok(host.querySelector('.away-which input'), 'the fields render');
+  const marked = [...host.querySelectorAll('.away-which input')].find((i) => i.closest('label').textContent.trim() === 'Only runs I marked');
+  assert.equal(marked.checked, true);
+  assert.equal(host.querySelector('.night-window-start').value, '22:00');
+  assert.equal(host.querySelector('.away-summary').textContent.trim(), 'Away mode settings could not be read.');
 });
 
 test('night form: project level unsets empty fields; grace off is an explicit null; no spend cap per project', () => {
@@ -193,4 +253,202 @@ test('night form: a user-level save of empty cap/window inherits the team cap an
   assert.equal(root.querySelector('.night-spend-cap-off').checked, true, 'a stored null paints as the checkbox');
   assert.equal(root.querySelector('.night-window-off').checked, true);
   assert.equal(root.querySelector('.night-spend-cap').disabled, true);
+});
+
+const formRoot = () => new JSDOM('<div id="r"></div>').window.document.getElementById('r');
+const fire = (node, type) => node.dispatchEvent(new node.ownerDocument.defaultView.Event(type, { bubbles: true }));
+
+test('the card reads top to bottom: summary, which runs, marked runs by day, collapsed advanced', () => {
+  const root = formRoot();
+  renderNightForm(root, { level: 'user', values: { window: '22:00-07:00' }, effective: { ...NIGHT_DEFAULTS, window: '22:00-07:00', timeZone: 'UTC' }, sources: {}, toggle: 'auto', now: Date.parse('2026-09-28T15:00:00Z') });
+  assert.match(root.querySelector('.away-summary').textContent, /You count as here/);
+  assert.deepEqual([...root.querySelectorAll('.away-which input')].map((i) => i.closest('label').textContent.trim()), ['Only runs I marked', 'All runs']);
+  assert.match(root.querySelector('.away-byday').textContent, /Marked runs by day/);
+  for (const t of ['How worca picks an answer', 'Limits', 'Always wait for me on…']) {
+    const d = [...root.querySelectorAll('details')].find((x) => x.querySelector('summary').textContent.includes(t));
+    assert.ok(d && !d.open, t);
+  }
+});
+
+test('the summary updates on input; switching to All runs changes line 2', () => {
+  const root = formRoot();
+  renderNightForm(root, { level: 'user', values: { window: '22:00-07:00', timeZone: 'UTC' }, effective: { ...NIGHT_DEFAULTS, window: '22:00-07:00', timeZone: 'UTC' }, sources: {}, toggle: 'auto', now: Date.parse('2026-09-28T15:00:00Z') });
+  const all = [...root.querySelectorAll('.away-which input')][1];
+  all.checked = true; fire(all, 'change');
+  assert.match(root.querySelector('.away-summary').textContent, /on all runs/);
+  assert.equal(readNightForm(root, { level: 'user' }).enabled, true);
+});
+
+test('user level: an unset "Which runs" shows the inherited choice and saves as unset', () => {
+  const root = formRoot();
+  renderNightForm(root, { level: 'user', values: {}, effective: { ...NIGHT_DEFAULTS }, sources: {}, toggle: 'auto', now: 0 });
+  const [marked] = root.querySelectorAll('.away-which input');
+  assert.equal(marked.checked, true, 'the inherited value is shown');
+  assert.match(root.querySelector('.away-which').textContent, /\(default\)/);
+  assert.ok(readNightForm(root, { level: 'user' }).__unset.includes('enabled'), 'untouched = inherit, as before');
+});
+
+test('half-typed hours: summary says inherited, save unsets the window', () => {
+  const root = formRoot();
+  renderNightForm(root, { level: 'user', values: {}, effective: { ...NIGHT_DEFAULTS }, sources: {}, toggle: 'auto', now: Date.parse('2026-09-28T15:00:00Z') });
+  root.querySelector('.night-window-start').value = '22:00';
+  fire(root.querySelector('.night-window-start'), 'input');
+  assert.match(root.querySelector('.away-summary').textContent, /No away hours are set/);
+  assert.ok(readNightForm(root, { level: 'user' }).__unset.includes('window'));
+});
+
+test('a cleared field falls back to the INHERITED value in the summary, not the stored one', () => {
+  const root = formRoot();
+  renderNightForm(root, { level: 'project', values: { window: '20:00-06:00' }, effective: { ...NIGHT_DEFAULTS, window: '20:00-06:00', timeZone: 'UTC' },
+    inherited: { config: { ...NIGHT_DEFAULTS, window: '22:00-07:00', timeZone: 'UTC' }, sources: { window: 'user' } }, toggle: 'auto', now: Date.parse('2026-09-28T15:00:00Z'), projectName: 'P' });
+  root.querySelector('.night-window-start').value = ''; fire(root.querySelector('.night-window-start'), 'input');
+  assert.match(root.querySelector('.away-summary').textContent, /^For P: .*Next away hours start at 22:00/);
+});
+
+test('round-trip: empty vs set vs explicit off gives the same patch as before', () => {
+  const root = formRoot();
+  renderNightForm(root, { level: 'user', values: { enabled: true, window: null, graceMinutes: null, spendCapUsd: 5, neverDecide: ['gate'] }, effective: { ...NIGHT_DEFAULTS }, sources: {}, toggle: 'auto', now: 0 });
+  const p = readNightForm(root, { level: 'user' });
+  assert.deepEqual([p.enabled, p.window, p.graceMinutes, p.spendCapUsd, p.neverDecide], [true, null, null, 5, ['gate']]);
+  assert.ok(p.__unset.includes('strategy'));
+});
+
+test('updateAwaySummary repaints the summary only (unsaved edits survive)', () => {
+  const root = formRoot();
+  renderNightForm(root, { level: 'user', values: {}, effective: { ...NIGHT_DEFAULTS }, sources: {}, toggle: 'auto', now: 0 });
+  root.querySelector('.night-num[data-field="maxDecisions"]').value = '7';
+  updateAwaySummary(root, { toggle: 'on', now: 0 });
+  assert.match(root.querySelector('.away-summary').textContent, /I'm away now/);
+  assert.equal(root.querySelector('.night-num[data-field="maxDecisions"]').value, '7');
+});
+
+test('paintAwaySummary renders one span per line', () => {
+  const host = formRoot();
+  paintAwaySummary(host, { config: { ...NIGHT_DEFAULTS, window: '22:00-07:00', timeZone: 'UTC' }, toggle: 'auto', now: Date.parse('2026-09-28T15:00:00Z') });
+  assert.equal(host.querySelectorAll('.away-line').length, 3);
+});
+
+test('no inherited config (the fetch failed): every field renders, nothing throws, the summary says so', () => {
+  const root = formRoot();
+  for (const level of ['user', 'project']) {
+    assert.doesNotThrow(() => renderNightForm(root, { level, values: {}, effective: {}, sources: {}, inherited: { config: null, sources: {} }, toggle: 'auto', now: 0 }));
+    assert.ok(root.querySelector('.away-which input:checked'), level);
+    assert.equal(root.querySelector('.away-summary').textContent.trim(), 'Away mode settings could not be read.');
+    assert.doesNotMatch(root.textContent, /undefined|\[object Object\]/, level);
+    if (level === 'user') assert.equal(root.querySelector('.away-inherited'), null, 'no source is claimed when nothing is inherited');
+  }
+  assert.equal(root.querySelector('.night-strategy option').textContent, 'Same as my settings', 'project level, nothing inherited: the plain label');
+  assert.equal(root.querySelector('.away-which input').closest('label').textContent.trim(), 'Same as my settings', 'the radio too: never a guessed "(Only runs I marked)"');
+});
+
+test('project level: "Same as my settings (…)" names the inherited choice; no spend cap; summary names the project', () => {
+  const root = formRoot();
+  renderNightForm(root, { level: 'project', values: {}, effective: { ...NIGHT_DEFAULTS, enabled: true }, sources: { enabled: 'user' },
+    inherited: { config: { ...NIGHT_DEFAULTS, enabled: true }, sources: { enabled: 'user' } }, toggle: 'auto', now: Date.parse('2026-09-28T15:00:00Z'), projectName: 'Shop' });
+  const first = root.querySelector('.away-which input');
+  assert.equal(first.value, ''); assert.equal(first.checked, true);
+  assert.equal(first.closest('label').textContent.trim(), 'Same as my settings (All runs)');
+  assert.equal(root.querySelector('.night-spend-cap'), null);
+  assert.match(root.textContent, /The spend cap is set once for you, not per project/);
+  // Wording §3.2: "Same as my settings" on every empty choice, not only the radio.
+  assert.equal(root.querySelector('.night-strategy option').textContent, 'Same as my settings (Trust the agent when it is sure, otherwise weigh the options)');
+  assert.equal(root.querySelector('.night-num[data-field="graceMinutes"]').placeholder, 'Same as my settings (30)');
+  assert.match(root.querySelector('.away-summary').textContent, /^For Shop: /);
+  assert.doesNotMatch(root.querySelector('.away-summary').textContent, /this project/, 'nothing overridden yet');
+});
+
+test('project level: a value set here marks its summary line "(this project)"', () => {
+  const root = formRoot();
+  renderNightForm(root, { level: 'project', values: { graceMinutes: 45 }, effective: { ...NIGHT_DEFAULTS, window: '22:00-07:00', timeZone: 'UTC', graceMinutes: 45 }, sources: { graceMinutes: 'project' },
+    inherited: { config: { ...NIGHT_DEFAULTS, window: '22:00-07:00', timeZone: 'UTC', graceMinutes: 30 }, sources: {} }, toggle: 'auto', now: Date.parse('2026-09-28T15:00:00Z'), projectName: 'Shop' });
+  const lines = [...root.querySelectorAll('.away-summary .away-line')].map((s) => s.textContent.trim());
+  assert.match(lines[2], /waited 45 minutes\. Unmarked runs always wait\. \(this project\)$/);
+  assert.doesNotMatch(lines[1], /this project/);
+});
+
+test('project card: Away mode for this project, its summary, and Save re-reads GET /api/away-mode?projectDir=', async () => {
+  const body = { config: { ...NIGHT_DEFAULTS, window: '22:00-07:00', timeZone: 'UTC' }, sources: {}, inherited: resolveNightConfig({ user: { window: '22:00-07:00', timeZone: 'UTC' } }), toggle: 'auto', user: {}, project: {} };
+  const ctx = await boot({ away: (u) => (u.includes('projectDir=') ? body : { ...body, inherited: resolveNightConfig({}) }) });
+  ctx.window.location.hash = 'projects/proj-1';
+  await settle(12);
+  const card = ctx.window.document.querySelector('.pd-night-card');
+  assert.ok(card, 'the card is on the Overview');
+  assert.equal(card.querySelector('.card-head b').textContent, 'Away mode for this project');
+  assert.match(card.querySelector('.card-head').textContent, /Anything left as "Same as my settings" uses your Settings page/);
+  assert.match(card.querySelector('.away-summary').textContent, /^For proj: /);
+  assert.ok([...card.querySelectorAll('small.hint')].some((h) => h.textContent === '"I\'m away now" and "Pause" are global. Change them in Settings › Away mode.'));
+  assert.equal(card.querySelector('.pd-night-reset').textContent, 'Use my settings');
+  const before = ctx.awayCalls.length;
+  card.querySelector('.pd-night-save').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
+  await settle(8);
+  const patch = ctx.posts.filter((p) => p.path.endsWith('/api/config')).at(-1);
+  assert.equal(patch.body.projectDir, '/repos/proj');
+  assert.ok(patch.body.nightMode && Array.isArray(patch.body.nightMode.__unset));
+  assert.ok(ctx.awayCalls.slice(before).some((u) => u.includes(`projectDir=${encodeURIComponent('/repos/proj')}`)), 'a fresh GET after the save');
+});
+
+// Task 7: the run page pill ticks on the 1 s timer even while the run waits on a question.
+const T = Date.parse('2026-09-28T15:00:00Z');
+const AWAY_C = { ...NIGHT_DEFAULTS, window: '22:00-07:00', timeZone: 'UTC', graceMinutes: 30, enabled: false };
+const awayBody = (o = {}) => ({ config: AWAY_C, sources: {}, inherited: resolveNightConfig({}), toggle: 'auto', user: {}, project: {}, ...o });
+const PENDING = { type: 'question', id: 'clarify-p-1', kind: 'clarify', questions: [{ id: 'a', question: 'A?', options: ['x', 'y'] }] };
+const realTick = () => new Promise((r) => setTimeout(r, 1100));
+async function openRun(ctx, run) {
+  ctx.dispatch({ type: 'hello', runs: [run] });
+  ctx.window.location.hash = `running/${run.runId}`;
+  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+  await settle(8);
+  return ctx.window.document.querySelector('#run-detail');
+}
+
+test('run page: the switch reads As set up / Answer for me now / Never on this run, with tips; the pill counts down', async () => {
+  let now = T; Date.now = () => now;
+  const ctx = await boot({ away: () => awayBody() });
+  const screen = await openRun(ctx, { ...RUN, pendingQuestion: PENDING, night: { optIn: true, override: 'auto', decisions: 0, flagged: 0, openedAt: new Date(T).toISOString() } });
+  const sel = screen.querySelector('.rd-night');
+  assert.deepEqual([...sel.options].map((o) => [o.value, o.textContent, o.title]), RUN_SWITCH_OPTIONS.map((o) => [o.value, o.label, o.tip]));
+  assert.equal(sel.closest('.rd-night-wrap').title, RUN_SWITCH_TIP);
+  assert.equal(sel.closest('.rd-night-wrap').querySelector('.txt').textContent, 'Away mode on this run');
+  const pill = screen.querySelector('.rd-night-pill');
+  assert.equal(pill.textContent, 'answers after 30 min');
+  assert.equal(pill.dataset.state, 'after');
+  now = T + 12 * 60_000;
+  await realTick();
+  assert.equal(pill.textContent, 'answers after 18 min');
+});
+
+test('run page: an open always-wait question (no openedAt) reads "waiting for you"', async () => {
+  Date.now = () => T;
+  const ctx = await boot({ away: () => awayBody() });
+  const screen = await openRun(ctx, { ...RUN, pendingQuestion: PENDING, night: { optIn: true, override: 'auto', decisions: 0, flagged: 0, openedAt: null } });
+  assert.equal(screen.querySelector('.rd-night-pill').textContent, 'waiting for you');
+});
+
+test('run page: a run with no projectDir uses the user-level body and never loops a fetch', async () => {
+  Date.now = () => T;
+  const ctx = await boot({ away: () => awayBody() });
+  const screen = await openRun(ctx, { ...RUN, projectDir: '', pendingQuestion: PENDING, night: { optIn: true, override: 'auto', decisions: 0, flagged: 0, openedAt: new Date(T).toISOString() } });
+  const n = ctx.awayCalls.length;
+  assert.equal(screen.querySelector('.rd-night-pill').textContent, 'answers after 30 min');
+  await realTick(); await realTick();
+  assert.equal(ctx.awayCalls.length, n, 'no new fetch on the ticks');
+});
+
+test('run page: a project whose GET fails leaves the pill empty and is fetched once, not every second', async () => {
+  Date.now = () => T;
+  const ctx = await boot({ away: (u) => (u.includes('projectDir=') ? null : awayBody()) });
+  const screen = await openRun(ctx, { ...RUN, pendingQuestion: PENDING, night: { optIn: true, override: 'auto', decisions: 0, flagged: 0, openedAt: new Date(T).toISOString() } });
+  await realTick(); await realTick();
+  assert.equal(screen.querySelector('.rd-night-pill').textContent, '');
+  assert.equal(ctx.awayCalls.filter((u) => u.includes('projectDir=')).length, 1);
+});
+
+test('New run: "Mark this run" and the hint from describeNewRun', async () => {
+  const body = awayBody();
+  const ctx = await boot({ away: () => body });
+  const doc = ctx.window.document;
+  assert.equal(doc.querySelector('#night-row .txt').textContent, 'Mark this run: worca may answer for me');
+  assert.equal(doc.getElementById('nightModeHint').textContent, describeNewRun({ config: body.config, toggle: body.toggle }));
+  const off = await boot({ away: () => awayBody({ toggle: 'off' }) });
+  assert.match(off.window.document.getElementById('nightModeHint').textContent, /^Away mode is paused/);
 });

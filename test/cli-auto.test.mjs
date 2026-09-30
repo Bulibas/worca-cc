@@ -120,7 +120,7 @@ test('--night --yes: night mode owns the answers and prints each decision', asyn
   const r = spawnSync(process.execPath, [CLI, '--project', freshRepo(), '--prompt', 'demo task', '--yes', '--night'],
     { env: { ...process.env, WORCA_HOME: home, WORCA_MOCK: '1', HOME: userHome, USERPROFILE: userHome }, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.match(r.stdout, /night mode answered clarify /);
+  assert.match(r.stdout, /Away mode answered Clarifying questions before planning /);
   const row = newestRow();
   assert.equal(row.status, 'done');
   const n = getDb().prepare('SELECT COUNT(*) AS n FROM night_decisions WHERE pipeline_id = ?').get(row.id).n;

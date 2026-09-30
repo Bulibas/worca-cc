@@ -36,6 +36,7 @@ import { promptFields, projectForm, coerceInput } from '../shared/forms/project.
 import { whenOk } from '../shared/forms/layout.mjs';
 import { validate } from '../shared/forms/schema.mjs';
 import { collectAnswer } from '../shared/forms/answer.mjs';
+import { kindLabel } from '../shared/away-mode/labels.mjs';
 import { pauseExitCode, describePauseReason, promptOptions, REASON } from '../core/failure-policy.mjs';
 import { effectiveDebugSpawn } from '../core/settings.mjs';
 import { SCHEDULE_VALUE_FLAGS, wantsSchedule, readScheduleFlags, createFromFlags, waitAndRun, cmdSchedule } from './schedule.mjs';
@@ -328,8 +329,9 @@ Options:
   --after-any              …even if that run fails or is stopped
   --source-from-previous   Start on that run's feature branch (with --after)
   --yes, --non-interactive Auto-answer clarify (recommended, else first option) and gates (continue)
-  --night                  Night mode for this run: worca answers open questions for you while
-                           you are away (settings: window, grace, strategy — Settings › Night mode)
+  --night                  Mark this run: worca may answer its questions while you are away
+                           (your away hours or "I'm away now"), and by day once a question has
+                           waited 30 min. Configure in Settings > Away mode.
   --ui                     Same as "worca ui start" (accepts --port, --open, --mock)
   --install <targetDir>    Copy agents + /worca skill into <targetDir>/.claude
   -h, --help               Show this help
@@ -832,8 +834,10 @@ async function attachAndDrive(orch, flags, start) {
   orch.on('night-decision', ({ id, kind, record }) => {
     // Close the readline prompt night mode just made moot.
     if (promptAbort && promptAbort.questionId === id && !record?.guardrail) promptAbort.abort();
-    const what = record?.guardrail ? `guardrail ${record.guardrail}` : `answered ${kind} ${id}: ${String(record?.choice).slice(0, 120)}`;
-    out(c('magenta', `night mode ${what}${record?.flagged ? ' (flagged for review)' : ''}`));
+    const what = record?.guardrail
+      ? `paused: ${String(record.rationale || record.guardrail).replace(/^Paused:\s*/, '')}`
+      : `answered ${kindLabel(kind)} ${id}: ${String(record?.choice).slice(0, 120)}`;
+    out(c('magenta', `Away mode ${what}${record?.flagged && !record?.guardrail ? ' (please check)' : ''}`));
   });
 
   // Ctrl+C: 1st -> graceful pause (falls back to stop when not pausable);

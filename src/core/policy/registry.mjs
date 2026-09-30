@@ -16,6 +16,7 @@
 // format change). Every field lists the kinds it accepts; the editor disables the rest.
 
 import { domainError } from '../web-allowlist.mjs';
+import { FIELD_LABELS } from '../../shared/away-mode/labels.mjs';
 
 export const POLICY_SCHEMA = 1;
 export const KINDS = Object.freeze(['default', 'soft', 'hard']);
@@ -27,7 +28,7 @@ export const TEXT_MAX = 200;
 
 const GROUPS = Object.freeze({
   cost: 'Cost', ask: 'Ask Worca', guardrails: 'Guardrails', models: 'Models', plugins: 'Plugins', runs: 'Runs',
-  night: 'Night mode',
+  night: 'Away mode',
 });
 
 /**
@@ -60,21 +61,21 @@ export const FIELDS = Object.freeze([
   { key: 'run.humanInLoop', group: 'runs', label: 'Human in the loop', help: 'Applies until the project sets its own switch.', type: 'bool', kinds: ['default'] },
   { key: 'metrics.record', group: 'runs', label: 'Record runs to team metrics', help: 'Expected on: the Projects cell hints when "Include my runs" is off.', type: 'bool', kinds: ['soft'] },
   { key: 'worca.minVersion', group: 'runs', label: 'Minimum Worca version', help: 'An older client shows a banner and logs a note.', type: 'semver', kinds: ['soft'] },
-  // Night mode (src/core/night/*): `night: true` makes validateValue run the night leaf's own
-  // field rules after the base-type check, so the rules live in one place.
-  { key: 'night.enabled', group: 'night', label: 'Night mode', help: 'Lets a decider answer pending questions while the developer is away. A project or developer value wins.', type: 'bool', kinds: ['default'], night: true },
-  { key: 'night.window', group: 'night', label: 'Night window', help: 'HH:MM-HH:MM (24 h), in the developer\'s time zone.', type: 'string', kinds: ['default'], night: true },
-  { key: 'night.timeZone', group: 'night', label: 'Time zone', help: 'IANA name, e.g. Europe/Berlin; unset = the developer\'s machine.', type: 'string', kinds: ['default'], night: true },
-  { key: 'night.graceMinutes', group: 'night', label: 'Grace (minutes)', help: 'A question open this long is decided, even outside the window.', type: 'int', min: 1, max: 1440, kinds: ['default'], night: true },
-  { key: 'night.strategy', group: 'night', label: 'Strategy', help: 'weights | analysis | mixed', type: 'enum', values: ['weights', 'analysis', 'mixed'], kinds: ['default'], night: true },
-  { key: 'night.minConfidence', group: 'night', label: 'Min confidence', help: '0-100', type: 'int', min: 0, max: 100, kinds: ['default'], night: true },
-  { key: 'night.minMargin', group: 'night', label: 'Min margin', help: '0-100', type: 'int', min: 0, max: 100, kinds: ['default'], night: true },
-  { key: 'night.criteria', group: 'night', label: 'Criteria weights', help: 'matchesMemory, reversible, smallestScope, codebaseConventions, cost (0-10); unset ones keep their default.', type: 'criteria', kinds: ['default'], night: true },
-  { key: 'night.neverDecide', group: 'night', label: 'Never decide', help: 'Question kinds that always wait for the developer: clarify, questions, form, gate, workflow, recovery. Clarify and questions also cover the forms those steps ask with.', type: 'string[]', kinds: ['default'], night: true },
-  { key: 'night.spendCapUsd', group: 'night', label: 'Night spend cap (USD)', help: 'Across all runs since night mode took over (the window start, or the first decision while you were away); null = no cap.', type: 'usd-or-null', min: 0.1, max: 10000, kinds: ['default'], night: true },
-  { key: 'night.maxDecisions', group: 'night', label: 'Max decisions per run', help: '1-500', type: 'int', min: 1, max: 500, kinds: ['default'], night: true },
-  { key: 'night.maxExtraCycles', group: 'night', label: 'Extra review cycles', help: 'Per loop, granted while critical issues remain.', type: 'int', min: 0, max: 10, kinds: ['default'], night: true },
-  { key: 'night.allowCostCapOverride', group: 'night', label: 'Continue past team soft caps', help: 'Off by default. Never overrides a developer\'s own caps.', type: 'bool', kinds: ['default'], night: true },
+  // Away mode (src/core/night/*): `night: true` makes validateValue run the night leaf's own
+  // field rules after the base-type check, so the rules live in one place. Labels: src/shared/away-mode/labels.mjs.
+  { key: 'night.enabled', group: 'night', label: FIELD_LABELS.enabled.label, help: FIELD_LABELS.enabled.hint || 'On: All runs. Off: Only runs I marked.', type: 'bool', kinds: ['default'], night: true },
+  { key: 'night.window', group: 'night', label: FIELD_LABELS.window.label, help: FIELD_LABELS.window.hint, type: 'string', kinds: ['default'], night: true },
+  { key: 'night.timeZone', group: 'night', label: FIELD_LABELS.timeZone.label, help: FIELD_LABELS.timeZone.hint, type: 'string', kinds: ['default'], night: true },
+  { key: 'night.graceMinutes', group: 'night', label: FIELD_LABELS.graceMinutes.label, help: FIELD_LABELS.graceMinutes.hint, type: 'int', min: 1, max: 1440, kinds: ['default'], night: true },
+  { key: 'night.strategy', group: 'night', label: FIELD_LABELS.strategy.label, help: FIELD_LABELS.strategy.hint, type: 'enum', values: ['weights', 'analysis', 'mixed'], kinds: ['default'], night: true },
+  { key: 'night.minConfidence', group: 'night', label: FIELD_LABELS.minConfidence.label, help: FIELD_LABELS.minConfidence.hint, type: 'int', min: 0, max: 100, kinds: ['default'], night: true },
+  { key: 'night.minMargin', group: 'night', label: FIELD_LABELS.minMargin.label, help: FIELD_LABELS.minMargin.hint, type: 'int', min: 0, max: 100, kinds: ['default'], night: true },
+  { key: 'night.criteria', group: 'night', label: FIELD_LABELS.criteria.label, help: FIELD_LABELS.criteria.hint, type: 'criteria', kinds: ['default'], night: true },
+  { key: 'night.neverDecide', group: 'night', label: FIELD_LABELS.neverDecide.label, help: FIELD_LABELS.neverDecide.hint, type: 'string[]', kinds: ['default'], night: true },
+  { key: 'night.spendCapUsd', group: 'night', label: FIELD_LABELS.spendCapUsd.label, help: FIELD_LABELS.spendCapUsd.hint, type: 'usd-or-null', min: 0.1, max: 10000, kinds: ['default'], night: true },
+  { key: 'night.maxDecisions', group: 'night', label: FIELD_LABELS.maxDecisions.label, help: FIELD_LABELS.maxDecisions.hint, type: 'int', min: 1, max: 500, kinds: ['default'], night: true },
+  { key: 'night.maxExtraCycles', group: 'night', label: FIELD_LABELS.maxExtraCycles.label, help: FIELD_LABELS.maxExtraCycles.hint, type: 'int', min: 0, max: 10, kinds: ['default'], night: true },
+  { key: 'night.allowCostCapOverride', group: 'night', label: FIELD_LABELS.allowCostCapOverride.label, help: FIELD_LABELS.allowCostCapOverride.hint, type: 'bool', kinds: ['default'], night: true },
 ]);
 
 const BY_KEY = new Map(FIELDS.map((f) => [f.key, f]));

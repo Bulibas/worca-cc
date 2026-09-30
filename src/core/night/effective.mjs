@@ -16,11 +16,16 @@ function userLayer() {
   try { return nightModeSettings(); } catch { return null; }
 }
 
-/** Synchronous (settings file + sqlite + cached policy): safe to call at every arm. Never throws. */
-export function effectiveNightConfig(projectDir) {
+/** The three raw layers, cleaned later by resolveNightConfig. Never throws. */
+export function nightLayers(projectDir) {
   let team = {};
   try { team = projectDir ? teamNightLayer((k) => teamDefault(projectDir, k)) : {}; } catch { team = {}; }
-  return resolveNightConfig({ project: projectLayer(projectDir), user: userLayer(), team });
+  return { project: projectLayer(projectDir), user: userLayer(), team };
+}
+
+/** Synchronous (settings file + sqlite + cached policy): safe to call at every arm. Never throws. */
+export function effectiveNightConfig(projectDir) {
+  return resolveNightConfig(nightLayers(projectDir));
 }
 
 /** Project + user layers only (the policy "local" snapshot must not include the team layer). */

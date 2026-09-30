@@ -20,7 +20,7 @@ const settingsView = () => {
 test('settings: twenty-one info-tip icons, each with non-empty tip content', () => {
   const view = settingsView();
   const tips = [...view.querySelectorAll('button.info-tip')];
-  assert.equal(tips.length, 21, 'twenty-one ⓘ icons (appearance, model credentials, interface mode, 2 folder fields, budget heading, 3 budget fields, ask heading, 2 ask fields, chat history, night mode heading, scheduled-runs heading + failures field, title generation, auto workflow model, PR description model, spawn diagnostics, workspace scan models)');
+  assert.equal(tips.length, 21, 'twenty-one ⓘ icons (appearance, model credentials, interface mode, 2 folder fields, budget heading, 3 budget fields, ask heading, 2 ask fields, chat history, Away mode heading, scheduled-runs heading + failures field, title generation, auto workflow model, PR description model, spawn diagnostics, workspace scan models)');
   for (const tip of tips) {
     assert.equal(tip.getAttribute('type'), 'button', 'icon must not submit anything');
     assert.match(tip.getAttribute('aria-label') || '', /^About /, 'icon names its setting');

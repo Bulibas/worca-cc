@@ -62,7 +62,7 @@ import {
   nightModeSettings, setNightMode, nightModeToggle, setNightModeToggle, assertNightModeToggleInput,
 } from '../src/core/settings.mjs';
 import { resolveNightConfig, validateNightPatch } from '../src/core/night/config.mjs';
-import { effectiveNightConfig } from '../src/core/night/effective.mjs';
+import { effectiveNightConfig, nightLayers } from '../src/core/night/effective.mjs';
 import { readNightDecisions } from '../src/core/night/store.mjs';
 import { resolveDefragModel, defragDefaultModel, defragWorkflowView, checkStartPair } from '../src/core/memory-defrag-model.mjs';
 import { describeTitleModel } from '../src/core/title.mjs';
@@ -180,6 +180,8 @@ import {
 import { applyMetricsChange } from '../src/core/ask/metrics-deps.mjs';
 import { metricsEventPrompt, metricsNoticeText } from '../src/core/ask/metrics-proposal.mjs';
 import { applyPolicyChange } from '../src/core/ask/policy-deps.mjs';
+import { createAwaySwitch, applyAwayChange } from '../src/core/ask/away-deps.mjs';
+import { awayEventPrompt, awayNoticeText } from '../src/core/ask/away-proposal.mjs';
 import { policyEventPrompt, policyNoticeText } from '../src/core/ask/policy-proposal.mjs';
 import { scheduleEventPrompt, scheduleNoticeText } from '../src/core/ask/schedule-spec.mjs';
 import { applyModelChange } from '../src/core/ask/model-deps.mjs';
@@ -2874,7 +2876,7 @@ app.post('/api/stop', (req, res) => {
 function setRunNightMode(runId, mode, by = 'local') {
   const entry = runs.get(runId);
   if (!entry) throw new Error('unknown runId');
-  if (typeof entry.orch?.setNightOverride !== 'function') throw Object.assign(new Error('run does not support night mode'), { code: 'BAD_NIGHT_MODE' });
+  if (typeof entry.orch?.setNightOverride !== 'function') throw Object.assign(new Error('run does not support Away mode'), { code: 'BAD_NIGHT_MODE' });
   entry.orch.setNightOverride(mode, by || 'local');
 }
 app.post('/api/run/night', (req, res) => {
@@ -2894,6 +2896,23 @@ app.get('/api/night-decisions', (req, res) => {
   const pipelineId = String(req.query.pipelineId || '') || runs.get(String(req.query.runId || ''))?.orch?.pipeline?.id;
   if (!pipelineId) return badRequest(res, 'pipelineId or runId required');
   res.json({ decisions: readNightDecisions(pipelineId) });
+});
+
+// GET /api/away-mode[?projectDir=] — what Away mode will do: the effective config (with the team
+// layer when a project is given), where each field comes from, what an empty field falls back to,
+// the live status and the raw layers the forms edit. Every surface renders its text from this
+// through src/shared/away-mode/describe.mjs.
+app.get('/api/away-mode', (req, res) => {
+  const raw = typeof req.query.projectDir === 'string' && req.query.projectDir ? req.query.projectDir : null;
+  const projectDir = raw ? resolveProjectDir(raw) : null;          // same key as PATCH /api/config (~ expanded)
+  const user = nightModeSettings() || {};
+  if (!projectDir) {
+    const { config, sources } = resolveNightConfig({ user });
+    return res.json({ config, sources, inherited: resolveNightConfig({}), toggle: nightModeToggle(), user, project: null });
+  }
+  const L = nightLayers(projectDir);
+  const { config, sources } = resolveNightConfig(L);
+  res.json({ config, sources, inherited: resolveNightConfig({ user: L.user, team: L.team }), toggle: nightModeToggle(), user, project: L.project || {} });
 });
 
 app.post('/api/pause', (req, res) => {
@@ -5505,6 +5524,9 @@ app.get('/api/credentials', async (req, res) => {
 // which cannot read worca's database. Its MCP child then only relays each JSON-RPC line
 // here; the worca tools run in this process (createAskToolServer), in the chat owner's
 // billing context. One token per turn, loopback callers only, dropped when the turn ends.
+// set_away_now / set_run_away_mode: the parent's half, over the settings and THIS process's live runs.
+const askAwaySwitch = createAwaySwitch({ liveRun: liveRunEntry, runs, emitChanged });
+
 const askRelays = new Map();   // token -> { rpc, out, billTo, owner }
 
 function askAgentRelay({ threadId, reader, web = null }) {
@@ -5524,6 +5546,14 @@ function askAgentRelay({ threadId, reader, web = null }) {
         if (!live || !live.orch || typeof live.orch.liveDiff !== 'function') return null;
         const out = await liveDiffOf(live).catch(() => null);
         return out && typeof out.patch === 'string' ? out.patch : null;
+      },
+      // Away mode on a live run (get_away_mode): its switch, mark and open question live only here.
+      readLiveNight: (id) => {
+        const live = liveRunEntry(id);
+        if (!live || !live.orch) return null;
+        const dir = live.projectDir || null;
+        return { status: live.orch.state?.status ?? live.status ?? null, night: live.orch.state?.night || null, waiting: live.orch.pendingQuestion != null,
+          projectDir: dir, projectKey: dir ? projectKey(dir) : null };
       },
     },
   });
@@ -7325,7 +7355,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
         // workflowId once the user saved it; a run card keeps its pre-P3 line byte for byte.
         const wf = !!(b.card && b.card.type === 'workflow');
         if (wf && b.state === 'building') continue;   // transient (no name yet) — never worth a header line
-        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web')) {
+        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'away')) {
           cards.push({ id: b.id, type: b.card.type, state: b.state, summary: b.card.summary || '' });
           continue;
         }
@@ -7475,10 +7505,12 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     const attachmentNames = {};
     for (const a of askListAttachments(id)) attachmentNames[a.id] = a.name;
 
+    // A shared sign-in's name: the MCP child reads/marks notifications per person (step 3); Away mode
+    // switches are attributed to it.
+    const turnReader = reader || (thread.createdBy && askSharedOwner(thread) ? thread.createdBy : null);
     turn = createAskTurn({
       threadId: id, assistantMessageId: asstMsg.id, userMessageId: userMsg.id,
-      // A shared sign-in's name: the MCP child reads/marks notifications per person (step 3).
-      reader: reader || (thread.createdBy && askSharedOwner(thread) ? thread.createdBy : null),
+      reader: turnReader,
       prompt, systemPrompt, restoredPrompt,
       model, effort,
       resumeSessionId: thread.sessionId || null,
@@ -7509,6 +7541,8 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         // the open Scripts tabs drop their list and the composer marks its script list dirty.
         onScriptMutation: () => { emitChanged('scripts-changed', 'updated'); },
         trackRun: (input, { pin } = {}) => askTrackRun(id, input, pin ?? null),
+        // set_away_now / set_run_away_mode: the parent applies what the MCP child validated.
+        awaySwitch: (req) => askAwaySwitch(req, { actor: turnReader || 'local' }),
         // pause / resume / skip / mark-read in the MCP child: the Schedules page and the badges repaint.
         onScheduleMutation: () => { emitChanged('schedules-changed', 'ask'); emitChanged('notifications-changed'); },
       },
@@ -7777,9 +7811,9 @@ async function startMetricsEventTurn(threadId, block) {
   const state = block.state === 'declined' ? 'declined' : block.state === 'failed' ? 'failed' : 'applied';
   const result = card.result || null;
   // One event turn for every non-workflow card; the type picks the wording. Metrics is the fallback.
-  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' ? card.type : 'metrics';
-  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, metrics: metricsEventPrompt }[kind];
-  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, metrics: metricsNoticeText }[kind];
+  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'away' ? card.type : 'metrics';
+  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, away: awayEventPrompt, metrics: metricsEventPrompt }[kind];
+  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, away: awayNoticeText, metrics: metricsNoticeText }[kind];
   const text = eventPrompt({ cardId: block.id, state, card, result });
   const notice = noticeText({ state, card, result });
   let mv = await validateModelEffort(thread.model, thread.effort);
@@ -7944,12 +7978,14 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
       followCloneCard(id, cardId, job);
       return res.json({ block });
     }
-    if (found.block.card && (found.block.card.type === 'metrics' || found.block.card.type === 'policy')) {
+    if (found.block.card && ['metrics', 'policy', 'away'].includes(found.block.card.type)) {
       // Metrics / policy card (docs/team-metrics.md, docs/team-policy.md "Ask Worca"): proposed → applied | failed |
       // declined. The change is the outward-facing part — a branch on origin, a commit to the team's policy, a
       // marker on another repo, this machine's switch, the workspace's home — so it happens HERE, behind the
       // click, never in the model's tool.
-      const apply = found.block.card.type === 'policy' ? applyPolicyChange : applyMetricsChange;
+      // An Away mode card writes this machine's stored settings (user) or one project's layer, like POST /api/settings / PATCH /api/config.
+      const type = found.block.card.type;
+      const apply = type === 'policy' ? applyPolicyChange : type === 'away' ? applyAwayChange : applyMetricsChange;
       if (body.state !== 'applied' && body.state !== 'declined') return badRequest(res, 'state must be "applied" or "declined"');
       if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
       if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
@@ -7970,6 +8006,11 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
         block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
       } finally { askCardBusy.delete(cardId); }
       if (!block) return res.status(409).json({ error: 'card vanished' });
+      if (type === 'away' && block && block.state === 'applied') {
+        // What POST /api/settings / PATCH /api/config do after a write: refresh every surface and re-arm live runs.
+        emitChanged('settings-changed');
+        for (const e of runs.values()) { try { e.orch?.nightConfigChanged?.(); } catch { /* keep going */ } }
+      }
       const turn = await startMetricsEventTurn(id, block);
       return res.json({ block, turn });
     }

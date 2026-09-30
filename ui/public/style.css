@@ -4371,6 +4371,9 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .rd-night-wrap{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2)}
 .rd-night-wrap[hidden]{display:none}
 .rd-night{font-size:12px}
+.rd-night-pill{font-size:11.5px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);color:var(--ink-2);white-space:nowrap}
+.rd-night-pill:empty{display:none}
+.rd-night-pill[data-state="now"]{border-color:var(--amber);background:var(--amber-wash)}
 .rd-night-sec{margin:14px 0}
 .rd-night-sec h3{font-size:13px;margin:0 0 8px}
 .rd-night-decisions{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
@@ -4380,6 +4383,16 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .rd-nd-why{font-size:12px;color:var(--ink-2);white-space:pre-wrap}
 .night-crit{display:inline-flex;align-items:center;gap:4px;margin:0 10px 6px 0;font-size:12px}
 .pd-night-card{margin-top:14px}
+/* Away mode card (night-mode-form.mjs): live summary, status strip, sections, radio group. */
+.away-summary{margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--panel);font-size:13px;line-height:1.5}
+.away-line{display:block}
+.away-status{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+.away-basic h3{font-size:13px;margin:4px 0 10px}
+.away-input-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.away-which{display:flex;flex-direction:column;gap:2px}
+.away-radio{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.away-adv{margin:10px 0 0;padding:8px 0 0;border-top:1px solid var(--line)}
+.away-adv > summary{cursor:pointer;font-weight:600;font-size:13px;margin-bottom:8px}
 /* Explicit twin: the UA [hidden] rule is (0,0,0) and loses to any author
    `display`, so without this the panel would render even while hidden. */
 .rd-questions[hidden]{display:none;}
@@ -5312,6 +5325,11 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-mcard-before.is-unset,.ask-mcard-after.is-unset{text-decoration:none;font-style:italic;color:var(--ink-3);}
 .ask-mcard-arrow{color:var(--ink-3);}
 .ask-mcard-after{color:var(--ink);font-weight:600;}
+.ask-acard-now,.ask-acard-after,.ask-acard-changed{margin-top:6px;font-size:12.5px}
+.ask-acard-line{margin:2px 0 0}
+.ask-acard-after mark{background:var(--amber-wash);color:inherit;border-radius:3px;padding:0 2px}
+.ask-acard-changes{margin:4px 0 0;padding-left:18px}
+.ask-acard-saved{margin-top:8px;font-size:12.5px}
 /* schedule card (buildScheduleCard; docs/scheduled-runs.md "Ask Worca"): the metrics card's chrome + a before/after grid */
 .ask-scard-kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 14px;margin-top:4px;font-size:12.5px;}
 .ask-scard-k{color:var(--ink-3);}

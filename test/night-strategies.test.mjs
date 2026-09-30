@@ -41,7 +41,7 @@ test('analysis confident → its choice, not flagged', async () => {
 test('analysis failure → recommended or first, flagged', async () => {
   const d = await decideQuestion(Q({ confidence: [10, 50, 40], recommended: 'B' }), { ...C, strategy: 'analysis' }, { analyze: async () => { throw new Error('boom'); } });
   assert.deepEqual([d.choice, d.flagged], ['B', true]);
-  assert.match(d.rationale, /analysis unavailable: boom/);
+  assert.match(d.rationale, /could not weigh the options \(boom\); took the agent's recommendation/);
 });
 
 test('weightedTotals / mostReversible', () => {
@@ -52,15 +52,19 @@ test('weightedTotals / mostReversible', () => {
 
 test('gate rule', () => {
   const crit = [{ severity: 'critical', title: 'x' }], major = [{ severity: 'major', title: 'y' }];
-  assert.deepEqual(gateRule({ issues: major, extraUsed: 0 }, C), { decision: 'continue', flagged: false, reason: 'no critical issues remain' });
+  assert.deepEqual(gateRule({ issues: major, extraUsed: 0 }, C), { decision: 'continue', flagged: false, reason: 'no critical issues left, continuing' });
   assert.equal(gateRule({ issues: crit, extraUsed: 0 }, C).decision, 'another');
+  assert.equal(gateRule({ issues: crit, extraUsed: 0 }, C).reason, '1 critical issue left, one more fix round');
+  assert.equal(gateRule({ issues: [...crit, ...crit], extraUsed: 0 }, C).reason, '2 critical issues left, one more fix round');
   const spent = gateRule({ issues: crit, extraUsed: 1 }, C);
   assert.deepEqual([spent.decision, spent.flagged], ['continue', true]);
+  assert.equal(spent.reason, '1 critical issue left but the extra fix rounds are used up; continuing');
 });
 
 test('workflow rule: accept; flag when the night budget is ≥80% used', () => {
-  assert.deepEqual(workflowRule({ proposal: { name: 'wf' }, budget: null }), { payload: { decision: 'accept', name: 'wf', nodes: {} }, flagged: false, reason: 'accepted as proposed' });
+  assert.deepEqual(workflowRule({ proposal: { name: 'wf' }, budget: null }), { payload: { decision: 'accept', name: 'wf', nodes: {} }, flagged: false, reason: 'workflow accepted as proposed' });
   assert.equal(workflowRule({ proposal: { name: 'wf' }, budget: { spent: 8, cap: 10 } }).flagged, true);
+  assert.equal(workflowRule({ proposal: { name: 'wf' }, budget: { spent: 8, cap: 10 } }).reason, 'workflow accepted; 80% of the away spend cap used');
 });
 
 test('recovery rule: retry until the per-class budget, then pause flagged', () => {
@@ -75,5 +79,18 @@ test('an analysis choice outside the options is replaced by the best-scored one 
   });
   assert.equal(d.choice, 'B');
   assert.equal(d.flagged, true);
-  assert.match(d.rationale, /not one of the options/);
+  assert.match(d.rationale, /which is not an option/);
+});
+
+test('rationales in plain words (wording §3.6)', async () => {
+  const met = await decideQuestion(Q({ confidence: [82, 10, 8], recommended: 'A' }), C, {});
+  assert.equal(met.rationale, 'the agent recommended this at 82%, well ahead of the next option');
+  const low = await decideQuestion(Q({ confidence: [40, 50, 10], recommended: 'B' }), { ...C, strategy: 'weights' }, {});
+  assert.equal(low.rationale, 'the agent was not sure enough; first option taken');
+  const none = await decideQuestion({ id: 'q', question: '?', options: [] }, C, {});
+  assert.equal(none.rationale, 'free-text question; worca cannot answer it');
+  const firstOpt = await decideQuestion(Q({}), { ...C, strategy: 'analysis' }, { analyze: async () => { throw new Error('boom'); } });
+  assert.equal(firstOpt.rationale, 'could not weigh the options (boom); first option taken');
+  const unsure = await decideQuestion(Q({}), { ...C, strategy: 'analysis' }, { analyze: async () => ({ choice: 'A', confidence: 10, rationale: 'r', scores: {} }) });
+  assert.match(unsure.rationale, /^the agent was not sure enough; took the option easiest to undo\. r$/);
 });

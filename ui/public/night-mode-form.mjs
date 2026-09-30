@@ -1,18 +1,20 @@
-// ui/public/night-mode-form.mjs — the night mode fields (src/core/night/config.mjs), shared by
+// ui/public/night-mode-form.mjs — the Away mode fields (src/core/night/config.mjs), shared by
 // the global Settings card (level 'user') and the project Overview card (level 'project').
-// Pure DOM: renderNightForm builds the inputs, readNightForm reads them back into a patch.
-// A field left empty is "not set here": it is sent as `__unset` so the next layer applies.
+// Pure DOM: renderNightForm builds the live summary and the inputs, readNightForm reads them back
+// into a patch. A field left empty is "not set here": it is sent as `__unset` so the next layer applies.
+// Every word comes from src/shared/away-mode (labels.mjs, describe.mjs); copy: plans/away-mode-wording.md §3.
+import { FIELD_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, KIND_LABELS, WHICH_RUNS_OPTIONS } from '../../src/shared/away-mode/labels.mjs';
+import { describeAwayMode } from '../../src/shared/away-mode/describe.mjs';
 
 export const NIGHT_KINDS = ['clarify', 'questions', 'form', 'gate', 'workflow', 'recovery'];
 export const CRITERIA = ['matchesMemory', 'reversible', 'smallestScope', 'codebaseConventions', 'cost'];
-const STRATEGIES = ['weights', 'analysis', 'mixed'];
-const NUMBER_FIELDS = [
-  ['graceMinutes', 'Grace (minutes)', 1, 1440, 'A question open this long is decided, even outside the window.'],
-  ['minConfidence', 'Min confidence (0-100)', 0, 100, 'The agent\'s recommendation is used when at least this confident…'],
-  ['minMargin', 'Min margin (0-100)', 0, 100, '…and ahead of the runner-up by at least this much.'],
-  ['maxDecisions', 'Max decisions per run', 1, 500, 'Reaching it pauses the run for review.'],
-  ['maxExtraCycles', 'Extra review cycles', 0, 10, 'Per loop, granted while critical issues remain.'],
-];
+// Per-field input limits of the number fields ([min, max]).
+const NUM_LIMITS = { graceMinutes: [1, 1440], minConfidence: [0, 100], minMargin: [0, 100], maxDecisions: [1, 500], maxExtraCycles: [0, 10] };
+// Where an empty field's value comes from (the inherited layer's source).
+const SOURCE_TAG = { default: '(default)', team: '(team default)', user: '(your setting)' };
+// The project level's empty choice: never "(undefined)" when nothing is inherited yet.
+const sameAs = (shown) => (shown == null || shown === '' ? 'Same as my settings' : `Same as my settings (${shown})`);
+const CTX = new WeakMap();   // root → {level, inherited, toggle, offset, projectName}
 
 function el(doc, tag, cls, text) {
   const n = doc.createElement(tag);
@@ -39,47 +41,118 @@ function field(doc, label, hint) {
   return wrap;
 }
 
-/** "(inherits: 30 · team)" — what an empty field falls back to. */
-function inherited(effective, sources, f, fmt = String) {
-  const v = effective[f];
-  const src = sources[f] && sources[f] !== 'default' ? ` · ${sources[f]}` : '';
-  return `inherits ${v == null ? 'off' : fmt(v)}${src}`;
+/** The placeholder of an empty input: the inherited value (project level: "Same as my settings (…)"). */
+const placeholderFor = (level, v) => (level === 'project' ? sameAs(v ?? null) : String(v ?? ''));
+
+/** "(default)" / "(team default)" / "(your setting)" after a field not set at this level. */
+function sourceHint(doc, wrap, values, inhSrc, f) {
+  const tag = values[f] === undefined ? SOURCE_TAG[inhSrc[f]] : null;
+  if (tag) wrap.append(el(doc, 'small', 'hint away-inherited', tag));
+}
+
+function numInput(doc, f, level, values, inh) {
+  const [min, max] = NUM_LIMITS[f];
+  const inp = el(doc, 'input', 'input input-mini night-num'); inp.type = 'number'; inp.min = String(min); inp.max = String(max); inp.step = '1';
+  inp.dataset.field = f; inp.value = values[f] == null ? '' : String(values[f]);
+  inp.placeholder = placeholderFor(level, inh[f]);
+  return inp;
+}
+
+/** A number field: label, hint, `[prefix][input][ suffix]`, and where an empty value comes from. */
+function numField(doc, f, level, values, inh, inhSrc, { suffix = '', prefix = '' } = {}) {
+  const w = field(doc, FIELD_LABELS[f].label, FIELD_LABELS[f].hint);
+  const inp = numInput(doc, f, level, values, inh);
+  const row = el(doc, 'div', 'away-input-row');
+  if (prefix) row.append(doc.createTextNode(prefix));
+  row.append(inp);
+  if (suffix) row.append(doc.createTextNode(` ${suffix}`));
+  w.append(row);
+  sourceHint(doc, w, values, inhSrc, f);
+  return { wrap: w, input: inp };
+}
+
+/** A tri-state select: '' (not set here) / on / off. */
+function triSelect(doc, cls, f, level, values, inhValue) {
+  const sel = el(doc, 'select', cls); sel.dataset.field = f;
+  const none = el(doc, 'option', null, level === 'project' ? sameAs(typeof inhValue === 'boolean' ? (inhValue ? 'On' : 'Off') : null) : 'Not set');
+  none.value = ''; sel.append(none);
+  for (const [v, t] of [['on', 'On'], ['off', 'Off']]) { const o = el(doc, 'option', null, t); o.value = v; sel.append(o); }
+  sel.value = values[f] !== undefined ? (values[f] ? 'on' : 'off') : '';
+  return sel;
+}
+
+// Called from renderNightForm with the normalised `inh`/`inhSrc`: both are always objects (never null),
+// so the fallback paint's `inherited: {config: null}` cannot throw here. The group records whether the user
+// set a value here: untouched at user level means "inherit", exactly like the old '' select option.
+function whichRuns(doc, level, own, inh, inhSrc) {
+  const wrap = field(doc, FIELD_LABELS.enabled.label, '');
+  const grp = el(doc, 'div', 'away-which'); grp.setAttribute('role', 'radiogroup');
+  grp.dataset.set = own === undefined ? '' : '1';
+  const name = `away-which-${level}`;
+  const known = typeof inh.enabled === 'boolean';                  // false when the fetch failed or has not answered
+  const opts = level === 'project'
+    ? [{ value: '', label: sameAs(known ? WHICH_RUNS_OPTIONS.find((o) => o.value === inh.enabled).label : null), hint: '' }, ...WHICH_RUNS_OPTIONS]
+    : WHICH_RUNS_OPTIONS;
+  const shown = own === undefined ? (level === 'project' ? '' : String(inh.enabled === true)) : String(own);
+  for (const o of opts) {
+    const lab = el(doc, 'label', 'away-radio'); const r = el(doc, 'input'); r.type = 'radio'; r.name = name; r.value = String(o.value);
+    r.checked = r.value === shown;
+    lab.append(r, ` ${o.label}`); grp.append(lab);
+    if (o.hint) grp.append(el(doc, 'small', 'hint', o.hint));
+  }
+  if (own === undefined && level === 'user' && known) grp.append(el(doc, 'small', 'hint away-inherited', SOURCE_TAG[inhSrc.enabled || 'default']));
+  grp.addEventListener('change', () => { grp.dataset.set = '1'; });
+  wrap.append(grp);
+  return wrap;
+}
+
+function details(doc, title) {
+  const d = el(doc, 'details', 'away-adv');
+  d.append(el(doc, 'summary', null, title));
+  return d;
 }
 
 /**
- * Build the fields into `root` (replacing its content).
+ * Build the summary and the fields into `root` (replacing its content).
  * @param {HTMLElement} root
- * @param {{level:'user'|'project', values?:object, effective?:object, sources?:object}} o
- *   values: the layer's own fields; effective/sources: what applies and where it comes from.
+ * @param {{level:'user'|'project', values?:object, effective?:object, sources?:object,
+ *   inherited?:{config:object|null, sources:object}, toggle?:string, now?:number, projectName?:string|null}} o
+ *   values: the layer's own fields; effective/sources: what applies and where it comes from;
+ *   inherited: what an EMPTY field falls back to (GET /api/away-mode), null config = unknown.
  */
-export function renderNightForm(root, { level, values = {}, effective = {}, sources = {} }) {
+export function renderNightForm(root, { level, values = {}, effective = {}, sources = {}, inherited = { config: effective, sources }, toggle = 'auto', now = Date.now(), projectName = null }) {
   const doc = root.ownerDocument;
   root.replaceChildren();
+  delete root.dataset.dirty;
   root.dataset.level = level;
-  const has = (f) => values[f] !== undefined;
+  const inh = (inherited && inherited.config) || {};
+  const inhSrc = (inherited && inherited.sources) || {};
 
-  // enabled: a switch at user level; inherit / on / off per project.
-  const en = field(doc, 'Night mode', level === 'project' ? inherited(effective, sources, 'enabled', (v) => (v ? 'on' : 'off')) : 'Eligible runs may be answered while you are away.');
-  const enSel = el(doc, 'select', 'select night-enabled');
-  enSel.dataset.field = 'enabled';
-  for (const [v, t] of [['', level === 'project' ? 'Inherit' : 'Not set'], ['on', 'On'], ['off', 'Off']]) {
-    const o = el(doc, 'option', null, t); o.value = v; enSel.append(o);
-  }
-  enSel.value = has('enabled') ? (values.enabled ? 'on' : 'off') : '';
-  en.append(enSel); root.append(en);
+  const summary = el(doc, 'p', 'away-summary'); summary.setAttribute('aria-live', 'polite');
+  const body = el(doc, 'div', 'away-body');      // fresh on every render: its listeners never stack
+  root.append(summary, body);
 
-  // window: two times; both empty = not set here, "No window" = an explicit null.
-  const win = field(doc, 'Night window', `24 h, in your time zone. ${inherited(effective, sources, 'window')}`);
+  // C. When and where worca answers (open).
+  const basic = el(doc, 'div', 'away-basic');
+  basic.append(el(doc, 'h3', null, 'When and where worca answers'));
+
+  const win = field(doc, FIELD_LABELS.window.label, FIELD_LABELS.window.hint);
   const [ws, we] = typeof values.window === 'string' ? values.window.split('-') : ['', ''];
-  const start = el(doc, 'input', 'input input-mini night-window-start'); start.type = 'time'; start.value = ws || '';
-  const end = el(doc, 'input', 'input input-mini night-window-end'); end.type = 'time'; end.value = we || '';
-  win.append(start, doc.createTextNode(' – '), end);
-  offBox(doc, win, 'night-window-off', 'No window', values.window === null, [start, end]);
-  root.append(win);
+  const [iws, iwe] = typeof inh.window === 'string' ? inh.window.split('-') : [null, null];
+  const start = el(doc, 'input', 'input input-mini night-window-start'); start.type = 'time'; start.value = ws || ''; start.placeholder = placeholderFor(level, iws);
+  const end = el(doc, 'input', 'input input-mini night-window-end'); end.type = 'time'; end.value = we || ''; end.placeholder = placeholderFor(level, iwe);
+  const winRow = el(doc, 'div', 'away-input-row');
+  winRow.append(start, doc.createTextNode(' to '), end);
+  win.append(winRow);
+  sourceHint(doc, win, values, inhSrc, 'window');
+  offBox(doc, win, 'night-window-off', 'No away hours', values.window === null, [start, end]);
+  win.append(el(doc, 'small', 'hint', 'You only count as away when you click "I\'m away now".'));
+  basic.append(win);
 
-  const tz = field(doc, 'Time zone', `IANA name, e.g. Europe/Berlin. ${inherited(effective, sources, 'timeZone')}`);
+  const tz = field(doc, FIELD_LABELS.timeZone.label, FIELD_LABELS.timeZone.hint);
   const tzIn = el(doc, 'input', 'input night-timezone'); tzIn.type = 'text'; tzIn.dataset.field = 'timeZone';
   tzIn.value = typeof values.timeZone === 'string' ? values.timeZone : '';
+  tzIn.placeholder = placeholderFor(level, inh.timeZone);
   try {
     const zones = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [];
     if (zones.length) {
@@ -88,60 +161,88 @@ export function renderNightForm(root, { level, values = {}, effective = {}, sour
       tzIn.setAttribute('list', list.id); tz.append(list);
     }
   } catch { /* no zone list: plain text */ }
-  tz.append(tzIn); root.append(tz);
+  tz.append(tzIn);
+  sourceHint(doc, tz, values, inhSrc, 'timeZone');
+  basic.append(tz);
 
-  const st = field(doc, 'Strategy', `weights: the agent's own confidence · analysis: a read-only decider scores each option · mixed: weights when decisive, else analysis. ${inherited(effective, sources, 'strategy')}`);
+  basic.append(whichRuns(doc, level, values.enabled, inh, inhSrc));
+
+  const byDay = numField(doc, 'graceMinutes', level, values, inh, inhSrc, { suffix: 'minutes' });
+  byDay.wrap.classList.add('away-byday');
+  offBox(doc, byDay.wrap, 'night-grace-off', 'Never by day', values.graceMinutes === null, [byDay.input]);
+  byDay.wrap.append(el(doc, 'small', 'hint', 'Marked runs wait for you outside away hours, like every other run.'));
+  basic.append(byDay.wrap);
+  body.append(basic);
+
+  // D. How worca picks an answer (collapsed).
+  const pick = details(doc, 'How worca picks an answer');
+  const method = field(doc, FIELD_LABELS.strategy.label, FIELD_LABELS.strategy.hint);
   const stSel = el(doc, 'select', 'select night-strategy'); stSel.dataset.field = 'strategy';
-  const none = el(doc, 'option', null, level === 'project' ? 'Inherit' : 'Not set'); none.value = ''; stSel.append(none);
-  for (const v of STRATEGIES) { const o = el(doc, 'option', null, v); o.value = v; stSel.append(o); }
-  stSel.value = has('strategy') ? values.strategy : '';
-  st.append(stSel); root.append(st);
-
-  for (const [f, label, min, max, hint] of NUMBER_FIELDS) {
-    const w = field(doc, label, `${hint} ${inherited(effective, sources, f)}`);
-    const inp = el(doc, 'input', 'input input-mini night-num'); inp.type = 'number'; inp.min = String(min); inp.max = String(max); inp.step = '1';
-    inp.dataset.field = f; inp.value = values[f] == null ? '' : String(values[f]);
-    w.append(inp);
-    if (f === 'graceMinutes') offBox(doc, w, 'night-grace-off', 'No grace timeout', values.graceMinutes === null, [inp]);
-    root.append(w);
+  const m = METHOD_OPTIONS.find((o) => o.value === inh.strategy);
+  const none = el(doc, 'option', null, level === 'project' ? sameAs(m && m.label) : 'Not set'); none.value = ''; stSel.append(none);
+  for (const o of METHOD_OPTIONS) {
+    const opt = el(doc, 'option', null, o.label); opt.value = o.value;
+    if (o.hint) opt.title = o.hint;
+    stSel.append(opt);
   }
-
-  const cr = field(doc, 'Criteria weights (0-10)', 'How the analysis weighs each option. Empty keeps the inherited weight.');
+  stSel.value = values.strategy !== undefined ? values.strategy : '';
+  method.append(stSel);
+  sourceHint(doc, method, values, inhSrc, 'strategy');
+  pick.append(method);
+  pick.append(numField(doc, 'minConfidence', level, values, inh, inhSrc, { suffix: '% sure' }).wrap);
+  pick.append(numField(doc, 'minMargin', level, values, inh, inhSrc, { suffix: 'points' }).wrap);
+  const cr = field(doc, FIELD_LABELS.criteria.label, FIELD_LABELS.criteria.hint);
   for (const c of CRITERIA) {
-    const lab = el(doc, 'label', 'night-crit', `${c} `);
+    const lab = el(doc, 'label', 'night-crit', `${CRITERIA_LABELS[c]} `);
     const inp = el(doc, 'input', 'input input-mini night-crit-val'); inp.type = 'number'; inp.min = '0'; inp.max = '10'; inp.step = '0.5';
     inp.dataset.crit = c;
-    inp.placeholder = effective.criteria && effective.criteria[c] != null ? String(effective.criteria[c]) : '';
+    inp.placeholder = String(inh.criteria?.[c] ?? '');
     if (values.criteria && Number.isFinite(values.criteria[c])) inp.value = String(values.criteria[c]);
     lab.append(inp); cr.append(lab);
   }
-  root.append(cr);
+  pick.append(cr);
+  body.append(pick);
 
-  const nd = field(doc, 'Never decide', 'These question kinds always wait for you. Clarify and questions also cover the forms those steps ask with.');
+  // E. Limits (collapsed).
+  const limits = details(doc, 'Limits');
+  limits.append(numField(doc, 'maxDecisions', level, values, inh, inhSrc, { suffix: 'answers' }).wrap);
+  limits.append(numField(doc, 'maxExtraCycles', level, values, inh, inhSrc).wrap);
+  if (level === 'user') {
+    const cap = field(doc, FIELD_LABELS.spendCapUsd.label, FIELD_LABELS.spendCapUsd.hint);
+    const inp = el(doc, 'input', 'input input-mini night-spend-cap'); inp.type = 'number'; inp.min = '0.1'; inp.step = '0.1';
+    inp.value = values.spendCapUsd == null ? '' : String(values.spendCapUsd);
+    inp.placeholder = placeholderFor(level, inh.spendCapUsd);
+    const row = el(doc, 'div', 'away-input-row');
+    row.append(doc.createTextNode('$'), inp, doc.createTextNode(' spent while away'));
+    cap.append(row);
+    sourceHint(doc, cap, values, inhSrc, 'spendCapUsd');
+    offBox(doc, cap, 'night-spend-cap-off', 'No cap', values.spendCapUsd === null, [inp]);
+    limits.append(cap);
+  } else {
+    limits.append(el(doc, 'small', 'hint', 'The spend cap is set once for you, not per project, because it counts spending across every run.'));
+  }
+  const ov = field(doc, FIELD_LABELS.allowCostCapOverride.label, FIELD_LABELS.allowCostCapOverride.hint);
+  ov.append(triSelect(doc, 'select night-override', 'allowCostCapOverride', level, values, inh.allowCostCapOverride));
+  sourceHint(doc, ov, values, inhSrc, 'allowCostCapOverride');
+  limits.append(ov);
+  body.append(limits);
+
+  // F. Always wait for me on… (collapsed).
+  const wait = details(doc, FIELD_LABELS.neverDecide.label);
+  wait.append(el(doc, 'small', 'hint', FIELD_LABELS.neverDecide.hint));
   for (const k of NIGHT_KINDS) {
     const lab = el(doc, 'label', 'check-row');
     const cb = el(doc, 'input', 'night-never'); cb.type = 'checkbox'; cb.value = k;
     cb.checked = Array.isArray(values.neverDecide) && values.neverDecide.includes(k);
-    lab.append(cb, ` ${k}`); nd.append(lab);
+    lab.append(cb, ` ${KIND_LABELS[k]}`); wait.append(lab);
+    if (k === 'form') wait.append(el(doc, 'small', 'hint', 'A form asked as part of the two kinds above follows their tick too.'));
   }
-  root.append(nd);
+  body.append(wait);
 
-  if (level === 'user') {
-    const cap = field(doc, 'Night spend cap (USD)', `Across all runs since night mode took over (the window start, or the first decision while you were away). Reaching it pauses the run. ${inherited(effective, sources, 'spendCapUsd')}`);
-    const inp = el(doc, 'input', 'input input-mini night-spend-cap'); inp.type = 'number'; inp.min = '0.1'; inp.step = '0.1';
-    inp.value = values.spendCapUsd == null ? '' : String(values.spendCapUsd);
-    cap.append(inp);
-    offBox(doc, cap, 'night-spend-cap-off', 'No cap', values.spendCapUsd === null, [inp]);
-    root.append(cap);
-  }
-
-  const ov = field(doc, 'Continue past team soft caps', 'Off by default. Never overrides your own caps.');
-  const ovSel = el(doc, 'select', 'select night-override'); ovSel.dataset.field = 'allowCostCapOverride';
-  for (const [v, t] of [['', level === 'project' ? 'Inherit' : 'Not set'], ['on', 'On'], ['off', 'Off']]) {
-    const o = el(doc, 'option', null, t); o.value = v; ovSel.append(o);
-  }
-  ovSel.value = has('allowCostCapOverride') ? (values.allowCostCapOverride ? 'on' : 'off') : '';
-  ov.append(ovSel); root.append(ov);
+  CTX.set(root, { level, inherited, toggle, offset: now - Date.now(), projectName });
+  const onEdit = () => { root.dataset.dirty = '1'; updateAwaySummary(root); };
+  body.addEventListener('input', onEdit); body.addEventListener('change', onEdit);
+  updateAwaySummary(root);
   return root;
 }
 
@@ -153,7 +254,9 @@ export function readNightForm(root, { level }) {
   const out = {}; const unset = [];
   const q = (sel) => root.querySelector(sel);
   const tri = (sel, f) => { const v = q(sel).value; if (v === '') unset.push(f); else out[f] = v === 'on'; };
-  tri('.night-enabled', 'enabled');
+  const grp = q('.away-which'); const pick = grp && grp.querySelector('input:checked');
+  if (!grp || grp.dataset.set !== '1' || !pick || pick.value === '') unset.push('enabled');
+  else out.enabled = pick.value === 'true';
   tri('.night-override', 'allowCostCapOverride');
   const ws = q('.night-window-start').value; const we = q('.night-window-end').value;
   if (q('.night-window-off').checked) out.window = null;
@@ -180,4 +283,31 @@ export function readNightForm(root, { level }) {
     else if (s === '') unset.push('spendCapUsd'); else out.spendCapUsd = Number(s);
   }
   return { ...out, __unset: unset };
+}
+
+function formPatch(root) {
+  const c = CTX.get(root); const { __unset, ...patch } = readNightForm(root, { level: c.level });
+  return patch;
+}
+
+/** The live summary: one `<span>` per line of describeAwayMode. */
+export function paintAwaySummary(host, { config, toggle, now, projectName = null, projectFields = null }) {
+  const doc = host.ownerDocument;
+  host.replaceChildren(...describeAwayMode({ config, toggle, now, projectName, projectFields }).lines.map((l) => el(doc, 'span', 'away-line', `${l} `)));
+}
+
+/** Re-render only the summary from the form's current values (unsaved edits survive). Each key is optional. */
+export function updateAwaySummary(root, { toggle, now, inherited } = {}) {
+  const c = CTX.get(root); if (!c) return;
+  if (toggle !== undefined) c.toggle = toggle;
+  if (inherited !== undefined) c.inherited = inherited;       // a fallback-painted, now-dirty form gets the real layers
+  if (now !== undefined) c.offset = now - Date.now();       // the render's clock, moving on in real time
+  const patch = formPatch(root);
+  paintAwaySummary(root.querySelector('.away-summary'), {
+    // An unset field falls back to the layer below. With no inherited config (the fetch failed), the
+    // summary says "Away mode settings could not be read." and the fields still render (spec §7).
+    config: c.inherited && c.inherited.config ? { ...c.inherited.config, ...patch } : null,
+    toggle: c.toggle, now: Date.now() + c.offset, projectName: c.projectName,
+    projectFields: c.level === 'project' ? Object.keys(patch) : null,   // "(this project)" on the lines it overrides
+  });
 }

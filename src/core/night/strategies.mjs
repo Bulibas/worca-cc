@@ -48,12 +48,12 @@ export function mostReversible(options, scores, totals) {
 export async function decideQuestion(q, cfg, { analyze } = {}) {
   const opts = realOpts(q);
   const base = { id: q.id, scores: null, reversible: null };
-  if (!opts.length) return { ...base, choice: '', strategy: 'none', confidence: null, rationale: 'question has no options', flagged: true };
+  if (!opts.length) return { ...base, choice: '', strategy: 'none', confidence: null, rationale: 'free-text question; worca cannot answer it', flagged: true };
   const w = weightsVerdict(q, cfg);
   if (cfg.strategy === 'weights' || (cfg.strategy === 'mixed' && w.met)) {
     return w.met
-      ? { ...base, choice: w.choice, strategy: 'weights', confidence: w.confidence, rationale: `recommended at ${w.confidence}% (lead ${w.margin})`, flagged: false }
-      : { ...base, choice: opts[0], strategy: 'weights', confidence: w.confidence, rationale: 'recommendation below threshold: first option taken', flagged: true };
+      ? { ...base, choice: w.choice, strategy: 'weights', confidence: w.confidence, rationale: `the agent recommended this at ${w.confidence}%, well ahead of the next option`, flagged: false }
+      : { ...base, choice: opts[0], strategy: 'weights', confidence: w.confidence, rationale: 'the agent was not sure enough; first option taken', flagged: true };
   }
   let a;
   try {
@@ -62,7 +62,7 @@ export async function decideQuestion(q, cfg, { analyze } = {}) {
     if (!a || typeof a !== 'object') throw new Error('empty analysis');
   } catch (err) {
     const fallback = w.choice || opts[0];
-    return { ...base, choice: fallback, strategy: 'analysis', confidence: null, rationale: `analysis unavailable: ${err?.message || err}`, flagged: true };
+    return { ...base, choice: fallback, strategy: 'analysis', confidence: null, rationale: `could not weigh the options (${err?.message || err}); ${w.choice ? "took the agent's recommendation" : 'first option taken'}`, flagged: true };
   }
   const scores = a.scores && typeof a.scores === 'object' ? a.scores : {};
   const totals = weightedTotals(scores, cfg.criteria, opts);
@@ -71,27 +71,29 @@ export async function decideQuestion(q, cfg, { analyze } = {}) {
   const pick = valid ? a.choice : opts.reduce((b, o) => (totals[o] > totals[b] ? o : b), opts[0]);
   if (conf >= cfg.minConfidence) {
     const rationale = valid ? String(a.rationale || '')
-      : `the analysis chose "${String(a.choice).slice(0, 80)}", not one of the options: took the best-scored option. ${String(a.rationale || '')}`.trim();
+      : `the review picked "${String(a.choice).slice(0, 80)}", which is not an option; took the best-scored option. ${String(a.rationale || '')}`.trim();
     return { id: q.id, choice: pick, strategy: 'analysis', confidence: conf, scores, rationale, reversible: a.reversible === true, flagged: !valid };
   }
   // User decision "never park": continue with the most reversible option, flagged.
   const rev = mostReversible(opts, scores, totals);
   return { id: q.id, choice: rev, strategy: 'analysis', confidence: conf, scores,
-    rationale: `low confidence (${conf}%): took the most reversible option. ${String(a.rationale || '')}`.trim(),
+    rationale: `the agent was not sure enough; took the option easiest to undo. ${String(a.rationale || '')}`.trim(),
     reversible: true, flagged: true };
 }
 
 export function gateRule({ issues = [], extraUsed = 0 }, cfg) {
   const critical = issues.filter((i) => String(i?.severity || '').toLowerCase() === 'critical');
-  if (!critical.length) return { decision: 'continue', flagged: false, reason: 'no critical issues remain' };
-  if (extraUsed < cfg.maxExtraCycles) return { decision: 'another', flagged: false, reason: `${critical.length} critical issue(s): one more cycle` };
-  return { decision: 'continue', flagged: true, reason: `${critical.length} critical issue(s) remain but the night cycle budget is spent` };
+  if (!critical.length) return { decision: 'continue', flagged: false, reason: 'no critical issues left, continuing' };
+  const n = critical.length;
+  const left = `${n} critical issue${n === 1 ? '' : 's'} left`;
+  if (extraUsed < cfg.maxExtraCycles) return { decision: 'another', flagged: false, reason: `${left}, one more fix round` };
+  return { decision: 'continue', flagged: true, reason: `${left} but the extra fix rounds are used up; continuing` };
 }
 
 export function workflowRule({ proposal, budget }) {
   const payload = { decision: 'accept', name: proposal?.name, nodes: {} };
   const tight = budget && budget.cap > 0 && budget.spent >= 0.8 * budget.cap;
-  return { payload, flagged: !!tight, reason: tight ? `accepted; night budget ${Math.round((budget.spent / budget.cap) * 100)}% used` : 'accepted as proposed' };
+  return { payload, flagged: !!tight, reason: tight ? `workflow accepted; ${Math.round((budget.spent / budget.cap) * 100)}% of the away spend cap used` : 'workflow accepted as proposed' };
 }
 
 export function recoveryRule({ attempts, max }) {

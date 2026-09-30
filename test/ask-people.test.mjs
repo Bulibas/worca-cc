@@ -113,7 +113,7 @@ test('the real readers: listPeople groups by person over pipelines, readRunActio
   assert.equal(defaultToolDeps({ threadId: null }).viewer, null, 'no shared sign-in: no "me"');
 });
 
-test('rule 19 (people) is in every prompt; rule 20 (hosting) only on a container or hosted worca', () => {
+test('rule 19 (people) is in every prompt; rule 21 (hosting) only on a container or hosted worca', () => {
   const rule19 = ASK_SYSTEM_RULES.slice(ASK_SYSTEM_RULES.indexOf('\n19. '));
   assert.ok(rule19.startsWith('\n19. People:'));
   for (const t of ['startedBy', '`actions`', 'createdBy, updatedBy', 'Cloudflare Access', 'WORCA_IDENTITY_HEADER', 'WORCA_IDENTITY_NAME', '"local"',
@@ -123,10 +123,10 @@ test('rule 19 (people) is in every prompt; rule 20 (hosting) only on a container
   const rule1 = ASK_SYSTEM_RULES.slice(ASK_SYSTEM_RULES.indexOf('\n1. '), ASK_SYSTEM_RULES.indexOf('\n2. '));
   assert.ok(rule1.includes('list_runs, list_people, get_run'));
   assert.ok(buildSystemPrompt({ projects: [], workspaces: [], workflows: [] }).includes('\n19. People:'), 'a local install gets rule 19 too');
-  assert.ok(ASK_HOSTING_RULE.startsWith('20. Where worca runs:'));
+  assert.ok(ASK_HOSTING_RULE.startsWith('21. Where worca runs:'));
   for (const t of ['single (GH_TOKEN)', 'split (WORCA_GH_READ_TOKEN', 'app (a GitHub App', 'agents never get a GitHub credential', 'one credential per call',
     'worca-agent', 'CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY', 'WORCA_AGENT_ISOLATION=0', 'WORCA_CLONE_ALLOW', 'Cloudflare Access policy, never in worca',
     '"Adding people later"', '"Who started a run"', '"GitHub App"']) {
-    assert.ok(ASK_HOSTING_RULE.includes(t), `rule 20 states "${t}"`);
+    assert.ok(ASK_HOSTING_RULE.includes(t), `rule 21 states "${t}"`);
   }
 });

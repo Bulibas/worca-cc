@@ -41,7 +41,7 @@ test('the existing About invariants still hold with the new rows', () => {
   assert.equal(about.querySelector('input, select, textarea, button'), null, 'still no controls');
   assert.equal(about.querySelector('.hint'), null, 'still no status line');
   assert.ok(!/\d+\.\d+\.\d+/.test(about.textContent), 'still no version string in the markup');
-  assert.equal(view.querySelectorAll('button.info-tip').length, 21, 'still no new ⓘ icon (21 = 14 + Interface mode + Scheduled runs + My model credentials + Workspaces + PR description model + Night mode)');
+  assert.equal(view.querySelectorAll('button.info-tip').length, 21, 'still no new ⓘ icon (21 = 14 + Interface mode + Scheduled runs + My model credentials + Workspaces + PR description model + Away mode)');
   for (const hint of view.querySelectorAll('.hint')) {
     assert.equal(hint.textContent.trim(), '', 'every settings hint stays empty-texted');
   }

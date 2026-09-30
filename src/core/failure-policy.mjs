@@ -194,7 +194,7 @@ const CONSEQUENCES = Object.freeze({
   [REASON.COST_PIPELINE_POLICY]: { reportsToSource: true, stagesResults: false, severity: 'warning', notifyPref: 'paused', exitInteractive: 0, label: 'team cost cap reached' },
   [REASON.COST_TOTAL_POLICY]:    { reportsToSource: true, stagesResults: false, severity: 'warning', notifyPref: 'paused', exitInteractive: 0, label: 'team total cap reached' },
   [REASON.ERROR]:        { reportsToSource: true,  stagesResults: true,  severity: 'error',   notifyPref: 'error',  exitInteractive: 1, label: 'a step failed' },
-  [REASON.NIGHT_GUARDRAIL]: { reportsToSource: true, stagesResults: false, severity: 'warning', notifyPref: 'paused', exitInteractive: 0, label: 'night mode guardrail reached' },
+  [REASON.NIGHT_GUARDRAIL]: { reportsToSource: true, stagesResults: false, severity: 'warning', notifyPref: 'paused', exitInteractive: 0, label: 'Away mode limit reached' },
 });
 
 /** The consequences row for a pause reason (unknown/legacy free-text reasons read

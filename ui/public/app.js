@@ -168,11 +168,13 @@ import { paintAboutInto } from './about-links.mjs';
 import { renderReasonOptions, renderOptIns, previewText, reportBlobParts, REPORT_PREVIEW_DEBOUNCE_MS } from './report-run.mjs';
 import { openScheduleSheet, closeScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
+import { STATUS_ACTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindLabel } from '../../src/shared/away-mode/labels.mjs';
+import { describeRun, describeNewRun } from '../../src/shared/away-mode/describe.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
 import { createLevelController, levelAtLeast, currentLevel, tagLevel, keepVisible, minLevelFor, LEVEL_INFO, UI_LEVELS } from './ui-level.mjs';
 import { registerAskRenderer, askRendererFor, askKindOf } from './ask/registry.mjs';
 import { renderAskForm } from './ask/form-renderer.mjs';
-import { renderNightForm, readNightForm } from './night-mode-form.mjs';
+import { renderNightForm, readNightForm, updateAwaySummary } from './night-mode-form.mjs';
 import { visibleFields as visibleAnswerFields } from '../../src/shared/forms/layout.mjs';
 
 const diffHljsLoader = window.__worcaTestHooks?.hljsLoader ?? createHljsLoader();
@@ -1105,6 +1107,7 @@ function handleServerMessage(msg) {
     if (memoryTabCtl) { void loadMemDefragModelCard(); void memoryTabCtl.load(memoryTabCtl.selectedName(), { keepDraft: true }); }
     delete state.workflowCache[MEMORY_DEFRAG_WORKFLOW_ID];
     if (currentView() === 'new' && state.workflowId === MEMORY_DEFRAG_WORKFLOW_ID) void renderWorkflowConfig(state.workflowId);
+    void refreshAwayBodies().catch(() => {});
     loadSettings();
     return;
   }
@@ -1474,7 +1477,7 @@ function makeRun({
   runId, title, projectDir, status = 'running', startedAt, local = false,
   pendingQuestion = null, kind = 'run', pipelineId = null, pauseReason = null,
   pauseDetail = null, startedBy = null, lastAction = null,
-  workspaceId = undefined, workspaceName = undefined, projectNames = null,
+  workspaceId = undefined, workspaceName = undefined, projectNames = null, night = undefined,
 }) {
   return {
     runId,
@@ -1493,6 +1496,7 @@ function makeRun({
     lastAction,           // who last stopped / paused / resumed it: { kind, by, at } or null
     workspaceId,
     workspaceName,
+    night,                // Away mode on this run: {optIn, override, decisions, flagged, openedAt} (hello / state)
     // Stable ordering key: assigned once per runId, never bumped by activity
     // and never re-minted if the run is dropped and re-materialized.
     // hello seeds runs in server registration order, so this tracks true
@@ -9920,44 +9924,50 @@ function buildPdOverview(sec, key) {
   void paintProjectPolicyCells();
 }
 
-// The project's night mode layer (project_config.extra.nightMode): fields set here beat the
-// developer's and the team's; empty fields inherit (the placeholders say what and from where).
+// The project's Away mode layer (project_config.extra.nightMode): fields set here beat the
+// developer's and the team's; empty fields read "Same as my settings (…)".
 function buildPdNightCard(p) {
   const card = document.createElement('section');
   card.className = 'card pd-night-card';
   const head = document.createElement('div');
   head.className = 'card-head';
-  const b = document.createElement('b'); b.textContent = 'Night mode';
+  const b = document.createElement('b'); b.textContent = 'Away mode for this project';
   const h = document.createElement('small'); h.className = 'hint';
-  h.textContent = 'This project\'s own night mode values. Empty fields inherit your settings, then the team policy.';
+  h.textContent = 'Anything left as "Same as my settings" uses your Settings page. Set a value here to override it for this project only.';
   head.append(b, h);
   const host = document.createElement('div');
   host.className = 'pd-night-form';
+  const global = Object.assign(document.createElement('small'), { className: 'hint', textContent: '"I\'m away now" and "Pause" are global. Change them in Settings › Away mode.' });
   const actions = document.createElement('div');
   actions.className = 'add-project-actions';
-  const reset = Object.assign(document.createElement('button'), { type: 'button', className: 'btn btn-ghost btn-mini pd-night-reset', textContent: 'Reset to inherited' });
+  const reset = Object.assign(document.createElement('button'), { type: 'button', className: 'btn btn-ghost btn-mini pd-night-reset', textContent: 'Use my settings' });
   const save = Object.assign(document.createElement('button'), { type: 'button', className: 'btn btn-primary btn-mini pd-night-save', textContent: 'Save' });
   actions.append(reset, save);
   const msg = Object.assign(document.createElement('small'), { className: 'hint pd-night-msg' });
-  card.append(head, host, actions, msg);
-  const paint = (nm) => renderNightForm(host, { level: 'project', values: (nm && nm.project) || {}, effective: (nm && nm.config) || {}, sources: (nm && nm.sources) || {} });
+  card.append(head, host, global, actions, msg);
+  let seq = 0;
+  const load = async () => {
+    const mine = ++seq;
+    const d = await fetchAwayMode(p.path);                  // guarded fetch: null on any failure
+    if (mine !== seq || !d) return;
+    renderNightForm(host, { level: 'project', values: d.project || {}, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, now: Date.now(), projectName: p.name });
+  };
   const send = async (nightMode) => {
     msg.textContent = ''; msg.className = 'hint pd-night-msg';
     try {
       const res = await fetch('/api/config', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: p.path, nightMode }) });
       const data = await safeJson(res);
       if (!res.ok) { msg.textContent = data.error || `HTTP ${res.status}`; msg.className = 'hint pd-night-msg err'; return; }
-      paint(data.nightMode);
+      delete state.awayModeByDir[p.path];                     // run pages refetch this project's body
+      await load();
       msg.textContent = 'Saved.';
     } catch (err) { msg.textContent = err.message || 'network error'; msg.className = 'hint pd-night-msg err'; }
   };
   save.addEventListener('click', () => send(readNightForm(host, { level: 'project' })));
   reset.addEventListener('click', () => send(null));
-  paint(null);
-  fetch(`/api/config?projectDir=${encodeURIComponent(p.path)}`)
-    .then((res) => (res.ok ? safeJson(res) : null))
-    .then((data) => { if (data && data.nightMode) paint(data.nightMode); })
-    .catch(() => {});
+  // Never a blank card before the GET lands: nothing is inherited yet, so every choice reads plainly.
+  renderNightForm(host, { level: 'project', values: {}, inherited: { config: null, sources: {} }, projectName: p.name });
+  void load().catch(() => {});
   return card;
 }
 
@@ -11720,23 +11730,69 @@ try {
 
 // Settings › Runs › Scheduled runs: the defaults a new schedule inherits.
 function setSchedDefaultsMsg(text, kind) { setHintMsg('schedDefaultsMsg', text, kind); }
-// ---- Night mode (Settings › General) ----
-// The user layer of the night config (night-mode-form.mjs) plus the live global switch.
+// ---- Away mode (Settings › Runs) ----
+// Settings › Away mode: the user layer (night-mode-form.mjs), its live summary and the status strip.
 function setNightModeMsg(text, kind) { setHintMsg('nightModeMsg', text, kind); }
-function paintNightSettings(data) {
-  const host = document.getElementById('night-mode-host');
-  const toggle = document.getElementById('nightModeToggle');
-  if (!host || !toggle) return;
-  toggle.value = data.nightModeToggle || 'auto';
-  renderNightForm(host, { level: 'user', values: data.nightMode || {}, effective: data.nightModeEffective || {}, sources: {} });
+/** A GET /api/away-mode body, or null. Other UI tests' fetch stubs answer unknown URLs with
+ *  unrelated JSON (e.g. {config:{steps}}), so check the shape, never just `config`. */
+const isAwayBody = (d) => !!(d && d.config && typeof d.config === 'object' && typeof d.toggle === 'string');
+async function fetchAwayMode(dir = null) {
+  try {
+    const r = await fetch(dir ? `/api/away-mode?projectDir=${encodeURIComponent(dir)}` : '/api/away-mode');
+    if (!r || !r.ok) return null;
+    const d = await r.json();
+    return isAwayBody(d) ? d : null;
+  } catch { return null; }
 }
+let _awayPaintSeq = 0;
+/** Spec §7: the card always renders its fields. Before the first GET answers, or when it fails, paint the
+ *  stored user layer from the /api/settings body; the summary then says "Away mode settings could not be read." */
+function paintNightFallback(host, data) {
+  const user = (data && data.nightMode && typeof data.nightMode === 'object') ? data.nightMode : {};
+  const toggle = typeof data?.nightModeToggle === 'string' ? data.nightModeToggle : 'auto';
+  paintAwayStatus(toggle);
+  renderNightForm(host, { level: 'user', values: user, effective: data?.nightModeEffective || user, sources: {}, inherited: { config: null, sources: {} }, toggle, now: Date.now() });
+}
+async function paintNightSettings(data) {
+  try {
+    const host = document.getElementById('night-mode-host');
+    if (!host) return;
+    const seq = ++_awayPaintSeq;
+    if (!host.firstChild && host.dataset.dirty !== '1') paintNightFallback(host, data);   // never a blank card while the GET is in flight
+    const d = await fetchAwayMode();
+    if (seq !== _awayPaintSeq) return;                       // a newer paint won
+    if (!d) { if (host.dataset.dirty !== '1' && data) paintNightFallback(host, data); return; }
+    state.awayMode = d;
+    paintAwayStatus(d.toggle);
+    if (host.dataset.dirty === '1') { updateAwaySummary(host, { toggle: d.toggle, now: Date.now(), inherited: d.inherited }); return; }   // keep unsaved edits
+    renderNightForm(host, { level: 'user', values: d.user, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, now: Date.now() });
+  } catch { /* the card keeps what it shows; never an unhandled rejection */ }
+}
+function paintAwayStatus(toggle) {
+  const bar = document.getElementById('awayStatus');
+  if (!bar) return;
+  bar.replaceChildren(...(STATUS_ACTIONS[toggle] || STATUS_ACTIONS.auto).map((a) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'btn btn-mini'; b.textContent = a.label; b.title = a.tip; b.dataset.mode = a.mode;
+    return b;
+  }));
+}
+document.getElementById('awayStatus')?.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-mode]'); if (!b) return;
+  // Only the toggle: the paint callback repaints the strip and the summary, never the unsaved fields.
+  postSettingsCard({ nightModeToggle: b.dataset.mode }, { setMsg: setNightModeMsg, paint: () => paintNightSettings(null), savedText: '' });
+});
 function postNightSettings(body) {
-  return postSettingsCard(body, { setMsg: setNightModeMsg, paint: paintNightSettings });
+  // The server emits settings-changed BEFORE it answers the POST, so the event's paint can run after
+  // this one. Clear the dirty flag synchronously on success: whichever paint runs last re-renders the
+  // saved values, and the form never stays stuck "dirty".
+  const host = document.getElementById('night-mode-host');
+  return postSettingsCard(body, { setMsg: setNightModeMsg, paint: () => { if (host) delete host.dataset.dirty; void paintNightSettings(null); }, savedText: 'Saved. The summary above is what will happen.' });
 }
 document.getElementById('nightModeSave')?.addEventListener('click', () => {
-  const host = document.getElementById('night-mode-host');
-  postNightSettings({ nightMode: readNightForm(host, { level: 'user' }), nightModeToggle: document.getElementById('nightModeToggle').value });
+  postNightSettings({ nightMode: readNightForm(document.getElementById('night-mode-host'), { level: 'user' }) });
 });
+// "Use defaults" keeps today's body: it also returns the status to "follow my away hours".
 document.getElementById('nightModeReset')?.addEventListener('click', () => postNightSettings({ nightMode: null, nightModeToggle: 'auto' }));
 
 function paintScheduleSettings(data) {
@@ -21282,7 +21338,7 @@ function rdStateCopy(r, stepName) {
   if (r.pauseReason === 'cost_total') return 'Paused — total budget reached.';
   if (r.pauseReason === 'cost_pipeline_policy') return 'Paused — team cost cap reached.';
   if (r.pauseReason === 'cost_total_policy') return 'Paused — team total cap reached.';
-  if (r.pauseReason === 'night_guardrail') return 'Paused — night mode guardrail (review flagged decisions).';
+  if (r.pauseReason === 'night_guardrail') return r.pauseDetail || 'Paused: Away mode limit reached.';
   if (r.pauseReason === 'error') {
     const why = r.pauseDetail ? `: ${r.pauseDetail}` : '';
     return `Paused after an error${why}. Fix the cause, then Resume — the worktree and progress are kept.`;
@@ -22411,7 +22467,7 @@ function statusPill(r) {
     // A team cap names its source too (team-policy design board 9).
     if (r.pauseReason === 'cost_pipeline_policy') return { family: 'amber', text: 'Paused · team cap' };
     if (r.pauseReason === 'cost_total_policy') return { family: 'amber', text: 'Paused · team total' };
-    if (r.pauseReason === 'night_guardrail') return { family: 'amber', text: 'Paused · night guardrail' };
+    if (r.pauseReason === 'night_guardrail') return { family: 'amber', text: 'Paused · Away mode limit' };
     // An error pause is parked and resumable (never dead), so it stays in the amber family.
     if (r.pauseReason === 'error') return { family: 'amber', text: 'Paused · error' };
     if (r.pauseReason === 'recoverable') return { family: 'amber', text: 'Paused · recoverable' };
@@ -23942,20 +23998,28 @@ function openRunDetail(runId, { instant = false } = {}) {
   screen.querySelector('.rd-stop').addEventListener('click', () => {
     openStopModal(runDetailState.runId);
   });
-  // Night mode for this run (POST /api/run/night). Reads the run at CHANGE time, like Stop.
+  // Away mode on this run (POST /api/run/night). Reads the run at CHANGE time, like Stop; the run id is
+  // captured before the POST, since the user may open another run while it is in flight.
   screen.querySelector('.rd-night').addEventListener('change', async (e) => {
     const sel = e.currentTarget;
+    const runId = runDetailState.runId;
     sel.disabled = true;
     try {
-      const res = await fetch('/api/run/night', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: runDetailState.runId, mode: sel.value }) });
+      const res = await fetch('/api/run/night', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId, mode: sel.value }) });
       if (!res.ok) {
         const err = await safeJson(res);
-        const run = runs.get(runDetailState.runId);
-        if (run) onLog(run, { source: 'ui', level: 'error', text: `night mode: ${err.error || res.status}`, ts: Date.now() });
+        const run = runs.get(runId);
+        if (run) onLog(run, { source: 'ui', level: 'error', text: `Away mode: ${err.error || res.status}`, ts: Date.now() });
+      } else {
+        const run = runs.get(runId);
+        if (run) {
+          run.night = { ...(run.night || {}), override: sel.value };
+          if (runDetailState.runId === runId) paintRdAwayPill(runDetailState.screen, run);   // still the open run
+        }
       }
     } catch (err) {
-      const run = runs.get(runDetailState.runId);
-      if (run) onLog(run, { source: 'ui', level: 'error', text: `night mode: ${err.message || err}`, ts: Date.now() });
+      const run = runs.get(runId);
+      if (run) onLog(run, { source: 'ui', level: 'error', text: `Away mode: ${err.message || err}`, ts: Date.now() });
     } finally { sel.disabled = false; }
   });
 
@@ -24072,7 +24136,10 @@ function paintNightDecisions(screen, r) {
   if (!sec) return;
   const list = Array.isArray(r.nightDecisions) ? r.nightDecisions : [];
   sec.hidden = !list.length;
-  screen.querySelector('.rd-night-count').textContent = list.length ? `(${list.length}, ${list.filter((d) => d.flagged).length} flagged)` : '';
+  // A guardrail row (choice null) is a pause, not an answer: it counts neither as an answer nor as one to check.
+  const answers = list.filter((d) => d.choice != null);
+  const n = answers.length; const m = answers.filter((d) => d.flagged).length;
+  screen.querySelector('.rd-night-count').textContent = list.length ? `(${n} answer${n === 1 ? '' : 's'}, ${m} to check)` : '';
   const ol = screen.querySelector('.rd-night-decisions');
   ol.replaceChildren();
   for (const d of list) {
@@ -24080,10 +24147,13 @@ function paintNightDecisions(screen, r) {
     if (d.flagged) li.classList.add('flagged');
     const head = document.createElement('div');
     head.className = 'rd-nd-head';
-    head.textContent = `${d.kind} · ${d.choice == null ? `guardrail: ${d.guardrail}` : d.choice}${d.confidence != null ? ` · ${d.confidence}%` : ''} · ${d.strategy}${d.flagged ? ' · flagged' : ''}`;
+    head.textContent = kindLabel(d.kind);
     const why = document.createElement('div');
     why.className = 'rd-nd-why';
-    why.textContent = d.rationale || '';
+    const reason = String(d.rationale || '').trim().replace(/\.$/, '');
+    why.textContent = d.choice == null
+      ? (reason ? `${reason}.` : `Paused: ${d.guardrail || 'Away mode limit reached'}.`)                 // a guardrail row: no answer was given
+      : `${d.flagged ? 'Answered for you, please check' : 'Answered for you'}: ${d.choice === '' ? '' : `"${d.choice}" — `}${reason}.`;   // a free-text question records choice ''
     li.append(head, why);
     ol.appendChild(li);
   }
@@ -25002,11 +25072,20 @@ function paintRdHeader(screen, r) {
     : (paused ? 'Resume — restart this paused pipeline where it left off'
               : 'Pause — gracefully stop the session so it can be resumed');
 
-  // Night mode switch: any run that is not over (a paused run stores it in its resume point).
+  // Away mode switch: any run that is not over (a paused run stores it in its resume point).
   const ns = screen.querySelector('.rd-night');
   if (ns) {
     ns.closest('.rd-night-wrap').hidden = terminal;
+    if (!ns.options.length) {                // fill once, BEFORE the value: a value on an empty select is a no-op
+      for (const o of RUN_SWITCH_OPTIONS) {
+        const opt = document.createElement('option');
+        opt.value = o.value; opt.textContent = o.label; opt.title = o.tip;
+        ns.append(opt);
+      }
+      ns.closest('.rd-night-wrap').title = RUN_SWITCH_TIP;
+    }
     if (document.activeElement !== ns) ns.value = (r.night && r.night.override) || 'auto';
+    paintRdAwayPill(screen, r);
   }
 }
 
@@ -26268,6 +26347,8 @@ function showView(name, param = '') {
   if (name === 'settings') showSettingsTab(param);
   if (name === 'new') {
     loadTaskSources(); applyBudgetToNewView(); refreshMentionHighlights();
+    paintNewRunAwayHint();
+    if (!state.awayMode) void fetchAwayMode().then((d) => { if (d) { state.awayMode = d; paintNewRunAwayHint(); } });
     schedulePolicyLine();                    // team policy notes for the current target (board 8)
     // Drop the per-id workflow memo on every (re-)entry so a workflow re-saved
     // in Composer repaints with its new topology rather than the cached one.
@@ -26394,6 +26475,8 @@ function rdTickHosts(r) {
 }
 
 const _timerTick = setInterval(() => {
+  // The Away mode pill counts down while the run WAITS on a question, which the loop below skips.
+  try { const open = rdOpenRun(); if (open && runDetailState.screen) paintRdAwayPill(runDetailState.screen, open); } catch { /* a closed test window must not throw from a timer */ }
   for (const r of runs.values()) {
     const active = r.status === 'running' || r.status === 'starting';
     const paused = r.pendingQuestion != null;
@@ -26639,6 +26722,56 @@ async function applyAskPrefill() {
       el.sourceBranch.value = p.sourceBranch;
     }
   }
+}
+
+// ---- Away mode on the run page and New run --------------------------------
+// state.awayMode: the user-level GET /api/away-mode body (Settings card, boot, settings-changed).
+// state.awayModeByDir: one body per run project, since a run's config includes its project's layer.
+state.awayModeByDir = {};
+const _awayLoading = {};
+const _awayMiss = new Set();   // dirs whose fetch failed: not retried on every 1 s tick; settings-changed clears it
+/** The Away mode body for a run's project (null dir = the user-level body). Never rejects. */
+function awayModeFor(dir) {
+  if (!dir) return Promise.resolve(state.awayMode || null);
+  if (state.awayModeByDir[dir]) return Promise.resolve(state.awayModeByDir[dir]);
+  if (_awayMiss.has(dir)) return Promise.resolve(null);
+  return (_awayLoading[dir] ||= fetchAwayMode(dir).then((d) => {
+    delete _awayLoading[dir];
+    if (d) state.awayModeByDir[dir] = d; else _awayMiss.add(dir);
+    return d;
+  }));
+}
+/** The body already in hand for this run, or null. */
+const awayBodyFor = (r) => (r.projectDir ? state.awayModeByDir[r.projectDir] : state.awayMode) || null;
+/** The run page's Away mode pill. Cheap: pure text from describeRun; the fetch happens once per project. */
+function paintRdAwayPill(screen, r) {
+  const pill = screen && screen.querySelector('.rd-night-pill');
+  if (!pill) return;
+  const d0 = awayBodyFor(r);
+  if (!d0) {
+    pill.textContent = '';
+    // Re-paint only when the lookup now hits, so a missing body can never loop.
+    if (r.projectDir) void awayModeFor(r.projectDir).then(() => { if (awayBodyFor(r)) paintRdAwayPill(screen, r); });
+    else if (!_awayLoading['']) _awayLoading[''] = fetchAwayMode().then((d) => { if (d && !state.awayMode) state.awayMode = d; });   // once; the 1 s tick repaints
+    return;
+  }
+  const d = describeRun({ config: d0.config, toggle: d0.toggle, now: Date.now(),
+    run: { ...(r.night || {}), waiting: r.pendingQuestion != null, done: RD_TERMINAL.includes(r.status) } });
+  pill.textContent = d.pill; pill.title = d.reason; pill.dataset.state = d.state;
+}
+/** settings-changed: refresh the user-level body and every cached project body, keeping the old ones until the new land. */
+async function refreshAwayBodies() {
+  _awayMiss.clear();
+  const d = await fetchAwayMode();
+  if (d) { state.awayMode = d; paintNewRunAwayHint(); }
+  await Promise.all(Object.keys(state.awayModeByDir).map(async (dir) => { const x = await fetchAwayMode(dir); if (x) state.awayModeByDir[dir] = x; }));
+  const open = rdOpenRun();
+  if (open && runDetailState.screen) paintRdAwayPill(runDetailState.screen, open);
+}
+/** The New-run "Mark this run" hint, from the user-level settings (the project is not fixed until submit). */
+function paintNewRunAwayHint() {
+  const h = document.getElementById('nightModeHint');
+  if (h) h.textContent = describeNewRun(state.awayMode || {});
 }
 
 // ---------------------------------------------------------------------------

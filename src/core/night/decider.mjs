@@ -53,7 +53,7 @@ export async function decideAsk(q, env) {
       for (const one of qs) { const d = await decideQuestion(one, config, { analyze }); values[one.id] = d.choice; ds.push(d); }
       return { payload: { form: q.form, version: q.version, values },
         record: { ...(ds.length ? agg(ds) : { flagged: false, confidence: null, strategy: 'defaults' }), choice: JSON.stringify(values).slice(0, 500), questions: ds,
-          rationale: ds.length ? ds.map((d) => `${d.id}: ${d.rationale}`).join('\n') : 'field defaults' } };
+          rationale: ds.length ? ds.map((d) => `${d.id}: ${d.rationale}`).join('\n') : 'the form\'s default values' } };
     }
     case 'gate': {
       const g = gateRule({ issues: q.issues || [], extraUsed: env.gateCyclesUsed ? env.gateCyclesUsed(q.wireId) : 0 }, config);
@@ -72,7 +72,7 @@ export async function decideAsk(q, env) {
       const r = recoveryRule({ attempts, max: RECOVERY_MAX_AUTO_ATTEMPTS });
       if (r.decision === 'retry' && env.sleep) await env.sleep(recoveryDelayMs({ cls, attempt: attempts + 1 }));
       return { payload: { decision: r.decision }, record: { choice: r.decision, strategy: 'rule', confidence: null, flagged: r.flagged,
-        rationale: r.decision === 'retry' ? `retry ${attempts + 1}/${RECOVERY_MAX_AUTO_ATTEMPTS} after backoff` : 'retry budget spent: pausing', reversible: true, meta: { cls } } };
+        rationale: r.decision === 'retry' ? `retry ${attempts + 1} of ${RECOVERY_MAX_AUTO_ATTEMPTS} after a pause` : `the step failed ${attempts + 1} times; worca does not retry further while you are away`, reversible: true, meta: { cls } } };
     }
     default: return null;
   }

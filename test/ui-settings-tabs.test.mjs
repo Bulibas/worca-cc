@@ -222,7 +222,7 @@ test('General keeps the machine cards; Runs, Ask Worca and Models hold the moved
   assert.deepEqual(cardIds(view, 'runs'), ['budget-settings-card', 'night-settings-card', 'schedule-settings-card', 'ws-scan-models-card', 'chat-settings-card']);
   assert.deepEqual(cardIds(view, 'ask'), ['ask-settings-card']);
   assert.deepEqual(cardIds(view, 'models'), ['title-model-settings-card', 'auto-model-settings-card', 'pr-description-model-settings-card']);
-  // Nothing got lost or duplicated in the move: the sixteen cards (dev's thirteen + Workspaces + PR description model + Night mode) are all still here, once.
+  // Nothing got lost or duplicated in the move: the sixteen cards (dev's thirteen + Workspaces + PR description model + Away mode) are all still here, once.
   const all = [...view.querySelectorAll('section.card.settings-card')].map((c) => c.id);
   assert.equal(all.length, 16);
   assert.equal(new Set(all).size, 16);
