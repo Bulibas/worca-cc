@@ -34,7 +34,8 @@ after(async () => {
   if (srv) await new Promise((r) => srv.close(r));
   gitSync.reset();
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-  await rm(root, { recursive: true, force: true });
+  // A stopped mock run may still be writing into a clone's .git: retry ENOTEMPTY.
+  await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 beforeEach(() => gitSync.reset());
 
