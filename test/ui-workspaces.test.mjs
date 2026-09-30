@@ -662,6 +662,17 @@ test('a re-scan still running when the page loads shows its loader and resubscri
   assert.ok(ws().sent.some((t) => JSON.parse(t).runId === 'run_live'));
 });
 
+test('a re-scan PAUSED when the page loads shows the paused box, not a spinner', async () => {
+  const { window, show } = await boot({ workspaces: [{ ...WS[0], rescan: { runId: 'run_paused', pipelineId: 'abcd1234', paused: true } }, WS[1]] });
+  show('workspaces/wks-alpha-00000001');
+  await settle(8);
+  const el = window.document.querySelector('#ws-detail .wd-rescan');
+  assert.ok(el && el.classList.contains('is-paused'), 'its pause was broadcast before the reload: the list says so');
+  assert.equal(el.querySelector('.spinner'), null);
+  assert.match(el.textContent, /Re-scan paused/);
+  assert.equal(el.querySelector('a.wd-rescan-open').getAttribute('href'), '#running/run_paused');
+});
+
 test('Remove confirms, posts {remove}; a 409 (live run) keeps the member and shows the error on the header', async () => {
   const three = { ...WS[0], projectPaths: [...WS[0].projectPaths, THIRD.path], projectKeys: ['k1', 'k2', 'k5'], exists: [true, true, true] };
   const posts = [];

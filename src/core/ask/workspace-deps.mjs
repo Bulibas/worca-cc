@@ -22,12 +22,14 @@ import { createWorkspaceWithHomes } from '../workspace-scan-run.mjs';
 import { WORKSPACE_SCAN_WORKFLOW_ID } from '../graph/builtin-workflows.mjs';
 import { createWorkspaceChangeValidator } from './workspace-proposal.mjs';
 
-/** A run of the workspace that has not settled, by its pipeline row (any process: CLI, another
- *  UI): 'run', or 'scan' when every such run is a Workspace scan (its stepper names the template). */
+/** A run that owns the workspace, by its pipeline row (any process: CLI, another UI) — any run
+ *  that has not settled, or a PAUSED Workspace scan (it resumes into the workspace; the server's
+ *  ownsWorkspaceTarget): 'run', or 'scan' when every such run is a Workspace scan (its stepper
+ *  names the template). */
 function liveRun(workspaceId) {
   const rows = getDb().prepare(
-    "SELECT json_extract(CASE WHEN json_valid(stepper) THEN stepper END, '$.template.id') AS wf FROM pipelines WHERE workspace_key = ? AND archived_at IS NULL AND status IN ('created', 'starting', 'running', 'pausing')",
-  ).all(workspaceId);
+    "SELECT status, json_extract(CASE WHEN json_valid(stepper) THEN stepper END, '$.template.id') AS wf FROM pipelines WHERE workspace_key = ? AND archived_at IS NULL AND status IN ('created', 'starting', 'running', 'pausing', 'paused')",
+  ).all(workspaceId).filter((r) => r.status !== 'paused' || r.wf === WORKSPACE_SCAN_WORKFLOW_ID);
   if (!rows.length) return null;
   return rows.every((r) => r.wf === WORKSPACE_SCAN_WORKFLOW_ID) ? 'scan' : 'run';
 }

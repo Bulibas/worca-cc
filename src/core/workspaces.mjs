@@ -243,6 +243,19 @@ function memberPaths(id) {
   ).all(id).map((r) => r.path);
 }
 
+/**
+ * The roots hash of the member set a workspace spans NOW, or null when no such workspace. Its id
+ * keeps the hash of the set it was created over (D1), so after a member change the two differ.
+ * Synchronous: the scan launch guard (ui/server.mjs liveOverSet) runs without an await.
+ * @param {string} id
+ * @returns {string|null}
+ */
+export function workspaceSetHash(id) {
+  getDb();
+  if (!prepare('SELECT 1 FROM workspaces WHERE id = ?').get(id)) return null;
+  return rootsHash(memberPaths(id));
+}
+
 /** Map a workspaces row (+ its member rows) to the persisted entry shape. */
 function rowToEntry(r) {
   return {

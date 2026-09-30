@@ -494,8 +494,13 @@ test('the workspace list and detail name the automatic re-scan run while it owns
   runs.set('auto-scan-r', { id: 'auto-scan-r', pipelineId: 'abcd1234', kind: 'workspace-run', workspaceId: workspace.id, status: 'running', autoRescan: true });
   try {
     const listed = (await (await get('/api/workspaces')).json()).workspaces.find((w) => w.id === workspace.id);
-    assert.deepEqual(listed.rescan, { runId: 'auto-scan-r', pipelineId: 'abcd1234' });
+    assert.deepEqual(listed.rescan, { runId: 'auto-scan-r', pipelineId: 'abcd1234', paused: false });
     assert.deepEqual((await (await get(`/api/workspaces/${workspace.id}`)).json()).workspace.rescan, listed.rescan);
+    // A paused automatic re-scan still owns the workspace (it resumes into it); a reloaded page
+    // must show it paused, not spinning — its rescan-paused frame went out before the reload.
+    Object.assign(runs.get('auto-scan-r'), { status: 'paused', orch: { workflowId: 'wf_workspace_scan' } });
+    assert.deepEqual((await (await get(`/api/workspaces/${workspace.id}`)).json()).workspace.rescan,
+      { runId: 'auto-scan-r', pipelineId: 'abcd1234', paused: true });
     runs.get('auto-scan-r').status = 'done';
     assert.equal((await (await get('/api/workspaces')).json()).workspaces.find((w) => w.id === workspace.id).rescan, undefined, 'gone once it ends');
   } finally { runs.delete('auto-scan-r'); }

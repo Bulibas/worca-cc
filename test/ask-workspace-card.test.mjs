@@ -395,3 +395,21 @@ test('the parent validator reads live runs from the pipeline rows: a running Wor
     getDb().prepare("DELETE FROM pipelines WHERE id IN ('5ca50001', '5ca50002')").run();
   }
 });
+
+test('a PAUSED Workspace scan still owns the workspace (it resumes into it): the card warns, as the apply guard refuses', async () => {
+  const { validateWorkspaceChange } = await import('../src/core/ask/workspace-deps.mjs');
+  const { seedPipelineRow } = await import('./helpers/db-seed.mjs');
+  const { getDb } = await import('../src/core/db.mjs');
+  const cur = await readWs(ws.id);
+  const warn = async () => (await validateWorkspaceChange({ kind: 'add_members', workspaceId: ws.id, projectKeys: [projects[3].key] })).card.warnings.join('\n');
+  const row = (id, wf) => seedPipelineRow({ id, projectKey: cur.projectKeys[0], workspaceKey: ws.id, target: 'workspace', status: 'paused',
+    startedAt: new Date().toISOString(), stepper: { version: 2, template: { id: wf, name: wf } } });
+  try {
+    row('5ca50011', 'wf_default');
+    assert.doesNotMatch(await warn(), /A (Workspace scan|run) of/, 'a paused ordinary run holds nothing (ownsWorkspaceTarget)');
+    row('5ca50012', 'wf_workspace_scan');
+    assert.match(await warn(), /A Workspace scan of .* (is running|is paused)/);
+  } finally {
+    getDb().prepare("DELETE FROM pipelines WHERE id IN ('5ca50011', '5ca50012')").run();
+  }
+});

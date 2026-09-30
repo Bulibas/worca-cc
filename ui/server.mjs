@@ -203,7 +203,7 @@ import {
   updateWorkspace, deleteWorkspace, isGitRepo, WORKSPACE_KEY_RE, countWorkspaces,
   readWorkspaceMap, setWorkspaceEdgeState, addWorkspaceManualEdge, removeWorkspaceManualEdge,
   regenerateWorkspaceDescription,
-  addWorkspaceMembers, removeWorkspaceMember,
+  addWorkspaceMembers, removeWorkspaceMember, rootsHash, workspaceSetHash,
 } from '../src/core/workspaces.mjs';
 import { effectiveEdges } from '../src/shared/workspace-map/overrides.mjs';
 import { WORKSPACE_SCAN_WORKFLOW_ID, WORKSPACE_SCAN_DEFAULT_MODELS } from '../src/core/graph/builtin-workflows.mjs';
@@ -4835,14 +4835,15 @@ app.get('/api/fs/dirs', async (req, res) => {
 // WORKSPACE_KEY_RE before any disk touch (a stale/crafted id reads as 404).
 // ---------------------------------------------------------------------------
 /** The automatic re-scan run (autoRescan: started after a member change) that still owns a
- *  workspace, or null. The page's loader follows it after a reload. */
+ *  workspace, or null — a paused one included (it resumes into the workspace). The page's loader
+ *  follows it after a reload, and shows a paused one as paused: its rescan-paused frame is gone. */
 function liveAutoRescan(id) {
   for (const r of runs.values()) if (r.workspaceId === id && r.autoRescan && ownsWorkspaceTarget(r)) return r;
   return null;
 }
 function liveRescanOf(id) {
   const r = liveAutoRescan(id);
-  return r ? { runId: r.id, pipelineId: r.pipelineId || null } : null;
+  return r ? { runId: r.id, pipelineId: r.pipelineId || null, paused: String(r.status).toLowerCase() === 'paused' } : null;
 }
 const withRescan = (w) => { const rescan = w && liveRescanOf(w.id); return rescan ? { ...w, rescan } : w; };
 
@@ -5134,8 +5135,10 @@ app.post('/api/workspaces/:id/map/render', async (req, res) => {
  *  has answered — by then the runs entry exists. */
 const pendingScans = new Set();
 
-/** The 8-hex roots hash a workspace id ends in (workspaces.mjs workspaceKey) — name-independent. */
-const setHashOf = (id) => String(id).slice(-8);
+/** The 8-hex roots hash of the set a run's workspace spans: the stored workspace's CURRENT members
+ *  (its id keeps the hash of the set it was created over — members can change since), else the
+ *  hash its id ends in (workspaces.mjs workspaceKey; a first scan's workspace does not exist yet). */
+const setHashOf = (id) => workspaceSetHash(id) ?? String(id).slice(-8);
 
 /** A run entry that still owns its workspace target: any ACTIVE run (no workflowId test — a
  *  just-resumed entry reads `wf_default` until resume() restores it), or a PAUSED Workspace scan
@@ -5148,14 +5151,15 @@ function ownsWorkspaceTarget(r) {
     || (s === 'paused' && r.orch?.workflowId === WORKSPACE_SCAN_WORKFLOW_ID);
 }
 
-/** A run over this PROJECT SET that owns it, or a scan of it still launching. For a first scan the
- *  set has no workspace (checkNewWorkspace refused a duplicate set), so any such run IS a scan,
- *  under any name; for a re-scan it is any active run of that workspace or a paused scan of it (D4). */
-function liveOverSet(id) {
-  const hash = setHashOf(id);
+/** A run of this workspace or over this PROJECT SET that owns it, or a scan of the set still
+ *  launching. For a first scan the set has no workspace (checkNewWorkspace refused a duplicate set),
+ *  so any such run IS a scan, under any name; for a re-scan it is any active run of that workspace
+ *  or a paused scan of it (D4). */
+function liveOverSet(id, projectPaths) {
+  const hash = rootsHash(projectPaths);
   if (pendingScans.has(hash)) return true;
   return [...runs.values()].some((r) => r.kind === 'workspace-run' && typeof r.workspaceId === 'string'
-    && setHashOf(r.workspaceId) === hash && ownsWorkspaceTarget(r));
+    && ownsWorkspaceTarget(r) && (r.workspaceId === id || setHashOf(r.workspaceId) === hash));
 }
 
 /** The run's primary member: the lowest projectKey — startRunHandler sorts members the same way,
@@ -5203,10 +5207,10 @@ async function scanModelsFor(body, projectPaths) {
  *  NO await between them: a second request for the same set, arriving while this one is still
  *  inside startRunHandler's awaits, finds the reservation and gets 409 (Review Focus 3). */
 async function scanRequest(req, res, { id, name, projectPaths, rescan, models }) {
-  if (liveOverSet(id)) {
+  if (liveOverSet(id, projectPaths)) {
     return res.status(409).json({ error: rescan ? 'a live run exists for this workspace' : 'a scan of this project set is already running' });
   }
-  const hash = setHashOf(id);
+  const hash = rootsHash(projectPaths);
   pendingScans.add(hash);
   try {
     const mock = !!(req.body && req.body.mock === true);

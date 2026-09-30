@@ -419,3 +419,31 @@ test('addWorkspaceMembers keeps the stored map as it is (the new member has no e
   await addWorkspaceMembers(ws.id, [d]);
   assert.deepEqual(await readWorkspaceMap(ws.id), before);
 });
+
+test('addWorkspaceMembers stops at 40 members: 40 is fine, the 41st is refused and nothing is written', async () => {
+  const { WORKSPACE_MAX_PROJECTS } = await import('../src/shared/workspace-size.mjs');
+  assert.equal(WORKSPACE_MAX_PROJECTS, 40);
+  const ws = await createWorkspace({ name: 'Crowd', projectPaths: [await freshRepo(), await freshRepo()] });
+  const more = [];
+  for (let i = 0; i < WORKSPACE_MAX_PROJECTS - 2; i++) more.push(await freshRepo());
+  assert.equal((await addWorkspaceMembers(ws.id, more)).projectPaths.length, 40);
+  const extra = await freshRepo();
+  await assert.rejects(() => addWorkspaceMembers(ws.id, [extra]),
+    (e) => e.code === 'BAD_REQUEST' && /at most 40 member projects \(41 after this change\)/.test(e.message));
+  assert.equal((await readWorkspace(ws.id)).projectPaths.length, 40, 'nothing written on a refusal');
+});
+
+test('removeWorkspaceMember keeps the free-text coordination notes and drops the cycles that named the member', async () => {
+  const { readWorkspaceMap, saveWorkspaceScanResult } = await import('../src/core/workspaces.mjs');
+  const { ws, a, c, key } = await threeMemberMapped('Mapped Notes');
+  const cur = await readWorkspaceMap(ws.id);
+  const map = { ...cur.map, cycles: [[key(a), key(c)].sort()], order: [[key(a), key(c)].sort(), [ws.projectKeys.find((k) => k !== key(a) && k !== key(c))]] };
+  const synthesis = { ...cur.synthesis, coordination: [`Ship ${key(c)} before the others.`, 'Release together.'] };
+  await saveWorkspaceScanResult(ws.id, { map, synthesis });
+  await removeWorkspaceMember(ws.id, c);
+  const stored = await readWorkspaceMap(ws.id);
+  assert.deepEqual(stored.synthesis.coordination, synthesis.coordination, 'free text: kept until the next scan');
+  assert.deepEqual(stored.map.cycles, [], 'the cycle through the member is gone');
+  assert.equal(JSON.stringify(stored.map.order).includes(key(c)), false);
+  assert.ok(stored.map.order.every((layer) => layer.length), 'no empty layer left behind');
+});

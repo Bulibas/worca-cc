@@ -7795,15 +7795,15 @@ function subscribeRescan(runId) {
   if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify({ type: 'subscribe', runId })); } catch { /* ignore */ } }
 }
 
-/** Start (or keep) following a workspace's re-scan: {runId} or {skipped: reason}. A run already
- *  followed keeps its own state. */
+/** Start (or keep) following a workspace's re-scan: {runId, paused?} or {skipped: reason}. A run
+ *  already followed keeps its own state. */
 function trackWsRescan(id, rescan, cleared = null) {
   const cur = wsRescans.get(id);
   if (rescan.runId && cur && cur.runId === rescan.runId) { if (cleared) cur.cleared = cleared; return; }
   wsRescans.set(id, rescan.runId
-    ? { runId: rescan.runId, state: 'running', reason: '', cleared: cleared || [] }
+    ? { runId: rescan.runId, state: rescan.paused ? 'paused' : 'running', reason: '', cleared: cleared || [] }
     : { runId: null, state: 'skipped', reason: String(rescan.skipped || ''), cleared: cleared || [] });
-  if (rescan.runId) subscribeRescan(rescan.runId);
+  if (rescan.runId && !rescan.paused) subscribeRescan(rescan.runId);
 }
 
 /** A run frame landed: repaint the loader following that run (after the frame is applied). */
