@@ -1606,6 +1606,7 @@ function contribSummary(x) {
     [n(b.scripts), 'script', 'scripts'],
     [n(b.skills), 'skill', 'skills'],
     [n(b.workflows), 'workflow', 'workflows'],
+    [n(b.mcpServers), 'MCP server', 'MCP servers'],
   ]
     .filter(([count]) => count > 0)
     .map(([count, one, many]) => `${count} ${count === 1 ? one : many}`);
@@ -1641,6 +1642,7 @@ async function printInventory(inv) {
   if (summary) out(`  ${summary}`);
   const notice = await pythonNoticeFor(i.scripts);
   if (notice) out(c('yellow', `  ${notice}`));
+  for (const s of i.mcpServers || []) out(`  MCP server: ${s.name} (${s.type}) — ${s.command || s.url}`);
   for (const s of i.skills || []) out(`  skill: ${s}`);
   for (const w of i.workflows || []) out(`  workflow: ${w}`);
   if (i.depCount != null) out(`  npm dependencies: ${i.depCount}`);
@@ -1939,6 +1941,13 @@ async function cmdPlugin(argv) {
   const store = await import('../core/plugin-store.mjs');
   const repoMod = await import('../core/plugin-repo.mjs');
   const manifestMod = await import('../core/plugin-manifest.mjs');
+  // MCP registry (§4.4): persist the bases of servers that became honoured with
+  // no install event. Never fails the command; the next start or write retries.
+  try {
+    await (await import('../core/mcp/catalog.mjs')).reconcileMcpStore();
+  } catch (err) {
+    process.stderr.write(`warning: MCP registry reconcile skipped: ${err?.message || err}\n`);
+  }
 
   try {
     switch (verb) {
@@ -1999,6 +2008,11 @@ async function cmdPlugin(argv) {
           const secrets = (s.configSchema || []).filter((f) => f.secret).map((f) => f.key);
           out(`  task source: ${s.id} (${s.displayName})${secrets.length ? ` — requests secrets: ${secrets.join(', ')}` : ''}`);
         }
+        // MCP servers (registry §13): the honoured block is knowable before export too.
+        for (const n of Object.keys(m.mcpServers || {}).sort()) {
+          const s = store.mcpInventoryRow(n, m.mcpServers[n]);
+          out(`  MCP server: ${s.name} (${s.type}) — ${s.command || s.url}`);
+        }
         if (m.setup?.node) out('  setup: npm ci --prefix <versionDir> --ignore-scripts --omit=dev');
         if (m.setup?.python) out('  setup: uv sync --project <versionDir>');
         if (!(await confirmPlugin('Install?', !!a.yes))) {
@@ -2046,6 +2060,7 @@ async function cmdPlugin(argv) {
         for (const s of delta.newTaskSources || []) out(c('yellow', `  new task source: ${s}`));
         for (const ag of delta.newAgents || []) out(c('yellow', `  new agent: ${ag}`));
         if (delta.setupChanged) out(c('yellow', '  setup commands changed'));
+        for (const l of delta.mcpLines || []) out(c(l.red ? 'red' : 'yellow', `  ${l.text}`));
         if (a.diff && cand.diffFull) out(cand.diffFull);
         if (!(await confirmPlugin('Update?', !!a.yes))) {
           out('aborted (still pinned)');

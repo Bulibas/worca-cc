@@ -17,6 +17,7 @@ import { join, dirname } from 'node:path';
 import { pluginsRoot, pluginDir, readPluginsLock } from './plugins-lock.mjs';
 import { normalizeManifest, findEscapingSymlinks } from './plugin-manifest.mjs';
 import { githubEnv } from './github-credentials.mjs';
+import { mcpUpdatePreview } from './mcp/plugin-lifecycle.mjs';
 
 const execFileP = promisify(execFile);
 const defaultExec = async (cmd, args, opts = {}) => {
@@ -191,6 +192,13 @@ function manifestModels(raw) {
   return r.ok ? { models: r.manifest.models, modelSecrets: r.manifest.modelSecrets } : { models: [], modelSecrets: [] };
 }
 
+/** Honoured MCP servers of a RAW manifest under its own negotiated API ({} on
+ *  any failure, and below API 5 — normalizeManifest strips the block). */
+function manifestMcp(raw) {
+  const r = raw ? normalizeManifest(raw) : null;
+  return r && r.ok ? r.manifest.mcpServers : {};
+}
+
 async function showManifest(cache, sha, subdir, exec) {
   const p = subdir ? `${subdir}/worca-cc-plugin.json` : 'worca-cc-plugin.json';
   try { return JSON.parse(await gitDir(cache, ['show', `${sha}:${p}`], exec)); } catch { return null; }
@@ -201,7 +209,7 @@ async function showManifest(cache, sha, subdir, exec) {
  * sources, new agents (added agents/<key>.meta.json files), setup changes —
  * the red-highlight inputs that turn a malicious update into a human review event.
  */
-async function computeManifestDelta(cache, entry, pinnedSha, candidateSha, exec) {
+async function computeManifestDelta(name, cache, entry, pinnedSha, candidateSha, exec) {
   const pin = await showManifest(cache, pinnedSha, entry.subdir, exec);
   const cand = await showManifest(cache, candidateSha, entry.subdir, exec);
   const pinSecrets = manifestSecretKeys(pin);
@@ -236,6 +244,8 @@ async function computeManifestDelta(cache, entry, pinnedSha, candidateSha, exec)
       .map((m) => m.id),
     newModelSecrets: candM.modelSecrets.map((f) => f.key)
       .filter((k) => !pinM.modelSecrets.some((f) => f.key === k)),
+    // MCP servers (registry §4.6): new/removed/changed names + the red lines.
+    ...(await mcpUpdatePreview(name, manifestMcp(pin), manifestMcp(cand))),
   };
 }
 
@@ -257,6 +267,7 @@ export async function fetchCandidate(name, { exec = defaultExec, fullDiff = fals
   let manifestDelta = {
     newSecrets: [], newTaskSources: [], newAgents: [], setupChanged: false,
     newModels: [], removedModels: [], envChangedModels: [], newModelSecrets: [],
+    newMcpServers: [], removedMcpServers: [], changedMcpServers: [], mcpLines: [],
   };
   if (candidateSha !== pinnedSha) {
     const log = await gitDir(cache, ['log', '--format=%H%x09%s', `${pinnedSha}..${candidateSha}`], exec);
@@ -267,7 +278,7 @@ export async function fetchCandidate(name, { exec = defaultExec, fullDiff = fals
     const scope = entry.subdir ? ['--', entry.subdir] : [];
     diffstat = (await gitDir(cache, ['diff', '--stat', pinnedSha, candidateSha, ...scope], exec)).trim();
     if (fullDiff) diffFull = (await gitDir(cache, ['diff', pinnedSha, candidateSha, ...scope], exec)).trim();
-    manifestDelta = await computeManifestDelta(cache, entry, pinnedSha, candidateSha, exec);
+    manifestDelta = await computeManifestDelta(name, cache, entry, pinnedSha, candidateSha, exec);
   }
   return { pinnedSha, candidateSha, commits, diffstat, diffFull, manifestDelta };
 }

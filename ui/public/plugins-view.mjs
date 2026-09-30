@@ -103,6 +103,8 @@ export function renderPluginList(plugins, { doc = globalThis.document, channelSt
       b.type = 'button';
       b.dataset.name = p.name;
       if (cls === 'pl-doctor') b.dataset.minLevel = 'expert';   // diagnostics (docs/ui-levels.md)
+      // The MCP sets this plugin's servers leave on uninstall — the confirm lists them.
+      if (cls === 'pl-remove' && (p.mcpSets || []).length) b.dataset.mcpSets = p.mcpSets.join(', ');
       actions.appendChild(b);
     }
     card.appendChild(actions);
@@ -216,6 +218,15 @@ export function renderInstallConsent(entry, inventory, { doc = globalThis.docume
         h(doc, 'span', 'pl-secret', `requests model secret: ${s.key}${s.label && s.label !== s.key ? ` (${s.label})` : ''}`));
     }
   }
+  // MCP servers (MCP registry §4.1): a snapshot persisted before API 5 has no
+  // key at all — that is "unknown", never "none".
+  if (!Array.isArray(inv.mcpServers)) section('MCP servers: unknown — refresh the marketplace');
+  else if (inv.mcpServers.length) {
+    const mcp = section(`MCP servers (${inv.mcpServers.length})`);
+    for (const s of inv.mcpServers) {
+      mcp.appendChild(h(doc, 'div', 'pl-consent-row mono', `${s.name} (${s.type}) — ${s.command || s.url}`));
+    }
+  }
   const skills = section(`Skills (${(inv.skills || []).length})`);
   for (const s of inv.skills || []) skills.appendChild(h(doc, 'div', 'pl-consent-row mono', s));
   const wfs = section(`Workflows (${(inv.workflows || []).length})`);
@@ -231,8 +242,10 @@ export function renderInstallConsent(entry, inventory, { doc = globalThis.docume
 // renderUpdatePreview(preview) — fetchCandidate result: pinned→candidate shas,
 // commit log, diffstat, confirm button (.pl-confirm-update; app.js wires it).
 // No new commits -> a plain up-to-date state: badge + hint, no shas/diffstat/button.
+// Also takes the route's body as app.js passes it: POST /api/plugins/:name/update
+// answers `{ preview }`.
 export function renderUpdatePreview(preview, { doc = globalThis.document } = {}) {
-  const p = preview || {};
+  const p = (preview && preview.preview) || preview || {};
   const root = h(doc, 'div', 'pl-update');
   if (!(p.commits || []).length) {
     const row = h(doc, 'div', 'pl-uptodate');
@@ -260,6 +273,8 @@ export function renderUpdatePreview(preview, { doc = globalThis.document } = {})
     ...(d.newModelSecrets || []).map((k) => ['pl-delta-secret', `NEW MODEL SECRET requested: ${k}`]),
     ...(d.newModels || []).map((m) => ['pl-delta', `new model: ${m}`]),
     ...(d.removedModels || []).map((m) => ['pl-delta', `removed model: ${m}`]),
+    // MCP servers (registry §4.6): lines built server-side, where the sets are known.
+    ...(d.mcpLines || []).map((l) => [l.red ? 'pl-delta-secret' : 'pl-delta', l.text]),
   ];
   if (flags.length) {
     const box = h(doc, 'div', 'pl-manifest-delta');

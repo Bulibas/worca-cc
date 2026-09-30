@@ -12567,7 +12567,8 @@ if (el.pluginsList) el.pluginsList.addEventListener('click', async (e) => {
   } else if (t.classList.contains('pl-remove')) {
     const res = await confirmModal({
       title: 'Uninstall plugin',
-      message: `Uninstall "${name}"?`,
+      message: `Uninstall "${name}"?${t.dataset.mcpSets
+        ? `\n\nIts MCP servers leave these sets, with their values, secrets and test results: ${t.dataset.mcpSets}.` : ''}`,
       confirmLabel: 'Uninstall',
       checkbox: { label: 'Also delete config, secrets and state (purge — cannot be undone)' },
     });

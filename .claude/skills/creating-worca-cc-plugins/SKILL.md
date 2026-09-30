@@ -6,7 +6,7 @@ description: Use when creating, scaffolding, debugging, reviewing, or extending 
 # Creating Worca CC Plugins
 
 A Worca CC plugin is a **git repo** (or a subdir one level deep) containing `worca-cc-plugin.json`.
-It contributes up to five things to the host, ships **no code that runs in the browser**, and — from
+It contributes up to six things to the host, ships **no code that runs in the browser**, and — from
 plugin API 4 — can ship the **declared forms** its agents ask questions with.
 
 | Dir | Contributes | Executed? |
@@ -16,8 +16,9 @@ plugin API 4 — can ship the **declared forms** its agents ask questions with.
 | `agents/<key>.md` + `<key>.meta.json` | pipeline agents (meta v2 sidecar: typed input/output ports; `ask.forms` from API 4) | No — prompt text fed to `claude -p`, forms drawn by the host |
 | `skills/<name>/SKILL.md` | agent skills | No — copied into the run worktree |
 | `workflows/*.json` | pipeline templates (v2 graph JSON — one Task node, one End node) | No — validated into DB rows |
+| `mcpServers` in the manifest (API 5) | MCP servers for worca's registry | **Yes** — a stdio server is started per spawn once a user adds it to a set |
 
-**The connector and the scripts are the executable seams.** Everything else is data.
+**The connector, the scripts and stdio MCP servers are the executable seams.** Everything else is data.
 Internalize this before designing anything.
 
 ## Start here — always scaffold
@@ -63,7 +64,7 @@ Only `name` is required. Unknown fields are warnings (errors under `--strict`).
 |---|---|
 | `name` | kebab-case, ≤64 chars, machine-unique, used as a dir name |
 | `version` | optional — absent means the pinned SHA **is** the version |
-| `engines.worca-cc-api` | `">=4 <5"`. Integer host API. Unparseable → fails closed, won't install. Host APIs are a SET ([1, 2, 3, 4]); the highest version your range admits is **negotiated**, and that is what decides which features you get. API 3 adds meta v2 sidecars and v2 graph templates; **API 4 honours an agent's `ask.forms`** |
+| `engines.worca-cc-api` | `">=4 <5"` (what `plugin init` writes); `">=5 <6"` to ship MCP servers. Integer host API. Unparseable → fails closed, won't install. Host APIs are a SET ([1, 2, 3, 4, 5]); the highest version your range admits is **negotiated**, and that is what decides which features you get. API 3 adds meta v2 sidecars and v2 graph templates; **API 4 honours an agent's `ask.forms`**; **API 5 honours the manifest's `mcpServers`** |
 | `setup.node` | `true` → `npm ci --ignore-scripts --omit=dev` at install. **Lockfile mandatory** |
 | `setup.python` | only `"pyproject"` → `uv sync`. Worca CC never *runs* python; your JS spawns it |
 | `taskSources[].id` | kebab-case |
@@ -73,6 +74,7 @@ Only `name` is required. Unknown fields are warnings (errors under `--strict`).
 | `taskSources[].inputs[]` | per-run UI — see next table. **Exactly one `task-browser` required** |
 | `models[]` | catalog entries: `id`, `label`, `efforts`, `env` (literal or `{"secret": "<key>"}`), `cost` (`{free:true}` \| `{perMtok:{…}}`), and `upstream` for a bridged model — `{provider: "copilot"\|"openai"\|"anthropic", api: "anthropic"\|"openai-chat"\|"openai-responses", model, baseUrl?, apiKey? (a `${VAR}` ref only, never a literal), headers?, capabilities? (toolCalls, vision, reasoning, maxPromptTokens, maxOutputTokens, reasoningEfforts)}`. A `copilot` entry resolves against each user's own sign-in |
 | `modelSecrets[]` | `{key, label}` — the secrets `models[].env` may reference; prompted for at install |
+| `mcpServers` | API 5: name → MCP server definition (`type`, `command`/`args`/`env` or `url`/`headers`, `fields`, `description`) — see **MCP servers (API 5)** |
 
 ## Marketplace manifest (repo-level, optional)
 
@@ -194,7 +196,7 @@ An agent that needs a human can ship the UI its question is asked with. The form
 sidecar** — the host draws it from a fixed widget catalog, validates the answer, and resumes the
 agent. Nothing you write runs in the browser.
 
-Your manifest must **negotiate** API 4 or the block is ignored:
+Your manifest must **negotiate** API 4 or later (`">=5 <6"` honours forms too) or the block is ignored:
 
 ```json
 "engines": { "worca-cc-api": ">=4 <5" }
@@ -421,6 +423,87 @@ names the block instead). That list is read from your `accept` patterns alone, b
 installed and without running a line of your code — so keep `accept` as narrow as the form really
 needs.
 
+## MCP servers (API 5)
+
+A plugin can ship **MCP server definitions** for worca's own registry — never written into anyone's
+Claude Code config. Installing starts nothing: a user adds a server to one or more **sets** in
+Settings › MCP servers, fills in that set's values and secrets, and assigns sets to projects; pipeline
+agents and Ask Worca then get one copy per (set, server). The consent card lists each server with its
+command or URL.
+
+Your manifest must **negotiate** API 5 or the block is ignored (and named as an ignored contribution):
+
+```json
+"engines": { "worca-cc-api": ">=5 <6" }
+```
+
+```json
+{
+  "name": "acme-tools",
+  "version": "1.4.0",
+  "engines": { "worca-cc-api": ">=5 <6" },
+  "mcpServers": {
+    "sentry": {
+      "type": "http",
+      "url": "https://mcp.sentry.dev/mcp",
+      "headers": { "Authorization": { "field": "token", "prefix": "Bearer " },
+                   "X-Sentry-Org": { "field": "org" } },
+      "fields": [
+        { "key": "token", "label": "Sentry token", "secret": true, "oauth": true, "required": true },
+        { "key": "org",   "label": "Organization", "required": true }
+      ],
+      "description": "Sentry issues and events"
+    },
+    "jira": {
+      "type": "stdio", "command": "node", "args": ["./mcp/jira.mjs"],
+      "env": { "JIRA_URL": { "field": "baseUrl" }, "JIRA_TOKEN": { "field": "token" } },
+      "fields": [
+        { "key": "baseUrl", "label": "Jira URL", "required": true, "default": "https://acme.atlassian.net" },
+        { "key": "token",   "label": "API token", "secret": true, "required": true }
+      ],
+      "description": "Search and read Jira issues"
+    }
+  }
+}
+```
+
+Rules — `worca plugin validate` checks every one, and an error blocks the install:
+
+- **Name** (the map key): `^[a-z][a-z0-9-]{0,19}$`; `worca` is reserved; no `_` (copy names use it).
+- **`type`**: `stdio` needs `command` (+ `args`, `env`); `http` / `sse` need `url` — `https:`, or `http:`
+  only for `localhost`, `127.0.0.1`, `::1` — plus optional `headers`.
+- **`fields[]`** — what each set fills in: `key` `^[A-Za-z][A-Za-z0-9_]{0,31}$` (unique ignoring case),
+  `label`, `secret` (default false), `oauth` (secret only: a bearer token the user refreshes by hand),
+  `required` (default false), `default` (non-secret only).
+- **Field refs** `{ "field": "<key>", "prefix"?: "…", "suffix"?: "…" }` go in an `env` value, a
+  `headers` value, an `args` element, or `url` (a string, one ref, or an array of strings and refs
+  joined in order). A secret field goes in `env`, `headers` or the path/query of `url` — never in
+  `args` (argv is readable by every local user), never the whole `url`, its host or userinfo. A field
+  used in `url` must be `required`. A field behind a secret-sounding env/header key (`TOKEN`, `KEY`,
+  `SECRET`, `Authorization`, …) or query parameter (`api_key`, `token`, …) must be `secret`.
+- **Env keys** `^[A-Za-z_][A-Za-z0-9_]{0,63}$`, unique ignoring case, never starting `MCPSECRET_` or
+  `MCPCHILD_`. **Header names** are RFC 7230 tokens, unique ignoring case; `Host`, `Content-Length`,
+  `Transfer-Encoding`, `Connection` and `Upgrade` are refused.
+- **No literal secrets.** Every literal (`command`, `args`, `url` parts, env and header values,
+  `prefix`/`suffix`, `default`, `description`) refuses `${` and control characters; a `prefix` may not
+  end in `$` and a `suffix` may not start with `{`. A token-shaped literal (`Bearer ghp_…`, a JWT,
+  `?api_key=…`, a URL with a password) is an error: make it a secret field.
+- **Paths**: a `command` or `args` element starting `./` resolves against your plugin dir (the pinned
+  version; your working dir when linked) and must exist inside it — the `command` as a file, an `args`
+  element may name a directory; the consent card shows it as `<plugin-dir>/…`. `"command": "node"`
+  runs worca's own Node. Python: `"command": "uv", "args": ["run", "--directory", "./", "server.py"]`
+  — `uv run --directory ./`, since no working directory is assumed.
+- **`description`**: at most 200 characters (it is flattened into prompts).
+
+A stdio server starts with only a keep-list of the environment (`HOME`, `PATH`, `LANG`, …) plus the
+`env` you declare: declare every variable it needs.
+
+**Updates** list each new, removed and changed server. A changed `type`, `command`, `args`, `url`,
+`headers` or `env`, a field added or removed, or a field's `default`, `secret` or `required` is a red
+line naming the sets that hold secrets for it; a `label`, `description` or `oauth` change is not.
+Applying keeps a set's value whose key and `secret` flag survive and drops the rest; a server you
+drop, like an uninstall, leaves every set with its values and secrets.
+
 ## Scripts (API 3)
 
 A script card runs **your program** instead of spawning Claude: worca hands it the bound
@@ -539,6 +622,8 @@ device names (`con`, `nul`, `com1`, …).
 | An `ask` block on a plugin declaring API 3 | The block is ignored, the agent asks with generic questions; `plugin list`/`doctor`/the Plugins card say so. Declare `">=4 <5"` |
 | A form with no `example` | Validation error — `example` is what proves the declaration and what the Agents view previews |
 | A `type:'file'` with a wide `accept` | Every reviewer sees it on the consent card. Narrow it to what the form actually shows |
+| `mcpServers` on a plugin declaring API 4 | The block is ignored — no server reaches the catalog; `plugin list`/`doctor`/the Plugins card say so. Declare `">=5 <6"` |
+| A secret field referenced from `args` | Validation error — argv is readable by every local user. Pass it through `env` |
 
 ## The example worth reading
 
@@ -575,6 +660,7 @@ silently dropping the tracker comment on a transient blip.
 | CLI | `src/cli/worca-cc.mjs` (`worca plugin help`) |
 | Ask-form dialect, the three gates (`validateFormDef`, `checkAskData`, `collectAnswer`) and the text projection | `src/shared/forms/` |
 | Ask-form rendering (host-owned widgets) | `ui/public/ask/form-renderer.mjs` |
+| MCP server rules, catalog, plugin lifecycle | `src/core/mcp/definitions.mjs`, `src/core/mcp/catalog.mjs`, `src/core/mcp/plugin-lifecycle.mjs` |
 
 ## Before you ship
 
@@ -588,5 +674,5 @@ Then push and let users register the repo as a marketplace:
 install from the Available list or `worca plugin install <name>`.
 Removing a marketplace never removes installed plugins.
 Installs are SHA-pinned; users see a consent inventory listing every agent's tools, every ask form it
-can put on screen with the file types that form may display, and every secret you request — so keep
-all three minimal.
+can put on screen with the file types that form may display, every MCP server with its command or URL,
+and every secret you request — so keep all four minimal.

@@ -233,6 +233,9 @@ import {
   listOrphanPluginData, purgePluginData,
 } from '../src/core/plugin-store.mjs';
 import { fetchCandidate } from '../src/core/plugin-repo.mjs';
+import { reconcileMcpStore } from '../src/core/mcp/catalog.mjs';
+import { readMcpStore } from '../src/core/mcp/store.mjs';
+import { mcpFootprint } from '../src/core/mcp/plugin-lifecycle.mjs';
 import {
   addMarketplace, listMarketplaces, syncMarketplace, refreshAllMarketplaces,
   removeMarketplace, readMarketplaces, seedBuiltinMarketplace,
@@ -8334,11 +8337,14 @@ app.get('/api/plugins', async (req, res) => {
     // request, and only when some plugin ships a python script (the probe caches 60 s).
     const anyPython = rows.some((p) => Number((p.scriptRuntimes || {}).python) > 0);
     const notice = anyPython ? await pythonNoticeFor([{ runtime: 'python' }]) : null;
+    const mcp = await readMcpStore();
     res.json({
       plugins: rows.map((p) => ({
         ...p,
         marketplaceName: p.marketplace && mkts[p.marketplace] ? mkts[p.marketplace].name : null,
         pythonMissing: !!(notice && Number((p.scriptRuntimes || {}).python) > 0),
+        // The uninstall confirm names the MCP sets its servers leave (§4.6).
+        mcpSets: mcpFootprint(mcp, (id) => id.startsWith(`plugin:${p.name}/`)).sets,
       })),
       orphans: listOrphanPluginData(),
     });
@@ -9282,6 +9288,14 @@ export async function bootMaintenance({ log } = {}) {
   } catch (err) {
     summary.bench = { removed: 0 };
     console.error(`[worca-ui] bench sweep failed: ${err && err.message ? err.message : err}`);
+  }
+
+  // MCP registry (§4.4): a plugin can become honoured with no install event (a
+  // host API bump, a linked plugin's edit), so persist the bases it still lacks.
+  try {
+    await reconcileMcpStore();
+  } catch (err) {
+    console.error(`[worca-ui] MCP registry reconcile failed: ${err && err.message ? err.message : err}`);
   }
   return summary;
 }
