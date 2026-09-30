@@ -143,7 +143,8 @@ started with.
 - Every change starts a Workspace scan run of the new set (graphs, map and description, saved
   when it ends done); the Projects card follows it. A newer member change stops the one it
   started and scans again. A scan you started yourself (paused ones included) — or any other
-  active run of the workspace — blocks a member change until it ends (409). The scan launch
+  active run of the workspace, including one the CLI or another UI runs — blocks a member change
+  until it ends (409); a crashed run's record blocks nothing. The scan launch
   guard follows each workspace's current members, not its id: a first scan of the set a
   workspace once spanned is not refused as "already running". A scan that finishes after the members changed
   saves nothing (`SET_CHANGED`). A member the scan cannot read (not the top of its own

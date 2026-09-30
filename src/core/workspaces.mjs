@@ -133,9 +133,9 @@ export function scanMemberProblems(projectPaths) {
  * @param {string[]} projectPaths
  * @returns {string} 8 hex chars
  */
-export function rootsHash(projectPaths) {
+export function rootsHash(projectPaths, rootOf = canonicalProjectRoot) {
   const roots = (Array.isArray(projectPaths) ? projectPaths : [])
-    .map((p) => canonicalProjectRoot(p))
+    .map((p) => rootOf(p))
     .sort();
   return createHash('sha1').update(roots.join('\n')).digest('hex').slice(0, 8);
 }
@@ -317,13 +317,13 @@ export async function readWorkspace(id) {
  * absolute paths in input order, with later paths that resolve to an
  * already-seen canonical root dropped.
  */
-function normalizeMembers(projectPaths) {
+function normalizeMembers(projectPaths, rootOf = canonicalProjectRoot) {
   const out = [];
   const seenRoots = new Set();
   for (const raw of Array.isArray(projectPaths) ? projectPaths : []) {
     const norm = normalizeProjectPath(raw);
     if (!norm) continue;
-    const root = canonicalProjectRoot(norm);
+    const root = rootOf(norm);
     if (seenRoots.has(root)) continue;
     seenRoots.add(root);
     out.push(norm);
@@ -331,11 +331,22 @@ function normalizeMembers(projectPaths) {
   return out;
 }
 
+/**
+ * The git probes of a member change (each spawns git), memoized: the change plans once BEFORE its
+ * write lock, where every probe runs, then again inside it on the cached answers — so the lock is
+ * never held across a git spawn (a member that is new to the second pass still probes live).
+ */
+function memoGitProbe() {
+  const memo = (fn) => { const m = new Map(); return (p) => { if (!m.has(p)) m.set(p, fn(p)); return m.get(p); }; };
+  return { rootOf: memo(canonicalProjectRoot), isRepo: memo(isGitRepo) };
+}
+const LIVE_GIT = { rootOf: canonicalProjectRoot, isRepo: isGitRepo };
+
 /** Each NEW member must be an existing directory inside a git work tree. */
-function checkNewMembers(paths) {
+function checkNewMembers(paths, isRepo = isGitRepo) {
   for (const p of paths) {
     if (!isDir(p)) throw err(`member path does not exist or is not a directory: ${p}`, 'BAD_REQUEST');
-    if (!isGitRepo(p)) throw err(`member path is not a git repository: ${p}`, 'BAD_REQUEST');
+    if (!isRepo(p)) throw err(`member path is not a git repository: ${p}`, 'BAD_REQUEST');
   }
 }
 
@@ -356,10 +367,10 @@ function prepareCreate(input) {
 }
 
 /** Throw DUPLICATE_SET when a workspace other than `selfId` (null: any) already spans exactly `paths`. */
-function assertUniqueSet(paths, selfId) {
-  const hash = rootsHash(paths);
+function assertUniqueSet(paths, selfId, rootOf = canonicalProjectRoot) {
+  const hash = rootsHash(paths, rootOf);
   for (const row of prepare('SELECT id FROM workspaces').all()) {
-    if (row.id !== selfId && rootsHash(memberPaths(row.id)) === hash) {
+    if (row.id !== selfId && rootsHash(memberPaths(row.id), rootOf) === hash) {
       throw err('a workspace over this exact project set already exists', 'DUPLICATE_SET');
     }
   }
@@ -524,20 +535,21 @@ export function planWorkspaceRename(id, name) {
  * @returns {{entry, added:string[], next:string[]}}
  * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_SET)
  */
-export function planMembersAdd(id, projectPaths) {
+export function planMembersAdd(id, projectPaths, git = LIVE_GIT) {
   const entry = entryOrThrow(id);
-  const current = new Set(entry.projectPaths.map((p) => canonicalProjectRoot(p)));
-  const added = normalizeMembers(projectPaths);
+  const tooMany = (n) => err(`a workspace holds at most ${WORKSPACE_MAX_PROJECTS} member projects (${n} after this change)`, 'BAD_REQUEST');
+  // Sized before any git runs, by distinct path: a flood of paths never spawns git once per path.
+  const distinct = new Set((Array.isArray(projectPaths) ? projectPaths : []).map(normalizeProjectPath).filter(Boolean)).size;
+  if (entry.projectPaths.length + distinct > WORKSPACE_MAX_PROJECTS) throw tooMany(entry.projectPaths.length + distinct);
+  const current = new Set(entry.projectPaths.map((p) => git.rootOf(p)));
+  const added = normalizeMembers(projectPaths, git.rootOf);
   if (!added.length) throw err('name at least one project to add', 'BAD_REQUEST');
   for (const p of added) {
-    if (current.has(canonicalProjectRoot(p))) throw err(`already a member of this workspace: ${p}`, 'BAD_REQUEST');
+    if (current.has(git.rootOf(p))) throw err(`already a member of this workspace: ${p}`, 'BAD_REQUEST');
   }
   const next = [...entry.projectPaths, ...added];
-  if (next.length > WORKSPACE_MAX_PROJECTS) {
-    throw err(`a workspace holds at most ${WORKSPACE_MAX_PROJECTS} member projects (${next.length} after this change)`, 'BAD_REQUEST');
-  }
-  checkNewMembers(added);
-  assertUniqueSet(next, id);
+  checkNewMembers(added, git.isRepo);
+  assertUniqueSet(next, id, git.rootOf);
   return { entry, added, next };
 }
 
@@ -550,15 +562,15 @@ export function planMembersAdd(id, projectPaths) {
  * @returns {{entry, removed:string, next:string[], metricsProject, policyProject}}
  * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_SET)
  */
-export function planMemberRemove(id, projectPath) {
+export function planMemberRemove(id, projectPath, git = LIVE_GIT) {
   const entry = entryOrThrow(id);
   const want = typeof projectPath === 'string' ? normalizeProjectPath(projectPath) : null;
   if (!want) throw err('name the member project to remove', 'BAD_REQUEST');
-  const removed = entry.projectPaths.find((p) => p === want || canonicalProjectRoot(p) === canonicalProjectRoot(want));
+  const removed = entry.projectPaths.find((p) => p === want || git.rootOf(p) === git.rootOf(want));
   if (!removed) throw err(`not a member of this workspace: ${want}`, 'BAD_REQUEST');
   const next = entry.projectPaths.filter((p) => p !== removed);
   if (next.length < 2) throw err('a workspace needs at least 2 distinct member projects', 'BAD_REQUEST');
-  assertUniqueSet(next, id);
+  assertUniqueSet(next, id, git.rootOf);
   return {
     entry, removed, next,
     metricsProject: entry.metricsProject === removed ? null : entry.metricsProject ?? null,
@@ -607,8 +619,10 @@ function mapWithoutMember(mapDoc, overrides, key) {
  */
 export async function addWorkspaceMembers(id, projectPaths) {
   const now = new Date().toISOString();
+  const git = memoGitProbe();
+  planMembersAdd(id, projectPaths, git);   // every git probe (and every refusal) before the write lock
   const { entry, next } = tx(() => {
-    const plan = planMembersAdd(id, projectPaths);
+    const plan = planMembersAdd(id, projectPaths, git);
     const base = prepare('SELECT COALESCE(MAX(ordinal), -1) AS m FROM workspace_projects WHERE workspace_id = ?').get(id).m;
     const ins = prepare('INSERT INTO workspace_projects (workspace_id, project_key, ordinal) VALUES (?, ?, ?)');
     plan.added.forEach((p, i) => ins.run(id, p, base + 1 + i));
@@ -627,10 +641,12 @@ export async function addWorkspaceMembers(id, projectPaths) {
  */
 export async function removeWorkspaceMember(id, projectPath) {
   const now = new Date().toISOString();
-  // projectKey may spawn git: taken before the write lock, like the map writers do.
+  // projectKey and the plan's probes spawn git: taken before the write lock, like the map writers do.
   const keyOf = new Map(entryOrThrow(id).projectPaths.map((p) => [p, projectKey(p)]));
+  const git = memoGitProbe();
+  planMemberRemove(id, projectPath, git);
   const out = tx(() => {
-    const p = planMemberRemove(id, projectPath);
+    const p = planMemberRemove(id, projectPath, git);
     const key = keyOf.get(p.removed) ?? projectKey(p.removed);
     const { mapDoc, overrides } = mapWithoutMember(p.entry.mapDoc, p.entry.overrides, key);
     const kept = { ...p.entry, projectPaths: p.next, mapDoc, overrides };

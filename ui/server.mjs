@@ -22,7 +22,7 @@ import { preflightDeps } from '../src/core/preflight-deps.mjs';
 import { createOrchestratorFor } from '../src/core/engine-select.mjs';
 import {
   listPipelines, readPipeline, listAllPipelines, readPipelineByKey,
-  enrichPipelinesPr, reconcileStaleRunning, readPipelineForResume, persistPrState, readPrState,
+  enrichPipelinesPr, reconcileStaleRunning, foreignActiveWorkspaceRuns, readPipelineForResume, persistPrState, readPrState,
   readRunLogText, readRunArtifactText, countPipelines, runRootSweepLookups, legacySweepLookups, slugify,
   listArtifacts, listRunArtifacts, lookupPipelineRow, findPipelineRowById, readPipelineStateById, resolveIndexedArtifact, resolveIndexedArtifactForRow,
   resolveIndexedArtifactFileForRow, readPromptFile, runDirForRow, recordArtifact, appendAudit,
@@ -4928,11 +4928,15 @@ app.patch('/api/workspaces/:id', async (req, res) => {
   }
 });
 
-/** A run that owns this workspace (ownsWorkspaceTarget: any active run, or a paused Workspace
- *  scan) in THIS process blocks a member change — except an automatic re-scan: the change
- *  supersedes it (supersedeRescans). */
+/** A run that owns this workspace blocks a member change: in THIS process any active run or a
+ *  paused Workspace scan (ownsWorkspaceTarget) — except an automatic re-scan, which the change
+ *  supersedes (supersedeRescans) — and any active run another live process (the CLI) owns: its
+ *  metrics / policy home must not move under it. A crashed owner's row is reconciled first. */
 function workspaceMembersBusy(id) {
-  return [...runs.values()].some((r) => r.workspaceId === id && !r.autoRescan && ownsWorkspaceTarget(r));
+  if ([...runs.values()].some((r) => r.workspaceId === id && !r.autoRescan && ownsWorkspaceTarget(r))) return true;
+  const liveIds = [...runs.values()].flatMap((r) => [r.id, r.pipelineId]).filter(Boolean);
+  try { reconcileStaleRunning({ liveIds: liveRunIds() }); } catch { /* best-effort */ }
+  return foreignActiveWorkspaceRuns(id, { liveIds }).length > 0;
 }
 
 /** Stop the automatic re-scan still owning a workspace: its member set is out of date. */

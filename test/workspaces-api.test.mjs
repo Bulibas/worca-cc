@@ -487,6 +487,32 @@ test('a second member change supersedes the automatic re-scan; a scan the user s
   } finally { runs.delete('user-scan-1'); }
 });
 
+test('POST /api/workspaces/:id/members is 409 while ANOTHER process (the CLI) runs the workspace; a crashed one blocks nothing', async () => {
+  const { seedPipelineRow } = await import('./helpers/db-seed.mjs');
+  const { getDb } = await import('../src/core/db.mjs');
+  const { hostname } = await import('node:os');
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const { workspace } = await (await post('/api/workspaces', { name: 'Cli Owned', projectPaths: [a, b] })).json();
+  const now = new Date().toISOString();
+  const row = (id, ownerPid) => seedPipelineRow({ id, projectKey: workspace.projectKeys[0], workspaceKey: workspace.id, target: 'workspace',
+    status: 'running', startedAt: now, ownerPid, ownerHost: hostname(), heartbeatAt: now });
+  try {
+    row('c1100001', process.ppid);   // alive, and not this server
+    const r = await post(`/api/workspaces/${workspace.id}/members`, { add: [c] });
+    assert.equal(r.status, 409, 'a run the in-process runs map cannot see still owns the workspace');
+    assert.match((await r.json()).error, /run or scan owns it/);
+    getDb().prepare("DELETE FROM pipelines WHERE id = 'c1100001'").run();
+    row('c1100002', 2 ** 22 + 12345);   // a pid no process holds: the CLI crashed mid-run
+    const ok = await post(`/api/workspaces/${workspace.id}/members`, { add: [c] });
+    assert.equal(ok.status, 200, 'a dead owner\'s row is reconciled, not obeyed');
+    stopRunsOf(workspace.id);
+  } finally {
+    getDb().prepare("DELETE FROM pipelines WHERE id IN ('c1100001', 'c1100002')").run();
+  }
+});
+
 test('the workspace list and detail name the automatic re-scan run while it owns the workspace', async () => {
   const a = await freshRepo();
   const b = await freshRepo();

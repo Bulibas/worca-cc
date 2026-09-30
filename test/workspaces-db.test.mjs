@@ -447,3 +447,33 @@ test('removeWorkspaceMember keeps the free-text coordination notes and drops the
   assert.equal(JSON.stringify(stored.map.order).includes(key(c)), false);
   assert.ok(stored.map.order.every((layer) => layer.length), 'no empty layer left behind');
 });
+
+/** Run fn with a `git` on PATH that logs each call, then runs the real git. Returns [result, calls]. */
+async function countingGit(fn) {
+  const { mkdtemp: mk, writeFile: wf, chmod, readFile } = await import('node:fs/promises');
+  const real = spawnSync('sh', ['-c', 'command -v git']).stdout.toString().trim();
+  const bin = await mk(join(tmpdir(), 'worca-cc-wsdb-gitshim-'));
+  created.push(bin);
+  const log = join(bin, 'calls.log');
+  await wf(log, '');
+  await wf(join(bin, 'git'), `#!/bin/sh\necho "$*" >> "${log}"\nexec "${real}" "$@"\n`);
+  await chmod(join(bin, 'git'), 0o755);
+  const prev = process.env.PATH;
+  process.env.PATH = `${bin}:${prev}`;
+  let out;
+  try { out = await fn(); } catch (e) { out = e; } finally { process.env.PATH = prev; }
+  return [out, (await readFile(log, 'utf8')).split('\n').filter(Boolean)];
+}
+
+test('addWorkspaceMembers refuses an oversized add before spawning git for any path', { skip: process.platform === 'win32' }, async () => {
+  const ws = await createWorkspace({ name: 'Flood', projectPaths: [await freshRepo(), await freshRepo()] });
+  const { mkdirSync } = await import('node:fs');
+  const flood = await mkdtemp(join(tmpdir(), 'worca-cc-wsdb-flood-'));
+  created.push(flood);
+  const many = Array.from({ length: 200 }, (_, i) => join(flood, `d${i}`));
+  for (const d of many) mkdirSync(d);   // real directories: git runs (and fails) in each
+  const [e, calls] = await countingGit(() => addWorkspaceMembers(ws.id, many));
+  assert.equal(e && e.code, 'BAD_REQUEST');
+  assert.match(e.message, /at most 40 member projects/);
+  assert.equal(calls.length, 0, `no git before the size check (${calls.length} calls)`);
+});

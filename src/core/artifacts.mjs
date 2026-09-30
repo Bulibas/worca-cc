@@ -1711,6 +1711,27 @@ export function reconcileStaleRunning({
 }
 
 /**
+ * The ids of a workspace's active runs (created / starting / running / pausing) owned by ANOTHER
+ * live process — the CLI, a second UI — that a server's own runs map cannot see. A row this
+ * process owns, or one in `liveIds` (the server's in-process runs), is left out; so is an
+ * unclaimed row (no owner yet). Call reconcileStaleRunning first: a crashed owner's row is then
+ * 'interrupted' and never counts.
+ * @param {string} workspaceKey
+ * @param {{liveIds?:string[], pid?:number, host?:string}} [opts]
+ * @returns {string[]}
+ */
+export function foreignActiveWorkspaceRuns(workspaceKey, { liveIds = [], pid = process.pid, host = hostname() } = {}) {
+  const live = new Set(liveIds.filter(Boolean));
+  const placeholders = RECONCILE_NON_TERMINAL.map(() => '?').join(', ');
+  return getDb().prepare(`
+    SELECT id, owner_pid, owner_host FROM pipelines
+    WHERE workspace_key = ? AND archived_at IS NULL AND status IN (${placeholders}) AND owner_pid IS NOT NULL
+  `).all(workspaceKey, ...RECONCILE_NON_TERMINAL)
+    .filter((r) => !live.has(r.id) && !(r.owner_pid === pid && r.owner_host === host))
+    .map((r) => r.id);
+}
+
+/**
  * Load everything resume needs for one pipeline: the raw pipelines row, the parsed
  * resume_point, and the saved steps (camelCase via rowToState, sessionId included).
  * Returns null when the id is unknown. Pure read — no status checks here (callers
