@@ -5445,12 +5445,10 @@ function finishRun(r, status) {
   const willLinger = !paused && isPipelineRun(r);
   if (willLinger) markLingering(r.runId);  // no-op if already acknowledged
 
-  // D8: a run that finishes while its DETAIL page is open keeps the page. The old
-  // single-card focus view had to bounce here — it rendered exactly one live card,
-  // so a finished run left it empty — but the detail screen renders a terminal run
-  // perfectly well (paintRdTerminal below), and D16 makes a lingering run's detail
-  // a legitimate destination in its own right. Dropping state.selectedRunId here
-  // would ALSO switch off `acknowledgeRun`'s repaint guard at the wrong moment.
+  // A run that finishes while its DETAIL page is open keeps the page until History
+  // has its finished row; then rdHandOffOpen moves it to the saved run (same tab).
+  // Dropping state.selectedRunId here would switch off `acknowledgeRun`'s repaint
+  // guard at the wrong moment.
   // Lingering/acknowledgement is untouched: markLingering above still runs, and
   // the lingerer is acknowledged the next time its detail is opened (showView's
   // running branch, which reads state.selectedRunId — on Back that is '' by then,
@@ -16102,6 +16100,7 @@ function paintHistory() {
   updateNavCounts();       // a paused History row counts toward the badge
   refreshHdFromRow();      // an open saved run re-reads its row
   refreshProjOverview();   // the Projects page reads state.historyAll too
+  rdHandOffOpen();         // a finished run on the Running page moves to its saved row
 }
 
 // One row of the history empty/error state — a DIV (never an <li>).
@@ -17421,7 +17420,7 @@ function paintHdGlance(screen, record, data) {
   // merged pull request is a fact (the headline), so its link is secondary.
   const acts = document.createElement('div');
   acts.className = 'rd-result-actions';
-  const mirror = (sel, label, cls) => {
+  const mirror = (sel, label, cls, icon) => {
     const src = screen.querySelector(sel);
     if (!src || src.hidden || !levelAtLeast(src.dataset.minLevel || 'simple')) return;
     if (src.tagName === 'A') {
@@ -17430,21 +17429,22 @@ function paintHdGlance(screen, record, data) {
       a.href = src.href;
       a.target = '_blank';
       a.rel = 'noopener';
-      a.textContent = label || src.textContent;
+      setCtaContent(a, icon, label);
       acts.appendChild(a);
       return;
     }
     const b = document.createElement('button');
     b.type = 'button';
     b.className = `rd-cta ${cls}`;
-    b.textContent = label;
+    setCtaContent(b, icon, label);
     b.addEventListener('click', () => src.click());
     acts.appendChild(b);
   };
-  mirror('.hd-resume', 'Resume', 'hd-g-resume');
-  mirror('.hd-pr', 'Create pull request', 'hd-g-pr');
-  mirror('.hd-pr-link', 'View pull request', `hd-g-pr-link${pr === 'MERGED' ? ' alt' : ''}`);
-  mirror('.hd-after', done || RD_TERMINAL.includes(st.status) ? 'Start a follow-up run' : 'Schedule a run after this', 'alt hd-g-after');
+  const finished = done || RD_TERMINAL.includes(st.status);
+  mirror('.hd-resume', 'Resume', 'hd-g-resume', 'resume');
+  mirror('.hd-pr', 'Create pull request', 'hd-g-pr', 'pr-create');
+  mirror('.hd-pr-link', 'View pull request', `hd-g-pr-link${pr === 'MERGED' ? ' alt' : ''}`, pr === 'MERGED' ? 'merged' : 'pr-open');
+  mirror('.hd-after', finished ? 'Start a follow-up run' : 'Schedule a run after this', 'alt hd-g-after', finished ? 'follow-up' : 'schedule');
   if (acts.childNodes.length) host.appendChild(acts);
 }
 
@@ -21050,7 +21050,7 @@ function repaintRunDetail(r) {
   paintRdTerminal((runDetailState && runDetailState.screen) || null, r);
 }
 
-// ── Terminal state + Open the saved run (§5.2, D8) ──────────────────────────
+// ── Terminal state + the hand-over to the saved run (§5.2) ──────────────────
 
 // The projectKey half of `#history/<projectKey>/<pipelineId>`. A live run carries
 // only projectDir, and projectKey is a server-side slug+sha1(canonicalProjectRoot)
@@ -21102,26 +21102,33 @@ function paintRdTerminal(screen, r) {
   // green caret is the visual half of "the log stops growing" (D8, §9's wr-blink).
   screen.classList.toggle('rd-terminal', terminal);
 
-  // The link is created here rather than in the template so it cannot exist in a
-  // half-painted state on a live run, and so the row-3 markup owns no state.
-  const row = screen.querySelector('.rd-row3');
-  let link = screen.querySelector('.rd-history-link');
-  if (!link && row) {
-    link = document.createElement('a');
-    link.className = 'rd-history-link';
-    link.textContent = 'Open the saved run';
-    link.hidden = true;
-    row.appendChild(link);
-  }
-  if (!link) return;
-  const key = terminal ? historyKeyForRun(r) : '';
-  if (terminal && r.pipelineId && key) {
-    link.setAttribute('href', `#history/${key}/${r.pipelineId}`);
-    link.hidden = false;
-  } else {
-    link.removeAttribute('href');
-    link.hidden = true;
-  }
+  if (terminal) rdHandOffOpen();
+}
+
+// A finished run IS its saved run: once History has its finished row, the Running page
+// hands over on the same glance or Details tab (the tab keys match). replaceRoute, so
+// Back skips the live page. '' while the run is live or paused, or before its row lands —
+// a row that is still `live` may not have the final state on disk yet.
+function rdSavedRoute(r, mode = 'glance', tab = '') {
+  if (!r || !RD_TERMINAL.includes(r.status) || !r.pipelineId) return '';
+  const row = (state.historyAll || []).find((p) => p && p.id === r.pipelineId && p.projectKey);
+  if (!row || row.live || !isTerminalStatus(row.status)) return '';
+  return hdHash({ projectKey: row.projectKey, id: r.pipelineId }, mode, tab);
+}
+function rdHandOffToSaved(r, mode, tab) {
+  const to = rdSavedRoute(r, mode, tab);
+  if (!to) return false;
+  acknowledgeRun(r.runId);   // its result is on screen: the live row gives way to the saved one
+  replaceRoute(to);
+  return true;
+}
+// The open Running page: called when its run finishes and whenever History's rows change.
+function rdHandOffOpen() {
+  const [view, param] = parseHash();
+  if (view !== 'running' || !runDetailState || !runDetailState.screen) return;
+  const { runId, mode, tab } = runDetailParts(param);
+  if (runId !== runDetailState.runId) return;
+  rdHandOffToSaved(runs.get(runId), mode, tab);
 }
 
 // Escape on the History detail screen navigates back to the list — but never
@@ -23356,6 +23363,8 @@ function rdHash(runId, mode = 'glance', tab = '') {
 function routeRunDetail(param, { instant = false } = {}) {
   const { runId, mode, tab } = runDetailParts(param);
   if (!runId) { closeRunDetail({ instant }); return; }
+  // A finished run opens as its saved run, without mounting the live page first.
+  if (rdHandOffToSaved(runs.get(runId), mode, tab)) return;
   // Re-routing to the already-open run only switches the mode (glance <-> details).
   if (runDetailState.screen && runDetailState.runId === runId) { setRdMode(runDetailState.screen, mode, tab); return; }
   if (!runs.has(runId) && helloSeeded) { bounceUnknownRun(runId); return; }
@@ -23864,6 +23873,26 @@ function glancePrInput(record) {
   return histPrEligible(record) ? 'NONE' : 'UNAVAILABLE';
 }
 
+// The glance's action buttons lead with a glyph: 24-unit, stroked like HD_TAB_ICONS.
+const CTA_ICONS = {
+  // A pull request with a plus where its head will be.
+  'pr-create': '<circle cx="6" cy="6" r="2.5"/><path d="M6 8.5V21M13 6h3a2 2 0 0 1 2 2v3M18 15v6M15 18h6"/>',
+  // A pull request: the base line, and the branch line arrowing into it.
+  'pr-open': '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5V21M12.5 6H16a2 2 0 0 1 2 2v7.5M15 3.5 12.5 6 15 8.5"/>',
+  // Merged: two lines joining into one.
+  merged: '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5V21M6 9a9 9 0 0 0 9 9h.5"/>',
+  resume: '<path d="M7 4.5v15l12-7.5z"/>',
+  // A follow-up: the next run branches off this one.
+  'follow-up': '<path d="M5 4v7a4 4 0 0 0 4 4h10M15 11l4 4-4 4"/>',
+  schedule: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+};
+function setCtaContent(node, icon, label) {
+  node.innerHTML = `<svg class="rd-cta-ico" data-icon="${icon}" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${CTA_ICONS[icon]}</svg>`;
+  const tx = document.createElement('span');
+  tx.textContent = label;
+  node.appendChild(tx);
+}
+
 function rdSheetGroup(title, rows) {
   const g = document.createElement('div');
   g.className = 'rd-sgroup';
@@ -23974,13 +24003,13 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
       a.href = pr.url;
       a.target = '_blank';
       a.rel = 'noopener';
-      a.textContent = 'View pull request';
+      setCtaContent(a, prState === 'MERGED' ? 'merged' : 'pr-open', 'View pull request');
       acts.appendChild(a);
     } else if (histPrEligible(record) && record.pr !== undefined) {
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'rd-cta rd-create-pr';
-      b.textContent = 'Create pull request';
+      setCtaContent(b, 'pr-create', 'Create pull request');
       b.addEventListener('click', () => {
         pendingShipIt = { id: r.pipelineId, projectKey: key };
         location.hash = `history/${key}/${r.pipelineId}`;
@@ -23992,7 +24021,7 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'rd-cta alt rd-follow-up';
-    b.textContent = 'Start a follow-up run';
+    setCtaContent(b, 'follow-up', 'Start a follow-up run');
     b.addEventListener('click', () => { location.hash = `#new/after/${r.pipelineId}`; });
     acts.appendChild(b);
   }
@@ -24228,15 +24257,19 @@ const LIVE_VIEW_KEY = 'worca-cc.run.liveView';
 /** The exit's fallback when no transitionend comes: past style.css's longest `.rd-live` exit. */
 const LIVE_EXIT_MS = 500;
 const LIVE_EXITS = new WeakMap();   // .rd-live -> { timer, onEnd } while it animates out
+// On unless switched off: a new user (nothing stored) sees it, and '0' keeps it off.
+// Where storage is blocked the choice lives in memory, so the switch still works.
+let liveViewMemo = null;
 function liveViewWanted() {
-  try { return localStorage.getItem(LIVE_VIEW_KEY) === '1'; } catch { return false; }
+  try { return localStorage.getItem(LIVE_VIEW_KEY) !== '0'; } catch { return liveViewMemo !== '0'; }
 }
 function reducedMotion() {
   try { return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; }
 }
 function toggleLiveView(screen) {
   const on = !liveViewWanted();
-  try { if (on) localStorage.setItem(LIVE_VIEW_KEY, '1'); else localStorage.removeItem(LIVE_VIEW_KEY); } catch { /* private mode */ }
+  liveViewMemo = on ? '1' : '0';
+  try { localStorage.setItem(LIVE_VIEW_KEY, liveViewMemo); } catch { /* private mode */ }
   const r = rdOpenRun();
   if (r) paintRdLive(screen, r);
 }

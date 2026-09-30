@@ -2810,7 +2810,12 @@ test('History glance mirrors the header actions: Resume on a paused run clicks t
   const real = hd.querySelector('.hd-resume');
   const mirror = hd.querySelector('.hd-result .hd-g-resume');
   assert.equal(!!mirror, !real.hidden, 'the glance offers Resume exactly when the header does');
+  for (const b of hd.querySelectorAll('.hd-result .rd-cta')) {
+    assert.ok(b.firstElementChild.matches('svg.rd-cta-ico'), `${b.textContent} leads with a glyph`);
+  }
   if (mirror) {
+    assert.equal(mirror.querySelector('.rd-cta-ico').dataset.icon, 'resume');
+    assert.equal(mirror.textContent, 'Resume');
     let clicked = 0;
     real.addEventListener('click', () => { clicked += 1; });
     mirror.dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));

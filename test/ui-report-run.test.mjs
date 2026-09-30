@@ -308,11 +308,12 @@ test('the issue link is inert while a rebuild is in flight', async () => {
 });
 
 // The report flow is reached from ONE place: History's per-run ⋯ menu. A finished run
-// on Running detail offers "Open the saved run" instead, and the link follows the
-// (hidden) Stop directly — no hidden button or empty slot is left in the row.
+// on Running detail has no report button; its saved page (where the menu is) takes over.
 for (const status of ['done', 'stopped', 'error']) {
-  test(`a ${status} run's Running header has no report button, only Open the saved run`, async () => {
-    const ctx = await boot({ fetchHandler: arms() });
+  test(`a ${status} run's Running header has no report button`, async () => {
+    // Its History row is still `live` (the refetch after the finish has not landed), so
+    // the Running page shows the finished run instead of handing over to the saved one.
+    const ctx = await boot({ fetchHandler: arms({ rows: [{ ...ROW, live: true }] }) });
     // `hello` is what populates `runs` and sets helloSeeded; without it routeRunDetail
     // mounts a title-only screen, repaintRunDetail never runs, and paintRdTerminal —
     // the thing that paints the terminal header — is never called at all.
@@ -327,11 +328,7 @@ for (const status of ['done', 'stopped', 'error']) {
     assert.equal(header.querySelector('.rd-report'), null, 'a finished run has no report button');
     assert.equal([...header.querySelectorAll('button, a')].some((b) => /Report this run/.test(b.textContent)),
       false, 'nothing in the header offers to report the run');
-    const link = header.querySelector('.rd-history-link');
-    assert.equal(link.hidden, false, 'the link to the saved run stays');
-    assert.equal(link.textContent, 'Open the saved run');
-    assert.equal(link.previousElementSibling, header.querySelector('.rd-spacer'),
-      'the link closes the branch row — no leftover control between them');
+    assert.equal(header.querySelector('.rd-history-link'), null, 'no link to click: the saved run opens on its own');
     assert.equal(doc.querySelector('#run-detail .rd-bar .rd-report'), null, 'nor does the shared bar');
   });
 }

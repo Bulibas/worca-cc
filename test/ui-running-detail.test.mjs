@@ -914,7 +914,7 @@ test('a run that finishes while its detail is open keeps the page and goes termi
   frame(ctx, { type: 'done', runId: 'r1', status: 'done' });
   await settle(window, 6);
 
-  // D8: no auto-redirect — the page stays exactly where it was.
+  // History has no finished row for p1 yet: the page stays exactly where it was.
   assert.equal(window.location.hash, '#running/r1/details/logs');
   assert.ok(window.document.getElementById('run-shell').classList.contains('detail-open'));
   assert.ok(window.document.querySelector('#run-detail .rd-header'), 'the screen is still mounted');
@@ -927,11 +927,7 @@ test('a run that finishes while its detail is open keeps the page and goes termi
   assert.ok(pill.classList.contains('green'), 'the pill takes the terminal family');
   assert.ok(pill.classList.contains('parked'), 'and its dot stops pulsing');
   assert.ok(window.document.querySelector('#run-detail .rd-graph').classList.contains('settled'));
-
-  const link = header.querySelector('.rd-history-link');
-  assert.equal(link.hidden, false);
-  assert.equal(link.getAttribute('href'), `#history/${KEY}/p1`);
-  assert.equal(link.textContent, 'Open the saved run');
+  assert.equal(header.querySelector('.rd-history-link'), null, 'no link to click: the hand-over is automatic');
 
   // The log stops growing: a stray late frame lands on a finished run and the
   // pane is unchanged.
@@ -953,8 +949,48 @@ test('Overview reads the terminal state once the run has finished', async () => 
   assert.ok(secOf(window, 'overview').querySelector('.rd-ov-chip').classList.contains('st-red'));
 });
 
-test('the History link is omitted when the pipeline id is unknown', async () => {
+test('a run that finishes while open moves to its saved run, on the same tab, once History has it', async () => {
   const ctx = await bootRunning();
+  await openRun(ctx);
+  const { window } = ctx;
+  click(window, tabOf(window, 'logs'));
+  await settle(window);
+  assert.equal(ctx.box.rows.some((p) => p.id === 'p1'), false, 'History loaded before p1 was saved');
+  // The refetch after the finish brings its finished row: the page hands over.
+  ctx.box.rows = [HISTORY_ROW, { ...HISTORY_ROW, id: 'p1', status: 'done' }];
+  frame(ctx, { type: 'done', runId: 'r1', status: 'done' });
+  await settle(window, 8);
+  assert.equal(window.location.hash, `#history/${KEY}/p1/details/logs`, 'the same tab, on the saved run');
+});
+
+test('a History row that is still live is not the saved run yet', async () => {
+  const ctx = await bootRunning();
+  await openRun(ctx);
+  const { window } = ctx;
+  ctx.box.rows = [HISTORY_ROW, { ...HISTORY_ROW, id: 'p1', status: 'running', live: true }];
+  frame(ctx, { type: 'done', runId: 'r1', status: 'done' });
+  await settle(window, 8);
+  assert.equal(window.location.hash, '#running/r1/details/logs', 'its final state may not be on disk yet');
+});
+
+test('opening a finished run goes straight to its saved run (glance or tab)', async () => {
+  const ctx = await bootRunning({ rows: [HISTORY_ROW, { ...HISTORY_ROW, id: 'p1', status: 'done' }] });
+  await openRun(ctx);
+  const { window } = ctx;
+  frame(ctx, { type: 'done', runId: 'r1', status: 'done' });
+  await settle(window, 6);
+  assert.equal(window.location.hash, `#history/${KEY}/p1/details/logs`);
+  go(window, 'running/r1');
+  await settle(window, 6);
+  assert.equal(window.location.hash, `#history/${KEY}/p1`, 'the glance opens the saved glance');
+  go(window, 'running/r1/details/diff');
+  await settle(window, 6);
+  assert.equal(window.location.hash, `#history/${KEY}/p1/details/diff`, 'a tab opens the same tab');
+});
+
+test('a finished run with no saved row stays on the Running page', async () => {
+  // No pipeline id, or History without its row (an older run from the same dir does not count).
+  const ctx = await bootRunning({ rows: [HISTORY_ROW] });
   frame(ctx, {
     type: 'run-created', runId: 'r3', title: 'No id yet', projectDir: PROJECT,
     status: 'running', startedAt: '2026-08-19T10:00:00Z', kind: 'run',
@@ -964,30 +1000,11 @@ test('the History link is omitted when the pipeline id is unknown', async () => 
   // onError (app.js) routes straight to finishRun(r, 'error').
   frame(ctx, { type: 'error', runId: 'r3' });
   await settle(ctx.window, 6);
-  const link = ctx.window.document.querySelector('#run-detail .rd-history-link');
-  assert.equal(link.hidden, true, 'no pipelineId -> no link');
-});
-
-test('the projectKey falls back to another pipeline from the same project dir', async () => {
-  // r1's own pipeline id ('p1') is NOT in the History dataset — only an older run
-  // from the same projectDir is. The dir->key mapping still resolves the link.
-  const ctx = await bootRunning({ rows: [HISTORY_ROW] });
+  assert.equal(ctx.window.location.hash, '#running/r3', 'no pipelineId: nothing to hand over to');
   await openRun(ctx);
-  const { window } = ctx;
-  assert.equal(ctx.box.rows.some((p) => p.id === 'p1'), false);
   frame(ctx, { type: 'done', runId: 'r1', status: 'done' });
-  await settle(window, 6);
-  assert.equal(window.document.querySelector('#run-detail .rd-history-link').getAttribute('href'),
-    `#history/${KEY}/p1`);
-});
-
-test('an unresolvable projectKey hides the link instead of guessing one', async () => {
-  const ctx = await bootRunning({ rows: [] });          // no history at all
-  await openRun(ctx);
-  const { window } = ctx;
-  frame(ctx, { type: 'done', runId: 'r1', status: 'done' });
-  await settle(window, 6);
-  assert.equal(window.document.querySelector('#run-detail .rd-history-link').hidden, true);
+  await settle(ctx.window, 6);
+  assert.equal(ctx.window.location.hash, '#running/r1/details/logs', 'p1 has no row yet');
 });
 // --- P6b Task 14: the Agents tab names v2 groups from the ledger -------------
 // C3: cycleAwareLabel's 4th parameter is only reachable through rdAgentsBody's
@@ -1271,7 +1288,9 @@ test('a finished run: its headline, the facts, what to check, Create pull reques
     keyThingsToCheck: [{ id: 'c1', severity: 'major', title: 'Unauthenticated uploads fall back to IP' }],
     nitpicks: [],
   };
-  const row = { ...HISTORY_ROW, id: 'p1', survived: true, branch: 'worca-cc/dark-p1', sourceBranch: 'main', pr: null };
+  // Still `live` in History (the refetch after the finish has not landed), so the Running
+  // page shows the result itself rather than handing over to the saved run.
+  const row = { ...HISTORY_ROW, id: 'p1', live: true, survived: true, branch: 'worca-cc/dark-p1', sourceBranch: 'main', pr: null };
   const ctx = await boot({
     fetchHandler: (url) => {
       if (url.endsWith('/api/history/pr')) return ok({ ok: true });
@@ -1305,9 +1324,40 @@ test('a finished run: its headline, the facts, what to check, Create pull reques
   assert.ok(pr, 'an eligible run offers Create pull request');
   assert.equal(pr.textContent, 'Create pull request');
   assert.equal(result.querySelector('.rd-follow-up').textContent, 'Start a follow-up run');
+  // Every action leads with its glyph, not words alone.
+  assert.deepEqual([...result.querySelectorAll('.rd-cta')].map((b) => b.firstElementChild.dataset.icon),
+    ['pr-create', 'follow-up']);
   click(window, pr);
   assert.equal(window.location.hash, `#history/${KEY}/p1`, 'it hands over to the ship-it flow');
 });
+
+for (const [state, icon, alt] of [['OPEN', 'pr-open', false], ['MERGED', 'merged', true]]) {
+  test(`a finished run with an ${state.toLowerCase()} pull request links to it, behind its glyph`, async () => {
+    const url = 'https://github.com/o/r/pull/7';
+    const row = { ...HISTORY_ROW, id: 'p1', live: true, survived: true, branch: 'worca-cc/dark-p1', sourceBranch: 'main', pr: { state, url } };
+    const ctx = await boot({
+      fetchHandler: (u) => {
+        if (u.endsWith('/api/history/pr')) return ok({ ok: true });
+        if (u.endsWith('/api/history')) return ok({ pipelines: [row], ghAvailable: true });
+        if (u.endsWith('/api/budget')) return ok(okBudget());
+        if (u.includes('/api/runs/p1?projectDir=')) return ok({ state: { status: 'done' }, results: null, clarify: { questions: [], answers: [] } });
+        return null;
+      },
+    });
+    frame(ctx, { type: 'hello', runs: [] });
+    await settle(ctx.window, 6);
+    const rd = await openGlance(ctx);
+    frame(ctx, { type: 'done', runId: 'r1', status: 'done' });
+    await settle(ctx.window, 10);
+    const link = rd.querySelector('.rd-result a.rd-cta');
+    assert.ok(link, 'the pull request is a link');
+    assert.equal(link.getAttribute('href'), url);
+    assert.equal(link.textContent, 'View pull request');
+    assert.equal(link.firstElementChild.dataset.icon, icon);
+    assert.equal(link.classList.contains('alt'), alt, 'a merged PR is a fact: its link is secondary');
+    assert.equal(rd.querySelector('.rd-follow-up').firstElementChild.dataset.icon, 'follow-up');
+  });
+}
 
 test('Details › Diff reads the live worktree while the run goes', async () => {
   const patch = 'diff --git a/src/limiter.js b/src/limiter.js\nnew file mode 100644\n--- /dev/null\n+++ b/src/limiter.js\n@@ -0,0 +1,2 @@\n+export const a = 1;\n+export const b = 2;\n';
@@ -1365,16 +1415,33 @@ test('the card head: the status line top left, the Live view switch top right (H
   assert.ok(hist.querySelector('.hd-glance > .rd-sheet > .rd-sheet-head:first-child > .rd-now-top'), 'History: the status line opens its card too');
 });
 
-test('Live view: off by default; the switch mounts the focus graph beside the card and remembers it', async () => {
+test('Live view: on by default for a new user', async () => {
   const ctx = await bootRunning();
   const { window } = ctx;
+  assert.equal(window.localStorage.getItem(LIVE_KEY), null, 'nothing remembered yet');
   const rd = await openGlance(ctx);
   const p = liveParts(rd);
   assert.ok(p.sw, 'a Live view switch on the card');
   assert.equal(p.row.hidden, false, 'shown on a live run');
   assert.equal(p.sw.getAttribute('role'), 'switch');
+  assert.equal(p.sw.getAttribute('aria-checked'), 'true');
+  assert.equal(p.panel.hidden, false, 'on by default');
+  assert.ok(p.world(), 'the focus graph is mounted');
+
+  click(window, p.sw);
+  await settle(window);
   assert.equal(p.sw.getAttribute('aria-checked'), 'false');
-  assert.equal(p.panel.hidden, true, 'off by default');
+  assert.equal(window.localStorage.getItem(LIVE_KEY), '0', 'switching off is remembered, so the default does not come back');
+});
+
+test('Live view: switched off, the switch mounts the focus graph beside the card and remembers it', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  window.localStorage.setItem(LIVE_KEY, '0');
+  const rd = await openGlance(ctx);
+  const p = liveParts(rd);
+  assert.equal(p.sw.getAttribute('aria-checked'), 'false');
+  assert.equal(p.panel.hidden, true, 'a remembered off stays off');
   assert.equal(p.world(), null, 'no graph is built while off');
 
   click(window, p.sw);
@@ -1391,6 +1458,7 @@ test('Live view: off by default; the switch mounts the focus graph beside the ca
 test('Live view: switching off animates out first, then drops the graph (transitionend or a timeout)', async () => {
   const ctx = await bootRunning();
   const { window } = ctx;
+  window.localStorage.setItem(LIVE_KEY, '0');
   const rd = await openGlance(ctx);
   const p = liveParts(rd);
   click(window, p.sw);
@@ -1399,7 +1467,7 @@ test('Live view: switching off animates out first, then drops the graph (transit
   click(window, p.sw);
   await settle(window);
   assert.equal(p.sw.getAttribute('aria-checked'), 'false');
-  assert.equal(window.localStorage.getItem(LIVE_KEY), null);
+  assert.equal(window.localStorage.getItem(LIVE_KEY), '0');
   assert.equal(p.panel.classList.contains('is-in'), false, 'the exit transition starts');
   assert.equal(p.panel.hidden, false, 'still on screen while it animates out');
   assert.ok(p.world(), 'the graph lives until the exit ends');
@@ -1420,6 +1488,7 @@ test('Live view: switching off animates out first, then drops the graph (transit
 test('Live view: switching back on mid-exit keeps the same graph', async () => {
   const ctx = await bootRunning();
   const { window } = ctx;
+  window.localStorage.setItem(LIVE_KEY, '0');
   const rd = await openGlance(ctx);
   const p = liveParts(rd);
   click(window, p.sw);
@@ -1472,6 +1541,7 @@ test('Live view: with reduced motion the panel goes at once', async () => {
   const ctx = await bootRunning();
   const { window } = ctx;
   window.matchMedia = (q) => ({ matches: /prefers-reduced-motion/.test(q), addEventListener() {}, removeEventListener() {} });
+  window.localStorage.setItem(LIVE_KEY, '0');
   const rd = await openGlance(ctx);
   const p = liveParts(rd);
   click(window, p.sw);

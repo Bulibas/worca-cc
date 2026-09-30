@@ -257,7 +257,7 @@ test('opening a lingering run side by side keeps focus on its (now History) row'
   assert.ok(row, 'the failed run lingers as a live row');
   row.focus();
   click(window, row); await settle(window);
-  assert.equal(window.location.hash, '#running/r1');
+  assert.match(window.location.hash, /^#history\/[^/]+\/aaaa0001$/, 'a finished run opens as its saved run');
   assert.equal(doc.getElementById('runs-shell').dataset.layout || 'split', 'split');
   const a = doc.activeElement;
   assert.notEqual(a, doc.body, 'focus did not drop to <body>');
