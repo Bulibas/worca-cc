@@ -265,7 +265,7 @@ import {
   runScheduleNow, deleteSchedule, cancelForTarget, dependentsOfWorkflow, runDueTickets, recordOutcome,
   recoverScheduler, purgeScheduler, scheduleCounts, scheduleStageDir, scheduleSignature,
   resolveAfterRef, predecessorState, previousBranchesOf, dependentsOfRun, AFTER_POLICIES, afterRefOf,
-  chainBaseBranchesOf,
+  chainBaseBranchesOf, resumeTicketsFor, cancelResumeTicketsFor,
 } from '../src/core/scheduler.mjs';
 import {
   onNotification, listNotifications, unreadCount, latestNotificationId, markRead, markAllRead, purgeNotifications,
@@ -274,6 +274,7 @@ import {
   normalizeRule, nextOccurrence, previewOccurrences, describeRule, parseScheduledFor, localDate,
   isValidTimeZone, formatInstant, OVERLAP_POLICIES, MISSED_POLICIES,
 } from '../src/shared/schedule/recurrence.mjs';
+import { REASON } from '../src/core/failure-policy.mjs';
 import { callSource, PluginOpError } from '../src/core/plugin-shim.mjs';
 import { resolveAutoModel, AUTO_MODEL_ENV } from '../src/core/auto/model.mjs';
 import {
@@ -979,6 +980,14 @@ function wireRun(entry) {
           const waiting = [...(entry.ticketId ? dependentsOfRun({ ticketId: entry.ticketId }) : []), ...(entry.pipelineId ? dependentsOfRun({ pipelineId: entry.pipelineId }) : [])];
           if (waiting.length) setTimeout(() => { void schedulerTick(); }, 0);
         } catch (err) { console.error(`[worca-ui] chain nudge failed: ${err && err.message ? err.message : err}`); }
+      }
+      if (name === 'done' && entry.pipelineId && entry.status !== 'paused') {
+        // Terminal (done/stopped/error) — a pending scheduled resume no longer applies.
+        // (A 'paused' done is exactly the state a resume ticket targets; never sweep then.)
+        cancelScheduledResumes(entry.pipelineId, {
+          by: entry.lastAction && entry.lastAction.by,
+          reason: 'the run was resumed or stopped by hand',
+        });
       }
       if (name === 'title' && payload && typeof payload.title === 'string') {
         // Keep the in-memory run fresh so a late-joining client's hello
@@ -2178,6 +2187,60 @@ function parseScheduleRequest(body, { now = Date.now() } = {}) {
   return out;
 }
 
+/** Pause reasons a scheduled resume must never touch (clarify: both cap kinds refuse). */
+const CAP_PAUSE_REASONS = new Set([REASON.COST_PIPELINE, REASON.COST_TOTAL, REASON.COST_PIPELINE_POLICY, REASON.COST_TOTAL_POLICY]);
+const TEAM_CAP_PAUSE_REASONS = new Set([REASON.COST_PIPELINE_POLICY, REASON.COST_TOTAL_POLICY]);
+
+/** The paused pipeline a resume ticket fires on, or null (any other ticket). */
+function resumeTargetOf(ticket) {
+  if (!ticket) return null;
+  if (typeof ticket.resumePipelineId === 'string' && ticket.resumePipelineId) return ticket.resumePipelineId;
+  const internal = ticket.request && ticket.request.internal;
+  return internal && typeof internal.resumePipelineId === 'string' && internal.resumePipelineId ? internal.resumePipelineId : null;
+}
+
+/** The onboarded project dir for a pipelines.project_key, or null. */
+async function projectDirForKey(key) {
+  for (const p of await listProjects()) {
+    if (projectKey(p.path) === key) return p.path;
+  }
+  return null;
+}
+
+/**
+ * Validate a scheduled-resume target at CREATE time. Mirrors resumeRun's early guards,
+ * plus the cap refusals a live decision may never be slept through.
+ * @returns {Promise<{ok:true, row:object, resumePoint:object, projectDir:string|null, workspaceId:string|null}
+ *          | {ok:false, status:number, body:object}>}
+ */
+async function validateResumeTarget(pipelineId) {
+  if (typeof pipelineId !== 'string' || !pipelineId.trim()) return { ok: false, status: 400, body: { error: 'pipelineId is required' } };
+  const saved = readPipelineForResume(pipelineId.trim());
+  if (!saved) return { ok: false, status: 404, body: { error: 'pipeline not found' } };
+  if (saved.row.status !== 'paused' && saved.row.status !== 'interrupted') {
+    return { ok: false, status: 409, body: { error: `run is "${saved.row.status}" — only a paused run can get a scheduled resume` } };
+  }
+  if (!saved.resumePoint) return { ok: false, status: 400, body: { error: 'run has no resume point' } };
+  if (saved.resumePoint.version !== 2) return { ok: false, status: 409, body: { code: 'ENGINE_RETIRED', error: V1_RUN_RETIRED } };
+  if (saved.row.archived_at) return { ok: false, status: 409, body: { error: 'run is archived' } };
+  const reason = saved.resumePoint.pauseReason || null;
+  if (TEAM_CAP_PAUSE_REASONS.has(reason)) {
+    return { ok: false, status: 409, body: { code: 'CAP_PAUSE', error: 'this run paused on a team cost cap — continuing past it is a live decision and cannot be scheduled' } };
+  }
+  if (CAP_PAUSE_REASONS.has(reason)) {
+    return { ok: false, status: 409, body: { code: 'CAP_PAUSE', error: 'this run paused on a cost cap — continuing past it needs the explicit “Continue without cap” decision and cannot be scheduled' } };
+  }
+  if (resumeTicketsFor(saved.row.id).length) {
+    return { ok: false, status: 409, body: { error: 'a scheduled resume already exists for this run — change or cancel it in Schedules' } };
+  }
+  const workspaceId = saved.row.target === 'workspace' ? (saved.row.workspace_key || null) : null;
+  let projectDir = null;
+  if (!workspaceId && saved.row.project_key) {
+    projectDir = await projectDirForKey(saved.row.project_key);
+  }
+  return { ok: true, row: saved.row, resumePoint: saved.resumePoint, projectDir, workspaceId };
+}
+
 /** The request a ticket stores: the validated body minus schedule fields and uploads. */
 async function storedRequestOf(body, stageId, projectDir, startedBy = null) {
   const request = { ...body };
@@ -2263,8 +2326,54 @@ async function invokeStartRun(body, internal) {
 /** Ticket id -> who clicked "Run now" (identity.mjs actor), consumed by the firing it causes. */
 const RUN_NOW_BY = new Map();
 
-/** runDueTickets' `start`: probe an external task first (transient errors retry), then start. */
+/** A run resumed or stopped by hand kills its pending scheduled resume (feed entry per ticket). Idempotent + best-effort. */
+function cancelScheduledResumes(pipelineId, { by = null, reason } = {}) {
+  try {
+    const n = cancelResumeTicketsFor(pipelineId, { by: by || undefined, reason });
+    if (n) { emitChanged('schedules-changed', 'deleted'); emitChanged('notifications-changed'); }
+  } catch (err) { console.error(`[worca-ui] scheduled-resume cancel failed: ${err && err.message ? err.message : err}`); }
+}
+
+/**
+ * Fire a "resume this paused run" ticket. The live row is re-checked at fire time:
+ * a run resumed or stopped by hand makes the ticket SKIP (feed entry, run stays as it
+ * is); a run that became cap-paused FAILS (a cap is never continued past unattended).
+ * Everything else goes through resumeRun's own guard chain (budget gates included).
+ */
+async function fireResumeTicket(ticket, pipelineId) {
+  const saved = readPipelineForResume(pipelineId);
+  if (!saved) return { ok: false, skip: true, error: 'the run no longer exists' };
+  if (saved.row.status !== 'paused' && saved.row.status !== 'interrupted') {
+    return { ok: false, skip: true, error: `the run is now "${saved.row.status}" — it was resumed or stopped meanwhile` };
+  }
+  const reason = saved.resumePoint && saved.resumePoint.pauseReason;
+  if (reason && CAP_PAUSE_REASONS.has(reason)) {
+    return { ok: false, error: 'the run paused on a cost cap meanwhile — continuing past it needs a live decision', transient: false };
+  }
+  const scheduledBy = ticket.createdBy || null;
+  try {
+    const out = await resumeRun(pipelineId, {
+      by: scheduledBy || 'local',
+      mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK),
+    });
+    // The feed learns how the resumed run ends through the same recordOutcome hook a
+    // schedule-started run uses (wireRun keys on entry.ticketId).
+    const entry = out && out.runId ? runs.get(out.runId) : null;
+    if (entry) entry.ticketId = ticket.id;
+    return { ok: true, pipelineId };
+  } catch (err) {
+    if (err instanceof ResumeError) {
+      return { ok: false, error: (err.body && err.body.error) || err.message, transient: false };
+    }
+    return { ok: false, error: err && err.message ? err.message : String(err), transient: false };
+  }
+}
+
+/** runDueTickets' `start`: a resume ticket goes to fireResumeTicket; anything else probes
+ *  an external task first (transient errors retry), then starts a NEW run. */
 async function fireTicket(ticket) {
+  const resumePipelineId = resumeTargetOf(ticket);
+  if (resumePipelineId) return fireResumeTicket(ticket, resumePipelineId);
   const body = { ...(ticket.request || {}) };
   if (body.source && body.source.type === 'plugin') {
     try {
@@ -2417,6 +2526,43 @@ app.post('/api/schedules/preview', (req, res) => {
   if (!norm.ok) return badRequest(res, norm.error);
   const n = Number.isSafeInteger(body.count) ? Math.max(1, Math.min(10, body.count)) : 3;
   res.json({ rule: norm.rule, sentence: describeRule(norm.rule), next: previewOccurrences(norm.rule, Date.now(), n).map((t) => new Date(t).toISOString()) });
+});
+
+// POST /api/schedules/resume { pipelineId, scheduledFor, ifMissed?, graceMin? } — a one-off
+// "resume this paused run at <time>" ticket. ifMissed defaults to 'skip' (clarify default);
+// the sheet pre-selects 'skip' but lets the user pick 'run', so an HTTP caller may pass either.
+app.post('/api/schedules/resume', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const by = actorOf(req);
+    const v = await validateResumeTarget(body.pipelineId);
+    if (!v.ok) return res.status(v.status).json(v.body);
+    const at = parseScheduledFor(body.scheduledFor);
+    if (!at.ok) return badRequest(res, at.error);
+    if (at.ms < Date.now() - 5_000) return badRequest(res, 'scheduledFor is in the past');
+    let ifMissed = 'skip';
+    if (body.ifMissed != null) {
+      if (!MISSED_POLICIES.includes(body.ifMissed)) return badRequest(res, `ifMissed must be one of ${MISSED_POLICIES.join(' | ')}`);
+      ifMissed = body.ifMissed;
+    }
+    let graceMin = 360;
+    if (body.graceMin != null) {
+      if (!Number.isSafeInteger(body.graceMin) || body.graceMin < 0 || body.graceMin > 10080) return badRequest(res, 'graceMin must be a whole number of minutes from 0 to 10080');
+      graceMin = body.graceMin;
+    }
+    const title = `Resume ‘${v.row.title || v.row.id}’`;
+    const request = { prompt: '', title: v.row.title || null, internal: { resumePipelineId: v.row.id, startedBy: by } };
+    const ticket = createTicket({
+      title, projectDir: v.projectDir, workspaceId: v.workspaceId,
+      runAtMs: at.ms, request, ifMissed, graceMin,
+      resumePipelineId: v.row.id, createdBy: by,
+    });
+    appendAuditById(v.row.id, `Resume scheduled for ${new Date(at.ms).toISOString().slice(0, 16).replace('T', ' ')} UTC${byActor(by)}.`, { actor: by });
+    emitChanged('schedules-changed', 'created');
+    res.status(202).json({ runId: ticket.id, status: 'scheduled', scheduledFor: ticket.runAt, resumePipelineId: v.row.id });
+  } catch (err) {
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
 });
 
 // GET /api/schedules/dependents?workflowId=|projectDir=|workspaceId= -> what a removal
@@ -2606,8 +2752,9 @@ async function scheduleVerb(verb, id, body = {}, { by = null } = {}) {
     emitChanged('notifications-changed');
     await schedulerTick();
     const after = getTicket(ticket.id);
+    const isResume = !!resumeTargetOf(after);
     // A ticket held by a waiting `--wait` terminal is started by that terminal within seconds.
-    return out(200, { runId: ticket.id, status: after ? after.status : 'scheduled', failReason: after ? after.failReason : null, pipelineId: after ? after.pipelineId : null });
+    return out(200, { runId: ticket.id, status: after ? after.status : 'scheduled', failReason: after ? after.failReason : null, pipelineId: after ? after.pipelineId : null, ...(isResume ? { resume: true } : {}) });
   }
   if (['pause', 'resume', 'skip-next'].includes(verb)) {
     if (found.kind !== 'recurring') return out(404, { error: 'repeating schedule not found' });
@@ -2868,6 +3015,7 @@ function stopRun(runId, by = 'local') {
   entry.lastAction = { kind: 'stop', by: by || 'local', at: new Date().toISOString() };
   entry.orch.stop(entry.lastAction.by);
   entry.status = 'stopped';
+  if (entry.pipelineId) cancelScheduledResumes(entry.pipelineId, { by, reason: `the run was stopped${byActor(by || 'local')}` });
   resolvePending(entry, { reason: 'stopped' });
 }
 function pauseRun(runId, by = 'local') {
@@ -3014,9 +3162,7 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
       description: meta.workspaceDescription || '', projects,
     };
   } else {
-    for (const p of await listProjects()) {
-      if (projectKey(p.path) === saved.row.project_key) { projectDir = p.path; break; }
-    }
+    projectDir = await projectDirForKey(saved.row.project_key);
     if (!projectDir) throw new ResumeError(400, { error: 'project for this pipeline is not onboarded on this machine' });
   }
 
@@ -3044,6 +3190,9 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     const live = liveDefragRun(memoryScopeKey(rpScope, projectDir));
     if (live) throw new ResumeError(409, { error: 'a defragment run for this memory scope is already live', runId: live.id });
   }
+
+  // A scheduled resume for this run is moot the moment any resume is committed.
+  cancelScheduledResumes(pipelineId, { by, reason: `the run was resumed${byActor(by || 'local')}` });
 
   const effMock = mock || serverMockMode();
   const runId = randomUUID();
@@ -9667,5 +9816,6 @@ export const _testing = {
   askTrackRun, liveRunEntry, liveDefragRun, memoryScopeKey, startRunHandler, emitMemoryChanged, askSystemPromptFor,
   uiControl, bearerMatches,
   broadcast, askFilesRunDir,
+  validateResumeTarget, resumeTargetOf, fireResumeTicket, cancelScheduledResumes,
   trackHeartbeat, heartbeatTick, BOOT_ID,
 };

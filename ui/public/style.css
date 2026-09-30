@@ -6026,6 +6026,57 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 /* Simple mode hides the caret (Schedule… is Advanced): the Start pill closes up again. */
 :root[data-level="simple"] .btn-split > .btn-go:first-child:not(:has(~ [data-level-keep])){border-radius:999px;padding-right:28px;}
 :root[data-level="simple"] .btn-split.mini > .btn-go:first-child:not(:has(~ [data-level-keep])){padding-right:14px;}
+/* Resume split (run card, run page, History detail): ONE control like #start-split —
+   the location's own Resume is the left half, the caret the right half, a hairline
+   divider between them. Each caret is Advanced-only, so Simple closes the Resume back
+   up. The .btn-split prefix outranks (.btn-split.mini > .btn-split-more), and the
+   [hidden] guards outrank the author display rules (same footgun as .btn-resume). */
+.rc-resume-split > .btn-resume{border-radius:9px 0 0 9px;border-right:none;}
+.btn-split.rc-resume-split > .rc-resume-more{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:22px;height:30px;padding:0;box-sizing:border-box;
+  background:var(--panel);color:var(--amber-ink);
+  border:1px solid var(--amber);border-left-color:var(--amber-bg);border-radius:0 9px 9px 0;
+  font-family:inherit;cursor:pointer;transition:background .15s;}
+.btn-split.rc-resume-split > .rc-resume-more:hover{background:var(--amber-bg);}
+.btn-split.rc-resume-split > .rc-resume-more:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.rc-resume-split[hidden],.rc-resume-split > .rc-resume-more[hidden]{display:none;}
+:root[data-level="simple"] .rc-resume-split > .btn-resume{border-radius:9px;border-right:1px solid var(--amber);}
+
+.rd-resume-split:has(> .rd-pause[hidden]){display:none;}
+.rd-resume-split > .rd-pause:has(~ .rd-resume-more:not([hidden])){border-radius:999px 0 0 999px;border-right:none;padding-right:12px;}
+.btn-split.rd-resume-split > .rd-resume-more{
+  display:inline-flex;align-items:center;justify-content:center;
+  height:36px;padding:0 13px 0 10px;box-sizing:border-box;
+  background:var(--panel);color:var(--amber-ink);
+  border:1.5px solid var(--amber-bg);border-radius:0 999px 999px 0;
+  font-family:inherit;cursor:pointer;transition:border-color .15s;}
+.btn-split.rd-resume-split > .rd-resume-more:hover{border-color:var(--amber);}
+.btn-split.rd-resume-split > .rd-resume-more:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.btn-split.rd-resume-split > .rd-resume-more[hidden]{display:none;}
+:root[data-level="simple"] .rd-resume-split > .rd-pause{border-radius:999px;border-right:1.5px solid var(--amber-bg);padding-right:15px;}
+
+.hd-resume-split > .hd-resume{border-radius:999px 0 0 999px;border-right:none;padding-right:12px;}
+.btn-split.hd-resume-split > .hd-resume-more{
+  display:inline-flex;align-items:center;justify-content:center;
+  padding:0 13px 0 10px;box-sizing:border-box;
+  background:var(--surface);color:var(--ink);
+  border:1.5px solid var(--line-2);border-radius:0 999px 999px 0;
+  font-family:inherit;cursor:pointer;transition:border-color .15s;}
+.btn-split.hd-resume-split > .hd-resume-more:hover{border-color:var(--hover-outline);}
+.btn-split.hd-resume-split > .hd-resume-more:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.hd-resume-split[hidden],.hd-resume-split > .hd-resume-more[hidden]{display:none;}
+:root[data-level="simple"] .hd-resume-split > .hd-resume{border-radius:999px;border-right:1.5px solid var(--line-2);padding-right:15px;}
+
+/* History glance: its full-width Resume CTA takes the caret exactly as #start-split does. */
+.hd-g-resume-split{display:flex;width:100%;}
+.hd-g-resume-split > .rd-cta{flex:1 1 auto;width:auto;border-radius:var(--r-ctrl) 0 0 var(--r-ctrl);}
+.hd-g-resume-split > .rd-cta:hover{transform:none;}
+.btn-split.hd-g-resume-split > .hd-g-resume-more{border-radius:0 var(--r-ctrl) var(--r-ctrl) 0;padding:0 18px 0 15px;}
+.hd-g-resume-split .btn-split-menu{bottom:auto;top:calc(100% + 8px);}
+/* Disabled "Resume at…" menu item: greyed, and its hover must not light it up. */
+.btn-split-menu button:disabled{opacity:.45;cursor:not-allowed;}
+.btn-split-menu button:disabled:hover,.btn-split-menu button:disabled:focus-visible{background:transparent;outline:none;}
 
 /* the schedule sheet */
 .sched-modal .card.sched-card{width:min(600px,100%);animation:wr-rise .28s cubic-bezier(.2,.7,.3,1) both;}
@@ -6088,6 +6139,7 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 .sched-when{font-variant-numeric:tabular-nums;}
 .sched-sub .sched-when{font-weight:600;color:var(--ink);}
 .sched-target{margin-top:4px;font-size:12.5px;color:var(--ink-3);overflow-wrap:anywhere;}
+.sched-resume-target{margin-top:4px;font-size:12.5px;color:var(--ink-2);overflow-wrap:anywhere;}
 .sched-rule{color:var(--ink-2);font-weight:500;}
 .sched-reason{margin-top:7px;font-size:12.5px;color:var(--amber-ink);}
 .sched-more{display:inline-flex;align-items:center;gap:7px;background:none;border:none;padding:6px 2px;cursor:pointer;
