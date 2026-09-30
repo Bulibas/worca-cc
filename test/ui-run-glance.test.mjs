@@ -86,6 +86,17 @@ test('now and earlier rows', () => {
   assert.equal(nodeLabel(stepper, 'n_missing'), 'n_missing');
 });
 
+test('status copy: an open preflight names itself and its stage, never "Between steps"', () => {
+  const pre = (status, extra = {}) => ({ key: 'x:preflight:1', executionId: 'x:preflight:1', nodeId: 'preflight', status, startedAt: at(0), ...extra });
+  const setting = { status: 'running', stepper, steps: [pre('start')], setupStage: 'Building the knowledge graph' };
+  assert.deepEqual([glanceCopy(setting).title, glanceCopy(setting).sub], ['Running', 'Preflight · Building the knowledge graph']);
+  assert.equal(glanceCopy({ ...setting, setupStage: null }).sub, 'Preflight', 'no stage known: the bookend alone');
+  assert.equal(glanceCopy({ ...setting, steps: [pre('done')] }).sub, 'Between steps', 'a closed preflight is not setup');
+  assert.deepEqual(nowRows(setting), [], 'preflight is not a workflow step: no Now row, no trail dot');
+  const both = { ...setting, steps: [pre('start'), row('n_plan', 1, 1, null, 'start')] };
+  assert.equal(glanceCopy(both).sub, 'Step: Plan', 'a running step outranks the bookend');
+});
+
 test('glance state and copy for every status', () => {
   assert.equal(glanceState({ status: 'starting' }), 'start');
   assert.equal(glanceState({ status: 'pausing' }), 'paused');

@@ -7,6 +7,7 @@
 // branches, fan-out slices), and nothing is drawn for steps that have not started. A workflow
 // that loops or branches has no honest "n of m", so the glance never claims one.
 import { ledgerRows } from './graph/run-decor.mjs';
+import { BOOKEND_EXECUTION_IDS } from '../../src/shared/graph/constants.mjs';
 
 /** Dots per stacked column before the rest collapse into "+N". */
 export const TRAIL_STACK_CAP = 3;
@@ -114,6 +115,16 @@ export function nowRows(run) {
         model: n && n.model ? String(n.model) : '',
       };
     });
+}
+
+const PREFLIGHT_EXEC = BOOKEND_EXECUTION_IDS[0];   // 'x:preflight:1'
+
+/** True while the preflight bookend is open: the run is setting itself up (checkpoint,
+ *  worktree, knowledge graph, agent context) and no workflow step has started. The
+ *  bookend is not a step (ledgerRows drops it), so it gets no dot and no Now row. */
+export function preflightOpen(run) {
+  const steps = Array.isArray(run && run.steps) ? run.steps : [];
+  return steps.some((s) => s && s.executionId === PREFLIGHT_EXEC && s.status === 'start');
 }
 
 /** Completed executions folded per node, in first-run order: [{nodeId,label,times}].
@@ -227,6 +238,8 @@ export function glanceCopy(run, { pill = null, checks = null, lastLine = '', pr 
       // row carries the run's time, and a second, unlabelled one read as a contradiction).
       if (now.length > 1) return line('Running', '', `Steps: ${join(names)}`);
       if (now.length === 1) return line('Running', '', `Step: ${names[0]}`);
+      // Nothing of the workflow runs yet: the preflight, and what it is doing.
+      if (preflightOpen(run)) return line('Running', '', run.setupStage ? `Preflight · ${run.setupStage}` : 'Preflight');
       return line('Running', '', 'Between steps');
   }
 }

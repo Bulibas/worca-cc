@@ -824,6 +824,7 @@ export class RunHarness extends EventEmitter {
       updatedAt: null,
       steps: [],
       stepper: null, // UI stepper manifest, snapshotted at run start (Task 2)
+      setupStage: null, // what the open preflight is doing (_setupStage); null outside it
       tools: null,
       checkpointRef: null,
       pipelineDir: null,
@@ -1110,6 +1111,10 @@ export class RunHarness extends EventEmitter {
       this._emit('state', this.getState());
 
       // 1) Load agent prompts + preflight tool detection (parallel; both safe).
+      //    The preflight bookend stays open (its clock running) through ALL of the
+      //    setup below, up to the first node: it is the only ledger row that can
+      //    run before then, and the run page's clock and status line read it.
+      this.state.setupStage = 'Checking the setup';   // the bookend's own state emit carries it
       this._bookend('preflight', 'start');
       const [agentPrompts, tools, stepModels] = await Promise.all([
         this._loadAgentPrompts(),
@@ -1240,13 +1245,13 @@ export class RunHarness extends EventEmitter {
       // 3) Ensure a git repo + checkpoint commit (per member on a workspace run).
       if (this.isWorkspace) await this._ensureGitCheckpointAll();
       else await this._ensureGitCheckpoint();
-      this._bookend('preflight', 'done');
       this._checkAbort();
 
       // 3b) Set up the run root + the per-pipeline worktree(s). All subsequent
       // claude spawns cwd into this.runCwd (the run root on a detached workspace
       // run, else the primary's worktree); per-member fan-out sub-agents work in
       // this.workDirs. Artifacts route via the workspace store.
+      this._setupStage('Creating the worktree');
       await this._setupRunRoot();
       // The provisional title (firstMeaningfulLine(prompt) or the dir basename) is
       // shown instantly; kick off the real LLM title without blocking run start, now
@@ -1268,10 +1273,12 @@ export class RunHarness extends EventEmitter {
       this._checkAbort();
 
       // 3c) Build the knowledge graph INSIDE each worktree so agents can query it.
+      this._setupStage('Building the knowledge graph');
       if (this.isWorkspace) await this._buildWorktreeGraphAll();
       else await this._buildWorktreeGraph();
       this._checkAbort();
 
+      this._setupStage('Preparing the agents');
       // 3d) Resolve + validate declared agent skills (hard gate, UNCHANGED in
       //     semantics), then assemble the run context for EVERY detached run —
       //     including the zero-declared-skills case, which is every shipped
@@ -1340,6 +1347,7 @@ export class RunHarness extends EventEmitter {
       // D7: every setup step above is done — a pause from here on has nothing to
       // replay, so _completePaused strips any `setupIncomplete` stamp instead.
       this._setupDone = true;
+      this._endPreflight();
 
       // 4) (Clarify now runs as the first graph node — see _runClarifyNode.)
 
@@ -1684,6 +1692,12 @@ export class RunHarness extends EventEmitter {
       // skills gate and the context assembly below see the ADOPTED agent keys, not
       // the bootstrap's empty set. null for a saved workflow and for an Auto run
       // that already adopted (rp.workflowId is then the real id).
+      // A run that paused mid-setup resumes INSIDE its preflight: the bookend's clock
+      // runs through the re-decision and the replay below (_endPreflight closes it).
+      if (rp.setupIncomplete === true) {
+        this.state.setupStage = 'Checking the setup';
+        this._bookend('preflight', 'start');
+      }
       await this._decideTopology({ resume: rp });
       this._checkAbort();
 
@@ -1699,6 +1713,7 @@ export class RunHarness extends EventEmitter {
         if (this.runRootMode === 'detached') resumeManifest = await readRunManifest(this.runRoot);
       }
       this._setupDone = true;
+      this._endPreflight();
 
       // ── §5.2 detached resume: idempotent re-assembly (self-healing) ──
       // Only when the RECORDED mode is 'detached', and NEVER with a resolvedSkills
@@ -5015,23 +5030,26 @@ export class RunHarness extends EventEmitter {
         this.state.checkpointRefs = { ...this.checkpointRefs };
       }
     }
-    // run() closes the preflight bookend right after the checkpoint; the paused
-    // run's ledger still holds it at 'start' (the rehydrated steps), so close it
-    // here or a finished run keeps an open preflight row forever.
-    this._bookend('preflight', 'done');
+    // The preflight bookend stays open through the replay: resume() reopened it
+    // before the replay and closes it (_endPreflight) once the replay returns.
     this._checkAbort();
     // 3b) run root + worktrees — keyed on the per-member map, NEVER on this.workDir
     //     (it defaults to projectDir and is never falsy).
     const missing = this.members.some((m) => !this.workDirs.get(m.projectKey));
-    if (missing) await this._setupRunRoot({ replay: true });
+    if (missing) {
+      this._setupStage('Creating the worktree');
+      await this._setupRunRoot({ replay: true });
+    }
     // run() kicks the LLM title off once runCwd exists; a run that paused before
     // that point still carries its provisional title, so kick it off now. A run
     // that got past it already holds the generated row.title (loaded by resume()).
     if (this.state.titleProvisional) this._kickoffTitleGeneration();
     this._checkAbort();
     // 3c) graph build (fail-safe, idempotent)
+    this._setupStage('Building the knowledge graph');
     if (this.isWorkspace) await this._buildWorktreeGraphAll(); else await this._buildWorktreeGraph();
     this._checkAbort();
+    this._setupStage('Preparing the agents');
     // 3d) the skills gate + legacy injection — run()'s block, agent keys from the frozen manifest
     const requiredSkills = collectRequiredSkills(this.registry, this._engineAgentKeys());
     let resolvedSkills = new Map();
@@ -5135,6 +5153,23 @@ export class RunHarness extends EventEmitter {
     });
     this._emit('state', this.getState());
     this._persist().catch(() => {});
+  }
+
+  /** Name what the open preflight is doing (`state.setupStage`): the run page's
+   *  status line reads it while no workflow step runs yet. */
+  _setupStage(label) {
+    if (this.state.setupStage === label) return;
+    this.state.setupStage = label;
+    this._emit('state', this.getState());
+  }
+
+  /** Close the preflight bookend once the setup is over (run(), and resume() after a
+   *  setup replay). A no-op on a row that is not open, so a resume with nothing to
+   *  replay never re-stamps a finished preflight. */
+  _endPreflight() {
+    this.state.setupStage = null;
+    const row = this.state.steps.find((s) => s.key === 'x:preflight:1');
+    if (row && row.status === 'start') this._bookend('preflight', 'done');
   }
 
   /** Constructor seam for the v1 runner registry (v1 only; the graph engine

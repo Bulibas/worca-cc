@@ -23,6 +23,7 @@ import { projectKey } from '../src/core/store.mjs';
 import { readRunManifest } from '../src/core/run-manifest.mjs';
 import { readPipelineForResume } from '../src/core/artifacts.mjs';
 import { getDb } from '../src/core/db.mjs';
+import { BOOKEND_EXECUTION_IDS } from '../src/shared/graph/constants.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { fileURLToPath } from 'node:url';
 
@@ -184,7 +185,9 @@ test('detached + an UNRESOLVABLE declared skill still gates before any node — 
     assert.match(res.detail, /no-such-skill-anywhere/);
     assert.equal(assembled, 0, 'the gate throws BEFORE assembly, so no context is generated');
     assert.equal(orch.getState().resumePoint?.setupIncomplete, true, 'resume replays the setup — including this gate');
-    assert.ok(!orch.getState().steps.some((s) => s.status === 'start' || s.status === 'ok'),
+    // No NODE ran. The preflight bookend is not one: the setup paused inside it, so it
+    // stays open (its clock stopped) until the resume's replay closes it.
+    assert.ok(!orch.getState().steps.some((s) => !BOOKEND_EXECUTION_IDS.includes(s.executionId) && (s.status === 'start' || s.status === 'ok')),
       JSON.stringify(orch.getState().steps));
 
     // The gate HOLDS on resume: with the skill still missing the replay pauses again

@@ -1196,6 +1196,30 @@ test('the glance is the default: page title, status line, facts, parallel steps;
   assert.doesNotMatch(rd.querySelector('.rd-meta').textContent, /\d+\/\d+ done/);
 });
 
+test('before the first step: the glance names the preflight and its stage, and the clock ticks', async () => {
+  const ctx = await bootRunning();
+  // The harness's shape: the bookend row is open, its clock a number (Date.now()).
+  const preflight = { key: 'x:preflight:1', executionId: 'x:preflight:1', nodeId: 'preflight', ordinal: 1, cycle: 1,
+    kind: 'cycle', status: 'start', startedAt: new Date(Date.now() - 42000).toISOString(), activeMs: 0, runningSince: Date.now() - 42000 };
+  const rd = await openGlance(ctx, 'running/r1', { active: [], steps: [preflight], totalCostUsd: 0, setupStage: 'Building the knowledge graph' });
+  assert.equal(rd.querySelector('.rd-now-title').textContent, 'Running');
+  assert.equal(rd.querySelector('.rd-now-sub').textContent, 'Preflight · Building the knowledge graph');
+  assert.equal(rd.querySelector('.rd-nowlist').textContent, '', 'preflight is not a workflow step: no Now row');
+  const time = rd.querySelector('.rd-facts b.run-time');
+  assert.ok(time, 'the time tile ticks during preflight');
+  assert.match(time.textContent, /^4\ds$/, 'the preflight counts toward the run\'s time');
+
+  // The stage moves on; then the preflight ends and the first step takes the line.
+  frame(ctx, { type: 'state', runId: 'r1', status: 'running', steps: [preflight], setupStage: 'Preparing the agents' });
+  await settle(ctx.window, 3);
+  assert.equal(rd.querySelector('.rd-now-sub').textContent, 'Preflight · Preparing the agents');
+  frame(ctx, { type: 'state', runId: 'r1', status: 'running', setupStage: null, active: [{ nodeId: 'n_plan', executionId: 'x:n_plan:1' }],
+    steps: [{ ...preflight, status: 'done', runningSince: null, activeMs: 42000 },
+      { key: 'x:n_plan:1', executionId: 'x:n_plan:1', nodeId: 'n_plan', ordinal: 1, cycle: 1, kind: 'cycle', status: 'start', startedAt: new Date().toISOString(), activeMs: 0, runningSince: Date.now() }] });
+  await settle(ctx.window, 3);
+  assert.equal(rd.querySelector('.rd-now-sub').textContent, 'Step: Plan');
+});
+
 test('Details is a route: a tab row and a Now row open it; Escape and ‹ Run come back', async () => {
   const ctx = await bootRunning();
   const { window } = ctx;
