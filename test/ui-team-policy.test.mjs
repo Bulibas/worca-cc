@@ -385,7 +385,13 @@ test('Running: a cost_pipeline_policy pause shows the blue banner; "Continue pas
   recv({ type: 'done', runId: 'r1', status: 'paused', reason: 'cost_pipeline_policy', detail: 'team cost cap reached ($10.00 >= $10.00, acme/gateway)' });
   await settle();
   const card = doc.querySelector('#run-list .run-card');
-  const banner = card.querySelector('.cost-banner');
+  assert.equal(card.querySelector('.cost-banner'), null, 'the list card carries no cost banner');
+  assert.equal(card.querySelector('.rc-wait').hidden, false, 'the card strip says the run is parked');
+  assert.equal(card.querySelector('.rc-wait-text').textContent, 'Paused \u00b7 cost limit reached');
+  await ctx.go('running/r1');                                  // the banner lives on the run page
+  await settle(6);
+  const banner = doc.querySelector('#run-detail .cost-banner');
+  assert.ok(banner, 'the run page carries the cost banner');
   assert.equal(banner.hidden, false);
   assert.ok(banner.classList.contains('cb-policy'), 'the blue team-cap variant');
   assert.match(banner.textContent, /Paused — team cost cap reached/);

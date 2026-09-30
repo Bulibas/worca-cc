@@ -119,8 +119,7 @@ test('setWireBadge writes an amber cycle badge and clears it', () => {
 });
 
 test('the run-monitor CSS block styles the hosts and states it ACTUALLY writes, at the end of the file, and re-declares no shared keyframe', () => {
-  for (const sel of ['.run-flow.gv-host{', '.run-flow-wrap.gv-wrap-monitor{', '.rc-detailed .run-flow-wrap.gv-wrap-static{height:300px',
-    '.run-flow.gv-host .gv-world .node.is-error', '.run-flow.gv-host .gv-world .node.is-skipped',
+  for (const sel of ['.run-flow.gv-host{', '.run-flow-wrap.gv-wrap-monitor{', '.run-flow.gv-host .gv-world .node.is-error', '.run-flow.gv-host .gv-world .node.is-skipped',
     '.run-flow.gv-host .gv-wires path.wire-live', '.rd-graph.settled .run-flow.gv-host .gv-wires path.wire-live{animation:none;stroke-dashoffset:0;}',
     '.run-flow.gv-host .wbadge:not(:has(> .wfired))', '.run-flow.gv-host .gv-world .xfoot>.fan{', '--run-host-h', '.run-warn{', '.rg-hint{',
     '.rg-hint{position:absolute;left:12px;',
@@ -877,40 +876,34 @@ test('destroyGraphMounts tears down every mount under a root; the next paint mou
   assert.notEqual(host.querySelector('.gv-world'), world);
 });
 
-test('a v2 CARD: the graph mounts into an empty host, survives a shim-signature change, and its wrap click opens the detail (v2 only)', async () => {
+test('the Running list card carries no graph; the run page mounts it, survives a shim-signature change, and its wrap is inert scenery', async () => {
   const window = await bootApp();
   const np = window.__np;
-  const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
-  const node = np.buildRunCard(r);              // stepper null → nothing painted
+  const r = np.upsertRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running', kind: 'run', startedAt: '10:00:00', pendingQuestion: null });
+  const node = np.buildRunCard(r);
   window.document.body.appendChild(node);
   r.el = node;
-  const host = node.querySelector('.rc-detailed .run-flow');
-  assert.equal(host.children.length, 0, 'a stepper-less card paints nothing (the v1 columns are gone)');
   np.onState(r, { status: 'running', stepper: WITH_SHIM, active: [], steps: [] });
+  assert.equal(node.querySelector('.run-flow, .run-flow-wrap, .rc-detailed'), null, 'the card has no graph host and no detailed body');
+  // A card built AFTER the manifest arrived paints no graph either.
+  const pre = np.makeRun({ runId: 'r3', title: 't', projectDir: '/p', status: 'running' });
+  pre.stepper = MANIFEST;
+  assert.equal(np.buildRunCard(pre).querySelector('.run-flow'), null, 'no graph on a card built after the manifest');
+  // The graph lives on Details › Workflow.
+  window.location.hash = 'running/r1/details/workflow';
+  window.dispatchEvent(new window.Event('hashchange'));
+  await new Promise((res) => setTimeout(res, 0));
+  const screen = window.document.querySelector('#run-detail').firstElementChild;
+  const host = screen.querySelector('.rd-graph .run-flow');
   const stage = host.querySelector('.gv-stage');
-  assert.ok(stage, 'the v2 renderer replaced the columns');
+  assert.ok(stage, 'the v2 renderer mounted the graph on the run page');
   assert.equal(host.querySelector('.col'), null);
-  // A later manifest whose v1 SHIM signature differs must not disturb the mount
-  // (the v1 structural rebuild that used to wipe the host is gone).
+  // A later manifest whose v1 SHIM signature differs must not disturb the mount.
   const shim2 = { ...WITH_SHIM, steps: [...WITH_SHIM.steps.slice(0, 2),
     { kind: 'agents', nodes: [{ id: 'n_x', key: 'reviewer', uiPhase: 'review', label: 'Reviewer' }] }, ...WITH_SHIM.steps.slice(2)] };
   np.onState(r, { status: 'running', stepper: shim2, active: [], steps: [] });
-  assert.equal(host.querySelector('.gv-stage'), stage, 'the mount is untouched by the v1 rebuild path');
-  // D5: the card's graph is scenery (pointer-events:none world); the WRAP takes
-  // the click and opens the detail — decided at click time, v2 only.
+  assert.equal(screen.querySelector('.rd-graph .run-flow .gv-stage'), stage, 'the mount is untouched by the v1 rebuild path');
   window.location.hash = '';
-  node.querySelector('.rc-detailed .run-flow-wrap').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  assert.equal(window.location.hash, '#running/r1');
-  window.location.hash = '';
-  const v1 = np.makeRun({ runId: 'r2', title: 't', projectDir: '/p', status: 'running' });
-  const card1 = np.buildRunCard(v1);
-  window.document.body.appendChild(card1);
-  card1.querySelector('.rc-detailed .run-flow-wrap').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  assert.equal(window.location.hash, '', 'a v1 card\'s graph stays inert');
-  // A card built AFTER the manifest arrived never paints the v1 columns at all.
-  const pre = np.makeRun({ runId: 'r3', title: 't', projectDir: '/p', status: 'running' });
-  pre.stepper = MANIFEST;
-  assert.equal(np.buildRunCard(pre).querySelector('.rc-detailed .run-flow').children.length, 0, 'no v1 columns for a v2 manifest');
 });
 
 test('openRunArtifact reads the End chip through the by-id route on Running and the keyed routes on History', async () => {
@@ -989,21 +982,17 @@ test('applyRunLogFilter assigns onto r.logFilter and repaints; focusLogExecution
   window.location.hash = '';
 });
 
-test('compact density renders NO graph on a v2 card (Running-page lock); detailed mounts it', async () => {
+test('the list card has no density toggle and no per-card graph body; setRunDensity is gone', async () => {
   const window = await bootApp();
   const np = window.__np;
-  np.setRunDensity('compact');
+  assert.equal(np.setRunDensity, undefined, 'the density model is gone');
   const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
   const node = np.buildRunCard(r);
   window.document.body.appendChild(node);
   r.el = node;
   np.onState(r, { status: 'running', stepper: MANIFEST, active: [], steps: [] });
-  const host = node.querySelector('.rc-detailed .run-flow');
-  assert.equal(node.dataset.density, 'compact');
-  assert.equal(host.querySelector('.gv-stage'), null, 'compact: nothing is mounted into the hidden body');
-  np.setRunDensity('detailed');
-  np.onState(r, { status: 'running', stepper: MANIFEST, active: [], steps: [] });
-  assert.ok(host.querySelector('.gv-stage'), 'detailed: the graph mounts on the next paint');
+  assert.equal(node.querySelector('.rc-detailed, .rc-compact, .run-density, .run-flow, .rc-step-chip'), null);
+  assert.equal(window.document.querySelector('#run-list .run-density'), null);
 });
 
 // ── banner / progress / gate copy / History header + Overview ────────────────
@@ -1048,7 +1037,7 @@ test('the gate intro names the wire it holds on; v1 keeps the two literals byte-
     'This cycle reached its limit with open issues. Approve another cycle to keep iterating, or continue with what you have.');
 });
 
-test('the card meta shows `n/m` and the compact chip `n/m done` on a v2 run; a v1 card is untouched', async () => {
+test('the card meta shows `n/m · step` on a v2 run; a v1 card is untouched', async () => {
   const window = await bootApp();
   const np = window.__np;
   const done = [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'done', activeMs: 1000, costUsd: 0.1 }];
@@ -1059,26 +1048,18 @@ test('the card meta shows `n/m` and the compact chip `n/m done` on a v2 run; a v
   assert.equal(node.querySelector('.rc-prog').hidden, true, 'hidden until a v2 manifest arrives');
   np.onState(r, { status: 'running', stepper: MANIFEST, active: [], steps: done });
   assert.equal(node.querySelector('.rc-prog').hidden, false);
-  assert.equal(node.querySelector('.rc-prog-text').textContent, '1/1');
+  assert.equal(node.querySelector('.rc-prog-text').textContent, '1/1 · Running', 'done/total, then the step');
   // The segment is painted ABOVE renderRunMeta's `.rc-branch` early return.
   const bare = window.document.createElement('div');
   bare.innerHTML = '<span class="rm-text"></span><span class="rc-seg rc-prog" hidden><span class="rc-prog-text"></span></span>';
   np.renderRunMeta(r, bare);
   assert.equal(bare.querySelector('.rc-prog').hidden, false, 'a branch-less root still gets the progress segment');
-  np.setRunDensity('compact');
-  np.onState(r, { status: 'running', stepper: MANIFEST, active: [], steps: done });
-  assert.equal(node.querySelector('.rc-step-chip').textContent, '1/1 done', 'D15: a number, never a bar');
-  np.setRunDensity('detailed');
   const v1 = np.makeRun({ runId: 'r2', title: 't', projectDir: '/p', status: 'running' });
   const c1 = np.buildRunCard(v1);
   window.document.body.appendChild(c1);
   v1.el = c1;
   np.onState(v1, { status: 'running', stepper: V1_STEPPER });
   assert.equal(c1.querySelector('.rc-prog').hidden, true, 'v1: no progress segment');
-  np.setRunDensity('compact');
-  np.onState(v1, { status: 'running', stepper: V1_STEPPER });
-  assert.match(c1.querySelector('.rc-step-chip').textContent, /^STEP \d+\/\d+$/, 'v1 keeps STEP n/m');
-  np.setRunDensity('detailed');
 });
 
 test('the detail header .rd-step names what runs on a v2 run, with no step count', async () => {

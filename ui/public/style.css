@@ -1011,14 +1011,58 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 /* The revise echo already carries its own 12px bottom margin — one child-selector
    deeper than the generic name margin below, so it wins wherever both match. */
 .ask-wfcard-body>.qnote+.ask-wfcard-namewrap{margin-top:0;}
-.qtune{width:100%;border-collapse:collapse;table-layout:fixed;margin-top:16px;font-size:13px;}
-.qtune th{text-align:left;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:400;height:32px;padding:0 8px;border-bottom:1px solid var(--line);white-space:nowrap;}
-.qtune td{height:44px;padding:0 8px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.qtune th:first-child,.qtune td:first-child{padding-left:0;}
-.qtune td:first-child{font-weight:500;color:var(--ink);}
-.qtune .select-wrap{width:150px;max-width:100%;}
+/* The agent table is one stacked card per agent (name, then model | effort, then the two switches, each
+   labelled), so it never depends on the panel being wide enough for five fixed columns. */
+.qtune{display:block;width:100%;font-size:13px;}
+.qtune thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);}
+.qtune tbody{display:block;}
+.qtune tr{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;padding:14px 0;border-bottom:1px solid var(--line);}
+.qtune tr:last-child{border-bottom:0;}
+.qtune td{display:block;min-width:0;padding:0;}
+.qtune td:first-child{grid-column:1 / -1;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.qtune td[data-label]::before{content:attr(data-label);display:block;margin-bottom:4px;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);}
+.qtune .select-wrap{width:100%;}
 .qtune .select-wrap select{height:34px;padding:0 40px 0 12px;border-radius:10px;}
-.qtune-sw{display:inline-block;position:relative;vertical-align:middle;}
+.qtune td.qtune-sw-cell{display:flex;align-items:center;min-height:24px;}
+.qtune-sw{display:inline-flex;align-items:center;gap:8px;position:relative;cursor:pointer;}
+.qtune-sw-t{font-size:12.5px;color:var(--ink-2);}
+/* Disclosures on the workflow review panel: Why this? · Show graph · Customize agents */
+.wf-namelabel{flex:0 0 auto;font-weight:600;font-size:15px;line-height:1.35;color:var(--ink-3);}
+/* The preview: always visible, the whole card is one button that opens the large pan/zoom popup. */
+.wf-preview{display:block;position:relative;width:100%;margin:16px 0 0;padding:0;border:0;border-radius:12px;background:transparent;font:inherit;text-align:left;cursor:zoom-in;}
+.wf-preview .ask-wfcard-graph{margin-top:0;transition:border-color .15s,height .24s cubic-bezier(.2,.7,.3,1);}
+.wf-preview:hover .ask-wfcard-graph{border-color:var(--hover-outline);}
+.wf-preview:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.wf-preview-hint{position:absolute;top:10px;right:10px;padding:3px 10px;border-radius:999px;background:var(--panel);border:1px solid var(--line);color:var(--ink-2);font-size:11.5px;font-weight:600;opacity:0;transition:opacity .15s;pointer-events:none;}
+.wf-preview:hover .wf-preview-hint,.wf-preview:focus-visible .wf-preview-hint{opacity:1;}
+/* Why this? — three plain rows: label left, value right */
+.wf-facts{display:grid;grid-template-columns:max-content 1fr;gap:8px 20px;margin:0;font-size:13px;line-height:1.5;}
+.wf-facts dt{color:var(--ink-3);}
+.wf-facts dd{margin:0;color:var(--ink-2);min-width:0;}
+.wf-facts .ask-wfcard-match{margin:0;padding-left:0;}
+.wf-facts .ask-wfcard-match svg{display:none;}
+/* The large workflow popup */
+.wf-pop .wf-pop-card{width:min(1120px,100%);height:min(780px,88vh);max-height:none;display:flex;flex-direction:column;overflow:hidden;padding:0;}
+.wf-pop-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid var(--line);}
+.wf-pop-head h2{margin:0;font-size:16px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.wf-pop-canvas{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;background:var(--canvas-2) radial-gradient(circle,var(--line-2) 1.1px,transparent 1.1px);background-size:22px 22px;}
+.wf-pop-canvas .gv-stage.gv-flow{position:absolute;inset:0;width:auto;height:100% !important;cursor:grab;}   /* the view sets an inline height from its rows; the popup's stage always fills the canvas */
+.wf-pop-canvas .gv-stage.panning,.wf-pop-canvas .gv-stage.panning *{cursor:grabbing !important;}
+.wf-pop-canvas .gv-nav{right:16px;bottom:16px;}
+.wf-pop-hint{padding:10px 20px;border-top:1px solid var(--line);font-size:11.5px;color:var(--ink-3);}
+.wf-discs{display:flex;flex-direction:column;margin-top:16px;border-top:1px solid var(--line);}
+.wf-disc{border-bottom:1px solid var(--line);}
+.wf-disc>summary{display:flex;align-items:center;gap:8px;min-height:40px;cursor:pointer;list-style:none;font-size:13px;font-weight:600;color:var(--ink-2);}
+.wf-disc>summary::-webkit-details-marker{display:none;}
+.wf-disc>summary::before{content:"";width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform .15s;}
+.wf-disc[open]>summary::before{transform:rotate(45deg);}
+.wf-disc>summary:hover{color:var(--ink);}
+.wf-disc>summary:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radius:4px;}
+.wf-disc-body{padding:0 0 16px;}
+.wf-disc-body>*{margin-top:0;}
+.wf-disc-body>*+*{margin-top:12px;}
+.wf-disc-body .ask-wfcard-graph{margin-top:0;}
+@media (prefers-reduced-motion: reduce){.wf-disc>summary::before{transition:none;}}
 /* (no disabled rule here: `.sw-input:disabled + .switch{opacity:.5;cursor:not-allowed}` already exists) */
 .qfree-area{margin-top:12px;min-height:64px;resize:vertical;line-height:1.5;}
 .qfree-area[hidden]{display:none;}
@@ -3883,10 +3927,7 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
    block is not contiguous (it also lives at ~557-600 and ~1109) and .btn-pause /
    .btn-resume / .btn-stop have base rules at 237-254, so a mid-file append would
    lose the source-order tie. Same reasoning as the History list card v2 block. */
-/* margin-bottom replaces `.run-top`'s own 18px, which this task deletes:
-   `.run-flow-wrap` (:1109) has only a BOTTOM margin, so without this the graph
-   would sit flush against the header until Task 4 adds `.rc-detailed{margin-top:18px}`. */
-.rc-head{display:flex;align-items:flex-start;gap:13px;cursor:pointer;margin-bottom:18px;}
+.rc-head{display:flex;align-items:flex-start;gap:13px;cursor:pointer;}
 .rc-head:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .rc-sic{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;
   border-radius:50%;flex:0 0 auto;align-self:center;}
@@ -3933,9 +3974,6 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .rc-copied{display:none;font:500 11px var(--sans);color:var(--green-ink);}
 .rc-branch-copy.copied + .rc-copied{display:inline;}
 .rc-acts{display:flex;align-items:center;gap:8px;flex:0 0 auto;align-self:center;margin-left:auto;}
-.rc-qpill{display:inline-flex;align-items:center;padding:5px 11px;border-radius:999px;
-  background:var(--amber-bg);color:var(--amber-ink);font:700 11.5px var(--sans);white-space:nowrap;}
-.rc-qpill[hidden]{display:none;}
 /* the five 30px icon buttons; .rc-open mirrors .hist-open exactly */
 .rc-acts .btn-pause,.rc-acts .btn-resume,.rc-acts .btn-stop,.rc-after,.rc-open{
   display:inline-flex;align-items:center;justify-content:center;gap:0;
@@ -3970,39 +4008,20 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
   .rc-sic .sic-spin{animation:none;}
 }
 
-/* ---------- Running list: density toggle + compact card body ---------- */
+/* ---------- Running list card ---------- */
 /* .topbar is `justify-content:space-between` with three children now; pushing the
    pill right keeps pill + toggle together as the right-hand group. */
 #running-status-pill{margin-left:auto;}
-.run-density{display:inline-flex;align-items:center;gap:2px;padding:3px;border-radius:999px;
-  background:var(--field);flex:0 0 auto;align-self:center;}
-/* `.rc-dseg`, not `.rd-seg`: the density toggle is LIST chrome, and the Global
-   Constraints reserve `.rd-*` for the run DETAIL — `.rd-seg` also sits one
-   character from C1's `secClass:'rd-sec'`, which the tab engine writes into the
-   detail screen. */
-.run-density .rc-dseg{display:inline-flex;align-items:center;justify-content:center;
-  width:32px;height:28px;padding:0;border:0;border-radius:999px;background:transparent;
-  color:var(--ink-2);cursor:pointer;transition:background .15s,color .15s;}
-.run-density .rc-dseg:hover{color:var(--ink);}
-.run-density .rc-dseg[aria-pressed="true"]{background:var(--ink);color:var(--on-ink);}
-.run-density .rc-dseg:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-/* One body per density. The other is display:none — which zeroes its scrollers, so
-   setRunDensity stashes .log scrollTop + .run-flow-wrap scrollLeft across the flip. */
-.run-card[data-density="compact"] .rc-detailed{display:none;}
-.run-card[data-density="detailed"] .rc-compact{display:none;}
-.rc-compact{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:14px;}
-.rc-step-chip{padding:4px 10px;border-radius:999px;font:700 11px var(--mono);
-  letter-spacing:.04em;background:var(--field);color:var(--ink-2);white-space:nowrap;}
-.rc-step-chip.st-blue{background:var(--blue-bg);color:var(--blue-ink);}
-.rc-step-chip.st-amber{background:var(--amber-bg);color:var(--amber-ink);}
-.rc-step-chip.st-green{background:var(--green-bg);color:var(--green-ink);}
-.rc-step-chip.st-red{background:var(--red-bg);color:var(--red-ink);}
-.rc-step-name{min-width:0;font:600 14.5px var(--sans);color:var(--ink);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.rc-step-model{font:400 12px var(--mono);color:var(--ink-3);margin-left:auto;white-space:nowrap;}
-.rc-step-model[hidden]{display:none;}
-/* .run-top's old 18px bottom margin used to open this gap. */
-.rc-detailed{margin-top:18px;}
+/* The Running list is History-level: header, one meta line, and — when the run waits on you — one strip
+   that opens the run page at the question. */
+.rc-wait{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;margin-top:16px;padding:10px 14px;
+  border:1px solid var(--line);border-radius:12px;background:var(--field);color:var(--ink-2);font:600 13px var(--sans);text-align:left;cursor:pointer;
+  transition:border-color .15s,background .15s;}
+.rc-wait[hidden]{display:none;}
+.rc-wait.is-ask{border-color:var(--amber-line);background:var(--amber-wash);color:var(--ink);}
+.rc-wait:hover{border-color:var(--hover-outline);}
+.rc-wait:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.rc-wait-go{font-weight:600;white-space:nowrap;opacity:.8;}
 
 /* ---------- Running two-screen shell (twin of the History track, 1591-1603) ---------- */
 .view[data-view="running"]{flex:1 1 auto;min-height:0;padding:0;position:relative;}
@@ -6642,7 +6661,6 @@ input.gv-name:focus-visible{outline:none;}
 .auto-deciding .auto-deciding-label{font-size:13px;}
 .run-flow-wrap.gv-wrap{user-select:none;-webkit-user-select:none;}
 .run-flow-wrap.gv-wrap-monitor{overflow:hidden;height:var(--run-host-h,360px);}
-.rc-detailed .run-flow-wrap.gv-wrap-static{height:300px;overflow-x:auto;overflow-y:hidden;}   /* additive (Running D17) */
 .run-flow.gv-host .gv-world .node{cursor:default;}
 /* v1 descendant rules that out-rank P5's .gv-world block (3-4 classes) — one neutraliser each */
 .run-flow.gv-host .gv-world .xfoot>.fan{flex:none;flex-wrap:nowrap;margin:0;border-top:0;}

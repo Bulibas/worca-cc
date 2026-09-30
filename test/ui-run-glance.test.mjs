@@ -105,7 +105,7 @@ test('glance state and copy for every status', () => {
   assert.deepEqual([gate.title, gate.sub], ['Waiting for you', 'Step: Refine']);
   const form = glanceCopy({ status: 'running', stepper, steps: [], pendingQuestion: { kind: 'form', nodeId: 'n_docs', title: 'What should this run produce?' } });
   assert.deepEqual([form.title, form.sub], ['Waiting for you', 'Step: Docs']);
-  assert.equal(glanceCopy({ status: 'running', stepper, steps: [], pendingQuestion: { kind: 'workflow' } }).sub, 'Pick a workflow');
+  assert.equal(glanceCopy({ status: 'running', stepper, steps: [], pendingQuestion: { kind: 'workflow' } }).sub, 'Review the workflow');
   assert.equal(glanceCopy({ status: 'running', stepper, steps: [], pendingQuestion: { kind: 'gate' } }).sub, 'A decision', 'no step known: what is asked');
 
   assert.deepEqual([glanceCopy({ status: 'paused' }, { pill: { text: 'Paused · cost limit' } }).title,

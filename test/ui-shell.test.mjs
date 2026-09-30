@@ -30,19 +30,24 @@ test('shell hooks present (base + workspace surfaces)', () => {
   ])
     assert.ok(html.includes(`id="${id}"`), `missing #${id}`);
 });
-test('run-card template v2: header cluster + graph + qpanel + stop, no run-foot / subs-bar', () => {
+test('run-card template: header cluster + one waiting strip + stop; no graph, log, qpanel, run-foot / subs-bar', () => {
   const m = html.match(/<template id="run-card-tpl">([\s\S]*?)<\/template>/);
   assert.ok(m, 'missing run-card-tpl');
   const tpl = m[1];
-  // The pipeline graph is JS-built: the template carries only the empty
-  // .run-flow-wrap > .run-flow container the run/history graph renders into.
-  assert.ok(/class="run-flow-wrap"><div class="run-flow"><\/div><\/div>/.test(tpl), 'tpl missing empty .run-flow container');
-  assert.ok(!tpl.includes('data-step'), 'tpl should no longer carry static data-step stages');
-  assert.ok(tpl.includes('qpanel'), 'tpl missing qpanel slot');
+  assert.ok(tpl.includes('rc-head'), 'tpl missing the header row');
   assert.ok(tpl.includes('btn-stop'), 'tpl missing btn-stop');
-  assert.ok(tpl.includes('rc-head'), 'tpl missing the v2 header row');
+  assert.ok(/<button[^>]*class="rc-wait"[^>]*hidden/.test(tpl), 'tpl missing the hidden .rc-wait strip button');
+  assert.ok(tpl.includes('rc-wait-text'), 'tpl missing .rc-wait-text');
+  assert.ok(!tpl.includes('run-flow'), 'the graph no longer lives on the list card');
+  assert.ok(!tpl.includes('run-log'), 'the live log no longer lives on the list card');
+  assert.ok(!tpl.includes('qpanel'), 'the question panel mounts on the run page only');
+  assert.ok(!tpl.includes('rc-compact') && !tpl.includes('rc-detailed'), 'no compact/detailed bodies');
+  assert.ok(!tpl.includes('data-step'), 'tpl should not carry static data-step stages');
   assert.ok(!tpl.includes('run-foot'), '.run-foot removed (design §7)');
   assert.ok(!tpl.includes('subs-bar'), '.subs-bar removed (design §7)');
+});
+test('the log filter bar ships in its own template, not in the run card', () => {
+  assert.ok(html.includes('id="log-bar-tpl"'), 'missing #log-bar-tpl');
 });
 test('scan loader carries role=status + aria-live=polite (A11y)', () => {
   const m = html.match(/class="ws-loader"[^>]*>/);

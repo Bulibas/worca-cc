@@ -135,9 +135,11 @@ import { createComposer, isReservedWorkflowId, pluginOriginName } from './graph/
 // bare <select> with no preview host on this branch (the v1 read-only mini-graph
 // lived in the composer's saved list, retired in P5 Task 8). P6's Running list is
 // its first caller.
-import { thumbnailFor } from './graph/view.mjs';
+import { thumbnailFor, createGraphView } from './graph/view.mjs';
+import { manifestPortsFn, manifestTemplate, manifestAgents } from './graph/run-decor.mjs';
+import { FLOW_SCALE } from './graph/model.mjs';
 import { createThinkingOrb } from './thinking-orb.mjs';
-import { renderAutoProposal, AUTO_PROPOSAL_ORDER_QPANEL } from './auto-proposal.mjs';
+import { renderAutoProposal, proposalBands } from './auto-proposal.mjs';
 import { portsFnFor } from '../../src/shared/graph/ports.mjs';
 import { indexByKey } from '../../src/shared/graph/agent-meta.mjs';
 import { classifyLoops } from '../../src/shared/graph/loops.mjs';
@@ -553,7 +555,7 @@ function scheduleReconnect() {
 // the user's PREFERENCE and applies above 1080px only. Tablets (761-1080px) always
 // get the rail; phones (<=760px) get the FULL column as a drawer behind #mbar-menu.
 // railCollapsed() is the one reader every paint uses; nothing here persists a tier.
-// Persistence mirrors readRunDensity/setRunDensity, the private-mode-safe pair.
+// Persistence is private-mode-safe (every storage access is try/catch'd).
 // ---------------------------------------------------------------------------
 const SIDEBAR_KEY = 'worca-cc.sidebar.collapsed';
 
@@ -2806,7 +2808,6 @@ if (typeof window !== 'undefined') {
     stepStatusByKey,
     makeRun,
     onLog,
-    maybeAutoscrollLog,
     setAutoscroll,
     onSubagent,
     onState,
@@ -2828,9 +2829,6 @@ if (typeof window !== 'undefined') {
     findManifestNode,
     subAgentsForNode,
     subGroupStatus,
-    readRunDensity,
-    setRunDensity,
-    renderDensityToggle,
     runStepLabel,
     skillPillsHtml,
     agentTypePillHtml,
@@ -4168,16 +4166,6 @@ function schedulePinToBottom(logEl, r) {
   else setTimeout(flush, 16);
 }
 
-// Pin a card's log to the bottom when its auto-scroll is on. Source of truth is
-// r.autoscroll (the DOM switch only mirrors it); undefined counts as ON so a run
-// that predates the field still follows. Called by the live stream (onLog) AND on
-// (re)mount from paintRunList — a detached node reports scrollHeight≈0, so the pin
-// set on build/stream is re-applied once the node is in the document.
-function maybeAutoscrollLog(r) {
-  if (!r || !r.el || r.autoscroll === false) return;
-  schedulePinToBottom(r.el.querySelector('.log'), r);
-}
-
 // Mirror r.autoscroll onto a card's switch (class + aria). One-way: model → DOM.
 // `el` lets a caller target a card whose r.el isn't assigned yet (buildRunCard's
 // freshly-cloned node); defaults to r.el for the live-card path.
@@ -4238,9 +4226,9 @@ function liveLinesOf(r) {
   return out;
 }
 
-// Per-run log: push to the model and, if the card is mounted, append the line.
+// Per-run log: push to the model; the open run page mirrors the line into its own pane.
 // Filtering is render-time only: the model keeps every line, so changing a
-// filter never loses history; a hidden line is simply not appended.
+// filter never loses history.
 function onLog(r, msg) {
   const text = msg.text;
   if (text === undefined || text === null) return;
@@ -4257,20 +4245,6 @@ function onLog(r, msg) {
   r.logLines.push(rec);
   if (r.logLines.length > MAX_LOG_LINES) r.logLines.shift();
   noteLiveLine(r, rec);
-
-  if (r.el) {
-    // A repaint (true) already rendered rec from the model — appending again
-    // would duplicate the line.
-    const repainted = maybePaintLogFilters(r, rec);
-    const logEl = r.el.querySelector('.log');
-    if (logEl && !repainted && logLineVisible(rec, r.logFilter)) {
-      logEl._artifactCtx = { run: r, runId: r.pipelineId || r.id, record: r.record || null };
-      clearLogPlaceholder(logEl);
-      r._cycleState = appendLogRec(logEl, rec, r._cycleState ?? null);
-      trimLogDom(logEl);
-      maybeAutoscrollLog(r);
-    }
-  }
 
   // §5.9: mirror the same record into the OPEN detail's pane. Hooked on the
   // writer, not on the `log` frame type, so the six producers that call onLog
@@ -4419,18 +4393,6 @@ function facetKeys(facets) {
     ...(facets.nodes || []).map((n) => `n:${n}`),
   ]);
 }
-// Returns paintLogFilters' repaint flag (true when the pane was fully
-// repainted) so onLog can skip its own incremental append.
-function maybePaintLogFilters(r, rec) {
-  const seen = r._logFacetKeys;
-  if (!seen) return paintLogFilters(r);
-  const f = logFacets([rec]);
-  for (const k of facetKeys(f)) {
-    if (!seen.has(k)) return paintLogFilters(r);
-  }
-  return false;
-}
-
 // The live-card empty-state note ('(no lines match the filter)') is plain text
 // stamped with data-empty; incremental appends must clear it first.
 function clearLogPlaceholder(logEl) {
@@ -4478,7 +4440,6 @@ function repaintFilteredLog(r, root = r.el) {
     logEl.textContent = '(no lines match the filter)';
     logEl.dataset.empty = '1';
   }
-  maybeAutoscrollLog(r);
   if (r.autoscroll === false && savedTop) logEl.scrollTop = savedTop;
 }
 
@@ -4597,8 +4558,7 @@ function onQuestion(r, msg) {
   r._decorSeq = (r._decorSeq || 0) + 1;   // isLive(r) reads pendingQuestion
   // A new question supersedes any half-finished answer attempt.
   r._answering = false;
-  if (r.el) renderQpanel(r);
-  paintRunCard(r);
+  paintRunCard(r);   // the list card only points at the run page (.rc-wait); the panel lives there
 }
 
 // The `?` glyph used in the panel head. Built fresh each call (a node can only
@@ -4653,12 +4613,10 @@ function realOptions(q) {
   return opts.filter((o) => typeof o === 'string' && o.trim() !== '');
 }
 
-// Build the inline question/gate panel into `root`'s .qpanel from
-// r.pendingQuestion, un-hide it, and wire its inputs. Idempotent: re-building
-// replaces the content. `root` defaults to the list card, so the two existing
-// call sites (onQuestion, buildRunCard) are unchanged; the detail screen passes
-// its own subtree, and BOTH panels can be mounted at once.
-function renderQpanel(r, root = r.el) {
+// Build the question/gate panel into `root`'s .qpanel from r.pendingQuestion, un-hide it, and wire
+// its inputs. Idempotent: re-building replaces the content. Only the run page mounts one (the list
+// card just points at it), so the caller passes the run page's subtree.
+function renderQpanel(r, root) {
   if (!root) return;
   const panel = root.querySelector('.qpanel');
   if (!panel) return;
@@ -4704,8 +4662,7 @@ function renderQpanel(r, root = r.el) {
 }
 
 /** The `ctx` every registered renderer receives (index §P3). `mode` tells a body
- *  whether it is the list card's panel or the detail screen's — both are mounted
- *  for the same run at once. */
+ *  whether it is the run page's panel or another host's. */
 function askCtxFor(r, panel) {
   return {
     doc: document,
@@ -4751,17 +4708,13 @@ function renderClarifyBody(r, panel, pq) {
 
   // r._answers maps a stable per-question key -> chosen value (option text or
   // free-text or ''). Rebuilt each render so it tracks the current markup.
-  // ALSO stamped on the panel node: the list card and the open detail screen
-  // mount a .qpanel for the same run at the same time, so the module-level
-  // r._answers can only ever describe whichever painted LAST. submitAnswer reads
-  // the SUBMITTED panel's copy; r._answers stays as the no-panel fallback.
+  // ALSO stamped on the panel node: submitAnswer reads the SUBMITTED panel's copy;
+  // r._answers stays as the no-panel fallback.
   r._answers = [];
   panel.__answers = r._answers;
   lastClarifyRun = r;
 
-  // "N of M answered" (spec §5.4). Counts the SUBMITTED panel's own slots, not
-  // r._answers: the card's .qpanel and the detail's .qpanel are both mounted for
-  // the same run (T6), and each must report its own state. `slots` is the array
+  // "N of M answered" (spec §5.4). Counts the panel's own slots. `slots` is the array
   // this render just stamped on `panel`.
   const answered = document.createElement('span');
   answered.className = 'qanswered';
@@ -4860,28 +4813,11 @@ function renderClarifyBody(r, panel, pq) {
     panel.appendChild(block);
   });
 
-  // ----- foot: Open run (card only) + submit -----
+  // ----- foot: submit -----
   const foot = document.createElement('div');
   foot.className = 'qpanel-foot';
   foot.appendChild(answered);
   recount();
-  // §4.3: the CARD's clarify footer offers a way into the detail page; the detail
-  // page's own panel omits it (you are already there). The card is identified by
-  // the `.run-card` ancestor renderQpanel always paints into (it reads r.el, and
-  // r.el IS the card) — a test that never depends on Task 6's attach order.
-  if (panel.closest && panel.closest('.run-card')) {
-    const open = document.createElement('button');
-    open.type = 'button';
-    open.className = 'qopen';
-    open.textContent = 'Open run';
-    open.addEventListener('click', (e) => {
-      // stopPropagation: the card-header navigation listener and the #run-list
-      // delegate both sit above this node.
-      e.stopPropagation();
-      location.hash = `running/${r.runId}`;
-    });
-    foot.appendChild(open);
-  }
   const submit = document.createElement('button');
   submit.type = 'button';
   submit.className = 'btn-go';
@@ -5012,7 +4948,7 @@ function renderWorkflowBody(r, panel, pq) {
   const costUsd = Math.max(classifyRows.reduce((sum, s) => sum + (Number(s.costUsd) || 0), 0), Number(w.costUsd) || 0);
   const body = document.createElement('div');
   body.className = 'qbody';
-  const handle = renderAutoProposal(w, { doc: document, order: AUTO_PROPOSAL_ORDER_QPANEL, costUsd, rounds: w.round, onName: (v) => { wf.name = v; } });
+  const handle = renderAutoProposal(w, { doc: document, order: ['name', 'warnings'], costUsd, rounds: w.round, onName: (v) => { wf.name = v; } });
   wf.handle = handle;
   panel.__dispose = () => { handle.destroy(); wf.handle = null; };
   body.appendChild(handle.el);
@@ -5023,9 +4959,40 @@ function renderWorkflowBody(r, panel, pq) {
     note.append(b, document.createTextNode(`\u201c${r._autoRevise}\u201d`));
     handle.el.insertBefore(note, handle.parts.name);
   }
-  // ---- tunables table, between the match line and the meta line (mockup §D)
-  const table = tagLevel(buildTunablesTable(w, wf, handle), 'expert');   // accept-as-proposed is the simple path
-  handle.el.insertBefore(table, handle.parts.warnings || handle.parts.meta);
+  // The name row reads "Workflow: <name>" (the label is this host's; the shared body and the chat card keep the bare name).
+  const nameRowEl = handle.parts.name.querySelector('.ask-wfcard-namerow');
+  if (nameRowEl) { const lab = document.createElement('span'); lab.className = 'wf-namelabel'; lab.textContent = 'Workflow:'; nameRowEl.prepend(lab); }
+  // ---- the workflow preview: always visible, the whole thing opens a large pan/zoom popup
+  const agentCount = Object.keys(base).length;
+  const preview = document.createElement('button');
+  preview.type = 'button'; preview.className = 'wf-preview';
+  preview.setAttribute('aria-label', 'Open the workflow in a larger view');
+  preview.appendChild(handle.parts.graph);
+  const hint = document.createElement('span'); hint.className = 'wf-preview-hint'; hint.textContent = 'Enlarge';
+  preview.appendChild(hint);
+  preview.addEventListener('click', stopBubble((ev) => openWorkflowPopup(w, wf, handle, ev.currentTarget)));
+  handle.el.insertBefore(preview, handle.parts.warnings || null);
+  // ---- Customize agents, then Why this? — plain rows, no chips
+  const disclose = (title, nodes, { open = false } = {}) => {
+    const els = nodes.filter(Boolean); if (!els.length) return null;
+    const d = document.createElement('details'); d.className = 'wf-disc'; d.open = open;
+    const sm = document.createElement('summary'); sm.textContent = title; d.appendChild(sm);
+    const inner = document.createElement('div'); inner.className = 'wf-disc-body'; inner.append(...els); d.appendChild(inner);
+    return d;
+  };
+  const facts = document.createElement('dl'); facts.className = 'wf-facts';
+  const fact = (k, ...v) => { const dt = document.createElement('dt'); dt.textContent = k; const dd = document.createElement('dd'); dd.append(...v); facts.append(dt, dd); };
+  const looks = [w.taskKind, w.size, ...(w.signals || []).filter((x) => !/^fingerprint:/i.test(x) && !/cards? read$/i.test(x))].filter(Boolean);
+  if (looks.length) fact('Classified as', looks.join(' \u00b7 '));
+  fact('Saved as', handle.parts.match);
+  fact('Classifier cost', `\u2248 $${(Number(costUsd) || 0).toFixed(2)}${w.round > 1 ? ` \u00b7 ${w.round} rounds` : ''}`);
+  const table = buildTunablesTable(w, wf, handle);
+  const discs = [
+    tagLevel(disclose('Customize agents', [table], { open: agentCount > 1 }), 'expert'),   // accept-as-proposed is the simple path
+    disclose('Why this?', [facts]),
+  ].filter(Boolean);
+  const discBox = document.createElement('div'); discBox.className = 'wf-discs'; discBox.append(...discs);
+  handle.el.appendChild(discBox);
   // ---- revise box + foot
   const ta = document.createElement('textarea');
   ta.className = 'qfree qfree-area'; ta.rows = 3; ta.hidden = true;
@@ -5074,6 +5041,66 @@ function renderWorkflowBody(r, panel, pq) {
   handle.relayout();                                        // measure now that the body is attached (0 => 702 default)
 }
 
+const stopBubble = (fn) => (e) => { e.stopPropagation(); fn(e); };   // the run-list / run-detail delegates sit above the panel
+
+// The large workflow view: the same graph in monitor mode (drag to pan, ⌘/ctrl+scroll or the buttons to zoom).
+// Reads the tunables edited so far, so the chips match the table. Esc, the × or a click outside closes it.
+function openWorkflowPopup(w, wf, handle, opener) {
+  const m = w.manifest || { graph: { nodes: [], wires: [] } };
+  const bands = proposalBands(w, wf.nodes);
+  const ov = document.createElement('div');
+  ov.className = 'viewer-modal wf-pop'; ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-modal', 'true'); ov.setAttribute('aria-label', 'Workflow');
+  const card = document.createElement('div'); card.className = 'card wf-pop-card';
+  const head = document.createElement('div'); head.className = 'wf-pop-head';
+  const title = document.createElement('h2'); title.textContent = `Workflow: ${handle.getName() || 'untitled'}`;
+  const close = document.createElement('button'); close.type = 'button'; close.className = 'btn btn-ghost btn-mini'; close.textContent = 'Close';
+  head.append(title, close);
+  const canvas = document.createElement('div'); canvas.className = 'wf-pop-canvas gv-host';
+  const foot = document.createElement('div'); foot.className = 'wf-pop-hint'; foot.textContent = 'drag to pan \u00b7 \u2318/ctrl+scroll to zoom';
+  card.append(head, canvas, foot); ov.appendChild(card);
+  document.body.appendChild(ov);
+
+  const view = createGraphView(canvas, {
+    doc: document, mode: 'monitor', portsFn: manifestPortsFn(m), agents: manifestAgents(m), zoomMin: 0.3, zoomMax: 2.5,
+    scale: FLOW_SCALE, layout: 'flow', band: (n) => bands[n.id] || null, order: Array.isArray(w.order) && w.order.length ? [...w.order] : null,
+  });
+  view.render(manifestTemplate(m), {});
+  const nav = document.createElement('div'); nav.className = 'gv-nav';
+  const btn = (label, glyph, fn) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'gv-nav-btn'; b.setAttribute('aria-label', label); b.title = label; b.textContent = glyph; b.addEventListener('click', fn); nav.appendChild(b); };
+  const zoom = (mult) => view.zoomAbout(view.getTransform().z * mult, canvas.clientWidth / 2, canvas.clientHeight / 2);
+  // Centre the graph and let it grow to fill the popup (the shared fit never magnifies past 1x; here the point is a large view).
+  const fit = () => {
+    const r = { width: canvas.clientWidth, height: canvas.clientHeight };   // the canvas box (the stage's own height follows the rows)
+    if (!(r.width > 0 && r.height > 0)) return;
+    const lay = view.relayout(r.width / 1.4);     // lay the rows out for a world 1.4x narrower, then scale up to fill
+    if (!lay) return;
+    // the card boxes come straight from the flow layout (world units), not from the DOM
+    let x0 = Infinity; let y0 = Infinity; let x1 = -Infinity; let y1 = -Infinity;
+    for (const p of Object.values(lay.pos)) {
+      x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x + lay.cardW); y1 = Math.max(y1, p.y + p.h + lay.bottomBand);
+    }
+    if (!(x1 > x0)) return;
+    const pad = 32; const bw = x1 - x0 + 2 * pad; const bh = y1 - y0 + 2 * pad;
+    const z = Math.max(0.3, Math.min(r.width / bw, r.height / bh, 2.5));
+    view.setTransform({ x: (r.width - (x1 - x0) * z) / 2 - x0 * z, y: (r.height - (y1 - y0) * z) / 2 - y0 * z, z });
+  };
+  btn('Zoom in', '+', () => zoom(1.2)); btn('Zoom out', '\u2212', () => zoom(1 / 1.2)); btn('Fit workflow to view', '\u25a1', fit);
+  canvas.appendChild(nav);
+  const pan = view.createNav({});
+  fit();
+
+  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); shut(); } };
+  function shut() {
+    document.removeEventListener('keydown', onKey, true);
+    pan.destroy(); view.destroy(); ov.remove();
+    if (opener && opener.isConnected) opener.focus();
+  }
+  document.addEventListener('keydown', onKey, true);
+  close.addEventListener('click', shut);
+  ov.addEventListener('click', (e) => { if (e.target === ov) shut(); });
+  close.focus();
+}
+
 // The tunables table: one row per dispatch-ordered agent. Columns 1fr · 160 · 160 · 90 · 100.
 function buildTunablesTable(w, wf, handle) {
   const models = Array.isArray(w.models) ? w.models : [];
@@ -5097,7 +5124,8 @@ function buildTunablesTable(w, wf, handle) {
     if (locked) { cb.disabled = true; cb.dataset.locked = '1'; }
     cb.addEventListener('change', () => onChange(cb.checked));
     const knob = document.createElement('span'); knob.className = 'switch switch-sm';
-    l.append(cb, knob); return l;
+    const t = document.createElement('span'); t.className = 'qtune-sw-t'; t.textContent = label.replace(/ for .*$/, '');
+    l.append(cb, knob, t); return l;
   };
   const lockEffort = (s, locked) => { s.disabled = locked; if (locked) s.dataset.locked = '1'; else delete s.dataset.locked; };
   const effortsOf = (mid) => models.find((m) => m.id === mid)?.efforts || [];
@@ -5106,7 +5134,7 @@ function buildTunablesTable(w, wf, handle) {
   // "default" would lie. A node whose effort is unset shows a DISABLED `default` placeholder.
   const fillEffort = (s, mid, value) => {
     const list = effortsOf(mid);
-    const kids = list.map((e) => option(e, e));
+    const kids = mid ? list.map((e) => option(e, e)) : [option('', 'default')];
     const picked = mid && list.includes(value) ? value : '';
     if (mid && !picked) { const ph = option('', 'default'); ph.disabled = true; kids.unshift(ph); }
     s.replaceChildren(...kids); s.value = picked;              // '' selects the placeholder
@@ -5130,9 +5158,10 @@ function buildTunablesTable(w, wf, handle) {
       set(id, { model: mid, effort: mid ? keep : '' });
     });
     effort.s.addEventListener('change', () => set(id, { effort: effort.s.value }));
+    tdModel.dataset.label = 'Model'; tdEffort.dataset.label = 'Effort';
     tdModel.appendChild(model.wrap); tdEffort.appendChild(effort.wrap); tr.append(tdModel, tdEffort);
-    const tdFan = document.createElement('td'); tdFan.appendChild(sw(`Fan-out for ${name.textContent}`, n.fanOut, !n.canFanOut, (on) => set(id, { fanOut: on }))); tr.appendChild(tdFan);
-    const tdQ = document.createElement('td');
+    const tdFan = document.createElement('td'); tdFan.className = 'qtune-sw-cell'; tdFan.appendChild(sw(`Fan-out for ${name.textContent}`, n.fanOut, !n.canFanOut, (on) => set(id, { fanOut: on }))); tr.appendChild(tdFan);
+    const tdQ = document.createElement('td'); tdQ.className = 'qtune-sw-cell';
     if (n.asksQuestions) tdQ.appendChild(sw(`Questions for ${name.textContent}`, n.askQuestions, n.questionsLocked, (on) => set(id, { askQuestions: on })));
     else tdQ.textContent = '\u2014';
     tr.appendChild(tdQ);
@@ -5185,15 +5214,6 @@ function askFormHost(r, panel, ask) {
   const foot = document.createElement('div');
   foot.className = 'qpanel-foot';
   foot.appendChild(answered);
-  // §4.3: the CARD's footer offers a way into the detail page; the detail's own omits it.
-  if (panel.closest && panel.closest('.run-card')) {
-    const open = document.createElement('button');
-    open.type = 'button';
-    open.className = 'qopen';
-    open.textContent = 'Open run';
-    open.addEventListener('click', (e) => { e.stopPropagation(); location.hash = `running/${r.runId}`; });
-    foot.appendChild(open);
-  }
   const submit = document.createElement('button');
   submit.type = 'button';
   submit.className = 'btn-go';
@@ -5355,14 +5375,10 @@ function isTerminalStatus(status) {
   return s === 'done' || s === 'error' || s === 'stopped' || s === 'aborted' || s === 'failed' || s === 'complete' || s === 'completed' || s === 'interrupted';
 }
 
-// Every mounted .qpanel for a run: the list card's, and the detail screen's when
-// it is open on this run. Both are in the DOM at once (the list screen sits
-// behind the detail), so busy-state and clearing must cover both or the card
-// keeps an enabled Submit while an answer is in flight from the detail.
+// Every mounted .qpanel for a run: the run page's, when it is open on this run (the list card
+// carries no panel; it only points at the run page).
 function qpanelsFor(r) {
   const out = [];
-  const card = r.el && r.el.querySelector('.qpanel');
-  if (card) out.push(card);
   const screen = runDetailState.screen;
   if (screen && runDetailState.runId === r.runId) {
     const detail = screen.querySelector('.qpanel');
@@ -5441,11 +5457,7 @@ function finishRun(r, status) {
   r.finishedAtMs = Date.now();
 
   // Clear the card's qpanel + attention before it drops out.
-  if (r.el) {
-    clearQpanel(r);
-    // Paint the terminal stepper one last time while the card still exists.
-    paintStepper(r);
-  }
+  if (r.el) clearQpanel(r);
 
   // A paused run is parked in Running (resumable), NOT a finished result: it does
   // NOT linger (no green/red "seen me" marker, never acknowledged-to-drop), keeps
@@ -14596,97 +14608,6 @@ if (runListEl) {
       if (runId) resumeRunFromCard(runId, resumeBtn);
       return;
     }
-    // Cost-banner actions. This handler is a plain sync arrow — the override
-    // confirm is async, so fire-and-forget it exactly like .btn-resume above.
-    const overrideBtn = e.target.closest && e.target.closest('.cb-override');
-    if (overrideBtn) {
-      const runId = overrideBtn.closest('.run-card')?.dataset.runId;
-      if (runId) confirmCostOverride(runId, overrideBtn);
-      return;
-    }
-    if (e.target.closest && e.target.closest('.cb-settings')) { location.hash = 'settings/runs'; return; }
-    // Team-cap banner (team-policy design board 9): continue past, or open the page.
-    const pastBtn = e.target.closest && e.target.closest('.cb-past-team-cap');
-    if (pastBtn) {
-      const runId = pastBtn.closest('.run-card')?.dataset.runId;
-      if (runId) confirmPastTeamCap(runId, pastBtn);
-      return;
-    }
-    if (e.target.closest && e.target.closest('.cb-policy-open')) { location.hash = 'team-policy'; return; }
-    const sw = e.target.closest && e.target.closest('.switch.autoscroll');
-    if (sw) {
-      const card = sw.closest('.run-card');
-      const r = card && runs.get(card.dataset.runId);
-      if (r) setAutoscroll(r, r.autoscroll === false);   // flip effective state
-      return;
-    }
-
-    // qpanel actions. Resolve the run per-card via the enclosing .run-card so
-    // delegation works for any dynamically-built card.
-    const qbtn = e.target.closest && e.target.closest('.qpanel .btn-go, .qpanel .gate-continue, .qpanel .gate-another, .qpanel .recovery-retry, .qpanel .recovery-pause, .qpanel .recovery-abort');
-    if (qbtn) {
-      if (qbtn.closest('.qpanel-workflow')) return;        // workflow buttons bind directly (renderWorkflowBody)
-      const card = qbtn.closest('.run-card');
-      const runId = card && card.dataset.runId;
-      const r = runId && runs.get(runId);
-      if (!r) return;
-      if (qbtn.classList.contains('gate-continue')) postAnswer(r, { decision: 'continue' });
-      else if (qbtn.classList.contains('gate-another')) postAnswer(r, { decision: 'another' });
-      else if (qbtn.classList.contains('recovery-retry')) postAnswer(r, { decision: 'retry' });
-      else if (qbtn.classList.contains('recovery-pause')) postAnswer(r, { decision: 'pause' });
-      else if (qbtn.classList.contains('recovery-abort')) postAnswer(r, { decision: 'abort' });
-      else submitAnswer(r, qbtn.closest('.qpanel'));
-    }
-  });
-
-  // a11y: the autoscroll .switch has role="switch" + tabindex="0" but only the
-  // click path toggled it. Mirror that toggle for Space/Enter via a delegated
-  // keydown (scoped through closest('.run-card') so it can't fire elsewhere).
-  runListEl.addEventListener('keydown', (e) => {
-    if (e.key !== ' ' && e.key !== 'Enter') return;
-    const sw = e.target.closest && e.target.closest('.switch.autoscroll');
-    if (!sw || !sw.closest('.run-card')) return;
-    e.preventDefault();
-    const card = sw.closest('.run-card');
-    const r = card && runs.get(card.dataset.runId);
-    if (r) setAutoscroll(r, r.autoscroll === false);
-  });
-
-  // Log filter dropdowns (source/level/step/cycle). Delegated like the switch
-  // above; read them all so one change event leaves the whole filter consistent.
-  runListEl.addEventListener('change', (e) => {
-    const sel = e.target.closest && e.target.closest('select.log-f');
-    if (!sel) return;
-    const card = sel.closest('.run-card');
-    const r = card && runs.get(card.dataset.runId);
-    if (!r) return;
-    r.logFilter = readCardLogFilter(card, r);
-    repaintFilteredLog(r);
-  });
-
-  // Log search. Debounced: `input` fires per keystroke and each repaint rebuilds
-  // every visible line, so filtering on the raw event would rebuild the pane
-  // mid-word. The model keeps every line, so narrowing never loses history.
-  runListEl.addEventListener('input', (e) => {
-    const box = e.target.closest && e.target.closest('.log-search');
-    if (!box) return;
-    const card = box.closest('.run-card');
-    const r = card && runs.get(card.dataset.runId);
-    if (!r) return;
-    scheduleLogSearch(r, () => {
-      r.logFilter = readCardLogFilter(card, r);
-      repaintFilteredLog(r);
-    });
-  });
-
-  // Copy the VISIBLE log lines (what the filters and search left on screen).
-  runListEl.addEventListener('click', (e) => {
-    const btn = e.target.closest && e.target.closest('.log-copy');
-    if (!btn) return;
-    const card = btn.closest('.run-card');
-    const r = card && runs.get(card.dataset.runId);
-    if (!r) return;
-    copyLogToClipboard(btn, r.logLines.filter(compileLogFilter(r.logFilter)));
   });
 }
 
@@ -14778,16 +14699,10 @@ function openStopModal(runId) {
   document.addEventListener('keydown', onKey);
 }
 
-// Density toggle. Delegated on the group so both segments share one listener.
-$('.run-density')?.addEventListener('click', (e) => {
-  const segEl = e.target.closest && e.target.closest('.rc-dseg');
-  if (segEl) setRunDensity(segEl.dataset.density);
-});
-
-// The ONE source of the filter bar's markup is the run-card template; History
-// clones it so the two bars can never drift (control order, classes, a11y).
+// The ONE source of the filter bar's markup is #log-bar-tpl; the run page's Logs tab and History
+// clone it so the two bars can never drift (control order, classes, a11y).
 function buildLogFilterBar() {
-  return document.getElementById('run-card-tpl').content.querySelector('.log-filters').cloneNode(true);
+  return document.getElementById('log-bar-tpl').content.querySelector('.log-filters').cloneNode(true);
 }
 
 // The ONE filter reader for both bars. The search box is read by PRESENCE, not
@@ -14817,12 +14732,6 @@ function readLogFilterFrom(root, prevSearch = '') {
 function scheduleLogSearch(holder, fn) {
   clearTimeout(holder._logSearchTimer);
   holder._logSearchTimer = setTimeout(fn, LOG_SEARCH_DEBOUNCE_MS);
-}
-
-// Read a run card's whole log filter out of the DOM, carrying the run's stored
-// search term as the fallback.
-function readCardLogFilter(card, r) {
-  return readLogFilterFrom(card, r.logFilter.search || '');
 }
 
 // Statistics: range segmented control + chart tooltip. Both are delegated, so
@@ -20988,35 +20897,18 @@ function rdRepaintLog(sec, r) {
 }
 
 // (Re)fill the detail's four dropdowns and memoize the facet key set ON THE
-// SECTION. r._logFacetKeys belongs to the card's maybePaintLogFilters and is
-// already up to date by the time a log frame reaches the detail, so sharing it
-// would leave this bar permanently stale — History's build-once facet fill in
-// loadLiveLogs is the same bug from the other direction.
+// SECTION (History's build-once facet fill in loadLiveLogs is the same idea).
 // Returns paintLogFilters' repaint flag (true when it repainted the pane itself).
 function rdPaintLogFilters(sec, r) {
   const repainted = paintLogFilters(r, sec);
   sec._logFacetKeys = r._logFacetKeys;
-  // paintLogFilters' reconcile branch calls repaintFilteredLog(r, sec), which has
-  // TWO cross-pane side effects, because that helper honours `root` for the
-  // wipe/rebuild but not for anything else:
-  //   1. it parks its cycle cursor on the RUN (`r._cycleState`) — which is
-  //      the CARD's cursor. Re-seat the section's own from it, then re-seat the
-  //      card's by repainting the card, or the card's next incremental append
-  //      compares against the DETAIL's value and drops or duplicates a
-  //      `Cycle N` separator.
-  //   2. it ends with `maybeAutoscrollLog(r)`, which pins `r.el`'s pane — never
-  //      `sec`'s. So the detail pane it just rewrote is left un-pinned while the
-  //      card jumps to the bottom.
-  // Both are cheap to undo here, and only on the (rare) reconcile path.
-  if (repainted) {
-    sec._cycleState = r._cycleState ?? null;
-    if (r.el) repaintFilteredLog(r);   // re-render the CARD and re-seat its cursor
-    rdAutoscrollLog(sec, r);           // …then pin the pane that actually changed
-  }
+  // paintLogFilters' reconcile branch repaints `sec`'s pane through repaintFilteredLog(r, sec), which parks its
+  // cycle cursor on the run; re-seat this section's own from it.
+  if (repainted) sec._cycleState = r._cycleState ?? null;
   return repainted;
 }
 
-// Cheap per-line facet check (twin of maybePaintLogFilters): rebuild the
+// Cheap per-line facet check: rebuild the
 // dropdowns only when THIS record introduces a value they do not offer yet, so a
 // 4000-line model is not re-scanned per arriving line.
 function rdMaybePaintLogFilters(sec, r, rec) {
@@ -21030,26 +20922,13 @@ function rdMaybePaintLogFilters(sec, r, rec) {
 
 // The four control listeners, bound once per section element (see buildRdLogs).
 function rdWireLogControls(sec, r) {
-  // The execution chip on THIS bar: same two rules as the card's, same setter
-  // (applyRunLogFilter repaints both bars), bound on the bar so it fires before
+  // The execution chip on THIS bar (applyRunLogFilter is the setter), bound on the bar so it fires before
   // the section-level change handler below re-reads the (then consistent) DOM.
   wireExecChip(sec.querySelector('.log-filters'), { read: () => r.logFilter, write: (patch) => applyRunLogFilter(r, patch) });
-  // The filter OBJECT is shared (it is `r.logFilter`), but the two DOMs are not:
-  // the card's four selects and its own pane still show the pre-change state until
-  // something repaints them. Mirror the change onto the card so hopping back to
-  // the list does not show a pane filtered by a control that reads "all sources".
-  const syncCard = () => {
-    if (!r.el) return;
-    // paintLogFilters re-selects the card's four dropdowns and RETURNS true when
-    // it already repainted the card's pane itself; only then is the explicit
-    // repaint redundant.
-    if (!paintLogFilters(r, r.el)) repaintFilteredLog(r);
-  };
   sec.addEventListener('change', (e) => {
     if (!(e.target.closest && e.target.closest('select.log-f'))) return;
     r.logFilter = readLogFilterFrom(sec, r.logFilter.search || '');
     rdRepaintLog(sec, r);
-    syncCard();
   });
   // Debounced like the card's: `input` fires per keystroke and each repaint
   // rebuilds every visible line.
@@ -21058,11 +20937,10 @@ function rdWireLogControls(sec, r) {
     scheduleLogSearch(sec, () => {
       r.logFilter = readLogFilterFrom(sec, r.logFilter.search || '');
       rdRepaintLog(sec, r);
-      syncCard();
     });
   });
   const flip = () => {
-    setAutoscroll(r, r.autoscroll === false);   // model + the card's switch
+    setAutoscroll(r, r.autoscroll === false);   // the model
     syncAutoscrollSwitch(r, sec);               // …and this screen's switch
     rdAutoscrollLog(sec, r);
   };
@@ -21092,13 +20970,13 @@ function buildRdLogs(sec, ctx) {
   const label = document.createElement('span');
   label.className = 'll-label';
   label.textContent = 'Live log';
-  // D9: the ONE filter-bar markup, cloned from #run-card-tpl, so the detail's
-  // controls can never drift from the card's.
+  // D9: the ONE filter-bar markup, cloned from #log-bar-tpl, so the run page's and History's
+  // controls can never drift.
   const bar = buildLogFilterBar();
   // Same single-source rule for the switch: clone it rather than re-typing the
   // role/aria-checked/tabindex triple that makes it operable.
-  const sw = document.getElementById('run-card-tpl').content
-    .querySelector('.run-log-head .switch-row').cloneNode(true);
+  const sw = document.getElementById('log-bar-tpl').content
+    .querySelector('.switch-row').cloneNode(true);
   head.append(label, bar, sw);
   const box = document.createElement('div');
   box.className = 'log';
@@ -22043,78 +21921,6 @@ function pipelineTabRuns() {
     .sort(cmpTabRuns);
 }
 
-// ── Running list density (design §4.1, D3) ──────────────────────────────────
-// 'detailed' is the default and the choice persists. Read once at boot; the
-// toggle writes it and repaints the list.
-const RUN_DENSITY_KEY = 'worca-cc.running.density';
-const RUN_DENSITIES = ['compact', 'detailed'];
-
-function readRunDensity() {
-  try {
-    const v = localStorage.getItem(RUN_DENSITY_KEY);
-    return RUN_DENSITIES.includes(v) ? v : 'detailed';
-  } catch { return 'detailed'; }        // private mode / storage disabled
-}
-
-let runDensity = readRunDensity();
-
-function renderDensityToggle() {
-  for (const b of $$('.run-density .rc-dseg')) {
-    b.setAttribute('aria-pressed', String(b.dataset.density === runDensity));
-  }
-}
-
-// Density hides one body with `display:none`, and a hidden scroller's
-// scrollTop/scrollLeft are reset to 0 by the browser. Stash them on the card
-// across the flip and write them back once the body is visible again — the same
-// save→swap→restore technique as insertCardPreservingScroll.
-// The `if (…scrollTop)` guards are load-bearing: reading a HIDDEN scroller
-// yields 0, which must not overwrite the stashed value.
-function stashCardScroll(cardEl) {
-  const logEl = cardEl.querySelector('.log');
-  const flowEl = cardEl.querySelector('.run-flow-wrap');
-  if (logEl && logEl.scrollTop) cardEl.dataset.logTop = String(logEl.scrollTop);
-  if (flowEl && flowEl.scrollLeft) cardEl.dataset.flowLeft = String(flowEl.scrollLeft);
-}
-function applyCardScroll(cardEl, r) {
-  // ONLY on the leg that makes the detailed body visible again. Both scrollers
-  // live inside `.rc-detailed`, which compact density gives `display:none` — an
-  // element with no scrolling box, where the writes below are a spec no-op and
-  // the `delete`s would throw the stashed position away for good. Sitting the
-  // flip out leaves stashCardScroll's truthiness guards to do the rest: the next
-  // stash reads the hidden (0) scroller and correctly declines to overwrite.
-  if (runDensity !== 'detailed') return;
-  const logEl = cardEl.querySelector('.log');
-  const flowEl = cardEl.querySelector('.run-flow-wrap');
-  const top = Number(cardEl.dataset.logTop || 0);
-  const left = Number(cardEl.dataset.flowLeft || 0);
-  // Restore the LOG only when auto-scroll is OFF. `renderRunningView` above ran
-  // `paintRunList` -> `maybeAutoscrollLog(r)`, which schedules a pin to the bottom
-  // for an auto-scrolling pane; writing a stale offset back on top of that would
-  // yank the user off the live tail on every density flip. The graph's horizontal
-  // offset has no such owner, so it is always restored.
-  if (logEl && top && r && r.autoscroll === false) logEl.scrollTop = top;
-  if (flowEl && left) flowEl.scrollLeft = left;
-  delete cardEl.dataset.logTop;      // one-shot: a later flip must not re-apply
-  delete cardEl.dataset.flowLeft;    // an offset the user has since scrolled away from
-}
-
-function setRunDensity(v) {
-  const next = RUN_DENSITIES.includes(v) ? v : 'detailed';
-  if (next === runDensity) { renderDensityToggle(); return; }
-  runDensity = next;
-  try { localStorage.setItem(RUN_DENSITY_KEY, next); } catch { /* private mode */ }
-  renderDensityToggle();
-  const list = $('#run-list');
-  const cards = list ? [...list.querySelectorAll('.run-card')] : [];
-  cards.forEach(stashCardScroll);
-  renderRunningView();                  // repaints in place; r.el nodes are reused
-  // Pass the run so applyCardScroll can tell an auto-scrolling pane (which
-  // renderRunningView just pinned to the bottom) from a user-parked one.
-  // `runs.get`, not `getRun` — the latter exists only as an inline arrow inside
-  // the `window.__np` literal, not as a module-scope function.
-  cards.forEach((c) => applyCardScroll(c, runs.get(c.dataset.runId)));
-}
 
 // Drives the Overview #run-list. PIPELINES ONLY (design D7): workspace scans and
 // agent-generation jobs are wizard-local progress, not runs the user can open, so
@@ -22428,7 +22234,7 @@ function renderRunMeta(r, root = r.el) {
   if (prog) {
     const d = isGraphRun(r) ? runDecorFor(r).progress : null;
     prog.hidden = !d || !d.total;        // a deciding Auto run has 0 agent nodes: no "0/0" (A33)
-    if (d) prog.querySelector('.rc-prog-text').textContent = `${d.done}/${d.total}`;
+    if (d) { const step = runStepLabel(r).name; prog.querySelector('.rc-prog-text').textContent = `${d.done}/${d.total}${step ? ` \u00b7 ${step}` : ''}`; }
   }
 
   const branchEl = root.querySelector('.rc-branch');
@@ -22446,7 +22252,6 @@ function buildRunCard(r) {
   const tpl = $('#run-card-tpl');
   const node = tpl.content.firstElementChild.cloneNode(true);
   node.dataset.runId = r.runId;
-  node.dataset.density = runDensity;
 
   const titleEl = node.querySelector('.run-title');
   if (titleEl) {
@@ -22472,12 +22277,9 @@ function buildRunCard(r) {
     }
   });
   node.querySelector('.rc-open').addEventListener('click', (e) => { e.stopPropagation(); go(); });
+  // The waiting strip opens the run page AND lands on its question (armed for the next few seconds).
+  node.querySelector('.rc-wait')?.addEventListener('click', (e) => { e.stopPropagation(); wantQuestionsFor = { runId: r.runId, at: Date.now() }; go(); });
   node.querySelector('.rc-after')?.addEventListener('click', (e) => { e.stopPropagation(); if (r.pipelineId) location.hash = `#new/after/${r.pipelineId}`; });
-  // D5: on a v2 run the card's graph is scenery (the world is pointer-events:none),
-  // so the WRAP takes the click and opens the detail. Decided at CLICK time — the
-  // manifest may arrive after the card is built; a v1 card's graph stays inert.
-  const graphWrap = node.querySelector('.rc-detailed .run-flow-wrap');
-  if (graphWrap) graphWrap.addEventListener('click', () => { if (isGraphRun(r)) go(); });
   // NB: .btn-pause/.btn-resume/.btn-stop deliberately do NOT stopPropagation —
   // they are driven by the DELEGATED #run-list listener and would go dead. The
   // closest('button') bail-out above is what keeps them from navigating.
@@ -22490,37 +22292,6 @@ function buildRunCard(r) {
     const name = node.querySelector('.rc-branch-name').textContent || '';
     if (name) copyBranchToClipboard(copyBtn, name);
   });
-
-  // Hydrate the log from any events that arrived before the card existed,
-  // through the run's current filter, and offer the facets seen so far.
-  // paintLogFilters may repaint once more if a stale selection fell back to
-  // "all" — cheap, and it keeps the pane and the dropdowns consistent.
-  // The clone's search box is born empty; mirror the run's stored term so the
-  // visible bar matches the filter the repaint below actually applies.
-  const searchBox = node.querySelector('.log-search');
-  if (searchBox) searchBox.value = r.logFilter.search || '';
-  repaintFilteredLog(r, node);
-  paintLogFilters(r, node);
-  // The execution chip's rules are bound on the CARD's bar, not on the delegated
-  // #run-list listeners: the chip is card-local markup, and the card exists (and
-  // is exercised) before it is ever appended to the list. applyRunLogFilter
-  // repaints this bar AND the open Running-detail bar (shared filter object).
-  wireExecChip(node.querySelector('.log-filters'), { read: () => r.logFilter, write: (patch) => applyRunLogFilter(r, patch) });
-
-  // The switch is cloned ON from the template; mirror the run's persisted choice so
-  // a rebuild (finish/resume/reconcile) never silently re-enables auto-scroll.
-  // Operate on `node` — in the normal path r.el is assigned by the caller
-  // (paintRunList:7744), not here.
-  syncAutoscrollSwitch(r, node);
-
-  // A2: a card built from a hello-seeded pending question (mid-pause reload, the
-  // original `question` event may be past the replay buffer) must render the
-  // panel immediately from r.pendingQuestion — independent of any replayed
-  // event. r.el must be set before renderQpanel reads it.
-  if (r.pendingQuestion != null) {
-    r.el = node;
-    renderQpanel(r);
-  }
 
   return node;
 }
@@ -22815,14 +22586,11 @@ function destroyGraphMounts(root) {
 
 /** The ONE writer of a run's log filter from outside its own bar (footer rows;
  *  P6b's node/execution axes). Assign, then repaint every pane that shows it:
- *  the card, and — when THIS run's detail is open with its Logs tab built — the
- *  detail through rdPaintLogFilters + rdRepaintLog (NOT repaintFilteredLog: that
- *  helper parks the cycle cursor on r._cycleState and pins r.el's pane). */
+ *  the open run page's Logs tab, through rdPaintLogFilters + rdRepaintLog. */
 function applyRunLogFilter(r, patch) {
   if (!r || !r.logFilter) return;
   Object.assign(r.logFilter, patch || {});
   // paintLogFilters returns true when its reconcile branch already repainted the pane.
-  if (r.el && !paintLogFilters(r, r.el)) repaintFilteredLog(r);
   const screen = runDetailState.runId === r.runId ? runDetailState.screen : null;
   const sec = screen && screen.querySelector('.rd-sec-logs');
   if (sec) { rdPaintLogFilters(sec, r); rdRepaintLog(sec, r); }
@@ -22867,8 +22635,7 @@ function focusLogExecution(ctx, executionId, nodeId) {
 function focusQuestionPanel(ctx) {
   const r = ctx && ctx.run;
   const screen = runDetailState.screen;
-  const panel = (screen && screen.querySelector('.rd-questions'))
-    || (r && r.el && r.el.querySelector('.qpanel'));
+  const panel = screen && screen.querySelector('.rd-questions');
   if (!panel) return;
   // The question lives on the glance: a gate pip clicked in Details › Workflow goes back to it.
   if (screen && screen.dataset.mode === 'details' && screen.contains(panel)) {
@@ -22880,6 +22647,8 @@ function focusQuestionPanel(ctx) {
   const focusable = panel.querySelector('button, [tabindex]');
   if (focusable && typeof focusable.focus === 'function') focusable.focus();
 }
+
+let wantQuestionsFor = null;   // { runId, at }: set by the list card's waiting strip, consumed once the run page has its question
 
 // Bring the waiting question to the top of the view, its heading just under the sticky
 // bar (style.css: scroll-margin-top on .rd-ask-head), and put focus in the panel.
@@ -23479,16 +23248,6 @@ function buildHdArtifacts(sec, record, data) {
   loadPage(0);
 }
 
-function paintStepper(r) {
-  if (!r.el) return;
-  const host = r.el.querySelector('.run-flow');
-  if (!host) return;
-  // locked: compact density renders NO graph — but release the deciding placeholder
-  // first, or its orb keeps its RAF canvas alive behind a `display:none` card body.
-  if (isGraphRun(r) && r.el.dataset.density === 'compact') { dropAutoPlaceholder(host); return; }
-  paintGraphFor(host, r.stepper, isGraphRun(r) ? runDecorFor(r, 'static') : null, r.steps);
-}
-
 
 
 // Frontier step for the compact card row (design §4.3): DONE agent nodes over
@@ -23534,32 +23293,19 @@ function paintRunCard(r) {
   const afterBtn = r.el.querySelector('.rc-after');
   if (afterBtn) afterBtn.hidden = !r.pipelineId || !isPipelineRun(r);
 
-  // Question-count pill in the action cluster (replaces the foot chip's
-  // "<phase> paused · N questions" copy).
-  const qpill = r.el.querySelector('.rc-qpill');
-  if (qpill) {
+  // The waiting strip: a run blocked on the user (or parked by a cost/error pause) says so in words and opens the run page.
+  const waitEl = r.el.querySelector('.rc-wait');
+  if (waitEl) {
     const pq = r.pendingQuestion;
-    const n = pq != null ? questionCount(pq) : 0;
-    qpill.hidden = n === 0;
-    qpill.textContent = !n ? '' : pq.kind === 'workflow' ? 'proposal' : `${n} question${n === 1 ? '' : 's'}`;
+    const why = isPaused(r) && typeof r.pauseReason === 'string' ? r.pauseReason : '';
+    const text = pq != null ? askHeading(r, pq)
+      : why.startsWith('cost_') ? 'Paused \u00b7 cost limit reached'
+        : (why === 'error' || why === 'recoverable') ? `Paused \u00b7 ${why}` : '';
+    waitEl.hidden = !text;
+    waitEl.querySelector('.rc-wait-text').textContent = text;
+    waitEl.classList.toggle('is-ask', pq != null);
   }
 
-  // Density: the root attribute selects which body the stylesheet shows.
-  r.el.dataset.density = runDensity;
-
-  const compact = r.el.querySelector('.rc-compact');
-  if (compact) {
-    const { n, m, name, model } = runStepLabel(r);
-    const chip = compact.querySelector('.rc-step-chip');
-    chip.textContent = isGraphRun(r) ? `${n}/${m} done` : `STEP ${n}/${m}`;
-    chip.className = `rc-step-chip mono st-${runStatusMeta(r).family}`;
-    compact.querySelector('.rc-step-name').textContent = name;
-    const modelEl = compact.querySelector('.rc-step-model');
-    modelEl.textContent = model;
-    modelEl.hidden = !model;
-  }
-
-  paintStepper(r);
   const titleEl = r.el.querySelector('.run-title');
   if (titleEl && r.title && titleEl.textContent !== r.title) titleEl.textContent = r.title;
   const timeEl = r.el.querySelector('.run-time');
@@ -23570,27 +23316,6 @@ function paintRunCard(r) {
     totalEl.title = estTitle(r.totalCostUsd || 0);
   }
   r.el.classList.toggle('attention', r.pendingQuestion != null);
-
-  // Cost-pause banner: rebuilt from the current budget snapshot on every paint so
-  // a raised limit / window reset is reflected without a card rebuild.
-  const bannerEl = r.el.querySelector('.cost-banner');
-  if (bannerEl) {
-    const costPaused = isPaused(r) && typeof r.pauseReason === 'string'
-      && r.pauseReason.startsWith('cost_');
-    if (costPaused) {
-      const fresh = renderCostPauseBanner(
-        { pauseReason: r.pauseReason, pauseDetail: r.pauseDetail, pipelineId: r.pipelineId, totalCostUsd: r.totalCostUsd },
-        { budget: budgetState.budget || {},
-          fmt: { usd: fmtUsd, usd4: fmtUsd4, duration: fmtDuration, estTitle } });
-      bannerEl.replaceChildren(...fresh.childNodes);
-      bannerEl.className = fresh.className;
-      bannerEl.hidden = false;
-    } else {
-      bannerEl.hidden = true;
-      bannerEl.className = 'cost-banner';
-      bannerEl.replaceChildren();
-    }
-  }
 
   // Paused → swap Pause for Resume (Stop stays, to discard the paused run).
   const paused = isPaused(r);
@@ -23639,7 +23364,6 @@ function questionCount(pq) {
 }
 
 function renderRunningView({ skipDetail = false } = {}) {
-  renderDensityToggle();
   // Painted for BOTH branches: the banner is list chrome living OUTSIDE #run-list,
   // so skipping it on the focus path would leave a resolved "waiting on your
   // answers" line on screen.
@@ -23662,21 +23386,6 @@ function renderRunningView({ skipDetail = false } = {}) {
   if (helloSeeded && view === 'running' && param === runDetailState.runId) location.hash = 'running';
 }
 
-// Attach/move one card without losing user scroll state. Re-inserting an
-// attached node is spec'd as remove+insert, which zeroes every scrollable
-// descendant (.log scrollTop, .run-flow-wrap scrollLeft). Save → insert →
-// write back synchronously (before paint), same technique as the graph
-// renderer's scrollLeft preservation across its structural rebuild.
-function insertCardPreservingScroll(list, el, before) {
-  const logEl = el.querySelector('.log');
-  const flowWrap = el.querySelector('.run-flow-wrap');
-  const savedTop = logEl ? logEl.scrollTop : 0;
-  const savedLeft = flowWrap ? flowWrap.scrollLeft : 0;
-  list.insertBefore(el, before || null);
-  if (logEl && savedTop) logEl.scrollTop = savedTop;
-  if (flowWrap && savedLeft) flowWrap.scrollLeft = savedLeft;
-}
-
 // Shared #run-list reconcile. Builds/reuses one card per run, orders to match,
 // removes stale cards. Tolerates r.el === null (finishRun evicts non-lingerers).
 // buildRunCard RETURNS the node — assign its return to r.el (it self-assigns
@@ -23696,13 +23405,9 @@ function paintRunList(list, rlist, emptyMsg) {
     if (!r.el || r.el.dataset.runId !== r.runId) r.el = buildRunCard(r);
     const inPlace = r.el.parentNode === list && r.el.previousElementSibling === prev;
     if (!inPlace) {
-      insertCardPreservingScroll(list, r.el, prev ? prev.nextSibling : list.firstChild);
+      list.insertBefore(r.el, prev ? prev.nextSibling : list.firstChild);
     }
     paintRunCard(r);
-    // Pin to bottom when auto-scroll is ON (no-op when OFF). Idempotent for
-    // in-place cards; covers fresh hydration + real moves, where a detached-node
-    // scrollTop set earlier was lost (scrollHeight≈0 off-DOM).
-    maybeAutoscrollLog(r);
     prev = r.el;
   }
   [...list.children].forEach((c) => {
@@ -24522,7 +24227,7 @@ function askHeading(r, pq) {
   const who = pq.nodeId ? nodeLabel(r.stepper, pq.nodeId) : '';
   const n = Array.isArray(pq.questions) ? pq.questions.length : (Array.isArray(pq.issues) ? pq.issues.length : 1);
   switch (pq.kind) {
-    case 'workflow': return 'Pick a workflow';
+    case 'workflow': return 'Review the workflow';
     case 'form': return pq.title ? String(pq.title) : (who ? `${who} needs your input` : 'Your input is needed');
     case 'gate': return who ? `${who} needs a decision` : 'A decision is needed';
     case 'recovery': return who ? `${who} failed` : 'A step failed';
@@ -24577,6 +24282,11 @@ function paintRdQuestions(screen, r) {
     // rebuild for the life of the run and defeating the identity guard. A
     // re-asked question still rebuilds, because `'' !== 'q1'`.
     panel.dataset.qid = key || '';             // the node survives innerHTML replacement
+    if (pq && wantQuestionsFor && wantQuestionsFor.runId === r.runId) {
+      const fresh = Date.now() - wantQuestionsFor.at < 4000;
+      wantQuestionsFor = null;
+      if (fresh) requestAnimationFrame(() => scrollToQuestions(screen));   // after the panel's entry layout
+    }
     // Busy state lives in the DOM, and setPanelBusy only ever covered the panels
     // mounted at the instant it ran. postAnswer KEEPS pendingQuestion on a 200
     // (resume is confirmed by a later frame), so a detail opened mid-answer lands
