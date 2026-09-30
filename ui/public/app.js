@@ -11220,6 +11220,7 @@ async function loadSettings() {
     paintDebugSpawnSettings(data);
     await paintTitleModelSettings(data);
     await paintAutoModelSettings(data);
+    await paintPrDescModelSettings(data);
     await paintWorkspaceScanModelsSettings(data);
     paintBudgetReadout();
     paintTeamCapsReadout();                 // team policy (design board 7): each home's caps, read-only
@@ -11964,6 +11965,42 @@ document.getElementById('autoModelSave')?.addEventListener('click', () => {
 document.getElementById('autoModelReset')?.addEventListener('click', () => postAutoModel({ autoWorkflowModel: '' }));
 document.getElementById('autoModel')?.addEventListener('change', () => { const sel = document.getElementById('autoModel'); const b = document.getElementById('autoModelTest'); if (b) b.disabled = !sel.value || sel.options[sel.selectedIndex]?.disabled; });
 document.getElementById('autoModelTest')?.addEventListener('click', () => testModelFromSettings('autoModel', 'autoModelTest', setAutoModelMsg));
+
+// ---- PR description model: the model behind the "Ship it?" modal's Generate with AI.
+// The Auto workflow card's recipe verbatim (buildAutoModelOptions, the server-decided
+// staleness, postSettingsCard), minus the env override that card has.
+function setPrDescModelMsg(text, kind) { setHintMsg('prDescModelMsg', text, kind); }
+async function paintPrDescModelSettings(data) {
+  const sel = document.getElementById('prDescModel');
+  if (!sel) return;
+  const catalog = await fetchTitleModelCatalog();
+  const stored = typeof data.prDescriptionModel === 'string' ? data.prDescriptionModel : '';
+  const eff = data.prDescriptionModelEffective || {};
+  const stale = !!stored && (eff.source
+    ? eff.source !== 'settings'
+    : (catalog.length > 0 && !catalog.some((m) => m && m.id === stored)));
+  buildAutoModelOptions(sel, stored, catalog, stale);
+  const effModel = eff.model || 'the default model';
+  let note = '', kind = '';
+  if (stale) { note = `Model "${stored}" is no longer in the catalog — PR descriptions use ${effModel} (the default).`; kind = 'warn'; }
+  else if (eff.source === 'settings') note = `PR descriptions are written with ${effModel}.`;
+  else note = `PR descriptions are written with ${effModel} (the default).`;
+  setHintMsg('prDescModelNote', note, kind);
+  const testBtn = document.getElementById('prDescModelTest');
+  if (testBtn) testBtn.disabled = !sel.value || sel.options[sel.selectedIndex]?.disabled;
+}
+function postPrDescModel(body) {
+  return postSettingsCard(body, { setMsg: setPrDescModelMsg, paint: paintPrDescModelSettings, savedText: 'Saved. Applies to the next Generate with AI — no restart needed.' });
+}
+document.getElementById('prDescModelSave')?.addEventListener('click', () => {
+  const sel = document.getElementById('prDescModel');
+  const opt = sel.options[sel.selectedIndex];
+  if (opt && opt.disabled) { setPrDescModelMsg('that model is no longer installed — pick another or use the default', 'err'); return; }
+  postPrDescModel({ prDescriptionModel: sel.value || '' });
+});
+document.getElementById('prDescModelReset')?.addEventListener('click', () => postPrDescModel({ prDescriptionModel: '' }));
+document.getElementById('prDescModel')?.addEventListener('change', () => { const sel = document.getElementById('prDescModel'); const b = document.getElementById('prDescModelTest'); if (b) b.disabled = !sel.value || sel.options[sel.selectedIndex]?.disabled; });
+document.getElementById('prDescModelTest')?.addEventListener('click', () => testModelFromSettings('prDescModel', 'prDescModelTest', setPrDescModelMsg));
 
 // ---- Settings › Memory: the Defragment model (memory-defrag-model.mjs) — the model + effort EVERY
 // Memory defragment run uses. The flat list of the Auto card (buildAutoModelOptions) over the same
@@ -13436,8 +13473,8 @@ async function loadModelsView() {
   }
 }
 
-// Settings › Models › Title generation + Auto workflow model: both pickers list the catalog, so they
-// repaint whenever it loads — a model added a moment ago is selectable without leaving the tab.
+// Settings › Models › Title generation + Auto workflow model + PR description model: the pickers list
+// the catalog, so they repaint whenever it loads — a model added a moment ago is selectable without leaving the tab.
 async function paintHelperModelCards() {
   try {
     const res = await fetch('/api/settings');
@@ -13445,6 +13482,7 @@ async function paintHelperModelCards() {
     const data = await safeJson(res);
     await paintTitleModelSettings(data);
     await paintAutoModelSettings(data);
+    await paintPrDescModelSettings(data);
   } catch { /* the cards keep their last paint */ }
 }
 
@@ -17557,6 +17595,31 @@ async function loadShipItRemotes(modal, record, gen, isClosed) {
   }
 }
 
+// The PR description block is one reused DOM node like the rest of the modal:
+// every open starts it empty, on the Write tab, idle, with no error.
+function resetShipItDesc(modal) {
+  const box = modal.querySelector('.shipit-desc');
+  const ta = box.querySelector('.shipit-desc-input');
+  ta.value = '';
+  setShipItGenerating(modal, false);
+  setMdEditMode(box, false);
+  const pv = box.querySelector('.shipit-desc-preview');
+  pv.replaceChildren();
+  pv.classList.remove('artifact-markdown');
+  const err = box.querySelector('.shipit-desc-err');
+  err.hidden = true; err.textContent = '';
+}
+
+// Generate with AI in flight: the button is disabled and says so, Stop shows, and
+// the textarea is read-only so nothing typed meanwhile is overwritten by the draft.
+function setShipItGenerating(modal, on) {
+  const btn = modal.querySelector('.shipit-generate');
+  btn.disabled = on;
+  btn.textContent = on ? 'Generating…' : 'Generate with AI';
+  modal.querySelector('.shipit-generate-stop').hidden = !on;
+  modal.querySelector('.shipit-desc-input').readOnly = on;
+}
+
 function openShipItModal(record, data) {
   const modal = document.getElementById('shipit-modal');
   if (!modal) return;
@@ -17581,6 +17644,7 @@ function openShipItModal(record, data) {
   q('.shipit-summary').hidden = nFiles == null && added == null;
   const err = q('.shipit-err');
   err.hidden = true; err.textContent = '';
+  resetShipItDesc(modal);
   const okBtn = q('.shipit-ok');
   okBtn.disabled = false; okBtn.textContent = 'Open pull request';
   modal.classList.remove('hidden');
@@ -17599,20 +17663,83 @@ function openShipItModal(record, data) {
   // listener attached — after which every further open stacks another `onOk`, i.e.
   // one click = N POSTs. That is exactly the double-POST these guards prevent.
   let closed = false;
+  // The in-flight Generate with AI request (null when idle). Stop and done() abort
+  // it; its handler acts only while it is still THIS open's current request.
+  let genCtl = null;
   const done = () => {
     if (closed) return;                              // idempotent: only the first call acts
     closed = true;
+    if (genCtl) { genCtl.abort(); genCtl = null; }
     modal.classList.add('hidden');
     if (shipItClose === done) shipItClose = null;    // never clobber a newer generation's handle
     okBtn.removeEventListener('click', onOk);
     q('.shipit-cancel').removeEventListener('click', onCancel);
     modal.removeEventListener('click', onBackdrop);
     document.removeEventListener('keydown', onKey);
+    descBox.removeEventListener('click', onDescClick);
   };
   shipItClose = done;
   const onCancel = () => done();
   const onBackdrop = (e) => { if (e.target === modal) done(); };
-  const onKey = (e) => { if (e.key === 'Escape') done(); };
+  // Escape while the "replace the description?" confirm is up belongs to that
+  // confirm (its own listener closes it) — it must not take this modal down too.
+  const onKey = (e) => {
+    if (e.key !== 'Escape') return;
+    const cm = document.getElementById('confirm-modal');
+    if (cm && !cm.classList.contains('hidden')) return;
+    done();
+  };
+  const descBox = q('.shipit-desc');
+  const descInput = q('.shipit-desc-input');
+  const descErr = q('.shipit-desc-err');
+  const stopGenerate = () => {
+    if (!genCtl) return;
+    const ctl = genCtl;
+    genCtl = null;
+    setShipItGenerating(modal, false);
+    ctl.abort();
+  };
+  const generate = async () => {
+    if (genCtl) return;
+    if (descInput.value.trim()) {
+      const replace = await confirmModal({
+        title: 'Replace the description?',
+        message: 'Generate with AI replaces what you have written in the PR description.',
+        confirmLabel: 'Replace',
+      });
+      if (!replace || closed || genCtl) return;
+    }
+    const ctl = new AbortController();
+    genCtl = ctl;
+    setShipItGenerating(modal, true);
+    descErr.hidden = true; descErr.textContent = '';
+    const payload = { projectDir: record.projectDir || null, projectKey: record.projectKey, id: record.id };
+    if (!q('.shipit-base-wrap').hidden) payload.baseBranch = q('.shipit-base-branch').value;
+    try {
+      const res = await fetch('/api/pr/describe', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload), signal: ctl.signal,
+      });
+      const dd = await safeJson(res);
+      if (closed || genCtl !== ctl) return;          // stopped, closed or re-opened since
+      if (!res.ok) throw new Error((dd && dd.error) || `HTTP ${res.status}`);
+      if (typeof dd.body !== 'string' || !dd.body.trim()) throw new Error('the model returned no description');
+      descInput.value = dd.body;
+      if (!q('.shipit-desc-preview').hidden) setMdEditMode(descBox, true);   // repaint an open Preview
+    } catch (e2) {
+      if (closed || genCtl !== ctl) return;
+      descErr.hidden = false;
+      descErr.textContent = `Could not generate a description: ${e2.message}`;
+    } finally {
+      if (!closed && genCtl === ctl) { genCtl = null; setShipItGenerating(modal, false); }
+    }
+  };
+  const onDescClick = (e) => {
+    const tab = e.target.closest('.shipit-desc-tab');
+    if (tab) { setMdEditMode(descBox, tab.dataset.mode === 'preview'); return; }
+    if (e.target.closest('.shipit-generate-stop')) { stopGenerate(); return; }
+    if (e.target.closest('.shipit-generate')) void generate();
+  };
   const onOk = async () => {
     okBtn.disabled = true;
     okBtn.textContent = 'Opening…';
@@ -17623,6 +17750,9 @@ function openShipItModal(record, data) {
       payload.baseRemote = q('.shipit-base-remote').value;
     }
     if (!q('.shipit-base-wrap').hidden) payload.baseBranch = q('.shipit-base-branch').value;
+    // The description as it reads NOW; blank sends nothing (the PR body is the title).
+    const description = descInput.value;
+    if (description.trim()) payload.body = description;
     try {
       const res = await fetch('/api/pr', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -17672,6 +17802,7 @@ function openShipItModal(record, data) {
   q('.shipit-cancel').addEventListener('click', onCancel);
   modal.addEventListener('click', onBackdrop);
   document.addEventListener('keydown', onKey);
+  descBox.addEventListener('click', onDescClick);
   loadShipItRemotes(modal, record, gen, () => closed);
 }
 

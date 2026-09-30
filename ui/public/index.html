@@ -1907,7 +1907,7 @@
             <div class="topbar">
               <div>
                 <h1>Models</h1>
-                <div class="sub">The global model catalog — available in every project; entries can override built-ins, route through a provider, or carry per-model routing env. The two cards on top pick the models Worca's own titles and Auto classifier use. Sign-ins and endpoints live on the Providers tab.</div>
+                <div class="sub">The global model catalog — available in every project; entries can override built-ins, route through a provider, or carry per-model routing env. The cards on top pick the models Worca's own titles, Auto classifier and PR descriptions use. Sign-ins and endpoints live on the Providers tab.</div>
               </div>
               <div style="display:flex;gap:8px;flex:0 0 auto">
                 <button type="button" id="model-share-btn" class="btn-ghost" style="padding:11px 20px;white-space:nowrap">Share as plugin…</button>
@@ -1918,8 +1918,8 @@
                 </button>
               </div>
             </div>
-            <!-- The models Worca's own helper calls use (titles, the Auto classifier). Two columns on a
-                 wide screen so the catalog below is not pushed a screen down. -->
+            <!-- The models Worca's own helper calls use (titles, the Auto classifier, PR descriptions). Two
+                 columns on a wide screen so the catalog below is not pushed a screen down. -->
             <div class="models-helpers" data-min-level="expert">
               <!-- Title generation (#422): which model writes run/chat titles.
                    Empty = the model of the run or chat itself (title.mjs
@@ -1979,6 +1979,32 @@
                   <button type="button" id="autoModelSave" class="btn btn-primary btn-mini">Save</button>
                 </div>
                 <small class="hint" id="autoModelMsg"></small>
+              </section>
+              <!-- PR description model: which model drafts the "Ship it?" modal's Generate with AI
+                   description (POST /api/pr/describe). Empty = the Sonnet-class default. -->
+              <section class="card settings-card" id="pr-description-model-settings-card" data-min-level="expert">
+                <div class="card-head">
+                  <div class="label-row">
+                    <h2>PR description model</h2>
+                    <button type="button" class="info-tip" aria-label="About the PR description model">i<span class="tip-content hidden">
+                      <b>Generate with AI</b> in the Create PR dialog makes one model call that reads the run's diff,
+                      results and review, and drafts a description you edit before opening the PR. Pick the model
+                      that makes that call; empty means the Sonnet-class default. Each call is billed to the run as a
+                      sub-agent row named "pr description".
+                    </span></button>
+                  </div>
+                </div>
+                <div class="field">
+                  <div class="label-row"><label for="prDescModel">Model</label></div>
+                  <select id="prDescModel" class="select" aria-label="PR description model"></select>
+                </div>
+                <small class="hint" id="prDescModelNote"></small>
+                <div class="add-project-actions" style="margin-top:14px">
+                  <button type="button" id="prDescModelTest" class="btn btn-ghost btn-mini" title="Send one tiny prompt to the selected model">Test</button>
+                  <button type="button" id="prDescModelReset" class="btn btn-ghost btn-mini">Use default</button>
+                  <button type="button" id="prDescModelSave" class="btn btn-primary btn-mini">Save</button>
+                </div>
+                <small class="hint" id="prDescModelMsg"></small>
               </section>
             </div>
             <p id="models-msg" class="form-msg" aria-live="polite"></p>
@@ -2306,6 +2332,24 @@
             </div>
           </div>
           <small class="shipit-remotes-hint hint"></small>
+        </div>
+        <!-- The PR description (optional): free-form markdown with Write / Preview tabs,
+             or drafted by Generate with AI (POST /api/pr/describe) for the user to edit.
+             Reset to empty on every open; empty = the PR body is the title, as before.
+             Its own error line keeps a failed draft off "Could not open PR". -->
+        <div class="shipit-desc">
+          <div class="shipit-desc-head">
+            <label for="shipit-desc-input">PR description</label>
+            <div class="md-tabs" role="tablist" aria-label="PR description editor">
+              <button type="button" class="md-tab shipit-desc-tab" role="tab" data-mode="text" aria-selected="true">Write</button>
+              <button type="button" class="md-tab shipit-desc-tab" role="tab" data-mode="preview" aria-selected="false">Preview</button>
+            </div>
+            <button type="button" class="shipit-generate-stop btn btn-ghost btn-mini" hidden>Stop</button>
+            <button type="button" class="shipit-generate btn btn-ghost btn-mini">Generate with AI</button>
+          </div>
+          <textarea id="shipit-desc-input" class="shipit-desc-input textarea" rows="7" placeholder="Describe this change, or use Generate with AI"></textarea>
+          <div class="shipit-desc-preview md-preview viewer" hidden></div>
+          <div class="shipit-desc-err hint err" hidden></div>
         </div>
         <!-- `hint err`, not `err`: style.css has no standalone .err rule, only
              .hint.err (:284). .hint sets display:block, so .shipit-err ships an

@@ -142,6 +142,7 @@ test('every SETTINGS_POST_KEYS key is exempt from the legacy "no known key clear
       askMaxTurns: '', askMaxBudgetUsd: '', askWeb: null, debugSpawnEnabled: false,
       titleModel: '', hideBuiltinModels: false, theme: '', uiLevel: '',
       autoWorkflowModel: '',
+      prDescriptionModel: '',
       memoryDefrag: null,
       workspaceScan: null,
       schedule: {},

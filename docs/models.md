@@ -242,8 +242,9 @@ fallbacks. The run log shows OpenRouter's own explanation rather than "Provider
 returned error", a rate-limited step backs off and retries before it pauses, and
 Worca's small helper calls — the title and the Auto workflow classifier — retry
 too; a classifier that still fails falls back to the default workflow instead of
-failing the run. Settings › Models picks the model for each helper call — *Title model* and
-*Auto workflow model* (`WORCA_AUTO_MODEL` overrides the latter) — so pointing both at
+failing the run. Settings › Models picks the model for each helper call — *Title model*,
+*Auto workflow model* (`WORCA_AUTO_MODEL` overrides it) and *PR description model*
+(the Create PR dialog's Generate with AI; Sonnet-class by default) — so pointing them at
 a steadier model leaves a flaky free model touching only the pipeline steps.
 
 **The daily allowance.** Separately, OpenRouter caps how many `:free` requests a key
