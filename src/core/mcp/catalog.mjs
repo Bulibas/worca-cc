@@ -12,6 +12,8 @@ import { normalizeManifest } from '../plugin-manifest.mjs';
 import { readPluginsLock, pluginCurrentDir } from '../plugins-lock.mjs';
 import { readMcpStore, assignBases } from './store.mjs';
 import { assignBaseNames } from './identity.mjs';
+import { cachedPolicyHomes, unreadablePolicyHomes } from '../policy/cache.mjs';
+import { mcpListComplete } from '../policy/registry.mjs';
 import { validateMcpDefinition } from './definitions.mjs';
 
 /** Plugin entries: `dir` = realpath(<plugin>/current) — versions/<sha7> for an
@@ -63,6 +65,13 @@ export async function loadCatalog(snapshot) {
     e.provisional = !Object.hasOwn(snap.bases, e.id);
     e.base = e.provisional ? provisional[e.id] : snap.bases[e.id];
   }
+  // §4.6: a policy server no cached home requires is retired — a flag for the Servers view and Remove;
+  // its memberships keep resolving and nothing is removed on the cache's word. A home whose cached doc holds an entry
+  // this build cannot read (§11.2), or whose whole doc it cannot read, retires none of its servers: they may be listed.
+  const homes = cachedPolicyHomes();
+  const unsure = new Set([...homes.filter((h) => !mcpListComplete(h.warnings)).map((h) => h.slug), ...unreadablePolicyHomes()]);
+  const required = new Set(homes.flatMap((h) => (h.doc.fields?.['mcp.required']?.value || []).filter((e) => !e.plugin).map((e) => `policy:${h.slug}/${e.name}`)));
+  for (const e of entries) if (e.source === 'policy' && !required.has(e.id) && !unsure.has(e.home)) e.retired = true;
   return entries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
@@ -71,5 +80,8 @@ export async function loadCatalog(snapshot) {
  *  this runs at server start and at the start of every `worca plugin` command. */
 export async function reconcileMcpStore() {
   const missing = (await loadCatalog()).filter((e) => e.provisional).map((e) => e.id);
-  if (missing.length) await assignBases(missing);
+  // §4.4: persist the Team record of every cached home that requires ≥1 MCP server (P3's cachedTeams(),
+  // inlined: registry.mjs imports this module).
+  const homes = cachedPolicyHomes().filter((h) => h.doc.fields?.['mcp.required']?.value?.length).map((h) => h.slug);
+  if (missing.length || homes.length) await assignBases(missing, { homes });
 }

@@ -127,9 +127,11 @@ function memberViews(ctx, set) {
     };
     if (set.group === 'team') {
       const pv = policyValues.get(m.serverId) || {};
+      // Only the server's non-secret fields (§11.1): a plugin reference's values meet its fields only here, as in Turn on.
+      const nonSecret = new Set((e ? e.def.fields : []).filter((f) => !f.secret).map((f) => f.key));
       view.team = {
         consented: m.consent !== null,
-        suggests: Object.keys(pv).filter((k) => typeof pv[k] === 'string' && (own(m.values, k) ? m.values[k] : '') !== pv[k])
+        suggests: Object.keys(pv).filter((k) => nonSecret.has(k) && typeof pv[k] === 'string' && (own(m.values, k) ? m.values[k] : '') !== pv[k])
           .map((k) => ({ key: k, value: pv[k] })),
       };
     }

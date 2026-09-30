@@ -80,7 +80,7 @@ import {
   renderMemoryHistory, MEMORY_NAME_HELP,
 } from './memory-view.mjs';
 import { createScriptsController } from './scripts-view.mjs';
-import { createMcpView, mountProjectMcp, paintMcpResolution, paintAskMcpBlock } from './mcp-view.mjs';
+import { createMcpView, mountProjectMcp, paintMcpResolution, paintAskMcpBlock, setMcpStripRenderer } from './mcp-view.mjs';
 import { createAskPanel } from './ask-panel.mjs';
 import { renderGettingStarted, renderGettingStartedPill, bindWelcome, doneCount, allStepsDone, GETTING_STARTED_STEPS } from './getting-started.mjs';
 import { createGuideSpot } from './guide-spot.mjs';
@@ -156,7 +156,7 @@ import {
   renderProjectTpCell, renderProjectTpChip, projectTpSummary, renderPolicyEnableDialogBody, renderEffectiveTable, renderPolicyEditor, docFromEditor, editorDirty,
   renderPolicyEmptyState, renderPolicySyncChip, renderWsPolicyLine, renderTeamCapsReadout, renderTeamChip, renderPolicyNotesLine,
   renderRequiredStrip, renderSetupChecklist, relTime as tpRelTime,
-  renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel,
+  renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel, renderMcpStrip, renderMcpConsent,
 } from './team-policy-view.mjs';
 import { mcpRunsLabel, renderMcpRunsPop } from './mcp-run-picker.mjs';
 import { aggregate, toCsv } from '../../src/shared/team-metrics/aggregate.mjs';
@@ -1164,6 +1164,7 @@ function handleServerMessage(msg) {
     if (currentView() === 'team-policy' && !tpState.editing) loadTeamPolicyView();
     if (currentView() === 'settings' && currentSettingsTab === 'runs') paintTeamCapsReadout(true);
     if (currentView() === 'settings' && currentSettingsTab === 'plugins') paintPluginsPolicy(true);
+    if (currentView() === 'settings' && currentSettingsTab === 'mcp') refreshMcpSurfaces();   // the MCP strip and the Team set
     if (currentView() === 'new') schedulePolicyLine();
     return;
   }
@@ -15540,11 +15541,13 @@ if (el.pluginsPolicy) el.pluginsPolicy.addEventListener('click', (e) => { void h
 async function openSetupChecklist() {
   const data = await loadTpScopes({ force: true });
   const reqs = data.requirements || [];
-  const homes = [...new Set(reqs.flatMap((r) => r.homes || []))];
+  const mcp = data.mcpRequirements || [];
+  const homes = [...new Set([...reqs.flatMap((r) => r.homes || []), ...mcp.map((r) => r.home)])];
   const home = homes[0] || (data.homes[0] && data.homes[0].slug) || '';
-  const body = renderSetupChecklist({ home, requirements: reqs, seeds: [], trusted: policyHomeTrusted(home) }, { doc: document });
+  const body = renderSetupChecklist({ home, requirements: reqs, seeds: [], trusted: policyHomeTrusted(home), mcp }, { doc: document });
   body.addEventListener('click', (e) => {
     if (e.target.closest('.tp-install-all')) { closePluginModal(); void installAllRequired(reqs); return; }
+    if (e.target.closest('.tp-mcp-act')) { void handleMcpTeamClick(e); return; }
     void handlePolicyPluginClick(e);
   });
   body.addEventListener('change', (e) => {
@@ -15552,6 +15555,75 @@ async function openSetupChecklist() {
     if (cb) { try { localStorage.setItem(TP_TRUST_PREFIX + cb.dataset.home, cb.checked ? '1' : '0'); } catch { /* private mode */ } }
   });
   pluginModal(`Set up for ${home || 'the team policy'}`, body);
+}
+// MCP requirements (MCP registry spec §11.3): Install / Turn on / Update post only { expectHash } — the
+// hash the dialog showed; the server reads the definition from the cached policy. Trust never reaches here.
+const MCP_TEAM_TITLE = { install: 'Install MCP server', 'turn-on': 'Turn on MCP server', update: 'Update MCP server' };
+const MCP_TEAM_VERB = { install: 'Install', 'turn-on': 'Turn on', update: 'Update' };
+async function paintMcpStrip(host) {
+  if (!host.dataset.wired) {
+    host.dataset.wired = '1';
+    host.addEventListener('click', (e) => {
+      if (e.target.closest('.tp-mcp-act')) void handleMcpTeamClick(e);
+      else if (e.target.closest('.pl-policy-setup')) void openSetupChecklist();
+    });
+  }
+  const fill = (data) => { const strip = renderMcpStrip(data.mcpRequirements || [], { doc: document }); host.replaceChildren(strip || ''); host.hidden = !strip; };
+  // P6 hands a fresh, hidden host on every paint of the pane: paint the last state at once (no flicker; a button painted
+  // from it that has moved on repaints instead of acting), then read fresh — the pane repaints after each write on it
+  // (a token set, a switch), and the strip must show that state.
+  if (tpCache.data) fill(tpCache.data);
+  fill(await loadTpScopes({ force: true }));
+}
+setMcpStripRenderer((host) => { void paintMcpStrip(host); });
+/** After a Team action, every surface that shows Team state reads it again: `openSetId` (Install, Set <field>) opens
+ *  that Team set; on the MCP tab the pane reloads (its paint repaints the strip), so a card never contradicts the strip;
+ *  the Team policy page reloads ("Yours", deviations). */
+function refreshMcpSurfaces(openSetId = null) {
+  const to = openSetId ? `settings/mcp/sets/${encodeURIComponent(openSetId)}` : null;
+  if (to && location.hash.slice(1) !== to) { location.hash = to; return; }
+  if (currentView() === 'settings' && currentSettingsTab === 'mcp') { void mcpTab().show(location.hash.slice(1).replace(/^settings\/mcp\/?/, '')); return; }
+  if (currentView() === 'team-policy' && !tpState.editing) loadTeamPolicyView();
+}
+async function runMcpTeamAction(r, action, { owner = null } = {}) {
+  // mcpApi never rejects: offline or a restarting server is an answer the error modal shows.
+  const res = await mcpApi('POST', `/api/mcp/teams/${encodeURIComponent(r.home)}/members/${encodeURIComponent(r.serverId)}/${action}`, { expectHash: r.hash });
+  await loadTpScopes({ force: true });   // the checklist, the strip and the Projects cells read the new state; an older in-flight read never lands
+  if (!res.ok) {
+    pluginModal(`${MCP_TEAM_TITLE[action]}: ${r.name}`, Object.assign(document.createElement('p'), { className: 'form-msg err', textContent: res.data?.error || `${action} failed` }));
+    refreshMcpSurfaces();   // a 409 means the row moved on: show where it is now
+    return;
+  }
+  // The dialog the action came from (the checklist, the consent dialog) closes, only while it is still the one shown: an
+  // action from the strip opened none, and no action closes a dialog the user opened while its POST was out.
+  if (owner && el.pluginModalBody.contains(owner)) closePluginModal();
+  refreshMcpSurfaces(action === 'install' ? res.data.setId : null);   // Install opens its Team set
+}
+async function handleMcpTeamClick(e) {
+  const t = e.target.closest('.tp-mcp-act');
+  e.stopPropagation();
+  if (t.dataset.busy === '1') return;   // a double click acts once: one POST, one dialog
+  t.dataset.busy = '1';
+  try {
+    // The dialog the click came from (read before the await: a repaint meanwhile detaches `t`).
+    const owner = t.closest('#plugin-modal') ? el.pluginModalBody.firstElementChild : null;
+    const r = ((await loadTpScopes({ force: true })).mcpRequirements || []).find((x) => x.home === t.dataset.home && x.serverId === t.dataset.server);
+    // The button was painted for one state. When the row has moved on (a new team definition, another tab), repaint instead
+    // of acting: a Turn on painted without the consent dialog must never post for a member that now needs one.
+    if (!r || r.state !== t.dataset.state) {
+      if (owner) void openSetupChecklist(); else refreshMcpSurfaces();
+      return;
+    }
+    const action = t.dataset.action;
+    if (action === 'set') { if (owner && el.pluginModalBody.contains(owner)) closePluginModal(); refreshMcpSurfaces(r.setId); return; }
+    if (t.dataset.consent !== '1') { await runMcpTeamAction(r, action, { owner }); return; }
+    const body = renderMcpConsent(r, action, { doc: document });
+    let sent = false;   // a double click posts once (a second Install would answer 409 "already installed")
+    pluginModal(MCP_TEAM_TITLE[action], body, [
+      ['Cancel', 'btn btn-ghost btn-mini', closePluginModal],
+      [MCP_TEAM_VERB[action], 'btn btn-primary btn-mini', () => { if (sent) return; sent = true; void runMcpTeamAction(r, action, { owner: body }); }],
+    ]);
+  } finally { delete t.dataset.busy; }
 }
 // One dialog after another — a consent dialog for each missing plugin, an update preview for each
 // one below the floor — the next opens when the previous closes (done or cancelled). Nothing runs

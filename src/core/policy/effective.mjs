@@ -58,6 +58,10 @@ const fmtUsd = (n) => `$${Number(n).toFixed(2)}`;
 // Built-in guardrail ids render as their display names everywhere (`secure` shows as "Strict",
 // the guardrail-store.mjs BUILTIN_META rule); a policy set reads "gp:<id>".
 const GUARDRAIL_NAMES = { permissive: 'Permissive', normal: 'Normal', secure: 'Strict' };
+// One `mcp.required` entry: "github (stdio: npx -y …)", "dd (http: https://…/{site})", "sentry (acme-tools)".
+const mcpPart = (p) => (typeof p === 'string' ? p : `${p.prefix || ''}{${p.field}}${p.suffix || ''}`);
+const mcpLine = (e) => (e.plugin ? `${e.server} (${e.plugin})`
+  : `${e.name} (${e.type}: ${e.type === 'stdio' ? [e.command, ...(e.args || []).map(mcpPart)].join(' ') : [].concat(e.url).map(mcpPart).join('')})`);
 /** A field value as the page shows it ("$25.00", "Strict", "on", "a, b"). */
 export function fmtValue(meta, v) {
   if (v == null) return '—';
@@ -67,6 +71,7 @@ export function fmtValue(meta, v) {
     case 'bool': return v ? 'on' : 'off';
     case 'string[]': return v.length ? v.join(', ') : '(none)';
     case 'plugins': return v.length ? v.map((p) => `${p.name}${p.minVersion ? ` ≥ ${p.minVersion}` : ''}`).join(', ') : '(none)';
+    case 'mcpServers': return v.length ? v.map(mcpLine).join(', ') : '(none)';
     case 'steps': return Object.entries(v).map(([r, s]) => `${r} ${s.model || '·'}${s.effort ? ` / ${s.effort}` : ''}`).join(' · ') || '(none)';
     default: return String(v);
   }
@@ -103,6 +108,7 @@ export function effectiveRows({ doc = null, workspaceRun = false, local = {} } =
       // An expectation: the run proceeds either way, deviations warn and are recorded.
       effective = { value: t.value, display: fmtValue(meta, t.value), source: 'team' };
       if (meta.key === 'metrics.record' && l && l.set && l.value === false && t.value === true) note = 'your "Include my runs" is off; the team expects recording';
+      if (meta.key === 'mcp.required' && l && t.value.length > l.value.length) note = `${t.value.length - l.value.length} missing`;
     } else {
       const r = effectiveDefault({ local: l, team: t });
       effective = { value: r.value, display: fmtValue(meta, r.value), source: r.source };

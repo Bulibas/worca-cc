@@ -167,7 +167,7 @@ test('removing a manual server takes it out of every set with its secrets', asyn
   assert.equal((await call('DELETE', '/api/mcp/sets/shop')).status, 200);
 });
 
-test('Team sets: members PUT runs the §11.2 locks; Duplicate needs a live Team set; a required policy server stays; bad member ids 400', async () => {
+test('Team sets: members PUT runs the §11.2 locks; Duplicate needs a live Team set; a policy server no cached home requires is retired; bad member ids 400', async () => {
   let r = await call('POST', '/api/mcp/servers', { name: 'tm', type: 'stdio', command: 'npx', args: ['-y', 'tm'], env: {}, fields: [], description: 'tm' });
   assert.equal(r.status, 200, r.text);
   const { id } = teamRecord('old/home');   // persisted below; no cached home follows it, so it is greyed with no members
@@ -175,7 +175,7 @@ test('Team sets: members PUT runs the §11.2 locks; Duplicate needs a live Team 
   r = await call('PUT', `/api/mcp/sets/${id}/members/${enc('manual:tm')}`, { enabled: true });
   assert.deepEqual([r.status, r.body.error], [409, 'Team set members come from team policy and cannot be added here']);
   assert.equal((await call('POST', `/api/mcp/sets/${id}/duplicate`, { name: 'Old copy' })).status, 404);
-  assert.equal((await call('DELETE', `/api/mcp/servers/${enc('policy:acme/platform/github')}`)).status, 400);
+  assert.equal((await call('DELETE', `/api/mcp/servers/${enc('policy:acme/platform/github')}`)).status, 200, 'retired: Remove deletes it');
   assert.equal((await call('PUT', `/api/mcp/sets/billing/members/${enc('manual:Bad Name')}`, {})).status, 400);
 });
 

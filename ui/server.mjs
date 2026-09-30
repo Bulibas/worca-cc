@@ -119,10 +119,11 @@ import { deviationsFor, fieldsForRun, capSummary, mcpDeviations } from '../src/c
 import { resolveRegistry, cachedTeamFor, toolNameLimitFor, skipMessage, skipReasonText } from '../src/core/mcp/registry.mjs';
 import { MEMBERSHIP_KEY_RE } from '../src/core/mcp/definitions.mjs';
 import { loadCatalog } from '../src/core/mcp/catalog.mjs';
-import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
+import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, mcpRequirements, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
 import { normalizePolicyDoc } from '../src/core/policy/registry.mjs';
 import { checkTeamTotalGate, checkTeamPipelineGate, teamCapsForTarget } from '../src/core/policy/gate.mjs';
 import { readPolicyState } from '../src/core/policy/state.mjs';
+import { teamAction, teamForget } from '../src/core/mcp/team.mjs';
 import { policyForScope, policyPayload } from '../src/core/policy/scope.mjs';
 import { policyCatalogModels } from '../src/core/policy/cache.mjs';
 import { pickFolderNative } from '../src/core/folder-dialog.mjs';
@@ -3853,7 +3854,8 @@ app.get('/api/policy/scopes', async (req, res) => {
       const r = await resolveProjectPolicy(s.path, { discover: false }).catch(() => null);
       if (r?.ok) docs.push({ slug: r.home, doc: r.doc });
     }
-    res.json({ ...scopes, requirements: pluginRequirements(docs), blockedPlugins: blockedPluginFindings(docs) });
+    // MCP rows from the policy cache — the source the consent routes hash against (MCP registry spec §11.3).
+    res.json({ ...scopes, requirements: pluginRequirements(docs), blockedPlugins: blockedPluginFindings(docs), mcpRequirements: await mcpRequirements() });
   } catch (err) { sendPolicyError(res, err); }
 });
 
@@ -3863,7 +3865,17 @@ app.get('/api/policy', async (req, res) => {
   try {
     const { meta, r, workspaceRun, projectDir } = await policyForScope(scope);
     if (!r.ok) return res.status(404).json({ error: r.detail || `no team policy for this ${scope.kind}`, code: (r.code || r.reason || 'NOT_ENABLED').toString().toUpperCase().replace(/-/g, '_'), scope: meta });
-    res.json(policyPayload(meta, r, { workspaceRun, projectDir }));
+    const payload = await policyPayload(meta, r, { workspaceRun, projectDir });
+    // MCP registry spec §11.4: the off-policy card also lists the Team set's MCP deviations for this scope's runs,
+    // worded and guarded like /api/policy/notes (a registry fault adds none; the policy's own card still paints).
+    const fields = fieldsForRun(r.doc, { workspaceRun });
+    if (fields['mcp.required']) {
+      try {
+        const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
+        if (target) { const p = await mcpRunPreview(target); payload.deviations.push(...mcpDeviations(fields, p.result, (sk) => skipReasonText(sk, p.catalog))); }
+      } catch { /* a registry fault adds no MCP deviations */ }
+    }
+    res.json(payload);
   } catch (err) { sendPolicyError(res, err); }
 });
 
@@ -4634,6 +4646,9 @@ app.post('/api/projects', async (req, res) => {
     discoverProject(normalizeProjectPath(body.path), { force: true })
       .then(() => emitChanged('team-metrics-changed', 'discovered'))
       .catch(() => { /* offline or not a git repo: discovery retries hourly */ });
+    // Its team policy at once too (MCP registry spec §11.2): removing a project drops its policy cache, so a re-added or
+    // re-cloned project's home must not read "no project here follows" (a greyed Team set) until the background discovery.
+    discoverPolicy(normalizeProjectPath(body.path), { force: true }).catch(() => { /* offline: the background discovery retries */ });
     res.json({ projects });
   } catch (err) {
     // addProject only throws on validation (empty/duplicate/not-a-directory), so
@@ -4665,6 +4680,7 @@ app.post('/api/projects/bulk', async (req, res) => {
             await discoverProject(p, { force: true });
             emitChanged('team-metrics-changed', 'discovered');
           } catch { /* offline or not a git repo: discovery retries hourly */ }
+          await discoverPolicy(p, { force: true }).catch(() => { /* offline: the background discovery retries */ });
         }
       })();
     }
@@ -4701,6 +4717,7 @@ async function startCloneJob(req) {
       discoverProject(project.path, { force: true })
         .then(() => emitChanged('team-metrics-changed', 'discovered'))
         .catch(() => { /* offline or not a git repo: discovery retries hourly */ });
+      discoverPolicy(project.path, { force: true }).catch(() => { /* offline: the background discovery retries */ });
     } catch (err) {
       Object.assign(job, { state: 'error', code: err instanceof CloneError ? err.code : 'failed', error: err && err.message ? err.message : String(err) });
     }
@@ -9096,6 +9113,32 @@ app.put('/api/mcp/projects/:key', async (req, res) => {
   if (!PROJECT_KEY_RE.test(req.params.key)) return badRequest(res, 'invalid project key');
   const { sets, includeGeneral } = req.body || {};   // P1 setProjectAssignment checks both
   try { await setProjectAssignment(req.params.key, { sets, includeGeneral }); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+// MCP Team set (MCP registry spec §11.3, §12): consent routes. The definition, values and hash are read
+// from the cached policy, never the body; `expectHash` is only a precondition (409 when it moved on).
+// A home is a lowercase policy slug (the home part of SERVER_ID_RE's `policy:` ids, within its bound: deep subgroups make
+// long slugs); ids are checked before any lookup.
+const MCP_HOME_RE = /^(?=.{1,1024}$)[a-z0-9_][a-z0-9._-]*(?:\/[a-z0-9_][a-z0-9._-]*)*$/;
+function mcpHome(req, res) {
+  const home = req.params.home;
+  if (!MCP_HOME_RE.test(home)) { badRequest(res, 'home must be a lowercase policy slug'); return null; }
+  return home;
+}
+for (const action of ['install', 'turn-on', 'update']) {
+  app.post(`/api/mcp/teams/:home/members/:serverId/${action}`, async (req, res) => {
+    const home = mcpHome(req, res); if (!home) return;
+    const serverId = mcpServerId(req, res); if (!serverId) return;
+    const expectHash = req.body?.expectHash;
+    if (typeof expectHash !== 'string' || !/^[0-9a-f]{64}$/.test(expectHash)) return badRequest(res, 'expectHash must be the hash the consent dialog showed');
+    try { res.json({ ok: true, ...(await teamAction(action, home, serverId, { expectHash })) }); }
+    catch (err) { sendMcpError(res, err); }
+  });
+}
+app.post('/api/mcp/teams/:home/forget', async (req, res) => {
+  const home = mcpHome(req, res); if (!home) return;
+  try { await teamForget(home); res.json({ ok: true }); }
+  catch (err) { sendMcpError(res, err); }
 });
 
 // ---------------------------------------------------------------------------

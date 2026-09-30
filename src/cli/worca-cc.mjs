@@ -3033,7 +3033,7 @@ async function cmdPolicy(argv) {
   if (!verb || verb === 'help') { process.stdout.write(POLICY_HELP); return 0; }
   const sync = await import('../core/policy/sync.mjs');
   const { effectiveRows } = await import('../core/policy/effective.mjs');
-  const { localSnapshot, pluginRequirements, marketplaceSeedCandidates, seedPolicyMarketplaces } = await import('../core/policy/local.mjs');
+  const { localSnapshot, withMcpLocal, pluginRequirements, marketplaceSeedCandidates, seedPolicyMarketplaces } = await import('../core/policy/local.mjs');
   try {
     switch (verb) {
       case 'show': {
@@ -3045,7 +3045,7 @@ async function cmdPolicy(argv) {
           else out(`no team policy for ${projectDir}: ${r.detail || r.reason}`);
           return r.reason === 'not-enabled' || r.reason === 'no-origin' ? 0 : 1;
         }
-        const rows = effectiveRows({ doc: r.doc, workspaceRun: false, local: localSnapshot(projectDir) });
+        const rows = effectiveRows({ doc: r.doc, workspaceRun: false, local: await withMcpLocal(localSnapshot(projectDir), { slug: r.home, sha: r.sha, doc: r.doc }) });
         if (a.json) { out(JSON.stringify({ home: r.home, sha: r.sha, delegated: r.delegated, from: r.from, doc: r.doc, rows }, null, 2)); return 0; }
         out(c('bold', `team policy ${r.home}${r.sha ? ` @ ${String(r.sha).slice(0, 7)}` : ''}${r.delegated ? ` (followed by ${r.from})` : ''}`));
         if (r.doc.title) out(`  ${r.doc.title}${r.doc.updatedBy ? ` · updated by ${r.doc.updatedBy}` : ''}${r.doc.updatedAt ? ` · ${r.doc.updatedAt}` : ''}`);
