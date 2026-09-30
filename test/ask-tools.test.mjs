@@ -504,6 +504,26 @@ test('get_run_diff: protected basenames dropped, redaction, path filter, paging,
   assert.ok(tiny.text.length <= 1);
 });
 
+test('get_run_diff: a run still in flight reads its live worktree diff (live: true), filtered like any patch, never memoised', async () => {
+  const live = [
+    'diff --git a/src/limiter.js b/src/limiter.js\nnew file mode 100644\n--- /dev/null\n+++ b/src/limiter.js\n@@ -0,0 +1 @@\n+export const token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";\n',
+    'diff --git a/.env b/.env\nnew file mode 100644\n--- /dev/null\n+++ b/.env\n@@ -0,0 +1 @@\n+SECRET=sk-ant-xyz\n',
+  ].join('');
+  let reads = 0;
+  const t = createAskTools({ ...fake, readLiveDiff: async (row) => { reads += 1; return row.id === 'bbbbbbbb' ? live : null; } });
+  const d = await t.call('get_run_diff', { id: 'bbbbbbbb' });
+  assert.equal(d.available, true, 'no saved patch yet, but the live reader answered');
+  assert.equal(d.live, true);
+  assert.deepEqual(d.files.map((f) => f.path), ['src/limiter.js'], 'a protected file is dropped from a live diff too');
+  assert.ok(d.text.includes('ghp_<redacted>') && !d.text.includes('sk-ant-'), 'and it is redacted');
+  await t.call('get_run_diff', { id: 'bbbbbbbb' });
+  assert.equal(reads, 2, 'a live diff moves while the run works: read again, never served from the page cache');
+  const saved = await t.call('get_run_diff', { id: '4e1f2a9b' });
+  assert.equal(saved.live, undefined, 'a saved patch wins; the live reader is only the fallback');
+  // Without the host's reader (the classic child), a run with no patch is still "not available".
+  assert.equal((await tools.call('get_run_diff', { id: 'bbbbbbbb' })).available, false);
+});
+
 test('get_run_diff: a C-quoted protected path is dropped and never counted against its neighbour', async () => {
   const t = createAskTools({ ...fake, readDiffPatch: async () => QUOTED_DIFF });
   const d = await t.call('get_run_diff', { id: '4e1f2a9b' });

@@ -315,8 +315,9 @@ for (const status of ['done', 'stopped', 'error']) {
       false, 'nothing in the header offers to report the run');
     const link = header.querySelector('.rd-history-link');
     assert.equal(link.hidden, false, 'View in History stays');
-    assert.equal(link.previousElementSibling, header.querySelector('.rd-stop'),
-      'the link sits right after Stop — no leftover control between them');
+    assert.equal(link.previousElementSibling, header.querySelector('.rd-spacer'),
+      'the link closes the branch row — no leftover control between them');
+    assert.equal(doc.querySelector('#run-detail .rd-bar .rd-report'), null, 'nor does the shared bar');
   });
 }
 

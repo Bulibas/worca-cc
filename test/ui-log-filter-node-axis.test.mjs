@@ -199,7 +199,7 @@ test('the Running-detail bar mirrors the chip through applyRunLogFilter, and its
   const r = np.getRun('r1');
   np.onState(r, { status: 'running', stepper: MANIFEST, active: [], steps: STEPS });
   for (const l of LINES) np.onLog(r, l);
-  go(window, 'running/r1');
+  go(window, 'running/r1/details/logs');   // Details › Live log (the glance is the default)
   await settle();
   const sec = $(window, '#run-detail .rd-sec-logs');
   assert.ok(sec, 'the Live log tab is the default section');

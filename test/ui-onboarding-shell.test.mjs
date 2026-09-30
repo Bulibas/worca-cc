@@ -630,6 +630,30 @@ test('a run tour ends on the run\'s card under Running, not at the Start click; 
   doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
 });
 
+test('a run tour ends on the run\'s own page (Start opens it): status line, facts, then the tab rows with Done', async () => {
+  const { window } = await boot({ onboarding: status(['claude', 'project'], { welcomeSeen: true }), projects: [{ name: 'p', path: '/tmp/p', key: 'p-00000001', exists: true }] });
+  const hops = () => window.__np.gsRunPageHops('This is your run’s page.');
+  const go = (h) => { window.location.hash = h; };
+  // On the run's page: three stops on its glance (a fourth only while a question waits).
+  go('running/r1');
+  const page = hops();
+  assert.deepEqual(page.map((h) => h.id), ['card', 'facts', 'rows']);
+  assert.equal(page[0].text, 'This is your run’s page.');
+  assert.ok(page.every((h) => h.info), 'reading stops: Next, never a click');
+  assert.equal(page.at(-1).nextLabel, 'Done', 'the tab rows are the last stop');
+  assert.deepEqual(page.map((h) => h.target[0]), [
+    '#run-detail .rd[data-mode="glance"] .rd-now',
+    '#run-detail .rd[data-mode="glance"] .rd-facts',
+    '#run-detail .rd[data-mode="glance"] .rd-result',
+  ]);
+  assert.ok(page.every((h) => h.target.includes('#run-list [data-run-id]')), 'each falls back to the card');
+  // Back on the Running list: one stop, on the run's card, with Done.
+  go('running');
+  const list = hops();
+  assert.deepEqual(list.map((h) => [h.id, h.nextLabel]), [['card', 'Done']]);
+  assert.deepEqual(list[0].target.slice(-1), ['#run-list [data-run-id]']);
+});
+
 test('the workspace tour walks the wizard: Create → name → two projects → Scan (the last stop); leaving the wizard re-lights Create', async () => {
   const projects = [{ name: 'a', path: '/tmp/a', key: 'a-1', exists: true }, { name: 'b', path: '/tmp/b', key: 'b-2', exists: true }];
   const { doc, window } = await boot({ level: 'advanced', onboarding: status(['claude', 'project'], { welcomeSeen: true }), projects });

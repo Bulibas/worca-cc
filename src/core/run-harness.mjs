@@ -27,7 +27,7 @@ import {
   recordArtifact, writeClarify, readPipelineExtras, claimPipelineOwnership, touchHeartbeat,
   clearPipelineOwnership, HEARTBEAT_INTERVAL_MS, upsertSubAgent,
 } from './artifacts.mjs';
-import { diffNameStatus, diffNumstat, diffPatch } from './git-info.mjs';
+import { diffNameStatus, diffNumstat, diffPatch, untrackedFiles, untrackedPatch } from './git-info.mjs';
 import {
   assembleResults, persistResults, persistDiffPatch, buildPerProject, rollupSummary,
   retainedWorkPatchName,
@@ -3633,6 +3633,54 @@ export class RunHarness extends EventEmitter {
     }
     const ref = await this._git(['rev-parse', 'HEAD'], { cwd: dir });
     return ref.ok ? ref.stdout.trim() : null;
+  }
+
+  /**
+   * The diff of a run IN FLIGHT: every member worktree against its checkpoint, plus the
+   * files an agent created that nothing has staged yet. Read-only (no `add -N`, so it can
+   * never race an agent's own git use), persists nothing, and uses the same exclusion set
+   * as _buildResults. Resolves null before setup has created a worktree.
+   * Shape: { results, patch, untrackedCapped } — `results` is the results.json shape
+   * (per-project under `perProject` for a workspace run), `patch` a unified diff.
+   * @param {{maxUntracked?:number}} [opts]
+   */
+  async liveDiff({ maxUntracked = 50 } = {}) {
+    const members = [];
+    const patches = [];
+    let untrackedCapped = false;
+    for (const [key, dir] of this.workDirs.entries()) {
+      const base = this.checkpointRefs[key];
+      if (!base) continue;
+      const ex = this._excludePathspecs(key);
+      const [ns, num, patch, untracked] = await Promise.all([
+        diffNameStatus(dir, base, undefined, ex),
+        diffNumstat(dir, base, undefined, ex),
+        diffPatch(dir, base, undefined, ex),
+        untrackedFiles(dir, ex),
+      ]);
+      const listed = new Set(ns.map((r) => r.path));
+      const fresh = untracked.filter((p) => !listed.has(p));
+      if (fresh.length > maxUntracked) untrackedCapped = true;
+      const extra = [];
+      for (const p of fresh.slice(0, maxUntracked)) {
+        const u = await untrackedPatch(dir, p);
+        ns.push({ status: 'A', path: p });
+        num.set(p, { added: u.added, removed: 0, binary: u.binary });
+        if (u.patch) extra.push(u.patch);
+      }
+      members.push({ projectKey: key, results: assembleResults({ nameStatus: ns, numstat: num, reviews: [] }) });
+      patches.push({ key, patch: [patch, ...extra].filter(Boolean).join('') });
+    }
+    if (!members.length) return null;
+    if (members.length === 1 && !this.isWorkspace) {
+      return { results: members[0].results, patch: patches[0].patch, untrackedCapped };
+    }
+    const perProject = buildPerProject(members);
+    return {
+      results: { summary: rollupSummary(perProject), perProject },
+      patch: patches.filter((p) => p.patch).map((p) => `# ${p.key}\n${p.patch}`).join('\n\n'),
+      untrackedCapped,
+    };
   }
 
   /**

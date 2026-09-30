@@ -346,7 +346,7 @@ try {
 
   // ---- the Running DETAIL (a monitor host) ---------------------------------
   const RD = '#run-detail .rd-graph .run-flow-wrap';
-  await go(`running/${runId}`);
+  await go(`running/${runId}/details/workflow`);   // the graph lives in Details › Workflow
   await until(`document.querySelector('${RD} .gv-stage .gv-world .node')`, 'the detail graph');
   await ev('window.scrollTo(0,0);0'); await settle('detail');
 
@@ -503,7 +503,7 @@ try {
   // (9b) a footer-row click narrows the log to ONE execution, on BOTH bars.
   // Reload first: check (6) left the view panned and zoomed, and the Escape leg
   // re-lays the shell out — a fresh screen puts every card back under its fit.
-  await go(`running/${runId}`);
+  await go(`running/${runId}/details/workflow`);   // the graph lives in Details › Workflow
   await until(`document.querySelector('${RD} .gv-stage .gv-world .node[data-node-id="n_clarify"] .xtoggle')`, 'the clarify strip');
   await clickCentre(`${RD} .gv-world .node[data-node-id="n_clarify"] .xtoggle`, 'clarify strip');
   await settle('expand');
@@ -554,7 +554,7 @@ try {
   const rec = (hist.body.pipelines || []).find((p) => p.id === entry.pipelineId);
   if (!rec) throw new Error(`pipeline ${entry.pipelineId} is not in /api/history`);
   const HD = '#hist-detail .hd-graph .run-flow-wrap';
-  await go(`history/${rec.projectKey}/${rec.id}`);
+  await go(`history/${rec.projectKey}/${rec.id}/details/workflow`);   // the graph lives in Details › Workflow
   await until(`document.querySelector('${HD} .gv-stage .gv-world .node')`, 'the History graph');
   await ev('window.scrollTo(0,0);0'); await settle('history');
   await ev(`(async()=>{const r=await fetch('/api/history/${rec.projectKey}/${rec.id}');
