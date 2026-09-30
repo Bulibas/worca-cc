@@ -17407,12 +17407,11 @@ function paintHdGlance(screen, record, data) {
   const activeMs = typeof st.totalActiveMs === 'number' ? st.totalActiveMs : liveTotalMs(st.steps, 0);
   paintGlanceFacts(glance, { summary: s || null, activeMs, cost: st.totalCostUsd || 0 });
 
-  // The result: things to check, every tab, the actions.
+  // The result: every tab, the actions. The things to check live in Overview only.
   const host = glance.querySelector('.hd-result');
   host.replaceChildren();
   const done = copy.state === 'done';
   const trail = trailColumns(run);
-  host.append(...glanceChecks(checks.map((c) => ({ ...c, origin: 'review' }))));
   host.append(...rdActivityGroups(screen, {
     overview: activityOverviewValue(results),
     workflow: trail.count ? `${trail.count} step${trail.count === 1 ? '' : 's'}` : '',
@@ -23865,20 +23864,6 @@ function glancePrInput(record) {
   return histPrEligible(record) ? 'NONE' : 'UNAVAILABLE';
 }
 
-// "Things to check" (at most three, the rest counted) — shown only when there are any.
-function glanceChecks(checks) {
-  if (!checks.length) return [];
-  const out = [rdSheetGroup('Things to check', [issueList(checks.slice(0, 3))])];
-  if (checks.length > 3) {
-    const more = document.createElement('div');
-    more.className = 'hint';
-    more.textContent = `and ${checks.length - 3} more in Overview`;
-    out.push(more);
-  }
-  return out;
-}
-
-
 function rdSheetGroup(title, rows) {
   const g = document.createElement('div');
   g.className = 'rd-sgroup';
@@ -23941,7 +23926,7 @@ function rdFilesChanged(r) {
   return s ? (s.filesNew || 0) + (s.filesChanged || 0) + (s.filesDeleted || 0) : null;
 }
 
-// Every tab (Activity) always; once the run is over, also things to check and the
+// Every tab (Activity) always; once the run is over, also the
 // actions (the facts row above carries Time · Cost · Changes in every state). Numbers come from
 // results.json; "Create pull request" hands over to History's ship-it modal
 // (pendingShipIt), which owns the remotes picker and the push. Rebuilt only when its
@@ -23973,7 +23958,6 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
   host.replaceChildren();
 
   const results = data && data.results;
-  host.append(...glanceChecks(results ? hdChecks(results) : []));
   host.append(...rdActivityGroups(screen, { overview: activityOverviewValue(results), workflow: steps, diff: rdDiffRowValue(r) }));
 
   const acts = document.createElement('div');

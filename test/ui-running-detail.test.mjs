@@ -1299,7 +1299,7 @@ test('a finished run: its headline, the facts, what to check, Create pull reques
   assert.match(facts.textContent, /\+12/);
   const result = rd.querySelector('.rd-result');
   assert.equal(result.hidden, false);
-  assert.match(result.querySelector('.issues').textContent, /Unauthenticated uploads/);
+  assert.equal(result.querySelector('.issues'), null, 'the things to check live in Overview only');
   assert.equal(result.querySelector('[data-rd-tab="diff"] .rd-srow-v').textContent, '2 files');
   const pr = result.querySelector('.rd-create-pr');
   assert.ok(pr, 'an eligible run offers Create pull request');

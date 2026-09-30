@@ -2771,11 +2771,11 @@ test('History opens on the glance: page title, status line, facts, the tab rows;
   assert.equal(hd.querySelector('.rd-trail-btn'), null, 'no trail of dots');
   assert.equal(hd.querySelectorAll('.rd-facts .rd-stats > div').length, 3, 'time · cost · changes');
   assert.deepEqual([...hd.querySelectorAll('.rd-facts .rd-stats > div > span')].map((s) => s.textContent).slice(0, 2), ['time', 'cost']);
-  assert.match(hd.querySelector('.hd-result .issues').textContent, /Uploads fall back to IP/);
+  assert.equal(hd.querySelector('.hd-result .issues'), null, 'the things to check live in Overview only');
   assert.equal(hd.querySelector('.rd-nowlist').textContent, '', 'no step list on a finished run');
   // Every tab is a row, in tab order, under Results and How it ran.
   const groups = [...hd.querySelectorAll('.hd-result .rd-sgroup')];
-  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent).filter((t) => t !== 'Things to check'), ['Results', 'How it ran']);
+  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent), ['Results', 'How it ran']);
   const rows = [...hd.querySelectorAll('.hd-result [data-rd-tab]')].map((b) => b.dataset.rdTab);
   const tabs = [...doc.querySelectorAll('#hist-detail .hd-tab')].map((b) => b.dataset.sec);
   assert.deepEqual(rows, tabs, 'one row per tab, in the tab bar\'s order');
