@@ -6918,7 +6918,18 @@ input.gv-name:focus-visible{outline:none;}
 .report-field{margin-bottom:14px;}
 .report-field > label{display:block;font-weight:600;font-size:12.5px;margin-bottom:6px;}
 .report-field textarea.textarea{resize:vertical;min-height:64px;font-size:13.5px;}
-.report-modal #report-preview{max-height:300px;margin:0;font-size:12px;}
+/* FIXED height, not max-height. This box is the tallest thing in the card and the
+   only thing whose height changes while the reporter types: pending it holds one
+   line ('Building the report…'), loaded it holds up to 300px of JSON. The card is
+   content-driven (.viewer-modal .card, :1330) inside a `place-items:center` grid
+   (:1320), so that swap re-centres the whole dialog and it "dances" on every
+   keystroke. Pinning the box pins the card. Do NOT "helpfully" add a padding here:
+   *{box-sizing:border-box} (:94) plus .viewer's padding:18px 20px (:1271) already
+   make 300px a BORDER-BOX height, and max-height:300px was border-box too, so the
+   JSON gets the same 262px of content it always did. Adding padding would be the
+   only way to make this change lossy. overflow:auto is inherited from .viewer, so
+   the JSON scrolls internally exactly as before. */
+.report-modal #report-preview{height:300px;margin:0;font-size:12px;}
 .report-optins .confirm-checkbox + .confirm-checkbox{margin-top:8px;}
 .report-optin-hint{display:block;margin-top:3px;color:var(--ink-2);font-size:11.5px;line-height:1.4;}
 .report-error{margin:10px 0 0;color:var(--red-ink);font-size:12.5px;}

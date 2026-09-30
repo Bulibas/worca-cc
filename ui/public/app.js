@@ -165,7 +165,7 @@ import {
   renderProjectTmCell, renderProjectTmChip, projectTmSummary, renderEnableDialogBody, renderMetricsHomePicker, renderWsMetricsRow, renderWsSummary, renderRouteResults, renderWsMetricsPending } from './team-metrics-surfaces.mjs';
 import { renderMapTab, emptyMapFilters } from './workspace-map-view.mjs';
 import { paintAboutInto } from './about-links.mjs';
-import { renderReasonOptions, renderOptIns, previewText, reportBlobParts } from './report-run.mjs';
+import { renderReasonOptions, renderOptIns, previewText, reportBlobParts, REPORT_PREVIEW_DEBOUNCE_MS } from './report-run.mjs';
 import { openScheduleSheet, closeScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
@@ -21580,6 +21580,13 @@ function reportPending() {
 }
 
 async function refreshReport() {
+  // A rebuild already queued behind the debounce is superseded by this one: it was
+  // armed against older form values, and letting it land would blank the preview
+  // back to "Building the report…" a beat after a fresh one had just painted. This
+  // is the single sink every rebuild passes through (open :21233, the select :21259,
+  // the opt-ins :21277, the debounce timer :21271), so one guard covers them all.
+  // A no-op when refreshReport is itself the timer callback — that id has fired.
+  clearTimeout(reportState.debounce);
   const token = (reportState.token += 1);
   reportError('');
   reportPending();
@@ -21654,10 +21661,12 @@ el.reportExpectation.addEventListener('input', () => {
   // rebuild that is merely PENDING behind the debounce as well as one in flight:
   // otherwise mousedown on the link (or Tab+Enter) fires the href built from the
   // previous text, and Copy JSON puts that same stale payload on the clipboard —
-  // the exact failure the `input` binding was chosen to avoid.
+  // the exact failure the `input` binding was chosen to avoid. The blanking of the
+  // preview is what makes this visible; the box is a fixed height, so the dialog
+  // itself does not move while it sits there.
   reportState.token += 1;   // orphan anything already in flight
   reportPending();          // strips the href and nulls the payload NOW
-  reportState.debounce = setTimeout(refreshReport, 250);
+  reportState.debounce = setTimeout(refreshReport, REPORT_PREVIEW_DEBOUNCE_MS);
 });
 el.reportOptins.addEventListener('change', (e) => {
   const key = e.target && e.target.dataset ? e.target.dataset.optin : '';
