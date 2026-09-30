@@ -17,8 +17,14 @@ Worca never uses the browser's own Web Speech API (Chrome sends that audio to Go
   loaded for it.
 - **Hold the mic** (or the ▾ menu → *Hands-free conversation*): worca listens,
   sends when you stop talking, reads the reply aloud sentence by sentence, then
-  listens again. Talk over it to interrupt — playback and the running answer stop,
-  and what you said becomes the next question.
+  listens again. Talk over the reply to interrupt — playback and the running
+  answer stop, and what you said becomes the next question.
+- A slow answer is acknowledged so you know worca heard you: when it starts
+  researching (a tool call) before saying anything, or after 4 s with nothing to
+  say, it says a short phrase (*"Okay, let me look into that."*, *"Hmm, let me
+  think."*, …). If worca writes a line before the tool call ("I'll check the
+  runs."), that line is read instead. Quick answers are just read. The
+  acknowledgement itself cannot be interrupted.
 - An utterance ends after **1.2 s of silence**. Speak slowly or pause to think?
   Raise **Pause before sending** (Settings › Providers › Speech, 0.3–5 s) so you are
   not cut off mid-sentence; lower it for snappier turns.

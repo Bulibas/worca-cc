@@ -2,7 +2,8 @@
 // The voice controller (docs/speech.md) with a fake VAD, fake fetch and fake
 // audio: support gating, dictation, the hands-free loop, sentence-level TTS as
 // frames stream, gating while thinking, barge-in, text-only fallback, stop,
-// and the Web Audio player that Safari needs for replies spoken after the click.
+// the hands-free acknowledgement, and the Web Audio player that Safari needs for
+// replies spoken after the click.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVoiceController, voiceSupport, webAudioPlayer } from '../ui/public/ask-voice.mjs';
@@ -44,7 +45,7 @@ const win = {
   setTimeout: (fn, ms) => { const t = setTimeout(fn, ms); t.unref(); return t; }, clearTimeout,
 };
 
-function setup({ tts = true, fetchOverride } = {}) {
+function setup({ tts = true, fetchOverride, ackPhrases = [], ackAfterMs = 60_000, random } = {}) {
   const vad = fakeVad();
   const audio = fakeAudio();
   const states = [];
@@ -52,8 +53,10 @@ function setup({ tts = true, fetchOverride } = {}) {
   const notices = [];
   let bargeIns = 0;
   const calls = [];
+  const synthesized = [];
   const fetch = async (url, init = {}) => {
     calls.push(url);
+    if (url === '/api/speech/synthesize') synthesized.push(JSON.parse(init.body).text);
     if (fetchOverride) { const r = await fetchOverride(url, init); if (r) return r; }
     if (url === '/api/speech') return { ok: true, json: async () => ({ stt: { configured: true }, tts: { configured: tts } }) };
     if (url === '/api/speech/transcribe') return { ok: true, json: async () => ({ text: ' hello worca ' }) };
@@ -61,15 +64,17 @@ function setup({ tts = true, fetchOverride } = {}) {
     return { ok: false, status: 404, json: async () => ({}) };
   };
   const v = createVoiceController({
-    win, fetch, loadVad: async () => vad.lib, playAudio: audio.play,
+    win, fetch, loadVad: async () => vad.lib, playAudio: audio.play, ackPhrases, ackAfterMs, random,
     onState: (s, info) => states.push([s, info.mode]),
     onTranscript: (t, o) => transcripts.push([t, o.autoSend]),
     onBargeIn: () => { bargeIns += 1; },
     onNotice: (m) => notices.push(m),
   });
-  return { v, vad, audio, states, transcripts, notices, calls, bargeIns: () => bargeIns };
+  return { v, vad, audio, states, transcripts, notices, calls, synthesized, bargeIns: () => bargeIns };
 }
 const frame = (type, extra = {}) => ({ type, threadId: 't', messageId: 'm1', ...extra });
+const toolFrame = (id = 'tu1', extra = {}) => frame('ask-block', { block: { kind: 'tool', id, name: 'mcp__worca__list_runs', status: 'running' }, ...extra });
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test('voiceSupport explains an insecure page and a missing mic', () => {
   assert.match(voiceSupport({ ...win, isSecureContext: false }).reason, /https or http:\/\/localhost/);
@@ -245,7 +250,7 @@ test('browser engines (the default): Whisper transcribes and Kokoro speaks in th
     speak: async (text, opts) => { engine.spoken.push([text, opts]); return { audio: new Float32Array(240), rate: 24000 }; },
   });
   const v = createVoiceController({
-    win: { ...win, Blob }, fetch, loadVad: async () => vad.lib, browserSpeech,
+    win: { ...win, Blob }, fetch, loadVad: async () => vad.lib, browserSpeech, ackPhrases: [],
     playAudio: (blob) => { played.push(blob); return { ended: Promise.resolve('ended'), stop() {} }; },
     onState: (s, info) => states.push([s, info.detail]),
     onTranscript: (t, o) => transcripts.push([t, o.autoSend]),
@@ -418,4 +423,170 @@ test('webAudioPlayer: a context the browser keeps suspended fails with a reason 
   assert.equal(await h.ended, 'error');
   assert.match(h.error.message, /blocked audio playback/);
   assert.deepEqual(log.started, []);
+});
+
+test('a quick reply is not acknowledged: its first sentence comes before the slow-answer delay', async () => {
+  const t = setup({ ackPhrases: ['On it.'], ackAfterMs: 30 });
+  await t.v.start('handsfree');
+  await tick();
+  assert.deepEqual(t.synthesized, ['On it.']);          // rendered ahead while the user talks, in case it is needed
+  t.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+  assert.deepEqual(t.transcripts, [['hello worca', true]]);
+  assert.deepEqual(t.audio.played, []);                  // nothing said yet: it may be quick
+  t.v.onFrame(frame('ask-start'), '');
+  t.v.onFrame(frame('ask-delta'), 'I can look up runs. ');
+  await tick(); await tick();
+  await wait(50);
+  assert.deepEqual(t.audio.played, ['I can look up runs.']);
+});
+
+test('a long think is acknowledged once the delay passes with nothing to say, then the reply follows it', async () => {
+  const t = setup({ ackPhrases: ['On it.'], ackAfterMs: 20 });
+  await t.v.start('handsfree');
+  t.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+  t.v.onFrame(frame('ask-start'), '');
+  await wait(40); await tick();
+  assert.deepEqual(t.audio.played, ['On it.']);
+  assert.equal(t.v.state(), 'thinking');                // the chip does not claim the reply is playing
+  t.v.onFrame(frame('ask-delta'), 'First sentence. ');
+  await tick(); await tick();
+  assert.deepEqual(t.audio.played, ['On it.']);          // the reply waits for the acknowledgement
+  t.audio.current.end(); await tick(); await tick();
+  assert.deepEqual(t.audio.played, ['On it.', 'First sentence.']);
+  assert.equal(t.v.state(), 'speaking');
+  t.v.onFrame(frame('ask-done', { text: 'First sentence.', status: 'done' }), null);
+  t.audio.current.end(); await tick(); await tick();
+  assert.equal(t.v.state(), 'listening');
+  assert.deepEqual(t.synthesized, ['On it.', 'First sentence.']);   // rendered once, then reused
+});
+
+test('research: a tool starting before anything was said is acknowledged at once', async () => {
+  const t = setup({ ackPhrases: ['On it.'] });
+  await t.v.start('handsfree');
+  t.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+  t.v.onFrame(frame('ask-start'), '');
+  t.v.onFrame(toolFrame(), '');
+  await tick(); await tick();
+  assert.deepEqual(t.audio.played, ['On it.']);
+  t.v.onFrame(toolFrame('tu1', { block: { kind: 'tool', id: 'tu1', status: 'done' } }), '');   // the same tool finishing
+  t.v.onFrame(toolFrame('tu2'), '');                                                           // a second tool
+  t.audio.current.end(); await tick(); await tick();
+  assert.deepEqual(t.audio.played, ['On it.']);          // said once per turn
+});
+
+test('the text before a tool call is spoken when the tool starts, and stands in for the acknowledgement', async () => {
+  const t = setup({ ackPhrases: ['On it.'], ackAfterMs: 30 });
+  await t.v.start('handsfree');
+  t.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+  t.v.onFrame(frame('ask-start'), '');
+  t.v.onFrame(frame('ask-delta'), "I'll check the runs.");
+  await tick(); await tick();
+  assert.deepEqual(t.audio.played, []);                  // no space after the period yet: could still be mid-sentence
+  t.v.onFrame(toolFrame(), "I'll check the runs.");
+  await tick(); await tick();
+  assert.deepEqual(t.audio.played, ["I'll check the runs."]);
+  t.audio.current.end(); await tick();
+  await wait(50);
+  t.v.onFrame(frame('ask-delta'), "I'll check the runs.\n\nThree runs failed today. ");
+  await tick(); await tick();
+  assert.deepEqual(t.audio.played, ["I'll check the runs.", 'Three runs failed today.']);
+});
+
+test('the acknowledgement cannot be barged in on: speech over it neither stops the turn nor is sent', async () => {
+  const t = setup({ ackPhrases: ['On it.'] });
+  await t.v.start('handsfree');
+  t.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+  t.v.onFrame(frame('ask-start'), '');
+  t.v.onFrame(toolFrame(), '');
+  await tick(); await tick();
+  assert.deepEqual(t.audio.played, ['On it.']);
+  t.vad.opts.onSpeechRealStart();
+  t.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+  assert.equal(t.bargeIns(), 0);
+  assert.equal(t.transcripts.length, 1);
+  assert.equal(t.vad.setOptionsCalls.length, 0);        // listen thresholds throughout: it is not 'speaking'
+  assert.equal(t.v.state(), 'thinking');
+});
+
+test('the acknowledgement rotates: never the same phrase twice running', async () => {
+  const t = setup({ ackPhrases: ['Okay.', 'On it.'], random: () => 0 });
+  await t.v.start('handsfree');
+  for (const id of ['m1', 'm2', 'm3']) {
+    t.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+    t.v.onFrame(frame('ask-start', { messageId: id }), '');
+    t.v.onFrame(toolFrame(`tu-${id}`, { messageId: id }), '');
+    await tick(); await tick();
+    t.audio.current.end(); await tick();
+    t.v.onFrame(frame('ask-error', { messageId: id }), null);
+    await tick();
+    assert.equal(t.v.state(), 'listening');
+  }
+  assert.deepEqual(t.audio.played, ['Okay.', 'On it.', 'Okay.']);
+});
+
+test('a turn that ends before the delay is never acknowledged; one that ends during it listens once it is said', async () => {
+  const quick = setup({ ackPhrases: ['On it.'], ackAfterMs: 20 });
+  await quick.v.start('handsfree');
+  quick.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+  quick.v.onFrame(frame('ask-start'), '');
+  quick.v.onFrame(frame('ask-error'), null);
+  await wait(40);
+  assert.deepEqual(quick.audio.played, []);
+  assert.equal(quick.v.state(), 'listening');
+
+  const t = setup({ ackPhrases: ['On it.'] });
+  await t.v.start('handsfree');
+  t.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+  t.v.onFrame(frame('ask-start'), '');
+  t.v.onFrame(toolFrame(), '');
+  await tick(); await tick();
+  t.v.onFrame(frame('ask-error'), null);
+  await tick();
+  assert.equal(t.v.state(), 'thinking');
+  t.audio.current.end(); await tick(); await tick();
+  assert.equal(t.v.state(), 'listening');
+});
+
+test('stopping voice while an acknowledgement is pending: it is never said', async () => {
+  const t = setup({ ackPhrases: ['On it.'], ackAfterMs: 20 });
+  await t.v.start('handsfree');
+  t.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+  await t.v.stop();
+  await wait(40);
+  assert.deepEqual(t.audio.played, []);
+});
+
+test('no acknowledgement without a spoken voice: talk mode, and hands-free with text-to-speech off', async () => {
+  const talk = setup({ ackPhrases: ['On it.'], ackAfterMs: 10 });
+  await talk.v.start('talk');
+  talk.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+  talk.v.onFrame(frame('ask-start'), '');
+  talk.v.onFrame(toolFrame(), '');
+  const off = setup({ ackPhrases: ['On it.'], ackAfterMs: 10, tts: false });
+  await off.v.start('handsfree');
+  off.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+  off.v.onFrame(frame('ask-start'), '');
+  off.v.onFrame(toolFrame(), '');
+  await wait(30);
+  for (const t of [talk, off]) {
+    assert.deepEqual(t.transcripts, [['hello worca', true]]);
+    assert.deepEqual(t.audio.played, []);
+    assert.deepEqual(t.synthesized, []);
+  }
+});
+
+test('an acknowledgement that cannot be rendered drops replies to text only, with the reason', async () => {
+  const t = setup({ ackPhrases: ['On it.'], fetchOverride: async (url) => (url === '/api/speech/synthesize' ? { ok: false, status: 502, json: async () => ({ error: 'speech server unreachable' }) } : null) });
+  await t.v.start('handsfree');
+  t.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+  t.v.onFrame(frame('ask-start'), '');
+  t.v.onFrame(toolFrame(), '');
+  await tick(); await tick(); await tick();
+  assert.equal(t.notices.length, 1);
+  assert.match(t.notices[0], /text only.*unreachable/);
+  assert.equal(t.v.state(), 'thinking');                // still waiting for the sent turn
+  t.v.onFrame(frame('ask-done', { text: 'Not spoken.', status: 'done' }), null);
+  await tick();
+  assert.deepEqual(t.audio.played, []);
+  assert.equal(t.v.state(), 'listening');
 });

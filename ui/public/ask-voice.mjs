@@ -5,6 +5,8 @@
 // Kokoro in a worker, speech-browser.mjs; the default) or 'server' (the user's own
 // OpenAI-compatible servers through /api/speech/*) — and an injected audio player.
 // States: off → loading → listening ⇄ transcribing → thinking ⇄ speaking; error.
+// Hands-free says a short acknowledgement ("Okay, let me look into that.") when the
+// answer will be slow — research, or a long think — so the wait is not dead air.
 // Never the Web Speech API: Chrome sends that audio to Google.
 import { encodeWav, cleanTranscript, createSpeechChunker } from '../../src/shared/speech.mjs';
 import { createBrowserSpeech } from './speech-browser.mjs';
@@ -25,6 +27,18 @@ const CONVERSATIONS = new Set(['handsfree', 'talk']);
 // The in-browser models hold several hundred MB of memory: kept warm between voice
 // sessions, released after this long with voice off (the next start reloads from disk).
 const IDLE_RELEASE_MS = 30 * 60_000;
+// Said when a hands-free answer is slow. Every word is in misaki's dictionary.
+export const ACK_PHRASES = Object.freeze([
+  'Okay, let me look into that.',
+  'Hmm, let me think.',
+  'Sure, one moment.',
+  'Got it, let me check.',
+  'Alright, give me a second.',
+  'On it.',
+]);
+// Short Ask answers with no tools finish in about 2.5–4.5 s end to end, so their first
+// sentence is spoken well inside this; silence this long after sending means a long think.
+const ACK_AFTER_MS = 4000;
 
 /** Can this page capture audio at all? { ok } or { ok:false, reason } for the composer. */
 export function voiceSupport(win) {
@@ -129,24 +143,28 @@ function micError(err) {
 }
 
 /**
- * createVoiceController({ win, fetch, loadVad, playAudio, browserSpeech, onState, onTranscript, onBargeIn, onNotice })
+ * createVoiceController({ win, fetch, loadVad, playAudio, browserSpeech, onState, onTranscript, onBargeIn, onNotice, ackPhrases })
  *  - browserSpeech(kind)                the in-browser engine for 'stt' / 'tts' (default: speech-browser.mjs)
+ *  - ackPhrases, ackAfterMs             what hands-free says when the answer is slow ([] = nothing), and
+ *                                       how long a silence counts as slow
  *  - onState(state, { mode, detail })   paint the mic / status chip
  *  - onTranscript(text, { autoSend })   put text in the composer (and send when autoSend)
  *  - onBargeIn()                        the user spoke over the reply: stop the in-flight turn
  *  - onNotice(message)                  a non-fatal message for the composer line
  * The panel feeds onFrame(frame, liveText) for every applied job frame of the current thread.
  */
-export function createVoiceController({ win, doc, fetch, loadVad, playAudio, browserSpeech, onState, onTranscript, onBargeIn, onNotice, idleReleaseMs = IDLE_RELEASE_MS }) {
+export function createVoiceController({ win, doc, fetch, loadVad, playAudio, browserSpeech, onState, onTranscript, onBargeIn, onNotice, idleReleaseMs = IDLE_RELEASE_MS, ackPhrases = ACK_PHRASES, ackAfterMs = ACK_AFTER_MS, random = Math.random }) {
   const load = loadVad || (() => loadVadLibrary(win, doc));
   const play = playAudio || webAudioPlayer(win);
   const makeBrowser = browserSpeech || ((kind) => createBrowserSpeech(win, kind));
   const browser = {};                               // kind → engine, kept warm across sessions
   const browserEngine = (kind) => (browser[kind] ||= makeBrowser(kind));
+  const ackAudio = new Map();                       // voice config + phrase → Promise<Blob>, so an ack plays at once
   let idleTimer = null;
   function releaseEngines() {
     win.clearTimeout(idleTimer);
     idleTimer = null;
+    ackAudio.clear();
     for (const e of Object.values(browser)) { try { e.release(); } catch { /* already gone */ } }
     if (play.close) play.close();                   // the next hands-free click makes a fresh one
   }
@@ -158,11 +176,13 @@ export function createVoiceController({ win, doc, fetch, loadVad, playAudio, bro
     mode: null, state: 'off', vad: null, gen: 0, ttsEnabled: false, cfg: null,
     sttCtrl: null, turnId: null, chunker: null, turnEnded: false, awaitingTurn: false,
     doneIds: new Set(), queue: [], playing: null, ttsCtrl: null,
+    nextAck: null, ackArmed: false, ackTimer: null, toolIds: new Set(),
   };
 
   function set(state, detail) {
     s.state = state;
     try { onState(state, { mode: s.mode, detail: detail || null }); } catch { /* the panel repaints itself */ }
+    if (state === 'listening') prepareAck();       // the voice is idle while the user talks
   }
 
   async function openVad() {
@@ -263,7 +283,60 @@ export function createVoiceController({ win, doc, fetch, loadVad, playAudio, bro
     }
     s.awaitingTurn = true;              // stay 'thinking' until the sent turn's ask-start
     set('thinking');
+    armAck();
     onTranscript(text, { autoSend: true });
+  }
+
+  // ── acknowledgement: "I heard you" before a slow reply ──
+  // Armed when an utterance is sent; said on research (a tool starts before anything
+  // was said) or after ackAfterMs of silence; dropped once the reply has something to say.
+  function pickAck(except) {
+    const pool = ackPhrases.length > 1 ? ackPhrases.filter((p) => p !== except) : ackPhrases;
+    return pool[Math.min(pool.length - 1, Math.floor(random() * pool.length))];
+  }
+
+  function ackBlob(text) {
+    const key = `${JSON.stringify((s.cfg && s.cfg.tts) || {})}\n${text}`;
+    let p = ackAudio.get(key);
+    if (!p) {
+      // No abort signal: a barge-in or stop leaves the phrase rendering, cached for next time.
+      p = render(text).catch((err) => { ackAudio.delete(key); throw err; });
+      p.catch(() => {});
+      ackAudio.set(key, p);
+    }
+    return p;
+  }
+
+  /** Render the next acknowledgement while the user is still speaking. */
+  function prepareAck() {
+    if (s.mode !== 'handsfree' || !s.ttsEnabled || !ackPhrases.length) return;
+    if (!s.nextAck) s.nextAck = pickAck();
+    ackBlob(s.nextAck);
+  }
+
+  function armAck() {
+    disarmAck();
+    if (s.mode !== 'handsfree' || !s.ttsEnabled || !ackPhrases.length) return;
+    const gen = s.gen;
+    s.ackArmed = true;
+    s.ackTimer = win.setTimeout(() => { s.ackTimer = null; if (gen === s.gen) acknowledge(); }, ackAfterMs);
+  }
+
+  function disarmAck() {
+    s.ackArmed = false;
+    if (s.ackTimer) { win.clearTimeout(s.ackTimer); s.ackTimer = null; }
+  }
+
+  // Played in 'thinking', not 'speaking': like the rest of the wait for the reply it
+  // cannot be barged in on, so it never stops the turn it acknowledges.
+  function acknowledge() {
+    if (!s.ackArmed || !s.ttsEnabled) return;
+    disarmAck();
+    const text = s.nextAck || pickAck();
+    s.nextAck = pickAck(text);                      // never the same twice running; rendered on the next 'listening'
+    if (!s.ttsCtrl) s.ttsCtrl = new AbortController();
+    s.queue.push({ text, audio: ackBlob(text), ack: true });
+    pump();
   }
 
   // ── reply → speech ──
@@ -275,6 +348,7 @@ export function createVoiceController({ win, doc, fetch, loadVad, playAudio, bro
       if (frame.messageId !== s.turnId) {                   // a replayed ask-start of the SAME turn keeps
         s.turnId = frame.messageId;                         // its chunker: the chunker waits out the rewind
         s.chunker = createSpeechChunker();                  // and never re-speaks
+        s.toolIds.clear();
       }
       s.turnEnded = false;
       if (s.state === 'listening') set('thinking');
@@ -283,35 +357,49 @@ export function createVoiceController({ win, doc, fetch, loadVad, playAudio, bro
     const mine = s.turnId && frame.messageId === s.turnId;
     if (frame.type === 'ask-delta' && mine && s.ttsEnabled) {
       for (const t of s.chunker.push(liveText || '')) enqueue(t);
+    } else if (frame.type === 'ask-block' && mine && s.ttsEnabled && isNewTool(frame.block)) {
+      // The text before a tool call is a finished block ("I'll check the runs."): say it
+      // now, not after the tool. If there was none, research is ahead: acknowledge.
+      if (liveText != null) for (const t of s.chunker.push(liveText, true)) enqueue(t);
+      acknowledge();
     } else if (frame.type === 'ask-done' || frame.type === 'ask-error') {
       if (mine && s.ttsEnabled && frame.type === 'ask-done' && frame.status !== 'stopped') {
         for (const t of s.chunker.push(frame.text ?? liveText ?? '', true)) enqueue(t);
       }
-      if (!s.doneIds.has(frame.messageId)) s.awaitingTurn = false;   // the sent turn ended (even with no ask-start)
+      if (!s.doneIds.has(frame.messageId)) { s.awaitingTurn = false; disarmAck(); }   // the sent turn ended (even with no ask-start)
       if (mine) s.doneIds.add(s.turnId);
       if (mine || !s.turnId) { s.turnEnded = true; s.turnId = null; }
       maybeListen();
     }
   }
 
+  function isNewTool(block) {
+    if (!block || (block.kind !== 'tool' && block.kind !== 'agent') || s.toolIds.has(block.id)) return false;
+    s.toolIds.add(block.id);                              // later frames of the block are status / log updates
+    return true;
+  }
+
   function enqueue(text) {
+    disarmAck();                                          // the reply speaks for itself
     if (!s.ttsCtrl) s.ttsCtrl = new AbortController();
     s.queue.push({ text, audio: null });
     pump();
   }
 
   function synth(item) {
-    const signal = s.ttsCtrl.signal;
+    item.audio = render(item.text, s.ttsCtrl.signal);
+    item.audio.catch(() => {});        // observed in pump; never an unhandled rejection
+  }
+
+  /** text → Promise<Blob> of speech, from the configured engine (async: never throws synchronously). */
+  async function render(text, signal) {
     const tts = (s.cfg && s.cfg.tts) || {};
     if (tts.engine === 'browser') {
-      item.audio = browserEngine('tts').speak(item.text, { voice: tts.voice, speed: tts.speed }, signal)
+      return browserEngine('tts').speak(text, { voice: tts.voice, speed: tts.speed }, signal)
         .then(({ audio, rate }) => new win.Blob([encodeWav(audio, rate)], { type: 'audio/wav' }));
-      item.audio.catch(() => {});
-      return;
     }
-    item.audio = fetch('/api/speech/synthesize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: item.text }), signal })
+    return fetch('/api/speech/synthesize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }), signal })
       .then(async (r) => { if (!r.ok) throw new Error(await errorOf(r, 'speech failed')); return r.blob(); });
-    item.audio.catch(() => {});        // observed in pump; never an unhandled rejection
   }
 
   async function pump() {
@@ -323,7 +411,7 @@ export function createVoiceController({ win, doc, fetch, loadVad, playAudio, bro
     let blob;
     try { blob = await item.audio; } catch (err) { return ttsFailed(err, gen); }
     if (gen !== s.gen || s.playing !== item) return;
-    if (s.state !== 'speaking') { set('speaking'); s.vad && s.vad.setOptions(BARGE_IN_THRESHOLDS); }
+    if (!item.ack && s.state !== 'speaking') { set('speaking'); s.vad && s.vad.setOptions(BARGE_IN_THRESHOLDS); }
     const h = play(blob);
     item.stop = h.stop;
     const why = await h.ended;
@@ -370,7 +458,8 @@ export function createVoiceController({ win, doc, fetch, loadVad, playAudio, bro
   function teardown() {
     if (s.sttCtrl) { s.sttCtrl.abort(); s.sttCtrl = null; }
     stopPlayback();
-    s.turnId = null; s.chunker = null; s.turnEnded = false; s.awaitingTurn = false;
+    s.turnId = null; s.chunker = null; s.turnEnded = false; s.awaitingTurn = false; s.nextAck = null;
+    disarmAck();
     // vad-web's pause() already stops the mic tracks, but an errored or paused
     // MicVAD cannot be reliably restarted: every session gets a fresh instance.
     if (s.vad) { const v = s.vad; s.vad = null; releaseVad(v); }
