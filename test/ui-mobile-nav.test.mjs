@@ -241,11 +241,11 @@ test('phone: a route closes the drawer and names the page in the bar; disclosure
 test('phone: a hash change (back button) closes an open drawer', async () => {
   const { $, click, window } = await boot({ width: 390 });
   click('#mbar-menu');
-  window.location.hash = 'history';
+  window.location.hash = 'history';   // a legacy bare route: it lands on the one Runs page
   window.dispatchEvent(new window.HashChangeEvent('hashchange'));
   await tick();
   assert.equal(window.document.body.classList.contains('nav-open'), false);
-  assert.equal($('#mbar-title').textContent, 'History');
+  assert.equal($('#mbar-title').textContent, 'Runs');
 });
 
 test('resizing across tiers closes the drawer and re-derives the rail', async () => {

@@ -345,6 +345,9 @@ test('cancel / Escape / backdrop close without POSTing', async () => {
   const ctx = await bootShip({ arms: prArm(PR_OK) });
   const { window } = ctx;
   const modal = await openModal(ctx);
+  // The slide layout: there, an Escape that leaked past the modal would send the glance
+  // back to the list. Side by side it does nothing, and the check below would be vacuous.
+  window.document.getElementById('runs-shell').dataset.layout = 'slide';
 
   const closers = {
     cancel: () => click(window, modal.querySelector('.shipit-cancel')),
@@ -409,7 +412,8 @@ test('leaving the detail screen closes the modal, and Create PR still works afte
   const ctx = await bootShip({ arms: prArm(PR_OK) });
   const { window } = ctx;
   await openModal(ctx);
-  go(window, 'history');
+  // Leave Runs: a bare #history would reopen this same run in the split layout (D6).
+  go(window, 'new');
   await settle(window, 6);
   // The modal is a top-level overlay, not a child of #hist-detail: emptying the
   // detail host does not dismiss it, so closeHistDetail must tear it down.
@@ -437,28 +441,36 @@ test('detail -> detail navigation tears the modal down too', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Keeping the list card in step
+// Keeping the list row in step
 // ---------------------------------------------------------------------------
 
-test('a successful ship updates the LIST card too (no stale Create PR)', async () => {
-  const ctx = await bootShip({ arms: prArm(PR_OK) });
+test('a successful ship updates the LIST row too (no stale Create PR)', async () => {
+  const OTHER = row({ id: 'aaaa1111', title: 'Another run' });
+  const ctx = await bootShip({ rows: [row(), OTHER], arms: prArm(PR_OK) });
   const { window } = ctx;
+  const rowSel = `#runs-list .runs-row[data-slot="group"][data-pipeline-id="${ROW.id}"]`;
+  const word = () => window.document.querySelector(`${rowSel} .runs-row-sub`).textContent;
   const modal = await openModal(ctx);
+  assert.match(word(), /^Finished\b/, 'no PR yet: the row reads Finished');
   click(window, modal.querySelector('.shipit-ok'));
   await settle(window, 6);
 
-  go(window, 'history');                                   // list<->detail hops do NOT refetch
+  // Row<->row hops do NOT refetch the list, so the ship itself must keep the row current.
+  const listFetches = () => ctx.calls.filter((c) => c.url.endsWith('/api/history')).length;
+  const before = listFetches();
+  go(window, `history/${KEY}/${OTHER.id}`);                // another saved run...
   await settle(window, 6);
-  const card = window.document.querySelector('#history .hist-card');
-  assert.ok(card, 'the list card is still there');
-  assert.equal(card.querySelector('.hist-pr'), null, 'the Create-PR button was swapped out');
-  assert.match(card.querySelector('.hist-pr-link').textContent, /View PR/);
+  await openDetail(ctx);                                   // ...and back
+  await settle(window, 6);
+  assert.equal(listFetches(), before, 'hopping between saved runs does not refetch /api/history');
 
-  // Re-entering the run must NOT re-open the modal — that was the stale-button ->
+  assert.ok(window.document.querySelector(rowSel), 'the list row is still there');
+  assert.match(word(), /^In review\b/, 'the row reads the OPEN PR');
+  // Re-entering the run must NOT offer Create PR again: that was the stale-button ->
   // double-POST loop (patchHistoryPr in the ship path + the `if (!record.pr)` gate).
-  await openDetail(ctx);
-  assert.equal(isOpen(window), false, 'a shipped run never re-opens the confirm modal');
-  assert.equal(prPosts(ctx).length, 1);
+  assert.equal(hdPr(window).hidden, true, 'the Create-PR button was swapped out');
+  assert.equal(hdPrLink(window).hidden, false);
+  assert.match(hdPrLink(window).textContent, /View PR/);
 });
 
 test('the PR-enrichment hooks repaint the OPEN detail header', async () => {
@@ -526,22 +538,21 @@ test('workspace runs never show Create PR', async () => {
   assert.equal(hdPrLink(ctx.window).hidden, true);
 });
 
-test('a workspace run cannot reach the ship-it modal from the LIST card either', async () => {
-  // The end-to-end half of the predicate test below. The list card's Create-PR
-  // button is the ONLY writer of pendingShipIt; with the shared predicate in place
-  // that button is never rendered for a workspace row, so navigating from the card
-  // can never arm the modal — and confirming it can never 404 on POST /api/pr.
+test('a workspace run cannot reach the ship-it modal from the LIST either', async () => {
+  // The end-to-end half of the predicate test below. Only the saved page's Create-PR
+  // control opens the modal, and the shared predicate never offers it for a workspace
+  // row, so opening that run from its list row can never arm the modal — and
+  // confirming it can never 404 on POST /api/pr.
   const ctx = await bootShip({ rows: [row({ projectKey: WKS_KEY, target: 'workspace' })] });
-  go(ctx.window, 'history');
+  go(ctx.window, 'runs');                                  // nothing remembered: the bare list
   await settle(ctx.window);
-  const card = ctx.window.document.querySelector('#history .hist-card');
-  assert.ok(card, 'the workspace row still renders a card');
-  const btn = card.querySelector('.hist-pr');
-  assert.equal(btn.hidden, true, 'no Create-PR button on a workspace card');
-  // If a future change re-opens the gate, clicking it must still not ship.
-  click(ctx.window, btn);
-  // Navigate the way the card does, then let the detail screen settle.
-  await openDetail(ctx, wksDetailHash);
+  const listRow = ctx.window.document.querySelector(
+    `#runs-list .runs-row[data-slot="group"][data-project-key="${WKS_KEY}"][data-pipeline-id="${ROW.id}"]`);
+  assert.ok(listRow, 'the workspace row is listed');
+  click(ctx.window, listRow);                              // navigate the way the row does
+  await settle(ctx.window, 5);
+  assert.equal(ctx.window.location.hash, `#${wksDetailHash}`, 'the row opens its saved page');
+  assert.equal(hdPr(ctx.window).hidden, true, 'no Create PR on the workspace run');
   assert.equal(isOpen(ctx.window), false, 'the ship-it modal never opens for a workspace run');
   assert.equal(prPosts(ctx).length, 0, 'and no POST /api/pr is fired');
 });

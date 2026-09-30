@@ -187,31 +187,23 @@ body{
 /* On the hovered item's grey, the badge turns white so it stays a badge. */
 .nav button:hover:not(.active) .nav-count.n-grey{background:var(--panel);}
 .nav button.active .nav-count{background:var(--on-ink-wash);color:var(--on-ink);}
-/* Running split-badges: green = work in flight, amber = paused count. Green is
-   applied by app.js ONLY while the count is >0 — at zero the badge falls back to
-   n-grey, the inert-inventory treatment the Schedules count uses, so a
-   permanently green pill cannot dilute the green that should catch the eye.
-   Both keep their colour on the dark active fill (the generic active rule above
-   would wash them into translucent white). */
+/* The Runs live count: green = work in flight. Green is applied by app.js ONLY while
+   the count is >0 — at zero the badge falls back to n-grey, the inert-inventory
+   treatment the Schedules count uses, so a permanently green pill cannot dilute the
+   green that should catch the eye. It keeps its colour on the dark active fill (the
+   generic active rule above would wash it into translucent white). */
 .nav-count.n-run{background:var(--green);color:var(--on-status);}
-.nav-count.n-paused{background:var(--amber);color:var(--on-status);position:relative;margin-left:6px;}
-/* Schedules' unread-problems badge sits beside its grey count exactly as Running's paused badge does */
+/* Schedules' unread-problems badge sits beside its grey count */
 #nav-schedules-unread{margin-left:6px;}
 .nav-count[hidden]{display:none;}   /* author display:grid beats the UA [hidden] rule */
 .nav button.active .nav-count.n-run{background:var(--green);color:var(--on-status);}
-.nav button.active .nav-count.n-paused{background:var(--amber);color:var(--on-status);}
-/* Tiny pause flag pinned at the badge's top-right corner. Scoped under
-   .nav-count so it outranks the generic `.nav button svg` sizing rule. */
-.nav-count .pause-flag{position:absolute;top:-5px;right:-6px;width:13px;height:13px;padding:2px;
-  border-radius:50%;background:var(--amber-ink);border:1.5px solid var(--panel);fill:var(--on-status);}
 
-/* Parent roll-up "needs you" dot on the Running nav item (sidebar + the phone bar's menu button) */
+/* Parent roll-up "needs you" dot on the phone bar's menu button */
 .nav-rollup {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--amber); margin-left: 6px; flex: 0 0 auto;
   animation: pulse 1.3s ease-in-out infinite;
 }
-.nav button.active .nav-rollup { background: var(--on-ink); }
 
 /* Child pipeline rows nested under Running — tree-connector style (mirrors the
    sub-agents tree: a vertical spine on the left with a branch into each dot). */
@@ -327,14 +319,12 @@ body{
 
 /* ---------- Main ---------- */
 .main{flex:1;min-width:0;padding:26px 32px 40px;overflow-y:auto;}
-/* History becomes a two-screen track: .main stops scrolling and becomes the
+/* Projects becomes a two-screen track: .main stops scrolling and becomes the
    bounded column, the view takes the remainder, and each screen owns its own
-   scrollport. Dropping the container's TOP padding is what lets the sticky pills
-   toolbar + per-project headers pin flush to the very top of that scrollport —
-   without it, .main's 26px top padding leaves a band above the stuck header
-   where scrolled cards peek through (the reported bug). The inset is re-applied
-   on the topbar (below) so the unscrolled layout is unchanged. */
-body.view-history .main,body.view-projects .main{display:flex;flex-direction:column;overflow:hidden;padding:0;}
+   scrollport. Dropping the container's TOP padding is what lets sticky headers
+   pin flush to the very top of that scrollport. The inset is re-applied on the
+   topbar (below) so the unscrolled layout is unchanged. (Runs has its own rule.) */
+body.view-projects .main{display:flex;flex-direction:column;overflow:hidden;padding:0;}
 body.view-workspaces .main{display:flex;flex-direction:column;overflow:hidden;padding:0;}   /* the Workspaces track: the same bounded column */
 .topbar{display:flex;align-items:flex-start;justify-content:space-between;
   gap:24px;margin-bottom:22px;}
@@ -345,25 +335,6 @@ body.view-workspaces .main{display:flex;flex-direction:column;overflow:hidden;pa
   border:1px solid var(--line-2);padding:9px 15px;border-radius:999px;
   font-weight:600;font-size:12.5px;color:var(--ink-2);box-shadow:var(--shadow-soft);}
 .pill-status .dot{width:8px;height:8px;border-radius:50%;background:var(--ink-3);}
-.btn-stop{display:inline-flex;align-items:center;gap:8px;background:var(--red-bg);
-  color:var(--red-ink);border:none;padding:11px 19px;border-radius:999px;
-  font-family:inherit;font-weight:600;font-size:13px;cursor:pointer;transition:box-shadow .15s;}
-.btn-stop:hover{box-shadow:inset 0 0 0 1.5px var(--red);}
-.btn-stop:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-.btn-pause{display:inline-flex;align-items:center;gap:8px;background:var(--amber-bg);
-  color:var(--amber-ink);border:none;padding:11px 19px;border-radius:999px;
-  font-family:inherit;font-weight:600;font-size:13px;cursor:pointer;transition:box-shadow .15s;}
-.btn-pause:hover{box-shadow:inset 0 0 0 1.5px var(--amber);}
-.btn-pause:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-.btn-resume{display:inline-flex;align-items:center;gap:8px;background:var(--green-bg);
-  color:var(--green-ink);border:none;padding:11px 19px;border-radius:999px;
-  font-family:inherit;font-weight:600;font-size:13px;cursor:pointer;transition:box-shadow .15s;}
-.btn-resume:hover{box-shadow:inset 0 0 0 1.5px var(--green);}
-.btn-resume:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-/* [hidden] must beat the author display rules above (author origin outranks the
-   UA [hidden]{display:none} rule — same footgun as .questions-toggle[hidden]). */
-.btn-pause[hidden],.btn-resume[hidden]{display:none;}
-
 /* ---------- Views ---------- */
 .view{display:block;}
 
@@ -770,19 +741,8 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
   color:var(--ink-3);font-size:11px;letter-spacing:.08em;text-transform:uppercase;}
 .log-sep::before,.log-sep::after{content:"";flex:1;height:1px;background:var(--line);}
 
-/* ---------- Running ---------- */
+/* ---------- Card lists (Models, Agents, Projects, Workspaces, …) ---------- */
 .run-list{display:flex;flex-direction:column;gap:18px;}
-
-/* "N pipelines are waiting on your answers" — inert status line above the list
-   (design D14). Amber family; the circle inverts to --panel so it still reads
-   against the pale wash. */
-.run-ask-banner{display:flex;align-items:center;gap:12px;margin:0 0 18px;padding:13px 18px;
-  background:var(--amber-wash);border:1px solid var(--amber);border-radius:var(--r-card);}
-.run-ask-banner[hidden]{display:none;}   /* author display:flex beats the UA [hidden] rule */
-.run-ask-banner .rab-mark{flex:0 0 auto;display:flex;align-items:center;justify-content:center;
-  width:26px;height:26px;border-radius:50%;background:var(--panel);
-  color:var(--amber-ink);font-weight:700;font-size:14px;}
-.run-ask-banner .rab-text{flex:1;font-weight:500;font-size:13px;color:var(--amber-ink);}
 
 /* Identity-proxy sign-in expired (session-guard.mjs): one fixed bar above
    everything, amber like the other "needs you" banners. */
@@ -795,10 +755,6 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
   border:0;background:var(--ink);color:var(--on-ink);cursor:pointer;}
 .session-expired .se-reload:focus-visible{outline:2px solid var(--amber);outline-offset:2px;}
 
-.run-card{padding:22px 24px;}
-.run-title{font-weight:700;font-size:16px;letter-spacing:-.01em;display:flex;align-items:center;gap:10px;}
-.run-title .hash{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);font-weight:500;}
-.run-title.title-provisional{opacity:.65;font-style:italic;}
 .pill-run{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;
   font-weight:600;font-size:12.5px;white-space:nowrap;}
 .pill-run .pdot{width:7px;height:7px;border-radius:50%;animation:pulse 1.3s ease-in-out infinite;}
@@ -839,7 +795,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .run-log-head .ll-label{font-weight:700;font-size:13px;}
 .run-log-head .switch-row .txt{font-size:12.5px;font-weight:600;color:var(--ink-2);}
 
-/* log filter dropdowns (source / level / step) — run cards + history panel;
+/* log filter dropdowns (source / level / step) — the run page + history panel;
    one row always: nowrap bar, content-sized shrinkable pills (width:auto beats
    the global 100%-width select rule; min-width:0 lets bar and pills shrink) */
 .log-filters{display:flex;gap:6px;align-items:center;flex-wrap:nowrap;min-width:0;}
@@ -865,8 +821,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
    the bar after the autoscroll switch so row 1 stays label ⟷ switch) */
 .run-log-head .log-filters{order:1;flex-basis:100%;}
 
-/* needs-attention card + paused stage */
-.run-card.attention{border:1.5px solid var(--amber);box-shadow:0 0 0 4px var(--amber-bg),var(--shadow);}
+/* needs-attention flag */
 .attn-flag{display:inline-flex;align-items:center;gap:5px;margin-left:10px;background:var(--amber-bg);
   color:var(--amber-ink);font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;vertical-align:middle;}
 .attn-flag svg{stroke:var(--amber-ink);}
@@ -1382,17 +1337,7 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
   background:var(--amber-ink);color:var(--on-status);}
 .brand .side-mock-pill[hidden]{display:none;}
 
-/* ---------- History cards (navigate to the detail screen) ---------- */
-.hist-card{padding:18px 22px;}
-/* flex-start, not center: the card is now three stacked lines (title, meta,
-   branch) and the icon/aside must pin to the top of that block. */
-.hist-head{display:flex;align-items:flex-start;gap:13px;cursor:pointer;}
-.hist-head:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-.hist-head .h-meta{flex:1;min-width:0;}
-/* one line, ellipsized (the `flex:1;min-width:0` above is what makes it work). */
-.hist-head .h-meta b{display:block;font-weight:600;font-size:14.5px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.hist-head .hash{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);}
+/* ---------- Retained-work banner (the saved run's page) ---------- */
 .retained-banner{margin:0 0 18px;padding:16px 18px;border:1.5px solid var(--amber);
   border-radius:var(--r-card);background:var(--amber-bg);color:var(--amber-ink);font-size:12.5px;line-height:1.55;}
 .retained-banner[hidden]{display:none;}
@@ -1406,11 +1351,9 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .retained-banner a{color:var(--amber-ink);font-weight:700;}
 .hist-empty{color:var(--ink-3);font-size:13px;padding:22px 4px;text-align:center;}
 
-/* ---------- History project-filter pills ---------- */
-/* The project-filter pills become a persistent sticky toolbar pinned to the top
-   of the scroll area while the list scrolls underneath. Opaque background +
-   z-index above the per-project header (z-index:3) so scrolled cards never
-   show through, and the user can switch projects while scrolled. */
+/* ---------- Started-by filter pills (the Runs list's .runs-people row) ---------- */
+/* The base pill row; `.hist-filter.runs-people` (the Runs block) makes it one static
+   row that scrolls sideways. */
 .hist-filter{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;align-items:center;
   gap:8px;margin:0 0 14px;padding:12px 0;background:var(--bg);}
 .hist-pill{display:inline-flex;align-items:center;gap:7px;background:var(--panel);
@@ -1420,13 +1363,6 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hist-pill:hover{border-color:var(--ink-3);color:var(--ink);}
 .hist-pill.active{background:var(--ink);border-color:var(--ink);color:var(--on-ink);}
 .hist-pill .pill-count{font-size:11px;font-weight:600;opacity:.7;}
-
-/* ---------- History per-project sticky sections (All Projects view) ---------- */
-.hist-group{display:flex;flex-direction:column;gap:18px;}
-.hist-group + .hist-group{margin-top:18px;}
-.hist-group-head{position:sticky;top:var(--hist-toolbar-h, 58px);z-index:3;display:flex;align-items:center;gap:10px;
-  background:var(--bg);padding:10px 2px;margin:0;font-weight:700;font-size:14px;color:var(--ink);}
-.hist-group-head .pill-count{font-size:11.5px;font-weight:600;color:var(--ink-3);}
 
 /* ---------- Saved-markdown viewer ---------- */
 .viewer{font-family:var(--mono);font-size:12.5px;line-height:1.7;background:var(--canvas-2);border:1px solid var(--line);
@@ -1508,65 +1444,23 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .folder-list .folder-pick{flex:0 0 auto;margin:0;}
 .folder-pick-count{margin-right:auto;align-self:center;}
 
-/* ---------- per-pipeline cost (per-node cost is the graph's .nrun .cost) ---------- */
-/* The `.run-meta .run-cost` pair that lived here went with `.run-meta` itself:
-   the redesigned card emits `.run-cost` inside `.rc-seg`, which owns its own
-   type scale and prints its separator as a real `.rc-dot` node. */
-/* Edited IN PLACE, not appended: this selector is (0,2,0) and an appended bare
-   `.hist-total{…}` (0,1,0) would never win. The `margin-left:10px` is gone — the
-   v2 meta line is a flex row with its own gap. */
-.h-meta .hist-total{font-family:var(--mono);font-size:12.5px;font-weight:700;color:var(--ink);}
-.h-meta .hist-total:empty{display:none;}
-
-/* ---------- per-pipeline duration (twin of cost) ---------- */
-/* `.run-meta .run-time` removed with its cost twin above, for the same reason. */
-/* Same in-place treatment as `.h-meta .hist-total` above. */
-.h-meta .hist-time{font-family:var(--mono);font-size:12.5px;font-weight:700;color:var(--ink);}
-.h-meta .hist-time:empty{display:none;}
-
-/* Branch name under the date/cost (left column). */
-.h-meta .hist-branch{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;font-weight:600;color:var(--ink-2);margin-top:4px;}
-.h-meta .hist-branch[hidden]{display:none;}   /* author display:flex beats the UA [hidden] rule */
-.hist-branch .hist-branch-src{color:var(--ink-3);font-weight:500;}
-.hist-branch .hist-branch-arrow{flex:0 0 auto;color:var(--ink-3);}
-.hist-branch .hist-branch-arrow[hidden]{display:none;}
-.hist-branch-copy{display:inline-flex;align-items:center;justify-content:center;padding:3px;background:none;border:0;border-radius:6px;color:var(--ink-3);cursor:pointer;}
-.hist-branch-copy:hover{background:var(--hover-on-field);color:var(--ink);}
-.hist-branch-copy .ico-check{display:none;}
-.hist-branch-copy.copied .ico-copy{display:none;}
-.hist-branch-copy.copied .ico-check{display:block;color:var(--green-ink);}
-
-/* Right-side cluster on the card: Create PR + the open-detail chevron button.
-   `align-self:center` (not the parent's `align-items:flex-start`) pins the cluster
-   to the card's vertical middle, the same escape hatch `.hist-card .hist-sic` uses
-   on the other side of the row. */
-.hist-aside{display:flex;align-items:center;align-self:center;gap:10px;flex:0 0 auto;}
-/* Base rule only. The v2 card hosts `.hist-diff` INSIDE `.hist-diff-pill`, whose
-   appended `.hist-diff-pill .hist-diff` (0,2,0) outranks this; the tints come from
-   the bare `.diff-add`/`.diff-del` rules further down. */
-.hist-diff{display:inline-flex;gap:6px;font-family:var(--mono);font-size:12px;font-weight:700;}
-
 /* Spec §7.5: the "Auto → ‹workflow name›" badge, in all three headers. */
 .auto-badge{display:inline-flex;align-items:center;max-width:220px;padding:3px 9px;border-radius:999px;font-size:10.5px;font-weight:700;letter-spacing:.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   background:var(--violet-bg);color:var(--violet-ink);flex:0 0 auto;}
 .auto-badge[hidden]{display:none;}
 .auto-badge.is-deciding{background:var(--amber-bg);color:var(--amber-ink);}
-.rc-acts .auto-badge{max-width:160px;}
 .hist-merge{font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:3px 8px;border-radius:999px;white-space:nowrap;}
 .hist-merge[hidden]{display:none;}
 .hist-merge.ok{background:var(--green-bg);color:var(--green-ink);}
 .hist-merge.bad{background:var(--red-bg);color:var(--red-ink);}
 .hist-merge.unknown{background:var(--amber-bg);color:var(--amber-ink);}
 
-.hist-pr{padding:6px 12px;font-size:12px;flex:0 0 auto;}
-.hist-pr[hidden]{display:none;}
-/* These three rules are the ONLY thing that styles a PR link, so the History
-   DETAIL header's `.hd-pr-link` joins the selector lists IN PLACE. Appending a
-   separate `.hd-pr-link{…}` at EOF instead would ship the detail link as a default
-   UA anchor — browser blue, underlined — and MERGED would lose its grey. */
-.hist-pr-link,.hd-pr-link{font-size:12px;font-weight:600;color:var(--green-ink);text-decoration:none;white-space:nowrap;}
-.hist-pr-link:hover,.hd-pr-link:hover{text-decoration:underline;}
-.hist-pr-link.merged,.hd-pr-link.merged{color:var(--ink-3);}
+/* These three rules are the ONLY thing that styles a PR link (the saved run's
+   Details header). Without them it ships as a default UA anchor — browser blue,
+   underlined — and MERGED would lose its grey. */
+.hd-pr-link{font-size:12px;font-weight:600;color:var(--green-ink);text-decoration:none;white-space:nowrap;}
+.hd-pr-link:hover{text-decoration:underline;}
+.hd-pr-link.merged{color:var(--ink-3);}
 
 /* Discard-worktree button. The class moved from the retired card accordion to the
    detail screen's banner block; nothing about it was card-position-dependent. */
@@ -2942,11 +2836,6 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .cost-banner .cb-text{color:var(--ink-2);}
 .cost-banner .cb-text .mono{font-family:var(--mono);font-weight:600;color:var(--ink);}
 .cost-banner .cb-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:10px;}
-/* No margin-left: that only made sense when the note trailed .hist-total inline.
-   In the v2 card it is a direct child of .h-meta on its own line. */
-.hist-pausenote{font-size:11.5px;font-weight:600;color:var(--amber-ink);}
-.hist-pausenote.total{color:var(--red-ink);}
-.hist-pausenote.error{color:var(--red-ink);}
 .pause-error-banner{border-radius:var(--r-ctrl);padding:12px 14px;margin-top:12px;font-size:13px;background:var(--red-bg);color:var(--red-ink);}
 .pause-error-banner b{display:block;margin-bottom:4px;}
 .pause-error-banner .peb-text{color:var(--ink);font-family:var(--mono);font-size:12px;word-break:break-word;}
@@ -3165,24 +3054,10 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .mvx-warn{color:var(--red);}
 .pl-baseurl{word-break:break-all;}
 
-/* ---------- History two-screen shell ---------- */
-.view[data-view="history"]{flex:1 1 auto;min-height:0;padding:0;position:relative;}
-.hist-shell{position:relative;height:100%;overflow:hidden;}
-/* NO top padding on the scroller itself — sticky pills must pin flush to the
-   scrollport top (see the comments at the .main and .hist-filter rules). */
-.hist-screen{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;padding:0 32px 40px;
-  transition:transform .46s cubic-bezier(.65,.02,.28,1);}
-.hist-screen-list .topbar{padding-top:26px;}
-.hist-screen-list{transform:translateX(0);}
-.hist-screen-detail{transform:translateX(100%);padding:0;background:var(--bg);}
-.hist-shell.detail-open .hist-screen-list{transform:translateX(-100%);}
-.hist-shell.detail-open .hist-screen-detail{transform:translateX(0);}
-.hist-shell.no-anim .hist-screen{transition:none;}
-
 /* style.css has NO base .mono rule (only ancestor-scoped ones), so class="mono"
    alone renders in Poppins. Scope a base rule to the new subtrees only — a
    global one would touch every other view. */
-.hd .mono,.pd .mono,.hist-card .mono,#shipit-modal .mono{font-family:var(--mono);}
+.hd .mono,.pd .mono,#shipit-modal .mono{font-family:var(--mono);}
 
 /* Card, not a full-bleed band: same border/radius/shadow language as `.card`, and
    its own 20px/32px margin box supplies the inset the screen itself cannot —
@@ -3238,11 +3113,9 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .hd-diffcounts{display:inline-flex;align-items:center;gap:6px;}
 .hd-dot{font-weight:700;color:var(--ink);}
 .hd-status-word{font:600 12.5px var(--sans);}
-/* shared with the Task-11 list card's .hist-status-word (same st-* families) */
-.hd-status-word.st-done,.hist-status-word.st-done{color:var(--green-ink);}
-.hd-status-word.st-stopped,.hd-status-word.st-error,
-.hist-status-word.st-stopped,.hist-status-word.st-error{color:var(--red-ink);}
-.hd-status-word.st-paused,.hist-status-word.st-paused{color:var(--amber-ink);}
+.hd-status-word.st-done{color:var(--green-ink);}
+.hd-status-word.st-stopped,.hd-status-word.st-error{color:var(--red-ink);}
+.hd-status-word.st-paused{color:var(--amber-ink);}
 /* 14px -> 6px: the branch chip and the Resume/Archive buttons carry ~8px of their
    own vertical padding, so the row reads far further from the meta line than the
    number says. 6px + that padding lands on the same optical gap as row1->row2. */
@@ -3695,7 +3568,7 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hd-ov-task{padding:22px 24px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);}
 .hd-ov-task-h{font:600 13px var(--sans);}
 /* overflow-wrap:anywhere like its sibling .hd-ov-sub — prompts routinely carry
-   absolute paths and URLs, and `.hist-screen{overflow-x:hidden}` would silently
+   absolute paths and URLs, and `.hist-screen-detail{overflow-x:hidden}` would silently
    CLIP an unbroken token rather than let it scroll. */
 .hd-ov-task p{margin:10px 0 0;max-width:74ch;font:400 13.5px/1.75 var(--sans);color:var(--ink-2);
   white-space:pre-wrap;overflow-wrap:anywhere;}
@@ -3932,49 +3805,10 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
   .shipit-desc-busy-label{animation:none;background:none;color:var(--ink-2);}
 }
 
-/* ---------- History list card v2 ---------- */
-/* Appended at EOF, after every surviving `.hist-*` rule — the History block is not
-   contiguous (it also lives at ~796-862 and ~1516), so a mid-file append would lose
-   the source-order tie against those. Where a redesigned element KEEPS an existing
-   class name (.hist-total, .hist-time, .hist-pausenote, .h-meta b) the rule was
-   edited in place instead; those are never restated here. */
-/* card icon is 36px; scoped so the detail header's 30px .hd-sic keeps its size */
-.hist-card .hist-sic{width:36px;height:36px;align-self:center;}
-.hist-meta-line{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin-top:5px;}
-.hist-meta-line .hm-seg{display:inline-flex;align-items:center;gap:7px;}
-.hist-meta-line .hm-seg[hidden]{display:none;}   /* author display beats the UA [hidden] rule */
-.hm-dot{font:700 16px/1 var(--mono);color:var(--ink);}
-.hist-status-word{font:600 12px var(--sans);display:inline-flex;align-items:center;gap:7px;}
-/* the design's 7px status accent dot before the word; currentColor = family ink */
-.hist-meta-line .hist-status-word::before{content:'';width:7px;height:7px;border-radius:50%;
-  background:currentColor;flex:0 0 auto;}
-.hist-day,.hist-clock{font:400 12.5px var(--mono);color:var(--ink-3);}
-.hist-diff-pill{display:inline-flex;align-items:center;gap:8px;padding:4px 11px;
-  border:1px solid var(--line);border-radius:999px;background:var(--panel);font-size:12px;}
-.hist-diff-pill[hidden]{display:none;}
-.hist-diff-pill .hist-diff{display:inline-flex;gap:6px;font-weight:700;}
-.hist-diff-pill .hist-diff[hidden],.hist-nodiff[hidden]{display:none;}
-.hist-nodiff{color:var(--ink-3);}
-.hist-cmt-pill{display:inline-flex;align-items:center;gap:8px;padding:4px 11px;
-  border:1px solid var(--line);border-radius:999px;background:var(--panel);font-size:12px;color:var(--amber-ink);}
-.hist-cmt-pill[hidden]{display:none;}   /* author display:inline-flex beats the UA [hidden] rule */
-.hist-cmt-pill .hist-cmt-count{font-weight:700;}
-.hist-open{display:flex;align-items:center;justify-content:center;width:30px;height:30px;
-  border:1px solid var(--line);border-radius:9px;background:var(--panel);color:var(--ink-2);cursor:pointer;}
-.hist-open:hover{border-color:var(--hover-outline);color:var(--ink);}
-/* The card head opens the run, so the card answers the pointer: its outline
-   strengthens and its chevron darkens with it. */
-.hist-card,.run-card{transition:border-color .15s;}
-.hist-card:has(.hist-head:hover),.run-card:has(.rc-head:hover){border-color:var(--hover-outline);}
-.hist-head:hover .hist-open,.rc-head:hover .rc-open{border-color:var(--hover-outline);color:var(--ink);}
-/* "Copied" caption on the card — same CSS-only mechanism as .hd-copied */
-.hist-copied{display:none;font:500 11px var(--sans);color:var(--green-ink);}
-.hist-branch-copy.copied + .hist-copied{display:inline;}
-
 /* ---------- focus visibility (History redesign) ----------
    Every other interactive control in this stylesheet carries a ring (.btn,
-   .btn-go, .btn-stop, .nav button, .hist-head, .seg button, .info-tip, .ws-head,
-   .ch-hit); none of the new controls did. `.btn-ghost` declares no
+   .btn-go, .nav button, .seg button, .info-tip, .ws-head, .ch-hit); none of the
+   new controls did. `.btn-ghost` declares no
    ring to inherit and carries no `btn` class, so `.hd-back`, `.hd-resume` and
    `.shipit-cancel` had nothing at all — which matters most for `.hd-back`, the
    node openHistDetail focuses programmatically, and for the `.hd-tab` tablist.
@@ -3982,17 +3816,11 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hd-tab:focus-visible,.hd-back:focus-visible,.hd-resume:focus-visible,.pd-tab:focus-visible,.pd-back:focus-visible,.pd-new:focus-visible,.pd-history:focus-visible,.pd-remove:focus-visible,.pd-sec:focus-visible,.proj-open:focus-visible,.pd-ov-link:focus-visible,
 .hd-more:focus-visible,.hd-report:focus-visible,
 .hd-archive:focus-visible,.hd-pr:focus-visible,.hd-pr-link:focus-visible,.hd-after:focus-visible,
-.hd-branch-copy:focus-visible,.hd-sec:focus-visible,.hist-open:focus-visible,
-.hist-branch-copy:focus-visible,.shipit-ok:focus-visible,.shipit-cancel:focus-visible{
+.hd-branch-copy:focus-visible,.hd-sec:focus-visible,.shipit-ok:focus-visible,.shipit-cancel:focus-visible{
   outline:2px solid var(--ink);outline-offset:2px;}
 
-/* ---------- Running list card v2 (.rc-*) ----------
-   Appended at EOF, after every surviving `.run-*` / `.btn-*` rule — the Running
-   block is not contiguous (it also lives at ~557-600 and ~1109) and .btn-pause /
-   .btn-resume / .btn-stop have base rules at 237-254, so a mid-file append would
-   lose the source-order tie. Same reasoning as the History list card v2 block. */
-.rc-head{display:flex;align-items:flex-start;gap:13px;cursor:pointer;}
-.rc-head:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+/* ---------- Run rows (.rc-*): the Schedules view's ticket and schedule rows ----------
+   Born on the retired Running list card; schedules-view.mjs builds its rows from them. */
 .rc-sic{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;
   border-radius:50%;flex:0 0 auto;align-self:center;}
 .rc-sic .sic[hidden]{display:none;}
@@ -4018,47 +3846,7 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .rc-status-word.st-amber{color:var(--amber-ink);}
 .rc-status-word.st-green{color:var(--green-ink);}
 .rc-status-word.st-red{color:var(--red-ink);}
-.rc-meta .run-time,.rc-meta .run-cost{font-weight:700;color:var(--ink);}
-.rc-meta .rc-by[hidden]{display:none;}   /* author inline-flex beats the UA [hidden] rule */
-.rc-branch{display:flex;align-items:center;gap:6px;margin-top:6px;min-width:0;
-  font-family:var(--mono);font-size:12px;font-weight:600;color:var(--ink-2);}
-.rc-branch[hidden]{display:none;}      /* author display:flex beats the UA [hidden] rule */
-.rc-base{color:var(--ink-3);font-weight:500;white-space:nowrap;}
-.rc-base[hidden]{display:none;}
-.rc-branch-copy{display:inline-flex;align-items:center;gap:8px;min-width:12ch;
-  padding:4px 10px;border:1px solid var(--line);border-radius:9px;background:var(--field);
-  font:700 11.5px var(--mono);color:var(--ink);cursor:pointer;}
-.rc-branch-copy:hover{border-color:var(--hover-outline);}
-.rc-branch-name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.rc-branch-copy .ico-check{display:none;}
-.rc-branch-copy.copied .ico-copy{display:none;}
-.rc-branch-copy.copied .ico-check{display:inline;color:var(--green-ink);}
-/* "Copied" caption — the CSS-only mechanism .hd-copied / .hist-copied use, driven
-   off copyBranchToClipboard's own 1200ms `.copied` window (app.js:3666-3672). */
-.rc-copied{display:none;font:500 11px var(--sans);color:var(--green-ink);}
-.rc-branch-copy.copied + .rc-copied{display:inline;}
-.rc-acts{display:flex;align-items:center;gap:8px;flex:0 0 auto;align-self:center;margin-left:auto;}
-/* the five 30px icon buttons; .rc-open mirrors .hist-open exactly */
-.rc-acts .btn-pause,.rc-acts .btn-resume,.rc-acts .btn-stop,.rc-after,.rc-open{
-  display:inline-flex;align-items:center;justify-content:center;gap:0;
-  width:30px;height:30px;padding:0;border-radius:9px;background:var(--panel);cursor:pointer;}
-.rc-acts .btn-pause,.rc-acts .btn-resume{border:1px solid var(--amber);color:var(--amber-ink);}
-.rc-acts .btn-pause:hover,.rc-acts .btn-resume:hover{box-shadow:inset 0 0 0 1.5px var(--amber);}
-.rc-acts .btn-stop{border:1px solid var(--red);color:var(--red-ink);}
-.rc-acts .btn-stop:hover{box-shadow:inset 0 0 0 1.5px var(--red);}
-/* The base `.btn-pause[hidden],.btn-resume[hidden]` rule (254) ties on specificity
-   with `.rc-acts .btn-pause` above and would LOSE on source order — a paused card
-   would show both buttons. Re-state it at the cluster's specificity. */
-.rc-acts .btn-pause[hidden],.rc-acts .btn-resume[hidden]{display:none;}
-/* Same footgun for the run-chain button: the shared `display:inline-flex` above is an
-   AUTHOR rule and outranks the UA `[hidden]{display:none}`, so paintRunCard's
-   `afterBtn.hidden = true` would not hide it. Re-state it here. */
-.rc-acts .rc-after[hidden]{display:none;}
-.rc-open{border:1px solid var(--line);color:var(--ink-2);}
-.rc-open:hover{border-color:var(--hover-outline);color:var(--ink);}
-.rc-after{border:1px solid var(--line);color:var(--ink-2);}
-.rc-after:hover{border-color:var(--hover-outline);color:var(--ink);}
-.rc-after:focus-visible,.rc-open:focus-visible,.rc-branch-copy:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.rc-meta .run-time{font-weight:700;color:var(--ink);}
 /* ---------- Running redesign: shared keyframes (C2 — declared ONCE, here) ----------
    @keyframes are name-resolved, not cascaded, so their position relative to the
    rules that use them is irrelevant; what matters is that there is exactly one of
@@ -4072,39 +3860,104 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
   .rc-sic .sic-spin{animation:none;}
 }
 
-/* ---------- Running list card ---------- */
-/* .topbar is `justify-content:space-between` with three children now; pushing the
-   pill right keeps pill + toggle together as the right-hand group. */
-#running-status-pill{margin-left:auto;}
-/* The Running list is History-level: header, one meta line, and — when the run waits on you — one strip
-   that opens the run page at the question. */
-.rc-wait{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;margin-top:16px;padding:10px 14px;
-  border:1px solid var(--line);border-radius:12px;background:var(--field);color:var(--ink-2);font:600 13px var(--sans);text-align:left;cursor:pointer;
-  transition:border-color .15s,background .15s;}
-.rc-wait[hidden]{display:none;}
-.rc-wait.is-ask{border-color:var(--amber-line);background:var(--amber-wash);color:var(--ink);}
-.rc-wait:hover{border-color:var(--hover-outline);}
-.rc-wait:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-.rc-wait-go{font-weight:600;white-space:nowrap;opacity:.8;}
-
-/* ---------- Running two-screen shell (twin of the History track, 1591-1603) ---------- */
-.view[data-view="running"]{flex:1 1 auto;min-height:0;padding:0;position:relative;}
-.run-shell{position:relative;height:100%;overflow:hidden;}
-/* NO top padding on the scroller itself — T7's sticky .rd-tabs must pin flush to
-   the scrollport top, exactly as .hist-screen does for .hd-tabs. */
-.run-screen{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;padding:0 32px 40px;
-  transition:transform .46s cubic-bezier(.65,.02,.28,1);}
-.run-screen-list .topbar{padding-top:26px;}
-.run-screen-list{transform:translateX(0);}
-.run-screen-detail{transform:translateX(100%);padding:0;background:var(--bg);}
-.run-shell.detail-open .run-screen-list{transform:translateX(-100%);}
-.run-shell.detail-open .run-screen-detail{transform:translateX(0);}
-.run-shell.no-anim .run-screen{transition:none;}
-/* Same reasoning as body.view-history .main: .main stops scrolling and becomes
-   the bounded column so each screen owns its scrollport. */
-body.view-running .main{display:flex;flex-direction:column;overflow:hidden;padding:0;}
+/* ---------- Runs: one list beside one content pane (index.html section "runs") ---------- */
+.view[data-view="runs"]{flex:1 1 auto;min-height:0;padding:0;position:relative;}
+body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:0;}
+.runs-shell{position:relative;height:100%;display:grid;grid-template-columns:clamp(260px,24%,320px) minmax(0,1fr);grid-template-rows:minmax(0,1fr);overflow:hidden;}
+.runs-list-pane{display:flex;flex-direction:column;min-height:0;background:var(--panel);border-right:1px solid var(--line);}
+.runs-head{flex:none;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:22px 14px 10px 20px;}
+.runs-head h1{margin:0;font:700 20px/1.2 var(--sans);letter-spacing:-.01em;}
+.runs-search-btn{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border:0;border-radius:9px;background:none;color:var(--ink-2);cursor:pointer;}
+.runs-search-btn:hover,.runs-search-btn.on{background:var(--hover);color:var(--ink);}
+.runs-search-btn:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.runs-search-row{flex:none;padding:0 12px 10px;}
+.runs-search-row[hidden]{display:none;}
+/* A bare input[type=search] matches none of the global field rules (text/number only), so it is
+   skinned here the way .pal-filter is; the UA placeholder grey is 2.6:1 on dark. */
+.runs-search{display:block;width:100%;box-sizing:border-box;-webkit-appearance:none;appearance:none;padding:8px 12px;border:1.5px solid transparent;border-radius:var(--r-ctrl);background:var(--field);color:var(--ink);font:500 13px var(--sans);}
+.runs-search::placeholder{color:var(--ink-2);}
+.runs-search::-webkit-search-decoration{-webkit-appearance:none;}
+.runs-search:focus{outline:none;background:var(--field-focus);border-color:var(--ink);}
+.runs-search:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+/* Started-by pills: one row that scrolls sideways instead of wrapping (D4). */
+.hist-filter.runs-people{position:static;flex:none;flex-wrap:nowrap;overflow-x:auto;gap:6px;margin:0;padding:0 12px 10px;background:none;scrollbar-width:thin;}
+.hist-filter.runs-people > *{flex:none;}
+.hist-filter.runs-people .hist-pill-label{white-space:nowrap;}
+.hist-filter.runs-people[hidden]{display:none;}
+.runs-list{flex:1 1 auto;min-height:0;overflow-y:auto;padding-inline:8px;}
+.runs-list[aria-busy="true"]{cursor:progress;}
+.runs-needs{background:var(--field);border-radius:var(--r-card);padding:6px 4px;margin:0 4px 12px;}
+.runs-needs-head{display:flex;align-items:baseline;gap:8px;padding:4px 8px 6px;font:700 13px var(--sans);}
+.runs-count{font:600 11.5px var(--sans);color:var(--ink-2);}   /* --ink-3 is ~2.6:1: small text needs --ink-2 */
+.runs-group + .runs-group{margin-top:8px;}
+.runs-group-head{position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:8px;width:100%;padding:8px;border:0;border-radius:8px;background:var(--panel);color:var(--ink);font:700 13px var(--sans);text-align:left;cursor:pointer;}
+.runs-group-head:hover{background:var(--hover);}
+.runs-group-head:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
+.runs-group-head[aria-disabled="true"]{cursor:default;}
+.runs-group-head .runs-count{margin-left:auto;}
+.runs-chev{flex:none;color:var(--ink-3);transition:transform .15s;}
+.runs-group-head[aria-expanded="false"] .runs-chev{transform:rotate(-90deg);}
+.runs-group-rows[hidden]{display:none;}
+.runs-row{display:flex;align-items:flex-start;gap:10px;padding:8px;border-radius:var(--r-ctrl);color:var(--ink);text-decoration:none;}
+.runs-row:hover{background:var(--hover);}
+.runs-row.selected{background:var(--field);}
+.runs-needs .runs-row.selected{background:var(--panel);}
+.runs-row:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
+.runs-ic{flex:none;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;margin-top:1px;}
+.runs-ic-run,.runs-ic-start{background:var(--blue-bg);color:var(--blue-ink);}
+.runs-ic-run .runs-glyph{animation:wr-spin 1.15s linear infinite;transform-origin:50% 50%;}
+.runs-ic-ask,.runs-ic-paused{background:var(--amber-bg);color:var(--amber-ink);}
+.runs-ic-fail,.runs-ic-stop{background:var(--red-bg);color:var(--red-ink);}
+.runs-ic-done{background:var(--green-bg);color:var(--green-ink);}
+.runs-ic-scheduled{background:var(--slate-bg);color:var(--slate-ink);}
+.runs-row-body{min-width:0;display:flex;flex-direction:column;gap:2px;}
+.runs-row-title{font:600 13.5px/1.3 var(--sans);overflow-wrap:anywhere;}   /* wraps, as in the mockup */
+.runs-row-sub{font-size:12px;color:var(--ink-2);}
+.runs-note{margin:0;padding:18px 12px;color:var(--ink-2);font-size:13px;text-align:center;}
+.runs-note-err{color:var(--red-ink);}
+.runs-pane{position:relative;min-width:0;min-height:0;background:var(--bg);}
+.runs-pane > :is(.run-shell,.hist-shell){position:absolute;inset:0;}
+/* Two rules, not one grouped selector: ui-ask-clearance reads each by `<sel>{`. */
+.run-screen-detail{position:absolute;inset:0;padding:0;overflow-y:auto;overflow-x:hidden;background:var(--bg);}
+.hist-screen-detail{position:absolute;inset:0;padding:0;overflow-y:auto;overflow-x:hidden;background:var(--bg);}
+.run-screen-detail:empty,.hist-screen-detail:empty{display:none;}
+.runs-empty{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:24px;text-align:center;}
+.runs-empty[hidden]{display:none;}
+.runs-empty-title{margin:0;font:700 16px var(--sans);color:var(--ink-2);}
+.runs-empty-sub{margin:0;font-size:13px;color:var(--ink-2);}
+/* The glance title is a programmatic focus landing (tabindex=-1), not a control. */
+.rd-page-title:focus{outline:none;}
+/* Side by side: only the open detail shows, and the glance's back-to-list button has nowhere to go. */
+.runs-shell[data-layout="split"] .runs-pane > :is(.run-shell,.hist-shell):not(.detail-open){display:none;}
+.runs-shell[data-layout="split"] :is(.rd-back,.hd-back){display:none;}
+/* Narrow: the slide the two old screens used (D7). */
+.runs-shell[data-layout="slide"]{display:block;}
+.runs-shell[data-layout="slide"] > :is(.runs-list-pane,.runs-pane){position:absolute;inset:0;transition:transform .46s cubic-bezier(.65,.02,.28,1);}
+.runs-shell[data-layout="slide"] > .runs-list-pane{border-right:0;}
+.runs-shell[data-layout="slide"] > .runs-pane{transform:translateX(100%);}
+.runs-shell[data-layout="slide"].pane-open > .runs-list-pane{transform:translateX(-100%);}
+.runs-shell[data-layout="slide"].pane-open > .runs-pane{transform:translateX(0);}
+.runs-shell[data-layout="slide"] .runs-empty{display:none;}
+/* The open detail sits above a closing one while it slides out. Slide only: side by side just
+   one shell shows, and a z-index there would trap the tour's .guide-lift (z 45) under its scrim. */
+.runs-shell[data-layout="slide"] .runs-pane > :is(.run-shell,.hist-shell).detail-open{z-index:1;}
+.runs-shell.no-anim > *{transition:none !important;}
+/* One badge on Runs (D11): the amber Needs-you count (.n-amber) replaces the live count while
+   shown, and stays amber on the active (dark) item — the generic active rule would wash it out. */
+#nav-needs-count:not([hidden]) + #nav-running-count{display:none;}
+.nav button.active #nav-needs-count{background:var(--amber);color:var(--on-status);}
+/* Schedule a run after this one (the list card's old schedule-after button): a quiet pill beside Pause/Stop. */
+.rd-after{display:flex;align-items:center;gap:8px;padding:9px 15px;border:1.5px solid var(--line);
+  border-radius:999px;background:var(--panel);font:600 12.5px var(--sans);color:var(--ink-2);cursor:pointer;}
+.rd-after[hidden]{display:none;}
+.rd-after:hover{border-color:var(--ink-2);color:var(--ink);}
+.rd-after:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+@media (prefers-reduced-motion: reduce){
+  .runs-shell > *,.runs-chev{transition:none !important;}
+  .runs-ic-run .runs-glyph{animation:none;}
+}
 /* style.css has no base .mono rule (only ancestor-scoped ones) — scope one to the
-   new subtree, exactly as :1608 does for .hd/.hist-card/#shipit-modal. */
+   new subtree, exactly as :1608 does for .hd/#shipit-modal. */
 .rd .mono{font-family:var(--mono);}
 
 /* ---------- Running detail: header card ---------- */
@@ -4163,7 +4016,6 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
 /* MUST sit after the rules above: @media contributes no specificity, so an
    earlier placement would lose the source-order tie (see the note at :1927-1932). */
 @media (prefers-reduced-motion: reduce){
-  .run-screen{transition:none;}
   .rd-status .pdot,.rd-status.parked .pdot{animation:none;}
 }
 
@@ -4194,11 +4046,11 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
 .rd > .rd-error{margin:12px 32px 0;}
 .rd-glance[hidden],.rd-details[hidden]{display:none;}
 
-.rd-glance{max-width:640px;margin:0 auto;padding:28px 32px var(--ask-dock-clearance);display:flex;flex-direction:column;gap:22px;}
+.rd-glance{max-width:608px;margin:0 auto;padding:28px 32px var(--ask-dock-clearance);display:flex;flex-direction:column;gap:22px;}
 /* A waiting question reads easier wide: the column opens to twice the run panel's width
-   for it, while the header and the panel keep their 576px measure and do not move. */
+   for it, while the header and the panel keep their 544px measure and do not move. */
 .rd-glance:has(> .rd-questions:not([hidden])){max-width:1216px;}
-.rd-glance:has(> .rd-questions:not([hidden])) > :is(.rd-now,.rd-sheet){width:100%;max-width:576px;align-self:center;}
+.rd-glance:has(> .rd-questions:not([hidden])) > :is(.rd-now,.rd-sheet){width:100%;max-width:544px;align-self:center;}
 .rd-now{display:flex;flex-direction:column;gap:18px;}
 /* The run's name is the page's subject: the largest type on it. */
 .rd-page-head{min-width:0;}
@@ -4417,10 +4269,10 @@ button.rd-srow:hover{background:var(--hover-on-field);}
   mask-image:radial-gradient(closest-side, transparent 66%, var(--ink) 100%);}
 /* The camera glides when the work moves on (focusNodeIds). */
 .rd-live .gv-world{transition:transform .7s cubic-bezier(.4,0,.2,1);}
-@container rd (min-width: 1040px){
+@container rd (min-width: 960px){
   /* :not([hidden]) — this weighs the same as `.rd-glance[hidden]{display:none}` and comes
      later, so without it Details would open UNDER a glance that never went away. */
-  .rd-glance[data-live="on"]:not([hidden]){max-width:1216px;display:grid;grid-template-columns:576px minmax(0,1fr);
+  .rd-glance[data-live="on"]:not([hidden]){max-width:1216px;display:grid;grid-template-columns:544px minmax(0,1fr);
     column-gap:28px;row-gap:22px;align-items:start;}
   .rd-glance[data-live="on"] > .rd-now{grid-column:1;grid-row:1;}
   .rd-glance[data-live="on"] > .rd-sheet{grid-column:1;grid-row:2;}
@@ -4442,7 +4294,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 /* NB: no `.mono` rule here. `.rd .mono{font-family:var(--mono);}` already ships
    and `#run-detail-tpl`'s root IS `<div class="rd">`, so the subtree is covered;
    a second `#run-detail .mono` would be dead weight. (History's twin is the
-   `.hd .mono,.hist-card .mono,#shipit-modal .mono` rule mid-file.) */
+   `.hd .mono,#shipit-modal .mono` rule mid-file.) */
 
 /* Section tabs (§5.5 + C12). WITHOUT these rules the pill row renders as three
    unstyled native buttons and nothing pins on scroll. Twin of
@@ -4687,9 +4539,8 @@ button.rd-srow:hover{background:var(--hover-on-field);}
    (:1603-1604), plus the clip-path .sr-only does not carry — `clip` is
    deprecated and its successor is what modern engines honour. position:absolute
    takes it out of flow, so the 40px square still centres its glyph, and the
-   button above is position:relative. Both
-   nav-count badges carry .nav-count, so the two :not() guards keep this off
-   them, and the child combinator keeps it off the nested nav-paused-count. */
+   button above is position:relative. The Runs badges carry .nav-count, so the
+   :not() guards keep this off them; the child combinator keeps it to the label. */
 .sidebar.collapsed .nav button:not(.rail-tile) > span:not(.nav-count):not(.nav-rollup){
   position:absolute;width:1px;height:1px;padding:0;margin:-1px;
   overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0;}
@@ -4714,27 +4565,10 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .sidebar.collapsed .nav-count{position:absolute;top:-2px;right:-2px;margin:0;
   min-width:17px;height:17px;padding:0 4px;font-size:10px;
   border:2px solid var(--panel);}
-/* Two rules, not one grouped selector: grouped, the only thing a test can reach
-   is the selector TEXT, and that assertion was proven vacuous. A grey zero
-   pinned to a 40px square is noise, and the paused pill would land in the same
-   corner as the live count. #nav-paused-badge has no rule of its own anywhere
-   in this file today — it is styled by .nav-count.n-paused (:125) — so this is
-   its first, and an id keeps it at (1,2,0), well clear of the badge rule above
-   and of `.nav-count[hidden]`. The paused signal is not lost: every paused run
-   still shows its amber dot on its own tile, and updateNavCounts puts the
-   number in the button's title AND aria-label. */
+/* A grey zero pinned to a 40px square is noise. The Runs item shows one badge in the
+   corner either way (the Needs-you count hides the live one, #nav-needs-count's rule),
+   and updateNavCounts puts both numbers in the button's title AND aria-label. */
 .sidebar.collapsed .nav-count.n-grey{display:none;}
-.sidebar.collapsed #nav-paused-badge{display:none;}
-/* The 2px ring is what both sibling markers on the rail get (`.child-dot` and
-   `.child-q` below) and for the same reason. The dot's centre sits at 37,37 on a
-   40px square whose corner arc is centred 28,28 with r=12, and sqrt(9^2+9^2) is
-   12.73 — so more than half the dot overhangs the button, onto the white
-   sidebar, in the #fff that `.nav button.active .nav-rollup` (:140) gives it
-   while Running is the current view. Measured in Chrome: a faint crescent
-   instead of an alert. Everything here is border-box (:52), so the ring eats
-   into the 8px, it does not grow it. */
-.sidebar.collapsed .nav-rollup{position:absolute;right:-1px;bottom:-1px;margin:0;
-  border:2px solid var(--panel);}
 
 /* The rail reproduces the expanded 10px on all four edges around Settings and
    the toggle. padding-top is 9, not 10, because the foot's own 1px border-top
@@ -5628,15 +5462,14 @@ body.rail-collapsed .ask-dock{left:76px;}
 /* ---------- Ask Worca dock clearance ---------- */
 /* The dock is a fixed overlay -- .ask-dock above: 26px dock padding-bottom plus the
    ~47px pill occludes a ~73px strip at the bottom of every scrollport, while the page
-   gutters reserve only 40px. One late override lifts the BOTTOM padding of all seven
-   scroll gutters to --ask-dock-clearance: 96px = 73px strip + breathing room. Source
-   order is load-bearing -- this must follow the .main, .run-screen/.rd-body,
-   .hist-screen/.hd-body and .proj-screen/.pd-body base rules and precede the
-   reduced-motion block below. The -list screen classes are targeted, NOT
-   .run-screen/.hist-screen/.proj-screen, so the -detail scrollports keep padding:0 for
-   their sticky tab bars and take clearance via .rd-body/.hd-body/.pd-body instead;
-   body.view-history/.view-running/.view-projects .main keep padding:0 by specificity. */
-.main,.run-screen-list,.hist-screen-list,.proj-screen-list,.rd-body,.hd-body,.pd-body{padding-bottom:var(--ask-dock-clearance);}
+   gutters reserve only 40px. One late override lifts the BOTTOM padding of the scroll
+   gutters to --ask-dock-clearance: 96px = 73px strip + breathing room. Source order is
+   load-bearing -- this must follow the .main, .runs-list, .rd-body, .hd-body and
+   .proj-screen/.pd-body base rules and precede the reduced-motion block below. The
+   -list screen classes are targeted, NOT the -detail scrollports, which keep padding:0
+   for their sticky tab bars and take clearance via .rd-body/.hd-body/.pd-body instead;
+   body.view-runs/.view-projects .main keep padding:0 by specificity. */
+.main,.runs-list,.proj-screen-list,.rd-body,.hd-body,.pd-body{padding-bottom:var(--ask-dock-clearance);}
 .ws-screen-list{padding-bottom:var(--ask-dock-clearance);}   /* the Workspaces track's list gutter, the same clearance */
 
 /* ---------- native control skins (checkbox / radio / switch / rows) -------- */
@@ -6053,7 +5886,6 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 .sched-tabs{display:flex;margin-bottom:18px;}
 .sched-pane[hidden]{display:none;}
 .sched-list{display:flex;flex-direction:column;gap:14px;}
-.sched-group-title{font:700 11.5px var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin:6px 4px -2px;}
 .sched-item{padding:18px 20px;}
 .sched-item.attention{border:1.5px solid var(--amber);box-shadow:0 0 0 4px var(--amber-bg),var(--shadow);}
 .sched-head{display:flex;align-items:flex-start;gap:13px;}
@@ -6101,12 +5933,6 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 .sched-feed-read{background:none;border:none;padding:4px 2px;font:600 12px var(--sans);color:var(--ink-3);cursor:pointer;text-decoration:underline;}
 .sched-feed-read:hover{color:var(--ink);}
 .sched-feed-read:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radius:6px;}
-
-/* the Running view's Scheduled group (runs due within 24 h) */
-.run-scheduled{margin-top:22px;display:flex;flex-direction:column;gap:14px;}
-.run-scheduled[hidden]{display:none;}
-.run-scheduled-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:0 4px -2px;}
-.run-scheduled-head a{font:600 12px var(--sans);color:var(--blue-ink-strong);}
 
 /* Ask run card: the scheduled state line */
 .ask-card-sched{display:flex;flex-wrap:wrap;align-items:center;gap:9px;font-size:12.5px;color:var(--ink-2);}
@@ -6178,7 +6004,7 @@ a.ask-card-task-title:hover{text-decoration-color:currentColor;}
 .level-banner[hidden]{display:none;}
 .level-banner-text{flex:1 1 220px;min-width:0;}
 .level-banner .btn{margin-left:auto;}
-body.view-history .level-banner,body.view-projects .level-banner,body.view-running .level-banner{margin:12px 32px 0;flex:0 0 auto;}
+body.view-runs .level-banner,body.view-projects .level-banner{margin:12px 32px 0;flex:0 0 auto;}
 body.view-workspaces .level-banner{margin:12px 32px 0;flex:0 0 auto;}
 
 /* Simple hides the Target switch, which leaves .split-row's picker alone in the row: auto-placement
@@ -7298,8 +7124,7 @@ input.gv-name:focus-visible{outline:none;}
   width:18px;height:18px;border-radius:50%;background:var(--slate-bg);color:var(--slate-ink);
   border:1px solid var(--line);font:600 9px/1 var(--sans);letter-spacing:.02em;
   vertical-align:middle;}
-.rc-meta .rc-by .person-ini,.hist-by-seg .person-ini,.rc-meta .sched-by .person-ini{margin-right:5px;}
-.rc-meta .rc-by .person-ini:empty{display:none;}
+.rc-meta .sched-by .person-ini{margin-right:5px;}
 .person-chip{display:inline-flex;align-items:center;gap:7px;flex:0 0 auto;max-width:280px;
   padding:4px 11px 4px 5px;border-radius:999px;background:var(--panel);border:1px solid var(--line);
   color:var(--ink-2);font-size:13px;font-weight:500;}

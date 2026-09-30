@@ -262,6 +262,9 @@ test('ui-ask-card: Open in New Pipeline for a workspace card selects the workspa
 test('ui-ask-card: a workspace card Start posts the workspace §9.4 body from inside the app', async () => {
   const ctx = await boot();
   await openCard(ctx, WS_CARD);
+  // Captured before the click: a bare '#running' is normalized to '#runs' now, so comparing
+  // against either literal would pass even if Start navigated somewhere.
+  const before = ctx.window.location.hash;
   ctx.window.document.querySelector('[data-ask-card-start]').click();
   await settle(ctx.window, 6);
   assert.deepEqual(ctx.runBodies[0], {
@@ -269,7 +272,7 @@ test('ui-ask-card: a workspace card Start posts the workspace §9.4 body from in
     title: 'Fix login', featureBranch: 'worca/fix-login', sourceBranchByKey: { 'lib-00000002': 'release' },
     mock: false, askThreadId: TID, askCardId: 'card_00000001',
   });
-  assert.notEqual(ctx.window.location.hash, '#running', 'no navigation');
+  assert.equal(ctx.window.location.hash, before, 'no navigation');
 });
 
 test('ui-ask-card: Open in New Pipeline carries the attachment pills into the extras file list', async () => {

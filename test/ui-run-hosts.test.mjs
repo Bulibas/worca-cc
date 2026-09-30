@@ -876,20 +876,12 @@ test('destroyGraphMounts tears down every mount under a root; the next paint mou
   assert.notEqual(host.querySelector('.gv-world'), world);
 });
 
-test('the Running list card carries no graph; the run page mounts it, survives a shim-signature change, and its wrap is inert scenery', async () => {
+test('the run page mounts the graph and it survives a shim-signature change', async () => {
   const window = await bootApp();
   const np = window.__np;
   const r = np.upsertRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running', kind: 'run', startedAt: '10:00:00', pendingQuestion: null });
-  const node = np.buildRunCard(r);
-  window.document.body.appendChild(node);
-  r.el = node;
   np.onState(r, { status: 'running', stepper: WITH_SHIM, active: [], steps: [] });
-  assert.equal(node.querySelector('.run-flow, .run-flow-wrap, .rc-detailed'), null, 'the card has no graph host and no detailed body');
-  // A card built AFTER the manifest arrived paints no graph either.
-  const pre = np.makeRun({ runId: 'r3', title: 't', projectDir: '/p', status: 'running' });
-  pre.stepper = MANIFEST;
-  assert.equal(np.buildRunCard(pre).querySelector('.run-flow'), null, 'no graph on a card built after the manifest');
-  // The graph lives on Details › Workflow.
+  // The graph lives on Details › Workflow (the list's compact rows carry none).
   window.location.hash = 'running/r1/details/workflow';
   window.dispatchEvent(new window.Event('hashchange'));
   await new Promise((res) => setTimeout(res, 0));
@@ -946,9 +938,6 @@ test('applyRunLogFilter assigns onto r.logFilter and repaints; focusLogExecution
   const window = await bootApp();
   const np = window.__np;
   const r = np.upsertRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running', kind: 'run', startedAt: '10:00:00', pendingQuestion: null });
-  const node = np.buildRunCard(r);
-  window.document.body.appendChild(node);
-  r.el = node;
   np.onState(r, { status: 'running', stepper: MANIFEST, active: [], steps: [] });
   np.applyRunLogFilter(r, { execution: 'x:n_a:1', node: 'n_a' });
   assert.equal(r.logFilter.execution, 'x:n_a:1');
@@ -982,17 +971,21 @@ test('applyRunLogFilter assigns onto r.logFilter and repaints; focusLogExecution
   window.location.hash = '';
 });
 
-test('the list card has no density toggle and no per-card graph body; setRunDensity is gone', async () => {
+test('the list has no density toggle and no per-row graph body; setRunDensity is gone', async () => {
   const window = await bootApp();
   const np = window.__np;
   assert.equal(np.setRunDensity, undefined, 'the density model is gone');
-  const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
-  const node = np.buildRunCard(r);
-  window.document.body.appendChild(node);
-  r.el = node;
+  // The list card is gone (a compact row replaced it): read the run's row on the Runs list.
+  const r = np.upsertRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running', kind: 'run', startedAt: '10:00:00', pendingQuestion: null });
   np.onState(r, { status: 'running', stepper: MANIFEST, active: [], steps: [] });
-  assert.equal(node.querySelector('.rc-detailed, .rc-compact, .run-density, .run-flow, .rc-step-chip'), null);
-  assert.equal(window.document.querySelector('#run-list .run-density'), null);
+  window.location.hash = 'runs';
+  window.dispatchEvent(new window.Event('hashchange'));
+  await new Promise((res) => setTimeout(res, 0));
+  const row = window.document.querySelector('#runs-list .runs-row[data-run-id="r1"]');
+  assert.ok(row, 'the run is listed');
+  assert.equal(row.querySelector('.rc-detailed, .rc-compact, .run-density, .run-flow, .rc-step-chip'), null);
+  assert.equal(window.document.querySelector('#runs-list .run-density'), null);
+  window.location.hash = '';
 });
 
 // ── banner / progress / gate copy / History header + Overview ────────────────
@@ -1035,31 +1028,6 @@ test('the gate intro names the wire it holds on; v1 keeps the two literals byte-
     'This cycle reached its limit. Approve another cycle to keep iterating, or continue with what you have.');
   assert.equal(intro(v1, { id: 'g', kind: 'gate', issues: [{ severity: 'major', title: 'x' }] }),
     'This cycle reached its limit with open issues. Approve another cycle to keep iterating, or continue with what you have.');
-});
-
-test('the card meta shows `n/m · step` on a v2 run; a v1 card is untouched', async () => {
-  const window = await bootApp();
-  const np = window.__np;
-  const done = [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'done', activeMs: 1000, costUsd: 0.1 }];
-  const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
-  const node = np.buildRunCard(r);
-  window.document.body.appendChild(node);
-  r.el = node;
-  assert.equal(node.querySelector('.rc-prog').hidden, true, 'hidden until a v2 manifest arrives');
-  np.onState(r, { status: 'running', stepper: MANIFEST, active: [], steps: done });
-  assert.equal(node.querySelector('.rc-prog').hidden, false);
-  assert.equal(node.querySelector('.rc-prog-text').textContent, '1/1 · Running', 'done/total, then the step');
-  // The segment is painted ABOVE renderRunMeta's `.rc-branch` early return.
-  const bare = window.document.createElement('div');
-  bare.innerHTML = '<span class="rm-text"></span><span class="rc-seg rc-prog" hidden><span class="rc-prog-text"></span></span>';
-  np.renderRunMeta(r, bare);
-  assert.equal(bare.querySelector('.rc-prog').hidden, false, 'a branch-less root still gets the progress segment');
-  const v1 = np.makeRun({ runId: 'r2', title: 't', projectDir: '/p', status: 'running' });
-  const c1 = np.buildRunCard(v1);
-  window.document.body.appendChild(c1);
-  v1.el = c1;
-  np.onState(v1, { status: 'running', stepper: V1_STEPPER });
-  assert.equal(c1.querySelector('.rc-prog').hidden, true, 'v1: no progress segment');
 });
 
 test('the detail header .rd-step names what runs on a v2 run, with no step count', async () => {

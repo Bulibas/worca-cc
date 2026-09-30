@@ -1,6 +1,6 @@
 // test/ui-report-run.test.mjs — "Report this run": the preview modal History detail's
 // per-run ⋯ menu opens. Running detail does not offer it; a finished run there links
-// to History instead. The modal renders the EXACT payload
+// to its saved page instead. The modal renders the EXACT payload
 // POST /api/pipelines/:id/report returns, and nothing leaves the machine until the
 // user presses Copy, Download, or the issue link — worca itself never calls GitHub.
 //
@@ -189,13 +189,13 @@ function arms({ report = REPORT, reportStatus = 200, filed = FILED, filedStatus 
 }
 
 /**
- * Land on History detail. Visit the LIST first so /api/history delivers the
+ * Land on History detail. Visit the Runs LIST first so /api/history delivers the
  * authoritative row: go straight to the detail hash and `record` is the minimal
  * {id, projectKey} deep-link stub, which is a different (and, for the .hd-report gate,
  * more dangerous) code path — covered separately below.
  */
 async function openHistoryDetail(ctx) {
-  go(ctx.window, 'history');
+  go(ctx.window, 'runs');
   await settle(ctx.window, 6);
   go(ctx.window, DETAIL_HASH);
   await settle(ctx.window, 8);
@@ -308,10 +308,10 @@ test('the issue link is inert while a rebuild is in flight', async () => {
 });
 
 // The report flow is reached from ONE place: History's per-run ⋯ menu. A finished run
-// on Running detail offers "View in History" instead, and the link follows the
+// on Running detail offers "Open the saved run" instead, and the link follows the
 // (hidden) Stop directly — no hidden button or empty slot is left in the row.
 for (const status of ['done', 'stopped', 'error']) {
-  test(`a ${status} run's Running header has no report button, only View in History`, async () => {
+  test(`a ${status} run's Running header has no report button, only Open the saved run`, async () => {
     const ctx = await boot({ fetchHandler: arms() });
     // `hello` is what populates `runs` and sets helloSeeded; without it routeRunDetail
     // mounts a title-only screen, repaintRunDetail never runs, and paintRdTerminal —
@@ -328,7 +328,8 @@ for (const status of ['done', 'stopped', 'error']) {
     assert.equal([...header.querySelectorAll('button, a')].some((b) => /Report this run/.test(b.textContent)),
       false, 'nothing in the header offers to report the run');
     const link = header.querySelector('.rd-history-link');
-    assert.equal(link.hidden, false, 'View in History stays');
+    assert.equal(link.hidden, false, 'the link to the saved run stays');
+    assert.equal(link.textContent, 'Open the saved run');
     assert.equal(link.previousElementSibling, header.querySelector('.rd-spacer'),
       'the link closes the branch row — no leftover control between them');
     assert.equal(doc.querySelector('#run-detail .rd-bar .rd-report'), null, 'nor does the shared bar');
@@ -362,6 +363,9 @@ test('the History ⋯ menu carries "Report this run" and it opens the report mod
 
 test('Escape closes the report modal WITHOUT navigating the detail screen away', async () => {
   const ctx = await boot({ fetchHandler: arms() });
+  // Slide: there the saved run's own Escape WOULD navigate to #runs (side by side it does
+  // nothing on the glance), so a leak past the modal's guard shows in the hash.
+  ctx.window.document.getElementById('runs-shell').dataset.layout = 'slide';
   await openHistoryReport(ctx);
   const before = ctx.window.location.hash;
   esc(ctx.window);
@@ -378,16 +382,21 @@ test('Escape closes the report modal WITHOUT navigating the detail screen away',
 // closeHistDetail). Leaving the screen with one up floats a full-screen dialog for a
 // run the user has navigated away from over an unrelated view, and a pending debounce
 // can still POST /report for it.
-test('going back to the History list tears the report modal down', async () => {
+test('going back to the Runs list tears the report modal down', async () => {
   const ctx = await boot({ fetchHandler: arms() });
+  // The detail -> list hop exists in the narrow slide layout only: side by side a bare
+  // #runs reopens the remembered run (this one), so it does not mean "the list" there.
+  ctx.window.document.getElementById('runs-shell').dataset.layout = 'slide';
   await openHistoryReport(ctx);
   const modal = ctx.window.document.getElementById('report-modal');
   assert.equal(modal.classList.contains('hidden'), false, 'the modal is up');
 
-  go(ctx.window, 'history');
+  go(ctx.window, 'runs');
   await settle(ctx.window, 8);
+  assert.equal(ctx.window.document.getElementById('hist-shell').classList.contains('detail-open'), false,
+    'the saved run slid away');
   assert.equal(modal.classList.contains('hidden'), true,
-    'detail -> list stays inside the History view, so closeHistDetail is what must close it');
+    'detail -> list stays inside the Runs view, so closeHistDetail is what must close it');
 });
 
 // History detail -> another view: the modal must not outlive the screen it opened on.

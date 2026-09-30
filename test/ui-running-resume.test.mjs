@@ -1,4 +1,5 @@
-// test/ui-running-resume.test.mjs — resume from the Running card for a run whose
+// test/ui-running-resume.test.mjs — resume a live run from its page (the pane's
+// `#run-detail .rd-pause`, which reads Resume once the run is paused) for a run whose
 // whole lifetime is inside the current socket session (no page reload, so no
 // hello re-seed of pipelineId). Harness mirrors test/ui-pause-resume.test.mjs.
 import { test } from 'node:test';
@@ -44,7 +45,9 @@ async function bootLive({ resumeFails = false } = {}) {
   globalThis.window = window; globalThis.document = window.document;
   await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
   await new Promise((r) => setTimeout(r, 0));
-  return { window, fetchCalls };
+  const go = (hash) => { window.location.hash = hash; window.dispatchEvent(new window.Event('hashchange')); };
+  const settle = async (n = 3) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); };
+  return { window, fetchCalls, go, settle };
 }
 
 test('onState mirrors the pipeline short id from state.id onto the run model', async () => {
@@ -59,7 +62,7 @@ test('onState mirrors the pipeline short id from state.id onto the run model', a
   assert.equal(r.pipelineId, 'p1');
 });
 
-test('resume works from the Running card for a same-session run (no reload)', async () => {
+test('resume works for a same-session run (no reload)', async () => {
   const { window, fetchCalls } = await bootLive();
   const { upsertRun, onState, resumeRunFromCard, getRun } = window.__np;
   // Born in THIS session (beginRun/upsertRun path) → pipelineId starts null.
@@ -77,21 +80,27 @@ test('resume works from the Running card for a same-session run (no reload)', as
 });
 
 test('failed resume restores the Resume button: enabled, icon intact, error logged', async () => {
-  const { window } = await bootLive({ resumeFails: true });
-  const { upsertRun, onState, buildRunCard, resumeRunFromCard, getRun } = window.__np;
+  const { window, go, settle } = await bootLive({ resumeFails: true });
+  const { upsertRun, onState, resumeRunFromCard, getRun } = window.__np;
   const r = upsertRun({ runId: 'r1', title: 't', projectDir: '/tmp/proj', status: 'running' });
   onState(r, { status: 'running', id: 'p1' });
   onState(r, { status: 'paused' });
-  r.el = buildRunCard(r);
-  const btn = r.el.querySelector('.btn-resume');
+  go('running/r1');
+  await settle();
+  // The pane's one Pause/Resume control; paintRdHeader flips it to Resume on a paused run.
+  const btn = window.document.querySelector('#run-detail .rd-pause');
+  assert.ok(btn, 'the run page carries the control');
+  assert.equal(btn.dataset.action, 'resume', 'a paused run offers Resume');
+  assert.equal(btn.hidden, false);
   await resumeRunFromCard('r1', btn);
   assert.ok(getRun('r1'), 'failed resume must keep the paused run');
   assert.equal(btn.disabled, false, 'button must be re-enabled after failure');
   assert.match(btn.innerHTML, /<svg/i, 'failure must restore the play icon, not leave bare text');
-  assert.match(btn.title, /Resume/, 'failure restores the stock tooltip too');
+  assert.equal(btn.querySelector('.rd-btn-label')?.textContent, 'Resume', 'and its label, not " Resuming…"');
+  assert.match(btn.title, /Resume/, 'failure keeps the Resume tooltip too');
   assert.ok(
     r.logLines.some((l) => /resume failed: pipeline not found/.test(String(l.text))),
-    'server error must land in the card log'
+    'server error must land in the run log'
   );
 });
 

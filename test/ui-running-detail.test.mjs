@@ -463,7 +463,7 @@ test('answers posted from the DETAIL panel carry the detail panel\'s choices', a
     'the DETAIL panel\'s slot won, not whichever panel painted last');
 });
 
-test('submitting busies the run page panel, the list card mounts none, and resolving clears it', async () => {
+test('submitting busies the run page panel, the list row mounts none, and resolving clears it', async () => {
   const ctx = await openDetail({
     bootOpts: {
       fetchHandler: (u) => (u.includes('/api/answer')
@@ -476,8 +476,10 @@ test('submitting busies the run page panel, the list card mounts none, and resol
   await settle(window);
 
   const dpanel = window.document.querySelector('#run-detail .rd-questions .qpanel');
-  assert.equal(window.document.querySelector(`#run-list .run-card[data-run-id="${ID}"] .qpanel`), null,
-    'the list card mounts no panel — the run page is the only place to answer');
+  const row = window.document.querySelector(`#runs-list .runs-row[data-slot="group"][data-run-id="${ID}"]`);
+  assert.ok(row, 'the asking run is listed beside the open pane');
+  assert.equal(row.querySelector('.qpanel'), null,
+    'the list row mounts no panel — the run page is the only place to answer');
   dpanel.querySelector('.btn-go').dispatchEvent(new window.Event('click', { bubbles: true }));
   await settle(window, 5);
   assert.equal(dpanel.querySelector('.btn-go').disabled, true);
@@ -862,7 +864,7 @@ test('frames for another run refresh the sidebar but never touch the open detail
   assert.ok(window.document.querySelector('#nav-running-children button.nav-child[data-child-run-id="r2"]'));
 });
 
-test('the existing 1 s interval ticks the open detail, not just the card', async () => {
+test('the existing 1 s interval ticks the open detail', async () => {
   const ctx = await bootRunning();
   await openRun(ctx, {
     steps: [
@@ -876,10 +878,9 @@ test('the existing 1 s interval ticks the open detail, not just the card', async
   // than getting an interval of its own.
   const r = window.__np.getRun('r1');
   const hosts = window.__np.rdTickHosts(r);
-  assert.equal(hosts.length, 2, 'the card and the open detail screen');
-  assert.equal(hosts[0], r.el);
-  assert.ok(hosts[1].contains(window.document.querySelector('#run-detail .rd-header')),
-    'the second host is the mounted detail screen');
+  assert.equal(hosts.length, 1, 'only the open detail screen (the list card is gone; r.el is null)');
+  assert.ok(hosts[0].contains(window.document.querySelector('#run-detail .rd-header')),
+    'the host is the mounted detail screen');
 
   click(window, tabOf(window, 'overview'));
   await settle(window);
@@ -930,7 +931,7 @@ test('a run that finishes while its detail is open keeps the page and goes termi
   const link = header.querySelector('.rd-history-link');
   assert.equal(link.hidden, false);
   assert.equal(link.getAttribute('href'), `#history/${KEY}/p1`);
-  assert.equal(link.textContent, 'View in History');
+  assert.equal(link.textContent, 'Open the saved run');
 
   // The log stops growing: a stray late frame lands on a finished run and the
   // pane is unchanged.
@@ -1054,14 +1055,11 @@ function instrumentScroll(el, { scrollHeight = 1000, clientHeight = 200, scrollW
   Object.defineProperty(el, 'scrollLeft', { configurable: true, get: () => left, set: (v) => { left = v; } });
 }
 
-test('detail-pane autoscroll pins once per burst, and the list card has no log pane to pin', async () => {
+test('detail-pane autoscroll pins once per burst', async () => {
   const ctx = await bootRunning();
   await openRun(ctx);
   const { window } = ctx;
   const box = rdBox(window);
-  const r = window.__np.getRun('r1');
-  assert.ok(r.el, 'the list card stays mounted behind the open detail');
-  assert.equal(r.el.querySelector('.log'), null, 'the card carries no log pane');
   instrumentScroll(box, { scrollHeight: 900, clientHeight: 200 });
   let rdPins = 0;
   const wrap = (el, bump) => { const d = Object.getOwnPropertyDescriptor(el, 'scrollTop');
@@ -1237,7 +1235,7 @@ test('Details is a route: a tab row and a Now row open it; Escape and ‹ Run co
   assert.ok(secOf(window, 'workflow').querySelector('.rd-graph .run-flow'), 'the graph lives in Workflow');
   assert.equal(rd.querySelector('.rd-mini'), null, 'no bottom bar: the shared bar carries the way back');
 
-  // Escape: Details -> glance (same run), then glance -> the list.
+  // Escape: Details -> glance (same run); on the glance it keeps the pane side by side (D16).
   window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   window.dispatchEvent(new window.Event('hashchange'));
   await settle(window, 4);
@@ -1256,7 +1254,13 @@ test('Details is a route: a tab row and a Now row open it; Escape and ‹ Run co
   window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   window.dispatchEvent(new window.Event('hashchange'));
   await settle(window, 4);
-  assert.equal(window.location.hash, '#running');
+  assert.equal(window.location.hash, '#running/r1', 'side by side, Escape on the glance keeps the pane (the list is already visible)');
+  // Narrow (slide) layout: Escape on the glance goes back to the list.
+  window.document.getElementById('runs-shell').dataset.layout = 'slide';
+  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle(window, 4);
+  assert.equal(window.location.hash, '#runs');
 });
 
 test('a finished run: its headline, the facts, what to check, Create pull request', async () => {

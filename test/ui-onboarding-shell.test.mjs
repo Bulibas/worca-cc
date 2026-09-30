@@ -154,7 +154,7 @@ test('boot: the pill mounts under the CTA and routes to the page (where the shel
   const pillHost = cta.nextElementSibling;
   assert.ok(pillHost && pillHost.classList.contains('gs-pill-host'), 'pill host right under New pipeline');
   assert.equal(pillHost.querySelector('.gs-pill .nav-count').textContent, '1/9');
-  assert.equal(doc.querySelectorAll('.nav button[data-nav]').length, 13, 'the nav census is untouched (Schedules, Team policy and Scripts included)');
+  assert.equal(doc.querySelectorAll('.nav button[data-nav]').length, 12, 'the nav census is untouched (Schedules, Team policy and Scripts included; Running and History are one Runs item)');
   assert.equal(doc.getElementById('welcome-modal').classList.contains('hidden'), false, 'first visit to New pipeline: welcome up');
   assert.deepEqual(posts, [], 'showing the welcome writes nothing until a choice');
   click(window, doc.querySelector('#welcome-modal .ob-skip'));
@@ -281,7 +281,7 @@ test('a tile guide: "Connect Claude Code" opens the setup dialog; "Ask Worca" ri
   assert.ok(layer.dataset.target.startsWith('.nav button[data-nav="projects"]'));
   assert.match(layer.querySelector('.guide-text').textContent, /at least two projects/);
   // Wherever the user goes, the hop is re-derived from the page rather than the guide ending.
-  click(window, doc.querySelector('.nav button[data-nav="history"]'));
+  click(window, doc.querySelector('.nav button[data-nav="runs"]'));
   await settle();
   layer = doc.querySelector('.guide-layer');
   assert.ok(layer, 'still guiding');
@@ -577,7 +577,7 @@ test('the project tour walks the Add project dialog to the new row: button (re-l
   assert.equal(layer(), null);
 });
 
-test('a run tour ends on the run\'s card under Running, not at the Start click; the Ask tour ends on the answer', async () => {
+test('a run tour ends on the run\'s row under Runs, not at the Start click; the Ask tour ends on the answer', async () => {
   const { doc, window } = await boot({ onboarding: status(['claude', 'project'], { welcomeSeen: true }), projects: [{ name: 'p', path: '/tmp/p', key: 'p-00000001', exists: true }] });
   click(window, doc.querySelector('.gs-pill'));
   await settle();
@@ -597,13 +597,13 @@ test('a run tour ends on the run\'s card under Running, not at the Start click; 
   await until(() => target() === '#mock-switch');
   if (next()) click(window, next()); else click(window, doc.getElementById('mock-switch'));
   await until(() => target() === '#start-btn');
-  // The click on Start is noted; the app routes to Running (here: the hash), where the card is the last stop.
+  // The click on Start is noted; the app routes to Runs (here: the hash), where the run's row is the last stop.
   click(window, doc.getElementById('start-btn'));
   doc.getElementById('form-msg').textContent = '';
-  window.location.hash = 'running';
+  window.location.hash = 'runs';
   window.dispatchEvent(new window.Event('hashchange'));
-  await until(() => target() === '#run-list [data-run-id]');
-  assert.equal(target(), '#run-list [data-run-id]');
+  await until(() => target() === '#runs-list [data-run-id]');
+  assert.equal(target(), '#runs-list [data-run-id]');
   assert.equal(next().textContent, 'Done');
   assert.match(layer().querySelector('.guide-text').textContent, /This is your run/);
   doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
@@ -646,12 +646,19 @@ test('a run tour ends on the run\'s own page (Start opens it): status line, fact
     '#run-detail .rd[data-mode="glance"] .rd-facts',
     '#run-detail .rd[data-mode="glance"] .rd-result',
   ]);
-  assert.ok(page.every((h) => h.target.includes('#run-list [data-run-id]')), 'each falls back to the card');
-  // Back on the Running list: one stop, on the run's card, with Done.
-  go('running');
+  assert.ok(page.every((h) => h.target.includes('#runs-list [data-run-id]')), 'each falls back to the run\'s row');
+  // Back on the Runs list: one stop, on the run's row, with Done.
+  go('runs');
   const list = hops();
   assert.deepEqual(list.map((h) => [h.id, h.nextLabel]), [['card', 'Done']]);
-  assert.deepEqual(list[0].target.slice(-1), ['#run-list [data-run-id]']);
+  assert.deepEqual(list[0].target.slice(-1), ['#runs-list [data-run-id]']);
+});
+
+test('the Workflows tour still walks to the run after Start (its run hop is looked up by id)', async () => {
+  const { window } = await boot();                       // the file's own harness
+  const hops = window.__np.gsHops('workflows', {});
+  assert.ok(hops.every(Boolean), 'no hole where a run hop was looked up by a stale id (run.running)');
+  assert.ok(hops.some((h) => h.id === 'nav:runs'), 'the Runs nav hop sits between Start and the run page');
 });
 
 test('the workspace tour walks the wizard: Create → name → two projects → Scan (the last stop); leaving the wizard re-lights Create', async () => {

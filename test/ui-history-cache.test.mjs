@@ -1,8 +1,8 @@
 // test/ui-history-cache.test.mjs
-// Stale-while-revalidate History: instant paint from a versioned localStorage
-// cache, version-bust safety, and never persisting live `pr`. Boots the REAL
-// app.js against the REAL index.html under jsdom (harness copied from
-// test/ui-history.test.mjs), pre-seeding window.localStorage before showHistory().
+// Stale-while-revalidate History: the Runs list's finished rows paint instantly
+// from a versioned localStorage cache, version-bust safety, and never persisting
+// live `pr`. Boots the REAL app.js against the REAL index.html under jsdom (harness
+// copied from test/ui-history.test.mjs), pre-seeding window.localStorage before showRuns().
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -40,7 +40,7 @@ async function boot({ fetchHandler } = {}) {
   globalThis.window = window; globalThis.document = window.document;
   await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
   await new Promise((r) => setTimeout(r, 0));
-  const showHistory = () => { window.location.hash = 'history'; window.dispatchEvent(new window.Event('hashchange')); };
+  const showRuns = () => { window.location.hash = 'runs'; window.dispatchEvent(new window.Event('hashchange')); };
   const tick = () => new Promise((r) => setTimeout(r, 0));
   // Read the load token the client POSTed to /api/history/pr (the last one).
   const lastPrToken = () => {
@@ -53,8 +53,11 @@ async function boot({ fetchHandler } = {}) {
     if (token != null && wsBox.ws) wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'history-pr', token, done: true, items: [] }) });
     await tick();
   };
-  return { window, calls, wsBox, showHistory, tick, lastPrToken, settle };
+  return { window, calls, wsBox, showRuns, tick, lastPrToken, settle };
 }
+// The finished rows of the Runs list, and a row's title.
+const histRows = (window) => window.document.querySelectorAll('#runs-list .runs-row[data-kind="hist"]');
+const title = (row) => row.querySelector('.runs-row-title').textContent;
 
 const skeleton = (pipelines, ghAvailable = true) =>
   Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines, live: [], ghAvailable }) });
@@ -65,18 +68,20 @@ test('instant paint from cache before the /api/history fetch resolves, then SWR 
   const ctx = await boot({
     fetchHandler: (url) => (url.endsWith('/api/history') ? deferred : null),
   });
-  // Pre-seed a valid v1 cache BEFORE navigating to History.
+  // Pre-seed a valid v1 cache BEFORE navigating to Runs.
   ctx.window.localStorage.setItem(CACHE_KEY, JSON.stringify({
     v: 1, ts: 1700000000000, ghAvailable: true,
     pipelines: [{ id: 'c1', projectKey: 'k1', projectName: 'K1', title: 'Cached', status: 'done', startedAt: '2026-01-01T00:00:00Z' }],
   }));
-  ctx.showHistory();
+  ctx.showRuns();
   await ctx.tick();
 
-  // Cards painted from cache while the network fetch is still pending.
-  let cards = ctx.window.document.querySelectorAll('#history .hist-card');
-  assert.equal(cards.length, 1, 'instant paint rendered the cached row');
-  assert.equal(cards[0].querySelector('.h-meta b').textContent, 'Cached');
+  // Rows painted from cache while the network fetch is still pending.
+  let rows = histRows(ctx.window);
+  assert.equal(rows.length, 1, 'instant paint rendered the cached row');
+  assert.equal(title(rows[0]), 'Cached');
+  assert.equal(ctx.window.document.getElementById('runs-list').getAttribute('aria-busy'), 'true',
+    'the list says it is still loading');
 
   // Resolve the skeleton -> SWR repaint with fresh data.
   resolveHistory({ ok: true, status: 200, json: async () => ({
@@ -84,9 +89,9 @@ test('instant paint from cache before the /api/history fetch resolves, then SWR 
     live: [], ghAvailable: true,
   }) });
   await ctx.tick();
-  cards = ctx.window.document.querySelectorAll('#history .hist-card');
-  assert.equal(cards.length, 1);
-  assert.equal(cards[0].querySelector('.h-meta b').textContent, 'Fresh', 'repainted from the fresh skeleton');
+  rows = histRows(ctx.window);   // re-query: a changed list replaces the row nodes
+  assert.equal(rows.length, 1);
+  assert.equal(title(rows[0]), 'Fresh', 'repainted from the fresh skeleton');
   await ctx.settle();
 });
 
@@ -101,17 +106,18 @@ test('corrupt/old cache version is busted (no stale paint, key removed) then net
     v: 0, ts: 1, ghAvailable: true,
     pipelines: [{ id: 'STALE', projectKey: 'k1', title: 'Stale', status: 'done' }],
   }));
-  ctx.showHistory();
+  ctx.showRuns();
   await ctx.tick();
 
-  assert.equal(ctx.window.document.querySelectorAll('#history .hist-card').length, 0, 'version-busted cache did not paint');
+  assert.equal(histRows(ctx.window).length, 0, 'version-busted cache did not paint');
+  assert.doesNotMatch(ctx.window.document.getElementById('runs-list').textContent, /Stale/);
   assert.equal(ctx.window.localStorage.getItem(CACHE_KEY), null, 'busted cache key was removed');
 
   resolveHistory(await skeleton([{ id: 'n1', projectKey: 'k1', projectName: 'K1', title: 'Net', status: 'done', startedAt: '2026-01-02T00:00:00Z' }]));
   await ctx.tick();
-  const cards = ctx.window.document.querySelectorAll('#history .hist-card');
-  assert.equal(cards.length, 1);
-  assert.equal(cards[0].querySelector('.h-meta b').textContent, 'Net', 'network fallback painted');
+  const rows = histRows(ctx.window);
+  assert.equal(rows.length, 1);
+  assert.equal(title(rows[0]), 'Net', 'network fallback painted');
   await ctx.settle();
 });
 
@@ -122,7 +128,7 @@ test('writeHistoryCache strips the live `pr` field before persisting', async () 
                     startedAt: '2026-01-02T00:00:00Z', pr: { state: 'OPEN', url: 'https://gh/x/pull/1', number: 1 } }])
       : null),
   });
-  ctx.showHistory();
+  ctx.showRuns();
   await ctx.tick();
 
   const raw = ctx.window.localStorage.getItem(CACHE_KEY);
@@ -143,7 +149,7 @@ test('writeHistoryCache strips the live retainedWork field before persisting', a
         ], ghAvailable: false }) })
       : null),
   });
-  ctx.showHistory();
+  ctx.showRuns();
   await ctx.settle();
   const parsed = JSON.parse(ctx.window.localStorage.getItem(CACHE_KEY));
   assert.ok(parsed.pipelines.every((row) => !('retainedWork' in row)),

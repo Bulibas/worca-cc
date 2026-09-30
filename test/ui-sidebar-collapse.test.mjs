@@ -223,11 +223,11 @@ test('the toggle is one bare chevron and nothing else', () => {
   assert.doesNotMatch(ruleBody('.sidebar.collapsed .side-toggle svg'), /transform:/);
 });
 
-test('the toggle stays OUT of <nav>, which keeps exactly 15 buttons (13 routes + the mode item + the Nodes disclosure)', () => {
+test('the toggle stays OUT of <nav>, which keeps exactly 14 buttons (12 routes + the mode item + the Nodes disclosure)', () => {
   // ui-nav-sections.test.mjs:39 asserts this count, :40 forbids <a>, and :26-35
   // pins the token stream. A toggle inside <nav class="nav"> reds all three.
   const nav = html.match(/<nav class="nav"[\s\S]*?<\/nav>/)[0];
-  assert.equal((nav.match(/<button type="button"/g) || []).length, 15);   // + interface mode, + Schedules, + Team policy, + Scripts, + the Nodes disclosure
+  assert.equal((nav.match(/<button type="button"/g) || []).length, 14);   // + interface mode, + Schedules, + Team policy, + Scripts, + the Nodes disclosure (Running + History merged into Runs)
   assert.equal(nav.includes('side-toggle'), false);
   assert.match(html, /<aside class="sidebar" id="side-rail">/,
     'aria-controls targets the whole aside — brand, nav AND the spend foot reshape');
@@ -280,7 +280,7 @@ test('section headers collapse to hairlines but keep their text nodes', () => {
   assert.match(html, /class="nav-sect">Manage</);
 });
 
-test('counts become corner badges; inert grey ones and the paused pill drop out', () => {
+test('counts become corner badges; inert grey ones drop out, and the Needs-you count hides the live one', () => {
   const badge = ruleBody('.sidebar.collapsed .nav-count');
   assert.ok(badge);
   assert.match(badge, /position:\s*absolute/);
@@ -291,8 +291,10 @@ test('counts become corner badges; inert grey ones and the paused pill drop out'
   const grey = ruleBody('.sidebar.collapsed .nav-count.n-grey');
   assert.ok(grey, 'zero/inert grey badges drop out on the rail');
   assert.match(grey, /display:\s*none/);
-  const hidden = ruleBody('.sidebar.collapsed #nav-paused-badge');
-  assert.ok(hidden, 'the paused pill would collide with the live count in the same corner');
+  // One badge on Runs (D11): the amber Needs-you count and the live count would
+  // collide in the same corner, so while Needs-you shows, the live count hides.
+  const hidden = ruleBody('#nav-needs-count:not([hidden]) + #nav-running-count');
+  assert.ok(hidden, 'the Needs-you badge would collide with the live count in the same corner');
   assert.match(hidden, /display:\s*none/);
 });
 
@@ -451,7 +453,7 @@ test('every collapsed nav button gains a tooltip, and loses it on expand', async
   const doc = window.document;
   const rows = () => [...doc.querySelectorAll('.nav button[data-nav]')]
     .map((b) => [b.dataset.nav, b.title]);
-  assert.deepEqual(rows().filter(([n, t]) => n !== 'running' && t), [],
+  assert.deepEqual(rows().filter(([n, t]) => n !== 'runs' && t), [],
     'expanded rows must not grow redundant tooltips — the label is right there');
   click('#side-toggle');
   for (const [nav, title] of rows()) assert.ok(title, `collapsed ${nav} must carry a tooltip`);
@@ -460,8 +462,8 @@ test('every collapsed nav button gains a tooltip, and loses it on expand', async
   assert.equal(doc.querySelector('.nav button[data-nav="new"]').title, 'New pipeline');
   assert.equal(doc.querySelector('.nav button[data-nav="stats"]').title, 'Statistics',
     'the tooltip is the SIDEBAR label, Statistics (index.html)');
-  assert.match(doc.querySelector('.nav button[data-nav="running"]').title, /^Running/,
-    'Running keeps the count tooltip updateNavCounts owns (set at boot by '
+  assert.match(doc.querySelector('.nav button[data-nav="runs"]').title, /^Runs/,
+    'Runs keeps the count tooltip updateNavCounts owns (set at boot by '
     + 'refreshAllCounts, app.js:14034)');
   click('#side-toggle');
   assert.equal(doc.querySelector('.nav button[data-nav="composer"]').hasAttribute('title'), false);
@@ -480,7 +482,7 @@ test('the live count still updates on the rail (n-grey hides only the inert ones
   assert.equal(c.classList.contains('n-grey'), false);
 });
 
-test('the Running tooltip carries the live and paused counts', async () => {
+test('the Runs tooltip carries the Needs-you and live counts', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [
     { runId: 'a', title: 'a', projectDir: PROJECT, status: 'running', kind: 'run',
@@ -488,56 +490,57 @@ test('the Running tooltip carries the live and paused counts', async () => {
     { runId: 'b', title: 'b', projectDir: PROJECT, status: 'paused', kind: 'run',
       startedAt: '10:00:00', pendingQuestion: null },
   ] });
-  const btn = window.document.querySelector('.nav button[data-nav="running"]');
-  assert.equal(btn.title, 'Running — 1 live, 1 paused',
-    'the paused badge is hidden on the rail, so its count has to survive here');
-  assert.equal(btn.getAttribute('aria-label'), 'Running — 1 live, 1 paused',
+  const btn = window.document.querySelector('.nav button[data-nav="runs"]');
+  // A paused run needs you (D5). The rail shows one badge, so both counts have to survive here.
+  assert.equal(btn.title, 'Runs — 1 needs you, 1 live',
+    'the live badge hides behind the Needs-you one, so its count has to survive here');
+  assert.equal(btn.getAttribute('aria-label'), 'Runs — 1 needs you, 1 live',
     'a title is a DESCRIPTION; name-from-contents would otherwise announce "1"');
 });
 
-test('with nothing paused the tooltip names only the live count', async () => {
+test('with nothing needing you the tooltip names only the live count', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [
     { runId: 'a', title: 'a', projectDir: PROJECT, status: 'running', kind: 'run',
       startedAt: '10:00:00', pendingQuestion: null },
   ] });
-  assert.equal(window.document.querySelector('.nav button[data-nav="running"]').title,
-    'Running — 1 live');
+  assert.equal(window.document.querySelector('.nav button[data-nav="runs"]').title,
+    'Runs — 1 live');
 });
 
 test('with nothing running at all the tooltip degrades to the bare label', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [] });
-  // "Running — 0 live" on a resting sidebar is noise, and zero is the state most
+  // "Runs — 0 live" on a resting sidebar is noise, and zero is the state most
   // users are in most of the time. Expanded, the label is on screen, so a tooltip saying
-  // only "Running" would repeat it: none then; the collapsed rail (no label) keeps it.
-  const b = window.document.querySelector('.nav button[data-nav="running"]');
-  assert.equal(b.getAttribute('aria-label'), 'Running');
-  assert.equal(b.title, b.closest('.sidebar.collapsed') ? 'Running' : '');
+  // only "Runs" would repeat it: none then; the collapsed rail (no label) keeps it.
+  const b = window.document.querySelector('.nav button[data-nav="runs"]');
+  assert.equal(b.getAttribute('aria-label'), 'Runs');
+  assert.equal(b.title, b.closest('.sidebar.collapsed') ? 'Runs' : '');
 });
 
-test('paused-only names the paused count without a phantom live one', async () => {
+test('paused-only names the Needs-you count without a phantom live one', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [
     { runId: 'p', title: 'p', projectDir: PROJECT, status: 'paused', kind: 'run',
       startedAt: '10:00:00', pendingQuestion: null }] });
-  // liveRuns() (app.js:12329-12336) excludes status 'paused', so live really is 0.
-  assert.equal(window.document.querySelector('.nav button[data-nav="running"]').title,
-    'Running — 0 live, 1 paused');
+  // liveRuns() excludes status 'paused', so live really is 0 — and a zero part is dropped.
+  assert.equal(window.document.querySelector('.nav button[data-nav="runs"]').title,
+    'Runs — 1 needs you');
 });
 
 test('a collapsed nav button still routes', async () => {
   const { window, click, tick } = await boot({ seed: { [KEY]: '1' } });
-  click('.nav button[data-nav="history"]');
+  click('.nav button[data-nav="runs"]');
   await tick();
-  assert.equal(window.location.hash, '#history');
-  assert.ok(window.document.querySelector('.nav button[data-nav="history"]')
+  assert.equal(window.location.hash, '#runs');
+  assert.ok(window.document.querySelector('.nav button[data-nav="runs"]')
     .classList.contains('active'));
 });
 
 test('the toggle still works after a view switch and a repaint', async () => {
   const { window, click, tick } = await boot();
-  click('.nav button[data-nav="history"]');
+  click('.nav button[data-nav="runs"]');
   await tick();
   click('#side-toggle');
   assert.equal(window.document.querySelector('.sidebar').classList.contains('collapsed'), true,
@@ -663,14 +666,21 @@ test('each tile carries the same status dot family the expanded row uses', async
   assert.match(doc.querySelector('.rail-tile[data-child-run-id="r2"]').title, /· Paused$/);
 });
 
-test('a run awaiting input gets a "?" badge and still raises the roll-up dot', async () => {
+test('a run awaiting input gets a "?" badge and raises the amber Needs-you count', async () => {
   const { window, recv } = await boot({ seed: { [KEY]: '1' } });
   recv({ type: 'hello', runs: [liveRun('r1', 'Needs me', { pendingQuestion: { id: 'q1', text: 'go?' } })] });
   const doc = window.document;
   const q = doc.querySelector('.rail-tile[data-child-run-id="r1"] .child-q');
   assert.ok(q, 'the tile carries its own "?" marker');
   assert.equal(q.textContent, '?');
-  assert.equal(doc.querySelector('#nav-running-rollup').hidden, false);
+  // One badge on Runs (D11): the amber Needs-you count shows and the live count hides behind it.
+  const needs = doc.querySelector('#nav-needs-count');
+  assert.equal(needs.hidden, false);
+  assert.equal(needs.textContent, '1');
+  assert.ok(needs.classList.contains('n-amber'));
+  assert.equal(doc.querySelector('#nav-needs-count:not([hidden]) + #nav-running-count'),
+    doc.querySelector('#nav-running-count'),
+    'the live count sits right after the shown Needs-you count, where CSS hides it');
   assert.match(doc.querySelector('.rail-tile[data-child-run-id="r1"]').title,
     /· Waiting for your input$/);
 });
@@ -786,7 +796,8 @@ test('an empty run list renders an empty rail without throwing', async () => {
   // renderPipelineTabs early-returns at :13677-13680 before the sig gate.
   const host = window.document.querySelector('#nav-running-children');
   assert.equal(host.querySelectorAll('.rail-tile').length, 0);
-  assert.equal(window.document.querySelector('#nav-running-rollup').hidden, true);
+  assert.equal(window.document.querySelector('#nav-needs-count').hidden, true,
+    'nothing needs you: the amber count stays hidden');
 });
 
 // ---- Task 3: circular budget indicator ----
@@ -933,11 +944,6 @@ test('every remaining new rule carries the declarations it exists for', () => {
   // reads as a button next to a label.
   mark('.sidebar.collapsed .nav button.nav-cta', /background:\s*var\(--ink\)/,
     /(?:^|[;{\s])color:\s*var\(--on-ink\)/);
-  // Pinned to the Running square's corner, and ringed in --panel like both
-  // sibling markers — .nav button.active .nav-rollup fills it #fff (:140), which
-  // is invisible on the white sidebar for the half of the dot that overhangs.
-  mark('.sidebar.collapsed .nav-rollup', /position:\s*absolute/,
-    /border:\s*2px solid var\(--panel\)/);
   mark('.nav .rail-tile:focus-visible', /outline:\s*2px solid var\(--ink\)/);
   // The ring's inner disc: without the --panel fill the conic-gradient covers
   // the whole 38px circle and there is no annulus.

@@ -177,3 +177,42 @@ test('frozen counts survive a deleted branch; a bad or non-numeric results.json 
   assert.equal(lite.added, 0);
   assert.equal(lite.diffFrozen, false);
 });
+
+test('history rows carry the review count and the files changed from results.json', async () => {
+  const { listPipelines, listAllPipelines } = await import('../src/core/artifacts.mjs');
+  const seed = (title) => seedPipeline(repo, {
+    title, status: 'done', startedAt: '2026-06-05T00:00:00Z',
+    branch: { source: 'main', feature: 'worca-cc/feat-1', branchKept: true },
+  });
+  const reviewed = await seed('Reviewed');
+  await writeFile(join(reviewed.dir, 'results.json'), JSON.stringify({
+    summary: { filesNew: 1, filesChanged: 2, filesDeleted: 0, linesAdded: 5, linesRemoved: 1 },
+    keyThingsToCheck: [{ title: 'a' }, { title: 'b' }],
+  }));
+  const members = await seed('Per project');
+  await writeFile(join(members.dir, 'results.json'), JSON.stringify({
+    summary: { filesNew: 0, filesChanged: 0, filesDeleted: 0 },
+    perProject: { a: { keyThingsToCheck: [{}] }, b: { keyThingsToCheck: [{}, {}] } },
+  }));
+  const bare = await seed('No list');
+  await writeFile(join(bare.dir, 'results.json'), JSON.stringify({ summary: { filesNew: 0, filesChanged: 4, filesDeleted: 1 } }));
+  const pending = await seed('No results yet');     // no results.json at all
+
+  const rows = await listPipelines(repo);
+  const r = rows.find((x) => x.id === reviewed.id);
+  assert.equal(r.checks, 2);
+  assert.equal(r.files, 3);
+  assert.deepEqual([r.added, r.removed], [5, 1], 'the frozen line counts still come from the same read');
+  const m = rows.find((x) => x.id === members.id);
+  assert.equal(m.checks, 3, 'a workspace-shaped result sums its members, as hdChecks does');
+  assert.equal(m.files, 0);
+  const b = rows.find((x) => x.id === bare.id);
+  assert.equal(b.checks, 0, 'a results file without the list counts 0 (the glance says Ready to ship)');
+  assert.equal(b.files, 5, 'new + changed + deleted, the glance headline’s own sum (rdFilesChanged)');
+  const p = rows.find((x) => x.id === pending.id);
+  assert.equal(p.checks, null, 'no results.json: unknown, not zero');
+  assert.equal(p.files, null);
+  const lite = (await listAllPipelines({ lite: true })).find((x) => x.id === reviewed.id);
+  assert.equal(lite.checks, null, 'lite callers skip the file read');
+  assert.equal(lite.files, null);
+});

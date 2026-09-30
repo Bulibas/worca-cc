@@ -623,5 +623,5 @@ test('Re-scan from the empty Map tab starts one scan run per press', async () =>
   click(window, rescan);
   await settle();
   assert.equal(server.calls.filter((c) => c === `POST /api/workspaces/${ID}/scan {}`).length, 1, 'one scan per press');
-  assert.equal(doc.querySelector('.view[data-view="running"]').classList.contains('hidden'), false, 'on Running');
+  assert.equal(doc.querySelector('.view[data-view="runs"]').classList.contains('hidden'), false, 'on Runs');
 });

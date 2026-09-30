@@ -1,5 +1,5 @@
 // test/ui-workspace-wizard.test.mjs — jsdom boot tests for the one-step creation wizard:
-// gating, the scan POST, the hand-off to the run's card on Running, error handling
+// gating, the scan POST, the hand-off to the run's row on Runs, error handling
 // (409 stays), leave-reset, JSON safety (.textContent only), and the retired steps.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -136,7 +136,7 @@ test('Select all is disabled when fewer than two projects are usable', async () 
   assert.equal(window.document.querySelector('#wiz-select-all').disabled, true);
 });
 
-test('Scan POSTs {projectPaths,name} and hands off to the run card on Running', async () => {
+test('Scan POSTs {projectPaths,name} and hands off to the run on Runs', async () => {
   const posts = [];
   const { window } = await boot({ fetchHandler: scanOk(posts) });
   goCreate(window);
@@ -148,9 +148,9 @@ test('Scan POSTs {projectPaths,name} and hands off to the run card on Running', 
   await tick(); await tick();
   assert.deepEqual(posts.map(({ projectPaths, name }) => ({ projectPaths, name })), [{ projectPaths: ['/a/svc-iam', '/a/svc-ui'], name: 'My WS' }]);
   assert.ok(posts[0].models && posts[0].models.agentModel, 'the Models column rides along');
-  assert.ok(viewShown(doc, 'running'), 'on Running');
+  assert.ok(viewShown(doc, 'runs'), 'on Runs');
   assert.ok(!viewShown(doc, 'workspace-create'), 'the wizard is left');
-  assert.ok(doc.querySelector('#run-list [data-run-id="run-scan-1"]'), 'the scan run has a card');
+  assert.ok(doc.querySelector('#runs-list [data-run-id="run-scan-1"]'), 'the scan run has a row');
 });
 
 test('no name: no POST, the name field gets focus', async () => {
