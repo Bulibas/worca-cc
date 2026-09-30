@@ -17610,14 +17610,18 @@ function resetShipItDesc(modal) {
   err.hidden = true; err.textContent = '';
 }
 
-// Generate with AI in flight: the button is disabled and says so, Stop shows, and
-// the textarea is read-only so nothing typed meanwhile is overwritten by the draft.
+// Generate with AI in flight: the button is disabled and says so, Stop shows, the
+// textarea is read-only so nothing typed meanwhile is overwritten by the draft, and
+// the field wears the shimmer veil (.is-generating) that also swallows clicks.
 function setShipItGenerating(modal, on) {
   const btn = modal.querySelector('.shipit-generate');
   btn.disabled = on;
   btn.textContent = on ? 'Generating…' : 'Generate with AI';
   modal.querySelector('.shipit-generate-stop').hidden = !on;
   modal.querySelector('.shipit-desc-input').readOnly = on;
+  const field = modal.querySelector('.shipit-desc-field');
+  field.classList.toggle('is-generating', on);
+  field.setAttribute('aria-busy', String(on));
 }
 
 function openShipItModal(record, data) {

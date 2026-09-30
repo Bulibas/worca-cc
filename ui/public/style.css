@@ -3870,6 +3870,38 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .shipit-desc-preview[hidden]{display:none;}
 .shipit-desc-err{margin-top:8px;}
 .shipit-desc-err[hidden]{display:none;}
+/* The Generate-with-AI veil over the editor (or its preview) while a draft is in
+   flight: a haze over the old text, a violet light band swept left to right across
+   it, a breathing violet edge, and a shimmering label. It keeps pointer-events, so
+   it swallows clicks; the textarea under it is read-only too (setShipItGenerating).
+   The textarea goes block so the box has no inline-gap strip under it for the veil
+   to overhang — hence its own [hidden] twin.
+   Both sweeps run on shipit-sweep, NOT the shared ask-shimmer: a 220%-wide
+   background repeats every 2.2 box widths, and ask-shimmer travels 2.88 of them
+   (180% -> -60%, each 1% of position = 1.2% of the box), so at the loop the next
+   tile's band restarts already inside the right edge — a flash. shipit-sweep
+   travels exactly one tile (-183.333% * 1.2 = 2.2), so the loop point is seamless:
+   the band leaves on the right and the next one enters from the left. */
+.shipit-desc-field{position:relative;}
+.shipit-desc-field > .shipit-desc-input{display:block;}
+.shipit-desc-field > .shipit-desc-input[hidden]{display:none;}
+.shipit-desc-busy{display:none;}
+.shipit-desc-field.is-generating .shipit-desc-busy{position:absolute;inset:0;z-index:1;display:flex;
+  align-items:center;justify-content:center;overflow:hidden;cursor:progress;border-radius:var(--r-ctrl);
+  background:color-mix(in srgb,var(--field) 50%,transparent);
+  -webkit-backdrop-filter:blur(1.5px);backdrop-filter:blur(1.5px);
+  animation:shipit-veil-breathe 2.4s ease-in-out infinite;}
+.shipit-desc-field.is-generating .shipit-desc-busy::before{content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(100deg,transparent 30%,color-mix(in srgb,var(--violet) 24%,transparent) 50%,transparent 70%);
+  background-size:220% 100%;animation:shipit-sweep 1.8s linear infinite;}
+.shipit-desc-busy-label{position:relative;font-weight:600;font-size:12.5px;letter-spacing:.01em;white-space:nowrap;
+  background:linear-gradient(100deg,var(--ink-2) 0%,var(--ink-2) 34%,var(--violet-ink) 50%,var(--ink-2) 66%,var(--ink-2) 100%);
+  background-size:220% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;
+  animation:shipit-sweep 2.4s linear infinite;}
+@keyframes shipit-sweep{from{background-position:0 0;}to{background-position:-183.333% 0;}}
+@keyframes shipit-veil-breathe{
+  0%,100%{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--violet) 30%,transparent);}
+  50%{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--violet) 70%,transparent),inset 0 0 24px color-mix(in srgb,var(--violet) 16%,transparent);}}
 
 /* Reduced motion for the three ship-it animations. This block MUST sit AFTER the
    rules that declare them: `@media` contributes no specificity, so naming
@@ -3884,6 +3916,12 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
      and it computes `opacity:1; transform:none` — a permanent 74px --green-bg disc
      ringing the 60px icon. */
   .shipit-spark{animation:none;opacity:0;}
+  /* The Generate-with-AI veil holds still: a steady violet edge, no sweep, and the
+     label gets a real colour back (its fill is a clipped, now-frozen gradient). */
+  .shipit-desc-field.is-generating .shipit-desc-busy{animation:none;
+    box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--violet) 55%,transparent);}
+  .shipit-desc-field.is-generating .shipit-desc-busy::before{content:none;}
+  .shipit-desc-busy-label{animation:none;background:none;color:var(--ink-2);}
 }
 
 /* ---------- History list card v2 ---------- */

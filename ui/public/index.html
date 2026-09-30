@@ -2347,8 +2347,15 @@
             <button type="button" class="shipit-generate-stop btn btn-ghost btn-mini" hidden>Stop</button>
             <button type="button" class="shipit-generate btn btn-ghost btn-mini">Generate with AI</button>
           </div>
-          <textarea id="shipit-desc-input" class="shipit-desc-input textarea" rows="7" placeholder="Describe this change, or use Generate with AI"></textarea>
-          <div class="shipit-desc-preview md-preview viewer" hidden></div>
+          <!-- The editor and its preview share one box so the Generate-with-AI veil can
+               lie over whichever is showing: a shimmer sweep that also swallows clicks
+               while the textarea is read-only. `.is-generating` + aria-busy toggle it
+               (setShipItGenerating); the veil itself is decoration. -->
+          <div class="shipit-desc-field" aria-busy="false">
+            <textarea id="shipit-desc-input" class="shipit-desc-input textarea" rows="7" placeholder="Describe this change, or use Generate with AI"></textarea>
+            <div class="shipit-desc-preview md-preview viewer" hidden></div>
+            <div class="shipit-desc-busy" aria-hidden="true"><span class="shipit-desc-busy-label">Drafting with AI…</span></div>
+          </div>
           <div class="shipit-desc-err hint err" hidden></div>
         </div>
         <!-- `hint err`, not `err`: style.css has no standalone .err rule, only
