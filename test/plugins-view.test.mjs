@@ -430,6 +430,12 @@ test('renderMarketplaceList: builtin badge, sync line (relTime), warnings, actio
   assert.match(never.querySelector('.pl-mkt-sync').textContent, /never synced/);
 });
 
+test('renderMarketplaceList: a marketplace that tracks a branch names it after the url', () => {
+  const el = renderMarketplaceList([{ ...MKT, url: 'https://github.com/o/worca', ref: 'dev' }, { ...MKT, id: 'm-2' }], { doc });
+  const urls = [...el.querySelectorAll('.pl-mkt-url')].map((u) => u.textContent);
+  assert.deepEqual(urls, ['https://github.com/o/worca · dev', '/tmp/m1']);
+});
+
 test('renderPluginList: provenance line renders marketplace + repo @ sha7', () => {
   const el = renderPluginList([{
     name: 'aa', version: '1.0.0', pinnedSha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',

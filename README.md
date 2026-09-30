@@ -159,7 +159,10 @@ and durations, the clarify Q&A, agent transcripts, and logs:
   templates, models, and chat channels. Install from a marketplace with an
   explicit consent ceremony (what's installed, which ask forms an agent can show
   and which file types they may display, which secrets are required, which setup
-  commands run); updates show a commit-level preview before you accept.
+  commands run); updates show a commit-level preview before you accept. The
+  built-in marketplace is worca's GitHub repository on its `dev` branch; set
+  `WORCA_BUILTIN_MARKETPLACE` to another repo URL or a local checkout to use
+  that instead (followed at its HEAD).
 - **Drive runs from chat** — bundled two-way **Telegram**, **Slack**,
   **Discord**, and **Microsoft Teams** channels: get notified on questions,
   finishes, failures, and cost pauses, and answer back with commands —

@@ -1964,7 +1964,7 @@ async function cmdPlugin(argv) {
         const name = a._[0];
         if (!name) fail('Usage: worca plugin install <name> [--repo <url>] [--marketplace <id>] [--ref <sha>] [--yes]');
         const mkt = await import('../core/marketplaces.mjs');
-        try { mkt.seedBuiltinMarketplace(); } catch { /* non-checkout install */ }
+        try { mkt.seedBuiltinMarketplace(); } catch { /* registry unwritable: go on without the builtin */ }
         let repoUrl = a.repo;
         let marketplace = a.marketplace || null;
         if (!repoUrl && marketplace) {
@@ -2300,7 +2300,7 @@ async function cmdMarketplace(argv) {
     return 0;
   }
   const mkt = await import('../core/marketplaces.mjs');
-  try { mkt.seedBuiltinMarketplace(); } catch { /* non-checkout install: skip */ }
+  try { mkt.seedBuiltinMarketplace(); } catch { /* registry unwritable: go on without the builtin */ }
   try {
     switch (verb) {
       case 'add': {

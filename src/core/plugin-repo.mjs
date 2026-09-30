@@ -103,23 +103,32 @@ async function ensureCache(repoUrl, exec) {
   return cache;
 }
 
+/** The commit a repo is followed at: its HEAD (the remote's default branch), or the tip of
+ *  branch `ref` (a marketplace that tracks one, spec §4.2; recorded in the lock for updates). */
+async function tipSha(cache, ref, exec) {
+  if (!ref) return (await gitDir(cache, ['rev-parse', 'HEAD'], exec)).trim();
+  const bad = () => new Error(`branch "${ref}" not found`);
+  if (!/^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(ref)) throw bad();
+  try { return (await gitDir(cache, ['rev-parse', '--verify', '--quiet', `refs/heads/${ref}^{commit}`], exec)).trim(); } catch { throw bad(); }
+}
+
 /**
  * `worca plugin add`: clone/refresh the bare cache, then discover plugins in the
- * HEAD tree. A root worca-cc-marketplace.json (spec §4.1), when present and
+ * HEAD tree (or branch `ref`'s). A root worca-cc-marketplace.json (spec §4.1), when present and
  * structurally valid, is AUTHORITATIVE — its listed dirs (any depth) are the only
  * candidates, even when the list is empty. Without one, the depth 0/1 scan of
  * spec §4.3 applies unchanged.
  * @returns {{repoUrl:string, sha:string, discovered:Array<{name,subdir,manifest}>,
  *   warnings:string[], marketplace:{name:string, description:string}|null}}
  */
-export async function addPluginRepo(repoUrl, { exec = defaultExec } = {}) {
+export async function addPluginRepo(repoUrl, { exec = defaultExec, ref = null } = {}) {
   // `owner/repo` shorthand -> GitHub URL (spec §4.3) — only when it is not a
   // real local path (local fixture repos in tests stay untouched).
   if (/^[\w.-]+\/[\w.-]+$/.test(repoUrl) && !existsSync(repoUrl)) {
     repoUrl = `https://github.com/${repoUrl}`;
   }
   const cache = await ensureCache(repoUrl, exec);
-  const sha = (await gitDir(cache, ['rev-parse', 'HEAD'], exec)).trim();
+  const sha = await tipSha(cache, ref, exec);
   const allPaths = (await gitDir(cache, ['ls-tree', '-r', '--name-only', sha], exec))
     .split('\n').map((s) => s.trim()).filter(Boolean);
   const warnings = [];
@@ -251,7 +260,7 @@ async function computeManifestDelta(name, cache, entry, pinnedSha, candidateSha,
 
 /**
  * Update preview (spec §6.2): fetch, then report commits + diffstat + the
- * manifest delta between the pinned SHA and the new HEAD; { fullDiff: true }
+ * manifest delta between the pinned SHA and the new HEAD (the lock's `ref` branch tip when set); { fullDiff: true }
  * additionally returns the complete diff text ("full diff on demand").
  * Read-only; performing the update is Task 5's updatePlugin.
  */
@@ -259,7 +268,7 @@ export async function fetchCandidate(name, { exec = defaultExec, fullDiff = fals
   const entry = readPluginsLock()[name];
   if (!entry || !entry.repo) throw new Error(`plugin "${name}" is not installed from a repo`);
   const cache = await ensureCache(entry.repo, exec);
-  const candidateSha = (await gitDir(cache, ['rev-parse', 'HEAD'], exec)).trim();
+  const candidateSha = await tipSha(cache, entry.ref, exec);
   const pinnedSha = entry.pinnedSha;
   let commits = [];
   let diffstat = '';

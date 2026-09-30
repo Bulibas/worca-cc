@@ -564,7 +564,7 @@ export function renderMarketplaceList(marketplaces, { doc = globalThis.document,
     }
     head.appendChild(actions);
     row.appendChild(head);
-    row.appendChild(h(doc, 'small', 'pl-mkt-url hint mono', m.url));
+    row.appendChild(h(doc, 'small', 'pl-mkt-url hint mono', m.ref ? `${m.url} · ${m.ref}` : m.url));
     const n = (m.plugins || []).length;
     row.appendChild(h(doc, 'small', 'pl-mkt-sync hint', m.lastSync
       ? `${sha7(m.lastSync.sha)} · synced ${relTime(m.lastSync.at, now)} · ${n} plugin${n === 1 ? '' : 's'}`

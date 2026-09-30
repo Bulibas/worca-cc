@@ -404,7 +404,10 @@ export async function installPlugin({ repoUrl, subdir = '', name, sha, marketpla
   if (!name) throw new Error('installPlugin: name is required');
   const lock = readPluginsLock();
   if (lock[name]) throw new Error(`plugin "${name}" is already installed`);
-  const added = await addPluginRepo(repoUrl, { exec }); // clone-or-fetch the cache
+  // A marketplace that tracks a branch (the builtin: dev) pins its tip and records it, so updates follow it.
+  // Imported here: marketplaces.mjs reaches this module through plugin-inventory.mjs.
+  const ref = marketplace ? (await import('./marketplaces.mjs')).readMarketplaces().marketplaces[marketplace]?.ref ?? null : null;
+  const added = await addPluginRepo(repoUrl, { exec, ref }); // clone-or-fetch the cache
   const pin = sha || added.sha;
   const { versionDir, warnings } = await exportVersion(name, pin, { exec, repoUrl, subdir });
   const prevCurrent = currentTarget(name); // null on first install
@@ -421,6 +424,7 @@ export async function installPlugin({ repoUrl, subdir = '', name, sha, marketpla
       enabled: true, installedAt: new Date().toISOString(),
       lockfileHash: sha256File(join(versionDir, 'package-lock.json')),
       ...(marketplace ? { marketplace } : {}), // provenance only when it came from one
+      ...(ref ? { ref } : {}),
     };
     writePluginsLock(lock);
     // §6.1(3): workflow template import is the LAST install step (post-swap,
