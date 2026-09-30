@@ -135,7 +135,7 @@ test('clarify question renders inline in the run card, card gets .attention', as
   assert.ok(panel.querySelector('.qpanel-foot .btn-go'), 'submit button present');
 });
 
-test('each option is prefixed with a letter (A, B, ...) so it can be referenced by name', async () => {
+test('each option carries a letter key (A, B, ...) so it can be referenced by name', async () => {
   const ctx = await boot();
   helloRunning(ctx);
   ctx.showRunning();
@@ -144,14 +144,19 @@ test('each option is prefixed with a letter (A, B, ...) so it can be referenced 
   const card = ctx.window.document.querySelector(`.run-card[data-run-id="${RUN_ID}"]`);
   const blocks = card.querySelectorAll('.qblock');
 
-  // q1: 2 real options -> "A. Redis", "B. Postgres".
+  // The letter rides data-key (the stylesheet draws it as the option's key square);
+  // the text node is the option itself, so the key is never printed twice.
+  // q1: 2 real options -> A Redis, B Postgres.
   const q1opts = blocks[0].querySelectorAll('.qopt');
-  assert.equal(q1opts[0].textContent, 'A. Redis');
-  assert.equal(q1opts[1].textContent, 'B. Postgres');
+  assert.equal(q1opts[0].dataset.key, 'A');
+  assert.equal(q1opts[0].textContent, 'Redis');
+  assert.equal(q1opts[1].dataset.key, 'B');
+  assert.equal(q1opts[1].textContent, 'Postgres');
 
-  // q2: 1 real option, letters restart per-question -> "A. Fail fast".
+  // q2: 1 real option, letters restart per-question -> A Fail fast.
   const q2opts = blocks[1].querySelectorAll('.qopt');
-  assert.equal(q2opts[0].textContent, 'A. Fail fast');
+  assert.equal(q2opts[0].dataset.key, 'A');
+  assert.equal(q2opts[0].textContent, 'Fail fast');
 });
 
 test('selecting an option marks it + submit posts {runId,id,payload:{answers}} with the choice', async () => {

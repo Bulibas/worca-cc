@@ -4676,6 +4676,7 @@ function renderQpanel(r, root = r.el) {
   const kind = askKindOf(pq);
   const renderer = askRendererFor(kind) || askRendererFor('clarify');
   if (!renderer) { panel.classList.add('hidden'); return; }
+  panel.dataset.kind = kind;                  // the run page lays each kind out on its own
   const ctx = askCtxFor(r, panel);
 
   // ----- head -----
@@ -4816,9 +4817,11 @@ function renderClarifyBody(r, panel, pq) {
       btn.type = 'button';
       btn.className = 'qopt';
       btn.setAttribute('aria-pressed', 'false');
-      // A/B/C/D prefix (MAX_CLARIFY_OPTIONS is 4) so a free-text answer can
-      // refer back to an option by name, e.g. "B but change the port".
-      btn.textContent = `${String.fromCharCode(65 + optIdx)}. ${optText}`;
+      // A/B/C/D key (MAX_CLARIFY_OPTIONS is 4) so a free-text answer can refer
+      // back to an option by name, e.g. "B but change the port". The stylesheet
+      // draws it as the option's key square, so the text node is the option alone.
+      btn.dataset.key = String.fromCharCode(65 + optIdx);
+      btn.textContent = optText;
       btn.addEventListener('click', () => {
         // Select this option, clear siblings + the free-text field (if present).
         optsWrap.querySelectorAll('.qopt').forEach((b) => {
