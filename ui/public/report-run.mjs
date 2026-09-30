@@ -69,6 +69,19 @@ export function previewText(payload) {
   return JSON.stringify(payload, null, 2);
 }
 
+/**
+ * How long the expectation box must be quiet before the preview is rebuilt.
+ * The preview box is a FIXED height (style.css:6553), so a rebuild no longer
+ * resizes the dialog — this is about not re-running the build on every keystroke,
+ * not about layout. The FIRST build, when the modal opens, is deliberately not
+ * debounced: there is nothing to wait for.
+ *
+ * A rebuild merely PENDING behind this timer is as stale as one in flight, which is
+ * why `reportPending()` still runs synchronously in the input handler (D24).
+ * Exporting it lets the UI tests wait on this number instead of a copy of it.
+ */
+export const REPORT_PREVIEW_DEBOUNCE_MS = 3000;
+
 /** Blob parts for Download JSON — pretty JSON with a trailing newline. */
 export function reportBlobParts(payload) {
   return [`${JSON.stringify(payload, null, 2)}\n`];
