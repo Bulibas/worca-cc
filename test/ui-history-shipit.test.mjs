@@ -22,9 +22,10 @@ const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 
 const PROJECT = '/tmp/proj';
 
-async function boot({ fetchHandler, url = 'http://localhost:4317/' } = {}) {
+async function boot({ fetchHandler, url = 'http://localhost:4317/', hooks = null } = {}) {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url });
   const { window } = dom;
+  if (hooks) window.__worcaTestHooks = hooks;   // e.g. the real marked + DOMPurify for the Preview tab
 
   // jsdom doesn't implement scrollIntoView; the viewer modal calls it on open.
   window.Element.prototype.scrollIntoView = function () {};
@@ -158,12 +159,13 @@ function historyArms(box) {
   };
 }
 
-async function bootShip({ rows = [row()], detail = DETAIL, gh = true, arms = null, deepLink = false, remotes = REMOTES } = {}) {
+async function bootShip({ rows = [row()], detail = DETAIL, gh = true, arms = null, deepLink = false, remotes = REMOTES, hooks = null } = {}) {
   const box = { rows, detail, gh, remotes, budget: okBudget() };
   const base = historyArms(box);
   const ctx = await boot({
     fetchHandler: (url, opts) => (arms && arms(url, opts, box)) || base(url, opts),
     url: deepLink ? `http://localhost:4317/#${detailHash}` : 'http://localhost:4317/',
+    hooks,
   });
   ctx.box = box;
   ctx.prTokens = () => ctx.calls
@@ -822,4 +824,268 @@ test('a re-open starts from the fresh default, not the previous pick', async () 
   click(window, hdPr(window));
   await settle(window);
   assert.equal(baseSelOf(modal).value, 'dev');
+});
+
+// ---------------------------------------------------------------------------
+// The PR description: Write / Preview, Generate with AI (POST /api/pr/describe),
+// and the optional `body` on the confirm POST
+// ---------------------------------------------------------------------------
+
+const descOf = (modal) => modal.querySelector('.shipit-desc-input');
+const previewOf = (modal) => modal.querySelector('.shipit-desc-preview');
+const genBtnOf = (modal) => modal.querySelector('.shipit-generate');
+const stopBtnOf = (modal) => modal.querySelector('.shipit-generate-stop');
+const descErrOf = (modal) => modal.querySelector('.shipit-desc-err');
+const tabOf = (modal, mode) => modal.querySelector(`.shipit-desc-tab[data-mode="${mode}"]`);
+const describeCalls = (ctx) => ctx.calls.filter((c) => c.url.endsWith('/api/pr/describe'));
+const typeInto = (window, ta, value) => { ta.value = value; ta.dispatchEvent(new window.Event('input', { bubbles: true })); };
+const confirmOpen = (w) => !w.document.getElementById('confirm-modal').classList.contains('hidden');
+const escape = (w) => w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+const realMarkdown = async () => ({ marked: (await import('marked')).marked, createDOMPurify: (await import('dompurify')).default });
+
+// A describe request that hangs until released. With `honorAbort` it rejects the
+// way fetch does once its signal aborts; without, the response can still land
+// late (a server that answered anyway) so the stale-response guards are exercised.
+function gatedDescribe({ honorAbort = true } = {}) {
+  const g = { signals: [], releases: [] };
+  g.arm = (url, opts) => {
+    if (!url.endsWith('/api/pr/describe')) return null;
+    g.signals.push(opts.signal);
+    return new Promise((resolve, reject) => {
+      g.releases.push((body, status = 200) => resolve({ ok: status < 400, status, json: async () => body }));
+      if (honorAbort) opts.signal?.addEventListener('abort', () => { const e = new Error('The operation was aborted.'); e.name = 'AbortError'; reject(e); });
+    });
+  };
+  g.release = (body, status) => g.releases[g.releases.length - 1](body, status);
+  return g;
+}
+
+test('the description field sits between the remotes and the error line: empty, Write selected, a hint placeholder', async () => {
+  const ctx = await bootShip();
+  const modal = await openModal(ctx);
+  const box = modal.querySelector('.shipit-desc');
+  const follows = (a, b) => !!(a.compareDocumentPosition(b) & ctx.window.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.ok(follows(modal.querySelector('.shipit-remotes'), box), 'below the summary / remotes block');
+  assert.ok(follows(box, modal.querySelector('.shipit-err')), 'above the "Could not open PR" line');
+  assert.deepEqual([...box.querySelectorAll('.shipit-desc-tab')].map((b) => b.textContent), ['Write', 'Preview']);
+  assert.equal(tabOf(modal, 'text').getAttribute('aria-selected'), 'true');
+  assert.equal(descOf(modal).value, '');
+  assert.equal(descOf(modal).hidden, false);
+  assert.equal(previewOf(modal).hidden, true);
+  assert.match(descOf(modal).placeholder, /Describe this change, or use Generate with AI/);
+  assert.equal(genBtnOf(modal).textContent, 'Generate with AI');
+  assert.equal(genBtnOf(modal).disabled, false);
+  assert.equal(stopBtnOf(modal).hidden, true);
+  assert.equal(descErrOf(modal).hidden, true);
+  assert.equal(describeCalls(ctx).length, 0, 'nothing is generated on open');
+});
+
+test('Preview renders the draft as markdown, Write brings the raw text back', async () => {
+  const ctx = await bootShip({ hooks: { askMarkdown: realMarkdown } });
+  const modal = await openModal(ctx);
+  typeInto(ctx.window, descOf(modal), '## Summary\n\nRetries **twice**.');
+  click(ctx.window, tabOf(modal, 'preview'));
+  await settle(ctx.window, 6);
+  assert.equal(tabOf(modal, 'preview').getAttribute('aria-selected'), 'true');
+  assert.equal(descOf(modal).hidden, true);
+  assert.equal(previewOf(modal).hidden, false);
+  assert.equal(previewOf(modal).querySelector('h2')?.textContent, 'Summary', 'rendered through the page markdown pipeline');
+  assert.equal(previewOf(modal).querySelector('strong')?.textContent, 'twice');
+  click(ctx.window, tabOf(modal, 'text'));
+  assert.equal(descOf(modal).hidden, false);
+  assert.equal(previewOf(modal).hidden, true);
+  assert.equal(descOf(modal).value, '## Summary\n\nRetries **twice**.', 'Write loses nothing');
+});
+
+test('Generate with AI posts the run + base branch, reads "Generating…" while in flight, then fills the description', async () => {
+  const g = gatedDescribe();
+  const ctx = await bootShip({ arms: g.arm });
+  const modal = await openModal(ctx);
+  click(ctx.window, genBtnOf(modal));
+  await settle(ctx.window);
+  assert.equal(describeCalls(ctx).length, 1);
+  assert.deepEqual(JSON.parse(describeCalls(ctx)[0].opts.body),
+    { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id, baseBranch: 'feat/log-ux' });
+  assert.equal(genBtnOf(modal).disabled, true);
+  assert.equal(genBtnOf(modal).textContent, 'Generating…');
+  assert.equal(stopBtnOf(modal).hidden, false, 'a generation in flight can be stopped');
+  click(ctx.window, genBtnOf(modal));
+  assert.equal(describeCalls(ctx).length, 1, 'a second click while in flight sends nothing');
+  g.release({ ok: true, body: '## Summary\nRetries fetch.' });
+  await settle(ctx.window, 6);
+  assert.equal(descOf(modal).value, '## Summary\nRetries fetch.');
+  assert.equal(genBtnOf(modal).disabled, false);
+  assert.equal(genBtnOf(modal).textContent, 'Generate with AI');
+  assert.equal(stopBtnOf(modal).hidden, true);
+  assert.equal(isOpen(ctx.window), true, 'nothing is submitted: the text waits for the user');
+  assert.equal(prPosts(ctx).length, 0);
+});
+
+test('while Generate with AI is in flight the description is veiled and locked: shimmer veil, aria-busy, read-only', async () => {
+  const g = gatedDescribe();
+  const ctx = await bootShip({ arms: g.arm });
+  const modal = await openModal(ctx);
+  const field = modal.querySelector('.shipit-desc-field');
+  const veil = modal.querySelector('.shipit-desc-busy');
+  assert.ok(field.contains(descOf(modal)) && field.contains(previewOf(modal)) && field.contains(veil),
+    'one box holds the editor, its preview and the veil laid over them');
+  assert.equal(veil.getAttribute('aria-hidden'), 'true', 'the veil is decoration; aria-busy carries the state');
+  assert.match(veil.textContent, /Drafting with AI/);
+  assert.equal(field.classList.contains('is-generating'), false);
+  assert.equal(field.getAttribute('aria-busy'), 'false');
+  assert.equal(descOf(modal).readOnly, false);
+
+  click(ctx.window, genBtnOf(modal));
+  await settle(ctx.window);
+  assert.equal(field.classList.contains('is-generating'), true, 'the shimmer veil is up');
+  assert.equal(field.getAttribute('aria-busy'), 'true');
+  assert.equal(descOf(modal).readOnly, true, 'nothing can be typed under the veil');
+
+  g.release({ ok: true, body: 'Drafted.' });
+  await settle(ctx.window, 6);
+  assert.equal(field.classList.contains('is-generating'), false, 'lifted once the draft lands');
+  assert.equal(field.getAttribute('aria-busy'), 'false');
+  assert.equal(descOf(modal).readOnly, false, 'editable again');
+
+  click(ctx.window, genBtnOf(modal));
+  await settle(ctx.window);
+  click(ctx.window, ctx.window.document.getElementById('confirm-ok'));   // replace "Drafted."
+  await settle(ctx.window);
+  assert.equal(field.classList.contains('is-generating'), true);
+  click(ctx.window, stopBtnOf(modal));
+  await settle(ctx.window, 6);
+  assert.equal(field.classList.contains('is-generating'), false, 'Stop lifts it too');
+  assert.equal(descOf(modal).readOnly, false);
+});
+
+test('Generate over a draft asks first: Escape on that confirm keeps the draft AND the modal; Replace overwrites it', async () => {
+  const g = gatedDescribe();
+  const ctx = await bootShip({ arms: g.arm });
+  const modal = await openModal(ctx);
+  typeInto(ctx.window, descOf(modal), 'my own words');
+  click(ctx.window, genBtnOf(modal));
+  await settle(ctx.window);
+  assert.equal(confirmOpen(ctx.window), true, 'a draft is never replaced without asking');
+  assert.equal(describeCalls(ctx).length, 0, 'nothing generated before the answer');
+  escape(ctx.window);
+  await settle(ctx.window);
+  assert.equal(confirmOpen(ctx.window), false);
+  assert.equal(isOpen(ctx.window), true, 'Escape closes the confirm only, not the ship-it modal under it');
+  assert.equal(describeCalls(ctx).length, 0);
+  assert.equal(descOf(modal).value, 'my own words');
+
+  click(ctx.window, genBtnOf(modal));
+  await settle(ctx.window);
+  click(ctx.window, ctx.window.document.getElementById('confirm-ok'));
+  await settle(ctx.window);
+  assert.equal(describeCalls(ctx).length, 1);
+  g.release({ ok: true, body: 'Generated.' });
+  await settle(ctx.window, 6);
+  assert.equal(descOf(modal).value, 'Generated.');
+});
+
+test('Stop aborts an in-flight generation: the button resets, no error, the description is untouched', async () => {
+  const g = gatedDescribe();
+  const ctx = await bootShip({ arms: g.arm });
+  const modal = await openModal(ctx);
+  click(ctx.window, genBtnOf(modal));
+  await settle(ctx.window);
+  assert.equal(g.signals[0].aborted, false);
+  click(ctx.window, stopBtnOf(modal));
+  await settle(ctx.window, 6);
+  assert.equal(g.signals[0].aborted, true, 'the request is cancelled (AbortController)');
+  assert.equal(genBtnOf(modal).disabled, false);
+  assert.equal(genBtnOf(modal).textContent, 'Generate with AI');
+  assert.equal(stopBtnOf(modal).hidden, true);
+  assert.equal(descErrOf(modal).hidden, true, 'a stop is not an error');
+  assert.equal(descOf(modal).value, '');
+  assert.equal(isOpen(ctx.window), true);
+});
+
+test('closing the modal aborts the generation, and a late response never writes into a re-opened modal', async () => {
+  const g = gatedDescribe({ honorAbort: false });
+  const ctx = await bootShip({ arms: g.arm });
+  const { window } = ctx;
+  const modal = await openModal(ctx);
+  click(window, genBtnOf(modal));
+  await settle(window);
+  click(window, modal.querySelector('.shipit-cancel'));
+  assert.equal(g.signals[0].aborted, true, 'closing the modal cancels the request');
+  click(window, hdPr(window));                        // re-open: a new generation owns the modal
+  await settle(window);
+  assert.equal(genBtnOf(modal).textContent, 'Generate with AI', 'the new open starts idle');
+  g.release({ ok: true, body: 'stale text' });        // the old response lands anyway
+  await settle(window, 6);
+  assert.equal(descOf(modal).value, '', 'the stale response must not fill the new modal');
+  assert.equal(genBtnOf(modal).disabled, false);
+  assert.equal(descErrOf(modal).hidden, true);
+  // Same for a failure that lands late.
+  click(window, genBtnOf(modal));
+  await settle(window);
+  escape(window);
+  click(window, hdPr(window));
+  await settle(window);
+  g.release({ error: 'boom' }, 500);
+  await settle(window, 6);
+  assert.equal(descErrOf(modal).hidden, true, 'a stale failure paints nothing either');
+  assert.equal(genBtnOf(modal).textContent, 'Generate with AI');
+});
+
+test('a failed generation shows its error on its own line, never on the "Could not open PR" line', async () => {
+  const ctx = await bootShip({
+    arms: (url) => (url.endsWith('/api/pr/describe')
+      ? fail(409, { code: 'claude-signed-out', error: "Claude Code isn't signed in." }) : null),
+  });
+  const modal = await openModal(ctx);
+  typeInto(ctx.window, descOf(modal), '');
+  click(ctx.window, genBtnOf(modal));
+  await settle(ctx.window, 6);
+  assert.equal(descErrOf(modal).hidden, false);
+  assert.match(descErrOf(modal).textContent, /isn't signed in/);
+  assert.equal(modal.querySelector('.shipit-err').hidden, true);
+  assert.equal(genBtnOf(modal).disabled, false, 'the user can retry');
+  assert.equal(descOf(modal).value, '');
+});
+
+test('confirm reads the description at click time and sends `body` only when it is non-empty', async () => {
+  let n = 0;
+  const ctx = await bootShip({
+    arms: (url, opts) => (url.endsWith('/api/pr') && opts.method === 'POST'
+      ? (++n === 1 ? fail(500, { error: 'git push failed: denied' }) : ok(PR_OK)) : null),
+  });
+  const modal = await openModal(ctx);
+  typeInto(ctx.window, descOf(modal), '  \n ');
+  click(ctx.window, modal.querySelector('.shipit-ok'));
+  await settle(ctx.window, 6);
+  assert.ok(!('body' in JSON.parse(prPosts(ctx)[0].opts.body)), 'a blank description sends no body: today\'s PR');
+  typeInto(ctx.window, descOf(modal), '## Summary\nShips it.');
+  click(ctx.window, modal.querySelector('.shipit-ok'));
+  await settle(ctx.window, 6);
+  assert.deepEqual(JSON.parse(prPosts(ctx)[1].opts.body),
+    { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id, pushRemote: 'origin', baseRemote: 'origin', baseBranch: 'feat/log-ux', body: '## Summary\nShips it.' });
+  assert.equal(isOpen(ctx.window), false);
+});
+
+test('every open starts from an empty description on the Write tab', async () => {
+  const ctx = await bootShip({
+    arms: (url) => (url.endsWith('/api/pr/describe') ? fail(500, { error: 'boom' }) : null),
+  });
+  const { window } = ctx;
+  const modal = await openModal(ctx);
+  typeInto(window, descOf(modal), 'left over');
+  click(window, tabOf(modal, 'preview'));
+  await settle(window);
+  typeInto(window, descOf(modal), '');
+  click(window, genBtnOf(modal));
+  await settle(window, 6);
+  assert.equal(descErrOf(modal).hidden, false);
+  descOf(modal).value = 'left over';
+  click(window, modal.querySelector('.shipit-cancel'));
+  click(window, hdPr(window));
+  await settle(window);
+  assert.equal(descOf(modal).value, '');
+  assert.equal(tabOf(modal, 'text').getAttribute('aria-selected'), 'true');
+  assert.equal(descOf(modal).hidden, false);
+  assert.equal(previewOf(modal).hidden, true);
+  assert.equal(descErrOf(modal).hidden, true);
 });

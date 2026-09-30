@@ -372,7 +372,7 @@ export function createAskTools(deps) {
       description: 'Read one run: its metadata, the user\'s original prompt, startedBy (the person who started it), `scheduled` when a schedule started it, and `actions` — the people who acted on it (paused, resumed, stopped, answered its questions, continued past a cost cap, opened its PR, archived it) with when. Give projectKey or workspaceId when known; without them the user-pinned scope (when the chat has one) is tried first, then the id is searched everywhere.',
       inputSchema: SCHEMA.obj({ id: SCHEMA.s('run id (8 hex)'), projectKey: SCHEMA.s('scope to a project'), workspaceId: SCHEMA.s('scope to a workspace') }, ['id']) },
     { name: 'get_run_diff',
-      description: 'Read the unified diff of a run, paged by byte offset (use nextOffset until truncated is false). Optional path = one file only. files[] lists every file with added/removed counts; credential files are omitted.',
+      description: 'Read the unified diff of a run, paged by byte offset (use nextOffset until truncated is false). Optional path = one file only. files[] lists every file with added/removed counts; credential files are omitted. For a run still in progress it returns the changes so far in its worktree, with live: true — they will keep moving until the run ends.',
       inputSchema: SCHEMA.obj({ id: SCHEMA.s('run id'), projectKey: SCHEMA.s('scope to a project'), workspaceId: SCHEMA.s('scope to a workspace'),
         path: SCHEMA.s('only this file path'), offset: SCHEMA.i('byte offset to start at', 0, Number.MAX_SAFE_INTEGER),
         maxBytes: SCHEMA.i('bytes per page (default 60000, max 200000)', 1, L.diffMaxBytes) }, ['id']) },
@@ -1422,7 +1422,14 @@ export function createAskTools(deps) {
         const body = hit.byPath.get(str(input.path) || '') ?? hit.filtered(str(input.path));
         return { available: true, files: hit.files, ...sliceBytes(body, offset, maxBytes) };
       }
-      const text = await deps.readDiffPatch(row);
+      let text = await deps.readDiffPatch(row);
+      // A run still in flight has no saved patch yet: its live worktree diff so far, when
+      // the host can read it (relay mode). Not memoised — it moves while the run works.
+      let live = false;
+      if (text == null && typeof deps.readLiveDiff === 'function') {
+        text = await deps.readLiveDiff(row).catch(() => null);
+        live = text != null;
+      }
       if (text == null) return EMPTY_DIFF();
       // Fail closed: a section whose path could not be read cannot be checked
       // against the guardrail patterns, so it is dropped rather than emitted
@@ -1441,6 +1448,7 @@ export function createAskTools(deps) {
         if (!byPath.has(key)) byPath.set(key, kept.filter((s) => (wantPath ? s.path === wantPath : true)).map((s) => s.text).join(''));
         return byPath.get(key);
       };
+      if (live) return { available: true, live: true, files, ...sliceBytes(filtered(str(input.path)), offset, maxBytes) };
       diffPageCache.set(row.id, { stamp, files, byPath, filtered });
       return { available: true, files, ...sliceBytes(filtered(str(input.path)), offset, maxBytes) };
     },

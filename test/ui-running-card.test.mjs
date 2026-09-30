@@ -292,18 +292,34 @@ test('a paused run swaps Pause for Resume inside the cluster', async () => {
   assert.equal(r.el.querySelector('.rc-acts .btn-resume').hidden, false);
 });
 
-test('a pending question shows the amber question-count pill in the action cluster', async () => {
+test('a pending question shows ONE waiting strip under the header that opens the run page', async () => {
   const ctx = await boot();
   helloRunning(ctx);
   ctx.showRunning();
-  assert.equal(cardOf(ctx).querySelector('.rc-qpill').hidden, true, 'no pill without a question');
+  const strip = () => cardOf(ctx).querySelector('button.rc-wait');
+  assert.equal(strip().hidden, true, 'no strip without a question');
+  assert.equal(cardOf(ctx).querySelector('.rc-qpill'), null, 'the count pill is gone from the header cluster');
   ctx.dispatch({
     type: 'question', runId: RUN_ID, id: 'q1', kind: 'clarify',
     questions: [{ id: 'a', question: 'x?', options: ['1'] }, { id: 'b', question: 'y?', options: ['2'] }],
   });
-  const pill = cardOf(ctx).querySelector('.rc-qpill');
-  assert.equal(pill.hidden, false);
-  assert.equal(pill.textContent, '2 questions');
+  assert.equal(strip().hidden, false);
+  assert.equal(strip().querySelector('.rc-wait-text').textContent, '2 questions');
+  assert.ok(strip().classList.contains('is-ask'), 'a question strip carries is-ask');
+  assert.equal(cardOf(ctx).querySelector('.qpanel'), null, 'the question panel is NOT mounted on the list card');
+  strip().dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
+  assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`, 'the strip opens the run page');
   ctx.dispatch({ type: 'question-resolved', runId: RUN_ID, id: 'q1' });
-  assert.equal(cardOf(ctx).querySelector('.rc-qpill').hidden, true, 'pill clears when the question resolves');
+  assert.equal(strip().hidden, true, 'strip clears when the question resolves');
+});
+
+test('a workflow proposal reads "Review the workflow" on the strip', async () => {
+  const ctx = await boot();
+  helloRunning(ctx);
+  ctx.showRunning();
+  ctx.dispatch({
+    type: 'question', runId: RUN_ID, id: 'w1', kind: 'workflow',
+    questions: [{ id: 'a', question: 'Pick', options: ['x'] }],
+  });
+  assert.equal(cardOf(ctx).querySelector('.rc-wait-text').textContent, 'Review the workflow');
 });

@@ -236,5 +236,5 @@ test('ui-ask-integration: the send body carries the resolved page context', asyn
   await settle(window);
   await sendText(window, 'context check two');
   const post2 = calls.filter((c) => c.url.includes('/messages') && c.opts.method === 'POST').at(-1);
-  assert.deepEqual(JSON.parse(post2.opts.body).context, { view: 'running', runId: 'r1', projectDir: '/p', pinned: false, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }); // #397
+  assert.deepEqual(JSON.parse(post2.opts.body).context, { view: 'running', runId: 'r1', projectDir: '/p', runPage: 'glance', pinned: false, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }); // #397
 });

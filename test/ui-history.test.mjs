@@ -280,7 +280,7 @@ test('frozen run counts (diffFrozen) show whether merged, branch gone or zero; a
 // ---------------------------------------------------------------------------
 
 
-test('clicking the title opens the viewer modal and does NOT navigate', async () => {
+test('clicking the title opens the run page like the rest of the card (no viewer modal)', async () => {
   const ctx = await boot({
     fetchHandler: (url) => {
       if (url.endsWith('/api/history/pr')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
@@ -299,10 +299,9 @@ test('clicking the title opens the viewer modal and does NOT navigate', async ()
   card.querySelector('.h-meta b').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
   await ctx.settle();
 
-  assert.equal(ctx.window.location.hash.replace(/^#/, ''), 'history', 'title click did not navigate');
-  const viewer = doc.querySelector('#viewer-card');
-  assert.equal(viewer.classList.contains('hidden'), false, 'viewer modal opened');
-  assert.match(doc.querySelector('#viewer').textContent, /saved audit/, 'viewer shows the saved markdown');
+  assert.equal(ctx.window.location.hash.replace(/^#/, ''), `history/${KEY}/p-done`, 'the title is part of the card link');
+  assert.equal(doc.querySelector('#viewer-card').classList.contains('hidden'), true, 'no viewer modal');
+  assert.ok(card.querySelector('.hist-open'), 'the chevron is always there');
 });
 
 
@@ -409,6 +408,6 @@ test('History never renders review sections, even when the payload carries them'
   assert.equal(hd.querySelector('.hist-cycle-tag'), null, 'no review cycle tags rendered');
   assert.doesNotMatch(hd.textContent, /Missing null-check/, 'no review issue leaks onto the screen');
   // The clarify answer, by contrast, IS reachable — through its own tab.
-  const clarifyTab = [...hd.querySelectorAll('.hd-tab')].find((t) => /Clarify/i.test(t.textContent));
+  const clarifyTab = [...hd.querySelectorAll('.hd-tab')].find((t) => t.dataset.sec === 'clarify');
   assert.ok(clarifyTab, 'a Clarify tab is offered when the run has Q&A');
 });

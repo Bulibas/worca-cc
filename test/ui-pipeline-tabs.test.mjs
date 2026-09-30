@@ -157,7 +157,13 @@ test('resuming a paused run carries the pre-pause log into the resumed run', asy
 
   const card = window.document.querySelector('#run-list .run-card[data-run-id="auth-fix-2"]');
   assert.ok(card, 'resumed run (new runId) card present');
-  assert.match(card.querySelector('.log').textContent, /PRE_PAUSE_LINE/, 'pre-pause log carried into the resumed run');
+  assert.equal(card.querySelector('.log'), null, 'the list card carries no log; it lives on the run page');
+  window.location.hash = 'running/auth-fix-2/details/logs';          // the run page's Live log tab
+  window.dispatchEvent(new window.Event('hashchange'));
+  for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
+  const box = window.document.querySelector('#run-detail .rd-sec[data-sec="logs"] .log');
+  assert.ok(box, 'the run page renders the Live log');
+  assert.match(box.textContent, /PRE_PAUSE_LINE/, 'pre-pause log carried into the resumed run');
   assert.equal(
     window.document.querySelector('#run-list .run-card[data-run-id="auth-fix"]'), null,
     'old paused run card dropped (no split/dup)'

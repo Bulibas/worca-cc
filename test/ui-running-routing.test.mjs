@@ -115,7 +115,7 @@ test('the Running view is a two-screen shell around the existing list', async ()
   assert.ok(list.querySelector('#run-list'), 'the run list moved inside the list screen');
   assert.ok(list.querySelector('.topbar h1'), 'so did the topbar');
   assert.ok(list.querySelector('.run-ask-banner'), 'and Task 2 banner');
-  assert.ok(list.querySelector('.run-density'), 'and Task 4 density toggle');
+  assert.equal(list.querySelector('.run-density'), null, 'the density toggle is gone');
 
   const host = doc.querySelector('#run-detail');
   assert.ok(host, '#run-detail must exist');

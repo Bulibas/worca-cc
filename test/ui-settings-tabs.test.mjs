@@ -221,11 +221,11 @@ test('General keeps the machine cards; Runs, Ask Worca and Models hold the moved
   ]);
   assert.deepEqual(cardIds(view, 'runs'), ['budget-settings-card', 'schedule-settings-card', 'ws-scan-models-card', 'chat-settings-card']);
   assert.deepEqual(cardIds(view, 'ask'), ['ask-settings-card']);
-  assert.deepEqual(cardIds(view, 'models'), ['title-model-settings-card', 'auto-model-settings-card']);
-  // Nothing got lost or duplicated in the move: the fourteen cards (dev's thirteen + Workspaces) are all still here, once.
+  assert.deepEqual(cardIds(view, 'models'), ['title-model-settings-card', 'auto-model-settings-card', 'pr-description-model-settings-card']);
+  // Nothing got lost or duplicated in the move: the fifteen cards (dev's thirteen + Workspaces + PR description model) are all still here, once.
   const all = [...view.querySelectorAll('section.card.settings-card')].map((c) => c.id);
-  assert.equal(all.length, 14);
-  assert.equal(new Set(all).size, 14);
+  assert.equal(all.length, 15);
+  assert.equal(new Set(all).size, 15);
 });
 
 test('each moved card keeps its level; Runs is a Simple tab, Ask Worca an Advanced one', () => {
@@ -238,6 +238,7 @@ test('each moved card keeps its level; Runs is a Simple tab, Ask Worca an Advanc
   assert.equal(lv('ask-settings-card'), 'simple', 'the Advanced tab gates it; a deep link must not open on an empty page');
   assert.equal(lv('title-model-settings-card'), 'expert');
   assert.equal(lv('auto-model-settings-card'), 'expert');
+  assert.equal(lv('pr-description-model-settings-card'), 'expert');
   const tab = (t) => view.querySelector(`#settings-tabs button[data-tab="${t}"]`).dataset.minLevel;
   assert.equal(tab('runs'), 'simple');
   assert.equal(tab('ask'), 'advanced');
@@ -267,7 +268,8 @@ test('opening Runs or Ask Worca loads the settings payload; Models repaints its 
 
 test('the cost-pause banners open the Runs tab, where the budget now lives', () => {
   const js = readFileSync(appPath, 'utf8');
-  assert.equal((js.match(/\.cb-settings'\)\) \{ location\.hash = 'settings\/runs'; return; \}/g) || []).length, 2);
+  assert.equal((js.match(/\.cb-settings'\)\) \{ location\.hash = 'settings\/runs'; return; \}/g) || []).length, 1,
+    'one delegated handler: the run page (the list card no longer carries a cost banner)');
   assert.match(js, /settingsBtn\.addEventListener\('click', \(\) => \{ location\.hash = 'settings\/runs'; \}\)/);
   assert.equal(/location\.hash = 'settings';/.test(js), false, 'no bare #settings jump left for the budget');
 });

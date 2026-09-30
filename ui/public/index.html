@@ -30,6 +30,8 @@
         <div class="brand">
           <span class="logo" role="img" aria-label="Worca"></span>
           <span class="logo-mark" role="img" aria-label="Worca"></span>
+          <!-- The server's mock mode (WS hello serverMock, app.js#applyServerMock): every run is a mock. -->
+          <span class="badge amber side-mock-pill" id="side-mock-pill" title="Server started with WORCA_MOCK=1 — all runs are mock." hidden>MOCK</span>
           <button type="button" class="side-close" id="side-close" aria-label="Close menu" title="Close menu">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
           </button>
@@ -464,14 +466,6 @@
               <div class="sub" id="running-sub">0 pipelines executing · 0 need your input</div>
             </div>
             <span class="pill-run amber hidden" id="running-status-pill" style="box-shadow:var(--shadow-soft)"><span class="pdot"></span> 0 needs input</span>
-            <div class="run-density" role="group" data-min-level="advanced" aria-label="List density">
-              <button type="button" class="rc-dseg" data-density="compact" aria-pressed="false" title="Compact — three runs per screen">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="3" y="5" width="18" height="3" rx="1.5"></rect><rect x="3" y="10.5" width="18" height="3" rx="1.5"></rect><rect x="3" y="16" width="18" height="3" rx="1.5"></rect></svg>
-              </button>
-              <button type="button" class="rc-dseg" data-density="detailed" aria-pressed="true" title="Detailed — one run with graph and log">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"></rect><path d="M6.5 8.5h7" stroke-linecap="round"></path><path d="M6.5 12.5h11" stroke-linecap="round" opacity=".45"></path><path d="M6.5 16h8" stroke-linecap="round" opacity=".45"></path></svg>
-              </button>
-            </div>
           </div>
 
           <!-- Inert status line (design D14): the per-card question pills are the
@@ -496,7 +490,7 @@
 
           <!-- clone target for one run card (Task 3 fills it) -->
           <template id="run-card-tpl">
-            <section class="card run-card" data-run-id="" data-density="detailed">
+            <section class="card run-card" data-run-id="">
               <div class="rc-head" role="button" tabindex="0">
                 <span class="rc-sic" role="img">
                   <svg class="sic sic-spin" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="M12 3a9 9 0 1 0 9 9" stroke-linecap="round"></path></svg>
@@ -512,7 +506,7 @@
                     <span class="rc-status-word"></span>
                     <span class="rc-seg"><span class="rc-dot">·</span><span class="rm-text"></span></span>
                     <span class="rc-seg rc-by" hidden><span class="rc-dot">·</span><span class="person-ini" aria-hidden="true"></span><span class="rc-by-text"></span></span>
-                    <span class="rc-seg rc-prog" hidden data-min-level="advanced"><span class="rc-dot">·</span><span class="rc-prog-text"></span></span>
+                    <span class="rc-seg rc-prog" hidden><span class="rc-dot">·</span><span class="rc-prog-text"></span></span>
                     <span class="rc-seg"><span class="rc-dot">·</span><span class="run-time mono"></span></span>
                     <span class="rc-seg"><span class="rc-dot">·</span><span class="run-cost mono"></span></span>
                   </div>
@@ -532,7 +526,6 @@
                 </div>
                 <div class="rc-acts">
                   <span class="auto-badge" hidden></span>
-                  <span class="rc-qpill" hidden></span>
                   <!-- Split Resume: the amber Resume keeps its look; the caret opens the schedule-resume
                        menu. The caret is gated at Advanced exactly like #start-more; Simple shows Resume.
                        Only the WRAPPER is .hidden-gated — .btn-resume keeps its own gating, and the caret
@@ -552,59 +545,38 @@
                   <button type="button" class="rc-open" title="Open run" aria-label="Open run"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"></path></svg></button>
                 </div>
               </div>
-              <div class="rc-compact">
-                <span class="rc-step-chip"></span>
-                <span class="rc-step-name"></span>
-                <span class="rc-step-model mono" hidden data-min-level="advanced"></span>
-              </div>
-              <div class="cost-banner" hidden></div>
-              <div class="rc-detailed">
-                <div class="run-flow-wrap"><div class="run-flow"></div></div>
-                <div class="run-log" data-min-level="advanced">
-                  <div class="run-log-head"><span class="ll-label">Live log</span><div class="log-filters"><select class="log-f log-f-source" data-min-level="expert" title="Filter by source" aria-label="Filter by source"></select><select class="log-f log-f-level" data-min-level="expert" title="Filter by level" aria-label="Filter by level"></select><select class="log-f log-f-step" data-min-level="expert" title="Filter by step" aria-label="Filter by step"></select><select class="log-f log-f-cycle" data-min-level="expert" title="Filter by cycle" aria-label="Filter by cycle"></select><button type="button" class="log-f log-f-exec" hidden title="Showing one execution — click to clear"><span class="lfe-text"></span><span class="lfe-x" aria-hidden="true">×</span></button><input type="search" class="log-f log-search" placeholder="search" title="Search the log text" aria-label="Search the log text"><button type="button" class="log-f log-copy" title="Copy the visible log lines" aria-label="Copy the visible log lines">copy</button></div><div class="switch-row"><div class="switch on autoscroll" role="switch" aria-checked="true" tabindex="0"></div><span class="txt">Auto-scroll</span></div></div>
-                  <div class="log"></div>
-                </div>
-              </div><!-- /.rc-detailed -->
-              <div class="qpanel hidden"></div>
+              <button type="button" class="rc-wait" hidden><span class="rc-wait-text"></span><span class="rc-wait-go" aria-hidden="true">Open →</span></button>
             </section>
           </template>
             </div>
             <div class="run-screen run-screen-detail" id="run-detail" aria-hidden="true" inert></div>
           </div>
 
+          <!-- The live-log bar (filters + auto-scroll switch), cloned by the run page's Logs tab and by History. -->
+          <template id="log-bar-tpl">
+            <div class="run-log-head"><span class="ll-label">Live log</span><div class="log-filters"><select class="log-f log-f-source" data-min-level="expert" title="Filter by source" aria-label="Filter by source"></select><select class="log-f log-f-level" data-min-level="expert" title="Filter by level" aria-label="Filter by level"></select><select class="log-f log-f-step" data-min-level="expert" title="Filter by step" aria-label="Filter by step"></select><select class="log-f log-f-cycle" data-min-level="expert" title="Filter by cycle" aria-label="Filter by cycle"></select><button type="button" class="log-f log-f-exec" hidden title="Showing one execution — click to clear"><span class="lfe-text"></span><span class="lfe-x" aria-hidden="true">×</span></button><input type="search" class="log-f log-search" placeholder="search" title="Search the log text" aria-label="Search the log text"><button type="button" class="log-f log-copy" title="Copy the visible log lines" aria-label="Copy the visible log lines">copy</button></div><div class="switch-row"><div class="switch on autoscroll" role="switch" aria-checked="true" tabindex="0"></div><span class="txt">Auto-scroll</span></div></div>
+          </template>
+
           <!-- clone target for the Running detail screen (#running/<runId>) -->
           <template id="run-detail-tpl">
-            <div class="rd">
-              <header class="rd-header">
-                <div class="rd-row1">
-                  <button type="button" class="rd-back btn-ghost" aria-label="Back to running list">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
-                    Back
-                  </button>
-                  <h1 class="rd-title"></h1>
-                  <span class="auto-badge" hidden></span>
-                  <span class="rd-status pill-run"><span class="pdot"></span><span class="rd-status-word"></span></span>
-                </div>
-                <div class="rd-meta mono"></div>
-                <div class="rd-row3">
-                  <span class="rd-base mono" hidden data-min-level="advanced"></span>
-                  <button type="button" class="rd-branch-copy mono" hidden data-min-level="advanced" title="Copy branch name" aria-label="Copy branch name">
-                    <span class="rd-branch-name"></span>
-                    <svg class="ico-copy" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2.5"></rect><path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5" stroke-linecap="round"></path></svg>
-                    <svg class="ico-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M4 12.5l5.5 5.5L20 6.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
-                  </button>
-                  <!-- NO `hidden`: the caption is driven purely by the CSS sibling rule
-                       off copyBranchToClipboard's own 1200ms `.copied` window
-                       (app.js:3666-3672), exactly as .hd-copied does (index.html:501). -->
-                  <span class="rd-copied">Copied</span>
-                  <span class="rd-spacer"></span>
-                  <!-- One control for Pause/Resume (spec §5.2 row 3). The label lives in
-                       its own span so a busy state swaps only the word and the inline SVG
-                       survives — the .hd-btn-label idiom. NB none of the three wired
-                       handlers actually swaps the label today (pauseRun:7831-7850 and
-                       stopRun:7806-7825 only set `disabled`; resumeRunFromCard:7920
-                       replaces the whole textContent), so the span is for
-                       paintRdHeader's Pause/Resume swap, not for a busy state. -->
+            <!-- Two modes on one screen (docs: Run page glance). `data-mode="glance"` shows the
+                 status line, the trail and the sheet; `data-mode="details"` shows the tabs.
+                 The route picks the mode: #running/<id> vs #running/<id>/details[/<tab>]. -->
+            <div class="rd" data-mode="glance">
+              <div class="rd-bar">
+                <button type="button" class="rd-back btn-ghost" aria-label="Back to running list">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                  Runs
+                </button>
+                <button type="button" class="rd-to-run btn-ghost" hidden aria-label="Back to the run">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                  <span class="rd-to-run-label">Run</span>
+                </button>
+                <!-- The run's name: the glance's headline carries its state. -->
+                <span class="rd-bar-mid"><span class="rd-bar-title"></span></span>
+                <span class="rd-bar-end">
+                  <!-- One control for Pause/Resume. The label lives in its own span so a busy
+                       state swaps only the word and the inline SVG survives. -->
                   <button type="button" class="rd-pause" data-action="pause" hidden>
                     <svg class="ico-pause" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.5"></rect><rect x="14" y="5" width="4" height="14" rx="1.5"></rect></svg>
                     <svg class="ico-play" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
@@ -614,26 +586,91 @@
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
                     <span class="rd-btn-label">Stop</span>
                   </button>
-                </div>
-                <!-- Inline error slot for failed actions, on the HEADER so it is never
-                     pushed below the fold by the graph or a tab body (mirrors .hd-error). -->
-                <div class="rd-error" hidden></div>
-              </header>
-              <div class="rd-body">
-                <div class="rd-banners">
-                  <div class="retained-banner" role="alert" hidden></div>
-                  <button type="button" class="hist-discard btn-ghost" hidden>Discard worktree</button>
-                </div>
-                <div class="rd-graph"><div class="run-flow-wrap"><div class="run-flow"></div></div></div>
-                <div class="rd-questions" hidden><div class="qpanel hidden"></div></div>
-                <!-- C12: the tab engine does `screen.querySelector('.rd-tabs').innerHTML = ''`.
-                     These two hosts MUST exist in the template or Task 7's tab bar
-                     silently paints NOTHING (initDetailTabs returns early on a
-                     missing host). Mirrors index.html:528-529 (.hd-tabs / .hd-sections),
-                     including the role="tablist" the engine does NOT set itself. -->
-                <div class="rd-tabs" role="tablist"></div>
-                <div class="rd-sections"></div>
+                </span>
               </div>
+              <!-- Inline error slot for failed actions, under the bar so the graph or a tab
+                   body never pushes it below the fold (mirrors .hd-error). -->
+              <div class="rd-error" hidden></div>
+
+              <section class="rd-glance" aria-label="Run status">
+                <div class="rd-now">
+                  <!-- The run's name is the page title; the bar shows it only once this scrolls away. -->
+                  <header class="rd-page-head">
+                    <h1 class="rd-page-title"></h1>
+                    <p class="rd-page-meta"></p>
+                  </header>
+                </div>
+                <div class="rd-sheet">
+                  <!-- The card's head: the status line top left, the Live view switch top right. -->
+                  <div class="rd-sheet-head">
+                    <div class="rd-now-top">
+                      <span class="rd-orb"></span>
+                      <div class="rd-now-text">
+                        <h2 class="rd-now-title"></h2>
+                        <p class="rd-now-sub"></p>
+                      </div>
+                    </div>
+                    <!-- Live view: the running step(s), centred in a fogged graph beside the card
+                         (below it when the page is narrow). Only while the run is not over. -->
+                    <div class="switch-row rd-live-row" hidden>
+                      <span class="txt">Live view</span>
+                      <div class="switch rd-live-switch" role="switch" tabindex="0" aria-checked="false" aria-label="Live view"></div>
+                    </div>
+                  </div>
+                  <div class="rd-banners">
+                    <div class="retained-banner" role="alert" hidden></div>
+                    <button type="button" class="hist-discard btn-ghost" hidden>Discard worktree</button>
+                  </div>
+                  <!-- Time · Cost · Changes, in every state (the time ticks while live). -->
+                  <div class="rd-facts"></div>
+                  <div class="rd-nowlist"></div>
+                  <div class="rd-result" hidden></div>
+                </div>
+                <!-- The Live view panel. The clip lets the narrow layout open its height while the
+                     graph host keeps its final size (no fit chasing a growing box). It is `inert`:
+                     the panel is ONE control, so the graph's cards are neither tab stops nor click
+                     targets (a click falls through to the panel). -->
+                <div class="rd-live" role="button" tabindex="0" aria-label="Open the workflow" hidden>
+                  <div class="rd-live-clip" inert>
+                    <div class="run-flow-wrap"><div class="run-flow"></div></div>
+                  </div>
+                </div>
+                <!-- A waiting question: below the run's panel (which never changes), led by
+                     a heading that says what is asked. -->
+                <div class="rd-questions" hidden>
+                  <h3 class="rd-ask-head"></h3>
+                  <div class="qpanel hidden"></div>
+                </div>
+              </section>
+
+              <section class="rd-details" hidden aria-label="Run details">
+                <header class="rd-header">
+                  <div class="rd-row1">
+                    <h2 class="rd-title"></h2>
+                    <span class="auto-badge" hidden></span>
+                    <span class="rd-status pill-run"><span class="pdot"></span><span class="rd-status-word"></span></span>
+                  </div>
+                  <div class="rd-meta mono"></div>
+                  <div class="rd-row3">
+                    <span class="rd-base mono" hidden data-min-level="advanced"></span>
+                    <button type="button" class="rd-branch-copy mono" hidden data-min-level="advanced" title="Copy branch name" aria-label="Copy branch name">
+                      <span class="rd-branch-name"></span>
+                      <svg class="ico-copy" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2.5"></rect><path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5" stroke-linecap="round"></path></svg>
+                      <svg class="ico-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M4 12.5l5.5 5.5L20 6.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                    </button>
+                    <!-- NO `hidden`: the caption is driven purely by the CSS sibling rule
+                         off copyBranchToClipboard's own 1200ms `.copied` window. -->
+                    <span class="rd-copied">Copied</span>
+                    <span class="rd-spacer"></span>
+                  </div>
+                </header>
+                <div class="rd-body">
+                  <!-- The tab engine does `screen.querySelector('.rd-tabs').innerHTML = ''`;
+                       both hosts MUST exist or the bar silently paints nothing. -->
+                  <div class="rd-tabs" role="tablist"></div>
+                  <div class="rd-sections"></div>
+                </div>
+              </section>
             </div>
           </template>
         </section>
@@ -723,13 +760,51 @@
 
           <!-- clone target for the History detail screen (#history/<projectKey>/<id>) -->
           <template id="hist-detail-tpl">
-            <div class="hd">
+            <div class="hd" data-mode="glance">
+              <!-- Two modes on one screen, as on the Running page: the glance (#history/<key>/<id>)
+                   and Details (#history/<key>/<id>/details[/<tab>]). The bar is shared. -->
+              <div class="hd-bar">
+                <button type="button" class="hd-back btn-ghost" aria-label="Back to history">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                  History
+                </button>
+                <button type="button" class="hd-to-run btn-ghost" hidden aria-label="Back to the run">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                  Run
+                </button>
+                <span class="rd-bar-mid"><span class="rd-bar-title"></span></span>
+                <span class="rd-bar-end"></span>
+              </div>
+              <!-- The inline error sits under the shared bar so both modes show it (a load
+                   failure, an archive failure); writers resolve it with screen.querySelector. -->
+              <div class="hd-error" hidden></div>
+              <section class="rd-glance hd-glance" aria-label="Run status">
+                <div class="rd-now">
+                  <header class="rd-page-head">
+                    <h1 class="rd-page-title"></h1>
+                    <p class="rd-page-meta"></p>
+                  </header>
+                </div>
+                <div class="rd-sheet">
+                  <div class="rd-sheet-head">
+                    <div class="rd-now-top">
+                      <span class="rd-orb"></span>
+                      <div class="rd-now-text"><h2 class="rd-now-title"></h2><p class="rd-now-sub"></p></div>
+                    </div>
+                  </div>
+                  <div class="hd-banners">
+                    <span class="badge hist-retained-badge" hidden>Work retained</span>
+                    <div class="retained-banner" role="alert" hidden></div>
+                    <button type="button" class="hist-discard btn-ghost" hidden>Discard worktree</button>
+                  </div>
+                  <div class="rd-facts"></div>
+                  <div class="rd-nowlist"></div>
+                  <div class="rd-result hd-result"></div>
+                </div>
+              </section>
+              <section class="rd-details hd-details" hidden aria-label="Run details">
               <header class="hd-header">
                 <div class="hd-row1">
-                  <button type="button" class="hd-back btn-ghost" aria-label="Back to history">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
-                    Back
-                  </button>
                   <h1 class="hd-title"></h1>
                   <span class="auto-badge" hidden></span>
                   <span class="hist-merge" hidden data-min-level="expert"></span>
@@ -803,22 +878,13 @@
                     </div>
                   </span>
                 </div>
-                <!-- The inline error lives on the HEADER, not in .hd-body, so an archive
-                     failure is not pushed below the fold by a long Diff or Logs tab.
-                     Both writers (the load-failure path and the archive catch) resolve
-                     it with screen.querySelector, so the position is free to be correct. -->
-                <div class="hd-error" hidden></div>
               </header>
               <div class="hd-body">
-                <div class="hd-banners">
-                  <span class="badge hist-retained-badge" hidden>Work retained</span>
-                  <div class="retained-banner" role="alert" hidden></div>
-                  <button type="button" class="hist-discard btn-ghost" hidden>Discard worktree</button>
-                </div>
                 <div class="hd-graph"><div class="run-flow-wrap"><div class="run-flow"></div></div></div>
                 <div class="hd-tabs" role="tablist"></div>
                 <div class="hd-sections"></div>
               </div>
+              </section>
             </div>
           </template>
         </section>
@@ -1865,7 +1931,7 @@
             <div class="topbar">
               <div>
                 <h1>Models</h1>
-                <div class="sub">The global model catalog — available in every project; entries can override built-ins, route through a provider, or carry per-model routing env. The two cards on top pick the models Worca's own titles and Auto classifier use. Sign-ins and endpoints live on the Providers tab.</div>
+                <div class="sub">The global model catalog — available in every project; entries can override built-ins, route through a provider, or carry per-model routing env. The cards on top pick the models Worca's own titles, Auto classifier and PR descriptions use. Sign-ins and endpoints live on the Providers tab.</div>
               </div>
               <div style="display:flex;gap:8px;flex:0 0 auto">
                 <button type="button" id="model-share-btn" class="btn-ghost" style="padding:11px 20px;white-space:nowrap">Share as plugin…</button>
@@ -1876,8 +1942,8 @@
                 </button>
               </div>
             </div>
-            <!-- The models Worca's own helper calls use (titles, the Auto classifier). Two columns on a
-                 wide screen so the catalog below is not pushed a screen down. -->
+            <!-- The models Worca's own helper calls use (titles, the Auto classifier, PR descriptions). Two
+                 columns on a wide screen so the catalog below is not pushed a screen down. -->
             <div class="models-helpers" data-min-level="expert">
               <!-- Title generation (#422): which model writes run/chat titles.
                    Empty = the model of the run or chat itself (title.mjs
@@ -1937,6 +2003,32 @@
                   <button type="button" id="autoModelSave" class="btn btn-primary btn-mini">Save</button>
                 </div>
                 <small class="hint" id="autoModelMsg"></small>
+              </section>
+              <!-- PR description model: which model drafts the "Ship it?" modal's Generate with AI
+                   description (POST /api/pr/describe). Empty = the Sonnet-class default. -->
+              <section class="card settings-card" id="pr-description-model-settings-card" data-min-level="expert">
+                <div class="card-head">
+                  <div class="label-row">
+                    <h2>PR description model</h2>
+                    <button type="button" class="info-tip" aria-label="About the PR description model">i<span class="tip-content hidden">
+                      <b>Generate with AI</b> in the Create PR dialog makes one model call that reads the run's diff,
+                      results and review, and drafts a description you edit before opening the PR. Pick the model
+                      that makes that call; empty means the Sonnet-class default. Each call is billed to the run as a
+                      sub-agent row named "pr description".
+                    </span></button>
+                  </div>
+                </div>
+                <div class="field">
+                  <div class="label-row"><label for="prDescModel">Model</label></div>
+                  <select id="prDescModel" class="select" aria-label="PR description model"></select>
+                </div>
+                <small class="hint" id="prDescModelNote"></small>
+                <div class="add-project-actions" style="margin-top:14px">
+                  <button type="button" id="prDescModelTest" class="btn btn-ghost btn-mini" title="Send one tiny prompt to the selected model">Test</button>
+                  <button type="button" id="prDescModelReset" class="btn btn-ghost btn-mini">Use default</button>
+                  <button type="button" id="prDescModelSave" class="btn btn-primary btn-mini">Save</button>
+                </div>
+                <small class="hint" id="prDescModelMsg"></small>
               </section>
             </div>
             <p id="models-msg" class="form-msg" aria-live="polite"></p>
@@ -2264,6 +2356,31 @@
             </div>
           </div>
           <small class="shipit-remotes-hint hint"></small>
+        </div>
+        <!-- The PR description (optional): free-form markdown with Write / Preview tabs,
+             or drafted by Generate with AI (POST /api/pr/describe) for the user to edit.
+             Reset to empty on every open; empty = the PR body is the title, as before.
+             Its own error line keeps a failed draft off "Could not open PR". -->
+        <div class="shipit-desc">
+          <div class="shipit-desc-head">
+            <label for="shipit-desc-input">PR description</label>
+            <div class="md-tabs" role="tablist" aria-label="PR description editor">
+              <button type="button" class="md-tab shipit-desc-tab" role="tab" data-mode="text" aria-selected="true">Write</button>
+              <button type="button" class="md-tab shipit-desc-tab" role="tab" data-mode="preview" aria-selected="false">Preview</button>
+            </div>
+            <button type="button" class="shipit-generate-stop btn btn-ghost btn-mini" hidden>Stop</button>
+            <button type="button" class="shipit-generate btn btn-ghost btn-mini">Generate with AI</button>
+          </div>
+          <!-- The editor and its preview share one box so the Generate-with-AI veil can
+               lie over whichever is showing: a shimmer sweep that also swallows clicks
+               while the textarea is read-only. `.is-generating` + aria-busy toggle it
+               (setShipItGenerating); the veil itself is decoration. -->
+          <div class="shipit-desc-field" aria-busy="false">
+            <textarea id="shipit-desc-input" class="shipit-desc-input textarea" rows="7" placeholder="Describe this change, or use Generate with AI"></textarea>
+            <div class="shipit-desc-preview md-preview viewer" hidden></div>
+            <div class="shipit-desc-busy" aria-hidden="true"><span class="shipit-desc-busy-label">Drafting with AI…</span></div>
+          </div>
+          <div class="shipit-desc-err hint err" hidden></div>
         </div>
         <!-- `hint err`, not `err`: style.css has no standalone .err rule, only
              .hint.err (:284). .hint sets display:block, so .shipit-err ships an

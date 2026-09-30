@@ -113,7 +113,7 @@ const ok = (body) => Promise.resolve({ ok: true, status: 200, json: async () => 
 const fail = (status, body) => Promise.resolve({ ok: false, status, json: async () => body });
 
 const DETAIL_URL = `/api/history/${KEY}/${ROW.id}`;
-const detailHash = `history/${KEY}/${ROW.id}`;
+const detailHash = `history/${KEY}/${ROW.id}/details/diff`;   // the Diff tab (a run opens on its glance)
 // ARM ORDER IS LOAD-BEARING (ui-history-routing.test.mjs:119-127): the detail URL
 // is a PREFIX of the /log and /diff URLs, and `/api/history` is a prefix of the
 // POST /api/history/pr enrichment call. Most-specific first, and every history arm
@@ -254,7 +254,7 @@ async function bootComments({ patch = CMT_PATCH, files = A_JS, comments = [], pa
 const WS_KEY = 'workspaces/wks-team-0000abcd';
 const WS_ROW = { ...ROW, projectKey: WS_KEY, target: 'workspace', workspaceName: 'Team', projectName: 'team' };
 const WS_URL = `/api/workspaces/wks-team-0000abcd/runs/${ROW.id}`;
-const WS_HASH = `history/${WS_KEY}/${ROW.id}`;
+const WS_HASH = `history/${WS_KEY}/${ROW.id}/details/diff`;
 // The '# <key>' marker is what makes splitPatchSections stamp `project` on the
 // section, and results.perProject is what makes hdDiffFileRows stamp it on the
 // file row. Both are needed, and they must agree.
@@ -422,12 +422,13 @@ test('Esc closes the composer and does NOT leave the detail screen', async () =>
   assert.equal(ctx.cbox.calls.length, 0, 'Esc never POSTs');
 });
 
-test('Esc with no composer open still leaves the detail screen (the guard is scoped)', async () => {
+test('Esc with no composer open still steps back out of Details (the guard is scoped)', async () => {
   const ctx = await bootComments();
   const { window } = ctx;
   keydown(window, window.document.querySelector('#hist-detail .hd-diff-pane'), 'Escape');
   await settle(window);
-  assert.equal(window.location.hash.replace(/^#/, ''), 'history', 'the existing behaviour is untouched');
+  // Details › Diff → the run's glance (one more Escape would reach the list).
+  assert.equal(window.location.hash.replace(/^#/, ''), `history/${KEY}/${ROW.id}`, 'the existing behaviour is untouched');
 });
 
 test('comments render as cards under their row, stacked in creation order', async () => {

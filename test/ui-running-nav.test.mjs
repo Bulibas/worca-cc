@@ -49,11 +49,12 @@ async function startRun(window) {
   await tick();
 }
 
-test('starting a run switches to Running and syncs the hash', async () => {
+test('starting a run opens that run\'s own page and syncs the hash', async () => {
   const window = await boot();
   await startRun(window);
   assert.equal(hidden(window.document, 'running'), false, 'Running view shown after start');
-  assert.equal(window.location.hash, '#running', 'hash follows the view (invariant restored)');
+  // Straight onto the new run's glance (#running/<id>), not the list.
+  assert.match(window.location.hash, /^#running\/[^/]+$/, 'hash follows the view (invariant restored)');
 });
 
 test('after starting a run, clicking "New pipeline" reopens the New view (not a dead click)', async () => {
