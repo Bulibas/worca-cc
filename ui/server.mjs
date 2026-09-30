@@ -55,6 +55,7 @@ import {
   theme as storedTheme, setTheme, assertThemeInput,
   uiLevel as storedUiLevel, setUiLevel, assertUiLevelInput, defaultUiLevel,
   autoWorkflowModel as storedAutoWorkflowModel, setAutoWorkflowModel, assertAutoWorkflowModelInput,
+  prDescriptionModel as storedPrDescriptionModel, setPrDescriptionModel, assertPrDescriptionModelInput,
   memoryDefragModel, setMemoryDefragModel, assertMemoryDefragModelInput,
   workspaceScanModels, setWorkspaceScanModels, assertWorkspaceScanInput,
   scheduleDefaults, setScheduleDefaults,
@@ -207,6 +208,7 @@ import { WORKSPACE_SCAN_WORKFLOW_ID, WORKSPACE_SCAN_DEFAULT_MODELS } from '../sr
 import { scanRunPrompt, scanRunTitle, createWorkspaceWithHomes, resolveScanModels } from '../src/core/workspace-scan-run.mjs';
 import { listWorkspacePipelines, readWorkspacePipeline, appendAuditById } from '../src/core/artifacts.mjs';
 import { generateOverview } from '../src/core/overview-agent.mjs';
+import { generatePrDescription, resolvePrDescriptionModel, PR_BODY_MAX } from '../src/core/pr-description.mjs';
 import { projectKey, PROJECT_KEY_RE } from '../src/core/store.mjs';
 import { validateMemoryScope, withStoreLock } from '../src/core/memory-sync.mjs';
 import {
@@ -4334,14 +4336,23 @@ app.get('/api/pr/remotes', async (req, res) => {
 // POST /api/pr  -> push the pipeline's feature branch (if needed) and open a PR
 // against its source branch (or the dialog's `baseBranch`) via the GitHub CLI.
 // Mergeability is read back only here (never during list rendering).
-// body: { id, projectDir?, projectKey?, pushRemote?, baseRemote?, baseBranch? } —
+// body: { id, projectDir?, projectKey?, pushRemote?, baseRemote?, baseBranch?, body? } —
 // remote names are validated against the repo's real remote list (never trusted
 // from the body); baseBranch must be a well-formed ref other than the feature
 // branch (whether the base repo has it is gh's call, its error surfaces as usual).
+// `body` is the "Ship it?" modal's PR description (a string of at most PR_BODY_MAX
+// characters): it becomes the PR body, the attribution footer after it. Absent,
+// null or blank keeps the title-only body exactly as before.
 // ---------------------------------------------------------------------------
 app.post('/api/pr', async (req, res) => {
   const body = req.body || {};
   if (!(typeof body.id === 'string' && body.id.trim())) return badRequest(res, 'id is required');
+  let description = '';
+  if (body.body !== undefined && body.body !== null) {
+    if (typeof body.body !== 'string') return badRequest(res, 'body must be a string');
+    if (body.body.length > PR_BODY_MAX) return badRequest(res, `body must be at most ${PR_BODY_MAX} characters`);
+    description = body.body.trim() ? body.body.trimEnd() : '';
+  }
   if (!(await hasGh())) {
     return res.status(409).json({ error: 'GitHub CLI (gh) is not available' });
   }
@@ -4409,7 +4420,8 @@ app.post('/api/pr', async (req, res) => {
   const footer = prAttributionFooter(state.startedBy);
   const pr = await createPr({
     projectDir: repoDir, base, head: feature, title: state.title || feature, repo, headOwner,
-    ...(footer ? { body: `${state.title || feature}${footer}` } : {}),
+    ...(description ? { body: `${description}${footer}` }
+      : footer ? { body: `${state.title || feature}${footer}` } : {}),
   });
   if (!pr.ok) return res.status(500).json({ error: `gh pr create failed: ${pr.error}` });
 
@@ -4429,6 +4441,41 @@ app.post('/api/pr', async (req, res) => {
 
   const mergeable = await prMergeable({ projectDir: repoDir, head: feature, repo, headOwner, prUrl: pr.url || null });
   res.json({ ok: true, url: pr.url, mergeable, existed: !!pr.existed });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/pr/describe -> the "Ship it?" modal's Generate with AI: one model call
+// drafts a PR description from the run's persisted artifacts (pr-description.mjs).
+// Never cached and never submitted — the text only fills the modal's textarea.
+// No gh needed. A request the client abandons (Cancel, the modal closing) aborts
+// the call. body: { id, projectKey | projectDir, baseBranch? } -> 200 { ok, body }
+// | 400 | 404 | 500, or 409 code 'claude-signed-out' (mapped like the overview route).
+// ---------------------------------------------------------------------------
+app.post('/api/pr/describe', async (req, res) => {
+  const body = req.body || {};
+  let baseBranch;
+  if (body.baseBranch !== undefined && body.baseBranch !== null) {
+    baseBranch = typeof body.baseBranch === 'string' ? body.baseBranch.trim() : '';
+    if (!isSyntacticRef(baseBranch)) return badRequest(res, `invalid base branch: ${String(body.baseBranch).slice(0, 80)}`);
+  }
+  const resolved = await resolvePrPipeline(body, res);
+  if (!resolved) return;
+  const { id, state } = resolved;
+  const key = typeof body.projectKey === 'string' && body.projectKey.trim()
+    ? body.projectKey : projectKey(resolveProjectDir(body.projectDir));
+  const life = new AbortController();
+  res.on('close', () => { if (!res.writableEnded) life.abort(); });
+  try {
+    const text = await generatePrDescription(key, state.id || id, { baseBranch, signal: life.signal });
+    res.json({ ok: true, body: text });
+  } catch (err) {
+    if (life.signal.aborted) return;                 // the client is gone; nobody to answer
+    const msg = err && err.message ? err.message : String(err);
+    if (msg !== 'pipeline not found' && await failedBecauseSignedOut({ message: msg })) {
+      return res.status(409).json({ code: CLAUDE_SIGNED_OUT_CODE, error: CLAUDE_SIGNED_OUT_MESSAGE });
+    }
+    res.status(msg === 'pipeline not found' ? 404 : 500).json({ error: msg });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -5324,6 +5371,14 @@ async function autoModelState() {
   return { autoWorkflowModel: stored, autoWorkflowModelEffective: { model, source } };
 }
 
+/** Settings ▸ PR description model: the stored id + what Generate with AI will actually
+ *  use (stored catalog id > the Sonnet-class default). Async because the catalog is. */
+async function prDescriptionModelState() {
+  const stored = storedPrDescriptionModel();
+  const { model, source } = resolvePrDescriptionModel(await listModels(''), { setting: stored });
+  return { prDescriptionModel: stored, prDescriptionModelEffective: { model, source } };
+}
+
 // ---------------------------------------------------------------------------
 // Instance lifecycle (`worca ui status|stop|restart`, src/core/ui-instance.mjs)
 // ---------------------------------------------------------------------------
@@ -5497,7 +5552,7 @@ app.post('/api/shutdown', (req, res) => {
 });
 
 app.get('/api/settings', async (_req, res) => {
-  res.json({ ...settingsState(), ...(await autoModelState()), chat: chatPrefs(), app: APP_INFO });
+  res.json({ ...settingsState(), ...(await autoModelState()), ...(await prDescriptionModelState()), chat: chatPrefs(), app: APP_INFO });
 });
 
 app.get('/api/budget', (_req, res) => {
@@ -5524,6 +5579,8 @@ app.post('/api/settings', async (req, res) => {
   const hasUiLevelKey = has('uiLevel');
   const hasAutoKey = has('autoWorkflowModel');
   const autoModels = hasAutoKey ? await listModels('') : null;
+  const hasPrDescKey = has('prDescriptionModel');
+  const prDescModels = hasPrDescKey ? (autoModels || await listModels('')) : null;
   // Settings › Memory: the defragment { model, effort } pair, checked against the same
   // project-less catalog the Settings pickers offer (a run re-checks it against its own).
   const hasMemoryDefragKey = has('memoryDefrag');
@@ -5567,6 +5624,7 @@ app.post('/api/settings', async (req, res) => {
     if (hasThemeKey) assertThemeInput(body.theme);
     if (hasUiLevelKey) assertUiLevelInput(body.uiLevel);
     if (hasAutoKey) assertAutoWorkflowModelInput(body.autoWorkflowModel ?? '', autoModels);
+    if (hasPrDescKey) assertPrDescriptionModelInput(body.prDescriptionModel ?? '', prDescModels);
     if (hasMemoryDefragKey) assertMemoryDefragModelInput(body.memoryDefrag, defragModels);
     if (hasWorkspaceScanKey) assertWorkspaceScanInput(body.workspaceScan, wsScanModels);
     // Root first: it is the one key whose setter can still fail AFTER the asserts
@@ -5594,14 +5652,15 @@ app.post('/api/settings', async (req, res) => {
     if (hasThemeKey) await setTheme(body.theme);
     if (hasUiLevelKey) await setUiLevel(body.uiLevel);
     if (hasAutoKey) await setAutoWorkflowModel(body.autoWorkflowModel ?? '', { models: autoModels });
+    if (hasPrDescKey) await setPrDescriptionModel(body.prDescriptionModel ?? '', { models: prDescModels });
     if (hasMemoryDefragKey) await setMemoryDefragModel(body.memoryDefrag, { models: defragModels });
     if (hasWorkspaceScanKey) await setWorkspaceScanModels(body.workspaceScan, { models: wsScanModels });
     if (has('schedule')) await setScheduleDefaults(body.schedule && typeof body.schedule === 'object' ? body.schedule : {});
     if (hasBudgetKey) emitChanged('budget-changed');
     // Other open tabs repaint their Settings cards (a stale tab could otherwise
     // "save" its old checkbox state over this one with no feedback to either).
-    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule')) emitChanged('settings-changed');
-    res.json({ ...settingsState(), ...(await autoModelState()), chat: chatPrefs() });
+    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule')) emitChanged('settings-changed');
+    res.json({ ...settingsState(), ...(await autoModelState()), ...(await prDescriptionModelState()), chat: chatPrefs() });
   } catch (err) {
     // The setters throw only on an unusable path -> client error (400).
     return badRequest(res, err && err.message ? err.message : String(err));

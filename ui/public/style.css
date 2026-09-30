@@ -2886,8 +2886,8 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .settings-card{max-width:760px;padding:22px;margin-left:auto;margin-right:auto;}
 .settings-card + .settings-card{margin-top:18px;}
 .settings-card[hidden]{display:none;}
-/* Settings › Models: Title generation + Auto workflow model side by side above the catalog, so two
-   short cards do not push it a screen down; one column once they would squeeze. */
+/* Settings › Models: Title generation, Auto workflow model and PR description model side by side
+   above the catalog, so short cards do not push it a screen down; one column once they would squeeze. */
 .models-helpers{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:18px;margin-bottom:18px;}
 .models-helpers > .settings-card{max-width:none;margin:0;}
 
@@ -3852,6 +3852,24 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .shipit-remotes-hint{grid-column:1/-1;margin:0;font-size:12px;color:var(--ink-3);word-break:break-all;}
 .shipit-remotes-hint:empty{display:none;}
 @media (max-width:520px){.shipit-remotes{grid-template-columns:1fr;}}
+
+/* The PR description: label, Write / Preview tabs and Generate with AI on one row,
+   the textarea (or its rendered preview) under it. Left-aligned inside the centered
+   card like the remotes. `.btn` sets display:inline-flex and `.hint` display:block,
+   so the Stop button, the preview and the error line each ship a [hidden] twin. */
+.shipit-desc{margin-top:14px;text-align:left;}
+.shipit-desc-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px;}
+.shipit-desc-head label{margin:0 4px 0 2px;font:600 11.5px/1.2 var(--sans);color:var(--ink-2);
+  text-transform:uppercase;letter-spacing:.04em;}
+.shipit-desc-head .shipit-generate-stop{margin-left:auto;}
+.shipit-desc-head .shipit-generate-stop[hidden]{display:none;}
+.shipit-desc-head .shipit-generate-stop[hidden] + .shipit-generate{margin-left:auto;}
+.shipit-desc-input{min-height:140px;font-size:13px;}
+.shipit-desc-input[readonly]{opacity:.6;}
+.shipit-desc-preview{max-height:320px;}
+.shipit-desc-preview[hidden]{display:none;}
+.shipit-desc-err{margin-top:8px;}
+.shipit-desc-err[hidden]{display:none;}
 
 /* Reduced motion for the three ship-it animations. This block MUST sit AFTER the
    rules that declare them: `@media` contributes no specificity, so naming

@@ -930,6 +930,7 @@ export const SETTINGS_POST_KEYS = Object.freeze([
   'theme',
   'uiLevel',                                 // interface mode (docs/ui-levels.md)
   'autoWorkflowModel',                       // auto-workflow spec D14
+  'prDescriptionModel',                      // the "Ship it?" modal's Generate with AI
   'memoryDefrag',                            // Settings › Memory: the defragment model + effort
   'workspaceScan',                           // Settings › Runs › Workspaces: the scan's models
   'schedule',                                // scheduled-run defaults { graceMin, ifMissed, maxFailures }
@@ -1064,6 +1065,41 @@ export async function setAutoWorkflowModel(input, { models = null } = {}) {
   if (id === null) delete settings.autoWorkflowModel; else settings.autoWorkflowModel = id;
   await persistSettings(settings);
   return { autoWorkflowModel: autoWorkflowModel() };
+}
+
+// ── PR description model (the "Ship it?" modal's Generate with AI) ──────────
+// '' = unset: the runtime resolves a Sonnet-class default from the catalog
+// (src/core/pr-description.mjs). Read at use time like every other stored setting.
+
+/** The configured PR-description model id, or '' when unset. */
+export function prDescriptionModel() {
+  const v = readSettings().prDescriptionModel;
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+/**
+ * Validate a POST value exactly like assertAutoWorkflowModelInput: with `models`
+ * (the effective catalog) the id must name an entry and comes back in the
+ * catalog's casing. Empty/null/undefined means "clear".
+ * @returns {string|null} the canonical id to store, null to clear
+ * @throws {Error} on a non-string or an id the catalog does not carry
+ */
+export function assertPrDescriptionModelInput(input, models = null) {
+  if (input === '' || input === null || input === undefined) return null;
+  if (typeof input !== 'string' || !input.trim()) throw new Error('prDescriptionModel must be a catalog model id');
+  const id = input.trim();
+  if (!Array.isArray(models)) return id;
+  const hit = models.find((m) => m && typeof m.id === 'string' && m.id.toLowerCase() === id.toLowerCase());
+  if (!hit) throw new Error(`unknown model "${id}" — add it to the catalog first`);
+  return hit.id;
+}
+
+export async function setPrDescriptionModel(input, { models = null } = {}) {
+  const id = assertPrDescriptionModelInput(input, models);
+  const settings = readSettings();
+  if (id === null) delete settings.prDescriptionModel; else settings.prDescriptionModel = id;
+  await persistSettings(settings);
+  return { prDescriptionModel: prDescriptionModel() };
 }
 
 // ── Spawn-debug diagnostics toggle (the stored side of WORCA_DEBUG_SPAWN) ────

@@ -215,7 +215,7 @@ Everything on the page: the list, the runtime step, the workspace and the bench 
 | Runs tab: Budget & cost limits | S |
 | General: root folders; Runs tab: Scheduled runs defaults, Workspaces (scan models), chat notifications; Ask Worca tab (limits, tools, web access, chat history) | A |
 | Guardrails tab (list, details); Plugins tab (installed, available, install); Memory tab (files) | A |
-| General: spawn diagnostics; Models tab: Title generation, Auto workflow model; Memory tab: Defragment model | E — the Defragment model card stays visible while a model is set |
+| General: spawn diagnostics; Models tab: Title generation, Auto workflow model, PR description model; Memory tab: Defragment model | E — the Defragment model card stays visible while a model is set |
 | Guardrails create / delete; Models tab; Providers tab; marketplaces, Doctor, leftover data | E |
 | Models tab: the catalog toolbar (search, filter chips, folding groups), the editor dialog's Connection section, the Import-models dialog (Copilot and OpenAI-compatible sources) | E |
 | Providers tab: Providers card (Copilot sign-in, account type, concurrency cap, key rows) and its Import-models shortcuts | E |
