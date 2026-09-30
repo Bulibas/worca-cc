@@ -80,6 +80,7 @@ import {
 } from './memory-view.mjs';
 import { createScriptsController } from './scripts-view.mjs';
 import { createAskPanel } from './ask-panel.mjs';
+import { createVoiceController } from './ask-voice.mjs';
 import { renderGettingStarted, renderGettingStartedPill, bindWelcome, doneCount, allStepsDone, GETTING_STARTED_STEPS } from './getting-started.mjs';
 import { createGuideSpot } from './guide-spot.mjs';
 import {
@@ -122,7 +123,7 @@ import {
   renderExportWizard, collectExportWizard, applyConnectionModeIn,
 } from './models-view.mjs';
 import {
-  renderProvidersCard, collectProviderRow, renderImportSheet, renderEndpointSheet, collectImportSheet, applyImportSelectAll,
+  renderProvidersCard, collectProviderRow, collectSpeechRow, formatSpeechBytes, renderImportSheet, renderEndpointSheet, collectImportSheet, applyImportSelectAll,
   applyProviderPreset, endpointRowMatches,
   setModelUpstream, COPILOT_TERMS,
 } from './bridge-view.mjs';
@@ -13674,6 +13675,53 @@ function setProviderResult(name, state, text) {
   pill.textContent = text || '';
 }
 
+/** "Remove speech models": frees the built-in engines' downloads; the next mic use fetches them again. */
+async function clearSpeechCacheFlow(btn) {
+  const bytes = (mvState.providers && mvState.providers.speech && mvState.providers.speech.cacheBytes) || 0;
+  const ok = await confirmModal({
+    title: 'Remove speech models?',
+    message: `Frees ${formatSpeechBytes(bytes)}. Voice keeps working: the next time you use the mic, the models download again.`,
+    confirmLabel: 'Remove', cancelLabel: 'Keep', danger: true,
+  });
+  if (!ok) return;
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/speech/cache', { method: 'DELETE' });
+    const data = await safeJson(res);
+    if (!res.ok) { setProviderMsg('speech', data.error || `HTTP ${res.status}`, true); btn.disabled = false; return; }
+    mvState.providers = data.providers;
+    repaintProviders();
+    setProviderMsg('speech', `Removed ${formatSpeechBytes(data.removed)} of speech models.`);
+  } catch (e) {
+    setProviderMsg('speech', e.message, true);
+    btn.disabled = false;
+  }
+}
+
+/** The Speech row's per-service Test (docs/speech.md): tests what is on screen, like testProviderFlow. */
+async function testSpeechFlow(btn) {
+  const kind = btn.dataset.kind;
+  const typed = (collectSpeechRow(providerRoot()) || {})[kind] || {};
+  const root = providerRoot();
+  const pill = root && root.querySelector(`.mv-sp-result[data-kind="${kind}"]`);
+  const show = (state, text) => { if (pill) { pill.className = `mv-pv-result mv-sp-result${state ? ` is-on is-${state}` : ''}`; pill.textContent = text || ''; } };
+  const what = kind === 'stt' ? 'Speech-to-text' : 'Text-to-speech';
+  btn.disabled = true;
+  show('busy', 'Testing…');
+  setProviderMsg('speech', '');
+  try {
+    const res = await fetch('/api/providers/speech/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, ...typed }) });
+    const data = await safeJson(res);
+    if (data.ok) { show('ok', 'Reachable'); setProviderMsg('speech', `${what}: ${data.detail || 'answered'}.`); }
+    else { show('err', 'Failed'); setProviderMsg('speech', `${what}: ${data.message || data.error || `HTTP ${res.status}`}`, true); }
+  } catch (e) {
+    show('err', 'Failed');
+    setProviderMsg('speech', e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function testProviderFlow(btn) {
   const name = btn.dataset.provider;
   // What the user is LOOKING at, not what is stored: an unsaved base URL or key is tested as typed,
@@ -14099,6 +14147,11 @@ if (el.providersList) {
       const body = collectProviderRow(providerRoot(), t.dataset.provider);
       if (body) patchProviderFlow(t.dataset.provider, body);
     } else if (t.classList.contains('mv-pv-test')) testProviderFlow(t);
+    else if (t.classList.contains('mv-sp-save')) {
+      const body = collectSpeechRow(providerRoot());
+      if (body) patchProviderFlow('speech', body);
+    } else if (t.classList.contains('mv-sp-test')) testSpeechFlow(t);
+    else if (t.classList.contains('mv-sp-clear')) clearSpeechCacheFlow(t);
     else if (t.classList.contains('mv-pv-preset')) {
       // Fills the fields only; the row's Test / Save do the rest, exactly as for a typed URL.
       applyProviderPreset(providerRoot(), t.dataset.provider, t.dataset.preset);
@@ -26548,6 +26601,8 @@ askPanel = createAskPanel({
   raf: window.requestAnimationFrame ? window.requestAnimationFrame.bind(window) : ((fn) => setTimeout(fn, 0)),
   now: () => Date.now(),
   runStore: askRunStore,
+  // Voice mode (docs/speech.md): the mic in the composer; the controller owns the audio.
+  createVoice: (hooks) => createVoiceController({ win: window, doc: document, fetch: (...args) => fetch(...args), ...hooks }),
 });
 document.body.appendChild(askPanel.root);
 

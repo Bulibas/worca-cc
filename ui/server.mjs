@@ -153,8 +153,10 @@ import { startBridge } from '../src/core/bridge/server.mjs';
 import {
   providersState, patchProvider, acknowledgeTerms, beginCopilotLogin, pollCopilotLogin, copilotLogout,
   copilotModelsForImport, importCopilotModels, testProviderConnection,
-  endpointModelsForImport, importEndpointModels,
+  endpointModelsForImport, importEndpointModels, patchSpeech,
 } from '../src/core/bridge/provider-ops.mjs';
+import { speechState, transcribe, synthesize, testSpeech } from '../src/core/speech.mjs';
+import { speechAssetStore } from '../src/core/speech-assets.mjs';
 import { listPluginModels, modelSecretsSchema, pluginModelSecretStatus } from '../src/core/plugin-models.mjs';
 import { testModel } from '../src/core/model-test.mjs';
 import {
@@ -367,6 +369,32 @@ const ASK_VENDOR_ASSETS = {
   marked: resolveEsmAsset('marked'),
   dompurify: resolveEsmAsset('dompurify'),
 };
+
+// Ask Worca voice mode (docs/speech.md): the Silero VAD (@ricky0123/vad-web) and
+// its onnxruntime-web wasm runtime, served from node_modules like marked above.
+// An explicit allow-list per prefix — never a directory listing — and an
+// unresolvable package leaves its routes unregistered (the /vendor 404 answers;
+// the mic then reports "voice activity detection unavailable").
+function resolveVendorDir(spec, resolve = (s) => import.meta.resolve(s), warn = (msg) => console.warn(msg)) {
+  try {
+    return path.dirname(fileURLToPath(resolve(spec)));
+  } catch (err) {
+    warn(`[worca-ui] voice asset unavailable (${spec}): ${err?.message || err}`);
+    return null;
+  }
+}
+const VOICE_VENDOR = [
+  // Only the runtime that vad-web's built-in ORT 1.22.0 JS fetches (wasmPaths + name).
+  { prefix: '/vendor/ort/', dir: resolveVendorDir('onnxruntime-web/wasm'), files: {
+    'ort-wasm-simd-threaded.mjs': 'text/javascript',
+    'ort-wasm-simd-threaded.wasm': 'application/wasm',
+  } },
+  { prefix: '/vendor/vad/', dir: resolveVendorDir('@ricky0123/vad-web'), files: {
+    'bundle.min.js': 'text/javascript',
+    'vad.worklet.bundle.min.js': 'text/javascript',
+    'silero_vad_v5.onnx': 'application/octet-stream',
+  } },
+];
 
 const PORT = Number(process.env.PORT) || DEFAULT_UI_PORT;
 // Bind to loopback by default (S1). Power users who knowingly want LAN exposure
@@ -1229,6 +1257,52 @@ if (ASK_VENDOR_ASSETS.marked) {
 if (ASK_VENDOR_ASSETS.dompurify) {
   app.get('/vendor/dompurify/purify.es.mjs', sendEsmModule(ASK_VENDOR_ASSETS.dompurify));
 }
+for (const { prefix, dir, files } of VOICE_VENDOR) {
+  if (!dir) continue;
+  for (const [name, type] of Object.entries(files)) {
+    const file = path.join(dir, name);
+    if (!fs.existsSync(file)) { console.warn(`[worca-ui] voice asset missing: ${file}`); continue; }
+    app.get(`${prefix}${name}`, (_req, res, next) => {
+      res.type(type);
+      res.set('X-Content-Type-Options', 'nosniff');
+      res.set('Cache-Control', 'public, max-age=86400');
+      res.sendFile(file, (err) => { if (!err) return; if (res.headersSent) return next(err); next(); });
+    });
+  }
+}
+
+// The in-browser speech engines (docs/speech.md): pinned runtime + model files,
+// downloaded once into ~/.worca-cc/speech-cache and served same-origin.
+// src/core/speech-assets.mjs owns the allow-lists; anything else is a 404.
+// Models are no-store: the worker keeps no copy either (speech-worker.mjs), so the disk
+// holds ONE copy — worca's — and "Remove speech models" really frees the space.
+// The runtime (~25 MB) may sit in the HTTP cache: pinned bytes that never change.
+const sendSpeechAsset = (res, next, cache = 'no-store') => ({ file, type }) => {
+  res.type(type);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', cache);
+  res.sendFile(file, (err) => { if (err && !res.headersSent) next(err); });
+};
+const streamSpeechAsset = (res) => ({ type, length, body }) => {
+  res.type(type);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', 'no-store');
+  if (length) res.set('Content-Length', String(length));
+  body.on('error', () => res.destroy());
+  body.pipe(res);
+};
+const speechAssetFail = (res, next) => (err) => {
+  if (err && err.status === 404) return next();
+  console.warn(`[worca-ui] speech asset: ${err && err.message ? err.message : err}`);
+  if (!res.headersSent) res.status(502).set('Cache-Control', 'no-store').type('text/plain').send(err && err.message ? err.message : 'download failed');
+};
+app.get('/vendor/speech/lib/:name', (req, res, next) => {
+  speechAssetStore().lib(req.params.name).then(sendSpeechAsset(res, next, 'public, max-age=31536000, immutable'), speechAssetFail(res, next));
+});
+app.get(/^\/vendor\/speech\/hf\/([^/]+\/[^/]+)\/resolve\/[^/]+\/(.+)$/, (req, res, next) => {
+  speechAssetStore().model(req.params[0], req.params[1])
+    .then((r) => (r.body ? streamSpeechAsset(res)(r) : sendSpeechAsset(res, next)(r)), speechAssetFail(res, next));
+});
 
 app.use('/vendor', (err, _req, res, next) => {
   if (res.headersSent) return next(err);
@@ -5941,6 +6015,74 @@ const providerError = (res, err) => {
   if (err && (err.code === 'TERMS' || err.code === 'NOT_SIGNED_IN')) return res.status(409).json({ error: msg, code: err.code });
   return badRequest(res, msg);
 };
+
+// ── Ask Worca voice mode (docs/speech.md) ──
+// Behind the same global loopback / identity-proxy guards as every /api/ask
+// route (:1131, :1144). They name no thread, so the thread-owner guard (:1181)
+// has nothing to check. Registered before /api/providers/:name so the param
+// routes never see "speech".
+const speechFail = (res, err) => res.status(err && err.status ? err.status : 502).json({ error: err && err.message ? err.message : String(err) });
+
+app.get('/api/speech', (_req, res) => {
+  // downloaded: the voice chip says "Downloading…" only when the models really are fetched.
+  let downloaded = { stt: false, tts: false };
+  try { downloaded = speechAssetStore().downloaded(); } catch { /* no worca home: nothing downloaded */ }
+  res.json({ ...speechState(), downloaded });
+});
+
+app.patch('/api/providers/speech', async (req, res) => {
+  try {
+    await patchSpeech(req.body || {});
+    emitChanged('settings-changed');
+    res.json(await providersState());
+  } catch (err) {
+    return providerError(res, err);
+  }
+});
+
+// Settings › Providers › Speech: "Remove speech models" (the size shows on the card).
+app.delete('/api/speech/cache', async (_req, res) => {
+  try {
+    const bytes = speechAssetStore().clear();
+    res.json({ removed: bytes, providers: await providersState() });
+  } catch (err) {
+    res.status(err && err.status === 409 ? 409 : 500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+app.post('/api/providers/speech/test', async (req, res) => {
+  const b = req.body || {};
+  res.json(await testSpeech(typeof b.kind === 'string' ? b.kind : '', b));
+});
+
+app.post('/api/speech/transcribe', express.raw({ type: ['audio/wav', 'audio/x-wav', 'audio/wave'], limit: '25mb' }), async (req, res) => {
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return badRequest(res, 'send the utterance as an audio/wav body');
+  const ctrl = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) ctrl.abort(); });
+  try {
+    res.json(await transcribe({ audio: req.body, signal: ctrl.signal }));
+  } catch (err) {
+    if (!res.headersSent) speechFail(res, err);
+  }
+});
+
+app.post('/api/speech/synthesize', async (req, res) => {
+  const ctrl = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) ctrl.abort(); });
+  let up;
+  try {
+    up = await synthesize({ text: req.body && req.body.text, signal: ctrl.signal });
+  } catch (err) {
+    return speechFail(res, err);
+  }
+  res.status(200).set({ 'Content-Type': up.headers.get('content-type') || 'audio/wav', 'Cache-Control': 'no-store' });
+  try {
+    if (up.body) for await (const chunk of up.body) { if (res.destroyed) break; res.write(chunk); }
+    res.end();
+  } catch {
+    res.destroy();   // upstream died mid-stream: the browser's audio fails, voice drops to text-only
+  }
+});
 
 app.get('/api/providers', async (req, res) => {
   try {
