@@ -1,9 +1,10 @@
 // ui/public/graph/run-hosts.mjs   (depth 3 below the repo root)
 //
-// The three run-graph HOSTS. One renderer (view.mjs) + one decor pass
+// The four run-graph HOSTS. One renderer (view.mjs) + one decor pass
 // (run-decor.mjs) mounted with per-host mode, zoom clamp, wheel policy and
-// sizing. Nothing here knows about the app's run model — app.js hands it a
-// manifest + a decor bag and gets clicks back.
+// sizing. `focus` is the glance's Live view: look-only like `static`, framed on
+// the running steps rather than the whole graph. Nothing here knows about the
+// app's run model — app.js hands it a manifest + a decor bag and gets clicks back.
 //
 // Measurement: `viewport` is a FUNCTION `() => ({left, top, width, height})`
 // (or null), handed VERBATIM to createGraphView; every size this module needs
@@ -30,7 +31,26 @@ const NAV_BTNS = [
   ['out', 'Zoom out', '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M5 12h14" stroke-linecap="round"></path></svg>'],
   ['center', 'Fit graph to view', '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4.5" y="4.5" width="15" height="15" rx="2.5"></rect><circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none"></circle></svg>'],
 ];
+/** Air around the focused cards, in world px, so their edges and glow clear
+ *  the fog's ring (the neighbours beyond are what fades). */
+export const FOCUS_PAD = 24;
+/** The share of the panel (each axis) the focused cards are fitted into. The fog
+ *  (style.css `.rd-live .run-flow-wrap` mask) is clear up to the same fraction of
+ *  its radius, so a fit never parks a running step in the mist at the edges. */
+export const FOCUS_CLEAR = 0.6;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+/** The nodes the Live view frames: the running steps; else the step a pause or
+ *  stop parked; else `prev` (between two steps the camera stays put); else []
+ *  (nothing to follow yet: the whole graph). */
+export function focusNodeIds(decor, prev = []) {
+  const active = ((decor && decor.activeNodes) || []).map((a) => a.nodeId);
+  if (active.length) return [...new Set(active)];
+  const status = (decor && decor.status) || {};
+  const parked = Object.keys(status).filter((id) => status[id] === 'paused' || status[id] === 'stopped');
+  if (parked.length) return parked;
+  return Array.isArray(prev) ? prev : [];
+}
 
 /** Centre `b` (already padded) in a vw×vh viewport through the SHARED `fitBounds`;
  *  fit NEVER magnifies past 1× (spec §7.6). Returns the view's `{x, y, z}`. */
@@ -48,10 +68,11 @@ export function mountRunGraph(hostEl, opts = {}) {
     onRowClick = null, onGateClick = null, onResultClick = null } = opts;
   const wrap = hostEl.closest('.run-flow-wrap') || hostEl.parentElement || hostEl;
   const win = doc.defaultView || globalThis;
-  const isStatic = mode === 'static';
-  const zoomMin = 0.3, zoomMax = isStatic ? 1 : 1.6;
+  const isStatic = mode === 'static', isFocus = mode === 'focus', isMonitor = !isStatic && !isFocus;
+  const zoomMin = 0.3, zoomMax = isMonitor ? 1.6 : 1;
 
   let view = null, stepper = null, decor = null, runId = null, expanded = null, ro = null, lastFit = null, bound = false, nav = null;
+  let focus = [];   // focus hosts: the node ids the camera frames (focusNodeIds)
   // The last width `view.readRect()` reported. A host inside a `display:none`
   // subtree (compact density, a closed detail) measures 0×0, and both fitters
   // BAIL on that rather than poison the transform / --run-host-h with it; the
@@ -158,15 +179,29 @@ export function mountRunGraph(hostEl, opts = {}) {
     });
   }
 
+  // Focus (the glance's Live view): the running steps' cards, padded, fitted into
+  // the clear middle of the host (FOCUS_CLEAR per axis) at ≤ 1×; nothing running
+  // yet frames the whole graph. The host never resizes itself — the panel's CSS
+  // owns its box.
+  function fitFocus() {
+    const r = view.readRect();
+    if (!(r.width > 0) || !(r.height > 0)) return;
+    const b = (focus.length && view.bounds(FOCUS_PAD, focus)) || view.bounds(FOCUS_PAD);
+    if (!b) return;
+    const cw = r.width * FOCUS_CLEAR, ch = r.height * FOCUS_CLEAR;
+    const f = fitInto(b, cw, ch, { zoomMin });
+    view.setTransform({ x: f.x + (r.width - cw) / 2, y: f.y + (r.height - ch) / 2, z: f.z });
+  }
+
   function fit() {
     if (!view || !stepper) return;
-    if (isStatic) fitStatic(); else fitMonitor(true);
+    if (isFocus) fitFocus(); else if (isStatic) fitStatic(); else fitMonitor(true);
     lastFit = view.getTransform();
     paintNav();
   }
   /** The size pass without the transform (monitor only; static hosts never grow). */
   function sizeHost() {
-    if (!view || !stepper || isStatic) return;
+    if (!view || !stepper || !isMonitor) return;
     fitMonitor(false);
   }
   /** Re-fit while the user has not touched the view; otherwise only re-size the host. */
@@ -182,20 +217,21 @@ export function mountRunGraph(hostEl, opts = {}) {
     // The v2 renderer's `.gv-stage{position:absolute;inset:0}` would fill THAT
     // padding box, not the wrap — `.gv-host` / `.gv-wrap-*` (style.css) reset it.
     hostEl.classList.add('gv-host');
-    wrap.classList.add('gv-wrap', isStatic ? 'gv-wrap-static' : 'gv-wrap-monitor');
-    view = createGraphView(hostEl, { mode, doc, raf, viewport,
+    wrap.classList.add('gv-wrap', `gv-wrap-${mode}`);
+    // A focus host renders its cards as the static one does: look, don't touch.
+    view = createGraphView(hostEl, { mode: isFocus ? 'static' : mode, doc, raf, viewport,
       portsFn: manifestPortsFn(stepper), agents: manifestAgents(stepper), zoomMin, zoomMax });
     // The view never auto-binds a nav: monitor hosts ask for one. There is no
     // engagement state any more — a plain wheel is always the page's (D2) — and
     // onTransform is how a wheel zoom or a drag repaints the cluster.
-    if (!isStatic) view.createNav({ onTransform: paintNav });
+    if (isMonitor) view.createNav({ onTransform: paintNav });
   }
 
   function update(nextRunId, nextStepper, nextDecor) {
     const runChanged = nextRunId !== runId;
     const structural = !view || runChanged || nodeSig(nextStepper) !== nodeSig(stepper);
     const sameBag = !structural && nextDecor === decor;
-    if (runChanged) { runId = nextRunId; expanded = null; lastFit = null; }   // one node open per surface; a new run is a new build
+    if (runChanged) { runId = nextRunId; expanded = null; lastFit = null; focus = []; }   // one node open per surface; a new run is a new build
     // A node-set change needs a view whose portsFn/headers read the NEW manifest.
     if (view && structural && nodeSig(nextStepper) !== nodeSig(stepper)) { view.destroy(); view = null; lastFit = null; }
     stepper = nextStepper; decor = nextDecor;
@@ -208,11 +244,18 @@ export function mountRunGraph(hostEl, opts = {}) {
     const rectW = view.readRect().width || 0;
     const revealed = rectW > 0 && !(lastRectW > 0);
     lastRectW = rectW;
+    if (isFocus) {
+      const next = focusNodeIds(decor, focus);
+      const moved = next.join(',') !== focus.join(',');
+      focus = next;
+      if (structural || revealed || moved) fit();
+      return;
+    }
     if ((structural || revealed) && untouched()) fit();
   }
 
   function bind() {
-    if (!isStatic) {
+    if (isMonitor) {
       const hint = doc.createElement('div');
       hint.className = 'rg-hint';
       hint.dataset.minLevel = 'advanced';
@@ -234,7 +277,7 @@ export function mountRunGraph(hostEl, opts = {}) {
     }
     // jsdom has no ResizeObserver — guard through the document's window (P5's idiom).
     if (typeof win.ResizeObserver === 'function') {
-      ro = new win.ResizeObserver(() => { if (isStatic) fit(); else refit(); });
+      ro = new win.ResizeObserver(() => { if (isMonitor) refit(); else fit(); });
       ro.observe(wrap);
     }
   }
@@ -248,12 +291,13 @@ export function mountRunGraph(hostEl, opts = {}) {
     if (nav) { nav.remove(); nav = null; }
     if (view) { view.destroy(); view = null; }   // view.destroy() tears every nav down
     hostEl.classList.remove('gv-host');
-    wrap.classList.remove('gv-wrap', 'gv-wrap-static', 'gv-wrap-monitor');
+    wrap.classList.remove('gv-wrap', 'gv-wrap-static', 'gv-wrap-monitor', 'gv-wrap-focus');
     wrap.style.removeProperty('--run-host-h');
     hostEl.style.width = '';
     hostEl.innerHTML = '';
     lastFit = null;
     lastRectW = 0;
+    focus = [];
     // bind() is called once per mount, guarded by `bound`. destroy() removed every
     // listener, the hint chip and the ResizeObserver, so a later update() must be
     // allowed to bind them again — otherwise the re-mounted view is inert.

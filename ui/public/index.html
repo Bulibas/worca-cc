@@ -585,15 +585,24 @@
                     <h1 class="rd-page-title"></h1>
                     <p class="rd-page-meta"></p>
                   </header>
-                  <div class="rd-now-top">
-                    <span class="rd-orb"></span>
-                    <div class="rd-now-text">
-                      <h2 class="rd-now-title"></h2>
-                      <p class="rd-now-sub"></p>
-                    </div>
-                  </div>
                 </div>
                 <div class="rd-sheet">
+                  <!-- The card's head: the status line top left, the Live view switch top right. -->
+                  <div class="rd-sheet-head">
+                    <div class="rd-now-top">
+                      <span class="rd-orb"></span>
+                      <div class="rd-now-text">
+                        <h2 class="rd-now-title"></h2>
+                        <p class="rd-now-sub"></p>
+                      </div>
+                    </div>
+                    <!-- Live view: the running step(s), centred in a fogged graph beside the card
+                         (below it when the page is narrow). Only while the run is not over. -->
+                    <div class="switch-row rd-live-row" hidden>
+                      <span class="txt">Live view</span>
+                      <div class="switch rd-live-switch" role="switch" tabindex="0" aria-checked="false" aria-label="Live view"></div>
+                    </div>
+                  </div>
                   <div class="rd-banners">
                     <div class="retained-banner" role="alert" hidden></div>
                     <button type="button" class="hist-discard btn-ghost" hidden>Discard worktree</button>
@@ -602,6 +611,15 @@
                   <div class="rd-facts"></div>
                   <div class="rd-nowlist"></div>
                   <div class="rd-result" hidden></div>
+                </div>
+                <!-- The Live view panel. The clip lets the narrow layout open its height while the
+                     graph host keeps its final size (no fit chasing a growing box). It is `inert`:
+                     the panel is ONE control, so the graph's cards are neither tab stops nor click
+                     targets (a click falls through to the panel). -->
+                <div class="rd-live" role="button" tabindex="0" aria-label="Open the workflow" hidden>
+                  <div class="rd-live-clip" inert>
+                    <div class="run-flow-wrap"><div class="run-flow"></div></div>
+                  </div>
                 </div>
                 <!-- A waiting question: below the run's panel (which never changes), led by
                      a heading that says what is asked. -->
@@ -752,12 +770,14 @@
                     <h1 class="rd-page-title"></h1>
                     <p class="rd-page-meta"></p>
                   </header>
-                  <div class="rd-now-top">
-                    <span class="rd-orb"></span>
-                    <div class="rd-now-text"><h2 class="rd-now-title"></h2><p class="rd-now-sub"></p></div>
-                  </div>
                 </div>
                 <div class="rd-sheet">
+                  <div class="rd-sheet-head">
+                    <div class="rd-now-top">
+                      <span class="rd-orb"></span>
+                      <div class="rd-now-text"><h2 class="rd-now-title"></h2><p class="rd-now-sub"></p></div>
+                    </div>
+                  </div>
                   <div class="hd-banners">
                     <span class="badge hist-retained-badge" hidden>Work retained</span>
                     <div class="retained-banner" role="alert" hidden></div>

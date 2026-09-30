@@ -642,7 +642,7 @@ test('a run tour ends on the run\'s own page (Start opens it): status line, fact
   assert.ok(page.every((h) => h.info), 'reading stops: Next, never a click');
   assert.equal(page.at(-1).nextLabel, 'Done', 'the tab rows are the last stop');
   assert.deepEqual(page.map((h) => h.target[0]), [
-    '#run-detail .rd[data-mode="glance"] .rd-now',
+    '#run-detail .rd[data-mode="glance"] .rd-now-top',
     '#run-detail .rd[data-mode="glance"] .rd-facts',
     '#run-detail .rd[data-mode="glance"] .rd-result',
   ]);

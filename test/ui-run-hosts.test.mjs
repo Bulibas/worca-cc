@@ -1237,3 +1237,107 @@ test('a log-line artifact click carries its kind, so an extension-less plan rend
   const bare = window.document.querySelector('.artifact-view');
   assert.ok(bare.classList.contains('kind-text'), [...bare.classList].join(' '));
 });
+
+// ── the focus host (the glance's Live view) ───────────────────────────────────
+import { focusNodeIds, FOCUS_PAD, FOCUS_CLEAR } from '../ui/public/graph/run-hosts.mjs';
+
+// Four agents in a row, 300px apart: far wider than a 600px panel at 1×.
+const LINE = {
+  version: 2, template: { id: 'wf_line', name: 'Line' },
+  graph: {
+    nodes: ['a', 'b', 'c', 'd'].map((k, i) => ({ id: `n_${k}`, kind: 'agent', key: k, x: i * 300, y: 0,
+      label: k.toUpperCase(), color: 'blue', ports: { inputs: [], outputs: [], await: true } })),
+    wires: [],
+  },
+};
+const lineRun = (over = {}) => RUN({ stepper: LINE, ...over });
+const running = (...ids) => ({
+  steps: ids.map((id) => ({ key: `x:${id}:1`, executionId: `x:${id}:1`, nodeId: id, ordinal: 1, kind: 'cycle', status: 'start' })),
+  active: ids.map((id) => ({ nodeId: id, executionId: `x:${id}:1` })),
+});
+
+function mountFocus(w = 600, h = 400) {
+  const dom = new JSDOM('<!doctype html><div class="run-flow-wrap"><div class="run-flow"></div></div>');
+  const { window } = dom;
+  const wrap = window.document.querySelector('.run-flow-wrap');
+  const host = window.document.querySelector('.run-flow');
+  const m = mountRunGraph(host, { mode: 'focus', doc: window.document, raf: (fn) => { fn(); return 1; },
+    viewport: () => ({ left: 0, top: 0, width: w, height: h }) });
+  return { window, wrap, host, m };
+}
+// Where the centre of the focused nodes' box lands on screen.
+const focusCentre = (m, ids) => {
+  const b = m.view.bounds(FOCUS_PAD, ids);
+  const t = xform(m.view.world);
+  return { x: (b.x + b.w / 2) * t.z + t.x, y: (b.y + b.h / 2) * t.z + t.y };
+};
+
+test('view.bounds(pad, ids) measures only the named nodes', () => {
+  const { m } = mountFocus();
+  m.update('run1', LINE, decorFromState(lineRun()));
+  const all = m.view.bounds(0);
+  const one = m.view.bounds(0, ['n_c']);
+  assert.equal(one.x, 600);
+  assert.equal(one.w, 220, 'one card wide');
+  assert.equal(all.w, 1120, 'no filter keeps the whole graph');
+  const two = m.view.bounds(10, ['n_b', 'n_d']);
+  assert.equal(two.x, 290);
+  assert.equal(two.w, 900 + 220 - 300 + 20);
+  assert.equal(m.view.bounds(0, ['nope']), null, 'no named node on the canvas → nothing to measure');
+});
+
+test('focusNodeIds: running steps first, then a paused or stopped step, then the last focus', () => {
+  const d = (over) => decorFromState(lineRun(over));
+  assert.deepEqual(focusNodeIds(d(running('n_b', 'n_c'))), ['n_b', 'n_c']);
+  const paused = d({ status: 'paused', active: [],
+    steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, kind: 'cycle', status: 'done' },
+      { key: 'x:n_b:1', executionId: 'x:n_b:1', nodeId: 'n_b', ordinal: 1, kind: 'cycle', status: 'paused' }] });
+  assert.deepEqual(focusNodeIds(paused), ['n_b'], 'a paused run centres on the step it paused at');
+  const between = d({ steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, kind: 'cycle', status: 'done' }] });
+  assert.deepEqual(focusNodeIds(between, ['n_a']), ['n_a'], 'between two steps the camera stays put');
+  assert.deepEqual(focusNodeIds(between), [], 'nothing to follow yet → the whole graph');
+});
+
+test('the focus host centres the running step at ≤ 1× and never shows the nav, the hint or reacts to pointers', () => {
+  const { m, wrap, host, window } = mountFocus(600, 400);
+  m.update('run1', LINE, decorFromState(lineRun(running('n_c'))));
+  const t = xform(m.view.world);
+  assert.equal(t.z, 1, 'one card fits at 1× and a fit never magnifies');
+  const c = focusCentre(m, ['n_c']);
+  near(c.x, 300, 'the running card sits in the middle, horizontally');
+  near(c.y, 200, 'and vertically');
+  assert.deepEqual([...wrap.classList], ['run-flow-wrap', 'gv-wrap', 'gv-wrap-focus']);
+  assert.equal(wrap.querySelector('.rg-hint'), null);
+  assert.equal(wrap.querySelector('.gv-nav'), null);
+  assert.ok(host.querySelector('.gv-stage.gv-static'), 'cards render like the Running card: look, don\'t touch');
+  const before = m.view.world.style.transform;
+  host.dispatchEvent(new window.PointerEvent('pointerdown', { pointerId: 1, button: 0, clientX: 10, clientY: 10, bubbles: true }));
+  assert.equal(m.view.world.style.transform, before);
+});
+
+test('the focus host keeps every parallel step in view, and follows the work as it moves', () => {
+  const { m } = mountFocus(600, 400);
+  m.update('run1', LINE, decorFromState(lineRun(running('n_a', 'n_d'))));
+  const z = xform(m.view.world).z;
+  assert.ok(z < 1, `two steps 900px apart must zoom out to fit 600px, got ${z}`);
+  near(focusCentre(m, ['n_a', 'n_d']).x, 300, 'the pair is centred');
+  // The work moves on: the camera goes with it.
+  m.update('run1', LINE, decorFromState(lineRun(running('n_b'))));
+  near(focusCentre(m, ['n_b']).x, 300, 'the new step is centred');
+  // A gap between steps (nothing running) keeps the camera where it was.
+  const held = m.view.world.style.transform;
+  m.update('run1', LINE, decorFromState(lineRun({ steps: [], active: [] })));
+  assert.equal(m.view.world.style.transform, held);
+});
+
+test('the focus fit keeps parallel steps inside the clear middle, never out in the fog at the edges', () => {
+  const { m } = mountFocus(600, 400);
+  m.update('run1', LINE, decorFromState(lineRun(running('n_a', 'n_d'))));
+  const b = m.view.bounds(FOCUS_PAD, ['n_a', 'n_d']);
+  const t = xform(m.view.world);
+  const left = b.x * t.z + t.x, right = (b.x + b.w) * t.z + t.x;
+  const lo = 600 * (1 - FOCUS_CLEAR) / 2, hi = 600 * (1 + FOCUS_CLEAR) / 2;
+  assert.ok(left >= lo - 1e-6 && right <= hi + 1e-6, `[${left}, ${right}] must sit within [${lo}, ${hi}]`);
+  // style.css spells the same clear fraction into the fog's mask.
+  assert.ok(css.includes(`radial-gradient(closest-side, var(--ink) ${Math.round(FOCUS_CLEAR * 100)}%, transparent 100%)`), 'the mask clears the fit\'s box');
+});

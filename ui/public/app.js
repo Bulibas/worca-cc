@@ -23641,6 +23641,15 @@ function openRunDetail(runId, { instant = false } = {}) {
     const row = e.target.closest && e.target.closest('[data-rd-tab]');
     if (row) toDetails(row.dataset.rdTab);
   });
+  // Live view: the switch flips the remembered choice; the panel is a way to Workflow.
+  const liveSwitch = screen.querySelector('.rd-live-switch');
+  const livePanel = screen.querySelector('.rd-live');
+  const onKey = (fn) => (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } };
+  const flipLive = () => toggleLiveView(screen);
+  liveSwitch.addEventListener('click', flipLive);
+  liveSwitch.addEventListener('keydown', onKey(flipLive));
+  livePanel.addEventListener('click', () => toDetails('workflow'));
+  livePanel.addEventListener('keydown', onKey(() => toDetails('workflow')));
   // Keep the address in step with the open tab without adding a history entry per click.
   screen.querySelector('.rd-tabs').addEventListener('click', (e) => {
     const btn = e.target.closest && e.target.closest('.rd-tab');
@@ -23864,6 +23873,7 @@ function paintRdGlance(screen, r) {
   });
 
   const trail = trailColumns(r);
+  paintRdLive(screen, live);
   paintRdNowList(screen, r, copy.state);
   paintRdResult(screen, r, { glance: copy.state, trailCount: trail.count });
   // In Details the way back doubles as the cue that a question waits on the glance.
@@ -24443,6 +24453,99 @@ function paintRdGraph(screen, r) {
   const host = screen.querySelector('.rd-graph .run-flow');
   if (!host) return;
   paintGraphFor(host, r.stepper, isGraphRun(r) ? runDecorFor(r, 'monitor') : null, r.steps);
+}
+
+// ---- Live view: the glance's running step(s), centred in a fogged graph beside the card ----
+// (below it on a narrow page). The choice is remembered per browser and offered only while
+// the run is not over. Entering: the left column slides aside (flipGlance), the graph
+// mounts at its final size, then the panel fades in (style.css `.rd-live.is-in`).
+// Leaving runs the other way round, and the graph is dropped only once the panel is gone.
+const LIVE_VIEW_KEY = 'worca-cc.run.liveView';
+/** The exit's fallback when no transitionend comes: past style.css's longest `.rd-live` exit. */
+const LIVE_EXIT_MS = 500;
+const LIVE_EXITS = new WeakMap();   // .rd-live -> { timer, onEnd } while it animates out
+function liveViewWanted() {
+  try { return localStorage.getItem(LIVE_VIEW_KEY) === '1'; } catch { return false; }
+}
+function reducedMotion() {
+  try { return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; }
+}
+function toggleLiveView(screen) {
+  const on = !liveViewWanted();
+  try { if (on) localStorage.setItem(LIVE_VIEW_KEY, '1'); else localStorage.removeItem(LIVE_VIEW_KEY); } catch { /* private mode */ }
+  const r = rdOpenRun();
+  if (r) paintRdLive(screen, r);
+}
+
+function paintRdLive(screen, r) {
+  const row = screen.querySelector('.rd-live-row');
+  const panel = screen.querySelector('.rd-live');
+  if (!row || !panel) return;
+  const offered = !RD_TERMINAL.includes(r.status) && isGraphRun(r);
+  const wanted = liveViewWanted();
+  row.hidden = !offered;
+  const sw = row.querySelector('.rd-live-switch');
+  sw.classList.toggle('on', wanted);
+  sw.setAttribute('aria-checked', String(wanted));
+  if (offered && wanted) liveEnter(screen, r); else liveExit(screen);
+}
+
+function liveEnter(screen, r) {
+  const glance = screen.querySelector('.rd-glance');
+  const panel = screen.querySelector('.rd-live');
+  cancelLiveExit(panel);                   // back on mid-exit: the same graph carries on
+  if (panel.hidden) flipGlance(glance, () => { glance.dataset.live = 'on'; panel.hidden = false; });
+  paintGraphFor(panel.querySelector('.run-flow'), r.stepper, runDecorFor(r, 'focus'), r.steps);
+  if (!panel.classList.contains('is-in')) {
+    void panel.offsetWidth;                // commit the out state, so the class change transitions
+    panel.classList.add('is-in');
+  }
+}
+
+function liveExit(screen) {
+  const panel = screen.querySelector('.rd-live');
+  if (!panel || panel.hidden || LIVE_EXITS.has(panel)) return;
+  panel.classList.remove('is-in');
+  if (reducedMotion()) { finishLiveExit(screen); return; }
+  // Opacity is the exit's last transition in both layouts; the card's own ones bubble here too.
+  const onEnd = (e) => { if (e.target === panel && (!e.propertyName || e.propertyName === 'opacity')) finishLiveExit(screen); };
+  panel.addEventListener('transitionend', onEnd);
+  LIVE_EXITS.set(panel, { timer: setTimeout(() => finishLiveExit(screen), LIVE_EXIT_MS), onEnd });
+}
+
+function cancelLiveExit(panel) {
+  const x = LIVE_EXITS.get(panel);
+  if (!x) return;
+  clearTimeout(x.timer);
+  panel.removeEventListener('transitionend', x.onEnd);
+  LIVE_EXITS.delete(panel);
+}
+
+function finishLiveExit(screen) {
+  const glance = screen.querySelector('.rd-glance');
+  const panel = screen.querySelector('.rd-live');
+  cancelLiveExit(panel);
+  destroyGraphMounts(panel);
+  flipGlance(glance, () => { delete glance.dataset.live; panel.hidden = true; });
+}
+
+/** Slide the glance's left column (title + card) to where a layout change puts it: measure,
+ *  change, then play each from its old place (FLIP). A slide still running is measured where
+ *  it is on screen, so a quick second toggle turns it round without a jump. */
+function flipGlance(glance, change) {
+  const items = [...glance.querySelectorAll(':scope > .rd-now, :scope > .rd-sheet')];
+  const animate = !reducedMotion() && items.every((n) => typeof n.animate === 'function');
+  const before = animate ? items.map((n) => n.getBoundingClientRect()) : null;
+  if (animate) for (const n of items) for (const a of (n.getAnimations ? n.getAnimations() : [])) a.cancel();
+  change();
+  if (!animate) return;
+  items.forEach((n, i) => {
+    const after = n.getBoundingClientRect();
+    const dx = before[i].left - after.left, dy = before[i].top - after.top;
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+    n.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
+      { duration: 420, easing: 'cubic-bezier(.2,.7,.3,1)' });
+  });
 }
 
 // A bold-mono '·' separator, the twin of hdDot().
@@ -25114,7 +25217,7 @@ const gsRunPageHops = (first) => {
   const on = (sel) => [`#run-detail .rd[data-mode="glance"] ${sel}`, ...card];
   const asking = !!document.querySelector('#run-detail .rd[data-mode="glance"] .rd-questions:not([hidden])');
   return [
-    { id: 'card', info: true, target: on('.rd-now'), text: first },
+    { id: 'card', info: true, target: on('.rd-now-top'), text: first },
     { id: 'facts', info: true, target: on('.rd-facts'),
       text: 'Time, cost and the files it has changed so far, kept current while it works.' },
     asking ? { id: 'ask', info: true, target: on('.rd-questions .rd-ask-head'),
@@ -25163,8 +25266,8 @@ function gsRunHops(g, mock) {
       ? 'Your runs live under Running. Open this one to follow it.'
       : 'Your runs live under Running. Open this one to follow it; when it finishes it moves to History.'),
     ...gsRunPageHops(mock
-      ? 'This is your run’s page. The line under its name says what it is doing: the state, then the step.'
-      : 'This is your run’s page. The line under its name says what it is doing: the state, then the step, and whether it waits for you.'),
+      ? 'This is your run’s page. The line at the top of its card says what it is doing: the state, then the step.'
+      : 'This is your run’s page. The line at the top of its card says what it is doing: the state, then the step, and whether it waits for you.'),
   ];
 }
 /** Register a folder, through the Add project dialog: the prelude of every tour that needs a project. */
@@ -25298,7 +25401,7 @@ function gsHops(step, g) {
           already: 'The task goes here — a sentence or two; the planner asks when something matters.' },
         { ...run.start, text: 'Start the run with that workflow. Mock mode, beside it, tries the loop offline first.' },
         run.running,
-        ...gsRunPageHops('This is your run’s page, on the workflow you picked. The line under its name says what it is doing: the state, then the step.'),
+        ...gsRunPageHops('This is your run’s page, on the workflow you picked. The line at the top of its card says what it is doing: the state, then the step.'),
       ];
     }
     case 'workspace': {

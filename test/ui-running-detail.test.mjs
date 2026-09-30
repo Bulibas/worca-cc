@@ -1335,3 +1335,160 @@ test('Details › Diff reads the live worktree while the run goes', async () => 
   await settle(window, 4);
   assert.equal(ctx.calls.filter((c) => c.url.endsWith('/live-diff')).length, 1);
 });
+
+// --- Live view: the fogged focus graph beside the glance card ---------------
+
+const LIVE_KEY = 'worca-cc.run.liveView';
+const liveParts = (rd) => ({
+  glance: rd.querySelector('.rd-glance'),
+  sw: rd.querySelector('.rd-live-switch'),
+  row: rd.querySelector('.rd-live-row'),
+  panel: rd.querySelector('.rd-live'),
+  world: () => rd.querySelector('.rd-live .run-flow .gv-world'),
+});
+
+test('the card head: the status line top left, the Live view switch top right (History keeps the same head)', async () => {
+  const ctx = await bootRunning();
+  const rd = await openGlance(ctx);
+  const head = rd.querySelector('.rd-glance > .rd-sheet > .rd-sheet-head');
+  assert.equal(head, rd.querySelector('.rd-glance > .rd-sheet').firstElementChild, 'the head opens the card');
+  assert.ok(head.firstElementChild.classList.contains('rd-now-top'), 'the status line on the left');
+  assert.ok(head.lastElementChild.classList.contains('rd-live-row'), 'the Live view switch on the right');
+  assert.equal(head.lastElementChild.hidden, false);
+  assert.equal(rd.querySelector('.rd-glance > .rd-now .rd-now-top'), null, 'nothing of the status above the card');
+  assert.match(css, /\.rd-sheet-head\{[^}]*justify-content:space-between/, 'the two ends of one row');
+  const hist = ctx.window.document.querySelector('#hist-detail-tpl').content;
+  assert.ok(hist.querySelector('.hd-glance > .rd-sheet > .rd-sheet-head:first-child > .rd-now-top'), 'History: the status line opens its card too');
+});
+
+test('Live view: off by default; the switch mounts the focus graph beside the card and remembers it', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  const rd = await openGlance(ctx);
+  const p = liveParts(rd);
+  assert.ok(p.sw, 'a Live view switch on the card');
+  assert.equal(p.row.hidden, false, 'shown on a live run');
+  assert.equal(p.sw.getAttribute('role'), 'switch');
+  assert.equal(p.sw.getAttribute('aria-checked'), 'false');
+  assert.equal(p.panel.hidden, true, 'off by default');
+  assert.equal(p.world(), null, 'no graph is built while off');
+
+  click(window, p.sw);
+  await settle(window);
+  assert.equal(p.sw.getAttribute('aria-checked'), 'true');
+  assert.equal(p.glance.dataset.live, 'on', 'the glance opens its second column');
+  assert.equal(p.panel.hidden, false);
+  assert.ok(p.panel.classList.contains('is-in'), 'the panel animates in');
+  assert.ok(p.world(), 'the focus graph is mounted');
+  assert.ok(rd.querySelector('.rd-live .run-flow-wrap').classList.contains('gv-wrap-focus'));
+  assert.equal(window.localStorage.getItem(LIVE_KEY), '1', 'the choice is remembered');
+});
+
+test('Live view: switching off animates out first, then drops the graph (transitionend or a timeout)', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  const rd = await openGlance(ctx);
+  const p = liveParts(rd);
+  click(window, p.sw);
+  await settle(window);
+
+  click(window, p.sw);
+  await settle(window);
+  assert.equal(p.sw.getAttribute('aria-checked'), 'false');
+  assert.equal(window.localStorage.getItem(LIVE_KEY), null);
+  assert.equal(p.panel.classList.contains('is-in'), false, 'the exit transition starts');
+  assert.equal(p.panel.hidden, false, 'still on screen while it animates out');
+  assert.ok(p.world(), 'the graph lives until the exit ends');
+  p.panel.dispatchEvent(new window.Event('transitionend'));
+  assert.equal(p.panel.hidden, true);
+  assert.equal(p.world(), null, 'the mount is destroyed');
+  assert.equal(p.glance.dataset.live, undefined, 'the card goes back to the middle');
+
+  // No transitionend (a background tab, a cancelled transition): the timeout finishes it.
+  click(window, p.sw);
+  await settle(window);
+  click(window, p.sw);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(p.panel.hidden, true);
+  assert.equal(p.world(), null);
+});
+
+test('Live view: switching back on mid-exit keeps the same graph', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  const rd = await openGlance(ctx);
+  const p = liveParts(rd);
+  click(window, p.sw);
+  await settle(window);
+  const world = p.world();
+  click(window, p.sw);
+  click(window, p.sw);
+  await settle(window);
+  assert.ok(p.panel.classList.contains('is-in'));
+  p.panel.dispatchEvent(new window.Event('transitionend'));   // the reversed exit's end
+  assert.equal(p.panel.hidden, false, 'an exit that was reversed never hides the panel');
+  assert.equal(p.world(), world, 'no rebuild');
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(p.world(), world, 'nor does the old timeout');
+});
+
+test('Live view: a remembered choice opens with the page; a click on the panel opens Workflow', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  window.localStorage.setItem(LIVE_KEY, '1');
+  const rd = await openGlance(ctx);
+  const p = liveParts(rd);
+  assert.equal(p.sw.getAttribute('aria-checked'), 'true');
+  assert.equal(p.panel.hidden, false);
+  assert.ok(p.world());
+  click(window, p.panel);
+  assert.equal(window.location.hash, '#running/r1/details/workflow');
+  // The panel is ONE control: the graph's cards and chevrons are neither tab stops nor targets.
+  assert.equal(p.panel.getAttribute('role'), 'button');
+  assert.ok(p.panel.querySelector('.rd-live-clip').hasAttribute('inert'), 'the graph inside is inert');
+});
+
+test('Live view: a finished run hides the switch and lets the panel animate out', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  window.localStorage.setItem(LIVE_KEY, '1');
+  const rd = await openGlance(ctx);
+  const p = liveParts(rd);
+  frame(ctx, { type: 'done', runId: 'r1', status: 'done' });
+  await settle(window, 6);
+  assert.equal(p.row.hidden, true, 'no switch on a finished run: Workflow has the whole graph');
+  assert.equal(p.panel.classList.contains('is-in'), false);
+  p.panel.dispatchEvent(new window.Event('transitionend'));
+  assert.equal(p.panel.hidden, true);
+  assert.equal(p.world(), null);
+  assert.equal(window.localStorage.getItem(LIVE_KEY), '1', 'the choice outlives the run');
+});
+
+test('Live view: with reduced motion the panel goes at once', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  window.matchMedia = (q) => ({ matches: /prefers-reduced-motion/.test(q), addEventListener() {}, removeEventListener() {} });
+  const rd = await openGlance(ctx);
+  const p = liveParts(rd);
+  click(window, p.sw);
+  await settle(window);
+  click(window, p.sw);
+  assert.equal(p.panel.hidden, true, 'no exit to wait for');
+  assert.equal(p.world(), null);
+});
+
+test('Live view CSS: the two-column layout never outranks [hidden] (Details must replace the glance)', () => {
+  // `.rd-glance[hidden]{display:none}` and `.rd-glance[data-live="on"]{display:grid}` weigh the same,
+  // and the later one wins: with Live view on, opening Details left the glance on screen above it.
+  const rules = [...css.matchAll(/([^{}]*\.rd-glance\[data-live="on"\][^{}]*)\{([^{}]*)\}/g)]
+    .filter(([, , body]) => /(^|;)\s*display\s*:/.test(body));
+  assert.ok(rules.length, 'the wide layout sets display somewhere');
+  for (const [, sel] of rules) assert.match(sel, /:not\(\[hidden\]\)/, `${sel.trim()} must skip a hidden glance`);
+});
+
+test('Live view CSS: two columns when the page is wide, a fog mask, and no motion when reduced', () => {
+  assert.match(css, /\.rd-glance\[data-live="on"\]/, 'the on state has its own layout');
+  assert.match(css, /@container rd \(min-width:/, 'side by side follows the page area, not the window');
+  assert.match(css, /\.rd-live[^{]*\{[^}]*mask-image:radial-gradient/, 'the fog');
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)\{[^}]*\.rd-live/, 'reduced motion drops the animation');
+});
