@@ -514,10 +514,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     overlay.hidden = true;
     overlay.appendChild(make('span', 'ask-drop-label', 'Drop files to attach'));
     let depth = 0;
-    const show = (on) => {
-      overlay.hidden = !on;
-      sheet.classList.toggle('is-dropping', on);
-    };
+    const show = (on) => { overlay.hidden = !on; };
     const reset = () => { depth = 0; show(false); };
     sheet.addEventListener('dragenter', (e) => {
       if (!carriesFiles(e.dataTransfer)) return;
@@ -548,14 +545,18 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   // A clipboard image is named "image.png" (or nothing) by the browser: every
   // paste would then replace the last one through addFiles' name dedupe. Such
   // files get a unique "pasted-<timestamp>.<ext>"; real copied files keep theirs.
+  // A nameless file of an unlisted non-text type gets no extension, so addFiles
+  // rejects it like the "+" button would.
   let lastPasteStamp = 0;
   function namePastedFiles(files) {
     return [...files].map((f) => {
       const name = String(f.name || '');
       if (name && !/^image\.[a-z0-9]+$/i.test(name)) return f;
       const dot = name.lastIndexOf('.');
+      const type = String(f.type || '');
       const ext = dot >= 0 ? name.slice(dot).toLowerCase()
-        : (Object.keys(ASK_ATTACH_BINARY).find((k) => ASK_ATTACH_BINARY[k] === f.type) || '.txt');
+        : (Object.keys(ASK_ATTACH_BINARY).find((k) => ASK_ATTACH_BINARY[k] === type)
+          || (type.startsWith('text/') ? '.txt' : ''));
       lastPasteStamp = Math.max(Date.now(), lastPasteStamp + 1);
       return new win.File([f], `pasted-${lastPasteStamp}${ext}`, { type: f.type });
     });
@@ -564,6 +565,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   function onComposerPaste(e) {
     const cd = e.clipboardData;
     if (!cd || !cd.files || !cd.files.length) return; // a text paste goes ahead natively
+    // Excel/Word/browser copies carry the text plus a rendered image of it: the
+    // text is what was meant. Screenshots (no text) and real files still attach.
+    const text = typeof cd.getData === 'function' ? cd.getData('text/plain') : '';
+    if (text && [...cd.files].every((f) => String(f.type || '').startsWith('image/'))) return;
     e.preventDefault();
     addFiles(namePastedFiles(cd.files));
   }

@@ -77,14 +77,12 @@ test('ask-panel-drop: the overlay shows on a file dragenter, survives crossing c
   const child = ctx.doc.querySelector('.ask-transcript');
   fire(ctx, sheet, 'dragenter', data);
   assert.equal(overlay.hidden, false, 'shown while files hover the sheet');
-  assert.ok(sheet.classList.contains('is-dropping'));
   // entering a child fires dragenter(child) before dragleave(sheet): no flicker
   fire(ctx, child, 'dragenter', data);
   fire(ctx, sheet, 'dragleave', data);
   assert.equal(overlay.hidden, false, 'crossing into a child keeps the overlay up');
   fire(ctx, child, 'dragleave', data);
   assert.equal(overlay.hidden, true, 'leaving the sheet entirely hides it');
-  assert.ok(!sheet.classList.contains('is-dropping'));
 
   fire(ctx, sheet, 'dragenter', data);
   fire(ctx, sheet, 'drop', data);
@@ -124,6 +122,51 @@ test('ask-panel-drop: repeated generic "image.png" pastes get unique names, so t
   assert.equal(names.length, 2, 'both screenshots stay attached');
   assert.notEqual(names[0], names[1]);
   for (const n of names) assert.match(n, /^pasted-.+\.png$/);
+});
+
+test('ask-panel-drop: a nameless pasted file of an unknown binary type is rejected, not attached as text', async () => {
+  const ctx = makePanel();
+  ctx.panel.open();
+  const input = ctx.doc.querySelector('textarea.ask-input');
+  const tiff = mkFile(ctx, '', new Uint8Array([0x49, 0x49, 0x2a, 0x00]), 'image/tiff');
+  paste(ctx, input, { types: ['Files'], files: [tiff], getData: () => '' });
+  await ctx.tick(); await ctx.tick();
+  assert.equal(ctx.doc.querySelector('.ask-chip'), null);
+  assert.match(ctx.doc.querySelector('.ask-composer-msg').textContent, /attachment type not allowed: pasted-\d+$/);
+});
+
+test('ask-panel-drop: a nameless pasted text/* file still attaches as .txt', async () => {
+  const ctx = makePanel();
+  ctx.panel.open();
+  const input = ctx.doc.querySelector('textarea.ask-input');
+  paste(ctx, input, { types: ['Files'], files: [mkFile(ctx, '', 'hello', 'text/plain')], getData: () => '' });
+  await ctx.tick(); await ctx.tick();
+  assert.match(ctx.doc.querySelector('.ask-chip-name').textContent, /^pasted-\d+\.txt$/);
+});
+
+test('ask-panel-drop: an image+text paste (Excel/Word copy) lets the text through and attaches nothing', async () => {
+  const ctx = makePanel();
+  ctx.panel.open();
+  const input = ctx.doc.querySelector('textarea.ask-input');
+  const png = mkFile(ctx, 'image.png', new Uint8Array([0x89, 0x50, 0x4e, 0x47]), 'image/png');
+  const ev = paste(ctx, input, {
+    types: ['text/plain', 'Files'], files: [png], getData: (t) => (t === 'text/plain' ? 'A1\tB1' : ''),
+  });
+  assert.equal(ev.defaultPrevented, false, 'the native text paste goes ahead');
+  await ctx.tick(); await ctx.tick();
+  assert.equal(ctx.doc.querySelector('.ask-chip'), null);
+});
+
+test('ask-panel-drop: text plus a non-image file still attaches the file', async () => {
+  const ctx = makePanel();
+  ctx.panel.open();
+  const input = ctx.doc.querySelector('textarea.ask-input');
+  const ev = paste(ctx, input, {
+    types: ['text/plain', 'Files'], files: [mkFile(ctx, 'notes.md', 'hi')], getData: () => 'notes.md',
+  });
+  assert.equal(ev.defaultPrevented, true);
+  await ctx.tick(); await ctx.tick();
+  assert.match(ctx.doc.querySelector('.ask-chip').textContent, /notes\.md/);
 });
 
 test('ask-panel-drop: a plain-text paste is untouched', async () => {
