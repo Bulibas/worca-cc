@@ -2996,6 +2996,8 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .mv-editor-grid{display:grid;gap:14px;}
 .mv-field{display:grid;gap:6px;}
 .mv-field-label{font-size:12.5px;font-weight:600;}
+.mv-sp-server{display:contents;}
+.mv-sp-server[hidden]{display:none;}
 .mv-efforts{display:flex;gap:14px;flex-wrap:wrap;}
 .mv-effort{display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;}
 .mv-env{display:grid;gap:8px;}
@@ -3874,6 +3876,7 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .shipit-desc-input{min-height:140px;font-size:13px;}
 .shipit-desc-input::placeholder{color:var(--ink-2);}
 .shipit-desc-input[readonly]{opacity:.6;}
+.shipit-desc-input::placeholder{color:var(--ink-2);}   /* --ink-3 misses 4.5:1 on the card's grey field */
 .shipit-desc-preview{max-height:320px;}
 .shipit-desc-preview[hidden]{display:none;}
 .shipit-desc-err{margin-top:8px;}
@@ -5429,6 +5432,23 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-stop{border:1.5px solid var(--line);background:var(--panel);color:var(--ink);}
 .ask-stop:hover{border-color:var(--hover-outline);}
 .ask-stop[hidden]{display:none;}
+.ask-voice{display:inline-flex;align-items:center;gap:2px;flex:none;}
+.ask-voice-mic{display:inline-flex;align-items:center;justify-content:center;width:31px;height:31px;flex:0 0 31px;
+  padding:0;border:1.5px solid var(--line);border-radius:50%;background:var(--panel);color:var(--ink);cursor:pointer;transition:.15s;}
+.ask-voice-mic:hover{border-color:var(--ink);}
+.ask-voice-mic.is-on{background:var(--ink);color:var(--panel);border-color:var(--ink);}
+.ask-voice-mic.is-handsfree{animation:wr-pulse 1.6s ease-in-out infinite;}
+.ask-voice-mic.is-error{border-color:var(--red);color:var(--red-ink);}
+.ask-voice-caret{display:inline-flex;align-items:center;justify-content:center;width:18px;height:31px;padding:0;
+  border:0;background:transparent;color:var(--ink-2);cursor:pointer;border-radius:var(--r-ctrl);}
+.ask-voice-caret:hover{color:var(--ink);background:var(--field);}
+.ask-voice-status{font-size:11.5px;color:var(--ink-3);white-space:nowrap;margin-right:4px;}
+.ask-voice-status[hidden]{display:none;}
+.ask-voice-status[data-state="speaking"],.ask-voice-status[data-state="listening"]{color:var(--ink);}
+.ask-voice-status[data-state="error"]{color:var(--red-ink);}
+.ask-pop-voice{right:var(--ask-col-inset);bottom:calc(var(--ask-box-top) + 6px);width:260px;}
+.ask-voice-item svg{flex:0 0 auto;}
+.ask-composer :is(.ask-voice-mic,.ask-voice-caret):focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-composer :is(.ask-agents-btn,.ask-wt-btn,.ask-model-btn,.ask-send,.ask-stop,.ask-chip-x):focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 /* The button shares .ask-agents-btn, which is display:flex — that AUTHOR rule
    outranks the UA [hidden]{display:none}, so without this twin the button never
