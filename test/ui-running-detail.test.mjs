@@ -463,39 +463,7 @@ test('answers posted from the DETAIL panel carry the detail panel\'s choices', a
     'the DETAIL panel\'s slot won, not whichever panel painted last');
 });
 
-test('answers posted from the CARD panel still carry the card\'s choices', async () => {
-  // THE dual-mount regression, and the one that is RED before the fix.
-  // renderClarifyBody rebuilds r._answers on every call; paintRunDetail runs
-  // AFTER renderOverview, so the DETAIL panel always paints last and owns that
-  // array. The card's option clicks mutate slots nobody reads, and its Submit
-  // posts the detail panel's untouched (empty) choices.
-  const posts = [];
-  const ctx = await openDetail({
-    bootOpts: {
-      fetchHandler: (u, opts) => {
-        if (u.includes('/api/answer')) {
-          posts.push(JSON.parse(opts.body));
-          return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
-        }
-        return null;
-      },
-    },
-  });
-  const { window } = ctx;
-  ctx.recv({ type: 'question', runId: ID, ...clarify() });
-  await settle(window);
-
-  const cpanel = window.document.querySelector(`#run-list .run-card[data-run-id="${ID}"] .qpanel`);
-  assert.ok(cpanel, 'the list card still carries its own panel (D6)');
-  cpanel.querySelectorAll('.qopt')[1].dispatchEvent(new window.Event('click', { bubbles: true }));
-  cpanel.querySelector('.btn-go').dispatchEvent(new window.Event('click', { bubbles: true }));
-  await settle(window, 5);
-
-  assert.equal(posts.length, 1);
-  assert.equal(posts[0].payload.answers[0].choice, 'Magic link');
-});
-
-test('submitting busies BOTH mounted panels and resolving clears both', async () => {
+test('submitting busies the run page panel, the list card mounts none, and resolving clears it', async () => {
   const ctx = await openDetail({
     bootOpts: {
       fetchHandler: (u) => (u.includes('/api/answer')
@@ -508,18 +476,16 @@ test('submitting busies BOTH mounted panels and resolving clears both', async ()
   await settle(window);
 
   const dpanel = window.document.querySelector('#run-detail .rd-questions .qpanel');
-  const cpanel = window.document.querySelector(`#run-list .run-card[data-run-id="${ID}"] .qpanel`);
+  assert.equal(window.document.querySelector(`#run-list .run-card[data-run-id="${ID}"] .qpanel`), null,
+    'the list card mounts no panel — the run page is the only place to answer');
   dpanel.querySelector('.btn-go').dispatchEvent(new window.Event('click', { bubbles: true }));
   await settle(window, 5);
   assert.equal(dpanel.querySelector('.btn-go').disabled, true);
-  assert.equal(cpanel.querySelector('.btn-go').disabled, true,
-    'the card panel cannot stay clickable while an answer is in flight');
 
   recv({ type: 'question-resolved', runId: ID, id: 'q1' });
   await settle(window);
   assert.equal(window.document.querySelector('#run-detail .rd-questions').hidden, true);
   assert.equal(window.document.querySelector('#run-detail .rd-questions .qpanel').innerHTML, '');
-  assert.equal(cpanel.innerHTML, '', 'and the card panel is emptied too');
 });
 
 // THE repaint-storm regression. paintRunDetail runs on EVERY ws frame — including
@@ -648,7 +614,7 @@ test('the Live log tab is the CARD pipeline: bar, switch, hydrated lines, shared
 
   const sec = secOf(window, 'logs');
   assert.ok(sec.classList.contains('rd-sec-logs'));
-  // D9: the shared bar, cloned from #run-card-tpl — same controls in the same
+  // D9: the shared bar, cloned from #log-bar-tpl — same controls in the same
   // order. Every control carries BOTH `log-f` and its specific class, so
   // classList[1] is the specific one.
   const bar = sec.querySelector('.log-filters');
@@ -1076,26 +1042,24 @@ function instrumentScroll(el, { scrollHeight = 1000, clientHeight = 200, scrollW
   Object.defineProperty(el, 'scrollLeft', { configurable: true, get: () => left, set: (v) => { left = v; } });
 }
 
-test('detail-pane autoscroll pins once per burst too, and the card pane pins once beside it', async () => {
+test('detail-pane autoscroll pins once per burst, and the list card has no log pane to pin', async () => {
   const ctx = await bootRunning();
   await openRun(ctx);
   const { window } = ctx;
   const box = rdBox(window);
   const r = window.__np.getRun('r1');
   assert.ok(r.el, 'the list card stays mounted behind the open detail');
-  const cardLog = r.el.querySelector('.log');
+  assert.equal(r.el.querySelector('.log'), null, 'the card carries no log pane');
   instrumentScroll(box, { scrollHeight: 900, clientHeight: 200 });
-  instrumentScroll(cardLog, { scrollHeight: 700, clientHeight: 200 });
-  let rdPins = 0, cardPins = 0;
+  let rdPins = 0;
   const wrap = (el, bump) => { const d = Object.getOwnPropertyDescriptor(el, 'scrollTop');
     Object.defineProperty(el, 'scrollTop', { configurable: true, get: d.get, set: (v) => { bump(); d.set(v); } }); };
-  wrap(box, () => { rdPins += 1; }); wrap(cardLog, () => { cardPins += 1; });
+  wrap(box, () => { rdPins += 1; });
   for (let i = 0; i < 20; i += 1) frame(ctx, { type: 'log', runId: 'r1', source: 'planner', level: 'info', text: `b${i}`, ts: 0, stepIndex: 0, cycle: 1 });
   assert.equal(rdPins, 0, 'no synchronous per-line pin in the detail pane');
   await new Promise((res) => setTimeout(res, 30));
   assert.equal(rdPins, 1, 'ONE pin for the burst in the detail pane');
   assert.equal(box.scrollTop, 900);
-  assert.equal(cardPins, 1, 'the card pane behind the detail also pinned exactly once — the ×2 cost is now 2 writes, one layout');
 });
 
 // --- script nodes P1b: the live line of a running script card (S4) ----------

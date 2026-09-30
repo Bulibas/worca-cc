@@ -1,4 +1,5 @@
-// test/ui-scroll.test.mjs
+// test/ui-scroll.test.mjs — log-pane scroll behaviour. The live log lives on the run page's
+// Details > Live log tab now (the list card has no log pane), so the pin/freeze cases drive that pane.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -56,110 +57,98 @@ function instrumentScroll(el, { scrollHeight = 1000, clientHeight = 200, scrollW
   Object.defineProperty(el, 'scrollLeft', { configurable: true, get: () => left, set: (v) => { left = v; } });
 }
 
-const STEP2 = { steps: [ { label: 'A', nodes: [{ id: 'a' }] }, { label: 'B', nodes: [{ id: 'b' }] } ] };
-const STEP3 = { steps: [ { label: 'A', nodes: [{ id: 'a' }] }, { label: 'B', nodes: [{ id: 'b' }] }, { label: 'C', nodes: [{ id: 'c' }] } ] };
+const RD = (window) => window.document.querySelector('#run-detail .rd-sec[data-sec="logs"] .log');
+
+// Seed a running pipeline and open its run page on the Live log tab.
+async function openLogs(ctx, runId = 'p1') {
+  const { window, recv, selectProject, tick } = ctx;
+  selectProject();
+  recv({ type: 'run-created', runId, title: 't', projectDir: PROJECT, status: 'running', startedAt: '10:00:00', kind: 'run' });
+  window.location.hash = `running/${runId}/details/logs`;
+  window.dispatchEvent(new window.Event('hashchange'));
+  for (let i = 0; i < 6; i += 1) await tick();
+  const box = RD(window);
+  assert.ok(box, 'the run page renders the Live log pane');
+  return box;
+}
+const logFrame = (ctx, runId, text, extra = {}) => ctx.recv({ type: 'log', runId, source: 'planner', level: 'info', text, ts: Date.now(), ...extra });
 
 // ── 1. ON pins every new line to the bottom (Q1) ──────────────────────────────
 test('log pins to bottom on a new line while Auto-scroll is ON', async () => {
-  const { np, tickPin } = await boot();
-  const r = np.upsertRun({ runId: 'p1', title: 't', projectDir: PROJECT, status: 'running' });
-  r.el = np.buildRunCard(r);
-  const logEl = r.el.querySelector('.log');
-  instrumentScroll(logEl, { scrollHeight: 5000, clientHeight: 300 });
-  assert.equal(r.autoscroll, true, 'default ON on the model (seeded by makeRun via upsertRun)');
-  np.onLog(r, { source: 'planner', level: 'info', text: 'line 1', ts: 1 });
-  await tickPin();
-  assert.equal(logEl.scrollTop, 5000, 'pinned to bottom while ON');
+  const ctx = await boot();
+  const box = await openLogs(ctx);
+  instrumentScroll(box, { scrollHeight: 5000, clientHeight: 300 });
+  assert.equal(ctx.np.getRun('p1').autoscroll, true, 'default ON on the model');
+  logFrame(ctx, 'p1', 'line 1');
+  await ctx.tickPin();
+  assert.equal(box.scrollTop, 5000, 'pinned to bottom while ON');
 });
 
-// ── 2. OFF holds position, AND survives a card rebuild (bugs #1 + #3) ─────────
-test('OFF freezes the log and persists across a card rebuild', async () => {
-  const { np, tick } = await boot();
-  const r = np.upsertRun({ runId: 'p1', title: 't', projectDir: PROJECT, status: 'running' });
-  r.el = np.buildRunCard(r);
-
-  np.setAutoscroll(r, false);                     // user disables auto-scroll
+// ── 2. OFF holds position through the real dispatch, and survives reopening the run page ─
+test('OFF freezes the log through a WS frame and persists across a run page reopen', async () => {
+  const ctx = await boot();
+  let box = await openLogs(ctx);
+  const r = ctx.np.getRun('p1');
+  // user disables auto-scroll with the pane's own switch (the run page mirrors the model onto it)
+  ctx.window.document.querySelector('#run-detail .rd-sec[data-sec="logs"] .switch.autoscroll')
+    .dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
   assert.equal(r.autoscroll, false);
-  let sw = r.el.querySelector('.switch.autoscroll');
-  assert.equal(sw.classList.contains('on'), false, 'DOM mirrors OFF');
+  assert.equal(ctx.window.document.querySelector('#run-detail .rd-sec[data-sec="logs"] .switch.autoscroll').classList.contains('on'), false, 'DOM mirrors OFF');
 
-  // Rebuild the card (what finish/resume/reconcile does) → must NOT re-enable.
-  r.el = np.buildRunCard(r);
-  sw = r.el.querySelector('.switch.autoscroll');
-  assert.equal(sw.classList.contains('on'), false, 'OFF survives the template re-clone');
+  instrumentScroll(box, { scrollHeight: 5000, clientHeight: 300 });
+  box.scrollTop = 30;                             // user parked here
+  logFrame(ctx, 'p1', 'x');
+  await ctx.tickPin();
+  assert.equal(box.scrollTop, 30, 'no scroll while OFF');
 
-  const logEl = r.el.querySelector('.log');
-  instrumentScroll(logEl, { scrollHeight: 5000, clientHeight: 300 });
-  logEl.scrollTop = 42;                            // user parked here
-  np.onLog(r, { source: 'planner', level: 'info', text: 'new', ts: 2 });
-  await tick();
-  assert.equal(logEl.scrollTop, 42, 'not re-pinned while OFF');
+  // Leave the run page and come back: the pane is rebuilt and must NOT re-enable.
+  ctx.window.location.hash = 'running';
+  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+  await ctx.tick();
+  ctx.window.location.hash = 'running/p1/details/logs';
+  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+  for (let i = 0; i < 6; i += 1) await ctx.tick();
+  box = RD(ctx.window);
+  assert.equal(r.autoscroll, false, 'OFF survives the reopen');
+  assert.equal(ctx.window.document.querySelector('#run-detail .rd-sec[data-sec="logs"] .switch.autoscroll').classList.contains('on'), false, 'the rebuilt switch reads OFF');
+  instrumentScroll(box, { scrollHeight: 5000, clientHeight: 300 });
+  box.scrollTop = 42;
+  logFrame(ctx, 'p1', 'y');
+  await ctx.tickPin();
+  assert.equal(box.scrollTop, 42, 'not re-pinned while OFF after the reopen');
 });
 
 // ── 3. Re-enabling does not jump; the NEXT line follows (Q2) ──────────────────
 test('re-enabling holds position; only subsequent lines follow', async () => {
-  const { np, tickPin } = await boot();
-  const r = np.upsertRun({ runId: 'p1', title: 't', projectDir: PROJECT, status: 'running' });
-  r.el = np.buildRunCard(r);
-  const logEl = r.el.querySelector('.log');
-  instrumentScroll(logEl, { scrollHeight: 5000, clientHeight: 300 });
-
-  np.setAutoscroll(r, false);
-  logEl.scrollTop = 100;
-  np.setAutoscroll(r, true);                       // re-enable
-  assert.equal(logEl.scrollTop, 100, 'enabling did NOT jump to bottom');
-
-  np.onLog(r, { source: 'planner', level: 'info', text: 'after', ts: 3 });
-  await tickPin();
-  assert.equal(logEl.scrollTop, 5000, 'the next line follows to bottom');
+  const ctx = await boot();
+  const box = await openLogs(ctx);
+  const r = ctx.np.getRun('p1');
+  instrumentScroll(box, { scrollHeight: 5000, clientHeight: 300 });
+  ctx.np.setAutoscroll(r, false);
+  box.scrollTop = 100;
+  ctx.np.setAutoscroll(r, true);                   // re-enable
+  assert.equal(box.scrollTop, 100, 'enabling did NOT jump to bottom');
+  logFrame(ctx, 'p1', 'after');
+  await ctx.tickPin();
+  assert.equal(box.scrollTop, 5000, 'the next line follows to bottom');
 });
 
 // ── 4. Toggle handler wiring: a real click flips r.autoscroll + mirrors DOM ───
 test('clicking the switch toggles the model and the DOM', async () => {
-  const { window, np } = await boot();
-  const r = np.upsertRun({ runId: 'p1', title: 't', projectDir: PROJECT, status: 'running' });
-  r.el = np.buildRunCard(r);
-  window.document.querySelector('#run-list').appendChild(r.el);   // so #run-list delegation catches it
-  const sw = r.el.querySelector('.switch.autoscroll');
+  const ctx = await boot();
+  await openLogs(ctx);
+  const r = ctx.np.getRun('p1');
+  const sw = ctx.window.document.querySelector('#run-detail .rd-sec[data-sec="logs"] .switch.autoscroll');
   assert.equal(r.autoscroll, true);
-  sw.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  sw.dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
   assert.equal(r.autoscroll, false, 'click disabled it on the model');
   assert.equal(sw.classList.contains('on'), false, 'DOM mirrors OFF');
   assert.equal(sw.getAttribute('aria-checked'), 'false');
 });
 
-// ── 5. Pipeline keeps horizontal scroll when a new stage arrives (bug #2, Q3) ─
-// jsdom has no layout engine, so emptying .run-flow never collapses its width and
-// the .run-flow-wrap scroller never clamps scrollLeft back to 0 the way a real
-// browser does. A plain `assert.equal(wrap.scrollLeft, 800)` therefore passes even
-// with the fix deleted (false-green). Instead, RECORD writes to scrollLeft and
-// assert the rebuild itself wrote the saved value back — that is the restore the fix
-// performs. Pre-fix: no restore → writes stay [] → RED. Post-fix: [800] → GREEN.
-
-// ── 6. End-to-end: a real WS log frame while OFF does NOT scroll, even through
-//       the full dispatch + Running-view render path (bugs #1/#3, routing). ────
-test('WS log frame while OFF does not scroll, through the real dispatch', async () => {
-  const { window, np, recv, selectProject, tick } = await boot();
-  selectProject();
-  window.location.hash = 'running';
-  window.dispatchEvent(new window.Event('hashchange'));
-  recv({ type: 'phase', runId: 'p3', phase: 'plan', cycle: 0 });   // mounts the card via renderRunningView
-  await tick();
-  const r = np.getRun('p3');
-  assert.ok(r && r.el, 'card mounted by the running view');
-
-  np.setAutoscroll(r, false);
-  const logEl = r.el.querySelector('.log');
-  instrumentScroll(logEl, { scrollHeight: 5000, clientHeight: 300 });
-  logEl.scrollTop = 30;
-  recv({ type: 'log', runId: 'p3', source: 'planner', level: 'info', text: 'x', ts: 4 });
-  await tick();
-  assert.equal(logEl.scrollTop, 30, 'no scroll while OFF — through onLog AND the paintRunList re-pin');
-});
-
-// ── 7. A log frame does not detach/reattach in-place cards (bugs #1/#2/#3 root).
-//       jsdom keeps scrollTop across reattach (no layout), so assert the
-//       MECHANISM: zero list-level DOM moves for an already-ordered list. ──────
+// ── 5. A log frame does not detach/reattach in-place list cards. jsdom keeps
+//       scrollTop across reattach (no layout), so assert the MECHANISM: zero
+//       list-level DOM moves for an already-ordered list. ──────────────────────
 test('log frame causes zero #run-list moves when order is unchanged', async () => {
   const { window, recv, selectProject, tick } = await boot();
   selectProject();
@@ -180,68 +169,51 @@ test('log frame causes zero #run-list moves when order is unchanged', async () =
   assert.deepEqual(moves, [], 'in-place cards are not re-appended on a log frame');
 });
 
-// ── 8. A REQUIRED move (question → regroup) restores .log scrollTop and
-//       .run-flow-wrap scrollLeft. Record writes: the restore must WRITE the
-//       saved values back after the insert (final-value asserts false-green). ──
-test('a regroup move restores log scrollTop and stepper scrollLeft', async () => {
-  const { window, np, recv, selectProject, tick, tickPin } = await boot();
+test('the list card carries no log pane, graph scroller or auto-scroll switch', async () => {
+  const { window, recv, selectProject, tick } = await boot();
   selectProject();
   window.location.hash = 'running';
   window.dispatchEvent(new window.Event('hashchange'));
   recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });
-  recv({ type: 'phase', runId: 'p2', phase: 'plan', cycle: 0 });
   await tick();
-
-  // Question the run that is NOT already on top, so the regroup forces a real move.
-  const bottomId = [...window.document.querySelectorAll('#run-list .run-card')]
-    .map((c) => c.dataset.runId)[1];
-  const r1 = np.getRun(bottomId);
-  np.setAutoscroll(r1, false);
-  const logEl = r1.el.querySelector('.log');
-  const wrap = r1.el.querySelector('.run-flow-wrap');
-  let top = 0, left = 0; const topWrites = [], leftWrites = [];
-  Object.defineProperty(logEl, 'scrollTop',  { configurable: true, get: () => top,  set: (v) => { top = v; topWrites.push(v); } });
-  Object.defineProperty(logEl, 'scrollHeight', { configurable: true, get: () => 5000 });
-  Object.defineProperty(wrap,  'scrollLeft', { configurable: true, get: () => left, set: (v) => { left = v; leftWrites.push(v); } });
-  logEl.scrollTop = 130; wrap.scrollLeft = 800;
-  // Both cards were painted with auto-scroll still ON, so a coalesced bottom-pin
-  // is queued against this pane. Let it land BEFORE the watch window opens, or it
-  // fires mid-move and reads as a spurious write (app.js schedulePinToBottom).
-  await tickPin();
-  topWrites.length = 0; leftWrites.length = 0;     // watch only the move
-
-  recv({ type: 'question', runId: bottomId, id: 'q1', kind: 'clarify', questions: [] });
-  await tick();
-  assert.deepEqual(topWrites, [130], 'moved card: saved scrollTop written back (no bottom-pin — autoscroll OFF)');
-  assert.deepEqual(leftWrites, [800], 'moved card: saved scrollLeft written back');
+  const card = window.document.querySelector('#run-list .run-card[data-run-id="p1"]');
+  assert.ok(card, 'card mounted');
+  for (const sel of ['.log', '.run-flow-wrap', '.switch.autoscroll', '.log-filters'])
+    assert.equal(card.querySelector(sel), null, `no ${sel} on the list card`);
 });
 
-// ── 9. A filter change repaints the pane (wipe+rebuild via repaintFilteredLog);
-//       with Auto-scroll OFF the position must survive the repaint. Record
-//       writes: the repaint must write the saved scrollTop back. ──────────────
+// ── 6. A filter change repaints the pane (rdRepaintLog); with Auto-scroll OFF the
+//       position must survive the repaint. Record writes: the repaint must write the
+//       saved scrollTop back. ──────────────────────────────────────────────────
 test('filter-change repaint keeps the OFF scroll position', async () => {
-  const { window, np, recv, selectProject, tick } = await boot();
-  selectProject();
-  window.location.hash = 'running';
-  window.dispatchEvent(new window.Event('hashchange'));
-  recv({ type: 'phase', runId: 'p9', phase: 'plan', cycle: 0 });   // mounts the card
-  recv({ type: 'log', runId: 'p9', source: 'planner', level: 'info', text: 'a', ts: 1 });
-  recv({ type: 'log', runId: 'p9', source: 'implementer', level: 'info', text: 'b', ts: 2 });
-  await tick();
+  const ctx = await boot();
+  const { window } = ctx;
+  const box = await openLogs(ctx, 'p9');
+  logFrame(ctx, 'p9', 'a', { source: 'planner' });
+  logFrame(ctx, 'p9', 'b', { source: 'implementer' });
+  await ctx.tick();
 
-  const r = np.getRun('p9');
-  np.setAutoscroll(r, false);
-  const logEl = r.el.querySelector('.log');
+  ctx.np.setAutoscroll(ctx.np.getRun('p9'), false);
   let top = 0; const writes = [];
-  Object.defineProperty(logEl, 'scrollTop', { configurable: true, get: () => top, set: (v) => { top = v; writes.push(v); } });
-  logEl.scrollTop = 42;
+  Object.defineProperty(box, 'scrollTop', { configurable: true, get: () => top, set: (v) => { top = v; writes.push(v); } });
+  box.scrollTop = 42;
   writes.length = 0;                                   // watch only the repaint
 
-  // Pick a source in the card's filter dropdown — the delegated change listener
-  // on #run-list rebuilds r.logFilter and calls repaintFilteredLog(r).
-  const sel = r.el.querySelector('.log-f-source');
+  const sel = window.document.querySelector('#run-detail .rd-sec[data-sec="logs"] .log-f-source');
   sel.value = 'planner';
   sel.dispatchEvent(new window.Event('change', { bubbles: true }));
-  await tick();
+  await ctx.tick();
   assert.deepEqual(writes, [42], 'repaint restored the saved position (and did not pin to bottom)');
+});
+
+// ── 7. A pin queued before the switch flips OFF never lands (flush re-checks the flag) ──
+test('a pin queued before the switch flips OFF never lands', async () => {
+  const ctx = await boot();
+  const box = await openLogs(ctx);
+  instrumentScroll(box, { scrollHeight: 1000, clientHeight: 200 });
+  box.scrollTop = 42;                                       // user parked mid-log
+  logFrame(ctx, 'p1', 'x');
+  ctx.np.setAutoscroll(ctx.np.getRun('p1'), false);         // the freeze gesture, same frame
+  await ctx.tickPin();
+  assert.equal(box.scrollTop, 42, 'the stale pin was dropped at flush');
 });

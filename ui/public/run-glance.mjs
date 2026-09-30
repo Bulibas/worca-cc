@@ -183,7 +183,7 @@ export function glanceCopy(run, { pill = null, checks = null, lastLine = '', pr 
       const who = pq.nodeId ? nodeLabel(run.stepper, pq.nodeId) : (names[0] || '');
       const wait = 'Waiting for you';
       // The step alone: the panel right below says what it asks and why.
-      if (pq.kind === 'workflow') return line(wait, '', 'Pick a workflow');
+      if (pq.kind === 'workflow') return line(wait, '', 'Review the workflow');
       if (who) return line(wait, '', `Step: ${who}`);
       const what = { form: 'Input needed', gate: 'A decision', recovery: 'A step failed' };
       return line(wait, '', what[pq.kind] || 'Questions to answer');

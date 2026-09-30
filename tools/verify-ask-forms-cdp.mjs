@@ -171,14 +171,14 @@ entry.pendingQuestion = ASK;
 _testing.broadcast({ type: 'question', runId, ...ASK });
 
 for (const theme of ['light', 'dark']) {
-  await send('Page.navigate', { url: `${base}/#running` });
+  await send('Page.navigate', { url: `${base}/#running/${runId}` });
   await sleep(900);
   await evalJs(`document.documentElement.setAttribute('data-theme', ${JSON.stringify(theme)}); true`);
   _testing.broadcast({ type: 'question', runId, ...ASK });   // the reload dropped the frame
   await sleep(600);
 
-  check(`${theme}: the form mounts in the card panel`,
-    await evalJs(`!!document.querySelector('#run-list .qpanel .af-form')`));
+  check(`${theme}: the form mounts in the run page's question panel`,
+    await evalJs(`!!document.querySelector('#run-detail .rd-questions .qpanel .af-form')`));
   // W19 — the check the prototype needed: `hidden` must actually hide, against an
   // author display:flex. jsdom computes no layout, so this is the only real proof.
   check(`${theme}: EVERY hidden .af- node computes display:none under real CSS`,

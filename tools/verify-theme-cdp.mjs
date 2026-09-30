@@ -390,7 +390,6 @@ const states = [
   ['new', async () => { await go('new'); await until(`document.querySelector('.agent-row-head')`, 'the agent rows (rendered after /api/agents)'); await clickSel('.agent-row-head'); await ev(`document.querySelector('details.advanced')?.setAttribute('open','');0`); await freeze('new'); }],
   ['new-error', async () => { await ev(`document.getElementById('prompt').value='';0`); await clickSel('#start-btn'); await until(`document.querySelector('.form-msg.err')`, 'the empty-prompt error'); }],
   ['running-list', async () => { await go('running'); await until(`document.querySelector('#run-list .run-card')`, 'a run card'); }],
-  ['running-list-compact', async () => { await clickSel('.run-density .rc-dseg[data-density="compact"]'); }, async () => { await clickSel('.run-density .rc-dseg[data-density="detailed"]'); }],
   // The Running detail has two modes on one route: the glance (#running/<id>) and
   // Details (#running/<id>/details[/<tab>]). Each mode is its own audited state.
   ['running-detail', async () => { await go(`running/${runId}`); await until(`document.querySelector('#run-detail .rd-glance:not([hidden]) .rd-now-title')?.textContent`, 'the glance'); }],

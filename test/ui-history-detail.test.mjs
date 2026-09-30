@@ -2263,12 +2263,12 @@ test('Logs tab filters via the shared selects', async () => {
 
 // MOVED here from test/ui-history-logs.test.mjs:308-320: the detail screen is now
 // the History surface that clones the bar, so the invariant belongs to this suite.
-test('the Logs tab uses the run-card template bar — one markup source', async () => {
+test('the Logs tab uses the log-bar template bar — one markup source', async () => {
   const ctx = await bootDetail({ detail: LOGS_DETAIL, arms: logArm(LOG_NDJSON) });
   const sec = await openTab(ctx, 'logs');
   const doc = ctx.window.document;
 
-  const tplBar = doc.getElementById('run-card-tpl').content.querySelector('.log-filters');
+  const tplBar = doc.getElementById('log-bar-tpl').content.querySelector('.log-filters');
   const histBar = sec.querySelector('.log-filters');
   // Children CLASSNAMES, never innerHTML: loadLiveLogs runs fillFilterSelect, which
   // fills the cloned <select>s with <option> children, so the live bar's innerHTML
