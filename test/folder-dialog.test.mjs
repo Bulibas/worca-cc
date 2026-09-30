@@ -46,6 +46,18 @@ test('win32: empty stdout with ok exit maps to canceled; dialog runs on an STA t
   assert.ok(calls[0].args.includes('-STA'));
 });
 
+test('win32: the dialog is owned by a SHOWN TopMost form, so it opens above the browser', async () => {
+  // The server's PowerShell child is never the foreground process, so an unowned dialog (or one
+  // whose TopMost owner is never shown) opens BEHIND the browser window: the user sees nothing.
+  _testing.set({ platform: 'win32', env: {} });
+  const calls = runner({ ok: true, stdout: '', stderr: '', code: 0, timedOut: false });
+  await pickFolderNative();
+  const script = calls[0].args[calls[0].args.indexOf('-Command') + 1];
+  assert.match(script, /\$o\.TopMost = \$true/);
+  assert.match(script, /\$o\.Show\(\)/);
+  assert.match(script, /\$d\.ShowDialog\(\$o\)/);
+});
+
 test('linux: headless (no DISPLAY/WAYLAND_DISPLAY) is unsupported without spawning', async () => {
   let spawned = 0;
   _testing.set({ platform: 'linux', env: {}, runner: async () => { spawned += 1; return { ok: false, stdout: '', stderr: '', code: -1, timedOut: false }; } });

@@ -30,6 +30,8 @@
         <div class="brand">
           <span class="logo" role="img" aria-label="Worca"></span>
           <span class="logo-mark" role="img" aria-label="Worca"></span>
+          <!-- The server's mock mode (WS hello serverMock, app.js#applyServerMock): every run is a mock. -->
+          <span class="badge amber side-mock-pill" id="side-mock-pill" title="Server started with WORCA_MOCK=1 — all runs are mock." hidden>MOCK</span>
           <button type="button" class="side-close" id="side-close" aria-label="Close menu" title="Close menu">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
           </button>
@@ -2367,8 +2369,15 @@
             <button type="button" class="shipit-generate-stop btn btn-ghost btn-mini" hidden>Stop</button>
             <button type="button" class="shipit-generate btn btn-ghost btn-mini">Generate with AI</button>
           </div>
-          <textarea id="shipit-desc-input" class="shipit-desc-input textarea" rows="7" placeholder="Describe this change, or use Generate with AI"></textarea>
-          <div class="shipit-desc-preview md-preview viewer" hidden></div>
+          <!-- The editor and its preview share one box so the Generate-with-AI veil can
+               lie over whichever is showing: a shimmer sweep that also swallows clicks
+               while the textarea is read-only. `.is-generating` + aria-busy toggle it
+               (setShipItGenerating); the veil itself is decoration. -->
+          <div class="shipit-desc-field" aria-busy="false">
+            <textarea id="shipit-desc-input" class="shipit-desc-input textarea" rows="7" placeholder="Describe this change, or use Generate with AI"></textarea>
+            <div class="shipit-desc-preview md-preview viewer" hidden></div>
+            <div class="shipit-desc-busy" aria-hidden="true"><span class="shipit-desc-busy-label">Drafting with AI…</span></div>
+          </div>
           <div class="shipit-desc-err hint err" hidden></div>
         </div>
         <!-- `hint err`, not `err`: style.css has no standalone .err rule, only
