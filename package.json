@@ -39,6 +39,7 @@
     "scripts/",
     "assets/deck-kit/",
     "assets/deck-narration/",
+    "assets/deck-preview/",
     "tools/install.mjs",
     "docker/compose*.yml",
     "docker/.env.example",

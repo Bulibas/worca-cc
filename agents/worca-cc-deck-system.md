@@ -35,7 +35,34 @@ The skill's diagnostic, quoted: *"if one sentence describes every slide in the d
 If a count fails, change the system — not the count.
 
 ## Approval checkpoint
-When "Asking the user (enabled)" appears in your prompt: after writing visual-system.md, ask exactly ONE question — id `approve-system`, question "visual-system.md is written. Approve it, or say what to change?", options `["Approve as written", "Revise — see my notes"]`, `allowFreeText: true` — then STOP. On resume, apply the notes and finish. If asking is disabled, finish without asking.
+**Already answered?** If your prompt carries a `## Your form answers` block for `approve-system` — or a line under `## Already answered` whose question is "Approve the visual system" (the form fell back to a plain question) — you have your answer: go straight to **On resume** below and do NOT ask again.
+
+Otherwise, ask only when "Asking the user (enabled)" appears in your prompt; if it does not, finish without asking.
+
+To ask, after writing visual-system.md, use the `approve-system` form. The user must SEE the system, so a script renders it; you only describe it:
+1. Name the colours in visual-system.md, so the builder uses exactly the colours the user approves: every `## Grounds` line names its ground and ink hex (`Paper #EEEDE8, ink #16181D — evidence`), and the `## Accent` line names the accent's hex.
+2. Write the system as data to `<pipelineDir>/preview/system.json`:
+   ```json
+   {"deckTitle":"<spine.md # title>","coverTitle":"<slide 1's takeaway title>",
+    "grounds":[{"id":"paper","name":"Paper","hex":"#EEEDE8","ink":"#16181D","job":"<its job>"}],
+    "typeSteps":[{"id":"title","name":"Slide title","px":64,"weight":600,"role":"title"},
+                 {"id":"body","name":"Body","px":36,"weight":400,"role":"body"}],
+    "compositions":[{"id":"ledger","name":"Ledger","kind":"ledger","job":"<its job>","ground":"paper","titles":["<real title>"],"slides":9}],
+    "accent":{"name":"Signal","hex":"#FF5A1F","job":"<its one job>","className":".is-unowned"},
+    "icons":{"family":"<icon family>","stroke":2}}
+   ```
+   - `typeSteps`: every step of your `## Type scale` (at least the largest and the smallest), in whole px on the 1920×1080 canvas; `weight` is 100–900 in steps of 100. `family` (optional) only when `## Type scale` names a font; without it the preview uses the system sans, as the kit does. `role` (optional) is one of `hero`, `title`, `body`, `caption`. `sample` (optional, at most 60 characters) is the text shown at that size; give the hero step the real hero number.
+   - `compositions[].kind`: the closest wireframe, one of `cover`, `statement`, `divider`, `figure`, `two-column`, `ledger`, `hero-number`, `quote`, `ask`, `list`. `ground` is the id of the ground it mostly sits on. `titles` holds 1–3 REAL titles from its `## Assignment` rows. `slides` is its count in `## Distribution`.
+   - `accent.className` is the `.is-<job>` class from `## Accent`. Every `id` is lowercase letters, digits and `-`.
+3. Run `node <pipelineDir>/deck-preview/render-preview.mjs --spec <pipelineDir>/preview/system.json --ask <file>`, where `<file>` is the file named under "Forms you may ask with". It renders the preview images (when a Chrome is available) and writes the whole `{"form":"approve-system","data":…}` payload itself. Exit code 2 means the spec is wrong: fix it from the stderr lines and run it again. On any other non-zero exit (for example the script is missing): finish without asking, and say why in your final message. Never write the payload by hand, and never edit the staged `deck-preview/` folder.
+4. STOP.
+
+If the host refuses the form (`## Your form ask was refused`), fix `system.json` from the listed errors and run step 3 again with the file named there.
+
+**On resume** (the `values` of `approve-system`):
+- **Nothing edited**: no `changeAreas` and no `notes`. With `decision` `approve`, visual-system.md stands; finish. With `decision` `changes` and nothing edited, re-check visual-system.md against "Reject your own system if it fails these", fix what fails, and finish.
+- **Anything edited is a change, even when `decision` is still `approve`.** The `notes` say what to change. Each ticked area (`grounds`, `type`, `compositions`, `accent`) is a part the user wants reworked: apply the notes there, and rework a ticked area that has no note yourself, against "Reject your own system if it fails these". Update visual-system.md (Assignment and Distribution included) and `preview/system.json` to match. Re-rendering is not required. Finish; do NOT ask again.
+- **A plain answer** (the fallback): empty or "approve" is approval; any other text is notes to apply as above.
 
 ## Directions from the user
 
