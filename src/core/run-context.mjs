@@ -42,6 +42,8 @@ import { readRunManifest, updateRunManifest } from './run-manifest.mjs';
 import { isValidSkillName } from './skills.mjs';
 import { mergePermissionRules } from './guardrails.mjs';
 import { screenMcpSecrets, mcpSecretsMode } from './mcp-secrets.mjs';
+import { brokerEnabled } from './broker-client.mjs';
+import { PROBLEM_REASONS, skipMessage } from './mcp/registry.mjs';
 
 /**
  * The `--allowedTools` grant shape this build emits for merged MCP servers.
@@ -566,7 +568,9 @@ async function readMcpFile(file) {
   const text = await readTextMaybe(file, (_p, err) => { readError = err?.code || err?.message || 'read failed'; });
   if (text === null) return { servers: null, parseError: null, readError };
   let data;
-  try { data = JSON.parse(text); }
+  // Parsed the way the CLI parses `.mcp.json` (a leading BOM stripped): otherwise a committed file
+  // the CLI loads natively could read as unparseable here and slip past the §5.5.6 hold.
+  try { data = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text); }
   catch (err) { return { servers: null, parseError: err?.message || 'invalid JSON', readError: null }; }
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     return { servers: null, parseError: 'not a JSON object', readError: null };
@@ -650,13 +654,22 @@ async function transformServer(name, raw, dir, platform) {
  * root server never silently claims a name a member also uses).
  *
  * @returns {Promise<{servers:Record<string,object>, renames:{mcpServers:Record<string,string>},
- *                    roster:Array<object>, nativeOnly:string[], warnings:string[]}>}
+ *                    roster:Array<object>, nativeOnly:string[], warnings:string[],
+ *                    userScopeNames:string[], committedNames:string[], committedRefs:string[]}>}
  *   `nativeOnly` are names whose generated definition was SKIPPED because the
  *   committed `.mcp.json` at cwd carries a byte-identical one; they are still
  *   effective in the session, so the caller must still grant them.
+ *   `userScopeNames` (the top-level `mcpServers` of `<homeDir>/.claude.json`; none under agent
+ *   isolation, where the CLI reads the agent user's own file) and `committedNames` (the committed
+ *   `.mcp.json` at a single-mode cwd) also load natively, so registry copies must not take them.
+ *   `committedRefs` are the committed names whose definition references `${MCPSECRET_…}`: no drop
+ *   reaches a server the CLI loads natively, so the caller withholds the registry layer (§5.5.6).
+ *   The committed scan covers `nativeMembers` (default `members`): every member whose worktree is a
+ *   spawn cwd, one whose real dir is missing (§8.20, left out of `members`) included.
  */
 export async function mergeMcpConfigs({
-  members = [], projectsRoot, homeDir, isWorkspace = false, platform = process.platform,
+  members = [], projectsRoot, homeDir, isWorkspace = false, platform = process.platform, agentIsolated = false,
+  nativeMembers = null,
 }) {
   const warnings = [];
   const onError = fsWarner(warnings);        // ENOENT stays silent; a real error is named
@@ -686,7 +699,7 @@ export async function mergeMcpConfigs({
   // is never even spawned), so the generated entry is always the effective one.
   const committedByMember = new Map();
   if (!isWorkspace) {
-    for (const m of sorted) {
+    for (const m of nativeMembers ?? sorted) {   // a worktree whose real dir is gone is still a cwd (§8.20)
       if (!m.worktreeDir) continue;
       const committedFile = join(m.worktreeDir, '.mcp.json');
       const { servers: cs, parseError, readError } = await readMcpFile(committedFile);
@@ -701,8 +714,28 @@ export async function mergeMcpConfigs({
     }
   }
 
-  let localStore;            // parsed ~/.claude.json, read once
+  // ~/.claude.json, read and parsed ONCE (local scope below; user-scope names). ABSENT means the CLI
+  // was never run here — normal, silent. EXISTS-BUT-UNREADABLE is §5.5's explicit "read error"
+  // clause: it must warn by member (below), because otherwise one `chmod` silently removes every
+  // user's local-scope servers (the DEFAULT scope of `claude mcp add`) with the run still green.
+  let localStore = null;
   let localStoreError = null;
+  const localText = await readTextMaybe(
+    join(homeDir || '', '.claude.json'),
+    (_p, err) => { localStoreError = `read failed: ${err?.code || err?.message}`; },
+  );
+  if (localText !== null) {
+    try {
+      const parsed = JSON.parse(localText);
+      localStore = parsed && typeof parsed === 'object' ? parsed : null;
+      if (!localStore) localStoreError = 'not a JSON object';
+    } catch (err) { localStoreError = err?.message || 'invalid JSON'; }
+  }
+  const userServers = agentIsolated ? null : localStore?.mcpServers;
+  const userScopeNames = userServers && typeof userServers === 'object' && !Array.isArray(userServers) ? Object.keys(userServers).sort() : [];
+  const committedNames = [...new Set([...committedByMember.values()].flatMap((m) => [...m.keys()]))].sort();
+  const committedRefs = [...new Set([...committedByMember.values()]
+    .flatMap((m) => [...m].filter(([, def]) => /\$\{MCPSECRET_/i.test(def)).map(([name]) => name)))].sort();
 
   for (const src of sources) {
     /** @type {Record<string, object>|null} */
@@ -725,25 +758,6 @@ export async function mergeMcpConfigs({
       // member pointed at a repo SUBDIRECTORY would otherwise harvest nothing,
       // silently, which is exactly what §5.5 forbids.
       const m = src.member;
-      if (localStore === undefined) {
-        // ABSENT means the CLI was never run here — normal, silent. EXISTS-BUT-
-        // UNREADABLE is §5.5's explicit "read error" clause: it must warn by member,
-        // because otherwise one `chmod` silently removes every user's local-scope
-        // servers (the DEFAULT scope of `claude mcp add`) with the run still green.
-        let readError = null;
-        const text = await readTextMaybe(
-          join(homeDir || '', '.claude.json'),
-          (_p, err) => { readError = `read failed: ${err?.code || err?.message}`; },
-        );
-        if (text === null) { localStore = null; localStoreError = readError; }
-        else {
-          try {
-            const parsed = JSON.parse(text);
-            localStore = parsed && typeof parsed === 'object' ? parsed : null;
-            if (!localStore) localStoreError = 'not a JSON object';
-          } catch (err) { localStore = null; localStoreError = err?.message || 'invalid JSON'; }
-        }
-      }
       if (localStore === null) {
         if (localStoreError) warnings.push(localScopeWarning(m, homeDir, localStoreError));
         continue;
@@ -818,7 +832,31 @@ export async function mergeMcpConfigs({
     }
   }
 
-  return { servers, renames: { mcpServers: renames }, roster, nativeOnly, warnings };
+  return { servers, renames: { mcpServers: renames }, roster, nativeOnly, warnings, userScopeNames, committedNames, committedRefs };
+}
+
+/** One line of catalog text for CLAUDE.md: breaks flattened, clipped to the §4.1 description cap. */
+function oneLine(s, max = 200) {
+  const t = String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+/** The registry layer's run warnings (§6.1): problem skips, renames, the cap line, D18 and a newer store. */
+function registryWarnings(layer, catalog, userScopeNames) {
+  const out = [];
+  if (layer.newer) out.push('MCP registry files need a newer Worca; no registry MCP servers were added to this run');
+  const problem = (r) => PROBLEM_REASONS.has(r) || PROBLEM_REASONS.has(r.slice(0, r.indexOf(':') + 1));
+  for (const s of layer.skipped) if (s.reason !== 'cap' && problem(s.reason)) out.push(skipMessage(s, catalog));
+  const capped = layer.skipped.filter((s) => s.reason === 'cap').length;
+  if (capped) out.push(`${capped} registry MCP server ${capped === 1 ? 'copy was' : 'copies were'} left out: a pipeline spawn starts at most 24`);
+  for (const c of layer.copies) {
+    if (!c.renamedFrom) continue;
+    const where = userScopeNames.includes(c.renamedFrom) ? 'your Claude Code config' : 'a project MCP config of this run';
+    out.push(`registry copy \`${c.renamedFrom}\` renamed \`${c.name}\`: ${where} already has an MCP server named \`${c.renamedFrom}\``);
+  }
+  const secrets = Object.keys(layer.env).filter((k) => k.startsWith('MCPSECRET_')).length;
+  if (secrets && brokerEnabled()) out.push(`${secrets} registry ${secrets === 1 ? 'secret is' : 'secrets are'} visible to this run's agents (credential broker on)`);
+  return out;
 }
 
 function localScopeWarning(member, homeDir, why) {
@@ -946,7 +984,9 @@ export function generateClaudeMd({
   );
   if (!servers.length) meta.push('*(none)*');
   for (const s of servers) {
-    meta.push(`- \`${s.name}\` — from ${s.origin}${s.renamedFrom ? ` (renamed from \`${s.renamedFrom}\`)` : ''}`);
+    meta.push(s.text
+      ? `- \`${s.name}\` — ${s.text}`
+      : `- \`${s.name}\` — from ${s.origin}${s.renamedFrom ? ` (renamed from \`${s.renamedFrom}\`)` : ''}`);
   }
   const metaText = `${meta.join('\n')}\n`;
   const minimalMeta =
@@ -1008,12 +1048,16 @@ export function generateClaudeMd({
  * @param {string} a.homeDir
  * @param {Map<string,boolean>|null} [a.honorByKey]  per-member honorProjectSettings keyed by projectKey — null honors everyone
  * @param {string} [a.platform]                  injectable for the win32 branch
+ * @param {boolean} [a.agentIsolated]            agents run as their own user (no user-scope names readable)
+ * @param {((taken:string[]) => Promise<{result:object, catalog:object[]}|null>)|null} [a.registry]
+ *        the MCP registry layer (MCP registry design §6.1): called with the names the spawn
+ *        already uses; null (or a null answer) adds nothing
  * @returns {Promise<object>} the run-context record (also persisted into run.json)
  */
 export async function assembleRunContext({
   runRoot, members = [], projectsRoot, isWorkspace = false,
   requiredSkillResolutions, graphInstructions, homeDir, honorByKey = null,
-  platform = process.platform,
+  platform = process.platform, agentIsolated = false, registry = null,
 }) {
   const warnings = [];
   // ENOENT/ENOTDIR stay silent (absence is normal, §8.20); every OTHER fs error on a
@@ -1136,14 +1180,55 @@ export async function assembleRunContext({
 
   // ── 2) mcp.json (§5.5) ───────────────────────────────────────────────────
   const mcp = await mergeMcpConfigs({
-    members: liveMembers, projectsRoot: rootUsable ? projectsRoot : null, homeDir, isWorkspace, platform,
+    members: liveMembers, projectsRoot: rootUsable ? projectsRoot : null, homeDir, isWorkspace, platform, agentIsolated,
+    nativeMembers: sorted,                 // §5.5.6: every worktree cwd, a missing real dir included
   });
   for (const w of mcp.warnings) warnings.push(w);
+  const merged = Object.keys(mcp.servers);
   // Secrets in these definitions reach the run's agents (mcp-secrets.mjs): with the
   // credential broker on they are left out by default, otherwise named.
   const screened = screenMcpSecrets(mcp.servers, { mode: mcpSecretsMode() });
   for (const w of screened.warnings) warnings.push(w);
   mcp.servers = screened.servers;
+  // A registry secret's env name is computable (sha256 of copy + key), so a project or local
+  // server that references one would read another copy's secret: dropped in every mode (§5.5.6).
+  for (const [name, def] of Object.entries(mcp.servers)) {
+    if (!/\$\{MCPSECRET_/i.test(JSON.stringify([def.env, def.headers, def.args, def.url]))) continue;
+    delete mcp.servers[name];
+    warnings.push(`MCP server \`${name}\` was left out of this run: it references a registry secret (\${MCPSECRET_…}).`);
+  }
+  // The registry layer (§6.1): its refs are resolver-emitted and its literals passed the
+  // write-time screens, so it skips screenMcpSecrets (D18). `taken` = every name the spawn
+  // already loads, so a clashing copy becomes `<copy>_w`.
+  // A committed `.mcp.json` at a single-mode cwd is loaded by the CLI itself, where no drop reaches
+  // a server (one identical to the real dir's, a committed-only one, one a drop above un-shadows).
+  // If one references `${MCPSECRET_…}`, the whole layer is withheld: no registry secret enters the
+  // spawn env for the CLI to expand into it (§5.5.6).
+  const withheld = !!registry && mcp.committedRefs.length > 0;
+  for (const n of withheld ? mcp.committedRefs : []) {
+    warnings.push(`MCP server \`${n}\` in a committed .mcp.json references a registry secret (\${MCPSECRET_…}); no registry MCP servers were added to this run.`);
+  }
+  let reg = null;
+  if (registry && !withheld) {
+    try {
+      reg = await registry([...new Set([...merged, ...mcp.nativeOnly, ...mcp.committedNames, ...mcp.userScopeNames])].sort());
+    } catch (err) {
+      // The error text may quote a store file, so only a plain error code is named.
+      const code = typeof err?.code === 'string' && /^[A-Z][A-Z0-9_]{0,31}$/.test(err.code) ? ` (${err.code})` : '';
+      warnings.push(`MCP registry could not be resolved${code}; no registry MCP servers were added to this run`);
+    }
+  }
+  if (reg) {
+    const layer = reg.result;
+    Object.assign(mcp.servers, layer.servers);
+    const nameOf = new Map(sorted.map((m) => [m.projectKey, m.projectName || m.projectKey]));
+    for (const c of layer.copies) {
+      const projects = c.projects.map((k) => nameOf.get(k) || k).join(', ');
+      const text = [oneLine(c.description), `set ${oneLine(c.setName)}`, projects && `projects ${oneLine(projects)}`].filter(Boolean).join(' · ');
+      mcp.roster.push({ name: c.name, text: `${text}${c.renamedFrom ? ` (renamed from \`${c.renamedFrom}\`)` : ''}` });
+    }
+    for (const w of registryWarnings(layer, reg.catalog, mcp.userScopeNames)) warnings.push(w);
+  }
   const written = Object.keys(mcp.servers).sort();
   let mcpConfigPath = null;
   if (written.length) {
@@ -1160,6 +1245,7 @@ export async function assembleRunContext({
     await rm(join(runRoot, MCP_FILE), { force: true });        // idempotent re-assembly
   }
   const mcpServerNames = [...written, ...mcp.nativeOnly].sort();
+  const listed = new Set(mcpServerNames);
 
   // ── 3) CLAUDE.md (§5.4) ──────────────────────────────────────────────────
   const bySource = {};
@@ -1299,7 +1385,7 @@ export async function assembleRunContext({
   const doc = generateClaudeMd({
     pipelineId, projectsRoot, members: sorted, graphInstructions,
     rootSections, memberSections,
-    skills: skillsOut.roster, servers: mcp.roster,
+    skills: skillsOut.roster, servers: mcp.roster.filter((s) => listed.has(s.name)),
     projectAgents,
     maxBytesTotal,
   });

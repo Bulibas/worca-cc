@@ -654,6 +654,12 @@ export function workspaceWriteTargetsFor(ctx) {
 /** Map the orchestrator's claudeOpts into runClaude options shared by every role. */
 export function runOpts(ctx, { role, prompt, systemPrompt, allowedTools }) {
   const c = ctx.claudeOpts || {};
+  // MCP registry (design §6.1): the copies' secret env joins the fan-out env, and the tools
+  // withheld for the run's tool-name limit join the bridge's. Both stay undefined without a
+  // registry layer, so every other spawn is byte-identical.
+  const fanEnv = fanOutSpawnEnv(ctx);
+  const mcpEnv = ctx.mcpEnv && Object.keys(ctx.mcpEnv).length ? ctx.mcpEnv : null;
+  const excluded = bridgedModelInfo(c.model)?.excludeTools;
   return {
     cwd: ctx.projectDir,
     systemPrompt,
@@ -698,11 +704,13 @@ export function runOpts(ctx, { role, prompt, systemPrompt, allowedTools }) {
     // tasks off on the scan's two fan-out nodes (so the cap holds there), merged OVER the guardrail env
     // and UNDER modelEnv. undefined for every non-fan-out node ⇒ nothing merged ⇒ that spawn env is
     // byte-identical.
-    spawnEnv: fanOutSpawnEnv(ctx),
+    spawnEnv: fanEnv || mcpEnv ? { ...fanEnv, ...mcpEnv } : undefined,
+    // MCP registry (§5.5.3): every registry secret value is redacted from what the run records.
+    redactValues: ctx.mcpRedact?.length ? ctx.mcpRedact : undefined,
     // Model bridge (model-bridge-design.md §5.3): a translated model has no
     // server-side web tools, so the runner withholds them. undefined for every
     // non-bridged model ⇒ nothing emitted ⇒ argv byte-identical.
-    disallowedTools: bridgedModelInfo(c.model)?.excludeTools,
+    disallowedTools: ctx.mcpDisallowed?.length ? [...(excluded || []), ...ctx.mcpDisallowed] : excluded,
     // Agent memory (§4.3): Task-tool sub-agents inherit the rules natively but not
     // --append-system-prompt, so the pointer block rides the sub-agent flag. undefined when the
     // run has no mount ⇒ buildClaudeArgs emits nothing and legacy argv stays byte-identical.

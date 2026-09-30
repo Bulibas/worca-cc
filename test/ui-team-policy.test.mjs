@@ -357,6 +357,72 @@ test('New pipeline: the policy notes line paints for the selected project and hi
   assert.match(line.querySelector('.pl-note.warn').textContent, /acme-jira is not installed/);
 });
 
+test('New pipeline: MCP servers paints under Guardrails; an unticked membership reaches the policy notes and the run body', async () => {
+  const PREVIEW = {
+    sets: [{ id: 'billing', name: 'Billing', group: 'set' }],
+    copies: [
+      { name: 'pg_billing', copy: 'pg_billing', setId: 'billing', serverId: 'manual:pg' },
+      { name: 'sentry_billing', copy: 'sentry_billing', setId: 'billing', serverId: 'plugin:acme-tools/sentry' },
+    ],
+    skipped: [{ setId: 'billing', setName: 'Billing', serverId: 'manual:jira', copy: 'jira_billing', reason: 'missing:token', why: 'API token not set' }],
+    started: 2, deviations: [],
+  };
+  const CONFIG = { config: { steps: { planner: { model: 'gw-gpt' } }, customModels: [] }, models: [], efforts: [], branches: [], workspaces: [], agents: [], channels: [], plugins: [], marketplaces: [] };
+  let previewFails = false;
+  const { doc, go, settle, window, fetchCalls } = await boot({ fetchHandler: (u) => (u === '/api/mcp/preview' ? (previewFails ? json({ error: 'boom' }, 500) : json(PREVIEW)) : u.startsWith('/api/config') ? json(CONFIG) : null) });
+  await go('new');
+  await settle();
+  assert.equal(doc.getElementById('mcpRunsField').hidden, true, 'no target yet');
+  const sel = doc.getElementById('projectSelect');
+  sel.value = PROJECT;
+  sel.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 200));
+  await settle();
+  assert.equal(doc.getElementById('mcpRunsField').hidden, false);
+  assert.equal(doc.getElementById('mcpRunsLabel').textContent, '2 of 2 MCP servers');
+  assert.deepEqual(JSON.parse(fetchCalls.findLast((c) => c.url === '/api/mcp/preview').opts.body), { target: { projectKey: 'gateway-00000001' }, models: ['gw-gpt'] }, 'the form\'s models set the preview\'s tool-name limit');
+  const rows = [...doc.querySelectorAll('#mcpRunsPop .mcp-runs-row')];
+  assert.equal(rows.at(-1).textContent, 'jira_billingAPI token not set', 'the skipped membership is a row with its reason');
+  rows[0].querySelector('input').focus();
+  rows[0].querySelector('input').click();
+  await settle();
+  assert.equal(doc.getElementById('mcpRunsLabel').textContent, '1 of 2 MCP servers');
+  assert.equal(doc.activeElement?.dataset.keys, 'billing|manual:pg', 'the re-render keeps the keyboard focus on the ticked box');
+  assert.equal(doc.activeElement?.dataset.kind, 'row');
+  assert.ok(fetchCalls.some((c) => c.url.includes('/api/policy/notes') && new URL(c.url, 'http://x').searchParams.get('mcpOptOut') === 'billing|manual:pg'));
+  // A failed preview refetch hides the control but keeps the opt-out (the server drops unknown entries).
+  const repaint = async () => {
+    sel.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 200));
+    await settle();
+  };
+  previewFails = true;
+  await repaint();
+  assert.equal(doc.getElementById('mcpRunsField').hidden, true);
+  doc.getElementById('prompt').value = 'demo task';
+  doc.getElementById('run-form').dispatchEvent(new window.Event('submit', { cancelable: true }));
+  await settle();
+  assert.deepEqual(JSON.parse(fetchCalls.findLast((c) => c.url === '/api/run').opts.body).mcpOptOut, ['billing|manual:pg']);
+  previewFails = false;
+  await repaint();
+  assert.equal(doc.getElementById('mcpRunsField').hidden, false);
+  assert.equal(doc.getElementById('mcpRunsLabel').textContent, '1 of 2 MCP servers', 'the opt-out held through the failed fetch');
+  // §6.1: a memory-defrag run gets no registry servers: the control hides and the body carries none.
+  const runs = fetchCalls.filter((c) => c.url === '/api/run').length;
+  const wf = doc.getElementById('workflowSelect');
+  wf.append(Object.assign(doc.createElement('option'), { value: 'wf_memory_defrag', textContent: 'Memory defragment' }));
+  wf.value = 'wf_memory_defrag';
+  wf.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 200));
+  await settle();
+  assert.equal(doc.getElementById('mcpRunsField').hidden, true);
+  doc.getElementById('run-form').dispatchEvent(new window.Event('submit', { cancelable: true }));
+  await settle();
+  const defrag = fetchCalls.filter((c) => c.url === '/api/run');
+  assert.equal(defrag.length, runs + 1, 'the defrag run was started');
+  assert.equal(JSON.parse(defrag.at(-1).opts.body).mcpOptOut, undefined);
+});
+
 test('History detail meta: the policy segment names overrides and off-policy picks', async () => {
   const detail = { state: { id: 'h1', phase: 'implement', status: 'done', totalCostUsd: 5.2, steps: [] }, policy: { home: 'acme/gateway', sha: '3f2a1bc0', overrides: ['pipeline'], exceeded: [], deviations: ['model:claude-opus-4-8'], unattended: false, reason: 'hotfix' } };
   const { doc, go, settle } = await boot({

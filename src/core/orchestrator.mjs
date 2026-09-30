@@ -880,6 +880,7 @@ export class GraphOrchestrator extends RunHarness {
         }
         : null,
       guardrailsId: this.guardrailsId,
+      ...(this.mcpOptOut?.length ? { mcpOptOut: [...this.mcpOptOut] } : {}),   // MCP registry §6.2: resume re-resolves minus it
       memoryScope: this.memoryScope || null,   // agent memory §7.3: a paused defrag resumes with ONE scope (B10)
       checkpointRef: this.checkpointRef || null,
       checkpointRefs: { ...this.checkpointRefs },
@@ -1246,6 +1247,11 @@ export class GraphOrchestrator extends RunHarness {
       runRoot: this.runRoot,
       mcpConfigPath: this.mcpConfigPath,
       mcpServerGrants: this.mcpServerGrants,
+      // MCP registry (design §6.1): the copies' secret env, the values to redact and the tools
+      // withheld for the run's tool-name limit. Never persisted anywhere.
+      mcpEnv: this.mcpLayer?.env,
+      mcpRedact: this.mcpLayer?.redact,
+      mcpDisallowed: this.mcpLayer?.disallowed,
       repos: this._reposCtx(),
       pipelineDir: this.pipeline.dir,
       pipelineId: this.pipeline.id,
@@ -1317,7 +1323,10 @@ export class GraphOrchestrator extends RunHarness {
         effort: nc.effort,                     // per-node effort (undefined when unset)
         permissionRules: this.guardrailPermissionRules || undefined,
         envScrub: this.guardrails?.envScrub || undefined,
-        envAllowlist: this.guardrails?.envScrub ? this.guardrails.envAllowlist : undefined,
+        // §5.5.1: a scrubbed spawn with a registry stdio copy keeps the launcher's keep-list.
+        envAllowlist: this.guardrails?.envScrub
+          ? (this.mcpLayer?.allowlist?.length ? [...this.guardrails.envAllowlist, ...this.mcpLayer.allowlist] : this.guardrails.envAllowlist)
+          : undefined,
         mock: this.claude.mock,
       },
     };

@@ -411,6 +411,18 @@ on purpose.
 The check makes the exposure visible; it can't make an MCP secret safe. Prefer MCP servers
 that need no secret, or accept the risk with `warn`.
 
+**MCP registry secrets** (Settings › MCP servers) are outside K1: the
+broker delivers them to the runs and chats that use their sets. A registry copy's definition
+carries only `${MCPSECRET_…}` references, so the check above skips the registry servers and
+screens project and local servers as before; a project or local server that references a
+`${MCPSECRET_…}` name is left out of the run in every mode. A single-project run's committed
+`.mcp.json` is loaded by Claude Code itself, where no server can be left out, so when a server
+there references a `${MCPSECRET_…}` name the run gets no registry servers at all. A run with the
+broker on and at least one registry secret logs "N registry secrets are visible to this run's
+agents (credential broker on)". None of this is a boundary against the repository itself: a
+stdio MCP server or a hook the repository commits inherits the agents' environment, registry
+secrets included.
+
 ## Push as me
 
 Optional. By default pushes and pull requests use the deployment's GitHub App or token, as
@@ -506,6 +518,7 @@ loopback with a token that lives for one turn.
 | On Railway, agents can reach the internet directly | Data (not keys) can leave | Outside what the broker does; lock the network down on Compose or Kubernetes |
 | The broker sees every prompt and response | A valuable target | Small, dependency-free, logs metadata only; same image as worca |
 | An MCP secret the operator passes through `${VAR}` | Readable by agents | An explicit operator choice; literal ones are blocked |
+| An MCP registry secret in a set a run uses | Readable by that run's agents | The set was assigned on purpose; each run warns (outside K1) |
 
 Not built: Amazon Bedrock and Google Vertex (the broker would have to sign requests with the
 person's cloud credentials), and routing plugin API keys other than MCP through the broker.

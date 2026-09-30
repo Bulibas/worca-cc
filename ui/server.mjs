@@ -114,7 +114,10 @@ import {
   policyEvents, discoverPolicy, discoverAllPolicies, resolveProjectPolicy, resolveWorkspacePolicy, enableTeamPolicy, publishPolicy,
   projectPolicyStatus, listPolicyScopes, routeWorkspaceMembersPolicy, startTeamPolicyBackground,
 } from '../src/core/policy/sync.mjs';
-import { deviationsFor, fieldsForRun, capSummary } from '../src/core/policy/effective.mjs';
+import { deviationsFor, fieldsForRun, capSummary, mcpDeviations } from '../src/core/policy/effective.mjs';
+import { resolveRegistry, cachedTeamFor, toolNameLimitFor, skipMessage, skipReasonText } from '../src/core/mcp/registry.mjs';
+import { MEMBERSHIP_KEY_RE } from '../src/core/mcp/definitions.mjs';
+import { loadCatalog } from '../src/core/mcp/catalog.mjs';
 import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
 import { normalizePolicyDoc } from '../src/core/policy/registry.mjs';
 import { checkTeamTotalGate, checkTeamPipelineGate, teamCapsForTarget } from '../src/core/policy/gate.mjs';
@@ -1752,6 +1755,11 @@ const startRunHandler = async (req, res) => {
     if (!(await readGuardrailSet(guardrailsId))) {
       return badRequest(res, `unknown guardrailsId "${guardrailsId}"`);
     }
+    // MCP registry (§6.2, D16): the per-run opt-out. Shape-checked here; entries that are not a
+    // membership of the target's sets are dropped per target below — a stored schedule keeps the
+    // body as sent, so its firing drops what is unknown by then.
+    const optOut = parseMcpOptOut(body.mcpOptOut);
+    if (optOut.error) return badRequest(res, optOut.error);
 
     // Budget gate: no new pipelines while the total window is spent (F6).
     const budget = budgetStatus();
@@ -1842,6 +1850,7 @@ const startRunHandler = async (req, res) => {
         sched.afterRef = r.after;
       }
       if (sched) return res.status(202).json(await scheduleRequest({ body, sched, title, askLink, budget, workspaceId: ws.id, projectDir: projects[0].projectDir, startedBy }));
+      const mcpOptOut = await knownMcpOptOut(optOut.list, mcpWorkspaceTarget(ws));
 
       orch = await createOrchestratorFor({
         workspace: {
@@ -1860,6 +1869,7 @@ const startRunHandler = async (req, res) => {
         template: workflowRow,
         ...(scanTarget && scanTarget.models ? { scanModels: scanTarget.models } : {}),
         guardrailsId,
+        ...(mcpOptOut.length ? { mcpOptOut } : {}),
         startedBy,
         branch,
         claude: { permissionMode: stored.permissionMode || 'acceptEdits', ...(stored.model ? { model: stored.model } : {}), mock },
@@ -1932,6 +1942,7 @@ const startRunHandler = async (req, res) => {
       // A schedule stores the pair as checked (the catalog's casing, trimmed): its ticket takes it verbatim.
       const storedBody = startPair ? { ...body, model: startPair.model, effort: startPair.effort || undefined } : body;
       if (sched) return res.status(202).json(await scheduleRequest({ body: storedBody, sched, title, askLink, budget, projectDir, startedBy }));
+      const mcpOptOut = await knownMcpOptOut(optOut.list, { kind: 'project', key: projectKey(projectDir), name: path.basename(projectDir), rank: 0 });
 
       orch = await createOrchestratorFor({
         projectDir,
@@ -1943,6 +1954,7 @@ const startRunHandler = async (req, res) => {
         workflowId,
         template: workflowRow,
         guardrailsId,
+        ...(mcpOptOut.length ? { mcpOptOut } : {}),
         startedBy,
         branch,
         humanInLoop,
@@ -2041,6 +2053,90 @@ const startRunHandler = async (req, res) => {
   }
 };
 app.post('/api/run', startRunHandler);
+
+// ---------------------------------------------------------------------------
+// MCP registry, pipeline side (MCP registry design §6.2, §8, §12): what a run on a target would
+// start, resolved the way the harness resolves it (the Team set from the policy cache here). One
+// preview route serves New Pipeline, the project MCP tab and the workspace overview.
+// ---------------------------------------------------------------------------
+
+/** `mcpOptOut` (D16): at most 100 '<setId>|<serverId>' entries, de-duplicated. */
+function parseMcpOptOut(v) {
+  if (v == null) return { list: [] };
+  if (!Array.isArray(v) || v.length > 100 || !v.every((e) => typeof e === 'string' && MEMBERSHIP_KEY_RE.test(e))) {
+    return { error: 'mcpOptOut must be at most 100 "<setId>|<serverId>" entries' };
+  }
+  return { list: [...new Set(v)] };
+}
+
+const mcpWorkspaceTarget = (ws) => ({
+  kind: 'workspace', id: ws.id, name: ws.name, rank: 0,
+  members: ws.projectPaths.map((d) => ({ key: projectKey(d), name: path.basename(d) })),
+});
+
+/** The resolver target of a `{ projectKey } | { workspaceId }` body: undefined when malformed, null when unknown. */
+async function mcpTargetOf(t) {
+  if (!t || typeof t !== 'object') return undefined;
+  if (typeof t.projectKey === 'string' && PROJECT_KEY_RE.test(t.projectKey) && t.workspaceId === undefined) {
+    const p = (await listProjects()).find((x) => x.key === t.projectKey);
+    return p ? { kind: 'project', key: p.key, name: p.name, rank: 0 } : null;
+  }
+  if (typeof t.workspaceId === 'string' && WORKSPACE_KEY_RE.test(t.workspaceId) && t.projectKey === undefined) {
+    const ws = await readWorkspace(t.workspaceId);
+    return ws ? mcpWorkspaceTarget(ws) : null;
+  }
+  return undefined;
+}
+
+/** One pipeline target through the resolver, its Team set from the policy cache; `opts` = the rest of the input. */
+async function mcpResolve(target, opts = {}) {
+  const project = target.kind === 'project';
+  const team = await cachedTeamFor(project ? { projectKey: target.key } : { workspaceId: target.id });
+  const result = await resolveRegistry({ surface: 'pipeline', targets: [target], teams: { [project ? target.key : `ws:${target.id}`]: team }, ...opts });
+  return { result, team };
+}
+
+/** What a run on the target would start (§5.6: `models` sets the tool-name limit). */
+async function mcpRunPreview(target, { optOut = [], models = [] } = {}) {
+  const [{ result, team }, catalog] = await Promise.all([mcpResolve(target, { optOut, toolNameLimit: toolNameLimitFor(models) }), loadCatalog()]);
+  return { result, catalog, team };
+}
+
+/** The opt-out entries that are memberships of the target's sets (unknown ones are dropped). A
+ *  registry fault keeps the list as sent: it must not block the run, whose own resolution matches
+ *  the opt-out by exact key (and adds nothing when it fails too). */
+async function knownMcpOptOut(list, target) {
+  if (!list.length) return list;
+  let result;
+  try { ({ result } = await mcpResolve(target)); } catch { return list; }
+  const known = new Set([...result.copies, ...result.skipped].map((m) => `${m.setId}|${m.serverId}`));
+  return list.filter((k) => known.has(k));
+}
+
+app.post('/api/mcp/preview', async (req, res) => {
+  const b = req.body || {};
+  const opt = parseMcpOptOut(b.mcpOptOut);
+  if (opt.error) return badRequest(res, opt.error);
+  if (b.models != null && (!Array.isArray(b.models) || b.models.length > 100 || !b.models.every((m) => typeof m === 'string'))) {
+    return badRequest(res, 'models must be an array of model ids');
+  }
+  try {
+    const target = await mcpTargetOf(b.target);
+    if (target === undefined) return badRequest(res, 'target must be { projectKey } or { workspaceId }');
+    if (!target) return res.status(404).json({ error: 'target not found' });
+    const { result, catalog, team } = await mcpRunPreview(target, { optOut: opt.list, models: b.models || [] });
+    const why = (sk) => skipReasonText(sk, catalog);
+    res.json({
+      sets: result.sets,
+      copies: result.copies,
+      skipped: result.skipped.map((sk) => ({ ...sk, message: skipMessage(sk, catalog), why: why(sk) })),
+      skippedTools: result.skippedTools,   // §5.6: `tool-name-too-long:<tool>`; the copy still starts
+      started: result.copies.length,
+      newer: !!result.newer,   // §4.5: a store written by a newer Worca resolves to nothing; say why
+      deviations: mcpDeviations(team ? { 'mcp.required': { value: team.required } } : {}, result, why),
+    });
+  } catch (err) { res.status(500).json({ error: err?.message || String(err) }); }
+});
 
 // ---------------------------------------------------------------------------
 // Scheduled runs (schema v31, src/core/scheduler.mjs). A schedule is a TICKET, not a
@@ -3766,6 +3862,11 @@ app.get('/api/policy/notes', async (req, res) => {
   const scope = parseScopeParam(req.query.scope);
   if (!scope) return badRequest(res, 'scope must be project:<projectKey> or workspace:<workspaceId>');
   try {
+    // MCP registry (§6.2): the form's opt-out, comma-joined like `models`, adds the MCP deviations. A
+    // repeated parameter arrives as an array and is checked entry by entry; any other shape is a 400.
+    const rawOptOut = req.query.mcpOptOut;
+    const optOut = parseMcpOptOut(rawOptOut == null || rawOptOut === '' ? null : typeof rawOptOut === 'string' ? rawOptOut.split(',') : rawOptOut);
+    if (optOut.error) return badRequest(res, optOut.error);
     const { meta, r, workspaceRun } = await policyForScope(scope);
     if (!r.ok) return res.json({ scope: meta, policy: null, notes: [] });
     const fields = fieldsForRun(r.doc, { workspaceRun });
@@ -3773,6 +3874,15 @@ app.get('/api/policy/notes', async (req, res) => {
     const set = await readGuardrailSet(guardrailsId);
     const models = typeof req.query.models === 'string' && req.query.models ? req.query.models.split(',').filter(Boolean).map((m) => ({ role: null, model: m })) : [];
     const dev = deviationsFor(fields, { guardrailsId, guardrailSet: set, stepModels: models, installed: installedPluginsMap(), worcaVersion: POLICY_WORCA_VERSION, metricsRecord: null });
+    if (fields['mcp.required']) {
+      try {
+        const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
+        if (target) {
+          const p = await mcpRunPreview(target, { optOut: optOut.list, models: models.map((m) => m.model) });
+          dev.push(...mcpDeviations(fields, p.result, (sk) => skipReasonText(sk, p.catalog)));
+        }
+      } catch { /* a registry fault adds no MCP notes; the policy's own notes still paint */ }
+    }
     res.json({ scope: meta, policy: { home: r.home, sha: r.sha, delegated: r.delegated, from: r.from, caps: capSummary(r.doc, { workspaceRun }) }, notes: dev, guardrailsDefault: fields['guardrails.default']?.value ?? null });
   } catch (err) { sendPolicyError(res, err); }
 });

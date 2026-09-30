@@ -174,6 +174,32 @@ export function deviationsFor(fields, ctx = {}) {
   return out;
 }
 
+/**
+ * MCP registry off-policy findings (MCP registry design §11.4): one per `mcp.required` entry
+ * that does not start in this run, read off its membership of the Team set in `resolved` (the
+ * resolver result for the run's target). `describe(skip)` words a problem skip's reason (the
+ * caller passes the resolver's skipReasonText). Pure; never blocking.
+ * @returns {Array<{code:string, level:'warn', text:string}>}
+ */
+export function mcpDeviations(fields, resolved, describe = (s) => s.reason) {
+  const required = Array.isArray(fields?.['mcp.required']?.value) ? fields['mcp.required'].value : [];
+  const team = (resolved?.sets || []).find((s) => s.group === 'team');
+  const out = [];
+  for (const e of required) {
+    const label = e.plugin ? `${e.plugin}/${e.server}` : e.name;
+    const hit = (m) => !!team && m.setId === team.id
+      && (e.plugin ? m.serverId === `plugin:${e.plugin}/${e.server}` : m.serverId.startsWith('policy:') && m.serverId.endsWith(`/${e.name}`));
+    if ((resolved?.copies || []).some(hit)) continue;
+    const skip = (resolved?.skipped || []).find(hit);
+    const d = (code, text) => out.push({ code: `${code}:${label}`, level: 'warn', text });
+    if (!skip) d('mcp-missing', `Required MCP server ${label} is not installed.`);
+    else if (skip.reason === 'off' || skip.reason === 'needs-consent') d('mcp-off', `Required MCP server ${label} is off.`);
+    else if (skip.reason === 'opted-out') d('mcp-opted-out', `Required MCP server ${label} is opted out of this run.`);
+    else d('mcp-skipped', `Required MCP server ${label} is skipped in this run (${describe(skip)}).`);
+  }
+  return out;
+}
+
 /** The three-number summary the Projects cell, the Settings readout and the CLI print. */
 export function capSummary(doc, { workspaceRun = false } = {}) {
   const f = fieldsForRun(doc, { workspaceRun });

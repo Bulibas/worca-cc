@@ -6795,6 +6795,16 @@ input.gv-name:focus-visible{outline:none;}
 .policy-line .pl-note{display:flex;gap:8px;align-items:flex-start;line-height:1.45;}
 .policy-line .pl-note .tm-dot{margin-top:6px;}
 .policy-line .pl-note.warn{color:var(--amber-ink);}
+/* New Pipeline › MCP servers (MCP registry §6.2): a disclosure over the run's registry copies. */
+.mcp-runs > summary{list-style:none;}
+.mcp-runs > summary::-webkit-details-marker{display:none;}
+.mcp-runs-pop{margin-top:6px;padding:6px;border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--panel);}
+.mcp-runs-set,.mcp-runs-row{display:flex;align-items:center;gap:8px;padding:5px 8px;font-size:12.5px;}
+.mcp-runs-set{font-weight:600;}
+.mcp-runs-row{padding-left:30px;}
+.mcp-runs-row.is-skipped{color:var(--ink-3);}
+.mcp-runs-row.is-problem .hint{color:var(--amber-ink);}
+.mcp-runs-row .hint{margin-left:auto;}
 /* team-cap pause banner (board 9) */
 /* Team metrics KPI row: the policy tiles (Off-policy, Pooled budget) make 7–8 tiles, which leave a
    hole in the 3-column row; four columns fill two rows for eight. Back to one column when narrow. */

@@ -32,6 +32,8 @@ const state = {
   subagentModels: ['sonnet', 'opus', 'fable', 'auto', 'inherit'],
   workflowId: 'wf_default', // currently selected workflow in New Pipeline
   guardrailsId: 'permissive', // the guardrail set the next run applies ('permissive' = unrestricted default)
+  mcpOptOut: [], // New Pipeline › MCP servers: the '<setId>|<serverId>' memberships the next run opts out of
+  mcpPreview: null, // POST /api/mcp/preview for the selected target, or null (control hidden)
   memoryScope: 'global', // Memory defragment only: the scope the next run restructures
   guardrailSets: [], // GET /api/guardrails cache for the picker + hint
   agents: {}, // registry { [key]: AgentMeta }, lazily loaded from /api/agents
@@ -155,6 +157,7 @@ import {
   renderRequiredStrip, renderSetupChecklist, relTime as tpRelTime,
   renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel,
 } from './team-policy-view.mjs';
+import { mcpRunsLabel, renderMcpRunsPop } from './mcp-run-picker.mjs';
 import { aggregate, toCsv } from '../../src/shared/team-metrics/aggregate.mjs';
 import { buildWorkItems, prLookupFor } from '../../src/shared/team-metrics/timeline.mjs';
 import { renderTimeline, renderTimelinePopover, timelineWindow, shiftAnchor, TL_MODES, TL_ZOOMS } from './team-metrics-timeline.mjs';
@@ -346,6 +349,9 @@ const el = {
   // Team policy surfaces (team-policy design §11)
   teamCapsReadout: $('#teamCapsReadout'),
   policyLine: $('#policyLine'),
+  mcpRunsField: $('#mcpRunsField'),
+  mcpRunsLabel: $('#mcpRunsLabel'),
+  mcpRunsPop: $('#mcpRunsPop'),
   pluginsPolicy: $('#plugins-policy'),
   tpBody: $('#tp-body'),
   tpScope: $('#tp-scope'),
@@ -3218,6 +3224,9 @@ async function renderWorkflowConfig(workflowId) {
   // Memory defragment (agent memory §7.3 / B11): the ONE run option that workflow needs. Every
   // path that changes the picker ends here, so this single line covers them all.
   if (el.memoryScopeRow) el.memoryScopeRow.hidden = workflowId !== MEMORY_DEFRAG_WORKFLOW_ID;
+  // MCP registry (§6.1): a memory-defrag run starts no registry servers, so the control hides at
+  // once; the policy-line repaint at the end refetches the preview for every other workflow.
+  if (el.mcpRunsField) renderMcpRuns();
   if (isAuto) {
     // Auto picks the agents per run (spec §7.2 / D20): no accordion, one switch, read from the project config.
     // The switch is per PROJECT like the accordion's rows, and saveHumanInLoop drops the
@@ -10775,6 +10784,9 @@ el.form.addEventListener('submit', async (e) => {
     // be equivalent but would change every legacy-shaped request for no gain.)
     guardrailsId: isDefragRun && state.guardrailsId === 'permissive' ? 'normal'
       : (state.guardrailsId !== 'permissive' ? state.guardrailsId : undefined),
+    // MCP registry (§6.2): absent unless something is opted out, so default bodies stay byte-identical;
+    // a memory-defrag run starts no registry servers (§6.1), so it sends none.
+    mcpOptOut: state.mcpOptOut.length && !isDefragRun ? [...state.mcpOptOut] : undefined,
     mock: el.mock.checked,
     sourceBranch: (el.sourceBranch && el.sourceBranch.value) || undefined,
     featureBranch: (el.featureBranch && el.featureBranch.value.trim()) || undefined,
@@ -15305,7 +15317,66 @@ let policyLineSeq = 0;
 function schedulePolicyLine() {
   if (!el.policyLine) return;
   clearTimeout(policyLineTimer);
-  policyLineTimer = setTimeout(() => { void paintPolicyLine(); }, 150);
+  policyLineTimer = setTimeout(() => { void paintPolicyLine(); void paintMcpRuns(); }, 150);
+}
+/** The models the run will pick: the Agents accordion's selects, else the legacy per-role config. */
+function selectedRunModels() {
+  const picked = [...document.querySelectorAll('#agents-rows select.step-model')].map((s) => s.value).filter((v) => v && v !== '__add__');
+  const models = picked.length ? picked
+    : Object.values((state.config && state.config.steps) || {}).map((s) => s && s.model).filter((m) => typeof m === 'string' && m);
+  return [...new Set(models)];
+}
+// New pipeline › MCP servers (MCP registry §6.2): the target's registry copies, fetched with the
+// form's models (they set the tool-name limit) and without the opt-out, which is toggled locally.
+let mcpRunsSeq = 0;
+async function paintMcpRuns() {
+  if (!el.mcpRunsField || currentView() !== 'new') return;
+  const scope = currentRunScopeId();
+  const seq = ++mcpRunsSeq;
+  const i = scope.indexOf(':');
+  const kind = scope.slice(0, i);
+  let data = null;
+  if (scope) {
+    try {
+      const r = await fetch('/api/mcp/preview', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: kind === 'project' ? { projectKey: scope.slice(i + 1) } : { workspaceId: scope.slice(i + 1) }, models: selectedRunModels() }),
+      });
+      data = r.ok ? await safeJson(r) : null;
+    } catch { data = null; }
+  }
+  if (seq !== mcpRunsSeq) return;
+  const valid = !!data && Array.isArray(data.sets) && Array.isArray(data.copies) && Array.isArray(data.skipped);
+  // An answer prunes the opt-out to the target's memberships; no answer (no target, defrag, a
+  // failed fetch) keeps it: the server drops whatever the run's target does not know.
+  if (valid) {
+    const known = new Set([...data.copies, ...data.skipped].map((m) => `${m.setId}|${m.serverId}`));
+    state.mcpOptOut = state.mcpOptOut.filter((k) => known.has(k));
+  }
+  state.mcpPreview = valid && data.copies.length + data.skipped.length > 0 ? { ...data, workspace: kind === 'workspace' } : null;
+  renderMcpRuns();
+}
+function renderMcpRuns() {
+  // §6.1: a memory-defrag run starts no registry servers, so the control hides for it.
+  const p = state.workflowId === MEMORY_DEFRAG_WORKFLOW_ID ? null : state.mcpPreview;
+  el.mcpRunsField.hidden = !p;
+  if (!p) { el.mcpRunsPop.replaceChildren(); return; }
+  el.mcpRunsLabel.textContent = mcpRunsLabel(p, state.mcpOptOut);
+  // A toggle re-renders the popover: the keyboard focus goes back to the box that was ticked.
+  const active = document.activeElement;
+  const focused = active && el.mcpRunsPop.contains(active) ? { keys: active.dataset.keys, kind: active.dataset.kind } : null;
+  el.mcpRunsPop.replaceChildren(renderMcpRunsPop(p, state.mcpOptOut, {
+    doc: document,
+    projectName: p.workspace ? (k) => (state.projects.find((x) => x && x.key === k) || {}).name || k : null,
+    onToggle: (keys, on) => {
+      const off = new Set(state.mcpOptOut);
+      for (const k of keys) { if (on) off.delete(k); else off.add(k); }
+      state.mcpOptOut = [...off];
+      renderMcpRuns();
+      void paintPolicyLine();                 // an opted-out required server is off-policy
+    },
+  }));
+  if (focused) [...el.mcpRunsPop.querySelectorAll('input')].find((i) => i.dataset.keys === focused.keys && i.dataset.kind === focused.kind)?.focus();
 }
 function currentRunScopeId() {
   if (state.runTarget === 'workspace') {
@@ -15325,10 +15396,9 @@ async function paintPolicyLine() {
   const qs = new URLSearchParams({ scope, guardrailsId: state.guardrailsId || 'permissive' });
   // What the run will actually pick: the Agents accordion's model selects (per workflow node),
   // falling back to the legacy per-role config when the accordion has not painted yet.
-  const picked = [...document.querySelectorAll('#agents-rows select.step-model')].map((s) => s.value).filter((v) => v && v !== '__add__');
-  const models = picked.length ? picked
-    : Object.values((state.config && state.config.steps) || {}).map((s) => s && s.model).filter((m) => typeof m === 'string' && m);
-  if (models.length) qs.set('models', [...new Set(models)].join(','));
+  const models = selectedRunModels();
+  if (models.length) qs.set('models', models.join(','));
+  if (state.mcpOptOut.length) qs.set('mcpOptOut', state.mcpOptOut.join(','));
   let data = null;
   try { const r = await fetch(`/api/policy/notes?${qs}`); data = r.ok ? await safeJson(r) : null; } catch { data = null; }
   if (seq !== policyLineSeq) return;
