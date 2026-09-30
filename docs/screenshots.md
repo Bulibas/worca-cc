@@ -43,15 +43,14 @@ running against seeded demo data, so they can be reproduced after UI changes.
    separately started server). Budget roughly $10–15 per full run on a small
    task.
 
-5. **Capture** at a 1440×900 viewport (Playwright), light theme, default
-   density unless the shot is about density. Crop nothing; the sidebar is
+5. **Capture** at a 1440×900 viewport (Playwright), light theme. Crop nothing; the sidebar is
    part of the product.
 
 ## Current set
 
 | File | View | Source |
 | --- | --- | --- |
-| `running.png` | Running, detailed density, real run mid-refine | real run |
+| `running.png` | Running list, a real run mid-refine | real run |
 | `clarify.png` | Clarify question panel | real run |
 | `run-detail.png` | History detail, Diff tab | real run |
 | `history.png` | History list, grouped by project | mock + real |

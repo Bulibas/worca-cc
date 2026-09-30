@@ -29,6 +29,18 @@
   --on-status:light-dark(#FFFFFF,#161614);
   --line:light-dark(#ECECEA,#30302D);
   --line-2:light-dark(#E3E3E0,#494944);
+  /* Hover grammar. Outlined things (buttons, pills, tabs, cards) strengthen their
+     outline to --hover-outline and keep their fill; borderless things (sidebar items,
+     rows, menu items) take the --hover fill, one grey that reads on white and on grey
+     (--hover-on-field is its alias). Solid buttons take the --solid-hover wash and lift;
+     tinted semantic buttons outline in their own colour; links change colour. No blue
+     fills, no brightness() (near-black x 1.08 is still near-black; a grey fill turns
+     white on a white card). */
+  /* One hover grey, on white and on grey alike: clearly past --field, yet light enough that
+     the secondary text on a hovered row keeps its contrast (dark: 4.5:1 for --ink-3). */
+  --hover:light-dark(#EBEBE8,#353531);
+  --hover-on-field:var(--hover);
+  --hover-outline:var(--ink-3);
 
   --green-bg:light-dark(#E2F3DF,#1C2F1D);  --green:#5BAE5B;  --green-ink:light-dark(#2F7A38,#8FD48F);
   --green-ink-strong:light-dark(#2C7535,#8FD48F);  /* sidebar Saved figure: 4.79:1 on --line (the spend card's hover fill); --green-ink is 4.48:1 */
@@ -57,6 +69,9 @@
   /* Semantic tokens introduced by the theme work (spec §3.2). Each light arm is
      the literal it replaced, so the light theme did not move. */
   --on-ink-wash:light-dark(rgba(255,255,255,.18),rgba(22,22,20,.18));
+  /* A solid button's hover: drawn over its fill as an inset wash (box-shadow), so it
+     reads on ink, red or any colour, in both themes. */
+  --solid-hover:light-dark(rgba(255,255,255,.14),rgba(22,22,20,.14));
   --on-ink-wash-2:light-dark(rgba(255,255,255,.22),rgba(22,22,20,.22));
   --on-ink-code:light-dark(rgba(255,255,255,.14),rgba(22,22,20,.14));
   --panel-wash:light-dark(rgba(255,255,255,.7),rgba(236,236,232,.12));
@@ -140,7 +155,7 @@ body{
   transition:background .15s,color .15s;
 }
 .nav button svg{width:19px;height:19px;flex:0 0 auto;stroke-width:1.9;}
-.nav button:hover{background:var(--field);color:var(--ink);}
+.nav button:hover{background:var(--hover);color:var(--ink);}
 .nav button.active{background:var(--ink);color:var(--on-ink);}
 .nav button.active svg{stroke:var(--on-ink);}
 .nav button:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
@@ -163,12 +178,14 @@ body{
    fill; border thickness is absorbed into padding to keep row height equal. */
 .nav button.nav-cta{border:1.5px solid var(--ink);color:var(--ink);font-weight:600;
   padding:6.5px 11.5px;}
-.nav button.nav-cta:hover{background:var(--field);}
+.nav button.nav-cta:hover{background:var(--hover);}
 .nav button.nav-cta.active{background:var(--ink);border-color:var(--ink);color:var(--on-ink);}
 .nav-count{margin-left:auto;min-width:22px;height:22px;padding:0 7px;border-radius:999px;
   display:grid;place-items:center;font-size:11.5px;font-weight:700;}
 .nav-count.n-amber{background:var(--amber);color:var(--on-status);}
 .nav-count.n-grey{background:var(--field);color:var(--ink-3);}
+/* On the hovered item's grey, the badge turns white so it stays a badge. */
+.nav button:hover:not(.active) .nav-count.n-grey{background:var(--panel);}
 .nav button.active .nav-count{background:var(--on-ink-wash);color:var(--on-ink);}
 /* Running split-badges: green = work in flight, amber = paused count. Green is
    applied by app.js ONLY while the count is >0 — at zero the badge falls back to
@@ -330,18 +347,18 @@ body.view-workspaces .main{display:flex;flex-direction:column;overflow:hidden;pa
 .pill-status .dot{width:8px;height:8px;border-radius:50%;background:var(--ink-3);}
 .btn-stop{display:inline-flex;align-items:center;gap:8px;background:var(--red-bg);
   color:var(--red-ink);border:none;padding:11px 19px;border-radius:999px;
-  font-family:inherit;font-weight:600;font-size:13px;cursor:pointer;transition:filter .15s;}
-.btn-stop:hover{filter:brightness(.97);}
+  font-family:inherit;font-weight:600;font-size:13px;cursor:pointer;transition:box-shadow .15s;}
+.btn-stop:hover{box-shadow:inset 0 0 0 1.5px var(--red);}
 .btn-stop:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .btn-pause{display:inline-flex;align-items:center;gap:8px;background:var(--amber-bg);
   color:var(--amber-ink);border:none;padding:11px 19px;border-radius:999px;
-  font-family:inherit;font-weight:600;font-size:13px;cursor:pointer;transition:filter .15s;}
-.btn-pause:hover{filter:brightness(.97);}
+  font-family:inherit;font-weight:600;font-size:13px;cursor:pointer;transition:box-shadow .15s;}
+.btn-pause:hover{box-shadow:inset 0 0 0 1.5px var(--amber);}
 .btn-pause:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .btn-resume{display:inline-flex;align-items:center;gap:8px;background:var(--green-bg);
   color:var(--green-ink);border:none;padding:11px 19px;border-radius:999px;
-  font-family:inherit;font-weight:600;font-size:13px;cursor:pointer;transition:filter .15s;}
-.btn-resume:hover{filter:brightness(.97);}
+  font-family:inherit;font-weight:600;font-size:13px;cursor:pointer;transition:box-shadow .15s;}
+.btn-resume:hover{box-shadow:inset 0 0 0 1.5px var(--green);}
 .btn-resume:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 /* [hidden] must beat the author display rules above (author origin outranks the
    UA [hidden]{display:none} rule — same footgun as .questions-toggle[hidden]). */
@@ -419,7 +436,7 @@ input[type="file"]{font-size:12.5px;color:var(--ink-3);background:transparent;bo
   font-family:inherit;font-size:10px;font-weight:700;line-height:1;
   display:inline-flex;align-items:center;justify-content:center;cursor:help;
   transition:color .15s,border-color .15s;}
-.info-tip:hover{border-color:var(--ink);color:var(--ink);}
+.info-tip:hover{border-color:var(--hover-outline);color:var(--ink);}
 .info-tip:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 /* The shared floating bubble (created once by app.js, filled per icon). */
 .info-bubble{position:fixed;z-index:70;background:var(--ink);color:var(--on-ink);border-radius:10px;
@@ -436,7 +453,7 @@ input[type="file"]{font-size:12.5px;color:var(--ink-3);background:transparent;bo
 .icon-btn{width:48px;flex:0 0 48px;border-radius:var(--r-ctrl);border:1.5px solid var(--line-2);
   background:var(--field);cursor:pointer;display:grid;place-items:center;color:var(--ink-2);
   font-size:18px;transition:background .15s,color .15s;}
-.icon-btn:hover{background:var(--surface);color:var(--ink);}
+.icon-btn:hover{border-color:var(--hover-outline);color:var(--ink);}
 
 /* project selector row */
 .project-row{display:flex;gap:11px;align-items:center;}
@@ -503,7 +520,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .mention-item{display:block;width:100%;text-align:left;border:0;background:transparent;color:var(--ink-2);
   font-family:inherit;font-weight:500;font-size:12.5px;padding:7px 10px;border-radius:8px;cursor:pointer;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.mention-item:hover{background:var(--field);}
+.mention-item:hover{background:var(--hover);}
 .mention-item.sel{background:var(--field);color:var(--ink);}
 
 /* @-mention highlighting: a textarea cannot colour part of its own text, so a
@@ -574,27 +591,27 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 /* ---------- buttons ---------- */
 .actions{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:22px;}
 .btn-ghost{background:var(--surface);border:1.5px solid var(--line-2);color:var(--ink);font-family:inherit;
-  font-weight:600;font-size:13.5px;padding:13px 20px;border-radius:999px;cursor:pointer;transition:.15s;}
-.btn-ghost:hover:not(:disabled){background:var(--field);}
+  font-weight:600;font-size:13.5px;padding:13px 20px;border-radius:999px;cursor:pointer;transition:border-color .15s,background .15s;}
+.btn-ghost:hover:not(:disabled){border-color:var(--hover-outline);}
 .btn-ghost:disabled{opacity:.45;cursor:not-allowed;}   /* a waiting step must not look clickable */
 .btn-go{display:inline-flex;align-items:center;gap:9px;background:var(--ink);color:var(--on-ink);border:none;
   font-family:inherit;font-weight:600;font-size:14px;padding:14px 28px;border-radius:999px;cursor:pointer;
-  transition:transform .15s,filter .15s;}
-.btn-go:hover{transform:translateY(-1px);filter:brightness(1.08);}
+  transition:transform .15s,box-shadow .15s;}
+.btn-go:hover{transform:translateY(-1px);box-shadow:inset 0 0 0 999px var(--solid-hover);}
 .btn-go:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 
 /* generic .btn / .btn-primary (question + gate JS, old markup) restyled to pills */
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;
   background:var(--surface);border:1.5px solid var(--line-2);color:var(--ink);font-family:inherit;
   font-weight:600;font-size:13.5px;padding:13px 20px;border-radius:999px;cursor:pointer;
-  transition:background .15s,filter .15s,transform .15s,border-color .15s;}
-.btn:hover:not(:disabled){background:var(--field);}
+  transition:background .15s,box-shadow .15s,transform .15s,border-color .15s;}
+.btn:hover:not(:disabled){border-color:var(--hover-outline);}
 .btn:disabled{opacity:.45;cursor:not-allowed;}
 .btn:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .btn-primary{background:var(--ink);border-color:var(--ink);color:var(--on-ink);}
-.btn-primary:hover:not(:disabled){background:var(--ink);transform:translateY(-1px);filter:brightness(1.08);}
+.btn-primary:hover:not(:disabled){background:var(--ink);transform:translateY(-1px);box-shadow:inset 0 0 0 999px var(--solid-hover);}
 .btn-danger{background:var(--red-bg);border-color:transparent;color:var(--red-ink);}
-.btn-danger:hover:not(:disabled){background:var(--red-bg);filter:brightness(.97);}
+.btn-danger:hover:not(:disabled){border-color:var(--red);}
 .btn-mini{padding:8px 14px;font-size:12.5px;}
 .btn-block{width:100%;}
 
@@ -638,7 +655,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .agent-row:first-child{border-top:none;}
 .agent-row-head{display:flex;align-items:center;gap:10px;width:100%;padding:10px 14px;
   background:none;border:none;font-family:inherit;font-size:13px;text-align:left;cursor:pointer;color:inherit;}
-.agent-row-head:hover{background:var(--field);}
+.agent-row-head:hover{background:var(--hover);}
 .agent-row-head:focus-visible{outline:2px solid var(--violet);outline-offset:-2px;}
 .agent-chev{flex:0 0 auto;width:0;height:0;border-left:5px solid var(--ink-3);
   border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform .15s;}
@@ -722,7 +739,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .log-tools .switch-row .txt{font-size:13px;font-weight:600;color:var(--ink-2);}
 .btn-clear{background:var(--field);border:none;border-radius:10px;padding:8px 15px;font-family:inherit;
   font-weight:600;font-size:12.5px;cursor:pointer;color:var(--ink-2);transition:.15s;}
-.btn-clear:hover{background:var(--line-2);}
+.btn-clear:hover{background:var(--hover-on-field);}
 .log{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);min-height:260px;max-height:380px;overflow-y:auto;
   padding:18px 20px;font-family:var(--mono);font-size:12.5px;line-height:1.85;color:var(--ink-2);
   white-space:pre-wrap;word-break:break-word;}
@@ -808,7 +825,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .btn-expand{margin-left:auto;display:inline-flex;align-items:center;gap:7px;background:var(--field);
   border:none;border-radius:999px;padding:8px 15px;font-family:inherit;font-weight:600;font-size:12px;
   color:var(--ink-2);cursor:pointer;transition:background .15s;}
-.btn-expand:hover{background:var(--line-2);}
+.btn-expand:hover{background:var(--hover-on-field);}
 /* The `.btn-expand + .btn-stop.sm` reset that sat here keyed off a `.btn-stop.sm`
    rule the card redesign removed; nothing emits that pair any more. */
 .btn-expand .chev{transition:transform .2s;}
@@ -833,7 +850,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
    copy pins to the bar's right edge via the auto margin */
 .log-filters .log-search{flex:1 1 160px;max-width:340px;}
 .log-filters .log-copy{flex:0 0 auto;margin-left:auto;cursor:pointer;}
-.log-filters .log-copy:hover{background:var(--line);}
+.log-filters .log-copy:hover{background:var(--hover-on-field);}
 /* execution chip (P6b): hidden until a footer-row click narrows the log to ONE
    execution; any click on it clears that axis. Scoped under .log-filters so it
    out-ranks the .log-f pill rule above (an unscoped .log-f-exec would lose). */
@@ -875,57 +892,109 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
   font-family:var(--mono);font-size:10.5px;font-weight:600;display:grid;place-items:center;margin-top:1px;}
 /* the option column and the free-text field line up under the number circle */
 .qopts{display:flex;flex-direction:column;align-items:stretch;gap:7px;margin:0 0 7px;padding-left:28px;}
-.qopt{display:flex;align-items:center;gap:8px;font-family:inherit;font-weight:500;font-size:12.5px;
+.qopt{display:flex;align-items:center;gap:10px;font-family:inherit;font-weight:500;font-size:12.5px;
   color:var(--ink);background:var(--panel);border:1.5px solid var(--line);border-radius:11px;
-  padding:10px 14px;cursor:pointer;transition:.14s;text-align:left;width:100%;}
-/* Radio + white check drawn entirely in CSS: renderClarifyBody keeps emitting a
-   bare <button> with one text node (§4.3 — styling only, no markup change), and
-   an inline data-URI background needs no extra element and no positioning context. */
-.qopt::before{content:'';flex:0 0 auto;width:15px;height:15px;border-radius:50%;
-  border:1.5px solid var(--radio-ring);background:var(--panel);}
-.qopt.sel::before{border-color:var(--green);
-  background:var(--green) center/9px 9px no-repeat url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.6' stroke-linecap='round' stroke-linejoin='round'><path d='M5 13l4 4L19 7'/></svg>");}
+  padding:9px 14px 9px 10px;cursor:pointer;transition:.14s;text-align:left;width:100%;}
+/* The letter key and its check are drawn entirely in CSS: renderClarifyBody keeps
+   emitting a bare <button> with one text node, its letter in data-key. Picked, the
+   square fills ink and the check is a HOLE masked out of it, so it shows the tile's
+   own panel colour in both themes — no painted glyph colour to go wrong in dark. */
+.qopt::before{content:attr(data-key);flex:0 0 auto;display:grid;place-items:center;box-sizing:border-box;
+  width:20px;height:20px;border-radius:6px;border:1px solid var(--line-2);background:var(--field);
+  font:600 10.5px var(--mono);color:var(--ink-2);}
+.qopt.sel::before{content:'';background:var(--ink);border-color:var(--ink);
+  -webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><mask id='k'><rect width='20' height='20' fill='white'/><path d='M7.1 10.2l1.8 1.9 4-4' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></mask><rect width='20' height='20' mask='url(%23k)'/></svg>") center/100% 100% no-repeat;mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><mask id='k'><rect width='20' height='20' fill='white'/><path d='M7.1 10.2l1.8 1.9 4-4' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></mask><rect width='20' height='20' mask='url(%23k)'/></svg>") center/100% 100% no-repeat;}
 .qopt:hover{border-color:var(--ink-3);}
-.qopt.sel{background:var(--green-bg);color:var(--ink);border-color:var(--green);}
+.qopt.sel{background:var(--panel);color:var(--ink);border-color:var(--ink);box-shadow:0 0 0 3px var(--line);}
 .qopt:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .qfree{width:100%;font-family:inherit;font-size:12.5px;color:var(--ink);background:var(--field);
   border:1.5px solid var(--line);border-radius:11px;padding:10px 14px;transition:.14s;}
 .qfree::placeholder{color:var(--ink-3);}
 /* `.has` is toggled by renderClarifyBody's own input handler the moment the field
-   holds a non-empty, non-option value — the green border IS that state. */
-.qfree:focus{outline:none;background:var(--panel);border-color:var(--green);}
-.qfree.has{background:var(--panel);border-color:var(--green);}
+   holds a non-empty, non-option value — the ink border IS that state, as on a picked option. */
+.qfree:focus{outline:none;background:var(--panel);border-color:var(--ink);}
+.qfree.has{background:var(--panel);border-color:var(--ink);}
 .qblock > .qfree{margin-left:28px;width:calc(100% - 28px);}
 .qpanel-foot{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:14px;}
 .qpanel-foot .btn-go{padding:9px 18px;font-size:12px;gap:8px;}
 /* secondary "Open run" — card only (§4.3) */
 .qopen{padding:9px 16px;border:1.5px solid var(--line-2);border-radius:999px;background:var(--panel);
   font-family:inherit;font-weight:600;font-size:12px;color:var(--ink);cursor:pointer;transition:.14s;}
-.qopen:hover{background:var(--field);}
+.qopen:hover{background:var(--hover);}
 .qopen:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 
-/* ---- run-detail variant: the mockup's larger metrics (design §5.4) ---- */
-/* NO `animation` here: Task 6 already put `animation:wr-rise …` on the
-   `.rd-questions` WRAPPER (and neutralizes it under reduced motion). Animating
+/* ---- run-detail variant: the ask cards of the "Worca Ask Cards Redesign" canvas ---- */
+/* Every kind reads as a white card here; clarify and form go further below (a card per
+   question, a pill footer). NO `animation` here: Task 6 already put `animation:wr-rise …`
+   on the `.rd-questions` WRAPPER (and neutralizes it under reduced motion). Animating
    the child too nests the two transforms — 20px of travel and opacity squared.
    `margin-top:0` also stays where Task 6 put it (its EOF rule comes LATER in the
    file, so it still wins); this rule must not restate it. */
-.rd-questions .qpanel{padding:22px 24px 20px;background:var(--amber-wash-2);
-  border:1.5px solid var(--amber-line);border-radius:var(--r-card);}
+.rd-questions .qpanel{padding:28px 32px;background:var(--panel);
+  border:1px solid var(--line);border-radius:var(--r-card);box-shadow:var(--shadow);}
+/* Clarify and form stack their own cards — each question, or the form — with the footer
+   as a pill bar beneath them, so the panel itself draws nothing. */
+.rd-questions .qpanel:is([data-kind="clarify"],[data-kind="form"]){display:flex;flex-direction:column;gap:14px;
+  padding:0;background:none;border:0;border-radius:0;box-shadow:none;}
+.rd-questions .qpanel[data-kind="form"] .qbody{gap:14px;margin-top:0;}
+/* A waiting question sits BELOW the run's panel, which never changes: a heading that says
+   what is asked, then the panel. Its own header row (title + count badge) would repeat
+   the heading, so it goes. The amber disc and its glyph are the two pseudo-elements. */
+.rd-ask-head{position:relative;display:flex;align-items:center;min-height:36px;margin:0;padding:0 4px 0 52px;
+  font:600 18px/1.35 var(--sans);letter-spacing:-.01em;color:var(--ink);overflow-wrap:anywhere;
+  scroll-margin-top:84px;}   /* the sticky bar (~61px) plus air: "go to the questions" lands the heading below it */
+.rd-ask-head::before{content:'';position:absolute;left:4px;top:50%;width:36px;height:36px;margin-top:-18px;
+  border-radius:50%;background:var(--amber-bg);}
+.rd-ask-head::after{content:'';position:absolute;left:13px;top:50%;width:18px;height:18px;margin-top:-9px;
+  background:var(--amber-ink);
+  -webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'><path d='M9.2 9.2a2.9 2.9 0 0 1 5.6 1c0 1.9-2.8 2.4-2.8 4.3'/><path d='M12 18.4v.1'/></svg>") center/contain no-repeat;mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'><path d='M9.2 9.2a2.9 2.9 0 0 1 5.6 1c0 1.9-2.8 2.4-2.8 4.3'/><path d='M12 18.4v.1'/></svg>") center/contain no-repeat;}
+/* a failed step is not a question: the red disc and an exclamation mark */
+.rd-questions:has(> .qpanel[data-kind="recovery"]) .rd-ask-head::before{background:var(--red-bg);}
+.rd-questions:has(> .qpanel[data-kind="recovery"]) .rd-ask-head::after{background:var(--red-ink);
+  -webkit-mask-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round'><path d='M12 6.5v7'/><path d='M12 17.6v.1'/></svg>");mask-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round'><path d='M12 6.5v7'/><path d='M12 17.6v.1'/></svg>");}
+/* While a question waits, the status header leads to it: a borderless row, so the hover fill. */
+.rd-now-top.is-link{cursor:pointer;margin:-8px -12px;padding:8px 12px;border-radius:var(--r-ctrl);transition:background .15s;}
+.rd-now-top.is-link:hover{background:var(--hover);}
+.rd-now-top.is-link:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}.rd-ask-head:empty{display:none;}
+.rd-glance > .rd-questions .qpanel-head{display:none;}
+.rd-glance > .rd-questions .qpanel .qbody > :first-child{margin-top:0;}   /* not padding: the form card keeps its own */
 .rd-questions .qpanel-head{gap:12px;padding-bottom:16px;border-bottom:1px solid var(--amber-line);}
 .rd-questions .qpanel-head b{font-size:15px;color:var(--ink);}
 .rd-questions .qpanel-head .qcount{font-weight:600;font-size:11.5px;padding:5px 12px;}
-.rd-questions .qblock{padding-top:18px;}
-.rd-questions .qtext{font-weight:600;font-size:14px;line-height:1.5;gap:11px;margin-bottom:12px;}
-.rd-questions .qtext .qn{width:22px;height:22px;font-size:11.5px;}
-/* the detail panel is wide enough to drop the number-circle indent */
-.rd-questions .qopts{gap:9px;margin:12px 0 0;padding-left:0;}
-.rd-questions .qblock > .qfree{margin-left:0;width:100%;padding:13px 16px;border-radius:13px;font-size:13.5px;}
-.rd-questions .qopt{gap:11px;padding:13px 16px;border-radius:13px;font-size:13.5px;}
-.rd-questions .qopt::before{width:17px;height:17px;}
-.rd-questions .qopt.sel::before{background-size:10px 10px;}
-.rd-questions .qpanel-foot{margin-top:20px;padding-top:16px;border-top:1px solid var(--amber-line);}
-.rd-questions .qpanel-foot .btn-go{padding:13px 22px;font-size:13.5px;gap:9px;}
+/* One card per question: the question on the left, its answers on the right. */
+.rd-questions .qblock{display:grid;grid-template-columns:380px minmax(0,1fr);grid-template-rows:auto 1fr;column-gap:56px;row-gap:8px;align-items:start;
+  padding:28px 32px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);box-shadow:var(--shadow);}
+/* The number over the question. The text node is an anonymous grid item that cannot be
+   placed, so the grid is one column: the number (and, once answered, the pill beside
+   it) holds row 1, and the text falls to the row below. It spans both answer rows, and
+   the card's second row is 1fr: an item crossing a flexible track is left out of the
+   auto row's sizing, so a long question grows the 1fr row instead of spreading the
+   options apart. Medium, not semibold: a question can run a whole paragraph. */
+.rd-questions .qtext{grid-column:1;grid-row:1 / span 2;display:grid;grid-template-columns:minmax(0,1fr);row-gap:12px;
+  margin:0;font-weight:500;font-size:16px;line-height:1.5;letter-spacing:-.005em;}
+.rd-questions .qtext .qn{grid-area:1 / 1;justify-self:start;width:22px;height:22px;font-size:11.5px;margin-top:0;}
+/* Answered: read off the picked state the renderer already keeps, so no extra markup. The
+   pill shares the number's cell, pushed past the 22px circle. */
+.rd-questions .qblock:has(.qopt.sel,.qfree.has) .qtext::after{content:'Answered';grid-area:1 / 1;justify-self:start;
+  align-self:center;margin-left:32px;padding:3px 10px;border-radius:999px;background:var(--green-bg);color:var(--green-ink);
+  font-size:11.5px;font-weight:600;line-height:1.4;letter-spacing:0;}
+.rd-questions .qopts{grid-column:2;gap:8px;margin:0;padding-left:0;}
+.rd-questions .qopt{min-height:52px;gap:14px;padding:11px 16px 11px 12px;border-radius:12px;font-size:14.5px;line-height:1.5;}
+.rd-questions .qopt::before{width:28px;height:28px;border-radius:8px;font-size:12px;}
+/* "Write your own" is the last tile: dashed until it holds a value, a pencil where the
+   options have their key, its text lined up with theirs (1.5 + 12 + 28 + 14 = 55.5px). */
+.rd-questions .qblock > .qfree{grid-column:2;margin-left:0;width:100%;min-height:52px;padding:11px 16px 11px 54px;
+  border-radius:12px;border-style:dashed;border-color:var(--line-2);font-size:14.5px;line-height:1.5;
+  background-color:var(--canvas-2);background-repeat:no-repeat;background-position:19px center;background-size:14px 14px;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239A9AA1' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'><path d='M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z'/></svg>");}
+.rd-questions .qblock > .qfree:is(:focus,.has){border-style:solid;border-color:var(--ink);background-color:var(--panel);
+  box-shadow:0 0 0 3px var(--line);}
+/* one card (gate, recovery, workflow): the actions sit across its foot, under a rule */
+.rd-questions .qpanel-foot{margin-top:24px;padding-top:20px;border-top:1px solid var(--line);}
+.rd-questions .qpanel-foot .btn-go{padding:14px 26px;font-size:14px;gap:9px;}
+/* a stack of cards (clarify, form): the footer is a pill bar of its own beneath them */
+.rd-questions .qpanel:is([data-kind="clarify"],[data-kind="form"]) .qpanel-foot{margin-top:0;padding:10px 10px 10px 26px;
+  background:var(--panel);border:1px solid var(--line);border-radius:999px;box-shadow:var(--shadow);}
 
 /* "N of M answered" (§5.4): left slot of the footer, submit on the right. The
    base .qpanel-foot is justify-content:flex-end — with a counter present the row
@@ -942,14 +1011,58 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 /* The revise echo already carries its own 12px bottom margin — one child-selector
    deeper than the generic name margin below, so it wins wherever both match. */
 .ask-wfcard-body>.qnote+.ask-wfcard-namewrap{margin-top:0;}
-.qtune{width:100%;border-collapse:collapse;table-layout:fixed;margin-top:16px;font-size:13px;}
-.qtune th{text-align:left;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:400;height:32px;padding:0 8px;border-bottom:1px solid var(--line);white-space:nowrap;}
-.qtune td{height:44px;padding:0 8px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.qtune th:first-child,.qtune td:first-child{padding-left:0;}
-.qtune td:first-child{font-weight:500;color:var(--ink);}
-.qtune .select-wrap{width:150px;max-width:100%;}
+/* The agent table is one stacked card per agent (name, then model | effort, then the two switches, each
+   labelled), so it never depends on the panel being wide enough for five fixed columns. */
+.qtune{display:block;width:100%;font-size:13px;}
+.qtune thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);}
+.qtune tbody{display:block;}
+.qtune tr{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;padding:14px 0;border-bottom:1px solid var(--line);}
+.qtune tr:last-child{border-bottom:0;}
+.qtune td{display:block;min-width:0;padding:0;}
+.qtune td:first-child{grid-column:1 / -1;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.qtune td[data-label]::before{content:attr(data-label);display:block;margin-bottom:4px;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);}
+.qtune .select-wrap{width:100%;}
 .qtune .select-wrap select{height:34px;padding:0 40px 0 12px;border-radius:10px;}
-.qtune-sw{display:inline-block;position:relative;vertical-align:middle;}
+.qtune td.qtune-sw-cell{display:flex;align-items:center;min-height:24px;}
+.qtune-sw{display:inline-flex;align-items:center;gap:8px;position:relative;cursor:pointer;}
+.qtune-sw-t{font-size:12.5px;color:var(--ink-2);}
+/* Disclosures on the workflow review panel: Why this? · Show graph · Customize agents */
+.wf-namelabel{flex:0 0 auto;font-weight:600;font-size:15px;line-height:1.35;color:var(--ink-3);}
+/* The preview: always visible, the whole card is one button that opens the large pan/zoom popup. */
+.wf-preview{display:block;position:relative;width:100%;margin:16px 0 0;padding:0;border:0;border-radius:12px;background:transparent;font:inherit;text-align:left;cursor:zoom-in;}
+.wf-preview .ask-wfcard-graph{margin-top:0;transition:border-color .15s,height .24s cubic-bezier(.2,.7,.3,1);}
+.wf-preview:hover .ask-wfcard-graph{border-color:var(--hover-outline);}
+.wf-preview:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.wf-preview-hint{position:absolute;top:10px;right:10px;padding:3px 10px;border-radius:999px;background:var(--panel);border:1px solid var(--line);color:var(--ink-2);font-size:11.5px;font-weight:600;opacity:0;transition:opacity .15s;pointer-events:none;}
+.wf-preview:hover .wf-preview-hint,.wf-preview:focus-visible .wf-preview-hint{opacity:1;}
+/* Why this? — three plain rows: label left, value right */
+.wf-facts{display:grid;grid-template-columns:max-content 1fr;gap:8px 20px;margin:0;font-size:13px;line-height:1.5;}
+.wf-facts dt{color:var(--ink-3);}
+.wf-facts dd{margin:0;color:var(--ink-2);min-width:0;}
+.wf-facts .ask-wfcard-match{margin:0;padding-left:0;}
+.wf-facts .ask-wfcard-match svg{display:none;}
+/* The large workflow popup */
+.wf-pop .wf-pop-card{width:min(1120px,100%);height:min(780px,88vh);max-height:none;display:flex;flex-direction:column;overflow:hidden;padding:0;}
+.wf-pop-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid var(--line);}
+.wf-pop-head h2{margin:0;font-size:16px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.wf-pop-canvas{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;background:var(--canvas-2) radial-gradient(circle,var(--line-2) 1.1px,transparent 1.1px);background-size:22px 22px;}
+.wf-pop-canvas .gv-stage.gv-flow{position:absolute;inset:0;width:auto;height:100% !important;cursor:grab;}   /* the view sets an inline height from its rows; the popup's stage always fills the canvas */
+.wf-pop-canvas .gv-stage.panning,.wf-pop-canvas .gv-stage.panning *{cursor:grabbing !important;}
+.wf-pop-canvas .gv-nav{right:16px;bottom:16px;}
+.wf-pop-hint{padding:10px 20px;border-top:1px solid var(--line);font-size:11.5px;color:var(--ink-3);}
+.wf-discs{display:flex;flex-direction:column;margin-top:16px;border-top:1px solid var(--line);}
+.wf-disc{border-bottom:1px solid var(--line);}
+.wf-disc>summary{display:flex;align-items:center;gap:8px;min-height:40px;cursor:pointer;list-style:none;font-size:13px;font-weight:600;color:var(--ink-2);}
+.wf-disc>summary::-webkit-details-marker{display:none;}
+.wf-disc>summary::before{content:"";width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform .15s;}
+.wf-disc[open]>summary::before{transform:rotate(45deg);}
+.wf-disc>summary:hover{color:var(--ink);}
+.wf-disc>summary:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radius:4px;}
+.wf-disc-body{padding:0 0 16px;}
+.wf-disc-body>*{margin-top:0;}
+.wf-disc-body>*+*{margin-top:12px;}
+.wf-disc-body .ask-wfcard-graph{margin-top:0;}
+@media (prefers-reduced-motion: reduce){.wf-disc>summary::before{transition:none;}}
 /* (no disabled rule here: `.sw-input:disabled + .switch{opacity:.5;cursor:not-allowed}` already exists) */
 .qfree-area{margin-top:12px;min-height:64px;resize:vertical;line-height:1.5;}
 .qfree-area[hidden]{display:none;}
@@ -958,7 +1071,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .qcancel:hover{background:var(--red-bg);}
 .qcancel:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .qopen[hidden]{display:none;}
-.rd-questions .qanswered{font-size:12.5px;}
+.rd-questions .qanswered{font:600 14px var(--sans);color:var(--ink);}   /* the pill bar's lead, not a mono aside */
 
 /* ---------- Ask forms (agent-ask-forms design §6.1) ---------- */
 /* The declarative widget catalog, inside the same amber .qpanel wash. Every
@@ -988,7 +1101,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .af-inp{width:100%;font-family:inherit;font-size:12.5px;color:var(--ink);background:var(--field);
   border:1.5px solid var(--line);border-radius:11px;padding:10px 14px;transition:.14s;}
 .af-inp::placeholder{color:var(--ink-3);}
-.af-inp:focus{outline:none;background:var(--field-focus);border-color:var(--green);}
+.af-inp:focus{outline:none;background:var(--field-focus);border-color:var(--ink);}
 .af-inp:disabled{opacity:.72;cursor:default;}
 .af-area{min-height:64px;resize:vertical;line-height:1.5;}
 .af-date{max-width:220px;}
@@ -1013,11 +1126,11 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .af-choice:hover{border-color:var(--ink-3);}
 .af-choice:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .af-choice:disabled{cursor:default;}
-.af-choice.on{background:var(--green-bg);border-color:var(--green);}
+.af-choice.on{background:var(--panel);border-color:var(--ink);box-shadow:0 0 0 3px var(--line);}
 .af-mark{flex:0 0 auto;width:15px;height:15px;margin-top:1px;border-radius:50%;
   border:1.5px solid var(--radio-ring);background:var(--panel);display:grid;place-items:center;color:var(--panel);}
 .af-choice[role="checkbox"] .af-mark{border-radius:5px;}
-.af-choice.on .af-mark{background:var(--green);border-color:var(--green);color:var(--on-ink);}
+.af-choice.on .af-mark{background:var(--ink);border-color:var(--ink);color:var(--on-ink);}
 .af-choice-txt{display:flex;flex-direction:column;gap:3px;min-width:0;}
 .af-choice-desc{font-weight:400;font-size:11.5px;color:var(--ink-2);}
 .af-seg-sm button{font-size:12px;padding:5px 11px;}
@@ -1057,7 +1170,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .af-pill[data-tone="bad"]{background:var(--red-bg);color:var(--red-ink);}
 .af-pill[data-tone="info"]{background:var(--blue-bg);color:var(--blue-ink);}
 .af-tbl tr.af-pick{cursor:pointer;}
-.af-tbl tr.af-pick:hover td{background:var(--field);}
+.af-tbl tr.af-pick:hover td{background:var(--hover);}
 .af-tbl tr.af-pick[aria-selected="true"] td{background:var(--green-bg);}
 
 /* review list */
@@ -1172,11 +1285,14 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .af-pane{display:flex;flex-direction:column;gap:14px;}
 .af-pane[hidden]{display:none;}
 
-/* the detail screen scales the family up, like `.rd-questions .qopt` does */
-.rd-questions .af-form{gap:18px;margin-top:16px;}
-.rd-questions .af-label{font-size:13.5px;}
-.rd-questions .af-choice{gap:11px;padding:13px 16px;border-radius:13px;font-size:13.5px;}
-.rd-questions .af-inp{padding:13px 16px;border-radius:13px;font-size:13.5px;}
+/* the detail screen scales the family up to the ask-card tiles, like `.rd-questions .qopt` does */
+.rd-questions .af-form{gap:24px;margin-top:16px;}
+.rd-questions .af-label{font-size:14px;}
+.rd-questions .af-choice{min-height:52px;gap:14px;padding:12px 16px 12px 12px;border-radius:12px;font-size:14.5px;}
+.rd-questions .af-inp{padding:13px 16px;border-radius:12px;font-size:14.5px;}
+/* the form is the run page's one ask card (the panel around it draws nothing) */
+.rd-questions .qpanel[data-kind="form"] .af-form{padding:28px 32px;background:var(--panel);
+  border:1px solid var(--line);border-radius:var(--r-card);box-shadow:var(--shadow);}
 .rd-questions .af-gal-card img{height:148px;}
 .rd-questions .af-pdf-frame{height:640px;}
 
@@ -1205,6 +1321,46 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .gate-actions{display:flex;gap:10px;flex-wrap:wrap;}
 .gate-actions .btn{flex:1 1 auto;}
 
+/* ---- the run page: gate and recovery as one ask card ---- */
+/* The decision on the left, its evidence (the open issues, the model's own message) on
+   the right, the buttons across the foot. With nothing to show on the right — a gate
+   with no issues, a recovery with no message — the decision takes the width. After the
+   .sev-* stripe rules above, so equal specificity lands on the neutral border. */
+.rd-questions .qpanel:is([data-kind="gate"],[data-kind="recovery"]){display:grid;grid-template-columns:380px minmax(0,1fr);
+  column-gap:56px;align-items:start;}
+.rd-questions .qpanel:is([data-kind="gate"],[data-kind="recovery"]):not(:has(> .issues,> .issue-detail)){grid-template-columns:minmax(0,1fr);}
+.rd-questions .qpanel:is([data-kind="gate"],[data-kind="recovery"]) > .gate-intro{grid-column:1;margin:0;font-size:14.5px;line-height:1.65;color:var(--ink);}
+.rd-questions .qpanel:is([data-kind="gate"],[data-kind="recovery"]) > .gate-intro::before{content:'Decision';display:block;margin-bottom:10px;
+  font:600 12px var(--mono);letter-spacing:.04em;text-transform:uppercase;color:var(--ink-2);}
+.rd-questions .qpanel[data-kind="recovery"] > .gate-intro::before{content:'What to do';}
+.rd-questions .qpanel:is([data-kind="gate"],[data-kind="recovery"]) > :is(.issues,.issue-detail){grid-column:2;}
+.rd-questions .qpanel:is([data-kind="gate"],[data-kind="recovery"]) > .qpanel-foot{grid-column:1 / -1;}
+.rd-questions .gate-actions .btn{flex:0 0 auto;padding:14px 24px;font-size:14px;}
+.rd-questions .issues{margin:0;gap:8px;}
+.rd-questions .qpanel[data-kind="gate"] > .issues::before{content:'What the reviewer still sees';
+  font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2);}
+/* an issue: its severity in a column of its own, the text beside it, no coloured stripe */
+.rd-questions .issue{display:grid;grid-template-columns:92px minmax(0,1fr);column-gap:16px;row-gap:3px;padding:14px 16px;
+  border-color:var(--line);border-left-width:1px;border-radius:12px;}
+.rd-questions .issue-head{display:contents;}
+.rd-questions .issue-sev{grid-column:1;grid-row:1;justify-self:start;padding:3px 9px;font-size:11.5px;font-weight:600;
+  letter-spacing:0;text-transform:capitalize;}
+.rd-questions :is(.issue-title,.issue > .issue-detail,.issue-loc){grid-column:2;}
+.rd-questions .issue-title{font-size:14.5px;line-height:1.45;}
+.rd-questions .issue > .issue-detail{margin:0;font-size:13.5px;line-height:1.6;}
+.rd-questions .issue-loc{margin-top:0;font-size:12px;color:var(--ink-2);}
+/* the model's own words, verbatim */
+.rd-questions .qpanel[data-kind="recovery"] > .issue-detail{margin:0;padding:16px 18px;background:var(--field);
+  border:1px solid var(--line);border-radius:12px;font:12.5px/1.7 var(--mono);color:var(--ink);white-space:pre-wrap;}
+/* narrow screens: the question (or the decision) over its answers */
+@media (max-width:1080px){
+  .rd-questions .qblock,.rd-questions .qpanel:is([data-kind="gate"],[data-kind="recovery"]){grid-template-columns:minmax(0,1fr);grid-template-rows:none;}
+  .rd-questions .qpanel:is([data-kind="gate"],[data-kind="recovery"]){row-gap:20px;}
+  .rd-questions .qtext{grid-row:auto;margin-bottom:6px;}   /* the options keep their own 8px rhythm below it */
+  .rd-questions .qopts,.rd-questions .qblock > .qfree,
+  .rd-questions .qpanel:is([data-kind="gate"],[data-kind="recovery"]) > :is(.issues,.issue-detail){grid-column:1;}
+}
+
 /* status badge — shared family colors (green/red/running/waiting/violet), used by
    guardrails-view.mjs, models-view.mjs and the chat-connection state pill */
 .badge{display:inline-flex;align-items:center;font-size:10.5px;font-weight:700;letter-spacing:.06em;
@@ -1230,8 +1386,6 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hist-head .h-meta b{display:block;font-weight:600;font-size:14.5px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .hist-head .hash{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);}
-.hist-head .h-meta b{cursor:pointer;}
-.hist-head .h-meta b:hover{text-decoration:underline;}
 .retained-banner{margin:0 0 18px;padding:16px 18px;border:1.5px solid var(--amber);
   border-radius:var(--r-card);background:var(--amber-bg);color:var(--amber-ink);font-size:12.5px;line-height:1.55;}
 .retained-banner[hidden]{display:none;}
@@ -1339,7 +1493,7 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
   border:1.5px solid var(--line-2);border-radius:var(--r-ctrl);background:var(--field);}
 .folder-list .folder-item{display:block;width:100%;text-align:left;padding:7px 12px;border:0;
   background:transparent;font-family:inherit;font-size:13px;color:var(--ink);cursor:pointer;}
-.folder-list .folder-item:hover{background:var(--line-2);}
+.folder-list .folder-item:hover{background:var(--hover-on-field);}
 .folder-empty{padding:10px 12px;}
 /* Multi mode: a tick box left of each folder name (the name still opens the folder). */
 .folder-list .folder-row{display:flex;align-items:center;gap:2px;padding-left:10px;}
@@ -1370,7 +1524,7 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hist-branch .hist-branch-arrow{flex:0 0 auto;color:var(--ink-3);}
 .hist-branch .hist-branch-arrow[hidden]{display:none;}
 .hist-branch-copy{display:inline-flex;align-items:center;justify-content:center;padding:3px;background:none;border:0;border-radius:6px;color:var(--ink-3);cursor:pointer;}
-.hist-branch-copy:hover{background:var(--line);color:var(--ink);}
+.hist-branch-copy:hover{background:var(--hover-on-field);color:var(--ink);}
 .hist-branch-copy .ico-check{display:none;}
 .hist-branch-copy.copied .ico-copy{display:none;}
 .hist-branch-copy.copied .ico-check{display:block;color:var(--green-ink);}
@@ -1414,7 +1568,7 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
    detail screen's banner block; nothing about it was card-position-dependent. */
 .hist-discard{display:inline-flex;align-items:center;padding:6px 12px;font-size:12px;
   color:var(--amber-ink);border-color:var(--amber);background:var(--amber-bg);}
-.hist-discard:hover:not(:disabled){background:var(--amber-bg);filter:brightness(.97);}
+.hist-discard:hover:not(:disabled){box-shadow:inset 0 0 0 1px var(--amber);}
 .hist-discard:disabled{opacity:.6;cursor:default;}
 .hist-discard[hidden]{display:none;}
 /* This block is SHARED with the Plugins view's `.pl-remove`; the retired
@@ -1422,7 +1576,7 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .pl-remove{display:inline-flex;align-items:center;gap:6px;background:var(--red-ink);
   border:1.5px solid var(--red-ink);color:var(--on-status);font-family:inherit;font-weight:600;
   font-size:12px;padding:6px 12px;border-radius:8px;cursor:pointer;}
-.pl-remove:hover:not(:disabled){filter:brightness(0.95);}
+.pl-remove:hover:not(:disabled){box-shadow:inset 0 0 0 999px var(--solid-hover);transform:translateY(-1px);}
 .pl-remove:disabled{opacity:.6;cursor:default;}
 .pl-remove svg{display:block;}
 
@@ -1504,7 +1658,7 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 #ws-list .ws-item{border-bottom:1px solid var(--line);}
 #ws-list .ws-item:last-child{border-bottom:none;}
 #ws-list .ws-row{display:flex;align-items:center;gap:15px;padding:16px 20px;cursor:pointer;transition:background .12s;}
-#ws-list .ws-row:hover{background:var(--field);}
+#ws-list .ws-row:hover{background:var(--hover);}
 #ws-list .ws-row:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
 #ws-list .ws-main{flex:1 1 auto;min-width:0;}
 #ws-list .ws-name{font-weight:600;font-size:14px;letter-spacing:-.01em;color:var(--ink);}
@@ -1563,7 +1717,7 @@ button.wd-member:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;
 .wm-coverage{display:flex;flex-wrap:wrap;gap:8px;}
 .wm-chip{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:12.5px;color:var(--ink);background:var(--field);
   border:1.5px solid transparent;border-radius:999px;padding:5px 11px;cursor:pointer;}
-.wm-chip:hover{border-color:var(--line-2);}
+.wm-chip:hover{border-color:var(--hover-outline);}
 .wm-chip.is-active{border-color:var(--ink);background:var(--surface);}
 .wm-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .wm-chip-name{font-weight:600;}
@@ -1641,14 +1795,14 @@ button.wd-member:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;
 .md-preview{min-height:72px;}
 .md-preview:empty::before{content:'Nothing to preview yet';color:var(--ink-2);}
 .ws-delete{display:inline-flex;align-items:center;gap:6px;background:var(--red-ink);border:1.5px solid var(--red-ink);color:var(--on-status);font-family:inherit;font-weight:600;font-size:12px;padding:7px 12px;border-radius:8px;cursor:pointer;}
-.ws-delete:hover:not(:disabled){filter:brightness(0.95);}
+.ws-delete:hover:not(:disabled){box-shadow:inset 0 0 0 999px var(--solid-hover);transform:translateY(-1px);}
 .ws-delete:disabled{opacity:.6;cursor:default;}
 
 /* Wizard step panes. */
 .wiz-step.hidden{display:none;}
 .wiz-proj-list{display:flex;flex-direction:column;gap:2px;border:1.5px solid var(--line-2);border-radius:var(--r-ctrl);padding:6px;background:var(--field);}
 .wiz-proj{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:10px;cursor:pointer;font-size:13.5px;color:var(--ink);}
-.wiz-proj:hover{background:var(--surface);}
+.wiz-proj:hover{background:var(--hover-on-field);}
 .wiz-proj input{margin:0;cursor:pointer;}
 .wiz-proj.missing{color:var(--ink-3);cursor:not-allowed;}
 .wiz-proj-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;}
@@ -1888,7 +2042,7 @@ button.wd-member:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;
 .bench-case-row{display:flex;align-items:center;gap:4px;min-width:0;}
 .bench-case{display:flex;align-items:center;gap:7px;flex:1;min-width:0;text-align:left;font-family:inherit;font-size:12.5px;
   color:var(--ink);background:transparent;border:1px solid transparent;border-radius:10px;padding:6px 8px;cursor:pointer;}
-.bench-case:hover{background:var(--field);}
+.bench-case:hover{background:var(--hover);}
 .bench-case.on{background:var(--field);border-color:var(--line-2);}
 .bench-case .bench-case-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .bench-case-row .bench-lock{font-size:10px;padding:1px 7px;flex:0 0 auto;}
@@ -2033,7 +2187,7 @@ input.bench-case-name{width:100%;padding:9px 12px;font-size:13px;}
 .wz-prow.stale{background:transparent;border:1.5px dashed var(--line-2);}
 .wz-prow .pid{font-size:12.5px;font-weight:600;}
 .wz .tchip{font-family:var(--mono);font-size:11px;font-weight:600;height:22px;padding:0 8px;border-radius:999px;border:1.5px solid var(--line-2);background:var(--panel);color:var(--ink-2);cursor:pointer;}
-.wz .tchip:hover:not(:disabled){border-color:var(--ink);color:var(--ink);}
+.wz .tchip:hover:not(:disabled){border-color:var(--hover-outline);color:var(--ink);}
 .wz .tchip:disabled{cursor:default;}
 .wz .tchip.void{color:var(--ink-3);}
 .wz .tchip.when{border-style:dashed;color:var(--violet-ink);border-color:var(--violet);}
@@ -2081,7 +2235,7 @@ input.bench-case-name{width:100%;padding:9px 12px;font-size:13px;}
 .apick-project-name{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin:10px 0 4px;}
 .apick-run,.apick-art{display:flex;align-items:center;gap:10px;width:100%;text-align:left;font-family:inherit;font-size:12.5px;
   color:var(--ink);background:transparent;border:1px solid var(--line);border-radius:12px;padding:8px 11px;cursor:pointer;}
-.apick-run:hover,.apick-art:hover{background:var(--field);}
+.apick-run:hover,.apick-art:hover{background:var(--hover);}
 .apick-run-title,.apick-art-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .apick-run-meta,.apick-art-bytes{font-family:var(--mono);font-size:11px;color:var(--ink-3);flex:0 0 auto;}
 .apick-art-kind{font-size:10px;padding:1px 7px;}
@@ -2151,11 +2305,11 @@ input.bench-case-name{width:100%;padding:9px 12px;font-size:13px;}
 /* A keyed row IS the control (role=button): pointer + hover tint, the .hist-head idiom. The
    keyless row keeps #projects-list .pl-row's default cursor. */
 #projects-list .pl-row[role="button"]{cursor:pointer;transition:background .12s;}
-#projects-list .pl-row[role="button"]:hover{background:var(--field);}
+#projects-list .pl-row[role="button"]:hover{background:var(--hover);}
 #projects-list .pl-row[role="button"]:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
 .proj-open{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:30px;height:30px;
   border:1px solid var(--line);border-radius:9px;background:var(--panel);color:var(--ink-2);cursor:pointer;}
-.proj-open:hover{background:var(--ink);color:var(--on-ink);border-color:var(--ink);}
+.proj-open:hover{border-color:var(--hover-outline);color:var(--ink);}
 /* Project page header: the card, title and Back ride the hd- rules; these are its own lines. */
 .pd-meta{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0;margin-top:10px;
   font-size:12.5px;color:var(--ink-2);overflow-wrap:anywhere;}
@@ -2177,7 +2331,7 @@ button.pd-ov-card:hover{border-color:var(--ink-3);}
 .gr-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12.5px;}
 .gr-row:last-child{border-bottom:none;}
 .gr-rm{flex:0 0 auto;width:26px;height:26px;border-radius:8px;border:1.5px solid var(--line-2);background:var(--surface);display:grid;place-items:center;cursor:pointer;color:var(--ink-3);font-size:11px;transition:.12s;}
-.gr-rm:hover{color:var(--red-ink);border-color:var(--red);background:var(--red-bg);}
+.gr-rm:hover{color:var(--red-ink);border-color:var(--red);}
 .gr-empty{color:var(--ink-3);font-size:12px;padding:6px 0;}
 
 /* ===== Confirm + add-project modals (reuse .viewer-modal shell) ===== */
@@ -2199,6 +2353,7 @@ button.pd-ov-card:hover{border-color:var(--ink-3);}
 .pb-status.err{color:var(--red-ink);}
 .pb-row.added{opacity:.65;}
 .confirm-message{margin:4px 0 18px;color:var(--ink-2);font-size:14px;line-height:1.5;white-space:pre-line;}
+.confirm-message.err{color:var(--red-ink);}
 .confirm-actions{display:flex;gap:9px;justify-content:flex-end;margin-top:14px;}
 .gv-import-scripts p{margin:0 0 12px;color:var(--ink-2);font-size:13.5px;}
 .gv-import-script-h{font-size:12px;font-weight:700;margin:10px 0 4px;}
@@ -2280,7 +2435,7 @@ button.pd-ov-card:hover{border-color:var(--ink-3);}
 .sp-results{margin-top:8px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:12px;}
 .sp-row{display:flex;justify-content:space-between;gap:10px;padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--line);font-size:13px;}
 .sp-row:last-child{border-bottom:none;}
-.sp-row:hover{background:var(--field);}
+.sp-row:hover{background:var(--hover);}
 .sp-row.sel{background:var(--green-bg);color:var(--green-ink);}
 .sp-row-meta{display:inline-flex;gap:6px;align-items:center;color:var(--ink-3);font-size:11.5px;flex:0 0 auto;}
 .sp-label{background:var(--field);border-radius:999px;padding:1px 8px;font-weight:600;}
@@ -2335,7 +2490,7 @@ button.pd-ov-card:hover{border-color:var(--ink-3);}
 /* ---- Guardrail wizard (Step 1 + read-only view) ---- */
 .grv-wizard .grv-source-list{display:grid;gap:8px;margin:12px 0;max-height:46vh;overflow-y:auto;}
 .grv-source-row{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;cursor:pointer;}
-.grv-source-row:hover{background:var(--field);}
+.grv-source-row:hover{background:var(--hover);}
 .grv-source-name{flex:1 1 auto;font-size:14px;}
 .grv-wizard-actions{justify-content:flex-end;margin-top:14px;}
 .grv-editor .switch.disabled{opacity:.5;pointer-events:none;}
@@ -2458,7 +2613,7 @@ section[data-view="team-metrics"] .topbar{align-items:flex-start;}
 .tm-tbl th{text-align:left;font-weight:600;color:var(--ink-3);padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap;}
 .tm-tbl th[data-sort]{cursor:pointer;} .tm-tbl th.num,.tm-tbl td.num{text-align:right;}
 .tm-tbl td{padding:9px 10px;border-bottom:1px solid var(--line);}
-.tm-tbl tbody tr[data-filter-dim]{cursor:pointer;} .tm-tbl tbody tr[data-filter-dim]:hover,.tm-tbl tbody tr.on{background:var(--field);}
+.tm-tbl tbody tr[data-filter-dim]{cursor:pointer;} .tm-tbl tbody tr[data-filter-dim]:hover,.tm-tbl tbody tr.on{background:var(--hover);}
 .tm-tbl tr.dim td{color:var(--ink-3);}
 .tm-tbl td.tm-saved.pos{color:var(--green-ink);} .tm-tbl td.tm-saved.neg{color:var(--red-ink);}
 .tm-runs-foot{display:flex;align-items:center;gap:12px;margin-top:8px;}
@@ -2471,7 +2626,7 @@ section[data-view="team-metrics"] .topbar{align-items:flex-start;}
 .badge.grey{background:var(--field);color:var(--ink-2);}
 /* The Copilot card's "read the notice first" pill is a button: it opens the notice (bridge-view.mjs). */
 .mv-cp-terms-pill{border:0;font-family:inherit;cursor:pointer;}
-.mv-cp-terms-pill:hover{background:var(--line);color:var(--ink);}
+.mv-cp-terms-pill:hover{background:var(--hover-on-field);color:var(--ink);}
 .mv-cp-terms-pill:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 /* With the credential broker, a provider pill for a missing key links to the key page. */
 .mv-broker-pill{text-decoration:none;cursor:pointer;}
@@ -2493,7 +2648,7 @@ section[data-view="team-metrics"] .topbar{align-items:flex-start;}
 .tl-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;}
 .tl-tile{text-align:left;font:inherit;color:inherit;display:flex;flex-direction:column;border:1.5px solid var(--line);}
 button.tl-tile{cursor:pointer;}
-button.tl-tile:hover{border-color:var(--line-2);}
+button.tl-tile:hover{border-color:var(--hover-outline);}
 button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .tl-tile .stat-value{margin-top:6px;}
 .tl-note{display:block;color:var(--ink-2);line-height:1.5;}
@@ -2504,7 +2659,7 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .tl-step{min-width:36px;font-size:15px;line-height:1;}
 .tl-crumbs{display:flex;align-items:center;gap:2px;font-size:15px;font-weight:600;margin-left:6px;flex-wrap:wrap;}
 .tl-crumb{border:0;background:none;font:inherit;font-weight:500;color:var(--ink-3);padding:4px 6px;border-radius:8px;cursor:pointer;}
-.tl-crumb:hover{background:var(--field);color:var(--ink);}
+.tl-crumb:hover{background:var(--hover);color:var(--ink);}
 .tl-crumb-cur{padding:4px 6px;}
 .tl-sep{color:var(--ink-3);}
 .tl-mode button{padding:6px 14px;font-size:12.5px;}
@@ -2534,7 +2689,7 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .tl-h-weeks{min-height:30px;} .tl-h-days{min-height:52px;} .tl-z-week .tl-h-days{min-height:58px;} .tl-h-hours{min-height:40px;}
 .tl-hcell{position:absolute;top:0;bottom:0;border:0;border-left:1px solid var(--line);background:none;padding:0;font:inherit;
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;font-size:11px;color:var(--ink-3);cursor:pointer;}
-.tl-hcell:hover{background:var(--field);color:var(--ink);}
+.tl-hcell:hover{background:var(--hover);color:var(--ink);}
 .tl-hcell .tl-dn{font-size:13px;color:var(--ink);font-weight:500;font-variant-numeric:tabular-nums;}
 .tl-hcell.is-today .tl-dn{background:var(--ink);color:var(--on-ink);border-radius:6px;padding:0 5px;}
 .tl-week{flex-direction:row;justify-content:flex-start;padding-left:8px;font-weight:500;color:var(--ink-2);}
@@ -2706,7 +2861,7 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 /* ---------- Sidebar spend indicator ---------- */
 .spend-ind{display:block;width:100%;text-align:left;border:1px solid var(--line);border-radius:var(--r-ctrl);
   background:var(--field);padding:10px 12px;cursor:pointer;font-family:inherit;}
-.spend-ind:hover{background:var(--line);}
+.spend-ind:hover{background:var(--hover-on-field);}
 .spend-ind:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .spend-ind-row{display:flex;align-items:baseline;justify-content:space-between;gap:8px;}
 .spend-ind-label{font-size:12px;font-weight:600;color:var(--ink-2);}
@@ -3094,7 +3249,7 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
   border:1px solid var(--line);border-radius:9px;background:var(--field);
   font:700 12px var(--mono);color:var(--ink);cursor:pointer;}
 .hd-branch-copy[hidden]{display:none;}
-.hd-branch-copy:hover{border-color:var(--ink-3);background:var(--panel);}
+.hd-branch-copy:hover{border-color:var(--hover-outline);}
 .hd-branch-name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .hd-branch-copy .ico-check{display:none;}
 .hd-branch-copy.copied .ico-copy{display:none;}
@@ -3128,11 +3283,15 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
   border:1.5px solid var(--line-2);border-radius:999px;background:var(--surface);color:var(--ink);
   cursor:pointer;transition:background .15s,border-color .15s;}
 .hd-more[hidden]{display:none;}
-.hd-more:hover,.hd-more[aria-expanded="true"]{background:var(--field);border-color:var(--ink-3);}
+.hd-more:hover{border-color:var(--hover-outline);}
+.hd-more[aria-expanded="true"]{background:var(--field);border-color:var(--hover-outline);}   /* open, not hover */
 .hd-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:5;min-width:214px;
   display:flex;flex-direction:column;gap:2px;padding:6px;background:var(--panel);
   border:1px solid var(--line-2);border-radius:var(--r-card);box-shadow:var(--shadow-menu);}
 .hd-menu[hidden]{display:none;}
+/* The menu drops over the sticky .hd-tabs (same z-index, later in the DOM): lift the
+   header above them only while it is open, so scrolled tabs still cover the header. */
+.hd-header:has(.hd-menu:not([hidden])){position:relative;z-index:6;}
 /* Both items shed their pill dressing in here and become full-width rows. Higher
    specificity than the standalone rules above, which still hold nowhere else. */
 .hd-menu .hd-archive,.hd-menu .hd-report{width:100%;justify-content:flex-start;gap:10px;
@@ -3152,7 +3311,7 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .hd-archive,.pd-remove{display:flex;align-items:center;gap:8px;padding:8.5px 15px;border:1.5px solid var(--red-bg);   /* 12.5px type + 8.5px = the 13.5px buttons' height */
   border-radius:999px;background:var(--panel);font:600 12.5px var(--sans);color:var(--red-ink);cursor:pointer;}
 .hd-archive[hidden]{display:none;}
-.hd-archive:hover:not([disabled]),.pd-remove:hover:not([disabled]){background:var(--red-bg);border-color:var(--red);}
+.hd-archive:hover:not([disabled]),.pd-remove:hover:not([disabled]){border-color:var(--red);}
 .hd-archive[disabled],.pd-remove[disabled]{opacity:.55;cursor:not-allowed;}
 /* align-items:flex-start, NOT the default stretch: `.badge.hist-retained-badge`
    (696) and `.hist-discard` (856) are inline-flex with no width, so a stretching
@@ -3339,17 +3498,17 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 
 .hd-cmt-btn{height:26px;padding:0 9px;border:0;border-radius:8px;background:transparent;color:var(--ink-2);
   font:500 12px var(--sans);line-height:26px;cursor:pointer;transition:background .15s,color .15s,border-color .15s;}
-.hd-cmt-btn:hover{background:var(--field);color:var(--ink);}
+.hd-cmt-btn:hover{background:var(--hover);color:var(--ink);}
 .hd-cmt-btn:focus-visible{outline:2px solid var(--ink);outline-offset:1px;}
 .hd-cmt-btn:disabled{opacity:.5;cursor:default;}
 .hd-cmt-delete:hover{color:var(--red-ink);background:var(--red-bg);}
 .hd-cmt-toggle{display:inline-flex;align-items:center;gap:7px;margin-left:-9px;}
 .hd-cmt-btn.hd-cmt-reply{display:inline-flex;align-items:center;gap:7px;height:28px;padding:0 12px;line-height:1;
   border:1px solid var(--line-2);border-radius:999px;background:var(--surface);color:var(--ink);}
-.hd-cmt-btn.hd-cmt-reply:hover{border-color:var(--ink);background:var(--surface);color:var(--ink);}
+.hd-cmt-btn.hd-cmt-reply:hover{border-color:var(--hover-outline);color:var(--ink);}
 .hd-cmt-save{height:28px;padding:0 14px;border-radius:999px;background:var(--ink);color:var(--on-ink);
   font-weight:600;line-height:28px;}
-.hd-cmt-save:hover{background:var(--ink);color:var(--on-ink);filter:brightness(1.08);}
+.hd-cmt-save:hover{background:var(--ink);color:var(--on-ink);box-shadow:inset 0 0 0 999px var(--solid-hover);}
 .hd-cmt-err{padding:0 14px;color:var(--red-ink);font-size:11.5px;}
 .hd-cmt-err:empty{display:none;}
 
@@ -3443,7 +3602,7 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
   border-radius:9px;
 }
 .hd-tree-dir,.hd-tree-file{padding-inline-start:var(--tree-indent,10px);}
-.hd-tree-dir:hover,.hd-tree-file:hover,.hd-tree-file.active{background:var(--field);}
+.hd-tree-dir:hover,.hd-tree-file:hover,.hd-tree-file.active{background:var(--hover);}
 .hd-tree-dir:focus-visible,.hd-tree-file:focus-visible{
   outline:2px solid var(--ink);
   outline-offset:-2px;
@@ -3500,6 +3659,15 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .hd-ov-chip.warn,.hd-ov-chip.st-paused{background:var(--amber-bg);color:var(--amber-ink);}
 .hd-ov-chip.st-stopped,.hd-ov-chip.st-error{background:var(--red-bg);color:var(--red-ink);}
 .hd-ov-grid,.pd-ov-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px;}
+/* The worktree: one full-width line (label · state · shortened copyable path), spanning
+   the stat grid on the Running Overview and sitting under it on History's. */
+.hd-ov-wt{grid-column:1/-1;display:flex;align-items:center;gap:12px;min-width:0;padding:12px 20px;
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);}
+.hd-ov-wt .hd-ov-label{margin:0;color:var(--ink-2);}   /* new text: --ink-2, never --ink-3 (contrast) */
+.hd-ov-wt-state{font:600 13px var(--mono);color:var(--ink);white-space:nowrap;}
+.hd-ov-wt-note{font-size:13px;color:var(--ink-2);min-width:0;}
+.hd-ov-wt-path{margin-left:auto;max-width:60%;font-weight:500;}
+@media (max-width:640px){ .hd-ov-wt{flex-wrap:wrap;} .hd-ov-wt-path{margin-left:0;max-width:100%;} }
 .hd-ov-card,.pd-ov-card{padding:20px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);}
 /* Agent memory (agent-memory-design.md §6): what this run wrote into worca's memory. */
 .hd-ov-mem{padding:16px 20px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);display:flex;flex-direction:column;gap:8px;}
@@ -3511,7 +3679,7 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
    button.hd-mem-chip's color reset (0,1,1) — source order alone would not. */
 .hd-mem-chip{padding:2px 8px;border-radius:999px;border:1px solid var(--line);font-size:12px;}
 button.hd-mem-chip{background:transparent;font:inherit;font-family:var(--mono);font-size:12px;line-height:inherit;color:inherit;cursor:pointer;}
-button.hd-mem-chip:hover{background:var(--field);}
+button.hd-mem-chip:hover{background:var(--hover);}
 button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .hd-mem-chip.hd-mem-add{color:var(--green-ink);}
 .hd-mem-chip.hd-mem-mod{color:var(--blue-ink);}
@@ -3552,7 +3720,7 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .mem-list-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
 .mem-list-title{font:600 10.5px var(--sans);letter-spacing:.14em;color:var(--ink-3);text-transform:uppercase;}
 .mem-row{display:flex;align-items:center;gap:12px;padding:10px 8px;border-radius:var(--r-ctrl);cursor:pointer;}
-.mem-row:hover{background:var(--field);}
+.mem-row:hover{background:var(--hover);}
 .mem-row.on{background:var(--field);box-shadow:inset 0 0 0 1px var(--line-2);}
 .mem-row:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
 .mem-row-main{min-width:0;flex:1;}
@@ -3594,7 +3762,9 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hd-cl-a{margin-top:12px;color:var(--ink-2);}
 .hd-cl-q > span:last-child{font:600 13.5px/1.6 var(--sans);}
 .hd-cl-a > span:last-child{font:400 13.5px/1.7 var(--sans);}
-.hd-cl-chip{flex:0 0 auto;padding:3px 9px;border-radius:7px;font-size:10.5px;font-weight:600;}
+/* One letter (Q / A) in a fixed square, so the question and answer rows line up. */
+.hd-cl-chip{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;
+  border-radius:7px;font-size:12px;font-weight:700;}
 .hd-cl-chip.ask{background:var(--field);color:var(--ink-2);}
 .hd-cl-chip.ans{background:var(--green-bg);color:var(--green-ink);}
 /* `.hint` (:283) ships `margin-top:7px`; the shorthand replaces it outright so the
@@ -3617,7 +3787,7 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hd-pr{padding:9px 18px;border:1.5px solid var(--ink);border-radius:999px;background:var(--ink);
   font:600 12.5px var(--sans);color:var(--on-ink);cursor:pointer;flex:0 0 auto;}
 .hd-pr[hidden]{display:none;}
-.hd-pr:hover{opacity:.88;}
+.hd-pr:hover{box-shadow:inset 0 0 0 999px var(--solid-hover);transform:translateY(-1px);}
 .hd-pr-link{flex:0 0 auto;font:600 12.5px var(--sans);}
 .hd-pr-link[hidden]{display:none;}
 /* Workspace runs: one line per member repo under the header row. */
@@ -3751,7 +3921,12 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hist-cmt-pill .hist-cmt-count{font-weight:700;}
 .hist-open{display:flex;align-items:center;justify-content:center;width:30px;height:30px;
   border:1px solid var(--line);border-radius:9px;background:var(--panel);color:var(--ink-2);cursor:pointer;}
-.hist-open:hover{background:var(--ink);color:var(--on-ink);border-color:var(--ink);}
+.hist-open:hover{border-color:var(--hover-outline);color:var(--ink);}
+/* The card head opens the run, so the card answers the pointer: its outline
+   strengthens and its chevron darkens with it. */
+.hist-card,.run-card{transition:border-color .15s;}
+.hist-card:has(.hist-head:hover),.run-card:has(.rc-head:hover){border-color:var(--hover-outline);}
+.hist-head:hover .hist-open,.rc-head:hover .rc-open{border-color:var(--hover-outline);color:var(--ink);}
 /* "Copied" caption on the card — same CSS-only mechanism as .hd-copied */
 .hist-copied{display:none;font:500 11px var(--sans);color:var(--green-ink);}
 .hist-branch-copy.copied + .hist-copied{display:inline;}
@@ -3776,10 +3951,7 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
    block is not contiguous (it also lives at ~557-600 and ~1109) and .btn-pause /
    .btn-resume / .btn-stop have base rules at 237-254, so a mid-file append would
    lose the source-order tie. Same reasoning as the History list card v2 block. */
-/* margin-bottom replaces `.run-top`'s own 18px, which this task deletes:
-   `.run-flow-wrap` (:1109) has only a BOTTOM margin, so without this the graph
-   would sit flush against the header until Task 4 adds `.rc-detailed{margin-top:18px}`. */
-.rc-head{display:flex;align-items:flex-start;gap:13px;cursor:pointer;margin-bottom:18px;}
+.rc-head{display:flex;align-items:flex-start;gap:13px;cursor:pointer;}
 .rc-head:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .rc-sic{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;
   border-radius:50%;flex:0 0 auto;align-self:center;}
@@ -3816,7 +3988,7 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .rc-branch-copy{display:inline-flex;align-items:center;gap:8px;min-width:12ch;
   padding:4px 10px;border:1px solid var(--line);border-radius:9px;background:var(--field);
   font:700 11.5px var(--mono);color:var(--ink);cursor:pointer;}
-.rc-branch-copy:hover{border-color:var(--ink-3);background:var(--panel);}
+.rc-branch-copy:hover{border-color:var(--hover-outline);}
 .rc-branch-name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .rc-branch-copy .ico-check{display:none;}
 .rc-branch-copy.copied .ico-copy{display:none;}
@@ -3826,17 +3998,14 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .rc-copied{display:none;font:500 11px var(--sans);color:var(--green-ink);}
 .rc-branch-copy.copied + .rc-copied{display:inline;}
 .rc-acts{display:flex;align-items:center;gap:8px;flex:0 0 auto;align-self:center;margin-left:auto;}
-.rc-qpill{display:inline-flex;align-items:center;padding:5px 11px;border-radius:999px;
-  background:var(--amber-bg);color:var(--amber-ink);font:700 11.5px var(--sans);white-space:nowrap;}
-.rc-qpill[hidden]{display:none;}
 /* the five 30px icon buttons; .rc-open mirrors .hist-open exactly */
 .rc-acts .btn-pause,.rc-acts .btn-resume,.rc-acts .btn-stop,.rc-after,.rc-open{
   display:inline-flex;align-items:center;justify-content:center;gap:0;
   width:30px;height:30px;padding:0;border-radius:9px;background:var(--panel);cursor:pointer;}
 .rc-acts .btn-pause,.rc-acts .btn-resume{border:1px solid var(--amber);color:var(--amber-ink);}
-.rc-acts .btn-pause:hover,.rc-acts .btn-resume:hover{background:var(--amber-bg);}
+.rc-acts .btn-pause:hover,.rc-acts .btn-resume:hover{box-shadow:inset 0 0 0 1.5px var(--amber);}
 .rc-acts .btn-stop{border:1px solid var(--red);color:var(--red-ink);}
-.rc-acts .btn-stop:hover{background:var(--red-bg);}
+.rc-acts .btn-stop:hover{box-shadow:inset 0 0 0 1.5px var(--red);}
 /* The base `.btn-pause[hidden],.btn-resume[hidden]` rule (254) ties on specificity
    with `.rc-acts .btn-pause` above and would LOSE on source order — a paused card
    would show both buttons. Re-state it at the cluster's specificity. */
@@ -3846,9 +4015,9 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
    `afterBtn.hidden = true` would not hide it. Re-state it here. */
 .rc-acts .rc-after[hidden]{display:none;}
 .rc-open{border:1px solid var(--line);color:var(--ink-2);}
-.rc-open:hover{background:var(--ink);color:var(--on-ink);border-color:var(--ink);}
+.rc-open:hover{border-color:var(--hover-outline);color:var(--ink);}
 .rc-after{border:1px solid var(--line);color:var(--ink-2);}
-.rc-after:hover{background:var(--ink);color:var(--on-ink);border-color:var(--ink);}
+.rc-after:hover{border-color:var(--hover-outline);color:var(--ink);}
 .rc-after:focus-visible,.rc-open:focus-visible,.rc-branch-copy:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 /* ---------- Running redesign: shared keyframes (C2 — declared ONCE, here) ----------
    @keyframes are name-resolved, not cascaded, so their position relative to the
@@ -3863,39 +4032,20 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
   .rc-sic .sic-spin{animation:none;}
 }
 
-/* ---------- Running list: density toggle + compact card body ---------- */
+/* ---------- Running list card ---------- */
 /* .topbar is `justify-content:space-between` with three children now; pushing the
    pill right keeps pill + toggle together as the right-hand group. */
 #running-status-pill{margin-left:auto;}
-.run-density{display:inline-flex;align-items:center;gap:2px;padding:3px;border-radius:999px;
-  background:var(--field);flex:0 0 auto;align-self:center;}
-/* `.rc-dseg`, not `.rd-seg`: the density toggle is LIST chrome, and the Global
-   Constraints reserve `.rd-*` for the run DETAIL — `.rd-seg` also sits one
-   character from C1's `secClass:'rd-sec'`, which the tab engine writes into the
-   detail screen. */
-.run-density .rc-dseg{display:inline-flex;align-items:center;justify-content:center;
-  width:32px;height:28px;padding:0;border:0;border-radius:999px;background:transparent;
-  color:var(--ink-2);cursor:pointer;transition:background .15s,color .15s;}
-.run-density .rc-dseg:hover{color:var(--ink);}
-.run-density .rc-dseg[aria-pressed="true"]{background:var(--ink);color:var(--on-ink);}
-.run-density .rc-dseg:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-/* One body per density. The other is display:none — which zeroes its scrollers, so
-   setRunDensity stashes .log scrollTop + .run-flow-wrap scrollLeft across the flip. */
-.run-card[data-density="compact"] .rc-detailed{display:none;}
-.run-card[data-density="detailed"] .rc-compact{display:none;}
-.rc-compact{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:14px;}
-.rc-step-chip{padding:4px 10px;border-radius:999px;font:700 11px var(--mono);
-  letter-spacing:.04em;background:var(--field);color:var(--ink-2);white-space:nowrap;}
-.rc-step-chip.st-blue{background:var(--blue-bg);color:var(--blue-ink);}
-.rc-step-chip.st-amber{background:var(--amber-bg);color:var(--amber-ink);}
-.rc-step-chip.st-green{background:var(--green-bg);color:var(--green-ink);}
-.rc-step-chip.st-red{background:var(--red-bg);color:var(--red-ink);}
-.rc-step-name{min-width:0;font:600 14.5px var(--sans);color:var(--ink);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.rc-step-model{font:400 12px var(--mono);color:var(--ink-3);margin-left:auto;white-space:nowrap;}
-.rc-step-model[hidden]{display:none;}
-/* .run-top's old 18px bottom margin used to open this gap. */
-.rc-detailed{margin-top:18px;}
+/* The Running list is History-level: header, one meta line, and — when the run waits on you — one strip
+   that opens the run page at the question. */
+.rc-wait{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;margin-top:16px;padding:10px 14px;
+  border:1px solid var(--line);border-radius:12px;background:var(--field);color:var(--ink-2);font:600 13px var(--sans);text-align:left;cursor:pointer;
+  transition:border-color .15s,background .15s;}
+.rc-wait[hidden]{display:none;}
+.rc-wait.is-ask{border-color:var(--amber-line);background:var(--amber-wash);color:var(--ink);}
+.rc-wait:hover{border-color:var(--hover-outline);}
+.rc-wait:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.rc-wait-go{font-weight:600;white-space:nowrap;opacity:.8;}
 
 /* ---------- Running two-screen shell (twin of the History track, 1591-1603) ---------- */
 .view[data-view="running"]{flex:1 1 auto;min-height:0;padding:0;position:relative;}
@@ -3943,7 +4093,7 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
   border:1px solid var(--line);border-radius:9px;background:var(--field);
   font:700 12px var(--mono);color:var(--ink);cursor:pointer;}
 .rd-branch-copy[hidden]{display:none;}
-.rd-branch-copy:hover{border-color:var(--ink-3);background:var(--panel);}
+.rd-branch-copy:hover{border-color:var(--hover-outline);}
 .rd-branch-name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .rd-branch-copy .ico-check{display:none;}
 .rd-branch-copy.copied .ico-copy{display:none;}
@@ -3954,14 +4104,14 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
 .rd-pause{display:flex;align-items:center;gap:8px;padding:9px 15px;border:1.5px solid var(--amber-bg);
   border-radius:999px;background:var(--panel);font:600 12.5px var(--sans);color:var(--amber-ink);cursor:pointer;}
 .rd-pause[hidden]{display:none;}
-.rd-pause:hover:not([disabled]){background:var(--amber-bg);border-color:var(--amber);}
+.rd-pause:hover:not([disabled]){border-color:var(--amber);}
 .rd-pause[disabled]{opacity:.55;cursor:not-allowed;}
 /* Only one of the two glyphs shows; data-action decides which. */
 .rd-pause[data-action="pause"] .ico-play,.rd-pause[data-action="resume"] .ico-pause{display:none;}
 .rd-stop{display:flex;align-items:center;gap:8px;padding:9px 15px;border:1.5px solid var(--red-bg);
   border-radius:999px;background:var(--panel);font:600 12.5px var(--sans);color:var(--red-ink);cursor:pointer;}
 .rd-stop[hidden]{display:none;}
-.rd-stop:hover:not([disabled]){background:var(--red-bg);border-color:var(--red);}
+.rd-stop:hover:not([disabled]){border-color:var(--red);}
 .rd-error{margin-top:24px;color:var(--red-ink);font-size:12.5px;}
 .rd-error[hidden]{display:none;}
 /* .btn-ghost declares no focus ring and .rd-back is focused programmatically by
@@ -3975,6 +4125,178 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
 @media (prefers-reduced-motion: reduce){
   .run-screen{transition:none;}
   .rd-status .pdot,.rd-status.parked .pdot{animation:none;}
+}
+
+/* ---------- Running detail: bar, glance and Details modes ---------- */
+/* One screen, two modes (`.rd[data-mode]`): the glance (status line, trail, sheet)
+   and Details (header card, tabs, mini bar). The bar is shared and sticky. Every
+   control on it is one height so the row reads as one strip. */
+.rd-bar,.hd-bar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;
+  padding:12px 32px;background:var(--bg);border-bottom:1px solid var(--line);}
+.rd-bar-mid{flex:1 1 auto;display:flex;justify-content:center;align-items:center;gap:8px;min-width:0;}
+/* The run's name. Details has it as its header's title, so the bar leaves it blank there. */
+/* The glance's page title owns the name; the bar repeats it only once that heading has
+   scrolled out of view (app.js watchPageTitle sets data-title-out), like a large title
+   collapsing into the navigation bar. Details has its own header, so never there. */
+.rd-bar-title{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font:600 14px var(--sans);color:var(--ink);
+  opacity:0;transition:opacity .2s;}
+.rd[data-title-out="1"][data-mode="glance"] .rd-bar-title,.hd[data-title-out="1"][data-mode="glance"] .rd-bar-title{opacity:1;}
+@media (prefers-reduced-motion:reduce){.rd-bar-title{transition:none;}}
+.rd-bar-end{display:flex;align-items:center;gap:8px;}
+.rd-bar .rd-back,.rd-bar .rd-to-run,.hd-bar .hd-back,.hd-bar .hd-to-run,.rd-bar .rd-pause,.rd-bar .rd-stop{height:36px;box-sizing:border-box;}
+.rd-to-run,.hd-to-run{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;}
+.rd-to-run.ask{background:var(--panel);border-color:var(--amber);color:var(--amber-ink);}   /* a question waits on the glance */
+.rd-back[hidden],.hd-bar .hd-back[hidden],.hd-to-run[hidden],.rd-to-run[hidden]{display:none;}
+.rd-to-run:focus-visible,.hd-to-run:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+/* The page focuses its way back when it opens; that ring shows only to keyboard users
+   (app.js sets data-input from the last keydown / pointerdown). */
+:root[data-input="pointer"] :is(.rd-bar,.hd-bar) :focus-visible{outline:none;}
+.rd > .rd-error{margin:12px 32px 0;}
+.rd-glance[hidden],.rd-details[hidden]{display:none;}
+
+.rd-glance{max-width:640px;margin:0 auto;padding:28px 32px var(--ask-dock-clearance);display:flex;flex-direction:column;gap:22px;}
+/* A waiting question reads easier wide: the column opens to twice the run panel's width
+   for it, while the header and the panel keep their 576px measure and do not move. */
+.rd-glance:has(> .rd-questions:not([hidden])){max-width:1216px;}
+.rd-glance:has(> .rd-questions:not([hidden])) > :is(.rd-now,.rd-sheet){width:100%;max-width:576px;align-self:center;}
+.rd-now{display:flex;flex-direction:column;gap:18px;}
+/* The run's name is the page's subject: the largest type on it. */
+.rd-page-head{min-width:0;}
+.rd-page-title{margin:0;font:700 28px/1.2 var(--sans);letter-spacing:-.02em;overflow-wrap:anywhere;text-wrap:balance;}
+.rd-page-meta{margin:6px 0 0;color:var(--ink-2);font-size:13px;}
+.rd-page-meta:empty{display:none;}
+/* The card's head: the status line top left, the Live view switch (app.js paintRdLive)
+   top right, level with the state word. */
+.rd-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;min-width:0;}
+.rd-sheet-head > .rd-now-top{flex:1 1 auto;}
+.rd-sheet-head > .rd-live-row{flex:none;height:23px;}   /* the state word's line box (18px × 1.3) */
+/* The status line: what is happening now. A state word, then what it concerns. */
+.rd-now-top{display:flex;align-items:center;gap:12px;min-width:0;}
+.rd-orb{flex:none;display:flex;}
+.rd-now-text{min-width:0;}
+.rd-now-title{margin:0;font:600 18px/1.3 var(--sans);letter-spacing:-.01em;overflow-wrap:anywhere;}
+.rd-now-title .rd-now-state{font-weight:700;}
+.rd-now-title .rd-now-elapsed{color:var(--ink-2);font-weight:500;font-variant-numeric:tabular-nums;}
+.rd-now-sub{margin:2px 0 0;color:var(--ink-2);font-size:13.5px;line-height:1.45;overflow-wrap:anywhere;}
+
+/* The status glyph (run-glance.mjs renderOrb): colour is the state. */
+.rg-orb-bg{fill:var(--blue-bg);}
+.rg-orb-core{fill:var(--blue);transform-box:fill-box;transform-origin:center;animation:rg-breathe 2.4s ease-in-out infinite;}
+.rg-orb-start .rg-orb-bg{fill:var(--peach-bg);}
+.rg-orb-start .rg-orb-core{fill:var(--peach);}
+.rg-orb-ask .rg-orb-bg{fill:var(--amber-bg);}
+.rg-orb-ask .rg-orb-mark{stroke:var(--amber-ink);stroke-width:3.2;stroke-linecap:round;stroke-linejoin:round;}
+.rg-orb-dot{fill:var(--amber-ink);}
+.rg-orb-paused .rg-orb-bg{fill:var(--amber-bg);}
+.rg-orb-fill{fill:var(--amber-ink);}
+.rg-orb-done .rg-orb-bg{fill:var(--green-bg);}
+.rg-orb-done .rg-orb-mark{stroke:var(--green-ink);stroke-width:3.2;stroke-linecap:round;stroke-linejoin:round;}
+/* A finished run: one glyph per headline. Colour answers "is this mine to deal with?":
+   green good to go, amber wants you, blue with someone else, violet shipped, grey nothing to do. */
+.rg-orb-line{stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round;}
+.rg-orb-ship .rg-orb-bg{fill:var(--green-bg);}
+.rg-orb-ship .rg-orb-line{stroke:var(--green-ink);}
+.rg-orb-review .rg-orb-bg{fill:var(--amber-bg);}
+.rg-orb-review .rg-orb-line{stroke:var(--amber-ink);stroke-width:3;}
+.rg-orb-pr-open .rg-orb-bg{fill:var(--blue-bg);}
+.rg-orb-pr-open .rg-orb-line{stroke:var(--blue-ink-strong);}
+.rg-orb-merged .rg-orb-bg{fill:var(--violet-bg);}
+.rg-orb-merged .rg-orb-line{stroke:var(--violet-ink);}
+.rg-orb-pr-closed .rg-orb-bg,.rg-orb-finished .rg-orb-bg{fill:var(--field);}
+.rg-orb-pr-closed .rg-orb-line{stroke:var(--ink-2);}
+.rg-orb-finished .rg-orb-mark{stroke:var(--ink-2);stroke-width:3.2;stroke-linecap:round;stroke-linejoin:round;}
+.rg-orb-fail .rg-orb-bg,.rg-orb-stop .rg-orb-bg{fill:var(--red-bg);}
+.rg-orb-fail .rg-orb-mark{stroke:var(--red-ink);stroke-width:3.4;stroke-linecap:round;}
+.rg-orb-stop .rg-orb-mark{fill:var(--red-ink);stroke:none;}
+@keyframes rg-breathe{0%,100%{transform:scale(.78);}50%{transform:scale(1);}}
+
+/* The trail: one dot per step execution; overlapping executions stack. */
+.rg-trail{display:inline-flex;align-items:center;flex-wrap:wrap;gap:5px;}
+.rg-td{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--green);flex:none;}
+.rg-td-act{background:var(--blue);animation:wr-pulse 1.6s ease-in-out infinite;}
+.rg-td-ask{background:var(--amber);}
+.rg-td-fail{background:var(--red);}
+.rg-td-stop{background:var(--ink-3);}
+.rg-tstack{display:inline-flex;flex-direction:column;align-items:center;gap:3px;}
+.rg-tmore{font:600 9.5px/1 var(--mono);color:var(--ink-2);}
+
+/* The sheet under the status line: banners, the waiting question, the result,
+   what runs now, and the way into Details. */
+.rd-sheet{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);box-shadow:var(--shadow);
+  padding:18px;display:flex;flex-direction:column;gap:16px;}
+.rd-sheet .rd-banners:has(> :not([hidden])){margin-top:0;}
+.rd-sheet .rd-banners:not(:has(> :not([hidden]))){display:none;}
+.rd-nowlist{display:flex;flex-direction:column;gap:16px;}
+.rd-nowlist:empty{display:none;}
+.rd-sgroup{display:flex;flex-direction:column;gap:6px;}
+.rd-slabel{font:600 11px var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);padding:0 4px;}
+.rd-slist{background:var(--field);border-radius:var(--r-ctrl);overflow:hidden;display:flex;flex-direction:column;}
+.rd-srow{all:unset;box-sizing:border-box;width:100%;display:flex;align-items:center;gap:12px;padding:12px 14px;
+  font:400 14px var(--sans);color:var(--ink);border-top:1px solid var(--line);}
+.rd-srow:first-child{border-top:0;}
+button.rd-srow{cursor:pointer;}
+button.rd-srow:hover{background:var(--hover-on-field);}
+.rd-srow:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
+.rd-srow-tx{flex:1;min-width:0;overflow-wrap:anywhere;}
+.rd-srow-ico{flex:none;color:var(--ink-2);}   /* the tab icon the row leads to */
+.rd-srow-tx small{display:block;color:var(--ink-2);font-size:12.5px;}
+.rd-srow-v{color:var(--ink-2);font-size:12.5px;white-space:nowrap;}
+.rd-srow.chv::after{content:"›";color:var(--ink-2);font-size:20px;line-height:1;}
+.rd-slist .issues{margin:0;padding:10px 14px;}
+
+.rd-result{display:flex;flex-direction:column;gap:16px;}
+.rd-result[hidden]{display:none;}
+.rd-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;text-align:center;}
+.rd-facts:empty{display:none;}
+.rd-stats[data-n="2"]{grid-template-columns:repeat(2,minmax(0,1fr));}
+.rd-stats[data-n="1"]{grid-template-columns:minmax(0,1fr);}
+.rd-stats > div{background:var(--field);border-radius:var(--r-ctrl);padding:12px 6px;display:flex;flex-direction:column;gap:2px;min-width:0;}
+.rd-stats b{font:700 20px var(--sans);font-variant-numeric:tabular-nums;letter-spacing:-.01em;overflow-wrap:anywhere;}
+.rd-stats b .hd-diff-counts{font-size:inherit;font-weight:700;}   /* large text: the counts sit on --field */
+.rd-stats > div > span{font-size:11.5px;color:var(--ink-2);}
+.rd-result-actions{display:flex;flex-direction:column;gap:8px;}
+.rd-cta{display:block;box-sizing:border-box;width:100%;text-align:center;font:600 15px var(--sans);border:0;border-radius:var(--r-ctrl);
+  padding:13px;cursor:pointer;background:var(--ink);color:var(--on-ink);text-decoration:none;
+  transition:filter .15s,transform .15s,box-shadow .15s;}
+.rd-cta:hover{box-shadow:inset 0 0 0 999px var(--solid-hover);transform:translateY(-1px);}
+/* The grey secondary: the outline rule, drawn inset (it has no border to recolour). */
+.rd-cta.alt{background:var(--field);color:var(--ink);}   /* secondary: ink like .btn/.btn-ghost; blue is for links */
+.rd-cta.alt:hover{filter:none;transform:none;box-shadow:inset 0 0 0 1.5px var(--hover-outline);}
+.rd-cta:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+/* Details: the header card and the tabs. The shared bar above carries the status and the way back. */
+.rd-details{display:flex;flex-direction:column;min-height:100%;}
+.rd-details .rd-body{flex:1 0 auto;}
+
+/* History uses the same two modes. Its graph is painted into the page body before the
+   tabs exist and moves into the Workflow tab on first open; until then it stays out of
+   the way. */
+.hd-body > .hd-graph{display:none;}
+.hd > .hd-error{margin:12px 32px 0;}
+
+/* Details › Diff and Q&A */
+.rd-diff-note{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;color:var(--ink-2);font-size:12.5px;}
+.rd-diff-refresh[hidden]{display:none;}
+.rd-diff-row{all:unset;box-sizing:border-box;width:100%;display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:9px;cursor:pointer;font-size:12.5px;}
+.rd-diff-row:hover{background:var(--hover);}
+.rd-diff-row.active{background:var(--blue-bg);}
+.rd-diff-row:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
+.rd-diff-row-path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.rd-diff-new{font:600 10.5px var(--sans);padding:1px 7px;border-radius:999px;background:var(--green-bg);color:var(--green-ink);}
+.rd-empty{color:var(--ink-2);font-size:13px;padding:18px 4px;}
+
+@media (max-width:640px){
+  .rd-bar,.hd-bar{padding:10px 16px;flex-wrap:wrap;gap:8px;}
+  .rd-bar-mid{justify-content:flex-start;flex-basis:0;}   /* the name truncates beside the back button */
+  .rd-bar-end{margin-left:auto;gap:6px;}
+  .rd-bar-end:empty{display:none;}
+  .rd-bar .rd-pause,.rd-bar .rd-stop{padding:0 11px;}
+  .rd-glance{padding:20px 16px var(--ask-dock-clearance);}
+  .rd-page-title{font-size:24px;}
+  .rd-details .rd-header{margin:16px 16px 0;}
+  .rd-details .rd-body{padding-inline:16px;}
+}
+@media (prefers-reduced-motion: reduce){
+  .rg-orb-core,.rg-td-act{animation:none;}
 }
 
 /* ---------- Running detail: pipeline graph ---------- */
@@ -4002,7 +4324,8 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
 /* ---------- Running detail: question panel ---------- */
 /* Container only — the panel's own restyle (larger metrics, green-tinted picked
    options, the "N of M answered" footer, "Open run") is T11 for BOTH mounts. */
-.rd-questions{margin-top:18px;animation:wr-rise .3s cubic-bezier(.2,.7,.3,1) both;}
+.rd-questions{margin-top:0;animation:wr-rise .3s cubic-bezier(.2,.7,.3,1) both;
+  display:flex;flex-direction:column;gap:10px;}   /* its heading, then the panel */
 /* Explicit twin: the UA [hidden] rule is (0,0,0) and loses to any author
    `display`, so without this the panel would render even while hidden. */
 .rd-questions[hidden]{display:none;}
@@ -4014,6 +4337,65 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
 /* MUST sit after the rule it neutralizes — @media contributes no specificity. */
 @media (prefers-reduced-motion: reduce){
   .rd-questions{animation:none;}
+}
+
+/* ---------- Running detail: Live view ---------- */
+/* The glance's running step(s), centred in a fogged graph (app.js paintRdLive, the
+   `focus` host in graph/run-hosts.mjs). Beside the card when the PAGE AREA is wide —
+   a container query, so a collapsed sidebar counts — and below it otherwise. app.js
+   slides the left column into place (flipGlance); the panel's own entrance is here.
+   Opacity is the LAST transition to end on the way out in both layouts: app.js drops
+   the graph on its transitionend. */
+.rd{container:rd / inline-size;}
+.switch-row.rd-live-row{gap:10px;}
+.rd-live-row[hidden]{display:none;}   /* .switch-row's display:flex beats the UA [hidden] rule */
+.rd-live-row .switch{transform:scale(.85);transform-origin:right center;margin-left:-6px;}
+.rd-live-row .txt{font-size:13px;color:var(--ink-2);}
+/* Narrow: the panel opens its height under the card (0fr → 1fr), eating the column gap
+   it would otherwise add at once, and rises into place. */
+.rd-live{display:grid;grid-template-rows:0fr;margin-top:-22px;opacity:0;transform:translateY(10px);
+  cursor:pointer;border-radius:var(--r-card);
+  transition:grid-template-rows .3s cubic-bezier(.4,0,.2,1),margin-top .3s cubic-bezier(.4,0,.2,1),opacity .3s ease,transform .3s ease;}
+.rd-live.is-in{grid-template-rows:1fr;margin-top:0;opacity:1;transform:none;
+  transition:grid-template-rows .42s cubic-bezier(.2,.7,.3,1),margin-top .42s cubic-bezier(.2,.7,.3,1),
+    opacity .36s ease .1s,transform .42s cubic-bezier(.2,.7,.3,1) .1s;}
+.rd-live[hidden]{display:none;}
+.rd-live:focus-visible{outline:2px solid var(--ink);outline-offset:4px;}
+.rd-live-clip{min-height:0;overflow:hidden;}
+/* The fog: the canvas fades out from its middle (the mask) and hazes toward its edges
+   (a blur layer masked the other way), so the panel has no hard edge — only the running
+   card stays clear. `closest-side` puts the fully faded ring AT the panel's edges; the
+   clear 60% is FOCUS_CLEAR (graph/run-hosts.mjs), the box the focus fit fills. A mask
+   reads only alpha, so any opaque token stands in for black. The graph host keeps its
+   final size while the clip opens. */
+.rd-live .run-flow-wrap{height:320px;margin:0;border-color:transparent;overflow:hidden;
+  -webkit-mask-image:radial-gradient(closest-side, var(--ink) 60%, transparent 100%);
+  mask-image:radial-gradient(closest-side, var(--ink) 60%, transparent 100%);}
+.rd-live .run-flow-wrap::after{content:"";position:absolute;inset:0;z-index:2;pointer-events:none;
+  -webkit-backdrop-filter:blur(2.5px);backdrop-filter:blur(2.5px);
+  -webkit-mask-image:radial-gradient(closest-side, transparent 66%, var(--ink) 100%);
+  mask-image:radial-gradient(closest-side, transparent 66%, var(--ink) 100%);}
+/* The camera glides when the work moves on (focusNodeIds). */
+.rd-live .gv-world{transition:transform .7s cubic-bezier(.4,0,.2,1);}
+@container rd (min-width: 1040px){
+  /* :not([hidden]) — this weighs the same as `.rd-glance[hidden]{display:none}` and comes
+     later, so without it Details would open UNDER a glance that never went away. */
+  .rd-glance[data-live="on"]:not([hidden]){max-width:1216px;display:grid;grid-template-columns:576px minmax(0,1fr);
+    column-gap:28px;row-gap:22px;align-items:start;}
+  .rd-glance[data-live="on"] > .rd-now{grid-column:1;grid-row:1;}
+  .rd-glance[data-live="on"] > .rd-sheet{grid-column:1;grid-row:2;}
+  .rd-glance[data-live="on"] > .rd-questions{grid-column:1 / -1;}
+  /* Wide: as tall as the card (320px at least), its top level with the card's; it slides
+     in from the right out of a blur once the card has made room. */
+  .rd-glance[data-live="on"] > .rd-live{grid-column:2;grid-row:2;align-self:stretch;min-height:320px;
+    grid-template-rows:1fr;margin-top:0;transform:translateX(28px);filter:blur(6px);
+    transition:opacity .22s ease,transform .22s ease,filter .22s ease;}
+  .rd-glance[data-live="on"] > .rd-live.is-in{transform:none;filter:none;
+    transition:opacity .38s ease .12s,transform .5s cubic-bezier(.2,.7,.3,1) .12s,filter .38s ease .12s;}
+  .rd-glance[data-live="on"] > .rd-live .run-flow-wrap{height:100%;}
+}
+@media (prefers-reduced-motion: reduce){
+  .rd-live,.rd-live.is-in,.rd-live .gv-world{transition:none !important;}
 }
 
 /* ---------- Running detail: tab bodies ---------- */
@@ -4041,7 +4423,7 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
 .rd-tab:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .rd-tab-badge{padding:2px 8px;border-radius:999px;background:var(--field);color:var(--ink-3);
   font:600 10.5px var(--mono);}
-.rd-tab.active .rd-tab-badge{background:var(--blue-bg);color:var(--blue-ink);}
+.rd-tab.active .rd-tab-badge{background:var(--blue-bg);color:var(--blue-ink-strong);}
 /* .rd-sections needs no rule of its own — the inset comes from .rd-body's
    padding, exactly as .hd-sections does. */
 .rd-sec{margin-top:4px;}
@@ -4178,13 +4560,13 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
 .stop-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:22px;}
 .stop-cancel{padding:11px 20px;border:1.5px solid var(--line-2);border-radius:999px;
   background:var(--panel);font:600 13.5px var(--sans);color:var(--ink);cursor:pointer;}
-.stop-cancel:hover{background:var(--field);}
+.stop-cancel:hover{background:var(--hover);}
 .stop-confirm{padding:11px 20px;border:1.5px solid transparent;border-radius:999px;
   background:var(--red-bg);font:600 13.5px var(--sans);color:var(--red-ink);cursor:pointer;}
 /* The mockup's hover is #F7D2CD — a shade §9 does not name and no token carries.
    brightness() keeps the darker-on-hover intent inside the existing palette (and
    out of Task 12's "one occurrence per new literal" assertion). */
-.stop-confirm:hover{filter:brightness(.97);}
+.stop-confirm:hover{border-color:var(--red);}
 .stop-confirm:disabled{opacity:.6;cursor:default;}
 .stop-cancel:focus-visible,.stop-confirm:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 
@@ -4211,7 +4593,7 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
   width:30px;height:30px;flex:0 0 auto;padding:0;border:0;border-radius:9px;
   background:transparent;color:var(--ink);cursor:pointer;}
 .side-toggle svg{width:23px;height:23px;}
-.side-toggle:hover{background:var(--field);color:var(--ink);}
+.side-toggle:hover{background:var(--hover);color:var(--ink);}
 .side-toggle:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 
 /* 76 - 1px border-right - 36px padding = a 39px content box. But
@@ -4353,7 +4735,7 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
    turns var(--field) grey with var(--ink) initials. The mock's hover changes the
    border only. Specificity is decided before source order — putting this rule
    later cannot fix it. */
-.nav .rail-tile:hover{background:var(--panel);border-color:var(--ink);color:var(--ink-2);}
+.nav .rail-tile:hover{background:var(--panel);border-color:var(--hover-outline);color:var(--ink-2);}
 /* Three (0,3,0) rules in a row, so SOURCE ORDER decides between them:
    `:hover` first, `.lingering` next (a hovered lingering tile stays grey), and
    `.active` last (a selected lingering tile must not render --ink-3 text on an
@@ -4462,7 +4844,7 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
   .mbar-menu{position:relative;display:flex;align-items:center;justify-content:center;flex:0 0 auto;
     width:40px;height:40px;padding:0;border:0;border-radius:12px;background:transparent;color:var(--ink);cursor:pointer;}
   .mbar-menu svg{width:22px;height:22px;}
-  .mbar-menu:hover{background:var(--field);}
+  .mbar-menu:hover{background:var(--hover);}
   .mbar-menu:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
   .mbar-menu .nav-rollup{position:absolute;top:6px;right:6px;margin:0;border:2px solid var(--panel);}
   .mbar-mark{width:26px;height:26px;flex:0 0 auto;background:var(--ink);
@@ -4480,7 +4862,7 @@ body.view-running .main{display:flex;flex-direction:column;overflow:hidden;paddi
   .side-close{display:flex;align-items:center;justify-content:center;flex:0 0 auto;
     width:36px;height:36px;padding:0;border:0;border-radius:10px;background:transparent;color:var(--ink);cursor:pointer;}
   .side-close svg{width:20px;height:20px;}
-  .side-close:hover{background:var(--field);}
+  .side-close:hover{background:var(--hover);}
   .side-close:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 }
 
@@ -4504,7 +4886,7 @@ body.rail-collapsed .ask-dock{left:76px;}
   border:1.5px solid var(--line-2);border-radius:999px;background:var(--panel);color:var(--ink);
   font-family:inherit;font-weight:600;font-size:13.5px;cursor:pointer;
   box-shadow:var(--shadow-pop);transition:border-color .15s;}
-.ask-pill:hover{border-color:var(--ink);}
+.ask-pill:hover{border-color:var(--hover-outline);}
 .ask-pill:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-pill[hidden]{display:none;}
 /* "Thinking" on the collapsed pill: the label shimmers, the same sweep the live
@@ -4567,13 +4949,13 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-scope-btn{display:inline-flex;align-items:center;gap:5px;max-width:180px;height:30px;flex:none;padding:0 9px;
   border:1px solid var(--line);border-radius:999px;background:none;color:var(--ink-3);
   font:inherit;font-size:11.5px;cursor:pointer;}
-.ask-scope-btn:hover{background:var(--field);color:var(--ink);}
+.ask-scope-btn:hover{background:var(--hover);color:var(--ink);}
 .ask-scope-btn:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-scope-btn.is-pinned{color:var(--ink);border-color:var(--line-2);font-weight:600;}
 .ask-scope-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ask-icon-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;padding:0;
   border:0;border-radius:9px;background:transparent;color:var(--ink-2);cursor:pointer;transition:.15s;}
-.ask-icon-btn:hover{background:var(--field);color:var(--ink);}
+.ask-icon-btn:hover{background:var(--hover);color:var(--ink);}
 .ask-icon-btn:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 
 /* `overflow-anchor:auto` is the UA default, stated here on purpose: it is the
@@ -4649,7 +5031,7 @@ body.rail-collapsed .ask-dock{left:76px;}
   font-family:var(--mono);font-weight:400;font-size:9.5px;letter-spacing:0;text-transform:none;}
 .ask-agent-row{display:flex;align-items:center;gap:9px;width:100%;padding:5px 7px;border:0;border-radius:9px;
   background:transparent;text-align:left;cursor:pointer;font-family:inherit;transition:.15s;}
-.ask-agent-row:hover{background:var(--field);}
+.ask-agent-row:hover{background:var(--hover);}
 .ask-agent-row:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
 .ask-agent-name{min-width:0;font-family:var(--mono);font-size:11.5px;color:var(--ink);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
@@ -4717,10 +5099,10 @@ body.rail-collapsed .ask-dock{left:76px;}
   font-size:11.5px;cursor:pointer;}
 .ask-card-not-now{padding:8px 13px;border:0;border-radius:999px;background:transparent;color:var(--ink-2);
   font-family:inherit;font-weight:600;font-size:12px;cursor:pointer;transition:.15s;}
-.ask-card-not-now:hover{background:var(--field);color:var(--ink);}
+.ask-card-not-now:hover{background:var(--hover);color:var(--ink);}
 .ask-card-start{display:flex;align-items:center;gap:7px;padding:8px 15px;border:0;border-radius:999px;
   background:var(--ink);color:var(--panel);font-family:inherit;font-weight:600;font-size:12px;cursor:pointer;transition:.15s;}
-.ask-card-start:hover{filter:brightness(1.08);}
+.ask-card-start:hover{box-shadow:inset 0 0 0 999px var(--solid-hover);}
 .ask-card-start:disabled{opacity:.55;cursor:default;}
 .ask-card :is(.ask-card-seg-btn,.ask-card-not-now,.ask-card-start,.ask-card-open-np):focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-card-stub{font-size:12.5px;color:var(--ink-3);}
@@ -4745,7 +5127,7 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-rp-sec-title{font-weight:600;font-size:12.5px;color:var(--ink);}
 .ask-rp-sec-sub{font-size:11.5px;color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1 1 auto;}
 .ask-rp-mini{height:22px;padding:0 9px;border:0;border-radius:999px;background:transparent;color:var(--ink-2);font-family:inherit;font-size:11.5px;font-weight:600;cursor:pointer;}
-.ask-rp-mini:hover{background:var(--field);color:var(--ink);}
+.ask-rp-mini:hover{background:var(--hover);color:var(--ink);}
 .ask-rp .ask-card-seg{gap:3px;padding:3px;border-radius:999px;background:var(--field);margin-left:auto;}
 .ask-rp .ask-card-seg-btn{height:24px;padding:0 12px;border:0;font-size:11.5px;}
 .ask-rp .ask-card-seg-btn.on{background:var(--ink);color:var(--on-ink);}
@@ -4958,7 +5340,7 @@ body.rail-collapsed .ask-dock{left:76px;}
   display:flex;align-items:center;gap:7px;padding:6px 12px;border:1px solid var(--line-2);border-radius:999px;
   background:var(--panel);color:var(--ink);font-family:inherit;font-weight:600;font-size:11.5px;cursor:pointer;
   box-shadow:var(--shadow-hover);transition:border-color .15s;}
-.ask-jump:hover{border-color:var(--ink);}
+.ask-jump:hover{border-color:var(--hover-outline);}
 .ask-jump[hidden]{display:none;}
 .ask-jump:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 
@@ -4978,7 +5360,7 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-chip-thumb{width:24px;height:24px;object-fit:cover;border-radius:4px;flex:none;}
 .ask-chip-x{border:0;background:transparent;color:var(--ink-3);cursor:pointer;font-family:inherit;
   font-size:13px;line-height:1;padding:1px 4px;border-radius:5px;transition:.15s;}
-.ask-chip-x:hover{background:var(--line);color:var(--ink);}
+.ask-chip-x:hover{background:var(--hover-on-field);color:var(--ink);}
 .ask-composer textarea.ask-input{min-height:0;height:auto;max-height:120px;resize:none;border:0;border-radius:0;
   background:transparent;padding:6px 6px 8px;font-size:13.5px;line-height:1.6;}
 .ask-composer textarea.ask-input:focus{background:transparent;border-color:transparent;}
@@ -4993,18 +5375,18 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-agents-btn{display:flex;align-items:center;gap:6px;padding:5px 8px;border:0;border-radius:8px;
   background:transparent;color:var(--ink-3);font-family:var(--mono);font-size:10.5px;white-space:nowrap;
   cursor:pointer;transition:.15s;}
-.ask-agents-btn:hover{background:var(--field);color:var(--ink);}
+.ask-agents-btn:hover{background:var(--hover);color:var(--ink);}
 .ask-model-btn{display:flex;align-items:center;gap:7px;padding:6px 10px;border:0;border-radius:9px;
   background:transparent;color:var(--ink);font-family:inherit;font-weight:600;font-size:12.5px;cursor:pointer;transition:.15s;}
-.ask-model-btn:hover{background:var(--field);}
+.ask-model-btn:hover{background:var(--hover);}
 .ask-model-btn-effort{font-weight:500;color:var(--ink-3);}
 .ask-send,.ask-stop{display:inline-flex;align-items:center;justify-content:center;width:31px;height:31px;
   flex:0 0 31px;border-radius:50%;cursor:pointer;transition:.15s;}
 .ask-send{border:0;background:var(--ink);color:var(--panel);}
-.ask-send:hover{filter:brightness(1.08);}
+.ask-send:hover{box-shadow:inset 0 0 0 999px var(--solid-hover);}
 .ask-send[hidden]{display:none;}
 .ask-stop{border:1.5px solid var(--line);background:var(--panel);color:var(--ink);}
-.ask-stop:hover{border-color:var(--ink);}
+.ask-stop:hover{border-color:var(--hover-outline);}
 .ask-stop[hidden]{display:none;}
 .ask-composer :is(.ask-agents-btn,.ask-wt-btn,.ask-model-btn,.ask-send,.ask-stop,.ask-chip-x):focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 /* The button shares .ask-agents-btn, which is display:flex — that AUTHOR rule
@@ -5034,7 +5416,7 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-pop-divider{height:1px;margin:6px 11px;background:var(--line);}
 .ask-pop-item{display:flex;align-items:center;gap:10px;width:100%;padding:9px 11px;border:0;border-radius:12px;
   background:transparent;text-align:left;font-family:inherit;cursor:pointer;transition:.15s;}
-.ask-pop-item:hover,.ask-pop-item:focus-visible{background:var(--field);outline:none;}
+.ask-pop-item:hover,.ask-pop-item:focus-visible{background:var(--hover);outline:none;}
 .ask-pop-item:disabled{cursor:default;color:var(--ink-3);}
 .ask-pop-item:disabled:hover{background:transparent;}
 .ask-model-name{font-weight:500;font-size:13.5px;color:var(--ink);}
@@ -5067,7 +5449,7 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-threads-list{max-height:min(360px,calc(100vh - 200px));overflow-y:auto;overscroll-behavior:contain;
   border-radius:10px;}
 .ask-thread-row{display:flex;align-items:center;border-radius:10px;}
-.ask-thread-row:hover{background:var(--field);}
+.ask-thread-row:hover{background:var(--hover);}
 .ask-thread-pick{flex:1 1 auto;min-width:0;padding:8px 4px 8px 10px;border-radius:10px;}
 /* The date leads the meter line: bold and on --ink so it anchors the scan while
    the ctx/cost/agent figures beside it keep the meter's grey. An inline span, so
@@ -5097,7 +5479,7 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-thread-trash:hover{background:var(--red-bg);color:var(--red-ink);}
 .ask-thread-trash:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-runinfo-row{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:10px;}
-.ask-runinfo-row:hover{background:var(--field);}
+.ask-runinfo-row:hover{background:var(--hover);}
 .ask-runinfo-col{display:flex;flex-direction:column;gap:1px;min-width:0;}
 .ask-runinfo-name{font-family:var(--mono);font-size:11.5px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ask-runinfo-sub{font-family:var(--mono);font-size:10px;color:var(--ink-3);}
@@ -5168,7 +5550,7 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-rc-pill.st-amber{background:var(--amber-bg);color:var(--amber-ink);}
 .ask-rc-spacer{flex:1 1 auto;}
 .ask-rc-open{display:inline-flex;align-items:center;height:28px;padding:0 12px;border-radius:999px;background:var(--ink);color:var(--panel);font-weight:600;font-size:12px;text-decoration:none;white-space:nowrap;transition:.15s;}
-.ask-rc-open:hover{filter:brightness(1.08);}
+.ask-rc-open:hover{box-shadow:inset 0 0 0 999px var(--solid-hover);}
 .ask-rc-open:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-rc-title{margin-top:12px;font-weight:600;font-size:15px;line-height:1.35;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ask-rc-sub{margin-top:4px;font-family:var(--mono);font-size:10.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
@@ -5469,7 +5851,7 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 .ob-door{display:flex;align-items:center;gap:12px;width:100%;padding:12px 14px;
   border:1.5px solid var(--line-2);border-radius:var(--r-ctrl);background:var(--surface);color:var(--ink);
   font:inherit;font-weight:600;font-size:14px;text-align:left;cursor:pointer;transition:border-color .15s,background .15s;}
-.ob-door:hover{border-color:var(--ink);background:var(--field);}
+.ob-door:hover{border-color:var(--hover-outline);}
 .ob-door:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ob-door-icon{display:grid;place-items:center;width:34px;height:34px;border-radius:10px;background:var(--violet-bg);color:var(--violet-ink);flex:0 0 auto;}
 .ob-door-icon svg{width:19px;height:19px;}
@@ -5532,7 +5914,7 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 .guide-actions{display:flex;align-items:center;gap:14px;}
 .guide-next{padding:6px 14px;border:0;border-radius:999px;background:var(--ink);color:var(--on-ink);
   font:600 12px var(--sans);font-family:inherit;cursor:pointer;transition:filter .12s;}
-.guide-next:hover{filter:brightness(1.15);}
+.guide-next:hover{box-shadow:inset 0 0 0 999px var(--solid-hover);transform:translateY(-1px);}
 .guide-next:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .guide-ring[hidden],.guide-balloon[hidden]{display:none;}
 /* A click on the scrim: the ring flashes a wider halo and the balloon bobs once — "here". */
@@ -5565,8 +5947,8 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 .btn-split > .btn-go:first-child{border-radius:999px 0 0 999px;padding-right:22px;}
 .btn-split > .btn-split-more{display:inline-flex;align-items:center;justify-content:center;background:var(--ink);color:var(--on-ink);
   border:none;border-left:1px solid var(--on-ink-wash-2);border-radius:0 999px 999px 0;padding:0 16px 0 13px;cursor:pointer;
-  transition:transform .15s,filter .15s;}
-.btn-split > .btn-split-more:hover{filter:brightness(1.08);}
+  transition:transform .15s,box-shadow .15s;}
+.btn-split > .btn-split-more:hover{box-shadow:inset 0 0 0 999px var(--solid-hover);}
 .btn-split > .btn-split-more:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .btn-split > .btn-go:disabled,.btn-split > .btn-split-more:disabled{opacity:.45;cursor:not-allowed;transform:none;filter:none;}
 .btn-split-menu{position:absolute;right:0;bottom:calc(100% + 8px);z-index:20;min-width:230px;padding:6px;
@@ -5574,7 +5956,7 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 .btn-split-menu[hidden]{display:none;}
 .btn-split-menu button{display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:100%;text-align:left;
   background:transparent;border:none;border-radius:11px;padding:10px 12px;font-family:inherit;cursor:pointer;color:var(--ink);}
-.btn-split-menu button:hover,.btn-split-menu button:focus-visible{background:var(--field);outline:none;}
+.btn-split-menu button:hover,.btn-split-menu button:focus-visible{background:var(--hover);outline:none;}
 .btn-split-menu b{font-weight:600;font-size:13.5px;}
 .btn-split-menu small{font-size:12px;color:var(--ink-3);}
 .btn-split.mini > .btn-go:first-child{padding:9px 14px 9px 16px;font-size:12.5px;}
@@ -5599,13 +5981,13 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
    [hidden]{display:none} — the .sched-quick[hidden] footgun above. Restate both. */
 .sched-presets[hidden],.sched-after[hidden]{display:none;}
 .sched-chip{border:1.5px solid transparent;cursor:pointer;font-family:inherit;transition:background .14s,border-color .14s;}
-.sched-chip:hover{border-color:var(--line-2);}
+.sched-chip:hover{border-color:var(--hover-outline);}
 .sched-chip.on{background:var(--surface);border-color:var(--ink);color:var(--ink);}
 .sched-chip:focus-visible,.sched-day:focus-visible,.sched-tz-change:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .sched-days{display:flex;flex-wrap:wrap;gap:6px;}
 .sched-day{width:42px;height:38px;border-radius:12px;border:1.5px solid transparent;background:var(--field);color:var(--ink-2);
   font:600 12.5px var(--sans);cursor:pointer;transition:background .14s,color .14s;}
-.sched-day:hover{border-color:var(--line-2);}
+.sched-day:hover{border-color:var(--hover-outline);}
 .sched-day.on{background:var(--ink);color:var(--on-ink);}
 .sched-inline{display:flex;gap:9px;align-items:center;}
 .sched-inline > *{flex:1 1 0;min-width:0;}
@@ -5790,7 +6172,7 @@ body.view-workspaces .level-banner{margin:12px 32px 0;flex:0 0 auto;}
 .lv-card{display:grid;grid-template-columns:40px minmax(0,1fr) 20px;align-items:center;gap:14px;width:100%;
   padding:13px 15px;border:1.5px solid var(--line-2);border-radius:var(--r-ctrl);background:var(--panel);color:var(--ink);
   font:inherit;text-align:left;cursor:pointer;transition:border-color .15s,background .15s;}
-.lv-card:hover{background:var(--field);}
+.lv-card:hover{background:var(--hover);}
 .lv-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .lv-card[aria-checked="true"]{border-color:var(--ink);background:var(--canvas-2);}
 .lv-card-icon{display:grid;place-items:center;width:40px;height:40px;border-radius:12px;background:var(--field);color:var(--ink-2);}
@@ -6085,7 +6467,7 @@ input.gv-name:focus-visible{outline:none;}
   border:1px solid var(--line-2);border-radius:9px;background:var(--panel);color:var(--ink-2);
   box-shadow:var(--shadow-soft);cursor:pointer;line-height:1;font-family:inherit;
   transition:background .12s,color .12s,opacity .12s;}
-.gv-nav-btn:hover:not(:disabled){background:var(--field);color:var(--ink);}
+.gv-nav-btn:hover:not(:disabled){background:var(--hover);color:var(--ink);}
 .gv-nav-btn:disabled{opacity:.42;cursor:default;box-shadow:none;}
 .gv-nav-btn:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
 .gv-nav-btn svg{display:block;}
@@ -6096,14 +6478,14 @@ input.gv-name:focus-visible{outline:none;}
 .gv-ins-toggle{flex:0 0 34px;width:34px;height:34px;display:grid;place-items:center;
   border:none;border-radius:9px;background:transparent;color:var(--ink-3);cursor:pointer;
   line-height:1;font-family:inherit;transition:background .12s,color .12s;}
-.gv-ins-toggle:hover{background:var(--field);color:var(--ink);}
+.gv-ins-toggle:hover{background:var(--hover);color:var(--ink);}
 /* The icon POINTS where the click sends the rail: right to collapse it into the
    edge, left to pull it back out. One element, turned by the state — never two
    glyphs that can disagree with `data-open`. */
 .gv-ins-toggle svg{display:block;flex:0 0 auto;transition:transform .15s;}
 .gv-ins-rail[data-open="collapsed"] .gv-ins-toggle svg{transform:rotate(180deg);}
 .gv-ins-rail[data-open="collapsed"] .gv-ins-toggle{flex-basis:28px;width:28px;border-radius:0;}
-.gv-ins-rail[data-open="collapsed"] .gv-ins-toggle:hover{background:var(--line);color:var(--ink);}
+.gv-ins-rail[data-open="collapsed"] .gv-ins-toggle:hover{background:var(--hover-on-field);color:var(--ink);}
 .gv-ins-toggle:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
 
 /* Segmented control, not two buttons: one track, the selected half raised. */
@@ -6210,7 +6592,7 @@ input.gv-name:focus-visible{outline:none;}
 .gv-pal-err{padding:22px 4px;text-align:center;font-size:13px;color:var(--ink-3);}
 .gv-retry{border:1.5px solid var(--line-2);background:var(--surface);color:var(--ink);font-family:inherit;
   font-weight:600;font-size:12px;padding:5px 13px;border-radius:999px;cursor:pointer;}
-.gv-retry:hover{background:var(--field);}
+.gv-retry:hover{background:var(--hover);}
 
 .pal-group[hidden]{display:none;}
 /* Each domain is its OWN disclosure — there is no chip row above the list, so a
@@ -6219,7 +6601,7 @@ input.gv-name:focus-visible{outline:none;}
   border:none;border-radius:9px;background:transparent;color:inherit;font-family:inherit;
   text-align:left;cursor:pointer;transition:background .12s;}
 .pal-group:first-of-type .pal-grp{margin-top:0;}
-.pal-grp:hover{background:var(--field);}
+.pal-grp:hover{background:var(--hover);}
 .pal-grp:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
 .pal-grp .chev{flex:0 0 auto;color:var(--ink-3);transition:transform .15s;}
 .pal-grp[aria-expanded="false"] .chev{transform:rotate(-90deg);}
@@ -6227,7 +6609,7 @@ input.gv-name:focus-visible{outline:none;}
 /* The global .chip is a 7px/13px page pill; a group header needs a count badge. */
 .pal-grp .chip{background:var(--field);color:var(--ink-3);font-weight:700;font-size:10.5px;
   padding:1px 8px;border-radius:999px;}
-.pal-grp:hover .chip{background:var(--line);}
+.pal-grp:hover .chip{background:var(--panel);}   /* on the hover grey, the chip turns white */
 .pal-grp .pinned-tag{background:transparent;border:1px solid var(--line-2);}
 .pal-pinned{border-top:1px solid var(--line);margin-top:16px;padding-top:4px;}
 /* One pill per row: the rail is a single column, and a two-up grid at 340px
@@ -6282,7 +6664,7 @@ input.gv-name:focus-visible{outline:none;}
 .gv-saved .pl-item{border-bottom:1px solid var(--line);}
 .gv-saved .pl-item:last-child{border-bottom:none;}
 .gv-saved .pl-row{display:flex;align-items:center;gap:14px;padding:12px 20px;transition:background .12s;}
-.gv-saved .pl-row:hover{background:var(--field);}
+.gv-saved .pl-row:hover{background:var(--hover);}
 /* The row IS the Open action for a v2 pipeline. */
 .gv-saved .pl-row.pl-openable{cursor:pointer;}
 .gv-saved .pl-row.pl-openable:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
@@ -6310,7 +6692,7 @@ input.gv-name:focus-visible{outline:none;}
 .gv-saved .pl-del{flex:0 0 auto;width:34px;height:34px;border-radius:999px;border:1.5px solid var(--red-bg);
   background:var(--panel);display:grid;place-items:center;cursor:pointer;color:var(--red-ink);transition:.12s;}
 .gv-saved .pl-del svg{width:15px;height:15px;stroke-width:1.9;}
-.gv-saved .pl-del:hover{border-color:var(--red);background:var(--red-bg);}
+.gv-saved .pl-del:hover{border-color:var(--red);}
 .gv-saved .pl-del:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .gv-saved .pl-empty{padding:30px 20px;text-align:center;color:var(--ink-3);font-size:13px;}
 .gv-archived{display:flex;flex-wrap:wrap;align-items:center;gap:7px;
@@ -6318,7 +6700,7 @@ input.gv-name:focus-visible{outline:none;}
 .gv-archived[hidden]{display:none;}
 .gv-archived .pl-chip{border:1px solid var(--line-2);background:var(--field);color:var(--ink-3);
   border-radius:999px;padding:2px 10px;font-family:inherit;font-size:11px;font-weight:600;cursor:pointer;transition:.12s;}
-.gv-archived .pl-chip:hover{border-color:var(--red);color:var(--red-ink);background:var(--red-bg);}
+.gv-archived .pl-chip:hover{border-color:var(--red);color:var(--red-ink);}
 
 /* ---------- save dialog ---------- */
 .save-dialog{border:none;border-radius:var(--r-card);padding:0;box-shadow:var(--shadow);max-width:420px;width:92vw;}
@@ -6367,7 +6749,6 @@ input.gv-name:focus-visible{outline:none;}
 .auto-deciding .auto-deciding-label{font-size:13px;}
 .run-flow-wrap.gv-wrap{user-select:none;-webkit-user-select:none;}
 .run-flow-wrap.gv-wrap-monitor{overflow:hidden;height:var(--run-host-h,360px);}
-.rc-detailed .run-flow-wrap.gv-wrap-static{height:300px;overflow-x:auto;overflow-y:hidden;}   /* additive (Running D17) */
 .run-flow.gv-host .gv-world .node{cursor:default;}
 /* v1 descendant rules that out-rank P5's .gv-world block (3-4 classes) — one neutraliser each */
 .run-flow.gv-host .gv-world .xfoot>.fan{flex:none;flex-wrap:nowrap;margin:0;border-top:0;}
@@ -6391,7 +6772,7 @@ input.gv-name:focus-visible{outline:none;}
 .run-flow.gv-host .gv-world .xfoot .xq.is-stopped,.run-flow.gv-host .gv-world .xfoot .xrow.is-stopped .led{background:var(--red);}
 .run-flow.gv-host .gv-world .xfoot .xq.is-active,.run-flow.gv-host .gv-world .xfoot .xrow.is-active .led{animation:xqPulse 1.5s ease-in-out infinite;}
 .run-flow.gv-host .gv-world .xrow,.run-flow.gv-host .gv-world .xresult a{cursor:pointer;}
-.run-flow.gv-host .gv-world .xrow:hover,.run-flow.gv-host .gv-world .xtoggle:hover{background:var(--field);}
+.run-flow.gv-host .gv-world .xrow:hover,.run-flow.gv-host .gv-world .xtoggle:hover{background:var(--hover);}
 .run-flow.gv-host .gv-world .xresult a{color:var(--blue-ink);text-decoration:none;}
 .run-flow.gv-host .gv-world .xresult a:hover{text-decoration:underline;}
 /* ants on v2 wires (the v1 rule targets svg.wires; a dashoffset animation needs a dash).
@@ -6470,8 +6851,8 @@ input.gv-name:focus-visible{outline:none;}
 .node-artifacts{flex:0 0 100%;margin-top:8px;padding-top:8px;border-top:1px solid var(--line);}
 .artifact-toggle{appearance:none;border:1px solid var(--line-2);background:var(--field);color:var(--ink);
   font:600 11.5px var(--sans);padding:4px 12px;border-radius:999px;cursor:pointer;}
-.artifact-toggle:hover{border-color:var(--blue);color:var(--blue-ink);}
-.artifact-toggle[aria-expanded="true"]{background:var(--blue-bg);color:var(--blue-ink);border-color:var(--blue);}
+.artifact-toggle:hover{border-color:var(--hover-outline);}
+.artifact-toggle[aria-expanded="true"]{border-color:var(--hover-outline);}   /* open: the outline stays */
 .artifact-list{display:flex;flex-direction:column;gap:6px;margin-top:8px;}
 /* An author `display:flex` outranks the UA's `[hidden]{display:none}`, so the
    collapsed state (`body.hidden = true` in buildNodeArtifactAffordance) must be
@@ -6487,7 +6868,7 @@ input.gv-name:focus-visible{outline:none;}
   padding:11px 20px;font:500 12.5px var(--sans);color:var(--ink-2);}
 .artifact-group .artifact-bulk-toggle{border-top:1px solid var(--line);}
 .artifact-group-head + .artifact-bulk-toggle,.artifact-cycle + .artifact-bulk-toggle{border-top:none;}
-.artifact-bulk-toggle:hover{background:var(--field);color:var(--ink);}
+.artifact-bulk-toggle:hover{background:var(--hover);color:var(--ink);}
 .artifact-bulk-toggle::after{content:"▸";margin-left:auto;font-size:10px;color:var(--ink-3);}
 .artifact-bulk-toggle[aria-expanded="true"]::after{content:"▾";}
 .artifact-list .artifact-bulk-toggle{padding:8px 12px;border:1px solid var(--line-2);border-radius:10px;background:var(--field);}
@@ -6502,8 +6883,7 @@ input.gv-name:focus-visible{outline:none;}
   appearance:none;border:none;background:transparent;cursor:pointer;
   padding:11px 20px;font:500 12.5px var(--sans);color:var(--ink);}
 .artifact-list .artifact-row{padding:8px 12px;border:1px solid var(--line-2);border-radius:10px;background:var(--field);}
-.artifact-row:hover{background:var(--field);}
-.artifact-list .artifact-row:hover{border-color:var(--blue);}
+.artifact-row:hover{background:var(--hover);}
 .artifact-kind{flex:0 0 auto;font-size:10px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;
   padding:2px 8px;border-radius:6px;background:var(--violet-bg);color:var(--violet-ink);}
 .artifact-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
@@ -6562,7 +6942,18 @@ input.gv-name:focus-visible{outline:none;}
 .report-field{margin-bottom:14px;}
 .report-field > label{display:block;font-weight:600;font-size:12.5px;margin-bottom:6px;}
 .report-field textarea.textarea{resize:vertical;min-height:64px;font-size:13.5px;}
-.report-modal #report-preview{max-height:300px;margin:0;font-size:12px;}
+/* FIXED height, not max-height. This box is the tallest thing in the card and the
+   only thing whose height changes while the reporter types: pending it holds one
+   line ('Building the report…'), loaded it holds up to 300px of JSON. The card is
+   content-driven (.viewer-modal .card, :1330) inside a `place-items:center` grid
+   (:1320), so that swap re-centres the whole dialog and it "dances" on every
+   keystroke. Pinning the box pins the card. Do NOT "helpfully" add a padding here:
+   *{box-sizing:border-box} (:94) plus .viewer's padding:18px 20px (:1271) already
+   make 300px a BORDER-BOX height, and max-height:300px was border-box too, so the
+   JSON gets the same 262px of content it always did. Adding padding would be the
+   only way to make this change lossy. overflow:auto is inherited from .viewer, so
+   the JSON scrolls internally exactly as before. */
+.report-modal #report-preview{height:300px;margin:0;font-size:12px;}
 .report-optins .confirm-checkbox + .confirm-checkbox{margin-top:8px;}
 .report-optin-hint{display:block;margin-top:3px;color:var(--ink-2);font-size:11.5px;line-height:1.4;}
 .report-error{margin:10px 0 0;color:var(--red-ink);font-size:12.5px;}
@@ -6597,7 +6988,7 @@ input.gv-name:focus-visible{outline:none;}
 .pal-create{display:flex;align-items:center;gap:8px;flex:0 0 auto;margin:10px 13px 13px;padding:9px 12px;
   border:1.5px dashed var(--line-2);border-radius:12px;background:transparent;color:var(--ink-2);
   font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;transition:border-color .15s,color .15s,background .15s;}
-.pal-create:hover{border-color:var(--ink);color:var(--ink);background:var(--field);}
+.pal-create:hover{border-color:var(--hover-outline);color:var(--ink);}
 .pal-create:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 
 /* ---------- Team policy (team-policy design §11, boards 1–11) ---------- */

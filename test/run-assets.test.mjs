@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isValidAssetName, collectRequiredAssets, stageAssets } from '../src/core/run-assets.mjs';
@@ -77,6 +78,24 @@ test('the shipped deck agents declare the kit, so a run can never depend on find
   for (const key of ['deckAudit', 'deckExport']) {
     const m = JSON.parse(await readFile(new URL(`../agents/${key}.meta.json`, import.meta.url), 'utf8'));
     assert.deepEqual(m.requiresAssets, ['deck-kit'], `${key} must declare the kit`);
+  }
+  const sys = JSON.parse(await readFile(new URL('../agents/deckSystem.meta.json', import.meta.url), 'utf8'));
+  // the approve-system gate renders its preview with the staged deck-preview/ script
+  assert.deepEqual(sys.requiresAssets, ['deck-preview']);
+});
+
+test('every asset a shipped agent requires exists under assets/ and ships in the npm package', async () => {
+  const dir = new URL('../agents/', import.meta.url);
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  const names = new Set();
+  for (const f of (await readdir(dir)).filter((n) => n.endsWith('.meta.json'))) {
+    for (const a of JSON.parse(await readFile(new URL(f, dir), 'utf8')).requiresAssets || []) names.add(a);
+  }
+  assert.ok(names.has('deck-preview'));
+  for (const name of names) {
+    assert.ok(existsSync(new URL(`../assets/${name}/`, import.meta.url)), `assets/${name}/ is missing`);
+    // without it the npm tarball, and the Docker image built from it, throw at setup
+    assert.ok(pkg.files.includes(`assets/${name}/`), `package.json "files" lacks assets/${name}/`);
   }
 });
 

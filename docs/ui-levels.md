@@ -149,17 +149,19 @@ be skipped by forgetting it.
 
 | Element | Level |
 |---|---|
-| Card status, title, elapsed, cost, Stop, Pause/Resume, open | S |
+| Card (History-level): status, title, elapsed, cost, Stop, Pause/Resume, open; a strip on a waiting or parked run that opens the run page at its question | S |
 | "Scheduled" group (runs due within 24 h) | S — it only exists when something is scheduled |
-| Needs-input pill and banner; clarify questions; Auto proposal and Accept | S |
+| Needs-input pill and banner; clarify questions; Auto proposal ("Review the workflow": preview that opens a pan/zoom popup, Accept) — all answered on the run page | S |
 | Recovery prompt, cycle gate, cost-pause banner, retained-work banner | all |
-| Workflow graph with status colours, gate pip, End result; Overview tab | S |
-| Density toggle, live log pane, log search / copy / auto-scroll | A |
-| Branch chip, progress n/m, model · effort pill, graph zoom cluster | A |
+| Run page glance: the run's name as the page title, the status line (state, then the step), time · cost · changes, the Live view switch and its fogged graph of the running step(s), parallel steps (Now), one row per tab, a waiting question below its own heading, the result actions | S |
+| Workflow graph with status colours, gate pip, End result; Workflow, Overview and Q&A tabs | S |
+| Diff tab (live worktree while running, the final patch after) | A |
+| Live log pane (run page › Logs), log search / copy / auto-scroll | A |
+| Branch chip, progress n/m · step on the card, model · effort pill, graph zoom cluster | A |
 | Auto proposal Revise; Artifacts tab | A |
 | Log filters (source, level, node, cycle) | E |
 | Graph node totals, fan and execution strips, loop badges | E |
-| Agents tab, WORKTREE card, Auto proposal tunables table | E |
+| Agents tab, worktree row, Auto proposal tunables table | E |
 
 ### History
 
@@ -168,7 +170,7 @@ be skipped by forgetting it.
 | List, project filter, Refresh; Overview (verdict, findings, duration, cost, task); Clarify tab; Resume | S |
 | "Files changed" list on the Overview | S — the stand-in for the Diff tab |
 | Diff tab, diff pill, inline comments; Create PR / View PR; branch line; ⋯ menu (Archive, Report); Artifacts tab | A |
-| Mergeability pill; Logs tab; Agents tab; team-metrics status; MEMORY CHANGES; WORKTREE card | E |
+| Mergeability pill; Logs tab; Agents tab; team-metrics status; MEMORY CHANGES; worktree row | E |
 
 ### Workflow Composer (page: A)
 

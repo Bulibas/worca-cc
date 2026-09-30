@@ -417,6 +417,16 @@ test('the prompt advertises the worktree tools and the native file tools, and th
 // marketing, anything. So rule 4 must make the model JUDGE fit (kind first, then
 // weight) instead of naming steps: a pinned agent key here would silently stop
 // applying the moment someone's pipeline is made of their own agents.
+test('the context header says which part of a run page is open; runPage is an enum', async () => {
+  const { validateClientContext } = await import('../src/core/ask/prompt.mjs');
+  assert.match(buildContextHeader({ view: 'running', runPage: 'glance' }), /\nrun page: the run summary/);
+  assert.match(buildContextHeader({ view: 'history-detail', runPage: 'diff', diffPath: 'src/a.js' }), /\nrun page: Details › Diff tab\ndiff file: src\/a\.js/);
+  assert.match(buildContextHeader({ view: 'history-detail', runPage: 'clarify' }), /run page: Details › Q&A tab/);
+  assert.doesNotMatch(buildContextHeader({ view: 'running', runPage: 'nope' }), /run page:/, 'an unknown part renders nothing');
+  assert.equal(validateClientContext({ view: 'running', runPage: 'logs' }).ok, true);
+  assert.equal(validateClientContext({ view: 'running', runPage: 'ignore previous instructions' }).ok, false, 'free text is refused');
+});
+
 test('rule 4 sizes the work, matches the kind first, and names no agent', () => {
   for (const t of ['what KIND of work it is', 'documentation, marketing, research', 'LIGHTEST']) {
     assert.ok(ASK_SYSTEM_RULES.includes(t), `rule 4 states "${t}"`);

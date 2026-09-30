@@ -186,8 +186,18 @@ test('setup replay closes the preflight bookend and kicks the title off — a fi
   let kicked = 0;
   const realKick = orch2._kickoffTitleGeneration.bind(orch2);
   orch2._kickoffTitleGeneration = () => { kicked++; return realKick(); };
+  // The replayed setup is preflight too: its clock runs until the replay ends.
+  let during = null;
+  const realRoot = orch2._setupRunRoot.bind(orch2);
+  orch2._setupRunRoot = async (...a) => {
+    const row = orch2.state.steps.find((s) => s.key === 'x:preflight:1');
+    during = { status: row?.status, ticking: row?.runningSince != null, stage: orch2.state.setupStage };
+    return realRoot(...a);
+  };
   const r2 = await orch2.resume();
   assert.equal(r2.status, 'done', JSON.stringify(r2));
+  assert.deepEqual(during, { status: 'start', ticking: true, stage: 'Creating the worktree' }, 'the replay runs inside an open preflight');
   assert.equal(orch2.getState().steps.find((s) => s.key === 'x:preflight:1')?.status, 'done', 'the replay closed the bookend');
+  assert.equal(orch2.getState().setupStage, null, 'the stage clears with the bookend');
   assert.equal(kicked, 1, 'the replay kicked the title generation off (the original run never reached it)');
 });

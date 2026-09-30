@@ -57,7 +57,7 @@ export function parseArgv(argv) {
  * server (ui/server.mjs /api/ask/relay), when the chat's claude runs as an agent user that
  * cannot read that database (agent-pool.mjs, credential broker).
  */
-export function createAskToolServer({ threadId, reader = null, signal, write, log, env = process.env }) {
+export function createAskToolServer({ threadId, reader = null, signal, write, log, env = process.env, extraDeps = {} }) {
   return createRpcServer({
     tools: createAskTools({
       ...defaultToolDeps({ threadId, viewer: reader }),
@@ -77,6 +77,9 @@ export function createAskToolServer({ threadId, reader = null, signal, write, lo
       // Web access: present only when this turn's env carries WORCA_ASK_WEB (web-deps.mjs) — the
       // child's env (classic), or the relay's own copy built from the turn's web access (ui/server.mjs).
       ...defaultWebDeps({ threadId, signal, env }),
+      // Readers only the host process can supply (relay mode: ui/server.mjs passes
+      // readLiveDiff, which needs the live runs). Absent in the classic child.
+      ...extraDeps,
     }),
     write,
     ...(log ? { log } : {}),

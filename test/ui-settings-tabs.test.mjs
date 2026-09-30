@@ -267,7 +267,8 @@ test('opening Runs or Ask Worca loads the settings payload; Models repaints its 
 
 test('the cost-pause banners open the Runs tab, where the budget now lives', () => {
   const js = readFileSync(appPath, 'utf8');
-  assert.equal((js.match(/\.cb-settings'\)\) \{ location\.hash = 'settings\/runs'; return; \}/g) || []).length, 2);
+  assert.equal((js.match(/\.cb-settings'\)\) \{ location\.hash = 'settings\/runs'; return; \}/g) || []).length, 1,
+    'one delegated handler: the run page (the list card no longer carries a cost banner)');
   assert.match(js, /settingsBtn\.addEventListener\('click', \(\) => \{ location\.hash = 'settings\/runs'; \}\)/);
   assert.equal(/location\.hash = 'settings';/.test(js), false, 'no bare #settings jump left for the budget');
 });

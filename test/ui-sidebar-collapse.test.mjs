@@ -509,9 +509,11 @@ test('with nothing running at all the tooltip degrades to the bare label', async
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [] });
   // "Running — 0 live" on a resting sidebar is noise, and zero is the state most
-  // users are in most of the time.
-  assert.equal(window.document.querySelector('.nav button[data-nav="running"]').title,
-    'Running');
+  // users are in most of the time. Expanded, the label is on screen, so a tooltip saying
+  // only "Running" would repeat it: none then; the collapsed rail (no label) keeps it.
+  const b = window.document.querySelector('.nav button[data-nav="running"]');
+  assert.equal(b.getAttribute('aria-label'), 'Running');
+  assert.equal(b.title, b.closest('.sidebar.collapsed') ? 'Running' : '');
 });
 
 test('paused-only names the paused count without a phantom live one', async () => {
@@ -598,7 +600,7 @@ test('a hovered tile keeps its own fill — .nav button:hover out-specifies the 
   // (0,3,0) :hover rule restates it. The mock's hover changes border-color only.
   const hov = ruleBody('.nav .rail-tile:hover');
   assert.ok(hov, '.nav .rail-tile:hover must exist');
-  assert.match(hov, /border-color:\s*var\(--ink\)/);
+  assert.match(hov, /border-color:\s*var\(--hover-outline\)/, 'the outlined hover: the border strengthens');
   assert.match(hov, /background:\s*var\(--panel\)/,
     'without this, hovering a rail tile turns it var(--field) grey');
   assert.match(hov, /color:\s*var\(--ink-2\)/,

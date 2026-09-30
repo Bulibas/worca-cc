@@ -1,6 +1,6 @@
 // test/ui-log-filters-row.test.mjs
 // Regression: the "Live log" filter pills (source / level / step) must sit on
-// one horizontal row in the running-view run card, matching the history panel.
+// one horizontal row on the run page's Logs tab (cloned from #log-bar-tpl), matching the history panel.
 // jsdom has no layout engine, so layout is asserted via the CSS text plus the
 // DOM structure the rules rely on (see test/ui-history-sticky-header.test.mjs
 // for the same hybrid pattern).
@@ -31,10 +31,10 @@ test('.log-filters keeps its pills on a single flex line', () => {
   assert.match(body, /display:\s*flex/, 'pill bar is a flex row');
   assert.match(body, /flex-wrap:\s*nowrap/, 'pills must never wrap onto extra rows');
   assert.match(body, /min-width:\s*0/,
-    'the bar itself must shrink as a run-card flex item instead of overflowing the head row');
+    'the bar itself must shrink as a flex item instead of overflowing the head row');
 });
 
-test('run-card head puts the pill bar on its own row under "Live log"', () => {
+test('the log head puts the pill bar on its own row under "Live log"', () => {
   const head = ruleBody('.run-log-head');
   assert.ok(head, '.run-log-head rule must exist');
   assert.match(head, /flex-wrap:\s*wrap/, 'head must wrap so the pill bar can drop to a second row');
@@ -54,12 +54,12 @@ test('.log-filters .log-f resets the global select width:100%', () => {
 
 // ---------- DOM structure the CSS relies on ----------
 
-test('run-card template keeps every control as a sibling in one .log-filters bar', () => {
+test('the log-bar template keeps every control as a sibling in one .log-filters bar', () => {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'));
-  const tpl = dom.window.document.getElementById('run-card-tpl');
-  assert.ok(tpl, 'run-card template must exist');
+  const tpl = dom.window.document.getElementById('log-bar-tpl');
+  assert.ok(tpl, 'log-bar template must exist');
   const bar = tpl.content.querySelector('.run-log-head .log-filters');
-  assert.ok(bar, 'run-card head must contain a .log-filters bar');
+  assert.ok(bar, 'the log-bar template must contain a .log-filters bar');
   const pills = [...bar.children].map((el) => el.className);
   assert.deepEqual(pills, [
     'log-f log-f-source', 'log-f log-f-level', 'log-f log-f-step', 'log-f log-f-cycle',
@@ -69,7 +69,7 @@ test('run-card template keeps every control as a sibling in one .log-filters bar
 
 test('the search box and copy button are labelled and typed for a11y', () => {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'));
-  const bar = dom.window.document.getElementById('run-card-tpl')
+  const bar = dom.window.document.getElementById('log-bar-tpl')
     .content.querySelector('.run-log-head .log-filters');
   const search = bar.querySelector('.log-search');
   assert.equal(search.tagName, 'INPUT');
@@ -91,7 +91,7 @@ test('the cycle separator is a styled rule, not a log line', () => {
 
 test('the ONE filter markup carries the node select and the execution chip', () => {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'));
-  const bar = dom.window.document.querySelector('#run-card-tpl').content.querySelector('.log-filters');
+  const bar = dom.window.document.querySelector('#log-bar-tpl').content.querySelector('.log-filters');
   const sel = bar.querySelector('.log-f-step');
   assert.ok(sel, 'the step select is re-purposed, never duplicated');
   assert.equal(bar.querySelectorAll('select.log-f').length, 4, 'still four selects (source, level, step/node, cycle)');

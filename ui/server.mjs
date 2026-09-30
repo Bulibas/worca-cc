@@ -3389,6 +3389,38 @@ function resolveRunScope(req, res) {
   return { workspaceId, projectKey: projectKey_, projectDir, key };
 }
 
+// GET /api/runs/:id/live-diff -> { results, patch, untrackedCapped, at } for a run that is
+// still in flight: its worktree(s) against the pre-run checkpoint, computed on demand by the
+// harness (run-harness.mjs#liveDiff, read-only). `:id` is the runs-Map UUID or the pipeline
+// id (liveRunEntry). 404 once the entry is gone (a finished run reads its persisted
+// diff through /api/history/:key/:id/diff) or before setup made a worktree. A short
+// per-entry cache keeps a polling client from spawning git on every tick.
+const LIVE_DIFF_TTL_MS = 3000;
+/** A live run entry's diff so far (cached per entry for LIVE_DIFF_TTL_MS), or null when
+ *  it has no worktree yet. Shared by the endpoint and Ask's get_run_diff (relay mode). */
+async function liveDiffOf(entry) {
+  const now = Date.now();
+  const cached = entry._liveDiff;
+  if (cached && now - cached.at < LIVE_DIFF_TTL_MS) return cached;
+  const out = await entry.orch.liveDiff();
+  if (!out) return null;
+  entry._liveDiff = { ...out, at: now };
+  return entry._liveDiff;
+}
+app.get('/api/runs/:id/live-diff', async (req, res) => {
+  const entry = liveRunEntry(req.params.id);
+  if (!entry || !entry.orch || typeof entry.orch.liveDiff !== 'function') {
+    return res.status(404).json({ error: 'run not live' });
+  }
+  try {
+    const out = await liveDiffOf(entry);
+    if (!out) return res.status(404).json({ error: 'no worktree yet' });
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
 // Download the durable done-path diff as an alternate recovery route for a
 // retained worktree. The filename is fixed; callers cannot supply a path.
 app.get('/api/runs/:id/recovery-patch', async (req, res) => {
@@ -5454,7 +5486,19 @@ function askAgentRelay({ threadId, reader, web = null }) {
   // The tools run here, so this turn's web access rides a private env copy (never process.env itself);
   // the search key is read from worca's own environment, where it was set.
   const env = { ...process.env, ...askWebMcpEnv(web) };
-  entry.rpc = createAskToolServer({ threadId, reader, signal: life.signal, env, write: (s) => { entry.out.push(s); } });
+  entry.rpc = createAskToolServer({
+    threadId, reader, signal: life.signal, env, write: (s) => { entry.out.push(s); },
+    // The tools run in THIS process, which holds the live runs: get_run_diff can read a run
+    // still in flight (its worktree against the pre-run checkpoint) before any patch is saved.
+    extraDeps: {
+      readLiveDiff: async (row) => {
+        const live = liveRunEntry(row && row.id);
+        if (!live || !live.orch || typeof live.orch.liveDiff !== 'function') return null;
+        const out = await liveDiffOf(live).catch(() => null);
+        return out && typeof out.patch === 'string' ? out.patch : null;
+      },
+    },
+  });
   askRelays.set(token, entry);
   const port = server.address()?.port || PORT;
   return { url: `http://127.0.0.1:${port}/api/ask/relay`, token, dispose: () => { life.abort(); askRelays.delete(token); } };
@@ -7135,6 +7179,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
   if (ctx.timeZone) out.timeZone = ctx.timeZone;   // validated IANA name; the header adds the user's clock
   if (ctx.view) out.view = ctx.view;
   if (ctx.diffPath) out.diffPath = ctx.diffPath;   // client-supplied, already length-checked by validateClientContext
+  if (ctx.runPage) out.runPage = ctx.runPage;       // an enum (RUN_PAGE_PARTS), validated the same way
   try {
     if (ctx.projectKey || ctx.projectDir) {
       const projects = await listProjects();
