@@ -1,10 +1,11 @@
 // test/ask-voice.test.mjs
 // The voice controller (docs/speech.md) with a fake VAD, fake fetch and fake
 // audio: support gating, dictation, the hands-free loop, sentence-level TTS as
-// frames stream, gating while thinking, barge-in, text-only fallback, stop.
+// frames stream, gating while thinking, barge-in, text-only fallback, stop,
+// and the Web Audio player that Safari needs for replies spoken after the click.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createVoiceController, voiceSupport } from '../ui/public/ask-voice.mjs';
+import { createVoiceController, voiceSupport, webAudioPlayer } from '../ui/public/ask-voice.mjs';
 
 function fakeVad() {
   const v = { opts: null, created: 0, started: 0, paused: 0, destroyed: 0, setOptionsCalls: [] };
@@ -15,9 +16,27 @@ function fakeVad() {
   return v;
 }
 function fakeAudio() {
-  const a = { played: [], current: null };
+  const a = { played: [], current: null, unlocks: 0, closes: 0 };
   a.play = (blob) => { let done; const p = new Promise((r) => { done = r; }); a.current = { blob, end: () => done('ended'), stop: () => done('stopped') }; a.played.push(blob.text); return { ended: p, stop: () => a.current.stop() }; };
+  a.play.unlock = () => { a.unlocks += 1; };
+  a.play.close = () => { a.closes += 1; };
   return a;
+}
+function fakeAudioContext({ allowed = true } = {}) {
+  const log = { made: 0, resumes: 0, closed: 0, started: [], stopped: 0, current: null };
+  function Ctx() {
+    log.made += 1;
+    this.state = 'suspended';                          // what a context made outside a gesture starts as
+    this.destination = {};
+    this.resume = () => { log.resumes += 1; if (!allowed) return new Promise(() => {}); this.state = 'running'; return Promise.resolve(); };
+    this.close = () => { log.closed += 1; this.state = 'closed'; return Promise.resolve(); };
+    this.decodeAudioData = async (ab) => ({ bytes: ab.byteLength });
+    this.createBufferSource = () => {
+      const src = { buffer: null, onended: null, connect() {}, disconnect() {}, start() { log.started.push(src.buffer); log.current = src; }, stop() { log.stopped += 1; } };
+      return src;
+    };
+  }
+  return { Ctx, log };
 }
 const tick = () => new Promise((r) => setTimeout(r, 0));
 const win = {
@@ -337,4 +356,66 @@ test('the pause before sending comes from Settings (seconds → the VAD\'s redem
   const plain = setup();
   await plain.v.start('dictate');
   assert.equal(plain.vad.opts.redemptionMs, 1200);
+});
+
+test('hands-free unlocks audio output synchronously, inside the click that started it (Safari plays nothing later otherwise)', async () => {
+  const t = setup();
+  const starting = t.v.start('handsfree');
+  assert.equal(t.audio.unlocks, 1);                  // before the first await: the gesture is still live
+  await starting;
+  await t.v.start('talk');                           // text replies: nothing to unlock
+  await t.v.start('dictate');
+  assert.equal(t.audio.unlocks, 1);
+  await t.v.destroy();
+  assert.equal(t.audio.closes, 1);
+});
+
+test('a playback failure names the browser\'s reason in the text-only notice', async () => {
+  const t = setup();
+  const blocked = new Error('the browser blocked audio playback');
+  const v = createVoiceController({
+    win, fetch: async (url) => (url === '/api/speech' ? { ok: true, json: async () => ({ stt: { configured: true }, tts: { configured: true } }) }
+      : url === '/api/speech/transcribe' ? { ok: true, json: async () => ({ text: 'hi' }) }
+        : { ok: true, blob: async () => ({}) }),
+    loadVad: async () => t.vad.lib,
+    playAudio: () => ({ ended: Promise.resolve('error'), error: blocked, stop() {} }),
+    onState() {}, onTranscript() {}, onBargeIn() {}, onNotice: (m) => t.notices.push(m),
+  });
+  await v.start('handsfree');
+  t.vad.opts.onSpeechEnd(new Float32Array(10)); await tick(); await tick();
+  v.onFrame(frame('ask-start'), '');
+  v.onFrame(frame('ask-done', { text: 'Hello there.', status: 'done' }), null);
+  for (let i = 0; i < 6; i++) await tick();
+  assert.deepEqual(t.notices, ['Voice replies are text only for now — the browser blocked audio playback']);
+  assert.equal(v.state(), 'listening');
+});
+
+test('webAudioPlayer: unlock() makes and resumes one context synchronously; every reply plays from it', async () => {
+  const { Ctx, log } = fakeAudioContext();
+  const play = webAudioPlayer({ ...win, AudioContext: Ctx });
+  play.unlock();
+  assert.equal(log.made, 1);
+  assert.equal(log.resumes, 1);
+  const h = play(new Blob([new Uint8Array(8)]));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.deepEqual(log.started, [{ bytes: 8 }]);
+  log.current.onended();
+  assert.equal(await h.ended, 'ended');
+  const h2 = play(new Blob([new Uint8Array(4)]));
+  for (let i = 0; i < 4; i++) await tick();
+  h2.stop();
+  assert.equal(await h2.ended, 'stopped');
+  assert.equal(log.stopped, 1);
+  assert.equal(log.made, 1);
+  play.close();
+  assert.equal(log.closed, 1);
+});
+
+test('webAudioPlayer: a context the browser keeps suspended fails with a reason instead of hanging in "speaking"', async () => {
+  const { Ctx, log } = fakeAudioContext({ allowed: false });
+  const play = webAudioPlayer({ ...win, setTimeout, AudioContext: Ctx }, { resumeTimeoutMs: 10 });
+  const h = play(new Blob([new Uint8Array(8)]));
+  assert.equal(await h.ended, 'error');
+  assert.match(h.error.message, /blocked audio playback/);
+  assert.deepEqual(log.started, []);
 });

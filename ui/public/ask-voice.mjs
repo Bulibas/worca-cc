@@ -55,19 +55,54 @@ export function loadVadLibrary(win, doc) {
   });
 }
 
-/** Default player: HTMLAudioElement over an object URL. Returns { ended: Promise, stop() }. */
-export function htmlAudioPlayer(win) {
-  return (blob) => {
-    const url = win.URL.createObjectURL(blob);
-    const a = new win.Audio(url);
+/**
+ * Default player: Web Audio on one AudioContext. Safari lets a page play sound only
+ * from a user gesture, and a reply is spoken seconds after the click, so a fresh
+ * `new Audio().play()` is refused then (NotAllowedError). A context resumed inside
+ * the click stays allowed: the controller calls unlock() synchronously from start().
+ * play(blob) → { ended: Promise<'ended'|'stopped'|'error'>, stop(), error } (error: why it failed).
+ */
+export function webAudioPlayer(win, { resumeTimeoutMs = 1000 } = {}) {
+  let ctx = null;
+  const context = () => (ctx ||= new (win.AudioContext || win.webkitAudioContext)());
+  const play = (blob) => {
     let settle;
+    let src = null;
+    let finished = false;
     const ended = new Promise((r) => { settle = r; });
-    const done = (why) => { a.onended = null; a.onerror = null; win.URL.revokeObjectURL(url); settle(why); };
-    a.onended = () => done('ended');
-    a.onerror = () => done('error');
-    Promise.resolve(a.play()).catch(() => done('error'));   // autoplay refusal → treated as a failure
-    return { ended, stop: () => { try { a.pause(); } catch { /* ignore */ } done('stopped'); } };
+    const h = { ended, error: null, stop: () => done('stopped') };
+    function done(why) {
+      if (finished) return;
+      finished = true;
+      if (src) {
+        src.onended = null;
+        if (why !== 'ended') try { src.stop(); } catch { /* not started */ }
+        try { src.disconnect(); } catch { /* ignore */ }
+      }
+      settle(why);
+    }
+    (async () => {
+      const c = context();
+      const buffer = await c.decodeAudioData(await blob.arrayBuffer());
+      if (finished) return;
+      if (c.state !== 'running') {
+        // Never unlocked by a gesture (or suspended by the system): resume() would wait for
+        // the next click, and the chip would sit on 'Speaking…' with nothing playing.
+        await Promise.race([c.resume(), new Promise((r) => win.setTimeout(r, resumeTimeoutMs))]);
+        if (c.state !== 'running') throw new Error('the browser blocked audio playback');
+        if (finished) return;
+      }
+      src = c.createBufferSource();
+      src.buffer = buffer;
+      src.connect(c.destination);
+      src.onended = () => done('ended');
+      src.start();
+    })().catch((err) => { h.error = err; done('error'); });
+    return h;
   };
+  play.unlock = () => { const c = context(); if (c.state !== 'running') c.resume().catch(() => {}); };
+  play.close = () => { if (ctx) { const c = ctx; ctx = null; try { Promise.resolve(c.close()).catch(() => {}); } catch { /* already gone */ } } };
+  return play;
 }
 
 /**
@@ -104,7 +139,7 @@ function micError(err) {
  */
 export function createVoiceController({ win, doc, fetch, loadVad, playAudio, browserSpeech, onState, onTranscript, onBargeIn, onNotice, idleReleaseMs = IDLE_RELEASE_MS }) {
   const load = loadVad || (() => loadVadLibrary(win, doc));
-  const play = playAudio || htmlAudioPlayer(win);
+  const play = playAudio || webAudioPlayer(win);
   const makeBrowser = browserSpeech || ((kind) => createBrowserSpeech(win, kind));
   const browser = {};                               // kind → engine, kept warm across sessions
   const browserEngine = (kind) => (browser[kind] ||= makeBrowser(kind));
@@ -113,6 +148,7 @@ export function createVoiceController({ win, doc, fetch, loadVad, playAudio, bro
     win.clearTimeout(idleTimer);
     idleTimer = null;
     for (const e of Object.values(browser)) { try { e.release(); } catch { /* already gone */ } }
+    if (play.close) play.close();                   // the next hands-free click makes a fresh one
   }
   function releaseWhenIdle() {
     win.clearTimeout(idleTimer);
@@ -151,6 +187,9 @@ export function createVoiceController({ win, doc, fetch, loadVad, playAudio, bro
   async function start(mode) {
     const sup = voiceSupport(win);
     if (!sup.ok) { fail(sup.reason); return; }
+    // Before the first await, while the click's gesture is live: Safari plays the
+    // replies (seconds later) only through audio output unlocked by that gesture.
+    if (mode === 'handsfree' && play.unlock) { try { play.unlock(); } catch { /* replies fall back to text */ } }
     if (s.mode) await stop();
     win.clearTimeout(idleTimer);
     const gen = ++s.gen;
@@ -291,7 +330,7 @@ export function createVoiceController({ win, doc, fetch, loadVad, playAudio, bro
     if (gen !== s.gen || s.playing !== item) return;
     s.playing = null;
     s.queue.shift();
-    if (why === 'error') return ttsFailed(new Error('the browser could not play the audio'), gen);
+    if (why === 'error') return ttsFailed(h.error || new Error('the browser could not play the audio'), gen);
     if (s.queue.length) pump(); else maybeListen();
   }
 
