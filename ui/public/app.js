@@ -80,6 +80,7 @@ import {
   renderMemoryHistory, MEMORY_NAME_HELP,
 } from './memory-view.mjs';
 import { createScriptsController } from './scripts-view.mjs';
+import { createMcpView, mountProjectMcp, paintMcpResolution, paintAskMcpBlock } from './mcp-view.mjs';
 import { createAskPanel } from './ask-panel.mjs';
 import { renderGettingStarted, renderGettingStartedPill, bindWelcome, doneCount, allStepsDone, GETTING_STARTED_STEPS } from './getting-started.mjs';
 import { createGuideSpot } from './guide-spot.mjs';
@@ -7425,6 +7426,11 @@ function buildWdOverview(sec, id) {
     + '<button type="button" class="ws-desc-save btn btn-primary btn-mini">Save</button></div>';   // static markup
   desc.append(dh, view, pane);
   sec.appendChild(desc);
+  // MCP servers a run on this workspace gets (the workspace policy's Team set, not the members').
+  const mcp = tagLevel(document.createElement('div'), 'advanced');
+  mcp.className = 'wd-mcp';
+  sec.appendChild(mcp);
+  void paintMcpResolution(mcp, { target: { workspaceId: id }, title: `MCP servers in runs on ${w.name || w.id}`, api: mcpApi });
   if (!hdMarkdown.isReady()) void bindMarkdownReady().then((ok) => { if (ok) repaintWsDescription(); });
   void paintWsMetricsRows();
   void paintWsPolicyLines();
@@ -9528,7 +9534,7 @@ const capFirst = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
 // (Memory tab) or "<key>/memory/<enc name>" (that file open). Keys are `<slug>-<8hex>`
 // (store.mjs#projectKey) and never contain "/", so the first slash splits key from tab. An
 // unknown tab word reads as Overview (the hash is left alone, as History leaves an odd param alone).
-const PROJ_TABS = ['overview', 'team', 'memory'];
+const PROJ_TABS = ['overview', 'team', 'memory', 'mcp'];
 function parseProjParam(param = '') {
   const s = String(param || '');
   if (!s) return null;
@@ -9543,7 +9549,7 @@ function parseProjParam(param = '') {
 }
 // The canonical param for a tab: Overview is plain '<key>', never '<key>/overview'.
 function projParamFor(key, tab = 'overview', sub = '') {
-  if (tab === 'team') return `${key}/team`;
+  if (tab === 'team' || tab === 'mcp') return `${key}/${tab}`;
   if (tab !== 'memory') return key;
   return sub ? `${key}/memory/${encodeURIComponent(sub)}` : `${key}/memory`;
 }
@@ -9744,12 +9750,14 @@ const PD_TAB_ICONS = {
   memory: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"></path><path d="M4 20.5V5.5M8 7h8M8 10.5h6"></path></svg>',
   map: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"></circle><circle cx="19" cy="5" r="2.5"></circle><circle cx="19" cy="19" r="2.5"></circle><path d="M7.3 10.9l9.4-4.8M7.3 13.1l9.4 4.8"></path></svg>',
   team: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"></circle><path d="M3.5 19c.6-3 2.8-4.6 5.5-4.6S13.9 16 14.5 19"></path><circle cx="17.5" cy="9.5" r="2.4"></circle><path d="M15.5 14.6c2.7 0 4.4 1.4 5 4.4"></path></svg>',
+  mcp: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5"></path><path d="M6 8h12v3a6 6 0 0 1-12 0z"></path><path d="M12 17v4"></path></svg>',
 };
 // Table-driven, like HD_TABS. `build(sec, key)` takes the KEY (buildArgs), never the project object.
 const PD_TABS = [
   { key: 'overview', label: 'Overview', level: 'simple', badge: () => null, visible: () => true, build: (sec, key) => buildPdOverview(sec, key) },
   { key: 'team', label: 'Team', level: 'expert', badge: () => null, visible: () => true, build: (sec, key) => buildPdTeam(sec, key) },
   { key: 'memory', label: 'Memory', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMemory(sec, key) },
+  { key: 'mcp', label: 'MCP', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMcp(sec, key) },
 ];
 function initPdTabs(screen, p) {
   initDetailTabs(screen, PD_TABS.map((t) => ({ ...t, icon: PD_TAB_ICONS[t.key] })), p, {
@@ -9848,6 +9856,14 @@ function buildPdOverview(sec, key) {
   ensureHistoryLoaded();
   void paintProjectTmCells();
   void paintProjectPolicyCells();
+}
+
+// ---- MCP tab (docs/mcp-servers.md): the project's sets and the servers its runs get ----
+function buildPdMcp(sec, key) {
+  sec.innerHTML = '';
+  sec.classList.add('pd-sec-mcp');
+  const p = projectByKey(key);
+  void mountProjectMcp(sec, { key, name: p ? p.name : key, api: mcpApi });
 }
 
 // ---- Team tab ----
@@ -24842,11 +24858,11 @@ const VIEW_MIN_LEVEL = Object.freeze({
   'team-metrics': 'expert', 'team-policy': 'expert', agents: 'expert', scripts: 'expert',
   schedules: 'advanced',
 });
-const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ ask: 'advanced', guardrails: 'advanced', plugins: 'advanced', memory: 'advanced', models: 'expert', providers: 'expert' });
+const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ ask: 'advanced', guardrails: 'advanced', plugins: 'advanced', mcp: 'advanced', memory: 'advanced', models: 'expert', providers: 'expert' });
 const VIEW_TITLES = Object.freeze({
   stats: 'Statistics', composer: 'Workflow Composer', workspaces: 'Workspaces', 'workspace-create': 'Workspaces',
   'agent-create': 'Create agent', 'team-metrics': 'Team metrics', 'team-policy': 'Team policy', agents: 'Agents', scripts: 'Scripts',
-  guardrails: 'Guardrails', plugins: 'Plugins', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
+  guardrails: 'Guardrails', plugins: 'Plugins', mcp: 'MCP servers', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
   schedules: 'Schedules',
 });
 function pageMinLevel() {
@@ -24903,7 +24919,7 @@ document.addEventListener('worca:level', () => {
 // The tab is the Settings view's hash param; a guardrail deep link nests its id
 // behind it (#settings/guardrails/<id>). parseHash splits on the FIRST '/' only,
 // so that is view 'settings', param 'guardrails/<id>' — no parseHash change.
-const SETTINGS_TABS = ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'models', 'providers'];
+const SETTINGS_TABS = ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'mcp', 'models', 'providers'];
 // The tabs whose cards GET /api/settings paints (loadSettings paints every card, wherever it sits).
 // Models is not one: loadModelsView repaints its two helper-model cards with the catalog.
 const SETTINGS_FORM_TABS = ['general', 'runs', 'ask'];
@@ -24966,6 +24982,8 @@ function showView(name, param = '') {
     // The Memory controller owns two delegated listeners and a painted host; a tab switch tears it
     // down so the next entry mounts a fresh one (and a stray frame paints nothing).
     if (currentSettingsTab === 'memory' && memoryTabCtl) { memoryTabCtl.destroy(); memoryTabCtl = null; }
+    // MCP servers' pickers and forms open in #plugin-modal, which lives outside the pane.
+    if (currentSettingsTab === 'mcp') closePluginModal();
   }
   // Leaving History resets the two-screen track, so the next visit lands on the
   // list instead of a stale detail screen sliding in behind the new view.
@@ -25155,11 +25173,38 @@ function showSettingsTab(param = '') {
   // '#settings/guardrails/<id>' -> '#settings/guardrails' hop reset the wizard).
   paintLevelBanner();
   if (SETTINGS_FORM_TABS.includes(tab)) loadSettings();
+  if (tab === 'ask') void paintAskMcpBlock(document.getElementById('ask-mcp-host'), { api: mcpApi });
   if (tab === 'guardrails') loadGuardrailsView(sub);
   if (tab === 'models') loadModelsView(sub);
   if (tab === 'providers') loadProvidersView();
   if (tab === 'plugins') loadPluginsView({ refresh: true });
   if (tab === 'memory') loadMemoryTab(sub);
+  if (tab === 'mcp') void mcpTab().show(sub);
+}
+
+// Settings › MCP servers (mcp-view.mjs): one controller, made on first entry; its sub-route
+// ('', 'sets/<id>', 'servers') rides behind #settings/mcp/.
+async function mcpApi(method, path, body) {
+  try {
+    const res = await fetch(path, body === undefined ? { method }
+      : { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    return { ok: res.ok, status: res.status, data: await safeJson(res) };
+  } catch (err) {   // offline, or the server restarting: an answer the views show, never a rejection under `void`
+    return { ok: false, status: 0, data: { error: err?.message || 'network error' } };
+  }
+}
+let mcpViewCtl = null;
+function mcpTab() {
+  if (!mcpViewCtl) {
+    mcpViewCtl = createMcpView({
+      host: document.querySelector('.settings-pane[data-tab="mcp"]'),
+      api: mcpApi,
+      navigate: (hash) => { if (location.hash.slice(1) !== hash) location.hash = hash; },
+      confirm: confirmModal,
+      modal: { open: pluginModal, close: closePluginModal },
+    });
+  }
+  return mcpViewCtl;
 }
 
 // Tracks the currently shown view so the leave-guard can fire on transition.

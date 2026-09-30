@@ -283,6 +283,15 @@ import {
   repoSlugFromBugsUrl, BUGS_URL,
 } from '../src/core/run-report.mjs';
 import { REPORT_REASON_IDS } from '../src/shared/report-reasons.mjs';
+import {
+  McpStoreError, createSet, renameSet, deleteSet, duplicateSet, putMember, deleteMember, setProjectAssignment,
+  addManualServer, editManualServer, removeServerEverywhere,
+} from '../src/core/mcp/store.mjs';
+import { validateMcpDefinition, SET_ID_RE, SERVER_ID_RE } from '../src/core/mcp/definitions.mjs';
+import {
+  viewContext, listCatalogView, listSetsView, getSetView, projectAssignmentView, teamMemberRefusal, teamDuplicateSource,
+} from '../src/core/mcp/views.mjs';
+import { testMembership, retestAfterSave, retestServers } from '../src/core/mcp/test.mjs';
 import { HLJS_GRAMMAR_IDS } from './public/hljs-loader.mjs';
 
 // ── node:sqlite runtime guard + warning filter ──────────────────────────────────
@@ -8633,6 +8642,7 @@ app.post('/api/plugins/:name/update', async (req, res) => {
     }
     const updated = await updatePlugin(name);
     reloadChatWorkers(name);
+    void retestServers((s) => s.startsWith(`plugin:${name}/`));   // MCP registry §7.3
     res.json(updated);
   } catch (err) {
     sendPluginError(res, err);
@@ -8907,6 +8917,185 @@ app.get('/api/plugins/:name/model-env', (req, res) => {
     id: model.id, label: model.label, efforts: model.efforts, env, secretKeys,
     ...(model.cost ? { cost: model.cost } : {}),
   });
+});
+
+// ---------------------------------------------------------------------------
+// /api/mcp/* — the MCP registry (docs/mcp-servers.md): the catalog, sets and their memberships,
+// project assignments. The store (src/core/mcp/store.mjs) owns every rule about the files and their shapes
+// and keeps user-keyed maps null-prototype; these handlers check ids and never return a secret value.
+// ---------------------------------------------------------------------------
+const MCP_REFUSED_KEYS = ['hash', 'consent', 'bases', 'seeded'];
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+// Bodies never set what only consent or the store writes (§12); `expectHash` is a precondition, not a value.
+app.use('/api/mcp', (req, res, next) => {
+  if (isPlainObject(req.body)) {
+    const bad = MCP_REFUSED_KEYS.find((k) => Object.hasOwn(req.body, k));
+    if (bad) return badRequest(res, `"${bad}" cannot be set here`);
+  }
+  next();
+});
+
+function sendMcpError(res, err) {
+  if (err instanceof McpStoreError) return res.status(err.status).json({ error: err.message });
+  res.status(500).json({ error: err?.message || String(err) });
+}
+function mcpSetId(req, res) {
+  const id = req.params.id;
+  if (!SET_ID_RE.test(id)) { badRequest(res, 'invalid set id'); return null; }
+  return id;
+}
+function mcpServerId(req, res, param = 'serverId') {
+  const id = req.params[param];
+  if (!SERVER_ID_RE.test(id)) { badRequest(res, 'invalid server id'); return null; }
+  return id;
+}
+/** `{ name, ...definition }` → [name, definition] with the name split off. */
+function mcpDefinitionBody(req) {
+  const { name, ...raw } = isPlainObject(req.body) ? req.body : {};
+  return [typeof name === 'string' ? name : '', raw];
+}
+
+app.get('/api/mcp/servers', async (_req, res) => {
+  try { res.json(await listCatalogView()); } catch (err) { sendMcpError(res, err); }
+});
+
+// Live checks for the Add / Edit definition form (§7.2); ?edit=1 skips the name check.
+app.post('/api/mcp/servers/validate', async (req, res) => {
+  const [name, raw] = mcpDefinitionBody(req);
+  try {
+    const { errors } = validateMcpDefinition(raw, { name, source: 'manual' });
+    if (req.query.edit !== '1') {
+      const { snapshot, catalog } = await viewContext();
+      // What P1 addManualServer refuses: a manual name in use, a base another id holds (a removed manual server keeps
+      // its own base, so its name can be added again) or a catalog server's declared name.
+      const held = Object.entries(snapshot.bases).some(([sid, b]) => b === name && sid !== `manual:${name}`);
+      if (Object.hasOwn(snapshot.manual, name) || held || catalog.some((e) => e.name === name)) errors.push(`the name "${name}" is taken`);
+    }
+    res.json({ errors });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/servers', async (req, res) => {
+  const [name, raw] = mcpDefinitionBody(req);
+  try {
+    const { catalog } = await viewContext();
+    await addManualServer(name, raw, { catalogNames: catalog.map((e) => e.name) });
+    res.json({ ok: true, id: `manual:${name}` });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/servers/:id', async (req, res) => {
+  const id = mcpServerId(req, res, 'id');
+  if (!id) return;
+  if (!id.startsWith('manual:')) return badRequest(res, 'only manual servers can be edited');
+  try {
+    await editManualServer(id.slice('manual:'.length), isPlainObject(req.body) ? req.body : {});
+    void retestServers((s) => s === id);
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.delete('/api/mcp/servers/:id', async (req, res) => {
+  const id = mcpServerId(req, res, 'id');
+  if (!id) return;
+  if (id.startsWith('plugin:')) return badRequest(res, 'a plugin server leaves with its plugin');
+  try {
+    const { catalog } = await viewContext();
+    const e = catalog.find((x) => x.id === id);
+    if (!e) return res.status(404).json({ error: 'server not found' });
+    if (e.source === 'policy' && e.retired !== true) return badRequest(res, 'a server team policy requires cannot be removed here');
+    await removeServerEverywhere(id);
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.get('/api/mcp/sets', async (_req, res) => {
+  try { res.json(await listSetsView()); } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/sets', async (req, res) => {
+  try { res.json(await createSet(req.body?.name)); } catch (err) { sendMcpError(res, err); }
+});
+
+app.get('/api/mcp/sets/:id', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try {
+    const v = await getSetView(id);
+    if (!v) return res.status(404).json({ error: 'set not found' });
+    res.json(v);
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/sets/:id', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try { await renameSet(id, req.body?.name); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+app.delete('/api/mcp/sets/:id', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try { await deleteSet(id); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/sets/:id/duplicate', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try {
+    const team = id.startsWith('team-') ? teamDuplicateSource(await viewContext(), id) : undefined;
+    if (team === null) return res.status(404).json({ error: 'set not found' });
+    res.json(await duplicateSet(id, req.body?.name, { team }));
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/sets/:id/members/:serverId', async (req, res) => {
+  const id = mcpSetId(req, res);
+  const serverId = id && mcpServerId(req, res);
+  if (!serverId) return;
+  const patch = req.body;   // P1 putMember checks enabled, values and secrets
+  if (!isPlainObject(patch)) return badRequest(res, 'body must be an object');
+  try {
+    const ctx = await viewContext();
+    const entry = ctx.catalog.find((e) => e.id === serverId);
+    if (!entry) return res.status(404).json({ error: 'server not found' });
+    const opts = { def: entry.def };
+    if (id.startsWith('team-')) {
+      const t = teamMemberRefusal(ctx, id, serverId, patch);
+      if (t.status) return res.status(t.status).json({ error: t.error });
+      opts.team = { home: t.home };
+    }
+    await putMember(id, serverId, patch, opts);
+    retestAfterSave(ctx, id, serverId, patch);   // refused quietly while a required field is unfilled; off starts nothing
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.delete('/api/mcp/sets/:id/members/:serverId', async (req, res) => {
+  const id = mcpSetId(req, res);
+  const serverId = id && mcpServerId(req, res);
+  if (!serverId) return;
+  if (id.startsWith('team-')) return res.status(409).json({ error: 'Team set members come from team policy and cannot be removed here' });
+  try { await deleteMember(id, serverId); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/sets/:id/members/:serverId/test', async (req, res) => {
+  const id = mcpSetId(req, res);
+  const serverId = id && mcpServerId(req, res);
+  if (!serverId) return;
+  try { res.json(await testMembership(id, serverId)); } catch (err) { sendMcpError(res, err); }
+});
+
+app.get('/api/mcp/projects/:key', async (req, res) => {
+  if (!PROJECT_KEY_RE.test(req.params.key)) return badRequest(res, 'invalid project key');
+  try { res.json(await projectAssignmentView(req.params.key)); } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/projects/:key', async (req, res) => {
+  if (!PROJECT_KEY_RE.test(req.params.key)) return badRequest(res, 'invalid project key');
+  const { sets, includeGeneral } = req.body || {};   // P1 setProjectAssignment checks both
+  try { await setProjectAssignment(req.params.key, { sets, includeGeneral }); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
 });
 
 // ---------------------------------------------------------------------------

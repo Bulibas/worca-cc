@@ -65,7 +65,7 @@ policy, plugin-granted tools remain subject to it). Protected paths expand to
 `Read(p)` + `Edit(p)` denies (Edit covers Write/NotebookEdit; a `Write(p)`
 rule is never consulted and only produces CLI warnings, so it is not emitted).
 
-A deny rule on an MCP server also reaches its MCP registry copies: a rule
+A deny rule on an MCP server also reaches its [MCP registry](mcp-servers.md) copies: a rule
 `mcp__<s>` or `mcp__<s>__<tool>` whose `<s>` is a registry server's base name
 or declared name gains one rule per copy of that server in the run
 (`mcp__linear__delete_issue` → `mcp__linear_billing__delete_issue`,
@@ -154,7 +154,7 @@ enforces the set's latest definition.
   `claude` spawned by Worca itself, never inside a project folder: its cwd is
   `<worcaHome>/tmp/ask`, its built-in tools are reduced to `Task` (`--tools
   Task` — no Bash/Read/Write/Edit exist in the process), only Worca's own MCP
-  server and the chat's MCP registry copies are loaded
+  server and the chat's [MCP registry](mcp-servers.md) copies are loaded
   (`--strict-mcp-config`, `--allowedTools Task,Read,Grep,Glob,mcp__worca`, plus
   `ToolSearch` and one `mcp__<copy>` grant per copy when the chat has any, under
   `--permission-mode dontAsk`; see the MCP registry limitation above), user hooks/plugins/skills are dropped

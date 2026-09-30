@@ -424,6 +424,7 @@ The skill starts the same deterministic orchestrator.
 
 - [Architecture](docs/ARCHITECTURE.md) — the whole stack in one picture
 - [Guardrails](docs/guardrails.md) — policy model, enforcement, limitations
+- [MCP servers](docs/mcp-servers.md) — worca's own MCP registry: catalog, sets, copies, secrets, Test
 - [Team metrics](docs/team-metrics.md) — git-backed, team-wide run records
 - [Team policy](docs/team-policy.md) — team-set cost caps, plugins, models and guardrails from a `worca-policy` branch
 - [Models](docs/models.md) — the catalog, providers (GitHub Copilot, OpenAI-compatible) and the built-in bridge

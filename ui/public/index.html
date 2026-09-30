@@ -1343,6 +1343,7 @@
             <button type="button" data-tab="guardrails" data-min-level="advanced" aria-pressed="false">Guardrails</button>
             <button type="button" data-tab="memory" data-min-level="advanced" aria-pressed="false">Memory</button>
             <button type="button" data-tab="plugins" data-min-level="advanced" aria-pressed="false">Plugins</button>
+            <button type="button" data-tab="mcp" data-min-level="advanced" aria-pressed="false">MCP servers</button>
             <button type="button" data-tab="models" data-min-level="expert" aria-pressed="false">Models</button>
             <button type="button" data-tab="providers" data-min-level="expert" aria-pressed="false">Providers</button>
           </div>
@@ -1744,6 +1745,9 @@
               <!-- Ask web access (off by default): rendered by chat-settings-view.mjs; saved with this
                    card's Save button, and only when one of its fields was touched. -->
               <div class="field" id="ask-web-host"></div>
+              <!-- MCP servers (docs/mcp-servers.md): the General set in one line, painted by mcp-view.mjs; the
+                   Edit General set link opens Settings › MCP servers under the level banner. -->
+              <div class="field" id="ask-mcp-host"></div>
               <div class="add-project-actions" style="margin-top:14px">
                 <button type="button" id="askLimitsReset" class="btn btn-ghost btn-mini">Use defaults</button>
                 <button type="button" id="askLimitsSave" class="btn btn-primary btn-mini">Save</button>
@@ -1849,6 +1853,10 @@
             <div class="run-list" id="marketplaces-list" data-min-level="expert"></div>
           </section>
           <!-- /pane plugins -->
+
+          <!-- ===== TAB: MCP SERVERS (docs/mcp-servers.md) — painted whole by mcp-view.mjs ===== -->
+          <section class="settings-pane hidden" data-tab="mcp"></section>
+          <!-- /pane mcp -->
 
           <!-- ===== TAB: MODELS (was the top-level Models view) ===== -->
           <section class="settings-pane hidden" data-tab="models">

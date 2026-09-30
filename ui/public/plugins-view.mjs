@@ -75,7 +75,17 @@ export function renderPluginList(plugins, { doc = globalThis.document, channelSt
     toggle.appendChild(h(doc, 'span', '', p.enabled !== false ? 'enabled' : 'disabled'));
     head.appendChild(toggle);
     card.appendChild(head);
-    card.appendChild(h(doc, 'small', 'pl-contrib hint', contribSummary(p.contributions)));
+    const contrib = h(doc, 'small', 'pl-contrib hint', contribSummary(p.contributions));
+    const mcp = Number(p.contributions && p.contributions.mcpServers) || 0;
+    if (mcp) {
+      // MCP servers are configured in their own Settings tab; the count is the way there.
+      if (contrib.textContent === 'no contributions') contrib.textContent = '';
+      else contrib.appendChild(doc.createTextNode(' · '));
+      const a = h(doc, 'a', 'pl-mcp-link', `${mcp} MCP server${mcp > 1 ? 's' : ''}`);
+      a.href = '#settings/mcp/servers';
+      contrib.appendChild(a);
+    }
+    card.appendChild(contrib);
     if (p.apiMismatch) card.appendChild(h(doc, 'small', 'pl-api-note hint err', p.apiMismatch.message || ''));
     // Contributions worca refused to load. Same note treatment as the API note:
     // the contributions line above counts what the plugin SHIPS, so without this

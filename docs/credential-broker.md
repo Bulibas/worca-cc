@@ -411,7 +411,7 @@ on purpose.
 The check makes the exposure visible; it can't make an MCP secret safe. Prefer MCP servers
 that need no secret, or accept the risk with `warn`.
 
-**MCP registry secrets** (Settings › MCP servers) are outside K1: the
+**MCP registry secrets** (Settings › MCP servers, [mcp-servers.md](mcp-servers.md)) are outside K1: the
 broker delivers them to the runs and chats that use their sets. A registry copy's definition
 carries only `${MCPSECRET_…}` references, so the check above skips the registry servers and
 screens project and local servers as before; a project or local server that references a
