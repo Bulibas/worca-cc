@@ -477,3 +477,19 @@ test('addWorkspaceMembers refuses an oversized add before spawning git for any p
   assert.match(e.message, /at most 40 member projects/);
   assert.equal(calls.length, 0, `no git before the size check (${calls.length} calls)`);
 });
+
+test('removeWorkspaceMember re-derives the change order and cycles from the edges left; the order notes go with the old order', async () => {
+  const { readWorkspaceMap, saveWorkspaceScanResult, addWorkspaceManualEdge } = await import('../src/core/workspaces.mjs');
+  const { ws, a, b, c, key } = await threeMemberMapped('Mapped Cycle');
+  const cur = await readWorkspaceMap(ws.id);
+  await saveWorkspaceScanResult(ws.id, { map: cur.map, synthesis: { ...cur.synthesis, orderNotes: `Ship ${key(c)} first.` } });
+  // With the manual a->b, b->c and the scanned a->c: add b->a and c->b — one cycle over all three.
+  await addWorkspaceManualEdge(ws.id, { from: key(b), to: key(a), kind: 'http', display: 'zz-manual-b-to-a' });
+  await addWorkspaceManualEdge(ws.id, { from: key(c), to: key(b), kind: 'http', display: 'zz-manual-c-to-b' });
+  await removeWorkspaceMember(ws.id, c);
+  const stored = await readWorkspaceMap(ws.id);
+  const pair = [key(a), key(b)].sort();
+  assert.deepEqual(stored.map.cycles, [pair], 'a and b still depend on each other: still a cycle');
+  assert.deepEqual(stored.map.order, [pair]);
+  assert.equal(stored.synthesis.orderNotes, '', 'the notes described the order before the member left');
+});

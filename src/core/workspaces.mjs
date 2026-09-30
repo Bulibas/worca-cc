@@ -32,8 +32,9 @@ import { WORKSPACE_MAX_PROJECTS, scanDescriptionBudget } from '../shared/workspa
 import { KINDS, checkOverrides, checkSynthesis } from '../shared/workspace-map/schema.mjs';
 import { LIMITS } from '../shared/workspace-map/limits.mjs';
 import {
-  emptyOverrides, effectiveEdges, setEdgeState, addManualEdge, removeManualEdge, rekeyOverrides,
+  emptyOverrides, effectiveEdges, setEdgeState, addManualEdge, removeManualEdge, rekeyOverrides, liveEdges,
 } from '../shared/workspace-map/overrides.mjs';
+import { changeOrder } from '../shared/workspace-map/order.mjs';
 import { renderWorkspaceDescription } from '../shared/workspace-map/render.mjs';
 import { mapSummary } from '../shared/workspace-map/summary.mjs';
 
@@ -579,33 +580,34 @@ export function planMemberRemove(id, projectPath, git = LIVE_GIT) {
 }
 
 /**
- * The stored map and its reviews without one member (by project key): its entry, every edge
- * and cycle that names it, its place in the change order and its synthesized role; every
- * confirm / reject override and manual edge that names it. Coordination notes are free text
+ * The stored map and its reviews without one member (by project key): its entry, every edge that
+ * names it and its synthesized role; every confirm / reject override and manual edge that names
+ * it. The change order and its cycles are re-derived from the members and live edges left
+ * (changeOrder over liveEdges, as the scan derives them), and the synthesizer's order notes are
+ * dropped: they described the order before the member left. Coordination notes are free text
  * and stay until the next scan replaces the synthesis. Pure.
  */
 function mapWithoutMember(mapDoc, overrides, key) {
   const names = (e) => e && (e.from === key || e.to === key);
+  const edgeOverrides = {};
+  for (const [id, o] of Object.entries((overrides && overrides.edges) || {})) if (!names(o)) edgeOverrides[id] = o;
+  const nextOverrides = { ...overrides, edges: edgeOverrides, manual: ((overrides && overrides.manual) || []).filter((x) => !names(x)) };
   let doc = mapDoc;
   if (mapDoc && mapDoc.map) {
     const m = mapDoc.map;
-    const roles = mapDoc.synthesis && mapDoc.synthesis.roles ? { ...mapDoc.synthesis.roles } : null;
-    if (roles) delete roles[key];
-    doc = {
-      map: {
-        ...m,
-        members: m.members.filter((x) => x && x.key !== key),
-        edges: m.edges.filter((e) => !names(e)),
-        order: Array.isArray(m.order) ? m.order.map((layer) => (Array.isArray(layer) ? layer.filter((k) => k !== key) : layer)).filter((layer) => !Array.isArray(layer) || layer.length) : m.order,
-        cycles: Array.isArray(m.cycles) ? m.cycles.filter((c) => !(Array.isArray(c) && c.includes(key))) : m.cycles,
-      },
-      synthesis: mapDoc.synthesis ? { ...mapDoc.synthesis, ...(roles ? { roles } : {}) } : mapDoc.synthesis,
-    };
+    const members = m.members.filter((x) => x && x.key !== key);
+    const edges = m.edges.filter((e) => !names(e));
+    const { order, cycles } = changeOrder(members.map((x) => x.key), liveEdges(edges, nextOverrides));
+    const syn = mapDoc.synthesis;
+    let synthesis = syn;
+    if (syn) {
+      const roles = syn.roles ? { ...syn.roles } : null;
+      if (roles) delete roles[key];
+      synthesis = { ...syn, ...(roles ? { roles } : {}), ...(typeof syn.orderNotes === 'string' ? { orderNotes: '' } : {}) };
+    }
+    doc = { map: { ...m, members, edges, order, cycles }, synthesis };
   }
-  const edges = {};
-  for (const [id, o] of Object.entries((overrides && overrides.edges) || {})) if (!names(o)) edges[id] = o;
-  const next = { ...overrides, edges, manual: ((overrides && overrides.manual) || []).filter((x) => !names(x)) };
-  return { mapDoc: doc, overrides: next };
+  return { mapDoc: doc, overrides: nextOverrides };
 }
 
 /**

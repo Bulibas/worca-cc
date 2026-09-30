@@ -638,6 +638,49 @@ test('the re-scan loader ends on its workspace\'s frame: refreshed, failed, stop
   }
 });
 
+test('a paused automatic re-scan that is resumed: the loader follows the new run again', async () => {
+  const { ws, loader } = await addWithRescan();
+  ws().deliver({ type: 'workspaces-changed', action: 'rescan-paused', workspaceId: 'wks-alpha-00000001', runId: 'run_1' });
+  await settle(8);
+  assert.ok(loader().classList.contains('is-paused'));
+  ws().deliver({ type: 'workspaces-changed', action: 'rescan-resumed', workspaceId: 'wks-alpha-00000001', runId: 'run_2' });
+  await settle(8);
+  assert.ok(loader().classList.contains('is-running'), 'running again');
+  assert.equal(loader().querySelector('a.wd-rescan-open').getAttribute('href'), '#running/run_2');
+  assert.ok(ws().sent.some((t) => JSON.parse(t).type === 'subscribe' && JSON.parse(t).runId === 'run_2'), 'subscribed to the resumed run');
+  ws().deliver({ type: 'workspaces-changed', action: 'description', workspaceId: 'wks-alpha-00000001', runId: 'run_2' });
+  await settle(8);
+  assert.ok(loader().classList.contains('is-done'), 'the resumed run\'s end is its end');
+});
+
+test('an ended re-scan box shows until the page is left; the next visit starts clean', async () => {
+  const { ws, loader, show } = await addWithRescan();
+  ws().deliver({ type: 'workspaces-changed', action: 'description', workspaceId: 'wks-alpha-00000001', runId: 'run_1' });
+  await settle(8);
+  assert.ok(loader().classList.contains('is-done'));
+  show('workspaces');
+  await settle(8);
+  show('workspaces/wks-alpha-00000001');
+  await settle(8);
+  assert.equal(loader(), null, 'seen and ended: gone on the next visit');
+});
+
+test('a re-scan that ended while the page was closed is shown once on return, then dropped', async () => {
+  const { ws, loader, show } = await addWithRescan();
+  show('workspaces');
+  await settle(8);
+  ws().deliver({ type: 'workspaces-changed', action: 'rescan-failed', workspaceId: 'wks-alpha-00000001', runId: 'run_1' });
+  await settle(8);
+  show('workspaces/wks-alpha-00000001');
+  await settle(8);
+  assert.ok(loader() && loader().classList.contains('is-failed'), 'the end the user has not seen yet');
+  show('workspaces');
+  await settle(8);
+  show('workspaces/wks-alpha-00000001');
+  await settle(8);
+  assert.equal(loader(), null);
+});
+
 test('a member change the scan cannot read shows why, with no spinner', async () => {
   const { loader } = await addWithRescan({ rescan: { skipped: 'read-only workspace scan: /x has no commit' } });
   const el = loader();

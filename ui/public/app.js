@@ -1123,6 +1123,8 @@ function handleServerMessage(msg) {
   if (msg.type === 'workspaces-changed') {
     // The automatic re-scan after a member change (server afterMembersChanged) ends here.
     if (msg.workspaceId && WS_RESCAN_ENDS[msg.action]) endWsRescan(msg.workspaceId, WS_RESCAN_ENDS[msg.action], msg.runId || null);
+    // A paused one resumed under a new runId: follow that run again.
+    if (msg.workspaceId && msg.action === 'rescan-resumed' && msg.runId) resumeWsRescan(msg.workspaceId, msg.runId);
     scheduleOnboardingRefresh();
     refreshAllCounts();
     tmCache.at = 0;
@@ -7246,6 +7248,9 @@ function openWsDetail(w, parsed, { instant = false } = {}) {
   wsDetail = null;
   host.innerHTML = '';
   host.scrollTop = 0;
+  // A re-scan box the user already saw end is not shown again.
+  const rescan = wsRescans.get(w.id);
+  if (rescan && rescan.seen && WS_RESCAN_ENDED.has(rescan.state)) wsRescans.delete(w.id);
   const screen = $('#ws-detail-tpl').content.firstElementChild.cloneNode(true);
   host.appendChild(screen);
   wsDetail = { id: w.id, name: w.name, screen };
@@ -7784,8 +7789,10 @@ if (el.wsDetail) {
 // The automatic re-scan after a member change (server afterMembersChanged): a Workspace scan run
 // of the new set — graphs, the map and a new description — followed on the Projects card with the
 // wizard's loader look (spinner, status, a stage track) and a link to the run.
-// id -> { runId, state: running|done|failed|stopped|paused|skipped, reason, cleared }
+// id -> { runId, state: running|done|failed|stopped|paused|skipped, reason, cleared, seen }
+// An ended entry the page has shown (seen) is dropped when the page is next opened.
 const wsRescans = new Map();
+const WS_RESCAN_ENDED = new Set(['done', 'failed', 'stopped', 'skipped']);
 const WS_RESCAN_ENDS = {
   description: 'done', 'rescan-failed': 'failed', 'rescan-stopped': 'stopped', 'rescan-paused': 'paused',
 };
@@ -7811,10 +7818,20 @@ function pokeWsRescanRun(runId) {
   for (const [id, r] of wsRescans) if (r.runId === runId && r.state === 'running') setTimeout(() => paintWsRescan(id), 0);
 }
 
+/** The paused re-scan this page follows was resumed (a new entry, a new runId). */
+function resumeWsRescan(id, runId) {
+  const r = wsRescans.get(id);
+  if (!r || r.state !== 'paused') return;
+  Object.assign(r, { runId, state: 'running', seen: false });
+  subscribeRescan(runId);
+  paintWsRescan(id);
+}
+
 function endWsRescan(id, how, runId = null) {
   const r = wsRescans.get(id);
   if (!r || (runId && r.runId && r.runId !== runId)) return;
   r.state = how;
+  r.seen = false;   // an end the page has not shown yet
   paintWsRescan(id);
 }
 
@@ -7836,6 +7853,7 @@ function wsRescanStages(runId) {
 }
 
 function renderWsRescan(r) {
+  if (WS_RESCAN_ENDED.has(r.state)) r.seen = true;
   const box = document.createElement('div');
   box.className = `wd-rescan is-${r.state}`;
   box.setAttribute('role', 'status');

@@ -3012,6 +3012,7 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     pipelineId,
   };
   runs.set(runId, entry);
+  markResumedRescan(entry);   // before the paused lineage is evicted below
   wireRun(entry);
   announceRun(entry);
 
@@ -4937,6 +4938,16 @@ function workspaceMembersBusy(id) {
   const liveIds = [...runs.values()].flatMap((r) => [r.id, r.pipelineId]).filter(Boolean);
   try { reconcileStaleRunning({ liveIds: liveRunIds() }); } catch { /* best-effort */ }
   return foreignActiveWorkspaceRuns(id, { liveIds }).length > 0;
+}
+
+/** A resumed run gets a new entry (and runId): when the entry it resumes was an automatic
+ *  re-scan, tag it again — the members route still supersedes it rather than refusing, and its
+ *  end still reports to the workspace page — and tell the page to follow the new run. */
+function markResumedRescan(entry) {
+  const was = [...runs.values()].some((e) => e !== entry && e.pipelineId && e.pipelineId === entry.pipelineId && e.autoRescan && !e.superseded);
+  if (!was) return;
+  entry.autoRescan = true;
+  broadcast({ type: 'workspaces-changed', action: 'rescan-resumed', workspaceId: entry.workspaceId, runId: entry.id });
 }
 
 /** Stop the automatic re-scan still owning a workspace: its member set is out of date. */
@@ -9579,7 +9590,7 @@ if (isMain) {
 
 export { app, server, runs };
 export const _testing = {
-  wireRun, summarizeRuns, scanRequest, fireTicket, afterMembersChanged, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
+  wireRun, summarizeRuns, scanRequest, fireTicket, afterMembersChanged, markResumedRescan, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
   chatActions, chatRouter, channelHost, handleChatInbound, enqueueChatWork, answerRun,
   chatNotifier, resumeRun, resolveHljsAssets, resolveEsmAsset, askJobs, askFollowers, askDeleting, resolveAskContext, flipCard, askWebAccessFor,
   startCloneJob, followCloneCard, CLONE_JOBS,

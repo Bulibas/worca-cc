@@ -404,6 +404,8 @@ test('a PAUSED Workspace scan still owns the workspace (it resumes into it): the
   const warn = async () => (await validateWorkspaceChange({ kind: 'add_members', workspaceId: ws.id, projectKeys: [projects[3].key] })).card.warnings.join('\n');
   const row = (id, wf) => seedPipelineRow({ id, projectKey: cur.projectKeys[0], workspaceKey: ws.id, target: 'workspace', status: 'paused',
     startedAt: new Date().toISOString(), stepper: { version: 2, template: { id: wf, name: wf } } });
+  // The route tests above re-scan this workspace (mock runs): let those settle first.
+  await waitFor(async () => !getDb().prepare("SELECT 1 FROM pipelines WHERE workspace_key = ? AND status IN ('created', 'starting', 'running', 'pausing', 'paused')").get(ws.id), 120000);
   try {
     row('5ca50011', 'wf_default');
     assert.doesNotMatch(await warn(), /A (Workspace scan|run) of/, 'a paused ordinary run holds nothing (ownsWorkspaceTarget)');
@@ -411,5 +413,30 @@ test('a PAUSED Workspace scan still owns the workspace (it resumes into it): the
     assert.match(await warn(), /A Workspace scan of .* (is running|is paused)/);
   } finally {
     getDb().prepare("DELETE FROM pipelines WHERE id IN ('5ca50011', '5ca50012')").run();
+  }
+});
+
+test('a resumed automatic re-scan stays automatic: it is tagged again and its page follows the new run', async () => {
+  const { WebSocket } = await import('ws');
+  const sock = new WebSocket(`${base.replace('http', 'ws')}/ws`, { headers: { host: '127.0.0.1', origin: 'http://127.0.0.1' } });
+  const msgs = [];
+  sock.on('message', (d) => { try { msgs.push(JSON.parse(String(d))); } catch { /* ignore */ } });
+  await new Promise((res, rej) => { sock.on('open', res); sock.on('error', rej); });
+  const W = 'wks-shop-0000abcd';
+  try {
+    mod.runs.set('auto-old', { id: 'auto-old', kind: 'workspace-run', workspaceId: W, pipelineId: 'feed0001', status: 'paused', autoRescan: true, events: [] });
+    mod.runs.set('user-old', { id: 'user-old', kind: 'workspace-run', workspaceId: W, pipelineId: 'feed0002', status: 'paused', events: [] });
+    const resumed = { id: 'auto-new', kind: 'workspace-run', workspaceId: W, pipelineId: 'feed0001', status: 'starting', events: [] };
+    const other = { id: 'user-new', kind: 'workspace-run', workspaceId: W, pipelineId: 'feed0002', status: 'starting', events: [] };
+    mod._testing.markResumedRescan(resumed);
+    mod._testing.markResumedRescan(other);
+    assert.equal(resumed.autoRescan, true, 'the lineage was an automatic re-scan');
+    assert.equal(other.autoRescan, undefined, 'a run the user started stays theirs');
+    const seen = await waitFor(async () => msgs.find((m) => m.type === 'workspaces-changed' && m.action === 'rescan-resumed') || null);
+    assert.deepEqual([seen.workspaceId, seen.runId], [W, 'auto-new']);
+    assert.equal(msgs.filter((m) => m.action === 'rescan-resumed').length, 1);
+  } finally {
+    sock.close();
+    mod.runs.delete('auto-old'); mod.runs.delete('user-old');
   }
 });
