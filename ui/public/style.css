@@ -4366,6 +4366,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
   display:flex;flex-direction:column;gap:10px;}   /* its heading, then the panel */
 /* Night mode (Step 14): the run-view switch and the decisions list; flagged rows need review. */
 .rd-night-wrap{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2)}
+.rd-night-wrap[hidden]{display:none}
 .rd-night{font-size:12px}
 .rd-night-sec{margin:14px 0}
 .rd-night-sec h3{font-size:13px;margin:0 0 8px}

@@ -1737,6 +1737,9 @@ async function mockClarify(m, cycle, onEvent) {
               'Ignore and continue',
               'Reject at the boundary', // 4 options — exercises the upper bound
             ],
+            // Recommendation fields (normalizeClarify): bars, badge and night mode's weights strategy.
+            confidence: [70, 15, 5, 10],
+            recommended: 'Fail fast with a clear error',
             allowFreeText: true,
           },
           {

@@ -25000,10 +25000,10 @@ function paintRdHeader(screen, r) {
     : (paused ? 'Resume — restart this paused pipeline where it left off'
               : 'Pause — gracefully stop the session so it can be resumed');
 
-  // Night mode switch: live runs only (a paused run re-arms from its resume point).
+  // Night mode switch: any run that is not over (a paused run stores it in its resume point).
   const ns = screen.querySelector('.rd-night');
   if (ns) {
-    ns.closest('.rd-night-wrap').hidden = terminal || paused;
+    ns.closest('.rd-night-wrap').hidden = terminal;
     if (document.activeElement !== ns) ns.value = (r.night && r.night.override) || 'auto';
   }
 }

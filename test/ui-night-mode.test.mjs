@@ -90,7 +90,16 @@ test('run view: the switch paints r.night.override and posts /api/run/night on c
   assert.deepEqual(ctx.posts.find((p) => p.path.endsWith('/api/run/night')).body, { runId: RUN.runId, mode: 'on' });
   ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 5, status: 'paused', night: { optIn: true, override: 'off', decisions: 1, flagged: 1 } });
   await settle();
-  assert.equal(screen.querySelector('.rd-night-wrap').hidden, true, 'hidden on a paused run');
+  assert.equal(screen.querySelector('.rd-night-wrap').hidden, false, 'a paused run keeps the switch (it lands in the resume point)');
+  assert.equal(sel.value, 'off');
+  ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 6, status: 'done', night: { optIn: true, override: 'off', decisions: 1, flagged: 1 } });
+  await settle();
+  assert.equal(screen.querySelector('.rd-night-wrap').hidden, true, 'hidden on a finished run');
+});
+
+test('a hidden night switch really is hidden (its display rule must not beat [hidden])', () => {
+  const css = readFileSync(new URL('../ui/public/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.rd-night-wrap\[hidden\]\s*\{\s*display:\s*none/);
 });
 
 test('run view: stored decisions load on open; a night-decision frame appends; flagged rows are marked', async () => {
