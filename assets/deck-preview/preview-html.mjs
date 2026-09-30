@@ -305,11 +305,11 @@ export const IMAGE_FIELDS = Object.freeze({ 'system-sheet': 'sheet', composition
  *  `chrome`: whether a Chrome was found, so the headline can say why a picture is missing. */
 export function formData(spec, { images = null, chrome = false } = {}) {
   const a = spec.accent;
-  const counts = `${spec.grounds.length} grounds · ${spec.typeSteps.length} type steps · ${spec.compositions.length} compositions · accent ${a.className}`;
+  const lead = 'Review the system below, then approve it or pick what to rework.';
   const missing = images ? Object.keys(IMAGE_FIELDS).filter((n) => !images[IMAGE_FIELDS[n]]) : [];
   const data = {
-    headline: !images ? `${counts}. Preview images unavailable (${chrome ? 'Chrome could not render them' : 'no Chrome found'}); the tables below carry the system.`
-      : missing.length ? `${counts}. Not rendered: ${missing.join(', ')}; the tables below carry the system.` : counts,
+    headline: !images ? `Preview images unavailable (${chrome ? 'Chrome could not render them' : 'no Chrome found'}); the tables below carry the system.`
+      : missing.length ? `Not rendered: ${missing.join(', ')}; the tables below carry the system.` : lead,
     grounds: spec.grounds.map((g) => ({ id: g.id, name: g.name, hex: g.hex, ink: g.ink, job: g.job })),
     typeSteps: byPx(spec.typeSteps).map((s) => ({ id: s.id, name: s.name, px: s.px, family: familyName(s), weight: s.weight })),
     compositions: spec.compositions.map((c) => ({ id: c.id, name: c.name, job: c.job, slides: c.slides })),
