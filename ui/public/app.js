@@ -1312,6 +1312,7 @@ function onHello(msg) {
   const ws = state.ws;
   const list = Array.isArray(msg.runs) ? msg.runs : [];
   noteBoot(state, msg.bootId, runs);   // a restarted server numbers run events from 1 again
+  applyServerMock(msg.serverMock);     // every hello: a restarted server may have changed mode
 
   if (!helloSeeded) {
     helloSeeded = true;
@@ -5819,11 +5820,38 @@ async function mountPluginSourcePane(src) {
 // Mock switch. The visible .switch mirrors the hidden #mock checkbox, which is
 // what the submit handler reads (el.mock.checked).
 const mockSwitch = $('#mock-switch');
-function toggleMock() {
-  const on = !el.mock.checked;
+function paintMock(on) {
   el.mock.checked = on;
   mockSwitch.classList.toggle('on', on);
   mockSwitch.setAttribute('aria-checked', String(on));
+}
+function toggleMock() {
+  if (serverMock.on) return;                 // locked on: the server mocks every run anyway
+  paintMock(!el.mock.checked);
+}
+
+// The server's mock mode (WS hello `serverMock`, server.mjs#serverMockMode): a server started
+// with WORCA_MOCK=1 / ORCH_MOCK=1 mocks EVERY run whatever body.mock says, so the switch is
+// locked on and the sidebar shows the MOCK pill. `choice` keeps the per-run pick the lock
+// covered, restored when a restarted server comes back without it.
+const SERVER_MOCK_TITLE = 'Server started with WORCA_MOCK=1 — all runs are mock.';
+const serverMock = { on: false, choice: false };
+function applyServerMock(on) {
+  on = on === true;
+  const pill = document.getElementById('side-mock-pill');
+  if (pill) pill.hidden = !on;
+  if (!mockSwitch || on === serverMock.on) return;
+  if (on) serverMock.choice = el.mock.checked;
+  serverMock.on = on;
+  paintMock(on || serverMock.choice);
+  mockSwitch.classList.toggle('disabled', on);
+  if (on) {
+    mockSwitch.setAttribute('aria-disabled', 'true');
+    mockSwitch.title = SERVER_MOCK_TITLE;
+  } else {
+    mockSwitch.removeAttribute('aria-disabled');
+    mockSwitch.removeAttribute('title');
+  }
 }
 if (mockSwitch) {
   mockSwitch.addEventListener('click', toggleMock);
@@ -25393,7 +25421,8 @@ function gsRunHops(g, mock) {
       already: mock
         ? 'The task goes here. A mock run never reads it, so what is there will do.'
         : 'The task goes here — a sentence or two; the planner asks when something matters.' },
-    { id: 'mock', target: '#mock-switch', toggle: true, met: () => mockOn() === mock,
+    // A server in mock mode locks the switch on (applyServerMock): nothing to turn off, so met.
+    { id: 'mock', target: '#mock-switch', toggle: true, met: () => mockOn() === mock || serverMock.on,
       skipWhenMet: !mock,   // a real run mentions the switch only when it has to be turned off
       text: mock ? 'Mock mode runs the whole pipeline offline: no Claude calls, no tokens.' : 'Turn Mock mode off for a real run.',
       already: 'Mock mode is on: the whole pipeline runs offline, no Claude calls, no tokens.' },

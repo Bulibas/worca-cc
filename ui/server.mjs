@@ -3,7 +3,8 @@
 // deterministic orchestrator core. Only non-builtin deps: express + ws.
 //
 // Run:  node ui/server.mjs   (or `npm start`)
-// Env:  PORT (default 4317), WORCA_MOCK (forwarded to runs when ?mock or body.mock)
+// Env:  PORT (default 4317), WORCA_MOCK / ORCH_MOCK (truthy = every run and Claude job is a
+//       mock, whatever body.mock says; the UI shows a MOCK pill and locks its Mock switch on)
 
 import express from 'express';
 import { WebSocketServer } from 'ws';
@@ -560,7 +561,7 @@ wss.on('connection', (ws, req) => {
   }
   const id = requestedRunId || requestedGenId || requestedBenchId;
 
-  send(ws, { type: 'hello', bootId: BOOT_ID, runs: summarizeRuns(), ask: askHello(ws) });
+  send(ws, { type: 'hello', bootId: BOOT_ID, serverMock: serverMockMode(), runs: summarizeRuns(), ask: askHello(ws) });
 
   if (id && runs.has(id)) {
     replayEntry(ws, runs.get(id));
@@ -1687,7 +1688,7 @@ const startRunHandler = async (req, res) => {
     const effectiveSource = source
       || (promptMarkdown && !prompt ? { type: 'markdown', promptText: promptMarkdown } : null);
 
-    const mock = !!body.mock || isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK);
+    const mock = !!body.mock || serverMockMode();
 
     // Optional workflowId selects a saved (or built-in default) topology. The
     // orchestrator resolves topology + per-project run-config into an executable
@@ -2970,7 +2971,7 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     if (live) throw new ResumeError(409, { error: 'a defragment run for this memory scope is already live', runId: live.id });
   }
 
-  const effMock = mock ||isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK);
+  const effMock = mock || serverMockMode();
   const runId = randomUUID();
   const orch = await createOrchestratorFor({
     projectDir,
@@ -5129,7 +5130,7 @@ function primaryMemberOf(paths) {
  * Sends the 409 and returns true when it refused.
  */
 async function refuseSignedOutClaude(res) {
-  const { state } = await probeClaudeAuth({ bin: configuredClaudeBin(), mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK) });
+  const { state } = await probeClaudeAuth({ bin: configuredClaudeBin(), mock: serverMockMode() });
   if (state !== 'signed-out') return false;
   res.status(409).json({ code: CLAUDE_SIGNED_OUT_CODE, error: CLAUDE_SIGNED_OUT_MESSAGE });
   return true;
@@ -7990,7 +7991,7 @@ function agentErrorBody(err) {
 function startAgentGen(input) {
   const orch = createAgentGen({
     ...input,
-    claude: { permissionMode: 'acceptEdits', mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK) },
+    claude: { permissionMode: 'acceptEdits', mock: serverMockMode() },
   });
   // The engine mints its own genId (agen_<uuid>) and tags every emitted event
   // with it; use THAT as the runs-Map key + the returned id so the entry, its
@@ -9193,6 +9194,13 @@ function isTruthy(v) {
   if (v === undefined || v === null) return false;
   const s = String(v).toLowerCase();
   return s === '1' || s === 'true' || s === 'yes' || s === 'on';
+}
+
+/** The server's mock mode (WORCA_MOCK, else ORCH_MOCK): it forces EVERY run and Claude job to
+ *  mock, whatever the request says. The WS hello carries it as `serverMock` so the UI locks its
+ *  Mock switch on and shows the MOCK pill — the one reading both sides use, so they never disagree. */
+function serverMockMode() {
+  return isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK);
 }
 
 // ---------------------------------------------------------------------------

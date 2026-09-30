@@ -586,6 +586,8 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .switch.on{background:var(--green);}
 .switch.on::after{left:21px;}
 .switch:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+/* Locked by the server's mock mode (app.js#applyServerMock): on, and not the user's to change. */
+.switch.disabled{opacity:.5;cursor:not-allowed;}
 .switch-row .txt{font-weight:500;}
 
 /* ---------- buttons ---------- */
@@ -1374,6 +1376,9 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .badge.paused{background:var(--amber-bg);color:var(--amber-ink);}
 .badge.hist-retained-badge{background:var(--amber-bg);color:var(--amber-ink);}
 .badge.hist-retained-badge[hidden]{display:none;}
+/* The server's mock mode, beside the wordmark: .brand spreads its row, so it parks left. */
+.brand .side-mock-pill{margin-right:auto;padding:3px 7px;cursor:default;}
+.brand .side-mock-pill[hidden]{display:none;}
 
 /* ---------- History cards (navigate to the detail screen) ---------- */
 .hist-card{padding:18px 22px;}
@@ -4608,6 +4613,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .sidebar.collapsed .brand{flex-direction:column;gap:6px;margin-bottom:26px;padding:0;}
 .sidebar.collapsed .logo{display:none;}
 .sidebar.collapsed .logo-mark{display:block;}
+.sidebar.collapsed .brand .side-mock-pill{margin-right:0;padding:2px 4px;font-size:9px;letter-spacing:.02em;}
 .sidebar.collapsed .side-toggle{width:40px;height:40px;margin:0;border-radius:12px;
   align-self:center;}
 /* One bare chevron, pointing wherever the rail is about to go. It is NOT
