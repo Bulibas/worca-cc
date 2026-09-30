@@ -23,11 +23,23 @@ test('confidence bars per option, a Recommended badge, and the recommendation is
   assert.ok(opts[1].classList.contains('sel'));
   assert.equal(opts[1].getAttribute('aria-pressed'), 'true');
   assert.equal(opts[0].getAttribute('aria-pressed'), 'false');
+  // Preselected is not answered: the "Answered" pill waits for a real click.
+  assert.equal(opts[1].dataset.preset, '1');
   panel.querySelector('.btn-go').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 0));
   const post = ctx.calls.find((c) => c.url.includes('/api/answer'));
   assert.ok(post, 'the answer was posted without a click on an option');
   assert.equal(JSON.parse(post.opts.body).payload.answers[0].choice, 'B');
+});
+
+test('a real click turns the preselected recommendation into an answer', async () => {
+  const ctx = await boot();
+  const panel = await openRunPanel(ctx, { runId: RUN_ID, question: { id: 'clarify-3', kind: 'clarify',
+    questions: [{ id: 'q1', question: 'Pick?', options: ['A', 'B'], confidence: [30, 70], recommended: 'B', allowFreeText: true }] } });
+  const opts = [...panel.querySelectorAll('.qopt')];
+  opts[1].dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
+  assert.ok(opts.every((b) => b.dataset.preset === undefined), 'clicking the recommendation itself confirms it');
+  assert.ok(opts[1].classList.contains('sel'));
 });
 
 test('a question without confidence renders plain options, nothing preselected', async () => {
@@ -42,4 +54,11 @@ test('stylesheet carries the confidence bar and badge rules', () => {
   const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../ui/public/style.css'), 'utf8');
   assert.ok(/\.qopt \.qrec\s*\{/.test(css), '.qopt .qrec rule');
   assert.ok(/\.qopt \.qconf-fill\s*\{/.test(css), '.qopt .qconf-fill rule');
+});
+
+test('the Answered pill ignores a preselected recommendation', () => {
+  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../ui/public/style.css'), 'utf8');
+  const rule = css.match(/\.rd-questions \.qblock:has\(([^)]*\)?[^)]*)\) \.qtext::after/);
+  assert.ok(rule, 'Answered rule');
+  assert.match(rule[1], /\.qopt\.sel:not\(\[data-preset\]\)/);
 });

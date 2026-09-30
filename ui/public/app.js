@@ -4802,6 +4802,7 @@ function renderClarifyBody(r, panel, pq) {
         const on = b === btn;
         b.classList.toggle('sel', on);
         b.setAttribute('aria-pressed', String(on));
+        delete b.dataset.preset;           // a real pick: the "Answered" pill may show
       });
       if (free) {
         free.value = '';
@@ -4841,7 +4842,8 @@ function renderClarifyBody(r, panel, pq) {
       }
       btn.addEventListener('click', () => select(btn, optText));
       optsWrap.appendChild(btn);
-      if (optText === rec) select(btn, optText);
+      // Preselected, not answered: data-preset keeps the "Answered" pill off until a real click.
+      if (optText === rec) { select(btn, optText); btn.dataset.preset = '1'; }
     });
     if (opts.length) block.appendChild(optsWrap);
 
