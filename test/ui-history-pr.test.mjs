@@ -155,10 +155,9 @@ test('Create-PR shows when gh available; click navigates to the detail page and 
   assert.equal(prPosts.length, 0, 'the list card itself never fires POST /api/pr');
 });
 
-test('a workspace run never offers Create PR on the list card', async () => {
-  // POST /api/pr has no workspace arm and its key regex rejects a `workspaces/…`
-  // composite with a 404, so histPrEligible excludes them even though this row
-  // satisfies every other clause.
+test('a workspace run with no member facts never offers Create PR on the list card', async () => {
+  // `members` absent (legacy/lite row) ⇒ no affected member ⇒ not eligible, even
+  // though this row satisfies every primary-only clause.
   const WKS = {
     ...SURVIVED, id: 'w1', projectKey: 'workspaces/team-a', target: 'workspace',
     workspaceName: 'Team A', pr: null,

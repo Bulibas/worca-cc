@@ -512,10 +512,9 @@ test('a MERGED run whose branch is gone still shows the link', async () => {
   assert.equal(hdPrLink(ctx.window).textContent, 'Merged');
 });
 
-test('workspace runs never show Create PR', async () => {
-  // POST /api/pr has NO workspace arm — its key regex (ui/server.mjs:1637) rejects
-  // a `workspaces/…` composite with a 404 — yet workspace rows satisfy every other
-  // clause because listAllPipelines hands rowToHistoryEntry the primary member dir.
+test('a workspace run with no member facts never shows Create PR', async () => {
+  // `members` absent (legacy/lite row) ⇒ no affected member ⇒ not eligible — even
+  // though the row satisfies every primary-only clause (survived/branch/sourceBranch).
   const ctx = await bootShip({
     rows: [row({ projectKey: WKS_KEY, target: 'workspace' })],
   });
@@ -524,7 +523,7 @@ test('workspace runs never show Create PR', async () => {
   assert.equal(hdPrLink(ctx.window).hidden, true);
 });
 
-test('a workspace run cannot reach the ship-it modal from the LIST card either', async () => {
+test('a workspace card with no affected member cannot reach the ship-it modal', async () => {
   // The end-to-end half of the predicate test below. The list card's Create-PR
   // button is the ONLY writer of pendingShipIt; with the shared predicate in place
   // that button is never rendered for a workspace row, so navigating from the card
@@ -544,7 +543,7 @@ test('a workspace run cannot reach the ship-it modal from the LIST card either',
   assert.equal(prPosts(ctx).length, 0, 'and no POST /api/pr is fired');
 });
 
-test('histPrEligible rejects a workspace run that satisfies every other clause', async () => {
+test('histPrEligible: a workspace row is judged by its members, never the primary-only clauses', async () => {
   const ctx = await bootShip();
   await openDetail(ctx);                                   // state.ghAvailable is true here
   const { histPrEligible } = ctx.window.__np;
