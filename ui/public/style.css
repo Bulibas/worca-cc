@@ -4548,6 +4548,7 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-scope-btn:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-scope-btn.is-pinned{color:var(--ink);border-color:var(--line-2);font-weight:600;}
 .ask-scope-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ask-mcp-btn[hidden]{display:none;}
 .ask-icon-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;padding:0;
   border:0;border-radius:9px;background:transparent;color:var(--ink-2);cursor:pointer;transition:.15s;}
 .ask-icon-btn:hover{background:var(--field);color:var(--ink);}
@@ -4618,6 +4619,7 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-tool-target{min-width:0;font-family:var(--mono);font-size:11.5px;color:var(--ink-2);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .ask-tool-note{flex:0 0 auto;font-family:var(--mono);font-size:10.5px;color:var(--seq);}
+.ask-tool-mcp{flex:0 1 auto;min-width:0;max-width:65%;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:11.5px;font-weight:500;color:var(--ink);white-space:nowrap;}
 
 .ask-agents{margin-top:3px;display:flex;flex-direction:column;gap:2px;}
 .ask-agents-cap{display:flex;align-items:center;gap:8px;padding:2px 0 3px;font-weight:600;font-size:9.5px;
@@ -4997,6 +4999,20 @@ body.rail-collapsed .ask-dock{left:76px;}
    the model popover. */
 .ask-pop-scope{left:var(--ask-col-inset);bottom:calc(var(--ask-box-top) + 6px);width:300px;max-height:min(420px,70%);overflow-y:auto;}
 .ask-pop-model{right:var(--ask-col-inset);bottom:calc(var(--ask-box-top) + 6px);width:292px;border-radius:var(--r-card);}
+/* The per-chat MCP picker (MCP registry §9.4) opens over the scope pill it sits beside. Level 1 rows hold a
+   small switch and a drill button; level 2 rows a copy name and its switch. */
+.ask-pop-mcp{left:var(--ask-col-inset);bottom:calc(var(--ask-box-top) + 6px);width:300px;max-height:min(420px,70%);overflow-y:auto;}
+.ask-mcp-row{display:flex;align-items:center;gap:6px;padding:0 11px;}
+.ask-mcp-row .ask-pop-item{flex:1 1 auto;min-width:0;padding-left:6px;}
+.ask-mcp-copy{flex:1 1 auto;min-width:0;padding:9px 0;font-family:var(--mono);font-size:12px;color:var(--ink);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ask-pop-mcp .switch{width:30px;height:18px;border:0;padding:0;}
+.ask-pop-mcp .switch::after{top:2px;left:2px;width:14px;height:14px;}
+.ask-pop-mcp .switch.on::after{left:14px;}
+.ask-pop-mcp .switch:disabled{opacity:.5;cursor:not-allowed;}
+.ask-mcp-member.is-skipped .ask-model-name{font-family:var(--mono);font-size:12px;color:var(--ink-3);}
+.ask-mcp-member.is-problem .ask-pop-row-value{color:var(--amber-ink);}
+.ask-notice-mcp{padding:0;border:0;background:none;color:var(--blue-ink);font:inherit;cursor:pointer;}
 .ask-pop-runinfo{right:calc(var(--ask-col-inset) + 66px);bottom:calc(var(--ask-box-top) + 6px);width:326px;z-index:4;}
 /* The chip picker (ask-panel.mjs openChipPicker) is the only JS-positioned panel: a band
    chip sits wherever the transcript scrolled it. Its rows are the WHOLE model catalog, so

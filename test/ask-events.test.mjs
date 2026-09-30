@@ -155,7 +155,7 @@ test('tool lifecycle: labels, running → done/error blocks, durations, input cl
   h.push(atool('msg_1', 'toolu_4', 'mcp__worca__read_attachment', { id: 'att_unknown' }));
   assert.equal(h.frames.at(-2).label, 'Reading attachment');
   h.push(atool('msg_1', 'toolu_5', 'mcp__other__thing', {}));
-  assert.equal(h.frames.at(-2).label, 'Using mcp__other__thing');
+  assert.equal(h.frames.at(-2).label, 'Using other · thing', '§9.7: a registry copy reads <copy> · <tool>');
   const before = h.frames.length;
   h.push(atool('msg_1', 'toolu_6', 'mcp__worca__list_runs', {}), atool('msg_1', 'toolu_7', 'mcp__worca__list_runs', {}));
   assert.deepEqual(h.frames.slice(before).map((f) => f.type), ['ask-label', 'ask-block', 'ask-block'], 'the same label is never repeated back to back');

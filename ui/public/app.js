@@ -25328,6 +25328,17 @@ function getPageContext() {
     ctx.workspaceId = state.selectedWorkspaceId;
     return ctx;
   }
+  // The New Pipeline page is ABOUT its project target (MCP registry §9.1): untagged, unlike the fallback below.
+  if (ctx.view === 'new' && state.runTarget !== 'workspace') {
+    const dir = selectedProjectPath();
+    if (dir) ctx.projectDir = dir;
+    return ctx;
+  }
+  // A workspace page names its workspace (§9.1), like a project page names its project.
+  if (ctx.view === 'workspaces' && param) {
+    const ws = parseWsParam(param);
+    if (ws && workspaceById(ws.id)) { ctx.workspaceId = ws.id; return ctx; }
+  }
   // The Team metrics page's selection: scope id, range, group-by and the active filters, so
   // "why did spend jump?" refers to the chart on screen. Ids and enum slugs only — the server
   // validates each and resolves the scope name itself.
@@ -25343,8 +25354,10 @@ function getPageContext() {
     if (f) ctx.tmFilter = f.slice(0, 200);
     return ctx;
   }
+  // The generic fallback: the dropdown's project on a page that is not about one. Tagged, so the server
+  // ignores it for MCP servers, the context header and the memory mount (§9.1).
   const dir = selectedProjectPath();
-  if (dir) ctx.projectDir = dir;
+  if (dir) { ctx.projectDir = dir; ctx.projectSource = 'fallback'; }
   return ctx;
 }
 

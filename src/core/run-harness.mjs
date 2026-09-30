@@ -99,6 +99,7 @@ import { createRedactor } from './redact.mjs';
 import { finalizeWorkspaceScan } from './workspace-scan-run.mjs';
 import { readWorkspaceMap } from './workspaces.mjs';
 import { redactSecrets } from '../shared/workspace-map/redact.mjs';
+import { MCP_TOOL_NAME_400_RE, MCP_TOOL_NAME_TOO_LONG } from '../shared/mcp-tool-name.mjs';
 
 // worca-cc repo root; holds skills/. fileURLToPath, never URL.pathname: the
 // latter is `/C:/…` on Windows and %-encoded everywhere (see DEFAULT_AGENTS_DIR
@@ -627,9 +628,10 @@ const HARNESS_GIT_TIMEOUT_MS = 120_000;
 
 // MCP registry §10: a result error the first-party API gives a tool name over the limit, and the
 // run warning it maps to (put back after a resume re-assembly, like the mcpStatus lines). Bounded
-// quantifiers and clipped text: it runs in the server process on every error result's text.
-const MCP_NAME_400_RE = /tools\.\d{1,6}\.(?:[A-Za-z_]{1,40}\.)?name\b.{0,120}?at most (64|128)/;
-const MCP_NAME_WARNING = 'an MCP tool name is too long for this model';
+// quantifiers and clipped text: it runs in the server process on every error result's text. One
+// definition with Ask's muted line (ask/turn.mjs): src/shared/mcp-tool-name.mjs.
+const MCP_NAME_400_RE = MCP_TOOL_NAME_400_RE;
+const MCP_NAME_WARNING = MCP_TOOL_NAME_TOO_LONG;
 
 /** §10: the run warning for a registry copy's `system/init` status; null when it is not a problem. */
 function mcpStatusWarning(name, status, setName) {

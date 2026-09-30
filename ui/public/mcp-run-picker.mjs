@@ -7,6 +7,24 @@
 const keyOf = (m) => `${m.setId}|${m.serverId}`;
 const CHOICES = new Set(['off', 'needs-consent', 'opted-out', 'chat-off']);   // §5.7: the other skips read as problems
 
+/** How a skipped membership reads in every MCP preview (this picker and Ask's, §5.7): its name — a
+ *  `missing-server` skip has no copy name (its server left the catalog), so its id stands in — its reason,
+ *  and whether it is a problem rather than a choice. A never-consented Team server reads "off — turn it
+ *  on in the team checklist" (Appendix B 4). */
+export function mcpSkipView(s) {
+  return {
+    name: s.copy ?? s.serverId,
+    why: s.reason === 'needs-consent' && s.why ? `off — ${s.why}` : (s.why || s.reason),
+    problem: !CHOICES.has(s.reason),
+  };
+}
+
+/** A startable copy's note — §4.4 provisional name, §5.6 withheld tools (it starts either way); '' when none. */
+export function mcpCopyNote(preview, c) {
+  const tools = (preview.skippedTools || []).filter((t) => t.name === c.name).map((t) => t.reason);
+  return [c.provisional && 'name provisional', ...tools].filter(Boolean).join(' · ');
+}
+
 /** "N of M MCP servers": M = memberships that would start, N = those not opted out. */
 export function mcpRunsLabel(preview, optOut) {
   const off = new Set(optOut);
@@ -62,16 +80,10 @@ export function renderMcpRunsPop(preview, optOut, { doc = globalThis.document, p
     const projects = projectName ? set.routes.map((r) => projectName(r.project)) : [];
     head.append(setBox, doc.createTextNode(projects.length ? `${set.name} · ${projects.join(', ')}` : set.name));
     root.append(head);
-    for (const c of startable) {
-      // §4.4 provisional names and §5.6 withheld tools: the copy starts either way.
-      const tools = (preview.skippedTools || []).filter((t) => t.name === c.name).map((t) => t.reason);
-      row(c.copy, box(!off.has(keyOf(c)), [keyOf(c)], 'row'), [c.provisional && 'name provisional', ...tools].filter(Boolean).join(' · '));
-    }
-    // A `missing-server` skip has no copy name (its server left the catalog): its id stands in. A
-    // never-consented Team server reads "off — turn it on in the team checklist" (Appendix B 4).
+    for (const c of startable) row(c.copy, box(!off.has(keyOf(c)), [keyOf(c)], 'row'), mcpCopyNote(preview, c));
     for (const s of skipped) {
-      const why = s.reason === 'needs-consent' && s.why ? `off — ${s.why}` : (s.why || s.reason);
-      row(s.copy ?? s.serverId, null, why, ` is-skipped${CHOICES.has(s.reason) ? '' : ' is-problem'}`);
+      const v = mcpSkipView(s);
+      row(v.name, null, v.why, ` is-skipped${v.problem ? ' is-problem' : ''}`);
     }
   }
   return root;

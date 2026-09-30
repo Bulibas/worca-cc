@@ -57,6 +57,9 @@ async function boot({ url = 'http://localhost:4317/' } = {}) {
     calls.push({ url: url2, opts: opts || {} });
     const ask = askArms(url2, opts);
     if (ask) return Promise.resolve(ask);
+    if (url2.includes('/api/workspaces')) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ workspaces: [{ id: 'wks-team-0000abcd', name: 'Team', projectKeys: [], projectPaths: [] }] }) });
+    }
     if (url2.includes('/api/projects')) {
       return Promise.resolve({ ok: true, status: 200, json: async () => ({ projects: [{ name: 'proj', path: '/repos/proj', exists: true }] }) });
     }
@@ -237,4 +240,27 @@ test('ui-ask-integration: the send body carries the resolved page context', asyn
   await sendText(window, 'context check two');
   const post2 = calls.filter((c) => c.url.includes('/messages') && c.opts.method === 'POST').at(-1);
   assert.deepEqual(JSON.parse(post2.opts.body).context, { view: 'running', runId: 'r1', projectDir: '/p', pinned: false, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }); // #397
+});
+
+test('MCP registry §9.1: New Pipeline names its project untagged, a workspace page its workspace; the generic fallback is tagged', async () => {
+  const { window, calls, recv } = await boot();
+  const lastCtx = () => JSON.parse(calls.filter((c) => c.url.includes('/messages') && c.opts.method === 'POST').at(-1).opts.body).context;
+  const done = () => recv({ type: 'ask-done', text: 'ok', blocks: [], usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }, costUsd: 0, durationMs: 5, model: 'm', status: 'done', threadTotals: {}, threadId: TID, messageId: MID, seq: 1 });
+  await openSheet(window);
+  await sendText(window, 'on new pipeline');
+  assert.equal(lastCtx().projectDir, '/repos/proj');
+  assert.equal(lastCtx().projectSource, undefined, 'the New Pipeline page is ABOUT its project target');
+  done();
+  go(window, 'settings');
+  await settle(window);
+  await sendText(window, 'on settings');
+  assert.equal(lastCtx().projectDir, '/repos/proj');
+  assert.equal(lastCtx().projectSource, 'fallback', 'the dropdown fallback is tagged');
+  done();
+  go(window, 'workspaces/wks-team-0000abcd');
+  await settle(window, 10);
+  await sendText(window, 'on a workspace page');
+  assert.equal(lastCtx().workspaceId, 'wks-team-0000abcd');
+  assert.equal(lastCtx().projectDir, undefined);
+  assert.equal(lastCtx().projectSource, undefined);
 });

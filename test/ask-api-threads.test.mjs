@@ -48,6 +48,10 @@ after(async () => {
 const post = (p, body) => fetch(`${base}${p}`, { method: 'POST', headers: JSONH, body: JSON.stringify(body) });
 const patch = (p, body) => fetch(`${base}${p}`, { method: 'PATCH', headers: JSONH, body: JSON.stringify(body) });
 const del = (p) => fetch(`${base}${p}`, { method: 'DELETE' });
+// Mock turns started by earlier tests may still be running; the global cap (3) answers 429 until they end.
+const idle = async () => {
+  for (let i = 0; i < 500 && [...mod._testing.askJobs.values()].some((j) => j.status === 'running'); i++) await new Promise((r) => setTimeout(r, 10));
+};
 
 test('POST creates a thread; the list shows it with runLinks count and inFlight:false', async () => {
   const r = await post('/api/ask/threads', {});
@@ -209,6 +213,38 @@ test('PATCH model/effort: persisted and returned by GET; validated like a send; 
   assert.equal((await patch('/api/ask/threads/ask_ffffffff', { model: 'claude-opus-5-5', effort: 'high' })).status, 404);
 });
 
+test('PATCH mcpOff (MCP registry §9.4): stored, returned by GET, bumps updated_at, no title needed; null clears; bad shapes 400', async () => {
+  const { thread } = await (await post('/api/ask/threads', { title: 'Kept' })).json();
+  const url = `/api/ask/threads/${thread.id}`;
+  const before = (await (await fetch(`${base}${url}`)).json()).thread;
+  await new Promise((r) => setTimeout(r, 5));
+  const mcpOff = { sets: ['billing'], members: ['shop|manual:postgres-ro'] };
+  let r = await patch(url, { mcpOff });
+  assert.equal(r.status, 200, 'a { mcpOff }-only PATCH is not answered with the title error');
+  const got = (await (await fetch(`${base}${url}`)).json()).thread;
+  assert.deepEqual(got.mcpOff, mcpOff);
+  assert.equal(got.title, 'Kept');
+  assert.ok(got.updatedAt > before.updatedAt, 'bumps updated_at like scope');
+  r = await patch(url, { mcpOff: { members: ['billing'] } });
+  assert.equal(r.status, 400);
+  assert.match((await r.json()).error, /mcpOff\.members/);
+  assert.deepEqual((await (await fetch(`${base}${url}`)).json()).thread.mcpOff, mcpOff, 'a refused PATCH writes nothing');
+  r = await patch(url, { mcpOff: null });
+  assert.equal(r.status, 200);
+  assert.equal((await r.json()).thread.mcpOff, null);
+});
+
+test('the first message stores mcpOff on the thread (choices made before a thread existed); a bad one is a 400 before any write', async () => {
+  await idle();
+  const { thread } = await (await post('/api/ask/threads', {})).json();
+  const bad = await post(`/api/ask/threads/${thread.id}/messages`, { text: 'hi', model: 'claude-opus-5-5', effort: 'high', mcpOff: { sets: ['Bad Id'] } });
+  assert.equal(bad.status, 400);
+  assert.equal((await (await fetch(`${base}/api/ask/threads/${thread.id}`)).json()).messages.length, 0, 'nothing written');
+  const r = await post(`/api/ask/threads/${thread.id}/messages`, { text: 'hi', model: 'claude-opus-5-5', effort: 'high', mcpOff: { sets: ['general'] } });
+  assert.equal(r.status, 202);
+  assert.deepEqual((await (await fetch(`${base}/api/ask/threads/${thread.id}`)).json()).thread.mcpOff, { sets: ['general'], members: [] });
+});
+
 test('PATCH naming none of title/scope/model still earns the title error', async () => {
   const { thread } = await (await post('/api/ask/threads', {})).json();
   const r = await patch(`/api/ask/threads/${thread.id}`, {});
@@ -243,6 +279,30 @@ test('#397: a message whose context lacks `pinned` inherits the thread pin, per 
   const snap2 = await (await fetch(`${base}/api/ask/threads/${t2.id}`)).json();
   assert.equal(snap2.thread.context.pinned, false);
   assert.equal(snap2.thread.context.projectKey, undefined);
+});
+
+test('MCP registry §9.1: the inherited pin and the PATCH scope branch drop projectSource with the target keys', async () => {
+  await idle();
+  const { thread } = await (await post('/api/ask/threads', {})).json();
+  let r = await post(`/api/ask/threads/${thread.id}/messages`, {
+    text: 'hi', model: 'claude-opus-5-5', effort: 'high',
+    context: { view: 'settings', projectDir: '/p/fallback', projectSource: 'fallback', pinned: false },
+  });
+  assert.equal(r.status, 202);
+  const stored = (await (await fetch(`${base}/api/ask/threads/${thread.id}`)).json()).thread.context;
+  assert.equal(stored.projectSource, 'fallback', 'Auto stores the tag (card-event turns reuse it)');
+  r = await patch(`/api/ask/threads/${thread.id}`, { scope: { pinned: true, projectKey: 'demo-00000001' } });
+  assert.deepEqual((await r.json()).thread.context, { view: 'settings', pinned: true, projectKey: 'demo-00000001' }, 'PATCH scope strips it');
+  // a pre-selector tab (no `pinned`) inherits the pin: askApplyPin strips the tag too
+  await idle();
+  r = await post(`/api/ask/threads/${thread.id}/messages`, {
+    text: 'again', model: 'claude-opus-5-5', effort: 'high',
+    context: { view: 'settings', projectDir: '/p/fallback', projectSource: 'fallback' },
+  });
+  assert.equal(r.status, 202, await r.clone().text());
+  const after = (await (await fetch(`${base}/api/ask/threads/${thread.id}`)).json()).thread.context;
+  assert.equal(after.projectSource, undefined);
+  assert.equal(after.projectKey, 'demo-00000001');
 });
 
 test('DELETE removes rows and the attachment directory; unknown is 404', async () => {

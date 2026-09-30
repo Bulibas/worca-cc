@@ -24,6 +24,7 @@
 //    The LAST result wins (two arrive in background mode).
 import { redactAskText } from './redact.mjs';
 import { ASK_LIMITS } from './limits.mjs';
+import { parseMcpToolName } from '../../shared/mcp-tool-name.mjs';
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const ZERO = () => ({ input: 0, output: 0, cacheRead: 0, cacheCreation: 0 });
@@ -122,6 +123,8 @@ export function estimateAgentCosts(agents, result) {
 /** The activity label for a main-stream tool call (null for sub-agent spawns — those are counted). */
 export function labelForTool(name, input = {}, attachmentNames = {}) {
   if (isAgentTool(name)) return null;
+  const mcp = parseMcpToolName(name);
+  if (mcp && mcp.server !== 'worca') return `Using ${mcp.server} · ${mcp.tool}`;   // a registry copy's tool (§9.7)
   const n = short(name);
   const id = typeof input?.id === 'string' ? input.id : '';
   switch (n) {

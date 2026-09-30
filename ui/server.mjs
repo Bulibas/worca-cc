@@ -98,6 +98,7 @@ import {
   sweepAskWorktrees,
 } from '../src/core/ask/worktrees.mjs';
 import { createAskTurn } from '../src/core/ask/turn.mjs';
+import { validateMcpOff, resolveAskMcp, askMcpPromptInput, askMcpPreview, askMcpJoinNotice } from '../src/core/ask/mcp.mjs';
 import { attachRunFollower } from '../src/core/ask/follow.mjs';
 import { mockEnabled, MOCK_WRITER_ROLES } from '../src/core/claude-runner.mjs';
 import { budgetStatus, readCostCapOverride, setCostCapOverride } from '../src/core/cost-budget.mjs';
@@ -6899,12 +6900,18 @@ app.patch('/api/ask/threads/:id', async (req, res) => {
     const pick = body.model !== undefined || body.effort !== undefined;
     // Title keeps its original contract exactly: a PATCH that names none of the
     // fields still earns the title error, so pre-#397 callers see identical behaviour.
-    if (body.title !== undefined || (body.scope === undefined && !pick)) {
+    if (body.title !== undefined || (body.scope === undefined && body.mcpOff === undefined && !pick)) {
       const raw = body.title;
       if (typeof raw !== 'string' || !raw.trim() || raw.length > 120) {
         return badRequest(res, 'title must be a non-empty string of at most 120 characters');
       }
       patch.title = raw.trim();
+    }
+    if (body.mcpOff !== undefined) {
+      // MCP registry §9.4: the composer picker's switched-off sets and memberships, applied from the next turn.
+      const mo = validateMcpOff(body.mcpOff);
+      if (!mo.ok) return badRequest(res, mo.error);
+      patch.mcpOff = mo.value;
     }
     if (pick) {
       // The same check as the message POST. Awaited BEFORE the scope branch, so its
@@ -6926,6 +6933,7 @@ app.patch('/api/ask/threads/:id', async (req, res) => {
       delete base.projectDir;
       delete base.projectKey;
       delete base.workspaceId;
+      delete base.projectSource;
       patch.context = { ...base, ...sv.scope };
     }
     const thread = askUpdateThread(id, patch);
@@ -7104,6 +7112,7 @@ function askApplyPin(ctx, pin) {
   delete out.projectDir;
   delete out.projectKey;
   delete out.workspaceId;
+  delete out.projectSource;   // MCP registry §9.1: the fallback tag goes with the target keys
   return { ...out, ...pin };
 }
 
@@ -7134,9 +7143,10 @@ function askWebAccessFor(threadId, ctx) {
 /** The system prompt of ONE Ask turn: the rules, the catalog, and — only when the chat's
  *  "Create and run scripts" pref is on (W20) — the scripts section with the runtimes this host
  *  actually has (the python probe, cached 60 s); plus the web section when `web` (askWebAccess()
- *  for this turn) is on. Memory is mounted, not rendered. */
-async function askSystemPromptFor(catalog, { web = null } = {}) {
-  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT, web });
+ *  for this turn) is on, and the MCP servers section when the turn has registry copies (`mcp`,
+ *  askMcpPromptInput()). Memory is mounted, not rendered. */
+async function askSystemPromptFor(catalog, { web = null, mcp = null } = {}) {
+  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT, web, mcp });
 }
 
 /** "scheduled Sat Sep 19, 02:00 (run 1a2b…)" / "repeats: Every weekday at 02:00 (sch_…)" / "proposes: …" — or ''. */
@@ -7170,10 +7180,12 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
   if (ctx.view) out.view = ctx.view;
   if (ctx.diffPath) out.diffPath = ctx.diffPath;   // client-supplied, already length-checked by validateClientContext
   try {
-    if (ctx.projectKey || ctx.projectDir) {
+    // MCP registry §9.1: a fallback-tagged projectDir (the dropdown on a page about no project) names nothing.
+    const dir = ctx.projectSource === 'fallback' ? null : ctx.projectDir;
+    if (ctx.projectKey || dir) {
       const projects = await listProjects();
       const p = projects.find((x) =>
-        (ctx.projectKey && x.key === ctx.projectKey) || (ctx.projectDir && x.path === ctx.projectDir));
+        (ctx.projectKey && x.key === ctx.projectKey) || (dir && x.path === dir));
       if (p) out.project = { name: p.name, key: p.key };
     }
   } catch { /* absent line */ }
@@ -7321,7 +7333,7 @@ function askSignedIn(req) {
   return who.source === 'local' ? null : who.name;
 }
 
-async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, files = [], synthetic = null, signedIn = null, reader = null }) {
+async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, files = [], synthetic = null, signedIn = null, reader = null, mcpOff = undefined }) {
   // §6.2.2 ATOMIC re-check + slot reservation. Today every await between the
   // top 409/429 pair and here resolves in microtasks (validateModelEffort ->
   // composeCatalog; askBuildCatalog -> three synchronous better-sqlite3
@@ -7353,7 +7365,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // Writes. Store the LAST context + model/effort on the thread (§6.5 tail, D8).
     // `ctx` (pin-merged) rather than cv.context: the stored row is what restores
     // the selector on reopen and what the MCP child reads for tool defaulting.
-    askUpdateThread(id, { context: ctx, model, effort });
+    askUpdateThread(id, { context: ctx, model, effort, ...(mcpOff !== undefined ? { mcpOff } : {}) });
     // §7.4 — NOTHING is stamped on the row before the 202: the thread stays
     // untitled (the header reads "Ask Worca") until the D13 background title
     // announces itself. titleWasAuto gates that call: a title given at THREAD
@@ -7399,7 +7411,10 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // team policy — so the prompt section, the sub-agent note and the MCP child's tools agree.
     const pinned = askPinnedScope(ctx);
     const web = askWebAccessFor(id, ctx);
-    const systemPrompt = await askSystemPromptFor(catalog, { web });
+    // MCP registry §9.1–9.3: General + the targets in play (the tagged dropdown fallback excluded), minus the chat's
+    // picker choices — resolved ONCE per turn, so the per-turn file, the spawn and the prompt section agree.
+    const mcp = await resolveAskMcp({ ctx, threadId: id, off: mcpOff !== undefined ? mcpOff : thread.mcpOff, model });
+    const systemPrompt = await askSystemPromptFor(catalog, { web, mcp: await askMcpPromptInput(mcp) });
     const header = askBuildContextHeader(headerCtx);
     const prompt = askBuildTurnPrompt(header, text, inline);
     const prior = askListMessages(id).filter((m) => m.seq < userMsg.seq);
@@ -7419,6 +7434,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
       deterministicTitle,
       pinnedScope: pinned,                          // #397: proposal defaulting + mismatch flag
       web,
+      mcp: mcp.result,
       timeZone: ctx.timeZone || (thread.context && thread.context.timeZone) || null,   // scheduled runs: the user's clock
       memoryProject: headerCtx.project ? { key: headerCtx.project.key, name: headerCtx.project.name || '' } : null,   // native-rules revision: the turn mounts global + this project through --add-dir
       mock: mockEnabled({}) ? { card: mockAskCard(ctx, text) } : null, // R-F
@@ -7431,6 +7447,8 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         onOutOfTurn: (f) => broadcast({ ...f, threadId: id }),
         onCommentMutation: ({ runId }) => { emitDiffCommentsChanged(runId); },
         onWorktreeMutation: () => { emitAskWorktrees(id); },
+        // §9.1 (D17): at turn end, name the copies a worktree opened this turn brings into the next one.
+        mcpJoinNotice: () => askMcpJoinNotice({ before: mcp, ctx, threadId: id, off: askGetThread(id)?.mcpOff ?? null, model }),
         // A remember/forget in the MCP child is the same scope change a REST write makes (B29).
         // The key is parsed out of worca's OWN tool result, never written by the model; shape-check
         // it anyway before it rides a broadcast (I2-#22).
@@ -7511,6 +7529,9 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
     }
     const cv = validateClientContext(body.context);
     if (!cv.ok) return badRequest(res, cv.error);
+    // MCP registry §9.4: the composer sends the picker's choices with every message; they decide this turn and are stored.
+    const mo = body.mcpOff === undefined ? { ok: true, value: undefined } : validateMcpOff(body.mcpOff);
+    if (!mo.ok) return badRequest(res, mo.error);
     // #397: explicit pin beats page context, per field. A context carrying its own
     // `pinned` verdict is authoritative — the selector-aware client already merged
     // (true) or explicitly chose Auto (false). A context WITHOUT one comes from a
@@ -7565,7 +7586,7 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
       }
     }
 
-    const r = await startAskTurn({ threadId: id, thread, ctx, model: mv.model, effort: mv.effort, text, files, signedIn: askSignedIn(req), reader: askViewer(req) });
+    const r = await startAskTurn({ threadId: id, thread, ctx, model: mv.model, effort: mv.effort, text, files, signedIn: askSignedIn(req), reader: askViewer(req), mcpOff: mo.value });
     if (!r.ok) return res.status(r.status).json({ error: r.error, ...(r.budget ? { budget: r.budget } : {}) });
     // `attachments` carries the store-minted ids so the sender's own echo can key
     // image thumbnails and the thread budget off them (the ask-message broadcast
@@ -7574,6 +7595,31 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
   } catch (err) {
     // startAskTurn never throws (it returns {ok:false,…}); only the route's own
     // pre-checks can land here, so there is no slot to release.
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+// MCP registry §9.4: the composer picker's data — the same targets in play and resolver as the turn. `threadId`
+// adds the thread's open worktrees and stored choices; a body `mcpOff` overrides them (a thread-less chat);
+// `model` (the composer's) sets the §5.6 tool-name limit.
+app.post('/api/ask/mcp-preview', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const cv = validateClientContext(body.context);
+    if (!cv.ok) return badRequest(res, cv.error);
+    let thread = null;
+    if (body.threadId !== undefined) {
+      const tid = askIdParam(res, body.threadId, 'thread');
+      if (!tid) return;
+      thread = askGetThread(tid);
+      // Someone else's thread is a 404, like every /api/ask/threads/:id route on a shared deployment.
+      if (!thread || !askThreadVisible(thread, req)) return res.status(404).json({ error: 'thread not found' });
+    }
+    const mo = body.mcpOff === undefined ? { ok: true, value: thread ? thread.mcpOff : null } : validateMcpOff(body.mcpOff);
+    if (!mo.ok) return badRequest(res, mo.error);
+    if (body.model !== undefined && (typeof body.model !== 'string' || !body.model || body.model.length > 200)) return badRequest(res, 'model must be a model id');
+    res.json(await askMcpPreview({ ctx: cv.context, threadId: thread ? thread.id : null, off: mo.value, model: body.model ?? null }));
+  } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
 });

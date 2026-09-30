@@ -127,6 +127,24 @@ test('ask-panel-render: tool rows — op, target with input preview, note', asyn
   assert.equal(rows[1].querySelector('.ask-tool-note').textContent, 'error');
 });
 
+test('ask-panel-render: a registry tool row reads <copy> · <tool> then the input preview, with no op cell (§9.7)', async () => {
+  const snap = snapBody([asstRow('askm_00000001', 1, {
+    blocks: [
+      { kind: 'tool', id: 't1', name: 'mcp__sentry_billing__search_issues', input: { query: 'checkout' }, status: 'done', durationMs: 400 },
+      { kind: 'tool', id: 't2', name: 'mcp__worca__list_runs', input: {}, status: 'done', durationMs: 100 },
+    ],
+  })]);
+  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+  await openThread(ctx);
+  const [mcp, worca] = [...ctx.doc.querySelectorAll('.ask-tool-row')];
+  assert.equal(mcp.querySelector('.ask-tool-op'), null, 'no 38 px op cell');
+  assert.equal(mcp.querySelector('.ask-tool-mcp').textContent, 'sentry_billing · search_issues');
+  assert.equal(mcp.querySelector('.ask-tool-target').textContent, '{"query":"checkout"}');
+  assert.equal(mcp.querySelector('.ask-tool-note').textContent, '0.4s');
+  assert.equal(worca.querySelector('.ask-tool-op').textContent, 'list', 'worca tools keep the op cell');
+  assert.equal(worca.querySelector('.ask-tool-mcp'), null);
+});
+
 test('ask-panel-render: agent row carries name · model · tokens · ≈$ · status; expand survives update', async () => {
   const agent = { kind: 'agent', id: 'toolu_1', label: 'count runs', type: 'general-purpose', model: 'claude-haiku-4-5', tokens: 5321, usage: { input: 10, output: 69, cacheRead: 4564, cacheCreation: 678 }, costUsd: 0.0017, estimated: true, status: 'done', durationMs: 2861, log: [{ t: 0, text: '→ list_runs {}' }, { t: 61000, text: '← ok 0.0s' }] };
   const snap = snapBody([asstRow('askm_00000001', 1, { blocks: [agent] })]);

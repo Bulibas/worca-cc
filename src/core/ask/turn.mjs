@@ -22,6 +22,9 @@ import { resolveModelEnv, resolveModelCost, estimateCost, liveCostRates as defau
 import { worcaHome } from '../projects.mjs';
 import { generateTitle } from '../title.mjs';
 import { cleanText } from '../../shared/graph/assemble.mjs';
+import { MCP_TOOL_NAME_400_RE, MCP_TOOL_NAME_TOO_LONG } from '../../shared/mcp-tool-name.mjs';
+import { createRedactor } from '../redact.mjs';
+import { redactAskText } from './redact.mjs';
 import { createTurnReducer } from './events.mjs';
 import { buildAskSpawnOptions, buildMcpConfig, ASK_MCP_SERVER_PATH } from './spawn.mjs';
 import { refreshAskMemoryMount } from './memory-deps.mjs';
@@ -52,6 +55,12 @@ const TERMINAL = new Set(['done', 'stopped', 'error']);
 // non-runner error paths so a huge message can never bloat the persisted block.
 const ERROR_DETAIL_MAX = 2000;
 
+// MCP registry §10 (Ask column): what a registry copy's `system/init` status reads as (connected/pending: nothing).
+const MCP_UNAVAILABLE = Object.freeze({
+  failed: 'failed', 'needs-auth': 'needs-auth',
+  disabled: 'disabled by your Claude Code settings', absent: 'blocked by managed MCP policy',
+});
+
 /** The human line a classified failure carries. The block is persisted and
  *  shared by every viewer, so the wording is level-neutral: it names where a
  *  remedy lives (including which interface mode gates it) instead of assuming
@@ -80,10 +89,19 @@ class AskTurn extends EventEmitter {
     timeZone = null,
     reader = null,
     web = null,
+    mcp = null,
     deps = {},
   } = {}) {
     super();
     this.threadId = threadId;
+    // MCP registry §9.2: resolveRegistry()'s result for this turn; null (or no copies) keeps the spawn byte-identical.
+    this.mcp = mcp && Array.isArray(mcp.copies) && mcp.copies.length ? mcp : null;
+    this._mcpNoted = new Set();       // §10: copies already given a muted line by THIS attempt's reducer
+    this._worktreeMutated = false;    // §9.1 (D17): set by the reducer's onWorktreeMutation; asks for the join notice
+    // §5.5.3: the reducer's text redactor — Ask's patterns, then this turn's registry values (and their encodings).
+    this._mcpRedact = this.mcp && this.mcp.secretValues.length
+      ? ((r) => (s) => r.text(redactAskText(s)))(createRedactor(this.mcp.secretValues))
+      : null;
     // A shared sign-in's name (identity.mjs): the MCP child's per-person reads (notifications).
     this.reader = typeof reader === 'string' && reader ? reader : null;
     // askWebAccess() for this turn (docs/guardrails.md "Web access"): the MCP child's web tools + the sub-agent note.
@@ -158,6 +176,10 @@ class AskTurn extends EventEmitter {
       onOutOfTurn: deps.onOutOfTurn ?? (() => {}),
       onCommentMutation: deps.onCommentMutation ?? (() => {}),
       onWorktreeMutation: deps.onWorktreeMutation ?? (() => {}),
+      // () => Promise<string|null>: §9.1 (D17) — the server re-runs the targets in play at turn end and names the
+      // copies a worktree change brings into the next turn. null = no notice.
+      mcpJoinNotice: deps.mcpJoinNotice ?? null,
+      mcpJoinNoticeMs: deps.mcpJoinNoticeMs ?? 5000,   // its bound: a hung resolve never wedges the terminal write
       onMemoryMutation: deps.onMemoryMutation ?? (() => {}),
       onScriptMutation: deps.onScriptMutation ?? (() => {}),
       onScheduleMutation: deps.onScheduleMutation ?? (() => {}),
@@ -489,6 +511,7 @@ class AskTurn extends EventEmitter {
   _makeReducer() {
     this._wfCards.clear();
     this._tracked.clear();
+    this._mcpNoted.clear();          // the retry's fresh reducer starts its own lines; only the last reducer is persisted
     const d = this.deps;
     // One settings read per attempt, never per frame. null → the frames carry
     // estimatedCostUsd:null and the footer keeps today's behaviour.
@@ -500,6 +523,9 @@ class AskTurn extends EventEmitter {
       setTimeout: d.setTimeout,
       clearTimeout: d.clearTimeout,
       attachmentNames: this.attachmentNames,
+      // MCP registry §5.5.3: the persisted text is redacted whole with this turn's registry values (the runner redacts
+      // per event, and a value split across stream deltas is only whole here). Without secrets: the default redactor.
+      ...(this._mcpRedact ? { redact: this._mcpRedact } : {}),
       // Ask spend feeds the SAME windowed budget as pipeline spend
       // (cost-budget.mjs combinedWindowedSpendUsd), so an on-prem model the CLI
       // prices by name inflates it from here too — re-price the turn exactly as
@@ -524,7 +550,7 @@ class AskTurn extends EventEmitter {
       onCommentMutation: (e) => { try { this.deps.onCommentMutation(e); } catch { /* a broken sink never breaks the turn */ } },
       // Same shape for worktrees: open/remove/navigate in the child → the server
       // broadcasts the thread's worktree envelope (ui/server.mjs emitAskWorktrees).
-      onWorktreeMutation: (e) => { try { this.deps.onWorktreeMutation(e); } catch { /* a broken sink never breaks the turn */ } },
+      onWorktreeMutation: (e) => { this._worktreeMutated = true; try { this.deps.onWorktreeMutation(e); } catch { /* a broken sink never breaks the turn */ } },
       // ...and for memory: a remember/forget in the child becomes the server's memory-changed frame.
       onMemoryMutation: (e) => { try { this.deps.onMemoryMutation(e); } catch { /* a broken sink never breaks the turn */ } },
       // ...and for scripts: a save_script in the child becomes the server's scripts-changed frame.
@@ -547,6 +573,41 @@ class AskTurn extends EventEmitter {
     await Promise.race([this.reducer.settle(), aborted]);
   }
 
+  /** §10 (Ask): one muted line per registry copy the CLI could not start, once per attempt's reducer. */
+  _noteMcpInit(list) {
+    const status = new Map((Array.isArray(list) ? list : []).filter((x) => x && typeof x.name === 'string').map((x) => [x.name, x.status]));
+    for (const c of this.mcp.copies) {
+      const s = status.has(c.name) ? status.get(c.name) : 'absent';
+      const why = typeof s === 'string' && Object.hasOwn(MCP_UNAVAILABLE, s) ? MCP_UNAVAILABLE[s] : null;
+      if (!why || this._mcpNoted.has(c.name)) continue;
+      this._mcpNoted.add(c.name);
+      this.reducer.addBlock({ kind: 'notice', text: `${c.name} unavailable (${why})` });
+    }
+    this._persistBlocks();
+  }
+
+  /** The turn's closing MCP notices: the §10 tool-name 400 mapping and the §9.1 worktree join notice. */
+  async _mcpClosingNotices(kind, message) {
+    if (this.mcp && kind === 'error') {
+      // P4's bounded regex over clipped texts (run-harness.mjs does the same with a result's errors).
+      const text = [message, this.reducer.snapshot().cliErrorText].filter((t) => typeof t === 'string').map((t) => t.slice(0, 4096)).join(' ');
+      if (MCP_TOOL_NAME_400_RE.test(text)) {
+        // §10: "naming the untested or stale copies" (P4's warning names them too); none untested ⇒ every copy's set.
+        const untested = this.mcp.copies.filter((c) => c.untested);
+        const sets = [...new Set((untested.length ? untested : this.mcp.copies).map((c) => c.setName))].sort();
+        const names = untested.length ? ` (${untested.map((c) => c.name).sort().join(', ')})` : '';
+        this.reducer.addBlock({ kind: 'notice', text: `${MCP_TOOL_NAME_TOO_LONG} — Test the servers in ${sets.join(', ')}${names}` });
+      }
+    }
+    if (!this._worktreeMutated || typeof this.deps.mcpJoinNotice !== 'function') return;   // §9.1: only a worktree change
+    // Bounded like _settle: a hung resolve must never hold the terminal write (the thread would answer 409 until a restart).
+    let text = null;
+    let timer = null;
+    const bound = new Promise((res) => { timer = setTimeout(() => res(null), this.deps.mcpJoinNoticeMs); timer.unref?.(); });
+    try { text = await Promise.race([this.deps.mcpJoinNotice(), bound]); } catch { text = null; } finally { clearTimeout(timer); }
+    if (text) this.reducer.addBlock({ kind: 'notice', text, mcp: true });
+  }
+
   /**
    * The single terminal writer — called exactly once per run().
    * kind 'done'  → ask-done{status:'done'|'stopped', reason?}
@@ -563,6 +624,7 @@ class AskTurn extends EventEmitter {
     this._completed = true;
     const d = this.deps;
     await this._settle();
+    await this._mcpClosingNotices(kind, message);
     // PD7: a card still building when the reply ends can never flip — fail it while the reducer is still open.
     for (const b of this.reducer.snapshot().blocks) {
       if (b && b.kind === 'card' && b.state === 'building') this.reducer.updateBlock(b.id, { state: 'failed', error: 'the reply ended before the proposal was ready' });
@@ -703,7 +765,8 @@ class AskTurn extends EventEmitter {
       this.relay = d.agentRelay ? d.agentRelay({ threadId: this.threadId, reader: this.reader || null, web: this.web }) : null;
       await d.fs.writeFile(
         mcpConfigPath,
-        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, ...(this.reader ? { reader: this.reader } : {}), ...(this.relay ? { relay: this.relay } : {}), ...(this.web ? { web: this.web } : {}) }), null, 2),
+        // MCP registry §9.2: the copies ride after `worca` — refs only (`${MCPSECRET_…}`); the values go in spawnEnv.
+        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, ...(this.reader ? { reader: this.reader } : {}), ...(this.relay ? { relay: this.relay } : {}), ...(this.web ? { web: this.web } : {}), ...(this.mcp ? { extraServers: this.mcp.servers } : {}) }), null, 2),
         // Never a key value (webKeyVar: the key rides the process env). A relayed turn runs as
         // the person's agent user (agent-pool.mjs), which reads this file through its group: the
         // scratch dir is setgid worca-share (2770), so 0640 reaches the agent users and nobody
@@ -761,6 +824,12 @@ class AskTurn extends EventEmitter {
               try { d.store.updateThread(this.threadId, { sessionId: e.sessionId }); } catch { /* deleted thread */ }
             }
             this.reducer.push(e);
+            const raw = e && e.raw;
+            // §10: the turn's own init only, and only with a list — an init without `mcp_servers` says nothing (never
+            // "absent"). After the push, so a failing note can never cost the reducer its init.
+            if (this.mcp && raw && raw.type === 'system' && raw.subtype === 'init' && raw.parent_tool_use_id == null && Array.isArray(raw.mcp_servers)) {
+              try { this._noteMcpInit(raw.mcp_servers); } catch { /* a muted line never breaks the stream */ }
+            }
           },
         },
         limits: limitsNow,
@@ -769,6 +838,7 @@ class AskTurn extends EventEmitter {
         memoryDir: this.memoryDir,
         web: this.web,
         relayed: !!this.relay,
+        registry: this.mcp,   // MCP registry §9.2: EVERY attempt, the resume-fallback retry included
       });
       // With the relay, the chat's claude runs as the person's agent user (agent-pool.mjs).
       if (this.relay) options.asAgent = true;
