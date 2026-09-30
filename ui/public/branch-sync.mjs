@@ -1,0 +1,328 @@
+// ui/public/branch-sync.mjs
+// Sync-before-run UI (#527): the status pill + Sync button + Auto-sync switch under the Source
+// branch dropdown, the details dialog, the diverged/offline chooser, and the Projects chips.
+// Models are pure (unit-tested without a DOM); the DOM helpers follow schedule-sheet.mjs
+// (Escape in the capture phase, outside click, focus returns to the opener).
+
+const WORD = { diverged: 'diverged', dirty: 'dirty', behind: 'behind', offline: 'offline', local: 'not on the remote', ok: 'up to date' };
+const TONE = { diverged: 'amber', dirty: 'amber', behind: 'blue', offline: 'grey', local: 'grey', ok: 'green' };
+const RANK = { diverged: 4, dirty: 3, behind: 2, offline: 1, local: 0.5, ok: 0 };   // no ties: the workspace chip must not depend on member order
+
+export function ago(isoStr, now = Date.now()) {
+  const t = Date.parse(isoStr || '');
+  if (!Number.isFinite(t)) return 'never';
+  const s = Math.max(0, Math.round((now - t) / 1000));
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+}
+const count = (n, shallow) => `${shallow ? 'at least ' : ''}${n}`;
+
+/** The form's `state.sync`, one complete shape for every reset (a `members` write never hits undefined). */
+export function freshSyncState(gen = 0) {
+  return { block: null, autoSync: null /* null = follow the project default */, busy: false, members: {}, gen };
+}
+
+/** CSS.escape with a fallback for jsdom, which has no window.CSS. */
+export function cssEscape(s) {
+  s = String(s == null ? '' : s);
+  const css = globalThis.CSS;
+  return (css && css.escape) ? css.escape(s) : s.replace(/["\\\]]/g, '\\$&');
+}
+
+/** The pill under Source branch. hidden:true → no remote: hide pill AND switch (edge case table). */
+export function syncPillModel(sync, { autoSync = true } = {}) {
+  if (!sync || !sync.remote) return { hidden: true };
+  if (sync.stale || sync.fetchError) return { tone: 'grey', label: 'Offline', state: 'offline' };
+  switch (sync.state) {
+    case 'behind': return autoSync
+      ? { tone: 'blue', label: `${count(sync.behind, sync.shallow)} behind`, state: 'behind' }
+      : { tone: 'amber', label: `${count(sync.behind, sync.shallow)} behind`, state: 'behind-off' };
+    case 'diverged': return { tone: 'amber', label: 'Diverged', state: 'diverged' };
+    case 'remote-only': return { tone: 'blue', label: 'Remote only', state: 'remote-only' };
+    case 'no-upstream': return { tone: 'grey', label: `Not on ${sync.remote}`, state: 'no-upstream' };
+    case 'up-to-date': case 'ahead': return { tone: 'green', label: 'Up to date', state: 'up-to-date' };
+    default: return { tone: 'grey', label: 'Unknown', state: 'unknown' };
+  }
+}
+
+/** Projects/Workspaces chip — must match src/core/project-sync.mjs#chipState. */
+export function chipState(b) {
+  if (!b || !b.remote || b.state === 'unknown') return null;
+  if (b.stale) return 'offline';
+  if (b.state === 'diverged') return 'diverged';
+  if (b.dirty && b.checkedOutHere) return 'dirty';
+  if (b.state === 'behind') return 'behind';
+  // remote-only = the branch IS on the remote, only the local copy is missing: no chip, never "not on the remote".
+  if (b.state === 'remote-only') return null;
+  if (b.state === 'no-upstream' || b.state === 'missing') return 'local';
+  return 'ok';
+}
+export function projectChipModel(b) {
+  const s = chipState(b);
+  if (!s) return null;
+  const word = s === 'behind' ? `${count(b.behind, b.shallow)} behind` : WORD[s];
+  return { state: s, tone: TONE[s], text: `${b.base} · ${word}`, action: s === 'diverged' ? 'Review…' : 'Sync' };
+}
+export function worstChip(blocks) {
+  const states = (blocks || []).map(chipState).filter(Boolean).sort((a, b) => RANK[b] - RANK[a]);
+  return states[0] ? { state: states[0], tone: TONE[states[0]], text: WORD[states[0]] } : null;
+}
+/** Ask proposal card suffix: "remote only", "2 behind", "stale". */
+export function sourceRefNote(ref) {
+  if (!ref) return '';
+  const bits = [];
+  if (ref.remoteOnly) bits.push('remote only');
+  if (ref.behind > 0) bits.push(`${ref.behind} behind`);
+  if (ref.stale) bits.push('could not fetch — last known refs');
+  return bits.length ? `from ${ref.ref} (${bits.join(', ')})` : '';
+}
+
+/** Copy for a fetch failure kind — never from stderr. */
+export function fetchFailureCopy(kind, remote = 'origin') {
+  return {
+    auth: `Sign-in to ${remote} failed. Worca will start from the last fetch instead.`,
+    network: `${remote} could not be reached. Worca will start from the last fetch instead.`,
+    timeout: `${remote} did not answer in time. Worca will start from the last fetch instead.`,
+  }[kind] || `Fetching ${remote} failed. Worca will start from the last fetch instead.`;
+}
+
+/** Why a Sync did not move the base (POST answer's sync.ff), or '' when it did / nothing to say.
+ *  The issue's "dirty → fetch only" case: without this the pill just stays "3 behind". */
+export function ffRefusalCopy(ff, base, remote = 'origin') {
+  if (!ff || ff.ok) return '';
+  return {
+    dirty: `${base} has uncommitted changes, so it was not moved. Runs start from ${remote}/${base} in their own worktree.`,
+    'in-use': `${base} is checked out in another worktree, so it was not moved. Runs start from ${remote}/${base}.`,
+    diverged: `${base} has diverged from ${remote}/${base}. Nothing was moved.`,
+  }[ff.kind] || `Could not update ${base}.`;
+}
+
+/** The run header's Sync button label from a member's sync record (plan D6, §6.5). */
+export function syncStageLabel(record, base = '') {
+  if (!record) return 'Sync';
+  const n = record.commits || 0;
+  switch (record.result) {
+    case 'fast-forwarded': return `Synced ${n} commit${n === 1 ? '' : 's'}`;
+    case 'remote-start': return `Started from ${record.remote || 'origin'}/${base}`;
+    case 'fetch-failed': return 'Sync: used the last fetch';
+    case 'diverged': return 'Sync: diverged';
+    default: return 'Sync';
+  }
+}
+
+// ── DOM helpers ────────────────────────────────────────────────────────────
+// Built with the global `document` (as schedule-sheet.mjs is). Untrusted text (branch names,
+// commit subjects, authors) only ever goes through textContent.
+
+function h(tag, attrs = {}, ...kids) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === 'class') node.className = v;
+    else if (k === 'text') node.textContent = v;
+    else if (k === 'hidden') node.hidden = !!v;
+    else node.setAttribute(k, v === true ? '' : String(v));
+  }
+  for (const kid of kids.flat()) if (kid != null) node.append(kid);
+  return node;
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function svgIcon(paths, size = 17) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  for (const [k, v] of Object.entries({ width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'aria-hidden': 'true' })) svg.setAttribute(k, String(v));
+  for (const d of paths) {
+    const p = document.createElementNS(SVG_NS, 'path');
+    p.setAttribute('d', d); p.setAttribute('stroke-linecap', 'round'); p.setAttribute('stroke-linejoin', 'round');
+    svg.append(p);
+  }
+  return svg;
+}
+// The question bubble the Q&A surfaces share (app.js questionIcon), with the mark inside it.
+const questionSvg = () => svgIcon(['M5 4.5h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-6.5L8 21v-3.5H5a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z',
+  'M9.9 9.1a2.2 2.2 0 1 1 3.2 2c-.7.4-1.1.9-1.1 1.6', 'M12 14.9h.01']);
+
+const shortSha = (sha) => (sha ? String(sha).slice(0, 7) : '');
+
+/** Bind the static #sync-row markup (index.html). Returns the host for chaining. */
+export function mountSyncRow(host, { onPill, onSync, onToggle } = {}) {
+  const pill = host.querySelector('.sync-pill');
+  const btn = host.querySelector('.sync-btn');
+  const sw = host.querySelector('input[type="checkbox"]');
+  if (pill && onPill) pill.addEventListener('click', (e) => onPill(e));
+  if (btn && onSync) btn.addEventListener('click', (e) => { if (!btn.disabled) onSync(e); });
+  if (sw && onToggle) sw.addEventListener('change', () => onToggle(sw.checked));
+  return host;
+}
+
+/** Paint #sync-row from a SyncBlock: hidden without a remote, tone + label on the pill,
+ *  busy on the Sync button, the switch's checked state. Returns the pill model. */
+export function paintSyncRow(host, sync, { autoSync = true, busy = false } = {}) {
+  const model = syncPillModel(sync, { autoSync });
+  host.hidden = !!model.hidden;
+  if (model.hidden) return model;
+  const pill = host.querySelector('.sync-pill');
+  if (pill) {
+    pill.className = `sync-pill ${model.tone}`;
+    const txt = pill.querySelector('.sync-pill-txt');
+    if (txt) txt.textContent = model.label;
+    pill.setAttribute('aria-label', `Sync status: ${model.label}. Show details`);
+  }
+  const btn = host.querySelector('.sync-btn');
+  if (btn) { btn.classList.toggle('busy', !!busy); btn.disabled = !!busy; }
+  const sw = host.querySelector('input[type="checkbox"]');
+  if (sw) sw.checked = !!autoSync;
+  return model;
+}
+
+/** Shared modal lifecycle: Escape (capture phase, never reaches the page), scrim click, focus return. */
+function openModal(modal, { opener, fallbackFocus, focusEl, onClose }) {
+  let closed = false;
+  function close(result) {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener('keydown', onKey, true);
+    modal.remove();
+    const target = opener && opener.isConnected ? opener : (typeof fallbackFocus === 'function' ? fallbackFocus() : null);
+    if (target && typeof target.focus === 'function') { try { target.focus(); } catch { /* gone */ } }
+    onClose(result);
+  }
+  function onKey(e) {
+    if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); close(null); }
+  }
+  document.addEventListener('keydown', onKey, true);
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(null); });
+  document.body.append(modal);
+  if (focusEl) focusEl.focus();
+  return close;
+}
+
+/**
+ * The details dialog behind the pill / a chip's Review…. Resolves null when closed.
+ * `onSync()` returns the new SyncBlock (or nothing: then the current block stays painted).
+ */
+export function openSyncDialog({ title = 'Sync status', subtitle = '', sync, autoSync = true, opener = null, onSync = null, fallbackFocus = null } = {}) {
+  return new Promise((resolve) => {
+    let cur = sync || {};
+    let refusal = '';
+    let busy = false;
+
+    const xBtn = h('button', { type: 'button', class: 'btn btn-mini sync-x', 'aria-label': 'Close', text: '×' });
+    const pill = h('span', { class: 'sync-pill grey' }, h('span', { class: 'sdot', 'aria-hidden': 'true' }), h('span', { class: 'sync-pill-txt' }));
+    const kv = h('dl', { class: 'sync-kv' });
+    const commitsHead = h('h3', { class: 'sync-commits-head', text: 'Incoming commits' });
+    const commits = h('ol', { class: 'sync-commits' });
+    const note = h('div', { class: 'sync-note', hidden: true });
+    const closeBtn = h('button', { type: 'button', class: 'btn btn-mini', text: 'Close' });
+    const syncBtn = h('button', { type: 'button', class: 'btn btn-primary btn-mini sync-go', text: 'Sync' });
+    const card = h('div', { class: 'card sync-card' },
+      h('div', { class: 'card-head' }, h('h2', { id: 'sync-dlg-title', text: title }), xBtn),
+      subtitle ? h('div', { class: 'sync-sub', text: subtitle }) : null,
+      pill, kv, commitsHead, commits, note,
+      h('div', { class: 'confirm-actions' }, closeBtn, syncBtn));
+    const modal = h('div', { class: 'viewer-modal confirm-modal sync-modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'sync-dlg-title' }, card);
+
+    function paint() {
+      const model = syncPillModel(cur, { autoSync });
+      pill.hidden = !!model.hidden;
+      if (!model.hidden) { pill.className = `sync-pill ${model.tone}`; pill.querySelector('.sync-pill-txt').textContent = model.label; }
+      const base = cur.base || '';
+      const remote = cur.remote || 'origin';
+      const tip = (t) => (t && t.sha ? `${shortSha(t.sha)} · ${ago(t.at)}` : '—');
+      const fetched = Date.parse(cur.fetchedAt || '');
+      const rows = [
+        ['Local base', tip(cur.local)],
+        [`${remote}/${base}`, tip(cur.remoteTip)],
+        ['Behind / ahead', `${cur.behind || 0} behind · ${cur.ahead || 0} ahead`],
+        ['Last fetched', Number.isFinite(fetched) ? `${ago(cur.fetchedAt)} (${new Date(fetched).toLocaleString()})` : 'never'],
+        ['Remote', cur.remoteLabel || remote],
+        ['Working tree', cur.dirty ? `${cur.dirtyCount || 0} changed` : 'Clean'],
+        ['Auto-sync', autoSync ? 'On: updates before the run' : 'Off: starts from the local commit'],
+      ];
+      kv.replaceChildren(...rows.flatMap(([k, v]) => [h('dt', { text: k }), h('dd', { text: v })]));
+      const list = Array.isArray(cur.incoming) ? cur.incoming : [];
+      commitsHead.hidden = !list.length; commits.hidden = !list.length;
+      commits.replaceChildren(...list.map((c) => h('li', {},
+        h('code', { text: shortSha(c.sha) }), h('span', { text: c.subject || '' }), h('span', { text: ago(c.at) }))));
+      const offline = cur.stale || cur.fetchError;
+      const text = refusal || (offline ? fetchFailureCopy(cur.fetchError && cur.fetchError.kind, remote) : '');
+      note.hidden = !text; note.textContent = text;
+      syncBtn.textContent = offline ? 'Retry' : 'Sync';
+      syncBtn.hidden = !cur.remote;
+      syncBtn.classList.toggle('busy', busy); syncBtn.disabled = busy;
+    }
+
+    const close = openModal(modal, { opener, fallbackFocus, focusEl: xBtn, onClose: resolve });
+    xBtn.addEventListener('click', () => close(null));
+    closeBtn.addEventListener('click', () => close(null));
+    syncBtn.addEventListener('click', async () => {
+      if (busy || !onSync) return;
+      busy = true; paint();
+      try {
+        const next = await onSync();
+        if (next) {
+          cur = next;
+          refusal = ffRefusalCopy(next.ff, next.base || cur.base, next.remote || 'origin');
+        }
+      } catch { /* the host reports; the dialog keeps its block */ }
+      busy = false;
+      if (modal.isConnected) paint();
+    });
+    paint();
+  });
+}
+
+/**
+ * The "ask once" card for a 409 from POST /api/run (sync-diverged / sync-fetch-failed).
+ * Resolves 'origin' | 'last-fetch' | null (Cancel, Escape, scrim).
+ */
+export function chooseSyncRefusal(data = {}) {
+  return new Promise((resolve) => {
+    const members = Array.isArray(data.members) ? data.members : [];
+    const first = members[0] || {};
+    const remote = first.remote || 'origin';
+    const base = first.base || '';
+    const options = Array.isArray(data.options) ? data.options : ['cancel'];
+    const diverged = data.code === 'sync-diverged';
+    const many = members.length > 1;
+
+    const body = h('div', { class: 'qbody' });
+    let head; let goBtn = null; let choice = null;
+    if (diverged) {
+      head = `${base} has diverged from ${remote}/${base}`;
+      for (const m of members) {
+        const line = `${m.base} has diverged from ${m.remote || remote}/${m.base} (${m.ahead || 0} ahead, ${m.behind || 0} behind).`;
+        body.append(h('p', { class: 'qtext', text: many ? `${m.projectName || m.projectKey}: ${line}` : line }));
+      }
+      if (options.includes('origin')) {
+        goBtn = h('button', { type: 'button', class: 'btn btn-primary', text: `Start from ${remote}/${base}` });
+        choice = 'origin';
+        body.append(h('small', { class: 'hint', text: 'Recommended: your shared folder stays untouched.' }));
+      } else {
+        body.append(h('small', { class: 'hint', text: 'This project\'s sync setting does not allow starting from the remote.' }));
+      }
+    } else {
+      head = `Could not reach ${remote}`;
+      for (const m of members.length ? members : [{ remote, fetchKind: data.fetchKind }]) {
+        const line = fetchFailureCopy(m.fetchKind || data.fetchKind, m.remote || remote);
+        body.append(h('p', { class: 'qtext', text: many ? `${m.projectName || m.projectKey}: ${line}` : line }));
+      }
+      if (options.includes('last-fetch')) {
+        goBtn = h('button', { type: 'button', class: 'btn btn-primary', text: 'Start anyway from last fetch' });
+        choice = 'last-fetch';
+      }
+    }
+    const cancelBtn = h('button', { type: 'button', class: 'btn', text: 'Cancel' });
+    const panel = h('div', { class: 'qpanel' },
+      h('div', { class: 'qpanel-head' }, questionSvg(), h('b', { id: 'sync-refusal-title', text: head })),
+      body,
+      h('div', { class: 'qpanel-foot' }, cancelBtn, goBtn));
+    const modal = h('div', { class: 'viewer-modal confirm-modal sync-modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'sync-refusal-title' },
+      h('div', { class: 'card' }, panel));
+    const close = openModal(modal, { opener: document.activeElement, focusEl: goBtn || cancelBtn, onClose: resolve });
+    cancelBtn.addEventListener('click', () => close(null));
+    if (goBtn) goBtn.addEventListener('click', () => close(choice));
+  });
+}

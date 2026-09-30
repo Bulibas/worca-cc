@@ -1052,3 +1052,25 @@ test('every open starts from an empty description on the Write tab', async () =>
   assert.equal(previewOf(modal).hidden, true);
   assert.equal(descErrOf(modal).hidden, true);
 });
+
+// ---------------------------------------------------------------------------
+// Sync before run (#527, plan §5.6): the base moved on the remote since the run started
+// ---------------------------------------------------------------------------
+
+test('baseStatus.movedSinceRun > 0 on the chosen base shows the warning; a base change hides it', async () => {
+  const ctx = await bootShip({ remotes: { ...REMOTES, baseStatus: { base: 'feat/log-ux', remote: 'origin', movedSinceRun: 3, fetchedAt: null, stale: false } } });
+  const modal = await openModal(ctx);
+  const warn = modal.querySelector('#shipit-base-warn');
+  assert.equal(warn.hidden, false);
+  assert.equal(warn.textContent, 'origin/feat/log-ux has 3 new commits since this run started. The PR may need an update.');
+  const sel = baseSelOf(modal);
+  sel.value = 'main';
+  sel.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
+  assert.equal(warn.hidden, true, 'another base: the warning no longer applies');
+});
+
+test('baseStatus.movedSinceRun null keeps the warning hidden', async () => {
+  const ctx = await bootShip({ remotes: { ...REMOTES, baseStatus: { base: 'feat/log-ux', remote: 'origin', movedSinceRun: null, fetchedAt: null, stale: false } } });
+  const modal = await openModal(ctx);
+  assert.equal(modal.querySelector('#shipit-base-warn').hidden, true);
+});

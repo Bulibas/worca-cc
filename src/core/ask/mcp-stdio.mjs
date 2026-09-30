@@ -35,6 +35,7 @@ import { defaultSourceDeps } from './source-deps.mjs';
 import { defaultModelDeps } from './model-deps.mjs';
 import { defaultCloneDeps } from './clone-deps.mjs';
 import { defaultWebDeps } from './web-deps.mjs';
+import { defaultBranchDeps } from './branch-deps.mjs';
 
 const SUPPORTED_PROTOCOLS = Object.freeze(['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25']);
 const DEFAULT_PROTOCOL = '2025-06-18';
@@ -74,6 +75,8 @@ export function createAskToolServer({ threadId, reader = null, signal, write, lo
       ...defaultSourceDeps(),
       ...defaultModelDeps({ threadId }),
       ...defaultCloneDeps(),
+      // Branch reads + fetch-only (#527): list_branches, list_projects.sync, get_run.baseMoved.
+      ...defaultBranchDeps(),
       // Web access: present only when this turn's env carries WORCA_ASK_WEB (web-deps.mjs) — the
       // child's env (classic), or the relay's own copy built from the turn's web access (ui/server.mjs).
       ...defaultWebDeps({ threadId, signal, env }),

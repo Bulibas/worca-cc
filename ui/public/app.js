@@ -50,6 +50,8 @@ const state = {
   workspaces: [],            // GET /api/workspaces read-model
   selectedWorkspaceId: '',   // '' === none; set ONLY in workspace target mode
   runTarget: 'project',      // 'project' | 'workspace' — New Pipeline target toggle
+  sync: freshSyncState(),    // #527: the New-pipeline Sync row (branch-sync.mjs#freshSyncState)
+  syncChips: {},             // #527: projectKey -> SyncBlock, from GET /api/sync/projects
   // --- Creation wizard (ephemeral; reset on wizard entry and exit) ---
   wizard: { name: '', selectedPaths: [], starting: false },
   // --- Agent creation wizard (ephemeral; reset on wizard close) ---
@@ -108,7 +110,7 @@ import { renderChatSettings, collectChatSettings, renderScriptToolsToggle, colle
 import { renderCredentials } from './credentials-view.mjs';
 import { loadCredentials, credentialSuffix } from './credential-badges.mjs';
 import { renderFreeDaily, freeRequestsSuffix, typicalFreeRun, newRunFreeWarning, providerFreeLine } from './openrouter-free-view.mjs';
-import { PORT_ID_RE, MAX_PORTS_PER_SIDE, PORT_TYPES, FLOW_LABEL, KEYED_KINDS } from '../../src/shared/graph/constants.mjs';
+import { PORT_ID_RE, MAX_PORTS_PER_SIDE, PORT_TYPES, FLOW_LABEL, KEYED_KINDS, SYNC_EXECUTION_ID } from '../../src/shared/graph/constants.mjs';
 import { FORM_ID_RE, validateFormDef, normalizeAskBlock } from '../../src/shared/forms/form-def.mjs';
 import { ASK_LIMITS } from '../../src/shared/forms/catalog.mjs';
 import { WORKSPACE_MAX_PROJECTS, workspaceSizeLevel } from '../../src/shared/workspace-size.mjs';
@@ -167,6 +169,10 @@ import { renderMapTab, emptyMapFilters } from './workspace-map-view.mjs';
 import { paintAboutInto } from './about-links.mjs';
 import { renderReasonOptions, renderOptIns, previewText, reportBlobParts, REPORT_PREVIEW_DEBOUNCE_MS } from './report-run.mjs';
 import { openScheduleSheet, closeScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
+import {
+  freshSyncState, syncPillModel, projectChipModel, worstChip, ffRefusalCopy, syncStageLabel, ago as syncAgo,
+  mountSyncRow, paintSyncRow, openSyncDialog, chooseSyncRefusal,
+} from './branch-sync.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
 import { createLevelController, levelAtLeast, currentLevel, tagLevel, keepVisible, minLevelFor, LEVEL_INFO, UI_LEVELS } from './ui-level.mjs';
@@ -301,8 +307,8 @@ const el = {
   targetWorkspacePane: $('#target-workspace-pane'),
   workspaceSelect: $('#workspaceSelect'),
   wsMembers: $('#ws-members'),
-  sourceBranchHint: $('#sourceBranchHint'),
   sourceBranchWrap: $('#sourceBranchWrap'),
+  syncRow: $('#sync-row'), syncPill: $('#sync-pill'), syncBtn: $('#sync-btn'), syncAuto: $('#syncAuto'),
   wsSourceBranches: $('#ws-source-branches'),
   wsSourcePreviousRow: $('#ws-source-previous-row'), wsSourcePrevious: $('#ws-source-previous'),
 
@@ -363,6 +369,7 @@ const el = {
 
   // Projects management view
   projectsList: $('#projects-list'),
+  projectsSyncAll: $('#projects-sync-all'),
   projectsMsg: $('#projects-msg'),
   projectAddBtn: $('#project-add-btn'),
   projShell: $('#proj-shell'),
@@ -1208,6 +1215,15 @@ function handleServerMessage(msg) {
   }
 
   // Tagged per-run event. Ignore anything without a runId.
+  if (msg.type === 'project-sync-changed') {
+    const v = currentView();
+    if (v === 'projects' || v === 'workspaces') void refreshSyncChips();
+    // GET /api/sync (no network). Not while this form's own Sync POST is in flight (its answer is
+    // authoritative), not in workspace mode, and '' (auto) is a valid base.
+    if (v === 'new' && state.runTarget !== 'workspace' && !state.sync.busy && el.syncRow && !el.syncRow.hidden && effectiveBase()) void refreshSyncStatusQuiet();
+    return;
+  }
+
   if (!msg.runId) return;
   // Run birth announcement: carries the metadata hello would have sent (projectDir,
   // kind, workspace attribution, member names) so a run started by ANOTHER tab or
@@ -6430,6 +6446,10 @@ function renderProjectOptions(selectName) {
 
 function onProjectChanged() {
   const path = selectedProjectPath();
+  // #527: a new project starts with no sync answer; the row stays hidden until branches-fresh.
+  state.sync = freshSyncState(state.sync.gen + 1);
+  syncHasRemote = null;
+  if (el.syncRow) el.syncRow.hidden = true;
   // The source profile is bound to the PROJECT, so a different project may pull
   // from a different tracker: re-resolve rather than keep listing the old one's.
   if (state.activePluginSource && state.activePluginSource.multiProfile) {
@@ -6493,29 +6513,10 @@ async function populateBranchSelect(select, projectDir) {
     select.dataset.current = data.current || '';
     const branches = Array.isArray(data.branches) ? data.branches : [];
     if (!branches.length) { placeholder.textContent = 'current branch (auto)'; syncPreviousBranchOption(select); return; }
-    seedBranchPlaceholder(select, 'current branch (auto)');
-    const runBranches = Array.isArray(data.runs) ? data.runs : [];
-    const isRun = new Set(runBranches.map((r) => r.branch));
-    const plain = document.createElement('optgroup'); plain.label = 'Branches';
-    for (const b of branches) {
-      if (isRun.has(b)) continue;
-      const opt = document.createElement('option');
-      opt.value = b; opt.textContent = b;
-      if (b === data.current) opt.selected = true;
-      plain.appendChild(opt);
-    }
-    if (plain.children.length) select.appendChild(plain);
-    if (runBranches.length) {
-      const grp = document.createElement('optgroup'); grp.label = 'Run branches';
-      for (const r of runBranches) {
-        const opt = document.createElement('option');
-        opt.value = r.branch; opt.textContent = `${r.branch} — ${r.title || r.pipelineId} · ${RUN_BRANCH_WORD[r.status] || r.status}`;
-        if (r.branch === data.current) opt.selected = true;
-        grp.appendChild(opt);
-      }
-      select.appendChild(grp);
-    }
+    paintBranchOptions(select, data);
     syncPreviousBranchOption(select);
+    // Phase 2 (#527): fire-and-forget; the cached list above is already usable.
+    void freshBranchPhase(select, projectDir, gen, stale);
   } catch {
     if (stale()) return;
     // m2: surface the failure instead of leaving a silently-empty select. The
@@ -6523,6 +6524,86 @@ async function populateBranchSelect(select, projectDir) {
     placeholder.textContent = 'current branch (auto — branch list unavailable)';
     syncPreviousBranchOption(select);
   }
+}
+
+/** The option body of a branch <select>: clears it (auto placeholder first), then the
+ *  "Branches", "Run branches" and (#527) "Remote only" groups. Stamps the list signature so a
+ *  fresh answer that adds nothing leaves an open <select> alone. */
+function paintBranchOptions(select, data) {
+  const branches = Array.isArray(data.branches) ? data.branches : [];
+  seedBranchPlaceholder(select, 'current branch (auto)');
+  const runBranches = Array.isArray(data.runs) ? data.runs : [];
+  const isRun = new Set(runBranches.map((r) => r.branch));
+  const plain = document.createElement('optgroup'); plain.label = 'Branches';
+  for (const b of branches) {
+    if (isRun.has(b)) continue;
+    const opt = document.createElement('option');
+    opt.value = b; opt.textContent = b;
+    if (b === data.current) opt.selected = true;
+    plain.appendChild(opt);
+  }
+  if (plain.children.length) select.appendChild(plain);
+  if (runBranches.length) {
+    const grp = document.createElement('optgroup'); grp.label = 'Run branches';
+    for (const r of runBranches) {
+      const opt = document.createElement('option');
+      opt.value = r.branch; opt.textContent = `${r.branch} — ${r.title || r.pipelineId} · ${RUN_BRANCH_WORD[r.status] || r.status}`;
+      if (r.branch === data.current) opt.selected = true;
+      grp.appendChild(opt);
+    }
+    select.appendChild(grp);
+  }
+  const only = remoteOnlyNames(data);
+  if (only.length) {
+    const grp = document.createElement('optgroup'); grp.label = 'Remote only';
+    for (const b of only) {
+      const opt = document.createElement('option');
+      opt.value = b; opt.textContent = `${b} — on ${data.remote.name}`; opt.dataset.remoteOnly = '1';
+      grp.appendChild(opt);
+    }
+    select.appendChild(grp);
+  }
+  select.dataset.branchSig = branchListSig(data);
+}
+
+/** Remote branch names with no local twin (the "Remote only" group). */
+function remoteOnlyNames(data) {
+  const remote = data && data.remote && Array.isArray(data.remote.branches) ? data.remote : null;
+  if (!remote) return [];
+  const have = new Set(Array.isArray(data.branches) ? data.branches : []);
+  return remote.branches.filter((b) => typeof b === 'string' && b && !have.has(b));
+}
+const branchListSig = (data) => JSON.stringify([data.branches || [], data.runs || [], remoteOnlyNames(data)]);
+
+/** Phase 2 of populateBranchSelect (#527): fetch the remote (45 s shared TTL, negative-cached
+ *  offline) and swap in the fresh list. Never awaited by callers; the gen guard drops it when a
+ *  newer populate (project change) has started. */
+async function freshBranchPhase(select, projectDir, gen, stale) {
+  const v = select.value;
+  const base = v && v !== PREVIOUS_BRANCH ? v : (select.dataset.current || '');
+  let fresh = null;
+  try {
+    const fr = await fetch(`/api/branches?projectDir=${encodeURIComponent(projectDir)}&fresh=1${base ? `&base=${encodeURIComponent(base)}` : ''}`);
+    if (stale() || !fr.ok) return;
+    fresh = await fr.json();
+  } catch { return; }
+  if (stale() || !fresh || !Array.isArray(fresh.branches)) return;
+  // Rebuilding the options of an OPEN native <select> closes it under the person's cursor, and
+  // this answer can land up to 8 s after load. Repaint only when the list really changed.
+  if (select.dataset.branchSig !== branchListSig(fresh)) {
+    const keep = select.value;                     // may be a prefilled value that is not in the list
+    paintBranchOptions(select, fresh);
+    if (keep && keep !== PREVIOUS_BRANCH && ![...select.options].some((o) => o.value === keep)) {
+      const opt = document.createElement('option'); opt.value = keep; opt.textContent = keep;
+      select.appendChild(opt);                     // keep Ask / chain prefills intact
+    }
+    syncPreviousBranchOption(select);              // re-adds __previous__ when it applies
+    // Restore ANY previous choice, '' ("current branch (auto)") included: paintBranchOptions
+    // re-selects data.current, which would turn an explicit "auto" into a named branch.
+    if (typeof keep === 'string' && [...select.options].some((o) => o.value === keep)) select.value = keep;
+  }
+  // jsdom rejects Node's CustomEvent; the house idiom is window.CustomEvent.
+  select.dispatchEvent(new window.CustomEvent('branches-fresh', { detail: fresh }));
 }
 
 // Back-compat shim for the single #sourceBranch (existing call sites in
@@ -6534,6 +6615,232 @@ function refreshBranches(projectDir) {
   // run will not use (each member branches off its own HEAD).
   if (state.runTarget === 'workspace') return showWorkspaceBranchPlaceholder();
   return populateBranchSelect(el.sourceBranch, projectDir);
+}
+
+// ---- Sync before run (#527): the pill, Sync and Auto-sync under Source branch --------------
+// Project mode paints from the fresh list's SyncBlock (or a no-network GET /api/sync); workspace
+// mode paints one pill per member and the shared row from the worst member.
+
+/** The base the run would start from: '' / "the run before it" mean HEAD's branch. */
+function effectiveBase() {
+  const v = el.sourceBranch ? el.sourceBranch.value : '';
+  if (!v || v === PREVIOUS_BRANCH) return (el.sourceBranch && el.sourceBranch.dataset.current) || '';
+  return v;
+}
+
+// false once the fresh list said this project has no such remote: a branch change then needs no status read.
+let syncHasRemote = null;
+
+function paintSyncRowNow() {
+  if (!el.syncRow) return;
+  if (state.runTarget === 'workspace') { paintWorkspaceSyncRow(); return; }
+  // "Branch off the run before it": that start is the previous run's branch, not HEAD's.
+  if (el.sourceBranch && el.sourceBranch.value === PREVIOUS_BRANCH) { el.syncRow.hidden = true; return; }
+  paintSyncRow(el.syncRow, state.sync.block, { autoSync: el.syncAuto.checked, busy: state.sync.busy });
+}
+
+/** GET /api/sync for the current base (no network: the list fetch already fetched). */
+async function refreshSyncStatusQuiet() {
+  const base = effectiveBase();
+  const projectDir = selectedProjectPath();
+  if (!base || !projectDir || state.runTarget === 'workspace' || syncHasRemote === false) return;
+  const gen = ++state.sync.gen;
+  try {
+    const res = await fetch(`/api/sync?projectDir=${encodeURIComponent(projectDir)}&base=${encodeURIComponent(base)}&details=1`);
+    const data = await safeJson(res);
+    if (gen !== state.sync.gen) return;
+    // 400: a base the server will not sync (e.g. "plus+branch"). Never keep the last branch's state.
+    if (res.status === 400) {
+      const prev = state.sync.block;
+      state.sync.block = { base, remote: (prev && prev.remote) || 'origin', state: 'unknown', settings: prev && prev.settings };
+      paintSyncRowNow();
+      return;
+    }
+    if (!(data && data.sync)) return;
+    // A status read reports the server's standing fetch failure itself (stale), so Offline survives it.
+    state.sync.block = data.sync;
+    paintSyncRowNow();
+  } catch { /* the pill keeps its last state */ }
+}
+
+/** Sync button and the dialog's Sync (project mode). Returns the block the dialog repaints with. */
+async function syncNow() {
+  const base = effectiveBase();
+  const projectDir = selectedProjectPath();
+  if (!base || !projectDir || state.sync.busy) return state.sync.block;
+  state.sync.busy = true;
+  paintSyncRowNow();
+  const same = () => effectiveBase() === base && selectedProjectPath() === projectDir;
+  const offline = () => {
+    if (same() && state.sync.block) state.sync.block = { ...state.sync.block, stale: true, fetchError: { kind: 'failed' } };
+  };
+  let out = state.sync.block;
+  try {
+    const res = await fetch('/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir, base, mode: 'ff' }) });
+    const data = await safeJson(res);
+    // A 4xx is a refusal (e.g. a base the server will not sync), not a failed fetch.
+    if (!res.ok || !data || !data.sync) { if (!(res.status >= 400 && res.status < 500)) offline(); out = state.sync.block; }
+    else {
+      out = data.sync;
+      // Whatever gen is: the server's own project-sync-changed frame usually lands first, and this
+      // answer is the only record of why nothing moved (sync.ff).
+      if (same()) {
+        ++state.sync.gen;
+        state.sync.block = data.sync;
+        const copy = ffRefusalCopy(data.sync.ff, base, data.sync.remote || 'origin');
+        if (copy) setFormMsg(copy, 'warn');
+      }
+    }
+  } catch { offline(); out = state.sync.block; }
+  finally {
+    state.sync.busy = false;
+    paintSyncRowNow();
+  }
+  // No refreshBranches: it re-selects HEAD's branch, and a fast-forward renames nothing.
+  return out;
+}
+
+// ---- workspace members ----
+function wsMemberName(key) {
+  const ws = state.workspaces.find((w) => w && w.id === state.selectedWorkspaceId);
+  const i = ws && Array.isArray(ws.projectKeys) ? ws.projectKeys.indexOf(key) : -1;
+  return i >= 0 ? wsBasename(ws.projectPaths[i]) : key;
+}
+function wsMemberSelect(key) {
+  return el.wsSourceBranches ? [...el.wsSourceBranches.querySelectorAll('select.ws-src-select')].find((s) => s.dataset.projectKey === key) || null : null;
+}
+function paintMemberPill(key) {
+  const sel = wsMemberSelect(key);
+  const pill = sel && sel.closest('.ws-src-row') ? sel.closest('.ws-src-row').querySelector('.sync-pill') : null;
+  if (!pill) return;
+  const model = syncPillModel(state.sync.members[key], { autoSync: el.syncAuto.checked });
+  pill.hidden = !!model.hidden;
+  if (model.hidden) return;
+  pill.className = `sync-pill ${model.tone}`;
+  pill.querySelector('.sync-pill-txt').textContent = model.label;
+  pill.setAttribute('aria-label', `${wsMemberName(key)} sync status: ${model.label}. Show details`);
+}
+/** Untouched switch in workspace mode shows what the run will do: every member's own beforeRun. */
+function membersBeforeRun() {
+  return Object.values(state.sync.members).filter(Boolean).every((b) => !b.settings || b.settings.beforeRun !== false);
+}
+function worstMemberKey() {
+  const w = worstChip(Object.values(state.sync.members));
+  if (!w) return null;
+  return Object.keys(state.sync.members).find((k) => worstChip([state.sync.members[k]])?.state === w.state) || null;
+}
+function paintWorkspaceSyncRow() {
+  const w = worstChip(Object.values(state.sync.members));
+  el.syncRow.hidden = !w;
+  if (!w) return;
+  // Auto-sync off turns a blue "behind" amber, as syncPillModel does.
+  const tone = w.state === 'behind' && !el.syncAuto.checked ? 'amber' : w.tone;
+  const text = w.text.charAt(0).toUpperCase() + w.text.slice(1);
+  el.syncPill.className = `sync-pill ${tone}`;
+  el.syncPill.querySelector('.sync-pill-txt').textContent = text;
+  el.syncPill.setAttribute('aria-label', `Sync status: ${text}. Show details`);
+  el.syncBtn.classList.toggle('busy', state.sync.busy);
+  el.syncBtn.disabled = state.sync.busy;
+}
+async function syncMember(key) {
+  const sel = wsMemberSelect(key);
+  const cur = state.sync.members[key];
+  const ws = state.workspaces.find((w) => w && w.id === state.selectedWorkspaceId);
+  const i = ws && Array.isArray(ws.projectKeys) ? ws.projectKeys.indexOf(key) : -1;
+  if (!sel || i < 0) return cur;
+  const v = sel.value;
+  const base = v && v !== PREVIOUS_BRANCH ? v : (sel.dataset.current || '');
+  try {
+    const res = await fetch('/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: ws.projectPaths[i], base, mode: 'ff' }) });
+    const data = await safeJson(res);
+    if (!res.ok || !data || !data.sync) return cur ? { ...cur, stale: true, fetchError: { kind: 'failed' } } : cur;
+    if (sel.isConnected) { state.sync.members[key] = data.sync; paintMemberPill(key); paintWorkspaceSyncRow(); }
+    return data.sync;
+  } catch { return cur; }
+}
+function openMemberSyncDialog(key, opener) {
+  const b = state.sync.members[key];
+  if (!b) return;
+  void openSyncDialog({ title: 'Sync status', subtitle: `${wsMemberName(key)} · ${b.base || ''}`, sync: b,
+    autoSync: el.syncAuto.checked, opener, onSync: () => syncMember(key) });
+}
+/** Shared Sync in workspace mode: one POST for every member, with each member's picked base. */
+async function syncWorkspaceNow() {
+  const id = state.selectedWorkspaceId;
+  if (!id || state.sync.busy) return;
+  const bases = {};
+  el.wsSourceBranches?.querySelectorAll('select.ws-src-select').forEach((s) => {
+    const v = (s.value || '').trim();
+    if (s.dataset.projectKey && v && v !== PREVIOUS_BRANCH) bases[s.dataset.projectKey] = v;
+  });
+  state.sync.busy = true;
+  paintWorkspaceSyncRow();
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}/sync`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'ff', bases }) });
+    const data = await safeJson(res);
+    if (res.ok && data && Array.isArray(data.members) && state.selectedWorkspaceId === id && state.runTarget === 'workspace') {
+      for (const m of data.members) {
+        if (!m || !m.projectKey || !(m.projectKey in state.sync.members)) continue;
+        state.sync.members[m.projectKey] = m.remote ? m : null;
+        paintMemberPill(m.projectKey);
+      }
+    }
+  } catch { /* the pills keep their last state */ }
+  finally {
+    state.sync.busy = false;
+    paintWorkspaceSyncRow();
+  }
+}
+
+if (el.syncRow) {
+  mountSyncRow(el.syncRow, {
+    onPill: () => {
+      if (state.runTarget === 'workspace') { const k = worstMemberKey(); if (k) openMemberSyncDialog(k, el.syncPill); return; }
+      void openSyncDialog({ title: 'Sync status', subtitle: `${selectedProjectName()} · ${effectiveBase()}`, sync: state.sync.block,
+        autoSync: el.syncAuto.checked, opener: el.syncPill, onSync: syncNow });
+    },
+    onSync: () => { if (state.runTarget === 'workspace') void syncWorkspaceNow(); else void syncNow(); },
+    onToggle: (on) => {
+      // autoSync !== null means "the person touched the switch for this run".
+      state.sync.autoSync = on;
+      if (state.runTarget === 'workspace') Object.keys(state.sync.members).forEach(paintMemberPill);
+      paintSyncRowNow();
+    },
+  });
+}
+if (el.sourceBranch) {
+  el.sourceBranch.addEventListener('branches-fresh', (e) => {
+    if (state.runTarget === 'workspace') return;
+    const detail = e.detail || {};
+    if (state.sync.autoSync === null) el.syncAuto.checked = !!(detail.sync?.settings?.beforeRun ?? true);
+    if (!detail.remote) {
+      syncHasRemote = false;
+      ++state.sync.gen;
+      state.sync.block = null;
+      paintSyncRowNow();
+      return;
+    }
+    syncHasRemote = true;
+    // The fresh request named the base when it STARTED; a prefill or a pick may have changed it.
+    if (detail.sync && detail.sync.base === effectiveBase()) {
+      ++state.sync.gen;
+      state.sync.block = detail.sync;
+      paintSyncRowNow();
+    } else void refreshSyncStatusQuiet();
+  });
+  el.sourceBranch.addEventListener('change', () => {
+    if (state.runTarget === 'workspace') return;
+    if (el.sourceBranch.value === PREVIOUS_BRANCH) { el.syncRow.hidden = true; return; }
+    void refreshSyncStatusQuiet();
+  });
+}
+/** After an accepted start: Auto-sync was a choice for that run only. */
+function resetSyncChoice() {
+  if (!el.syncAuto) return;
+  state.sync.autoSync = null;
+  el.syncAuto.checked = state.runTarget === 'workspace' ? membersBeforeRun() : (state.sync.block?.settings?.beforeRun ?? true);
+  if (state.runTarget === 'workspace') Object.keys(state.sync.members).forEach(paintMemberPill);
+  paintSyncRowNow();
 }
 
 el.projectSelect.addEventListener('change', () => {
@@ -6814,7 +7121,6 @@ function setRunTarget(target) {
     // picker each — an empty column reads as a broken control, and the field
     // vanishing entirely made the row jump.
     showWorkspaceBranchPlaceholder();
-    if (el.sourceBranchHint) el.sourceBranchHint.textContent = "One per project; each defaults to its current branch.";
     // Config panel: no projectDir → built-in models/efforts; workflow picker still works.
     loadConfig('');
     ensureWorkspaceOptions();
@@ -6828,7 +7134,6 @@ function setRunTarget(target) {
     if (el.sourceBranchWrap) el.sourceBranchWrap.classList.remove('hidden');
     if (el.sourceBranch) el.sourceBranch.disabled = false;
     if (el.wsSourceBranches) { el.wsSourceBranches.classList.add('hidden'); el.wsSourceBranches.innerHTML = ''; }
-    if (el.sourceBranchHint) el.sourceBranchHint.textContent = "The worktree branches off this. Defaults to the current branch.";
     // Restore the project-driven branch list + config for the selected project.
     onProjectChanged();
   }
@@ -6841,6 +7146,10 @@ function setRunTarget(target) {
 function showWorkspaceBranchPlaceholder() {
   if (el.sourceBranchWrap) el.sourceBranchWrap.classList.remove('hidden');
   if (!el.sourceBranch) return;
+  // #527: a project-mode fresh answer still in flight must not repaint the stand-in.
+  el.sourceBranch._branchGen = (el.sourceBranch._branchGen || 0) + 1;
+  state.sync = freshSyncState(state.sync.gen + 1);
+  if (el.syncRow) el.syncRow.hidden = true;
   seedBranchPlaceholder(el.sourceBranch, 'current branch (auto)');
   el.sourceBranch.disabled = true;
   el.sourceBranch.title = "Set per project once a workspace is chosen; each defaults to its current branch.";
@@ -6869,6 +7178,9 @@ function renderWorkspaceSourceBranches() {
   const host = el.wsSourceBranches;
   if (!host) return;
   host.innerHTML = '';
+  // #527: the old member selects are gone (their late branches-fresh checks isConnected).
+  state.sync.members = {};
+  if (el.syncRow) el.syncRow.hidden = true;
   const ws = state.workspaces.find((w) => w && w.id === state.selectedWorkspaceId);
   if (!ws || !Array.isArray(ws.projectPaths) || !ws.projectPaths.length) {
     host.classList.add('hidden');
@@ -6907,6 +7219,36 @@ function renderWorkspaceSourceBranches() {
       sel.dataset.missing = '1';
       seedBranchPlaceholder(sel, 'current branch (auto)');
     } else {
+      // #527: this member's sync pill, painted from its own select's fresh answer.
+      const pill = document.createElement('button');
+      pill.type = 'button'; pill.className = 'sync-pill grey'; pill.hidden = true;
+      pill.setAttribute('aria-haspopup', 'dialog');
+      const dot = document.createElement('span'); dot.className = 'sdot'; dot.setAttribute('aria-hidden', 'true');
+      const txt = document.createElement('span'); txt.className = 'sync-pill-txt';
+      pill.append(dot, txt);
+      pill.addEventListener('click', () => openMemberSyncDialog(key, pill));
+      row.appendChild(pill);
+      sel.addEventListener('branches-fresh', (e) => {
+        if (!sel.isConnected || state.runTarget !== 'workspace' || !key) return;
+        const d = e.detail || {};
+        state.sync.members[key] = d.remote && d.sync ? d.sync : null;
+        if (state.sync.autoSync === null) el.syncAuto.checked = membersBeforeRun();
+        paintMemberPill(key);
+        paintWorkspaceSyncRow();
+      });
+      sel.addEventListener('change', async () => {
+        // A new pick: re-read that member's status (no network) when it has a remote.
+        const v = sel.value;
+        if (!state.sync.members[key] || !v || v === PREVIOUS_BRANCH) return;
+        try {
+          const res = await fetch(`/api/sync?projectDir=${encodeURIComponent(p)}&base=${encodeURIComponent(v)}&details=1`);
+          const data = await safeJson(res);
+          if (!sel.isConnected || sel.value !== v || !(data && data.sync)) return;
+          state.sync.members[key] = data.sync.remote ? data.sync : null;
+          paintMemberPill(key);
+          paintWorkspaceSyncRow();
+        } catch { /* keep the last pill */ }
+      });
       populateBranchSelect(sel, p); // async; defaults to HEAD per the clarification
     }
   });
@@ -7042,6 +7384,8 @@ function renderWorkspaces() {
   host.appendChild(card);
   paintWsMetricsRows();
   paintWsPolicyLines();                     // team policy (design board 6): the policy home line on the page
+  paintSyncChips();
+  void refreshSyncChips();
 }
 
 function buildWorkspaceRow(w, known) {
@@ -7067,7 +7411,15 @@ function buildWorkspaceRow(w, known) {
   const sum = document.createElement('small');
   sum.className = 'ws-projects';
   sum.replaceChildren(known ? renderWsSummary(known, { doc: document }) : renderWsSummary(w, { doc: document, pending: true }));
-  main.append(name, sum);
+  // #527: the worst member's sync state, and one chip per member in a slot of its own
+  // (paintWsMetricsRows rewrites .ws-projects on every team-metrics frame).
+  const worst = document.createElement('span');
+  worst.className = 'sync-pill ws-sync-worst';
+  worst.hidden = true;
+  const syncSlot = document.createElement('div');
+  syncSlot.className = 'ws-sync';
+  syncSlot.hidden = true;
+  main.append(name, worst, sum, syncSlot);
   const open = document.createElement('button');
   open.type = 'button';
   open.className = 'proj-open ws-open';
@@ -9440,6 +9792,14 @@ function buildProjectRow(p) {
   path.textContent = p.path;
   path.title = p.path;
   main.append(name, path);
+  // #527: the sync chip slot, always there for a keyed row (paintSyncChips fills and unhides it).
+  if (p.key) {
+    const syncSlot = document.createElement('div');
+    syncSlot.className = 'proj-sync';
+    syncSlot.dataset.key = p.key;
+    syncSlot.hidden = true;
+    main.appendChild(syncSlot);
+  }
   row.appendChild(main);
 
   // The team column: two one-line chips (metrics, policy) that paintProjectTmCells /
@@ -9472,6 +9832,148 @@ function buildProjectRow(p) {
   return item;
 }
 
+// ---- Sync chips (#527, plan §6.7): filled in place, like the team-metrics cells --------------
+// Render creates empty slots; paintSyncChips() fills them from state.syncChips (no fetch);
+// refreshSyncChips() is a coalesced local status read. They never refresh by polling.
+
+function syncProjectName(key) {
+  const p = state.projects.find((x) => x && x.key === key);
+  return (p && p.name) || key;
+}
+function syncChipNodes(key, block, label = '') {
+  const m = projectChipModel(block);
+  if (!m) return null;
+  const pill = document.createElement('span');
+  pill.className = `sync-pill ${m.tone}`;
+  const dot = document.createElement('span'); dot.className = 'sdot'; dot.setAttribute('aria-hidden', 'true');
+  const txt = document.createElement('span'); txt.className = 'sync-pill-txt';
+  txt.textContent = label ? `${label} · ${m.text}` : m.text;
+  pill.append(dot, txt);
+  const when = document.createElement('span');
+  when.className = 'sync-when';
+  when.textContent = `fetched ${syncAgo(block.fetchedAt)}`;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-mini';
+  btn.textContent = m.action;
+  btn.dataset.syncKey = key;
+  // The chips sit inside a row that opens its page on click: keep the click here.
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (m.state === 'diverged') void openChipSyncDialog(key, btn);
+    else void syncChipNow(key, btn);
+  });
+  return [pill, when, btn];
+}
+function paintSyncChips() {
+  for (const slot of document.querySelectorAll('.proj-sync[data-key]')) {
+    const nodes = syncChipNodes(slot.dataset.key, state.syncChips[slot.dataset.key]);
+    slot.hidden = !nodes;
+    slot.replaceChildren(...(nodes || []));
+  }
+  for (const item of document.querySelectorAll('.ws-item[data-workspace-id]')) {
+    const w = state.workspaces.find((x) => x && x.id === item.dataset.workspaceId);
+    const keys = w && Array.isArray(w.projectKeys) ? w.projectKeys : [];
+    const slot = item.querySelector('.ws-sync');
+    if (slot) {
+      const groups = keys.map((k) => {
+        const nodes = syncChipNodes(k, state.syncChips[k], syncProjectName(k));
+        if (!nodes) return null;
+        const g = document.createElement('span');
+        g.className = 'ws-sync-member';
+        g.dataset.key = k;
+        g.append(...nodes);
+        return g;
+      }).filter(Boolean);
+      slot.hidden = !groups.length;
+      slot.replaceChildren(...groups);
+    }
+    const pill = item.querySelector('.ws-sync-worst');
+    if (pill) {
+      const worst = worstChip(keys.map((k) => state.syncChips[k]));
+      pill.hidden = !worst;
+      pill.className = `sync-pill ws-sync-worst${worst ? ` ${worst.tone}` : ''}`;
+      pill.textContent = worst ? worst.text : '';
+    }
+  }
+}
+// Coalesced: Sync all and the background refresh emit one project-sync-changed per project.
+const SYNC_CHIPS_MS = 300;
+let syncChipsTimer = null;
+let syncChipsBusy = false;
+let syncChipsQueued = false;
+function refreshSyncChips() {
+  if (syncChipsTimer) return;
+  syncChipsTimer = setTimeout(async () => {
+    syncChipsTimer = null;
+    if (syncChipsBusy) { syncChipsQueued = true; return; }
+    syncChipsBusy = true;
+    try {
+      const res = await fetch('/api/sync/projects');
+      const data = await safeJson(res);
+      // The server's status read reports a standing fetch failure (background or Sync) as stale.
+      state.syncChips = data && data.projects && typeof data.projects === 'object' ? data.projects : {};
+      paintSyncChips();
+    } catch { /* the chips keep their last state */ }
+    finally {
+      syncChipsBusy = false;
+      if (syncChipsQueued) { syncChipsQueued = false; refreshSyncChips(); }
+    }
+  }, SYNC_CHIPS_MS);
+}
+async function postProjectSync(key) {
+  const res = await fetch(`/api/projects/${encodeURIComponent(key)}/sync`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'ff' }) });
+  const data = await safeJson(res);
+  if (!res.ok || !data || !data.sync) throw new Error((data && data.error) || `HTTP ${res.status}`);
+  state.syncChips[key] = data.sync;
+  paintSyncChips();
+  return data.sync;
+}
+async function syncChipNow(key, btn) {
+  btn.disabled = true;
+  btn.classList.add('busy');
+  try { await postProjectSync(key); } catch { /* the chip keeps its last state */ }
+  // The chip was repainted (a new button) on success; this one only matters on failure.
+  btn.disabled = false;
+  btn.classList.remove('busy');
+}
+async function openChipSyncDialog(key, opener) {
+  let sync = state.syncChips[key];
+  try {
+    const res = await fetch(`/api/projects/${encodeURIComponent(key)}/sync?details=1`);
+    const data = await safeJson(res);
+    if (res.ok && data && data.sync) sync = data.sync;
+  } catch { /* the cached block is still worth showing */ }
+  if (!sync) return;
+  await openSyncDialog({
+    title: 'Sync status', subtitle: `${syncProjectName(key)} · ${sync.base || ''}`, sync,
+    autoSync: sync.settings ? sync.settings.beforeRun !== false : true, opener,
+    // A project-sync-changed repaint can replace the opener while the dialog is open.
+    fallbackFocus: () => document.querySelector(`.pl-item[data-key="${cssEscape(key)}"] .pl-row`),
+    onSync: async () => { try { return await postProjectSync(key); } catch { return null; } },
+  });
+}
+if (el.projectsSyncAll) {
+  el.projectsSyncAll.addEventListener('click', async () => {
+    const btn = el.projectsSyncAll;
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.classList.add('busy');
+    try {
+      const res = await fetch('/api/sync/all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'ff' }) });
+      const data = await safeJson(res);
+      if (res.ok && data && data.projects && typeof data.projects === 'object') {
+        state.syncChips = data.projects;
+        paintSyncChips();
+      }
+    } catch { /* the chips keep their last state */ }
+    finally {
+      btn.disabled = false;
+      btn.classList.remove('busy');
+    }
+  });
+}
+
 function renderProjectsList() {
   const host = el.projectsList;
   if (!host) return;
@@ -9500,6 +10002,8 @@ function renderProjectsList() {
   host.appendChild(card);
   paintProjectTmCells();
   paintProjectPolicyCells();
+  paintSyncChips();
+  void refreshSyncChips();
 }
 
 // Fills the .pl-tm chips left by buildProjectRow, and the open project page's team-metrics
@@ -10866,7 +11370,15 @@ el.form.addEventListener('submit', async (e) => {
   // A time picked earlier (Schedule… in the split menu, Schedules › Schedule a run, Change…)
   // rides the same POST /api/run body — `scheduledFor` (once) or `repeat` (recurring).
   const scheduling = !!pendingSchedule;
-  if (scheduling) Object.assign(body, pendingSchedule);
+  // #527: Auto-sync only when the person touched the switch for this run (untouched, each
+  // member follows its own sync.beforeRun). Before the schedule merge, so the sheet's choice wins.
+  if (state.sync.autoSync !== null && el.syncRow && !el.syncRow.hidden && levelAtLeast('advanced')) body.syncBeforeStart = state.sync.autoSync;
+  if (scheduling) {
+    const { sync: schedSync, ...schedRest } = pendingSchedule;
+    Object.assign(body, schedRest);
+    if (schedSync && typeof schedSync.beforeRun === 'boolean') body.syncBeforeStart = schedSync.beforeRun;
+    if (schedSync && (schedSync.onDiverged === 'origin' || schedSync.onDiverged === 'fail')) body.syncOnDiverged = schedSync.onDiverged;
+  }
 
   // Guard the whole in-flight window: applyBudgetToNewView also drives
   // start.disabled, and this run's own creation event repaints it.
@@ -10892,17 +11404,30 @@ el.form.addEventListener('submit', async (e) => {
       body: JSON.stringify(body),
     });
     let data = await safeJson(res);
+    let lastSentBody = body;
     // Team total cap (team-policy design §7, board 9): soft — ask once, resend with the
     // acknowledgement (and its reason) recorded; a required reason re-asks.
     if (!res.ok && data && (data.needsPolicyAck || data.code === 'reason_required')) {
       const choice = await policyRefusalRetry(data, res.status);
       if (choice) {
+        lastSentBody = { ...body, pastTeamCap: true, ...(choice.reason ? { policyReason: choice.reason } : {}) };
         res = await fetch('/api/run', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...body, pastTeamCap: true, ...(choice.reason ? { policyReason: choice.reason } : {}) }),
+          body: JSON.stringify(lastSentBody),
         });
         data = await safeJson(res);
       }
+    }
+    // #527: the base diverged (or could not be fetched) — ask once, resend with the choice.
+    if (!res.ok && data && (data.code === 'sync-diverged' || data.code === 'sync-fetch-failed')) {
+      const choice = await chooseSyncRefusal(data);
+      if (!choice) {
+        startSubmitInFlight = false; el.startBtn.disabled = false; if (el.startMore) el.startMore.disabled = false;
+        return setFormMsg('Start cancelled.', 'warn');
+      }
+      lastSentBody = { ...lastSentBody, syncPolicy: choice };   // keeps pastTeamCap/policyReason
+      res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(lastSentBody) });
+      data = await safeJson(res);
     }
     if (el.startMore) el.startMore.disabled = false;
     if (!res.ok || !data.runId) {
@@ -10915,6 +11440,7 @@ el.form.addEventListener('submit', async (e) => {
       startSubmitInFlight = false;
       el.startBtn.disabled = !!budgetState.budget?.blocked;
       setPendingSchedule(null);   // the form is a plain Start run form again
+      resetSyncChoice();
       setFormMsg(data.budgetWarning ? `Scheduled. ${data.budgetWarning}` : 'Scheduled.', data.budgetWarning ? 'warn' : 'ok');
       showView('schedules');
       return;
@@ -10927,6 +11453,7 @@ el.form.addEventListener('submit', async (e) => {
     // budget just went over, in which case the gate keeps Start disabled.
     startSubmitInFlight = false;
     el.startBtn.disabled = !!budgetState.budget?.blocked;
+    resetSyncChoice();
     setFormMsg('Run started.', 'ok');
     if (extras.length) {
       appendLog({
@@ -10954,13 +11481,30 @@ let pendingSchedule = null;
 const newScheduleSheetOpts = (runTitle = '') => ({
   mode: 'create', runTitle, defaults: schedulesView.defaults, candidates: fetchAfterCandidates,
   warning: 'A scheduled run is unattended. If this workflow asks questions, the run waits for your answer — chat notifications can reach you.',
+  sync: scheduleSyncOpt(),
 });
+/** The sheet's opt-in Sync block (#527, D16): form state, not server defaults. A scheduled run
+ *  cannot ask, so the project's 'ask' reads as 'origin' (D2); workspace = each member's own. */
+function scheduleSyncOpt() {
+  const od = state.sync.block?.settings?.onDiverged;
+  const projectOnDiverged = state.sync.block ? (od === 'fail' ? 'fail' : 'origin') : null;
+  return {
+    show: !!el.syncRow && !el.syncRow.hidden && levelAtLeast('advanced'),
+    beforeRun: state.sync.autoSync,                 // null = untouched → each member's own sync.beforeRun
+    shownBeforeRun: !!(el.syncAuto && el.syncAuto.checked),
+    onDiverged: state.runTarget === 'workspace' ? null : projectOnDiverged,
+  };
+}
 const pendingScheduleInitial = () => (pendingSchedule
-  ? (pendingSchedule.after
-    ? { after: pendingSchedule.after, afterPolicy: pendingSchedule.afterPolicy }
-    : pendingSchedule.repeat
-      ? { rule: pendingSchedule.repeat.rule, overlap: pendingSchedule.repeat.overlap, maxFailures: pendingSchedule.repeat.maxFailures, ifMissed: pendingSchedule.ifMissed, graceMin: pendingSchedule.graceMin }
-      : { scheduledFor: pendingSchedule.scheduledFor, ifMissed: pendingSchedule.ifMissed, graceMin: pendingSchedule.graceMin })
+  ? {
+    ...(pendingSchedule.after
+      ? { after: pendingSchedule.after, afterPolicy: pendingSchedule.afterPolicy }
+      : pendingSchedule.repeat
+        ? { rule: pendingSchedule.repeat.rule, overlap: pendingSchedule.repeat.overlap, maxFailures: pendingSchedule.repeat.maxFailures, ifMissed: pendingSchedule.ifMissed, graceMin: pendingSchedule.graceMin }
+        : { scheduledFor: pendingSchedule.scheduledFor, ifMissed: pendingSchedule.ifMissed, graceMin: pendingSchedule.graceMin }),
+    // #527: reopening shows the previous Sync choice rather than the form's switch.
+    ...(pendingSchedule.sync ? { sync: pendingSchedule.sync } : {}),
+  }
   : {});
 function setPendingSchedule(pick) {
   pendingSchedule = pick || null;
@@ -14570,7 +15114,7 @@ async function confirmCostOverride(runId, btn) {
   if (ok) resumeRunFromCard(runId, btn, { ignoreCostCap: true });
 }
 
-async function resumeRunFromCard(runId, btn, { ignoreCostCap = false, pastTeamCap = false, policyReason = null } = {}) {
+async function resumeRunFromCard(runId, btn, { ignoreCostCap = false, pastTeamCap = false, policyReason = null, baseAck = false } = {}) {
   const r = runs.get(runId);
   if (!r || !isPaused(r)) return;
   const pipelineId = r.pipelineId;
@@ -14587,13 +15131,19 @@ async function resumeRunFromCard(runId, btn, { ignoreCostCap = false, pastTeamCa
     const res = await fetch('/api/resume', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pipelineId, ...(ignoreCostCap ? { ignoreCostCap: true } : {}), ...(pastTeamCap ? { pastTeamCap: true, ...(policyReason ? { policyReason } : {}) } : {}) }),
+      body: JSON.stringify({ pipelineId, baseCheck: true, ...(baseAck ? { baseAck: true } : {}), ...(ignoreCostCap ? { ignoreCostCap: true } : {}), ...(pastTeamCap ? { pastTeamCap: true, ...(policyReason ? { policyReason } : {}) } : {}) }),
     });
     const data = await safeJson(res);
     if (!res.ok) {
       // A team cap (team-policy design §7): soft — ask, then resume again with the choice recorded.
       const again = await policyRefusalRetry(data, res.status);
-      if (again) { if (btn) { btn.disabled = false; btn.innerHTML = prevBtnHtml; } return resumeRunFromCard(runId, btn, { ignoreCostCap, pastTeamCap: true, policyReason: again.reason }); }
+      if (again) { if (btn) { btn.disabled = false; btn.innerHTML = prevBtnHtml; } return resumeRunFromCard(runId, btn, { ignoreCostCap, pastTeamCap: true, policyReason: again.reason, baseAck }); }
+      // #527: the base moved (or vanished) since this run started — confirm, then resend every option.
+      if (await baseMovedConfirm(data, res.status)) {
+        if (btn) { btn.disabled = false; btn.innerHTML = prevBtnHtml; }
+        return resumeRunFromCard(runId, btn, { ignoreCostCap, pastTeamCap, policyReason, baseAck: true });
+      }
+      if (isBaseRefusal(data, res.status)) { if (btn) { btn.disabled = false; btn.innerHTML = prevBtnHtml; } return; }
       throw new Error((data && data.error) || `HTTP ${res.status}`);
     }
     upsertRun({
@@ -15321,6 +15871,18 @@ async function promptPastTeamCap({ total = false, required = false, home = '', w
   });
   if (!res) return null;
   return { reason: (res.reason || '').trim() || null };
+}
+/** A resume refused because the run's base moved or vanished on the remote (#527, plan §5.5). */
+const isBaseRefusal = (data, status) => status === 409 && !!data && (data.code === 'base-moved' || data.code === 'base-missing');
+/** Ask whether to resume anyway; true = resend with baseAck. */
+async function baseMovedConfirm(data, status) {
+  if (!isBaseRefusal(data, status)) return false;
+  const m = (Array.isArray(data.members) && data.members[0]) || {};
+  const remote = m.remote || 'origin';
+  const message = data.code === 'base-missing'
+    ? `${m.base || 'The base branch'} no longer exists locally or on ${remote}. The run keeps its own branch. Resume anyway?`
+    : `${m.base || 'The base branch'} moved ${m.movedBy || 0} commit${m.movedBy === 1 ? '' : 's'} on ${remote} since this run started. The run keeps its own branch and will not pick them up. Resume anyway?`;
+  return !!(await confirmModal({ title: 'The base branch changed', message, confirmLabel: 'Resume anyway', cancelLabel: 'Cancel' }));
 }
 async function policyRefusalRetry(data, status) {
   if (!data || typeof data !== 'object') return null;
@@ -17553,6 +18115,9 @@ async function loadShipItRemotes(modal, record, gen, isClosed) {
   branchSel.innerHTML = '';
   setShipItRemotesDisabled(modal, true);
   modal.querySelector('.shipit-remotes-hint').textContent = '';
+  // #527: the modal is reused, so the base-moved note from a previous open goes first.
+  const baseWarn = modal.querySelector('#shipit-base-warn');
+  if (baseWarn) { baseWarn.hidden = true; baseWarn.textContent = ''; }
   const qs = new URLSearchParams({ id: record.id });
   if (record.projectKey) qs.set('projectKey', record.projectKey);   // server prefers the key
   if (record.projectDir) qs.set('projectDir', record.projectDir);   // deep-link stubs may lack it
@@ -17584,12 +18149,22 @@ async function loadShipItRemotes(modal, record, gen, isClosed) {
     // Confirm may already have been pressed (okBtn disabled = POST in flight, sent
     // without the fields): paint the list, but keep it locked until that POST settles.
     setShipItRemotesDisabled(modal, modal.querySelector('.shipit-ok').disabled);
+    // #527: warn (never block) when the base gained commits on the remote since the run started.
+    const bs = data.baseStatus && typeof data.baseStatus === 'object' ? data.baseStatus : null;
+    const paintBaseWarn = () => {
+      if (!baseWarn) return;
+      const n = bs && Number(bs.movedSinceRun);
+      const on = !!(bs && n > 0 && bs.base && shipItChosenBase(modal, record) === bs.base);
+      baseWarn.hidden = !on;
+      baseWarn.textContent = on ? `${bs.remote || 'origin'}/${bs.base} has ${n} new commit${n === 1 ? '' : 's'} since this run started. The PR may need an update.` : '';
+    };
     const paintHint = () => paintShipItRemotesHint(modal, remotes, record);
     paintHint();
+    paintBaseWarn();
     // Property assignment, not addEventListener: re-runs per open without stacking.
     pushSel.onchange = paintHint;
-    baseSel.onchange = () => { if (chain.length) paintBranches(); paintHint(); };
-    branchSel.onchange = paintHint;
+    baseSel.onchange = () => { if (chain.length) paintBranches(); paintHint(); paintBaseWarn(); };
+    branchSel.onchange = () => { paintHint(); paintBaseWarn(); };
   } catch {
     /* remotes unavailable: block stays hidden, POST omits the fields */
   }
@@ -18117,7 +18692,7 @@ function btnLabelEl(btn) { return btn.querySelector('.hd-btn-label') || btn; }
 
 // The POST /api/resume -> upsert -> seed-log -> land-on-running recipe, shared by
 // the detail header and the cost-override path.
-async function resumePipeline(p, projectDir, btn, { ignoreCostCap = false, pastTeamCap = false, policyReason = null } = {}) {
+async function resumePipeline(p, projectDir, btn, { ignoreCostCap = false, pastTeamCap = false, policyReason = null, baseAck = false } = {}) {
   const labelEl = btnLabelEl(btn);
   btn.disabled = true;
   // Claim the button for the duration of the round-trip (and keep the failure
@@ -18138,7 +18713,7 @@ async function resumePipeline(p, projectDir, btn, { ignoreCostCap = false, pastT
     const res = await fetch('/api/resume', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pipelineId: p.id, ...(ignoreCostCap ? { ignoreCostCap: true } : {}), ...(pastTeamCap ? { pastTeamCap: true, ...(policyReason ? { policyReason } : {}) } : {}) }),
+      body: JSON.stringify({ pipelineId: p.id, baseCheck: true, ...(baseAck ? { baseAck: true } : {}), ...(ignoreCostCap ? { ignoreCostCap: true } : {}), ...(pastTeamCap ? { pastTeamCap: true, ...(policyReason ? { policyReason } : {}) } : {}) }),
     });
     const data = await safeJson(res);
     if (!res.ok) {
@@ -18146,8 +18721,14 @@ async function resumePipeline(p, projectDir, btn, { ignoreCostCap = false, pastT
       const again = await policyRefusalRetry(data, res.status);
       if (again) {
         btn.disabled = false; labelEl.textContent = label; delete btn.dataset.resumeState;
-        return resumePipeline(p, projectDir, btn, { ignoreCostCap, pastTeamCap: true, policyReason: again.reason });
+        return resumePipeline(p, projectDir, btn, { ignoreCostCap, pastTeamCap: true, policyReason: again.reason, baseAck });
       }
+      // #527: the base moved (or vanished) since this run started — confirm, then resend every option.
+      if (await baseMovedConfirm(data, res.status)) {
+        btn.disabled = false; labelEl.textContent = label; delete btn.dataset.resumeState;
+        return resumePipeline(p, projectDir, btn, { ignoreCostCap, pastTeamCap, policyReason, baseAck: true });
+      }
+      if (isBaseRefusal(data, res.status)) { btn.disabled = false; labelEl.textContent = label; delete btn.dataset.resumeState; return; }
       throw new Error((data && data.error) || `HTTP ${res.status}`);
     }
     upsertRun({
@@ -21602,6 +22183,8 @@ function paintRdTerminal(screen, r) {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (askPanel?.ownsKey(e)) return;
+  // #527: a sync dialog (details / refusal card) owns Escape; the detail screen stays.
+  if (document.querySelector('.viewer-modal.sync-modal')) return;
   if (currentView() !== 'history') return;
   if (!el.histShell || !el.histShell.classList.contains('detail-open')) return;
   if (el.viewerCard && !el.viewerCard.classList.contains('hidden')) return;
@@ -21635,6 +22218,8 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (askPanel?.ownsKey(e)) return;
+  // #527: a sync dialog (details / refusal card) owns Escape; the detail screen stays.
+  if (document.querySelector('.viewer-modal.sync-modal')) return;
   if (currentView() !== 'running') return;
   if (!el.runShell || !el.runShell.classList.contains('detail-open')) return;
   if (el.viewerCard && !el.viewerCard.classList.contains('hidden')) return;
@@ -21656,6 +22241,8 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (askPanel?.ownsKey(e)) return;
+  // #527: a sync dialog (details / refusal card) owns Escape; the detail screen stays.
+  if (document.querySelector('.viewer-modal.sync-modal')) return;
   if (currentView() !== 'projects') return;
   if (!el.projShell || !el.projShell.classList.contains('detail-open')) return;
   if (el.confirmModal && !el.confirmModal.classList.contains('hidden')) return;
@@ -24765,8 +25352,17 @@ function paintRdHeader(screen, r) {
   const feature = br.feature || r.branchFeature || '';
   const source = br.source || '';
   const base = screen.querySelector('.rd-base');
-  base.textContent = source ? `${source} →` : '';
+  // #527: the start commit rides inside the existing span (no new themed element).
+  base.textContent = source ? `${source}${br.baseSha ? ` @ ${String(br.baseSha).slice(0, 7)}` : ''} →` : '';
+  base.title = br.baseSha ? `Started from ${br.baseSha}${br.startRef ? ' (the remote tip; the local branch was left untouched)' : ''}` : '';
   base.hidden = !source;
+  const syncBtn = screen.querySelector('.rd-sync');
+  if (syncBtn) {
+    const hasStage = Array.isArray(r.steps) && r.steps.some((s) => s && s.executionId === SYNC_EXECUTION_ID);
+    syncBtn.hidden = !hasStage;
+    syncBtn.textContent = hasStage ? syncStageLabel(br.sync, source) : '';
+    syncBtn.onclick = hasStage ? () => focusLogExecution({ run: r }, SYNC_EXECUTION_ID, 'sync') : null;
+  }
   const copyBtn = screen.querySelector('.rd-branch-copy');
   copyBtn.hidden = !feature;
   if (feature) screen.querySelector('.rd-branch-name').textContent = feature;

@@ -2,10 +2,10 @@
 // P4/T4: the per-thread worktree registry (ask-worca-worktrees-design.md §3-§5)
 // — open/list/remove over a real repo, caps, run-id sugar, navigation row
 // updates, the sweep, and the unminted-id doctrine.
-import { test, after } from 'node:test';
+import { test, after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, rmSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,8 +20,19 @@ import {
   removeThreadWorktrees, noteWorktreeNavigation, sweepAskWorktrees,
   worktreesDir, worktreeDirFor, AskWorktreeError, WT_ID_RE,
 } from '../src/core/ask/worktrees.mjs';
+import { _testing as gitSyncTesting } from '../src/core/git-sync.mjs';
 
 useTempHome(after);
+
+// #527: the remote fallback reads effectiveSyncSettings → settings.json under HOME, so a
+// developer's own sync.remote must not change these results (nor may a test write it).
+const realHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+const fakeHome = mkdtempSync(join(tmpdir(), 'worca-cc-awt-home-'));
+before(() => { process.env.HOME = fakeHome; process.env.USERPROFILE = fakeHome; });
+after(() => {
+  for (const [k, v] of Object.entries(realHome)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  rmSync(fakeHome, { recursive: true, force: true });
+});
 
 const created = [];
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true }))));
@@ -242,4 +253,81 @@ test('a thread deleted while `git worktree add` runs: open rolls the checkout ba
   const wtl = String(spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: repo }).stdout);
   assert.ok(!wtl.includes(t.id), 'no orphan checkout registered in the source repo');
   assert.ok(!existsSync(join(repo, '..', t.id)), 'nothing on disk');
+});
+
+// ── #527: remote-only refs ──────────────────────────────────────────────────
+/** A bare origin (main + optional pre-clone branches) and a clone of it; push() adds a branch
+ *  to origin AFTER the clone, so only a fetch can see it. The clone has no FETCH_HEAD. */
+async function clonedRepo(preClone = []) {
+  const root = await mkdtemp(join(tmpdir(), 'worca-cc-awt-remote-'));
+  created.push(root);
+  const g = (cwd, args) => {
+    const r = spawnSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8' });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  };
+  const origin = join(root, 'origin.git');
+  const seed = join(root, 'seed');
+  const clone = join(root, 'clone');
+  g(root, ['init', '-q', '--bare', '-b', 'main', origin]);
+  g(root, ['init', '-q', '-b', 'main', seed]);
+  await writeFile(join(seed, 'README.md'), '# hi\n');
+  g(seed, ['add', '-A']); g(seed, ['commit', '-qm', 'init']);
+  g(seed, ['remote', 'add', 'origin', origin]);
+  g(seed, ['push', '-q', 'origin', 'main']);
+  const push = async (name) => {
+    g(seed, ['checkout', '-qB', name, 'main']);
+    await writeFile(join(seed, `${name.replace(/\//g, '_')}.txt`), `${name}\n`);
+    g(seed, ['add', '-A']); g(seed, ['commit', '-qm', name]);
+    g(seed, ['push', '-q', 'origin', name]);
+  };
+  for (const b of preClone) await push(b);
+  g(root, ['clone', '-q', origin, clone]);
+  return { clone, push };
+}
+
+test('#527 open_worktree: a bare remote-only branch resolves to origin/<name> with resolvedFrom', async () => {
+  const { clone, push } = await clonedRepo();
+  await push('feat/remote');
+  const p = (await addProject({ name: 'awt-remote', path: clone })).find((x) => x.name === 'awt-remote');
+  const t = createThread();
+  const wt = await openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'feat/remote' });
+  assert.equal(wt.ref, 'origin/feat/remote');
+  assert.equal(wt.resolvedFrom, 'feat/remote');
+  assert.equal('stale' in wt, false);
+  assert.ok(existsSync(join(wt.path, 'feat_remote.txt')));
+  await assert.rejects(() => openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'nowhere' }), /ref does not resolve: "nowhere"/);
+  const local = await openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'main' });
+  assert.equal(local.ref, 'main');
+  assert.equal('resolvedFrom' in local, false);
+  await removeThreadWorktrees(t.id);
+});
+
+test('#527 open_worktree: origin/<name> pushed since the last fetch is fetched and opened as given', async () => {
+  const { clone, push } = await clonedRepo();
+  await push('feat/late');
+  const p = (await addProject({ name: 'awt-late', path: clone })).find((x) => x.name === 'awt-late');
+  const t = createThread();
+  const wt = await openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'origin/feat/late' });
+  assert.equal(wt.ref, 'origin/feat/late');
+  assert.equal('resolvedFrom' in wt, false);
+  await assert.rejects(() => openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'origin/never' }), /ref does not resolve/);
+  await removeThreadWorktrees(t.id);
+});
+
+test('#527 open_worktree: a failed fetch still opens a previously fetched remote-only branch, stale', async () => {
+  const { clone } = await clonedRepo(['feat/old']);     // origin/feat/old came with the clone
+  const p = (await addProject({ name: 'awt-stale', path: clone })).find((x) => x.name === 'awt-stale');
+  const t = createThread();
+  gitSyncTesting.setRunner(async (args, o) => (args[0] === 'fetch'
+    ? { ok: false, stdout: '', stderr: 'fatal: unable to access: Could not resolve host: github.com', code: 128, timedOut: false }
+    : gitSyncTesting.defaultRun(args, o)));
+  try {
+    const wt = await openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'feat/old' });
+    assert.equal(wt.ref, 'origin/feat/old');
+    assert.equal(wt.resolvedFrom, 'feat/old');
+    assert.equal(wt.stale, true);
+    assert.ok('fetchedAt' in wt);
+    await assert.rejects(() => openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'feat/missing' }), /the remote could not be fetched/);
+  } finally { gitSyncTesting.reset(); }
+  await removeThreadWorktrees(t.id);
 });

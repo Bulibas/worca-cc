@@ -387,7 +387,7 @@ test('Resume POSTs exactly { pipelineId } and lands on running/<newRunId>', asyn
   click(ctx.window, ctx.window.document.querySelector('#hist-detail .hd-resume'));
   await settle(ctx.window, 5);
   // The body assertion test/ui-pause-resume.test.mjs:70 owns for the list card.
-  assert.deepEqual(posts, [{ pipelineId: ROW.id }]);
+  assert.deepEqual(posts, [{ pipelineId: ROW.id, baseCheck: true }]);
   assert.equal(ctx.window.location.hash.replace(/^#/, ''), 'running/r-9');
 });
 
@@ -667,7 +667,7 @@ test('cost-paused run shows the banner; Continue-without-cap resumes with ignore
     'the override asks for confirmation first');
   doc.querySelector('#confirm-ok').click();
   await settle(ctx.window, 6);
-  assert.deepEqual(posts, [{ pipelineId: ROW.id, ignoreCostCap: true }]);
+  assert.deepEqual(posts, [{ pipelineId: ROW.id, baseCheck: true, ignoreCostCap: true }]);
 });
 
 test('a deep-linked cost-paused run gains its banner exactly once when the row arrives', async () => {

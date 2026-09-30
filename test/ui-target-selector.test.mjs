@@ -106,7 +106,7 @@ test('workspace mode swaps the single source dropdown for per-project dropdowns'
   assert.equal(doc.querySelector('#ws-source-branches').classList.contains('hidden'), false);
   assert.equal(doc.querySelectorAll('#ws-source-branches select.ws-src-select').length, 2);
   // The "Source branch" field/header itself is never hidden.
-  assert.equal(doc.querySelector('#sourceBranchHint').closest('.field').classList.contains('hidden'), false);
+  assert.equal(doc.querySelector('#sourceBranch').closest('.field').classList.contains('hidden'), false);
 });
 
 test('submit in workspace mode sends {workspaceId} and NO projectDir; project mode is unchanged', async () => {

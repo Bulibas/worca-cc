@@ -87,7 +87,7 @@ test('a paused run shows a wired Resume button on its detail screen', async () =
   await ctx.settle(5);
   const call = ctx.fetchCalls.find((c) => c.url.includes('/api/resume'));
   assert.ok(call, 'click posts /api/resume');
-  assert.deepEqual(JSON.parse(call.opts.body), { pipelineId: 'p1' });
+  assert.deepEqual(JSON.parse(call.opts.body), { pipelineId: 'p1', baseCheck: true });
 });
 
 test('a done run hides the Resume button on its detail screen', async () => {
