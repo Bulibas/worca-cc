@@ -411,6 +411,127 @@ test('git-sync never runs the project\'s hooks: reference-transaction / post-mer
 test('pure helpers', () => {
   assert.equal(classifyFetchError('fatal: Authentication failed for ...'), 'auth');
   assert.equal(classifyFetchError("fatal: 'upstream' does not appear to be a git repository"), 'no-remote');
+  // A configured remote whose path/URL is not a repository: git adds the "access rights" line, but
+  // it is unreachable, not a sign-in problem.
+  assert.equal(classifyFetchError("fatal: '/gone/x.git' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists."), 'network');
+  assert.equal(classifyFetchError("fatal: 'git@host:o/r.git' does not appear to be a git repository"), 'network');
   assert.equal(scrubGitText('https://u:secret@host/x ghp_abcdefghijklmnopqrstuv1234'), 'https://***@host/x <redacted>');
   assert.equal(syncState({ ok: true, hasLocal: true, hasRemote: true, ahead: 1, behind: 2 }), 'diverged');
+});
+
+test('a planted core.fsmonitor command in .git/config never runs from a git-sync status read', { skip: process.platform === 'win32' }, async () => {
+  const { a } = await world();
+  const marker = join(root, `fsmon-${n}`);
+  const script = join(root, `fsmon-${n}.sh`);
+  await writeFile(script, `#!/bin/sh\necho ran >> "${marker}"\n`); await chmod(script, 0o755);
+  g(a, 'config', 'core.fsmonitor', script);
+  await fetchRemote(a);
+  const s = await syncStatus(a, { base: 'dev' });
+  assert.equal(s.ok, true); assert.equal(s.checkedOutHere, true);
+  await assert.rejects(readFile(marker, 'utf8'), 'git-sync status must not run core.fsmonitor');
+  spawnSync('git', ['status', '--porcelain'], { cwd: a });
+  assert.match(await readFile(marker, 'utf8'), /ran/, 'control: plain git status runs it');
+});
+
+test('a failed `git worktree list` counts as in use: update-ref never moves the base', async () => {
+  const { a, push } = await world();
+  g(a, 'checkout', '-q', '-b', 'other');
+  await push('g.txt', 'two'); await fetchRemote(a);
+  const before = g(a, 'rev-parse', 'dev');
+  _testing.setRunner((args, opts) => (args[0] === 'worktree'
+    ? Promise.resolve({ ok: false, stdout: '', stderr: 'fatal: boom', code: 128, timedOut: false })
+    : _testing.defaultRun(args, opts)));
+  const r = await fastForward(a, { base: 'dev' });
+  _testing.setRunner(null);
+  assert.equal(r.ok, false); assert.equal(r.kind, 'in-use');
+  assert.equal(g(a, 'rev-parse', 'dev'), before);
+});
+
+test('a lost update-ref compare-and-swap is diverged, with the counts re-read after the refusal', async () => {
+  const { a, push } = await world();
+  g(a, 'checkout', '-q', '-b', 'other');
+  await push('g.txt', 'two'); await fetchRemote(a);
+  const commitOnDev = () => {
+    // Someone commits on dev (not checked out anywhere) between the status read and the write.
+    const tree = g(a, 'rev-parse', 'dev^{tree}');
+    const c = g(a, 'commit-tree', tree, '-p', 'dev', '-m', 'local');
+    g(a, '-c', 'core.hooksPath=/dev/null', 'update-ref', 'refs/heads/dev', c);
+  };
+  _testing.setRunner((args, opts) => {
+    if (args.includes('update-ref') && !args.includes('commit-tree')) commitOnDev();
+    return _testing.defaultRun(args, opts);
+  });
+  const r = await fastForward(a, { base: 'dev' });
+  assert.equal(r.ok, false); assert.equal(r.kind, 'diverged');
+  assert.equal(r.ahead, 1); assert.equal(r.behind, 1);
+  _testing.setRunner(null);
+});
+
+test('syncBaseForRun: a base that diverges during the fast-forward reports the re-read ahead count', async () => {
+  const { a, push } = await world();
+  g(a, 'checkout', '-q', '-b', 'other');
+  await push('g.txt', 'two');
+  let armed = true;
+  _testing.setRunner((args, opts) => {
+    if (armed && args[0] === 'update-ref') {
+      armed = false;
+      const tree = g(a, 'rev-parse', 'dev^{tree}');
+      const c = g(a, 'commit-tree', tree, '-p', 'dev', '-m', 'local');
+      g(a, '-c', 'core.hooksPath=/dev/null', 'update-ref', 'refs/heads/dev', c);
+    }
+    return _testing.defaultRun(args, opts);
+  });
+  const r = await syncBaseForRun(a, { base: 'dev', onDiverged: 'fail' });
+  _testing.setRunner(null);
+  assert.equal(r.result, 'diverged');
+  assert.equal(r.ahead, 1, 'not the pre-merge "0 ahead"'); assert.equal(r.behind, 1);
+});
+
+test('merge path re-checks HEAD AFTER the credential mint: a checkout during it → in-use', async () => {
+  const { a, push } = await world();
+  await push('h.txt', 'two'); await fetchRemote(a);
+  const devBefore = g(a, 'rev-parse', 'dev');
+  let statusSeen = false, switched = false;
+  _testing.setRunner((args, opts) => {
+    // fastForward's own `remote get-url` (the mint's input) comes after syncStatus's `status`.
+    if (args[0] === 'status') statusSeen = true;
+    else if (statusSeen && !switched && args[0] === 'remote') { switched = true; g(a, 'checkout', '-q', '-b', 'feat'); }
+    return _testing.defaultRun(args, opts);
+  });
+  const r = await fastForward(a, { base: 'dev' });
+  _testing.setRunner(null);
+  assert.equal(switched, true);
+  assert.equal(r.ok, false); assert.equal(r.kind, 'in-use');
+  assert.equal(g(a, 'rev-parse', 'feat'), devBefore);
+});
+
+test('resolveSourceRef accepts a just-fetched <remote>/<name>', async () => {
+  const { a, push } = await world();
+  await fetchRemote(a);
+  await push('n.txt', 'new', 'feat-new');   // pushed after the last fetch
+  const r = await resolveSourceRef(a, 'origin/feat-new', { maxAgeMs: 0 });
+  assert.equal(r.ok, true); assert.equal(r.ref, 'origin/feat-new'); assert.equal(r.remoteOnly, true);
+});
+
+test('a failed fetch keeps the last good fetch time (git empties FETCH_HEAD) and classifies a gone path as network', async () => {
+  const { a } = await world();
+  const good = await fetchRemote(a);
+  assert.equal(good.ok, true);
+  g(a, 'remote', 'set-url', 'origin', join(root, 'no-such-origin.git'));
+  const bad = await fetchRemote(a, { maxAgeMs: 0 });
+  assert.equal(bad.ok, false); assert.equal(bad.kind, 'network');
+  assert.equal(bad.fetchedAt, good.fetchedAt);
+  const st = await syncRepo(a, { base: 'dev', mode: 'status' });
+  assert.equal(st.stale, true); assert.equal(st.fetchedAt, good.fetchedAt);
+});
+
+test('status reads spawn no extra git for the negative cache when nothing failed', async () => {
+  const { a } = await world();
+  await fetchRemote(a);
+  const calls = [];
+  _testing.setRunner((args, opts) => { calls.push(args.join(' ')); return _testing.defaultRun(args, opts); });
+  await syncRepo(a, { base: 'dev', mode: 'status' });
+  _testing.setRunner(null);
+  // syncStatus reads the remote once (lastFetchedMs); standingFailure adds none.
+  assert.equal(calls.filter((c) => c.startsWith('remote get-url')).length, 1);
 });

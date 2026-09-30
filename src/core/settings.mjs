@@ -1776,9 +1776,12 @@ export async function setSyncDefaults(patch) {
   const settings = readSettings();
   if (patch === null || patch === '') delete settings.sync;
   else {
-    const next = { ...normalizeSyncSettings(settings.sync), ...patch };
-    for (const k of Object.keys(patch)) if (patch[k] === null) next[k] = DEFAULT_SYNC_SETTINGS[k];
-    settings.sync = next;
+    // Store only the keys someone set: a key left out follows the built-in default as it changes.
+    const prev = settings.sync && typeof settings.sync === 'object' && !Array.isArray(settings.sync) ? settings.sync : {};
+    const next = {};
+    for (const k of Object.keys(DEFAULT_SYNC_SETTINGS)) if (Object.hasOwn(prev, k)) next[k] = normalizeSyncSettings(prev)[k];
+    for (const [k, v] of Object.entries(patch)) { if (v === null) delete next[k]; else next[k] = v; }
+    if (Object.keys(next).length) settings.sync = next; else delete settings.sync;
   }
   await persistSettings(settings);
   return syncDefaults();

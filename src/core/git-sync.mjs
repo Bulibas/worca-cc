@@ -47,12 +47,14 @@ const NETWORK_CMDS = new Set(['fetch', 'merge']);
 /** Every git-sync call runs with an empty hooks directory (metrics/sync.mjs hookFreeArgs, decision 33):
  *  `reference-transaction` fires on fetch / update-ref / branch and `post-merge` on merge --ff-only,
  *  with the spawn env — worca's GitHub credential included. Run worktrees share the project's
- *  .git/hooks, so an agent could plant one there. A hooksPath that does not exist simply has no hooks;
- *  with no worca home (bare unit test) the null device stands in, which can hold no hooks either. */
+ *  .git/hooks, so an agent could plant one there. On POSIX the hooks path is the null device, which
+ *  can hold no hooks (a directory could be created and filled later); on Windows, a worca-home
+ *  folder that does not exist simply has no hooks. The shared .git/config is just as writable, so
+ *  a planted core.fsmonitor command (run by `git status`) and http.sslVerify=false are overridden too. */
 function hookFreeArgs() {
-  let dir;
-  try { dir = join(worcaHome(), 'no-hooks'); } catch { dir = devNull; }
-  return ['-c', `core.hooksPath=${dir}`];
+  let dir = devNull;
+  if (process.platform === 'win32') { try { dir = join(worcaHome(), 'no-hooks'); } catch { /* devNull */ } }
+  return ['-c', `core.hooksPath=${dir}`, '-c', 'core.fsmonitor=false', '-c', 'http.sslVerify=true'];
 }
 const liveGroups = new Set();   // pids of detached groups still running (POSIX)
 let exitHooked = false;
@@ -104,6 +106,9 @@ const inflight = new Map();   // `${realpath}\0${remote}` -> Promise<fetch resul
 // accept a cache (maxAgeMs > 0) see it; the run's Sync stage (maxAgeMs 0) always retries.
 const failed = new Map();     // same key -> { at, result }
 const ownFetch = new Map();   // same key -> FETCH_HEAD mtime right after THIS process's last good fetch
+// A failed fetch truncates FETCH_HEAD (and bumps its mtime), so the disk forgets the last good
+// fetch. Remember it here for DISPLAY only ("Last fetched …"); freshness decisions never read it.
+const lastGood = new Map();   // same key -> ms of the last good fetch this process saw
 
 // ── names, text ──────────────────────────────────────────────────────────────
 /** A configured remote NAME (never a URL, never an option). */
@@ -128,6 +133,11 @@ export function scrubGitText(s, max = 2000) {
 /** Stable failure kind for a failed fetch's stderr (LC_ALL=C, so English). */
 export function classifyFetchError(stderr) {
   const s = String(stderr || '');
+  // git adds "make sure you have the correct access rights" to a MISSING repository too: a quoted
+  // path or URL that is not a repository is unreachable, not a sign-in problem. A bare name
+  // ('upstream') is a remote that is not configured.
+  const notRepo = /'([^']*)' does not appear to be a git repository/i.exec(s);
+  if (notRepo && /[/\\:]/.test(notRepo[1])) return 'network';
   if (/Authentication failed|could not read (?:Username|Password)|terminal prompts disabled|HTTP 40[13]|returned error: 40[13]|Permission denied \(publickey|Repository not found|correct access rights|Host key verification failed|invalid credentials/i.test(s)) return 'auth';
   if (/No such remote|does not appear to be a git repository/i.test(s)) return 'no-remote';
   if (/Could not resolve host|unable to access|Connection (?:refused|timed out|reset)|Network is unreachable|Operation timed out|early EOF|remote end hung up|SSL|TLS/i.test(s)) return 'network';
@@ -179,11 +189,17 @@ async function remoteFetchedMs(dir, key, urls) {
   let text = '';
   try { text = await readFile(p, 'utf8'); } catch { return null; }
   const lines = text.split('\n');
-  return (urls || []).some((u) => lines.some((l) => l.endsWith(` of ${u}`))) ? ms : null;
+  if (!(urls || []).some((u) => lines.some((l) => l.endsWith(` of ${u}`)))) return null;
+  if (!(lastGood.get(key) >= ms)) lastGood.set(key, ms);
+  return ms;
+}
+/** For display: the last good fetch, surviving a failed fetch that emptied FETCH_HEAD. */
+async function shownFetchedMs(dir, key, urls) {
+  return (await remoteFetchedMs(dir, key, urls)) ?? lastGood.get(key) ?? null;
 }
 async function lastFetchedMs(dir, remote) {
   const info = await remoteInfo(dir, remote);
-  return info.ok ? remoteFetchedMs(dir, await repoKey(dir, remote), info.fetchUrls) : null;
+  return info.ok ? shownFetchedMs(dir, await repoKey(dir, remote), info.fetchUrls) : null;
 }
 /** ISO time `remote` was last fetched into `dir` (any process, or a person), or null. No network. */
 export async function lastFetchedAt(dir, { remote = 'origin' } = {}) {
@@ -211,9 +227,11 @@ const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform ===
 const samePath = (a, b) => (CASE_INSENSITIVE_FS ? a.toLowerCase() === b.toLowerCase() : a === b);
 async function canonPath(p) { return resolve(await realpath(p).catch(() => p)); }
 
-/** Canonical absolute paths of the worktrees that have refs/heads/<base> checked out. */
+/** Canonical absolute paths of the worktrees that have refs/heads/<base> checked out; null when
+ *  git could not list them. */
 async function checkoutsOf(dir, base) {
   const r = await _run(['worktree', 'list', '--porcelain'], { cwd: dir });
+  if (!r.ok) return null;                  // unknown: callers must treat the branch as in use
   const out = [];
   let cur = null;
   for (const line of (r.ok ? r.stdout : '').split(/\r?\n/)) {
@@ -250,10 +268,10 @@ async function runFetch(key, dir, info, timeoutMs) {
   if (r.ok) {
     const p = await fetchHeadPath(dir);
     const ms = p ? await stat(p).then((s) => s.mtimeMs, () => null) : null;
-    if (ms) ownFetch.set(key, ms);
+    if (ms) { ownFetch.set(key, ms); lastGood.set(key, ms); }
     return { ok: true, fetchedAt: iso(ms) || iso(Date.now()), cached: false };
   }
-  const fetchedAt = iso(await remoteFetchedMs(dir, key, info.fetchUrls));   // this remote's last good fetch
+  const fetchedAt = iso(await shownFetchedMs(dir, key, info.fetchUrls));   // this remote's last good fetch
   return {
     ok: false, kind: r.timedOut ? 'timeout' : classifyFetchError(r.stderr), timeoutMs, fetchedAt,
     error: scrubGitText(r.stderr) || (r.timedOut ? `git fetch timed out after ${timeoutMs} ms` : `git fetch exited ${r.code}`),
@@ -297,7 +315,7 @@ export async function fetchRemote(dir, { remote = 'origin', timeoutMs = INTERACT
     bound.unref?.();
   })]);
   clearTimeout(bound);
-  if (shared.joined) return { ...shared, fetchedAt: iso(await remoteFetchedMs(dir, key, info.fetchUrls)) };
+  if (shared.joined) return { ...shared, fetchedAt: iso(await shownFetchedMs(dir, key, info.fetchUrls)) };
   // Joined a SHORTER-bounded fetch (a person's 8 s) that timed out: a longer caller (the run's
   // 60 s Sync stage) tries once on its own bound instead of inheriting the timeout.
   if (!shared.ok && shared.kind === 'timeout' && timeoutMs > (shared.timeoutMs || 0)) {
@@ -310,11 +328,11 @@ export async function fetchRemote(dir, { remote = 'origin', timeoutMs = INTERACT
  *  rule fetchRemote's cache uses), else null: a status read must still read Offline after a
  *  background refresh or a Sync that could not fetch. Server clock on both sides. */
 async function standingFailure(dir, remote) {
-  const info = await remoteInfo(dir, remote);
-  if (!info.ok) return null;
   const key = await repoKey(dir, remote);
   const fail = failed.get(key);
-  if (!fail) return null;
+  if (!fail) return null;                  // the common case: no git spawn at all
+  const info = await remoteInfo(dir, remote);
+  if (!info.ok) return null;
   const at = await remoteFetchedMs(dir, key, info.fetchUrls);
   return !at || fail.at >= at ? fail.result : null;
 }
@@ -325,11 +343,12 @@ export async function syncStatus(dir, { base, remote = 'origin' } = {}) {
   if (!dir) return { ok: false, kind: 'failed', error: 'projectDir is required' };
   if (!isSafeBranchName(base)) return { ok: false, kind: 'bad-base', error: 'not a syncable branch name' };
   if (!isSafeRemoteName(remote)) return { ok: false, kind: 'bad-remote', error: 'invalid remote name' };
-  const [headSha, remoteSha, fetched, top, shallow, checkouts, head] = await Promise.all([
+  const [headSha, remoteSha, fetched, top, shallow, listed, head] = await Promise.all([
     shaOf(dir, `refs/heads/${base}`), shaOf(dir, `refs/remotes/${remote}/${base}`), lastFetchedMs(dir, remote),
     _run(['rev-parse', '--show-toplevel'], { cwd: dir }), _run(['rev-parse', '--is-shallow-repository'], { cwd: dir }),
     checkoutsOf(dir, base), _run(['symbolic-ref', '-q', 'HEAD'], { cwd: dir }),
   ]);
+  const checkouts = listed || [];
   const here = top.ok && top.stdout.trim() ? await canonPath(top.stdout.trim()) : null;
   const matchesHere = (p) => !!here && samePath(p, here);
   // dir's own HEAD is authoritative for "checked out HERE" — no path comparison involved. A
@@ -355,7 +374,7 @@ export async function syncStatus(dir, { base, remote = 'origin' } = {}) {
   }
   const out = {
     ok: true, base, remote, hasLocal: !!headSha, hasRemote: !!remoteSha, headSha, remoteSha, ahead, behind,
-    dirty: dirtyCount > 0, dirtyCount, detached: !head.ok, checkedOutHere, checkedOutElsewhere,
+    dirty: dirtyCount > 0, dirtyCount, detached: !head.ok, checkedOutHere, checkedOutElsewhere, worktreesUnknown: listed === null,
     shallow: shallow.ok && shallow.stdout.trim() === 'true', fetchedAt: iso(fetched),
   };
   out.state = syncState(out);
@@ -399,7 +418,7 @@ export async function fastForward(dir, { base, remote = 'origin' } = {}) {
   if (!s.hasLocal) return ensureLocalBranch(dir, { base, remote });
   if (s.behind === 0) return { ok: true, from: s.headSha, to: s.headSha, commits: 0, status: s };
   if (s.ahead > 0) return { ok: false, kind: 'diverged', ahead: s.ahead, behind: s.behind, status: s };
-  if (s.checkedOutElsewhere.length) return { ok: false, kind: 'in-use', paths: s.checkedOutElsewhere, status: s };
+  if (s.checkedOutElsewhere.length || (s.worktreesUnknown && !s.checkedOutHere)) return { ok: false, kind: 'in-use', paths: s.checkedOutElsewhere, status: s };
   let r;
   if (s.checkedOutHere) {
     if (s.dirty) return { ok: false, kind: 'dirty', dirtyCount: s.dirtyCount, status: s };
@@ -407,19 +426,20 @@ export async function fastForward(dir, { base, remote = 'origin' } = {}) {
     // since syncStatus), and merge the SHA we measured, not the remote-tracking ref, which a fetch
     // in another process (an Ask child) can move in between. `to`/`commits` then stay exact, and
     // the harness re-points the diff base to exactly the commit HEAD moved to.
-    const headNow = await _run(['symbolic-ref', '-q', 'HEAD'], { cwd: dir });
-    if (!(headNow.ok && headNow.stdout.trim() === `refs/heads/${base}`)) return { ok: false, kind: 'in-use', paths: [], status: s };
     // A blobless clone fetches the new files' blobs during the checkout: give the merge the same
     // read credential the fetch had (v8), or a private hosted repo fails every fast-forward.
+    // Minting can take a network round trip, so HEAD is re-checked after it, right before the merge.
     const info = await remoteInfo(dir, remote);
     const cred = info.ok && info.githubRepo ? await githubEnv('read', { repo: info.githubRepo }) : null;
+    const headNow = await _run(['symbolic-ref', '-q', 'HEAD'], { cwd: dir });
+    if (!(headNow.ok && headNow.stdout.trim() === `refs/heads/${base}`)) return { ok: false, kind: 'in-use', paths: [], status: s };
     r = await _run(['merge', '--ff-only', '--no-stat', '-q', s.remoteSha], { cwd: dir, timeoutMs: FF_TIMEOUT_MS, env: cred ? cred.env : null });
   } else {
     // Belt and braces: update-ref on a CHECKED-OUT branch would move HEAD under that checkout's
     // index and files (they would read as a staged revert of every upstream commit). Re-read
     // right before writing, and refuse when anything has the branch checked out.
     const [again, headNow] = await Promise.all([checkoutsOf(dir, base), _run(['symbolic-ref', '-q', 'HEAD'], { cwd: dir })]);
-    if (again.length || (headNow.ok && headNow.stdout.trim() === `refs/heads/${base}`)) {
+    if (again === null || again.length || (headNow.ok && headNow.stdout.trim() === `refs/heads/${base}`)) {
       return { ok: false, kind: 'in-use', paths: again, status: s };
     }
     r = await _run(['update-ref', '-m', `worca sync: fast-forward ${base} to ${remote}/${base}`,
@@ -427,8 +447,13 @@ export async function fastForward(dir, { base, remote = 'origin' } = {}) {
   }
   if (!r.ok) {
     const e = String(r.stderr || '');
-    const kind = /would be overwritten|untracked working tree/i.test(e) ? 'dirty' : /Not possible to fast-forward|diverg/i.test(e) ? 'diverged' : 'failed';
-    return { ok: false, kind, error: scrubGitText(e), status: s };
+    // Re-read: the refusal usually means <base> moved meanwhile (a commit, or a lost update-ref
+    // compare-and-swap), and the caller's message must show the counts as they are NOW.
+    const now = await syncStatus(dir, { base, remote });
+    const status = now.ok ? now : s;
+    const kind = /would be overwritten|untracked working tree/i.test(e) ? 'dirty'
+      : (/Not possible to fast-forward|diverg/i.test(e) || status.state === 'diverged') ? 'diverged' : 'failed';
+    return { ok: false, kind, error: scrubGitText(e), ...(kind === 'diverged' ? { ahead: status.ahead, behind: status.behind } : {}), status };
   }
   return { ok: true, from: s.headSha, to: s.remoteSha, commits: s.behind };
 }
@@ -499,7 +524,8 @@ export async function syncBaseForRun(dir, { base, remote = 'origin', timeoutMs =
   // so the member's onDiverged applies (a 'fail' project must not silently start from the remote).
   if (ff.kind === 'diverged' && onDiverged !== 'origin') {
     note(`${base} diverged from ${remote}/${base} while syncing; nothing was moved`);
-    return { result: 'diverged', ...common, log };
+    // The counts from BEFORE the fast-forward read "0 ahead": report the re-read ones.
+    return { result: 'diverged', ...common, ahead: ff.ahead ?? common.ahead, behind: ff.behind ?? common.behind, log };
   }
   note(`not moving ${base} (${ff.kind}${ff.kind === 'dirty' ? `: ${s.dirtyCount} changed file(s)` : ''}); the run starts from ${remote}/${base} (${short(s.remoteSha)}) in a fresh worktree`);
   return { result: 'remote-start', reason: ff.kind, startRef: s.remoteSha, ...common, to: s.remoteSha, commits: s.behind, log };
@@ -516,6 +542,10 @@ export async function resolveSourceRef(dir, name, { remote = 'origin', fetch = t
   const f = fetch ? await fetchRemote(dir, { remote, maxAgeMs, timeoutMs }) : null;
   if (await shaOf(dir, `refs/remotes/${remote}/${name}`)) {
     return { ok: true, ref: `${remote}/${name}`, local: false, remoteOnly: true, fetchedAt: f?.fetchedAt || null, stale: !!(f && !f.ok) };
+  }
+  // A name already spelled `<remote>/<branch>` that only this fetch brought in.
+  if (name.startsWith(`${remote}/`) && await shaOf(dir, `refs/remotes/${name}`)) {
+    return { ok: true, ref: name, local: false, remoteOnly: true, fetchedAt: f?.fetchedAt || null, stale: !!(f && !f.ok) };
   }
   return { ok: false, kind: f && !f.ok && f.kind !== 'no-remote' ? 'stale' : 'missing', ...(f && !f.ok ? { fetchError: { kind: f.kind, message: f.error } } : {}) };
 }
@@ -598,7 +628,7 @@ export const _testing = {
   QUIET_ENV,
   NETWORK_CMDS,
   setRunner(fn) { _run = typeof fn === 'function' ? fn : defaultRun; },
-  reset() { _run = defaultRun; inflight.clear(); failed.clear(); ownFetch.clear(); },
+  reset() { _run = defaultRun; inflight.clear(); failed.clear(); ownFetch.clear(); lastGood.clear(); },
   /** Forget this process's fetch memory only (simulates another process; the runner stays). */
-  forgetProcess() { inflight.clear(); failed.clear(); ownFetch.clear(); },
+  forgetProcess() { inflight.clear(); failed.clear(); ownFetch.clear(); lastGood.clear(); },
 };

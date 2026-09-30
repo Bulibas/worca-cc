@@ -101,6 +101,28 @@ test('a 409 base-moved asks, then resends with baseAck and every option of the c
   assert.ok(getRun('r-new'), 'the acknowledged resend resumes the run');
 });
 
+test('while the base-moved question is open the button reads Resume again (disabled); Cancel re-enables it (#527)', async () => {
+  const { window } = await bootLive({ baseMoved: true });
+  const { upsertRun, onState, buildRunCard, resumeRunFromCard, getRun } = window.__np;
+  const r = upsertRun({ runId: 'r1', title: 't', projectDir: '/tmp/proj', status: 'running' });
+  onState(r, { status: 'running', id: 'p1' });
+  onState(r, { status: 'paused' });
+  r.el = buildRunCard(r);
+  const btn = r.el.querySelector('.btn-resume');
+  const before = btn.innerHTML;
+  const done = resumeRunFromCard('r1', btn);
+  for (let i = 0; i < 5; i++) await new Promise((res) => setTimeout(res, 0));
+  const doc = window.document;
+  assert.equal(doc.querySelector('#confirm-modal').classList.contains('hidden'), false, 'the question is open');
+  assert.doesNotMatch(btn.textContent, /Resuming/, 'nothing is resuming while the person decides');
+  assert.equal(btn.innerHTML, before, 'the Resume label and icon are back');
+  assert.equal(btn.disabled, true, 'no second click while the question is open');
+  doc.querySelector('#confirm-cancel').click();
+  await done;
+  assert.equal(btn.disabled, false);
+  assert.ok(getRun('r1'), 'Cancel leaves the run paused');
+});
+
 test('failed resume restores the Resume button: enabled, icon intact, error logged', async () => {
   const { window } = await bootLive({ resumeFails: true });
   const { upsertRun, onState, buildRunCard, resumeRunFromCard, getRun } = window.__np;

@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import {
   DEFAULT_SYNC_SETTINGS, SETTINGS_POST_KEYS, normalizeSyncSettings, assertSyncSettingsInput,
-  syncDefaults, setSyncDefaults,
+  syncDefaults, setSyncDefaults, readSettings,
 } from '../src/core/settings.mjs';
 import { SYNC_PREFS_KEY, readSyncPrefs, writeSyncPrefs, readRunConfig } from '../src/core/config.mjs';
 import { projectKey } from '../src/core/store.mjs';
@@ -72,6 +72,19 @@ test('a null sync key resets just that key to its default', async () => {
   await setSyncDefaults({ remote: 'upstream', refreshMinutes: 30, beforeRun: false, onDiverged: 'fail' });
   assert.deepEqual(await setSyncDefaults({ remote: null }), { beforeRun: false, remote: 'origin', refreshMinutes: 30, onDiverged: 'fail' });
   assert.deepEqual(await setSyncDefaults({ refreshMinutes: null, beforeRun: null, onDiverged: null }), { ...DEFAULT_SYNC_SETTINGS });
+  assert.deepEqual(syncDefaults(), { ...DEFAULT_SYNC_SETTINGS });
+});
+
+test('settings.json keeps only the sync keys someone set (a null key is deleted, not frozen at today\'s default)', async () => {
+  await setSyncDefaults(null);
+  await setSyncDefaults({ onDiverged: 'fail' });
+  assert.deepEqual(readSettings().sync, { onDiverged: 'fail' });
+  await setSyncDefaults({ refreshMinutes: 30 });
+  assert.deepEqual(readSettings().sync, { onDiverged: 'fail', refreshMinutes: 30 });
+  await setSyncDefaults({ onDiverged: null });
+  assert.deepEqual(readSettings().sync, { refreshMinutes: 30 });
+  await setSyncDefaults({ refreshMinutes: null });
+  assert.equal(readSettings().sync, undefined);
   assert.deepEqual(syncDefaults(), { ...DEFAULT_SYNC_SETTINGS });
 });
 

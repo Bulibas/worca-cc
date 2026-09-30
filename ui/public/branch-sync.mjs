@@ -17,6 +17,12 @@ export function ago(isoStr, now = Date.now()) {
   if (s < 86400) return `${Math.round(s / 3600)} h ago`;
   return `${Math.round(s / 86400)} d ago`;
 }
+/** "3 min ago", or — with no fetch time — "never" only when nothing failed: a failed fetch can
+ *  wipe FETCH_HEAD, and "never" would then deny a fetch that did happen. */
+export function fetchedAgo(b, now = Date.now()) {
+  if (Number.isFinite(Date.parse((b && b.fetchedAt) || ''))) return ago(b.fetchedAt, now);
+  return b && (b.stale || b.fetchError) ? 'unknown (the last fetch failed)' : 'never';
+}
 const count = (n, shallow) => `${shallow ? 'at least ' : ''}${n}`;
 
 /** The form's `state.sync`, one complete shape for every reset (a `members` write never hits undefined). */
@@ -29,6 +35,16 @@ export function cssEscape(s) {
   s = String(s == null ? '' : s);
   const css = globalThis.CSS;
   return (css && css.escape) ? css.escape(s) : s.replace(/["\\\]]/g, '\\$&');
+}
+
+/** Twin of src/core/git-sync.mjs#isSafeBranchName (test/ui-branch-sync-model.test.mjs pins them
+ *  together): a base the server refuses to sync. The UI paints it Unknown without asking. */
+export function isSyncableBranchName(s) {
+  if (typeof s !== 'string' || !s || s.length > 255) return false;
+  if (!/^[A-Za-z0-9._/-]+$/.test(s) || /^[0-9a-f]{40}$/i.test(s)) return false;
+  if (s.startsWith('-') || s.startsWith('/') || s.endsWith('/') || s.endsWith('.') || s.endsWith('.lock')) return false;
+  if (s.includes('..') || s.includes('//')) return false;
+  return s.split('/').every((c) => c && !c.startsWith('.') && !c.endsWith('.lock'));
 }
 
 /** The pill under Source branch. hidden:true → no remote: hide pill AND switch (edge case table). */
@@ -171,7 +187,8 @@ export function paintSyncRow(host, sync, { autoSync = true, busy = false } = {})
     pill.setAttribute('aria-label', `Sync status: ${model.label}. Show details`);
   }
   const btn = host.querySelector('.sync-btn');
-  if (btn) { btn.classList.toggle('busy', !!busy); btn.disabled = !!busy; }
+  // Unknown = a base the server will not sync: a Sync would only be refused (400).
+  if (btn) { btn.classList.toggle('busy', !!busy); btn.disabled = !!busy || model.state === 'unknown'; }
   const sw = host.querySelector('input[type="checkbox"]');
   if (sw) sw.checked = !!autoSync;
   return model;
@@ -236,7 +253,7 @@ export function openSyncDialog({ title = 'Sync status', subtitle = '', sync, aut
         ['Local base', tip(cur.local)],
         [`${remote}/${base}`, tip(cur.remoteTip)],
         ['Behind / ahead', `${cur.behind || 0} behind · ${cur.ahead || 0} ahead`],
-        ['Last fetched', Number.isFinite(fetched) ? `${ago(cur.fetchedAt)} (${new Date(fetched).toLocaleString()})` : 'never'],
+        ['Last fetched', Number.isFinite(fetched) ? `${ago(cur.fetchedAt)} (${new Date(fetched).toLocaleString()})` : fetchedAgo(cur)],
         ['Remote', cur.remoteLabel || remote],
         ['Working tree', cur.dirty ? `${cur.dirtyCount || 0} changed` : 'Clean'],
         ['Auto-sync', autoSync ? 'On: updates before the run' : 'Off: starts from the local commit'],

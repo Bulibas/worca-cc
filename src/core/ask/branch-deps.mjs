@@ -4,11 +4,12 @@
 // here updates ONLY remote-tracking refs + FETCH_HEAD; nothing in this file fast-forwards,
 // creates a branch or touches a working tree — test/ask-branch-tools.test.mjs pins that.
 import { existsSync } from 'node:fs';
-import { listBranches, syncStatus, commitsBetween, lastFetchedAt, isSafeBranchName, isSafeRemoteName } from '../git-sync.mjs';
+import { listBranches, syncStatus, commitsBetween, lastFetchedAt, isSafeBranchName, isSafeRemoteName, INTERACTIVE_TIMEOUT_MS } from '../git-sync.mjs';
 import { effectiveSyncSettings, chipBase } from '../project-sync.mjs';
 import { listProjects } from '../projects.mjs';
 import { readWorkspace } from '../workspaces.mjs';
 import { mapWithCap, fanoutCap } from '../fanout.mjs';
+import { ASK_LIMITS } from './limits.mjs';
 
 const MISSING = 'project folder is missing on disk';
 
@@ -29,7 +30,8 @@ const NO_CREDENTIAL = /could not read (?:Username|Password)|terminal prompts dis
 const withNote = (r) => (r && r.fetchError && r.fetchError.kind === 'auth' && NO_CREDENTIAL.test(String(r.fetchError.message || ''))
   ? { ...r, fetchError: { kind: 'auth', message: CHILD_AUTH_NOTE } } : r);
 
-export function defaultBranchDeps() {
+/** workspaceMs: the workspace fan-out's deadline (tests shorten it). */
+export function defaultBranchDeps({ workspaceMs = ASK_LIMITS.branchListWorkspaceMs || 15_000 } = {}) {
   return {
     branches: {
       async list(projectKey, opts) {
@@ -39,16 +41,42 @@ export function defaultBranchDeps() {
         return withNote({ projectKey, ...(await listBranches(p.path, { ...opts, remote: effectiveSyncSettings(p.key).remote })) });
       },
       /** One result per member. The row budget is SHARED: opts.limit is the workspace total
-       *  (tools.mjs clamps it), split evenly so 40 members can never return 40 × 200 rows. */
+       *  (tools.mjs clamps it), split evenly so 40 members can never return 40 × 200 rows.
+       *  The fan-out has ONE deadline (an MCP tool call times out; 40 unreachable members at 8 s
+       *  each were ~80 s): no fetch outlives it, and a member reached after it is read from its
+       *  last fetch, marked stale. A member's unused share goes to the truncated ones (no network). */
       async listWorkspace(workspaceId, opts) {
         const ws = await readWorkspace(workspaceId);
         if (!ws) return null;
         const members = ws.projectPaths.map((dir, i) => ({ dir, key: ws.projectKeys[i], gone: ws.exists && ws.exists[i] === false }));
-        const per = Math.max(1, Math.ceil((opts.limit || 100) / Math.max(1, members.length)));
-        return mapWithCap(members, fanoutCap(), async (m) => (m.gone
-          ? { projectKey: m.key, ok: false, error: MISSING }                       // no git in a dead cwd
-          : withNote({ projectKey: m.key,
-            ...(await listBranches(m.dir, { ...opts, limit: per, remote: effectiveSyncSettings(m.key).remote })) })));
+        const limit = opts.limit || 100;
+        const per = Math.max(1, Math.ceil(limit / Math.max(1, members.length)));
+        const deadline = Date.now() + workspaceMs;
+        const wantFresh = opts.fresh !== false;
+        const out = await mapWithCap(members, fanoutCap(), async (m) => {
+          if (m.gone) return { projectKey: m.key, ok: false, error: MISSING };   // no git in a dead cwd
+          const remote = effectiveSyncSettings(m.key).remote;
+          const left = deadline - Date.now();
+          const fresh = wantFresh && left > 0;
+          const r = await listBranches(m.dir, { ...opts, limit: per, remote, fresh,
+            ...(fresh ? { timeoutMs: Math.min(INTERACTIVE_TIMEOUT_MS, left) } : {}) });
+          const skipped = wantFresh && !fresh && r.ok && r.remote && !r.stale
+            ? { stale: true, fetchError: { kind: 'timeout', message: 'not fetched: the workspace listing ran out of time; showing the last fetch (see fetchedAt)' } } : {};
+          return withNote({ projectKey: m.key, remote, ...r, ...skipped });
+        });
+        // Second pass (local refs only): hand the rows other members did not use to the truncated ones.
+        let spare = limit - out.reduce((n, r) => n + (r.ok !== false ? (r.branches || []).length : 0), 0);
+        const short = out.filter((r) => r.ok !== false && r.truncated);
+        for (let i = 0; i < short.length && spare > 0 && Date.now() < deadline; i++) {
+          const r = short[i];
+          const extra = Math.ceil(spare / (short.length - i));
+          const more = await listBranches(members.find((m) => m.key === r.projectKey).dir,
+            { ...opts, fresh: false, remote: r.remote || effectiveSyncSettings(r.projectKey).remote, limit: r.branches.length + extra });
+          if (!more.ok) continue;
+          spare -= more.branches.length - r.branches.length;
+          r.branches = more.branches; r.total = more.total; r.truncated = more.truncated;
+        }
+        return out;
       },
       /** No network: { base, ahead, behind, dirty, fetchedAt } per EXISTING project key. */
       async status(projects) {

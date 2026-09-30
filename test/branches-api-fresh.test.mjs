@@ -90,3 +90,21 @@ test('without fresh the keys are exactly branches/current/runs', async () => {
   const w = await world();
   assert.deepEqual(Object.keys(await branches(w.a)), ['branches', 'current', 'runs']);
 });
+
+test('fresh=1 when the project registry cannot be read → 200 with local refs and remote:null (never a 500)', async () => {
+  const w = await world();
+  const prev = process.env.WORCA_HOME;
+  const { _resetForTests } = await import('../src/core/db.mjs');
+  const bad = join(root, `not-a-dir-${++n}`);
+  await writeFile(bad, 'x');                       // WORCA_HOME is a FILE: the DB cannot open
+  process.env.WORCA_HOME = bad; _resetForTests();
+  try {
+    const r = await fetch(`${base}/api/branches?projectDir=${encodeURIComponent(w.a)}&fresh=1`);
+    assert.equal(r.status, 200);
+    const j = await r.json();
+    assert.ok(j.branches.includes('dev'));
+    assert.equal(j.remote, null);
+  } finally {
+    process.env.WORCA_HOME = prev; _resetForTests();
+  }
+});

@@ -205,11 +205,18 @@ test('6. the pill opens the details dialog; Escape returns focus, the scrim clos
   assert.ok(dlg, 'the dialog is open');
   assert.match(dlg.textContent, /Incoming commits/);
   assert.equal(dlg.querySelectorAll('.sync-commits li').length, 1);
-  const hashBefore = ctx.window.location.hash;
-  ctx.doc.dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  // The page's own Escape handlers listen in the bubble phase: the dialog must swallow the key
+  // in the capture phase so none of them (e.g. a view that navigates back) ever sees it.
+  let pageSawEscape = 0;
+  const onPage = (e) => { if (e.key === 'Escape') pageSawEscape++; };
+  ctx.doc.addEventListener('keydown', onPage);
+  const focused = ctx.doc.activeElement;
+  assert.ok(dlg.contains(focused), 'focus moved into the dialog');
+  focused.dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  ctx.doc.removeEventListener('keydown', onPage);
   assert.equal($(ctx.doc, '.sync-modal'), null);
   assert.equal(ctx.doc.activeElement, pill);
-  assert.equal(ctx.window.location.hash, hashBefore, 'Escape did not also navigate');
+  assert.equal(pageSawEscape, 0, 'Escape closed the dialog only; it never reached the page');
   click(ctx.window, pill);
   const again = $(ctx.doc, '.sync-modal');
   click(ctx.window, again);
@@ -374,17 +381,64 @@ test('15c. Sync refused with a 4xx (a base the server will not sync) never paint
   assert.equal(pillText(ctx.doc), '3 behind');
 });
 
-test('15b. a base the server cannot sync (400) paints Unknown, not the previous branch\'s state', async () => {
-  const ctx = await boot({ syncGet: (q) => (q.get('base') === 'plus+branch' ? ok({ error: 'not a plain branch name' }, 400) : { sync: block(q.get('base') || 'dev') }) });
+test('15b. a base the server cannot sync paints Unknown without asking (no 400 in the console); Sync is disabled', async () => {
+  // As the server answers such a base (200, state 'unknown') — the UI does not even ask.
+  const ctx = await boot({ syncGet: (q) => (q.get('base') === 'plus+branch'
+    ? { sync: { base: 'plus+branch', remote: 'origin', state: 'unknown', reason: 'not-a-branch', settings: { beforeRun: true, onDiverged: 'ask' } } }
+    : { sync: block(q.get('base') || 'dev') }) });
   const sel = $(ctx.doc, '#sourceBranch');
   await waitFor(() => rowShown(ctx.doc) && pillText(ctx.doc) === '3 behind');
+  const gets = syncGets(ctx.calls).length;
   const opt = ctx.doc.createElement('option'); opt.value = 'plus+branch'; opt.textContent = 'plus+branch';
   sel.appendChild(opt); sel.value = 'plus+branch'; change(ctx.window, sel);
-  await waitFor(() => syncGets(ctx.calls).some((c) => c.url.includes('base=plus%2Bbranch')));
   await waitFor(() => pillText(ctx.doc) === 'Unknown');
   assert.equal(pillTone(ctx.doc), 'grey');
+  assert.equal(syncGets(ctx.calls).length, gets, 'no GET /api/sync for a base the server refuses');
+  assert.equal($(ctx.doc, '#sync-btn').disabled, true, 'a Sync would only be refused');
   sel.value = 'dev'; change(ctx.window, sel);
   await waitFor(() => pillText(ctx.doc) === '3 behind');
+  assert.equal($(ctx.doc, '#sync-btn').disabled, false);
+});
+
+test('15e. a 200 {state:"unknown"} answer paints Unknown with Sync disabled', async () => {
+  const ctx = await boot({ syncGet: (q) => (q.get('base') === 'release'
+    ? { sync: { base: 'release', remote: 'origin', state: 'unknown', reason: 'not-a-branch', settings: { beforeRun: true, onDiverged: 'ask' } } }
+    : { sync: block(q.get('base') || 'dev') }) });
+  const sel = $(ctx.doc, '#sourceBranch');
+  await waitFor(() => rowShown(ctx.doc) && pillText(ctx.doc) === '3 behind');
+  sel.value = 'release'; change(ctx.window, sel);
+  await waitFor(() => pillText(ctx.doc) === 'Unknown');
+  assert.equal($(ctx.doc, '#sync-btn').disabled, true);
+});
+
+test('15d. a 500 or a lost connection on another branch paints Unknown, never the previous branch\'s pill', async () => {
+  let mode = 'ok';
+  const ctx = await boot({ syncGet: (q) => {
+    if (q.get('base') === 'release' && mode === '500') return ok({ error: 'boom' }, 500);
+    if (q.get('base') === 'release' && mode === 'net') return Promise.reject(new TypeError('Failed to fetch'));
+    return { sync: block(q.get('base') || 'dev') };
+  } });
+  const sel = $(ctx.doc, '#sourceBranch');
+  await waitFor(() => rowShown(ctx.doc) && pillText(ctx.doc) === '3 behind');
+  for (const m of ['500', 'net']) {
+    mode = m;
+    sel.value = 'release'; change(ctx.window, sel);
+    await waitFor(() => pillText(ctx.doc) === 'Unknown');
+    mode = 'ok';
+    sel.value = 'dev'; change(ctx.window, sel);
+    await waitFor(() => pillText(ctx.doc) === '3 behind');
+  }
+  // The SAME base keeps its last good answer when a re-read fails.
+  mode = 'ok'; const n0 = syncGets(ctx.calls).length;
+  sel.value = 'release'; change(ctx.window, sel);
+  await waitFor(() => syncGets(ctx.calls).length > n0);
+  for (let i = 0; i < 5; i++) await tick();   // let release's answer land before the next read
+  assert.equal(pillText(ctx.doc), '3 behind');
+  mode = '500'; const n = syncGets(ctx.calls).length;
+  change(ctx.window, sel);
+  await waitFor(() => syncGets(ctx.calls).length > n);
+  await tick(); await tick();
+  assert.equal(pillText(ctx.doc), '3 behind');
 });
 
 test('16. a scheduled run posts syncBeforeStart / syncOnDiverged only for the controls set (host side, §6.6)', async () => {
@@ -459,4 +513,54 @@ test('18. workspace members get their own pills; the shared row shows the worst 
   const dlg = $(ctx.doc, '.sync-modal');
   assert.match(dlg.textContent, /api · main/, 'the worst member\'s dialog');
   click(ctx.window, dlg);
+});
+
+test('18b. untouched switch: each member pill follows its OWN beforeRun; touching the switch applies to all', async () => {
+  const ctx = await boot({
+    workspaces: WORKSPACES,
+    // web: behind with beforeRun:true (will sync → blue); api: behind with beforeRun:false (will not → amber).
+    fresh: (dir) => freshBody(dir, { sync: block(CACHED[dir].current, { state: 'behind', behind: 2,
+      settings: { beforeRun: dir !== '/a/api', onDiverged: 'ask' } }) }),
+  });
+  click(ctx.window, $(ctx.doc, '#target-seg button[data-target="workspace"]'));
+  await tick();
+  const wsel = $(ctx.doc, '#workspaceSelect');
+  await waitFor(() => optionValues(wsel).includes('wks-alpha-00000001'));
+  wsel.value = 'wks-alpha-00000001'; change(ctx.window, wsel);
+  await waitFor(() => ctx.doc.querySelectorAll('#ws-source-branches .sync-pill:not([hidden])').length === 2 && rowShown(ctx.doc));
+  const tones = () => [...ctx.doc.querySelectorAll('#ws-source-branches .ws-src-row .sync-pill')]
+    .map((p) => ['blue', 'amber', 'green', 'grey'].find((t) => p.classList.contains(t)));
+  assert.equal($(ctx.doc, '#syncAuto').checked, false, 'seeded off: not every member syncs');
+  assert.deepEqual(tones(), ['blue', 'amber'], 'web syncs by its own setting even though the shared switch reads off');
+  assert.equal(pillTone(ctx.doc), 'amber', 'a member that will not sync keeps the shared row amber');
+  const sw = $(ctx.doc, '#syncAuto');
+  sw.checked = true; change(ctx.window, sw);
+  assert.deepEqual(tones(), ['blue', 'blue'], 'a touched switch applies to every member');
+  assert.equal(pillTone(ctx.doc), 'blue');
+});
+
+test('18c. a member pick: Offline survives (server-reported stale); a failed read never keeps the old branch\'s pill', async () => {
+  let fail = false;
+  const ctx = await boot({
+    workspaces: WORKSPACES,
+    fresh: (dir) => freshBody(dir, { sync: block(CACHED[dir].current, { state: 'up-to-date', behind: 0 }) }),
+    syncGet: (q) => {
+      if (fail) return ok({ error: 'boom' }, 500);
+      return { sync: block(q.get('base'), { state: 'up-to-date', behind: 0, stale: true, fetchError: { kind: 'network' } }) };
+    },
+  });
+  click(ctx.window, $(ctx.doc, '#target-seg button[data-target="workspace"]'));
+  await tick();
+  const wsel = $(ctx.doc, '#workspaceSelect');
+  await waitFor(() => optionValues(wsel).includes('wks-alpha-00000001'));
+  wsel.value = 'wks-alpha-00000001'; change(ctx.window, wsel);
+  await waitFor(() => ctx.doc.querySelectorAll('#ws-source-branches .sync-pill:not([hidden])').length === 2);
+  const webSel = [...ctx.doc.querySelectorAll('#ws-source-branches select.ws-src-select')][0];
+  const webPill = () => webSel.closest('.ws-src-row').querySelector('.sync-pill .sync-pill-txt').textContent;
+  assert.equal(webPill(), 'Up to date');
+  webSel.value = 'release'; change(ctx.window, webSel);
+  await waitFor(() => webPill() === 'Offline');
+  fail = true;
+  webSel.value = 'dev'; change(ctx.window, webSel);
+  await waitFor(() => webPill() === 'Unknown');
 });

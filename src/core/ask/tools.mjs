@@ -1322,13 +1322,19 @@ export function createAskTools(deps) {
       // both fit, and say so. Rows are sorted newest-first, so the oldest go first. The row cap is
       // re-applied here because the per-member split rounds up (ceil(200 / 3) × 3 = 201). The byte
       // cap measures the WHOLE result (member wrappers included), the same JSON the model receives.
+      // The size is tracked per popped row (one stringify per row, not of the whole result per row);
+      // the outer loop re-measures exactly, so the estimate can never let an over-cap result out.
       const fit = (lists) => {
-        const rows = () => lists.reduce((n, x) => n + (x.branches || []).length, 0);
-        const size = () => Buffer.byteLength(JSON.stringify(lists), 'utf8');
-        while (rows() > opts.limit || size() > maxBytes) {
-          const longest = lists.reduce((a, b) => ((b.branches || []).length > (a.branches || []).length ? b : a));
-          if (!longest.branches || !longest.branches.length) break;
-          longest.branches.pop(); longest.truncated = true;
+        let rows = lists.reduce((n, x) => n + (x.branches || []).length, 0);
+        for (;;) {
+          let size = Buffer.byteLength(JSON.stringify(lists), 'utf8');
+          if (rows <= opts.limit && size <= maxBytes) return;
+          while (rows > opts.limit || size > maxBytes) {
+            const longest = lists.reduce((a, b) => ((b.branches || []).length > (a.branches || []).length ? b : a));
+            if (!longest.branches || !longest.branches.length) return;
+            size -= Buffer.byteLength(JSON.stringify(longest.branches.pop()), 'utf8') + 1;   // the row + its comma
+            longest.truncated = true; rows -= 1;
+          }
         }
       };
       if (scope.workspaceId) {

@@ -170,7 +170,7 @@ import { paintAboutInto } from './about-links.mjs';
 import { renderReasonOptions, renderOptIns, previewText, reportBlobParts, REPORT_PREVIEW_DEBOUNCE_MS } from './report-run.mjs';
 import { openScheduleSheet, closeScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
 import {
-  freshSyncState, syncPillModel, projectChipModel, worstChip, ffRefusalCopy, syncStageLabel, ago as syncAgo,
+  freshSyncState, syncPillModel, projectChipModel, worstChip, ffRefusalCopy, syncStageLabel, fetchedAgo, isSyncableBranchName,
   mountSyncRow, paintSyncRow, openSyncDialog, chooseSyncRefusal,
 } from './branch-sync.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
@@ -6673,22 +6673,24 @@ async function refreshSyncStatusQuiet() {
   const projectDir = selectedProjectPath();
   if (!base || !projectDir || state.runTarget === 'workspace' || syncHasRemote === false) return;
   const gen = ++state.sync.gen;
+  // Never keep ANOTHER branch's state: a base the server will not sync (e.g. "plus+branch"), a 400,
+  // a 500 or a lost connection paints Unknown. The same base keeps its last answer on a failed read.
+  const unknown = () => {
+    const prev = state.sync.block;
+    if (prev && prev.base === base && prev.state !== 'unknown') return;
+    state.sync.block = { base, remote: (prev && prev.remote) || 'origin', state: 'unknown', settings: prev && prev.settings };
+    paintSyncRowNow();
+  };
+  if (!isSyncableBranchName(base)) { unknown(); return; }   // no request: it would only log a 400
   try {
     const res = await fetch(`/api/sync?projectDir=${encodeURIComponent(projectDir)}&base=${encodeURIComponent(base)}&details=1`);
     const data = await safeJson(res);
     if (gen !== state.sync.gen) return;
-    // 400: a base the server will not sync (e.g. "plus+branch"). Never keep the last branch's state.
-    if (res.status === 400) {
-      const prev = state.sync.block;
-      state.sync.block = { base, remote: (prev && prev.remote) || 'origin', state: 'unknown', settings: prev && prev.settings };
-      paintSyncRowNow();
-      return;
-    }
-    if (!(data && data.sync)) return;
+    if (!res.ok || !(data && data.sync)) { unknown(); return; }
     // A status read reports the server's standing fetch failure itself (stale), so Offline survives it.
     state.sync.block = data.sync;
     paintSyncRowNow();
-  } catch { /* the pill keeps its last state */ }
+  } catch { if (gen === state.sync.gen) unknown(); }
 }
 
 /** Sync button and the dialog's Sync (project mode). Returns the block the dialog repaints with. */
@@ -6737,11 +6739,17 @@ function wsMemberName(key) {
 function wsMemberSelect(key) {
   return el.wsSourceBranches ? [...el.wsSourceBranches.querySelectorAll('select.ws-src-select')].find((s) => s.dataset.projectKey === key) || null : null;
 }
+/** Will this member sync before the run? The touched switch for every member, else its own beforeRun. */
+function memberAutoSync(key) {
+  if (state.sync.autoSync !== null) return state.sync.autoSync;
+  const b = state.sync.members[key];
+  return !(b && b.settings && b.settings.beforeRun === false);
+}
 function paintMemberPill(key) {
   const sel = wsMemberSelect(key);
   const pill = sel && sel.closest('.ws-src-row') ? sel.closest('.ws-src-row').querySelector('.sync-pill') : null;
   if (!pill) return;
-  const model = syncPillModel(state.sync.members[key], { autoSync: el.syncAuto.checked });
+  const model = syncPillModel(state.sync.members[key], { autoSync: memberAutoSync(key) });
   pill.hidden = !!model.hidden;
   if (model.hidden) return;
   pill.className = `sync-pill ${model.tone}`;
@@ -6761,8 +6769,9 @@ function paintWorkspaceSyncRow() {
   const w = worstChip(Object.values(state.sync.members));
   el.syncRow.hidden = !w;
   if (!w) return;
-  // Auto-sync off turns a blue "behind" amber, as syncPillModel does.
-  const tone = w.state === 'behind' && !el.syncAuto.checked ? 'amber' : w.tone;
+  // Auto-sync off turns a blue "behind" amber, as syncPillModel does — per member while the switch is untouched.
+  const behindOff = Object.keys(state.sync.members).some((k) => worstChip([state.sync.members[k]])?.state === 'behind' && !memberAutoSync(k));
+  const tone = w.state === 'behind' && behindOff ? 'amber' : w.tone;
   const text = w.text.charAt(0).toUpperCase() + w.text.slice(1);
   el.syncPill.className = `sync-pill ${tone}`;
   el.syncPill.querySelector('.sync-pill-txt').textContent = text;
@@ -6781,7 +6790,8 @@ async function syncMember(key) {
   try {
     const res = await fetch('/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: ws.projectPaths[i], base, mode: 'ff' }) });
     const data = await safeJson(res);
-    if (!res.ok || !data || !data.sync) return cur ? { ...cur, stale: true, fetchError: { kind: 'failed' } } : cur;
+    // A 4xx is a refusal (e.g. a base the server will not sync), not a failed fetch.
+    if (!res.ok || !data || !data.sync) return cur && !(res.status >= 400 && res.status < 500) ? { ...cur, stale: true, fetchError: { kind: 'failed' } } : cur;
     if (sel.isConnected) { state.sync.members[key] = data.sync; paintMemberPill(key); paintWorkspaceSyncRow(); }
     return data.sync;
   } catch { return cur; }
@@ -6790,7 +6800,7 @@ function openMemberSyncDialog(key, opener) {
   const b = state.sync.members[key];
   if (!b) return;
   void openSyncDialog({ title: 'Sync status', subtitle: `${wsMemberName(key)} · ${b.base || ''}`, sync: b,
-    autoSync: el.syncAuto.checked, opener, onSync: () => syncMember(key) });
+    autoSync: memberAutoSync(key), opener, onSync: () => syncMember(key) });
 }
 /** Shared Sync in workspace mode: one POST for every member, with each member's picked base. */
 async function syncWorkspaceNow() {
@@ -7267,15 +7277,26 @@ function renderWorkspaceSourceBranches() {
       sel.addEventListener('change', async () => {
         // A new pick: re-read that member's status (no network) when it has a remote.
         const v = sel.value;
-        if (!state.sync.members[key] || !v || v === PREVIOUS_BRANCH) return;
+        const prev = state.sync.members[key];
+        if (!prev || !v || v === PREVIOUS_BRANCH) return;
+        // As refreshSyncStatusQuiet: never keep ANOTHER branch's state after a refused or failed read.
+        const unknown = () => {
+          if (!sel.isConnected || sel.value !== v || (prev.base === v && prev.state !== 'unknown')) return;
+          state.sync.members[key] = { base: v, remote: prev.remote || 'origin', state: 'unknown', settings: prev.settings };
+          paintMemberPill(key);
+          paintWorkspaceSyncRow();
+        };
+        if (!isSyncableBranchName(v)) { unknown(); return; }
         try {
           const res = await fetch(`/api/sync?projectDir=${encodeURIComponent(p)}&base=${encodeURIComponent(v)}&details=1`);
           const data = await safeJson(res);
-          if (!sel.isConnected || sel.value !== v || !(data && data.sync)) return;
+          if (!sel.isConnected || sel.value !== v) return;
+          if (!res.ok || !(data && data.sync)) { unknown(); return; }
+          // The status read carries the server's standing fetch failure (stale), so Offline survives a pick.
           state.sync.members[key] = data.sync.remote ? data.sync : null;
           paintMemberPill(key);
           paintWorkspaceSyncRow();
-        } catch { /* keep the last pill */ }
+        } catch { unknown(); }
       });
       populateBranchSelect(sel, p); // async; defaults to HEAD per the clarification
     }
@@ -9879,7 +9900,7 @@ function syncChipNodes(key, block, label = '') {
   pill.append(dot, txt);
   const when = document.createElement('span');
   when.className = 'sync-when';
-  when.textContent = `fetched ${syncAgo(block.fetchedAt)}`;
+  when.textContent = `fetched ${fetchedAgo(block)}`;
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'btn btn-mini';
@@ -11593,7 +11614,14 @@ function syncPreviousBranchOption(select) {
   }
 }
 function syncPreviousBranchEverywhere() {
+  const before = el.sourceBranch ? el.sourceBranch.value : '';
   syncPreviousBranchOption(el.sourceBranch);
+  // The value moved without a change event: repaint the Sync row (hidden for "the run before it",
+  // which also keeps a touched Auto-sync switch out of the POST), or re-read HEAD's branch.
+  if (el.sourceBranch && el.sourceBranch.value !== before && state.runTarget !== 'workspace') {
+    if (el.sourceBranch.value === PREVIOUS_BRANCH || (state.sync.block && state.sync.block.base === effectiveBase())) paintSyncRowNow();
+    else void refreshSyncStatusQuiet();
+  }
   const wsPick = !!(pendingSchedule && pendingSchedule.after) && state.runTarget === 'workspace';
   if (el.wsSourcePreviousRow) el.wsSourcePreviousRow.classList.toggle('hidden', !wsPick);
   // ON by default with a pick in workspace mode; a deliberate OFF (the click handler marks it) survives
@@ -15167,11 +15195,14 @@ async function resumeRunFromCard(runId, btn, { ignoreCostCap = false, pastTeamCa
       const again = await policyRefusalRetry(data, res.status);
       if (again) { if (btn) { btn.disabled = false; btn.innerHTML = prevBtnHtml; } return resumeRunFromCard(runId, btn, { ignoreCostCap, pastTeamCap: true, policyReason: again.reason, baseAck }); }
       // #527: the base moved (or vanished) since this run started — confirm, then resend every option.
-      if (await baseMovedConfirm(data, res.status)) {
-        if (btn) { btn.disabled = false; btn.innerHTML = prevBtnHtml; }
-        return resumeRunFromCard(runId, btn, { ignoreCostCap, pastTeamCap, policyReason, baseAck: true });
+      // The button reads "Resume" again (still disabled) while the question is open: nothing is resuming yet.
+      if (isBaseRefusal(data, res.status)) {
+        if (btn) btn.innerHTML = prevBtnHtml;
+        const go = await baseMovedConfirm(data, res.status);
+        if (btn) btn.disabled = false;
+        if (go) return resumeRunFromCard(runId, btn, { ignoreCostCap, pastTeamCap, policyReason, baseAck: true });
+        return;
       }
-      if (isBaseRefusal(data, res.status)) { if (btn) { btn.disabled = false; btn.innerHTML = prevBtnHtml; } return; }
       throw new Error((data && data.error) || `HTTP ${res.status}`);
     }
     upsertRun({
@@ -18182,7 +18213,9 @@ async function loadShipItRemotes(modal, record, gen, isClosed) {
     const paintBaseWarn = () => {
       if (!baseWarn) return;
       const n = bs && Number(bs.movedSinceRun);
-      const on = !!(bs && n > 0 && bs.base && shipItChosenBase(modal, record) === bs.base);
+      // Measured on bs.remote: a PR into another remote's copy of the same branch name says nothing.
+      const sameRemote = box.hidden || !baseSel.value || baseSel.value === (bs && bs.remote ? bs.remote : 'origin');
+      const on = !!(bs && n > 0 && bs.base && sameRemote && shipItChosenBase(modal, record) === bs.base);
       baseWarn.hidden = !on;
       baseWarn.textContent = on ? `${bs.remote || 'origin'}/${bs.base} has ${n} new commit${n === 1 ? '' : 's'} since this run started. The PR may need an update.` : '';
     };
@@ -18756,11 +18789,14 @@ async function resumePipeline(p, projectDir, btn, { ignoreCostCap = false, pastT
         return resumePipeline(p, projectDir, btn, { ignoreCostCap, pastTeamCap: true, policyReason: again.reason, baseAck });
       }
       // #527: the base moved (or vanished) since this run started — confirm, then resend every option.
-      if (await baseMovedConfirm(data, res.status)) {
-        btn.disabled = false; labelEl.textContent = label; delete btn.dataset.resumeState;
-        return resumePipeline(p, projectDir, btn, { ignoreCostCap, pastTeamCap, policyReason, baseAck: true });
+      // The label reads "Resume" again (still disabled, still claimed) while the question is open.
+      if (isBaseRefusal(data, res.status)) {
+        labelEl.textContent = label;
+        const go = await baseMovedConfirm(data, res.status);
+        btn.disabled = false; delete btn.dataset.resumeState;
+        if (go) return resumePipeline(p, projectDir, btn, { ignoreCostCap, pastTeamCap, policyReason, baseAck: true });
+        return;
       }
-      if (isBaseRefusal(data, res.status)) { btn.disabled = false; labelEl.textContent = label; delete btn.dataset.resumeState; return; }
       throw new Error((data && data.error) || `HTTP ${res.status}`);
     }
     upsertRun({

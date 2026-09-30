@@ -7,8 +7,9 @@ import assert from 'node:assert/strict';
 import {
   ago, syncPillModel, chipState, projectChipModel, worstChip, sourceRefNote,
   fetchFailureCopy, ffRefusalCopy, syncStageLabel, freshSyncState, cssEscape,
-  mountSyncRow, paintSyncRow,
+  mountSyncRow, paintSyncRow, isSyncableBranchName, fetchedAgo,
 } from '../ui/public/branch-sync.mjs';
+import { isSafeBranchName } from '../src/core/git-sync.mjs';
 
 const block = (over = {}) => ({
   base: 'dev', remote: 'origin', state: 'up-to-date', ahead: 0, behind: 0,
@@ -312,11 +313,36 @@ test('style.css: §6.3 block before the 6193 reduced-motion line, explicit [hidd
   const block = css.indexOf('/* Sync before run (#527) */');
   assert.ok(block > css.indexOf('.confirm-modal .card{width:min(440px,100%);}'), 'after .confirm-modal .card');
   assert.ok(block < css.indexOf('@media (prefers-reduced-motion: reduce){.mode-modal .card'), 'before the 6193 block');
-  assert.match(css, /\.sync-row\[hidden\],\.sync-pill\[hidden\],\.sync-note\[hidden\],\.rd-sync\[hidden\],#shipit-base-warn\[hidden\],\.proj-sync\[hidden\],\.ws-sync\[hidden\]\{display:none;\}/);
+  assert.match(css, /\.sync-row\[hidden\],\.sync-pill\[hidden\],\.sync-note\[hidden\],\.sync-commits\[hidden\],\.sync-go\[hidden\],\.rd-sync\[hidden\],#shipit-base-warn\[hidden\],\.proj-sync\[hidden\],\.ws-sync\[hidden\]\{display:none;\}/);
   assert.match(css, /\.sync-pill\.blue\{background:var\(--blue-bg\);color:var\(--blue-ink-strong\);\}/);
   assert.match(css, /\.field-grid-2\.branch-pair\{/);
   assert.match(css, /\.ws-src-row \.sync-pill\{align-self:flex-start;\}/);
   const last = css.lastIndexOf('@media (prefers-reduced-motion: reduce)');
   assert.ok(css.slice(last).includes('.sync-btn.busy svg{animation:none;}'), 'the override lives in the final block');
   assert.ok(css.indexOf('.sync-btn.busy svg{animation:ws-spin') < last);
+});
+
+test('isSyncableBranchName is the twin of git-sync isSafeBranchName (the UI skips the 400)', () => {
+  const names = ['dev', 'main', 'feat/x', 'release/1.0', 'a.b-c_d', 'plus+branch', 'with space', '', '-x', '/x', 'x/', 'x.',
+    'x.lock', 'a/b.lock/c', 'a..b', 'a//b', '.hidden', 'a/.b', 'a'.repeat(256), 'a'.repeat(255), '0123456789abcdef0123456789abcdef01234567',
+    'ümlaut', 'x~1', 'x^', 'x:y', 'x?', 'x*', 'x[', 'x\\y', null, undefined, 7];
+  for (const n of names) assert.equal(isSyncableBranchName(n), isSafeBranchName(n), JSON.stringify(n));
+});
+
+test('paintSyncRow: an Unknown pill disables Sync (the server would refuse it)', async () => {
+  const { JSDOM } = await import('jsdom');
+  const { window } = new JSDOM('<div id="r"><button class="sync-pill"><span class="sync-pill-txt"></span></button><button class="sync-btn"></button><input type="checkbox"></div>');
+  const host = window.document.getElementById('r');
+  paintSyncRow(host, block({ state: 'unknown' }));
+  assert.equal(host.querySelector('.sync-btn').disabled, true);
+  paintSyncRow(host, block({ state: 'behind', behind: 1 }));
+  assert.equal(host.querySelector('.sync-btn').disabled, false);
+});
+
+test('fetchedAgo: "never" only when nothing failed; a failed fetch with no time says so', () => {
+  const now = Date.parse('2026-09-30T12:00:00Z');
+  assert.equal(fetchedAgo({ fetchedAt: '2026-09-30T11:57:00Z' }, now), '3 min ago');
+  assert.equal(fetchedAgo({ fetchedAt: null }, now), 'never');
+  assert.equal(fetchedAgo({ fetchedAt: null, stale: true, fetchError: { kind: 'network' } }, now), 'unknown (the last fetch failed)');
+  assert.equal(fetchedAgo({ fetchedAt: '2026-09-30T11:57:00Z', stale: true }, now), '3 min ago', 'a known time always wins');
 });

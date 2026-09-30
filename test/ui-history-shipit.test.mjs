@@ -1106,6 +1106,22 @@ test('baseStatus.movedSinceRun > 0 on the chosen base shows the warning; a base 
   assert.equal(warn.hidden, true, 'another base: the warning no longer applies');
 });
 
+test('the base warning is about baseStatus.remote: a PR into another remote\'s same-named branch hides it (#527)', async () => {
+  const ctx = await bootShip({ remotes: { ...FORK_REMOTES, baseStatus: { base: 'feat/log-ux', remote: 'origin', movedSinceRun: 2, fetchedAt: null, stale: false } } });
+  const modal = await openModal(ctx);
+  const warn = modal.querySelector('#shipit-base-warn');
+  const remoteSel = modal.querySelector('.shipit-base-remote');
+  assert.equal(remoteSel.value, 'upstream');
+  assert.equal(baseSelOf(modal).value, 'feat/log-ux');
+  assert.equal(warn.hidden, true, 'upstream/feat/log-ux is not the branch that moved');
+  remoteSel.value = 'origin';
+  remoteSel.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
+  baseSelOf(modal).value = 'feat/log-ux';
+  baseSelOf(modal).dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
+  assert.equal(warn.hidden, false);
+  assert.match(warn.textContent, /^origin\/feat\/log-ux has 2 new commits/);
+});
+
 test('baseStatus.movedSinceRun null keeps the warning hidden', async () => {
   const ctx = await bootShip({ remotes: { ...REMOTES, baseStatus: { base: 'feat/log-ux', remote: 'origin', movedSinceRun: null, fetchedAt: null, stale: false } } });
   const modal = await openModal(ctx);

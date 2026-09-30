@@ -36,10 +36,14 @@ export async function chipBase(dir) {
 export async function projectSyncBlock({ dir, projectKey = null, base = null, mode = 'status', details = false,
   maxAgeMs = INTERACTIVE_TTL_MS, timeoutMs = INTERACTIVE_TIMEOUT_MS } = {}) {
   const settings = effectiveSyncSettings(projectKey);
-  const b = base && isSafeBranchName(base) ? base : await chipBase(dir);
+  // An explicit base that is not syncable (a tag, a SHA, 'plus+branch') describes THAT ref as
+  // unknown; it is never swapped for HEAD's branch, which would report another branch's state.
+  const explicit = base != null && base !== '';
+  const b = explicit ? (isSafeBranchName(base) ? base : null) : await chipBase(dir);
   const info = await remoteInfo(dir, settings.remote);
   const pub = { beforeRun: settings.beforeRun, onDiverged: settings.onDiverged };
-  if (!info.ok) return { base: b, remote: null, state: 'unknown', settings: pub };
+  if (!info.ok) return { base: explicit ? base : b, remote: null, state: 'unknown', settings: pub };
+  if (explicit && !b) return { base, remote: info.name, remoteLabel: info.label, state: 'unknown', settings: pub };
   if (!b) return { base: null, remote: info.name, remoteLabel: info.label, state: 'unknown', settings: pub };
   const r = await syncRepo(dir, { base: b, remote: info.name, mode, maxAgeMs, timeoutMs });
   const block = {

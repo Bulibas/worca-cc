@@ -95,7 +95,15 @@ test('GET /api/sync reads status with no network; POST ff moves dev; an unregist
 
   const other = await world({ register: false });
   assert.equal((await J('POST', '/api/sync', { projectDir: other.a, mode: 'ff' })).status, 404);
-  assert.equal((await fetch(`${base}/api/sync?projectDir=${encodeURIComponent(w.a)}&base=${encodeURIComponent('-x')}`)).status, 400);
+  // A base sync never touches: 200 'unknown' for THAT base (no failed request in the browser), no git with it.
+  for (const bad of ['-x', 'plus+branch']) {
+    const u = await fetch(`${base}/api/sync?projectDir=${encodeURIComponent(w.a)}&base=${encodeURIComponent(bad)}`);
+    assert.equal(u.status, 200);
+    const b = (await u.json()).sync;
+    assert.deepEqual([b.base, b.remote, b.state, b.reason], [bad, 'origin', 'unknown', 'not-a-branch']);
+    assert.equal(typeof b.settings.beforeRun, 'boolean');
+  }
+  assert.equal((await J('POST', '/api/sync', { projectDir: w.a, base: 'plus+branch' })).status, 400, 'a write still refuses it');
 });
 
 test('POST /api/sync never takes a remote or URL from the request', async () => {
@@ -207,7 +215,7 @@ test('POST /api/run with syncBeforeStart:false on a diverged base → not 409 (a
   if (j.runId) await J('POST', '/api/stop', { runId: j.runId });
 });
 
-test('POST /api/run with a failing fetch → 409 sync-fetch-failed; the retry within the TTL does not fetch again', async () => {
+test('POST /api/run with a failing fetch → 409 sync-fetch-failed; a retry fetches again (a Start is explicit)', async () => {
   const w = await world();
   const fetches = [];
   gitSync.setRunner((args, opts) => {
@@ -228,7 +236,34 @@ test('POST /api/run with a failing fetch → 409 sync-fetch-failed; the retry wi
   assert.equal(r.status, 409);
   j = await r.json();
   assert.equal(j.fetchKind, 'auth');
-  assert.equal(fetches.length, 1, 'negative cache: no second git fetch');
+  assert.equal(fetches.length, 2, 'no negative cache at Start: a remote that came back is seen at once');
+  gitSync.reset();                                 // the remote is back: the next Start is not asked
+  r = await J('POST', '/api/run', { projectDir: w.a, prompt: 'x', mock: true });
+  assert.notEqual(r.status, 409);
+  j = await r.json();
+  if (j.runId) await J('POST', '/api/stop', { runId: j.runId });
+});
+
+test('POST /api/run: a push that diverges the base inside the 45 s cache is still caught at Start', async () => {
+  const w = await world();
+  g(w.a, 'fetch', '-q', 'origin');                 // a fresh FETCH_HEAD: well inside the TTL
+  await w.push('t.txt', 'teammate');
+  await w.localCommit('l.txt', 'mine');
+  const r = await J('POST', '/api/run', { projectDir: w.a, prompt: 'x', mock: true });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).code, 'sync-diverged');
+});
+
+test('POST /api/run from a tag while offline → no sync-fetch-failed 409 (the harness never syncs a tag)', async () => {
+  const w = await world();
+  g(w.a, 'tag', 'v1.0');
+  gitSync.setRunner((args, opts) => (args[0] === 'fetch'
+    ? Promise.resolve({ ok: false, stdout: '', stderr: 'fatal: unable to access: Could not resolve host', code: 128 })
+    : gitSync.defaultRun(args, opts)));
+  const r = await J('POST', '/api/run', { projectDir: w.a, prompt: 'x', mock: true, sourceBranch: 'v1.0' });
+  assert.notEqual(r.status, 409);
+  const j = await r.json();
+  if (j.runId) await J('POST', '/api/stop', { runId: j.runId });
 });
 
 test('POST /api/run: a remote-only sourceBranch is accepted (schedule → 202); a nowhere branch → 400', async () => {

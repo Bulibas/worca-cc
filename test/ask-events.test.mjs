@@ -175,6 +175,7 @@ test('tool lifecycle: labels, running → done/error blocks, durations, input cl
 
 test('labelForTool table', () => {
   assert.equal(labelForTool('mcp__worca__list_runs', {}), 'Finding runs');
+  assert.equal(labelForTool('mcp__worca__list_branches', { projectKey: 'web-00000001' }), 'Looking at branches');
   assert.equal(labelForTool('mcp__worca__get_run', { id: 'abcdefghijklmnop' }), 'Reading run abcdefghijkl');
   assert.equal(labelForTool('mcp__worca__get_run', {}), 'Reading run');
   assert.equal(labelForTool('mcp__worca__list_workflows', {}), 'Looking at workflows');

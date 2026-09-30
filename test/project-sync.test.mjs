@@ -259,3 +259,12 @@ test('startProjectSyncBackground: WORCA_SYNC_BACKGROUND=0 disables it', async ()
     if (prev === undefined) delete process.env.WORCA_SYNC_BACKGROUND; else process.env.WORCA_SYNC_BACKGROUND = prev;
   }
 });
+
+test('projectSyncBlock: an unsyncable explicit base reads unknown for THAT name, never HEAD\'s branch', async () => {
+  const { a, push } = await world();
+  await push('g.txt', 'two'); await fetchRemote(a);
+  const b = await projectSyncBlock({ dir: a, base: 'plus+branch' });
+  assert.equal(b.base, 'plus+branch'); assert.equal(b.state, 'unknown'); assert.equal(b.remote, 'origin');
+  assert.equal(b.behind, undefined, 'dev\'s "1 behind" must not be reported for plus+branch');
+  assert.equal((await projectSyncBlock({ dir: a })).state, 'behind', 'no base → HEAD\'s branch, as before');
+});

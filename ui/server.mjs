@@ -197,7 +197,7 @@ import {
   listLocalBranches, currentBranch, isValidSourceRef, sweepRunRoots, sweepLegacyWorktreesAll, resolveDefaultBranch,
 } from '../src/core/worktree.mjs';
 import {
-  fetchRemote, syncStatus, resolveSourceRef, commitsBetween, isSafeBranchName, isSafeRemoteName, scrubGitText,
+  fetchRemote, remoteInfo, syncStatus, resolveSourceRef, commitsBetween, isSafeBranchName, isSafeRemoteName, scrubGitText,
   INTERACTIVE_TTL_MS, INTERACTIVE_TIMEOUT_MS, RUN_TIMEOUT_MS,
 } from '../src/core/git-sync.mjs';
 import {
@@ -1392,18 +1392,23 @@ export function runSyncOpts(members, { allowed, before, policy, scheduled, onDiv
 }
 
 /**
- * Before an interactive start: fetch (45 s TTL, 8 s bound, negative-cached) and read each
- * synced member's base. Returns null (start) or { status: 409, body } asking the person once
- * (plan §0.2 C9, D14). A member whose policy already resolves to 'origin' is never asked.
+ * Before an interactive start: fetch (no TTL, 8 s bound) and read each synced member's base.
+ * Returns null (start) or { status: 409, body } asking the person once (plan §0.2 C9, D14).
+ * A member whose policy already resolves to 'origin' is never asked. No TTL: a Start is an
+ * explicit action, so a push that landed inside the 45 s cache (a diverged base the run's own
+ * Sync stage would then fail on) or a remote that came back since a failed fetch is seen now.
  */
 export async function syncPrecheck(members, sync) {
   const rows = await mapWithCap(members, fanoutCap(), async (m) => {
     const cfg = sync.members[m.projectKey];
     if (!cfg || !cfg.enabled || !isSafeBranchName(m.source)) return null;
-    const f = await fetchRemote(m.projectDir, { remote: cfg.remote, maxAgeMs: INTERACTIVE_TTL_MS, timeoutMs: INTERACTIVE_TIMEOUT_MS });
+    const f = await fetchRemote(m.projectDir, { remote: cfg.remote, maxAgeMs: 0, timeoutMs: INTERACTIVE_TIMEOUT_MS });
     if (!f.ok && (f.kind === 'no-remote' || f.kind === 'bad-remote')) return null;
     const st = await syncStatus(m.projectDir, { base: m.source, remote: cfg.remote });
-    return st.ok ? { m, f, st, cfg, setting: effectiveSyncSettings(m.projectKey).onDiverged } : null;
+    // Neither a local nor a remote branch (a tag or a SHA): the harness has no branch to sync, so
+    // an offline start from it must not be asked about a failed fetch (D9).
+    if (!st.ok || (!st.hasLocal && !st.hasRemote)) return null;
+    return { m, f, st, cfg, setting: effectiveSyncSettings(m.projectKey).onDiverged };
   });
   const hit = rows.filter(Boolean);
   const view = (r) => ({ projectKey: r.m.projectKey, projectName: r.m.projectName || path.basename(r.m.projectDir), base: r.m.source,
@@ -3075,11 +3080,14 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
   }
 
   // Double-resume guard: any live entry already driving this pipeline id.
-  for (const e of runs.values()) {
-    if (e.pipelineId === pipelineId && !['done', 'stopped', 'error', 'paused', 'interrupted'].includes(String(e.status || ''))) {
-      throw new ResumeError(400, { error: 'pipeline is already live' });
+  const assertNotLive = () => {
+    for (const e of runs.values()) {
+      if (e.pipelineId === pipelineId && !['done', 'stopped', 'error', 'paused', 'interrupted'].includes(String(e.status || ''))) {
+        throw new ResumeError(400, { error: 'pipeline is already live' });
+      }
     }
-  }
+  };
+  assertNotLive();
 
   // Worktree(s) must still exist (single-project; workspace members are checked
   // inside orchestrator.resume(), which fails fast with the same message).
@@ -3121,6 +3129,8 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
         error: first.exists ? `${first.base} moved ${first.movedBy} commit(s) on ${first.remote} since this run started`
                             : `${first.base} no longer exists locally or on ${first.remote}` });
     }
+    // The check can wait on a fetch (up to 8 s): a second Resume may have gone live meanwhile.
+    assertNotLive();
   }
   // Deferred override write: only reached once the base check passed.
   if (ignoreCostCap === true && deferOverride) {
@@ -4019,13 +4029,21 @@ app.post('/api/policy/discover', async (_req, res) => {
 });
 
 // ── Sync before run (#527) ───────────────────────────────────────────────────
+/** A status read for a base sync never touches (e.g. "plus+branch"): 200 with state 'unknown', so
+ *  the pill reads Unknown for THAT base and the browser logs no failed request. No git runs with it. */
+async function unsyncableBlock(dir, projectKey, base) {
+  const s = effectiveSyncSettings(projectKey);
+  const info = await remoteInfo(dir, s.remote);
+  return { base, remote: info.ok ? info.name : null, ...(info.ok ? { remoteLabel: info.label } : {}),
+    state: 'unknown', reason: 'not-a-branch', settings: { beforeRun: s.beforeRun, onDiverged: s.onDiverged } };
+}
 // Status (no network) or an action for ONE project, by path — the New-pipeline form (plan D8).
 app.get('/api/sync', syncRoute(async (req, res) => {
   const dir = resolveProjectDir(req.query.projectDir);
   if (!dir) return badRequest(res, 'projectDir is required');
   const p = await registeredProjectForDir(dir);
   const base = typeof req.query.base === 'string' && req.query.base ? req.query.base : null;
-  if (base && !isSafeBranchName(base)) return badRequest(res, 'base is not a branch name');
+  if (base && !isSafeBranchName(base)) return res.json({ sync: await unsyncableBlock(dir, p ? p.key : null, base) });
   res.json({ sync: await projectSyncBlock({ dir, projectKey: p ? p.key : null, base, mode: 'status', details: req.query.details === '1' }) });
 }));
 app.post('/api/sync', syncRoute(async (req, res) => {
@@ -4040,7 +4058,7 @@ app.post('/api/sync', syncRoute(async (req, res) => {
 app.get('/api/projects/:key/sync', syncRoute(async (req, res) => {
   const p = await tmProject(req, res); if (!p) return;
   const base = typeof req.query.base === 'string' && req.query.base ? req.query.base : null;
-  if (base && !isSafeBranchName(base)) return badRequest(res, 'base is not a branch name');
+  if (base && !isSafeBranchName(base)) return res.json({ sync: await unsyncableBlock(p.path, p.key, base) });
   res.json({ sync: await projectSyncBlock({ dir: p.path, projectKey: p.key, base, mode: 'status', details: req.query.details === '1' }) });
 }));
 app.post('/api/projects/:key/sync', syncRoute(async (req, res) => {
@@ -4086,8 +4104,9 @@ app.post('/api/sync/all', syncRoute(async (req, res) => {
   if (!mode) return badRequest(res, 'mode must be "fetch" or "ff"');
   const ps = (await listProjects()).filter((p) => p.exists);
   const blocks = await mapWithCap(ps, fanoutCap(), (p) => projectSyncBlock({ dir: p.path, projectKey: p.key, mode, maxAgeMs: 0, timeoutMs: RUN_TIMEOUT_MS }));
-  ps.forEach((p) => projectSyncEvents.emit('changed', { projectKey: p.key }));
   res.json({ projects: Object.fromEntries(ps.map((p, i) => [p.key, blocks[i]])) });
+  // After the answer, as syncProjectAction.
+  ps.forEach((p) => projectSyncEvents.emit('changed', { projectKey: p.key }));
 }));
 app.get('/api/workspaces/:id/sync', syncRoute(async (req, res) => {
   if (!WORKSPACE_KEY_RE.test(req.params.id)) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
@@ -4095,6 +4114,9 @@ app.get('/api/workspaces/:id/sync', syncRoute(async (req, res) => {
   if (!members) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
   res.json({ members });
 }));
+// Unlike the per-project routes (registered projects only), this fetches every member whether or
+// not it is a registered project: a workspace run's Sync stage fetches the same members anyway,
+// so an explicit Sync here reaches no folder the workspace does not already sync.
 app.post('/api/workspaces/:id/sync', syncRoute(async (req, res) => {
   if (!WORKSPACE_KEY_RE.test(req.params.id)) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
   const body = req.body || {};
@@ -4104,8 +4126,8 @@ app.post('/api/workspaces/:id/sync', syncRoute(async (req, res) => {
   for (const v of Object.values(bases)) if (!isSafeBranchName(v)) return badRequest(res, 'bases must name branches');
   const members = await workspaceSyncBlocks(req.params.id, { mode, bases });
   if (!members) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
-  members.forEach((m) => projectSyncEvents.emit('changed', { projectKey: m.projectKey }));
   res.json({ members });
+  members.forEach((m) => projectSyncEvents.emit('changed', { projectKey: m.projectKey }));
 }));
 
 app.get('/api/projects/:key/policy', async (req, res) => {
@@ -4863,7 +4885,11 @@ app.get('/api/branches', async (req, res) => {
     if (req.query.fresh === '1' || req.query.fresh === 'true') {
       // D8: only a REGISTERED project is fetched (a credentialed network call). Any other folder
       // answers from its local refs, exactly as the non-fresh list does.
-      const reg = await registeredProjectForDir(projectDir);
+      // A registry read error degrades to "not registered" (local refs, remote:null), never a 500.
+      const reg = await registeredProjectForDir(projectDir).catch((err) => {
+        console.error(`[worca-ui] branches: project registry read failed: ${err && err.message ? err.message : err}`);
+        return null;
+      });
       const key = reg ? reg.key : null;
       const settings = effectiveSyncSettings(key);
       const f = reg

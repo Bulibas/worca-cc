@@ -170,3 +170,19 @@ test('a cancellable base check defers the cost-cap override write until it passe
     await fetch(`${base}/api/settings`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pipelineCostLimitUsd: '' }) });
   }
 });
+
+test('a resume that goes live while the base check fetches: the second resume is refused as already live', async () => {
+  const w = await world();
+  const start = w.sha('dev');
+  const { id } = await paused(w.a, { source: 'dev', feature: 'worca/f7', baseSha: start, sync: { remote: 'origin', remoteSha: start } });
+  gitSync.setRunner((args, opts) => {
+    // Another Resume wins the race while this one waits on its fetch.
+    if (args[0] === 'fetch') runs.set('racer', { id: 'racer', pipelineId: id, status: 'running', events: [] });
+    return gitSync.defaultRun(args, opts);
+  });
+  try {
+    const r = await resume({ pipelineId: id, baseCheck: true });
+    assert.equal(r.status, 400);
+    assert.match((await r.json()).error, /already live/);
+  } finally { runs.clear(); }
+});

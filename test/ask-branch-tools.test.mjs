@@ -312,6 +312,71 @@ test('defaultBranchDeps: a workspace with one deleted member lists the others', 
   assert.equal(await defaultBranchDeps().branches.listWorkspace('wks-none-0000abcd', { limit: 10 }), null);
 });
 
+test('defaultBranchDeps: the workspace fan-out has one deadline — later members are read from the last fetch, marked stale', async () => {
+  const { addProject } = await import('../src/core/projects.mjs');
+  const { createWorkspace } = await import('../src/core/workspaces.mjs');
+  const { defaultBranchDeps } = await import('../src/core/ask/branch-deps.mjs');
+  const { _testing } = await import('../src/core/git-sync.mjs');
+  const dirs = [repoPair().clone, repoPair().clone, repoPair().clone];
+  for (const [i, d] of dirs.entries()) await addProject({ name: `abt-dl-${i}`, path: d });
+  const ws = await createWorkspace({ name: 'abt-dl', projectPaths: dirs });
+  const fetched = [];
+  _testing.setRunner(async (args, o) => {
+    if (args[0] !== 'fetch') return _testing.defaultRun(args, o);
+    fetched.push(o.cwd);
+    await new Promise((r) => setTimeout(r, 150));   // an unreachable remote, slower than the deadline
+    return { ok: false, stdout: '', stderr: 'fatal: unable to access: Could not resolve host: github.com', code: 128, timedOut: false };
+  });
+  const prevCap = process.env.WORCA_FANOUT_CAP;
+  process.env.WORCA_FANOUT_CAP = '1';                // one member at a time: the deadline is reached after the first
+  try {
+    const out = await defaultBranchDeps({ workspaceMs: 100 }).branches.listWorkspace(ws.id, { fresh: true, limit: 30 });
+    assert.equal(fetched.length, 1, `only the first member fetched: ${fetched.join(', ')}`);
+    assert.equal(out[0].fetchError.kind, 'network');
+    for (const m of out.slice(1)) {
+      assert.equal(m.ok, true);
+      assert.ok(m.branches.length >= 1, 'still listed from local refs');
+      assert.equal(m.stale, true);
+      assert.equal(m.fetchError.kind, 'timeout');
+    }
+  } finally {
+    _testing.reset();
+    if (prevCap === undefined) delete process.env.WORCA_FANOUT_CAP; else process.env.WORCA_FANOUT_CAP = prevCap;
+  }
+});
+
+test('defaultBranchDeps: an unused member row share goes to a truncated member', async () => {
+  const { addProject } = await import('../src/core/projects.mjs');
+  const { createWorkspace } = await import('../src/core/workspaces.mjs');
+  const { defaultBranchDeps } = await import('../src/core/ask/branch-deps.mjs');
+  const few = repoPair().clone;                      // main + local-only (feat/remote was pushed after the clone; no fetch) → 2 names
+  const many = repoPair().clone;
+  for (let i = 0; i < 7; i++) git(many, ['branch', `extra-${i}`]);   // 9 names
+  await addProject({ name: 'abt-rd-few', path: few });
+  await addProject({ name: 'abt-rd-many', path: many });
+  const ws = await createWorkspace({ name: 'abt-rd', projectPaths: [few, many] });
+  const out = await defaultBranchDeps().branches.listWorkspace(ws.id, { fresh: false, limit: 10 });   // 5 each at first
+  const by = Object.fromEntries(out.map((m) => [ws.projectPaths[ws.projectKeys.indexOf(m.projectKey)], m]));
+  assert.equal(by[few].branches.length, 2);
+  assert.equal(by[few].truncated, false);
+  assert.equal(by[many].branches.length, 8, 'its own 5 plus the 3 the other member left');
+  assert.equal(by[many].truncated, true);
+});
+
+test('propose_run singleton: bound to the real resolver — a remote-only source is annotated, a nowhere source names the remote', async () => {
+  const { addProject } = await import('../src/core/projects.mjs');
+  const { validateProposal } = await import('../src/core/ask/proposal.mjs');
+  const { clone } = repoPair();                      // feat/remote was pushed after the clone: only a fetch finds it
+  const p = (await addProject({ name: 'abt-prop', path: clone })).find((x) => x.name === 'abt-prop');
+  const r = await validateProposal({ projectKey: p.key, brief: 'x', sourceBranch: 'feat/remote' });
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.equal(r.card.sourceBranch, 'feat/remote');
+  assert.deepEqual(r.card.sourceRef, { ref: 'origin/feat/remote', remoteOnly: true, behind: 0 });
+  const bad = await validateProposal({ projectKey: p.key, brief: 'x', sourceBranch: 'nowhere' });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.errors.some((e) => /exists neither locally nor on origin/.test(e)), bad.errors.join('; '));
+});
+
 test('defaultBranchDeps: a no-credential auth failure gets the child note; a rejected credential passes through', async () => {
   const { addProject } = await import('../src/core/projects.mjs');
   const { defaultBranchDeps } = await import('../src/core/ask/branch-deps.mjs');

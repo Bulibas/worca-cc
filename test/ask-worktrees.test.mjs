@@ -314,6 +314,16 @@ test('#527 open_worktree: origin/<name> pushed since the last fetch is fetched a
   await removeThreadWorktrees(t.id);
 });
 
+test('#527 open_worktree: <remote>/<name> in a project with no remote is a plain "does not resolve" (no fetch note)', async () => {
+  const { clone } = await clonedRepo();
+  spawnSync('git', ['remote', 'remove', 'origin'], { cwd: clone });
+  const p = (await addProject({ name: 'awt-noremote', path: clone })).find((x) => x.name === 'awt-noremote');
+  const t = createThread();
+  await assert.rejects(() => openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'origin/feat' }),
+    (err) => /ref does not resolve: "origin\/feat"$/.test(err.message));
+  await removeThreadWorktrees(t.id);
+});
+
 test('#527 open_worktree: a failed fetch still opens a previously fetched remote-only branch, stale', async () => {
   const { clone } = await clonedRepo(['feat/old']);     // origin/feat/old came with the clone
   const p = (await addProject({ name: 'awt-stale', path: clone })).find((x) => x.name === 'awt-stale');

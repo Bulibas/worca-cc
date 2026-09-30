@@ -146,8 +146,9 @@ export async function openAskWorktree({ threadId, projectKey, ref, runId, signal
       // <remote>/<name> for a branch pushed since the last fetch: resolveSourceRef would look up
       // refs/remotes/<remote>/<remote>/<name>, so fetch and re-check the ref as given.
       const f = await fetchRemote(t.projectDir, { remote, maxAgeMs: INTERACTIVE_TTL_MS });
+      const unfetched = !f.ok && f.kind !== 'no-remote' && f.kind !== 'bad-remote';   // no remote: nothing to retry
       if (!(await isValidSourceRef(t.projectDir, t.ref))) {
-        throw new AskWorktreeError(`ref does not resolve: ${JSON.stringify(t.ref)}${f.ok ? '' : STALE_NOTE}`);
+        throw new AskWorktreeError(`ref does not resolve: ${JSON.stringify(t.ref)}${unfetched ? STALE_NOTE : ''}`);
       }
     } else {
       const r = !t.runId ? await resolveSourceRef(t.projectDir, t.ref, { remote }) : { ok: false };
