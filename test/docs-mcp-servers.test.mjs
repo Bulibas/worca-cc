@@ -15,7 +15,7 @@ test('docs/mcp-servers.md covers every §17 topic', () => {
     ['copy names and renames', /`sentry_billing`[\s\S]*`<copy>_w`/], ['surfaces', /\*\*Pipelines:\*\*[\s\S]*\*\*Ask Worca:\*\*/],
     ['per-chat picker', /MCP · N/], ['per-run opt-out', /switch memberships off for one run/], ['OAuth refresh', /refreshed by hand/],
     ['$env MCP_ rule', /MCP_\[A-Z0-9_\]\{1,60\}/], ['keep-list', /HOME LOGNAME PATH\s+SHELL TERM USER TMPDIR LANG/],
-    ['limits and start costs', /12 copies per Ask message and 24 per pipeline agent[\s\S]*75 s/],
+    ['limits and start costs', /12 copies per Ask message and 24 per pipeline agent[\s\S]*each given 60 s to start;\s+pipelines start them on every agent spawn with 2 minutes each, and \*\*Test\*\* waits 2 minutes too/],
     ['worktrees bring sets (D17)', /open a worktree on any registered project/], ['what can still read secrets', /## What can still read a secret/],
   ]) assert.match(DOC, re, topic);
 });

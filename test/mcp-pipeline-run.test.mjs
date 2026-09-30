@@ -361,3 +361,19 @@ test('§10: a run.json write still queued on the MCP chain when the run ends lan
   await orch._mcpTail;
   assert.equal(existsSync(orch.runRoot), false, 'the removed run root is never recreated');
 });
+
+test('pipelines give registry servers 2 minutes to start: every dispatch with the config gets MCP_TIMEOUT 120000; worca\'s own wins', async () => {
+  const { dir } = await fixture();
+  const seen = [];
+  await withEnv({ MCP_TIMEOUT: undefined }, async () => {   // a worca spawn may set it
+    const orch = createOrchestrator({ projectDir: dir, prompt: 'x', auto: true, claude: { mock: true }, runners: runners(seen) });
+    assert.equal((await orch.run()).status, 'done');
+  });
+  const withConfig = seen.filter((r) => r.file);
+  assert.ok(withConfig.length >= 2, 'several dispatches carried the config');
+  for (const { ctx } of withConfig) assert.equal(runOpts(ctx, RO).spawnEnv.MCP_TIMEOUT, '120000');
+  await withEnv({ MCP_TIMEOUT: '300000' }, async () => {
+    const { result } = await createOrchestrator({ projectDir: dir, claude: { mock: true } })._resolveMcp([]);
+    assert.equal(result.env.MCP_TIMEOUT, '300000');
+  });
+});

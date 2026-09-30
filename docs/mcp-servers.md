@@ -27,6 +27,36 @@ in **Settings › MCP servers** (an Advanced tab) and in four files under `~/.wo
 - Deleting a set removes its values, secrets and test results; the confirm lists the projects that
   used it and flags those left with no servers. A deleted set's id is never reused.
 
+## Bundled servers
+
+The built-in marketplace ships these servers as plugins. Install one in **Settings › Plugins**
+(**Available**), then add its server to a set (**Sets › Add server**) and fill in its fields.
+Worca runs no OAuth flow, so each server takes a token or uses a CLI you are logged in to. Each
+plugin's `README.md` says where to get its credentials.
+
+| Plugin | Server | Runs | Fields |
+|---|---|---|---|
+| `cloudflare-mcp` | `cloudflare` | `https://mcp.cloudflare.com/mcp` | **Cloudflare API token** (required) |
+| | `cloudflare-docs` | `https://docs.mcp.cloudflare.com/mcp` | none |
+| `atlassian-mcp` | `atlassian` | `https://mcp.atlassian.com/v2/mcp` | **Base64 of email:API token** (required) |
+| `firebase-mcp` | `firebase` | `npx -y firebase-tools@latest mcp` | **Project directory**, **Feature groups**, **Service account key file** (all optional) |
+| `railway-mcp` | `railway` | `railway mcp local` (Railway CLI ≥ 5.44.0) | **Railway account token** (optional) |
+| `notion-mcp` | `notion` | `npx -y @notionhq/notion-mcp-server` | **Notion integration secret** (required) |
+
+- Pipeline agents call these servers' tools without asking. Give each token only the permissions
+  your agents need; a broad token lets an agent delete what the token can reach.
+- A server you also have in Claude Code (your `~/.claude.json` or a Claude Code plugin) loads twice
+  in pipeline agents; turn one off.
+- `firebase` and `railway` fall back to your own `firebase login` / `railway login` when their
+  key or token is blank. Under agent isolation the server runs as the agent user, who has neither:
+  fill in the key file or token.
+- `firebase` and `notion` run through `npx`, which keeps one copy of each package per OS user,
+  shared by every project. A new `firebase-tools` release is installed on the next start; that
+  normally fits the startup limits in **Limits and costs** below, and
+  `plugins/firebase-mcp/README.md` shows what to do on a slow connection.
+- Notion's and Railway's hosted servers accept OAuth sign-in only, so `notion-mcp` and
+  `railway-mcp` run the local servers. Notion no longer actively maintains its open-source server.
+
 ## Adding a server by hand
 
 **Add MCP server** asks for a name (`a-z`, digits and `-`, starting with a letter, up to 20
@@ -57,7 +87,8 @@ and its state: `18 tools · tested 3d ago`, `stale` (something changed since the
 - Secrets show as set, with their age; **Replace** swaps one. Worca never shows a stored secret.
 - An **OAuth** token (from a provider's OAuth flow; worca runs none) is refreshed by hand: paste the
   new token with Replace. After 30 days its age turns amber.
-- **Test** starts the server exactly as a run would, lists its tools (20 s at most) and stops it and
+- **Test** starts the server exactly as a run would, lists its tools (2 minutes at most — a first
+  `npx` download fits, and warms the cache for runs) and stops it and
   everything it started. Saving a complete membership, applying a plugin update in Settings ›
   Plugins and editing a manual definition run Test in the background for the memberships that are
   on (a switched-off one starts nothing), and so does a Team Install / Turn on / Update. An http/sse
@@ -111,12 +142,17 @@ taken too it is skipped). In a pipeline, a deny rule on `mcp__linear__…` reach
 - Tool names are `mcp__<copy>__<tool>`, at most 128 characters (64 for models behind the bridge);
   a longer tool is withheld and its server still starts. Under the 64 limit a copy with no current
   Test result is skipped.
-- Every Ask message starts its stdio servers afresh, three at a time, each bounded by a 15 s
-  `MCP_TIMEOUT` (your own `MCP_TIMEOUT` wins when it is 1000 ms or more): the worst case is about 75 s before the
-  first answer (measured: 12.5 s for five slow servers). Pipelines start them on every agent spawn
-  at Claude Code's default 30 s timeout —
-  up to about 4 minutes in the worst case. A change of servers between messages costs one
-  prompt-cache miss.
+- Every Ask message starts its stdio servers afresh, three at a time, each given 60 s to start;
+  pipelines start them on every agent spawn with 2 minutes each, and **Test** waits 2 minutes too.
+  That fits a first `npx` download of a large package (firebase-tools: 33.5 s measured). Your own
+  `MCP_TIMEOUT` in worca's environment (whole milliseconds, 1000 or more) replaces all three. A
+  server that hangs holds its slot for the whole limit: if every server hangs, about 5 minutes
+  before Ask's first answer and up to about 16 minutes per pipeline agent (normally: 12.5 s
+  measured for five slow servers). A change of servers between messages costs one prompt-cache miss.
+  In a pipeline agent the limit also covers your own Claude Code servers, which load in the same
+  spawn. Through Cloudflare ([remote-access.md](remote-access.md)), which ends a request after
+  100 s, a longer Test shows `HTTP 524`; worca still finishes it, and reopening **Settings › MCP
+  servers** shows the result.
 
 ## What can still read a secret
 

@@ -93,6 +93,7 @@ import { WORKSPACE_SCAN_WORKFLOW_ID, MEMORY_DEFRAG_WORKFLOW_ID } from './graph/b
 import { agentIdentity } from './agent-user.mjs';
 import { resolveRegistry, requiredOf, toolNameLimitFor, skipReasonText } from './mcp/registry.mjs';
 import { loadCatalog } from './mcp/catalog.mjs';
+import { MCP_STARTUP_MS } from './mcp/timeouts.mjs';
 import { keepListNames } from './mcp/keep-list.mjs';
 import { expandMcpDenyRules } from './mcp/deny.mjs';
 import { createRedactor } from './redact.mjs';
@@ -2233,6 +2234,7 @@ export class RunHarness extends EventEmitter {
         surface: 'pipeline', targets: [target],
         teams: { [this.isWorkspace ? `ws:${this.workspace.id}` : m.projectKey]: required.length ? { home: this.policyRun.home, required } : null },
         optOut: this.mcpOptOut, toolNameLimit: toolNameLimitFor([...this._mcpModels()]), copyCap: 24, taken,
+        mcpTimeoutMs: MCP_STARTUP_MS.pipeline,
       }),
       loadCatalog(),
     ]);

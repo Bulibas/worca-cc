@@ -1,7 +1,7 @@
 // src/core/mcp/test.mjs
 // Test (spec §7.3): start one membership exactly as a spawn would (P3 materializeCopy: launcher,
 // keep-list env, MCPCHILD_* declared env; agentSpawn under isolation), run initialize + tools/list
-// through the MCP SDK with a 20 s bound, kill the whole process tree, and store the result. The
+// through the MCP SDK with a 2-minute bound (timeouts.mjs), kill the whole process tree, and store the result. The
 // connect runs outside the store lock; recordTest re-reads under it and writes only this entry.
 import { spawn, spawnSync } from 'node:child_process';
 import { McpStoreError, recordTest } from './store.mjs';
@@ -13,8 +13,9 @@ import { createRedactor } from '../redact.mjs';
 import { agentSpawn, killAgentGroup } from '../agent-user.mjs';
 import { agentIdentityFor } from '../agent-pool.mjs';
 import { currentOwner } from '../billing.mjs';
+import { MCP_STARTUP_MS, mcpStartupMs } from './timeouts.mjs';
 
-export const TEST_TIMEOUT_MS = 20000;
+export const TEST_TIMEOUT_MS = MCP_STARTUP_MS.test;
 const MAX_TOOLS = 10000;   // a tools/list that pages past this fails the Test (a cursor that never ends fills the heap)
 const REF_RE = /\$\{(MCPSECRET_[0-9A-F]{8})\}/g;
 const own = (o, k) => !!o && Object.hasOwn(o, k);
@@ -137,12 +138,15 @@ export async function probe(entry, { platform = process.platform, env = process.
   }
   let timer;
   try {
+    // The SDK ends each request after 60 s of its own (DEFAULT_REQUEST_TIMEOUT_MSEC) unless told otherwise:
+    // hand it the whole bound, so the race below is the only limit.
+    const request = { timeout: timeoutMs };
     const work = (async () => {
-      await client.connect(transport);
+      await client.connect(transport, request);
       const names = [];
       let cursor;
       do {
-        const page = await client.listTools(cursor ? { cursor } : undefined);
+        const page = await client.listTools(cursor ? { cursor } : undefined, request);
         names.push(...page.tools.map((x) => x.name));
         if (names.length > MAX_TOOLS) throw new Error(`tools/list returned more than ${MAX_TOOLS} tools`);
         cursor = page.nextCursor;
@@ -188,7 +192,7 @@ async function runTest(setId, serverId, probeImpl) {
   const at = new Date().toISOString();
   let result;
   try {
-    const tools = await probeImpl(expand(m.entry, m.env), { agent, redact: redactor.text });
+    const tools = await probeImpl(expand(m.entry, m.env), { agent, redact: redactor.text, timeoutMs: mcpStartupMs('test') });
     result = { at, ok: true, tools, error: null, fingerprint: m.fingerprint };
   } catch (err) {
     result = { at, ok: false, tools: [], error: err.rejected ? 'token rejected' : redactor.text(err.message), fingerprint: m.fingerprint };

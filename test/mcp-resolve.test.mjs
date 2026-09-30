@@ -354,7 +354,7 @@ test('tool names: untested only under the 64 limit; an over-long tool is withhel
   assert.deepEqual(run(128, good).disallowedTools, [], `${full.length} chars fit 128`);
 });
 
-test('MCP_TIMEOUT: Ask with ≥1 copy gets 15000 unless worca\'s own is an integer ≥1000; none without copies or in pipelines', () => {
+test('MCP_TIMEOUT: Ask with ≥1 copy gets 15000 unless worca\'s own is an integer ≥1000; none without copies or without a surface default', () => {
   const store = { catalog: [PW], sets: GENERAL(mem('manual:pw')) };
   const t = (o) => resolve({ surface: 'ask', store, mcpTimeoutMs: 15000, ...o }).env.MCP_TIMEOUT;
   assert.equal(t({}), '15000');

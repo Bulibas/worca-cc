@@ -59,7 +59,7 @@ const RESULT = () => ({
   sets: [{ id: 'general', name: 'General', group: 'general', routes: [], members: 1, started: 1 }],
 });
 
-test('resolveAskMcp: surface ask, cap 12, no taken names, the chat\'s choices, teams from the cache per target (ws:<id> for a workspace), MCP_TIMEOUT 15000', async () => {
+test('resolveAskMcp: surface ask, cap 12, no taken names, the chat\'s choices, teams from the cache per target (ws:<id> for a workspace), MCP_TIMEOUT 60000', async () => {
   const calls = []; const teamCalls = [];
   const deps = { ...readers([wt('docs-00000003')]),   // docs is no member of the workspace: its own target and Team set
     cachedTeamFor: (target) => { teamCalls.push(target); return target.projectKey === 'docs-00000003' ? { home: 'acme/platform', required: [{ name: 'github' }] } : null; },
@@ -74,7 +74,7 @@ test('resolveAskMcp: surface ask, cap 12, no taken names, the chat\'s choices, t
   assert.deepEqual(o.taken, []);
   assert.deepEqual(o.off, off);
   assert.equal(o.toolNameLimit, 128);
-  assert.equal(o.mcpTimeoutMs, 15000);
+  assert.equal(o.mcpTimeoutMs, 60000);
   assert.deepEqual(o.targets, targets);
   assert.deepEqual(teamCalls, [{ workspaceId: WS.id }, { projectKey: 'docs-00000003' }]);
   assert.deepEqual({ ...o.teams }, { [`ws:${WS.id}`]: null, 'docs-00000003': { home: 'acme/platform', required: [{ name: 'github' }] } });

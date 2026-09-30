@@ -87,7 +87,7 @@ A repo can declare itself a **marketplace** with `worca-cc-marketplace.json` at 
 Listed dirs (any depth, no `..`) each contain a `worca-cc-plugin.json`; when the file is
 present it is the complete plugin list (the depth 0–1 auto-scan is skipped). Repos without
 it still work as implicit marketplaces via the scan. The worca-cc repo itself is a
-marketplace (its 5 bundled plugins live under `plugins/`), registered by default.
+marketplace (its bundled plugins live under `plugins/`), registered by default.
 
 ## UI is schema-driven — pick from these widgets
 

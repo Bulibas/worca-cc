@@ -1,5 +1,5 @@
 // test/mcp-test.test.mjs — Test (spec §7.3): a fixture stdio server through the launcher, a fixture
-// HTTP server (header expansion, 401 ⇒ "token rejected"), redaction, the 20 s timeout and the tree
+// HTTP server (header expansion, 401 ⇒ "token rejected"), redaction, the 2-minute timeout and the tree
 // kill, agent isolation, refusals, background re-tests, the SDK pin.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { withEnv } from './helpers/with-env.mjs';
 import { testMembership, retestInBackground, probe, killProbe, materializeForTest, TEST_TIMEOUT_MS } from '../src/core/mcp/test.mjs';
 import { createSet, addManualServer, putMember as storePut, readMcpStore, mcpDir } from '../src/core/mcp/store.mjs';
 import { getSetView } from '../src/core/mcp/views.mjs';
@@ -104,8 +105,8 @@ test('error text is redacted before it is returned or stored', async () => {
   assert.equal(readFileSync(join(mcpDir(), 'tests.json'), 'utf8').includes(SECRET), false);
 });
 
-test('a hanging server is killed with its whole tree when the timeout fires; the timeout is 20 s', async () => {
-  assert.equal(TEST_TIMEOUT_MS, 20000);
+test('a hanging server is killed with its whole tree when the timeout fires; the timeout is 2 minutes', async () => {
+  assert.equal(TEST_TIMEOUT_MS, 120000);
   const pidFile = join(scratch, 'pids');
   await assert.rejects(probe({ command: process.execPath, args: [FIXTURE, 'hang', pidFile], env: {} }, { timeoutMs: 1500 }), /no answer within/);
   const [pid, gc] = readFileSync(pidFile, 'utf8').split(' ').map(Number);
@@ -373,4 +374,28 @@ test('sse: tools listed over the SSE transport; a 401 on its stream reads "token
     await assert.rejects(probe({ type: 'sse', url, headers: { Authorization: 'Bearer wrong-token-123' } }, { timeoutMs: 2000 }),
       (err) => err.rejected === true && err.message === 'token rejected');
   } finally { srv.closeAllConnections(); await new Promise((r) => srv.close(r)); }
+});
+
+test('Test gives the server as long to start as a pipeline would (2 minutes); worca\'s own MCP_TIMEOUT wins', async () => {
+  const seen = [];
+  const probeImpl = async (_entry, opts) => { seen.push(opts.timeoutMs); return ['t']; };
+  await withEnv({ MCP_TIMEOUT: undefined }, async () => {   // a worca spawn may set it
+    assert.equal((await testMembership(setId, 'manual:fx-ok', { probeImpl })).ok, true);
+  });
+  await withEnv({ MCP_TIMEOUT: '200000' }, () => testMembership(setId, 'manual:fx-ok', { probeImpl }));
+  assert.deepEqual(seen, [120000, 200000]);
+});
+
+test('the probe hands the SDK its whole bound: initialize and tools/list get timeoutMs, not the SDK\'s own 60 s', async () => {
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { connect, listTools } = Client.prototype;
+  const seen = [];
+  Client.prototype.connect = function (transport, options) { seen.push(['initialize', options?.timeout]); return connect.call(this, transport, options); };
+  Client.prototype.listTools = function (params, options) { seen.push(['tools/list', options?.timeout]); return listTools.call(this, params, options); };
+  try {
+    assert.deepEqual(await probe({ command: process.execPath, args: [FIXTURE, 'ok'], env: {} }, { timeoutMs: 90000 }), ['search_issues', 'get_issue']);
+  } finally {
+    Object.assign(Client.prototype, { connect, listTools });
+  }
+  assert.deepEqual(seen, [['initialize', 90000], ['tools/list', 90000]]);
 });

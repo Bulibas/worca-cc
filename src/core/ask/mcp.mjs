@@ -9,9 +9,9 @@ import { listAskWorktrees } from './worktrees.mjs';
 import { resolveRegistry, cachedTeamFor, toolNameLimitFor, skipReasonText } from '../mcp/registry.mjs';
 import { readMcpStore } from '../mcp/store.mjs';
 import { loadCatalog } from '../mcp/catalog.mjs';
+import { MCP_STARTUP_MS } from '../mcp/timeouts.mjs';
 
 export const ASK_MCP_COPY_CAP = 12;
-const ASK_MCP_TIMEOUT_MS = 15000;   // §5.6; the resolver lets worca's own MCP_TIMEOUT win
 const DEFAULT_DEPS = { listProjects, readWorkspace, listWorktrees: listAskWorktrees, resolveRegistry, cachedTeamFor, readMcpStore, loadCatalog };
 const EMPTY_RESULT = () => ({ servers: {}, env: {}, secretValues: [], grants: [], disallowedTools: [], copies: [], skipped: [], skippedTools: [], sets: [] });
 
@@ -86,7 +86,7 @@ export async function resolveAskMcp({ ctx = {}, threadId = null, off = null, mod
     }
     const result = await d.resolveRegistry({
       surface: 'ask', targets, teams, off: off || { sets: [], members: [] },
-      toolNameLimit: toolNameLimitFor(model ? [model] : []), copyCap: ASK_MCP_COPY_CAP, taken: [], mcpTimeoutMs: ASK_MCP_TIMEOUT_MS,
+      toolNameLimit: toolNameLimitFor(model ? [model] : []), copyCap: ASK_MCP_COPY_CAP, taken: [], mcpTimeoutMs: MCP_STARTUP_MS.ask,
     });
     return { targets, result };
   } catch (err) {
