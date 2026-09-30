@@ -80,7 +80,7 @@ export function previewText(payload) {
  * why `reportPending()` still runs synchronously in the input handler (D24).
  * Exporting it lets the UI tests wait on this number instead of a copy of it.
  */
-export const REPORT_PREVIEW_DEBOUNCE_MS = 3000;
+export const REPORT_PREVIEW_DEBOUNCE_MS = 1000;
 
 /** Blob parts for Download JSON — pretty JSON with a trailing newline. */
 export function reportBlobParts(payload) {

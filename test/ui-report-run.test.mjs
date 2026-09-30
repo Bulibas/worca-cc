@@ -435,8 +435,8 @@ test('typing an expectation invalidates the issue link BEFORE the debounce fires
     'the reviewer looped forever', 'and the rebuild carried the typed text');
 });
 
-test('typing does not rebuild the preview until the reporter has been quiet for 3s', async () => {
-  assert.equal(REPORT_PREVIEW_DEBOUNCE_MS, 3000, 'the delay the reporter asked for');
+test('typing does not rebuild the preview until the reporter has been quiet for 1s', async () => {
+  assert.equal(REPORT_PREVIEW_DEBOUNCE_MS, 1000, 'the delay the reporter asked for');
   const ctx = await boot({ fetchHandler: arms() });
   await openHistoryReport(ctx);
   const before = reportPosts(ctx).length;
@@ -473,7 +473,7 @@ test('a control change inside the wait supersedes the queued rebuild instead of 
   box.value = 'the diff swallowed my change';
   box.dispatchEvent(new ctx.window.Event('input', { bubbles: true }));
 
-  // Inside the 3s window: switching the reason rebuilds at once, as it always has.
+  // Inside the 1s window: switching the reason rebuilds at once, as it always has.
   const reason = ctx.window.document.getElementById('report-reason');
   reason.value = reason.options[1].value;
   reason.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
