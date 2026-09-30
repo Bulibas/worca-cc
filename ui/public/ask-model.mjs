@@ -64,11 +64,10 @@ export function createThreadModel({ threadId }) {
     dirty.structure = true;
   }
 
-  // The thread's attachment ledger (attachmentsBytes → the composer's budget
-  // pre-check) is seeded by the snapshot; without this it would never learn of
-  // an upload made in this session, and the composer would let a whole over-
-  // budget base64 POST through to the server's 413. Keyed by the store id, so a
-  // row seen through both the broadcast and the local echo counts once.
+  // The thread's attachment ledger (attachments() → the run card's @-popover)
+  // is seeded by the snapshot; without this it would never learn of an upload
+  // made in this session. Keyed by the store id, so a row seen through both the
+  // broadcast and the local echo counts once.
   function noteAttachmentBlocks(blocks) {
     for (const b of Array.isArray(blocks) ? blocks : []) {
       if (!b || b.kind !== 'attachment' || typeof b.id !== 'string') continue;
@@ -310,7 +309,6 @@ export function createThreadModel({ threadId }) {
       worktrees = Array.isArray(list) ? list.slice() : [];
       dirty.worktrees = true;
     },
-    attachmentsBytes() { return attachments.reduce((n, a) => n + (a && Number.isFinite(a.bytes) ? a.bytes : 0), 0); },
     attachments() { return attachments.map((a) => ({ ...a })); },   // the run card's @-popover + pills
     findCard(cardId) {
       for (const r of rows) {

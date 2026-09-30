@@ -423,7 +423,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   }
 
   // Mirrors src/core/ask/attachment-kind.mjs + limits.mjs (#398): text kinds are
-  // UTF-8 capped at 512 KB, binary kinds (images + PDF) at 5 MB; the server
+  // UTF-8 capped at 512 KB, binary kinds (images + PDF) at 32 MB, 48 MB per message; the server
   // re-validates everything, these are just early clear messages.
   const ASK_ATTACH_EXT = ['.md', '.markdown', '.txt', '.json', '.csv', '.log', '.html', '.htm'];
   const ASK_ATTACH_BINARY = {
@@ -431,8 +431,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     '.gif': 'image/gif', '.webp': 'image/webp', '.pdf': 'application/pdf',
   };
   const ASK_MAX_TEXT_BYTES = 524_288;
-  const ASK_MAX_BINARY_BYTES = 5 * 1024 * 1024;
-  const ASK_MAX_THREAD_BYTES = 25 * 1024 * 1024;
+  const ASK_MAX_BINARY_BYTES = 32 * 1024 * 1024;
+  const ASK_MAX_MESSAGE_BYTES = 48 * 1024 * 1024;
 
   function bytesToBase64(bytes) {
     let bin = '';
@@ -483,9 +483,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       if (f.size > cap) { setComposerMsg(`attachment over ${cap} bytes: ${name}`); continue; }
       const others = st.pendingFiles.filter((p) => p.name !== name); // dedupe by name, newest wins
       if (others.length >= 8) { setComposerMsg('at most 8 attachments per message'); continue; }
-      const serverBytes = st.model ? st.model.attachmentsBytes() : 0;
       const pendingBytes = others.reduce((n, p) => n + p.bytes, 0);
-      if (serverBytes + pendingBytes + f.size > ASK_MAX_THREAD_BYTES) { setComposerMsg('attachment budget for this thread exceeded'); continue; }
+      if (pendingBytes + f.size > ASK_MAX_MESSAGE_BYTES) { setComposerMsg(`attachments over ${ASK_MAX_MESSAGE_BYTES} bytes per message`); continue; }
       let dataBase64 = '';
       try {
         dataBase64 = bytesToBase64(new Uint8Array(await f.arrayBuffer()));
