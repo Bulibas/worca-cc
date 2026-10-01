@@ -4,24 +4,49 @@ name: CI
 # the only workflow (release-npm-app.yml) triggers on `push: tags` — so `npm test`
 # gated a publish, never a merge. Tags are left to that workflow; this one gates
 # every branch push and every pull request.
+#
+# Docs-only changes skip CI, except the two docs paths a test reads:
+# test/deck-kit-sync (docs/why-worca/) and test/ui-levels (docs/ui-levels.md).
+# Later patterns win, so those are re-included after the docs exclusion.
+# Safe while no status check is required on dev: a skipped workflow would
+# otherwise leave a required check pending forever.
 on:
   push:
     branches: ["**"]
+    paths:
+      - "**"
+      - "!docs/**"
+      - "docs/why-worca/**"
+      - "docs/ui-levels.md"
   pull_request:
+    paths:
+      - "**"
+      - "!docs/**"
+      - "docs/why-worca/**"
+      - "docs/ui-levels.md"
 
 permissions:
   contents: read
 
-# A branch push and its open PR both fire: keep only the newest run per ref.
+# A branch push and its open PR both fire. github.ref differs between them
+# (refs/heads/x vs refs/pull/N/merge), so group on the branch name instead —
+# head_ref on pull_request, ref_name on push — plus the head repo, so a fork's
+# same-named branch can't cancel ours. The later of the pair cancels the first.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
   test:
-    name: npm test
+    # node --test --test-shard splits test/*.mjs deterministically by file;
+    # each shard has its own runner, WORCA_HOME and real-claude guard log.
+    name: npm test (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v6
 
@@ -44,6 +69,8 @@ jobs:
       # retries the rmdir itself (maxRetries, like test/helpers/temp-home.mjs).
       # A failure here is real on the first attempt.
       - name: Run tests
+        env:
+          WORCA_TEST_SHARD: ${{ matrix.shard }}/4
         run: npm test
 
   cdp:
@@ -88,9 +115,10 @@ jobs:
   # run the offline mock smoke inside it (tools/docker-smoke.mjs), and scan
   # the OS layer. No real `claude`, no token, no spend. amd64 + slim only on
   # PRs; the -full variant and arm64 are exercised by the release workflow.
+  # Runs alongside the tests rather than after them: it uses nothing they
+  # produce, and gating it only added its ~1.5 min to every run's wall time.
   docker:
     name: container image
-    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -117,6 +145,9 @@ jobs:
           npm pack --silent --pack-destination docker/.pack
           echo "tarball=$(ls docker/.pack/worca-app-*.tgz)" >> "$GITHUB_OUTPUT"
           echo "claude_code=$(cat docker/CLAUDE_CODE_VERSION)" >> "$GITHUB_OUTPUT"
+          # ISO week: rebuilds the cached apt layer weekly so new Debian security
+          # fixes land (the layer text never changes, so the gha cache kept it forever).
+          echo "apt_refresh=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -131,6 +162,7 @@ jobs:
             WORCA_TARBALL=${{ steps.pack.outputs.tarball }}
             CLAUDE_CODE_VERSION=${{ steps.pack.outputs.claude_code }}
             VARIANT=slim
+            APT_REFRESH=${{ steps.pack.outputs.apt_refresh }}
           cache-from: type=gha,scope=ci-slim
           cache-to: type=gha,scope=ci-slim,mode=max
 

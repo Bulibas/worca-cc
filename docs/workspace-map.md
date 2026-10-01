@@ -127,6 +127,31 @@ The same actions over HTTP:
 | `DELETE /api/workspaces/:id/map/edges/:edgeId` | — manual edges (`m_…`) only |
 | `POST /api/workspaces/:id/map/render` | — Regenerate description |
 
+## Changing members
+
+A workspace's members can change after it is created: **Add projects** and **Remove** on the
+workspace page's Projects card, `POST /api/workspaces/:id/members` with `{ "add": [paths] }` or
+`{ "remove": path }`, or Ask Worca's workspace card. The workspace keeps its id, so its runs,
+schedules, homes and map reviews stay attached; runs already started keep the members they
+started with.
+
+- A removed member leaves the map at once: its entry, every edge that names it, its synthesized
+  role, and every confirmed, rejected or manual edge that names it. The change order and its
+  cycles are re-derived from the edges left, and the scan's order notes are dropped (they
+  described the old order); coordination notes stay until the next scan. A description the scan wrote is re-rendered without it; a hand-edited one is left
+  alone. Removing the member that is the metrics or policy home clears that home.
+- An added member has no edges until the next scan.
+- Every change starts a Workspace scan run of the new set (graphs, map and description, saved
+  when it ends done); the Projects card follows it — a paused one you resume included — and
+  shows how it ended until you next leave the page. A newer member change stops the one it
+  started and scans again. A scan you started yourself (paused ones included) — or any other
+  active run of the workspace, including one the CLI or another UI runs — blocks a member change
+  until it ends (409); a crashed run's record blocks nothing. The scan launch
+  guard follows each workspace's current members, not its id: a first scan of the set a
+  workspace once spanned is not refused as "already running". A scan that finishes after the members changed
+  saves nothing (`SET_CHANGED`). A member the scan cannot read (not the top of its own
+  repository, or no commit) still joins; the page says why no scan ran.
+
 ## Cross-project graph
 
 When the graphify CLI is installed, worca builds each member's graph in the scan's checkout of

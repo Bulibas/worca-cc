@@ -1,4 +1,7 @@
-// test/ui-history-pills.test.mjs
+// test/ui-history-pills.test.mjs — the finished runs' project groups in the Runs list.
+// The per-project filter pills (and their remembered choice) are gone (D4): every
+// project is a collapsible group of #runs-list; only the Started-by pills stay in
+// #historyFilter, on shared deployments.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -16,15 +19,18 @@ const HISTORY = [
 ];
 const histResp = (pipelines, ghAvailable = false) =>
   Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines, ghAvailable }) });
-const norm = (s) => s.replace(/\s+/g, ' ').trim();
 
-async function boot({ fetchHandler, local } = {}) {
+async function boot({ fetchHandler } = {}) {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
-  window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
-  // Pre-seed localStorage BEFORE app.js boots so restore-on-load is exercised.
-  if (local) for (const [k, v] of Object.entries(local)) window.localStorage.setItem(k, v);
+  // Store the socket's listeners so a test can deliver a frame (recv), as test/ui-runs-view.test.mjs does.
+  let lastWs = null;
+  window.WebSocket = class {
+    constructor() { this.readyState = 1; this._l = {}; lastWs = this; }
+    send() {} close() {}
+    addEventListener(t, fn) { (this._l[t] ||= []).push(fn); }
+  };
   window.fetch = (url, opts) => {
     if (fetchHandler) { const r = fetchHandler(String(url), opts || {}); if (r) return r; }
     if (String(url).includes('/api/projects'))
@@ -37,78 +43,41 @@ async function boot({ fetchHandler, local } = {}) {
   globalThis.window = window; globalThis.document = window.document;
   await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
   await new Promise((r) => setTimeout(r, 0));
-  function showHistory() { window.location.hash = 'history'; window.dispatchEvent(new window.Event('hashchange')); }
-  return { window, showHistory };
+  function showRuns() { window.location.hash = 'runs'; window.dispatchEvent(new window.Event('hashchange')); }
+  const recv = (obj) => (lastWs._l.message || []).forEach((fn) => fn({ data: JSON.stringify(obj) }));
+  return { window, showRuns, recv };
 }
 
-test('History shows All Projects + per-project pills and groups sticky sections', async () => {
-  const { window, showHistory } = await boot({ fetchHandler: (url) => url.includes('/api/history') ? histResp(HISTORY) : null });
-  showHistory();
+test('the Runs list groups finished runs in one section per project (name + count); no project pills', async () => {
+  const { window, showRuns } = await boot({ fetchHandler: (url) => url.includes('/api/history') ? histResp(HISTORY) : null });
+  showRuns();
   await new Promise((r) => setTimeout(r, 0));
   const doc = window.document;
 
-  const pills = [...doc.querySelectorAll('#historyFilter .hist-pill')];
-  assert.equal(pills.length, 3, 'All Projects + Alpha + Beta');
-  assert.equal(norm(pills[0].textContent), 'All Projects 3');
-  assert.ok(pills[0].classList.contains('active'), 'All Projects active by default');
+  // The project pills are gone (D4); the pill row holds only Started-by pills, and only when shared.
+  assert.equal(doc.querySelectorAll('#historyFilter .hist-pill').length, 0, 'no project pills');
+  assert.equal(doc.getElementById('historyFilter').hidden, true, 'the pill row is hidden on a single-user deployment');
 
-  const groups = [...doc.querySelectorAll('#history .hist-group')];
+  const groups = [...doc.querySelectorAll('#runs-list .runs-group')];
   assert.equal(groups.length, 2, 'one section per project');
-  assert.equal(norm(groups[0].querySelector('.hist-group-head').textContent), 'Alpha 2', 'Alpha first (most recent activity)');
-  assert.equal(norm(groups[1].querySelector('.hist-group-head').textContent), 'Beta 1');
-  assert.equal(doc.querySelectorAll('#history .hist-card').length, 3);
+  const name = (g) => g.querySelector('.runs-group-head .runs-group-name').textContent;
+  const count = (g) => g.querySelector('.runs-group-head .runs-count').textContent;
+  assert.equal(groups[0].dataset.groupKey, 'alpha-00000001');
+  assert.equal(name(groups[0]), 'Alpha', 'Alpha first (most recent activity)');
+  assert.equal(count(groups[0]), '2');
+  assert.equal(groups[1].dataset.groupKey, 'beta-00000002');
+  assert.equal(name(groups[1]), 'Beta');
+  assert.equal(count(groups[1]), '1');
+  assert.deepEqual([...groups[0].querySelectorAll('.runs-row-title')].map((n) => n.textContent), ['Alpha two', 'Alpha one'],
+    'rows keep the server order (newest first) inside their group');
+  assert.equal(doc.querySelectorAll('#runs-list .runs-row[data-kind="hist"]').length, 3);
   // No <li> ever (regression guard kept from ui-history).
-  assert.equal(doc.querySelectorAll('#history li').length, 0);
+  assert.equal(doc.querySelectorAll('#runs-list li').length, 0);
 });
 
-test('clicking a project pill filters to that project (flat) and persists the choice', async () => {
-  const { window, showHistory } = await boot({ fetchHandler: (url) => url.includes('/api/history') ? histResp(HISTORY) : null });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const doc = window.document;
-
-  const beta = [...doc.querySelectorAll('#historyFilter .hist-pill')].find((b) => b.dataset.projectKey === 'beta-00000002');
-  beta.dispatchEvent(new window.Event('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-
-  // The pill row is rebuilt on filter change (host.innerHTML = ''), so the captured
-  // `beta` node is now detached — re-query the active pill instead of asserting on it.
-  const active = doc.querySelector('#historyFilter .hist-pill.active');
-  assert.equal(active.dataset.projectKey, 'beta-00000002', 'Beta pill is active after click');
-  assert.equal(doc.querySelectorAll('#history .hist-group').length, 0, 'no grouping for a single project');
-  assert.equal(doc.querySelectorAll('#history .hist-card').length, 1, 'only Beta pipelines');
-  assert.match(doc.querySelector('#history').textContent, /Beta one/);
-  assert.equal(window.localStorage.getItem('worca-cc.history.project'), 'beta-00000002', 'choice persisted');
-});
-
-test('restores the remembered project filter on load', async () => {
-  const { window, showHistory } = await boot({
-    local: { 'worca-cc.history.project': 'beta-00000002' },
-    fetchHandler: (url) => url.includes('/api/history') ? histResp(HISTORY) : null,
-  });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const active = window.document.querySelector('#historyFilter .hist-pill.active');
-  assert.equal(active.dataset.projectKey, 'beta-00000002');
-  assert.equal(window.document.querySelectorAll('#history .hist-card').length, 1);
-});
-
-test('a remembered project with no history falls back to All Projects', async () => {
-  const { window, showHistory } = await boot({
-    local: { 'worca-cc.history.project': 'gone-99999999' },
-    fetchHandler: (url) => url.includes('/api/history') ? histResp(HISTORY) : null,
-  });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const active = window.document.querySelector('#historyFilter .hist-pill.active');
-  assert.equal(active.dataset.projectKey, '', 'defaults to All Projects');
-  assert.equal(window.document.querySelectorAll('#history .hist-group').length, 2);
-});
-
-test('Refresh re-fetches /api/history and keeps the active project filter', async () => {
+test('a pipelines-changed frame re-fetches /api/history and keeps the groups', async () => {
   let hits = 0;
-  const { window, showHistory } = await boot({
-    local: { 'worca-cc.history.project': 'beta-00000002' },
+  const { window, showRuns, recv } = await boot({
     // Count only the skeleton GET; the Phase-2 POST /api/history/pr is a separate
     // trigger, not a refetch of the history list.
     fetchHandler: (url) => {
@@ -117,14 +86,18 @@ test('Refresh re-fetches /api/history and keeps the active project filter', asyn
       return null;
     },
   });
-  showHistory();
+  showRuns();
   await new Promise((r) => setTimeout(r, 0));
   // Don't assume exactly one hit here: setting location.hash can make jsdom fire a
-  // native hashchange in addition to our manual dispatch. Assert the refresh adds one.
+  // native hashchange in addition to our manual dispatch. Assert the reload adds one.
   const before = hits;
   assert.ok(before >= 1, 'history fetched when the view is shown');
-  window.document.querySelector('#refresh-history').dispatchEvent(new window.Event('click', { bubbles: true }));
+  // The Refresh button is gone (D14): the app reloads on this frame while on #runs (app.js:1076).
+  recv({ type: 'pipelines-changed' });
   await new Promise((r) => setTimeout(r, 0));
-  assert.equal(hits, before + 1, 'refresh refetches exactly once');
-  assert.equal(window.document.querySelector('#historyFilter .hist-pill.active').dataset.projectKey, 'beta-00000002');
+  assert.equal(hits, before + 1, 'the frame refetches exactly once');
+  const doc = window.document;
+  assert.deepEqual([...doc.querySelectorAll('#runs-list .runs-group')].map((g) => g.dataset.groupKey),
+    ['alpha-00000001', 'beta-00000002']);
+  assert.equal(doc.querySelectorAll('#runs-list .runs-row[data-kind="hist"]').length, 3);
 });

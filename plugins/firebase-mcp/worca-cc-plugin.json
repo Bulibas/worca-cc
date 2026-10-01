@@ -1,0 +1,25 @@
+{
+  "name": "firebase-mcp",
+  "version": "0.1.0",
+  "description": "Firebase MCP server (firebase-tools): projects, Firestore, Auth, Storage, rules, Crashlytics and more",
+  "license": "MIT",
+  "engines": { "worca-cc-api": ">=5 <6" },
+  "mcpServers": {
+    "firebase": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y", "firebase-tools@latest", "mcp",
+        { "field": "dir", "prefix": "--dir=" },
+        { "field": "only", "prefix": "--only=" }
+      ],
+      "env": { "GOOGLE_APPLICATION_CREDENTIALS": { "field": "serviceAccount" } },
+      "fields": [
+        { "key": "dir", "label": "Project directory" },
+        { "key": "only", "label": "Feature groups" },
+        { "key": "serviceAccount", "label": "Service account key file", "secret": true }
+      ],
+      "description": "Firebase projects, Firestore, Auth, Storage, security rules, Crashlytics and more via firebase-tools"
+    }
+  }
+}

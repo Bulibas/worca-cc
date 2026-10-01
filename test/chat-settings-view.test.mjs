@@ -65,3 +65,26 @@ test('the Ask Worca script toggle: default on, explicit off honored, round-trips
   assert.deepEqual(collectScriptToolsToggle(off), { scriptTools: true });
   assert.deepEqual(collectScriptToolsToggle(doc.createElement('div')), { scriptTools: true }, 'a host with no control means ON');
 });
+
+test('a channel with no allowed chats says commands are off; a refused command is named', () => {
+  const el = renderChatSettings({
+    prefs: { notify: {}, channels: {} },
+    channels: [
+      { plugin: 'telegram-chat', channelId: 'main', displayName: 'Telegram', platform: 'telegram', state: 'connected',
+        capabilities: { inbound: true, outbound: true },
+        commands: { allowed: 0, lastRefused: { chatId: '-100123', command: 'approve', at: '2026-09-30T10:00:00.000Z' } } },
+      { plugin: 'slack-chat', channelId: 'main', displayName: 'Slack', platform: 'slack', state: 'connected',
+        capabilities: { inbound: true, outbound: true }, commands: { allowed: 2, lastRefused: null } },
+    ],
+  }, { doc });
+  const off = el.querySelector('.chat-commands-off[data-channel-key="telegram-chat/main"]');
+  assert.ok(off, 'commands-off hint rendered');
+  assert.match(off.className, /\bhint\b/);
+  assert.match(off.textContent, /Allowed chat IDs/);
+  assert.match(off.textContent, /telegram-chat/);
+  const refused = el.querySelector('.chat-refused[data-channel-key="telegram-chat/main"]');
+  assert.match(refused.textContent, /\/approve/);
+  assert.match(refused.textContent, /-100123/);
+  assert.equal(el.querySelector('[data-channel-key="slack-chat/main"].chat-commands-off'), null);
+  assert.equal(el.querySelector('[data-channel-key="slack-chat/main"].chat-refused'), null);
+});

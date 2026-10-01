@@ -39,24 +39,24 @@ const V1_META = (key) => JSON.stringify({ key, agentFile: `${key}.md`, consumes:
 const errs = (v) => v.problems.filter((p) => p.level === 'error').map((p) => p.message);
 const warns = (v) => v.problems.filter((p) => p.level === 'warn').map((p) => p.message);
 
-test('the host speaks APIs 1..4; 4 is current, 3 is the agent DATA contract', () => {
-  assert.equal(WORCA_PLUGIN_API, 4);
-  assert.deepEqual(WORCA_PLUGIN_APIS, [1, 2, 3, 4]);
+test('the host speaks APIs 1..5; 5 is current, 3 is the agent DATA contract', () => {
+  assert.equal(WORCA_PLUGIN_API, 5);
+  assert.deepEqual(WORCA_PLUGIN_APIS, [1, 2, 3, 4, 5]);
   assert.equal(WORCA_AGENT_DATA_API, 3, 'meta v2 + v2 graphs arrived in API 3 and API 4 does not touch them');
   assert.equal(WORCA_ASK_FORMS_API, 4);
 });
 
-test('old ranges keep negotiating their own API; an open range now reaches 4', () => {
+test('old ranges keep negotiating their own API; an open range now reaches 5', () => {
   assert.equal(negotiatedApi('>=1 <2'), 1);
   assert.equal(negotiatedApi('>=2 <3'), 2);
   assert.equal(negotiatedApi('>=3 <4'), 3, 'an API-3 plugin must NOT be promoted to 4');
   assert.equal(negotiatedApi('>=4 <5'), 4);
   assert.equal(negotiatedApi('>=3 <5'), 4, 'the HIGHEST member a range admits');
-  assert.equal(negotiatedApi(''), 4, 'unconstrained -> newest');
-  assert.equal(negotiatedApi('>=5'), null, 'beyond the host set');
+  assert.equal(negotiatedApi(''), 5, 'unconstrained -> newest');
+  assert.equal(negotiatedApi('>=6'), null, 'beyond the host set');
   assert.equal(negotiatedApi('^4.0.0'), null, 'unsupported syntax fails CLOSED');
   assert.equal(apiSatisfies('>=4 <5'), true);
-  assert.equal(apiSatisfies('>=5'), false);
+  assert.equal(apiSatisfies('>=6'), false);
   assert.equal(declaredApi('>=4 <5'), 4, 'declaredApi is still the LOWEST integer a range accepts');
 });
 

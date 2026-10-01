@@ -1,8 +1,8 @@
 // test/helpers/run-page-boot.mjs — boot the REAL app.js under jsdom and open the
 // run page (#running/<id>) for a run, where the question / gate / recovery /
-// workflow panel is mounted (`#run-detail .rd-questions .qpanel`). The Running
-// list card no longer hosts a panel: it only carries the `.rc-wait` strip that
-// points at the run page.
+// workflow panel is mounted (`#run-detail .rd-questions .qpanel`). The Runs list
+// row never hosts a panel: it is a link (icon, title, subline) to the run page, and
+// a waiting question puts it in the Needs-you group.
 //
 // bootApp() captures the single WebSocket app.js creates, so a test can push
 // server frames through `dispatch(msg)` and record every fetch in `calls`.
@@ -70,7 +70,12 @@ export async function bootApp({ fetchHandler } = {}) {
     window.location.hash = hash;
     window.dispatchEvent(new window.Event('hashchange'));
   }
-  const showRunning = () => go('running');
+  // The bare Runs list with nothing selected, as #running was: a bare route would
+  // otherwise reopen the remembered run (D6), so forget it first.
+  const showRunning = () => {
+    window.localStorage.removeItem('worca-cc.runs.last');
+    go('runs');
+  };
   const settle = async (n = 3) => {
     for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
   };
@@ -89,8 +94,9 @@ export function helloRun(ctx, { runId, title = 'Demo run', ...extra } = {}) {
   });
 }
 
+// The run's row in its project group (a Needs-you run is repeated above it).
 export const runCard = (ctx, runId) =>
-  ctx.window.document.querySelector(`#run-list .run-card[data-run-id="${runId}"]`);
+  ctx.window.document.querySelector(`#runs-list .runs-row[data-slot="group"][data-run-id="${runId}"]`);
 
 // The run page's panel host, and its .qpanel (null until the page is open).
 export const runPanel = (ctx) => ctx.window.document.querySelector('#run-detail .rd-questions .qpanel');

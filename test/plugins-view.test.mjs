@@ -430,6 +430,12 @@ test('renderMarketplaceList: builtin badge, sync line (relTime), warnings, actio
   assert.match(never.querySelector('.pl-mkt-sync').textContent, /never synced/);
 });
 
+test('renderMarketplaceList: a marketplace that tracks a branch names it after the url', () => {
+  const el = renderMarketplaceList([{ ...MKT, url: 'https://github.com/o/worca', ref: 'dev' }, { ...MKT, id: 'm-2' }], { doc });
+  const urls = [...el.querySelectorAll('.pl-mkt-url')].map((u) => u.textContent);
+  assert.deepEqual(urls, ['https://github.com/o/worca · dev', '/tmp/m1']);
+});
+
 test('renderPluginList: provenance line renders marketplace + repo @ sha7', () => {
   const el = renderPluginList([{
     name: 'aa', version: '1.0.0', pinnedSha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
@@ -512,4 +518,18 @@ test('the Plugins card carries the python notice; a consent script row counts it
         { key: 'lint', runtime: 'node', file: 'lint.mjs', command: null, cases: 1 }] }, { doc });
   assert.match(el.textContent, /tidy — shell · npm run tidy · 2 cases/);
   assert.match(el.textContent, /lint — node · lint\.mjs · 1 case/);
+});
+
+test('a plugin that ships MCP servers links its count to Settings › MCP servers › Servers', () => {
+  const el = renderPluginList([
+    { name: 'acme-tools', version: '1.4.0', enabled: true, contributions: { agents: 2, skills: 1, mcpServers: 2 } },
+    { name: 'only-mcp', version: '1.0.0', enabled: true, contributions: { mcpServers: 1 } },
+    { name: 'none', version: '1.0.0', enabled: true, contributions: {} },
+  ], { doc });
+  const [a, b, c] = el.querySelectorAll('.pl-contrib');
+  assert.equal(a.textContent, '2 agents · 1 skill · 2 MCP servers');
+  assert.equal(a.querySelector('a.pl-mcp-link').getAttribute('href'), '#settings/mcp/servers');
+  assert.equal(b.textContent, '1 MCP server');
+  assert.equal(c.textContent, 'no contributions');
+  assert.equal(c.querySelector('a'), null);
 });

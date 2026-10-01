@@ -314,10 +314,11 @@ try {
   await until(`location.hash === '#projects/${project.key}'`, 'the Overview route');
   const ov = await ev(`(()=>{const d=document.querySelector('#proj-detail');return {
     tab:d.querySelector('.pd-tab.active').dataset.sec,
-    path:d.querySelector('.pd-ov-card-path .pd-ov-value').textContent,
+    path:d.querySelector('.pd-header .pd-path').textContent,
+    branchCard:!!d.querySelector('.pd-sec[data-sec="overview"]:not([hidden]) .pd-ov-card-branch'),
     memoryHidden:d.querySelector('.pd-sec[data-sec="memory"]').hidden};})()`);
-  check('7b', 'clicking Overview routes to #projects/<key>, lights its pill, hides the Memory section and shows the project path',
-    ov.tab === 'overview' && ov.path === project.path && ov.memoryHidden === true, ov);
+  check('7b', 'clicking Overview routes to #projects/<key>, lights its pill, hides the Memory section and shows the Overview cards under the project path',
+    ov.tab === 'overview' && ov.path === project.path && ov.branchCard === true && ov.memoryHidden === true, ov);
 
   // ---- (8) the picker's Memory scope row ------------------------------------
   await go('new');

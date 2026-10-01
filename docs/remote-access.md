@@ -265,6 +265,9 @@ Access.
   named emails, and use one deployment per person or per set of credentials, never one per project.
 - Scope the secrets: a fine-grained `GH_TOKEN`, a spend limit on an Anthropic API key, and worca's
   per-run cost caps.
+- **One MCP registry and one MCP secrets file per instance** ([mcp-servers.md](mcp-servers.md)):
+  every allowed person edits the same sets and can replace, never read, their secrets, and every
+  person's runs and chats use them. Per-person sets are not supported.
 - To share one deployment as a team without sharing a model key, run the
   [credential broker](credential-broker.md) in multi mode: each person saves their own keys on
   its key page, agents never hold a key, and costs are charged to whoever caused them.

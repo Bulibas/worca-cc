@@ -9,8 +9,10 @@
 import {
   providerConfig, allProviders, updateProvider, resolveProviderSecret, providerSecretSet,
   copilotTermsAcknowledged, acknowledgeCopilotTerms, clearCopilotSignIn,
-  listGlobalModels, addGlobalModel, updateGlobalModel,
+  listGlobalModels, addGlobalModel, updateGlobalModel, updateSpeech,
 } from '../settings.mjs';
+import { speechState } from '../speech.mjs';
+import { speechAssetStore } from '../speech-assets.mjs';
 import { modelEnvRef, maskModelEnvValue, COPILOT_TERMS_VERSION, UPSTREAM_PROVIDERS, isUpstreamBaseUrl, EFFORTS } from '../model-env.mjs';
 import {
   startDeviceFlow, pollDeviceFlow, githubLogin, copilotToken, invalidateCopilotToken,
@@ -164,7 +166,7 @@ export async function providersState({ quota = false, fetch: f, person = resolve
   // With the credential broker on, keys and the Copilot sign-in are per person on its key page:
   // each provider's state is the viewer's own slot there, not worca's (empty) settings.
   const broker = brokerEnabled() ? await brokerProviders(all, person) : { enabled: false };
-  return { copilot, openai: keyed('openai'), anthropic: keyed('anthropic'), broker };
+  return { copilot, openai: keyed('openai'), anthropic: keyed('anthropic'), speech: { ...speechState(), cacheBytes: speechCacheBytes() }, broker };
 }
 
 /**
@@ -210,6 +212,24 @@ export async function patchProvider(name, patch = {}) {
   // Credential broker: keys are per person, on the key page; worca stores none.
   if (brokerEnabled() && ['apiKey', 'githubToken'].some((k) => typeof p[k] === 'string' && p[k].trim())) refuseWithBroker('store a provider key');
   return updateProvider(name, p);
+}
+
+/** Downloaded in-browser speech models on disk; null where there is no worca home (tests). */
+function speechCacheBytes() {
+  try { return speechAssetStore().size(); } catch { return null; }
+}
+
+/** Patch the speech block from the UI (docs/speech.md): masked key echoes are dropped ("keep"). */
+export async function patchSpeech(patch = {}) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('speech patch must be an object');
+  const p = {};
+  for (const [kind, side] of Object.entries(patch)) {
+    p[kind] = side && typeof side === 'object' && !Array.isArray(side) ? { ...side } : side;
+    if (p[kind] && typeof p[kind].apiKey === 'string' && p[kind].apiKey.startsWith('••')) delete p[kind].apiKey;
+  }
+  // Credential broker: worca stores no keys at all (same rule as patchProvider).
+  if (brokerEnabled() && Object.values(p).some((s) => s && typeof s.apiKey === 'string' && s.apiKey.trim())) refuseWithBroker('store a speech key');
+  return updateSpeech(p);
 }
 
 // ── Copilot models: list for import, import ─────────────────────────────────

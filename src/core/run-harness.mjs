@@ -67,8 +67,10 @@ import { collectRequiredAssets, stageAssets } from './run-assets.mjs';
 import { loadAgentRegistry, DEFAULT_AGENTS_DIR } from './agent-registry.mjs';
 import {
   createWorktree, removeWorktree, suggestBranchName, sanitizeBranchName, resolveDefaultBranch,
-  isValidSourceRef, snapshotWorktreePatch,
+  isValidSourceRef, snapshotWorktreePatch, listLocalBranches, worktreeHead,
 } from './worktree.mjs';
+import { syncBaseForRun, ensureLocalBranch, fetchRemote, isSafeBranchName, runSyncOptions, INTERACTIVE_TIMEOUT_MS } from './git-sync.mjs';
+import { SYNC_EXECUTION_ID } from '../shared/graph/constants.mjs';
 import { readPluginsLock, pluginCurrentDir } from './plugins-lock.mjs'; // §9.4 disabled-plugin hint
 import { classifyError, rateLimitHint, brokerHint, freeDailyHint } from './recoverable-error.mjs';
 import { cachedFreeDailyCounts } from './openrouter-free.mjs';
@@ -76,6 +78,7 @@ import { withBillTo, currentBillTo } from './billing.mjs';
 import { brokerEnabled, brokerInfo, personSlots } from './broker-client.mjs';
 import { mockEnabled } from './claude-runner.mjs';
 import { modelSlot, manifestModels, missingCredentials, describeMissing } from './broker-routing.mjs';
+import { syncPluginSlots } from './plugin-broker-slots.mjs';
 import { recoveryDelayMs, sleepAbortable } from './recovery-backoff.mjs';
 import {
   resolveFailure, isTerminal, markTerminal, answerFromDecision,
@@ -85,12 +88,19 @@ import { recordRunMetrics } from './metrics/record.mjs';
 // Team policy (team-policy design §6–§7): the document a run's cost gates fold in, its
 // per-run state, and the off-policy findings the run log names at start.
 import { resolveProjectPolicy, resolveWorkspacePolicy } from './policy/sync.mjs';
-import { fieldsForRun, effectiveCap, deviationsFor } from './policy/effective.mjs';
+import { fieldsForRun, effectiveCap, deviationsFor, mcpDeviations } from './policy/effective.mjs';
 import { writePolicyState, hasPipelineOverride, readTotalAck } from './policy/state.mjs';
 import { installedPluginsMap, WORCA_VERSION as POLICY_WORCA_VERSION } from './policy/local.mjs';
 import { readSettings as readRawSettings } from './settings.mjs';
 import { byActor } from './identity.mjs';
-import { WORKSPACE_SCAN_WORKFLOW_ID } from './graph/builtin-workflows.mjs';
+import { WORKSPACE_SCAN_WORKFLOW_ID, MEMORY_DEFRAG_WORKFLOW_ID } from './graph/builtin-workflows.mjs';
+import { agentIdentity } from './agent-user.mjs';
+import { resolveRegistry, requiredOf, toolNameLimitFor, skipReasonText } from './mcp/registry.mjs';
+import { loadCatalog } from './mcp/catalog.mjs';
+import { MCP_STARTUP_MS } from './mcp/timeouts.mjs';
+import { keepListNames } from './mcp/keep-list.mjs';
+import { expandMcpDenyRules } from './mcp/deny.mjs';
+import { createRedactor } from './redact.mjs';
 import { finalizeWorkspaceScan } from './workspace-scan-run.mjs';
 import { readWorkspaceMap } from './workspaces.mjs';
 import { redactSecrets } from '../shared/workspace-map/redact.mjs';
@@ -102,6 +112,7 @@ import { runNightAnalysis, readMemoryText } from './night/analysis.mjs';
 import { writeNightDecision, countNightDecisions, nightCounts, nightGateCycles, nightSpendSinceUsd } from './night/store.mjs';
 import { NIGHT_ACTOR, NIGHT_TOGGLES, nightNeverDecides } from './night/config.mjs';
 import { nightModeToggle, nightModeHereSince } from './settings.mjs';
+import { MCP_TOOL_NAME_400_RE, MCP_TOOL_NAME_TOO_LONG } from '../shared/mcp-tool-name.mjs';
 
 // worca-cc repo root; holds skills/. fileURLToPath, never URL.pathname: the
 // latter is `/C:/…` on Windows and %-encoded everywhere (see DEFAULT_AGENTS_DIR
@@ -651,6 +662,22 @@ export function autoAnswerPayload(q) {
 // slowest command issued here, and it legitimately takes seconds, never minutes.
 const HARNESS_GIT_TIMEOUT_MS = 120_000;
 
+// MCP registry §10: a result error the first-party API gives a tool name over the limit, and the
+// run warning it maps to (put back after a resume re-assembly, like the mcpStatus lines). Bounded
+// quantifiers and clipped text: it runs in the server process on every error result's text. One
+// definition with Ask's muted line (ask/turn.mjs): src/shared/mcp-tool-name.mjs.
+const MCP_NAME_400_RE = MCP_TOOL_NAME_400_RE;
+const MCP_NAME_WARNING = MCP_TOOL_NAME_TOO_LONG;
+
+/** §10: the run warning for a registry copy's `system/init` status; null when it is not a problem. */
+function mcpStatusWarning(name, status, setName) {
+  const set = setName ? ` (set ${setName})` : '';
+  if (status === 'failed' || status === 'needs-auth') return `${name}: failed to connect (token, URL or command) — run Test in Settings › MCP servers${setName ? ` › ${setName}` : ''}`;
+  if (status === 'disabled') return `${name}: disabled by your Claude Code settings${set}`;
+  if (status === 'absent') return `${name}: blocked by managed MCP policy${set}`;
+  return null;
+}
+
 export class RunHarness extends EventEmitter {
   constructor(opts) {
     super();
@@ -750,6 +777,9 @@ export class RunHarness extends EventEmitter {
     // policy = byte-identical legacy spawn, so callers that never pass the
     // option (CLI, tests, pre-picker API bodies) keep today's behavior exactly.
     this.guardrailsId = this.opts.guardrailsId || 'permissive';
+    // MCP registry (design §6.2, D16): the run's per-membership opt-out ('<setId>|<serverId>'),
+    // validated by POST /api/run; rides the resume point, restored beside guardrailsId.
+    this.mcpOptOut = Array.isArray(this.opts.mcpOptOut) ? this.opts.mcpOptOut : [];
     // Engine hook: the v1 runner registry (see Orchestrator._initRunners).
     this._initRunners(this.opts);
 
@@ -761,6 +791,14 @@ export class RunHarness extends EventEmitter {
       source: (this.opts.branch && this.opts.branch.source) || null,
       feature: (this.opts.branch && this.opts.branch.feature) || null,
     };
+    // Sync before run (#527): absent → disabled, so the CLI, resume and every existing caller
+    // keep today's behaviour; the UI server passes per-member options on a fresh start.
+    this.syncOpts = runSyncOptions(this.opts.sync);
+    this._syncStageOpen = false;
+    this._syncStageFailed = false;
+    this._syncing = 0;                  // members whose sync is in flight (setupStage restore)
+    this._stageBeforeSync = null;
+    this._createdSources = new Map();   // projectKey -> sha of a local source created from the remote
     this.branchInfo = null;
     // ── Run root (§5.2). All three are assigned in _setupRunRoot() (or rehydrated
     // by resume() from the RECORDED mode, never the live flag). Under `legacy`
@@ -779,6 +817,10 @@ export class RunHarness extends EventEmitter {
     this.runContext = null;
     this.mcpConfigPath = null;      // <runRoot>/mcp.json -> --mcp-config
     this.mcpServerGrants = [];      // `mcp__<server>` per merged server (V1 branch (a))
+    // MCP registry layer (design §6.1): { env, redact, disallowed, allowlist, copies } for every
+    // dispatch, or null. Holds secret values: never written to run.json, events, journals or the
+    // resume point.
+    this.mcpLayer = null;
 
     this.abort = new AbortController();
     this._answeredBy = new Map();            // question id -> who answered it (identity.mjs actor)
@@ -1621,6 +1663,7 @@ export class RunHarness extends EventEmitter {
       // the constructor default ('permissive'). Keep state in sync for re-persist.
       this.guardrailsId = rp.guardrailsId || this.guardrailsId;
       this.state.guardrailsId = this.guardrailsId;
+      this.mcpOptOut = Array.isArray(rp.mcpOptOut) ? rp.mcpOptOut : [];
       await this._resolveGuardrails();
       await this._resolvePolicy();
       // Restore the EFFECTIVE instruction from the resume point — by dispatch time
@@ -1639,6 +1682,8 @@ export class RunHarness extends EventEmitter {
       const meta = safeParse(row.workspace_meta);
       const recordedRaw = this.isWorkspace ? meta?.runRootMode : this.state.branch?.runRootMode;
       this._modeRecorded = !!recordedRaw;                       // a setup-incomplete point may carry none
+      // (A setup paused in createWorktree now persists a pending member record in `branch`,
+      // so its replay pins the first attempt's mode too — the more correct behaviour.)
       const recordedMode = recordedRaw || 'legacy';
       this.runRootMode = recordedMode === 'detached' ? 'detached' : 'legacy';
       // Re-stamp BEFORE the first persist so a resumed workspace run re-persists the
@@ -1945,47 +1990,145 @@ export class RunHarness extends EventEmitter {
     // the legacy sweep disabled, i.e. permanent. The partial-setup test
     // (test/orchestrator-workspace.test.mjs) guards exactly this.
     const setupFailures = [];
-    await mapWithCap(this.members, fanoutCap(), async (m) => {
-      // Replay: a member whose checkout survived the pause is already re-attached by
-      // resume() (workDirs/branchInfos/state.branches); `git worktree add` onto the
-      // live dir would fail. (This skips the per-member "Worktree `<key>`" audit line
-      // for kept members — say so in the run log instead.)
-      const kept = replay ? this.workDirs.get(m.projectKey) : null;
-      if (kept && existsSync(kept)) {
-        this._log('orchestrator', 'info', `setup replay: ${m.projectKey} keeps its checkout ${kept}`);
-        return;
-      }
-      try {
-        const { source, featureRaw } = this.isWorkspace
-          ? await this._resolveMemberBranches(m)          // unchanged (member-suffixed names)
-          : await this._resolveSingleBranches();          // single: today's exact semantics
-        const info = await createWorktree({
-          projectDir: resolve(m.projectDir),              // the REAL dir: git runs here
-          pipelineId: this.pipeline.id,
-          // detached ⇒ <runRoot>/repos/<projectKey>, uniqueness from the run root.
-          // legacy   ⇒ both omitted, so worktree.mjs falls back to its retained
-          //            default <projectDir>/.worca-cc/worktrees/<pipelineId> (§10).
-          ...(detached ? { baseDir: reposBase, checkoutName: m.projectKey } : {}),
-          sourceBranch: source,
-          featureBranch: featureRaw,
-          signal: this.abort.signal,
-        });
-        // Register EAGERLY (Map.set is synchronous) so teardown always sees it.
-        this.workDirs.set(m.projectKey, info.worktreeDir);
-        this.branchInfos.set(m.projectKey, info);
-        this.state.branches[m.projectKey] = { source: info.sourceBranch, feature: info.branch,
-                                              worktreeDir: info.worktreeDir,
-                                              reusedExisting: info.reusedExisting };
-        const reuseNote = info.reusedExisting ? ' (resumed existing branch)' : '';
-        await appendAudit(this.pipeline.dir,
-          `Worktree \`${m.projectKey}\`: \`${info.branch}\` (off \`${info.sourceBranch}\`)${reuseNote} at \`${info.worktreeDir}\`.`,
-        ).catch(() => {});                                // per-member audit
-      } catch (err) {
-        setupFailures.push(err);
-      }
-    });
+    try {
+      await mapWithCap(this.members, fanoutCap(), async (m) => {
+        // Replay: a member whose checkout survived the pause is already re-attached by
+        // resume() (workDirs/branchInfos/state.branches); `git worktree add` onto the
+        // live dir would fail. (This skips the per-member "Worktree `<key>`" audit line
+        // for kept members — say so in the run log instead.)
+        const kept = replay ? this.workDirs.get(m.projectKey) : null;
+        if (kept && existsSync(kept)) {
+          this._log('orchestrator', 'info', `setup replay: ${m.projectKey} keeps its checkout ${kept}`);
+          return;
+        }
+        try {
+          // Replay (resume after a pausable setup failure): the first attempt persisted its planned
+          // start below. Resume passes no `branch`, so without it a replay would re-resolve
+          // resolveDefaultBranch and could start from — and record — another branch.
+          const pending = replay ? this._pendingStart(m.projectKey) : null;
+          const resolved = this.isWorkspace
+            ? await this._resolveMemberBranches(m, { replay })   // member-suffixed names; creates a remote-only source itself
+            : await this._resolveSingleBranches();                // single: today's exact semantics
+          const source = (pending && pending.source) || resolved.source;
+          // Resume also passes no `title`, so a replay re-derives ANOTHER feature name. Take the
+          // first attempt's planned name, so `pending.reuse` below describes the branch this
+          // replay really uses.
+          const featureRaw = (pending && pending.plannedFeature) || resolved.featureRaw;
+          const { fellBack = false } = resolved;
+          // Single mode never validated the source (workspace mode does it in _resolveMemberBranches):
+          // only a name that resolves to nothing may be created from the remote. A tag or SHA source
+          // resolves already and must not trigger a fetch or a same-named local branch.
+          if (!this.isWorkspace && !(await isValidSourceRef(resolve(m.projectDir), source))) {
+            await this._ensureLocalSource(m, source, { replay });
+          }
+          // Refuse feature == source BEFORE the sync, so a doomed start never fast-forwards the shared
+          // base first. Only when this member syncs: with sync off, createWorktree's own check
+          // keeps today's outcome.
+          if (this.syncOpts.memberFor(m.projectKey).enabled && !replay
+              && sanitizeBranchName(featureRaw) === sanitizeBranchName(source)) {
+            throw markTerminal(new Error(`featureBranch and sourceBranch both resolve to "${sanitizeBranchName(source)}" — they must differ`));
+          }
+          const synced = await this._syncMemberBase(m, source, { replay, fellBack });
+          const startRef = synced.startRef || (pending && pending.startRef) || null;
+          // createWorktree's feature == source guard compares NAMES; a startRef SHA slips past it,
+          // and feature `dev` off source `dev` would reuse the shared `dev` itself.
+          if (startRef && sanitizeBranchName(featureRaw) === sanitizeBranchName(source)) {
+            // Terminal, not a pause (setup failures pause by default): resuming cannot change
+            // the names, so every resume would replay into the same pause.
+            throw markTerminal(new Error(`featureBranch and sourceBranch both resolve to "${sanitizeBranchName(source)}" — they must differ`));
+          }
+          // Will createWorktree REUSE an existing feature branch? A reused branch ignores
+          // sourceBranch and sits on its old tip, so diffing it against a freshly synced base would
+          // count every upstream commit as a deletion by this run. Decide it BEFORE moving the diff
+          // base, so a paused setup can never persist a moved base for a reused branch. On a replay
+          // the first attempt's answer wins: its own `worktree add -b` usually created the branch
+          // (at the start point) before failing, which is not a reuse. The recorded answer is
+          // trusted only for the SAME planned name; anything else is decided again.
+          const willReuse = pending && typeof pending.reuse === 'boolean'
+              && pending.plannedFeature === sanitizeBranchName(featureRaw)
+            ? pending.reuse
+            : (await listLocalBranches(resolve(m.projectDir))).includes(sanitizeBranchName(featureRaw));
+          // D17 / C3: the checkpoint is the project dir's HEAD from BEFORE the sync. When this run
+          // moved its start (fast-forward, remote start, a source created from the remote — before
+          // the sync by _ensureLocalSource or by the Sync fetch itself), diffing against it would
+          // count every upstream commit as the run's own change. Move the member's diff base NOW —
+          // before createWorktree — so a paused setup persists it.
+          const moved = synced.record && ['fast-forwarded', 'remote-start', 'created'].includes(synced.record.result)
+            ? synced.record.to : (this._createdSources.get(m.projectKey) || null);
+          const baseMoved = !willReuse && (!!moved || !!(pending && pending.baseMoved));
+          if (baseMoved && moved && this.checkpointRefs[m.projectKey] !== moved) this.checkpointRefs[m.projectKey] = moved;
+          const syncRecord = synced.record || (pending && pending.sync) || null;
+          // Pending record, persisted with the checkpoint if createWorktree fails pausably (mirrored
+          // into state.branch before the throw, below). It has no worktreeDir: that marks it pending.
+          // `plannedFeature`, not `feature`: readers treat `feature` as "a branch this run owns".
+          this.state.branches[m.projectKey] = { source, plannedFeature: sanitizeBranchName(featureRaw), reuse: willReuse,
+            ...(startRef ? { startRef } : {}),
+            ...(baseMoved ? { baseMoved: true } : {}), ...(syncRecord ? { sync: syncRecord } : {}) };
+          const info = await createWorktree({
+            projectDir: resolve(m.projectDir),              // the REAL dir: git runs here
+            pipelineId: this.pipeline.id,
+            // detached ⇒ <runRoot>/repos/<projectKey>, uniqueness from the run root.
+            // legacy   ⇒ both omitted, so worktree.mjs falls back to its retained
+            //            default <projectDir>/.worca-cc/worktrees/<pipelineId> (§10).
+            ...(detached ? { baseDir: reposBase, checkoutName: m.projectKey } : {}),
+            // startRef (a SHA) only when the shared base must not move (diverged/dirty/in-use):
+            // a SHA never auto-tracks, unlike `origin/<base>` (branch.autoSetupMerge).
+            sourceBranch: startRef || source,
+            featureBranch: featureRaw,
+            signal: this.abort.signal,
+          });
+          // Register EAGERLY (Map.set is synchronous) so teardown always sees it.
+          this.workDirs.set(m.projectKey, info.worktreeDir);
+          this.branchInfos.set(m.projectKey, info);
+          // `source` stays the LOCAL branch name (PR base, chains, metrics read it — C4);
+          // info.sourceBranch would echo the startRef SHA on a remote start, so don't use it.
+          // A fresh start: a new branch, or (replay) the branch the first attempt created at the
+          // start point, which createWorktree now reports as reusedExisting. Only a branch that
+          // existed BEFORE this run (willReuse) ignored sourceBranch; its diff base never moved.
+          const freshStart = !willReuse;
+          const baseSha = freshStart ? await worktreeHead(info.worktreeDir) : null;
+          // A fresh worktree whose start this run moved (now, or on the first attempt of a replay):
+          // its real HEAD is the diff base (a ref could also have moved in between).
+          if (baseMoved && baseSha && this.checkpointRefs[m.projectKey] !== baseSha) this.checkpointRefs[m.projectKey] = baseSha;
+          const keptStart = startRef && freshStart ? startRef : null;   // a reused branch ignored it
+          this.state.branches[m.projectKey] = { source, feature: info.branch,
+                                                worktreeDir: info.worktreeDir,
+                                                reusedExisting: info.reusedExisting,
+                                                ...(baseSha ? { baseSha } : {}),
+                                                ...(keptStart ? { startRef: keptStart } : {}),
+                                                ...(syncRecord ? { sync: syncRecord } : {}) };
+          if (baseMoved) {
+            await appendAudit(this.pipeline.dir, `Diff base for \`${m.projectKey}\` moved to the run's start \`${String(this.checkpointRefs[m.projectKey]).slice(0, 10)}\`.`).catch(() => {});
+          }
+          const reuseNote = info.reusedExisting ? ' (resumed existing branch)' : '';
+          await appendAudit(this.pipeline.dir,
+            `Worktree \`${m.projectKey}\`: \`${info.branch}\` (off \`${keptStart ? `${source} @ ${keptStart.slice(0, 10)}` : source}\`)${reuseNote} at \`${info.worktreeDir}\`.`,
+          ).catch(() => {});                                // per-member audit
+        } catch (err) {
+          setupFailures.push(err);
+        }
+      });
+    } finally {
+      this._closeSyncStage();                              // workspace, or a single member that threw
+    }
+    // Mirror the (possibly moved) diff bases BEFORE the failure throw: a paused setup writes its
+    // resume point (single: rp.checkpointRef) / workspace_meta.checkpointRefs from these.
+    const primaryKey = this.members[0]?.projectKey;
+    if (primaryKey && this.checkpointRefs[primaryKey]) this.checkpointRef = this.checkpointRefs[primaryKey];
+    this.state.checkpointRef = this.checkpointRef;
+    this.state.checkpointRefs = { ...this.checkpointRefs };
+    // Single project: the pending member record rides the persisted `branch` column, so a replay
+    // can read it (_pendingStart). The success path below overwrites it with the same object plus
+    // the pin, exactly as today. Workspace members persist through workspace_meta.branches.
+    if (!this.isWorkspace && primaryKey && this.state.branches[primaryKey]) {
+      this.state.branch = { ...this.state.branches[primaryKey], runRootMode: this.runRootMode };
+    }
     if (setupFailures.length) {
-      throw setupFailures[0] instanceof Error ? setupFailures[0] : new Error(String(setupFailures[0]));
+      // A terminal failure (a diverged member under onDiverged 'fail', the feature == source guard)
+      // must win over another member's pausable one: pausing would let a resume — which never
+      // syncs — start that member from its local diverged base and bypass 'fail'.
+      const first = setupFailures.find((e) => isTerminal(e)) || setupFailures[0];
+      throw first instanceof Error ? first : new Error(String(first));
     }
 
     const primary = this.members[0];                      // members sorted by projectKey; single: the only one
@@ -2143,9 +2286,9 @@ export class RunHarness extends EventEmitter {
     // what "already reported" means (a resumed run is a NEW orchestrator object, so an
     // in-memory Set could not see the earlier segment). Read BEFORE the assembly,
     // which rewrites `warnings` wholesale.
-    const alreadyReported = new Set(
-      this.runRoot ? ((await readRunManifest(this.runRoot))?.warnings ?? []) : [],
-    );
+    const prior = this.runRoot ? await readRunManifest(this.runRoot) : null;
+    const alreadyReported = new Set(prior?.warnings ?? []);
+    let reg = null;                                        // the MCP registry layer's { result, catalog }
     const rc = await assembleRunContext({
       runRoot: this.runRoot,
       members: this.members.map((m) => ({
@@ -2163,11 +2306,51 @@ export class RunHarness extends EventEmitter {
       graphInstructions: this.toolInstructions,
       homeDir: homedir(),
       honorByKey: this.guardrailHonorByKey,
+      agentIsolated: !!agentIdentity(),
+      registry: async (taken) => (reg = await this._resolveMcp(taken)),
     });
     this.runContext = rc;
     if (rc?.projectPermissions) {
       this.guardrailPermissionRules = mergePermissionRules(this.guardrailPermissionRules, rc.projectPermissions);
     }
+    // MCP registry (§6.4): a deny rule on a server reaches every copy of it in this run — BEFORE
+    // the audit below, so denyCount includes the added rules. Resume re-runs it on the rebuilt rules.
+    if (reg && this.guardrailPermissionRules?.deny?.length) {
+      this.guardrailPermissionRules = {
+        ...this.guardrailPermissionRules,
+        deny: expandMcpDenyRules(this.guardrailPermissionRules.deny, { catalog: reg.catalog, copies: reg.result.copies }),
+      };
+    }
+    this.mcpLayer = reg && {
+      env: reg.result.env,
+      redact: reg.result.secretValues,
+      disallowed: reg.result.disallowedTools,
+      // §5.5.1: a scrubbed spawn keeps the launcher's keep-list when a stdio copy runs.
+      allowlist: Object.values(reg.result.servers).some((s) => typeof s.command === 'string') ? keepListNames() : [],
+      copies: reg.result.copies,
+    };
+    // §11.4: MCP deviations need the resolution, so they land here, after _resolvePolicy (which
+    // resets the list on resume). Persisted now, with the WHOLE list: when this is the run's first
+    // _persistPolicyState (a saved workflow; an Auto run's classifier spawn persists earlier), the
+    // patch replaces the policy's own codes, because writePolicyState unions only with what is stored.
+    if (reg && this.policyRun) {
+      const found = mcpDeviations(this.policyRun.fields, reg.result, (s) => skipReasonText(s, reg.catalog));
+      for (const d of found) {
+        this.policyRun.deviations.push(d.code);
+        this._log('policy', 'warn', `off-policy: ${d.text}`);
+      }
+      if (found.length) this._persistPolicyState({ deviations: [...this.policyRun.deviations] });
+    }
+    // §10: the assembly rewrote run.json.warnings; a resumed run's recorded connection problems
+    // (run.json.mcpStatus, which the assembly never rewrites) and its tool-name warning are put
+    // back, and the resumed harness does not warn the tool name again.
+    const lost = Object.entries(prior?.mcpStatus || {})
+      .map(([name, status]) => mcpStatusWarning(name, status, this.mcpLayer?.copies.find((c) => c.name === name)?.setName))
+      .filter(Boolean);
+    const named = (prior?.warnings || []).filter((w) => w.startsWith(`${MCP_NAME_WARNING} — `));
+    if (named.length) this._mcpNameWarned = true;
+    lost.push(...named);
+    if (lost.length) await updateRunManifest(this.runRoot, { warnings: [...rc.warnings, ...lost] });
     // Audit (spec bullet): the resolved effective policy, compact, into run.json.
     // Written HERE because runRoot exists only on detached runs and this is the
     // one site where this.guardrails and the FINAL (post-lift) rule set are both
@@ -2206,6 +2389,40 @@ export class RunHarness extends EventEmitter {
     await appendAudit(this.pipeline.dir, renderContextAudit(rc)).catch(() => {});
     await this._recordCapabilities();
     return rc;
+  }
+
+  /**
+   * The MCP registry layer for this run (design §6.1): the resolver over the run's target, its
+   * Team set from the resolved policy, the opt-out and the tool-name limit of every model the run
+   * may dispatch. Workspace scans and memory-defrag runs get none (designer default 3).
+   * @param {string[]} taken  names the spawn already loads (run-context.mjs)
+   * @returns {Promise<{result:object, catalog:object[]}|null>}
+   */
+  async _resolveMcp(taken) {
+    if (this._isWorkspaceScan() || this.workflowId === MEMORY_DEFRAG_WORKFLOW_ID) return null;
+    const m = this.members[0];
+    const target = this.isWorkspace
+      ? { kind: 'workspace', id: this.workspace.id, name: this.workspace.name, members: this.members.map((x) => ({ key: x.projectKey, name: x.projectName })), rank: 0 }
+      : { kind: 'project', key: m.projectKey, name: m.projectName, rank: 0 };
+    const required = requiredOf(this.policyRun);
+    const [result, catalog] = await Promise.all([
+      resolveRegistry({
+        surface: 'pipeline', targets: [target],
+        teams: { [this.isWorkspace ? `ws:${this.workspace.id}` : m.projectKey]: required.length ? { home: this.policyRun.home, required } : null },
+        optOut: this.mcpOptOut, toolNameLimit: toolNameLimitFor([...this._mcpModels()]), copyCap: 24, taken,
+        mcpTimeoutMs: MCP_STARTUP_MS.pipeline,
+      }),
+      loadCatalog(),
+    ]);
+    return { result, catalog };
+  }
+
+  /** §5.6: every model this run may dispatch — the manifest's, the step models' and the run's own. */
+  _mcpModels() {
+    const models = manifestModels(this.state.stepper);
+    for (const s of Object.values(this.stepModels || {})) if (typeof s?.model === 'string' && s.model.trim()) models.add(s.model.trim());
+    if (this.claude.model) models.add(this.claude.model);
+    return models;
   }
 
   /** Absolute `<pipeline.dir>/memory.json` — the durable memory ledger (amendment A2). */
@@ -2604,6 +2821,7 @@ export class RunHarness extends EventEmitter {
       );
       this.mcpConfigPath = null;
       this.mcpServerGrants = [];
+      this.mcpLayer = null;
     }
     await updateRunManifest(this.runRoot, {
       capabilities: { mcpGrants: MCP_GRANT_MODE, ...caps, probed: true },
@@ -2617,14 +2835,17 @@ export class RunHarness extends EventEmitter {
    * the run-level featureBranch suffixed with the project slug (so members never
    * collide on one branch name), or a suggested name when none was given.
    * @param {{projectDir,projectKey,projectName,branch?:{source?,feature?}}} m
-   * @returns {Promise<{source:string, featureRaw:string}>}
+   * @returns {Promise<{source:string, featureRaw:string, fellBack:boolean}>}
    */
-  async _resolveMemberBranches(m) {
+  async _resolveMemberBranches(m, { replay = false } = {}) {
     const dir = resolve(m.projectDir);
     const named = (m.branch && m.branch.source) || this.branchOpts.source || null;
-    const source = (named && (await isValidSourceRef(dir, named)))
-      ? named
-      : await resolveDefaultBranch(dir);
+    // A remote-only source becomes a local tracking branch first (C14), so the silent
+    // fallback below applies only when the branch exists nowhere.
+    if (named && !(await isValidSourceRef(dir, named))) await this._ensureLocalSource(m, named, { replay });
+    const namedOk = !!named && (await isValidSourceRef(dir, named));
+    const source = namedOk ? named : await resolveDefaultBranch(dir);
+    const fellBack = !!named && !namedOk;          // _syncMemberBase never syncs a fallback (D9)
     const feature = (m.branch && m.branch.feature) || this.branchOpts.feature || null;
     const featureRaw = feature
       ? sanitizeBranchName(`${feature}-${slugify(m.projectName)}`)
@@ -2633,7 +2854,7 @@ export class RunHarness extends EventEmitter {
           title: `${this.opts.title || ''} ${m.projectName}`.trim() || null,
           pipelineId: this.pipeline.id,
         });
-    return { source, featureRaw };
+    return { source, featureRaw, fellBack };
   }
 
   /**
@@ -2851,6 +3072,11 @@ export class RunHarness extends EventEmitter {
    * §8.11 stray scan, (8) the run.json durability copy, (9) guarded rm -rf (§8.13).
    */
   async _teardownRunRoot() {
+    // §10: run.json writes still queued on the MCP chain land before the manifest is copied and
+    // the run root removed, and the chain closes: an agent event that arrives later (a sibling
+    // still streaming after a failure) must not recreate the removed root.
+    this._mcpClosed = true;
+    await this._mcpTail;
     if (this.runRootMode !== 'detached') {
       if (this.isWorkspace) await this._teardownWorktreeAll();
       else await this._teardownWorktree();
@@ -2983,6 +3209,7 @@ export class RunHarness extends EventEmitter {
    * live manifest, copied out before removal). Never throws.
    */
   async _recordRunWarning(text, attr = null) {
+    if (this.mcpLayer?.redact.length) text = createRedactor(this.mcpLayer.redact).text(text);   // MCP registry §5.5.3
     this._log('worktree', 'warn', text, attr);
     if (!this.runRoot) return;
     try {
@@ -3265,6 +3492,7 @@ export class RunHarness extends EventEmitter {
     for (const m of Object.values(stepModels || {})) if (typeof m === 'string' && m.trim()) models.add(m.trim());
     if (this.claude?.model) models.add(this.claude.model);
     if (!models.size) models.add('claude-sonnet-5');   // nothing named: the CLI's own default is a Claude model
+    try { await syncPluginSlots(); } catch { /* the spawn says why */ }
     let status;
     try { status = (await personSlots(person === 'local' || !person ? (process.env.WORCA_BROKER_SYSTEM_BILL_TO || 'local') : person)).slots || []; } catch { return; }
     const r = missingCredentials([...models], modelSlot, status);
@@ -4852,6 +5080,19 @@ export class RunHarness extends EventEmitter {
         step.modelUsed = e.raw.model;
         this._persist().catch(() => {});
       }
+      // §10: an init without an `mcp_servers` list says nothing about the copies (never "absent").
+      if (!sub && Array.isArray(e.raw.mcp_servers) && this.mcpLayer?.copies.length) this._recordMcpInit(e.raw.mcp_servers);
+    }
+    // §10: a first-party 400 on an over-long MCP tool name fails the whole turn; name the
+    // registry copies whose tools were never checked (no current Test), once per run.
+    if (isResult && e.raw.is_error && !this._mcpNameWarned && this.mcpLayer?.copies.length) {
+      const text = [e.raw.result, ...(Array.isArray(e.raw.errors) ? e.raw.errors : [])].filter((t) => typeof t === 'string').map((t) => t.slice(0, 4096)).join(' ');
+      const untested = this.mcpLayer.copies.filter((c) => c.untested);
+      if (untested.length && MCP_NAME_400_RE.test(text)) {
+        this._mcpNameWarned = true;
+        const sets = [...new Set(untested.map((c) => c.setName))].join(', ');
+        this._mcpChain(() => this._recordRunWarning(`${MCP_NAME_WARNING} — Test the servers in ${sets} (${untested.map((c) => c.name).join(', ')})`));
+      }
     }
 
     // The CLI's silent API retries (`system`/`api_retry`): without this line a call
@@ -4870,6 +5111,38 @@ export class RunHarness extends EventEmitter {
     for (const line of describeToolResults(e.raw)) {
       this._log(source, 'debug', `← ${line}`, logAttr);
     }
+  }
+
+  /** §10: run.json.mcpStatus and its warnings go through ONE chain — updateRunManifest is an
+   *  unlocked read-modify-write and fan-out nodes emit `system/init` concurrently. A pause and the
+   *  teardown drain and close it (a later event must not write behind a resume or recreate the
+   *  removed run root). */
+  _mcpChain(fn) {
+    if (this._mcpClosed) return this._mcpTail || Promise.resolve();
+    this._mcpTail = (this._mcpTail || Promise.resolve()).then(fn).catch(() => {});
+    return this._mcpTail;
+  }
+
+  /** §10: one warning per registry copy and problem status per run; `pending` is a debug line. */
+  _recordMcpInit(servers) {
+    const status = new Map(servers.map((s) => [s?.name, s?.status]));
+    const copies = this.mcpLayer.copies;
+    this._mcpChain(async () => {
+      const m = (await readRunManifest(this.runRoot)) || {};
+      const cur = m.mcpStatus || {};
+      const next = { ...cur };
+      const warned = new Set(m.warnings || []);   // once per copy and status per run, flapping included
+      const lines = [];
+      for (const c of copies) {
+        const st = status.get(c.name) ?? 'absent';
+        if (st === 'pending') { this._log('mcp', 'debug', `${c.name}: MCP server still starting (pending)`); continue; }
+        next[c.name] = st;
+        const w = mcpStatusWarning(c.name, st, c.setName);
+        if (w && !warned.has(w)) { warned.add(w); lines.push(w); }
+      }
+      await updateRunManifest(this.runRoot, { mcpStatus: next });
+      for (const w of lines) await this._recordRunWarning(w);
+    });
   }
 
   /**
@@ -5308,6 +5581,12 @@ export class RunHarness extends EventEmitter {
    *  finally never tears a paused run down. Both helpers are no-ops with an empty
    *  workDirs (a setup-phase pause). */
   async _completePaused() {
+    // §10: MCP run.json writes queued before the pause land first: the run log is still open, and
+    // a resume reads run.json before its assembly rewrites it. The chain closes here too: an agent
+    // still streaming after the pause must not write run.json behind a resume (a resume always
+    // builds a new orchestrator, so this one never dispatches again).
+    this._mcpClosed = true;
+    await this._mcpTail;
     // D7: a pause that landed BEFORE run()'s setup finished (a converted setup failure,
     // or a user pause racing one — run()'s pause branch catches a plain error while
     // 'pausing') must replay that setup on resume; a completed setup never leaves a
@@ -5555,6 +5834,141 @@ export class RunHarness extends EventEmitter {
     });
     this._emit('state', this.getState());
     this._persist().catch(() => {});
+  }
+
+  /** The Sync stage row (x:sync:1) opens lazily — an all-up-to-date run shows none (plan D6).
+   *  It can only open once the fetch has answered, so charge the fetch to it: backdate the row
+   *  to `startedAtMs` and take that time back off preflight, which _recordStep('start') just
+   *  paused (it folds the elapsed time into preflight's activeMs). */
+  _openSyncStage(startedAtMs) {
+    if (this._syncStageOpen) return;
+    this._syncStageOpen = true;
+    this._bookend('sync', 'start');
+    const row = this.state.steps.find((s) => s.key === SYNC_EXECUTION_ID);
+    const pre = this.state.steps.find((s) => s.key === 'x:preflight:1');
+    if (row && Number.isFinite(startedAtMs) && row.runningSince != null) {
+      const spent = Math.max(0, row.runningSince - startedAtMs);
+      row.startedAt = new Date(startedAtMs).toISOString();
+      row.runningSince = startedAtMs;
+      if (pre) pre.activeMs = Math.max(0, (pre.activeMs || 0) - spent);
+      this.state.totalActiveMs = sumStepActive(this.state.steps);
+    }
+  }
+
+  /** Close the Sync row and hand the active-time clock back to the still-open preflight —
+   *  test/orchestrator-graph.test.mjs pins that preflight ticks through all of setup.
+   *  Resume FIRST: _bookend emits `state` itself, and that emit must already show
+   *  preflight running (_recordStep('done') pauses only the sync key). */
+  _closeSyncStage() {
+    if (!this._syncStageOpen) return;
+    this._syncStageOpen = false;
+    const pre = this.state.steps.find((s) => s.key === 'x:preflight:1');
+    if (pre && pre.status === 'start') this._clockResume('x:preflight:1');
+    this._bookend('sync', this._syncStageFailed ? 'error' : 'done');
+  }
+
+  /** The start a paused setup recorded for `key` before its createWorktree failed (replay only):
+   *  a member record with no worktreeDir. Single-project runs read the persisted state.branch. */
+  _pendingStart(key) {
+    const b = (this.state.branches && this.state.branches[key]) || (!this.isWorkspace ? this.state.branch : null);
+    return b && typeof b === 'object' && !b.worktreeDir && b.source ? b : null;
+  }
+
+  /** A remote-only source (picked from the Remote only group / proposed by Ask) becomes a local
+   *  tracking branch before anything resolves or validates it (C14). Never on a read-only scan
+   *  or a memory-defrag run. Records the created branch's sha for the diff-base move (D17). */
+  async _ensureLocalSource(m, name, { replay = false } = {}) {
+    if (!name || !isSafeBranchName(name) || this._isWorkspaceScan() || this.memoryScope) return;
+    const cfg = this.syncOpts.memberFor(m.projectKey);
+    const remote = cfg.remote;
+    const dir = resolve(m.projectDir);
+    let c = await ensureLocalBranch(dir, { base: name, remote });
+    // A scheduled start skips the server's pre-check, so a source pushed after the last fetch
+    // is not in the refs yet and a workspace member would silently fall back to its default
+    // branch. With sync on for this member (never on a replay), fetch once and retry.
+    // maxAgeMs 0: the TTL would skip exactly the fetch this exists for when the background
+    // refresh or an Ask call fetched moments before the push. It runs only on a miss.
+    if (!c.ok && c.kind === 'missing' && cfg.enabled && !replay) {
+      await fetchRemote(dir, { remote, maxAgeMs: 0, timeoutMs: INTERACTIVE_TIMEOUT_MS });
+      c = await ensureLocalBranch(dir, { base: name, remote });
+    }
+    if (!(c.ok && c.created)) return;
+    this._createdSources.set(m.projectKey, c.to);
+    this._log('sync', 'info', `${m.projectKey}: created local ${name} tracking ${remote}/${name}`);
+    await appendAudit(this.pipeline.dir, `Created local \`${name}\` in \`${m.projectKey}\` from \`${remote}/${name}\` (\`${String(c.to).slice(0, 10)}\`).`).catch(() => {});
+  }
+
+  /**
+   * Bring member `m`'s base up to date before its worktree exists. Returns
+   * { startRef?, record? }; throws a TERMINAL error only for a diverged base under
+   * onDiverged 'fail' (never a pause: resuming cannot fix a divergence).
+   * Never on a replay/resume, a read-only scan, or a memory-defrag run.
+   */
+  async _syncMemberBase(m, source, { replay = false, fellBack = false } = {}) {
+    const cfg = this.syncOpts.memberFor(m.projectKey);
+    if (!cfg.enabled || replay || this._isWorkspaceScan() || this.memoryScope) return {};
+    const attr = { nodeId: 'sync', executionId: SYNC_EXECUTION_ID };
+    const prefix = this.isWorkspace ? `${m.projectKey}: ` : '';
+    // Say why a member is not synced. A workspace member whose named source exists nowhere
+    // falls back to its default branch (_resolveMemberBranches); the interactive pre-check looked
+    // at the NAMED branch, so syncing the fallback could fail a run nobody was asked about.
+    if (fellBack || !isSafeBranchName(source)) {
+      this._log('sync', 'info', `${prefix}not syncing ${JSON.stringify(String(source))}: ${fellBack ? 'the named source branch does not exist, so this is a fallback' : 'not a plain branch name'}`, attr);
+      return {};
+    }
+    // isSafeBranchName rejects only full SHAs. A tag or short SHA resolves without being a
+    // local branch: never sync it (no fetch, no record, no audit line). A name that resolves
+    // to NOTHING still goes on: the Sync fetch may create it ('created').
+    const mdir = resolve(m.projectDir);
+    if (!(await listLocalBranches(mdir)).includes(source) && (await isValidSourceRef(mdir, source))) {
+      this._log('sync', 'info', `${prefix}not syncing ${JSON.stringify(String(source))}: a tag or commit, not a branch`, attr);
+      return {};
+    }
+    const startedAtMs = Date.now();
+    const startedAt = new Date(startedAtMs).toISOString();
+    // Members sync concurrently (mapWithCap): restore the previous stage label only when the
+    // LAST in-flight sync finishes, so the status line never sticks on "Syncing…".
+    if (this._syncing === 0) this._stageBeforeSync = this.state.setupStage || null;
+    this._syncing += 1;
+    this._setupStage('Syncing the base branch');
+    let r;
+    try {
+      r = await syncBaseForRun(mdir, {
+        base: source, remote: cfg.remote, timeoutMs: this.syncOpts.timeoutMs, onDiverged: cfg.onDiverged });
+    } finally {
+      this._syncing -= 1;
+      if (this._syncing === 0) this._setupStage(this._stageBeforeSync);
+    }
+    // A project with no such remote has nothing to sync (beforeRun defaults to true, so this is
+    // every run of a local-only project): no record, no audit line, no Sync row.
+    if (r.result === 'skipped' && (r.reason === 'no-remote' || r.reason === 'bad-remote')) return {};
+    const quiet = r.result === 'skipped' || r.result === 'up-to-date' || r.result === 'no-upstream';
+    if (!quiet) this._openSyncStage(startedAtMs);
+    if (r.result === 'diverged') this._syncStageFailed = true;
+    for (const line of r.log) this._log('sync', r.result === 'fetch-failed' || r.result === 'diverged' ? 'warn' : 'info', `${prefix}${line}`, attr);
+    const record = {
+      result: r.result, ...(r.reason ? { reason: r.reason } : {}), remote: cfg.remote,
+      from: r.from || null, to: r.to || null, remoteSha: r.remoteSha || null,   // remote tip at start (resume / Ship-it measure from it)
+      commits: r.commits || 0, ahead: r.ahead || 0, behind: r.behind || 0,
+      stale: !!r.stale, fetchedAt: r.fetch?.fetchedAt || null, ...(r.fetch && !r.fetch.ok ? { fetchError: r.fetch.kind } : {}),
+      policy: cfg.onDiverged, policySource: cfg.policySource,
+      startedAt, endedAt: new Date().toISOString(), log: r.log.slice(0, 20),
+    };
+    await appendAudit(this.pipeline.dir, `Sync \`${m.projectKey}\`: ${source} ${r.result}${r.reason ? ` (${r.reason})` : ''}` +
+      `${r.commits ? `, ${r.commits} commit(s)` : ''}${r.to ? ` → \`${String(r.to).slice(0, 10)}\`` : ''}` +
+      ` (onDiverged ${cfg.onDiverged}, from ${cfg.policySource}).`).catch(() => {});
+    if (r.result === 'diverged') {
+      // Keep the refusal on the run (header Sync button, Ask get_run): the terminal run's persisted
+      // state.branch is mirrored from this before the setup-failure throw. No worktreeDir, so
+      // every pending-record reader skips it.
+      this.state.branches[m.projectKey] = { source, sync: record };
+      throw markTerminal(new Error(`Sync: ${source} has diverged from ${cfg.remote}/${source} (${r.ahead} ahead, ${r.behind} behind). ` +
+        'Worca never merges or resets a shared checkout; start again and choose "Start from origin", or set sync.onDiverged to "origin".'));
+    }
+    // Single project: close the row now so its time is the sync, not the worktree creation.
+    // Workspace members share the row; it closes after the member loop.
+    if (!this.isWorkspace) this._closeSyncStage();
+    return { ...(r.startRef ? { startRef: r.startRef } : {}), record };
   }
 
   /** Name what the open preflight is doing (`state.setupStage`): the run page's

@@ -287,7 +287,9 @@ test('bookends are exec rows carrying an executionId, and no phase event is emit
   // stepRowToStep never restores it, and both readers (run-decor's ledgerRows,
   // render.mjs's summary) stop filtering the bookends on a REHYDRATED run.
   const live = orch.getState();
-  for (const id of BOOKEND_EXECUTION_IDS) {
+  // x:sync:1 is a bookend too, but it exists only when a base sync happened (lazy row,
+  // covered in test/run-harness-sync.test.mjs); preflight and done are always written.
+  for (const id of ['x:preflight:1', 'x:done:1']) {
     const row = live.steps.find((s) => s.key === id);
     assert.ok(row, `the ledger keeps ${id}`);
     assert.equal(row.executionId, id, `${id} carries its executionId`);
@@ -298,7 +300,7 @@ test('bookends are exec rows carrying an executionId, and no phase event is emit
   // path the two readers actually run on in History).
   const rehydrated = readPipelineForResume(live.id).steps
     ?? (await import('../src/core/artifacts.mjs')).readPipeline(live.id).steps;
-  for (const id of BOOKEND_EXECUTION_IDS) {
+  for (const id of ['x:preflight:1', 'x:done:1']) {
     const row = (rehydrated || []).find((s) => s.key === id);
     assert.ok(row, `${id} round-tripped`);
     assert.equal(row.executionId, id, `${id} kept execution_id through the DB`);

@@ -1,7 +1,8 @@
 # Third-party notices
 
-Worca is MIT-licensed (see `LICENSE`). The pieces below were adapted from other
-MIT-licensed projects; their notices travel with the code as the license asks.
+Worca is MIT-licensed (see `LICENSE`). The first section below covers code adapted
+from another MIT-licensed project, whose notice travels with the code as its license
+asks; the last names the npm packages worca installs for MCP Test.
 
 ## ericc-ch/copilot-api
 
@@ -37,3 +38,25 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## @modelcontextprotocol/sdk
+
+Test (Settings › MCP servers, `src/core/mcp/test.mjs`) talks to MCP servers
+through the official SDK, `@modelcontextprotocol/sdk 1.31.0` (MIT, Copyright (c)
+2024 Anthropic, PBC), pinned exactly in `package.json`. It and the packages it
+pulls in are installed from npm, each under its own license (the text ships in
+the package):
+
+- MIT: `@modelcontextprotocol/sdk`, `@hono/node-server`, `accepts`, `ajv`,
+  `ajv-formats`, `body-parser`, `content-disposition`, `content-type`,
+  `cookie-signature`, `cors`, `cross-spawn`, `debug`, `eventsource`,
+  `eventsource-parser`, `express` (5, nested under the SDK), `express-rate-limit`,
+  `fast-deep-equal`, `finalhandler`, `fresh`, `hono`, `iconv-lite`, `ip-address`,
+  `is-promise`, `jose`, `json-schema-traverse`, `media-typer`,
+  `merge-descriptors`, `mime-db`, `mime-types`, `ms`, `negotiator`,
+  `object-assign`, `path-key`, `path-to-regexp`, `pkce-challenge`, `raw-body`,
+  `require-from-string`, `router`, `send`, `serve-static`, `shebang-command`,
+  `shebang-regex`, `type-is`, `zod`
+- ISC: `isexe`, `once`, `which`, `wrappy`, `zod-to-json-schema`
+- BSD-2-Clause: `json-schema-typed`
+- BSD-3-Clause: `fast-uri`

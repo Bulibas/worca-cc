@@ -111,7 +111,7 @@ useTempHome(after);
 const origCwd = process.cwd();
 let cwdSandbox = null;
 
-let homeDir, srv, base, runs, summarizeRuns, prevHome;
+let homeDir, srv, base, runs, summarizeRuns, prevHome, testing;
 const JSONH = { 'Content-Type': 'application/json' };
 const created = [];
 
@@ -135,6 +135,7 @@ before(async () => {
   const mod = await import('../ui/server.mjs'); // imported => no port bind
   runs = mod.runs;
   summarizeRuns = mod._testing.summarizeRuns;
+  testing = mod._testing;
   srv = http.createServer(mod.app);
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${srv.address().port}`;
@@ -357,6 +358,214 @@ test('DELETE /api/workspaces/:id is 409 while a live run/scan for it exists', as
 
   // After the live entry clears, deletion proceeds.
   assert.equal((await del(`/api/workspaces/${workspace.id}`)).status, 200);
+});
+
+test('POST /api/workspaces/:id/members adds and removes members; the id stays frozen', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const { workspace } = await (await post('/api/workspaces', { name: 'Members', projectPaths: [a, b], metricsProject: a })).json();
+
+  let r = await post(`/api/workspaces/${workspace.id}/members`, { add: [c] });
+  assert.equal(r.status, 200, await r.clone().text());
+  let body = await r.json();
+  assert.equal(body.workspace.id, workspace.id);
+  assert.equal(body.workspace.projectPaths.length, 3);
+  assert.deepEqual(body.clearedHomes, []);
+
+  r = await post(`/api/workspaces/${workspace.id}/members`, { remove: a });
+  assert.equal(r.status, 200, await r.clone().text());
+  body = await r.json();
+  assert.equal(body.workspace.id, workspace.id);
+  assert.equal(body.workspace.projectPaths.includes(a), false);
+  assert.equal(body.workspace.metricsProject, null, 'the removed metrics home is cleared');
+  assert.deepEqual(body.clearedHomes, ['metrics']);
+  const got = (await (await get(`/api/workspaces/${workspace.id}`)).json()).workspace;
+  assert.equal(got.projectPaths.length, 2);
+});
+
+test('POST /api/workspaces/:id/members maps refusals: 400 bad body / non-git / below 2, 409 duplicate set, 404 unknown', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const plain = await freshDir();
+  await post('/api/workspaces', { name: 'Trio Taken', projectPaths: [a, b, c] });
+  const { workspace } = await (await post('/api/workspaces', { name: 'Duo', projectPaths: [a, b] })).json();
+  const url = `/api/workspaces/${workspace.id}/members`;
+  assert.equal((await post(url, {})).status, 400, 'neither add nor remove');
+  assert.equal((await post(url, { add: [c], remove: a })).status, 400, 'both');
+  assert.equal((await post(url, { add: [plain] })).status, 400, 'non-git member');
+  assert.equal((await post(url, { remove: a })).status, 400, 'below 2 members');
+  assert.equal((await post(url, { add: [c] })).status, 409, 'another workspace spans that set');
+  assert.equal((await post('/api/workspaces/wks-nope-00000000/members', { add: [c] })).status, 404);
+  assert.equal((await post('/api/workspaces/not-a-ws-id/members', { add: [c] })).status, 404);
+});
+
+test('POST /api/workspaces/:id/members is 409 while a run owns the workspace (a paused Workspace scan included)', async () => {
+  const { WORKSPACE_SCAN_WORKFLOW_ID } = await import('../src/core/graph/builtin-workflows.mjs');
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const { workspace } = await (await post('/api/workspaces', { name: 'Live Members', projectPaths: [a, b] })).json();
+  const owners = [
+    { status: 'running' }, { status: 'pausing' },
+    { status: 'paused', orch: { workflowId: WORKSPACE_SCAN_WORKFLOW_ID } },
+  ];
+  for (const o of owners) {
+    runs.set('live-ws-m', { id: 'live-ws-m', kind: 'workspace-run', workspaceId: workspace.id, ...o });
+    const r = await post(`/api/workspaces/${workspace.id}/members`, { add: [c] });
+    assert.equal(r.status, 409, `status=${o.status} blocks a membership change`);
+  }
+  // A paused ordinary run holds the target no more than it does for a re-scan or a delete.
+  runs.set('live-ws-m', { id: 'live-ws-m', kind: 'workspace-run', workspaceId: workspace.id, status: 'paused', orch: { workflowId: 'wf_default' } });
+  try {
+    assert.equal((await post(`/api/workspaces/${workspace.id}/members`, { add: [c] })).status, 200);
+  } finally { runs.delete('live-ws-m'); }
+});
+
+/** Poll until `fn` returns a truthy value (bounded). */
+async function until(fn, ms = 15000) {
+  const t0 = Date.now();
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() - t0 > ms) throw new Error('until: timed out');
+    await delay(25);
+  }
+}
+
+/** Stop and forget every run of a workspace the test started (mock scans included). */
+function stopRunsOf(workspaceId) {
+  for (const [id, r] of runs) {
+    if (r.workspaceId !== workspaceId) continue;
+    try { r.orch && typeof r.orch.stop === 'function' && r.orch.stop(); } catch { /* best-effort */ }
+    runs.delete(id);
+  }
+}
+
+test('a member change starts a Workspace scan run of the new set (graphs, map, description), saved when it ends done', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const { workspace } = await (await post('/api/workspaces', { name: 'Rescanned', projectPaths: [a, b], description: 'old text' })).json();
+  const r = await post(`/api/workspaces/${workspace.id}/members`, { add: [c] });
+  assert.equal(r.status, 200, await r.clone().text());
+  const body = await r.json();
+  assert.ok(body.rescan && body.rescan.runId, `the change starts a re-scan: ${JSON.stringify(body.rescan)}`);
+  const entry = runs.get(body.rescan.runId);
+  assert.equal(entry.kind, 'workspace-run');
+  assert.equal(entry.workspaceId, workspace.id);
+  assert.equal(entry.autoRescan, true);
+  assert.equal(entry.orch.workflowId, 'wf_workspace_scan', 'the Workspace scan workflow');
+  const got = await until(async () => {
+    const ws = (await (await get(`/api/workspaces/${workspace.id}`)).json()).workspace;
+    return ws.description && ws.description !== 'old text' ? ws : null;
+  }, 60000);
+  assert.equal(got.projectPaths.length, 3);
+  assert.equal(got.descriptionOrigin, 'generated');
+  stopRunsOf(workspace.id);
+});
+
+test('a second member change supersedes the automatic re-scan; a scan the user started still blocks it', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const { workspace } = await (await post('/api/workspaces', { name: 'Superseded', projectPaths: [a, b] })).json();
+  const stopped = [];
+  runs.set('auto-scan-1', { id: 'auto-scan-1', kind: 'workspace-run', workspaceId: workspace.id, status: 'running', autoRescan: true,
+    events: [], orch: { stop() { stopped.push('auto-scan-1'); } } });
+  const r = await post(`/api/workspaces/${workspace.id}/members`, { add: [c] });
+  assert.equal(r.status, 200, await r.clone().text());
+  assert.deepEqual(stopped, ['auto-scan-1'], 'the automatic re-scan of the old set is stopped');
+  assert.equal(runs.get('auto-scan-1').superseded, true);
+  const next = (await r.json()).rescan;
+  assert.ok(next.runId && next.runId !== 'auto-scan-1', 'a fresh re-scan of the new set');
+  stopRunsOf(workspace.id);
+  runs.set('user-scan-1', { id: 'user-scan-1', kind: 'workspace-run', workspaceId: workspace.id, status: 'running', orch: { stop() {} } });
+  try {
+    assert.equal((await post(`/api/workspaces/${workspace.id}/members`, { remove: c })).status, 409, 'a scan the user started is theirs to finish');
+  } finally { runs.delete('user-scan-1'); }
+});
+
+test('POST /api/workspaces/:id/members is 409 while ANOTHER process (the CLI) runs the workspace; a crashed one blocks nothing', async () => {
+  const { seedPipelineRow } = await import('./helpers/db-seed.mjs');
+  const { getDb } = await import('../src/core/db.mjs');
+  const { hostname } = await import('node:os');
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const { workspace } = await (await post('/api/workspaces', { name: 'Cli Owned', projectPaths: [a, b] })).json();
+  const now = new Date().toISOString();
+  const row = (id, ownerPid) => seedPipelineRow({ id, projectKey: workspace.projectKeys[0], workspaceKey: workspace.id, target: 'workspace',
+    status: 'running', startedAt: now, ownerPid, ownerHost: hostname(), heartbeatAt: now });
+  try {
+    row('c1100001', process.ppid);   // alive, and not this server
+    const r = await post(`/api/workspaces/${workspace.id}/members`, { add: [c] });
+    assert.equal(r.status, 409, 'a run the in-process runs map cannot see still owns the workspace');
+    assert.match((await r.json()).error, /run or scan owns it/);
+    getDb().prepare("DELETE FROM pipelines WHERE id = 'c1100001'").run();
+    row('c1100002', 2 ** 22 + 12345);   // a pid no process holds: the CLI crashed mid-run
+    const ok = await post(`/api/workspaces/${workspace.id}/members`, { add: [c] });
+    assert.equal(ok.status, 200, 'a dead owner\'s row is reconciled, not obeyed');
+    stopRunsOf(workspace.id);
+  } finally {
+    getDb().prepare("DELETE FROM pipelines WHERE id IN ('c1100001', 'c1100002')").run();
+  }
+});
+
+test('the workspace list and detail name the automatic re-scan run while it owns the workspace', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const { workspace } = await (await post('/api/workspaces', { name: 'Reported', projectPaths: [a, b] })).json();
+  runs.set('auto-scan-r', { id: 'auto-scan-r', pipelineId: 'abcd1234', kind: 'workspace-run', workspaceId: workspace.id, status: 'running', autoRescan: true });
+  try {
+    const listed = (await (await get('/api/workspaces')).json()).workspaces.find((w) => w.id === workspace.id);
+    assert.deepEqual(listed.rescan, { runId: 'auto-scan-r', pipelineId: 'abcd1234', paused: false });
+    assert.deepEqual((await (await get(`/api/workspaces/${workspace.id}`)).json()).workspace.rescan, listed.rescan);
+    // A paused automatic re-scan still owns the workspace (it resumes into it); a reloaded page
+    // must show it paused, not spinning — its rescan-paused frame went out before the reload.
+    Object.assign(runs.get('auto-scan-r'), { status: 'paused', orch: { workflowId: 'wf_workspace_scan' } });
+    assert.deepEqual((await (await get(`/api/workspaces/${workspace.id}`)).json()).workspace.rescan,
+      { runId: 'auto-scan-r', pipelineId: 'abcd1234', paused: true });
+    runs.get('auto-scan-r').status = 'done';
+    assert.equal((await (await get('/api/workspaces')).json()).workspaces.find((w) => w.id === workspace.id).rescan, undefined, 'gone once it ends');
+  } finally { runs.delete('auto-scan-r'); }
+});
+
+test('a member change the scan cannot read skips the re-scan with the reason, and still applies', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const { workspace } = await (await post('/api/workspaces', { name: 'Unscannable', projectPaths: [a, b] })).json();
+  // A repository with no commit yet: createWorkspace accepts it, a scan never reads it (scan D5).
+  const empty = await freshDir();
+  spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: empty });
+  const r = await post(`/api/workspaces/${workspace.id}/members`, { add: [empty] });
+  assert.equal(r.status, 200, await r.clone().text());
+  const body = await r.json();
+  assert.equal(body.workspace.projectPaths.length, 3);
+  assert.match(body.rescan.skipped, /read-only workspace scan/);
+});
+
+test('a chained run that starts from the previous run\'s branches still fires after a member was added', async () => {
+  const { createTicket, getTicket } = await import('../src/core/scheduler.mjs');
+  const { seedPipelineRow } = await import('./helpers/db-seed.mjs');
+  const { projectKey } = await import('../src/core/store.mjs');
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const { workspace } = await (await post('/api/workspaces', { name: 'Chained', projectPaths: [a, b] })).json();
+  for (const d of [a, b]) spawnSync('git', ['branch', 'worca/prev-feature'], { cwd: d });
+  seedPipelineRow({
+    id: 'c0ffee01', projectKey: projectKey(a), workspaceKey: workspace.id, target: 'workspace', status: 'done',
+    startedAt: new Date().toISOString(),
+    workspaceMeta: { workspaceId: workspace.id, branches: { [projectKey(a)]: { feature: 'worca/prev-feature' }, [projectKey(b)]: { feature: 'worca/prev-feature' } } },
+  });
+  await post(`/api/workspaces/${workspace.id}/members`, { add: [c] });
+  const t = createTicket({ workspaceId: workspace.id, after: { kind: 'pipeline', id: 'c0ffee01' }, afterPolicy: 'any', sourceFromPrevious: true,
+    request: { workspaceId: workspace.id, prompt: 'next step', mock: true } });
+  const out = await testing.fireTicket(getTicket(t.id, { withRequest: true }));
+  assert.deepEqual(out, { ok: true }, 'the new member starts from its default branch instead of failing the ticket');
+  for (const r of runs.values()) if (r.workspaceId === workspace.id && r.orch && r.kind !== 'scan') { try { r.orch.stop(); } catch { /* best-effort */ } }
 });
 
 // ───────────────────────────────────────────────────────────────────────────

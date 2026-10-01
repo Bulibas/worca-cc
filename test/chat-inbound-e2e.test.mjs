@@ -77,6 +77,17 @@ test('allowlist enforced at the server seam: unlisted chat gets NO reply', async
   assert.equal(mockSentMessages().length, 0);
 });
 
+test('/api/chat/status reports the allow-list size and the last refused command', async () => {
+  await inject('/approve *zz', '666');
+  const body = await (await fetch(`${base}/api/chat/status`)).json();
+  const row = body.channels.find((c) => c.plugin === NAME && c.channelId === 'main');
+  assert.equal(row.commands.allowed, 1, 'allowedChatIds = "42"');
+  assert.equal(row.commands.lastRefused.chatId, '666');
+  assert.equal(row.commands.lastRefused.command, 'approve');
+  assert.ok(!Number.isNaN(Date.parse(row.commands.lastRefused.at)));
+  assert.equal(mockSentMessages().filter((m) => m.chatId === '666').length, 0, '666 is not a notify chat: still silent');
+});
+
 test('a live run is visible and a gate answered from chat clears pendingQuestion', async () => {
   const answered = [];
   runs.set('run-e2e-77', {

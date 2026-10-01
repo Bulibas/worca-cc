@@ -101,12 +101,12 @@ test('workspace mode swaps the single source dropdown for per-project dropdowns'
   wsel.value = 'wks-alpha-00000001';
   wsel.dispatchEvent(new window.Event('change', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 0));
-  // Single dropdown hidden; per-project list shown with one select per member.
-  assert.equal(doc.querySelector('#sourceBranchWrap').classList.contains('hidden'), true);
+  // Single project row hidden; one table row per member shown instead (design v3).
+  assert.equal(doc.querySelector('#bt-project-row').hidden, true);
   assert.equal(doc.querySelector('#ws-source-branches').classList.contains('hidden'), false);
   assert.equal(doc.querySelectorAll('#ws-source-branches select.ws-src-select').length, 2);
   // The "Source branch" field/header itself is never hidden.
-  assert.equal(doc.querySelector('#sourceBranchHint').closest('.field').classList.contains('hidden'), false);
+  assert.equal(doc.querySelector('#sourceBranch').closest('.field').classList.contains('hidden'), false);
 });
 
 test('submit in workspace mode sends {workspaceId} and NO projectDir; project mode is unchanged', async () => {

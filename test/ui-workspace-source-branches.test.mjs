@@ -61,7 +61,7 @@ test('workspace mode hides the single source dropdown and shows one per member',
   const window = await boot();
   const doc = window.document;
   await selectWorkspace(window, 'wks-alpha-00000001');
-  assert.equal(doc.querySelector('#sourceBranchWrap').classList.contains('hidden'), true, 'single dropdown hidden');
+  assert.equal(doc.querySelector('#bt-project-row').hidden, true, 'the single project row gives way to the member rows');
   assert.equal(doc.querySelector('#ws-source-branches').classList.contains('hidden'), false, 'per-project list shown');
   const selects = [...doc.querySelectorAll('#ws-source-branches select.ws-src-select')];
   assert.equal(selects.length, 2, 'one dropdown per member');

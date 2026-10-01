@@ -47,6 +47,8 @@ function rowToThread(r) {
     totals: { ...emptyTotals(), ...(parse(r.totals, {}) || {}) },
     // The thread's owner (identity.mjs actor); null = ownerless (before attribution).
     createdBy: r.created_by ?? null,
+    // MCP registry §9.4: the picker's switched-off {sets, members}; null = none (v45).
+    mcpOff: parse(r.mcp_off, null),
   };
 }
 
@@ -134,9 +136,10 @@ export function countAttachments() {
   return row ? Number(row.n) : 0;
 }
 
-const THREAD_PATCH_COLS = { title: 'title', model: 'model', effort: 'effort', sessionId: 'session_id', context: 'context' };
+const THREAD_PATCH_COLS = { title: 'title', model: 'model', effort: 'effort', sessionId: 'session_id', context: 'context', mcpOff: 'mcp_off' };
+const JSON_PATCH_KEYS = new Set(['context', 'mcpOff']);
 
-/** Patch ⊆ {title, model, effort, sessionId, context}; unknown keys ignored; always bumps updated_at. */
+/** Patch ⊆ {title, model, effort, sessionId, context, mcpOff}; unknown keys ignored; always bumps updated_at. */
 export function updateThread(id, patch = {}) {
   const db = getDb();
   const sets = [];
@@ -144,7 +147,7 @@ export function updateThread(id, patch = {}) {
   for (const [k, col] of Object.entries(THREAD_PATCH_COLS)) {
     if (!Object.prototype.hasOwnProperty.call(patch, k)) continue;
     sets.push(`${col} = ?`);
-    vals.push(k === 'context' ? str(patch[k]) : (patch[k] ?? null));
+    vals.push(JSON_PATCH_KEYS.has(k) ? str(patch[k]) : (patch[k] ?? null));
   }
   sets.push('updated_at = ?');
   vals.push(now(), id);
@@ -286,7 +289,8 @@ export function updateCardBlock(threadId, cardId, patch = {}) {
     const blocks = found.message.blocks.map((b) => {
       if (!(b && b.kind === 'card' && b.id === cardId)) return b;
       const subPatchable = !!(b.card && (b.card.type === 'workflow' || b.card.type === 'metrics'
-        || b.card.type === 'policy' || b.card.type === 'schedule' || b.card.type === 'model' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'away'));
+        || b.card.type === 'policy' || b.card.type === 'schedule' || b.card.type === 'model' || b.card.type === 'clone' || b.card.type === 'web'
+        || b.card.type === 'workspace' || b.card.type === 'away'));
       return { ...b, ...allowed, ...(sub && subPatchable ? { card: { ...(b.card || {}), ...sub } } : {}) };
     });
     prepare('UPDATE ask_messages SET blocks = ? WHERE id = ?').run(JSON.stringify(blocks), found.message.id);
@@ -424,11 +428,6 @@ export function readAttachmentRaw(threadId, id) {
   } catch {
     return null;
   }
-}
-
-export function threadAttachmentBytes(threadId) {
-  getDb();
-  return prepare('SELECT COALESCE(SUM(bytes), 0) AS n FROM ask_attachments WHERE thread_id = ?').get(threadId).n;
 }
 
 // ── run links ───────────────────────────────────────────────────────────────

@@ -53,7 +53,7 @@
           "key": "notifyChatIds",
           "type": "text",
           "label": "Notify conversation IDs",
-          "help": "Comma-separated Teams conversation IDs for notifications. Message the bot once; the ID appears in `worca plugin channel teams-chat main` inbound frames."
+          "help": "Comma-separated Teams conversation IDs for notifications. Send any command (e.g. `/whoami`) to the bot; worca refuses it and Settings → Chat notifications shows 'Ignored /whoami from chat <id>'. That is the conversation ID."
         },
         {
           "key": "allowedChatIds",

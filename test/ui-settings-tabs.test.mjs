@@ -20,23 +20,23 @@ test('the three nav entries are gone from BOTH menus', () => {
     assert.equal(html.includes(`data-nav="${v}"`), false, `data-nav=${v} still present`);
 });
 
-test('settings holds a .seg tab strip with the eight tabs in mode order, General preselected', () => {
+test('settings holds a .seg tab strip with the nine tabs in mode order, General preselected', () => {
   const seg = settingsView().querySelector('#settings-tabs');
   assert.ok(seg, '#settings-tabs missing');
   assert.ok(seg.classList.contains('seg'), 'reuses the .seg segmented control');
   const btns = [...seg.querySelectorAll('button[data-tab]')];
-  assert.deepEqual(btns.map((b) => b.dataset.tab), ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'models', 'providers']);
-  assert.deepEqual(btns.map((b) => b.classList.contains('on')), [true, false, false, false, false, false, false, false]);
+  assert.deepEqual(btns.map((b) => b.dataset.tab), ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'mcp', 'models', 'providers']);
+  assert.deepEqual(btns.map((b) => b.classList.contains('on')), [true, false, false, false, false, false, false, false, false]);
   // Simple, then Advanced, then Expert: every mode sees a gap-free prefix of the strip.
   const rank = { simple: 0, advanced: 1, expert: 2 };
   const ranks = btns.map((b) => rank[b.dataset.minLevel]);
   assert.deepEqual(ranks, [...ranks].sort((a, b) => a - b), 'tabs ordered by level');
 });
 
-test('eight panes live inside settings, in tab order; only General starts visible', () => {
+test('nine panes live inside settings, in tab order; only General starts visible', () => {
   const panes = [...settingsView().querySelectorAll('.settings-pane')];
-  assert.deepEqual(panes.map((p) => p.dataset.tab), ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'models', 'providers']);
-  assert.deepEqual(panes.map((p) => p.classList.contains('hidden')), [false, true, true, true, true, true, true, true]);
+  assert.deepEqual(panes.map((p) => p.dataset.tab), ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'mcp', 'models', 'providers']);
+  assert.deepEqual(panes.map((p) => p.classList.contains('hidden')), [false, true, true, true, true, true, true, true, true]);
   // A pane must NOT be a routed view: showView's views.forEach would force
   // .hidden back on it at every navigation.
   for (const p of panes) {
@@ -219,13 +219,13 @@ test('General keeps the machine cards; Runs, Ask Worca and Models hold the moved
     'appearance-card', 'credentials-card', 'mode-settings-card', 'root-settings-card',
     'debug-spawn-settings-card', 'getting-started-card', 'about-card',
   ]);
-  assert.deepEqual(cardIds(view, 'runs'), ['budget-settings-card', 'night-settings-card', 'schedule-settings-card', 'ws-scan-models-card', 'chat-settings-card']);
+  assert.deepEqual(cardIds(view, 'runs'), ['budget-settings-card', 'night-settings-card', 'sync-settings-card', 'schedule-settings-card', 'ws-scan-models-card', 'chat-settings-card']);
   assert.deepEqual(cardIds(view, 'ask'), ['ask-settings-card']);
   assert.deepEqual(cardIds(view, 'models'), ['title-model-settings-card', 'auto-model-settings-card', 'pr-description-model-settings-card']);
-  // Nothing got lost or duplicated in the move: the sixteen cards (dev's thirteen + Workspaces + PR description model + Away mode) are all still here, once.
+  // Nothing got lost or duplicated in the move: the seventeen cards (dev's thirteen + Workspaces + PR description model + Sync before run + Away mode) are all still here, once.
   const all = [...view.querySelectorAll('section.card.settings-card')].map((c) => c.id);
-  assert.equal(all.length, 16);
-  assert.equal(new Set(all).size, 16);
+  assert.equal(all.length, 17);
+  assert.equal(new Set(all).size, 17);
 });
 
 test('each moved card keeps its level; Runs is a Simple tab, Ask Worca an Advanced one', () => {
@@ -233,6 +233,7 @@ test('each moved card keeps its level; Runs is a Simple tab, Ask Worca an Advanc
   const lv = (id) => view.querySelector(`#${id}`).dataset.minLevel;
   assert.equal(lv('budget-settings-card'), 'simple');
   assert.equal(lv('schedule-settings-card'), 'advanced');
+  assert.equal(lv('sync-settings-card'), 'advanced', 'Sync before run: an Advanced card on the Simple Runs tab');
   assert.equal(lv('chat-settings-card'), 'advanced');
   assert.equal(lv('ws-scan-models-card'), 'advanced', 'Workspaces (scan models): an Advanced card on the Simple Runs tab');
   assert.equal(lv('ask-settings-card'), 'simple', 'the Advanced tab gates it; a deep link must not open on an empty page');

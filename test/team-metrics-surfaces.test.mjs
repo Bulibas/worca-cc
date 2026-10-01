@@ -271,7 +271,7 @@ test('row chip + summary: a dot, the word and the short state; the sentence ride
   assert.equal(off.title, 'Team metrics: Off · runs stay on this machine');
   const none = renderProjectTmChip({ key: 'k3', hasOrigin: false }, { doc });
   assert.equal(none.textContent, 'Metrics not available');
-  assert.equal(none.querySelector('.tm-dot'), null, 'no dot for a project the feature cannot reach');
+  assert.ok(none.querySelector('.tm-dot.muted'), 'a hollow dot for a project the feature cannot reach: the dots stay one column');
   assert.ok(none.querySelector('.pl-team-state.muted'));
   const via = projectTmSummary({ key: 'k4', hasOrigin: true, enabled: true, delegateTo: 'me/hub', delegateState: 'ok', record: false, runs: 2, pending: 0 });
   assert.deepEqual([via.kind, via.tone, via.short], ['delegated', 'grey', 'via me/hub · yours excluded']);

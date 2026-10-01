@@ -1,7 +1,8 @@
-// test/ui-history-workspace.test.mjs — jsdom boot tests for the History view's
+// test/ui-history-workspace.test.mjs — jsdom boot tests for the Runs list's
 // workspace-run cosmetics: a workspace row (projectKey="workspaces/<key>",
-// target:'workspace') forms its own pill/group keyed by that literal path
-// segment, the label prefers p.workspaceName, and the pill carries a "WS" badge.
+// target:'workspace') forms its own group keyed by that literal path segment,
+// and the group's name prefers p.workspaceName. (The project pills, and the "WS"
+// badge they carried, are gone: D4.)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -18,7 +19,7 @@ const HISTORY = [
   { id: 'w1', title: 'ws run one', status: 'stopped', startedAt: '2026-06-02T00:00:00Z', target: 'workspace', workspaceName: 'IoT Platform', projectName: 'svc-iam', projectKey: 'workspaces/wks-iot-9f3a1c20', projectDir: '/abs/iam' },
 ];
 const histResp = (pipelines) => Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines, ghAvailable: false }) });
-const norm = (s) => s.replace(/\s+/g, ' ').trim();
+const WKS_KEY = 'workspaces/wks-iot-9f3a1c20';
 
 // A persisted state with a stepper + audit markdown, the shape both
 // readPipelineByKey and readWorkspacePipeline return ({state, auditMarkdown}).
@@ -48,57 +49,53 @@ async function boot({ local, fetchHandler } = {}) {
   globalThis.window = window; globalThis.document = window.document;
   await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
   await new Promise((r) => setTimeout(r, 0));
-  const show = () => { window.location.hash = 'history'; window.dispatchEvent(new window.Event('hashchange')); };
-  // The card no longer expands — open the run's DETAIL screen (#history/<key>/<id>).
+  const show = () => { window.location.hash = 'runs'; window.dispatchEvent(new window.Event('hashchange')); };
+  // Open the run's DETAIL screen (#history/<key>/<id>) in the Runs pane.
   const showDetail = (key, id) => { window.location.hash = `history/${key}/${id}`; window.dispatchEvent(new window.Event('hashchange')); };
   const settle = async (n = 3) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); };
   return { window, show, reqs, showDetail, settle };
 }
-const filterTo = (window, key) => {
-  const pill = [...window.document.querySelectorAll('#historyFilter .hist-pill')].find((p) => p.dataset.projectKey === key);
-  pill.dispatchEvent(new window.Event('click', { bubbles: true }));
-};
 
-test('a workspace run forms its own pill labelled by workspaceName, carrying the WS badge', async () => {
+test('a workspace run forms its own group keyed by the literal path segment, named by workspaceName', async () => {
   const { window, show } = await boot();
   show();
   await new Promise((r) => setTimeout(r, 0));
   const doc = window.document;
-  const pills = [...doc.querySelectorAll('#historyFilter .hist-pill')];
-  // All Projects + Alpha + IoT Platform (the workspace bucket).
-  assert.equal(pills.length, 3);
-  const wsPill = pills.find((p) => p.dataset.projectKey === 'workspaces/wks-iot-9f3a1c20');
-  assert.ok(wsPill, 'workspace pill keyed by the literal projectKey path segment');
-  assert.match(norm(wsPill.textContent), /IoT Platform 2/, 'labelled by workspaceName, count 2');
-  assert.ok(wsPill.classList.contains('ws'), 'workspace pill carries the .ws badge class');
-  // The plain project pill is NOT a workspace pill.
-  const alphaPill = pills.find((p) => p.dataset.projectKey === 'alpha-00000001');
-  assert.equal(alphaPill.classList.contains('ws'), false);
+  // The project pills (and their WS badge) are gone (D4): the workspace is a group of the Runs list.
+  assert.equal(doc.querySelectorAll('#historyFilter .hist-pill').length, 0, 'no project pills');
+  const ws = doc.querySelector(`#runs-list .runs-group[data-group-key="${WKS_KEY}"]`);
+  assert.ok(ws, 'workspace group keyed by the literal projectKey path segment');
+  assert.equal(ws.querySelector('.runs-group-name').textContent, 'IoT Platform', 'named by workspaceName, not the member projectName');
+  assert.equal(ws.querySelector('.runs-count').textContent, '2');
+  // The plain project row is NOT in the workspace group.
+  const alpha = doc.querySelector('#runs-list .runs-group[data-group-key="alpha-00000001"]');
+  assert.ok(alpha);
+  assert.equal(ws.querySelector('.runs-row[data-pipeline-id="p1"]'), null);
 });
 
-test('All Projects view groups the workspace runs under a workspaceName header', async () => {
+test('the Runs list groups the workspace runs under a workspaceName header', async () => {
   const { window, show } = await boot();
   show();
   await new Promise((r) => setTimeout(r, 0));
   const doc = window.document;
-  const groups = [...doc.querySelectorAll('#history .hist-group')];
+  const groups = [...doc.querySelectorAll('#runs-list .runs-group')];
   assert.equal(groups.length, 2, 'one project group + one workspace group');
-  const heads = groups.map((g) => norm(g.querySelector('.hist-group-head').textContent));
+  // Read name and count apart: the head's textContent runs them together ("IoT Platform2").
+  const heads = groups.map((g) => `${g.querySelector('.runs-group-name').textContent} ${g.querySelector('.runs-count').textContent}`);
   assert.ok(heads.includes('IoT Platform 2'), 'workspace group header uses workspaceName');
   assert.ok(heads.includes('Alpha 1'), 'project group unchanged');
 });
 
-test('filtering to the workspace pill shows only its runs (literal path-segment filter)', async () => {
+test('the workspace group holds exactly its own runs (literal path-segment key)', async () => {
   const { window, show } = await boot();
   show();
   await new Promise((r) => setTimeout(r, 0));
   const doc = window.document;
-  const wsPill = [...doc.querySelectorAll('#historyFilter .hist-pill')].find((p) => p.dataset.projectKey === 'workspaces/wks-iot-9f3a1c20');
-  wsPill.dispatchEvent(new window.Event('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(doc.querySelectorAll('#history .hist-group').length, 0, 'single bucket → flat list');
-  assert.equal(doc.querySelectorAll('#history .hist-card').length, 2, 'two workspace runs');
-  assert.equal(window.localStorage.getItem('worca-cc.history.project'), 'workspaces/wks-iot-9f3a1c20', 'filter persisted by literal key');
+  const rows = [...doc.querySelectorAll(`#runs-list .runs-group[data-group-key="${WKS_KEY}"] .runs-row`)];
+  assert.deepEqual(rows.map((r) => r.dataset.pipelineId), ['w2', 'w1'], 'two workspace runs, newest first');
+  assert.ok(rows.every((r) => r.dataset.projectKey === WKS_KEY), 'each row carries the literal key');
+  assert.equal(doc.querySelectorAll(`#runs-list .runs-row[data-project-key="${WKS_KEY}"]`).length, 2,
+    'and no workspace row lands in another group');
 });
 
 // ── M6↔M2 integration boundary: the three row actions must route a WORKSPACE row
@@ -115,14 +112,13 @@ test('opening a workspace row fetches GET /api/workspaces/<wksId>/runs/<id> (not
   });
   show();
   await new Promise((r) => setTimeout(r, 0));
-  filterTo(window, 'workspaces/wks-iot-9f3a1c20'); // flat list of the two ws runs
-  await new Promise((r) => setTimeout(r, 0));
-  const card = window.document.querySelector('#history .hist-card');
-  card.querySelector('.hist-head').dispatchEvent(new window.Event('click', { bubbles: true }));
+  // Nothing is open yet, so the click navigates (a click on the open run's row changes nothing).
+  const row = window.document.querySelector(`#runs-list .runs-row[data-project-key="${WKS_KEY}"]`);
+  row.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
   await settle();
 
   assert.equal(window.location.hash.replace(/^#/, ''), 'history/workspaces/wks-iot-9f3a1c20/w2',
-    'the card click navigates to the run\'s detail screen');
+    'the row click navigates to the run\'s detail screen');
   assert.equal(detailReqs.length, 1, 'one detail fetch');
   assert.match(detailReqs[0], /\/api\/workspaces\/wks-iot-9f3a1c20\/runs\/w2$/, 'workspace-aware detail URL with the BARE wks id');
   // It must NOT have hit the single-project key route (which would 404 on the slash).
@@ -141,9 +137,8 @@ test('opening a workspace row (title click) fetches the workspace route for the 
   });
   show();
   await new Promise((r) => setTimeout(r, 0));
-  filterTo(window, 'workspaces/wks-iot-9f3a1c20');
-  await new Promise((r) => setTimeout(r, 0));
-  window.document.querySelector('#history .hist-card .h-meta b').dispatchEvent(new window.Event('click', { bubbles: true }));
+  window.document.querySelector(`#runs-list .runs-row[data-project-key="${WKS_KEY}"] .runs-row-title`)
+    .dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(viewReqs.length, 1);
   assert.match(viewReqs[0], /\/api\/workspaces\/wks-iot-9f3a1c20\/runs\/w2$/);

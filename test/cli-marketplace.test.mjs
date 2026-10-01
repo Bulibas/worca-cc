@@ -22,10 +22,15 @@ const scratchCwd = mkdtempSync(join(tmpdir(), 'worca-cc-cli-mkt-cwd-'));
 created.push(scratchCwd);
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true }))));
 
-function run(args, { home } = {}) {
+// The builtin marketplace is the GitHub repo; tests point it at this checkout (offline, and its
+// committed tree carries plugins/github-source). `builtin: null` runs with no override.
+const REPO_ROOT = resolve(__dirname, '..');
+function run(args, { home, builtin = REPO_ROOT } = {}) {
   return new Promise((res) => {
     const env = { ...process.env, WORCA_MOCK: '1' };
     if (home) env.WORCA_HOME = home;
+    delete env.WORCA_BUILTIN_MARKETPLACE;
+    if (builtin) env.WORCA_BUILTIN_MARKETPLACE = builtin;
     const child = spawn(process.execPath, [CLI, ...args], {
       env, cwd: scratchCwd, stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -133,4 +138,12 @@ test('plugin install of a bundled plugin works on a fresh home with no prior ref
   const inst = await run(['plugin', 'install', 'github-source', '--yes'], { home });
   assert.equal(inst.code, 0, inst.stderr);
   assert.match(inst.stdout, /installed:/);
+});
+
+test('with no override the builtin marketplace is the GitHub repo on dev (listing seeds it without touching the network)', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'worca-cc-cli-mkt5-'));
+  created.push(home);
+  const list = await run(['marketplace', 'list'], { home, builtin: null });
+  assert.equal(list.code, 0, list.stderr);
+  assert.match(list.stdout, /Worca CC Official\t[^\t]+\thttps:\/\/github\.com\/SinishaDjukic\/worca-cc\tnever synced\tbuilt-in/);
 });

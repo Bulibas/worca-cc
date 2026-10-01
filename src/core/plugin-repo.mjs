@@ -17,6 +17,7 @@ import { join, dirname } from 'node:path';
 import { pluginsRoot, pluginDir, readPluginsLock } from './plugins-lock.mjs';
 import { normalizeManifest, findEscapingSymlinks } from './plugin-manifest.mjs';
 import { githubEnv } from './github-credentials.mjs';
+import { mcpUpdatePreview } from './mcp/plugin-lifecycle.mjs';
 
 const execFileP = promisify(execFile);
 const defaultExec = async (cmd, args, opts = {}) => {
@@ -102,23 +103,32 @@ async function ensureCache(repoUrl, exec) {
   return cache;
 }
 
+/** The commit a repo is followed at: its HEAD (the remote's default branch), or the tip of
+ *  branch `ref` (a marketplace that tracks one, spec §4.2; recorded in the lock for updates). */
+async function tipSha(cache, ref, exec) {
+  if (!ref) return (await gitDir(cache, ['rev-parse', 'HEAD'], exec)).trim();
+  const bad = () => new Error(`branch "${ref}" not found`);
+  if (!/^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(ref)) throw bad();
+  try { return (await gitDir(cache, ['rev-parse', '--verify', '--quiet', `refs/heads/${ref}^{commit}`], exec)).trim(); } catch { throw bad(); }
+}
+
 /**
  * `worca plugin add`: clone/refresh the bare cache, then discover plugins in the
- * HEAD tree. A root worca-cc-marketplace.json (spec §4.1), when present and
+ * HEAD tree (or branch `ref`'s). A root worca-cc-marketplace.json (spec §4.1), when present and
  * structurally valid, is AUTHORITATIVE — its listed dirs (any depth) are the only
  * candidates, even when the list is empty. Without one, the depth 0/1 scan of
  * spec §4.3 applies unchanged.
  * @returns {{repoUrl:string, sha:string, discovered:Array<{name,subdir,manifest}>,
  *   warnings:string[], marketplace:{name:string, description:string}|null}}
  */
-export async function addPluginRepo(repoUrl, { exec = defaultExec } = {}) {
+export async function addPluginRepo(repoUrl, { exec = defaultExec, ref = null } = {}) {
   // `owner/repo` shorthand -> GitHub URL (spec §4.3) — only when it is not a
   // real local path (local fixture repos in tests stay untouched).
   if (/^[\w.-]+\/[\w.-]+$/.test(repoUrl) && !existsSync(repoUrl)) {
     repoUrl = `https://github.com/${repoUrl}`;
   }
   const cache = await ensureCache(repoUrl, exec);
-  const sha = (await gitDir(cache, ['rev-parse', 'HEAD'], exec)).trim();
+  const sha = await tipSha(cache, ref, exec);
   const allPaths = (await gitDir(cache, ['ls-tree', '-r', '--name-only', sha], exec))
     .split('\n').map((s) => s.trim()).filter(Boolean);
   const warnings = [];
@@ -191,6 +201,13 @@ function manifestModels(raw) {
   return r.ok ? { models: r.manifest.models, modelSecrets: r.manifest.modelSecrets } : { models: [], modelSecrets: [] };
 }
 
+/** Honoured MCP servers of a RAW manifest under its own negotiated API ({} on
+ *  any failure, and below API 5 — normalizeManifest strips the block). */
+function manifestMcp(raw) {
+  const r = raw ? normalizeManifest(raw) : null;
+  return r && r.ok ? r.manifest.mcpServers : {};
+}
+
 async function showManifest(cache, sha, subdir, exec) {
   const p = subdir ? `${subdir}/worca-cc-plugin.json` : 'worca-cc-plugin.json';
   try { return JSON.parse(await gitDir(cache, ['show', `${sha}:${p}`], exec)); } catch { return null; }
@@ -201,7 +218,7 @@ async function showManifest(cache, sha, subdir, exec) {
  * sources, new agents (added agents/<key>.meta.json files), setup changes —
  * the red-highlight inputs that turn a malicious update into a human review event.
  */
-async function computeManifestDelta(cache, entry, pinnedSha, candidateSha, exec) {
+async function computeManifestDelta(name, cache, entry, pinnedSha, candidateSha, exec) {
   const pin = await showManifest(cache, pinnedSha, entry.subdir, exec);
   const cand = await showManifest(cache, candidateSha, entry.subdir, exec);
   const pinSecrets = manifestSecretKeys(pin);
@@ -236,12 +253,14 @@ async function computeManifestDelta(cache, entry, pinnedSha, candidateSha, exec)
       .map((m) => m.id),
     newModelSecrets: candM.modelSecrets.map((f) => f.key)
       .filter((k) => !pinM.modelSecrets.some((f) => f.key === k)),
+    // MCP servers (registry §4.6): new/removed/changed names + the red lines.
+    ...(await mcpUpdatePreview(name, manifestMcp(pin), manifestMcp(cand))),
   };
 }
 
 /**
  * Update preview (spec §6.2): fetch, then report commits + diffstat + the
- * manifest delta between the pinned SHA and the new HEAD; { fullDiff: true }
+ * manifest delta between the pinned SHA and the new HEAD (the lock's `ref` branch tip when set); { fullDiff: true }
  * additionally returns the complete diff text ("full diff on demand").
  * Read-only; performing the update is Task 5's updatePlugin.
  */
@@ -249,7 +268,7 @@ export async function fetchCandidate(name, { exec = defaultExec, fullDiff = fals
   const entry = readPluginsLock()[name];
   if (!entry || !entry.repo) throw new Error(`plugin "${name}" is not installed from a repo`);
   const cache = await ensureCache(entry.repo, exec);
-  const candidateSha = (await gitDir(cache, ['rev-parse', 'HEAD'], exec)).trim();
+  const candidateSha = await tipSha(cache, entry.ref, exec);
   const pinnedSha = entry.pinnedSha;
   let commits = [];
   let diffstat = '';
@@ -257,6 +276,7 @@ export async function fetchCandidate(name, { exec = defaultExec, fullDiff = fals
   let manifestDelta = {
     newSecrets: [], newTaskSources: [], newAgents: [], setupChanged: false,
     newModels: [], removedModels: [], envChangedModels: [], newModelSecrets: [],
+    newMcpServers: [], removedMcpServers: [], changedMcpServers: [], mcpLines: [],
   };
   if (candidateSha !== pinnedSha) {
     const log = await gitDir(cache, ['log', '--format=%H%x09%s', `${pinnedSha}..${candidateSha}`], exec);
@@ -267,7 +287,7 @@ export async function fetchCandidate(name, { exec = defaultExec, fullDiff = fals
     const scope = entry.subdir ? ['--', entry.subdir] : [];
     diffstat = (await gitDir(cache, ['diff', '--stat', pinnedSha, candidateSha, ...scope], exec)).trim();
     if (fullDiff) diffFull = (await gitDir(cache, ['diff', pinnedSha, candidateSha, ...scope], exec)).trim();
-    manifestDelta = await computeManifestDelta(cache, entry, pinnedSha, candidateSha, exec);
+    manifestDelta = await computeManifestDelta(name, cache, entry, pinnedSha, candidateSha, exec);
   }
   return { pinnedSha, candidateSha, commits, diffstat, diffFull, manifestDelta };
 }

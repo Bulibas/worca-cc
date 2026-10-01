@@ -510,7 +510,7 @@ test('row chip + summary (policy): a dot, the word and the short state; the cap 
   assert.ok(off.querySelector('.tm-dot.grey'));
   const none = renderProjectTpChip({ ...base, hasOrigin: false }, { doc });
   assert.equal(none.textContent, 'Policy not available');
-  assert.equal(none.querySelector('.tm-dot'), null);
+  assert.ok(none.querySelector('.tm-dot.muted'), 'a hollow dot: the dots stay one column');
   const invalid = projectTpSummary({ ...base, delegateTo: 'acme/old', delegateState: 'invalid', delegateCode: 'DELEGATE_DANGLING', caps: null });
   assert.deepEqual([invalid.kind, invalid.tone, invalid.short], ['delegate-invalid', 'red', 'follow invalid']);
   const unsupported = projectTpSummary({ ...base, unknownSchema: true, warnings: ['schema 9 is newer than this Worca reads'] });

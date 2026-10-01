@@ -3,7 +3,8 @@
 // deterministic orchestrator core. Only non-builtin deps: express + ws.
 //
 // Run:  node ui/server.mjs   (or `npm start`)
-// Env:  PORT (default 4317), WORCA_MOCK (forwarded to runs when ?mock or body.mock)
+// Env:  PORT (default 4317), WORCA_MOCK / ORCH_MOCK (truthy = every run and Claude job is a
+//       mock, whatever body.mock says; the UI shows a MOCK pill and locks its Mock switch on)
 
 import express from 'express';
 import { WebSocketServer } from 'ws';
@@ -22,7 +23,7 @@ import { preflightDeps } from '../src/core/preflight-deps.mjs';
 import { createOrchestratorFor } from '../src/core/engine-select.mjs';
 import {
   listPipelines, readPipeline, listAllPipelines, readPipelineByKey,
-  enrichPipelinesPr, reconcileStaleRunning, readPipelineForResume, persistPrState, readPrState,
+  enrichPipelinesPr, reconcileStaleRunning, foreignActiveWorkspaceRuns, readPipelineForResume, persistPrState, readPrState,
   readRunLogText, readRunArtifactText, countPipelines, runRootSweepLookups, legacySweepLookups, slugify,
   listArtifacts, listRunArtifacts, lookupPipelineRow, findPipelineRowById, readPipelineStateById, resolveIndexedArtifact, resolveIndexedArtifactForRow,
   resolveIndexedArtifactFileForRow, readPromptFile, runDirForRow, recordArtifact, appendAudit,
@@ -60,6 +61,7 @@ import {
   workspaceScanModels, setWorkspaceScanModels, assertWorkspaceScanInput,
   scheduleDefaults, setScheduleDefaults,
   nightModeSettings, setNightMode, nightModeToggle, nightModeHereSince, setNightModeToggle, assertNightModeToggleInput,
+  syncDefaults, setSyncDefaults, assertSyncSettingsInput, DEFAULT_SYNC_SETTINGS,
 } from '../src/core/settings.mjs';
 import { resolveNightConfig, validateNightPatch } from '../src/core/night/config.mjs';
 import { effectiveNightConfig, nightLayers } from '../src/core/night/effective.mjs';
@@ -78,7 +80,7 @@ import {
   listMessages as askListMessages, setMessageBlocks as askSetMessageBlocks,
   findCard as askFindCard, updateCardBlock as askUpdateCardBlock,
   addAttachment as askAddAttachment, listAttachments as askListAttachments,
-  getAttachment as askGetAttachment, attachmentPath as askAttachmentPath, threadAttachmentBytes as askThreadAttachmentBytes,
+  getAttachment as askGetAttachment, attachmentPath as askAttachmentPath,
   linkRun as askLinkRun, updateRunLink as askUpdateRunLink, listRunLinks as askListRunLinks,
   findRunLinksByPipeline as askFindRunLinksByPipeline,
   finishMessage as askFinishMessage,
@@ -104,6 +106,7 @@ import {
   sweepAskWorktrees,
 } from '../src/core/ask/worktrees.mjs';
 import { createAskTurn } from '../src/core/ask/turn.mjs';
+import { validateMcpOff, resolveAskMcp, askMcpPromptInput, askMcpPreview, askMcpJoinNotice } from '../src/core/ask/mcp.mjs';
 import { attachRunFollower } from '../src/core/ask/follow.mjs';
 import { mockEnabled, MOCK_WRITER_ROLES } from '../src/core/claude-runner.mjs';
 import { budgetStatus, readCostCapOverride, setCostCapOverride } from '../src/core/cost-budget.mjs';
@@ -120,11 +123,15 @@ import {
   policyEvents, discoverPolicy, discoverAllPolicies, resolveProjectPolicy, resolveWorkspacePolicy, enableTeamPolicy, publishPolicy,
   projectPolicyStatus, listPolicyScopes, routeWorkspaceMembersPolicy, startTeamPolicyBackground,
 } from '../src/core/policy/sync.mjs';
-import { deviationsFor, fieldsForRun, capSummary } from '../src/core/policy/effective.mjs';
-import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
+import { deviationsFor, fieldsForRun, capSummary, mcpDeviations } from '../src/core/policy/effective.mjs';
+import { resolveRegistry, cachedTeamFor, toolNameLimitFor, skipMessage, skipReasonText } from '../src/core/mcp/registry.mjs';
+import { MEMBERSHIP_KEY_RE } from '../src/core/mcp/definitions.mjs';
+import { loadCatalog } from '../src/core/mcp/catalog.mjs';
+import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, mcpRequirements, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
 import { normalizePolicyDoc } from '../src/core/policy/registry.mjs';
 import { checkTeamTotalGate, checkTeamPipelineGate, teamCapsForTarget } from '../src/core/policy/gate.mjs';
 import { readPolicyState } from '../src/core/policy/state.mjs';
+import { teamAction, teamForget } from '../src/core/mcp/team.mjs';
 import { policyForScope, policyPayload } from '../src/core/policy/scope.mjs';
 import { policyCatalogModels } from '../src/core/policy/cache.mjs';
 import { pickFolderNative } from '../src/core/folder-dialog.mjs';
@@ -141,6 +148,7 @@ import { brokerEnabled, brokerInfo, personSlots, brokerUsageSummary, foldUsageBy
 import { freeDailyStatus } from '../src/core/openrouter-free.mjs';
 import { checkBrokerAtBoot } from '../src/core/broker-boot.mjs';
 import { modelSlot, missingCredentials, describeMissing } from '../src/core/broker-routing.mjs';
+import { syncPluginSlots } from '../src/core/plugin-broker-slots.mjs';
 import { planClone, cloneProject, CloneError } from '../src/core/clone-project.mjs';
 import { listFolders } from '../src/core/fs-browse.mjs';
 import {
@@ -148,7 +156,7 @@ import {
   PREDEFINED_MODELS, agentSteps, EFFORTS, catalogHasModel,
   readRunConfig, setNodeModel, setFeedbackCycles, setWireCycles, setActiveWorkflow, setHumanInLoop, resetWorkflowConfig,
   globalModelRefs, removeGlobalModelAndRefs, promoteCustomModel, costUnreliableModelIds,
-  readPrRemotePrefs, setPrRemotePrefs, modelHasBaseUrlRouting,
+  readPrRemotePrefs, setPrRemotePrefs, modelHasBaseUrlRouting, writeSyncPrefs, readSyncPrefs,
   readNightModePrefs, writeNightModePrefs,
 } from '../src/core/config.mjs';
 import { listGlobalModels, addGlobalModel, updateGlobalModel } from '../src/core/settings.mjs';
@@ -158,8 +166,10 @@ import { startBridge } from '../src/core/bridge/server.mjs';
 import {
   providersState, patchProvider, acknowledgeTerms, beginCopilotLogin, pollCopilotLogin, copilotLogout,
   copilotModelsForImport, importCopilotModels, testProviderConnection,
-  endpointModelsForImport, importEndpointModels,
+  endpointModelsForImport, importEndpointModels, patchSpeech,
 } from '../src/core/bridge/provider-ops.mjs';
+import { speechState, transcribe, synthesize, testSpeech } from '../src/core/speech.mjs';
+import { speechAssetStore } from '../src/core/speech-assets.mjs';
 import { listPluginModels, modelSecretsSchema, pluginModelSecretStatus } from '../src/core/plugin-models.mjs';
 import { testModel } from '../src/core/model-test.mjs';
 import {
@@ -188,6 +198,8 @@ import { scheduleEventPrompt, scheduleNoticeText } from '../src/core/ask/schedul
 import { applyModelChange } from '../src/core/ask/model-deps.mjs';
 import { modelEventPrompt, modelNoticeText } from '../src/core/ask/model-proposal.mjs';
 import { cloneEventPrompt, cloneNoticeText } from '../src/core/ask/clone-proposal.mjs';
+import { workspaceEventPrompt, workspaceNoticeText } from '../src/core/ask/workspace-proposal.mjs';
+import { applyWorkspaceChange } from '../src/core/ask/workspace-deps.mjs';
 import { webEventPrompt, webNoticeText, chatWebHosts } from '../src/core/ask/web-proposal.mjs';
 import { hostAllowed as askHostAllowed } from '../src/core/web-allowlist.mjs';
 import { registryPortsFn } from '../src/core/graph/registry-ports.mjs';
@@ -200,8 +212,16 @@ import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
 import { loadScriptRegistry } from '../src/core/script-registry.mjs';
 import { probePython, pythonRuntimeState } from '../src/core/graph/python-probe.mjs';
 import {
-  listLocalBranches, currentBranch, isValidSourceRef, sweepRunRoots, sweepLegacyWorktreesAll,
+  listLocalBranches, currentBranch, isValidSourceRef, sweepRunRoots, sweepLegacyWorktreesAll, resolveDefaultBranch,
 } from '../src/core/worktree.mjs';
+import {
+  fetchRemote, remoteInfo, syncStatus, resolveSourceRef, commitsBetween, isSafeBranchName, isSafeRemoteName, scrubGitText,
+  INTERACTIVE_TTL_MS, INTERACTIVE_TIMEOUT_MS, RUN_TIMEOUT_MS,
+} from '../src/core/git-sync.mjs';
+import {
+  projectSyncBlock, workspaceSyncBlocks, effectiveSyncSettings, projectSyncEvents, startProjectSyncBackground,
+} from '../src/core/project-sync.mjs';
+import { mapWithCap, fanoutCap } from '../src/core/fanout.mjs';
 import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, listRemoteBranches, sameRepo } from '../src/core/git-info.mjs';
 import { isSyntacticRef } from '../src/core/ask/proposal.mjs';
 import { archivePipeline, discardRetainedWorktrees } from '../src/core/pipeline-delete.mjs';
@@ -210,6 +230,7 @@ import {
   updateWorkspace, deleteWorkspace, isGitRepo, WORKSPACE_KEY_RE, countWorkspaces,
   readWorkspaceMap, setWorkspaceEdgeState, addWorkspaceManualEdge, removeWorkspaceManualEdge,
   regenerateWorkspaceDescription,
+  addWorkspaceMembers, removeWorkspaceMember, rootsHash, workspaceSetHash,
 } from '../src/core/workspaces.mjs';
 import { effectiveEdges } from '../src/shared/workspace-map/overrides.mjs';
 import { WORKSPACE_SCAN_WORKFLOW_ID, WORKSPACE_SCAN_DEFAULT_MODELS } from '../src/core/graph/builtin-workflows.mjs';
@@ -243,6 +264,9 @@ import {
   listOrphanPluginData, purgePluginData,
 } from '../src/core/plugin-store.mjs';
 import { fetchCandidate } from '../src/core/plugin-repo.mjs';
+import { reconcileMcpStore } from '../src/core/mcp/catalog.mjs';
+import { readMcpStore } from '../src/core/mcp/store.mjs';
+import { mcpFootprint } from '../src/core/mcp/plugin-lifecycle.mjs';
 import {
   addMarketplace, listMarketplaces, syncMarketplace, refreshAllMarketplaces,
   removeMarketplace, readMarketplaces, seedBuiltinMarketplace,
@@ -257,6 +281,7 @@ import {
 } from '../src/core/source-bindings.mjs';
 import { createChannelHost } from '../src/core/chat/channel-host.mjs';
 import { createCommandRouter } from '../src/core/chat/command-router.mjs';
+import { parseIdList } from '../src/core/chat/allowlist.mjs';
 import { createChatContext } from '../src/core/chat/chat-context.mjs';
 import { createNotifier } from '../src/core/chat/notifier.mjs';
 import { TokenBucket } from '../src/core/chat/rate-limiter.mjs';
@@ -270,7 +295,7 @@ import {
   runScheduleNow, deleteSchedule, cancelForTarget, dependentsOfWorkflow, runDueTickets, recordOutcome,
   recoverScheduler, purgeScheduler, scheduleCounts, scheduleStageDir, scheduleSignature,
   resolveAfterRef, predecessorState, previousBranchesOf, dependentsOfRun, AFTER_POLICIES, afterRefOf,
-  chainBaseBranchesOf,
+  chainBaseBranchesOf, resumeTicketsFor, cancelResumeTicketsFor,
 } from '../src/core/scheduler.mjs';
 import {
   onNotification, listNotifications, unreadCount, latestNotificationId, markRead, markAllRead, purgeNotifications,
@@ -279,6 +304,7 @@ import {
   normalizeRule, nextOccurrence, previewOccurrences, describeRule, parseScheduledFor, localDate,
   isValidTimeZone, formatInstant, OVERLAP_POLICIES, MISSED_POLICIES,
 } from '../src/shared/schedule/recurrence.mjs';
+import { REASON } from '../src/core/failure-policy.mjs';
 import { callSource, PluginOpError } from '../src/core/plugin-shim.mjs';
 import { resolveAutoModel, AUTO_MODEL_ENV } from '../src/core/auto/model.mjs';
 import {
@@ -286,7 +312,17 @@ import {
   repoSlugFromBugsUrl, BUGS_URL,
 } from '../src/core/run-report.mjs';
 import { REPORT_REASON_IDS } from '../src/shared/report-reasons.mjs';
+import {
+  McpStoreError, createSet, renameSet, deleteSet, duplicateSet, putMember, deleteMember, setProjectAssignment,
+  addManualServer, editManualServer, removeServerEverywhere,
+} from '../src/core/mcp/store.mjs';
+import { validateMcpDefinition, SET_ID_RE, SERVER_ID_RE } from '../src/core/mcp/definitions.mjs';
+import {
+  viewContext, listCatalogView, listSetsView, getSetView, projectAssignmentView, teamMemberRefusal, teamDuplicateSource,
+} from '../src/core/mcp/views.mjs';
+import { testMembership, retestAfterSave, retestServers } from '../src/core/mcp/test.mjs';
 import { HLJS_GRAMMAR_IDS } from './public/hljs-loader.mjs';
+import { useEnvProxy, proxyNotice } from '../src/core/env-proxy.mjs';
 
 // ── node:sqlite runtime guard + warning filter ──────────────────────────────────
 // Drop ONLY the one-time ExperimentalWarning emitted by node:sqlite (the module is
@@ -374,6 +410,32 @@ const ASK_VENDOR_ASSETS = {
   marked: resolveEsmAsset('marked'),
   dompurify: resolveEsmAsset('dompurify'),
 };
+
+// Ask Worca voice mode (docs/speech.md): the Silero VAD (@ricky0123/vad-web) and
+// its onnxruntime-web wasm runtime, served from node_modules like marked above.
+// An explicit allow-list per prefix — never a directory listing — and an
+// unresolvable package leaves its routes unregistered (the /vendor 404 answers;
+// the mic then reports "voice activity detection unavailable").
+function resolveVendorDir(spec, resolve = (s) => import.meta.resolve(s), warn = (msg) => console.warn(msg)) {
+  try {
+    return path.dirname(fileURLToPath(resolve(spec)));
+  } catch (err) {
+    warn(`[worca-ui] voice asset unavailable (${spec}): ${err?.message || err}`);
+    return null;
+  }
+}
+const VOICE_VENDOR = [
+  // Only the runtime that vad-web's built-in ORT 1.22.0 JS fetches (wasmPaths + name).
+  { prefix: '/vendor/ort/', dir: resolveVendorDir('onnxruntime-web/wasm'), files: {
+    'ort-wasm-simd-threaded.mjs': 'text/javascript',
+    'ort-wasm-simd-threaded.wasm': 'application/wasm',
+  } },
+  { prefix: '/vendor/vad/', dir: resolveVendorDir('@ricky0123/vad-web'), files: {
+    'bundle.min.js': 'text/javascript',
+    'vad.worklet.bundle.min.js': 'text/javascript',
+    'silero_vad_v5.onnx': 'application/octet-stream',
+  } },
+];
 
 const PORT = Number(process.env.PORT) || DEFAULT_UI_PORT;
 // Bind to loopback by default (S1). Power users who knowingly want LAN exposure
@@ -568,7 +630,7 @@ wss.on('connection', (ws, req) => {
   }
   const id = requestedRunId || requestedGenId || requestedBenchId;
 
-  send(ws, { type: 'hello', bootId: BOOT_ID, runs: summarizeRuns(), ask: askHello(ws) });
+  send(ws, { type: 'hello', bootId: BOOT_ID, serverMock: serverMockMode(), runs: summarizeRuns(), ask: askHello(ws) });
 
   if (id && runs.has(id)) {
     replayEntry(ws, runs.get(id));
@@ -690,6 +752,7 @@ function emitChanged(type, action) {
 
 metricsEvents.on('changed', (e) => emitChanged('team-metrics-changed', e && e.action ? e.action : null));
 policyEvents.on('changed', (e) => emitChanged('team-policy-changed', e && e.action ? e.action : null));
+projectSyncEvents.on('changed', (e) => emitChanged('project-sync-changed', e && e.projectKey ? e.projectKey : null));
 
 // Every comment mutation in THIS process (the REST routes below) pokes the open
 // Diff tabs. A poke carries ids only — no payload, so it is idempotent and has no
@@ -917,6 +980,13 @@ function wireRun(entry) {
         // _finalizeWorkspaceScan, which ran before this event) — refresh every open list (D13).
         const scanOutcome = orch.state?.workspaceScan?.outcome;
         if (scanOutcome === 'created' || scanOutcome === 'updated') emitChanged('workspaces-changed', `scan-${scanOutcome}`);
+        // An automatic re-scan (afterMembersChanged) tells its workspace page how it ended; one a
+        // newer member change superseded says nothing — its successor reports instead.
+        if (entry.autoRescan && !entry.superseded) {
+          const how = entry.status === 'done' ? (scanOutcome === 'updated' ? 'description' : 'rescan-failed')
+            : entry.status === 'stopped' ? 'rescan-stopped' : entry.status === 'paused' ? 'rescan-paused' : 'rescan-failed';
+          broadcast({ type: 'workspaces-changed', action: how, workspaceId: entry.workspaceId, runId: entry.id });
+        }
       }
       if (name === 'error') {
         // The launch-error channel (a failure BEFORE the pipeline row exists). A
@@ -967,6 +1037,14 @@ function wireRun(entry) {
           const waiting = [...(entry.ticketId ? dependentsOfRun({ ticketId: entry.ticketId }) : []), ...(entry.pipelineId ? dependentsOfRun({ pipelineId: entry.pipelineId }) : [])];
           if (waiting.length) setTimeout(() => { void schedulerTick(); }, 0);
         } catch (err) { console.error(`[worca-ui] chain nudge failed: ${err && err.message ? err.message : err}`); }
+      }
+      if (name === 'done' && entry.pipelineId && entry.status !== 'paused') {
+        // Terminal (done/stopped/error) — a pending scheduled resume no longer applies.
+        // (A 'paused' done is exactly the state a resume ticket targets; never sweep then.)
+        cancelScheduledResumes(entry.pipelineId, {
+          by: entry.lastAction && entry.lastAction.by,
+          reason: 'the run was resumed or stopped by hand',
+        });
       }
       if (name === 'title' && payload && typeof payload.title === 'string') {
         // Keep the in-memory run fresh so a late-joining client's hello
@@ -1186,14 +1264,14 @@ app.use('/api/ask/threads/:id', (req, res, next) => {
 });
 
 // Ask attachments ride base64 inside the message JSON (§7.3), and a binary
-// attachment (#398) may legitimately be 5 MB — several of them blow the app-wide
-// 8mb cap below. Registered BEFORE the global parser on the ONE route that
-// carries uploads (a body parsed here is skipped there): every other ask route
-// reads a string field or nothing and keeps the 8mb window. 64mb covers
-// maxFiles × maxBytesPerBinaryFile at base64's 4/3 inflation, so every
-// over-budget upload still reaches the route's OWN clear 400/413, not a raw
-// parser error.
-app.post('/api/ask/threads/:id/messages', express.json({ limit: '64mb' }));
+// attachment (#398) may legitimately be 32 MB — far past the app-wide 8mb cap
+// below. Registered BEFORE the global parser on the ONE route that carries
+// uploads (a body parsed here is skipped there): every other ask route reads a
+// string field or nothing and keeps the 8mb window. The window is
+// maxBytesPerMessage at base64's 4/3 inflation plus 1 MiB for the text and
+// context, so any upload the composer lets through reaches the route's OWN
+// clear 400/413, not a raw parser error.
+app.post('/api/ask/threads/:id/messages', express.json({ limit: Math.ceil(ASK_LIMITS.attachment.maxBytesPerMessage * 4 / 3) + 1024 * 1024 }));
 // A script's saved cases are inline text: 32 cases x 256 KiB PER PORT is legal (workbench
 // spec §3.2) and does not fit the global 8 MB, so the one route that saves them all gets room.
 app.put('/api/scripts/:key/cases', express.json({ limit: '64mb' }));
@@ -1245,6 +1323,52 @@ if (ASK_VENDOR_ASSETS.marked) {
 if (ASK_VENDOR_ASSETS.dompurify) {
   app.get('/vendor/dompurify/purify.es.mjs', sendEsmModule(ASK_VENDOR_ASSETS.dompurify));
 }
+for (const { prefix, dir, files } of VOICE_VENDOR) {
+  if (!dir) continue;
+  for (const [name, type] of Object.entries(files)) {
+    const file = path.join(dir, name);
+    if (!fs.existsSync(file)) { console.warn(`[worca-ui] voice asset missing: ${file}`); continue; }
+    app.get(`${prefix}${name}`, (_req, res, next) => {
+      res.type(type);
+      res.set('X-Content-Type-Options', 'nosniff');
+      res.set('Cache-Control', 'public, max-age=86400');
+      res.sendFile(file, (err) => { if (!err) return; if (res.headersSent) return next(err); next(); });
+    });
+  }
+}
+
+// The in-browser speech engines (docs/speech.md): pinned runtime + model files,
+// downloaded once into ~/.worca-cc/speech-cache and served same-origin.
+// src/core/speech-assets.mjs owns the allow-lists; anything else is a 404.
+// Models are no-store: the worker keeps no copy either (speech-worker.mjs), so the disk
+// holds ONE copy — worca's — and "Remove speech models" really frees the space.
+// The runtime (~25 MB) may sit in the HTTP cache: pinned bytes that never change.
+const sendSpeechAsset = (res, next, cache = 'no-store') => ({ file, type }) => {
+  res.type(type);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', cache);
+  res.sendFile(file, (err) => { if (err && !res.headersSent) next(err); });
+};
+const streamSpeechAsset = (res) => ({ type, length, body }) => {
+  res.type(type);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', 'no-store');
+  if (length) res.set('Content-Length', String(length));
+  body.on('error', () => res.destroy());
+  body.pipe(res);
+};
+const speechAssetFail = (res, next) => (err) => {
+  if (err && err.status === 404) return next();
+  console.warn(`[worca-ui] speech asset: ${err && err.message ? err.message : err}`);
+  if (!res.headersSent) res.status(502).set('Cache-Control', 'no-store').type('text/plain').send(err && err.message ? err.message : 'download failed');
+};
+app.get('/vendor/speech/lib/:name', (req, res, next) => {
+  speechAssetStore().lib(req.params.name).then(sendSpeechAsset(res, next, 'public, max-age=31536000, immutable'), speechAssetFail(res, next));
+});
+app.get(/^\/vendor\/speech\/hf\/([^/]+\/[^/]+)\/resolve\/[^/]+\/(.+)$/, (req, res, next) => {
+  speechAssetStore().model(req.params[0], req.params[1])
+    .then((r) => (r.body ? streamSpeechAsset(res)(r) : sendSpeechAsset(res, next)(r)), speechAssetFail(res, next));
+});
 
 app.use('/vendor', (err, _req, res, next) => {
   if (res.headersSent) return next(err);
@@ -1348,6 +1472,21 @@ function resolveProjectDir(input) {
   return normalizeProjectPath(input);
 }
 
+/** Express 4 does not catch async rejections: every sync route answers 500 instead of crashing. */
+const syncRoute = (fn) => async (req, res) => {
+  try { await fn(req, res); } catch (err) {
+    if (!res.headersSent) res.status(500).json({ error: scrubGitText(err && err.message ? err.message : String(err), 500) });
+  }
+};
+
+/** The registered project whose path is `dir` (sync writes are limited to registered projects), or null. */
+async function registeredProjectForDir(dir) {
+  if (!dir) return null;
+  const want = path.resolve(dir);
+  return (await listProjects()).find((p) => path.resolve(p.path) === want) || null;
+}
+const syncMode = (m) => (m === 'fetch' || m === 'ff' ? m : null);
+
 // ── Per-project source branches (workspace runs) ──────────────────────────────
 // A workspace run may carry a { [projectKey]: sourceBranch } override map. Each
 // member's source is its override (when non-blank) else the shared run default;
@@ -1359,6 +1498,66 @@ export function buildWorkspaceMembers(projects, branch, sourceByKey = {}) {
     const source = typeof override === 'string' && override.trim() ? override.trim() : branch.source;
     return { ...p, branch: { source, feature: branch.feature } };
   });
+}
+
+/** Per-member opts.sync for createOrchestratorFor (plan §4.3, D2, D14). */
+export function runSyncOpts(members, { allowed, before, policy, scheduled, onDiverged }) {
+  const out = {};
+  for (const m of members) {
+    const s = effectiveSyncSettings(m.projectKey);
+    let resolved, source;
+    if (scheduled) {
+      resolved = onDiverged || (s.onDiverged === 'fail' ? 'fail' : 'origin');       // D2: nobody can answer 'ask'
+      source = onDiverged ? 'schedule' : 'setting';
+    } else if (s.onDiverged === 'origin') {
+      resolved = 'origin'; source = 'setting';                                     // D14: never asks
+    } else if (policy === 'origin' && s.onDiverged !== 'fail') {
+      resolved = 'origin'; source = 'user';                                        // the person chose on the card
+    } else {
+      resolved = 'fail'; source = 'setting';                                       // 'fail', or 'ask' not yet answered
+    }
+    out[m.projectKey] = { enabled: !!(allowed && (before ?? s.beforeRun)), remote: s.remote, onDiverged: resolved, policySource: source };
+  }
+  return { members: out, enabled: Object.values(out).some((x) => x.enabled) };
+}
+
+/**
+ * Before an interactive start: fetch (no TTL, 8 s bound) and read each synced member's base.
+ * Returns null (start) or { status: 409, body } asking the person once (plan §0.2 C9, D14).
+ * A member whose policy already resolves to 'origin' is never asked. No TTL: a Start is an
+ * explicit action, so a push that landed inside the 45 s cache (a diverged base the run's own
+ * Sync stage would then fail on) or a remote that came back since a failed fetch is seen now.
+ */
+export async function syncPrecheck(members, sync) {
+  const rows = await mapWithCap(members, fanoutCap(), async (m) => {
+    const cfg = sync.members[m.projectKey];
+    if (!cfg || !cfg.enabled || !isSafeBranchName(m.source)) return null;
+    const f = await fetchRemote(m.projectDir, { remote: cfg.remote, maxAgeMs: 0, timeoutMs: INTERACTIVE_TIMEOUT_MS });
+    if (!f.ok && (f.kind === 'no-remote' || f.kind === 'bad-remote')) return null;
+    const st = await syncStatus(m.projectDir, { base: m.source, remote: cfg.remote });
+    // Neither a local nor a remote branch (a tag or a SHA): the harness has no branch to sync, so
+    // an offline start from it must not be asked about a failed fetch (D9).
+    if (!st.ok || (!st.hasLocal && !st.hasRemote)) return null;
+    return { m, f, st, cfg, setting: effectiveSyncSettings(m.projectKey).onDiverged };
+  });
+  const hit = rows.filter(Boolean);
+  const view = (r) => ({ projectKey: r.m.projectKey, projectName: r.m.projectName || path.basename(r.m.projectDir), base: r.m.source,
+    remote: r.cfg.remote, ahead: r.st.ahead, behind: r.st.behind, fetchedAt: r.f.fetchedAt || r.st.fetchedAt || null });
+  const diverged = hit.filter((r) => r.st.state === 'diverged' && r.cfg.onDiverged !== 'origin');
+  if (diverged.length) {
+    const d = diverged[0];
+    const forbidden = diverged.some((r) => r.setting === 'fail');     // the project forbids starting from the remote
+    return { status: 409, body: { code: 'sync-diverged', kind: 'diverged', options: forbidden ? ['cancel'] : ['origin', 'cancel'],
+      ...(forbidden ? { forbidden: true } : {}), members: diverged.map(view),
+      error: `${d.m.source} has diverged from ${d.cfg.remote}/${d.m.source} (${d.st.ahead} ahead, ${d.st.behind} behind)` } };
+  }
+  const failed = hit.filter((r) => !r.f.ok);
+  if (failed.length) {
+    const x = failed[0];
+    return { status: 409, body: { code: 'sync-fetch-failed', kind: 'fetch-failed', fetchKind: x.f.kind, options: ['last-fetch', 'cancel'],
+      members: failed.map((r) => ({ ...view(r), fetchKind: r.f.kind })), error: `Could not reach ${x.cfg.remote} (${x.f.kind})` } };
+  }
+  return null;
 }
 
 // Mirror the shared-source option-injection guard (D2) for every override entry.
@@ -1704,7 +1903,7 @@ const startRunHandler = async (req, res) => {
     const effectiveSource = source
       || (promptMarkdown && !prompt ? { type: 'markdown', promptText: promptMarkdown } : null);
 
-    const mock = !!body.mock || isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK);
+    const mock = !!body.mock || serverMockMode();
 
     // Optional workflowId selects a saved (or built-in default) topology. The
     // orchestrator resolves topology + per-project run-config into an executable
@@ -1772,6 +1971,11 @@ const startRunHandler = async (req, res) => {
     if (!(await readGuardrailSet(guardrailsId))) {
       return badRequest(res, `unknown guardrailsId "${guardrailsId}"`);
     }
+    // MCP registry (§6.2, D16): the per-run opt-out. Shape-checked here; entries that are not a
+    // membership of the target's sets are dropped per target below — a stored schedule keeps the
+    // body as sent, so its firing drops what is unknown by then.
+    const optOut = parseMcpOptOut(body.mcpOptOut);
+    if (optOut.error) return badRequest(res, optOut.error);
 
     // Budget gate: no new pipelines while the total window is spent (F6).
     const budget = budgetStatus();
@@ -1796,6 +2000,13 @@ const startRunHandler = async (req, res) => {
       feature: typeof body.featureBranch === 'string' && body.featureBranch.trim()
         ? body.featureBranch.trim() : null,
     };
+    const syncBody = {
+      before: typeof body.syncBeforeStart === 'boolean' ? body.syncBeforeStart : null,         // null = project default
+      policy: body.syncPolicy === 'origin' || body.syncPolicy === 'last-fetch' ? body.syncPolicy : null,
+      onDiverged: body.syncOnDiverged === 'origin' || body.syncOnDiverged === 'fail' ? body.syncOnDiverged : null,  // schedules
+    };
+    // Scans are read-only (C10) and memory defrag is a reserved workflow: never sync them.
+    const syncAllowed = !scanTarget && !memoryScope;
 
     let orch, entry;
 
@@ -1862,6 +2073,17 @@ const startRunHandler = async (req, res) => {
         sched.afterRef = r.after;
       }
       if (sched) return res.status(202).json(await scheduleRequest({ body, sched, title, askLink, budget, workspaceId: ws.id, projectDir: projects[0].projectDir, startedBy }));
+      const mcpOptOut = await knownMcpOptOut(optOut.list, mcpWorkspaceTarget(ws));
+
+      const wsBuilt = buildWorkspaceMembers(projects, branch, sourceByKey);
+      const wsMembers = [];
+      if (syncAllowed) for (const m of wsBuilt) wsMembers.push({ ...m, source: m.branch.source || await resolveDefaultBranch(m.projectDir) });
+      const sync = runSyncOpts(wsMembers, { allowed: syncAllowed, before: syncBody.before, policy: syncBody.policy,
+        scheduled: !!internal, onDiverged: syncBody.onDiverged });
+      if (sync.enabled && !internal && !syncBody.policy) {
+        const blocked = await syncPrecheck(wsMembers, sync);
+        if (blocked) return res.status(blocked.status).json(blocked.body);
+      }
 
       orch = await createOrchestratorFor({
         workspace: {
@@ -1869,7 +2091,7 @@ const startRunHandler = async (req, res) => {
           key: ws.id, // ws.id === workspaceKey(ws); routes artifacts to its store
           name: ws.name,
           description: ws.description,
-          projects: buildWorkspaceMembers(projects, branch, sourceByKey),
+          projects: wsBuilt,
         },
         prompt: effectivePrompt,
         ...(effectiveSource ? { source: effectiveSource } : {}),
@@ -1880,8 +2102,10 @@ const startRunHandler = async (req, res) => {
         template: workflowRow,
         ...(scanTarget && scanTarget.models ? { scanModels: scanTarget.models } : {}),
         guardrailsId,
+        ...(mcpOptOut.length ? { mcpOptOut } : {}),
         startedBy,
         branch,
+        sync,
         claude: { permissionMode: stored.permissionMode || 'acceptEdits', ...(stored.model ? { model: stored.model } : {}), mock },
         // A CLI-made ticket may carry `--yes`: the explicit non-interactive choice survives the wait.
         ...(stored.auto ? { auto: true } : {}),
@@ -1920,7 +2144,17 @@ const startRunHandler = async (req, res) => {
       // clean 400 instead of a mid-run error event. featureBranch is sanitized
       // downstream by sanitizeBranchName, so it needs no ref check.
       if (branch.source && !(await isValidSourceRef(projectDir, branch.source))) {
-        return badRequest(res, `unknown or invalid sourceBranch: ${branch.source}`);
+        const r = isSafeBranchName(branch.source)
+          ? await resolveSourceRef(projectDir, branch.source, { remote: effectiveSyncSettings(projectKey(projectDir)).remote })
+          : { ok: false };
+        if (!r.ok || !r.remoteOnly) {
+          // 'stale' = the remote could not be reached: do not claim the branch is missing.
+          const why = !isSafeBranchName(branch.source) ? ''
+            : r.kind === 'stale' ? ' (not a local branch, and the remote could not be reached to check)'
+            : ' (not a local branch and not on the remote)';
+          return badRequest(res, `unknown or invalid sourceBranch: ${branch.source}${why}`);
+        }
+        // remote-only: the harness creates the local tracking branch (_ensureLocalSource).
       }
 
       const fileProblem = await promptFileProblem(effectiveSource, projectDir);
@@ -1953,6 +2187,18 @@ const startRunHandler = async (req, res) => {
       // A schedule stores the pair as checked (the catalog's casing, trimmed): its ticket takes it verbatim.
       const storedBody = startPair ? { ...body, model: startPair.model, effort: startPair.effort || undefined } : body;
       if (sched) return res.status(202).json(await scheduleRequest({ body: storedBody, sched, title, askLink, budget, projectDir, startedBy }));
+      const mcpOptOut = await knownMcpOptOut(optOut.list, { kind: 'project', key: projectKey(projectDir), name: path.basename(projectDir), rank: 0 });
+
+      // Scans and defrag never sync: skip the default-branch lookup and settings reads entirely, so
+      // the window between the one-defrag-per-scope check and runs.set does not widen.
+      const members1 = syncAllowed ? [{ projectDir, projectKey: projectKey(projectDir), projectName: path.basename(projectDir),
+        source: branch.source || await resolveDefaultBranch(projectDir) }] : [];
+      const sync = runSyncOpts(members1, { allowed: syncAllowed, before: syncBody.before, policy: syncBody.policy,
+        scheduled: !!internal, onDiverged: syncBody.onDiverged });
+      if (sync.enabled && !internal && !syncBody.policy) {
+        const blocked = await syncPrecheck(members1, sync);
+        if (blocked) return res.status(blocked.status).json(blocked.body);
+      }
 
       orch = await createOrchestratorFor({
         projectDir,
@@ -1964,8 +2210,10 @@ const startRunHandler = async (req, res) => {
         workflowId,
         template: workflowRow,
         guardrailsId,
+        ...(mcpOptOut.length ? { mcpOptOut } : {}),
         startedBy,
         branch,
+        sync,
         humanInLoop,
         ...(memoryScope ? { memoryScope } : {}),
         claude: {
@@ -2065,6 +2313,90 @@ const startRunHandler = async (req, res) => {
 app.post('/api/run', startRunHandler);
 
 // ---------------------------------------------------------------------------
+// MCP registry, pipeline side (MCP registry design §6.2, §8, §12): what a run on a target would
+// start, resolved the way the harness resolves it (the Team set from the policy cache here). One
+// preview route serves New Pipeline, the project MCP tab and the workspace overview.
+// ---------------------------------------------------------------------------
+
+/** `mcpOptOut` (D16): at most 100 '<setId>|<serverId>' entries, de-duplicated. */
+function parseMcpOptOut(v) {
+  if (v == null) return { list: [] };
+  if (!Array.isArray(v) || v.length > 100 || !v.every((e) => typeof e === 'string' && MEMBERSHIP_KEY_RE.test(e))) {
+    return { error: 'mcpOptOut must be at most 100 "<setId>|<serverId>" entries' };
+  }
+  return { list: [...new Set(v)] };
+}
+
+const mcpWorkspaceTarget = (ws) => ({
+  kind: 'workspace', id: ws.id, name: ws.name, rank: 0,
+  members: ws.projectPaths.map((d) => ({ key: projectKey(d), name: path.basename(d) })),
+});
+
+/** The resolver target of a `{ projectKey } | { workspaceId }` body: undefined when malformed, null when unknown. */
+async function mcpTargetOf(t) {
+  if (!t || typeof t !== 'object') return undefined;
+  if (typeof t.projectKey === 'string' && PROJECT_KEY_RE.test(t.projectKey) && t.workspaceId === undefined) {
+    const p = (await listProjects()).find((x) => x.key === t.projectKey);
+    return p ? { kind: 'project', key: p.key, name: p.name, rank: 0 } : null;
+  }
+  if (typeof t.workspaceId === 'string' && WORKSPACE_KEY_RE.test(t.workspaceId) && t.projectKey === undefined) {
+    const ws = await readWorkspace(t.workspaceId);
+    return ws ? mcpWorkspaceTarget(ws) : null;
+  }
+  return undefined;
+}
+
+/** One pipeline target through the resolver, its Team set from the policy cache; `opts` = the rest of the input. */
+async function mcpResolve(target, opts = {}) {
+  const project = target.kind === 'project';
+  const team = await cachedTeamFor(project ? { projectKey: target.key } : { workspaceId: target.id });
+  const result = await resolveRegistry({ surface: 'pipeline', targets: [target], teams: { [project ? target.key : `ws:${target.id}`]: team }, ...opts });
+  return { result, team };
+}
+
+/** What a run on the target would start (§5.6: `models` sets the tool-name limit). */
+async function mcpRunPreview(target, { optOut = [], models = [] } = {}) {
+  const [{ result, team }, catalog] = await Promise.all([mcpResolve(target, { optOut, toolNameLimit: toolNameLimitFor(models) }), loadCatalog()]);
+  return { result, catalog, team };
+}
+
+/** The opt-out entries that are memberships of the target's sets (unknown ones are dropped). A
+ *  registry fault keeps the list as sent: it must not block the run, whose own resolution matches
+ *  the opt-out by exact key (and adds nothing when it fails too). */
+async function knownMcpOptOut(list, target) {
+  if (!list.length) return list;
+  let result;
+  try { ({ result } = await mcpResolve(target)); } catch { return list; }
+  const known = new Set([...result.copies, ...result.skipped].map((m) => `${m.setId}|${m.serverId}`));
+  return list.filter((k) => known.has(k));
+}
+
+app.post('/api/mcp/preview', async (req, res) => {
+  const b = req.body || {};
+  const opt = parseMcpOptOut(b.mcpOptOut);
+  if (opt.error) return badRequest(res, opt.error);
+  if (b.models != null && (!Array.isArray(b.models) || b.models.length > 100 || !b.models.every((m) => typeof m === 'string'))) {
+    return badRequest(res, 'models must be an array of model ids');
+  }
+  try {
+    const target = await mcpTargetOf(b.target);
+    if (target === undefined) return badRequest(res, 'target must be { projectKey } or { workspaceId }');
+    if (!target) return res.status(404).json({ error: 'target not found' });
+    const { result, catalog, team } = await mcpRunPreview(target, { optOut: opt.list, models: b.models || [] });
+    const why = (sk) => skipReasonText(sk, catalog);
+    res.json({
+      sets: result.sets,
+      copies: result.copies,
+      skipped: result.skipped.map((sk) => ({ ...sk, message: skipMessage(sk, catalog), why: why(sk) })),
+      skippedTools: result.skippedTools,   // §5.6: `tool-name-too-long:<tool>`; the copy still starts
+      started: result.copies.length,
+      newer: !!result.newer,   // §4.5: a store written by a newer Worca resolves to nothing; say why
+      deviations: mcpDeviations(team ? { 'mcp.required': { value: team.required } } : {}, result, why),
+    });
+  } catch (err) { res.status(500).json({ error: err?.message || String(err) }); }
+});
+
+// ---------------------------------------------------------------------------
 // Scheduled runs (schema v31, src/core/scheduler.mjs). A schedule is a TICKET, not a
 // pipeline: POST /api/run with `scheduledFor` and/or `repeat` validates the request
 // exactly like a run, stores it, and answers 202. The tick below claims due tickets
@@ -2124,6 +2456,60 @@ function parseScheduleRequest(body, { now = Date.now() } = {}) {
   if (at.ms < now - 5_000) return { ok: false, error: 'scheduledFor is in the past' };
   out.runAtMs = at.ms;
   return out;
+}
+
+/** Pause reasons a scheduled resume must never touch (clarify: both cap kinds refuse). */
+const CAP_PAUSE_REASONS = new Set([REASON.COST_PIPELINE, REASON.COST_TOTAL, REASON.COST_PIPELINE_POLICY, REASON.COST_TOTAL_POLICY]);
+const TEAM_CAP_PAUSE_REASONS = new Set([REASON.COST_PIPELINE_POLICY, REASON.COST_TOTAL_POLICY]);
+
+/** The paused pipeline a resume ticket fires on, or null (any other ticket). */
+function resumeTargetOf(ticket) {
+  if (!ticket) return null;
+  if (typeof ticket.resumePipelineId === 'string' && ticket.resumePipelineId) return ticket.resumePipelineId;
+  const internal = ticket.request && ticket.request.internal;
+  return internal && typeof internal.resumePipelineId === 'string' && internal.resumePipelineId ? internal.resumePipelineId : null;
+}
+
+/** The onboarded project dir for a pipelines.project_key, or null. */
+async function projectDirForKey(key) {
+  for (const p of await listProjects()) {
+    if (projectKey(p.path) === key) return p.path;
+  }
+  return null;
+}
+
+/**
+ * Validate a scheduled-resume target at CREATE time. Mirrors resumeRun's early guards,
+ * plus the cap refusals a live decision may never be slept through.
+ * @returns {Promise<{ok:true, row:object, resumePoint:object, projectDir:string|null, workspaceId:string|null}
+ *          | {ok:false, status:number, body:object}>}
+ */
+async function validateResumeTarget(pipelineId) {
+  if (typeof pipelineId !== 'string' || !pipelineId.trim()) return { ok: false, status: 400, body: { error: 'pipelineId is required' } };
+  const saved = readPipelineForResume(pipelineId.trim());
+  if (!saved) return { ok: false, status: 404, body: { error: 'pipeline not found' } };
+  if (saved.row.status !== 'paused' && saved.row.status !== 'interrupted') {
+    return { ok: false, status: 409, body: { error: `run is "${saved.row.status}" — only a paused run can get a scheduled resume` } };
+  }
+  if (!saved.resumePoint) return { ok: false, status: 400, body: { error: 'run has no resume point' } };
+  if (saved.resumePoint.version !== 2) return { ok: false, status: 409, body: { code: 'ENGINE_RETIRED', error: V1_RUN_RETIRED } };
+  if (saved.row.archived_at) return { ok: false, status: 409, body: { error: 'run is archived' } };
+  const reason = saved.resumePoint.pauseReason || null;
+  if (TEAM_CAP_PAUSE_REASONS.has(reason)) {
+    return { ok: false, status: 409, body: { code: 'CAP_PAUSE', error: 'this run paused on a team cost cap — continuing past it is a live decision and cannot be scheduled' } };
+  }
+  if (CAP_PAUSE_REASONS.has(reason)) {
+    return { ok: false, status: 409, body: { code: 'CAP_PAUSE', error: 'this run paused on a cost cap — continuing past it needs the explicit “Continue without cap” decision and cannot be scheduled' } };
+  }
+  if (resumeTicketsFor(saved.row.id).length) {
+    return { ok: false, status: 409, body: { error: 'a scheduled resume already exists for this run — change or cancel it in Schedules' } };
+  }
+  const workspaceId = saved.row.target === 'workspace' ? (saved.row.workspace_key || null) : null;
+  let projectDir = null;
+  if (!workspaceId && saved.row.project_key) {
+    projectDir = await projectDirForKey(saved.row.project_key);
+  }
+  return { ok: true, row: saved.row, resumePoint: saved.resumePoint, projectDir, workspaceId };
 }
 
 /** The request a ticket stores: the validated body minus schedule fields and uploads. */
@@ -2211,8 +2597,54 @@ async function invokeStartRun(body, internal) {
 /** Ticket id -> who clicked "Run now" (identity.mjs actor), consumed by the firing it causes. */
 const RUN_NOW_BY = new Map();
 
-/** runDueTickets' `start`: probe an external task first (transient errors retry), then start. */
+/** A run resumed or stopped by hand kills its pending scheduled resume (feed entry per ticket). Idempotent + best-effort. */
+function cancelScheduledResumes(pipelineId, { by = null, reason } = {}) {
+  try {
+    const n = cancelResumeTicketsFor(pipelineId, { by: by || undefined, reason });
+    if (n) { emitChanged('schedules-changed', 'deleted'); emitChanged('notifications-changed'); }
+  } catch (err) { console.error(`[worca-ui] scheduled-resume cancel failed: ${err && err.message ? err.message : err}`); }
+}
+
+/**
+ * Fire a "resume this paused run" ticket. The live row is re-checked at fire time:
+ * a run resumed or stopped by hand makes the ticket SKIP (feed entry, run stays as it
+ * is); a run that became cap-paused FAILS (a cap is never continued past unattended).
+ * Everything else goes through resumeRun's own guard chain (budget gates included).
+ */
+async function fireResumeTicket(ticket, pipelineId) {
+  const saved = readPipelineForResume(pipelineId);
+  if (!saved) return { ok: false, skip: true, error: 'the run no longer exists' };
+  if (saved.row.status !== 'paused' && saved.row.status !== 'interrupted') {
+    return { ok: false, skip: true, error: `the run is now "${saved.row.status}" — it was resumed or stopped meanwhile` };
+  }
+  const reason = saved.resumePoint && saved.resumePoint.pauseReason;
+  if (reason && CAP_PAUSE_REASONS.has(reason)) {
+    return { ok: false, error: 'the run paused on a cost cap meanwhile — continuing past it needs a live decision', transient: false };
+  }
+  const scheduledBy = ticket.createdBy || null;
+  try {
+    const out = await resumeRun(pipelineId, {
+      by: scheduledBy || 'local',
+      mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK),
+    });
+    // The feed learns how the resumed run ends through the same recordOutcome hook a
+    // schedule-started run uses (wireRun keys on entry.ticketId).
+    const entry = out && out.runId ? runs.get(out.runId) : null;
+    if (entry) entry.ticketId = ticket.id;
+    return { ok: true, pipelineId };
+  } catch (err) {
+    if (err instanceof ResumeError) {
+      return { ok: false, error: (err.body && err.body.error) || err.message, transient: false };
+    }
+    return { ok: false, error: err && err.message ? err.message : String(err), transient: false };
+  }
+}
+
+/** runDueTickets' `start`: a resume ticket goes to fireResumeTicket; anything else probes
+ *  an external task first (transient errors retry), then starts a NEW run. */
 async function fireTicket(ticket) {
+  const resumePipelineId = resumeTargetOf(ticket);
+  if (resumePipelineId) return fireResumeTicket(ticket, resumePipelineId);
   const body = { ...(ticket.request || {}) };
   if (body.source && body.source.type === 'plugin') {
     try {
@@ -2235,7 +2667,9 @@ async function fireTicket(ticket) {
         for (const dir of ws.projectPaths) {
           const key = projectKey(dir);
           const br = prev.sourceBranchByKey[key];
-          if (!br) return { ok: false, error: `the run before it has no branch for ${path.basename(dir)}`, transient: false };
+          // A member added after the run before it: no branch of its own yet, so it starts from
+          // its default source branch (buildWorkspaceMembers' fallback for a key the map lacks).
+          if (!br) continue;
           if (!(await isValidSourceRef(dir, br))) return { ok: false, error: `branch ${br} no longer exists in ${path.basename(dir)}`, transient: false };
         }
       }
@@ -2386,6 +2820,43 @@ app.post('/api/schedules/preview', (req, res) => {
   if (!norm.ok) return badRequest(res, norm.error);
   const n = Number.isSafeInteger(body.count) ? Math.max(1, Math.min(10, body.count)) : 3;
   res.json({ rule: norm.rule, sentence: describeRule(norm.rule), next: previewOccurrences(norm.rule, Date.now(), n).map((t) => new Date(t).toISOString()) });
+});
+
+// POST /api/schedules/resume { pipelineId, scheduledFor, ifMissed?, graceMin? } — a one-off
+// "resume this paused run at <time>" ticket. ifMissed defaults to 'skip' (clarify default);
+// the sheet pre-selects 'skip' but lets the user pick 'run', so an HTTP caller may pass either.
+app.post('/api/schedules/resume', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const by = actorOf(req);
+    const v = await validateResumeTarget(body.pipelineId);
+    if (!v.ok) return res.status(v.status).json(v.body);
+    const at = parseScheduledFor(body.scheduledFor);
+    if (!at.ok) return badRequest(res, at.error);
+    if (at.ms < Date.now() - 5_000) return badRequest(res, 'scheduledFor is in the past');
+    let ifMissed = 'skip';
+    if (body.ifMissed != null) {
+      if (!MISSED_POLICIES.includes(body.ifMissed)) return badRequest(res, `ifMissed must be one of ${MISSED_POLICIES.join(' | ')}`);
+      ifMissed = body.ifMissed;
+    }
+    let graceMin = 360;
+    if (body.graceMin != null) {
+      if (!Number.isSafeInteger(body.graceMin) || body.graceMin < 0 || body.graceMin > 10080) return badRequest(res, 'graceMin must be a whole number of minutes from 0 to 10080');
+      graceMin = body.graceMin;
+    }
+    const title = `Resume ‘${v.row.title || v.row.id}’`;
+    const request = { prompt: '', title: v.row.title || null, internal: { resumePipelineId: v.row.id, startedBy: by } };
+    const ticket = createTicket({
+      title, projectDir: v.projectDir, workspaceId: v.workspaceId,
+      runAtMs: at.ms, request, ifMissed, graceMin,
+      resumePipelineId: v.row.id, createdBy: by,
+    });
+    appendAuditById(v.row.id, `Resume scheduled for ${new Date(at.ms).toISOString().slice(0, 16).replace('T', ' ')} UTC${byActor(by)}.`, { actor: by });
+    emitChanged('schedules-changed', 'created');
+    res.status(202).json({ runId: ticket.id, status: 'scheduled', scheduledFor: ticket.runAt, resumePipelineId: v.row.id });
+  } catch (err) {
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
 });
 
 // GET /api/schedules/dependents?workflowId=|projectDir=|workspaceId= -> what a removal
@@ -2575,8 +3046,9 @@ async function scheduleVerb(verb, id, body = {}, { by = null } = {}) {
     emitChanged('notifications-changed');
     await schedulerTick();
     const after = getTicket(ticket.id);
+    const isResume = !!resumeTargetOf(after);
     // A ticket held by a waiting `--wait` terminal is started by that terminal within seconds.
-    return out(200, { runId: ticket.id, status: after ? after.status : 'scheduled', failReason: after ? after.failReason : null, pipelineId: after ? after.pipelineId : null });
+    return out(200, { runId: ticket.id, status: after ? after.status : 'scheduled', failReason: after ? after.failReason : null, pipelineId: after ? after.pipelineId : null, ...(isResume ? { resume: true } : {}) });
   }
   if (['pause', 'resume', 'skip-next'].includes(verb)) {
     if (found.kind !== 'recurring') return out(404, { error: 'repeating schedule not found' });
@@ -2727,10 +3199,18 @@ const chatActions = {
   listProjects: async () => (await listProjects()).map((p) => ({ name: p.name || path.basename(p.path || ''), path: p.path })),
 };
 
+// "plugin/channelId" -> the latest command a NON-allow-listed chat sent. Settings
+// shows it, so "my /approve did nothing" has a visible reason and the id to add.
+// In memory only (a diagnostic; the next refused command re-populates it).
+const chatRefusals = new Map();
+
 const chatRouter = createCommandRouter({
   actions: chatActions,
   chatContext,
   logger: (level, msg) => console.error(`[worca-ui] chat ${level}: ${msg}`),
+  onRefused: ({ plugin, channelId, chatId, command }) => {
+    chatRefusals.set(`${plugin}/${channelId}`, { chatId, command, at: new Date().toISOString() });
+  },
 });
 
 // Same-chat commands must run strictly in order: a batched ['/use beta','/runs']
@@ -2803,6 +3283,10 @@ function reloadChatWorkers(name) {
   channelHost.reloadPlugin(name).catch((err) => {
     console.error(`[worca-ui] chat worker reload failed for ${name}: ${err && err.message ? err.message : err}`);
   });
+  // The enabled plugins' models decide the broker's plugin slots (plugin-broker-slots.mjs).
+  syncPluginSlots().catch((err) => {
+    console.error(`[worca-ui] plugin credential slots not registered: ${err && err.message ? err.message : err}`);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2837,6 +3321,7 @@ function stopRun(runId, by = 'local') {
   entry.lastAction = { kind: 'stop', by: by || 'local', at: new Date().toISOString() };
   entry.orch.stop(entry.lastAction.by);
   entry.status = 'stopped';
+  if (entry.pipelineId) cancelScheduledResumes(entry.pipelineId, { by, reason: `the run was stopped${byActor(by || 'local')}` });
   resolvePending(entry, { reason: 'stopped' });
 }
 function pauseRun(runId, by = 'local') {
@@ -2965,7 +3450,47 @@ class ResumeError extends Error {
   }
 }
 
-async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, pastTeamCap = false, policyReason = null, by = 'local' } = {}) {
+/** A workspace scan run, as the harness's _isWorkspaceScan() sees it once restored from the resume point. */
+function isWorkspaceScanResume(saved) {
+  return saved.row.target === 'workspace' && saved.resumePoint?.workflowId === WORKSPACE_SCAN_WORKFLOW_ID;
+}
+
+/** Per member: does the recorded source still exist, and how far did <remote>/<source> move since
+ *  baseSha? Reads + a TTL fetch only; never throws (a read error never blocks a resume). */
+async function resumeBaseCheck(row, { workspace, projectDir }) {
+  try {
+    const branches = workspace
+      ? (JSON.parse(row.workspace_meta || '{}').branches || {})
+      : { [row.project_key]: row.branch ? JSON.parse(row.branch) : null };
+    const dirOf = (key) => (workspace ? (workspace.projects.find((p) => p.projectKey === key) || {}).projectDir : projectDir);
+    // Members in parallel: an offline workspace must not wait N × 8 s.
+    const rows = await mapWithCap(Object.entries(branches), fanoutCap(), async ([key, b]) => {
+      const dir = dirOf(key);
+      if (!dir || !b || !isSafeBranchName(b.source)) return null;
+      // The remote the run used (its sync record), else today's setting.
+      const remote = isSafeRemoteName(b.sync?.remote) ? b.sync.remote : effectiveSyncSettings(key).remote;
+      const f = await fetchRemote(dir, { remote, maxAgeMs: INTERACTIVE_TTL_MS });
+      if (!f.ok && (f.kind === 'no-remote' || f.kind === 'bad-remote')) return null;
+      const st = await syncStatus(dir, { base: b.source, remote });
+      if (!st.ok) return null;
+      if (!st.hasLocal && !st.hasRemote) {
+        // Not a branch at all (a tag, or 'origin/dev', both accepted by isValidSourceRef):
+        // nothing to measure. Only a source that resolves nowhere is "missing".
+        if (await isValidSourceRef(dir, b.source)) return null;
+        return { projectKey: key, base: b.source, remote, exists: false, onRemote: false, movedBy: null, stale: !f.ok };
+      }
+      // Measure from the remote tip recorded at start when there is one: with sync off or a failed
+      // fetch, baseSha is a local tip that may already have been behind, and baseSha..remote would
+      // count commits that landed BEFORE the run as "since this run started".
+      const from = b.sync?.remoteSha || b.baseSha;
+      const movedBy = from && st.hasRemote ? await commitsBetween(dir, from, `refs/remotes/${remote}/${b.source}`) : null;
+      return { projectKey: key, base: b.source, remote, exists: true, onRemote: st.hasRemote, movedBy, stale: !f.ok };
+    });
+    return rows.filter(Boolean);
+  } catch { return []; /* never block a resume on a read error */ }
+}
+
+async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, pastTeamCap = false, policyReason = null, by = 'local', baseCheck = false, baseAck = false } = {}) {
   if (!pipelineId || typeof pipelineId !== 'string') throw new ResumeError(400, { error: 'pipelineId is required' });
   const saved = readPipelineForResume(pipelineId);
   if (!saved) throw new ResumeError(404, { error: 'pipeline not found' });
@@ -2988,25 +3513,30 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     throw new ResumeError(403, { error: 'total cost limit reached', budget });
   }
   // Override persists only once the (never-bypassable) total gate passes —
-  // a total-refused request must not leave cost_cap_override armed.
-  if (ignoreCostCap === true) {
+  // a total-refused request must not leave cost_cap_override armed. When a base check can
+  // still be cancelled (baseCheck without baseAck), the write waits until it has passed.
+  const deferOverride = baseCheck === true && baseAck !== true;
+  if (ignoreCostCap === true && !deferOverride) {
     setCostCapOverride(pipelineId);            // persistent per-pipeline override (F7)
     appendAuditById(pipelineId, `Pipeline cost limit override set${byActor(by)}.`, { actor: by });
   }
   const pipeCap = budget.pipelineLimitUsd;
   const spentSoFar = Number(saved.row.total_cost_usd || 0);
-  if (pipeCap != null && spentSoFar >= pipeCap && !readCostCapOverride(pipelineId)) {
+  if (pipeCap != null && spentSoFar >= pipeCap && ignoreCostCap !== true && !readCostCapOverride(pipelineId)) {
     throw new ResumeError(403, {
       error: 'pipeline cost limit reached', budget, needsOverride: true,
     });
   }
 
   // Double-resume guard: any live entry already driving this pipeline id.
-  for (const e of runs.values()) {
-    if (e.pipelineId === pipelineId && !['done', 'stopped', 'error', 'paused', 'interrupted'].includes(String(e.status || ''))) {
-      throw new ResumeError(400, { error: 'pipeline is already live' });
+  const assertNotLive = () => {
+    for (const e of runs.values()) {
+      if (e.pipelineId === pipelineId && !['done', 'stopped', 'error', 'paused', 'interrupted'].includes(String(e.status || ''))) {
+        throw new ResumeError(400, { error: 'pipeline is already live' });
+      }
     }
-  }
+  };
+  assertNotLive();
 
   // Worktree(s) must still exist (single-project; workspace members are checked
   // inside orchestrator.resume(), which fails fast with the same message).
@@ -3029,10 +3559,30 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
       description: meta.workspaceDescription || '', projects,
     };
   } else {
-    for (const p of await listProjects()) {
-      if (projectKey(p.path) === saved.row.project_key) { projectDir = p.path; break; }
-    }
+    projectDir = await projectDirForKey(saved.row.project_key);
     if (!projectDir) throw new ResumeError(400, { error: 'project for this pipeline is not onboarded on this machine' });
+  }
+
+  // Base check (opt-in, plan D7) BEFORE the team gates, which save acknowledgements and audit
+  // lines a cancelled "base moved" confirmation must not leave behind. A memory-defrag run keeps
+  // no branch to merge and a workspace scan is read-only (C10): neither is checked or fetched.
+  const skipBase = !!saved.resumePoint?.memoryScope || isWorkspaceScanResume(saved);
+  if (deferOverride && !skipBase) {
+    const moved = await resumeBaseCheck(saved.row, { workspace, projectDir });
+    const bad = moved.filter((m) => !m.exists || (m.movedBy || 0) > 0);
+    if (bad.length) {
+      const first = bad[0];
+      throw new ResumeError(409, { code: first.exists ? 'base-moved' : 'base-missing', members: bad,
+        error: first.exists ? `${first.base} moved ${first.movedBy} commit(s) on ${first.remote} since this run started`
+                            : `${first.base} no longer exists locally or on ${first.remote}` });
+    }
+    // The check can wait on a fetch (up to 8 s): a second Resume may have gone live meanwhile.
+    assertNotLive();
+  }
+  // Deferred override write: only reached once the base check passed.
+  if (ignoreCostCap === true && deferOverride) {
+    setCostCapOverride(pipelineId);
+    appendAuditById(pipelineId, `Pipeline cost limit override set${byActor(by)}.`, { actor: by });
   }
 
   // Team policy gates (design §7): the total cap once per window per home, the pipeline cap once
@@ -3060,7 +3610,10 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     if (live) throw new ResumeError(409, { error: 'a defragment run for this memory scope is already live', runId: live.id });
   }
 
-  const effMock = mock ||isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK);
+  // A scheduled resume for this run is moot the moment any resume is committed.
+  cancelScheduledResumes(pipelineId, { by, reason: `the run was resumed${byActor(by || 'local')}` });
+
+  const effMock = mock || serverMockMode();
   const runId = randomUUID();
   const orch = await createOrchestratorFor({
     projectDir,
@@ -3092,6 +3645,7 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     pipelineId,
   };
   runs.set(runId, entry);
+  markResumedRescan(entry);   // before the paused lineage is evicted below
   wireRun(entry);
   announceRun(entry);
 
@@ -3148,6 +3702,8 @@ app.post('/api/resume', async (req, res) => {
       pastTeamCap: req.body?.pastTeamCap === true,
       policyReason: typeof req.body?.policyReason === 'string' ? req.body.policyReason : null,
       by: actorOf(req),
+      baseCheck: req.body?.baseCheck === true,
+      baseAck: req.body?.baseAck === true,
     });
     res.json(out);
   } catch (err) {
@@ -3868,7 +4424,8 @@ app.get('/api/policy/scopes', async (req, res) => {
       const r = await resolveProjectPolicy(s.path, { discover: false }).catch(() => null);
       if (r?.ok) docs.push({ slug: r.home, doc: r.doc });
     }
-    res.json({ ...scopes, requirements: pluginRequirements(docs), blockedPlugins: blockedPluginFindings(docs) });
+    // MCP rows from the policy cache — the source the consent routes hash against (MCP registry spec §11.3).
+    res.json({ ...scopes, requirements: pluginRequirements(docs), blockedPlugins: blockedPluginFindings(docs), mcpRequirements: await mcpRequirements() });
   } catch (err) { sendPolicyError(res, err); }
 });
 
@@ -3878,7 +4435,17 @@ app.get('/api/policy', async (req, res) => {
   try {
     const { meta, r, workspaceRun, projectDir } = await policyForScope(scope);
     if (!r.ok) return res.status(404).json({ error: r.detail || `no team policy for this ${scope.kind}`, code: (r.code || r.reason || 'NOT_ENABLED').toString().toUpperCase().replace(/-/g, '_'), scope: meta });
-    res.json(policyPayload(meta, r, { workspaceRun, projectDir }));
+    const payload = await policyPayload(meta, r, { workspaceRun, projectDir });
+    // MCP registry spec §11.4: the off-policy card also lists the Team set's MCP deviations for this scope's runs,
+    // worded and guarded like /api/policy/notes (a registry fault adds none; the policy's own card still paints).
+    const fields = fieldsForRun(r.doc, { workspaceRun });
+    if (fields['mcp.required']) {
+      try {
+        const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
+        if (target) { const p = await mcpRunPreview(target); payload.deviations.push(...mcpDeviations(fields, p.result, (sk) => skipReasonText(sk, p.catalog))); }
+      } catch { /* a registry fault adds no MCP deviations */ }
+    }
+    res.json(payload);
   } catch (err) { sendPolicyError(res, err); }
 });
 
@@ -3887,6 +4454,11 @@ app.get('/api/policy/notes', async (req, res) => {
   const scope = parseScopeParam(req.query.scope);
   if (!scope) return badRequest(res, 'scope must be project:<projectKey> or workspace:<workspaceId>');
   try {
+    // MCP registry (§6.2): the form's opt-out, comma-joined like `models`, adds the MCP deviations. A
+    // repeated parameter arrives as an array and is checked entry by entry; any other shape is a 400.
+    const rawOptOut = req.query.mcpOptOut;
+    const optOut = parseMcpOptOut(rawOptOut == null || rawOptOut === '' ? null : typeof rawOptOut === 'string' ? rawOptOut.split(',') : rawOptOut);
+    if (optOut.error) return badRequest(res, optOut.error);
     const { meta, r, workspaceRun } = await policyForScope(scope);
     if (!r.ok) return res.json({ scope: meta, policy: null, notes: [] });
     const fields = fieldsForRun(r.doc, { workspaceRun });
@@ -3894,6 +4466,15 @@ app.get('/api/policy/notes', async (req, res) => {
     const set = await readGuardrailSet(guardrailsId);
     const models = typeof req.query.models === 'string' && req.query.models ? req.query.models.split(',').filter(Boolean).map((m) => ({ role: null, model: m })) : [];
     const dev = deviationsFor(fields, { guardrailsId, guardrailSet: set, stepModels: models, installed: installedPluginsMap(), worcaVersion: POLICY_WORCA_VERSION, metricsRecord: null });
+    if (fields['mcp.required']) {
+      try {
+        const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
+        if (target) {
+          const p = await mcpRunPreview(target, { optOut: optOut.list, models: models.map((m) => m.model) });
+          dev.push(...mcpDeviations(fields, p.result, (sk) => skipReasonText(sk, p.catalog)));
+        }
+      } catch { /* a registry fault adds no MCP notes; the policy's own notes still paint */ }
+    }
     res.json({ scope: meta, policy: { home: r.home, sha: r.sha, delegated: r.delegated, from: r.from, caps: capSummary(r.doc, { workspaceRun }) }, notes: dev, guardrailsDefault: fields['guardrails.default']?.value ?? null });
   } catch (err) { sendPolicyError(res, err); }
 });
@@ -3922,6 +4503,117 @@ app.post('/api/policy/discover', async (_req, res) => {
   try { await discoverAllPolicies({ force: true }); res.json(await listPolicyScopes()); }
   catch (err) { sendPolicyError(res, err); }
 });
+
+// ── Sync before run (#527) ───────────────────────────────────────────────────
+/** A status read for a base sync never touches (e.g. "plus+branch"): 200 with state 'unknown', so
+ *  the pill reads Unknown for THAT base and the browser logs no failed request. No git runs with it. */
+async function unsyncableBlock(dir, projectKey, base) {
+  const s = effectiveSyncSettings(projectKey);
+  const info = await remoteInfo(dir, s.remote);
+  return { base, remote: info.ok ? info.name : null, ...(info.ok ? { remoteLabel: info.label } : {}),
+    state: 'unknown', reason: 'not-a-branch', settings: { beforeRun: s.beforeRun, onDiverged: s.onDiverged } };
+}
+// Status (no network) or an action for ONE project, by path — the New-pipeline form (plan D8).
+app.get('/api/sync', syncRoute(async (req, res) => {
+  const dir = resolveProjectDir(req.query.projectDir);
+  if (!dir) return badRequest(res, 'projectDir is required');
+  const p = await registeredProjectForDir(dir);
+  const base = typeof req.query.base === 'string' && req.query.base ? req.query.base : null;
+  if (base && !isSafeBranchName(base)) return res.json({ sync: await unsyncableBlock(dir, p ? p.key : null, base) });
+  res.json({ sync: await projectSyncBlock({ dir, projectKey: p ? p.key : null, base, mode: 'status', details: req.query.details === '1' }) });
+}));
+app.post('/api/sync', syncRoute(async (req, res) => {
+  const body = req.body || {};
+  const dir = resolveProjectDir(body.projectDir);
+  if (!dir) return badRequest(res, 'projectDir is required');
+  const p = await registeredProjectForDir(dir);
+  if (!p) return res.status(404).json({ error: 'project not found', code: 'NOT_FOUND' });
+  return syncProjectAction(res, p, body);
+}));
+// By key — the Projects page (and the issue's API). tmProject answers the 404 itself.
+app.get('/api/projects/:key/sync', syncRoute(async (req, res) => {
+  const p = await tmProject(req, res); if (!p) return;
+  const base = typeof req.query.base === 'string' && req.query.base ? req.query.base : null;
+  if (base && !isSafeBranchName(base)) return res.json({ sync: await unsyncableBlock(p.path, p.key, base) });
+  res.json({ sync: await projectSyncBlock({ dir: p.path, projectKey: p.key, base, mode: 'status', details: req.query.details === '1' }) });
+}));
+app.post('/api/projects/:key/sync', syncRoute(async (req, res) => {
+  const p = await tmProject(req, res); if (!p) return;
+  return syncProjectAction(res, p, req.body || {});
+}));
+async function syncProjectAction(res, p, body) {
+  // A remote NAME from settings only — the body can never name a remote or a URL.
+  if (Object.hasOwn(body, 'remote') || Object.hasOwn(body, 'url')) return badRequest(res, 'sync never takes a remote or URL from the request; configure sync.remote');
+  const mode = syncMode(body.mode || 'ff');
+  if (!mode) return badRequest(res, 'mode must be "fetch" or "ff"');
+  const base = typeof body.base === 'string' && body.base ? body.base : null;
+  if (base && !isSafeBranchName(base)) return badRequest(res, 'base is not a branch name');
+  // A registered project whose folder is gone: never run git in a dead cwd.
+  if (p.exists === false) return badRequest(res, `project path is missing: ${p.path}`);
+  // A person clicked Sync: the long bound (a SIGKILLed fetch can leave *.lock files behind).
+  const sync = await projectSyncBlock({ dir: p.path, projectKey: p.key, base, mode, details: true, maxAgeMs: 0, timeoutMs: RUN_TIMEOUT_MS });
+  res.json({ sync });     // 200 even when ff refused: sync.ff = { ok:false, kind } drives the UI copy
+  // After the answer. The WS frame can still overtake the HTTP response, so the UI does not rely
+  // on this order: its own Sync action ignores frames while in flight.
+  projectSyncEvents.emit('changed', { projectKey: p.key });
+}
+app.put('/api/projects/:key/sync/settings', syncRoute(async (req, res) => {
+  const p = await tmProject(req, res); if (!p) return;
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+  if (!body) return badRequest(res, 'body must be an object');
+  // null values reset a key to the instance default (writeSyncPrefs); validate the rest.
+  try { assertSyncSettingsInput(Object.fromEntries(Object.entries(body).filter(([, v]) => v !== null))); }
+  catch (err) { return badRequest(res, err.message); }
+  for (const k of Object.keys(body)) if (!Object.hasOwn(DEFAULT_SYNC_SETTINGS, k)) return badRequest(res, `unknown sync setting: ${k}`);
+  writeSyncPrefs(p.key, body);
+  res.json(syncPrefsView(p.key));
+  projectSyncEvents.emit('changed', { projectKey: p.key });
+}));
+// The project's own sync keys (what it overrides), the instance defaults it otherwise follows,
+// and the effective result — the pill dialog's "This project" section needs all three.
+app.get('/api/projects/:key/sync/settings', syncRoute(async (req, res) => {
+  const p = await tmProject(req, res); if (!p) return;
+  res.json(syncPrefsView(p.key));
+}));
+function syncPrefsView(key) {
+  return { own: readSyncPrefs(key) || {}, defaults: syncDefaults(), settings: effectiveSyncSettings(key) };
+}
+// All projects' chip blocks (no network) + Sync all.
+app.get('/api/sync/projects', syncRoute(async (_req, res) => {
+  const ps = (await listProjects()).filter((p) => p.exists);
+  const blocks = await mapWithCap(ps, fanoutCap(), (p) => projectSyncBlock({ dir: p.path, projectKey: p.key, mode: 'status' }));
+  res.json({ projects: Object.fromEntries(ps.map((p, i) => [p.key, blocks[i]])) });
+}));
+app.post('/api/sync/all', syncRoute(async (req, res) => {
+  const mode = syncMode((req.body || {}).mode || 'ff');
+  if (!mode) return badRequest(res, 'mode must be "fetch" or "ff"');
+  const ps = (await listProjects()).filter((p) => p.exists);
+  const blocks = await mapWithCap(ps, fanoutCap(), (p) => projectSyncBlock({ dir: p.path, projectKey: p.key, mode, maxAgeMs: 0, timeoutMs: RUN_TIMEOUT_MS }));
+  res.json({ projects: Object.fromEntries(ps.map((p, i) => [p.key, blocks[i]])) });
+  // After the answer, as syncProjectAction.
+  ps.forEach((p) => projectSyncEvents.emit('changed', { projectKey: p.key }));
+}));
+app.get('/api/workspaces/:id/sync', syncRoute(async (req, res) => {
+  if (!WORKSPACE_KEY_RE.test(req.params.id)) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  const members = await workspaceSyncBlocks(req.params.id, { mode: 'status' });
+  if (!members) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  res.json({ members });
+}));
+// Unlike the per-project routes (registered projects only), this fetches every member whether or
+// not it is a registered project: a workspace run's Sync stage fetches the same members anyway,
+// so an explicit Sync here reaches no folder the workspace does not already sync.
+app.post('/api/workspaces/:id/sync', syncRoute(async (req, res) => {
+  if (!WORKSPACE_KEY_RE.test(req.params.id)) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  const body = req.body || {};
+  const mode = syncMode(body.mode || 'ff');
+  if (!mode) return badRequest(res, 'mode must be "fetch" or "ff"');
+  const bases = body.bases && typeof body.bases === 'object' && !Array.isArray(body.bases) ? body.bases : {};
+  for (const v of Object.values(bases)) if (!isSafeBranchName(v)) return badRequest(res, 'bases must name branches');
+  const members = await workspaceSyncBlocks(req.params.id, { mode, bases });
+  if (!members) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  res.json({ members });
+  members.forEach((m) => projectSyncEvents.emit('changed', { projectKey: m.projectKey }));
+}));
 
 app.get('/api/projects/:key/policy', async (req, res) => {
   const p = await tmProject(req, res); if (!p) return;
@@ -4395,12 +5087,14 @@ async function resolvePrPipeline(src, res) {
 // pipeline's store_meta, never from the query). gh is not required here.
 // The base-branch choices ride along: `chain` is the run chain's base branches,
 // root first (a run outside a chain: just its source), `defaultBase` its root, and
-// `branches` each remote's branches from the LOCAL remote-tracking refs (no fetch),
-// without HEAD and the run's own feature branch. A git remote failure still carries
-// the chain so the dialog can offer it.
+// `branches` each remote's branches from the remote-tracking refs, without HEAD and
+// the run's own feature branch. The base remote is fetched first (45 s TTL, 8 s bound,
+// negative-cached) so `baseStatus` can warn when the base moved since the run started
+// (warn only, #527). A git remote failure still carries the chain so the dialog can offer it.
 // -> { ok, remotes:[{name,fetchUrl,pushUrl,host,owner,repo,slug}],
 //      defaults:{pushRemote,baseRemote}, remembered:{pushRemote,baseRemote}|null,
-//      chain:[branch], defaultBase:branch|null, branches:{[remote]:[branch]} }
+//      chain:[branch], defaultBase:branch|null, branches:{[remote]:[branch]},
+//      baseStatus:{base, remote, movedSinceRun:number|null, fetchedAt, stale} }
 // ---------------------------------------------------------------------------
 app.get('/api/pr/remotes', async (req, res) => {
   const resolved = await resolvePrPipeline(req.query || {}, res);
@@ -4415,11 +5109,26 @@ app.get('/api/pr/remotes', async (req, res) => {
   const rl = await listRemotes(repoDir);
   if (!rl.ok) return res.status(500).json({ error: `git remote failed: ${rl.error}`, chain, defaultBase });
   const remembered = readPrRemotePrefs(repoDir);
+  const defaults = defaultPrRemotes(rl.remotes, remembered);
+  const baseRemote = defaults.baseRemote;
+  const runBranch = resolved.state.branch || {};
+  // Measure from the remote tip recorded at start only when it is the SAME ref we compare
+  // against: a fork's base remote is `upstream` and a chained run's base is the chain root,
+  // not this run's source; there, the recorded origin tip would count old commits.
+  const sameRef = runBranch.sync?.remote === baseRemote && runBranch.source === defaultBase;
+  const baseSha = (sameRef && runBranch.sync?.remoteSha) || runBranch.baseSha || null;
+  const bf = isSafeRemoteName(baseRemote) ? await fetchRemote(repoDir, { remote: baseRemote, maxAgeMs: INTERACTIVE_TTL_MS }) : null;
   const rb = await listRemoteBranches(repoDir, rl.remotes.map((r) => r.name));
   const branches = {};
   for (const [name, list] of Object.entries(rb.byRemote)) branches[name] = list.filter((b) => b !== feature);
-  res.json({ ok: true, remotes: rl.remotes, defaults: defaultPrRemotes(rl.remotes, remembered), remembered,
-    chain, defaultBase, branches });
+  const movedSinceRun = baseSha && isSafeRemoteName(baseRemote) && isSafeBranchName(defaultBase)
+    ? await commitsBetween(repoDir, baseSha, `refs/remotes/${baseRemote}/${defaultBase}`) : null;
+  // No such remote (or not a repo) is not "stale": there is simply nothing to compare.
+  const bfNoRemote = !!(bf && !bf.ok && (bf.kind === 'no-remote' || bf.kind === 'bad-remote'));
+  const baseStatus = { base: defaultBase, remote: baseRemote, movedSinceRun,
+    fetchedAt: bf ? bf.fetchedAt || null : null, stale: !!(bf && !bf.ok && !bfNoRemote) };
+  res.json({ ok: true, remotes: rl.remotes, defaults, remembered,
+    chain, defaultBase, branches, baseStatus });
 });
 
 // ---------------------------------------------------------------------------
@@ -4657,7 +5366,35 @@ app.get('/api/branches', async (req, res) => {
     } catch (err) {
       console.error(`[worca-ui] run branches lookup failed: ${err && err.message ? err.message : err}`);
     }
-    res.json({ branches, current, runs: runsOut });
+    const out = { branches, current, runs: runsOut };
+    if (req.query.fresh === '1' || req.query.fresh === 'true') {
+      // D8: only a REGISTERED project is fetched (a credentialed network call). Any other folder
+      // answers from its local refs, exactly as the non-fresh list does.
+      // A registry read error degrades to "not registered" (local refs, remote:null), never a 500.
+      const reg = await registeredProjectForDir(projectDir).catch((err) => {
+        console.error(`[worca-ui] branches: project registry read failed: ${err && err.message ? err.message : err}`);
+        return null;
+      });
+      const key = reg ? reg.key : null;
+      const settings = effectiveSyncSettings(key);
+      const f = reg
+        ? await fetchRemote(projectDir, { remote: settings.remote, maxAgeMs: INTERACTIVE_TTL_MS, timeoutMs: INTERACTIVE_TIMEOUT_MS })
+        : { ok: false, kind: 'unregistered', error: 'not a registered project: showing local refs only' };
+      if (reg && (f.ok || (f.kind !== 'no-remote' && f.kind !== 'bad-remote'))) {
+        const rb = await listRemoteBranches(projectDir, [settings.remote]);
+        const base = typeof req.query.base === 'string' && isSafeBranchName(req.query.base) ? req.query.base : current;
+        const sync = await projectSyncBlock({ dir: projectDir, projectKey: key, base, mode: 'status', details: true });
+        const fetchError = f.ok ? {} : { fetchError: { kind: f.kind, message: f.error } };
+        Object.assign(out, {
+          remote: { name: settings.remote, branches: rb.ok ? (rb.byRemote[settings.remote] || []) : [] },
+          fetchedAt: f.fetchedAt || sync.fetchedAt || null, stale: !f.ok, ...fetchError,
+          behind: sync.behind ?? null, sync: { ...sync, stale: !f.ok, ...fetchError },
+        });
+      } else {
+        Object.assign(out, { remote: null, fetchedAt: null, stale: false });
+      }
+    }
+    res.json(out);
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -4680,6 +5417,9 @@ app.post('/api/projects', async (req, res) => {
     discoverProject(normalizeProjectPath(body.path), { force: true })
       .then(() => emitChanged('team-metrics-changed', 'discovered'))
       .catch(() => { /* offline or not a git repo: discovery retries hourly */ });
+    // Its team policy at once too (MCP registry spec §11.2): removing a project drops its policy cache, so a re-added or
+    // re-cloned project's home must not read "no project here follows" (a greyed Team set) until the background discovery.
+    discoverPolicy(normalizeProjectPath(body.path), { force: true }).catch(() => { /* offline: the background discovery retries */ });
     res.json({ projects });
   } catch (err) {
     // addProject only throws on validation (empty/duplicate/not-a-directory), so
@@ -4711,6 +5451,7 @@ app.post('/api/projects/bulk', async (req, res) => {
             await discoverProject(p, { force: true });
             emitChanged('team-metrics-changed', 'discovered');
           } catch { /* offline or not a git repo: discovery retries hourly */ }
+          await discoverPolicy(p, { force: true }).catch(() => { /* offline: the background discovery retries */ });
         }
       })();
     }
@@ -4747,6 +5488,7 @@ async function startCloneJob(req) {
       discoverProject(project.path, { force: true })
         .then(() => emitChanged('team-metrics-changed', 'discovered'))
         .catch(() => { /* offline or not a git repo: discovery retries hourly */ });
+      discoverPolicy(project.path, { force: true }).catch(() => { /* offline: the background discovery retries */ });
     } catch (err) {
       Object.assign(job, { state: 'error', code: err instanceof CloneError ? err.code : 'failed', error: err && err.message ? err.message : String(err) });
     }
@@ -4991,9 +5733,22 @@ app.get('/api/fs/dirs', async (req, res) => {
 // /api/projects + /api/workflows. The :id is the workspaceKey, validated against
 // WORKSPACE_KEY_RE before any disk touch (a stale/crafted id reads as 404).
 // ---------------------------------------------------------------------------
+/** The automatic re-scan run (autoRescan: started after a member change) that still owns a
+ *  workspace, or null — a paused one included (it resumes into the workspace). The page's loader
+ *  follows it after a reload, and shows a paused one as paused: its rescan-paused frame is gone. */
+function liveAutoRescan(id) {
+  for (const r of runs.values()) if (r.workspaceId === id && r.autoRescan && ownsWorkspaceTarget(r)) return r;
+  return null;
+}
+function liveRescanOf(id) {
+  const r = liveAutoRescan(id);
+  return r ? { runId: r.id, pipelineId: r.pipelineId || null, paused: String(r.status).toLowerCase() === 'paused' } : null;
+}
+const withRescan = (w) => { const rescan = w && liveRescanOf(w.id); return rescan ? { ...w, rescan } : w; };
+
 app.get('/api/workspaces', async (_req, res) => {
   try {
-    res.json({ workspaces: await listWorkspaces() });
+    res.json({ workspaces: (await listWorkspaces()).map(withRescan) });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -5005,7 +5760,7 @@ app.get('/api/workspaces/:id', async (req, res) => {
   try {
     const workspace = await readWorkspace(id);
     if (!workspace) return res.status(404).json({ error: 'workspace not found' });
-    res.json({ workspace });
+    res.json({ workspace: withRescan(workspace) });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -5037,9 +5792,10 @@ app.patch('/api/workspaces/:id', async (req, res) => {
   const id = req.params.id;
   if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
   const body = req.body || {};
-  // Immutability (defense-in-depth, §2.3): the project set never changes via PATCH.
+  // The member set never changes via PATCH (defense-in-depth, §2.3): it has its own
+  // route, POST /api/workspaces/:id/members, behind the live-run guard.
   if ('projectPaths' in body || 'projectKeys' in body) {
-    return badRequest(res, 'a workspace project set is immutable; PATCH accepts only name/description/metricsProject');
+    return badRequest(res, 'PATCH accepts only name/description/metricsProject/policyProject; change members with POST /api/workspaces/:id/members');
   }
   // Pass through only the editable fields.
   const patch = {};
@@ -5065,6 +5821,118 @@ app.patch('/api/workspaces/:id', async (req, res) => {
     if ('metricsProject' in patch) emitChanged('workspaces-changed', 'metrics-home');
     if ('policyProject' in patch) { emitChanged('workspaces-changed', 'policy-home'); emitChanged('team-policy-changed', 'policy-home'); }
     res.json({ workspace });
+  } catch (err) {
+    const status = workspaceErrorStatus(err && err.code);
+    return res.status(status).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+/** A run that owns this workspace blocks a member change: in THIS process any active run or a
+ *  paused Workspace scan (ownsWorkspaceTarget) — except an automatic re-scan, which the change
+ *  supersedes (supersedeRescans) — and any active run another live process (the CLI) owns: its
+ *  metrics / policy home must not move under it. A crashed owner's row is reconciled first. */
+function workspaceMembersBusy(id) {
+  if ([...runs.values()].some((r) => r.workspaceId === id && !r.autoRescan && ownsWorkspaceTarget(r))) return true;
+  const liveIds = [...runs.values()].flatMap((r) => [r.id, r.pipelineId]).filter(Boolean);
+  try { reconcileStaleRunning({ liveIds: liveRunIds() }); } catch { /* best-effort */ }
+  return foreignActiveWorkspaceRuns(id, { liveIds }).length > 0;
+}
+
+/** A resumed run gets a new entry (and runId): when the entry it resumes was an automatic
+ *  re-scan, tag it again — the members route still supersedes it rather than refusing, and its
+ *  end still reports to the workspace page — and tell the page to follow the new run. */
+function markResumedRescan(entry) {
+  const was = [...runs.values()].some((e) => e !== entry && e.pipelineId && e.pipelineId === entry.pipelineId && e.autoRescan && !e.superseded);
+  if (!was) return;
+  entry.autoRescan = true;
+  broadcast({ type: 'workspaces-changed', action: 'rescan-resumed', workspaceId: entry.workspaceId, runId: entry.id });
+}
+
+/** Stop the automatic re-scan still owning a workspace: its member set is out of date. */
+function supersedeRescans(id) {
+  for (const r of runs.values()) {
+    if (r.workspaceId !== id || !r.autoRescan || !ownsWorkspaceTarget(r)) continue;
+    r.superseded = true;
+    try { stopRun(r.id, 'worca'); } catch { /* best-effort: its save refuses a changed set anyway */ }
+  }
+}
+
+/**
+ * Start a re-scan of a workspace from inside the server, through the same launch as
+ * POST /api/workspaces/:id/scan (scanRequest), and tag its run as automatic. A workspace the
+ * scan cannot read (a member that is not its own repository with a commit), a scan model that
+ * no longer fits, or a signed-out CLI skips it with the reason — the page offers Re-scan.
+ * @returns {Promise<{runId:string}|{skipped:string}>}
+ */
+async function startAutoRescan(ws) {
+  const problems = scanMemberProblems(ws.projectPaths);
+  if (problems.length) return { skipped: `read-only workspace scan: ${problems.join('; ')}` };
+  let models;
+  try { models = await scanModelsFor({}, ws.projectPaths); }
+  catch (err) { return { skipped: err && err.message ? err.message : String(err) }; }
+  if (!(models && modelHasBaseUrlRouting(models.scanModel))) {
+    const { state } = await probeClaudeAuth({ bin: configuredClaudeBin(), mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK) });
+    if (state === 'signed-out') return { skipped: CLAUDE_SIGNED_OUT_MESSAGE };
+  }
+  let out = { status: 200, body: null };
+  const res = {
+    statusCode: 200, headersSent: false,
+    status(code) { this.statusCode = code; return this; },
+    json(payload) { out = { status: this.statusCode, body: payload }; this.headersSent = true; return this; },
+  };
+  await scanRequest({ body: {} }, res, { id: ws.id, name: ws.name, projectPaths: ws.projectPaths, rescan: true, models });
+  const runId = out.body && out.body.runId;
+  const entry = runId ? runs.get(runId) : null;
+  if (!entry) return { skipped: (out.body && out.body.error) || `the re-scan could not start (HTTP ${out.status})` };
+  entry.autoRescan = true;
+  return { runId };
+}
+
+/**
+ * After a member change (the members route and Ask's workspace card): discover the added
+ * members' metrics / policy branches (so the Team tab and the homes read them at once), stop an
+ * automatic re-scan of the old set, and re-scan the workspace — per-member graphify graphs, the
+ * map and a new description, saved when the run ends done. Runs build their own graphs per
+ * member worktree from the registry at start, so the next run already covers the new set.
+ * @returns {Promise<{runId:string}|{skipped:string}>}
+ */
+async function afterMembersChanged(workspace, added = []) {
+  for (const dir of added) {
+    discoverProject(dir, { force: true }).then(() => emitChanged('team-metrics-changed', 'discovered')).catch(() => { /* retried hourly */ });
+    discoverPolicy(dir, { force: true }).then(() => emitChanged('team-policy-changed', 'discovered')).catch(() => { /* retried hourly */ });
+  }
+  supersedeRescans(workspace.id);
+  try { return await startAutoRescan(workspace); }
+  catch (err) { return { skipped: err && err.message ? err.message : String(err) }; }
+}
+
+// Change the member set: body {add: [paths]} or {remove: path}. The id stays frozen
+// (workspaces.mjs D1). 409 while a run (or a scan the user started) owns the workspace —
+// a live run keeps its own frozen members, but the metrics / policy home it resolves at
+// its end must not move under it, and a scan would save a map of the old set. Removing the home member clears that home
+// (clearedHomes). Every change re-scans the workspace (afterMembersChanged -> rescan).
+app.post('/api/workspaces/:id/members', async (req, res) => {
+  const id = req.params.id;
+  if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
+  const body = req.body || {};
+  const adding = Array.isArray(body.add);
+  const removing = typeof body.remove === 'string';
+  if (adding === removing) return badRequest(res, 'give add (an array of project paths) or remove (one project path)');
+  if (workspaceMembersBusy(id)) return res.status(409).json({ error: 'cannot change the members of a workspace while a run or scan owns it' });
+  try {
+    const before = await readWorkspace(id);
+    if (!before) return res.status(404).json({ error: 'workspace not found' });
+    const workspace = adding
+      ? await addWorkspaceMembers(id, body.add.map((p) => resolveProjectDir(p)).filter(Boolean))
+      : await removeWorkspaceMember(id, body.remove);
+    const rescan = await afterMembersChanged(workspace, workspace.projectPaths.filter((p) => !before.projectPaths.includes(p)));
+    const clearedHomes = [
+      ...(before.metricsProject && !workspace.metricsProject ? ['metrics'] : []),
+      ...(before.policyProject && !workspace.policyProject ? ['policy'] : []),
+    ];
+    emitChanged('workspaces-changed', 'members');
+    if (clearedHomes.includes('policy')) emitChanged('team-policy-changed', 'policy-home');
+    res.json({ workspace, clearedHomes, rescan });
   } catch (err) {
     const status = workspaceErrorStatus(err && err.code);
     return res.status(status).json({ error: err && err.message ? err.message : String(err) });
@@ -5180,8 +6048,10 @@ app.post('/api/workspaces/:id/map/render', async (req, res) => {
  *  has answered — by then the runs entry exists. */
 const pendingScans = new Set();
 
-/** The 8-hex roots hash a workspace id ends in (workspaces.mjs workspaceKey) — name-independent. */
-const setHashOf = (id) => String(id).slice(-8);
+/** The 8-hex roots hash of the set a run's workspace spans: the stored workspace's CURRENT members
+ *  (its id keeps the hash of the set it was created over — members can change since), else the
+ *  hash its id ends in (workspaces.mjs workspaceKey; a first scan's workspace does not exist yet). */
+const setHashOf = (id) => workspaceSetHash(id) ?? String(id).slice(-8);
 
 /** A run entry that still owns its workspace target: any ACTIVE run (no workflowId test — a
  *  just-resumed entry reads `wf_default` until resume() restores it), or a PAUSED Workspace scan
@@ -5194,14 +6064,15 @@ function ownsWorkspaceTarget(r) {
     || (s === 'paused' && r.orch?.workflowId === WORKSPACE_SCAN_WORKFLOW_ID);
 }
 
-/** A run over this PROJECT SET that owns it, or a scan of it still launching. For a first scan the
- *  set has no workspace (checkNewWorkspace refused a duplicate set), so any such run IS a scan,
- *  under any name; for a re-scan it is any active run of that workspace or a paused scan of it (D4). */
-function liveOverSet(id) {
-  const hash = setHashOf(id);
+/** A run of this workspace or over this PROJECT SET that owns it, or a scan of the set still
+ *  launching. For a first scan the set has no workspace (checkNewWorkspace refused a duplicate set),
+ *  so any such run IS a scan, under any name; for a re-scan it is any active run of that workspace
+ *  or a paused scan of it (D4). */
+function liveOverSet(id, projectPaths) {
+  const hash = rootsHash(projectPaths);
   if (pendingScans.has(hash)) return true;
   return [...runs.values()].some((r) => r.kind === 'workspace-run' && typeof r.workspaceId === 'string'
-    && setHashOf(r.workspaceId) === hash && ownsWorkspaceTarget(r));
+    && ownsWorkspaceTarget(r) && (r.workspaceId === id || setHashOf(r.workspaceId) === hash));
 }
 
 /** The run's primary member: the lowest projectKey — startRunHandler sorts members the same way,
@@ -5219,7 +6090,7 @@ function primaryMemberOf(paths) {
  * Sends the 409 and returns true when it refused.
  */
 async function refuseSignedOutClaude(res) {
-  const { state } = await probeClaudeAuth({ bin: configuredClaudeBin(), mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK) });
+  const { state } = await probeClaudeAuth({ bin: configuredClaudeBin(), mock: serverMockMode() });
   if (state !== 'signed-out') return false;
   res.status(409).json({ code: CLAUDE_SIGNED_OUT_CODE, error: CLAUDE_SIGNED_OUT_MESSAGE });
   return true;
@@ -5249,10 +6120,10 @@ async function scanModelsFor(body, projectPaths) {
  *  NO await between them: a second request for the same set, arriving while this one is still
  *  inside startRunHandler's awaits, finds the reservation and gets 409 (Review Focus 3). */
 async function scanRequest(req, res, { id, name, projectPaths, rescan, models }) {
-  if (liveOverSet(id)) {
+  if (liveOverSet(id, projectPaths)) {
     return res.status(409).json({ error: rescan ? 'a live run exists for this workspace' : 'a scan of this project set is already running' });
   }
-  const hash = setHashOf(id);
+  const hash = rootsHash(projectPaths);
   pendingScans.add(hash);
   try {
     const mock = !!(req.body && req.body.mock === true);
@@ -5442,6 +6313,7 @@ const settingsState = () => ({
   hideBuiltinModels: hideBuiltinModels(),
   theme: storedTheme(),                                   // system | light | dark (dark-mode design §6)
   schedule: scheduleDefaults(),                           // defaults a NEW schedule inherits
+  sync: syncDefaults(),                                   // sync before run (#527): instance defaults
   uiLevel: effectiveUiLevel(),                            // simple | advanced | expert (docs/ui-levels.md)
   memoryDefrag: memoryDefragModel(),                      // Settings › Memory: the STORED { model, effort } (null = the workflow default)
   memoryDefragDefault: defragDefaultModel(),              // what "(default)" means there: the built-in's own model
@@ -5521,6 +6393,7 @@ app.get('/api/openrouter/free-daily', async (req, res) => {
 app.get('/api/credentials', async (req, res) => {
   if (!brokerEnabled()) return res.json({ enabled: false });
   try {
+    try { await syncPluginSlots(); } catch { /* status below still answers */ }
     const info = await brokerInfo();
     const who = resolveIdentity(req);
     // Which slot each catalog model spends from: the pickers' "your key / no key" badges.
@@ -5611,6 +6484,7 @@ app.post('/api/ask/relay', async (req, res) => {
 async function brokerStartRefusal(req, modelIds) {
   if (!brokerEnabled() || !modelIds || !modelIds.length) return null;
   try {
+    try { await syncPluginSlots(); } catch { /* the spawn says why */ }
     const info = await brokerInfo();
     let person = 'local';
     if (info.mode === 'multi') {
@@ -5739,6 +6613,7 @@ app.post('/api/settings', async (req, res) => {
       validateNightPatch(patch);
     }
     if (has('nightModeToggle')) assertNightModeToggleInput(body.nightModeToggle);
+    if (has('sync')) assertSyncSettingsInput(body.sync);
     // Root first: it is the one key whose setter can still fail AFTER the asserts
     // above (an unusable path), so every other key's write must come after it or
     // a mixed POST would answer 400 with those keys already applied on disk.
@@ -5770,12 +6645,13 @@ app.post('/api/settings', async (req, res) => {
     if (has('schedule')) await setScheduleDefaults(body.schedule && typeof body.schedule === 'object' ? body.schedule : {});
     if (has('nightMode')) await setNightMode(body.nightMode);
     if (has('nightModeToggle')) await setNightModeToggle(body.nightModeToggle);
+    if (has('sync')) await setSyncDefaults(body.sync);
     // Live runs re-evaluate their open question against the new night settings.
     if (hasNightKey) for (const e of runs.values()) e.orch?.nightConfigChanged?.();
     if (hasBudgetKey) emitChanged('budget-changed');
     // Other open tabs repaint their Settings cards (a stale tab could otherwise
     // "save" its old checkbox state over this one with no feedback to either).
-    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule') || hasNightKey) emitChanged('settings-changed');
+    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule') || has('sync') || hasNightKey) emitChanged('settings-changed');
     res.json({ ...settingsState(), ...(await autoModelState()), ...(await prDescriptionModelState()), chat: chatPrefs() });
   } catch (err) {
     // The setters throw only on an unusable path -> client error (400).
@@ -6069,6 +6945,74 @@ const providerError = (res, err) => {
   if (err && (err.code === 'TERMS' || err.code === 'NOT_SIGNED_IN')) return res.status(409).json({ error: msg, code: err.code });
   return badRequest(res, msg);
 };
+
+// ── Ask Worca voice mode (docs/speech.md) ──
+// Behind the same global loopback / identity-proxy guards as every /api/ask
+// route (:1131, :1144). They name no thread, so the thread-owner guard (:1181)
+// has nothing to check. Registered before /api/providers/:name so the param
+// routes never see "speech".
+const speechFail = (res, err) => res.status(err && err.status ? err.status : 502).json({ error: err && err.message ? err.message : String(err) });
+
+app.get('/api/speech', (_req, res) => {
+  // downloaded: the voice chip says "Downloading…" only when the models really are fetched.
+  let downloaded = { stt: false, tts: false };
+  try { downloaded = speechAssetStore().downloaded(); } catch { /* no worca home: nothing downloaded */ }
+  res.json({ ...speechState(), downloaded });
+});
+
+app.patch('/api/providers/speech', async (req, res) => {
+  try {
+    await patchSpeech(req.body || {});
+    emitChanged('settings-changed');
+    res.json(await providersState());
+  } catch (err) {
+    return providerError(res, err);
+  }
+});
+
+// Settings › Providers › Speech: "Remove speech models" (the size shows on the card).
+app.delete('/api/speech/cache', async (_req, res) => {
+  try {
+    const bytes = speechAssetStore().clear();
+    res.json({ removed: bytes, providers: await providersState() });
+  } catch (err) {
+    res.status(err && err.status === 409 ? 409 : 500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+app.post('/api/providers/speech/test', async (req, res) => {
+  const b = req.body || {};
+  res.json(await testSpeech(typeof b.kind === 'string' ? b.kind : '', b));
+});
+
+app.post('/api/speech/transcribe', express.raw({ type: ['audio/wav', 'audio/x-wav', 'audio/wave'], limit: '25mb' }), async (req, res) => {
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return badRequest(res, 'send the utterance as an audio/wav body');
+  const ctrl = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) ctrl.abort(); });
+  try {
+    res.json(await transcribe({ audio: req.body, signal: ctrl.signal }));
+  } catch (err) {
+    if (!res.headersSent) speechFail(res, err);
+  }
+});
+
+app.post('/api/speech/synthesize', async (req, res) => {
+  const ctrl = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) ctrl.abort(); });
+  let up;
+  try {
+    up = await synthesize({ text: req.body && req.body.text, signal: ctrl.signal });
+  } catch (err) {
+    return speechFail(res, err);
+  }
+  res.status(200).set({ 'Content-Type': up.headers.get('content-type') || 'audio/wav', 'Cache-Control': 'no-store' });
+  try {
+    if (up.body) for await (const chunk of up.body) { if (res.destroyed) break; res.write(chunk); }
+    res.end();
+  } catch {
+    res.destroy();   // upstream died mid-stream: the browser's audio fails, voice drops to text-only
+  }
+});
 
 app.get('/api/providers', async (req, res) => {
   try {
@@ -7018,12 +7962,18 @@ app.patch('/api/ask/threads/:id', async (req, res) => {
     const pick = body.model !== undefined || body.effort !== undefined;
     // Title keeps its original contract exactly: a PATCH that names none of the
     // fields still earns the title error, so pre-#397 callers see identical behaviour.
-    if (body.title !== undefined || (body.scope === undefined && !pick)) {
+    if (body.title !== undefined || (body.scope === undefined && body.mcpOff === undefined && !pick)) {
       const raw = body.title;
       if (typeof raw !== 'string' || !raw.trim() || raw.length > 120) {
         return badRequest(res, 'title must be a non-empty string of at most 120 characters');
       }
       patch.title = raw.trim();
+    }
+    if (body.mcpOff !== undefined) {
+      // MCP registry §9.4: the composer picker's switched-off sets and memberships, applied from the next turn.
+      const mo = validateMcpOff(body.mcpOff);
+      if (!mo.ok) return badRequest(res, mo.error);
+      patch.mcpOff = mo.value;
     }
     if (pick) {
       // The same check as the message POST. Awaited BEFORE the scope branch, so its
@@ -7045,6 +7995,7 @@ app.patch('/api/ask/threads/:id', async (req, res) => {
       delete base.projectDir;
       delete base.projectKey;
       delete base.workspaceId;
+      delete base.projectSource;
       patch.context = { ...base, ...sv.scope };
     }
     const thread = askUpdateThread(id, patch);
@@ -7223,6 +8174,7 @@ function askApplyPin(ctx, pin) {
   delete out.projectDir;
   delete out.projectKey;
   delete out.workspaceId;
+  delete out.projectSource;   // MCP registry §9.1: the fallback tag goes with the target keys
   return { ...out, ...pin };
 }
 
@@ -7253,9 +8205,10 @@ function askWebAccessFor(threadId, ctx) {
 /** The system prompt of ONE Ask turn: the rules, the catalog, and — only when the chat's
  *  "Create and run scripts" pref is on (W20) — the scripts section with the runtimes this host
  *  actually has (the python probe, cached 60 s); plus the web section when `web` (askWebAccess()
- *  for this turn) is on. Memory is mounted, not rendered. */
-async function askSystemPromptFor(catalog, { web = null } = {}) {
-  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT, web });
+ *  for this turn) is on, and the MCP servers section when the turn has registry copies (`mcp`,
+ *  askMcpPromptInput()). Memory is mounted, not rendered. */
+async function askSystemPromptFor(catalog, { web = null, mcp = null } = {}) {
+  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT, web, mcp });
 }
 
 /** "scheduled Sat Sep 19, 02:00 (run 1a2b…)" / "repeats: Every weekday at 02:00 (sch_…)" / "proposes: …" — or ''. */
@@ -7290,10 +8243,12 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
   if (ctx.diffPath) out.diffPath = ctx.diffPath;   // client-supplied, already length-checked by validateClientContext
   if (ctx.runPage) out.runPage = ctx.runPage;       // an enum (RUN_PAGE_PARTS), validated the same way
   try {
-    if (ctx.projectKey || ctx.projectDir) {
+    // MCP registry §9.1: a fallback-tagged projectDir (the dropdown on a page about no project) names nothing.
+    const dir = ctx.projectSource === 'fallback' ? null : ctx.projectDir;
+    if (ctx.projectKey || dir) {
       const projects = await listProjects();
       const p = projects.find((x) =>
-        (ctx.projectKey && x.key === ctx.projectKey) || (ctx.projectDir && x.path === ctx.projectDir));
+        (ctx.projectKey && x.key === ctx.projectKey) || (dir && x.path === dir));
       if (p) out.project = { name: p.name, key: p.key };
     }
   } catch { /* absent line */ }
@@ -7377,7 +8332,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
         // workflowId once the user saved it; a run card keeps its pre-P3 line byte for byte.
         const wf = !!(b.card && b.card.type === 'workflow');
         if (wf && b.state === 'building') continue;   // transient (no name yet) — never worth a header line
-        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'away')) {
+        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'workspace' || b.card.type === 'away')) {
           cards.push({ id: b.id, type: b.card.type, state: b.state, summary: b.card.summary || '' });
           continue;
         }
@@ -7441,7 +8396,7 @@ function askSignedIn(req) {
   return who.source === 'local' ? null : who.name;
 }
 
-async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, files = [], synthetic = null, signedIn = null, reader = null }) {
+async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, files = [], synthetic = null, signedIn = null, reader = null, mcpOff = undefined }) {
   // §6.2.2 ATOMIC re-check + slot reservation. Today every await between the
   // top 409/429 pair and here resolves in microtasks (validateModelEffort ->
   // composeCatalog; askBuildCatalog -> three synchronous better-sqlite3
@@ -7473,7 +8428,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // Writes. Store the LAST context + model/effort on the thread (§6.5 tail, D8).
     // `ctx` (pin-merged) rather than cv.context: the stored row is what restores
     // the selector on reopen and what the MCP child reads for tool defaulting.
-    askUpdateThread(id, { context: ctx, model, effort });
+    askUpdateThread(id, { context: ctx, model, effort, ...(mcpOff !== undefined ? { mcpOff } : {}) });
     // §7.4 — NOTHING is stamped on the row before the 202: the thread stays
     // untitled (the header reads "Ask Worca") until the D13 background title
     // announces itself. titleWasAuto gates that call: a title given at THREAD
@@ -7491,7 +8446,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     const attRows = files.map((f) => askAddAttachment(id, userMsg.id, { name: f.name, kind: f.kind, mime: f.mime, text: f.text, data: f.data }));
     // The decoded binary bodies are on disk now. `files` is captured by this
     // scope's closures (settleJob, the turn listeners, onOutOfTurn) for the whole
-    // turn plus jobGraceMs, so up to 25 MB of dead Buffers would otherwise stay
+    // turn plus jobGraceMs, so up to 48 MB of dead Buffers would otherwise stay
     // reachable per running thread.
     for (const f of files) f.data = null;
     echoAttachments = attRows.map((a) => ({ id: a.id, name: a.name, bytes: a.bytes, kind: a.kind, mime: a.mime }));
@@ -7519,7 +8474,10 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // team policy — so the prompt section, the sub-agent note and the MCP child's tools agree.
     const pinned = askPinnedScope(ctx);
     const web = askWebAccessFor(id, ctx);
-    const systemPrompt = await askSystemPromptFor(catalog, { web });
+    // MCP registry §9.1–9.3: General + the targets in play (the tagged dropdown fallback excluded), minus the chat's
+    // picker choices — resolved ONCE per turn, so the per-turn file, the spawn and the prompt section agree.
+    const mcp = await resolveAskMcp({ ctx, threadId: id, off: mcpOff !== undefined ? mcpOff : thread.mcpOff, model });
+    const systemPrompt = await askSystemPromptFor(catalog, { web, mcp: await askMcpPromptInput(mcp) });
     const header = askBuildContextHeader(headerCtx);
     const prompt = askBuildTurnPrompt(header, text, inline);
     const prior = askListMessages(id).filter((m) => m.seq < userMsg.seq);
@@ -7541,6 +8499,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
       deterministicTitle,
       pinnedScope: pinned,                          // #397: proposal defaulting + mismatch flag
       web,
+      mcp: mcp.result,
       timeZone: ctx.timeZone || (thread.context && thread.context.timeZone) || null,   // scheduled runs: the user's clock
       memoryProject: headerCtx.project ? { key: headerCtx.project.key, name: headerCtx.project.name || '' } : null,   // native-rules revision: the turn mounts global + this project through --add-dir
       mock: mockEnabled({}) ? { card: mockAskCard(ctx, text) } : null, // R-F
@@ -7553,6 +8512,8 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         onOutOfTurn: (f) => broadcast({ ...f, threadId: id }),
         onCommentMutation: ({ runId }) => { emitDiffCommentsChanged(runId); },
         onWorktreeMutation: () => { emitAskWorktrees(id); },
+        // §9.1 (D17): at turn end, name the copies a worktree opened this turn brings into the next one.
+        mcpJoinNotice: () => askMcpJoinNotice({ before: mcp, ctx, threadId: id, off: askGetThread(id)?.mcpOff ?? null, model }),
         // A remember/forget in the MCP child is the same scope change a REST write makes (B29).
         // The key is parsed out of worca's OWN tool result, never written by the model; shape-check
         // it anyway before it rides a broadcast (I2-#22).
@@ -7635,6 +8596,9 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
     }
     const cv = validateClientContext(body.context);
     if (!cv.ok) return badRequest(res, cv.error);
+    // MCP registry §9.4: the composer sends the picker's choices with every message; they decide this turn and are stored.
+    const mo = body.mcpOff === undefined ? { ok: true, value: undefined } : validateMcpOff(body.mcpOff);
+    if (!mo.ok) return badRequest(res, mo.error);
     // #397: explicit pin beats page context, per field. A context carrying its own
     // `pinned` verdict is authoritative — the selector-aware client already merged
     // (true) or explicitly chose Auto (false). A context WITHOUT one comes from a
@@ -7683,13 +8647,13 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
         if (bodyText.includes('\u0000')) return badRequest(res, `attachment contains NUL bytes: ${name}`);
         files.push({ name, kind: 'text', mime: cls.mime, text: bodyText, bytes: buf.length });
       }
-      const total = askThreadAttachmentBytes(id) + files.reduce((s, f) => s + f.bytes, 0);
-      if (total > ASK_LIMITS.attachment.maxBytesPerThread) {
-        return res.status(413).json({ error: 'attachment budget for this thread exceeded' });
+      const cap = ASK_LIMITS.attachment.maxBytesPerMessage;
+      if (files.reduce((s, f) => s + f.bytes, 0) > cap) {
+        return res.status(413).json({ error: `attachments over ${cap} bytes per message` });
       }
     }
 
-    const r = await startAskTurn({ threadId: id, thread, ctx, model: mv.model, effort: mv.effort, text, files, signedIn: askSignedIn(req), reader: askViewer(req) });
+    const r = await startAskTurn({ threadId: id, thread, ctx, model: mv.model, effort: mv.effort, text, files, signedIn: askSignedIn(req), reader: askViewer(req), mcpOff: mo.value });
     if (!r.ok) return res.status(r.status).json({ error: r.error, ...(r.budget ? { budget: r.budget } : {}) });
     // `attachments` carries the store-minted ids so the sender's own echo can key
     // image thumbnails and the thread budget off them (the ask-message broadcast
@@ -7698,6 +8662,31 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
   } catch (err) {
     // startAskTurn never throws (it returns {ok:false,…}); only the route's own
     // pre-checks can land here, so there is no slot to release.
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+// MCP registry §9.4: the composer picker's data — the same targets in play and resolver as the turn. `threadId`
+// adds the thread's open worktrees and stored choices; a body `mcpOff` overrides them (a thread-less chat);
+// `model` (the composer's) sets the §5.6 tool-name limit.
+app.post('/api/ask/mcp-preview', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const cv = validateClientContext(body.context);
+    if (!cv.ok) return badRequest(res, cv.error);
+    let thread = null;
+    if (body.threadId !== undefined) {
+      const tid = askIdParam(res, body.threadId, 'thread');
+      if (!tid) return;
+      thread = askGetThread(tid);
+      // Someone else's thread is a 404, like every /api/ask/threads/:id route on a shared deployment.
+      if (!thread || !askThreadVisible(thread, req)) return res.status(404).json({ error: 'thread not found' });
+    }
+    const mo = body.mcpOff === undefined ? { ok: true, value: thread ? thread.mcpOff : null } : validateMcpOff(body.mcpOff);
+    if (!mo.ok) return badRequest(res, mo.error);
+    if (body.model !== undefined && (typeof body.model !== 'string' || !body.model || body.model.length > 200)) return badRequest(res, 'model must be a model id');
+    res.json(await askMcpPreview({ ctx: cv.context, threadId: thread ? thread.id : null, off: mo.value, model: body.model ?? null }));
+  } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
 });
@@ -7833,9 +8822,9 @@ async function startMetricsEventTurn(threadId, block) {
   const state = block.state === 'declined' ? 'declined' : block.state === 'failed' ? 'failed' : 'applied';
   const result = card.result || null;
   // One event turn for every non-workflow card; the type picks the wording. Metrics is the fallback.
-  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'away' ? card.type : 'metrics';
-  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, away: awayEventPrompt, metrics: metricsEventPrompt }[kind];
-  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, away: awayNoticeText, metrics: metricsNoticeText }[kind];
+  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'away' ? card.type : 'metrics';
+  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, workspace: workspaceEventPrompt, away: awayEventPrompt, metrics: metricsEventPrompt }[kind];
+  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, workspace: workspaceNoticeText, away: awayNoticeText, metrics: metricsNoticeText }[kind];
   const text = eventPrompt({ cardId: block.id, state, card, result });
   const notice = noticeText({ state, card, result });
   let mv = await validateModelEffort(thread.model, thread.effort);
@@ -7963,6 +8952,49 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
           if (body.scope === 'always') { await addAskWebHost(host); emitChanged('settings-changed'); }
           result = { ok: true, scope: body.scope };
         } catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err) }; }
+        block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
+      } finally { askCardBusy.delete(cardId); }
+      if (!block) return res.status(409).json({ error: 'card vanished' });
+      const turn = await startMetricsEventTurn(id, block);
+      return res.json({ block, turn });
+    }
+    if (found.block.card && found.block.card.type === 'workspace') {
+      // Workspace card: proposed → applied | failed | declined. The registry write happens HERE, behind the
+      // click, through the same core functions as the workspace routes — and behind the same live-run guard.
+      if (body.state !== 'applied' && body.state !== 'declined') return badRequest(res, 'state must be "applied" or "declined"');
+      if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
+      if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
+      if (body.state === 'declined') {
+        const block = flipCard(id, cardId, { state: 'declined' });
+        if (!block) return res.status(409).json({ error: 'card vanished' });
+        const turn = await startMetricsEventTurn(id, block);
+        return res.json({ block, turn });
+      }
+      askCardBusy.add(cardId);
+      let block;
+      try {
+        const card = found.block.card;
+        const wid = card.change && card.change.workspaceId;
+        let result;
+        try {
+          if (card.kind !== 'create' && card.kind !== 'rename' && wid && workspaceMembersBusy(wid)) {
+            throw new Error('cannot change the members of a workspace while a run or scan owns it');
+          }
+          const before = wid ? await readWorkspace(wid) : null;
+          result = await applyWorkspaceChange(card);
+          if (card.kind !== 'rename') {
+            // A new or changed member set: discover the new members and re-scan (graphs + description).
+            const ws = await readWorkspace(result.workspaceId);
+            if (ws) {
+              const rescan = await afterMembersChanged(ws, ws.projectPaths.filter((p) => !(before?.projectPaths || []).includes(p)));
+              result = rescan.runId
+                ? { ...result, rescanRunId: rescan.runId, detail: `${result.detail} · re-scanning the workspace` }
+                : { ...result, detail: `${result.detail} · no re-scan (${rescan.skipped})` };
+            }
+          }
+          emitChanged('workspaces-changed', card.kind === 'create' ? 'created' : card.kind === 'rename' ? 'renamed' : 'members');
+          if (result.clearedHomes.includes('policy')) emitChanged('team-policy-changed', 'policy-home');
+        } catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err), code: (err && err.code) || 'ERROR' }; }
         block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
       } finally { askCardBusy.delete(cardId); }
       if (!block) return res.status(409).json({ error: 'card vanished' });
@@ -8130,7 +9162,7 @@ function agentErrorBody(err) {
 function startAgentGen(input) {
   const orch = createAgentGen({
     ...input,
-    claude: { permissionMode: 'acceptEdits', mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK) },
+    claude: { permissionMode: 'acceptEdits', mock: serverMockMode() },
   });
   // The engine mints its own genId (agen_<uuid>) and tags every emitted event
   // with it; use THAT as the runs-Map key + the returned id so the entry, its
@@ -8578,11 +9610,14 @@ app.get('/api/plugins', async (req, res) => {
     // request, and only when some plugin ships a python script (the probe caches 60 s).
     const anyPython = rows.some((p) => Number((p.scriptRuntimes || {}).python) > 0);
     const notice = anyPython ? await pythonNoticeFor([{ runtime: 'python' }]) : null;
+    const mcp = await readMcpStore();
     res.json({
       plugins: rows.map((p) => ({
         ...p,
         marketplaceName: p.marketplace && mkts[p.marketplace] ? mkts[p.marketplace].name : null,
         pythonMissing: !!(notice && Number((p.scriptRuntimes || {}).python) > 0),
+        // The uninstall confirm names the MCP sets its servers leave (§4.6).
+        mcpSets: mcpFootprint(mcp, (id) => id.startsWith(`plugin:${p.name}/`)).sets,
       })),
       orphans: listOrphanPluginData(),
     });
@@ -8715,6 +9750,7 @@ app.post('/api/plugins/:name/update', async (req, res) => {
     }
     const updated = await updatePlugin(name);
     reloadChatWorkers(name);
+    void retestServers((s) => s.startsWith(`plugin:${name}/`));   // MCP registry §7.3
     res.json(updated);
   } catch (err) {
     sendPluginError(res, err);
@@ -8785,7 +9821,7 @@ app.post('/api/plugins/:name/doctor', async (req, res) => {
 // { set: true } (§7.6).
 // ?profile=<id> selects which configuration to echo (multi-profile sources);
 // absent = the default bucket, which is all a single-profile source ever uses.
-app.get('/api/plugins/:name/config', (req, res) => {
+app.get('/api/plugins/:name/config', async (req, res) => {
   const name = requirePlugin(req, res);
   if (!name) return;
   const manifest = readInstalledManifest(name);
@@ -8825,10 +9861,18 @@ app.get('/api/plugins/:name/config', (req, res) => {
     // Model secrets (design §9.7): same redaction contract — { set: true|false }
     // markers only, never values.
     const msSchema = modelSecretsSchema(name);
+    // With the credential broker on, each person adds these keys on the key page; the form
+    // only clears values saved here before (the boot guard refuses them).
+    let broker = null;
+    if (msSchema.length && brokerEnabled()) {
+      let keyPage = null;
+      try { keyPage = (await brokerInfo()).publicUrl || null; } catch { /* the note still shows */ }
+      broker = { keyPage };
+    }
     res.json({
       sources,
       channels,
-      ...(msSchema.length ? { models: { schema: msSchema, values: redactedConfig(name, msSchema) } } : {}),
+      ...(msSchema.length ? { models: { schema: msSchema, values: redactedConfig(name, msSchema), ...(broker ? { broker } : {}) } } : {}),
     });
   } catch (err) {
     sendPluginError(res, err);
@@ -8924,6 +9968,10 @@ app.put('/api/plugins/:name/config', (req, res) => {
   if (body.target === 'modelSecrets') {
     const schema = modelSecretsSchema(name);
     if (!schema.length) return badRequest(res, 'plugin declares no modelSecrets');
+    // Broker on: only clearing is allowed; a key saved here would be one agents could reach.
+    if (brokerEnabled() && Object.values(body.values || {}).some((v) => v !== null && v !== '')) {
+      return res.status(409).json({ error: 'the credential broker is on: each person adds this key on the key page' });
+    }
     try {
       writePluginConfig(name, schema, body.values);
       return res.json({ ok: true });
@@ -8989,6 +10037,211 @@ app.get('/api/plugins/:name/model-env', (req, res) => {
     id: model.id, label: model.label, efforts: model.efforts, env, secretKeys,
     ...(model.cost ? { cost: model.cost } : {}),
   });
+});
+
+// ---------------------------------------------------------------------------
+// /api/mcp/* — the MCP registry (docs/mcp-servers.md): the catalog, sets and their memberships,
+// project assignments. The store (src/core/mcp/store.mjs) owns every rule about the files and their shapes
+// and keeps user-keyed maps null-prototype; these handlers check ids and never return a secret value.
+// ---------------------------------------------------------------------------
+const MCP_REFUSED_KEYS = ['hash', 'consent', 'bases', 'seeded'];
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+// Bodies never set what only consent or the store writes (§12); `expectHash` is a precondition, not a value.
+app.use('/api/mcp', (req, res, next) => {
+  if (isPlainObject(req.body)) {
+    const bad = MCP_REFUSED_KEYS.find((k) => Object.hasOwn(req.body, k));
+    if (bad) return badRequest(res, `"${bad}" cannot be set here`);
+  }
+  next();
+});
+
+function sendMcpError(res, err) {
+  if (err instanceof McpStoreError) return res.status(err.status).json({ error: err.message });
+  res.status(500).json({ error: err?.message || String(err) });
+}
+function mcpSetId(req, res) {
+  const id = req.params.id;
+  if (!SET_ID_RE.test(id)) { badRequest(res, 'invalid set id'); return null; }
+  return id;
+}
+function mcpServerId(req, res, param = 'serverId') {
+  const id = req.params[param];
+  if (!SERVER_ID_RE.test(id)) { badRequest(res, 'invalid server id'); return null; }
+  return id;
+}
+/** `{ name, ...definition }` → [name, definition] with the name split off. */
+function mcpDefinitionBody(req) {
+  const { name, ...raw } = isPlainObject(req.body) ? req.body : {};
+  return [typeof name === 'string' ? name : '', raw];
+}
+
+app.get('/api/mcp/servers', async (_req, res) => {
+  try { res.json(await listCatalogView()); } catch (err) { sendMcpError(res, err); }
+});
+
+// Live checks for the Add / Edit definition form (§7.2); ?edit=1 skips the name check.
+app.post('/api/mcp/servers/validate', async (req, res) => {
+  const [name, raw] = mcpDefinitionBody(req);
+  try {
+    const { errors } = validateMcpDefinition(raw, { name, source: 'manual' });
+    if (req.query.edit !== '1') {
+      const { snapshot, catalog } = await viewContext();
+      // What P1 addManualServer refuses: a manual name in use, a base another id holds (a removed manual server keeps
+      // its own base, so its name can be added again) or a catalog server's declared name.
+      const held = Object.entries(snapshot.bases).some(([sid, b]) => b === name && sid !== `manual:${name}`);
+      if (Object.hasOwn(snapshot.manual, name) || held || catalog.some((e) => e.name === name)) errors.push(`the name "${name}" is taken`);
+    }
+    res.json({ errors });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/servers', async (req, res) => {
+  const [name, raw] = mcpDefinitionBody(req);
+  try {
+    const { catalog } = await viewContext();
+    await addManualServer(name, raw, { catalogNames: catalog.map((e) => e.name) });
+    res.json({ ok: true, id: `manual:${name}` });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/servers/:id', async (req, res) => {
+  const id = mcpServerId(req, res, 'id');
+  if (!id) return;
+  if (!id.startsWith('manual:')) return badRequest(res, 'only manual servers can be edited');
+  try {
+    await editManualServer(id.slice('manual:'.length), isPlainObject(req.body) ? req.body : {});
+    void retestServers((s) => s === id);
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.delete('/api/mcp/servers/:id', async (req, res) => {
+  const id = mcpServerId(req, res, 'id');
+  if (!id) return;
+  if (id.startsWith('plugin:')) return badRequest(res, 'a plugin server leaves with its plugin');
+  try {
+    const { catalog } = await viewContext();
+    const e = catalog.find((x) => x.id === id);
+    if (!e) return res.status(404).json({ error: 'server not found' });
+    if (e.source === 'policy' && e.retired !== true) return badRequest(res, 'a server team policy requires cannot be removed here');
+    await removeServerEverywhere(id);
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.get('/api/mcp/sets', async (_req, res) => {
+  try { res.json(await listSetsView()); } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/sets', async (req, res) => {
+  try { res.json(await createSet(req.body?.name)); } catch (err) { sendMcpError(res, err); }
+});
+
+app.get('/api/mcp/sets/:id', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try {
+    const v = await getSetView(id);
+    if (!v) return res.status(404).json({ error: 'set not found' });
+    res.json(v);
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/sets/:id', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try { await renameSet(id, req.body?.name); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+app.delete('/api/mcp/sets/:id', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try { await deleteSet(id); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/sets/:id/duplicate', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try {
+    const team = id.startsWith('team-') ? teamDuplicateSource(await viewContext(), id) : undefined;
+    if (team === null) return res.status(404).json({ error: 'set not found' });
+    res.json(await duplicateSet(id, req.body?.name, { team }));
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/sets/:id/members/:serverId', async (req, res) => {
+  const id = mcpSetId(req, res);
+  const serverId = id && mcpServerId(req, res);
+  if (!serverId) return;
+  const patch = req.body;   // P1 putMember checks enabled, values and secrets
+  if (!isPlainObject(patch)) return badRequest(res, 'body must be an object');
+  try {
+    const ctx = await viewContext();
+    const entry = ctx.catalog.find((e) => e.id === serverId);
+    if (!entry) return res.status(404).json({ error: 'server not found' });
+    const opts = { def: entry.def };
+    if (id.startsWith('team-')) {
+      const t = teamMemberRefusal(ctx, id, serverId, patch);
+      if (t.status) return res.status(t.status).json({ error: t.error });
+      opts.team = { home: t.home };
+    }
+    await putMember(id, serverId, patch, opts);
+    retestAfterSave(ctx, id, serverId, patch);   // refused quietly while a required field is unfilled; off starts nothing
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.delete('/api/mcp/sets/:id/members/:serverId', async (req, res) => {
+  const id = mcpSetId(req, res);
+  const serverId = id && mcpServerId(req, res);
+  if (!serverId) return;
+  if (id.startsWith('team-')) return res.status(409).json({ error: 'Team set members come from team policy and cannot be removed here' });
+  try { await deleteMember(id, serverId); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/sets/:id/members/:serverId/test', async (req, res) => {
+  const id = mcpSetId(req, res);
+  const serverId = id && mcpServerId(req, res);
+  if (!serverId) return;
+  try { res.json(await testMembership(id, serverId)); } catch (err) { sendMcpError(res, err); }
+});
+
+app.get('/api/mcp/projects/:key', async (req, res) => {
+  if (!PROJECT_KEY_RE.test(req.params.key)) return badRequest(res, 'invalid project key');
+  try { res.json(await projectAssignmentView(req.params.key)); } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/projects/:key', async (req, res) => {
+  if (!PROJECT_KEY_RE.test(req.params.key)) return badRequest(res, 'invalid project key');
+  const { sets, includeGeneral } = req.body || {};   // P1 setProjectAssignment checks both
+  try { await setProjectAssignment(req.params.key, { sets, includeGeneral }); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+// MCP Team set (MCP registry spec §11.3, §12): consent routes. The definition, values and hash are read
+// from the cached policy, never the body; `expectHash` is only a precondition (409 when it moved on).
+// A home is a lowercase policy slug (the home part of SERVER_ID_RE's `policy:` ids, within its bound: deep subgroups make
+// long slugs); ids are checked before any lookup.
+const MCP_HOME_RE = /^(?=.{1,1024}$)[a-z0-9_][a-z0-9._-]*(?:\/[a-z0-9_][a-z0-9._-]*)*$/;
+function mcpHome(req, res) {
+  const home = req.params.home;
+  if (!MCP_HOME_RE.test(home)) { badRequest(res, 'home must be a lowercase policy slug'); return null; }
+  return home;
+}
+for (const action of ['install', 'turn-on', 'update']) {
+  app.post(`/api/mcp/teams/:home/members/:serverId/${action}`, async (req, res) => {
+    const home = mcpHome(req, res); if (!home) return;
+    const serverId = mcpServerId(req, res); if (!serverId) return;
+    const expectHash = req.body?.expectHash;
+    if (typeof expectHash !== 'string' || !/^[0-9a-f]{64}$/.test(expectHash)) return badRequest(res, 'expectHash must be the hash the consent dialog showed');
+    try { res.json({ ok: true, ...(await teamAction(action, home, serverId, { expectHash })) }); }
+    catch (err) { sendMcpError(res, err); }
+  });
+}
+app.post('/api/mcp/teams/:home/forget', async (req, res) => {
+  const home = mcpHome(req, res); if (!home) return;
+  try { await teamForget(home); res.json({ ok: true }); }
+  catch (err) { sendMcpError(res, err); }
 });
 
 // ---------------------------------------------------------------------------
@@ -9335,13 +10588,37 @@ function isTruthy(v) {
   return s === '1' || s === 'true' || s === 'yes' || s === 'on';
 }
 
+/** The server's mock mode (WORCA_MOCK, else ORCH_MOCK): it forces EVERY run and Claude job to
+ *  mock, whatever the request says. The WS hello carries it as `serverMock` so the UI locks its
+ *  Mock switch on and shows the MOCK pill — the one reading both sides use, so they never disagree. */
+function serverMockMode() {
+  return isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK);
+}
+
 // ---------------------------------------------------------------------------
 // /api/chat* -> channel worker status + test delivery (design §4.8). Prefs ride
 // GET/POST /api/settings; per-plugin channel CONFIG rides /api/plugins/:name/config.
 // ---------------------------------------------------------------------------
+/** Channel status rows + each channel's command reach: how many chats may send
+ *  commands, and the last command refused (hidden once its chat is allowed). */
+function chatStatusRows() {
+  const entries = channelHost.list();
+  return channelHost.status().map((row) => {
+    const entry = entries.find((e) => e.plugin === row.plugin && e.channelId === row.channelId);
+    let ids = [];
+    try { ids = parseIdList(readPluginConfig(row.plugin, entry?.configSchema || []).allowedChatIds); }
+    catch { /* unreadable config: nobody is allowed */ }
+    const refused = chatRefusals.get(`${row.plugin}/${row.channelId}`) || null;
+    return {
+      ...row,
+      commands: { allowed: ids.length, lastRefused: refused && !ids.includes(refused.chatId) ? refused : null },
+    };
+  });
+}
+
 app.get('/api/chat/status', (_req, res) => {
   try {
-    res.json({ channels: channelHost.status() });
+    res.json({ channels: chatStatusRows() });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -9527,6 +10804,14 @@ export async function bootMaintenance({ log } = {}) {
     summary.bench = { removed: 0 };
     console.error(`[worca-ui] bench sweep failed: ${err && err.message ? err.message : err}`);
   }
+
+  // MCP registry (§4.4): a plugin can become honoured with no install event (a
+  // host API bump, a linked plugin's edit), so persist the bases it still lacks.
+  try {
+    await reconcileMcpStore();
+  } catch (err) {
+    console.error(`[worca-ui] MCP registry reconcile failed: ${err && err.message ? err.message : err}`);
+  }
   return summary;
 }
 
@@ -9534,6 +10819,11 @@ export async function bootMaintenance({ log } = {}) {
 // test, skip listening so the test can mount `app` on its own ephemeral port.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
+  // Outbound calls honor HTTP(S)_PROXY / NO_PROXY (src/core/env-proxy.mjs). First: the
+  // broker check below is already one.
+  const proxyLine = proxyNotice(useEnvProxy());
+  if (proxyLine) console[proxyLine.level === 'warn' ? 'warn' : 'log'](`[worca-ui] ${proxyLine.text}`);
+
   // Remote access fails closed: an unsafe or broken config never starts serving.
   if (REMOTE_ACCESS_CHECK.errors.length) {
     for (const e of REMOTE_ACCESS_CHECK.errors) console.error(`[worca-ui] remote access: ${e}`);
@@ -9622,6 +10912,8 @@ if (isMain) {
     }
     try { startTeamMetricsBackground({ log: (m) => console.warn(m) }); }
     catch (err) { console.warn(`[worca-ui] team metrics background: ${err?.message || err}`); }
+    try { startProjectSyncBackground({ log: (m) => console.warn(m) }); }
+    catch (err) { console.warn(`[worca-ui] project sync background: ${err?.message || err}`); }
     // Model bridge (model-bridge-design.md §4.1): up before the first bridged
     // spawn so resolveModelEnv's synchronous start is the exception, not the rule.
     startBridge({ log: (m) => console.warn(m) }).catch((err) => console.warn(`[worca-ui] model bridge: ${err?.message || err}`));
@@ -9650,7 +10942,7 @@ if (isMain) {
 
 export { app, server, runs };
 export const _testing = {
-  wireRun, summarizeRuns, scanRequest, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
+  wireRun, summarizeRuns, scanRequest, fireTicket, afterMembersChanged, markResumedRescan, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
   chatActions, chatRouter, channelHost, handleChatInbound, enqueueChatWork, answerRun,
   chatNotifier, resumeRun, resolveHljsAssets, resolveEsmAsset, askJobs, askFollowers, askDeleting, resolveAskContext, flipCard, askWebAccessFor,
   startCloneJob, followCloneCard, CLONE_JOBS,
@@ -9658,5 +10950,6 @@ export const _testing = {
   askTrackRun, liveRunEntry, liveDefragRun, memoryScopeKey, startRunHandler, emitMemoryChanged, askSystemPromptFor,
   uiControl, bearerMatches,
   broadcast, askFilesRunDir,
+  validateResumeTarget, resumeTargetOf, fireResumeTicket, cancelScheduledResumes,
   trackHeartbeat, heartbeatTick, BOOT_ID,
 };

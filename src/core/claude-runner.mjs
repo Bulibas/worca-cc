@@ -59,9 +59,10 @@ import { agentIdentity, agentSpawn, killAgentGroup, shareWithAgent } from './age
 import { agentIdentityFor } from './agent-pool.mjs';
 import { brokerEnabled, brokerInfo, mintSpawnToken, revokeSpawnToken, slotBaseUrl, slotOfBaseUrl } from './broker-client.mjs';
 import { resolveBillTo, normalizeBillTo, currentOwner } from './billing.mjs';
-import { redactSecrets, redactDeep } from './redact.mjs';
+import { redactSecrets, redactDeep, createRedactor } from './redact.mjs';
 import { MODEL_CREDENTIAL_ENV_KEYS } from './broker-guard.mjs';
 import { modelSlot } from './broker-routing.mjs';
+import { pluginModelRoute, syncPluginSlots } from './plugin-broker-slots.mjs';
 
 const DEFAULT_BIN = process.env.WORCA_CLAUDE_BIN || process.env.ORCH_CLAUDE_BIN || 'claude';
 
@@ -419,6 +420,8 @@ export function mockEnabled(opts) {
  *   on the scan's two). Merged OVER the guardrail env and UNDER modelEnv (a catalog entry that sets the
  *   same key wins); string values only, reserved keys (isReservedModelEnvKey) dropped (cleanRunEnv).
  *   Absent ⇒ the spawn env is byte-identical.
+ * @param {string[]} [o.redactValues]  secret values to redact (MCP registry §5.5.3: the spawn's registry secrets):
+ *   every event, the result text and error messages, on the direct and the broker path. Absent ⇒ unchanged.
  * @returns {Promise<{text:string, exitCode:number}>}
  */
 export async function runClaude(o = {}) {
@@ -444,6 +447,7 @@ export async function runClaude(o = {}) {
     envAllowlist,
     modelEnv,
     spawnEnv,
+    redactValues,
     disallowedTools,
     workspaceWriteTargets,
     resumeSessionId,
@@ -506,6 +510,7 @@ export async function runClaude(o = {}) {
     envAllowlist,
     modelEnv,
     spawnEnv,
+    redactValues,
     disallowedTools,
     tools,
     strictMcpConfig,
@@ -564,8 +569,15 @@ export function brokerRouteFor(modelEnv, env = process.env) {
 const SPAWN_TTL_SEC = { aux: 600, test: 600, ask: 7200, phase: 86400 };
 
 async function runViaBroker(opts) {
-  const route = brokerRouteFor(opts.modelEnv);
+  // An env-style plugin model spends from its plugin's own slot, at the plugin's base path;
+  // the plugin's secrets were never resolved into its env (config.mjs).
+  const pluginRoute = pluginModelRoute(opts.model);
+  if (pluginRoute?.error) throw brokerSpawnError(pluginRoute.error);
+  const route = pluginRoute || brokerRouteFor(opts.modelEnv);
   if (route.error) throw brokerSpawnError(route.error);
+  // Register the plugins' slots first if they changed since (a plugin enabled from the CLI).
+  try { await syncPluginSlots(); }
+  catch (err) { if (pluginRoute) throw brokerSpawnError(`cannot register plugin credential slots: ${err.message}`, 'network'); }
   const onEvent = opts.onEvent;
   const redactingOnEvent = (e) => onEvent(redactDeep(e));
 
@@ -619,7 +631,7 @@ async function runViaBroker(opts) {
     : withProviderModesOff({
       ENABLE_TOOL_SEARCH: 'true',
       ...(opts.modelEnv || {}),
-      ANTHROPIC_BASE_URL: slotBaseUrl(route.slot),
+      ANTHROPIC_BASE_URL: `${slotBaseUrl(route.slot)}${route.prefix || ''}`,
       ANTHROPIC_AUTH_TOKEN: minted.token,
     });
   try {
@@ -791,8 +803,18 @@ export function stageClaudeInvocation(opts, { bin = DEFAULT_BIN, limit = ARGV_IN
   return { ...plan, dir };
 }
 
-function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, model, effort, onEvent, signal, bin, resumeSessionId, mcpConfigPath, mcpServerGrants, permissionRules, envScrub, envAllowlist, modelEnv, spawnEnv: runSpawnEnv, disallowedTools, tools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages, maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, addDirs, agents, argvInlineLimit, asAgent }) { // billTo/spawnKind/runId/threadId are consumed by runViaBroker
-  return new Promise((resolveP, rejectP) => {
+function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, model, effort, onEvent, signal, bin, resumeSessionId, mcpConfigPath, mcpServerGrants, permissionRules, envScrub, envAllowlist, modelEnv, spawnEnv: runSpawnEnv, redactValues, disallowedTools, tools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages, maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, addDirs, agents, argvInlineLimit, asAgent }) { // billTo/spawnKind/runId/threadId are consumed by runViaBroker
+  // MCP registry §5.5.3: with registry secrets in this spawn's env, every emit, the result text and the error
+  // message leave redacted — wrapped once here, so the broker path (which calls runReal) is covered too.
+  const redactor = Array.isArray(redactValues) && redactValues.length ? createRedactor(redactValues) : null;
+  if (redactor) { const emit = onEvent; onEvent = (e) => emit(redactor.deep(e)); }
+  return new Promise((resolveRaw, rejectRaw) => {
+    const resolveP = redactor ? (r) => resolveRaw({ ...r, text: redactor.text(r.text) }) : resolveRaw;
+    const rejectP = redactor ? (err) => {
+      if (err && typeof err.message === 'string') err.message = redactor.text(err.message);
+      if (err && typeof err.stack === 'string') err.stack = redactor.text(err.stack);
+      rejectRaw(err);
+    } : rejectRaw;
     // Per-model routing env (design §4.4), prepared BEFORE argv: reserved keys
     // are re-dropped here defensively — the write path already rejects them, so
     // a drop means a hand-edited settings file — and the surviving map is also
@@ -1093,7 +1115,8 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
       // an early 401 or session-limit notice followed by hundreds of KB of MCP
       // chatter would otherwise scroll past both the trim and the tail cap.
       if (!isBenignStderrLine(line)) stderrClass = strongestClass(stderrClass, classifyError(line));
-      stderrBuf += line + '\n';        // still the source of the exit-code detail
+      // MCP registry §5.5.3: redacted line by line, before the trims below can cut a secret in two.
+      stderrBuf += (redactor ? redactor.text(line) : line) + '\n';        // still the source of the exit-code detail
       // Rolling tail: bound memory against chatty MCP servers. Trim at 4x the
       // cap down to 2x — amortized, and the kept tail always exceeds
       // STDERR_DETAIL_MAX so the close handler's `… ` marker still fires.
@@ -1123,7 +1146,9 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
         // error wins. A notice alone still beats the opaque "no stderr".
         const fromStderr = stderrBuf.split('\n').filter((l) => !isBenignStderrLine(l)).join('\n').trim();
         const streamDetail = errorDetail || apiErrorText || bridgeFailureText;
-        const raw = fromStderr || streamDetail || stderrBuf.trim() || 'no stderr';
+        const found = fromStderr || streamDetail || stderrBuf.trim() || 'no stderr';
+        // Redacted before the tail cut below, which could leave a piece of a secret that no value matches (§5.5.3).
+        const raw = redactor ? redactor.text(found) : found;
         // Tail, not head: the terminal cause sits at the END of a long stderr.
         const detail = raw.length > STDERR_DETAIL_MAX ? `… ${raw.slice(-STDERR_DETAIL_MAX)}` : raw;
         const err = new Error(`${bin} exited with code ${code}: ${detail}`);

@@ -91,6 +91,16 @@ test('delta batching: 256 chars flush immediately, flush() forces, redaction per
   assert.deepEqual(out.filter((f) => f.type === 'ask-delta').map((f) => f.text), ['a', 'b'], 'a synchronous timer stub flushes every delta (no stale timer id)');
 });
 
+test('a tool call flushes the batched text before it: the text reaches the client before the tool block', () => {
+  const h = harness();
+  h.push(mstart('msg_1'), delta("I'll check the runs."));
+  assert.equal(h.frames.filter((f) => f.type === 'ask-delta').length, 0, 'still batched');
+  h.push(atool('msg_1', 'tu_1', 'mcp__worca__list_runs', {}));
+  const order = h.types().filter((t) => t === 'ask-delta' || t === 'ask-block');
+  assert.deepEqual(order, ['ask-delta', 'ask-block']);
+  assert.equal(h.frames.find((f) => f.type === 'ask-delta').text, "I'll check the runs.");
+});
+
 test('text comes from the main stream only; result.result is a fallback when no assistant text arrived', () => {
   const h = harness();
   h.push(mstart('msg_c', 'toolu_agent'), delta('child text', 'toolu_agent'), atext('msg_1', 'parent'));
@@ -155,7 +165,7 @@ test('tool lifecycle: labels, running → done/error blocks, durations, input cl
   h.push(atool('msg_1', 'toolu_4', 'mcp__worca__read_attachment', { id: 'att_unknown' }));
   assert.equal(h.frames.at(-2).label, 'Reading attachment');
   h.push(atool('msg_1', 'toolu_5', 'mcp__other__thing', {}));
-  assert.equal(h.frames.at(-2).label, 'Using mcp__other__thing');
+  assert.equal(h.frames.at(-2).label, 'Using other · thing', '§9.7: a registry copy reads <copy> · <tool>');
   const before = h.frames.length;
   h.push(atool('msg_1', 'toolu_6', 'mcp__worca__list_runs', {}), atool('msg_1', 'toolu_7', 'mcp__worca__list_runs', {}));
   assert.deepEqual(h.frames.slice(before).map((f) => f.type), ['ask-label', 'ask-block', 'ask-block'], 'the same label is never repeated back to back');
@@ -175,6 +185,7 @@ test('tool lifecycle: labels, running → done/error blocks, durations, input cl
 
 test('labelForTool table', () => {
   assert.equal(labelForTool('mcp__worca__list_runs', {}), 'Finding runs');
+  assert.equal(labelForTool('mcp__worca__list_branches', { projectKey: 'web-00000001' }), 'Looking at branches');
   assert.equal(labelForTool('mcp__worca__get_run', { id: 'abcdefghijklmnop' }), 'Reading run abcdefghijkl');
   assert.equal(labelForTool('mcp__worca__get_run', {}), 'Reading run');
   assert.equal(labelForTool('mcp__worca__list_workflows', {}), 'Looking at workflows');
@@ -854,4 +865,19 @@ test('onAwayProposal fires on the propose_away_mode_change result, with its labe
   h.push(session(), init(), atool('msg_1', 't1', 'mcp__worca__propose_away_mode_change', { level: 'user', set: { enabled: true } }), uresult('t1', '{"ok":true}'));
   assert.deepEqual(calls, [{ toolUseId: 't1', input: { level: 'user', set: { enabled: true } }, text: '{"ok":true}', isError: false }]);
   assert.ok(h.frames.some((f) => f.type === 'ask-label' && f.label === 'Proposing an Away mode change'));
+});
+
+test('propose_workspace_change: labelled, and its RESULT reaches onWorkspaceProposal with the full input; a sub-agent call never does', () => {
+  assert.equal(labelForTool('mcp__worca__propose_workspace_change', {}), 'Proposing a workspace change');
+  const seen = [];
+  const h = harness({ onWorkspaceProposal: (e) => { seen.push(e); return Promise.resolve(); } });
+  const input = { kind: 'add_members', workspaceId: 'wks-demo-0000abcd', projectKeys: ['k1'] };
+  h.push(session(), init(), mstart('msg_1'), atool('msg_1', 'toolu_ws', 'mcp__worca__propose_workspace_change', input));
+  assert.deepEqual(seen, [], 'minted at RESULT, never at START');
+  h.push(uresult('toolu_ws', '{"ok":true,"card":{}}'));
+  assert.deepEqual(seen, [{ toolUseId: 'toolu_ws', input, text: '{"ok":true,"card":{}}', isError: false }]);
+  h.push(atool('msg_1', 'toolu_task', 'Agent', { description: 'helper', subagent_type: 'general-purpose', prompt: 'x' }));
+  h.push(atool('msg_c', 'toolu_ws2', 'mcp__worca__propose_workspace_change', input, 'toolu_task'));
+  h.push(uresult('toolu_ws2', '{"ok":true}', { ptu: 'toolu_task' }));
+  assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
 });

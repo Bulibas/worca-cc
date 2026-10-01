@@ -31,6 +31,12 @@ no public URL, no interactions endpoint, no tunnel. Zero npm dependencies
    IDs** and — for commands — **Allowed channel IDs**. Test from *Settings →
    Chat notifications*.
 
+## Sending commands
+
+Commands are plain messages: both `/approve` and `@worca /approve` work
+(Discord delivers the mention as `<@123> /approve`). The channel must be a
+server channel — the bot has no DM intent.
+
 ## Security
 
 **A bot token, or write access to an allowed channel, is control of worca-cc**
