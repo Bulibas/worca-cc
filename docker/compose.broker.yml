@@ -24,6 +24,9 @@ services:
       - broker
     environment:
       WORCA_BROKER_URL: http://broker:8080
+      # worca's fetch() honors HTTP(S)_PROXY (src/core/env-proxy.mjs): keep the sidecar
+      # direct, or a corporate proxy from .env gets asked for "broker" and can't resolve it.
+      NO_PROXY: ${NO_PROXY:-127.0.0.1,localhost},broker
       WORCA_BROKER_SECRET: ${WORCA_BROKER_SECRET:?set WORCA_BROKER_SECRET in .env}
       WORCA_BROKER_SYSTEM_BILL_TO: ${WORCA_BROKER_SYSTEM_BILL_TO:-}
       # Optional: pushes and pull requests as the person who acted (prefer | required),

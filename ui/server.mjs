@@ -297,6 +297,7 @@ import {
 } from '../src/core/run-report.mjs';
 import { REPORT_REASON_IDS } from '../src/shared/report-reasons.mjs';
 import { HLJS_GRAMMAR_IDS } from './public/hljs-loader.mjs';
+import { useEnvProxy, proxyNotice } from '../src/core/env-proxy.mjs';
 
 // ── node:sqlite runtime guard + warning filter ──────────────────────────────────
 // Drop ONLY the one-time ExperimentalWarning emitted by node:sqlite (the module is
@@ -10276,6 +10277,11 @@ export async function bootMaintenance({ log } = {}) {
 // test, skip listening so the test can mount `app` on its own ephemeral port.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
+  // Outbound calls honor HTTP(S)_PROXY / NO_PROXY (src/core/env-proxy.mjs). First: the
+  // broker check below is already one.
+  const proxyLine = proxyNotice(useEnvProxy());
+  if (proxyLine) console[proxyLine.level === 'warn' ? 'warn' : 'log'](`[worca-ui] ${proxyLine.text}`);
+
   // Remote access fails closed: an unsafe or broken config never starts serving.
   if (REMOTE_ACCESS_CHECK.errors.length) {
     for (const e of REMOTE_ACCESS_CHECK.errors) console.error(`[worca-ui] remote access: ${e}`);

@@ -45,6 +45,7 @@ import { cmdContainer } from './container.mjs';
 import {
   DEFAULT_UI_HOST, DEFAULT_UI_PORT, probeUi, stopUi, readUiInstance, uiUrl, waitForUiState,
 } from '../core/ui-instance.mjs';
+import { useEnvProxy, proxyNotice } from '../core/env-proxy.mjs';
 
 // ── node:sqlite runtime guard + warning filter ──────────────────────────────────
 // Drop ONLY the one-time ExperimentalWarning emitted by node:sqlite (the module is
@@ -3165,6 +3166,10 @@ function nearestSubcommand(token) {
 }
 
 async function main() {
+  // Outbound calls (pipelines, `worca broker`) honor HTTP(S)_PROXY / NO_PROXY (src/core/env-proxy.mjs).
+  // Only problems are printed: stdout belongs to the subcommand (some emit JSON).
+  const proxyLine = proxyNotice(useEnvProxy());
+  if (proxyLine?.level === 'warn') process.stderr.write(`worca: ${proxyLine.text}\n`);
   const sub = process.argv[2];
   // `worca help` is what every CLI user types first; it is not a subcommand and
   // not a near-miss of one, so without this line it became a PROMPT and ran a
