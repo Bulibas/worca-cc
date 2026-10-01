@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import {
   ago, syncPillModel, chipState, projectChipModel, worstChip, sourceRefNote,
   fetchFailureCopy, ffRefusalCopy, syncStageLabel, freshSyncState, cssEscape,
-  mountSyncRow, paintSyncRow, isSyncableBranchName, fetchedAgo,
+  mountSyncRow, paintSyncRow, isSyncableBranchName, fetchedAgo, syncPrefsModel, syncPrefsPatch,
 } from '../ui/public/branch-sync.mjs';
 import { isSafeBranchName } from '../src/core/git-sync.mjs';
 
@@ -345,4 +345,75 @@ test('fetchedAgo: "never" only when nothing failed; a failed fetch with no time 
   assert.equal(fetchedAgo({ fetchedAt: null }, now), 'never');
   assert.equal(fetchedAgo({ fetchedAt: null, stale: true, fetchError: { kind: 'network' } }, now), 'unknown (the last fetch failed)');
   assert.equal(fetchedAgo({ fetchedAt: '2026-09-30T11:57:00Z', stale: true }, now), '3 min ago', 'a known time always wins');
+});
+
+test('syncPrefsModel / syncPrefsPatch: "" follows the instance default (named in the option); a value overrides it', () => {
+  const view = { own: { onDiverged: 'fail' }, defaults: { beforeRun: false, onDiverged: 'origin' } };
+  const m = syncPrefsModel(view);
+  assert.equal(m.beforeRun.value, '', 'no own beforeRun: follows the default');
+  assert.deepEqual(m.beforeRun.options[0], ['', 'Default (Off)']);
+  assert.equal(m.onDiverged.value, 'fail');
+  assert.deepEqual(m.onDiverged.options.map(([v]) => v), ['', 'ask', 'origin', 'fail']);
+  assert.equal(m.onDiverged.options[0][1], 'Default (Start from origin)');
+  assert.equal(syncPrefsModel({ own: { beforeRun: true }, defaults: {} }).beforeRun.value, 'true');
+  assert.equal(syncPrefsModel(null).onDiverged.options[0][1], 'Default (Ask me)');
+  assert.deepEqual(syncPrefsPatch('beforeRun', 'false'), { beforeRun: false });
+  assert.deepEqual(syncPrefsPatch('beforeRun', 'true'), { beforeRun: true });
+  assert.deepEqual(syncPrefsPatch('beforeRun', ''), { beforeRun: null });
+  assert.deepEqual(syncPrefsPatch('onDiverged', 'origin'), { onDiverged: 'origin' });
+  assert.deepEqual(syncPrefsPatch('onDiverged', ''), { onDiverged: null });
+});
+
+test('openSyncDialog prefs: "This project" loads, saves each select on change, repaints from the answer and shows a refusal', async () => {
+  const w = await dom(ROW);
+  const { openSyncDialog } = await import('../ui/public/branch-sync.mjs');
+  const opener = w.document.getElementById('opener');
+  const saves = [];
+  let refuse = false;
+  let own = {};
+  const defaults = { beforeRun: true, onDiverged: 'ask' };
+  const prefs = {
+    load: async () => ({ own, defaults }),
+    save: async (patch) => {
+      saves.push(patch);
+      if (refuse) throw new Error('sync.onDiverged must be one of ask | origin | fail');
+      own = { ...own };
+      for (const [k, v] of Object.entries(patch)) { if (v === null) delete own[k]; else own[k] = v; }
+      return { own, defaults };
+    },
+  };
+  const done = openSyncDialog({ sync: block(), opener, prefs });
+  const dlg = w.document.querySelector('.sync-modal');
+  assert.equal(dlg.querySelector('.sync-prefs-head').textContent, 'This project');
+  const before = dlg.querySelector('#syncPrefBeforeRun');
+  const diverged = dlg.querySelector('#syncPrefOnDiverged');
+  assert.equal(before.disabled, true, 'disabled until the settings load');
+  await tick(2);
+  assert.equal(before.disabled, false);
+  assert.deepEqual([before.value, diverged.value], ['', '']);
+  assert.equal(before.options[0].textContent, 'Default (On)');
+
+  diverged.value = 'fail'; diverged.dispatchEvent(new w.Event('change')); await tick(2);
+  assert.deepEqual(saves.at(-1), { onDiverged: 'fail' });
+  assert.equal(diverged.value, 'fail');
+  assert.equal(dlg.querySelector('.sync-prefs-msg').textContent, 'Saved for this project.');
+  before.value = 'false'; before.dispatchEvent(new w.Event('change')); await tick(2);
+  assert.deepEqual(saves.at(-1), { beforeRun: false });
+  diverged.value = ''; diverged.dispatchEvent(new w.Event('change')); await tick(2);
+  assert.deepEqual(saves.at(-1), { onDiverged: null }, 'Default resets the key');
+  assert.deepEqual(own, { beforeRun: false });
+
+  refuse = true;
+  diverged.value = 'origin'; diverged.dispatchEvent(new w.Event('change')); await tick(2);
+  const msg = dlg.querySelector('.sync-prefs-msg');
+  assert.match(msg.textContent, /must be one of/);
+  assert.ok(msg.classList.contains('err'));
+  dlg.querySelector('.sync-x').click();
+  assert.equal(await done, null);
+
+  // No prefs option → no section.
+  const d2 = openSyncDialog({ sync: block(), opener });
+  assert.equal(w.document.querySelector('.sync-modal .sync-prefs'), null);
+  w.document.querySelector('.sync-modal .sync-x').click();
+  await d2;
 });

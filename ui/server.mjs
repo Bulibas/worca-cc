@@ -145,7 +145,7 @@ import {
   PREDEFINED_MODELS, agentSteps, EFFORTS, catalogHasModel,
   readRunConfig, setNodeModel, setFeedbackCycles, setWireCycles, setActiveWorkflow, setHumanInLoop, resetWorkflowConfig,
   globalModelRefs, removeGlobalModelAndRefs, promoteCustomModel, costUnreliableModelIds,
-  readPrRemotePrefs, setPrRemotePrefs, modelHasBaseUrlRouting, writeSyncPrefs,
+  readPrRemotePrefs, setPrRemotePrefs, modelHasBaseUrlRouting, writeSyncPrefs, readSyncPrefs,
 } from '../src/core/config.mjs';
 import { listGlobalModels, addGlobalModel, updateGlobalModel } from '../src/core/settings.mjs';
 import { modelEnvRef, maskModelEnvValue, SUBAGENT_MODEL_VALUES, subagentModelIssue, UPSTREAM_PROVIDERS } from '../src/core/model-env.mjs';
@@ -4313,9 +4313,18 @@ app.put('/api/projects/:key/sync/settings', syncRoute(async (req, res) => {
   catch (err) { return badRequest(res, err.message); }
   for (const k of Object.keys(body)) if (!Object.hasOwn(DEFAULT_SYNC_SETTINGS, k)) return badRequest(res, `unknown sync setting: ${k}`);
   writeSyncPrefs(p.key, body);
+  res.json(syncPrefsView(p.key));
   projectSyncEvents.emit('changed', { projectKey: p.key });
-  res.json({ settings: effectiveSyncSettings(p.key) });
 }));
+// The project's own sync keys (what it overrides), the instance defaults it otherwise follows,
+// and the effective result — the pill dialog's "This project" section needs all three.
+app.get('/api/projects/:key/sync/settings', syncRoute(async (req, res) => {
+  const p = await tmProject(req, res); if (!p) return;
+  res.json(syncPrefsView(p.key));
+}));
+function syncPrefsView(key) {
+  return { own: readSyncPrefs(key) || {}, defaults: syncDefaults(), settings: effectiveSyncSettings(key) };
+}
 // All projects' chip blocks (no network) + Sync all.
 app.get('/api/sync/projects', syncRoute(async (_req, res) => {
   const ps = (await listProjects()).filter((p) => p.exists);

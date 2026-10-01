@@ -138,6 +138,23 @@ test('PUT /api/projects/:key/sync/settings: set, null resets to the instance val
   assert.equal((await J('PUT', `/api/projects/${w.key}/sync/settings`, { bogus: 1 })).status, 400);
 });
 
+test('GET /api/projects/:key/sync/settings: own keys, the instance defaults and the effective result; PUT answers the same shape', async () => {
+  const w = await world();
+  let j = await (await fetch(`${base}/api/projects/${w.key}/sync/settings`)).json();
+  assert.deepEqual(j.own, {}, 'nothing overridden yet');
+  assert.equal(j.defaults.onDiverged, j.settings.onDiverged);
+  let r = await J('PUT', `/api/projects/${w.key}/sync/settings`, { onDiverged: 'fail', beforeRun: false });
+  j = await r.json();
+  assert.deepEqual(j.own, { onDiverged: 'fail', beforeRun: false });
+  assert.deepEqual([j.settings.onDiverged, j.settings.beforeRun], ['fail', false]);
+  assert.ok(j.defaults && 'remote' in j.defaults);
+  r = await J('PUT', `/api/projects/${w.key}/sync/settings`, { onDiverged: null, beforeRun: null });
+  j = await r.json();
+  assert.deepEqual(j.own, {});
+  assert.deepEqual(j.settings, j.defaults, 'back to following the instance');
+  assert.equal((await fetch(`${base}/api/projects/no-such-key/sync/settings`)).status, 400, "an unknown key is refused like every project route (tmProject)");
+});
+
 test('POST /api/settings { sync } sets the instance defaults and GET echoes them', async () => {
   let r = await J('POST', '/api/settings', { sync: { refreshMinutes: 5 } });
   assert.equal(r.status, 200);

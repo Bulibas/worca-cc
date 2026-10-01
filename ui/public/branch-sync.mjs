@@ -216,11 +216,78 @@ function openModal(modal, { opener, fallbackFocus, focusEl, onClose }) {
   return close;
 }
 
+const DIVERGED_WORDS = { ask: 'Ask me', origin: 'Start from origin', fail: "Don't run" };
+
+/** The "This project" selects: '' = follow the instance default (named in the option). */
+export function syncPrefsModel(view) {
+  const own = (view && view.own) || {};
+  const d = (view && view.defaults) || {};
+  return {
+    beforeRun: {
+      value: typeof own.beforeRun === 'boolean' ? String(own.beforeRun) : '',
+      options: [['', `Default (${d.beforeRun === false ? 'Off' : 'On'})`], ['true', 'On'], ['false', 'Off']],
+    },
+    onDiverged: {
+      value: own.onDiverged in DIVERGED_WORDS ? own.onDiverged : '',
+      options: [['', `Default (${DIVERGED_WORDS[d.onDiverged] || 'Ask me'})`], ...Object.entries(DIVERGED_WORDS)],
+    },
+  };
+}
+/** A select's value as the PUT body: '' resets the key to the instance default. */
+export function syncPrefsPatch(field, value) {
+  if (field === 'beforeRun') return { beforeRun: value === '' ? null : value === 'true' };
+  return { onDiverged: value === '' ? null : value };
+}
+
+/** "This project": two selects that save on change through prefs.save (PUT .../sync/settings). */
+function buildPrefsSection(prefs) {
+  const field = (id, label, key) => {
+    const sel = h('select', { id, class: 'select', 'data-pref': key, disabled: true });
+    return { sel, node: h('div', { class: 'field' }, h('label', { for: id, text: label }), h('div', { class: 'select-wrap' }, sel)) };
+  };
+  const before = field('syncPrefBeforeRun', 'Sync before run', 'beforeRun');
+  const diverged = field('syncPrefOnDiverged', 'If the source branch has diverged', 'onDiverged');
+  const msg = h('small', { class: 'hint sync-prefs-msg' });
+  const section = h('div', { class: 'sync-prefs' },
+    h('h3', { class: 'sync-prefs-head', text: 'This project' }),
+    h('div', { class: 'field-grid-2' }, before.node, diverged.node), msg);
+  const setMsg = (text, kind) => { msg.textContent = text || ''; msg.className = `hint sync-prefs-msg${kind ? ` ${kind}` : ''}`; };
+  const paint = (view) => {
+    const m = syncPrefsModel(view);
+    for (const [f, key] of [[before, 'beforeRun'], [diverged, 'onDiverged']]) {
+      f.sel.replaceChildren(...m[key].options.map(([v, t]) => h('option', { value: v, text: t })));
+      f.sel.value = m[key].value;
+      f.sel.disabled = false;
+    }
+  };
+  let saving = 0;
+  for (const f of [before, diverged]) {
+    f.sel.addEventListener('change', async () => {
+      const mine = ++saving;
+      setMsg('Saving…');
+      try {
+        const view = await prefs.save(syncPrefsPatch(f.sel.dataset.pref, f.sel.value));
+        if (mine !== saving) return;
+        if (view) paint(view);
+        setMsg('Saved for this project.');
+      } catch (err) {
+        if (mine === saving) setMsg((err && err.message) || 'Could not save', 'err');
+      }
+    });
+  }
+  Promise.resolve().then(() => prefs.load()).then((view) => { if (view) paint(view); else setMsg('Could not load this project\'s settings', 'err'); },
+    (err) => setMsg((err && err.message) || 'Could not load this project\'s settings', 'err'));
+  return section;
+}
+
 /**
  * The details dialog behind the pill / a chip's Review…. Resolves null when closed.
  * `onSync()` returns the new SyncBlock (or nothing: then the current block stays painted).
+ * `prefs` = { load(): Promise<view>, save(patch): Promise<view> } adds the "This project" section,
+ * where view = GET /api/projects/:key/sync/settings ({ own, defaults, settings }); save throws an
+ * Error whose message is shown under the selects.
  */
-export function openSyncDialog({ title = 'Sync status', subtitle = '', sync, autoSync = true, opener = null, onSync = null, fallbackFocus = null } = {}) {
+export function openSyncDialog({ title = 'Sync status', subtitle = '', sync, autoSync = true, opener = null, onSync = null, fallbackFocus = null, prefs = null } = {}) {
   return new Promise((resolve) => {
     let cur = sync || {};
     let refusal = '';
@@ -234,10 +301,11 @@ export function openSyncDialog({ title = 'Sync status', subtitle = '', sync, aut
     const note = h('div', { class: 'sync-note', hidden: true });
     const closeBtn = h('button', { type: 'button', class: 'btn btn-mini', text: 'Close' });
     const syncBtn = h('button', { type: 'button', class: 'btn btn-primary btn-mini sync-go', text: 'Sync' });
+    const prefsSection = prefs ? buildPrefsSection(prefs) : null;
     const card = h('div', { class: 'card sync-card' },
       h('div', { class: 'card-head' }, h('h2', { id: 'sync-dlg-title', text: title }), xBtn),
       subtitle ? h('div', { class: 'sync-sub', text: subtitle }) : null,
-      pill, kv, commitsHead, commits, note,
+      pill, kv, commitsHead, commits, note, prefsSection,
       h('div', { class: 'confirm-actions' }, closeBtn, syncBtn));
     const modal = h('div', { class: 'viewer-modal confirm-modal sync-modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'sync-dlg-title' }, card);
 

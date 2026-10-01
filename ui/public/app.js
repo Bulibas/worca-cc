@@ -6797,11 +6797,44 @@ async function syncMember(key) {
     return data.sync;
   } catch { return cur; }
 }
+/** The sync dialog's "This project" section: GET/PUT /api/projects/:key/sync/settings.
+ *  onSaved(view) lets the opener repaint what follows the project's settings. */
+function projectSyncPrefs(key, onSaved = () => {}) {
+  const url = `/api/projects/${encodeURIComponent(key)}/sync/settings`;
+  return {
+    async load() {
+      const res = await fetch(url);
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    },
+    async save(patch) {
+      const res = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      onSaved(data);
+      return data;
+    },
+  };
+}
+function selectedProjectKey() {
+  const path = selectedProjectPath();
+  const p = path ? state.projects.find((x) => x && x.path === path) : null;
+  return p ? p.key : '';
+}
 function openMemberSyncDialog(key, opener) {
   const b = state.sync.members[key];
   if (!b) return;
   void openSyncDialog({ title: 'Sync status', subtitle: `${wsMemberName(key)} · ${b.base || ''}`, sync: b,
-    autoSync: memberAutoSync(key), opener, onSync: () => syncMember(key) });
+    autoSync: memberAutoSync(key), opener, onSync: () => syncMember(key),
+    prefs: projectSyncPrefs(key, (view) => {
+      const m = state.sync.members[key];
+      if (m && view && view.settings) {
+        m.settings = { beforeRun: view.settings.beforeRun, onDiverged: view.settings.onDiverged };
+        paintMemberPill(key);
+        paintWorkspaceSyncRow();
+      }
+    }) });
 }
 /** Shared Sync in workspace mode: one POST for every member, with each member's picked base. */
 async function syncWorkspaceNow() {
@@ -6835,8 +6868,16 @@ if (el.syncRow) {
   mountSyncRow(el.syncRow, {
     onPill: () => {
       if (state.runTarget === 'workspace') { const k = worstMemberKey(); if (k) openMemberSyncDialog(k, el.syncPill); return; }
+      const key = selectedProjectKey();
       void openSyncDialog({ title: 'Sync status', subtitle: `${selectedProjectName()} · ${effectiveBase()}`, sync: state.sync.block,
-        autoSync: el.syncAuto.checked, opener: el.syncPill, onSync: syncNow });
+        autoSync: el.syncAuto.checked, opener: el.syncPill, onSync: syncNow,
+        prefs: key ? projectSyncPrefs(key, (view) => {
+          if (selectedProjectKey() !== key || !view || !view.settings) return;
+          if (state.sync.block) state.sync.block = { ...state.sync.block, settings: { beforeRun: view.settings.beforeRun, onDiverged: view.settings.onDiverged } };
+          // An untouched switch follows the project's beforeRun; a touched one is this run's choice.
+          if (state.sync.autoSync === null) el.syncAuto.checked = view.settings.beforeRun !== false;
+          paintSyncRowNow();
+        }) : null });
     },
     onSync: () => { if (state.runTarget === 'workspace') void syncWorkspaceNow(); else void syncNow(); },
     onToggle: (on) => {
@@ -10001,6 +10042,8 @@ async function openChipSyncDialog(key, opener) {
     // A project-sync-changed repaint can replace the opener while the dialog is open.
     fallbackFocus: () => document.querySelector(`.pl-item[data-key="${cssEscape(key)}"] .pl-row`),
     onSync: async () => { try { return await postProjectSync(key); } catch { return null; } },
+    // The server's project-sync-changed frame repaints the chip after a save.
+    prefs: projectSyncPrefs(key),
   });
 }
 if (el.projectsSyncAll) {
