@@ -347,6 +347,64 @@ test('History Clarify: "answered by <name>" under the answers, "you" for yoursel
   assert.equal(step.querySelector('.hd-cl-by')?.textContent, 'answered by ada via Slack');
 });
 
+test('History Clarify: an Away mode answer says so, solo or shared, with its reason and "please check"', async () => {
+  const Q = [{ id: 'q1', question: 'Which DB?', options: ['sqlite', 'pg'] }, { id: 'q2', question: 'Cache?', options: ['yes', 'no'] }];
+  const A = [{ id: 'q1', question: 'Which DB?', choice: 'pg' }, { id: 'q2', question: 'Cache?', choice: 'no' }];
+  const night = { strategy: 'weights', flagged: true, questions: [
+    { id: 'q1', choice: 'pg', rationale: 'the agent recommended this at 80%, well ahead of the next option', flagged: false },
+    { id: 'q2', choice: 'no', rationale: 'the agent was not sure enough; first option taken', flagged: true },
+  ] };
+  for (const who of [SOLO, SHARED]) {
+    const sec = await clarifySec({ clarify: { questions: Q, answers: A, answeredBy: 'night-mode', night } }, who);
+    assert.equal(sec.querySelector('.hd-cl-by')?.textContent, 'Answered by Away mode · please check');
+    const why = [...sec.querySelectorAll('.hd-cl-away')].map((e) => e.textContent);
+    assert.deepEqual(why, ['Away mode: the agent recommended this at 80%, well ahead of the next option.',
+      'Away mode, please check: the agent was not sure enough; first option taken.']);
+  }
+  const step = await clarifySec({ stepQuestions: [{ stepKey: 'x:n_plan:1', round: 1, nodeId: 'n_plan', agentKey: 'planner', questions: Q.slice(0, 1), answers: A.slice(0, 1), answeredBy: 'night-mode', night: { flagged: false, questions: night.questions.slice(0, 1) } }] }, SOLO);
+  assert.equal(step.querySelector('.hd-cl-by')?.textContent, 'Answered by Away mode');
+});
+
+test('History run page: "Answers while you were away" lists the stored answers', async () => {
+  const decisions = [
+    { questionId: 'clarify-1', kind: 'clarify', choice: 'pg', strategy: 'weights', flagged: false, rationale: 'q1: the agent recommended this at 80%' },
+    { questionId: 'gate-1', kind: 'gate', choice: 'another', strategy: 'rule', flagged: true, rationale: '2 critical issues left, one more fix round' },
+  ];
+  const ctx = await boot({ whoami: SOLO, fetchHandler: (u) => {
+    if (u.includes('/api/night-decisions')) return ok({ decisions: u.includes(encodeURIComponent(DETAIL_ROW.id)) ? decisions : [] });
+    if (u.endsWith('/api/history/pr')) return ok({ ok: true });
+    if (u.endsWith('/diff')) return fail(404, { error: 'no diff' });
+    if (u.endsWith('/log')) return fail(404, { error: 'no log' });
+    if (u.endsWith('/api/history')) return ok({ pipelines: [DETAIL_ROW], ghAvailable: false });
+    if (u.endsWith(`/api/history/${KEY}/${DETAIL_ROW.id}`)) return ok(detailOf({}));
+    return null;
+  } });
+  go(ctx.window, `history/${KEY}/${DETAIL_ROW.id}`);
+  await settle(ctx.window, 8);
+  const sec = ctx.doc.querySelector('#hist-detail .rd-night-sec');
+  assert.ok(sec && !sec.hidden, 'the section shows');
+  assert.equal(sec.querySelector('.rd-night-count').textContent, '(2 answers, 1 to check)');
+  const rows = [...sec.querySelectorAll('.rd-night-decisions li')];
+  assert.equal(rows.length, 2);
+  assert.ok(rows[1].classList.contains('flagged'));
+  assert.match(rows[1].textContent, /Fix again or continue, in a review loop/);
+});
+
+test('History run page: no Away mode answers, no section', async () => {
+  const ctx = await boot({ whoami: SOLO, fetchHandler: (u) => {
+    if (u.includes('/api/night-decisions')) return ok({ decisions: [] });
+    if (u.endsWith('/api/history/pr')) return ok({ ok: true });
+    if (u.endsWith('/diff')) return fail(404, { error: 'no diff' });
+    if (u.endsWith('/log')) return fail(404, { error: 'no log' });
+    if (u.endsWith('/api/history')) return ok({ pipelines: [DETAIL_ROW], ghAvailable: false });
+    if (u.endsWith(`/api/history/${KEY}/${DETAIL_ROW.id}`)) return ok(detailOf({}));
+    return null;
+  } });
+  go(ctx.window, `history/${KEY}/${DETAIL_ROW.id}`);
+  await settle(ctx.window, 8);
+  assert.equal(ctx.doc.querySelector('#hist-detail .rd-night-sec').hidden, true);
+});
+
 // ── Schedules: created by / changed by (step 4) ──────────────────────────────────
 
 const SUMMARY = { target: 'project', workflowId: 'wf_default', guardrailsId: null, prompt: 'x', source: null, sourceBranch: null, featureBranch: null, memoryScope: null, mock: false, extras: 0 };

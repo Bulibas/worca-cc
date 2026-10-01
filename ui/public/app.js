@@ -18030,6 +18030,7 @@ function hdSyncPr(projectKey, id, row) {
 function paintHdGlance(screen, record, data) {
   const glance = screen && screen.querySelector('.hd-glance');
   if (!glance || !data || !data.state) return;
+  void loadHdAwayAnswers(screen, record && record.id);
   const st = data.state;
   const run = { status: st.status, steps: st.steps, stepper: st.stepper, pendingQuestion: null, active: st.active };
   const meta = histStatusMeta({ status: st.status });
@@ -20704,7 +20705,7 @@ function buildHdClarify(sec, record, data) {
   const questions = (data.clarify && data.clarify.questions) || [];
   const answers = (data.clarify && data.clarify.answers) || [];
   const byId = new Map(answers.map((a) => [a.id, a]));
-  const addCard = (q, ans) => {
+  const addCard = (q, ans, night = null) => {
     const card = document.createElement('div');
     card.className = 'hd-cl-card';
     const qRow = document.createElement('div');
@@ -20727,10 +20728,25 @@ function buildHdClarify(sec, record, data) {
     aText.textContent = chosen || '(none)';
     aRow.append(aChip, aText);
     card.append(qRow, aRow);
+    // Away mode's reason for this one answer (its per-question record), flagged ones marked.
+    const nd = night && Array.isArray(night.questions) ? night.questions.find((d) => d && d.id === q.id) : null;
+    if (nd && nd.rationale) {
+      const why = document.createElement('div');
+      why.className = 'hint hd-cl-away' + (nd.flagged ? ' flagged' : '');
+      why.textContent = `${nd.flagged ? 'Away mode, please check' : 'Away mode'}: ${String(nd.rationale).trim().replace(/\.$/, '')}.`;
+      card.appendChild(why);
+    }
     wrap.appendChild(card);
   };
   // Who answered (step 3): shown under step 2's rule (shared sign-ins only, "you" for the viewer).
-  const answeredByLine = (by) => {
+  const answeredByLine = (by, night) => {
+    // Away mode is named for every viewer: it is not a person, and a solo user needs to know it most.
+    if (night || by === 'night-mode') {
+      const el = document.createElement('div');
+      el.className = 'hint hd-cl-by hd-cl-by-away';
+      el.textContent = `Answered by Away mode${night && night.flagged ? ' · please check' : ''}`;
+      return el;
+    }
     const who = personLabel(by);
     if (!who) return null;
     const el = document.createElement('div');
@@ -20739,15 +20755,15 @@ function buildHdClarify(sec, record, data) {
     el.title = `Answered by ${personShown(by)}`;
     return el;
   };
-  for (const q of questions) addCard(q, byId.get(q.id));
-  if (questions.length && data.clarify) { const by = answeredByLine(data.clarify.answeredBy); if (by) wrap.appendChild(by); }
+  for (const q of questions) addCard(q, byId.get(q.id), data.clarify && data.clarify.night);
+  if (questions.length && data.clarify) { const by = answeredByLine(data.clarify.answeredBy, data.clarify.night); if (by) wrap.appendChild(by); }
   if (data.clarify && data.clarify.ask) wrap.appendChild(hdRenderAskForm(record, data.clarify.ask));
   for (const r of Array.isArray(data.stepQuestions) ? data.stepQuestions : []) {
     const roundLabel = `${r && (r.agentKey || r.nodeId) ? (r.agentKey || r.nodeId) : 'agent'} — round ${r && r.round}`
       + (String((r && r.stepKey) || '').split('#')[1] ? ` · cycle ${String(r.stepKey).split('#')[1]}` : '');
     if (r && r.ask) {
       wrap.appendChild(hdRenderAskForm(record, r.ask, roundLabel));
-      const by = answeredByLine(r.answeredBy);
+      const by = answeredByLine(r.answeredBy, r.night);
       if (by) wrap.appendChild(by);
     }
     if (!((r && r.questions) || []).length) continue;
@@ -20756,8 +20772,8 @@ function buildHdClarify(sec, record, data) {
     caption.textContent = roundLabel;
     wrap.appendChild(caption);
     const rById = new Map((r.answers || []).map((a) => [a.id, a]));
-    for (const q of r.questions) addCard(q, rById.get(q.id));
-    const by = answeredByLine(r.answeredBy);
+    for (const q of r.questions) addCard(q, rById.get(q.id), r.night);
+    const by = answeredByLine(r.answeredBy, r.night);
     if (by) wrap.appendChild(by);
   }
 }
@@ -24134,15 +24150,33 @@ async function loadNightDecisions(r) {
 }
 
 function paintNightDecisions(screen, r) {
-  const sec = screen.querySelector('.rd-night-sec');
+  paintAwayAnswers(screen.querySelector('.rd-night-sec'), r.nightDecisions);
+}
+
+/** The History run page's copy of the list: read once per run from the stored answers. */
+async function loadHdAwayAnswers(screen, pipelineId) {
+  const sec = screen && screen.querySelector('.hd-night-sec');
+  if (!sec || !pipelineId || sec.dataset.for === pipelineId) return;
+  sec.dataset.for = pipelineId;
+  sec.hidden = true;
+  try {
+    const res = await fetch(`/api/night-decisions?pipelineId=${encodeURIComponent(pipelineId)}`);
+    const data = res.ok ? await safeJson(res) : null;
+    if (sec.dataset.for !== pipelineId) return;                 // another run was opened meanwhile
+    paintAwayAnswers(sec, data && Array.isArray(data.decisions) ? data.decisions : []);
+  } catch { /* the section stays hidden */ }
+}
+
+/** "Answers while you were away" into `sec` (run page and History run page). */
+function paintAwayAnswers(sec, decisions) {
   if (!sec) return;
-  const list = Array.isArray(r.nightDecisions) ? r.nightDecisions : [];
+  const list = Array.isArray(decisions) ? decisions : [];
   sec.hidden = !list.length;
   // A guardrail row (choice null) is a pause, not an answer: it counts neither as an answer nor as one to check.
   const answers = list.filter((d) => d.choice != null);
   const n = answers.length; const m = answers.filter((d) => d.flagged).length;
-  screen.querySelector('.rd-night-count').textContent = list.length ? `(${n} answer${n === 1 ? '' : 's'}, ${m} to check)` : '';
-  const ol = screen.querySelector('.rd-night-decisions');
+  sec.querySelector('.rd-night-count').textContent = list.length ? `(${n} answer${n === 1 ? '' : 's'}, ${m} to check)` : '';
+  const ol = sec.querySelector('.rd-night-decisions');
   ol.replaceChildren();
   for (const d of list) {
     const li = document.createElement('li');

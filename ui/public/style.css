@@ -3768,6 +3768,9 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hd-cl-a{margin-top:12px;color:var(--ink-2);}
 .hd-cl-q > span:last-child{font:600 13.5px/1.6 var(--sans);}
 .hd-cl-a > span:last-child{font:400 13.5px/1.7 var(--sans);}
+/* Away mode's reason under an answer it gave (indented to the answer text: chip 22px + gap 12px). */
+.hd-cl-away{margin:8px 0 0 34px;}
+.hd-cl-away.flagged{color:var(--amber-ink, var(--ink-2));font-weight:500;}
 /* One letter (Q / A) in a fixed square, so the question and answer rows line up. */
 .hd-cl-chip{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;
   border-radius:7px;font-size:12px;font-weight:700;}
