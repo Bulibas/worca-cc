@@ -12,6 +12,7 @@
 #   CLAUDE_CODE_VERSION  the @anthropic-ai/claude-code version to pin              [required]
 #   VARIANT              slim | full                                               [slim]
 #   NODE_IMAGE           base image                                                [node:22-bookworm-slim]
+#   APT_REFRESH          any string; a new value rebuilds the OS layer (CI: ISO week)
 
 ARG NODE_IMAGE=node:22-bookworm-slim
 FROM ${NODE_IMAGE}
@@ -19,17 +20,17 @@ FROM ${NODE_IMAGE}
 ARG WORCA_TARBALL
 ARG CLAUDE_CODE_VERSION
 ARG VARIANT=slim
+# Changes weekly in CI (ISO week) so the cached OS layer picks up Debian fixes.
+ARG APT_REFRESH=
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # OS layer: git is mandatory (worktrees); gh backs one-click PRs and the GitHub
 # Issues source; tini reaps orphaned claude/MCP children; procps gives agents
-# `ps` for the host guard's "look the PID up first" rule. The upgrade takes the
-# Debian security fixes the base image predates (the CI scan fails on a fixed HIGH).
-# APT_REFRESH (CI passes the date) re-runs this layer past a build cache, which
-# would otherwise keep shipping the packages of the day the layer was first built.
-ARG APT_REFRESH=
-# hadolint ignore=DL3008
+# `ps` for the host guard's "look the PID up first" rule. The upgrade pulls in
+# Debian security fixes the node base image has not picked up yet (it lags; the
+# Trivy scan fails on fixed HIGH CVEs such as libexpat1's).
+# hadolint ignore=DL3005,DL3008
 RUN echo "apt refresh: ${APT_REFRESH:-none}" \
  && apt-get update \
  && apt-get upgrade -y --no-install-recommends \

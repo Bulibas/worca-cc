@@ -2247,6 +2247,10 @@ async function cmdPlugin(argv) {
         const row = host.status().find((r) => r.plugin === name && r.channelId === channelId);
         if (!row) { await host.stop(); fail(`no chat channel "${name}/${channelId}" — is the plugin installed and enabled?`); }
         process.stderr.write(`worker for ${name}/${channelId} running — type text to simulate inbound, Ctrl-C to exit\n`);
+        // A second live worker on the same bot competes with the worca server:
+        // Telegram hands each update to ONE poller (the other gets HTTP 409), and the
+        // cursor state is shared — commands consumed here never reach the server.
+        process.stderr.write('note: while this runs, chat commands go HERE, not to the worca UI server. Stop the server first, or use it only for a quick check.\n');
         const { createInterface } = await import('node:readline');
         const rl = createInterface({ input: process.stdin });
         rl.on('line', (line) => {

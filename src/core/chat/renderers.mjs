@@ -109,9 +109,10 @@ export function renderError(meta, payload = {}) {
 }
 
 /**
- * question event: {id, kind: clarify|questions|gate|recovery, questions,
+ * question event: {id, kind: clarify|questions|gate|recovery|workflow|form, questions,
  * issues, recovery, agent}. The reply instructions match the command router:
  *   gate/recovery -> /approve <ref> | /retry <ref>
+ *   workflow -> /approve | /answer <change> | /cancel
  *   clarify/questions -> /answer <ref> <n|text> [| …] (one answer per question:
  *     an option number, or free text for questions without options)
  */
@@ -132,9 +133,24 @@ export function renderQuestion(meta, payload = {}) {
     if (kind === 'recovery' && payload.recovery?.message) {
       parts.push(`   **Cause:** ${String(payload.recovery.message).slice(0, 200)}`);
     }
+    // Commands ride inline code: plain `*ref … *ref` is an italic span in every
+    // markdown flavour (Telegram rendered "/approve <i>2951 … </i>2951"), and code
+    // is tap-to-copy on Telegram, so the whole command — ref included — is one tap.
+    const giveUp = giveUpOption(payload.recovery?.options).id === 'abort' ? 'abort the run' : 'pause the run';
     parts.push(kind === 'gate'
-      ? `   Reply: /approve ${ref} to continue · /retry ${ref} for another cycle`
-      : `   Reply: /approve ${ref} to retry · /abort ${ref} to ${giveUpOption(payload.recovery?.options).id === 'abort' ? 'abort the run' : 'pause the run'}`);
+      ? `   Reply: \`/approve ${ref}\` — no more cycles, continue · \`/retry ${ref}\` — run another cycle`
+      : `   Reply: \`/approve ${ref}\` to retry · \`/abort ${ref}\` to ${giveUp}`);
+    return mdMsg(parts.join('\n'), 'warning');
+  }
+
+  if (kind === 'workflow') {
+    // An Auto run's proposal (orchestrator _autoAsk). Without this branch it fell
+    // into the generic "has questions / /answer *x 1" text, which the router refuses.
+    const wf = payload.workflow && typeof payload.workflow === 'object' ? payload.workflow : {};
+    const name = String(wf.name || '').replace(/[*_`~]/g, '').trim();
+    const n = wf.nodes && typeof wf.nodes === 'object' ? Object.keys(wf.nodes).length : 0;
+    parts.push(`   **Status:** waiting for you to accept the proposed workflow${name ? ` **${name}**` : ''}${n ? ` (${n} agent${n === 1 ? '' : 's'})` : ''}`);
+    parts.push(`   Reply: \`/approve ${ref}\` to accept · \`/answer ${ref} <what to change>\` to revise · \`/cancel ${ref}\` to cancel the run`);
     return mdMsg(parts.join('\n'), 'warning');
   }
 

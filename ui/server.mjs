@@ -75,7 +75,7 @@ import {
   listMessages as askListMessages, setMessageBlocks as askSetMessageBlocks,
   findCard as askFindCard, updateCardBlock as askUpdateCardBlock,
   addAttachment as askAddAttachment, listAttachments as askListAttachments,
-  getAttachment as askGetAttachment, attachmentPath as askAttachmentPath, threadAttachmentBytes as askThreadAttachmentBytes,
+  getAttachment as askGetAttachment, attachmentPath as askAttachmentPath,
   linkRun as askLinkRun, updateRunLink as askUpdateRunLink, listRunLinks as askListRunLinks,
   findRunLinksByPipeline as askFindRunLinksByPipeline,
   finishMessage as askFinishMessage,
@@ -261,6 +261,7 @@ import {
 } from '../src/core/source-bindings.mjs';
 import { createChannelHost } from '../src/core/chat/channel-host.mjs';
 import { createCommandRouter } from '../src/core/chat/command-router.mjs';
+import { parseIdList } from '../src/core/chat/allowlist.mjs';
 import { createChatContext } from '../src/core/chat/chat-context.mjs';
 import { createNotifier } from '../src/core/chat/notifier.mjs';
 import { TokenBucket } from '../src/core/chat/rate-limiter.mjs';
@@ -1217,14 +1218,14 @@ app.use('/api/ask/threads/:id', (req, res, next) => {
 });
 
 // Ask attachments ride base64 inside the message JSON (§7.3), and a binary
-// attachment (#398) may legitimately be 5 MB — several of them blow the app-wide
-// 8mb cap below. Registered BEFORE the global parser on the ONE route that
-// carries uploads (a body parsed here is skipped there): every other ask route
-// reads a string field or nothing and keeps the 8mb window. 64mb covers
-// maxFiles × maxBytesPerBinaryFile at base64's 4/3 inflation, so every
-// over-budget upload still reaches the route's OWN clear 400/413, not a raw
-// parser error.
-app.post('/api/ask/threads/:id/messages', express.json({ limit: '64mb' }));
+// attachment (#398) may legitimately be 32 MB — far past the app-wide 8mb cap
+// below. Registered BEFORE the global parser on the ONE route that carries
+// uploads (a body parsed here is skipped there): every other ask route reads a
+// string field or nothing and keeps the 8mb window. The window is
+// maxBytesPerMessage at base64's 4/3 inflation plus 1 MiB for the text and
+// context, so any upload the composer lets through reaches the route's OWN
+// clear 400/413, not a raw parser error.
+app.post('/api/ask/threads/:id/messages', express.json({ limit: Math.ceil(ASK_LIMITS.attachment.maxBytesPerMessage * 4 / 3) + 1024 * 1024 }));
 // A script's saved cases are inline text: 32 cases x 256 KiB PER PORT is legal (workbench
 // spec §3.2) and does not fit the global 8 MB, so the one route that saves them all gets room.
 app.put('/api/scripts/:key/cases', express.json({ limit: '64mb' }));
@@ -3030,10 +3031,18 @@ const chatActions = {
   listProjects: async () => (await listProjects()).map((p) => ({ name: p.name || path.basename(p.path || ''), path: p.path })),
 };
 
+// "plugin/channelId" -> the latest command a NON-allow-listed chat sent. Settings
+// shows it, so "my /approve did nothing" has a visible reason and the id to add.
+// In memory only (a diagnostic; the next refused command re-populates it).
+const chatRefusals = new Map();
+
 const chatRouter = createCommandRouter({
   actions: chatActions,
   chatContext,
   logger: (level, msg) => console.error(`[worca-ui] chat ${level}: ${msg}`),
+  onRefused: ({ plugin, channelId, chatId, command }) => {
+    chatRefusals.set(`${plugin}/${channelId}`, { chatId, command, at: new Date().toISOString() });
+  },
 });
 
 // Same-chat commands must run strictly in order: a batched ['/use beta','/runs']
@@ -8007,7 +8016,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     const attRows = files.map((f) => askAddAttachment(id, userMsg.id, { name: f.name, kind: f.kind, mime: f.mime, text: f.text, data: f.data }));
     // The decoded binary bodies are on disk now. `files` is captured by this
     // scope's closures (settleJob, the turn listeners, onOutOfTurn) for the whole
-    // turn plus jobGraceMs, so up to 25 MB of dead Buffers would otherwise stay
+    // turn plus jobGraceMs, so up to 48 MB of dead Buffers would otherwise stay
     // reachable per running thread.
     for (const f of files) f.data = null;
     echoAttachments = attRows.map((a) => ({ id: a.id, name: a.name, bytes: a.bytes, kind: a.kind, mime: a.mime }));
@@ -8195,9 +8204,9 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
         if (bodyText.includes('\u0000')) return badRequest(res, `attachment contains NUL bytes: ${name}`);
         files.push({ name, kind: 'text', mime: cls.mime, text: bodyText, bytes: buf.length });
       }
-      const total = askThreadAttachmentBytes(id) + files.reduce((s, f) => s + f.bytes, 0);
-      if (total > ASK_LIMITS.attachment.maxBytesPerThread) {
-        return res.status(413).json({ error: 'attachment budget for this thread exceeded' });
+      const cap = ASK_LIMITS.attachment.maxBytesPerMessage;
+      if (files.reduce((s, f) => s + f.bytes, 0) > cap) {
+        return res.status(413).json({ error: `attachments over ${cap} bytes per message` });
       }
     }
 
@@ -9851,9 +9860,26 @@ function serverMockMode() {
 // /api/chat* -> channel worker status + test delivery (design §4.8). Prefs ride
 // GET/POST /api/settings; per-plugin channel CONFIG rides /api/plugins/:name/config.
 // ---------------------------------------------------------------------------
+/** Channel status rows + each channel's command reach: how many chats may send
+ *  commands, and the last command refused (hidden once its chat is allowed). */
+function chatStatusRows() {
+  const entries = channelHost.list();
+  return channelHost.status().map((row) => {
+    const entry = entries.find((e) => e.plugin === row.plugin && e.channelId === row.channelId);
+    let ids = [];
+    try { ids = parseIdList(readPluginConfig(row.plugin, entry?.configSchema || []).allowedChatIds); }
+    catch { /* unreadable config: nobody is allowed */ }
+    const refused = chatRefusals.get(`${row.plugin}/${row.channelId}`) || null;
+    return {
+      ...row,
+      commands: { allowed: ids.length, lastRefused: refused && !ids.includes(refused.chatId) ? refused : null },
+    };
+  });
+}
+
 app.get('/api/chat/status', (_req, res) => {
   try {
-    res.json({ channels: channelHost.status() });
+    res.json({ channels: chatStatusRows() });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }

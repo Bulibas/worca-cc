@@ -5388,6 +5388,19 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-jump[hidden]{display:none;}
 .ask-jump:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 
+/* File drag-and-drop (ask-panel.mjs buildDropTarget): the overlay covers the
+   whole sheet while files hover it. pointer-events:none keeps the drag events
+   on the sheet's children, where the depth counter expects them. The fade is
+   an animation, which the global reduced-motion rule (transitions only) misses. */
+.ask-drop{position:absolute;inset:0;z-index:8;display:flex;align-items:center;justify-content:center;pointer-events:none;
+  margin:6px;border:2px dashed var(--ink-3);border-radius:calc(var(--r-card) - 4px);
+  background:color-mix(in srgb, var(--panel) 88%, transparent);animation:ask-drop-in .12s ease-out both;}
+.ask-drop[hidden]{display:none;}
+.ask-drop-label{padding:8px 16px;border:1px solid var(--line-2);border-radius:999px;background:var(--panel);
+  color:var(--ink);font-weight:600;font-size:13px;box-shadow:var(--shadow-hover);}
+@keyframes ask-drop-in{from{opacity:0;}to{opacity:1;}}
+@media (prefers-reduced-motion: reduce){.ask-drop{animation:none;}}
+
 /* The band is the padded outer strip (no border-top: the box is the separation);
    the box holds chips → textarea → msg → row, rounded and bordered, on the same
    cap as the transcript column. Panel background, not field: the textarea keeps

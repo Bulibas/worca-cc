@@ -117,21 +117,22 @@ test('ask-model: the local echo never replaces an already-received canonical row
   assert.ok(m.takeDirty().messages.has('askm_u0000001'), 'the echo still marks the row for a repaint');
 });
 
-test('ask-model (#398): attachmentsBytes learns in-session uploads from the broadcast and the echo, each id once', () => {
+test('ask-model (#398): the attachment ledger learns in-session uploads from the broadcast and the echo, each id once', () => {
   const m = createThreadModel({ threadId: TID });
+  const bytes = () => m.attachments().reduce((n, a) => n + a.bytes, 0);
   m.load({ thread: { id: TID, title: null, totals: {} }, messages: [], attachments: [{ id: 'att_00000000', name: 'old.md', bytes: 100 }], runLinks: [], inFlight: null });
-  assert.equal(m.attachmentsBytes(), 100, 'seeded by the snapshot');
+  assert.equal(bytes(), 100, 'seeded by the snapshot');
   const att1 = { kind: 'attachment', id: 'att_00000001', name: 'a.pdf', bytes: 50, attKind: 'binary', mime: 'application/pdf' };
   m.apply({ type: 'ask-message', threadId: TID, message: { id: 'askm_u0000001', threadId: TID, seq: 1, role: 'user', text: 'x', blocks: [att1], status: null, reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't' } });
-  assert.equal(m.attachmentsBytes(), 150, 'the broadcast row counts');
+  assert.equal(bytes(), 150, 'the broadcast row counts');
   m.noteLocalUserMessage({ id: 'askm_u0000001', text: 'x', attachments: [{ id: 'att_00000001', name: 'a.pdf', bytes: 50, attKind: 'binary' }] });
-  assert.equal(m.attachmentsBytes(), 150, 'the echo of the same row does not double-count');
+  assert.equal(bytes(), 150, 'the echo of the same row does not double-count');
   m.noteLocalUserMessage({ id: 'askm_u0000002', text: 'y', attachments: [{ id: 'att_00000002', name: 'b.png', bytes: 25, attKind: 'image' }] });
-  assert.equal(m.attachmentsBytes(), 175, 'an echo that arrives first counts (ids from the 202 body)');
+  assert.equal(bytes(), 175, 'an echo that arrives first counts (ids from the 202 body)');
   m.apply({ type: 'ask-message', threadId: TID, message: { id: 'askm_u0000002', threadId: TID, seq: 3, role: 'user', text: 'y', blocks: [{ ...att1, id: 'att_00000002', bytes: 25 }], status: null, reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't' } });
-  assert.equal(m.attachmentsBytes(), 175, 'its later broadcast does not double-count either');
+  assert.equal(bytes(), 175, 'its later broadcast does not double-count either');
   m.noteLocalUserMessage({ id: 'askm_u0000003', text: 'z', attachments: [{ name: 'noid.md', bytes: 999 }] });
-  assert.equal(m.attachmentsBytes(), 175, 'an id-less echo (older server) is not counted — it cannot be deduped');
+  assert.equal(bytes(), 175, 'an id-less echo (older server) is not counted — it cannot be deduped');
 });
 
 test('ask-model: ask-message inserts new rows in seq order', () => {

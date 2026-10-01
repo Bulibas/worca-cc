@@ -2,13 +2,14 @@
 # Reviewed whenever it grows; unfixable Debian findings are already skipped
 # by ignore-unfixed in ci.yml.
 
-# libexpat1 (bookworm): the fix 2.5.0-1+deb12u4 is published for arm64 but not yet
-# for amd64 on bookworm-security (checked 2026-10-01, amd64 candidate deb12u3), so
-# no amd64 image can install it. The ignore lapses on its own; drop these lines
-# once the apt layer picks up deb12u4.
-CVE-2024-28757 exp:2026-10-08
-CVE-2025-59375 exp:2026-10-08
-CVE-2026-25210 exp:2026-10-08
-CVE-2026-45186 exp:2026-10-08
-CVE-2026-66046 exp:2026-10-08
-CVE-2026-93990 exp:2026-10-08
+# libexpat1: Trivy's DB lists these as fixed in 2.5.0-1+deb12u4, but on
+# 2026-10-01 bookworm-security serves deb12u4 for arm64 only — amd64 (the CI
+# and published image arch) still gets deb12u3, so nothing installable fixes
+# them yet. Remove these once `apt-cache policy libexpat1` on amd64 shows u4;
+# the weekly APT_REFRESH rebuild then picks it up.
+CVE-2024-28757
+CVE-2025-59375
+CVE-2026-25210
+CVE-2026-45186
+CVE-2026-66046
+CVE-2026-93990
