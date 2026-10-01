@@ -40,7 +40,9 @@ test('global "here" ("I\'m back") inside the away hours: counts as here until th
   await s.sw({ kind: 'global', toggle: 'on' });
   const r = await s.sw({ kind: 'global', toggle: 'here' });
   assert.equal(r.ok, true);
-  assert.equal(r.line, 'Right now it is 23:00 UTC. You count as here because you said "I\'m here". Your away hours apply again from 22:00.');
+  // The zone is named only when it differs from this machine's (a UTC CI runner shows none).
+  const tag = Intl.DateTimeFormat().resolvedOptions().timeZone === 'UTC' ? '' : ' UTC';
+  assert.equal(r.line, `Right now it is 23:00${tag}. You count as here because you said "I'm here". Your away hours apply again from 22:00.`);
   assert.equal(s.live.orch.changed, 2, 'every run re-checks');
 });
 

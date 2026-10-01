@@ -829,7 +829,7 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .qopt.sel::before{content:'';background:var(--ink);border-color:var(--ink);
   -webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><mask id='k'><rect width='20' height='20' fill='white'/><path d='M7.1 10.2l1.8 1.9 4-4' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></mask><rect width='20' height='20' mask='url(%23k)'/></svg>") center/100% 100% no-repeat;mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><mask id='k'><rect width='20' height='20' fill='white'/><path d='M7.1 10.2l1.8 1.9 4-4' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></mask><rect width='20' height='20' mask='url(%23k)'/></svg>") center/100% 100% no-repeat;}
 /* Night mode (Step 14): the agent's recommendation badge and per-option confidence bar. */
-.qopt .qrec{margin-left:8px;padding:1px 6px;border-radius:999px;font-size:11px;font-weight:600;background:var(--blue-bg);color:var(--blue-ink)}
+.qopt .qrec{margin-left:8px;padding:1px 6px;border-radius:999px;font-size:11px;font-weight:600;background:var(--blue-bg);color:var(--blue-ink-strong)}   /* 11px on --blue-bg: --blue-ink is 3.6:1 in light */
 /* The bar wraps onto its own line under the label (key square 20px + gap 10px = the 30px indent). */
 .qopt:has(.qconf){flex-wrap:wrap;row-gap:6px}
 .qopt .qconf{display:block;flex:0 0 calc(100% - 30px);margin-left:30px;height:3px;border-radius:2px;background:var(--line)}
@@ -4494,6 +4494,9 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .away-radio{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
 .away-adv{margin:10px 0 0;padding:8px 0 0;border-top:1px solid var(--line)}
 .away-adv > summary{cursor:pointer;font-weight:600;font-size:13px;margin-bottom:8px}
+/* The empty fields' placeholders ARE the value that applies, and "(default)" / the hints say why:
+   content, not decoration. --ink-3 reads at 2.6-2.8:1 in light, so they take --ink-2. */
+.away-body .hint,.away-body .input::placeholder{color:var(--ink-2)}
 /* Explicit twin: the UA [hidden] rule is (0,0,0) and loses to any author
    `display`, so without this the panel would render even while hidden. */
 .rd-questions[hidden]{display:none;}
