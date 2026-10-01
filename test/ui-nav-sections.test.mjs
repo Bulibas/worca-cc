@@ -26,7 +26,7 @@ test('sidebar reads: CTA, Activity, Build, Manage, divider, Settings — in orde
   )].map((m) => m[1] || m[2] || m[3] || m[4] || m[5]);
   assert.deepEqual(tokens, [
     'new',
-    'Activity', 'running', 'schedules', 'history', 'stats', 'team-metrics',
+    'Activity', 'runs', 'schedules', 'stats', 'team-metrics',
     'Build', 'composer', 'nodes', 'agents', 'scripts',   // Nodes is a disclosure holding the two (ui-nav-nodes-group)
     'Manage', 'projects', 'workspaces', 'team-policy',
     'nav-sep', 'nav-mode', 'settings',          // the interface-mode item sits directly above Settings (docs/ui-levels.md)
@@ -36,10 +36,11 @@ test('sidebar reads: CTA, Activity, Build, Manage, divider, Settings — in orde
 // guardrails/models/plugins moved into Settings as tabs, so 12 -> 9; team-metrics adds one -> 10;
 // Schedules (docs/scheduled-runs.md) and team-policy (team-policy design §11) add a route each
 // -> 12; the interface-mode item (docs/ui-levels.md) adds one -> 13; Scripts -> 14; the Nodes
-// disclosure (test/ui-nav-nodes-group.test.mjs) -> 15, of which 13 route (data-nav).
-test('grouping adds no buttons and no anchors (15-button invariant holds)', () => {
-  assert.equal((sidebar().match(/<button type="button"/g) || []).length, 15);
-  assert.equal((sidebar().match(/<button type="button"[^>]*data-nav=/g) || []).length, 13);
+// disclosure (test/ui-nav-nodes-group.test.mjs) -> 15, of which 13 route (data-nav); Running
+// and History merged into one Runs item -> 14, of which 12 route.
+test('grouping adds no buttons and no anchors (14-button invariant holds)', () => {
+  assert.equal((sidebar().match(/<button type="button"/g) || []).length, 14);
+  assert.equal((sidebar().match(/<button type="button"[^>]*data-nav=/g) || []).length, 12);
   assert.ok(!/<a[\s>]/.test(sidebar()));
   assert.match(sidebar(), /<div class="nav-sect">Activity<\/div>/);
   assert.match(sidebar(), /<div class="nav-sect" data-min-level="advanced">Build<\/div>/);
@@ -49,11 +50,6 @@ test('grouping adds no buttons and no anchors (15-button invariant holds)', () =
 
 test('New-pipeline button is the CTA and still boots active', () => {
   assert.match(sidebar(), /<button type="button" class="active nav-cta" data-nav="new" data-min-level="simple">/);
-});
-
-test('running children container still sits between Running and History', () => {
-  assert.match(sidebar(),
-    /data-nav="running"[^>]*>[\s\S]*?id="nav-running-children"[\s\S]*?data-nav="history"[^>]*>/);
 });
 
 test('Settings stays a .nav child (app.js selector `.nav button[data-nav]` must match it)', () => {
@@ -103,7 +99,7 @@ test('clicking pinned Settings still routes via the hash', async () => {
 test('clicking the CTA routes back to the New view', async () => {
   const { window } = await boot();
   const doc = window.document;
-  click(window, doc.querySelector('.nav button[data-nav="history"]'));
+  click(window, doc.querySelector('.nav button[data-nav="projects"]'));
   await tick();
   click(window, doc.querySelector('.nav button[data-nav="new"]'));
   await tick();

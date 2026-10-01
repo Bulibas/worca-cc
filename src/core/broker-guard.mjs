@@ -23,10 +23,15 @@ const describe = (v) => `(set, ${String(v).length} chars)`;
 
 /**
  * @param {{env?:Record<string,string|undefined>, files?:{path:string, kind:'login'|'settings'|'secret', content?:string}[],
- *          models?:object[], providers?:Record<string,object>, brokerUrl?:string}} o
+ *          models?:object[], providers?:Record<string,object>, brokerUrl?:string, slotOrigins?:string[],
+ *          brokeredModels?:string[], pluginSecrets?:{plugin:string, key:string}[]}} o
+ *   brokeredModels: lower-cased ids of plugin models that spend from their own plugin slot
+ *     (their ANTHROPIC_BASE_URL is pinned there, not a way around the broker)
+ *   pluginSecrets: plugin Model secrets that hold a value (never read: the broker replaces them)
  * @returns {string[]} findings, one line each
  */
-export function findLocalCredentials({ env = {}, files = [], models = [], providers = {}, brokerUrl = '', slotOrigins = [] } = {}) {
+export function findLocalCredentials({ env = {}, files = [], models = [], providers = {}, brokerUrl = '', slotOrigins = [], brokeredModels = [], pluginSecrets = [] } = {}) {
+  const brokered = new Set(brokeredModels);
   const out = [];
   for (const k of MODEL_CREDENTIAL_ENV_KEYS) {
     const v = env[k];
@@ -43,6 +48,7 @@ export function findLocalCredentials({ env = {}, files = [], models = [], provid
     for (const [k, v] of Object.entries(m?.env || {})) {
       if (typeof v !== 'string' || !v.trim()) continue;
       if (k === 'ANTHROPIC_BASE_URL') {
+        if (brokered.has(String(m?.id ?? '').toLowerCase())) continue;
         if (!(brokerPrefix && v.trim().startsWith(brokerPrefix))) out.push(`catalog model ${id}: env ANTHROPIC_BASE_URL routes around the broker`);
       } else if (SECRET_ENV_RE.test(k)) {
         out.push(`catalog model ${id}: env ${k} ${/^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(v.trim()) ? `= ${v.trim()}` : describe(v.trim())}`);
@@ -69,6 +75,9 @@ export function findLocalCredentials({ env = {}, files = [], models = [], provid
     for (const k of ['apiKey', 'githubToken']) {
       if (p && typeof p[k] === 'string' && p[k].trim()) out.push(`providers.${name}.${k}`);
     }
+  }
+  for (const s of pluginSecrets || []) {
+    out.push(`plugin "${s.plugin}": Model secret ${s.key} is set (each person adds it on the key page instead; clear it in the plugin's settings)`);
   }
   return out;
 }

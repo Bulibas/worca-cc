@@ -5,9 +5,12 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 
-// Behavior tests for the two-screen Running shell: `#running/<runId>` routes
-// through the existing parseHash/showView machinery into the detail screen, and
-// `#running` (or Back / Escape / leaving the view) returns to the list.
+// Behavior tests for the live run in the Runs pane: `#running/<runId>` routes
+// through the existing parseHash/showView machinery into `#run-detail`, inside
+// `#runs-pane`, beside the compact list (`#runs-list-pane`). Side by side (the
+// `split` layout, jsdom's default) nothing on the page closes the pane; in the
+// narrow `slide` layout (set by hand: jsdom has no ResizeObserver) `#runs`
+// (Back / Escape) slides the run away and returns to the list.
 //
 // boot() / settle() / go() are copied verbatim from test/ui-history-routing.test.mjs
 // (boot 25-84, settle 89-91, go 93-96), with the fetch handler collapsed to this
@@ -31,7 +34,7 @@ function ruleBody(selector) {
   return m ? m[1] : null;
 }
 
-async function boot({ url = 'http://localhost:4317/' } = {}) {
+async function boot({ url = 'http://localhost:4317/', storage = {} } = {}) {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url });
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
@@ -69,6 +72,8 @@ async function boot({ url = 'http://localhost:4317/' } = {}) {
   globalThis.window = window;
   globalThis.document = window.document;
   window.localStorage.clear();   // T4's density key must not leak between cases
+  // Seeded before app.js loads: the remembered run (worca-cc.runs.last) is read on routing.
+  for (const [k, v] of Object.entries(storage)) window.localStorage.setItem(k, v);
 
   await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
   await new Promise((r) => setTimeout(r, 0));
@@ -88,6 +93,12 @@ function go(window, hash) {
   window.dispatchEvent(new window.Event('hashchange'));
 }
 
+// The narrow layout, by hand: jsdom has no ResizeObserver, so #runs-shell stays `split`
+// unless a test flips it (measureRunsLayout keeps the last value on a 0px width).
+function slide(window) {
+  window.document.getElementById('runs-shell').dataset.layout = 'slide';
+}
+
 const live = (runId, extra = {}) => ({
   runId, title: runId, projectDir: PROJECT, status: 'running', kind: 'run',
   startedAt: '10:00:00', pendingQuestion: null, ...extra,
@@ -102,27 +113,38 @@ async function bootWithRuns() {
 
 // ---------- structure ----------
 
-test('the Running view is a two-screen shell around the existing list', async () => {
+test('the Runs view is a two-pane shell: the compact list beside the content pane', async () => {
   const { window } = await boot();
   const doc = window.document;
+  const runsShell = doc.querySelector('#runs-shell');
+  assert.ok(runsShell, '#runs-shell must exist');
+  assert.equal(runsShell.closest('[data-view]').dataset.view, 'runs');
+  assert.equal(runsShell.dataset.layout, 'split', 'side by side unless a ResizeObserver says narrow');
+
+  const list = runsShell.querySelector(':scope > #runs-list-pane');
+  const pane = runsShell.querySelector(':scope > #runs-pane');
+  assert.ok(list, '#runs-shell holds the list pane');
+  assert.ok(pane, '#runs-shell holds the content pane');
+  assert.ok(list.querySelector('#runs-list'), 'the run list lives in the list pane');
+  assert.ok(list.querySelector('.runs-head h1'), 'so does its header');
+  assert.equal(list.querySelector('.run-density'), null, 'the density toggle is gone');
+
   const shell = doc.querySelector('#run-shell');
   assert.ok(shell, '#run-shell must exist');
   assert.ok(shell.classList.contains('run-shell'));
-  assert.equal(shell.closest('[data-view]').dataset.view, 'running');
-
-  const list = shell.querySelector('.run-screen.run-screen-list');
-  assert.ok(list, '.run-screen-list wraps the list screen');
-  assert.ok(list.querySelector('#run-list'), 'the run list moved inside the list screen');
-  assert.ok(list.querySelector('.topbar h1'), 'so did the topbar');
-  assert.ok(list.querySelector('.run-ask-banner'), 'and Task 2 banner');
-  assert.equal(list.querySelector('.run-density'), null, 'the density toggle is gone');
+  assert.equal(shell.parentElement, pane, 'the live detail opens inside the content pane');
 
   const host = doc.querySelector('#run-detail');
   assert.ok(host, '#run-detail must exist');
-  assert.ok(host.classList.contains('run-screen') && host.classList.contains('run-screen-detail'));
+  assert.ok(host.classList.contains('run-screen-detail'));
   assert.equal(host.getAttribute('aria-hidden'), 'true', 'closed detail is hidden from AT');
   assert.equal(host.hasAttribute('inert'), true, 'and untabbable — aria-hidden alone does not do that');
   assert.ok(doc.querySelector('#run-detail-tpl'), 'the detail screen template ships in the markup');
+
+  go(window, 'runs');
+  await settle(window);
+  assert.equal(list.hasAttribute('inert'), false, 'side by side the list is never inert');
+  assert.equal(list.hasAttribute('aria-hidden'), false);
 });
 
 test('renderFocusView is gone from app.js', async () => {
@@ -138,14 +160,15 @@ test('#running/<id> opens the detail screen and paints its header', async () => 
   await settle(window);
   const doc = window.document;
   const shell = doc.querySelector('#run-shell');
-  assert.ok(shell.classList.contains('detail-open'), 'the shell slides to the detail screen');
+  assert.ok(shell.classList.contains('detail-open'), 'the live detail is open in the pane');
+  assert.equal(doc.querySelector('#runs-pane').dataset.kind, 'live');
 
   const host = doc.querySelector('#run-detail');
   assert.equal(host.getAttribute('aria-hidden'), 'false');
   assert.equal(host.hasAttribute('inert'), false, 'the open screen is interactive');
-  const listScreen = shell.querySelector('.run-screen-list');
-  assert.equal(listScreen.getAttribute('aria-hidden'), 'true');
-  assert.equal(listScreen.hasAttribute('inert'), true, 'the off-screen list is untabbable');
+  const listPane = doc.querySelector('#runs-list-pane');
+  assert.equal(listPane.hasAttribute('aria-hidden'), false, 'side by side the list stays in view');
+  assert.equal(listPane.hasAttribute('inert'), false, 'and reachable');
 
   assert.equal(doc.querySelector('#run-detail .rd-title').textContent, ID);
   const status = doc.querySelector('#run-detail .rd-status');
@@ -158,18 +181,19 @@ test('#running/<id> opens the detail screen and paints its header', async () => 
   assert.equal(doc.querySelector('#run-detail .rd-stop').hidden, false);
 });
 
-test('the list keeps every card while the detail is open (no focus view)', async () => {
+test('the list keeps every row while the detail is open (no focus view)', async () => {
   const { window } = await bootWithRuns();
   go(window, `running/${ID}`);
   await settle(window);
-  const ids = [...window.document.querySelectorAll('#run-list .run-card')]
+  const ids = [...window.document.querySelectorAll('#runs-list .runs-row[data-slot="group"]')]
     .map((c) => c.dataset.runId).sort();
   assert.deepEqual(ids, [ID, OTHER].sort(),
-    'the list screen still holds every run — the detail is a second screen, not a filter');
+    'the list still holds every run — the detail is the pane beside it, not a filter');
 });
 
-test('the Back button returns to #running and closes the screen', async () => {
+test('slide layout: the Back button returns to #runs and closes the screen', async () => {
   const { window } = await bootWithRuns();
+  slide(window);
   go(window, `running/${ID}`);
   await settle(window);
   const shell = window.document.querySelector('#run-shell');
@@ -178,8 +202,9 @@ test('the Back button returns to #running and closes the screen', async () => {
     .dispatchEvent(new window.Event('click', { bubbles: true }));
   window.dispatchEvent(new window.Event('hashchange'));
   await settle(window);
-  assert.equal(window.location.hash.replace(/^#/, ''), 'running');
+  assert.equal(window.location.hash.replace(/^#/, ''), 'runs');
   assert.equal(shell.classList.contains('detail-open'), false);
+  assert.equal(window.document.querySelector('#runs-pane').dataset.kind, '');
 });
 
 test('a state frame paints the branch row through the stored r.branch', async () => {
@@ -263,7 +288,7 @@ test('.rd-pause posts /api/pause, then becomes Resume when the run parks', async
 
 // ---------- Escape ----------
 
-test('Escape with the detail open and no modal navigates back', async () => {
+test('Escape with the detail open and no modal: side by side it keeps the pane; in the slide it navigates back', async () => {
   const { window } = await bootWithRuns();
   go(window, `running/${ID}`);
   await settle(window);
@@ -271,12 +296,21 @@ test('Escape with the detail open and no modal navigates back', async () => {
 
   window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await settle(window);
-  assert.equal(window.location.hash.replace(/^#/, ''), 'running');
+  assert.equal(window.location.hash.replace(/^#/, ''), `running/${ID}`,
+    'split: the list is already in view, so Escape on the glance does nothing (D16)');
+  assert.ok(shell.classList.contains('detail-open'));
+
+  slide(window);
+  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle(window);
+  assert.equal(window.location.hash.replace(/^#/, ''), 'runs');
   assert.equal(shell.classList.contains('detail-open'), false);
 });
 
 test('Escape is swallowed while a modal owns it', async () => {
   const { window } = await bootWithRuns();
+  // Slide: there a leaked Escape WOULD navigate to #runs (side by side it does nothing anyway).
+  slide(window);
   go(window, `running/${ID}`);
   await settle(window);
   const shell = window.document.querySelector('#run-shell');
@@ -291,6 +325,7 @@ test('Escape is swallowed while a modal owns it', async () => {
 
 test('Escape on another view never touches the Running track', async () => {
   const { window } = await bootWithRuns();
+  slide(window);   // where a leaked Escape would navigate to #runs
   go(window, `running/${ID}`);
   await settle(window);
   // Force the shell to stay open while the hash points elsewhere: the guard is
@@ -303,45 +338,61 @@ test('Escape on another view never touches the Running track', async () => {
 
 // ---------- focus ----------
 
-test('opening the detail moves focus to Back', async () => {
+test('opening the detail: side by side focus lands on the glance title; in the slide on Back', async () => {
   const { window } = await bootWithRuns();
   go(window, `running/${ID}`);
   await settle(window);
   assert.equal(window.document.activeElement,
+    window.document.querySelector('#run-detail .rd-glance .rd-page-title'),
+    'split: a hash-driven open lands on the glance title, not on <body> (Back is hidden there)');
+
+  go(window, 'new');
+  await settle(window);
+  slide(window);
+  go(window, `running/${ID}`);
+  await settle(window);
+  assert.equal(window.document.activeElement,
     window.document.querySelector('#run-detail .rd-back'),
-    'focus lands on the detail screen, not on whatever the list left behind');
+    'slide: focus lands on the detail screen, not on whatever the list left behind');
 });
 
-test('closing the detail restores focus to the originating card', async () => {
+test('slide layout: closing the detail restores focus to the originating row', async () => {
   const { window } = await bootWithRuns();
-  // The list only paints while the Running view is shown (onHello gates on
-  // currentView()), so visit it before reading the card the focus comes home to.
-  go(window, 'running');
+  slide(window);
+  // The list only paints while the Runs view is shown (the paint is gated on
+  // inRunsView()), so visit it before reading the row the focus comes home to.
+  go(window, 'runs');
   await settle(window);
-  const head = window.document.querySelector(`#run-list .run-card[data-run-id="${ID}"] .rc-head`);
-  assert.ok(head, 'T3 gives every card an .rc-head');
-  assert.equal(head.getAttribute('tabindex'), '0', 'spec §4.4: the card header is focusable');
+  const row = window.document.querySelector(`#runs-list .runs-row[data-slot="group"][data-run-id="${ID}"]`);
+  assert.ok(row, 'the run has a row in its project group');
+  assert.equal(row.tagName, 'A', 'rows are links, focusable without a tabindex');
 
   go(window, `running/${ID}`);
   await settle(window);
+  assert.equal(window.document.querySelector('#runs-list-pane').hasAttribute('inert'), true,
+    'the list slid away');
   window.document.querySelector('#run-detail .rd-back')
     .dispatchEvent(new window.Event('click', { bubbles: true }));
   window.dispatchEvent(new window.Event('hashchange'));
   await settle(window);
 
   const active = window.document.activeElement;
-  assert.ok(active && active.classList.contains('rc-head'), 'focus returned to a card head, not <body>');
-  assert.equal(active.closest('.run-card').dataset.runId, ID,
-    'and to the card the detail was opened from (re-queried by data-run-id)');
+  assert.ok(active && active.classList.contains('runs-row'), 'focus returned to a row, not <body>');
+  assert.equal(active.dataset.runId, ID,
+    'and to the row the detail was opened from (re-queried by data-run-id)');
+  assert.equal(active.dataset.slot, 'group', 'the group copy, where the run lives');
+  assert.equal(window.document.querySelector('#runs-list-pane').hasAttribute('inert'), false);
 });
 
 // ---------- transitionend cleanup ----------
 
-test('the closing detail stays mounted + inert until the guarded transitionend', async () => {
+test('slide layout: the closing detail stays mounted + inert until the pane\'s guarded transitionend', async () => {
   const { window } = await bootWithRuns();
+  slide(window);
   go(window, `running/${ID}`);
   await settle(window);
   const host = window.document.querySelector('#run-detail');
+  const pane = window.document.querySelector('#runs-pane');
 
   window.document.querySelector('#run-detail .rd-back')
     .dispatchEvent(new window.Event('click', { bubbles: true }));
@@ -359,10 +410,12 @@ test('the closing detail stays mounted + inert until the guarded transitionend',
   // transitionend BUBBLES: a descendant's own transition must not clear the DOM.
   fire(host.querySelector('.rd-header'), 'transform');
   assert.ok(host.children.length > 0, 'a descendant transition is ignored');
-  fire(host, 'opacity');
-  assert.ok(host.children.length > 0, 'a non-transform property is ignored');
   fire(host, 'transform');
-  assert.equal(host.children.length, 0, 'the host\'s own transform end clears the screen');
+  assert.ok(host.children.length > 0, 'the screen is inside the pane: only the pane\'s own slide counts');
+  fire(pane, 'opacity');
+  assert.ok(host.children.length > 0, 'a non-transform property is ignored');
+  fire(pane, 'transform');
+  assert.equal(host.children.length, 0, 'the pane\'s own transform end clears the screen');
 });
 
 // ---------- detail -> detail ----------
@@ -389,7 +442,9 @@ test('a detail->detail hop rebuilds in place and never runs the close path', asy
 
 test('entering from another view is instant; an in-view hop animates', async () => {
   const { window } = await bootWithRuns();
-  const shell = window.document.querySelector('#run-shell');
+  // holdRunsAnim() puts `no-anim` on the whole two-pane shell (the panes are what slide).
+  const shell = window.document.querySelector('#runs-shell');
+  slide(window);   // side by side nothing slides; the list->detail hop only exists in the slide
 
   go(window, 'new');
   await settle(window);
@@ -398,8 +453,10 @@ test('entering from another view is instant; an in-view hop animates', async () 
   await settle(window);
   assert.equal(shell.classList.contains('no-anim'), false, 'the flag is dropped after a frame');
 
-  go(window, 'running');
+  // In the slide, #runs from inside the page IS the list (no remembered-run restore).
+  go(window, 'runs');
   await settle(window);
+  assert.equal(window.document.querySelector('#run-shell').classList.contains('detail-open'), false);
   go(window, `running/${ID}`);
   assert.equal(shell.classList.contains('no-anim'), false, 'a list->detail hop animates');
 });
@@ -421,34 +478,36 @@ test('deep-link boot opens the detail before hello, then upgrades from it', asyn
   assert.equal(window.location.hash.replace(/^#/, ''), `running/${ID}`, 'no bounce');
 });
 
-test('a deep link to a run hello does not know bounces to #running', async () => {
+test('a deep link to a run hello does not know bounces to #runs', async () => {
   const { window, recv } = await boot({ url: 'http://localhost:4317/#running/ghost' });
   await settle(window);
   recv({ type: 'hello', runs: [live(ID)] });
   await settle(window);
-  assert.equal(window.location.hash.replace(/^#/, ''), 'running',
+  assert.equal(window.location.hash.replace(/^#/, ''), 'runs',
     'once hello has been processed an unknown id is genuinely bad');
+  assert.equal(window.document.querySelector('#run-shell').classList.contains('detail-open'), false);
+  assert.equal(window.document.querySelector('#runs-empty').hidden, false, 'the list and the empty pane');
+});
+
+test('a deep link to a run hello does not know lands on its saved page when the pane remembers it', async () => {
+  const KEY = 'proj-0000abcd';
+  const storage = { 'worca-cc.runs.last': JSON.stringify({ runId: 'ghost', pipelineId: 'aaaa0001', projectKey: KEY }) };
+  const { window, recv } = await boot({ url: 'http://localhost:4317/#running/ghost', storage });
+  await settle(window);
+  recv({ type: 'hello', runs: [live(ID)] });
+  await settle(window);
+  assert.equal(window.location.hash.replace(/^#/, ''), `history/${KEY}/aaaa0001`,
+    'the remembered run ended: its saved page, not the list (D6)');
+  assert.equal(window.document.querySelector('#run-shell').classList.contains('detail-open'), false);
+  assert.ok(window.document.querySelector('#hist-shell').classList.contains('detail-open'));
 });
 
 test('an unknown id typed after hello bounces immediately', async () => {
   const { window } = await bootWithRuns();
   go(window, 'running/ghost');
   await settle(window);
-  assert.equal(window.location.hash.replace(/^#/, ''), 'running');
+  assert.equal(window.location.hash.replace(/^#/, ''), 'runs');
   assert.equal(window.document.querySelector('#run-shell').classList.contains('detail-open'), false);
-});
-
-test('a sidebar child row opens the detail', async () => {
-  const { window } = await bootWithRuns();
-  go(window, 'running');
-  await settle(window);
-  const row = window.document.querySelector(`#nav-running-children .nav-child[data-child-run-id="${ID}"]`);
-  assert.ok(row, 'the sidebar row is painted');
-  row.dispatchEvent(new window.Event('click', { bubbles: true }));
-  window.dispatchEvent(new window.Event('hashchange'));
-  await settle(window);
-  assert.equal(window.location.hash.replace(/^#/, ''), `running/${ID}`);
-  assert.ok(window.document.querySelector('#run-shell').classList.contains('detail-open'));
 });
 
 // ---------- leave-guard ----------
@@ -466,51 +525,63 @@ test('leaving the running view resets the track synchronously', async () => {
     'the instant close path empties the screen synchronously');
 });
 
-test('leaving the running view does not park focus on a hidden card', async () => {
+test('leaving the running view does not park focus on a hidden row', async () => {
   const { window } = await bootWithRuns();
+  // Slide: the only layout whose close hands focus to a row, so a leave that did would show here.
+  slide(window);
+  go(window, 'runs');
+  await settle(window);
   go(window, `running/${ID}`);
   await settle(window);
   go(window, 'new');
   await settle(window);
   const active = window.document.activeElement;
-  assert.equal(active ? active.closest('.run-card') : null, null,
+  assert.equal(active ? active.closest('.runs-row') : null, null,
     'focus is not restored into the list the view switch just hid');
 });
 
 // ---------- CSS ----------
 
-test('showView stamps body.view-running', async () => {
+test('showView stamps body.view-runs for all three Runs routes', async () => {
   const { window } = await bootWithRuns();
+  const body = window.document.body;
   go(window, 'running');
   await settle(window);
-  assert.ok(window.document.body.classList.contains('view-running'));
+  assert.ok(body.classList.contains('view-runs'), 'a bare #running is the Runs list');
+  go(window, `running/${ID}`);
+  await settle(window);
+  assert.ok(body.classList.contains('view-runs'), 'the live run opens in the Runs pane');
+  assert.equal(body.classList.contains('view-running'), false, 'the old per-screen flag is gone');
   go(window, 'new');
   await settle(window);
-  assert.equal(window.document.body.classList.contains('view-running'), false);
+  assert.equal(body.classList.contains('view-runs'), false);
 });
 
-test('the Running slide shell mirrors History\'s track', () => {
-  const view = ruleBody('.view[data-view="running"]');
-  assert.ok(view, '.view[data-view="running"] rule must exist');
-  assert.match(view, /padding:\s*0/, 'the screens own their gutters');
-  assert.match(view, /position:\s*relative/, 'the absolute screens need a containing block');
+test('the Runs panes slide only in the narrow layout', () => {
+  const view = ruleBody('.view[data-view="runs"]');
+  assert.ok(view, '.view[data-view="runs"] rule must exist');
+  assert.match(view, /padding:\s*0/, 'the panes own their gutters');
+  assert.match(view, /position:\s*relative/, 'the absolute panes need a containing block');
 
-  const screen = ruleBody('.run-screen');
-  assert.ok(screen, '.run-screen rule must exist');
+  const panes = ruleBody('.runs-shell[data-layout="slide"] > :is(.runs-list-pane,.runs-pane)');
+  assert.ok(panes, 'the slide layout stacks both panes');
+  assert.match(panes, /position:\s*absolute/);
+  assert.match(panes, /transition:\s*transform/);
+
+  assert.match(ruleBody('.runs-shell[data-layout="slide"] > .runs-pane'), /transform:\s*translateX\(100%\)/);
+  assert.match(ruleBody('.runs-shell[data-layout="slide"].pane-open > .runs-list-pane'), /transform:\s*translateX\(-100%\)/);
+  assert.match(ruleBody('.runs-shell[data-layout="slide"].pane-open > .runs-pane'), /transform:\s*translateX\(0\)/);
+  assert.match(ruleBody('.runs-shell.no-anim > *'), /transition:\s*none/);
+  assert.match(ruleBody('.runs-shell[data-layout="split"] :is(.rd-back,.hd-back)'), /display:\s*none/,
+    'side by side the way back to the list is hidden: the list is in view');
+
+  const screen = ruleBody('.run-screen-detail');
+  assert.ok(screen, '.run-screen-detail rule must exist');
   assert.match(screen, /position:\s*absolute/);
-  assert.match(screen, /overflow-y:\s*auto/, 'each screen owns its scrollport');
-  assert.match(screen, /padding:\s*0 32px/, 'zero TOP padding so T7\'s sticky tabs pin flush');
-  assert.match(screen, /transition:\s*transform/);
+  assert.match(screen, /overflow-y:\s*auto/, 'the screen owns its scrollport');
 
-  assert.match(ruleBody('.run-screen-detail'), /transform:\s*translateX\(100%\)/);
-  assert.match(css, /\.run-shell\.detail-open\s+\.run-screen-list\s*\{[^}]*translateX\(-100%\)/);
-  assert.match(css, /\.run-shell\.detail-open\s+\.run-screen-detail\s*\{[^}]*translateX\(0\)/);
-  assert.match(css, /\.run-shell\.no-anim\s+\.run-screen\s*\{[^}]*transition:\s*none/);
-  assert.match(css, /\.run-screen-list\s+\.topbar\s*\{[^}]*padding-top:\s*26px/,
-    'the inset the screen dropped is re-applied on the topbar');
-
-  const main = ruleBody('body.view-running .main');
-  assert.ok(main, 'body.view-running .main rule must exist');
+  const main = ruleBody('body.view-runs .main');
+  assert.ok(main, 'body.view-runs .main rule must exist');
   assert.match(main, /overflow:\s*hidden/);
   assert.match(main, /padding:\s*0/);
 });

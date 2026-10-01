@@ -262,7 +262,7 @@ export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repea
     }
     const del = h('button', { type: 'button', class: 'btn btn-danger btn-mini', text: 'Delete' });
     del.addEventListener('click', async () => {
-      if (!(await deps.confirmModal({ title: 'Delete schedule', message: `Delete “${s.title || 'this schedule'}”?\nIt stops repeating. Runs it already started stay in History.`, confirmLabel: 'Delete schedule' }))) return;
+      if (!(await deps.confirmModal({ title: 'Delete schedule', message: `Delete “${s.title || 'this schedule'}”?\nIt stops repeating. Runs it already started stay in Runs.`, confirmLabel: 'Delete schedule' }))) return;
       act(() => api('DELETE', `/api/schedules/${s.id}`));
     });
     acts.append(del);

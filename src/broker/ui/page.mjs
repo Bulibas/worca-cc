@@ -58,6 +58,8 @@ function slotCard(slot) {
   const pasteToo = slot.id === 'github' || slot.protocol === 'github';
 
   const metaParts = [];
+  // A plugin's slot (its label names the plugin): the only host the key is sent to.
+  if (slot.plugin) metaParts.push(`sent only to ${slot.host}`);
   if (slot.updatedAt) metaParts.push(`added ${when(slot.updatedAt)}`);
   if (slot.lastUsedAt) metaParts.push(`used ${when(slot.lastUsedAt)}`);
   if (slot.state === 'invalid' && slot.verifyError) metaParts.push(`last check: ${slot.verifyError}`);

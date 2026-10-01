@@ -50,7 +50,8 @@ test('no surface hard-codes a radius at or above the card scale — it uses the 
 
 test('card-level surfaces take --r-card; boxes nested inside a card take --r-ctrl', () => {
   const rule = (sel) => { const i = css.indexOf(`\n${sel}{`); return i < 0 ? null : css.slice(i, css.indexOf('}', i)); };
-  const cards = ['.log', '.hd-sec-logs .log', '.rd-sec-logs .log', '.viewer', '.run-flow-wrap', '.run-ask-banner',
+  // .runs-needs (the Runs list's Needs-you box) replaced the Running page's .run-ask-banner.
+  const cards = ['.log', '.hd-sec-logs .log', '.rd-sec-logs .log', '.viewer', '.run-flow-wrap', '.runs-needs',
     '.session-expired', '.retained-banner', '.sync-chip-inner', '.wz .rt', '.tl-pop', '.hd-menu', '.hd-cmt-card',
     '.btn-split-menu', '.save-dialog', '.tp-json', '.ask-card', '.ask-card.ask-rp', '.ask-composer-box',
     '.ask-pop', '.ask-pop-at', '.ask-pop-model', '.ask-pop-chip', '.guide-balloon', '.level-banner',

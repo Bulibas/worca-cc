@@ -32,41 +32,32 @@ async function boot({ fetchHandler } = {}) {
   await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
   await new Promise((r) => setTimeout(r, 0));
   const selectProject = () => { const s = window.document.querySelector('#projectSelect'); s.value = PROJECT; s.dispatchEvent(new window.Event('change', { bubbles: true })); };
-  const showHistory = () => { window.location.hash = 'history'; window.dispatchEvent(new window.Event('hashchange')); };
   // The card no longer expands — open the run's DETAIL screen (#history/<key>/<id>).
   const showDetail = (key, id) => { window.location.hash = `history/${key}/${id}`; window.dispatchEvent(new window.Event('hashchange')); };
   const settle = async (n = 3) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); };
-  return { window, selectProject, showHistory, showDetail, settle };
+  return { window, selectProject, showDetail, settle };
 }
 const runsList = (pipelines, live = []) => Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines, live }) });
+const ok = (body) => Promise.resolve({ ok: true, status: 200, json: async () => body });
 
-test('history card shows the pipeline total next to the date', async () => {
+// The glance's labelled fact tiles (Time · Cost · Changes): { label: value }.
+const factTiles = (window) => Object.fromEntries(
+  [...window.document.querySelectorAll('#hist-detail .rd-facts .rd-stats > div')]
+    .map((t) => [t.querySelector('span').textContent, t.querySelector('b').textContent]));
+
+test('the saved run shows the pipeline total in its glance facts', async () => {
+  const KEY = 'proj-a1b2c3d4';
+  const row = { id: 'p1', projectKey: KEY, title: 'Run', status: 'done', startedAt: '2026-01-01T00:00:00Z', totalCostUsd: 0.42 };
+  const detail = { state: { id: 'p1', title: 'Run', status: 'done', startedAt: row.startedAt, steps: [], totalCostUsd: 0.42 } };
   const ctx = await boot({
-    fetchHandler: (url) => url.includes('/api/history')
-      ? runsList([{ id: 'p1', title: 'Run', status: 'done', startedAt: '2026-01-01T00:00:00Z', totalCostUsd: 0.42 }])
-      : null,
+    // The detail URL shares the /api/history prefix: match it first.
+    fetchHandler: (url) => (url.endsWith(`/api/history/${KEY}/p1`) ? ok(detail)
+      : url.endsWith('/api/history') ? runsList([row]) : null),
   });
-  ctx.showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const total = ctx.window.document.querySelector('#history .hist-card .hist-total');
-  assert.equal(total.textContent, '$0.42');
+  ctx.showDetail(KEY, 'p1');
+  await ctx.settle(5);
+  assert.equal(factTiles(ctx.window).cost, '$0.42');
 });
-
-test('the history total is tooltip-labelled as an estimate with the exact value', async () => {
-  const ctx = await boot({
-    fetchHandler: (url) => url.includes('/api/history')
-      ? runsList([{ id: 'p1', title: 'Run', status: 'done', startedAt: '2026-01-01T00:00:00Z', totalCostUsd: 0.42 }])
-      : null,
-  });
-  ctx.showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const total = ctx.window.document.querySelector('#history .hist-card .hist-total');
-  assert.equal(total.textContent, '$0.42', 'visible figure unchanged');
-  assert.match(total.title, /[Ee]stimat/, 'tooltip marks it as an estimate');
-  assert.match(total.title, /\$0\.4200/, 'tooltip shows the exact 4-dp value');
-});
-
-
 
 test('costByNode buckets per nodeId; a row with no nodeId has nothing to bucket onto', async () => {
   const { window } = await boot();

@@ -127,6 +127,7 @@ export function mergeSlots(builtins, extra) {
       const where = `slots[${i}]`;
       if (!e || typeof e !== 'object') throw new Error(`${where} must be an object`);
       if (!SLOT_ID_RE.test(String(e.id || ''))) throw new Error(`${where}: id must match ${SLOT_ID_RE}`);
+      if (e.id.startsWith(PLUGIN_SLOT_PREFIX)) throw new Error(`${where}: ids starting with "${PLUGIN_SLOT_PREFIX}" belong to plugin slots`);
       const base = byId.get(e.id) || {};
       const s = { ...base, ...e };
       if (!PROTOCOLS.includes(s.protocol)) throw new Error(`${where}: protocol must be one of ${PROTOCOLS.join(', ')}`);
@@ -155,6 +156,51 @@ export function mergeSlots(builtins, extra) {
     }
   }
   return [...byId.values()].map((s) => Object.freeze(s));
+}
+
+/** Slot ids worca derives from enabled plugins' models start with this; nothing else may. */
+export const PLUGIN_SLOT_PREFIX = 'p-';
+export const MAX_PLUGIN_SLOTS = 64;
+
+/**
+ * Validate the plugin slots worca registers (PUT /internal/plugin-slots). Plugins are
+ * curated, trusted configuration on a shared instance, so worca may add slots, but only
+ * narrow ones: per-person, a plain key header, a `p-` id that can't shadow a built-in or
+ * operator slot, and an explicit path allowlist. Throws naming the entry.
+ * @param {unknown} list
+ * @param {Set<string>|string[]} [takenIds] ids of the built-in and operator slots
+ */
+export function validatePluginSlots(list, takenIds = []) {
+  if (!Array.isArray(list)) throw new Error('plugin slots must be a JSON array');
+  if (list.length > MAX_PLUGIN_SLOTS) throw new Error(`at most ${MAX_PLUGIN_SLOTS} plugin slots`);
+  const taken = new Set(takenIds);
+  const seen = new Set();
+  return list.map((e, i) => {
+    const where = `plugin slots[${i}]`;
+    if (!e || typeof e !== 'object') throw new Error(`${where} must be an object`);
+    const id = String(e.id || '');
+    if (!SLOT_ID_RE.test(id) || !id.startsWith(PLUGIN_SLOT_PREFIX)) throw new Error(`${where}: id must start with "${PLUGIN_SLOT_PREFIX}" and match ${SLOT_ID_RE}`);
+    if (taken.has(id) || seen.has(id)) throw new Error(`${where}: duplicate slot id ${id}`);
+    seen.add(id);
+    if (e.protocol !== 'anthropic' && e.protocol !== 'openai') throw new Error(`${where}: protocol must be anthropic or openai`);
+    if (e.auth !== 'bearer' && e.auth !== 'x-api-key') throw new Error(`${where}: auth must be bearer or x-api-key`);
+    const issue = upstreamIssue(e.upstream);
+    if (issue) throw new Error(`${where}: ${issue}`);
+    const paths = normPaths(e.paths, where);
+    let verify = null;
+    if (e.verify !== undefined && e.verify !== null) {
+      const vp = e.verify?.path;
+      if (typeof vp !== 'string' || !vp.startsWith('/') || pathIssue(vp)) throw new Error(`${where}: verify must be {path}`);
+      // A gateway may not list models: a 404/405 there doesn't make a key wrong.
+      verify = Object.freeze({ method: 'GET', path: vp, lenient: true });
+    }
+    const text = (v, max) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, max) : '');
+    return Object.freeze({
+      id, label: text(e.label, 80) || id, protocol: e.protocol, upstream: new URL(e.upstream).origin,
+      auth: e.auth, credential: 'per-person', paths, verify, keyHint: text(e.keyHint, 80),
+      plugin: text(e.plugin, 64) || null,
+    });
+  });
 }
 
 /**

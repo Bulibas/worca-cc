@@ -35,12 +35,12 @@ test('manifestSig changes when node ids change', async () => {
 
 test('onState swaps the manifest when the signature changes', async () => {
   const { np } = await boot();
-  // makeRun({...}) takes an OPTIONS OBJECT (app.js:668) and returns a COMPLETE run
-  // object. onState calls paintRunCard + maybeResume unconditionally; both no-op when
-  // r.el == null, so a full run object with el=null is safe for this unit test.
+  // makeRun({...}) takes an OPTIONS OBJECT and returns a COMPLETE run object. onState
+  // paints nothing itself (the frame hook repaints the Runs row and the open run page) and
+  // calls maybeResume, which no-ops unless an answer is in flight, so a bare run is safe here.
   const r = np.makeRun({ runId: 'rid' });
   r.stepper = { steps: [{ nodes: [{ id: 's2_0', key: 'implementer' }] }] };
-  r.el = null; // no DOM card in this unit test; swap should still update r.stepper
+  r.el = null; // r.el is always null (the list card is gone); swap should still update r.stepper
   np.onState(r, { stepper: { steps: [{ nodes: [{ id: 's_impl_p1_t1' }] }] }, status: 'running' });
   assert.deepEqual(r.stepper.steps[0].nodes.map((n) => n.id), ['s_impl_p1_t1']);
 });

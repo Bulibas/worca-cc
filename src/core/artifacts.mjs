@@ -1885,28 +1885,59 @@ export function retainedWorkFor(row) {
 const RESULTS_FILE = 'results.json';
 
 /**
- * A run's frozen line counts from `<dir>/results.json` — persistResults writes it when
- * the run ends (or error-pauses), and a workspace run's summary is the rollup across
- * its members. Null when the file is absent or unparseable, or its summary lacks
- * numeric counts.
+ * The run dir's results.json, parsed — persistResults writes it when the run ends (or
+ * error-pauses). Null when the file is absent or unreadable.
  * @param {string|undefined} dir the on-disk run dir
- * @returns {Promise<{added:number, removed:number}|null>}
+ * @returns {Promise<object|null>}
  */
-async function frozenDiffCounts(dir) {
+async function readResultsJson(dir) {
   if (!dir) return null;
   try {
-    const sum = JSON.parse(await readFile(join(dir, RESULTS_FILE), 'utf8'))?.summary;
-    if (!Number.isFinite(sum?.linesAdded) || !Number.isFinite(sum?.linesRemoved)) return null;
-    return { added: sum.linesAdded, removed: sum.linesRemoved };
+    const res = JSON.parse(await readFile(join(dir, RESULTS_FILE), 'utf8'));
+    return res && typeof res === 'object' ? res : null;
   } catch {
     return null;
   }
 }
 
 /**
+ * A run's frozen line counts from its results summary (a workspace run's summary is the
+ * rollup across its members). Null when the summary lacks numeric counts.
+ * @param {object|null} res parsed results.json (readResultsJson)
+ * @returns {{added:number, removed:number}|null}
+ */
+function frozenDiffCounts(res) {
+  const sum = res?.summary;
+  if (!Number.isFinite(sum?.linesAdded) || !Number.isFinite(sum?.linesRemoved)) return null;
+  return { added: sum.linesAdded, removed: sum.linesRemoved };
+}
+
+/**
+ * How many "things to check" the review left, counted the way the glance does
+ * (ui/public/app.js hdChecks): a workspace run sums its members, and a results file
+ * without the list counts 0. null when there is no results file yet.
+ */
+export function resultsChecksCount(res) {
+  if (!res) return null;
+  if (res.perProject && typeof res.perProject === 'object') {
+    return Object.values(res.perProject)
+      .reduce((n, p) => n + (Array.isArray(p?.keyThingsToCheck) ? p.keyThingsToCheck.length : 0), 0);
+  }
+  return Array.isArray(res.keyThingsToCheck) ? res.keyThingsToCheck.length : 0;
+}
+
+/** Files the run changed per its results summary (new + changed + deleted, the glance
+ *  headline's sum — app.js rdFilesChanged / paintHdGlance); null without one. */
+export function resultsFilesCount(res) {
+  const s = res?.summary;
+  if (!s || typeof s !== 'object') return null;
+  return (Number(s.filesNew) || 0) + (Number(s.filesChanged) || 0) + (Number(s.filesDeleted) || 0);
+}
+
+/**
  * Build a history row from a pipelines DB row. Mirrors the legacy pipelineEntry
  * wire shape EXACTLY: { id, dir, title, status, startedAt, branch, sourceBranch,
- * survived, added, removed, diffFrozen, totalCostUsd, totalActiveMs, mtime[, pr] }.
+ * survived, added, removed, diffFrozen, checks, files, totalCostUsd, totalActiveMs, mtime[, pr] }.
  * Git/PR work (branchExists / diffShortstat / findPrForBranch) is UNCHANGED — it
  * still shells out — and is fed the DB row's branch JSON instead of a parsed state.json.
  *  - `branch` (wire) = state.branch.feature; `sourceBranch` = state.branch.source.
@@ -1920,6 +1951,9 @@ async function frozenDiffCounts(dir) {
  *    live three-dot diff. Otherwise (a run still going, a legacy run) they are the
  *    live source...feature counts while the branch survives. `survived` is always
  *    the live "branch exists" fact. `lite` skips the file read like the git work.
+ *  - `checks` / `files` (additive): the review's things-to-check count and the files
+ *    changed, from the same results.json — the finished headline's inputs (the Runs
+ *    list word = the glance headline). null until results exist, and for `lite`.
  * @param {object} row a pipelines row (incl. row.dir set by the caller)
  * @param {string|null} repoDir git repo root for live branch facts
  * @param {object} opts { withPr?, lite? }
@@ -1928,7 +1962,8 @@ async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
   const branchObj = j(row.branch, null);
   const feature = branchObj?.feature ?? (typeof branchObj === 'string' ? branchObj : null);
   const source = branchObj?.source ?? null;
-  const frozen = opts.lite ? null : await frozenDiffCounts(row.dir);
+  const results = opts.lite ? null : await readResultsJson(row.dir);
+  const frozen = frozenDiffCounts(results);
   let survived = false;
   let added = frozen ? frozen.added : 0;
   let removed = frozen ? frozen.removed : 0;
@@ -1960,6 +1995,10 @@ async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
     added,
     removed,
     diffFrozen: !!frozen,
+    // The finished headline's inputs (the Runs list word = the glance headline):
+    // `checks` (review findings) and `files` (files changed); null until results exist.
+    checks: resultsChecksCount(results),
+    files: resultsFilesCount(results),
     totalCostUsd: cost,
     totalActiveMs: active,
     mtime: row.updated_at ? (Date.parse(row.updated_at) || 0) : 0,

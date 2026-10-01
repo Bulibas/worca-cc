@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS usage (
 CREATE INDEX IF NOT EXISTS usage_bill_to_at ON usage (bill_to, at);
 CREATE INDEX IF NOT EXISTS usage_run ON usage (run_id);
 CREATE INDEX IF NOT EXISTS tokens_issuer ON tokens (issuer);
+CREATE TABLE IF NOT EXISTS plugin_slots (
+  id TEXT PRIMARY KEY, spec TEXT NOT NULL, updated_at TEXT NOT NULL);
 `;
 
 const iso = (ms) => new Date(ms).toISOString();
@@ -47,10 +49,13 @@ export function openStore(path = ':memory:') {
   //   tokens.isolated    the spawn runs under its person's own agent user (a subscription
   //                      is only ever used by such a spawn in multi mode)
   //   usage.plan         'subscription' for calls on a Claude plan (no per-call price)
+  //   credentials.upstream the origin the key was saved for: a slot that later points
+  //                      elsewhere (a plugin upgrade) never sends it there
   const cols = (t) => new Set(db.prepare(`PRAGMA table_info(${t})`).all().map((r) => r.name));
   if (!cols('credentials').has('kind')) db.exec('ALTER TABLE credentials ADD COLUMN kind TEXT');
   if (!cols('tokens').has('isolated')) db.exec('ALTER TABLE tokens ADD COLUMN isolated INTEGER NOT NULL DEFAULT 0');
   if (!cols('usage').has('plan')) db.exec('ALTER TABLE usage ADD COLUMN plan TEXT');
+  if (!cols('credentials').has('upstream')) db.exec('ALTER TABLE credentials ADD COLUMN upstream TEXT');
   const q = (sql) => db.prepare(sql);
 
   const s = {
@@ -58,19 +63,19 @@ export function openStore(path = ':memory:') {
     close() { try { db.close(); } catch { /* already closed */ } },
 
     // ── credentials ──
-    putCredential({ billTo, slot, sealed, suffix, kind = null, verifiedAt = null, now = Date.now() }) {
-      q(`INSERT INTO credentials (bill_to, slot, ciphertext, iv, tag, key_id, suffix, kind, created_at, updated_at, verified_at, verify_error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    putCredential({ billTo, slot, sealed, suffix, kind = null, upstream = null, verifiedAt = null, now = Date.now() }) {
+      q(`INSERT INTO credentials (bill_to, slot, ciphertext, iv, tag, key_id, suffix, kind, upstream, created_at, updated_at, verified_at, verify_error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT (bill_to, slot) DO UPDATE SET ciphertext = excluded.ciphertext, iv = excluded.iv, tag = excluded.tag,
-           key_id = excluded.key_id, suffix = excluded.suffix, kind = excluded.kind, updated_at = excluded.updated_at,
-           verified_at = excluded.verified_at, verify_error = NULL`)
-        .run(billTo, slot, sealed.ciphertext, sealed.iv, sealed.tag, sealed.keyId, suffix, kind, iso(now), iso(now), verifiedAt ? iso(verifiedAt) : null);
+           key_id = excluded.key_id, suffix = excluded.suffix, kind = excluded.kind, upstream = excluded.upstream,
+           updated_at = excluded.updated_at, verified_at = excluded.verified_at, verify_error = NULL`)
+        .run(billTo, slot, sealed.ciphertext, sealed.iv, sealed.tag, sealed.keyId, suffix, kind, upstream, iso(now), iso(now), verifiedAt ? iso(verifiedAt) : null);
     },
     getCredential(billTo, slot) {
       return q('SELECT * FROM credentials WHERE bill_to = ? AND slot = ?').get(billTo, slot) || null;
     },
     listCredentials(billTo) {
-      return q('SELECT bill_to, slot, suffix, kind, key_id, created_at, updated_at, last_used_at, verified_at, verify_error, daily_usd, monthly_usd FROM credentials WHERE bill_to = ? ORDER BY slot').all(billTo);
+      return q('SELECT bill_to, slot, suffix, kind, key_id, upstream, created_at, updated_at, last_used_at, verified_at, verify_error, daily_usd, monthly_usd FROM credentials WHERE bill_to = ? ORDER BY slot').all(billTo);
     },
     allCredentials() {
       return q('SELECT * FROM credentials').all();
@@ -92,6 +97,24 @@ export function openStore(path = ':memory:') {
     setCaps(billTo, slot, { dailyUsd = null, monthlyUsd = null }) {
       return q('UPDATE credentials SET daily_usd = ?, monthly_usd = ? WHERE bill_to = ? AND slot = ?')
         .run(dailyUsd, monthlyUsd, billTo, slot).changes;
+    },
+
+    // ── plugin slots (registered by worca, kept across broker restarts) ──
+    getPluginSlots() {
+      const out = [];
+      for (const r of q('SELECT spec FROM plugin_slots ORDER BY id').all()) {
+        try { out.push(JSON.parse(r.spec)); } catch { /* a corrupt row is skipped */ }
+      }
+      return out;
+    },
+    replacePluginSlots(specs, now = Date.now()) {
+      db.exec('BEGIN');
+      try {
+        q('DELETE FROM plugin_slots').run();
+        const ins = q('INSERT INTO plugin_slots (id, spec, updated_at) VALUES (?, ?, ?)');
+        for (const sp of specs) ins.run(sp.id, JSON.stringify(sp), iso(now));
+        db.exec('COMMIT');
+      } catch (err) { db.exec('ROLLBACK'); throw err; }
     },
 
     // ── tokens ──

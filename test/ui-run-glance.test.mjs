@@ -7,6 +7,7 @@ import { JSDOM } from 'jsdom';
 import {
   trailColumns, nowRows, earlierRows, glanceState, glanceCopy, renderTrail, renderOrb, nodeLabel, TRAIL_STACK_CAP,
 } from '../ui/public/run-glance.mjs';
+import { histRowState } from '../ui/public/runs-list.mjs';
 
 const stepper = {
   version: 2,
@@ -140,6 +141,29 @@ test('glance state and copy for every status', () => {
   assert.equal(glanceCopy({ status: 'done' }, { pr: 'PENDING', checks: 0 }).sub, 'Checking for a pull request…', 'never guesses while the lookup runs');
   assert.deepEqual(fin({ pr: 'UNAVAILABLE', checks: 0, files: 2 }), ['Finished', 'finished'], 'no gh: never "Ready to ship"');
   assert.equal(glanceCopy({ status: 'done' }).title, 'Finished');
+});
+
+test('a finished row in the Runs list says what the glance headline says (D12): same inputs, same word', () => {
+  // The inputs a History row carries into the list: the glance's PR input (glancePrInput), the
+  // review's `checks` and the changed `files` (both from the server row).
+  const cases = [
+    { pr: 'MERGED' }, { pr: 'OPEN', checks: 3 }, { pr: 'CLOSED' },
+    { pr: 'NONE', checks: 0, files: 2 }, { pr: 'NONE', checks: 2, files: 2 },
+    { files: 0, checks: 0 }, { pr: 'PENDING', checks: 0 }, { pr: 'UNAVAILABLE', checks: 0, files: 2 },
+    { pr: 'NONE' }, {},
+  ];
+  const leads = [];
+  for (const o of cases) {
+    const lead = glanceCopy({ status: 'done' }, o).lead;
+    const st = histRowState({ status: 'done', ...o });
+    assert.equal(st.word, lead, `row word vs glance lead for ${JSON.stringify(o)}`);
+    assert.equal(st.icon, 'done');
+    leads.push(lead);
+  }
+  // Every headline of the done branch is reached, so this is not one word compared ten times.
+  assert.deepEqual([...new Set(leads)].sort(), ['Finished', 'In review', 'Merged', 'PR closed', 'Ready to review', 'Ready to ship']);
+  // History's synonyms for done read the same headline.
+  assert.equal(histRowState({ status: 'completed', pr: 'MERGED' }).word, glanceCopy({ status: 'done' }, { pr: 'MERGED' }).lead);
 });
 
 test('DOM: every glyph is its own drawing, stroked, with its state class', () => {

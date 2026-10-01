@@ -178,7 +178,7 @@ test('tablet: the icon rail is forced without touching the stored preference', a
   assert.equal(window.localStorage.getItem(SIDEBAR_KEY), null, 'nothing persisted');
   assert.equal($('.nav button[data-nav="composer"]').title, 'Workflow Composer', 'rail tooltips');
   recv({ type: 'hello', runs: [live('auth-fix')] });
-  assert.equal(window.document.querySelectorAll('#nav-running-children .rail-tile').length, 1, 'runs as rail tiles');
+  assert.equal($('#nav-running-count').textContent, '1', 'the Runs badge counts the live run (no per-run rows)');
 });
 
 // ---- phone ----
@@ -189,7 +189,6 @@ test('phone: the drawer is the FULL sidebar even when the rail preference is on'
   assert.equal(window.document.body.classList.contains('rail-collapsed'), false);
   assert.equal(window.localStorage.getItem(SIDEBAR_KEY), '1', 'the desktop preference survives');
   recv({ type: 'hello', runs: [live('auth-fix'), live('seo', { pendingQuestion: { id: 'q1', kind: 'clarify', questions: [{ question: 'x?', options: ['a'] }] } })] });
-  assert.equal(window.document.querySelectorAll('#nav-running-children .nav-child').length, 2, 'labelled live-run rows');
   assert.equal($('#nav-running-count').textContent, '2', 'counts');
   assert.equal($('#mbar-rollup').hidden, false, 'the menu button carries the needs-input dot');
   assert.equal($('#mbar-menu').getAttribute('aria-label'), 'Menu — a pipeline needs your input');
@@ -241,11 +240,11 @@ test('phone: a route closes the drawer and names the page in the bar; disclosure
 test('phone: a hash change (back button) closes an open drawer', async () => {
   const { $, click, window } = await boot({ width: 390 });
   click('#mbar-menu');
-  window.location.hash = 'history';
+  window.location.hash = 'history';   // a legacy bare route: it lands on the one Runs page
   window.dispatchEvent(new window.HashChangeEvent('hashchange'));
   await tick();
   assert.equal(window.document.body.classList.contains('nav-open'), false);
-  assert.equal($('#mbar-title').textContent, 'History');
+  assert.equal($('#mbar-title').textContent, 'Runs');
 });
 
 test('resizing across tiers closes the drawer and re-derives the rail', async () => {

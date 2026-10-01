@@ -1,8 +1,8 @@
 // test/ui-ask-form-panel.test.mjs — a kind:'form' ask end to end on the run page
 // (ask-forms design §6): the panel head, the mounted form, the submit payload, the
 // 422 arm, the busy sweep, and the rebuild key that must include `form` + `version`.
-// The panel mounts only on the run page (test/helpers/run-page-boot.mjs); the list
-// card carries just the wait strip.
+// The panel mounts only on the run page (test/helpers/run-page-boot.mjs); the Runs
+// list row is just a link to it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp as boot, runPanel, openRunPanel } from './helpers/run-page-boot.mjs';
@@ -29,7 +29,7 @@ const ASK = {
 
 // Open the run page for a run parked on `ask`; resolves to its .qpanel.
 const seed = (ctx, ask = ASK) => openRunPanel(ctx, { runId: RUN_ID, question: ask });
-const cardPanel = (w) => w.document.querySelector('#run-list .run-card .qpanel');
+const cardPanel = (w) => w.document.querySelector('#runs-list .qpanel');
 const click = (w, n) => n.dispatchEvent(new w.Event('click', { bubbles: true }));
 
 test('a form ask paints the agent title, a field count and the mounted form', async () => {
@@ -43,7 +43,8 @@ test('a form ask paints the agent title, a field count and the mounted form', as
   assert.equal(panel.querySelector('.qanswered').textContent, '0 of 1 answered');
   assert.ok(panel.querySelector('.btn-go'), 'the panel keeps the house Submit button');
   assert.equal(panel.querySelector('.qopen'), null, 'no Open run: you are on the run page');
-  assert.equal(cardPanel(ctx.window), null, 'and the list card mounts no panel');
+  assert.ok(ctx.window.document.querySelector(`#runs-list .runs-row[data-run-id="${RUN_ID}"]`), 'the run is listed beside the page');
+  assert.equal(cardPanel(ctx.window), null, 'and the list mounts no panel');
 });
 
 test('a valid answer posts { values } and leaves the question open until resume', async () => {
