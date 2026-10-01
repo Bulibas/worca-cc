@@ -14,7 +14,7 @@
 // jsdom cannot produce:
 //   STILL CDP-ONLY
 //     (1b)(1c) .gv-stage === the .run-flow-wrap padding box on the Running detail and the History detail
-//     (1a)     the Running list card carries no graph, log or inline panel, just the waiting strip
+//     (1a)     the Runs list row carries no graph, log or inline panel; a waiting run sits in Needs you
 //     (3)       the 26/22px footer bands and offsetHeight === nodeSize()
 //     (4a)(4b)  computed animationName on a live wire, live and under .settled
 //     (5)       the COMPUTED font-size that hides the composer's <=N pill
@@ -313,22 +313,24 @@ try {
   if (!entry.pendingQuestion) throw new Error('the mock run never reached the clarify question');
   log(`run ${runId} holding at ${entry.pendingQuestion.id} (status ${entry.status})`);
 
-  // ================ PHASE 1 — the LIVE run (Running page) ====================
-  const CARD_ROOT = `#run-list .run-card[data-run-id=${JSON.stringify(runId)}]`;
-  await go('running', { first: true });
-  await until(`document.querySelector(${JSON.stringify(CARD_ROOT)}+' .rc-wait:not([hidden])')`, 'the waiting strip on the live card');
+  // ================ PHASE 1 — the LIVE run (the Runs page) ==================
+  // The waiting run's Needs-you row (it repeats in its project group below).
+  const CARD_ROOT = `#runs-list .runs-needs .runs-row[data-run-id=${JSON.stringify(runId)}]`;
+  await go('runs', { first: true });
+  await ev(`localStorage.removeItem('worca-cc.runs.last');0`);   // the bare list: nothing remembered reopens
+  await go('runs');
+  await until(`document.querySelector(${JSON.stringify(CARD_ROOT)})`, 'the waiting run in Needs you');
   await settle('card');
 
-  // (1a) the list card is History-level: a header and the waiting strip, no graph, log, banner or inline panel
+  // (1a) the row is compact: an icon, a title and a subline — no graph, log, banner or inline panel
   const shape = await ev(`(()=>{const c=document.querySelector(${JSON.stringify(CARD_ROOT)});
-    const w=c.querySelector('.rc-wait');
     return {graph:!!c.querySelector('.run-flow-wrap,.run-flow'),log:!!c.querySelector('.log,.log-filters'),
       panel:!!c.querySelector('.qpanel'),banner:!!c.querySelector('.cost-banner'),density:!!document.querySelector('.run-density'),
-      wait:w&&{hidden:w.hidden,ask:w.classList.contains('is-ask'),text:w.querySelector('.rc-wait-text').textContent}};})()`);
-  check('1a', 'Running list card: no graph, log, banner or inline panel; the waiting strip names the question and opens the run page',
+      icon:c.dataset.icon,sub:(c.querySelector('.runs-row-sub')||{}).textContent||''};})()`);
+  check('1a', 'Runs list row: no graph, log, banner or inline panel; the waiting run sits in Needs you, says what it waits for, and opens the run page',
     !shape.graph && !shape.log && !shape.panel && !shape.banner && !shape.density
-    && shape.wait && shape.wait.hidden === false && shape.wait.ask === true && shape.wait.text.length > 0, shape);
-  await clickCentre(`${CARD_ROOT} .rc-wait`, 'the waiting strip');
+    && shape.icon === 'ask' && shape.sub.length > 0, shape);
+  await clickCentre(CARD_ROOT, 'the Needs-you row');
   await until(`location.hash === '#running/${runId}' && document.querySelector('#run-detail .rd-questions:not([hidden])')`, 'the run page with its question');
 
   // ---- the Running DETAIL (a monitor host) ---------------------------------
@@ -520,6 +522,17 @@ try {
     && chips.filter.execution === 'x:n_clarify:1' && chips.filter.node === 'n_clarify', chips);
 
   // ================ PHASE 2 — answer, finish, settle =========================
+  // A finished run hands the page over to its saved run (#history/…) as soon as History lists
+  // its finished row (app.js rdSavedRoute). (4b) measures the terminal Running page itself, so
+  // the page's /api/history reads leave this pipeline out until (4b) is done.
+  await ev(`(()=>{const pid=${JSON.stringify(entry.pipelineId)};const f=window.fetch.bind(window);
+    window.__realFetch=f;
+    window.fetch=async(...a)=>{const r=await f(...a);const u=String((a[0]&&a[0].url)||a[0]);
+      if(!/^\\/api\\/history(\\?|$)/.test(u.replace(location.origin,'')))return r;
+      const j=await r.clone().json();
+      if(Array.isArray(j.pipelines))j.pipelines=j.pipelines.filter((p)=>p.id!==pid);
+      return new Response(JSON.stringify(j),{status:r.status,headers:r.headers});};
+    return 1;})()`);
   const q = entry.pendingQuestion;
   await api('/api/answer', { method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ runId, id: q.id, payload: { answers: (q.questions || []).map((x) => ({ id: x.id, text: 'yes' })) } }) });
@@ -543,6 +556,7 @@ try {
   check('4b', 'under .rd-graph.settled a live wire is pinned still (animationName "none", offset 0px)',
     settledAnts.settled === true && settledAnts.liveBefore === 0 && settledAnts.animationName === 'none'
     && settledAnts.strokeDashoffset === '0px', settledAnts);
+  await ev('window.fetch=window.__realFetch;delete window.__realFetch;0');
 
   // ---- the History detail --------------------------------------------------
   const hist = await api('/api/history');

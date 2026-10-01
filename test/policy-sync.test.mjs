@@ -194,3 +194,28 @@ test('workspace: home pointer, resolve through a following member, autoPolicyHom
   await assert.rejects(updateWorkspace(ws.id, { policyProject: '/nope' }), { code: 'BAD_REQUEST' });
   writeTeamPolicyPrefs(projectKey(billing), { delegateTo: 'gateway', present: true, docKnown: true, doc: { schema: 1, fields: {}, delegateTo: 'gateway' } });
 });
+
+test('discovery: a head cached by a build that did not know a field is read again once this build knows it', { skip }, async () => {
+  // MCP registry spec §11.1: a teammate on an older Worca caches the doc with `mcp.required` dropped as an unknown field;
+  // after the upgrade the same head must be read again, or the field stays lost until the team's next publish.
+  const key = projectKey(gw);
+  const now = await discoverPolicy(gw, { force: true });
+  assert.equal(now.doc.fields['cost.totalLimitUsd'].value, 150);
+  const { 'cost.totalLimitUsd': _dropped, ...fields } = now.doc.fields;   // eslint-disable-line no-unused-vars
+  writeTeamPolicyPrefs(key, { doc: { ...now.doc, fields }, warnings: ['unknown field cost.totalLimitUsd', 'unknown field future.field'] });
+  const events = []; policyEvents.on('changed', (e) => events.push(e.action));
+  const fresh = await discoverPolicy(gw, { force: true });
+  assert.equal(fresh.headSha, now.headSha);
+  assert.equal(fresh.doc.fields['cost.totalLimitUsd'].value, 150, 'the known field is back without a new publish');
+  assert.deepEqual(fresh.warnings, []);
+  assert.deepEqual(events, ['updated'], 'the open policy views repaint (team-policy-changed)');
+  // A field this build does not know either is no reason to read again (no loop); a workspaceRuns field it knows is.
+  writeTeamPolicyPrefs(key, { warnings: ['unknown field future.field'] });
+  const calls = [];
+  metricsTesting.setGit(async (cwd, args) => { calls.push(args[0]); return metricsTesting.defaultGit(cwd, args); });
+  await discoverPolicy(gw, { force: true });
+  assert.equal(calls.some((c) => c === 'fetch' || c === 'show'), false, calls.join(' '));
+  writeTeamPolicyPrefs(key, { warnings: ['workspaceRuns.unknown field cost.totalLimitUsd'] });
+  await discoverPolicy(gw, { force: true });
+  assert.equal(calls.some((c) => c === 'fetch' || c === 'show'), true, calls.join(' '));
+});

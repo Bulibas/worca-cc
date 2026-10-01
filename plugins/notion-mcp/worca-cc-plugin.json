@@ -1,0 +1,19 @@
+{
+  "name": "notion-mcp",
+  "version": "0.1.0",
+  "description": "Notion MCP server (open-source, integration token): search, read and edit pages and databases",
+  "license": "MIT",
+  "engines": { "worca-cc-api": ">=5 <6" },
+  "mcpServers": {
+    "notion": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "env": { "NOTION_TOKEN": { "field": "token" } },
+      "fields": [
+        { "key": "token", "label": "Notion integration secret", "secret": true, "required": true }
+      ],
+      "description": "Search, read and edit the Notion pages and databases shared with your integration"
+    }
+  }
+}

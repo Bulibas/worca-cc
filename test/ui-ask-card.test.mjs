@@ -106,7 +106,8 @@ async function boot({ url = 'http://localhost:4317/', runResponse = null, workfl
     const path = url2.split('?')[0];
     if (path.endsWith('/api/run') && method === 'POST') {
       runBodies.push(JSON.parse(opts.body));
-      return Promise.resolve(runResponse || { ok: true, status: 200, json: async () => ({ runId: 'run-uuid-1' }) });
+      const r = typeof runResponse === 'function' ? runResponse(runBodies.length) : runResponse;
+      return Promise.resolve(r || { ok: true, status: 200, json: async () => ({ runId: 'run-uuid-1' }) });
     }
     // /api/workflows/:id serves the template for a LISTED id and 404s the rest, like the real route.
     const wfRow = path.match(/\/api\/workflows\/([^/]+)$/);
@@ -216,6 +217,49 @@ test('ui-ask-card: a 403 stays on the editable card with the error inline', asyn
   assert.ok(ctx.window.document.querySelector('.ask-card-brief'), 'still editable');
 });
 
+test('ui-ask-card: a 409 sync-diverged asks once, then resends with syncPolicy (no syncBeforeStart) (#527)', async () => {
+  const refusal = { code: 'sync-diverged', error: 'dev diverged', options: ['origin', 'cancel'],
+    members: [{ projectKey: 'proj-00000001', base: 'dev', remote: 'origin', ahead: 1, behind: 2 }] };
+  const ctx = await boot({ runResponse: (n) => (n === 1 ? { ok: false, status: 409, json: async () => refusal } : null) });
+  await openCard(ctx, CARD);
+  ctx.window.document.querySelector('[data-ask-card-start]').click();
+  await settle(ctx.window, 6);
+  const go = [...ctx.window.document.querySelectorAll('.sync-modal button')].find((b) => b.textContent === 'Start from origin/dev');
+  assert.ok(go, 'the refusal card offers the remote start');
+  go.click();
+  await settle(ctx.window, 6);
+  assert.equal(ctx.runBodies.length, 2);
+  assert.equal(ctx.runBodies[1].syncPolicy, 'origin');
+  assert.equal('syncBeforeStart' in ctx.runBodies[1], false, 'the project default applies');
+  assert.equal(ctx.window.document.querySelector('.ask-card-err').textContent, '');
+});
+
+test('ui-ask-card: cancelling the sync refusal posts nothing more and says so (#527)', async () => {
+  const refusal = { code: 'sync-fetch-failed', error: 'offline', options: ['last-fetch', 'cancel'], fetchKind: 'network',
+    members: [{ projectKey: 'proj-00000001', base: 'dev', remote: 'origin', fetchKind: 'network' }] };
+  const ctx = await boot({ runResponse: () => ({ ok: false, status: 409, json: async () => refusal }) });
+  await openCard(ctx, CARD);
+  ctx.window.document.querySelector('[data-ask-card-start]').click();
+  await settle(ctx.window, 6);
+  const cancel = [...ctx.window.document.querySelectorAll('.sync-modal button')].find((b) => b.textContent === 'Cancel');
+  cancel.click();
+  await settle(ctx.window, 6);
+  assert.equal(ctx.runBodies.length, 1);
+  assert.equal(ctx.window.document.querySelector('.ask-card-err').textContent, 'Start cancelled.');
+});
+
+test('ui-ask-card: the proposed source carries its sourceRef note; another pick clears it (#527)', async () => {
+  const ctx = await boot();
+  await openCard(ctx, { ...CARD, sourceRef: { ref: 'origin/dev', remoteOnly: true, behind: 0, stale: false } });
+  const sel = ctx.window.document.querySelector('.ask-card-source');
+  const hint = sel.closest('.ask-rp-field').querySelector('.ask-rp-hint');
+  assert.ok(hint, 'the Source branch label carries a hint');
+  assert.equal(hint.textContent, ' · from origin/dev (remote only)');
+  sel.value = 'main';
+  sel.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
+  assert.equal(hint.textContent, '', 'the note describes the proposed branch only');
+});
+
 test('ui-ask-card: Not now dismisses; the flip renders the stub', async () => {
   const ctx = await boot();
   await openCard(ctx, CARD);
@@ -262,6 +306,9 @@ test('ui-ask-card: Open in New Pipeline for a workspace card selects the workspa
 test('ui-ask-card: a workspace card Start posts the workspace §9.4 body from inside the app', async () => {
   const ctx = await boot();
   await openCard(ctx, WS_CARD);
+  // Captured before the click: a bare '#running' is normalized to '#runs' now, so comparing
+  // against either literal would pass even if Start navigated somewhere.
+  const before = ctx.window.location.hash;
   ctx.window.document.querySelector('[data-ask-card-start]').click();
   await settle(ctx.window, 6);
   assert.deepEqual(ctx.runBodies[0], {
@@ -269,7 +316,7 @@ test('ui-ask-card: a workspace card Start posts the workspace §9.4 body from in
     title: 'Fix login', featureBranch: 'worca/fix-login', sourceBranchByKey: { 'lib-00000002': 'release' },
     mock: false, askThreadId: TID, askCardId: 'card_00000001',
   });
-  assert.notEqual(ctx.window.location.hash, '#running', 'no navigation');
+  assert.equal(ctx.window.location.hash, before, 'no navigation');
 });
 
 test('ui-ask-card: Open in New Pipeline carries the attachment pills into the extras file list', async () => {

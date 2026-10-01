@@ -1,6 +1,8 @@
 // test/ui-running-order.test.mjs
-// Card/tab ordering is STABLE while pipelines run: log activity must not
-// reshuffle; group-rank transitions (question, finish) still regroup.
+// Row/tab ordering is STABLE while pipelines run: log activity must not
+// reshuffle; group-rank transitions (question, finish) still regroup. The live
+// rows are read inside their project group — `[data-slot="group"]`, because a
+// Needs-you run is repeated above the groups (rule 6).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -49,29 +51,32 @@ async function boot() {
   return { window, np, recv, selectProject, tick };
 }
 
-const cardOrder = (window) =>
-  [...window.document.querySelectorAll('#run-list .run-card')].map((c) => c.dataset.runId);
+const liveRows = (window) =>
+  [...window.document.querySelectorAll('#runs-list .runs-group .runs-row[data-slot="group"][data-kind="live"]')];
+const cardOrder = (window) => liveRows(window).map((c) => c.dataset.runId);
 
-test('log activity does not reorder the Running cards', async () => {
+test('log activity does not reorder the Runs list rows', async () => {
   const { window, recv, selectProject, tick } = await boot();
   selectProject();
-  window.location.hash = 'running';
+  window.location.hash = 'runs';
   window.dispatchEvent(new window.Event('hashchange'));
   recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });   // older run
   recv({ type: 'phase', runId: 'p2', phase: 'plan', cycle: 0 });   // newer run
   await tick();
   assert.deepEqual(cardOrder(window), ['p2', 'p1'], 'newest-first baseline');
 
+  const before = liveRows(window);
   // Log to the run at the BOTTOM — recency-based ordering would bump it to the top.
   recv({ type: 'log', runId: 'p1', source: 'planner', level: 'info', text: 'x', ts: 1 });
   await tick();
   assert.deepEqual(cardOrder(window), ['p2', 'p1'], 'order unchanged on log activity');
+  assert.ok(liveRows(window).every((c, i) => c === before[i]), 'same DOM nodes — a log frame never rebuilds #runs-list');
 });
 
-test('a question still regroups the card to the top (needs-attention rank)', async () => {
+test('a question still regroups the row to the top (needs-attention rank)', async () => {
   const { window, recv, selectProject, tick } = await boot();
   selectProject();
-  window.location.hash = 'running';
+  window.location.hash = 'runs';
   window.dispatchEvent(new window.Event('hashchange'));
   recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });
   recv({ type: 'phase', runId: 'p2', phase: 'plan', cycle: 0 });
@@ -89,7 +94,7 @@ test('a question still regroups the card to the top (needs-attention rank)', asy
 test('a trailing frame for a superseded run does not outrank the resumed run', async () => {
   const { window, np, recv, selectProject, tick } = await boot();
   selectProject();
-  window.location.hash = 'running';
+  window.location.hash = 'runs';
   window.dispatchEvent(new window.Event('hashchange'));
   recv({ type: 'phase', runId: 'r1', phase: 'plan', cycle: 0 });
   await tick();
@@ -104,7 +109,7 @@ test('a trailing frame for a superseded run does not outrank the resumed run', a
   // Trailing frame for the dead runId → upsertRun re-materializes it.
   recv({ type: 'log', runId: 'r1', source: 'planner', level: 'info', text: 'late', ts: 9 });
   await tick();
-  window.location.hash = 'running';
+  window.location.hash = 'runs';
   window.dispatchEvent(new window.Event('hashchange'));
   await tick();
 
@@ -113,35 +118,3 @@ test('a trailing frame for a superseded run does not outrank the resumed run', a
 
 // Sidebar rows: a log frame changes nothing → the rebuild must be skipped
 // entirely (same DOM nodes), so sidebar scroll/DOM stop churning per log.
-test('log frame does not rebuild the sidebar child rows', async () => {
-  const { window, recv, selectProject, tick } = await boot();
-  selectProject();
-  window.location.hash = 'running';
-  window.dispatchEvent(new window.Event('hashchange'));
-  recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });
-  recv({ type: 'phase', runId: 'p2', phase: 'plan', cycle: 0 });
-  await tick();
-
-  const host = window.document.querySelector('#nav-running-children');
-  const before = [...host.children];
-  assert.equal(before.length, 2, 'two child rows exist');
-
-  recv({ type: 'log', runId: 'p1', source: 'planner', level: 'info', text: 'x', ts: 3 });
-  await tick();
-  const after = [...host.children];
-  assert.deepEqual(after.map((c) => c.dataset.childRunId), before.map((c) => c.dataset.childRunId), 'same order');
-  assert.ok(after.every((c, i) => c === before[i]), 'same DOM nodes — rebuild was skipped');
-});
-
-test('a title change does rebuild the sidebar rows', async () => {
-  const { window, recv, selectProject, tick } = await boot();
-  selectProject();
-  window.location.hash = 'running';
-  window.dispatchEvent(new window.Event('hashchange'));
-  recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });
-  await tick();
-  recv({ type: 'title', runId: 'p1', title: 'settled title' });
-  await tick();
-  const row = window.document.querySelector('#nav-running-children .nav-child .child-title');
-  assert.equal(row.textContent, 'settled title', 'signature change → repaint happened');
-});

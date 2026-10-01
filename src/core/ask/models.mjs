@@ -6,6 +6,7 @@
 import { listModels as realListModels, EFFORTS } from '../config.mjs';
 import { listPluginModels as realPluginModels, pluginModelSecretStatus as realSecretStatus } from '../plugin-models.mjs';
 import { ASK_LIMITS } from './limits.mjs';
+import { brokerEnabled } from '../broker-client.mjs';
 import { effortlessModels as realEffortless } from '../bridge/upstream.mjs';
 
 /**
@@ -114,7 +115,9 @@ export function createAskModels({
               : `Not signed in to ${m.bridged} — Settings › Providers.`;
         }
       }
-      if (custom === 'plugin' && withSecrets) {
+      // With the credential broker on, plugin secrets are never read: the broker's key
+      // status (the pickers' credential badges) says whether this person has the key.
+      if (custom === 'plugin' && withSecrets && !brokerEnabled()) {
         if (!missing) missing = missingSecretsByIdLc();
         const keys = missing.get(m.id.toLowerCase());
         if (keys && keys.length) entry.secretsMissing = [...keys];

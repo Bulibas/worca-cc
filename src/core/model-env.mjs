@@ -149,6 +149,12 @@ export function isReservedModelEnvKey(key) {
     || RESERVED_MODEL_ENV_PREFIXES.some((p) => typeof key === 'string' && key.startsWith(p));
 }
 
+// A registry spawn's own env names (MCP registry §5.5.6): runReal merges the model env over the run env, so a
+// model entry that set one would replace a copy's secret. Refused by prepareModelEnv and the plugin manifest —
+// deliberately NOT reserved: cleanRunEnv shares isReservedModelEnvKey and must keep the registry env.
+export function isMcpRegistryEnvKey(key) {
+  return typeof key === 'string' && /^MCP(SECRET|CHILD)_/i.test(key);
+}
 // Whole-value indirection only (§4.1): `${VARNAME}` and nothing else. Embedded
 // refs ("prefix-${X}") are deliberately literals — no templating language.
 const ENV_REF_RE = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
@@ -176,7 +182,7 @@ export function prepareModelEnv(modelEnv, sourceEnv = process.env) {
   const env = {};
   const dropped = [];
   for (const [k, v] of Object.entries(modelEnv || {})) {
-    if (isReservedModelEnvKey(k) || typeof v !== 'string') { dropped.push(k); continue; }
+    if (isReservedModelEnvKey(k) || isMcpRegistryEnvKey(k) || typeof v !== 'string') { dropped.push(k); continue; }
     const ref = modelEnvRef(v);
     if (ref !== null) {
       const resolved = sourceEnv ? sourceEnv[ref] : undefined;

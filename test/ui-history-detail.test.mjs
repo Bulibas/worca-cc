@@ -387,7 +387,7 @@ test('Resume POSTs exactly { pipelineId } and lands on running/<newRunId>', asyn
   click(ctx.window, ctx.window.document.querySelector('#hist-detail .hd-resume'));
   await settle(ctx.window, 5);
   // The body assertion test/ui-pause-resume.test.mjs:70 owns for the list card.
-  assert.deepEqual(posts, [{ pipelineId: ROW.id }]);
+  assert.deepEqual(posts, [{ pipelineId: ROW.id, baseCheck: true }]);
   assert.equal(ctx.window.location.hash.replace(/^#/, ''), 'running/r-9');
 });
 
@@ -432,6 +432,8 @@ test('Archive: honest copy + danger styling, DELETE, back to the list, row dropp
   await openDetail(ctx);
   const { window } = ctx;
   const doc = window.document;
+  const rowSel = `#runs-list .runs-row[data-kind="hist"][data-pipeline-id="${ROW.id}"]`;
+  assert.ok(doc.querySelector(rowSel), 'the run is listed before the archive');
   const archive = doc.querySelector('#hist-detail .hd-archive');
   assert.equal(archive.hidden, false, 'a finished run is archivable');
 
@@ -455,8 +457,9 @@ test('Archive: honest copy + danger styling, DELETE, back to the list, row dropp
   await settle(window, 5);
   assert.equal(deletes.length, 1);
   assert.equal(deletes[0], `/api/runs/${ROW.id}?projectKey=${KEY}`);
-  assert.equal(window.location.hash.replace(/^#/, ''), 'history');
-  assert.equal(doc.querySelector('#history .hist-card'), null, 'the row is dropped from the list');
+  // goRunsList(): the bare list, not the remembered (now archived) run.
+  assert.equal(window.location.hash.replace(/^#/, ''), 'runs');
+  assert.equal(doc.querySelector(rowSel), null, 'the row is dropped from the list');
 });
 
 test('Archive is hidden while the run is still live (running/pausing)', async () => {
@@ -521,10 +524,14 @@ test('an in-flight Archive survives a concurrent repaint (never a second DELETE)
   assert.equal(doc.querySelector('#confirm-modal').classList.contains('hidden'), true,
     'a second click is swallowed by the disabled guard — no second confirm');
 
+  // Take the error node BEFORE the DELETE lands: the archive's goRunsList() closes the
+  // saved page at once in the split layout, so it is gone from #hist-detail afterwards.
+  const err = doc.querySelector('#hist-detail .hd-error');
+  assert.ok(err, 'the saved page is still open while the DELETE is in flight');
   release();
   await settle(window, 6);
   assert.equal(deletes.length, 1, 'exactly one DELETE for one archive');
-  assert.equal(doc.querySelector('#hist-detail .hd-error').hidden, true, 'and no error stamped');
+  assert.equal(err.hidden, true, 'and no error stamped');
 });
 
 test('a DEEP-LINKED Archive names the run in the confirm copy', async () => {
@@ -582,10 +589,9 @@ test('discarding the retained worktree clears the banner and re-enables Archive'
   assert.equal(doc.querySelector('#hist-detail .retained-banner').hidden, true);
   assert.equal(doc.querySelector('#hist-detail .hist-discard').hidden, true);
   assert.equal(doc.querySelector('#hist-detail .hd-archive').disabled, false);
-  // The mutation must land on the ROW that lives in state.historyAll, not on a
-  // copy: the same paintHistory() rebuilds the list card from that array.
-  assert.equal(doc.querySelector('#history .hist-card .hist-retained-badge').hidden, true,
-    'the discard mutated the row, not a throwaway copy');
+  // A discard is not an archive: the run stays listed.
+  assert.ok(doc.querySelector(`#runs-list .runs-row[data-kind="hist"][data-pipeline-id="${ROW.id}"]`),
+    'the discarded run is still listed');
 });
 
 test('deep-linked discard still clears the banner after the real row lands', async () => {
@@ -617,8 +623,9 @@ test('deep-linked discard still clears the banner after the real row lands', asy
   await settle(ctx.window, 6);
   assert.equal(doc.querySelector('#hist-detail .retained-banner').hidden, true);
   assert.equal(doc.querySelector('#hist-detail .hd-archive').disabled, false);
-  assert.equal(doc.querySelector('#history .hist-card .hist-retained-badge').hidden, true,
-    'the bound handler mutated the ROW, not the orphaned deep-link stub');
+  // A discard is not an archive: the run stays listed.
+  assert.ok(doc.querySelector(`#runs-list .runs-row[data-kind="hist"][data-pipeline-id="${ROW.id}"]`),
+    'the discarded run is still listed');
 });
 
 test('deep link derives retained work from state.branch.commitFailed, then DEFERS to the row', async () => {
@@ -667,7 +674,7 @@ test('cost-paused run shows the banner; Continue-without-cap resumes with ignore
     'the override asks for confirmation first');
   doc.querySelector('#confirm-ok').click();
   await settle(ctx.window, 6);
-  assert.deepEqual(posts, [{ pipelineId: ROW.id, ignoreCostCap: true }]);
+  assert.deepEqual(posts, [{ pipelineId: ROW.id, baseCheck: true, ignoreCostCap: true }]);
 });
 
 test('a deep-linked cost-paused run gains its banner exactly once when the row arrives', async () => {
@@ -1070,8 +1077,8 @@ test('non-done run (results null) shows the empty state and never fetches /diff'
   // persist one, so that sentence must be gone.
   assert.doesNotMatch(empty.textContent, /captured when a run completes/);
   assert.equal(doc.querySelector('#hist-detail .hd-diff-file'), null);
-  // endsWith, not includes: /api/diff-comments/counts (the History pill's own
-  // endpoint) contains "/diff" as a substring and is unrelated to the patch.
+  // endsWith, not includes: the diff-comments endpoints contain "/diff" as a
+  // substring and are unrelated to the patch.
   assert.ok(ctx.calls.every((c) => !c.url.endsWith('/diff')), 'the patch is never requested');
 });
 
@@ -1462,7 +1469,7 @@ test('a patch resolving after navigation cannot append a body or start highlight
   await openDetail(ctx);
   const retiredPane = paneOf(ctx.window.document);
   assert.equal(retiredPane.querySelector('.hd-diff-body'), null);
-  go(ctx.window, 'history');
+  go(ctx.window, 'new');   // leave Runs: a bare #history would restore this same run (D6)
   await settle(ctx.window);
   release();
   await settle(ctx.window, 6);
@@ -1481,7 +1488,7 @@ test('a highlighter resolving after navigation leaves the retired plain body unt
   await settle(ctx.window);
   const retiredBody = paneOf(ctx.window.document).querySelector('.hd-diff-body');
   assert.ok(retiredBody);
-  go(ctx.window, 'history');
+  go(ctx.window, 'new');   // leave Runs: a bare #history would restore this same run (D6)
   await settle(ctx.window);
   release({
     lang: 'javascript',
@@ -2235,7 +2242,7 @@ test('Logs tab renders the shared filter bar + lines + cycle separator', async (
   const ctx = await bootDetail({ detail: LOGS_DETAIL, arms: logArm(LOG_NDJSON) });
   const sec = await openTab(ctx, 'logs');
 
-  assert.ok(sec.querySelector('.log-filters'), 'the shared bar, cloned from #run-card-tpl');
+  assert.ok(sec.querySelector('.log-filters'), 'the shared bar, cloned from #log-bar-tpl');
   assert.equal(sec.querySelectorAll('.log-line').length, 3);
   const seps = sec.querySelectorAll('.log-sep');
   assert.equal(seps.length, 1, 'one separator at the cycle 1 -> 2 boundary');
@@ -2569,7 +2576,7 @@ test('the ⋯ trigger opens and closes the header menu', async () => {
   assert.equal(report.querySelector('.hd-btn-label').textContent, 'Report this run',
     'and its label lives in the same span Archive uses, so the two rows line up');
   assert.equal(menu.contains(doc.querySelector('#hist-detail .hd-resume')), false,
-    'Resume is the primary action and stays in the row');
+    'Resume is the primary action and sits in the bar');
 
   click(ctx.window, more);
   await settle(ctx.window);
@@ -2764,11 +2771,11 @@ test('History opens on the glance: page title, status line, facts, the tab rows;
   assert.equal(hd.querySelector('.rd-trail-btn'), null, 'no trail of dots');
   assert.equal(hd.querySelectorAll('.rd-facts .rd-stats > div').length, 3, 'time · cost · changes');
   assert.deepEqual([...hd.querySelectorAll('.rd-facts .rd-stats > div > span')].map((s) => s.textContent).slice(0, 2), ['time', 'cost']);
-  assert.match(hd.querySelector('.hd-result .issues').textContent, /Uploads fall back to IP/);
+  assert.equal(hd.querySelector('.hd-result .issues'), null, 'the things to check live in Overview only');
   assert.equal(hd.querySelector('.rd-nowlist').textContent, '', 'no step list on a finished run');
   // Every tab is a row, in tab order, under Results and How it ran.
   const groups = [...hd.querySelectorAll('.hd-result .rd-sgroup')];
-  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent).filter((t) => t !== 'Things to check'), ['Results', 'How it ran']);
+  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent), ['Results', 'How it ran']);
   const rows = [...hd.querySelectorAll('.hd-result [data-rd-tab]')].map((b) => b.dataset.rdTab);
   const tabs = [...doc.querySelectorAll('#hist-detail .hd-tab')].map((b) => b.dataset.sec);
   assert.deepEqual(rows, tabs, 'one row per tab, in the tab bar\'s order');
@@ -2794,21 +2801,442 @@ test('History opens on the glance: page title, status line, facts, the tab rows;
   assert.equal(hd.dataset.mode, 'glance');
 });
 
-test('History glance mirrors the header actions: Resume on a paused run clicks the real control', async () => {
-  const ctx = await bootDetail({ detail: PAUSED_DETAIL, rows: [{ ...ROW, status: 'paused' }] });
+// The saved run's bar carries the Running bar's controls in its order (Run after, the
+// Resume split, Pause, Stop), in both modes. The Details header keeps only the PR
+// controls and the ⋯ menu, and the glance card carries no run control.
+const HD_BAR_ORDER = ['hd-after', 'hd-resume-split', 'hd-pause', 'hd-stop'];
+for (const [status, resumable, finished] of [
+  ['done', false, true], ['paused', true, false], ['interrupted', true, false],
+  ['stopped', false, true], ['error', false, true],
+]) {
+  test(`History bar, ${status} run: Run after${resumable ? ' and the Resume split' : ''}, no Pause or Stop without a live run`, async () => {
+    const ctx = await bootDetail({ detail: { ...DETAIL, state: { ...DETAIL.state, status } }, rows: [{ ...ROW, status }] });
+    await openDetail(ctx, '');
+    await settle(ctx.window, 6);
+    const hd = ctx.window.document.querySelector('#hist-detail .hd');
+    const end = hd.querySelector('.hd-bar .rd-bar-end');
+    assert.deepEqual([...end.children].map((c) => HD_BAR_ORDER.find((k) => c.classList.contains(k)) || c.className), HD_BAR_ORDER);
+    const after = end.querySelector('.hd-after');
+    assert.equal(after.hidden, false, 'a saved run can always be waited for');
+    assert.equal(after.dataset.minLevel, 'advanced');
+    assert.equal(after.textContent.trim(), 'Run after');
+    assert.ok(after.querySelector('svg'), 'the Running bar\'s arrow leads the label');
+    const title = finished ? 'Start a follow-up run' : 'Schedule a run after this';
+    assert.equal(after.title, title);
+    assert.equal(after.getAttribute('aria-label'), title);
+    assert.equal(end.querySelector('.hd-resume-split').hidden, !resumable);
+    assert.equal(end.querySelector('.hd-resume').hidden, !resumable);
+    assert.ok(end.querySelector('.hd-resume svg'), 'Resume leads with the play glyph');
+    assert.equal(end.querySelector('.hd-pause').hidden, true, 'no live run: nothing to pause');
+    assert.equal(end.querySelector('.hd-stop').hidden, true, 'no live run: nothing to stop');
+    const header = hd.querySelector('.hd-header');
+    for (const sel of ['.hd-after', '.hd-resume-split', '.hd-resume', '.hd-pause', '.hd-stop']) {
+      assert.equal(header.querySelector(sel), null, `${sel} is not in the Details header`);
+    }
+    assert.ok(header.querySelector('.hd-pr') && header.querySelector('.hd-pr-link') && header.querySelector('.hd-more'),
+      'the Details header keeps the PR controls and the ⋯ menu');
+    assert.equal(hd.querySelector('.hd-result [class*="hd-g-resume"], .hd-result .hd-g-after'), null, 'the card carries no run control');
+    click(ctx.window, after);
+    assert.equal(ctx.window.location.hash, `#new/after/${ROW.id}`);
+  });
+}
+
+// Pause and Stop act on the pipeline's LIVE run (POST /api/pause and /api/stop need its
+// runId); a paused one shows Resume only.
+test('History bar of a live pipeline: Pause and Stop act on its live run', async () => {
+  const ctx = await bootDetail({ detail: { ...DETAIL, state: { ...DETAIL.state, status: 'running' } }, rows: [{ ...ROW, status: 'running' }] });
+  const frame = (msg) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
+  frame({ type: 'hello', runs: [{ runId: 'r-live', title: ROW.title, projectDir: PROJECT, status: 'running', startedAt: '00:00:00', pipelineId: ROW.id }] });
+  await settle(ctx.window, 4);
   await openDetail(ctx, '');
   await settle(ctx.window, 6);
-  const hd = ctx.window.document.querySelector('#hist-detail .hd');
-  assert.equal(hd.querySelector('.rd-now-title').textContent, 'Paused');
-  const real = hd.querySelector('.hd-resume');
-  const mirror = hd.querySelector('.hd-result .hd-g-resume');
-  assert.equal(!!mirror, !real.hidden, 'the glance offers Resume exactly when the header does');
-  if (mirror) {
-    let clicked = 0;
-    real.addEventListener('click', () => { clicked += 1; });
-    mirror.dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
-    assert.equal(clicked, 1);
-  }
+  const doc = ctx.window.document;
+  const end = doc.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  const pause = end.querySelector('.hd-pause');
+  const stop = end.querySelector('.hd-stop');
+  assert.equal(pause.hidden, false, 'a live run can be paused');
+  assert.equal(stop.hidden, false, 'a live run can be stopped');
+  assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'nothing to resume while it runs');
+  assert.equal(end.querySelector('.hd-after').title, 'Schedule a run after this');
+  click(ctx.window, pause);
+  await settle(ctx.window);
+  const pauses = ctx.calls.filter((c) => c.url.endsWith('/api/pause'));
+  assert.equal(pauses.length, 1);
+  assert.deepEqual(JSON.parse(pauses[0].opts.body), { runId: 'r-live' });
+  // C16: a frame landing before the run flips to `pausing` never re-arms Pause mid-request.
+  frame({ type: 'state', runId: 'r-live', id: ROW.id, status: 'running' });
+  await settle(ctx.window, 4);
+  assert.equal(pause.disabled, true, 'the pause request still owns the button');
+  click(ctx.window, pause);
+  await settle(ctx.window);
+  assert.equal(ctx.calls.filter((c) => c.url.endsWith('/api/pause')).length, 1, 'no second POST');
+  click(ctx.window, stop);
+  const modal = doc.getElementById('stop-modal');
+  assert.equal(modal.classList.contains('hidden'), false, 'Stop confirms first');
+  assert.equal(modal.dataset.runId, 'r-live');
+  click(ctx.window, modal.querySelector('.stop-cancel'));
+  // The pause lands: the request's disable holds while the run is pausing.
+  frame({ type: 'state', runId: 'r-live', id: ROW.id, status: 'pausing' });
+  await settle(ctx.window, 4);
+  assert.equal(pause.hidden, false);
+  assert.equal(pause.disabled, true, 'no second POST while it pauses');
+  // The run parks: Pause goes, Resume comes, Stop stays (a paused run can still be discarded),
+  // as on the run page, although this screen loaded on a running pipeline.
+  frame({ type: 'done', runId: 'r-live', status: 'paused' });
+  await settle(ctx.window, 6);
+  assert.equal(pause.hidden, true, 'a paused run is not paused again');
+  assert.equal(end.querySelector('.hd-resume-split').hidden, false, 'a paused run can be resumed');
+  assert.equal(end.querySelector('.hd-resume').hidden, false);
+  assert.equal(stop.hidden, false);
+  // It ends: neither control is left.
+  frame({ type: 'state', runId: 'r-live', id: ROW.id, status: 'stopped' });
+  await settle(ctx.window, 6);
+  assert.equal(pause.hidden, true);
+  assert.equal(stop.hidden, true, 'a finished run cannot be stopped');
+  assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'a stopped run is not resumed');
+  // A resume elsewhere mints a new live run: Pause is armed again, and greys out while that
+  // run pauses even though this page sent nothing.
+  frame({ type: 'run-created', runId: 'r-live2', title: ROW.title, projectDir: PROJECT, status: 'running', kind: 'run' });
+  frame({ type: 'state', runId: 'r-live2', id: ROW.id, status: 'running' });
+  await settle(ctx.window, 4);
+  assert.equal(pause.hidden, false);
+  assert.equal(pause.disabled, false, 'the new run can be paused');
+  assert.equal(stop.hidden, false);
+  assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'nothing to resume while it runs');
+  frame({ type: 'state', runId: 'r-live2', id: ROW.id, status: 'pausing' });
+  await settle(ctx.window, 4);
+  assert.equal(pause.disabled, true, 'pausing: as on the run page');
+  click(ctx.window, stop);
+  assert.equal(modal.dataset.runId, 'r-live2', 'Stop reads the live run at click time');
+});
+
+// D23: a resumed pipeline can leave its superseded paused run in the runs map, FIRST in Map
+// order (another tab resumed it, or a scheduled "Resume at…" fired). The bar follows the
+// newest lineage: Pause and Stop target it, and both go once it ends.
+test('History bar of a resumed pipeline: Pause and Stop act on the newest run, never the superseded one', async () => {
+  const ctx = await bootDetail({ detail: { ...DETAIL, state: { ...DETAIL.state, status: 'running' } }, rows: [{ ...ROW, status: 'running' }] });
+  const frame = (msg) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
+  frame({ type: 'hello', runs: [
+    { runId: 'r-old', title: ROW.title, projectDir: PROJECT, status: 'paused', startedAt: '00:00:00', pipelineId: ROW.id, pauseReason: 'manual' },
+    { runId: 'r-new', title: ROW.title, projectDir: PROJECT, status: 'running', startedAt: '00:01:00', pipelineId: ROW.id },
+  ] });
+  await settle(ctx.window, 4);
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const doc = ctx.window.document;
+  const end = doc.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  const pause = end.querySelector('.hd-pause');
+  const stop = end.querySelector('.hd-stop');
+  assert.equal(pause.hidden, false, 'the running lineage can be paused');
+  assert.equal(stop.hidden, false);
+  assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'the dead paused entry offers no Resume');
+  click(ctx.window, stop);
+  const modal = doc.getElementById('stop-modal');
+  assert.equal(modal.dataset.runId, 'r-new', 'Stop targets the live run, not the superseded one');
+  click(ctx.window, modal.querySelector('.stop-cancel'));
+  click(ctx.window, pause);
+  await settle(ctx.window);
+  const pauses = ctx.calls.filter((c) => c.url.endsWith('/api/pause'));
+  assert.deepEqual(pauses.map((c) => JSON.parse(c.opts.body)), [{ runId: 'r-new' }]);
+  // The newest run finishes: the stale paused entry does not bring Pause or Stop back.
+  frame({ type: 'done', runId: 'r-new', status: 'done' });
+  await settle(ctx.window, 6);
+  assert.equal(pause.hidden, true, 'a done pipeline cannot be paused');
+  assert.equal(stop.hidden, true, 'a done pipeline cannot be stopped');
+  assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'nor resumed through its dead entry');
+});
+
+// Resume follows the live run too: a pipeline that pauses after this screen loaded offers it
+// (with its caret, gated on the run's own pause reason), and one resumed elsewhere stops
+// offering it beside Pause and Stop.
+test('History bar: the Resume split follows the pipeline\'s live run', async () => {
+  const posts = [];
+  const ctx = await bootDetail({
+    detail: { ...DETAIL, state: { ...DETAIL.state, status: 'running' } }, rows: [{ ...ROW, status: 'running' }],
+    arms: (url, opts) => {
+      if (url === '/api/resume') { posts.push(JSON.parse(opts.body)); return ok({ ok: true, runId: 'r-9', pipelineId: ROW.id }); }
+      return null;
+    },
+  });
+  const frame = (msg) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
+  frame({ type: 'hello', runs: [{ runId: 'r-live', title: ROW.title, projectDir: PROJECT, status: 'running', startedAt: '00:00:00', pipelineId: ROW.id }] });
+  await settle(ctx.window, 4);
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const end = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  const split = end.querySelector('.hd-resume-split');
+  assert.equal(split.hidden, true);
+  // It parks on a pipeline cost cap, which no schedule may continue past.
+  frame({ type: 'done', runId: 'r-live', status: 'paused', reason: 'cost_pipeline' });
+  await settle(ctx.window, 6);
+  assert.equal(split.hidden, false, 'paused after load: Resume is offered');
+  assert.equal(end.querySelector('.hd-pause').hidden, true);
+  assert.equal(end.querySelector('.hd-stop').hidden, false);
+  const more = end.querySelector('.hd-resume-more');
+  click(ctx.window, more);
+  assert.equal(end.querySelector('.hd-resume-menu').hidden, false, 'the caret opens its menu');
+  assert.equal(end.querySelector('.hd-resume-at-item').disabled, true, 'a cap pause is never scheduled');
+  click(ctx.window, end.querySelector('.hd-resume'));
+  await settle(ctx.window, 5);
+  assert.deepEqual(posts, [{ pipelineId: ROW.id, baseCheck: true }], 'Resume is wired although the screen loaded running');
+  assert.equal(ctx.window.location.hash.replace(/^#/, ''), 'running/r-9');
+});
+
+// The run page logs a failed pause into the run's log, which this page does not show: the
+// saved run says it under its bar. And the stop dialog, a top-level overlay, leaves with it.
+test('History bar: a failed pause is said inline, and the stop dialog closes with the screen', async () => {
+  let pauses = 0;
+  const ctx = await bootDetail({
+    detail: { ...DETAIL, state: { ...DETAIL.state, status: 'running' } }, rows: [{ ...ROW, status: 'running' }],
+    arms: (url) => (url !== '/api/pause' ? null : ++pauses === 1 ? fail(409, { error: 'run is not live' }) : ok({ ok: true })),
+  });
+  const frame = (msg) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
+  frame({ type: 'hello', runs: [{ runId: 'r-live', title: ROW.title, projectDir: PROJECT, status: 'running', startedAt: '00:00:00', pipelineId: ROW.id }] });
+  await settle(ctx.window, 4);
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const doc = ctx.window.document;
+  const hd = doc.querySelector('#hist-detail .hd');
+  const pause = hd.querySelector('.hd-bar .hd-pause');
+  click(ctx.window, pause);
+  await settle(ctx.window, 4);
+  const err = hd.querySelector('.hd-error');
+  assert.equal(err.hidden, false, 'the failure is shown');
+  assert.equal(err.textContent, 'Could not pause: run is not live');
+  assert.equal(pause.disabled, false, 'and Pause can be tried again');
+  click(ctx.window, pause);
+  await settle(ctx.window, 4);
+  assert.equal(pauses, 2);
+  assert.equal(err.hidden, true, 'a pause that went through takes its failure away');
+  click(ctx.window, hd.querySelector('.hd-bar .hd-stop'));
+  const modal = doc.getElementById('stop-modal');
+  assert.equal(modal.classList.contains('hidden'), false);
+  go(ctx.window, 'new');
+  await settle(ctx.window, 6);
+  assert.equal(ctx.window.location.hash, '#new');
+  assert.equal(modal.classList.contains('hidden'), true, 'leaving the saved run closes its stop dialog');
+});
+
+test('History bar of a paused pipeline resumed elsewhere: Pause and Stop replace Resume', async () => {
+  const ctx = await bootDetail({ rows: [{ ...ROW, status: 'paused' }], detail: PAUSED_DETAIL });
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const end = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  const split = end.querySelector('.hd-resume-split');
+  assert.equal(split.hidden, false, 'paused: Resume');
+  assert.equal(end.querySelector('.hd-pause').hidden, true);
+  assert.equal(end.querySelector('.hd-stop').hidden, true);
+  // Its menu is open when another tab resumes the run.
+  click(ctx.window, end.querySelector('.hd-resume-more'));
+  const frame = (msg) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
+  frame({ type: 'run-created', runId: 'r-2', title: ROW.title, projectDir: PROJECT, status: 'running', kind: 'run' });
+  frame({ type: 'state', runId: 'r-2', id: ROW.id, status: 'running' });
+  await settle(ctx.window, 6);
+  assert.equal(split.hidden, true, 'a running pipeline offers no Resume');
+  assert.equal(end.querySelector('.hd-resume-menu').hidden, true, 'and closes its menu');
+  assert.equal(end.querySelector('.hd-resume-more').getAttribute('aria-expanded'), 'false');
+  assert.equal(end.querySelector('.hd-pause').hidden, false);
+  assert.equal(end.querySelector('.hd-stop').hidden, false);
+  // That run finishes: the pipeline is over, so the load-time pause does not bring Resume back.
+  frame({ type: 'done', runId: 'r-2', status: 'done' });
+  await settle(ctx.window, 6);
+  assert.equal(split.hidden, true, 'a done pipeline offers no Resume');
+  assert.equal(end.querySelector('.hd-pause').hidden, true);
+  assert.equal(end.querySelector('.hd-stop').hidden, true);
+});
+
+// A restarted server lists none of the old process's runs, but the tab keeps their entries
+// (onHello only upserts). Such an entry is neither the pipeline's live run nor its newest run
+// that ended: the saved run keeps its working Resume, never a Pause or Stop on a runId the new
+// server does not know. A run the new boot starts for the pipeline is live again.
+for (const [stale, saved] of [['running', 'interrupted'], ['paused', 'paused'], ['stopped', 'paused']]) {
+  test(`History bar after a server restart: the old boot's ${stale} run is not the pipeline's run`, async () => {
+    const ctx = await bootDetail({ detail: { ...DETAIL, state: { ...DETAIL.state, status: saved } }, rows: [{ ...ROW, status: saved }] });
+    const frame = (msg) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
+    const entry = { runId: 'r-old', title: ROW.title, projectDir: PROJECT, status: stale, startedAt: '00:00:00', pipelineId: ROW.id };
+    frame({ type: 'hello', bootId: 'b1', runs: [entry] });
+    await settle(ctx.window, 4);
+    frame({ type: 'hello', bootId: 'b1', runs: [entry] });   // a reconnect to the same server changes nothing
+    frame({ type: 'hello', bootId: 'b2', runs: [] });
+    await settle(ctx.window, 4);
+    await openDetail(ctx, '');
+    await settle(ctx.window, 6);
+    const doc = ctx.window.document;
+    const end = doc.querySelector('#hist-detail .hd-bar .rd-bar-end');
+    const resume = end.querySelector('.hd-resume');
+    const pause = end.querySelector('.hd-pause');
+    const stop = end.querySelector('.hd-stop');
+    assert.equal(end.querySelector('.hd-resume-split').hidden, false, `the ${saved} run can still be resumed`);
+    assert.equal(resume.hidden, false);
+    assert.equal(resume.disabled, false);
+    assert.equal(pause.hidden, true, 'no Pause on a run the server lost');
+    assert.equal(stop.hidden, true, 'no Stop on a run the server lost');
+    // The new server resumes the pipeline: that run is live.
+    frame({ type: 'run-created', runId: 'r-2', title: ROW.title, projectDir: PROJECT, status: 'running', kind: 'run' });
+    frame({ type: 'state', runId: 'r-2', id: ROW.id, status: 'running' });
+    await settle(ctx.window, 6);
+    assert.equal(pause.hidden, false);
+    assert.equal(stop.hidden, false);
+    assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'nothing to resume while it runs');
+    click(ctx.window, stop);
+    const modal = doc.getElementById('stop-modal');
+    assert.equal(modal.dataset.runId, 'r-2');
+    click(ctx.window, modal.querySelector('.stop-cancel'));
+    click(ctx.window, pause);   // no live run when the screen loaded: Pause reads it at click time
+    await settle(ctx.window);
+    assert.deepEqual(ctx.calls.filter((c) => c.url.endsWith('/api/pause')).map((c) => JSON.parse(c.opts.body)), [{ runId: 'r-2' }]);
+  });
+}
+
+// The tab can learn of a run before the restarted server's hello (this tab's own resume POST
+// answered while the socket was down): the hello lists it, so it stays the pipeline's live run.
+test('History bar after a server restart: a run the new server lists is still live', async () => {
+  const ctx = await bootDetail({ detail: PAUSED_DETAIL, rows: [{ ...ROW, status: 'paused' }] });
+  const frame = (msg) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
+  const run = (runId, status) => ({ runId, title: ROW.title, projectDir: PROJECT, status, startedAt: '00:00:00', pipelineId: ROW.id });
+  frame({ type: 'hello', bootId: 'b1', runs: [run('r-old', 'paused')] });
+  frame({ type: 'run-created', runId: 'r-new', title: ROW.title, projectDir: PROJECT, status: 'running', kind: 'run' });
+  frame({ type: 'state', runId: 'r-new', id: ROW.id, status: 'running' });
+  frame({ type: 'hello', bootId: 'b2', runs: [run('r-new', 'running')] });
+  await settle(ctx.window, 4);
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const end = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  assert.equal(end.querySelector('.hd-pause').hidden, false, 'the listed run can be paused');
+  assert.equal(end.querySelector('.hd-stop').hidden, false);
+  assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'nothing to resume while it runs');
+  click(ctx.window, end.querySelector('.hd-pause'));
+  await settle(ctx.window);
+  assert.deepEqual(ctx.calls.filter((c) => c.url.endsWith('/api/pause')).map((c) => JSON.parse(c.opts.body)), [{ runId: 'r-new' }]);
+});
+
+// An in-flight resume owns its button: neither a run frame (paintHdLive), a budget refresh nor
+// the row landing (refreshHistResumeGating) re-enables it, so a second click cannot land (a
+// disabled button takes no click; jsdom's synthetic one would, so the pin is `disabled`).
+test('History bar: a resume in flight is never re-armed by a frame, a budget refresh or a row', async () => {
+  let release;
+  const held = new Promise((r) => { release = r; });
+  const posts = [];
+  const ctx = await bootDetail({
+    detail: PAUSED_DETAIL, rows: [{ ...ROW, status: 'paused' }],
+    arms: (url, opts) => {
+      if (url !== '/api/resume') return null;
+      posts.push(JSON.parse(opts.body));
+      return held.then(() => ok({ ok: true, runId: 'r-9', pipelineId: ROW.id }));
+    },
+  });
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const resume = ctx.window.document.querySelector('#hist-detail .hd-bar .hd-resume');
+  click(ctx.window, resume);
+  await settle(ctx.window);
+  assert.equal(resume.disabled, true, 'the resume claims its button');
+  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'hello', runs: [] }) });
+  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'budget-changed' }) });
+  await deliverRows(ctx, [{ ...ROW, status: 'paused' }]);
+  assert.equal(resume.disabled, true, 'nothing re-arms it mid-POST');
+  assert.equal(resume.textContent.trim(), 'Resuming…', 'nor repaints its label');
+  release();
+  await settle(ctx.window, 6);
+  assert.deepEqual(posts, [{ pipelineId: ROW.id, baseCheck: true }]);
+  assert.equal(ctx.window.location.hash.replace(/^#/, ''), 'running/r-9');
+});
+
+// A run frame can land while the saved run's details are still loading: the bar waits for them.
+test('History bar: a run frame during the detail fetch is painted once the details land', async () => {
+  let release;
+  const held = new Promise((r) => { release = r; });
+  const ctx = await bootDetail({
+    detail: { ...DETAIL, state: { ...DETAIL.state, status: 'running' } }, rows: [{ ...ROW, status: 'running' }],
+    arms: (url, _opts, box) => (url.endsWith(DETAIL_URL) ? held.then(() => ok(box.detail)) : null),
+  });
+  const frame = (msg) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
+  frame({ type: 'hello', runs: [{ runId: 'r-live', title: ROW.title, projectDir: PROJECT, status: 'running', startedAt: '00:00:00', pipelineId: ROW.id }] });
+  await openDetail(ctx, '');
+  await settle(ctx.window, 4);
+  assert.doesNotThrow(() => frame({ type: 'state', runId: 'r-live', id: ROW.id, status: 'running' }));
+  release();
+  await settle(ctx.window, 6);
+  const end = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  assert.equal(end.querySelector('.hd-pause').hidden, false);
+  assert.equal(end.querySelector('.hd-stop').hidden, false);
+});
+
+// Resume is gated on the LIVE run's pause, which the screen never loaded: an error pause's
+// cause rides its title, and a total-budget pause is blocked once the budget runs out.
+for (const [label, done, check] of [
+  ['an error pause names its cause', { reason: 'error', detail: 'disk full' },
+    (btn) => { assert.equal(btn.disabled, false); assert.match(btn.title, /Paused after an error: disk full/); }],
+  ['a total-budget pause is blocked by the budget', { reason: 'cost_total' },
+    (btn) => { assert.equal(btn.disabled, true); assert.match(btn.title, /Total budget reached/); }],
+]) {
+  test(`History bar: a live pause after load, ${label}`, async () => {
+    const ctx = await bootDetail({ detail: { ...DETAIL, state: { ...DETAIL.state, status: 'running' } }, rows: [{ ...ROW, status: 'running' }] });
+    const frame = (msg) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
+    frame({ type: 'hello', runs: [{ runId: 'r-live', title: ROW.title, projectDir: PROJECT, status: 'running', startedAt: '00:00:00', pipelineId: ROW.id }] });
+    await settle(ctx.window, 4);
+    await openDetail(ctx, '');
+    await settle(ctx.window, 6);
+    frame({ type: 'done', runId: 'r-live', status: 'paused', ...done });
+    await settle(ctx.window, 6);
+    const resume = ctx.window.document.querySelector('#hist-detail .hd-bar .hd-resume');
+    assert.equal(resume.hidden, false);
+    if (done.reason === 'cost_total') {
+      ctx.box.budget = blockedBudget();
+      frame({ type: 'budget-changed' });
+      await settle(ctx.window, 6);
+    }
+    check(resume);
+  });
+}
+
+// The card's bottom: one pull request button at most, each state in its own colour.
+for (const [label, pr, cls, icon, text] of [
+  ['eligible', null, 'hd-g-pr', 'pr-create', 'Create pull request'],
+  ['open', { state: 'OPEN', url: 'https://github.com/o/r/pull/7' }, 'pr-view', 'external', 'View pull request'],
+  ['merged', { state: 'MERGED', url: 'https://github.com/o/r/pull/7' }, 'pr-merged', 'merged', 'View pull request'],
+]) {
+  test(`History glance, ${label} PR: the card carries exactly one PR button`, async () => {
+    const row = { ...ROW, pr };
+    const ctx = await bootDetail({
+      rows: [row],
+      arms: (url) => (url.endsWith('/api/history') ? ok({ pipelines: [row], ghAvailable: true }) : null),
+    });
+    await openDetail(ctx, '');
+    await settle(ctx.window, 6);
+    const acts = ctx.window.document.querySelector('#hist-detail .hd-result .rd-result-actions');
+    assert.ok(acts, 'the card has its actions row');
+    const ctas = [...acts.children];
+    assert.equal(ctas.length, 1, 'one button, the pull request');
+    const [cta] = ctas;
+    assert.ok(cta.classList.contains('rd-cta') && cta.classList.contains(cls), `${cls}: ${cta.className}`);
+    assert.equal(cta.classList.contains('alt'), false, 'no grey secondary');
+    assert.equal(cta.firstElementChild.dataset.icon, icon);
+    assert.equal(cta.textContent, text);
+    if (pr) {
+      assert.equal(cta.tagName, 'A');
+      assert.equal(cta.getAttribute('href'), pr.url);
+      assert.equal(cta.target, '_blank', 'GitHub opens in a new tab');
+    }
+  });
+}
+
+// jsdom reads the `hidden` PROPERTY, not the cascade, and the bar's buttons take the run page
+// bar's display:flex rules, which beat the UA [hidden] rule: pin the shared CSS by source.
+test('style.css: the saved run bar shares the run page bar\'s rules; the PR buttons wear their state', () => {
+  const css = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8');
+  assert.match(css, /\.hd-resume,\.hd-pause,\.rd-pause\{[^}]*display:flex/);
+  assert.match(css, /\.hd-stop,\.rd-stop\{[^}]*display:flex/);
+  assert.match(css, /\.hd-resume\[hidden\],\.hd-pause\[hidden\],\.rd-pause\[hidden\]\{display:none;\}/);
+  assert.match(css, /\.hd-stop\[hidden\],\.rd-stop\[hidden\]\{display:none;\}/);
+  assert.match(css, /\.hd-resume-split\[hidden\][^{]*\{display:none;\}/);
+  assert.match(css, /\.hd-bar \.hd-resume,\.hd-bar \.hd-pause,\.hd-bar \.hd-stop[^{]*\{height:36px;/, 'one height across the strip');
+  assert.match(css, /\.btn-split\.hd-resume-split > \.hd-resume-more,\.btn-split\.rd-resume-split > \.rd-resume-more\{/, 'one caret look');
+  assert.match(css, /\.rd-cta\.pr-view\{background:var\(--blue-bg\);color:var\(--blue-ink-strong\);\}/);
+  assert.match(css, /\.rd-cta\.pr-merged\{background:var\(--violet-bg\);color:var\(--violet-ink\);\}/);
+  assert.match(css, /\.hd-pr-link\{[^}]*background:var\(--blue-bg\);color:var\(--blue-ink-strong\);/);
+  assert.match(css, /\.hd-pr-link\.merged\{background:var\(--violet-bg\);color:var\(--violet-ink\);\}/);
+  assert.doesNotMatch(css, /hd-g-resume|\.rd-cta\.alt/, 'the card\'s Resume split and grey secondary are gone');
 });
 
 test('a deep link to a History Details tab opens it once the run loads', async () => {

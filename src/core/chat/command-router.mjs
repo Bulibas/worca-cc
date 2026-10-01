@@ -10,7 +10,7 @@
 // `actions` capability object is injected by ui/server.mjs over its runs Map;
 // this module never imports Express or the orchestrator.
 
-import { parseCommand } from './parser.mjs';
+import { parseCommand, MENTION_TOKEN } from './parser.mjs';
 import { DIRECTIONS_CLOSED, DIRECTION_MAX_CHARS } from '../directions.mjs';
 import { BOOKEND_EXECUTION_IDS } from '../../shared/graph/constants.mjs';
 import { createAllowlistGuard, parseIdList } from './allowlist.mjs';
@@ -47,9 +47,11 @@ const HELP_TEXT = [
   '`/runs` — live runs · `/last` — latest finished pipeline',
   '`/status [*ref]` — run detail · `/cost [*ref]` — run cost',
   '`/pause [*ref]` · `/stop [*ref]` · `/resume [*ref]`',
-  '`/approve [*ref]` — continue past a gate · `/retry [*ref]` — another cycle',
+  '`/approve [*ref]` — at a gate: no more cycles, continue · on a recovery prompt: retry · on an Auto proposal: accept',
+  '`/retry [*ref]` — at a gate: run another cycle',
   '`/abort [*ref]` — give up on a recovery prompt (pauses the run; nothing is discarded)',
-  '`/answer [*ref] <n|text> [| …]` — answer clarify questions (option number, or text for free-text)',
+  '`/cancel [*ref]` — cancel an Auto workflow proposal (stops the run) or give up on a recovery prompt',
+  '`/answer [*ref] <n|text> [| …]` — answer clarify questions (option number, or text for free-text); on an Auto proposal, the change you want',
   '`/answer [*ref] field=value [| field2=a,b]` — answer a form (escape a literal `|`, `,`, `=` or `:` with `\\`)',
   '`/direct [*ref] <text>` — push a direction to a live run (non-blocking; the next step reads it)',
   '`/projects` · `/use <name>` — scope commands to one project',
@@ -59,6 +61,18 @@ const HELP_TEXT = [
 ].join('\n');
 
 const LIVE = new Set(['running', 'starting', 'pausing']);
+
+// Mentions BEFORE the command ("@bot /direct …", "<@U0123> /direct …"), and a
+// consumed ref behind any mentions that follow it — built from the parser's own
+// token so the two cannot disagree about what a mention is.
+const LEADING_MENTIONS_RE = new RegExp(`^\\s*(?:${MENTION_TOKEN}\\s+)*`);
+const LEADING_REF_RE = new RegExp(`^((?:${MENTION_TOKEN}\\s+)*)\\*\\S+\\s*`);
+
+// A refused command from a chat worca NOTIFIES is answered, once per window: that
+// chat already receives worca content, so naming its own id leaks nothing, and a
+// silent drop there looked exactly like "the bot never got my /approve".
+// Any other chat stays silent — deny-by-default fails closed.
+const REFUSAL_HINT_EVERY_MS = 10 * 60 * 1000;
 
 // Runs that can still READ a direction — LIVE plus the two SETTLED states resume
 // accepts, which is what the inbox exists for: resume replays directions.ndjson.
@@ -131,13 +145,32 @@ export function lastPathSegment(p) {
 }
 
 /**
- * @param {{actions:object, chatContext:object, logger?:(l:string,m:string)=>void}} deps
+ * @param {{actions:object, chatContext:object, logger?:(l:string,m:string)=>void,
+ *          onRefused?:(ev:{plugin:string, channelId:string, platform:string, chatId:string, command:string})=>void,
+ *          now?:()=>number}} deps
  * actions: listRuns(), runState(runId), pendingQuestion(runId),
  *          answer(runId, id, payload), stop(runId), pause(runId),
  *          resume(pipelineId), history({limit}), listProjects(),
  *          listScheduled?() -> [{id, title, runAt, status, projectDir, workspaceName?}] (optional)
  */
-export function createCommandRouter({ actions, chatContext, logger = () => {} }) {
+export function createCommandRouter({ actions, chatContext, logger = () => {}, onRefused = () => {}, now = Date.now }) {
+  const lastHintAt = new Map();   // "plugin/channelId:chatId" -> ms
+
+  function refuse({ plugin, channelId, platform, channelConfig, msg }, command) {
+    const chatId = String(msg.chatId);
+    try { onRefused({ plugin, channelId, platform, chatId, command }); }
+    catch (err) { logger('error', `chat onRefused observer failed: ${err?.message || err}`); }
+    if (!parseIdList(channelConfig?.notifyChatIds).includes(chatId)) return null;
+    const key = `${plugin}/${channelId}:${chatId}`;
+    const t = now();
+    if (t - (lastHintAt.get(key) ?? -Infinity) < REFUSAL_HINT_EVERY_MS) return null;
+    lastHintAt.set(key, t);
+    return reply([
+      `This chat gets worca notifications but is not allowed to send commands, so \`/${command}\` was ignored.`,
+      `To control runs from here, add \`${chatId}\` to **Allowed chat IDs** in worca → Plugins → ${plugin} → Settings.`,
+    ].join('\n'), 'warning');
+  }
+
   const projectOf = (chatKey) => chatContext.get(chatKey).active_project;
 
   const scopedRuns = (chatKey) => {
@@ -238,9 +271,12 @@ export function createCommandRouter({ actions, chatContext, logger = () => {} })
       }
       const pq = actions.pendingQuestion(r.runId);
       if (pq) {
+        const ref = runRef(r.runId);
         lines.push(pq.kind === 'form'
-          ? `   ❓ waiting on the \`${pq.form}\` form — \`/answer ${runRef(r.runId)} <field>=<value>\``
-          : `   ❓ waiting on you — \`/approve ${runRef(r.runId)}\` or \`/answer ${runRef(r.runId)} <n>\``);
+          ? `   ❓ waiting on the \`${pq.form}\` form — \`/answer ${ref} <field>=<value>\``
+          : pq.kind === 'workflow'
+            ? `   ❓ waiting on you to accept the proposed workflow — \`/approve ${ref}\` · \`/answer ${ref} <what to change>\` · \`/cancel ${ref}\``
+            : `   ❓ waiting on you — \`/approve ${ref}\` or \`/answer ${ref} <n>\``);
       }
       return reply(lines.join('\n'));
     },
@@ -288,6 +324,7 @@ export function createCommandRouter({ actions, chatContext, logger = () => {} })
     approve: async (env) => answerDecision(env, 'approve'),
     retry: async (env) => answerDecision(env, 'retry'),
     abort: async (env) => answerDecision(env, 'abort'),
+    cancel: async (env) => answerDecision(env, 'cancel'),
 
     answer: async ({ chatKey, args, actor }) => {
       const t = resolveTarget(args[0] && args[0].startsWith('*') ? args[0] : '', scopedRuns(chatKey), [], { wantLive: true });
@@ -295,6 +332,13 @@ export function createCommandRouter({ actions, chatContext, logger = () => {} })
       const pq = actions.pendingQuestion(t.run.runId);
       if (!pq) return reply(`\`${runRef(t.run.runId)}\` is not waiting on a question.`, 'warning');
       const formRef = runRef(t.run.runId);
+      if (pq.kind === 'workflow') {
+        const hasRefArg = !!(args[0] && args[0].startsWith('*'));
+        const change = (hasRefArg ? args.slice(1) : args).join(' ').trim();
+        if (!change) return reply(`Say what to change: \`/answer ${formRef} <what to change>\` — or \`/approve ${formRef}\` to accept, \`/cancel ${formRef}\` to cancel.`, 'warning');
+        await actions.answer(t.run.runId, pq.id, { decision: 'revise', text: change }, actor);
+        return reply(`✏️ \`${formRef}\` — asked Auto to revise the workflow: “${change.slice(0, 120)}”`, 'success');
+      }
       if (pq.kind === 'form') {
         // Spec §8: `/answer <ref> field=value | field2=a,b`. The grammar itself —
         // escapes, type-driven comma splitting, `id:verdict[:note]` for a
@@ -458,7 +502,7 @@ export function createCommandRouter({ actions, chatContext, logger = () => {} })
       // "should sign off on slide 3". A leading bot handle left in the text is
       // noise; a deleted subject changes what the direction says.
       const raw = String(msg.text || '')
-        .replace(/^\s*(?:@\S+\s+)*/, '')
+        .replace(LEADING_MENTIONS_RE, '')
         .replace(/^\/direct(?:@\S+)?\s*/i, '');
       // The consumed ref is not always the first token of `raw`: parseCommand
       // strips mentions ANYWHERE, so `/direct @bot *a1b2c3d4 …` makes `*a1b2c3d4`
@@ -466,7 +510,7 @@ export function createCommandRouter({ actions, chatContext, logger = () => {} })
       // reach the ref and delete only the ref — putting them back with `$1`,
       // because a mention after the command may be the direction's subject and
       // deleting that is the worse error.
-      const text = (hasRef ? raw.replace(/^((?:@\S+\s+)*)\*\S+\s*/, '$1') : raw).trim();
+      const text = (hasRef ? raw.replace(LEADING_REF_RE, '$1') : raw).trim();
       if (!text) return reply('Usage: `/direct [*ref] <what to change>`', 'warning');
       // appendDirection silently slices at DIRECTION_MAX_CHARS, and the HTTP twin
       // 400s rather than let that happen quietly. Without this, chat confirmed a
@@ -521,24 +565,38 @@ export function createCommandRouter({ actions, chatContext, logger = () => {} })
   async function answerDecision({ chatKey, args, actor }, verb) {
     const t = resolveTarget(args[0], scopedRuns(chatKey), [], { wantLive: true });
     if (t.error) return t.error;
-    const pq = actions.pendingQuestion(t.run.runId);
-    if (!pq) return reply(`\`${runRef(t.run.runId)}\` is not waiting on a decision.`, 'warning');
     const ref = runRef(t.run.runId);
+    const pq = actions.pendingQuestion(t.run.runId);
+    if (!pq) {
+      return reply(`\`${ref}\` is not waiting on a decision.${verb === 'cancel' ? ` \`/stop ${ref}\` stops the run.` : ''}`, 'warning');
+    }
+    const givingUp = verb === 'abort' || verb === 'cancel';
     let payload;
+    let what;
     if (pq.kind === 'gate') {
-      if (verb === 'abort') return reply(`Gates have no abort — \`/approve ${ref}\`, \`/retry ${ref}\`, or \`/stop ${ref}\`.`, 'warning');
+      if (givingUp) {
+        return reply(`Gates have no ${verb} — \`/approve ${ref}\` continues without another cycle, `
+          + `\`/retry ${ref}\` runs another cycle, \`/stop ${ref}\` stops the run.`, 'warning');
+      }
       payload = { decision: verb === 'approve' ? 'continue' : 'another' };
+      what = payload.decision === 'continue' ? 'approved — continuing' : 'sent back for another cycle';
     } else if (pq.kind === 'recovery') {
-      // /abort is the give-up choice; what it does (pause or abort) is the row's
-      // option (failure-policy.mjs) — the option id is the wire decision.
-      payload = { decision: verb === 'abort' ? giveUpOption(pq.recovery?.options).id : 'retry' };
+      // /abort and /cancel are the give-up choice; what it does (pause or abort) is
+      // the row's option (failure-policy.mjs) — the option id is the wire decision.
+      payload = { decision: givingUp ? giveUpOption(pq.recovery?.options).id : 'retry' };
+      what = payload.decision === 'retry' ? 'retrying' : payload.decision === 'abort' ? 'aborting the run' : 'pausing the run';
+    } else if (pq.kind === 'workflow') {
+      // An Auto proposal (orchestrator _autoAsk): the web card's own payloads —
+      // sanitizeProposalAnswer fills name/nodes from the proposal on accept.
+      if (verb === 'retry') {
+        return reply(`To change the proposed workflow, say what to change: \`/answer ${ref} <what to change>\`.`, 'warning');
+      }
+      payload = { decision: verb === 'approve' ? 'accept' : 'cancel' };
+      what = payload.decision === 'accept' ? 'workflow accepted — the run continues' : 'workflow proposal cancelled — the run stops';
     } else {
       return reply(`\`${ref}\` is waiting on ${pq.kind} — use \`/answer ${ref} <n>\`.`, 'warning');
     }
     await actions.answer(t.run.runId, pq.id, payload, actor);
-    const what = pq.kind === 'gate'
-      ? (payload.decision === 'continue' ? 'approved — continuing' : 'sent back for another cycle')
-      : (payload.decision === 'retry' ? 'retrying' : payload.decision === 'abort' ? 'aborting the run' : 'pausing the run');
     return reply(`✅ \`${ref}\` ${what}.`, 'success');
   }
 
@@ -552,8 +610,12 @@ export function createCommandRouter({ actions, chatContext, logger = () => {} })
       const guard = createAllowlistGuard(parseIdList(channelConfig?.allowedChatIds), {
         debug: (m) => logger('info', m),
       });
-      if (!guard.isAllowed({ platform, chatId: msg.chatId })) return null; // silent, fail closed
       const parsed = parseCommand(msg.text);
+      if (!guard.isAllowed({ platform, chatId: msg.chatId })) {
+        // Chatter in a watched group is never a refusal; a command is — tell the
+        // observer (Settings shows it) and maybe the chat (refuse()).
+        return parsed ? refuse({ plugin, channelId, platform, channelConfig, msg }, parsed.command) : null;
+      }
       if (!parsed) return null; // non-commands are never interpreted
       const handler = Object.hasOwn(handlers, parsed.command) ? handlers[parsed.command] : null;
       const chatKey = `${platform}:${msg.chatId}`;

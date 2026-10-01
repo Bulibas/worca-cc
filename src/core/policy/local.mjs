@@ -14,6 +14,11 @@ import { readPluginsLock } from '../plugins-lock.mjs';
 import { readMarketplaces, writeMarketplaces, normalizeMarketplaceUrl, marketplaceId, addMarketplace } from '../marketplaces.mjs';
 import { fieldsForRun } from './effective.mjs';
 import { semverAtLeast } from './registry.mjs';
+import { cachedPolicyHomes } from './cache.mjs';
+import { readMcpStore } from '../mcp/store.mjs';
+import { loadCatalog } from '../mcp/catalog.mjs';
+import { teamRows } from '../mcp/team.mjs';
+import { hostContext } from '../mcp/registry.mjs';
 
 export const WORCA_VERSION = createRequire(import.meta.url)('../../../package.json').version;
 
@@ -91,6 +96,36 @@ export function pluginRequirements(homes) {
     out.push({ ...req, installed: have, state });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Every home's `mcp.required` entries, each with its state on this machine (MCP registry spec §11.3:
+ * the setup checklist, the MCP strip, "Yours"). Touches the MCP store only when a home lists entries.
+ * Default: every cached home — the source the consent routes hash against. A registry fault yields no rows
+ * (logged): it never takes the policy page, the scopes payload or `worca policy show` down with it.
+ * @param {Array<{slug:string, sha?:string|null, doc:object}>} [homes]
+ */
+export async function mcpRequirements(homes = cachedPolicyHomes()) {
+  const listing = (homes || []).filter((h) => h.doc?.fields?.['mcp.required']?.value?.length);
+  if (!listing.length) return [];
+  try {
+    const snapshot = await readMcpStore();
+    const catalog = await loadCatalog(snapshot);
+    return listing.flatMap((h) => teamRows({ slug: h.slug, sha: h.sha ?? null, doc: h.doc }, {
+      ...hostContext(), catalog, snapshot,
+      pluginStates: Object.fromEntries(pluginRequirements([h]).map((r) => [r.name, r.state])),
+    }));
+  } catch (err) {
+    console.warn(`[worca] mcp: team requirements skipped: ${err.message}`);
+    return [];
+  }
+}
+
+/** `local` plus mcp.required's "Yours" for one home — the Team set's working members as they run here (§11.3). */
+export async function withMcpLocal(local, home) {
+  const rows = await mcpRequirements([home]);
+  if (rows.length) local['mcp.required'] = { value: rows.filter((x) => x.working).map((x) => x.running), set: true };
+  return local;
 }
 
 /** Blocked plugins that are enabled here, per home. */

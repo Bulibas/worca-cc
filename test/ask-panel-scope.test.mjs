@@ -101,6 +101,34 @@ test('#397: pick a project → label, per-field merged send context, PATCH once 
   ctx.panel.destroy();
 });
 
+test('MCP registry §9.1: a pin strips the fallback tag with the page target; Auto keeps it', async () => {
+  const state = { patches: [], bodies: [], snap: null };
+  const ctx = makePanel({
+    fetchHandler: handler(state),
+    getPageContext: () => ({ view: 'settings', projectDir: '/p/other', projectSource: 'fallback' }),
+  });
+  ctx.panel.open();
+  const send = async (text) => {
+    ctx.doc.querySelector('textarea.ask-input').value = text;
+    ctx.doc.querySelector('[data-ask-send]').click();
+    await ctx.tick(); await ctx.tick(); await ctx.tick();
+  };
+  await send('auto');
+  assert.equal(state.bodies[0].context.projectSource, 'fallback', 'Auto sends the page context as is');
+  const btn = ctx.doc.querySelector('[data-ask-scope-btn]');
+  btn.click();
+  await ctx.tick(); await ctx.tick(); await ctx.tick();
+  scopeItems(ctx.doc).find((i) => /^Demo/.test(i.textContent.trim())).click();
+  await ctx.tick();
+  ctx.panel.pushServerFrame({ type: 'ask-done', threadId: TID, messageId: 'askm_00000001', seq: 1, text: '', blocks: [], status: 'done' });
+  await send('pinned');
+  const pinned = state.bodies.at(-1).context;
+  assert.equal(pinned.projectKey, 'demo-00000001');
+  assert.equal(pinned.projectDir, undefined);
+  assert.equal(pinned.projectSource, undefined, 'the tag goes with the target keys');
+  ctx.panel.destroy();
+});
+
 test('#397: reopening a pinned thread restores the selector (name resolved from /api/projects)', async () => {
   const state = { patches: [], bodies: [], snap: {
     thread: { id: TID, title: 'Scoped chat', createdAt: 't', updatedAt: 't', model: null, effort: null, sessionId: null, context: { pinned: true, projectKey: 'demo-00000001', view: 'history' }, totals: {} },
@@ -158,6 +186,7 @@ test('scope pill lives in the composer row: header is logo → title → spacer 
   const scope = attach.nextElementSibling;
   assert.ok(scope && scope.hasAttribute('data-ask-scope-btn'), 'the scope pill sits right after the "+" attach button');
   assert.ok(scope.classList.contains('ask-scope-btn'));
-  assert.equal(scope.nextElementSibling.className, 'ask-composer-spacer', 'and before the spacer');
+  assert.ok(scope.nextElementSibling.hasAttribute('data-ask-mcp-btn'), 'then the MCP picker chip (MCP registry §9.4)');
+  assert.equal(scope.nextElementSibling.nextElementSibling.className, 'ask-composer-spacer', 'and before the spacer');
   assert.equal(row.querySelector('[data-ask-scope-btn]').textContent.trim(), 'Auto');
 });

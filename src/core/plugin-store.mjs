@@ -15,7 +15,10 @@ import {
 } from 'node:fs';
 import { join, resolve, isAbsolute, sep } from 'node:path';
 import { WORCA_PLUGIN_APIS, WORCA_ASK_FORMS_API } from './plugin-api.mjs';
-import { normalizeManifest, validatePluginDir, apiSatisfies, dataContractIssues, apiMismatch, negotiatedApi } from './plugin-manifest.mjs';
+import {
+  normalizeManifest, validatePluginDir, apiSatisfies, dataContractIssues, apiMismatch, negotiatedApi,
+  mcpBlockIgnored, MCP_NEEDS_API_5,
+} from './plugin-manifest.mjs';
 import {
   pluginsRoot, pluginDir, pluginCurrentDir, pluginDataDir, readPluginsLock, writePluginsLock,
   DIR_NAME_RE,
@@ -34,7 +37,9 @@ import { normalizeScriptMeta, resolvePlatformValue } from '../shared/graph/scrip
 import { pluginModelSecretStatus } from './plugin-models.mjs';
 import { referencedPluginModels } from './config.mjs';
 import { clearBindingsForPlugin } from './source-bindings.mjs';
+import { assignPluginBases, checkMcpStoreWritable, removePluginServers, applyMcpUpdate, mcpServerDelta } from './mcp/plugin-lifecycle.mjs';
 import { parseFrontmatter } from './frontmatter.mjs';
+import { agentIdentity } from './agent-user.mjs';
 
 const execFileP = promisify(execFile);
 const defaultExec = (cmd, args, opts = {}) =>
@@ -49,6 +54,18 @@ function readManifestAt(dir) {
   } catch {
     return null;
   }
+}
+
+/** One consent string for an MCP server's command line or URL: `./` paths as
+ *  `<plugin-dir>/…` (setupCommands' placeholder), field refs as `{key}`.
+ *  Exported for the CLI's install consent, which lists them before export. */
+const refText = (p) => `${p.prefix ?? ''}{${p.field}}${p.suffix ?? ''}`;
+export function mcpInventoryRow(name, d) {
+  if (d.type !== 'stdio') {
+    return { name, type: d.type, url: (Array.isArray(d.url) ? d.url : [d.url]).map((p) => (typeof p === 'string' ? p : refText(p))).join('') };
+  }
+  const part = (p) => (typeof p !== 'string' ? refText(p) : p.startsWith('./') ? `<plugin-dir>/${p.slice(2)}` : p);
+  return { name, type: 'stdio', command: [d.command, ...(d.args || [])].map(part).join(' ') };
 }
 
 function sha256File(file) {
@@ -70,7 +87,7 @@ function insideDir(dir, rel) {
 export function buildInstallInventory(versionDir) {
   const readManifest = readManifestAt(versionDir);
   const manifest = readManifest
-    ?? { taskSources: [], chatChannels: [], models: [], modelSecrets: [], setup: { node: false, python: null } };
+    ?? { taskSources: [], chatChannels: [], models: [], modelSecrets: [], mcpServers: {}, setup: { node: false, python: null } };
   // Ask forms are honoured only when the plugin NEGOTIATES plugin API 4: below
   // it agent-registry.scanLayer strips the block at load and reports it as an
   // ignored contribution. Consent describes what THIS host will do, so such
@@ -163,6 +180,9 @@ export function buildInstallInventory(versionDir) {
     };
   });
   const modelSecrets = (manifest.modelSecrets || []).map((f) => ({ key: f.key, label: f.label }));
+  // Only HONOURED servers: normalizeManifest already stripped a block the plugin
+  // does not negotiate API 5 for, so consent never promises one (spec §4.1).
+  const mcpServers = Object.keys(manifest.mcpServers).sort().map((n) => mcpInventoryRow(n, manifest.mcpServers[n]));
   const skills = [];
   const sDir = join(versionDir, 'skills');
   if (existsSync(sDir)) {
@@ -183,7 +203,7 @@ export function buildInstallInventory(versionDir) {
   const setupCommands = [];
   if (manifest.setup?.node) setupCommands.push(`npm ci --prefix ${versionDir} --ignore-scripts --omit=dev`);
   if (manifest.setup?.python === 'pyproject') setupCommands.push(`uv sync --project ${versionDir}`);
-  return { agents, scripts, taskSources, chatChannels, models, modelSecrets, skills: skills.sort(), workflows, depCount, setupCommands };
+  return { agents, scripts, taskSources, chatChannels, models, modelSecrets, mcpServers, skills: skills.sort(), workflows, depCount, setupCommands };
 }
 
 /**
@@ -233,6 +253,9 @@ export function ignoredContributions(name, dir, opts = {}) {
       catch { return []; }
     })();
   for (const s of skips) out.push({ file: `workflows/${s.file}`, reason: `invalid template (${s.errors.join('; ')})` });
+  let raw = null;
+  try { raw = JSON.parse(readFileSync(join(dir, 'worca-cc-plugin.json'), 'utf8')); } catch { /* broken: reported elsewhere */ }
+  if (mcpBlockIgnored(raw)) out.push({ file: 'worca-cc-plugin.json', reason: MCP_NEEDS_API_5 });
   return out.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
 }
 
@@ -258,6 +281,28 @@ export async function runSetup(versionDir, manifest, { exec = defaultExec } = {}
     commands.push('uv sync');
   }
   return { commands };
+}
+
+/** Agent isolation (MCP registry spec §14): agent users run plugin stdio servers
+ *  from versions/<sha7>. The entrypoint shares plugins/ at boot; a plugin
+ *  installed or updated since then has worca's own group (no setgid there, and
+ *  agent users are not in it), so: the agents' group on plugins/<p>/,
+ *  versions/ and the new version; plugins/<p>/ traverse only; versions/**
+ *  group read-only — the server's umask (0007) leaves new files group-writable,
+ *  and worca itself runs code from there. After setup, so node_modules/.venv
+ *  are covered too. */
+async function shareVersionDir(name, versionDir, exec) {
+  const id = agentIdentity();
+  if (!id) return;
+  const pdir = pluginDir(name);
+  const versions = join(pdir, 'versions');
+  await exec('chmod', ['0710', pdir]);                       // modes first: never a group-writable moment
+  await exec('chmod', ['g-w,g+rX', versions]);
+  await exec('chmod', ['-R', 'g-w,g+rX', versionDir]);
+  if (id.gid != null) {
+    await exec('chgrp', [String(id.gid), pdir, versions]);
+    await exec('chgrp', ['-R', String(id.gid), versionDir]);
+  }
 }
 
 /** Doctor checks that run against an arbitrary dir — shared by the install
@@ -359,13 +404,17 @@ export async function installPlugin({ repoUrl, subdir = '', name, sha, marketpla
   if (!name) throw new Error('installPlugin: name is required');
   const lock = readPluginsLock();
   if (lock[name]) throw new Error(`plugin "${name}" is already installed`);
-  const added = await addPluginRepo(repoUrl, { exec }); // clone-or-fetch the cache
+  // A marketplace that tracks a branch (the builtin: dev) pins its tip and records it, so updates follow it.
+  // Imported here: marketplaces.mjs reaches this module through plugin-inventory.mjs.
+  const ref = marketplace ? (await import('./marketplaces.mjs')).readMarketplaces().marketplaces[marketplace]?.ref ?? null : null;
+  const added = await addPluginRepo(repoUrl, { exec, ref }); // clone-or-fetch the cache
   const pin = sha || added.sha;
   const { versionDir, warnings } = await exportVersion(name, pin, { exec, repoUrl, subdir });
   const prevCurrent = currentTarget(name); // null on first install
   try {
     const manifest = validated(name, versionDir);
     await runSetup(versionDir, manifest, { exec });
+    await shareVersionDir(name, versionDir, exec);
     precheck(versionDir, manifest);
     const inventory = buildInstallInventory(versionDir);
     swapCurrent(name, join('versions', pin.slice(0, 7)));
@@ -375,6 +424,7 @@ export async function installPlugin({ repoUrl, subdir = '', name, sha, marketpla
       enabled: true, installedAt: new Date().toISOString(),
       lockfileHash: sha256File(join(versionDir, 'package-lock.json')),
       ...(marketplace ? { marketplace } : {}), // provenance only when it came from one
+      ...(ref ? { ref } : {}),
     };
     writePluginsLock(lock);
     // §6.1(3): workflow template import is the LAST install step (post-swap,
@@ -392,6 +442,7 @@ export async function installPlugin({ repoUrl, subdir = '', name, sha, marketpla
     } catch (err) {
       console.warn(`[plugin-store] ${name}: workflow import failed (${err?.message || err}) — plugin installed; re-import via update`);
     }
+    await assignPluginBases(name, manifest.mcpServers);
     // The receipt says what actually landed: `inventory` is what the plugin
     // SHIPS, `ignored` is the subset worca refused to load (spec §9.3 drops).
     const ignored = ignoredContributions(name, versionDir, workflowSkips ? { workflowSkips } : {});
@@ -417,9 +468,17 @@ export async function updatePlugin(name, { exec = defaultExec } = {}) {
   if (cand.candidateSha === entry.pinnedSha) return { ok: true, updated: false, ...cand };
   const { versionDir, warnings } = await exportVersion(name, cand.candidateSha, { exec });
   const prevCurrent = currentTarget(name);
+  // The pinned side's honoured MCP servers, read before the swap (§4.6 apply).
+  const mcpBefore = readManifestAt(pluginCurrentDir(name))?.mcpServers ?? {};
   try {
     const manifest = validated(name, versionDir);
+    // MCP registry (§4.6): the apply below removes or migrates servers after the
+    // swap, so a registry file it could not write refuses the update HERE —
+    // decided on the apply's own inputs, before setup, the swap and the lock.
+    const mcpDelta = mcpServerDelta(mcpBefore, manifest.mcpServers);
+    if (mcpDelta.removedMcpServers.length || mcpDelta.changedMcpServers.length) await checkMcpStoreWritable(name);
     await runSetup(versionDir, manifest, { exec });
+    await shareVersionDir(name, versionDir, exec);
     precheck(versionDir, manifest);
     const inventory = buildInstallInventory(versionDir);
     const sha7 = cand.candidateSha.slice(0, 7);
@@ -445,6 +504,7 @@ export async function updatePlugin(name, { exec = defaultExec } = {}) {
     } catch (err) {
       console.warn(`[plugin-store] ${name}: workflow import failed (${err?.message || err}) — plugin updated; re-import via update`);
     }
+    await applyMcpUpdate(name, mcpBefore, manifest.mcpServers);
     const ignored = ignoredContributions(name, versionDir, workflowSkips ? { workflowSkips } : {});
     return { ok: true, updated: true, inventory, warnings, ignored, ...cand };
   } catch (err) {
@@ -562,7 +622,13 @@ export async function uninstallPlugin(name, { purge = false } = {}) {
       { code: 'REFERENCED', references: modelRefs },
     );
   }
+  // MCP registry (§4.6): a registry file the removal below could not write
+  // refuses HERE, before removePluginWorkflows deletes the templates.
+  await checkMcpStoreWritable(name);
   await removePluginWorkflows(name); // throws its ReferencedError with the referencing list
+  // MCP registry (§4.6): after every guard, so a refused uninstall keeps them and
+  // `worca plugin remove` does it too.
+  await removePluginServers(name);
   // Bindings live in the DB, not in the plugin's data dir, so they would
   // outlive the uninstall: a stale row silently rebinds a project the moment
   // the plugin is reinstalled with a same-named profile — possibly pointing at
@@ -664,8 +730,8 @@ export function listInstalledPlugins() {
       broken: !manifest,
       apiMismatch: mismatch,
       contributions: inv
-        ? { agents: inv.agents.length, scripts: inv.scripts.length, taskSources: inv.taskSources.length, chatChannels: inv.chatChannels.length, models: inv.models.length, skills: inv.skills.length, workflows: inv.workflows.length }
-        : { agents: 0, scripts: 0, taskSources: 0, chatChannels: 0, models: 0, skills: 0, workflows: 0 },
+        ? { agents: inv.agents.length, scripts: inv.scripts.length, taskSources: inv.taskSources.length, chatChannels: inv.chatChannels.length, models: inv.models.length, mcpServers: inv.mcpServers.length, skills: inv.skills.length, workflows: inv.workflows.length }
+        : { agents: 0, scripts: 0, taskSources: 0, chatChannels: 0, models: 0, mcpServers: 0, skills: 0, workflows: 0 },
       // What the card needs to decide whether the python notice applies, without
       // re-reading the plugin dir.
       scriptRuntimes: inv
@@ -793,6 +859,7 @@ export async function linkPlugin(name, absDir) {
     installedAt: new Date().toISOString(), linked: true,
   };
   writePluginsLock(lock);
+  await assignPluginBases(name, v.manifest.mcpServers);
   // Same isolation as installPlugin: an import failure must not undo a link
   // that already landed — the lock and the symlink are correct either way.
   let workflows = { imported: [], skipped: [] };

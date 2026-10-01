@@ -31,7 +31,7 @@ async function branchesReady(doc) {
   for (let i = 0; i < 200 && !doc.getElementById('sourceBranch').dataset.current; i++) await tick(5);
 }
 
-async function boot(hash) {
+async function boot(hash, { withSync = false } = {}) {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: `http://localhost:4317/${hash}` });
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
@@ -56,8 +56,14 @@ async function boot(hash) {
     if (u.includes('/api/schedules/after/t8')) return json({ kind: 'ticket', id: 't8', title: 'Gone', status: 'canceled', projectDir: '/a/svc-iam', workspaceId: null });
     if (u.includes('/api/schedules/after-candidates')) return json({ runs: [{ pipelineId: 'p1', runId: 'r1', title: 'Refactor', status: 'running' }], tickets: [] });
     if (u.includes('/api/branches')) {
-      const dir = decodeURIComponent(new URL(u, 'http://x').searchParams.get('projectDir') || '');
-      return slow(BRANCHES[dir] || { branches: [], current: '', runs: [] });
+      const q = new URL(u, 'http://x').searchParams;
+      const dir = decodeURIComponent(q.get('projectDir') || '');
+      const b = BRANCHES[dir] || { branches: [], current: '', runs: [] };
+      // withSync: the fresh list names a remote and HEAD's SyncBlock, as GET /api/branches?fresh=1 does.
+      if (withSync && q.get('fresh') === '1' && b.current) {
+        return slow({ ...b, remote: { name: 'origin', branches: b.branches }, sync: { base: b.current, remote: 'origin', state: 'behind', behind: 2, ahead: 0, stale: false, settings: { beforeRun: true, onDiverged: 'ask' } } });
+      }
+      return slow(b);
     }
     if (u.endsWith('/api/run') && opts && opts.method === 'POST') { const body = JSON.parse(opts.body); runBodies.push(body); return json({ runId: 'r-2', status: 'scheduled', scheduledFor: null, after: body.after }, 202); }
     if (u.includes('/api/schedules')) return json({ schedules: [], tickets: [], counts: { scheduled: 0, missed: 0, recurring: 0, unread: 0 }, defaults: { graceMin: 360, ifMissed: 'run', maxFailures: 3 } });
@@ -96,6 +102,23 @@ test('#new/after/p1: the pick waits on the form, the branch select leads with th
   assert.equal(runBodies[0].afterPolicy, 'done');
   assert.equal(runBodies[0].sourceFromPrevious, true);
   assert.equal('sourceBranch' in runBodies[0], false);
+});
+
+test('the Branches row follows the value the pick sets without a change event: the run before it, then back to HEAD (#527)', async () => {
+  const { window } = await boot('#new/after/p1', { withSync: true });
+  const doc = window.document;
+  await branchesReady(doc);
+  await tick(40);
+  const mode = doc.getElementById('branches-mode-wrap');
+  const text = () => doc.querySelector('#bt-project-outcome .bt-text')?.textContent || '';
+  assert.equal(doc.getElementById('sourceBranch').value, '__previous__');
+  assert.equal(mode.hidden, true, 'the previous run\'s branch is not HEAD\'s: nothing to sync');
+  assert.equal(text(), 'Starts from the branch of the run before it');
+  doc.getElementById('new-sched-clear').click();
+  for (let i = 0; i < 100 && mode.hidden; i++) await tick(5);
+  assert.equal(doc.getElementById('sourceBranch').value, 'main');
+  assert.equal(mode.hidden, false, 'back on HEAD\'s branch: the choice returns');
+  assert.equal(text(), 'Gets 2 new commits from origin first');
 });
 
 test('Start now instead drops the pick and the previous-run option', async () => {

@@ -75,7 +75,17 @@ export function renderPluginList(plugins, { doc = globalThis.document, channelSt
     toggle.appendChild(h(doc, 'span', '', p.enabled !== false ? 'enabled' : 'disabled'));
     head.appendChild(toggle);
     card.appendChild(head);
-    card.appendChild(h(doc, 'small', 'pl-contrib hint', contribSummary(p.contributions)));
+    const contrib = h(doc, 'small', 'pl-contrib hint', contribSummary(p.contributions));
+    const mcp = Number(p.contributions && p.contributions.mcpServers) || 0;
+    if (mcp) {
+      // MCP servers are configured in their own Settings tab; the count is the way there.
+      if (contrib.textContent === 'no contributions') contrib.textContent = '';
+      else contrib.appendChild(doc.createTextNode(' · '));
+      const a = h(doc, 'a', 'pl-mcp-link', `${mcp} MCP server${mcp > 1 ? 's' : ''}`);
+      a.href = '#settings/mcp/servers';
+      contrib.appendChild(a);
+    }
+    card.appendChild(contrib);
     if (p.apiMismatch) card.appendChild(h(doc, 'small', 'pl-api-note hint err', p.apiMismatch.message || ''));
     // Contributions worca refused to load. Same note treatment as the API note:
     // the contributions line above counts what the plugin SHIPS, so without this
@@ -103,6 +113,8 @@ export function renderPluginList(plugins, { doc = globalThis.document, channelSt
       b.type = 'button';
       b.dataset.name = p.name;
       if (cls === 'pl-doctor') b.dataset.minLevel = 'expert';   // diagnostics (docs/ui-levels.md)
+      // The MCP sets this plugin's servers leave on uninstall — the confirm lists them.
+      if (cls === 'pl-remove' && (p.mcpSets || []).length) b.dataset.mcpSets = p.mcpSets.join(', ');
       actions.appendChild(b);
     }
     card.appendChild(actions);
@@ -216,6 +228,15 @@ export function renderInstallConsent(entry, inventory, { doc = globalThis.docume
         h(doc, 'span', 'pl-secret', `requests model secret: ${s.key}${s.label && s.label !== s.key ? ` (${s.label})` : ''}`));
     }
   }
+  // MCP servers (MCP registry §4.1): a snapshot persisted before API 5 has no
+  // key at all — that is "unknown", never "none".
+  if (!Array.isArray(inv.mcpServers)) section('MCP servers: unknown — refresh the marketplace');
+  else if (inv.mcpServers.length) {
+    const mcp = section(`MCP servers (${inv.mcpServers.length})`);
+    for (const s of inv.mcpServers) {
+      mcp.appendChild(h(doc, 'div', 'pl-consent-row mono', `${s.name} (${s.type}) — ${s.command || s.url}`));
+    }
+  }
   const skills = section(`Skills (${(inv.skills || []).length})`);
   for (const s of inv.skills || []) skills.appendChild(h(doc, 'div', 'pl-consent-row mono', s));
   const wfs = section(`Workflows (${(inv.workflows || []).length})`);
@@ -231,8 +252,10 @@ export function renderInstallConsent(entry, inventory, { doc = globalThis.docume
 // renderUpdatePreview(preview) — fetchCandidate result: pinned→candidate shas,
 // commit log, diffstat, confirm button (.pl-confirm-update; app.js wires it).
 // No new commits -> a plain up-to-date state: badge + hint, no shas/diffstat/button.
+// Also takes the route's body as app.js passes it: POST /api/plugins/:name/update
+// answers `{ preview }`.
 export function renderUpdatePreview(preview, { doc = globalThis.document } = {}) {
-  const p = preview || {};
+  const p = (preview && preview.preview) || preview || {};
   const root = h(doc, 'div', 'pl-update');
   if (!(p.commits || []).length) {
     const row = h(doc, 'div', 'pl-uptodate');
@@ -260,6 +283,8 @@ export function renderUpdatePreview(preview, { doc = globalThis.document } = {})
     ...(d.newModelSecrets || []).map((k) => ['pl-delta-secret', `NEW MODEL SECRET requested: ${k}`]),
     ...(d.newModels || []).map((m) => ['pl-delta', `new model: ${m}`]),
     ...(d.removedModels || []).map((m) => ['pl-delta', `removed model: ${m}`]),
+    // MCP servers (registry §4.6): lines built server-side, where the sets are known.
+    ...(d.mcpLines || []).map((l) => [l.red ? 'pl-delta-secret' : 'pl-delta', l.text]),
   ];
   if (flags.length) {
     const box = h(doc, 'div', 'pl-manifest-delta');
@@ -539,7 +564,7 @@ export function renderMarketplaceList(marketplaces, { doc = globalThis.document,
     }
     head.appendChild(actions);
     row.appendChild(head);
-    row.appendChild(h(doc, 'small', 'pl-mkt-url hint mono', m.url));
+    row.appendChild(h(doc, 'small', 'pl-mkt-url hint mono', m.ref ? `${m.url} · ${m.ref}` : m.url));
     const n = (m.plugins || []).length;
     row.appendChild(h(doc, 'small', 'pl-mkt-sync hint', m.lastSync
       ? `${sha7(m.lastSync.sha)} · synced ${relTime(m.lastSync.at, now)} · ${n} plugin${n === 1 ? '' : 's'}`

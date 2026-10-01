@@ -190,12 +190,6 @@ test('a node pick that the log has not produced yet keeps the node axis and surv
   assert.equal(r.logFilter.node, 'n_a', 'a second paint does not wipe the pick');
 });
 
-test('the Running list card no longer carries a log filter bar', async () => {
-  const ctx = await boot();
-  const { r } = await liveRun(ctx);
-  assert.equal(r.el.querySelector('.log-filters, .log-f-exec, .log-f-step'), null);
-});
-
 // ── the History detail ──────────────────────────────────────────────────────
 
 const KEY = 'proj-alpha-abcd1234';

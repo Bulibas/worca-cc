@@ -1,8 +1,10 @@
 // test/ui-history-pr-phase.test.mjs
-// Phase-2 PR enrichment over the WS: a `history-pr` batch patches the matching
-// card in place (Create-PR -> PR link), tagged by a request token so stale/racing
-// batches are dropped. Boots the REAL app.js under jsdom; WS frames are delivered
-// via wsBox.ws.dispatch('message', { data }) (harness per test/ui-question.test.mjs).
+// Phase-2 PR enrichment over the WS: a `history-pr` batch updates the matching
+// Runs row's word (the glance headline: "Finished" while pending -> "In review" /
+// "Merged" / "Ready to ship"), tagged by a request token so stale/racing batches are
+// dropped. Rows repaint through a coalesced microtask that REPLACES changed nodes, so
+// every assertion re-queries its row. Boots the REAL app.js under jsdom; WS frames are
+// delivered via wsBox.ws.dispatch('message', { data }) (harness per test/ui-question.test.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -39,199 +41,200 @@ async function boot({ fetchHandler } = {}) {
   globalThis.window = window; globalThis.document = window.document;
   await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
   await new Promise((r) => setTimeout(r, 0));
-  const showHistory = () => { window.location.hash = 'history'; window.dispatchEvent(new window.Event('hashchange')); };
-  const refresh = () => window.document.querySelector('#refresh-history').dispatchEvent(new window.Event('click', { bubbles: true }));
+  const showRuns = () => { window.location.hash = 'runs'; window.dispatchEvent(new window.Event('hashchange')); };
+  // The Refresh button is gone (D14): a pipelines-changed frame on #runs force-reloads History (app.js:1076).
+  const refresh = () => wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'pipelines-changed' }) });
   const tick = () => new Promise((r) => setTimeout(r, 0));
   const prTokens = () => calls.filter((c) => c.url.endsWith('/api/history/pr') && c.opts.body).map((c) => JSON.parse(c.opts.body).token);
+  const historyGets = () => calls.filter((c) => c.url.endsWith('/api/history') && !c.opts.method).length;
   const dispatchPr = (msg) => wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'history-pr', done: true, items: [], ...msg }) });
-  return { window, calls, wsBox, showHistory, refresh, tick, prTokens, dispatchPr };
+  return { window, calls, wsBox, showRuns, refresh, tick, prTokens, historyGets, dispatchPr };
 }
 
 const skeleton = (pipelines, ghAvailable = true) =>
   Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines, live: [], ghAvailable }) });
 
+// A finished run with no review counts: its word depends on `pr` alone ("Finished" while
+// the lookup runs, "In review" / "Merged" once gh answers).
 const ROW = (over = {}) => ({
-  id: 'p1', title: 'Feat', status: 'stopped', startedAt: '2026-06-02T00:00:00Z',
+  id: 'p1', title: 'Feat', status: 'done', startedAt: '2026-06-02T00:00:00Z',
   branch: 'worca-cc/feat-1', sourceBranch: 'main', survived: true, added: 3, removed: 1,
   projectName: 'Proj', projectKey: 'proj-0000abcd', projectDir: '/x/proj', ...over,
 });
+// Its review flagged nothing: once gh answers "no PR" (null) the word is "Ready to ship",
+// while the lookup is still pending it stays "Finished". Tells pending from resolved apart.
+const READY = { checks: 0 };
 
-const cardSel = (id, key) => `#history .hist-card[data-pipeline-id="${id}"][data-project-key="${key}"]`;
+const rowSel = (id, key) => `#runs-list .runs-row[data-kind="hist"][data-pipeline-id="${id}"][data-project-key="${key}"]`;
+// Re-queried on every call: never hold a row across a repaint.
+function wordOf(ctx, id = 'p1', key = 'proj-0000abcd') {
+  const row = ctx.window.document.querySelector(rowSel(id, key));
+  assert.ok(row, `row ${key}/${id} is listed`);
+  return row.querySelector('.runs-row-sub').textContent.split(' · ')[0];
+}
+const busy = (ctx) => ctx.window.document.getElementById('runs-list').getAttribute('aria-busy');
 
-test('history-pr OPEN batch swaps Create-PR -> "View PR" link in place, without repainting the list', async () => {
+test('history-pr OPEN batch turns the row word into "In review", without a refetch', async () => {
   const ctx = await boot({ fetchHandler: (url) => (url.endsWith('/api/history') ? skeleton([ROW()]) : null) });
-  ctx.showHistory();
+  ctx.showRuns();
   await ctx.tick();
-  const card = ctx.window.document.querySelector('#history .hist-card');
-  assert.equal(card.querySelector('.hist-pr').hidden, true, 'Create-PR hidden until Phase-2 resolves (progressive reveal)');
+  assert.equal(wordOf(ctx), 'Finished', 'pending: the headline while the PR lookup runs');
 
+  const gets = ctx.historyGets();
   const token = ctx.prTokens().at(-1);
   assert.ok(token != null, 'client POSTed a load token');
   ctx.dispatchPr({ token, done: true, items: [{ projectKey: 'proj-0000abcd', id: 'p1', pr: { state: 'OPEN', url: 'https://gh/x/pull/8', number: 8 } }] });
   await ctx.tick();
 
-  assert.equal(card.querySelector('.hist-pr'), null, 'Create-PR button replaced');
-  const link = card.querySelector('.hist-pr-link');
-  assert.equal(link.getAttribute('href'), 'https://gh/x/pull/8');
-  assert.equal(link.textContent, 'View PR');
-  // The patch is IN PLACE: no full repaint (which would swap the node) and no
-  // navigation to the detail screen.
-  assert.equal(ctx.window.document.querySelector('#history .hist-card'), card, 'the card node itself survived the patch');
-  assert.equal(ctx.window.location.hash.replace(/^#/, ''), 'history', 'the patch never navigates');
-  assert.equal(card.querySelector('.hist-merge'), null, 'the merge pill left the list card (detail-only now)');
+  assert.equal(wordOf(ctx), 'In review', 'the row reads the PR state');
+  // The patch repaints from the in-memory rows (scheduleRunsPaint), never by reloading
+  // History, and never navigates to the detail screen.
+  assert.equal(ctx.historyGets(), gets, 'no /api/history refetch');
+  assert.equal(ctx.window.location.hash.replace(/^#/, ''), 'runs', 'the patch never navigates');
+  assert.equal(busy(ctx), 'false', 'the final batch clears the busy state');
 });
 
-test('history-pr MERGED batch renders a "Merged" link', async () => {
+test('history-pr MERGED batch makes the row read "Merged"', async () => {
   const ctx = await boot({ fetchHandler: (url) => (url.endsWith('/api/history') ? skeleton([ROW()]) : null) });
-  ctx.showHistory();
+  ctx.showRuns();
   await ctx.tick();
   const token = ctx.prTokens().at(-1);
   ctx.dispatchPr({ token, items: [{ projectKey: 'proj-0000abcd', id: 'p1', pr: { state: 'MERGED', url: 'https://gh/x/pull/9', number: 9 } }] });
   await ctx.tick();
-  const card = ctx.window.document.querySelector('#history .hist-card');
-  const link = card.querySelector('.hist-pr-link.merged');
-  assert.ok(link, 'merged link present');
-  assert.equal(link.textContent, 'Merged');
-  assert.equal(link.getAttribute('href'), 'https://gh/x/pull/9');
+  assert.equal(wordOf(ctx), 'Merged');
 });
 
-test('id collision across projects: only the (id, projectKey)-matched card is patched', async () => {
+test('id collision across projects: only the (id, projectKey)-matched row is patched', async () => {
   const ctx = await boot({
     fetchHandler: (url) => (url.endsWith('/api/history')
       ? skeleton([ROW({ id: 'dup', projectKey: 'k1' }), ROW({ id: 'dup', projectKey: 'k2' })]) : null),
   });
-  ctx.showHistory();
+  ctx.showRuns();
   await ctx.tick();
   const token = ctx.prTokens().at(-1);
   ctx.dispatchPr({ token, items: [{ projectKey: 'k1', id: 'dup', pr: { state: 'OPEN', url: 'https://gh/x/pull/1', number: 1 } }] });
   await ctx.tick();
 
-  const k1 = ctx.window.document.querySelector(cardSel('dup', 'k1'));
-  const k2 = ctx.window.document.querySelector(cardSel('dup', 'k2'));
-  assert.ok(k1.querySelector('.hist-pr-link'), 'k1 card patched to a link');
-  assert.equal(k1.querySelector('.hist-pr'), null);
-  assert.equal(k2.querySelector('.hist-pr-link'), null, 'k2 card untouched');
-  assert.equal(k2.querySelector('.hist-pr').hidden, false, 'k2 still shows Create-PR');
+  assert.equal(wordOf(ctx, 'dup', 'k1'), 'In review', 'k1 row patched');
+  assert.equal(wordOf(ctx, 'dup', 'k2'), 'Finished', 'k2 row untouched (resolved to no PR by the final batch)');
 });
 
 test('stale/never-issued token batch is dropped (no DOM change)', async () => {
-  const ctx = await boot({ fetchHandler: (url) => (url.endsWith('/api/history') ? skeleton([ROW()]) : null) });
-  ctx.showHistory();
+  const ctx = await boot({ fetchHandler: (url) => (url.endsWith('/api/history') ? skeleton([ROW(READY)]) : null) });
+  ctx.showRuns();
   await ctx.tick();
   const token = ctx.prTokens().at(-1);
   ctx.dispatchPr({ token: token + 999, items: [{ projectKey: 'proj-0000abcd', id: 'p1', pr: { state: 'OPEN', url: 'https://gh/x/pull/8', number: 8 } }] });
   await ctx.tick();
-  const card = ctx.window.document.querySelector('#history .hist-card');
-  assert.equal(card.querySelector('.hist-pr-link'), null, 'no link from a stale token');
-  assert.equal(card.querySelector('.hist-pr').hidden, true, 'still hidden — pending; stale batch did not resolve it');
+  // A stale item would read "In review"; a stale FINAL batch would finalize to "Ready to ship".
+  assert.equal(wordOf(ctx), 'Finished', 'still pending — the stale batch did not resolve it');
+  assert.equal(busy(ctx), 'true', 'nor clear the busy state');
   // settle the real load so no watchdog lingers
   ctx.dispatchPr({ token, items: [] });
   await ctx.tick();
+  assert.equal(wordOf(ctx), 'Ready to ship', 'the current token resolves it');
 });
 
-test('race: a forced refresh supersedes the prior load; the old token batch is dropped', async () => {
+test('race: a forced reload supersedes the prior load; the old token batch is dropped', async () => {
   const ctx = await boot({ fetchHandler: (url) => (url.endsWith('/api/history') ? skeleton([ROW()]) : null) });
-  ctx.showHistory();
+  ctx.showRuns();
   await ctx.tick();
-  ctx.refresh();                         // force-refresh -> bumps the token
+  ctx.refresh();                         // pipelines-changed -> force reload -> bumps the token
   await ctx.tick();
   const tokens = ctx.prTokens();
   const [tA, tB] = [tokens[0], tokens.at(-1)];
-  assert.notEqual(tA, tB, 'force refresh issued a new token');
+  assert.notEqual(tA, tB, 'the forced reload issued a new token');
 
   // Deliver the OLD token LAST -> must be ignored.
   ctx.dispatchPr({ token: tA, items: [{ projectKey: 'proj-0000abcd', id: 'p1', pr: { state: 'OPEN', url: 'https://gh/x/pull/8', number: 8 } }] });
   await ctx.tick();
-  const card = ctx.window.document.querySelector('#history .hist-card');
-  assert.equal(card.querySelector('.hist-pr-link'), null, 'stale (tA) batch dropped after tB superseded it');
+  assert.equal(wordOf(ctx), 'Finished', 'stale (tA) batch dropped after tB superseded it');
 
   // The current token still patches.
   ctx.dispatchPr({ token: tB, items: [{ projectKey: 'proj-0000abcd', id: 'p1', pr: { state: 'OPEN', url: 'https://gh/x/pull/8', number: 8 } }] });
   await ctx.tick();
-  assert.ok(card.querySelector('.hist-pr-link'), 'current (tB) batch patches');
+  assert.equal(wordOf(ctx), 'In review', 'current (tB) batch patches');
 });
 
-test('PR button stays hidden until each entry resolves, then reveals progressively', async () => {
+test('each row stays pending until its own entry resolves, then updates progressively', async () => {
   const ctx = await boot({
     fetchHandler: (url) => (url.endsWith('/api/history')
-      ? skeleton([ROW({ id: 'a', projectKey: 'k' }), ROW({ id: 'b', projectKey: 'k' })]) : null),
+      ? skeleton([ROW({ id: 'a', projectKey: 'k', ...READY }), ROW({ id: 'b', projectKey: 'k', ...READY })]) : null),
   });
-  ctx.showHistory();
+  ctx.showRuns();
   await ctx.tick();
-  const cardA = ctx.window.document.querySelector(cardSel('a', 'k'));
-  const cardB = ctx.window.document.querySelector(cardSel('b', 'k'));
-  // Eligible (gh + survived + branch + source) but UNRESOLVED -> hidden, NOT "Create PR".
-  assert.equal(cardA.querySelector('.hist-pr').hidden, true, 'A hidden while pending');
-  assert.equal(cardB.querySelector('.hist-pr').hidden, true, 'B hidden while pending');
+  // Eligible (gh + survived + branch + source) but UNRESOLVED -> pending, NOT "Ready to ship".
+  assert.equal(wordOf(ctx, 'a', 'k'), 'Finished', 'A pending');
+  assert.equal(wordOf(ctx, 'b', 'k'), 'Finished', 'B pending');
 
   const token = ctx.prTokens().at(-1);
-  // Non-final batch resolves only A (no PR) -> A reveals Create-PR, B stays hidden.
+  // Non-final batch resolves only A (no PR) -> A reads "Ready to ship", B stays pending.
   ctx.dispatchPr({ token, done: false, items: [{ projectKey: 'k', id: 'a', pr: null }] });
   await ctx.tick();
-  assert.equal(cardA.querySelector('.hist-pr').hidden, false, 'A revealed after its result');
-  assert.equal(cardB.querySelector('.hist-pr').hidden, true, 'B still hidden until its result');
+  assert.equal(wordOf(ctx, 'a', 'k'), 'Ready to ship', 'A resolved after its result');
+  assert.equal(wordOf(ctx, 'b', 'k'), 'Finished', 'B still pending until its result');
+  assert.equal(busy(ctx), 'true', 'a non-final batch keeps the list busy');
 
-  // Final batch resolves B (OPEN) -> B becomes a link.
+  // Final batch resolves B (OPEN) -> B reads "In review".
   ctx.dispatchPr({ token, done: true, items: [{ projectKey: 'k', id: 'b', pr: { state: 'OPEN', url: 'https://gh/x/pull/4', number: 4 } }] });
   await ctx.tick();
-  assert.equal(cardB.querySelector('.hist-pr'), null, 'B button replaced by link');
-  assert.equal(cardB.querySelector('.hist-pr-link').textContent, 'View PR');
+  assert.equal(wordOf(ctx, 'b', 'k'), 'In review');
+  assert.equal(wordOf(ctx, 'a', 'k'), 'Ready to ship', 'A keeps its result');
 });
 
-test('an eligible entry the server never sent a batch for is revealed on the final (done) batch', async () => {
+test('an eligible entry the server never sent a batch for is resolved on the final (done) batch', async () => {
   const ctx = await boot({
-    fetchHandler: (url) => (url.endsWith('/api/history') ? skeleton([ROW({ id: 'a', projectKey: 'k' })]) : null),
+    fetchHandler: (url) => (url.endsWith('/api/history') ? skeleton([ROW({ id: 'a', projectKey: 'k', ...READY })]) : null),
   });
-  ctx.showHistory();
+  ctx.showRuns();
   await ctx.tick();
-  const card = ctx.window.document.querySelector(cardSel('a', 'k'));
-  assert.equal(card.querySelector('.hist-pr').hidden, true, 'hidden while pending');
+  assert.equal(wordOf(ctx, 'a', 'k'), 'Finished', 'pending');
   const token = ctx.prTokens().at(-1);
   ctx.dispatchPr({ token, done: true, items: [] });   // final batch, no item for 'a'
   await ctx.tick();
-  assert.equal(card.querySelector('.hist-pr').hidden, false, 'revealed as Create-PR by finalize');
+  assert.equal(wordOf(ctx, 'a', 'k'), 'Ready to ship', 'resolved as "no PR" by finalize');
 });
 
-test('enrichment failure (no done batch) reveals pending buttons via the watchdog catch', async () => {
+test('enrichment failure (no done batch) resolves pending rows via the watchdog catch', async () => {
   const ctx = await boot({
     fetchHandler: (url) => {
       if (url.endsWith('/api/history/pr')) return Promise.resolve({ ok: false, status: 500, json: async () => ({}) });
-      if (url.endsWith('/api/history')) return skeleton([ROW({ id: 'a', projectKey: 'k' })]);
+      if (url.endsWith('/api/history')) return skeleton([ROW({ id: 'a', projectKey: 'k', ...READY })]);
       return null;
     },
   });
-  ctx.showHistory();
+  ctx.showRuns();
   await ctx.tick();                                   // POST /api/history/pr rejects -> catch finalizes
-  const card = ctx.window.document.querySelector(cardSel('a', 'k'));
-  assert.equal(card.querySelector('.hist-pr').hidden, false, 'failed enrichment still reveals Create-PR');
+  assert.equal(wordOf(ctx, 'a', 'k'), 'Ready to ship', 'failed enrichment still settles the word');
+  assert.equal(busy(ctx), 'false', 'and clears the busy state');
 });
 
-// Maps 1:1 to the reported bug: an entry with an existing MERGED PR must NOT flash a
-// "Create PR" button (nor keep a stale "Merged" link) during a refresh; it is hidden
-// while the refresh is in flight, then re-resolves to "Merged".
-test('refresh hides a previously-merged entry button (no Create-PR flash) until it re-resolves', async () => {
+// Maps 1:1 to the reported bug, now inverted by carryHistoryPr (D12): a reload's rows
+// carry no `pr`, so a merged row used to drop to "Finished" and back on every reload.
+// It keeps its last known PR until Phase 2 answers again.
+test('a reload keeps a merged row "Merged" (no "Finished" flash) until the next batch re-resolves it', async () => {
   const ctx = await boot({ fetchHandler: (url) => (url.endsWith('/api/history') ? skeleton([ROW()]) : null) });
-  ctx.showHistory();
+  ctx.showRuns();
   await ctx.tick();
   // First load resolves the entry as MERGED (done defaults true via dispatchPr).
   const t1 = ctx.prTokens().at(-1);
   ctx.dispatchPr({ token: t1, items: [{ projectKey: 'proj-0000abcd', id: 'p1', pr: { state: 'MERGED', url: 'https://gh/x/pull/9', number: 9 } }] });
   await ctx.tick();
-  let card = ctx.window.document.querySelector('#history .hist-card');
-  assert.equal(card.querySelector('.hist-pr-link').textContent, 'Merged', 'resolved to Merged after first load');
+  assert.equal(wordOf(ctx), 'Merged', 'resolved to Merged after first load');
 
-  // Force-refresh: skeleton has no pr -> button must be HIDDEN, not "Create PR", and the
-  // stale "Merged" link must be gone during the refresh window.
+  // Forced reload: the skeleton has no pr -> the row keeps the last known one.
+  const gets = ctx.historyGets();
   ctx.refresh();
   await ctx.tick();
-  card = ctx.window.document.querySelector('#history .hist-card');
-  assert.equal(card.querySelector('.hist-pr-link'), null, 'no stale link during refresh');
-  assert.equal(card.querySelector('.hist-pr').hidden, true, 'no Create-PR flash during refresh — button hidden');
+  assert.equal(ctx.historyGets(), gets + 1, 'History was fetched again');
+  assert.equal(busy(ctx), 'true', 'the reload is in flight (Phase 2 not answered yet)');
+  assert.equal(wordOf(ctx), 'Merged', 'no "Finished" flash while the PR lookup runs');
 
-  // Enrichment re-resolves -> Merged link returns.
+  // Enrichment re-resolves -> still Merged.
   const t2 = ctx.prTokens().at(-1);
-  assert.notEqual(t1, t2, 'refresh issued a new token');
+  assert.notEqual(t1, t2, 'the reload issued a new token');
   ctx.dispatchPr({ token: t2, items: [{ projectKey: 'proj-0000abcd', id: 'p1', pr: { state: 'MERGED', url: 'https://gh/x/pull/9', number: 9 } }] });
   await ctx.tick();
-  assert.equal(card.querySelector('.hist-pr-link').textContent, 'Merged', 're-resolved to Merged after refresh');
+  assert.equal(wordOf(ctx), 'Merged', 're-resolved to Merged after the reload');
+  assert.equal(busy(ctx), 'false');
 });

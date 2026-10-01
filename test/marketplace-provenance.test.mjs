@@ -9,6 +9,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { installPlugin, listInstalledPlugins } from '../src/core/plugin-store.mjs';
+import { fetchCandidate } from '../src/core/plugin-repo.mjs';
+import { writeMarketplaces, seedBuiltinMarketplace } from '../src/core/marketplaces.mjs';
 import { readPluginsLock, pluginsLockFile } from '../src/core/plugins-lock.mjs';
 
 useTempHome(after);
@@ -71,4 +73,39 @@ test('installPlugin without marketplace writes no marketplace key', async () => 
   // the whole lock legitimately contains other plugins' marketplace keys in the shared home.
   const onDisk = JSON.parse(readFileSync(pluginsLockFile(), 'utf8'))['plain-plugin'];
   assert.doesNotMatch(JSON.stringify(onDisk), /"marketplace"/);
+});
+
+test('installing from a marketplace that tracks a branch pins that branch and records it; updates follow it, not HEAD', async () => {
+  const root = join(scratch, 'branch-repo');
+  mkdirSync(join(root, 'plugins', 'br'), { recursive: true });
+  writeFileSync(join(root, 'worca-cc-marketplace.json'), JSON.stringify({ name: 'B', plugins: ['plugins/br'] }));
+  writeFileSync(join(root, 'plugins', 'br', 'worca-cc-plugin.json'), JSON.stringify({
+    name: 'branch-plugin', version: '0.1.0',
+    taskSources: [{ id: 'main', displayName: 'B', module: './index.mjs',
+      inputs: [{ key: 'task', type: 'task-browser', label: 'Task' }] }],
+  }));
+  writeFileSync(join(root, 'plugins', 'br', 'index.mjs'), 'export default () => ({});\n');
+  await git(root, 'init', '-q', '-b', 'main');
+  await git(root, 'add', '-A');
+  await git(root, 'commit', '-qm', 'c1');
+  await git(root, 'checkout', '-q', '-b', 'dev');
+  await git(root, 'commit', '-q', '--allow-empty', '-m', 'dev 1');
+  const dev1 = await git(root, 'rev-parse', 'HEAD');
+  await git(root, 'checkout', '-q', 'main');
+  writeMarketplaces({ seededBuiltin: false, marketplaces: {} });
+  const { id } = seedBuiltinMarketplace({ source: { url: root, ref: 'dev' } });
+
+  await installPlugin({ repoUrl: root, subdir: 'plugins/br', name: 'branch-plugin', marketplace: id });
+  const entry = readPluginsLock()['branch-plugin'];
+  assert.equal(entry.pinnedSha, dev1, 'no sha given: the branch tip, not HEAD');
+  assert.equal(entry.ref, 'dev');
+
+  await git(root, 'commit', '-q', '--allow-empty', '-m', 'main 2');
+  await git(root, 'checkout', '-q', 'dev');
+  await git(root, 'commit', '-q', '--allow-empty', '-m', 'dev 2');
+  const dev2 = await git(root, 'rev-parse', 'HEAD');
+  await git(root, 'checkout', '-q', 'main');
+  const cand = await fetchCandidate('branch-plugin');
+  assert.equal(cand.candidateSha, dev2);
+  assert.deepEqual(cand.commits.map((c) => c.subject), ['dev 2']);
 });

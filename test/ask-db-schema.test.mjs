@@ -26,7 +26,7 @@ test('fresh DB: user_version = SCHEMA_VERSION, the four ask tables, the index an
   for (const t of ASK_TABLES) assert.ok(tableNames(db).includes(t), `${t} exists`);
   assert.ok(indexNames(db).includes('idx_ask_messages_thread'));
   assert.deepEqual(cols(db, 'ask_threads'),
-    ['id', 'title', 'created_at', 'updated_at', 'model', 'effort', 'session_id', 'context', 'totals', 'created_by']);   // v37 owner appended
+    ['id', 'title', 'created_at', 'updated_at', 'model', 'effort', 'session_id', 'context', 'totals', 'created_by', 'mcp_off']);   // v37 owner, v45 MCP picker choices appended
   assert.deepEqual(cols(db, 'ask_messages'),
     ['id', 'thread_id', 'seq', 'role', 'text', 'blocks', 'status', 'reason', 'model', 'effort', 'usage', 'cost_usd', 'duration_ms', 'created_at']);
   // ALTER TABLE ADD COLUMN appends, so the v27 columns (#398) are LAST.
@@ -141,8 +141,7 @@ test('UNIQUE (thread_id, seq) is enforced', () => {
   /UNIQUE/);
 });
 
-// Review of PR #376: every per-thread attachment read (threadAttachmentBytes, the
-// snapshot, the delete cascade) scanned ask_attachments. The index is IF NOT
+// Review of PR #376: every per-thread attachment read (the snapshot, the delete cascade) scanned ask_attachments. The index is IF NOT
 // EXISTS and probed by schemaGaps (INCREMENTAL_INDEXES), so an existing
 // stamped-current DB heals without a version bump.
 test('ask_attachments has a thread_id index on a fresh DB; self-heal recreates it on a stamped-current DB', () => {

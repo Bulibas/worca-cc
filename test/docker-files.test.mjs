@@ -113,6 +113,7 @@ test('overlays: egress confines worca to an internal network; clone-in drops the
   const eg = read('docker/compose.egress.yml');
   assert.match(eg, /internal:\s*true/);
   assert.match(eg, /HTTPS_PROXY: http:\/\/egress:3128/);
+  assert.match(eg, /NO_PROXY: .*\bbroker\b/, 'worca fetch() honors the proxy, so the broker sidecar must bypass it');
   assert.match(eg, /worca-egress-proxy\.mjs/);
   const ci = read('docker/compose.clonein.yml');
   assert.match(ci, /projects:\/projects/);
@@ -247,6 +248,7 @@ test('egress proxy survives a client that resets a denied CONNECT (the sidecar u
 test('compose.broker.yml: worca gets the broker address and no key; the broker publishes no port', () => {
   const b = read('docker/compose.broker.yml');
   assert.match(b, /WORCA_BROKER_URL: http:\/\/broker:8080/);
+  assert.match(b, /NO_PROXY: .*\bbroker\b/, 'worca fetch() honors a proxy from .env, so the broker sidecar must bypass it');
   assert.match(b, /ANTHROPIC_API_KEY: ""/, 'the key is blanked in worca');
   assert.match(b, /CLAUDE_CODE_OAUTH_TOKEN: ""/);
   assert.match(b, /command: \["worca", "broker"\]/);
@@ -279,4 +281,27 @@ test('entrypoint.sh: `worca broker` skips worca\'s preparation and drops to worc
   assert.match(block, /chown worca:worca "\$WORCA_BROKER_DATA_DIR"/);
   assert.match(block, /exec setpriv --reuid=worca --regid=worca --init-groups -- "\$0" "\$@"/);
   assert.match(e, /credential broker \(\$\{WORCA_BROKER_URL\}\); worca holds no model key/);
+});
+
+test('entrypoint.sh: plugin code is shared read-only with the agent users, plugin data never (MCP registry §14)', () => {
+  const e = read('docker/entrypoint.sh');
+  const iso = e.indexOf('if [ "${WORCA_AGENT_ISOLATION:-1}" != 0 ]');
+  const start = e.indexOf('# MCP registry (§14)');
+  assert.ok(iso > 0 && start > iso && start < e.indexOf('exec setpriv --reuid=worca', iso), 'inside the agent-isolation preparation, as root');
+  assert.ok(start < e.indexOf('      umask 0007\n    fi\n', iso), 'before the isolation block closes: $wh is set only inside it');
+  const block = e.slice(start, e.indexOf('\n      done\n', start));
+  assert.match(block, /for p in "\$wh\/plugins"\/\*\/; do/, 'each plugin dir with its trailing slash: ${p}versions is <p>/versions');
+  assert.match(block, /chown worca:worca-share "\$wh\/plugins"/);
+  assert.match(block, /chmod 0710 "\$wh\/plugins"/, 'plugins/: traverse only');
+  assert.match(block, /chmod 0710 "\$p" && chgrp worca-share "\$p"/, 'plugins/<p>/: traverse only');
+  assert.match(block, /chmod -R g-w,g\+rX "\$\{p\}versions" && chgrp -R worca-share "\$\{p\}versions"/, 'versions/**: read-only');
+  assert.ok(block.indexOf('chmod 0710 "$wh/plugins"') < block.indexOf('chown worca:worca-share "$wh/plugins"'),
+    'modes first, then the group (as P2 shareVersionDir): the agents\' group never holds write access, not even for a moment');
+  assert.match(block, /chmod -R go-rwx "\$\{p\}data"/, 'plugin secrets stay owner-only');
+  assert.match(block, /if \[ ! -L "\$wh\/plugins" \]; then chmod 0710/, 'root never follows a planted symlink: plugins/ itself');
+  assert.match(block, /\[ ! -L "\$wh\/plugins" \] && \[ ! -L "\$\{p%\/\}" \] && \[ ! -L "\$\{p\}versions" \] && \[ -d "\$\{p\}versions" \] \|\| continue/,
+    'nor a plugin dir or its versions/');
+  assert.match(block, /if \[ -d "\$\{p\}data" \] && \[ ! -L "\$\{p\}data" \]; then chmod -R go-rwx/, 'nor its data/');
+  assert.doesNotMatch(block, /g\+w|g\+s|2770|worca-share "\$\{p\}data"/, 'never group-writable, never setgid, data never shared');
+  assert.doesNotMatch(block, /\.agent-isolation/, 'every boot, not once per volume: plugins installed since then join too');
 });

@@ -29,6 +29,13 @@ URL, no Events API endpoint, no tunnel.
    channel's *About* tab. Fill **Notify channel IDs** and — for commands —
    **Allowed channel IDs**. Test from *Settings → Chat notifications*.
 
+## Sending commands
+
+Commands are plain messages, not Slack slash commands. Address the bot:
+`@worca /approve *ab12` (Slack delivers it as `<@U…> /approve *ab12`, which
+worca understands). A bare message starting with `/` is intercepted by Slack
+as a slash command; a leading space (` /approve`) also works.
+
 ## Security
 
 **A bot in an allowed channel is control of worca-cc** (approve gates,

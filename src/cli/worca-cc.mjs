@@ -46,6 +46,7 @@ import { cmdContainer } from './container.mjs';
 import {
   DEFAULT_UI_HOST, DEFAULT_UI_PORT, probeUi, stopUi, readUiInstance, uiUrl, waitForUiState,
 } from '../core/ui-instance.mjs';
+import { useEnvProxy, proxyNotice } from '../core/env-proxy.mjs';
 
 // ── node:sqlite runtime guard + warning filter ──────────────────────────────────
 // Drop ONLY the one-time ExperimentalWarning emitted by node:sqlite (the module is
@@ -1609,6 +1610,7 @@ function contribSummary(x) {
     [n(b.scripts), 'script', 'scripts'],
     [n(b.skills), 'skill', 'skills'],
     [n(b.workflows), 'workflow', 'workflows'],
+    [n(b.mcpServers), 'MCP server', 'MCP servers'],
   ]
     .filter(([count]) => count > 0)
     .map(([count, one, many]) => `${count} ${count === 1 ? one : many}`);
@@ -1644,6 +1646,7 @@ async function printInventory(inv) {
   if (summary) out(`  ${summary}`);
   const notice = await pythonNoticeFor(i.scripts);
   if (notice) out(c('yellow', `  ${notice}`));
+  for (const s of i.mcpServers || []) out(`  MCP server: ${s.name} (${s.type}) — ${s.command || s.url}`);
   for (const s of i.skills || []) out(`  skill: ${s}`);
   for (const w of i.workflows || []) out(`  workflow: ${w}`);
   if (i.depCount != null) out(`  npm dependencies: ${i.depCount}`);
@@ -1942,6 +1945,13 @@ async function cmdPlugin(argv) {
   const store = await import('../core/plugin-store.mjs');
   const repoMod = await import('../core/plugin-repo.mjs');
   const manifestMod = await import('../core/plugin-manifest.mjs');
+  // MCP registry (§4.4): persist the bases of servers that became honoured with
+  // no install event. Never fails the command; the next start or write retries.
+  try {
+    await (await import('../core/mcp/catalog.mjs')).reconcileMcpStore();
+  } catch (err) {
+    process.stderr.write(`warning: MCP registry reconcile skipped: ${err?.message || err}\n`);
+  }
 
   try {
     switch (verb) {
@@ -1958,7 +1968,7 @@ async function cmdPlugin(argv) {
         const name = a._[0];
         if (!name) fail('Usage: worca plugin install <name> [--repo <url>] [--marketplace <id>] [--ref <sha>] [--yes]');
         const mkt = await import('../core/marketplaces.mjs');
-        try { mkt.seedBuiltinMarketplace(); } catch { /* non-checkout install */ }
+        try { mkt.seedBuiltinMarketplace(); } catch { /* registry unwritable: go on without the builtin */ }
         let repoUrl = a.repo;
         let marketplace = a.marketplace || null;
         if (!repoUrl && marketplace) {
@@ -2001,6 +2011,11 @@ async function cmdPlugin(argv) {
         for (const s of m.taskSources || []) {
           const secrets = (s.configSchema || []).filter((f) => f.secret).map((f) => f.key);
           out(`  task source: ${s.id} (${s.displayName})${secrets.length ? ` — requests secrets: ${secrets.join(', ')}` : ''}`);
+        }
+        // MCP servers (registry §13): the honoured block is knowable before export too.
+        for (const n of Object.keys(m.mcpServers || {}).sort()) {
+          const s = store.mcpInventoryRow(n, m.mcpServers[n]);
+          out(`  MCP server: ${s.name} (${s.type}) — ${s.command || s.url}`);
         }
         if (m.setup?.node) out('  setup: npm ci --prefix <versionDir> --ignore-scripts --omit=dev');
         if (m.setup?.python) out('  setup: uv sync --project <versionDir>');
@@ -2049,6 +2064,7 @@ async function cmdPlugin(argv) {
         for (const s of delta.newTaskSources || []) out(c('yellow', `  new task source: ${s}`));
         for (const ag of delta.newAgents || []) out(c('yellow', `  new agent: ${ag}`));
         if (delta.setupChanged) out(c('yellow', '  setup commands changed'));
+        for (const l of delta.mcpLines || []) out(c(l.red ? 'red' : 'yellow', `  ${l.text}`));
         if (a.diff && cand.diffFull) out(cand.diffFull);
         if (!(await confirmPlugin('Update?', !!a.yes))) {
           out('aborted (still pinned)');
@@ -2250,6 +2266,10 @@ async function cmdPlugin(argv) {
         const row = host.status().find((r) => r.plugin === name && r.channelId === channelId);
         if (!row) { await host.stop(); fail(`no chat channel "${name}/${channelId}" — is the plugin installed and enabled?`); }
         process.stderr.write(`worker for ${name}/${channelId} running — type text to simulate inbound, Ctrl-C to exit\n`);
+        // A second live worker on the same bot competes with the worca server:
+        // Telegram hands each update to ONE poller (the other gets HTTP 409), and the
+        // cursor state is shared — commands consumed here never reach the server.
+        process.stderr.write('note: while this runs, chat commands go HERE, not to the worca UI server. Stop the server first, or use it only for a quick check.\n');
         const { createInterface } = await import('node:readline');
         const rl = createInterface({ input: process.stdin });
         rl.on('line', (line) => {
@@ -2288,7 +2308,7 @@ async function cmdMarketplace(argv) {
     return 0;
   }
   const mkt = await import('../core/marketplaces.mjs');
-  try { mkt.seedBuiltinMarketplace(); } catch { /* non-checkout install: skip */ }
+  try { mkt.seedBuiltinMarketplace(); } catch { /* registry unwritable: go on without the builtin */ }
   try {
     switch (verb) {
       case 'add': {
@@ -3021,7 +3041,7 @@ async function cmdPolicy(argv) {
   if (!verb || verb === 'help') { process.stdout.write(POLICY_HELP); return 0; }
   const sync = await import('../core/policy/sync.mjs');
   const { effectiveRows } = await import('../core/policy/effective.mjs');
-  const { localSnapshot, pluginRequirements, marketplaceSeedCandidates, seedPolicyMarketplaces } = await import('../core/policy/local.mjs');
+  const { localSnapshot, withMcpLocal, pluginRequirements, marketplaceSeedCandidates, seedPolicyMarketplaces } = await import('../core/policy/local.mjs');
   try {
     switch (verb) {
       case 'show': {
@@ -3033,7 +3053,7 @@ async function cmdPolicy(argv) {
           else out(`no team policy for ${projectDir}: ${r.detail || r.reason}`);
           return r.reason === 'not-enabled' || r.reason === 'no-origin' ? 0 : 1;
         }
-        const rows = effectiveRows({ doc: r.doc, workspaceRun: false, local: localSnapshot(projectDir) });
+        const rows = effectiveRows({ doc: r.doc, workspaceRun: false, local: await withMcpLocal(localSnapshot(projectDir), { slug: r.home, sha: r.sha, doc: r.doc }) });
         if (a.json) { out(JSON.stringify({ home: r.home, sha: r.sha, delegated: r.delegated, from: r.from, doc: r.doc, rows }, null, 2)); return 0; }
         out(c('bold', `team policy ${r.home}${r.sha ? ` @ ${String(r.sha).slice(0, 7)}` : ''}${r.delegated ? ` (followed by ${r.from})` : ''}`));
         if (r.doc.title) out(`  ${r.doc.title}${r.doc.updatedBy ? ` · updated by ${r.doc.updatedBy}` : ''}${r.doc.updatedAt ? ` · ${r.doc.updatedAt}` : ''}`);
@@ -3164,6 +3184,10 @@ function nearestSubcommand(token) {
 }
 
 async function main() {
+  // Outbound calls (pipelines, `worca broker`) honor HTTP(S)_PROXY / NO_PROXY (src/core/env-proxy.mjs).
+  // Only problems are printed: stdout belongs to the subcommand (some emit JSON).
+  const proxyLine = proxyNotice(useEnvProxy());
+  if (proxyLine?.level === 'warn') process.stderr.write(`worca: ${proxyLine.text}\n`);
   const sub = process.argv[2];
   // `worca help` is what every CLI user types first; it is not a subcommand and
   // not a near-miss of one, so without this line it became a PROMPT and ran a

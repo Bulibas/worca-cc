@@ -5,6 +5,7 @@
 // innerHTML for content anywhere in this file (the markdown renderer owns the
 // only sanitized-HTML path).
 import { openScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
+import { chooseSyncRefusal, sourceRefNote } from './branch-sync.mjs';
 import { formatInstant, describeRule } from '../../src/shared/schedule/recurrence.mjs';
 import { createThreadModel } from './ask-model.mjs';
 import { credentialBadge } from './credential-badges.mjs';
@@ -17,6 +18,8 @@ import { buildTrace, scheduleTrace, playAssembly } from './auto-build.mjs';
 import { buildNodeConfigRows, pruneNodeSelection, modifiedFieldsOf } from './node-tunables.mjs';
 import { classifyLoops } from '../../src/shared/graph/loops.mjs';
 import { portsFnFor } from '../../src/shared/graph/ports.mjs';
+import { parseMcpToolName } from '../../src/shared/mcp-tool-name.mjs';
+import { mcpSkipView, mcpCopyNote } from './mcp-run-picker.mjs';
 
 /**
  * Cold-start pick, used ONLY until GET /api/ask/models resolves — and afterwards
@@ -32,7 +35,12 @@ const ICONS = {
   chevronDown: 'M6 9l6 6 6-6',
   send: 'M12 19V5M6 11l6-6 6 6',
   down: 'M12 5v14M6 13l6 6 6-6',
+  mic: ['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M19 11a7 7 0 0 1-14 0', 'M12 18v3'],
+  voiceTalk: ['M7.9 20A9 9 0 1 0 4 16.1L2 22z', 'M8 10h8M8 14h5'],           // chat bubble with text lines: speak in, read the reply
+  voiceHandsFree: ['M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4'],               // waveform: a live conversation
 };
+// One icon per voice mode; the mic button and the ▾ menu both draw from this.
+const VOICE_MODE_ICONS = { dictate: ICONS.mic, talk: ICONS.voiceTalk, handsfree: ICONS.voiceHandsFree };
 
 export function fmtTokens(n) {
   if (!Number.isFinite(n) || n <= 0) return null;
@@ -165,7 +173,7 @@ const PILL_MORPH_IN_MS = 520;
 const PILL_MORPH_OUT_MS = 800;
 const PILL_SETTLE_FALLBACK_MS = PILL_MORPH_OUT_MS + 150;
 
-export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null }) {
+export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null, createVoice = null, voiceLongPressMs = 500 }) {
   const homePick = browserPick();         // hoisted declaration (defined below)
   const st = {
     open: false,
@@ -189,6 +197,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     threadsRefresh: null,     // the debounce timer behind the History popover's ask-run-status refetch
     expandedAgents: new Set(),
     worktrees: [],            // P4 §10: the chat's open worktrees (snapshot-fed)
+    // MCP registry §9.4: the chat's picker choices (held here, sent with every message, PATCHed between turns),
+    // the last POST /api/ask/mcp-preview body and whether it failed; gen drops a stale response, render repaints
+    // an open picker, saving chains the PATCHes so they land in toggle order.
+    mcp: { off: { sets: [], members: [] }, preview: null, failed: false, gen: 0, queued: false, render: null, saving: Promise.resolve() },
     pinned: true,
     prevFocus: null,
     size: readStoredSize(),   // {w,h} the user's persisted sheet size (hoisted reader); null = stylesheet default
@@ -205,6 +217,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     resyncing: false,
     firstOpenDone: false,
     destroyed: false,
+    voice: null,              // the voice controller (ask-voice.mjs), made on first mic use — docs/speech.md
+    voicePendingSend: false,  // a hands-free transcript waiting for the live turn to end (barge-in)
+    voiceLongPress: null,     // the mic's long-press timer
+    voiceSwallowClick: false, // the click that ends a long-press must not also start dictation
     lastAnswerRender: 0,
     rowEls: null,
     seenRows: new Set(),      // message ids the transcript has already shown — see renderTranscript
@@ -413,6 +429,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     el.jump.addEventListener('click', jumpToLatest);
     sheet.appendChild(el.jump);
     for (const edge of ['n', 'e', 'w', 'ne', 'nw']) sheet.appendChild(buildResizeHandle(edge));
+    sheet.appendChild(buildDropTarget(sheet));
     dock.appendChild(sheet);
     dock.appendChild(pill);
     el.pill = pill;
@@ -422,7 +439,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   }
 
   // Mirrors src/core/ask/attachment-kind.mjs + limits.mjs (#398): text kinds are
-  // UTF-8 capped at 512 KB, binary kinds (images + PDF) at 5 MB; the server
+  // UTF-8 capped at 512 KB, binary kinds (images + PDF) at 32 MB, 48 MB per message; the server
   // re-validates everything, these are just early clear messages.
   const ASK_ATTACH_EXT = ['.md', '.markdown', '.txt', '.json', '.csv', '.log', '.html', '.htm'];
   const ASK_ATTACH_BINARY = {
@@ -430,8 +447,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     '.gif': 'image/gif', '.webp': 'image/webp', '.pdf': 'application/pdf',
   };
   const ASK_MAX_TEXT_BYTES = 524_288;
-  const ASK_MAX_BINARY_BYTES = 5 * 1024 * 1024;
-  const ASK_MAX_THREAD_BYTES = 25 * 1024 * 1024;
+  const ASK_MAX_BINARY_BYTES = 32 * 1024 * 1024;
+  const ASK_MAX_MESSAGE_BYTES = 48 * 1024 * 1024;
 
   function bytesToBase64(bytes) {
     let bin = '';
@@ -482,9 +499,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       if (f.size > cap) { setComposerMsg(`attachment over ${cap} bytes: ${name}`); continue; }
       const others = st.pendingFiles.filter((p) => p.name !== name); // dedupe by name, newest wins
       if (others.length >= 8) { setComposerMsg('at most 8 attachments per message'); continue; }
-      const serverBytes = st.model ? st.model.attachmentsBytes() : 0;
       const pendingBytes = others.reduce((n, p) => n + p.bytes, 0);
-      if (serverBytes + pendingBytes + f.size > ASK_MAX_THREAD_BYTES) { setComposerMsg('attachment budget for this thread exceeded'); continue; }
+      if (pendingBytes + f.size > ASK_MAX_MESSAGE_BYTES) { setComposerMsg(`attachments over ${ASK_MAX_MESSAGE_BYTES} bytes per message`); continue; }
       let dataBase64 = '';
       try {
         dataBase64 = bytesToBase64(new Uint8Array(await f.arrayBuffer()));
@@ -493,6 +509,83 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       st.pendingFiles = [...others, { name, bytes: f.size, dataBase64, attKind, mime: binMime || null }];
     }
     renderChips();
+  }
+
+  // Drag-and-drop and paste feed the same addFiles() as the "+" button: no
+  // validation of their own. Only drags that carry files are touched, so text
+  // and element drags (widgets-input.mjs list reordering) keep their defaults.
+  const carriesFiles = (dt) => !!dt && Array.from(dt.types || []).includes('Files');
+
+  /**
+   * The whole sheet is the drop target. dragenter/dragleave fire on every child
+   * crossed (enter on the new child lands before leave on the old one), so a
+   * depth counter — not the event target — decides when the pointer really left;
+   * drop and dragend reset it outright.
+   */
+  function buildDropTarget(sheet) {
+    const overlay = make('div', 'ask-drop');
+    overlay.setAttribute('data-ask-drop', '');
+    overlay.setAttribute('aria-hidden', 'true');
+    overlay.hidden = true;
+    overlay.appendChild(make('span', 'ask-drop-label', 'Drop files to attach'));
+    let depth = 0;
+    const show = (on) => { overlay.hidden = !on; };
+    const reset = () => { depth = 0; show(false); };
+    sheet.addEventListener('dragenter', (e) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      depth += 1;
+      show(true);
+    });
+    sheet.addEventListener('dragover', (e) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    });
+    sheet.addEventListener('dragleave', (e) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      depth = Math.max(0, depth - 1);
+      if (!depth) show(false);
+    });
+    sheet.addEventListener('drop', (e) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      reset();
+      addFiles(e.dataTransfer.files);
+    });
+    sheet.addEventListener('dragend', reset);
+    return overlay;
+  }
+
+  // A clipboard image is named "image.png" (or nothing) by the browser: every
+  // paste would then replace the last one through addFiles' name dedupe. Such
+  // files get a unique "pasted-<timestamp>.<ext>"; real copied files keep theirs.
+  // A nameless file of an unlisted non-text type gets no extension, so addFiles
+  // rejects it like the "+" button would.
+  let lastPasteStamp = 0;
+  function namePastedFiles(files) {
+    return [...files].map((f) => {
+      const name = String(f.name || '');
+      if (name && !/^image\.[a-z0-9]+$/i.test(name)) return f;
+      const dot = name.lastIndexOf('.');
+      const type = String(f.type || '');
+      const ext = dot >= 0 ? name.slice(dot).toLowerCase()
+        : (Object.keys(ASK_ATTACH_BINARY).find((k) => ASK_ATTACH_BINARY[k] === type)
+          || (type.startsWith('text/') ? '.txt' : ''));
+      lastPasteStamp = Math.max(Date.now(), lastPasteStamp + 1);
+      return new win.File([f], `pasted-${lastPasteStamp}${ext}`, { type: f.type });
+    });
+  }
+
+  function onComposerPaste(e) {
+    const cd = e.clipboardData;
+    if (!cd || !cd.files || !cd.files.length) return; // a text paste goes ahead natively
+    // Excel/Word/browser copies carry the text plus a rendered image of it: the
+    // text is what was meant. Screenshots (no text) and real files still attach.
+    const text = typeof cd.getData === 'function' ? cd.getData('text/plain') : '';
+    if (text && [...cd.files].every((f) => String(f.type || '').startsWith('image/'))) return;
+    e.preventDefault();
+    addFiles(namePastedFiles(cd.files));
   }
 
   function updateSendStop() {
@@ -574,11 +667,156 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       .catch(() => { /* the turn will end via its own frames */ });
   }
 
+  // ---- voice mode (docs/speech.md) ------------------------------------------
+  // One mic: click = one-shot dictation (text lands in the composer, not sent);
+  // long-press or the caret menu = hands-free (listen → send → speak → listen).
+  // The controller (ask-voice.mjs) owns audio; the panel owns the composer, the
+  // turn and the lifecycle (voice off on close / New chat / switch / destroy).
+  const VOICE_LABELS = { loading: 'Starting mic…', listening: 'Listening…', transcribing: 'Transcribing…', thinking: 'Thinking…', speaking: 'Speaking…', error: 'Voice error' };
+
+  function buildVoiceControls() {
+    const wrap = make('span', 'ask-voice');
+    el.voiceStatus = make('span', 'ask-voice-status');
+    el.voiceStatus.hidden = true;
+    el.voiceStatus.setAttribute('role', 'status');
+    wrap.appendChild(el.voiceStatus);
+
+    el.mic = make('button', 'ask-voice-mic');
+    el.mic.type = 'button';
+    el.mic.setAttribute('data-ask-mic', '');
+    el.mic.setAttribute('aria-pressed', 'false');
+    el.mic.setAttribute('aria-label', 'Voice input');
+    el.mic.addEventListener('pointerdown', (ev) => {
+      if (ev.button !== undefined && ev.button !== 0) return;
+      st.voiceSwallowClick = false;                 // a long-press that never produced a click must not eat the next one
+      clearTimeout(st.voiceLongPress);
+      st.voiceLongPress = setTimeout(() => {
+        st.voiceLongPress = null;
+        st.voiceSwallowClick = true;
+        toggleHandsFree();
+      }, voiceLongPressMs);
+    });
+    const cancelPress = () => { if (st.voiceLongPress) { clearTimeout(st.voiceLongPress); st.voiceLongPress = null; } };
+    el.mic.addEventListener('pointerup', cancelPress);
+    el.mic.addEventListener('pointerleave', cancelPress);
+    el.mic.addEventListener('click', () => {
+      if (st.voiceSwallowClick) { st.voiceSwallowClick = false; return; }
+      const v = voice();
+      if (v.active()) { stopVoice(); return; }
+      startVoice(lastVoiceMode());
+    });
+    paintMicMode(lastVoiceMode());
+    wrap.appendChild(el.mic);
+
+    const caret = make('button', 'ask-voice-caret');
+    caret.type = 'button';
+    caret.setAttribute('data-ask-voice-caret', '');
+    caret.setAttribute('aria-label', 'Voice options');
+    caret.title = 'Voice options';
+    caret.appendChild(svgIcon(ICONS.chevronDown, 11, 2));
+    caret.addEventListener('click', () => openVoicePopover(caret));
+    wrap.appendChild(caret);
+    return wrap;
+  }
+
+  function openVoicePopover(trigger) {
+    openPopover({ panelClass: 'ask-pop-voice', trigger, build: (p) => {
+      p.appendChild(make('div', 'ask-pop-caption', 'Voice'));
+      // The check marks the mode that is on now, or, with voice off, the one a click will start.
+      const v = st.voice;
+      const current = v && v.active() ? v.mode() : lastVoiceMode();
+      const item = (label, mode, onPick) => {
+        const it = menuItem('ask-voice-item', () => { closePopover({ focusTrigger: false }); onPick(); });
+        it.dataset.mode = mode;
+        if (VOICE_MODE_ICONS[mode]) it.appendChild(svgIcon(VOICE_MODE_ICONS[mode], 16, 1.9));
+        it.appendChild(make('span', 'ask-model-name', label));
+        if (mode === current) it.appendChild(make('span', 'ask-model-check', '✓'));
+        return it;
+      };
+      p.appendChild(item('Dictate once', 'dictate', () => startVoice('dictate')));
+      p.appendChild(item('Talk, read the replies', 'talk', () => startVoice('talk')));
+      p.appendChild(item('Hands-free conversation', 'handsfree', () => startVoice('handsfree')));
+      if (st.voice && st.voice.active()) p.appendChild(item('Turn voice off', 'off', () => stopVoice()));
+    } });
+  }
+
+  function voice() {
+    if (!st.voice) {
+      st.voice = createVoice({
+        onState: paintVoice,
+        onTranscript: voiceTranscript,
+        onBargeIn: () => { if (st.model && st.model.live()) stopTurn(); },
+        onNotice: (msg) => setComposerMsg(msg),
+      });
+    }
+    return st.voice;
+  }
+
+  const VOICE_USED_KEY = 'worca-cc.ask.voiceUsed';
+  function voiceUsedBefore() { try { return storage.getItem(VOICE_USED_KEY) === '1'; } catch { return false; } }
+
+  // The mode a plain click starts: the last one started (menu, hold or click), remembered across
+  // reloads. Dictate until the user picks another.
+  const VOICE_MODE_KEY = 'worca-cc.ask.voiceMode';
+  const VOICE_MODE_NAMES = { dictate: 'Dictate once', talk: 'Talk, read the replies', handsfree: 'Hands-free conversation' };
+  function lastVoiceMode() {
+    try { const m = storage.getItem(VOICE_MODE_KEY); if (m && VOICE_MODE_NAMES[m]) return m; } catch { /* default */ }
+    return 'dictate';
+  }
+  function paintMicMode(shown) {
+    if (!el.mic) return;
+    el.mic.replaceChildren(svgIcon(VOICE_MODE_ICONS[shown] || ICONS.mic, 16, 1.9));
+    el.mic.title = `${VOICE_MODE_NAMES[lastVoiceMode()]} (click) · hands-free conversation (hold) · other modes (the arrow menu)`;
+  }
+  function startVoice(mode) {
+    if (st.destroyed) return;
+    try { storage.setItem(VOICE_MODE_KEY, mode); } catch { /* sticky is a nicety */ }
+    paintMicMode(mode);
+    voice().start(mode);
+  }
+  function toggleHandsFree() { const v = voice(); if (v.active() && v.mode() === 'handsfree') stopVoice(); else startVoice('handsfree'); }
+  function stopVoice() { st.voicePendingSend = false; if (st.voice && st.voice.active()) st.voice.stop(); }
+
+  function paintVoice(state, { mode, detail } = {}) {
+    if (!el.mic) return;
+    const on = state !== 'off' && state !== 'error';
+    paintMicMode(on && mode ? mode : lastVoiceMode());
+    el.mic.setAttribute('aria-pressed', on ? 'true' : 'false');
+    el.mic.classList.toggle('is-on', on);
+    el.mic.classList.toggle('is-handsfree', on && (mode === 'handsfree' || mode === 'talk'));
+    el.mic.classList.toggle('is-error', state === 'error');
+    el.voiceStatus.hidden = state === 'off';
+    el.voiceStatus.dataset.state = state;
+    el.voiceStatus.textContent = (state === 'loading' && detail) || VOICE_LABELS[state] || '';
+    if (state === 'error') { setComposerMsg(detail || 'voice stopped'); st.voicePendingSend = false; }
+    if (state === 'listening' || state === 'speaking' || state === 'error') announce(VOICE_LABELS[state]);
+    if (state === 'listening' && !voiceUsedBefore()) { try { storage.setItem(VOICE_USED_KEY, '1'); } catch { /* preload is a nicety */ } }
+  }
+
+  function voiceTranscript(text, { autoSend } = {}) {
+    const cur = el.input.value;
+    el.input.value = cur && !/\s$/.test(cur) ? `${cur} ${text}` : `${cur}${text}`;
+    fitInput();                                   // a programmatic write fires no input event
+    if (!autoSend) { focusComposer(); return; }
+    // A live (or loaded-but-not-yet-adopted, inFlight) turn: send once it ends. This covers barge-in.
+    if (st.sending || (st.model && (st.model.live() || st.model.inFlight()))) { st.voicePendingSend = true; return; }
+    voiceSend();
+  }
+
+  function voiceSend() {
+    Promise.resolve()
+      .then(() => sendMessage())
+      .catch(() => false)                          // sendMessage can throw on a malformed response body
+      .then((ok) => {
+        if (!ok && st.voice && st.voice.active()) st.voice.fail(el.composerMsg.hidden ? 'the message was not sent' : el.composerMsg.textContent);
+      });
+  }
+
   async function sendMessage() {
-    if (st.sending || st.destroyed) return;
-    if (st.model && st.model.live()) return; // a turn is streaming — the stop button is showing
+    if (st.sending || st.destroyed) return false;
+    if (st.model && st.model.live()) return false; // a turn is streaming — the stop button is showing
     const text = el.input.value.trim();
-    if (!text) return;
+    if (!text) return false;
     st.sending = true;
     setComposerMsg(null);
     updateSendStop();      // the pill lights the moment the user sends; Send/Stop do not move (nothing streams yet)
@@ -589,7 +827,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         try {
           r = await fetch('/api/ask/threads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
         } catch { r = null; }
-        if (!r || (r.status !== 201 && !r.ok)) { setComposerMsg('could not create the thread'); return; }
+        if (!r || (r.status !== 201 && !r.ok)) { setComposerMsg('could not create the thread'); return false; }
         const body = await r.json();
         id = body.thread.id;
         loadGen += 1;                     // a pending loadThread() must not replace this fresh model
@@ -599,29 +837,35 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         renderTranscript();
         storeThread(id);
       }
+      const sentOff = st.mcp.off;
       const payload = {
         text,
         model: st.picker.model,
         effort: st.picker.effort,
         // The browser's zone rides along: "tomorrow 02:00" is read in it (docs/scheduled-runs.md "Ask Worca").
         context: { ...scopedContext(getPageContext() || {}), timeZone: browserTimeZone() },
+        // MCP registry §9.4: every message carries the picker's choices, so each turn runs what the picker shows —
+        // a refused first message (429/403/400, network) or a PATCH still in flight would leave the stored ones behind.
+        mcpOff: sentOff,
         ...(st.pendingFiles.length ? { attachments: st.pendingFiles.map((f) => ({ name: f.name, dataBase64: f.dataBase64 })) } : {}),
       };
       const model = st.model;
       let res = null;
       try {
         res = await fetch(`/api/ask/threads/${id}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      } catch { setComposerMsg('network error — the message was not sent'); return; }
+      } catch { setComposerMsg('network error — the message was not sent'); return false; }
       // The user may have clicked New chat or switched threads during the POST: the
       // message is on the server and arrives with its thread; touching the composer
       // or the (now different or null) model here would be wrong (review of PR #376).
-      if (st.destroyed || st.model !== model || st.threadId !== id) return;
+      if (st.destroyed || st.model !== model || st.threadId !== id) return false;
       if (!res || res.status !== 202) {
         let msg = `request failed (${res ? res.status : 'network'})`;
         try { const b = await res.json(); if (b && b.error) msg = b.error; } catch { /* keep the fallback */ }
         setComposerMsg(msg);
-        return;
+        return false;
       }
+      // A toggle made while this POST was out PATCHed a value the route then overwrote with sentOff: re-send the latest.
+      if (st.mcp.off !== sentOff) patchMcpOff(id, st.mcp.off);
       const { userMessageId, attachments: stored } = await res.json();
       // Prefer the server's rows: they carry the store-minted ids that key the
       // image thumbnail (#398) and the thread's attachment ledger. The pending
@@ -639,6 +883,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       subscribe(id);
       st.pinned = true;
       scheduleFlush();
+      return true;
     } finally {
       st.sending = false;
       updateSendStop();
@@ -666,6 +911,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); }
     });
     el.input.addEventListener('input', fitInput);
+    el.input.addEventListener('paste', onComposerPaste);
     box.appendChild(el.input);
 
     el.composerMsg = make('div', 'ask-composer-msg');
@@ -701,6 +947,20 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     el.scopeBtn = scopeBtn;
     scopeBtn.dataset.minLevel = 'advanced';      // interface mode (docs/ui-levels.md): Auto scope is the simple path
     row.appendChild(scopeBtn);
+
+    // MCP registry §9.4: the per-chat MCP picker — `MCP · N` (N = copies that start next turn), hidden while no
+    // set in play has a member. Styled as the scope pill; opens like the model button's Effort sub-picker.
+    const mcpBtn = make('button', 'ask-scope-btn ask-mcp-btn');
+    mcpBtn.type = 'button';
+    mcpBtn.setAttribute('data-ask-mcp-btn', '');
+    mcpBtn.title = 'MCP servers for this chat';
+    mcpBtn.hidden = true;
+    mcpBtn.dataset.minLevel = 'advanced';
+    el.mcpBtnLabel = make('span', 'ask-scope-label', 'MCP · 0');
+    mcpBtn.appendChild(el.mcpBtnLabel);
+    mcpBtn.addEventListener('click', () => openMcpPopover(mcpBtn));
+    el.mcpBtn = mcpBtn;
+    row.appendChild(mcpBtn);
 
     row.appendChild(make('span', 'ask-composer-spacer'));
 
@@ -755,6 +1015,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     el.send.setAttribute('aria-label', 'Send');
     el.send.appendChild(svgIcon(ICONS.send, 15, 2.2));
     el.send.addEventListener('click', sendMessage);
+    if (createVoice) row.appendChild(buildVoiceControls());
     row.appendChild(el.send);
 
     el.stop = make('button', 'ask-stop');
@@ -800,6 +1061,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     focusComposer();
     scheduleFlush();
     repaintProgressCards({ hydrate: true });
+    scheduleMcpRefresh();                          // the page may have changed while the sheet was closed
+    if (createVoice && voiceUsedBefore()) voice().preload();   // the mic is ready by the time it is clicked
   }
 
   /**
@@ -822,6 +1085,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
   function closeSheet() {
     if (!st.open) return;
+    stopVoice();
     closePopover({ focusTrigger: false });
     st.open = false;
     el.sheet.hidden = true;
@@ -1064,7 +1328,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (focusTrigger) { try { p.trigger.focus(); } catch { /* ignore */ } }
   }
 
-  function menuItems(panel) { return [...panel.querySelectorAll('[role="menuitem"]:not([disabled])')]; }
+  function menuItems(panel) { return [...panel.querySelectorAll('[role="menuitem"]:not([disabled]),[role="menuitemcheckbox"]:not([disabled])')]; }
 
   function onPopKeydown(e) {
     const p = st.popover;
@@ -1274,6 +1538,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const effort = wantedEntry ? wanted.effort : fallback.effort;
     const next = { model: entry.id, effort: coerceEffort(entry, effort) };
     const changed = next.model !== st.picker.model || next.effort !== st.picker.effort;
+    if (next.model !== st.picker.model) scheduleMcpRefresh();   // MCP registry §9.4: the model sets the §5.6 tool-name limit
     st.picker = next;
     // D11: persist ONLY a repair of a pick the user actually made. Writing the
     // backend default here would make it authoritative exactly once, ever — and a
@@ -1377,6 +1642,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     storeModel();
     persistThreadPick();
     updatePickerButton();
+    scheduleMcpRefresh();                           // the model sets the §5.6 tool-name limit
     closePopover({ focusTrigger: false });
     focusComposer();
   }
@@ -1484,6 +1750,164 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     renderPane('main');
   }
 
+  // ---- MCP picker (MCP registry §9.4) -----------------------------------------
+  const MCP_ROUTE_LABEL = { pinned: 'pinned', page: 'this page', worktree: 'open worktree' };
+  const mcpOffOf = (v) => ({
+    sets: v && Array.isArray(v.sets) ? [...v.sets] : [],
+    members: v && Array.isArray(v.members) ? [...v.members] : [],
+  });
+
+  /** One POST /api/ask/mcp-preview per tick, whatever asked for it; only while the sheet is open. */
+  function scheduleMcpRefresh() {
+    if (st.mcp.queued || st.destroyed || !st.open) return;
+    st.mcp.queued = true;
+    Promise.resolve().then(refreshMcp);
+  }
+
+  async function refreshMcp() {
+    st.mcp.queued = false;
+    const gen = ++st.mcp.gen;
+    const body = {
+      context: scopedContext(getPageContext() || {}),
+      mcpOff: st.mcp.off,                       // the client holds the choices: they override the stored ones
+      ...(st.picker.model ? { model: st.picker.model } : {}),
+      ...(st.threadId ? { threadId: st.threadId } : {}),
+    };
+    let data = null;
+    try {
+      const r = await fetch('/api/ask/mcp-preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      data = r && r.ok ? await r.json() : null;
+    } catch { data = null; }
+    if (gen !== st.mcp.gen || st.destroyed) return;
+    st.mcp.failed = !(data && Array.isArray(data.sets));
+    st.mcp.preview = st.mcp.failed ? null : data;
+    const p = st.mcp.preview;
+    // A failed preview leaves the chip as it was (the open picker says so): the user can reopen it to retry.
+    if (p) el.mcpBtn.hidden = !p.sets.some((x) => x.members > 0);
+    el.mcpBtnLabel.textContent = p ? `MCP · ${p.started}` : 'MCP · ?';
+    if (st.mcp.render) st.mcp.render();
+  }
+
+  /** Save the choices: every message carries them; once a thread exists they are also PATCHed (card-event turns and
+   *  reloads read the stored value) — one PATCH at a time, in toggle order, since two in flight can land out of order. */
+  function patchMcpOff(tid, value) {
+    const body = JSON.stringify({ mcpOff: value });
+    st.mcp.saving = st.mcp.saving
+      .then(() => fetch(`/api/ask/threads/${tid}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }))
+      .catch(() => { /* the picker keeps the choice; the next message carries it */ });
+  }
+  function setMcpOff(next) {
+    st.mcp.off = next;
+    if (st.threadId) patchMcpOff(st.threadId, next);
+    if (st.mcp.render) st.mcp.render();          // the switch moves now; the counts follow the preview
+    scheduleMcpRefresh();
+  }
+  const toggle = (list, v) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
+
+  function mcpSwitch(on, label, onToggle, focusKey) {
+    const b = make('button', `switch ask-mcp-switch${on ? ' on' : ''}`);
+    b.dataset.mcpKey = focusKey;
+    b.type = 'button';
+    b.setAttribute('role', 'menuitemcheckbox');
+    b.setAttribute('aria-checked', String(on));
+    b.setAttribute('aria-label', label);
+    b.tabIndex = -1;
+    b.addEventListener('click', onToggle);
+    return b;
+  }
+
+  function mcpManageItem(text, hash) {
+    const item = menuItem('ask-mcp-manage', () => {
+      closeSheet();                                 // the progress card's precedent: close, then route
+      if (win.location.hash !== hash) win.location.hash = hash.slice(1);
+    });
+    item.dataset.mcpKey = 'manage';                 // a re-render keeps focus on the footer too
+    item.appendChild(make('span', null, text));
+    return item;
+  }
+
+  function openMcpPopover(trigger) {
+    const panel = openPopover({ panelClass: 'ask-pop-mcp', trigger, build: () => {}, onClose: () => { st.mcp.render = null; } });
+    if (!panel) return;
+    let pane = null;                                // null = level 1; else the set id drilled into
+    let first = true;
+    const render = (focusKey = null) => {
+      const p = st.mcp.preview || { sets: [], copies: [], skipped: [] };
+      // A re-render (a toggle, a preview landing) keeps keyboard focus on the same control.
+      const keep = focusKey ?? (panel.contains(doc.activeElement) ? doc.activeElement.dataset.mcpKey || '' : null);
+      panel.replaceChildren();
+      const set = pane ? p.sets.find((x) => x.id === pane) : null;
+      if (pane && set) {
+        // Level 2: one row per membership of the set; a skipped one is a disabled row with its reason.
+        const back = menuItem('ask-pane-back', () => { const from = pane; pane = null; render(`drill:${from}`); });
+        back.setAttribute('data-ask-pane-back', '');
+        back.appendChild(make('span', null, `‹ ${set.name}`));
+        panel.appendChild(back);
+        panel.appendChild(make('div', 'ask-pop-divider'));
+        const setOff = st.mcp.off.sets.includes(set.id);
+        const rows = [
+          ...p.copies.filter((c) => c.setId === set.id).map((c) => ({ copy: c.name, serverId: c.serverId, skip: null, note: mcpCopyNote(p, c) })),
+          ...p.skipped.filter((x) => x.setId === set.id).map((x) => ({ copy: mcpSkipView(x).name, serverId: x.serverId, skip: x, note: '' })),
+        ].sort((a, b) => (Number(!!a.skip && a.skip.reason !== 'chat-off') - Number(!!b.skip && b.skip.reason !== 'chat-off'))
+          || (a.copy < b.copy ? -1 : a.copy > b.copy ? 1 : 0));   // switches first, then the disabled rows (Appendix B 10, P4)
+        for (const m of rows) {
+          if (m.skip && m.skip.reason !== 'chat-off') {
+            // §5.7 in the New Pipeline picker's wording: choices (off, needs-consent) muted, problems amber.
+            const v = mcpSkipView(m.skip);
+            const item = menuItem(`ask-mcp-member is-skipped${v.problem ? ' is-problem' : ''}`);
+            item.disabled = true;
+            item.appendChild(make('span', 'ask-model-name', m.copy));
+            item.appendChild(make('span', 'ask-pop-row-value', v.why));
+            panel.appendChild(item);
+            continue;
+          }
+          const k = `${set.id}|${m.serverId}`;
+          const row = make('div', 'ask-mcp-row');
+          row.setAttribute('role', 'none');
+          const shown = m.note ? `${m.copy} · ${m.note}` : m.copy;   // §4.4 name provisional, §5.6 withheld tools
+          row.appendChild(make('span', 'ask-mcp-copy', shown));
+          const sw = mcpSwitch(!setOff && !st.mcp.off.members.includes(k), shown,
+            () => setMcpOff({ ...st.mcp.off, members: toggle(st.mcp.off.members, k) }), `member:${k}`);
+          if (setOff) { sw.disabled = true; sw.title = `${set.name} is off in this chat`; }   // the whole set is off
+          row.appendChild(sw);
+          panel.appendChild(row);
+        }
+        panel.appendChild(make('div', 'ask-pop-divider'));
+        panel.appendChild(mcpManageItem(`Manage ${set.name} in Settings › MCP servers`, `#settings/mcp/sets/${encodeURIComponent(set.id)}`));
+      } else {
+        pane = null;
+        // Level 1: one row per set in play, in the resolver's picker order (General, user sets by rank, Team).
+        for (const x of p.sets) {
+          const row = make('div', 'ask-mcp-row');
+          row.setAttribute('role', 'none');
+          row.appendChild(mcpSwitch(!st.mcp.off.sets.includes(x.id), x.name,
+            () => setMcpOff({ ...st.mcp.off, sets: toggle(st.mcp.off.sets, x.id) }), `set:${x.id}`));
+          const drill = menuItem('ask-mcp-set', () => { pane = x.id; render(); });
+          drill.dataset.mcpKey = `drill:${x.id}`;
+          const route = x.routes[0]?.route;          // the resolver sorts a set's routes by rank
+          drill.appendChild(make('span', 'ask-model-name', x.group === 'set' && route ? `${x.name} · ${MCP_ROUTE_LABEL[route] || route}` : x.name));
+          drill.appendChild(make('span', 'ask-pop-row-value', `${x.started}/${x.members}`));
+          drill.appendChild(make('span', 'ask-pop-row-chev', '›'));
+          row.appendChild(drill);
+          panel.appendChild(row);
+        }
+        // Before the first preview lands, or when it failed: say so rather than show an empty menu.
+        if (!p.sets.length) panel.appendChild(make('div', 'ask-pop-empty', st.mcp.failed ? 'Could not load the MCP servers — reopen to retry.' : !st.mcp.preview ? 'Loading…' : 'No MCP servers in play.'));
+        panel.appendChild(make('div', 'ask-pop-divider'));
+        panel.appendChild(mcpManageItem('Manage in Settings › MCP servers', '#settings/mcp'));
+      }
+      if (first || keep !== null) {
+        const items = menuItems(panel);
+        const f = items.find((x) => keep && x.dataset.mcpKey === keep) || items[0];
+        if (f) { f.tabIndex = 0; try { f.focus(); } catch { /* ignore */ } }
+      }
+      first = false;
+    };
+    st.mcp.render = render;
+    render();
+    scheduleMcpRefresh();
+  }
+
   // ---- scope selector (#397) ------------------------------------------------
   /** Per-field merge: the pinned scope replaces the page context's TARGET keys;
    *  view/run/diff-file context still follow the page. Auto sends pinned:false so
@@ -1494,6 +1918,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     delete ctx.projectDir;
     delete ctx.projectKey;
     delete ctx.workspaceId;
+    delete ctx.projectSource;                     // the fallback tag goes with the target keys (MCP registry §9.1)
     ctx.pinned = true;
     if (st.scope.projectKey) ctx.projectKey = st.scope.projectKey;
     else if (st.scope.workspaceId) ctx.workspaceId = st.scope.workspaceId;
@@ -1516,6 +1941,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       label: next.label || null,
     };
     updateScopeButton();
+    scheduleMcpRefresh();
     closePopover({ focusTrigger: false });
     focusComposer();
     // Persist on the thread so the pin survives reload with no message sent. A
@@ -1602,7 +2028,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   // ---- run-info popover ("Agents this chat") --------------------------------
   // ---- worktrees (P4 §10) ---------------------------------------------------
   function setWorktrees(list) {
-    st.worktrees = Array.isArray(list) ? list : [];
+    const ids = (l) => l.map((w) => w && w.worktreeId).join(',');
+    const next = Array.isArray(list) ? list : [];
+    if (ids(next) !== ids(st.worktrees)) scheduleMcpRefresh();   // an open worktree brings its project's sets (D17)
+    st.worktrees = next;
     if (!el.wtBtn) return;
     el.wtBtn.hidden = st.worktrees.length === 0;
     el.wtBtnLabel.textContent = `${st.worktrees.length} worktree${st.worktrees.length === 1 ? '' : 's'}`;
@@ -1711,6 +2140,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
   // ---- thread actions -------------------------------------------------------
   function newThread() {
+    stopVoice();
     loadGen += 1;                       // a load still in flight must not resurrect the old thread
     st.threadId = null;
     st.model = null;
@@ -1721,6 +2151,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     el.title.textContent = 'Ask Worca';
     applyThreadScope(null);             // #397: a brand-new chat starts on Auto
     restoreBrowserPick();               // …and on the browser-level pick, not the last chat's
+    st.mcp.off = { sets: [], members: [] };   // …and with every MCP server on
+    scheduleMcpRefresh();
     pruneCardEls();                     // st.model is already null — renderTranscript's keep set cannot see the old ids
     renderTranscript();
     updateMeters();
@@ -1787,6 +2219,14 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       const a = make('a', 'ask-notice-link', 'open');
       a.setAttribute('href', b.href);
       n.appendChild(a);
+    }
+    if (b.mcp) {
+      // MCP registry §9.1 (D17): the worktree join notice's "MCP" opens the per-chat picker.
+      n.appendChild(doc.createTextNode(' · '));
+      const mcp = make('button', 'ask-notice-mcp', 'MCP');
+      mcp.type = 'button';
+      mcp.addEventListener('click', () => { if (el.mcpBtn) openMcpPopover(el.mcpBtn); });
+      n.appendChild(mcp);
     }
     // The raw failure evidence, for those who debug: expert only — the human
     // line above is the explanation at every level.
@@ -2599,6 +3039,82 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return { el: rootEl };
   }
 
+  // ---- Workspace card (propose_workspace_change): create, add / remove members, rename ------------------------------
+  const WS_KIND_LABEL = { create: 'Create', add_members: 'Add members', remove_member: 'Remove member', rename: 'Rename' };
+  const WS_APPLY_LABEL = { create: 'Create', add_members: 'Add', remove_member: 'Remove', rename: 'Rename' };
+  /** proposed → applied | failed, or declined. Every value is text. */
+  function buildWorkspaceCard(block) {
+    const card = block.card || {};
+    const summary = card.summary || 'workspace change';
+    if (block.state === 'declined') return { el: make('div', 'ask-card-stub', `Declined — ${summary}`) };
+    const rootEl = make('div', `ask-card ask-mcard ask-wscard is-${block.state}`);
+    rootEl.setAttribute('data-ask-wscard', block.state);
+    const head = make('div', 'ask-mcard-head');
+    head.appendChild(make('span', 'ask-mcard-title', block.state === 'applied' ? 'Applied workspace change' : block.state === 'failed' ? 'Workspace change failed' : 'Proposed workspace change'));
+    head.appendChild(make('span', 'ask-mcard-kind', WS_KIND_LABEL[card.kind] || card.kind || ''));
+    rootEl.appendChild(head);
+    const body = make('div', 'ask-mcard-body');
+    const sum = make('div', 'ask-mcard-summary');
+    if (block.state === 'applied') sum.appendChild(svgIcon(WF_ICO.check, 15, 2.4));
+    sum.appendChild(make('span', null, summary));
+    body.appendChild(sum);
+    if (card.note) body.appendChild(make('div', 'ask-mcard-note', card.note));
+    const member = (m) => (m && m.path ? `${m.name || ''} · ${m.path}` : (m && m.name) || '');
+    const rows = [
+      ['Workspace', card.kind === 'create' ? card.name : card.workspaceName],
+      ...(card.kind === 'create' ? (card.members || []).map((m) => ['Member', member(m)]) : []),
+      ...(card.kind === 'add_members' ? (card.added || []).map((m) => ['Add', member(m)]) : []),
+      ...(card.kind === 'remove_member' && card.removed ? [['Remove', member(card.removed)]] : []),
+      ...(card.kind === 'rename' ? [['New name', card.name]] : []),
+    ];
+    const ul = make('ul', 'ask-mcard-changes');
+    for (const [label, value] of rows) {
+      if (!value) continue;
+      const li = make('li');
+      li.appendChild(make('span', 'ask-mcard-change-label', label));
+      const val = make('span', 'ask-mcard-change-val');
+      val.appendChild(make('span', label === 'Remove' ? 'ask-mcard-before' : 'ask-mcard-after', String(value)));
+      li.appendChild(val);
+      ul.appendChild(li);
+    }
+    body.appendChild(ul);
+    if (block.state === 'proposed') {
+      for (const [items, cls] of [[card.warnings, 'ask-mcard-effects ask-wscard-warn'], [card.effects, 'ask-mcard-effects ask-wscard-effects']]) {
+        if (!Array.isArray(items) || !items.length) continue;
+        const list = make('ul', cls);
+        for (const w of items) list.appendChild(make('li', null, w));
+        body.appendChild(list);
+      }
+    }
+    const result = card.result || null;
+    if (block.state === 'failed') body.appendChild(make('div', 'ask-mcard-failed', `Could not apply: ${block.error || (result && result.error) || 'unknown error'}`));
+    else if (block.state === 'applied' && result && result.detail) body.appendChild(make('div', 'ask-mcard-detail', result.detail));
+    const wid = (result && result.workspaceId) || card.workspaceId;
+    if (block.state === 'applied' && wid) {
+      const open = make('a', 'ask-card-sched-link', 'Open the workspace');
+      open.href = `#workspaces/${encodeURIComponent(wid)}`;
+      body.appendChild(open);
+    }
+    rootEl.appendChild(body);
+    rootEl.appendChild(make('div', 'ask-card-err'));
+    if (block.state === 'proposed') {
+      const actions = make('div', 'ask-mcard-actions');
+      const btn = (cls, text, attr, icon) => {
+        const b = make('button', cls, text); b.type = 'button'; b.setAttribute(attr, '');
+        if (icon) b.prepend(svgIcon(icon, 12, 2.2));
+        return b;
+      };
+      const decline = btn('ask-card-not-now', 'Decline', 'data-ask-ws-decline');
+      decline.addEventListener('click', () => postCard(block, rootEl, { state: 'declined' }, decline));
+      const destructive = card.kind === 'remove_member';
+      const apply = btn(destructive ? 'ask-card-start is-danger' : 'ask-card-start', WS_APPLY_LABEL[card.kind] || 'Apply', 'data-ask-ws-apply', destructive ? null : WF_ICO.save);
+      apply.addEventListener('click', () => postCard(block, rootEl, { state: 'applied' }, apply));
+      actions.append(make('span', 'ask-card-actions-spacer'), decline, apply);
+      rootEl.appendChild(actions);
+    }
+    return { el: rootEl };
+  }
+
   /** The model · effort picker (mockup §C): the panel's popover chrome, anchored under the chip. Rows are menuitems (PD28). */
   function openChipPicker(chip, nodeId, card, wf, handle) {
     const node = card.nodes && card.nodes[nodeId];
@@ -2983,8 +3499,14 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
           loadBranchesInto(srcSel, projSel.value, card.sourceBranch || '').then(updateTargetSub);
         }
         projSel.addEventListener('change', () => { loadBranchesInto(srcSel, projSel.value, '').then(updateTargetSub); updateTargetSub(); reloadLane(); });
-        srcSel.addEventListener('change', updateTargetSub);
-        grid.append(rpField('Project', projSel), lvTag(rpField('Source branch', srcSel), 'advanced', !!card.sourceBranch),
+        // #527: "from origin/x (remote only, 2 behind)" describes the PROPOSED branch only.
+        const srcField = rpField('Source branch', srcSel, sourceRefNote(card.sourceRef));
+        const srcHint = srcField.querySelector('.ask-rp-hint');
+        srcSel.addEventListener('change', () => {
+          if (srcHint && srcSel.value !== card.sourceBranch) srcHint.textContent = '';
+          updateTargetSub();
+        });
+        grid.append(rpField('Project', projSel), lvTag(srcField, 'advanced', !!card.sourceBranch),
           lvTag(rpField('Feature branch', feature, 'created for the run'), 'advanced', !!card.featureBranch));
         targetHost.appendChild(grid);
         updateTargetSub();
@@ -3161,10 +3683,23 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       } catch { err.textContent = 'network error'; return; }
       if (!res.ok) {
-        let msg = `request failed (${res.status})`;
-        try { const b = await res.json(); if (b && b.error) msg = b.error; } catch { /* keep */ }
-        err.textContent = msg;
-        return;
+        let b = null;
+        try { b = await res.json(); } catch { /* keep */ }
+        // #527: the base diverged or could not be fetched — ask once and resend with the choice.
+        // No syncBeforeStart: the project's own setting applies.
+        if (b && (b.code === 'sync-diverged' || b.code === 'sync-fetch-failed')) {
+          const choice = await chooseSyncRefusal(b);
+          if (!choice) { err.textContent = 'Start cancelled.'; return; }
+          try {
+            res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, syncPolicy: choice }) });
+          } catch { err.textContent = 'network error'; return; }
+          b = null;
+          if (!res.ok) { try { b = await res.json(); } catch { /* keep */ } }
+        }
+        if (!res.ok) {
+          err.textContent = (b && b.error) || `request failed (${res.status})`;
+          return;
+        }
       }
       // Success: the server links, flips the card to started and broadcasts;
       // the flip frame renders the terminal state. The browser never navigates
@@ -3268,7 +3803,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   function isProgressBlock(block) {
     const card = block.card || {};
     if (card.type === PROGRESS_CARD_TYPE) return true;
-    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web') return false;
+    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace') return false;
     return block.state === 'started' || (block.state === 'failed' && !!block.runId);
   }
   function buildCard(block) {
@@ -3280,9 +3815,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const isSchedule = !!(block.card && block.card.type === 'schedule');
     const isModel = !!(block.card && block.card.type === 'model');
     const isClone = !!(block.card && block.card.type === 'clone');
+    const isWorkspace = !!(block.card && block.card.type === 'workspace');
     const isWeb = !!(block.card && block.card.type === 'web');
     const isProgress = isProgressBlock(block);
-    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isWeb || isProgress || block.state === 'proposed')) return cached.el;
+    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isWeb || isWorkspace || isProgress || block.state === 'proposed')) return cached.el;
     if (cached) disposeCardEntry(cached);
     const built = isWorkflow ? buildWorkflowCard(block, cached)
       : isMetrics ? buildMetricsCard(block)
@@ -3290,6 +3826,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       : isModel ? buildModelCard(block)
       : isClone ? buildCloneCard(block)
       : isWeb ? buildWebCard(block)
+      : isWorkspace ? buildWorkspaceCard(block)
       : isProgress ? buildProgressCard(block)
         : { el: block.state === 'proposed' ? buildCardForm(block) : buildCardTerminal(block) };
     st.cardEls.set(block.id, { el: built.el, state: block.state, handle: built.handle || null, dispose: built.dispose || null, animate: !!built.animate, cancelAnim: null, lastW: -1 });
@@ -3441,16 +3978,24 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   function toolRow(block) {
     const rowEl = make('div', 'ask-tool-row');
     rowEl.dataset.minLevel = 'advanced';            // what the assistant ran, step by step
-    const short = String(block.name || '').replace(/^mcp__worca__/, '');
-    const parts = short.split('_');
-    rowEl.appendChild(make('span', 'ask-tool-op', parts[0] || short));
-    // A script tool reads as `test script runTests → blocking, exit 1` (§9.3): the op column
-    // (a fixed 38 px cell) keeps the verb, the target column carries the key and the outcome —
-    // a script's input is a whole program, so the JSON preview is worth nothing there.
-    const script = scriptToolLine(short, block);
-    const target = script ? script.target : parts.slice(1).join(' ');
-    const preview = script ? '' : clipInput(block.input);
-    rowEl.appendChild(make('span', 'ask-tool-target', preview ? (target ? `${target} · ${preview}` : preview) : target));
+    const mcp = parseMcpToolName(block.name);
+    if (mcp && mcp.server !== 'worca') {
+      // A registry copy's tool (MCP registry §9.7): `<copy> · <tool>` in the name cell, then the
+      // input preview — no op cell, since a third-party tool name has no worca verb to show.
+      rowEl.appendChild(make('span', 'ask-tool-mcp', `${mcp.server} · ${mcp.tool}`));
+      rowEl.appendChild(make('span', 'ask-tool-target', clipInput(block.input)));
+    } else {
+      const short = String(block.name || '').replace(/^mcp__worca__/, '');
+      const parts = short.split('_');
+      rowEl.appendChild(make('span', 'ask-tool-op', parts[0] || short));
+      // A script tool reads as `test script runTests → blocking, exit 1` (§9.3): the op column
+      // (a fixed 38 px cell) keeps the verb, the target column carries the key and the outcome —
+      // a script's input is a whole program, so the JSON preview is worth nothing there.
+      const script = scriptToolLine(short, block);
+      const target = script ? script.target : parts.slice(1).join(' ');
+      const preview = script ? '' : clipInput(block.input);
+      rowEl.appendChild(make('span', 'ask-tool-target', preview ? (target ? `${target} · ${preview}` : preview) : target));
+    }
     const note = block.status === 'error' ? 'error' : block.status === 'running' ? '…' : fmtElapsed(block.durationMs);
     rowEl.appendChild(make('span', 'ask-tool-note', note || ''));
     return rowEl;
@@ -3813,6 +4358,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // reconnect re-loads the SAME thread and must keep it: those repaint rows the
     // user is already reading, mid-turn.
     const switched = st.threadId !== id;
+    if (switched) stopVoice();
     if (switched) st.seenRows = new Set();
     st.threadId = id;
     st.model = createThreadModel({ threadId: id });
@@ -3822,6 +4368,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // The picker follows the chat — on a SWITCH only: a resync of the same thread
     // would otherwise clobber a pick the user just made (its PATCH may not have landed).
     if (switched) applyThreadPick(snap.thread);
+    if (switched) st.mcp.off = mcpOffOf(snap.thread && snap.thread.mcpOff);   // §9.4: the chat's own choices
+    scheduleMcpRefresh();
     renderTranscript();
     updateMeters();
     // P4: the count rides the snapshot loadThread ALREADY fetched — no extra GET.
@@ -3919,6 +4467,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       // NOT live in updateSendStop() — that also runs from loadThread, so a
       // running→idle latch there fires a SECOND snapshot GET on every resync.
       refreshWorktrees();
+      if (st.voicePendingSend) { st.voicePendingSend = false; if (st.voice && st.voice.active()) voiceSend(); }
     }
     else if (frame.type === 'ask-message' && frame.message && typeof frame.message.text === 'string'
       && /is waiting for your answer/.test(frame.message.text)) announce('run needs an answer');
@@ -3946,6 +4495,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const r = st.model.apply(frame);
     if (r && r.gap) { resync(); return; }
     if (!r || !r.ok) return;
+    if (st.voice && st.voice.active() && frame.messageId) {
+      const live = st.model && st.model.live();
+      st.voice.onFrame(frame, live && live.messageId === frame.messageId ? live.text : null);
+    }
     afterFrame(frame);
     scheduleFlush();
   }
@@ -4076,6 +4629,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   doc.addEventListener('keydown', onDocKeydown, true);
   doc.addEventListener('pointerdown', onDocPointerdown, true);
   win.addEventListener('resize', onWinResize);
+  // MCP registry §9.4: in Auto the page is the scope, so a route change re-previews the picker.
+  const onHashChange = () => { if (!st.scope.pinned) scheduleMcpRefresh(); };
+  win.addEventListener('hashchange', onHashChange);
   // The rail collapsing changes the dock width by 222px with no window resize;
   // observe the dock itself (guarded: jsdom has no ResizeObserver — P5's idiom).
   let dockRo = null;
@@ -4095,10 +4651,13 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     doc.removeEventListener('keydown', onDocKeydown, true);
     doc.removeEventListener('pointerdown', onDocPointerdown, true);
     win.removeEventListener('resize', onWinResize);
+    win.removeEventListener('hashchange', onHashChange);
     if (dockRo) { dockRo.disconnect(); dockRo = null; }
     if (st.runTick) { clearInterval(st.runTick); st.runTick = null; }
     if (st.runUnsub) { try { st.runUnsub(); } catch { /* ignore */ } st.runUnsub = null; }
     pruneCardEls();                                  // every card graph mount and its ResizeObserver goes with the sheet
+    clearTimeout(st.voiceLongPress);
+    if (st.voice) { const v = st.voice; st.voice = null; Promise.resolve(v.destroy()).catch(() => {}); }
     root.remove();
   }
 

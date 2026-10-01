@@ -99,10 +99,15 @@ export const WIRE_ID_RE = /^w_?[a-z0-9]{1,32}$/;
 /** Port ids are lowerCamel, at most 32 chars (`task`, `revise`, `in1`, `await`). */
 export const PORT_ID_RE = /^[a-z][A-Za-z0-9]{0,31}$/;
 
-/** The two ledger rows every run writes for its own bookends (P8 makes them
- *  `exec` rows keyed exactly so). Shared by the run monitor and the CLI so
- *  neither counts them as executions or progress. */
-export const BOOKEND_EXECUTION_IDS = Object.freeze(['x:preflight:1', 'x:done:1']);
+/** The ledger rows a run writes for its own bookends (P8 makes them `exec` rows
+ *  keyed exactly so). Shared by the run monitor and the CLI so neither counts
+ *  them as executions or progress. Preflight and Done are always written; the
+ *  Sync row (#527) only when a base sync happened. Keep the order: run-glance
+ *  reads [0] as the preflight id. */
+export const BOOKEND_EXECUTION_IDS = Object.freeze(['x:preflight:1', 'x:done:1', 'x:sync:1']);
+
+/** The ledger row of a run's lazy Sync stage (base-branch fetch / fast-forward, #527). */
+export const SYNC_EXECUTION_ID = 'x:sync:1';
 
 /** Structural ceilings the validator enforces (override per call with
  *  `validateGraph(tpl, portsFn, { limits })`). */

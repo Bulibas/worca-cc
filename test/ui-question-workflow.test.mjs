@@ -2,7 +2,7 @@
 // rendered in the run page's question panel ("Review the workflow"): the name row, the always-visible
 // preview button (opens the pan/zoom popup), the "Customize agents" tunables and "Why this?" facts
 // disclosures, and the Accept / Revise / Cancel payloads. The panel mounts only on the run page
-// (test/helpers/run-page-boot.mjs); the Running list card carries just the wait strip.
+// (test/helpers/run-page-boot.mjs); the Runs list row just reads "Workflow review" in Needs you.
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { confirmDialog, cancelDialog, dialogText } from './helpers/confirm-modal.mjs';
@@ -181,16 +181,19 @@ test('clicking the preview opens the pan/zoom popup titled with the workflow nam
   assert.equal(ctx.window.document.querySelector('.wf-pop'), null, 'Close removes it');
 });
 
-test('the list card holds no workflow panel: its wait strip reads "Review the workflow" and opens the run page', async () => {
+test('the list row holds no workflow panel: it reads "Workflow review" and opens the run page', async () => {
   const ctx = await boot(); await openWf(ctx);
+  // The bare list with nothing open (rule 5): a click on the OPEN run's row would prove nothing.
   ctx.showRunning(); await settle(ctx.window);
+  assert.equal(ctx.window.location.hash, '#runs');
   const card = runCard(ctx, RUN_ID);
-  assert.equal(card.querySelector('.qpanel'), null, 'no panel on the card');
+  assert.ok(card, 'the run is listed in its project group');
+  assert.equal(card.querySelector('.qpanel'), null, 'no panel on the row');
   assert.equal(card.querySelector('.gv-stage'), null, 'and no graph');
-  const strip = card.querySelector('button.rc-wait');
-  assert.equal(strip.hidden, false);
-  assert.equal(strip.querySelector('.rc-wait-text').textContent, 'Review the workflow');
-  strip.click();
+  // The ask frame carries no nodeId, so no step names it: the generic "Workflow review".
+  assert.equal(card.querySelector('.runs-row-sub').textContent.split(' · ')[0], 'Workflow review', 'the row names the workflow review');
+  assert.ok(ctx.window.document.querySelector(`#runs-list .runs-needs .runs-row[data-run-id="${RUN_ID}"]`), 'and it is in Needs you');
+  card.click();
   assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`);
 });
 

@@ -16,24 +16,44 @@ import { fieldsForRun } from './effective.mjs';
 
 const parse = (s) => { try { const v = JSON.parse(s); return v && typeof v === 'object' ? v : null; } catch { return null; } };
 
-/** Every cached, carrying policy on this machine: [{ slug, sha, doc, key }]. Never throws. */
+/**
+ * The one cache row that stands for each carrying home: a registered project's row first (a row an older Worca left
+ * behind for a removed project never shadows the live one), then the newest discovery. `doc` is null when this build
+ * cannot read the policy (a newer schema, a branch file that is not JSON). MCP registry spec §11.2, §11.3.
+ */
+function homeRows() {
+  getDb();
+  const rows = prepare(`SELECT pc.project_key, pc.extra, p.key IS NOT NULL AS registered FROM project_config pc
+    LEFT JOIN projects p ON p.key = pc.project_key WHERE pc.extra LIKE '%teamPolicy%'`).all();
+  const found = [];
+  for (const r of rows) {
+    const tp = parse(r.extra)?.teamPolicy;
+    if (!tp || !tp.present || !tp.docKnown || tp.delegateTo || !tp.slug) continue;
+    found.push({ r, tp, slug: String(tp.slug).toLowerCase(), at: typeof tp.checkedAt === 'string' ? tp.checkedAt : '' });
+  }
+  found.sort((a, b) => (Number(b.r.registered) - Number(a.r.registered)) || (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  const out = new Map();
+  for (const { r, tp, slug } of found) {
+    if (out.has(slug)) continue;
+    // Re-normalise: the cache was written by this or an older build; the reader is the contract.
+    const norm = tp.unknownSchema || !tp.doc ? null : normalizePolicyDoc(tp.doc);
+    // `warnings`: what the discovering read and this re-read dropped. An `mcp.required` entry this build cannot read
+    // is still listed (MCP registry spec §11.2; registry.mjs mcpListComplete).
+    const warnings = [...(Array.isArray(tp.warnings) ? tp.warnings : []), ...(norm ? norm.warnings : [])].filter((w) => typeof w === 'string');
+    out.set(slug, { slug, sha: tp.headSha ?? null, doc: norm?.doc ?? null, key: r.project_key, warnings });
+  }
+  return [...out.values()];
+}
+
+/** Every cached, carrying policy on this machine that this build reads: [{ slug, sha, doc, key, warnings }]. Never throws. */
 export function cachedPolicyHomes() {
-  try {
-    getDb();
-    const rows = prepare("SELECT project_key, extra FROM project_config WHERE extra LIKE '%teamPolicy%'").all();
-    const out = []; const seen = new Set();
-    for (const r of rows) {
-      const tp = parse(r.extra)?.teamPolicy;
-      if (!tp || !tp.present || !tp.docKnown || tp.delegateTo || tp.unknownSchema || !tp.doc || !tp.slug) continue;
-      const slug = String(tp.slug).toLowerCase();
-      if (seen.has(slug)) continue;
-      seen.add(slug);
-      // Re-normalise: the cache was written by this or an older build; the reader is the contract.
-      const doc = normalizePolicyDoc(tp.doc).doc;
-      if (doc) out.push({ slug, sha: tp.headSha ?? null, doc, key: r.project_key });
-    }
-    return out;
-  } catch { return []; }
+  try { return homeRows().filter((h) => h.doc); } catch { return []; }
+}
+
+/** The homes a cached row carries whose policy this build cannot read: their Team state stays and their `policy:`
+ *  servers do not retire (MCP registry spec §11.2) — they are not "no longer required". Never throws. */
+export function unreadablePolicyHomes() {
+  try { return new Set(homeRows().filter((h) => !h.doc).map((h) => h.slug)); } catch { return new Set(); }
 }
 
 /**

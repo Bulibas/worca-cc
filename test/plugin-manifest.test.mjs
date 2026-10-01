@@ -32,9 +32,9 @@ const SRC = (over = {}) => ({
   ...over,
 });
 
-test('WORCA_PLUGIN_API is the integer 4; host still speaks APIs 1, 2 and 3', () => {
-  assert.equal(WORCA_PLUGIN_API, 4);
-  assert.deepEqual(WORCA_PLUGIN_APIS, [1, 2, 3, 4]);
+test('WORCA_PLUGIN_API is the integer 5; host still speaks APIs 1, 2, 3 and 4', () => {
+  assert.equal(WORCA_PLUGIN_API, 5);
+  assert.deepEqual(WORCA_PLUGIN_APIS, [1, 2, 3, 4, 5]);
   // Set semantics: a connector-only API-1 plugin must keep negotiating 1.
   assert.equal(negotiatedApi('>=1 <2'), 1);
   assert.equal(negotiatedApi('>=2 <3'), 2);
@@ -71,7 +71,7 @@ test('dataContractIssues names the v1-shaped files, and apiMismatch counts them'
   // so the shape pin compares the counts WITHOUT it.
   const { message, ...counts } = m;
   assert.equal(typeof message, 'string');
-  assert.deepEqual(counts, { builtFor: 1, host: 4, agents: 1, workflows: 1 });
+  assert.deepEqual(counts, { builtFor: 1, host: 5, agents: 1, workflows: 1 });
   assert.equal(apiMismatch('>=3 <4', { agentsV1: [], workflowsV1: [] }), null,
     'an API-3 plugin with clean data has no mismatch');
   assert.equal(apiMismatch('>=1 <2', { agentsV1: [], workflowsV1: [] }), null,
@@ -85,7 +85,7 @@ test('minimal { name } manifest normalizes with full defaults', () => {
   assert.deepEqual(r.manifest, {
     name: 'my-plugin', version: null, description: '', author: '', homepage: '', license: '',
     engines: { worcaApi: null }, setup: { node: false, python: null }, taskSources: [], chatChannels: [],
-    models: [], modelSecrets: [],
+    models: [], modelSecrets: [], mcpServers: Object.create(null),
   });
 });
 
@@ -110,7 +110,7 @@ test('engines.worca-cc-api: range checked against the host API SET (no npm semve
   assert.equal(apiSatisfies('3'), true);
   assert.equal(apiSatisfies('>=4 <5'), true);    // API-4 plugins (ask forms) install
   assert.equal(apiSatisfies('<1'), false);
-  assert.equal(apiSatisfies('>=5'), false);      // beyond the host API set
+  assert.equal(apiSatisfies('>=6'), false);      // beyond the host API set
   assert.equal(apiSatisfies(''), true);          // unset -> unconstrained
   assert.equal(apiSatisfies('^1.0.0'), false);   // unsupported syntax fails CLOSED
   assert.equal(apiSatisfies('>=1.2.3'), true);   // minor/patch tolerated; integer compared
@@ -118,9 +118,9 @@ test('engines.worca-cc-api: range checked against the host API SET (no npm semve
   const ok = normalizeManifest({ name: 'p', engines: { 'worca-cc-api': '>=1 <2' } });
   assert.equal(ok.ok, true);
   assert.equal(ok.manifest.engines.worcaApi, '>=1 <2');
-  const bad = normalizeManifest({ name: 'p', engines: { 'worca-cc-api': '>=5' } });
+  const bad = normalizeManifest({ name: 'p', engines: { 'worca-cc-api': '>=6' } });
   assert.equal(bad.ok, false);
-  assert.match(bad.errors[0], /not satisfied by host plugin APIs \[1, 2, 3, 4\]/);
+  assert.match(bad.errors[0], /not satisfied by host plugin APIs \[1, 2, 3, 4, 5\]/);
 });
 
 test('negotiatedApi: highest satisfying host API drives the child apiVersion', () => {
@@ -128,10 +128,10 @@ test('negotiatedApi: highest satisfying host API drives the child apiVersion', (
   assert.equal(negotiatedApi('>=2 <3'), 2);
   assert.equal(negotiatedApi('>=3 <4'), 3);
   assert.equal(negotiatedApi('>=4 <5'), 4);
-  assert.equal(negotiatedApi('>=1'), 4);         // open range -> newest
-  assert.equal(negotiatedApi(''), 4);            // unconstrained -> newest
-  assert.equal(negotiatedApi(null), 4);
-  assert.equal(negotiatedApi('>=5'), null);      // unsatisfiable
+  assert.equal(negotiatedApi('>=1'), 5);         // open range -> newest
+  assert.equal(negotiatedApi(''), 5);            // unconstrained -> newest
+  assert.equal(negotiatedApi(null), 5);
+  assert.equal(negotiatedApi('>=6'), null);      // unsatisfiable
   assert.equal(negotiatedApi('garbage'), null);  // fail closed
 });
 
@@ -476,6 +476,14 @@ test('models: reserved env keys are dropped with a warning, not a rejection (bac
   assert.match(w, /env key "WORCA_MOCK" is reserved — ignored/);
 });
 
+test('models: MCP registry env names (MCPSECRET_*, MCPCHILD_*, any case) are dropped with a warning', () => {
+  const r = normalizeManifest({ name: 'p', modelSecrets: SECRETS,
+    models: [MODEL({ env: { ...MODEL().env, MCPSECRET_A41C6F76: 'x', McpChild_PATH: '/p' } })] });
+  assert.equal(r.ok, true, r.ok ? '' : r.errors.join('\n'));
+  assert.deepEqual(Object.keys(r.manifest.models[0].env), ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN']);
+  assert.match(r.warnings.join('\n'), /env key "MCPSECRET_A41C6F76" is reserved — ignored/);
+  assert.match(r.warnings.join('\n'), /env key "McpChild_PATH" is reserved — ignored/);
+});
 test('models: rejections — dup id, unknown effort, dangling secret, bad value', () => {
   const fail = (models, modelSecrets, re) => {
     const r = normalizeManifest({ name: 'p', models, ...(modelSecrets ? { modelSecrets } : {}) });
