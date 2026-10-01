@@ -41,6 +41,14 @@ function fakeClock(start = Date.parse('2026-09-27T12:00:00Z')) {
     pending: () => timers.size,
   };
 }
+/** Tick the fake clock until `done()` holds. The analysis starts after real file reads, so a fixed
+ *  number of ticks is not enough on a loaded machine: give it up to 5 s of wall time. */
+async function settle(clock, done) {
+  for (const end = Date.now() + 5000; !done() && Date.now() < end;) {
+    await clock.tick(0);
+    if (!done()) await new Promise((r) => setTimeout(r, 2));
+  }
+}
 const Q = [{ id: 'a', question: 'A?', options: ['x', 'y'], confidence: [90, 10], recommended: 'x' }];
 
 test('grace timeout decides an open question with actor night-mode', async () => {
@@ -308,12 +316,12 @@ test('stop() aborts an in-flight night analysis', async () => {
   const orch = createOrchestrator({ projectDir: '/tmp/night-h16', nightClock: clock, nightRunClaude: a.run });
   const p = orch._ask({ id: 'c16', kind: 'clarify', questions: QA });
   const rejected = assert.rejects(p, (e) => e.name === 'AbortError');
-  for (let i = 0; i < 5 && !a.seen.signal; i++) await clock.tick(0);
+  await settle(clock, () => a.seen.signal);
   assert.ok(a.seen.signal, 'the analysis started');
   orch.stop();
   await rejected;
   assert.equal(a.seen.signal.aborted, true, 'the nightDecider child is killed by stop');
-  for (let i = 0; i < 5 && orch._night.deciding; i++) await clock.tick(0);
+  await settle(clock, () => !orch._night.deciding);
   assert.equal(orch._night.deciding, false);
   assert.equal(orch.nightDecision('c16'), null);
 });
@@ -329,7 +337,7 @@ test('stop() cuts a night recovery backoff short', async () => {
   assert.equal(orch._night.deciding, true, 'waiting out the backoff');
   orch.stop();
   await rejected;
-  for (let i = 0; i < 5 && orch._night.deciding; i++) await clock.tick(0);
+  await settle(clock, () => !orch._night.deciding);
   assert.equal(orch._night.deciding, false, 'the backoff sleep ended on stop');
 });
 
@@ -341,11 +349,11 @@ for (const how of ['run override', 'global toggle']) {
     const a = blockingAnalysis();
     const orch = createOrchestrator({ projectDir: '/tmp/night-h18', nightClock: clock, nightRunClaude: a.run });
     orch._ask({ id: 'c18', kind: 'clarify', questions: QA }).catch(() => {});
-    for (let i = 0; i < 5 && !a.seen.signal; i++) await clock.tick(0);
+    await settle(clock, () => a.seen.signal);
     if (how === 'run override') orch.setNightOverride('off');
     else { await setNightModeToggle('off'); orch.nightConfigChanged(); }
     a.release();
-    for (let i = 0; i < 5 && orch._night.deciding; i++) await clock.tick(0);
+    await settle(clock, () => !orch._night.deciding);
     assert.equal(orch.pendingQuestion?.id, 'c18', 'still waiting for the user');
     assert.equal(orch.nightDecision('c18'), null);
     assert.equal(orch.state.night.decisions, 0);
@@ -443,12 +451,12 @@ test('the user answering during a night analysis kills it, and the next question
   const a = blockingAnalysis();
   const orch = createOrchestrator({ projectDir: '/tmp/night-h24', nightClock: clock, nightRunClaude: a.run });
   const p = orch._ask({ id: 'c24', kind: 'clarify', questions: QA });
-  for (let i = 0; i < 5 && !a.seen.signal; i++) await clock.tick(0);
+  await settle(clock, () => a.seen.signal);
   assert.ok(a.seen.signal, 'the analysis started');
   orch.answer('c24', { answers: [{ id: 'a', choice: 'x' }] }, 'local');
   assert.deepEqual(await p, { answers: [{ id: 'a', choice: 'x' }] });
   assert.equal(a.seen.signal.aborted, true, 'the superseded nightDecider child is killed (no longer billed)');
-  for (let i = 0; i < 5 && orch._night.deciding; i++) await clock.tick(0);
+  await settle(clock, () => !orch._night.deciding);
   assert.equal(orch._night.deciding, false, 'the next question is free to be decided');
   assert.equal(orch.nightDecision('c24'), null);
 });
