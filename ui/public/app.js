@@ -68,7 +68,7 @@ import { alreadyApplied, noteBoot } from './ws-seq.mjs';
 import { decorFromState, applyDecor, isGraphManifest, ledgerRows } from './graph/run-decor.mjs';
 import { mountRunGraph } from './graph/run-hosts.mjs';
 import { trailColumns, nowRows, glanceCopy, renderOrb, nodeLabel, preflightOpen } from './run-glance.mjs';
-import { buildRunsModel, countNeedsYou, isRowSelected, renderRunsList } from './runs-list.mjs';
+import { buildRunsModel, countNeedsYou, isRowSelected, renderRunsList, RUNS_FILTERS, RUNS_GROUPINGS } from './runs-list.mjs';
 // Import list only — `statusChip`/`diffBadges`/`mergeFindings`/`reportResultControl`
 // lost their last app.js caller with the retired card accordion, and `sourceBadge` with the
 // History list card. They stay EXPORTED
@@ -300,6 +300,9 @@ const el = {
   runsSearch: $('#runs-search'),
   runsSearchBtn: $('#runs-search-btn'),
   runsSearchRow: $('#runs-search-row'),
+  runsFilter: $('#runs-filter'),
+  runsGroupBtn: $('#runs-group-btn'),
+  runsGroupMenu: $('#runs-group-menu'),
 
   // Target selector (New Pipeline)
   targetSeg: $('#target-seg'),
@@ -1003,7 +1006,6 @@ async function loadWhoami() {
 // Everything that shows a person, repainted once the viewer is known (boot races the
 // hello snapshot and the History fetch). Each painter is idempotent.
 function repaintPeople() {
-  try { const tabs = $('#nav-running-children'); if (tabs) tabs.dataset.tabsSig = ''; renderPipelineTabs(); } catch { /* not booted */ }
   try { if (runDetailState.screen && runs.get(runDetailState.runId)) repaintRunDetail(runs.get(runDetailState.runId)); } catch { /* none open */ }
   try { if (Array.isArray(state.historyAll) && state.historyAll.length) paintHistory(); } catch { /* not loaded */ }
   try { if (inRunsView()) paintRunsList(); } catch { /* not booted */ }   // no History loaded yet
@@ -22939,7 +22941,17 @@ function withWorkspaces() {
 const RUNS_COLLAPSED_KEY = 'worca-cc.runs.collapsed';   // group keys the user folded (D10)
 // reveal: a group to scroll to once the list is on screen ("Show in Runs").
 // skipRestore: bare #runs shows the list, not the remembered run, until another route (goRunsList).
-const runsUi = { query: '', collapsed: loadIdSet(RUNS_COLLAPSED_KEY), reveal: '', skipRestore: false };
+const RUNS_FILTER_KEY = 'worca-cc.runs.filter';         // the chip this browser last picked
+function loadRunsFilter() {
+  try { const v = localStorage.getItem(RUNS_FILTER_KEY); return RUNS_FILTERS.includes(v) ? v : 'all'; }
+  catch { return 'all'; }                    // private mode / storage disabled
+}
+const RUNS_GROUP_BY_KEY = 'worca-cc.runs.groupBy';     // 'project' (default) or 'date'
+function loadRunsGroupBy() {
+  try { const v = localStorage.getItem(RUNS_GROUP_BY_KEY); return RUNS_GROUPINGS.includes(v) ? v : 'project'; }
+  catch { return 'project'; }
+}
+const runsUi = { query: '', filter: loadRunsFilter(), groupBy: loadRunsGroupBy(), collapsed: loadIdSet(RUNS_COLLAPSED_KEY), reveal: '', skipRestore: false };
 
 function histGroupName(p) {
   return (p.target === 'workspace' && p.workspaceName) || p.projectName || p.projectKey || '(unknown project)';
@@ -23037,13 +23049,13 @@ function paintRunsList() {
     history: (Array.isArray(state.historyAll) ? state.historyAll : []).filter(Boolean).map(runsHistItem),
     scheduled: schedulesView.upcoming(SCHEDULED_GROUP_WINDOW_MS).map(runsSchedItem),
     person: viewer.shared ? state.historyPerson : '',
-    query: runsUi.query, collapsed: runsUi.collapsed, now: Date.now(),
+    query: runsUi.query, filter: runsUi.filter, groupBy: runsUi.groupBy, collapsed: runsUi.collapsed, now: Date.now(),
   });
   const note = state.historyError && !(state.historyAll || []).length ? `Could not load finished runs: ${state.historyError}` : '';
   const sig = JSON.stringify([
     model.needs.map(runsRowSig),
     model.groups.map((g) => [g.key, g.name, g.count, g.collapsed, g.collapsed ? [] : g.rows.map(runsRowSig)]),
-    model.total, model.searching, note,
+    model.total, model.searching, model.filter, model.groupBy, note,
   ]);
   let refocus = null;
   if (host.dataset.sig !== sig) {
@@ -23137,6 +23149,61 @@ function setRunsSearchOpen(open) {
   el.runsSearchBtn.focus({ preventScroll: true });
 }
 el.runsSearchBtn?.addEventListener('click', () => setRunsSearchOpen(el.runsSearchRow.hidden));
+function paintRunsFilter() {
+  for (const b of el.runsFilter ? el.runsFilter.querySelectorAll('button[data-filter]') : []) {
+    const on = b.dataset.filter === runsUi.filter;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+}
+el.runsFilter?.addEventListener('click', (e) => {
+  const b = e.target.closest && e.target.closest('button[data-filter]');
+  if (!b || b.dataset.filter === runsUi.filter) return;
+  runsUi.filter = b.dataset.filter;
+  try { localStorage.setItem(RUNS_FILTER_KEY, runsUi.filter); } catch { /* private mode */ }
+  paintRunsFilter();
+  paintRunsList();
+});
+paintRunsFilter();
+
+// "Group by" menu: opens under its header button; a pick, Escape or a click elsewhere closes it.
+function paintRunsGroupBy() {
+  for (const b of el.runsGroupMenu ? el.runsGroupMenu.querySelectorAll('[data-group-by]') : []) {
+    b.setAttribute('aria-checked', b.dataset.groupBy === runsUi.groupBy ? 'true' : 'false');
+  }
+  el.runsGroupBtn?.classList.toggle('on', runsUi.groupBy !== 'project');
+}
+function setRunsGroupMenuOpen(open, { focusBtn = false } = {}) {
+  if (!el.runsGroupMenu || !el.runsGroupBtn) return;
+  el.runsGroupMenu.hidden = !open;
+  el.runsGroupBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) el.runsGroupMenu.querySelector('[aria-checked="true"]')?.focus({ preventScroll: true });
+  else if (focusBtn) el.runsGroupBtn.focus({ preventScroll: true });
+}
+el.runsGroupBtn?.addEventListener('click', () => setRunsGroupMenuOpen(el.runsGroupMenu.hidden));
+el.runsGroupMenu?.addEventListener('click', (e) => {
+  const b = e.target.closest && e.target.closest('[data-group-by]');
+  if (!b) return;
+  setRunsGroupMenuOpen(false, { focusBtn: true });
+  if (b.dataset.groupBy === runsUi.groupBy) return;
+  runsUi.groupBy = b.dataset.groupBy;
+  try { localStorage.setItem(RUNS_GROUP_BY_KEY, runsUi.groupBy); } catch { /* private mode */ }
+  paintRunsGroupBy();
+  paintRunsList();
+});
+el.runsGroupMenu?.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { e.preventDefault(); setRunsGroupMenuOpen(false, { focusBtn: true }); return; }
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+  e.preventDefault();
+  const items = [...el.runsGroupMenu.querySelectorAll('[data-group-by]')];
+  const i = items.indexOf(document.activeElement);
+  items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length]?.focus();
+});
+document.addEventListener('click', (e) => {
+  if (!el.runsGroupMenu || el.runsGroupMenu.hidden) return;
+  if (!e.target.closest || !e.target.closest('.runs-group-wrap')) setRunsGroupMenuOpen(false);
+});
+paintRunsGroupBy();
 el.runsSearch?.addEventListener('input', () => { runsUi.query = el.runsSearch.value; paintRunsList(); });
 el.runsSearch?.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
@@ -24489,212 +24556,13 @@ function paintRdHeader(screen, r) {
               : 'Pause — gracefully stop the session so it can be resumed');
 }
 
-let runningCollapsed = false; // in-memory only; auto-expanded whenever ≥1 child exists
-
-// The rail shows a 36px square per run instead of a titled row.
-
-// The run's display name for the TOOLTIP and the accessible name. The initials
-// deliberately read the raw title instead, so a blank one still degrades to '?'
-// rather than to 'UR'. `.trim()` before the fallback is load-bearing: a
-// whitespace-only title is TRUTHY, so `r.title || …` opens with a bare separator.
-function railName(r) {
-  return String(r.title || '').trim() || 'Untitled run';
-}
-
-// Initials are the mock's algorithm with two corrections it does not make:
-// `w[0]` is a UTF-16 CODE UNIT, so an emoji title yields a lone high surrogate
-// ('🎉 launch' -> "\ud83cL" -> "?L"); and 'ß'.toUpperCase() is 'SS', so a
-// two-glyph tile would render three. The final `|| '?'` covers a blank or
-// whitespace-only title, which splits to nothing.
-function railInitials(title) {
-  const firstGlyph = (w) => {
-    const c = [...w][0] || '';
-    return [...c.toUpperCase()][0] || c;
-  };
-  return String(title || '').split(/\s+/).filter(Boolean).slice(0, 2)
-    .map(firstGlyph).join('') || '?';
-}
-
-// The word the tile's tooltip ends with. The two branches the expanded tab row
-// also has words for — pending-input and finished — are copied verbatim from it,
-// so the rail and the row can never disagree where both speak. The remaining
-// four are new: the expanded row deliberately renders NO end marker for a
-// paused/starting/pausing/plain-running run, and a 36px square with no label
-// needs a word for each. They intentionally do NOT follow statusPill
-// ('Stopped'/'Error'/'Implementing'/…), which is the run CARD's vocabulary; the
-// tile's sibling is the tab row, not the card. `starting` and `pausing` are
-// named explicitly because runDotClass gives them their own grey-pulse dot — a
-// grey-pulsing dot next to the word "Running" is the dot and the label
-// disagreeing on one 36px square. Because those two share a dot class AND a sig
-// marker, Step 4 puts this function's OUTPUT in the signature.
-function tabStatusWord(r) {
-  if (r.pendingQuestion != null) return 'Waiting for your input';
-  if (isPaused(r)) return 'Paused';
-  if (r._finished || isTerminalStatus(r.status)) {
-    return r.status === 'done' ? 'Completed' : 'Did not complete';
-  }
-  if (r.status === 'starting') return 'Starting';
-  if (r.status === 'pausing') return 'Pausing';
-  return 'Running';
-}
-
-function railTileEl(r) {
-  const tile = document.createElement('button');
-  tile.type = 'button';
-  tile.className = 'rail-tile';
-  // Same distinct dataset key the expanded row uses — NOT data-run-id, which is
-  // the Runs row's identifier and is queried unscoped across the suite.
-  tile.dataset.childRunId = r.runId;
-  tile.classList.toggle('active', r.runId === state.selectedRunId);
-  if (isLingering(r)) tile.classList.add('lingering');
-  const label = `${railName(r)} · ${tabStatusWord(r)}`;
-  tile.title = label;
-  // The initials are meaningless to a screen reader, so the tile needs a real
-  // name; `aria-label` also beats name-from-contents, which would read "FA".
-  tile.setAttribute('aria-label', label);
-  tile.appendChild(document.createTextNode(railInitials(r.title)));
-
-  const dot = document.createElement('span');
-  dot.className = `child-dot ${runDotClass(r)}`;
-  tile.appendChild(dot);
-
-  // Only the pending-input marker is carried over. The expanded row also shows a
-  // green/red finished-unseen "●", but the tile's corner dot ALREADY carries
-  // green/red from runDotClass — a second marker on a 36px square is unreadable.
-  if (r.pendingQuestion != null) {
-    const q = document.createElement('span');
-    q.className = 'child-q';
-    q.textContent = '?';
-    tile.appendChild(q);
-  }
-
-  tile.addEventListener('click', () => { location.hash = `running/${r.runId}`; });
-  return tile;
-}
-
+// The sidebar no longer lists runs under Runs: the Runs page's own list (Needs you
+// first) is always one click away, and the Runs badge carries the count. What is
+// left is the phone roll-up: the hamburger's amber dot while the drawer is shut.
 function renderPipelineTabs() {
-  const rows = pipelineTabRuns();
-
-  // Roll-up amber dot = ANY child needs input. On phones it rides the hamburger, whose
-  // name says so while the drawer (and its "?" rows) is shut; the sidebar's own signal
-  // is the Runs Needs-you badge (updateNavCounts).
-  const needs = rows.some((r) => r.pendingQuestion != null);
-  for (const id of ['#mbar-rollup']) {
-    const dot = $(id); if (dot) dot.hidden = !needs;
-  }
+  const needs = pipelineTabRuns().some((r) => r.pendingQuestion != null);
+  const dot = $('#mbar-rollup'); if (dot) dot.hidden = !needs;
   $('#mbar-menu')?.setAttribute('aria-label', needs ? 'Menu — a pipeline needs your input' : 'Menu');
-
-  const host = $('#nav-running-children');
-  if (!host) return;
-  if (rows.length === 0) {
-    host.innerHTML = ''; host.dataset.tabsSig = ''; host.classList.add('hidden');
-    return;
-  }
-
-  // Rebuild gate: every tagged event (incl. every log line) lands here, but a
-  // log frame changes nothing a row renders. Skip identical rebuilds so the
-  // sidebar DOM (and its scroll position) stays put; any rendered datum
-  // changing — order, dot, title, project, end marker, active, lingering,
-  // collapsed — changes the signature and repaints as before. JSON.stringify
-  // is the encoding: titles/labels are free text, so a hand-joined concat
-  // could alias two different states; JSON escaping is unambiguous.
-  // railCollapsed() is FIRST and load-bearing: this function early-returns on an
-  // unchanged signature, so without it a collapse/expand leaves the previous
-  // mode's markup on screen until the next server event happens to arrive.
-  const rail = railCollapsed();
-  const sig = JSON.stringify([rail, runningCollapsed, rows.map((r) => [
-    r.runId,
-    runDotClass(r),
-    r.title,
-    Array.isArray(r.projectNames) && r.projectNames.length
-      ? r.projectNames.join(' · ') : projectName(r.projectDir),
-    r.pendingQuestion != null ? 'q'
-      : isPaused(r) ? 'p'
-      : (r._finished || isTerminalStatus(r.status)) ? (r.status === 'done' ? 'ok' : 'bad')
-      : '',
-    r.runId === state.selectedRunId,
-    isLingering(r),
-    // The tile renders a status WORD the expanded row never shows, and
-    // starting/pausing are indistinguishable in every field above. Without this
-    // a run paused while still starting keeps a stale "· Starting" tooltip and
-    // aria-label. Costs the expanded state one extra (identical) repaint on that
-    // one transition and nothing else.
-    tabStatusWord(r),
-    personShown(r.startedBy),
-  ])]);
-  if (host.dataset.tabsSig === sig) return;
-  host.dataset.tabsSig = sig;
-
-  host.classList.remove('hidden');
-  host.classList.toggle('collapsed', runningCollapsed);  // auto-expanded: default false
-  host.innerHTML = '';
-  for (const r of rows) {
-    if (rail) { host.appendChild(railTileEl(r)); continue; }
-    const row = document.createElement('button');
-    row.type = 'button';
-    row.className = 'nav-child';
-    // NB: a distinct dataset key (NOT data-run-id) — `data-run-id` is the Runs row's
-    // identifier queried unscoped across the suite; reusing it here would make
-    // a child row shadow its row in document-order lookups.
-    row.dataset.childRunId = r.runId;
-    row.classList.toggle('active', r.runId === state.selectedRunId);
-    if (isLingering(r)) row.classList.add('lingering'); // greyed
-
-    const dot = document.createElement('span');
-    dot.className = `child-dot ${runDotClass(r)}`;
-
-    const body = document.createElement('span');
-    body.className = 'child-body';
-
-    const title = document.createElement('span');
-    title.className = 'child-title';
-    title.textContent = r.title;
-
-    const hint = document.createElement('span');
-    hint.className = 'child-proj';
-    // Workspace runs list every member project (CSS clamps at three lines);
-    // single-project runs keep the lone basename.
-    const projLabel = Array.isArray(r.projectNames) && r.projectNames.length
-      ? r.projectNames.join(' · ')
-      : projectName(r.projectDir);
-    hint.textContent = projLabel;
-    hint.title = projLabel;
-
-    body.append(title, hint);
-    row.append(dot, body);
-    // Who started it (shared deployments only): just the initials; space is tight.
-    const starter = personShown(r.startedBy);
-    if (starter) {
-      const ini = personIni(starter, `Started by ${starter}`);
-      ini.classList.add('child-by');
-      row.appendChild(ini);
-    }
-
-    // End-of-row marker (same slot, three mutually exclusive states):
-    //  - pending input  → pulsing amber "?"   (needs your answer)
-    //  - finished done   → static green "●"    (completed, unseen)
-    //  - finished failed → static red "●"      (error/stopped, unseen)
-    // The green/red marker persists until the run is acknowledged (opened), at
-    // which point isLingering() goes false and the row leaves the list entirely.
-    if (r.pendingQuestion != null) {
-      const q = document.createElement('span');
-      q.className = 'child-q';
-      q.textContent = '?';
-      q.title = 'Waiting for your input';
-      row.appendChild(q);
-    } else if (isPaused(r)) {
-      // Paused: no end marker — it's parked (amber leading dot), not a result.
-    } else if (r._finished || isTerminalStatus(r.status)) {
-      const ok = r.status === 'done';
-      const m = document.createElement('span');
-      m.className = `child-q ${ok ? 'ok' : 'bad'}`;
-      m.textContent = '●';
-      m.title = ok ? 'Completed' : 'Did not complete';
-      row.appendChild(m);
-    }
-    row.addEventListener('click', () => { location.hash = `running/${r.runId}`; });
-    host.appendChild(row);
-  }
 }
 
 // Needs you, counted without building the list (this runs on every WS frame): the same rule

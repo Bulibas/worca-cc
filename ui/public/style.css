@@ -242,20 +242,6 @@ body{
 /* Selected: gentle tint + soft ring, not a heavy dark fill.
    Scoped under .nav to outrank the global `.nav button.active` dark-fill rule. */
 .nav .nav-child.active { background: var(--field); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line-2); }
-.nav-child.lingering { color: var(--ink-3); }   /* greyed finished-unread */
-
-.child-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
-/* Up to two lines, then ellipsis — one line rarely fits a run title. */
-.child-title { font-size: 13.5px; font-weight: 700; line-height: 1.3; overflow: hidden;
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
-  overflow-wrap: anywhere; }
-/* Single project → one name; workspace runs list every member. Wraps up to
-   three lines, then ellipsis. */
-.child-proj  { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 500; color: var(--ink-3);
-  overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3; line-clamp: 3; overflow-wrap: anywhere; }
-.nav-child.active .child-proj { color: var(--ink-3); }
-
 /* Static group (Nodes › Agents, Scripts). The parent is a disclosure: it never
    takes the dark current-page fill (`.active` belongs to the child page) and
    reads as --ink via .has-active while a child is open. The children reuse the
@@ -268,30 +254,6 @@ body{
 /* `.nav button.active svg` (0,2,2) paints the stroke --on-ink for the dark fill;
    a child's fill is the soft --field tint, so its icon stays --ink. */
 .nav .nav-child.active svg { stroke: var(--ink); }
-
-/* Status dot (left). Color matches the current running agent/phase
-   (violet=plan, peach=refine/review/running, blue=implement, red=clarify),
-   grey-pulse=starting/pausing, green=done, red=error/stopped. */
-.child-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
-/* Running states: colour + scale/halo pulse (currentColor drives the halo hue). */
-.child-dot.peach  { color: var(--peach);  background: currentColor; animation: dotpulse 1.3s ease-in-out infinite; }
-.child-dot.blue   { color: var(--blue);   background: currentColor; animation: dotpulse 1.3s ease-in-out infinite; }
-.child-dot.violet { color: var(--violet); background: currentColor; animation: dotpulse 1.3s ease-in-out infinite; }
-.child-dot.amber  { color: var(--amber);  background: currentColor; animation: dotpulse 1.3s ease-in-out infinite; }
-.child-dot.grey-pulse { color: var(--ink-3); background: currentColor; animation: dotpulse 1.3s ease-in-out infinite; }
-.child-dot.green { background: var(--green); }
-.child-dot.red   { background: var(--red); }
-.child-dot.paused { background: var(--amber); } /* parked + resumable: static, no pulse */
-
-/* Awaiting-input marker: a pulsing yellow "?" pinned at the end of the row. */
-.child-q {
-  flex: 0 0 auto; margin-left: 6px;
-  color: var(--amber); font-weight: 800; font-size: 15px; line-height: 1;
-  animation: pulse 1.3s ease-in-out infinite;
-}
-/* Finished-but-unseen marker: static green/red "●" in the same end slot (no pulse). */
-.child-q.ok  { color: var(--green); font-size: 12px; animation: none; }
-.child-q.bad { color: var(--red);   font-size: 12px; animation: none; }
 
 .side-project{margin:0 4px 22px;padding-bottom:22px;border-bottom:1px solid var(--line);}
 .side-project .sp-label{display:block;font-size:11px;font-weight:600;letter-spacing:.08em;
@@ -1403,7 +1365,7 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
    `@media (prefers-reduced-motion: reduce)` block placed AFTER them at the end
    of the file. */
 @media (prefers-reduced-motion: reduce){
-  .pdot,.cur,.child-dot,.child-q{animation:none;}
+  .pdot,.cur{animation:none;}
   *{transition:none !important;}
 }
 
@@ -3871,8 +3833,24 @@ body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:
 .runs-search-btn{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border:0;border-radius:9px;background:none;color:var(--ink-2);cursor:pointer;}
 .runs-search-btn:hover,.runs-search-btn.on{background:var(--hover);color:var(--ink);}
 .runs-search-btn:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.runs-head-tools{display:flex;align-items:center;gap:2px;}
+.runs-group-wrap{position:relative;display:flex;}
+.runs-group-btn[aria-expanded="true"]{background:var(--hover);color:var(--ink);}
+.runs-group-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:5;min-width:180px;
+  display:flex;flex-direction:column;gap:2px;padding:6px;background:var(--panel);
+  border:1px solid var(--line-2);border-radius:var(--r-card);box-shadow:var(--shadow-menu);}
+.runs-group-menu[hidden]{display:none;}
+.runs-group-menu button{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;border:0;border-radius:9px;
+  background:transparent;color:var(--ink-2);font:600 13px var(--sans);text-align:left;cursor:pointer;}
+.runs-group-menu button:hover,.runs-group-menu button:focus-visible{background:var(--hover);color:var(--ink);outline:none;}
+.runs-group-menu button[aria-checked="true"]{color:var(--ink);}
+.runs-group-menu button[aria-checked="true"]::after{content:"\2713";margin-left:auto;font-size:12px;}
 .runs-search-row{flex:none;padding:0 12px 10px;}
 .runs-search-row[hidden]{display:none;}
+/* The filter chips: .seg chrome, tightened to fit the 270px list pane on one row. */
+.seg.runs-filter{display:flex;flex:none;margin:0 12px 12px;padding:3px;gap:2px;border-radius:10px;}
+.seg.runs-filter button{flex:1 1 auto;padding:6px 8px;border-radius:8px;font-size:12.5px;white-space:nowrap;}
+.seg.runs-filter button:not(.on):hover{color:var(--ink);}
 /* A bare input[type=search] matches none of the global field rules (text/number only), so it is
    skinned here the way .pal-filter is; the UA placeholder grey is 2.6:1 on dark. */
 .runs-search{display:block;width:100%;box-sizing:border-box;-webkit-appearance:none;appearance:none;padding:8px 12px;border:1.5px solid transparent;border-radius:var(--r-ctrl);background:var(--field);color:var(--ink);font:500 13px var(--sans);}
@@ -4463,7 +4441,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 /* ---------- Collapsible sidebar: the 76px icon rail ---------- */
 /* No rule here restyles anything the expanded 298px column already had: 21 of
    them are scoped under `.sidebar.collapsed`, and the rest (`.brand .logo-mark`,
-   `.side-toggle*`, `.nav .rail-tile*`, `.spend-ring*`, `.spend-stack*`) style
+   `.side-toggle*`, `.spend-ring*`, `.spend-stack*`) style
    nodes that exist only because of this feature. Below 1080px the rail is
    forced (tablets) and at 760px the full column becomes the phone drawer;
    app.js#railCollapsed decides, and the stored preference only applies above
@@ -4474,17 +4452,17 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .brand .logo-mark{display:none;width:32px;height:32px;border-radius:50%;background:var(--ink);
   -webkit-mask:url(/assets/worca-mark-mask.png) center/contain no-repeat;-webkit-mask-mode:luminance;
   mask:url(/assets/worca-mark-mask.png) center/contain no-repeat;mask-mode:luminance;}
-/* The foot is a column flex, so the button parks itself: flex-end pins it to
-   the rail's right edge under the spend block while expanded, and the collapsed
-   override below re-centres it in the 76px rail — `align-self` on the child
-   out-ranks the `align-items:center` the collapsed foot sets. */
+/* The toggle ends the wordmark row: the mock pill's margin-right:auto (or the
+   row's space-between) parks it at the right edge. The round mark inside it
+   shows only on the rail, where mark + chevron are one target. */
 .side-toggle{display:flex;align-items:center;justify-content:center;
-  align-self:flex-end;
   width:30px;height:30px;flex:0 0 auto;padding:0;border:0;border-radius:9px;
-  background:transparent;color:var(--ink);cursor:pointer;}
-.side-toggle svg{width:23px;height:23px;}
+  background:transparent;color:var(--ink-3);cursor:pointer;
+  transition:background .15s,color .15s;}
+.side-toggle svg{width:20px;height:20px;flex:0 0 auto;}
 .side-toggle:hover{background:var(--hover);color:var(--ink);}
 .side-toggle:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.brand .side-toggle-mark{display:none;}
 
 /* 76 - 1px border-right - 36px padding = a 39px content box. But
    ::-webkit-scrollbar (:898) makes the vertical gutter SPACE-CONSUMING, and the
@@ -4504,29 +4482,24 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .sidebar.collapsed .brand{flex-direction:column;gap:6px;margin-bottom:26px;padding:0;}
 .sidebar.collapsed .logo{display:none;}
 .sidebar.collapsed .logo-mark{display:block;}
+.sidebar.collapsed .brand > .logo-mark{display:none;}
 .sidebar.collapsed .brand .side-mock-pill{margin-right:0;padding:2px 4px;font-size:9px;letter-spacing:.02em;}
-.sidebar.collapsed .side-toggle{width:40px;height:40px;margin:0;border-radius:12px;
-  align-self:center;}
-/* One bare chevron, pointing wherever the rail is about to go. It is NOT
-   mirrored in CSS: scaleX(-1) shifts a chevron's visual mass off the button's
-   centre, so applySidebarCollapsed rewrites the path's `d` and the arrow stays
-   optically centred in both states. Sizes: 23px under the spend block, 26px on
-   the rail. stroke-width lives in the markup, not here — 2 in a 24-unit viewBox
-   is a ~2px stroke at both sizes, which a lone arrow needs and the old boxed
-   glyph did not. */
-.sidebar.collapsed .side-toggle svg{width:26px;height:26px;}
+/* On the rail the toggle IS the mark: the 32px mark plus a 14px ">" in the
+   empty padding to its right, one button. The negative margins take the 3px
+   hover pad and the chevron out of layout, so the mark sits exactly where the
+   bare mark did (centred, 26 + 32 + 26 = 84 to the first tile) and the rail
+   stays 76px wide: the chevron lands in the right padding, before the border. */
+.sidebar.collapsed .side-toggle{width:auto;height:auto;gap:1px;padding:3px;
+  margin:-3px -18px -3px -3px;border-radius:12px;order:-1;}
+.sidebar.collapsed .side-toggle .side-toggle-mark{display:block;}
+.sidebar.collapsed .side-toggle svg{width:14px;height:14px;stroke-width:2.6;}
 
-/* `:not(.rail-tile)` is LOAD-BEARING on both rules below. Run tiles are
-   <button>s inside .nav, so without the guard the first rule would force them
-   to 40x40 and the second would hide their .child-dot and .child-q — the two
-   things a tile exists to show. `:not()` contributes its argument's
-   specificity, so the first rule is (0,4,1) and out-ranks `.nav button`
-   (:91, 0,1,1), `.nav button:hover` (:100, 0,2,1) and `.nav button.nav-cta`
-   (:109, 0,2,1). `flex:0 0 auto` is NOT decoration: .nav is a column flex
-   container whose items default to shrinkable, and these boxes are fixed-size
-   by design. */
+/* (0,3,1): out-ranks `.nav button` (0,1,1), `.nav button:hover` (0,2,1) and
+   `.nav button.nav-cta` (0,2,1). `flex:0 0 auto` is NOT decoration: .nav is a
+   column flex container whose items default to shrinkable, and these boxes are
+   fixed-size by design. */
 .sidebar.collapsed .nav{align-items:center;gap:6px;}
-.sidebar.collapsed .nav button:not(.rail-tile){position:relative;flex:0 0 auto;
+.sidebar.collapsed .nav button{position:relative;flex:0 0 auto;
   width:40px;height:40px;padding:0;gap:0;justify-content:center;border-radius:12px;}
 /* NOT display:none. This span is the ONLY source of an accessible name for
    every nav button — index.html carries no aria-label on any of the 12 and the
@@ -4539,7 +4512,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
    takes it out of flow, so the 40px square still centres its glyph, and the
    button above is position:relative. The Runs badges carry .nav-count, so the
    :not() guards keep this off them; the child combinator keeps it to the label. */
-.sidebar.collapsed .nav button:not(.rail-tile) > span:not(.nav-count):not(.nav-rollup){
+.sidebar.collapsed .nav button > span:not(.nav-count):not(.nav-rollup){
   position:absolute;width:1px;height:1px;padding:0;margin:-1px;
   overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0;}
 /* New pipeline is the one filled control on the rail; outlined-at-rest only
@@ -4576,13 +4549,6 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .sidebar.collapsed .side-foot{align-items:center;gap:10px;
   padding-top:9px;border-top:1px solid var(--line);}
 
-/* ---- rail run tiles ---- */
-/* Scoped `.nav .rail-tile` (0,2,0) for the same reason `.nav .nav-child` is
-   scoped (:149-155): it has to outrank the generic `.nav button` (:91, 0,1,1).
-   `padding` and `gap` must be restated — the collapsed `padding:0` rule
-   deliberately excludes `.rail-tile`, so a tile would otherwise inherit
-   `padding:11px 13px` and hold its initials in an 8px content box.
-   `flex:0 0 auto` keeps the fixed 36px box out of the column flex shrink. */
 .sidebar.collapsed .nav-children{align-items:center;gap:5px;margin-top:5px;}
 /* Nodes on the rail: no room for a parent row, so it goes and its two children
    stand as ordinary 40px squares — the rail reads exactly as it did before the
@@ -4597,49 +4563,6 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .sidebar.collapsed .nav .nav-child > svg{width:19px;height:19px;}
 .sidebar.collapsed .nav .nav-child.active{background:var(--ink);color:var(--on-ink);box-shadow:none;}
 .sidebar.collapsed .nav .nav-child.active svg{stroke:var(--on-ink);}
-.nav .rail-tile{position:relative;display:flex;align-items:center;justify-content:center;
-  width:36px;height:36px;flex:0 0 auto;padding:0;gap:0;
-  border:1.5px solid var(--line-2);border-radius:11px;
-  background:var(--panel);color:var(--ink-2);
-  font-family:var(--mono);font-size:11.5px;font-weight:400;cursor:pointer;
-  transition:border-color .15s,background .15s,color .15s;}
-/* `.nav button:hover` (:100) is (0,2,1) and OUT-SPECIFIES the (0,2,0) rule above,
-   so background and color have to be restated here at (0,3,0) or a hovered tile
-   turns var(--field) grey with var(--ink) initials. The mock's hover changes the
-   border only. Specificity is decided before source order — putting this rule
-   later cannot fix it. */
-.nav .rail-tile:hover{background:var(--panel);border-color:var(--hover-outline);color:var(--ink-2);}
-/* Three (0,3,0) rules in a row, so SOURCE ORDER decides between them:
-   `:hover` first, `.lingering` next (a hovered lingering tile stays grey), and
-   `.active` last (a selected lingering tile must not render --ink-3 text on an
-   --ink fill). `.active` also has to beat `.nav button.active` (:101, 0,2,1),
-   which it does on class count. The expanded row gets the same precedence for
-   free, on specificity: `.nav .nav-child.active` (:177) is (0,3,0) and
-   `.nav-child.lingering` (:178) is only (0,2,0). */
-.nav .rail-tile.lingering{color:var(--ink-3);}
-.nav .rail-tile.active{background:var(--ink);border-color:var(--ink);color:var(--on-ink);}
-.nav .rail-tile:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-/* No `box-sizing:content-box`: the global border-box (:52) makes this a 9px
-   total — a 5px core inside a 2px panel ring, exactly the mock. content-box
-   would make it 13px, and 15.3px at the dotpulse peak, on a 36px tile. The
-   colour classes (:197-204) are UNSCOPED (0,2,0), so the tile's dot inherits its
-   family and its pulse for free, and this (0,3,0) rule still wins on geometry.
-   Reduced motion does NOT reach that pulse, here or on the expanded row:
-   `.child-dot{animation:none}` in the block at :914-915 is (0,1,0) and loses to
-   `.child-dot.peach{animation:dotpulse}` (0,2,0), and `.nav-rollup` is not on
-   that kill list at all. Both are pre-existing and out of this change's scope. */
-.nav .rail-tile .child-dot{position:absolute;right:-2px;bottom:-2px;margin:0;
-  width:9px;height:9px;border:2px solid var(--panel);}
-/* `margin:0` overrides the base .child-q's margin-left:6px (:207-211), which
-   would otherwise shove this absolutely-positioned badge off the corner. The
-   base `animation:pulse` is kept on purpose — a run waiting on you should
-   pulse — and the block at :914-915 names .child-q, which DOES reach it: both
-   are (0,1,0) and the kill list comes later in the file. */
-.nav .rail-tile .child-q{position:absolute;top:-5px;right:-5px;margin:0;
-  display:flex;align-items:center;justify-content:center;
-  width:15px;height:15px;border:2px solid var(--panel);border-radius:50%;
-  background:var(--amber);color:var(--on-status);font-size:9px;font-weight:700;}
-
 /* ---- rail budget ring ---- */
 /* `.spend-ring` (0,1,0) ties `.spend-ind` (:1607-1608, 0,1,0) and wins the tie
    on source order, which is what lets it override display / width / text-align /
@@ -4708,6 +4631,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .mbar,.nav-scrim,.side-close{display:none;}
 @media (max-width:1080px){
   .sidebar .side-toggle{display:none;}
+  .sidebar.collapsed .brand > .logo-mark{display:block;}
 }
 @media (max-width:760px){
   .app{flex-direction:column;}
@@ -7131,7 +7055,6 @@ input.gv-name:focus-visible{outline:none;}
 .rd-row1 .person-chip{margin-left:auto;}
 
 .hd-row2 .person-chip{margin-left:auto;}
-.nav-child .child-by{margin-left:6px;}
 .hist-pill-label{margin-left:8px;font-size:12px;color:var(--ink-3);}
 .hist-pill.person .person-ini{width:16px;height:16px;font-size:8px;}
 

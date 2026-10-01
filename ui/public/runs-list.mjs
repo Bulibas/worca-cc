@@ -170,6 +170,7 @@ export function histRow(p, now = Date.now()) {
     title: String(p.title || p.id || '(untitled)'), status,
     groupKey: key, groupName: String(p.groupName || key || '(unknown project)'), by: String(p.by || ''),
     unread: false, needs: needsYou({ kind: 'hist', status }),
+    activityMs: Number.isFinite(timeMs(p.mtime, now)) ? timeMs(p.mtime, now) : timeMs(p.startedAt, now),
   }, { at: p.startedAt || p.mtime }, now);
 }
 
@@ -194,34 +195,85 @@ export function rowMatches(row, query) {
   return words.every((w) => hay.includes(w));
 }
 
-/** "<status or step> · <time>"; in Needs you the tail is the project (the group is not in view). */
-export function rowSub(row, { inNeeds = false } = {}) {
+/** "<status or step> · <time>"; in Needs you the tail is the project (the group is not in view).
+ *  Grouped by date the section says when, so the project joins the line and the time stays only
+ *  where the header does not already pin the day (Yesterday drops it) and the run is not live. */
+export function rowSub(row, { inNeeds = false, bucket = '' } = {}) {
+  if (bucket) {
+    // A live row is happening now: its start time would only push the line onto two.
+    const time = bucket === 'yesterday' || row.kind === 'live' ? '' : (row.kind === 'hist' ? rowTime(row.activityMs, row.nowMs) : row.time);
+    return [row.word, row.detail, row.groupName, time].filter(Boolean).join(' · ');
+  }
   const tail = inNeeds ? row.groupName : (row.detail || row.time);
   return tail ? `${row.word} · ${tail}` : row.word;
 }
+
+/** The list's filter chips. Finished = the run ended (done, stopped, failed, and every History
+ *  row, which covers interrupted); Live = the rest (running, waiting, paused, scheduled). A
+ *  run that ended but still lingers as a live row counts as finished: its icon says so. */
+export const RUNS_FILTERS = Object.freeze(['all', 'live', 'finished', 'needs']);
+const ENDED_ICONS = new Set(['done', 'stop', 'fail']);
+const isFinishedRow = (r) => r.kind === 'hist' || (r.kind === 'live' && ENDED_ICONS.has(r.icon));
+export function rowInFilter(row, filter) {
+  if (filter === 'live') return !isFinishedRow(row);
+  if (filter === 'finished') return isFinishedRow(row);
+  if (filter === 'needs') return !!row.needs;
+  return true;
+}
+const FILTER_EMPTY = Object.freeze({ live: 'No live runs.', finished: 'No finished runs yet.', needs: 'Nothing needs you.' });
+
+/** "Group by" for the list: per project/workspace (the default), or by when the run last moved. */
+export const RUNS_GROUPINGS = Object.freeze(['project', 'date']);
+/** Date sections, top to bottom. Live rows are happening now (Today); a scheduled run is
+ *  Upcoming; a History row files under its last activity (finish time, else start). The
+ *  boundaries are local midnights, stepped with setDate so a DST day is still one day. */
+export const DATE_BUCKETS = Object.freeze([
+  ['upcoming', 'Upcoming'], ['today', 'Today'], ['yesterday', 'Yesterday'],
+  ['week', 'Previous 7 days'], ['older', 'Older'],
+]);
+export function dateBucket(row, now = Date.now()) {
+  if (row.kind === 'sched') return 'upcoming';
+  const t = row.kind === 'live' ? now : row.activityMs;
+  if (!Number.isFinite(t)) return 'older';
+  const day = new Date(now);
+  day.setHours(0, 0, 0, 0);
+  if (t >= day.getTime()) return 'today';
+  day.setDate(day.getDate() - 1);
+  if (t >= day.getTime()) return 'yesterday';
+  day.setDate(day.getDate() - 6);
+  return t >= day.getTime() ? 'week' : 'older';
+}
+const KIND_RANK = Object.freeze({ live: 0, sched: 1, hist: 2 });
+const cmpDateRows = (a, b) => ((KIND_RANK[a.kind] ?? 3) - (KIND_RANK[b.kind] ?? 3))
+  || (a.kind === 'hist' ? (b.activityMs || 0) - (a.activityMs || 0) : 0);
 
 const NEEDS_RANK = Object.freeze({ ask: 0, paused: 1, fail: 2 });
 const cmpNeeds = (a, b) => ((NEEDS_RANK[a.icon] ?? 3) - (NEEDS_RANK[b.icon] ?? 3)) || ((b.sortMs || 0) - (a.sortMs || 0));
 
 /**
- * The list model: { needs: Row[], groups: [{key, name, count, collapsed, rows}], total, searching }.
+ * The list model: { needs: Row[], groups: [{key, name, count, collapsed, rows}], total, searching, filter }.
+ * `filter` is one of RUNS_FILTERS; under 'needs' the Needs-you group is the whole list.
+ * `groupBy` is one of RUNS_GROUPINGS; by date the groups are DATE_BUCKETS (keys "date:<id>",
+ * so their folds never collide with a project's) and each carries its `bucket`.
  * Live rows arrive in cmpTabRuns order and History rows newest first; both orders are kept.
  * A History row whose run is listed live is dropped (the live row stands for it), and so is a
  * schedule ticket whose run is (a firing ticket's id IS its runId).
  */
 export function buildRunsModel({
-  live = [], history = [], scheduled = [], person = '', query = '', collapsed = new Set(), now = Date.now(),
+  live = [], history = [], scheduled = [], person = '', query = '', filter = 'all', groupBy = 'project', collapsed = new Set(), now = Date.now(),
 } = {}) {
+  const shown = RUNS_FILTERS.includes(filter) ? filter : 'all';
+  const byDate = groupBy === 'date';
   const liveRows = live.map((it) => liveRow(it, now));
   const listed = new Set(liveRows.map((r) => r.pipelineId).filter(Boolean));
   const liveIds = new Set(liveRows.map((r) => r.runId));
   const histRows = history.filter((p) => p && p.id && !listed.has(String(p.id))).map((p) => histRow(p, now));
   const schedRows = scheduled.filter((t) => t && !liveIds.has(String(t.id))).map((t) => schedRow(t, now));
   const all = [...liveRows, ...schedRows, ...histRows]
-    .filter((r) => (!person || r.by === person) && rowMatches(r, query));
+    .filter((r) => (!person || r.by === person) && rowMatches(r, query) && rowInFilter(r, shown));
   const needs = all.filter((r) => r.needs).sort(cmpNeeds);
   const groups = new Map();
-  for (const r of all) {
+  for (const r of shown === 'needs' ? [] : all) {
     let g = groups.get(r.groupKey);
     if (!g) {
       g = { key: r.groupKey, name: r.groupName || '(unknown project)', rows: [], live: false, latest: -Infinity };
@@ -233,10 +285,20 @@ export function buildRunsModel({
     if (t > g.latest) g.latest = t;
   }
   const searching = !!String(query || '').trim();
+  if (byDate) {
+    const buckets = new Map(DATE_BUCKETS.map(([id]) => [id, []]));
+    for (const r of shown === 'needs' ? [] : all) buckets.get(dateBucket(r, now)).push(r);
+    const list = DATE_BUCKETS.filter(([id]) => buckets.get(id).length).map(([id, name]) => {
+      const rows = buckets.get(id).sort(cmpDateRows).map((r) => ({ ...r, nowMs: now }));
+      const key = `date:${id}`;
+      return { key, name, bucket: id, count: rows.length, collapsed: !searching && collapsed.has(key), rows };
+    });
+    return { needs, groups: list, total: all.length, searching, filter: shown, groupBy: 'date' };
+  }
   const list = [...groups.values()]
     .sort((a, b) => (Number(b.live) - Number(a.live)) || (b.latest - a.latest) || a.name.localeCompare(b.name))
     .map((g) => ({ key: g.key, name: g.name, count: g.rows.length, collapsed: !searching && collapsed.has(g.key), rows: g.rows }));
-  return { needs, groups: list, total: all.length, searching };
+  return { needs, groups: list, total: all.length, searching, filter: shown, groupBy: 'project' };
 }
 
 /** Is `row` the run the pane shows? `sel` = { runId, pipelineId, histKey: "<projectKey>/<id>" }. */
@@ -282,7 +344,7 @@ function textEl(doc, tag, cls, text) {
   return n;
 }
 
-function renderRow(doc, r, { inNeeds = false } = {}) {
+function renderRow(doc, r, { inNeeds = false, bucket = '' } = {}) {
   const a = doc.createElement('a');
   a.className = `runs-row runs-row-${r.kind}`;
   a.setAttribute('href', r.href);
@@ -299,7 +361,7 @@ function renderRow(doc, r, { inNeeds = false } = {}) {
   ic.appendChild(renderRowIcon(doc, r.icon));
   const body = doc.createElement('span');
   body.className = 'runs-row-body';
-  body.append(textEl(doc, 'span', 'runs-row-title', r.title), textEl(doc, 'span', 'runs-row-sub', rowSub(r, { inNeeds })));
+  body.append(textEl(doc, 'span', 'runs-row-title', r.title), textEl(doc, 'span', 'runs-row-sub', rowSub(r, { inNeeds, bucket })));
   a.append(ic, body);
   return a;
 }
@@ -339,11 +401,14 @@ export function renderRunsList(doc, model, { emptyText = 'No runs yet.', note = 
     const rows = doc.createElement('div');
     rows.className = 'runs-group-rows';
     rows.hidden = g.collapsed;
-    if (!g.collapsed) for (const r of g.rows) rows.appendChild(renderRow(doc, r));
+    if (!g.collapsed) for (const r of g.rows) rows.appendChild(renderRow(doc, r, { bucket: g.bucket || '' }));
     sec.append(head, rows);
     out.push(sec);
   }
-  if (!model.total) out.push(textEl(doc, 'p', 'runs-note', model.searching ? 'No runs match your search.' : emptyText));
+  if (!model.total) {
+    const empty = model.searching ? 'No runs match your search.' : (FILTER_EMPTY[model.filter] || emptyText);
+    out.push(textEl(doc, 'p', 'runs-note', empty));
+  }
   if (note) out.push(textEl(doc, 'p', 'runs-note runs-note-err', note));
   return out;
 }

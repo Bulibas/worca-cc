@@ -32,6 +32,14 @@
           <span class="logo-mark" role="img" aria-label="Worca"></span>
           <!-- The server's mock mode (WS hello serverMock, app.js#applyServerMock): every run is a mock. -->
           <span class="badge amber side-mock-pill" id="side-mock-pill" title="Server started with WORCA_MOCK=1 — all runs are mock." hidden>MOCK</span>
+          <!-- Collapse/expand (desktop only). Expanded: a bare "<" at the row's end. On the
+               rail the button carries the round mark too, so mark + ">" is one target. -->
+          <button type="button" class="side-toggle" id="side-toggle"
+                  aria-expanded="true" aria-controls="side-rail"
+                  title="Collapse menu" aria-label="Collapse menu">
+            <span class="logo-mark side-toggle-mark" aria-hidden="true"></span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path class="chev" d="M15 6l-6 6 6 6"></path></svg>
+          </button>
           <button type="button" class="side-close" id="side-close" aria-label="Close menu" title="Close menu">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
           </button>
@@ -53,7 +61,6 @@
             <span class="nav-count n-amber" id="nav-needs-count" hidden>0</span>
             <span class="nav-count n-grey" id="nav-running-count">0</span>
           </button>
-          <div class="nav-children" id="nav-running-children"></div>
           <button type="button" data-nav="schedules" data-min-level="advanced">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="3"></rect><path d="M3.5 10h17M8 3v4M16 3v4"></path><path d="M12 13.2v2.6l1.8 1.1"></path></svg>
             <span>Schedules</span>
@@ -129,11 +136,6 @@
                identity proxy or an operator-set name; a local install never shows it. -->
           <div class="side-who" id="side-who" hidden><span class="side-who-label">Signed in as</span> <span class="side-who-name"></span></div>
           <div id="side-spend"></div>
-          <button type="button" class="side-toggle" id="side-toggle"
-                  aria-expanded="true" aria-controls="side-rail"
-                  title="Collapse menu" aria-label="Collapse menu">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path class="chev" d="M15 6l-6 6 6 6"></path></svg>
-          </button>
         </div>
       </aside>
 
@@ -458,14 +460,34 @@
             <div class="runs-list-pane" id="runs-list-pane">
               <div class="runs-head">
                 <h1>Runs</h1>
-                <button type="button" class="runs-search-btn" id="runs-search-btn" aria-label="Search runs"
-                        aria-expanded="false" aria-controls="runs-search-row">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M16 16l4.5 4.5"></path></svg>
-                </button>
+                <span class="runs-head-tools">
+                  <!-- "Group by" (runs-list.mjs RUNS_GROUPINGS): app.js keeps aria-checked and the menu. -->
+                  <span class="runs-group-wrap">
+                    <button type="button" class="runs-search-btn runs-group-btn" id="runs-group-btn" aria-label="Group runs"
+                            title="Group runs" aria-haspopup="menu" aria-expanded="false" aria-controls="runs-group-menu">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h11M4 18h7"></path></svg>
+                    </button>
+                    <div class="runs-group-menu" id="runs-group-menu" role="menu" aria-label="Group runs by" hidden>
+                      <button type="button" role="menuitemradio" data-group-by="project" aria-checked="true">Group by project</button>
+                      <button type="button" role="menuitemradio" data-group-by="date" aria-checked="false">Group by date</button>
+                    </div>
+                  </span>
+                  <button type="button" class="runs-search-btn" id="runs-search-btn" aria-label="Search runs"
+                          aria-expanded="false" aria-controls="runs-search-row">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M16 16l4.5 4.5"></path></svg>
+                  </button>
+                </span>
               </div>
               <div class="runs-search-row" id="runs-search-row" hidden>
                 <input type="search" id="runs-search" class="runs-search" placeholder="Status, project or name"
                        aria-label="Search runs by status, project or name" autocomplete="off" spellcheck="false">
+              </div>
+              <!-- Which runs the list shows (runs-list.mjs RUNS_FILTERS); app.js keeps aria-pressed. -->
+              <div class="seg runs-filter" id="runs-filter" role="group" aria-label="Show runs">
+                <button type="button" data-filter="all" aria-pressed="true" class="on">All</button>
+                <button type="button" data-filter="live" aria-pressed="false">Live</button>
+                <button type="button" data-filter="finished" aria-pressed="false">Finished</button>
+                <button type="button" data-filter="needs" aria-pressed="false">Needs you</button>
               </div>
               <!-- "Started by" pills, shared deployments only: one scrolling row. Built by renderRunsPeople(). -->
               <div class="hist-filter runs-people" id="historyFilter" role="group" aria-label="Filter runs by who started them" hidden></div>
