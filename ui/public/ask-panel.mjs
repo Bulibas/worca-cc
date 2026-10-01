@@ -2004,7 +2004,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         row.appendChild(make('span', `ask-dot${a.status === 'running' ? ' ask-dot-run' : a.status === 'done' ? ' ask-dot-done' : ''}`));
         const col = make('span', 'ask-runinfo-col');
         col.appendChild(make('span', 'ask-runinfo-name', a.label || a.type || 'agent'));
-        col.appendChild(make('span', 'ask-runinfo-sub', [a.model, fmtCtx(a.ctx) || fmtTokens(a.tokens), Number.isFinite(a.costUsd) ? `≈${fmtUsd(a.costUsd)}` : null, a.status || null].filter(Boolean).join(' · ')));
+        col.appendChild(make('span', 'ask-runinfo-sub', [a.model, fmtCtx(a.ctx, a.ctxWindow) || fmtTokens(a.tokens), Number.isFinite(a.costUsd) ? `≈${fmtUsd(a.costUsd)}` : null, a.status || null].filter(Boolean).join(' · ')));
         row.appendChild(col);
         row.appendChild(make('span', 'ask-runinfo-elapsed', fmtElapsed(a.durationMs) || '—'));
         p.appendChild(row);
@@ -3786,7 +3786,12 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     rowEl.appendChild(make('span', `ask-dot${block.status === 'running' ? ' ask-dot-run' : block.status === 'done' ? ' ask-dot-done' : ''}`));
     rowEl.appendChild(make('span', 'ask-agent-name', block.label || block.type || 'agent'));
     rowEl.appendChild(make('span', 'ask-agent-model', block.model || ''));
-    rowEl.appendChild(make('span', 'ask-agent-tokens', fmtCtx(block.ctx) || fmtTokens(block.tokens) || ''));
+    const fillEl = make('span', 'ask-agent-tokens', fmtCtx(block.ctx, block.ctxWindow) || fmtTokens(block.tokens) || '');
+    const level = ctxLevel(block.ctx, block.ctxWindow);             // null without a window: no colour, as before
+    if (level === 'warn' || level === 'high') fillEl.classList.add(`is-ctx-${level}`);
+    const fillTitle = Number.isInteger(block.ctxWindow) ? ctxTitle(block.ctx, block.ctxWindow) : null;
+    if (fillTitle) fillEl.title = fillTitle;
+    rowEl.appendChild(fillEl);
     rowEl.appendChild(make('span', 'ask-agent-cost', Number.isFinite(block.costUsd) ? `≈${fmtUsd(block.costUsd)}` : ''));
     rowEl.appendChild(make('span', `ask-agent-status${block.status === 'done' ? ' is-done' : ''}`, block.status || ''));
     rowEl.addEventListener('click', () => {
@@ -3799,7 +3804,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.expandedAgents.has(block.id)) {
       const log = make('div', 'ask-agent-log');
       const head = make('div', 'ask-agent-log-head');
-      head.appendChild(make('span', null, [block.model, fmtCtx(block.ctx) || fmtTokens(block.tokens), Number.isFinite(block.costUsd) ? `≈${fmtUsd(block.costUsd)}` : null].filter(Boolean).join(' · ')));
+      head.appendChild(make('span', null, [block.model, fmtCtx(block.ctx, block.ctxWindow) || fmtTokens(block.tokens), Number.isFinite(block.costUsd) ? `≈${fmtUsd(block.costUsd)}` : null].filter(Boolean).join(' · ')));
       head.appendChild(make('span', 'ask-agent-log-type', block.type || ''));
       log.appendChild(head);
       const body = make('div', 'ask-agent-log-body');
