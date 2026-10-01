@@ -291,6 +291,7 @@ const settle = async (id) => {             // the mock turn must finish before t
 };
 
 test('context chips: accumulate across turns, dedupe, survive scope PATCH, ride list + GET + 202', async () => {
+  await idle();
   const { thread } = await (await post('/api/ask/threads', {})).json();
   assert.deepEqual(thread.contexts, [], 'a fresh chat has no chips');
   const send = (context) => post(`/api/ask/threads/${thread.id}/messages`, { text: 'hi', model: 'claude-opus-5-5', effort: 'high', context });
@@ -319,6 +320,7 @@ test('context chips: accumulate across turns, dedupe, survive scope PATCH, ride 
 });
 
 test('conversation chips: a run the answer links to becomes a chat chip, on the thread and the ask-done frame', async () => {
+  await idle();
   const { addProject } = await import('../src/core/projects.mjs');
   const { getDb } = await import('../src/core/db.mjs');
   const projDir = await mkdtemp(join(tmpdir(), 'worca-cc-askchips-'));
