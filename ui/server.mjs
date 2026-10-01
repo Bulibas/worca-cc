@@ -7948,6 +7948,57 @@ function askCardScheduleLine(b, tz = null) {
   return '';
 }
 
+/** One run's header shape by pipeline id, scoped to a store key when known (any key otherwise), or null.
+ *  `home` = the run's #history route prefix (context chips); never rendered into the header. */
+function askRunByPipelineId(pipelineId, key) {
+  const row = (key ? lookupPipelineRow(key, pipelineId) : null) || findPipelineRowById(pipelineId);
+  if (!row) return null;
+  const home = row.workspace_key ? `workspaces/${row.workspace_key}` : (row.project_key || null);
+  return { ...askRunFromPipelineRow(row), home };
+}
+
+/** A live run's header shape from the runs Map (the app run id), or null. `home` (context chips) only
+ *  once the pipeline id is known: the run-id prefix fallback is not the id a later turn resolves, so
+ *  contextEntries skips a run without one. (The LIVE entry really is camelCase — no row mapping.) */
+function askLiveRun(runId) {
+  const entry = runs.get(runId);
+  if (!entry) return null;
+  const home = !entry.pipelineId ? null
+    : entry.workspaceId ? `workspaces/${entry.workspaceId}`
+      : (entry.projectDir ? projectKey(entry.projectDir) : null);
+  return {
+    id: entry.pipelineId || runId.slice(0, 8), title: entry.title || '',
+    status: entry.status || '', startedAt: entry.startedAt || '', branch: null, home,
+  };
+}
+
+/** Conversation chips: resolve one finished turn's mentioned refs (contexts.mjs mentionedRefs) exactly like
+ *  the page's — project and workspace names, a run's title and home, a live run through the runs Map —
+ *  dropping any that do not resolve. Each entry is marked source 'chat'. Lookups are individually guarded. */
+async function resolveAskMentions(refs) {
+  let projects = null;
+  const out = [];
+  for (const ref of refs) {
+    const header = {};
+    try {
+      if (ref.kind === 'project') {
+        projects ??= await listProjects();
+        const p = projects.find((x) => x.key === ref.id);
+        if (p) header.project = { name: p.name, key: p.key };
+      } else if (ref.kind === 'workspace') {
+        const ws = await readWorkspace(ref.id);
+        if (ws) header.workspace = { name: ws.name, id: ws.id };
+      } else if (ref.kind === 'run') {
+        header.run = askRunByPipelineId(ref.id, ref.workspaceId ? `workspaces/${ref.workspaceId}` : ref.projectKey);
+      } else if (ref.kind === 'liveRun') {
+        header.run = askLiveRun(ref.id);
+      }
+    } catch { /* an unresolved ref earns no chip */ }
+    for (const e of askContextEntries({}, header)) out.push({ ...e, source: 'chat' });
+  }
+  return out;
+}
+
 /** Resolve the VALIDATED client context into the server-side shape
  *  buildContextHeader consumes (§6.5: server-resolved rows only — never
  *  client-supplied titles or paths). Every lookup is individually guarded:
@@ -8021,28 +8072,13 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
   } catch { /* absent line */ }
   try {
     if (ctx.pipelineId) {
-      const key = ctx.workspaceId ? `workspaces/${ctx.workspaceId}` : out.project?.key;
-      const row = (key ? lookupPipelineRow(key, ctx.pipelineId) : null) || findPipelineRowById(ctx.pipelineId);
-      if (row) {
-        // `home` = the run's #history route prefix (context chips); never rendered into the header.
-        const home = row.workspace_key ? `workspaces/${row.workspace_key}` : (row.project_key || null);
-        out.run = { ...askRunFromPipelineRow(row), home };
-      }
-    } else if (ctx.runId && runs.has(ctx.runId)) {
-      const entry = runs.get(ctx.runId);
-      // `home` (context chips) only once the pipeline id is known: the run-id prefix fallback
-      // is not the id a later turn resolves, so contextEntries skips a run without one.
-      const home = !entry.pipelineId ? null
-        : entry.workspaceId ? `workspaces/${entry.workspaceId}`
-          : (entry.projectDir ? projectKey(entry.projectDir) : null);
-      out.run = {
-        id: entry.pipelineId || ctx.runId.slice(0, 8), title: entry.title || '',
-        status: entry.status || '', startedAt: entry.startedAt || '', branch: null, home,
-      };
+      const run = askRunByPipelineId(ctx.pipelineId, ctx.workspaceId ? `workspaces/${ctx.workspaceId}` : out.project?.key);
+      if (run) out.run = run;
+    } else if (ctx.runId) {
+      const run = askLiveRun(ctx.runId);
+      if (run) out.run = run;
     }
   } catch { /* absent line */ }
-  // (the ctx.runId branch reads the LIVE runs-Map entry, which really is
-  // camelCase — only the DB pipeline row needs askRunFromPipelineRow)
   try {
     const links = askListRunLinks(threadId).slice(0, ASK_LIMITS.headerRuns).map((l) => {
       const live = runs.get(l.runId);
@@ -8251,6 +8287,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         // the open Scripts tabs drop their list and the composer marks its script list dirty.
         onScriptMutation: () => { emitChanged('scripts-changed', 'updated'); },
         trackRun: (input, { pin } = {}) => askTrackRun(id, input, pin ?? null),
+        resolveMentions: resolveAskMentions,
         // pause / resume / skip / mark-read in the MCP child: the Schedules page and the badges repaint.
         onScheduleMutation: () => { emitChanged('schedules-changed', 'ask'); emitChanged('notifications-changed'); },
       },

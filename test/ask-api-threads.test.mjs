@@ -282,6 +282,38 @@ test('context chips: accumulate across turns, dedupe, survive scope PATCH, ride 
   assert.deepEqual(list.threads.find((t) => t.id === thread.id).contexts.map((c) => c.id), ['settings', 'team-metrics']);
 });
 
+test('conversation chips: a run the answer links to becomes a chat chip, on the thread and the ask-done frame', async () => {
+  const { addProject } = await import('../src/core/projects.mjs');
+  const { getDb } = await import('../src/core/db.mjs');
+  const projDir = await mkdtemp(join(tmpdir(), 'worca-cc-askchips-'));
+  const project = (await addProject({ name: 'chips-demo', path: projDir })).find((p) => p.name === 'chips-demo');
+  getDb().prepare("INSERT INTO pipelines (id, project_key, target, title, status) VALUES ('5e6f7081', ?, 'project', 'Fix login', 'done')").run(project.key);
+  const msgs = [];
+  const ws = new WebSocket(wsBase, { headers: { host: '127.0.0.1', origin: 'http://127.0.0.1' } });
+  ws.on('message', (d) => { try { msgs.push(JSON.parse(String(d))); } catch { /* ignore */ } });
+  await new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); });
+  try {
+    const { thread } = await (await post('/api/ask/threads', {})).json();
+    // the mock answers with the first line of the user's text, so the answer carries these links
+    const r = await post(`/api/ask/threads/${thread.id}/messages`, {
+      text: `see #history/${project.key}/5e6f7081 and #history/${project.key}/0000dead`, model: 'claude-opus-5-5', effort: 'high', context: { view: 'settings' },
+    });
+    assert.equal(r.status, 202);
+    const snap = await settle(thread.id);
+    const chip = { kind: 'run', id: '5e6f7081', label: 'Fix login', home: project.key, source: 'chat' };
+    assert.deepEqual(snap.thread.contexts, [
+      { kind: 'page', id: 'settings', label: 'Settings' },
+      chip,
+    ], 'the page chip first, then the resolved run; the unknown run is dropped');
+    const done = msgs.find((m) => m.type === 'ask-done' && m.threadId === thread.id);
+    assert.ok(done, 'saw the ask-done frame');
+    assert.deepEqual(done.contexts, snap.thread.contexts, 'the frame carries the list so the panel repaints');
+  } finally {
+    ws.close();
+    await rm(projDir, { recursive: true, force: true });
+  }
+});
+
 test('DELETE removes rows and the attachment directory; unknown is 404', async () => {
   assert.equal((await del('/api/ask/threads/ask_ffffffff')).status, 404);
   const store = await import('../src/core/ask/store.mjs');

@@ -106,6 +106,52 @@ test('happy path: frames ordered, session stored immediately, row + totals persi
   assert.deepEqual(done.threadTotals, totals);
 });
 
+test('conversation chips: the answer\'s refs are resolved, merged as chat chips and ride ask-done', async () => {
+  const s = seed();
+  let seen = null;
+  const { turn, frames } = makeTurn(s, {}, {
+    runClaudeImpl: async (opts) => {
+      say(opts.onEvent, 'msg_1', 'See [Fix login](#history/demo-00000001/1a2b3c4d).');
+      push(opts.onEvent, RESULT());
+      return { text: '', exitCode: 0 };
+    },
+    resolveMentions: async (refs) => {
+      seen = refs;
+      return [{ kind: 'run', id: '1a2b3c4d', label: 'Fix login', home: 'demo-00000001', source: 'chat' }];
+    },
+  });
+  await turn.run();
+  assert.deepEqual(seen, [{ kind: 'run', id: '1a2b3c4d', projectKey: 'demo-00000001' }]);
+  const chip = { kind: 'run', id: '1a2b3c4d', label: 'Fix login', home: 'demo-00000001', source: 'chat' };
+  assert.deepEqual(getThread(s.thread.id).contexts, [chip]);
+  assert.deepEqual(frames.at(-1).contexts, [chip]);
+});
+
+test('conversation chips: a failing resolver is logged and the turn still ends done, without contexts', async () => {
+  const s = seed();
+  const warn = console.warn;
+  const warned = [];
+  console.warn = (m) => warned.push(String(m));
+  try {
+    const { turn, frames } = makeTurn(s, {}, {
+      runClaudeImpl: async (opts) => {
+        say(opts.onEvent, 'msg_1', 'See #projects/demo-00000001');
+        push(opts.onEvent, RESULT());
+        return { text: '', exitCode: 0 };
+      },
+      resolveMentions: async () => { throw new Error('db gone'); },
+    });
+    const out = await turn.run();
+    assert.equal(out.status, 'done');
+    const done = frames.at(-1);
+    assert.equal(done.type, 'ask-done');
+    assert.equal(Object.hasOwn(done, 'contexts'), false);
+    assert.ok(warned.some((m) => /mentioned contexts not recorded: db gone/.test(m)));
+  } finally {
+    console.warn = warn;
+  }
+});
+
 test('web access: the turn hands WORCA_ASK_WEB to the child, writes the config 0600, and swaps the sub-agent note', async () => {
   const s = seed();
   let cfg = null; let mode = null; let note = null;

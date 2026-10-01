@@ -38,8 +38,9 @@ import { effectiveTimeZone } from './schedule-spec.mjs';
 import { scheduleDefaults } from '../settings.mjs';
 import { revalidateWorkflowProposal } from './workflow-deps.mjs';
 import { askLimits, ASK_LIMITS } from './limits.mjs';
+import { mentionedRefs } from './contexts.mjs';
 import {
-  newAskId, finishMessage, setMessageBlocks, addThreadTotals, updateThread, setThreadTitle, listAttachments,
+  newAskId, finishMessage, setMessageBlocks, addThreadTotals, addThreadContexts, updateThread, setThreadTitle, listAttachments,
 } from './store.mjs';
 import { recordAskCostDelta } from '../cost-budget.mjs';
 import { setPendingCardComments } from '../diff-comments.mjs';
@@ -117,7 +118,7 @@ class AskTurn extends EventEmitter {
       failedBecauseSignedOut: deps.failedBecauseSignedOut ?? failedBecauseSignedOut,
       memoryMount: deps.memoryMount ?? refreshAskMemoryMount,
       store: {
-        finishMessage, setMessageBlocks, addThreadTotals, updateThread, setThreadTitle, listAttachments,
+        finishMessage, setMessageBlocks, addThreadTotals, addThreadContexts, updateThread, setThreadTitle, listAttachments,
         ...(deps.store || {}),
       },
       validateProposal: deps.validateProposal ?? validateProposal,
@@ -135,6 +136,8 @@ class AskTurn extends EventEmitter {
       // A proposed plugin task is looked up here, once: it must exist, and the card shows its title.
       lookupTask: deps.lookupTask === undefined ? lookupTask : deps.lookupTask,
       trackRun: deps.trackRun ?? null,
+      // Conversation chips: (refs) → resolved chip entries (ui/server.mjs resolveAskMentions). null = none.
+      resolveMentions: deps.resolveMentions ?? null,
       generateTitle: deps.generateTitle ?? generateTitle,
       askLimits: deps.askLimits ?? askLimits,
       limits: deps.limits ?? ASK_LIMITS,
@@ -660,6 +663,7 @@ class AskTurn extends EventEmitter {
         model: this.model, tsMs: d.now(),
       });
     } catch { /* ledger append is best-effort */ }
+    const contexts = await this._mentionedContexts(summary);
     this.status = finalStatus;
     if (summary.reducerErrors) {
       console.warn(`[worca-ask] turn ${this.assistantMessageId}: ${summary.reducerErrors} reducer error(s) absorbed`);
@@ -682,11 +686,27 @@ class AskTurn extends EventEmitter {
       this._frame({
         type: 'ask-done', text: summary.text, blocks: summary.blocks, usage: summary.usage,
         costUsd, durationMs: summary.durationMs, model: this.model, status: finalStatus,
-        ...(reason ? { reason } : {}), threadTotals,
+        ...(reason ? { reason } : {}), threadTotals, ...(contexts ? { contexts } : {}),
       });
       this._emit('done', { status: finalStatus, reason });
     }
     return { status: finalStatus };
+  }
+
+  /** Conversation chips: what this turn's answer linked to and its worca tools touched, resolved by the
+   *  server and merged into the thread as source 'chat'. Returns the thread's list for the ask-done frame,
+   *  or null (no resolver, a deleted thread, a failure). Cosmetic — a failure is logged, never thrown. */
+  async _mentionedContexts(summary) {
+    const d = this.deps;
+    if (typeof d.resolveMentions !== 'function') return null;
+    try {
+      const refs = mentionedRefs(summary);
+      const entries = refs.length ? await d.resolveMentions(refs) : [];
+      return d.store.addThreadContexts(this.threadId, entries) || null;
+    } catch (e) {
+      console.warn(`[worca-ask] turn ${this.assistantMessageId}: mentioned contexts not recorded: ${e && e.message ? e.message : e}`);
+      return null;
+    }
   }
 
   _limitNotice(reason, limitsNow) {
