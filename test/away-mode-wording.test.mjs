@@ -50,3 +50,12 @@ test('the scanner itself catches the old wording', () => {
     .filter((s) => BAD.some((b) => b.test(scrub(s))));
   assert.deepEqual(hits, ['Grace (minutes)', 'Night mode']);
 });
+
+test('the Away mode info tip promises only what the code does', () => {
+  const html = read('ui/public/index.html');
+  const at = html.indexOf('aria-label="About Away mode"');
+  const tip = html.slice(at, html.indexOf('</span>', at)).replace(/\s+/g, ' ');
+  assert.match(tip, /While you're away, worca answers the questions your runs are waiting on\. You can see every answer and why it was chosen\. When worca wasn't sure, it marks the answer "please check"\./);
+  // Rule-based answers (accepting a workflow, retrying a step) are not marked: never claim all of them are reviewed.
+  assert.doesNotMatch(tip, /flagged|every answer is (checked|reviewed)/i);
+});
