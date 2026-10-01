@@ -87,15 +87,23 @@ import { recordRunMetrics } from './metrics/record.mjs';
 // Team policy (team-policy design §6–§7): the document a run's cost gates fold in, its
 // per-run state, and the off-policy findings the run log names at start.
 import { resolveProjectPolicy, resolveWorkspacePolicy } from './policy/sync.mjs';
-import { fieldsForRun, effectiveCap, deviationsFor } from './policy/effective.mjs';
+import { fieldsForRun, effectiveCap, deviationsFor, mcpDeviations } from './policy/effective.mjs';
 import { writePolicyState, hasPipelineOverride, readTotalAck } from './policy/state.mjs';
 import { installedPluginsMap, WORCA_VERSION as POLICY_WORCA_VERSION } from './policy/local.mjs';
 import { readSettings as readRawSettings } from './settings.mjs';
 import { byActor } from './identity.mjs';
-import { WORKSPACE_SCAN_WORKFLOW_ID } from './graph/builtin-workflows.mjs';
+import { WORKSPACE_SCAN_WORKFLOW_ID, MEMORY_DEFRAG_WORKFLOW_ID } from './graph/builtin-workflows.mjs';
+import { agentIdentity } from './agent-user.mjs';
+import { resolveRegistry, requiredOf, toolNameLimitFor, skipReasonText } from './mcp/registry.mjs';
+import { loadCatalog } from './mcp/catalog.mjs';
+import { MCP_STARTUP_MS } from './mcp/timeouts.mjs';
+import { keepListNames } from './mcp/keep-list.mjs';
+import { expandMcpDenyRules } from './mcp/deny.mjs';
+import { createRedactor } from './redact.mjs';
 import { finalizeWorkspaceScan } from './workspace-scan-run.mjs';
 import { readWorkspaceMap } from './workspaces.mjs';
 import { redactSecrets } from '../shared/workspace-map/redact.mjs';
+import { MCP_TOOL_NAME_400_RE, MCP_TOOL_NAME_TOO_LONG } from '../shared/mcp-tool-name.mjs';
 
 // worca-cc repo root; holds skills/. fileURLToPath, never URL.pathname: the
 // latter is `/C:/…` on Windows and %-encoded everywhere (see DEFAULT_AGENTS_DIR
@@ -622,6 +630,22 @@ export function normalizeClarifyAnswer(payload, questions) {
 // slowest command issued here, and it legitimately takes seconds, never minutes.
 const HARNESS_GIT_TIMEOUT_MS = 120_000;
 
+// MCP registry §10: a result error the first-party API gives a tool name over the limit, and the
+// run warning it maps to (put back after a resume re-assembly, like the mcpStatus lines). Bounded
+// quantifiers and clipped text: it runs in the server process on every error result's text. One
+// definition with Ask's muted line (ask/turn.mjs): src/shared/mcp-tool-name.mjs.
+const MCP_NAME_400_RE = MCP_TOOL_NAME_400_RE;
+const MCP_NAME_WARNING = MCP_TOOL_NAME_TOO_LONG;
+
+/** §10: the run warning for a registry copy's `system/init` status; null when it is not a problem. */
+function mcpStatusWarning(name, status, setName) {
+  const set = setName ? ` (set ${setName})` : '';
+  if (status === 'failed' || status === 'needs-auth') return `${name}: failed to connect (token, URL or command) — run Test in Settings › MCP servers${setName ? ` › ${setName}` : ''}`;
+  if (status === 'disabled') return `${name}: disabled by your Claude Code settings${set}`;
+  if (status === 'absent') return `${name}: blocked by managed MCP policy${set}`;
+  return null;
+}
+
 export class RunHarness extends EventEmitter {
   constructor(opts) {
     super();
@@ -721,6 +745,9 @@ export class RunHarness extends EventEmitter {
     // policy = byte-identical legacy spawn, so callers that never pass the
     // option (CLI, tests, pre-picker API bodies) keep today's behavior exactly.
     this.guardrailsId = this.opts.guardrailsId || 'permissive';
+    // MCP registry (design §6.2, D16): the run's per-membership opt-out ('<setId>|<serverId>'),
+    // validated by POST /api/run; rides the resume point, restored beside guardrailsId.
+    this.mcpOptOut = Array.isArray(this.opts.mcpOptOut) ? this.opts.mcpOptOut : [];
     // Engine hook: the v1 runner registry (see Orchestrator._initRunners).
     this._initRunners(this.opts);
 
@@ -758,6 +785,10 @@ export class RunHarness extends EventEmitter {
     this.runContext = null;
     this.mcpConfigPath = null;      // <runRoot>/mcp.json -> --mcp-config
     this.mcpServerGrants = [];      // `mcp__<server>` per merged server (V1 branch (a))
+    // MCP registry layer (design §6.1): { env, redact, disallowed, allowlist, copies } for every
+    // dispatch, or null. Holds secret values: never written to run.json, events, journals or the
+    // resume point.
+    this.mcpLayer = null;
 
     this.abort = new AbortController();
     this._answeredBy = new Map();            // question id -> who answered it (identity.mjs actor)
@@ -1582,6 +1613,7 @@ export class RunHarness extends EventEmitter {
       // the constructor default ('permissive'). Keep state in sync for re-persist.
       this.guardrailsId = rp.guardrailsId || this.guardrailsId;
       this.state.guardrailsId = this.guardrailsId;
+      this.mcpOptOut = Array.isArray(rp.mcpOptOut) ? rp.mcpOptOut : [];
       await this._resolveGuardrails();
       await this._resolvePolicy();
       // Restore the EFFECTIVE instruction from the resume point — by dispatch time
@@ -2204,9 +2236,9 @@ export class RunHarness extends EventEmitter {
     // what "already reported" means (a resumed run is a NEW orchestrator object, so an
     // in-memory Set could not see the earlier segment). Read BEFORE the assembly,
     // which rewrites `warnings` wholesale.
-    const alreadyReported = new Set(
-      this.runRoot ? ((await readRunManifest(this.runRoot))?.warnings ?? []) : [],
-    );
+    const prior = this.runRoot ? await readRunManifest(this.runRoot) : null;
+    const alreadyReported = new Set(prior?.warnings ?? []);
+    let reg = null;                                        // the MCP registry layer's { result, catalog }
     const rc = await assembleRunContext({
       runRoot: this.runRoot,
       members: this.members.map((m) => ({
@@ -2224,11 +2256,51 @@ export class RunHarness extends EventEmitter {
       graphInstructions: this.toolInstructions,
       homeDir: homedir(),
       honorByKey: this.guardrailHonorByKey,
+      agentIsolated: !!agentIdentity(),
+      registry: async (taken) => (reg = await this._resolveMcp(taken)),
     });
     this.runContext = rc;
     if (rc?.projectPermissions) {
       this.guardrailPermissionRules = mergePermissionRules(this.guardrailPermissionRules, rc.projectPermissions);
     }
+    // MCP registry (§6.4): a deny rule on a server reaches every copy of it in this run — BEFORE
+    // the audit below, so denyCount includes the added rules. Resume re-runs it on the rebuilt rules.
+    if (reg && this.guardrailPermissionRules?.deny?.length) {
+      this.guardrailPermissionRules = {
+        ...this.guardrailPermissionRules,
+        deny: expandMcpDenyRules(this.guardrailPermissionRules.deny, { catalog: reg.catalog, copies: reg.result.copies }),
+      };
+    }
+    this.mcpLayer = reg && {
+      env: reg.result.env,
+      redact: reg.result.secretValues,
+      disallowed: reg.result.disallowedTools,
+      // §5.5.1: a scrubbed spawn keeps the launcher's keep-list when a stdio copy runs.
+      allowlist: Object.values(reg.result.servers).some((s) => typeof s.command === 'string') ? keepListNames() : [],
+      copies: reg.result.copies,
+    };
+    // §11.4: MCP deviations need the resolution, so they land here, after _resolvePolicy (which
+    // resets the list on resume). Persisted now, with the WHOLE list: when this is the run's first
+    // _persistPolicyState (a saved workflow; an Auto run's classifier spawn persists earlier), the
+    // patch replaces the policy's own codes, because writePolicyState unions only with what is stored.
+    if (reg && this.policyRun) {
+      const found = mcpDeviations(this.policyRun.fields, reg.result, (s) => skipReasonText(s, reg.catalog));
+      for (const d of found) {
+        this.policyRun.deviations.push(d.code);
+        this._log('policy', 'warn', `off-policy: ${d.text}`);
+      }
+      if (found.length) this._persistPolicyState({ deviations: [...this.policyRun.deviations] });
+    }
+    // §10: the assembly rewrote run.json.warnings; a resumed run's recorded connection problems
+    // (run.json.mcpStatus, which the assembly never rewrites) and its tool-name warning are put
+    // back, and the resumed harness does not warn the tool name again.
+    const lost = Object.entries(prior?.mcpStatus || {})
+      .map(([name, status]) => mcpStatusWarning(name, status, this.mcpLayer?.copies.find((c) => c.name === name)?.setName))
+      .filter(Boolean);
+    const named = (prior?.warnings || []).filter((w) => w.startsWith(`${MCP_NAME_WARNING} — `));
+    if (named.length) this._mcpNameWarned = true;
+    lost.push(...named);
+    if (lost.length) await updateRunManifest(this.runRoot, { warnings: [...rc.warnings, ...lost] });
     // Audit (spec bullet): the resolved effective policy, compact, into run.json.
     // Written HERE because runRoot exists only on detached runs and this is the
     // one site where this.guardrails and the FINAL (post-lift) rule set are both
@@ -2267,6 +2339,40 @@ export class RunHarness extends EventEmitter {
     await appendAudit(this.pipeline.dir, renderContextAudit(rc)).catch(() => {});
     await this._recordCapabilities();
     return rc;
+  }
+
+  /**
+   * The MCP registry layer for this run (design §6.1): the resolver over the run's target, its
+   * Team set from the resolved policy, the opt-out and the tool-name limit of every model the run
+   * may dispatch. Workspace scans and memory-defrag runs get none (designer default 3).
+   * @param {string[]} taken  names the spawn already loads (run-context.mjs)
+   * @returns {Promise<{result:object, catalog:object[]}|null>}
+   */
+  async _resolveMcp(taken) {
+    if (this._isWorkspaceScan() || this.workflowId === MEMORY_DEFRAG_WORKFLOW_ID) return null;
+    const m = this.members[0];
+    const target = this.isWorkspace
+      ? { kind: 'workspace', id: this.workspace.id, name: this.workspace.name, members: this.members.map((x) => ({ key: x.projectKey, name: x.projectName })), rank: 0 }
+      : { kind: 'project', key: m.projectKey, name: m.projectName, rank: 0 };
+    const required = requiredOf(this.policyRun);
+    const [result, catalog] = await Promise.all([
+      resolveRegistry({
+        surface: 'pipeline', targets: [target],
+        teams: { [this.isWorkspace ? `ws:${this.workspace.id}` : m.projectKey]: required.length ? { home: this.policyRun.home, required } : null },
+        optOut: this.mcpOptOut, toolNameLimit: toolNameLimitFor([...this._mcpModels()]), copyCap: 24, taken,
+        mcpTimeoutMs: MCP_STARTUP_MS.pipeline,
+      }),
+      loadCatalog(),
+    ]);
+    return { result, catalog };
+  }
+
+  /** §5.6: every model this run may dispatch — the manifest's, the step models' and the run's own. */
+  _mcpModels() {
+    const models = manifestModels(this.state.stepper);
+    for (const s of Object.values(this.stepModels || {})) if (typeof s?.model === 'string' && s.model.trim()) models.add(s.model.trim());
+    if (this.claude.model) models.add(this.claude.model);
+    return models;
   }
 
   /** Absolute `<pipeline.dir>/memory.json` — the durable memory ledger (amendment A2). */
@@ -2665,6 +2771,7 @@ export class RunHarness extends EventEmitter {
       );
       this.mcpConfigPath = null;
       this.mcpServerGrants = [];
+      this.mcpLayer = null;
     }
     await updateRunManifest(this.runRoot, {
       capabilities: { mcpGrants: MCP_GRANT_MODE, ...caps, probed: true },
@@ -2915,6 +3022,11 @@ export class RunHarness extends EventEmitter {
    * §8.11 stray scan, (8) the run.json durability copy, (9) guarded rm -rf (§8.13).
    */
   async _teardownRunRoot() {
+    // §10: run.json writes still queued on the MCP chain land before the manifest is copied and
+    // the run root removed, and the chain closes: an agent event that arrives later (a sibling
+    // still streaming after a failure) must not recreate the removed root.
+    this._mcpClosed = true;
+    await this._mcpTail;
     if (this.runRootMode !== 'detached') {
       if (this.isWorkspace) await this._teardownWorktreeAll();
       else await this._teardownWorktree();
@@ -3047,6 +3159,7 @@ export class RunHarness extends EventEmitter {
    * live manifest, copied out before removal). Never throws.
    */
   async _recordRunWarning(text, attr = null) {
+    if (this.mcpLayer?.redact.length) text = createRedactor(this.mcpLayer.redact).text(text);   // MCP registry §5.5.3
     this._log('worktree', 'warn', text, attr);
     if (!this.runRoot) return;
     try {
@@ -4565,6 +4678,19 @@ export class RunHarness extends EventEmitter {
         step.modelUsed = e.raw.model;
         this._persist().catch(() => {});
       }
+      // §10: an init without an `mcp_servers` list says nothing about the copies (never "absent").
+      if (!sub && Array.isArray(e.raw.mcp_servers) && this.mcpLayer?.copies.length) this._recordMcpInit(e.raw.mcp_servers);
+    }
+    // §10: a first-party 400 on an over-long MCP tool name fails the whole turn; name the
+    // registry copies whose tools were never checked (no current Test), once per run.
+    if (isResult && e.raw.is_error && !this._mcpNameWarned && this.mcpLayer?.copies.length) {
+      const text = [e.raw.result, ...(Array.isArray(e.raw.errors) ? e.raw.errors : [])].filter((t) => typeof t === 'string').map((t) => t.slice(0, 4096)).join(' ');
+      const untested = this.mcpLayer.copies.filter((c) => c.untested);
+      if (untested.length && MCP_NAME_400_RE.test(text)) {
+        this._mcpNameWarned = true;
+        const sets = [...new Set(untested.map((c) => c.setName))].join(', ');
+        this._mcpChain(() => this._recordRunWarning(`${MCP_NAME_WARNING} — Test the servers in ${sets} (${untested.map((c) => c.name).join(', ')})`));
+      }
     }
 
     // The CLI's silent API retries (`system`/`api_retry`): without this line a call
@@ -4583,6 +4709,38 @@ export class RunHarness extends EventEmitter {
     for (const line of describeToolResults(e.raw)) {
       this._log(source, 'debug', `← ${line}`, logAttr);
     }
+  }
+
+  /** §10: run.json.mcpStatus and its warnings go through ONE chain — updateRunManifest is an
+   *  unlocked read-modify-write and fan-out nodes emit `system/init` concurrently. A pause and the
+   *  teardown drain and close it (a later event must not write behind a resume or recreate the
+   *  removed run root). */
+  _mcpChain(fn) {
+    if (this._mcpClosed) return this._mcpTail || Promise.resolve();
+    this._mcpTail = (this._mcpTail || Promise.resolve()).then(fn).catch(() => {});
+    return this._mcpTail;
+  }
+
+  /** §10: one warning per registry copy and problem status per run; `pending` is a debug line. */
+  _recordMcpInit(servers) {
+    const status = new Map(servers.map((s) => [s?.name, s?.status]));
+    const copies = this.mcpLayer.copies;
+    this._mcpChain(async () => {
+      const m = (await readRunManifest(this.runRoot)) || {};
+      const cur = m.mcpStatus || {};
+      const next = { ...cur };
+      const warned = new Set(m.warnings || []);   // once per copy and status per run, flapping included
+      const lines = [];
+      for (const c of copies) {
+        const st = status.get(c.name) ?? 'absent';
+        if (st === 'pending') { this._log('mcp', 'debug', `${c.name}: MCP server still starting (pending)`); continue; }
+        next[c.name] = st;
+        const w = mcpStatusWarning(c.name, st, c.setName);
+        if (w && !warned.has(w)) { warned.add(w); lines.push(w); }
+      }
+      await updateRunManifest(this.runRoot, { mcpStatus: next });
+      for (const w of lines) await this._recordRunWarning(w);
+    });
   }
 
   /**
@@ -5021,6 +5179,12 @@ export class RunHarness extends EventEmitter {
    *  finally never tears a paused run down. Both helpers are no-ops with an empty
    *  workDirs (a setup-phase pause). */
   async _completePaused() {
+    // §10: MCP run.json writes queued before the pause land first: the run log is still open, and
+    // a resume reads run.json before its assembly rewrites it. The chain closes here too: an agent
+    // still streaming after the pause must not write run.json behind a resume (a resume always
+    // builds a new orchestrator, so this one never dispatches again).
+    this._mcpClosed = true;
+    await this._mcpTail;
     // D7: a pause that landed BEFORE run()'s setup finished (a converted setup failure,
     // or a user pause racing one — run()'s pause branch catches a plain error while
     // 'pausing') must replay that setup on resume; a completed setup never leaves a

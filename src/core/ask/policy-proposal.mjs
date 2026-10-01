@@ -44,6 +44,7 @@ export const POLICY_ERRORS = Object.freeze({
   opShape: (i) => `set[${i}] must be { key, value, kind?, onBreach?, requireReason?, window?, forWorkspaceRuns? }`,
   unsetShape: (i) => `unset[${i}] must be { key, forWorkspaceRuns? }`,
   unknownField: (key) => `unknown field "${key}" — get_team_policy lists every field key`,
+  noWorkspaceRuns: (key) => `${key} cannot be set for workspace runs — a workspace run uses its policy home's Team set`,
   kindRequired: (key, kinds) => `${key}: kind is required for a field the policy does not set yet (${kinds.join(' | ')})`,
   hard: (key) => `${key}: hard constraints are not enforced by this version — use "soft"`,
   unsetMissing: (key, block) => `${key} is not set in ${block === 'workspaceRuns' ? 'the workspaceRuns block' : 'the policy'}`,
@@ -97,6 +98,7 @@ export function normalizeEditOps(raw, doc) {
     const meta = fieldMeta(key);
     if (!meta) { errors.push(POLICY_ERRORS.unknownField(clip(key, 80))); return; }
     const block = op.forWorkspaceRuns === true ? 'workspaceRuns' : 'fields';
+    if (block === 'workspaceRuns' && meta.workspaceRuns === false) { errors.push(POLICY_ERRORS.noWorkspaceRuns(key)); return; }
     const id = `${block}:${key}`;
     if (seen.has(id)) { errors.push(POLICY_ERRORS.duplicate(key)); return; }
     seen.add(id);
@@ -115,9 +117,9 @@ export function normalizeEditOps(raw, doc) {
       if (op[a] !== undefined && op[a] !== null) rawEntry[a] = op[a];
       else if (cur && cur[a] !== undefined && cur.kind === kind) rawEntry[a] = cur[a];
     }
-    const { entry, warning } = normalizeEntry(key, rawEntry);
+    const { entry, warning, dropped = [] } = normalizeEntry(key, rawEntry);
     if (!entry) { errors.push(warning || `${key}: invalid`); return; }
-    if (warning) { errors.push(warning); return; }
+    if (warning || dropped.length) { errors.push(...(warning ? [warning] : []), ...dropped); return; }
     ops.set.push({ key, block, entry });
   });
   unset.forEach((op, i) => {

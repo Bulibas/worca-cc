@@ -22,7 +22,7 @@ import {
   runGit, projectSlug, gitUserName, orphanCommit, identityArgs, findLocalRepoBySlug, isNonFastForward,
   slugDirName, DISCOVERY_TTL_MS, DISCOVERY_RETRY_MS,
 } from '../metrics/sync.mjs';
-import { normalizePolicyDoc, emptyPolicyDoc, serializePolicyDoc, POLICY_SCHEMA } from './registry.mjs';
+import { normalizePolicyDoc, emptyPolicyDoc, serializePolicyDoc, POLICY_SCHEMA, fieldMeta } from './registry.mjs';
 import { capSummary, fieldCount, effectiveRows } from './effective.mjs';
 
 export const POLICY_BRANCH = 'worca-policy';
@@ -118,7 +118,13 @@ export async function discoverPolicy(projectDir, { force = false, now = Date.now
     return next;
   }
   let { doc = null, docKnown = false, warnings = [], unknownSchema = false, delegateTo = null, headSha = null } = prev;
-  if (sha !== prev.headSha || !prev.docKnown) {
+  // A head cached by a build that did not know a field ("unknown field <key>") is read again once this build knows
+  // it: mcp.required published before a teammate upgraded is not lost until the next publish (MCP registry spec §11.1).
+  const staleRead = (Array.isArray(prev.warnings) ? prev.warnings : []).some((w) => {
+    const m = typeof w === 'string' && /^(?:workspaceRuns\.)?unknown field (\S+)$/.exec(w);
+    return !!(m && fieldMeta(m[1]));
+  });
+  if (sha !== prev.headSha || !prev.docKnown || staleRead) {
     const f = await fetchPolicyBranch(projectDir, { timeoutMs: fetchTimeoutMs });
     if (!f.ok) {
       const next = write({ present: true, hasOrigin: true, slug, originDisplay, docKnown: !!prev.docKnown, lastDiscoveryError: firstLine(f.stderr), lastDiscoveryAt: iso(now) });
@@ -130,7 +136,7 @@ export async function discoverPolicy(projectDir, { force = false, now = Date.now
   }
   const next = write({ present: true, hasOrigin: true, slug, originDisplay, headSha, doc, docKnown, warnings, unknownSchema, delegateTo, checkedAt: iso(now), lastDiscoveryError: null });
   if (!prev.present) emit(slug, 'discovered');
-  else if (prev.headSha !== sha) emit(slug, 'updated');
+  else if (prev.headSha !== sha || staleRead) emit(slug, 'updated');
   return next;
 }
 

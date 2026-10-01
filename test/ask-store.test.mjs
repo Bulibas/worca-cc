@@ -36,7 +36,8 @@ test('createThread / getThread / updateThread / setThreadTitle', () => {
   const t = createThread({ model: 'claude-opus-5-5', effort: 'high' });
   assert.match(t.id, /^ask_[0-9a-f]{8}$/);
   assert.deepEqual(Object.keys(t).sort(),
-    ['context', 'createdAt', 'createdBy', 'effort', 'id', 'model', 'sessionId', 'title', 'totals', 'updatedAt']);
+    ['context', 'createdAt', 'createdBy', 'effort', 'id', 'mcpOff', 'model', 'sessionId', 'title', 'totals', 'updatedAt']);
+  assert.equal(t.mcpOff, null, 'no MCP picker choices yet (v45)');
   assert.equal(t.createdBy, null, 'ownerless unless created with an owner');
   assert.equal(t.title, null);
   assert.equal(t.sessionId, null);
@@ -52,6 +53,10 @@ test('createThread / getThread / updateThread / setThreadTitle', () => {
   assert.equal(u.model, 'claude-opus-5-5', 'untouched keys survive');
   assert.ok(u.updatedAt >= t.updatedAt);
   assert.equal(updateThread(t.id, { context: null }).context, null);
+  // MCP registry §9.4: the picker's choices round-trip as JSON like `context`; null clears.
+  assert.deepEqual(updateThread(t.id, { mcpOff: { sets: ['billing'], members: ['shop|manual:pg'] } }).mcpOff, { sets: ['billing'], members: ['shop|manual:pg'] });
+  assert.equal(getThread(t.id).context, null, 'an mcpOff patch leaves the context alone');
+  assert.equal(updateThread(t.id, { mcpOff: null }).mcpOff, null);
   assert.equal(updateThread('ask_ffffffff', { title: 'x' }), null);
   assert.equal(getThread(t.id).title, 'First');
   updateThread(t.id, { bogus: 1 });

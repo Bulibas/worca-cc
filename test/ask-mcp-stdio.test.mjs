@@ -14,7 +14,9 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
 import { addProject } from '../src/core/projects.mjs';
 import { createThread, appendMessage, addAttachment } from '../src/core/ask/store.mjs';
-import { createRpcServer, parseArgv } from '../src/core/ask/mcp-stdio.mjs';
+import { createRpcServer, parseArgv, main } from '../src/core/ask/mcp-stdio.mjs';
+import { scriptBaseEnv } from '../src/core/graph/script-runner.mjs';
+import { Readable, Writable } from 'node:stream';
 import { AskToolError } from '../src/core/ask/tools.mjs';
 
 const home = useTempHome(after);
@@ -204,4 +206,21 @@ test('real child: web_fetch listed only with WORCA_ASK_WEB, and refuses an exfil
   assert.ok(names.includes('web_fetch')); assert.ok(!names.includes('web_search'));
   const call = out.find((m) => m.id === 2).result;
   assert.equal(call.isError, true); assert.match(call.content[0].text, /^error: web_fetch: host "evil.example" is not on the Ask web allowlist/);
+});
+
+test('main() drops every MCPSECRET_* (any case) before the relay branch, so test_script and nested spawns inherit none (MCP registry §5.5.2)', async () => {
+  process.env.MCPSECRET_AAAA1111 = 'secret-a';
+  process.env.mcpsecret_bbbb2222 = 'secret-b';
+  const env = { MCPSECRET_CCCC3333: 'secret-c', KEEP: '1' };
+  const secrets = (e) => Object.keys(e).filter((k) => /^MCPSECRET_/i.test(k));
+  try {
+    await main({ argv: ['--relay', 'http://127.0.0.1:9/relay'], env, stdin: Readable.from([]),
+      stdout: new Writable({ write(_c, _e, cb) { cb(); } }) });
+    assert.deepEqual(secrets(process.env), []);
+    assert.deepEqual(env, { KEEP: '1' });
+    assert.deepEqual(secrets(scriptBaseEnv({})), [], 'what test_script starts from');
+  } finally {
+    delete process.env.MCPSECRET_AAAA1111;
+    delete process.env.mcpsecret_bbbb2222;
+  }
 });

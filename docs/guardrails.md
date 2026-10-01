@@ -65,6 +65,14 @@ policy, plugin-granted tools remain subject to it). Protected paths expand to
 `Read(p)` + `Edit(p)` denies (Edit covers Write/NotebookEdit; a `Write(p)`
 rule is never consulted and only produces CLI warnings, so it is not emitted).
 
+A deny rule on an MCP server also reaches its [MCP registry](mcp-servers.md) copies: a rule
+`mcp__<s>` or `mcp__<s>__<tool>` whose `<s>` is a registry server's base name
+or declared name gains one rule per copy of that server in the run
+(`mcp__linear__delete_issue` → `mcp__linear_billing__delete_issue`,
+`mcp__platform-linear_team-platfor__delete_issue`), and a rule on a copy name
+follows its `_w` rename. The original rule stays, and the run's `denyCount`
+counts the added ones.
+
 A workspace run enforces the run's ONE selected set uniformly on every member
 — nothing is unioned across member projects — and a workspace scan runs as a pipeline under the Normal set, like a memory
 defragment run. The scan's script stages (extract, catalog, join, render) are
@@ -88,6 +96,18 @@ enforces the set's latest definition.
 
 ## Honest limitations
 
+- **MCP registry servers are outside the presets.** No preset denies `mcp__*`,
+  and Strict's exfil and publish denies (`Bash(gh)`, `curl`, `WebFetch`, …) do
+  not constrain a registry server's tools, which every agent of the run can
+  call. A team that wants a tool off writes a deny rule, which then reaches every
+  copy (above). Ask Worca has no guardrails, so deny rules never bind the chat's
+  copies.
+- **What "no code changes" means for Ask Worca with MCP servers.** Native write
+  tools stay denied, but a server included in a chat may have write tools (a
+  filesystem server, GitHub push/merge, Jira create), and it is a network path
+  outside Ask web access: the allowlist, the SSRF checks, the team's web caps and
+  `ask-web.jsonl` do not apply to it, and neither do guardrail presets. Which sets
+  include a server is the guard; the chat's prompt rules only reinforce it.
 - `Read` denial is the load-bearing secret guard; Claude Code does not consult
   `Write(path)` rules (so Worca emits `Read`+`Edit` only), and Bash denies are
   prefix matches — `sh -c "curl …"`, `/usr/bin/curl`, and `git -c k=v push`
@@ -134,8 +154,10 @@ enforces the set's latest definition.
   `claude` spawned by Worca itself, never inside a project folder: its cwd is
   `<worcaHome>/tmp/ask`, its built-in tools are reduced to `Task` (`--tools
   Task` — no Bash/Read/Write/Edit exist in the process), only Worca's own MCP
-  server is loaded (`--strict-mcp-config`, `--allowedTools Task,Read,Grep,Glob,mcp__worca`
-  under `--permission-mode dontAsk`), user hooks/plugins/skills are dropped
+  server and the chat's [MCP registry](mcp-servers.md) copies are loaded
+  (`--strict-mcp-config`, `--allowedTools Task,Read,Grep,Glob,mcp__worca`, plus
+  `ToolSearch` and one `mcp__<copy>` grant per copy when the chat has any, under
+  `--permission-mode dontAsk`; see the MCP registry limitation above), user hooks/plugins/skills are dropped
   (`--setting-sources project`, `--disable-slash-commands`), the env is
   scrubbed like a Strict run, and Task sub-agents run in the foreground of the
   same process with the same pool (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`).

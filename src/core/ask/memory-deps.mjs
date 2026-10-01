@@ -36,7 +36,7 @@ export function defaultMemoryDeps({ threadId }) {
         try { c = getThread(threadId)?.context ?? null; } catch { return null; }
         if (!c || c.pinned === true) return null;
         if (typeof c.projectKey === 'string' && c.projectKey) return c.projectKey;
-        if (typeof c.projectDir === 'string' && c.projectDir) {
+        if (typeof c.projectDir === 'string' && c.projectDir && c.projectSource !== 'fallback') {   // MCP registry §9.1
           try {
             const p = (await listProjects()).find((x) => x && x.path === c.projectDir);   // the match resolveAskContext uses
             return p ? p.key : null;

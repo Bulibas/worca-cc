@@ -4985,6 +4985,7 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-scope-btn:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-scope-btn.is-pinned{color:var(--ink);border-color:var(--line-2);font-weight:600;}
 .ask-scope-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ask-mcp-btn[hidden]{display:none;}
 .ask-icon-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;padding:0;
   border:0;border-radius:9px;background:transparent;color:var(--ink-2);cursor:pointer;transition:.15s;}
 .ask-icon-btn:hover{background:var(--hover);color:var(--ink);}
@@ -5055,6 +5056,7 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-tool-target{min-width:0;font-family:var(--mono);font-size:11.5px;color:var(--ink-2);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .ask-tool-note{flex:0 0 auto;font-family:var(--mono);font-size:10.5px;color:var(--seq);}
+.ask-tool-mcp{flex:0 1 auto;min-width:0;max-width:65%;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:11.5px;font-weight:500;color:var(--ink);white-space:nowrap;}
 
 .ask-agents{margin-top:3px;display:flex;flex-direction:column;gap:2px;}
 .ask-agents-cap{display:flex;align-items:center;gap:8px;padding:2px 0 3px;font-weight:600;font-size:9.5px;
@@ -5464,6 +5466,20 @@ body.rail-collapsed .ask-dock{left:76px;}
    the model popover. */
 .ask-pop-scope{left:var(--ask-col-inset);bottom:calc(var(--ask-box-top) + 6px);width:300px;max-height:min(420px,70%);overflow-y:auto;}
 .ask-pop-model{right:var(--ask-col-inset);bottom:calc(var(--ask-box-top) + 6px);width:292px;border-radius:var(--r-card);}
+/* The per-chat MCP picker (MCP registry §9.4) opens over the scope pill it sits beside. Level 1 rows hold a
+   small switch and a drill button; level 2 rows a copy name and its switch. */
+.ask-pop-mcp{left:var(--ask-col-inset);bottom:calc(var(--ask-box-top) + 6px);width:300px;max-height:min(420px,70%);overflow-y:auto;}
+.ask-mcp-row{display:flex;align-items:center;gap:6px;padding:0 11px;}
+.ask-mcp-row .ask-pop-item{flex:1 1 auto;min-width:0;padding-left:6px;}
+.ask-mcp-copy{flex:1 1 auto;min-width:0;padding:9px 0;font-family:var(--mono);font-size:12px;color:var(--ink);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ask-pop-mcp .switch{width:30px;height:18px;border:0;padding:0;}
+.ask-pop-mcp .switch::after{top:2px;left:2px;width:14px;height:14px;}
+.ask-pop-mcp .switch.on::after{left:14px;}
+.ask-pop-mcp .switch:disabled{opacity:.5;cursor:not-allowed;}
+.ask-mcp-member.is-skipped .ask-model-name{font-family:var(--mono);font-size:12px;color:var(--ink-3);}
+.ask-mcp-member.is-problem .ask-pop-row-value{color:var(--amber-ink);}
+.ask-notice-mcp{padding:0;border:0;background:none;color:var(--blue-ink);font:inherit;cursor:pointer;}
 .ask-pop-runinfo{right:calc(var(--ask-col-inset) + 66px);bottom:calc(var(--ask-box-top) + 6px);width:326px;z-index:4;}
 /* The chip picker (ask-panel.mjs openChipPicker) is the only JS-positioned panel: a band
    chip sits wherever the transcript scrolled it. Its rows are the WHOLE model catalog, so
@@ -7371,6 +7387,16 @@ input.gv-name:focus-visible{outline:none;}
 .policy-line .pl-note{display:flex;gap:8px;align-items:flex-start;line-height:1.45;}
 .policy-line .pl-note .tm-dot{margin-top:6px;}
 .policy-line .pl-note.warn{color:var(--amber-ink);}
+/* New Pipeline › MCP servers (MCP registry §6.2): a disclosure over the run's registry copies. */
+.mcp-runs > summary{list-style:none;}
+.mcp-runs > summary::-webkit-details-marker{display:none;}
+.mcp-runs-pop{margin-top:6px;padding:6px;border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--panel);}
+.mcp-runs-set,.mcp-runs-row{display:flex;align-items:center;gap:8px;padding:5px 8px;font-size:12.5px;}
+.mcp-runs-set{font-weight:600;}
+.mcp-runs-row{padding-left:30px;}
+.mcp-runs-row.is-skipped{color:var(--ink-3);}
+.mcp-runs-row.is-problem .hint{color:var(--amber-ink);}
+.mcp-runs-row .hint{margin-left:auto;}
 /* team-cap pause banner (board 9) */
 /* Team metrics KPI row: the policy tiles (Off-policy, Pooled budget) make 7–8 tiles, which leave a
    hole in the 3-column row; four columns fill two rows for eight. Back to one column when narrow. */
@@ -7433,3 +7459,32 @@ input.gv-name:focus-visible{outline:none;}
 
 /* Team metrics: an actor may be a full email (attribution) — clip it to the column, full name in the tooltip. */
 .tm-person{display:inline-block;max-width:24ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom;}
+
+/* Settings › MCP servers (mcp-view.mjs, mcp-definition-form.mjs): layout only; cards, chips, badges,
+   switches and buttons are the shared ones. */
+.settings-pane[data-tab="mcp"] .topbar{flex-wrap:wrap;}
+.mcp-sets{display:grid;grid-template-columns:minmax(220px,300px) minmax(0,1fr);gap:18px;align-items:start;}
+.mcp-setlist{padding:8px;display:flex;flex-direction:column;gap:2px;}
+.mcp-setrow{display:flex;flex-direction:column;gap:3px;text-align:left;padding:10px 12px;border:0;border-radius:12px;background:none;font:inherit;color:inherit;cursor:pointer;}
+.mcp-setrow.on{background:var(--field);}
+.mcp-setrow.greyed{opacity:.55;}
+.mcp-setrow-head{display:flex;align-items:center;gap:8px;}
+.mcp-dot{width:8px;height:8px;border-radius:50%;background:var(--amber);}
+.mcp-usedby{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0;}
+.mcp-chip{display:inline-flex;align-items:center;gap:6px;}
+.mcp-x{border:0;background:none;cursor:pointer;color:var(--ink-3);font:inherit;padding:0 2px;}
+.mcp-member{padding:14px 16px;margin-top:10px;}
+.mcp-member .pl-enable{margin-left:0;}
+.settings-pane[data-tab="mcp"] .mono,.mcp-def .mono,.mcp-fields .mono{font-family:var(--mono);}
+.mcp-fld{display:grid;grid-template-columns:150px minmax(0,1fr);align-items:center;gap:12px;margin-top:8px;}
+.mcp-secret{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.mcp-state{margin-top:10px;}
+.mcp-state.ok{color:var(--green-ink);}
+.mcp-state.warn{color:var(--amber-ink);}
+.mcp-server-row{padding:14px 18px;}
+.mcp-def-row{display:grid;grid-template-columns:1fr 1fr auto auto auto;gap:8px;align-items:center;margin-bottom:6px;}
+.mcp-def-fill{display:flex;gap:10px;align-items:center;font-size:12.5px;}
+.mcp-res-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(0,1.4fr);gap:12px;padding:8px 0;border-top:1px solid var(--line);}
+.mcp-res-skip{color:var(--amber-ink);}
+.mcp-resolution,.mcp-proj-sets{margin-bottom:14px;}
+@media (max-width:760px){.mcp-sets{grid-template-columns:1fr;}}

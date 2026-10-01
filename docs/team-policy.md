@@ -38,6 +38,7 @@ No run is ever blocked by a policy. The two Ask Worca web fields are the excepti
 | Guardrails default set / minimum tier | what the New pipeline picker starts on; a run below the tier warns | default / soft |
 | Allowed models, step defaults, hide built-ins | pickers warn on an off-list model; roles you have not configured start from the team's | soft / default |
 | Marketplaces, required plugins, blocked plugins | marketplaces are added once (metadata only); required plugins go through the setup checklist with consent; blocked ones warn | default / soft |
+| Required MCP servers (`mcp.required`) | servers each developer turns on with consent; they form the **Team** set ([below](#mcp-servers-the-team-set)); never in `workspaceRuns` | soft |
 | Default workflow, human in the loop | when the project has no active workflow / switch of its own | default |
 | Record runs to team metrics, minimum Worca version | a hint when "Include my runs" is off; a banner on an older client | soft |
 | Catalogs: guardrail sets, models | distributed as read-only rows with a **policy** badge; model env may use `${VAR}` indirection only — secrets never go on the branch | — |
@@ -96,6 +97,46 @@ you like through the normal update preview; when the policy raises the floor you
 Non-secret plugin config (a base URL, a project key) travels with the requirement: **Configure…**
 opens the plugin's settings pane with those values filled into fields that are still blank — saved
 only when you save — and secrets are yours to enter.
+
+## MCP servers: the Team set
+
+`mcp.required` lists the MCP servers a team needs: a **plugin reference**
+`{ "plugin": "acme-tools", "server": "sentry", "values"?: {…} }` (the plugin must also be in
+`plugins.required`) or an **inline definition** in the MCP registry's shape (`docs/mcp-servers.md`;
+a command is absolute or on `PATH`, never `./`) with a `name` and optional non-secret `values`. An
+entry that breaks a rule is dropped with a warning; the other entries stay.
+
+- **The Team set.** Each home with at least one entry gets a `Team · <home>` set in Settings › MCP
+  servers. Its members are the entries installed on this machine; each teammate fills in the secrets.
+  Project runs use their policy's Team set; workspace runs use only the workspace policy's, which is
+  why the field is refused in the `workspaceRuns` block.
+- **Consent, never automatic.** The setup checklist lists every entry with its action, and the strip
+  on the MCP servers tab every entry still to set up: **Install** (an inline entry), **Turn on**,
+  **Update** (the team definition changed; the dialog shows before and after), **Set <field>**, or
+  *Needs plugin* (the plugin's own row). Install, a first Turn on and Update open a consent dialog:
+  the command or URL, environment and headers, what each teammate fills in and the values the team
+  seeds. Consent is recorded on exactly the definition and values the dialog showed; if the cached
+  policy moved on meanwhile, Worca asks you to review it again. Every new member starts off,
+  including the servers of a plugin a trusted home installed: the trust switch never installs or
+  turns on an MCP server.
+- **Your consented copy.** When the team changes a definition or its values, the member keeps
+  running what you consented to until you **Update**.
+- **Seeded values.** On Install, Turn on and Update, a team value fills your value when you have none
+  or still have the previous team value; a value you changed is kept, and the member card offers
+  "Use team value".
+- **Leaving the policy.** Your Team state for an entry (values, secrets, consent, test) goes only
+  when a Team action on that home finds the entry gone from its policy, on **Forget**, when you
+  remove the server, or when you uninstall its plugin. An entry your Worca cannot read (a newer rule,
+  a typo; the policy shows its warning) still counts as listed, and so does every entry of a policy
+  it cannot read at all (one published for a newer Worca): their state stays. A Team set greys with
+  **Forget** once no project here follows its home (removing a project from Worca drops its cached
+  policy, unless the repo is still in one of your workspaces; adding a project reads its policy at
+  once) or its policy requires no MCP server any more; Forget then drops the set with its values,
+  secrets and tests. A policy server no home requires any more reads "no longer required by <home>"
+  in the Servers view, keeps working in your own sets, and offers **Remove**.
+- **Pair it with `worca.minVersion`.** An older Worca drops `mcp.required` as an unknown field, and a
+  publish from such a client removes it from the branch. A teammate who upgrades sees the field at
+  the next discovery, without a new publish.
 
 ## Reading and freshness
 

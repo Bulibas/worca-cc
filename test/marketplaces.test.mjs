@@ -12,7 +12,7 @@ import {
   readMarketplaces, writeMarketplaces, normalizeMarketplaceUrl, marketplaceId,
   addMarketplace, syncMarketplace, refreshAllMarketplaces, removeMarketplace,
   listMarketplaces, resolveInstallSource, marketplacesFile,
-  hostRepoRoot, seedBuiltinMarketplace,
+  seedBuiltinMarketplace, builtinMarketplaceSource, BUILTIN_MARKETPLACE_REF,
 } from '../src/core/marketplaces.mjs';
 import { repoCacheDir, repoSlug } from '../src/core/plugin-repo.mjs';
 import { writePluginsLock, pluginsRoot } from '../src/core/plugins-lock.mjs';
@@ -249,44 +249,110 @@ test('addMarketplace of a manifest-less repo falls back to the scan (E15)', asyn
   assert.equal(entry.plugins[0].name, 'solo');
 });
 
-test('seedBuiltinMarketplace: seeds once from an injected root, never resurrects after removal', () => {
+// The builtin marketplace is this package's GitHub repo on its `dev` branch — never the checkout
+// worca runs from — so npm and container installs get it too. Seeding does no git work.
+const GH = { url: 'https://github.com/o/worca', ref: 'dev' };
+
+test('builtinMarketplaceSource: the package repository on GitHub, branch dev; WORCA_BUILTIN_MARKETPLACE replaces it at HEAD', () => {
+  assert.equal(BUILTIN_MARKETPLACE_REF, 'dev');
+  assert.deepEqual(builtinMarketplaceSource({}), { url: 'https://github.com/SinishaDjukic/worca-cc', ref: 'dev' });
+  assert.deepEqual(builtinMarketplaceSource({ WORCA_BUILTIN_MARKETPLACE: '  ' }), builtinMarketplaceSource({}), 'blank = unset');
+  assert.deepEqual(builtinMarketplaceSource({ WORCA_BUILTIN_MARKETPLACE: scratch }), { url: scratch, ref: null });
+  assert.deepEqual(builtinMarketplaceSource({ WORCA_BUILTIN_MARKETPLACE: 'https://github.com/o/r.git' }),
+    { url: 'https://github.com/o/r', ref: null });
+});
+
+test('seedBuiltinMarketplace: registers the source once with its branch and no git work; removal never resurrects', () => {
   writeMarketplaces({ seededBuiltin: false, marketplaces: {} });
-  const rootDir = join(scratch, 'host-root');
-  mkdirSync(join(rootDir, '.git'), { recursive: true });
-  writeFileSync(join(rootDir, 'worca-cc-marketplace.json'),
-    JSON.stringify({ name: 'Worca CC Official', description: 'bundled', plugins: [] }));
-  const r1 = seedBuiltinMarketplace({ rootDir });
+  const r1 = seedBuiltinMarketplace({ source: GH });
   assert.equal(r1.seeded, true);
+  assert.equal(r1.id, marketplaceId(GH.url));
   const entry = readMarketplaces().marketplaces[r1.id];
+  assert.equal(entry.url, GH.url);
+  assert.equal(entry.ref, 'dev');
   assert.equal(entry.builtin, true);
   assert.equal(entry.name, 'Worca CC Official');
   assert.equal(entry.lastSync, null);
   assert.deepEqual(entry.plugins, []);
-  assert.equal(seedBuiltinMarketplace({ rootDir }).seeded, false, 'idempotent');
+  assert.ok(!existsSync(repoCacheDir(GH.url)), 'seeding never clones');
+  assert.equal(seedBuiltinMarketplace({ source: GH }).seeded, false, 'idempotent');
   removeMarketplace(r1.id);
-  assert.equal(seedBuiltinMarketplace({ rootDir }).seeded, false, 'removal never resurrects');
+  assert.equal(seedBuiltinMarketplace({ source: GH }).seeded, false, 'removal never resurrects');
   assert.ok(!readMarketplaces().marketplaces[r1.id]);
 });
 
-test('seedBuiltinMarketplace: no host checkout -> not seeded, flag stays false', () => {
+test('seedBuiltinMarketplace: a local-checkout builtin (older worca) is replaced by the GitHub one; its unused cache goes', async () => {
+  const { root } = await makeMarketRepo('old-builtin', ['x1']);
   writeMarketplaces({ seededBuiltin: false, marketplaces: {} });
-  const r = seedBuiltinMarketplace({ rootDir: null });
-  assert.equal(r.seeded, false);
-  assert.equal(readMarketplaces().seededBuiltin, false, 'a later run from a real checkout can still seed');
+  const legacy = await addMarketplace(root);
+  const state = readMarketplaces();
+  state.seededBuiltin = true;
+  state.marketplaces[legacy.id].builtin = true;
+  writeMarketplaces(state);
+  assert.ok(existsSync(repoCacheDir(root)));
+  const r = seedBuiltinMarketplace({ source: GH });
+  assert.equal(r.seeded, true);
+  assert.equal(r.replaced, legacy.id);
+  const now = readMarketplaces().marketplaces;
+  assert.ok(!now[legacy.id]);
+  assert.equal(now[r.id].builtin, true);
+  assert.equal(now[r.id].ref, 'dev');
+  assert.ok(!existsSync(repoCacheDir(root)), 'no installed plugin shares it');
 });
 
-test('hostRepoRoot: resolves to this repo (it has the marketplace manifest + .git)', () => {
-  const root = hostRepoRoot();
-  assert.ok(root, 'worca-cc checkout detected');
-  assert.ok(existsSync(join(root, 'worca-cc-marketplace.json')));
+test('seedBuiltinMarketplace: WORCA_BUILTIN_MARKETPLACE swaps the builtin to a checkout at HEAD, and back', () => {
+  writeMarketplaces({ seededBuiltin: false, marketplaces: {} });
+  const gh = seedBuiltinMarketplace({ source: GH });
+  const local = seedBuiltinMarketplace({ source: { url: scratch, ref: null } });
+  assert.equal(local.replaced, gh.id);
+  assert.equal(Object.hasOwn(readMarketplaces().marketplaces[local.id], 'ref'), false, 'a checkout is followed at HEAD');
+  assert.equal(seedBuiltinMarketplace({ source: GH }).replaced, local.id);
+  assert.deepEqual(Object.keys(readMarketplaces().marketplaces), [gh.id]);
 });
 
-test('seedBuiltinMarketplace: injected root with a manifest but NO .git is skipped (E7)', () => {
+test('seedBuiltinMarketplace: the same repo added by hand becomes the builtin on the branch, its HEAD snapshot dropped', () => {
+  const id = marketplaceId(GH.url);
+  writeMarketplaces({ seededBuiltin: false, marketplaces: { [id]: {
+    id, url: GH.url, name: 'Mine', description: '', addedAt: '2026-09-01T00:00:00Z',
+    lastSync: { sha: 'a'.repeat(40), at: '2026-09-01T00:00:00Z' }, plugins: [{ name: 'old' }], warnings: [],
+  } } });
+  assert.equal(seedBuiltinMarketplace({ source: GH }).seeded, true);
+  const entry = readMarketplaces().marketplaces[id];
+  assert.equal(entry.builtin, true);
+  assert.equal(entry.ref, 'dev');
+  assert.equal(entry.name, 'Mine');
+  assert.equal(entry.lastSync, null);
+  assert.deepEqual(entry.plugins, []);
+});
+
+test('seedBuiltinMarketplace: no source -> not seeded, flag stays false', () => {
   writeMarketplaces({ seededBuiltin: false, marketplaces: {} });
-  const rootDir = join(scratch, 'no-git-root');
-  mkdirSync(rootDir, { recursive: true });
-  writeFileSync(join(rootDir, 'worca-cc-marketplace.json'),
-    JSON.stringify({ name: 'Worca CC Official', plugins: [] })); // manifest present, .git absent
-  assert.equal(seedBuiltinMarketplace({ rootDir }).seeded, false);
-  assert.equal(readMarketplaces().seededBuiltin, false, 'a real checkout can still seed later');
+  assert.equal(seedBuiltinMarketplace({ source: null }).seeded, false);
+  assert.equal(readMarketplaces().seededBuiltin, false);
+});
+
+test('a marketplace with a ref discovers that branch, not HEAD; a missing branch is a sync warning', async () => {
+  const { root } = await makeMarketRepo('branchy', ['on-main']);
+  await git(root, 'checkout', '-q', '-b', 'dev');
+  writeTree(root, {
+    'worca-cc-marketplace.json': JSON.stringify({ name: 'branchy market', plugins: ['plugins/on-main', 'plugins/on-dev'] }),
+    'plugins/on-dev/worca-cc-plugin.json': PLUGIN('on-dev'),
+    'plugins/on-dev/index.mjs': 'export default () => ({});\n',
+  });
+  await git(root, 'add', '-A');
+  await git(root, 'commit', '-qm', 'dev only');
+  const devSha = await git(root, 'rev-parse', 'HEAD');
+  await git(root, 'checkout', '-q', 'main'); // HEAD, the default branch, lags dev
+  writeMarketplaces({ seededBuiltin: false, marketplaces: {} });
+  const { id } = seedBuiltinMarketplace({ source: { url: root, ref: 'dev' } });
+  const synced = await syncMarketplace(id);
+  assert.equal(synced.lastSync.sha, devSha);
+  assert.deepEqual(synced.plugins.map((p) => p.name).sort(), ['on-dev', 'on-main']);
+  assert.deepEqual(resolveInstallSource('on-dev'), { repoUrl: root, subdir: 'plugins/on-dev', sha: devSha, marketplace: id });
+  const state = readMarketplaces();
+  state.marketplaces[id].ref = 'nope';
+  writeMarketplaces(state);
+  const bad = await syncMarketplace(id);
+  assert.match(bad.warnings[0], /refresh failed: branch "nope" not found/);
+  assert.equal(bad.lastSync.sha, devSha, 'the last snapshot stays usable');
 });

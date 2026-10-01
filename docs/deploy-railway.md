@@ -326,4 +326,6 @@ registers it (remove it in Projects afterwards).
 - Every allowed person is an administrator of this worca (see
   [remote-access.md → Limits](remote-access.md#limits)). Use one deployment per person or per set of
   credentials.
+- The deployment has one MCP registry and one MCP secrets file in its volume
+  ([mcp-servers.md](mcp-servers.md)): every signed-in person's runs and chats use the same sets.
 - One replica only; deploys pause running agents (see [Operate your deployment](#operate-your-deployment)).

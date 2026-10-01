@@ -194,9 +194,25 @@ export async function removeProject(name) {
   let removedPath = null;
   if (key) {
     tx(() => {
-      const row = prepare('SELECT path FROM projects WHERE name = ? COLLATE NOCASE').get(key);
+      const row = prepare('SELECT key, path FROM projects WHERE name = ? COLLATE NOCASE').get(key);
       removedPath = row ? row.path : null;
       prepare('DELETE FROM projects WHERE name = ? COLLATE NOCASE').run(key);
+      // Its team-policy discovery cache goes with it: the home stops being followed here, so its Team set greys with
+      // Forget (MCP registry spec §11.2), and a later add of the same path discovers afresh.
+      // …unless a workspace still has this repo as a member (its policy and metrics homes are members too): Worca still
+      // reaches it there (discoverAllPolicies; findLocalRepoBySlug finds the home a workspace's policy project follows
+      // among its members), so the home it carries is still followed and its Team set must not grey.
+      const inWorkspace = !!row && prepare('SELECT project_key AS path FROM workspace_projects').all()
+        .some((w) => { try { return projectKey(w.path) === row.key; } catch { return false; } });
+      const pc = row && !inWorkspace ? prepare('SELECT extra FROM project_config WHERE project_key = ?').get(row.key) : null;
+      let extra = null;
+      try { extra = pc ? JSON.parse(pc.extra) : null; } catch { /* not JSON: left as it is */ }
+      if (extra && typeof extra === 'object' && Object.hasOwn(extra, 'teamPolicy')) {
+        // The total-cap acknowledgements stay (policy/state.mjs): a project added again is not asked twice in one window.
+        const acks = extra.teamPolicy?.acks;
+        if (acks && typeof acks === 'object') extra.teamPolicy = { acks }; else delete extra.teamPolicy;
+        prepare('UPDATE project_config SET extra = ? WHERE project_key = ?').run(JSON.stringify(extra), row.key);
+      }
     });
   }
   if (removedPath) {

@@ -20,23 +20,23 @@ test('the three nav entries are gone from BOTH menus', () => {
     assert.equal(html.includes(`data-nav="${v}"`), false, `data-nav=${v} still present`);
 });
 
-test('settings holds a .seg tab strip with the eight tabs in mode order, General preselected', () => {
+test('settings holds a .seg tab strip with the nine tabs in mode order, General preselected', () => {
   const seg = settingsView().querySelector('#settings-tabs');
   assert.ok(seg, '#settings-tabs missing');
   assert.ok(seg.classList.contains('seg'), 'reuses the .seg segmented control');
   const btns = [...seg.querySelectorAll('button[data-tab]')];
-  assert.deepEqual(btns.map((b) => b.dataset.tab), ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'models', 'providers']);
-  assert.deepEqual(btns.map((b) => b.classList.contains('on')), [true, false, false, false, false, false, false, false]);
+  assert.deepEqual(btns.map((b) => b.dataset.tab), ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'mcp', 'models', 'providers']);
+  assert.deepEqual(btns.map((b) => b.classList.contains('on')), [true, false, false, false, false, false, false, false, false]);
   // Simple, then Advanced, then Expert: every mode sees a gap-free prefix of the strip.
   const rank = { simple: 0, advanced: 1, expert: 2 };
   const ranks = btns.map((b) => rank[b.dataset.minLevel]);
   assert.deepEqual(ranks, [...ranks].sort((a, b) => a - b), 'tabs ordered by level');
 });
 
-test('eight panes live inside settings, in tab order; only General starts visible', () => {
+test('nine panes live inside settings, in tab order; only General starts visible', () => {
   const panes = [...settingsView().querySelectorAll('.settings-pane')];
-  assert.deepEqual(panes.map((p) => p.dataset.tab), ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'models', 'providers']);
-  assert.deepEqual(panes.map((p) => p.classList.contains('hidden')), [false, true, true, true, true, true, true, true]);
+  assert.deepEqual(panes.map((p) => p.dataset.tab), ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'mcp', 'models', 'providers']);
+  assert.deepEqual(panes.map((p) => p.classList.contains('hidden')), [false, true, true, true, true, true, true, true, true]);
   // A pane must NOT be a routed view: showView's views.forEach would force
   // .hidden back on it at every navigation.
   for (const p of panes) {

@@ -101,6 +101,7 @@ import {
   sweepAskWorktrees,
 } from '../src/core/ask/worktrees.mjs';
 import { createAskTurn } from '../src/core/ask/turn.mjs';
+import { validateMcpOff, resolveAskMcp, askMcpPromptInput, askMcpPreview, askMcpJoinNotice } from '../src/core/ask/mcp.mjs';
 import { attachRunFollower } from '../src/core/ask/follow.mjs';
 import { mockEnabled, MOCK_WRITER_ROLES } from '../src/core/claude-runner.mjs';
 import { budgetStatus, readCostCapOverride, setCostCapOverride } from '../src/core/cost-budget.mjs';
@@ -117,11 +118,15 @@ import {
   policyEvents, discoverPolicy, discoverAllPolicies, resolveProjectPolicy, resolveWorkspacePolicy, enableTeamPolicy, publishPolicy,
   projectPolicyStatus, listPolicyScopes, routeWorkspaceMembersPolicy, startTeamPolicyBackground,
 } from '../src/core/policy/sync.mjs';
-import { deviationsFor, fieldsForRun, capSummary } from '../src/core/policy/effective.mjs';
-import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
+import { deviationsFor, fieldsForRun, capSummary, mcpDeviations } from '../src/core/policy/effective.mjs';
+import { resolveRegistry, cachedTeamFor, toolNameLimitFor, skipMessage, skipReasonText } from '../src/core/mcp/registry.mjs';
+import { MEMBERSHIP_KEY_RE } from '../src/core/mcp/definitions.mjs';
+import { loadCatalog } from '../src/core/mcp/catalog.mjs';
+import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, mcpRequirements, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
 import { normalizePolicyDoc } from '../src/core/policy/registry.mjs';
 import { checkTeamTotalGate, checkTeamPipelineGate, teamCapsForTarget } from '../src/core/policy/gate.mjs';
 import { readPolicyState } from '../src/core/policy/state.mjs';
+import { teamAction, teamForget } from '../src/core/mcp/team.mjs';
 import { policyForScope, policyPayload } from '../src/core/policy/scope.mjs';
 import { policyCatalogModels } from '../src/core/policy/cache.mjs';
 import { pickFolderNative } from '../src/core/folder-dialog.mjs';
@@ -251,6 +256,9 @@ import {
   listOrphanPluginData, purgePluginData,
 } from '../src/core/plugin-store.mjs';
 import { fetchCandidate } from '../src/core/plugin-repo.mjs';
+import { reconcileMcpStore } from '../src/core/mcp/catalog.mjs';
+import { readMcpStore } from '../src/core/mcp/store.mjs';
+import { mcpFootprint } from '../src/core/mcp/plugin-lifecycle.mjs';
 import {
   addMarketplace, listMarketplaces, syncMarketplace, refreshAllMarketplaces,
   removeMarketplace, readMarketplaces, seedBuiltinMarketplace,
@@ -296,6 +304,15 @@ import {
   repoSlugFromBugsUrl, BUGS_URL,
 } from '../src/core/run-report.mjs';
 import { REPORT_REASON_IDS } from '../src/shared/report-reasons.mjs';
+import {
+  McpStoreError, createSet, renameSet, deleteSet, duplicateSet, putMember, deleteMember, setProjectAssignment,
+  addManualServer, editManualServer, removeServerEverywhere,
+} from '../src/core/mcp/store.mjs';
+import { validateMcpDefinition, SET_ID_RE, SERVER_ID_RE } from '../src/core/mcp/definitions.mjs';
+import {
+  viewContext, listCatalogView, listSetsView, getSetView, projectAssignmentView, teamMemberRefusal, teamDuplicateSource,
+} from '../src/core/mcp/views.mjs';
+import { testMembership, retestAfterSave, retestServers } from '../src/core/mcp/test.mjs';
 import { HLJS_GRAMMAR_IDS } from './public/hljs-loader.mjs';
 import { useEnvProxy, proxyNotice } from '../src/core/env-proxy.mjs';
 
@@ -1933,6 +1950,11 @@ const startRunHandler = async (req, res) => {
     if (!(await readGuardrailSet(guardrailsId))) {
       return badRequest(res, `unknown guardrailsId "${guardrailsId}"`);
     }
+    // MCP registry (§6.2, D16): the per-run opt-out. Shape-checked here; entries that are not a
+    // membership of the target's sets are dropped per target below — a stored schedule keeps the
+    // body as sent, so its firing drops what is unknown by then.
+    const optOut = parseMcpOptOut(body.mcpOptOut);
+    if (optOut.error) return badRequest(res, optOut.error);
 
     // Budget gate: no new pipelines while the total window is spent (F6).
     const budget = budgetStatus();
@@ -2030,6 +2052,7 @@ const startRunHandler = async (req, res) => {
         sched.afterRef = r.after;
       }
       if (sched) return res.status(202).json(await scheduleRequest({ body, sched, title, askLink, budget, workspaceId: ws.id, projectDir: projects[0].projectDir, startedBy }));
+      const mcpOptOut = await knownMcpOptOut(optOut.list, mcpWorkspaceTarget(ws));
 
       const wsBuilt = buildWorkspaceMembers(projects, branch, sourceByKey);
       const wsMembers = [];
@@ -2058,6 +2081,7 @@ const startRunHandler = async (req, res) => {
         template: workflowRow,
         ...(scanTarget && scanTarget.models ? { scanModels: scanTarget.models } : {}),
         guardrailsId,
+        ...(mcpOptOut.length ? { mcpOptOut } : {}),
         startedBy,
         branch,
         sync,
@@ -2141,6 +2165,7 @@ const startRunHandler = async (req, res) => {
       // A schedule stores the pair as checked (the catalog's casing, trimmed): its ticket takes it verbatim.
       const storedBody = startPair ? { ...body, model: startPair.model, effort: startPair.effort || undefined } : body;
       if (sched) return res.status(202).json(await scheduleRequest({ body: storedBody, sched, title, askLink, budget, projectDir, startedBy }));
+      const mcpOptOut = await knownMcpOptOut(optOut.list, { kind: 'project', key: projectKey(projectDir), name: path.basename(projectDir), rank: 0 });
 
       // Scans and defrag never sync: skip the default-branch lookup and settings reads entirely, so
       // the window between the one-defrag-per-scope check and runs.set does not widen.
@@ -2163,6 +2188,7 @@ const startRunHandler = async (req, res) => {
         workflowId,
         template: workflowRow,
         guardrailsId,
+        ...(mcpOptOut.length ? { mcpOptOut } : {}),
         startedBy,
         branch,
         sync,
@@ -2262,6 +2288,90 @@ const startRunHandler = async (req, res) => {
   }
 };
 app.post('/api/run', startRunHandler);
+
+// ---------------------------------------------------------------------------
+// MCP registry, pipeline side (MCP registry design §6.2, §8, §12): what a run on a target would
+// start, resolved the way the harness resolves it (the Team set from the policy cache here). One
+// preview route serves New Pipeline, the project MCP tab and the workspace overview.
+// ---------------------------------------------------------------------------
+
+/** `mcpOptOut` (D16): at most 100 '<setId>|<serverId>' entries, de-duplicated. */
+function parseMcpOptOut(v) {
+  if (v == null) return { list: [] };
+  if (!Array.isArray(v) || v.length > 100 || !v.every((e) => typeof e === 'string' && MEMBERSHIP_KEY_RE.test(e))) {
+    return { error: 'mcpOptOut must be at most 100 "<setId>|<serverId>" entries' };
+  }
+  return { list: [...new Set(v)] };
+}
+
+const mcpWorkspaceTarget = (ws) => ({
+  kind: 'workspace', id: ws.id, name: ws.name, rank: 0,
+  members: ws.projectPaths.map((d) => ({ key: projectKey(d), name: path.basename(d) })),
+});
+
+/** The resolver target of a `{ projectKey } | { workspaceId }` body: undefined when malformed, null when unknown. */
+async function mcpTargetOf(t) {
+  if (!t || typeof t !== 'object') return undefined;
+  if (typeof t.projectKey === 'string' && PROJECT_KEY_RE.test(t.projectKey) && t.workspaceId === undefined) {
+    const p = (await listProjects()).find((x) => x.key === t.projectKey);
+    return p ? { kind: 'project', key: p.key, name: p.name, rank: 0 } : null;
+  }
+  if (typeof t.workspaceId === 'string' && WORKSPACE_KEY_RE.test(t.workspaceId) && t.projectKey === undefined) {
+    const ws = await readWorkspace(t.workspaceId);
+    return ws ? mcpWorkspaceTarget(ws) : null;
+  }
+  return undefined;
+}
+
+/** One pipeline target through the resolver, its Team set from the policy cache; `opts` = the rest of the input. */
+async function mcpResolve(target, opts = {}) {
+  const project = target.kind === 'project';
+  const team = await cachedTeamFor(project ? { projectKey: target.key } : { workspaceId: target.id });
+  const result = await resolveRegistry({ surface: 'pipeline', targets: [target], teams: { [project ? target.key : `ws:${target.id}`]: team }, ...opts });
+  return { result, team };
+}
+
+/** What a run on the target would start (§5.6: `models` sets the tool-name limit). */
+async function mcpRunPreview(target, { optOut = [], models = [] } = {}) {
+  const [{ result, team }, catalog] = await Promise.all([mcpResolve(target, { optOut, toolNameLimit: toolNameLimitFor(models) }), loadCatalog()]);
+  return { result, catalog, team };
+}
+
+/** The opt-out entries that are memberships of the target's sets (unknown ones are dropped). A
+ *  registry fault keeps the list as sent: it must not block the run, whose own resolution matches
+ *  the opt-out by exact key (and adds nothing when it fails too). */
+async function knownMcpOptOut(list, target) {
+  if (!list.length) return list;
+  let result;
+  try { ({ result } = await mcpResolve(target)); } catch { return list; }
+  const known = new Set([...result.copies, ...result.skipped].map((m) => `${m.setId}|${m.serverId}`));
+  return list.filter((k) => known.has(k));
+}
+
+app.post('/api/mcp/preview', async (req, res) => {
+  const b = req.body || {};
+  const opt = parseMcpOptOut(b.mcpOptOut);
+  if (opt.error) return badRequest(res, opt.error);
+  if (b.models != null && (!Array.isArray(b.models) || b.models.length > 100 || !b.models.every((m) => typeof m === 'string'))) {
+    return badRequest(res, 'models must be an array of model ids');
+  }
+  try {
+    const target = await mcpTargetOf(b.target);
+    if (target === undefined) return badRequest(res, 'target must be { projectKey } or { workspaceId }');
+    if (!target) return res.status(404).json({ error: 'target not found' });
+    const { result, catalog, team } = await mcpRunPreview(target, { optOut: opt.list, models: b.models || [] });
+    const why = (sk) => skipReasonText(sk, catalog);
+    res.json({
+      sets: result.sets,
+      copies: result.copies,
+      skipped: result.skipped.map((sk) => ({ ...sk, message: skipMessage(sk, catalog), why: why(sk) })),
+      skippedTools: result.skippedTools,   // §5.6: `tool-name-too-long:<tool>`; the copy still starts
+      started: result.copies.length,
+      newer: !!result.newer,   // §4.5: a store written by a newer Worca resolves to nothing; say why
+      deviations: mcpDeviations(team ? { 'mcp.required': { value: team.required } } : {}, result, why),
+    });
+  } catch (err) { res.status(500).json({ error: err?.message || String(err) }); }
+});
 
 // ---------------------------------------------------------------------------
 // Scheduled runs (schema v31, src/core/scheduler.mjs). A schedule is a TICKET, not a
@@ -4224,7 +4334,8 @@ app.get('/api/policy/scopes', async (req, res) => {
       const r = await resolveProjectPolicy(s.path, { discover: false }).catch(() => null);
       if (r?.ok) docs.push({ slug: r.home, doc: r.doc });
     }
-    res.json({ ...scopes, requirements: pluginRequirements(docs), blockedPlugins: blockedPluginFindings(docs) });
+    // MCP rows from the policy cache — the source the consent routes hash against (MCP registry spec §11.3).
+    res.json({ ...scopes, requirements: pluginRequirements(docs), blockedPlugins: blockedPluginFindings(docs), mcpRequirements: await mcpRequirements() });
   } catch (err) { sendPolicyError(res, err); }
 });
 
@@ -4234,7 +4345,17 @@ app.get('/api/policy', async (req, res) => {
   try {
     const { meta, r, workspaceRun, projectDir } = await policyForScope(scope);
     if (!r.ok) return res.status(404).json({ error: r.detail || `no team policy for this ${scope.kind}`, code: (r.code || r.reason || 'NOT_ENABLED').toString().toUpperCase().replace(/-/g, '_'), scope: meta });
-    res.json(policyPayload(meta, r, { workspaceRun, projectDir }));
+    const payload = await policyPayload(meta, r, { workspaceRun, projectDir });
+    // MCP registry spec §11.4: the off-policy card also lists the Team set's MCP deviations for this scope's runs,
+    // worded and guarded like /api/policy/notes (a registry fault adds none; the policy's own card still paints).
+    const fields = fieldsForRun(r.doc, { workspaceRun });
+    if (fields['mcp.required']) {
+      try {
+        const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
+        if (target) { const p = await mcpRunPreview(target); payload.deviations.push(...mcpDeviations(fields, p.result, (sk) => skipReasonText(sk, p.catalog))); }
+      } catch { /* a registry fault adds no MCP deviations */ }
+    }
+    res.json(payload);
   } catch (err) { sendPolicyError(res, err); }
 });
 
@@ -4243,6 +4364,11 @@ app.get('/api/policy/notes', async (req, res) => {
   const scope = parseScopeParam(req.query.scope);
   if (!scope) return badRequest(res, 'scope must be project:<projectKey> or workspace:<workspaceId>');
   try {
+    // MCP registry (§6.2): the form's opt-out, comma-joined like `models`, adds the MCP deviations. A
+    // repeated parameter arrives as an array and is checked entry by entry; any other shape is a 400.
+    const rawOptOut = req.query.mcpOptOut;
+    const optOut = parseMcpOptOut(rawOptOut == null || rawOptOut === '' ? null : typeof rawOptOut === 'string' ? rawOptOut.split(',') : rawOptOut);
+    if (optOut.error) return badRequest(res, optOut.error);
     const { meta, r, workspaceRun } = await policyForScope(scope);
     if (!r.ok) return res.json({ scope: meta, policy: null, notes: [] });
     const fields = fieldsForRun(r.doc, { workspaceRun });
@@ -4250,6 +4376,15 @@ app.get('/api/policy/notes', async (req, res) => {
     const set = await readGuardrailSet(guardrailsId);
     const models = typeof req.query.models === 'string' && req.query.models ? req.query.models.split(',').filter(Boolean).map((m) => ({ role: null, model: m })) : [];
     const dev = deviationsFor(fields, { guardrailsId, guardrailSet: set, stepModels: models, installed: installedPluginsMap(), worcaVersion: POLICY_WORCA_VERSION, metricsRecord: null });
+    if (fields['mcp.required']) {
+      try {
+        const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
+        if (target) {
+          const p = await mcpRunPreview(target, { optOut: optOut.list, models: models.map((m) => m.model) });
+          dev.push(...mcpDeviations(fields, p.result, (sk) => skipReasonText(sk, p.catalog)));
+        }
+      } catch { /* a registry fault adds no MCP notes; the policy's own notes still paint */ }
+    }
     res.json({ scope: meta, policy: { home: r.home, sha: r.sha, delegated: r.delegated, from: r.from, caps: capSummary(r.doc, { workspaceRun }) }, notes: dev, guardrailsDefault: fields['guardrails.default']?.value ?? null });
   } catch (err) { sendPolicyError(res, err); }
 });
@@ -5192,6 +5327,9 @@ app.post('/api/projects', async (req, res) => {
     discoverProject(normalizeProjectPath(body.path), { force: true })
       .then(() => emitChanged('team-metrics-changed', 'discovered'))
       .catch(() => { /* offline or not a git repo: discovery retries hourly */ });
+    // Its team policy at once too (MCP registry spec §11.2): removing a project drops its policy cache, so a re-added or
+    // re-cloned project's home must not read "no project here follows" (a greyed Team set) until the background discovery.
+    discoverPolicy(normalizeProjectPath(body.path), { force: true }).catch(() => { /* offline: the background discovery retries */ });
     res.json({ projects });
   } catch (err) {
     // addProject only throws on validation (empty/duplicate/not-a-directory), so
@@ -5223,6 +5361,7 @@ app.post('/api/projects/bulk', async (req, res) => {
             await discoverProject(p, { force: true });
             emitChanged('team-metrics-changed', 'discovered');
           } catch { /* offline or not a git repo: discovery retries hourly */ }
+          await discoverPolicy(p, { force: true }).catch(() => { /* offline: the background discovery retries */ });
         }
       })();
     }
@@ -5259,6 +5398,7 @@ async function startCloneJob(req) {
       discoverProject(project.path, { force: true })
         .then(() => emitChanged('team-metrics-changed', 'discovered'))
         .catch(() => { /* offline or not a git repo: discovery retries hourly */ });
+      discoverPolicy(project.path, { force: true }).catch(() => { /* offline: the background discovery retries */ });
     } catch (err) {
       Object.assign(job, { state: 'error', code: err instanceof CloneError ? err.code : 'failed', error: err && err.message ? err.message : String(err) });
     }
@@ -7693,12 +7833,18 @@ app.patch('/api/ask/threads/:id', async (req, res) => {
     const pick = body.model !== undefined || body.effort !== undefined;
     // Title keeps its original contract exactly: a PATCH that names none of the
     // fields still earns the title error, so pre-#397 callers see identical behaviour.
-    if (body.title !== undefined || (body.scope === undefined && !pick)) {
+    if (body.title !== undefined || (body.scope === undefined && body.mcpOff === undefined && !pick)) {
       const raw = body.title;
       if (typeof raw !== 'string' || !raw.trim() || raw.length > 120) {
         return badRequest(res, 'title must be a non-empty string of at most 120 characters');
       }
       patch.title = raw.trim();
+    }
+    if (body.mcpOff !== undefined) {
+      // MCP registry §9.4: the composer picker's switched-off sets and memberships, applied from the next turn.
+      const mo = validateMcpOff(body.mcpOff);
+      if (!mo.ok) return badRequest(res, mo.error);
+      patch.mcpOff = mo.value;
     }
     if (pick) {
       // The same check as the message POST. Awaited BEFORE the scope branch, so its
@@ -7720,6 +7866,7 @@ app.patch('/api/ask/threads/:id', async (req, res) => {
       delete base.projectDir;
       delete base.projectKey;
       delete base.workspaceId;
+      delete base.projectSource;
       patch.context = { ...base, ...sv.scope };
     }
     const thread = askUpdateThread(id, patch);
@@ -7898,6 +8045,7 @@ function askApplyPin(ctx, pin) {
   delete out.projectDir;
   delete out.projectKey;
   delete out.workspaceId;
+  delete out.projectSource;   // MCP registry §9.1: the fallback tag goes with the target keys
   return { ...out, ...pin };
 }
 
@@ -7928,9 +8076,10 @@ function askWebAccessFor(threadId, ctx) {
 /** The system prompt of ONE Ask turn: the rules, the catalog, and — only when the chat's
  *  "Create and run scripts" pref is on (W20) — the scripts section with the runtimes this host
  *  actually has (the python probe, cached 60 s); plus the web section when `web` (askWebAccess()
- *  for this turn) is on. Memory is mounted, not rendered. */
-async function askSystemPromptFor(catalog, { web = null } = {}) {
-  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT, web });
+ *  for this turn) is on, and the MCP servers section when the turn has registry copies (`mcp`,
+ *  askMcpPromptInput()). Memory is mounted, not rendered. */
+async function askSystemPromptFor(catalog, { web = null, mcp = null } = {}) {
+  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT, web, mcp });
 }
 
 /** "scheduled Sat Sep 19, 02:00 (run 1a2b…)" / "repeats: Every weekday at 02:00 (sch_…)" / "proposes: …" — or ''. */
@@ -7965,10 +8114,12 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
   if (ctx.diffPath) out.diffPath = ctx.diffPath;   // client-supplied, already length-checked by validateClientContext
   if (ctx.runPage) out.runPage = ctx.runPage;       // an enum (RUN_PAGE_PARTS), validated the same way
   try {
-    if (ctx.projectKey || ctx.projectDir) {
+    // MCP registry §9.1: a fallback-tagged projectDir (the dropdown on a page about no project) names nothing.
+    const dir = ctx.projectSource === 'fallback' ? null : ctx.projectDir;
+    if (ctx.projectKey || dir) {
       const projects = await listProjects();
       const p = projects.find((x) =>
-        (ctx.projectKey && x.key === ctx.projectKey) || (ctx.projectDir && x.path === ctx.projectDir));
+        (ctx.projectKey && x.key === ctx.projectKey) || (dir && x.path === dir));
       if (p) out.project = { name: p.name, key: p.key };
     }
   } catch { /* absent line */ }
@@ -8116,7 +8267,7 @@ function askSignedIn(req) {
   return who.source === 'local' ? null : who.name;
 }
 
-async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, files = [], synthetic = null, signedIn = null, reader = null }) {
+async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, files = [], synthetic = null, signedIn = null, reader = null, mcpOff = undefined }) {
   // §6.2.2 ATOMIC re-check + slot reservation. Today every await between the
   // top 409/429 pair and here resolves in microtasks (validateModelEffort ->
   // composeCatalog; askBuildCatalog -> three synchronous better-sqlite3
@@ -8148,7 +8299,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // Writes. Store the LAST context + model/effort on the thread (§6.5 tail, D8).
     // `ctx` (pin-merged) rather than cv.context: the stored row is what restores
     // the selector on reopen and what the MCP child reads for tool defaulting.
-    askUpdateThread(id, { context: ctx, model, effort });
+    askUpdateThread(id, { context: ctx, model, effort, ...(mcpOff !== undefined ? { mcpOff } : {}) });
     // §7.4 — NOTHING is stamped on the row before the 202: the thread stays
     // untitled (the header reads "Ask Worca") until the D13 background title
     // announces itself. titleWasAuto gates that call: a title given at THREAD
@@ -8194,7 +8345,10 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // team policy — so the prompt section, the sub-agent note and the MCP child's tools agree.
     const pinned = askPinnedScope(ctx);
     const web = askWebAccessFor(id, ctx);
-    const systemPrompt = await askSystemPromptFor(catalog, { web });
+    // MCP registry §9.1–9.3: General + the targets in play (the tagged dropdown fallback excluded), minus the chat's
+    // picker choices — resolved ONCE per turn, so the per-turn file, the spawn and the prompt section agree.
+    const mcp = await resolveAskMcp({ ctx, threadId: id, off: mcpOff !== undefined ? mcpOff : thread.mcpOff, model });
+    const systemPrompt = await askSystemPromptFor(catalog, { web, mcp: await askMcpPromptInput(mcp) });
     const header = askBuildContextHeader(headerCtx);
     const prompt = askBuildTurnPrompt(header, text, inline);
     const prior = askListMessages(id).filter((m) => m.seq < userMsg.seq);
@@ -8214,6 +8368,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
       deterministicTitle,
       pinnedScope: pinned,                          // #397: proposal defaulting + mismatch flag
       web,
+      mcp: mcp.result,
       timeZone: ctx.timeZone || (thread.context && thread.context.timeZone) || null,   // scheduled runs: the user's clock
       memoryProject: headerCtx.project ? { key: headerCtx.project.key, name: headerCtx.project.name || '' } : null,   // native-rules revision: the turn mounts global + this project through --add-dir
       mock: mockEnabled({}) ? { card: mockAskCard(ctx, text) } : null, // R-F
@@ -8226,6 +8381,8 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         onOutOfTurn: (f) => broadcast({ ...f, threadId: id }),
         onCommentMutation: ({ runId }) => { emitDiffCommentsChanged(runId); },
         onWorktreeMutation: () => { emitAskWorktrees(id); },
+        // §9.1 (D17): at turn end, name the copies a worktree opened this turn brings into the next one.
+        mcpJoinNotice: () => askMcpJoinNotice({ before: mcp, ctx, threadId: id, off: askGetThread(id)?.mcpOff ?? null, model }),
         // A remember/forget in the MCP child is the same scope change a REST write makes (B29).
         // The key is parsed out of worca's OWN tool result, never written by the model; shape-check
         // it anyway before it rides a broadcast (I2-#22).
@@ -8306,6 +8463,9 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
     }
     const cv = validateClientContext(body.context);
     if (!cv.ok) return badRequest(res, cv.error);
+    // MCP registry §9.4: the composer sends the picker's choices with every message; they decide this turn and are stored.
+    const mo = body.mcpOff === undefined ? { ok: true, value: undefined } : validateMcpOff(body.mcpOff);
+    if (!mo.ok) return badRequest(res, mo.error);
     // #397: explicit pin beats page context, per field. A context carrying its own
     // `pinned` verdict is authoritative — the selector-aware client already merged
     // (true) or explicitly chose Auto (false). A context WITHOUT one comes from a
@@ -8360,7 +8520,7 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
       }
     }
 
-    const r = await startAskTurn({ threadId: id, thread, ctx, model: mv.model, effort: mv.effort, text, files, signedIn: askSignedIn(req), reader: askViewer(req) });
+    const r = await startAskTurn({ threadId: id, thread, ctx, model: mv.model, effort: mv.effort, text, files, signedIn: askSignedIn(req), reader: askViewer(req), mcpOff: mo.value });
     if (!r.ok) return res.status(r.status).json({ error: r.error, ...(r.budget ? { budget: r.budget } : {}) });
     // `attachments` carries the store-minted ids so the sender's own echo can key
     // image thumbnails and the thread budget off them (the ask-message broadcast
@@ -8369,6 +8529,31 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
   } catch (err) {
     // startAskTurn never throws (it returns {ok:false,…}); only the route's own
     // pre-checks can land here, so there is no slot to release.
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+// MCP registry §9.4: the composer picker's data — the same targets in play and resolver as the turn. `threadId`
+// adds the thread's open worktrees and stored choices; a body `mcpOff` overrides them (a thread-less chat);
+// `model` (the composer's) sets the §5.6 tool-name limit.
+app.post('/api/ask/mcp-preview', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const cv = validateClientContext(body.context);
+    if (!cv.ok) return badRequest(res, cv.error);
+    let thread = null;
+    if (body.threadId !== undefined) {
+      const tid = askIdParam(res, body.threadId, 'thread');
+      if (!tid) return;
+      thread = askGetThread(tid);
+      // Someone else's thread is a 404, like every /api/ask/threads/:id route on a shared deployment.
+      if (!thread || !askThreadVisible(thread, req)) return res.status(404).json({ error: 'thread not found' });
+    }
+    const mo = body.mcpOff === undefined ? { ok: true, value: thread ? thread.mcpOff : null } : validateMcpOff(body.mcpOff);
+    if (!mo.ok) return badRequest(res, mo.error);
+    if (body.model !== undefined && (typeof body.model !== 'string' || !body.model || body.model.length > 200)) return badRequest(res, 'model must be a model id');
+    res.json(await askMcpPreview({ ctx: cv.context, threadId: thread ? thread.id : null, off: mo.value, model: body.model ?? null }));
+  } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
 });
@@ -9285,11 +9470,14 @@ app.get('/api/plugins', async (req, res) => {
     // request, and only when some plugin ships a python script (the probe caches 60 s).
     const anyPython = rows.some((p) => Number((p.scriptRuntimes || {}).python) > 0);
     const notice = anyPython ? await pythonNoticeFor([{ runtime: 'python' }]) : null;
+    const mcp = await readMcpStore();
     res.json({
       plugins: rows.map((p) => ({
         ...p,
         marketplaceName: p.marketplace && mkts[p.marketplace] ? mkts[p.marketplace].name : null,
         pythonMissing: !!(notice && Number((p.scriptRuntimes || {}).python) > 0),
+        // The uninstall confirm names the MCP sets its servers leave (§4.6).
+        mcpSets: mcpFootprint(mcp, (id) => id.startsWith(`plugin:${p.name}/`)).sets,
       })),
       orphans: listOrphanPluginData(),
     });
@@ -9422,6 +9610,7 @@ app.post('/api/plugins/:name/update', async (req, res) => {
     }
     const updated = await updatePlugin(name);
     reloadChatWorkers(name);
+    void retestServers((s) => s.startsWith(`plugin:${name}/`));   // MCP registry §7.3
     res.json(updated);
   } catch (err) {
     sendPluginError(res, err);
@@ -9708,6 +9897,211 @@ app.get('/api/plugins/:name/model-env', (req, res) => {
     id: model.id, label: model.label, efforts: model.efforts, env, secretKeys,
     ...(model.cost ? { cost: model.cost } : {}),
   });
+});
+
+// ---------------------------------------------------------------------------
+// /api/mcp/* — the MCP registry (docs/mcp-servers.md): the catalog, sets and their memberships,
+// project assignments. The store (src/core/mcp/store.mjs) owns every rule about the files and their shapes
+// and keeps user-keyed maps null-prototype; these handlers check ids and never return a secret value.
+// ---------------------------------------------------------------------------
+const MCP_REFUSED_KEYS = ['hash', 'consent', 'bases', 'seeded'];
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+// Bodies never set what only consent or the store writes (§12); `expectHash` is a precondition, not a value.
+app.use('/api/mcp', (req, res, next) => {
+  if (isPlainObject(req.body)) {
+    const bad = MCP_REFUSED_KEYS.find((k) => Object.hasOwn(req.body, k));
+    if (bad) return badRequest(res, `"${bad}" cannot be set here`);
+  }
+  next();
+});
+
+function sendMcpError(res, err) {
+  if (err instanceof McpStoreError) return res.status(err.status).json({ error: err.message });
+  res.status(500).json({ error: err?.message || String(err) });
+}
+function mcpSetId(req, res) {
+  const id = req.params.id;
+  if (!SET_ID_RE.test(id)) { badRequest(res, 'invalid set id'); return null; }
+  return id;
+}
+function mcpServerId(req, res, param = 'serverId') {
+  const id = req.params[param];
+  if (!SERVER_ID_RE.test(id)) { badRequest(res, 'invalid server id'); return null; }
+  return id;
+}
+/** `{ name, ...definition }` → [name, definition] with the name split off. */
+function mcpDefinitionBody(req) {
+  const { name, ...raw } = isPlainObject(req.body) ? req.body : {};
+  return [typeof name === 'string' ? name : '', raw];
+}
+
+app.get('/api/mcp/servers', async (_req, res) => {
+  try { res.json(await listCatalogView()); } catch (err) { sendMcpError(res, err); }
+});
+
+// Live checks for the Add / Edit definition form (§7.2); ?edit=1 skips the name check.
+app.post('/api/mcp/servers/validate', async (req, res) => {
+  const [name, raw] = mcpDefinitionBody(req);
+  try {
+    const { errors } = validateMcpDefinition(raw, { name, source: 'manual' });
+    if (req.query.edit !== '1') {
+      const { snapshot, catalog } = await viewContext();
+      // What P1 addManualServer refuses: a manual name in use, a base another id holds (a removed manual server keeps
+      // its own base, so its name can be added again) or a catalog server's declared name.
+      const held = Object.entries(snapshot.bases).some(([sid, b]) => b === name && sid !== `manual:${name}`);
+      if (Object.hasOwn(snapshot.manual, name) || held || catalog.some((e) => e.name === name)) errors.push(`the name "${name}" is taken`);
+    }
+    res.json({ errors });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/servers', async (req, res) => {
+  const [name, raw] = mcpDefinitionBody(req);
+  try {
+    const { catalog } = await viewContext();
+    await addManualServer(name, raw, { catalogNames: catalog.map((e) => e.name) });
+    res.json({ ok: true, id: `manual:${name}` });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/servers/:id', async (req, res) => {
+  const id = mcpServerId(req, res, 'id');
+  if (!id) return;
+  if (!id.startsWith('manual:')) return badRequest(res, 'only manual servers can be edited');
+  try {
+    await editManualServer(id.slice('manual:'.length), isPlainObject(req.body) ? req.body : {});
+    void retestServers((s) => s === id);
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.delete('/api/mcp/servers/:id', async (req, res) => {
+  const id = mcpServerId(req, res, 'id');
+  if (!id) return;
+  if (id.startsWith('plugin:')) return badRequest(res, 'a plugin server leaves with its plugin');
+  try {
+    const { catalog } = await viewContext();
+    const e = catalog.find((x) => x.id === id);
+    if (!e) return res.status(404).json({ error: 'server not found' });
+    if (e.source === 'policy' && e.retired !== true) return badRequest(res, 'a server team policy requires cannot be removed here');
+    await removeServerEverywhere(id);
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.get('/api/mcp/sets', async (_req, res) => {
+  try { res.json(await listSetsView()); } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/sets', async (req, res) => {
+  try { res.json(await createSet(req.body?.name)); } catch (err) { sendMcpError(res, err); }
+});
+
+app.get('/api/mcp/sets/:id', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try {
+    const v = await getSetView(id);
+    if (!v) return res.status(404).json({ error: 'set not found' });
+    res.json(v);
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/sets/:id', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try { await renameSet(id, req.body?.name); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+app.delete('/api/mcp/sets/:id', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try { await deleteSet(id); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/sets/:id/duplicate', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try {
+    const team = id.startsWith('team-') ? teamDuplicateSource(await viewContext(), id) : undefined;
+    if (team === null) return res.status(404).json({ error: 'set not found' });
+    res.json(await duplicateSet(id, req.body?.name, { team }));
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/sets/:id/members/:serverId', async (req, res) => {
+  const id = mcpSetId(req, res);
+  const serverId = id && mcpServerId(req, res);
+  if (!serverId) return;
+  const patch = req.body;   // P1 putMember checks enabled, values and secrets
+  if (!isPlainObject(patch)) return badRequest(res, 'body must be an object');
+  try {
+    const ctx = await viewContext();
+    const entry = ctx.catalog.find((e) => e.id === serverId);
+    if (!entry) return res.status(404).json({ error: 'server not found' });
+    const opts = { def: entry.def };
+    if (id.startsWith('team-')) {
+      const t = teamMemberRefusal(ctx, id, serverId, patch);
+      if (t.status) return res.status(t.status).json({ error: t.error });
+      opts.team = { home: t.home };
+    }
+    await putMember(id, serverId, patch, opts);
+    retestAfterSave(ctx, id, serverId, patch);   // refused quietly while a required field is unfilled; off starts nothing
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.delete('/api/mcp/sets/:id/members/:serverId', async (req, res) => {
+  const id = mcpSetId(req, res);
+  const serverId = id && mcpServerId(req, res);
+  if (!serverId) return;
+  if (id.startsWith('team-')) return res.status(409).json({ error: 'Team set members come from team policy and cannot be removed here' });
+  try { await deleteMember(id, serverId); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/sets/:id/members/:serverId/test', async (req, res) => {
+  const id = mcpSetId(req, res);
+  const serverId = id && mcpServerId(req, res);
+  if (!serverId) return;
+  try { res.json(await testMembership(id, serverId)); } catch (err) { sendMcpError(res, err); }
+});
+
+app.get('/api/mcp/projects/:key', async (req, res) => {
+  if (!PROJECT_KEY_RE.test(req.params.key)) return badRequest(res, 'invalid project key');
+  try { res.json(await projectAssignmentView(req.params.key)); } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/projects/:key', async (req, res) => {
+  if (!PROJECT_KEY_RE.test(req.params.key)) return badRequest(res, 'invalid project key');
+  const { sets, includeGeneral } = req.body || {};   // P1 setProjectAssignment checks both
+  try { await setProjectAssignment(req.params.key, { sets, includeGeneral }); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+// MCP Team set (MCP registry spec §11.3, §12): consent routes. The definition, values and hash are read
+// from the cached policy, never the body; `expectHash` is only a precondition (409 when it moved on).
+// A home is a lowercase policy slug (the home part of SERVER_ID_RE's `policy:` ids, within its bound: deep subgroups make
+// long slugs); ids are checked before any lookup.
+const MCP_HOME_RE = /^(?=.{1,1024}$)[a-z0-9_][a-z0-9._-]*(?:\/[a-z0-9_][a-z0-9._-]*)*$/;
+function mcpHome(req, res) {
+  const home = req.params.home;
+  if (!MCP_HOME_RE.test(home)) { badRequest(res, 'home must be a lowercase policy slug'); return null; }
+  return home;
+}
+for (const action of ['install', 'turn-on', 'update']) {
+  app.post(`/api/mcp/teams/:home/members/:serverId/${action}`, async (req, res) => {
+    const home = mcpHome(req, res); if (!home) return;
+    const serverId = mcpServerId(req, res); if (!serverId) return;
+    const expectHash = req.body?.expectHash;
+    if (typeof expectHash !== 'string' || !/^[0-9a-f]{64}$/.test(expectHash)) return badRequest(res, 'expectHash must be the hash the consent dialog showed');
+    try { res.json({ ok: true, ...(await teamAction(action, home, serverId, { expectHash })) }); }
+    catch (err) { sendMcpError(res, err); }
+  });
+}
+app.post('/api/mcp/teams/:home/forget', async (req, res) => {
+  const home = mcpHome(req, res); if (!home) return;
+  try { await teamForget(home); res.json({ ok: true }); }
+  catch (err) { sendMcpError(res, err); }
 });
 
 // ---------------------------------------------------------------------------
@@ -10269,6 +10663,14 @@ export async function bootMaintenance({ log } = {}) {
   } catch (err) {
     summary.bench = { removed: 0 };
     console.error(`[worca-ui] bench sweep failed: ${err && err.message ? err.message : err}`);
+  }
+
+  // MCP registry (§4.4): a plugin can become honoured with no install event (a
+  // host API bump, a linked plugin's edit), so persist the bases it still lacks.
+  try {
+    await reconcileMcpStore();
+  } catch (err) {
+    console.error(`[worca-ui] MCP registry reconcile failed: ${err && err.message ? err.message : err}`);
   }
   return summary;
 }

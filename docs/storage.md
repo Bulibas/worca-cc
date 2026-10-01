@@ -61,6 +61,17 @@ project's working tree, so nothing is ever committed to your repo.
   policy/
     repos/<owner~repo>/                  git worktree of the project repo, detached at origin/worca-policy
     locks/<owner~repo>.lock              cross-process lock for enable / follow / publish
+  mcp/                                  the MCP registry: servers for worca only, never written to
+                                        ~/.claude.json or .mcp.json; every file mode 0600, written
+                                        atomically under mcp/.lock; a file with schema > 1 stops the
+                                        registry ("MCP registry files need a newer Worca")
+    servers.json                         manual definitions, consented team-policy definitions, and
+                                         the persisted base name of every server id (never reassigned)
+    sets.json                            user sets (General is implicit until first edited), retired set
+                                         ids, Team set state per policy home, project assignments
+    secrets.json                         set secrets — the only place a registry secret value is stored;
+                                         runs and chats get them as spawn env, never in a file
+    tests.json                           the last Test per set and server (tools, stale fingerprint)
   plugins/                              installed plugin checkouts
   agents/                               installed agent registry checkouts
   workflows/                            saved workflow templates

@@ -194,7 +194,7 @@ test('setPluginEnabled toggles the lock flag; listInstalledPlugins reflects it',
     { enabled: row.enabled, linked: row.linked, version: row.version, pinnedSha: row.pinnedSha },
     { enabled: true, linked: false, version: '0.1.0', pinnedSha: origin.sha },
   );
-  assert.deepEqual(row.contributions, { agents: 1, scripts: 1, taskSources: 1, chatChannels: 0, models: 0, skills: 1, workflows: 1 });
+  assert.deepEqual(row.contributions, { agents: 1, scripts: 1, taskSources: 1, chatChannels: 0, models: 0, mcpServers: 0, skills: 1, workflows: 1 });
   assert.throws(() => setPluginEnabled('ghost-plugin', true), /not installed/);
 });
 
@@ -478,7 +478,7 @@ test('listInstalledPlugins reports apiMismatch for v1-shaped data, and null when
   });
   const p = listInstalledPlugins().find((x) => x.name === 'legacy-data');
   assert.deepEqual(p.apiMismatch, {
-    builtFor: 1, host: 4, agents: 1, workflows: 1,
+    builtFor: 1, host: 5, agents: 1, workflows: 1,
     message: 'built for plugin API 1; this version of worca requires plugin API 3 for agents and pipeline templates \u2014 update or reinstall the plugin (1 agent(s), 1 template(s) ignored)',
   });
   assert.equal(p.broken, false, 'an outdated data contract is not a broken install');
