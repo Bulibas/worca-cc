@@ -37,7 +37,7 @@ const TM_SCOPES = {
   anyEnabled: true,
 };
 
-async function boot({ fetchHandler } = {}) {
+async function boot({ fetchHandler, storage = {} } = {}) {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4321/' });
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
@@ -55,6 +55,8 @@ async function boot({ fetchHandler } = {}) {
     try { Object.defineProperty(globalThis, k, { value: window[k], configurable: true, writable: true }); } catch {}
   }
   globalThis.window = window; globalThis.document = window.document;
+  // Seeded BEFORE app.js loads: the Runs list reads its folded groups at module load.
+  for (const [k, v] of Object.entries(storage)) window.localStorage.setItem(k, v);
   await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
   await new Promise((r) => setTimeout(r, 0));
   if (WSStub.last) WSStub.last._open();
@@ -264,7 +266,7 @@ test('#projects/<key> on boot: Overview reads the History dataset (RUNS, LAST RU
   assert.equal(window.location.hash, '#history/alpha-00000001/p-new');
 });
 
-test('a project with no runs: LAST RUN is a dash and Open in History is disabled', async () => {
+test('a project with no runs: LAST RUN is a dash and Show in Runs is disabled', async () => {
   const { window } = await boot({
     fetchHandler: (u) => (u.includes('/api/history') ? Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines: [], ghAvailable: false }) }) : null),
   });
@@ -278,14 +280,15 @@ test('a project with no runs: LAST RUN is a dash and Open in History is disabled
   assert.equal(btn.title, 'No runs yet');
 });
 
-test('Open in History pre-sets the project filter; New pipeline selects the project and lands on #new', async () => {
-  const { window } = await boot();
+test('Show in Runs unfolds the project group on the Runs list; New pipeline selects the project and lands on #new', async () => {
+  const { window } = await boot({ storage: { 'worca-cc.runs.collapsed': JSON.stringify(['alpha-00000001']) } });
   await goHash(window, 'projects/alpha-00000001');
   await tick(); await tick();
   const doc = window.document;
   click(window, doc.querySelector('#proj-detail .pd-history'));
-  assert.equal(window.location.hash, '#history');
-  assert.equal(window.localStorage.getItem('worca-cc.history.project'), 'alpha-00000001');
+  assert.equal(window.location.hash, '#runs');
+  assert.deepEqual(JSON.parse(window.localStorage.getItem('worca-cc.runs.collapsed')), [],
+    'the project group is unfolded (the folded key is gone)');
   await goHash(window, 'projects/alpha-00000001');
   click(window, doc.querySelector('#proj-detail .pd-new'));
   assert.equal(window.location.hash, '#new');
@@ -640,7 +643,7 @@ test('index.html: the Projects view is a two-screen shell with a detail template
   }
   // The list still lives at the same ids (the controller and every older test read them).
   assert.match(htmlText, /<p id="projects-msg" class="form-msg" aria-live="polite"><\/p>\s*<div class="run-list" id="projects-list"><\/div>/);
-  assert.equal((htmlText.match(/data-view/g) || []).length, 16, 'a screen inside the projects view, not a view (Team metrics, Team policy, Getting started, Scripts and Schedules are their own views)');
+  assert.equal((htmlText.match(/data-view/g) || []).length, 15, 'a screen inside the projects view, not a view (Team metrics, Team policy, Getting started, Scripts and Schedules are their own views)');
 });
 
 test('style.css: the projects shell is a twin of the History track', () => {

@@ -1,6 +1,6 @@
 // test/ui-running-auto.test.mjs — an Auto run: the deciding placeholder on the run page
-// (spec §7.3; the list card carries no graph), the card's wait strip and status word, and the
-// "Auto → ‹name›" header badge (spec §7.5). Boot: test/helpers/run-page-boot.mjs.
+// (spec §7.3; the list row carries no graph), the row's Needs-you word while the proposal waits,
+// and the "Auto → ‹name›" header badge on the run page (spec §7.5). Boot: test/helpers/run-page-boot.mjs.
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { proposalFor } from './helpers/auto-proposal-fixture.mjs';
@@ -20,6 +20,10 @@ const settle = async (window, n = 3) => { for (let i = 0; i < n; i += 1) await n
 
 function helloRunning(ctx, extra = {}) { helloRun(ctx, { runId: RUN_ID, ...extra }); }
 const cardOf = (ctx) => runCard(ctx, RUN_ID);
+const inNeeds = (ctx) => ctx.window.document.querySelector(`#runs-list .runs-needs .runs-row[data-run-id="${RUN_ID}"]`);
+const rowWord = (row) => row.querySelector('.runs-row-sub').textContent.split(' · ')[0];
+// The run page's header badge (the list row has none).
+const rdBadge = (ctx) => ctx.window.document.querySelector('#run-detail .rd-row1 .auto-badge');
 // The deciding placeholder / run graph lives on the run page's Workflow tab only (the list card has no graph).
 const pageHost = (ctx) => ctx.window.document.querySelector('#run-detail .rd-graph .run-flow');
 async function openPage(ctx) {
@@ -31,8 +35,9 @@ async function openPage(ctx) {
 const DECIDING = { version: 2, template: { id: 'wf_auto', name: 'Auto' }, auto: { status: 'deciding', humanInLoop: true }, graph: { nodes: [], wires: [] }, bookends: { preflight: true, done: true }, steps: [{ kind: 'preflight', nodes: [{ id: 'preflight', label: 'Preflight', sub: 'checks' }] }, { kind: 'done', nodes: [{ id: 'done', label: 'Done', sub: 'complete' }] }], feedbacks: [] };
 
 test('a deciding Auto run paints the orb placeholder, not an empty graph; the label follows the pending proposal', async () => {
-  const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
-  assert.equal(cardOf(ctx).querySelector('.run-flow'), null, 'the list card carries no graph host');
+  const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning(); await settle(ctx.window);
+  assert.ok(cardOf(ctx), 'the run is listed');
+  assert.equal(cardOf(ctx).querySelector('.run-flow'), null, 'the list row carries no graph host');
   assert.equal(cardOf(ctx).querySelector('.auto-deciding'), null, 'and no placeholder');
   const host = await openPage(ctx);
   assert.ok(host.classList.contains('auto-deciding-host'));
@@ -42,10 +47,9 @@ test('a deciding Auto run paints the orb placeholder, not an empty graph; the la
   assert.ok(host.querySelector('.ask-orb'), 'the thinking orb');
   ctx.dispatch({ type: 'question', runId: RUN_ID, id: 'auto-1', kind: 'workflow', workflow: proposalFor() });
   assert.equal(host.querySelector('.auto-deciding-label').textContent, 'Waiting for your decision');
-  ctx.showRunning();
-  assert.equal(cardOf(ctx).querySelector('.rc-wait-text').textContent, 'Review the workflow', 'the card points at the proposal');
-  assert.equal(cardOf(ctx).querySelector('.rc-status-word').textContent, 'Paused · your decision');
-  assert.equal(cardOf(ctx).querySelector('.rc-prog').hidden, true, 'no 0/0 progress while deciding');
+  ctx.showRunning(); await settle(ctx.window);
+  assert.ok(inNeeds(ctx), 'the waiting proposal puts the run in Needs you');
+  assert.equal(rowWord(cardOf(ctx)), 'Workflow review', 'the row points at the proposal');
 });
 
 test('the real manifest replaces the placeholder with the graph (the orb is stopped, the host class dropped)', async () => {
@@ -58,8 +62,6 @@ test('the real manifest replaces the placeholder with the graph (the orb is stop
   assert.ok(!host.classList.contains('auto-deciding-host'));
   assert.equal(host.querySelector('.auto-deciding'), null);
   assert.ok(host.querySelector('.gv-stage'), 'the run graph mounted');
-  ctx.showRunning();
-  assert.equal(cardOf(ctx).querySelector('.rc-prog').hidden, false, 'progress is back once there are nodes');
 });
 
 // A classifier failure parks the run with auto.status still 'deciding' (spec D17 / §5.6,
@@ -93,18 +95,23 @@ test('a run STOPPED while deciding is frozen: no orb, and A24’s "did not decid
 
 const DECIDED = (p) => ({ ...p.manifest, template: { id: 'wf_theme', name: 'Theme switch' }, auto: { status: 'decided', via: 'created', rounds: 1, humanInLoop: true, workflowId: 'wf_theme' } });
 
-test('badge: "Auto" while deciding, "Auto → name" after adoption — run card and Running detail', async () => {
-  const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
-  const badge = cardOf(ctx).querySelector('.rc-acts .auto-badge');
+test('badge: "Auto" while deciding, "Auto → name" after adoption — on the Running detail', async () => {
+  const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING });
+  ctx.go(`running/${RUN_ID}`); await settle(ctx.window);
+  const badge = rdBadge(ctx);
+  assert.ok(badge, 'the run page header carries the badge');
   assert.equal(badge.hidden, false); assert.equal(badge.textContent, 'Auto'); assert.equal(badge.title, 'Auto is deciding the workflow');
   ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'running', stepper: DECIDED(proposalFor()), steps: [], subAgents: [] });
-  assert.equal(badge.textContent, 'Auto → Theme switch'); assert.equal(badge.title, 'Auto created the workflow "Theme switch"');
+  await settle(ctx.window);
+  assert.equal(rdBadge(ctx).textContent, 'Auto → Theme switch'); assert.equal(rdBadge(ctx).title, 'Auto created the workflow "Theme switch"');
   ctx.window.location.hash = `running/${RUN_ID}`; ctx.window.dispatchEvent(new ctx.window.Event('hashchange')); await settle(ctx.window);
   const rd = ctx.window.document.querySelector('#run-detail .rd-row1 .auto-badge');
   assert.equal(rd.hidden, false); assert.equal(rd.textContent, 'Auto → Theme switch');
 });
 
 test('a saved-workflow run shows no badge', async () => {
-  const ctx = await boot(); helloRunning(ctx, { stepper: proposalFor().manifest }); ctx.showRunning();
-  assert.equal(cardOf(ctx).querySelector('.rc-acts .auto-badge').hidden, true);
+  const ctx = await boot(); helloRunning(ctx, { stepper: proposalFor().manifest });
+  ctx.go(`running/${RUN_ID}`); await settle(ctx.window);
+  assert.ok(rdBadge(ctx), 'the run page header carries the badge slot');
+  assert.equal(rdBadge(ctx).hidden, true);
 });

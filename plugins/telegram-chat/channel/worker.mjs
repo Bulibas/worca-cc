@@ -19,6 +19,12 @@ const TELEGRAM_API = 'https://api.telegram.org';
 const LONG_POLL_TIMEOUT_SEC = 25; // < the host's 30s ping interval
 const MAX_MESSAGE_CHARS = 4096;
 const STALE_AFTER_MS = (LONG_POLL_TIMEOUT_SEC * 2 + 20) * 1000;
+// Telegram: "if there are no new updates for at least a week, the identifier of
+// the next update will be chosen randomly" — a stored offset above it would
+// confirm (discard) every new update unseen.
+const CURSOR_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+// Sent on every poll: Telegram otherwise reuses whatever the LAST client set.
+const ALLOWED_UPDATES = encodeURIComponent(JSON.stringify(['message', 'channel_post']));
 
 export function renderToHtml(msg) {
   return renderSegments(msg, TELEGRAM_HTML_STYLE);
@@ -44,24 +50,51 @@ export function createTelegramWorker(ctx, {
   const api = (method) => `${TELEGRAM_API}/bot${token}/${method}`;
   let running = false;
   let botUsername = null;
+  let botId = null;
   let lastPollOk = null;
   let staleTimer = null;
   let announced = 'connecting';
+  let announcedDetail = null;
 
   const setStatus = (state, detail) => {
-    if (announced === state) return;
+    const d = detail ?? null;
+    if (announced === state && announcedDetail === d) return;
     announced = state;
-    ctx.setStatus(state, detail ?? null);
+    announcedDetail = d;
+    ctx.setStatus(state, d);
   };
 
   async function pollLoop() {
     let cursor = Number(await ctx.state.get('cursor')) || 0;
     let lastSeen = Number(await ctx.state.get('lastUpdateId')) || 0;
+    const storedBot = await ctx.state.get('botId');
+    let cursorAt = Number(await ctx.state.get('cursorAt')) || 0;
+    // The cursor belongs to ONE bot and goes stale after a week of silence; either
+    // way offset=cursor would silently swallow new commands. Legacy state (no
+    // botId / cursorAt) is kept — it cannot be proven wrong, and a reset could
+    // replay a processed-but-unconfirmed update.
+    const resetCursor = async (reason) => {
+      ctx.log('info', `telegram cursor reset (${reason})`);
+      cursor = 0;
+      lastSeen = 0;
+      await ctx.state.set('cursor', 0);
+      await ctx.state.set('lastUpdateId', 0);
+    };
+    if (botId != null && storedBot != null && String(storedBot) !== String(botId)) {
+      await resetCursor('bot token changed');
+    }
+    if (botId != null && String(storedBot) !== String(botId)) await ctx.state.set('botId', botId);
     let firstPoll = true;
     while (running) {
       try {
+        // Checked before EVERY poll: a healthy worker is never recycled, so a
+        // start-only check would miss a server that idles for a week. After the
+        // reset cursor is 0, so this is a no-op until an update restamps cursorAt.
+        if (cursor > 0 && cursorAt > 0 && now() - cursorAt > CURSOR_MAX_AGE_MS) {
+          await resetCursor('idle for more than 7 days');
+        }
         const pollTimeout = firstPoll ? 0 : LONG_POLL_TIMEOUT_SEC;
-        const res = await fetchFn(`${api('getUpdates')}?offset=${cursor}&timeout=${pollTimeout}`, {
+        const res = await fetchFn(`${api('getUpdates')}?offset=${cursor}&timeout=${pollTimeout}&allowed_updates=${ALLOWED_UPDATES}`, {
           signal: ctx.shutdownSignal,
         });
         firstPoll = false;
@@ -73,6 +106,17 @@ export function createTelegramWorker(ctx, {
         if (res.status === 401 || res.status === 403) {
           setStatus('disconnected', `auth failed (HTTP ${res.status}) — check botToken`);
           return; // a restart cannot fix a bad token; wait for config reload
+        }
+        if (res.status === 409) {
+          // A webhook is set on this bot, or another getUpdates client (a second
+          // worca, `worca plugin channel`, an old adapter) holds the long poll.
+          // Outbound still works, so this is the "notifications fine, replies
+          // lost" shape — say why. Never deleteWebhook here: it is the bot's
+          // remote config and may belong to another deployment.
+          const data = await res.json().catch(() => ({}));
+          setStatus('disconnected', `HTTP 409 — another client or a webhook is using this bot token; replies will not arrive until it stops${data.description ? ` (${data.description})` : ''}`);
+          if (running) await _sleep(5000);
+          continue;
         }
         if (!res.ok) {
           setStatus('disconnected', `HTTP ${res.status}`);
@@ -87,7 +131,7 @@ export function createTelegramWorker(ctx, {
             cursor = update.update_id + 1;
             if (update.update_id <= lastSeen) continue; // replay guard (at-least-once)
             lastSeen = update.update_id;
-            const m = update.message; // edited_message deliberately skipped
+            const m = update.message ?? update.channel_post; // edited_* deliberately skipped
             if (!m) continue;
             let text = m.text ?? '';
             // Group etiquette: /cmd@other_bot is not for us; /cmd@us loses the suffix.
@@ -111,6 +155,8 @@ export function createTelegramWorker(ctx, {
           }
           await ctx.state.set('cursor', cursor);
           await ctx.state.set('lastUpdateId', lastSeen);
+          cursorAt = now();
+          await ctx.state.set('cursorAt', cursorAt);
         }
       } catch (err) {
         if (!running || ctx.shutdownSignal.aborted) return;
@@ -130,6 +176,7 @@ export function createTelegramWorker(ctx, {
       }
       const me = await res.json().catch(() => ({}));
       botUsername = me?.result?.username ?? null;
+      botId = me?.result?.id ?? null;
       pollLoop().catch((err) => ctx.log('error', `poll loop died: ${err?.message || err}`));
       // Push-based stale detection (the old adapter computed this on demand).
       staleTimer = setInterval(() => {

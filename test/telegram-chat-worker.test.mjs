@@ -234,3 +234,124 @@ test('bold content with $-patterns survives toSlackMrkdwn (second restore site)'
   assert.match(out, /\*b\$(&|&amp;)c\*/); // T6 escapes & → &amp; in Slack output; both spellings prove no $-interpretation
   assert.ok(!/\x01/.test(out), 'no bold marker leaks');
 });
+
+test('409 names the conflicting poller/webhook in the status detail', async () => {
+  const { ctx, events } = fakeCtx();
+  let polls = 0;
+  const fetchFn = async (url) => {
+    if (url.includes('/getMe')) return json({ ok: true, result: { id: 1, username: 'b' } });
+    polls += 1;
+    if (polls === 1) return json({ ok: false, description: 'Conflict: terminated by other getUpdates request' }, 409);
+    return new Promise(() => {});
+  };
+  const w = createTelegramWorker(ctx, { fetchFn, _sleep: async () => {} });
+  await w.start();
+  const st = await waitFor(() => events.status.find((s) => s.state === 'disconnected'));
+  assert.match(st.detail, /409/);
+  assert.match(st.detail, /another client|webhook/i);
+  assert.match(st.detail, /terminated by other getUpdates request/);
+  await w.stop();
+});
+
+test('cursor is scoped to the bot: a new bot id resets cursor and replay guard', async () => {
+  const { ctx, state, events } = fakeCtx();
+  state.set('cursor', 5001); state.set('lastUpdateId', 5000); state.set('botId', 111);
+  const polls = [];
+  const fetchFn = async (url) => {
+    if (url.includes('/getMe')) return json({ ok: true, result: { id: 222, username: 'new_bot' } });
+    polls.push(url);
+    if (polls.length === 1) return json({ ok: true, result: [{ update_id: 300, message: { message_id: 1, chat: { id: 7 }, from: { id: 9 }, text: '/approve' } }] });
+    return new Promise(() => {});
+  };
+  const w = createTelegramWorker(ctx, { fetchFn, _sleep: async () => {} });
+  await w.start();
+  await waitFor(() => events.inbound.length === 1);
+  assert.match(polls[0], /offset=0&/);
+  assert.equal(events.inbound[0].text, '/approve');
+  await waitFor(() => state.get('botId') === 222 && state.get('cursor') === 301);
+  await w.stop();
+});
+
+test('a cursor idle for more than 7 days is reset (Telegram re-randomises update ids)', async () => {
+  const { ctx, state, events } = fakeCtx();
+  const NOW = Date.parse('2026-09-30T00:00:00Z');
+  state.set('cursor', 5001); state.set('lastUpdateId', 5000); state.set('botId', 1);
+  state.set('cursorAt', NOW - 8 * 86400000);
+  const polls = [];
+  const fetchFn = async (url) => {
+    if (url.includes('/getMe')) return json({ ok: true, result: { id: 1, username: 'b' } });
+    polls.push(url);
+    if (polls.length === 1) return json({ ok: true, result: [{ update_id: 12, message: { message_id: 1, chat: { id: 7 }, text: '/status' } }] });
+    return new Promise(() => {});
+  };
+  const w = createTelegramWorker(ctx, { fetchFn, _sleep: async () => {}, now: () => NOW });
+  await w.start();
+  await waitFor(() => events.inbound.length === 1);
+  assert.match(polls[0], /offset=0&/);
+  await w.stop();
+});
+
+test('a cursor that ages past 7 days while the worker runs is reset before the next poll', async () => {
+  const { ctx, state, events } = fakeCtx();
+  const NOW = Date.parse('2026-09-30T00:00:00Z');
+  let clock = NOW;
+  state.set('cursor', 5001); state.set('lastUpdateId', 5000); state.set('botId', 1);
+  state.set('cursorAt', NOW - 3600000);
+  const polls = [];
+  const fetchFn = async (url) => {
+    if (url.includes('/getMe')) return json({ ok: true, result: { id: 1, username: 'b' } });
+    polls.push(url);
+    if (polls.length === 1) {
+      clock = NOW + 8 * 86400000; // a week of empty long polls passes
+      return json({ ok: true, result: [] });
+    }
+    if (polls.length === 2) return json({ ok: true, result: [{ update_id: 12, message: { message_id: 1, chat: { id: 7 }, from: { id: 9 }, text: '/approve' } }] });
+    return new Promise(() => {});
+  };
+  const w = createTelegramWorker(ctx, { fetchFn, _sleep: async () => {}, now: () => clock });
+  await w.start();
+  await waitFor(() => events.inbound.length === 1);
+  assert.match(polls[0], /offset=5001&/, 'a fresh cursor is kept at start');
+  assert.match(polls[1], /offset=0&/, 'the aged cursor is reset inside the loop');
+  assert.equal(events.inbound[0].text, '/approve');
+  await waitFor(() => state.get('cursor') === 13 && state.get('lastUpdateId') === 12 && state.get('cursorAt') === clock);
+  assert.equal(events.logs.filter((l) => /cursor reset/.test(l)).length, 1, 'the reset is logged once');
+  await w.stop();
+});
+
+test('legacy state without botId/cursorAt is kept, not reset', async () => {
+  const { ctx, state } = fakeCtx();
+  state.set('cursor', 40); state.set('lastUpdateId', 39);
+  const polls = [];
+  const fetchFn = async (url) => {
+    if (url.includes('/getMe')) return json({ ok: true, result: { id: 1, username: 'b' } });
+    polls.push(url);
+    return new Promise(() => {});
+  };
+  const w = createTelegramWorker(ctx, { fetchFn, _sleep: async () => {} });
+  await w.start();
+  await waitFor(() => polls.length === 1);
+  assert.match(polls[0], /offset=40&/);
+  await waitFor(() => state.get('botId') === 1);
+  await w.stop();
+});
+
+test('polls ask for message + channel_post; a channel post command is emitted', async () => {
+  const { ctx, events } = fakeCtx();
+  const polls = [];
+  const fetchFn = async (url) => {
+    if (url.includes('/getMe')) return json({ ok: true, result: { id: 1, username: 'b' } });
+    polls.push(url);
+    if (polls.length === 1) return json({ ok: true, result: [{ update_id: 3, channel_post: { message_id: 4, chat: { id: -1009, type: 'channel', title: 'ops' }, text: '/approve *ab12' } }] });
+    return new Promise(() => {});
+  };
+  const w = createTelegramWorker(ctx, { fetchFn, _sleep: async () => {} });
+  await w.start();
+  await waitFor(() => events.inbound.length === 1);
+  assert.match(decodeURIComponent(polls[0]), /allowed_updates=\["message","channel_post"\]/);
+  assert.deepEqual(events.inbound[0], {
+    chatId: '-1009', userId: '-1009', text: '/approve *ab12',
+    meta: { platform: 'telegram', messageId: 4, chatType: 'channel', chatTitle: 'ops', username: null },
+  });
+  await w.stop();
+});

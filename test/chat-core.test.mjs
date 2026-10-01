@@ -13,6 +13,7 @@ import { createChatContext } from '../src/core/chat/chat-context.mjs';
 import { createRateLimiter, RingBuffer, TokenBucket } from '../src/core/chat/rate-limiter.mjs';
 import { renderDone, renderError, renderQuestion, renderTest, runRef, fmtMs, fmtUsd } from '../src/core/chat/renderers.mjs';
 import { isValidMessage } from '../src/core/chat/channel-protocol.mjs';
+import { renderToHtml } from '../plugins/telegram-chat/channel/worker.mjs';
 
 useTempHome(after);
 
@@ -32,6 +33,15 @@ test('parseCommand: commands, @bot suffix, mentions, non-commands', () => {
   assert.equal(parseCommand(''), null);
   assert.equal(parseCommand('   '), null);
   assert.equal(parseCommand('@mention only'), null, 'mention plus non-command');
+});
+
+test('parseCommand strips Slack/Discord wire mentions, not just @name', () => {
+  assert.deepEqual(parseCommand('<@U0123ABC> /approve *ab12'), { command: 'approve', args: ['*ab12'] });
+  assert.deepEqual(parseCommand('<@!123456789> /status'), { command: 'status', args: [] });
+  assert.deepEqual(parseCommand('<@&987> /runs'), { command: 'runs', args: [] });
+  assert.deepEqual(parseCommand('<@U0123ABC|worca> /runs'), { command: 'runs', args: [] });
+  assert.deepEqual(parseCommand('@worca /approve'), { command: 'approve', args: [] }, 'plain @name still works');
+  assert.equal(parseCommand('<@U0123ABC> hello there'), null, 'a mention alone does not make a command');
 });
 
 // ── allowlist ────────────────────────────────────────────────────────────────
@@ -191,8 +201,30 @@ test('renderQuestion gate: issues + /approve + /retry instructions', () => {
   const text = msg.body[0].value;
   assert.match(text, /waiting for approval \(reviewer\)/);
   assert.match(text, /\[critical\] SQL injection/);
-  assert.match(text, /\/approve \*2951 to continue/);
-  assert.match(text, /\/retry \*2951 for another cycle/);
+  assert.match(text, /`\/approve \*2951` — no more cycles, continue/);
+  assert.match(text, /`\/retry \*2951` — run another cycle/);
+});
+
+test('gate/recovery reply lines survive Telegram HTML: refs keep their *, no stray italics', () => {
+  for (const payload of [
+    { id: 'g', kind: 'gate', issues: [] },
+    { id: 'r', kind: 'recovery', recovery: { message: 'x' } },
+  ]) {
+    const html = renderToHtml(renderQuestion(META, payload));
+    assert.doesNotMatch(html, /<i>/, payload.kind);
+    assert.match(html, /<code>\/approve \*2951<\/code>/, payload.kind);
+  }
+});
+
+test('renderQuestion workflow: names the proposal and the three replies', () => {
+  const msg = renderQuestion(META, { id: 'auto-1', kind: 'workflow', workflow: { name: 'Fix *login* flow', nodes: { a: {}, b: {}, c: {} } } });
+  const body = msg.body[0].value;
+  assert.equal(msg.severity, 'warning');
+  assert.match(body, /proposed workflow \*\*Fix login flow\*\* \(3 agents\)/, 'markdown chars stripped from the name');
+  assert.match(body, /`\/approve \*2951` to accept/);
+  assert.match(body, /`\/answer \*2951 <what to change>` to revise/);
+  assert.match(body, /`\/cancel \*2951` to cancel the run/);
+  assert.doesNotMatch(body, /has questions/);
 });
 
 test('renderQuestion clarify: ordinals per option + /answer instructions', () => {
@@ -227,7 +259,7 @@ test('renderQuestion recovery: cause + retry/pause reply line; renderTest is val
   assert.equal(isValidMessage(renderTest()), true);
 
   const q = renderQuestion(META, { id: 'r1', kind: 'recovery', recovery: { cls: 'auth', message: 'x' } });
-  assert.match(q.body[0].value, /\/abort \*2951 to pause the run/);
+  assert.match(q.body[0].value, /`\/abort \*2951` to pause the run/);
 });
 
 // renderDone reports directions the run never applied, but the chat notifier's

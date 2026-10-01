@@ -166,10 +166,6 @@ function armsFor(box) {
     if (/\/comments\/dc_[0-9a-f]{8}$/.test(url) && method === 'DELETE') { box.calls.push(['DELETE', url]); return ok({ ok: true }); }
     if (url.endsWith('/comments') && method === 'POST') { box.calls.push(['POST', url, opts.body]); return ok({ comment: {} }); }
     if (url.endsWith('/comments')) return ok({ comments: box.comments, patchAvailable: box.patchAvailable });
-    // refreshCommentCounts() fires on load and on every poke. Armed so it cannot
-    // fall through to boot()'s catch-all (which answers with the CONFIG payload)
-    // and muddy ctx.calls.
-    if (url.endsWith('/api/diff-comments/counts')) return ok({ counts: box.counts });
     // The Ask panel mounts with the app and openSheet() hits its thread endpoints.
     // Answer them blandly so the hand-off case does not depend on the chat API.
     if (url.includes('/api/ask/threads') && method === 'POST') return ok({ thread: { id: 'ask_00000001', title: null } });
@@ -236,8 +232,8 @@ const keydown = (window, node, key, init = {}) => node.dispatchEvent(
  *  change the comment set between renders. 8 ticks, not 3: buildHdDiff paints the
  *  file list from `results` first and repaints after the SECOND fetch
  *  (ensureComments) lands, so a synthetic row appears one round trip late. */
-async function bootComments({ patch = CMT_PATCH, files = A_JS, comments = [], patchAvailable = true, counts = {}, markdown = null, arms = null, whoami = null } = {}) {
-  const box = { patch, comments, patchAvailable, counts, calls: [] };
+async function bootComments({ patch = CMT_PATCH, files = A_JS, comments = [], patchAvailable = true, markdown = null, arms = null, whoami = null } = {}) {
+  const box = { patch, comments, patchAvailable, calls: [] };
   const base = armsFor(box);
   const ctx = await bootDetail({
     detail: diffDetail(cmtResults(files)),
@@ -304,7 +300,6 @@ async function bootWsComments() {
       const method = opts.method || 'GET';
       if (url.endsWith(`${WS_URL}/comments`) && method === 'POST') { box.calls.push(['POST', url, opts.body]); return ok({ comment: {} }); }
       if (url.endsWith(`${WS_URL}/comments`)) return ok({ comments: box.comments, patchAvailable: true });
-      if (url.endsWith('/api/diff-comments/counts')) return ok({ counts: {} });
       const a = askArms(url, opts);
       if (a) return Promise.resolve(a);
       if (url.endsWith(`${WS_URL}/diff`)) return Promise.resolve({ ok: true, status: 200, text: async () => WS_PATCH });
@@ -947,7 +942,7 @@ const guardedArms = (box) => (url, opts) => {
   }
   return armsFor(box)(url, opts);
 };
-const guardedBox = () => ({ patch: SECRET_PATCH, comments: [], patchAvailable: true, counts: {},
+const guardedBox = () => ({ patch: SECRET_PATCH, comments: [], patchAvailable: true,
   calls: [], protectedPaths: ['config/.env'] });
 
 test('a protected file renders, says so, and never arms the + (the floor would refuse it)', async () => {
@@ -984,7 +979,7 @@ test('an ordinary file in the same run is unaffected', async () => {
 });
 
 test('a failed comment load disarms the +, and the next poke brings it back', async () => {
-  const box = { patch: CMT_PATCH, comments: [], patchAvailable: true, counts: {}, calls: [], fail: true };
+  const box = { patch: CMT_PATCH, comments: [], patchAvailable: true, calls: [], fail: true };
   const arms = (url, opts) => {
     if (url.endsWith('/comments') && (opts.method || 'GET') === 'GET' && box.fail) {
       box.fail = false;                     // one blip, then the endpoint recovers
@@ -1023,9 +1018,9 @@ test('re-arming is idempotent: one + button, one composer', async () => {
 // The ONE case in this suite that has to outwait real time (COMMENT_POKE_MS).
 test('a burst of pokes collapses into two passes, not one per frame', async () => {
   const ctx = await bootComments();
-  const countCalls = () => ctx.calls.filter((c) => c.url.endsWith('/api/diff-comments/counts')).length;
+  // The open Diff tab's pokeOpenDiffTab is the coalesced consumer (the list's
+  // comment-count poll is gone with the History cards).
   const cmtCalls = () => ctx.calls.filter((c) => c.url.endsWith('/comments')).length;
-  const c0 = countCalls();
   const m0 = cmtCalls();
   const frame = JSON.stringify({ type: 'diff-comments-changed', storeKey: KEY, pipelineId: ROW.id });
   const t0 = Date.now();
@@ -1036,12 +1031,10 @@ test('a burst of pokes collapses into two passes, not one per frame', async () =
   // trailing pass has legitimately fired already. The leading-edge claim holds
   // either way: 1 pass before the window closes, never more than 2 in total.
   const lateTail = Date.now() - t0 >= 250;
-  const lead = countCalls() - c0;
+  const lead = cmtCalls() - m0;
   assert.ok(lead === 1 || (lateTail && lead === 2), `the leading frame runs immediately; the other 19 are queued (got ${lead}, ${Date.now() - t0}ms elapsed)`);
-  assert.equal(cmtCalls() - m0, lead, 'same for the open tab');
   await new Promise((r) => setTimeout(r, 400));    // past COMMENT_POKE_MS
-  assert.equal(countCalls() - c0, 2, 'the whole tail collapsed into ONE trailing pass');
-  assert.equal(cmtCalls() - m0, 2);
+  assert.equal(cmtCalls() - m0, 2, 'the whole tail collapsed into ONE trailing pass');
 });
 
 test('a hello after a socket drop replays the poke the open Diff tab missed', async () => {

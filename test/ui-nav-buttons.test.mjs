@@ -56,13 +56,13 @@ test('sidebar menu contains buttons, not links', () => {
   for (const [name, block] of [['sidebar', sidebar]]) {
     assert.ok(!/<a[\s>]/.test(block), `${name} still contains an <a> (browser shows a link preview on hover)`);
     assert.ok(!/href="#/.test(block), `${name} still carries hash hrefs`);
-    // 13 routes (team-metrics, team-policy, Schedules and Scripts joined the 9) + the
-    // interface-mode item (docs/ui-levels.md), which is an action, not a link, plus the
-    // Nodes disclosure (test/ui-nav-nodes-group.test.mjs).
-    const buttons = 15;
+    // 12 routes (team-metrics, team-policy, Schedules and Scripts joined the 9; Running and
+    // History merged into Runs) + the interface-mode item (docs/ui-levels.md), which is an
+    // action, not a link, plus the Nodes disclosure (test/ui-nav-nodes-group.test.mjs).
+    const buttons = 14;
     assert.equal((block.match(/<button type="button"/g) || []).length, buttons,
       `${name} should have exactly ${buttons} menu buttons`);
-    assert.equal((block.match(/<button type="button"[^>]*data-nav=/g) || []).length, 13, `${name}: 13 route buttons`);
+    assert.equal((block.match(/<button type="button"[^>]*data-nav=/g) || []).length, 12, `${name}: 12 route buttons`);
   }
 });
 
@@ -71,12 +71,12 @@ test('sidebar menu contains buttons, not links', () => {
 test('clicking a menu button routes via the hash (view, hash, active, aria-current)', async () => {
   const { window } = await boot();
   const doc = window.document;
-  const btn = doc.querySelector('.nav button[data-nav="history"]');
-  assert.ok(btn, 'sidebar History button exists');
+  const btn = doc.querySelector('.nav button[data-nav="runs"]');
+  assert.ok(btn, 'sidebar Runs button exists');
   click(window, btn);
   await tick();
-  assert.equal(window.location.hash, '#history', 'hash follows the click');
-  assert.equal(hidden(doc, 'history'), false, 'History view shown');
+  assert.equal(window.location.hash, '#runs', 'hash follows the click');
+  assert.equal(hidden(doc, 'runs'), false, 'Runs view shown');
   assert.ok(btn.classList.contains('active'), 'button highlighted');
   assert.equal(btn.getAttribute('aria-current'), 'page', 'active state exposed to AT');
   assert.equal(doc.querySelector('.nav button[data-nav="new"]').getAttribute('aria-current'), null);
@@ -85,37 +85,22 @@ test('clicking a menu button routes via the hash (view, hash, active, aria-curre
 test('back/forward (a plain hashchange) still routes', async () => {
   const { window } = await boot();
   const doc = window.document;
-  click(window, doc.querySelector('.nav button[data-nav="history"]'));
+  click(window, doc.querySelector('.nav button[data-nav="runs"]'));
   await tick();
   click(window, doc.querySelector('.nav button[data-nav="agents"]'));
   await tick();
-  window.location.hash = 'history';                       // what Back does
+  window.location.hash = 'runs';                          // what Back does
   window.dispatchEvent(new window.Event('hashchange'));
   await tick();
-  assert.equal(hidden(doc, 'history'), false, 'Back restored the History view');
+  assert.equal(hidden(doc, 'runs'), false, 'Back restored the Runs view');
 });
 
-test('running child rows are buttons with no href and still deep-link', async () => {
-  const { window, recv } = await boot();
-  recv({ type: 'hello', runs: [live('auth-fix')] });
-  await tick();                                           // let renderPipelineTabs paint
-  const row = window.document.querySelector('#nav-running-children .nav-child');
-  assert.ok(row, 'child row rendered');
-  assert.equal(row.tagName, 'BUTTON', 'child row is a button');
-  assert.equal(row.getAttribute('href'), null, 'no href → no hover preview');
-  click(window, row);
-  await tick();
-  assert.equal(window.location.hash, '#running/auth-fix', 'child row still focuses the run');
-  assert.equal(window.document.querySelectorAll('.nav a, .mbar a').length, 0,
-    'no anchors remain anywhere in the menus');
-});
-
-test('reload on #running/<id> keeps the Running view (no reset to New)', async () => {
+test('reload on #running/<id> keeps the Runs view (no reset to New)', async () => {
   const { window } = await boot('http://localhost:4317/#running/auth-fix');
   const doc = window.document;
   await tick(); await tick();   // let boot's showView + the detail mount settle
   assert.equal(hidden(doc, 'new'), true, 'must not fall back to the New view');
-  assert.equal(hidden(doc, 'running'), false, 'Running view restored from the deep link');
+  assert.equal(hidden(doc, 'runs'), false, 'Runs view restored from the deep link');
   assert.ok(doc.querySelector('#run-shell').classList.contains('detail-open'),
     'the deep link lands on the detail screen, not the list');
 });

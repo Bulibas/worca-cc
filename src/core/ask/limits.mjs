@@ -16,8 +16,8 @@ export const ASK_LIMITS = Object.freeze({
   attachment: Object.freeze({
     maxFiles: 8,                           // per message
     maxBytesPerFile: 512 * 1024,           // text kinds — they are inlined/paged into prompts
-    maxBytesPerBinaryFile: 5 * 1024 * 1024, // image/pdf kinds — read from disk, never inlined (#398)
-    maxBytesPerThread: 25 * 1024 * 1024,   // enforced ACROSS kinds (was 4 MB text-only pre-#398)
+    maxBytesPerBinaryFile: 32 * 1024 * 1024, // image/pdf kinds — read from disk, never inlined (#398); the API's PDF request cap
+    maxBytesPerMessage: 48 * 1024 * 1024,  // ACROSS kinds, one POST — base64 (×4/3) keeps it inside the route's JSON window
     extensions: TEXT_EXTENSIONS,           // attachment-kind.mjs owns both tables
     binaryExtensions: BINARY_EXTENSIONS,
   }),
@@ -43,6 +43,9 @@ export const ASK_LIMITS = Object.freeze({
   attachmentReadDefaultBytes: 32_000,
   attachmentReadMaxBytes: 200_000,
   artifactsListMaxLimit: 200,
+  branchListMaxRows: 200,                  // list_branches rows in all (a workspace shares them across members, #527)
+  branchListMaxBytes: 60_000,              // list_branches whole-result byte cap (= diffDefaultBytes)
+  branchListWorkspaceMs: 15_000,           // list_branches workspace fan-out: past this, members are read without a fetch
   artifactReadDefaultBytes: 60_000,
   artifactReadMaxBytes: 200_000,
   // Scripts in the chat (scripts-workbench-design.md §9.1). The store's own caps (source

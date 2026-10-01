@@ -1,9 +1,10 @@
-// test/ui-running-density.test.mjs — the Running list card is History-level: there is NO
-// Compact/Detailed density toggle and NO card body (graph / live log), plus the removal of
-// the card's Agents disclosure.
+// test/ui-running-density.test.mjs — the Runs list row is compact: there is NO
+// Compact/Detailed density toggle and NO row body (graph / live log), plus the removal of
+// the old run card's Agents disclosure.
 //
 // boot() is copied VERBATIM from test/ui-pipeline-tabs.test.mjs — the nearest suite that
-// captures the WebSocket and clears localStorage.
+// captures the WebSocket and clears localStorage. showRunning() is the bare list with
+// nothing selected (test/helpers/run-page-boot.mjs): a bare route reopens the remembered run (D6).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
@@ -41,8 +42,13 @@ async function boot({ local } = {}) {
   const open = () => lastWs._l.open?.forEach((fn) => fn());
   const recv = (obj) => lastWs._l.message.forEach((fn) => fn({ data: JSON.stringify(obj) }));
   open();
-  const showRunning = () => { window.location.hash = 'running'; window.dispatchEvent(new window.Event('hashchange')); };
-  return { window, recv, showRunning };
+  const showRunning = () => {
+    window.localStorage.removeItem('worca-cc.runs.last');
+    window.location.hash = 'runs';
+    window.dispatchEvent(new window.Event('hashchange'));
+  };
+  const settle = async (n = 3) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); };
+  return { window, recv, showRunning, settle };
 }
 
 const RUN_ID = 'run-den';
@@ -50,9 +56,10 @@ const live = (runId, extra = {}) => ({
   runId, title: runId, projectDir: PROJECT, status: 'running', kind: 'run',
   startedAt: '10:00:00', pendingQuestion: null, ...extra,
 });
-const card = (doc) => doc.querySelector(`#run-list .run-card[data-run-id="${RUN_ID}"]`);
+// The run's row in its project group (rule 6: a Needs-you run is repeated above it).
+const card = (doc) => doc.querySelector(`#runs-list .runs-row[data-slot="group"][data-run-id="${RUN_ID}"]`);
 
-test('the running topbar carries no density toggle, and nothing reads or writes the density key', async () => {
+test('the Runs list carries no density toggle, and nothing reads or writes the density key', async () => {
   const { window, showRunning } = await boot({ local: { [KEY]: 'compact' } });
   showRunning();
   const doc = window.document;
@@ -67,28 +74,23 @@ test('the running topbar carries no density toggle, and nothing reads or writes 
   assert.equal(/\.rc-dseg|\.run-density|\.rc-compact|\.rc-detailed|\.rc-step-chip|\.rc-qpill/.test(css), false, 'no density / compact / detailed CSS left');
 });
 
-test('the list card is header + optional waiting strip only: no graph, log, banner or question panel', async () => {
+test('the list row is icon + title + subline only: no graph, log, banner, question panel or Agents bar', async () => {
   const ctx = await boot();
   ctx.recv({ type: 'hello', runs: [live(RUN_ID)] });
   ctx.showRunning();
+  await ctx.settle();
   const c = card(ctx.window.document);
-  assert.ok(c, 'card rendered');
-  assert.ok(c.querySelector('.rc-head'), 'header present');
-  assert.ok(c.querySelector('button.rc-wait'), 'the waiting strip slot is present (hidden until the run waits)');
+  assert.ok(c, 'row rendered');
+  assert.ok(c.querySelector('.runs-row-title') && c.querySelector('.runs-row-sub'), 'title and subline present');
   for (const sel of ['.rc-compact', '.rc-detailed', '.rc-step-chip', '.run-flow-wrap', '.run-flow', '.run-log', '.log', '.log-filters',
-    '.switch.autoscroll', '.cost-banner', '.qpanel', '.rc-qpill'])
-    assert.equal(c.querySelector(sel), null, `no ${sel} on the list card`);
+    '.switch.autoscroll', '.cost-banner', '.qpanel', '.rc-qpill', '.subs-bar'])
+    assert.equal(c.querySelector(sel), null, `no ${sel} on the list row`);
 });
 
 test('the card no longer carries the Agents disclosure, and its painters are gone', async () => {
   const ctx = await boot();
   ctx.recv({ type: 'hello', runs: [live(RUN_ID)] });
   ctx.showRunning();
-  const doc = ctx.window.document;
-  const tpl = doc.getElementById('run-card-tpl').content.firstElementChild;
-  assert.equal(tpl.querySelector('.subs-bar'), null, 'template carries no .subs-bar');
-  assert.equal(tpl.querySelector('.subs-panel'), null, 'template carries no .subs-panel');
-  assert.equal(card(doc).querySelector('.subs-bar'), null, 'a painted card carries no .subs-bar');
 
   // Against the SOURCE, not the hook: `__np.anythingMisspelled` is undefined too,
   // so the hook form proves nothing about removal. Idiom from

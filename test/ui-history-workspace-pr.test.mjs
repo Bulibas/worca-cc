@@ -5,9 +5,10 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 
-// Workspace runs: one PR per AFFECTED member repo. The list card's aggregate chip +
-// Create PR, the detail header's per-repo list, and the workspace Ship-it dialog
-// (per-repo rows, sequential POSTs, per-repo failure + retry, cross-linking).
+// Workspace runs: one PR per AFFECTED member repo. The saved-run detail header's
+// per-repo list and the workspace Ship-it dialog (per-repo rows, sequential POSTs,
+// per-repo failure + retry, cross-linking). The old History list card and its
+// Create-PR hop were retired when the Runs list replaced the History view.
 //
 // The harness below (boot … remotesCalls, openModal) is a verbatim copy of
 // test/ui-history-shipit.test.mjs:1-228 — the suites do not import each other.
@@ -244,66 +245,6 @@ const cardOf = (w) => w.document.querySelector('#history .hist-card');
 const hdRepos = (w) => w.document.querySelector('#hist-detail .hd-pr-repos');
 const crossPosts = (ctx) => ctx.calls.filter((c) => c.url.endsWith('/api/pr/crosslink'));
 
-test('list card: a workspace run whose ONLY change is in a non-primary member offers Create PR', async () => {
-  // The trap: the row's own survived/branch describe the primary (api), which has no changes.
-  const ctx = await bootShip({ rows: [wsRow([member(API, 'api', { affected: false }), member(WEB, 'web')], { survived: false })] });
-  go(ctx.window, 'history'); await settle(ctx.window);
-  const card = cardOf(ctx.window);
-  assert.equal(card.querySelector('.hist-pr').hidden, false);
-  assert.equal(card.querySelector('.hist-pr-agg').hidden, true, 'no chip before any PR exists');
-});
-
-test('list card: aggregate chip "PRs 2/2 · 1 merged" (unchanged doc not counted) and no Create PR once every affected repo has one', async () => {
-  const ctx = await bootShip({ rows: [wsRow([
-    member(API, 'api', { pr: { state: 'OPEN', url: 'https://x/api/pull/1' } }),
-    member(WEB, 'web', { pr: { state: 'MERGED', url: 'https://x/web/pull/2' } }),
-    member(DOC, 'doc', { affected: false }),
-  ])] });
-  go(ctx.window, 'history'); await settle(ctx.window);
-  const card = cardOf(ctx.window);
-  assert.equal(card.querySelector('.hist-pr-agg').textContent, 'PRs 2/2 · 1 merged');
-  assert.equal(card.querySelector('.hist-pr').hidden, true);
-  assert.equal(card.querySelector('.hist-pr-link'), null, 'no single-PR link swap for a workspace row');
-});
-
-test('list card: some PRs + one still shippable -> chip AND Create PR', async () => {
-  const ctx = await bootShip({ rows: [wsRow([
-    member(API, 'api', { pr: { state: 'OPEN', url: 'https://x/api/pull/1' } }), member(WEB, 'web'), member(DOC, 'doc')])] });
-  go(ctx.window, 'history'); await settle(ctx.window);
-  const card = cardOf(ctx.window);
-  assert.equal(card.querySelector('.hist-pr-agg').textContent, 'PRs 1/3');
-  assert.equal(card.querySelector('.hist-pr').hidden, false);
-});
-
-test('list card: pending enrichment hides both; a history-pr batch with members paints them', async () => {
-  const ctx = await bootShip({ rows: [wsRow([member(API, 'api', { pr: undefined }), member(WEB, 'web', { pr: undefined })], { pr: undefined })] });
-  go(ctx.window, 'history'); await settle(ctx.window);
-  const card = cardOf(ctx.window);
-  assert.equal(card.querySelector('.hist-pr').hidden, true);
-  const token = ctx.prTokens().at(-1);
-  ctx.dispatchPr({ token, items: [{ projectKey: WKS_KEY, id: ROW.id, pr: { state: 'OPEN', url: 'https://x/api/pull/1' },
-    members: [{ memberKey: API, pr: { state: 'OPEN', url: 'https://x/api/pull/1' } }, { memberKey: WEB, pr: null }] }] });
-  await settle(ctx.window);
-  const card2 = cardOf(ctx.window);
-  assert.equal(card2.querySelector('.hist-pr-agg').textContent, 'PRs 1/2');
-  assert.equal(card2.querySelector('.hist-pr').hidden, false, 'web is still shippable');
-});
-
-test('finalize resolves a member the batch never named even when the rollup already landed', async () => {
-  const ctx = await bootShip({ rows: [wsRow([member(API, 'api', { pr: undefined }), member(WEB, 'web', { pr: undefined })], { pr: undefined })] });
-  go(ctx.window, 'history'); await settle(ctx.window);
-  const token = ctx.prTokens().at(-1);
-  // A non-final batch names api only; web stays undefined while row.pr is now resolved.
-  ctx.dispatchPr({ token, done: false, items: [{ projectKey: WKS_KEY, id: ROW.id, pr: { state: 'OPEN', url: 'https://x/api/pull/1' },
-    members: [{ memberKey: API, pr: { state: 'OPEN', url: 'https://x/api/pull/1' } }] }] });
-  await settle(ctx.window);
-  assert.equal(cardOf(ctx.window).querySelector('.hist-pr').hidden, true, 'web still pending');
-  ctx.dispatchPr({ token, done: true, items: [] });           // terminal
-  await settle(ctx.window);
-  assert.equal(cardOf(ctx.window).querySelector('.hist-pr').hidden, false, 'web resolved to "no PR" -> shippable');
-  assert.equal(cardOf(ctx.window).querySelector('.hist-pr-agg').textContent, 'PRs 1/2');
-});
-
 test('detail header lists every member repo with its status', async () => {
   const OPS = 'ops-00000004', CLI = 'cli-00000005';
   const ctx = await bootShip({ detail: WS_DETAIL, rows: [wsRow([
@@ -324,44 +265,6 @@ test('detail header lists every member repo with its status', async () => {
   assert.equal(list.querySelector('.hd-pr-repo-link').href, 'https://x/api/pull/1');
   assert.equal(hdPr(ctx.window).hidden, false, 'web can still be shipped');
   assert.equal(hdPrLink(ctx.window).hidden, true, 'never the single-PR link');
-});
-
-test('a card Create PR hop whose record lost its member PRs (cache strip) never re-offers a PR\'d repo', async () => {
-  // v2 review M3: the card shows Create PR while api already has an OPEN PR (web is
-  // shippable). The history cache strips member `pr` (writeHistoryCache), so after the
-  // hop the matched record can read pr === undefined for EVERY member. The consumer must
-  // restore the click-time facts, not blanket-null them — else api is ticked again.
-  const rows = [wsRow([member(API, 'api', { pr: { state: 'OPEN', url: 'https://x/api/pull/1' } }), member(WEB, 'web')])];
-  const ctx = await bootShip({ detail: WS_DETAIL, rows });
-  go(ctx.window, 'history'); await settle(ctx.window);
-  const btn = cardOf(ctx.window).querySelector('.hist-pr');
-  assert.equal(btn.hidden, false);
-  click(ctx.window, btn);                                   // arms pendingShipIt WITH the member facts
-  // Simulate the cache-warm repaint between click and consumption: the list model's row
-  // loses every live PR fact (row.pr and each member.pr back to undefined).
-  const live = ctx.window.__np.historyRow(WKS_KEY, ROW.id);
-  live.pr = undefined;
-  for (const m of live.members) delete m.pr;
-  await settle(ctx.window, 8);                              // the hash hop + detail fetch + consumer
-  assert.equal(isOpen(ctx.window), true, 'the intent is honoured');
-  const modal = modalOf(ctx.window);
-  const picks = [...modal.querySelectorAll('#shipit-repos .shipit-repo')]
-    .map((r) => [r.dataset.memberKey, !!r.querySelector('.shipit-repo-pick')]);
-  assert.deepEqual(picks, [[API, false], [WEB, true]], 'api is shown as opened (no tick box); only web is offered');
-  assert.equal(modal.querySelector('.shipit-ok').textContent, 'Open 1 pull request');
-});
-
-test('a hop that cannot restore every member PR fact does not auto-open the workspace dialog', async () => {
-  const rows = [wsRow([member(API, 'api'), member(WEB, 'web')])];
-  const ctx = await bootShip({ detail: WS_DETAIL, rows });
-  go(ctx.window, 'history'); await settle(ctx.window);
-  const live = ctx.window.__np.historyRow(WKS_KEY, ROW.id);
-  // A member the click never saw (e.g. added to the row by a re-list mid-hop) stays unresolved.
-  click(ctx.window, cardOf(ctx.window).querySelector('.hist-pr'));
-  live.members.push(member(DOC, 'doc', { pr: undefined }));
-  await settle(ctx.window, 8);
-  assert.equal(isOpen(ctx.window), false, 'unresolved member PR -> wait for enrichment, never guess');
-  assert.equal(prPosts(ctx).length, 0);
 });
 
 test('dialog lists affected repos (ticked), says which were skipped, loads remotes per member', async () => {

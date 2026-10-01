@@ -161,6 +161,10 @@ test('frames: map and scan actions reload a built tab; other actions do not; the
   ws().deliver({ type: 'workspaces-changed', action: 'scan-updated' });
   await settle();
   assert.equal(gets(server), 3);
+  // A member change prunes the stored map (a removed member's edges and reviews leave it).
+  ws().deliver({ type: 'workspaces-changed', action: 'members' });
+  await settle();
+  assert.equal(gets(server), 4, 'a member change reloads the map');
 });
 
 test('filters: a graph pair by click or Enter filters the table and keeps focus; a coverage chip and a select filter too', async () => {
@@ -623,5 +627,5 @@ test('Re-scan from the empty Map tab starts one scan run per press', async () =>
   click(window, rescan);
   await settle();
   assert.equal(server.calls.filter((c) => c === `POST /api/workspaces/${ID}/scan {}`).length, 1, 'one scan per press');
-  assert.equal(doc.querySelector('.view[data-view="running"]').classList.contains('hidden'), false, 'on Running');
+  assert.equal(doc.querySelector('.view[data-view="runs"]').classList.contains('hidden'), false, 'on Runs');
 });

@@ -318,3 +318,19 @@ test('gateway: heartbeat interval starts AFTER the jittered first beat, not in p
   assert.equal(FakeWebSocket.instances.length, 1, 'no spurious ackPending self-kill / reconnect');
   await client.stop();
 });
+
+test('gateway: close 4007 (invalid seq) drops the session and re-IDENTIFIES', async () => {
+  FakeWebSocket.instances = [];
+  const { client } = gatewayFixture();
+  client.start();
+  const s1 = await waitFor(() => FakeWebSocket.instances[0]);
+  s1.frame({ op: 10, d: { heartbeat_interval: 100000 } });
+  s1.frame({ op: 0, t: 'READY', s: 5, d: { session_id: 'sess1', resume_gateway_url: 'wss://resume.test', user: {} } });
+  s1.close(4007);
+  const s2 = await waitFor(() => FakeWebSocket.instances[1]);
+  assert.match(s2.url, /^wss:\/\/gw\.test/, 'not the resume url');
+  s2.frame({ op: 10, d: { heartbeat_interval: 100000 } });
+  await waitFor(() => s2.sent.find((f) => f.op === 2));
+  assert.equal(s2.sent.find((f) => f.op === 6), undefined, 'no RESUME with a dead session');
+  client.stop();
+});

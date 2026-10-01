@@ -23,6 +23,7 @@ import { listGlobalModels, addGlobalModel, removeGlobalModel, hideBuiltinModels,
 /** Whether the developer stored the hide-built-ins flag (a team default applies only when not). */
 const readSettingsHideStored = () => { const s = readSettings(); return typeof s.hideBuiltinModels === 'boolean' || s.hideBuiltinModelsChosen === true; };
 import { listPluginModels, allPluginModels, flattenPluginModelEnv } from './plugin-models.mjs';
+import { brokerEnabled } from './broker-client.mjs';
 // Team policy defaults (team-policy design §6, §8): read from the discovery CACHE only (a leaf module).
 import { policyCatalogModels, teamDefault } from './policy/cache.mjs';
 import { PREDEFINED_LIST_PRICES } from './list-prices.mjs';
@@ -618,7 +619,9 @@ export function resolveModelEnv(modelId, { tag } = {}) {
   } else if (!entry) {
     const pm = listPluginModels().find((m) => m.id.toLowerCase() === lc);
     if (pm && pm.env) {
-      const { env, droppedSecrets } = flattenPluginModelEnv(pm);
+      // With the credential broker on, a plugin secret never reaches a spawn: the broker adds
+      // the person's own key for the plugin's slot (plugin-broker-slots.mjs).
+      const { env, droppedSecrets } = flattenPluginModelEnv(pm, { withSecrets: !brokerEnabled() });
       for (const d of droppedSecrets) {
         console.warn(`[worca] plugin "${pm.plugin}" model ${JSON.stringify(pm.id)}: dropping env ${d} — set it in the plugin's Model secrets`);
       }
@@ -973,7 +976,7 @@ export async function readRunConfig(projectDir) {
   // Forward any OTHER unknown keys verbatim too (future-proof, matches "preserve unknown").
   // prRemotes is the ship-it dialog's own preference (readPrRemotePrefs), not run config.
   for (const [k, v] of Object.entries(extra)) {
-    if (k !== 'webUiTesting' && k !== PR_REMOTES_KEY && k !== TEAM_METRICS_KEY && k !== TEAM_POLICY_KEY && k !== 'humanInLoopSet' && !(k in out)) out[k] = v;
+    if (k !== 'webUiTesting' && k !== PR_REMOTES_KEY && k !== TEAM_METRICS_KEY && k !== TEAM_POLICY_KEY && k !== SYNC_PREFS_KEY && k !== 'humanInLoopSet' && !(k in out)) out[k] = v;
   }
   const active = row && typeof row.active_workflow_id === 'string' ? row.active_workflow_id.trim() : '';
   // Spec §6.1 / D16: a project with no remembered New-pipeline choice starts on Auto — unless a
@@ -1273,6 +1276,38 @@ export function writeTeamPolicyPrefs(key, patch) {
     const cur = extra[TEAM_POLICY_KEY] && typeof extra[TEAM_POLICY_KEY] === 'object' ? extra[TEAM_POLICY_KEY] : {};
     next = { ...cur, ...patch };
     extra[TEAM_POLICY_KEY] = next;
+    prepare(`
+      INSERT INTO project_config (project_key, steps, custom_models, active_workflow_id, extra)
+      VALUES (?, '{}', '[]', NULL, ?)
+      ON CONFLICT(project_key) DO UPDATE SET extra = excluded.extra
+    `).run(key, JSON.stringify(extra));
+  });
+  return next;
+}
+
+// ── Sync before run (#527): per-project override of settings.json `sync` ─────
+export const SYNC_PREFS_KEY = 'sync';
+
+/** @returns {object|null} the project's sync override (partial), or null */
+export function readSyncPrefs(key) {
+  assertProjectKey(key);
+  const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
+  const extra = row ? parseJson(row.extra, {}) : {};
+  const v = extra[SYNC_PREFS_KEY];
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+}
+
+/** Merge `patch` into extra.sync; a null value deletes that key (back to the instance default). */
+export function writeSyncPrefs(key, patch) {
+  assertProjectKey(key);
+  let next = null;
+  tx(() => {
+    const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
+    const extra = row ? parseJson(row.extra, {}) : {};
+    const cur = extra[SYNC_PREFS_KEY] && typeof extra[SYNC_PREFS_KEY] === 'object' ? extra[SYNC_PREFS_KEY] : {};
+    next = { ...cur };
+    for (const [k, v] of Object.entries(patch || {})) { if (v === null) delete next[k]; else next[k] = v; }
+    if (Object.keys(next).length) extra[SYNC_PREFS_KEY] = next; else { delete extra[SYNC_PREFS_KEY]; next = null; }
     prepare(`
       INSERT INTO project_config (project_key, steps, custom_models, active_workflow_id, extra)
       VALUES (?, '{}', '[]', NULL, ?)

@@ -1754,6 +1754,27 @@ export function reconcileStaleRunning({
 }
 
 /**
+ * The ids of a workspace's active runs (created / starting / running / pausing) owned by ANOTHER
+ * live process — the CLI, a second UI — that a server's own runs map cannot see. A row this
+ * process owns, or one in `liveIds` (the server's in-process runs), is left out; so is an
+ * unclaimed row (no owner yet). Call reconcileStaleRunning first: a crashed owner's row is then
+ * 'interrupted' and never counts.
+ * @param {string} workspaceKey
+ * @param {{liveIds?:string[], pid?:number, host?:string}} [opts]
+ * @returns {string[]}
+ */
+export function foreignActiveWorkspaceRuns(workspaceKey, { liveIds = [], pid = process.pid, host = hostname() } = {}) {
+  const live = new Set(liveIds.filter(Boolean));
+  const placeholders = RECONCILE_NON_TERMINAL.map(() => '?').join(', ');
+  return getDb().prepare(`
+    SELECT id, owner_pid, owner_host FROM pipelines
+    WHERE workspace_key = ? AND archived_at IS NULL AND status IN (${placeholders}) AND owner_pid IS NOT NULL
+  `).all(workspaceKey, ...RECONCILE_NON_TERMINAL)
+    .filter((r) => !live.has(r.id) && !(r.owner_pid === pid && r.owner_host === host))
+    .map((r) => r.id);
+}
+
+/**
  * Load everything resume needs for one pipeline: the raw pipelines row, the parsed
  * resume_point, and the saved steps (camelCase via rowToState, sessionId included).
  * Returns null when the id is unknown. Pure read — no status checks here (callers
@@ -1906,24 +1927,20 @@ export function retainedWorkFor(row) {
 // Kept local, not imported: results.mjs (which exports RESULTS_FILE) imports this module.
 const RESULTS_FILE = 'results.json';
 
-/** `<dir>/results.json` parsed, or null (absent/unparseable). One read per history row. */
-async function readResultsFile(dir) {
-  if (!dir) return null;
-  try { return JSON.parse(await readFile(join(dir, RESULTS_FILE), 'utf8')); } catch { return null; }
-}
-
 /**
- * A run's frozen line counts from its parsed results.json (see readResultsFile) —
- * persistResults writes it when the run ends (or error-pauses), and a workspace run's
- * summary is the rollup across its members. Null when the file is absent or
- * unparseable, or its summary lacks numeric counts.
- * @param {object|null} results the parsed results.json
- * @returns {{added:number, removed:number}|null}
+ * The run dir's results.json, parsed — persistResults writes it when the run ends (or
+ * error-pauses). Null when the file is absent or unreadable.
+ * @param {string|undefined} dir the on-disk run dir
+ * @returns {Promise<object|null>}
  */
-function frozenDiffCounts(results) {
-  const sum = results?.summary;
-  if (!Number.isFinite(sum?.linesAdded) || !Number.isFinite(sum?.linesRemoved)) return null;
-  return { added: sum.linesAdded, removed: sum.linesRemoved };
+async function readResultsJson(dir) {
+  if (!dir) return null;
+  try {
+    const res = JSON.parse(await readFile(join(dir, RESULTS_FILE), 'utf8'));
+    return res && typeof res === 'object' ? res : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1972,9 +1989,43 @@ async function workspaceMemberFacts(row, results, opts = {}) {
 }
 
 /**
+ * A run's frozen line counts from its results summary (a workspace run's summary is the
+ * rollup across its members). Null when the summary lacks numeric counts.
+ * @param {object|null} res parsed results.json (readResultsJson)
+ * @returns {{added:number, removed:number}|null}
+ */
+function frozenDiffCounts(res) {
+  const sum = res?.summary;
+  if (!Number.isFinite(sum?.linesAdded) || !Number.isFinite(sum?.linesRemoved)) return null;
+  return { added: sum.linesAdded, removed: sum.linesRemoved };
+}
+
+/**
+ * How many "things to check" the review left, counted the way the glance does
+ * (ui/public/app.js hdChecks): a workspace run sums its members, and a results file
+ * without the list counts 0. null when there is no results file yet.
+ */
+export function resultsChecksCount(res) {
+  if (!res) return null;
+  if (res.perProject && typeof res.perProject === 'object') {
+    return Object.values(res.perProject)
+      .reduce((n, p) => n + (Array.isArray(p?.keyThingsToCheck) ? p.keyThingsToCheck.length : 0), 0);
+  }
+  return Array.isArray(res.keyThingsToCheck) ? res.keyThingsToCheck.length : 0;
+}
+
+/** Files the run changed per its results summary (new + changed + deleted, the glance
+ *  headline's sum — app.js rdFilesChanged / paintHdGlance); null without one. */
+export function resultsFilesCount(res) {
+  const s = res?.summary;
+  if (!s || typeof s !== 'object') return null;
+  return (Number(s.filesNew) || 0) + (Number(s.filesChanged) || 0) + (Number(s.filesDeleted) || 0);
+}
+
+/**
  * Build a history row from a pipelines DB row. Mirrors the legacy pipelineEntry
  * wire shape EXACTLY: { id, dir, title, status, startedAt, branch, sourceBranch,
- * survived, added, removed, diffFrozen, totalCostUsd, totalActiveMs, mtime[, pr] }.
+ * survived, added, removed, diffFrozen, checks, files, totalCostUsd, totalActiveMs, mtime[, pr] }.
  * Git/PR work (branchExists / diffShortstat / findPrForBranch) is UNCHANGED — it
  * still shells out — and is fed the DB row's branch JSON instead of a parsed state.json.
  *  - `branch` (wire) = state.branch.feature; `sourceBranch` = state.branch.source.
@@ -1994,6 +2045,9 @@ async function workspaceMemberFacts(row, results, opts = {}) {
  *    the row's `pr` tri-state: ABSENT = not looked up (pending), null = looked/none,
  *    object = OPEN/MERGED. A legacy workspace row (empty workspace_meta.projects) gets
  *    `members: []` and keeps its primary-only `pr`.
+ *  - `checks` / `files` (additive): the review's things-to-check count and the files
+ *    changed, from the same results.json — the finished headline's inputs (the Runs
+ *    list word = the glance headline). null until results exist, and for `lite`.
  * @param {object} row a pipelines row (incl. row.dir set by the caller)
  * @param {string|null} repoDir git repo root for live branch facts
  * @param {object} opts { withPr?, lite? }
@@ -2002,7 +2056,7 @@ async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
   const branchObj = j(row.branch, null);
   const feature = branchObj?.feature ?? (typeof branchObj === 'string' ? branchObj : null);
   const source = branchObj?.source ?? null;
-  const results = opts.lite ? null : await readResultsFile(row.dir);
+  const results = opts.lite ? null : await readResultsJson(row.dir);
   const frozen = frozenDiffCounts(results);
   let survived = false;
   let added = frozen ? frozen.added : 0;
@@ -2010,7 +2064,9 @@ async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
   if (repoDir && feature) {
     survived = await branchExists(repoDir, feature);
     if (!frozen && survived && source) {
-      const d = await diffShortstat(repoDir, source, feature);
+      // #527: only a REMOTE-started run (startRef set) diffs from its recorded start; every other
+      // run keeps `source...feature` exactly (so a merged branch still drops to 0, as documented above).
+      const d = await diffShortstat(repoDir, branchObj?.startRef && branchObj?.baseSha ? branchObj.baseSha : source, feature);
       added = d.added;
       removed = d.removed;
     }
@@ -2033,6 +2089,10 @@ async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
     added,
     removed,
     diffFrozen: !!frozen,
+    // The finished headline's inputs (the Runs list word = the glance headline):
+    // `checks` (review findings) and `files` (files changed); null until results exist.
+    checks: resultsChecksCount(results),
+    files: resultsFilesCount(results),
     totalCostUsd: cost,
     totalActiveMs: active,
     mtime: row.updated_at ? (Date.parse(row.updated_at) || 0) : 0,
@@ -2105,7 +2165,10 @@ export async function listPipelines(projectDir, opts = {}, workspaceKey) {
   const out = [];
   for (const row of rows) {
     row.dir = dirById.get(row.id) || join(pipelinesDir, row.id);
-    out.push(await rowToHistoryEntry(row, projectDir, opts));
+    // A workspace run reads ITS OWN primary member (frozen in workspace_meta at start), never
+    // the registry's current one: the member set can change after the run finished.
+    const ownPrimary = workspaceKey ? j(row.workspace_meta, null)?.projects?.[0]?.projectDir : null;
+    out.push(await rowToHistoryEntry(row, ownPrimary || projectDir, opts));
   }
   out.sort((a, b) => b.mtime - a.mtime);
   return out;

@@ -3,7 +3,7 @@
 // lettered key squares that turn ink with a check when picked, a free-text field that turns
 // white-on-ink once it holds a non-option value, a right-aligned footer. The panel mounts only on
 // the run page (#running/<id>), where the ask cards follow the "Worca Ask Cards Redesign" canvas
-// (see the section below); the list card carries just the `.rc-wait` strip, so there is no
+// (see the section below); the Runs list row is just a link to that page, so there is no
 // "Open run" button in the footer.
 //
 // ruleBody() is a verbatim copy of test/ui-run-flow-css.test.mjs:17-21.
@@ -230,13 +230,15 @@ test('narrow screens stack the question over its answers', () => {
   assert.match(m[1], /grid-template-columns:\s*minmax\(0,\s*1fr\)/);
 });
 
-test('the panel is stamped with the kind it draws, on the run page (the list card carries no panel)', async () => {
+test('the panel is stamped with the kind it draws, on the run page (the list row carries no panel)', async () => {
   const ctx = await boot();
   const panel = await openRunPanel(ctx, { runId: RUN_ID, question: CLARIFY });
   assert.equal(panel.dataset.kind, 'clarify');
   ctx.showRunning();
-  assert.equal(ctx.window.document.querySelector(`.run-card[data-run-id="${RUN_ID}"] .qpanel`), null,
-    'the list card mounts no panel; its .rc-wait strip points at the run page');
+  await ctx.settle();
+  assert.ok(ctx.window.document.querySelector(`#runs-list .runs-row[data-run-id="${RUN_ID}"]`), 'the run is listed');
+  assert.equal(ctx.window.document.querySelector(`#runs-list .runs-row[data-run-id="${RUN_ID}"] .qpanel`), null,
+    'the list row mounts no panel; it is a link to the run page');
   ctx.window.location.hash = `running/${RUN_ID}`;
   ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
   await new Promise((r) => setTimeout(r, 0));
@@ -269,10 +271,12 @@ test('the clarify footer has no "Open run" button: the panel only lives on the r
   assert.ok(panel.querySelector('.qpanel-foot .btn-go'), 'Submit is there');
   assert.equal(panel.querySelector('.qopen'), null, 'no Open run on the run page (you are already there)');
 
-  // The list card never mounts a panel; its wait strip is the way in.
+  // The list row never mounts a panel; the row itself (a link) is the way in.
   ctx.showRunning();
+  await ctx.settle();
   const card = runCard(ctx, RUN_ID);
-  assert.equal(card.querySelector('.qpanel'), null, 'no panel on the list card');
+  assert.ok(card, 'the run is listed');
+  assert.equal(card.querySelector('.qpanel'), null, 'no panel on the list row');
   assert.equal(card.querySelector('.qopen'), null, 'and no Open run button');
 });
 
@@ -301,13 +305,15 @@ test('a panel built while an answer is in flight comes up busy, not dead', async
   assert.equal(answers(ctx).length, 1, 'the first panel posted');
 
   // Leave the run page and come back — paintRdQuestions mints the panel afresh.
-  ctx.showRunning();
+  // Leave through another view: side by side a bare #runs would reopen this run (rule 1).
+  ctx.go('new');
   await ctx.settle();
   ctx.go(`running/${RUN_ID}`);
   await ctx.settle();
 
   const panel = runPanel(ctx);
   assert.ok(panel, 'the run page rendered a panel');
+  assert.notEqual(panel, first, 'a freshly minted panel, not the one that posted');
   const go = panel.querySelector('.btn-go');
   assert.equal(go.disabled, true, 'the freshly built primary is disabled, not offered');
   assert.equal(go.textContent, 'Resuming…', 'and reads the in-flight affordance');

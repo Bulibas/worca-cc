@@ -91,6 +91,16 @@ test('delta batching: 256 chars flush immediately, flush() forces, redaction per
   assert.deepEqual(out.filter((f) => f.type === 'ask-delta').map((f) => f.text), ['a', 'b'], 'a synchronous timer stub flushes every delta (no stale timer id)');
 });
 
+test('a tool call flushes the batched text before it: the text reaches the client before the tool block', () => {
+  const h = harness();
+  h.push(mstart('msg_1'), delta("I'll check the runs."));
+  assert.equal(h.frames.filter((f) => f.type === 'ask-delta').length, 0, 'still batched');
+  h.push(atool('msg_1', 'tu_1', 'mcp__worca__list_runs', {}));
+  const order = h.types().filter((t) => t === 'ask-delta' || t === 'ask-block');
+  assert.deepEqual(order, ['ask-delta', 'ask-block']);
+  assert.equal(h.frames.find((f) => f.type === 'ask-delta').text, "I'll check the runs.");
+});
+
 test('text comes from the main stream only; result.result is a fallback when no assistant text arrived', () => {
   const h = harness();
   h.push(mstart('msg_c', 'toolu_agent'), delta('child text', 'toolu_agent'), atext('msg_1', 'parent'));
@@ -175,6 +185,7 @@ test('tool lifecycle: labels, running → done/error blocks, durations, input cl
 
 test('labelForTool table', () => {
   assert.equal(labelForTool('mcp__worca__list_runs', {}), 'Finding runs');
+  assert.equal(labelForTool('mcp__worca__list_branches', { projectKey: 'web-00000001' }), 'Looking at branches');
   assert.equal(labelForTool('mcp__worca__get_run', { id: 'abcdefghijklmnop' }), 'Reading run abcdefghijkl');
   assert.equal(labelForTool('mcp__worca__get_run', {}), 'Reading run');
   assert.equal(labelForTool('mcp__worca__list_workflows', {}), 'Looking at workflows');
@@ -834,5 +845,20 @@ test('propose_web_access: labelled, and its RESULT reaches onWebProposal with th
   h.push(atool('msg_1', 'toolu_task', 'Agent', { description: 'helper', subagent_type: 'general-purpose', prompt: 'x' }));
   h.push(atool('msg_c', 'toolu_w2', 'mcp__worca__propose_web_access', input, 'toolu_task'));
   h.push(uresult('toolu_w2', '{"ok":true}', { ptu: 'toolu_task' }));
+  assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
+});
+
+test('propose_workspace_change: labelled, and its RESULT reaches onWorkspaceProposal with the full input; a sub-agent call never does', () => {
+  assert.equal(labelForTool('mcp__worca__propose_workspace_change', {}), 'Proposing a workspace change');
+  const seen = [];
+  const h = harness({ onWorkspaceProposal: (e) => { seen.push(e); return Promise.resolve(); } });
+  const input = { kind: 'add_members', workspaceId: 'wks-demo-0000abcd', projectKeys: ['k1'] };
+  h.push(session(), init(), mstart('msg_1'), atool('msg_1', 'toolu_ws', 'mcp__worca__propose_workspace_change', input));
+  assert.deepEqual(seen, [], 'minted at RESULT, never at START');
+  h.push(uresult('toolu_ws', '{"ok":true,"card":{}}'));
+  assert.deepEqual(seen, [{ toolUseId: 'toolu_ws', input, text: '{"ok":true,"card":{}}', isError: false }]);
+  h.push(atool('msg_1', 'toolu_task', 'Agent', { description: 'helper', subagent_type: 'general-purpose', prompt: 'x' }));
+  h.push(atool('msg_c', 'toolu_ws2', 'mcp__worca__propose_workspace_change', input, 'toolu_task'));
+  h.push(uresult('toolu_ws2', '{"ok":true}', { ptu: 'toolu_task' }));
   assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
 });

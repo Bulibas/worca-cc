@@ -163,7 +163,25 @@ test('ui-ask-integration: Escape is routed by focus location', async () => {
   await settle(window);
   keydown(window, window.document.body, { key: 'Escape' });
   await settle(window);
-  assert.equal(window.location.hash, '#running', 'document Escape still routes the detail back');
+  assert.equal(window.location.hash, '#running/r1',
+    'side by side, document Escape on the glance keeps the pane (D16): the list is already in view');
+  assert.ok(window.document.querySelector('.run-shell').classList.contains('detail-open'));
+
+  // The narrow slide layout, where the glance's Escape DOES route back to the list: there a
+  // sheet-owned Escape that leaked to the document would visibly navigate.
+  window.document.getElementById('runs-shell').dataset.layout = 'slide';
+  await openSheet(window);
+  assert.equal(window.document.querySelector('.ask-sheet').hidden, false, 'the sheet is open again');
+  const input2 = window.document.querySelector('textarea.ask-input');
+  input2.focus();
+  keydown(window, input2, { key: 'Escape' });
+  await settle(window);
+  assert.equal(window.location.hash, '#running/r1', 'slide: sheet-owned Escape still leaves the detail alone');
+  keydown(window, window.document.body, { key: 'k', metaKey: true }); // ⌘K closes the sheet
+  await settle(window);
+  keydown(window, window.document.body, { key: 'Escape' });
+  await settle(window);
+  assert.equal(window.location.hash, '#runs', 'slide: document Escape still routes the detail back to the list');
 });
 
 test('ui-ask-integration: ask frames reach the panel; runId frames do not', async () => {

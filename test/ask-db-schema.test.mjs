@@ -141,8 +141,7 @@ test('UNIQUE (thread_id, seq) is enforced', () => {
   /UNIQUE/);
 });
 
-// Review of PR #376: every per-thread attachment read (threadAttachmentBytes, the
-// snapshot, the delete cascade) scanned ask_attachments. The index is IF NOT
+// Review of PR #376: every per-thread attachment read (the snapshot, the delete cascade) scanned ask_attachments. The index is IF NOT
 // EXISTS and probed by schemaGaps (INCREMENTAL_INDEXES), so an existing
 // stamped-current DB heals without a version bump.
 test('ask_attachments has a thread_id index on a fresh DB; self-heal recreates it on a stamped-current DB', () => {

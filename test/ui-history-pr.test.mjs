@@ -1,4 +1,7 @@
-// test/ui-history-pr.test.mjs
+// test/ui-history-pr.test.mjs — a finished run's branch and PR, now that the list card is gone.
+// The Runs row says where the PR stands in its word (the glance headline, D12); the branch
+// row lives in the saved run's Details header (D14). The card's Create PR / View PR buttons
+// are gone; the pane's .hd-pr / .hd-pr-link are covered in test/ui-history-shipit.test.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -31,10 +34,14 @@ async function boot({ fetchHandler } = {}) {
     const sel = window.document.querySelector('#projectSelect');
     sel.value = PROJECT; sel.dispatchEvent(new window.Event('change', { bubbles: true }));
   };
-  const showHistory = () => { window.location.hash = 'history'; window.dispatchEvent(new window.Event('hashchange')); };
-  return { window, selectProject, showHistory };
+  const showRuns = () => { window.location.hash = 'runs'; window.dispatchEvent(new window.Event('hashchange')); };
+  // The saved run's Details (its header carries the branch row).
+  const showDetails = (p) => { window.location.hash = `history/${p.projectKey}/${p.id}/details`; window.dispatchEvent(new window.Event('hashchange')); };
+  const settle = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); };
+  return { window, selectProject, showRuns, showDetails, settle };
 }
 const runs = (pipelines, ghAvailable) => Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines, live: [], ghAvailable }) });
+const ok = (body) => Promise.resolve({ ok: true, status: 200, json: async () => body });
 
 const SURVIVED = {
   id: 'p1', title: 'Feat', status: 'stopped', startedAt: '2026-06-02T00:00:00Z',
@@ -42,204 +49,130 @@ const SURVIVED = {
   projectName: 'Proj', projectKey: 'proj-0000abcd', projectDir: '/x/proj',
 };
 
-// Minimal detail payload for the one test that follows the card through to the
-// detail screen. Shape per readPipelineByKey: 8 keys, `results`/`overview` null.
-const DETAIL = {
+// Minimal detail payload for a row, per readPipelineByKey: 8 keys, `results`/`overview`
+// null. Its state's branch mirrors the row's (no `source` for a legacy entry).
+const detailOf = (p) => ({
   state: {
-    id: SURVIVED.id, title: SURVIVED.title, status: 'stopped', startedAt: SURVIVED.startedAt,
+    id: p.id, title: p.title, status: p.status, startedAt: p.startedAt,
     stepper: null, steps: [], subAgents: [],
-    branch: { source: 'main', feature: SURVIVED.branch },
+    branch: p.branch ? { feature: p.branch, ...(p.sourceBranch ? { source: p.sourceBranch } : {}) } : null,
   },
   results: null, overview: null, clarify: { questions: [], answers: [] },
   reviews: [], stepQuestions: [], artifacts: [], auditMarkdown: '',
+});
+// MOST-SPECIFIC FIRST: the keyed detail URL `/api/history/proj-0000abcd/p1` STARTS WITH
+// `/api/history/pr` (the key begins "pro"), so every arm matches with endsWith.
+const armsFor = (rows, ghAvailable = true) => (url) => {
+  if (url.endsWith('/api/history/pr')) return ok({ ok: true });
+  for (const p of rows) if (url.endsWith(`/api/history/${p.projectKey}/${p.id}`)) return ok(detailOf(p));
+  if (url.endsWith('/api/history')) return runs(rows, ghAvailable);
+  return null;
 };
 
-test('survived entry: source → destination branch line + green/red diff chip', async () => {
-  const { window, showHistory } = await boot({
-    fetchHandler: (url) => (url.includes('/api/history') ? runs([SURVIVED], true) : null),
-  });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const card = window.document.querySelector('#history .hist-card');
-  const row = card.querySelector('.h-meta .hist-branch');
-  assert.equal(row.hidden, false);
-  assert.equal(row.querySelector('.hist-branch-src').textContent, 'main');
-  assert.equal(row.querySelector('.hist-branch-src').hidden, false);
-  // The arrow is an SVG element: no `hidden` IDL property, so assert on the
-  // ATTRIBUTE — a `.hidden = false` expando would pass while Chrome still hides it.
-  assert.equal(row.querySelector('.hist-branch-arrow').hasAttribute('hidden'), false);
-  assert.equal(row.querySelector('.hist-branch-dst').textContent, 'worca-cc/feat-1');
-  assert.equal(row.querySelector('.hist-branch-copy').hidden, false);
-  assert.equal(card.querySelector('.hist-diff .diff-add').textContent, '+12');
-  assert.equal(card.querySelector('.hist-diff .diff-del').textContent, '−5');
+// ---------------------------------------------------------------------------
+// The branch row (the saved run's Details header; the list row has none, D14)
+// ---------------------------------------------------------------------------
+
+test('survived entry: source → destination branch line', async () => {
+  const ctx = await boot({ fetchHandler: armsFor([SURVIVED]) });
+  ctx.showDetails(SURVIVED);
+  await ctx.settle();
+  const doc = ctx.window.document;
+  const base = doc.querySelector('#hist-detail .hd-base');
+  assert.equal(base.hidden, false);
+  assert.equal(base.textContent, 'main →', 'the source branch, then the arrow');
+  assert.equal(doc.querySelector('#hist-detail .hd-branch-name').textContent, 'worca-cc/feat-1');
+  assert.equal(doc.querySelector('#hist-detail .hd-branch-copy').hidden, false);
 });
 
 test('legacy entry without sourceBranch: destination only, no arrow', async () => {
   const LEGACY = { ...SURVIVED, id: 'pl', sourceBranch: null };
-  const { window, showHistory } = await boot({
-    fetchHandler: (url) => (url.includes('/api/history') ? runs([LEGACY], true) : null),
-  });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const row = window.document.querySelector('#history .hist-card .h-meta .hist-branch');
-  assert.equal(row.hidden, false);
-  assert.equal(row.querySelector('.hist-branch-src').hidden, true);
-  assert.equal(row.querySelector('.hist-branch-arrow').hasAttribute('hidden'), true);
-  assert.equal(row.querySelector('.hist-branch-dst').textContent, 'worca-cc/feat-1');
+  const ctx = await boot({ fetchHandler: armsFor([LEGACY]) });
+  ctx.showDetails(LEGACY);
+  await ctx.settle();
+  const doc = ctx.window.document;
+  const base = doc.querySelector('#hist-detail .hd-base');
+  assert.equal(base.hidden, true);
+  assert.equal(base.textContent, '', 'no source, so no arrow either');
+  assert.equal(doc.querySelector('#hist-detail .hd-branch-name').textContent, 'worca-cc/feat-1');
+  assert.equal(doc.querySelector('#hist-detail .hd-branch-copy').hidden, false);
 });
 
 test('entry without a feature branch hides the whole branch row', async () => {
   const NOBRANCH = { ...SURVIVED, id: 'pn', branch: null, sourceBranch: null, survived: false };
-  const { window, showHistory } = await boot({
-    fetchHandler: (url) => (url.includes('/api/history') ? runs([NOBRANCH], true) : null),
-  });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const row = window.document.querySelector('#history .hist-card .h-meta .hist-branch');
-  assert.equal(row.hidden, true);
+  const ctx = await boot({ fetchHandler: armsFor([NOBRANCH]) });
+  ctx.showDetails(NOBRANCH);
+  await ctx.settle();
+  const doc = ctx.window.document;
+  // The template ships the branch row hidden: prove the header painted this run first.
+  assert.equal(doc.querySelector('#hist-detail .hd-title').textContent, 'Feat', 'the saved run\'s header painted');
+  assert.equal(doc.querySelector('#hist-detail .hd-branch-copy').hidden, true);
+  assert.equal(doc.querySelector('#hist-detail .hd-base').hidden, true);
 });
 
 test('copy button copies the destination branch and does not navigate', async () => {
-  const { window, showHistory } = await boot({
-    fetchHandler: (url) => (url.includes('/api/history') ? runs([SURVIVED], true) : null),
-  });
+  const ctx = await boot({ fetchHandler: armsFor([SURVIVED]) });
+  const { window } = ctx;
   let copied = null;
   Object.defineProperty(window.navigator, 'clipboard', {
     value: { writeText: (t) => { copied = t; return Promise.resolve(); } },
     configurable: true,
   });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const card = window.document.querySelector('#history .hist-card');
-  const btn = card.querySelector('.hist-branch-copy');
-  btn.dispatchEvent(new window.Event('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
+  ctx.showDetails(SURVIVED);
+  await ctx.settle();
+  const before = window.location.hash;
+  const btn = window.document.querySelector('#hist-detail .hd-branch-copy');
+  btn.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
+  await ctx.settle();
   assert.equal(copied, 'worca-cc/feat-1');
-  assert.equal(window.location.hash.replace(/^#/, ''), 'history',
-    'copy click must not navigate to the detail screen');
+  assert.equal(window.location.hash, before, 'copy click must not navigate away from the saved run');
 });
 
-test('Create-PR shows when gh available; click navigates to the detail page and arms the ship-it modal', async () => {
-  const prPosts = [];
-  const { window, showHistory } = await boot({
-    fetchHandler: (url, opts) => {
-      // MOST-SPECIFIC FIRST. Two prefix traps here, both real:
-      //  - the keyed detail URL `/api/history/proj-0000abcd/p1` STARTS WITH
-      //    `/api/history/pr` (the key begins "pro"), so the enrichment arm must
-      //    match with endsWith;
-      //  - `/api/projects`.includes('/api/pr') is true, so the create arm must too.
-      if (url.endsWith('/api/history/pr')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
-      if (url.endsWith(`/api/history/${SURVIVED.projectKey}/${SURVIVED.id}`)) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => DETAIL });
-      }
-      if (url.endsWith('/api/history')) return runs([{ ...SURVIVED, pr: null }], true);
-      if (url.endsWith('/api/pr') && opts.method === 'POST') {
-        prPosts.push(JSON.parse(opts.body));
-        return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, url: 'https://gh/x/pull/3', mergeable: 'MERGEABLE' }) });
-      }
-      return null;
-    },
-  });
-  showHistory();
+// ---------------------------------------------------------------------------
+// The PR in the row's word (the glance headline: done + pr state)
+// ---------------------------------------------------------------------------
+
+const DONE = { ...SURVIVED, status: 'done' };
+async function rowFor(p) {
+  const ctx = await boot({ fetchHandler: armsFor([p]) });
+  ctx.showRuns();
   await new Promise((r) => setTimeout(r, 0));
-  const card = window.document.querySelector('#history .hist-card');
-  const btn = card.querySelector('.hist-pr');
-  assert.equal(btn.hidden, false, 'button visible when gh available');
-  btn.dispatchEvent(new window.Event('click', { bubbles: true }));
-  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  const row = ctx.window.document.querySelector(`#runs-list .runs-row[data-kind="hist"][data-pipeline-id="${p.id}"]`);
+  assert.ok(row, 'the finished run is listed');
+  return row;
+}
+const word = (row) => row.querySelector('.runs-row-sub').textContent.split(' · ')[0];
 
-  assert.equal(window.location.hash.replace(/^#/, ''), `history/${SURVIVED.projectKey}/${SURVIVED.id}`,
-    'the list button navigates to the detail page');
-  assert.equal(window.document.querySelector('#shipit-modal').classList.contains('hidden'), false,
-    'the pending ship-it intent auto-opens the modal on arrival');
-  assert.equal(prPosts.length, 0, 'the list card itself never fires POST /api/pr');
+test('open PR: the row reads "In review" and links to the saved run', async () => {
+  const OPEN = { ...DONE, id: 'po', pr: { state: 'OPEN', url: 'https://gh/x/pull/8', number: 8 } };
+  const row = await rowFor(OPEN);
+  assert.equal(word(row), 'In review');
+  assert.equal(row.getAttribute('href'), `#history/${OPEN.projectKey}/po`, 'the row opens the run, not GitHub');
 });
 
-test('a workspace run with no member facts never offers Create PR on the list card', async () => {
-  // `members` absent (legacy/lite row) ⇒ no affected member ⇒ not eligible, even
-  // though this row satisfies every primary-only clause.
-  const WKS = {
-    ...SURVIVED, id: 'w1', projectKey: 'workspaces/team-a', target: 'workspace',
-    workspaceName: 'Team A', pr: null,
-  };
-  const { window, showHistory } = await boot({
-    fetchHandler: (url) => (url.endsWith('/api/history') ? runs([WKS], true) : null),
-  });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const card = window.document.querySelector('#history .hist-card');
-  assert.equal(card.querySelector('.hist-pr').hidden, true, 'no Create-PR button for a workspace run');
-  assert.equal(card.querySelector('.hist-pr-link'), null, 'and no PR link either');
+// A workspace run never offers Create PR from the list — the Runs list shows only a
+// word, and PR eligibility (members vs primary-only) is asserted for the saved-run
+// detail screen in ui-history-shipit.test.mjs.
+
+test('merged PR: the row reads "Merged"', async () => {
+  const MERGED = { ...DONE, id: 'pm', pr: { state: 'MERGED', url: 'https://gh/x/pull/9', number: 9 } };
+  assert.equal(word(await rowFor(MERGED)), 'Merged');
 });
 
-test('button hidden when gh unavailable, and for non-survived branches', async () => {
-  const { window, showHistory } = await boot({
-    fetchHandler: (url) => (url.includes('/api/history')
-      ? runs([SURVIVED, { ...SURVIVED, id: 'p2', survived: false }], false) : null),
-  });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const cards = window.document.querySelectorAll('#history .hist-card');
-  assert.equal(cards[0].querySelector('.hist-pr').hidden, true, 'gh unavailable hides button');
-  assert.equal(cards[1].querySelector('.hist-diff').textContent, '', 'non-survived shows no diff');
+test('closed (unmerged) PR: the row reads "PR closed", never "Merged" or "In review"', async () => {
+  // Defense in depth: even if a stray CLOSED pr object reaches the client, the row must
+  // not claim the work landed. (In practice the server now sends pr:null here.)
+  const CLOSED = { ...DONE, id: 'pc', pr: { state: 'CLOSED', url: 'https://gh/x/pull/1', number: 1 } };
+  assert.equal(word(await rowFor(CLOSED)), 'PR closed');
 });
 
-test('open PR: no Create-PR button, shows a "View PR" link to the existing PR', async () => {
-  const OPEN = { ...SURVIVED, id: 'po', pr: { state: 'OPEN', url: 'https://gh/x/pull/8', number: 8 } };
-  const { window, showHistory } = await boot({
-    fetchHandler: (url) => (url.includes('/api/history') ? runs([OPEN], true) : null),
-  });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const card = window.document.querySelector('#history .hist-card');
-  assert.equal(card.querySelector('.hist-pr'), null, 'Create-PR button is gone');
-  const link = card.querySelector('.hist-pr-link');
-  assert.equal(link.getAttribute('href'), 'https://gh/x/pull/8');
-  assert.equal(link.textContent, 'View PR');
-});
-
-test('merged PR: shows a "Merged" link, no button', async () => {
-  const MERGED = { ...SURVIVED, id: 'pm', pr: { state: 'MERGED', url: 'https://gh/x/pull/9', number: 9 } };
-  const { window, showHistory } = await boot({
-    fetchHandler: (url) => (url.includes('/api/history') ? runs([MERGED], true) : null),
-  });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const card = window.document.querySelector('#history .hist-card');
-  assert.equal(card.querySelector('.hist-pr'), null);
-  const link = card.querySelector('.hist-pr-link');
-  assert.equal(link.textContent, 'Merged');
-  assert.equal(link.getAttribute('href'), 'https://gh/x/pull/9');
-});
-
-test('closed (unmerged) PR is treated as none: Create-PR button still shows', async () => {
-  // Defense in depth: even if a stray CLOSED pr object reaches the client, the UI
-  // must not hide the button. (In practice the server now sends pr:null here.)
-  const CLOSED = { ...SURVIVED, id: 'pc', pr: { state: 'CLOSED', url: 'https://gh/x/pull/1', number: 1 } };
-  const { window, showHistory } = await boot({
-    fetchHandler: (url) => (url.includes('/api/history') ? runs([CLOSED], true) : null),
-  });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const card = window.document.querySelector('#history .hist-card');
-  assert.equal(card.querySelector('.hist-pr').hidden, false, 'button visible for a closed/unmerged PR');
-  assert.equal(card.querySelector('.hist-pr-link'), null);
-});
-
-test('merged PR with branch gone (survived=false) still shows the Merged link', async () => {
+test('merged PR with branch gone (survived=false) still reads "Merged"', async () => {
   // The cited case: PR merged, the lookup is by remote head name, not local branch.
   const MERGED_GONE = {
-    ...SURVIVED, id: 'pmg', survived: false,
+    ...DONE, id: 'pmg', survived: false,
     pr: { state: 'MERGED', url: 'https://gh/x/pull/2', number: 2 },
   };
-  const { window, showHistory } = await boot({
-    fetchHandler: (url) => (url.includes('/api/history') ? runs([MERGED_GONE], true) : null),
-  });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const card = window.document.querySelector('#history .hist-card');
-  assert.equal(card.querySelector('.hist-pr'), null);
-  assert.equal(card.querySelector('.hist-pr-link').textContent, 'Merged');
+  assert.equal(word(await rowFor(MERGED_GONE)), 'Merged');
 });
 
 // The two merge-pill re-check tests moved to test/ui-history-shipit.test.mjs:

@@ -193,3 +193,38 @@ test('the Workspace scan workflow is refused: it starts only from Workspaces (D2
   assert.deepEqual(errs(await v({ workspaceId: 'wks-team-0000abcd', brief: 'x', workflowId: 'wf_workspace_scan' })), [PROPOSAL_ERRORS.scanWorkflow]);
   assert.deepEqual(errs(await v({ projectKey: 'demo-00000001', brief: 'x', workflowId: 'wf_workspace_scan' })), [PROPOSAL_ERRORS.scanWorkflow]);
 });
+
+// ── #527: the source branch is resolved against the remote (injected resolveSourceRef) ──
+test('#527 sourceBranch: remote-only / behind / stale annotate the card; missing is an error naming the remote', async () => {
+  const calls = [];
+  const answers = {
+    'feat/remote': { ok: true, ref: 'origin/feat/remote', local: false, remoteOnly: true, fetchedAt: null, stale: false },
+    behind: { ok: true, ref: 'behind', local: true, remoteOnly: false, behind: 3, ahead: 0 },
+    offline: { ok: false, kind: 'stale', fetchError: { kind: 'network', message: 'x' } },
+    uptodate: { ok: true, ref: 'uptodate', local: true, remoteOnly: false, behind: 0, ahead: 0 },
+    nowhere: { ok: false, kind: 'missing' },
+  };
+  const v = createProposalValidator({ ...deps,
+    resolveSourceRef: async (dir, name, o) => { calls.push({ dir, name, o }); return answers[name]; },
+    remoteName: (key) => (key === 'demo-00000001' ? 'upstream' : 'origin') }).validateProposal;
+  const remote = ok(await v({ projectKey: 'demo-00000001', brief: 'x', sourceBranch: 'feat/remote' }));
+  assert.deepEqual(calls[0], { dir: '/p/demo', name: 'feat/remote', o: { projectKey: 'demo-00000001' } });
+  assert.equal(remote.sourceBranch, 'feat/remote', 'the bare name stays the source (POST /api/run accepts it)');
+  assert.deepEqual(remote.sourceRef, { ref: 'origin/feat/remote', remoteOnly: true, behind: 0 });
+  assert.deepEqual(ok(await v({ projectKey: 'demo-00000001', brief: 'x', sourceBranch: 'behind' })).sourceRef, { ref: 'behind', remoteOnly: false, behind: 3 });
+  assert.deepEqual(ok(await v({ projectKey: 'demo-00000001', brief: 'x', sourceBranch: 'offline' })).sourceRef,
+    { ref: 'offline', remoteOnly: false, behind: 0, stale: true }, 'offline: never reject what may exist');
+  assert.equal('sourceRef' in ok(await v({ projectKey: 'demo-00000001', brief: 'x', sourceBranch: 'uptodate' })), false);
+  assert.deepEqual(errs(await v({ projectKey: 'demo-00000001', brief: 'x', sourceBranch: 'nowhere' })), [PROPOSAL_ERRORS.missingSource('nowhere', 'upstream')]);
+  assert.equal(PROPOSAL_ERRORS.missingSource('nowhere', 'upstream'), 'sourceBranch "nowhere" exists neither locally nor on upstream');
+});
+
+test('#527 sourceBranch: never resolved for a failing card, a workspace, or without the reader', async () => {
+  let n = 0;
+  const v = createProposalValidator({ ...deps, resolveSourceRef: async () => { n += 1; return { ok: false, kind: 'missing' }; } }).validateProposal;
+  errs(await v({ projectKey: 'demo-00000001', brief: 'x', sourceBranch: 'feat', guardrailsId: 'permissive' }));
+  ok(await v({ workspaceId: 'wks-team-0000abcd', brief: 'x', sourceBranch: 'feat' }));
+  assert.equal(n, 0);
+  // The default is null: a fake-dir card is not resolved against git.
+  assert.equal('sourceRef' in ok(await validateProposal({ projectKey: 'demo-00000001', brief: 'x', sourceBranch: 'main' })), false);
+});

@@ -58,7 +58,7 @@ const OPEN_BACKOFF_MS = 15;
 /** Latest schema version. Bump + append a new migration step when the DDL grows.
  *  Exported so migration tests assert "reached the module's current version"
  *  instead of hardcoding the number — a schema bump then touches no test file. */
-export const SCHEMA_VERSION = 44;
+export const SCHEMA_VERSION = 45;
 
 /** Absolute path to the database file: <worcaHome>/worca-cc.db. */
 export function dbPath() {
@@ -790,6 +790,7 @@ CREATE TABLE IF NOT EXISTS scheduled_runs (
   after_id     TEXT,                         -- v34: scheduled_runs.id | pipelines.id
   after_policy TEXT NOT NULL DEFAULT 'done', -- v34: done | any
   source_from_previous INTEGER NOT NULL DEFAULT 0,  -- v34: start on the predecessor's feature branch
+  resume_pipeline_id TEXT,                 -- v44: resume this paused pipeline instead of starting a new run
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL
 );
@@ -865,7 +866,8 @@ const INCREMENTAL_COLUMNS = {
                             created_by: 'TEXT', updated_by: 'TEXT' },   // v39: who made / last changed it (identity.mjs actor)
   scheduled_runs:         { after_kind: 'TEXT', after_id: 'TEXT', after_policy: "TEXT NOT NULL DEFAULT 'done'",
                             source_from_previous: 'INTEGER NOT NULL DEFAULT 0',   // v34: run chains
-                            created_by: 'TEXT', updated_by: 'TEXT' },   // v39: who made / last changed it
+                            created_by: 'TEXT', updated_by: 'TEXT',   // v39: who made / last changed it
+                            resume_pipeline_id: 'TEXT' },   // v44: a one-off "resume this paused run" ticket (NULL = starts a new run)
 };
 
 /** v23: per-loop-wire cycle budgets, the graph-engine twin of
@@ -1505,8 +1507,16 @@ function applySchemaV42(db) {
        AND rel_path NOT LIKE 'deck/deck%.pdf'`).run();
 }
 
-/** v44 (workspace PRs): create pipeline_member_prs (via the gap repair) and backfill
- *  the single PR the pre-v44 path could have recorded on a workspace row. The old
+/** v44 (scheduled resume): scheduled_runs.resume_pipeline_id — a plain additive column
+ *  declared in INCREMENTAL_COLUMNS; repairSchemaGaps covers fresh DBs (addColumns re-probes
+ *  after the table CREATE) and existing ones. NULL on every existing row = a ticket that
+ *  starts a NEW run (the only kind before v44). */
+function applySchemaV44(db) {
+  repairSchemaGaps(db, schemaGaps(db));
+}
+
+/** v45 (workspace PRs): create pipeline_member_prs (via the gap repair) and backfill
+ *  the single PR the pre-v45 path could have recorded on a workspace row. The old
  *  POST /api/pr resolved a workspace run only through its primary member's project
  *  key and pushed the PRIMARY member's branch, so that PR belongs to project_key.
  *  INSERT OR IGNORE: re-entering the step never duplicates or overwrites.
@@ -1515,7 +1525,7 @@ function applySchemaV42(db) {
  *  the base columns project_key/target — an ungated SELECT throws `no such column`
  *  and rolls the whole ladder back. Also fenced (V33/V39 shape): a backfill is never
  *  worth failing the migration over. */
-function applySchemaV44(db) {
+function applySchemaV45(db) {
   repairSchemaGaps(db, schemaGaps(db));
   if (!memberPrBackfillable(db)) return;
   try {
@@ -1528,7 +1538,7 @@ function applySchemaV44(db) {
   } catch { /* never fail the migration on the backfill */ }
 }
 
-/** applySchemaV44's column guard (the presentationSeedable precedent). */
+/** applySchemaV45's column guard (the presentationSeedable precedent). */
 function memberPrBackfillable(db) {
   if (!hasSqliteTable(db, 'pipelines') || !hasSqliteTable(db, 'pipeline_member_prs')) return false;
   const cols = new Set(db.prepare('PRAGMA table_info(pipelines)').all().map((c) => c.name));
@@ -1958,7 +1968,8 @@ export function migrate(db) {
     if (current < 41) applySchemaV41(db);
     if (current < SCHEMA_VERSION) refreshPresentationSeed(db);
     if (current < 42) applySchemaV42(db);            // deck subresources -> the unlisted deck-asset kind
-    if (current < 44) applySchemaV44(db);            // workspace PRs: pipeline_member_prs + gated backfill
+    if (current < 44) applySchemaV44(db);            // scheduled resume: scheduled_runs.resume_pipeline_id
+    if (current < 45) applySchemaV45(db);            // workspace PRs: pipeline_member_prs + gated backfill
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {
