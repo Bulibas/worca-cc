@@ -1704,7 +1704,8 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 /* The scan run's own stages, as pills: done ones muted-strong, the running one inverted. */
 .wd-rescan-phases{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 2px;}
 .wd-rescan-phases [data-phase]{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:4px 10px;}
-.wd-rescan-phases [data-phase].done{color:var(--ink-2);}
+.wd-rescan-phases [data-phase].done{color:var(--green-ink);background:var(--green-bg);border-color:transparent;}
+.wd-rescan-phases [data-phase].done::before{content:'\2713\00a0';}
 .wd-rescan-phases [data-phase].active{color:var(--on-ink);background:var(--ink);border-color:var(--ink);}
 .wd-rescan-open{font-size:12.5px;width:fit-content;}
 .wd-rescan-hint{margin-top:2px;}
