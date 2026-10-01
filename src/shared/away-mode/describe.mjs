@@ -1,6 +1,6 @@
 // src/shared/away-mode/describe.mjs — the ONE source of Away mode's plain-English text: the Settings
 // card summary, the project card, the run page pill, the New-run hint, Ask Worca and its card.
-// Pure; `now` is passed in. Copy: plans/away-mode-wording.md §3.1 A, §3.3, §3.4.
+// Pure; `now` is passed in. Copy: plans/away-mode-wording.md §3.1 A, §3.2, §3.3, §3.4.
 import { inWindow, nightState, decideDelayMs, parseWindow } from './activation.mjs';
 import { kindLabel, pillText } from './labels.mjs';
 
@@ -24,16 +24,20 @@ function hoursOf(config) {
   return w ? config.window.split('-') : null;
 }
 
-function statusLine(config, toggle, now, tz, localZone) {
+// Where the status buttons are, on a surface that does not show them (the project tab, Ask Worca's chat).
+const SETTINGS_PLACE = ' in Settings › Away mode';
+
+function statusLine(config, toggle, now, tz, localZone, surface) {
+  const where = surface === 'settings' ? '' : SETTINGS_PLACE;
   // Name the zone when it is not the local one, or when the configured zone was unusable (we fell back).
   const fellBack = !!config.timeZone && !zoneOk(config.timeZone);
   const zoneTag = tz !== localZone || fellBack ? ` ${tz}` : '';
   const hours = hoursOf(config);
-  if (toggle === 'off') return { status: 'paused', text: 'Away mode is paused. worca answers nothing until you turn it back on. (Marked runs wait too.)' };
-  if (toggle === 'on') return { status: 'away-now', text: 'Right now you count as away because you said "I\'m away now". worca answers on every run until you click "I\'m back".' };
+  if (toggle === 'off') return { status: 'paused', text: `Away mode is paused. worca answers nothing until you turn it back on${where}. (Marked runs wait too.)` };
+  if (toggle === 'on') return { status: 'away-now', text: `Right now you count as away because you said "I'm away now". worca answers on every run until you click "I'm back"${where}.` };
   if (!hours) {
     const extra = config.graceMinutes != null ? `, or on a marked run after a question has waited ${config.graceMinutes} minutes` : '';
-    return { status: 'no-hours', text: `No away hours are set. worca only answers when you click "I'm away now"${extra}.` };
+    return { status: 'no-hours', text: `No away hours are set. worca only answers when you click "I'm away now"${where}${extra}.` };
   }
   const cfg = { ...config, timeZone: tz };
   if (inWindow(cfg.window, tz, now)) return { status: 'away-hours', text: `Right now it is ${fmtHHMM(now, tz)}${zoneTag}. You count as away (your away hours). They end at ${hours[1]}.` };
@@ -58,15 +62,17 @@ function scheduleLines(config) {
 const LINE_FIELDS = { status: ['window', 'timeZone'], schedule: ['window', 'enabled'], byDay: ['graceMinutes'], kinds: ['neverDecide'] };
 const PROJECT_TAG = ' (this project)';
 
-/** The card summary. @returns {{status:string, lines:string[]}} */
-export function describeAwayMode({ config, toggle = 'auto', now, localZone = null, projectName = null, projectFields = null } = {}) {
+/** The card summary. `surface`: 'settings' (the card with the status buttons), 'project' (the project tab) or
+ *  'chat' (Ask Worca); off Settings, a line that asks for a status button says where it is.
+ *  @returns {{status:string, lines:string[]}} */
+export function describeAwayMode({ config, toggle = 'auto', now, localZone = null, projectName = null, projectFields = null, surface = 'settings' } = {}) {
   try {
     if (!config || typeof config !== 'object' || !Number.isFinite(now)) return { status: 'unknown', lines: ['Away mode settings could not be read.'] };
     const local = localZone || Intl.DateTimeFormat().resolvedOptions().timeZone;
     const tz = zoneOf(config, local);
     const own = new Set(Array.isArray(projectFields) ? projectFields : []);
     const tag = (text, key) => (LINE_FIELDS[key].some((f) => own.has(f)) ? `${text}${PROJECT_TAG}` : text);
-    const s = statusLine(config, toggle, now, tz, local);
+    const s = statusLine(config, toggle, now, tz, local, surface);
     const sched = scheduleLines(config);
     const lines = [tag(s.text, 'status'), ...sched.map((l, i) => tag(l, i === 0 ? 'schedule' : 'byDay'))];
     const kinds = Array.isArray(config.neverDecide) ? config.neverDecide : [];

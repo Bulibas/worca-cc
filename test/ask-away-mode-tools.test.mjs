@@ -24,6 +24,13 @@ test('get_away_mode returns the same summary lines the Settings card shows', asy
   assert.equal(out.sources.window, 'user');
 });
 
+test('get_away_mode is read in chat: a status button is named where it is, in Settings › Away mode', async () => {
+  const out = await reader({ toggle: () => 'on' })({});
+  assert.equal(out.summary[0], 'Right now you count as away because you said "I\'m away now". worca answers on every run until you click "I\'m back" in Settings › Away mode.');
+  const p = await reader({ toggle: () => 'off' })({ projectKey: 'shop-1' });
+  assert.equal(p.summary[0], 'For Shop: Away mode is paused. worca answers nothing until you turn it back on in Settings › Away mode. (Marked runs wait too.)');
+});
+
 test('a project key reads that project\'s layers and names it', async () => {
   const out = await reader()({ projectKey: 'shop-1' });
   assert.match(out.summary[0], /^For Shop: /);

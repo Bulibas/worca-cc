@@ -227,6 +227,9 @@ Buttons: `Use defaults` · `Save`. After save: *Saved. The summary above is what
 - The spend cap is **not shown**; in its place: *The spend cap is set once for you, not per project, because it counts spending across every run.*
 - The status strip (I'm away now / Pause) is **not** repeated here; one line instead:
   *"I'm away now" and "Pause" are global. Change them in Settings › Away mode.*
+- Since the buttons are not here, every summary line and hint that asks for one says where it is:
+  `…when you click "I'm away now" in Settings › Away mode…`, `…until you click "I'm back" in Settings › Away mode.`,
+  `…until you turn it back on in Settings › Away mode.` Ask Worca's chat uses the same wording.
 - Team-provided values show `(team default)` after the value.
 
 ### 3.3 Run page switch

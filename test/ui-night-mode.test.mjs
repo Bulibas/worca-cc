@@ -367,6 +367,33 @@ test('project level: a value set here marks its summary line "(this project)"', 
   assert.doesNotMatch(lines[1], /this project/);
 });
 
+// A bare "click "I'm away now"" points at a button the project tab does not have.
+const bareButton = (text) => /click "I'm (away now|back)"(?! in Settings › Away mode)|turn it back on(?! in Settings › Away mode)/.test(text);
+
+test('project level: no summary line or hint sends the user to a status button that is not on the page', () => {
+  const root = formRoot();
+  const inherited = { config: { ...NIGHT_DEFAULTS, window: null, timeZone: 'UTC', graceMinutes: 30 }, sources: {} };
+  for (const toggle of ['auto', 'on', 'off']) {
+    renderNightForm(root, { level: 'project', values: {}, effective: inherited.config, sources: {}, inherited, toggle, now: Date.parse('2026-09-28T15:00:00Z'), projectName: 'worca-cc' });
+    const summary = root.querySelector('.away-summary').textContent;
+    assert.ok(!bareButton(summary), `${toggle}: ${summary}`);
+    assert.match(summary, /in Settings › Away mode/, toggle);
+    assert.ok(!bareButton(root.textContent), `${toggle}: a hint on the tab`);
+    updateAwaySummary(root, { toggle, now: Date.parse('2026-09-28T15:00:00Z') });
+    assert.ok(!bareButton(root.querySelector('.away-summary').textContent), `${toggle}: after a repaint`);
+  }
+  assert.match(root.textContent, /You only count as away when you click "I'm away now" in Settings › Away mode\./);
+});
+
+test('user level: the Settings card keeps the bare button wording (the buttons sit right below)', () => {
+  const root = formRoot();
+  const inherited = { config: { ...NIGHT_DEFAULTS, window: null, timeZone: 'UTC', graceMinutes: 30 }, sources: {} };
+  renderNightForm(root, { level: 'user', values: {}, effective: inherited.config, sources: {}, inherited, toggle: 'auto', now: Date.parse('2026-09-28T15:00:00Z') });
+  assert.match(root.querySelector('.away-summary').textContent, /click "I'm away now", or on a marked run/);
+  assert.match(root.textContent, /You only count as away when you click "I'm away now"\./);
+  assert.doesNotMatch(root.textContent, /Settings › Away mode/);
+});
+
 test('project card: Away mode for this project, its summary, and Save re-reads GET /api/away-mode?projectDir=', async () => {
   const body = { config: { ...NIGHT_DEFAULTS, window: '22:00-07:00', timeZone: 'UTC' }, sources: {}, inherited: resolveNightConfig({ user: { window: '22:00-07:00', timeZone: 'UTC' } }), toggle: 'auto', user: {}, project: {} };
   const ctx = await boot({ away: (u) => (u.includes('projectDir=') ? body : { ...body, inherited: resolveNightConfig({}) }) });
@@ -379,6 +406,7 @@ test('project card: Away mode for this project, its summary, and Save re-reads G
   assert.match(card.querySelector('.away-summary').textContent, /^For proj: /);
   assert.ok([...card.querySelectorAll('small.hint')].some((h) => h.textContent === '"I\'m away now" and "Pause" are global. Change them in Settings › Away mode.'));
   assert.equal(card.querySelector('.pd-night-reset').textContent, 'Use my settings');
+  assert.ok(!bareButton(card.textContent), 'nothing on the tab points at a status button it does not have');
   const before = ctx.awayCalls.length;
   card.querySelector('.pd-night-save').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
   await settle(8);

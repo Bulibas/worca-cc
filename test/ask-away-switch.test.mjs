@@ -32,6 +32,7 @@ test('global: sets the toggle, tells every surface and every run, and returns th
   assert.deepEqual(s.emitted, ['settings-changed']);
   assert.equal(s.live.orch.changed, 1);
   assert.match(r.line, /^Right now you count as away because you said "I'm away now"\./);
+  assert.match(r.line, /until you click "I'm back" in Settings › Away mode\.$/, 'said in chat: the button is named where it is');
 });
 
 test('run: sets the switch as the actor and says what happens now', async () => {

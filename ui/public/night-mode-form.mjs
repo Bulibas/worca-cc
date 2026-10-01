@@ -148,7 +148,8 @@ export function renderNightForm(root, { level, values = {}, effective = {}, sour
   win.append(winRow);
   sourceHint(doc, win, values, inhSrc, 'window');
   offBox(doc, win, 'night-window-off', 'No away hours', values.window === null, [start, end]);
-  win.append(el(doc, 'small', 'hint', 'You only count as away when you click "I\'m away now".'));
+  // The project tab has no status buttons: name where "I'm away now" is (wording §3.2).
+  win.append(el(doc, 'small', 'hint', `You only count as away when you click "I'm away now"${level === 'project' ? ' in Settings › Away mode' : ''}.`));
   basic.append(win);
 
   const tz = field(doc, FIELD_LABELS.timeZone.label, FIELD_LABELS.timeZone.hint);
@@ -293,9 +294,9 @@ function formPatch(root) {
 }
 
 /** The live summary: one `<span>` per line of describeAwayMode. */
-export function paintAwaySummary(host, { config, toggle, now, projectName = null, projectFields = null }) {
+export function paintAwaySummary(host, { config, toggle, now, projectName = null, projectFields = null, surface = 'settings' }) {
   const doc = host.ownerDocument;
-  host.replaceChildren(...describeAwayMode({ config, toggle, now, projectName, projectFields }).lines.map((l) => el(doc, 'span', 'away-line', `${l} `)));
+  host.replaceChildren(...describeAwayMode({ config, toggle, now, projectName, projectFields, surface }).lines.map((l) => el(doc, 'span', 'away-line', `${l} `)));
 }
 
 /** Re-render only the summary from the form's current values (unsaved edits survive). Each key is optional. */
@@ -311,5 +312,6 @@ export function updateAwaySummary(root, { toggle, now, inherited } = {}) {
     config: c.inherited && c.inherited.config ? { ...c.inherited.config, ...patch } : null,
     toggle: c.toggle, now: Date.now() + c.offset, projectName: c.projectName,
     projectFields: c.level === 'project' ? Object.keys(patch) : null,   // "(this project)" on the lines it overrides
+    surface: c.level === 'project' ? 'project' : 'settings',            // no status buttons on the project tab
   });
 }

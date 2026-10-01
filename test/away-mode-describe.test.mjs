@@ -101,3 +101,27 @@ test('never throws on junk', () => {
   assert.doesNotThrow(() => describeAwayMode({ config: null, toggle: undefined, now: NaN }));
   assert.deepEqual(describeAwayMode({ config: null, toggle: 'auto', now: 0 }).lines, ['Away mode settings could not be read.']);
 });
+
+test('surface: the project tab and Ask Worca name Settings › Away mode wherever a status button is meant', () => {
+  const now = at('2026-09-28T15:00:00Z');
+  const noHours = { ...C, window: null };
+  for (const surface of ['project', 'chat']) {
+    const d = (o) => describeAwayMode({ ...base, now, surface, ...o }).lines[0];
+    assert.equal(d({ config: noHours }), 'No away hours are set. worca only answers when you click "I\'m away now" in Settings › Away mode, or on a marked run after a question has waited 30 minutes.', surface);
+    assert.equal(d({ config: { ...noHours, graceMinutes: null } }), 'No away hours are set. worca only answers when you click "I\'m away now" in Settings › Away mode.', surface);
+    assert.equal(d({ toggle: 'on' }), 'Right now you count as away because you said "I\'m away now". worca answers on every run until you click "I\'m back" in Settings › Away mode.', surface);
+    assert.equal(d({ toggle: 'off' }), 'Away mode is paused. worca answers nothing until you turn it back on in Settings › Away mode. (Marked runs wait too.)', surface);
+  }
+  assert.equal(describeAwayMode({ ...base, now, surface: 'project', projectName: 'worca-cc', config: noHours }).lines[0],
+    'For worca-cc: No away hours are set. worca only answers when you click "I\'m away now" in Settings › Away mode, or on a marked run after a question has waited 30 minutes.');
+});
+
+test('surface: the Settings card (the default) keeps its wording, next to the buttons', () => {
+  const now = at('2026-09-28T15:00:00Z');
+  for (const o of [{}, { surface: 'settings' }]) {
+    const d = (x) => describeAwayMode({ ...base, now, ...o, ...x }).lines[0];
+    assert.equal(d({ config: { ...C, window: null } }), 'No away hours are set. worca only answers when you click "I\'m away now", or on a marked run after a question has waited 30 minutes.');
+    assert.equal(d({ toggle: 'on' }), 'Right now you count as away because you said "I\'m away now". worca answers on every run until you click "I\'m back".');
+    assert.equal(d({ toggle: 'off' }), 'Away mode is paused. worca answers nothing until you turn it back on. (Marked runs wait too.)');
+  }
+});

@@ -45,7 +45,7 @@ export function createAwayReader({ userLayer, toggle, effective, projects, now =
     const { config, sources } = dir ? effective(dir) : resolveNightConfig({ user: userLayer() });
     const t = toggle(); const at = now();
     const projectFields = dir ? Object.keys(sources).filter((f) => sources[f] === 'project') : null;   // same "(this project)" marks as the project card
-    const d = describeAwayMode({ config, toggle: t, now: at, projectName: project ? project.name : null, projectFields });
+    const d = describeAwayMode({ config, toggle: t, now: at, projectName: project ? project.name : null, projectFields, surface: 'chat' });
     const out = { summary: d.lines, status: d.status, config, sources };
     if (row || live) out.run = runLine({ config, toggle: t, now: at, row, live });
     return out;
@@ -79,7 +79,7 @@ export async function applyAwayChange(card) {
     writeNightModePrefs(storeKey(dir), patch);
   }
   const { config } = dir ? effectiveNightConfig(dir) : resolveNightConfig({ user: nightModeSettings() });
-  return { ok: true, detail: describeAwayMode({ config, toggle: nightModeToggle(), now: Date.now(), projectName: r.card.projectName }).lines[0] };
+  return { ok: true, detail: describeAwayMode({ config, toggle: nightModeToggle(), now: Date.now(), projectName: r.card.projectName, surface: 'chat' }).lines[0] };
 }
 
 export function defaultAwayDeps() {
@@ -99,7 +99,7 @@ export function createAwaySwitch({ liveRun, runs, emitChanged, now = Date.now,
       emitChanged('settings-changed');
       for (const e of runs.values()) { try { e.orch?.nightConfigChanged?.(); } catch { /* one run must not stop the rest */ } }
       const { config } = resolveNightConfig({ user: userLayer() });
-      return { ok: true, line: describeAwayMode({ config, toggle: readToggle(), now: now() }).lines[0] };
+      return { ok: true, line: describeAwayMode({ config, toggle: readToggle(), now: now(), surface: 'chat' }).lines[0] };
     }
     if (req && req.kind === 'run') {
       if (!NIGHT_TOGGLES.includes(req.mode)) return { ok: false, error: `unknown mode "${req.mode}"` };
