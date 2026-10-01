@@ -11817,6 +11817,7 @@ async function loadSettings() {
     paintBudgetSettings(data);
     paintAskSettings(data);
     paintScheduleSettings(data);
+    paintSyncSettings(data);
     paintDebugSpawnSettings(data);
     await paintTitleModelSettings(data);
     await paintAutoModelSettings(data);
@@ -12250,6 +12251,41 @@ document.getElementById('schedIfMissed')?.addEventListener('change', (e) => {
   const grace = document.getElementById('schedGraceMin');
   if (grace) grace.disabled = e.target.value !== 'run';
 });
+
+// Settings › Runs › Sync before run (#527): the instance defaults every project inherits.
+function setSyncDefaultsMsg(text, kind) { setHintMsg('syncDefaultsMsg', text, kind); }
+function paintSyncSettings(data) {
+  const d = data && data.sync;
+  const before = document.getElementById('syncDefBeforeRun');
+  const diverged = document.getElementById('syncDefOnDiverged');
+  const remote = document.getElementById('syncDefRemote');
+  const refresh = document.getElementById('syncDefRefresh');
+  if (!d || !before || !diverged || !remote || !refresh) return;
+  before.checked = d.beforeRun !== false;
+  diverged.value = d.onDiverged;
+  remote.value = d.remote || '';
+  const mins = String(d.refreshMinutes);
+  if (![...refresh.options].some((o) => o.value === mins)) {
+    const opt = document.createElement('option');
+    opt.value = mins; opt.textContent = `Every ${mins} minutes`;
+    refresh.append(opt);
+  }
+  refresh.value = mins;
+}
+function saveSyncDefaults() {
+  const remote = document.getElementById('syncDefRemote').value.trim();
+  postSettingsCard({
+    sync: {
+      beforeRun: document.getElementById('syncDefBeforeRun').checked,
+      onDiverged: document.getElementById('syncDefOnDiverged').value,
+      remote: remote || null,                            // empty = back to the default remote
+      refreshMinutes: Number(document.getElementById('syncDefRefresh').value),
+    },
+  }, { setMsg: setSyncDefaultsMsg, paint: paintSyncSettings });
+}
+document.getElementById('syncDefaultsSave')?.addEventListener('click', saveSyncDefaults);
+document.getElementById('syncDefaultsReset')?.addEventListener('click', () => postSettingsCard(
+  { sync: null }, { setMsg: setSyncDefaultsMsg, paint: paintSyncSettings }));
 
 function setAskLimitsMsg(text, kind) { setHintMsg('askLimitsMsg', text, kind); }
 function paintAskSettings(data) {

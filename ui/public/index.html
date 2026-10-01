@@ -1664,6 +1664,60 @@
 
             <!-- Scheduled runs: the defaults a NEW schedule inherits. Each schedule keeps
                  its own copy, so a change here never rewrites an existing one. -->
+            <!-- Sync before run (#527): the instance defaults each project inherits. -->
+            <section class="card settings-card" id="sync-settings-card" data-min-level="advanced">
+              <div class="card-head">
+                <div class="label-row">
+                  <h2>Sync before run</h2>
+                  <button type="button" class="info-tip" aria-label="About sync before run">i<span class="tip-content hidden">
+                    Defaults for every project. Before a run, Worca fetches the remote and fast-forwards the source branch when it is safe. It never merges or resets a branch with local commits.
+                  </span></button>
+                </div>
+              </div>
+              <label class="switch-row" id="syncDefBeforeRunRow">
+                <input id="syncDefBeforeRun" class="sw-input" type="checkbox" checked>
+                <span class="switch"></span><span class="txt">Sync the source branch before each run</span>
+              </label>
+              <div class="field-grid-2" style="margin-top:14px">
+                <div class="field">
+                  <div class="label-row">
+                    <label for="syncDefOnDiverged">If the source branch has diverged</label>
+                    <button type="button" class="info-tip" aria-label="About diverged branches">i<span class="tip-content hidden">
+                      Diverged: the branch has local commits that are not on the remote, and the remote has commits that are not local. Start from origin leaves the local branch untouched and starts the run from the remote. A scheduled run cannot ask, so Ask me starts it from origin.
+                    </span></button>
+                  </div>
+                  <div class="select-wrap">
+                    <select id="syncDefOnDiverged" class="select">
+                      <option value="ask">Ask me</option>
+                      <option value="origin">Start from origin</option>
+                      <option value="fail">Don't run</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="syncDefRemote">Remote</label>
+                  <input id="syncDefRemote" class="input" type="text" placeholder="origin" spellcheck="false" autocomplete="off" />
+                </div>
+              </div>
+              <div class="field">
+                <label for="syncDefRefresh">Check remotes in the background</label>
+                <div class="select-wrap">
+                  <select id="syncDefRefresh" class="select">
+                    <option value="0">Off</option>
+                    <option value="5">Every 5 minutes</option>
+                    <option value="10">Every 10 minutes</option>
+                    <option value="30">Every 30 minutes</option>
+                    <option value="60">Every hour</option>
+                  </select>
+                </div>
+              </div>
+              <div class="add-project-actions" style="margin-top:14px">
+                <button type="button" id="syncDefaultsReset" class="btn btn-ghost btn-mini">Use defaults</button>
+                <button type="button" id="syncDefaultsSave" class="btn btn-primary btn-mini">Save</button>
+              </div>
+              <small class="hint" id="syncDefaultsMsg"></small>
+            </section>
+
             <section class="card settings-card" id="schedule-settings-card" data-min-level="advanced">
               <div class="card-head">
                 <div class="label-row">
