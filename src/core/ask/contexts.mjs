@@ -1,6 +1,7 @@
 // src/core/ask/contexts.mjs — the Ask chat's context chips: which project / run / workspace /
 // named page a chat was asked in, accumulated across turns (origin first, deduplicated).
 // Pure: the route resolves names (resolveAskContext) and the store persists (addThreadContexts).
+// A chip the conversation produced (mentionedRefs) carries source: 'chat'; a page sighting wins.
 
 export const MAX_CONTEXTS = 20;
 const LABEL_MAX = 80;
@@ -59,10 +60,70 @@ export function mergeContexts(existing, incoming) {
       if (e.label !== e.id || !cur.label) cur.label = e.label;
       if (e.kind === 'run' && nonEmpty(e.home)) cur.home = e.home;
       if (e.pinned === true) cur.pinned = true;
+      if (e.source !== 'chat') delete cur.source;               // a page sighting wins over a chat one
     } else {
       at.set(k, list.length);
       list.push({ ...e });
     }
   }
   return list.length > MAX_CONTEXTS ? [list[0], ...list.slice(-(MAX_CONTEXTS - 1))] : list;
+}
+
+// ── conversation chips ──
+// What a finished turn talked about: the links in its answer and the scope of the main conversation's
+// worca tool calls. Sub-agent calls (never blocks), tool results and the user's own words are left out.
+
+const SEG = '[A-Za-z0-9_-]+';
+// A hash link starts a token or follows link punctuation (`](#…`, `<#…`), never mid-word.
+const LINK_RE = new RegExp(`(?<![\\w#/])#(history|running|projects|workspaces)((?:/${SEG})+)`, 'g');
+const RUN_ID_RE = /^[0-9a-f]{8}$/i;
+const LIVE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const RUN_TOOLS = new Set(['get_run', 'get_run_diff', 'track_run']);
+const WORCA_PREFIX = 'mcp__worca__';
+
+function linkRef(route, segs) {
+  if (route === 'projects' || route === 'workspaces') return { kind: route.slice(0, -1), id: segs[0] };
+  if (route === 'running') return LIVE_ID_RE.test(segs[0]) ? { kind: 'liveRun', id: segs[0] } : null;
+  // #history/<projectKey>/<runId>[/details/<tab>] or #history/workspaces/<wsId>/<runId>[/…]
+  if (segs[0] === 'workspaces') return segs[2] ? { kind: 'run', id: segs[2], workspaceId: segs[1] } : null;
+  return segs[1] ? { kind: 'run', id: segs[1], projectKey: segs[0] } : null;
+}
+
+function toolRefs(block) {
+  const out = [];
+  const name = typeof block.name === 'string' && block.name.startsWith(WORCA_PREFIX) ? block.name.slice(WORCA_PREFIX.length) : null;
+  const input = block.input;
+  if (!name || !input || typeof input !== 'object' || input._truncated) return out;   // a clipped input is unreadable
+  const projectKey = nonEmpty(input.projectKey) ? input.projectKey : null;
+  const workspaceId = nonEmpty(input.workspaceId) ? input.workspaceId : null;
+  if (RUN_TOOLS.has(name) && nonEmpty(input.id)) {
+    if (LIVE_ID_RE.test(input.id)) out.push({ kind: 'liveRun', id: input.id });          // track_run's app run id
+    else if (RUN_ID_RE.test(input.id)) {
+      out.push({ kind: 'run', id: input.id, ...(workspaceId ? { workspaceId } : projectKey ? { projectKey } : {}) });
+    }
+  }
+  if (projectKey) out.push({ kind: 'project', id: projectKey });
+  if (workspaceId) out.push({ kind: 'workspace', id: workspaceId });
+  return out;
+}
+
+/** Raw refs `{kind: 'project'|'workspace'|'run'|'liveRun', id, projectKey?, workspaceId?}` from one finished
+ *  turn's summary (`{text, blocks}`), first sighting per kind:id. The server resolves them into chips. */
+export function mentionedRefs(summary) {
+  const s = summary && typeof summary === 'object' ? summary : {};
+  const refs = [];
+  if (typeof s.text === 'string') {
+    for (const m of s.text.matchAll(LINK_RE)) {
+      const r = linkRef(m[1], m[2].split('/').slice(1));
+      if (r) refs.push(r);
+    }
+  }
+  for (const b of Array.isArray(s.blocks) ? s.blocks : []) {
+    if (b && b.kind === 'tool') refs.push(...toolRefs(b));
+  }
+  const seen = new Set();
+  return refs.filter((r) => {
+    const k = `${r.kind}:${r.id}`;
+    return seen.has(k) ? false : seen.add(k);
+  });
 }
