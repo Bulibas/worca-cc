@@ -87,7 +87,7 @@ test('renderQuestion: clarify and gate arms are byte-identical to before', () =>
   assert.match(clarify, /\/answer \*2951 1$/m);
   const gate = text(renderQuestion(META, { kind: 'gate', issues: [{ severity: 'major', title: 'Empty input' }] }));
   assert.match(gate, /\*\*Status:\*\* waiting for approval/);
-  assert.match(gate, /\/approve \*2951 to continue/);
+  assert.match(gate, /`\/approve \*2951` — no more cycles, continue/);
 });
 
 // ── /answer grammar (P1 C9/C10, ruling X8) ─────────────────────────────────────

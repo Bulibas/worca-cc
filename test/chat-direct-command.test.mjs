@@ -83,6 +83,19 @@ test('/direct addressed to the bot by name records only the prose', async () => 
   assert.deepEqual(calls, [['direct', 'run-aaaa1111', 'cut the roadmap section']]);
 });
 
+test('/direct after a Slack/Discord wire mention records only the prose', async () => {
+  const { send, calls } = fixture();
+  const out = await send('<@U0123ABC> /direct cut the roadmap section');
+  assert.equal(out.severity, 'success', JSON.stringify(out));
+  assert.deepEqual(calls, [['direct', 'run-aaaa1111', 'cut the roadmap section']]);
+});
+
+test('/direct strips a consumed ref behind a wire mention and keeps the mention', async () => {
+  const { send, calls } = fixture();
+  await send('/direct <@U0123ABC> *aaaa1111 cut the roadmap slide');
+  assert.deepEqual(calls, [['direct', 'run-aaaa1111', '<@U0123ABC> cut the roadmap slide']]);
+});
+
 // A first word that merely starts with '*' is not a run ref.
 test('/direct with markdown emphasis in the first word is prose, not a ref', async () => {
   const { send, calls } = fixture();

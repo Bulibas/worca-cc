@@ -252,6 +252,7 @@ import {
 } from '../src/core/source-bindings.mjs';
 import { createChannelHost } from '../src/core/chat/channel-host.mjs';
 import { createCommandRouter } from '../src/core/chat/command-router.mjs';
+import { parseIdList } from '../src/core/chat/allowlist.mjs';
 import { createChatContext } from '../src/core/chat/chat-context.mjs';
 import { createNotifier } from '../src/core/chat/notifier.mjs';
 import { TokenBucket } from '../src/core/chat/rate-limiter.mjs';
@@ -2905,10 +2906,18 @@ const chatActions = {
   listProjects: async () => (await listProjects()).map((p) => ({ name: p.name || path.basename(p.path || ''), path: p.path })),
 };
 
+// "plugin/channelId" -> the latest command a NON-allow-listed chat sent. Settings
+// shows it, so "my /approve did nothing" has a visible reason and the id to add.
+// In memory only (a diagnostic; the next refused command re-populates it).
+const chatRefusals = new Map();
+
 const chatRouter = createCommandRouter({
   actions: chatActions,
   chatContext,
   logger: (level, msg) => console.error(`[worca-ui] chat ${level}: ${msg}`),
+  onRefused: ({ plugin, channelId, chatId, command }) => {
+    chatRefusals.set(`${plugin}/${channelId}`, { chatId, command, at: new Date().toISOString() });
+  },
 });
 
 // Same-chat commands must run strictly in order: a batched ['/use beta','/runs']
@@ -9498,9 +9507,26 @@ function serverMockMode() {
 // /api/chat* -> channel worker status + test delivery (design §4.8). Prefs ride
 // GET/POST /api/settings; per-plugin channel CONFIG rides /api/plugins/:name/config.
 // ---------------------------------------------------------------------------
+/** Channel status rows + each channel's command reach: how many chats may send
+ *  commands, and the last command refused (hidden once its chat is allowed). */
+function chatStatusRows() {
+  const entries = channelHost.list();
+  return channelHost.status().map((row) => {
+    const entry = entries.find((e) => e.plugin === row.plugin && e.channelId === row.channelId);
+    let ids = [];
+    try { ids = parseIdList(readPluginConfig(row.plugin, entry?.configSchema || []).allowedChatIds); }
+    catch { /* unreadable config: nobody is allowed */ }
+    const refused = chatRefusals.get(`${row.plugin}/${row.channelId}`) || null;
+    return {
+      ...row,
+      commands: { allowed: ids.length, lastRefused: refused && !ids.includes(refused.chatId) ? refused : null },
+    };
+  });
+}
+
 app.get('/api/chat/status', (_req, res) => {
   try {
-    res.json({ channels: channelHost.status() });
+    res.json({ channels: chatStatusRows() });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
