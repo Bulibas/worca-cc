@@ -305,7 +305,7 @@
                 </div>
 
                 <!-- Branch pair: one decision (from → into), so one compact row. -->
-                <div class="field-grid-2" id="branch-fields" data-min-level="advanced">
+                <div class="field-grid-2 branch-pair" id="branch-fields" data-min-level="advanced">
                   <div class="field field-compact">
                     <label for="sourceBranch">Source branch</label>
                     <div class="select-wrap" id="sourceBranchWrap">
@@ -317,7 +317,21 @@
                       <div class="switch" id="ws-source-previous" role="switch" tabindex="0" aria-checked="false" aria-label="Branch off the run before it"></div>
                       <span class="txt">Branch off the run before it</span>
                     </div>
-                    <small class="hint" id="sourceBranchHint">The worktree branches off this. Defaults to the current branch.</small>
+                    <!-- Sync before run (#527): status pill, Sync, Auto-sync — one left-aligned row. -->
+                    <div class="sync-row" id="sync-row" hidden>
+                      <button type="button" class="sync-pill grey" id="sync-pill" aria-haspopup="dialog">
+                        <span class="sdot" aria-hidden="true"></span><span class="sync-pill-txt">Checking…</span>
+                        <svg class="chev" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                      </button>
+                      <button type="button" class="btn btn-mini sync-btn" id="sync-btn">
+                        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5V5h-2.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        <span>Sync</span>
+                      </button>
+                      <label class="switch-row sync-auto" id="sync-auto-row">
+                        <input id="syncAuto" class="sw-input" type="checkbox" checked>
+                        <span class="switch switch-sm"></span><span class="txt">Auto-sync</span>
+                      </label>
+                    </div>
                   </div>
 
                   <div class="field field-compact">
@@ -538,11 +552,20 @@
                   </button>
                   <!-- One control for Pause/Resume. The label lives in its own span so a busy
                        state swaps only the word and the inline SVG survives. -->
-                  <button type="button" class="rd-pause" data-action="pause" hidden>
-                    <svg class="ico-pause" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.5"></rect><rect x="14" y="5" width="4" height="14" rx="1.5"></rect></svg>
-                    <svg class="ico-play" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
-                    <span class="rd-btn-label">Pause</span>
-                  </button>
+                  <!-- Split Resume: the caret (Advanced, paused only) opens "Resume at…", like #start-split. -->
+                  <div class="btn-split mini rd-resume-split">
+                    <button type="button" class="rd-pause" data-action="pause" hidden>
+                      <svg class="ico-pause" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.5"></rect><rect x="14" y="5" width="4" height="14" rx="1.5"></rect></svg>
+                      <svg class="ico-play" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
+                      <span class="rd-btn-label">Pause</span>
+                    </button>
+                    <button type="button" class="btn-split-more rd-resume-more" data-min-level="advanced" aria-haspopup="menu" aria-expanded="false" title="Schedule the resume" aria-label="Schedule the resume" hidden>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+                    </button>
+                    <div class="btn-split-menu rd-resume-menu" role="menu" hidden>
+                      <button type="button" role="menuitem" class="rd-resume-at"><b>Resume at…</b><small>Schedule the resume</small></button>
+                    </div>
+                  </div>
                   <button type="button" class="rd-stop" hidden>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
                     <span class="rd-btn-label">Stop</span>
@@ -622,6 +645,8 @@
                     <!-- NO `hidden`: the caption is driven purely by the CSS sibling rule
                          off copyBranchToClipboard's own 1200ms `.copied` window. -->
                     <span class="rd-copied">Copied</span>
+                    <!-- Sync before run (#527): shown only when the run has a Sync row; opens its log. -->
+                    <button type="button" class="rd-sync" hidden data-min-level="advanced" title="Show the Sync log"></button>
                     <span class="rd-spacer"></span>
                   </div>
                 </header>
@@ -718,10 +743,20 @@
                   <!-- The label lives in its own span: the busy states ("Resuming…" /
                        "Archiving…") swap ONLY that node, so the inline SVG survives and
                        the error path can restore the word. -->
-                  <button type="button" class="hd-resume btn-ghost" hidden>
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
-                    <span class="hd-btn-label">Resume</span>
-                  </button>
+                  <!-- Split Resume (History detail): the ghost Resume keeps its look; the caret opens
+                       the schedule-resume menu. Gated at Advanced like .hd-more-wrap. -->
+                  <div class="btn-split mini hd-resume-split" hidden>
+                    <button type="button" class="hd-resume btn-ghost" hidden>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
+                      <span class="hd-btn-label">Resume</span>
+                    </button>
+                    <button type="button" class="btn-split-more hd-resume-more" data-min-level="advanced" aria-haspopup="menu" aria-expanded="false" title="Schedule the resume" aria-label="Schedule the resume">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+                    </button>
+                    <div class="btn-split-menu hd-resume-menu" role="menu" hidden>
+                      <button type="button" role="menuitem" class="hd-resume-at-item"><b>Resume at…</b><small>Schedule the resume</small></button>
+                    </div>
+                  </div>
                   <!-- Archive and Report live behind one ⋯ trigger, but keep their own
                        classes: every gate, the busy-label swap and hdSetArchiveGate all
                        address them directly, and only their PLACEMENT moved here.
@@ -1058,10 +1093,12 @@
                   <h1>Projects</h1>
                   <div class="sub">Registered projects. Open one for its details and memory; add a folder or remove one from the list — files on disk and run history are never touched.</div>
                 </div>
+                <div class="topbar-actions"><button class="btn btn-mini" id="projects-sync-all" type="button">Sync all</button>
                 <button type="button" id="project-add-btn" class="btn btn-primary btn-mini">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
                   Add project
                 </button>
+                </div>
               </div>
               <p id="projects-msg" class="form-msg" aria-live="polite"></p>
               <div class="run-list" id="projects-list"></div>
@@ -1535,6 +1572,60 @@
 
             <!-- Scheduled runs: the defaults a NEW schedule inherits. Each schedule keeps
                  its own copy, so a change here never rewrites an existing one. -->
+            <!-- Sync before run (#527): the instance defaults each project inherits. -->
+            <section class="card settings-card" id="sync-settings-card" data-min-level="advanced">
+              <div class="card-head">
+                <div class="label-row">
+                  <h2>Sync before run</h2>
+                  <button type="button" class="info-tip" aria-label="About sync before run">i<span class="tip-content hidden">
+                    Defaults for every project. Before a run, Worca fetches the remote and fast-forwards the source branch when it is safe. It never merges or resets a branch with local commits.
+                  </span></button>
+                </div>
+              </div>
+              <label class="switch-row" id="syncDefBeforeRunRow">
+                <input id="syncDefBeforeRun" class="sw-input" type="checkbox" checked>
+                <span class="switch"></span><span class="txt">Sync the source branch before each run</span>
+              </label>
+              <div class="field-grid-2" style="margin-top:14px">
+                <div class="field">
+                  <div class="label-row">
+                    <label for="syncDefOnDiverged">If the source branch has diverged</label>
+                    <button type="button" class="info-tip" aria-label="About diverged branches">i<span class="tip-content hidden">
+                      Diverged: the branch has local commits that are not on the remote, and the remote has commits that are not local. Start from origin leaves the local branch untouched and starts the run from the remote. A scheduled run cannot ask, so Ask me starts it from origin.
+                    </span></button>
+                  </div>
+                  <div class="select-wrap">
+                    <select id="syncDefOnDiverged" class="select">
+                      <option value="ask">Ask me</option>
+                      <option value="origin">Start from origin</option>
+                      <option value="fail">Don't run</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="syncDefRemote">Remote</label>
+                  <input id="syncDefRemote" class="input" type="text" placeholder="origin" spellcheck="false" autocomplete="off" />
+                </div>
+              </div>
+              <div class="field">
+                <label for="syncDefRefresh">Check remotes in the background</label>
+                <div class="select-wrap">
+                  <select id="syncDefRefresh" class="select">
+                    <option value="0">Off</option>
+                    <option value="5">Every 5 minutes</option>
+                    <option value="10">Every 10 minutes</option>
+                    <option value="30">Every 30 minutes</option>
+                    <option value="60">Every hour</option>
+                  </select>
+                </div>
+              </div>
+              <div class="add-project-actions" style="margin-top:14px">
+                <button type="button" id="syncDefaultsReset" class="btn btn-ghost btn-mini">Use defaults</button>
+                <button type="button" id="syncDefaultsSave" class="btn btn-primary btn-mini">Save</button>
+              </div>
+              <small class="hint" id="syncDefaultsMsg"></small>
+            </section>
+
             <section class="card settings-card" id="schedule-settings-card" data-min-level="advanced">
               <div class="card-head">
                 <div class="label-row">
@@ -2205,6 +2296,8 @@
             <select id="shipit-base-branch" class="select shipit-base-branch" aria-label="Base branch"></select>
           </span>
         </div>
+        <!-- Sync before run (#527): the base moved on the remote since this run started. -->
+        <small class="hint warn" id="shipit-base-warn" hidden></small>
         <!-- Fork support: where the branch is pushed and which repo the PR opens in
              (GitHub's "compare across forks"). Filled from GET /api/pr/remotes on
              open; hidden until the list arrives and stays hidden when it cannot be

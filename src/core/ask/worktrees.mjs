@@ -15,6 +15,8 @@ import { listProjects } from '../projects.mjs';
 import { readStoreMeta, findPipelineRowById } from '../artifacts.mjs';
 import { branchExists } from '../git-info.mjs';
 import { createDetachedWorktree, removeWorktree, worktreeHead, isValidSourceRef } from '../worktree.mjs';
+import { resolveSourceRef, fetchRemote, INTERACTIVE_TTL_MS } from '../git-sync.mjs';
+import { effectiveSyncSettings } from '../project-sync.mjs';
 import { ASK_ID_RE, askRoot } from './store.mjs';
 import { ASK_LIMITS } from './limits.mjs';
 
@@ -135,8 +137,29 @@ export async function openAskWorktree({ threadId, projectKey, ref, runId, signal
   if (!existsSync(join(t.projectDir, '.git'))) {
     throw new AskWorktreeError(`project ${t.projectKey} has no git repository at ${t.projectDir}`);
   }
+  let resolvedFrom = null, refStale = null;
   if (!(await isValidSourceRef(t.projectDir, t.ref))) {
-    throw new AskWorktreeError(`ref does not resolve: ${JSON.stringify(t.ref)}`);
+    // #527: a bare branch name that only the remote has — fetch once (shared TTL) and use <remote>/<ref>.
+    const remote = effectiveSyncSettings(t.projectKey).remote;
+    const STALE_NOTE = ' (the remote could not be fetched — the branch may exist; try again or check list_branches)';
+    if (!t.runId && t.ref.startsWith(`${remote}/`)) {
+      // <remote>/<name> for a branch pushed since the last fetch: resolveSourceRef would look up
+      // refs/remotes/<remote>/<remote>/<name>, so fetch and re-check the ref as given.
+      const f = await fetchRemote(t.projectDir, { remote, maxAgeMs: INTERACTIVE_TTL_MS });
+      const unfetched = !f.ok && f.kind !== 'no-remote' && f.kind !== 'bad-remote';   // no remote: nothing to retry
+      if (!(await isValidSourceRef(t.projectDir, t.ref))) {
+        throw new AskWorktreeError(`ref does not resolve: ${JSON.stringify(t.ref)}${unfetched ? STALE_NOTE : ''}`);
+      }
+    } else {
+      const r = !t.runId ? await resolveSourceRef(t.projectDir, t.ref, { remote }) : { ok: false };
+      if (!r.ok || !r.remoteOnly) {
+        throw new AskWorktreeError(`ref does not resolve: ${JSON.stringify(t.ref)}${r.kind === 'stale' ? STALE_NOTE : ''}`);
+      }
+      resolvedFrom = t.ref;
+      t.ref = r.ref;
+      // The worktree opens on the LAST fetched commit: tell the model (stale is not missing).
+      if (r.stale) refStale = { stale: true, fetchedAt: r.fetchedAt || null };
+    }
   }
   const wtId = newWtId();
   mkdirSync(worktreesDir(threadId), { recursive: true });
@@ -163,7 +186,8 @@ export async function openAskWorktree({ threadId, projectKey, ref, runId, signal
     try { await removeWorktree({ projectDir: t.projectDir, worktreeDir: dir, branch: null, force: true }); } catch { /* best-effort */ }
     throw err instanceof AskWorktreeError ? err : new AskWorktreeError(`worktree could not be registered: ${err && err.message ? err.message : err}`);
   }
-  return getAskWorktree(threadId, wtId);
+  const wt = getAskWorktree(threadId, wtId);
+  return wt && resolvedFrom ? { ...wt, resolvedFrom, ...(refStale || {}) } : wt;
 }
 
 export async function removeAskWorktree({ threadId, wtId } = {}) {

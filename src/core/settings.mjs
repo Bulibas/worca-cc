@@ -934,6 +934,7 @@ export const SETTINGS_POST_KEYS = Object.freeze([
   'memoryDefrag',                            // Settings › Memory: the defragment model + effort
   'workspaceScan',                           // Settings › Runs › Workspaces: the scan's models
   'schedule',                                // scheduled-run defaults { graceMin, ifMissed, maxFailures }
+  'sync',                                    // sync before run (#527) { beforeRun, remote, refreshMinutes, onDiverged }
 ]);
 
 // ── Title-generation model + hidden built-ins (#422) ─────────────────────────
@@ -1467,6 +1468,7 @@ export async function removeGlobalModel(id) {
 //     copilot:   { githubToken?, accountType?, acknowledgedTerms?, termsVersion?, maxConcurrent?, login? },
 //     openai:    { baseUrl?, apiKey?, maxConcurrent? },
 //     anthropic: { baseUrl?, apiKey?, maxConcurrent? },
+//     speech:    { stt: {...}, tts: {...} },   // voice mode, NOT an upstream — see the Speech block below
 //   }
 // ---------------------------------------------------------------------------
 
@@ -1610,6 +1612,103 @@ export async function updateProvider(name, patch = {}, { dryRun = false } = {}) 
   return providerConfig(name);
 }
 
+// ── Speech (Ask Worca voice mode, docs/speech.md) ──
+//   providers: { …, speech: {
+//     stt: { engine?, baseUrl?, apiKey?, model?, language?, pause? },
+//     tts: { engine?, baseUrl?, apiKey?, model?, voice?, speed? },
+//   } }
+// engine: 'browser' (the default — Whisper / Kokoro run in the page, src/core/speech-assets.mjs)
+// or 'server' (the baseUrl fields); tts may also be 'off' (replies stay text only).
+// NOT a model-bridge upstream: it never joins UPSTREAM_PROVIDERS, allProviders(),
+// the catalog or /api/models. Keys are literal or a whole-value ${VAR}, resolved at
+// use time by resolveProviderSecret like every provider key.
+const SPEECH_DEFAULTS = Object.freeze({
+  // pause: seconds of silence that end an utterance (the voice detector's wait), any engine.
+  stt: Object.freeze({ engine: 'browser', baseUrl: 'http://127.0.0.1:8080/v1', model: 'whisper-1', language: 'auto', pause: 1.2 }),
+  tts: Object.freeze({ engine: 'browser', baseUrl: '', model: 'tts-1', voice: 'af_heart', speed: 1 }),
+});
+const SPEECH_FIELDS = Object.freeze({
+  stt: Object.freeze(['engine', 'baseUrl', 'apiKey', 'model', 'language', 'pause']),
+  tts: Object.freeze(['engine', 'baseUrl', 'apiKey', 'model', 'voice', 'speed']),
+});
+const SPEECH_ENGINES = Object.freeze({ stt: Object.freeze(['browser', 'server']), tts: Object.freeze(['browser', 'server', 'off']) });
+const SPEECH_LANG_RE = /^(auto|[a-z]{2,3})$/;
+const SPEECH_ID_RE = /^[\w.:/@+-]{1,128}$/;
+const speechObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** Why `v` is not a valid value for speech field `k` of `kind`, or null when it is. */
+function speechFieldError(k, v, kind) {
+  if (k === 'engine') return typeof v === 'string' && SPEECH_ENGINES[kind].includes(v.trim().toLowerCase()) ? null : `engine must be ${SPEECH_ENGINES[kind].map((e) => `"${e}"`).join(' or ')}`;
+  if (k === 'baseUrl') return isUpstreamBaseUrl(v) ? null : 'baseUrl must be an http(s) URL with no query or fragment';
+  if (k === 'apiKey') return typeof v === 'string' && v.trim() ? null : 'apiKey must be a non-empty string';
+  if (k === 'language') return typeof v === 'string' && SPEECH_LANG_RE.test(v.trim().toLowerCase()) ? null : 'language must be "auto" or an ISO 639 code such as "bg"';
+  if (k === 'pause') { const n = Number(v); return (typeof v === 'number' || typeof v === 'string') && String(v).trim() !== '' && Number.isFinite(n) && n >= 0.3 && n <= 5 ? null : 'pause must be a number of seconds from 0.3 to 5'; }
+  if (k === 'speed') { const n = Number(v); return (typeof v === 'number' || typeof v === 'string') && Number.isFinite(n) && n >= 0.25 && n <= 4 ? null : 'speed must be a number from 0.25 to 4'; }
+  return typeof v === 'string' && SPEECH_ID_RE.test(v.trim()) ? null : `${k} must be an id (letters, digits and . _ - : / @ +)`;
+}
+
+function normSpeechField(k, v) {
+  if (k === 'baseUrl') return v.trim().replace(/\/+$/, '');
+  if (k === 'speed' || k === 'pause') return Number(v);
+  if (k === 'language' || k === 'engine') return v.trim().toLowerCase();
+  return v.trim();
+}
+
+/** Stored speech block → only the valid fields (never throws; like sanitizeProvider). */
+function sanitizeSpeech(raw) {
+  const r = speechObj(raw) ? raw : {};
+  const out = { stt: {}, tts: {} };
+  for (const kind of Object.keys(SPEECH_FIELDS)) {
+    const side = speechObj(r[kind]) ? r[kind] : {};
+    for (const k of SPEECH_FIELDS[kind]) {
+      if (side[k] === undefined) continue;
+      const why = speechFieldError(k, side[k], kind);
+      if (why) console.warn(`[worca] providers.speech.${kind}.${k}: ${why} — ignored`);
+      else out[kind][k] = normSpeechField(k, side[k]);
+    }
+  }
+  return out;
+}
+
+/** Effective speech config: defaults under the stored block. The key stays raw (literal or ${VAR}). */
+export function speechConfig() {
+  const d = { stt: { ...SPEECH_DEFAULTS.stt }, tts: { ...SPEECH_DEFAULTS.tts } };
+  if (process.env.NODE_TEST_CONTEXT && !process.env.WORCA_TEST_ALLOW_HOME_FALLBACK) return d;
+  const all = readSettings().providers;
+  const s = sanitizeSpeech(speechObj(all) ? all.speech : undefined);
+  return { stt: { ...d.stt, ...s.stt }, tts: { ...d.tts, ...s.tts } };
+}
+
+/** Patch { stt?: {...}, tts?: {...} }; '' / null clears a field back to its default. */
+export async function updateSpeech(patch = {}) {
+  assertTestSettingsAccess();
+  if (!speechObj(patch)) throw new Error('speech patch must be an object');
+  for (const [kind, side] of Object.entries(patch)) {
+    if (!SPEECH_FIELDS[kind]) throw new Error(`unknown speech service ${JSON.stringify(kind)} (stt or tts)`);
+    if (!speechObj(side)) throw new Error(`speech.${kind} must be an object`);
+    for (const [k, v] of Object.entries(side)) {
+      if (!SPEECH_FIELDS[kind].includes(k)) throw new Error(`unknown speech field ${JSON.stringify(k)} for ${kind}`);
+      if (isClearInput(v)) continue;
+      const why = speechFieldError(k, v, kind);
+      if (why) throw new Error(`${kind}: ${why}`);
+    }
+  }
+  const settings = readSettings();
+  const all = speechObj(settings.providers) ? settings.providers : {};
+  const cur = speechObj(all.speech) ? { ...all.speech } : {};
+  for (const [kind, side] of Object.entries(patch)) {
+    const s = speechObj(cur[kind]) ? { ...cur[kind] } : {};
+    for (const [k, v] of Object.entries(side)) {
+      if (isClearInput(v)) delete s[k]; else s[k] = normSpeechField(k, v);
+    }
+    if (Object.keys(s).length) cur[kind] = s; else delete cur[kind];
+  }
+  if (Object.keys(cur).length) all.speech = cur; else delete all.speech;
+  if (Object.keys(all).length) settings.providers = all; else delete settings.providers;
+  await persistSettings(settings);
+  return speechConfig();
+}
+
 /** Record the Copilot terms acknowledgement at the current wording version. */
 export async function acknowledgeCopilotTerms(now = new Date()) {
   return updateProvider('copilot', { acknowledgedTerms: now.toISOString(), termsVersion: COPILOT_TERMS_VERSION });
@@ -1740,4 +1839,48 @@ export async function setScheduleDefaults(patch = {}) {
   if (has('maxFailures')) put('scheduleMaxFailures', patch.maxFailures);
   await persistSettings(settings);
   return scheduleDefaults();
+}
+
+// ── Sync before run (#527) ─────────────────────────────────────────────────
+export const SYNC_ON_DIVERGED = Object.freeze(['ask', 'origin', 'fail']);
+export const DEFAULT_SYNC_SETTINGS = Object.freeze({ beforeRun: true, remote: 'origin', refreshMinutes: 10, onDiverged: 'ask' });
+const SYNC_REMOTE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+
+/** Merge `v` over `base`, keeping only valid keys. Pure. */
+export function normalizeSyncSettings(v, base = DEFAULT_SYNC_SETTINGS) {
+  const o = v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  return {
+    beforeRun: typeof o.beforeRun === 'boolean' ? o.beforeRun : base.beforeRun,
+    remote: typeof o.remote === 'string' && SYNC_REMOTE_RE.test(o.remote) ? o.remote : base.remote,
+    refreshMinutes: Number.isInteger(o.refreshMinutes) && o.refreshMinutes >= 0 && o.refreshMinutes <= 1440 ? o.refreshMinutes : base.refreshMinutes,
+    onDiverged: SYNC_ON_DIVERGED.includes(o.onDiverged) ? o.onDiverged : base.onDiverged,
+  };
+}
+export function syncDefaults() { return normalizeSyncSettings(readSettings().sync); }
+
+/** @throws {Error} on anything but a partial, valid sync object (null / '' resets; a null key resets that key). */
+export function assertSyncSettingsInput(patch) {
+  if (patch === null || patch === '') return;
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('sync must be an object');
+  for (const k of Object.keys(patch)) if (!Object.hasOwn(DEFAULT_SYNC_SETTINGS, k)) throw new Error(`unknown sync setting: ${k}`);
+  const set = (k) => k in patch && patch[k] !== null;
+  if (set('beforeRun') && typeof patch.beforeRun !== 'boolean') throw new Error('sync.beforeRun must be true or false');
+  if (set('remote') && !(typeof patch.remote === 'string' && SYNC_REMOTE_RE.test(patch.remote))) throw new Error('sync.remote must be a remote NAME (e.g. origin), never a URL');
+  if (set('refreshMinutes') && !(Number.isInteger(patch.refreshMinutes) && patch.refreshMinutes >= 0 && patch.refreshMinutes <= 1440)) throw new Error('sync.refreshMinutes must be an integer 0–1440 (0 = never)');
+  if (set('onDiverged') && !SYNC_ON_DIVERGED.includes(patch.onDiverged)) throw new Error(`sync.onDiverged must be one of ${SYNC_ON_DIVERGED.join(' | ')}`);
+}
+export async function setSyncDefaults(patch) {
+  assertSyncSettingsInput(patch);
+  const settings = readSettings();
+  if (patch === null || patch === '') delete settings.sync;
+  else {
+    // Store only the keys someone set: a key left out follows the built-in default as it changes.
+    const prev = settings.sync && typeof settings.sync === 'object' && !Array.isArray(settings.sync) ? settings.sync : {};
+    const next = {};
+    for (const k of Object.keys(DEFAULT_SYNC_SETTINGS)) if (Object.hasOwn(prev, k)) next[k] = normalizeSyncSettings(prev)[k];
+    for (const [k, v] of Object.entries(patch)) { if (v === null) delete next[k]; else next[k] = v; }
+    if (Object.keys(next).length) settings.sync = next; else delete settings.sync;
+  }
+  await persistSettings(settings);
+  return syncDefaults();
 }

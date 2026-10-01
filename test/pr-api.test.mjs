@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { app } from '../ui/server.mjs';
 import { _testing as gitInfo } from '../src/core/git-info.mjs';
+import { _testing as gitSync } from '../src/core/git-sync.mjs';
 import { projectKey } from '../src/core/store.mjs';
 import { _resetForTests } from '../src/core/db.mjs';
 import { writeStoreMeta, persistPrState, createPipeline, writeState } from '../src/core/artifacts.mjs';
@@ -43,12 +44,25 @@ before(async () => {
 after(async () => {
   if (srv) await new Promise((r) => srv.close(r));
   gitInfo.reset();
+  gitSync.reset();
   _resetForTests();
   if (prevHome === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prevHome;
   await rm(home, { recursive: true, force: true });
 });
 
-beforeEach(() => { gitInfo.reset(); prDesc.reset(); });
+beforeEach(() => { gitInfo.reset(); gitSync.reset(); prDesc.reset(); });
+
+// git-sync's runner (the base-freshness fetch, #527): upstream is a github remote; every argv
+// lands in `seen`; `rev-list --count` answers `moved`.
+function stubSyncRepo(seen, { moved = '0' } = {}) {
+  gitSync.setRunner((args) => {
+    seen.push(args);
+    if (args[0] === 'remote' && args[1] === 'get-url') return Promise.resolve({ ok: true, stdout: 'git@github.com:up/repo.git\n', stderr: '', code: 0 });
+    if (args[0] === 'rev-list' && args[1] === '--count') return Promise.resolve({ ok: true, stdout: `${moved}\n`, stderr: '', code: 0 });
+    if (args[0] === 'rev-parse') return Promise.resolve({ ok: false, stdout: '', stderr: '', code: 1 });
+    return Promise.resolve({ ok: true, stdout: '', stderr: '', code: 0 });
+  });
+}
 
 const post = (body) => fetch(`${base}/api/pr`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -321,13 +335,39 @@ test('GET /api/pr/remotes lists each remote\'s branches (local refs, no HEAD, no
   assert.equal(j.defaultBase, 'main');
   assert.deepEqual(j.branches, { origin: ['main', 'release'], upstream: ['dev', 'main'] });
   assert.ok(seen.some((c) => c[1] === 'for-each-ref'), 'read from the local remote-tracking refs');
-  assert.ok(!seen.some((c) => c[1] === 'fetch' || c[1] === 'ls-remote'), 'never the network');
+  assert.ok(!seen.some((c) => c[1] === 'fetch' || c[1] === 'ls-remote'), 'git-info itself never goes to the network');
+  // The fixture dir is not a git repo: "no remote" is nothing to compare, never "stale".
+  assert.deepEqual(j.baseStatus, { base: 'main', remote: 'upstream', movedSinceRun: null, fetchedAt: null, stale: false });
   // Refs that cannot be read are no reason to fail the dialog: no branches, same chain.
   gitInfo.setRunner((cmd, args) => (cmd === 'git' && args[0] === 'for-each-ref'
     ? Promise.resolve({ ok: false, stdout: '', stderr: 'fatal: bad', code: 128 })
     : Promise.resolve({ ok: true, stdout: cmd === 'git' && args[0] === 'remote' ? REMOTES_V : '', stderr: '', code: 0 })));
   const k = await (await getRemotes({ projectKey: betaKey, id: betaId })).json();
   assert.deepEqual([k.branches, k.chain, k.defaultBase], [{}, ['main'], 'main']);
+});
+
+test('GET /api/pr/remotes fetches the base remote once (git-sync) and reports baseStatus', async () => {
+  await setPrRemotePrefs(betaRepo, {});
+  stubForkRepo([]);
+  const seen = [];
+  stubSyncRepo(seen);
+  const j = await (await getRemotes({ projectKey: betaKey, id: betaId })).json();
+  assert.deepEqual(seen.filter((a) => a[0] === 'fetch'), [['fetch', '--prune', '--no-tags', 'upstream']], 'exactly one fetch of the base remote');
+  assert.equal(j.baseStatus.remote, 'upstream');
+  assert.equal(j.baseStatus.stale, false);
+  assert.equal(j.baseStatus.movedSinceRun, null, 'no recorded baseSha: unknown, never 0');
+});
+
+test('GET /api/pr/remotes: a run with baseSha gets baseStatus.movedSinceRun from rev-list --count', async () => {
+  await setPrRemotePrefs(betaRepo, {});
+  const seeded = await seedPipeline(betaRepo, { title: 'Base moved', status: 'stopped', startedAt: '2026-06-02T00:00:00Z',
+    branch: { source: 'main', feature: 'worca-cc/base-moved', branchKept: true, commit: 'abc', baseSha: 'a'.repeat(40) } });
+  stubForkRepo([]);
+  const seen = [];
+  stubSyncRepo(seen, { moved: '3' });
+  const j = await (await getRemotes({ projectKey: betaKey, id: seeded.id })).json();
+  assert.equal(j.baseStatus.movedSinceRun, 3);
+  assert.ok(seen.some((a) => a[0] === 'rev-list' && a[2] === `${'a'.repeat(40)}..refs/remotes/upstream/main`), 'measured from baseSha to the base remote');
 });
 
 test('POST /api/pr baseBranch reaches gh pr create --base; the response shape and the remembered remotes are unchanged', async () => {

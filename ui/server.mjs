@@ -60,6 +60,7 @@ import {
   memoryDefragModel, setMemoryDefragModel, assertMemoryDefragModelInput,
   workspaceScanModels, setWorkspaceScanModels, assertWorkspaceScanInput,
   scheduleDefaults, setScheduleDefaults,
+  syncDefaults, setSyncDefaults, assertSyncSettingsInput, DEFAULT_SYNC_SETTINGS,
 } from '../src/core/settings.mjs';
 import { resolveDefragModel, defragDefaultModel, defragWorkflowView, checkStartPair } from '../src/core/memory-defrag-model.mjs';
 import { describeTitleModel } from '../src/core/title.mjs';
@@ -74,7 +75,7 @@ import {
   listMessages as askListMessages, setMessageBlocks as askSetMessageBlocks,
   findCard as askFindCard, updateCardBlock as askUpdateCardBlock,
   addAttachment as askAddAttachment, listAttachments as askListAttachments,
-  getAttachment as askGetAttachment, attachmentPath as askAttachmentPath, threadAttachmentBytes as askThreadAttachmentBytes,
+  getAttachment as askGetAttachment, attachmentPath as askAttachmentPath,
   linkRun as askLinkRun, updateRunLink as askUpdateRunLink, listRunLinks as askListRunLinks,
   findRunLinksByPipeline as askFindRunLinksByPipeline,
   finishMessage as askFinishMessage,
@@ -144,7 +145,7 @@ import {
   PREDEFINED_MODELS, agentSteps, EFFORTS, catalogHasModel,
   readRunConfig, setNodeModel, setFeedbackCycles, setWireCycles, setActiveWorkflow, setHumanInLoop, resetWorkflowConfig,
   globalModelRefs, removeGlobalModelAndRefs, promoteCustomModel, costUnreliableModelIds,
-  readPrRemotePrefs, setPrRemotePrefs, modelHasBaseUrlRouting,
+  readPrRemotePrefs, setPrRemotePrefs, modelHasBaseUrlRouting, writeSyncPrefs, readSyncPrefs,
 } from '../src/core/config.mjs';
 import { listGlobalModels, addGlobalModel, updateGlobalModel } from '../src/core/settings.mjs';
 import { modelEnvRef, maskModelEnvValue, SUBAGENT_MODEL_VALUES, subagentModelIssue, UPSTREAM_PROVIDERS } from '../src/core/model-env.mjs';
@@ -153,8 +154,10 @@ import { startBridge } from '../src/core/bridge/server.mjs';
 import {
   providersState, patchProvider, acknowledgeTerms, beginCopilotLogin, pollCopilotLogin, copilotLogout,
   copilotModelsForImport, importCopilotModels, testProviderConnection,
-  endpointModelsForImport, importEndpointModels,
+  endpointModelsForImport, importEndpointModels, patchSpeech,
 } from '../src/core/bridge/provider-ops.mjs';
+import { speechState, transcribe, synthesize, testSpeech } from '../src/core/speech.mjs';
+import { speechAssetStore } from '../src/core/speech-assets.mjs';
 import { listPluginModels, modelSecretsSchema, pluginModelSecretStatus } from '../src/core/plugin-models.mjs';
 import { testModel } from '../src/core/model-test.mjs';
 import {
@@ -193,8 +196,16 @@ import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
 import { loadScriptRegistry } from '../src/core/script-registry.mjs';
 import { probePython, pythonRuntimeState } from '../src/core/graph/python-probe.mjs';
 import {
-  listLocalBranches, currentBranch, isValidSourceRef, sweepRunRoots, sweepLegacyWorktreesAll,
+  listLocalBranches, currentBranch, isValidSourceRef, sweepRunRoots, sweepLegacyWorktreesAll, resolveDefaultBranch,
 } from '../src/core/worktree.mjs';
+import {
+  fetchRemote, remoteInfo, syncStatus, resolveSourceRef, commitsBetween, isSafeBranchName, isSafeRemoteName, scrubGitText,
+  INTERACTIVE_TTL_MS, INTERACTIVE_TIMEOUT_MS, RUN_TIMEOUT_MS,
+} from '../src/core/git-sync.mjs';
+import {
+  projectSyncBlock, workspaceSyncBlocks, effectiveSyncSettings, projectSyncEvents, startProjectSyncBackground,
+} from '../src/core/project-sync.mjs';
+import { mapWithCap, fanoutCap } from '../src/core/fanout.mjs';
 import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, listRemoteBranches, sameRepo } from '../src/core/git-info.mjs';
 import { isSyntacticRef } from '../src/core/ask/proposal.mjs';
 import { archivePipeline, discardRetainedWorktrees } from '../src/core/pipeline-delete.mjs';
@@ -250,6 +261,7 @@ import {
 } from '../src/core/source-bindings.mjs';
 import { createChannelHost } from '../src/core/chat/channel-host.mjs';
 import { createCommandRouter } from '../src/core/chat/command-router.mjs';
+import { parseIdList } from '../src/core/chat/allowlist.mjs';
 import { createChatContext } from '../src/core/chat/chat-context.mjs';
 import { createNotifier } from '../src/core/chat/notifier.mjs';
 import { TokenBucket } from '../src/core/chat/rate-limiter.mjs';
@@ -263,7 +275,7 @@ import {
   runScheduleNow, deleteSchedule, cancelForTarget, dependentsOfWorkflow, runDueTickets, recordOutcome,
   recoverScheduler, purgeScheduler, scheduleCounts, scheduleStageDir, scheduleSignature,
   resolveAfterRef, predecessorState, previousBranchesOf, dependentsOfRun, AFTER_POLICIES, afterRefOf,
-  chainBaseBranchesOf,
+  chainBaseBranchesOf, resumeTicketsFor, cancelResumeTicketsFor,
 } from '../src/core/scheduler.mjs';
 import {
   onNotification, listNotifications, unreadCount, latestNotificationId, markRead, markAllRead, purgeNotifications,
@@ -272,6 +284,7 @@ import {
   normalizeRule, nextOccurrence, previewOccurrences, describeRule, parseScheduledFor, localDate,
   isValidTimeZone, formatInstant, OVERLAP_POLICIES, MISSED_POLICIES,
 } from '../src/shared/schedule/recurrence.mjs';
+import { REASON } from '../src/core/failure-policy.mjs';
 import { callSource, PluginOpError } from '../src/core/plugin-shim.mjs';
 import { resolveAutoModel, AUTO_MODEL_ENV } from '../src/core/auto/model.mjs';
 import {
@@ -367,6 +380,32 @@ const ASK_VENDOR_ASSETS = {
   marked: resolveEsmAsset('marked'),
   dompurify: resolveEsmAsset('dompurify'),
 };
+
+// Ask Worca voice mode (docs/speech.md): the Silero VAD (@ricky0123/vad-web) and
+// its onnxruntime-web wasm runtime, served from node_modules like marked above.
+// An explicit allow-list per prefix — never a directory listing — and an
+// unresolvable package leaves its routes unregistered (the /vendor 404 answers;
+// the mic then reports "voice activity detection unavailable").
+function resolveVendorDir(spec, resolve = (s) => import.meta.resolve(s), warn = (msg) => console.warn(msg)) {
+  try {
+    return path.dirname(fileURLToPath(resolve(spec)));
+  } catch (err) {
+    warn(`[worca-ui] voice asset unavailable (${spec}): ${err?.message || err}`);
+    return null;
+  }
+}
+const VOICE_VENDOR = [
+  // Only the runtime that vad-web's built-in ORT 1.22.0 JS fetches (wasmPaths + name).
+  { prefix: '/vendor/ort/', dir: resolveVendorDir('onnxruntime-web/wasm'), files: {
+    'ort-wasm-simd-threaded.mjs': 'text/javascript',
+    'ort-wasm-simd-threaded.wasm': 'application/wasm',
+  } },
+  { prefix: '/vendor/vad/', dir: resolveVendorDir('@ricky0123/vad-web'), files: {
+    'bundle.min.js': 'text/javascript',
+    'vad.worklet.bundle.min.js': 'text/javascript',
+    'silero_vad_v5.onnx': 'application/octet-stream',
+  } },
+];
 
 const PORT = Number(process.env.PORT) || DEFAULT_UI_PORT;
 // Bind to loopback by default (S1). Power users who knowingly want LAN exposure
@@ -683,6 +722,7 @@ function emitChanged(type, action) {
 
 metricsEvents.on('changed', (e) => emitChanged('team-metrics-changed', e && e.action ? e.action : null));
 policyEvents.on('changed', (e) => emitChanged('team-policy-changed', e && e.action ? e.action : null));
+projectSyncEvents.on('changed', (e) => emitChanged('project-sync-changed', e && e.projectKey ? e.projectKey : null));
 
 // Every comment mutation in THIS process (the REST routes below) pokes the open
 // Diff tabs. A poke carries ids only — no payload, so it is idempotent and has no
@@ -952,6 +992,14 @@ function wireRun(entry) {
           if (waiting.length) setTimeout(() => { void schedulerTick(); }, 0);
         } catch (err) { console.error(`[worca-ui] chain nudge failed: ${err && err.message ? err.message : err}`); }
       }
+      if (name === 'done' && entry.pipelineId && entry.status !== 'paused') {
+        // Terminal (done/stopped/error) — a pending scheduled resume no longer applies.
+        // (A 'paused' done is exactly the state a resume ticket targets; never sweep then.)
+        cancelScheduledResumes(entry.pipelineId, {
+          by: entry.lastAction && entry.lastAction.by,
+          reason: 'the run was resumed or stopped by hand',
+        });
+      }
       if (name === 'title' && payload && typeof payload.title === 'string') {
         // Keep the in-memory run fresh so a late-joining client's hello
         // (summarizeRuns reads entry.title) sees the settled title.
@@ -1170,14 +1218,14 @@ app.use('/api/ask/threads/:id', (req, res, next) => {
 });
 
 // Ask attachments ride base64 inside the message JSON (§7.3), and a binary
-// attachment (#398) may legitimately be 5 MB — several of them blow the app-wide
-// 8mb cap below. Registered BEFORE the global parser on the ONE route that
-// carries uploads (a body parsed here is skipped there): every other ask route
-// reads a string field or nothing and keeps the 8mb window. 64mb covers
-// maxFiles × maxBytesPerBinaryFile at base64's 4/3 inflation, so every
-// over-budget upload still reaches the route's OWN clear 400/413, not a raw
-// parser error.
-app.post('/api/ask/threads/:id/messages', express.json({ limit: '64mb' }));
+// attachment (#398) may legitimately be 32 MB — far past the app-wide 8mb cap
+// below. Registered BEFORE the global parser on the ONE route that carries
+// uploads (a body parsed here is skipped there): every other ask route reads a
+// string field or nothing and keeps the 8mb window. The window is
+// maxBytesPerMessage at base64's 4/3 inflation plus 1 MiB for the text and
+// context, so any upload the composer lets through reaches the route's OWN
+// clear 400/413, not a raw parser error.
+app.post('/api/ask/threads/:id/messages', express.json({ limit: Math.ceil(ASK_LIMITS.attachment.maxBytesPerMessage * 4 / 3) + 1024 * 1024 }));
 // A script's saved cases are inline text: 32 cases x 256 KiB PER PORT is legal (workbench
 // spec §3.2) and does not fit the global 8 MB, so the one route that saves them all gets room.
 app.put('/api/scripts/:key/cases', express.json({ limit: '64mb' }));
@@ -1229,6 +1277,52 @@ if (ASK_VENDOR_ASSETS.marked) {
 if (ASK_VENDOR_ASSETS.dompurify) {
   app.get('/vendor/dompurify/purify.es.mjs', sendEsmModule(ASK_VENDOR_ASSETS.dompurify));
 }
+for (const { prefix, dir, files } of VOICE_VENDOR) {
+  if (!dir) continue;
+  for (const [name, type] of Object.entries(files)) {
+    const file = path.join(dir, name);
+    if (!fs.existsSync(file)) { console.warn(`[worca-ui] voice asset missing: ${file}`); continue; }
+    app.get(`${prefix}${name}`, (_req, res, next) => {
+      res.type(type);
+      res.set('X-Content-Type-Options', 'nosniff');
+      res.set('Cache-Control', 'public, max-age=86400');
+      res.sendFile(file, (err) => { if (!err) return; if (res.headersSent) return next(err); next(); });
+    });
+  }
+}
+
+// The in-browser speech engines (docs/speech.md): pinned runtime + model files,
+// downloaded once into ~/.worca-cc/speech-cache and served same-origin.
+// src/core/speech-assets.mjs owns the allow-lists; anything else is a 404.
+// Models are no-store: the worker keeps no copy either (speech-worker.mjs), so the disk
+// holds ONE copy — worca's — and "Remove speech models" really frees the space.
+// The runtime (~25 MB) may sit in the HTTP cache: pinned bytes that never change.
+const sendSpeechAsset = (res, next, cache = 'no-store') => ({ file, type }) => {
+  res.type(type);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', cache);
+  res.sendFile(file, (err) => { if (err && !res.headersSent) next(err); });
+};
+const streamSpeechAsset = (res) => ({ type, length, body }) => {
+  res.type(type);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', 'no-store');
+  if (length) res.set('Content-Length', String(length));
+  body.on('error', () => res.destroy());
+  body.pipe(res);
+};
+const speechAssetFail = (res, next) => (err) => {
+  if (err && err.status === 404) return next();
+  console.warn(`[worca-ui] speech asset: ${err && err.message ? err.message : err}`);
+  if (!res.headersSent) res.status(502).set('Cache-Control', 'no-store').type('text/plain').send(err && err.message ? err.message : 'download failed');
+};
+app.get('/vendor/speech/lib/:name', (req, res, next) => {
+  speechAssetStore().lib(req.params.name).then(sendSpeechAsset(res, next, 'public, max-age=31536000, immutable'), speechAssetFail(res, next));
+});
+app.get(/^\/vendor\/speech\/hf\/([^/]+\/[^/]+)\/resolve\/[^/]+\/(.+)$/, (req, res, next) => {
+  speechAssetStore().model(req.params[0], req.params[1])
+    .then((r) => (r.body ? streamSpeechAsset(res)(r) : sendSpeechAsset(res, next)(r)), speechAssetFail(res, next));
+});
 
 app.use('/vendor', (err, _req, res, next) => {
   if (res.headersSent) return next(err);
@@ -1332,6 +1426,21 @@ function resolveProjectDir(input) {
   return normalizeProjectPath(input);
 }
 
+/** Express 4 does not catch async rejections: every sync route answers 500 instead of crashing. */
+const syncRoute = (fn) => async (req, res) => {
+  try { await fn(req, res); } catch (err) {
+    if (!res.headersSent) res.status(500).json({ error: scrubGitText(err && err.message ? err.message : String(err), 500) });
+  }
+};
+
+/** The registered project whose path is `dir` (sync writes are limited to registered projects), or null. */
+async function registeredProjectForDir(dir) {
+  if (!dir) return null;
+  const want = path.resolve(dir);
+  return (await listProjects()).find((p) => path.resolve(p.path) === want) || null;
+}
+const syncMode = (m) => (m === 'fetch' || m === 'ff' ? m : null);
+
 // ── Per-project source branches (workspace runs) ──────────────────────────────
 // A workspace run may carry a { [projectKey]: sourceBranch } override map. Each
 // member's source is its override (when non-blank) else the shared run default;
@@ -1343,6 +1452,66 @@ export function buildWorkspaceMembers(projects, branch, sourceByKey = {}) {
     const source = typeof override === 'string' && override.trim() ? override.trim() : branch.source;
     return { ...p, branch: { source, feature: branch.feature } };
   });
+}
+
+/** Per-member opts.sync for createOrchestratorFor (plan §4.3, D2, D14). */
+export function runSyncOpts(members, { allowed, before, policy, scheduled, onDiverged }) {
+  const out = {};
+  for (const m of members) {
+    const s = effectiveSyncSettings(m.projectKey);
+    let resolved, source;
+    if (scheduled) {
+      resolved = onDiverged || (s.onDiverged === 'fail' ? 'fail' : 'origin');       // D2: nobody can answer 'ask'
+      source = onDiverged ? 'schedule' : 'setting';
+    } else if (s.onDiverged === 'origin') {
+      resolved = 'origin'; source = 'setting';                                     // D14: never asks
+    } else if (policy === 'origin' && s.onDiverged !== 'fail') {
+      resolved = 'origin'; source = 'user';                                        // the person chose on the card
+    } else {
+      resolved = 'fail'; source = 'setting';                                       // 'fail', or 'ask' not yet answered
+    }
+    out[m.projectKey] = { enabled: !!(allowed && (before ?? s.beforeRun)), remote: s.remote, onDiverged: resolved, policySource: source };
+  }
+  return { members: out, enabled: Object.values(out).some((x) => x.enabled) };
+}
+
+/**
+ * Before an interactive start: fetch (no TTL, 8 s bound) and read each synced member's base.
+ * Returns null (start) or { status: 409, body } asking the person once (plan §0.2 C9, D14).
+ * A member whose policy already resolves to 'origin' is never asked. No TTL: a Start is an
+ * explicit action, so a push that landed inside the 45 s cache (a diverged base the run's own
+ * Sync stage would then fail on) or a remote that came back since a failed fetch is seen now.
+ */
+export async function syncPrecheck(members, sync) {
+  const rows = await mapWithCap(members, fanoutCap(), async (m) => {
+    const cfg = sync.members[m.projectKey];
+    if (!cfg || !cfg.enabled || !isSafeBranchName(m.source)) return null;
+    const f = await fetchRemote(m.projectDir, { remote: cfg.remote, maxAgeMs: 0, timeoutMs: INTERACTIVE_TIMEOUT_MS });
+    if (!f.ok && (f.kind === 'no-remote' || f.kind === 'bad-remote')) return null;
+    const st = await syncStatus(m.projectDir, { base: m.source, remote: cfg.remote });
+    // Neither a local nor a remote branch (a tag or a SHA): the harness has no branch to sync, so
+    // an offline start from it must not be asked about a failed fetch (D9).
+    if (!st.ok || (!st.hasLocal && !st.hasRemote)) return null;
+    return { m, f, st, cfg, setting: effectiveSyncSettings(m.projectKey).onDiverged };
+  });
+  const hit = rows.filter(Boolean);
+  const view = (r) => ({ projectKey: r.m.projectKey, projectName: r.m.projectName || path.basename(r.m.projectDir), base: r.m.source,
+    remote: r.cfg.remote, ahead: r.st.ahead, behind: r.st.behind, fetchedAt: r.f.fetchedAt || r.st.fetchedAt || null });
+  const diverged = hit.filter((r) => r.st.state === 'diverged' && r.cfg.onDiverged !== 'origin');
+  if (diverged.length) {
+    const d = diverged[0];
+    const forbidden = diverged.some((r) => r.setting === 'fail');     // the project forbids starting from the remote
+    return { status: 409, body: { code: 'sync-diverged', kind: 'diverged', options: forbidden ? ['cancel'] : ['origin', 'cancel'],
+      ...(forbidden ? { forbidden: true } : {}), members: diverged.map(view),
+      error: `${d.m.source} has diverged from ${d.cfg.remote}/${d.m.source} (${d.st.ahead} ahead, ${d.st.behind} behind)` } };
+  }
+  const failed = hit.filter((r) => !r.f.ok);
+  if (failed.length) {
+    const x = failed[0];
+    return { status: 409, body: { code: 'sync-fetch-failed', kind: 'fetch-failed', fetchKind: x.f.kind, options: ['last-fetch', 'cancel'],
+      members: failed.map((r) => ({ ...view(r), fetchKind: r.f.kind })), error: `Could not reach ${x.cfg.remote} (${x.f.kind})` } };
+  }
+  return null;
 }
 
 // Mirror the shared-source option-injection guard (D2) for every override entry.
@@ -1776,6 +1945,13 @@ const startRunHandler = async (req, res) => {
       feature: typeof body.featureBranch === 'string' && body.featureBranch.trim()
         ? body.featureBranch.trim() : null,
     };
+    const syncBody = {
+      before: typeof body.syncBeforeStart === 'boolean' ? body.syncBeforeStart : null,         // null = project default
+      policy: body.syncPolicy === 'origin' || body.syncPolicy === 'last-fetch' ? body.syncPolicy : null,
+      onDiverged: body.syncOnDiverged === 'origin' || body.syncOnDiverged === 'fail' ? body.syncOnDiverged : null,  // schedules
+    };
+    // Scans are read-only (C10) and memory defrag is a reserved workflow: never sync them.
+    const syncAllowed = !scanTarget && !memoryScope;
 
     let orch, entry;
 
@@ -1843,13 +2019,23 @@ const startRunHandler = async (req, res) => {
       }
       if (sched) return res.status(202).json(await scheduleRequest({ body, sched, title, askLink, budget, workspaceId: ws.id, projectDir: projects[0].projectDir, startedBy }));
 
+      const wsBuilt = buildWorkspaceMembers(projects, branch, sourceByKey);
+      const wsMembers = [];
+      if (syncAllowed) for (const m of wsBuilt) wsMembers.push({ ...m, source: m.branch.source || await resolveDefaultBranch(m.projectDir) });
+      const sync = runSyncOpts(wsMembers, { allowed: syncAllowed, before: syncBody.before, policy: syncBody.policy,
+        scheduled: !!internal, onDiverged: syncBody.onDiverged });
+      if (sync.enabled && !internal && !syncBody.policy) {
+        const blocked = await syncPrecheck(wsMembers, sync);
+        if (blocked) return res.status(blocked.status).json(blocked.body);
+      }
+
       orch = await createOrchestratorFor({
         workspace: {
           id: ws.id,
           key: ws.id, // ws.id === workspaceKey(ws); routes artifacts to its store
           name: ws.name,
           description: ws.description,
-          projects: buildWorkspaceMembers(projects, branch, sourceByKey),
+          projects: wsBuilt,
         },
         prompt: effectivePrompt,
         ...(effectiveSource ? { source: effectiveSource } : {}),
@@ -1862,6 +2048,7 @@ const startRunHandler = async (req, res) => {
         guardrailsId,
         startedBy,
         branch,
+        sync,
         claude: { permissionMode: stored.permissionMode || 'acceptEdits', ...(stored.model ? { model: stored.model } : {}), mock },
         // A CLI-made ticket may carry `--yes`: the explicit non-interactive choice survives the wait.
         ...(stored.auto ? { auto: true } : {}),
@@ -1899,7 +2086,17 @@ const startRunHandler = async (req, res) => {
       // clean 400 instead of a mid-run error event. featureBranch is sanitized
       // downstream by sanitizeBranchName, so it needs no ref check.
       if (branch.source && !(await isValidSourceRef(projectDir, branch.source))) {
-        return badRequest(res, `unknown or invalid sourceBranch: ${branch.source}`);
+        const r = isSafeBranchName(branch.source)
+          ? await resolveSourceRef(projectDir, branch.source, { remote: effectiveSyncSettings(projectKey(projectDir)).remote })
+          : { ok: false };
+        if (!r.ok || !r.remoteOnly) {
+          // 'stale' = the remote could not be reached: do not claim the branch is missing.
+          const why = !isSafeBranchName(branch.source) ? ''
+            : r.kind === 'stale' ? ' (not a local branch, and the remote could not be reached to check)'
+            : ' (not a local branch and not on the remote)';
+          return badRequest(res, `unknown or invalid sourceBranch: ${branch.source}${why}`);
+        }
+        // remote-only: the harness creates the local tracking branch (_ensureLocalSource).
       }
 
       const fileProblem = await promptFileProblem(effectiveSource, projectDir);
@@ -1933,6 +2130,17 @@ const startRunHandler = async (req, res) => {
       const storedBody = startPair ? { ...body, model: startPair.model, effort: startPair.effort || undefined } : body;
       if (sched) return res.status(202).json(await scheduleRequest({ body: storedBody, sched, title, askLink, budget, projectDir, startedBy }));
 
+      // Scans and defrag never sync: skip the default-branch lookup and settings reads entirely, so
+      // the window between the one-defrag-per-scope check and runs.set does not widen.
+      const members1 = syncAllowed ? [{ projectDir, projectKey: projectKey(projectDir), projectName: path.basename(projectDir),
+        source: branch.source || await resolveDefaultBranch(projectDir) }] : [];
+      const sync = runSyncOpts(members1, { allowed: syncAllowed, before: syncBody.before, policy: syncBody.policy,
+        scheduled: !!internal, onDiverged: syncBody.onDiverged });
+      if (sync.enabled && !internal && !syncBody.policy) {
+        const blocked = await syncPrecheck(members1, sync);
+        if (blocked) return res.status(blocked.status).json(blocked.body);
+      }
+
       orch = await createOrchestratorFor({
         projectDir,
         prompt: effectivePrompt,
@@ -1945,6 +2153,7 @@ const startRunHandler = async (req, res) => {
         guardrailsId,
         startedBy,
         branch,
+        sync,
         humanInLoop,
         ...(memoryScope ? { memoryScope } : {}),
         claude: {
@@ -2104,6 +2313,60 @@ function parseScheduleRequest(body, { now = Date.now() } = {}) {
   return out;
 }
 
+/** Pause reasons a scheduled resume must never touch (clarify: both cap kinds refuse). */
+const CAP_PAUSE_REASONS = new Set([REASON.COST_PIPELINE, REASON.COST_TOTAL, REASON.COST_PIPELINE_POLICY, REASON.COST_TOTAL_POLICY]);
+const TEAM_CAP_PAUSE_REASONS = new Set([REASON.COST_PIPELINE_POLICY, REASON.COST_TOTAL_POLICY]);
+
+/** The paused pipeline a resume ticket fires on, or null (any other ticket). */
+function resumeTargetOf(ticket) {
+  if (!ticket) return null;
+  if (typeof ticket.resumePipelineId === 'string' && ticket.resumePipelineId) return ticket.resumePipelineId;
+  const internal = ticket.request && ticket.request.internal;
+  return internal && typeof internal.resumePipelineId === 'string' && internal.resumePipelineId ? internal.resumePipelineId : null;
+}
+
+/** The onboarded project dir for a pipelines.project_key, or null. */
+async function projectDirForKey(key) {
+  for (const p of await listProjects()) {
+    if (projectKey(p.path) === key) return p.path;
+  }
+  return null;
+}
+
+/**
+ * Validate a scheduled-resume target at CREATE time. Mirrors resumeRun's early guards,
+ * plus the cap refusals a live decision may never be slept through.
+ * @returns {Promise<{ok:true, row:object, resumePoint:object, projectDir:string|null, workspaceId:string|null}
+ *          | {ok:false, status:number, body:object}>}
+ */
+async function validateResumeTarget(pipelineId) {
+  if (typeof pipelineId !== 'string' || !pipelineId.trim()) return { ok: false, status: 400, body: { error: 'pipelineId is required' } };
+  const saved = readPipelineForResume(pipelineId.trim());
+  if (!saved) return { ok: false, status: 404, body: { error: 'pipeline not found' } };
+  if (saved.row.status !== 'paused' && saved.row.status !== 'interrupted') {
+    return { ok: false, status: 409, body: { error: `run is "${saved.row.status}" — only a paused run can get a scheduled resume` } };
+  }
+  if (!saved.resumePoint) return { ok: false, status: 400, body: { error: 'run has no resume point' } };
+  if (saved.resumePoint.version !== 2) return { ok: false, status: 409, body: { code: 'ENGINE_RETIRED', error: V1_RUN_RETIRED } };
+  if (saved.row.archived_at) return { ok: false, status: 409, body: { error: 'run is archived' } };
+  const reason = saved.resumePoint.pauseReason || null;
+  if (TEAM_CAP_PAUSE_REASONS.has(reason)) {
+    return { ok: false, status: 409, body: { code: 'CAP_PAUSE', error: 'this run paused on a team cost cap — continuing past it is a live decision and cannot be scheduled' } };
+  }
+  if (CAP_PAUSE_REASONS.has(reason)) {
+    return { ok: false, status: 409, body: { code: 'CAP_PAUSE', error: 'this run paused on a cost cap — continuing past it needs the explicit “Continue without cap” decision and cannot be scheduled' } };
+  }
+  if (resumeTicketsFor(saved.row.id).length) {
+    return { ok: false, status: 409, body: { error: 'a scheduled resume already exists for this run — change or cancel it in Schedules' } };
+  }
+  const workspaceId = saved.row.target === 'workspace' ? (saved.row.workspace_key || null) : null;
+  let projectDir = null;
+  if (!workspaceId && saved.row.project_key) {
+    projectDir = await projectDirForKey(saved.row.project_key);
+  }
+  return { ok: true, row: saved.row, resumePoint: saved.resumePoint, projectDir, workspaceId };
+}
+
 /** The request a ticket stores: the validated body minus schedule fields and uploads. */
 async function storedRequestOf(body, stageId, projectDir, startedBy = null) {
   const request = { ...body };
@@ -2189,8 +2452,54 @@ async function invokeStartRun(body, internal) {
 /** Ticket id -> who clicked "Run now" (identity.mjs actor), consumed by the firing it causes. */
 const RUN_NOW_BY = new Map();
 
-/** runDueTickets' `start`: probe an external task first (transient errors retry), then start. */
+/** A run resumed or stopped by hand kills its pending scheduled resume (feed entry per ticket). Idempotent + best-effort. */
+function cancelScheduledResumes(pipelineId, { by = null, reason } = {}) {
+  try {
+    const n = cancelResumeTicketsFor(pipelineId, { by: by || undefined, reason });
+    if (n) { emitChanged('schedules-changed', 'deleted'); emitChanged('notifications-changed'); }
+  } catch (err) { console.error(`[worca-ui] scheduled-resume cancel failed: ${err && err.message ? err.message : err}`); }
+}
+
+/**
+ * Fire a "resume this paused run" ticket. The live row is re-checked at fire time:
+ * a run resumed or stopped by hand makes the ticket SKIP (feed entry, run stays as it
+ * is); a run that became cap-paused FAILS (a cap is never continued past unattended).
+ * Everything else goes through resumeRun's own guard chain (budget gates included).
+ */
+async function fireResumeTicket(ticket, pipelineId) {
+  const saved = readPipelineForResume(pipelineId);
+  if (!saved) return { ok: false, skip: true, error: 'the run no longer exists' };
+  if (saved.row.status !== 'paused' && saved.row.status !== 'interrupted') {
+    return { ok: false, skip: true, error: `the run is now "${saved.row.status}" — it was resumed or stopped meanwhile` };
+  }
+  const reason = saved.resumePoint && saved.resumePoint.pauseReason;
+  if (reason && CAP_PAUSE_REASONS.has(reason)) {
+    return { ok: false, error: 'the run paused on a cost cap meanwhile — continuing past it needs a live decision', transient: false };
+  }
+  const scheduledBy = ticket.createdBy || null;
+  try {
+    const out = await resumeRun(pipelineId, {
+      by: scheduledBy || 'local',
+      mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK),
+    });
+    // The feed learns how the resumed run ends through the same recordOutcome hook a
+    // schedule-started run uses (wireRun keys on entry.ticketId).
+    const entry = out && out.runId ? runs.get(out.runId) : null;
+    if (entry) entry.ticketId = ticket.id;
+    return { ok: true, pipelineId };
+  } catch (err) {
+    if (err instanceof ResumeError) {
+      return { ok: false, error: (err.body && err.body.error) || err.message, transient: false };
+    }
+    return { ok: false, error: err && err.message ? err.message : String(err), transient: false };
+  }
+}
+
+/** runDueTickets' `start`: a resume ticket goes to fireResumeTicket; anything else probes
+ *  an external task first (transient errors retry), then starts a NEW run. */
 async function fireTicket(ticket) {
+  const resumePipelineId = resumeTargetOf(ticket);
+  if (resumePipelineId) return fireResumeTicket(ticket, resumePipelineId);
   const body = { ...(ticket.request || {}) };
   if (body.source && body.source.type === 'plugin') {
     try {
@@ -2343,6 +2652,43 @@ app.post('/api/schedules/preview', (req, res) => {
   if (!norm.ok) return badRequest(res, norm.error);
   const n = Number.isSafeInteger(body.count) ? Math.max(1, Math.min(10, body.count)) : 3;
   res.json({ rule: norm.rule, sentence: describeRule(norm.rule), next: previewOccurrences(norm.rule, Date.now(), n).map((t) => new Date(t).toISOString()) });
+});
+
+// POST /api/schedules/resume { pipelineId, scheduledFor, ifMissed?, graceMin? } — a one-off
+// "resume this paused run at <time>" ticket. ifMissed defaults to 'skip' (clarify default);
+// the sheet pre-selects 'skip' but lets the user pick 'run', so an HTTP caller may pass either.
+app.post('/api/schedules/resume', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const by = actorOf(req);
+    const v = await validateResumeTarget(body.pipelineId);
+    if (!v.ok) return res.status(v.status).json(v.body);
+    const at = parseScheduledFor(body.scheduledFor);
+    if (!at.ok) return badRequest(res, at.error);
+    if (at.ms < Date.now() - 5_000) return badRequest(res, 'scheduledFor is in the past');
+    let ifMissed = 'skip';
+    if (body.ifMissed != null) {
+      if (!MISSED_POLICIES.includes(body.ifMissed)) return badRequest(res, `ifMissed must be one of ${MISSED_POLICIES.join(' | ')}`);
+      ifMissed = body.ifMissed;
+    }
+    let graceMin = 360;
+    if (body.graceMin != null) {
+      if (!Number.isSafeInteger(body.graceMin) || body.graceMin < 0 || body.graceMin > 10080) return badRequest(res, 'graceMin must be a whole number of minutes from 0 to 10080');
+      graceMin = body.graceMin;
+    }
+    const title = `Resume ‘${v.row.title || v.row.id}’`;
+    const request = { prompt: '', title: v.row.title || null, internal: { resumePipelineId: v.row.id, startedBy: by } };
+    const ticket = createTicket({
+      title, projectDir: v.projectDir, workspaceId: v.workspaceId,
+      runAtMs: at.ms, request, ifMissed, graceMin,
+      resumePipelineId: v.row.id, createdBy: by,
+    });
+    appendAuditById(v.row.id, `Resume scheduled for ${new Date(at.ms).toISOString().slice(0, 16).replace('T', ' ')} UTC${byActor(by)}.`, { actor: by });
+    emitChanged('schedules-changed', 'created');
+    res.status(202).json({ runId: ticket.id, status: 'scheduled', scheduledFor: ticket.runAt, resumePipelineId: v.row.id });
+  } catch (err) {
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
 });
 
 // GET /api/schedules/dependents?workflowId=|projectDir=|workspaceId= -> what a removal
@@ -2532,8 +2878,9 @@ async function scheduleVerb(verb, id, body = {}, { by = null } = {}) {
     emitChanged('notifications-changed');
     await schedulerTick();
     const after = getTicket(ticket.id);
+    const isResume = !!resumeTargetOf(after);
     // A ticket held by a waiting `--wait` terminal is started by that terminal within seconds.
-    return out(200, { runId: ticket.id, status: after ? after.status : 'scheduled', failReason: after ? after.failReason : null, pipelineId: after ? after.pipelineId : null });
+    return out(200, { runId: ticket.id, status: after ? after.status : 'scheduled', failReason: after ? after.failReason : null, pipelineId: after ? after.pipelineId : null, ...(isResume ? { resume: true } : {}) });
   }
   if (['pause', 'resume', 'skip-next'].includes(verb)) {
     if (found.kind !== 'recurring') return out(404, { error: 'repeating schedule not found' });
@@ -2684,10 +3031,18 @@ const chatActions = {
   listProjects: async () => (await listProjects()).map((p) => ({ name: p.name || path.basename(p.path || ''), path: p.path })),
 };
 
+// "plugin/channelId" -> the latest command a NON-allow-listed chat sent. Settings
+// shows it, so "my /approve did nothing" has a visible reason and the id to add.
+// In memory only (a diagnostic; the next refused command re-populates it).
+const chatRefusals = new Map();
+
 const chatRouter = createCommandRouter({
   actions: chatActions,
   chatContext,
   logger: (level, msg) => console.error(`[worca-ui] chat ${level}: ${msg}`),
+  onRefused: ({ plugin, channelId, chatId, command }) => {
+    chatRefusals.set(`${plugin}/${channelId}`, { chatId, command, at: new Date().toISOString() });
+  },
 });
 
 // Same-chat commands must run strictly in order: a batched ['/use beta','/runs']
@@ -2794,6 +3149,7 @@ function stopRun(runId, by = 'local') {
   entry.lastAction = { kind: 'stop', by: by || 'local', at: new Date().toISOString() };
   entry.orch.stop(entry.lastAction.by);
   entry.status = 'stopped';
+  if (entry.pipelineId) cancelScheduledResumes(entry.pipelineId, { by, reason: `the run was stopped${byActor(by || 'local')}` });
   resolvePending(entry, { reason: 'stopped' });
 }
 function pauseRun(runId, by = 'local') {
@@ -2876,7 +3232,47 @@ class ResumeError extends Error {
   }
 }
 
-async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, pastTeamCap = false, policyReason = null, by = 'local' } = {}) {
+/** A workspace scan run, as the harness's _isWorkspaceScan() sees it once restored from the resume point. */
+function isWorkspaceScanResume(saved) {
+  return saved.row.target === 'workspace' && saved.resumePoint?.workflowId === WORKSPACE_SCAN_WORKFLOW_ID;
+}
+
+/** Per member: does the recorded source still exist, and how far did <remote>/<source> move since
+ *  baseSha? Reads + a TTL fetch only; never throws (a read error never blocks a resume). */
+async function resumeBaseCheck(row, { workspace, projectDir }) {
+  try {
+    const branches = workspace
+      ? (JSON.parse(row.workspace_meta || '{}').branches || {})
+      : { [row.project_key]: row.branch ? JSON.parse(row.branch) : null };
+    const dirOf = (key) => (workspace ? (workspace.projects.find((p) => p.projectKey === key) || {}).projectDir : projectDir);
+    // Members in parallel: an offline workspace must not wait N × 8 s.
+    const rows = await mapWithCap(Object.entries(branches), fanoutCap(), async ([key, b]) => {
+      const dir = dirOf(key);
+      if (!dir || !b || !isSafeBranchName(b.source)) return null;
+      // The remote the run used (its sync record), else today's setting.
+      const remote = isSafeRemoteName(b.sync?.remote) ? b.sync.remote : effectiveSyncSettings(key).remote;
+      const f = await fetchRemote(dir, { remote, maxAgeMs: INTERACTIVE_TTL_MS });
+      if (!f.ok && (f.kind === 'no-remote' || f.kind === 'bad-remote')) return null;
+      const st = await syncStatus(dir, { base: b.source, remote });
+      if (!st.ok) return null;
+      if (!st.hasLocal && !st.hasRemote) {
+        // Not a branch at all (a tag, or 'origin/dev', both accepted by isValidSourceRef):
+        // nothing to measure. Only a source that resolves nowhere is "missing".
+        if (await isValidSourceRef(dir, b.source)) return null;
+        return { projectKey: key, base: b.source, remote, exists: false, onRemote: false, movedBy: null, stale: !f.ok };
+      }
+      // Measure from the remote tip recorded at start when there is one: with sync off or a failed
+      // fetch, baseSha is a local tip that may already have been behind, and baseSha..remote would
+      // count commits that landed BEFORE the run as "since this run started".
+      const from = b.sync?.remoteSha || b.baseSha;
+      const movedBy = from && st.hasRemote ? await commitsBetween(dir, from, `refs/remotes/${remote}/${b.source}`) : null;
+      return { projectKey: key, base: b.source, remote, exists: true, onRemote: st.hasRemote, movedBy, stale: !f.ok };
+    });
+    return rows.filter(Boolean);
+  } catch { return []; /* never block a resume on a read error */ }
+}
+
+async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, pastTeamCap = false, policyReason = null, by = 'local', baseCheck = false, baseAck = false } = {}) {
   if (!pipelineId || typeof pipelineId !== 'string') throw new ResumeError(400, { error: 'pipelineId is required' });
   const saved = readPipelineForResume(pipelineId);
   if (!saved) throw new ResumeError(404, { error: 'pipeline not found' });
@@ -2899,25 +3295,30 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     throw new ResumeError(403, { error: 'total cost limit reached', budget });
   }
   // Override persists only once the (never-bypassable) total gate passes —
-  // a total-refused request must not leave cost_cap_override armed.
-  if (ignoreCostCap === true) {
+  // a total-refused request must not leave cost_cap_override armed. When a base check can
+  // still be cancelled (baseCheck without baseAck), the write waits until it has passed.
+  const deferOverride = baseCheck === true && baseAck !== true;
+  if (ignoreCostCap === true && !deferOverride) {
     setCostCapOverride(pipelineId);            // persistent per-pipeline override (F7)
     appendAuditById(pipelineId, `Pipeline cost limit override set${byActor(by)}.`, { actor: by });
   }
   const pipeCap = budget.pipelineLimitUsd;
   const spentSoFar = Number(saved.row.total_cost_usd || 0);
-  if (pipeCap != null && spentSoFar >= pipeCap && !readCostCapOverride(pipelineId)) {
+  if (pipeCap != null && spentSoFar >= pipeCap && ignoreCostCap !== true && !readCostCapOverride(pipelineId)) {
     throw new ResumeError(403, {
       error: 'pipeline cost limit reached', budget, needsOverride: true,
     });
   }
 
   // Double-resume guard: any live entry already driving this pipeline id.
-  for (const e of runs.values()) {
-    if (e.pipelineId === pipelineId && !['done', 'stopped', 'error', 'paused', 'interrupted'].includes(String(e.status || ''))) {
-      throw new ResumeError(400, { error: 'pipeline is already live' });
+  const assertNotLive = () => {
+    for (const e of runs.values()) {
+      if (e.pipelineId === pipelineId && !['done', 'stopped', 'error', 'paused', 'interrupted'].includes(String(e.status || ''))) {
+        throw new ResumeError(400, { error: 'pipeline is already live' });
+      }
     }
-  }
+  };
+  assertNotLive();
 
   // Worktree(s) must still exist (single-project; workspace members are checked
   // inside orchestrator.resume(), which fails fast with the same message).
@@ -2940,10 +3341,30 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
       description: meta.workspaceDescription || '', projects,
     };
   } else {
-    for (const p of await listProjects()) {
-      if (projectKey(p.path) === saved.row.project_key) { projectDir = p.path; break; }
-    }
+    projectDir = await projectDirForKey(saved.row.project_key);
     if (!projectDir) throw new ResumeError(400, { error: 'project for this pipeline is not onboarded on this machine' });
+  }
+
+  // Base check (opt-in, plan D7) BEFORE the team gates, which save acknowledgements and audit
+  // lines a cancelled "base moved" confirmation must not leave behind. A memory-defrag run keeps
+  // no branch to merge and a workspace scan is read-only (C10): neither is checked or fetched.
+  const skipBase = !!saved.resumePoint?.memoryScope || isWorkspaceScanResume(saved);
+  if (deferOverride && !skipBase) {
+    const moved = await resumeBaseCheck(saved.row, { workspace, projectDir });
+    const bad = moved.filter((m) => !m.exists || (m.movedBy || 0) > 0);
+    if (bad.length) {
+      const first = bad[0];
+      throw new ResumeError(409, { code: first.exists ? 'base-moved' : 'base-missing', members: bad,
+        error: first.exists ? `${first.base} moved ${first.movedBy} commit(s) on ${first.remote} since this run started`
+                            : `${first.base} no longer exists locally or on ${first.remote}` });
+    }
+    // The check can wait on a fetch (up to 8 s): a second Resume may have gone live meanwhile.
+    assertNotLive();
+  }
+  // Deferred override write: only reached once the base check passed.
+  if (ignoreCostCap === true && deferOverride) {
+    setCostCapOverride(pipelineId);
+    appendAuditById(pipelineId, `Pipeline cost limit override set${byActor(by)}.`, { actor: by });
   }
 
   // Team policy gates (design §7): the total cap once per window per home, the pipeline cap once
@@ -2970,6 +3391,9 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     const live = liveDefragRun(memoryScopeKey(rpScope, projectDir));
     if (live) throw new ResumeError(409, { error: 'a defragment run for this memory scope is already live', runId: live.id });
   }
+
+  // A scheduled resume for this run is moot the moment any resume is committed.
+  cancelScheduledResumes(pipelineId, { by, reason: `the run was resumed${byActor(by || 'local')}` });
 
   const effMock = mock || serverMockMode();
   const runId = randomUUID();
@@ -3059,6 +3483,8 @@ app.post('/api/resume', async (req, res) => {
       pastTeamCap: req.body?.pastTeamCap === true,
       policyReason: typeof req.body?.policyReason === 'string' ? req.body.policyReason : null,
       by: actorOf(req),
+      baseCheck: req.body?.baseCheck === true,
+      baseAck: req.body?.baseAck === true,
     });
     res.json(out);
   } catch (err) {
@@ -3834,6 +4260,117 @@ app.post('/api/policy/discover', async (_req, res) => {
   catch (err) { sendPolicyError(res, err); }
 });
 
+// ── Sync before run (#527) ───────────────────────────────────────────────────
+/** A status read for a base sync never touches (e.g. "plus+branch"): 200 with state 'unknown', so
+ *  the pill reads Unknown for THAT base and the browser logs no failed request. No git runs with it. */
+async function unsyncableBlock(dir, projectKey, base) {
+  const s = effectiveSyncSettings(projectKey);
+  const info = await remoteInfo(dir, s.remote);
+  return { base, remote: info.ok ? info.name : null, ...(info.ok ? { remoteLabel: info.label } : {}),
+    state: 'unknown', reason: 'not-a-branch', settings: { beforeRun: s.beforeRun, onDiverged: s.onDiverged } };
+}
+// Status (no network) or an action for ONE project, by path — the New-pipeline form (plan D8).
+app.get('/api/sync', syncRoute(async (req, res) => {
+  const dir = resolveProjectDir(req.query.projectDir);
+  if (!dir) return badRequest(res, 'projectDir is required');
+  const p = await registeredProjectForDir(dir);
+  const base = typeof req.query.base === 'string' && req.query.base ? req.query.base : null;
+  if (base && !isSafeBranchName(base)) return res.json({ sync: await unsyncableBlock(dir, p ? p.key : null, base) });
+  res.json({ sync: await projectSyncBlock({ dir, projectKey: p ? p.key : null, base, mode: 'status', details: req.query.details === '1' }) });
+}));
+app.post('/api/sync', syncRoute(async (req, res) => {
+  const body = req.body || {};
+  const dir = resolveProjectDir(body.projectDir);
+  if (!dir) return badRequest(res, 'projectDir is required');
+  const p = await registeredProjectForDir(dir);
+  if (!p) return res.status(404).json({ error: 'project not found', code: 'NOT_FOUND' });
+  return syncProjectAction(res, p, body);
+}));
+// By key — the Projects page (and the issue's API). tmProject answers the 404 itself.
+app.get('/api/projects/:key/sync', syncRoute(async (req, res) => {
+  const p = await tmProject(req, res); if (!p) return;
+  const base = typeof req.query.base === 'string' && req.query.base ? req.query.base : null;
+  if (base && !isSafeBranchName(base)) return res.json({ sync: await unsyncableBlock(p.path, p.key, base) });
+  res.json({ sync: await projectSyncBlock({ dir: p.path, projectKey: p.key, base, mode: 'status', details: req.query.details === '1' }) });
+}));
+app.post('/api/projects/:key/sync', syncRoute(async (req, res) => {
+  const p = await tmProject(req, res); if (!p) return;
+  return syncProjectAction(res, p, req.body || {});
+}));
+async function syncProjectAction(res, p, body) {
+  // A remote NAME from settings only — the body can never name a remote or a URL.
+  if (Object.hasOwn(body, 'remote') || Object.hasOwn(body, 'url')) return badRequest(res, 'sync never takes a remote or URL from the request; configure sync.remote');
+  const mode = syncMode(body.mode || 'ff');
+  if (!mode) return badRequest(res, 'mode must be "fetch" or "ff"');
+  const base = typeof body.base === 'string' && body.base ? body.base : null;
+  if (base && !isSafeBranchName(base)) return badRequest(res, 'base is not a branch name');
+  // A registered project whose folder is gone: never run git in a dead cwd.
+  if (p.exists === false) return badRequest(res, `project path is missing: ${p.path}`);
+  // A person clicked Sync: the long bound (a SIGKILLed fetch can leave *.lock files behind).
+  const sync = await projectSyncBlock({ dir: p.path, projectKey: p.key, base, mode, details: true, maxAgeMs: 0, timeoutMs: RUN_TIMEOUT_MS });
+  res.json({ sync });     // 200 even when ff refused: sync.ff = { ok:false, kind } drives the UI copy
+  // After the answer. The WS frame can still overtake the HTTP response, so the UI does not rely
+  // on this order: its own Sync action ignores frames while in flight.
+  projectSyncEvents.emit('changed', { projectKey: p.key });
+}
+app.put('/api/projects/:key/sync/settings', syncRoute(async (req, res) => {
+  const p = await tmProject(req, res); if (!p) return;
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+  if (!body) return badRequest(res, 'body must be an object');
+  // null values reset a key to the instance default (writeSyncPrefs); validate the rest.
+  try { assertSyncSettingsInput(Object.fromEntries(Object.entries(body).filter(([, v]) => v !== null))); }
+  catch (err) { return badRequest(res, err.message); }
+  for (const k of Object.keys(body)) if (!Object.hasOwn(DEFAULT_SYNC_SETTINGS, k)) return badRequest(res, `unknown sync setting: ${k}`);
+  writeSyncPrefs(p.key, body);
+  res.json(syncPrefsView(p.key));
+  projectSyncEvents.emit('changed', { projectKey: p.key });
+}));
+// The project's own sync keys (what it overrides), the instance defaults it otherwise follows,
+// and the effective result — the pill dialog's "This project" section needs all three.
+app.get('/api/projects/:key/sync/settings', syncRoute(async (req, res) => {
+  const p = await tmProject(req, res); if (!p) return;
+  res.json(syncPrefsView(p.key));
+}));
+function syncPrefsView(key) {
+  return { own: readSyncPrefs(key) || {}, defaults: syncDefaults(), settings: effectiveSyncSettings(key) };
+}
+// All projects' chip blocks (no network) + Sync all.
+app.get('/api/sync/projects', syncRoute(async (_req, res) => {
+  const ps = (await listProjects()).filter((p) => p.exists);
+  const blocks = await mapWithCap(ps, fanoutCap(), (p) => projectSyncBlock({ dir: p.path, projectKey: p.key, mode: 'status' }));
+  res.json({ projects: Object.fromEntries(ps.map((p, i) => [p.key, blocks[i]])) });
+}));
+app.post('/api/sync/all', syncRoute(async (req, res) => {
+  const mode = syncMode((req.body || {}).mode || 'ff');
+  if (!mode) return badRequest(res, 'mode must be "fetch" or "ff"');
+  const ps = (await listProjects()).filter((p) => p.exists);
+  const blocks = await mapWithCap(ps, fanoutCap(), (p) => projectSyncBlock({ dir: p.path, projectKey: p.key, mode, maxAgeMs: 0, timeoutMs: RUN_TIMEOUT_MS }));
+  res.json({ projects: Object.fromEntries(ps.map((p, i) => [p.key, blocks[i]])) });
+  // After the answer, as syncProjectAction.
+  ps.forEach((p) => projectSyncEvents.emit('changed', { projectKey: p.key }));
+}));
+app.get('/api/workspaces/:id/sync', syncRoute(async (req, res) => {
+  if (!WORKSPACE_KEY_RE.test(req.params.id)) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  const members = await workspaceSyncBlocks(req.params.id, { mode: 'status' });
+  if (!members) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  res.json({ members });
+}));
+// Unlike the per-project routes (registered projects only), this fetches every member whether or
+// not it is a registered project: a workspace run's Sync stage fetches the same members anyway,
+// so an explicit Sync here reaches no folder the workspace does not already sync.
+app.post('/api/workspaces/:id/sync', syncRoute(async (req, res) => {
+  if (!WORKSPACE_KEY_RE.test(req.params.id)) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  const body = req.body || {};
+  const mode = syncMode(body.mode || 'ff');
+  if (!mode) return badRequest(res, 'mode must be "fetch" or "ff"');
+  const bases = body.bases && typeof body.bases === 'object' && !Array.isArray(body.bases) ? body.bases : {};
+  for (const v of Object.values(bases)) if (!isSafeBranchName(v)) return badRequest(res, 'bases must name branches');
+  const members = await workspaceSyncBlocks(req.params.id, { mode, bases });
+  if (!members) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  res.json({ members });
+  members.forEach((m) => projectSyncEvents.emit('changed', { projectKey: m.projectKey }));
+}));
+
 app.get('/api/projects/:key/policy', async (req, res) => {
   const p = await tmProject(req, res); if (!p) return;
   try { res.json({ status: await projectPolicyStatus(p, { discover: req.query.discover === '1' }) }); }
@@ -4306,12 +4843,14 @@ async function resolvePrPipeline(src, res) {
 // pipeline's store_meta, never from the query). gh is not required here.
 // The base-branch choices ride along: `chain` is the run chain's base branches,
 // root first (a run outside a chain: just its source), `defaultBase` its root, and
-// `branches` each remote's branches from the LOCAL remote-tracking refs (no fetch),
-// without HEAD and the run's own feature branch. A git remote failure still carries
-// the chain so the dialog can offer it.
+// `branches` each remote's branches from the remote-tracking refs, without HEAD and
+// the run's own feature branch. The base remote is fetched first (45 s TTL, 8 s bound,
+// negative-cached) so `baseStatus` can warn when the base moved since the run started
+// (warn only, #527). A git remote failure still carries the chain so the dialog can offer it.
 // -> { ok, remotes:[{name,fetchUrl,pushUrl,host,owner,repo,slug}],
 //      defaults:{pushRemote,baseRemote}, remembered:{pushRemote,baseRemote}|null,
-//      chain:[branch], defaultBase:branch|null, branches:{[remote]:[branch]} }
+//      chain:[branch], defaultBase:branch|null, branches:{[remote]:[branch]},
+//      baseStatus:{base, remote, movedSinceRun:number|null, fetchedAt, stale} }
 // ---------------------------------------------------------------------------
 app.get('/api/pr/remotes', async (req, res) => {
   const resolved = await resolvePrPipeline(req.query || {}, res);
@@ -4326,11 +4865,26 @@ app.get('/api/pr/remotes', async (req, res) => {
   const rl = await listRemotes(repoDir);
   if (!rl.ok) return res.status(500).json({ error: `git remote failed: ${rl.error}`, chain, defaultBase });
   const remembered = readPrRemotePrefs(repoDir);
+  const defaults = defaultPrRemotes(rl.remotes, remembered);
+  const baseRemote = defaults.baseRemote;
+  const runBranch = resolved.state.branch || {};
+  // Measure from the remote tip recorded at start only when it is the SAME ref we compare
+  // against: a fork's base remote is `upstream` and a chained run's base is the chain root,
+  // not this run's source; there, the recorded origin tip would count old commits.
+  const sameRef = runBranch.sync?.remote === baseRemote && runBranch.source === defaultBase;
+  const baseSha = (sameRef && runBranch.sync?.remoteSha) || runBranch.baseSha || null;
+  const bf = isSafeRemoteName(baseRemote) ? await fetchRemote(repoDir, { remote: baseRemote, maxAgeMs: INTERACTIVE_TTL_MS }) : null;
   const rb = await listRemoteBranches(repoDir, rl.remotes.map((r) => r.name));
   const branches = {};
   for (const [name, list] of Object.entries(rb.byRemote)) branches[name] = list.filter((b) => b !== feature);
-  res.json({ ok: true, remotes: rl.remotes, defaults: defaultPrRemotes(rl.remotes, remembered), remembered,
-    chain, defaultBase, branches });
+  const movedSinceRun = baseSha && isSafeRemoteName(baseRemote) && isSafeBranchName(defaultBase)
+    ? await commitsBetween(repoDir, baseSha, `refs/remotes/${baseRemote}/${defaultBase}`) : null;
+  // No such remote (or not a repo) is not "stale": there is simply nothing to compare.
+  const bfNoRemote = !!(bf && !bf.ok && (bf.kind === 'no-remote' || bf.kind === 'bad-remote'));
+  const baseStatus = { base: defaultBase, remote: baseRemote, movedSinceRun,
+    fetchedAt: bf ? bf.fetchedAt || null : null, stale: !!(bf && !bf.ok && !bfNoRemote) };
+  res.json({ ok: true, remotes: rl.remotes, defaults, remembered,
+    chain, defaultBase, branches, baseStatus });
 });
 
 // ---------------------------------------------------------------------------
@@ -4568,7 +5122,35 @@ app.get('/api/branches', async (req, res) => {
     } catch (err) {
       console.error(`[worca-ui] run branches lookup failed: ${err && err.message ? err.message : err}`);
     }
-    res.json({ branches, current, runs: runsOut });
+    const out = { branches, current, runs: runsOut };
+    if (req.query.fresh === '1' || req.query.fresh === 'true') {
+      // D8: only a REGISTERED project is fetched (a credentialed network call). Any other folder
+      // answers from its local refs, exactly as the non-fresh list does.
+      // A registry read error degrades to "not registered" (local refs, remote:null), never a 500.
+      const reg = await registeredProjectForDir(projectDir).catch((err) => {
+        console.error(`[worca-ui] branches: project registry read failed: ${err && err.message ? err.message : err}`);
+        return null;
+      });
+      const key = reg ? reg.key : null;
+      const settings = effectiveSyncSettings(key);
+      const f = reg
+        ? await fetchRemote(projectDir, { remote: settings.remote, maxAgeMs: INTERACTIVE_TTL_MS, timeoutMs: INTERACTIVE_TIMEOUT_MS })
+        : { ok: false, kind: 'unregistered', error: 'not a registered project: showing local refs only' };
+      if (reg && (f.ok || (f.kind !== 'no-remote' && f.kind !== 'bad-remote'))) {
+        const rb = await listRemoteBranches(projectDir, [settings.remote]);
+        const base = typeof req.query.base === 'string' && isSafeBranchName(req.query.base) ? req.query.base : current;
+        const sync = await projectSyncBlock({ dir: projectDir, projectKey: key, base, mode: 'status', details: true });
+        const fetchError = f.ok ? {} : { fetchError: { kind: f.kind, message: f.error } };
+        Object.assign(out, {
+          remote: { name: settings.remote, branches: rb.ok ? (rb.byRemote[settings.remote] || []) : [] },
+          fetchedAt: f.fetchedAt || sync.fetchedAt || null, stale: !f.ok, ...fetchError,
+          behind: sync.behind ?? null, sync: { ...sync, stale: !f.ok, ...fetchError },
+        });
+      } else {
+        Object.assign(out, { remote: null, fetchedAt: null, stale: false });
+      }
+    }
+    res.json(out);
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -5353,6 +5935,7 @@ const settingsState = () => ({
   hideBuiltinModels: hideBuiltinModels(),
   theme: storedTheme(),                                   // system | light | dark (dark-mode design §6)
   schedule: scheduleDefaults(),                           // defaults a NEW schedule inherits
+  sync: syncDefaults(),                                   // sync before run (#527): instance defaults
   uiLevel: effectiveUiLevel(),                            // simple | advanced | expert (docs/ui-levels.md)
   memoryDefrag: memoryDefragModel(),                      // Settings › Memory: the STORED { model, effort } (null = the workflow default)
   memoryDefragDefault: defragDefaultModel(),              // what "(default)" means there: the built-in's own model
@@ -5628,6 +6211,7 @@ app.post('/api/settings', async (req, res) => {
     if (hasPrDescKey) assertPrDescriptionModelInput(body.prDescriptionModel ?? '', prDescModels);
     if (hasMemoryDefragKey) assertMemoryDefragModelInput(body.memoryDefrag, defragModels);
     if (hasWorkspaceScanKey) assertWorkspaceScanInput(body.workspaceScan, wsScanModels);
+    if (has('sync')) assertSyncSettingsInput(body.sync);
     // Root first: it is the one key whose setter can still fail AFTER the asserts
     // above (an unusable path), so every other key's write must come after it or
     // a mixed POST would answer 400 with those keys already applied on disk.
@@ -5657,10 +6241,11 @@ app.post('/api/settings', async (req, res) => {
     if (hasMemoryDefragKey) await setMemoryDefragModel(body.memoryDefrag, { models: defragModels });
     if (hasWorkspaceScanKey) await setWorkspaceScanModels(body.workspaceScan, { models: wsScanModels });
     if (has('schedule')) await setScheduleDefaults(body.schedule && typeof body.schedule === 'object' ? body.schedule : {});
+    if (has('sync')) await setSyncDefaults(body.sync);
     if (hasBudgetKey) emitChanged('budget-changed');
     // Other open tabs repaint their Settings cards (a stale tab could otherwise
     // "save" its old checkbox state over this one with no feedback to either).
-    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule')) emitChanged('settings-changed');
+    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule') || has('sync')) emitChanged('settings-changed');
     res.json({ ...settingsState(), ...(await autoModelState()), ...(await prDescriptionModelState()), chat: chatPrefs() });
   } catch (err) {
     // The setters throw only on an unusable path -> client error (400).
@@ -5941,6 +6526,74 @@ const providerError = (res, err) => {
   if (err && (err.code === 'TERMS' || err.code === 'NOT_SIGNED_IN')) return res.status(409).json({ error: msg, code: err.code });
   return badRequest(res, msg);
 };
+
+// ── Ask Worca voice mode (docs/speech.md) ──
+// Behind the same global loopback / identity-proxy guards as every /api/ask
+// route (:1131, :1144). They name no thread, so the thread-owner guard (:1181)
+// has nothing to check. Registered before /api/providers/:name so the param
+// routes never see "speech".
+const speechFail = (res, err) => res.status(err && err.status ? err.status : 502).json({ error: err && err.message ? err.message : String(err) });
+
+app.get('/api/speech', (_req, res) => {
+  // downloaded: the voice chip says "Downloading…" only when the models really are fetched.
+  let downloaded = { stt: false, tts: false };
+  try { downloaded = speechAssetStore().downloaded(); } catch { /* no worca home: nothing downloaded */ }
+  res.json({ ...speechState(), downloaded });
+});
+
+app.patch('/api/providers/speech', async (req, res) => {
+  try {
+    await patchSpeech(req.body || {});
+    emitChanged('settings-changed');
+    res.json(await providersState());
+  } catch (err) {
+    return providerError(res, err);
+  }
+});
+
+// Settings › Providers › Speech: "Remove speech models" (the size shows on the card).
+app.delete('/api/speech/cache', async (_req, res) => {
+  try {
+    const bytes = speechAssetStore().clear();
+    res.json({ removed: bytes, providers: await providersState() });
+  } catch (err) {
+    res.status(err && err.status === 409 ? 409 : 500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+app.post('/api/providers/speech/test', async (req, res) => {
+  const b = req.body || {};
+  res.json(await testSpeech(typeof b.kind === 'string' ? b.kind : '', b));
+});
+
+app.post('/api/speech/transcribe', express.raw({ type: ['audio/wav', 'audio/x-wav', 'audio/wave'], limit: '25mb' }), async (req, res) => {
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return badRequest(res, 'send the utterance as an audio/wav body');
+  const ctrl = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) ctrl.abort(); });
+  try {
+    res.json(await transcribe({ audio: req.body, signal: ctrl.signal }));
+  } catch (err) {
+    if (!res.headersSent) speechFail(res, err);
+  }
+});
+
+app.post('/api/speech/synthesize', async (req, res) => {
+  const ctrl = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) ctrl.abort(); });
+  let up;
+  try {
+    up = await synthesize({ text: req.body && req.body.text, signal: ctrl.signal });
+  } catch (err) {
+    return speechFail(res, err);
+  }
+  res.status(200).set({ 'Content-Type': up.headers.get('content-type') || 'audio/wav', 'Cache-Control': 'no-store' });
+  try {
+    if (up.body) for await (const chunk of up.body) { if (res.destroyed) break; res.write(chunk); }
+    res.end();
+  } catch {
+    res.destroy();   // upstream died mid-stream: the browser's audio fails, voice drops to text-only
+  }
+});
 
 app.get('/api/providers', async (req, res) => {
   try {
@@ -7363,7 +8016,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     const attRows = files.map((f) => askAddAttachment(id, userMsg.id, { name: f.name, kind: f.kind, mime: f.mime, text: f.text, data: f.data }));
     // The decoded binary bodies are on disk now. `files` is captured by this
     // scope's closures (settleJob, the turn listeners, onOutOfTurn) for the whole
-    // turn plus jobGraceMs, so up to 25 MB of dead Buffers would otherwise stay
+    // turn plus jobGraceMs, so up to 48 MB of dead Buffers would otherwise stay
     // reachable per running thread.
     for (const f of files) f.data = null;
     echoAttachments = attRows.map((a) => ({ id: a.id, name: a.name, bytes: a.bytes, kind: a.kind, mime: a.mime }));
@@ -7551,9 +8204,9 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
         if (bodyText.includes('\u0000')) return badRequest(res, `attachment contains NUL bytes: ${name}`);
         files.push({ name, kind: 'text', mime: cls.mime, text: bodyText, bytes: buf.length });
       }
-      const total = askThreadAttachmentBytes(id) + files.reduce((s, f) => s + f.bytes, 0);
-      if (total > ASK_LIMITS.attachment.maxBytesPerThread) {
-        return res.status(413).json({ error: 'attachment budget for this thread exceeded' });
+      const cap = ASK_LIMITS.attachment.maxBytesPerMessage;
+      if (files.reduce((s, f) => s + f.bytes, 0) > cap) {
+        return res.status(413).json({ error: `attachments over ${cap} bytes per message` });
       }
     }
 
@@ -9207,9 +9860,26 @@ function serverMockMode() {
 // /api/chat* -> channel worker status + test delivery (design §4.8). Prefs ride
 // GET/POST /api/settings; per-plugin channel CONFIG rides /api/plugins/:name/config.
 // ---------------------------------------------------------------------------
+/** Channel status rows + each channel's command reach: how many chats may send
+ *  commands, and the last command refused (hidden once its chat is allowed). */
+function chatStatusRows() {
+  const entries = channelHost.list();
+  return channelHost.status().map((row) => {
+    const entry = entries.find((e) => e.plugin === row.plugin && e.channelId === row.channelId);
+    let ids = [];
+    try { ids = parseIdList(readPluginConfig(row.plugin, entry?.configSchema || []).allowedChatIds); }
+    catch { /* unreadable config: nobody is allowed */ }
+    const refused = chatRefusals.get(`${row.plugin}/${row.channelId}`) || null;
+    return {
+      ...row,
+      commands: { allowed: ids.length, lastRefused: refused && !ids.includes(refused.chatId) ? refused : null },
+    };
+  });
+}
+
 app.get('/api/chat/status', (_req, res) => {
   try {
-    res.json({ channels: channelHost.status() });
+    res.json({ channels: chatStatusRows() });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -9490,6 +10160,8 @@ if (isMain) {
     }
     try { startTeamMetricsBackground({ log: (m) => console.warn(m) }); }
     catch (err) { console.warn(`[worca-ui] team metrics background: ${err?.message || err}`); }
+    try { startProjectSyncBackground({ log: (m) => console.warn(m) }); }
+    catch (err) { console.warn(`[worca-ui] project sync background: ${err?.message || err}`); }
     // Model bridge (model-bridge-design.md §4.1): up before the first bridged
     // spawn so resolveModelEnv's synchronous start is the exception, not the rule.
     startBridge({ log: (m) => console.warn(m) }).catch((err) => console.warn(`[worca-ui] model bridge: ${err?.message || err}`));
@@ -9525,5 +10197,6 @@ export const _testing = {
   askTrackRun, liveRunEntry, liveDefragRun, memoryScopeKey, startRunHandler, emitMemoryChanged, askSystemPromptFor,
   uiControl, bearerMatches,
   broadcast, askFilesRunDir,
+  validateResumeTarget, resumeTargetOf, fireResumeTicket, cancelScheduledResumes,
   trackHeartbeat, heartbeatTick, BOOT_ID,
 };

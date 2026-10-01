@@ -216,3 +216,43 @@ test('history rows carry the review count and the files changed from results.jso
   assert.equal(lite.checks, null, 'lite callers skip the file read');
   assert.equal(lite.files, null);
 });
+
+// #527 §4.5: a REMOTE-started run (startRef set) branched from origin/<base> while the local
+// <base> had diverged. source...feature would count the remote's commits as the run's own;
+// the recorded start (baseSha) is the real merge base. Without startRef: today's count.
+test('a remote-started run diffs from its recorded baseSha; without startRef it keeps source...feature', async () => {
+  const { listPipelines } = await import('../src/core/artifacts.mjs');
+  const r2 = await mkdtemp(join(tmpdir(), 'worca-cc-rs-'));
+  try {
+    const g = (a) => spawnSync('git', a, { cwd: r2, encoding: 'utf8' });
+    g(['init', '-q', '-b', 'dev']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
+    await writeFile(join(r2, 'f.txt'), 'a\n'); g(['add', '-A']); g(['commit', '-qm', 'init']);
+    // The remote's tip: three upstream lines the local dev never got.
+    g(['checkout', '-q', '-b', 'upstream-tip']);
+    await writeFile(join(r2, 'u.txt'), 'u1\nu2\nu3\n'); g(['add', '-A']); g(['commit', '-qm', 'upstream']);
+    const start = g(['rev-parse', 'HEAD']).stdout.trim();
+    // The run's feature branch off that start: one line of its own.
+    g(['checkout', '-q', '-b', 'worca-cc/remote-start']);
+    await writeFile(join(r2, 'mine.txt'), 'm\n'); g(['add', '-A']); g(['commit', '-qm', 'mine']);
+    // Local dev diverges with its own commit.
+    g(['checkout', '-q', 'dev']);
+    await writeFile(join(r2, 'local.txt'), 'l\n'); g(['add', '-A']); g(['commit', '-qm', 'local']);
+
+    const withStart = await seedPipeline(r2, {
+      title: 'Remote start', status: 'stopped', startedAt: '2026-09-30T00:00:00Z',
+      branch: { source: 'dev', feature: 'worca-cc/remote-start', baseSha: start, startRef: start, branchKept: true },
+    });
+    const noStart = await seedPipeline(r2, {
+      title: 'Plain', status: 'stopped', startedAt: '2026-09-30T00:00:00Z',
+      branch: { source: 'dev', feature: 'worca-cc/remote-start', baseSha: start, branchKept: true },
+    });
+    const rows = await listPipelines(r2);
+    const a = rows.find((r) => r.id === withStart.id);
+    assert.equal(a.added, 1, 'only the feature\'s own line');
+    assert.equal(a.removed, 0);
+    const b = rows.find((r) => r.id === noStart.id);
+    assert.equal(b.added, 4, 'no startRef → today\'s dev...feature count (upstream lines included)');
+  } finally {
+    await rm(r2, { recursive: true, force: true });
+  }
+});

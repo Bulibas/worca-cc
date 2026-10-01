@@ -247,7 +247,7 @@ test('"Continue without cap" confirms, then resumes with ignoreCostCap', async (
   window.document.querySelector('#confirm-ok').dispatchEvent(new window.Event('click', { bubbles: true }));
   await settle(window, 5);
 
-  assert.deepEqual(posts, [{ pipelineId: 'p1', ignoreCostCap: true }],
+  assert.deepEqual(posts, [{ pipelineId: 'p1', baseCheck: true, ignoreCostCap: true }],
     'POST /api/resume carries the cap override');
 });
 

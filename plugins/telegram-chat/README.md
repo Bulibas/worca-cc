@@ -21,17 +21,31 @@ server and dials out to `api.telegram.org` only.
 
    Then in the UI: *Plugins → telegram-chat → Settings* — paste the **Bot
    token** (or set `{"$env":"TELEGRAM_BOT_TOKEN"}` and export the var).
-3. **Find your chat ID**: open a chat with the bot (or add it to a group) and
-   send any message. Then:
+3. **Find your chat ID**: send `/whoami` to the bot from the chat, then read
+   the ID from *Settings → Chat notifications* ("Ignored /whoami from chat …").
+   Add it to **Allowed chat IDs** (and **Notify chat IDs** for notifications).
+   Groups have negative IDs. If the chat is already in **Notify chat IDs**,
+   worca also replies in the chat that it is not allowed yet and names its ID.
 
-   ```bash
-   worca plugin channel telegram-chat main   # foreground worker, prints inbound frames
-   ```
-
-   The inbound frame shows `chatId`. Groups have negative IDs.
-4. Put that ID into **Notify chat IDs** (outbound) and — if you want chat
-   commands — **Allowed chat IDs** (inbound).
+   Don't run `worca plugin channel telegram-chat main` while the worca UI is
+   up: it becomes a second poller and steals the updates.
+4. **Notify chat IDs** is outbound; **Allowed chat IDs** is inbound (chat
+   commands).
 5. *Settings → Chat notifications* — pick which events notify, hit **Test**.
+
+## Commands do nothing?
+
+- **Allowed chat IDs is empty** (or lacks this chat). Empty means nobody may
+  send commands. A notified chat gets a one-line hint naming its ID;
+  *Settings → Chat notifications* shows "Commands are off" and the last
+  ignored command.
+- **`HTTP 409` badge**: another poller (a second worca, `worca plugin
+  channel`) or a webhook is using this bot token. Stop the other poller; if
+  you set a webhook yourself, remove it with
+  `https://api.telegram.org/bot<token>/deleteWebhook`. worca never deletes it
+  for you.
+- **Group privacy mode**: in a group, the bot only sees commands addressed to
+  it — use `/approve@yourbot`.
 
 ## Security
 

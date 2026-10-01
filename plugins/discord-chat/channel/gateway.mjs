@@ -149,9 +149,10 @@ export function createGatewayClient({
       }
       if ([4010, 4011, 4012, 4013].includes(code)) { onFatal(`unrecoverable gateway close ${code}`, 'plugin'); return; }
       // Our own resume-intent closes (4900 RECONNECT, 4009 zombie, 4901 after
-      // INVALID_SESSION already handled resumability) keep the session; other
-      // 4xxx closes invalidate it so the next connect re-identifies.
-      if (![4900, 4901, 4007, 4009].includes(code) && code >= 4000) { sessionId = null; resumeUrl = null; }
+      // INVALID_SESSION already handled resumability) keep the session; every other
+      // 4xxx close — including Discord's 4007 "invalid seq", which it documents as
+      // "start a new session" — invalidates it so the next connect re-identifies.
+      if (![4900, 4901, 4009].includes(code) && code >= 4000) { sessionId = null; resumeUrl = null; }
       onState('disconnected', `gateway closed (${code || 'socket error'})`);
       await _sleep(RECONNECT_DELAYS[Math.min(reconnects++, RECONNECT_DELAYS.length - 1)]);
     }

@@ -31,7 +31,7 @@
           "key": "allowedChatIds",
           "type": "text",
           "label": "Allowed chat IDs (commands)",
-          "help": "Comma-separated chat IDs allowed to send commands (/status, /pause, /approve…). EMPTY = nobody: anyone in an allowed chat can control worca-cc."
+          "help": "Comma-separated chat IDs allowed to send commands (/status, /pause, /approve…). EMPTY = nobody: anyone in an allowed chat can control worca-cc. Replies from a notified chat that is not listed get a one-line hint naming its ID."
         }
       ]
     }

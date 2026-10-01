@@ -77,6 +77,24 @@ export function renderChatSettings({ prefs, channels } = {}, { doc = globalThis.
     test.dataset.channelId = c.channelId;
     row.appendChild(test);
     chBox.appendChild(row);
+    // Command reach (/api/chat/status `commands`): an inbound channel with an empty
+    // allow-list notifies but ignores every reply — the silent failure behind
+    // "my /approve did nothing". Say so, and name the last chat that was refused.
+    const cmd = c.capabilities?.inbound !== false && c.commands ? c.commands : null;
+    if (cmd && cmd.allowed === 0) {
+      const off = h(doc, 'small', 'hint warn chat-commands-off',
+        `Commands are off: no chat is in Allowed chat IDs, so replies like /approve are ignored. Add the chat ID in Plugins → ${c.plugin} → Settings.`);
+      off.dataset.channelKey = key;
+      chBox.appendChild(off);
+    }
+    if (cmd && cmd.lastRefused) {
+      const r = cmd.lastRefused;
+      const refused = h(doc, 'small', 'hint warn chat-refused',
+        `Ignored /${r.command} from chat ${r.chatId} — it is not in Allowed chat IDs.`);
+      refused.dataset.channelKey = key;
+      if (r.at) refused.title = r.at;
+      chBox.appendChild(refused);
+    }
   }
   root.appendChild(chBox);
   return root;

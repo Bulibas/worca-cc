@@ -131,6 +131,7 @@ export function labelForTool(name, input = {}, attachmentNames = {}) {
     case 'get_run_diff': return id ? `Reading run ${id.slice(0, 12)}` : 'Reading run';
     case 'list_workflows': return 'Looking at workflows';
     case 'list_projects': return 'Looking at projects';
+    case 'list_branches': return 'Looking at branches';
     case 'propose_run': return 'Preparing a run';
     case 'propose_workflow': return 'Building a workflow';
     case 'propose_metrics_change': return 'Proposing a metrics change';
@@ -447,6 +448,7 @@ export function createTurnReducer({
       if (!c || c.type !== 'tool_use' || typeof c.id !== 'string') continue;
       const input = c.input && typeof c.input === 'object' ? c.input : {};
       if (isMain) {
+        flushDeltas();                                                    // the text before a tool reaches the client before its block (voice speaks it then)
         anyToolRan = true;
         startAt.set(c.id, now());
         if (isAgentTool(c.name)) {

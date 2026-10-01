@@ -87,7 +87,7 @@ test('a paused run shows a wired Resume button on its detail screen', async () =
   await ctx.settle(5);
   const call = ctx.fetchCalls.find((c) => c.url.includes('/api/resume'));
   assert.ok(call, 'click posts /api/resume');
-  assert.deepEqual(JSON.parse(call.opts.body), { pipelineId: 'p1' });
+  assert.deepEqual(JSON.parse(call.opts.body), { pipelineId: 'p1', baseCheck: true });
 });
 
 test('a done run hides the Resume button on its detail screen', async () => {
@@ -108,5 +108,8 @@ test('the run page template carries a Pause button next to Stop', async () => {
   const pause = tpl.content.querySelector('.rd-bar .rd-pause');
   assert.ok(pause, 'the run page bar has .rd-pause');
   assert.equal(pause.dataset.action, 'pause', 'it starts as Pause (paintRdHeader flips it to resume)');
-  assert.ok(pause.nextElementSibling && pause.nextElementSibling.classList.contains('rd-stop'), '.rd-stop sits right after it');
+  // Pause/Resume rides the split Resume (its caret schedules the resume); Stop follows the split.
+  const split = pause.closest('.rd-resume-split');
+  assert.ok(split, '.rd-pause lives in the .rd-resume-split');
+  assert.ok(split.nextElementSibling && split.nextElementSibling.classList.contains('rd-stop'), '.rd-stop sits right after the split');
 });

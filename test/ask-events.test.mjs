@@ -91,6 +91,16 @@ test('delta batching: 256 chars flush immediately, flush() forces, redaction per
   assert.deepEqual(out.filter((f) => f.type === 'ask-delta').map((f) => f.text), ['a', 'b'], 'a synchronous timer stub flushes every delta (no stale timer id)');
 });
 
+test('a tool call flushes the batched text before it: the text reaches the client before the tool block', () => {
+  const h = harness();
+  h.push(mstart('msg_1'), delta("I'll check the runs."));
+  assert.equal(h.frames.filter((f) => f.type === 'ask-delta').length, 0, 'still batched');
+  h.push(atool('msg_1', 'tu_1', 'mcp__worca__list_runs', {}));
+  const order = h.types().filter((t) => t === 'ask-delta' || t === 'ask-block');
+  assert.deepEqual(order, ['ask-delta', 'ask-block']);
+  assert.equal(h.frames.find((f) => f.type === 'ask-delta').text, "I'll check the runs.");
+});
+
 test('text comes from the main stream only; result.result is a fallback when no assistant text arrived', () => {
   const h = harness();
   h.push(mstart('msg_c', 'toolu_agent'), delta('child text', 'toolu_agent'), atext('msg_1', 'parent'));
@@ -175,6 +185,7 @@ test('tool lifecycle: labels, running → done/error blocks, durations, input cl
 
 test('labelForTool table', () => {
   assert.equal(labelForTool('mcp__worca__list_runs', {}), 'Finding runs');
+  assert.equal(labelForTool('mcp__worca__list_branches', { projectKey: 'web-00000001' }), 'Looking at branches');
   assert.equal(labelForTool('mcp__worca__get_run', { id: 'abcdefghijklmnop' }), 'Reading run abcdefghijkl');
   assert.equal(labelForTool('mcp__worca__get_run', {}), 'Reading run');
   assert.equal(labelForTool('mcp__worca__list_workflows', {}), 'Looking at workflows');

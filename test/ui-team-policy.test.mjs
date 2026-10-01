@@ -414,5 +414,5 @@ test('Running: a cost_pipeline_policy pause shows the blue banner; "Continue pas
   await settle(6);
   const posts = fetchCalls.filter((c) => c.url.includes('/api/resume'));
   assert.equal(posts.length, 1);
-  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'pl_1', pastTeamCap: true, policyReason: 'release hotfix' });
+  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'pl_1', baseCheck: true, pastTeamCap: true, policyReason: 'release hotfix' });
 });
