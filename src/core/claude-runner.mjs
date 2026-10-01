@@ -62,6 +62,7 @@ import { resolveBillTo, normalizeBillTo, currentOwner } from './billing.mjs';
 import { redactSecrets, redactDeep } from './redact.mjs';
 import { MODEL_CREDENTIAL_ENV_KEYS } from './broker-guard.mjs';
 import { modelSlot } from './broker-routing.mjs';
+import { pluginModelRoute, syncPluginSlots } from './plugin-broker-slots.mjs';
 
 const DEFAULT_BIN = process.env.WORCA_CLAUDE_BIN || process.env.ORCH_CLAUDE_BIN || 'claude';
 
@@ -564,8 +565,15 @@ export function brokerRouteFor(modelEnv, env = process.env) {
 const SPAWN_TTL_SEC = { aux: 600, test: 600, ask: 7200, phase: 86400 };
 
 async function runViaBroker(opts) {
-  const route = brokerRouteFor(opts.modelEnv);
+  // An env-style plugin model spends from its plugin's own slot, at the plugin's base path;
+  // the plugin's secrets were never resolved into its env (config.mjs).
+  const pluginRoute = pluginModelRoute(opts.model);
+  if (pluginRoute?.error) throw brokerSpawnError(pluginRoute.error);
+  const route = pluginRoute || brokerRouteFor(opts.modelEnv);
   if (route.error) throw brokerSpawnError(route.error);
+  // Register the plugins' slots first if they changed since (a plugin enabled from the CLI).
+  try { await syncPluginSlots(); }
+  catch (err) { if (pluginRoute) throw brokerSpawnError(`cannot register plugin credential slots: ${err.message}`, 'network'); }
   const onEvent = opts.onEvent;
   const redactingOnEvent = (e) => onEvent(redactDeep(e));
 
@@ -619,7 +627,7 @@ async function runViaBroker(opts) {
     : withProviderModesOff({
       ENABLE_TOOL_SEARCH: 'true',
       ...(opts.modelEnv || {}),
-      ANTHROPIC_BASE_URL: slotBaseUrl(route.slot),
+      ANTHROPIC_BASE_URL: `${slotBaseUrl(route.slot)}${route.prefix || ''}`,
       ANTHROPIC_AUTH_TOKEN: minted.token,
     });
   try {

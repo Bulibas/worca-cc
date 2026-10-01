@@ -138,6 +138,7 @@ import { brokerEnabled, brokerInfo, personSlots, brokerUsageSummary, foldUsageBy
 import { freeDailyStatus } from '../src/core/openrouter-free.mjs';
 import { checkBrokerAtBoot } from '../src/core/broker-boot.mjs';
 import { modelSlot, missingCredentials, describeMissing } from '../src/core/broker-routing.mjs';
+import { syncPluginSlots } from '../src/core/plugin-broker-slots.mjs';
 import { planClone, cloneProject, CloneError } from '../src/core/clone-project.mjs';
 import { listFolders } from '../src/core/fs-browse.mjs';
 import {
@@ -3115,6 +3116,10 @@ function reloadChatWorkers(name) {
   channelHost.reloadPlugin(name).catch((err) => {
     console.error(`[worca-ui] chat worker reload failed for ${name}: ${err && err.message ? err.message : err}`);
   });
+  // The enabled plugins' models decide the broker's plugin slots (plugin-broker-slots.mjs).
+  syncPluginSlots().catch((err) => {
+    console.error(`[worca-ui] plugin credential slots not registered: ${err && err.message ? err.message : err}`);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -6012,6 +6017,7 @@ app.get('/api/openrouter/free-daily', async (req, res) => {
 app.get('/api/credentials', async (req, res) => {
   if (!brokerEnabled()) return res.json({ enabled: false });
   try {
+    try { await syncPluginSlots(); } catch { /* status below still answers */ }
     const info = await brokerInfo();
     const who = resolveIdentity(req);
     // Which slot each catalog model spends from: the pickers' "your key / no key" badges.
@@ -6091,6 +6097,7 @@ app.post('/api/ask/relay', async (req, res) => {
 async function brokerStartRefusal(req, modelIds) {
   if (!brokerEnabled() || !modelIds || !modelIds.length) return null;
   try {
+    try { await syncPluginSlots(); } catch { /* the spawn says why */ }
     const info = await brokerInfo();
     let person = 'local';
     if (info.mode === 'multi') {
@@ -9299,7 +9306,7 @@ app.post('/api/plugins/:name/doctor', async (req, res) => {
 // { set: true } (§7.6).
 // ?profile=<id> selects which configuration to echo (multi-profile sources);
 // absent = the default bucket, which is all a single-profile source ever uses.
-app.get('/api/plugins/:name/config', (req, res) => {
+app.get('/api/plugins/:name/config', async (req, res) => {
   const name = requirePlugin(req, res);
   if (!name) return;
   const manifest = readInstalledManifest(name);
@@ -9339,10 +9346,18 @@ app.get('/api/plugins/:name/config', (req, res) => {
     // Model secrets (design §9.7): same redaction contract — { set: true|false }
     // markers only, never values.
     const msSchema = modelSecretsSchema(name);
+    // With the credential broker on, each person adds these keys on the key page; the form
+    // only clears values saved here before (the boot guard refuses them).
+    let broker = null;
+    if (msSchema.length && brokerEnabled()) {
+      let keyPage = null;
+      try { keyPage = (await brokerInfo()).publicUrl || null; } catch { /* the note still shows */ }
+      broker = { keyPage };
+    }
     res.json({
       sources,
       channels,
-      ...(msSchema.length ? { models: { schema: msSchema, values: redactedConfig(name, msSchema) } } : {}),
+      ...(msSchema.length ? { models: { schema: msSchema, values: redactedConfig(name, msSchema), ...(broker ? { broker } : {}) } } : {}),
     });
   } catch (err) {
     sendPluginError(res, err);
@@ -9438,6 +9453,10 @@ app.put('/api/plugins/:name/config', (req, res) => {
   if (body.target === 'modelSecrets') {
     const schema = modelSecretsSchema(name);
     if (!schema.length) return badRequest(res, 'plugin declares no modelSecrets');
+    // Broker on: only clearing is allowed; a key saved here would be one agents could reach.
+    if (brokerEnabled() && Object.values(body.values || {}).some((v) => v !== null && v !== '')) {
+      return res.status(409).json({ error: 'the credential broker is on: each person adds this key on the key page' });
+    }
     try {
       writePluginConfig(name, schema, body.values);
       return res.json({ ok: true });

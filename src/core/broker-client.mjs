@@ -130,6 +130,11 @@ export async function personSlots(person) {
   return call('GET', `/internal/people/${encodeURIComponent(String(person || '').toLowerCase())}/slots`);
 }
 
+/** Replace the plugin slots (plugin-broker-slots.mjs). Returns {slots:[id]}. */
+export async function putPluginSlots(slots) {
+  return call('PUT', '/internal/plugin-slots', { slots });
+}
+
 /** Usage rows, newest first. */
 export async function brokerUsage({ since, billTo, runId } = {}) {
   const q = new URLSearchParams();

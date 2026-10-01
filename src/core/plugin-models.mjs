@@ -106,14 +106,21 @@ export function pluginModelSecretStatus(name) {
  * pass through; {secret} placeholders resolve via the plugin's secrets store
  * ({"$env":"VAR"} indirection honored there). Unresolvable secrets are dropped
  * and reported — same degradation as an unresolvable ${VAR} ref downstream.
+ * With `withSecrets: false` (the credential broker is on) placeholders are left out
+ * without reading the store: the broker adds each person's key instead.
  * @param {{plugin:string, env?:object}} model  an allPluginModels entry
+ * @param {{withSecrets?: boolean}} [o]
  * @returns {{env: Record<string,string>, droppedSecrets: string[]}}
  */
-export function flattenPluginModelEnv(model) {
+export function flattenPluginModelEnv(model, { withSecrets = true } = {}) {
   const env = {};
   const droppedSecrets = [];
   const entries = Object.entries(model?.env ?? {});
   if (!entries.length) return { env, droppedSecrets };
+  if (!withSecrets) {
+    for (const [k, v] of entries) if (typeof v === 'string') env[k] = v;
+    return { env, droppedSecrets };
+  }
   let secrets = {};
   const schema = modelSecretsSchema(model.plugin);
   if (schema.length) {

@@ -13143,10 +13143,28 @@ async function openPluginSettings(name, profile, { seeds = null } = {}) {
     head.className = 'pl-config-h';
     head.textContent = 'Model secrets';
     body.appendChild(head);
-    const msForm = renderConfigForm([{ id: '', schema: data.models.schema, values: data.models.values }])
-      .querySelector('.pl-config-form');
-    msForm.dataset.target = 'modelSecrets';
-    body.appendChild(msForm);
+    // Credential broker on: each person adds these keys on the key page. A value saved
+    // here before keeps its form, only so it can be cleared.
+    const broker = data.models.broker;
+    const anySet = Object.values(data.models.values || {}).some((v) => v && v.set === true);
+    if (broker) {
+      const note = document.createElement('p');
+      note.className = 'hint pl-broker-note';
+      note.append(`The credential broker is on: each person adds ${data.models.schema.map((f) => f.label || f.key).join(', ')} on `);
+      if (broker.keyPage) {
+        const a = document.createElement('a');
+        a.href = broker.keyPage; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'the key page';
+        note.append(a);
+      } else note.append('the key page');
+      note.append(anySet ? '. Clear the values still saved here: worca refuses to start while they are.' : '.');
+      body.appendChild(note);
+    }
+    if (!broker || anySet) {
+      const msForm = renderConfigForm([{ id: '', schema: data.models.schema, values: data.models.values }])
+        .querySelector('.pl-config-form');
+      msForm.dataset.target = 'modelSecrets';
+      body.appendChild(msForm);
+    }
   }
   // Roster controls (multiProfile sources only — absent otherwise). Switching
   // profile REOPENS the pane: the values are the server's per-profile echo, so
