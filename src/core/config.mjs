@@ -23,6 +23,7 @@ import { listGlobalModels, addGlobalModel, removeGlobalModel, hideBuiltinModels,
 /** Whether the developer stored the hide-built-ins flag (a team default applies only when not). */
 const readSettingsHideStored = () => { const s = readSettings(); return typeof s.hideBuiltinModels === 'boolean' || s.hideBuiltinModelsChosen === true; };
 import { listPluginModels, allPluginModels, flattenPluginModelEnv } from './plugin-models.mjs';
+import { brokerEnabled } from './broker-client.mjs';
 // Team policy defaults (team-policy design §6, §8): read from the discovery CACHE only (a leaf module).
 import { policyCatalogModels, teamDefault } from './policy/cache.mjs';
 import { PREDEFINED_LIST_PRICES } from './list-prices.mjs';
@@ -618,7 +619,9 @@ export function resolveModelEnv(modelId, { tag } = {}) {
   } else if (!entry) {
     const pm = listPluginModels().find((m) => m.id.toLowerCase() === lc);
     if (pm && pm.env) {
-      const { env, droppedSecrets } = flattenPluginModelEnv(pm);
+      // With the credential broker on, a plugin secret never reaches a spawn: the broker adds
+      // the person's own key for the plugin's slot (plugin-broker-slots.mjs).
+      const { env, droppedSecrets } = flattenPluginModelEnv(pm, { withSecrets: !brokerEnabled() });
       for (const d of droppedSecrets) {
         console.warn(`[worca] plugin "${pm.plugin}" model ${JSON.stringify(pm.id)}: dropping env ${d} — set it in the plugin's Model secrets`);
       }

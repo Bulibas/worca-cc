@@ -32,8 +32,9 @@ import { WORKSPACE_MAX_PROJECTS, scanDescriptionBudget } from '../shared/workspa
 import { KINDS, checkOverrides, checkSynthesis } from '../shared/workspace-map/schema.mjs';
 import { LIMITS } from '../shared/workspace-map/limits.mjs';
 import {
-  emptyOverrides, effectiveEdges, setEdgeState, addManualEdge, removeManualEdge, rekeyOverrides,
+  emptyOverrides, effectiveEdges, setEdgeState, addManualEdge, removeManualEdge, rekeyOverrides, liveEdges,
 } from '../shared/workspace-map/overrides.mjs';
+import { changeOrder } from '../shared/workspace-map/order.mjs';
 import { renderWorkspaceDescription } from '../shared/workspace-map/render.mjs';
 import { mapSummary } from '../shared/workspace-map/summary.mjs';
 
@@ -133,9 +134,9 @@ export function scanMemberProblems(projectPaths) {
  * @param {string[]} projectPaths
  * @returns {string} 8 hex chars
  */
-export function rootsHash(projectPaths) {
+export function rootsHash(projectPaths, rootOf = canonicalProjectRoot) {
   const roots = (Array.isArray(projectPaths) ? projectPaths : [])
-    .map((p) => canonicalProjectRoot(p))
+    .map((p) => rootOf(p))
     .sort();
   return createHash('sha1').update(roots.join('\n')).digest('hex').slice(0, 8);
 }
@@ -243,6 +244,19 @@ function memberPaths(id) {
   ).all(id).map((r) => r.path);
 }
 
+/**
+ * The roots hash of the member set a workspace spans NOW, or null when no such workspace. Its id
+ * keeps the hash of the set it was created over (D1), so after a member change the two differ.
+ * Synchronous: the scan launch guard (ui/server.mjs liveOverSet) runs without an await.
+ * @param {string} id
+ * @returns {string|null}
+ */
+export function workspaceSetHash(id) {
+  getDb();
+  if (!prepare('SELECT 1 FROM workspaces WHERE id = ?').get(id)) return null;
+  return rootsHash(memberPaths(id));
+}
+
 /** Map a workspaces row (+ its member rows) to the persisted entry shape. */
 function rowToEntry(r) {
   return {
@@ -304,18 +318,37 @@ export async function readWorkspace(id) {
  * absolute paths in input order, with later paths that resolve to an
  * already-seen canonical root dropped.
  */
-function normalizeMembers(projectPaths) {
+function normalizeMembers(projectPaths, rootOf = canonicalProjectRoot) {
   const out = [];
   const seenRoots = new Set();
   for (const raw of Array.isArray(projectPaths) ? projectPaths : []) {
     const norm = normalizeProjectPath(raw);
     if (!norm) continue;
-    const root = canonicalProjectRoot(norm);
+    const root = rootOf(norm);
     if (seenRoots.has(root)) continue;
     seenRoots.add(root);
     out.push(norm);
   }
   return out;
+}
+
+/**
+ * The git probes of a member change (each spawns git), memoized: the change plans once BEFORE its
+ * write lock, where every probe runs, then again inside it on the cached answers — so the lock is
+ * never held across a git spawn (a member that is new to the second pass still probes live).
+ */
+function memoGitProbe() {
+  const memo = (fn) => { const m = new Map(); return (p) => { if (!m.has(p)) m.set(p, fn(p)); return m.get(p); }; };
+  return { rootOf: memo(canonicalProjectRoot), isRepo: memo(isGitRepo) };
+}
+const LIVE_GIT = { rootOf: canonicalProjectRoot, isRepo: isGitRepo };
+
+/** Each NEW member must be an existing directory inside a git work tree. */
+function checkNewMembers(paths, isRepo = isGitRepo) {
+  for (const p of paths) {
+    if (!isDir(p)) throw err(`member path does not exist or is not a directory: ${p}`, 'BAD_REQUEST');
+    if (!isRepo(p)) throw err(`member path is not a git repository: ${p}`, 'BAD_REQUEST');
+  }
 }
 
 /** Name + member validation shared by createWorkspace and checkNewWorkspace. */
@@ -330,29 +363,56 @@ function prepareCreate(input) {
   if (members.length > WORKSPACE_MAX_PROJECTS) {
     throw err(`a workspace holds at most ${WORKSPACE_MAX_PROJECTS} member projects (${members.length} given)`, 'BAD_REQUEST');
   }
-  for (const p of members) {
-    if (!isDir(p)) throw err(`member path does not exist or is not a directory: ${p}`, 'BAD_REQUEST');
-    if (!isGitRepo(p)) throw err(`member path is not a git repository: ${p}`, 'BAD_REQUEST');
-  }
+  checkNewMembers(members);
   return { name, members };
 }
 
-/** Case-insensitive name clash + D1 duplicate-SET guard. Call inside tx() when writing. */
-function assertNoDuplicate(name, members) {
-  if (prepare('SELECT 1 FROM workspaces WHERE name = ? COLLATE NOCASE').get(name)) {
-    throw err(`a workspace named "${name}" already exists`, 'DUPLICATE_NAME');
-  }
-  const hash = rootsHash(members);
+/** Throw DUPLICATE_SET when a workspace other than `selfId` (null: any) already spans exactly `paths`. */
+function assertUniqueSet(paths, selfId, rootOf = canonicalProjectRoot) {
+  const hash = rootsHash(paths, rootOf);
   for (const row of prepare('SELECT id FROM workspaces').all()) {
-    if (rootsHash(memberPaths(row.id)) === hash) {
+    if (row.id !== selfId && rootsHash(memberPaths(row.id), rootOf) === hash) {
       throw err('a workspace over this exact project set already exists', 'DUPLICATE_SET');
     }
   }
 }
 
+/** A trimmed, non-empty name no OTHER workspace holds (case-insensitive; selfId null: any). */
+function checkName(raw, selfId) {
+  const name = (typeof raw === 'string' ? raw : '').trim();
+  if (!name) throw err('workspace name is required', 'BAD_REQUEST');
+  if (prepare('SELECT 1 FROM workspaces WHERE name = ? COLLATE NOCASE AND id <> ?').get(name, selfId ?? '')) {
+    throw err(`a workspace named "${name}" already exists`, 'DUPLICATE_NAME');
+  }
+  return name;
+}
+
+/**
+ * Case-insensitive name clash + D1 duplicate-SET guard + a free key. Call inside tx() when
+ * writing. The key is frozen at create, so a workspace whose member set changed since
+ * (addWorkspaceMembers / removeWorkspaceMember) still holds the key of its ORIGINAL set: a
+ * same-slug name over that set would collide on the id.
+ */
+function assertNoDuplicate(name, members) {
+  checkName(name, null);
+  assertUniqueSet(members, null);
+  if (prepare('SELECT 1 FROM workspaces WHERE id = ?').get(workspaceKey({ name, projectPaths: members }))) {
+    throw err(`a workspace with a name like "${name}" once spanned this project set; choose another name`, 'DUPLICATE_NAME');
+  }
+}
+
+/** The persisted entry, or NOT_FOUND. */
+function entryOrThrow(id) {
+  getDb();
+  const entry = typeof id === 'string' && id ? readEntry(id) : null;
+  if (!entry) throw err(`workspace not found: ${id}`, 'NOT_FOUND');
+  return entry;
+}
+
 /**
  * Validate a NEW workspace exactly as createWorkspace will, without writing — the Workspace scan
- * launch (POST /api/workspaces/scan) refuses up front what the run's final save would refuse.
+ * launch (POST /api/workspaces/scan) refuses up front what the run's final save would refuse, and
+ * Ask's workspace card proposes only what it would accept.
  * @param {{name:string, projectPaths:string[]}} input
  * @returns {{id:string, name:string, projectPaths:string[]}}  id === the key createWorkspace mints
  * @throws err(code: BAD_REQUEST | DUPLICATE_NAME | DUPLICATE_SET)
@@ -365,11 +425,9 @@ export function checkNewWorkspace(input = {}) {
 }
 
 /**
- * Create a workspace. Validates name (non-empty + unique case-insensitive),
- * a 2+ distinct-git-repo member set (de-duped by canonical root), and a unique
- * project set (D1, by rootsHash). Persists the workspaces row + ordered
- * workspace_projects member rows (member PATH stored in the project_key column)
- * in ONE tx(). id is the frozen workspaceKey, computed once. Returns the
+ * Create a workspace (rules: checkNewWorkspace, re-checked inside the write). Persists the
+ * workspaces row + ordered workspace_projects member rows (member PATH stored in the
+ * project_key column) in ONE tx(). id is the frozen workspaceKey, computed once. Returns the
  * annotated entry.
  * @param {{name:string, projectPaths:string[], description?:string}} input
  * @throws err(code: BAD_REQUEST | DUPLICATE_NAME | DUPLICATE_SET)
@@ -382,7 +440,6 @@ export async function createWorkspace(input = {}) {
   const policyProject = memberPathFor(members, input.policyProject ?? null, 'policyProject');
   const id = workspaceKey({ name, projectPaths: members });
   const now = new Date().toISOString();
-
   getDb();
   tx(() => {
     assertNoDuplicate(name, members);
@@ -403,17 +460,15 @@ export async function createWorkspace(input = {}) {
 }
 
 /**
- * Update a workspace's name and/or description. NEVER touches projectPaths (the
- * project set is immutable) and NEVER recomputes the id (D1). Re-validates a new
- * name for case-insensitive uniqueness. Stamps updatedAt.
+ * Update a workspace's name and/or description. NEVER touches projectPaths (the member set
+ * changes only through addWorkspaceMembers / removeWorkspaceMember) and NEVER recomputes the
+ * id (D1). Re-validates a new name for case-insensitive uniqueness. Stamps updatedAt.
  * @param {string} id
  * @param {{name?:string, description?:string}} patch
  * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_NAME)
  */
 export async function updateWorkspace(id, patch = {}) {
-  getDb();
-  const entry = readEntry(id);
-  if (!entry) throw err(`workspace not found: ${id}`, 'NOT_FOUND');
+  const entry = entryOrThrow(id);
 
   let { name, description } = entry;
   let descriptionOrigin = null;   // set under the write lock below, from the row as it is then
@@ -436,10 +491,7 @@ export async function updateWorkspace(id, patch = {}) {
 
   tx(() => {
     // Re-check NOCASE name clash against OTHER rows (exclude self).
-    const clash = prepare(
-      'SELECT 1 FROM workspaces WHERE name = ? COLLATE NOCASE AND id <> ?'
-    ).get(name, id);
-    if (clash) throw err(`a workspace named "${name}" already exists`, 'DUPLICATE_NAME');
+    checkName(name, id);
     // Re-read under the write lock: a scan's finalize (possibly in another process — a scan
     // resumed from the CLI) or an override re-render may have landed since the read above. A
     // patch without a description keeps THAT text and its origin. A CHANGED text is a hand edit
@@ -463,6 +515,150 @@ export async function updateWorkspace(id, patch = {}) {
   });
 
   return annotate({ ...fresh, name, description, descriptionOrigin, metricsProject, policyProject, updatedAt: now });
+}
+
+/**
+ * Validate a rename without writing (Ask's workspace card; updateWorkspace applies it).
+ * @returns {{entry, name:string}}
+ * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_NAME)
+ */
+export function planWorkspaceRename(id, name) {
+  const entry = entryOrThrow(id);
+  const next = checkName(name, id);
+  if (next === entry.name) throw err(`the workspace is already named "${next}"`, 'BAD_REQUEST');
+  return { entry, name: next };
+}
+
+/**
+ * Validate adding member projects without writing. Same rules as create: each new path must
+ * be an existing git repo (de-duped by canonical root, and not already a member), the result
+ * stays within WORKSPACE_MAX_PROJECTS, and the set must be unique among the OTHER workspaces.
+ * @returns {{entry, added:string[], next:string[]}}
+ * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_SET)
+ */
+export function planMembersAdd(id, projectPaths, git = LIVE_GIT) {
+  const entry = entryOrThrow(id);
+  const tooMany = (n) => err(`a workspace holds at most ${WORKSPACE_MAX_PROJECTS} member projects (${n} after this change)`, 'BAD_REQUEST');
+  // Sized before any git runs, by distinct path: a flood of paths never spawns git once per path.
+  const distinct = new Set((Array.isArray(projectPaths) ? projectPaths : []).map(normalizeProjectPath).filter(Boolean)).size;
+  if (entry.projectPaths.length + distinct > WORKSPACE_MAX_PROJECTS) throw tooMany(entry.projectPaths.length + distinct);
+  const current = new Set(entry.projectPaths.map((p) => git.rootOf(p)));
+  const added = normalizeMembers(projectPaths, git.rootOf);
+  if (!added.length) throw err('name at least one project to add', 'BAD_REQUEST');
+  for (const p of added) {
+    if (current.has(git.rootOf(p))) throw err(`already a member of this workspace: ${p}`, 'BAD_REQUEST');
+  }
+  const next = [...entry.projectPaths, ...added];
+  checkNewMembers(added, git.isRepo);
+  assertUniqueSet(next, id, git.rootOf);
+  return { entry, added, next };
+}
+
+/**
+ * Validate removing one member without writing. The path must be a member (exact or same
+ * canonical root; a member that vanished from disk can still be removed), at least 2 members
+ * must remain, and the remaining set must be unique among the OTHER workspaces. A removed
+ * metricsProject / policyProject home comes back null: the home is CLEARED, never silently
+ * moved to another member (the user picks a new one).
+ * @returns {{entry, removed:string, next:string[], metricsProject, policyProject}}
+ * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_SET)
+ */
+export function planMemberRemove(id, projectPath, git = LIVE_GIT) {
+  const entry = entryOrThrow(id);
+  const want = typeof projectPath === 'string' ? normalizeProjectPath(projectPath) : null;
+  if (!want) throw err('name the member project to remove', 'BAD_REQUEST');
+  const removed = entry.projectPaths.find((p) => p === want || git.rootOf(p) === git.rootOf(want));
+  if (!removed) throw err(`not a member of this workspace: ${want}`, 'BAD_REQUEST');
+  const next = entry.projectPaths.filter((p) => p !== removed);
+  if (next.length < 2) throw err('a workspace needs at least 2 distinct member projects', 'BAD_REQUEST');
+  assertUniqueSet(next, id, git.rootOf);
+  return {
+    entry, removed, next,
+    metricsProject: entry.metricsProject === removed ? null : entry.metricsProject ?? null,
+    policyProject: entry.policyProject === removed ? null : entry.policyProject ?? null,
+  };
+}
+
+/**
+ * The stored map and its reviews without one member (by project key): its entry, every edge that
+ * names it and its synthesized role; every confirm / reject override and manual edge that names
+ * it. The change order and its cycles are re-derived from the members and live edges left
+ * (changeOrder over liveEdges, as the scan derives them), and the synthesizer's order notes are
+ * dropped: they described the order before the member left. Coordination notes are free text
+ * and stay until the next scan replaces the synthesis. Pure.
+ */
+function mapWithoutMember(mapDoc, overrides, key) {
+  const names = (e) => e && (e.from === key || e.to === key);
+  const edgeOverrides = {};
+  for (const [id, o] of Object.entries((overrides && overrides.edges) || {})) if (!names(o)) edgeOverrides[id] = o;
+  const nextOverrides = { ...overrides, edges: edgeOverrides, manual: ((overrides && overrides.manual) || []).filter((x) => !names(x)) };
+  let doc = mapDoc;
+  if (mapDoc && mapDoc.map) {
+    const m = mapDoc.map;
+    const members = m.members.filter((x) => x && x.key !== key);
+    const edges = m.edges.filter((e) => !names(e));
+    const { order, cycles } = changeOrder(members.map((x) => x.key), liveEdges(edges, nextOverrides));
+    const syn = mapDoc.synthesis;
+    let synthesis = syn;
+    if (syn) {
+      const roles = syn.roles ? { ...syn.roles } : null;
+      if (roles) delete roles[key];
+      synthesis = { ...syn, ...(roles ? { roles } : {}), ...(typeof syn.orderNotes === 'string' ? { orderNotes: '' } : {}) };
+    }
+    doc = { map: { ...m, members, edges, order, cycles }, synthesis };
+  }
+  return { mapDoc: doc, overrides: nextOverrides };
+}
+
+/**
+ * Add member projects to an existing workspace (rules: planMembersAdd). New rows are appended
+ * after the current ordinals in ONE tx(); the id is NOT recomputed (D1: the store dir, runs,
+ * schedules, metrics, policy and the map's reviews all hang off it). The stored map is left as
+ * is — the new member has no edges until the next scan (the server re-scans after a change).
+ * Runs already started keep the member set frozen in their own pipeline row (workspace_meta).
+ * The live-run 409 guard lives in the server route.
+ * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_SET)
+ */
+export async function addWorkspaceMembers(id, projectPaths) {
+  const now = new Date().toISOString();
+  const git = memoGitProbe();
+  planMembersAdd(id, projectPaths, git);   // every git probe (and every refusal) before the write lock
+  const { entry, next } = tx(() => {
+    const plan = planMembersAdd(id, projectPaths, git);
+    const base = prepare('SELECT COALESCE(MAX(ordinal), -1) AS m FROM workspace_projects WHERE workspace_id = ?').get(id).m;
+    const ins = prepare('INSERT INTO workspace_projects (workspace_id, project_key, ordinal) VALUES (?, ?, ?)');
+    plan.added.forEach((p, i) => ins.run(id, p, base + 1 + i));
+    prepare('UPDATE workspaces SET updated_at = ? WHERE id = ?').run(now, id);
+    return plan;
+  });
+  return annotate({ ...entry, projectPaths: next, updatedAt: now });
+}
+
+/**
+ * Remove one member project from an existing workspace (rules: planMemberRemove — a removed
+ * metrics / policy home is cleared). The member leaves the stored map and its reviews too
+ * (mapWithoutMember), and a generated description is re-rendered without it; a hand-edited one
+ * is left alone (D8). One tx(); the id is NOT recomputed.
+ * @throws err(code: NOT_FOUND | BAD_REQUEST | DUPLICATE_SET)
+ */
+export async function removeWorkspaceMember(id, projectPath) {
+  const now = new Date().toISOString();
+  // projectKey and the plan's probes spawn git: taken before the write lock, like the map writers do.
+  const keyOf = new Map(entryOrThrow(id).projectPaths.map((p) => [p, projectKey(p)]));
+  const git = memoGitProbe();
+  planMemberRemove(id, projectPath, git);
+  const out = tx(() => {
+    const p = planMemberRemove(id, projectPath, git);
+    const key = keyOf.get(p.removed) ?? projectKey(p.removed);
+    const { mapDoc, overrides } = mapWithoutMember(p.entry.mapDoc, p.entry.overrides, key);
+    const kept = { ...p.entry, projectPaths: p.next, mapDoc, overrides };
+    const description = p.entry.descriptionOrigin === 'generated' && mapDoc ? renderFor(kept, mapDoc, overrides) : p.entry.description;
+    prepare('DELETE FROM workspace_projects WHERE workspace_id = ? AND project_key = ?').run(id, p.removed);
+    prepare('UPDATE workspaces SET metrics_project = ?, policy_project = ?, map_json = ?, map_overrides_json = ?, description = ?, updated_at = ? WHERE id = ?')
+      .run(p.metricsProject, p.policyProject, mapDoc ? JSON.stringify(mapDoc) : null, JSON.stringify(overrides), description, now, id);
+    return { ...kept, description, metricsProject: p.metricsProject, policyProject: p.policyProject, updatedAt: now };
+  });
+  return annotate(out);
 }
 
 /**
@@ -500,8 +696,9 @@ export async function readWorkspaceMap(id) {
  */
 export async function saveWorkspaceScanResult(id, { description = '', map = null, synthesis = null } = {}) {
   getDb();
-  // The member set is immutable (D1): its keys are computed before the write lock is taken
-  // (projectKey may spawn git). An unknown id has none; readEntry below answers NOT_FOUND.
+  // Member keys are computed before the write lock is taken (projectKey may spawn git). A member
+  // change blocks while a scan owns the workspace (the server's live-run guard), so they hold for
+  // the write. An unknown id has none; readEntry below answers NOT_FOUND.
   const memberKeys = memberPaths(id).map((p) => projectKey(p));
   const checked = synthesis === null ? null : checkSynthesis(synthesis, { memberKeys }).value;
   const mapDoc = isWorkspaceMap(map) ? { map, synthesis: checked } : null;
@@ -563,14 +760,17 @@ export const MANUAL_DISPLAY_MAX = 200;
  */
 export async function updateWorkspaceOverrides(id, next) {
   getDb();
-  // The member set is immutable (D1), so its keys are computed before the write lock is taken
-  // (projectKey may spawn git) — from the member rows only, not a second parse of map_json.
-  // An unknown id has no member rows; readEntry inside the transaction answers NOT_FOUND.
-  const memberKeys = memberPaths(id).map((p) => projectKey(p));
+  // Member keys are computed before the write lock is taken (projectKey may spawn git) — from the
+  // member rows only, not a second parse of map_json — and re-taken inside it when a member change
+  // landed in between. An unknown id has no member rows; readEntry inside the transaction answers NOT_FOUND.
+  const paths = memberPaths(id);
+  let memberKeys = paths.map((p) => projectKey(p));
   const now = new Date().toISOString();
   const { entry, rerendered } = tx(() => {
     const cur = readEntry(id);
     if (!cur) throw err(`workspace not found: ${id}`, 'NOT_FOUND');
+    const nowPaths = memberPaths(id);
+    if (nowPaths.join('\n') !== paths.join('\n')) memberKeys = nowPaths.map((p) => projectKey(p));
     const produced = typeof next === 'function'
       ? next(cur.overrides, { map: cur.mapDoc ? cur.mapDoc.map : null, memberKeys })
       : next;

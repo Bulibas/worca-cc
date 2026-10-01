@@ -365,9 +365,38 @@ done
 curl -s -o /dev/null -w '%{http_code}\n' https://docs.worca.dev/changelog/<V>/
 ```
 
-Still not 200 means the Cloudflare build did not deploy. Say so and point at
-the `worca-docs` build log in the Cloudflare dashboard (Workers & Pages →
-worca-docs → Deployments). An expired or rolled build token is the usual cause.
+Then check the home page. Its version chip, its "Changelog for …" card and
+its link all come from the build (`package.json` and the newest
+`entries.json` record), so they move with the same deploy, and nothing in
+`docs-site/src/` is edited by hand for a release:
+
+```bash
+curl -s https://docs.worca.dev/ | perl -ne 'print "$1\n" while /(\@worca\/app [0-9A-Za-z.-]+|Changelog for [0-9A-Za-z.-]+|Built [0-9-]+)/g'
+```
+
+Expect `@worca/app <V>` and `Changelog for <V>`. An older version there means
+the old build is still being served, even when the changelog page answers.
+
+Still not 200, or a home page naming the previous version, means the
+Cloudflare build did not deploy. Check *Build history* (Workers & Pages →
+worca-docs → Deployments → View all builds): no row for the new `docs-live`
+commit means the push never started a build; a red row has the reason in its
+log. Either way the commit can go live without waiting, by deploying exactly
+the `docs-live` commit with wrangler, the same deploy Workers Builds runs:
+
+```bash
+W=<scratchpad>/docs-live-wt
+git worktree add -q --detach "$W" "$(git ls-remote origin docs-live | cut -f1)"
+(cd "$W/docs-site" && node build.mjs \
+  && CLOUDFLARE_ACCOUNT_ID=05989744162c7031c609e572a5185057 npx --yes wrangler@4 deploy --message "docs-live <sha>")
+git worktree remove "$W"
+```
+
+Then run the two checks above again, and tell the user which case it was so
+the automatic build can be fixed: a red row is usually an expired or rolled
+build token (Settings → Builds → API token); no row means Cloudflare never
+acted on the push (check the Cloudflare Workers and Pages GitHub app's access
+to the repository).
 
 ### C6: Summary
 
@@ -378,5 +407,6 @@ Changelog published
   Commit:     <sha> "Changelog: What's new in <V>" on dev
   docs-live:  <old> → <new>
   Live:       https://docs.worca.dev/changelog/<V>/   (200 | not yet — see the build log)
+  Home page:  @worca/app <V> · Changelog for <V>      (| still <old> — see the build log)
   Left alone: <other uncommitted files, or "nothing">
 ```

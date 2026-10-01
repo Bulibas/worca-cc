@@ -73,7 +73,7 @@ Only `name` is required. Unknown fields are warnings (errors under `--strict`).
 | `taskSources[].multiProfile` | `true` → one install holds several independent configurations (two Jira servers, two orgs), each with its own config/secrets/state. Users create profiles in the UI and bind each project/workspace to one. Omit it and the source uses a single implicit `default` profile — identical to before profiles existed |
 | `taskSources[].inputs[]` | per-run UI — see next table. **Exactly one `task-browser` required** |
 | `models[]` | catalog entries: `id`, `label`, `efforts`, `env` (literal or `{"secret": "<key>"}`), `cost` (`{free:true}` \| `{perMtok:{…}}`), and `upstream` for a bridged model — `{provider: "copilot"\|"openai"\|"anthropic", api: "anthropic"\|"openai-chat"\|"openai-responses", model, baseUrl?, apiKey? (a `${VAR}` ref only, never a literal), headers?, capabilities? (toolCalls, vision, reasoning, maxPromptTokens, maxOutputTokens, reasoningEfforts)}`. A `copilot` entry resolves against each user's own sign-in |
-| `modelSecrets[]` | `{key, label}` — the secrets `models[].env` may reference; prompted for at install |
+| `modelSecrets[]` | `{key, label}` — the secrets `models[].env` may reference; prompted for at install. With the credential broker on, each person adds the key on the key page instead (a per-person `p-<plugin>-<key>` slot): keep `ANTHROPIC_BASE_URL` a literal URL and put the secret only in `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` (docs/credential-broker.md "Plugin slots") |
 | `mcpServers` | API 5: name → MCP server definition (`type`, `command`/`args`/`env` or `url`/`headers`, `fields`, `description`) — see **MCP servers (API 5)** |
 
 ## Marketplace manifest (repo-level, optional)

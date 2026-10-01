@@ -240,6 +240,39 @@ test('propose_metrics_change: the parent re-validates the INPUT (pinned default 
   assert.ok(frames.some((f) => f.type === 'ask-card' && f.block.card.type === 'metrics'), 'the card was broadcast mid-turn');
 });
 
+test('propose_workspace_change: the parent re-validates the INPUT (pinned workspace replayed, never for create) and mints the card; a refusal is a notice', async () => {
+  const s = seed();
+  const seen = [];
+  const runner = (frames) => async (opts) => {
+    for (const [id, name, input, text, isError] of frames) {
+      push(opts.onEvent, { type: 'assistant', parent_tool_use_id: null, message: { id: 'msg_1', content: [{ type: 'tool_use', id, name, input }] } });
+      push(opts.onEvent, { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: id, content: text, ...(isError ? { is_error: true } : {}) }] } });
+    }
+    await new Promise((r) => setImmediate(r)); await new Promise((r) => setImmediate(r));
+    push(opts.onEvent, RESULT());
+    return { text: '', exitCode: 0 };
+  };
+  const card = { type: 'workspace', kind: 'add_members', summary: 'Add docs to Shop', workspaceId: 'wks-shop-0000abcd', effects: [], warnings: [], followUps: [] };
+  const { turn, frames } = makeTurn(s, { pinnedScope: { workspaceId: 'wks-shop-0000abcd' } }, {
+    validateWorkspaceChange: async (input) => { seen.push(input); return input.kind === 'add_members' ? { ok: true, card } : { ok: false, errors: ['a workspace over this exact project set already exists'] }; },
+    runClaudeImpl: runner([
+      ['toolu_1', 'mcp__worca__propose_workspace_change', { kind: 'add_members', projectKeys: ['kc'] }, '{"ok":true,"card":{}}', false],
+      ['toolu_2', 'mcp__worca__propose_workspace_change', { kind: 'create', name: 'X', projectKeys: ['ka', 'kb'] }, '{"ok":true,"card":{}}', false],
+      ['toolu_3', 'mcp__worca__propose_workspace_change', { kind: 'rename' }, '{"ok":false,"errors":["x"]}', false],
+    ]),
+  });
+  await turn.run();
+  assert.deepEqual(seen, [
+    { kind: 'add_members', projectKeys: ['kc'], workspaceId: 'wks-shop-0000abcd' },
+    { kind: 'create', name: 'X', projectKeys: ['ka', 'kb'] },
+  ], 'the pin fills the workspace of a change to it, never a create; a child refusal never reaches the validator');
+  const final = getMessage(s.asst.id);
+  const cards = final.blocks.filter((b) => b.kind === 'card');
+  assert.equal(cards.length, 1); assert.deepEqual(cards[0].card, card);
+  assert.ok(final.blocks.some((b) => b.kind === 'notice' && b.text === 'Workspace change rejected: a workspace over this exact project set already exists'));
+  assert.ok(frames.some((f) => f.type === 'ask-card' && f.block.card.type === 'workspace'));
+});
+
 test('invalid proposal → "Proposal rejected" notice, no card', async () => {
   const s = seed();
   const { turn, frames } = makeTurn(s, {}, {

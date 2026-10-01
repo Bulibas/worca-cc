@@ -77,6 +77,7 @@ import { withBillTo, currentBillTo } from './billing.mjs';
 import { brokerEnabled, brokerInfo, personSlots } from './broker-client.mjs';
 import { mockEnabled } from './claude-runner.mjs';
 import { modelSlot, manifestModels, missingCredentials, describeMissing } from './broker-routing.mjs';
+import { syncPluginSlots } from './plugin-broker-slots.mjs';
 import { recoveryDelayMs, sleepAbortable } from './recovery-backoff.mjs';
 import {
   resolveFailure, isTerminal, markTerminal, answerFromDecision,
@@ -3441,6 +3442,7 @@ export class RunHarness extends EventEmitter {
     for (const m of Object.values(stepModels || {})) if (typeof m === 'string' && m.trim()) models.add(m.trim());
     if (this.claude?.model) models.add(this.claude.model);
     if (!models.size) models.add('claude-sonnet-5');   // nothing named: the CLI's own default is a Claude model
+    try { await syncPluginSlots(); } catch { /* the spawn says why */ }
     let status;
     try { status = (await personSlots(person === 'local' || !person ? (process.env.WORCA_BROKER_SYSTEM_BILL_TO || 'local') : person)).slots || []; } catch { return; }
     const r = missingCredentials([...models], modelSlot, status);

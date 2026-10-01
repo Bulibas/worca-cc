@@ -20,7 +20,10 @@ services:
     environment:
       HTTPS_PROXY: http://egress:3128
       HTTP_PROXY: http://egress:3128
-      NO_PROXY: 127.0.0.1,localhost
+      # worca's own fetch() honors these too (src/core/env-proxy.mjs), so a
+      # sidecar it calls on this network (the broker overlay's broker:8080)
+      # must be listed here or the proxy refuses it as not allowlisted.
+      NO_PROXY: 127.0.0.1,localhost,broker
       # Playwright downloads Chromium from a CDN; add it to the allowlist or
       # pre-fetch it. Listed here so the failure is legible, not silent.
       PLAYWRIGHT_DOWNLOAD_HOST: ${PLAYWRIGHT_DOWNLOAD_HOST:-}

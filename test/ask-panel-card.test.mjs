@@ -1000,3 +1000,54 @@ test('web card: host, reason and exact URL as text; Deny / Always allow / Allow 
   ctx.flush();
   assert.equal(ctx.doc.querySelector('[data-ask-webcard="failed"] .ask-mcard-failed').textContent, 'Could not allow: web access is off');
 });
+
+test('workspace card: members, warnings and effects as text; Apply / Decline post the verbs; applied and failed read as such', async () => {
+  const rec = { cardPosts: [] };
+  const base = apiHandler(rec);
+  const ctx = await openWithCard(PROJECT_CARD, rec, { fetchHandler: (url, opts) => {
+    const m = /^\/api\/ask\/threads\/[^/]+\/cards\/(card_[0-9a-f]{8})$/.exec(url);
+    if (m && (opts.method || '').toUpperCase() === 'POST' && m[1] !== CARD_ID) { rec.cardPosts.push([m[1], JSON.parse(opts.body)]); return { ok: true, status: 200, json: async () => ({}) }; }
+    return base(url, opts);
+  } });
+  const card = { type: 'workspace', kind: 'add_members', summary: 'Add docs to Shop', workspaceId: 'wks-shop-0000abcd', workspaceName: 'Shop',
+    added: [{ key: 'kc', name: 'docs', path: '/r/docs' }], note: '<b>why</b>',
+    warnings: ['A run of Shop is live — the change is refused until it ends', 'docs does not record to the metrics home acme/api — route the members once this is applied'],
+    effects: ['The workspace keeps its id wks-shop-0000abcd; runs already started keep the members they started with'],
+    followUps: ['metrics_route_members'], change: { workspaceId: 'wks-shop-0000abcd', projectPaths: ['/r/docs'] } };
+  const WC = 'card_00000010';
+  ctx.panel.pushServerFrame({ type: 'ask-card', block: { kind: 'card', id: WC, state: 'proposed', card }, threadId: TID, messageId: MID, seq: 3 });
+  ctx.flush();
+  const el = ctx.doc.querySelector('[data-ask-wscard="proposed"]');
+  assert.ok(el);
+  assert.equal(el.querySelector('.ask-mcard-title').textContent, 'Proposed workspace change');
+  assert.equal(el.querySelector('.ask-mcard-kind').textContent, 'Add members');
+  assert.deepEqual([...el.querySelectorAll('.ask-mcard-change-label')].map((x) => x.textContent), ['Workspace', 'Add']);
+  assert.deepEqual([...el.querySelectorAll('.ask-mcard-after')].map((x) => x.textContent), ['Shop', 'docs · /r/docs']);
+  assert.equal(el.querySelectorAll('.ask-wscard-warn li').length, 2);
+  assert.match(el.querySelector('.ask-wscard-warn li').textContent, /is live/);
+  assert.match(el.querySelector('.ask-wscard-effects li').textContent, /keeps its id/);
+  assert.equal(el.querySelector('.ask-mcard-note b'), null, 'text, never markup');
+  el.querySelector('[data-ask-ws-apply]').click();
+  await ctx.tick();
+  assert.deepEqual(rec.cardPosts.at(-1), [WC, { state: 'applied' }]);
+  ctx.panel.pushServerFrame({ type: 'ask-card', block: { kind: 'card', id: WC, state: 'applied', card: { ...card, result: { ok: true, workspaceId: 'wks-shop-0000abcd', detail: 'Shop has 3 members' } } }, threadId: TID, messageId: MID, seq: 4 });
+  ctx.flush();
+  const done = ctx.doc.querySelector('[data-ask-wscard="applied"]');
+  assert.equal(done.querySelector('.ask-mcard-title').textContent, 'Applied workspace change');
+  assert.equal(done.querySelector('.ask-mcard-detail').textContent, 'Shop has 3 members');
+  assert.equal(done.querySelector('.ask-wscard-warn'), null, 'warnings belong to the proposal');
+  assert.equal(done.querySelector('a.ask-card-sched-link').getAttribute('href'), '#workspaces/wks-shop-0000abcd');
+  const rm = { ...card, kind: 'remove_member', summary: 'Remove api from Shop', added: undefined, removed: { key: 'ka', name: 'api', path: '/r/api' } };
+  ctx.panel.pushServerFrame({ type: 'ask-card', block: { kind: 'card', id: 'card_00000011', state: 'failed', error: 'cannot change the members of a workspace with a live run or scan', card: rm }, threadId: TID, messageId: MID, seq: 5 });
+  ctx.flush();
+  const failed = ctx.doc.querySelector('[data-ask-wscard="failed"]');
+  assert.equal(failed.querySelector('.ask-mcard-failed').textContent, 'Could not apply: cannot change the members of a workspace with a live run or scan');
+  ctx.panel.pushServerFrame({ type: 'ask-card', block: { kind: 'card', id: 'card_00000012', state: 'proposed', card: rm }, threadId: TID, messageId: MID, seq: 6 });
+  ctx.flush();
+  const rmEl = ctx.doc.querySelector('[data-ask-wscard="proposed"]');
+  assert.equal(rmEl.querySelector('.ask-mcard-kind').textContent, 'Remove member');
+  assert.ok(rmEl.querySelector('[data-ask-ws-apply]').classList.contains('is-danger'), 'a removal reads as one');
+  rmEl.querySelector('[data-ask-ws-decline]').click();
+  await ctx.tick();
+  assert.deepEqual(rec.cardPosts.at(-1), ['card_00000012', { state: 'declined' }]);
+});

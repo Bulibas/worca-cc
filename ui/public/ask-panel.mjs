@@ -3039,6 +3039,82 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return { el: rootEl };
   }
 
+  // ---- Workspace card (propose_workspace_change): create, add / remove members, rename ------------------------------
+  const WS_KIND_LABEL = { create: 'Create', add_members: 'Add members', remove_member: 'Remove member', rename: 'Rename' };
+  const WS_APPLY_LABEL = { create: 'Create', add_members: 'Add', remove_member: 'Remove', rename: 'Rename' };
+  /** proposed → applied | failed, or declined. Every value is text. */
+  function buildWorkspaceCard(block) {
+    const card = block.card || {};
+    const summary = card.summary || 'workspace change';
+    if (block.state === 'declined') return { el: make('div', 'ask-card-stub', `Declined — ${summary}`) };
+    const rootEl = make('div', `ask-card ask-mcard ask-wscard is-${block.state}`);
+    rootEl.setAttribute('data-ask-wscard', block.state);
+    const head = make('div', 'ask-mcard-head');
+    head.appendChild(make('span', 'ask-mcard-title', block.state === 'applied' ? 'Applied workspace change' : block.state === 'failed' ? 'Workspace change failed' : 'Proposed workspace change'));
+    head.appendChild(make('span', 'ask-mcard-kind', WS_KIND_LABEL[card.kind] || card.kind || ''));
+    rootEl.appendChild(head);
+    const body = make('div', 'ask-mcard-body');
+    const sum = make('div', 'ask-mcard-summary');
+    if (block.state === 'applied') sum.appendChild(svgIcon(WF_ICO.check, 15, 2.4));
+    sum.appendChild(make('span', null, summary));
+    body.appendChild(sum);
+    if (card.note) body.appendChild(make('div', 'ask-mcard-note', card.note));
+    const member = (m) => (m && m.path ? `${m.name || ''} · ${m.path}` : (m && m.name) || '');
+    const rows = [
+      ['Workspace', card.kind === 'create' ? card.name : card.workspaceName],
+      ...(card.kind === 'create' ? (card.members || []).map((m) => ['Member', member(m)]) : []),
+      ...(card.kind === 'add_members' ? (card.added || []).map((m) => ['Add', member(m)]) : []),
+      ...(card.kind === 'remove_member' && card.removed ? [['Remove', member(card.removed)]] : []),
+      ...(card.kind === 'rename' ? [['New name', card.name]] : []),
+    ];
+    const ul = make('ul', 'ask-mcard-changes');
+    for (const [label, value] of rows) {
+      if (!value) continue;
+      const li = make('li');
+      li.appendChild(make('span', 'ask-mcard-change-label', label));
+      const val = make('span', 'ask-mcard-change-val');
+      val.appendChild(make('span', label === 'Remove' ? 'ask-mcard-before' : 'ask-mcard-after', String(value)));
+      li.appendChild(val);
+      ul.appendChild(li);
+    }
+    body.appendChild(ul);
+    if (block.state === 'proposed') {
+      for (const [items, cls] of [[card.warnings, 'ask-mcard-effects ask-wscard-warn'], [card.effects, 'ask-mcard-effects ask-wscard-effects']]) {
+        if (!Array.isArray(items) || !items.length) continue;
+        const list = make('ul', cls);
+        for (const w of items) list.appendChild(make('li', null, w));
+        body.appendChild(list);
+      }
+    }
+    const result = card.result || null;
+    if (block.state === 'failed') body.appendChild(make('div', 'ask-mcard-failed', `Could not apply: ${block.error || (result && result.error) || 'unknown error'}`));
+    else if (block.state === 'applied' && result && result.detail) body.appendChild(make('div', 'ask-mcard-detail', result.detail));
+    const wid = (result && result.workspaceId) || card.workspaceId;
+    if (block.state === 'applied' && wid) {
+      const open = make('a', 'ask-card-sched-link', 'Open the workspace');
+      open.href = `#workspaces/${encodeURIComponent(wid)}`;
+      body.appendChild(open);
+    }
+    rootEl.appendChild(body);
+    rootEl.appendChild(make('div', 'ask-card-err'));
+    if (block.state === 'proposed') {
+      const actions = make('div', 'ask-mcard-actions');
+      const btn = (cls, text, attr, icon) => {
+        const b = make('button', cls, text); b.type = 'button'; b.setAttribute(attr, '');
+        if (icon) b.prepend(svgIcon(icon, 12, 2.2));
+        return b;
+      };
+      const decline = btn('ask-card-not-now', 'Decline', 'data-ask-ws-decline');
+      decline.addEventListener('click', () => postCard(block, rootEl, { state: 'declined' }, decline));
+      const destructive = card.kind === 'remove_member';
+      const apply = btn(destructive ? 'ask-card-start is-danger' : 'ask-card-start', WS_APPLY_LABEL[card.kind] || 'Apply', 'data-ask-ws-apply', destructive ? null : WF_ICO.save);
+      apply.addEventListener('click', () => postCard(block, rootEl, { state: 'applied' }, apply));
+      actions.append(make('span', 'ask-card-actions-spacer'), decline, apply);
+      rootEl.appendChild(actions);
+    }
+    return { el: rootEl };
+  }
+
   /** The model · effort picker (mockup §C): the panel's popover chrome, anchored under the chip. Rows are menuitems (PD28). */
   function openChipPicker(chip, nodeId, card, wf, handle) {
     const node = card.nodes && card.nodes[nodeId];
@@ -3727,7 +3803,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   function isProgressBlock(block) {
     const card = block.card || {};
     if (card.type === PROGRESS_CARD_TYPE) return true;
-    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web') return false;
+    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace') return false;
     return block.state === 'started' || (block.state === 'failed' && !!block.runId);
   }
   function buildCard(block) {
@@ -3739,9 +3815,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const isSchedule = !!(block.card && block.card.type === 'schedule');
     const isModel = !!(block.card && block.card.type === 'model');
     const isClone = !!(block.card && block.card.type === 'clone');
+    const isWorkspace = !!(block.card && block.card.type === 'workspace');
     const isWeb = !!(block.card && block.card.type === 'web');
     const isProgress = isProgressBlock(block);
-    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isWeb || isProgress || block.state === 'proposed')) return cached.el;
+    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isWeb || isWorkspace || isProgress || block.state === 'proposed')) return cached.el;
     if (cached) disposeCardEntry(cached);
     const built = isWorkflow ? buildWorkflowCard(block, cached)
       : isMetrics ? buildMetricsCard(block)
@@ -3749,6 +3826,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       : isModel ? buildModelCard(block)
       : isClone ? buildCloneCard(block)
       : isWeb ? buildWebCard(block)
+      : isWorkspace ? buildWorkspaceCard(block)
       : isProgress ? buildProgressCard(block)
         : { el: block.state === 'proposed' ? buildCardForm(block) : buildCardTerminal(block) };
     st.cardEls.set(block.id, { el: built.el, state: block.state, handle: built.handle || null, dispose: built.dispose || null, animate: !!built.animate, cancelAnim: null, lastW: -1 });

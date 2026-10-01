@@ -115,3 +115,19 @@ test('createWorkspaceWithHomes creates like POST /api/workspaces (no recording m
   assert.equal(workspace.metricsProject, null);
   assert.equal(metricsHomeAuto, false);
 });
+
+test('finalize refuses to save a scan of a member set the workspace no longer has (SET_CHANGED)', async () => {
+  const { addWorkspaceMembers } = await import('../src/core/workspaces.mjs');
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const ws = await createWorkspace({ name: 'Moved On', projectPaths: [a, b], description: 'kept' });
+  await addWorkspaceMembers(ws.id, [c]);   // a member change landed while the scan of [a, b] ran
+  const res = await finalizeWorkspaceScan({ workspaceId: ws.id, name: 'Moved On', projectPaths: [a, b], pipelineDir: await pipelineDirWith(DESC) });
+  assert.equal(res.outcome, 'failed');
+  assert.equal(res.code, 'SET_CHANGED');
+  assert.equal((await readWorkspace(ws.id)).description, 'kept', 'nothing saved');
+  const now = await readWorkspace(ws.id);
+  const ok = await finalizeWorkspaceScan({ workspaceId: ws.id, name: 'Moved On', projectPaths: now.projectPaths, pipelineDir: await pipelineDirWith(DESC) });
+  assert.equal(ok.outcome, 'updated', 'a scan of the current set saves');
+});

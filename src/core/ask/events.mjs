@@ -176,6 +176,7 @@ export function labelForTool(name, input = {}, attachmentNames = {}) {
     case 'list_copilot_models': return 'Listing Copilot models';
     case 'propose_model_change': return 'Proposing a model change';
     case 'propose_clone_project': return 'Proposing a project clone';
+    case 'propose_workspace_change': return 'Proposing a workspace change';
     case 'web_fetch': { let host = ''; try { host = new URL(String(input?.url ?? '')).hostname; } catch { /* label only */ } return host ? `Reading ${host}` : 'Reading a web page'; }
     case 'web_search': return 'Searching the web';
     case 'propose_web_access': return 'Asking to read a new site';
@@ -256,6 +257,7 @@ export function createTurnReducer({
   onScheduleProposal = null,     // propose_schedule_change RESULT (schedule card; the parent re-validates the input)
   onModelProposal = null,        // propose_model_change RESULT (model card; same split)
   onCloneProposal = null,        // propose_clone_project RESULT (clone card; same split)
+  onWorkspaceProposal = null,    // propose_workspace_change RESULT (workspace card; same split)
   onWebProposal = null,          // propose_web_access RESULT (web card; same split)
   onScheduleMutation = null,     // a direct schedule write succeeded in the MCP child
   onTrackRun = null,
@@ -641,6 +643,13 @@ export function createTurnReducer({
         // Same split as the model card: the parent re-validates the INPUT and adds how GitHub is reached (clone-proposal.mjs).
         try {
           const ret = onCloneProposal({ toolUseId: b.id, input: fullInputs.get(b.id) ?? {}, text, isError: !!c.is_error });
+          if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
+        } catch { reducerErrors += 1; }
+      }
+      if (b.name === 'mcp__worca__propose_workspace_change' && typeof onWorkspaceProposal === 'function') {
+        // Same split as the model card: the parent re-validates the INPUT against the live registry (workspace-proposal.mjs).
+        try {
+          const ret = onWorkspaceProposal({ toolUseId: b.id, input: fullInputs.get(b.id) ?? {}, text, isError: !!c.is_error });
           if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
         } catch { reducerErrors += 1; }
       }
