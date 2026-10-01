@@ -24,9 +24,15 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # OS layer: git is mandatory (worktrees); gh backs one-click PRs and the GitHub
 # Issues source; tini reaps orphaned claude/MCP children; procps gives agents
-# `ps` for the host guard's "look the PID up first" rule.
+# `ps` for the host guard's "look the PID up first" rule. The upgrade takes the
+# Debian security fixes the base image predates (the CI scan fails on a fixed HIGH).
+# APT_REFRESH (CI passes the date) re-runs this layer past a build cache, which
+# would otherwise keep shipping the packages of the day the layer was first built.
+ARG APT_REFRESH=
 # hadolint ignore=DL3008
-RUN apt-get update \
+RUN echo "apt refresh: ${APT_REFRESH:-none}" \
+ && apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git gnupg jq less openssh-client procps ripgrep sudo tini \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \

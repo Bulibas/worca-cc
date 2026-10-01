@@ -117,6 +117,7 @@ jobs:
           npm pack --silent --pack-destination docker/.pack
           echo "tarball=$(ls docker/.pack/worca-app-*.tgz)" >> "$GITHUB_OUTPUT"
           echo "claude_code=$(cat docker/CLAUDE_CODE_VERSION)" >> "$GITHUB_OUTPUT"
+          echo "apt_refresh=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -131,6 +132,7 @@ jobs:
             WORCA_TARBALL=${{ steps.pack.outputs.tarball }}
             CLAUDE_CODE_VERSION=${{ steps.pack.outputs.claude_code }}
             VARIANT=slim
+            APT_REFRESH=${{ steps.pack.outputs.apt_refresh }}
           cache-from: type=gha,scope=ci-slim
           cache-to: type=gha,scope=ci-slim,mode=max
 
