@@ -107,6 +107,28 @@ export function ctxTitle(ctx, w) {
   if (ctx >= CTX_COST_HINT) parts.push(`Each message re-sends about ${(ctx / 1000).toFixed(1)}k tokens.`);
   return parts.length ? parts.join(' ') : null;
 }
+/** Share of the window with one decimal, as the popover's rows show it: 120400 of 1M → "12.0%". */
+export function fmtShare(n, w) {
+  return validWindow(w) && Number.isFinite(n) && n >= 0 ? `${((n / w) * 100).toFixed(1)}%` : null;
+}
+/** The context popover's figures, or null without a known window and fill. Only what Worca knows:
+ *  the fill, the window and the documented compaction buffer — never a per-category split. */
+export function ctxBreakdown(ctx, w) {
+  if (!validWindow(w) || !Number.isFinite(ctx) || ctx <= 0) return null;
+  const trigger = ctxTrigger(w);
+  const buffer = w - trigger;
+  return {
+    used: ctx, buffer, free: Math.max(0, w - ctx - buffer), untilCompact: Math.max(0, trigger - ctx),
+    pct: ctxPercent(ctx, w), level: ctxLevel(ctx, w),
+  };
+}
+const validContexts = (list) => (Array.isArray(list) ? list : [])
+  .filter((c) => c && typeof c.kind === 'string' && typeof c.id === 'string' && c.id);
+/** A chat's topics split for the popover: where it was asked from (page) and what it mentioned (source 'chat'). */
+export function groupContexts(list) {
+  const all = validContexts(list);
+  return { asked: all.filter((c) => c.source !== 'chat'), mentioned: all.filter((c) => c.source === 'chat') };
+}
 export function fmtUsd(x) {
   return Number.isFinite(x) ? `$${x.toFixed(2)}` : null;
 }
@@ -1470,9 +1492,6 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     }
     return chip;
   }
-
-  const validContexts = (list) => (Array.isArray(list) ? list : [])
-    .filter((c) => c && typeof c.kind === 'string' && typeof c.id === 'string' && c.id);
 
   /** Header chip row for the open chat; hidden when the chat has none (legacy / fresh). */
   function renderContextChips(list) {
