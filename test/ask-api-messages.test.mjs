@@ -13,7 +13,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 
 useTempHome(after);
 
-let homeDir, srv, base, wsBase, mod, prevHome;
+let homeDir, srv, base, wsBase, mod, prevHome, prevOsHome, prevProfile;
 const JSONH = { 'Content-Type': 'application/json' };
 const MODEL = { model: 'claude-opus-5-5', effort: 'high' };
 
@@ -21,6 +21,10 @@ before(async () => {
   homeDir = await mkdtemp(join(tmpdir(), 'worca-cc-askmsg-'));
   prevHome = process.env.WORCA_HOME;
   process.env.WORCA_HOME = homeDir;
+  // settings.json lives under HOME, not WORCA_HOME: the budget tests' cost-limit
+  // setters must never write the developer's real ~/.worca-cc/settings.json.
+  prevOsHome = process.env.HOME; prevProfile = process.env.USERPROFILE;
+  process.env.HOME = homeDir; process.env.USERPROFILE = homeDir;
   process.env.WORCA_MOCK = '1';
   mod = await import('../ui/server.mjs');
   srv = mod.server;
@@ -42,6 +46,8 @@ after(async () => {
     ]);
   }
   if (prevHome === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prevHome;
+  if (prevOsHome === undefined) delete process.env.HOME; else process.env.HOME = prevOsHome;
+  if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
   delete process.env.WORCA_MOCK;
   await rm(homeDir, { recursive: true, force: true });
 });
