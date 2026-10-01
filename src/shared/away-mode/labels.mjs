@@ -59,7 +59,8 @@ export const STATUS_ACTIONS = Object.freeze({
     { mode: 'on', label: "I'm away now", tip: 'worca answers on every run from now until you click "I\'m back".' },
     { mode: 'off', label: 'Pause away mode', tip: 'worca answers nothing, on any run, until you turn it back on. Your away hours are kept.' },
   ],
-  on: [{ mode: 'auto', label: "I'm back", tip: 'Go back to following your away hours.' }],
+  // "I'm back" = "I'm here": here even inside the away hours; the next stretch applies by itself.
+  on: [{ mode: 'here', label: "I'm back", tip: 'You count as here again, even inside your away hours. The next away hours apply by themselves.' }],
   off: [{ mode: 'auto', label: 'Turn away mode back on', tip: 'Go back to following your away hours.' }],
 });
 

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setNightMode, nightModeSettings, setNightModeToggle, nightModeToggle, SETTINGS_POST_KEYS } from '../src/core/settings.mjs';
+import { setNightMode, nightModeSettings, setNightModeToggle, nightModeToggle, nightModeHereSince, SETTINGS_POST_KEYS } from '../src/core/settings.mjs';
 
 // settings.json is read from $HOME/.worca-cc (NOT WORCA_HOME): swap HOME/USERPROFILE.
 let home; const prev = {};
@@ -34,6 +34,19 @@ test('toggle defaults to auto and validates', async () => {
   await setNightModeToggle('on'); assert.equal(nightModeToggle(), 'on');
   await assert.rejects(() => setNightModeToggle('maybe'), /nightModeToggle/);
   await setNightModeToggle('auto'); assert.equal(nightModeToggle(), 'auto');
+});
+
+test('"here" stores auto plus the moment it was said; any other status clears it', async () => {
+  const t = Date.parse('2026-09-27T23:00:00Z');
+  await setNightModeToggle('on');
+  await setNightModeToggle('here', { now: t });
+  assert.equal(nightModeToggle(), 'auto', '"here" is not a stored status: away hours resume by themselves');
+  assert.equal(nightModeHereSince(), t);
+  await setNightModeToggle('on');
+  assert.deepEqual([nightModeToggle(), nightModeHereSince()], ['on', null]);
+  await setNightModeToggle('here', { now: t });
+  await setNightModeToggle('auto');
+  assert.equal(nightModeHereSince(), null);
 });
 
 test('POST keys include the night mode keys', () => {

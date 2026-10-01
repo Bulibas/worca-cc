@@ -108,3 +108,23 @@ test('runAllowed: the run switch and the stored settings only, never the clock o
   assert.equal(runAllowed({ config: W, optIn: false, override: 'on' }), true);
   assert.equal(runAllowed({ config: { ...W, enabled: true }, optIn: true, override: 'off' }), false);
 });
+
+test('"I\'m here" (hereSince) skips the away-hours stretch it was said in, and only that one', () => {
+  const c = cfg({ enabled: true, window: '22:00-07:00', timeZone: 'UTC', graceMinutes: 30 });
+  const st = (iso, hereSince, o = {}) => nightState({ config: c, toggle: 'auto', optIn: true, override: 'auto', now: at(iso), hereSince: hereSince == null ? null : at(hereSince), ...o });
+  // Said at 23:00 inside the hours: here for the rest of that stretch, by-day rule still on.
+  assert.deepEqual(st('2026-09-27T23:30:00Z', '2026-09-27T23:00:00Z'), { eligible: true, active: false, graceOn: true, wakeOn: true });
+  assert.equal(st('2026-09-28T06:59:00Z', '2026-09-27T23:00:00Z').active, false, 'still the same stretch after midnight');
+  assert.equal(st('2026-09-28T22:00:00Z', '2026-09-27T23:00:00Z').active, true, 'the next stretch applies again by itself');
+  // Said by day: the coming stretch is not skipped.
+  assert.equal(st('2026-09-27T22:30:00Z', '2026-09-27T15:00:00Z').active, true);
+  // Exactly at the start of the hours: that stretch is skipped.
+  assert.equal(st('2026-09-27T22:10:00Z', '2026-09-27T22:00:00Z').active, false);
+  // The live switches and the run switch still win.
+  assert.equal(st('2026-09-27T23:30:00Z', '2026-09-27T23:00:00Z', { toggle: 'on' }).active, true);
+  assert.equal(st('2026-09-27T23:30:00Z', '2026-09-27T23:00:00Z', { override: 'on' }).active, true);
+  assert.equal(st('2026-09-27T23:30:00Z', '2026-09-27T23:00:00Z', { toggle: 'off' }).eligible, false);
+  // Skipped stretch: the next answer is due at the next start (or the by-day deadline), never now.
+  const s = st('2026-09-27T23:30:00Z', '2026-09-27T23:00:00Z', { optIn: false, config: { ...c, graceMinutes: null } });
+  assert.equal(decideDelayMs({ state: s, config: c, openedAt: at('2026-09-27T23:30:00Z'), now: at('2026-09-27T23:30:00Z') }), 22.5 * 3_600_000);
+});

@@ -1,7 +1,7 @@
 // src/shared/away-mode/describe.mjs — the ONE source of Away mode's plain-English text: the Settings
 // card summary, the project card, the run page pill, the New-run hint, Ask Worca and its card.
 // Pure; `now` is passed in. Copy: plans/away-mode-wording.md §3.1 A, §3.2, §3.3, §3.4.
-import { inWindow, nightState, decideDelayMs, parseWindow } from './activation.mjs';
+import { inWindow, nightState, decideDelayMs, parseWindow, windowStartMs } from './activation.mjs';
 import { kindLabel, pillText } from './labels.mjs';
 
 const MIN = 60_000;
@@ -27,7 +27,7 @@ function hoursOf(config) {
 // Where the status buttons are, on a surface that does not show them (the project tab, Ask Worca's chat).
 const SETTINGS_PLACE = ' in Settings › Away mode';
 
-function statusLine(config, toggle, now, tz, localZone, surface) {
+function statusLine(config, toggle, now, tz, localZone, surface, hereSince) {
   const where = surface === 'settings' ? '' : SETTINGS_PLACE;
   // Name the zone when it is not the local one, or when the configured zone was unusable (we fell back).
   const fellBack = !!config.timeZone && !zoneOk(config.timeZone);
@@ -40,7 +40,9 @@ function statusLine(config, toggle, now, tz, localZone, surface) {
     return { status: 'no-hours', text: `No away hours are set. worca only answers when you click "I'm away now"${where}${extra}.` };
   }
   const cfg = { ...config, timeZone: tz };
-  if (inWindow(cfg.window, tz, now)) return { status: 'away-hours', text: `Right now it is ${fmtHHMM(now, tz)}${zoneTag}. You count as away (your away hours). They end at ${hours[1]}.` };
+  const start = windowStartMs(cfg.window, tz, now);
+  if (start != null && Number.isFinite(hereSince) && hereSince >= start) return { status: 'here-now', text: `Right now it is ${fmtHHMM(now, tz)}${zoneTag}. You count as here because you said "I'm here". Your away hours apply again from ${hours[0]}.` };
+  if (start != null) return { status: 'away-hours', text: `Right now it is ${fmtHHMM(now, tz)}${zoneTag}. You count as away (your away hours). They end at ${hours[1]}.` };
   return { status: 'here', text: `Right now it is ${fmtHHMM(now, tz)}${zoneTag}. You count as here. Next away hours start at ${hours[0]}.` };
 }
 
@@ -65,14 +67,14 @@ const PROJECT_TAG = ' (this project)';
 /** The card summary. `surface`: 'settings' (the card with the status buttons), 'project' (the project tab) or
  *  'chat' (Ask Worca); off Settings, a line that asks for a status button says where it is.
  *  @returns {{status:string, lines:string[]}} */
-export function describeAwayMode({ config, toggle = 'auto', now, localZone = null, projectName = null, projectFields = null, surface = 'settings' } = {}) {
+export function describeAwayMode({ config, toggle = 'auto', now, localZone = null, projectName = null, projectFields = null, surface = 'settings', hereSince = null } = {}) {
   try {
     if (!config || typeof config !== 'object' || !Number.isFinite(now)) return { status: 'unknown', lines: ['Away mode settings could not be read.'] };
     const local = localZone || Intl.DateTimeFormat().resolvedOptions().timeZone;
     const tz = zoneOf(config, local);
     const own = new Set(Array.isArray(projectFields) ? projectFields : []);
     const tag = (text, key) => (LINE_FIELDS[key].some((f) => own.has(f)) ? `${text}${PROJECT_TAG}` : text);
-    const s = statusLine(config, toggle, now, tz, local, surface);
+    const s = statusLine(config, toggle, now, tz, local, surface, hereSince);
     const sched = scheduleLines(config);
     const lines = [tag(s.text, 'status'), ...sched.map((l, i) => tag(l, i === 0 ? 'schedule' : 'byDay'))];
     const kinds = Array.isArray(config.neverDecide) ? config.neverDecide : [];
@@ -85,13 +87,13 @@ export function describeAwayMode({ config, toggle = 'auto', now, localZone = nul
 }
 
 /** One run's state for the pill and the tooltip. */
-export function describeRun({ config, toggle = 'auto', now, run = {}, localZone = null } = {}) {
+export function describeRun({ config, toggle = 'auto', now, run = {}, localZone = null, hereSince = null } = {}) {
   try {
     if (run.done) return { state: 'never', pill: pillText('never'), reason: 'The run is over.' };
     if (!config || typeof config !== 'object') return { state: 'unknown', pill: '', reason: '' };   // settings not loaded yet
     const tz = zoneOf(config, localZone);
     const cfg = { ...config, timeZone: tz };
-    const st = nightState({ config: cfg, toggle, optIn: run.optIn === true, override: run.override || 'auto', now });
+    const st = nightState({ config: cfg, toggle, optIn: run.optIn === true, override: run.override || 'auto', now, hereSince });
     if (run.override === 'off') return { state: 'never', pill: pillText('never'), reason: 'You set this run to "Never on this run".' };
     // An open question with no openedAt is on an always-wait kind: it waits, whatever the hour (spec §3.1).
     if (run.waiting === true && !run.openedAt) return { state: 'wait', pill: pillText('wait'), reason: 'This kind of question is on your "Always wait for me on…" list.' };
@@ -126,18 +128,19 @@ export function describeChange(before, after, { toggle = 'auto', now, localZone 
   return { before: pick(before), after: pick(after) };
 }
 
-// The sidebar switch (wording §3.8). The switch shows only the manual choice ("I'm away now");
-// the word next to it says what applies right now, so the away hours never flip the switch itself.
-const SWITCH_WORDS = { 'away-now': 'Away', 'away-hours': 'Away (your hours)', here: 'Here', 'no-hours': 'Here', paused: 'Paused' };
-const TURN_ON = 'Turn on to have worca answer on every run now.';
+// The sidebar switch (wording §3.8): "I'm here | I'm away". The lit side is what applies right now,
+// the away hours included; clicking the other side says it ("I'm here" skips the current stretch).
+const AWAY_SIDE = new Set(['away-now', 'away-hours']);
+const CLICK_AWAY = 'Click "I\'m away" to have worca answer on every run now.';
 
-/** @returns {{checked:boolean, paused:boolean, status:string, word:string, tip:string}} */
-export function describeAwaySwitch({ config, toggle = 'auto', now, localZone = null } = {}) {
-  const d = describeAwayMode({ config, toggle, now, localZone });
-  const out = { checked: toggle === 'on' && d.status !== 'unknown', paused: d.status === 'paused', status: d.status, word: SWITCH_WORDS[d.status] || '' };
-  if (d.status === 'unknown') return { ...out, tip: d.lines[0] };
-  if (d.status === 'away-now') return { ...out, tip: 'You said you are away. worca answers on every run until you turn this off.' };
-  if (d.status === 'paused') return { ...out, tip: 'Away mode is paused. worca answers nothing. Turn it back on in Settings › Away mode.' };
-  if (d.status === 'no-hours') return { ...out, tip: `No away hours are set. ${TURN_ON}` };
-  return { ...out, tip: `${d.lines[0]} ${TURN_ON}` };
+/** @returns {{side:'here'|'away'|null, status:string, disabled:boolean, tip:string}} */
+export function describeAwaySwitch({ config, toggle = 'auto', now, localZone = null, hereSince = null } = {}) {
+  const d = describeAwayMode({ config, toggle, now, localZone, hereSince });
+  if (d.status === 'unknown') return { side: null, status: d.status, disabled: true, tip: d.lines[0] };
+  const out = { side: AWAY_SIDE.has(d.status) ? 'away' : 'here', status: d.status, disabled: false };
+  if (d.status === 'away-now') return { ...out, tip: 'You said you are away. worca answers on every run until you click "I\'m here".' };
+  if (d.status === 'away-hours') return { ...out, tip: `${d.lines[0]} Click "I'm here" to count as here until they end.` };
+  if (d.status === 'paused') return { ...out, tip: 'Away mode is paused. worca answers nothing. Click "I\'m away" to have worca answer on every run, or turn it back on in Settings › Away mode.' };
+  if (d.status === 'no-hours') return { ...out, tip: `No away hours are set. ${CLICK_AWAY}` };
+  return { ...out, tip: `${d.lines[0]} ${CLICK_AWAY}` };
 }

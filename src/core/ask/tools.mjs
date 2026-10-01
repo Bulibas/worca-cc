@@ -522,7 +522,7 @@ export function createAskTools(deps) {
       description: 'Read Away mode — whether worca answers a waiting run question for the user, and when. Returns `summary`: the plain-English lines the user sees at the top of Settings › Away mode, worded for chat (a line that asks for a status button says it is in Settings › Away mode; set_away_now does the same) (status, away hours, which runs, the marked-runs-by-day rule, kinds that always wait), plus the effective config and where each value comes from. projectKey (or the pinned project) reads that project\'s values. With runId, `run` says whether that run\'s waiting question is answered now, after N minutes (answersAfterMin), or never, and why; state "unknown" means only the run page can tell — say so. Use it before answering any question about whether worca will answer for the user; quote the summary lines rather than paraphrasing. Read-only.',
       inputSchema: SCHEMA.obj({ projectKey: SCHEMA.s('project key; omit for the user\'s own settings (or the pinned project)'), runId: SCHEMA.s('run id or pipeline id') }) },
     { name: 'set_away_now',
-      description: 'Switch the user\'s global Away mode status NOW, when the user asks ("I\'m leaving, take over", "I\'m back", "pause it"). mode: "away" = I\'m away now (worca answers on every run until told "back"), "back" = follow the away hours again, "pause" = answer nothing, on any run, until turned back on. The status is machine-wide: on a shared sign-in it changes it for everyone. It is applied as soon as this call returns; a line in the chat confirms it. Reversible.',
+      description: 'Switch the user\'s global Away mode status NOW, when the user asks ("I\'m leaving, take over", "I\'m back", "pause it"). mode: "away" = I\'m away now (worca answers on every run until told "back"), "back" = I\'m here (worca stops answering for the user, even inside the away hours; the next away hours apply by themselves), "pause" = answer nothing, on any run, until turned back on. The status is machine-wide: on a shared sign-in it changes it for everyone. It is applied as soon as this call returns; a line in the chat confirms it. Reversible.',
       inputSchema: SCHEMA.obj({ mode: SCHEMA.s('away | back | pause') }, ['mode']) },
     { name: 'set_run_away_mode',
       description: 'Set Away mode on ONE run that is not over, when the user asks. mode: "auto" = as set up (follows Settings and whether the run was marked), "on" = answer for me now on this run, at any hour, even when paused, "off" = never on this run. Applied as soon as this call returns; a line in the chat confirms it, or says why not (a finished run cannot change). Reversible.',
@@ -1306,7 +1306,7 @@ export function createAskTools(deps) {
     },
     // Validate only: the parent (turn.mjs _onAwaySwitch → ui/server.mjs createAwaySwitch) owns settings and live runs.
     async set_away_now(input) {
-      const toggle = { away: 'on', back: 'auto', pause: 'off' }[str(input.mode)];
+      const toggle = { away: 'on', back: 'here', pause: 'off' }[str(input.mode)];
       if (!toggle) throw new AskToolError('set_away_now: mode must be "away", "back" or "pause"');
       return { ok: true, requested: { kind: 'global', toggle } };
     },

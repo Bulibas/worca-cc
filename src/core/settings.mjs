@@ -811,15 +811,25 @@ export function nightModeToggle() {
   return NIGHT_TOGGLES.includes(v) ? v : 'auto';
 }
 
+/** When the user last said "I'm here" (ms), or null. It only skips the away-hours stretch it was said in. */
+export function nightModeHereSince() {
+  const t = Date.parse(readSettings().nightModeHereSince);
+  return Number.isFinite(t) ? t : null;
+}
+
+// 'here' is an INPUT, not a stored status: "I'm here" = follow my away hours, minus the stretch I am in now.
+const NIGHT_TOGGLE_INPUTS = [...NIGHT_TOGGLES, 'here'];
+
 export function assertNightModeToggleInput(v) {
-  if (!NIGHT_TOGGLES.includes(v)) throw Object.assign(new Error(`nightModeToggle must be one of ${NIGHT_TOGGLES.join(' | ')}`), { status: 400 });
+  if (!NIGHT_TOGGLE_INPUTS.includes(v)) throw Object.assign(new Error(`nightModeToggle must be one of ${NIGHT_TOGGLE_INPUTS.join(' | ')}`), { status: 400 });
   return v;
 }
 
-export async function setNightModeToggle(v) {
+export async function setNightModeToggle(v, { now = Date.now() } = {}) {
   assertNightModeToggleInput(v);
   const settings = readSettings();
-  if (v === 'auto') delete settings.nightModeToggle; else settings.nightModeToggle = v;
+  if (v === 'auto' || v === 'here') delete settings.nightModeToggle; else settings.nightModeToggle = v;
+  if (v === 'here') settings.nightModeHereSince = new Date(now).toISOString(); else delete settings.nightModeHereSince;
   return persistSettings(settings);
 }
 

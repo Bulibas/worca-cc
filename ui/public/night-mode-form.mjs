@@ -14,7 +14,7 @@ const NUM_LIMITS = { graceMinutes: [1, 1440], minConfidence: [0, 100], minMargin
 const SOURCE_TAG = { default: '(default)', team: '(team default)', user: '(your setting)' };
 // The project level's empty choice: never "(undefined)" when nothing is inherited yet.
 const sameAs = (shown) => (shown == null || shown === '' ? 'Same as my settings' : `Same as my settings (${shown})`);
-const CTX = new WeakMap();   // root → {level, inherited, toggle, offset, projectName}
+const CTX = new WeakMap();   // root → {level, inherited, toggle, hereSince, offset, projectName}
 
 function el(doc, tag, cls, text) {
   const n = doc.createElement(tag);
@@ -120,7 +120,7 @@ function details(doc, title) {
  *   values: the layer's own fields; effective/sources: what applies and where it comes from;
  *   inherited: what an EMPTY field falls back to (GET /api/away-mode), null config = unknown.
  */
-export function renderNightForm(root, { level, values = {}, effective = {}, sources = {}, inherited = { config: effective, sources }, toggle = 'auto', now = Date.now(), projectName = null, statusEl = null }) {
+export function renderNightForm(root, { level, values = {}, effective = {}, sources = {}, inherited = { config: effective, sources }, toggle = 'auto', hereSince = null, now = Date.now(), projectName = null, statusEl = null }) {
   const doc = root.ownerDocument;
   root.replaceChildren();
   delete root.dataset.dirty;
@@ -242,7 +242,7 @@ export function renderNightForm(root, { level, values = {}, effective = {}, sour
   }
   body.append(wait);
 
-  CTX.set(root, { level, inherited, toggle, offset: now - Date.now(), projectName });
+  CTX.set(root, { level, inherited, toggle, hereSince, offset: now - Date.now(), projectName });
   const onEdit = () => { root.dataset.dirty = '1'; updateAwaySummary(root); };
   body.addEventListener('input', onEdit); body.addEventListener('change', onEdit);
   updateAwaySummary(root);
@@ -294,15 +294,16 @@ function formPatch(root) {
 }
 
 /** The live summary: one `<span>` per line of describeAwayMode. */
-export function paintAwaySummary(host, { config, toggle, now, projectName = null, projectFields = null, surface = 'settings' }) {
+export function paintAwaySummary(host, { config, toggle, hereSince = null, now, projectName = null, projectFields = null, surface = 'settings' }) {
   const doc = host.ownerDocument;
-  host.replaceChildren(...describeAwayMode({ config, toggle, now, projectName, projectFields, surface }).lines.map((l) => el(doc, 'span', 'away-line', `${l} `)));
+  host.replaceChildren(...describeAwayMode({ config, toggle, hereSince, now, projectName, projectFields, surface }).lines.map((l) => el(doc, 'span', 'away-line', `${l} `)));
 }
 
 /** Re-render only the summary from the form's current values (unsaved edits survive). Each key is optional. */
-export function updateAwaySummary(root, { toggle, now, inherited } = {}) {
+export function updateAwaySummary(root, { toggle, hereSince, now, inherited } = {}) {
   const c = CTX.get(root); if (!c) return;
   if (toggle !== undefined) c.toggle = toggle;
+  if (hereSince !== undefined) c.hereSince = hereSince;
   if (inherited !== undefined) c.inherited = inherited;       // a fallback-painted, now-dirty form gets the real layers
   if (now !== undefined) c.offset = now - Date.now();       // the render's clock, moving on in real time
   const patch = formPatch(root);
@@ -310,7 +311,7 @@ export function updateAwaySummary(root, { toggle, now, inherited } = {}) {
     // An unset field falls back to the layer below. With no inherited config (the fetch failed), the
     // summary says "Away mode settings could not be read." and the fields still render (spec §7).
     config: c.inherited && c.inherited.config ? { ...c.inherited.config, ...patch } : null,
-    toggle: c.toggle, now: Date.now() + c.offset, projectName: c.projectName,
+    toggle: c.toggle, hereSince: c.hereSince, now: Date.now() + c.offset, projectName: c.projectName,
     projectFields: c.level === 'project' ? Object.keys(patch) : null,   // "(this project)" on the lines it overrides
     surface: c.level === 'project' ? 'project' : 'settings',            // no status buttons on the project tab
   });

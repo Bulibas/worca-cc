@@ -28,6 +28,7 @@ test('run switch, status actions and pill wording', () => {
   assert.deepEqual(RUN_SWITCH_OPTIONS.map((o) => [o.value, o.label]), [['auto', 'As set up'], ['on', 'Answer for me now'], ['off', 'Never on this run']]);
   assert.deepEqual(STATUS_ACTIONS.auto.map((a) => a.label), ["I'm away now", 'Pause away mode']);
   assert.deepEqual(STATUS_ACTIONS.on.map((a) => a.label), ["I'm back"]);
+  assert.equal(STATUS_ACTIONS.on[0].mode, 'here', '"I\'m back" counts as here, even inside the away hours');
   assert.deepEqual(STATUS_ACTIONS.off.map((a) => a.label), ['Turn away mode back on']);
   assert.equal(kindLabel('gate'), 'Fix again or continue, in a review loop');
   assert.equal(kindLabel('cost-cap'), "Continuing past the team's cost cap");

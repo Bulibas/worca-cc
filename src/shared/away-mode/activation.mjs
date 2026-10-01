@@ -41,7 +41,7 @@ export function msUntilWindowStart(w, tz, now) {
  *  Outside it (grace, toggle, opt-in): the stretch alone — the attended day never counts. */
 export function nightAnchorMs(config, now, since = null) {
   if (inWindow(config.window, config.timeZone, now)) {
-    const windowStart = now + msUntilWindowStart(config.window, config.timeZone, now) - DAY;
+    const windowStart = windowStartMs(config.window, config.timeZone, now);
     return since == null ? windowStart : Math.min(windowStart, since);
   }
   return since ?? now;
@@ -49,10 +49,16 @@ export function nightAnchorMs(config, now, since = null) {
 
 /**
  * Away mode precedence (plans/away-mode-design.md §3.1). `optIn` = the run was MARKED at start.
+ * `hereSince` (ms) = when the user last said "I'm here": the away-hours stretch it was said in counts as here.
  * @returns {{eligible:boolean, active:boolean, graceOn:boolean, wakeOn:boolean}}
  *   graceOn: the by-day "waited N minutes" rule applies (marked runs only); wakeOn: arm for the next away-hours start.
  */
-export function nightState({ config, toggle = 'auto', optIn = false, override = 'auto', now }) {
+/** Start (ms) of the away-hours stretch `now` is in, or null when outside the hours. */
+export function windowStartMs(w, tz, now) {
+  return inWindow(w, tz, now) ? now + msUntilWindowStart(w, tz, now) - DAY : null;
+}
+
+export function nightState({ config, toggle = 'auto', optIn = false, override = 'auto', now, hereSince = null }) {
   const off = { eligible: false, active: false, graceOn: false, wakeOn: false };
   if (override === 'off') return off;                                        // 1. Never on this run
   if (override === 'on') return { eligible: true, active: true, graceOn: false, wakeOn: false };   // 2. Answer for me now
@@ -60,7 +66,9 @@ export function nightState({ config, toggle = 'auto', optIn = false, override = 
   if (toggle === 'on') return { eligible: true, active: true, graceOn: false, wakeOn: false };     // 4. I'm away now: every run
   const allowed = config.enabled === true || optIn === true;
   if (!allowed) return off;
-  const away = inWindow(config.window, config.timeZone, now);                // 5. inside away hours
+  // 5. inside away hours, unless "I'm here" was said during this stretch (it skips this one only).
+  const start = windowStartMs(config.window, config.timeZone, now);
+  const away = start != null && !(Number.isFinite(hereSince) && hereSince >= start);
   return { eligible: true, active: away, graceOn: optIn === true && config.graceMinutes != null, wakeOn: true };
 }
 

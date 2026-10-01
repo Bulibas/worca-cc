@@ -31,6 +31,13 @@ test('get_away_mode is read in chat: a status button is named where it is, in Se
   assert.equal(p.summary[0], 'For Shop: Away mode is paused. worca answers nothing until you turn it back on in Settings › Away mode. (Marked runs wait too.)');
 });
 
+test('get_away_mode reads "I\'m here" said inside the away hours', async () => {
+  const T23 = Date.parse('2026-09-28T23:30:00Z');
+  const out = await reader({ now: () => T23, hereSince: () => T23 - 30 * 60_000 })({});
+  assert.equal(out.status, 'here-now');
+  assert.match(out.summary[0], /You count as here because you said "I'm here"/);
+});
+
 test('a project key reads that project\'s layers and names it', async () => {
   const out = await reader()({ projectKey: 'shop-1' });
   assert.match(out.summary[0], /^For Shop: /);
@@ -69,7 +76,7 @@ test('the tool: validates, resolves the run, prefers the live reader, and is una
 test('set_away_now: away | back | pause map to the toggle; anything else is an AskToolError', async () => {
   const tools = createAskTools({ limits: ASK_LIMITS });
   assert.deepEqual(await tools.call('set_away_now', { mode: 'away' }), { ok: true, requested: { kind: 'global', toggle: 'on' } });
-  assert.deepEqual(await tools.call('set_away_now', { mode: 'back' }), { ok: true, requested: { kind: 'global', toggle: 'auto' } });
+  assert.deepEqual(await tools.call('set_away_now', { mode: 'back' }), { ok: true, requested: { kind: 'global', toggle: 'here' } }, '"back" = here, even inside the away hours');
   assert.deepEqual(await tools.call('set_away_now', { mode: 'pause' }), { ok: true, requested: { kind: 'global', toggle: 'off' } });
   await assert.rejects(tools.call('set_away_now', { mode: 'later' }), (e) => e instanceof AskToolError && /"away", "back" or "pause"/.test(e.message));
 });

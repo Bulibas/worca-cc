@@ -50,6 +50,18 @@ test('GET /api/away-mode: effective config, sources, live status and the raw lay
   assert.equal(r.body.inherited.sources.window, 'default');
 });
 
+test('POST nightModeToggle "here": stored as auto plus when it was said; GET /api/away-mode reports both', async () => {
+  const before = Date.now();
+  assert.equal((await api('POST', '/api/settings', { nightModeToggle: 'here' })).status, 200);
+  const r = await api('GET', '/api/away-mode');
+  assert.equal(r.body.toggle, 'auto');
+  assert.ok(r.body.hereSince >= before && r.body.hereSince <= Date.now(), 'the server stamps the time');
+  await api('POST', '/api/settings', { nightModeToggle: 'on' });
+  assert.equal((await api('GET', '/api/away-mode')).body.hereSince, null);
+  assert.equal((await api('POST', '/api/settings', { nightModeToggle: 'later' })).status, 400);
+  await api('POST', '/api/settings', { nightModeToggle: 'auto' });
+});
+
 test('GET /api/away-mode?projectDir= adds the project layer and says what the user layer gives', async () => {
   await api('POST', '/api/settings', { nightMode: { window: '22:00-07:00', enabled: true } });   // self-contained: runs alone too
   const dir = await projectDir();

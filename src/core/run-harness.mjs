@@ -101,7 +101,7 @@ import { decideAsk } from './night/decider.mjs';
 import { runNightAnalysis, readMemoryText } from './night/analysis.mjs';
 import { writeNightDecision, countNightDecisions, nightCounts, nightGateCycles, nightSpendSinceUsd } from './night/store.mjs';
 import { NIGHT_ACTOR, NIGHT_TOGGLES, nightNeverDecides } from './night/config.mjs';
-import { nightModeToggle } from './settings.mjs';
+import { nightModeToggle, nightModeHereSince } from './settings.mjs';
 
 // worca-cc repo root; holds skills/. fileURLToPath, never URL.pathname: the
 // latter is `/C:/…` on Windows and %-encoded everywhere (see DEFAULT_AGENTS_DIR
@@ -3654,7 +3654,7 @@ export class RunHarness extends EventEmitter {
   }
 
   _nightStateNow(config) {
-    return nightState({ config, toggle: nightModeToggle(), optIn: this._night.optIn, override: this._night.override, now: this._nightClock.now() });
+    return nightState({ config, toggle: nightModeToggle(), hereSince: nightModeHereSince(), optIn: this._night.optIn, override: this._night.override, now: this._nightClock.now() });
   }
 
   /** True when night mode may currently decide (used by the team soft-cap override). */

@@ -109,6 +109,19 @@ test('global toggle on decides immediately; neverDecide waits', async () => {
   assert.equal(orch.pendingQuestion?.id, 'g5');
 });
 
+test('"I\'m here" inside the away hours: the open question waits until the next stretch', async () => {
+  await setNightMode({ enabled: true, window: '10:00-14:00', timeZone: 'UTC', graceMinutes: null });
+  const clock = fakeClock();                                     // 12:00 UTC: inside the hours
+  await setNightModeToggle('here', { now: clock.now() });
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h-here', nightClock: clock });
+  const p = orch._ask({ id: 'c-here', kind: 'clarify', questions: Q });
+  await clock.tick(60 * 60_000);
+  assert.equal(orch.pendingQuestion?.id, 'c-here', 'not answered in the skipped stretch');
+  await clock.tick(21 * 60 * 60_000);                            // the next day, 10:00
+  await p;
+  assert.equal(orch.answeredBy('c-here'), 'night-mode');
+});
+
 test('max decisions reached → the run pauses with night_guardrail', async () => {
   await setNightMode({ enabled: true, maxDecisions: 1, graceMinutes: 1 });
   await setNightModeToggle('on');

@@ -59,7 +59,7 @@ import {
   memoryDefragModel, setMemoryDefragModel, assertMemoryDefragModelInput,
   workspaceScanModels, setWorkspaceScanModels, assertWorkspaceScanInput,
   scheduleDefaults, setScheduleDefaults,
-  nightModeSettings, setNightMode, nightModeToggle, setNightModeToggle, assertNightModeToggleInput,
+  nightModeSettings, setNightMode, nightModeToggle, nightModeHereSince, setNightModeToggle, assertNightModeToggleInput,
 } from '../src/core/settings.mjs';
 import { resolveNightConfig, validateNightPatch } from '../src/core/night/config.mjs';
 import { effectiveNightConfig, nightLayers } from '../src/core/night/effective.mjs';
@@ -2900,7 +2900,7 @@ app.get('/api/night-decisions', (req, res) => {
 
 // GET /api/away-mode[?projectDir=] — what Away mode will do: the effective config (with the team
 // layer when a project is given), where each field comes from, what an empty field falls back to,
-// the live status and the raw layers the forms edit. Every surface renders its text from this
+// the live status (toggle, and hereSince: when "I'm here" was last said) and the raw layers the forms edit. Every surface renders its text from this
 // through src/shared/away-mode/describe.mjs.
 app.get('/api/away-mode', (req, res) => {
   const raw = typeof req.query.projectDir === 'string' && req.query.projectDir ? req.query.projectDir : null;
@@ -2908,11 +2908,11 @@ app.get('/api/away-mode', (req, res) => {
   const user = nightModeSettings() || {};
   if (!projectDir) {
     const { config, sources } = resolveNightConfig({ user });
-    return res.json({ config, sources, inherited: resolveNightConfig({}), toggle: nightModeToggle(), user, project: null });
+    return res.json({ config, sources, inherited: resolveNightConfig({}), toggle: nightModeToggle(), hereSince: nightModeHereSince(), user, project: null });
   }
   const L = nightLayers(projectDir);
   const { config, sources } = resolveNightConfig(L);
-  res.json({ config, sources, inherited: resolveNightConfig({ user: L.user, team: L.team }), toggle: nightModeToggle(), user, project: L.project || {} });
+  res.json({ config, sources, inherited: resolveNightConfig({ user: L.user, team: L.team }), toggle: nightModeToggle(), hereSince: nightModeHereSince(), user, project: L.project || {} });
 });
 
 app.post('/api/pause', (req, res) => {

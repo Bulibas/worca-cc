@@ -9960,7 +9960,7 @@ function buildPdNightCard(p) {
     const mine = ++seq;
     const d = await fetchAwayMode(p.path);                  // guarded fetch: null on any failure
     if (mine !== seq || !d) return;
-    renderNightForm(host, { level: 'project', values: d.project || {}, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, now: Date.now(), projectName: p.name });
+    renderNightForm(host, { level: 'project', values: d.project || {}, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), projectName: p.name });
   };
   const send = async (nightMode) => {
     msg.textContent = ''; msg.className = 'hint pd-night-msg';
@@ -11777,8 +11777,8 @@ async function paintNightSettings(data) {
     state.awayMode = d;
     paintAwayStatus(d.toggle);
     paintSideAway();
-    if (host.dataset.dirty === '1') { updateAwaySummary(host, { toggle: d.toggle, now: Date.now(), inherited: d.inherited }); return; }   // keep unsaved edits
-    renderNightForm(host, { level: 'user', values: d.user, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, now: Date.now(), statusEl: awayStatusEl });
+    if (host.dataset.dirty === '1') { updateAwaySummary(host, { toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), inherited: d.inherited }); return; }   // keep unsaved edits
+    renderNightForm(host, { level: 'user', values: d.user, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), statusEl: awayStatusEl });
   } catch { /* the card keeps what it shows; never an unhandled rejection */ }
 }
 function paintAwayStatus(toggle) {
@@ -26830,7 +26830,7 @@ function paintRdAwayPill(screen, r) {
     else if (!_awayLoading['']) _awayLoading[''] = fetchAwayMode().then((d) => { if (d && !state.awayMode) state.awayMode = d; });   // once; the 1 s tick repaints
     return;
   }
-  const d = describeRun({ config: d0.config, toggle: d0.toggle, now: Date.now(),
+  const d = describeRun({ config: d0.config, toggle: d0.toggle, hereSince: d0.hereSince ?? null, now: Date.now(),
     run: { ...(r.night || {}), waiting: r.pendingQuestion != null, done: RD_TERMINAL.includes(r.status) } });
   pill.textContent = d.pill; pill.title = d.reason; pill.dataset.state = d.state;
 }
@@ -26844,7 +26844,7 @@ async function refreshAwayBodies() {
   if (d) {
     state.awayMode = d;
     // An open project tab: the status is global, so its summary follows (unsaved edits survive).
-    for (const host of document.querySelectorAll('.pd-night-form')) { if (host.querySelector('.away-summary')) updateAwaySummary(host, { toggle: d.toggle, now: Date.now() }); }
+    for (const host of document.querySelectorAll('.pd-night-form')) { if (host.querySelector('.away-summary')) updateAwaySummary(host, { toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now() }); }
   }
   _sideAwayRead = true;
   paintNewRunAwayHint(); paintSideAway();
@@ -26852,48 +26852,58 @@ async function refreshAwayBodies() {
   const open = rdOpenRun();
   if (open && runDetailState.screen) paintRdAwayPill(runDetailState.screen, open);
 }
-// ---- The sidebar's "I'm away" switch ----
-// One click sets the global status: on = "I'm away now", off = follow my away hours. Pause and an
-// unread body leave it disabled; a click then opens Settings › Runs, where Away mode lives.
+// ---- The sidebar's "I'm here | I'm away" control ----
+// The lit side is what applies right now, the away hours included. Clicking the other side says it:
+// "I'm away" = "I'm away now"; "I'm here" = here, even inside the away hours (the next ones apply by
+// themselves). Pause stays in Settings. Unread settings leave it disabled; a click opens Settings › Runs.
 let _sideAwaySig = '';
 let _sideAwayBusy = false;
 let _sideAwayErr = '';            // the last failed click, kept in the tooltip until the next one
 let _sideAwayRead = false;        // the first GET has answered (until then the slot stays empty, never "could not be read")
 const sideAwayMount = document.getElementById('side-away');   // held, like awayStatusEl: the 1 s tick paints this page's own mount
+const SIDE_AWAY_ICONS = {         // shown alone on the collapsed menu
+  here: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-4v-5h-6v5H5a1 1 0 0 1-1-1z"></path></svg>',
+  away: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"></path><path d="M10 16l4-4-4-4"></path><path d="M14 12H4"></path></svg>',
+};
 function paintSideAway() {
   const mount = sideAwayMount;
   if (!mount || !_sideAwayRead) return;
   const d0 = state.awayMode;
-  const s = describeAwaySwitch({ config: d0 ? d0.config : null, toggle: d0 ? d0.toggle : 'auto', now: Date.now() });
-  const disabled = s.paused || s.status === 'unknown';
-  const sig = JSON.stringify([s, disabled, _sideAwayBusy, _sideAwayErr]);
+  const s = describeAwaySwitch({ config: d0 ? d0.config : null, toggle: d0 ? d0.toggle : 'auto', hereSince: d0 ? d0.hereSince : null, now: Date.now() });
+  const sig = JSON.stringify([s, _sideAwayBusy, _sideAwayErr]);
   if (sig === _sideAwaySig && mount.firstChild) return;      // the 1 s tick repaints only on a change
   _sideAwaySig = sig;
-  const b = document.createElement('button');
-  b.type = 'button'; b.className = 'side-away'; b.setAttribute('role', 'switch'); b.setAttribute('aria-label', "I'm away");
-  b.setAttribute('aria-checked', String(s.checked));
-  if (disabled || _sideAwayBusy) b.setAttribute('aria-disabled', 'true');
-  b.dataset.status = s.status; b.title = _sideAwayErr ? `${s.tip} (Could not change it: ${_sideAwayErr})` : s.tip;
-  const sw = Object.assign(document.createElement('span'), { className: `switch${s.checked ? ' on' : ''}` });
-  sw.setAttribute('aria-hidden', 'true');
-  const text = Object.assign(document.createElement('span'), { className: 'side-away-text' });
-  text.append(Object.assign(document.createElement('span'), { className: 'side-away-label', textContent: "I'm away" }),
-    Object.assign(document.createElement('span'), { className: 'side-away-word', textContent: s.word }));
-  b.append(sw, text);
-  mount.replaceChildren(b);
+  const seg = document.createElement('div');
+  seg.className = 'seg side-away'; seg.setAttribute('role', 'group'); seg.setAttribute('aria-label', 'Away mode');
+  seg.dataset.status = s.status;
+  seg.title = _sideAwayErr ? `${s.tip} (Could not change it: ${_sideAwayErr})` : s.tip;
+  for (const [side, label] of [['here', "I'm here"], ['away', "I'm away"]]) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.dataset.side = side;
+    const on = s.side === side;
+    b.className = on ? 'on' : '';
+    b.setAttribute('aria-pressed', String(on));
+    if (s.disabled || _sideAwayBusy) b.setAttribute('aria-disabled', 'true');
+    b.innerHTML = SIDE_AWAY_ICONS[side];
+    b.append(Object.assign(document.createElement('span'), { className: 'side-away-label', textContent: label }));
+    b.setAttribute('aria-label', label);
+    seg.append(b);
+  }
+  mount.replaceChildren(seg);
 }
 sideAwayMount?.addEventListener('click', async (e) => {
-  const b = e.target.closest('.side-away');
+  const b = e.target.closest('.side-away button[data-side]');
   if (!b || _sideAwayBusy) return;
   const d0 = state.awayMode;
-  if (!d0 || b.dataset.status === 'paused' || b.dataset.status === 'unknown') { location.hash = 'settings/runs'; return; }
+  if (!d0 || b.getAttribute('aria-disabled') === 'true') { location.hash = 'settings/runs'; return; }
+  if (b.getAttribute('aria-pressed') === 'true') return;     // already what applies
   _sideAwayBusy = true; _sideAwayErr = ''; paintSideAway();
   try {
-    const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nightModeToggle: d0.toggle === 'on' ? 'auto' : 'on' }) });
+    const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nightModeToggle: b.dataset.side === 'away' ? 'on' : 'here' }) });
     if (!res.ok) _sideAwayErr = (await safeJson(res)).error || `HTTP ${res.status}`;
   } catch (err) { _sideAwayErr = err.message || 'network error'; }
   _sideAwayBusy = false;
-  await refreshAwayBodies().catch(() => {});                 // settings-changed does the same; whichever lands first paints
+  await refreshAwayBodies().catch(() => {});                 // settings-changed does the same; the newest refresh wins
   paintSideAway();
 });
 

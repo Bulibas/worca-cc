@@ -318,24 +318,31 @@ After apply: `Saved. {new status line}.`
 
 ---
 
-### 3.8 Sidebar switch
+### 3.8 Sidebar "I'm here | I'm away"
 
-At the bottom of the menu, above the spend card: a small switch labelled `I'm away`, with one
-word under it for what applies right now. On the collapsed menu only the switch shows; the
-tooltip carries the words.
+At the bottom of the menu, above the spend card: a two-way control in the same neutral style as
+every other two-way choice, `I'm here` on the left and `I'm away` on the right. The lit side is
+what applies right now, the away hours included. On the collapsed menu it shows two stacked icons;
+the tooltip carries the words.
 
-- Switch on = "I'm away now". Switch off = follow my away hours. Pause stays in Settings.
-- The away hours never flip the switch itself; only the word changes.
+- Click `I'm away` = "I'm away now": worca answers on every run until you click `I'm here`.
+- Click `I'm here` = here right now, even inside the away hours. The stretch you are in is skipped;
+  the next away hours apply by themselves. (Settings' `I'm back` and Ask Worca's "back" do the same.)
+- Clicking the lit side does nothing. Pause stays in Settings.
 
-| Status | Switch | Word | Tooltip |
-|---|---|---|---|
-| here | off | `Here` | `{status line 1} Turn on to have worca answer on every run now.` |
-| inside away hours | off | `Away (your hours)` | `{status line 1} Turn on to have worca answer on every run now.` |
-| no away hours | off | `Here` | `No away hours are set. Turn on to have worca answer on every run now.` |
-| I'm away now | on | `Away` | `You said you are away. worca answers on every run until you turn this off.` |
-| paused | off, disabled | `Paused` | `Away mode is paused. worca answers nothing. Turn it back on in Settings › Away mode.` |
+| Status | Lit | Tooltip |
+|---|---|---|
+| here | I'm here | `{status line 1} Click "I'm away" to have worca answer on every run now.` |
+| inside away hours | I'm away | `{status line 1} Click "I'm here" to count as here until they end.` |
+| "I'm here" said inside the hours | I'm here | `{status line 1} Click "I'm away" to have worca answer on every run now.` |
+| no away hours | I'm here | `No away hours are set. Click "I'm away" to have worca answer on every run now.` |
+| I'm away now | I'm away | `You said you are away. worca answers on every run until you click "I'm here".` |
+| paused | I'm here | `Away mode is paused. worca answers nothing. Click "I'm away" to have worca answer on every run, or turn it back on in Settings › Away mode.` |
 
-A disabled switch (paused, or the settings could not be read) opens Settings › Runs when clicked.
+New status line 1 (Settings, project tab, Ask Worca) after "I'm here" inside the hours:
+`Right now it is {HH:MM} {tz}. You count as here because you said "I'm here". Your away hours apply again from {HH:MM}.`
+
+Settings' `I'm back` tooltip: *You count as here again, even inside your away hours. The next away hours apply by themselves.*
 
 ## 4. Reads-top-to-bottom test
 

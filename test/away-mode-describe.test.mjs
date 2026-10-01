@@ -126,22 +126,36 @@ test('surface: the Settings card (the default) keeps its wording, next to the bu
   }
 });
 
-test('sidebar switch: on = "I\'m away now"; the status word says what applies right now', () => {
+test('sidebar switch: "I\'m here | I\'m away" lights what applies right now', () => {
   const sw = (o) => describeAwaySwitch({ ...base, ...o });
   const here = sw({ now: at('2026-09-28T15:00:00Z') });
-  assert.deepEqual([here.checked, here.paused, here.status, here.word], [false, false, 'here', 'Here']);
-  assert.equal(here.tip, 'Right now it is 15:00. You count as here. Next away hours start at 22:00. Turn on to have worca answer on every run now.');
+  assert.deepEqual([here.side, here.status, here.disabled], ['here', 'here', false]);
+  assert.equal(here.tip, 'Right now it is 15:00. You count as here. Next away hours start at 22:00. Click "I\'m away" to have worca answer on every run now.');
   const hours = sw({ now: at('2026-09-28T23:00:00Z') });
-  assert.deepEqual([hours.checked, hours.status, hours.word], [false, 'away-hours', 'Away (your hours)'], 'the hours never flip the switch itself');
-  assert.equal(hours.tip, 'Right now it is 23:00. You count as away (your away hours). They end at 07:00. Turn on to have worca answer on every run now.');
+  assert.deepEqual([hours.side, hours.status], ['away', 'away-hours'], 'the away hours light "I\'m away" by themselves');
+  assert.equal(hours.tip, 'Right now it is 23:00. You count as away (your away hours). They end at 07:00. Click "I\'m here" to count as here until they end.');
+  const held = sw({ now: at('2026-09-28T23:30:00Z'), hereSince: at('2026-09-28T23:00:00Z') });
+  assert.deepEqual([held.side, held.status], ['here', 'here-now']);
+  assert.equal(held.tip, 'Right now it is 23:30. You count as here because you said "I\'m here". Your away hours apply again from 22:00. Click "I\'m away" to have worca answer on every run now.');
   const on = sw({ now: at('2026-09-28T15:00:00Z'), toggle: 'on' });
-  assert.deepEqual([on.checked, on.word, on.tip], [true, 'Away', 'You said you are away. worca answers on every run until you turn this off.']);
-  const paused = sw({ now: at('2026-09-28T15:00:00Z'), toggle: 'off' });
-  assert.deepEqual([paused.checked, paused.paused, paused.word], [false, true, 'Paused']);
-  assert.equal(paused.tip, 'Away mode is paused. worca answers nothing. Turn it back on in Settings › Away mode.');
+  assert.deepEqual([on.side, on.tip], ['away', 'You said you are away. worca answers on every run until you click "I\'m here".']);
+  const paused = sw({ now: at('2026-09-28T23:00:00Z'), toggle: 'off' });
+  assert.deepEqual([paused.side, paused.status, paused.disabled], ['here', 'paused', false]);
+  assert.equal(paused.tip, 'Away mode is paused. worca answers nothing. Click "I\'m away" to have worca answer on every run, or turn it back on in Settings › Away mode.');
   const none = sw({ now: at('2026-09-28T15:00:00Z'), config: { ...C, window: null } });
-  assert.deepEqual([none.word, none.tip], ['Here', 'No away hours are set. Turn on to have worca answer on every run now.']);
+  assert.deepEqual([none.side, none.tip], ['here', 'No away hours are set. Click "I\'m away" to have worca answer on every run now.']);
   const junk = describeAwaySwitch({ config: null, toggle: 'auto', now: 0 });
-  assert.deepEqual([junk.checked, junk.word, junk.tip], [false, '', 'Away mode settings could not be read.']);
-  for (const d of [here, hours, on, paused, none]) assert.doesNotMatch(d.tip, /night|grace|eligible|Force|strategy/i);
+  assert.deepEqual([junk.side, junk.disabled, junk.tip], [null, true, 'Away mode settings could not be read.']);
+  for (const d of [here, hours, held, on, paused, none]) assert.doesNotMatch(d.tip, /night|grace|eligible|Force|strategy/i);
+});
+
+test('"I\'m here" inside the away hours: the summary and the run pill count it as here', () => {
+  const now = at('2026-09-28T23:30:00Z'); const hereSince = at('2026-09-28T23:00:00Z');
+  const d = describeAwayMode({ ...base, now, hereSince });
+  assert.equal(d.status, 'here-now');
+  assert.equal(d.lines[0], 'Right now it is 23:30. You count as here because you said "I\'m here". Your away hours apply again from 22:00.');
+  assert.equal(describeAwayMode({ ...base, now, hereSince: at('2026-09-28T15:00:00Z') }).status, 'away-hours', 'said by day: tonight still counts');
+  const run = (o) => describeRun({ config: C, toggle: 'auto', now, hereSince, run: { optIn: true, override: 'auto', openedAt: '2026-09-28T23:30:00Z', done: false, ...o } });
+  assert.deepEqual([run().state, run().minutes], ['after', 30], 'a marked run gets the by-day rule, as when you are here by day');
+  assert.equal(run({ optIn: false }).state, 'wait');
 });
