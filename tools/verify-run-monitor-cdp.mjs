@@ -522,6 +522,17 @@ try {
     && chips.filter.execution === 'x:n_clarify:1' && chips.filter.node === 'n_clarify', chips);
 
   // ================ PHASE 2 — answer, finish, settle =========================
+  // A finished run hands the page over to its saved run (#history/…) as soon as History lists
+  // its finished row (app.js rdSavedRoute). (4b) measures the terminal Running page itself, so
+  // the page's /api/history reads leave this pipeline out until (4b) is done.
+  await ev(`(()=>{const pid=${JSON.stringify(entry.pipelineId)};const f=window.fetch.bind(window);
+    window.__realFetch=f;
+    window.fetch=async(...a)=>{const r=await f(...a);const u=String((a[0]&&a[0].url)||a[0]);
+      if(!/^\\/api\\/history(\\?|$)/.test(u.replace(location.origin,'')))return r;
+      const j=await r.clone().json();
+      if(Array.isArray(j.pipelines))j.pipelines=j.pipelines.filter((p)=>p.id!==pid);
+      return new Response(JSON.stringify(j),{status:r.status,headers:r.headers});};
+    return 1;})()`);
   const q = entry.pendingQuestion;
   await api('/api/answer', { method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ runId, id: q.id, payload: { answers: (q.questions || []).map((x) => ({ id: x.id, text: 'yes' })) } }) });
@@ -545,6 +556,7 @@ try {
   check('4b', 'under .rd-graph.settled a live wire is pinned still (animationName "none", offset 0px)',
     settledAnts.settled === true && settledAnts.liveBefore === 0 && settledAnts.animationName === 'none'
     && settledAnts.strokeDashoffset === '0px', settledAnts);
+  await ev('window.fetch=window.__realFetch;delete window.__realFetch;0');
 
   // ---- the History detail --------------------------------------------------
   const hist = await api('/api/history');

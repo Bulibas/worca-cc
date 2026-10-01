@@ -52,11 +52,6 @@ test('New-pipeline button is the CTA and still boots active', () => {
   assert.match(sidebar(), /<button type="button" class="active nav-cta" data-nav="new" data-min-level="simple">/);
 });
 
-test('running children container still sits between Runs and Schedules', () => {
-  assert.match(sidebar(),
-    /data-nav="runs"[^>]*>[\s\S]*?id="nav-running-children"[\s\S]*?data-nav="schedules"[^>]*>/);
-});
-
 test('Settings stays a .nav child (app.js selector `.nav button[data-nav]` must match it)', () => {
   assert.match(sidebar(), /data-nav="settings"[^>]*>\s*<svg/);
   const sideFoot = html.match(/<div class="side-foot">[\s\S]*?<\/aside>/)[0];

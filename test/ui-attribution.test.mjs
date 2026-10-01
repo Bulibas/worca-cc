@@ -157,21 +157,6 @@ function hello(ctx, extra = {}) {
   go(ctx.window, 'runs');
 }
 
-test('sidebar row: just the initials with a tooltip, shared deployments only', async () => {
-  const ctx = await boot({ whoami: SHARED });
-  hello(ctx, { startedBy: 'grace.hopper@example.com' });
-  await settle(ctx.window);
-  const ini = ctx.doc.querySelector(`#nav-running-children [data-child-run-id="${RUN_ID}"] .child-by`);
-  assert.ok(ini);
-  assert.equal(ini.textContent, 'GH');
-  assert.equal(ini.title, 'Started by grace.hopper@example.com');
-
-  const solo = await boot({ whoami: SOLO });
-  hello(solo, { startedBy: 'grace.hopper@example.com' });
-  await settle(solo.window);
-  assert.equal(solo.doc.querySelector(`#nav-running-children .child-by`), null);
-});
-
 // ── live run detail: the person chip ────────────────────────────────────────────
 
 async function runDetail(extra, whoami = SHARED) {

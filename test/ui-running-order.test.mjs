@@ -118,35 +118,3 @@ test('a trailing frame for a superseded run does not outrank the resumed run', a
 
 // Sidebar rows: a log frame changes nothing → the rebuild must be skipped
 // entirely (same DOM nodes), so sidebar scroll/DOM stop churning per log.
-test('log frame does not rebuild the sidebar child rows', async () => {
-  const { window, recv, selectProject, tick } = await boot();
-  selectProject();
-  window.location.hash = 'runs';
-  window.dispatchEvent(new window.Event('hashchange'));
-  recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });
-  recv({ type: 'phase', runId: 'p2', phase: 'plan', cycle: 0 });
-  await tick();
-
-  const host = window.document.querySelector('#nav-running-children');
-  const before = [...host.children];
-  assert.equal(before.length, 2, 'two child rows exist');
-
-  recv({ type: 'log', runId: 'p1', source: 'planner', level: 'info', text: 'x', ts: 3 });
-  await tick();
-  const after = [...host.children];
-  assert.deepEqual(after.map((c) => c.dataset.childRunId), before.map((c) => c.dataset.childRunId), 'same order');
-  assert.ok(after.every((c, i) => c === before[i]), 'same DOM nodes — rebuild was skipped');
-});
-
-test('a title change does rebuild the sidebar rows', async () => {
-  const { window, recv, selectProject, tick } = await boot();
-  selectProject();
-  window.location.hash = 'runs';
-  window.dispatchEvent(new window.Event('hashchange'));
-  recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });
-  await tick();
-  recv({ type: 'title', runId: 'p1', title: 'settled title' });
-  await tick();
-  const row = window.document.querySelector('#nav-running-children .nav-child .child-title');
-  assert.equal(row.textContent, 'settled title', 'signature change → repaint happened');
-});

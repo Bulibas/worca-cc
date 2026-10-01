@@ -510,21 +510,6 @@ test('an unknown id typed after hello bounces immediately', async () => {
   assert.equal(window.document.querySelector('#run-shell').classList.contains('detail-open'), false);
 });
 
-test('a sidebar child row opens the detail', async () => {
-  const { window } = await bootWithRuns();
-  go(window, 'runs');
-  await settle(window);
-  assert.equal(window.document.querySelector('#run-shell').classList.contains('detail-open'), false,
-    'starts from the list: nothing is remembered yet');
-  const row = window.document.querySelector(`#nav-running-children .nav-child[data-child-run-id="${ID}"]`);
-  assert.ok(row, 'the sidebar row is painted');
-  row.dispatchEvent(new window.Event('click', { bubbles: true }));
-  window.dispatchEvent(new window.Event('hashchange'));
-  await settle(window);
-  assert.equal(window.location.hash.replace(/^#/, ''), `running/${ID}`);
-  assert.ok(window.document.querySelector('#run-shell').classList.contains('detail-open'));
-});
-
 // ---------- leave-guard ----------
 
 test('leaving the running view resets the track synchronously', async () => {

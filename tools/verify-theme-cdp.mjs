@@ -399,8 +399,8 @@ const states = [
   ['running-detail', async () => { await go(`running/${runId}`); await until(`document.querySelector('#run-detail .rd-glance:not([hidden]) .rd-now-title')?.textContent`, 'the glance'); }],
   ['running-detail-details', async () => { await go(`running/${runId}/details`); await until(`document.querySelector('#run-detail .rd-details:not([hidden]) .rd-tabs .rd-tab')`, 'detail tabs'); await freeze('details'); }],
   ['running-detail-tabs', async () => { const n = await ev(`document.querySelectorAll('#run-detail .rd-tab').length`); if (n < 2) throw new Error(`running-detail has ${n} tab(s): nothing to audit`); for (let i = 1; i < n; i += 1) { await ev(`document.querySelectorAll('#run-detail .rd-tab')[${i}].click();0`); await freeze('tab'); await auditCurrent(`running-detail-tab-${i}`); } }],
-  ['running-detail-done', async () => { await go(`running/${runId}`); await until(`document.querySelector('#run-detail .rd-result:not([hidden]) .rd-sgroup')`, 'the result sheet'); }],
-  ['running-detail-done-details', async () => { await go(`running/${runId}/details/diff`); await until(`document.querySelector('#run-detail .rd-sec[data-sec="diff"] .rd-diff-host > *')`, 'the finished diff'); await freeze('diff'); }],
+  // No finished Running page: a finished run IS its saved run (app.js rdSavedRoute), and after
+  // the reload every go() does, #running/<id> lands on #history/… — the history-detail states.
   // The just-finished mock run LINGERS as a live row and the list hides its History row
   // until the linger key is cleared (app.js isLingering).
   ['history-list', async () => { await ev(`localStorage.removeItem('worca-cc.lingerRuns');0`); await go('runs'); await until(`document.querySelector('#runs-list .runs-row[data-kind="hist"]')`, 'a finished run row'); }],
@@ -528,7 +528,7 @@ try {
   await until('window.__np && window.__np.getRun', 'app boot');
 
   // Phase A: the live run (question panel visible) — running states only.
-  const phaseA = new Set(['running-list', 'running-list-compact', 'running-detail', 'running-detail-details', 'running-detail-tabs']);   // running-detail-done is a Phase-B state on purpose: the run must be finished
+  const phaseA = new Set(['running-list', 'running-list-compact', 'running-detail', 'running-detail-details', 'running-detail-tabs']);
   for (const [id, prepare, cleanup] of states) {
     if (!phaseA.has(id) || (ONLY.length && !ONLY.includes(id))) continue;
     log(`state ${id}`); await prepare(); if (id !== 'running-detail-tabs') await auditCurrent(id); if (cleanup) await cleanup();

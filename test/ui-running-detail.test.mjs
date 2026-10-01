@@ -841,7 +841,7 @@ test('a log frame appends into the open pane without rebuilding it', async () =>
   assert.equal(box.querySelectorAll('.log-line').length, 3);
 });
 
-test('frames for another run refresh the sidebar but never touch the open detail', async () => {
+test('frames for another run reach the run model but never touch the open detail', async () => {
   const ctx = await bootRunning();
   await openRun(ctx);
   const { window } = ctx;
@@ -860,8 +860,8 @@ test('frames for another run refresh the sidebar but never touch the open detail
   assert.match(box.textContent, /mine/);
   assert.doesNotMatch(box.textContent, /theirs/);
   assert.equal(window.document.querySelector('#run-detail .rd-header .rd-title').textContent, 'Add dark mode');
-  // The sidebar DID learn about r2.
-  assert.ok(window.document.querySelector('#nav-running-children button.nav-child[data-child-run-id="r2"]'));
+  // The page DID learn about r2.
+  assert.ok(window.__np.getRun('r2'), 'r2 is in the run model');
 });
 
 test('the existing 1 s interval ticks the open detail', async () => {

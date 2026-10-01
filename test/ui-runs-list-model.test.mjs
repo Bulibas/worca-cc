@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import {
   rowTime, liveRowState, histRowState, schedRowState, countNeedsYou,
-  buildRunsModel, rowSub, isRowSelected, renderRunsList,
+  buildRunsModel, rowSub, isRowSelected, renderRunsList, rowInFilter, dateBucket, RUNS_FILTERS, DATE_BUCKETS,
 } from '../ui/public/runs-list.mjs';
 
 const NOW = new Date(2026, 8, 30, 15, 0).getTime();           // Wed Sep 30 2026, 15:00 local
@@ -205,4 +205,82 @@ test('renderRunsList: Needs you on top, foldable heads, rows as links with a tit
   assert.equal(host.querySelector('.runs-group[data-group-key="worca-00000002"] .runs-row'), null, 'a folded group renders no rows');
   const empty = renderRunsList(doc, buildRunsModel({ now: NOW }), { emptyText: 'No runs yet.' });
   assert.equal(empty[0].textContent, 'No runs yet.');
+});
+
+test('filters: Live keeps what has not ended, Finished what has, Needs you only its group', () => {
+  assert.deepEqual(RUNS_FILTERS, ['all', 'live', 'finished', 'needs']);
+  const live = [liveIt('run'), liveIt('ask', { ask: { kind: 'clarify', step: 'Plan' } }),
+    liveIt('ended', { status: 'done', pipelineId: 'p-ended' })];
+  const history = [histIt('h-done'), histIt('h-stop', { status: 'stopped' }), histIt('h-int', { status: 'interrupted' })];
+  const titles = (filter) => buildRunsModel({ live, history, filter, now: NOW }).groups.flatMap((g) => g.rows.map((r) => r.title)).sort();
+  assert.deepEqual(titles('live'), ['ask', 'run']);
+  assert.deepEqual(titles('finished'), ['ended', 'h-done', 'h-int', 'h-stop'],
+    'a run that ended but still lingers as a live row counts as finished; interrupted is finished');
+  assert.equal(titles('all').length, 6);
+  const needs = buildRunsModel({ live, history, filter: 'needs', now: NOW });
+  assert.deepEqual(needs.groups, [], 'Needs you is the whole list');
+  assert.deepEqual(needs.needs.map((r) => r.title), ['ask']);
+  assert.equal(buildRunsModel({ live, history, filter: 'bogus', now: NOW }).filter, 'all', 'an unknown filter shows everything');
+  assert.equal(rowInFilter({ kind: 'sched', icon: 'scheduled' }, 'live'), true, 'a scheduled run has not ended');
+});
+
+test('filters: each has its own empty note; a search keeps the search note', () => {
+  const doc = new JSDOM('').window.document;
+  const note = (opts) => renderRunsList(doc, buildRunsModel({ now: NOW, ...opts })).map((n) => n.textContent).join('|');
+  assert.equal(note({ history: [histIt('h')], filter: 'live' }), 'No live runs.');
+  assert.equal(note({ live: [liveIt('r')], filter: 'finished' }).includes('No finished runs yet.'), true);
+  assert.equal(note({ live: [liveIt('r')], filter: 'needs' }), 'Nothing needs you.');
+  assert.equal(note({ live: [liveIt('r')], filter: 'needs', query: 'zzz' }), 'No runs match your search.');
+});
+
+test('dateBucket: local midnights, the finish time for History, now for live, Upcoming for scheduled', () => {
+  const t = (d, h) => new Date(2026, 8, d, h, 0).getTime();
+  const b = (ms) => dateBucket({ kind: 'hist', activityMs: ms }, NOW);
+  assert.equal(b(t(30, 0)), 'today');
+  assert.equal(b(t(29, 23)), 'yesterday');
+  assert.equal(b(t(29, 0)), 'yesterday');
+  assert.equal(b(t(28, 23)), 'week');
+  assert.equal(b(t(23, 0)), 'week', 'Previous 7 days: yesterday plus the six before it');
+  assert.equal(b(t(22, 23)), 'older');
+  assert.equal(b(NaN), 'older', 'an unknown time files under Older, not Today');
+  assert.equal(dateBucket({ kind: 'live' }, NOW), 'today');
+  assert.equal(dateBucket({ kind: 'sched' }, NOW), 'upcoming');
+  assert.deepEqual(DATE_BUCKETS.map(([id]) => id), ['upcoming', 'today', 'yesterday', 'week', 'older']);
+});
+
+test('dateBucket: a DST day is still one day', () => {
+  const prev = process.env.TZ;
+  process.env.TZ = 'Europe/Berlin';
+  try {
+    const now = new Date(2026, 9, 26, 10, 0).getTime();                // the Monday after clocks go back
+    const b = (d, h) => dateBucket({ kind: 'hist', activityMs: new Date(2026, 9, d, h, 0).getTime() }, now);
+    assert.equal(b(25, 0), 'yesterday', 'the 25-hour Sunday is all Yesterday');
+    assert.equal(b(24, 23), 'week');
+  } finally { if (prev === undefined) delete process.env.TZ; else process.env.TZ = prev; }
+});
+
+test('group by date: sections in order, empty ones dropped, History by last activity, the project in the subline', () => {
+  const live = [liveIt('now')];
+  const history = [
+    histIt('late-finish', { startedAt: at(29, 23, 50), mtime: new Date(2026, 8, 30, 0, 10).getTime() }),
+    histIt('yday', { status: 'stopped', startedAt: at(29, 9, 0), mtime: new Date(2026, 8, 29, 9, 30).getTime() }),
+    histIt('old', { startedAt: at(1, 9, 0) }),
+  ];
+  const m = buildRunsModel({ live, history, groupBy: 'date', now: NOW });
+  assert.equal(m.groupBy, 'date');
+  assert.deepEqual(m.groups.map((g) => [g.key, g.name, g.rows.map((r) => r.title)]), [
+    ['date:today', 'Today', ['now', 'late-finish']],
+    ['date:yesterday', 'Yesterday', ['yday']],
+    ['date:older', 'Older', ['old']],
+  ], 'a run started yesterday that finished today is Today; mtime 0 falls back to the start');
+  const sub = (g, i) => rowSub(m.groups[g].rows[i], { bucket: m.groups[g].bucket });
+  assert.equal(sub(0, 0), 'Running · Employee project', 'a live row drops its start time');
+  assert.equal(sub(0, 1), 'Merged · worca-cc · 00:10', 'Today keeps the finish time');
+  assert.equal(sub(1, 0), 'Stopped · worca-cc', 'Yesterday needs no time');
+  assert.equal(sub(2, 0), 'Merged · worca-cc · Sep 1');
+  const folded = buildRunsModel({ live, history, groupBy: 'date', collapsed: new Set(['date:today']), now: NOW });
+  assert.equal(folded.groups[0].collapsed, true, 'date sections fold by their own keys');
+  const doc = new JSDOM('').window.document;
+  const heads = renderRunsList(doc, m).filter((n) => n.classList.contains('runs-group')).map((n) => n.dataset.groupKey);
+  assert.deepEqual(heads, ['date:today', 'date:yesterday', 'date:older']);
 });

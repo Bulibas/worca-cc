@@ -445,3 +445,54 @@ test('a log line does not rebuild the list', async () => {
   await settle(window);
   assert.equal(mutations, 0);
 });
+
+test('the filter chips narrow the list and are remembered across reloads', async () => {
+  const first = await boot();
+  go(first.window, 'runs'); await settle(first.window);
+  first.recv({ type: 'hello', runs: [live('r-live')] });
+  await settle(first.window);
+  const titles = (doc) => [...doc.querySelectorAll('#runs-list .runs-group .runs-row-title')].map((n) => n.textContent);
+  const chip = (doc, f) => doc.querySelector(`#runs-filter [data-filter="${f}"]`);
+  assert.equal(chip(first.doc, 'all').getAttribute('aria-pressed'), 'true');
+  click(first.window, chip(first.doc, 'finished')); await settle(first.window);
+  assert.deepEqual(titles(first.doc), ['Merged thing', 'Stopped thing']);
+  assert.equal(chip(first.doc, 'finished').getAttribute('aria-pressed'), 'true');
+  assert.equal(chip(first.doc, 'all').getAttribute('aria-pressed'), 'false');
+  click(first.window, chip(first.doc, 'live')); await settle(first.window);
+  assert.deepEqual(titles(first.doc), ['r-live']);
+  const saved = first.window.localStorage.getItem('worca-cc.runs.filter');
+  assert.equal(saved, 'live');
+  const second = await boot({ storage: { 'worca-cc.runs.filter': saved } });
+  go(second.window, 'runs'); await settle(second.window);
+  assert.equal(chip(second.doc, 'live').classList.contains('on'), true, 'the chip comes back');
+  assert.deepEqual(titles(second.doc), [], 'and still filters (no live run after this boot)');
+});
+
+test('the Group by menu switches to date sections, closes on a pick or a click outside, and is remembered', async () => {
+  const first = await boot();
+  const { window, doc } = first;
+  go(window, 'runs'); await settle(window);
+  first.recv({ type: 'hello', runs: [live('r-live')] });
+  await settle(window);
+  const btn = doc.getElementById('runs-group-btn');
+  const menu = doc.getElementById('runs-group-menu');
+  assert.equal(menu.hidden, true);
+  click(window, btn); await settle(window);
+  assert.equal(menu.hidden, false);
+  assert.equal(btn.getAttribute('aria-expanded'), 'true');
+  assert.equal(doc.activeElement, menu.querySelector('[data-group-by="project"]'), 'focus lands on the current choice');
+  click(window, doc.body); await settle(window);
+  assert.equal(menu.hidden, true, 'a click elsewhere closes it');
+  click(window, btn); await settle(window);
+  click(window, menu.querySelector('[data-group-by="date"]')); await settle(window);
+  assert.equal(menu.hidden, true, 'a pick closes it');
+  assert.equal(menu.querySelector('[data-group-by="date"]').getAttribute('aria-checked'), 'true');
+  const heads = () => [...doc.querySelectorAll('#runs-list .runs-group-name')].map((n) => n.textContent);
+  assert.equal(heads()[0], 'Today', 'the live run is happening today');
+  assert.ok(heads().every((h) => ['Upcoming', 'Today', 'Yesterday', 'Previous 7 days', 'Older'].includes(h)));
+  assert.equal(window.localStorage.getItem('worca-cc.runs.groupBy'), 'date');
+  const second = await boot({ storage: { 'worca-cc.runs.groupBy': 'date' } });
+  go(second.window, 'runs'); await settle(second.window);
+  assert.equal(second.doc.getElementById('runs-group-btn').classList.contains('on'), true);
+  assert.ok(second.doc.querySelector('#runs-list .runs-group[data-group-key^="date:"]'), 'date sections after a reload');
+});

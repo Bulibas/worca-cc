@@ -1,4 +1,5 @@
-// test/ui-pipeline-tabs.test.mjs — per-pipeline child tabs under Running.
+// test/ui-pipeline-tabs.test.mjs — live runs in the Runs list and the sidebar badges. The
+// sidebar no longer lists runs under Runs; a live run's state shows as its Runs-list row icon.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
@@ -38,26 +39,36 @@ async function boot() {
 const settle = async (n = 3) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); };
 // A run's row in its project group (a Needs-you run is repeated above it: rule 6).
 const groupRow = (doc, runId) => doc.querySelector(`#runs-list .runs-row[data-slot="group"][data-run-id="${runId}"]`);
+const showRuns = async (window) => {
+  window.location.hash = 'runs';
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle();
+};
+const openRun = async (window, runId) => {
+  window.location.hash = `running/${runId}`;
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle();
+};
 
 const live = (runId, extra = {}) => ({
   runId, title: runId, projectDir: PROJECT, status: 'running', kind: 'run',
   startedAt: '10:00:00', pendingQuestion: null, ...extra,
 });
 
-test('hello with two live pipelines renders two child rows + live badge', async () => {
+test('hello with two live pipelines lists both in Runs + live badge', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [live('auth-fix'), live('seo-pSEO')] });
-  const rows = window.document.querySelectorAll('#nav-running-children .nav-child');
-  assert.equal(rows.length, 2);
+  await showRuns(window);
+  assert.ok(groupRow(window.document, 'auth-fix') && groupRow(window.document, 'seo-pSEO'));
+  assert.equal(window.document.querySelector('#nav-running-children'), null, 'no per-run rows in the sidebar');
   assert.equal(window.document.querySelector('#nav-running-count').textContent, '2');
 });
 
-test('a pending question shows pulsing "?" marker + parent roll-up', async () => {
+test('a pending question lands in Needs you + the parent roll-up', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [live('auth-fix', { pendingQuestion: { id: 'q1', kind: 'clarify', questions: [{ question: 'x?', options: ['a'] }] } })] });
-  const q = window.document.querySelector('#nav-running-children .nav-child .child-q');
-  assert.ok(q, 'awaiting-input "?" marker present');
-  assert.equal(q.textContent, '?');
+  await showRuns(window);
+  assert.ok(window.document.querySelector('#runs-list .runs-needs .runs-row[data-run-id="auth-fix"]'), 'listed under Needs you');
   // The parent roll-up is the Runs button's amber Needs-you count now (D11).
   const needs = window.document.querySelector('#nav-needs-count');
   assert.equal(needs.hidden, false, 'the Runs button shows the Needs-you count');
@@ -79,17 +90,17 @@ test('#running/<id> opens the run in the pane and leaves the list intact', async
   assert.equal(window.document.querySelector('#run-detail .rd-title').textContent, 'auth-fix');
 });
 
-test('a run finishing live lingers as a greyed child row, then drops once opened', async () => {
+test('a run finishing live lingers in the Runs list, then drops once opened', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [live('auth-fix')] });
   recv({ type: 'done', runId: 'auth-fix', status: 'done' });        // finishes LIVE
-  let row = window.document.querySelector('#nav-running-children .nav-child[data-child-run-id="auth-fix"]');
+  await showRuns(window);
+  const row = groupRow(window.document, 'auth-fix');
   assert.ok(row, 'lingerer still present');
-  assert.ok(row.classList.contains('lingering'));
-  window.location.hash = 'running/auth-fix';                        // open → acknowledge
-  window.dispatchEvent(new window.Event('hashchange'));
-  row = window.document.querySelector('#nav-running-children .nav-child[data-child-run-id="auth-fix"]');
-  assert.equal(row, null, 'acknowledged run drops from tabs');
+  assert.equal(row.dataset.icon, 'done');
+  await openRun(window, 'auth-fix');                                // open → acknowledge
+  await showRuns(window);
+  assert.equal(groupRow(window.document, 'auth-fix'), null, 'acknowledged run drops from the live rows');
 });
 
 // Regression: watching a run LIVE (focus view open) must not pre-acknowledge it.
@@ -98,42 +109,35 @@ test('a run finishing live lingers as a greyed child row, then drops once opened
 test('opening a run while LIVE does not suppress its later linger', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [live('auth-fix')] });
-  window.location.hash = 'running/auth-fix';                        // open while still running
-  window.dispatchEvent(new window.Event('hashchange'));
-  recv({ type: 'done', runId: 'auth-fix', status: 'done' });        // finishes LIVE, focus drops
-  const row = window.document.querySelector('#nav-running-children .nav-child[data-child-run-id="auth-fix"]');
-  assert.ok(row, 'finished run still lingers in Running (not acknowledged by live-open)');
-  assert.ok(row.classList.contains('lingering'));
+  await openRun(window, 'auth-fix');                                // open while still running
+  await showRuns(window);                                           // leave before it finishes
+  recv({ type: 'done', runId: 'auth-fix', status: 'done' });        // finishes LIVE
+  await settle();
+  const row = groupRow(window.document, 'auth-fix');
+  assert.ok(row, 'finished run still lingers (not acknowledged by live-open)');
+  assert.equal(row.dataset.icon, 'done');
 });
 
-test('a run finishing live shows a static green "●" end marker (done)', async () => {
+test('a run finishing live shows the done icon', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [live('auth-fix')] });
   recv({ type: 'done', runId: 'auth-fix', status: 'done' });
-  const m = window.document.querySelector('#nav-running-children .nav-child .child-q');
-  assert.ok(m, 'finished marker present');
-  assert.equal(m.textContent, '●');
-  assert.ok(m.classList.contains('ok'), 'green (ok) marker for done');
-  assert.equal(m.classList.contains('bad'), false);
+  await showRuns(window);
+  assert.equal(groupRow(window.document, 'auth-fix').dataset.icon, 'done');
 });
 
 // A PAUSED run is parked in Running (resumable), not a finished result: it stays
 // in the list with a static amber dot + no green/red end marker, and opening it
 // (to Resume) must NOT drop it into History.
-test('a paused run stays in Running with an amber dot and no end marker', async () => {
+test('a paused run stays a live row with the paused icon, even once opened', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [live('auth-fix')] });
   recv({ type: 'done', runId: 'auth-fix', status: 'paused' });      // pause routes through finishRun
-  let row = window.document.querySelector('#nav-running-children .nav-child[data-child-run-id="auth-fix"]');
-  assert.ok(row, 'paused run present in Running');
-  assert.equal(row.classList.contains('lingering'), false, 'paused is not a greyed lingerer');
-  assert.ok(row.querySelector('.child-dot.paused'), 'static amber paused dot');
-  assert.equal(row.querySelector('.child-q'), null, 'no green/red end marker for paused');
-
-  window.location.hash = 'running/auth-fix';                        // open to Resume
-  window.dispatchEvent(new window.Event('hashchange'));
-  row = window.document.querySelector('#nav-running-children .nav-child[data-child-run-id="auth-fix"]');
-  assert.ok(row, 'opening a paused run does NOT drop it from Running');
+  await showRuns(window);
+  assert.equal(groupRow(window.document, 'auth-fix').dataset.icon, 'paused');
+  await openRun(window, 'auth-fix');                                // open to Resume
+  await showRuns(window);
+  assert.ok(groupRow(window.document, 'auth-fix'), 'opening a paused run does NOT drop it');
 });
 
 // Resuming a paused run mints a NEW runId; the pre-pause log must be carried into
@@ -179,15 +183,12 @@ test('resuming a paused run carries the pre-pause log into the resumed run', asy
   );
 });
 
-test('a run failing live shows a static red "●" end marker (error/stopped)', async () => {
+test('a run failing live shows the failed icon', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [live('auth-fix')] });
   recv({ type: 'done', runId: 'auth-fix', status: 'error' });
-  const m = window.document.querySelector('#nav-running-children .nav-child .child-q');
-  assert.ok(m, 'finished marker present');
-  assert.equal(m.textContent, '●');
-  assert.ok(m.classList.contains('bad'), 'red (bad) marker for error');
-  assert.equal(m.classList.contains('ok'), false);
+  await showRuns(window);
+  assert.equal(groupRow(window.document, 'auth-fix').dataset.icon, 'fail');
 });
 
 test('seed-on-first-hello: a pre-existing terminal run is NOT a lingerer', async () => {
@@ -258,27 +259,16 @@ test('index.html ships the running badge grey — zero is its resting state', ()
 });
 
 // Workspace runs list every member project in the child hint (clamped by CSS).
-test('a workspace run lists all member projects in the child hint', async () => {
-  const { window, recv } = await boot();
-  recv({
-    type: 'hello',
-    runs: [live('ws-run', { kind: 'workspace-run', workspaceId: 'w1', projectNames: ['api', 'web', 'mobile', 'infra'] })],
-  });
-  const hint = window.document.querySelector('#nav-running-children .nav-child .child-proj');
-  assert.equal(hint.textContent, 'api · web · mobile · infra');
-  const single = window.document.querySelector('#nav-running-children .nav-child[data-child-run-id="ws-run"]');
-  assert.ok(single, 'workspace run still renders a child tab');
-});
-
 // A run started by ANOTHER tab / the CLI arrives via the run-created broadcast
 // (hello is once-per-socket) and must carry its project metadata immediately.
-test('run-created broadcast materializes a child row with project metadata', async () => {
+test('run-created broadcast lists the run under its project without a reload', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [] });
   recv({ type: 'run-created', runId: 'fresh', title: 'fresh run', projectDir: PROJECT, kind: 'run', status: 'starting', startedAt: '10:00:00' });
-  const row = window.document.querySelector('#nav-running-children .nav-child[data-child-run-id="fresh"]');
-  assert.ok(row, 'child row present without a reload');
-  assert.equal(row.querySelector('.child-proj').textContent, 'proj');
+  await showRuns(window);
+  const row = groupRow(window.document, 'fresh');
+  assert.ok(row, 'row present without a reload');
+  assert.equal(row.closest('.runs-group').querySelector('.runs-group-name').textContent, 'proj');
   assert.equal(window.document.querySelector('#nav-running-count').textContent, '1');
 });
 

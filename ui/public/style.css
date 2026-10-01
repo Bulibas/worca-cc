@@ -3223,7 +3223,8 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 
 /* ---------- History detail: Diff tab ---------- */
 .hd-diff{display:grid;grid-template-columns:minmax(280px,340px) 1fr;gap:18px;align-items:start;}
-.hd-diff{
+/* The glance fact tile (.rd-stats) shows the same +/- counts at 18px bold: same tokens. */
+.rd-stats,.hd-diff{
   --hd-count-add:light-dark(#176B4D,#6CCB93);
   --hd-count-del:light-dark(#B31D28,#F0868E);
 }
@@ -4126,7 +4127,11 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .rd-stats[data-n="1"]{grid-template-columns:minmax(0,1fr);}
 .rd-stats > div{background:var(--field);border-radius:var(--r-ctrl);padding:12px 6px;display:flex;flex-direction:column;gap:2px;min-width:0;}
 .rd-stats b{font:700 18px var(--sans);font-variant-numeric:tabular-nums;letter-spacing:-.01em;overflow-wrap:anywhere;}
-.rd-stats b .hd-diff-counts{font-size:inherit;font-weight:700;}   /* large text: the counts sit on --field */
+.rd-stats b .hd-diff-counts{font-size:inherit;font-weight:700;}
+/* 18px bold is under the large-text line (18.66px), so the counts need 4.5:1 on --field: the
+   diff pane's darker count tokens, not the 4.45:1 --red-ink. */
+.rd-stats .hd-diff-counts .diff-add{color:var(--hd-count-add);}
+.rd-stats .hd-diff-counts .diff-del{color:var(--hd-count-del);}
 .rd-stats > div > span{font-size:11.5px;color:var(--ink-2);}
 .rd-result-actions{display:flex;flex-direction:column;gap:8px;}
 .rd-cta{display:flex;align-items:center;justify-content:center;gap:9px;box-sizing:border-box;width:100%;text-align:center;font:600 15px var(--sans);border:0;border-radius:var(--r-ctrl);
@@ -4460,7 +4465,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
    shows only on the rail, where mark + chevron are one target. */
 .side-toggle{display:flex;align-items:center;justify-content:center;
   width:30px;height:30px;flex:0 0 auto;padding:0;border:0;border-radius:9px;
-  background:transparent;color:var(--ink-3);cursor:pointer;
+  background:transparent;color:var(--ink-2);cursor:pointer;
   transition:background .15s,color .15s;}
 .side-toggle svg{width:20px;height:20px;flex:0 0 auto;}
 .side-toggle:hover{background:var(--hover);color:var(--ink);}

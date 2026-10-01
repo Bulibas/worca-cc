@@ -95,21 +95,6 @@ test('back/forward (a plain hashchange) still routes', async () => {
   assert.equal(hidden(doc, 'runs'), false, 'Back restored the Runs view');
 });
 
-test('running child rows are buttons with no href and still deep-link', async () => {
-  const { window, recv } = await boot();
-  recv({ type: 'hello', runs: [live('auth-fix')] });
-  await tick();                                           // let renderPipelineTabs paint
-  const row = window.document.querySelector('#nav-running-children .nav-child');
-  assert.ok(row, 'child row rendered');
-  assert.equal(row.tagName, 'BUTTON', 'child row is a button');
-  assert.equal(row.getAttribute('href'), null, 'no href → no hover preview');
-  click(window, row);
-  await tick();
-  assert.equal(window.location.hash, '#running/auth-fix', 'child row still focuses the run');
-  assert.equal(window.document.querySelectorAll('.nav a, .mbar a').length, 0,
-    'no anchors remain anywhere in the menus');
-});
-
 test('reload on #running/<id> keeps the Runs view (no reset to New)', async () => {
   const { window } = await boot('http://localhost:4317/#running/auth-fix');
   const doc = window.document;
