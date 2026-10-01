@@ -309,3 +309,18 @@ test('a background refresh that could not fetch turns the row offline with no Sy
   await go(again.window, 'projects');
   await waitFor(() => lab(again.doc, 'k1') === OFFLINE);
 });
+
+test('style.css: the Projects sync line puts the action right after the status, and the narrow layout wins', () => {
+  const css = readFileSync(new URL('../ui/public/style.css', import.meta.url), 'utf8');
+  const base = css.match(/^\.proj-sync\{display:grid;[^}]*\}/m);
+  assert.ok(base, 'the base .proj-sync rule');
+  // The status column sizes to its content (still shrinkable), so no 1fr gap before the button.
+  assert.match(base[0], /grid-template-columns:18px minmax\(0,180px\) minmax\(0,max-content\) auto;/);
+  assert.match(base[0], /justify-content:start;/);
+  // The narrow override must come AFTER the base rule: same specificity, so source order decides.
+  const narrow = css.indexOf('@media (max-width:820px){\n  .proj-sync{grid-template-columns:18px minmax(0,1fr) auto;row-gap:4px;}\n}');
+  assert.ok(narrow > base.index, 'the 820px .proj-sync override sits after the base rule');
+  assert.equal(css.match(/\.proj-sync\{grid-template-columns:/g).length, 1, 'one narrow override, not a dead copy');
+  // The Workspaces table keeps its own grid.
+  assert.match(css, /\.ws-trow\{[^}]*grid-template-columns:22px minmax\(0,190px\) minmax\(0,1fr\) minmax\(0,320px\) 112px;/);
+});
