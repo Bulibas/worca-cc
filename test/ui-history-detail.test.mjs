@@ -755,7 +755,7 @@ test('tabs render with badges; Details opens on Overview, and a tab route opens 
 
   assert.deepEqual(
     tabsOf(doc).map((b) => b.dataset.sec),
-    ['overview', 'diff', 'workflow', 'clarify', 'logs', 'agents'],   // one order on both run pages: results, then how it ran
+    ['overview', 'diff', 'actions', 'workflow', 'clarify', 'logs', 'agents'],   // one order on both run pages: results, then how it ran
   );
   // filesNew(1) + filesChanged(13). NEVER + filesDeleted: results.mjs:32 buckets
   // 'D' rows into changedFiles (NEW_STATUS is {A,C}) while :29 ALSO counts them in
@@ -776,7 +776,7 @@ test('tabs render with badges; Details opens on Overview, and a tab route opens 
   const bare = await bootDetail();
   await openDetail(bare, 'details');
   const bareDoc = bare.window.document;
-  assert.deepEqual(tabsOf(bareDoc).map((b) => b.dataset.sec), ['overview', 'diff', 'workflow', 'agents']);
+  assert.deepEqual(tabsOf(bareDoc).map((b) => b.dataset.sec), ['overview', 'diff', 'actions', 'workflow', 'agents']);
   assert.equal(secOf(bareDoc, 'clarify'), null, 'no Q&A -> no Clarify section either');
   assert.equal(secOf(bareDoc, 'logs'), null, 'no live-log artifact -> no Logs section either');
   assert.ok(bareDoc.querySelector('#hist-detail .hd-tab[data-sec="overview"]').classList.contains('active'));
@@ -891,7 +891,7 @@ test('tabs are wired for a11y', async () => {
 
   assert.equal(doc.querySelector('#hist-detail .hd-tabs').getAttribute('role'), 'tablist');
   const tabs = tabsOf(doc);
-  assert.equal(tabs.length, 6);
+  assert.equal(tabs.length, 7);   // the fixture's visible tabs, Actions included
   for (const btn of tabs) {
     const key = btn.dataset.sec;
     const sec = secOf(doc, key);
@@ -2818,4 +2818,90 @@ test('a deep link to a History Details tab opens it once the run loads', async (
   const doc = ctx.window.document;
   assert.equal(doc.querySelector('#hist-detail .hd').dataset.mode, 'details');
   assert.ok(doc.querySelector('#hist-detail .hd-tab[data-sec="agents"]').classList.contains('active'));
+});
+
+// ---------------------------------------------------------------------------
+// Actions (issue #529): the tab, the Overview strip and the running-service surfaces
+// ---------------------------------------------------------------------------
+
+const ACT_MODEL = {
+  runId: ROW.id, workspace: false, finished: true, enabled: true,
+  members: [{ projectKey: KEY, projectName: 'Alpha', branch: ROW.branch, checkout: null, actions: [], builtins: [] }],
+  instances: [], stacks: [], stackStates: [],
+};
+const ACT_RUNNING = [{
+  instanceId: `act:${ROW.id}:${KEY}:run`, runId: ROW.id, member: KEY, actionId: 'run', label: 'Run', kind: 'service',
+  status: 'ready', ports: { PORT: 4417 }, url: 'http://localhost:4417', startedAt: Date.now(),
+  histKey: KEY, workspaceId: null, runTitle: 'Log UX',
+}];
+function actionArms(running = []) {
+  return (url) => {
+    if (url.endsWith('/api/actions/running')) return ok(running);
+    if (url.includes(`/api/runs/${ROW.id}/actions?`)) return ok(ACT_MODEL);
+    if (url.includes('/api/actions/instances/')) return ok({ ok: true });
+    return null;
+  };
+}
+
+test('the Actions tab loads the run model with the run scope and offers Check out', async () => {
+  const ctx = await bootDetail({ arms: actionArms() });
+  await openDetail(ctx, 'details/actions');
+  await settle(ctx.window, 4);
+  const doc = ctx.window.document;
+  assert.ok(doc.querySelector('#hist-detail .hd-tab[data-sec="actions"]').classList.contains('active'));
+  const get = ctx.calls.find((c) => c.url.startsWith(`/api/runs/${ROW.id}/actions?`));
+  assert.ok(get, 'GET /api/runs/:id/actions');
+  assert.match(get.url, new RegExp(`projectKey=${KEY}`));
+  const card = secOf(doc, 'actions').querySelector('.act-card');
+  assert.ok(card, 'one card per member');
+  assert.equal(card.dataset.state, 'not-checked-out');
+  assert.ok([...card.querySelectorAll('button')].some((b) => b.textContent === 'Check out'));
+});
+
+test('the Overview carries the Actions strip on a finished run, with "Open tab ›"', async () => {
+  const ctx = await bootDetail({ arms: actionArms() });
+  await openDetail(ctx, 'details/overview');
+  await settle(ctx.window, 4);
+  const strip = secOf(ctx.window.document, 'overview').querySelector('.act-strip');
+  assert.ok(strip, 'the strip is mounted');
+  assert.equal(strip.dataset.runId, ROW.id);
+  assert.equal(strip.dataset.minLevel, 'advanced');
+  const open = [...strip.querySelectorAll('button')].find((b) => b.textContent === 'Open tab ›');
+  assert.ok(open);
+  click(ctx.window, open);
+  assert.equal(ctx.window.location.hash, `#${detailHash}/details/actions`);
+});
+
+test('the Overview strip follows actions-changed without the Actions tab ever opening', async () => {
+  const running = { ...ACT_MODEL, members: [{ ...ACT_MODEL.members[0], checkout: { setup: { status: 'ok' } } }], instances: [ACT_RUNNING[0]] };
+  let model = running;
+  const ctx = await bootDetail({ arms: (url) => (url.includes(`/api/runs/${ROW.id}/actions?`) ? ok(model) : actionArms()(url)) });
+  await openDetail(ctx, 'details/overview');
+  await settle(ctx.window, 4);
+  const strip = () => secOf(ctx.window.document, 'overview').querySelector('.act-strip');
+  assert.match(strip().textContent, /Running :4417/);
+  model = { ...running, instances: [{ ...ACT_RUNNING[0], status: 'stopped' }] };   // stopped from the sidebar, or it crashed
+  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'actions-changed', action: 'stopped' }) });
+  await settle(ctx.window, 4);
+  assert.doesNotMatch(strip().textContent, /Running :4417/);
+  assert.ok(![...strip().querySelectorAll('button')].some((b) => b.textContent === 'Stop'));
+});
+
+test('a running service shows in the sidebar, the header pill and the tab dot; Stop goes by instance id', async () => {
+  const ctx = await bootDetail({ arms: actionArms(ACT_RUNNING) });
+  await openDetail(ctx, 'details/overview');
+  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'actions-changed', action: 'start' }) });
+  await settle(ctx.window, 4);
+  const doc = ctx.window.document;
+  const side = doc.getElementById('side-actions');
+  assert.equal(side.hidden, false);
+  assert.match(side.textContent, /Run :4417/);
+  assert.match(side.textContent, /Log UX/);
+  assert.equal(doc.querySelector('#hist-detail .hd-row1 .act-pill').textContent, 'Run :4417');
+  assert.ok(doc.querySelector('#hist-detail .hd-tab[data-sec="actions"] .tab-dot'), 'the Actions tab carries a dot');
+  click(ctx.window, side.querySelector('.act-stop'));
+  await settle(ctx.window);
+  const stop = ctx.calls.find((c) => c.url.includes('/api/actions/instances/'));
+  assert.equal(stop.url, `/api/actions/instances/${encodeURIComponent(ACT_RUNNING[0].instanceId)}/stop`);
+  assert.equal(stop.opts.method, 'POST');
 });

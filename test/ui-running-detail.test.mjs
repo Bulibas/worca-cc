@@ -589,15 +589,16 @@ test('a waiting question gets twice the run panel\'s width; the header and panel
 
 // --- T7: tabs ---------------------------------------------------------------
 
-test('Details has seven tabs, results first; the route picks the open one', async () => {
+test('Details has eight tabs, results first; the route picks the open one', async () => {
   const ctx = await bootRunning();
   await openRun(ctx);
   const { window } = ctx;
   const tabs = [...window.document.querySelectorAll('#run-detail .rd-tab')];
-  assert.deepEqual(tabs.map((b) => b.dataset.sec), ['overview', 'diff', 'artifacts', 'workflow', 'qa', 'logs', 'agents']);
+  assert.deepEqual(tabs.map((b) => b.dataset.sec), ['overview', 'diff', 'artifacts', 'actions', 'workflow', 'qa', 'logs', 'agents']);
   assert.match(tabs[0].textContent, /Overview/);
-  assert.match(tabs[5].textContent, /Logs/);
-  assert.match(tabs[4].textContent, /Q&A/);
+  assert.match(tabs[3].textContent, /Actions/);
+  assert.match(tabs[6].textContent, /Logs/);
+  assert.match(tabs[5].textContent, /Q&A/);
   // openRun lands on #running/r1/details/logs.
   assert.equal(window.document.querySelector('#run-detail .rd').dataset.mode, 'details');
   assert.ok(tabOf(window, 'logs').classList.contains('active'), 'the routed tab is open');

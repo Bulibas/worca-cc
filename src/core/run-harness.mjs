@@ -1473,6 +1473,7 @@ export class RunHarness extends EventEmitter {
       // work) and the run root are the things we resume into (§8.13).
       if (this.state.status !== 'paused' && this.state.status !== 'pausing') {
         await this._teardownRunRoot().catch(() => {});
+        await this._keepCheckoutByPolicy().catch((e) => this._log('worktree', 'warn', `keep policy: ${e?.message || e}`));
       }
       await this.logWriter.close().catch(() => {}); // flush + stop timer (last, to capture teardown logs)
     }
@@ -1843,6 +1844,7 @@ export class RunHarness extends EventEmitter {
       // next boot, no stray scan, no injected-path cleanup.
       if (this.state.status !== 'paused' && this.state.status !== 'pausing') {
         await this._teardownRunRoot().catch(() => {});
+        await this._keepCheckoutByPolicy().catch((e) => this._log('worktree', 'warn', `keep policy: ${e?.message || e}`));
       }
       await this.logWriter.close().catch(() => {}); // flush + stop timer (last, to capture teardown logs)
     }
@@ -3020,6 +3022,26 @@ export class RunHarness extends EventEmitter {
         'the run.json retain record is the only durable copy');
     }
     return true;
+  }
+
+  /** Keep policy (issue #529, D10): re-create the checkout the teardown just removed. */
+  async _keepCheckoutByPolicy() {
+    if (this._isWorkspaceScan() || this.state.status !== 'done' || !this.state.id) return;
+    const { keepAfterRun } = await import('./checkout.mjs');   // lazy: no import cycle, no cost when unused
+    const kept = await keepAfterRun({ pipelineId: this.state.id, log: (m) => this._log('worktree', 'info', m) });
+    if (!kept) return;
+    // _teardownRunRoot already _persist()ed the pre-checkout branch record. keepAfterRun stamped the
+    // checkout with a targeted UPDATE, so mirror it into memory: a later _persist() must not erase it.
+    const { findPipelineRowById } = await import('./artifacts.mjs');
+    const row = findPipelineRowById(this.state.id);
+    const parse = (t) => { try { return typeof t === 'string' ? JSON.parse(t) : t; } catch { return null; } };
+    if (row?.target === 'workspace') {
+      const branches = parse(row.workspace_meta)?.branches || {};
+      for (const [k, v] of Object.entries(branches)) if (this.state.branches?.[k]) this.state.branches[k] = v;
+    } else if (row?.branch) {
+      const br = parse(row.branch);
+      if (br) this.state.branch = br;
+    }
   }
 
   /** A Workspace scan run (wf_workspace_scan on a workspace target) is READ-ONLY: nothing is

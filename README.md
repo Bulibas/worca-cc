@@ -152,6 +152,12 @@ and durations, the clarify Q&A, agent transcripts, and logs:
   worktree per member, one cross-project review verdict at the end. See
   [`docs/workspace-map.md`](docs/workspace-map.md).
 
+### Actions
+
+- **Try the result before you ship it** — check out a finished run's branch and run the
+  project's own commands (dev server, tests, a workspace stack) from Worca, with ports, a ready
+  check and live logs. See [`docs/actions.md`](docs/actions.md).
+
 ### Plugins & chat
 
 - **Plugin system with marketplaces** — plugins contribute task sources
@@ -430,6 +436,7 @@ The skill starts the same deterministic orchestrator.
 - [Getting started](docs/getting-started.md) — the in-app checklist, welcome and spotlight guides
 - [Storage](docs/storage.md) — where state lives, project keys, migration
 - [Workspace map](docs/workspace-map.md) — how a workspace scan maps relations, reviewing them, measuring a scan
+- [Actions](docs/actions.md) — check out a finished run and run the project's commands from Worca
 - [Remote access](docs/remote-access.md) — opt-in, behind Cloudflare Access, with worca checking the token
 - [Deploy on Railway](docs/deploy-railway.md) — the container as a hosted service behind Cloudflare Access
 - [Releasing](docs/RELEASING.md) — how `@worca/app` versions are published

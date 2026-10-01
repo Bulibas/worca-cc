@@ -79,6 +79,8 @@ import {
   renderMemoryHistory, MEMORY_NAME_HELP,
 } from './memory-view.mjs';
 import { createScriptsController } from './scripts-view.mjs';
+import { renderRunPill, renderOverviewStrip, renderShipItStrip, renderRunningActionsCard, historyActionBadges, createActionsController } from './actions-view.mjs';
+import { renderProjectActionsEditor, renderStackEditor } from './actions-config-view.mjs';
 import { createAskPanel } from './ask-panel.mjs';
 import { renderGettingStarted, renderGettingStartedPill, bindWelcome, doneCount, allStepsDone, GETTING_STARTED_STEPS } from './getting-started.mjs';
 import { createGuideSpot } from './guide-spot.mjs';
@@ -1023,6 +1025,7 @@ function handleServerMessage(msg) {
 
   if (msg.type === 'hello') {
     onHello(msg);
+    refreshRunningActions();
     return;
   }
 
@@ -1184,6 +1187,12 @@ function handleServerMessage(msg) {
     if (scriptsCtl) scriptsCtl.onFrame(msg);
     return;
   }
+  // Action frames are tagged by instanceId (not runId); each controller keeps its own run's.
+  if (typeof msg.type === 'string' && msg.type.startsWith('action-')) {
+    for (const c of actionControllers) c.onFrame(msg);
+    return;
+  }
+  if (msg.type === 'actions-changed') { refreshRunningActions(); for (const c of actionControllers) c.refresh(); refreshActionsStrips(); return; }
   if (msg.type === 'memory-changed') {
     const scope = String(msg.scope || '');
     if (scope === 'global' && currentView() === 'settings' && currentSettingsTab === 'memory' && memoryTabCtl) pokeGlobalMemory();
@@ -7197,7 +7206,7 @@ if (el.wsList) {
 // editing — description, re-scan, delete, metrics home, policy home, routing, the map's overrides —
 // lives here.
 // ---------------------------------------------------------------------------
-const WS_TABS = ['overview', 'map', 'team'];
+const WS_TABS = ['overview', 'map', 'team', 'actions'];
 // workspaces-changed actions that can change the Map tab: an override (P5 routes) or a scan's save.
 const WD_MAP_ACTIONS = new Set(['map', 'scan-created', 'scan-updated']);
 function parseWsParam(param = '') {
@@ -7335,6 +7344,7 @@ const WD_TABS = [
   { key: 'overview', label: 'Overview', level: 'simple', badge: () => null, visible: () => true, build: (sec, id) => buildWdOverview(sec, id) },
   { key: 'map', label: 'Map', level: 'advanced', badge: () => null, visible: () => true, build: (sec, id) => buildWdMap(sec, id) },
   { key: 'team', label: 'Team', level: 'expert', badge: () => null, visible: () => true, build: (sec, id) => buildWdTeam(sec, id) },
+  { key: 'actions', label: 'Actions', level: 'advanced', badge: () => null, visible: () => true, build: (sec, id) => buildWdActions(sec, id) },
 ];
 function initWdTabs(screen, w) {
   initDetailTabs(screen, WD_TABS.map((t) => ({ ...t, icon: PD_TAB_ICONS[t.key] })), w, {
@@ -9545,7 +9555,7 @@ const capFirst = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
 // (Memory tab) or "<key>/memory/<enc name>" (that file open). Keys are `<slug>-<8hex>`
 // (store.mjs#projectKey) and never contain "/", so the first slash splits key from tab. An
 // unknown tab word reads as Overview (the hash is left alone, as History leaves an odd param alone).
-const PROJ_TABS = ['overview', 'team', 'memory'];
+const PROJ_TABS = ['overview', 'team', 'memory', 'actions'];
 function parseProjParam(param = '') {
   const s = String(param || '');
   if (!s) return null;
@@ -9561,6 +9571,7 @@ function parseProjParam(param = '') {
 // The canonical param for a tab: Overview is plain '<key>', never '<key>/overview'.
 function projParamFor(key, tab = 'overview', sub = '') {
   if (tab === 'team') return `${key}/team`;
+  if (tab === 'actions') return `${key}/actions`;
   if (tab !== 'memory') return key;
   return sub ? `${key}/memory/${encodeURIComponent(sub)}` : `${key}/memory`;
 }
@@ -9761,12 +9772,14 @@ const PD_TAB_ICONS = {
   memory: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"></path><path d="M4 20.5V5.5M8 7h8M8 10.5h6"></path></svg>',
   map: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"></circle><circle cx="19" cy="5" r="2.5"></circle><circle cx="19" cy="19" r="2.5"></circle><path d="M7.3 10.9l9.4-4.8M7.3 13.1l9.4 4.8"></path></svg>',
   team: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"></circle><path d="M3.5 19c.6-3 2.8-4.6 5.5-4.6S13.9 16 14.5 19"></path><circle cx="17.5" cy="9.5" r="2.4"></circle><path d="M15.5 14.6c2.7 0 4.4 1.4 5 4.4"></path></svg>',
+  actions: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5l11 7-11 7z"></path></svg>',
 };
 // Table-driven, like HD_TABS. `build(sec, key)` takes the KEY (buildArgs), never the project object.
 const PD_TABS = [
   { key: 'overview', label: 'Overview', level: 'simple', badge: () => null, visible: () => true, build: (sec, key) => buildPdOverview(sec, key) },
   { key: 'team', label: 'Team', level: 'expert', badge: () => null, visible: () => true, build: (sec, key) => buildPdTeam(sec, key) },
   { key: 'memory', label: 'Memory', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMemory(sec, key) },
+  { key: 'actions', label: 'Actions', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdActions(sec, key) },
 ];
 function initPdTabs(screen, p) {
   initDetailTabs(screen, PD_TABS.map((t) => ({ ...t, icon: PD_TAB_ICONS[t.key] })), p, {
@@ -11217,6 +11230,7 @@ async function loadSettings() {
     paintBudgetSettings(data);
     paintAskSettings(data);
     paintScheduleSettings(data);
+    paintActionsSettings(data);
     paintDebugSpawnSettings(data);
     await paintTitleModelSettings(data);
     await paintAutoModelSettings(data);
@@ -13083,6 +13097,316 @@ async function scriptsCall(method, url, body) {
   }
 }
 const scriptUrl = (key, tail = '') => `/api/scripts/${encodeURIComponent(key)}${tail}`;
+
+// ── Actions (issue #529) ────────────────────────────────────────────────────
+// actions-view.mjs / actions-config-view.mjs own the pixels; this owns the endpoint calls,
+// the controllers' lifetime and the shared run-model cache the strips read.
+const actionControllers = new Set();        // live createActionsController() objects (History + run page)
+const actionsModelCache = new Map();        // runId -> last run model, read by the Overview and Ship It strips
+const histActionEntries = new WeakMap();    // .hist-card -> its history entry (p.checkout), for in-place badge repaints
+
+async function actionsCall(method, url, body) {
+  const init = { method };
+  if (body !== undefined) { init.headers = { 'Content-Type': 'application/json' }; init.body = JSON.stringify(body); }
+  try {
+    const res = await fetch(url, init);
+    return { ok: res.ok, status: res.status, data: await safeJson(res) };
+  } catch (e) {
+    return { ok: false, status: 0, data: { error: e.message } };
+  }
+}
+const actionsRunUrl = (runId, tail, scopeQuery) => `/api/runs/${encodeURIComponent(runId)}${tail}?${scopeQuery}`;
+
+/** The run page's scope query: the same projectKey / workspaceId keys runActionQuery builds for History. */
+function rdScopeQuery(run) {
+  const qs = new URLSearchParams();
+  if (run.workspaceId) qs.set('workspaceId', String(run.workspaceId).replace(/^workspaces\//, ''));
+  else if (run.projectKey) qs.set('projectKey', run.projectKey);
+  else qs.set('projectDir', run.projectDir || '');
+  return qs.toString();
+}
+
+/** Repaint every mounted strip for runId (Overview strip on either page, Ship It "Try it first") from the cache. */
+function paintActionsStrips(runId) {
+  const model = actionsModelCache.get(runId);   // undefined when the model GET failed: the strip stays empty
+  // Compare the dataset instead of building a selector: no CSS.escape needed (jsdom tests lack it).
+  for (const el of [...document.querySelectorAll('.act-strip[data-run-id]')].filter((x) => x.dataset.runId === runId)) {
+    el.replaceChildren(...(model ? [renderOverviewStrip(model, { doc: document, handlers: stripHandlers(el) })].filter(Boolean) : []));
+  }
+}
+/** Mount point: stamps the run id and scope, then paints from the cache or fetches the model once. */
+async function paintActionsStrip(strip, runId, scopeQuery) {
+  strip.dataset.runId = runId; strip.__scopeQuery = scopeQuery;
+  if (!actionsModelCache.has(runId)) {
+    const r = await actionsCall('GET', actionsRunUrl(runId, '/actions', scopeQuery));
+    if (r.ok) actionsModelCache.set(runId, r.data);
+  }
+  paintActionsStrips(runId);
+}
+/** Refetch one run's model into the cache, repaint its strips and refresh its open controllers. */
+async function refreshActionsModel(runId, scopeQuery) {
+  const r = await actionsCall('GET', actionsRunUrl(runId, '/actions', scopeQuery));
+  if (r.ok) actionsModelCache.set(runId, r.data);
+  paintActionsStrips(runId);
+  for (const c of actionControllers) if (c.runId === runId) c.refresh();
+  return r;
+}
+/**
+ * actions-changed: a stop from the sidebar or the pill, or a crash, changes runs whose tab may never have
+ * opened. Refetch every mounted strip's model; a run with a live controller repaints through its onModel.
+ * Cached models of unmounted runs are dropped, so a revisit fetches instead of painting a stale state.
+ */
+function refreshActionsStrips() {
+  const mounted = new Map();
+  for (const el of document.querySelectorAll('.act-strip[data-run-id]')) mounted.set(el.dataset.runId, el.__scopeQuery);
+  for (const runId of [...actionsModelCache.keys()]) if (!mounted.has(runId)) actionsModelCache.delete(runId);
+  const controlled = new Set([...actionControllers].map((c) => c.runId));
+  for (const [runId, scopeQuery] of mounted) {
+    if (controlled.has(runId)) continue;
+    actionsCall('GET', actionsRunUrl(runId, '/actions', scopeQuery)).then((r) => {
+      if (r.ok) actionsModelCache.set(runId, r.data);
+      paintActionsStrips(runId);
+    });
+  }
+  for (const box of document.querySelectorAll('.shipit-try[data-run-id]')) box.__repaint?.();   // Ship It "Try it first"
+}
+/** The strip's one primary button makes the controller's calls, then refetches the model. */
+function stripHandlers(el) {
+  const runId = () => el.dataset.runId;
+  const scope = () => el.__scopeQuery;
+  const after = () => refreshActionsModel(runId(), scope());
+  return {
+    onCheckout: async () => { await actionsCall('POST', actionsRunUrl(runId(), '/checkout', scope()), {}); await after(); },
+    onStop: async (member, actionId) => {
+      await actionsCall('POST', actionsRunUrl(runId(), `/actions/${encodeURIComponent(actionId)}/stop`, scope()), { member });
+      await after();
+    },
+    onOpenTab: () => {
+      if (el.closest('.hd') && histDetailState) location.hash = hdHash(histDetailState, 'details', 'actions');
+      else if (el.closest('.rd') && runDetailState.runId) location.hash = rdHash(runDetailState.runId, 'details', 'actions');
+    },
+  };
+}
+
+function buildRdActions(sec, ctx) {
+  const paint = (c) => {
+    // ctx.run is a makeRun object: runId, pipelineId (null until state frames arrive), status. It has no `id`.
+    // isTerminalStatus includes 'interrupted'; the card then shows the server's finished:false hint.
+    if (!isTerminalStatus(c.run.status) || !c.run.pipelineId) {
+      destroyActionsCtl(sec);
+      const p = document.createElement('p'); p.className = 'hint act-hint';
+      p.textContent = 'Actions are available once the run finishes.';
+      sec.replaceChildren(p);
+      return;
+    }
+    mountActionsController(sec, c.run.pipelineId, rdScopeQuery(c.run));
+  };
+  paint(ctx);
+  sec.__update = paint;
+}
+function buildHdActions(sec, record) {
+  // runActionQuery prefers projectKey (a deep-link stub may lack projectDir) and maps workspace records to workspaceId.
+  mountActionsController(sec, record.id, runActionQuery(record.projectDir, record).toString());
+}
+function mountActionsController(sec, runId, scopeQuery) {
+  if (sec.__actionsCtl && sec.__actionsCtl.runId === runId) return;
+  destroyActionsCtl(sec);
+  const host = document.createElement('div'); sec.replaceChildren(host);
+  const ctl = createActionsController({ runId, scopeQuery, host, doc: document,
+    api: actionsCall, ws: { send: (o) => { if (state.ws && state.wsReady) state.ws.send(JSON.stringify(o)); } },
+    confirm: confirmModal, navigate: (hash) => { location.hash = hash; },
+    onModel: (m) => { actionsModelCache.set(runId, m); paintActionsStrips(runId); } });
+  // destroy() also drops the controller from the live set, so frames stop reaching it.
+  const wrapped = { ...ctl, destroy: () => { actionControllers.delete(wrapped); ctl.destroy(); } };
+  sec.__actionsCtl = wrapped;
+  actionControllers.add(wrapped);
+  ctl.refresh();
+}
+function destroyActionsCtl(sec) {
+  if (!sec.__actionsCtl) return;
+  sec.__actionsCtl.destroy();
+  sec.__actionsCtl = null;
+}
+/** Tear down every Actions controller mounted under root (a detail screen about to go away). */
+function destroyActionsIn(root) {
+  if (!root) return;
+  for (const sec of root.querySelectorAll('[data-sec="actions"]')) destroyActionsCtl(sec);
+}
+
+// ---- running actions: sidebar card, header pill, tab dots, History badges ----
+async function refreshRunningActions() {
+  const r = await actionsCall('GET', '/api/actions/running');
+  if (r.ok && Array.isArray(r.data)) state.actionsRunning = r.data;
+  paintRunningActions();
+}
+const runningServicesOf = (runId) => (state.actionsRunning || []).filter((s) => s.runId === runId && s.kind === 'service');
+async function stopActionInstance(s) {
+  await actionsCall('POST', `/api/actions/instances/${encodeURIComponent(s.instanceId)}/stop`, {});
+  refreshRunningActions();
+}
+function openActionRun(s) {
+  if (s.histKey == null) return;   // the run row was archived meanwhile: nowhere to go
+  location.hash = hdHash({ projectKey: s.histKey, id: s.runId }, 'details', 'actions');
+}
+function paintRunningActions() {
+  const running = state.actionsRunning || [];
+  const side = document.getElementById('side-actions');
+  if (side) {
+    const card = renderRunningActionsCard(running.filter((s) => s.kind === 'service'),
+      { doc: document, titleOf: (s) => s.runTitle || s.runId, onStop: stopActionInstance, onOpen: openActionRun });
+    side.replaceChildren(...(card ? [card] : []));
+    side.hidden = !card;
+  }
+  paintActionsHeaders();
+  paintHistActionBadges();
+}
+/** The header pill and the Actions tab dot on whichever detail screens are open. */
+function paintActionsHeaders() {
+  const hdScreen = histDetailState && histDetailState.screen;
+  if (hdScreen) {
+    const record = histDetailState.record || { projectKey: histDetailState.key, id: histDetailState.id };
+    paintActionsHeader(hdScreen, '.hd-row1 .act-pill-slot', '.hd-tab[data-sec="actions"]', histDetailState.id,
+      () => { location.hash = hdHash({ projectKey: record.projectKey, id: record.id }, 'details', 'actions'); });
+  }
+  const rdScreen = runDetailState && runDetailState.screen;
+  if (rdScreen) {
+    const r = runs.get(runDetailState.runId);
+    const runId = runDetailState.runId;
+    paintActionsHeader(rdScreen, '.rd-row1 .act-pill-slot', '.rd-tab[data-sec="actions"]', r && r.pipelineId,
+      () => { location.hash = rdHash(runId, 'details', 'actions'); });
+  }
+}
+function paintActionsHeader(screen, slotSel, tabSel, runId, onClick) {
+  const list = runId ? runningServicesOf(runId) : [];
+  const slot = screen.querySelector(slotSel);
+  if (slot) {
+    const pill = renderRunPill(list, { doc: document, onClick });
+    slot.replaceChildren(...(pill ? [pill] : []));
+  }
+  const tab = screen.querySelector(tabSel);
+  if (tab) {
+    const on = list.length > 0;
+    const dot = tab.querySelector('.tab-dot');
+    if (on && !dot) { const d = document.createElement('span'); d.className = 'tab-dot'; tab.appendChild(d); }
+    else if (!on && dot) dot.remove();
+  }
+}
+function paintHistCardActions(node, p) {
+  const box = node.querySelector('.hist-actions-badges');
+  if (!box) return;
+  box.replaceChildren(...historyActionBadges(p, state.actionsRunning || []).map((b) => {
+    const s = document.createElement('span'); s.className = b.cls; s.textContent = b.text; return s;
+  }));
+}
+function paintHistActionBadges() {
+  for (const node of document.querySelectorAll('.hist-card[data-pipeline-id]')) {
+    const p = histActionEntries.get(node);
+    if (p) paintHistCardActions(node, p);
+  }
+}
+
+// ---- Ship It "Try it first" ----
+// Follows loadShipItRemotes: every await re-checks the generation, and nothing here ever
+// blocks .shipit-ok.
+async function paintShipItTry(modal, record, gen, isClosed) {
+  const box = modal.querySelector('.shipit-try');
+  if (!box) return;
+  box.hidden = true;
+  box.replaceChildren();
+  const scope = runActionQuery(record.projectDir, record).toString();
+  const call = (method, tail, body) => actionsCall(method, actionsRunUrl(record.id, tail, scope), body);
+  const repaint = async () => {
+    if (gen !== shipItRemotesGen || isClosed()) return;   // a closed dialog stops following actions-changed
+    const r = await call('GET', '/actions');
+    if (gen !== shipItRemotesGen || isClosed()) return;
+    if (!r.ok) { box.hidden = true; box.replaceChildren(); return; }
+    actionsModelCache.set(record.id, r.data);
+    paintActionsStrips(record.id);
+    const node = renderShipItStrip(r.data, { doc: document, handlers });
+    box.replaceChildren(...(node ? [node] : []));
+    box.hidden = !node;
+  };
+  const handlers = {
+    onCheckout: async (members) => { await call('POST', '/checkout', members ? { members } : {}); await repaint(); },
+    onStart: async (member, actionId) => { await call('POST', `/actions/${encodeURIComponent(actionId)}/start`, { member }); await repaint(); },
+    onBuiltin: async (member, key) => { await call('POST', `/builtins/${encodeURIComponent(key)}`, { member }); },
+    onStop: async (member, actionId) => { await call('POST', `/actions/${encodeURIComponent(actionId)}/stop`, { member }); await repaint(); },
+  };
+  box.dataset.runId = record.id;
+  box.__repaint = repaint;                       // refreshActionsStrips() calls it on actions-changed
+  await repaint();
+}
+
+// ---- project / workspace Actions tabs ----
+function actionsTabError(sec, text) {
+  const p = document.createElement('p'); p.className = 'hint err'; p.textContent = text;
+  sec.replaceChildren(p);
+}
+function actionsSaveMsg(root, text, kind) {
+  let msg = root.querySelector('.act-save-msg');
+  if (!msg) { msg = document.createElement('small'); root.appendChild(msg); }
+  msg.className = `hint act-save-msg${kind ? ` ${kind}` : ''}`;
+  msg.textContent = text || '';
+}
+async function buildPdActions(sec, key) {
+  sec.classList.add('pd-sec-actions');
+  const url = `/api/projects/${encodeURIComponent(key)}/actions`;
+  const r = await actionsCall('GET', url);
+  if (!r.ok) { actionsTabError(sec, r.data?.error || 'Could not load actions.'); return; }
+  const onTry = async (actionId, btn) => {
+    btn.disabled = true;
+    const t = await actionsCall('POST', `${url}/${encodeURIComponent(actionId)}/try`, {});
+    btn.disabled = false;
+    if (t.ok) { location.hash = hdHash({ projectKey: t.data.histKey, id: t.data.runId }, 'details', 'actions'); return; }
+    btn.title = t.data?.code === 'NO_FINISHED_RUN' ? 'No finished run yet' : (t.data?.error || `HTTP ${t.status}`);
+    actionsSaveMsg(sec, btn.title, 'err');
+  };
+  const onSave = async (cfg) => {
+    actionsSaveMsg(sec, 'Saving…');
+    const s = await actionsCall('PUT', url, cfg);
+    if (!s.ok) { actionsSaveMsg(sec, s.data?.field ? `${s.data.field}: ${s.data.error}` : (s.data?.error || `HTTP ${s.status}`), 'err'); return; }
+    actionsSaveMsg(sec, 'Saved.');
+  };
+  sec.replaceChildren(renderProjectActionsEditor(r.data.config, { doc: document, detected: r.data.detected, onSave, onTry }));
+}
+async function buildWdActions(sec, id) {
+  sec.classList.add('pd-sec-actions');
+  const url = `/api/workspaces/${encodeURIComponent(id)}/actions`;
+  const r = await actionsCall('GET', url);
+  if (!r.ok) { actionsTabError(sec, r.data?.error || 'Could not load stacks.'); return; }
+  const onSave = async (body) => {
+    actionsSaveMsg(sec, 'Saving…');
+    const s = await actionsCall('PUT', url, body);
+    if (!s.ok) { actionsSaveMsg(sec, s.data?.field ? `${s.data.field}: ${s.data.error}` : (s.data?.error || `HTTP ${s.status}`), 'err'); return; }
+    actionsSaveMsg(sec, 'Saved.');
+  };
+  sec.replaceChildren(renderStackEditor(r.data, { doc: document, onSave }));
+}
+
+// ---- Settings › Runs › Actions ----
+function paintActionsSettings(data) {
+  const a = (data && data.actions) || {};
+  const set = (id, v) => { const n = document.getElementById(id); if (n) n.value = v ?? ''; };
+  set('act-keep', a.keep || 'never');
+  set('act-port-low', a.portLow);
+  set('act-port-high', a.portHigh);
+  set('act-editor', a.editor);
+  set('act-terminal', a.terminal);
+  set('act-max', a.maxCheckouts);
+}
+function saveActionsSettings(actions) {
+  return postSettingsCard({ actions }, {
+    setMsg: (t, k) => setHintMsg('actSettingsMsg', t, k), paint: paintActionsSettings });
+}
+function readActionsSettingsForm() {
+  const val = (id) => (document.getElementById(id)?.value ?? '').trim();
+  const num = (id) => (val(id) === '' ? null : Number(val(id)));   // blank -> null clears the key
+  return { keep: val('act-keep') || 'never', portLow: num('act-port-low'), portHigh: num('act-port-high'),
+    editor: val('act-editor'), terminal: val('act-terminal'), maxCheckouts: num('act-max') };
+}
+document.getElementById('act-save')?.addEventListener('click', () => saveActionsSettings(readActionsSettingsForm()));
+document.getElementById('act-reset')?.addEventListener('click', () => saveActionsSettings(
+  { keep: null, portLow: null, portHigh: null, editor: null, terminal: null, maxCheckouts: null }));
 
 const scriptsApi = {
   async list() {
@@ -16663,6 +16987,8 @@ function buildHistCard(projectDir, p, ghAvailable = false) {
   // patchHistoryPr / finalizeHistoryPr locate cards by BOTH stamps.
   node.dataset.pipelineId = id;
   node.dataset.projectKey = p.projectKey || '';
+  histActionEntries.set(node, p);
+  paintHistCardActions(node, p);
 
   paintHistStatusIcon(node.querySelector('.hist-sic'), p);
   const { word, family } = histStatusMeta(p);
@@ -17228,6 +17554,7 @@ function openHistDetail(parsed, { instant = false } = {}) {
   const record = histRecordFor(parsed);
   histDetailState = { key: parsed.projectKey, id: parsed.id, record, data: null, screen: null };
 
+  destroyActionsIn(host);                   // the old screen's Actions controller stops following frames
   destroyGraphMounts(host);                 // a detail->detail hop never passes closeHistDetail
   host.innerHTML = '';
   host.scrollTop = 0;                       // a prior visit's scroll must not carry over
@@ -17276,6 +17603,7 @@ function openHistDetail(parsed, { instant = false } = {}) {
   const ship = pendingShipIt;
   pendingShipIt = null;
   loadHistDetailScreen(screen, record, parsed, ship);
+  paintActionsHeaders();
 }
 
 // Double rAF: one frame is not always enough for the browser to commit the
@@ -17299,6 +17627,7 @@ function closeHistDetail({ instant = false } = {}) {
   const host = el.histDetail;
   if (!shell || !host) return;
   if (!shell.classList.contains('detail-open')) { histDetailState = null; hdCommentState = null; return; }
+  destroyActionsIn(host);
   histDetailState = null;
   hdCommentState = null;
   host.setAttribute('aria-hidden', 'true');
@@ -17804,6 +18133,7 @@ function openShipItModal(record, data) {
   document.addEventListener('keydown', onKey);
   descBox.addEventListener('click', onDescClick);
   loadShipItRemotes(modal, record, gen, () => closed);
+  paintShipItTry(modal, record, gen, () => closed);
 }
 
 // THE single PR-eligibility predicate. Every caller uses it: paintHdPr (below),
@@ -18562,6 +18892,7 @@ const HD_TAB_ICONS = {
   clarify: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4.5h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-6.5L8 21v-3.5H5a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z" stroke-linejoin="round"/><path d="M9.9 9.1a2.2 2.2 0 1 1 3.2 2c-.7.4-1.1.9-1.1 1.6M12 14.9h.01" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   logs: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h16M4 12h16M4 18h10" stroke-linecap="round"/></svg>',
   artifacts: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 8l9-4 9 4-9 4-9-4z" stroke-linejoin="round"/><path d="M3 8v8l9 4 9-4V8" stroke-linejoin="round"/><path d="M12 12v8" stroke-linecap="round"/></svg>',
+  actions: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5l11 7-11 7z"></path></svg>',
 };
 
 // Per-screen tab state, keyed by the SCREEN element. The cells + activate() pair
@@ -18696,8 +19027,8 @@ const HD_TABS = [
   // counted in filesDeleted, so adding filesDeleted double-counts every deletion
   // against the rendered file list.
   // ONE order on both run pages (RD_TABS matches), in the order a reader asks: what did
-  // it produce (Overview · Diff · Artifacts), then how did it get there, coarse to fine
-  // (Workflow · Q&A · Logs · Agents). "Details ›" opens the first shown tab; the trail
+  // it produce (Overview · Diff · Artifacts), what can I do with it (Actions), then how did it
+  // get there, coarse to fine (Workflow · Q&A · Logs · Agents). "Details ›" opens the first shown tab; the trail
   // opens Workflow.
   { key: 'overview', label: 'Overview', level: 'simple', badge: () => null, visible: () => true, build: (...a) => buildHdOverview(...a) },
   { key: 'diff', label: 'Diff', level: 'advanced',
@@ -18715,6 +19046,8 @@ const HD_TABS = [
     },
     visible: (d) => Array.isArray(d.artifacts) && d.artifacts.some(isDisplayableArtifact),
     build: (...a) => buildHdArtifacts(...a) },
+  { key: 'actions', label: 'Actions', level: 'advanced', badge: () => null, visible: () => true,
+    build: (...a) => buildHdActions(...a) },
   // The graph, moved off the page body into its own tab (as on the Running page).
   // loadHistDetailScreen paints it into `.hd-graph` before the tabs exist; the builder
   // MOVES that node, so its mounted view, decor and log links come along.
@@ -20248,6 +20581,11 @@ function buildHdOverview(sec, record, data) {
     verdict.append(chip, document.createTextNode(' No review results captured — the run did not complete.'));
   }
   wrap.appendChild(verdict);
+  if (isTerminalStatus(record.status)) {
+    const strip = document.createElement('div'); strip.className = 'act-strip'; tagLevel(strip, 'advanced');
+    wrap.appendChild(strip);
+    paintActionsStrip(strip, record.id, runActionQuery(record.projectDir, record).toString());
+  }
   if (checks.length) wrap.appendChild(issueList(checks.map((c) => ({ ...c, origin: 'review' }))));
 
   // 2) Stat cards.
@@ -20632,7 +20970,7 @@ const RD_WORKFLOW_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="
 // not here.
 const RD_TABS = [
   // The same order as History's HD_TABS: results first, then the process —
-  // Overview · Diff · Artifacts · Workflow · Q&A · Logs · Agents.
+  // Overview · Diff · Artifacts · Actions · Workflow · Q&A · Logs · Agents.
   {
     key: 'overview', label: 'Overview', icon: HD_TAB_ICONS.overview, level: 'simple',
     badge: () => null, visible: () => true,
@@ -20653,6 +20991,11 @@ const RD_TABS = [
     },
     visible: () => true,
     build: (sec, ctx) => buildRdArtifacts(sec, ctx),
+  },
+  {
+    key: 'actions', label: 'Actions', icon: HD_TAB_ICONS.actions, level: 'advanced',
+    badge: () => null, visible: () => true,
+    build: (sec, ctx) => buildRdActions(sec, ctx),
   },
   {
     key: 'workflow', label: 'Workflow', icon: RD_WORKFLOW_ICON, level: 'simple',
@@ -21301,9 +21644,17 @@ function buildRdOverview(sec, ctx) {
   // The Task card is built ONCE and never re-rendered: the prompt cannot change
   // mid-run, and rebuilding it would slam the "Show more" expander shut under the
   // user on every arriving `state` frame.
-  wrap.append(banner, grid, rdOvTask(ctx.run));
+  // Actions strip: terminal runs only, filled once the run has its pipeline id.
+  const strip = document.createElement('div'); strip.className = 'act-strip'; tagLevel(strip, 'advanced');
+  strip.hidden = true;
+  wrap.append(banner, strip, grid, rdOvTask(ctx.run));
   sec.appendChild(wrap);
-  const paint = (c) => { rdOvStateBanner(banner, c.run); rdOvStats(grid, c.run); };
+  const paintStrip = (run) => {
+    const on = isTerminalStatus(run.status) && !!run.pipelineId;
+    strip.hidden = !on;
+    if (on && strip.dataset.runId !== run.pipelineId) paintActionsStrip(strip, run.pipelineId, rdScopeQuery(run));
+  };
+  const paint = (c) => { rdOvStateBanner(banner, c.run); paintStrip(c.run); rdOvStats(grid, c.run); };
   paint(ctx);
   sec.__update = paint;
 }
@@ -21474,6 +21825,7 @@ function rdUpdateSections(r) {
     if (typeof sec.__update === 'function') sec.__update(ctx);
   }
   rdPaintTabBadges(screen, ctx);
+  paintActionsHeaders();   // the pill needs the run's pipeline id, which arrives with state frames
 }
 
 // One arriving log record, straight into the open detail's pane. A full
@@ -23756,6 +24108,7 @@ function openRunDetail(runId, { instant = false } = {}) {
   const shell = el.runShell;
   if (!host || !shell) return;
 
+  destroyActionsIn(host);                   // the old screen's Actions controller stops following frames
   destroyGraphMounts(host);                 // a detail->detail hop never passes closeRunDetail
   host.innerHTML = '';
   host.scrollTop = 0;                       // a prior visit's scroll must not carry over
@@ -23859,6 +24212,7 @@ function closeRunDetail({ instant = false } = {}) {
   // card, and routeRunDetail('') calls this on every plain `#running` route — so
   // calling it above the detail-open guard would dismiss a list-owned modal.
   closeStopModal();
+  destroyActionsIn(host);
   const runId = runDetailState.runId;
   runDetailState = { runId: '', screen: null };
   host.setAttribute('aria-hidden', 'true');
@@ -24064,7 +24418,7 @@ function rdSheetRow({ label, detail = '', value = '', tab = '', state = '', icon
 // produced, then how it ran. Each row is named like its tab, carries its icon and
 // previews its content: `values[key]`, else the tab's own badge with a unit.
 const ACTIVITY_GROUPS = [
-  ['Results', ['overview', 'diff', 'artifacts']],
+  ['Results', ['overview', 'diff', 'artifacts', 'actions']],
   ['How it ran', ['workflow', 'qa', 'clarify', 'logs', 'agents']],
 ];
 const ACTIVITY_UNITS = { diff: 'file', qa: 'question', clarify: 'question', agents: 'agent' };

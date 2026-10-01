@@ -130,6 +130,9 @@
           <!-- Who this browser is signed in as (GET /api/whoami). Filled only behind an
                identity proxy or an operator-set name; a local install never shows it. -->
           <div class="side-who" id="side-who" hidden><span class="side-who-label">Signed in as</span> <span class="side-who-name"></span></div>
+          <!-- Running actions (issue #529): its own mount, since paintBudget replaces #side-spend's children.
+               Not level-gated: it shows only while a service runs, and it must stay stoppable. -->
+          <div id="side-actions" class="side-actions" hidden aria-label="Running actions"></div>
           <div id="side-spend"></div>
           <button type="button" class="side-toggle" id="side-toggle"
                   aria-expanded="true" aria-controls="side-rail"
@@ -635,6 +638,7 @@
                     <h2 class="rd-title"></h2>
                     <span class="auto-badge" hidden></span>
                     <span class="rd-status pill-run"><span class="pdot"></span><span class="rd-status-word"></span></span>
+                    <span class="act-pill-slot"></span>
                   </div>
                   <div class="rd-meta mono"></div>
                   <div class="rd-row3">
@@ -694,6 +698,7 @@
                     <div class="h-meta">
                       <b></b>
                       <span class="badge hist-retained-badge" hidden>Work retained</span>
+                      <span class="hist-actions-badges"></span>
                       <div class="hist-meta-line">
                         <span class="hist-status-word"></span>
                         <!-- Plain <span>s: each segment is typed by its own
@@ -795,6 +800,7 @@
                   <span class="auto-badge" hidden></span>
                   <span class="hist-merge" hidden data-min-level="expert"></span>
                   <button type="button" class="hd-pr" hidden data-min-level="advanced">Create PR</button>
+                  <span class="act-pill-slot"></span>
                   <a class="hd-pr-link" hidden data-min-level="advanced" target="_blank" rel="noopener"></a>
                   <button type="button" class="hd-after btn-ghost" hidden data-min-level="advanced">Schedule a run after this</button>
                 </div>
@@ -1693,6 +1699,28 @@
               <small class="hint" id="schedDefaultsMsg"></small>
             </section>
 
+            <!-- Actions (issue #529): keep policy for finished-run checkouts, the port range for
+                 automatic port variables, editor/terminal overrides and the checkout cap. -->
+            <section class="card settings-card" id="actions-settings-card" data-min-level="advanced">
+              <div class="card-head"><div class="label-row"><h2>Actions</h2>
+                <button type="button" class="info-tip" aria-label="About actions">i<span class="tip-content hidden">
+                  Check out a finished run and run its project's actions from Worca. Actions are off on hosted
+                  deployments unless an administrator enables them.
+                </span></button></div></div>
+              <div class="field"><label for="act-keep">Keep checkouts</label><div class="select-wrap"><select id="act-keep" class="select">
+                <option value="never">Re-create on demand</option><option value="on-success">Keep after a successful run</option>
+                <option value="until-pr">Keep until the PR is merged or closed</option></select></div></div>
+              <div class="field act-port-range"><label for="act-port-low">Ports for automatic port variables</label>
+                <input id="act-port-low" class="input" type="number" min="1024" max="65535" placeholder="4400"> –
+                <input id="act-port-high" class="input" type="number" min="1024" max="65535" placeholder="4499" aria-label="High port"></div>
+              <div class="field"><label for="act-editor">Editor</label><input id="act-editor" class="input" placeholder="Detected automatically"></div>
+              <div class="field"><label for="act-terminal">Terminal</label><input id="act-terminal" class="input" placeholder="Detected automatically"></div>
+              <div class="field"><label for="act-max">Keep at most</label><input id="act-max" class="input" type="number" min="1" max="100" placeholder="No limit"> checkouts (oldest removed first)</div>
+              <div class="add-project-actions"><button type="button" class="btn btn-ghost btn-mini" id="act-reset">Reset</button>
+                <button type="button" class="btn btn-primary btn-mini" id="act-save">Save</button></div>
+              <small class="hint" id="actSettingsMsg"></small>
+            </section>
+
             <section class="card settings-card" id="ws-scan-models-card" data-min-level="advanced">
               <div class="card-head">
                 <div class="label-row">
@@ -2355,6 +2383,7 @@
              .hint.err (:284). .hint sets display:block, so .shipit-err ships an
              explicit [hidden] twin. -->
         <div class="shipit-err hint err" hidden></div>
+        <div class="shipit-try" hidden data-min-level="advanced" aria-label="Try it first"></div>
         <div class="shipit-actions">
           <button type="button" class="shipit-cancel btn-ghost">Cancel</button>
           <button type="button" class="shipit-ok">Open pull request</button>

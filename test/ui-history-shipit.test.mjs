@@ -1052,3 +1052,27 @@ test('every open starts from an empty description on the Write tab', async () =>
   assert.equal(previewOf(modal).hidden, true);
   assert.equal(descErrOf(modal).hidden, true);
 });
+
+// ---------------------------------------------------------------------------
+// Actions (issue #529): "Try it first" follows actions-changed while the dialog is open
+// ---------------------------------------------------------------------------
+
+test('"Try it first" drops Open/Stop when the service stops elsewhere (actions-changed)', async () => {
+  const inst = { instanceId: `act:${ROW.id}:${KEY}:run`, runId: ROW.id, member: KEY, actionId: 'run', label: 'Run', kind: 'service',
+    status: 'ready', ports: { PORT: 4417 }, url: 'http://localhost:4417', startedAt: Date.now() };
+  const model = (instances) => ({ runId: ROW.id, workspace: false, finished: true, enabled: true, stacks: [], stackStates: [], instances,
+    members: [{ projectKey: KEY, projectName: 'Alpha', branch: ROW.branch, checkout: { setup: { status: 'ok' } },
+      actions: [{ id: 'run', label: 'Run', kind: 'service' }], builtins: [] }] });
+  let current = model([inst]);
+  const ctx = await bootShip({ arms: (url) => (url.includes(`/api/runs/${ROW.id}/actions?`) ? ok(current)
+    : url.endsWith('/api/actions/running') ? ok([]) : null) });
+  const modal = await openModal(ctx);
+  await settle(ctx.window, 4);
+  const box = modal.querySelector('.shipit-try');
+  assert.match(box.textContent, /Open :4417/);
+  current = model([{ ...inst, status: 'stopped' }]);
+  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'actions-changed', action: 'stopped' }) });
+  await settle(ctx.window, 4);
+  assert.doesNotMatch(box.textContent, /Open :4417/);
+  assert.ok(![...box.querySelectorAll('button')].some((b) => b.textContent === 'Stop'));
+});

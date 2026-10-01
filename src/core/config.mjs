@@ -26,6 +26,7 @@ import { listPluginModels, allPluginModels, flattenPluginModelEnv } from './plug
 // Team policy defaults (team-policy design §6, §8): read from the discovery CACHE only (a leaf module).
 import { policyCatalogModels, teamDefault } from './policy/cache.mjs';
 import { PREDEFINED_LIST_PRICES } from './list-prices.mjs';
+import { normalizeProjectActions, EMPTY_PROJECT_ACTIONS } from './actions/model.mjs';
 
 /**
  * Recompute the agent step list FRESH from the layered registry (repo agents/ +
@@ -973,7 +974,7 @@ export async function readRunConfig(projectDir) {
   // Forward any OTHER unknown keys verbatim too (future-proof, matches "preserve unknown").
   // prRemotes is the ship-it dialog's own preference (readPrRemotePrefs), not run config.
   for (const [k, v] of Object.entries(extra)) {
-    if (k !== 'webUiTesting' && k !== PR_REMOTES_KEY && k !== TEAM_METRICS_KEY && k !== TEAM_POLICY_KEY && k !== 'humanInLoopSet' && !(k in out)) out[k] = v;
+    if (k !== 'webUiTesting' && k !== PR_REMOTES_KEY && k !== TEAM_METRICS_KEY && k !== TEAM_POLICY_KEY && k !== 'humanInLoopSet' && k !== ACTIONS_KEY && k !== ACTIONS_META_KEY && !(k in out)) out[k] = v;
   }
   const active = row && typeof row.active_workflow_id === 'string' ? row.active_workflow_id.trim() : '';
   // Spec §6.1 / D16: a project with no remembered New-pipeline choice starts on Auto — unless a
@@ -1215,7 +1216,7 @@ export const TEAM_METRICS_KEY = 'teamMetrics';
  */
 function assertProjectKey(key) {
   if (typeof key !== 'string' || !/^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/.test(key)) {
-    throw new TypeError(`team metrics prefs take a projectKey(), not ${JSON.stringify(key)} — did you pass a directory?`);
+    throw new TypeError(`project prefs take a projectKey(), not ${JSON.stringify(key)} — did you pass a directory?`);
   }
   return key;
 }
@@ -1246,6 +1247,53 @@ export function writeTeamMetricsPrefs(key, patch) {
     `).run(key, JSON.stringify(extra));
   });
   return next;
+}
+
+// ── Project actions (project_config.extra.actions / extra.actionsMeta) ─────
+// A project's setup command + actions (issue #529), and the last setup duration
+// used for the checkout estimate. Same KEY-taking contract as the team-metrics pair.
+const ACTIONS_KEY = 'actions';
+const ACTIONS_META_KEY = 'actionsMeta';
+
+/** A project's setup + actions (issue #529). Invalid stored data reads as empty. */
+export function readProjectActions(key) {
+  assertProjectKey(key);
+  const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
+  const extra = row ? parseJson(row.extra, {}) : {};
+  try { return normalizeProjectActions(extra[ACTIONS_KEY] || {}); } catch { return { ...EMPTY_PROJECT_ACTIONS, actions: [] }; }
+}
+
+/** Validate then store; throws ActionConfigError (400) before any write. */
+export function writeProjectActions(key, raw) {
+  assertProjectKey(key);
+  const next = normalizeProjectActions(raw);
+  writeExtraKey(key, ACTIONS_KEY, next);
+  return next;
+}
+
+export function readActionsMeta(key) {
+  assertProjectKey(key);
+  const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
+  const v = row ? parseJson(row.extra, {})[ACTIONS_META_KEY] : null;
+  return v && typeof v === 'object' ? v : {};
+}
+
+export function writeActionsMeta(key, patch) {
+  assertProjectKey(key);
+  writeExtraKey(key, ACTIONS_META_KEY, { ...readActionsMeta(key), ...patch });
+}
+
+function writeExtraKey(key, name, value) {
+  tx(() => {
+    const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
+    const extra = row ? parseJson(row.extra, {}) : {};
+    extra[name] = value;
+    prepare(`
+      INSERT INTO project_config (project_key, steps, custom_models, active_workflow_id, extra)
+      VALUES (?, '{}', '[]', NULL, ?)
+      ON CONFLICT(project_key) DO UPDATE SET extra = excluded.extra
+    `).run(key, JSON.stringify(extra));
+  });
 }
 
 // ── Team-policy preferences (project_config.extra.teamPolicy) ──────────────

@@ -298,3 +298,15 @@ test('detailTabsOf returns null for a screen that was never initialised', async 
   assert.equal(window.__np.detailTabsOf(makeScreen(window, 'rd')), null);
   assert.equal(window.__np.detailTabsOf(null), null);
 });
+
+test('History and the run page list their tabs in one order (Clarify is the run page\'s Q&A)', () => {
+  const app = readFileSync(appPath, 'utf8');
+  const keysOf = (table) => {
+    const start = app.indexOf(`const ${table} = [`);
+    assert.ok(start > 0, `${table} exists`);
+    return [...app.slice(start, app.indexOf('\n];', start)).matchAll(/key: '([a-z-]+)'/g)].map((m) => m[1]);
+  };
+  const hd = keysOf('HD_TABS').map((k) => (k === 'clarify' ? 'qa' : k));
+  assert.deepEqual(hd, keysOf('RD_TABS'));
+  assert.ok(hd.includes('actions'), 'both pages carry the Actions tab');
+});

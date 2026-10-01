@@ -22,7 +22,8 @@ import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { createWorktree } from '../src/core/worktree.mjs';
 import { worcaHome } from '../src/core/projects.mjs';
 import { projectKey } from '../src/core/store.mjs';
-import { readPipelineForResume, readPipelineByKey } from '../src/core/artifacts.mjs';
+import { readPipelineForResume, readPipelineByKey, listPipelines } from '../src/core/artifacts.mjs';
+import { setActionsSettings } from '../src/core/settings.mjs';
 import {
   readRunManifest, updateRunManifest, claudeMdFenceBegin, CLAUDE_MD_FENCE_END,
 } from '../src/core/run-manifest.mjs';
@@ -117,6 +118,38 @@ test('detached: a completed run leaves NO <worcaHome>/runs/<id> behind', async (
     assert.ok(branchList(repo).includes(feature), 'the feature branch is KEPT');
     assert.ok(treeOf(repo, feature).includes('src/feature.mjs'), 'the agent work was committed');
   });
+});
+
+// Keep policy (issue #529, D10): settingsFile() lives under HOME, so repoint HOME/USERPROFILE at a
+// temp dir for the test; otherwise it would rewrite the developer's real settings.json.
+test('detached + keep on-success: a finished run keeps its checkout, protected and recorded', async () => {
+  const repo = await freshRepo();
+  const prevHome = process.env.HOME;
+  const prevProfile = process.env.USERPROFILE;
+  process.env.HOME = process.env.USERPROFILE = await tmp('worca-cc-rrt-home-');
+  try {
+    await setActionsSettings({ keep: 'on-success' });
+    await withMode('detached', async () => {
+      const orch = createOrchestrator({
+        projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
+      });
+      const res = await orch.run();
+      assert.equal(res.status, 'done', JSON.stringify(res));
+      const st = orch.getState();
+      const key = projectKey(repo);
+      const runRoot = join(worcaHome(), 'runs', st.id);
+      assert.ok(existsSync(join(runRoot, 'repos', key)), 'the checkout is re-created at runs/<id>/repos/<key>');
+      assert.equal((await readRunManifest(runRoot))?.retain?.reason, 'checkout');
+      // A later persist of the in-memory state must not erase the targeted checkout stamp.
+      await orch._persist();
+      const entry = (await listPipelines(repo)).find((e) => e.id === st.id);
+      assert.equal(entry?.checkout?.members[0].policy, 'on-success');
+    });
+  } finally {
+    await setActionsSettings({ keep: null });
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
+  }
 });
 
 test('detached: a failed teardown commit retains the worktree + run root and persists the reason', async () => {

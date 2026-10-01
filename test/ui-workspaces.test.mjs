@@ -136,7 +136,8 @@ test('a row click opens the workspace page: slide, header, tabs, focus on Back, 
   const page = doc.querySelector('#ws-detail .pd.wd');
   assert.ok(page, 'the page rides the project page\'s pd- shell');
   assert.equal(page.querySelector('.pd-title').textContent, 'Alpha WS');
-  assert.deepEqual([...page.querySelectorAll('.pd-tab')].map((b) => b.dataset.sec), ['overview', 'map', 'team']);
+  assert.deepEqual([...page.querySelectorAll('.pd-tab')].map((b) => b.dataset.sec), ['overview', 'map', 'team', 'actions']);
+  assert.equal(page.querySelector('.pd-tab[data-sec="actions"]').dataset.minLevel, 'advanced');
   assert.equal(page.querySelector('.pd-tab[data-sec="map"]').dataset.minLevel, 'advanced');
   assert.equal(page.querySelector('.pd-tab[data-sec="team"]').dataset.minLevel, 'expert');
   assert.equal(doc.activeElement, page.querySelector('.pd-back'), 'focus lands on Back');

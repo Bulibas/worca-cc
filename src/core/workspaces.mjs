@@ -21,12 +21,12 @@
 import { realpathSync, statSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
 import { worcaHome, normalizeProjectPath } from './projects.mjs';
 import { canonicalProjectRoot, projectKey, workspaceStorePath } from './store.mjs';
-import { slugify, retainedWorkFor } from './artifacts.mjs';
+import { slugify, retainedWorkFor, checkoutRecordsFor } from './artifacts.mjs';
 import { getDb, prepare, tx } from './db.mjs';
 import { WORKSPACE_MAX_PROJECTS, scanDescriptionBudget } from '../shared/workspace-size.mjs';
 import { KINDS, checkOverrides, checkSynthesis } from '../shared/workspace-map/schema.mjs';
@@ -72,7 +72,7 @@ export const WORKSPACE_KEY_RE = /^wks-[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/;
 
 /** Every workspaces column a read needs (readEntry + listWorkspaces share it). */
 const WORKSPACE_COLUMNS =
-  'id, name, description, metrics_project, policy_project, map_json, map_overrides_json, description_origin, created_at, updated_at';
+  'id, name, description, metrics_project, policy_project, map_json, map_overrides_json, description_origin, actions_json, created_at, updated_at';
 
 /** description_origin values; anything else (NULL = before v40) reads as null. */
 const DESCRIPTION_ORIGINS = new Set(['generated', 'edited']);
@@ -243,6 +243,12 @@ function memberPaths(id) {
   ).all(id).map((r) => r.path);
 }
 
+/** actions_json -> its stacks array (NULL / garbage / no stacks -> []). */
+function parseStacks(text) {
+  if (typeof text !== 'string' || !text) return [];
+  try { const v = JSON.parse(text); return Array.isArray(v?.stacks) ? v.stacks : []; } catch { return []; }
+}
+
 /** Map a workspaces row (+ its member rows) to the persisted entry shape. */
 function rowToEntry(r) {
   return {
@@ -255,6 +261,7 @@ function rowToEntry(r) {
     mapDoc: parseMapDoc(r.map_json),
     overrides: parseOverrides(r.map_overrides_json),
     descriptionOrigin: DESCRIPTION_ORIGINS.has(r.description_origin) ? r.description_origin : null,
+    stacks: parseStacks(r.actions_json),
     createdAt: typeof r.created_at === 'string' ? r.created_at : '',
     updatedAt: typeof r.updated_at === 'string' ? r.updated_at : '',
   };
@@ -265,6 +272,32 @@ function readEntry(id) {
   getDb();
   const r = prepare(`SELECT ${WORKSPACE_COLUMNS} FROM workspaces WHERE id = ?`).get(id);
   return r ? rowToEntry(r) : null;
+}
+
+/** A workspace's stored stacks ([] when none or unknown id). Sync — safe in request handlers. */
+export function readWorkspaceStacks(id) {
+  getDb();
+  return readEntry(id)?.stacks || [];
+}
+
+/** Members as the stack editor and aliases need them: [{projectKey, name, projectDir}], sorted by key. */
+export async function workspaceMembers(id) {
+  const ws = await readWorkspace(id);
+  if (!ws) return null;
+  // projectKey(dir) (store.mjs), not projectKeys[i]: do not rely on the two arrays sharing an order.
+  return ws.projectPaths.map((dir) => ({ projectKey: projectKey(dir), name: basename(dir), projectDir: dir }))
+    .sort((a, b) => a.projectKey.localeCompare(b.projectKey));
+}
+
+/** Replace a workspace's stacks; caller validated them with normalizeStacks. */
+export async function updateWorkspaceStacks(id, stacks) {
+  getDb();
+  if (!readEntry(id)) throw err(`workspace not found: ${id}`, 'NOT_FOUND');
+  tx(() => {
+    prepare('UPDATE workspaces SET actions_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify({ stacks }), new Date().toISOString(), id);
+  });
+  return readEntry(id).stacks;
 }
 
 /**
@@ -735,6 +768,12 @@ export async function deleteWorkspace(id) {
       throw err(
         `workspace has retained uncommitted work (pipeline ${memberRow.id}); recover or discard it first — ` +
         'and copy any retained-work*.patch out of the workspace store before deleting, deletion removes it',
+        'RETAINED_WORKTREE',
+      );
+    }
+    if (checkoutRecordsFor(memberRow)) {
+      throw err(
+        `workspace has a checked-out run (pipeline ${memberRow.id}); discard its checkout first`,
         'RETAINED_WORKTREE',
       );
     }

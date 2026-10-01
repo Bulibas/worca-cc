@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseAllowedHosts, readRemoteAccessConfig, checkRemoteAccessConfig, isRemoteMode,
-  createHostGuard, isInContainer, createIdentityCheck, hostnameOf,
+  createHostGuard, isInContainer, isPeerThisMachine, createIdentityCheck, hostnameOf,
 } from '../src/core/remote-access.mjs';
 import { TEAM, AUD, makeAccessKey, signAccessJwt, certsFetch } from './helpers/access-jwt.mjs';
 
@@ -108,6 +108,16 @@ test('isInContainer needs a loopback peer AND a loopback Host', () => {
   assert.equal(isInContainer(req({ host: 'localhost:4317', peer: '::ffff:127.0.0.1' })), true);
   assert.equal(isInContainer(req({ host: 'localhost:4317', peer: 'fd12::5' })), false, 'cloudflared on the private network');
   assert.equal(isInContainer(req({ host: 'worca-01.example.com', peer: '127.0.0.1' })), false, 'a same-box proxy forwarding the public Host');
+});
+
+test('isPeerThisMachine: own interface addresses (v4, v4-mapped, v6) yes; other peers no', () => {
+  const ifaces = { lo: [{ address: '127.0.0.1' }, { address: '::1' }], eth0: [{ address: '172.17.0.2' }, { address: 'fe80::1' }] };
+  const req = (a) => ({ socket: { remoteAddress: a } });
+  assert.equal(isPeerThisMachine(req('172.17.0.2'), ifaces), true);
+  assert.equal(isPeerThisMachine(req('::ffff:172.17.0.2'), ifaces), true);
+  assert.equal(isPeerThisMachine(req('::1'), ifaces), true);
+  assert.equal(isPeerThisMachine(req('172.17.0.1'), ifaces), false);   // Docker gateway: a person via a published port
+  assert.equal(isPeerThisMachine(req(undefined), ifaces), false);
 });
 
 test('createIdentityCheck reads Cf-Access-Jwt-Assertion', async () => {

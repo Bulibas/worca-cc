@@ -270,3 +270,9 @@ Access.
   its key page, agents never hold a key, and costs are charged to whoever caused them.
 - Desktop features act on the server: the folder picker becomes a text field
   (`WORCA_NO_NATIVE_DIALOG=1`).
+- [Actions](actions.md) are refused (`403 ACTIONS_DISABLED`) unless the server starts with
+  `WORCA_ACTIONS_REMOTE=1`. Check out, Discard, Copy command and editing the actions config keep
+  working; a saved command runs only once actions are on. With agent isolation
+  on, callers inside the box (which could be an agent) can never run or edit actions. Enabling
+  actions means the branch's code, which agents wrote, runs as the server user whenever a person
+  clicks Run. That is the point of the feature, but know it before you turn it on.

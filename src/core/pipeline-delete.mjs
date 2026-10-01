@@ -19,14 +19,14 @@ import { join, isAbsolute } from 'node:path';
 
 import { projectKey, projectStorePath } from './store.mjs';
 import {
-  listArtifacts, readPipelineByKey, persistPrState, retainedWorkFor,
+  listArtifacts, readPipelineByKey, persistPrState, retainedWorkFor, checkoutRecordsFor,
   recordArtifact, appendAudit, findRunDir,
 } from './artifacts.mjs';
 import { worcaHome } from './projects.mjs';
 import { getDb, tx } from './db.mjs';
 import { removeWorktree, snapshotWorktreePatch } from './worktree.mjs';
 import {
-  rmGuarded, readRunManifest, rescueModifiedMounts, scanStrayEntries, copyRunManifestTo,
+  rmGuarded, readRunManifest, rescueModifiedMounts, scanStrayEntries, copyRunManifestTo, RETAIN_REASONS,
 } from './run-manifest.mjs';
 import { branchExists, hasGh, findPrForBranch } from './git-info.mjs';
 import { retainedWorkPatchName } from './results.mjs';
@@ -113,6 +113,7 @@ export async function archivePipeline({ projectDir = null, key = null, workspace
   if (retainedWorkFor(row)) {
     throw err('cannot archive while retained uncommitted work exists; recover it or discard the worktree first', 'RETAINED_WORKTREE');
   }
+  if (checkoutRecordsFor(row)) throw err('cannot archive while the run is checked out; discard the checkout first', 'RETAINED_WORKTREE');
   // The run root is the one thing archive destroys that can still hold retained
   // checkouts (detached members live at runs/<id>/repos/<key>). Resolve it ONCE,
   // here, for the guards below AND the 2b) removal further down.
@@ -143,6 +144,9 @@ export async function archivePipeline({ projectDir = null, key = null, workspace
     const guardManifest = await readRunManifest(runRoot);
     const members = Array.isArray(guardManifest?.retain?.members) ? guardManifest.retain.members : [];
     if (members.some((m) => m?.worktreeDir && existsSync(m.worktreeDir))) {
+      if (guardManifest.retain.reason === RETAIN_REASONS.CHECKOUT) {
+        throw err('cannot archive while the run is checked out; discard the checkout first', 'RETAINED_WORKTREE');
+      }
       throw err('cannot archive while retained uncommitted work exists; recover it or discard the worktree first', 'RETAINED_WORKTREE');
     }
   }
