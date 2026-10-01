@@ -48,7 +48,8 @@ export function contextEntries(ctx, header) {
 const valid = (e) => e && typeof e === 'object' && KINDS.has(e.kind) && nonEmpty(e.id) && typeof e.label === 'string';
 
 /** Accumulate: existing order kept (origin first), new kind:id appended, label refreshed
- *  (an id-only fallback label never replaces a real one), pinned sticky (OR). A corrupt stored value degrades to []. Over the cap: origin + newest. */
+ *  (an id-only fallback label never replaces a real one), pinned sticky (OR). A corrupt stored value degrades to [].
+ *  Over the cap: the origin stays, then chat chips are dropped before page chips, oldest first. */
 export function mergeContexts(existing, incoming) {
   const list = (Array.isArray(existing) ? existing : []).filter(valid).map((e) => ({ ...e }));
   const at = new Map(list.map((e, i) => [`${e.kind}:${e.id}`, i]));
@@ -66,7 +67,18 @@ export function mergeContexts(existing, incoming) {
       list.push({ ...e });
     }
   }
-  return list.length > MAX_CONTEXTS ? [list[0], ...list.slice(-(MAX_CONTEXTS - 1))] : list;
+  return capContexts(list);
+}
+
+/** Over the cap the origin always stays; chat chips go before page chips, oldest first. */
+function capContexts(list) {
+  const over = list.length - MAX_CONTEXTS;
+  if (over <= 0) return list;
+  const drop = new Set();
+  const pick = (want) => { for (let i = 1; i < list.length && drop.size < over; i++) if (want(list[i])) drop.add(i); };
+  pick((e) => e.source === 'chat');
+  pick(() => true);
+  return list.filter((_, i) => !drop.has(i));
 }
 
 // ── conversation chips ──
@@ -121,9 +133,10 @@ export function mentionedRefs(summary) {
   for (const b of Array.isArray(s.blocks) ? s.blocks : []) {
     if (b && b.kind === 'tool') refs.push(...toolRefs(b));
   }
+  // Capped: the server resolves each ref before ask-done, and the thread never holds more chips than this.
   const seen = new Set();
   return refs.filter((r) => {
     const k = `${r.kind}:${r.id}`;
     return seen.has(k) ? false : seen.add(k);
-  });
+  }).slice(0, MAX_CONTEXTS);
 }

@@ -142,3 +142,27 @@ test('mergeContexts: a page sighting wins over a chat one, both ways', () => {
   assert.deepEqual(mergeContexts([], [chat]), [chat], 'a new chat chip keeps its source');
   assert.deepEqual(mergeContexts([chat], [{ ...chat, label: 'Fix login v2' }]), [{ ...chat, label: 'Fix login v2' }]);
 });
+
+test('mergeContexts: over the cap, chat chips go first (oldest first), page chips and the pin survive', () => {
+  const page = [
+    { kind: 'page', id: 'settings', label: 'Settings' },
+    { kind: 'workspace', id: 'wks-havn-0000abcd', label: 'havn', pinned: true },
+    { kind: 'project', id: 'p-00000001', label: 'p' },
+  ];
+  const chat = (i) => ({ kind: 'run', id: i.toString(16).padStart(8, '0'), label: `r${i}`, home: 'p-00000001', source: 'chat' });
+  const m = mergeContexts(page, Array.from({ length: 25 }, (_, i) => chat(i)));
+  assert.equal(m.length, MAX_CONTEXTS);
+  assert.deepEqual(m.slice(0, 3), page, 'every page chip kept, in place');
+  assert.deepEqual(m.slice(3).map((c) => c.label), Array.from({ length: MAX_CONTEXTS - 3 }, (_, i) => `r${i + 25 - (MAX_CONTEXTS - 3)}`), 'the newest chat chips');
+  const more = mergeContexts(m, [{ kind: 'page', id: 'team-policy', label: 'Team policy' }]);
+  assert.equal(more.length, MAX_CONTEXTS);
+  assert.equal(more.at(-1).id, 'team-policy', 'a new page chip evicts a chat chip');
+  assert.equal(more.filter((c) => !c.source).length, 4);
+});
+
+test('mentionedRefs: at most MAX_CONTEXTS refs, the first ones (the server resolves each before ask-done)', () => {
+  const text = Array.from({ length: 30 }, (_, i) => `#history/p-00000001/${i.toString(16).padStart(8, '0')}`).join(' ');
+  const refs = mentionedRefs({ text, blocks: [] });
+  assert.equal(refs.length, MAX_CONTEXTS);
+  assert.equal(refs[0].id, '00000000');
+});
