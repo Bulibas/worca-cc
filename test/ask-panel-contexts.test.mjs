@@ -113,3 +113,45 @@ test('history rows: at most 3 display-only chips + overflow; clicking a chip ope
   assert.equal(ctx.window.location.hash, '', 'no navigation from a history chip');
   ctx.panel.destroy();
 });
+
+test('chat chips: is-mentioned styling and title in the header (links) and History rows; pinned stays page-only', async () => {
+  const mentioned = [
+    { kind: 'project', id: 'worca-cc-ace1a602', label: 'worca-cc' },
+    { kind: 'run', id: '5e6f7081', label: 'Fix login', home: 'worca-cc-ace1a602', source: 'chat' },
+  ];
+  const state = { threads: [thread({ contexts: mentioned })], thread: thread({ contexts: mentioned }) };
+  const ctx = makePanel({ fetchHandler: handler(state) });
+  await openThread(ctx);
+  const chips = [...ctx.doc.querySelectorAll('[data-ask-ctx-row] .ask-ctx-chip')];
+  assert.ok(!chips[0].classList.contains('is-mentioned'), 'a page chip is not a mentioned one');
+  assert.ok(chips[1].classList.contains('is-mentioned'));
+  assert.ok(!chips[1].classList.contains('is-pinned'));
+  assert.match(chips[1].title, /Mentioned in this chat/);
+  assert.doesNotMatch(chips[0].title, /Mentioned/);
+  assert.equal(chips[1].getAttribute('href'), '#history/worca-cc-ace1a602/5e6f7081', 'routes like a page chip');
+  ctx.doc.querySelector('[data-ask-threads-btn]').click();
+  await ctx.tick(); await ctx.tick(); await ctx.tick();
+  const rowChips = [...ctx.doc.querySelectorAll('.ask-thread-row .ask-thread-ctx .ask-ctx-chip')];
+  assert.deepEqual(rowChips.map((c) => c.classList.contains('is-mentioned')), [false, true]);
+  ctx.panel.destroy();
+});
+
+test('ask-done contexts repaint the header row; a frame without them keeps what is shown', async () => {
+  const state = { threads: [thread({ contexts: CONTEXTS.slice(0, 1) })], thread: thread({ contexts: CONTEXTS.slice(0, 1) }) };
+  const ctx = makePanel({ fetchHandler: handler(state) });
+  await openThread(ctx);
+  const ids = () => [...ctx.doc.querySelectorAll('[data-ask-ctx-row] .ask-ctx-chip')].map((c) => c.dataset.kind);
+  assert.deepEqual(ids(), ['project']);
+  const done = (seq, over = {}) => ({ type: 'ask-done', threadId: TID, messageId: 'msg_00000002', seq, text: 'ok', blocks: [], usage: null,
+    costUsd: null, durationMs: 1, model: 'm', status: 'done', threadTotals: null, ...over });
+  ctx.panel.pushServerFrame({ type: 'ask-start', threadId: TID, messageId: 'msg_00000002', seq: 1, userMessageId: 'msg_00000001', model: 'm', effort: 'high', startedAt: 't' });
+  ctx.panel.pushServerFrame(done(2, { contexts: [CONTEXTS[0], { kind: 'run', id: '5e6f7081', label: 'Fix login', home: 'worca-cc-ace1a602', source: 'chat' }] }));
+  ctx.flush();
+  assert.deepEqual(ids(), ['project', 'run']);
+  assert.ok(ctx.doc.querySelector('[data-ask-ctx-row] .ask-ctx-chip.is-mentioned'));
+  ctx.panel.pushServerFrame({ type: 'ask-start', threadId: TID, messageId: 'msg_00000003', seq: 3, userMessageId: 'msg_00000001', model: 'm', effort: 'high', startedAt: 't' });
+  ctx.panel.pushServerFrame(done(4, { messageId: 'msg_00000003' }));         // an older server omits contexts
+  ctx.flush();
+  assert.deepEqual(ids(), ['project', 'run']);
+  ctx.panel.destroy();
+});

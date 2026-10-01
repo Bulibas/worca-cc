@@ -4999,6 +4999,7 @@ a.ask-ctx-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-ctx-chip.is-pinned{background:var(--violet-bg);color:var(--violet-ink);border-color:transparent;font-weight:600;}
 .ask-ctx-kind{font-family:var(--mono);font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-3);}
 .ask-ctx-chip.is-pinned .ask-ctx-kind{color:inherit;opacity:.75;}
+.ask-ctx-chip.is-mentioned{background:transparent;border:1px dashed var(--line-2);}
 .ask-ctx-name{min-width:0;overflow:hidden;text-overflow:ellipsis;}
 .ask-icon-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;padding:0;
   border:0;border-radius:9px;background:transparent;color:var(--ink-2);cursor:pointer;transition:.15s;}

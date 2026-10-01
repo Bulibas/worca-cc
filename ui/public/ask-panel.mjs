@@ -1371,13 +1371,15 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
    *  otherwise a plain span (history rows: the row itself is the click target). */
   function contextChip(c, { link }) {
     const href = link ? contextHref(c) : null;
-    const chip = make(href ? 'a' : 'span', `ask-ctx-chip${c.pinned ? ' is-pinned' : ''}`);
+    // A chip the conversation produced (source 'chat') is drawn as mentioned; only a page chip is ever pinned.
+    const mentioned = c.source === 'chat';
+    const chip = make(href ? 'a' : 'span', `ask-ctx-chip${mentioned ? ' is-mentioned' : c.pinned ? ' is-pinned' : ''}`);
     chip.dataset.kind = c.kind;
-    if (c.pinned) chip.appendChild(svgIcon(ICONS.pin, 11, 2));
+    if (c.pinned && !mentioned) chip.appendChild(svgIcon(ICONS.pin, 11, 2));
     const prefix = CTX_KINDS[c.kind];
     if (prefix) chip.appendChild(make('span', 'ask-ctx-kind', prefix));
     chip.appendChild(make('span', 'ask-ctx-name', c.label || c.id));
-    chip.title = `${prefix ? `${prefix} ${c.id} — ` : ''}${c.label || c.id}${c.pinned ? ' (pinned)' : ''}`;
+    chip.title = `${prefix ? `${prefix} ${c.id} — ` : ''}${c.label || c.id}${mentioned ? ' (Mentioned in this chat)' : c.pinned ? ' (pinned)' : ''}`;
     if (href) {
       chip.setAttribute('href', href);
       chip.addEventListener('click', (ev) => {
@@ -4320,6 +4322,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     }
     if (frame.type === 'ask-done' || frame.type === 'ask-error') {
       stopElapsed(); updateSendStop(); announce('answer finished');
+      // Conversation chips: the turn's resolved list rides ask-done (an older server omits it: keep what is shown).
+      if (frame.type === 'ask-done' && Array.isArray(frame.contexts)) renderContextChips(frame.contexts);
       // P4: a finished turn may have created/removed/navigated worktrees. This must
       // NOT live in updateSendStop() — that also runs from loadThread, so a
       // running→idle latch there fires a SECOND snapshot GET on every resync.
