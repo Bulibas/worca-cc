@@ -774,3 +774,18 @@ test('web section: other hosts go through a card and the turn ends; any-host and
   const any = renderWebSection({ enabled: true, allowedDomains: ['*'], search: null });
   assert.match(any, /any public host/); assert.ok(!/propose_web_access with the URL/.test(any));
 });
+
+test('#527 branches: rule 1 lists list_branches; rule 7 says what fetches and how to treat stale data', () => {
+  const lines = ASK_SYSTEM_RULES.split('\n');
+  const rule1 = lines.find((l) => l.startsWith('1.'));
+  assert.ok(rule1.includes('(list_projects, list_branches, list_workflows,'), 'rule 1: right after list_projects');
+  const rule7 = lines.find((l) => l.startsWith('7.'));
+  assert.ok(rule7.includes('list_branches'));
+  assert.ok(rule7.includes('<remote>/<name>'));
+  assert.ok(rule7.includes('stale'));
+  assert.ok(rule7.includes('fetchedAt'));
+  assert.ok(!rule7.includes('identical to you running fetch yourself'), 'the old fetch clause is reworded');
+  assert.ok(rule7.includes('nothing else you can run mutates the repository; push, pull and commits are impossible.'));
+  assert.ok(lines.find((l) => l.startsWith('9.')), 'rule 9 is still one line of its own');
+  assert.equal(lines.filter((l) => l.startsWith('7.')).length, 1);
+});

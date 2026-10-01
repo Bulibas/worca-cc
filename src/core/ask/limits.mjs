@@ -43,6 +43,9 @@ export const ASK_LIMITS = Object.freeze({
   attachmentReadDefaultBytes: 32_000,
   attachmentReadMaxBytes: 200_000,
   artifactsListMaxLimit: 200,
+  branchListMaxRows: 200,                  // list_branches rows in all (a workspace shares them across members, #527)
+  branchListMaxBytes: 60_000,              // list_branches whole-result byte cap (= diffDefaultBytes)
+  branchListWorkspaceMs: 15_000,           // list_branches workspace fan-out: past this, members are read without a fetch
   artifactReadDefaultBytes: 60_000,
   artifactReadMaxBytes: 200_000,
   // Scripts in the chat (scripts-workbench-design.md §9.1). The store's own caps (source

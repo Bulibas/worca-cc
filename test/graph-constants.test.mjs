@@ -76,8 +76,8 @@ test('id shapes: minted ids and the seed graphs both match', () => {
   for (const id of ['Task', 'in-1', 'in_1', '1in', '', 'x'.repeat(33)]) assert.doesNotMatch(id, PORT_ID_RE);
 });
 
-test('BOOKEND_EXECUTION_IDS names the two bookend ledger rows, frozen', () => {
-  assert.deepEqual([...BOOKEND_EXECUTION_IDS], ['x:preflight:1', 'x:done:1']);
+test('BOOKEND_EXECUTION_IDS names the bookend ledger rows (preflight first), frozen', () => {
+  assert.deepEqual([...BOOKEND_EXECUTION_IDS], ['x:preflight:1', 'x:done:1', 'x:sync:1']);
   assert.ok(Object.isFrozen(BOOKEND_EXECUTION_IDS));
 });
 

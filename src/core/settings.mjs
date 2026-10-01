@@ -934,6 +934,7 @@ export const SETTINGS_POST_KEYS = Object.freeze([
   'memoryDefrag',                            // Settings › Memory: the defragment model + effort
   'workspaceScan',                           // Settings › Runs › Workspaces: the scan's models
   'schedule',                                // scheduled-run defaults { graceMin, ifMissed, maxFailures }
+  'sync',                                    // sync before run (#527) { beforeRun, remote, refreshMinutes, onDiverged }
 ]);
 
 // ── Title-generation model + hidden built-ins (#422) ─────────────────────────
@@ -1838,4 +1839,48 @@ export async function setScheduleDefaults(patch = {}) {
   if (has('maxFailures')) put('scheduleMaxFailures', patch.maxFailures);
   await persistSettings(settings);
   return scheduleDefaults();
+}
+
+// ── Sync before run (#527) ─────────────────────────────────────────────────
+export const SYNC_ON_DIVERGED = Object.freeze(['ask', 'origin', 'fail']);
+export const DEFAULT_SYNC_SETTINGS = Object.freeze({ beforeRun: true, remote: 'origin', refreshMinutes: 10, onDiverged: 'ask' });
+const SYNC_REMOTE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+
+/** Merge `v` over `base`, keeping only valid keys. Pure. */
+export function normalizeSyncSettings(v, base = DEFAULT_SYNC_SETTINGS) {
+  const o = v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  return {
+    beforeRun: typeof o.beforeRun === 'boolean' ? o.beforeRun : base.beforeRun,
+    remote: typeof o.remote === 'string' && SYNC_REMOTE_RE.test(o.remote) ? o.remote : base.remote,
+    refreshMinutes: Number.isInteger(o.refreshMinutes) && o.refreshMinutes >= 0 && o.refreshMinutes <= 1440 ? o.refreshMinutes : base.refreshMinutes,
+    onDiverged: SYNC_ON_DIVERGED.includes(o.onDiverged) ? o.onDiverged : base.onDiverged,
+  };
+}
+export function syncDefaults() { return normalizeSyncSettings(readSettings().sync); }
+
+/** @throws {Error} on anything but a partial, valid sync object (null / '' resets; a null key resets that key). */
+export function assertSyncSettingsInput(patch) {
+  if (patch === null || patch === '') return;
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('sync must be an object');
+  for (const k of Object.keys(patch)) if (!Object.hasOwn(DEFAULT_SYNC_SETTINGS, k)) throw new Error(`unknown sync setting: ${k}`);
+  const set = (k) => k in patch && patch[k] !== null;
+  if (set('beforeRun') && typeof patch.beforeRun !== 'boolean') throw new Error('sync.beforeRun must be true or false');
+  if (set('remote') && !(typeof patch.remote === 'string' && SYNC_REMOTE_RE.test(patch.remote))) throw new Error('sync.remote must be a remote NAME (e.g. origin), never a URL');
+  if (set('refreshMinutes') && !(Number.isInteger(patch.refreshMinutes) && patch.refreshMinutes >= 0 && patch.refreshMinutes <= 1440)) throw new Error('sync.refreshMinutes must be an integer 0–1440 (0 = never)');
+  if (set('onDiverged') && !SYNC_ON_DIVERGED.includes(patch.onDiverged)) throw new Error(`sync.onDiverged must be one of ${SYNC_ON_DIVERGED.join(' | ')}`);
+}
+export async function setSyncDefaults(patch) {
+  assertSyncSettingsInput(patch);
+  const settings = readSettings();
+  if (patch === null || patch === '') delete settings.sync;
+  else {
+    // Store only the keys someone set: a key left out follows the built-in default as it changes.
+    const prev = settings.sync && typeof settings.sync === 'object' && !Array.isArray(settings.sync) ? settings.sync : {};
+    const next = {};
+    for (const k of Object.keys(DEFAULT_SYNC_SETTINGS)) if (Object.hasOwn(prev, k)) next[k] = normalizeSyncSettings(prev)[k];
+    for (const [k, v] of Object.entries(patch)) { if (v === null) delete next[k]; else next[k] = v; }
+    if (Object.keys(next).length) settings.sync = next; else delete settings.sync;
+  }
+  await persistSettings(settings);
+  return syncDefaults();
 }

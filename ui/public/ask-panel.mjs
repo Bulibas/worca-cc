@@ -5,6 +5,7 @@
 // innerHTML for content anywhere in this file (the markdown renderer owns the
 // only sanitized-HTML path).
 import { openScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
+import { chooseSyncRefusal, sourceRefNote } from './branch-sync.mjs';
 import { formatInstant, describeRule } from '../../src/shared/schedule/recurrence.mjs';
 import { createThreadModel } from './ask-model.mjs';
 import { credentialBadge } from './credential-badges.mjs';
@@ -3220,8 +3221,14 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
           loadBranchesInto(srcSel, projSel.value, card.sourceBranch || '').then(updateTargetSub);
         }
         projSel.addEventListener('change', () => { loadBranchesInto(srcSel, projSel.value, '').then(updateTargetSub); updateTargetSub(); reloadLane(); });
-        srcSel.addEventListener('change', updateTargetSub);
-        grid.append(rpField('Project', projSel), lvTag(rpField('Source branch', srcSel), 'advanced', !!card.sourceBranch),
+        // #527: "from origin/x (remote only, 2 behind)" describes the PROPOSED branch only.
+        const srcField = rpField('Source branch', srcSel, sourceRefNote(card.sourceRef));
+        const srcHint = srcField.querySelector('.ask-rp-hint');
+        srcSel.addEventListener('change', () => {
+          if (srcHint && srcSel.value !== card.sourceBranch) srcHint.textContent = '';
+          updateTargetSub();
+        });
+        grid.append(rpField('Project', projSel), lvTag(srcField, 'advanced', !!card.sourceBranch),
           lvTag(rpField('Feature branch', feature, 'created for the run'), 'advanced', !!card.featureBranch));
         targetHost.appendChild(grid);
         updateTargetSub();
@@ -3398,10 +3405,23 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       } catch { err.textContent = 'network error'; return; }
       if (!res.ok) {
-        let msg = `request failed (${res.status})`;
-        try { const b = await res.json(); if (b && b.error) msg = b.error; } catch { /* keep */ }
-        err.textContent = msg;
-        return;
+        let b = null;
+        try { b = await res.json(); } catch { /* keep */ }
+        // #527: the base diverged or could not be fetched — ask once and resend with the choice.
+        // No syncBeforeStart: the project's own setting applies.
+        if (b && (b.code === 'sync-diverged' || b.code === 'sync-fetch-failed')) {
+          const choice = await chooseSyncRefusal(b);
+          if (!choice) { err.textContent = 'Start cancelled.'; return; }
+          try {
+            res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, syncPolicy: choice }) });
+          } catch { err.textContent = 'network error'; return; }
+          b = null;
+          if (!res.ok) { try { b = await res.json(); } catch { /* keep */ } }
+        }
+        if (!res.ok) {
+          err.textContent = (b && b.error) || `request failed (${res.status})`;
+          return;
+        }
       }
       // Success: the server links, flips the card to started and broadcasts;
       // the flip frame renders the terminal state. The browser never navigates

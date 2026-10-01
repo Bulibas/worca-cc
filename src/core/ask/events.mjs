@@ -131,6 +131,7 @@ export function labelForTool(name, input = {}, attachmentNames = {}) {
     case 'get_run_diff': return id ? `Reading run ${id.slice(0, 12)}` : 'Reading run';
     case 'list_workflows': return 'Looking at workflows';
     case 'list_projects': return 'Looking at projects';
+    case 'list_branches': return 'Looking at branches';
     case 'propose_run': return 'Preparing a run';
     case 'propose_workflow': return 'Building a workflow';
     case 'propose_metrics_change': return 'Proposing a metrics change';

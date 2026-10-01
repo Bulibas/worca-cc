@@ -143,7 +143,7 @@ test('cb-override: confirm modal -> single resume POST with ignoreCostCap:true',
   await ctx.tick();
   const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/resume'));
   assert.equal(posts.length, 1, 'exactly one resume POST');
-  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'pl_1', ignoreCostCap: true });
+  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'pl_1', baseCheck: true, ignoreCostCap: true });
 });
 
 test('cb-override: cancelling the confirm posts nothing', async () => {
@@ -289,7 +289,7 @@ test('history: pausenote on the card; the detail screen shows the banner and gat
   await ctx.settle();
   const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/resume'));
   assert.equal(posts.length, 1);
-  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'h1', ignoreCostCap: true });
+  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'h1', baseCheck: true, ignoreCostCap: true });
 });
 
 test('history: a budget-changed unblock re-enables the gated detail Resume', async () => {

@@ -10,7 +10,7 @@ import { JSDOM } from 'jsdom';
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 
-async function bootLive({ resumeFails = false } = {}) {
+async function bootLive({ resumeFails = false, baseMoved = false } = {}) {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
@@ -28,6 +28,10 @@ async function bootLive({ resumeFails = false } = {}) {
         '{"source":"implementer","level":"warn","text":"429, retrying","ts":"2026-08-17T00:00:02Z","stepIndex":1,"cycle":2,"stream":"err"}\n' });
     }
     if (String(url).includes('/api/resume')) {
+      if (baseMoved && !JSON.parse(opts.body).baseAck) {
+        return Promise.resolve({ ok: false, status: 409, json: async () => ({ code: 'base-moved', error: 'dev moved',
+          members: [{ projectKey: 'k', base: 'dev', remote: 'origin', exists: true, movedBy: 5 }] }) });
+      }
       if (resumeFails) {
         return Promise.resolve({ ok: false, status: 404, json: async () => ({ error: 'pipeline not found' }) });
       }
@@ -69,11 +73,54 @@ test('resume works from the Running card for a same-session run (no reload)', as
   await resumeRunFromCard('r1');
   const call = fetchCalls.find((c) => c.url.includes('/api/resume'));
   assert.ok(call, 'resume must reach POST /api/resume (was: client-side "run has no pipelineId" bail)');
-  assert.deepEqual(JSON.parse(call.opts.body), { pipelineId: 'p1' });
+  assert.deepEqual(JSON.parse(call.opts.body), { pipelineId: 'p1', baseCheck: true });
   // The old paused run is superseded by the resumed live run.
   assert.equal(getRun('r1'), undefined);
   assert.ok(getRun('r-new'));
   assert.equal(getRun('r-new').pipelineId, 'p1');
+});
+
+test('a 409 base-moved asks, then resends with baseAck and every option of the call (#527)', async () => {
+  const { window, fetchCalls } = await bootLive({ baseMoved: true });
+  const { upsertRun, onState, resumeRunFromCard, getRun } = window.__np;
+  const r = upsertRun({ runId: 'r1', title: 't', projectDir: '/tmp/proj', status: 'running' });
+  onState(r, { status: 'running', id: 'p1' });
+  onState(r, { status: 'paused' });
+  const done = resumeRunFromCard('r1', null, { ignoreCostCap: true });
+  for (let i = 0; i < 5; i++) await new Promise((res) => setTimeout(res, 0));
+  const doc = window.document;
+  assert.equal(doc.querySelector('#confirm-modal').classList.contains('hidden'), false, 'the base move is confirmed first');
+  assert.match(doc.querySelector('#confirm-message').textContent, /dev moved 5 commits on origin since this run started/);
+  doc.querySelector('#confirm-ok').click();
+  await done;
+  const bodies = fetchCalls.filter((c) => c.url.includes('/api/resume')).map((c) => JSON.parse(c.opts.body));
+  assert.deepEqual(bodies, [
+    { pipelineId: 'p1', baseCheck: true, ignoreCostCap: true },
+    { pipelineId: 'p1', baseCheck: true, baseAck: true, ignoreCostCap: true },
+  ]);
+  assert.ok(getRun('r-new'), 'the acknowledged resend resumes the run');
+});
+
+test('while the base-moved question is open the button reads Resume again (disabled); Cancel re-enables it (#527)', async () => {
+  const { window } = await bootLive({ baseMoved: true });
+  const { upsertRun, onState, buildRunCard, resumeRunFromCard, getRun } = window.__np;
+  const r = upsertRun({ runId: 'r1', title: 't', projectDir: '/tmp/proj', status: 'running' });
+  onState(r, { status: 'running', id: 'p1' });
+  onState(r, { status: 'paused' });
+  r.el = buildRunCard(r);
+  const btn = r.el.querySelector('.btn-resume');
+  const before = btn.innerHTML;
+  const done = resumeRunFromCard('r1', btn);
+  for (let i = 0; i < 5; i++) await new Promise((res) => setTimeout(res, 0));
+  const doc = window.document;
+  assert.equal(doc.querySelector('#confirm-modal').classList.contains('hidden'), false, 'the question is open');
+  assert.doesNotMatch(btn.textContent, /Resuming/, 'nothing is resuming while the person decides');
+  assert.equal(btn.innerHTML, before, 'the Resume label and icon are back');
+  assert.equal(btn.disabled, true, 'no second click while the question is open');
+  doc.querySelector('#confirm-cancel').click();
+  await done;
+  assert.equal(btn.disabled, false);
+  assert.ok(getRun('r1'), 'Cancel leaves the run paused');
 });
 
 test('failed resume restores the Resume button: enabled, icon intact, error logged', async () => {

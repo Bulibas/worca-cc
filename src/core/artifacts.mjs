@@ -1914,7 +1914,9 @@ async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
   if (repoDir && feature) {
     survived = await branchExists(repoDir, feature);
     if (!frozen && survived && source) {
-      const d = await diffShortstat(repoDir, source, feature);
+      // #527: only a REMOTE-started run (startRef set) diffs from its recorded start; every other
+      // run keeps `source...feature` exactly (so a merged branch still drops to 0, as documented above).
+      const d = await diffShortstat(repoDir, branchObj?.startRef && branchObj?.baseSha ? branchObj.baseSha : source, feature);
       added = d.added;
       removed = d.removed;
     }
