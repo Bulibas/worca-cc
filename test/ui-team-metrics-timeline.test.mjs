@@ -3,7 +3,7 @@
 // lookup is asked once for the runs on screen and repaints the tiles, tab switches do not
 // refetch the records, a bar opens its card (Escape closes it), zooming by the header works,
 // and a failing PR lookup leaves a working page. boot() is test/ui-team-metrics.test.mjs's.
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -39,6 +39,10 @@ async function boot({ fetchHandler, url = 'http://localhost:4317/' } = {}) {
 }
 
 const respond = (body, status = 200) => Promise.resolve({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
+// The timeline opens on the current calendar month, so records a few hours old fall into the
+// previous month shortly after midnight on the 1st. Pin the clock (Date only; timers stay real)
+// to a mid-month, mid-week noon in local time so every fixture sits inside the shown period.
+mock.timers.enable({ apis: ['Date'], now: new Date(2026, 5, 17, 12).getTime() });
 const now = Date.now();
 const iso = (t) => new Date(t).toISOString().replace(/\.\d{3}Z$/, 'Z');
 function rec(id, ageH, extra = {}) {
