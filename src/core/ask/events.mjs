@@ -290,6 +290,7 @@ export function createTurnReducer({
   let sawResult = false;
   let sessionId = null;
   let lastResult = null;
+  let mainModel = null;           // the init frame's model — picks this turn's entry out of result.modelUsage
   let reducerErrors = 0;
   let summary = null;
   let cliErrorText = '';          // what a <synthetic> CLI message said (its API-error line)
@@ -317,7 +318,21 @@ export function createTurnReducer({
   // Context fill = the last MAIN call's per-call total. The cumulative result
   // usage never feeds it — a result would report the whole turn, not one call.
   const ctxNow = () => { const e = lastMainUsageMsg ? usageByMsg.get(lastMainUsageMsg) : null; return e ? ctxOf(e.usage) : null; };
-  const currentUsage = () => ({ ...(lastResult && lastResult.usage ? normalizeUsage(lastResult.usage) : usageSum()), ctx: ctxNow() });
+  // The main model's context window, from the result's modelUsage (the CLI reports it per model).
+  // modelUsage also carries the CLI's title call and sub-agent models, so an unmatched main model
+  // yields null — never another model's window.
+  const ctxWindowNow = () => {
+    const mu = lastResult && lastResult.modelUsage && typeof lastResult.modelUsage === 'object' ? lastResult.modelUsage : null;
+    const key = mu ? matchModelKey(mainModel, mu) : null;
+    const w = key ? mu[key]?.contextWindow : null;
+    return Number.isInteger(w) && w > 0 ? w : null;
+  };
+  const currentUsage = () => {
+    const u = { ...(lastResult && lastResult.usage ? normalizeUsage(lastResult.usage) : usageSum()), ctx: ctxNow() };
+    const w = ctxWindowNow();
+    if (w) u.ctxWindow = w;                                               // absent, not null, when unknown: old payloads stay byte-identical
+    return u;
+  };
   /** What the CLI itself reported for this turn — null until the `result` frame lands. */
   const cliCost = () => (lastResult && typeof lastResult.total_cost_usd === 'number' && Number.isFinite(lastResult.total_cost_usd) ? lastResult.total_cost_usd : null);
   // The AUTHORITATIVE turn cost: cliCost() re-priced by the injected override, if
@@ -673,7 +688,11 @@ export function createTurnReducer({
     const isMain = ptu === null;
     switch (raw.type) {
       case 'system':
-        if (raw.subtype === 'init') { sawInit = true; if (typeof raw.session_id === 'string') sessionId = raw.session_id; }
+        if (raw.subtype === 'init') {
+          sawInit = true;
+          if (typeof raw.session_id === 'string') sessionId = raw.session_id;
+          if (typeof raw.model === 'string' && raw.model) mainModel = raw.model;
+        }
         return;                                                           // status, thinking_tokens, task_*, background_tasks_changed, hook_*
       case 'stream_event': return onStreamEvent(raw, ptu, isMain);
       case 'assistant': return onAssistant(raw, ptu, isMain);

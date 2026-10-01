@@ -847,3 +847,34 @@ test('propose_web_access: labelled, and its RESULT reaches onWebProposal with th
   h.push(uresult('toolu_w2', '{"ok":true}', { ptu: 'toolu_task' }));
   assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
 });
+
+test('ctxWindow: the main model\'s contextWindow rides the usage once the result lands', () => {
+  const h = harness();
+  h.push(session(), init({ model: 'claude-opus-5-5' }), mstart('msg_1'), atext('msg_1', 'ok'), mdelta({ output_tokens: 4, input_tokens: 2 }));
+  assert.equal('ctxWindow' in h.r.snapshot().usage, false, 'no result yet: window unknown');
+  h.push(result({ modelUsage: {
+    'claude-opus-5-5': { inputTokens: 2, outputTokens: 4, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.01, contextWindow: 1000000, canonicalModel: 'claude-opus-5-5' },
+    'claude-haiku-4-5-20251001': { inputTokens: 900, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.001, contextWindow: 200000, canonicalModel: 'claude-haiku-4-5' },
+  } }));
+  assert.equal(h.r.snapshot().usage.ctxWindow, 1000000, 'the main model, never the title call');
+  assert.equal(h.frames.filter((f) => f.type === 'ask-usage').at(-1).usage.ctxWindow, 1000000);
+  assert.equal(h.r.finish().usage.ctxWindow, 1000000);
+});
+
+test('ctxWindow: absent when the main model cannot be matched or the window is garbage', () => {
+  const two = {
+    a: { contextWindow: 1000000, canonicalModel: 'a' },
+    b: { contextWindow: 200000, canonicalModel: 'b' },
+  };
+  let h = harness();
+  h.push(session(), init(), mstart('msg_1'), atext('msg_1', 'ok'), result({ modelUsage: two }));   // no init model, two keys
+  assert.equal('ctxWindow' in h.r.snapshot().usage, false);
+  for (const bad of [0, -5, '1000000', 1.5, null]) {
+    h = harness();
+    h.push(session(), init({ model: 'm' }), mstart('msg_1'), atext('msg_1', 'ok'), result({ modelUsage: { m: { contextWindow: bad } } }));
+    assert.equal('ctxWindow' in h.r.snapshot().usage, false, `window ${JSON.stringify(bad)} is unknown`);
+  }
+  h = harness();
+  h.push(session(), init(), mstart('msg_1'), atext('msg_1', 'ok'), result({ modelUsage: { only: { contextWindow: 200000 } } }));
+  assert.equal(h.r.snapshot().usage.ctxWindow, 200000, 'a single entry is the main model (matchModelKey fallback)');
+});
