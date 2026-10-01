@@ -280,17 +280,20 @@ test('run page: a cap pause keeps the caret but disables "Resume at…"', async 
   assert.equal(ctx.doc.querySelector('.rd-resume-at').disabled, true);
 });
 
-test('History glance: the Resume CTA is a split whose "Resume at…" posts', async () => {
+test('History glance: the bar carries the Resume split, whose "Resume at…" posts', async () => {
   const ctx = await boot({ level: 'advanced', fetchHandler: histFetch() });
   ctx.go(`history/${KEY}/fcec04e8`);
   await ctx.settle(8);
-  const split = ctx.doc.querySelector('.hd-g-resume-split');
-  assert.ok(split, 'the glance Resume is wrapped in a split');
-  assert.ok(split.querySelector('.hd-g-resume'), 'the Resume CTA is its left half');
-  split.querySelector('.hd-g-resume-more').click();
+  assert.equal(ctx.doc.querySelector('#hist-detail .hd').dataset.mode, 'glance');
+  const split = ctx.doc.querySelector('#hist-detail .hd-bar .rd-bar-end .hd-resume-split');
+  assert.ok(split, 'the Resume split sits in the bar, shared by both modes');
+  assert.equal(split.hidden, false);
+  assert.equal(split.querySelector('.hd-resume').hidden, false, 'Resume is its left half');
+  assert.equal(ctx.doc.querySelector('#hist-detail [class*="hd-g-resume"]'), null, 'the card carries no Resume of its own');
+  split.querySelector('.hd-resume-more').click();
   await ctx.settle();
-  assert.equal(split.querySelector('.hd-g-resume-menu').hidden, false, 'caret opens the menu');
-  split.querySelector('.hd-g-resume-at').click();
+  assert.equal(split.querySelector('.hd-resume-menu').hidden, false, 'caret opens the menu');
+  split.querySelector('.hd-resume-at-item').click();
   await ctx.settle();
   await confirmSheet(ctx);
   const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/schedules/resume'));
@@ -298,16 +301,17 @@ test('History glance: the Resume CTA is a split whose "Resume at…" posts', asy
   assert.equal(JSON.parse(posts[0].opts.body).pipelineId, 'fcec04e8');
 });
 
-test('History glance: simple level keeps the plain Resume CTA; a cap pause disables the item', async () => {
+test('History glance: at simple level the bar\'s caret is the Advanced one; a cap pause disables the item', async () => {
   const ctx = await boot({ level: 'simple', fetchHandler: histFetch() });
   ctx.go(`history/${KEY}/fcec04e8`);
   await ctx.settle(8);
-  assert.ok(ctx.doc.querySelector('.hd-g-resume'), 'Resume CTA shown');
-  assert.equal(ctx.doc.querySelector('.hd-g-resume-split'), null, 'no caret at simple');
+  const bar = ctx.doc.querySelector('#hist-detail .hd-bar');
+  assert.equal(bar.querySelector('.hd-resume').hidden, false, 'Resume shown');
+  assert.equal(bar.querySelector('.hd-resume-more').getAttribute('data-min-level'), 'advanced', 'the CSS gate hides the caret at simple');
   const ctx2 = await boot({ level: 'advanced', fetchHandler: histFetch('cost_total') });
   ctx2.go(`history/${KEY}/fcec04e8`);
   await ctx2.settle(8);
-  assert.equal(ctx2.doc.querySelector('.hd-g-resume-at').disabled, true);
+  assert.equal(ctx2.doc.querySelector('#hist-detail .hd-bar .hd-resume-at-item').disabled, true);
 });
 
 test('a refused schedule surfaces its reason in the confirm modal', async () => {
