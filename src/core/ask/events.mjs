@@ -322,13 +322,13 @@ export function createTurnReducer({
   // The main model's context window, from the result's modelUsage (the CLI reports it per model).
   // modelUsage also carries the CLI's title call and sub-agent models, so an unmatched main model
   // yields null — never another model's window.
+  const resultModelUsage = () => (lastResult && lastResult.modelUsage && typeof lastResult.modelUsage === 'object' ? lastResult.modelUsage : null);
+  const windowAt = (mu, key) => { const w = key ? mu[key]?.contextWindow : null; return Number.isInteger(w) && w > 0 ? w : null; };
   const ctxWindowNow = () => {
-    const mu = lastResult && lastResult.modelUsage && typeof lastResult.modelUsage === 'object' ? lastResult.modelUsage : null;
+    const mu = resultModelUsage();
     // A lone entry stands in for the main model only when the init frame named none: with a named
     // model, a lone mismatch is the title call of a turn whose main call failed.
-    const key = mu ? matchModelKey(mainModel, mu, { single: !mainModel }) : null;
-    const w = key ? mu[key]?.contextWindow : null;
-    return Number.isInteger(w) && w > 0 ? w : null;
+    return mu ? windowAt(mu, matchModelKey(mainModel, mu, { single: !mainModel })) : null;
   };
   const currentUsage = () => {
     const u = { ...(lastResult && lastResult.usage ? normalizeUsage(lastResult.usage) : usageSum()), ctx: ctxNow() };
@@ -762,6 +762,13 @@ export function createTurnReducer({
       }
       const agents = blocks.filter((b) => b.kind === 'agent');
       if (agents.length && lastResult) {
+        // Each agent's context window: its own (resolved) model's modelUsage entry, never a lone
+        // guess; an agent with no model inherits the main model, so the main window.
+        const mu = resultModelUsage();
+        for (const a of agents) {
+          const w = a.model ? (mu ? windowAt(mu, matchModelKey(a.model, mu, { single: false })) : null) : ctxWindowNow();
+          if (w) a.ctxWindow = w;
+        }
         const est = estimateAgentCosts(agents, lastResult);
         // §6.6 splits the CLI's OWN modelUsage costUSD across agents. When an
         // override re-prices the turn, the shares must ride the same scale or the

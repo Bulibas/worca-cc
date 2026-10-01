@@ -886,3 +886,22 @@ test('ctxWindow: a lone modelUsage entry that is not the init model is never tak
   } }));
   assert.equal('ctxWindow' in h.r.snapshot().usage, false, 'the Haiku title call must not supply the Opus window');
 });
+
+test('agent ctxWindow: each sub-agent gets its own model\'s window at finish; an inheriting agent gets the main window; an unresolved alias gets none', () => {
+  const h = harness();
+  h.push(session(), init({ model: 'claude-opus-5-5' }));
+  h.push(atool('msg_1', 'toolu_h', 'Agent', { description: 'haiku child', subagent_type: 'general-purpose', model: 'haiku' }));
+  h.push(atool('msg_2', 'toolu_i', 'Agent', { description: 'inherits', subagent_type: 'general-purpose' }));
+  h.push(atool('msg_3', 'toolu_s', 'Agent', { description: 'sonnet alias, never resolved', subagent_type: 'general-purpose', model: 'sonnet' }));
+  h.push(uresult('toolu_h', [{ type: 'text', text: 'ok' }], { tur: { ...AGENT_TUR, resolvedModel: 'claude-haiku-4-5-20251001' } }));
+  h.push(uresult('toolu_i', [{ type: 'text', text: 'ok' }], { tur: { ...AGENT_TUR, resolvedModel: undefined } }));
+  h.push(uresult('toolu_s', [{ type: 'text', text: 'boom' }], { isError: true }));
+  h.push(result({ modelUsage: {
+    'claude-opus-5-5': { inputTokens: 2, outputTokens: 4, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.01, contextWindow: 1000000, canonicalModel: 'claude-opus-5-5' },
+    'claude-haiku-4-5-20251001': { inputTokens: 4016, outputTokens: 123, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.001, contextWindow: 200000, canonicalModel: 'claude-haiku-4-5' },
+  } }));
+  const agents = Object.fromEntries(h.r.finish().blocks.filter((b) => b.kind === 'agent').map((b) => [b.id, b]));
+  assert.equal(agents.toolu_h.ctxWindow, 200000, 'the Haiku child: its own window');
+  assert.equal(agents.toolu_i.ctxWindow, 1000000, 'no model: it inherits the main model, so the main window');
+  assert.equal('ctxWindow' in agents.toolu_s, false, 'an alias that never resolved matches nothing: no guess');
+});
