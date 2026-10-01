@@ -8,7 +8,7 @@ import {
   ago, syncPillModel, chipState, projectChipModel, worstChip, sourceRefNote,
   fetchFailureCopy, ffRefusalCopy, syncStageLabel, freshSyncState, cssEscape,
   mountSyncRow, paintSyncRow, isSyncableBranchName, fetchedAgo, syncPrefsModel, syncPrefsPatch,
-  runOutcomeModel, listRowModel, wsRollupModel,
+  runOutcomeModel, listRowModel, projectBarModel, wsRollupModel,
 } from '../ui/public/branch-sync.mjs';
 import { isSafeBranchName } from '../src/core/git-sync.mjs';
 
@@ -59,6 +59,30 @@ test('listRowModel: one action at most, and only one Worca can take', () => {
   assert.deepEqual([dirtyBehind.label, dirtyBehind.action, dirtyBehind.dirty], ['1 commit behind', null, true]);
   assert.deepEqual([m({ dirty: true }).label, m({ dirty: true }).action], ['Uncommitted changes', null]);
   assert.equal(listRowModel(null).label, 'No remote');
+});
+
+test('projectBarModel: the Projects list bar — tone, the ref it is compared with, its action and filter group', () => {
+  const m = (over) => projectBarModel(block(over));
+  const pick = (x) => [x.tone, x.label, x.hint, x.actionLabel, x.vs, x.group];
+  assert.deepEqual(pick(m({})), ['ok', 'Up to date', '', '', 'origin/dev', 'ok']);
+  assert.deepEqual(pick(m({ state: 'behind', behind: 5 })), ['blue', '5 commits behind', 'Next run syncs it first', 'Sync', 'origin/dev', 'behind']);
+  assert.equal(m({ state: 'behind', behind: 2, settings: { beforeRun: false } }).hint, 'Auto-sync is off · runs start from your local copy');
+  const dirtyBehind = m({ state: 'behind', behind: 7, dirty: true });
+  assert.deepEqual(pick(dirtyBehind), ['blue', '7 commits behind', 'Uncommitted changes, so Sync can’t move it · runs use committed code', '', 'origin/dev', 'behind']);
+  assert.deepEqual(pick(m({ state: 'diverged', ahead: 3, behind: 8 })), ['amber', 'Diverged', '3 ahead, 8 behind · next run will ask', 'Review…', 'origin/dev', 'diverged']);
+  assert.deepEqual(pick(m({ dirty: true })), ['peach', 'Uncommitted changes', 'Runs use committed code only', '', 'origin/dev', 'dirty']);
+  assert.deepEqual(pick(m({ stale: true, fetchedAt: null })), ['grey', 'Can’t reach origin', 'Last fetched unknown (the last fetch failed)', 'Retry', 'origin/dev', 'offline']);
+  // Not on the remote: nothing to compare with, so no "vs" line.
+  assert.deepEqual(pick(m({ base: 'feature/x', state: 'no-upstream' })), ['grey', 'Not on origin yet', 'Runs use your local copy', '', '', 'local']);
+  assert.deepEqual(pick(m({ base: null, state: 'unknown' })), ['grey', 'Status unknown', '', '', '', null]);
+  assert.equal(projectBarModel(block({ remote: 'upstream', base: 'main' })).vs, 'upstream/main', 'the compared ref follows the payload\'s remote');
+  // No remote: the bar says so instead of leaving a blank line.
+  for (const b of [null, block({ remote: null, state: 'unknown' })]) {
+    assert.deepEqual(pick(projectBarModel(b)), ['none', 'No git remote', 'Local folder · nothing to sync', '', '', 'local']);
+  }
+  // No answer yet.
+  assert.deepEqual(pick(projectBarModel(undefined)), ['grey', 'Checking…', '', '', '', null]);
+  assert.equal(projectBarModel(undefined).icon, 'spin');
 });
 
 test('wsRollupModel: one sentence, worst state sets the tone', () => {
@@ -365,7 +389,9 @@ test('index.html: Branches table, previous-run switch after it, run-header Sync,
   assert.ok(copied > 0 && rdSync > copied && spacer > rdSync, '.rd-sync sits between .rd-copied and .rd-spacer');
   const summaryEnd = html.indexOf('<small class="hint warn" id="shipit-base-warn" hidden></small>');
   assert.ok(summaryEnd > html.indexOf('class="shipit-summary mono"'));
-  assert.match(html, /<div class="topbar-actions"><button class="btn btn-mini" id="projects-sync-all" type="button">Sync all<\/button>\s*<button type="button" id="project-add-btn"/);
+  // Sync all moved into the Projects card head (design 2026-10-01): app.js builds it.
+  assert.ok(!html.includes('id="projects-sync-all"'), 'no Sync all in the Projects topbar');
+  assert.match(html, /<div class="topbar-actions"><button type="button" id="project-add-btn"/);
 });
 
 test('style.css: §6.3 block before the 6193 reduced-motion line, explicit [hidden], override inside the final block', async () => {
