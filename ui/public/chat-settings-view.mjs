@@ -17,6 +17,7 @@ const EVENTS = [
   ['done', 'Run finished (done / stopped)', ''],
   ['error', 'Run failed', ''],
   ['paused', 'Run paused (incl. cost limits)', ''],
+  ['away', 'Away hours start or end', 'only when a run is answered by worca'],
 ];
 
 /**

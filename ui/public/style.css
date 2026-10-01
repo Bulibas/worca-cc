@@ -2876,6 +2876,8 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .sidebar.collapsed .seg.side-away{flex-direction:column;width:auto;}
 .sidebar.collapsed .seg.side-away button{padding:6px;}
 .sidebar.collapsed .side-away-label{display:none;}
+.side-away-note{display:block;padding:6px 4px 0;font-size:11.5px;line-height:1.35;color:var(--ink-3);}
+.sidebar.collapsed .side-away-note{display:none;}
 
 /* ---------- Sidebar spend indicator ---------- */
 .spend-ind{display:block;width:100%;text-align:left;border:1px solid var(--line);border-radius:var(--r-ctrl);

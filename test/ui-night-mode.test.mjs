@@ -285,6 +285,19 @@ test('sidebar: settings-changed (Settings, another tab, Ask Worca) repaints it a
   assert.match(doc.querySelector('.pd-night-card .away-summary').textContent, /^For proj: Right now you count as away because you said "I'm away now"/);
 });
 
+test('sidebar: the away hours starting by themselves show one line under the control and refresh it', async () => {
+  const ctx = await boot({ away: () => sideBody() });
+  const doc = ctx.window.document;
+  const before = ctx.awayCalls.length;
+  ctx.dispatch({ type: 'away-hours', edge: 'start', text: 'Away hours started (22:00 to 07:00). worca now answers questions on 1 run.' });
+  await settle(6);
+  const note = doc.querySelector('.side-foot #side-away .side-away-note');
+  assert.ok(note, 'the line sits with the control');
+  assert.equal(note.textContent, 'Away hours started (22:00 to 07:00). worca now answers questions on 1 run.');
+  assert.equal(note.getAttribute('role'), 'status');
+  assert.ok(ctx.awayCalls.length > before, 'the control re-reads the status');
+});
+
 test('settings card: when GET /api/away-mode fails, the stored fields still render (spec §7)', async () => {
   // No `enabled` key: the default state of a real user.
   const ctx = await boot({ away: null, settings: { nightMode: { window: '22:00-07:00' } } });

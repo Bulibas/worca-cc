@@ -1111,6 +1111,7 @@ function handleServerMessage(msg) {
     loadSettings();
     return;
   }
+  if (msg.type === 'away-hours') { onAwayHoursEdge(msg); return; }
   if (msg.type === 'onboarding-changed') {
     scheduleOnboardingRefresh();
     return;
@@ -26860,6 +26861,9 @@ let _sideAwaySig = '';
 let _sideAwayBusy = false;
 let _sideAwayErr = '';            // the last failed click, kept in the tooltip until the next one
 let _sideAwayRead = false;        // the first GET has answered (until then the slot stays empty, never "could not be read")
+let _sideAwayNote = '';           // "Away hours started / ended" from the server, shown for a minute under the control
+let _sideAwayNoteTimer = null;
+const SIDE_AWAY_NOTE_MS = 60_000;
 const sideAwayMount = document.getElementById('side-away');   // held, like awayStatusEl: the 1 s tick paints this page's own mount
 const SIDE_AWAY_ICONS = {         // shown alone on the collapsed menu
   here: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-4v-5h-6v5H5a1 1 0 0 1-1-1z"></path></svg>',
@@ -26870,7 +26874,7 @@ function paintSideAway() {
   if (!mount || !_sideAwayRead) return;
   const d0 = state.awayMode;
   const s = describeAwaySwitch({ config: d0 ? d0.config : null, toggle: d0 ? d0.toggle : 'auto', hereSince: d0 ? d0.hereSince : null, now: Date.now() });
-  const sig = JSON.stringify([s, _sideAwayBusy, _sideAwayErr]);
+  const sig = JSON.stringify([s, _sideAwayBusy, _sideAwayErr, _sideAwayNote]);
   if (sig === _sideAwaySig && mount.firstChild) return;      // the 1 s tick repaints only on a change
   _sideAwaySig = sig;
   const seg = document.createElement('div');
@@ -26889,7 +26893,17 @@ function paintSideAway() {
     b.setAttribute('aria-label', label);
     seg.append(b);
   }
-  mount.replaceChildren(seg);
+  const note = _sideAwayNote ? Object.assign(document.createElement('small'), { className: 'hint side-away-note', textContent: _sideAwayNote }) : null;
+  if (note) note.setAttribute('role', 'status');
+  mount.replaceChildren(seg, ...(note ? [note] : []));
+}
+/** The server's away-hours edge (night/hours-watch.mjs): one line for a minute, and a fresh status. */
+function onAwayHoursEdge(msg) {
+  _sideAwayNote = typeof msg.text === 'string' ? msg.text : '';
+  if (_sideAwayNoteTimer) clearTimeout(_sideAwayNoteTimer);
+  _sideAwayNoteTimer = setTimeout(() => { _sideAwayNote = ''; _sideAwayNoteTimer = null; paintSideAway(); }, SIDE_AWAY_NOTE_MS);
+  void refreshAwayBodies().catch(() => {});
+  paintSideAway();
 }
 sideAwayMount?.addEventListener('click', async (e) => {
   const b = e.target.closest('.side-away button[data-side]');

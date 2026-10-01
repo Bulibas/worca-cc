@@ -196,6 +196,11 @@ export function renderSchedule(n = {}) {
   return mdMsg(`${icon} **Schedule:** ${name}\n   ${msg.length > 300 ? `${msg.slice(0, 300)}…` : msg}`, n.severity === 'info' ? 'info' : 'warning');
 }
 
+/** The away hours started or ended by themselves (night/hours-watch.mjs). */
+export function renderAway(text) {
+  return mdMsg(`\u{1F552} **Away mode:** ${String(text || '').slice(0, 300)}`, 'info');
+}
+
 export function renderTest() {
   return {
     title: 'worca-cc test message',

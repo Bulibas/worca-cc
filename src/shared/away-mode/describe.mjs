@@ -11,7 +11,7 @@ function zoneOk(tz) {
   try { new Intl.DateTimeFormat('en-GB', { timeZone: tz }); return true; } catch { return false; }
 }
 /** The zone the hours are read in: the configured one when valid, else the local one. */
-function zoneOf(config, localZone) {
+export function zoneOf(config, localZone) {
   return zoneOk(config.timeZone) ? config.timeZone : (localZone || Intl.DateTimeFormat().resolvedOptions().timeZone);
 }
 export function fmtHHMM(ms, tz) {

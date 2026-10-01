@@ -344,6 +344,18 @@ New status line 1 (Settings, project tab, Ask Worca) after "I'm here" inside the
 
 Settings' `I'm back` tooltip: *You count as here again, even inside your away hours. The next away hours apply by themselves.*
 
+### 3.9 Away hours starting or ending by themselves
+
+When your away hours start or end on their own (never after a click or an edit), every open worca
+tab shows one line under "I'm here | I'm away" for a minute. Chat hears it only when a run is
+touched (Settings › Chat notifications › `Away hours start or end`, on by default).
+The edges follow your own hours (Settings), not a project's.
+
+- Start: `Away hours started ({from} to {to}). worca now answers questions on {N} run(s).`
+  or `Away hours started ({from} to {to}). No run is answered by worca right now.` (no chat)
+- End: `Away hours ended. worca answered {N} question(s) while you were away{; M to check}.`
+  or `Away hours ended. worca answered nothing while you were away.` (no chat)
+
 ## 4. Reads-top-to-bottom test
 
 Developer opens Settings › Away mode with: hours 22:00–07:00, "Only runs I marked", 30 min,

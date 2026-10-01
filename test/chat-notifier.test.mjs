@@ -138,7 +138,7 @@ test('chatPrefs/setChatPrefs: defaults ON, merge-patch, unknown keys rejected', 
   const home = mkdtempSync(join(tmpdir(), 'worca-cc-chatprefs-'));
   process.env.HOME = home;
   try {
-    assert.deepEqual(chatPrefs(), { notify: { done: true, error: true, question: true, paused: true }, channels: {}, scriptTools: true });
+    assert.deepEqual(chatPrefs(), { notify: { done: true, error: true, question: true, paused: true, away: true }, channels: {}, scriptTools: true });
     await setChatPrefs({ notify: { done: false }, channels: { 'tg-chat/main': { enabled: false } } });
     const p = chatPrefs();
     assert.equal(p.notify.done, false);
@@ -182,4 +182,25 @@ test('a run that applied every direction carries no such warning', async () => {
   orch.emit('done', { status: 'done' });
   await settle();
   assert.doesNotMatch(JSON.stringify(sent[0]), /Directions pending/);
+});
+
+test('away hours: notifyAway sends one info message; notify.away=false keeps it out of chat', async () => {
+  const { sent, settle, notifier, state } = fixture();
+  notifier.notifyAway('Away hours started (22:00 to 07:00). worca now answers questions on 1 run.');
+  await settle();
+  assert.equal(sent.length, 2);
+  assert.match(sent[0].message.body[0].value, /Away hours started \(22:00 to 07:00\)/);
+  assert.equal(sent[0].message.severity, 'info');
+  sent.length = 0;
+  state.prefs = { notify: { away: false }, channels: {} };
+  notifier.notifyAway('Away hours ended. worca answered 3 questions while you were away; 1 to check.');
+  await settle();
+  assert.equal(sent.length, 0);
+});
+
+test('chat prefs: "away" is a notify event, on by default', async () => {
+  assert.equal(chatPrefs().notify.away, true);
+  await setChatPrefs({ notify: { away: false } });
+  assert.equal(chatPrefs().notify.away, false);
+  await setChatPrefs({ notify: { away: true } });
 });

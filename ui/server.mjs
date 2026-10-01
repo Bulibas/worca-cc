@@ -63,7 +63,8 @@ import {
 } from '../src/core/settings.mjs';
 import { resolveNightConfig, validateNightPatch } from '../src/core/night/config.mjs';
 import { effectiveNightConfig, nightLayers } from '../src/core/night/effective.mjs';
-import { readNightDecisions } from '../src/core/night/store.mjs';
+import { readNightDecisions, nightAnsweredSince } from '../src/core/night/store.mjs';
+import { createAwayHoursWatch } from '../src/core/night/hours-watch.mjs';
 import { resolveDefragModel, defragDefaultModel, defragWorkflowView, checkStartPair } from '../src/core/memory-defrag-model.mjs';
 import { describeTitleModel } from '../src/core/title.mjs';
 import { effectiveHumanRateUsd } from '../src/core/human-rate.mjs';
@@ -2323,6 +2324,27 @@ onNotification((n) => {
   broadcast({ type: 'notification', notification: n });
   try { chatNotifier.notifySchedule(n); } catch { /* never break the writer */ }
 });
+
+// Away hours starting or ending by themselves (night/hours-watch.mjs): every open tab shows one line
+// under the menu's "I'm here | I'm away"; chat hears it only when a run is answered by worca.
+const AWAY_WATCH_TICK_MS = 30_000;
+let _awayWatchTimer = null;
+function startAwayHoursWatch() {
+  if (_awayWatchTimer) return;
+  const watch = createAwayHoursWatch({
+    readStatus: () => ({ config: resolveNightConfig({ user: nightModeSettings() }).config, toggle: nightModeToggle(), hereSince: nightModeHereSince() }),
+    liveRuns: () => [...runs.values()].map((e) => ({ projectDir: e.projectDir, status: e.orch?.state?.status || e.status, night: e.orch?.state?.night })),
+    effective: effectiveNightConfig,
+    answeredSince: nightAnsweredSince,
+    onEdge: (e) => {
+      broadcast({ type: 'away-hours', edge: e.edge, text: e.text });
+      if (e.chat) { try { chatNotifier.notifyAway(e.text); } catch { /* never break the watch */ } }
+    },
+  });
+  watch.tick();                                   // the baseline: a restart never announces an edge
+  _awayWatchTimer = setInterval(() => watch.tick(), AWAY_WATCH_TICK_MS);
+  _awayWatchTimer.unref();
+}
 
 /** A schedule item (ticket or series) by id, for the unified /api/schedules routes. */
 function findScheduleItem(id) {
@@ -9622,6 +9644,7 @@ if (isMain) {
     } catch (err) { console.warn(`[worca-ui] team policy background: ${err?.message || err}`); }
     // Scheduled runs: boot catch-up + the 30 s tick (the server IS the scheduler).
     try { startScheduler(); } catch (err) { console.warn(`[worca-ui] scheduler: ${err?.message || err}`); }
+    startAwayHoursWatch();
   });
 }
 

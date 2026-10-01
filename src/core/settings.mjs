@@ -876,7 +876,7 @@ export const setHumanRateUsdPerHour = (input) => setUsdCap('humanRateUsdPerHour'
 
 // ── chat notification preferences (chat-connectivity-design.md §4.5) ─────────
 
-const CHAT_NOTIFY_EVENTS = ['done', 'error', 'question', 'paused'];
+const CHAT_NOTIFY_EVENTS = ['done', 'error', 'question', 'paused', 'away'];
 
 /**
  * Effective chat preferences. Every notification event defaults ON; channels default
@@ -899,7 +899,7 @@ export function chatPrefs() {
 }
 
 /**
- * Merge-patch the chat prefs: {notify?: {done?, error?, question?, paused?},
+ * Merge-patch the chat prefs: {notify?: {done?, error?, question?, paused?, away?},
  * channels?: {"<plugin>/<id>"?: {enabled: boolean}}, scriptTools?: boolean}. Unknown
  * notify keys and a non-boolean scriptTools are rejected (400 at the API layer);
  * channels merge per key.

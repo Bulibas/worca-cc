@@ -45,3 +45,11 @@ export function nightGateCycles(pipelineId, wireId) {
 export function nightSpendSinceUsd(sinceMs) {
   return windowedSpendUsd(sinceMs);
 }
+
+/** Answers worca gave on every run since `sinceMs`, and how many of them are marked to check. Guardrail
+ *  rows and cost-cap overrides are not answers. `ts` is an ISO string, so compare it as one. */
+export function nightAnsweredSince(sinceMs) {
+  const r = prepare(`SELECT COUNT(*) AS answered, COALESCE(SUM(CASE WHEN json_extract(record, '$.flagged') = 1 THEN 1 ELSE 0 END), 0) AS flagged
+    FROM night_decisions WHERE ts >= ? AND kind != 'cost-cap' AND json_extract(record, '$.guardrail') IS NULL`).get(new Date(sinceMs).toISOString());
+  return { answered: r.answered, flagged: r.flagged };
+}
