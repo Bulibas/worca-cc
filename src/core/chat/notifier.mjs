@@ -77,6 +77,8 @@ export function createNotifier({ channelHost, getPrefs, chatContext, logger = ()
         // could not be told it went unread. The CLI twin (cli/render.mjs) reads
         // orch.state directly and has always shown it.
         directions: orch?.state?.directions,
+        // Away mode's {decisions, flagged}: the finished message says how many answers to check.
+        night: orch?.state?.night,
       });
       const guard = (fn) => (payload) => {
         try { fn(payload); } catch (err) { logger('error', `chat notifier: ${err?.message || err}`); }

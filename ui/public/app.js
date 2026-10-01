@@ -168,7 +168,7 @@ import { paintAboutInto } from './about-links.mjs';
 import { renderReasonOptions, renderOptIns, previewText, reportBlobParts, REPORT_PREVIEW_DEBOUNCE_MS } from './report-run.mjs';
 import { openScheduleSheet, closeScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
-import { STATUS_ACTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindLabel } from '../../src/shared/away-mode/labels.mjs';
+import { STATUS_ACTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindLabel, awayAnswersSummary } from '../../src/shared/away-mode/labels.mjs';
 import { describeRun, describeNewRun } from '../../src/shared/away-mode/describe.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
 import { createLevelController, levelAtLeast, currentLevel, tagLevel, keepVisible, minLevelFor, LEVEL_INFO, UI_LEVELS } from './ui-level.mjs';
@@ -9598,10 +9598,10 @@ const capFirst = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
 // Project page (#projects/<key>[/memory[/<name>]]) — spec 2026-09-13-project-detail-design.md
 // ---------------------------------------------------------------------------
 // The param after "projects/" is "<key>" (Overview), "<key>/team" (Team tab), "<key>/memory"
-// (Memory tab) or "<key>/memory/<enc name>" (that file open). Keys are `<slug>-<8hex>`
+// (Memory tab), "<key>/memory/<enc name>" (that file open) or "<key>/away" (Away mode tab). Keys are `<slug>-<8hex>`
 // (store.mjs#projectKey) and never contain "/", so the first slash splits key from tab. An
 // unknown tab word reads as Overview (the hash is left alone, as History leaves an odd param alone).
-const PROJ_TABS = ['overview', 'team', 'memory'];
+const PROJ_TABS = ['overview', 'team', 'memory', 'away'];
 function parseProjParam(param = '') {
   const s = String(param || '');
   if (!s) return null;
@@ -9616,7 +9616,7 @@ function parseProjParam(param = '') {
 }
 // The canonical param for a tab: Overview is plain '<key>', never '<key>/overview'.
 function projParamFor(key, tab = 'overview', sub = '') {
-  if (tab === 'team') return `${key}/team`;
+  if (tab === 'team' || tab === 'away') return `${key}/${tab}`;
   if (tab !== 'memory') return key;
   return sub ? `${key}/memory/${encodeURIComponent(sub)}` : `${key}/memory`;
 }
@@ -9816,6 +9816,8 @@ const PD_TAB_ICONS = {
   overview: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect></svg>',
   memory: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"></path><path d="M4 20.5V5.5M8 7h8M8 10.5h6"></path></svg>',
   map: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"></circle><circle cx="19" cy="5" r="2.5"></circle><circle cx="19" cy="19" r="2.5"></circle><path d="M7.3 10.9l9.4-4.8M7.3 13.1l9.4 4.8"></path></svg>',
+  // Away mode: a door with an arrow leaving it (the developer is away).
+  away: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"></path><path d="M10 16l-4-4 4-4M6 12h9"></path></svg>',
   team: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"></circle><path d="M3.5 19c.6-3 2.8-4.6 5.5-4.6S13.9 16 14.5 19"></path><circle cx="17.5" cy="9.5" r="2.4"></circle><path d="M15.5 14.6c2.7 0 4.4 1.4 5 4.4"></path></svg>',
 };
 // Table-driven, like HD_TABS. `build(sec, key)` takes the KEY (buildArgs), never the project object.
@@ -9823,6 +9825,7 @@ const PD_TABS = [
   { key: 'overview', label: 'Overview', level: 'simple', badge: () => null, visible: () => true, build: (sec, key) => buildPdOverview(sec, key) },
   { key: 'team', label: 'Team', level: 'expert', badge: () => null, visible: () => true, build: (sec, key) => buildPdTeam(sec, key) },
   { key: 'memory', label: 'Memory', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMemory(sec, key) },
+  { key: 'away', label: 'Away mode', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdAway(sec, key) },
 ];
 function initPdTabs(screen, p) {
   initDetailTabs(screen, PD_TABS.map((t) => ({ ...t, icon: PD_TAB_ICONS[t.key] })), p, {
@@ -9918,10 +9921,17 @@ function buildPdOverview(sec, key) {
     grid.appendChild(tagLevel(card, 'expert'));
   }
   sec.appendChild(grid);
-  sec.appendChild(tagLevel(buildPdNightCard(p), 'advanced'));
   ensureHistoryLoaded();
   void paintProjectTmCells();
   void paintProjectPolicyCells();
+}
+
+// ---- Away mode tab ----
+function buildPdAway(sec, key) {
+  sec.innerHTML = '';
+  sec.classList.add('pd-sec-away');
+  const p = projectByKey(key);
+  if (p) sec.appendChild(buildPdNightCard(p));
 }
 
 // The project's Away mode layer (project_config.extra.nightMode): fields set here beat the
@@ -18062,6 +18072,8 @@ function paintHdGlance(screen, record, data) {
   host.replaceChildren();
   const done = copy.state === 'done';
   const trail = trailColumns(run);
+  const away = awayNoteEl(screen, st.night);
+  if (away) host.append(away);
   host.append(...glanceChecks(checks.map((c) => ({ ...c, origin: 'review' }))));
   host.append(...rdActivityGroups(screen, {
     overview: activityOverviewValue(results),
@@ -24167,6 +24179,28 @@ async function loadHdAwayAnswers(screen, pipelineId) {
   } catch { /* the section stays hidden */ }
 }
 
+/** The finished run's note (run page and History run page): how many answers Away mode gave and how
+ *  many to check, with a button down to the list. null when Away mode gave no answer. */
+function awayNoteEl(screen, night) {
+  const line = awayAnswersSummary(night);
+  if (!line) return null;
+  const note = document.createElement('div');
+  note.className = 'rd-away-note' + (Number(night.flagged) > 0 ? ' has-checks' : '');
+  const text = document.createElement('span');
+  text.className = 'rd-away-note-text';
+  text.textContent = `Away mode: ${line}.`;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'btn btn-ghost btn-mini';
+  b.textContent = 'See the answers';
+  b.addEventListener('click', () => {
+    const sec = screen.querySelector('.rd-night-sec');
+    if (sec && !sec.hidden) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  note.append(text, b);
+  return note;
+}
+
 /** "Answers while you were away" into `sec` (run page and History run page). */
 function paintAwayAnswers(sec, decisions) {
   if (!sec) return;
@@ -24606,12 +24640,15 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
   const record = rdHistoryRecord(r);
   // `undefined` (lookup pending) and `null` (none) must differ: only the second offers Create.
   const prSig = record ? `${record.pr === undefined ? 'u' : JSON.stringify(record.pr)}${histPrEligible(record) ? 1 : 0}` : '';
-  const sig = [r.status, glance, data ? 1 : 0, key, prSig, r.totalCostUsd, steps, currentLevel()].join('|');
+  const awaySig = r.night ? `${r.night.decisions || 0}/${r.night.flagged || 0}` : '';
+  const sig = [r.status, glance, data ? 1 : 0, key, prSig, r.totalCostUsd, steps, currentLevel(), awaySig].join('|');
   if (host.dataset.key === sig) return;
   host.dataset.key = sig;
   host.replaceChildren();
 
   const results = data && data.results;
+  const away = awayNoteEl(screen, r.night);
+  if (away) host.append(away);
   host.append(...glanceChecks(results ? hdChecks(results) : []));
   host.append(...rdActivityGroups(screen, { overview: activityOverviewValue(results), workflow: steps, diff: rdDiffRowValue(r) }));
 

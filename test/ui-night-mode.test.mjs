@@ -370,10 +370,10 @@ test('project level: a value set here marks its summary line "(this project)"', 
 test('project card: Away mode for this project, its summary, and Save re-reads GET /api/away-mode?projectDir=', async () => {
   const body = { config: { ...NIGHT_DEFAULTS, window: '22:00-07:00', timeZone: 'UTC' }, sources: {}, inherited: resolveNightConfig({ user: { window: '22:00-07:00', timeZone: 'UTC' } }), toggle: 'auto', user: {}, project: {} };
   const ctx = await boot({ away: (u) => (u.includes('projectDir=') ? body : { ...body, inherited: resolveNightConfig({}) }) });
-  ctx.window.location.hash = 'projects/proj-1';
+  ctx.window.location.hash = 'projects/proj-1/away';
   await settle(12);
-  const card = ctx.window.document.querySelector('.pd-night-card');
-  assert.ok(card, 'the card is on the Overview');
+  const card = ctx.window.document.querySelector('.pd-sec[data-sec="away"] .pd-night-card');
+  assert.ok(card, 'the card is on the project\'s Away mode tab');
   assert.equal(card.querySelector('.card-head b').textContent, 'Away mode for this project');
   assert.match(card.querySelector('.card-head').textContent, /Anything left as "Same as my settings" uses your Settings page/);
   assert.match(card.querySelector('.away-summary').textContent, /^For proj: /);
@@ -452,4 +452,42 @@ test('New run: "Mark this run" and the hint from describeNewRun', async () => {
   assert.equal(doc.getElementById('nightModeHint').textContent, describeNewRun({ config: body.config, toggle: body.toggle }));
   const off = await boot({ away: () => awayBody({ toggle: 'off' }) });
   assert.match(off.window.document.getElementById('nightModeHint').textContent, /^Away mode is paused/);
+});
+
+test('run view: a finished run Away mode answered gets a note at the top of its result', async () => {
+  const ctx = await boot();
+  const screen = await openDetail(ctx);
+  ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 7, status: 'done', night: { optIn: true, override: 'auto', decisions: 5, flagged: 2 } });
+  await settle();
+  const note = screen.querySelector('.rd-result .rd-away-note');
+  assert.ok(note, 'the note shows on the finished run');
+  assert.equal(note.querySelector('.rd-away-note-text').textContent, 'Away mode: 5 answers while you were away — 2 to check.');
+  assert.ok(note.classList.contains('has-checks'));
+});
+
+test('run view: no note while the run is live, none when Away mode never answered', async () => {
+  const ctx = await boot();
+  const screen = await openDetail(ctx);
+  ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 7, status: 'running', night: { optIn: true, override: 'auto', decisions: 3, flagged: 1 } });
+  await settle();
+  assert.equal(screen.querySelector('.rd-away-note'), null, 'live run: the answers list carries it');
+  ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 8, status: 'done', night: { optIn: true, override: 'auto', decisions: 0, flagged: 0 } });
+  await settle();
+  assert.equal(screen.querySelector('.rd-away-note'), null);
+});
+
+test('project page: Away mode is its own tab after Memory, and the Overview no longer carries it', async () => {
+  const body = { config: { ...NIGHT_DEFAULTS }, sources: {}, inherited: resolveNightConfig({}), toggle: 'auto', user: {}, project: {} };
+  const ctx = await boot({ away: () => body });
+  ctx.window.location.hash = 'projects/proj-1';
+  await settle(12);
+  const doc = ctx.window.document;
+  const pills = [...doc.querySelectorAll('#proj-detail .pd-tab')].map((b) => b.dataset.sec);
+  assert.ok(pills.indexOf('away') === pills.indexOf('memory') + 1, `away right after memory: ${pills.join(',')}`);
+  assert.equal(doc.querySelector('#proj-detail .pd-tab[data-sec="away"]').textContent.trim(), 'Away mode');
+  assert.equal(doc.querySelector('.pd-sec[data-sec="overview"] .pd-night-card'), null, 'not on the Overview');
+  doc.querySelector('#proj-detail .pd-tab[data-sec="away"]').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
+  await settle(8);
+  assert.equal(ctx.window.location.hash, '#projects/proj-1/away', 'the pill writes its own route');
+  assert.ok(doc.querySelector('.pd-sec[data-sec="away"] .pd-night-card'));
 });

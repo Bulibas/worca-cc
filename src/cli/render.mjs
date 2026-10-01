@@ -16,6 +16,7 @@
 // Flow nodes never print a start/paused/error line; `skipped` and P8's bookend
 // executions render nothing; `token` events are never rendered.
 import { BOOKEND_EXECUTION_IDS, KEYED_KINDS } from '../shared/graph/constants.mjs';
+import { awayAnswersSummary } from '../shared/away-mode/labels.mjs';
 
 const nodesOf = (m) => ((m && m.graph && m.graph.nodes) || []).filter(Boolean);
 const wiresOf = (m) => ((m && m.graph && m.graph.wires) || []).filter(Boolean);
@@ -170,6 +171,8 @@ export function formatRunSummary(state) {
   if (Array.isArray(st.directions?.pending) && st.directions.pending.length) {
     lines.push(`${st.directions.pending.length} direction(s) never applied: ${st.directions.pending.map((d) => `${d.id} "${d.text}"`).join('; ')}`);
   }
+  const away = awayAnswersSummary(st.night);
+  if (away) lines.push(`Away mode: ${away}`);
   return lines;
 }
 

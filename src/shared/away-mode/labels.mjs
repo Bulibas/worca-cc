@@ -72,3 +72,12 @@ export function pillText(state, minutes = 0) {
     default: return 'waiting for you';
   }
 }
+
+/** The end-of-run line every existing channel uses (chat, CLI, run pages): "5 answers while you were
+ *  away — 2 to check", or null when Away mode gave no answer. `night` = the run's {decisions, flagged}. */
+export function awayAnswersSummary(night) {
+  const n = Math.max(0, Number(night && night.decisions) || 0);
+  if (!n) return null;
+  const m = Math.min(n, Math.max(0, Number(night.flagged) || 0));
+  return `${n} answer${n === 1 ? '' : 's'} while you were away — ${m ? `${m} to check` : 'nothing to check'}`;
+}

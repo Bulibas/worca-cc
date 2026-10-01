@@ -267,3 +267,12 @@ test('renderDone/renderError: an unread direction is reported on every terminal 
     assert.doesNotMatch(r.body[0].value, /Directions pending/);
   }
 });
+
+test('renderDone: a run Away mode answered says so, with how many to check', () => {
+  for (const status of ['done', 'stopped', 'paused']) {
+    const m = renderDone({ ...META, night: { decisions: 5, flagged: 2 } }, { status, reason: status === 'paused' ? 'manual' : undefined });
+    assert.match(m.body[0].value, /\*\*Away mode:\*\* 5 answers while you were away — 2 to check/, status);
+  }
+  assert.match(renderError({ ...META, night: { decisions: 1, flagged: 1 } }, { message: 'x' }).body[0].value, /\*\*Away mode:\*\* 1 answer while you were away — 1 to check/);
+  assert.doesNotMatch(renderDone(META, { status: 'done' }).body[0].value, /Away mode/);
+});

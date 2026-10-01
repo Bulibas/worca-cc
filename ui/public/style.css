@@ -4378,6 +4378,9 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .rd-night-pill:empty{display:none}
 .rd-night-pill[data-state="now"]{border-color:var(--amber);background:var(--amber-wash)}
 .rd-night-sec{margin:14px 0}
+/* The finished run's Away mode note, at the top of the result sheet. */
+.rd-away-note{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--panel);font-size:13px}
+.rd-away-note.has-checks{border-left:3px solid var(--amber);background:var(--amber-wash)}
 .rd-night-sec h3{font-size:13px;margin:0 0 8px}
 .rd-night-decisions{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
 .rd-night-decisions li{padding:8px 12px;border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--panel)}

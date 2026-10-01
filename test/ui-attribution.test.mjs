@@ -390,6 +390,29 @@ test('History run page: "Answers while you were away" lists the stored answers',
   assert.match(rows[1].textContent, /Fix again or continue, in a review loop/);
 });
 
+test('History run page: a note at the top of the result says how many answers to check', async () => {
+  const sec = await detailNote({ night: { optIn: true, override: 'auto', decisions: 4, flagged: 1 } });
+  assert.equal(sec.querySelector('.rd-away-note-text').textContent, 'Away mode: 4 answers while you were away — 1 to check.');
+  assert.equal(sec.querySelector('.rd-away-note button').textContent, 'See the answers');
+  assert.equal(await detailNote({ night: { decisions: 0, flagged: 0 } }), null);
+});
+
+async function detailNote(state) {
+  const ctx = await boot({ whoami: SOLO, fetchHandler: (u) => {
+    if (u.includes('/api/night-decisions')) return ok({ decisions: [] });
+    if (u.endsWith('/api/history/pr')) return ok({ ok: true });
+    if (u.endsWith('/diff')) return fail(404, { error: 'no diff' });
+    if (u.endsWith('/log')) return fail(404, { error: 'no log' });
+    if (u.endsWith('/api/history')) return ok({ pipelines: [DETAIL_ROW], ghAvailable: false });
+    if (u.endsWith(`/api/history/${KEY}/${DETAIL_ROW.id}`)) return ok(detailOf(state));
+    return null;
+  } });
+  go(ctx.window, `history/${KEY}/${DETAIL_ROW.id}`);
+  await settle(ctx.window, 8);
+  const note = ctx.doc.querySelector('#hist-detail .hd-result .rd-away-note');
+  return note ? note.parentElement : null;
+}
+
 test('History run page: no Away mode answers, no section', async () => {
   const ctx = await boot({ whoami: SOLO, fetchHandler: (u) => {
     if (u.includes('/api/night-decisions')) return ok({ decisions: [] });

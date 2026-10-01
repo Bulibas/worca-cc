@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { KIND_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, FIELD_LABELS, WHICH_RUNS_OPTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, STATUS_ACTIONS, kindLabel, pillText } from '../src/shared/away-mode/labels.mjs';
+import { awayAnswersSummary, KIND_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, FIELD_LABELS, WHICH_RUNS_OPTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, STATUS_ACTIONS, kindLabel, pillText } from '../src/shared/away-mode/labels.mjs';
 import { NIGHT_KINDS, NIGHT_STRATEGIES, NIGHT_CRITERIA, NIGHT_FIELDS } from '../src/core/night/config.mjs';
 
 test('every kind, method, criterion and field has a plain label', () => {
@@ -33,4 +33,12 @@ test('run switch, status actions and pill wording', () => {
   assert.equal(kindLabel('cost-cap'), "Continuing past the team's cost cap");
   assert.equal(pillText('after', 12), 'answers after 12 min');
   assert.equal(pillText('now'), 'answering');
+});
+
+test('awayAnswersSummary: the one line every end-of-run channel uses', () => {
+  assert.equal(awayAnswersSummary({ decisions: 5, flagged: 2 }), '5 answers while you were away — 2 to check');
+  assert.equal(awayAnswersSummary({ decisions: 1, flagged: 0 }), '1 answer while you were away — nothing to check');
+  assert.equal(awayAnswersSummary({ decisions: 0, flagged: 0 }), null);
+  assert.equal(awayAnswersSummary(null), null);
+  assert.equal(awayAnswersSummary({ decisions: 2, flagged: 9 }), '2 answers while you were away — 2 to check', 'never more to check than answers');
 });
