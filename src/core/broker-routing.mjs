@@ -7,6 +7,8 @@
 //                           gateway named in the broker's slots file -> that slot)
 //   - a keyless local endpoint (llama.cpp, Ollama, LM Studio on this machine or network)
 //                        -> no slot: it holds no key, the bridge reaches it directly
+//   - a plugin model whose key is a plugin secret -> that plugin's own slot
+//                           (plugin-broker-slots.mjs; bridged ones match by origin above)
 //   - anything else      -> the anthropic slot, or the slot its ANTHROPIC_BASE_URL names
 // Synchronous: reads the broker info cached at boot and on every spawn (broker-client.mjs).
 import { brokerEnabled, cachedBrokerInfo, slotOfBaseUrl } from './broker-client.mjs';
@@ -14,6 +16,7 @@ import { isLocalBaseUrl } from './model-env.mjs';
 import { findBridgedEntry } from './bridge/registry.mjs';
 import { providerConfig, listGlobalModels } from './settings.mjs';
 import { listPluginModels } from './plugin-models.mjs';
+import { pluginModelRoute } from './plugin-broker-slots.mjs';
 
 const DEFAULT_BASE = Object.freeze({ openai: 'https://api.openai.com/v1', anthropic: 'https://api.anthropic.com' });
 
@@ -128,6 +131,9 @@ export function modelSlot(modelId) {
     const r = routeBridgedUpstream(bridged.upstream);
     return r.slot ? { slot: r.slot } : r;
   }
+  // An env-style plugin model with a plugin secret: its own plugin slot (plugin-broker-slots.mjs).
+  const pr = pluginModelRoute(id);
+  if (pr) return pr.slot ? { slot: pr.slot } : pr;
   const lc = id.toLowerCase();
   let entry = null;
   try { entry = listGlobalModels().find((m) => m.id.toLowerCase() === lc) || listPluginModels().find((m) => m.id.toLowerCase() === lc) || null; } catch { entry = null; }

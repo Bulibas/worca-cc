@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { readBrokerConfig } from './config.mjs';
-import { builtinSlots, mergeSlots } from './slots.mjs';
+import { builtinSlots, mergeSlots, PLUGIN_SLOT_PREFIX } from './slots.mjs';
 import { openStore } from './store.mjs';
 import { createBrokerService } from './service.mjs';
 import { createUiHandler } from './ui-server.mjs';
@@ -36,7 +36,8 @@ export function loadBroker(env = process.env) {
     errors.push('WORCA_BROKER_KEY_* is for single mode; in multi mode each person saves their own key on the key page (WORCA_BROKER_ALLOW_TEAM_KEYS=1 allows team keys for operator slots)');
   }
   for (const id of Object.keys(config.singleKeys)) {
-    if (!slots.some((s) => s.id === id)) errors.push(`WORCA_BROKER_KEY_${id.toUpperCase().replace(/-/g, '_')} names an unknown slot`);
+    // A plugin slot (p-…) only exists once worca registers it.
+    if (!id.startsWith(PLUGIN_SLOT_PREFIX) && !slots.some((s) => s.id === id)) errors.push(`WORCA_BROKER_KEY_${id.toUpperCase().replace(/-/g, '_')} names an unknown slot`);
   }
   return { config: { ...config, version: version() }, slots, errors };
 }
