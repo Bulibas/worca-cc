@@ -40,6 +40,7 @@ import { pauseExitCode, describePauseReason, promptOptions, REASON } from '../co
 import { effectiveDebugSpawn } from '../core/settings.mjs';
 import { SCHEDULE_VALUE_FLAGS, wantsSchedule, readScheduleFlags, createFromFlags, waitAndRun, cmdSchedule } from './schedule.mjs';
 import { cmdRuns } from './runs.mjs';
+import { cmdLogs } from './logs.mjs';
 import { cmdModels } from './models.mjs';
 import { cmdContainer } from './container.mjs';
 import {
@@ -270,6 +271,8 @@ Subcommands:
     [--past-team-cap]         Continue past a TEAM cap (soft; recorded to team metrics). Add --reason "<why>".
   runs [list|show|<id>]       List pipeline runs across projects, or show one in detail
                               (any unique prefix; --json for machines). See: worca runs help
+  logs <id> [-f]              Tail a run's live log (--tail N, --component, --level,
+                              --json). -f follows; Ctrl-C detaches, the run continues. See: worca logs help
   doctor                      Reconcile crashed runs and sweep leftover run roots.
   plugin <cmd> [...]          Manage plugins: add|install|list|update|remove|purge|enable|
                               disable|doctor|link|reimport|init|validate|exec. See: worca plugin help
@@ -3118,7 +3121,7 @@ async function drainMetricsFlushes() {
 
 // ── main ──────────────────────────────────────────────────────────────────────────
 
-const SUBCOMMANDS = new Set(['add', 'list', 'remove', 'resume', 'runs', 'doctor', 'plugin', 'marketplace', 'config', 'ui', 'workflow', 'metrics', 'script', 'policy', 'schedule', 'models', 'container', 'broker']);
+const SUBCOMMANDS = new Set(['add', 'list', 'remove', 'resume', 'runs', 'logs', 'doctor', 'plugin', 'marketplace', 'config', 'ui', 'workflow', 'metrics', 'script', 'policy', 'schedule', 'models', 'container', 'broker']);
 
 /** Levenshtein distance, two-row. Only ever called on short argv tokens. */
 function editDistance(a, b) {
@@ -3173,6 +3176,7 @@ async function main() {
     if (sub === 'remove') return cmdRemove(rest);
     if (sub === 'resume') return cmdResume(rest);
     if (sub === 'runs') return cmdRuns(rest, { out, c, fail });
+    if (sub === 'logs') return cmdLogs(rest, { out, c, fail });
     if (sub === 'doctor') return cmdDoctor();
     if (sub === 'plugin') return cmdPlugin(rest);
     if (sub === 'marketplace') return cmdMarketplace(rest);
