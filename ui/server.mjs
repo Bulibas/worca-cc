@@ -23,7 +23,7 @@ import { preflightDeps } from '../src/core/preflight-deps.mjs';
 import { createOrchestratorFor } from '../src/core/engine-select.mjs';
 import {
   listPipelines, readPipeline, listAllPipelines, readPipelineByKey,
-  enrichPipelinesPr, reconcileStaleRunning, readPipelineForResume, persistPrState, readPrState,
+  enrichPipelinesPr, reconcileStaleRunning, foreignActiveWorkspaceRuns, readPipelineForResume, persistPrState, readPrState,
   readRunLogText, readRunArtifactText, countPipelines, runRootSweepLookups, legacySweepLookups, slugify,
   listArtifacts, listRunArtifacts, lookupPipelineRow, findPipelineRowById, readPipelineStateById, resolveIndexedArtifact, resolveIndexedArtifactForRow,
   resolveIndexedArtifactFileForRow, readPromptFile, runDirForRow, recordArtifact, appendAudit,
@@ -185,6 +185,8 @@ import { scheduleEventPrompt, scheduleNoticeText } from '../src/core/ask/schedul
 import { applyModelChange } from '../src/core/ask/model-deps.mjs';
 import { modelEventPrompt, modelNoticeText } from '../src/core/ask/model-proposal.mjs';
 import { cloneEventPrompt, cloneNoticeText } from '../src/core/ask/clone-proposal.mjs';
+import { workspaceEventPrompt, workspaceNoticeText } from '../src/core/ask/workspace-proposal.mjs';
+import { applyWorkspaceChange } from '../src/core/ask/workspace-deps.mjs';
 import { webEventPrompt, webNoticeText, chatWebHosts } from '../src/core/ask/web-proposal.mjs';
 import { hostAllowed as askHostAllowed } from '../src/core/web-allowlist.mjs';
 import { registryPortsFn } from '../src/core/graph/registry-ports.mjs';
@@ -215,6 +217,7 @@ import {
   updateWorkspace, deleteWorkspace, isGitRepo, WORKSPACE_KEY_RE, countWorkspaces,
   readWorkspaceMap, setWorkspaceEdgeState, addWorkspaceManualEdge, removeWorkspaceManualEdge,
   regenerateWorkspaceDescription,
+  addWorkspaceMembers, removeWorkspaceMember, rootsHash, workspaceSetHash,
 } from '../src/core/workspaces.mjs';
 import { effectiveEdges } from '../src/shared/workspace-map/overrides.mjs';
 import { WORKSPACE_SCAN_WORKFLOW_ID, WORKSPACE_SCAN_DEFAULT_MODELS } from '../src/core/graph/builtin-workflows.mjs';
@@ -942,6 +945,13 @@ function wireRun(entry) {
         // _finalizeWorkspaceScan, which ran before this event) — refresh every open list (D13).
         const scanOutcome = orch.state?.workspaceScan?.outcome;
         if (scanOutcome === 'created' || scanOutcome === 'updated') emitChanged('workspaces-changed', `scan-${scanOutcome}`);
+        // An automatic re-scan (afterMembersChanged) tells its workspace page how it ended; one a
+        // newer member change superseded says nothing — its successor reports instead.
+        if (entry.autoRescan && !entry.superseded) {
+          const how = entry.status === 'done' ? (scanOutcome === 'updated' ? 'description' : 'rescan-failed')
+            : entry.status === 'stopped' ? 'rescan-stopped' : entry.status === 'paused' ? 'rescan-paused' : 'rescan-failed';
+          broadcast({ type: 'workspaces-changed', action: how, workspaceId: entry.workspaceId, runId: entry.id });
+        }
       }
       if (name === 'error') {
         // The launch-error channel (a failure BEFORE the pipeline row exists). A
@@ -2523,7 +2533,9 @@ async function fireTicket(ticket) {
         for (const dir of ws.projectPaths) {
           const key = projectKey(dir);
           const br = prev.sourceBranchByKey[key];
-          if (!br) return { ok: false, error: `the run before it has no branch for ${path.basename(dir)}`, transient: false };
+          // A member added after the run before it: no branch of its own yet, so it starts from
+          // its default source branch (buildWorkspaceMembers' fallback for a key the map lacks).
+          if (!br) continue;
           if (!(await isValidSourceRef(dir, br))) return { ok: false, error: `branch ${br} no longer exists in ${path.basename(dir)}`, transient: false };
         }
       }
@@ -3432,6 +3444,7 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     pipelineId,
   };
   runs.set(runId, entry);
+  markResumedRescan(entry);   // before the paused lineage is evicted below
   wireRun(entry);
   announceRun(entry);
 
@@ -5489,9 +5502,22 @@ app.get('/api/fs/dirs', async (req, res) => {
 // /api/projects + /api/workflows. The :id is the workspaceKey, validated against
 // WORKSPACE_KEY_RE before any disk touch (a stale/crafted id reads as 404).
 // ---------------------------------------------------------------------------
+/** The automatic re-scan run (autoRescan: started after a member change) that still owns a
+ *  workspace, or null — a paused one included (it resumes into the workspace). The page's loader
+ *  follows it after a reload, and shows a paused one as paused: its rescan-paused frame is gone. */
+function liveAutoRescan(id) {
+  for (const r of runs.values()) if (r.workspaceId === id && r.autoRescan && ownsWorkspaceTarget(r)) return r;
+  return null;
+}
+function liveRescanOf(id) {
+  const r = liveAutoRescan(id);
+  return r ? { runId: r.id, pipelineId: r.pipelineId || null, paused: String(r.status).toLowerCase() === 'paused' } : null;
+}
+const withRescan = (w) => { const rescan = w && liveRescanOf(w.id); return rescan ? { ...w, rescan } : w; };
+
 app.get('/api/workspaces', async (_req, res) => {
   try {
-    res.json({ workspaces: await listWorkspaces() });
+    res.json({ workspaces: (await listWorkspaces()).map(withRescan) });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -5503,7 +5529,7 @@ app.get('/api/workspaces/:id', async (req, res) => {
   try {
     const workspace = await readWorkspace(id);
     if (!workspace) return res.status(404).json({ error: 'workspace not found' });
-    res.json({ workspace });
+    res.json({ workspace: withRescan(workspace) });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -5535,9 +5561,10 @@ app.patch('/api/workspaces/:id', async (req, res) => {
   const id = req.params.id;
   if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
   const body = req.body || {};
-  // Immutability (defense-in-depth, §2.3): the project set never changes via PATCH.
+  // The member set never changes via PATCH (defense-in-depth, §2.3): it has its own
+  // route, POST /api/workspaces/:id/members, behind the live-run guard.
   if ('projectPaths' in body || 'projectKeys' in body) {
-    return badRequest(res, 'a workspace project set is immutable; PATCH accepts only name/description/metricsProject');
+    return badRequest(res, 'PATCH accepts only name/description/metricsProject/policyProject; change members with POST /api/workspaces/:id/members');
   }
   // Pass through only the editable fields.
   const patch = {};
@@ -5563,6 +5590,118 @@ app.patch('/api/workspaces/:id', async (req, res) => {
     if ('metricsProject' in patch) emitChanged('workspaces-changed', 'metrics-home');
     if ('policyProject' in patch) { emitChanged('workspaces-changed', 'policy-home'); emitChanged('team-policy-changed', 'policy-home'); }
     res.json({ workspace });
+  } catch (err) {
+    const status = workspaceErrorStatus(err && err.code);
+    return res.status(status).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+/** A run that owns this workspace blocks a member change: in THIS process any active run or a
+ *  paused Workspace scan (ownsWorkspaceTarget) — except an automatic re-scan, which the change
+ *  supersedes (supersedeRescans) — and any active run another live process (the CLI) owns: its
+ *  metrics / policy home must not move under it. A crashed owner's row is reconciled first. */
+function workspaceMembersBusy(id) {
+  if ([...runs.values()].some((r) => r.workspaceId === id && !r.autoRescan && ownsWorkspaceTarget(r))) return true;
+  const liveIds = [...runs.values()].flatMap((r) => [r.id, r.pipelineId]).filter(Boolean);
+  try { reconcileStaleRunning({ liveIds: liveRunIds() }); } catch { /* best-effort */ }
+  return foreignActiveWorkspaceRuns(id, { liveIds }).length > 0;
+}
+
+/** A resumed run gets a new entry (and runId): when the entry it resumes was an automatic
+ *  re-scan, tag it again — the members route still supersedes it rather than refusing, and its
+ *  end still reports to the workspace page — and tell the page to follow the new run. */
+function markResumedRescan(entry) {
+  const was = [...runs.values()].some((e) => e !== entry && e.pipelineId && e.pipelineId === entry.pipelineId && e.autoRescan && !e.superseded);
+  if (!was) return;
+  entry.autoRescan = true;
+  broadcast({ type: 'workspaces-changed', action: 'rescan-resumed', workspaceId: entry.workspaceId, runId: entry.id });
+}
+
+/** Stop the automatic re-scan still owning a workspace: its member set is out of date. */
+function supersedeRescans(id) {
+  for (const r of runs.values()) {
+    if (r.workspaceId !== id || !r.autoRescan || !ownsWorkspaceTarget(r)) continue;
+    r.superseded = true;
+    try { stopRun(r.id, 'worca'); } catch { /* best-effort: its save refuses a changed set anyway */ }
+  }
+}
+
+/**
+ * Start a re-scan of a workspace from inside the server, through the same launch as
+ * POST /api/workspaces/:id/scan (scanRequest), and tag its run as automatic. A workspace the
+ * scan cannot read (a member that is not its own repository with a commit), a scan model that
+ * no longer fits, or a signed-out CLI skips it with the reason — the page offers Re-scan.
+ * @returns {Promise<{runId:string}|{skipped:string}>}
+ */
+async function startAutoRescan(ws) {
+  const problems = scanMemberProblems(ws.projectPaths);
+  if (problems.length) return { skipped: `read-only workspace scan: ${problems.join('; ')}` };
+  let models;
+  try { models = await scanModelsFor({}, ws.projectPaths); }
+  catch (err) { return { skipped: err && err.message ? err.message : String(err) }; }
+  if (!(models && modelHasBaseUrlRouting(models.scanModel))) {
+    const { state } = await probeClaudeAuth({ bin: configuredClaudeBin(), mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK) });
+    if (state === 'signed-out') return { skipped: CLAUDE_SIGNED_OUT_MESSAGE };
+  }
+  let out = { status: 200, body: null };
+  const res = {
+    statusCode: 200, headersSent: false,
+    status(code) { this.statusCode = code; return this; },
+    json(payload) { out = { status: this.statusCode, body: payload }; this.headersSent = true; return this; },
+  };
+  await scanRequest({ body: {} }, res, { id: ws.id, name: ws.name, projectPaths: ws.projectPaths, rescan: true, models });
+  const runId = out.body && out.body.runId;
+  const entry = runId ? runs.get(runId) : null;
+  if (!entry) return { skipped: (out.body && out.body.error) || `the re-scan could not start (HTTP ${out.status})` };
+  entry.autoRescan = true;
+  return { runId };
+}
+
+/**
+ * After a member change (the members route and Ask's workspace card): discover the added
+ * members' metrics / policy branches (so the Team tab and the homes read them at once), stop an
+ * automatic re-scan of the old set, and re-scan the workspace — per-member graphify graphs, the
+ * map and a new description, saved when the run ends done. Runs build their own graphs per
+ * member worktree from the registry at start, so the next run already covers the new set.
+ * @returns {Promise<{runId:string}|{skipped:string}>}
+ */
+async function afterMembersChanged(workspace, added = []) {
+  for (const dir of added) {
+    discoverProject(dir, { force: true }).then(() => emitChanged('team-metrics-changed', 'discovered')).catch(() => { /* retried hourly */ });
+    discoverPolicy(dir, { force: true }).then(() => emitChanged('team-policy-changed', 'discovered')).catch(() => { /* retried hourly */ });
+  }
+  supersedeRescans(workspace.id);
+  try { return await startAutoRescan(workspace); }
+  catch (err) { return { skipped: err && err.message ? err.message : String(err) }; }
+}
+
+// Change the member set: body {add: [paths]} or {remove: path}. The id stays frozen
+// (workspaces.mjs D1). 409 while a run (or a scan the user started) owns the workspace —
+// a live run keeps its own frozen members, but the metrics / policy home it resolves at
+// its end must not move under it, and a scan would save a map of the old set. Removing the home member clears that home
+// (clearedHomes). Every change re-scans the workspace (afterMembersChanged -> rescan).
+app.post('/api/workspaces/:id/members', async (req, res) => {
+  const id = req.params.id;
+  if (!WORKSPACE_KEY_RE.test(id)) return res.status(404).json({ error: 'workspace not found' });
+  const body = req.body || {};
+  const adding = Array.isArray(body.add);
+  const removing = typeof body.remove === 'string';
+  if (adding === removing) return badRequest(res, 'give add (an array of project paths) or remove (one project path)');
+  if (workspaceMembersBusy(id)) return res.status(409).json({ error: 'cannot change the members of a workspace while a run or scan owns it' });
+  try {
+    const before = await readWorkspace(id);
+    if (!before) return res.status(404).json({ error: 'workspace not found' });
+    const workspace = adding
+      ? await addWorkspaceMembers(id, body.add.map((p) => resolveProjectDir(p)).filter(Boolean))
+      : await removeWorkspaceMember(id, body.remove);
+    const rescan = await afterMembersChanged(workspace, workspace.projectPaths.filter((p) => !before.projectPaths.includes(p)));
+    const clearedHomes = [
+      ...(before.metricsProject && !workspace.metricsProject ? ['metrics'] : []),
+      ...(before.policyProject && !workspace.policyProject ? ['policy'] : []),
+    ];
+    emitChanged('workspaces-changed', 'members');
+    if (clearedHomes.includes('policy')) emitChanged('team-policy-changed', 'policy-home');
+    res.json({ workspace, clearedHomes, rescan });
   } catch (err) {
     const status = workspaceErrorStatus(err && err.code);
     return res.status(status).json({ error: err && err.message ? err.message : String(err) });
@@ -5678,8 +5817,10 @@ app.post('/api/workspaces/:id/map/render', async (req, res) => {
  *  has answered — by then the runs entry exists. */
 const pendingScans = new Set();
 
-/** The 8-hex roots hash a workspace id ends in (workspaces.mjs workspaceKey) — name-independent. */
-const setHashOf = (id) => String(id).slice(-8);
+/** The 8-hex roots hash of the set a run's workspace spans: the stored workspace's CURRENT members
+ *  (its id keeps the hash of the set it was created over — members can change since), else the
+ *  hash its id ends in (workspaces.mjs workspaceKey; a first scan's workspace does not exist yet). */
+const setHashOf = (id) => workspaceSetHash(id) ?? String(id).slice(-8);
 
 /** A run entry that still owns its workspace target: any ACTIVE run (no workflowId test — a
  *  just-resumed entry reads `wf_default` until resume() restores it), or a PAUSED Workspace scan
@@ -5692,14 +5833,15 @@ function ownsWorkspaceTarget(r) {
     || (s === 'paused' && r.orch?.workflowId === WORKSPACE_SCAN_WORKFLOW_ID);
 }
 
-/** A run over this PROJECT SET that owns it, or a scan of it still launching. For a first scan the
- *  set has no workspace (checkNewWorkspace refused a duplicate set), so any such run IS a scan,
- *  under any name; for a re-scan it is any active run of that workspace or a paused scan of it (D4). */
-function liveOverSet(id) {
-  const hash = setHashOf(id);
+/** A run of this workspace or over this PROJECT SET that owns it, or a scan of the set still
+ *  launching. For a first scan the set has no workspace (checkNewWorkspace refused a duplicate set),
+ *  so any such run IS a scan, under any name; for a re-scan it is any active run of that workspace
+ *  or a paused scan of it (D4). */
+function liveOverSet(id, projectPaths) {
+  const hash = rootsHash(projectPaths);
   if (pendingScans.has(hash)) return true;
   return [...runs.values()].some((r) => r.kind === 'workspace-run' && typeof r.workspaceId === 'string'
-    && setHashOf(r.workspaceId) === hash && ownsWorkspaceTarget(r));
+    && ownsWorkspaceTarget(r) && (r.workspaceId === id || setHashOf(r.workspaceId) === hash));
 }
 
 /** The run's primary member: the lowest projectKey — startRunHandler sorts members the same way,
@@ -5747,10 +5889,10 @@ async function scanModelsFor(body, projectPaths) {
  *  NO await between them: a second request for the same set, arriving while this one is still
  *  inside startRunHandler's awaits, finds the reservation and gets 409 (Review Focus 3). */
 async function scanRequest(req, res, { id, name, projectPaths, rescan, models }) {
-  if (liveOverSet(id)) {
+  if (liveOverSet(id, projectPaths)) {
     return res.status(409).json({ error: rescan ? 'a live run exists for this workspace' : 'a scan of this project set is already running' });
   }
-  const hash = setHashOf(id);
+  const hash = rootsHash(projectPaths);
   pendingScans.add(hash);
   try {
     const mock = !!(req.body && req.body.mock === true);
@@ -7909,7 +8051,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
         // workflowId once the user saved it; a run card keeps its pre-P3 line byte for byte.
         const wf = !!(b.card && b.card.type === 'workflow');
         if (wf && b.state === 'building') continue;   // transient (no name yet) — never worth a header line
-        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web')) {
+        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'workspace')) {
           cards.push({ id: b.id, type: b.card.type, state: b.state, summary: b.card.summary || '' });
           continue;
         }
@@ -8361,9 +8503,9 @@ async function startMetricsEventTurn(threadId, block) {
   const state = block.state === 'declined' ? 'declined' : block.state === 'failed' ? 'failed' : 'applied';
   const result = card.result || null;
   // One event turn for every non-workflow card; the type picks the wording. Metrics is the fallback.
-  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' ? card.type : 'metrics';
-  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, metrics: metricsEventPrompt }[kind];
-  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, metrics: metricsNoticeText }[kind];
+  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' ? card.type : 'metrics';
+  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, workspace: workspaceEventPrompt, metrics: metricsEventPrompt }[kind];
+  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, workspace: workspaceNoticeText, metrics: metricsNoticeText }[kind];
   const text = eventPrompt({ cardId: block.id, state, card, result });
   const notice = noticeText({ state, card, result });
   let mv = await validateModelEffort(thread.model, thread.effort);
@@ -8491,6 +8633,49 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
           if (body.scope === 'always') { await addAskWebHost(host); emitChanged('settings-changed'); }
           result = { ok: true, scope: body.scope };
         } catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err) }; }
+        block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
+      } finally { askCardBusy.delete(cardId); }
+      if (!block) return res.status(409).json({ error: 'card vanished' });
+      const turn = await startMetricsEventTurn(id, block);
+      return res.json({ block, turn });
+    }
+    if (found.block.card && found.block.card.type === 'workspace') {
+      // Workspace card: proposed → applied | failed | declined. The registry write happens HERE, behind the
+      // click, through the same core functions as the workspace routes — and behind the same live-run guard.
+      if (body.state !== 'applied' && body.state !== 'declined') return badRequest(res, 'state must be "applied" or "declined"');
+      if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
+      if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
+      if (body.state === 'declined') {
+        const block = flipCard(id, cardId, { state: 'declined' });
+        if (!block) return res.status(409).json({ error: 'card vanished' });
+        const turn = await startMetricsEventTurn(id, block);
+        return res.json({ block, turn });
+      }
+      askCardBusy.add(cardId);
+      let block;
+      try {
+        const card = found.block.card;
+        const wid = card.change && card.change.workspaceId;
+        let result;
+        try {
+          if (card.kind !== 'create' && card.kind !== 'rename' && wid && workspaceMembersBusy(wid)) {
+            throw new Error('cannot change the members of a workspace while a run or scan owns it');
+          }
+          const before = wid ? await readWorkspace(wid) : null;
+          result = await applyWorkspaceChange(card);
+          if (card.kind !== 'rename') {
+            // A new or changed member set: discover the new members and re-scan (graphs + description).
+            const ws = await readWorkspace(result.workspaceId);
+            if (ws) {
+              const rescan = await afterMembersChanged(ws, ws.projectPaths.filter((p) => !(before?.projectPaths || []).includes(p)));
+              result = rescan.runId
+                ? { ...result, rescanRunId: rescan.runId, detail: `${result.detail} · re-scanning the workspace` }
+                : { ...result, detail: `${result.detail} · no re-scan (${rescan.skipped})` };
+            }
+          }
+          emitChanged('workspaces-changed', card.kind === 'create' ? 'created' : card.kind === 'rename' ? 'renamed' : 'members');
+          if (result.clearedHomes.includes('policy')) emitChanged('team-policy-changed', 'policy-home');
+        } catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err), code: (err && err.code) || 'ERROR' }; }
         block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
       } finally { askCardBusy.delete(cardId); }
       if (!block) return res.status(409).json({ error: 'card vanished' });
@@ -10208,7 +10393,7 @@ if (isMain) {
 
 export { app, server, runs };
 export const _testing = {
-  wireRun, summarizeRuns, scanRequest, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
+  wireRun, summarizeRuns, scanRequest, fireTicket, afterMembersChanged, markResumedRescan, wireAgentGen, startAgentGen, wireScriptBench, startScriptBench,
   chatActions, chatRouter, channelHost, handleChatInbound, enqueueChatWork, answerRun,
   chatNotifier, resumeRun, resolveHljsAssets, resolveEsmAsset, askJobs, askFollowers, askDeleting, resolveAskContext, flipCard, askWebAccessFor,
   startCloneJob, followCloneCard, CLONE_JOBS,

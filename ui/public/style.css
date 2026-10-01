@@ -1157,7 +1157,7 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .af-open[hidden]{display:none;}
 .af-pdf{display:flex;flex-direction:column;gap:8px;}
 .af-pdf-bar{display:flex;align-items:center;gap:9px;}
-.af-pdf-frame{width:100%;height:520px;border:1px solid var(--line);border-radius:12px;background:var(--field);}
+.af-pdf-frame{width:100%;height:520px;border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--field);}
 .af-code{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel);}
 .af-code-bar{display:flex;align-items:center;gap:10px;padding:7px 12px;background:var(--field);
   border-bottom:1px solid var(--line);font:600 11px var(--mono);color:var(--ink-2);}
@@ -1541,7 +1541,35 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .wd-member-list{display:flex;flex-direction:column;}
 .wd-member{display:flex;align-items:center;flex-wrap:wrap;gap:4px 14px;padding:11px 0;border-bottom:1px solid var(--line);
   background:none;border-left:0;border-right:0;border-top:0;text-align:left;font:inherit;color:inherit;width:100%;}
-.wd-member:last-child{border-bottom:0;}
+.wd-member-item{display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line);}
+.wd-member-item:last-child{border-bottom:0;}
+.wd-member-item .wd-member{border-bottom:0;flex:1 1 auto;min-width:0;width:auto;}
+.wd-member-remove{flex:0 0 auto;}
+.wd-members .card-head .wd-members-add{margin-left:auto;}
+/* The automatic re-scan after a member change: the wizard's loader (spinner, status, phase
+   track), compact and left-aligned inside the Projects card. */
+.wd-rescan{display:flex;align-items:flex-start;gap:14px;margin-top:14px;padding:14px 16px;border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--field);}
+.wd-rescan-lead{flex:0 0 auto;padding-top:1px;}
+.wd-rescan-spinner{width:22px;height:22px;border-width:2.5px;}
+.wd-rescan-mark{display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;font-size:12px;font-weight:700;}
+.wd-rescan.is-done .wd-rescan-mark{color:var(--green-ink);background:var(--green-bg);}
+.wd-rescan.is-failed .wd-rescan-mark{color:var(--red-ink);background:var(--red-bg);}
+.wd-rescan-body{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1 1 auto;}
+.wd-rescan .status-label{font-size:13.5px;}
+.wd-rescan .status-sub{overflow-wrap:anywhere;}
+.wd-rescan.is-stopped .wd-rescan-mark,.wd-rescan.is-paused .wd-rescan-mark,.wd-rescan.is-skipped .wd-rescan-mark{color:var(--amber-ink);background:var(--amber-bg);}
+/* The scan run's own stages, as pills: done ones muted-strong, the running one inverted. */
+.wd-rescan-phases{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 2px;}
+.wd-rescan-phases [data-phase]{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:4px 10px;}
+.wd-rescan-phases [data-phase].done{color:var(--green-ink);background:var(--green-bg);border-color:transparent;}
+.wd-rescan-phases [data-phase].done::before{content:'\2713\00a0';}
+.wd-rescan-phases [data-phase].active{color:var(--on-ink);background:var(--ink);border-color:var(--ink);}
+.wd-rescan-open{font-size:12.5px;width:fit-content;}
+.wd-rescan-hint{margin-top:2px;}
+.wd-add-list{display:flex;flex-direction:column;gap:2px;max-height:50vh;overflow:auto;}
+.wd-add-row{display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px;padding:8px 0;border-bottom:1px solid var(--line);cursor:pointer;}
+.wd-add-row:last-child{border-bottom:0;}
+.wd-add-row .proj-path{margin-top:0;flex:1 1 100%;min-width:0;}
 .wd-member-name{font-weight:600;font-size:13.5px;color:var(--ink);}
 .wd-member .proj-path{margin-top:0;flex:1 1 auto;min-width:0;}
 .wd-member-chev{display:flex;align-items:center;color:var(--ink-3);margin-left:auto;}
@@ -5073,7 +5101,7 @@ body.rail-collapsed .ask-dock{left:76px;}
 .mvi-warn{display:block;color:var(--amber-ink);}
 .mvi-ctx-unknown{color:var(--ink-3);font-size:11.5px;}
 /* model card (buildModelCard; docs/models.md "Ask Worca"): the policy card's change list + what will still block the model */
-.ask-modcard-warn{color:var(--amber-ink);}
+.ask-modcard-warn,.ask-wscard-warn{color:var(--amber-ink);}
 .ask-modcard .ask-card-sched-link{align-self:flex-start;margin-top:2px;}
 
 /* ---------- Auto proposal body (ui/public/auto-proposal.mjs) — one body, two hosts (mockup §D/§F) ----------
@@ -5390,7 +5418,7 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-rc-title{margin-top:12px;font-weight:600;font-size:15px;line-height:1.35;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ask-rc-sub{margin-top:4px;font-family:var(--mono);font-size:10.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .ask-rc-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:14px;}
-.ask-rc-stat{display:flex;flex-direction:column;gap:3px;padding:9px 11px;border:1px solid var(--line);border-radius:12px;background:var(--field);}
+.ask-rc-stat{display:flex;flex-direction:column;gap:3px;padding:9px 11px;border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--field);}
 .ask-rc-stat-k{font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);}
 .ask-rc-stat-v{font-family:var(--mono);font-size:14px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums;}
 .ask-rc-active{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;}
@@ -6460,7 +6488,7 @@ input.gv-name:focus-visible{outline:none;}
 .ins-select-wrap::after{content:"";position:absolute;right:12px;top:50%;width:8px;height:8px;
   border-right:1.8px solid var(--ink-2);border-bottom:1.8px solid var(--ink-2);transform:translateY(-65%) rotate(45deg);pointer-events:none;}
 .ins-tog{display:flex;align-items:flex-start;gap:10px;padding:9px 11px;
-  border:1px solid var(--line);border-radius:12px;background:var(--field);}
+  border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--field);}
 .ins-tog input[type="checkbox"]{width:15px;height:15px;flex:0 0 auto;margin:1px 0 0;accent-color:var(--ink);cursor:pointer;}
 .ins-tog input:disabled{cursor:not-allowed;}
 .ins-tog:has(input:disabled){opacity:.55;}

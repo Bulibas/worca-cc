@@ -657,6 +657,16 @@ export function createAskTools(deps) {
           name: SCHEMA.s('folder and project name (default: the repository name)'),
           note: SCHEMA.s('one line shown on the card: why (≤ 200 chars)') }, ['url']) },
     ] : []),
+    ...(deps.workspaceChanges ? [
+      { name: 'propose_workspace_change',
+        description: 'Propose a workspace change for the user to confirm — it never changes anything itself; the user sees a card and applies or declines it. kind: "create" (name + projectKeys: two or more registered projects from list_projects), "add_members" (workspaceId + projectKeys to add), "remove_member" (workspaceId + projectKey of one member; at least two stay), "rename" (workspaceId + name). workspaceId defaults to the pinned workspace (not for create). The workspace keeps its id; runs already started keep their members. Returns {ok:true, card} (card.warnings: a live run, a new member off the metrics / policy home, a removed home, schedules naming members; card.followUps: what to offer once applied) or {ok:false, errors} to fix and retry. Never claim a change was applied — the card says so when it happens.',
+        inputSchema: SCHEMA.obj({ kind: SCHEMA.s('create | add_members | remove_member | rename'),
+          workspaceId: SCHEMA.s('add_members / remove_member / rename: the workspace (default: the pinned one)'),
+          name: SCHEMA.s('create / rename: the workspace name'),
+          projectKeys: { type: 'array', items: { type: 'string' }, description: 'create: the member projects; add_members: the projects to add (keys from list_projects)' },
+          projectKey: SCHEMA.s('remove_member: the member to remove'),
+          note: SCHEMA.s('one line shown on the card: why (≤ 200 chars)') }, ['kind']) },
+    ] : []),
     // Web access (docs/guardrails.md "Web access"): only when the parent turned it on for this turn (WORCA_ASK_WEB ⇒ deps.web).
     // Every rule (https, allowlist, redirects, SSRF, data-in-URL, caps) is enforced in web-fetch.mjs, not here.
     ...(deps.web ? [
@@ -2135,6 +2145,13 @@ export function createAskTools(deps) {
       catch (err) { throw new AskToolError(`list_copilot_models: ${err && err.message ? err.message : err}`); }
     },
     async propose_model_change(input) { return modelsOf('propose_model_change').validateChange(input); },
+    async propose_workspace_change(input) {
+      if (!deps.workspaceChanges) throw new AskToolError('propose_workspace_change: workspace changes are unavailable');
+      // A change to a workspace falls back to the pinned one (turn.mjs replays this); a create names its own members.
+      const pin = pinnedScope();
+      const inp = pin && pin.workspaceId && str(input.kind) !== 'create' && !str(input.workspaceId) ? { ...input, workspaceId: pin.workspaceId } : input;
+      return deps.workspaceChanges.validateChange(inp);
+    },
     async propose_clone_project(input) {
       if (!deps.clones) throw new AskToolError('propose_clone_project: cloning is unavailable');
       return deps.clones.validateChange(input);

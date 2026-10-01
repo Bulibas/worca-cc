@@ -10,7 +10,7 @@ import { CONFIDENCE, KINDS, KIND_LABELS, checkUsage, confidenceRank, storedCheck
 import { cutQuery, normBody, normKey, pathSuffixMatch, topicMatches } from '../../shared/workspace-map/keys.mjs';
 import { edgeId } from '../../shared/workspace-map/ids.mjs';
 import { changeOrder } from '../../shared/workspace-map/order.mjs';
-import { effectiveEdges, rekeyOverrides } from '../../shared/workspace-map/overrides.mjs';
+import { liveEdges } from '../../shared/workspace-map/overrides.mjs';
 import { redactSecrets } from '../../shared/workspace-map/redact.mjs';
 import { QUOTED_TEXT_NOTE, quoteRole, roleQuoteLabel } from '../../shared/workspace-map/render.mjs';
 import { createFileCache, verifyFact } from './verify.mjs';
@@ -109,12 +109,6 @@ function edgeSink(limits) {
   };
 }
 
-/** M15: the edges a review leaves standing — `edges` with the workspace's overrides applied: first moved
- *  onto an edge an agent reworded this scan (rekeyOverrides, as finalize will), then merged
- *  (effectiveEdges). A rejected edge and a confirmed one the scan no longer finds are gone, a manual edge
- *  is in. An allowlist: any other state (stale, or a later one) never orders or briefs anything. */
-const LIVE_STATES = Object.freeze(['auto', 'confirmed', 'manual']);
-const liveEdges = (edges, overrides) => effectiveEdges({ edges }, rekeyOverrides(overrides, { edges })).filter((e) => LIVE_STATES.includes(e.state));
 
 /** spec §6.5. usage may be null/garbage. enrich: optional async (map, {catalog}) => map (P7
  *  plugs graphify in; errors inside enrich are caught and recorded in map.errors). overrides (M15):

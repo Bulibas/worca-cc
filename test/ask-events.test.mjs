@@ -847,3 +847,18 @@ test('propose_web_access: labelled, and its RESULT reaches onWebProposal with th
   h.push(uresult('toolu_w2', '{"ok":true}', { ptu: 'toolu_task' }));
   assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
 });
+
+test('propose_workspace_change: labelled, and its RESULT reaches onWorkspaceProposal with the full input; a sub-agent call never does', () => {
+  assert.equal(labelForTool('mcp__worca__propose_workspace_change', {}), 'Proposing a workspace change');
+  const seen = [];
+  const h = harness({ onWorkspaceProposal: (e) => { seen.push(e); return Promise.resolve(); } });
+  const input = { kind: 'add_members', workspaceId: 'wks-demo-0000abcd', projectKeys: ['k1'] };
+  h.push(session(), init(), mstart('msg_1'), atool('msg_1', 'toolu_ws', 'mcp__worca__propose_workspace_change', input));
+  assert.deepEqual(seen, [], 'minted at RESULT, never at START');
+  h.push(uresult('toolu_ws', '{"ok":true,"card":{}}'));
+  assert.deepEqual(seen, [{ toolUseId: 'toolu_ws', input, text: '{"ok":true,"card":{}}', isError: false }]);
+  h.push(atool('msg_1', 'toolu_task', 'Agent', { description: 'helper', subagent_type: 'general-purpose', prompt: 'x' }));
+  h.push(atool('msg_c', 'toolu_ws2', 'mcp__worca__propose_workspace_change', input, 'toolu_task'));
+  h.push(uresult('toolu_ws2', '{"ok":true}', { ptu: 'toolu_task' }));
+  assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
+});
