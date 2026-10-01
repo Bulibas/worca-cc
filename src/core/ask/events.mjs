@@ -76,8 +76,9 @@ export function normalizeUsage(u) {
   };
 }
 
-/** result.modelUsage key for an agent's model: exact → canonicalModel → stripped -YYYYMMDD → the single key. */
-export function matchModelKey(model, modelUsage) {
+/** result.modelUsage key for an agent's model: exact → canonicalModel → stripped -YYYYMMDD → the single key
+ *  (unless `single: false`, for callers that must not guess). */
+export function matchModelKey(model, modelUsage, { single = true } = {}) {
   const mu = modelUsage && typeof modelUsage === 'object' ? modelUsage : {};
   const keys = Object.keys(mu);
   if (!keys.length) return null;
@@ -92,7 +93,7 @@ export function matchModelKey(model, modelUsage) {
       || keys.find((k) => strip(k.toLowerCase()) === strip(m));
     if (stripped) return stripped;
   }
-  return keys.length === 1 ? keys[0] : null;
+  return single && keys.length === 1 ? keys[0] : null;
 }
 
 /** Spec §6.6: costUSD × w(agent) / w(model total), clamped; null without usage or a matching model. Always estimated:true. */
@@ -323,7 +324,9 @@ export function createTurnReducer({
   // yields null — never another model's window.
   const ctxWindowNow = () => {
     const mu = lastResult && lastResult.modelUsage && typeof lastResult.modelUsage === 'object' ? lastResult.modelUsage : null;
-    const key = mu ? matchModelKey(mainModel, mu) : null;
+    // A lone entry stands in for the main model only when the init frame named none: with a named
+    // model, a lone mismatch is the title call of a turn whose main call failed.
+    const key = mu ? matchModelKey(mainModel, mu, { single: !mainModel }) : null;
     const w = key ? mu[key]?.contextWindow : null;
     return Number.isInteger(w) && w > 0 ? w : null;
   };

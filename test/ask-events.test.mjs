@@ -878,3 +878,11 @@ test('ctxWindow: absent when the main model cannot be matched or the window is g
   h.push(session(), init(), mstart('msg_1'), atext('msg_1', 'ok'), result({ modelUsage: { only: { contextWindow: 200000 } } }));
   assert.equal(h.r.snapshot().usage.ctxWindow, 200000, 'a single entry is the main model (matchModelKey fallback)');
 });
+
+test('ctxWindow: a lone modelUsage entry that is not the init model is never taken (failed main call, title call only)', () => {
+  const h = harness();
+  h.push(session(), init({ model: 'claude-opus-5-5' }), mstart('msg_1'), atext('msg_1', 'ok'), result({ modelUsage: {
+    'claude-haiku-4-5-20251001': { inputTokens: 900, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.001, contextWindow: 200000, canonicalModel: 'claude-haiku-4-5' },
+  } }));
+  assert.equal('ctxWindow' in h.r.snapshot().usage, false, 'the Haiku title call must not supply the Opus window');
+});
