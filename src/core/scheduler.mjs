@@ -116,6 +116,7 @@ function rowToTicket(r, { withRequest = false } = {}) {
     queued: !!r.queued,
     forced: !!r.forced,
     after: r.after_kind ? { kind: r.after_kind, id: r.after_id, policy: r.after_policy || 'done' } : null,
+    resumePipelineId: r.resume_pipeline_id || null,
     sourceFromPrevious: !!r.source_from_previous,
     ownerPid: r.owner_pid ?? null,
     ownerHost: r.owner_host || null,
@@ -217,23 +218,27 @@ export function createTicket({
   runAtMs, request, ifMissed = 'run', graceMin = 360, ownerPid = null, ownerHost = null,
   askThreadId = null, askCardId = null, forced = false,
   after = null, afterPolicy = 'done', sourceFromPrevious = false,
+  resumePipelineId = null,
   createdBy = null,
   now = Date.now(),
 }) {
   const chained = normAfter(after);
   if (after && !chained) throw new Error('createTicket: after.kind must be ticket | pipeline and after.id a string');
+  if (resumePipelineId != null && (typeof resumePipelineId !== 'string' || !resumePipelineId.trim())) throw new Error('createTicket: resumePipelineId must be a non-empty string');
+  if (resumePipelineId && chained) throw new Error('createTicket: a resume ticket cannot wait on another run');
   if (!chained && !Number.isFinite(runAtMs)) throw new Error('createTicket: runAtMs is required');
   const tc = targetCols({ projectDir, workspaceId });
   const ts = iso(now);
   getDb().prepare(`
     INSERT INTO scheduled_runs (id, schedule_id, title, project_key, project_dir, workspace_id, run_at, request,
       status, if_missed, grace_min, owner_pid, owner_host, ask_thread_id, ask_card_id, forced,
-      after_kind, after_id, after_policy, source_from_previous, created_at, updated_at, created_by, updated_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      after_kind, after_id, after_policy, source_from_previous, resume_pipeline_id, created_at, updated_at, created_by, updated_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(id, scheduleId, title, tc.project_key, tc.project_dir, tc.workspace_id, chained ? AFTER_RUN_AT : iso(runAtMs), JSON.stringify(request || {}),
     normPolicy(ifMissed, MISSED_POLICIES, 'run'), normGrace(graceMin), ownerPid, ownerPid != null ? (ownerHost || hostname()) : null,
     askThreadId, askCardId, forced ? 1 : 0,
-    chained ? chained.kind : null, chained ? chained.id : null, normPolicy(afterPolicy, AFTER_POLICIES, 'done'), chained && sourceFromPrevious ? 1 : 0, ts, ts, byOf(createdBy), byOf(createdBy));
+    chained ? chained.kind : null, chained ? chained.id : null, normPolicy(afterPolicy, AFTER_POLICIES, 'done'), chained && sourceFromPrevious ? 1 : 0,
+    resumePipelineId ? resumePipelineId.trim() : null, ts, ts, byOf(createdBy), byOf(createdBy));
   return getTicket(id);
 }
 
@@ -319,6 +324,31 @@ export function cancelTicket(id, { now = Date.now(), by = undefined } = {}) {
   resolveNotifications({ ticketId: id });
   if (!t.scheduleId) removeStage(id);
   return t;
+}
+
+/** Open (scheduled/missed) one-off tickets that resume the given pipeline. */
+export function resumeTicketsFor(pipelineId) {
+  if (typeof pipelineId !== 'string' || !pipelineId) return [];
+  return getDb().prepare("SELECT * FROM scheduled_runs WHERE resume_pipeline_id = ? AND status IN ('scheduled', 'missed')")
+    .all(pipelineId).map((r) => rowToTicket(r));
+}
+
+/**
+ * Cancel every open resume ticket for a pipeline — the run was resumed or stopped by
+ * hand, so its scheduled resume no longer applies. Each cancellation leaves an info
+ * feed entry; the ticket leaves the open list. @returns {number} how many were canceled
+ */
+export function cancelResumeTicketsFor(pipelineId, { now = Date.now(), by = undefined, reason = 'the run was resumed or stopped by hand' } = {}) {
+  const open = resumeTicketsFor(pipelineId);
+  for (const t of open) {
+    cancelTicket(t.id, { now, by });
+    addNotification({
+      kind: 'canceled', severity: 'info', scheduleId: null, ticketId: t.id,
+      pipelineId, projectDir: t.projectDir, title: t.title,
+      message: `was canceled: ${reason}${byOf(by) ? ` (by ${byOf(by)})` : ''}.`, now: new Date(now),
+    });
+  }
+  return open.length;
 }
 
 /**
@@ -820,7 +850,7 @@ export function dueTickets({ now = Date.now() } = {}) {
 
 /**
  * Process every due ticket once. The host supplies:
- *   start(ticket)  -> { ok:true, pipelineId? } | { ok:false, error, transient? }
+ *   start(ticket)  -> { ok:true, pipelineId? } | { ok:false, error, transient? } | { ok:false, skip:true, error }
  *   isLive({id,pipelineId}) -> boolean   (optional: the host's in-memory run view)
  * Returns a summary { fired, missed, skipped, failed, retried, waiting }.
  */
@@ -899,6 +929,21 @@ export async function runDueTickets({
         materializeNext(schedule.id, { now });
       }
       out.fired.push(t.id);
+      continue;
+    }
+
+    // A one-shot action whose target vanished (a resume ticket whose run was resumed or
+    // stopped by hand): not a failure — park it as skipped with an info feed item.
+    // (Mirrors the overlap-skip arm above; 'skipped' is a known terminal status —
+    // TICKET_STATUSES / purgeScheduler.)
+    if (res && res.skip) {
+      touchTicket(t.id, "status = 'skipped', fail_reason = ?, forced = 0", [(res && res.error) || 'no longer applies'], now);
+      addNotification({
+        kind: 'skipped', severity: 'info', scheduleId: t.scheduleId, ticketId: t.id,
+        pipelineId: t.resumePipelineId || null, projectDir: t.projectDir, title: t.title,
+        message: `was skipped: ${(res && res.error) || 'no longer applies'}.`, now: new Date(now),
+      });
+      out.skipped.push(t.id);
       continue;
     }
 

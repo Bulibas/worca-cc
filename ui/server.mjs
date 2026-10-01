@@ -154,8 +154,10 @@ import { startBridge } from '../src/core/bridge/server.mjs';
 import {
   providersState, patchProvider, acknowledgeTerms, beginCopilotLogin, pollCopilotLogin, copilotLogout,
   copilotModelsForImport, importCopilotModels, testProviderConnection,
-  endpointModelsForImport, importEndpointModels,
+  endpointModelsForImport, importEndpointModels, patchSpeech,
 } from '../src/core/bridge/provider-ops.mjs';
+import { speechState, transcribe, synthesize, testSpeech } from '../src/core/speech.mjs';
+import { speechAssetStore } from '../src/core/speech-assets.mjs';
 import { listPluginModels, modelSecretsSchema, pluginModelSecretStatus } from '../src/core/plugin-models.mjs';
 import { testModel } from '../src/core/model-test.mjs';
 import {
@@ -272,7 +274,7 @@ import {
   runScheduleNow, deleteSchedule, cancelForTarget, dependentsOfWorkflow, runDueTickets, recordOutcome,
   recoverScheduler, purgeScheduler, scheduleCounts, scheduleStageDir, scheduleSignature,
   resolveAfterRef, predecessorState, previousBranchesOf, dependentsOfRun, AFTER_POLICIES, afterRefOf,
-  chainBaseBranchesOf,
+  chainBaseBranchesOf, resumeTicketsFor, cancelResumeTicketsFor,
 } from '../src/core/scheduler.mjs';
 import {
   onNotification, listNotifications, unreadCount, latestNotificationId, markRead, markAllRead, purgeNotifications,
@@ -281,6 +283,7 @@ import {
   normalizeRule, nextOccurrence, previewOccurrences, describeRule, parseScheduledFor, localDate,
   isValidTimeZone, formatInstant, OVERLAP_POLICIES, MISSED_POLICIES,
 } from '../src/shared/schedule/recurrence.mjs';
+import { REASON } from '../src/core/failure-policy.mjs';
 import { callSource, PluginOpError } from '../src/core/plugin-shim.mjs';
 import { resolveAutoModel, AUTO_MODEL_ENV } from '../src/core/auto/model.mjs';
 import {
@@ -376,6 +379,32 @@ const ASK_VENDOR_ASSETS = {
   marked: resolveEsmAsset('marked'),
   dompurify: resolveEsmAsset('dompurify'),
 };
+
+// Ask Worca voice mode (docs/speech.md): the Silero VAD (@ricky0123/vad-web) and
+// its onnxruntime-web wasm runtime, served from node_modules like marked above.
+// An explicit allow-list per prefix — never a directory listing — and an
+// unresolvable package leaves its routes unregistered (the /vendor 404 answers;
+// the mic then reports "voice activity detection unavailable").
+function resolveVendorDir(spec, resolve = (s) => import.meta.resolve(s), warn = (msg) => console.warn(msg)) {
+  try {
+    return path.dirname(fileURLToPath(resolve(spec)));
+  } catch (err) {
+    warn(`[worca-ui] voice asset unavailable (${spec}): ${err?.message || err}`);
+    return null;
+  }
+}
+const VOICE_VENDOR = [
+  // Only the runtime that vad-web's built-in ORT 1.22.0 JS fetches (wasmPaths + name).
+  { prefix: '/vendor/ort/', dir: resolveVendorDir('onnxruntime-web/wasm'), files: {
+    'ort-wasm-simd-threaded.mjs': 'text/javascript',
+    'ort-wasm-simd-threaded.wasm': 'application/wasm',
+  } },
+  { prefix: '/vendor/vad/', dir: resolveVendorDir('@ricky0123/vad-web'), files: {
+    'bundle.min.js': 'text/javascript',
+    'vad.worklet.bundle.min.js': 'text/javascript',
+    'silero_vad_v5.onnx': 'application/octet-stream',
+  } },
+];
 
 const PORT = Number(process.env.PORT) || DEFAULT_UI_PORT;
 // Bind to loopback by default (S1). Power users who knowingly want LAN exposure
@@ -962,6 +991,14 @@ function wireRun(entry) {
           if (waiting.length) setTimeout(() => { void schedulerTick(); }, 0);
         } catch (err) { console.error(`[worca-ui] chain nudge failed: ${err && err.message ? err.message : err}`); }
       }
+      if (name === 'done' && entry.pipelineId && entry.status !== 'paused') {
+        // Terminal (done/stopped/error) — a pending scheduled resume no longer applies.
+        // (A 'paused' done is exactly the state a resume ticket targets; never sweep then.)
+        cancelScheduledResumes(entry.pipelineId, {
+          by: entry.lastAction && entry.lastAction.by,
+          reason: 'the run was resumed or stopped by hand',
+        });
+      }
       if (name === 'title' && payload && typeof payload.title === 'string') {
         // Keep the in-memory run fresh so a late-joining client's hello
         // (summarizeRuns reads entry.title) sees the settled title.
@@ -1239,6 +1276,52 @@ if (ASK_VENDOR_ASSETS.marked) {
 if (ASK_VENDOR_ASSETS.dompurify) {
   app.get('/vendor/dompurify/purify.es.mjs', sendEsmModule(ASK_VENDOR_ASSETS.dompurify));
 }
+for (const { prefix, dir, files } of VOICE_VENDOR) {
+  if (!dir) continue;
+  for (const [name, type] of Object.entries(files)) {
+    const file = path.join(dir, name);
+    if (!fs.existsSync(file)) { console.warn(`[worca-ui] voice asset missing: ${file}`); continue; }
+    app.get(`${prefix}${name}`, (_req, res, next) => {
+      res.type(type);
+      res.set('X-Content-Type-Options', 'nosniff');
+      res.set('Cache-Control', 'public, max-age=86400');
+      res.sendFile(file, (err) => { if (!err) return; if (res.headersSent) return next(err); next(); });
+    });
+  }
+}
+
+// The in-browser speech engines (docs/speech.md): pinned runtime + model files,
+// downloaded once into ~/.worca-cc/speech-cache and served same-origin.
+// src/core/speech-assets.mjs owns the allow-lists; anything else is a 404.
+// Models are no-store: the worker keeps no copy either (speech-worker.mjs), so the disk
+// holds ONE copy — worca's — and "Remove speech models" really frees the space.
+// The runtime (~25 MB) may sit in the HTTP cache: pinned bytes that never change.
+const sendSpeechAsset = (res, next, cache = 'no-store') => ({ file, type }) => {
+  res.type(type);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', cache);
+  res.sendFile(file, (err) => { if (err && !res.headersSent) next(err); });
+};
+const streamSpeechAsset = (res) => ({ type, length, body }) => {
+  res.type(type);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', 'no-store');
+  if (length) res.set('Content-Length', String(length));
+  body.on('error', () => res.destroy());
+  body.pipe(res);
+};
+const speechAssetFail = (res, next) => (err) => {
+  if (err && err.status === 404) return next();
+  console.warn(`[worca-ui] speech asset: ${err && err.message ? err.message : err}`);
+  if (!res.headersSent) res.status(502).set('Cache-Control', 'no-store').type('text/plain').send(err && err.message ? err.message : 'download failed');
+};
+app.get('/vendor/speech/lib/:name', (req, res, next) => {
+  speechAssetStore().lib(req.params.name).then(sendSpeechAsset(res, next, 'public, max-age=31536000, immutable'), speechAssetFail(res, next));
+});
+app.get(/^\/vendor\/speech\/hf\/([^/]+\/[^/]+)\/resolve\/[^/]+\/(.+)$/, (req, res, next) => {
+  speechAssetStore().model(req.params[0], req.params[1])
+    .then((r) => (r.body ? streamSpeechAsset(res)(r) : sendSpeechAsset(res, next)(r)), speechAssetFail(res, next));
+});
 
 app.use('/vendor', (err, _req, res, next) => {
   if (res.headersSent) return next(err);
@@ -2229,6 +2312,60 @@ function parseScheduleRequest(body, { now = Date.now() } = {}) {
   return out;
 }
 
+/** Pause reasons a scheduled resume must never touch (clarify: both cap kinds refuse). */
+const CAP_PAUSE_REASONS = new Set([REASON.COST_PIPELINE, REASON.COST_TOTAL, REASON.COST_PIPELINE_POLICY, REASON.COST_TOTAL_POLICY]);
+const TEAM_CAP_PAUSE_REASONS = new Set([REASON.COST_PIPELINE_POLICY, REASON.COST_TOTAL_POLICY]);
+
+/** The paused pipeline a resume ticket fires on, or null (any other ticket). */
+function resumeTargetOf(ticket) {
+  if (!ticket) return null;
+  if (typeof ticket.resumePipelineId === 'string' && ticket.resumePipelineId) return ticket.resumePipelineId;
+  const internal = ticket.request && ticket.request.internal;
+  return internal && typeof internal.resumePipelineId === 'string' && internal.resumePipelineId ? internal.resumePipelineId : null;
+}
+
+/** The onboarded project dir for a pipelines.project_key, or null. */
+async function projectDirForKey(key) {
+  for (const p of await listProjects()) {
+    if (projectKey(p.path) === key) return p.path;
+  }
+  return null;
+}
+
+/**
+ * Validate a scheduled-resume target at CREATE time. Mirrors resumeRun's early guards,
+ * plus the cap refusals a live decision may never be slept through.
+ * @returns {Promise<{ok:true, row:object, resumePoint:object, projectDir:string|null, workspaceId:string|null}
+ *          | {ok:false, status:number, body:object}>}
+ */
+async function validateResumeTarget(pipelineId) {
+  if (typeof pipelineId !== 'string' || !pipelineId.trim()) return { ok: false, status: 400, body: { error: 'pipelineId is required' } };
+  const saved = readPipelineForResume(pipelineId.trim());
+  if (!saved) return { ok: false, status: 404, body: { error: 'pipeline not found' } };
+  if (saved.row.status !== 'paused' && saved.row.status !== 'interrupted') {
+    return { ok: false, status: 409, body: { error: `run is "${saved.row.status}" — only a paused run can get a scheduled resume` } };
+  }
+  if (!saved.resumePoint) return { ok: false, status: 400, body: { error: 'run has no resume point' } };
+  if (saved.resumePoint.version !== 2) return { ok: false, status: 409, body: { code: 'ENGINE_RETIRED', error: V1_RUN_RETIRED } };
+  if (saved.row.archived_at) return { ok: false, status: 409, body: { error: 'run is archived' } };
+  const reason = saved.resumePoint.pauseReason || null;
+  if (TEAM_CAP_PAUSE_REASONS.has(reason)) {
+    return { ok: false, status: 409, body: { code: 'CAP_PAUSE', error: 'this run paused on a team cost cap — continuing past it is a live decision and cannot be scheduled' } };
+  }
+  if (CAP_PAUSE_REASONS.has(reason)) {
+    return { ok: false, status: 409, body: { code: 'CAP_PAUSE', error: 'this run paused on a cost cap — continuing past it needs the explicit “Continue without cap” decision and cannot be scheduled' } };
+  }
+  if (resumeTicketsFor(saved.row.id).length) {
+    return { ok: false, status: 409, body: { error: 'a scheduled resume already exists for this run — change or cancel it in Schedules' } };
+  }
+  const workspaceId = saved.row.target === 'workspace' ? (saved.row.workspace_key || null) : null;
+  let projectDir = null;
+  if (!workspaceId && saved.row.project_key) {
+    projectDir = await projectDirForKey(saved.row.project_key);
+  }
+  return { ok: true, row: saved.row, resumePoint: saved.resumePoint, projectDir, workspaceId };
+}
+
 /** The request a ticket stores: the validated body minus schedule fields and uploads. */
 async function storedRequestOf(body, stageId, projectDir, startedBy = null) {
   const request = { ...body };
@@ -2314,8 +2451,54 @@ async function invokeStartRun(body, internal) {
 /** Ticket id -> who clicked "Run now" (identity.mjs actor), consumed by the firing it causes. */
 const RUN_NOW_BY = new Map();
 
-/** runDueTickets' `start`: probe an external task first (transient errors retry), then start. */
+/** A run resumed or stopped by hand kills its pending scheduled resume (feed entry per ticket). Idempotent + best-effort. */
+function cancelScheduledResumes(pipelineId, { by = null, reason } = {}) {
+  try {
+    const n = cancelResumeTicketsFor(pipelineId, { by: by || undefined, reason });
+    if (n) { emitChanged('schedules-changed', 'deleted'); emitChanged('notifications-changed'); }
+  } catch (err) { console.error(`[worca-ui] scheduled-resume cancel failed: ${err && err.message ? err.message : err}`); }
+}
+
+/**
+ * Fire a "resume this paused run" ticket. The live row is re-checked at fire time:
+ * a run resumed or stopped by hand makes the ticket SKIP (feed entry, run stays as it
+ * is); a run that became cap-paused FAILS (a cap is never continued past unattended).
+ * Everything else goes through resumeRun's own guard chain (budget gates included).
+ */
+async function fireResumeTicket(ticket, pipelineId) {
+  const saved = readPipelineForResume(pipelineId);
+  if (!saved) return { ok: false, skip: true, error: 'the run no longer exists' };
+  if (saved.row.status !== 'paused' && saved.row.status !== 'interrupted') {
+    return { ok: false, skip: true, error: `the run is now "${saved.row.status}" — it was resumed or stopped meanwhile` };
+  }
+  const reason = saved.resumePoint && saved.resumePoint.pauseReason;
+  if (reason && CAP_PAUSE_REASONS.has(reason)) {
+    return { ok: false, error: 'the run paused on a cost cap meanwhile — continuing past it needs a live decision', transient: false };
+  }
+  const scheduledBy = ticket.createdBy || null;
+  try {
+    const out = await resumeRun(pipelineId, {
+      by: scheduledBy || 'local',
+      mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK),
+    });
+    // The feed learns how the resumed run ends through the same recordOutcome hook a
+    // schedule-started run uses (wireRun keys on entry.ticketId).
+    const entry = out && out.runId ? runs.get(out.runId) : null;
+    if (entry) entry.ticketId = ticket.id;
+    return { ok: true, pipelineId };
+  } catch (err) {
+    if (err instanceof ResumeError) {
+      return { ok: false, error: (err.body && err.body.error) || err.message, transient: false };
+    }
+    return { ok: false, error: err && err.message ? err.message : String(err), transient: false };
+  }
+}
+
+/** runDueTickets' `start`: a resume ticket goes to fireResumeTicket; anything else probes
+ *  an external task first (transient errors retry), then starts a NEW run. */
 async function fireTicket(ticket) {
+  const resumePipelineId = resumeTargetOf(ticket);
+  if (resumePipelineId) return fireResumeTicket(ticket, resumePipelineId);
   const body = { ...(ticket.request || {}) };
   if (body.source && body.source.type === 'plugin') {
     try {
@@ -2468,6 +2651,43 @@ app.post('/api/schedules/preview', (req, res) => {
   if (!norm.ok) return badRequest(res, norm.error);
   const n = Number.isSafeInteger(body.count) ? Math.max(1, Math.min(10, body.count)) : 3;
   res.json({ rule: norm.rule, sentence: describeRule(norm.rule), next: previewOccurrences(norm.rule, Date.now(), n).map((t) => new Date(t).toISOString()) });
+});
+
+// POST /api/schedules/resume { pipelineId, scheduledFor, ifMissed?, graceMin? } — a one-off
+// "resume this paused run at <time>" ticket. ifMissed defaults to 'skip' (clarify default);
+// the sheet pre-selects 'skip' but lets the user pick 'run', so an HTTP caller may pass either.
+app.post('/api/schedules/resume', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const by = actorOf(req);
+    const v = await validateResumeTarget(body.pipelineId);
+    if (!v.ok) return res.status(v.status).json(v.body);
+    const at = parseScheduledFor(body.scheduledFor);
+    if (!at.ok) return badRequest(res, at.error);
+    if (at.ms < Date.now() - 5_000) return badRequest(res, 'scheduledFor is in the past');
+    let ifMissed = 'skip';
+    if (body.ifMissed != null) {
+      if (!MISSED_POLICIES.includes(body.ifMissed)) return badRequest(res, `ifMissed must be one of ${MISSED_POLICIES.join(' | ')}`);
+      ifMissed = body.ifMissed;
+    }
+    let graceMin = 360;
+    if (body.graceMin != null) {
+      if (!Number.isSafeInteger(body.graceMin) || body.graceMin < 0 || body.graceMin > 10080) return badRequest(res, 'graceMin must be a whole number of minutes from 0 to 10080');
+      graceMin = body.graceMin;
+    }
+    const title = `Resume ‘${v.row.title || v.row.id}’`;
+    const request = { prompt: '', title: v.row.title || null, internal: { resumePipelineId: v.row.id, startedBy: by } };
+    const ticket = createTicket({
+      title, projectDir: v.projectDir, workspaceId: v.workspaceId,
+      runAtMs: at.ms, request, ifMissed, graceMin,
+      resumePipelineId: v.row.id, createdBy: by,
+    });
+    appendAuditById(v.row.id, `Resume scheduled for ${new Date(at.ms).toISOString().slice(0, 16).replace('T', ' ')} UTC${byActor(by)}.`, { actor: by });
+    emitChanged('schedules-changed', 'created');
+    res.status(202).json({ runId: ticket.id, status: 'scheduled', scheduledFor: ticket.runAt, resumePipelineId: v.row.id });
+  } catch (err) {
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
 });
 
 // GET /api/schedules/dependents?workflowId=|projectDir=|workspaceId= -> what a removal
@@ -2657,8 +2877,9 @@ async function scheduleVerb(verb, id, body = {}, { by = null } = {}) {
     emitChanged('notifications-changed');
     await schedulerTick();
     const after = getTicket(ticket.id);
+    const isResume = !!resumeTargetOf(after);
     // A ticket held by a waiting `--wait` terminal is started by that terminal within seconds.
-    return out(200, { runId: ticket.id, status: after ? after.status : 'scheduled', failReason: after ? after.failReason : null, pipelineId: after ? after.pipelineId : null });
+    return out(200, { runId: ticket.id, status: after ? after.status : 'scheduled', failReason: after ? after.failReason : null, pipelineId: after ? after.pipelineId : null, ...(isResume ? { resume: true } : {}) });
   }
   if (['pause', 'resume', 'skip-next'].includes(verb)) {
     if (found.kind !== 'recurring') return out(404, { error: 'repeating schedule not found' });
@@ -2919,6 +3140,7 @@ function stopRun(runId, by = 'local') {
   entry.lastAction = { kind: 'stop', by: by || 'local', at: new Date().toISOString() };
   entry.orch.stop(entry.lastAction.by);
   entry.status = 'stopped';
+  if (entry.pipelineId) cancelScheduledResumes(entry.pipelineId, { by, reason: `the run was stopped${byActor(by || 'local')}` });
   resolvePending(entry, { reason: 'stopped' });
 }
 function pauseRun(runId, by = 'local') {
@@ -3110,9 +3332,7 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
       description: meta.workspaceDescription || '', projects,
     };
   } else {
-    for (const p of await listProjects()) {
-      if (projectKey(p.path) === saved.row.project_key) { projectDir = p.path; break; }
-    }
+    projectDir = await projectDirForKey(saved.row.project_key);
     if (!projectDir) throw new ResumeError(400, { error: 'project for this pipeline is not onboarded on this machine' });
   }
 
@@ -3162,6 +3382,9 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     const live = liveDefragRun(memoryScopeKey(rpScope, projectDir));
     if (live) throw new ResumeError(409, { error: 'a defragment run for this memory scope is already live', runId: live.id });
   }
+
+  // A scheduled resume for this run is moot the moment any resume is committed.
+  cancelScheduledResumes(pipelineId, { by, reason: `the run was resumed${byActor(by || 'local')}` });
 
   const effMock = mock || serverMockMode();
   const runId = randomUUID();
@@ -6285,6 +6508,74 @@ const providerError = (res, err) => {
   if (err && (err.code === 'TERMS' || err.code === 'NOT_SIGNED_IN')) return res.status(409).json({ error: msg, code: err.code });
   return badRequest(res, msg);
 };
+
+// ── Ask Worca voice mode (docs/speech.md) ──
+// Behind the same global loopback / identity-proxy guards as every /api/ask
+// route (:1131, :1144). They name no thread, so the thread-owner guard (:1181)
+// has nothing to check. Registered before /api/providers/:name so the param
+// routes never see "speech".
+const speechFail = (res, err) => res.status(err && err.status ? err.status : 502).json({ error: err && err.message ? err.message : String(err) });
+
+app.get('/api/speech', (_req, res) => {
+  // downloaded: the voice chip says "Downloading…" only when the models really are fetched.
+  let downloaded = { stt: false, tts: false };
+  try { downloaded = speechAssetStore().downloaded(); } catch { /* no worca home: nothing downloaded */ }
+  res.json({ ...speechState(), downloaded });
+});
+
+app.patch('/api/providers/speech', async (req, res) => {
+  try {
+    await patchSpeech(req.body || {});
+    emitChanged('settings-changed');
+    res.json(await providersState());
+  } catch (err) {
+    return providerError(res, err);
+  }
+});
+
+// Settings › Providers › Speech: "Remove speech models" (the size shows on the card).
+app.delete('/api/speech/cache', async (_req, res) => {
+  try {
+    const bytes = speechAssetStore().clear();
+    res.json({ removed: bytes, providers: await providersState() });
+  } catch (err) {
+    res.status(err && err.status === 409 ? 409 : 500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+app.post('/api/providers/speech/test', async (req, res) => {
+  const b = req.body || {};
+  res.json(await testSpeech(typeof b.kind === 'string' ? b.kind : '', b));
+});
+
+app.post('/api/speech/transcribe', express.raw({ type: ['audio/wav', 'audio/x-wav', 'audio/wave'], limit: '25mb' }), async (req, res) => {
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return badRequest(res, 'send the utterance as an audio/wav body');
+  const ctrl = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) ctrl.abort(); });
+  try {
+    res.json(await transcribe({ audio: req.body, signal: ctrl.signal }));
+  } catch (err) {
+    if (!res.headersSent) speechFail(res, err);
+  }
+});
+
+app.post('/api/speech/synthesize', async (req, res) => {
+  const ctrl = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) ctrl.abort(); });
+  let up;
+  try {
+    up = await synthesize({ text: req.body && req.body.text, signal: ctrl.signal });
+  } catch (err) {
+    return speechFail(res, err);
+  }
+  res.status(200).set({ 'Content-Type': up.headers.get('content-type') || 'audio/wav', 'Cache-Control': 'no-store' });
+  try {
+    if (up.body) for await (const chunk of up.body) { if (res.destroyed) break; res.write(chunk); }
+    res.end();
+  } catch {
+    res.destroy();   // upstream died mid-stream: the browser's audio fails, voice drops to text-only
+  }
+});
 
 app.get('/api/providers', async (req, res) => {
   try {
@@ -9871,5 +10162,6 @@ export const _testing = {
   askTrackRun, liveRunEntry, liveDefragRun, memoryScopeKey, startRunHandler, emitMemoryChanged, askSystemPromptFor,
   uiControl, bearerMatches,
   broadcast, askFilesRunDir,
+  validateResumeTarget, resumeTargetOf, fireResumeTicket, cancelScheduledResumes,
   trackHeartbeat, heartbeatTick, BOOT_ID,
 };

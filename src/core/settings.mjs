@@ -1468,6 +1468,7 @@ export async function removeGlobalModel(id) {
 //     copilot:   { githubToken?, accountType?, acknowledgedTerms?, termsVersion?, maxConcurrent?, login? },
 //     openai:    { baseUrl?, apiKey?, maxConcurrent? },
 //     anthropic: { baseUrl?, apiKey?, maxConcurrent? },
+//     speech:    { stt: {...}, tts: {...} },   // voice mode, NOT an upstream — see the Speech block below
 //   }
 // ---------------------------------------------------------------------------
 
@@ -1609,6 +1610,103 @@ export async function updateProvider(name, patch = {}, { dryRun = false } = {}) 
   if (Object.keys(all).length) settings.providers = all; else delete settings.providers;
   await persistSettings(settings);
   return providerConfig(name);
+}
+
+// ── Speech (Ask Worca voice mode, docs/speech.md) ──
+//   providers: { …, speech: {
+//     stt: { engine?, baseUrl?, apiKey?, model?, language?, pause? },
+//     tts: { engine?, baseUrl?, apiKey?, model?, voice?, speed? },
+//   } }
+// engine: 'browser' (the default — Whisper / Kokoro run in the page, src/core/speech-assets.mjs)
+// or 'server' (the baseUrl fields); tts may also be 'off' (replies stay text only).
+// NOT a model-bridge upstream: it never joins UPSTREAM_PROVIDERS, allProviders(),
+// the catalog or /api/models. Keys are literal or a whole-value ${VAR}, resolved at
+// use time by resolveProviderSecret like every provider key.
+const SPEECH_DEFAULTS = Object.freeze({
+  // pause: seconds of silence that end an utterance (the voice detector's wait), any engine.
+  stt: Object.freeze({ engine: 'browser', baseUrl: 'http://127.0.0.1:8080/v1', model: 'whisper-1', language: 'auto', pause: 1.2 }),
+  tts: Object.freeze({ engine: 'browser', baseUrl: '', model: 'tts-1', voice: 'af_heart', speed: 1 }),
+});
+const SPEECH_FIELDS = Object.freeze({
+  stt: Object.freeze(['engine', 'baseUrl', 'apiKey', 'model', 'language', 'pause']),
+  tts: Object.freeze(['engine', 'baseUrl', 'apiKey', 'model', 'voice', 'speed']),
+});
+const SPEECH_ENGINES = Object.freeze({ stt: Object.freeze(['browser', 'server']), tts: Object.freeze(['browser', 'server', 'off']) });
+const SPEECH_LANG_RE = /^(auto|[a-z]{2,3})$/;
+const SPEECH_ID_RE = /^[\w.:/@+-]{1,128}$/;
+const speechObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** Why `v` is not a valid value for speech field `k` of `kind`, or null when it is. */
+function speechFieldError(k, v, kind) {
+  if (k === 'engine') return typeof v === 'string' && SPEECH_ENGINES[kind].includes(v.trim().toLowerCase()) ? null : `engine must be ${SPEECH_ENGINES[kind].map((e) => `"${e}"`).join(' or ')}`;
+  if (k === 'baseUrl') return isUpstreamBaseUrl(v) ? null : 'baseUrl must be an http(s) URL with no query or fragment';
+  if (k === 'apiKey') return typeof v === 'string' && v.trim() ? null : 'apiKey must be a non-empty string';
+  if (k === 'language') return typeof v === 'string' && SPEECH_LANG_RE.test(v.trim().toLowerCase()) ? null : 'language must be "auto" or an ISO 639 code such as "bg"';
+  if (k === 'pause') { const n = Number(v); return (typeof v === 'number' || typeof v === 'string') && String(v).trim() !== '' && Number.isFinite(n) && n >= 0.3 && n <= 5 ? null : 'pause must be a number of seconds from 0.3 to 5'; }
+  if (k === 'speed') { const n = Number(v); return (typeof v === 'number' || typeof v === 'string') && Number.isFinite(n) && n >= 0.25 && n <= 4 ? null : 'speed must be a number from 0.25 to 4'; }
+  return typeof v === 'string' && SPEECH_ID_RE.test(v.trim()) ? null : `${k} must be an id (letters, digits and . _ - : / @ +)`;
+}
+
+function normSpeechField(k, v) {
+  if (k === 'baseUrl') return v.trim().replace(/\/+$/, '');
+  if (k === 'speed' || k === 'pause') return Number(v);
+  if (k === 'language' || k === 'engine') return v.trim().toLowerCase();
+  return v.trim();
+}
+
+/** Stored speech block → only the valid fields (never throws; like sanitizeProvider). */
+function sanitizeSpeech(raw) {
+  const r = speechObj(raw) ? raw : {};
+  const out = { stt: {}, tts: {} };
+  for (const kind of Object.keys(SPEECH_FIELDS)) {
+    const side = speechObj(r[kind]) ? r[kind] : {};
+    for (const k of SPEECH_FIELDS[kind]) {
+      if (side[k] === undefined) continue;
+      const why = speechFieldError(k, side[k], kind);
+      if (why) console.warn(`[worca] providers.speech.${kind}.${k}: ${why} — ignored`);
+      else out[kind][k] = normSpeechField(k, side[k]);
+    }
+  }
+  return out;
+}
+
+/** Effective speech config: defaults under the stored block. The key stays raw (literal or ${VAR}). */
+export function speechConfig() {
+  const d = { stt: { ...SPEECH_DEFAULTS.stt }, tts: { ...SPEECH_DEFAULTS.tts } };
+  if (process.env.NODE_TEST_CONTEXT && !process.env.WORCA_TEST_ALLOW_HOME_FALLBACK) return d;
+  const all = readSettings().providers;
+  const s = sanitizeSpeech(speechObj(all) ? all.speech : undefined);
+  return { stt: { ...d.stt, ...s.stt }, tts: { ...d.tts, ...s.tts } };
+}
+
+/** Patch { stt?: {...}, tts?: {...} }; '' / null clears a field back to its default. */
+export async function updateSpeech(patch = {}) {
+  assertTestSettingsAccess();
+  if (!speechObj(patch)) throw new Error('speech patch must be an object');
+  for (const [kind, side] of Object.entries(patch)) {
+    if (!SPEECH_FIELDS[kind]) throw new Error(`unknown speech service ${JSON.stringify(kind)} (stt or tts)`);
+    if (!speechObj(side)) throw new Error(`speech.${kind} must be an object`);
+    for (const [k, v] of Object.entries(side)) {
+      if (!SPEECH_FIELDS[kind].includes(k)) throw new Error(`unknown speech field ${JSON.stringify(k)} for ${kind}`);
+      if (isClearInput(v)) continue;
+      const why = speechFieldError(k, v, kind);
+      if (why) throw new Error(`${kind}: ${why}`);
+    }
+  }
+  const settings = readSettings();
+  const all = speechObj(settings.providers) ? settings.providers : {};
+  const cur = speechObj(all.speech) ? { ...all.speech } : {};
+  for (const [kind, side] of Object.entries(patch)) {
+    const s = speechObj(cur[kind]) ? { ...cur[kind] } : {};
+    for (const [k, v] of Object.entries(side)) {
+      if (isClearInput(v)) delete s[k]; else s[k] = normSpeechField(k, v);
+    }
+    if (Object.keys(s).length) cur[kind] = s; else delete cur[kind];
+  }
+  if (Object.keys(cur).length) all.speech = cur; else delete all.speech;
+  if (Object.keys(all).length) settings.providers = all; else delete settings.providers;
+  await persistSettings(settings);
+  return speechConfig();
 }
 
 /** Record the Copilot terms acknowledgement at the current wording version. */

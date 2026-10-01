@@ -448,6 +448,7 @@ export function createTurnReducer({
       if (!c || c.type !== 'tool_use' || typeof c.id !== 'string') continue;
       const input = c.input && typeof c.input === 'object' ? c.input : {};
       if (isMain) {
+        flushDeltas();                                                    // the text before a tool reaches the client before its block (voice speaks it then)
         anyToolRan = true;
         startAt.set(c.id, now());
         if (isAgentTool(c.name)) {

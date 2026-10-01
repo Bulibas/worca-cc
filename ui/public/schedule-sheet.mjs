@@ -83,6 +83,8 @@ export function closeScheduleSheet() {
  * @param {object} [o.initial]                  { scheduledFor?, rule?, overlap?, maxFailures?, ifMissed?, graceMin? }
  * @param {{graceMin:number, ifMissed:string, maxFailures:number}} [o.defaults]
  * @param {string} [o.runTitle]                   shown under the heading
+ * @param {string} [o.heading]                    overrides the mode's heading (e.g. a new resume is not a "Change time")
+ * @param {string} [o.confirmLabel]               overrides the mode's confirm label
  * @param {string} [o.warning]                    an amber note (e.g. the workflow can ask questions)
  * @param {{show:boolean, beforeRun:boolean|null, shownBeforeRun:boolean, onDiverged:'origin'|'fail'|null}} [o.sync]
  *   opt-in Sync block (#527): only the New-pipeline Schedule path passes it. beforeRun null = the form
@@ -92,7 +94,7 @@ export function closeScheduleSheet() {
 export function openScheduleSheet({
   mode = 'create', allowRepeat = true, allowAfter = true, candidates = null,
   initial = {}, defaults = { graceMin: 360, ifMissed: 'run', maxFailures: 3 },
-  runTitle = '', warning = '', sync = null,
+  runTitle = '', warning = '', sync = null, heading: headingOverride = '', confirmLabel: confirmOverride = '',
 } = {}) {
   closeScheduleSheet();
   return new Promise((resolve) => {
@@ -122,8 +124,8 @@ export function openScheduleSheet({
       after: initial.after || null, afterAny: initial.afterPolicy === 'any', cands: null, candsLoading: false, candsError: '',
     };
 
-    const heading = mode === 'ticket' ? (showKind ? 'Change when it starts' : 'Change time') : mode === 'series' ? 'Edit schedule' : 'Schedule this run';
-    const confirmLabel = mode === 'create' ? 'Schedule run' : 'Save';
+    const heading = headingOverride || (mode === 'ticket' ? (showKind ? 'Change when it starts' : 'Change time') : mode === 'series' ? 'Edit schedule' : 'Schedule this run');
+    const confirmLabel = confirmOverride || (mode === 'create' ? 'Schedule run' : 'Save');
 
     // ── build ────────────────────────────────────────────────────────────────
     const seg = h('div', { class: 'seg sched-presets', role: 'group', 'aria-label': 'How often' });
