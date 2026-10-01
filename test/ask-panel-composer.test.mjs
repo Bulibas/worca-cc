@@ -117,9 +117,9 @@ test('ask-panel-composer (#398): png accepted with a thumbnail chip, pdf accepte
   await ctx.tick(); await ctx.tick();
   assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 2, 'pdf accepted too');
   assert.equal(ctx.doc.querySelectorAll('.ask-chip img.ask-chip-thumb').length, 1, 'no thumbnail on a pdf chip');
-  injectFiles(ctx, [new ctx.window.File([new Uint8Array(5 * 1024 * 1024 + 1)], 'big.png', { type: 'image/png' })]);
+  injectFiles(ctx, [new ctx.window.File([new Uint8Array(32 * 1024 * 1024 + 1)], 'big.png', { type: 'image/png' })]);
   await ctx.tick(); await ctx.tick();
-  assert.match(ctx.doc.querySelector('.ask-composer-msg').textContent, /attachment over 5242880 bytes: big\.png/);
+  assert.match(ctx.doc.querySelector('.ask-composer-msg').textContent, /attachment over 33554432 bytes: big\.png/);
   // the file input advertises the binary types
   const accept = ctx.doc.querySelector('.ask-composer input[type="file"]').accept;
   for (const e of ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf']) assert.ok(accept.includes(e), `accept carries ${e}`);
@@ -182,13 +182,13 @@ test('ask-panel-composer: a 409 body renders verbatim and the composer keeps the
 });
 
 test('ask-panel-composer: a 413 body renders verbatim', async () => {
-  const calls = { messages: () => ({ ok: false, status: 413, json: async () => ({ error: 'attachment budget for this thread exceeded' }) }) };
+  const calls = { messages: () => ({ ok: false, status: 413, json: async () => ({ error: 'attachments over 50331648 bytes per message' }) }) };
   const ctx = makePanel({ fetchHandler: apiHandler(calls) });
   ctx.panel.open();
   ctx.doc.querySelector('textarea.ask-input').value = 'big send';
   ctx.doc.querySelector('[data-ask-send]').click();
   await ctx.tick(); await ctx.tick(); await ctx.tick();
-  assert.equal(ctx.doc.querySelector('.ask-composer-msg').textContent, 'attachment budget for this thread exceeded');
+  assert.equal(ctx.doc.querySelector('.ask-composer-msg').textContent, 'attachments over 50331648 bytes per message');
 });
 
 test('ask-panel-composer: streaming swaps send→stop; stop POSTs; done swaps back', async () => {
@@ -228,7 +228,7 @@ test('ask-panel-composer: the user echo replaces the optimistic row (no duplicat
 
 // #398: the sender's own tab must show the thumbnail right away — the 202 body
 // carries the store-minted id, and no later frame re-sends the row.
-test('ask-panel-composer (#398): the 202 attachment rows give the echo its ids — thumbnail now, and the thread budget counts them', async () => {
+test('ask-panel-composer (#398): the 202 attachment rows give the echo its ids — thumbnail now, and earlier uploads never block a new one', async () => {
   const calls = {
     messages: () => ({ ok: true, status: 202, json: async () => ({ userMessageId: 'askm_u0000001', assistantMessageId: MID,
       attachments: [{ id: 'att_00000001', name: 'shot.png', bytes: 24 * 1024 * 1024, kind: 'image', mime: 'image/png' }] }) }),
@@ -244,12 +244,11 @@ test('ask-panel-composer (#398): the 202 attachment rows give the echo its ids �
   const img = ctx.doc.querySelector('.ask-msg-user img.ask-attachment-thumb');
   assert.ok(img, 'the echo renders the thumbnail without waiting for a broadcast or reload');
   assert.ok(img.src.endsWith(`/api/ask/threads/${TID}/attachments/att_00000001`));
-  // the ledger learned the 24 MB the server reported: a further 2 MB is refused
-  // in the composer, before any base64 upload is paid
-  injectFiles(ctx, [new ctx.window.File([new Uint8Array(2 * 1024 * 1024)], 'more.png', { type: 'image/png' })]);
+  // the cap is per message, not per thread: the 24 MB already sent does not
+  // count against the next message's files
+  injectFiles(ctx, [new ctx.window.File(['still not a png'], 'more.png', { type: 'image/png' })]);
   await ctx.tick(); await ctx.tick();
-  assert.equal(ctx.doc.querySelector('.ask-composer-msg').textContent, 'attachment budget for this thread exceeded');
-  assert.equal(ctx.doc.querySelector('.ask-chip'), null, 'no chip for the refused file');
+  assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 1, 'the new file is accepted');
 });
 
 test('ask-panel-composer: the meter shows context fill — 0 ctx on a fresh panel, the live ctx while streaming, the thread ctx after done', async () => {
