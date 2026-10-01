@@ -1,5 +1,5 @@
-// test/ask-panel-contexts.test.mjs — context chips: the open chat's header row (links that
-// close the sheet and route) and the History popover rows (display-only, max 3 + overflow).
+// test/ask-panel-contexts.test.mjs — context topics: the context popover's Topics section (links that
+// close the sheet and route) and the History popover rows.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makePanel } from './helpers/ask-panel-harness.mjs';
@@ -42,57 +42,92 @@ async function openThread(ctx) {
   await ctx.tick(); await ctx.tick(); await ctx.tick();
 }
 
-test('header chips: one per context, links route + close, pinned styled, dead run not a link', async () => {
-  const state = { threads: [thread()], thread: thread() };
-  const ctx = makePanel({ fetchHandler: handler(state) });
-  await openThread(ctx);
-  const row = ctx.doc.querySelector('[data-ask-ctx-row]');
-  assert.equal(row.hidden, false);
-  assert.equal(row.getAttribute('role'), 'group', 'the aria-label needs a role to be announced');
-  assert.equal(row.getAttribute('aria-label'), 'Chat context');
-  const chips = [...row.querySelectorAll('.ask-ctx-chip')];
-  assert.deepEqual(chips.map((c) => c.dataset.kind), ['project', 'run', 'workspace', 'page', 'run']);
-  assert.deepEqual(chips.map((c) => c.getAttribute('href')), [
-    '#projects/worca-cc-ace1a602',
-    '#history/worca-cc-ace1a602/1a2b3c4d',
-    '#workspaces/wks-havn-0000abcd',
-    '#settings',
-    null,
-  ]);
-  assert.equal(chips[4].tagName, 'SPAN', 'a run with no home is display-only');
-  assert.ok(chips[2].classList.contains('is-pinned'));
-  assert.ok(chips[2].querySelector('svg'), 'pinned chip carries the pin icon');
-  assert.ok(!chips[0].classList.contains('is-pinned'));
-  assert.match(chips[0].textContent, /project\s*worca-cc/);
-  assert.equal(chips[3].textContent.trim(), 'Settings');
+const openCtx = (ctx) => { ctx.doc.querySelector('[data-ask-ctx-btn]').click(); return ctx.doc.querySelector('.ask-pop-ctx'); };
+const topics = (pop, group) => [...pop.querySelectorAll(`[data-ctx-group="${group}"] .ask-ctx-topic`)];
 
-  chips[1].click();
+test('no header chip row any more', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ threads: [thread()], thread: thread() }) });
+  await openThread(ctx);
+  assert.equal(ctx.doc.querySelector('[data-ask-ctx-row]'), null);
+  assert.equal(ctx.doc.querySelector('.ask-sheet .ask-ctx-chip'), null);
+  ctx.panel.destroy();
+});
+
+test('topics: "Asked from" rows in stored order, links route + close, pinned marked, homeless run not a link', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ threads: [thread()], thread: thread() }) });
+  await openThread(ctx);
+  const pop = openCtx(ctx);
+  assert.equal(pop.querySelector('[data-ctx-group="asked"] .ask-ctx-group').textContent, 'Asked from');
+  assert.equal(pop.querySelector('[data-ctx-group="mentioned"]'), null, 'no mentioned topics: no group');
+  const rows = topics(pop, 'asked');
+  assert.deepEqual(rows.map((r) => r.dataset.kind), ['project', 'run', 'workspace', 'page', 'run']);
+  assert.deepEqual(rows.map((r) => r.querySelector('.ask-ctx-topic-name').textContent), ['worca-cc', 'Fix login', 'havn', 'Settings', 'Live run']);
+  assert.deepEqual(rows.map((r) => r.querySelector('.ask-ctx-topic-kind').textContent), ['project', 'run', 'workspace', 'page', 'run']);
+  assert.deepEqual(rows.map((r) => r.getAttribute('role')), ['menuitem', 'menuitem', 'menuitem', 'menuitem', null]);
+  assert.equal(rows[4].tagName, 'DIV', 'a run with no home is a plain row');
+  assert.ok(rows[2].classList.contains('is-pinned'));
+  assert.ok(rows[2].querySelector('svg'), 'pin icon');
+  assert.equal(rows[2].querySelector('.ask-ctx-topic-pin').textContent, 'pinned');
+  assert.equal(rows[0].querySelector('.ask-ctx-topic-pin'), null);
+  assert.equal(ctx.doc.activeElement, rows[0], 'focus lands on the first topic');
+  rows[1].click();
   assert.equal(ctx.window.location.hash, '#history/worca-cc-ace1a602/1a2b3c4d');
   assert.equal(ctx.panel.isOpen(), false, 'routing closes the sheet');
+  assert.equal(ctx.doc.querySelector('.ask-pop-ctx'), null);
   ctx.panel.destroy();
 });
 
-test('legacy chat (contexts []) shows no indicator; new chat clears the row', async () => {
-  const state = { threads: [thread({ contexts: [] })], thread: thread({ contexts: [] }) };
-  const ctx = makePanel({ fetchHandler: handler(state) });
+test('topics: arrow keys skip the homeless run', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ threads: [thread()], thread: thread() }) });
   await openThread(ctx);
-  assert.equal(ctx.doc.querySelector('[data-ask-ctx-row]').hidden, true);
-  assert.equal(ctx.doc.querySelectorAll('.ask-thread-ctx').length, 0, 'no chips in the history row either');
+  const pop = openCtx(ctx);
+  const rows = topics(pop, 'asked');
+  rows[3].focus();
+  pop.dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  assert.equal(ctx.doc.activeElement, rows[0], 'wraps past the plain row');
   ctx.panel.destroy();
 });
 
-test('send repaints the header from the 202 contexts', async () => {
+test('topics: mentioned ones get their own group, muted, routing like page topics', async () => {
+  const mentioned = [
+    { kind: 'project', id: 'worca-cc-ace1a602', label: 'worca-cc' },
+    { kind: 'run', id: '5e6f7081', label: 'Fix login', home: 'worca-cc-ace1a602', source: 'chat' },
+  ];
+  const ctx = makePanel({ fetchHandler: handler({ threads: [thread({ contexts: mentioned })], thread: thread({ contexts: mentioned }) }) });
+  await openThread(ctx);
+  const pop = openCtx(ctx);
+  assert.equal(pop.querySelector('[data-ctx-group="mentioned"] .ask-ctx-group').textContent, 'Mentioned in chat');
+  const [m] = topics(pop, 'mentioned');
+  assert.ok(m.classList.contains('is-mentioned'));
+  assert.ok(!m.classList.contains('is-pinned'));
+  assert.equal(topics(pop, 'asked').length, 1);
+  m.click();
+  assert.equal(ctx.window.location.hash, '#history/worca-cc-ace1a602/5e6f7081');
+  ctx.panel.destroy();
+});
+
+test('topics: none yet says so', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ threads: [thread({ contexts: [] })], thread: thread({ contexts: [] }) }) });
+  await openThread(ctx);
+  const pop = openCtx(ctx);
+  assert.equal(pop.querySelector('.ask-ctx-topics .ask-pop-empty').textContent, 'No topics yet.');
+  assert.equal(pop.querySelectorAll('.ask-ctx-topic').length, 0);
+  ctx.panel.destroy();
+});
+
+test('topics: the 202 contexts and New chat repaint an open popover in place', async () => {
   const state = { threads: [], thread: thread({ contexts: [] }), after: [{ kind: 'page', id: 'team-policy', label: 'Team policy' }] };
   const ctx = makePanel({ fetchHandler: handler(state), getPageContext: () => ({ view: 'team-policy' }) });
   ctx.panel.open();
+  const pop = openCtx(ctx);
   ctx.doc.querySelector('textarea.ask-input').value = 'hello';
   ctx.doc.querySelector('[data-ask-send]').click();
   await ctx.tick(); await ctx.tick(); await ctx.tick();
-  const row = ctx.doc.querySelector('[data-ask-ctx-row]');
-  assert.equal(row.hidden, false);
-  assert.deepEqual([...row.querySelectorAll('.ask-ctx-chip')].map((c) => c.getAttribute('href')), ['#team-policy']);
+  assert.equal(ctx.doc.querySelector('.ask-pop-ctx'), pop, 'still open, same node');
+  assert.deepEqual(topics(pop, 'asked').map((r) => r.querySelector('.ask-ctx-topic-name').textContent), ['Team policy']);
   ctx.doc.querySelector('[data-ask-new-btn]').click();
-  assert.equal(row.hidden, true, 'New chat starts with no chips');
+  const p3 = ctx.doc.querySelector('.ask-pop-ctx') || openCtx(ctx);
+  assert.equal(p3.querySelectorAll('.ask-ctx-topic').length, 0, 'New chat starts with no topics');
   ctx.panel.destroy();
 });
 
@@ -114,21 +149,13 @@ test('history rows: at most 3 display-only chips + overflow; clicking a chip ope
   ctx.panel.destroy();
 });
 
-test('chat chips: is-mentioned styling and title in the header (links) and History rows; pinned stays page-only', async () => {
+test('history rows: mentioned chips marked (rewritten in the next step)', async () => {
   const mentioned = [
     { kind: 'project', id: 'worca-cc-ace1a602', label: 'worca-cc' },
     { kind: 'run', id: '5e6f7081', label: 'Fix login', home: 'worca-cc-ace1a602', source: 'chat' },
   ];
-  const state = { threads: [thread({ contexts: mentioned })], thread: thread({ contexts: mentioned }) };
-  const ctx = makePanel({ fetchHandler: handler(state) });
-  await openThread(ctx);
-  const chips = [...ctx.doc.querySelectorAll('[data-ask-ctx-row] .ask-ctx-chip')];
-  assert.ok(!chips[0].classList.contains('is-mentioned'), 'a page chip is not a mentioned one');
-  assert.ok(chips[1].classList.contains('is-mentioned'));
-  assert.ok(!chips[1].classList.contains('is-pinned'));
-  assert.match(chips[1].title, /Mentioned in this chat/);
-  assert.doesNotMatch(chips[0].title, /Mentioned/);
-  assert.equal(chips[1].getAttribute('href'), '#history/worca-cc-ace1a602/5e6f7081', 'routes like a page chip');
+  const ctx = makePanel({ fetchHandler: handler({ threads: [thread({ contexts: mentioned })], thread: thread({ contexts: mentioned }) }) });
+  ctx.panel.open();
   ctx.doc.querySelector('[data-ask-threads-btn]').click();
   await ctx.tick(); await ctx.tick(); await ctx.tick();
   const rowChips = [...ctx.doc.querySelectorAll('.ask-thread-row .ask-thread-ctx .ask-ctx-chip')];
@@ -136,19 +163,21 @@ test('chat chips: is-mentioned styling and title in the header (links) and Histo
   ctx.panel.destroy();
 });
 
-test('ask-done contexts repaint the header row; a frame without them keeps what is shown', async () => {
+test('topics: ask-done contexts repaint the open popover; a frame without them keeps what is shown', async () => {
   const state = { threads: [thread({ contexts: CONTEXTS.slice(0, 1) })], thread: thread({ contexts: CONTEXTS.slice(0, 1) }) };
   const ctx = makePanel({ fetchHandler: handler(state) });
   await openThread(ctx);
-  const ids = () => [...ctx.doc.querySelectorAll('[data-ask-ctx-row] .ask-ctx-chip')].map((c) => c.dataset.kind);
+  const pop = openCtx(ctx);
+  const ids = () => [...ctx.doc.querySelectorAll('.ask-pop-ctx .ask-ctx-topic')].map((r) => r.dataset.kind);
   assert.deepEqual(ids(), ['project']);
   const done = (seq, over = {}) => ({ type: 'ask-done', threadId: TID, messageId: 'msg_00000002', seq, text: 'ok', blocks: [], usage: null,
     costUsd: null, durationMs: 1, model: 'm', status: 'done', threadTotals: null, ...over });
   ctx.panel.pushServerFrame({ type: 'ask-start', threadId: TID, messageId: 'msg_00000002', seq: 1, userMessageId: 'msg_00000001', model: 'm', effort: 'high', startedAt: 't' });
   ctx.panel.pushServerFrame(done(2, { contexts: [CONTEXTS[0], { kind: 'run', id: '5e6f7081', label: 'Fix login', home: 'worca-cc-ace1a602', source: 'chat' }] }));
   ctx.flush();
+  assert.equal(ctx.doc.querySelector('.ask-pop-ctx'), pop, 'rebuilt in place');
   assert.deepEqual(ids(), ['project', 'run']);
-  assert.ok(ctx.doc.querySelector('[data-ask-ctx-row] .ask-ctx-chip.is-mentioned'));
+  assert.ok(ctx.doc.querySelector('.ask-pop-ctx .ask-ctx-topic.is-mentioned'));
   ctx.panel.pushServerFrame({ type: 'ask-start', threadId: TID, messageId: 'msg_00000003', seq: 3, userMessageId: 'msg_00000001', model: 'm', effort: 'high', startedAt: 't' });
   ctx.panel.pushServerFrame(done(4, { messageId: 'msg_00000003' }));         // an older server omits contexts
   ctx.flush();

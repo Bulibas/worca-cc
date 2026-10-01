@@ -4986,17 +4986,9 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-scope-btn.is-pinned{color:var(--ink);border-color:var(--line-2);font-weight:600;}
 .ask-scope-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ask-mcp-btn[hidden]{display:none;}
-/* Context chips: the open chat's row under the header (links) and the History rows (display-only). */
-/* flex:none — overflow-y:auto zeroes the flex item's min-height, so a long transcript would squash the row */
-.ask-ctx-row{flex:none;display:flex;flex-wrap:wrap;gap:5px;padding:7px 14px 8px 16px;border-bottom:1px solid var(--line);
-  max-height:58px;overflow-y:auto;}
-.ask-ctx-row[hidden]{display:none;}
 .ask-ctx-chip{display:inline-flex;align-items:center;gap:4px;max-width:200px;padding:2px 8px;border:1px solid var(--line);
   border-radius:999px;background:var(--field);color:var(--ink-2);font-size:11px;line-height:16px;text-decoration:none;
   white-space:nowrap;}
-a.ask-ctx-chip{cursor:pointer;}
-a.ask-ctx-chip:hover{color:var(--ink);border-color:var(--line-2);}
-a.ask-ctx-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-ctx-chip.is-pinned{background:var(--violet-bg);color:var(--violet-ink);border-color:transparent;font-weight:600;}
 .ask-ctx-kind{font-family:var(--mono);font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-3);}
 .ask-ctx-chip.is-pinned .ask-ctx-kind{color:inherit;opacity:.75;}
@@ -5525,6 +5517,19 @@ a.ask-ctx-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-ctx-foot{padding:6px 10px 4px;font-size:12px;color:var(--ink-2);}
 .ask-ctx-foot.is-ctx-high{color:var(--red-ink);font-weight:600;}
 .ask-ctx-hint{padding:0 10px 4px;font-size:11px;color:var(--ink-3);}
+.ask-ctx-topics{padding-bottom:4px;}
+.ask-ctx-group{padding:6px 10px 2px;font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);}
+.ask-ctx-topic{display:flex;align-items:center;gap:8px;padding:5px 10px;border-radius:10px;font-size:12.5px;color:var(--ink);}
+.ask-ctx-topic.ask-pop-item{padding:5px 10px;}
+.ask-ctx-topic[data-kind="project"] .ask-ctx-swatch{background:var(--violet);}
+.ask-ctx-topic[data-kind="run"] .ask-ctx-swatch{background:var(--blue);}
+.ask-ctx-topic[data-kind="workspace"] .ask-ctx-swatch{background:var(--green);}
+.ask-ctx-topic[data-kind="page"] .ask-ctx-swatch{background:var(--amber);}
+.ask-ctx-topic-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;}
+.ask-ctx-topic svg{flex:none;color:var(--violet-ink);}
+.ask-ctx-topic-pin{font-family:var(--mono);font-size:10px;color:var(--violet-ink);}
+.ask-ctx-topic-kind{flex:none;font-family:var(--mono);font-size:10px;color:var(--ink-3);}
+.ask-ctx-topic.is-mentioned{color:var(--ink-2);}
 /* The chip picker (ask-panel.mjs openChipPicker) is the only JS-positioned panel: a band
    chip sits wherever the transcript scrolled it. Its rows are the WHOLE model catalog, so
    the menu outgrows the sheet, which clips -- the same cap .ask-pop-scope carries keeps

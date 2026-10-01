@@ -272,6 +272,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // page — today's behaviour). label caches the display name once resolved.
     scope: { pinned: false, projectKey: null, workspaceId: null, label: null },
     popover: null,            // {panel, trigger, onClose, build, refreshOn, refresh}
+    contexts: [],             // the open chat's topics (thread.contexts), shown in the context popover
     threadsRefresh: null,     // the debounce timer behind the History popover's ask-run-status refetch
     expandedAgents: new Set(),
     worktrees: [],            // P4 §10: the chat's open worktrees (snapshot-fed)
@@ -482,13 +483,6 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     header.appendChild(newBtn);
     header.appendChild(iconButton('ask-icon-btn', 'Close', ICONS.chevronDown, closeSheet));
     sheet.appendChild(header);
-    // Context chips: what this chat was asked in (project/run/workspace/named page), origin first.
-    el.ctxRow = make('div', 'ask-ctx-row');
-    el.ctxRow.setAttribute('data-ask-ctx-row', '');
-    el.ctxRow.setAttribute('role', 'group');   // a bare div's aria-label is ignored
-    el.ctxRow.setAttribute('aria-label', 'Chat context');
-    el.ctxRow.hidden = true;
-    sheet.appendChild(el.ctxRow);
 
     el.transcript = make('div', 'ask-transcript');
     el.transcript.setAttribute('data-ask-scroll', '');
@@ -934,7 +928,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         st.threadId = id;
         st.model = createThreadModel({ threadId: id });
         st.model.load({ thread: body.thread, messages: [], attachments: [], runLinks: [], inFlight: null });
-        renderContextChips(body.thread && body.thread.contexts);
+        setContexts(body.thread && body.thread.contexts);
         renderTranscript();
         storeThread(id);
       }
@@ -968,7 +962,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       // A toggle made while this POST was out PATCHed a value the route then overwrote with sentOff: re-send the latest.
       if (st.mcp.off !== sentOff) patchMcpOff(id, st.mcp.off);
       const { userMessageId, attachments: stored, contexts } = await res.json();
-      if (Array.isArray(contexts)) renderContextChips(contexts);   // an older server omits it: keep what is shown
+      if (Array.isArray(contexts)) setContexts(contexts);   // an older server omits it: keep what is shown
       // Prefer the server's rows: they carry the store-minted ids that key the
       // image thumbnail (#398) and the thread's attachment ledger. The pending
       // files are the fallback for a server that predates the field.
@@ -1511,11 +1505,11 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return chip;
   }
 
-  /** Header chip row for the open chat; hidden when the chat has none (legacy / fresh). */
-  function renderContextChips(list) {
-    if (!el.ctxRow) return;
-    el.ctxRow.replaceChildren(...validContexts(list).map((c) => contextChip(c, { link: true })));
-    el.ctxRow.hidden = el.ctxRow.childElementCount === 0;
+  /** The open chat's topics; an open context popover is rebuilt in place (same node, focus kept). */
+  function setContexts(list) {
+    st.contexts = validContexts(list);
+    const pop = st.popover;
+    if (pop && pop.trigger === el.meterTokens) { pop.panel.replaceChildren(); pop.build(pop.panel); }
   }
 
   const HISTORY_CHIPS = 3;
@@ -2313,6 +2307,48 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   // ---- context popover (window fill + this chat's topics) -------------------
   const levelClass = (level) => (level === 'warn' || level === 'high' ? ` is-ctx-${level}` : '');
 
+  /** One topic row: a menuitem that closes the sheet and routes, or a plain row when it has no route. */
+  function topicRow(c) {
+    const href = contextHref(c);
+    const mentioned = c.source === 'chat';                       // only a page topic is ever pinned
+    const pinned = c.pinned && !mentioned;
+    const row = href
+      ? menuItem('ask-ctx-topic', () => { closeSheet(); if (win.location.hash !== href) win.location.hash = href.slice(1); })
+      : make('div', 'ask-ctx-topic');
+    if (mentioned) row.classList.add('is-mentioned');
+    if (pinned) row.classList.add('is-pinned');
+    row.dataset.kind = c.kind;
+    row.title = `${c.kind} ${c.id} — ${c.label || c.id}`;
+    row.appendChild(make('span', 'ask-ctx-swatch'));
+    row.appendChild(make('span', 'ask-ctx-topic-name', c.label || c.id));
+    if (pinned) {
+      row.appendChild(svgIcon(ICONS.pin, 11, 2));
+      row.appendChild(make('span', 'ask-ctx-topic-pin', 'pinned'));
+    }
+    row.appendChild(make('span', 'ask-ctx-topic-kind', c.kind));
+    return row;
+  }
+
+  function topicsSection() {
+    const box = make('div', 'ask-ctx-topics');
+    const { asked, mentioned } = groupContexts(st.contexts);
+    const total = asked.length + mentioned.length;
+    const head = make('div', 'ask-pop-caption-row');
+    head.appendChild(make('span', 'ask-pop-caption', 'Topics'));
+    head.appendChild(make('span', 'ask-pop-caption-meter', total ? String(total) : ''));
+    box.appendChild(head);
+    if (!total) { box.appendChild(make('div', 'ask-pop-empty', 'No topics yet.')); return box; }
+    for (const [key, label, list] of [['asked', 'Asked from', asked], ['mentioned', 'Mentioned in chat', mentioned]]) {
+      if (!list.length) continue;
+      const g = make('div', 'ask-ctx-topic-group');
+      g.dataset.ctxGroup = key;
+      g.appendChild(make('div', 'ask-ctx-group', label));
+      for (const c of list) g.appendChild(topicRow(c));
+      box.appendChild(g);
+    }
+    return box;
+  }
+
   /** Caption, then the window's bar / rows / footer (or one line while the window is unknown), then the topics. */
   function buildCtxPopover(p) {
     const { ctx, win } = currentCtx();
@@ -2351,6 +2387,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         : make('div', 'ask-ctx-foot', `${kTok(b.untilCompact)} until auto-compact`));
     }
     if (ctx >= CTX_COST_HINT) p.appendChild(make('div', 'ask-ctx-hint', `Each message re-sends about ${(ctx / 1000).toFixed(1)}k tokens.`));
+    p.appendChild(make('div', 'ask-pop-divider'));
+    p.appendChild(topicsSection());
   }
 
   function openCtxPopover(trigger) {
@@ -2376,7 +2414,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     storeThread(null);
     el.title.textContent = 'Ask Worca';
     applyThreadScope(null);             // #397: a brand-new chat starts on Auto
-    renderContextChips([]);
+    setContexts([]);
     restoreBrowserPick();               // …and on the browser-level pick, not the last chat's
     st.mcp.off = { sets: [], members: [] };   // …and with every MCP server on
     scheduleMcpRefresh();
@@ -4597,7 +4635,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     st.model.load(snap);
     el.title.textContent = (snap.thread && snap.thread.title) || 'Ask Worca';
     applyThreadScope(snap.thread && snap.thread.context);   // #397: restore the pin
-    renderContextChips(snap.thread && snap.thread.contexts);
+    setContexts(snap.thread && snap.thread.contexts);
     // The picker follows the chat — on a SWITCH only: a resync of the same thread
     // would otherwise clobber a pick the user just made (its PATCH may not have landed).
     if (switched) applyThreadPick(snap.thread);
@@ -4697,7 +4735,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (frame.type === 'ask-done' || frame.type === 'ask-error') {
       stopElapsed(); updateSendStop(); announce('answer finished');
       // Conversation chips: the turn's resolved list rides ask-done (an older server omits it: keep what is shown).
-      if (frame.type === 'ask-done' && Array.isArray(frame.contexts)) renderContextChips(frame.contexts);
+      if (frame.type === 'ask-done' && Array.isArray(frame.contexts)) setContexts(frame.contexts);
       // P4: a finished turn may have created/removed/navigated worktrees. This must
       // NOT live in updateSendStop() — that also runs from loadThread, so a
       // running→idle latch there fires a SECOND snapshot GET on every resync.
