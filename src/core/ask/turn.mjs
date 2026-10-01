@@ -633,9 +633,10 @@ class AskTurn extends EventEmitter {
     }
     if (!this._worktreeMutated || typeof this.deps.mcpJoinNotice !== 'function') return;   // §9.1: only a worktree change
     // Bounded like _settle: a hung resolve must never hold the terminal write (the thread would answer 409 until a restart).
+    // The timer stays ref'd: it is the only thing left to wake the turn when the resolve hangs, and finally clears it.
     let text = null;
     let timer = null;
-    const bound = new Promise((res) => { timer = setTimeout(() => res(null), this.deps.mcpJoinNoticeMs); timer.unref?.(); });
+    const bound = new Promise((res) => { timer = setTimeout(() => res(null), this.deps.mcpJoinNoticeMs); });
     try { text = await Promise.race([this.deps.mcpJoinNotice(), bound]); } catch { text = null; } finally { clearTimeout(timer); }
     if (text) this.reducer.addBlock({ kind: 'notice', text, mcp: true });
   }
