@@ -593,12 +593,16 @@ async function addWithRescan(extra = {}) {
   return { ...booted, doc, loader: () => doc.querySelector('#ws-detail .wd-members .wd-rescan') };
 }
 
-/** A Workspace scan run's state frame: its stepper (bookends + three stages) and step records. */
+/** A Workspace scan run's state frame, shaped as the server sends it: its stepper (preflight / done
+ *  steps, the graph's Task and End nodes, three stages between) and ledger rows ('start' while
+ *  running, 'done' once finished). */
 const SCAN_STEPPER = { version: 2, steps: [
   { kind: 'preflight', nodes: [{ id: 'preflight', label: 'Preflight' }] },
-  { kind: 'script', nodes: [{ id: 'extract', label: 'Extract' }] },
-  { kind: 'agent', nodes: [{ id: 'survey', label: 'Survey' }] },
-  { kind: 'script', nodes: [{ id: 'render', label: 'Render' }] },
+  { kind: 'agents', nodes: [{ id: 'n_task', key: null, uiPhase: 'task', label: 'Task' }] },
+  { kind: 'agents', nodes: [{ id: 'extract', label: 'Extract' }] },
+  { kind: 'agents', nodes: [{ id: 'survey', label: 'Survey' }] },
+  { kind: 'agents', nodes: [{ id: 'render', label: 'Render' }] },
+  { kind: 'agents', nodes: [{ id: 'n_end', key: null, uiPhase: 'end', label: 'End' }] },
   { kind: 'done', nodes: [{ id: 'done', label: 'Done' }] },
 ] };
 
@@ -612,11 +616,12 @@ test('a member change shows the re-scan loader: spinner, status, the scan run\'s
   assert.equal(el.querySelector('a.wd-rescan-open').getAttribute('href'), '#running/run_1');
   assert.match(el.querySelector('.wd-rescan-hint').textContent, /Team tab/);
   assert.ok(ws().sent.some((t) => JSON.parse(t).type === 'subscribe' && JSON.parse(t).runId === 'run_1'), 'subscribed to the run');
-  ws().deliver({ type: 'state', runId: 'run_other', stepper: SCAN_STEPPER, steps: [{ nodeId: 'render', status: 'running' }] });
-  ws().deliver({ type: 'state', runId: 'run_1', stepper: SCAN_STEPPER, steps: [{ nodeId: 'extract', status: 'done' }, { nodeId: 'survey', status: 'running' }] });
+  ws().deliver({ type: 'state', runId: 'run_other', stepper: SCAN_STEPPER, steps: [{ nodeId: 'render', status: 'start' }] });
+  ws().deliver({ type: 'state', runId: 'run_1', stepper: SCAN_STEPPER, steps: [
+    { nodeId: 'n_task', status: 'done' }, { nodeId: 'extract', status: 'done' }, { nodeId: 'survey', status: 'start' }] });
   await settle(6);
   const now = loader();
-  assert.deepEqual([...now.querySelectorAll('[data-phase]')].map((n) => n.textContent), ['Extract', 'Survey', 'Render'], 'the run\'s stages, bookends left out');
+  assert.deepEqual([...now.querySelectorAll('[data-phase]')].map((n) => n.textContent), ['Extract', 'Survey', 'Render'], 'the run\'s stages; preflight, Task, End and done left out');
   assert.deepEqual([...now.querySelectorAll('[data-phase].active')].map((n) => n.dataset.phase), ['survey']);
   assert.deepEqual([...now.querySelectorAll('[data-phase].done')].map((n) => n.dataset.phase), ['extract']);
 });

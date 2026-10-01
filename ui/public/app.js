@@ -70,7 +70,7 @@ import { logLineVisible, logFacets, compileLogFilter } from './log-filter.mjs';
 import { alreadyApplied, noteBoot } from './ws-seq.mjs';
 import { decorFromState, applyDecor, isGraphManifest } from './graph/run-decor.mjs';
 import { mountRunGraph } from './graph/run-hosts.mjs';
-import { trailColumns, nowRows, glanceCopy, renderOrb, nodeLabel, preflightOpen } from './run-glance.mjs';
+import { trailColumns, nowRows, glanceCopy, renderOrb, nodeLabel, preflightOpen, dotState } from './run-glance.mjs';
 // Import list only — `statusChip`/`diffBadges`/`mergeFindings`/`reportResultControl`
 // lost their last app.js caller with the retired card accordion. They stay EXPORTED
 // from results-view.mjs (test/results-view-helpers.test.mjs imports four of them).
@@ -8304,7 +8304,9 @@ function endWsRescan(id, how, runId = null) {
   paintWsRescan(id);
 }
 
-/** The scan run's stages from its own stepper (bookends left out), each with done / active. */
+/** The scan run's stages from its own stepper, each with done / active from its ledger rows ('start'
+ *  while one runs: dotState). Bookends are left out: the preflight and done steps, and the graph's
+ *  Task and End nodes. */
 function wsRescanStages(runId) {
   const run = runId ? runs.get(runId) : null;
   const steps = run && run.stepper && Array.isArray(run.stepper.steps) ? run.stepper.steps : [];
@@ -8313,9 +8315,10 @@ function wsRescanStages(runId) {
   for (const step of steps) {
     if (!step || step.kind === 'preflight' || step.kind === 'done') continue;
     for (const n of step.nodes || []) {
+      if (n.uiPhase === 'task' || n.uiPhase === 'end') continue;
       const mine = records.filter((x) => x && x.nodeId === n.id);
       out.push({ id: n.id, label: n.label || n.id,
-        active: mine.some((x) => x.status === 'running'), done: mine.length > 0 && mine.every((x) => x.status === 'done') });
+        active: mine.some((x) => ['act', 'ask'].includes(dotState(x))), done: mine.length > 0 && mine.every((x) => dotState(x) === 'done') });
     }
   }
   return out;
