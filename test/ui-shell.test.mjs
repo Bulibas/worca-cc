@@ -5,48 +5,32 @@ import { fileURLToPath } from 'node:url';
 const html = readFileSync(fileURLToPath(new URL('../ui/public/index.html', import.meta.url)), 'utf8');
 
 test('exactly fifteen routed views', () => {
-  assert.equal((html.match(/data-view/g) || []).length, 16);   // + getting-started (docs/getting-started.md) + scripts + schedules + team-policy (team-policy design §11)
+  assert.equal((html.match(/data-view/g) || []).length, 15);   // + getting-started (docs/getting-started.md) + scripts + schedules + team-policy (team-policy design §11); Running + History merged into Runs
 });
 test('thirteen views include composer + the two workspace views + the two agent views + scripts + projects + stats + team-metrics (plugins/guardrails/models are Settings tabs now)', () => {
-  for (const v of ['new', 'running', 'history', 'stats', 'team-metrics', 'composer', 'workspaces', 'workspace-create', 'agents', 'scripts', 'agent-create', 'projects', 'settings'])
+  for (const v of ['new', 'runs', 'stats', 'team-metrics', 'composer', 'workspaces', 'workspace-create', 'agents', 'scripts', 'agent-create', 'projects', 'settings'])
     assert.ok(html.includes(`data-view="${v}"`), `missing data-view=${v}`);
   // Folded into Settings: a pane, not a routed view (see .settings-pane below).
   for (const v of ['plugins', 'guardrails', 'models'])
     assert.ok(!html.includes(`data-view="${v}"`), `${v} should no longer be a routed view`);
 });
 test('nav targets: the base set + workspaces + projects + stats (workspace-create is NOT a nav target)', () => {
-  for (const v of ['new', 'running', 'history', 'stats', 'composer', 'workspaces', 'scripts', 'projects', 'settings'])
+  for (const v of ['new', 'runs', 'stats', 'composer', 'workspaces', 'scripts', 'projects', 'settings'])
     assert.ok(html.includes(`data-nav="${v}"`), `missing data-nav=${v}`);
   // workspace-create is reached via location.hash only — no nav link.
   assert.ok(!html.includes('data-nav="workspace-create"'), 'workspace-create must not be a nav target');
 });
 test('shell hooks present (base + workspace surfaces)', () => {
   for (const id of [
-    'run-card-tpl', 'run-detail-tpl', 'run-shell', 'run-detail', 'stop-modal',
-    'hist-card-tpl', 'hist-detail-tpl', 'shipit-modal',
-    'run-list', 'nav-running-count',
+    'run-detail-tpl', 'run-shell', 'run-detail', 'stop-modal',
+    'hist-detail-tpl', 'shipit-modal',
+    'runs-shell', 'runs-list', 'runs-pane', 'nav-needs-count', 'nav-running-count',
     'ws-detail-tpl', 'ws-shell', 'ws-detail', 'ws-list', 'target-seg', 'target-project-pane',
     'target-workspace-pane', 'workspaceSelect', 'ws-members', 'wiz-close',
   ])
     assert.ok(html.includes(`id="${id}"`), `missing #${id}`);
 });
-test('run-card template: header cluster + one waiting strip + stop; no graph, log, qpanel, run-foot / subs-bar', () => {
-  const m = html.match(/<template id="run-card-tpl">([\s\S]*?)<\/template>/);
-  assert.ok(m, 'missing run-card-tpl');
-  const tpl = m[1];
-  assert.ok(tpl.includes('rc-head'), 'tpl missing the header row');
-  assert.ok(tpl.includes('btn-stop'), 'tpl missing btn-stop');
-  assert.ok(/<button[^>]*class="rc-wait"[^>]*hidden/.test(tpl), 'tpl missing the hidden .rc-wait strip button');
-  assert.ok(tpl.includes('rc-wait-text'), 'tpl missing .rc-wait-text');
-  assert.ok(!tpl.includes('run-flow'), 'the graph no longer lives on the list card');
-  assert.ok(!tpl.includes('run-log'), 'the live log no longer lives on the list card');
-  assert.ok(!tpl.includes('qpanel'), 'the question panel mounts on the run page only');
-  assert.ok(!tpl.includes('rc-compact') && !tpl.includes('rc-detailed'), 'no compact/detailed bodies');
-  assert.ok(!tpl.includes('data-step'), 'tpl should not carry static data-step stages');
-  assert.ok(!tpl.includes('run-foot'), '.run-foot removed (design §7)');
-  assert.ok(!tpl.includes('subs-bar'), '.subs-bar removed (design §7)');
-});
-test('the log filter bar ships in its own template, not in the run card', () => {
+test('the log filter bar ships in its own template', () => {
   assert.ok(html.includes('id="log-bar-tpl"'), 'missing #log-bar-tpl');
 });
 test('scan loader carries role=status + aria-live=polite (A11y)', () => {

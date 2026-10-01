@@ -17,7 +17,7 @@ import { spawnSync } from 'node:child_process';
 import { WebSocket } from 'ws';
 
 import { useTempHome } from './helpers/temp-home.mjs';
-import { workspaceKey } from '../src/core/workspaces.mjs';
+import { workspaceKey, addWorkspaceMembers } from '../src/core/workspaces.mjs';
 
 useTempHome(after);
 
@@ -216,6 +216,42 @@ test('re-scan: 404 unknown, 409 live run, else a run that replaces the descripti
   assert.equal(again.status, 200);
   assert.equal((await settled((await again.json()).runId)).status, 'done');
   await branchesGone(a, b);
+});
+
+test('a workspace whose members changed keeps its id, but the scan guard follows its CURRENT set', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const { workspace } = await (await post('/api/workspaces', { name: 'Grown', projectPaths: [a, b] })).json();
+  await addWorkspaceMembers(workspace.id, [c]);   // id still ends in the hash of {a, b}
+  // A live run of the grown workspace does not block a first scan of its ORIGINAL set: no
+  // workspace spans {a, b} any more, and no scan of {a, b} is running.
+  fakeLiveScan('fake-grown-run', workspace.id);
+  try {
+    const res = await post('/api/workspaces/scan', { name: 'Original Pair', projectPaths: [a, b] });
+    const body = await res.json();
+    assert.equal(res.status, 200, body.error);
+    // ...while the grown workspace itself stays guarded by its own live run.
+    assert.equal((await post(`/api/workspaces/${workspace.id}/scan`, {})).status, 409);
+    assert.equal((await settled(body.runId)).status, 'done');
+    await branchesGone(a, b);
+  } finally { runs.delete('fake-grown-run'); }
+});
+
+test('a live first scan of a set a grown workspace once spanned does not block that workspace\'s re-scan', async () => {
+  const a = await freshRepo();
+  const b = await freshRepo();
+  const c = await freshRepo();
+  const { workspace } = await (await post('/api/workspaces', { name: 'Grown Too', projectPaths: [a, b] })).json();
+  await addWorkspaceMembers(workspace.id, [c]);
+  fakeLiveScan('fake-pair-scan', workspaceKey({ name: 'Pair', projectPaths: [a, b] }));
+  try {
+    const res = await post(`/api/workspaces/${workspace.id}/scan`, {});
+    const body = await res.json();
+    assert.equal(res.status, 200, body.error);
+    assert.equal((await settled(body.runId)).status, 'done');
+    await branchesGone(a, b, c);
+  } finally { runs.delete('fake-pair-scan'); }
 });
 
 test('a paused scan blocks a re-scan and a delete; a paused ordinary run blocks neither', async () => {

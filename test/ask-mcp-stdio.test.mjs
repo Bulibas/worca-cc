@@ -14,7 +14,9 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
 import { addProject } from '../src/core/projects.mjs';
 import { createThread, appendMessage, addAttachment } from '../src/core/ask/store.mjs';
-import { createRpcServer, parseArgv } from '../src/core/ask/mcp-stdio.mjs';
+import { createRpcServer, parseArgv, main } from '../src/core/ask/mcp-stdio.mjs';
+import { scriptBaseEnv } from '../src/core/graph/script-runner.mjs';
+import { Readable, Writable } from 'node:stream';
 import { AskToolError } from '../src/core/ask/tools.mjs';
 
 const home = useTempHome(after);
@@ -139,7 +141,7 @@ test('real child: handshake, seeded rows readable, thread-scoped attachment, pro
   const msgs = r.out.split('\n').filter(Boolean).map((l) => JSON.parse(l));
   assert.deepEqual(msgs.map((m) => m.id), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   assert.equal(msgs[0].result.protocolVersion, '2025-11-25');
-  assert.deepEqual(msgs[1].result.tools.map((t) => t.name), ['list_projects', 'list_workflows', 'list_runs', 'list_people', 'get_run', 'get_run_diff', 'track_run', 'propose_run', 'propose_workflow', 'read_attachment',
+  assert.deepEqual(msgs[1].result.tools.map((t) => t.name), ['list_projects', 'list_branches', 'list_workflows', 'list_runs', 'list_people', 'get_run', 'get_run_diff', 'track_run', 'propose_run', 'propose_workflow', 'read_attachment',
     'list_diff_comments', 'add_diff_comment', 'reply_to_diff_comment', 'resolve_diff_comment', 'delete_diff_comment',
     'open_worktree', 'list_worktrees', 'remove_worktree', 'git',
     'list_run_artifacts', 'read_run_artifact', 'get_run_progress',
@@ -150,7 +152,8 @@ test('real child: handshake, seeded rows readable, thread-scoped attachment, pro
     'pause_schedule', 'resume_schedule', 'skip_next_run', 'mark_schedule_activity_read',
     'list_task_sources', 'find_tasks', 'get_task',
     'list_scripts', 'get_script', 'save_script', 'test_script',
-    'list_models', 'get_providers', 'test_provider', 'list_copilot_models', 'list_endpoint_models', 'propose_model_change', 'propose_clone_project']);
+    'list_models', 'get_providers', 'test_provider', 'list_copilot_models', 'list_endpoint_models', 'propose_model_change', 'propose_clone_project',
+    'propose_workspace_change']);
   const projects = JSON.parse(msgs[2].result.content[0].text);
   assert.equal(projects.projects[0].key, project.key);
   const run = JSON.parse(msgs[3].result.content[0].text);
@@ -203,4 +206,21 @@ test('real child: web_fetch listed only with WORCA_ASK_WEB, and refuses an exfil
   assert.ok(names.includes('web_fetch')); assert.ok(!names.includes('web_search'));
   const call = out.find((m) => m.id === 2).result;
   assert.equal(call.isError, true); assert.match(call.content[0].text, /^error: web_fetch: host "evil.example" is not on the Ask web allowlist/);
+});
+
+test('main() drops every MCPSECRET_* (any case) before the relay branch, so test_script and nested spawns inherit none (MCP registry §5.5.2)', async () => {
+  process.env.MCPSECRET_AAAA1111 = 'secret-a';
+  process.env.mcpsecret_bbbb2222 = 'secret-b';
+  const env = { MCPSECRET_CCCC3333: 'secret-c', KEEP: '1' };
+  const secrets = (e) => Object.keys(e).filter((k) => /^MCPSECRET_/i.test(k));
+  try {
+    await main({ argv: ['--relay', 'http://127.0.0.1:9/relay'], env, stdin: Readable.from([]),
+      stdout: new Writable({ write(_c, _e, cb) { cb(); } }) });
+    assert.deepEqual(secrets(process.env), []);
+    assert.deepEqual(env, { KEEP: '1' });
+    assert.deepEqual(secrets(scriptBaseEnv({})), [], 'what test_script starts from');
+  } finally {
+    delete process.env.MCPSECRET_AAAA1111;
+    delete process.env.mcpsecret_bbbb2222;
+  }
 });

@@ -158,6 +158,9 @@ export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repea
     const missed = t.status === 'missed';
     const firing = t.status === 'firing';
     const chained = !!t.after;
+    const resumeTarget = !t.scheduleId && t.resumePipelineId
+      ? (typeof deps.labelResumeTarget === 'function' ? deps.labelResumeTarget(t.resumePipelineId) : null)
+      : null;
     const statusWord = missed ? 'Missed' : firing ? 'Starting' : chained ? 'Waiting for a run' : t.queued ? 'Waiting for the previous run' : t.retryAt ? 'Retrying' : 'Scheduled';
     const family = missed ? 'amber' : firing ? 'peach' : 'grey';
     // The word after the dot always describes the PREDECESSOR (running / finished / ended with an
@@ -167,11 +170,11 @@ export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repea
       : (missed ? `was due ${when(t.runAt)}` : `${when(t.runAt)}${countdown(t.runAt) ? ` · in ${countdown(t.runAt)}` : ''}`);
     const acts = h('div', { class: 'sched-acts' });
     if (!firing) {
-      const runNow = h('button', { type: 'button', class: 'btn btn-mini', text: 'Run now' });
+      const runNow = h('button', { type: 'button', class: 'btn btn-mini', text: resumeTarget ? 'Resume now' : 'Run now' });
       runNow.addEventListener('click', () => act(async () => {
         const out = await api('POST', `/api/schedules/${t.id}/run-now`);
         if (out.status === 'failed') throw new Error(out.failReason || 'The run could not be started.');
-        if (out.status === 'fired' && deps.openRun) deps.openRun({ runId: out.runId });
+        if (out.status === 'fired' && deps.openRun) deps.openRun(out.resume ? { runId: out.runId, pipelineId: out.pipelineId } : { runId: out.runId });
       }));
       acts.append(runNow);
       if (!t.scheduleId) {
@@ -223,6 +226,7 @@ export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repea
             h('span', { class: `rc-status-word st-${family}`, text: statusWord }),
             h('span', { class: 'rc-seg' }, h('span', { class: 'rc-dot', text: '·' }), h('span', { class: 'sched-when', 'data-at': missed || chained ? '' : t.runAt, text: timeText })),
             bySeg(t)),
+          resumeTarget ? h('div', { class: 'sched-resume-target', text: `Resumes ‘${resumeTarget.title}’ · ${resumeTarget.statusWord}` }) : null,
           h('div', { class: 'sched-target', text: `${t.scheduleId ? 'Repeating' : 'Once'} · ${metaLine(t)}` }),
           missed && t.failReason ? h('div', { class: 'sched-reason', text: t.failReason }) : null)),
       footer(t, acts, details), details);
@@ -258,7 +262,7 @@ export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repea
     }
     const del = h('button', { type: 'button', class: 'btn btn-danger btn-mini', text: 'Delete' });
     del.addEventListener('click', async () => {
-      if (!(await deps.confirmModal({ title: 'Delete schedule', message: `Delete “${s.title || 'this schedule'}”?\nIt stops repeating. Runs it already started stay in History.`, confirmLabel: 'Delete schedule' }))) return;
+      if (!(await deps.confirmModal({ title: 'Delete schedule', message: `Delete “${s.title || 'this schedule'}”?\nIt stops repeating. Runs it already started stay in Runs.`, confirmLabel: 'Delete schedule' }))) return;
       act(() => api('DELETE', `/api/schedules/${s.id}`));
     });
     acts.append(del);

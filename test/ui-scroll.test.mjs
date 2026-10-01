@@ -1,5 +1,5 @@
 // test/ui-scroll.test.mjs — log-pane scroll behaviour. The live log lives on the run page's
-// Details > Live log tab now (the list card has no log pane), so the pin/freeze cases drive that pane.
+// Details > Live log tab now (the list row has no log pane), so the pin/freeze cases drive that pane.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -102,7 +102,8 @@ test('OFF freezes the log through a WS frame and persists across a run page reop
   assert.equal(box.scrollTop, 30, 'no scroll while OFF');
 
   // Leave the run page and come back: the pane is rebuilt and must NOT re-enable.
-  ctx.window.location.hash = 'running';
+  // (Leave through another view: side by side a bare #runs reopens this same run.)
+  ctx.window.location.hash = 'new';
   ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
   await ctx.tick();
   ctx.window.location.hash = 'running/p1/details/logs';
@@ -146,40 +147,42 @@ test('clicking the switch toggles the model and the DOM', async () => {
   assert.equal(sw.getAttribute('aria-checked'), 'false');
 });
 
-// ── 5. A log frame does not detach/reattach in-place list cards. jsdom keeps
-//       scrollTop across reattach (no layout), so assert the MECHANISM: zero
-//       list-level DOM moves for an already-ordered list. ──────────────────────
-test('log frame causes zero #run-list moves when order is unchanged', async () => {
+// ── 5. A log frame does not rebuild the list rows. jsdom keeps scrollTop across
+//       reattach (no layout), so assert the MECHANISM: zero list-level DOM
+//       mutations for an unchanged list. ─────────────────────────────────────────
+test('log frame causes zero #runs-list mutations when nothing a row shows changed', async () => {
   const { window, recv, selectProject, tick } = await boot();
   selectProject();
-  window.location.hash = 'running';
+  window.location.hash = 'runs';
   window.dispatchEvent(new window.Event('hashchange'));
   recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });
   recv({ type: 'phase', runId: 'p2', phase: 'plan', cycle: 0 });
   await tick();
 
-  const list = window.document.querySelector('#run-list');
-  const moves = [];
-  for (const m of ['appendChild', 'insertBefore']) {
-    const orig = list[m].bind(list);
-    list[m] = (...a) => { moves.push(m); return orig(...a); };
-  }
+  const list = window.document.querySelector('#runs-list');
+  assert.equal(list.querySelectorAll('.runs-row[data-slot="group"]').length, 2,
+    'both runs are listed (so a rebuild would be observable)');
+  let mutations = 0;
+  const mo = new window.MutationObserver((m) => { mutations += m.length; });
+  mo.observe(list, { childList: true, subtree: true });
   recv({ type: 'log', runId: 'p1', source: 'planner', level: 'info', text: 'x', ts: 2 });
   await tick();
-  assert.deepEqual(moves, [], 'in-place cards are not re-appended on a log frame');
+  mutations += mo.takeRecords().length;
+  mo.disconnect();
+  assert.equal(mutations, 0, 'the rows are not rebuilt on a log frame');
 });
 
-test('the list card carries no log pane, graph scroller or auto-scroll switch', async () => {
+test('the list row carries no log pane, graph scroller or auto-scroll switch', async () => {
   const { window, recv, selectProject, tick } = await boot();
   selectProject();
-  window.location.hash = 'running';
+  window.location.hash = 'runs';
   window.dispatchEvent(new window.Event('hashchange'));
   recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });
   await tick();
-  const card = window.document.querySelector('#run-list .run-card[data-run-id="p1"]');
-  assert.ok(card, 'card mounted');
+  const row = window.document.querySelector('#runs-list .runs-row[data-slot="group"][data-run-id="p1"]');
+  assert.ok(row, 'row mounted');
   for (const sel of ['.log', '.run-flow-wrap', '.switch.autoscroll', '.log-filters'])
-    assert.equal(card.querySelector(sel), null, `no ${sel} on the list card`);
+    assert.equal(row.querySelector(sel), null, `no ${sel} on the list row`);
 });
 
 // ── 6. A filter change repaints the pane (rdRepaintLog); with Auto-scroll OFF the

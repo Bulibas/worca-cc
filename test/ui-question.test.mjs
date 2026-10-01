@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { bootApp as boot, helloRun, runCard, runPanel, openRunPanel } from './helpers/run-page-boot.mjs';
 
 // Behavior tests for the clarify/gate question panel. The panel mounts ONLY on
-// the run page (#running/<id>, `#run-detail .rd-questions .qpanel`); the Running
-// list card just shows the `.rc-wait` strip that opens it. We boot the REAL
+// the run page (#running/<id>, `#run-detail .rd-questions .qpanel`); the Runs
+// list row just puts the run in Needs you and names the wait in its subline
+// ("Question", "Workflow review"), and its click opens the page. We boot the REAL
 // app.js against the REAL index.html under jsdom (test/helpers/run-page-boot.mjs),
 // dispatch server frames through the captured WebSocket and capture POST
 // /api/answer via a fetch stub.
@@ -28,6 +29,12 @@ function clarifyEvent() {
 
 const click = (ctx, el) => el.dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
 
+// The run's copy in Needs you (null when nothing waits on you), and a row's word:
+// the subline's head, before " · <step or time>".
+const needsRow = (ctx, runId) =>
+  ctx.window.document.querySelector(`#runs-list .runs-needs .runs-row[data-run-id="${runId}"]`);
+const rowWord = (row) => row.querySelector('.runs-row-sub').textContent.split(' · ')[0];
+
 // A fetch stub that records /api/answer bodies.
 function answerRecorder() {
   const captured = [];
@@ -41,7 +48,7 @@ function answerRecorder() {
   return { captured, fetchHandler };
 }
 
-test('clarify question renders on the run page; the list card gets .attention and a wait strip, no panel', async () => {
+test('clarify question renders on the run page; the list row is in Needs you and reads "Question", no panel', async () => {
   const ctx = await boot();
   const panel = await openRunPanel(ctx, { runId: RUN_ID, question: clarifyEvent() });
   assert.ok(panel, 'qpanel present on the run page');
@@ -59,13 +66,15 @@ test('clarify question renders on the run page; the list card gets .attention an
   assert.match(panel.querySelector('.qcount').textContent, /2 questions/);
   assert.ok(panel.querySelector('.qpanel-foot .btn-go'), 'submit button present');
 
-  // The list card keeps only the ring and the strip — the panel is not mounted there.
+  // The list row only points at it (Needs you + its word) — the panel is not mounted there.
   ctx.showRunning();
+  await ctx.settle();
   const card = runCard(ctx, RUN_ID);
-  assert.ok(card, 'run card exists');
-  assert.ok(card.classList.contains('attention'), 'card has .attention ring');
-  assert.equal(card.querySelector('.qpanel'), null, 'no question panel on the list card');
-  assert.equal(card.querySelector('.rc-wait').hidden, false, 'the wait strip is shown');
+  assert.ok(card, 'run row exists in its project group');
+  assert.ok(needsRow(ctx, RUN_ID), 'the run is in Needs you');
+  assert.equal(card.querySelector('.qpanel'), null, 'no question panel on the list row');
+  assert.equal(needsRow(ctx, RUN_ID).querySelector('.qpanel'), null, 'nor on its Needs-you copy');
+  assert.equal(rowWord(card), 'Question', 'the row names the wait');
 });
 
 test('each option carries a letter key (A, B, ...) so it can be referenced by name', async () => {
@@ -125,12 +134,15 @@ test('selecting an option marks it + submit posts {runId,id,payload:{answers}} w
   assert.equal(runPanel(ctx).classList.contains('hidden'), false, 'panel still visible after 200');
   assert.equal(ctx.window.document.querySelector('#run-detail .rd-questions').hidden, false, 'question host stays up');
   ctx.showRunning();
-  assert.equal(runCard(ctx, RUN_ID).classList.contains('attention'), true, 'panel kept until a resume event confirms');
+  await ctx.settle();
+  assert.ok(needsRow(ctx, RUN_ID), 'still in Needs you until a resume event confirms');
 
-  // A following `state` event confirms resume -> panel clears, attention drops.
+  // A following `state` event confirms resume -> panel clears, Needs you drops it.
   // (The v1 `phase` frame is gone; onState is the client's single resume seam.)
   ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'running' });
-  assert.equal(runCard(ctx, RUN_ID).classList.contains('attention'), false, 'attention dropped on resume');
+  await ctx.settle();
+  assert.equal(needsRow(ctx, RUN_ID), null, 'out of Needs you on resume');
+  assert.equal(rowWord(runCard(ctx, RUN_ID)), 'Running', 'the row reads running again');
   ctx.go(`running/${RUN_ID}`);
   await ctx.settle();
   assert.equal(ctx.window.document.querySelector('#run-detail .rd-questions').hidden, true, 'question host hidden on resume');
@@ -170,11 +182,11 @@ test('A2: a hello-seeded pendingQuestion renders the panel when the run page ope
   assert.equal(panel.classList.contains('hidden'), false, 'panel rendered from the seed');
   assert.equal(panel.querySelectorAll('.qblock').length, 2, 'seeded questions rendered');
 
-  // The list card points at it: ring plus the strip.
+  // The list row points at it: Needs you plus its word.
   ctx.showRunning();
-  const card = runCard(ctx, RUN_ID);
-  assert.ok(card.classList.contains('attention'), 'seeded paused run shows attention');
-  assert.equal(card.querySelector('.rc-wait').hidden, false, 'wait strip shown for the seeded question');
+  await ctx.settle();
+  assert.ok(needsRow(ctx, RUN_ID), 'the seeded question puts the run in Needs you');
+  assert.equal(rowWord(runCard(ctx, RUN_ID)), 'Question', 'the row names the seeded question');
 });
 
 test('gate question renders issues + two decision buttons; approve posts {decision:"another"}', async () => {
@@ -219,8 +231,10 @@ test('multi-tab: a question-resolved event clears the run page WITHOUT this tab 
   assert.equal(host.hidden, true, 'question host hides for the non-answering tab');
   assert.equal(panel.innerHTML, '', 'panel emptied');
   ctx.showRunning();
-  assert.equal(runCard(ctx, RUN_ID).classList.contains('attention'), false, 'attention drops on the list card');
-  assert.equal(runCard(ctx, RUN_ID).querySelector('.rc-wait').hidden, true, 'and the wait strip goes');
+  await ctx.settle();
+  assert.ok(runCard(ctx, RUN_ID), 'the run is still listed');
+  assert.equal(needsRow(ctx, RUN_ID), null, 'it leaves Needs you');
+  assert.equal(rowWord(runCard(ctx, RUN_ID)), 'Running', 'and its row no longer names a question');
 });
 
 test('a question-resolved for a STALE id leaves a newer pending question untouched', async () => {
@@ -232,42 +246,50 @@ test('a question-resolved for a STALE id leaves a newer pending question untouch
   assert.equal(ctx.window.document.querySelector('#run-detail .rd-questions').hidden, false, 'mismatched id leaves the question up');
   assert.equal(panel.querySelectorAll('.qblock').length, 2, 'panel still rendered');
   ctx.showRunning();
-  assert.equal(runCard(ctx, RUN_ID).classList.contains('attention'), true, 'card ring stays');
+  await ctx.settle();
+  assert.ok(needsRow(ctx, RUN_ID), 'the run stays in Needs you');
+  assert.equal(rowWord(runCard(ctx, RUN_ID)), 'Question', 'and its row still names the question');
 });
 
-test('the list card shows the wait strip for a pending question and it opens the run page', async () => {
+test('a pending question puts the run in Needs you reading "Question", and its row opens the run page', async () => {
   const ctx = await boot();
   helloRun(ctx, { runId: RUN_ID });
   ctx.dispatch({ type: 'question', runId: RUN_ID, ...clarifyEvent() });
   ctx.showRunning();
+  await ctx.settle();
 
   const card = runCard(ctx, RUN_ID);
-  const strip = card.querySelector('button.rc-wait');
-  assert.ok(strip, 'the card carries the wait strip');
-  assert.equal(strip.hidden, false);
-  assert.ok(strip.classList.contains('is-ask'), 'a question marks it .is-ask');
-  assert.equal(strip.querySelector('.rc-wait-text').textContent, '2 questions', 'clarify strip text');
-  assert.equal(card.querySelector('.qpanel'), null, 'the panel is not mounted on the card');
+  assert.ok(card, 'the run is listed in its project group');
+  assert.equal(card.dataset.icon, 'ask', 'a question gives the row the ask icon');
+  assert.equal(rowWord(card), 'Question', 'clarify row word');
+  assert.equal(card.querySelector('.qpanel'), null, 'the panel is not mounted on the row');
+  const needs = needsRow(ctx, RUN_ID);
+  assert.ok(needs, 'and repeated in Needs you');
+  assert.equal(rowWord(needs), 'Question');
 
-  click(ctx, strip);
-  assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`, 'the strip opens the run page');
+  click(ctx, needs);
+  assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`, 'the row opens the run page');
   await ctx.settle();
   assert.ok(runPanel(ctx).querySelector('.qblock'), 'and the question is there');
+  assert.match(runPanel(ctx).querySelector('.qcount').textContent, /2 questions/, 'the page counts them');
   assert.equal(ctx.calls.filter((c) => c.url.includes('/api/answer')).length, 0, 'navigating never POSTs an answer');
 });
 
-test('the wait strip reads "Review the workflow" for a workflow question and is hidden with no question', async () => {
+test('the row reads "Workflow review" for a workflow question and leaves Needs you with no question', async () => {
   const ctx = await boot();
   helloRun(ctx, { runId: RUN_ID });
   ctx.showRunning();
-  assert.equal(runCard(ctx, RUN_ID).querySelector('.rc-wait').hidden, true, 'no strip while nothing waits');
+  await ctx.settle();
+  assert.equal(needsRow(ctx, RUN_ID), null, 'not in Needs you while nothing waits');
+  assert.equal(rowWord(runCard(ctx, RUN_ID)), 'Running', 'a plain running row');
 
   ctx.dispatch({
     type: 'question', runId: RUN_ID, id: 'wf-1', kind: 'workflow',
     workflow: { name: 'web-task', agents: [] },
   });
-  const strip = runCard(ctx, RUN_ID).querySelector('.rc-wait');
-  assert.equal(strip.hidden, false);
-  assert.equal(strip.querySelector('.rc-wait-text').textContent, 'Review the workflow');
-  assert.ok(strip.classList.contains('is-ask'));
+  await ctx.settle();
+  const card = runCard(ctx, RUN_ID);
+  assert.ok(needsRow(ctx, RUN_ID), 'the workflow ask puts it in Needs you');
+  assert.equal(rowWord(card), 'Workflow review');
+  assert.equal(card.dataset.icon, 'ask');
 });

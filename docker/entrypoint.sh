@@ -66,6 +66,19 @@ if [ -n "${WORCA_DATA_DIR:-}" ]; then
         touch "$wh/.agent-isolation"
         chown worca:worca "$wh/.agent-isolation"
       fi
+      # MCP registry (§14): plugin stdio servers run as the agent users, so plugin code is shared
+      # read-only — plugins/ and plugins/<p>/ traverse only, versions/** readable, never group-writable;
+      # plugins/<p>/data (plugin secrets) owner-only. Every boot: plugins installed since the last one join.
+      # Modes first, then the group (as plugin-store.mjs shareVersionDir): never a group-writable moment.
+      # Root never follows a symlink here: one planted under plugins/ would aim these at any path.
+      mkdir -p "$wh/plugins"
+      if [ ! -L "$wh/plugins" ]; then chmod 0710 "$wh/plugins" && chown worca:worca-share "$wh/plugins"; fi
+      for p in "$wh/plugins"/*/; do
+        [ ! -L "$wh/plugins" ] && [ ! -L "${p%/}" ] && [ ! -L "${p}versions" ] && [ -d "${p}versions" ] || continue
+        chmod 0710 "$p" && chgrp worca-share "$p"
+        chmod -R g-w,g+rX "${p}versions" && chgrp -R worca-share "${p}versions"
+        if [ -d "${p}data" ] && [ ! -L "${p}data" ]; then chmod -R go-rwx "${p}data"; fi
+      done
       # The agent works in repositories worca owns, and writes objects both users share.
       printf '[safe]\n\tdirectory = *\n[core]\n\tsharedRepository = group\n' > "$ah/.gitconfig"
       chown worca-agent:worca-share "$ah/.gitconfig"

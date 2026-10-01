@@ -114,7 +114,7 @@ Credentials cross exactly one boundary: from the broker to the provider.
 | # | Guarantee | How it's enforced |
 | --- | --- | --- |
 | K1 | No model credential exists anywhere an agent can reach. | Keys exist only in the broker. worca refuses to start in broker mode while it finds one in its environment, in a Claude Code sign-in (its own or an agent's HOME), in the model catalog or in provider settings. |
-| K2 | The broker alone decides where each credential goes. | Each slot has a fixed upstream origin in the broker's configuration. A request names a slot, never a host. Nothing worca's shared configuration holds can redirect a key. |
+| K2 | The broker alone decides where each credential goes. | Each slot has a fixed upstream origin in the broker's configuration, or registered by worca for an enabled plugin ([Plugin slots](#plugin-slots)). A request names a slot, never a host. A saved key is bound to the origin it was saved for: a slot that later points elsewhere never sends it there. |
 | K3 | What an agent holds is worthless outside the instance. | Per-spawn `wbt_` tokens work only on the broker's private port, expire, and are revoked when their process exits. |
 | K4 | The broker never sends a credential back. | Allowlisted headers each way, no redirects followed, and provider error messages scrubbed of the key and of known key shapes. worca also removes `wbt_` tokens from everything agents print. |
 
@@ -157,6 +157,36 @@ translation bridge, which forwards to `<broker>/p/<slot>` with the spawn's token
 the one whose pinned origin matches the model's base URL, and when two slots share an origin
 the one speaking the model's API wins. Discovery and imports go through the broker too.
 Keyless local endpoints reached directly by worca hold no key and bypass it.
+
+### Plugin slots
+
+A shared instance runs a plugin set its team agreed on, so plugins are trusted configuration:
+a plugin model's endpoint gets its own per-person slot, with no slots file to write. worca
+derives the slots from the enabled plugins and registers them with the broker
+(`PUT /internal/plugin-slots`) at boot, after a plugin is installed, updated, enabled,
+disabled or removed, and before a run or spawn when they changed. The broker keeps them across
+restarts.
+
+| Plugin model | Slot |
+| --- | --- |
+| `env` with a literal `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` (or `ANTHROPIC_API_KEY`) set to `{"secret": "<key>"}` | `p-<plugin>-<key>`, labelled with the Model secret's label, pinned to the base URL's origin, its paths under the base URL's path; sent as `Authorization: Bearer` (or `x-api-key`) |
+| `upstream.baseUrl` (bridged) on an https origin no built-in or operator slot pins | `p-<plugin>-<host>`; the bridge finds it by origin like any other slot |
+
+Each person adds the key on the key page, which shows the one host it is sent to. The
+plugin's own *Model secrets* are never read with the broker on: its settings show a note
+instead of the form, and worca refuses to start while one still holds a value (clear it).
+
+A plugin slot is narrow: a `p-` id that can't replace a built-in or operator slot (the slots
+file can't use `p-` ids), per-person only, a plain key header, the protocol's paths under the
+base path, and https (http only for a private host). Saving a key checks it against the
+endpoint's model list; an endpoint without one (404) accepts any key the first real call
+doesn't refuse. When a plugin update moves its endpoint, keys saved for the old host show
+*enter it again* and are never sent to the new one.
+
+Refused by name, so the model can't be used with the broker on (its plugin author can fix
+it): a base URL that is a `${VAR}` or missing, a secret in any other variable (such as
+`ANTHROPIC_CUSTOM_HEADERS`), both key variables at once, and one secret used for two hosts.
+worca logs these at boot; a run or Ask turn on such a model fails with the reason.
 
 ### Tokens
 
@@ -346,9 +376,10 @@ credential is still within agents' reach:
 - a provider key in its environment;
 - a stored Claude Code sign-in or an `apiKeyHelper` in its own or the agents' HOME;
 - a model in the catalog whose env holds a key or routes around the broker with
-  `ANTHROPIC_BASE_URL`;
+  `ANTHROPIC_BASE_URL` (a plugin model on its own [plugin slot](#plugin-slots) doesn't);
 - a bridged model with its own `apiKey` or a remote `baseUrl` no slot pins;
-- a provider key or Copilot sign-in in Settings › Providers.
+- a provider key or Copilot sign-in in Settings › Providers;
+- a plugin's Model secret that holds a value.
 
 It also exits when the broker can't be reached within 60 seconds, or the secrets differ.
 
@@ -410,6 +441,18 @@ on purpose.
 
 The check makes the exposure visible; it can't make an MCP secret safe. Prefer MCP servers
 that need no secret, or accept the risk with `warn`.
+
+**MCP registry secrets** (Settings › MCP servers, [mcp-servers.md](mcp-servers.md)) are outside K1: the
+broker delivers them to the runs and chats that use their sets. A registry copy's definition
+carries only `${MCPSECRET_…}` references, so the check above skips the registry servers and
+screens project and local servers as before; a project or local server that references a
+`${MCPSECRET_…}` name is left out of the run in every mode. A single-project run's committed
+`.mcp.json` is loaded by Claude Code itself, where no server can be left out, so when a server
+there references a `${MCPSECRET_…}` name the run gets no registry servers at all. A run with the
+broker on and at least one registry secret logs "N registry secrets are visible to this run's
+agents (credential broker on)". None of this is a boundary against the repository itself: a
+stdio MCP server or a hook the repository commits inherits the agents' environment, registry
+secrets included.
 
 ## Push as me
 
@@ -506,6 +549,8 @@ loopback with a token that lives for one turn.
 | On Railway, agents can reach the internet directly | Data (not keys) can leave | Outside what the broker does; lock the network down on Compose or Kubernetes |
 | The broker sees every prompt and response | A valuable target | Small, dependency-free, logs metadata only; same image as worca |
 | An MCP secret the operator passes through `${VAR}` | Readable by agents | An explicit operator choice; literal ones are blocked |
+| An MCP registry secret in a set a run uses | Readable by that run's agents | The set was assigned on purpose; each run warns (outside K1) |
 
 Not built: Amazon Bedrock and Google Vertex (the broker would have to sign requests with the
-person's cloud credentials), and routing plugin API keys other than MCP through the broker.
+person's cloud credentials), and plugin model keys sent any way but one `Authorization` or
+`x-api-key` header ([Plugin slots](#plugin-slots)).

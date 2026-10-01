@@ -403,3 +403,93 @@ test('chat actions carry the sender as attribution text: "<name> via <Platform>"
   await send('/pause *1111', { username: 'ev\nil' }, 'telegram', '77');
   assert.equal(got[0][2], '77 via Telegram');
 });
+
+test('a refused command from a NOTIFIED chat gets one throttled hint naming its id; others stay silent', async () => {
+  const refused = [];
+  let t = 1_000_000;
+  const router = createCommandRouter({
+    actions: { listRuns: () => [] },
+    chatContext: createChatContext(join(worcaHome(), 'cc-refuse.json')),
+    logger: () => {},
+    onRefused: (ev) => refused.push(ev),
+    now: () => t,
+  });
+  const cfg = { allowedChatIds: '', notifyChatIds: '-100123, 55' };
+  const send = (body, chatId) => router.handleIncoming({
+    plugin: 'telegram-chat', channelId: 'main', platform: 'telegram', channelConfig: cfg,
+    msg: { chatId, userId: 'u', text: body },
+  });
+
+  const first = await send('/approve *ab12', '-100123');
+  assert.equal(first.severity, 'warning');
+  assert.match(text(first), /not allowed to send commands/);
+  assert.match(text(first), /`-100123`/);
+  assert.match(text(first), /Allowed chat IDs/);
+  assert.match(text(first), /telegram-chat/);
+
+  assert.equal(await send('/approve', '-100123'), null, 'throttled inside the window');
+  t += 10 * 60 * 1000;
+  assert.ok(await send('/status', '-100123'), 'hints again once the window passes');
+  assert.equal(await send('/approve', '999'), null, 'a chat worca does not notify learns nothing');
+  assert.equal(await send('good morning', '-100123'), null, 'chatter is not a command: no hint, no refusal event');
+
+  assert.deepEqual(refused.map((r) => [r.plugin, r.channelId, r.chatId, r.command]), [
+    ['telegram-chat', 'main', '-100123', 'approve'],
+    ['telegram-chat', 'main', '-100123', 'approve'],
+    ['telegram-chat', 'main', '-100123', 'status'],
+    ['telegram-chat', 'main', '999', 'approve'],
+  ]);
+});
+
+test('/cancel: gate lists the real options, recovery gives up, nothing pending points at /stop', async () => {
+  const { send, calls, state } = fixture();
+  assert.match(text(await send('/cancel')), /not waiting on a decision.*`\/stop \*1111`/s);
+
+  state.pending['run-aaaa1111'] = { id: 'gate-9', kind: 'gate' };
+  const before = calls.length;
+  const out = text(await send('/cancel'));
+  assert.match(out, /Gates have no cancel/);
+  assert.match(out, /`\/approve \*1111` continues without another cycle/);
+  assert.match(out, /`\/retry \*1111` runs another cycle/);
+  assert.match(out, /`\/stop \*1111` stops the run/);
+  assert.equal(calls.length, before, 'no action taken on a gate');
+
+  state.pending['run-aaaa1111'] = { id: 'rec-1', kind: 'recovery' };
+  await send('/cancel');
+  assert.deepEqual(calls.at(-1), ['answer', 'run-aaaa1111', 'rec-1', { decision: 'pause' }]);
+});
+
+test('Auto workflow proposal: /approve accepts, /answer revises, /retry explains, /cancel cancels', async () => {
+  const { send, calls, state } = fixture();
+  state.pending['run-aaaa1111'] = { id: 'auto-1', kind: 'workflow', workflow: { name: 'Fix flow', nodes: { a: {}, b: {} } } };
+
+  assert.match(text(await send('/approve')), /accepted/);
+  assert.deepEqual(calls.at(-1), ['answer', 'run-aaaa1111', 'auto-1', { decision: 'accept' }]);
+
+  await send('/answer *1111 use a cheaper reviewer');
+  assert.deepEqual(calls.at(-1), ['answer', 'run-aaaa1111', 'auto-1', { decision: 'revise', text: 'use a cheaper reviewer' }]);
+  assert.match(text(await send('/answer')), /\/answer \*1111 <what to change>/, 'empty revise -> usage');
+
+  const n = calls.length;
+  assert.match(text(await send('/retry')), /\/answer \*1111 <what to change>/);
+  assert.equal(calls.length, n, '/retry never answers a proposal');
+
+  await send('/cancel');
+  assert.deepEqual(calls.at(-1), ['answer', 'run-aaaa1111', 'auto-1', { decision: 'cancel' }]);
+});
+
+test('/status names an open workflow proposal with its three replies', async () => {
+  const { send, state } = fixture();
+  state.pending['run-aaaa1111'] = { id: 'auto-1', kind: 'workflow', workflow: { name: 'Fix flow' } };
+  const out = text(await send('/status'));
+  assert.match(out, /proposed workflow/);
+  assert.match(out, /`\/approve \*1111`/);
+  assert.match(out, /`\/cancel \*1111`/);
+});
+
+test('/help lists /cancel and says which way /approve goes at a gate', async () => {
+  const { send } = fixture();
+  const out = text(await send('/help'));
+  assert.match(out, /`\/cancel \[\*ref\]`/);
+  assert.match(out, /no more cycles/);
+});

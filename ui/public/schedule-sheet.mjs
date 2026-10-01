@@ -10,6 +10,7 @@
 //   result (once):      { scheduledFor: ISO-with-Z, ifMissed, graceMin }
 //   result (recurring): { repeat: { rule, overlap, maxFailures }, ifMissed, graceMin }
 //   result (after):     { after: { kind, id, title }, afterPolicy }
+//   + sync: { beforeRun?, onDiverged? }  only with the opt-in `sync` option, and only what was set
 
 import {
   WEEKDAYS, normalizeRule, previewOccurrences, describeRule, formatInstant, formatCountdown,
@@ -82,12 +83,18 @@ export function closeScheduleSheet() {
  * @param {object} [o.initial]                  { scheduledFor?, rule?, overlap?, maxFailures?, ifMissed?, graceMin? }
  * @param {{graceMin:number, ifMissed:string, maxFailures:number}} [o.defaults]
  * @param {string} [o.runTitle]                   shown under the heading
+ * @param {string} [o.heading]                    overrides the mode's heading (e.g. a new resume is not a "Change time")
+ * @param {string} [o.confirmLabel]               overrides the mode's confirm label
  * @param {string} [o.warning]                    an amber note (e.g. the workflow can ask questions)
+ * @param {{show:boolean, beforeRun:boolean|null, shownBeforeRun:boolean, onDiverged:'origin'|'fail'|null}} [o.sync]
+ *   opt-in Sync block (#527): only the New-pipeline Schedule path passes it. beforeRun null = the form
+ *   switch is untouched; onDiverged null = each member's own setting. The result's `sync` carries only
+ *   the controls the person set (initial.sync reopens with the previous choice).
  */
 export function openScheduleSheet({
   mode = 'create', allowRepeat = true, allowAfter = true, candidates = null,
   initial = {}, defaults = { graceMin: 360, ifMissed: 'run', maxFailures: 3 },
-  runTitle = '', warning = '',
+  runTitle = '', warning = '', sync = null, heading: headingOverride = '', confirmLabel: confirmOverride = '',
 } = {}) {
   closeScheduleSheet();
   return new Promise((resolve) => {
@@ -117,8 +124,8 @@ export function openScheduleSheet({
       after: initial.after || null, afterAny: initial.afterPolicy === 'any', cands: null, candsLoading: false, candsError: '',
     };
 
-    const heading = mode === 'ticket' ? (showKind ? 'Change when it starts' : 'Change time') : mode === 'series' ? 'Edit schedule' : 'Schedule this run';
-    const confirmLabel = mode === 'create' ? 'Schedule run' : 'Save';
+    const heading = headingOverride || (mode === 'ticket' ? (showKind ? 'Change when it starts' : 'Change time') : mode === 'series' ? 'Edit schedule' : 'Schedule this run');
+    const confirmLabel = confirmOverride || (mode === 'create' ? 'Schedule run' : 'Save');
 
     // ── build ────────────────────────────────────────────────────────────────
     const seg = h('div', { class: 'seg sched-presets', role: 'group', 'aria-label': 'How often' });
@@ -184,6 +191,30 @@ export function openScheduleSheet({
       h('div', { class: 'field field-compact' }, h('label', { for: 'sched-missed', text: 'If Worca is not running then' }), missedSel),
       graceField);
 
+    // Sync block (#527): rendered only when the host opts in and the form's sync row is showing.
+    const showSync = !!(sync && sync.show);
+    const syncInit = initial.sync || {};
+    const syncAutoIn = h('input', { type: 'checkbox', id: 'sched-sync-auto', class: 'sw-input' });
+    syncAutoIn.checked = !!(syncInit.beforeRun ?? sync?.beforeRun ?? sync?.shownBeforeRun);
+    let syncAutoTouched = false;
+    const divergedOpts = [...(sync?.onDiverged == null ? [['', 'Project setting']] : []), ['origin', 'Start from origin'], ['fail', 'Don\'t run']];
+    const divergedStart = syncInit.onDiverged ?? sync?.onDiverged ?? '';
+    const divergedSel = selectEl('sched-sync-diverged', divergedOpts, divergedStart, 'If the base has diverged');
+    const syncRow = showSync ? h('div', { class: 'field-grid-2 sched-sync' },
+      h('div', { class: 'field field-compact' }, h('span', { class: 'label', text: 'Sync' }),
+        h('label', { class: 'switch-row' }, syncAutoIn, h('span', { class: 'switch switch-sm' }), h('span', { class: 'txt', text: 'Auto-sync before the run' }))),
+      h('div', { class: 'field field-compact' }, h('label', { for: 'sched-sync-diverged', text: 'If the base has diverged' }), divergedSel)) : null;
+    syncAutoIn.addEventListener('change', () => { syncAutoTouched = true; });
+    /** Only what the person chose: undefined when nothing was set, so no `sync` key at all. */
+    const syncResult = () => {
+      if (!showSync) return undefined;
+      const out = {};
+      if (syncAutoTouched || typeof syncInit.beforeRun === 'boolean' || typeof sync.beforeRun === 'boolean') out.beforeRun = syncAutoIn.checked;
+      const pick = divergedSel.firstChild.value;
+      if (pick !== '' && (pick !== divergedStart || syncInit.onDiverged != null)) out.onDiverged = pick;
+      return Object.keys(out).length ? out : undefined;
+    };
+
     const err = h('div', { class: 'hint err sched-err', hidden: true });
     const cancelBtn = h('button', { type: 'button', class: 'btn btn-mini sched-cancel', text: 'Cancel' });
     const okBtn = h('button', { type: 'button', class: 'btn btn-primary btn-mini sched-ok', text: confirmLabel });
@@ -196,7 +227,7 @@ export function openScheduleSheet({
       showPresets ? seg : null,
       quick, onceRow, daysField, customField, monthField, showKind ? afterRow : null, repeatRow,
       sentence, tzLine, tzIn, tzList,
-      policyRow, missedRow,
+      policyRow, missedRow, syncRow,
       h('small', { class: 'hint sched-note', text: 'A scheduled run starts only while Worca is running and this computer is awake.' }),
       warning ? h('div', { class: 'hint warn sched-warn', text: warning }) : null,
       err,
@@ -392,6 +423,8 @@ export function openScheduleSheet({
     const tick = setInterval(paint, 30000); // keep "Starts in …" and the quick chips honest
     function finish(result) {
       clearInterval(tick);
+      const chosen = result ? syncResult() : undefined;
+      if (chosen) result = { ...result, sync: chosen };
       document.removeEventListener('keydown', onKey, true);
       modal.remove();
       openSheet = null;

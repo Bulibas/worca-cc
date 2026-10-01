@@ -6,7 +6,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import { seal, open, suffixOf, keyId } from './vault.mjs';
-import { isAllowedPath, pathIssue } from './slots.mjs';
+import { isAllowedPath, pathIssue, validatePluginSlots } from './slots.mjs';
 import { resolveToken, tokenFromHeaders, parseMintRequest, mintToken, safeEqual, normalizeBillTo } from './tokens.mjs';
 import { createUsageTap, priceUsage } from './usage.mjs';
 import { scrubText } from './scrub.mjs';
@@ -75,6 +75,7 @@ function readBody(req, limit) {
 
 /** A human name for a slot in messages: "Anthropic API key". */
 const slotName = (slot) => slot.label || slot.id;
+const hostOf = (origin) => { try { return new URL(origin).host; } catch { return String(origin); } };
 
 /** The beta header a Claude subscription (OAuth) token needs on every API call. */
 export const OAUTH_BETA = 'oauth-2025-04-20';
@@ -97,8 +98,19 @@ export function mergeBetas(...lists) {
  * @param {{config:object, slots:object[], store:object, log?:(line:string)=>void, now?:()=>number,
  *          requestImpl?:(url:URL, opts:object)=>import('node:http').ClientRequest}} o
  */
-export function createBrokerService({ config, slots, store, log = () => {}, now = Date.now, requestImpl, fetchImpl = globalThis.fetch }) {
-  const slotById = new Map(slots.map((s) => [s.id, s]));
+export function createBrokerService({ config, slots: baseSlots, store, log = () => {}, now = Date.now, requestImpl, fetchImpl = globalThis.fetch }) {
+  // The built-in and operator slots, then the plugin slots worca registers
+  // (PUT /internal/plugin-slots), which survive a broker restart in the store.
+  let slots = baseSlots;
+  let slotById = new Map();
+  const useSlots = (pluginSlots) => {
+    slots = Object.freeze([...baseSlots, ...pluginSlots]);
+    slotById = new Map(slots.map((s) => [s.id, s]));
+  };
+  let storedPluginSlots = [];
+  try { storedPluginSlots = validatePluginSlots(store.getPluginSlots ? store.getPluginSlots() : [], baseSlots.map((s) => s.id)); }
+  catch (err) { log(`stored plugin slots ignored: ${err.message}`); }
+  useSlots(storedPluginSlots);
   const limits = createLimits({ store, config, now });
   const credCache = new Map();
   const doRequest = requestImpl || ((url, opts) => (url.protocol === 'https:' ? https : http).request(url, opts));
@@ -127,7 +139,25 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
     ? `add one at ${config.publicUrl}`
     : `set WORCA_BROKER_KEY_${slot.id.toUpperCase().replace(/-/g, '_')} on the broker`);
 
+  /** Replace the plugin slots (validated, stored). Returns them; throws on a bad list. */
+  function setPluginSlots(list) {
+    const next = validatePluginSlots(list, baseSlots.map((s) => s.id));
+    store.replacePluginSlots(next, now());
+    useSlots(next);
+    credCache.clear();
+    log(`${new Date(now()).toISOString()} plugin slots: ${next.map((s) => s.id).join(', ') || '(none)'}`);
+    return next;
+  }
+
   // ── credentials ─────────────────────────────────────────────────────────────
+
+  /** Why a saved key may not go to the slot's current upstream, or null. */
+  function movedUpstream(slot, row) {
+    if (!row || !row.upstream || slot.auth === 'copilot') return null;
+    const origin = new URL(slot.upstream).origin;
+    if (row.upstream === origin) return null;
+    return `this key was saved for ${hostOf(row.upstream)}, and ${slotName(slot)} now points at ${hostOf(origin)}: enter it again`;
+  }
 
   /** {secret} (null secret for a keyless slot), or {missing:true}, or {error}. */
   function resolveCredential(billTo, slot) {
@@ -145,6 +175,7 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
       const row = store.getCredential(billTo, slot.id);
       if (!row) value = { missing: true };
       else if (!config.vaultKey) value = { error: 'the broker has no vault key' };
+      else if (movedUpstream(slot, row)) value = { error: movedUpstream(slot, row) };
       else {
         try { value = { secret: open(config.vaultKey, row, { billTo, slot: slot.id }), row }; }
         catch { value = { error: 'this key cannot be decrypted (the vault key changed); enter it again' }; }
@@ -193,6 +224,8 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
         r.on('data', (c) => { if (n < MAX_ERROR_BODY) { parts.push(c); n += c.length; } });
         r.on('end', () => {
           if (r.statusCode >= 200 && r.statusCode < 300) { resolveP({ ok: true }); return; }
+          // A plugin's gateway may have no model list: only a refusal says the key is wrong.
+          if (!sub && spec.lenient && (r.statusCode === 404 || r.statusCode === 405)) { resolveP({ ok: true }); return; }
           let detail = Buffer.concat(parts).toString('utf8');
           try { const j = JSON.parse(detail); detail = j?.error?.message || j?.message || detail; } catch { /* text */ }
           resolveP({ ok: false, status: r.statusCode, error: scrubText(`${r.statusCode}: ${String(detail).slice(0, 300)}`, [secret, parseGithubSecret(secret).token]) });
@@ -214,7 +247,7 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
     if (!v.ok) return { ok: false, status: 422, error: `${slotName(slot)} was not accepted: ${v.error}` };
     const kind = credentialKind(slot, s);
     const suffix = suffixOf(slot.auth === 'github-user' ? parseGithubSecret(s).token : s);
-    store.putCredential({ billTo, slot: slotId, sealed: seal(config.vaultKey, s, { billTo, slot: slotId }), suffix, kind, verifiedAt: now(), now: now() });
+    store.putCredential({ billTo, slot: slotId, sealed: seal(config.vaultKey, s, { billTo, slot: slotId }), suffix, kind, upstream: new URL(slot.upstream).origin, verifiedAt: now(), now: now() });
     credCache.delete(`${billTo}|${slotId}`);
     log(`${new Date(now()).toISOString()} credential saved: ${billTo} ${slotId} (${kind})`);
     return { ok: true, suffix, kind };
@@ -242,7 +275,11 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
   function slotStatus(billTo) {
     const rows = config.mode === 'multi' ? new Map(store.listCredentials(billTo).map((r) => [r.slot, r])) : new Map();
     return slots.map((slot) => {
-      const base = { id: slot.id, label: slot.label, protocol: slot.protocol, credential: slot.credential, keyHint: slot.keyHint || '', ...(slot.signIn ? { signIn: slot.signIn } : {}) };
+      const base = {
+        id: slot.id, label: slot.label, protocol: slot.protocol, credential: slot.credential, keyHint: slot.keyHint || '',
+        ...(slot.signIn ? { signIn: slot.signIn } : {}),
+        ...(slot.plugin ? { plugin: slot.plugin, host: hostOf(slot.upstream) } : {}),
+      };
       if (slot.credential === 'none' || slot.auth === 'none') return { ...base, state: 'keyless' };
       if (config.mode === 'single') {
         const k = config.singleKeys[slot.id];
@@ -252,11 +289,12 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
       const r = rows.get(slot.id);
       if (!r) return { ...base, state: 'missing' };
       const stale = config.vaultKey && r.key_id !== keyId(config.vaultKey);
+      const moved = movedUpstream(slot, r);
       return {
         ...base,
-        state: stale ? 'invalid' : (r.verify_error ? 'invalid' : 'set'),
+        state: stale || moved ? 'invalid' : (r.verify_error ? 'invalid' : 'set'),
         suffix: r.suffix, kind: r.kind || null, createdAt: r.created_at, updatedAt: r.updated_at, lastUsedAt: r.last_used_at,
-        verifiedAt: r.verified_at, verifyError: stale ? 'the vault key changed: enter this key again' : r.verify_error,
+        verifiedAt: r.verified_at, verifyError: stale ? 'the vault key changed: enter this key again' : (moved || r.verify_error),
         dailyUsd: r.daily_usd, monthlyUsd: r.monthly_usd,
       };
     });
@@ -456,7 +494,7 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
     const url = new URL(req.url, 'http://broker');
     const p = url.pathname;
     let body = null;
-    if (req.method === 'POST') {
+    if (req.method === 'POST' || req.method === 'PUT') {
       try { const b = await readBody(req, 64 << 10); body = b.length ? JSON.parse(b.toString('utf8')) : {}; }
       catch { sendJson(res, 400, { error: 'body must be JSON (at most 64 KB)' }); return; }
     }
@@ -465,8 +503,20 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
         version: config.version || null, mode: config.mode, publicUrl: config.publicUrl,
         // upstream: the pinned origin, so worca can map a bridged model's base URL to its slot
         // (routing only; it never learns a key). auth: 'copilot' marks the Copilot slot.
-        slots: slots.map((s) => ({ id: s.id, label: s.label, protocol: s.protocol, credential: s.credential, upstream: new URL(s.upstream).origin, auth: s.auth })),
+        slots: slots.map((s) => ({
+          id: s.id, label: s.label, protocol: s.protocol, credential: s.credential, upstream: new URL(s.upstream).origin, auth: s.auth,
+          ...(s.plugin ? { plugin: s.plugin } : {}),
+        })),
       });
+      return;
+    }
+    // The slots worca derives from enabled plugins' models (src/core/plugin-broker-slots.mjs):
+    // the whole set each time, so a disabled plugin's slots go away.
+    if (req.method === 'PUT' && p === '/internal/plugin-slots') {
+      let next;
+      try { next = setPluginSlots(body?.slots ?? []); }
+      catch (err) { sendJson(res, 400, { error: err.message }); return; }
+      sendJson(res, 200, { slots: next.map((s) => s.id) });
       return;
     }
     if (req.method === 'POST' && p === '/internal/tokens') {
@@ -507,7 +557,7 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
         try {
           const next = await refreshGithubToken({ refreshToken: g.refreshToken, clientId: slot.clientId, clientSecret: config.github?.clientSecret, fetchImpl, ...(slot.deviceBaseUrl ? { baseUrl: slot.deviceBaseUrl } : {}), now: now() });
           g = parseGithubSecret(next);
-          store.putCredential({ billTo: who, slot: slot.id, sealed: seal(config.vaultKey, next, { billTo: who, slot: slot.id }), suffix: suffixOf(g.token), kind: 'github', verifiedAt: now(), now: now() });
+          store.putCredential({ billTo: who, slot: slot.id, sealed: seal(config.vaultKey, next, { billTo: who, slot: slot.id }), suffix: suffixOf(g.token), kind: 'github', upstream: new URL(slot.upstream).origin, verifiedAt: now(), now: now() });
           credCache.delete(`${who}|${slot.id}`);
         } catch (err) {
           store.setVerify(who, slot.id, { ok: false, error: err.message, now: now() });
@@ -540,8 +590,10 @@ export function createBrokerService({ config, slots, store, log = () => {}, now 
   }
 
   return {
-    slots, slotById, limits, fetchImpl,
-    resolveCredential, verifyCredential, saveCredential, testCredential, deleteCredential, slotStatus, rotateVault,
+    get slots() { return slots; },
+    get slotById() { return slotById; },
+    limits, fetchImpl,
+    resolveCredential, verifyCredential, saveCredential, testCredential, deleteCredential, slotStatus, rotateVault, setPluginSlots,
     handleProxy, handleInternal,
     /** Router for the private port: /internal/*, /healthz, /p/*. */
     handlePrivate(req, res) {

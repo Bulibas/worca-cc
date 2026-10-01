@@ -597,11 +597,11 @@ test('the promoted fields sit in the intended order around the task box', async 
   assert.ok(taskSeg < extras, 'Extra files sit under the task source, grouped with it');
   assert.ok(extras < source, 'the branch pair follows the extra files');
   assert.ok(source < advanced, 'everything promoted stays above Advanced');
-  // Source + feature branch share one compact row.
-  const pair = doc.querySelector('.field-grid-2');
-  assert.ok(pair, 'missing the two-column row');
-  assert.ok(pair.querySelector('#sourceBranch') && pair.querySelector('#featureBranch'),
-    'both branch fields must share the row');
+  // Source + new branch share one Branches block (design v3: the table, then New branch).
+  const block = doc.querySelector('#branch-fields.branches');
+  assert.ok(block, 'missing the Branches block');
+  assert.ok(block.querySelector('#branch-table #sourceBranch') && block.querySelector('#featureBranch'),
+    'both branch fields must share the block');
 });
 
 test('Extra files is labelled like the other optional fields', () => {

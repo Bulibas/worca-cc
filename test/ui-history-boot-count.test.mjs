@@ -1,7 +1,8 @@
 // test/ui-history-boot-count.test.mjs
 // On the first WS `hello`, history is background-loaded (PR states ready) even when
-// boot lands on the default New-pipeline view (History never opened). The History
-// menu item itself carries no count. Boots the REAL app.js under jsdom.
+// boot lands on the default New-pipeline view (Runs never opened). The finished runs
+// never number the Runs menu item: it counts live runs and Needs you only (D11).
+// Boots the REAL app.js under jsdom.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -51,7 +52,7 @@ const ROW = (over = {}) => ({
   projectName: 'Proj', projectKey: 'proj-0000abcd', projectDir: '/x/proj', ...over,
 });
 
-test('first connect background-loads history without opening History or numbering its menu item', async () => {
+test('first connect background-loads history without opening Runs or numbering its menu item', async () => {
   const ctx = await boot({
     fetchHandler: (url) => (url.endsWith('/api/history')
       ? skeleton([ROW(), ROW({ id: 'p2' }), ROW({ id: 'p3' })]) : null),
@@ -62,11 +63,14 @@ test('first connect background-loads history without opening History or numberin
   ctx.hello();                 // server greets the socket -> background history load
   await ctx.tick();            // let /api/history resolve + paint
 
-  assert.ok(historyFetches() > before, 'history was loaded even though History was never opened');
-  assert.ok(ctx.window.document.querySelector('[data-view="history"]').classList.contains('hidden'),
-    'History view stays hidden');
-  assert.doesNotMatch(ctx.window.document.querySelector('.nav button[data-nav="history"]').textContent, /\d/,
-    'the History menu item shows no number');
+  assert.ok(historyFetches() > before, 'history was loaded even though Runs was never opened');
+  const doc = ctx.window.document;
+  assert.ok(doc.querySelector('[data-view="runs"]').classList.contains('hidden'),
+    'the Runs view stays hidden');
+  // The Runs button's textContent holds both badges (the hidden Needs-you one reads "0"),
+  // so read each: three stopped rows need nobody and are not live.
+  assert.equal(doc.querySelector('#nav-needs-count').hidden, true, 'no Needs-you count for finished runs');
+  assert.equal(doc.querySelector('#nav-running-count').textContent, '0', 'the live count, not the 3 finished runs');
 });
 
 test('the background load also triggers Phase-2 PR enrichment so PR states are ready', async () => {

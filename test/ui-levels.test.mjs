@@ -38,7 +38,7 @@ const LEVEL_RE = /^(simple|advanced|expert)$/;
 test('every sidebar item carries an explicit level', () => {
   const doc = shell();
   const items = [...doc.querySelectorAll('.nav button')];
-  assert.ok(items.length >= 15, 'the sidebar is present');
+  assert.ok(items.length >= 14, 'the sidebar is present');
   for (const b of items) {
     assert.match(b.dataset.minLevel || '', LEVEL_RE, `nav item "${b.textContent.trim()}" has no data-min-level`);
   }
@@ -247,7 +247,7 @@ test('levelCardsHtml escapes and marks exactly one card checked', () => {
 
 test('blocking prompts are never under a gated ancestor in the shell', () => {
   const doc = shell();
-  for (const sel of ['#run-card-tpl', '#run-detail-tpl']) {
+  for (const sel of ['#run-detail-tpl']) {
     const tpl = doc.querySelector(sel).content;
     for (const q of tpl.querySelectorAll('.qpanel, .cost-banner, .retained-banner, .rd-questions')) {
       assert.equal(minLevelFor(q), 'simple', `${sel} ${q.className} must show at every level`);

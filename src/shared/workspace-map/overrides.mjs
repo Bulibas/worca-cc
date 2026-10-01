@@ -153,3 +153,11 @@ export function rekeyOverrides(overrides, map) {
   }
   return moved ? ov : overrides;
 }
+
+/** M15: the edges a review leaves standing — `edges` with the workspace's overrides applied: first moved
+ *  onto an edge an agent reworded this scan (rekeyOverrides, as finalize will), then merged
+ *  (effectiveEdges). A rejected edge and a confirmed one the scan no longer finds are gone, a manual edge
+ *  is in. An allowlist: any other state (stale, or a later one) never orders or briefs anything. The scan
+ *  orders the map by them (join.mjs), and so does a member's removal (workspaces.mjs). */
+const LIVE_STATES = Object.freeze(['auto', 'confirmed', 'manual']);
+export const liveEdges = (edges, overrides) => effectiveEdges({ edges }, rekeyOverrides(overrides, { edges })).filter((e) => LIVE_STATES.includes(e.state));

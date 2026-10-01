@@ -15,7 +15,7 @@ import {
   dependentsOfWorkflow, dueTickets, runDueTickets, recordOutcome, recoverScheduler, purgeScheduler,
   scheduleCounts, summarizeRequest, RETRY_BACKOFF_MIN, AFTER_RUN_AT,
   afterRefOf, predecessorState, previousBranchesOf, dependentsOfRun, resolveAfterRef,
-  chainBaseBranchesOf, markTicketFired,
+  chainBaseBranchesOf, markTicketFired, cancelResumeTicketsFor,
 } from '../src/core/scheduler.mjs';
 import { projectKey } from '../src/core/store.mjs';
 import { listNotifications, unreadCount } from '../src/core/notifications.mjs';
@@ -646,4 +646,52 @@ test('chainBaseBranchesOf stops where the predecessor\'s feature is not this run
   // A run without a recorded source has nothing to offer.
   chainRun('c0000035', null, 'nb9');
   assert.deepEqual(chainBaseBranchesOf('c0000035'), []);
+});
+
+// ── scheduled resume (v44) ──────────────────────────────────────────────────
+
+test('a resume ticket stores its target on the column and in the request marker', () => {
+  const t = createTicket({
+    projectDir: DIR, title: 'Resume Upgrade', runAtMs: T0 + HOUR,
+    request: { prompt: '', internal: { resumePipelineId: 'pl_1' } },
+    resumePipelineId: 'pl_1', ifMissed: 'skip', now: T0,
+  });
+  assert.equal(t.resumePipelineId, 'pl_1');
+  assert.equal(t.ifMissed, 'skip');
+  assert.equal(t.status, 'scheduled');
+  const row = getDb().prepare('SELECT resume_pipeline_id FROM scheduled_runs WHERE id = ?').get(t.id);
+  assert.equal(row.resume_pipeline_id, 'pl_1');
+});
+
+test('createTicket rejects a resume ticket chained after another run', () => {
+  assert.throws(() => createTicket({
+    projectDir: DIR, title: 'R', runAtMs: T0 + HOUR,
+    request: REQ, resumePipelineId: 'pl_1',
+    after: { kind: 'pipeline', id: 'pl_0' }, now: T0,
+  }), /cannot wait on another run/);
+});
+
+test('runDueTickets: start() answering skip marks the ticket skipped with a feed entry', async () => {
+  const t = createTicket({ projectDir: DIR, title: 'R', runAtMs: T0, request: REQ, now: T0 - MIN });
+  const out = await runDueTickets({ now: T0, start: async () => ({ ok: false, skip: true, error: 'it was already resumed' }) });
+  assert.deepEqual(out.skipped, [t.id]);
+  assert.deepEqual(out.fired, []);
+  assert.equal(getTicket(t.id).status, 'skipped');
+  assert.equal(getTicket(t.id).failReason, 'it was already resumed');
+  const n = listNotifications().find((x) => x.ticketId === t.id);
+  assert.equal(n.kind, 'skipped');
+  assert.equal(n.severity, 'info');
+});
+
+test('cancelResumeTicketsFor cancels only that pipeline’s open tickets and audits the reason', () => {
+  const a = createTicket({ projectDir: DIR, title: 'A', runAtMs: T0 + HOUR, request: { internal: { resumePipelineId: 'pl_1' } }, resumePipelineId: 'pl_1', now: T0 });
+  const b = createTicket({ projectDir: DIR, title: 'B', runAtMs: T0 + HOUR, request: { internal: { resumePipelineId: 'pl_2' } }, resumePipelineId: 'pl_2', now: T0 });
+  const n = cancelResumeTicketsFor('pl_1', { now: T0 + MIN, by: 'ada', reason: 'the run was resumed by hand' });
+  assert.equal(n, 1);
+  assert.equal(getTicket(a.id).status, 'canceled');
+  assert.equal(getTicket(b.id).status, 'scheduled');
+  const note = listNotifications().find((x) => x.ticketId === a.id && x.kind === 'canceled');
+  assert.ok(note, 'a feed entry explains the cancellation');
+  assert.match(note.message, /resumed by hand/);
+  assert.match(note.message, /ada/);
 });

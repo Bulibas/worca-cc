@@ -120,7 +120,9 @@ test('re-opening the run page keeps the search term when a dropdown selection va
   // User had cycle '7' + search 'error'; the cycle rotated out of the facets.
   r.logFilter = { source: '', level: '', step: '', cycle: '7', search: 'error' };
   // Leaving and re-opening the page rebuilds the tab: the stale cycle falls back to "all"…
-  go(window, 'running');
+  // (Leave through another view: side by side a bare #runs reopens this same run, so it
+  // would not rebuild anything.)
+  go(window, 'new');
   await settle();
   go(window, 'running/r-search/details/logs');
   await settle();

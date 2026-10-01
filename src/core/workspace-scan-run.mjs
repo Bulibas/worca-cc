@@ -14,7 +14,7 @@ import { copyFile, lstat, mkdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
-  checkNewWorkspace, createWorkspace, readWorkspace, saveWorkspaceScanResult, isWorkspaceMap,
+  checkNewWorkspace, createWorkspace, readWorkspace, saveWorkspaceScanResult, isWorkspaceMap, rootsHash,
 } from './workspaces.mjs';
 import { workspaceStorePath } from './store.mjs';
 import { autoMetricsHome } from './metrics/sync.mjs';
@@ -178,7 +178,7 @@ export async function adoptGraphFile(map, { pipelineDir, storeDir, renameFile = 
 /**
  * Save a finished scan from the scan pipeline's outputs in the run folder, then UPDATE the
  * workspace when one with this id exists (a re-scan — or one created under the same name and
- * project set while the scan ran) or CREATE it — under this id only: a project set that keys
+ * project set while the scan ran; never one whose members changed since: 'SET_CHANGED') or CREATE it — under this id only: a project set that keys
  * differently now (a member's repository root moved) fails with code 'ID_MISMATCH' and creates
  * nothing. With a map (the join card's workspace-map.json)
  * the map + synthesis are stored and the description is RE-RENDERED from them with the
@@ -199,7 +199,13 @@ export async function finalizeWorkspaceScan({ workspaceId, name, projectPaths, p
   try {
     let id = workspaceId;
     let outcome = 'updated';
-    if (!(await readWorkspace(workspaceId))) {
+    const existing = await readWorkspace(workspaceId);
+    // Members can change after the scan started (addWorkspaceMembers / removeWorkspaceMember): a map
+    // of the old set is never saved over the new one — the change started a re-scan of its own.
+    if (existing && rootsHash(existing.projectPaths) !== rootsHash(projectPaths)) {
+      return { outcome: 'failed', workspaceId, error: 'the workspace\'s members changed while the scan ran; nothing saved (a re-scan of the new set replaces it)', code: 'SET_CHANGED' };
+    }
+    if (!existing) {
       // The run is filed under the id the launch froze (scan D3): a workspace created under any
       // other id — a member's repository root moved while the scan ran — would never list it.
       const fresh = checkNewWorkspace({ name, projectPaths }).id;

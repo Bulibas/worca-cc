@@ -87,7 +87,7 @@ function firstFatal(err) {
  *  Failure keeps the previous snapshot and records a warning (stale-but-usable). */
 async function syncEntry(entry, { exec } = {}) {
   try {
-    const found = await addPluginRepo(entry.url, ...(exec ? [{ exec }] : []));
+    const found = await addPluginRepo(entry.url, { ...(exec ? { exec } : {}), ...(entry.ref ? { ref: entry.ref } : {}) });
     const plugins = [];
     for (const d of found.discovered) {
       plugins.push({
@@ -147,9 +147,7 @@ export async function addMarketplace(url, { exec } = {}) {
   if (!entry.lastSync) {
     // C8: drop the orphan bare cache the failed clone left — but never a cache an
     // installed plugin still shares (transient failures must not evict it).
-    const inUse = Object.values(readPluginsLock()).some((e) =>
-      e && e.repo && (e.repo === norm || normalizeMarketplaceUrl(e.repo) === norm));
-    if (!inUse) rmSync(repoCacheDir(norm), { recursive: true, force: true });
+    dropCacheUnlessInstalled(norm);
     throw Object.assign(new Error(entry.warnings[0] || `could not read ${norm}`), { code: 'BAD_REQUEST' });
   }
   const state = readMarketplaces(); // B8: LATEST state, not the pre-sync snapshot
@@ -201,12 +199,17 @@ export function removeMarketplace(id) {
   const state = readMarketplaces();
   const entry = state.marketplaces[id];
   if (!entry) throw Object.assign(new Error(`marketplace "${id}" not found`), { code: 'NOT_FOUND' });
-  const inUse = Object.values(readPluginsLock()).some((e) =>
-    e && e.repo && (e.repo === entry.url || normalizeMarketplaceUrl(e.repo) === entry.url));
   delete state.marketplaces[id];
   writeMarketplaces(state);
-  if (!inUse) rmSync(repoCacheDir(entry.url), { recursive: true, force: true });
+  dropCacheUnlessInstalled(entry.url);
   return { ok: true, id };
+}
+
+/** Delete a repo's bare cache unless a plugins.lock.json entry still installs from it. */
+function dropCacheUnlessInstalled(url) {
+  const inUse = Object.values(readPluginsLock()).some((e) =>
+    e && e.repo && (e.repo === url || normalizeMarketplaceUrl(e.repo) === url));
+  if (!inUse) rmSync(repoCacheDir(url), { recursive: true, force: true });
 }
 
 export function listMarketplaces() {
@@ -236,45 +239,50 @@ export function resolveInstallSource(name, { repo } = {}) {
   return null;
 }
 
-/** The checkout the host code runs from: two dirs above src/core/. Only a real
- *  marketplace checkout counts (must have worca-cc-marketplace.json + .git) —
- *  an npm-dist install without either returns null and seeding is skipped. */
-export function hostRepoRoot() {
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-  return existsSync(join(root, 'worca-cc-marketplace.json')) && existsSync(join(root, '.git'))
-    ? root : null;
+export const BUILTIN_MARKETPLACE_REF = 'dev';
+
+/** Where the builtin marketplace lives: this package's GitHub repository (package.json
+ *  `repository`) on BUILTIN_MARKETPLACE_REF — the default branch lags the releases — so npm and
+ *  container installs get it too. WORCA_BUILTIN_MARKETPLACE (a URL or local path) replaces it,
+ *  followed at its HEAD: tests and unpushed plugins use a checkout. null when neither is known. */
+export function builtinMarketplaceSource(env = process.env) {
+  const override = String(env.WORCA_BUILTIN_MARKETPLACE ?? '').trim();
+  if (override) return { url: normalizeMarketplaceUrl(override), ref: null };
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json'), 'utf8'));
+    const repo = typeof pkg.repository === 'string' ? pkg.repository : pkg.repository?.url;
+    const url = typeof repo === 'string' ? normalizeMarketplaceUrl(repo.replace(/^git\+/, '')) : null;
+    return url ? { url, ref: BUILTIN_MARKETPLACE_REF } : null;
+  } catch { return null; }
 }
 
-/** First-run builtin seed (spec §4.2): register the host checkout as a
- *  local-path marketplace. NO git operations — plugins:[] / lastSync:null; the
- *  first sync happens via the Plugins view's background refresh or an explicit
- *  `worca marketplace refresh`. seededBuiltin is set only on success, so a
- *  removed builtin never auto-returns, while a non-checkout host stays eligible
- *  to seed on a later run from a real checkout. */
-export function seedBuiltinMarketplace({ rootDir = hostRepoRoot() } = {}) {
+/** Builtin seed (spec §4.2): register `source` as the builtin marketplace. NO git operations —
+ *  lastSync:null; the first sync happens via the Plugins view's background refresh or an explicit
+ *  `worca marketplace refresh`. A builtin with another url or branch (an older worca's local
+ *  checkout, a changed WORCA_BUILTIN_MARKETPLACE) is replaced; the same repo added by hand becomes
+ *  the builtin. seededBuiltin is set only on success, so a removed builtin never auto-returns. */
+export function seedBuiltinMarketplace({ source = builtinMarketplaceSource() } = {}) {
+  if (!source?.url) return { seeded: false, reason: 'no-source' };
   const state = readMarketplaces();
-  if (state.seededBuiltin) return { seeded: false, reason: 'already-seeded' };
-  // Same contract as hostRepoRoot for an INJECTED rootDir too: a real checkout must
-  // carry both the manifest and .git, else this is an npm-dist dir — skip (E7).
-  if (!rootDir || !existsSync(join(rootDir, 'worca-cc-marketplace.json')) || !existsSync(join(rootDir, '.git'))) {
-    return { seeded: false, reason: 'no-host-checkout' };
-  }
-  const url = resolve(rootDir);
-  const id = marketplaceId(url);
-  let name = 'Worca CC Official';
-  let description = '';
-  try {
-    const raw = JSON.parse(readFileSync(join(rootDir, 'worca-cc-marketplace.json'), 'utf8'));
-    if (typeof raw?.name === 'string' && raw.name.trim()) name = raw.name.trim();
-    if (typeof raw?.description === 'string') description = raw.description.trim();
-  } catch { /* keep defaults */ }
-  if (!state.marketplaces[id]) {
-    state.marketplaces[id] = {
-      id, url, name, description, builtin: true,
-      addedAt: new Date().toISOString(), lastSync: null, plugins: [], warnings: [],
-    };
-  }
+  const ref = source.ref ?? null;
+  const id = marketplaceId(source.url);
+  const old = Object.values(state.marketplaces).find((m) => m && m.builtin === true);
+  if (!old && state.seededBuiltin) return { seeded: false, reason: 'already-seeded' };
+  if (old && old.id === id && (old.ref ?? null) === ref) return { seeded: false, reason: 'already-seeded' };
+  const replaced = old && old.id !== id ? old.id : null;
+  if (replaced) delete state.marketplaces[replaced];
+  const prev = state.marketplaces[id];
+  const sameBranch = !!prev && (prev.ref ?? null) === ref;
+  const entry = {
+    ...(prev ?? { id, url: source.url, name: 'Worca CC Official', description: '', addedAt: new Date().toISOString(), warnings: [] }),
+    builtin: true,
+    lastSync: sameBranch ? prev.lastSync : null,
+    plugins: sameBranch ? prev.plugins : [],
+  };
+  if (ref) entry.ref = ref; else delete entry.ref;
+  state.marketplaces[id] = entry;
   state.seededBuiltin = true;
   writeMarketplaces(state);
-  return { seeded: true, id };
+  if (replaced) dropCacheUnlessInstalled(old.url);
+  return { seeded: true, id, ...(replaced ? { replaced } : {}) };
 }

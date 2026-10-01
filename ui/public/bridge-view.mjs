@@ -168,6 +168,126 @@ function numberField(doc, cls, labelText, value, { min = 1, max = 64, hint = '',
   return wrap;
 }
 
+const SPEECH_FIELDS = {
+  stt: [
+    ['baseUrl', 'Base URL', 'http://127.0.0.1:8080/v1'],
+    ['apiKey', 'API key', 'optional for a local server; or ${VAR}'],
+    ['model', 'Model', 'whisper-1'],
+  ],
+  tts: [
+    ['baseUrl', 'Base URL', 'http://127.0.0.1:8880/v1'],
+    ['apiKey', 'API key', 'optional for a local server; or ${VAR}'],
+    ['model', 'Model', 'tts-1'],
+  ],
+};
+
+const SPEECH_ENGINE_OPTIONS = {
+  stt: [['browser', 'In the browser (built-in)'], ['server', 'Your server']],
+  tts: [['browser', 'In the browser (built-in)'], ['server', 'Your server'], ['off', 'Off — replies stay text only']],
+};
+
+function speechBadge(doc, s, kind) {
+  if (s.engine === 'browser') return h(doc, 'span', 'badge green', 'in the browser');
+  if (s.engine === 'off') return h(doc, 'span', 'badge grey', 'off — replies stay text only');
+  if (s.keyMissing) return h(doc, 'span', 'badge red', 'key ${VAR} not set');
+  if (s.configured) return h(doc, 'span', 'badge green', 'configured');
+  return h(doc, 'span', 'badge grey', kind === 'tts' ? 'off — replies stay text only' : 'not configured');
+}
+
+export function formatSpeechBytes(n) {
+  return n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 1e6))} MB`;
+}
+
+function speechInput(doc, kind, field, label, placeholder, s) {
+  const wrap = h(doc, 'label', 'mv-field');
+  wrap.appendChild(h(doc, 'span', 'mv-field-label', label));
+  const inp = h(doc, 'input', `input mv-sp-field${field === 'apiKey' ? ' mv-pv-key' : ''}`);
+  inp.type = field === 'speed' || field === 'pause' ? 'number' : 'text';
+  if (field === 'speed') { inp.min = '0.25'; inp.max = '4'; inp.step = '0.05'; }
+  if (field === 'pause') { inp.min = '0.3'; inp.max = '5'; inp.step = '0.1'; }
+  inp.dataset.kind = kind;
+  inp.dataset.field = field;
+  inp.placeholder = placeholder;
+  inp.value = field === 'apiKey' ? (s.keyRef || s.keyMasked || '') : (s[field] == null ? '' : String(s[field]));
+  if (field === 'apiKey' && inp.value) inp.dataset.original = inp.value;
+  wrap.appendChild(inp);
+  return wrap;
+}
+
+/** The Speech row (docs/speech.md): Ask Worca's voice mode, never a model upstream. */
+function renderSpeechRow(doc, sp) {
+  const row = h(doc, 'div', 'mv-pv-row mv-sp-row');
+  row.dataset.provider = 'speech';
+  const main = h(doc, 'div', 'mv-pv-main');
+  main.appendChild(h(doc, 'small', 'hint',
+    'Voice mode for Ask Worca. Built in: Whisper and Kokoro run inside your browser — the first use downloads the speech models once (up to about 500 MB), and audio never leaves this computer. Or point worca at speech servers you run (whisper.cpp, Kokoro-FastAPI, …) through their OpenAI-compatible audio API.'));
+  if (sp.cacheBytes) {
+    // The built-in engines' downloads (~/.worca-cc/speech-cache); the next mic use fetches them again.
+    const cache = h(doc, 'div', 'mv-pv-btns mv-sp-cache');
+    cache.appendChild(h(doc, 'small', 'hint', `Downloaded speech models: ${formatSpeechBytes(sp.cacheBytes)}`));
+    const clear = h(doc, 'button', 'btn-ghost mv-sp-clear', 'Remove speech models');
+    clear.type = 'button';
+    cache.appendChild(clear);
+    main.appendChild(cache);
+  }
+  main.appendChild(h(doc, 'small', 'hint mv-pv-msg'));
+  row.appendChild(main);
+  const ctl = h(doc, 'div', 'mv-pv-ctl');
+  for (const kind of ['stt', 'tts']) {
+    const s = sp[kind] || {};
+    const head = h(doc, 'div', 'mv-head');
+    head.appendChild(h(doc, 'b', 'mv-name', kind === 'stt' ? 'Speech-to-text' : 'Text-to-speech'));
+    head.appendChild(speechBadge(doc, s, kind));
+    ctl.appendChild(head);
+    const eng = h(doc, 'label', 'mv-field');
+    eng.appendChild(h(doc, 'span', 'mv-field-label', 'Engine'));
+    const sel = h(doc, 'select', 'input mv-sp-field mv-sp-engine');
+    sel.dataset.kind = kind;
+    sel.dataset.field = 'engine';
+    for (const [value, label] of SPEECH_ENGINE_OPTIONS[kind]) {
+      const o = h(doc, 'option', '', label);
+      o.value = value;
+      sel.appendChild(o);
+    }
+    sel.value = s.engine || 'browser';
+    eng.appendChild(sel);
+    ctl.appendChild(eng);
+    // The server fields matter only for engine 'server' (they stay stored either way).
+    const server = h(doc, 'div', 'mv-sp-server');
+    server.dataset.kind = kind;
+    server.hidden = sel.value !== 'server';
+    sel.addEventListener('change', () => { server.hidden = sel.value !== 'server'; });
+    if (kind === 'tts') {
+      // Kokoro's voices (af_heart, bf_emma, …) serve both the built-in engine and Kokoro-FastAPI.
+      ctl.appendChild(speechInput(doc, kind, 'voice', 'Voice', 'af_heart, bf_emma, … (OpenAI: alloy, …)', s));
+      ctl.appendChild(speechInput(doc, kind, 'speed', 'Speed', '1', s));
+    }
+    if (kind === 'stt') {
+      ctl.appendChild(speechInput(doc, kind, 'language', 'Language', 'auto, or an ISO code such as bg', s));
+      // How long a silence ends what you are saying — raise it if you get cut off mid-sentence.
+      ctl.appendChild(speechInput(doc, kind, 'pause', 'Pause before sending (seconds)', '1.2 — raise it if you get cut off', s));
+    }
+    for (const [field, label, placeholder] of SPEECH_FIELDS[kind]) server.appendChild(speechInput(doc, kind, field, label, placeholder, s));
+    const btns = h(doc, 'div', 'mv-pv-btns');
+    const pill = h(doc, 'span', 'mv-pv-result mv-sp-result', '');
+    pill.dataset.kind = kind;
+    btns.appendChild(pill);
+    const test = h(doc, 'button', 'btn-ghost mv-sp-test', kind === 'stt' ? 'Test speech-to-text' : 'Test text-to-speech');
+    test.type = 'button';
+    test.dataset.kind = kind;
+    btns.appendChild(test);
+    server.appendChild(btns);
+    ctl.appendChild(server);
+  }
+  row.appendChild(ctl);
+  const save = h(doc, 'div', 'mv-pv-btns');
+  const b = h(doc, 'button', 'btn-go mv-sp-save', 'Save');
+  b.type = 'button';
+  save.appendChild(b);
+  row.appendChild(save);
+  return row;
+}
+
 /**
  * The Providers card. `providers` is GET /api/providers' payload (never a
  * token). `signIn` is an in-flight device-flow {userCode, verificationUri,
@@ -345,6 +465,7 @@ export function renderProvidersCard(providers, { doc = globalThis.document, sign
     row.appendChild(btns);
     place(row, PROVIDER_LABELS[name]);
   }
+  place(renderSpeechRow(doc, p.speech || {}), 'Speech (Ask Worca voice)');
   return root;
 }
 
@@ -381,6 +502,20 @@ export function collectProviderRow(rootEl, name) {
   }
   const conc = row.querySelector('.mv-pv-conc');
   if (conc && conc.value.trim() !== '') body.maxConcurrent = Number(conc.value);
+  return body;
+}
+
+/** Collect the Speech row into PATCH /api/providers/speech's body (masked/unchanged key omitted). */
+export function collectSpeechRow(rootEl) {
+  const row = rootEl.querySelector('.mv-pv-row[data-provider="speech"]');
+  if (!row) return null;
+  const body = { stt: {}, tts: {} };
+  for (const inp of row.querySelectorAll('.mv-sp-field')) {
+    const { kind, field } = inp.dataset;
+    const v = inp.value.trim();
+    if (field === 'apiKey') { if (v !== (inp.dataset.original || '')) body[kind].apiKey = v; continue; }
+    body[kind][field] = (field === 'speed' || field === 'pause') && v !== '' ? Number(v) : v;
+  }
   return body;
 }
 

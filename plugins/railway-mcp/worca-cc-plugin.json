@@ -1,0 +1,19 @@
+{
+  "name": "railway-mcp",
+  "version": "0.1.0",
+  "description": "Railway MCP server through the Railway CLI: projects, services, deployments, variables, domains, logs",
+  "license": "MIT",
+  "engines": { "worca-cc-api": ">=5 <6" },
+  "mcpServers": {
+    "railway": {
+      "type": "stdio",
+      "command": "railway",
+      "args": ["mcp", "local"],
+      "env": { "RAILWAY_API_TOKEN": { "field": "token" } },
+      "fields": [
+        { "key": "token", "label": "Railway account token", "secret": true }
+      ],
+      "description": "Railway projects, services, environments, deployments, variables, domains and logs via the Railway CLI"
+    }
+  }
+}

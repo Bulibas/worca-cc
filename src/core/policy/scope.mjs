@@ -9,7 +9,7 @@ import { readWorkspace } from '../workspaces.mjs';
 import { projectKey } from '../store.mjs';
 import { resolveProjectPolicy, resolveWorkspacePolicy } from './sync.mjs';
 import { effectiveRows, capSummary, deviationsFor, fieldsForRun } from './effective.mjs';
-import { localSnapshot, installedPluginsMap, pluginRequirements, blockedPluginFindings, WORCA_VERSION } from './local.mjs';
+import { localSnapshot, installedPluginsMap, pluginRequirements, blockedPluginFindings, withMcpLocal, WORCA_VERSION } from './local.mjs';
 import { readTeamMetricsPrefs } from '../config.mjs';
 import { FIELDS } from './registry.mjs';
 
@@ -32,8 +32,9 @@ export async function policyForScope(scope) {
 }
 
 /** The local machine's answer to a resolved policy: the fold, the plugin gaps, the blocked plugins. */
-export function policyPayload(meta, r, { workspaceRun, projectDir }) {
-  const local = localSnapshot(workspaceRun ? null : projectDir);
+export async function policyPayload(meta, r, { workspaceRun, projectDir }) {
+  // localSnapshot is home-agnostic; mcp.required's "Yours" is the Team set of r.home (MCP registry spec §11.3).
+  const local = await withMcpLocal(localSnapshot(workspaceRun ? null : projectDir), { slug: r.home, sha: r.sha, doc: r.doc });
   const homeKey = r.homeDir ? projectKey(r.homeDir) : null;
   const homes = [{ slug: r.home, doc: r.doc }];
   // The machine-level deviations (no run yet: no guardrail set, no picked models) — what the page's

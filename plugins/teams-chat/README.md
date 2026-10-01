@@ -45,8 +45,9 @@ you discover the conversation ID.
 
    Fill App ID / secret / tenant / ingress token. Doctor verifies the AAD
    credentials (inbound wiring is proven by the first received message).
-7. **Message the bot once** → copy the conversation ID from the worker's
-   inbound frame (`worca plugin channel teams-chat main` shows it) → put it in
+7. **Find the conversation ID**: send any command (e.g. `/whoami`) to the
+   bot; worca refuses it and *Settings → Chat notifications* shows "Ignored
+   /whoami from chat <id>". That is the conversation ID → put it in
    **Notify conversation IDs** and, for commands, **Allowed conversation IDs**.
 
 ## Security
