@@ -131,35 +131,36 @@ test('topics: the 202 contexts and New chat repaint an open popover in place', a
   ctx.panel.destroy();
 });
 
-test('history rows: at most 3 display-only chips + overflow; clicking a chip opens the chat', async () => {
-  const state = { threads: [thread()], thread: thread() };
-  const ctx = makePanel({ fetchHandler: handler(state) });
+test('history rows: the first topic plus a count in the meter line, every label in the hover; the row still opens the chat', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ threads: [thread()], thread: thread() }) });
   ctx.panel.open();
   ctx.doc.querySelector('[data-ask-threads-btn]').click();
   await ctx.tick(); await ctx.tick(); await ctx.tick();
-  const holder = ctx.doc.querySelector('.ask-thread-row .ask-thread-ctx');
-  const chips = [...holder.querySelectorAll('.ask-ctx-chip')];
-  assert.equal(chips.length, 3);
-  assert.ok(chips.every((c) => c.tagName === 'SPAN' && !c.hasAttribute('href')), 'display-only');
-  assert.equal(holder.querySelector('.ask-ctx-more').textContent, '+2');
-  chips[0].click();                                             // bubbles to the row's pick button
+  const row = ctx.doc.querySelector('.ask-thread-row');
+  assert.equal(row.querySelector('.ask-ctx-chip'), null, 'no chips');
+  const topics = row.querySelector('.ask-thread-meter .ask-thread-topics');
+  assert.equal(topics.textContent, 'worca-cc +4');
+  assert.equal(topics.title, 'worca-cc\nFix login\nhavn\nSettings\nLive run');
+  assert.match(row.querySelector('.ask-thread-meter').textContent, /^.+ · worca-cc \+4 · \$0\.00/);
+  topics.click();
   await ctx.tick(); await ctx.tick(); await ctx.tick();
   assert.equal(ctx.doc.querySelector('.ask-title').textContent, 'A chat', 'the row opened the chat');
-  assert.equal(ctx.window.location.hash, '', 'no navigation from a history chip');
+  assert.equal(ctx.window.location.hash, '', 'no navigation from a history row');
   ctx.panel.destroy();
 });
 
-test('history rows: mentioned chips marked (rewritten in the next step)', async () => {
-  const mentioned = [
-    { kind: 'project', id: 'worca-cc-ace1a602', label: 'worca-cc' },
-    { kind: 'run', id: '5e6f7081', label: 'Fix login', home: 'worca-cc-ace1a602', source: 'chat' },
-  ];
-  const ctx = makePanel({ fetchHandler: handler({ threads: [thread({ contexts: mentioned })], thread: thread({ contexts: mentioned }) }) });
+test('history rows: one topic has no count; mentioned ones are marked in the hover; none shows nothing', async () => {
+  const one = [{ kind: 'project', id: 'worca-cc-ace1a602', label: 'worca-cc' }];
+  const two = [...one, { kind: 'run', id: '5e6f7081', label: 'Fix login', home: 'worca-cc-ace1a602', source: 'chat' }];
+  const threads = [thread({ id: 'ask_0000aaaa', contexts: one }), thread({ id: 'ask_0000bbbb', contexts: two }), thread({ id: 'ask_0000cccc', contexts: [] })];
+  const ctx = makePanel({ fetchHandler: (url) => (url === '/api/ask/threads?limit=50' ? ok({ threads, total: 3 }) : ok({})) });
   ctx.panel.open();
   ctx.doc.querySelector('[data-ask-threads-btn]').click();
   await ctx.tick(); await ctx.tick(); await ctx.tick();
-  const rowChips = [...ctx.doc.querySelectorAll('.ask-thread-row .ask-thread-ctx .ask-ctx-chip')];
-  assert.deepEqual(rowChips.map((c) => c.classList.contains('is-mentioned')), [false, true]);
+  const rows = [...ctx.doc.querySelectorAll('.ask-thread-row')];
+  assert.equal(rows[0].querySelector('.ask-thread-topics').textContent, 'worca-cc');
+  assert.equal(rows[1].querySelector('.ask-thread-topics').title, 'worca-cc\nFix login (mentioned)');
+  assert.equal(rows[2].querySelector('.ask-thread-topics'), null);
   ctx.panel.destroy();
 });
 

@@ -43,8 +43,6 @@ const ICONS = {
 // One icon per voice mode; the mic button and the ▾ menu both draw from this.
 const VOICE_MODE_ICONS = { dictate: ICONS.mic, talk: ICONS.voiceTalk, handsfree: ICONS.voiceHandsFree };
 
-const CTX_KINDS = { project: 'project', run: 'run', workspace: 'workspace' };   // page chips show no prefix
-
 /** A context chip's in-app route, or null when it has none (a run with no known home). */
 function contextHref(c) {
   const e = encodeURIComponent;
@@ -1481,46 +1479,14 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   }
 
   // ---- threads popover (list; switching/delete land in Task 7) -------------
-  /** One context chip. `link` → an <a> that closes the sheet and routes (header);
-   *  otherwise a plain span (history rows: the row itself is the click target). */
-  function contextChip(c, { link }) {
-    const href = link ? contextHref(c) : null;
-    // A chip the conversation produced (source 'chat') is drawn as mentioned; only a page chip is ever pinned.
-    const mentioned = c.source === 'chat';
-    const chip = make(href ? 'a' : 'span', `ask-ctx-chip${mentioned ? ' is-mentioned' : c.pinned ? ' is-pinned' : ''}`);
-    chip.dataset.kind = c.kind;
-    if (c.pinned && !mentioned) chip.appendChild(svgIcon(ICONS.pin, 11, 2));
-    const prefix = CTX_KINDS[c.kind];
-    if (prefix) chip.appendChild(make('span', 'ask-ctx-kind', prefix));
-    chip.appendChild(make('span', 'ask-ctx-name', c.label || c.id));
-    chip.title = `${prefix ? `${prefix} ${c.id} — ` : ''}${c.label || c.id}${mentioned ? ' (Mentioned in this chat)' : c.pinned ? ' (pinned)' : ''}`;
-    if (href) {
-      chip.setAttribute('href', href);
-      chip.addEventListener('click', (ev) => {
-        ev.preventDefault();
-        closeSheet();                                            // openNewPipeline / progress-card precedent: close, then route
-        if (win.location.hash !== href) win.location.hash = href.slice(1);
-      });
-    }
-    return chip;
-  }
-
-  /** The open chat's topics; an open context popover is rebuilt in place (same node, focus kept). */
-  function setContexts(list) {
-    st.contexts = validContexts(list);
-    const pop = st.popover;
-    if (pop && pop.trigger === el.meterTokens) { pop.panel.replaceChildren(); pop.build(pop.panel); }
-  }
-
-  const HISTORY_CHIPS = 3;
-  /** History-row chips: display-only, first three plus "+N". */
-  function threadContextChips(t) {
+  /** History-row topics: the first one's name plus "+N", every name in the hover. Display-only — the row is the click target. */
+  function threadTopics(t) {
     const list = validContexts(t.contexts);
     if (!list.length) return null;
-    const holder = make('span', 'ask-thread-ctx');
-    for (const c of list.slice(0, HISTORY_CHIPS)) holder.appendChild(contextChip(c, { link: false }));
-    if (list.length > HISTORY_CHIPS) holder.appendChild(make('span', 'ask-ctx-more', `+${list.length - HISTORY_CHIPS}`));
-    return holder;
+    const name = (c) => c.label || c.id;
+    const span = make('span', 'ask-thread-topics', list.length > 1 ? `${name(list[0])} +${list.length - 1}` : name(list[0]));
+    span.title = list.map((c) => `${name(c)}${c.source === 'chat' ? ' (mentioned)' : ''}`).join('\n');
+    return span;
   }
 
   // The start date leads the meter line, bold and on the primary ink, so the eye
@@ -1542,7 +1508,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       const title = ctxTitle(tot.ctx, tot.ctxWindow);
       if (title) fill.title = title;
     }
-    const parts = [fill, fmtUsd(tot.costUsd), fmtAgents(tot.agents)].filter(Boolean);
+    const parts = [threadTopics(t), fill, fmtUsd(tot.costUsd), fmtAgents(tot.agents)].filter(Boolean);
     parts.forEach((p, i) => {
       if (when || i > 0) meter.appendChild(doc.createTextNode(' · '));
       meter.appendChild(typeof p === 'string' ? doc.createTextNode(p) : p);
@@ -1639,8 +1605,6 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       // A null title = the haiku title has not landed yet (the message route
       // stamps nothing); "New chat" is the same label the turn falls back to.
       col.appendChild(make('span', 'ask-thread-title', t.title || 'New chat'));
-      const chips = threadContextChips(t);
-      if (chips) col.appendChild(chips);
       col.appendChild(threadMeter(t));
       pick.appendChild(col);
       row.appendChild(pick);
@@ -2305,6 +2269,13 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   }
 
   // ---- context popover (window fill + this chat's topics) -------------------
+  /** The open chat's topics; an open context popover is rebuilt in place (same node, focus kept). */
+  function setContexts(list) {
+    st.contexts = validContexts(list);
+    const pop = st.popover;
+    if (pop && pop.trigger === el.meterTokens) { pop.panel.replaceChildren(); pop.build(pop.panel); }
+  }
+
   const levelClass = (level) => (level === 'warn' || level === 'high' ? ` is-ctx-${level}` : '');
 
   /** One topic row: a menuitem that closes the sheet and routes, or a plain row when it has no route. */
