@@ -724,24 +724,29 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (el.pillOrb) el.pillOrb.stop();
   }
 
-  function updateMeters() {
-    if (!el.meterTokens) return;
+  /** The open chat's context fill and window: the streaming call's while live, else the last turn's.
+   *  A thread with turns but no ctx predates the metric — null, never a fake 0. */
+  function currentCtx() {
     const totals = st.model ? st.model.totals() : { live: null };
-    // Context fill: the streaming call's figure while live, else the last turn's.
-    // A thread with turns but no ctx predates the metric — show nothing, never a fake 0.
     const liveUsage = totals.live && totals.live.usage ? totals.live.usage : null;
     const ctx = liveUsage && Number.isFinite(liveUsage.ctx) ? liveUsage.ctx : totals.ctx;
     // The window: this turn's once its result landed, else the thread's last known (same model, as a rule).
     const win = liveUsage && Number.isInteger(liveUsage.ctxWindow) ? liveUsage.ctxWindow : totals.ctxWindow;
+    return { ctx: Number.isFinite(ctx) ? ctx : null, win: Number.isInteger(win) ? win : null, turns: totals.turns || 0 };
+  }
+
+  function updateMeters() {
+    if (!el.meterTokens) return;
+    const totals = st.model ? st.model.totals() : { live: null };
+    const { ctx, win, turns } = currentCtx();
     const pct = ctxPercent(ctx, win);
-    el.meterTokens.textContent = fmtCtx(ctx, win)
+    el.meterTokensLabel.textContent = fmtCtx(ctx, win)
       ? `${fmtCtx(ctx, win)}${pct != null ? ` · ${pct}%` : ''}`
-      : ((totals.turns || 0) > 0 ? '' : '0 ctx');
+      : (turns > 0 ? '' : '0 ctx');
     const level = ctxLevel(ctx, win);
     el.meterTokens.classList.toggle('is-ctx-warn', level === 'warn');
     el.meterTokens.classList.toggle('is-ctx-high', level === 'high');
-    const title = ctxTitle(ctx, win);
-    if (title) el.meterTokens.setAttribute('title', title); else el.meterTokens.removeAttribute('title');
+    el.meterTokens.setAttribute('aria-label', pct != null ? `Context window, ${pct}% full` : 'Context window');
     // Cost: the stored thread total; while a turn streams, "≈" + that total plus
     // this turn's live figure — the CLI's once its result landed, else the
     // display-only list-price estimate the ask-usage frame carries. ask-done
@@ -1061,15 +1066,28 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
     row.appendChild(make('span', 'ask-composer-spacer'));
 
+    // The context fill opens the context popover (window + this chat's topics), so it shows at every
+    // interface level; the cost and its separators stay an Advanced detail.
     const meter = make('span', 'ask-meter');
     meter.setAttribute('data-ask-meter', '');
-    el.meterTokens = make('span', 'ask-meter-tokens', '0 ctx');
-    meter.appendChild(el.meterTokens);
-    { const sep = make('span', 'ask-meter-sep', '|'); sep.setAttribute('aria-hidden', 'true'); meter.appendChild(sep); }
+    const ctxBtn = make('button', 'ask-meter-tokens');
+    ctxBtn.type = 'button';
+    ctxBtn.setAttribute('data-ask-ctx-btn', '');
+    ctxBtn.setAttribute('aria-haspopup', 'menu');
+    ctxBtn.setAttribute('aria-expanded', 'false');
+    ctxBtn.setAttribute('aria-label', 'Context window');
+    el.meterTokensLabel = make('span', 'ask-meter-tokens-label', '0 ctx');
+    ctxBtn.appendChild(el.meterTokensLabel);
+    ctxBtn.appendChild(svgIcon('M6 15l6-6 6 6', 11, 2));
+    ctxBtn.addEventListener('click', () => openCtxPopover(ctxBtn));
+    el.meterTokens = ctxBtn;
+    meter.appendChild(ctxBtn);
+    const sep = () => { const s = make('span', 'ask-meter-sep', '|'); s.setAttribute('aria-hidden', 'true'); s.dataset.minLevel = 'advanced'; return s; };
+    meter.appendChild(sep());
     el.meterCost = make('span', 'ask-meter-cost', '');
+    el.meterCost.dataset.minLevel = 'advanced';
     meter.appendChild(el.meterCost);
-    { const sep = make('span', 'ask-meter-sep', '|'); sep.setAttribute('aria-hidden', 'true'); meter.appendChild(sep); }
-    meter.dataset.minLevel = 'advanced';
+    meter.appendChild(sep());
     row.appendChild(meter);
 
     const wtBtn = make('button', 'ask-agents-btn ask-wt-btn');
@@ -2290,6 +2308,18 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         p.appendChild(row);
       }
     } });
+  }
+
+  // ---- context popover (window fill + this chat's topics) -------------------
+  function openCtxPopover(trigger) {
+    const panel = openPopover({
+      panelClass: 'ask-pop-ctx', trigger, refreshOn: (d) => d.meters,
+      onClose: () => trigger.setAttribute('aria-expanded', 'false'),
+      build: () => {},
+    });
+    if (!panel) return;
+    panel.setAttribute('aria-label', 'Context window');
+    trigger.setAttribute('aria-expanded', 'true');
   }
 
   // ---- thread actions -------------------------------------------------------

@@ -85,7 +85,7 @@ test('composer meter: "fill / window ctx · N%", coloured by level, hover title'
   const m = await sendAndFinish(ctx, { usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 214400, ctxWindow: 1000000 }, totals: T({ ctx: 214400, ctxWindow: 1000000 }) });
   assert.equal(m.textContent, '214.4k / 1M ctx · 21%');
   assert.ok(!m.classList.contains('is-ctx-warn') && !m.classList.contains('is-ctx-high'));
-  assert.match(m.getAttribute('title'), /^21% of the 1M context window/);
+  assert.equal(m.getAttribute('aria-label'), 'Context window, 21% full');
   ctx.panel.destroy();
 });
 

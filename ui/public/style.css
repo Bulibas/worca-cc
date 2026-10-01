@@ -5435,6 +5435,11 @@ a.ask-ctx-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
   color:var(--ink-3);white-space:nowrap;}
 .ask-meter-sep{color:var(--line-2);}
 .ask-meter-cost{color:var(--ink-2);}
+/* The context fill is the context popover's trigger: a bare button that keeps the meter's mono look. */
+.ask-meter-tokens{display:inline-flex;align-items:center;gap:5px;margin:-4px -6px;padding:4px 6px;border:0;border-radius:8px;
+  background:transparent;color:inherit;font:inherit;white-space:nowrap;cursor:pointer;transition:.15s;}
+.ask-meter-tokens:hover,.ask-meter-tokens[aria-expanded="true"]{background:var(--hover);color:var(--ink);}
+.ask-meter-tokens:focus-visible{outline:2px solid var(--ink);outline-offset:1px;}
 /* Context window levels (ask-panel.mjs ctxLevel): amber from 75% of the compaction trigger, red from 90%. */
 .ask-meter-tokens.is-ctx-warn,.ask-thread-fill.is-ctx-warn,.ask-agent-tokens.is-ctx-warn{color:var(--amber-ink);}
 .ask-meter-tokens.is-ctx-high,.ask-thread-fill.is-ctx-high,.ask-agent-tokens.is-ctx-high{color:var(--red-ink);font-weight:600;}
