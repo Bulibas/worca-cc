@@ -92,3 +92,77 @@ test('trigger: aria-label without a known share; click toggles the popover and a
   assert.equal(btn.getAttribute('aria-expanded'), 'false');
   ctx.panel.destroy();
 });
+
+const openCtx = (ctx) => { ctx.doc.querySelector('[data-ask-ctx-btn]').click(); return ctx.doc.querySelector('.ask-pop-ctx'); };
+const stats = (pop) => [...pop.querySelectorAll('.ask-ctx-stat')].map((r) => [
+  r.dataset.stat, r.querySelector('.ask-ctx-stat-name').textContent,
+  r.querySelector('.ask-ctx-stat-tokens').textContent, r.querySelector('.ask-ctx-stat-share').textContent]);
+
+test('popover: caption, bar, Used / Autocompact buffer / Free space, until auto-compact', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ thread: thread() }) });
+  await openThread(ctx);
+  const pop = openCtx(ctx);
+  assert.equal(pop.getAttribute('aria-label'), 'Context window');
+  assert.equal(pop.querySelector('.ask-pop-caption').textContent, 'Context window');
+  assert.equal(pop.querySelector('.ask-pop-caption-meter').textContent, '120.4k / 1M (12%)');
+  const bar = pop.querySelector('.ask-ctx-bar');
+  assert.equal(bar.getAttribute('aria-hidden'), 'true');
+  assert.equal(bar.querySelector('.ask-ctx-bar-used').style.width, '12.04%');
+  assert.equal(bar.querySelector('.ask-ctx-bar-buffer').style.width, '3.3%');
+  assert.deepEqual(stats(pop), [
+    ['used', 'Used', '120.4k', '12.0%'],
+    ['buffer', 'Autocompact buffer', '33.0k', '3.3%'],
+    ['free', 'Free space', '846.6k', '84.7%'],
+  ]);
+  assert.equal(pop.querySelector('.ask-ctx-foot').textContent, '846.6k until auto-compact');
+  assert.equal(pop.querySelector('.ask-ctx-hint'), null, 'under 200k: no re-send hint');
+  ctx.panel.destroy();
+});
+
+test('popover: over the window — Used past 100%, nothing free, bar clamped, compaction soon, re-send hint', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ thread: thread({ totals: T({ ctx: 230000, ctxWindow: 200000 }) }) }) });
+  await openThread(ctx);
+  const pop = openCtx(ctx);
+  assert.equal(pop.querySelector('.ask-pop-caption-meter').textContent, '230.0k / 200k (115%)');
+  assert.equal(pop.querySelector('.ask-ctx-bar-used').style.width, '100%');
+  assert.ok(pop.querySelector('.ask-ctx-bar-used').classList.contains('is-ctx-high'));
+  assert.deepEqual(stats(pop).map((r) => r[3]), ['115.0%', '16.5%', '0.0%']);
+  const foot = pop.querySelector('.ask-ctx-foot');
+  assert.equal(foot.textContent, 'Compaction soon');
+  assert.ok(foot.classList.contains('is-ctx-high'));
+  assert.equal(pop.querySelector('.ask-ctx-hint').textContent, 'Each message re-sends about 230.0k tokens.');
+  ctx.panel.destroy();
+});
+
+test('popover: a small window has no buffer row', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ thread: thread({ totals: T({ ctx: 10000, ctxWindow: 50000 }) }) }) });
+  await openThread(ctx);
+  assert.deepEqual(stats(openCtx(ctx)).map((r) => r[0]), ['used', 'free']);
+  ctx.panel.destroy();
+});
+
+test('popover: window unknown — fill alone in the caption, one line, no bar or rows', async () => {
+  for (const [totals, caption] of [[T({ ctx: 68400 }), '68.4k'], [T({}), ''], [{}, '']]) {
+    const ctx = makePanel({ fetchHandler: handler({ thread: thread({ totals }) }) });
+    await openThread(ctx);
+    const pop = openCtx(ctx);
+    assert.equal(pop.querySelector('.ask-pop-caption-meter').textContent, caption);
+    assert.equal(pop.querySelector('.ask-pop-empty').textContent, 'The window shows after the first answer.');
+    assert.equal(pop.querySelector('.ask-ctx-bar'), null);
+    assert.equal(pop.querySelectorAll('.ask-ctx-stat').length, 0);
+    assert.equal(pop.querySelector('.ask-ctx-foot'), null);
+    ctx.panel.destroy();
+  }
+});
+
+test('popover: follows the streaming fill without reopening', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ thread: thread() }) });
+  await openThread(ctx);
+  const pop = openCtx(ctx);
+  ctx.panel.pushServerFrame({ type: 'ask-start', threadId: TID, messageId: 'msg_00000002', seq: 1, userMessageId: 'msg_00000001', model: 'm', effort: 'high', startedAt: 't' });
+  ctx.panel.pushServerFrame({ type: 'ask-usage', threadId: TID, messageId: 'msg_00000002', seq: 2, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 250000 }, costUsd: null });
+  ctx.flush();
+  assert.equal(ctx.doc.querySelector('.ask-pop-ctx'), pop, 'same node');
+  assert.equal(pop.querySelector('.ask-pop-caption-meter').textContent, '250.0k / 1M (25%)');
+  ctx.panel.destroy();
+});

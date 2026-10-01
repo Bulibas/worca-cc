@@ -5505,6 +5505,26 @@ a.ask-ctx-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-mcp-member.is-problem .ask-pop-row-value{color:var(--amber-ink);}
 .ask-notice-mcp{padding:0;border:0;background:none;color:var(--blue-ink);font:inherit;cursor:pointer;}
 .ask-pop-runinfo{right:calc(var(--ask-col-inset) + 66px);bottom:calc(var(--ask-box-top) + 6px);width:326px;z-index:4;}
+/* Context popover (ask-panel.mjs buildCtxPopover): the window's fill, then the chat's topics. Above the meter. */
+.ask-pop-ctx{right:calc(var(--ask-col-inset) + 120px);bottom:calc(var(--ask-box-top) + 6px);width:320px;z-index:4;
+  max-height:min(460px,70%);overflow-y:auto;}
+.ask-ctx-bar{position:relative;height:6px;margin:2px 10px 8px;border-radius:999px;background:var(--field);overflow:hidden;}
+.ask-ctx-bar-used{position:absolute;left:0;top:0;bottom:0;background:var(--blue);}
+.ask-ctx-bar-buffer{position:absolute;right:0;top:0;bottom:0;
+  background:repeating-linear-gradient(135deg,var(--line-2) 0 3px,transparent 3px 6px);}
+.ask-ctx-stat{display:flex;align-items:center;gap:8px;padding:3px 10px;font-size:12px;color:var(--ink-2);}
+.ask-ctx-swatch{flex:none;width:9px;height:9px;border-radius:2px;background:var(--line-2);}
+.ask-ctx-stat[data-stat="used"] .ask-ctx-swatch{background:var(--blue);}
+.ask-ctx-stat[data-stat="buffer"] .ask-ctx-swatch{background:repeating-linear-gradient(135deg,var(--line-2) 0 2px,transparent 2px 4px);border:1px solid var(--line-2);}
+.ask-ctx-stat[data-stat="free"] .ask-ctx-swatch{background:var(--field);border:1px solid var(--line-2);}
+.ask-ctx-stat-name{flex:1;min-width:0;}
+.ask-ctx-stat-tokens{font-family:var(--mono);font-size:11px;color:var(--ink-3);}
+.ask-ctx-stat-share{width:48px;text-align:right;font-family:var(--mono);font-size:11px;}
+.ask-ctx-bar-used.is-ctx-warn,.ask-ctx-stat.is-ctx-warn .ask-ctx-swatch{background:var(--amber);}
+.ask-ctx-bar-used.is-ctx-high,.ask-ctx-stat.is-ctx-high .ask-ctx-swatch{background:var(--red);}
+.ask-ctx-foot{padding:6px 10px 4px;font-size:12px;color:var(--ink-2);}
+.ask-ctx-foot.is-ctx-high{color:var(--red-ink);font-weight:600;}
+.ask-ctx-hint{padding:0 10px 4px;font-size:11px;color:var(--ink-3);}
 /* The chip picker (ask-panel.mjs openChipPicker) is the only JS-positioned panel: a band
    chip sits wherever the transcript scrolled it. Its rows are the WHOLE model catalog, so
    the menu outgrows the sheet, which clips -- the same cap .ask-pop-scope carries keeps

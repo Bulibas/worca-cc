@@ -2311,11 +2311,53 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   }
 
   // ---- context popover (window fill + this chat's topics) -------------------
+  const levelClass = (level) => (level === 'warn' || level === 'high' ? ` is-ctx-${level}` : '');
+
+  /** Caption, then the window's bar / rows / footer (or one line while the window is unknown), then the topics. */
+  function buildCtxPopover(p) {
+    const { ctx, win } = currentCtx();
+    const b = ctxBreakdown(ctx, win);
+    const head = make('div', 'ask-pop-caption-row');
+    head.appendChild(make('span', 'ask-pop-caption', 'Context window'));
+    head.appendChild(make('span', 'ask-pop-caption-meter', b ? `${kTok(ctx)} / ${fmtWindow(win)} (${b.pct}%)` : (ctx > 0 ? kTok(ctx) : '')));
+    p.appendChild(head);
+    if (!b) {
+      p.appendChild(make('div', 'ask-pop-empty', 'The window shows after the first answer.'));
+    } else {
+      const bar = make('div', 'ask-ctx-bar');
+      bar.setAttribute('aria-hidden', 'true');               // the rows below carry the numbers
+      const used = make('span', `ask-ctx-bar-used${levelClass(b.level)}`);
+      used.style.width = `${+Math.min(100, (ctx / win) * 100).toFixed(2)}%`;
+      bar.appendChild(used);
+      if (b.buffer > 0) {
+        const buf = make('span', 'ask-ctx-bar-buffer');
+        buf.style.width = `${+((b.buffer / win) * 100).toFixed(2)}%`;
+        bar.appendChild(buf);
+      }
+      p.appendChild(bar);
+      const rows = [['used', 'Used', b.used], ['buffer', 'Autocompact buffer', b.buffer], ['free', 'Free space', b.free]];
+      for (const [key, name, n] of rows) {
+        if (key === 'buffer' && n <= 0) continue;
+        const r = make('div', `ask-ctx-stat${key === 'used' ? levelClass(b.level) : ''}`);
+        r.dataset.stat = key;
+        r.appendChild(make('span', 'ask-ctx-swatch'));
+        r.appendChild(make('span', 'ask-ctx-stat-name', name));
+        r.appendChild(make('span', 'ask-ctx-stat-tokens', kTok(n)));
+        r.appendChild(make('span', 'ask-ctx-stat-share', fmtShare(n, win)));
+        p.appendChild(r);
+      }
+      p.appendChild(b.level === 'high'
+        ? make('div', 'ask-ctx-foot is-ctx-high', 'Compaction soon')
+        : make('div', 'ask-ctx-foot', `${kTok(b.untilCompact)} until auto-compact`));
+    }
+    if (ctx >= CTX_COST_HINT) p.appendChild(make('div', 'ask-ctx-hint', `Each message re-sends about ${(ctx / 1000).toFixed(1)}k tokens.`));
+  }
+
   function openCtxPopover(trigger) {
     const panel = openPopover({
       panelClass: 'ask-pop-ctx', trigger, refreshOn: (d) => d.meters,
       onClose: () => trigger.setAttribute('aria-expanded', 'false'),
-      build: () => {},
+      build: buildCtxPopover,
     });
     if (!panel) return;
     panel.setAttribute('aria-label', 'Context window');
