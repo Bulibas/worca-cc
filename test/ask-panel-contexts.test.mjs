@@ -185,3 +185,19 @@ test('topics: ask-done contexts repaint the open popover; a frame without them k
   assert.deepEqual(ids(), ['project', 'run']);
   ctx.panel.destroy();
 });
+
+test('topics: a live rebuild keeps keyboard focus on the same row, so Escape still closes', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ threads: [thread()], thread: thread() }) });
+  await openThread(ctx);
+  const pop = openCtx(ctx);
+  topics(pop, 'asked')[2].focus();
+  ctx.panel.pushServerFrame({ type: 'ask-start', threadId: TID, messageId: 'msg_00000002', seq: 1, userMessageId: 'msg_00000001', model: 'm', effort: 'high', startedAt: 't' });
+  ctx.panel.pushServerFrame({ type: 'ask-usage', threadId: TID, messageId: 'msg_00000002', seq: 2, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 250000 }, costUsd: null });
+  ctx.flush();
+  const now = topics(pop, 'asked');
+  assert.equal(ctx.doc.activeElement, now[2], 'focus lands on the rebuilt row at the same place');
+  now[2].dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert.equal(ctx.doc.querySelector('.ask-pop-ctx'), null, 'Escape still closes');
+  assert.equal(ctx.doc.activeElement, ctx.doc.querySelector('[data-ask-ctx-btn]'));
+  ctx.panel.destroy();
+});

@@ -1469,6 +1469,18 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return panel;
   }
 
+  /** Rebuild an open popover in place. Keyboard focus inside it moves to the item at the same place in
+   *  the new list (or to the trigger when the list got shorter than that), so Escape and the arrows keep working. */
+  function rebuildPopover(pop) {
+    const at = pop.panel.contains(doc.activeElement) ? menuItems(pop.panel).indexOf(doc.activeElement) : null;
+    pop.panel.replaceChildren();
+    pop.build(pop.panel);
+    if (at === null) return;
+    const item = at >= 0 ? menuItems(pop.panel)[at] : null;
+    if (item) item.tabIndex = 0;
+    try { (item || pop.trigger).focus(); } catch { /* ignore */ }
+  }
+
   function menuItem(className, onPick) {
     const b = make('button', `ask-pop-item ${className}`.trim());
     b.type = 'button';
@@ -2273,7 +2285,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   function setContexts(list) {
     st.contexts = validContexts(list);
     const pop = st.popover;
-    if (pop && pop.trigger === el.meterTokens) { pop.panel.replaceChildren(); pop.build(pop.panel); }
+    if (pop && pop.trigger === el.meterTokens) rebuildPopover(pop);
   }
 
   const CTX_POP_WIDTH = 320;                                      // .ask-pop-ctx width
@@ -4825,7 +4837,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // (same node — never reopened, never refocused). Runs AFTER the mirror and
     // the meters above: the worktrees build() reads st.worktrees.
     const pop = st.popover;
-    if (pop && typeof pop.refreshOn === 'function' && pop.refreshOn(d)) { pop.panel.replaceChildren(); pop.build(pop.panel); }
+    if (pop && typeof pop.refreshOn === 'function' && pop.refreshOn(d)) rebuildPopover(pop);
     updateLiveElapsed();
   }
 
