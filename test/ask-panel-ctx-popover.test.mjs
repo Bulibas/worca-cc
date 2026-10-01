@@ -166,3 +166,18 @@ test('popover: follows the streaming fill without reopening', async () => {
   assert.equal(pop.querySelector('.ask-pop-caption-meter').textContent, '250.0k / 1M (25%)');
   ctx.panel.destroy();
 });
+
+test('popover: its right edge lines up with the trigger, kept inside the sheet', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ thread: thread() }) });
+  await openThread(ctx);
+  const btn = ctx.doc.querySelector('[data-ask-ctx-btn]');
+  const sheet = btn.closest('.ask-sheet');
+  const rect = (left, right) => () => ({ left, right, width: right - left, top: 0, bottom: 0, height: 0, x: left, y: 0 });
+  sheet.getBoundingClientRect = rect(100, 920);
+  btn.getBoundingClientRect = rect(350, 505);
+  assert.equal(openCtx(ctx).style.right, '415px', '920 − 505: flush with the trigger');
+  btn.click();
+  btn.getBoundingClientRect = rect(110, 230);                    // too far left for a 320px panel
+  assert.equal(openCtx(ctx).style.right, '494px', 'clamped: 820 − 320 − 6 keeps 6px to the sheet edge');
+  ctx.panel.destroy();
+});

@@ -2276,6 +2276,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (pop && pop.trigger === el.meterTokens) { pop.panel.replaceChildren(); pop.build(pop.panel); }
   }
 
+  const CTX_POP_WIDTH = 320;                                      // .ask-pop-ctx width
   const levelClass = (level) => (level === 'warn' || level === 'high' ? ` is-ctx-${level}` : '');
 
   /** One topic row: a menuitem that closes the sheet and routes, or a plain row when it has no route. */
@@ -2370,6 +2371,11 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     });
     if (!panel) return;
     panel.setAttribute('aria-label', 'Context window');
+    // Right edge flush with the trigger: the meter moves with the interface level and the controls
+    // beside it, so a fixed CSS offset would miss it. Kept 6px inside the sheet.
+    const sr = el.sheet.getBoundingClientRect();
+    const tr = trigger.getBoundingClientRect();
+    if (sr.width > 0) panel.style.right = `${Math.max(0, Math.min(sr.right - tr.right, sr.width - CTX_POP_WIDTH - 6))}px`;
     trigger.setAttribute('aria-expanded', 'true');
   }
 
