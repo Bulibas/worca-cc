@@ -427,6 +427,8 @@ The skill starts the same deterministic orchestrator.
 - [Team metrics](docs/team-metrics.md) — git-backed, team-wide run records
 - [Team policy](docs/team-policy.md) — team-set cost caps, plugins, models and guardrails from a `worca-policy` branch
 - [Models](docs/models.md) — the catalog, providers (GitHub Copilot, OpenAI-compatible) and the built-in bridge
+- [Voice mode](docs/speech.md) — hands-free Ask Worca: Whisper and Kokoro in the browser, or your own speech servers
+- [Voice languages](docs/speech-languages.md) — what is supported today and the plan for more languages
 - [Getting started](docs/getting-started.md) — the in-app checklist, welcome and spotlight guides
 - [Storage](docs/storage.md) — where state lives, project keys, migration
 - [Workspace map](docs/workspace-map.md) — how a workspace scan maps relations, reviewing them, measuring a scan

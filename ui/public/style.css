@@ -586,6 +586,8 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .switch.on{background:var(--green);}
 .switch.on::after{left:21px;}
 .switch:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+/* Locked by the server's mock mode (app.js#applyServerMock): on, and not the user's to change. */
+.switch.disabled{opacity:.5;cursor:not-allowed;}
 .switch-row .txt{font-weight:500;}
 
 /* ---------- buttons ---------- */
@@ -1374,6 +1376,11 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .badge.paused{background:var(--amber-bg);color:var(--amber-ink);}
 .badge.hist-retained-badge{background:var(--amber-bg);color:var(--amber-ink);}
 .badge.hist-retained-badge[hidden]{display:none;}
+/* The server's mock mode, beside the wordmark: .brand spreads its row, so it parks left. */
+.brand .side-mock-pill{margin-right:auto;padding:3px 7px;cursor:default;
+  /* Solid chip: --amber-ink on --amber-bg is 3.9:1 in light, below the 4.5:1 text floor. */
+  background:var(--amber-ink);color:var(--on-status);}
+.brand .side-mock-pill[hidden]{display:none;}
 
 /* ---------- History cards (navigate to the detail screen) ---------- */
 .hist-card{padding:18px 22px;}
@@ -2989,6 +2996,8 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .mv-editor-grid{display:grid;gap:14px;}
 .mv-field{display:grid;gap:6px;}
 .mv-field-label{font-size:12.5px;font-weight:600;}
+.mv-sp-server{display:contents;}
+.mv-sp-server[hidden]{display:none;}
 .mv-efforts{display:flex;gap:14px;flex-wrap:wrap;}
 .mv-effort{display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;}
 .mv-env{display:grid;gap:8px;}
@@ -3865,11 +3874,45 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .shipit-desc-head .shipit-generate-stop[hidden]{display:none;}
 .shipit-desc-head .shipit-generate-stop[hidden] + .shipit-generate{margin-left:auto;}
 .shipit-desc-input{min-height:140px;font-size:13px;}
+.shipit-desc-input::placeholder{color:var(--ink-2);}
 .shipit-desc-input[readonly]{opacity:.6;}
+.shipit-desc-input::placeholder{color:var(--ink-2);}   /* --ink-3 misses 4.5:1 on the card's grey field */
 .shipit-desc-preview{max-height:320px;}
 .shipit-desc-preview[hidden]{display:none;}
 .shipit-desc-err{margin-top:8px;}
 .shipit-desc-err[hidden]{display:none;}
+/* The Generate-with-AI veil over the editor (or its preview) while a draft is in
+   flight: a haze over the old text, a violet light band swept left to right across
+   it, a breathing violet edge, and a shimmering label. It keeps pointer-events, so
+   it swallows clicks; the textarea under it is read-only too (setShipItGenerating).
+   The textarea goes block so the box has no inline-gap strip under it for the veil
+   to overhang — hence its own [hidden] twin.
+   Both sweeps run on shipit-sweep, NOT the shared ask-shimmer: a 220%-wide
+   background repeats every 2.2 box widths, and ask-shimmer travels 2.88 of them
+   (180% -> -60%, each 1% of position = 1.2% of the box), so at the loop the next
+   tile's band restarts already inside the right edge — a flash. shipit-sweep
+   travels exactly one tile (-183.333% * 1.2 = 2.2), so the loop point is seamless:
+   the band leaves on the right and the next one enters from the left. */
+.shipit-desc-field{position:relative;}
+.shipit-desc-field > .shipit-desc-input{display:block;}
+.shipit-desc-field > .shipit-desc-input[hidden]{display:none;}
+.shipit-desc-busy{display:none;}
+.shipit-desc-field.is-generating .shipit-desc-busy{position:absolute;inset:0;z-index:1;display:flex;
+  align-items:center;justify-content:center;overflow:hidden;cursor:progress;border-radius:var(--r-ctrl);
+  background:color-mix(in srgb,var(--field) 50%,transparent);
+  -webkit-backdrop-filter:blur(1.5px);backdrop-filter:blur(1.5px);
+  animation:shipit-veil-breathe 2.4s ease-in-out infinite;}
+.shipit-desc-field.is-generating .shipit-desc-busy::before{content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(100deg,transparent 30%,color-mix(in srgb,var(--violet) 24%,transparent) 50%,transparent 70%);
+  background-size:220% 100%;animation:shipit-sweep 1.8s linear infinite;}
+.shipit-desc-busy-label{position:relative;font-weight:600;font-size:12.5px;letter-spacing:.01em;white-space:nowrap;
+  background:linear-gradient(100deg,var(--ink-2) 0%,var(--ink-2) 34%,var(--violet-ink) 50%,var(--ink-2) 66%,var(--ink-2) 100%);
+  background-size:220% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;
+  animation:shipit-sweep 2.4s linear infinite;}
+@keyframes shipit-sweep{from{background-position:0 0;}to{background-position:-183.333% 0;}}
+@keyframes shipit-veil-breathe{
+  0%,100%{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--violet) 30%,transparent);}
+  50%{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--violet) 70%,transparent),inset 0 0 24px color-mix(in srgb,var(--violet) 16%,transparent);}}
 
 /* Reduced motion for the three ship-it animations. This block MUST sit AFTER the
    rules that declare them: `@media` contributes no specificity, so naming
@@ -3884,6 +3927,12 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
      and it computes `opacity:1; transform:none` — a permanent 74px --green-bg disc
      ringing the 60px icon. */
   .shipit-spark{animation:none;opacity:0;}
+  /* The Generate-with-AI veil holds still: a steady violet edge, no sweep, and the
+     label gets a real colour back (its fill is a clipped, now-frozen gradient). */
+  .shipit-desc-field.is-generating .shipit-desc-busy{animation:none;
+    box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--violet) 55%,transparent);}
+  .shipit-desc-field.is-generating .shipit-desc-busy::before{content:none;}
+  .shipit-desc-busy-label{animation:none;background:none;color:var(--ink-2);}
 }
 
 /* ---------- History list card v2 ---------- */
@@ -4608,6 +4657,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .sidebar.collapsed .brand{flex-direction:column;gap:6px;margin-bottom:26px;padding:0;}
 .sidebar.collapsed .logo{display:none;}
 .sidebar.collapsed .logo-mark{display:block;}
+.sidebar.collapsed .brand .side-mock-pill{margin-right:0;padding:2px 4px;font-size:9px;letter-spacing:.02em;}
 .sidebar.collapsed .side-toggle{width:40px;height:40px;margin:0;border-radius:12px;
   align-self:center;}
 /* One bare chevron, pointing wherever the rail is about to go. It is NOT
@@ -5382,6 +5432,23 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-stop{border:1.5px solid var(--line);background:var(--panel);color:var(--ink);}
 .ask-stop:hover{border-color:var(--hover-outline);}
 .ask-stop[hidden]{display:none;}
+.ask-voice{display:inline-flex;align-items:center;gap:2px;flex:none;}
+.ask-voice-mic{display:inline-flex;align-items:center;justify-content:center;width:31px;height:31px;flex:0 0 31px;
+  padding:0;border:1.5px solid var(--line);border-radius:50%;background:var(--panel);color:var(--ink);cursor:pointer;transition:.15s;}
+.ask-voice-mic:hover{border-color:var(--ink);}
+.ask-voice-mic.is-on{background:var(--ink);color:var(--panel);border-color:var(--ink);}
+.ask-voice-mic.is-handsfree{animation:wr-pulse 1.6s ease-in-out infinite;}
+.ask-voice-mic.is-error{border-color:var(--red);color:var(--red-ink);}
+.ask-voice-caret{display:inline-flex;align-items:center;justify-content:center;width:18px;height:31px;padding:0;
+  border:0;background:transparent;color:var(--ink-2);cursor:pointer;border-radius:var(--r-ctrl);}
+.ask-voice-caret:hover{color:var(--ink);background:var(--field);}
+.ask-voice-status{font-size:11.5px;color:var(--ink-3);white-space:nowrap;margin-right:4px;}
+.ask-voice-status[hidden]{display:none;}
+.ask-voice-status[data-state="speaking"],.ask-voice-status[data-state="listening"]{color:var(--ink);}
+.ask-voice-status[data-state="error"]{color:var(--red-ink);}
+.ask-pop-voice{right:var(--ask-col-inset);bottom:calc(var(--ask-box-top) + 6px);width:260px;}
+.ask-voice-item svg{flex:0 0 auto;}
+.ask-composer :is(.ask-voice-mic,.ask-voice-caret):focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-composer :is(.ask-agents-btn,.ask-wt-btn,.ask-model-btn,.ask-send,.ask-stop,.ask-chip-x):focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 /* The button shares .ask-agents-btn, which is display:flex — that AUTHOR rule
    outranks the UA [hidden]{display:none}, so without this twin the button never
@@ -5959,6 +6026,57 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 /* Simple mode hides the caret (Schedule… is Advanced): the Start pill closes up again. */
 :root[data-level="simple"] .btn-split > .btn-go:first-child:not(:has(~ [data-level-keep])){border-radius:999px;padding-right:28px;}
 :root[data-level="simple"] .btn-split.mini > .btn-go:first-child:not(:has(~ [data-level-keep])){padding-right:14px;}
+/* Resume split (run card, run page, History detail): ONE control like #start-split —
+   the location's own Resume is the left half, the caret the right half, a hairline
+   divider between them. Each caret is Advanced-only, so Simple closes the Resume back
+   up. The .btn-split prefix outranks (.btn-split.mini > .btn-split-more), and the
+   [hidden] guards outrank the author display rules (same footgun as .btn-resume). */
+.rc-resume-split > .btn-resume{border-radius:9px 0 0 9px;border-right:none;}
+.btn-split.rc-resume-split > .rc-resume-more{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:22px;height:30px;padding:0;box-sizing:border-box;
+  background:var(--panel);color:var(--amber-ink);
+  border:1px solid var(--amber);border-left-color:var(--amber-bg);border-radius:0 9px 9px 0;
+  font-family:inherit;cursor:pointer;transition:background .15s;}
+.btn-split.rc-resume-split > .rc-resume-more:hover{background:var(--amber-bg);}
+.btn-split.rc-resume-split > .rc-resume-more:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.rc-resume-split[hidden],.rc-resume-split > .rc-resume-more[hidden]{display:none;}
+:root[data-level="simple"] .rc-resume-split > .btn-resume{border-radius:9px;border-right:1px solid var(--amber);}
+
+.rd-resume-split:has(> .rd-pause[hidden]){display:none;}
+.rd-resume-split > .rd-pause:has(~ .rd-resume-more:not([hidden])){border-radius:999px 0 0 999px;border-right:none;padding-right:12px;}
+.btn-split.rd-resume-split > .rd-resume-more{
+  display:inline-flex;align-items:center;justify-content:center;
+  height:36px;padding:0 13px 0 10px;box-sizing:border-box;
+  background:var(--panel);color:var(--amber-ink);
+  border:1.5px solid var(--amber-bg);border-radius:0 999px 999px 0;
+  font-family:inherit;cursor:pointer;transition:border-color .15s;}
+.btn-split.rd-resume-split > .rd-resume-more:hover{border-color:var(--amber);}
+.btn-split.rd-resume-split > .rd-resume-more:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.btn-split.rd-resume-split > .rd-resume-more[hidden]{display:none;}
+:root[data-level="simple"] .rd-resume-split > .rd-pause{border-radius:999px;border-right:1.5px solid var(--amber-bg);padding-right:15px;}
+
+.hd-resume-split > .hd-resume{border-radius:999px 0 0 999px;border-right:none;padding-right:12px;}
+.btn-split.hd-resume-split > .hd-resume-more{
+  display:inline-flex;align-items:center;justify-content:center;
+  padding:0 13px 0 10px;box-sizing:border-box;
+  background:var(--surface);color:var(--ink);
+  border:1.5px solid var(--line-2);border-radius:0 999px 999px 0;
+  font-family:inherit;cursor:pointer;transition:border-color .15s;}
+.btn-split.hd-resume-split > .hd-resume-more:hover{border-color:var(--hover-outline);}
+.btn-split.hd-resume-split > .hd-resume-more:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.hd-resume-split[hidden],.hd-resume-split > .hd-resume-more[hidden]{display:none;}
+:root[data-level="simple"] .hd-resume-split > .hd-resume{border-radius:999px;border-right:1.5px solid var(--line-2);padding-right:15px;}
+
+/* History glance: its full-width Resume CTA takes the caret exactly as #start-split does. */
+.hd-g-resume-split{display:flex;width:100%;}
+.hd-g-resume-split > .rd-cta{flex:1 1 auto;width:auto;border-radius:var(--r-ctrl) 0 0 var(--r-ctrl);}
+.hd-g-resume-split > .rd-cta:hover{transform:none;}
+.btn-split.hd-g-resume-split > .hd-g-resume-more{border-radius:0 var(--r-ctrl) var(--r-ctrl) 0;padding:0 18px 0 15px;}
+.hd-g-resume-split .btn-split-menu{bottom:auto;top:calc(100% + 8px);}
+/* Disabled "Resume at…" menu item: greyed, and its hover must not light it up. */
+.btn-split-menu button:disabled{opacity:.45;cursor:not-allowed;}
+.btn-split-menu button:disabled:hover,.btn-split-menu button:disabled:focus-visible{background:transparent;outline:none;}
 
 /* the schedule sheet */
 .sched-modal .card.sched-card{width:min(600px,100%);animation:wr-rise .28s cubic-bezier(.2,.7,.3,1) both;}
@@ -6021,6 +6139,7 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 .sched-when{font-variant-numeric:tabular-nums;}
 .sched-sub .sched-when{font-weight:600;color:var(--ink);}
 .sched-target{margin-top:4px;font-size:12.5px;color:var(--ink-3);overflow-wrap:anywhere;}
+.sched-resume-target{margin-top:4px;font-size:12.5px;color:var(--ink-2);overflow-wrap:anywhere;}
 .sched-rule{color:var(--ink-2);font-weight:500;}
 .sched-reason{margin-top:7px;font-size:12.5px;color:var(--amber-ink);}
 .sched-more{display:inline-flex;align-items:center;gap:7px;background:none;border:none;padding:6px 2px;cursor:pointer;

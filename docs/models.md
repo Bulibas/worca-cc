@@ -75,6 +75,13 @@ same shortcut, and carries its base URL into the dialog.
 never fail. For Copilot it is the one knob that lowers the abuse-detection risk
 described below, so it ships at 4.
 
+**Speech.** The same tab has a **Speech** card for Ask Worca's voice mode:
+speech-to-text and text-to-speech each run in the browser (Whisper, Kokoro — the
+default) or on a server you run (whisper.cpp, Kokoro-FastAPI, Piper), reached
+through the OpenAI audio API. It is not a model
+provider — nothing on it joins the catalog, the bridge or `/api/models`. See
+[docs/speech.md](speech.md).
+
 ### The Copilot notice
 
 Worca talks to Copilot through the same API GitHub's editor extensions use,

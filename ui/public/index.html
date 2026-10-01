@@ -30,6 +30,8 @@
         <div class="brand">
           <span class="logo" role="img" aria-label="Worca"></span>
           <span class="logo-mark" role="img" aria-label="Worca"></span>
+          <!-- The server's mock mode (WS hello serverMock, app.js#applyServerMock): every run is a mock. -->
+          <span class="badge amber side-mock-pill" id="side-mock-pill" title="Server started with WORCA_MOCK=1 — all runs are mock." hidden>MOCK</span>
           <button type="button" class="side-close" id="side-close" aria-label="Close menu" title="Close menu">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
           </button>
@@ -524,7 +526,19 @@
                 </div>
                 <div class="rc-acts">
                   <span class="auto-badge" hidden></span>
-                  <button type="button" class="btn-resume" title="Resume — restart this paused pipeline where it left off" aria-label="Resume" hidden><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg></button>
+                  <!-- Split Resume: the amber Resume keeps its look; the caret opens the schedule-resume
+                       menu. The caret is gated at Advanced exactly like #start-more; Simple shows Resume.
+                       Only the WRAPPER is .hidden-gated — .btn-resume keeps its own gating, and the caret
+                       is simply not offered when the wrapper is hidden. -->
+                  <div class="btn-split mini rc-resume-split" hidden>
+                    <button type="button" class="btn-resume" title="Resume — restart this paused pipeline where it left off" aria-label="Resume" hidden><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg></button>
+                    <button type="button" class="btn-split-more rc-resume-more" data-min-level="advanced" aria-haspopup="menu" aria-expanded="false" title="Schedule the resume" aria-label="Schedule the resume">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+                    </button>
+                    <div class="btn-split-menu rc-resume-menu" role="menu" hidden>
+                      <button type="button" role="menuitem" class="rc-resume-at"><b>Resume at…</b><small>Schedule the resume</small></button>
+                    </div>
+                  </div>
                   <button type="button" class="btn-pause" title="Pause — gracefully stop the session so it can be resumed" aria-label="Pause"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.5"></rect><rect x="14" y="5" width="4" height="14" rx="1.5"></rect></svg></button>
                   <button type="button" class="btn-stop" title="Stop this pipeline" aria-label="Stop"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg></button>
                   <button type="button" class="rc-after" title="Schedule a run after this" aria-label="Schedule a run after this" data-min-level="advanced" hidden><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h12"></path><path d="M13 6l6 6-6 6"></path></svg></button>
@@ -563,11 +577,20 @@
                 <span class="rd-bar-end">
                   <!-- One control for Pause/Resume. The label lives in its own span so a busy
                        state swaps only the word and the inline SVG survives. -->
-                  <button type="button" class="rd-pause" data-action="pause" hidden>
-                    <svg class="ico-pause" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.5"></rect><rect x="14" y="5" width="4" height="14" rx="1.5"></rect></svg>
-                    <svg class="ico-play" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
-                    <span class="rd-btn-label">Pause</span>
-                  </button>
+                  <!-- Split Resume: the caret (Advanced, paused only) opens "Resume at…", like #start-split. -->
+                  <div class="btn-split mini rd-resume-split">
+                    <button type="button" class="rd-pause" data-action="pause" hidden>
+                      <svg class="ico-pause" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.5"></rect><rect x="14" y="5" width="4" height="14" rx="1.5"></rect></svg>
+                      <svg class="ico-play" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
+                      <span class="rd-btn-label">Pause</span>
+                    </button>
+                    <button type="button" class="btn-split-more rd-resume-more" data-min-level="advanced" aria-haspopup="menu" aria-expanded="false" title="Schedule the resume" aria-label="Schedule the resume" hidden>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+                    </button>
+                    <div class="btn-split-menu rd-resume-menu" role="menu" hidden>
+                      <button type="button" role="menuitem" class="rd-resume-at"><b>Resume at…</b><small>Schedule the resume</small></button>
+                    </div>
+                  </div>
                   <button type="button" class="rd-stop" hidden>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
                     <span class="rd-btn-label">Stop</span>
@@ -827,10 +850,20 @@
                   <!-- The label lives in its own span: the busy states ("Resuming…" /
                        "Archiving…") swap ONLY that node, so the inline SVG survives and
                        the error path can restore the word. -->
-                  <button type="button" class="hd-resume btn-ghost" hidden>
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
-                    <span class="hd-btn-label">Resume</span>
-                  </button>
+                  <!-- Split Resume (History detail): the ghost Resume keeps its look; the caret opens
+                       the schedule-resume menu. Gated at Advanced like .hd-more-wrap. -->
+                  <div class="btn-split mini hd-resume-split" hidden>
+                    <button type="button" class="hd-resume btn-ghost" hidden>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
+                      <span class="hd-btn-label">Resume</span>
+                    </button>
+                    <button type="button" class="btn-split-more hd-resume-more" data-min-level="advanced" aria-haspopup="menu" aria-expanded="false" title="Schedule the resume" aria-label="Schedule the resume">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+                    </button>
+                    <div class="btn-split-menu hd-resume-menu" role="menu" hidden>
+                      <button type="button" role="menuitem" class="hd-resume-at-item"><b>Resume at…</b><small>Schedule the resume</small></button>
+                    </div>
+                  </div>
                   <!-- Archive and Report live behind one ⋯ trigger, but keep their own
                        classes: every gate, the busy-label swap and hdSetArchiveGate all
                        address them directly, and only their PLACEMENT moved here.
@@ -2347,8 +2380,15 @@
             <button type="button" class="shipit-generate-stop btn btn-ghost btn-mini" hidden>Stop</button>
             <button type="button" class="shipit-generate btn btn-ghost btn-mini">Generate with AI</button>
           </div>
-          <textarea id="shipit-desc-input" class="shipit-desc-input textarea" rows="7" placeholder="Describe this change, or use Generate with AI"></textarea>
-          <div class="shipit-desc-preview md-preview viewer" hidden></div>
+          <!-- The editor and its preview share one box so the Generate-with-AI veil can
+               lie over whichever is showing: a shimmer sweep that also swallows clicks
+               while the textarea is read-only. `.is-generating` + aria-busy toggle it
+               (setShipItGenerating); the veil itself is decoration. -->
+          <div class="shipit-desc-field" aria-busy="false">
+            <textarea id="shipit-desc-input" class="shipit-desc-input textarea" rows="7" placeholder="Describe this change, or use Generate with AI"></textarea>
+            <div class="shipit-desc-preview md-preview viewer" hidden></div>
+            <div class="shipit-desc-busy" aria-hidden="true"><span class="shipit-desc-busy-label">Drafting with AI…</span></div>
+          </div>
           <div class="shipit-desc-err hint err" hidden></div>
         </div>
         <!-- `hint err`, not `err`: style.css has no standalone .err rule, only

@@ -8,7 +8,8 @@
 //             the dialog frontmost; on first use macOS may show a one-time
 //             Automation consent prompt — a denial surfaces as a non-cancel
 //             error and degrades to `unsupported`, i.e. the in-app fallback)
-//   win32  -> PowerShell System.Windows.Forms.FolderBrowserDialog (-STA)
+//   win32  -> PowerShell System.Windows.Forms.FolderBrowserDialog (-STA), owned
+//             by a shown, transparent TopMost form so it opens above the browser
 //   linux  -> zenity --file-selection --directory, falling back to kdialog;
 //             requires DISPLAY/WAYLAND_DISPLAY (headless -> unsupported)
 //   `multiple` -> multi-select on darwin and zenity (newline-separated paths);
@@ -149,11 +150,19 @@ async function pickMac(run, prompt, multiple) {
 
 async function pickWindows(run, prompt) {
   // FolderBrowserDialog has no multi-select: a `multiple` caller gets a one-element list.
+  // This PowerShell is the server's child, never the foreground process, so an unowned
+  // dialog opens BEHIND the browser (Windows' foreground lock) and the user sees nothing.
+  // Its owner is a 1x1 transparent TopMost form that is actually SHOWN: an owned window
+  // stays above its owner, so the dialog lands in the topmost band. (TopMost on an owner
+  // that is never shown does not carry over — measured on Windows 11.)
   const script =
     'Add-Type -AssemblyName System.Windows.Forms | Out-Null; ' +
+    '$o = New-Object System.Windows.Forms.Form; $o.TopMost = $true; $o.ShowInTaskbar = $false; ' +
+    "$o.FormBorderStyle = 'None'; $o.Opacity = 0; $o.StartPosition = 'CenterScreen'; " +
+    '$o.Size = New-Object System.Drawing.Size(1, 1); $o.Show(); ' +
     '$d = New-Object System.Windows.Forms.FolderBrowserDialog; ' +
     `$d.Description = '${prompt}'; $d.ShowNewFolderButton = $true; ` +
-    "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.WriteLine($d.SelectedPath) }";
+    "if ($d.ShowDialog($o) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.WriteLine($d.SelectedPath) }";
   const r = await run('powershell.exe', ['-NoProfile', '-STA', '-Command', script]);
   if (!r.ok) return { status: 'unsupported' };
   // OK exit either way; empty stdout means the user canceled.
