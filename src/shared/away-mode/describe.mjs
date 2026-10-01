@@ -125,3 +125,19 @@ export function describeChange(before, after, { toggle = 'auto', now, localZone 
   const pick = (c) => describeAwayMode({ config: c, toggle, now, localZone }).lines.slice(1);
   return { before: pick(before), after: pick(after) };
 }
+
+// The sidebar switch (wording §3.8). The switch shows only the manual choice ("I'm away now");
+// the word next to it says what applies right now, so the away hours never flip the switch itself.
+const SWITCH_WORDS = { 'away-now': 'Away', 'away-hours': 'Away (your hours)', here: 'Here', 'no-hours': 'Here', paused: 'Paused' };
+const TURN_ON = 'Turn on to have worca answer on every run now.';
+
+/** @returns {{checked:boolean, paused:boolean, status:string, word:string, tip:string}} */
+export function describeAwaySwitch({ config, toggle = 'auto', now, localZone = null } = {}) {
+  const d = describeAwayMode({ config, toggle, now, localZone });
+  const out = { checked: toggle === 'on' && d.status !== 'unknown', paused: d.status === 'paused', status: d.status, word: SWITCH_WORDS[d.status] || '' };
+  if (d.status === 'unknown') return { ...out, tip: d.lines[0] };
+  if (d.status === 'away-now') return { ...out, tip: 'You said you are away. worca answers on every run until you turn this off.' };
+  if (d.status === 'paused') return { ...out, tip: 'Away mode is paused. worca answers nothing. Turn it back on in Settings › Away mode.' };
+  if (d.status === 'no-hours') return { ...out, tip: `No away hours are set. ${TURN_ON}` };
+  return { ...out, tip: `${d.lines[0]} ${TURN_ON}` };
+}

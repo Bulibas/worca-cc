@@ -318,6 +318,25 @@ After apply: `Saved. {new status line}.`
 
 ---
 
+### 3.8 Sidebar switch
+
+At the bottom of the menu, above the spend card: a small switch labelled `I'm away`, with one
+word under it for what applies right now. On the collapsed menu only the switch shows; the
+tooltip carries the words.
+
+- Switch on = "I'm away now". Switch off = follow my away hours. Pause stays in Settings.
+- The away hours never flip the switch itself; only the word changes.
+
+| Status | Switch | Word | Tooltip |
+|---|---|---|---|
+| here | off | `Here` | `{status line 1} Turn on to have worca answer on every run now.` |
+| inside away hours | off | `Away (your hours)` | `{status line 1} Turn on to have worca answer on every run now.` |
+| no away hours | off | `Here` | `No away hours are set. Turn on to have worca answer on every run now.` |
+| I'm away now | on | `Away` | `You said you are away. worca answers on every run until you turn this off.` |
+| paused | off, disabled | `Paused` | `Away mode is paused. worca answers nothing. Turn it back on in Settings › Away mode.` |
+
+A disabled switch (paused, or the settings could not be read) opens Settings › Runs when clicked.
+
 ## 4. Reads-top-to-bottom test
 
 Developer opens Settings › Away mode with: hours 22:00–07:00, "Only runs I marked", 30 min,

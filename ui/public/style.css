@@ -2864,6 +2864,24 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .tm-route-list{list-style:none;padding:0;margin:8px 0 0;} .tm-route-list li.failed{color:var(--red-ink);}
 .tm-route-list .tm-stderr{white-space:pre-wrap;margin:4px 0 0;}
 
+/* ---------- Sidebar "I'm away" switch (app.js#paintSideAway) ---------- */
+/* Quiet by design: a plain row, not a card. The word under the label says what applies now. */
+.side-away{display:flex;align-items:center;gap:10px;width:100%;padding:4px 12px;border:0;background:none;
+  color:inherit;font-family:inherit;text-align:left;cursor:pointer;border-radius:var(--r-ctrl);}
+.side-away:hover{background:var(--hover-on-field);}
+.side-away:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.side-away[aria-disabled="true"] .switch{opacity:.5;}
+.side-away .switch{width:32px;height:18px;}
+.side-away .switch::after{top:2px;left:2px;width:14px;height:14px;}
+.side-away .switch.on::after{left:16px;}
+.side-away-text{display:flex;flex-direction:column;min-width:0;line-height:1.25;}
+.side-away-label{font-size:12.5px;font-weight:600;color:var(--ink-2);}
+.side-away-word{font-size:11.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.side-away[data-status="away-hours"] .side-away-word,.side-away[data-status="away-now"] .side-away-word{color:var(--green-ink);}
+/* The rail: the switch alone; the tooltip carries the words. */
+.sidebar.collapsed .side-away{justify-content:center;padding:4px 0;}
+.sidebar.collapsed .side-away-text{display:none;}
+
 /* ---------- Sidebar spend indicator ---------- */
 .spend-ind{display:block;width:100%;text-align:left;border:1px solid var(--line);border-radius:var(--r-ctrl);
   background:var(--field);padding:10px 12px;cursor:pointer;font-family:inherit;}

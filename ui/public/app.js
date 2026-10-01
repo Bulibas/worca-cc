@@ -169,7 +169,7 @@ import { renderReasonOptions, renderOptIns, previewText, reportBlobParts, REPORT
 import { openScheduleSheet, closeScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
 import { STATUS_ACTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindLabel, awayAnswersSummary } from '../../src/shared/away-mode/labels.mjs';
-import { describeRun, describeNewRun } from '../../src/shared/away-mode/describe.mjs';
+import { describeRun, describeNewRun, describeAwaySwitch } from '../../src/shared/away-mode/describe.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
 import { createLevelController, levelAtLeast, currentLevel, tagLevel, keepVisible, minLevelFor, LEVEL_INFO, UI_LEVELS } from './ui-level.mjs';
 import { registerAskRenderer, askRendererFor, askKindOf } from './ask/registry.mjs';
@@ -11776,6 +11776,7 @@ async function paintNightSettings(data) {
     if (!d) { if (host.dataset.dirty !== '1' && data) paintNightFallback(host, data); return; }
     state.awayMode = d;
     paintAwayStatus(d.toggle);
+    paintSideAway();
     if (host.dataset.dirty === '1') { updateAwaySummary(host, { toggle: d.toggle, now: Date.now(), inherited: d.inherited }); return; }   // keep unsaved edits
     renderNightForm(host, { level: 'user', values: d.user, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, now: Date.now(), statusEl: awayStatusEl });
   } catch { /* the card keeps what it shows; never an unhandled rejection */ }
@@ -26548,6 +26549,7 @@ function rdTickHosts(r) {
 }
 
 const _timerTick = setInterval(() => {
+  try { paintSideAway(); } catch { /* the word moves with the clock (away hours start and end) */ }
   // The Away mode pill counts down while the run WAITS on a question, which the loop below skips.
   try { const open = rdOpenRun(); if (open && runDetailState.screen) paintRdAwayPill(runDetailState.screen, open); } catch { /* a closed test window must not throw from a timer */ }
   for (const r of runs.values()) {
@@ -26833,14 +26835,68 @@ function paintRdAwayPill(screen, r) {
   pill.textContent = d.pill; pill.title = d.reason; pill.dataset.state = d.state;
 }
 /** settings-changed: refresh the user-level body and every cached project body, keeping the old ones until the new land. */
+let _awayRefreshSeq = 0;
 async function refreshAwayBodies() {
   _awayMiss.clear();
+  const seq = ++_awayRefreshSeq;
   const d = await fetchAwayMode();
-  if (d) { state.awayMode = d; paintNewRunAwayHint(); }
+  if (seq !== _awayRefreshSeq) return;                    // a newer refresh (a later settings-changed) wins
+  if (d) {
+    state.awayMode = d;
+    // An open project tab: the status is global, so its summary follows (unsaved edits survive).
+    for (const host of document.querySelectorAll('.pd-night-form')) { if (host.querySelector('.away-summary')) updateAwaySummary(host, { toggle: d.toggle, now: Date.now() }); }
+  }
+  _sideAwayRead = true;
+  paintNewRunAwayHint(); paintSideAway();
   await Promise.all(Object.keys(state.awayModeByDir).map(async (dir) => { const x = await fetchAwayMode(dir); if (x) state.awayModeByDir[dir] = x; }));
   const open = rdOpenRun();
   if (open && runDetailState.screen) paintRdAwayPill(runDetailState.screen, open);
 }
+// ---- The sidebar's "I'm away" switch ----
+// One click sets the global status: on = "I'm away now", off = follow my away hours. Pause and an
+// unread body leave it disabled; a click then opens Settings › Runs, where Away mode lives.
+let _sideAwaySig = '';
+let _sideAwayBusy = false;
+let _sideAwayErr = '';            // the last failed click, kept in the tooltip until the next one
+let _sideAwayRead = false;        // the first GET has answered (until then the slot stays empty, never "could not be read")
+const sideAwayMount = document.getElementById('side-away');   // held, like awayStatusEl: the 1 s tick paints this page's own mount
+function paintSideAway() {
+  const mount = sideAwayMount;
+  if (!mount || !_sideAwayRead) return;
+  const d0 = state.awayMode;
+  const s = describeAwaySwitch({ config: d0 ? d0.config : null, toggle: d0 ? d0.toggle : 'auto', now: Date.now() });
+  const disabled = s.paused || s.status === 'unknown';
+  const sig = JSON.stringify([s, disabled, _sideAwayBusy, _sideAwayErr]);
+  if (sig === _sideAwaySig && mount.firstChild) return;      // the 1 s tick repaints only on a change
+  _sideAwaySig = sig;
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'side-away'; b.setAttribute('role', 'switch'); b.setAttribute('aria-label', "I'm away");
+  b.setAttribute('aria-checked', String(s.checked));
+  if (disabled || _sideAwayBusy) b.setAttribute('aria-disabled', 'true');
+  b.dataset.status = s.status; b.title = _sideAwayErr ? `${s.tip} (Could not change it: ${_sideAwayErr})` : s.tip;
+  const sw = Object.assign(document.createElement('span'), { className: `switch${s.checked ? ' on' : ''}` });
+  sw.setAttribute('aria-hidden', 'true');
+  const text = Object.assign(document.createElement('span'), { className: 'side-away-text' });
+  text.append(Object.assign(document.createElement('span'), { className: 'side-away-label', textContent: "I'm away" }),
+    Object.assign(document.createElement('span'), { className: 'side-away-word', textContent: s.word }));
+  b.append(sw, text);
+  mount.replaceChildren(b);
+}
+sideAwayMount?.addEventListener('click', async (e) => {
+  const b = e.target.closest('.side-away');
+  if (!b || _sideAwayBusy) return;
+  const d0 = state.awayMode;
+  if (!d0 || b.dataset.status === 'paused' || b.dataset.status === 'unknown') { location.hash = 'settings/runs'; return; }
+  _sideAwayBusy = true; _sideAwayErr = ''; paintSideAway();
+  try {
+    const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nightModeToggle: d0.toggle === 'on' ? 'auto' : 'on' }) });
+    if (!res.ok) _sideAwayErr = (await safeJson(res)).error || `HTTP ${res.status}`;
+  } catch (err) { _sideAwayErr = err.message || 'network error'; }
+  _sideAwayBusy = false;
+  await refreshAwayBodies().catch(() => {});                 // settings-changed does the same; whichever lands first paints
+  paintSideAway();
+});
+
 /** The New-run "Mark this run" hint, from the user-level settings (the project is not fixed until submit). */
 function paintNewRunAwayHint() {
   const h = document.getElementById('nightModeHint');
@@ -26852,6 +26908,7 @@ function paintNewRunAwayHint() {
 // ---------------------------------------------------------------------------
 syncSourceToggle();
 loadProjects();
+void refreshAwayBodies().catch(() => {});   // the sidebar switch (and the New-run hint) need the user-level body
 connectWS();
 // Restore the New-Pipeline target (project | workspace). 'workspace' lazy-loads
 // the workspace options + re-points the config panel; 'project' is the default.

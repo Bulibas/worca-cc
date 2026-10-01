@@ -203,6 +203,84 @@ test('settings card: "I\'m away now" and "Pause away mode" post the toggle alone
   assert.deepEqual(ctx.posts.filter((p) => p.path.endsWith('/api/settings')).at(-1).body, { nightModeToggle: 'off' });
 });
 
+// The sidebar's "I'm away" switch (wording §3.8): on = "I'm away now", off = follow my away hours.
+const sideAway = (doc) => doc.querySelector('.side-foot #side-away [role="switch"]');
+const settingsPosts = (ctx) => ctx.posts.filter((p) => p.path.endsWith('/api/settings'));
+
+test('sidebar switch: off follows the hours, says what applies now, and a click posts "I\'m away now"', async () => {
+  Date.now = () => Date.parse('2026-09-28T15:00:00Z');
+  const ctx = await boot({ settings: { nightMode: { window: '22:00-07:00', timeZone: 'UTC' } } });
+  const sw = sideAway(ctx.window.document);
+  assert.ok(sw, 'the switch sits in the sidebar foot');
+  assert.equal(sw.getAttribute('aria-checked'), 'false');
+  assert.match(sw.textContent, /I'm away/);
+  assert.equal(sw.querySelector('.side-away-word').textContent, 'Here');
+  assert.match(sw.title, /^Right now it is 15:00( UTC)?\. You count as here\. Next away hours start at 22:00\. Turn on to have worca answer on every run now\.$/);
+  click(ctx, sw);
+  await settle();
+  assert.deepEqual(settingsPosts(ctx).at(-1).body, { nightModeToggle: 'on' });
+});
+
+test('sidebar switch: inside away hours the switch stays off; the word says away', async () => {
+  Date.now = () => Date.parse('2026-09-28T23:00:00Z');
+  const ctx = await boot({ settings: { nightMode: { window: '22:00-07:00', timeZone: 'UTC' } } });
+  const sw = sideAway(ctx.window.document);
+  assert.equal(sw.getAttribute('aria-checked'), 'false');
+  assert.equal(sw.querySelector('.switch').classList.contains('on'), false);
+  assert.equal(sw.querySelector('.side-away-word').textContent, 'Away (your hours)');
+  assert.equal(sw.dataset.status, 'away-hours');
+});
+
+test('sidebar switch: on reads "Away" and a click goes back to the away hours', async () => {
+  const ctx = await boot({ settings: { nightMode: { window: '22:00-07:00' }, nightModeToggle: 'on' } });
+  const sw = sideAway(ctx.window.document);
+  assert.equal(sw.getAttribute('aria-checked'), 'true');
+  assert.equal(sw.querySelector('.switch').classList.contains('on'), true);
+  assert.equal(sw.querySelector('.side-away-word').textContent, 'Away');
+  click(ctx, sw);
+  await settle();
+  assert.deepEqual(settingsPosts(ctx).at(-1).body, { nightModeToggle: 'auto' });
+});
+
+test('sidebar switch: paused (or unread) is disabled and opens Settings › Runs instead of posting', async () => {
+  for (const o of [{ settings: { nightModeToggle: 'off' } }, { away: null }]) {
+    const ctx = await boot(o);
+    const sw = sideAway(ctx.window.document);
+    assert.equal(sw.getAttribute('aria-disabled'), 'true');
+    assert.equal(sw.getAttribute('aria-checked'), 'false');
+    click(ctx, sw);
+    await settle();
+    assert.equal(settingsPosts(ctx).length, 0, 'nothing is posted');
+    assert.equal(ctx.window.location.hash, '#settings/runs');
+  }
+});
+
+test('sidebar switch: settings-changed (a Settings button, another tab, Ask Worca) repaints it', async () => {
+  let toggle = 'auto';
+  const body = () => ({ config: resolveNightConfig({ user: { window: '22:00-07:00' } }).config, sources: {}, inherited: resolveNightConfig({}), toggle, user: {}, project: null });
+  const ctx = await boot({ away: body });
+  assert.equal(sideAway(ctx.window.document).getAttribute('aria-checked'), 'false');
+  toggle = 'on';
+  ctx.dispatch({ type: 'settings-changed' });
+  await settle(8);
+  assert.equal(sideAway(ctx.window.document).getAttribute('aria-checked'), 'true');
+});
+
+test('sidebar switch: an open project tab repaints its summary when the status changes', async () => {
+  let toggle = 'auto';
+  const body = () => ({ config: resolveNightConfig({ user: { window: '22:00-07:00' } }).config, sources: {}, inherited: resolveNightConfig({ user: { window: '22:00-07:00' } }), toggle, user: {}, project: {} });
+  const ctx = await boot({ away: body });
+  ctx.window.location.hash = 'projects/proj-1/away';
+  await settle(12);
+  const summary = () => ctx.window.document.querySelector('.pd-night-card .away-summary').textContent;
+  assert.doesNotMatch(summary(), /I'm away now/);
+  toggle = 'on';
+  ctx.dispatch({ type: 'settings-changed' });
+  await settle(8);
+  assert.match(summary(), /^For proj: Right now you count as away because you said "I'm away now"/);
+  assert.equal(sideAway(ctx.window.document).getAttribute('aria-label'), "I'm away");
+});
+
 test('settings card: when GET /api/away-mode fails, the stored fields still render (spec §7)', async () => {
   // No `enabled` key: the default state of a real user.
   const ctx = await boot({ away: null, settings: { nightMode: { window: '22:00-07:00' } } });

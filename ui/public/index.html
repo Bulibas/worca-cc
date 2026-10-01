@@ -130,6 +130,9 @@
           <!-- Who this browser is signed in as (GET /api/whoami). Filled only behind an
                identity proxy or an operator-set name; a local install never shows it. -->
           <div class="side-who" id="side-who" hidden><span class="side-who-label">Signed in as</span> <span class="side-who-name"></span></div>
+          <!-- The "I'm away" switch (app.js#paintSideAway): on = "I'm away now"; the word beside it says
+               what applies right now (wording §3.8). Pause stays in Settings › Away mode. -->
+          <div id="side-away"></div>
           <div id="side-spend"></div>
           <button type="button" class="side-toggle" id="side-toggle"
                   aria-expanded="true" aria-controls="side-rail"

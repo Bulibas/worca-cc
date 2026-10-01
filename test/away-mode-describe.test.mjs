@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { describeAwayMode, describeRun, describeNewRun, describeChange } from '../src/shared/away-mode/describe.mjs';
+import { describeAwayMode, describeRun, describeNewRun, describeChange, describeAwaySwitch } from '../src/shared/away-mode/describe.mjs';
 import { NIGHT_DEFAULTS } from '../src/core/night/config.mjs';
 
 const at = (iso) => Date.parse(iso);
@@ -124,4 +124,24 @@ test('surface: the Settings card (the default) keeps its wording, next to the bu
     assert.equal(d({ toggle: 'on' }), 'Right now you count as away because you said "I\'m away now". worca answers on every run until you click "I\'m back".');
     assert.equal(d({ toggle: 'off' }), 'Away mode is paused. worca answers nothing until you turn it back on. (Marked runs wait too.)');
   }
+});
+
+test('sidebar switch: on = "I\'m away now"; the status word says what applies right now', () => {
+  const sw = (o) => describeAwaySwitch({ ...base, ...o });
+  const here = sw({ now: at('2026-09-28T15:00:00Z') });
+  assert.deepEqual([here.checked, here.paused, here.status, here.word], [false, false, 'here', 'Here']);
+  assert.equal(here.tip, 'Right now it is 15:00. You count as here. Next away hours start at 22:00. Turn on to have worca answer on every run now.');
+  const hours = sw({ now: at('2026-09-28T23:00:00Z') });
+  assert.deepEqual([hours.checked, hours.status, hours.word], [false, 'away-hours', 'Away (your hours)'], 'the hours never flip the switch itself');
+  assert.equal(hours.tip, 'Right now it is 23:00. You count as away (your away hours). They end at 07:00. Turn on to have worca answer on every run now.');
+  const on = sw({ now: at('2026-09-28T15:00:00Z'), toggle: 'on' });
+  assert.deepEqual([on.checked, on.word, on.tip], [true, 'Away', 'You said you are away. worca answers on every run until you turn this off.']);
+  const paused = sw({ now: at('2026-09-28T15:00:00Z'), toggle: 'off' });
+  assert.deepEqual([paused.checked, paused.paused, paused.word], [false, true, 'Paused']);
+  assert.equal(paused.tip, 'Away mode is paused. worca answers nothing. Turn it back on in Settings › Away mode.');
+  const none = sw({ now: at('2026-09-28T15:00:00Z'), config: { ...C, window: null } });
+  assert.deepEqual([none.word, none.tip], ['Here', 'No away hours are set. Turn on to have worca answer on every run now.']);
+  const junk = describeAwaySwitch({ config: null, toggle: 'auto', now: 0 });
+  assert.deepEqual([junk.checked, junk.word, junk.tip], [false, '', 'Away mode settings could not be read.']);
+  for (const d of [here, hours, on, paused, none]) assert.doesNotMatch(d.tip, /night|grace|eligible|Force|strategy/i);
 });
