@@ -252,6 +252,7 @@ export class GraphOrchestrator extends RunHarness {
       if (resume.titleProvisional === true) this.state.titleProvisional = true;
       this.humanInLoop = typeof saved.humanInLoop === 'boolean' ? saved.humanInLoop : (resume.manifest.auto.humanInLoop ?? this.humanInLoop);
     }
+    this._setupStage('Choosing a workflow');
     try {
       return await this._decideTopologyInner();
     } catch (err) {

@@ -1,70 +1,40 @@
-// test/ui-running-auto.test.mjs — an Auto run on the Running page: the deciding placeholder
-// (spec §7.3), the proposal pill words and the "Auto → ‹name›" header badge (spec §7.5).
-// Boot preamble copied from test/ui-question.test.mjs:19-82 (house convention: duplicated per
-// suite) + helloRunning/cardOf from test/ui-running-card.test.mjs:76-87.
+// test/ui-running-auto.test.mjs — an Auto run: the deciding placeholder on the run page
+// (spec §7.3; the list card carries no graph), the card's wait strip and status word, and the
+// "Auto → ‹name›" header badge (spec §7.5). Boot: test/helpers/run-page-boot.mjs.
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { JSDOM } from 'jsdom';
 import { proposalFor } from './helpers/auto-proposal-fixture.mjs';
-
-const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
-const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
+import { bootApp, helloRun, runCard } from './helpers/run-page-boot.mjs';
 
 const wins = [];
 afterEach(() => { for (const w of wins.splice(0)) w.close(); });
 
-async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
-  const { window } = dom;
-  wins.push(window);
-
-  const wsBox = { ws: null };
-  window.WebSocket = class {
-    constructor() { this.readyState = 1; this._listeners = {}; wsBox.ws = this; }
-    send() {}
-    close() {}
-    addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
-    dispatch(type, evt) { (this._listeners[type] || []).forEach((fn) => fn(evt)); }
-  };
-
-  const calls = [];
-  window.fetch = (url, opts) => {
-    calls.push({ url: String(url), opts: opts || {} });
-    if (fetchHandler) { const r = fetchHandler(String(url), opts || {}); if (r) return r; }
-    return Promise.resolve({ ok: true, status: 200, json: async () => ({ projects: [], config: { steps: {}, customModels: [] }, models: [], efforts: [] }) });
-  };
-
-  for (const k of ['window', 'document', 'location', 'localStorage', 'WebSocket', 'fetch', 'navigator']) {
-    try { Object.defineProperty(globalThis, k, { value: window[k], configurable: true, writable: true }); } catch { /* read-only */ }
-  }
-  globalThis.window = window;
-  globalThis.document = window.document;
-
-  await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
-  await new Promise((r) => setTimeout(r, 0));
-
-  const dispatch = (msg) => wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
-  const showRunning = () => { window.location.hash = 'running'; window.dispatchEvent(new window.Event('hashchange')); };
-  return { window, dispatch, showRunning, calls, wsBox };
+async function boot(opts) {
+  const ctx = await bootApp(opts);
+  wins.push(ctx.window);
+  return ctx;
 }
 
 const RUN_ID = 'run-aaa';
 const settle = async (window, n = 3) => { for (let i = 0; i < n; i += 1) await new Promise((r) => setTimeout(r, 0)); };
 
-function helloRunning(ctx, extra = {}) {
-  ctx.wsBox.ws.dispatch('open', {});
-  ctx.dispatch({ type: 'hello', runs: [{ runId: RUN_ID, title: 'Demo run', projectDir: '/tmp/p', status: 'running', startedAt: '2026-01-01T00:00:00Z', ...extra }] });
+function helloRunning(ctx, extra = {}) { helloRun(ctx, { runId: RUN_ID, ...extra }); }
+const cardOf = (ctx) => runCard(ctx, RUN_ID);
+// The deciding placeholder / run graph lives on the run page's Workflow tab only (the list card has no graph).
+const pageHost = (ctx) => ctx.window.document.querySelector('#run-detail .rd-graph .run-flow');
+async function openPage(ctx) {
+  ctx.go(`running/${RUN_ID}/details/workflow`); await settle(ctx.window);
+  return pageHost(ctx);
 }
-const cardOf = (ctx) => ctx.window.document.querySelector(`.run-card[data-run-id="${RUN_ID}"]`);
 
 // The bootstrap manifest exactly as buildGraphManifest() emits it for the empty Auto template.
 const DECIDING = { version: 2, template: { id: 'wf_auto', name: 'Auto' }, auto: { status: 'deciding', humanInLoop: true }, graph: { nodes: [], wires: [] }, bookends: { preflight: true, done: true }, steps: [{ kind: 'preflight', nodes: [{ id: 'preflight', label: 'Preflight', sub: 'checks' }] }, { kind: 'done', nodes: [{ id: 'done', label: 'Done', sub: 'complete' }] }], feedbacks: [] };
 
 test('a deciding Auto run paints the orb placeholder, not an empty graph; the label follows the pending proposal', async () => {
   const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
-  const host = cardOf(ctx).querySelector('.run-flow');
+  assert.equal(cardOf(ctx).querySelector('.run-flow'), null, 'the list card carries no graph host');
+  assert.equal(cardOf(ctx).querySelector('.auto-deciding'), null, 'and no placeholder');
+  const host = await openPage(ctx);
   assert.ok(host.classList.contains('auto-deciding-host'));
   assert.ok(!host.classList.contains('gv-host'), 'no run graph mounted on the host');
   assert.equal(host.querySelector('.gv-stage'), null, 'no renderer mounted');
@@ -72,19 +42,23 @@ test('a deciding Auto run paints the orb placeholder, not an empty graph; the la
   assert.ok(host.querySelector('.ask-orb'), 'the thinking orb');
   ctx.dispatch({ type: 'question', runId: RUN_ID, id: 'auto-1', kind: 'workflow', workflow: proposalFor() });
   assert.equal(host.querySelector('.auto-deciding-label').textContent, 'Waiting for your decision');
-  assert.equal(cardOf(ctx).querySelector('.rc-qpill').textContent, 'proposal');
+  ctx.showRunning();
+  assert.equal(cardOf(ctx).querySelector('.rc-wait-text').textContent, 'Review the workflow', 'the card points at the proposal');
   assert.equal(cardOf(ctx).querySelector('.rc-status-word').textContent, 'Paused · your decision');
   assert.equal(cardOf(ctx).querySelector('.rc-prog').hidden, true, 'no 0/0 progress while deciding');
 });
 
 test('the real manifest replaces the placeholder with the graph (the orb is stopped, the host class dropped)', async () => {
   const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
+  await openPage(ctx);
+  assert.ok(pageHost(ctx).classList.contains('auto-deciding-host'), 'the placeholder first');
   const p = proposalFor();
   ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'running', stepper: { ...p.manifest, auto: { status: 'decided', via: 'created', rounds: 1, humanInLoop: true, workflowId: 'wf_x' } }, steps: [], subAgents: [] });
-  const host = cardOf(ctx).querySelector('.run-flow');
+  const host = pageHost(ctx);
   assert.ok(!host.classList.contains('auto-deciding-host'));
   assert.equal(host.querySelector('.auto-deciding'), null);
   assert.ok(host.querySelector('.gv-stage'), 'the run graph mounted');
+  ctx.showRunning();
   assert.equal(cardOf(ctx).querySelector('.rc-prog').hidden, false, 'progress is back once there are nodes');
 });
 
@@ -94,36 +68,27 @@ test('the real manifest replaces the placeholder with the graph (the orb is stop
 // decision is gone: resume() re-enters _decideTopology.
 test('a run parked while deciding drops the orb and says so; resuming brings the orb back', async () => {
   const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
-  assert.ok(cardOf(ctx).querySelector('.run-flow .ask-orb'), 'live: the thinking orb');
+  await openPage(ctx);
+  assert.ok(pageHost(ctx).querySelector('.ask-orb'), 'live: the thinking orb');
   ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'paused', pauseReason: 'error', steps: [], subAgents: [] });
-  let host = cardOf(ctx).querySelector('.run-flow');
+  let host = pageHost(ctx);
   assert.ok(host.classList.contains('auto-deciding-host'), 'still the placeholder, not an empty graph');
   assert.equal(host.querySelector('.ask-orb'), null, 'no orb spinning on a parked run');
   assert.equal(host.querySelector('.auto-deciding-label').textContent, 'Paused before deciding');
   ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'running', steps: [], subAgents: [] });
-  host = cardOf(ctx).querySelector('.run-flow');
+  host = pageHost(ctx);
   assert.ok(host.querySelector('.ask-orb'), 'the orb is rebuilt when the run goes live again');
   assert.equal(host.querySelector('.auto-deciding-label').textContent, 'Auto is deciding the workflow…');
 });
 
 test('a run STOPPED while deciding is frozen: no orb, and A24’s "did not decide" line', async () => {
   const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
-  // finishRun repaints the stepper one last time while the card still exists; hold the
+  // finishRun repaints the stepper one last time while the page still exists; hold the
   // host, because a stopped run leaves the live list on the very next render.
-  const host = cardOf(ctx).querySelector('.run-flow');
+  const host = await openPage(ctx);
   ctx.dispatch({ type: 'done', runId: RUN_ID, status: 'stopped' });
   assert.equal(host.querySelector('.ask-orb'), null, 'a stopped run would spin its canvas forever');
   assert.equal(host.querySelector('.auto-deciding-label').textContent, 'Auto did not decide a workflow');
-});
-
-test('compact density releases the placeholder instead of hiding a still-running orb', async () => {
-  const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
-  const card = cardOf(ctx);
-  assert.ok(card.querySelector('.run-flow .ask-orb'), 'detailed density paints the orb');
-  ctx.window.__np.setRunDensity('compact');
-  const host = cardOf(ctx).querySelector('.run-flow');
-  assert.ok(!host.classList.contains('auto-deciding-host'), 'the placeholder is dropped, not stranded');
-  assert.equal(host.querySelector('.ask-orb'), null, 'no RAF canvas behind a display:none card body');
 });
 
 const DECIDED = (p) => ({ ...p.manifest, template: { id: 'wf_theme', name: 'Theme switch' }, auto: { status: 'decided', via: 'created', rounds: 1, humanInLoop: true, workflowId: 'wf_theme' } });

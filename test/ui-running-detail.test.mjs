@@ -181,7 +181,9 @@ async function openRun(ctx, over = {}, logs = []) {
     ...over,
   });
   for (const l of logs) frame(ctx, { type: 'log', runId: 'r1', ...l });
-  go(ctx.window, 'running/r1');
+  // The tab tests below drive Details › Live log, so they land there directly; the
+  // glance itself is covered by the glance tests further down.
+  go(ctx.window, 'running/r1/details/logs');
   await settle(ctx.window, 6);
   return ctx.window.document.querySelector('#run-detail .rd-header');
 }
@@ -209,9 +211,11 @@ test('a cost-paused run renders the cost banner above the graph', async () => {
   assert.ok(banner, 'the cost-pause banner renders on the detail page too (D11)');
   assert.ok(banner.classList.contains('cb-pipeline'));
   assert.match(banner.textContent, /pipeline cost limit reached/);
-  const graph = window.document.querySelector('#run-detail .rd-graph');
-  assert.equal(banners.compareDocumentPosition(graph) & window.Node.DOCUMENT_POSITION_FOLLOWING,
-    window.Node.DOCUMENT_POSITION_FOLLOWING, 'banners sit ABOVE the graph (spec §5.2)');
+  // The graph moved into Details › Workflow; on the glance the banners lead the run's
+  // sheet, above its facts (spec §5.2's "above everything the run shows").
+  const facts = window.document.querySelector('#run-detail .rd-glance .rd-facts');
+  assert.equal(banners.compareDocumentPosition(facts) & window.Node.DOCUMENT_POSITION_FOLLOWING,
+    window.Node.DOCUMENT_POSITION_FOLLOWING, 'banners sit ABOVE the run\'s facts');
 });
 
 test('"Continue without cap" confirms, then resumes with ignoreCostCap', async () => {
@@ -243,7 +247,7 @@ test('"Continue without cap" confirms, then resumes with ignoreCostCap', async (
   window.document.querySelector('#confirm-ok').dispatchEvent(new window.Event('click', { bubbles: true }));
   await settle(window, 5);
 
-  assert.deepEqual(posts, [{ pipelineId: 'p1', ignoreCostCap: true }],
+  assert.deepEqual(posts, [{ pipelineId: 'p1', baseCheck: true, ignoreCostCap: true }],
     'POST /api/resume carries the cap override');
 });
 
@@ -390,10 +394,24 @@ test('a clarify question renders the large panel on the detail page', async () =
   assert.equal(panel.querySelectorAll('.qblock').length, 2, 'renderClarifyBody ran into the detail host');
   assert.equal(panel.querySelectorAll('.qopt').length, 2, 'padding options are filtered out');
   assert.ok(panel.querySelector('.btn-go'), 'the submit button is present');
-  // It sits between the graph and where T7 puts the tabs.
-  const graph = window.document.querySelector('#run-detail .rd-graph');
-  assert.equal(graph.compareDocumentPosition(host) & window.Node.DOCUMENT_POSITION_FOLLOWING,
-    window.Node.DOCUMENT_POSITION_FOLLOWING, 'the panel follows the graph (spec §5.4)');
+  // It sits on the glance, BELOW the run's sheet (which never changes), under its own
+  // heading; the status line names the step and leads down to it.
+  assert.equal(host.parentElement, window.document.querySelector('#run-detail .rd-glance'), 'the panel is its own block on the glance');
+  const sheet = window.document.querySelector('#run-detail .rd-glance > .rd-sheet');
+  assert.equal(sheet.compareDocumentPosition(host) & window.Node.DOCUMENT_POSITION_FOLLOWING,
+    window.Node.DOCUMENT_POSITION_FOLLOWING, 'below the run\'s sheet');
+  assert.match(host.querySelector('.rd-ask-head').textContent, /^2 questions\b/);   // '… from <step>' when the question names its step
+  assert.equal(window.document.querySelector('#run-detail .rd-glance').hidden, false, 'the glance is showing');
+  assert.equal(window.document.querySelector('#run-detail .rd-now-title').textContent, 'Waiting for you');
+  assert.match(window.document.querySelector('#run-detail .rd-now-sub').textContent, /^(Step: .+|Questions to answer)$/);
+  const top = window.document.querySelector('#run-detail .rd-now-top');
+  assert.ok(top.classList.contains('is-link') && top.getAttribute('role') === 'button', 'the status header leads to the questions');
+  // In Details the way back is the cue: it turns amber and reads "Answer".
+  const back = window.document.querySelector('#run-detail .rd-to-run');
+  assert.ok(back.classList.contains('ask'));
+  assert.equal(back.querySelector('.rd-to-run-label').textContent, 'Answer');
+  assert.ok(window.document.querySelector('#run-detail .rd-questions .qpanel-head svg path').getAttribute('d').startsWith('M5 4.5h14'),
+    'the panel head carries the question bubble');
 });
 
 test('the gate and recovery bodies render on the detail page too (D6)', async () => {
@@ -445,39 +463,7 @@ test('answers posted from the DETAIL panel carry the detail panel\'s choices', a
     'the DETAIL panel\'s slot won, not whichever panel painted last');
 });
 
-test('answers posted from the CARD panel still carry the card\'s choices', async () => {
-  // THE dual-mount regression, and the one that is RED before the fix.
-  // renderClarifyBody rebuilds r._answers on every call; paintRunDetail runs
-  // AFTER renderOverview, so the DETAIL panel always paints last and owns that
-  // array. The card's option clicks mutate slots nobody reads, and its Submit
-  // posts the detail panel's untouched (empty) choices.
-  const posts = [];
-  const ctx = await openDetail({
-    bootOpts: {
-      fetchHandler: (u, opts) => {
-        if (u.includes('/api/answer')) {
-          posts.push(JSON.parse(opts.body));
-          return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
-        }
-        return null;
-      },
-    },
-  });
-  const { window } = ctx;
-  ctx.recv({ type: 'question', runId: ID, ...clarify() });
-  await settle(window);
-
-  const cpanel = window.document.querySelector(`#run-list .run-card[data-run-id="${ID}"] .qpanel`);
-  assert.ok(cpanel, 'the list card still carries its own panel (D6)');
-  cpanel.querySelectorAll('.qopt')[1].dispatchEvent(new window.Event('click', { bubbles: true }));
-  cpanel.querySelector('.btn-go').dispatchEvent(new window.Event('click', { bubbles: true }));
-  await settle(window, 5);
-
-  assert.equal(posts.length, 1);
-  assert.equal(posts[0].payload.answers[0].choice, 'Magic link');
-});
-
-test('submitting busies BOTH mounted panels and resolving clears both', async () => {
+test('submitting busies the run page panel, the list card mounts none, and resolving clears it', async () => {
   const ctx = await openDetail({
     bootOpts: {
       fetchHandler: (u) => (u.includes('/api/answer')
@@ -490,18 +476,16 @@ test('submitting busies BOTH mounted panels and resolving clears both', async ()
   await settle(window);
 
   const dpanel = window.document.querySelector('#run-detail .rd-questions .qpanel');
-  const cpanel = window.document.querySelector(`#run-list .run-card[data-run-id="${ID}"] .qpanel`);
+  assert.equal(window.document.querySelector(`#run-list .run-card[data-run-id="${ID}"] .qpanel`), null,
+    'the list card mounts no panel — the run page is the only place to answer');
   dpanel.querySelector('.btn-go').dispatchEvent(new window.Event('click', { bubbles: true }));
   await settle(window, 5);
   assert.equal(dpanel.querySelector('.btn-go').disabled, true);
-  assert.equal(cpanel.querySelector('.btn-go').disabled, true,
-    'the card panel cannot stay clickable while an answer is in flight');
 
   recv({ type: 'question-resolved', runId: ID, id: 'q1' });
   await settle(window);
   assert.equal(window.document.querySelector('#run-detail .rd-questions').hidden, true);
   assert.equal(window.document.querySelector('#run-detail .rd-questions .qpanel').innerHTML, '');
-  assert.equal(cpanel.innerHTML, '', 'and the card panel is emptied too');
 });
 
 // THE repaint-storm regression. paintRunDetail runs on EVERY ws frame — including
@@ -591,28 +575,44 @@ test('the question panel rises in and is neutralized under reduced motion', () =
   assert.ok(kill > at, 'the reduced-motion block sits AFTER the rule it neutralizes');
 });
 
+test('a waiting question gets twice the run panel\'s width; the header and panel keep theirs', () => {
+  const px = (re) => { const m = css.match(re); return m ? Number(m[1]) : NaN; };
+  // .rd-glance is border-box with 32px side padding: its content is max-width - 64.
+  const base = px(/\.rd-glance\{[^}]*max-width:(\d+)px/) - 64;
+  const wide = px(/\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\)\{[^}]*max-width:(\d+)px/) - 64;
+  assert.ok(wide >= 2 * base, `questions column ${wide}px is at least twice the panel's ${base}px`);
+  assert.match(css, /\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\) > :is\(\.rd-now,\.rd-sheet\)\{[^}]*max-width:(\d+)px/,
+    'the header and the run panel stay at their own measure while the column widens');
+  assert.equal(px(/\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\) > :is\(\.rd-now,\.rd-sheet\)\{[^}]*max-width:(\d+)px/), base,
+    'the run panel does not move when a question arrives');
+});
+
 // --- T7: tabs ---------------------------------------------------------------
 
-test('the detail has exactly four tabs, Live log first and active by default', async () => {
+test('Details has seven tabs, results first; the route picks the open one', async () => {
   const ctx = await bootRunning();
   await openRun(ctx);
   const { window } = ctx;
   const tabs = [...window.document.querySelectorAll('#run-detail .rd-tab')];
-  assert.deepEqual(tabs.map((b) => b.dataset.sec), ['logs', 'overview', 'agents', 'artifacts']);
-  assert.match(tabs[0].textContent, /Live log/);
-  assert.match(tabs[1].textContent, /Overview/);
-  assert.match(tabs[2].textContent, /Agents/);
-  assert.match(tabs[3].textContent, /Artifacts/);
-  assert.ok(tabs[0].classList.contains('active'), 'Live log is the default tab');
-  assert.equal(tabs[0].getAttribute('aria-selected'), 'true');
+  assert.deepEqual(tabs.map((b) => b.dataset.sec), ['overview', 'diff', 'artifacts', 'workflow', 'qa', 'logs', 'agents']);
+  assert.match(tabs[0].textContent, /Overview/);
+  assert.match(tabs[5].textContent, /Logs/);
+  assert.match(tabs[4].textContent, /Q&A/);
+  // openRun lands on #running/r1/details/logs.
+  assert.equal(window.document.querySelector('#run-detail .rd').dataset.mode, 'details');
+  assert.ok(tabOf(window, 'logs').classList.contains('active'), 'the routed tab is open');
+  assert.equal(tabOf(window, 'logs').getAttribute('aria-selected'), 'true');
   assert.equal(secOf(window, 'logs').hidden, false);
+  assert.equal(secOf(window, 'workflow').hidden, true);
   assert.equal(secOf(window, 'overview').hidden, true);
-  assert.equal(secOf(window, 'agents').hidden, true);
-  // D1: no Diff. And no Clarify — a live question is a panel, not a tab.
-  assert.equal(window.document.querySelector('#run-detail .rd-tab[data-sec="diff"]'), null);
+  // No Clarify tab: a waiting question renders on the glance; Q&A is the record.
   assert.equal(window.document.querySelector('#run-detail .rd-tab[data-sec="clarify"]'), null);
   // The Agents pill carries the live sub-agent count.
   assert.equal(tabOf(window, 'agents').querySelector('.rd-tab-badge').textContent, '2');
+  // A tab click rewrites the address in place (no extra history entry).
+  click(window, tabOf(window, 'overview'));
+  await settle(window);
+  assert.equal(window.location.hash, '#running/r1/details/overview');
 });
 
 test('the Live log tab is the CARD pipeline: bar, switch, hydrated lines, shared filter', async () => {
@@ -626,7 +626,7 @@ test('the Live log tab is the CARD pipeline: bar, switch, hydrated lines, shared
 
   const sec = secOf(window, 'logs');
   assert.ok(sec.classList.contains('rd-sec-logs'));
-  // D9: the shared bar, cloned from #run-card-tpl — same controls in the same
+  // D9: the shared bar, cloned from #log-bar-tpl — same controls in the same
   // order. Every control carries BOTH `log-f` and its specific class, so
   // classList[1] is the specific one.
   const bar = sec.querySelector('.log-filters');
@@ -898,6 +898,11 @@ test('a run that finishes while its detail is open keeps the page and goes termi
   frame(ctx, { type: 'log', runId: 'r1', source: 'planner', level: 'info', text: 'one', ts: 0, stepIndex: 0, cycle: 1 });
   await settle(window);
   assert.equal(rdBox(window).querySelectorAll('.log-line').length, 1);
+  // The graph is built when Workflow first opens (Overview leads the tabs): visit it, then
+  // come back to Logs so the address below still reads details/logs.
+  click(window, tabOf(window, 'workflow'));
+  click(window, tabOf(window, 'logs'));
+  await settle(window);
   // MAJ-30: the LIVE half of `.rd-graph.settled`. Only the terminal half was
   // pinned, so a paintRdTerminal that stamped `settled` unconditionally killed
   // the marching ants on every running graph with the suite still green — the
@@ -909,14 +914,15 @@ test('a run that finishes while its detail is open keeps the page and goes termi
   await settle(window, 6);
 
   // D8: no auto-redirect — the page stays exactly where it was.
-  assert.equal(window.location.hash, '#running/r1');
+  assert.equal(window.location.hash, '#running/r1/details/logs');
   assert.ok(window.document.getElementById('run-shell').classList.contains('detail-open'));
   assert.ok(window.document.querySelector('#run-detail .rd-header'), 'the screen is still mounted');
 
   const header = window.document.querySelector('#run-detail .rd-header');
-  assert.equal(header.querySelector('.rd-pause').hidden, true);
-  assert.equal(header.querySelector('.rd-stop').hidden, true);
-  const pill = header.querySelector('.rd-status');
+  const bar = window.document.querySelector('#run-detail .rd-bar');
+  assert.equal(bar.querySelector('.rd-pause').hidden, true);
+  assert.equal(bar.querySelector('.rd-stop').hidden, true);
+  const pill = header.querySelector('.rd-status');   // the bar names the run; Details' header carries the status
   assert.ok(pill.classList.contains('green'), 'the pill takes the terminal family');
   assert.ok(pill.classList.contains('parked'), 'and its dot stops pulsing');
   assert.ok(window.document.querySelector('#run-detail .rd-graph').classList.contains('settled'));
@@ -1048,26 +1054,24 @@ function instrumentScroll(el, { scrollHeight = 1000, clientHeight = 200, scrollW
   Object.defineProperty(el, 'scrollLeft', { configurable: true, get: () => left, set: (v) => { left = v; } });
 }
 
-test('detail-pane autoscroll pins once per burst too, and the card pane pins once beside it', async () => {
+test('detail-pane autoscroll pins once per burst, and the list card has no log pane to pin', async () => {
   const ctx = await bootRunning();
   await openRun(ctx);
   const { window } = ctx;
   const box = rdBox(window);
   const r = window.__np.getRun('r1');
   assert.ok(r.el, 'the list card stays mounted behind the open detail');
-  const cardLog = r.el.querySelector('.log');
+  assert.equal(r.el.querySelector('.log'), null, 'the card carries no log pane');
   instrumentScroll(box, { scrollHeight: 900, clientHeight: 200 });
-  instrumentScroll(cardLog, { scrollHeight: 700, clientHeight: 200 });
-  let rdPins = 0, cardPins = 0;
+  let rdPins = 0;
   const wrap = (el, bump) => { const d = Object.getOwnPropertyDescriptor(el, 'scrollTop');
     Object.defineProperty(el, 'scrollTop', { configurable: true, get: d.get, set: (v) => { bump(); d.set(v); } }); };
-  wrap(box, () => { rdPins += 1; }); wrap(cardLog, () => { cardPins += 1; });
+  wrap(box, () => { rdPins += 1; });
   for (let i = 0; i < 20; i += 1) frame(ctx, { type: 'log', runId: 'r1', source: 'planner', level: 'info', text: `b${i}`, ts: 0, stepIndex: 0, cycle: 1 });
   assert.equal(rdPins, 0, 'no synchronous per-line pin in the detail pane');
   await new Promise((res) => setTimeout(res, 30));
   assert.equal(rdPins, 1, 'ONE pin for the burst in the detail pane');
   assert.equal(box.scrollTop, 900);
-  assert.equal(cardPins, 1, 'the card pane behind the detail also pinned exactly once — the ×2 cost is now 2 writes, one layout');
 });
 
 // --- script nodes P1b: the live line of a running script card (S4) ----------
@@ -1094,6 +1098,8 @@ test('a running script card shows its last captured line; agent lines never repa
     ],
     subAgents: [],
   });
+  click(window, tabOf(window, 'workflow'));   // the graph is built when Workflow first opens
+  await settle(window);
   const liveOf = () => window.document.querySelector('#run-detail .rd-graph .node[data-node-id="n_tests"] .xfoot .xlive');
   assert.equal(liveOf(), null, 'no line captured yet');
   frame(ctx, { type: 'log', runId: 'r1', source: 'implementer', level: 'info', text: 'agent chatter', nodeId: 'n_impl' });
@@ -1124,4 +1130,365 @@ test('a running script card shows its last captured line; agent lines never repa
   await new Promise((r) => setTimeout(r, 320));
   assert.equal(liveOf().textContent.length, 240);
   assert.ok(liveOf().textContent.startsWith('x '));
+});
+
+// --- the glance (status line, trail, sheet) and the two modes ---------------
+
+const GLANCE_MANIFEST = {
+  version: 2, template: { id: 'wf', name: 'WF' },
+  graph: {
+    nodes: ['plan', 'impl', 'docs'].map((k, i) => ({
+      id: `n_${k}`, kind: 'agent', key: k, label: { plan: 'Plan', impl: 'Implement', docs: 'Docs' }[k],
+      color: 'blue', x: i * 300, y: 0, ports: { inputs: [], outputs: [], await: true },
+    })),
+    wires: [],
+  },
+};
+const T = (m) => `2026-08-19T10:0${m}:00Z`;
+const GLANCE_STEPS = () => ([
+  { key: 'x:n_plan:1', executionId: 'x:n_plan:1', nodeId: 'n_plan', ordinal: 1, cycle: 1, kind: 'cycle', status: 'done', startedAt: T(0), endedAt: T(1), activeMs: 60000, costUsd: 0.2 },
+  { key: 'x:n_plan:2', executionId: 'x:n_plan:2', nodeId: 'n_plan', ordinal: 2, cycle: 2, kind: 'cycle', status: 'done', startedAt: T(1), endedAt: T(2), activeMs: 60000, costUsd: 0.2 },
+  { key: 'x:n_impl:1', executionId: 'x:n_impl:1', nodeId: 'n_impl', ordinal: 1, cycle: 1, kind: 'cycle', status: 'start', startedAt: T(2), endedAt: null, activeMs: 1000, runningSince: T(2), costUsd: 0.1 },
+  { key: 'x:n_docs:1', executionId: 'x:n_docs:1', nodeId: 'n_docs', ordinal: 1, cycle: 1, kind: 'cycle', status: 'start', startedAt: T(2), endedAt: null, activeMs: 1000, runningSince: T(2), costUsd: 0 },
+]);
+
+async function openGlance(ctx, hash = 'running/r1', over = {}) {
+  frame(ctx, { type: 'run-created', runId: 'r1', title: 'Rate limit uploads', projectDir: PROJECT,
+    status: 'running', startedAt: '2026-08-19T10:00:00Z', kind: 'run' });
+  frame(ctx, { type: 'state', runId: 'r1', id: 'p1', status: 'running', stepper: GLANCE_MANIFEST,
+    active: [{ nodeId: 'n_impl', executionId: 'x:n_impl:1' }, { nodeId: 'n_docs', executionId: 'x:n_docs:1' }],
+    steps: GLANCE_STEPS(), subAgents: [], totalCostUsd: 0.5, ...over });
+  go(ctx.window, hash);
+  await settle(ctx.window, 6);
+  return ctx.window.document.querySelector('#run-detail .rd');
+}
+
+test('the glance is the default: page title, status line, facts, parallel steps; Details stays hidden', async () => {
+  const ctx = await bootRunning();
+  const rd = await openGlance(ctx);
+  assert.equal(rd.dataset.mode, 'glance');
+  assert.equal(rd.querySelector('.rd-glance').hidden, false);
+  assert.equal(rd.querySelector('.rd-details').hidden, true);
+  // The run's name is the page title; the bar repeats it (shown once scrolled away).
+  assert.equal(rd.querySelector('.rd-page-title').textContent, 'Rate limit uploads');
+  assert.equal(rd.querySelector('.rd-bar-title').textContent, 'Rate limit uploads');
+  assert.equal(rd.querySelector('.rd-to-details'), null, 'no Details button: every tab is a row');
+  // The state word alone; the line under it names what runs.
+  assert.equal(rd.querySelector('.rd-now-title').textContent, 'Running');
+  assert.equal(rd.querySelector('.rd-now-sub').textContent, 'Steps: Implement and Docs');
+  assert.ok(rd.querySelector('.rd-orb .rg-orb-run'), 'the running glyph');
+  assert.equal(rd.querySelector('.rd-trail-btn'), null, 'no trail of dots');
+  // Time ticks (the 1 s ticker's hook) beside the cost.
+  const facts = rd.querySelector('.rd-facts .rd-stats');
+  assert.ok(facts.querySelector('b.run-time'), 'the time tile ticks while steps run');
+  assert.match(facts.textContent, /\$0\.50/);
+  assert.doesNotMatch(rd.textContent, /\b\d+ of \d+\b/, 'no "n of m" anywhere on the glance');
+  // Two steps at once: the Now list names them (one step would be on the status line).
+  const now = [...rd.querySelectorAll('.rd-nowlist .rd-sgroup')];
+  assert.deepEqual(now.map((g) => g.querySelector('.rd-slabel').textContent), ['Now']);
+  assert.deepEqual([...now[0].querySelectorAll('.rd-srow-tx')].map((n) => n.firstChild.textContent), ['Implement', 'Docs']);
+  // Every tab is a row, in tab order, under Results and How it ran.
+  const groups = [...rd.querySelectorAll('.rd-result .rd-sgroup')];
+  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent), ['Results', 'How it ran']);
+  assert.deepEqual([...rd.querySelectorAll('.rd-result [data-rd-tab]')].map((b) => b.dataset.rdTab),
+    [...rd.querySelectorAll('.rd-tab')].map((b) => b.dataset.sec), 'one row per tab, in the tab bar\'s order');
+  // The details header names what runs and never counts steps.
+  assert.doesNotMatch(rd.querySelector('.rd-meta').textContent, /\d+\/\d+ done/);
+});
+
+test('before the first step: the glance names the preflight and its stage, and the clock ticks', async () => {
+  const ctx = await bootRunning();
+  // The harness's shape: the bookend row is open, its clock a number (Date.now()).
+  const preflight = { key: 'x:preflight:1', executionId: 'x:preflight:1', nodeId: 'preflight', ordinal: 1, cycle: 1,
+    kind: 'cycle', status: 'start', startedAt: new Date(Date.now() - 42000).toISOString(), activeMs: 0, runningSince: Date.now() - 42000 };
+  const rd = await openGlance(ctx, 'running/r1', { active: [], steps: [preflight], totalCostUsd: 0, setupStage: 'Building the knowledge graph' });
+  assert.equal(rd.querySelector('.rd-now-title').textContent, 'Running');
+  assert.equal(rd.querySelector('.rd-now-sub').textContent, 'Preflight · Building the knowledge graph');
+  assert.equal(rd.querySelector('.rd-nowlist').textContent, '', 'preflight is not a workflow step: no Now row');
+  const time = rd.querySelector('.rd-facts b.run-time');
+  assert.ok(time, 'the time tile ticks during preflight');
+  assert.match(time.textContent, /^4\ds$/, 'the preflight counts toward the run\'s time');
+
+  // The stage moves on; then the preflight ends and the first step takes the line.
+  frame(ctx, { type: 'state', runId: 'r1', status: 'running', steps: [preflight], setupStage: 'Preparing the agents' });
+  await settle(ctx.window, 3);
+  assert.equal(rd.querySelector('.rd-now-sub').textContent, 'Preflight · Preparing the agents');
+  frame(ctx, { type: 'state', runId: 'r1', status: 'running', setupStage: null, active: [{ nodeId: 'n_plan', executionId: 'x:n_plan:1' }],
+    steps: [{ ...preflight, status: 'done', runningSince: null, activeMs: 42000 },
+      { key: 'x:n_plan:1', executionId: 'x:n_plan:1', nodeId: 'n_plan', ordinal: 1, cycle: 1, kind: 'cycle', status: 'start', startedAt: new Date().toISOString(), activeMs: 0, runningSince: Date.now() }] });
+  await settle(ctx.window, 3);
+  assert.equal(rd.querySelector('.rd-now-sub').textContent, 'Step: Plan');
+});
+
+test('Details is a route: a tab row and a Now row open it; Escape and ‹ Run come back', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  const rd = await openGlance(ctx);
+  click(window, rd.querySelector('.rd-result [data-rd-tab="workflow"]'));
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle(window, 4);
+  assert.equal(window.location.hash, '#running/r1/details/workflow');
+  assert.equal(rd.dataset.mode, 'details');
+  assert.equal(rd.querySelector('.rd-details').hidden, false);
+  assert.equal(rd.querySelector('.rd-glance').hidden, true);
+  assert.equal(rd.querySelector('.rd-to-run').hidden, false);
+  assert.equal(rd.querySelector('.rd-back').hidden, true);
+  assert.ok(tabOf(window, 'workflow').classList.contains('active'), 'the row\'s tab is open');
+  assert.ok(secOf(window, 'workflow').querySelector('.rd-graph .run-flow'), 'the graph lives in Workflow');
+  assert.equal(rd.querySelector('.rd-mini'), null, 'no bottom bar: the shared bar carries the way back');
+
+  // Escape: Details -> glance (same run), then glance -> the list.
+  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle(window, 4);
+  assert.equal(window.location.hash, '#running/r1');
+  assert.equal(rd.dataset.mode, 'glance');
+
+  // A Now row deep-links to its tab; "‹ Run" returns.
+  click(window, rd.querySelector('.rd-nowlist [data-rd-tab="workflow"]'));
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle(window, 4);
+  assert.equal(window.location.hash, '#running/r1/details/workflow');
+  click(window, rd.querySelector('.rd-to-run'));
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle(window, 4);
+  assert.equal(rd.dataset.mode, 'glance');
+  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle(window, 4);
+  assert.equal(window.location.hash, '#running');
+});
+
+test('a finished run: its headline, the facts, what to check, Create pull request', async () => {
+  const results = {
+    summary: { filesNew: 1, filesChanged: 1, filesDeleted: 0, linesAdded: 12, linesRemoved: 3, blockingIssues: 1, nitpicks: 0 },
+    newFiles: [{ path: 'src/limiter.js', status: 'A', added: 10, removed: 0 }],
+    changedFiles: [{ path: 'src/upload.js', status: 'M', added: 2, removed: 3, issues: [] }],
+    keyThingsToCheck: [{ id: 'c1', severity: 'major', title: 'Unauthenticated uploads fall back to IP' }],
+    nitpicks: [],
+  };
+  const row = { ...HISTORY_ROW, id: 'p1', survived: true, branch: 'worca-cc/dark-p1', sourceBranch: 'main', pr: null };
+  const ctx = await boot({
+    fetchHandler: (url) => {
+      if (url.endsWith('/api/history/pr')) return ok({ ok: true });
+      if (url.endsWith('/api/history')) return ok({ pipelines: [row], ghAvailable: true });
+      if (url.endsWith('/api/budget')) return ok(okBudget());
+      if (url.includes('/api/runs/p1?projectDir=')) return ok({ state: { status: 'done' }, results, clarify: { questions: [], answers: [] } });
+      return null;
+    },
+  });
+  frame(ctx, { type: 'hello', runs: [] });
+  await settle(ctx.window, 6);
+  const { window } = ctx;
+  const rd = await openGlance(ctx);
+  frame(ctx, { type: 'done', runId: 'r1', status: 'done' });
+  await settle(window, 10);
+  assert.equal(rd.dataset.glance, 'done');
+  // No PR yet and one could be opened: the review decides the headline and its glyph.
+  assert.equal(rd.querySelector('.rd-now-title').textContent, 'Ready to review');
+  assert.equal(rd.querySelector('.rd-now-sub').textContent, '1 thing to check before you open a pull request');
+  assert.ok(rd.querySelector('.rd-orb .rg-orb-review'), 'the review glyph, not a tick');
+  // Time · Cost · Changes, each labelled once.
+  const facts = rd.querySelector('.rd-facts .rd-stats');
+  assert.equal(facts.children.length, 3);
+  assert.deepEqual([...facts.querySelectorAll('div > span')].map((s) => s.textContent), ['time', 'cost', '2 files changed']);
+  assert.match(facts.textContent, /\+12/);
+  const result = rd.querySelector('.rd-result');
+  assert.equal(result.hidden, false);
+  assert.match(result.querySelector('.issues').textContent, /Unauthenticated uploads/);
+  assert.equal(result.querySelector('[data-rd-tab="diff"] .rd-srow-v').textContent, '2 files');
+  const pr = result.querySelector('.rd-create-pr');
+  assert.ok(pr, 'an eligible run offers Create pull request');
+  assert.equal(pr.textContent, 'Create pull request');
+  assert.equal(result.querySelector('.rd-follow-up').textContent, 'Start a follow-up run');
+  click(window, pr);
+  assert.equal(window.location.hash, `#history/${KEY}/p1`, 'it hands over to the ship-it flow');
+});
+
+test('Details › Diff reads the live worktree while the run goes', async () => {
+  const patch = 'diff --git a/src/limiter.js b/src/limiter.js\nnew file mode 100644\n--- /dev/null\n+++ b/src/limiter.js\n@@ -0,0 +1,2 @@\n+export const a = 1;\n+export const b = 2;\n';
+  const ctx = await boot({
+    fetchHandler: (url) => {
+      if (url.endsWith('/api/runs/r1/live-diff')) {
+        return ok({ results: { summary: { filesNew: 1, filesChanged: 0, linesAdded: 2, linesRemoved: 0 },
+          newFiles: [{ path: 'src/limiter.js', status: 'A', added: 2, removed: 0 }], changedFiles: [] }, patch, untrackedCapped: false });
+      }
+      if (url.endsWith('/api/history')) return ok({ pipelines: [], ghAvailable: false });
+      if (url.endsWith('/api/budget')) return ok(okBudget());
+      return null;
+    },
+  });
+  frame(ctx, { type: 'hello', runs: [] });
+  await settle(ctx.window, 6);
+  const { window } = ctx;
+  await openGlance(ctx, 'running/r1/details/diff');
+  await settle(window, 8);
+  const sec = secOf(window, 'diff');
+  assert.equal(sec.hidden, false);
+  assert.match(sec.querySelector('.rd-diff-note').textContent, /^Live:/);
+  assert.equal(sec.querySelector('.rd-diff-refresh').hidden, false, 'a live diff refreshes on demand');
+  assert.deepEqual([...sec.querySelectorAll('.rd-diff-row-path')].map((n) => n.textContent), ['src/limiter.js']);
+  assert.equal(sec.querySelectorAll('.hd-dl-row.hd-dl-add').length, 2, 'the patch lines render');
+  assert.equal(tabOf(window, 'diff').querySelector('.rd-tab-badge').textContent, '1');
+  assert.equal(ctx.calls.filter((c) => c.url.endsWith('/live-diff')).length, 1, 'fetched once, not per frame');
+  frame(ctx, { type: 'state', runId: 'r1', id: 'p1', status: 'running', stepper: GLANCE_MANIFEST, steps: GLANCE_STEPS() });
+  await settle(window, 4);
+  assert.equal(ctx.calls.filter((c) => c.url.endsWith('/live-diff')).length, 1);
+});
+
+// --- Live view: the fogged focus graph beside the glance card ---------------
+
+const LIVE_KEY = 'worca-cc.run.liveView';
+const liveParts = (rd) => ({
+  glance: rd.querySelector('.rd-glance'),
+  sw: rd.querySelector('.rd-live-switch'),
+  row: rd.querySelector('.rd-live-row'),
+  panel: rd.querySelector('.rd-live'),
+  world: () => rd.querySelector('.rd-live .run-flow .gv-world'),
+});
+
+test('the card head: the status line top left, the Live view switch top right (History keeps the same head)', async () => {
+  const ctx = await bootRunning();
+  const rd = await openGlance(ctx);
+  const head = rd.querySelector('.rd-glance > .rd-sheet > .rd-sheet-head');
+  assert.equal(head, rd.querySelector('.rd-glance > .rd-sheet').firstElementChild, 'the head opens the card');
+  assert.ok(head.firstElementChild.classList.contains('rd-now-top'), 'the status line on the left');
+  assert.ok(head.lastElementChild.classList.contains('rd-live-row'), 'the Live view switch on the right');
+  assert.equal(head.lastElementChild.hidden, false);
+  assert.equal(rd.querySelector('.rd-glance > .rd-now .rd-now-top'), null, 'nothing of the status above the card');
+  assert.match(css, /\.rd-sheet-head\{[^}]*justify-content:space-between/, 'the two ends of one row');
+  const hist = ctx.window.document.querySelector('#hist-detail-tpl').content;
+  assert.ok(hist.querySelector('.hd-glance > .rd-sheet > .rd-sheet-head:first-child > .rd-now-top'), 'History: the status line opens its card too');
+});
+
+test('Live view: off by default; the switch mounts the focus graph beside the card and remembers it', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  const rd = await openGlance(ctx);
+  const p = liveParts(rd);
+  assert.ok(p.sw, 'a Live view switch on the card');
+  assert.equal(p.row.hidden, false, 'shown on a live run');
+  assert.equal(p.sw.getAttribute('role'), 'switch');
+  assert.equal(p.sw.getAttribute('aria-checked'), 'false');
+  assert.equal(p.panel.hidden, true, 'off by default');
+  assert.equal(p.world(), null, 'no graph is built while off');
+
+  click(window, p.sw);
+  await settle(window);
+  assert.equal(p.sw.getAttribute('aria-checked'), 'true');
+  assert.equal(p.glance.dataset.live, 'on', 'the glance opens its second column');
+  assert.equal(p.panel.hidden, false);
+  assert.ok(p.panel.classList.contains('is-in'), 'the panel animates in');
+  assert.ok(p.world(), 'the focus graph is mounted');
+  assert.ok(rd.querySelector('.rd-live .run-flow-wrap').classList.contains('gv-wrap-focus'));
+  assert.equal(window.localStorage.getItem(LIVE_KEY), '1', 'the choice is remembered');
+});
+
+test('Live view: switching off animates out first, then drops the graph (transitionend or a timeout)', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  const rd = await openGlance(ctx);
+  const p = liveParts(rd);
+  click(window, p.sw);
+  await settle(window);
+
+  click(window, p.sw);
+  await settle(window);
+  assert.equal(p.sw.getAttribute('aria-checked'), 'false');
+  assert.equal(window.localStorage.getItem(LIVE_KEY), null);
+  assert.equal(p.panel.classList.contains('is-in'), false, 'the exit transition starts');
+  assert.equal(p.panel.hidden, false, 'still on screen while it animates out');
+  assert.ok(p.world(), 'the graph lives until the exit ends');
+  p.panel.dispatchEvent(new window.Event('transitionend'));
+  assert.equal(p.panel.hidden, true);
+  assert.equal(p.world(), null, 'the mount is destroyed');
+  assert.equal(p.glance.dataset.live, undefined, 'the card goes back to the middle');
+
+  // No transitionend (a background tab, a cancelled transition): the timeout finishes it.
+  click(window, p.sw);
+  await settle(window);
+  click(window, p.sw);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(p.panel.hidden, true);
+  assert.equal(p.world(), null);
+});
+
+test('Live view: switching back on mid-exit keeps the same graph', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  const rd = await openGlance(ctx);
+  const p = liveParts(rd);
+  click(window, p.sw);
+  await settle(window);
+  const world = p.world();
+  click(window, p.sw);
+  click(window, p.sw);
+  await settle(window);
+  assert.ok(p.panel.classList.contains('is-in'));
+  p.panel.dispatchEvent(new window.Event('transitionend'));   // the reversed exit's end
+  assert.equal(p.panel.hidden, false, 'an exit that was reversed never hides the panel');
+  assert.equal(p.world(), world, 'no rebuild');
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(p.world(), world, 'nor does the old timeout');
+});
+
+test('Live view: a remembered choice opens with the page; a click on the panel opens Workflow', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  window.localStorage.setItem(LIVE_KEY, '1');
+  const rd = await openGlance(ctx);
+  const p = liveParts(rd);
+  assert.equal(p.sw.getAttribute('aria-checked'), 'true');
+  assert.equal(p.panel.hidden, false);
+  assert.ok(p.world());
+  click(window, p.panel);
+  assert.equal(window.location.hash, '#running/r1/details/workflow');
+  // The panel is ONE control: the graph's cards and chevrons are neither tab stops nor targets.
+  assert.equal(p.panel.getAttribute('role'), 'button');
+  assert.ok(p.panel.querySelector('.rd-live-clip').hasAttribute('inert'), 'the graph inside is inert');
+});
+
+test('Live view: a finished run hides the switch and lets the panel animate out', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  window.localStorage.setItem(LIVE_KEY, '1');
+  const rd = await openGlance(ctx);
+  const p = liveParts(rd);
+  frame(ctx, { type: 'done', runId: 'r1', status: 'done' });
+  await settle(window, 6);
+  assert.equal(p.row.hidden, true, 'no switch on a finished run: Workflow has the whole graph');
+  assert.equal(p.panel.classList.contains('is-in'), false);
+  p.panel.dispatchEvent(new window.Event('transitionend'));
+  assert.equal(p.panel.hidden, true);
+  assert.equal(p.world(), null);
+  assert.equal(window.localStorage.getItem(LIVE_KEY), '1', 'the choice outlives the run');
+});
+
+test('Live view: with reduced motion the panel goes at once', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  window.matchMedia = (q) => ({ matches: /prefers-reduced-motion/.test(q), addEventListener() {}, removeEventListener() {} });
+  const rd = await openGlance(ctx);
+  const p = liveParts(rd);
+  click(window, p.sw);
+  await settle(window);
+  click(window, p.sw);
+  assert.equal(p.panel.hidden, true, 'no exit to wait for');
+  assert.equal(p.world(), null);
+});
+
+test('Live view CSS: the two-column layout never outranks [hidden] (Details must replace the glance)', () => {
+  // `.rd-glance[hidden]{display:none}` and `.rd-glance[data-live="on"]{display:grid}` weigh the same,
+  // and the later one wins: with Live view on, opening Details left the glance on screen above it.
+  const rules = [...css.matchAll(/([^{}]*\.rd-glance\[data-live="on"\][^{}]*)\{([^{}]*)\}/g)]
+    .filter(([, , body]) => /(^|;)\s*display\s*:/.test(body));
+  assert.ok(rules.length, 'the wide layout sets display somewhere');
+  for (const [, sel] of rules) assert.match(sel, /:not\(\[hidden\]\)/, `${sel.trim()} must skip a hidden glance`);
+});
+
+test('Live view CSS: two columns when the page is wide, a fog mask, and no motion when reduced', () => {
+  assert.match(css, /\.rd-glance\[data-live="on"\]/, 'the on state has its own layout');
+  assert.match(css, /@container rd \(min-width:/, 'side by side follows the page area, not the window');
+  assert.match(css, /\.rd-live[^{]*\{[^}]*mask-image:radial-gradient/, 'the fog');
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)\{[^}]*\.rd-live/, 'reduced motion drops the animation');
 });

@@ -427,11 +427,6 @@ export function readAttachmentRaw(threadId, id) {
   }
 }
 
-export function threadAttachmentBytes(threadId) {
-  getDb();
-  return prepare('SELECT COALESCE(SUM(bytes), 0) AS n FROM ask_attachments WHERE thread_id = ?').get(threadId).n;
-}
-
 // ── run links ───────────────────────────────────────────────────────────────
 
 export function linkRun(threadId, { runId, cardId = null, pipelineId = null, status = null, phase = null } = {}) {

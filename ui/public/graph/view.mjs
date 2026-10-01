@@ -599,9 +599,15 @@ export function createGraphView(host, {
   /** MODEL bounds (no DOM measure): the shared `graphBounds` over the rendered
    *  template, with this view's footer rows (only the view knows them), UNIONED
    *  with the routed wire vertices — a backward detour or a lane offset leaves
-   *  the card union, and a fit must never clip it (D9). */
-  function bounds(pad = 0) {
+   *  the card union, and a fit must never clip it (D9). `ids` narrows it to those
+   *  cards alone (the glance's Live view frames the running steps, not the wires). */
+  function bounds(pad = 0, ids = null) {
     if (!current || !current.nodes.length) return null;
+    if (Array.isArray(ids)) {
+      const only = new Set(ids);
+      const nodes = current.nodes.filter((n) => n && only.has(n.id));
+      return graphBounds({ ...current, nodes }, portsAt, { pad, footerRowsOf: (n) => footers.get(n.id) || 0, ...geo });
+    }
     const base = graphBounds(current, portsAt, { pad: 0, footerRowsOf: (n) => footers.get(n.id) || 0, ...geo });
     if (!base) return null;
     let x0 = base.x; let y0 = base.y; let x1 = base.x + base.w; let y1 = base.y + base.h;

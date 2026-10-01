@@ -166,7 +166,10 @@ function calloutWidget(item, ctx) {
   const box = h(ctx.doc, 'div', `af-callout af-${tone}`);
   box.appendChild(icon(ctx.doc, ICON_INFO, 16));
   const body = h(ctx.doc, 'div', 'af-callout-body');
-  if (item.title) body.appendChild(h(ctx.doc, 'b', '', item.title));
+  if (item.title) {
+    body.appendChild(h(ctx.doc, 'b', '', item.title));
+    body.appendChild(ctx.doc.createTextNode(' '));
+  }
   body.appendChild(ctx.doc.createTextNode(String(bound(item, ctx) ?? item.text ?? '')));
   box.appendChild(body);
   return box;

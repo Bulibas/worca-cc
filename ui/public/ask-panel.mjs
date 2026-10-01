@@ -5,6 +5,7 @@
 // innerHTML for content anywhere in this file (the markdown renderer owns the
 // only sanitized-HTML path).
 import { openScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
+import { chooseSyncRefusal, sourceRefNote } from './branch-sync.mjs';
 import { formatInstant, describeRule } from '../../src/shared/schedule/recurrence.mjs';
 import { createThreadModel } from './ask-model.mjs';
 import { credentialBadge } from './credential-badges.mjs';
@@ -32,7 +33,12 @@ const ICONS = {
   chevronDown: 'M6 9l6 6 6-6',
   send: 'M12 19V5M6 11l6-6 6 6',
   down: 'M12 5v14M6 13l6 6 6-6',
+  mic: ['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M19 11a7 7 0 0 1-14 0', 'M12 18v3'],
+  voiceTalk: ['M7.9 20A9 9 0 1 0 4 16.1L2 22z', 'M8 10h8M8 14h5'],           // chat bubble with text lines: speak in, read the reply
+  voiceHandsFree: ['M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4'],               // waveform: a live conversation
 };
+// One icon per voice mode; the mic button and the ▾ menu both draw from this.
+const VOICE_MODE_ICONS = { dictate: ICONS.mic, talk: ICONS.voiceTalk, handsfree: ICONS.voiceHandsFree };
 
 export function fmtTokens(n) {
   if (!Number.isFinite(n) || n <= 0) return null;
@@ -165,7 +171,7 @@ const PILL_MORPH_IN_MS = 520;
 const PILL_MORPH_OUT_MS = 800;
 const PILL_SETTLE_FALLBACK_MS = PILL_MORPH_OUT_MS + 150;
 
-export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null }) {
+export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null, createVoice = null, voiceLongPressMs = 500 }) {
   const homePick = browserPick();         // hoisted declaration (defined below)
   const st = {
     open: false,
@@ -205,6 +211,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     resyncing: false,
     firstOpenDone: false,
     destroyed: false,
+    voice: null,              // the voice controller (ask-voice.mjs), made on first mic use — docs/speech.md
+    voicePendingSend: false,  // a hands-free transcript waiting for the live turn to end (barge-in)
+    voiceLongPress: null,     // the mic's long-press timer
+    voiceSwallowClick: false, // the click that ends a long-press must not also start dictation
     lastAnswerRender: 0,
     rowEls: null,
     seenRows: new Set(),      // message ids the transcript has already shown — see renderTranscript
@@ -413,6 +423,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     el.jump.addEventListener('click', jumpToLatest);
     sheet.appendChild(el.jump);
     for (const edge of ['n', 'e', 'w', 'ne', 'nw']) sheet.appendChild(buildResizeHandle(edge));
+    sheet.appendChild(buildDropTarget(sheet));
     dock.appendChild(sheet);
     dock.appendChild(pill);
     el.pill = pill;
@@ -422,7 +433,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   }
 
   // Mirrors src/core/ask/attachment-kind.mjs + limits.mjs (#398): text kinds are
-  // UTF-8 capped at 512 KB, binary kinds (images + PDF) at 5 MB; the server
+  // UTF-8 capped at 512 KB, binary kinds (images + PDF) at 32 MB, 48 MB per message; the server
   // re-validates everything, these are just early clear messages.
   const ASK_ATTACH_EXT = ['.md', '.markdown', '.txt', '.json', '.csv', '.log', '.html', '.htm'];
   const ASK_ATTACH_BINARY = {
@@ -430,8 +441,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     '.gif': 'image/gif', '.webp': 'image/webp', '.pdf': 'application/pdf',
   };
   const ASK_MAX_TEXT_BYTES = 524_288;
-  const ASK_MAX_BINARY_BYTES = 5 * 1024 * 1024;
-  const ASK_MAX_THREAD_BYTES = 25 * 1024 * 1024;
+  const ASK_MAX_BINARY_BYTES = 32 * 1024 * 1024;
+  const ASK_MAX_MESSAGE_BYTES = 48 * 1024 * 1024;
 
   function bytesToBase64(bytes) {
     let bin = '';
@@ -482,9 +493,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       if (f.size > cap) { setComposerMsg(`attachment over ${cap} bytes: ${name}`); continue; }
       const others = st.pendingFiles.filter((p) => p.name !== name); // dedupe by name, newest wins
       if (others.length >= 8) { setComposerMsg('at most 8 attachments per message'); continue; }
-      const serverBytes = st.model ? st.model.attachmentsBytes() : 0;
       const pendingBytes = others.reduce((n, p) => n + p.bytes, 0);
-      if (serverBytes + pendingBytes + f.size > ASK_MAX_THREAD_BYTES) { setComposerMsg('attachment budget for this thread exceeded'); continue; }
+      if (pendingBytes + f.size > ASK_MAX_MESSAGE_BYTES) { setComposerMsg(`attachments over ${ASK_MAX_MESSAGE_BYTES} bytes per message`); continue; }
       let dataBase64 = '';
       try {
         dataBase64 = bytesToBase64(new Uint8Array(await f.arrayBuffer()));
@@ -493,6 +503,83 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       st.pendingFiles = [...others, { name, bytes: f.size, dataBase64, attKind, mime: binMime || null }];
     }
     renderChips();
+  }
+
+  // Drag-and-drop and paste feed the same addFiles() as the "+" button: no
+  // validation of their own. Only drags that carry files are touched, so text
+  // and element drags (widgets-input.mjs list reordering) keep their defaults.
+  const carriesFiles = (dt) => !!dt && Array.from(dt.types || []).includes('Files');
+
+  /**
+   * The whole sheet is the drop target. dragenter/dragleave fire on every child
+   * crossed (enter on the new child lands before leave on the old one), so a
+   * depth counter — not the event target — decides when the pointer really left;
+   * drop and dragend reset it outright.
+   */
+  function buildDropTarget(sheet) {
+    const overlay = make('div', 'ask-drop');
+    overlay.setAttribute('data-ask-drop', '');
+    overlay.setAttribute('aria-hidden', 'true');
+    overlay.hidden = true;
+    overlay.appendChild(make('span', 'ask-drop-label', 'Drop files to attach'));
+    let depth = 0;
+    const show = (on) => { overlay.hidden = !on; };
+    const reset = () => { depth = 0; show(false); };
+    sheet.addEventListener('dragenter', (e) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      depth += 1;
+      show(true);
+    });
+    sheet.addEventListener('dragover', (e) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    });
+    sheet.addEventListener('dragleave', (e) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      depth = Math.max(0, depth - 1);
+      if (!depth) show(false);
+    });
+    sheet.addEventListener('drop', (e) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      reset();
+      addFiles(e.dataTransfer.files);
+    });
+    sheet.addEventListener('dragend', reset);
+    return overlay;
+  }
+
+  // A clipboard image is named "image.png" (or nothing) by the browser: every
+  // paste would then replace the last one through addFiles' name dedupe. Such
+  // files get a unique "pasted-<timestamp>.<ext>"; real copied files keep theirs.
+  // A nameless file of an unlisted non-text type gets no extension, so addFiles
+  // rejects it like the "+" button would.
+  let lastPasteStamp = 0;
+  function namePastedFiles(files) {
+    return [...files].map((f) => {
+      const name = String(f.name || '');
+      if (name && !/^image\.[a-z0-9]+$/i.test(name)) return f;
+      const dot = name.lastIndexOf('.');
+      const type = String(f.type || '');
+      const ext = dot >= 0 ? name.slice(dot).toLowerCase()
+        : (Object.keys(ASK_ATTACH_BINARY).find((k) => ASK_ATTACH_BINARY[k] === type)
+          || (type.startsWith('text/') ? '.txt' : ''));
+      lastPasteStamp = Math.max(Date.now(), lastPasteStamp + 1);
+      return new win.File([f], `pasted-${lastPasteStamp}${ext}`, { type: f.type });
+    });
+  }
+
+  function onComposerPaste(e) {
+    const cd = e.clipboardData;
+    if (!cd || !cd.files || !cd.files.length) return; // a text paste goes ahead natively
+    // Excel/Word/browser copies carry the text plus a rendered image of it: the
+    // text is what was meant. Screenshots (no text) and real files still attach.
+    const text = typeof cd.getData === 'function' ? cd.getData('text/plain') : '';
+    if (text && [...cd.files].every((f) => String(f.type || '').startsWith('image/'))) return;
+    e.preventDefault();
+    addFiles(namePastedFiles(cd.files));
   }
 
   function updateSendStop() {
@@ -574,11 +661,156 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       .catch(() => { /* the turn will end via its own frames */ });
   }
 
+  // ---- voice mode (docs/speech.md) ------------------------------------------
+  // One mic: click = one-shot dictation (text lands in the composer, not sent);
+  // long-press or the caret menu = hands-free (listen → send → speak → listen).
+  // The controller (ask-voice.mjs) owns audio; the panel owns the composer, the
+  // turn and the lifecycle (voice off on close / New chat / switch / destroy).
+  const VOICE_LABELS = { loading: 'Starting mic…', listening: 'Listening…', transcribing: 'Transcribing…', thinking: 'Thinking…', speaking: 'Speaking…', error: 'Voice error' };
+
+  function buildVoiceControls() {
+    const wrap = make('span', 'ask-voice');
+    el.voiceStatus = make('span', 'ask-voice-status');
+    el.voiceStatus.hidden = true;
+    el.voiceStatus.setAttribute('role', 'status');
+    wrap.appendChild(el.voiceStatus);
+
+    el.mic = make('button', 'ask-voice-mic');
+    el.mic.type = 'button';
+    el.mic.setAttribute('data-ask-mic', '');
+    el.mic.setAttribute('aria-pressed', 'false');
+    el.mic.setAttribute('aria-label', 'Voice input');
+    el.mic.addEventListener('pointerdown', (ev) => {
+      if (ev.button !== undefined && ev.button !== 0) return;
+      st.voiceSwallowClick = false;                 // a long-press that never produced a click must not eat the next one
+      clearTimeout(st.voiceLongPress);
+      st.voiceLongPress = setTimeout(() => {
+        st.voiceLongPress = null;
+        st.voiceSwallowClick = true;
+        toggleHandsFree();
+      }, voiceLongPressMs);
+    });
+    const cancelPress = () => { if (st.voiceLongPress) { clearTimeout(st.voiceLongPress); st.voiceLongPress = null; } };
+    el.mic.addEventListener('pointerup', cancelPress);
+    el.mic.addEventListener('pointerleave', cancelPress);
+    el.mic.addEventListener('click', () => {
+      if (st.voiceSwallowClick) { st.voiceSwallowClick = false; return; }
+      const v = voice();
+      if (v.active()) { stopVoice(); return; }
+      startVoice(lastVoiceMode());
+    });
+    paintMicMode(lastVoiceMode());
+    wrap.appendChild(el.mic);
+
+    const caret = make('button', 'ask-voice-caret');
+    caret.type = 'button';
+    caret.setAttribute('data-ask-voice-caret', '');
+    caret.setAttribute('aria-label', 'Voice options');
+    caret.title = 'Voice options';
+    caret.appendChild(svgIcon(ICONS.chevronDown, 11, 2));
+    caret.addEventListener('click', () => openVoicePopover(caret));
+    wrap.appendChild(caret);
+    return wrap;
+  }
+
+  function openVoicePopover(trigger) {
+    openPopover({ panelClass: 'ask-pop-voice', trigger, build: (p) => {
+      p.appendChild(make('div', 'ask-pop-caption', 'Voice'));
+      // The check marks the mode that is on now, or, with voice off, the one a click will start.
+      const v = st.voice;
+      const current = v && v.active() ? v.mode() : lastVoiceMode();
+      const item = (label, mode, onPick) => {
+        const it = menuItem('ask-voice-item', () => { closePopover({ focusTrigger: false }); onPick(); });
+        it.dataset.mode = mode;
+        if (VOICE_MODE_ICONS[mode]) it.appendChild(svgIcon(VOICE_MODE_ICONS[mode], 16, 1.9));
+        it.appendChild(make('span', 'ask-model-name', label));
+        if (mode === current) it.appendChild(make('span', 'ask-model-check', '✓'));
+        return it;
+      };
+      p.appendChild(item('Dictate once', 'dictate', () => startVoice('dictate')));
+      p.appendChild(item('Talk, read the replies', 'talk', () => startVoice('talk')));
+      p.appendChild(item('Hands-free conversation', 'handsfree', () => startVoice('handsfree')));
+      if (st.voice && st.voice.active()) p.appendChild(item('Turn voice off', 'off', () => stopVoice()));
+    } });
+  }
+
+  function voice() {
+    if (!st.voice) {
+      st.voice = createVoice({
+        onState: paintVoice,
+        onTranscript: voiceTranscript,
+        onBargeIn: () => { if (st.model && st.model.live()) stopTurn(); },
+        onNotice: (msg) => setComposerMsg(msg),
+      });
+    }
+    return st.voice;
+  }
+
+  const VOICE_USED_KEY = 'worca-cc.ask.voiceUsed';
+  function voiceUsedBefore() { try { return storage.getItem(VOICE_USED_KEY) === '1'; } catch { return false; } }
+
+  // The mode a plain click starts: the last one started (menu, hold or click), remembered across
+  // reloads. Dictate until the user picks another.
+  const VOICE_MODE_KEY = 'worca-cc.ask.voiceMode';
+  const VOICE_MODE_NAMES = { dictate: 'Dictate once', talk: 'Talk, read the replies', handsfree: 'Hands-free conversation' };
+  function lastVoiceMode() {
+    try { const m = storage.getItem(VOICE_MODE_KEY); if (m && VOICE_MODE_NAMES[m]) return m; } catch { /* default */ }
+    return 'dictate';
+  }
+  function paintMicMode(shown) {
+    if (!el.mic) return;
+    el.mic.replaceChildren(svgIcon(VOICE_MODE_ICONS[shown] || ICONS.mic, 16, 1.9));
+    el.mic.title = `${VOICE_MODE_NAMES[lastVoiceMode()]} (click) · hands-free conversation (hold) · other modes (the arrow menu)`;
+  }
+  function startVoice(mode) {
+    if (st.destroyed) return;
+    try { storage.setItem(VOICE_MODE_KEY, mode); } catch { /* sticky is a nicety */ }
+    paintMicMode(mode);
+    voice().start(mode);
+  }
+  function toggleHandsFree() { const v = voice(); if (v.active() && v.mode() === 'handsfree') stopVoice(); else startVoice('handsfree'); }
+  function stopVoice() { st.voicePendingSend = false; if (st.voice && st.voice.active()) st.voice.stop(); }
+
+  function paintVoice(state, { mode, detail } = {}) {
+    if (!el.mic) return;
+    const on = state !== 'off' && state !== 'error';
+    paintMicMode(on && mode ? mode : lastVoiceMode());
+    el.mic.setAttribute('aria-pressed', on ? 'true' : 'false');
+    el.mic.classList.toggle('is-on', on);
+    el.mic.classList.toggle('is-handsfree', on && (mode === 'handsfree' || mode === 'talk'));
+    el.mic.classList.toggle('is-error', state === 'error');
+    el.voiceStatus.hidden = state === 'off';
+    el.voiceStatus.dataset.state = state;
+    el.voiceStatus.textContent = (state === 'loading' && detail) || VOICE_LABELS[state] || '';
+    if (state === 'error') { setComposerMsg(detail || 'voice stopped'); st.voicePendingSend = false; }
+    if (state === 'listening' || state === 'speaking' || state === 'error') announce(VOICE_LABELS[state]);
+    if (state === 'listening' && !voiceUsedBefore()) { try { storage.setItem(VOICE_USED_KEY, '1'); } catch { /* preload is a nicety */ } }
+  }
+
+  function voiceTranscript(text, { autoSend } = {}) {
+    const cur = el.input.value;
+    el.input.value = cur && !/\s$/.test(cur) ? `${cur} ${text}` : `${cur}${text}`;
+    fitInput();                                   // a programmatic write fires no input event
+    if (!autoSend) { focusComposer(); return; }
+    // A live (or loaded-but-not-yet-adopted, inFlight) turn: send once it ends. This covers barge-in.
+    if (st.sending || (st.model && (st.model.live() || st.model.inFlight()))) { st.voicePendingSend = true; return; }
+    voiceSend();
+  }
+
+  function voiceSend() {
+    Promise.resolve()
+      .then(() => sendMessage())
+      .catch(() => false)                          // sendMessage can throw on a malformed response body
+      .then((ok) => {
+        if (!ok && st.voice && st.voice.active()) st.voice.fail(el.composerMsg.hidden ? 'the message was not sent' : el.composerMsg.textContent);
+      });
+  }
+
   async function sendMessage() {
-    if (st.sending || st.destroyed) return;
-    if (st.model && st.model.live()) return; // a turn is streaming — the stop button is showing
+    if (st.sending || st.destroyed) return false;
+    if (st.model && st.model.live()) return false; // a turn is streaming — the stop button is showing
     const text = el.input.value.trim();
-    if (!text) return;
+    if (!text) return false;
     st.sending = true;
     setComposerMsg(null);
     updateSendStop();      // the pill lights the moment the user sends; Send/Stop do not move (nothing streams yet)
@@ -589,7 +821,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         try {
           r = await fetch('/api/ask/threads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
         } catch { r = null; }
-        if (!r || (r.status !== 201 && !r.ok)) { setComposerMsg('could not create the thread'); return; }
+        if (!r || (r.status !== 201 && !r.ok)) { setComposerMsg('could not create the thread'); return false; }
         const body = await r.json();
         id = body.thread.id;
         loadGen += 1;                     // a pending loadThread() must not replace this fresh model
@@ -611,16 +843,16 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       let res = null;
       try {
         res = await fetch(`/api/ask/threads/${id}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      } catch { setComposerMsg('network error — the message was not sent'); return; }
+      } catch { setComposerMsg('network error — the message was not sent'); return false; }
       // The user may have clicked New chat or switched threads during the POST: the
       // message is on the server and arrives with its thread; touching the composer
       // or the (now different or null) model here would be wrong (review of PR #376).
-      if (st.destroyed || st.model !== model || st.threadId !== id) return;
+      if (st.destroyed || st.model !== model || st.threadId !== id) return false;
       if (!res || res.status !== 202) {
         let msg = `request failed (${res ? res.status : 'network'})`;
         try { const b = await res.json(); if (b && b.error) msg = b.error; } catch { /* keep the fallback */ }
         setComposerMsg(msg);
-        return;
+        return false;
       }
       const { userMessageId, attachments: stored } = await res.json();
       // Prefer the server's rows: they carry the store-minted ids that key the
@@ -639,6 +871,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       subscribe(id);
       st.pinned = true;
       scheduleFlush();
+      return true;
     } finally {
       st.sending = false;
       updateSendStop();
@@ -666,6 +899,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); }
     });
     el.input.addEventListener('input', fitInput);
+    el.input.addEventListener('paste', onComposerPaste);
     box.appendChild(el.input);
 
     el.composerMsg = make('div', 'ask-composer-msg');
@@ -755,6 +989,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     el.send.setAttribute('aria-label', 'Send');
     el.send.appendChild(svgIcon(ICONS.send, 15, 2.2));
     el.send.addEventListener('click', sendMessage);
+    if (createVoice) row.appendChild(buildVoiceControls());
     row.appendChild(el.send);
 
     el.stop = make('button', 'ask-stop');
@@ -800,6 +1035,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     focusComposer();
     scheduleFlush();
     repaintProgressCards({ hydrate: true });
+    if (createVoice && voiceUsedBefore()) voice().preload();   // the mic is ready by the time it is clicked
   }
 
   /**
@@ -822,6 +1058,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
   function closeSheet() {
     if (!st.open) return;
+    stopVoice();
     closePopover({ focusTrigger: false });
     st.open = false;
     el.sheet.hidden = true;
@@ -1711,6 +1948,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
   // ---- thread actions -------------------------------------------------------
   function newThread() {
+    stopVoice();
     loadGen += 1;                       // a load still in flight must not resurrect the old thread
     st.threadId = null;
     st.model = null;
@@ -3059,8 +3297,14 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
           loadBranchesInto(srcSel, projSel.value, card.sourceBranch || '').then(updateTargetSub);
         }
         projSel.addEventListener('change', () => { loadBranchesInto(srcSel, projSel.value, '').then(updateTargetSub); updateTargetSub(); reloadLane(); });
-        srcSel.addEventListener('change', updateTargetSub);
-        grid.append(rpField('Project', projSel), lvTag(rpField('Source branch', srcSel), 'advanced', !!card.sourceBranch),
+        // #527: "from origin/x (remote only, 2 behind)" describes the PROPOSED branch only.
+        const srcField = rpField('Source branch', srcSel, sourceRefNote(card.sourceRef));
+        const srcHint = srcField.querySelector('.ask-rp-hint');
+        srcSel.addEventListener('change', () => {
+          if (srcHint && srcSel.value !== card.sourceBranch) srcHint.textContent = '';
+          updateTargetSub();
+        });
+        grid.append(rpField('Project', projSel), lvTag(srcField, 'advanced', !!card.sourceBranch),
           lvTag(rpField('Feature branch', feature, 'created for the run'), 'advanced', !!card.featureBranch));
         targetHost.appendChild(grid);
         updateTargetSub();
@@ -3237,10 +3481,23 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       } catch { err.textContent = 'network error'; return; }
       if (!res.ok) {
-        let msg = `request failed (${res.status})`;
-        try { const b = await res.json(); if (b && b.error) msg = b.error; } catch { /* keep */ }
-        err.textContent = msg;
-        return;
+        let b = null;
+        try { b = await res.json(); } catch { /* keep */ }
+        // #527: the base diverged or could not be fetched — ask once and resend with the choice.
+        // No syncBeforeStart: the project's own setting applies.
+        if (b && (b.code === 'sync-diverged' || b.code === 'sync-fetch-failed')) {
+          const choice = await chooseSyncRefusal(b);
+          if (!choice) { err.textContent = 'Start cancelled.'; return; }
+          try {
+            res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, syncPolicy: choice }) });
+          } catch { err.textContent = 'network error'; return; }
+          b = null;
+          if (!res.ok) { try { b = await res.json(); } catch { /* keep */ } }
+        }
+        if (!res.ok) {
+          err.textContent = (b && b.error) || `request failed (${res.status})`;
+          return;
+        }
       }
       // Success: the server links, flips the card to started and broadcasts;
       // the flip frame renders the terminal state. The browser never navigates
@@ -3891,6 +4148,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // reconnect re-loads the SAME thread and must keep it: those repaint rows the
     // user is already reading, mid-turn.
     const switched = st.threadId !== id;
+    if (switched) stopVoice();
     if (switched) st.seenRows = new Set();
     st.threadId = id;
     st.model = createThreadModel({ threadId: id });
@@ -3997,6 +4255,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       // NOT live in updateSendStop() — that also runs from loadThread, so a
       // running→idle latch there fires a SECOND snapshot GET on every resync.
       refreshWorktrees();
+      if (st.voicePendingSend) { st.voicePendingSend = false; if (st.voice && st.voice.active()) voiceSend(); }
     }
     else if (frame.type === 'ask-message' && frame.message && typeof frame.message.text === 'string'
       && /is waiting for your answer/.test(frame.message.text)) announce('run needs an answer');
@@ -4024,6 +4283,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const r = st.model.apply(frame);
     if (r && r.gap) { resync(); return; }
     if (!r || !r.ok) return;
+    if (st.voice && st.voice.active() && frame.messageId) {
+      const live = st.model && st.model.live();
+      st.voice.onFrame(frame, live && live.messageId === frame.messageId ? live.text : null);
+    }
     afterFrame(frame);
     scheduleFlush();
   }
@@ -4177,6 +4440,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.runTick) { clearInterval(st.runTick); st.runTick = null; }
     if (st.runUnsub) { try { st.runUnsub(); } catch { /* ignore */ } st.runUnsub = null; }
     pruneCardEls();                                  // every card graph mount and its ResizeObserver goes with the sheet
+    clearTimeout(st.voiceLongPress);
+    if (st.voice) { const v = st.voice; st.voice = null; Promise.resolve(v.destroy()).catch(() => {}); }
     root.remove();
   }
 

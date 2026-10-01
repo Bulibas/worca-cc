@@ -1,5 +1,5 @@
-// test/ui-cost-paused.test.mjs — cost-paused UX: run-card banners, the
-// continue-without-cap override flow, total-cap resume gating, and the History
+// test/ui-cost-paused.test.mjs — cost-paused UX: the list card's one waiting
+// strip, the run page's banners, the continue-without-cap override flow, total-cap resume gating, and the History
 // parity (pause note in the head, banner in the expanded detail, gated Resume).
 // Harness: jsdom boot of the REAL index.html + app.js, with the dispatchable
 // WebSocket stub from test/ui-history-cache.test.mjs (so `done`/`budget-changed`
@@ -94,24 +94,43 @@ async function pausedRun(ctx, reason, detail = undefined) {
   return ctx.window.document.querySelector('#run-list .run-card');
 }
 
-test('cost_pipeline pause renders the amber banner with an enabled Resume', async () => {
+// The cost/error banners and the run page's own Resume live on the run page
+// (#running/<id>); the list card only carries the `.rc-wait` strip that points there.
+async function openRunPage(ctx, runId = 'r1') {
+  ctx.window.location.hash = `running/${runId}`;
+  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+  await ctx.settle();
+  return ctx.window.document.querySelector('#run-detail');
+}
+const resumeOf = (page) => page.querySelector('.rd-pause');
+
+test('cost_pipeline pause: the card shows the waiting strip, the run page shows the amber banner with an enabled Resume', async () => {
   const ctx = await boot();
   const card = await pausedRun(ctx, 'cost_pipeline');
   assert.ok(card, 'paused run still has a card in the Overview list');
-  const banner = card.querySelector('.cost-banner');
-  assert.ok(banner, 'card carries a .cost-banner slot');
+  assert.equal(card.querySelector('.cost-banner'), null, 'the list card no longer carries the banner');
+  const wait = card.querySelector('button.rc-wait');
+  assert.equal(wait.hidden, false, 'the card points at the run page with one strip');
+  assert.equal(wait.querySelector('.rc-wait-text').textContent, 'Paused · cost limit reached');
+  assert.equal(wait.classList.contains('is-ask'), false, 'a pause is not a question');
+  assert.equal(card.querySelector('.btn-resume').disabled, false, 'per-pipeline pause never blocks Resume');
+  assert.equal(card.querySelector('.rc-status-word').textContent, 'Paused · cost limit');
+  const page = await openRunPage(ctx);
+  const banner = page.querySelector('.rd-banners .cost-banner');
+  assert.ok(banner, 'the run page carries the cost-pause banner');
   assert.equal(banner.hidden, false, 'banner is revealed for a cost pause');
   assert.ok(banner.classList.contains('cb-pipeline'), 'amber per-pipeline variant');
   assert.match(banner.textContent, /pipeline cost limit/);
   assert.ok(banner.querySelector('.cb-override'), 'override action offered');
-  assert.equal(card.querySelector('.btn-resume').disabled, false, 'per-pipeline pause never blocks Resume');
-  assert.equal(card.querySelector('.rc-status-word').textContent, 'Paused · cost limit');
+  assert.equal(resumeOf(page).disabled, false, 'per-pipeline pause never blocks the run page Resume');
+  assert.equal(resumeOf(page).querySelector('.rd-btn-label').textContent, 'Resume');
 });
 
 test('cb-override: confirm modal -> single resume POST with ignoreCostCap:true', async () => {
   const ctx = await boot();
-  const card = await pausedRun(ctx, 'cost_pipeline');
-  card.querySelector('.cb-override').click();
+  await pausedRun(ctx, 'cost_pipeline');
+  const page = await openRunPage(ctx);
+  page.querySelector('.cb-override').click();
   await ctx.tick();
   const modal = ctx.window.document.querySelector('#confirm-modal');
   assert.equal(modal.classList.contains('hidden'), false, 'override asks for confirmation first');
@@ -124,13 +143,14 @@ test('cb-override: confirm modal -> single resume POST with ignoreCostCap:true',
   await ctx.tick();
   const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/resume'));
   assert.equal(posts.length, 1, 'exactly one resume POST');
-  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'pl_1', ignoreCostCap: true });
+  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'pl_1', baseCheck: true, ignoreCostCap: true });
 });
 
 test('cb-override: cancelling the confirm posts nothing', async () => {
   const ctx = await boot();
-  const card = await pausedRun(ctx, 'cost_pipeline');
-  card.querySelector('.cb-override').click();
+  await pausedRun(ctx, 'cost_pipeline');
+  const page = await openRunPage(ctx);
+  page.querySelector('.cb-override').click();
   await ctx.tick();
   ctx.window.document.querySelector('#confirm-cancel').click();
   await ctx.tick();
@@ -141,12 +161,18 @@ test('cb-override: cancelling the confirm posts nothing', async () => {
 test('cost_total pause: red banner, Resume disabled with reset-date tooltip', async () => {
   const ctx = await boot({ budget: blockedBudget() });
   const card = await pausedRun(ctx, 'cost_total');
-  assert.ok(card.querySelector('.cost-banner.cb-total'), 'red total-budget variant');
-  assert.equal(card.querySelector('.cost-banner .cb-override'), null, 'no per-pipeline override on a total-cap pause');
+  assert.equal(card.querySelector('.cost-banner'), null, 'no banner on the list card');
+  assert.equal(card.querySelector('.rc-wait .rc-wait-text').textContent, 'Paused · cost limit reached');
   const resume = card.querySelector('.btn-resume');
   assert.equal(resume.disabled, true);
   assert.match(resume.title, /Total budget reached/);
   assert.equal(card.querySelector('.rc-status-word').textContent, 'Paused · total budget');
+  const page = await openRunPage(ctx);
+  assert.ok(page.querySelector('.rd-banners .cost-banner.cb-total'), 'red total-budget variant on the run page');
+  assert.equal(page.querySelector('.cost-banner .cb-override'), null, 'no per-pipeline override on a total-cap pause');
+  const pageResume = resumeOf(page);
+  assert.equal(pageResume.disabled, true, 'the run page Resume is gated too');
+  assert.match(pageResume.title, /Total budget reached/);
 });
 
 test('budget-changed unblocking re-enables Resume and clears the total banner', async () => {
@@ -177,22 +203,33 @@ test('an ordinary paused run keeps the template Resume tooltip', async () => {
   assert.equal(resume.title, stock, 'painting must not strip the stock tooltip');
 });
 
-test('a non-cost pause leaves the banner hidden and the pill plain', async () => {
+test('a non-cost pause shows no waiting strip, no banner and a plain pill', async () => {
   const ctx = await boot();
   const card = await pausedRun(ctx, undefined);   // manual pause carries no reason
-  assert.equal(card.querySelector('.cost-banner').hidden, true);
+  assert.equal(card.querySelector('.rc-wait').hidden, true, 'a plain pause has no waiting strip');
   assert.equal(card.querySelector('.rc-status-word').textContent, 'Paused');
   assert.equal(card.querySelector('.btn-resume').disabled, false);
+  const page = await openRunPage(ctx);
+  assert.equal(page.querySelector('.rd-banners .cost-banner'), null, 'no cost banner on the run page');
+  assert.equal(page.querySelector('.rd-banners .pause-error-banner'), null, 'no error banner either');
+  assert.equal(resumeOf(page).disabled, false);
 });
 
-test('an error pause: pill "Paused · error", no cost banner, Resume enabled with the detail as tooltip', async () => {
+test('an error pause: strip "Paused · error" on the card, error banner (no cost banner) on the run page, Resume enabled with the detail as tooltip', async () => {
   const ctx = await boot();
   const card = await pausedRun(ctx, 'error', 'claude exited with code 1: disk full');
   assert.equal(card.querySelector('.rc-status-word').textContent, 'Paused · error');
-  assert.equal(card.querySelector('.cost-banner').hidden, true);
+  assert.equal(card.querySelector('.cost-banner'), null);
+  const wait = card.querySelector('button.rc-wait');
+  assert.equal(wait.hidden, false);
+  assert.equal(wait.querySelector('.rc-wait-text').textContent, 'Paused · error');
   const resume = card.querySelector('.btn-resume');
   assert.equal(resume.disabled, false, 'an error pause is always resumable');
   assert.match(resume.title, /disk full/);
+  const page = await openRunPage(ctx);
+  assert.equal(page.querySelector('.rd-banners .cost-banner'), null, 'no cost banner for an error pause');
+  assert.match(page.querySelector('.rd-banners .pause-error-banner').textContent, /disk full/);
+  assert.equal(resumeOf(page).disabled, false, 'an error pause is always resumable from the run page too');
 });
 
 // Resume + the cost-pause banner moved to the History DETAIL screen; the card
@@ -252,7 +289,7 @@ test('history: pausenote on the card; the detail screen shows the banner and gat
   await ctx.settle();
   const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/resume'));
   assert.equal(posts.length, 1);
-  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'h1', ignoreCostCap: true });
+  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'h1', baseCheck: true, ignoreCostCap: true });
 });
 
 test('history: a budget-changed unblock re-enables the gated detail Resume', async () => {
@@ -268,7 +305,7 @@ test('history: a budget-changed unblock re-enables the gated detail Resume', asy
   assert.equal(ctx.window.document.querySelector('#hist-detail .hd-resume').disabled, false);
 });
 
-test('reload parity: a hello-seeded paused run with pauseReason renders the banner', async () => {
+test('reload parity: a hello-seeded paused run with pauseReason renders the strip and, on its page, the banner', async () => {
   const ctx = await boot();
   ctx.showRunning();
   // Field-for-field the real hello summary: every key ui/server.mjs
@@ -298,8 +335,11 @@ test('reload parity: a hello-seeded paused run with pauseReason renders the bann
   assert.ok(card, 'a hello-seeded paused run still renders in the Overview');
   // Without makeRun declaring the field, upsertRun's CREATE path drops it.
   assert.equal(ctx.window.__np.getRun('r9').pauseReason, 'cost_pipeline');
-  assert.ok(card.querySelector('.cost-banner.cb-pipeline'), 'banner survives a reload');
+  assert.equal(card.querySelector('.rc-wait-text').textContent, 'Paused · cost limit reached', 'the strip survives a reload');
+  assert.equal(card.querySelector('.cost-banner'), null, 'the banner is a run-page thing');
   assert.equal(card.querySelector('.rc-status-word').textContent, 'Paused · cost limit');
+  const page = await openRunPage(ctx, 'r9');
+  assert.ok(page.querySelector('.rd-banners .cost-banner.cb-pipeline'), 'banner survives a reload');
 });
 
 // ---------------------------------------------------------------------------

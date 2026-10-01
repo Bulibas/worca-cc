@@ -36,6 +36,7 @@ import { defaultModelDeps } from './model-deps.mjs';
 import { defaultCloneDeps } from './clone-deps.mjs';
 import { defaultWorkspaceDeps } from './workspace-deps.mjs';
 import { defaultWebDeps } from './web-deps.mjs';
+import { defaultBranchDeps } from './branch-deps.mjs';
 
 const SUPPORTED_PROTOCOLS = Object.freeze(['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25']);
 const DEFAULT_PROTOCOL = '2025-06-18';
@@ -58,7 +59,7 @@ export function parseArgv(argv) {
  * server (ui/server.mjs /api/ask/relay), when the chat's claude runs as an agent user that
  * cannot read that database (agent-pool.mjs, credential broker).
  */
-export function createAskToolServer({ threadId, reader = null, signal, write, log, env = process.env }) {
+export function createAskToolServer({ threadId, reader = null, signal, write, log, env = process.env, extraDeps = {} }) {
   return createRpcServer({
     tools: createAskTools({
       ...defaultToolDeps({ threadId, viewer: reader }),
@@ -76,9 +77,14 @@ export function createAskToolServer({ threadId, reader = null, signal, write, lo
       ...defaultModelDeps({ threadId }),
       ...defaultCloneDeps(),
       ...defaultWorkspaceDeps(),
+      // Branch reads + fetch-only (#527): list_branches, list_projects.sync, get_run.baseMoved.
+      ...defaultBranchDeps(),
       // Web access: present only when this turn's env carries WORCA_ASK_WEB (web-deps.mjs) — the
       // child's env (classic), or the relay's own copy built from the turn's web access (ui/server.mjs).
       ...defaultWebDeps({ threadId, signal, env }),
+      // Readers only the host process can supply (relay mode: ui/server.mjs passes
+      // readLiveDiff, which needs the live runs). Absent in the classic child.
+      ...extraDeps,
     }),
     write,
     ...(log ? { log } : {}),

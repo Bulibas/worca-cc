@@ -17,9 +17,23 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM, VirtualConsole } from 'jsdom';
+import { previewText, REPORT_PREVIEW_DEBOUNCE_MS } from '../ui/public/report-run.mjs';
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
+const cssPath = fileURLToPath(new URL('../ui/public/style.css', import.meta.url));
+// Comments are stripped FIRST. This file documents several of its own rules in
+// prose that contains braces, and a `{` or `}` inside one is read as a rule
+// boundary — which splits the capture in two and makes the "exactly one rule"
+// count below see a phantom. Stripping removes that whole class of accident.
+const css = readFileSync(cssPath, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+
+/** The first flat rule whose selector list contains `sel` — test/ui-pinned-sidebar.test.mjs:16-20. */
+function ruleBody(sel) {
+  const escaped = sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = css.match(new RegExp('(?:^|[\\s,}])' + escaped + '\\s*\\{([^}]*)\\}'));
+  return m ? m[1] : null;
+}
 
 const PKEY = 'proj-alpha-11111111';
 const PID = 'abc123de';
@@ -315,8 +329,9 @@ for (const status of ['done', 'stopped', 'error']) {
       false, 'nothing in the header offers to report the run');
     const link = header.querySelector('.rd-history-link');
     assert.equal(link.hidden, false, 'View in History stays');
-    assert.equal(link.previousElementSibling, header.querySelector('.rd-stop'),
-      'the link sits right after Stop — no leftover control between them');
+    assert.equal(link.previousElementSibling, header.querySelector('.rd-spacer'),
+      'the link closes the branch row — no leftover control between them');
+    assert.equal(doc.querySelector('#run-detail .rd-bar .rd-report'), null, 'nor does the shared bar');
   });
 }
 
@@ -389,7 +404,7 @@ test('switching views tears the report modal down', async () => {
 });
 
 // D24 covers a rebuild that is in flight; a rebuild that is merely PENDING behind the
-// 250 ms debounce is exactly as stale. Between the keystroke and the timer the link
+// debounce is exactly as stale. Between the keystroke and the timer the link
 // still carries the href built from the previous text, and mousedown on it fires that
 // href — the precise failure the `input` binding was chosen to avoid.
 test('typing an expectation invalidates the issue link BEFORE the debounce fires (D24)', async () => {
@@ -414,11 +429,66 @@ test('typing an expectation invalidates the issue link BEFORE the debounce fires
   assert.equal(copied.length, 0,
     'neither the link nor Copy JSON can ship a payload the preview is not showing');
 
-  await new Promise((r) => ctx.window.setTimeout(r, 300));
+  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS + 50));
   await settle(ctx.window, 8);
   assert.equal(link.getAttribute('href'), REPORT.issue.url, 'the fresh payload revives it');
   assert.equal(JSON.parse(reportPosts(ctx).at(-1).opts.body).expectation,
     'the reviewer looped forever', 'and the rebuild carried the typed text');
+});
+
+test('typing does not rebuild the preview until the reporter has been quiet for 1s', async () => {
+  assert.equal(REPORT_PREVIEW_DEBOUNCE_MS, 1000, 'the delay the reporter asked for');
+  const ctx = await boot({ fetchHandler: arms() });
+  await openHistoryReport(ctx);
+  const before = reportPosts(ctx).length;
+
+  const box = ctx.window.document.getElementById('report-expectation');
+  box.value = 'the diff swallowed my change';
+  box.dispatchEvent(new ctx.window.Event('input', { bubbles: true }));
+  // A FRACTION of the window, not a few zero-delay macrotasks and not the full
+  // constant. Settling on zero-delay ticks passes for any delay above ~0, and
+  // waiting the whole constant would move in lockstep with whatever app.js does —
+  // both let a hardcoded 250 back in unnoticed. A quarter of the way in is far
+  // past a regression and far short of the real delay, so the assert polices the
+  // WIRING (app.js must use REPORT_PREVIEW_DEBOUNCE_MS) rather than restating the
+  // number. The `assert.equal` above still pins the value itself.
+  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS / 4));
+  await settle(ctx.window, 8);
+  assert.equal(reportPosts(ctx).length, before,
+    'a quarter of the window in, no rebuild yet');
+
+  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS + 50));
+  await settle(ctx.window, 8);
+  assert.equal(reportPosts(ctx).length, before + 1, 'exactly one rebuild once typing stops');
+  assert.equal(JSON.parse(reportPosts(ctx).at(-1).opts.body).expectation,
+    'the diff swallowed my change', 'carrying the final text');
+});
+
+test('a control change inside the wait supersedes the queued rebuild instead of re-blanking', async () => {
+  const ctx = await boot({ fetchHandler: arms() });
+  await openHistoryReport(ctx);
+  const before = reportPosts(ctx).length;
+  const preview = ctx.window.document.getElementById('report-preview');
+
+  const box = ctx.window.document.getElementById('report-expectation');
+  box.value = 'the diff swallowed my change';
+  box.dispatchEvent(new ctx.window.Event('input', { bubbles: true }));
+
+  // Inside the 1s window: switching the reason rebuilds at once, as it always has.
+  const reason = ctx.window.document.getElementById('report-reason');
+  reason.value = reason.options[1].value;
+  reason.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
+  await settle(ctx.window, 8);
+  assert.equal(reportPosts(ctx).length, before + 1, 'the control change rebuilt immediately');
+  assert.equal(preview.textContent, previewText(REPORT.payload),
+    'and the fresh JSON is on screen — not the building placeholder');
+
+  // Past the point where the textarea's own timer would have fired.
+  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS + 50));
+  await settle(ctx.window, 8);
+  assert.equal(reportPosts(ctx).length, before + 1,
+    'the superseded rebuild never ran — the preview is not re-blanked after it');
+  assert.equal(preview.textContent, previewText(REPORT.payload), 'and the JSON never left the screen');
 });
 
 test('Copy JSON copies the exact preview text', async () => {
@@ -555,7 +625,7 @@ test('a pending rebuild makes the create button inert, like the link (D24)', asy
   assert.equal(issuePosts(ctx).length, 0,
     'a report cannot be filed from a payload the preview is not showing');
 
-  await new Promise((r) => ctx.window.setTimeout(r, 300));
+  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS + 50));
   await settle(ctx.window, 8);
   click(ctx.window, createBtn(ctx.window));
   await settle(ctx.window, 8);
@@ -605,4 +675,23 @@ test('the actions sit in a sticky header above the form, not below the preview',
   assert.equal(
     doc.getElementById('report-create-issue').compareDocumentPosition(doc.getElementById('report-close')) & 4,
     4, 'and sits to the LEFT of Close');
+});
+
+test('the JSON preview box is a FIXED height, so rebuilding it cannot resize the card', () => {
+  const body = ruleBody('.report-modal #report-preview');
+  assert.ok(body, 'the preview rule exists');
+  // `(?:^|;)` is load-bearing: plain /height:\s*300px/ matches "max-height:300px" and
+  // "min-height:300px" as substrings, so it cannot tell a fixed height from either
+  // flexible one. Anchored on the declaration boundary it cannot.
+  assert.match(body, /(?:^|;)\s*height:\s*300px/,
+    'a fixed height — a min-height would still grow with tall JSON');
+  assert.doesNotMatch(body, /min-height/, 'and no min-height competing with it');
+  assert.doesNotMatch(body, /max-height:\s*300px/, 'and the old max-height is gone, not merely shadowed');
+  // The card is content-driven (style.css:1330) inside a `place-items:center` grid
+  // (:1320), so ANY height change in here re-centres the whole dialog. A fixed box is
+  // what stops the "dancing"; the debounce only reduces how often it repaints.
+  // Count the rules instead of substring-matching one: a later override would silently
+  // undo the fix, and only the COUNT is order- and formatting-independent.
+  const rules = [...css.matchAll(/(?:^|[\s,}])[^{}]*#report-preview[^{}]*\{[^}]*\}/g)];
+  assert.equal(rules.length, 1, 'exactly one rule for the preview in the whole stylesheet');
 });

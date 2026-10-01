@@ -366,16 +366,20 @@ test('binary attachments (#398): png + pdf stored with kind/mime, served with th
   const spoof = await send([{ name: 'spoof.png', dataBase64: Buffer.from('plain text, not a png').toString('base64') }]);
   assert.equal(spoof.status, 400);
   assert.match((await spoof.json()).error, /does not match its extension/);
-  assert.equal((await send([{ name: 'big.png', dataBase64: Buffer.alloc(5 * 1024 * 1024 + 1).toString('base64') }])).status, 413);
+  const big = await send([{ name: 'big.png', dataBase64: Buffer.alloc(32 * 1024 * 1024 + 1).toString('base64') }]);
+  assert.equal(big.status, 413);
+  assert.match((await big.json()).error, /attachment over 33554432 bytes: big\.png/, 'the route, not the parser, answered');
   assert.equal((await send([{ name: 'vector.svg', dataBase64: Buffer.from('<svg/>').toString('base64') }])).status, 400, 'svg stays off the allowlist');
-  // The 64mb JSON window belongs to THIS route only: a ~13 MB body (two 5 MB
-  // images, base64) reaches the route's own per-file 413 …
+  // The ~65 MB JSON window belongs to THIS route only: two in-cap images one
+  // byte over the 48 MB message total (~64 MB of base64) reach the route's own
+  // per-message 413 …
+  const fill = (n) => Buffer.concat([png, Buffer.alloc(n - png.length)]).toString('base64');
   const twoBig = await send([
-    { name: 'ok.png', dataBase64: Buffer.concat([png, Buffer.alloc(5 * 1024 * 1024 - png.length)]).toString('base64') },
-    { name: 'over.png', dataBase64: Buffer.alloc(5 * 1024 * 1024 + 1).toString('base64') },
+    { name: 'a.png', dataBase64: fill(24 * 1024 * 1024) },
+    { name: 'b.png', dataBase64: fill(24 * 1024 * 1024 + 1) },
   ]);
   assert.equal(twoBig.status, 413);
-  assert.match((await twoBig.json()).error, /attachment over/, 'the route, not the parser, answered');
+  assert.match((await twoBig.json()).error, /attachments over 50331648 bytes per message/, 'the route, not the parser, answered');
   // … while the sibling routes keep the app-wide 8mb parser (a 9 MB PATCH dies
   // in body-parser, never reaching the handler's string-field read)
   const fat = await fetch(`${base}/api/ask/threads/${t2.id}`, { method: 'PATCH', headers: JSONH, body: JSON.stringify({ title: 'x'.repeat(9 * 1024 * 1024) }) });
