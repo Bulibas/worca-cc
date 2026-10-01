@@ -356,6 +356,22 @@ The edges follow your own hours (Settings), not a project's.
 - End: `Away hours ended. worca answered {N} question(s) while you were away{; M to check}.`
   or `Away hours ended. worca answered nothing while you were away.` (no chat)
 
+### 3.10 No away hours set
+
+Nothing may talk about away hours, or "by day", when none are set (Settings › "No away hours", or
+never filled in). Where a line needs the hours, it has a no-hours twin:
+
+| Where | With hours | No hours |
+|---|---|---|
+| Pause tip | `…until you turn it back on. Your away hours are kept.` | `worca answers nothing, on any run, until you turn it back on.` |
+| "I'm back" tip | `You count as here again, even inside your away hours. The next away hours apply by themselves.` | `You count as here again.` |
+| "Turn away mode back on" tip | `Go back to following your away hours.` | `worca answers again when you say you are away.` |
+| Field | `Marked runs by day` / `Never by day` | `Marked runs` / `Never` |
+| Field hint | `Outside away hours, a marked run is still answered…` | `A marked run is answered once a question has waited this long. Unmarked runs wait for you.` |
+| Run pill, marked | `A marked run is answered by day once a question has waited long enough.` | `A marked run is answered once a question has waited long enough.` |
+| Run pill, waits | `You count as here, and … by day.` | `Unmarked runs wait for you until you say you are away.` / `Marked runs wait for you too, until you say you are away.` |
+| New-run hint | `By day it also answers once…` | `It also answers once…` |
+
 ## 4. Reads-top-to-bottom test
 
 Developer opens Settings › Away mode with: hours 22:00–07:00, "Only runs I marked", 30 min,

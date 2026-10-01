@@ -159,3 +159,18 @@ test('"I\'m here" inside the away hours: the summary and the run pill count it a
   assert.deepEqual([run().state, run().minutes], ['after', 30], 'a marked run gets the by-day rule, as when you are here by day');
   assert.equal(run({ optIn: false }).state, 'wait');
 });
+
+test('no away hours set: the run pill and the New-run hint never say "by day" or "your away hours"', () => {
+  const now = at('2026-09-28T15:00:00Z');
+  const N = { ...C, window: null };
+  const r = (o, c = N) => describeRun({ config: c, toggle: 'auto', now, run: { optIn: true, override: 'auto', openedAt: '2026-09-28T14:48:00Z', done: false, ...o } });
+  assert.equal(r({}).reason, 'A marked run is answered once a question has waited long enough.');
+  assert.equal(r({ optIn: false }).reason, 'This run is not marked and your settings allow only marked runs.');
+  assert.equal(r({ optIn: false }, { ...N, enabled: true }).reason, 'Unmarked runs wait for you until you say you are away.');
+  assert.equal(r({}, { ...N, graceMinutes: null }).reason, 'Marked runs wait for you too, until you say you are away.');
+  assert.equal(describeNewRun({ config: N, toggle: 'auto' }), 'While you are away (Settings › Away mode: "I\'m away now"), worca answers this run\'s questions. It also answers once a question has waited 30 minutes.');
+  assert.equal(describeNewRun({ config: { ...N, enabled: true }, toggle: 'auto' }), 'Your settings already allow every run while you are away. Marking adds the 30-minute rule.');
+  // With hours, unchanged.
+  assert.equal(r({}, C).reason, 'A marked run is answered by day once a question has waited long enough.');
+  assert.match(describeNewRun({ config: C, toggle: 'auto' }), /By day it also answers/);
+});

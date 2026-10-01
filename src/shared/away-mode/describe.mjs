@@ -103,8 +103,9 @@ export function describeRun({ config, toggle = 'auto', now, run = {}, localZone 
     if (st.graceOn) {
       const delay = decideDelayMs({ state: { ...st, wakeOn: false }, config: cfg, openedAt, now });
       if (delay != null && delay <= 0) return { state: 'now', pill: pillText('now'), reason: 'The question has waited long enough; worca is answering it.' };   // due: never "answers after 1 min"
-      if (delay != null) return { state: 'after', pill: pillText('after', delay / MIN), minutes: Math.max(1, Math.round(delay / MIN)), reason: 'A marked run is answered by day once a question has waited long enough.' };
+      if (delay != null) return { state: 'after', pill: pillText('after', delay / MIN), minutes: Math.max(1, Math.round(delay / MIN)), reason: hoursOf(config) ? 'A marked run is answered by day once a question has waited long enough.' : 'A marked run is answered once a question has waited long enough.' };
     }
+    if (!hoursOf(config)) return { state: 'wait', pill: pillText('wait'), reason: run.optIn === true ? 'Marked runs wait for you too, until you say you are away.' : 'Unmarked runs wait for you until you say you are away.' };
     return { state: 'wait', pill: pillText('wait'), reason: run.optIn === true ? 'You count as here, and your settings say marked runs wait by day too.' : 'You count as here, and unmarked runs wait for you by day.' };
   } catch {
     return { state: 'wait', pill: pillText('wait'), reason: 'Away mode settings could not be read.' };
@@ -117,9 +118,9 @@ export function describeNewRun({ config, toggle = 'auto' } = {}) {
   if (toggle === 'off') return 'Away mode is paused: even a marked run waits for you until you turn it back on.';
   const hours = hoursOf(config);
   const n = config.graceMinutes;
-  if (config.enabled === true) return `Your settings already allow every run while you are away.${n != null ? ` Marking adds the ${n}-minute rule by day.` : ''}`;
+  if (config.enabled === true) return `Your settings already allow every run while you are away.${n != null ? ` Marking adds the ${n}-minute rule${hours ? ' by day' : ''}.` : ''}`;
   const when = hours ? `Settings › Away mode: ${hours[0]}–${hours[1]}, or "I'm away now"` : 'Settings › Away mode: "I\'m away now"';
-  return `While you are away (${when}), worca answers this run's questions.${n != null ? ` By day it also answers once a question has waited ${n} minutes.` : ''}`;
+  return `While you are away (${when}), worca answers this run's questions.${n != null ? ` ${hours ? 'By day it' : 'It'} also answers once a question has waited ${n} minutes.` : ''}`;
 }
 
 /** Lines 2–3 before and after a stored change (the Ask Worca card). */

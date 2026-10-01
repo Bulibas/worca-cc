@@ -199,8 +199,15 @@ test('away hours: notifyAway sends one info message; notify.away=false keeps it 
 });
 
 test('chat prefs: "away" is a notify event, on by default', async () => {
-  assert.equal(chatPrefs().notify.away, true);
-  await setChatPrefs({ notify: { away: false } });
-  assert.equal(chatPrefs().notify.away, false);
-  await setChatPrefs({ notify: { away: true } });
+  const prevHome = process.env.HOME;
+  const home = mkdtempSync(join(tmpdir(), 'worca-cc-chatprefs-away-'));
+  process.env.HOME = home;                     // settings.json lives under HOME: never the real one
+  try {
+    assert.equal(chatPrefs().notify.away, true);
+    await setChatPrefs({ notify: { away: false } });
+    assert.equal(chatPrefs().notify.away, false);
+  } finally {
+    process.env.HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { awayAnswersSummary, KIND_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, FIELD_LABELS, WHICH_RUNS_OPTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, STATUS_ACTIONS, kindLabel, pillText } from '../src/shared/away-mode/labels.mjs';
+import { awayAnswersSummary, KIND_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, FIELD_LABELS, WHICH_RUNS_OPTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, STATUS_ACTIONS, statusActions, GRACE_NO_HOURS, kindLabel, pillText } from '../src/shared/away-mode/labels.mjs';
 import { NIGHT_KINDS, NIGHT_STRATEGIES, NIGHT_CRITERIA, NIGHT_FIELDS } from '../src/core/night/config.mjs';
 
 test('every kind, method, criterion and field has a plain label', () => {
@@ -34,6 +34,18 @@ test('run switch, status actions and pill wording', () => {
   assert.equal(kindLabel('cost-cap'), "Continuing past the team's cost cap");
   assert.equal(pillText('after', 12), 'answers after 12 min');
   assert.equal(pillText('now'), 'answering');
+});
+
+test('no away hours set: no status button talks about away hours', () => {
+  for (const t of ['auto', 'on', 'off']) {
+    const withHours = statusActions(t, { hours: true });
+    const none = statusActions(t, { hours: false });
+    assert.deepEqual(withHours, STATUS_ACTIONS[t], 'with hours: the table as it is');
+    assert.deepEqual(none.map((a) => [a.mode, a.label]), STATUS_ACTIONS[t].map((a) => [a.mode, a.label]), 'same buttons');
+    for (const a of none) assert.doesNotMatch(a.tip, /away hours|by day/i, `${t}: ${a.tip}`);
+  }
+  assert.equal(statusActions('off', { hours: false })[0].tip, 'worca answers again when you say you are away.');
+  assert.deepEqual(GRACE_NO_HOURS, { label: 'Marked runs', hint: 'A marked run is answered once a question has waited this long. Unmarked runs wait for you.', never: 'Never', neverHint: 'Marked runs wait for you, like every other run.' });
 });
 
 test('awayAnswersSummary: the one line every end-of-run channel uses', () => {

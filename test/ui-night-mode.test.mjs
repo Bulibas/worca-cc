@@ -298,6 +298,19 @@ test('sidebar: the away hours starting by themselves show one line under the con
   assert.ok(ctx.awayCalls.length > before, 'the control re-reads the status');
 });
 
+test('no away hours set: the Settings card never talks about away hours or "by day"', async () => {
+  const ctx = await boot({ settings: { nightMode: {}, nightModeToggle: 'on' } });
+  const doc = await openSettings(ctx);
+  assert.doesNotMatch(statusButton(doc, "I'm back").title, /away hours/i);
+  const host = doc.getElementById('night-mode-host');
+  assert.equal(host.querySelector('.away-byday label').textContent, 'Marked runs');
+  assert.doesNotMatch(host.querySelector('.away-byday').textContent, /by day|away hours/i);
+  // Typing hours in brings the hours wording back, live.
+  host.querySelector('.night-window-start').value = '22:00'; host.querySelector('.night-window-end').value = '07:00';
+  fire(host.querySelector('.night-window-end'), 'input');
+  assert.equal(host.querySelector('.away-byday label').textContent, 'Marked runs by day');
+});
+
 test('settings card: when GET /api/away-mode fails, the stored fields still render (spec §7)', async () => {
   // No `enabled` key: the default state of a real user.
   const ctx = await boot({ away: null, settings: { nightMode: { window: '22:00-07:00' } } });

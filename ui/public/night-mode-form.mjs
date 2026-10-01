@@ -3,7 +3,8 @@
 // Pure DOM: renderNightForm builds the live summary and the inputs, readNightForm reads them back
 // into a patch. A field left empty is "not set here": it is sent as `__unset` so the next layer applies.
 // Every word comes from src/shared/away-mode (labels.mjs, describe.mjs); copy: plans/away-mode-wording.md §3.
-import { FIELD_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, KIND_LABELS, WHICH_RUNS_OPTIONS } from '../../src/shared/away-mode/labels.mjs';
+import { FIELD_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, KIND_LABELS, WHICH_RUNS_OPTIONS, GRACE_NO_HOURS } from '../../src/shared/away-mode/labels.mjs';
+import { parseWindow } from '../../src/shared/away-mode/activation.mjs';
 import { describeAwayMode } from '../../src/shared/away-mode/describe.mjs';
 
 export const NIGHT_KINDS = ['clarify', 'questions', 'form', 'gate', 'workflow', 'recovery'];
@@ -173,7 +174,7 @@ export function renderNightForm(root, { level, values = {}, effective = {}, sour
   const byDay = numField(doc, 'graceMinutes', level, values, inh, inhSrc, { suffix: 'minutes' });
   byDay.wrap.classList.add('away-byday');
   offBox(doc, byDay.wrap, 'night-grace-off', 'Never by day', values.graceMinutes === null, [byDay.input]);
-  byDay.wrap.append(el(doc, 'small', 'hint', 'Marked runs wait for you outside away hours, like every other run.'));
+  byDay.wrap.append(el(doc, 'small', 'hint away-never-hint', 'Marked runs wait for you outside away hours, like every other run.'));
   basic.append(byDay.wrap);
   body.append(basic);
 
@@ -299,6 +300,18 @@ export function paintAwaySummary(host, { config, toggle, hereSince = null, now, 
   host.replaceChildren(...describeAwayMode({ config, toggle, hereSince, now, projectName, projectFields, surface }).lines.map((l) => el(doc, 'span', 'away-line', `${l} `)));
 }
 
+/** "Marked runs by day" only makes sense with away hours; without them it reads "Marked runs" (no day). */
+function paintByDay(root, config) {
+  const w = root.querySelector('.away-byday'); if (!w) return;
+  const none = !!config && !parseWindow(config.window);
+  const label = w.querySelector('.label-row label'); const hint = w.querySelector(':scope > small.hint');
+  const never = w.querySelector('.night-grace-off')?.parentElement; const neverHint = w.querySelector('.away-never-hint');
+  if (label) label.textContent = none ? GRACE_NO_HOURS.label : FIELD_LABELS.graceMinutes.label;
+  if (hint) hint.textContent = none ? GRACE_NO_HOURS.hint : FIELD_LABELS.graceMinutes.hint;
+  if (never && never.lastChild) never.lastChild.textContent = ` ${none ? GRACE_NO_HOURS.never : 'Never by day'}`;
+  if (neverHint) neverHint.textContent = none ? GRACE_NO_HOURS.neverHint : 'Marked runs wait for you outside away hours, like every other run.';
+}
+
 /** Re-render only the summary from the form's current values (unsaved edits survive). Each key is optional. */
 export function updateAwaySummary(root, { toggle, hereSince, now, inherited } = {}) {
   const c = CTX.get(root); if (!c) return;
@@ -307,6 +320,7 @@ export function updateAwaySummary(root, { toggle, hereSince, now, inherited } = 
   if (inherited !== undefined) c.inherited = inherited;       // a fallback-painted, now-dirty form gets the real layers
   if (now !== undefined) c.offset = now - Date.now();       // the render's clock, moving on in real time
   const patch = formPatch(root);
+  paintByDay(root, c.inherited && c.inherited.config ? { ...c.inherited.config, ...patch } : null);
   paintAwaySummary(root.querySelector('.away-summary'), {
     // An unset field falls back to the layer below. With no inherited config (the fetch failed), the
     // summary says "Away mode settings could not be read." and the fields still render (spec §7).

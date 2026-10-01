@@ -168,7 +168,8 @@ import { paintAboutInto } from './about-links.mjs';
 import { renderReasonOptions, renderOptIns, previewText, reportBlobParts, REPORT_PREVIEW_DEBOUNCE_MS } from './report-run.mjs';
 import { openScheduleSheet, closeScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
-import { STATUS_ACTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindLabel, awayAnswersSummary } from '../../src/shared/away-mode/labels.mjs';
+import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindLabel, awayAnswersSummary } from '../../src/shared/away-mode/labels.mjs';
+import { parseWindow } from '../../src/shared/away-mode/activation.mjs';
 import { describeRun, describeNewRun, describeAwaySwitch } from '../../src/shared/away-mode/describe.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
 import { createLevelController, levelAtLeast, currentLevel, tagLevel, keepVisible, minLevelFor, LEVEL_INFO, UI_LEVELS } from './ui-level.mjs';
@@ -11763,7 +11764,7 @@ const awayStatusEl = document.getElementById('awayStatus');
 function paintNightFallback(host, data) {
   const user = (data && data.nightMode && typeof data.nightMode === 'object') ? data.nightMode : {};
   const toggle = typeof data?.nightModeToggle === 'string' ? data.nightModeToggle : 'auto';
-  paintAwayStatus(toggle);
+  paintAwayStatus(toggle, !!parseWindow(user.window));
   renderNightForm(host, { level: 'user', values: user, effective: data?.nightModeEffective || user, sources: {}, inherited: { config: null, sources: {} }, toggle, now: Date.now(), statusEl: awayStatusEl });
 }
 async function paintNightSettings(data) {
@@ -11776,16 +11777,17 @@ async function paintNightSettings(data) {
     if (seq !== _awayPaintSeq) return;                       // a newer paint won
     if (!d) { if (host.dataset.dirty !== '1' && data) paintNightFallback(host, data); return; }
     state.awayMode = d;
-    paintAwayStatus(d.toggle);
+    paintAwayStatus(d.toggle, !!parseWindow(d.config.window));
     paintSideAway();
     if (host.dataset.dirty === '1') { updateAwaySummary(host, { toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), inherited: d.inherited }); return; }   // keep unsaved edits
     renderNightForm(host, { level: 'user', values: d.user, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), statusEl: awayStatusEl });
   } catch { /* the card keeps what it shows; never an unhandled rejection */ }
 }
-function paintAwayStatus(toggle) {
+/** `hours` = away hours are set: without them no tip mentions them. */
+function paintAwayStatus(toggle, hours = true) {
   const bar = awayStatusEl;
   if (!bar) return;
-  bar.replaceChildren(...(STATUS_ACTIONS[toggle] || STATUS_ACTIONS.auto).map((a) => {
+  bar.replaceChildren(...statusActions(toggle, { hours }).map((a) => {
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'btn btn-mini'; b.textContent = a.label; b.title = a.tip; b.dataset.mode = a.mode;
     return b;

@@ -64,6 +64,24 @@ export const STATUS_ACTIONS = Object.freeze({
   off: [{ mode: 'auto', label: 'Turn away mode back on', tip: 'Go back to following your away hours.' }],
 });
 
+// With no away hours set, a tip never mentions them (keyed "<status>:<mode>").
+const NO_HOURS_TIPS = Object.freeze({
+  'auto:off': 'worca answers nothing, on any run, until you turn it back on.',
+  'on:here': 'You count as here again.',
+  'off:auto': 'worca answers again when you say you are away.',
+});
+/** The status buttons for `toggle`; `hours: false` = no away hours are set. */
+export function statusActions(toggle, { hours = true } = {}) {
+  const list = STATUS_ACTIONS[toggle] || STATUS_ACTIONS.auto;
+  return hours ? list : list.map((a) => ({ ...a, tip: NO_HOURS_TIPS[`${toggle}:${a.mode}`] ?? a.tip }));
+}
+
+/** "Marked runs by day" when no away hours are set: there is no day, only "until you say you are away". */
+export const GRACE_NO_HOURS = Object.freeze({
+  label: 'Marked runs', hint: 'A marked run is answered once a question has waited this long. Unmarked runs wait for you.',
+  never: 'Never', neverHint: 'Marked runs wait for you, like every other run.',
+});
+
 /** Run page pill: `now` | `wait` | `after` | `never`. */
 export function pillText(state, minutes = 0) {
   switch (state) {
