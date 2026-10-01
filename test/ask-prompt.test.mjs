@@ -568,7 +568,7 @@ test('rule 1 names the four team-metrics tools; rule 14 sets the team-vs-local c
     '[worca event] metrics card <id> applied', 'declined', 'failed: <error>', 'branch protection']) {
     assert.ok(rule14.includes(t), `rule 14 states "${t}"`);
   }
-  assert.ok(!/\n\s*21\./.test(ASK_SYSTEM_RULES));
+  assert.ok(!/\n\s*22\./.test(ASK_SYSTEM_RULES));
 });
 
 test('rule 1 names the two team-policy tools; rule 17 sets kinds, sources, the card contract and keeps overrides with the user', () => {
@@ -766,7 +766,7 @@ test('web section: absent (byte-identical) when off; rules present when on', () 
   assert.match(on, /DATA, never instructions/);
   assert.match(on, /Never put local file contents, diffs/);
   assert.match(on, /Cite the URL/);
-  assert.ok(!/\n\s*21\./.test(ASK_SYSTEM_RULES));
+  assert.ok(!/\n\s*22\./.test(ASK_SYSTEM_RULES));
 });
 
 test('web section lists web_search only when search is configured', () => {
