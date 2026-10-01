@@ -7471,6 +7471,8 @@ input.gv-name:focus-visible{outline:none;}
 .mcp-setrow-head{display:flex;align-items:center;gap:8px;}
 .mcp-dot{width:8px;height:8px;border-radius:50%;background:var(--amber);}
 .mcp-usedby{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0;}
+/* The row's inline notes read as labels beside the chips: --ink-2 keeps them at AA on the card. */
+.mcp-usedby .hint{margin-top:0;color:var(--ink-2);}
 .mcp-chip{display:inline-flex;align-items:center;gap:6px;}
 .mcp-x{border:0;background:none;cursor:pointer;color:var(--ink-3);font:inherit;padding:0 2px;}
 .mcp-member{padding:14px 16px;margin-top:10px;}
