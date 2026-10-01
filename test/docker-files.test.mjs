@@ -113,6 +113,7 @@ test('overlays: egress confines worca to an internal network; clone-in drops the
   const eg = read('docker/compose.egress.yml');
   assert.match(eg, /internal:\s*true/);
   assert.match(eg, /HTTPS_PROXY: http:\/\/egress:3128/);
+  assert.match(eg, /NO_PROXY: .*\bbroker\b/, 'worca fetch() honors the proxy, so the broker sidecar must bypass it');
   assert.match(eg, /worca-egress-proxy\.mjs/);
   const ci = read('docker/compose.clonein.yml');
   assert.match(ci, /projects:\/projects/);
