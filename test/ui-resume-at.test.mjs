@@ -1,5 +1,5 @@
 // test/ui-resume-at.test.mjs — "Resume at…" (scheduled resume of a paused run):
-// the paused run-card split (Resume + caret → "Resume at…"), its cap-pause refusal
+// the paused run page's split (Resume + caret → "Resume at…"), its cap-pause refusal
 // (arrow kept, item disabled), the History-detail split, the simple-level gate
 // contract, and the schedule sheet opening with the missed-slot policy pre-selected
 // to Skip (changeable). Harness: jsdom boot of the REAL index.html + app.js with
@@ -69,17 +69,19 @@ async function boot({ fetchHandler, level } = {}) {
   return { window, doc: window.document, recv, settle, go, fetchCalls };
 }
 
-/** A paused run card is up on the Running view. */
+/** A paused run is open on its run page (the Runs list has no cards; the page's split is the control). */
 async function pausedCard(ctx, { reason = null, detail = null } = {}) {
-  const { doc, recv, settle } = ctx;
-  location.hash = 'running';
+  const { doc, recv, settle, go } = ctx;
+  go('runs');
   recv({ type: 'hello', runs: [{ runId: 'r1', title: 'Feat', projectDir: PROJECT, status: 'running', startedAt: '00:00:00', pipelineId: 'pl_1' }] });
   await settle();
+  go('running/r1');
+  await settle(8);
   recv({ type: 'done', runId: 'r1', status: 'paused', ...(reason ? { reason } : {}), ...(detail ? { detail } : {}) });
-  await settle();
-  const card = doc.querySelector('#run-list .run-card');
-  assert.ok(card, 'the paused run has a card');
-  return card;
+  await settle(8);
+  const page = doc.querySelector('#run-detail');
+  assert.ok(page && page.querySelector('.rd-resume-split'), 'the paused run has its run page');
+  return page;
 }
 
 /** Drive the sheet: pick tomorrow 02:00, then OK. The sheet's inputs update state on `input`. */
@@ -104,22 +106,23 @@ async function confirmSheet(ctx) {
   await settle(6);
 }
 
-test('paused card offers Resume + a caret; "Resume at…" opens the sheet and posts', async () => {
+test('a paused run page offers Resume + a caret; "Resume at…" opens the sheet and posts', async () => {
   const ctx = await boot({});
   const card = await pausedCard(ctx);
-  const split = card.querySelector('.rc-resume-split');
-  assert.ok(split, 'the split exists on the card');
+  const split = card.querySelector('.rd-resume-split');
+  assert.ok(split, 'the split exists on the run page');
   assert.equal(split.hidden, false, 'wrapper shown for a plain pause');
-  assert.equal(card.querySelector('.btn-resume').hidden, false, 'default Resume is shown');
-  const more = card.querySelector('.rc-resume-more');
+  assert.equal(card.querySelector('.rd-pause').dataset.action, 'resume', 'the toggle offers Resume');
+  assert.equal(card.querySelector('.rd-pause').hidden, false, 'default Resume is shown');
+  const more = card.querySelector('.rd-resume-more');
   assert.ok(more, 'the caret exists');
   assert.equal(more.hidden, false, 'caret shown for a plain pause');
-  const menu = card.querySelector('.rc-resume-menu');
+  const menu = card.querySelector('.rd-resume-menu');
   assert.equal(menu.hidden, true, 'menu closed initially');
   more.click();                                          // open the menu
   await ctx.settle();
   assert.equal(menu.hidden, false, 'caret opens the menu');
-  const item = card.querySelector('.rc-resume-at');
+  const item = card.querySelector('.rd-resume-at');
   assert.equal(item.disabled, false, 'item enabled for a plain pause');
   assert.equal(more.getAttribute('aria-expanded'), 'true');
   item.click();                                          // schedule
@@ -133,29 +136,29 @@ test('paused card offers Resume + a caret; "Resume at…" opens the sheet and po
   assert.ok(/^\d{4}-\d{2}-\d{2}T/.test(body.scheduledFor), 'an ISO instant is posted');
 });
 
-test('cap-paused cards keep the arrow but disable "Resume at…" (all four cap reasons)', async () => {
+test('cap-paused run pages keep the arrow but disable "Resume at…" (all four cap reasons)', async () => {
   for (const reason of ['cost_pipeline', 'cost_total', 'cost_pipeline_policy', 'cost_total_policy']) {
     const ctx = await boot({});
     const card = await pausedCard(ctx, { reason, detail: 'cap reached' });
-    const more = card.querySelector('.rc-resume-more');
+    const more = card.querySelector('.rd-resume-more');
     assert.ok(more, 'caret exists');
     assert.equal(more.hidden, false, `caret is KEPT for ${reason} (clarify: arrow stays)`);
     more.click();
     await ctx.settle();
-    const item = card.querySelector('.rc-resume-at');
+    const item = card.querySelector('.rd-resume-at');
     assert.equal(item.disabled, true, `item disabled for ${reason}`);
     item.click();                                        // a disabled item must not schedule
     await ctx.settle();
     const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/schedules/resume'));
     assert.equal(posts.length, 0, `no schedule POST for ${reason}`);
-    assert.equal(card.querySelector('.btn-resume').hidden, false, `Resume still offered for ${reason}`);
+    assert.equal(card.querySelector('.rd-pause').dataset.action, 'resume', `Resume still offered for ${reason}`);
   }
 });
 
 test('usage_limit pause keeps "Resume at…" enabled (the quota-reset case)', async () => {
   const ctx = await boot({});
   const card = await pausedCard(ctx, { reason: 'usage_limit', detail: 'quota resets at 02:00' });
-  const item = card.querySelector('.rc-resume-at');
+  const item = card.querySelector('.rd-resume-at');
   assert.ok(item);
   assert.equal(item.disabled, false);
 });
@@ -229,8 +232,8 @@ test('History detail keeps the split for every cap pause but disables "Resume at
 test('at data-level="simple" the resume carets carry data-min-level="advanced" (the CSS gate)', async () => {
   const ctx = await boot({ level: 'simple' });
   const card = await pausedCard(ctx);
-  assert.equal(card.querySelector('.rc-resume-more').getAttribute('data-min-level'), 'advanced');
-  assert.ok(card.querySelector('.rc-resume-split'), 'split wrapper still ships (Resume alone at simple)');
+  assert.equal(card.querySelector('.rd-resume-more').getAttribute('data-min-level'), 'advanced');
+  assert.ok(card.querySelector('.rd-resume-split'), 'split wrapper still ships (Resume alone at simple)');
   // History detail too
   const ctx2 = await boot({ level: 'simple', fetchHandler: histFetch() });
   ctx2.go(`history/${KEY}/fcec04e8`);
@@ -314,13 +317,13 @@ test('a refused schedule surfaces its reason in the confirm modal', async () => 
       ? ok({ error: 'a scheduled resume already exists for this run — change or cancel it in Schedules' }, 409) : null),
   });
   const card = await pausedCard(ctx);
-  card.querySelector('.rc-resume-more').click();
-  card.querySelector('.rc-resume-at').click();
+  card.querySelector('.rd-resume-more').click();
+  card.querySelector('.rd-resume-at').click();
   await ctx.settle();
   await confirmSheet(ctx);
   const modal = ctx.doc.getElementById('confirm-modal');
   assert.equal(modal.classList.contains('hidden'), false, 'the modal is up');
   assert.match(ctx.doc.getElementById('confirm-message').textContent, /already exists/);
   assert.equal(ctx.doc.getElementById('confirm-ok').textContent, 'Open Schedules');
-  assert.equal(card.querySelector('.rc-resume-at').disabled, false, 'the item is usable again');
+  assert.equal(card.querySelector('.rd-resume-at').disabled, false, 'the item is usable again');
 });

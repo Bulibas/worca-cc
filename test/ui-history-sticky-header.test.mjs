@@ -20,43 +20,41 @@ function ruleBody(selector) {
 
 // ---------- CSS-string assertions ----------
 
-test('the History filter pills are a persistent sticky toolbar pinned to the top', () => {
-  const body = ruleBody('.hist-filter');
-  assert.ok(body, '.hist-filter rule must exist');
-  assert.match(body, /position:\s*sticky/, 'pills must be a sticky toolbar');
-  assert.match(body, /top:\s*0/, 'toolbar pins at the top of the scroll area');
-  assert.match(body, /z-index:\s*[5-9]\d*/, 'toolbar must stack above the project header (z-index 3)');
-  assert.match(body, /background:\s*var\(--bg\)/, 'opaque background so scrolled cards do not show through');
+test('the Started-by pills are one static row above the list scroller; they no longer stick over it', () => {
+  const body = ruleBody('.hist-filter.runs-people');
+  assert.ok(body, '.hist-filter.runs-people rule must exist');
+  assert.match(body, /position:\s*static/, 'the pill row sits above the scroller instead of pinning inside it');
+  assert.match(body, /flex-wrap:\s*nowrap/, 'one row of pills');
+  assert.match(body, /overflow-x:\s*auto/, 'that scrolls sideways instead of wrapping (D4)');
+  // Static is right only because the row is outside the scrolling list.
+  const doc = new JSDOM(readFileSync(htmlPath, 'utf8')).window.document;
+  const pills = doc.getElementById('historyFilter');
+  assert.ok(pills.classList.contains('runs-people'));
+  assert.equal(pills.closest('#runs-list'), null, 'the pill row is not inside #runs-list');
+  assert.ok(pills.closest('#runs-list-pane'), 'it heads the list pane');
 });
 
-test('the per-project header sticks just below the pinned toolbar, not behind it', () => {
-  const body = ruleBody('.hist-group-head');
-  assert.ok(body, '.hist-group-head rule must exist');
+test('each project group head sticks to the top of the list scroller, not behind anything', () => {
+  const body = ruleBody('.runs-group-head');
+  assert.ok(body, '.runs-group-head rule must exist');
   assert.match(body, /position:\s*sticky/, 'header stays sticky');
-  assert.match(body, /top:\s*var\(--hist-toolbar-h/, 'header offsets by the measured toolbar height');
-  assert.match(body, /background:\s*var\(--bg\)/, 'header keeps its opaque background');
+  assert.match(body, /top:\s*0/, 'nothing else pins inside the scroller, so no toolbar offset');
+  assert.match(body, /background:\s*var\(--panel\)/, 'the list pane\'s own opaque background, so scrolled rows do not show through');
 });
 
-test('the History scroll area drops its top padding so sticky elements pin flush (kills the peek-through band)', () => {
-  // The Projects two-screen track shares this rule (project-detail spec D2), so match the joined head.
-  const head = 'body.view-history .main,body.view-projects .main{';
+test('the Runs page drops .main\'s padding so the panes (and their sticky heads) pin flush', () => {
+  const head = 'body.view-runs .main{';
   const at = css.indexOf(head);
   const body = at === -1 ? null : css.slice(at + head.length, css.indexOf('}', at));
-  assert.ok(body, 'body.view-history .main rule must exist');
-  assert.match(body, /padding(-top)?:\s*0/, 'no top padding for sticky to fight while History is active');
-  assert.match(body, /display:\s*flex/, '.main is the bounded column that gives the two-screen track its height');
-});
-
-test('the History scrollport has no top padding; the 26px inset rides on the topbar', () => {
-  // matched directly on the stylesheet because attribute selectors are awkward through ruleBody()
-  assert.match(css, /\.hist-screen\s*\{[^}]*padding:\s*0 32px/, 'scroller has zero top padding for sticky');
-  assert.match(css, /\.hist-screen-list\s+\.topbar\s*\{[^}]*padding-top:\s*26px/, 'the inset moved onto the topbar');
+  assert.ok(body, 'body.view-runs .main rule must exist');
+  assert.match(body, /padding(-top)?:\s*0/, 'no top padding for sticky to fight while Runs is active');
+  assert.match(body, /display:\s*flex/, '.main is the bounded column that gives the two panes their height');
 });
 
 // ---------- DOM behavior (boot the real app under jsdom) ----------
-// boot()/HISTORY/histResp copied verbatim from test/ui-history-pills.test.mjs.
-// boot() takes { fetchHandler, local }, returns { window, showHistory }, and
-// showHistory() navigates to the History view (hash -> hashchange -> showView).
+// boot()/HISTORY/histResp copied from test/ui-history-pills.test.mjs.
+// boot() takes { fetchHandler, local }, returns { window, showRuns }, and
+// showRuns() navigates to the Runs view (hash -> hashchange -> showView).
 
 const HISTORY = [
   { id: 'a2', title: 'Alpha two', status: 'done',    startedAt: '2026-06-04T00:00:00Z', projectName: 'Alpha', projectKey: 'alpha-00000001', projectDir: '/x/alpha' },
@@ -85,30 +83,16 @@ async function boot({ fetchHandler, local } = {}) {
   globalThis.window = window; globalThis.document = window.document;
   await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
   await new Promise((r) => setTimeout(r, 0));
-  function showHistory() { window.location.hash = 'history'; window.dispatchEvent(new window.Event('hashchange')); }
-  return { window, showHistory };
+  function showRuns() { window.location.hash = 'runs'; window.dispatchEvent(new window.Event('hashchange')); }
+  return { window, showRuns };
 }
 
-test('entering the History view flags <body> so CSS can pin the toolbar flush', async () => {
-  const { window, showHistory } = await boot({
+test('entering the Runs view flags <body> so CSS can pin the panes flush', async () => {
+  const { window, showRuns } = await boot({
     fetchHandler: (url) => (url.includes('/api/history') ? histResp(HISTORY) : null),
   });
-  showHistory();
+  showRuns();
   await new Promise((r) => setTimeout(r, 0));
-  assert.ok(window.document.body.classList.contains('view-history'),
-    'showView("history") must add the view-history body class');
-});
-
-test('the History view exposes the toolbar height as --hist-toolbar-h for the sticky header', async () => {
-  const { window, showHistory } = await boot({
-    fetchHandler: (url) => (url.includes('/api/history') ? histResp(HISTORY) : null),
-  });
-  showHistory();
-  await new Promise((r) => setTimeout(r, 0));
-  const view = window.document.querySelector('.view[data-view="history"]');
-  assert.ok(view, 'history view exists');
-  // jsdom has no layout (offsetHeight === 0) so the value is "0px", but it must be SET,
-  // proving renderHistoryPills() ran the measurement wiring.
-  assert.ok(view.style.getPropertyValue('--hist-toolbar-h').endsWith('px'),
-    '--hist-toolbar-h must be written onto the history view after pills render');
+  assert.ok(window.document.body.classList.contains('view-runs'),
+    'showView("runs") must add the view-runs body class');
 });

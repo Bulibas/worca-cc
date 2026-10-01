@@ -41,9 +41,8 @@ const state = {
   scriptsList: [],   // GET /api/scripts cache; dropped on every scripts-changed frame
   mockWriterRoles: [], // closed mock-role list from /api/agents (drives the agent form)
   historyAll: [],    // full /api/history dataset; client-side filter cache
-  commentCounts: {}, // "<storeKey>/<pipelineId>" -> unresolved diff-comment count
-  historyFilter: '', // active projectKey filter for History; '' === All Projects
   historyPerson: '', // active "Started by" filter (lower-cased name); '' === everyone. Shared deployments only.
+  historyError: '',  // the last /api/history load error, shown in the Runs list while it has no rows
   ghAvailable: false,// gh CLI availability, from the last /api/history load
 
   // --- Workspaces ---
@@ -68,14 +67,16 @@ const state = {
 import { logLineClass, logLineTime, serializeLog, cycleSeparatorBefore, newCycleState, projectLogRecord } from './log-line.mjs';
 import { logLineVisible, logFacets, compileLogFilter } from './log-filter.mjs';
 import { alreadyApplied, noteBoot } from './ws-seq.mjs';
-import { decorFromState, applyDecor, isGraphManifest } from './graph/run-decor.mjs';
+import { decorFromState, applyDecor, isGraphManifest, ledgerRows } from './graph/run-decor.mjs';
 import { mountRunGraph } from './graph/run-hosts.mjs';
 import { trailColumns, nowRows, glanceCopy, renderOrb, nodeLabel, preflightOpen } from './run-glance.mjs';
+import { buildRunsModel, countNeedsYou, isRowSelected, renderRunsList, RUNS_FILTERS, RUNS_GROUPINGS } from './runs-list.mjs';
 // Import list only — `statusChip`/`diffBadges`/`mergeFindings`/`reportResultControl`
-// lost their last app.js caller with the retired card accordion. They stay EXPORTED
+// lost their last app.js caller with the retired card accordion, and `sourceBadge` with the
+// History list card. They stay EXPORTED
 // from results-view.mjs (test/results-view-helpers.test.mjs imports four of them).
-import { sourceBadge, workflowPickerLabel, memoryChangesRows } from './results-view.mjs';
-// `renderHistory` is taken in this file (the History list painter), so the memory one is aliased.
+import { workflowPickerLabel, memoryChangesRows } from './results-view.mjs';
+// The memory view's history list is `renderMemoryHistory`: "History" alone names the saved runs here.
 import {
   memoryRoute, renderHealthCard, renderFileList, renderEditor, collectEditor,
   renderMemoryHistory, MEMORY_NAME_HELP,
@@ -293,13 +294,22 @@ const el = {
   wfFeedbackConfig: $('#wf-feedback-config'),
   advancedConfig: $('#advanced-config'),
 
-  history: $('#history'),
   historyFilter: $('#historyFilter'),
-  refreshHistory: $('#refresh-history'),
   histShell: $('#hist-shell'),
   histDetail: $('#hist-detail'),
   runShell: $('#run-shell'),
   runDetail: $('#run-detail'),
+  runsShell: $('#runs-shell'),
+  runsListPane: $('#runs-list-pane'),
+  runsList: $('#runs-list'),
+  runsPane: $('#runs-pane'),
+  runsEmpty: $('#runs-empty'),
+  runsSearch: $('#runs-search'),
+  runsSearchBtn: $('#runs-search-btn'),
+  runsSearchRow: $('#runs-search-row'),
+  runsFilter: $('#runs-filter'),
+  runsGroupBtn: $('#runs-group-btn'),
+  runsGroupMenu: $('#runs-group-menu'),
 
   // Target selector (New Pipeline)
   targetSeg: $('#target-seg'),
@@ -616,14 +626,13 @@ function applySidebarCollapsed() {
   // never as markup: a static title= on the CTA or on Settings reds
   // ui-nav-sections:48 / :57, whose regexes pin those open-tags verbatim.
   // `data-rail-title` marks the ones WE wrote, so expanding removes only those.
-  // Running is excluded — updateNavCounts owns its title (the live/paused
-  // counts). It has not run yet at the boot call below; showView (:13901) does.
-  // `:scope >` mirrors the CSS rule exactly: #nav-paused-badge nests its own
-  // <span id="nav-paused-count">, which a descendant query could reach.
+  // Runs is excluded — updateNavCounts owns its title (the needs-you/live
+  // counts). It has not run yet at the boot call below; showView does.
+  // `:scope >` mirrors the CSS rule exactly: only the label span is a direct child.
   // The dataset.nav fallback can only fire if a button ever loses its label
   // span; an empty title would otherwise leave the button both tooltip-less and
   // silently "handled".
-  for (const b of $$('.nav button[data-nav]:not([data-nav="running"])')) {
+  for (const b of $$('.nav button[data-nav]:not([data-nav="runs"])')) {
     if (collapsed) {
       if (!b.dataset.railTitle) {
         const t = b.querySelector(':scope > span:not(.nav-count):not(.nav-rollup)');
@@ -641,7 +650,7 @@ function applySidebarCollapsed() {
  *  (the toggle, or a viewport crossing a tier). */
 function repaintNavMode() {
   applySidebarCollapsed();
-  updateNavCounts();             // Running's title/aria-label (both states)
+  updateNavCounts();             // Runs' title/aria-label (both states)
   renderPipelineTabs();          // child rows <-> initials tiles
   paintBudget();                 // spend block <-> budget ring
   paintFreeDaily();              // the free-request line shows only in the full column
@@ -1005,11 +1014,10 @@ async function loadWhoami() {
 // Everything that shows a person, repainted once the viewer is known (boot races the
 // hello snapshot and the History fetch). Each painter is idempotent.
 function repaintPeople() {
-  try { for (const r of runs.values()) if (r.el) paintRunCard(r); } catch { /* not booted */ }
-  try { const tabs = $('#nav-running-children'); if (tabs) tabs.dataset.tabsSig = ''; renderPipelineTabs(); } catch { /* not booted */ }
   try { if (runDetailState.screen && runs.get(runDetailState.runId)) repaintRunDetail(runs.get(runDetailState.runId)); } catch { /* none open */ }
   try { if (Array.isArray(state.historyAll) && state.historyAll.length) paintHistory(); } catch { /* not loaded */ }
-  try { schedulesView.repaint(); paintScheduledGroup(); } catch { /* not booted */ }
+  try { if (inRunsView()) paintRunsList(); } catch { /* not booted */ }   // no History loaded yet
+  try { schedulesView.repaint(); } catch { /* not booted */ }
 }
 
 // The indicator is re-rendered on every paint, and .side-foot sits OUTSIDE the
@@ -1079,7 +1087,7 @@ function handleServerMessage(msg) {
     scheduleOnboardingRefresh();
     refreshAllCounts();
     refreshBudget();
-    if (currentView() === 'history') loadHistoryView({ force: true });
+    if (inRunsView()) loadHistoryView({ force: true });
     if (currentView() === 'stats') loadStatsView();
     return;
   }
@@ -1093,7 +1101,7 @@ function handleServerMessage(msg) {
   // CLI, or because the scheduler tick started/missed/skipped something).
   if (msg.type === 'schedules-changed') {
     refreshAllCounts();
-    if (currentView() === 'schedules' || currentView() === 'running') void schedulesView.load().then(paintScheduledGroup);
+    if (currentView() === 'schedules' || inRunsView()) void schedulesView.load().then(() => { if (inRunsView()) paintRunsList(); });
     return;
   }
   if (msg.type === 'notification' || msg.type === 'notifications-changed') {
@@ -1204,14 +1212,11 @@ function handleServerMessage(msg) {
   // carrying ids only: the open Diff tab refetches its comments and re-renders the
   // CARDS in place, never the diff. Tabs showing another run ignore it.
   if (msg.type === 'diff-comments-changed') {
-    // Both jobs are COALESCED (:9816): an Ask turn writing a dozen comments
-    // broadcasts a dozen frames, and each one otherwise costs a counts round trip
-    // plus a whole paintHistory(). The open tab's repaint is queued FIRST, so the
-    // poke survives even if the counts refresh ever throws.
+    // COALESCED (pokeOpenDiffTab): an Ask turn writing a dozen comments broadcasts a
+    // dozen frames, and each one otherwise costs a comments refetch + repaint.
     if (hdCommentState && hdCommentState.key === msg.storeKey && hdCommentState.id === msg.pipelineId) {
       pokeOpenDiffTab();
     }
-    pokeCommentCounts();
     return;
   }
 
@@ -1305,12 +1310,12 @@ function handleServerMessage(msg) {
   }
 
   updateNavCounts();
-  // If the user is already on the Running view, build/repaint cards now.
+  // If the user is already on the Runs view, repaint its list now.
   // Without this, a run this tab didn't start (begun in another tab or via the
   // /worca CLI — the server sends `hello` only once per socket and broadcasts
   // later runs purely as tagged events) would bump the nav badge but never
-  // render a card until the user navigated away and back. renderRunningView
-  // diffs by data-run-id and reuses r.el, so this is cheap + idempotent.
+  // render a row until the user navigated away and back. renderRunningView
+  // coalesces into one signature-diffed list paint, so this is cheap + idempotent.
   renderPipelineTabs();            // keep sidebar child rows + roll-up live from ANY view
   pokeAskRuns(msg.runId, msg.type);
   // §5.9. Every frame repaints the open detail through the ONE entry point
@@ -1319,7 +1324,7 @@ function handleServerMessage(msg) {
   // `skipDetail` a single log line would rebuild `.rd-meta`, both banners, the
   // graph adapter and the question guard, which is exactly the jank the
   // incremental append exists to avoid.
-  if (currentView() === 'running') renderRunningView({ skipDetail: msg.type === 'log' });
+  if (inRunsView()) renderRunningView({ skipDetail: msg.type === 'log' });
 }
 
 // hello greeting carries the server's authoritative run list. We upsert each
@@ -1390,21 +1395,18 @@ function onHello(msg) {
   // diff-comments-changed is a plain global broadcast with no per-socket buffer
   // (ui/server.mjs:389-398), so any comment written while the socket was down is
   // simply lost. `hello` is the fresh-socket hook — the same one the backfill
-  // subscribes ride — so replay both halves of the poke here. Coalesced, so a
-  // reconnect that lands mid-burst still costs one pass. pokeCommentCounts() is
-  // redundant ONLY on the history view (loadHistoryView() at :801 refreshes counts
-  // itself) — it is load-bearing on every other view, so it is not a duplicate.
+  // subscribes ride — so replay the open Diff tab's poke here. Coalesced, so a
+  // reconnect that lands mid-burst still costs one pass.
   if (hdCommentState) pokeOpenDiffTab();
-  pokeCommentCounts();
 
   refreshAllCounts();
   refreshBudget();
   const cur = currentView();
-  if (cur === 'running') renderRunningView();
+  if (inRunsView(cur)) renderRunningView();
   // Background-load history on the first connect so the PR states populate even
   // when boot lands on another view (e.g. New pipeline). Reconnects
-  // skip this; an open History view still re-loads to refresh its data.
-  if (cur === 'history' || !historyBooted) loadHistoryView();
+  // skip this; an open Runs view still re-loads to refresh its data.
+  if (inRunsView(cur) || !historyBooted) loadHistoryView();
   historyBooted = true;
 }
 
@@ -1588,7 +1590,6 @@ function onQuestionResolved(r, msg) {
   if (msg && msg.id && r.pendingQuestion.id !== msg.id) return;
   dropPendingQuestion(r);
   r._decorSeq = (r._decorSeq || 0) + 1;   // isLive(r) reads pendingQuestion
-  paintRunCard(r);
 }
 
 // Minimal HTML escape for text interpolated into node innerHTML.
@@ -2015,46 +2016,33 @@ function onState(r, msg) {
   r._decorSeq = (r._decorSeq || 0) + 1;
   if (msg.title && msg.title !== r.title) r.title = msg.title;
   maybeResume(r);
-  paintRunCard(r);
 }
 
 // Live title replacement: the LLM title landed, replacing the instant provisional.
-// Update the in-memory run model first (source of truth for re-renders), then patch
-// only the .run-title node of the open card in place (mirrors patchHistoryPr — never
-// full-repaint, never lose stepper/expand state).
+// Update the in-memory run model (source of truth for re-renders); the frame hook
+// (renderRunningView) repaints the Runs row, whose signature carries the title.
 function onTitle(r, msg) {
   if (!msg || typeof msg.title !== 'string' || !msg.title) return;
   r.title = msg.title;                          // model is source of truth for re-renders
   r.titleProvisional = !!msg.provisional;       // false once the real title lands
-  // Patch the live Running card in place (no rebuild), keyed by runId.
-  const card = document.querySelector(`.run-card[data-run-id="${cssEscape(r.runId)}"]`);
-  const titleEl = card && card.querySelector('.run-title');
-  if (titleEl) {
-    titleEl.textContent = r.title;
-    titleEl.classList.remove('title-provisional');
-  }
-  // If this pipeline is also shown in History (e.g. it finished before the title
-  // settled), patch it too. The pipeline id comes from the MESSAGE — the run model
+  // If this pipeline also has a History row (e.g. it finished before the title
+  // settled), retitle it too. The pipeline id comes from the MESSAGE — the run model
   // has none.
   patchHistoryTitle(msg.pipelineId, r.title);
 }
 
-// Patch an already-rendered History card's title without a full paintHistory().
+// Retitle a History row in the model; the Runs list repaints from it (no paintHistory()).
 // Pipeline ids are globally unique, so id-only selection is sufficient.
 function patchHistoryTitle(pipelineId, title) {
   if (!pipelineId || !title) return;
-  const el = document.querySelector(`.hist-card[data-pipeline-id="${cssEscape(pipelineId)}"]`);
-  const b = el && el.querySelector('.h-meta b');
-  if (b) b.textContent = title;
   const row = (state.historyAll || []).find((p) => p && p.id === pipelineId);
-  if (row) row.title = title;                   // keep the model so a later paintHistory() keeps it
+  if (row) row.title = title;
 }
 
 // Per-run sub-agent lifecycle delta. Upsert into r.subAgents by `id`: a spawn
 // inserts/updates the record; a finish updates status + finishedAt + telemetry.
-// Then repaint via the same path onState/onExec use (paintRunCard -> paintStepper),
-// so the graph card the render layer builds reflects the change immediately. The
-// authoritative full set still arrives on the `state` snapshot (see onState).
+// The decor bump lets the frame hook's repaint (renderRunningView) show the change
+// immediately. The authoritative full set still arrives on the `state` snapshot (see onState).
 function onSubagent(r, msg) {
   if (!msg || !msg.id) return;
   let rec = r.subAgents.find((s) => s.id === msg.id);
@@ -2073,7 +2061,6 @@ function onSubagent(r, msg) {
       : (msg.ts != null ? new Date(msg.ts).toISOString() : new Date().toISOString());
   }
   r._decorSeq = (r._decorSeq || 0) + 1;   // the footer fan strip reads sub-agents
-  paintRunCard(r);
 }
 
 // Per-step MAIN-agent skill delta, keyed by the same nodeId|cycle composite the
@@ -2083,7 +2070,6 @@ function onStepSkills(r, msg) {
   if (!msg || msg.nodeId == null) return;
   if (!r.stepSkills) r.stepSkills = {};
   r.stepSkills[execKey(msg.nodeId, execIdOf(msg), msg.cycle)] = Array.isArray(msg.skills) ? msg.skills : [];
-  paintRunCard(r);
 }
 
 // Per-step MAIN-agent graphify-count delta, keyed by the same nodeId|cycle composite
@@ -2093,7 +2079,6 @@ function onStepGraphify(r, msg) {
   if (!msg || msg.nodeId == null) return;
   if (!r.stepGraphify) r.stepGraphify = {};
   r.stepGraphify[execKey(msg.nodeId, execIdOf(msg), msg.cycle)] = Number(msg.graphifyCount) || 0;
-  paintRunCard(r);
 }
 
 // ---------------------------------------------------------------------------
@@ -2890,15 +2875,10 @@ if (typeof window !== 'undefined') {
     paintRdHeader,
     renderGateBody,
     runStatusMeta,
-    paintRunStatusIcon,
-    renderRunMeta,
-    buildHistCard,
     histStatusMeta,
     histPrEligible,
     pauseRun,
     upsertRun,
-    buildRunCard,
-    paintRunCard,
     onHello,
     isPaused,
     resumeRunFromCard,
@@ -4187,8 +4167,8 @@ function schedulePinToBottom(logEl, r) {
 }
 
 // Mirror r.autoscroll onto a card's switch (class + aria). One-way: model → DOM.
-// `el` lets a caller target a card whose r.el isn't assigned yet (buildRunCard's
-// freshly-cloned node); defaults to r.el for the live-card path.
+// `el` lets a caller target a host of its own (the detail's Logs section); defaults
+// to r.el, which is always null now that the list card is gone.
 function syncAutoscrollSwitch(r, el) {
   const host = el || (r && r.el);
   if (!r || !host) return;
@@ -4231,7 +4211,6 @@ function noteLiveLine(r, rec) {
   r._liveLineTimer = setTimeout(() => {
     r._liveLineTimer = null;
     r._decorSeq = (r._decorSeq || 0) + 1;
-    paintRunCard(r);
     if (rdOpenRun() === r && runDetailState.screen) paintRdGraph(runDetailState.screen, r);
   }, LIVE_LINE_MS);
 }
@@ -4295,7 +4274,7 @@ function fillFilterSelect(sel, allLabel, values, current, labelOf) {
 }
 
 // (Re)populate a run card's three filter dropdowns from the lines seen so far.
-// `root` lets buildRunCard target the freshly-cloned node before r.el is assigned.
+// `root` targets a host of its own; r.el (the default) is always null now.
 // Returns true when the pane was fully repainted (see below), false otherwise.
 function paintLogFilters(r, root = r.el) {
   if (!root) return false;
@@ -4387,7 +4366,7 @@ function paintExecChip(r, root) {
  *  - a MANUAL node/step or cycle pick clears it too (adj-d §4): the chip narrows
  *    to one execution and a broader pick must not stay hidden behind it. The
  *    patch carries the bar's fresh DOM values because the owner's own change
- *    handler may run AFTER this one (the card's is delegated on #run-list) and
+ *    handler may run AFTER this one (the detail's is bound per section) and
  *    would otherwise find its select re-filled from the stale model. */
 function wireExecChip(bar, { read, write }) {
   bar.addEventListener('click', (e) => {
@@ -4419,10 +4398,9 @@ function clearLogPlaceholder(logEl) {
   if (logEl.dataset.empty) { logEl.textContent = ''; delete logEl.dataset.empty; }
 }
 
-// Re-render a card's log pane from the model through the current filter (called
-// on a filter change and by buildRunCard's hydration; live appends stay
-// incremental via onLog). `root` lets buildRunCard target the freshly-cloned
-// node before r.el is assigned.
+// Re-render a log pane from the model through the current filter (called on a
+// filter change; live appends stay incremental via onLog). `root` targets a host
+// of its own; r.el (the default) is always null now.
 function repaintFilteredLog(r, root = r.el) {
   if (!r || !root) return;
   const logEl = root.querySelector('.log');
@@ -4569,16 +4547,14 @@ function appendLog({ source, level, text }) {
 
 // ---------------------------------------------------------------------------
 // Questions (clarify) and gates. The full question/gate UI is built INLINE into
-// each run card's .qpanel slot (no global question card). onQuestion stores the
-// pending question, builds the panel, and repaints (paintRunCard toggles
-// .attention + paints the paused stepper).
+// the run page's .qpanel slot (no global question card). onQuestion stores the
+// pending question; the frame hook repaints the run page and the Runs row.
 // ---------------------------------------------------------------------------
 function onQuestion(r, msg) {
   r.pendingQuestion = msg;
   r._decorSeq = (r._decorSeq || 0) + 1;   // isLive(r) reads pendingQuestion
   // A new question supersedes any half-finished answer attempt.
   r._answering = false;
-  paintRunCard(r);   // the list card only points at the run page (.rc-wait); the panel lives there
 }
 
 // The `?` glyph used in the panel head. Built fresh each call (a node can only
@@ -4709,7 +4685,7 @@ function disposeQpanel(panel) {
   if (panel) panel.__dispose = null;
 }
 /** A34: the paths that destroy panel DOM WITHOUT renderQpanel/clearQpanel (openRunDetail,
- *  closeRunDetail, paintRunList's sweep) all go through destroyGraphMounts — dispose there. */
+ *  closeRunDetail) all go through destroyGraphMounts — dispose there. */
 function disposeQpanelsIn(root) {
   if (!root || typeof root.querySelectorAll !== 'function') return;
   for (const p of root.querySelectorAll('.qpanel')) disposeQpanel(p);
@@ -5027,7 +5003,7 @@ function renderWorkflowBody(r, panel, pq) {
   const accept = mk('btn-go wf-accept', 'Accept & run');
   accept.dataset.busyLabel = 'Starting…';                 // A31: setPanelBusy's primary swap reads it
   accept.prepend(playIcon());
-  const stop = (fn) => (e) => { e.stopPropagation(); fn(); };   // the #run-list / #run-detail delegates sit above this node
+  const stop = (fn) => (e) => { e.stopPropagation(); fn(); };   // the #run-detail delegates sit above this node
   cancel.addEventListener('click', stop(async () => {
     const ok = await confirmModal({ title: 'Cancel this run?', message: 'The run stops now. Nothing is saved — no workflow row is written.', confirmLabel: 'Cancel run', cancelLabel: 'Keep', danger: true });
     if (ok) postAnswer(r, { decision: 'cancel' });
@@ -5061,7 +5037,7 @@ function renderWorkflowBody(r, panel, pq) {
   handle.relayout();                                        // measure now that the body is attached (0 => 702 default)
 }
 
-const stopBubble = (fn) => (e) => { e.stopPropagation(); fn(e); };   // the run-list / run-detail delegates sit above the panel
+const stopBubble = (fn) => (e) => { e.stopPropagation(); fn(e); };   // the run-detail delegates sit above the panel
 
 // The large workflow view: the same graph in monitor mode (drag to pan, ⌘/ctrl+scroll or the buttons to zoom).
 // Reads the tunables edited so far, so the chips match the table. Esc, the × or a click outside closes it.
@@ -5488,30 +5464,27 @@ function finishRun(r, status) {
   const willLinger = !paused && isPipelineRun(r);
   if (willLinger) markLingering(r.runId);  // no-op if already acknowledged
 
-  // D8: a run that finishes while its DETAIL page is open keeps the page. The old
-  // single-card focus view had to bounce here — it rendered exactly one live card,
-  // so a finished run left it empty — but the detail screen renders a terminal run
-  // perfectly well (paintRdTerminal below), and D16 makes a lingering run's detail
-  // a legitimate destination in its own right. Dropping state.selectedRunId here
-  // would ALSO switch off `acknowledgeRun`'s repaint guard at the wrong moment.
+  // A run that finishes while its DETAIL page is open keeps the page until History
+  // has its finished row; then rdHandOffOpen moves it to the saved run (same tab).
+  // Dropping state.selectedRunId here would switch off `acknowledgeRun`'s repaint
+  // guard at the wrong moment.
   // Lingering/acknowledgement is untouched: markLingering above still runs, and
   // the lingerer is acknowledged the next time its detail is opened (showView's
   // running branch, which reads state.selectedRunId — on Back that is '' by then,
   // exactly as before D8).
 
-  // Card drops out of the live view (liveRuns excludes terminal statuses).
-  renderRunningView();   // Overview keeps the greyed lingerer / paused card; reconcile rebuilds if needed
+  // The row leaves the live count (liveRuns excludes terminal statuses).
+  renderRunningView();   // the Runs list keeps the lingerer / paused run as a live row
   updateNavCounts();
   renderPipelineTabs();
   // History is machine-wide + decoupled from the project picker now; if the user
   // is looking at it, force-refetch so the just-finished pipeline surfaces with no
-  // stale-cache flash (and re-triggers Phase-2 PR enrichment). A paused run is
-  // suppressed from History (it lives in Running), so refreshing is still correct.
-  if (currentView() === 'history') loadHistoryView({ force: true });
+  // stale-cache flash (and re-triggers Phase-2 PR enrichment). A paused run's History
+  // row is deduped behind its live row, so refreshing is still correct.
+  if (inRunsView()) loadHistoryView({ force: true });
 
   // Evict heavy fields ONLY for non-lingerers AND non-paused; lingerers + paused
-  // keep el/logLines so the card persists without a duplicate (paintRunList
-  // tolerates either case) and Resume has the log context.
+  // keep their logLines so the open page and Resume have the log context.
   if (!willLinger && !paused) { r.logLines = []; r.el = null; }
 }
 
@@ -6415,10 +6388,10 @@ function acknowledgeRun(runId) {
   acknowledged.add(runId);
   persistIdSet(ACK_RUNS_KEY, acknowledged);
   if (lingering.delete(runId)) persistIdSet(LINGER_RUNS_KEY, lingering);
-  // Drop the now-acknowledged row from tabs + Overview; History will now surface it.
+  // Drop the now-acknowledged row from the tabs; its History row now stands for it.
   renderPipelineTabs();
-  if (currentView() === 'running' && !state.selectedRunId) renderRunningView();
-  if (currentView() === 'history') renderHistory();
+  updateNavCounts();                           // an acknowledged failure leaves Needs you at once
+  if (inRunsView()) scheduleRunsPaint();       // its live row turns into its History row
 }
 
 function selectedProjectPath() {
@@ -10197,7 +10170,7 @@ function openProjDetail(p, parsed, { instant = false } = {}) {
   // rebuild replaces the object in state.projects.
   screen.querySelector('.pd-back').addEventListener('click', () => { void leaveProjDetail(); });
   screen.querySelector('.pd-new').addEventListener('click', () => { newPipelineForProject(p.key); });
-  screen.querySelector('.pd-history').addEventListener('click', () => { openHistoryForProject(p.key); });
+  screen.querySelector('.pd-history').addEventListener('click', () => { openRunsForProject(p.key); });
   screen.querySelector('.pd-remove').addEventListener('click', () => { void removeProjectFromPage(p.key); });
   paintProjHeader(screen, p);
   initPdTabs(screen, p);
@@ -10233,14 +10206,14 @@ function paintProjHeader(screen, p) {
   syncProjHistoryButton(screen, p.key);
 }
 
-// "Open in History" is live only while History has rows for this project: restoreHistoryFilter
-// keeps a remembered key only when rows exist, so without rows the hop would land on All Projects.
+// "Show in Runs" is live only while History has rows for this project: without rows the
+// Runs list has no group of this project's to reveal.
 function syncProjHistoryButton(screen, key) {
   const btn = screen.querySelector('.pd-history');
   if (!btn) return;
   const n = projectHistoryRows(key).length;
   btn.disabled = n === 0;
-  btn.title = n === 0 ? 'No runs yet' : `${n} run${n === 1 ? '' : 's'} in History`;
+  btn.title = n === 0 ? 'No runs yet' : `${n} run${n === 1 ? '' : 's'} in Runs`;
 }
 
 function teardownProjDetail() {
@@ -10330,13 +10303,6 @@ function newPipelineForProject(key) {
   if (state.runTarget !== 'project') setRunTarget('project');
   renderProjectOptions(p.name);
   location.hash = 'new';
-}
-// "Open in History": the History project filter, pre-set. restoreHistoryFilter reads the key on
-// the way in (the button is disabled while the project has no rows — see syncProjHistoryButton).
-function openHistoryForProject(key) {
-  state.historyFilter = key;
-  localStorage.setItem(HISTORY_FILTER_KEY, key);
-  location.hash = 'history';
 }
 async function removeProjectFromPage(key) {
   const p = projectByKey(key);
@@ -10442,7 +10408,7 @@ function buildPdOverview(sec, key) {
   if (last) {
     const card = pdStatCard('last', 'LAST RUN', fmtDate(last.r.startedAt || last.r.mtime), last.r.title || last.r.id, { tag: 'button' });
     card.classList.add('pd-ov-link');
-    card.title = 'Open in History';
+    card.title = 'Open this run';
     card.addEventListener('click', () => { location.hash = `history/${histDetailParam(last.r)}`; });
     grid.appendChild(card);
   } else {
@@ -11788,9 +11754,10 @@ function beginRun(runId, projectDir, title, opts = {}) {
   hideViewer();
   updateNavCounts();
   gs.startedRunId = runId;   // the Getting-started tours end on THIS run's page
-  // Straight onto the new run's own page (its glance), not the Running list: the list
-  // is where you pick among runs, and you just picked this one.
-  showView('running');
+  // Straight onto the new run's own page (its glance), not the Runs list: the list
+  // is where you pick among runs, and you just picked this one. Name the run: a bare
+  // route would first reopen (and acknowledge) the remembered run.
+  showView('running', runId);
   renderRunningView();
   location.hash = rdHash(runId);
 }
@@ -15283,7 +15250,7 @@ async function seedResumedLog(newRunId, prevLines, logUrl) {
   const tail = Array.isArray(nr.logLines) ? nr.logLines : [];
   nr.logLines = [...head, sep, ...tail];
   if (nr.logLines.length > MAX_LOG_LINES) nr.logLines = nr.logLines.slice(-MAX_LOG_LINES);
-  nr.el = null;            // force paintRunList to rebuild the card from the seeded log
+  nr.el = null;            // no list card to reuse: the run page repaints from the seeded log
   renderRunningView();
 }
 
@@ -15362,12 +15329,12 @@ async function resumeRunFromCard(runId, btn, { ignoreCostCap = false, pastTeamCa
   }
 }
 
-// Resume splits (run card, run page, History detail + its glance): a click outside any split closes every
+// Resume splits (run page, History detail + its glance): a click outside any split closes every
 // open resume menu. One listener covers every location; the caret/item clicks already
 // stopPropagation, so the parity with #start-split's click-away holds (closeStartMenu).
 document.addEventListener('click', (e) => {
-  if (e.target.closest && e.target.closest('.rc-resume-split, .hd-resume-split, .rd-resume-split, .hd-g-resume-split')) return;
-  for (const menu of document.querySelectorAll('.rc-resume-menu, .hd-resume-menu, .rd-resume-menu, .hd-g-resume-menu')) {
+  if (e.target.closest && e.target.closest('.hd-resume-split, .rd-resume-split, .hd-g-resume-split')) return;
+  for (const menu of document.querySelectorAll('.hd-resume-menu, .rd-resume-menu, .hd-g-resume-menu')) {
     if (!menu.hidden) {
       menu.hidden = true;
       const more = menu.closest('.btn-split')?.querySelector('.btn-split-more');
@@ -15375,36 +15342,6 @@ document.addEventListener('click', (e) => {
     }
   }
 });
-
-// Delegated controls on the dynamic run-card list: per-card Stop/Pause + per-card
-// auto-scroll switch. Scoped to each card via closest('.run-card').
-const runListEl = $('#run-list');
-if (runListEl) {
-  runListEl.addEventListener('click', (e) => {
-    const stopBtn = e.target.closest && e.target.closest('.btn-stop');
-    if (stopBtn) {
-      const card = stopBtn.closest('.run-card');
-      const runId = card && card.dataset.runId;
-      // D5: Stop confirms. This used to call stopRun(runId, stopBtn) directly.
-      if (runId) openStopModal(runId);
-      return;
-    }
-    const pauseBtn = e.target.closest && e.target.closest('.btn-pause');
-    if (pauseBtn) {
-      const card = pauseBtn.closest('.run-card');
-      const runId = card && card.dataset.runId;
-      if (runId) pauseRun(runId, pauseBtn);
-      return;
-    }
-    const resumeBtn = e.target.closest && e.target.closest('.btn-resume');
-    if (resumeBtn) {
-      const card = resumeBtn.closest('.run-card');
-      const runId = card && card.dataset.runId;
-      if (runId) resumeRunFromCard(runId, resumeBtn);
-      return;
-    }
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Stop confirmation modal (design §6 / D5). A dedicated overlay, not confirmModal:
@@ -16667,15 +16604,12 @@ if (tmSection) {
 }
 
 // ---------------------------------------------------------------------------
-// History
+// History rows (the Runs list's finished runs, the Projects page, the saved pages)
 //
-// The tab is driven entirely by GET /api/history (every project with pipelines
-// on disk, onboarded or not). The project pills and per-project sticky sections
-// are derived client-side from that single dataset; selecting a pill is a pure
-// in-memory filter (no refetch). The chosen project is remembered for the
-// History filter only — independent of the New-Pipeline project picker.
+// Driven entirely by GET /api/history (every project with pipelines on disk,
+// onboarded or not). The Runs list groups these rows by project client-side;
+// the started-by pills are a pure in-memory filter (no refetch).
 // ---------------------------------------------------------------------------
-const HISTORY_FILTER_KEY = 'worca-cc.history.project'; // stores a projectKey; '' === All Projects
 
 // Versioned localStorage cache for instant (stale-while-revalidate) first paint.
 // Only stable FS + local-git skeleton fields are persisted — never the live `pr`
@@ -16707,10 +16641,20 @@ function writeHistoryCache(pipelines, ghAvailable) {
   } catch { /* quota / serialization: skip cache, never throw */ }
 }
 
-// Refresh re-fetches /api/history with force:true (bypass the cache, always show
-// the spinner + re-trigger Phase 2). Other callers (showView/onHello) stay
-// cache-first. The active filter is preserved (it lives in localStorage).
-el.refreshHistory.addEventListener('click', () => loadHistoryView({ force: true }));
+// A reload's rows carry no `pr` (Phase 2 pushes it over the WS; the cache strips it). Keep the
+// last known state per row until that lands, so the Runs list's "Merged" / "In review" /
+// "Ready to ship" words do not drop to "Finished" and back on every reload. Returns `next`.
+function carryHistoryPr(next) {
+  const prev = new Map();
+  for (const r of state.historyAll || []) if (r && r.pr !== undefined) prev.set(`${r.projectKey}/${r.id}`, r.pr);
+  if (!prev.size) return next;
+  for (const r of next) {
+    if (!r || r.pr !== undefined) continue;
+    const key = `${r.projectKey}/${r.id}`;
+    if (prev.has(key)) r.pr = prev.get(key);
+  }
+  return next;
+}
 
 let historyLoadToken = 0;                 // monotonically increasing; newest wins (per-tab)
 let historyInFlight = null;               // AbortController for the current skeleton fetch
@@ -16726,13 +16670,12 @@ async function loadHistoryView({ force = false } = {}) {
   if (!force) {
     const cached = readHistoryCache();
     if (cached) {
-      state.historyAll = cached.pipelines;
+      state.historyAll = carryHistoryPr(cached.pipelines);
       state.ghAvailable = cached.ghAvailable;
-      restoreHistoryFilter();
-      paintHistory();                     // instant; cards show Create-PR in its neutral state
+      paintHistory();                     // instant; rows read their last known PR until Phase 2
     }
   }
-  setHistoryLoading(true);                // spinner + disable Refresh
+  setHistoryLoading(true);                // the list is aria-busy until Phase 2 settles
 
   let res, data;
   try {
@@ -16751,11 +16694,10 @@ async function loadHistoryView({ force = false } = {}) {
     setHistoryLoading(false);
     return;
   }
-  const pipelines = Array.isArray(data.pipelines) ? data.pipelines : [];
+  const pipelines = carryHistoryPr(Array.isArray(data.pipelines) ? data.pipelines : []);
   state.historyAll = pipelines;
-  void refreshCommentCounts();   // non-blocking: the pill lands on the next tick
+  state.historyError = '';
   state.ghAvailable = !!data.ghAvailable;
-  restoreHistoryFilter();
   paintHistory();                                        // fresh skeleton repaint
   rdRepaintOpenGlance();                                 // an open finished run reads its PR from these rows
   if (pipelines.length) writeHistoryCache(pipelines, data.ghAvailable);  // never cache empty/error
@@ -16763,19 +16705,9 @@ async function loadHistoryView({ force = false } = {}) {
   // NOTE: the spinner intentionally stays ON here; onHistoryPr (or the watchdog) clears it.
 }
 
-// Restore the remembered filter, but only if that project still has history;
-// otherwise fall back to All Projects (the default).
-function restoreHistoryFilter() {
-  const saved = localStorage.getItem(HISTORY_FILTER_KEY) || '';
-  state.historyFilter = saved && state.historyAll.some((p) => p && p.projectKey === saved) ? saved : '';
-}
-
-// Loading affordance for Refresh: disable + spin the button and mark the list
-// aria-busy. Mirrors the per-button busy idiom in setupPrButton/setupHdActions.
+// Loading affordance: the Runs list is aria-busy while History (re)loads.
 function setHistoryLoading(on) {
-  const btn = el.refreshHistory;                         // #refresh-history
-  if (btn) { btn.disabled = !!on; btn.classList.toggle('busy', !!on); }
-  if (el.history) el.history.setAttribute('aria-busy', on ? 'true' : 'false');
+  if (el.runsList) el.runsList.setAttribute('aria-busy', on ? 'true' : 'false');
 }
 
 // Phase-2 trigger + WS handler. The spinner stays on through PR enrichment and is
@@ -16822,172 +16754,68 @@ function cssEscape(s) {
   return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/["\\\]]/g, '\\$&');
 }
 
-// Rebuild the .hist-pr node from the template so a re-patch (e.g. a Refresh after a
-// link was already rendered) starts from the Create-PR BUTTON again: setupPrButton
-// early-returns if it cannot find `.hist-pr` (a prior button->link swap did
-// btn.replaceWith(link)), so that swap must be undone first. Cloning a fresh node
-// also drops any click listener a prior setupPrButton attached.
-// No merge half any more — the v2 card template has no `.hist-merge` (the pill is
-// detail-only), so cloning one would throw on every PR patch. The fresh button is
-// inserted BEFORE `.hist-open` so the chevron stays last in the aside.
-function resetPrCluster(card) {
-  const aside = card.querySelector('.hist-aside');
-  // A PR batch can land after its document is gone (a test harness swapping pages): nothing to patch.
-  const tpl = $('#hist-card-tpl');
-  if (!aside || !tpl) return;
-  const freshPr = tpl.content.querySelector('.hist-pr').cloneNode(true);
-  const curPr = aside.querySelector('.hist-pr, .hist-pr-link');         // button OR the swapped-in link
-  if (curPr) curPr.replaceWith(freshPr);
-  else aside.insertBefore(freshPr, aside.querySelector('.hist-open'));
-}
-
 function patchHistoryPr({ projectKey, id, pr }) {
-  // 1) Update the in-memory model (by id AND projectKey) so a later paintHistory()
-  //    (e.g. a filter click) does NOT revert the card to its pr-less state.
+  // 1) Update the in-memory model (by id AND projectKey): the Runs row's word and a
+  //    later repaint read it from here.
   const row = state.historyAll.find((r) => r && r.id === id && r.projectKey === projectKey);
   if (row) row.pr = pr || null;
 
-  // 1b) Keep an OPEN detail screen for this run in step. BEFORE the `!card`
-  //     early-out below: the deep-link case this hook exists for is exactly the
-  //     one where the matching list card is filtered off-screen.
+  // 2) Keep an OPEN detail screen for this run in step.
   hdSyncPr(projectKey, id, row);
 
-  // 2) Patch ONLY the matching live card in place. NEVER call paintHistory() here —
-  //    a full repaint blows away expand state + the lazily-fetched stepper.
-  const sel = `.hist-card[data-pipeline-id="${cssEscape(id)}"][data-project-key="${cssEscape(projectKey)}"]`;
-  const card = el.history.querySelector(sel);
-  if (!card) return;                                         // off-screen (filtered out) — model is enough
-  resetPrCluster(card);
-  setupPrButton(card, row?.projectDir || null, row || { id, projectKey, pr }, state.ghAvailable);
-  // A MERGED enrichment hides only a LIVE diff pill (the merge emptied its
-  // source...feature diff); a row with frozen counts (`diffFrozen`) keeps showing them.
-  renderHistDiffPill(card.querySelector('.hist-diff-pill'), row || { id, projectKey, pr });
-  // No setMergePill: clarification B — merged-or-not is shown by the link swap inside
-  // setupPrButton (OPEN->"View PR", MERGED->"Merged"); the pill is detail-only now.
+  // 3) The row's word ("Merged", "In review") comes from `pr`. NEVER call paintHistory()
+  //    here: scheduleRunsPaint is a coalesced, signature-diffed repaint, not a rebuild.
+  scheduleRunsPaint();
 }
 
 // Enrichment terminated (final WS batch, failed POST, or the watchdog): any entry
-// still unresolved (pr === undefined) is treated as "no PR" so its control is
-// revealed. Without this an eligible entry the server never sent a batch for — or a
-// load where enrichment failed entirely — would stay hidden forever. Patches the
-// visible card in place; off-screen rows get the model update and resolve on the
-// next paint (e.g. a filter click). Callers already gate on the load token.
+// still unresolved (pr === undefined) is treated as "no PR" so its word settles.
+// Without this an eligible entry the server never sent a batch for — or a load where
+// enrichment failed entirely — would stay pending forever. Callers already gate on
+// the load token.
 function finalizeHistoryPr() {
   for (const row of state.historyAll) {
     if (!row || row.pr !== undefined) continue;        // already resolved (object or null)
     row.pr = null;                                      // resolved: no open/merged PR
-    // Same reason as in patchHistoryPr: before the `!card` continue, or a
-    // deep-linked eligible run keeps `pr === undefined` and never offers Create PR.
+    // A deep-linked eligible run must not keep `pr === undefined` and never offer Create PR.
     hdSyncPr(row.projectKey, row.id, row);
-    const sel = `.hist-card[data-pipeline-id="${cssEscape(row.id)}"][data-project-key="${cssEscape(row.projectKey)}"]`;
-    const card = el.history.querySelector(sel);
-    if (!card) continue;                                // off-screen — model update is enough
-    resetPrCluster(card);
-    setupPrButton(card, row.projectDir || null, row, state.ghAvailable);
-    renderHistDiffPill(card.querySelector('.hist-diff-pill'), row);
   }
+  scheduleRunsPaint();
 }
 
-// Distinct projects present in the dataset, in most-recent-activity order
-// (listAllPipelines is newest-first, so first encounter === most recent pipeline).
-function historyProjects() {
-  const seen = new Map(); // projectKey -> { key, name, count, workspace }
-  for (const p of state.historyAll) {
-    if (!p || !p.projectKey) continue;
-    const cur = seen.get(p.projectKey);
-    if (cur) cur.count += 1;
-    else {
-      const isWs = p.target === 'workspace';
-      // Workspace rows (projectKey="workspaces/<key>") prefer the workspace name.
-      const name = isWs ? (p.workspaceName || p.projectName || p.projectKey) : (p.projectName || p.projectKey);
-      seen.set(p.projectKey, { key: p.projectKey, name, count: 1, workspace: isWs });
-    }
-  }
-  return [...seen.values()];
-}
-
-// The pinned pills toolbar has a dynamic height (pills wrap on narrow widths),
-// so measure it and expose it as --hist-toolbar-h on the History view. The
-// per-project sticky header reads it (top:var(--hist-toolbar-h)) to sit exactly
-// below the toolbar instead of behind it.
-let histToolbarRO = null;
-function syncHistToolbarHeight() {
-  const tb = el.historyFilter;
-  if (!tb) return;
-  const view = tb.closest('.view');
-  if (view) view.style.setProperty('--hist-toolbar-h', tb.offsetHeight + 'px');
-}
-function ensureHistToolbarObserver() {
-  // window.ResizeObserver matches the existing usage at app.js:766; absent under
-  // jsdom, where the typeof guard makes this a no-op (offsetHeight is 0 there).
-  if (histToolbarRO || !el.historyFilter || typeof ResizeObserver === 'undefined') return;
-  histToolbarRO = new window.ResizeObserver(() => syncHistToolbarHeight());
-  histToolbarRO.observe(el.historyFilter);
-}
-
-// Build the pill row: "All Projects" + one pill per project. Clicking sets the
-// filter, persists it, and repaints.
-function renderHistoryPills() {
+// Started-by pills (shared deployments only), one scrolling row (D4): the distinct starters
+// in the loaded history, the viewer first as "you". A filter over every Runs row.
+function renderRunsPeople() {
   const host = el.historyFilter;
   if (!host) return;
   host.innerHTML = '';
-
-  const mkPill = (key, label, count, isWs = false) => {
+  const people = historyPeople();
+  host.hidden = !people.length;
+  if (!people.length) return;
+  const lab = document.createElement('span');
+  lab.className = 'hist-pill-label';
+  lab.textContent = 'Started by';
+  host.appendChild(lab);
+  for (const pp of people) {
     const b = document.createElement('button');
     b.type = 'button';
-    const active = state.historyFilter === key;
-    b.className = 'hist-pill' + (isWs ? ' ws' : '') + (active ? ' active' : '');
-    b.dataset.projectKey = key;
+    const active = state.historyPerson === pp.key;
+    b.className = 'hist-pill person' + (active ? ' active' : '');
+    b.dataset.person = pp.key;
     b.setAttribute('aria-pressed', active ? 'true' : 'false');
+    b.title = active ? 'Show runs by everyone' : `Only runs started by ${pp.name}`;
+    b.appendChild(personIni(pp.name));
     const txt = document.createElement('span');
-    txt.textContent = label;
+    txt.textContent = pp.label;
     b.appendChild(txt);
-    b.appendChild(document.createTextNode(' ')); // keep label/count separable in textContent
+    b.appendChild(document.createTextNode(' '));
     const c = document.createElement('span');
     c.className = 'pill-count';
-    c.textContent = String(count);
+    c.textContent = String(pp.count);
     b.appendChild(c);
-    b.addEventListener('click', () => setHistoryFilter(key));
-    return b;
-  };
-
-  host.appendChild(mkPill('', 'All Projects', state.historyAll.length));
-  for (const pr of historyProjects()) host.appendChild(mkPill(pr.key, pr.name, pr.count, pr.workspace));
-
-  // "Started by" pills (shared deployments only): the distinct starters in the loaded
-  // history, the viewer first as "you". A second, independent filter.
-  const people = historyPeople();
-  if (people.length) {
-    const lab = document.createElement('span');
-    lab.className = 'hist-pill-label';
-    lab.textContent = 'Started by';
-    host.appendChild(lab);
-    for (const pp of people) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      const active = state.historyPerson === pp.key;
-      b.className = 'hist-pill person' + (active ? ' active' : '');
-      b.dataset.person = pp.key;
-      b.setAttribute('aria-pressed', active ? 'true' : 'false');
-      b.title = active ? 'Show runs by everyone' : `Only runs started by ${pp.name}`;
-      b.appendChild(personIni(pp.name));
-      const txt = document.createElement('span');
-      txt.textContent = pp.label;
-      b.appendChild(txt);
-      b.appendChild(document.createTextNode(' '));
-      const c = document.createElement('span');
-      c.className = 'pill-count';
-      c.textContent = String(pp.count);
-      b.appendChild(c);
-      b.addEventListener('click', () => { state.historyPerson = active ? '' : pp.key; paintHistory(); });
-      host.appendChild(b);
-    }
+    b.addEventListener('click', () => { state.historyPerson = active ? '' : pp.key; paintHistory(); });
+    host.appendChild(b);
   }
-
-  // Keep the sticky project header offset in sync with the toolbar's height
-  // (also re-measures on resize, when pills wrap to more/fewer rows).
-  ensureHistToolbarObserver();
-  syncHistToolbarHeight();
 }
 
 /** The distinct people who started loaded runs: [{ key, name, label, count }], the viewer first. */
@@ -17005,102 +16833,15 @@ function historyPeople() {
   return [...byKey.values()].sort((a, b) => (isViewer(b.name) - isViewer(a.name)) || b.count - a.count || a.name.localeCompare(b.name));
 }
 
-// Switch the active project filter, persist it (so it survives reloads), repaint.
-// Selecting All Projects clears the memory (the default needs no stored value).
-function setHistoryFilter(key) {
-  state.historyFilter = key || '';
-  if (state.historyFilter) localStorage.setItem(HISTORY_FILTER_KEY, state.historyFilter);
-  else localStorage.removeItem(HISTORY_FILTER_KEY);
-  paintHistory();
-}
-
-// Repaint pills + the list from the in-memory dataset (no refetch).
+// Repaint the pills and the Runs list from the in-memory dataset (no refetch).
 function paintHistory() {
-  // If the active filter's project is gone (e.g. its last pipeline was just
-  // deleted in this session), fall back to All Projects so the view never
-  // strands on an empty, unselectable filter.
-  if (state.historyFilter && !state.historyAll.some((p) => p && p.projectKey === state.historyFilter)) {
-    state.historyFilter = '';
-    localStorage.removeItem(HISTORY_FILTER_KEY);
-  }
   if (state.historyPerson && !historyPeople().some((pp) => pp.key === state.historyPerson)) state.historyPerson = '';
-  renderHistoryPills();
-  renderHistory();
-  // An open detail screen re-reads its (possibly late-arriving, possibly mutated)
-  // list row from the same dataset. No-op when no detail is open.
-  refreshHdFromRow();
-  refreshProjOverview();
-}
-
-// Render #history from state.historyAll filtered by state.historyFilter.
-//   All Projects ('')  -> per-project sections, each with a sticky header.
-//   A specific project -> flat list (the active pill already names the project).
-function renderHistory() {
-  const host = el.history;
-  host.innerHTML = '';
-  const all = Array.isArray(state.historyAll) ? state.historyAll : [];
-
-  // A finished-but-unacknowledged pipeline (lingerer) AND a paused pipeline both
-  // live ONLY in the Running list — suppress them from History by pipelineId so
-  // they don't double-show. A lingerer reappears in History once acknowledged; a
-  // paused run reappears (as the resumed/finished record) once resumed or stopped.
-  const hiddenPids = new Set(
-    [...runs.values()]
-      .filter((r) => (isLingering(r) || isPaused(r)) && r.pipelineId)
-      .map((r) => r.pipelineId)
-  );
-  const visible = hiddenPids.size ? all.filter((p) => !hiddenPids.has(p.id)) : all;
-
-  const filter = state.historyFilter;
-  const person = viewer.shared ? state.historyPerson : '';
-  const byProject = filter ? visible.filter((p) => p && p.projectKey === filter) : visible;
-  const records = person ? byProject.filter((p) => personShown(p && p.startedBy).toLowerCase() === person) : byProject;
-
-  if (!records.length) {
-    host.appendChild(histEmpty(person ? 'No saved pipelines started by this person here yet.'
-      : filter ? 'No saved pipelines for this project yet.' : 'No saved pipelines yet.'));
-    return;
-  }
-
-  if (filter) {
-    for (const p of records) host.appendChild(buildHistCard(p.projectDir || null, p, state.ghAvailable));
-    return;
-  }
-
-  // All Projects: bucket by projectKey, preserving the newest-first group order.
-  const groups = new Map(); // key -> { name, items: [] }
-  for (const p of records) {
-    const key = p && p.projectKey ? p.projectKey : '';
-    let g = groups.get(key);
-    if (!g) {
-      // Workspace rows prefer the workspace name for the section header.
-      const name = (p && p.target === 'workspace' && p.workspaceName)
-        || (p && p.projectName) || key || '(unknown project)';
-      g = { name, items: [] };
-      groups.set(key, g);
-    }
-    g.items.push(p);
-  }
-  for (const g of groups.values()) host.appendChild(buildHistGroup(g));
-}
-
-// One per-project section: a sticky, non-collapsible header + that project's cards.
-function buildHistGroup(group) {
-  const wrap = document.createElement('section');
-  wrap.className = 'hist-group';
-
-  const head = document.createElement('div');
-  head.className = 'hist-group-head';
-  const name = document.createElement('span');
-  name.textContent = group.name;
-  const count = document.createElement('span');
-  count.className = 'pill-count';
-  count.textContent = String(group.items.length);
-  head.append(name, ' ', count); // space keeps name/count separable in textContent
-  wrap.appendChild(head);
-
-  for (const p of group.items) wrap.appendChild(buildHistCard(p.projectDir || null, p, state.ghAvailable));
-  return wrap;
+  renderRunsPeople();
+  if (inRunsView()) paintRunsList();
+  updateNavCounts();       // a paused History row counts toward the badge
+  refreshHdFromRow();      // an open saved run re-reads its row
+  refreshProjOverview();   // the Projects page reads state.historyAll too
+  rdHandOffOpen();         // a finished run on the Running page moves to its saved row
 }
 
 // One row of the history empty/error state — a DIV (never an <li>).
@@ -17109,58 +16850,6 @@ function histEmpty(text) {
   div.className = 'hist-empty';
   div.textContent = text;
   return div;
-}
-
-// Wire the list card's Create-PR button. Eligibility is `histPrEligible` (shared
-// with the detail screen); a click navigates to the detail page and arms the
-// "Ship it?" modal rather than POSTing from here. No `.hist-merge` lookup — the
-// mergeability pill is detail-only now.
-function setupPrButton(node, projectDir, p, ghAvailable) {
-  const btn = node.querySelector('.hist-pr');
-  if (!btn) return;
-
-  // A PR already open or merged for this branch -> never offer "Create PR";
-  // replace the button with a link to that existing PR (reusing gh's URL). This
-  // runs BEFORE the `survived` eligibility check, so a merged PR whose branch was
-  // deleted (survived === false) still shows a "Merged" link.
-  const pr = p.pr && typeof p.pr === 'object' ? p.pr : null;
-  const prState = pr ? String(pr.state || '').toUpperCase() : '';
-  if (pr && (prState === 'OPEN' || prState === 'MERGED') && pr.url) {
-    const link = document.createElement('a');
-    link.className = prState === 'MERGED' ? 'hist-pr-link merged' : 'hist-pr-link';
-    link.href = pr.url;
-    link.target = '_blank';
-    link.rel = 'noopener';
-    link.textContent = prState === 'MERGED' ? 'Merged' : 'View PR';
-    // Clicking the link must not toggle the surrounding history card.
-    link.addEventListener('click', (e) => e.stopPropagation());
-    btn.replaceWith(link);
-    return;
-  }
-
-  // ONE shared predicate with paintHdPr and the pendingShipIt consumer. It adds the
-  // workspace clause the open-coded gate was missing: POST /api/pr has no workspace
-  // arm and its key regex rejects a `workspaces/…` composite with a 404, so offering
-  // "Create PR" there could only ever end in a failed ship. `ghAvailable` stays a
-  // parameter (the three call sites keep passing it) — the GATE reads state itself.
-  if (!histPrEligible(p)) { btn.hidden = true; return; }
-
-  // PR state not yet resolved for this entry (Phase-2 enrichment still in flight).
-  // Keep the button hidden instead of flashing "Create PR" on an entry that may
-  // already have an OPEN/MERGED PR. patchHistoryPr (per-entry result) or
-  // finalizeHistoryPr (terminal) re-runs this with a resolved pr — object or null —
-  // and reveals the correct control. Tri-state on entry.pr:
-  //   undefined = pending, null = looked/none, object = found.
-  if (p.pr === undefined) { btn.hidden = true; return; }
-
-  btn.hidden = false;
-  // The list card never fires the PR call itself: it hands the intent to the detail
-  // screen, which owns the "Ship it?" confirm modal and every PR control from here on.
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation(); // never let the whole-card navigation double-fire
-    pendingShipIt = { id: p.id, projectKey: p.projectKey };
-    location.hash = `history/${histDetailParam(p)}`;
-  });
 }
 
 // A history entry is deletable only when finished (never while live/running/
@@ -17420,142 +17109,13 @@ function scheduleMergeRecheck(mergeEl, body) {
   if (t && typeof t.unref === 'function') t.unref();
 }
 
-// Build one history card from a (disk or live) record. The card is a LINK: the
-// whole head navigates to the detail screen (#history/<projectKey>/<id>); it never
-// expands in place. Interactive descendants (title, copy, Create PR) opt out.
-function buildHistCard(projectDir, p, ghAvailable = false) {
-  const tpl = $('#hist-card-tpl');
-  const node = tpl.content.firstElementChild.cloneNode(true);
-  const id = p.id || '';
-  // patchHistoryPr / finalizeHistoryPr locate cards by BOTH stamps.
-  node.dataset.pipelineId = id;
-  node.dataset.projectKey = p.projectKey || '';
-
-  paintHistStatusIcon(node.querySelector('.hist-sic'), p);
-  const { word, family } = histStatusMeta(p);
-  const wordEl = node.querySelector('.hist-status-word');
-  wordEl.textContent = word;
-  wordEl.className = `hist-status-word st-${family}`;
-
-  const titleEl = node.querySelector('.h-meta b');
-  titleEl.textContent = p.title || id || '(untitled)'; // project shown by the pill / section header
-  const src = sourceBadge(p);   // provenance sits in the META line (null for prompt/markdown rows)
-  if (src) node.querySelector('.hist-meta-line').appendChild(src);
-
-  const { day, clock } = splitDateStamp(p.startedAt || p.mtime);
-  const seg = (name, text) => {
-    const wrapEl = node.querySelector(`.hist-${name}-seg`);
-    if (!text) { wrapEl.hidden = true; return; }
-    node.querySelector(`.hist-${name}`).textContent = text;
-  };
-  seg('day', day);
-  seg('clock', clock);
-  seg('time', typeof p.totalActiveMs === 'number' ? fmtDuration(p.totalActiveMs) : '');
-  seg('total', typeof p.totalCostUsd === 'number' ? fmtUsd(p.totalCostUsd) : '');
-  // Who started it (shared deployments only): an initials circle + "by you" / "by <name>".
-  const by = personLabel(p.startedBy);
-  seg('by', by ? `by ${by}` : '');
-  if (by) {
-    const full = personShown(p.startedBy);
-    const byEl = node.querySelector('.hist-by');
-    byEl.title = `Started by ${full}`;
-    byEl.before(personIni(full));
-  }
-  if (typeof p.totalCostUsd === 'number') node.querySelector('.hist-total').title = estTitle(p.totalCostUsd);
-
-  renderHistDiffPill(node.querySelector('.hist-diff-pill'), p);
-  renderHistCommentPill(node.querySelector('.hist-cmt-pill'), p);
-
-  // Branch line: "source → destination" plus a copy button for the destination.
-  // Legacy rows may lack sourceBranch — then the source half (and arrow) stays
-  // hidden; no destination hides the whole row.
-  const branchEl = node.querySelector('.hist-branch');
-  const feature = p.branch || '';
-  const source = p.sourceBranch || '';
-  branchEl.hidden = !feature;
-  branchEl.querySelector('.hist-branch-dst').textContent = feature;
-  const srcEl = branchEl.querySelector('.hist-branch-src');
-  srcEl.textContent = source;
-  srcEl.hidden = !source;
-  // SVG elements have no `hidden` IDL property (HTMLElement-only) — assigning
-  // `.hidden` would set a dead expando and leave the attribute in place.
-  branchEl.querySelector('.hist-branch-arrow').toggleAttribute('hidden', !source);
-  const copyBtn = branchEl.querySelector('.hist-branch-copy');
-  copyBtn.addEventListener('click', (e) => {
-    e.stopPropagation(); // copy must not navigate to the detail screen
-    copyBranchToClipboard(copyBtn, feature);
-  });
-
-  // Pause note. Resume + its budget gating live on the detail page now; the
-  // dataset stamp survives for parity/debugging.
-  const pauseReason = typeof p.pauseReason === 'string' ? p.pauseReason : '';
-  const pauseDetail = typeof p.pauseDetail === 'string' ? p.pauseDetail : '';
-  if (pauseReason) node.dataset.pauseReason = pauseReason;
-  if (pauseDetail) node.dataset.pauseDetail = pauseDetail;
-  const noteEl = node.querySelector('.hist-pausenote');
-  const parked = PAUSED_STATUSES.includes(String(p.status || '').toLowerCase());
-  const costPaused = parked && pauseReason.startsWith('cost_');
-  const errorPaused = parked && (pauseReason === 'error' || pauseReason === 'recoverable');
-  noteEl.hidden = !(costPaused || errorPaused);
-  // A team cap names its source, like the status pill (team-policy design board 9).
-  const COST_NOTE = { cost_total: 'paused · total budget', cost_pipeline_policy: 'paused · team cap', cost_total_policy: 'paused · team total' };
-  noteEl.textContent = costPaused
-    ? (COST_NOTE[pauseReason] || 'paused · cost limit')
-    : (errorPaused ? (pauseReason === 'recoverable' ? 'paused · recoverable' : 'paused · error') : '');
-  // The cause is too long for the caption line — it rides as the tooltip.
-  noteEl.title = errorPaused ? pauseDetail : '';
-  noteEl.classList.toggle('total', costPaused && pauseReason === 'cost_total');
-  noteEl.classList.toggle('error', errorPaused);
-
-  renderRetainedWork(node, p);           // badge only — the card has no banner node
-  setupPrButton(node, projectDir, p, ghAvailable);
-
-  // Whole-card click -> detail page. Interactive descendants opt out.
-  const go = () => {
-    histReturnFocus = { id: p.id, projectKey: p.projectKey };   // Esc/Back come home here
-    location.hash = `history/${histDetailParam(p)}`;
-  };
-  const head = node.querySelector('.hist-head');
-  head.addEventListener('click', (e) => {
-    if (e.target.closest('button, a')) return;
-    go();
-  });
-  head.addEventListener('keydown', (e) => {
-    if ((e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') && !e.target.closest('button, a')) {
-      e.preventDefault();
-      go();
-    }
-  });
-  node.querySelector('.hist-open').addEventListener('click', (e) => { e.stopPropagation(); go(); });
-  return node;
-}
-
-// Unresolved diff-comment counts, keyed "<storeKey>/<pipelineId>" — the same key
-// the server groups by. Its own fetch rather than a field on /api/history: that
-// response has a localStorage skeleton cache (test/ui-history-cache.test.mjs), so a
-// cached paint would render a stale pill.
-async function refreshCommentCounts() {
-  try {
-    const res = await fetch('/api/diff-comments/counts');
-    if (!res.ok) return;
-    const out = await res.json();
-    state.commentCounts = (out && out.counts) || {};
-  } catch { return; }
-  if (currentView() === 'history') paintHistory();
-}
-
 // A single Ask turn can write a dozen comments and EVERY write broadcasts, so the
-// raw poke is a repaint storm: one /api/diff-comments/counts round trip plus a
-// whole paintHistory() per frame, and a comments refetch + card repaint for the
-// run on screen. coalesce() runs the FIRST frame of a burst immediately — a poke
-// caused by the user's own click must feel instant — and collapses every further
-// frame inside the window into ONE trailing run. Trailing-edge only (debounce()
-// in source-pane.mjs) would delay that first frame by the whole window, which is
+// raw poke is a repaint storm: a comments refetch + repaint per frame for the run on
+// screen. coalesce() runs the FIRST frame of a burst immediately — a poke caused by
+// the user's own click must feel instant — and collapses every further frame inside
+// the window into ONE trailing run. Trailing-edge only (debounce() in
+// source-pane.mjs) would delay that first frame by the whole window, which is
 // latency the local mutation path does not have.
-//
-// TWO independent coalescers, not one: the counts refresh fires for EVERY run's
-// poke while the tab reload fires only for the run on screen, so sharing a window
-// would let another run's frame delay this run's repaint.
 const COMMENT_POKE_MS = 250;
 function coalesce(fn, ms) {
   let timer = null;
@@ -17576,7 +17136,6 @@ function coalesce(fn, ms) {
   };
   return () => { if (timer == null) run(); else queued = true; };
 }
-const pokeCommentCounts = coalesce(() => { void refreshCommentCounts(); }, COMMENT_POKE_MS);
 const pokeOpenDiffTab = coalesce(() => { if (hdCommentState) void hdCommentState.reload(); }, COMMENT_POKE_MS);
 
 // Agent memory (§10 / A11): a burst of `memory-changed` frames (an Ask turn remembering five
@@ -17591,46 +17150,6 @@ const pokeProjectMemory = coalesce(() => {
   const ctl = projDetail && projDetail.memCtl;
   if (ctl) void ctl.load(ctl.selectedName(), { fromFrame: true });
 }, COMMENT_POKE_MS);
-
-function renderHistCommentPill(pill, p) {
-  if (!pill) return;
-  const n = (state.commentCounts || {})[`${p && p.projectKey}/${p && p.id}`] || 0;
-  if (!n) { pill.hidden = true; return; }
-  pill.hidden = false;
-  pill.querySelector('.hist-cmt-count').textContent = String(n);
-  pill.title = `${n} unresolved diff comment${n === 1 ? '' : 's'}`;
-}
-
-// Diff pill: frozen counts (`diffFrozen`, the run's own results.json summary) always
-// show — merged PR and branch gone alike — as +A −R, or "no diff" when the run
-// really changed nothing. Without them (a live or legacy run) the counts are the
-// live source...feature diff: survived with changes -> +A −R; survived with none ->
-// "no diff"; merged PR or branch gone -> hidden (that diff is empty or unknowable).
-// NOTE: the minus glyph is U+2212 (−), not an ASCII hyphen; the jsdom test
-// asserts it byte-for-byte, so keep this exact character.
-function renderHistDiffPill(pill, p) {
-  if (!pill) return;
-  const frozen = !!(p && p.diffFrozen);
-  const merged = p && p.pr && typeof p.pr === 'object' && String(p.pr.state || '').toUpperCase() === 'MERGED';
-  if (!p || (!frozen && (!p.survived || merged))) { pill.hidden = true; return; }
-  pill.hidden = false;
-  const added = Number.isFinite(+p.added) ? +p.added : 0;
-  const removed = Number.isFinite(+p.removed) ? +p.removed : 0;
-  const diffEl = pill.querySelector('.hist-diff');
-  const noneEl = pill.querySelector('.hist-nodiff');
-  const has = added > 0 || removed > 0;
-  noneEl.hidden = has;
-  diffEl.hidden = !has;
-  diffEl.textContent = '';
-  if (has) {
-    const add = document.createElement('span'); add.className = 'diff-add'; add.textContent = `+${added}`;
-    const del = document.createElement('span'); del.className = 'diff-del'; del.textContent = `−${removed}`; // U+2212
-    diffEl.append(add, ' ', del);
-    pill.title = frozen
-      ? `${added} added, ${removed} removed by this run`
-      : `${added} added, ${removed} removed vs ${p.sourceBranch || 'source'}`;
-  }
-}
 
 // Resolve the saved-pipeline detail URL ({state, auditMarkdown}) for a history
 // record. A workspace run (target==='workspace', projectKey="workspaces/<wkey>")
@@ -17884,8 +17403,8 @@ async function loadLiveLogs(panel, logUrl, st = null) {
 }
 
 function renderHistoryError(message) {
-  el.history.innerHTML = '';
-  el.history.appendChild(histEmpty(`Could not load history: ${message}`));
+  state.historyError = String(message || 'unknown error');
+  if (inRunsView()) paintRunsList();
 }
 
 // ---------------------------------------------------------------------------
@@ -17936,7 +17455,10 @@ function setHdMode(screen, mode, tab = '', { focus = true } = {}) {
   }
   if (changed && el.histDetail) el.histDetail.scrollTop = 0;
   if (changed && focus) {
-    const target = details ? screen.querySelector('.hd-to-run') : screen.querySelector('.hd-back');
+    // Side by side the glance's way back to the list is hidden (the list is in view), so
+    // coming back from Details lands on the glance's title (tabindex="-1") instead.
+    const target = details ? screen.querySelector('.hd-to-run')
+      : runsLayout() === 'split' ? screen.querySelector('.hd-glance .rd-page-title') : screen.querySelector('.hd-back');
     if (target && !target.hidden) target.focus({ preventScroll: true });
   }
 }
@@ -17947,12 +17469,12 @@ let histDetailState = null; // { key, id, record, data, screen } while open
 // `reload` refetches the comments and repaints CARDS ONLY — never the diff, never
 // the patch (D18).
 let hdCommentState = null; // { key, id, reload }
-// One-shot "the user pressed Create PR on the list card" intent, consumed by
+// One-shot "open the Ship it? modal on arrival" intent, consumed by
 // openHistDetail unconditionally so it can never strand across visits.
 let pendingShipIt = null;   // { id, projectKey } | null
-// Spec §11. The card that opened the detail, by DATA STAMPS rather than by node:
-// a repaint between open and close replaces the element, so closeHistDetail
-// re-queries. A deep link leaves this null and the restore is simply skipped.
+// Spec §11. The Runs row the saved page belongs to, by DATA STAMPS rather than by
+// node: a repaint between open and close replaces the element, so closeHistDetail
+// re-queries (slide layout only; side by side focus never left the list).
 let histReturnFocus = null; // { id, projectKey } | null
 
 function routeHistoryDetail(param, { instant = false } = {}) {
@@ -18003,7 +17525,7 @@ function openHistDetail(parsed, { instant = false } = {}) {
   histDetailState.screen = screen;
   watchPageTitle(screen, 'hd');
 
-  screen.querySelector('.hd-back').addEventListener('click', () => { location.hash = 'history'; });
+  screen.querySelector('.hd-back').addEventListener('click', () => { location.hash = 'runs'; });
   // Glance <-> Details are routes, so the browser's back and forward walk them.
   const toDetails = (tab = '') => { if (histDetailState) location.hash = hdHash(histDetailState, 'details', tab); };
   const toRun = () => { if (histDetailState) location.hash = hdHash(histDetailState); };
@@ -18023,20 +17545,16 @@ function openHistDetail(parsed, { instant = false } = {}) {
   screen.querySelector('.hd-glance .rd-now-title').textContent = record.title || parsed.id;
   paintHistStatusIcon(screen.querySelector('.hd-sic'), record);
 
-  if (instant) shell.classList.add('no-anim');
-  shell.classList.add('detail-open');
+  if (instant) holdRunsAnim();
+  shell.classList.add('detail-open');                  // #hist-shell: "the saved run is open"
   host.setAttribute('aria-hidden', 'false');
-  host.removeAttribute('inert');   // the previous close left it inert for the slide;
-                                   // focus() below is a no-op inside an inert subtree
-  // The off-screen list must not stay tabbable behind the detail. `aria-hidden`
-  // alone does NOT remove focusability — only `inert` does — so set BOTH.
-  const list = shell.querySelector('.hist-screen-list');
-  if (list) { list.setAttribute('aria-hidden', 'true'); list.setAttribute('inert', ''); }
-  // AFTER the mount and AFTER the list went inert (spec §11): leaving
-  // document.activeElement inside a subtree as it becomes inert is invalid, and
-  // `.hd-back` is the one control that is always present on this screen.
-  screen.querySelector('.hd-back').focus({ preventScroll: true });
-  if (instant) rafSafe(() => shell.classList.remove('no-anim'));
+  host.removeAttribute('inert');
+  syncRunsPane();
+  if (runsLayout() === 'slide') screen.querySelector('.hd-back').focus({ preventScroll: true });
+  else keepPaneFocus(screen);
+  // The row to hand focus back to on a slide close (the list row, by its data stamps).
+  histReturnFocus = { id: parsed.id, projectKey: parsed.projectKey };
+  rememberRun({ runId: '', pipelineId: parsed.id, projectKey: parsed.projectKey });
 
   // Consume the one-shot ship-it intent HERE, not inside the async loader, so a
   // failed detail fetch cannot strand it for a later, unrelated visit.
@@ -18069,50 +17587,30 @@ function closeHistDetail({ instant = false } = {}) {
   histDetailState = null;
   hdCommentState = null;
   host.setAttribute('aria-hidden', 'true');
-  // Un-inert the list FIRST — focus() is a no-op inside an inert subtree.
-  const list = shell.querySelector('.hist-screen-list');
-  if (list) { list.removeAttribute('aria-hidden'); list.removeAttribute('inert'); }
-  // Hand focus back to the card the detail was opened from, re-queried by the
-  // same stamped selector patchHistoryPr uses — the node itself may have been
-  // replaced by a repaint while the detail was up. One-shot: a subsequent deep
-  // link must not inherit it.
   const back = histReturnFocus;
   histReturnFocus = null;
-  // NOT on the instant path: that one runs from showView, which hides this whole
-  // section a few lines later — focusing a card inside a `display:none` subtree
-  // just drops focus to <body>. The restore is for list<->detail hops.
-  if (back && el.history && !instant) {
-    const sel = `.hist-card[data-pipeline-id="${cssEscape(back.id)}"]`
-      + `[data-project-key="${cssEscape(back.projectKey)}"] .hist-head`;
-    const node = el.history.querySelector(sel);
-    if (node) node.focus({ preventScroll: true });   // absent (archived/filtered) -> skip
-  }
-  // AFTER the focus hand-off (leaving activeElement inside a freshly-inert subtree
-  // is invalid): the screen stays MOUNTED until transitionend, so `aria-hidden`
-  // alone would leave .hd-back, the tab pills and .hd-archive tabbable behind the
-  // list for the whole slide. openHistDetail clears it.
+  const slide = runsLayout() === 'slide';
+  if (!slide) instant = true;                          // side by side: the pane swaps at once
+  // Un-inert the list, hand focus to the row, THEN make the screen inert (as before): the
+  // screen stays MOUNTED while it slides, and `aria-hidden` alone would leave it tabbable.
+  if (slide && !instant) { releaseRunsList(); if (back) focusRunsRow({ pipelineId: back.id, projectKey: back.projectKey }); }
   host.setAttribute('inert', '');
-  if (instant) {
-    shell.classList.add('no-anim');
-    shell.classList.remove('detail-open');
-    destroyGraphMounts(host);
-    host.innerHTML = '';
-    rafSafe(() => shell.classList.remove('no-anim'));
-    return;
-  }
+  if (instant) holdRunsAnim();
   shell.classList.remove('detail-open');
-  // Empty the screen after the slide (or via the timeout under reduced motion /
-  // jsdom, where transitionend never fires natively). transitionend BUBBLES, so
-  // a descendant's hover transition would otherwise clear the DOM mid-slide —
-  // hence the target + propertyName guard.
+  syncRunsPane();
+  if (instant) { destroyGraphMounts(host); host.innerHTML = ''; return; }
+  // The slide: empty the screen once the pane has slid out (or after the fallback; jsdom and
+  // reduced motion never fire transitionend). transitionend bubbles: guard target + property.
+  const pane = el.runsPane;
   const clear = () => { if (!histDetailState) { destroyGraphMounts(host); host.innerHTML = ''; } };
+  if (!pane) { clear(); return; }
   const onEnd = (e) => {
-    if (e.target !== host || e.propertyName !== 'transform') return;
-    host.removeEventListener('transitionend', onEnd);
+    if (e.target !== pane || e.propertyName !== 'transform') return;
+    pane.removeEventListener('transitionend', onEnd);
     clear();
   };
-  host.addEventListener('transitionend', onEnd);
-  const t = setTimeout(() => { host.removeEventListener('transitionend', onEnd); clear(); }, 600);
+  pane.addEventListener('transitionend', onEnd);
+  const t = setTimeout(() => { pane.removeEventListener('transitionend', onEnd); clear(); }, 600);
   if (t && typeof t.unref === 'function') t.unref();
 }
 
@@ -18129,6 +17627,9 @@ async function loadHistDetailScreen(screen, record, parsed, ship = null) {
     if (!data || !data.state) throw new Error('no saved details for this pipeline yet');
   } catch (e) {
     if (!histDetailState || histDetailState.screen !== screen) return; // navigated away mid-fetch
+    // A remembered saved run that no longer loads is not worth reopening next time.
+    const m = readLastRun();
+    if (m && !m.runId && m.pipelineId === parsed.id && m.projectKey === parsed.projectKey) forgetLastRun();
     const err = screen.querySelector('.hd-error');
     if (err) { err.hidden = false; err.textContent = `Could not load run: ${e.message}`; }
     const sub = screen.querySelector('.hd-glance .rd-now-sub');
@@ -18549,14 +18050,11 @@ function openShipItModal(record, data) {
       const pr = { state: 'OPEN', url: dd.url || '#', number: null };
       record.pr = pr;
       done();
-      // Keep the LIST card in step. Without this the card behind the detail keeps
-      // its stale "Create PR" button — list<->detail hops deliberately do NOT
-      // reload — so pressing Back and clicking it again sets pendingShipIt and
-      // re-opens this modal for a run that already has an OPEN PR, firing a second
-      // POST /api/pr. patchHistoryPr updates the model row, calls resetPrCluster +
-      // setupPrButton on the live card, and — through hdSyncPr — repaints the
-      // detail control too. It no-ops safely for an off-screen/filtered card, so
-      // the explicit detail paint below stays.
+      // Keep the model row in step — list<->detail hops deliberately do NOT reload, so
+      // without this a later reopen would offer "Create PR" again for a run that already
+      // has an OPEN PR, firing a second POST /api/pr. patchHistoryPr updates the row (the
+      // Runs row then reads "In review") and — through hdSyncPr — repaints the detail
+      // control too; the explicit detail paint below stays.
       patchHistoryPr({ projectKey: record.projectKey, id: record.id, pr });
       const screen = histDetailState && histDetailState.screen;
       if (screen) {
@@ -18593,7 +18091,7 @@ function openShipItModal(record, data) {
 }
 
 // THE single PR-eligibility predicate. Every caller uses it: paintHdPr (below),
-// setupPrButton (the list card) and the pendingShipIt consumer.
+// glancePrInput and the pendingShipIt consumer.
 //
 // `target !== 'workspace'` is MANDATORY and is the ONE clause the existing list
 // gate (app.js:8571) is missing. POST /api/pr has NO workspace arm and its key
@@ -18664,12 +18162,11 @@ function paintHdGlance(screen, record, data) {
   const activeMs = typeof st.totalActiveMs === 'number' ? st.totalActiveMs : liveTotalMs(st.steps, 0);
   paintGlanceFacts(glance, { summary: s || null, activeMs, cost: st.totalCostUsd || 0 });
 
-  // The result: things to check, every tab, the actions.
+  // The result: every tab, the actions. The things to check live in Overview only.
   const host = glance.querySelector('.hd-result');
   host.replaceChildren();
   const done = copy.state === 'done';
   const trail = trailColumns(run);
-  host.append(...glanceChecks(checks.map((c) => ({ ...c, origin: 'review' }))));
   host.append(...rdActivityGroups(screen, {
     overview: activityOverviewValue(results),
     workflow: trail.count ? `${trail.count} step${trail.count === 1 ? '' : 's'}` : '',
@@ -18679,7 +18176,7 @@ function paintHdGlance(screen, record, data) {
   // merged pull request is a fact (the headline), so its link is secondary.
   const acts = document.createElement('div');
   acts.className = 'rd-result-actions';
-  const mirror = (sel, label, cls) => {
+  const mirror = (sel, label, cls, icon) => {
     const src = screen.querySelector(sel);
     if (!src || src.hidden || !levelAtLeast(src.dataset.minLevel || 'simple')) return;
     if (src.tagName === 'A') {
@@ -18688,22 +18185,23 @@ function paintHdGlance(screen, record, data) {
       a.href = src.href;
       a.target = '_blank';
       a.rel = 'noopener';
-      a.textContent = label || src.textContent;
+      setCtaContent(a, icon, label);
       acts.appendChild(a);
       return;
     }
     const b = document.createElement('button');
     b.type = 'button';
     b.className = `rd-cta ${cls}`;
-    b.textContent = label;
+    setCtaContent(b, icon, label);
     b.addEventListener('click', () => src.click());
     acts.appendChild(b);
   };
-  mirror('.hd-resume', 'Resume', 'hd-g-resume');
+  const finished = done || RD_TERMINAL.includes(st.status);
+  mirror('.hd-resume', 'Resume', 'hd-g-resume', 'resume');
   splitGlanceResume(screen, acts);
-  mirror('.hd-pr', 'Create pull request', 'hd-g-pr');
-  mirror('.hd-pr-link', 'View pull request', `hd-g-pr-link${pr === 'MERGED' ? ' alt' : ''}`);
-  mirror('.hd-after', done || RD_TERMINAL.includes(st.status) ? 'Start a follow-up run' : 'Schedule a run after this', 'alt hd-g-after');
+  mirror('.hd-pr', 'Create pull request', 'hd-g-pr', 'pr-create');
+  mirror('.hd-pr-link', 'View pull request', `hd-g-pr-link${pr === 'MERGED' ? ' alt' : ''}`, pr === 'MERGED' ? 'merged' : 'pr-open');
+  mirror('.hd-after', finished ? 'Start a follow-up run' : 'Schedule a run after this', 'alt hd-g-after', finished ? 'follow-up' : 'schedule');
   if (acts.childNodes.length) host.appendChild(acts);
 }
 
@@ -19020,7 +18518,7 @@ async function resumePipeline(p, projectDir, btn, { ignoreCostCap = false, pastT
       const feat = (prior && prior.branchFeature)
         || (p.branch && typeof p.branch === 'object' ? p.branch.feature : null)
         || (typeof p.branch === 'string' ? p.branch : null);
-      if (feat) { nr.branchFeature = feat; paintRunCard(nr); }
+      if (feat) nr.branchFeature = feat;
     }
     if (prior) runs.delete(prior.runId);   // drop the superseded paused run (no split/dup)
     hideViewer();
@@ -19355,11 +18853,12 @@ function setupHdActions(screen, record, data) {
       const chainNote = await afterDependentsNote(`pipelineId=${encodeURIComponent(r.id)}`);
       delete archiveBtn.dataset.archiveState; archiveBtn.disabled = false;
       // Spec §5.2/D2 fixes this copy VERBATIM — do not paraphrase (only the
-      // run-title context line above it is ours). `.confirm-message` already
+      // run-title context line above it is ours; only the page name changed when
+      // History merged into Runs). `.confirm-message` already
       // declares white-space:pre-line, so the blank line renders as a paragraph.
       const ok = await confirmModal({
         title: 'Archive this pipeline?',
-        message: `${r.title || r.id}\n\nIt moves out of History. The local branch, worktree, and run artifacts (logs, results, diff) are removed. The remote branch and any open PR stay untouched.${chainNote}`,
+        message: `${r.title || r.id}\n\nIt moves out of Runs. The local branch, worktree, and run artifacts (logs, results, diff) are removed. The remote branch and any open PR stay untouched.${chainNote}`,
         confirmLabel: 'Archive',
         danger: true,
       });
@@ -19379,8 +18878,10 @@ function setupHdActions(screen, record, data) {
         // and the next boot would paint an empty History from cache before the
         // network answers.
         if (state.historyAll.length) writeHistoryCache(state.historyAll, state.ghAvailable);
+        const m = readLastRun();
+        if (m && m.pipelineId === r.id && (!m.projectKey || m.projectKey === r.projectKey)) forgetLastRun();
         paintHistory();
-        location.hash = 'history';
+        goRunsList();                               // the list itself: the archived run is gone
       } catch (err) {
         // Cleared only on failure: the success path navigates back to the list and
         // the screen (button included) is discarded.
@@ -20150,7 +19651,7 @@ function hdCommentComposer(doc, anchor, ctx, onClose, { mode = 'comment', root =
     // Cmd/Ctrl+Enter saves, Esc cancels.
     //
     // stopPropagation() here is NOT what makes Esc safe — see D20. The handler that
-    // would throw the draft away (`location.hash = 'history'`) is registered on
+    // would throw the draft away (`location.hash = 'runs'`) is registered on
     // `document` in the CAPTURE phase, so it has already run by the time this
     // bubble-phase listener sees the event. That handler gets an explicit guard
     // instead. stopPropagation stays only to shield the draft from BUBBLE-phase
@@ -21519,7 +21020,7 @@ function buildHdClarify(sec, record, data) {
 }
 
 // Logs tab: no fork of the log stack. loadLiveLogs owns the markup (the filter bar
-// cloned from #run-card-tpl + the .log box), the fetch, the facets, the filter and
+// cloned from #log-bar-tpl + the .log box), the fetch, the facets, the filter and
 // the cycle separators, so the detail gets exactly the Running view's behavior.
 function buildHdLogs(sec, record, data) {
   sec.classList.add('hd-sec-logs');
@@ -21714,7 +21215,7 @@ async function rdFetchDiff(r) {
   return { results, patch, live: false };
 }
 
-// Up to this many diff rows are connected per file; the rest stay one click away in History.
+// Up to this many diff rows are connected per file; the rest stay one click away on the saved run.
 const RD_DIFF_MAX_LINES = 4000;
 
 function rdRenderFileBody(pane, index, entry) {
@@ -22051,16 +21552,14 @@ function buildRdLogs(sec, ctx) {
   sec.appendChild(block);
 
   // The clone's search box is born empty; mirror the run's stored term so the
-  // visible bar matches the filter the hydration below actually applies
-  // (buildRunCard does exactly this for the card).
+  // visible bar matches the filter the hydration below actually applies.
   const searchBox = bar.querySelector('.log-search');
   if (searchBox) searchBox.value = r.logFilter.search || '';
   syncAutoscrollSwitch(r, sec);
   rdRepaintLog(sec, r);
   rdPaintLogFilters(sec, r);
 
-  // The card's log controls are DELEGATED on #run-list and the detail screen is
-  // not inside it, so this screen binds its own.
+  // Nothing above this screen delegates its log controls, so it binds its own.
   //
   // ONCE per section ELEMENT, not once per build: rdUpdateSections re-arms a
   // hidden section by clearing dataset.loaded, so this builder runs again on every
@@ -22455,7 +21954,7 @@ function repaintRunDetail(r) {
   paintRdTerminal((runDetailState && runDetailState.screen) || null, r);
 }
 
-// ── Terminal state + View in History (§5.2, D8) ─────────────────────────────
+// ── Terminal state + the hand-over to the saved run (§5.2) ──────────────────
 
 // The projectKey half of `#history/<projectKey>/<pipelineId>`. A live run carries
 // only projectDir, and projectKey is a server-side slug+sha1(canonicalProjectRoot)
@@ -22507,26 +22006,33 @@ function paintRdTerminal(screen, r) {
   // green caret is the visual half of "the log stops growing" (D8, §9's wr-blink).
   screen.classList.toggle('rd-terminal', terminal);
 
-  // The link is created here rather than in the template so it cannot exist in a
-  // half-painted state on a live run, and so the row-3 markup owns no state.
-  const row = screen.querySelector('.rd-row3');
-  let link = screen.querySelector('.rd-history-link');
-  if (!link && row) {
-    link = document.createElement('a');
-    link.className = 'rd-history-link';
-    link.textContent = 'View in History';
-    link.hidden = true;
-    row.appendChild(link);
-  }
-  if (!link) return;
-  const key = terminal ? historyKeyForRun(r) : '';
-  if (terminal && r.pipelineId && key) {
-    link.setAttribute('href', `#history/${key}/${r.pipelineId}`);
-    link.hidden = false;
-  } else {
-    link.removeAttribute('href');
-    link.hidden = true;
-  }
+  if (terminal) rdHandOffOpen();
+}
+
+// A finished run IS its saved run: once History has its finished row, the Running page
+// hands over on the same glance or Details tab (the tab keys match). replaceRoute, so
+// Back skips the live page. '' while the run is live or paused, or before its row lands —
+// a row that is still `live` may not have the final state on disk yet.
+function rdSavedRoute(r, mode = 'glance', tab = '') {
+  if (!r || !RD_TERMINAL.includes(r.status) || !r.pipelineId) return '';
+  const row = (state.historyAll || []).find((p) => p && p.id === r.pipelineId && p.projectKey);
+  if (!row || row.live || !isTerminalStatus(row.status)) return '';
+  return hdHash({ projectKey: row.projectKey, id: r.pipelineId }, mode, tab);
+}
+function rdHandOffToSaved(r, mode, tab) {
+  const to = rdSavedRoute(r, mode, tab);
+  if (!to) return false;
+  acknowledgeRun(r.runId);   // its result is on screen: the live row gives way to the saved one
+  replaceRoute(to);
+  return true;
+}
+// The open Running page: called when its run finishes and whenever History's rows change.
+function rdHandOffOpen() {
+  const [view, param] = parseHash();
+  if (view !== 'running' || !runDetailState || !runDetailState.screen) return;
+  const { runId, mode, tab } = runDetailParts(param);
+  if (runId !== runDetailState.runId) return;
+  rdHandOffToSaved(runs.get(runId), mode, tab);
 }
 
 // Escape on the History detail screen navigates back to the list — but never
@@ -22540,6 +22046,8 @@ document.addEventListener('keydown', (e) => {
   if (document.querySelector('.viewer-modal.sync-modal')) return;
   if (currentView() !== 'history') return;
   if (!el.histShell || !el.histShell.classList.contains('detail-open')) return;
+  // The search box owns its Escape (clears and closes the search).
+  if (e.target && typeof e.target.closest === 'function' && e.target.closest('#runs-search-row')) return;
   if (el.viewerCard && !el.viewerCard.classList.contains('hidden')) return;
   if (el.confirmModal && !el.confirmModal.classList.contains('hidden')) return;
   if (el.pluginModal && !el.pluginModal.classList.contains('hidden')) return;
@@ -22551,18 +22059,18 @@ document.addEventListener('keydown', (e) => {
   if (e.target && typeof e.target.closest === 'function' && e.target.closest('.hd-cmt-composer')) return;
   const ship = document.getElementById('shipit-modal');
   if (ship && !ship.classList.contains('hidden')) return;
-  // Symmetry with the Running arm below. #stop-modal also opens from a LIST card,
-  // so it can be up on a view where no Running detail is open; without this guard
-  // one Escape would both close it and send History's detail back.
+  // Symmetry with the Running arm below: whichever overlay is up owns Escape.
   const stopUp = document.getElementById('stop-modal');
   if (stopUp && !stopUp.classList.contains('hidden')) return;
   // The header's ⋯ menu owns Escape while it is open: dismiss it and stay on the
   // screen. Handled HERE rather than in its own listener because this one is capture
   // phase — a separate listener would fire after the navigation had already run.
   if (closeHdMenu({ focusTrigger: true })) return;
-  // Details steps back to the run's glance; the glance steps back to the list.
+  // Details steps back to the run's glance; the glance steps back to the list, in the
+  // slide only: side by side the list is already there.
   const hs = histDetailState;
-  location.hash = hs && hs.screen && hs.screen.dataset.mode === 'details' ? hdHash(hs) : 'history';
+  if (hs && hs.screen && hs.screen.dataset.mode === 'details') { location.hash = hdHash(hs); return; }
+  if (runsLayout() === 'slide') location.hash = 'runs';
 }, true);
 
 // Escape on the Running detail screen navigates back to the list — but never
@@ -22575,6 +22083,8 @@ document.addEventListener('keydown', (e) => {
   if (document.querySelector('.viewer-modal.sync-modal')) return;
   if (currentView() !== 'running') return;
   if (!el.runShell || !el.runShell.classList.contains('detail-open')) return;
+  // The search box owns its Escape (clears and closes the search).
+  if (e.target && typeof e.target.closest === 'function' && e.target.closest('#runs-search-row')) return;
   if (el.viewerCard && !el.viewerCard.classList.contains('hidden')) return;
   if (el.confirmModal && !el.confirmModal.classList.contains('hidden')) return;
   if (el.pluginModal && !el.pluginModal.classList.contains('hidden')) return;
@@ -22583,9 +22093,11 @@ document.addEventListener('keydown', (e) => {
   if (el.reportModal && !el.reportModal.classList.contains('hidden')) return;
   const stop = document.getElementById('stop-modal');
   if (stop && !stop.classList.contains('hidden')) return;
-  // Details steps back to the run's glance; the glance steps back to the list.
+  // Details steps back to the run's glance; the glance steps back to the list, in the
+  // slide only: side by side the list is already there.
   const screen = runDetailState.screen;
-  location.hash = screen && screen.dataset.mode === 'details' ? rdHash(runDetailState.runId) : 'running';
+  if (screen && screen.dataset.mode === 'details') { location.hash = rdHash(runDetailState.runId); return; }
+  if (runsLayout() === 'slide') location.hash = 'runs';
 }, true);
 
 // Escape on a project page navigates back to the list — never while an overlay modal is open,
@@ -23004,7 +22516,7 @@ function pipelineTabRuns() {
 }
 
 
-// Drives the Overview #run-list. PIPELINES ONLY (design D7): workspace scans and
+// Drives the Runs list's live rows. PIPELINES ONLY (design D7): workspace scans and
 // agent-generation jobs are wizard-local progress, not runs the user can open, so
 // they no longer render as cards — which makes this list identical in membership
 // to pipelineTabRuns() (the sidebar), which always filtered this way. Live
@@ -23276,134 +22788,6 @@ function runStatusMeta(r) {
   if (r.status === 'error') return { family: 'red', word, glyph: 'bang' };
   return { family: 'blue', word, glyph: 'spin' };   // running / starting / created
 }
-
-function paintRunStatusIcon(host, r) {
-  if (!host) return;
-  const { family, word, glyph } = runStatusMeta(r);
-  host.className = host.className.replace(/\bst-\w+\b/g, '').replace(/\s+/g, ' ').trim() + ` st-${family}`;
-  host.title = word;
-  host.setAttribute('aria-label', word);
-  for (const svg of host.querySelectorAll('.sic')) {
-    svg.toggleAttribute('hidden', !svg.classList.contains(`sic-${glyph}`));
-  }
-}
-
-// Render the run-card meta segment (started HH:MM:SS) and the branch chip.
-// Called from buildRunCard (with the freshly built node, before r.el is
-// assigned) AND from paintRunCard on every repaint, so a branch that arrives on
-// a later `state` event (or a resume) refreshes instead of leaving a stale chip.
-// The project name is NOT in the card meta any more (design §4.3) — the sidebar
-// row and the detail header carry it.
-function renderRunMeta(r, root = r.el) {
-  if (!root) return;
-  const metaEl = root.querySelector('.rm-text');
-  if (metaEl) metaEl.textContent = `started ${startedLabel(r.startedAt)}`;
-  const byEl = root.querySelector('.rc-by');
-  if (byEl) {
-    // Shared deployments only: an initials circle + "by you" / "by <name>".
-    const by = personLabel(r.startedBy);
-    const full = personShown(r.startedBy);
-    byEl.hidden = !by;
-    byEl.querySelector('.rc-by-text').textContent = by ? `by ${by}` : '';
-    const ini = byEl.querySelector('.person-ini');
-    if (ini) ini.textContent = full ? personInitials(full) : '';
-    byEl.title = full ? `Started by ${full}` : '';
-  }
-
-  // D15: progress is a NUMBER, never a bar. Hidden on every v1 run. This sits
-  // ABOVE the `if (!branchEl) return` exit, or a branch-less card never gets it.
-  const prog = root.querySelector('.rc-prog');
-  if (prog) {
-    const d = isGraphRun(r) ? runDecorFor(r).progress : null;
-    prog.hidden = !d || !d.total;        // a deciding Auto run has 0 agent nodes: no "0/0" (A33)
-    if (d) { const step = runStepLabel(r).name; prog.querySelector('.rc-prog-text').textContent = `${d.done}/${d.total}${step ? ` \u00b7 ${step}` : ''}`; }
-  }
-
-  const branchEl = root.querySelector('.rc-branch');
-  if (!branchEl) return;
-  const feature = r.branchFeature || '';
-  const source = r.branchSource || '';
-  branchEl.hidden = !feature;
-  branchEl.querySelector('.rc-branch-name').textContent = feature;
-  const baseEl = branchEl.querySelector('.rc-base');
-  baseEl.textContent = source ? `${source} →` : '';
-  baseEl.hidden = !source;
-}
-
-function buildRunCard(r) {
-  const tpl = $('#run-card-tpl');
-  const node = tpl.content.firstElementChild.cloneNode(true);
-  node.dataset.runId = r.runId;
-
-  const titleEl = node.querySelector('.run-title');
-  if (titleEl) {
-    titleEl.textContent = r.title;
-    if (r.titleProvisional) titleEl.classList.add('title-provisional');
-  }
-  renderRunMeta(r, node);
-
-  // Whole-header click -> the run's page. Same recipe as buildHistCard:
-  // interactive descendants opt out via closest(), the chevron fires the same
-  // go() with stopPropagation, and Enter/Space mirror the click for the
-  // role="button" header.
-  const go = () => { location.hash = `running/${r.runId}`; };
-  const head = node.querySelector('.rc-head');
-  head.addEventListener('click', (e) => {
-    if (e.target.closest('button, a, input, textarea')) return;
-    go();
-  });
-  head.addEventListener('keydown', (e) => {
-    if ((e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') && !e.target.closest('button, a, input, textarea')) {
-      e.preventDefault();
-      go();
-    }
-  });
-  node.querySelector('.rc-open').addEventListener('click', (e) => { e.stopPropagation(); go(); });
-  // The waiting strip opens the run page AND lands on its question (armed for the next few seconds).
-  node.querySelector('.rc-wait')?.addEventListener('click', (e) => { e.stopPropagation(); wantQuestionsFor = { runId: r.runId, at: Date.now() }; go(); });
-  node.querySelector('.rc-after')?.addEventListener('click', (e) => { e.stopPropagation(); if (r.pipelineId) location.hash = `#new/after/${r.pipelineId}`; });
-  // Resume split: the caret toggles the menu; "Resume at…" schedules. Direct-bound
-  // with stopPropagation like .rc-after — the delegated #run-list handler owns .btn-resume.
-  const resumeMore = node.querySelector('.rc-resume-more');
-  const resumeMenu = node.querySelector('.rc-resume-menu');
-  const resumeAtItem = node.querySelector('.rc-resume-at');
-  if (resumeMore && resumeMenu && resumeAtItem) {
-    const closeResumeMenu = () => {
-      if (!resumeMenu.hidden) { resumeMenu.hidden = true; resumeMore.setAttribute('aria-expanded', 'false'); }
-    };
-    resumeMore.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const open = resumeMenu.hidden;
-      resumeMenu.hidden = !open;
-      resumeMore.setAttribute('aria-expanded', open ? 'true' : 'false');
-      (open ? resumeAtItem : resumeMore).focus();
-    });
-    resumeAtItem.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (resumeAtItem.disabled) return;
-      closeResumeMenu();
-      if (r.pipelineId) scheduleResumeAt({ pipelineId: r.pipelineId, title: r.title, projectDir: r.projectDir || '', workspaceId: r.workspaceId || null }, resumeAtItem);
-    });
-    resumeMenu.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { e.stopPropagation(); closeResumeMenu(); resumeMore.focus(); }
-    });
-  }
-  // NB: .btn-pause/.btn-resume/.btn-stop deliberately do NOT stopPropagation —
-  // they are driven by the DELEGATED #run-list listener and would go dead. The
-  // closest('button') bail-out above is what keeps them from navigating.
-  const copyBtn = node.querySelector('.rc-branch-copy');
-  copyBtn.addEventListener('click', (e) => {
-    e.stopPropagation();                                  // copying must not open the run
-    // Read the CURRENTLY PAINTED name, never a load-time capture: this binder is
-    // bound once while renderRunMeta rewrites .rc-branch-name on every later
-    // state event (the History header carries the same stale-capture note).
-    const name = node.querySelector('.rc-branch-name').textContent || '';
-    if (name) copyBranchToClipboard(copyBtn, name);
-  });
-
-  return node;
-}
-
 
 // Group rollup for a step's sub-agents: anyStop (stop|error) -> 'stop',
 // else anyRun -> 'run', else 'done'. Drives the .subs-stat / .dot colour.
@@ -23756,7 +23140,7 @@ function focusQuestionPanel(ctx) {
   if (focusable && typeof focusable.focus === 'function') focusable.focus();
 }
 
-let wantQuestionsFor = null;   // { runId, at }: set by the list card's waiting strip, consumed once the run page has its question
+let wantQuestionsFor = null;   // { runId, at }: set by a Needs-you question row's click, consumed once the run page has its question
 
 // Bring the waiting question to the top of the view, its heading just under the sticky
 // bar (style.css: scroll-margin-top on .rd-ask-head), and put focus in the panel.
@@ -24368,110 +23752,19 @@ function runStepLabel(r) {
     model: a && (a.model || a.effort) ? `${a.model || 'default'}${a.effort ? ` · ${a.effort}` : ''}` : '' };
 }
 
-// The run-card template's stock Resume tooltip. Read from the template rather
-// than duplicated as a literal so the two cannot drift; painting restores it
-// whenever a card is not total-budget blocked, instead of blanking the button.
-let _stockResumeTitle = null;
-function stockResumeTitle() {
-  if (_stockResumeTitle === null) {
-    _stockResumeTitle = document.getElementById('run-card-tpl')
-      ?.content?.querySelector('.btn-resume')?.title || '';
-  }
-  return _stockResumeTitle;
-}
-
-function paintRunCard(r) {
-  if (!r.el) return;
-
-  // Meta segment (started HH:MM:SS) + the branch chip — refresh so a branch that
-  // lands on a later state/resume event appears without a full card rebuild.
-  renderRunMeta(r);
-
-  // Status avatar + the meta line's status word. The avatar's 4-family scale
-  // (runStatusMeta) and the word's 6-family scale (statusPill) are different on
-  // purpose — see design §4.3.
-  paintRunStatusIcon(r.el.querySelector('.rc-sic'), r);
-  const wordEl = r.el.querySelector('.rc-status-word');
-  if (wordEl) {
-    const { family, text } = statusPill(r);
-    wordEl.textContent = text;
-    wordEl.className = `rc-status-word st-${family}`;
-  }
-  paintAutoBadge(r.el.querySelector('.rc-acts .auto-badge'), r.stepper);
-  const afterBtn = r.el.querySelector('.rc-after');
-  if (afterBtn) afterBtn.hidden = !r.pipelineId || !isPipelineRun(r);
-
-  // The waiting strip: a run blocked on the user (or parked by a cost/error pause) says so in words and opens the run page.
-  const waitEl = r.el.querySelector('.rc-wait');
-  if (waitEl) {
-    const pq = r.pendingQuestion;
-    const why = isPaused(r) && typeof r.pauseReason === 'string' ? r.pauseReason : '';
-    const text = pq != null ? askHeading(r, pq)
-      : why.startsWith('cost_') ? 'Paused \u00b7 cost limit reached'
-        : (why === 'error' || why === 'recoverable') ? `Paused \u00b7 ${why}` : '';
-    waitEl.hidden = !text;
-    waitEl.querySelector('.rc-wait-text').textContent = text;
-    waitEl.classList.toggle('is-ask', pq != null);
-  }
-
-  const titleEl = r.el.querySelector('.run-title');
-  if (titleEl && r.title && titleEl.textContent !== r.title) titleEl.textContent = r.title;
-  const timeEl = r.el.querySelector('.run-time');
-  if (timeEl) timeEl.textContent = fmtDuration(liveTotalMs(r.steps, Date.now()));
-  const totalEl = r.el.querySelector('.run-cost');
-  if (totalEl) {
-    totalEl.textContent = fmtUsd(r.totalCostUsd || 0); // always shows (mock => $0.00)
-    totalEl.title = estTitle(r.totalCostUsd || 0);
-  }
-  r.el.classList.toggle('attention', r.pendingQuestion != null);
-
-  // Paused → swap Pause for Resume (Stop stays, to discard the paused run).
-  const paused = isPaused(r);
-  const pauseBtn = r.el.querySelector('.btn-pause');
-  const resumeBtn = r.el.querySelector('.btn-resume');
-  if (pauseBtn) pauseBtn.hidden = paused;
-  if (resumeBtn) resumeBtn.hidden = !paused;
-  const resumeSplit = r.el.querySelector('.rc-resume-split');
-  const resumeAtItem = r.el.querySelector('.rc-resume-at');
-  if (resumeSplit) resumeSplit.hidden = !paused || !r.pipelineId;
-  if (resumeAtItem) {
-    const refused = typeof r.pauseReason === 'string' && SCHEDULE_REFUSED_PAUSE.has(r.pauseReason);
-    resumeAtItem.disabled = refused;   // clarify: caps keep the arrow, the item is disabled
-    resumeAtItem.title = refused
-      ? 'This run paused on a cost cap — continuing past it is a live decision and cannot be scheduled.'
-      : '';
-  }
-  // A total-budget pause cannot be resumed at all until the window resets or the
-  // limit is raised — the server 403s it, so the button says so up front.
-  const totalBlocked = r.pauseReason === 'cost_total' && budgetState.budget?.blocked;
-  if (resumeBtn) {
-    resumeBtn.disabled = !!totalBlocked;
-    if (totalBlocked) {
-      resumeBtn.title = `Total budget reached — blocked until ${fmtResetAtLocal(budgetState.budget.windowEndMs)} or a higher total limit`;
-    } else if (r.pauseReason === 'error' || r.pauseReason === 'recoverable') {
-      // The cause the run parked on, so the card alone explains what to fix.
-      resumeBtn.title = r.pauseReason === 'recoverable'
-        ? `Paused on a recoverable error${r.pauseDetail ? `: ${r.pauseDetail}` : ''} — resume once it clears`
-        : `Paused after an error${r.pauseDetail ? `: ${r.pauseDetail}` : ''} — fix the cause, then resume`;
-    } else {
-      resumeBtn.title = stockResumeTitle();
-    }
-  }
-}
-
-// Repaint every cost-paused card against the current budget snapshot. Iterates
+// Repaint the open cost-paused run against the current budget snapshot. Iterates
 // ALL runs, not liveRuns(): a paused run is _finished and excluded there.
 function repaintCostBanners() {
   for (const r of runs.values()) {
     if (isPaused(r) && typeof r.pauseReason === 'string' && r.pauseReason.startsWith('cost_')) {
-      paintRunCard(r);
       // A budget refresh is a fetch, not a ws frame, so nothing else repaints the
-      // detail; without this the open screen keeps yesterday's figures.
+      // detail; without this the open screen keeps yesterday's figures — and its
+      // Resume (the header) keeps a total-budget block that has since lifted.
       const screen = runDetailState.screen;
-      if (screen && runDetailState.runId === r.runId) paintRdBanners(screen, r);
+      if (screen && runDetailState.runId === r.runId) { paintRdBanners(screen, r); paintRdHeader(screen, r); }
     }
   }
-  if (currentView() === 'history') refreshHistResumeGating();
+  if (inRunsView()) refreshHistResumeGating();
 }
 
 function questionCount(pq) {
@@ -24482,80 +23775,27 @@ function questionCount(pq) {
 }
 
 function renderRunningView({ skipDetail = false } = {}) {
-  // Painted for BOTH branches: the banner is list chrome living OUTSIDE #run-list,
-  // so skipping it on the focus path would leave a resolved "waiting on your
-  // answers" line on screen.
-  renderAskBanner();
-  renderOverview();
+  if (!skipDetail) scheduleRunsPaint();   // a log line changes nothing a row shows
   const screen = runDetailState.screen;
   if (!screen) return;
   const r = runs.get(runDetailState.runId);
   // `skipDetail` is set only by handleServerMessage's `log` branch: onLog has
   // already mirrored that one line into the open pane, and a full repaint per log
   // line is the jank the incremental append exists to avoid.
-  if (r) { if (!skipDetail) repaintRunDetail(r); return; }
-  // The detail is open on an id the runs Map does not know. BEFORE `hello` that
-  // is just a deep-link boot mid-flight (showView runs at module load, the socket
-  // greeting lands later); AFTER it the id is genuinely bad -> bounce, which is
-  // renderFocusView's old behavior. The hash check keeps a navigation already in
-  // flight (resumeRunFromCard writes `running/<newId>` then repaints) from being
-  // clobbered by this bounce.
+  if (r) {
+    if (!skipDetail) { repaintRunDetail(r); noteLastRun(r); }
+    return;
+  }
+  // Open on an id the runs Map does not know: before `hello` a deep-link boot mid-flight,
+  // after it a genuinely unknown run -> its saved page if remembered, else the list. The hash
+  // check keeps a navigation already in flight (resume writes running/<newId>) from being clobbered.
   const [view, param] = parseHash();
-  if (helloSeeded && view === 'running' && param === runDetailState.runId) location.hash = 'running';
-}
-
-// Shared #run-list reconcile. Builds/reuses one card per run, orders to match,
-// removes stale cards. Tolerates r.el === null (finishRun evicts non-lingerers).
-// buildRunCard RETURNS the node — assign its return to r.el (it self-assigns
-// only on the pendingQuestion hydration path, app.js:8405–8407).
-// A card already in its correct slot is NOT touched — reattaching an attached
-// node resets descendant scroll (log pane, stepper row) and breaks the .main
-// scroller's anchoring, which is exactly the scroll-reset-on-every-log bug.
-function paintRunList(list, rlist, emptyMsg) {
-  if (rlist.length) {
-    const empty = list.querySelector('.run-empty');
-    if (empty) empty.remove();
-  }
-  const seen = new Set();
-  let prev = null;   // last correctly-placed card
-  for (const r of rlist) {
-    seen.add(r.runId);
-    if (!r.el || r.el.dataset.runId !== r.runId) r.el = buildRunCard(r);
-    const inPlace = r.el.parentNode === list && r.el.previousElementSibling === prev;
-    if (!inPlace) {
-      list.insertBefore(r.el, prev ? prev.nextSibling : list.firstChild);
-    }
-    paintRunCard(r);
-    prev = r.el;
-  }
-  [...list.children].forEach((c) => {
-    // Release the leaving card's mounts, orbs and panel resources before dropping its DOM (A34).
-    if (c.dataset && c.dataset.runId && !seen.has(c.dataset.runId)) { destroyGraphMounts(c); c.remove(); }
-  });
-  if (!rlist.length) list.innerHTML = `<div class="run-empty">${emptyMsg}</div>`;
-}
-
-// The "N pipelines are waiting on your answers" line above the list. Deliberately
-// INERT (design D14): a status line, not a control — no listener, no role, no
-// tabindex. Reads the SAME set the list renders, so a run that is filtered out of
-// the list can never be counted here.
-function renderAskBanner() {
-  const banner = $('.run-ask-banner');
-  if (!banner) return;
-  const n = overviewRuns().filter((r) => r.pendingQuestion).length;
-  banner.hidden = n === 0;
-  if (!n) return;
-  const txt = banner.querySelector('.rab-text');
-  if (txt) {
-    txt.textContent = n === 1
-      ? '1 pipeline is waiting on your answers'
-      : `${n} pipelines are waiting on your answers`;
-  }
+  if (helloSeeded && view === 'running' && runDetailParts(param).runId === runDetailState.runId) bounceUnknownRun(runDetailState.runId);
 }
 
 // ---------------------------------------------------------------------------
 // Scheduled runs (tickets, not pipelines). One view controller serves the Schedules view
-// AND the Running view's "next 24 hours" group; both read GET /api/schedules.
+// AND the Runs list's scheduled rows (next 24 hours); both read GET /api/schedules.
 // ---------------------------------------------------------------------------
 const SCHEDULED_GROUP_WINDOW_MS = 24 * 3600 * 1000;
 const schedulesView = createSchedulesView({
@@ -24589,13 +23829,15 @@ const schedulesView = createSchedulesView({
     personLabel: (v) => personLabel(v),
     personShown: (v) => personShown(v),
     personIni: (name, title) => personIni(name, title),
-    // A started run opens its live monitor (the ticket id IS the runId); a finished one opens History.
+    // A started run opens its live monitor (the ticket id IS the runId); a finished one opens
+    // its saved page, or the Runs list when its project is unknown here.
     openRun: ({ runId, pipelineId, projectDir }) => {
       // A resume ticket's runId is the TICKET id — no live run carries it, so fall
       // through to the resumed pipeline's History detail instead of a bogus card.
       if (runId && runs.has(runId)) { location.hash = `running/${runId}`; return; }
       const proj = (state.projects || []).find((x) => x && x.path === projectDir);
-      location.hash = proj && pipelineId ? `history/${histDetailParam({ id: pipelineId, projectKey: proj.key })}` : 'history';
+      if (proj && pipelineId) location.hash = `history/${histDetailParam({ id: pipelineId, projectKey: proj.key })}`;
+      else goRunsList();
     },
     // A resume ticket names its target: "Resumes '<title>' · paused".
     labelResumeTarget: (pipelineId) => {
@@ -24611,44 +23853,387 @@ function withWorkspaces() {
   return (state.workspaces || []).length ? Promise.resolve() : loadWorkspaces();
 }
 
-function paintScheduledGroup() {
-  const wrap = $('#run-scheduled');
-  const list = $('#run-scheduled-list');
-  if (!wrap || !list) return;
-  const soon = schedulesView.upcoming(SCHEDULED_GROUP_WINDOW_MS);
-  wrap.hidden = soon.length === 0;
-  list.replaceChildren(...soon.map((t) => schedulesView.ticketRow(t)));
+// ── Runs list (#runs-list): live, scheduled and finished runs in one list (runs-list.mjs) ──
+const RUNS_COLLAPSED_KEY = 'worca-cc.runs.collapsed';   // group keys the user folded (D10)
+// reveal: a group to scroll to once the list is on screen ("Show in Runs").
+// skipRestore: bare #runs shows the list, not the remembered run, until another route (goRunsList).
+const RUNS_FILTER_KEY = 'worca-cc.runs.filter';         // the chip this browser last picked
+function loadRunsFilter() {
+  try { const v = localStorage.getItem(RUNS_FILTER_KEY); return RUNS_FILTERS.includes(v) ? v : 'all'; }
+  catch { return 'all'; }                    // private mode / storage disabled
+}
+const RUNS_GROUP_BY_KEY = 'worca-cc.runs.groupBy';     // 'project' (default) or 'date'
+function loadRunsGroupBy() {
+  try { const v = localStorage.getItem(RUNS_GROUP_BY_KEY); return RUNS_GROUPINGS.includes(v) ? v : 'project'; }
+  catch { return 'project'; }
+}
+const runsUi = { query: '', filter: loadRunsFilter(), groupBy: loadRunsGroupBy(), collapsed: loadIdSet(RUNS_COLLAPSED_KEY), reveal: '', skipRestore: false };
+
+function histGroupName(p) {
+  return (p.target === 'workspace' && p.workspaceName) || p.projectName || p.projectKey || '(unknown project)';
+}
+// A run's or ticket's project group (D15): its History row's key, else the workspace key,
+// else the registered project (whose key IS its History projectKey — projectHistoryRows),
+// else a History row from the same folder, else the folder itself (an unregistered dir).
+function runsGroupFor({ pipelineId = '', projectDir = '', workspaceId = '', projectKey = '' } = {}) {
+  const rows = Array.isArray(state.historyAll) ? state.historyAll : [];
+  const byId = pipelineId ? rows.find((p) => p && p.id === pipelineId && p.projectKey) : null;
+  if (byId) return { key: byId.projectKey, name: histGroupName(byId) };
+  if (workspaceId) {
+    const key = `workspaces/${workspaceId}`;
+    const row = rows.find((p) => p && p.projectKey === key);
+    const w = (state.workspaces || []).find((x) => x && x.id === workspaceId);
+    return { key, name: row ? histGroupName(row) : ((w && w.name) || workspaceId) };
+  }
+  const proj = (state.projects || []).find((p) => p && p.key && (projectKey ? p.key === projectKey : p.path === projectDir));
+  if (proj) {
+    const row = rows.find((p) => p && p.projectKey === proj.key);
+    return { key: proj.key, name: row ? histGroupName(row) : (proj.name || projectName(proj.path)) };
+  }
+  const byDir = projectDir ? rows.find((p) => p && p.projectDir === projectDir && p.projectKey && p.target !== 'workspace') : null;
+  if (byDir) return { key: byDir.projectKey, name: histGroupName(byDir) };
+  if (projectKey) return { key: projectKey, name: projectKey };
+  return { key: projectDir ? `dir:${projectDir}` : '', name: projectDir ? projectName(projectDir) : '(unknown project)' };
+}
+const runsPersonKey = (v) => { const n = personShown(v); return n ? n.toLowerCase() : ''; };   // historyPeople()'s key
+// The row's step while running: the active agent, or "N agents" (statusPill says "N agents
+// running", which would read "Running · 3 agents running" in a row). '' before a manifest.
+function runsStepWord(r) {
+  if (!isGraphRun(r)) return '';
+  const list = activeNodes(r);
+  if (list.length > 1) return `${list.length} agents`;
+  return list.length === 1 ? String(list[0].label || '') : '';
 }
 
-function renderOverview() {
-  const list = $('#run-list');
-  if (!list) return;
-  const rows = overviewRuns();
-  // Pipelines only (D7) — but the empty copy stays "runs" per spec §4.2: it is
-  // still true, and it is the wording the design keeps.
-  paintRunList(list, rows, 'No active runs — start one from New, or schedule one for later.');
+function runsLiveItem(r) {
+  const pq = r.pendingQuestion;
+  const g = runsGroupFor({ pipelineId: r.pipelineId || '', projectDir: r.projectDir || '', workspaceId: r.kind === 'workspace-run' ? (r.workspaceId || '') : '' });
+  const terminal = RD_TERMINAL.includes(r.status);
+  const rec = terminal && r.pipelineId ? rdHistoryRecord(r) : null;
+  const failed = r.status === 'error' ? ledgerRows(r).filter((x) => x.status === 'error').pop() : null;
+  return {
+    runId: r.runId, pipelineId: r.pipelineId || '', title: r.title, status: r.status,
+    // nodeLabel(null, id) returns the raw node id ("n3 review"): name the step only with a manifest.
+    ask: pq != null ? { kind: pq.kind || '', step: pq.nodeId && r.stepper ? nodeLabel(r.stepper, pq.nodeId) : '' } : null,
+    pauseReason: r.pauseReason || '', unread: isLingering(r),
+    step: r.status === 'running' && pq == null ? runsStepWord(r) : '',
+    failedStep: failed && failed.nodeId ? nodeLabel(r.stepper, failed.nodeId) : '',
+    startedAt: r.startedAt, groupKey: g.key, groupName: g.name, by: runsPersonKey(r.startedBy),
+    pr: terminal ? glancePrInput(rec) : null,
+    checks: rec && typeof rec.checks === 'number' ? rec.checks : null,
+    files: rec && typeof rec.files === 'number' ? rec.files : null,
+  };
+}
+function runsHistItem(p) {
+  return {
+    id: p.id, projectKey: p.projectKey, title: p.title, status: p.status, pauseReason: p.pauseReason,
+    startedAt: p.startedAt, mtime: p.mtime, groupName: histGroupName(p), by: runsPersonKey(p.startedBy),
+    pr: glancePrInput(p),
+    checks: typeof p.checks === 'number' ? p.checks : null,
+    files: typeof p.files === 'number' ? p.files : null,
+  };
+}
+function runsSchedItem(t) {
+  const g = runsGroupFor({ projectDir: t.projectDir || '', workspaceId: t.workspaceId || '', projectKey: t.projectKey || '' });
+  return { id: t.id, scheduleId: t.scheduleId || '', title: t.title, status: t.status, after: t.after || null,
+    queued: !!t.queued, retryAt: t.retryAt || null, runAt: t.runAt,
+    groupKey: g.key, groupName: g.name, by: runsPersonKey(t.createdBy) };
+}
 
-  // `rows` is already pipeline-only, so `live` IS the live-pipeline set the
-  // "N pipelines executing" copy claims; "needs input" counts the ones asking.
-  const live = rows.filter(isLive);
-  const needs = live.filter((r) => r.pendingQuestion).length;
-  const sub = $('#running-sub');
-  if (sub) sub.textContent =
-    `${live.length} pipeline${live.length === 1 ? '' : 's'} executing · ${needs} need${needs === 1 ? 's' : ''} your input`;
-  const pill = $('#running-status-pill');
-  if (pill) {
-    pill.classList.toggle('hidden', needs === 0);
-    const label = `${needs} need${needs === 1 ? 's' : ''} input`;
-    const txt = pill.querySelector('.pill-text');
-    if (txt) { txt.textContent = label; }
-    else {
-      // Preserve a leading .pdot if present; replace only the trailing text.
-      const dot = pill.querySelector('.pdot');
-      pill.textContent = '';
-      if (dot) pill.appendChild(dot);
-      pill.append(document.createTextNode(' ' + label));
+// pipelineId: a live row painted before its id arrived must repaint once it does (selection
+// and the focus fallbacks below match on it).
+const runsRowSig = (r) => [r.key, r.pipelineId, r.href, r.title, r.icon, r.word, r.detail, r.time, r.groupName];
+// Where focus goes back to after the list is rebuilt under it. A row can change key in the
+// rebuild: opening a finished run acknowledges it, and the same paint turns live:<runId> into
+// hist:<projectKey>/<pipelineId>. Its pipeline id carries over (same slot first), then the
+// selected row stands in; a focused group head is found by its group.
+function runsFocusTarget(host, { key, slot, pid, group }) {
+  const q = (sel) => host.querySelector(sel);
+  if (group) return q(`.runs-group-head[data-group-key="${cssEscape(group)}"]`);
+  if (!key) return null;
+  const k = cssEscape(key);
+  const p = pid ? cssEscape(pid) : '';
+  return q(`.runs-row[data-row-key="${k}"][data-slot="${slot}"]`) || q(`.runs-row[data-row-key="${k}"]`)
+    || (p && (q(`.runs-row[data-pipeline-id="${p}"][data-slot="${slot}"]`) || q(`.runs-row[data-pipeline-id="${p}"]`)))
+    || q('.runs-row.selected[data-slot="group"]');
+}
+function paintRunsList() {
+  const host = el.runsList;
+  if (!host) return;
+  const model = buildRunsModel({
+    live: overviewRuns().map(runsLiveItem),
+    history: (Array.isArray(state.historyAll) ? state.historyAll : []).filter(Boolean).map(runsHistItem),
+    scheduled: schedulesView.upcoming(SCHEDULED_GROUP_WINDOW_MS).map(runsSchedItem),
+    person: viewer.shared ? state.historyPerson : '',
+    query: runsUi.query, filter: runsUi.filter, groupBy: runsUi.groupBy, collapsed: runsUi.collapsed, now: Date.now(),
+  });
+  const note = state.historyError && !(state.historyAll || []).length ? `Could not load finished runs: ${state.historyError}` : '';
+  const sig = JSON.stringify([
+    model.needs.map(runsRowSig),
+    model.groups.map((g) => [g.key, g.name, g.count, g.collapsed, g.collapsed ? [] : g.rows.map(runsRowSig)]),
+    model.total, model.searching, model.filter, model.groupBy, note,
+  ]);
+  let refocus = null;
+  if (host.dataset.sig !== sig) {
+    host.dataset.sig = sig;
+    const a = document.activeElement;
+    if (a && host.contains(a)) {
+      refocus = { key: a.dataset.rowKey || '', slot: a.dataset.slot || 'group',
+        pid: a.dataset.pipelineId || '', group: a.dataset.rowKey ? '' : (a.dataset.groupKey || '') };
     }
+    host.replaceChildren(...renderRunsList(document, model, { emptyText: 'No runs yet. Start one from New pipeline.', note }));
   }
+  paintRunsSelection();   // before the focus restore: its last fallback is the selected row
+  if (refocus) {
+    const back = runsFocusTarget(host, refocus);
+    if (back) back.focus({ preventScroll: true });
+  }
+  // Only once the section is actually shown: `inRunsView()` reads the hash, which already says
+  // #runs before its hashchange routes, and a WS frame painting in that gap must not use it up.
+  if (runsUi.reveal && RUNS_VIEWS.has(currentShownView)) {
+    const g = host.querySelector(`.runs-group[data-group-key="${cssEscape(runsUi.reveal)}"]`);
+    runsUi.reveal = '';
+    if (g && typeof g.scrollIntoView === 'function') g.scrollIntoView({ block: 'start' });
+  }
+}
+// Frames arrive in bursts (one message fans out to several repaint hooks): paint once.
+let runsPaintQueued = false;
+function scheduleRunsPaint() {
+  if (runsPaintQueued) return;
+  runsPaintQueued = true;
+  queueMicrotask(() => { runsPaintQueued = false; if (inRunsView()) paintRunsList(); });
+}
+
+function runsSelection() {
+  const r = runDetailState.screen ? runs.get(runDetailState.runId) : null;
+  return {
+    runId: runDetailState.screen ? runDetailState.runId : '',
+    pipelineId: (r && r.pipelineId) || (histDetailState ? histDetailState.id : ''),
+    histKey: histDetailState ? `${histDetailState.key}/${histDetailState.id}` : '',
+  };
+}
+function paintRunsSelection() {
+  const host = el.runsList;
+  if (!host) return;
+  const sel = runsSelection();
+  for (const a of host.querySelectorAll('.runs-row')) {
+    const row = { kind: a.dataset.kind, runId: a.dataset.runId || '', pipelineId: a.dataset.pipelineId || '', projectKey: a.dataset.projectKey || '' };
+    const on = isRowSelected(row, sel);
+    a.classList.toggle('selected', on);
+    if (on) a.setAttribute('aria-current', 'true'); else a.removeAttribute('aria-current');
+  }
+}
+
+// Rows are links (#running/<id>, #history/<key>/<id>, #schedules) so a modifier click can
+// open a tab; a plain click routes in place. Group heads fold (D10).
+el.runsList?.addEventListener('click', (e) => {
+  const head = e.target.closest && e.target.closest('.runs-group-head');
+  if (head) { toggleRunsGroup(head.dataset.groupKey || ''); return; }
+  const a = e.target.closest && e.target.closest('a.runs-row');
+  if (!a || e.defaultPrevented || (e.button || 0) !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  e.preventDefault();
+  const ask = a.dataset.icon === 'ask' && a.dataset.runId ? a.dataset.runId : '';
+  const screen = runDetailState.screen;
+  const open = !!ask && !!screen && runDetailState.runId === ask;
+  // A waiting question: the pane lands on it once its panel mounts (the removed card strip's
+  // job; paintRdQuestions consumes wantQuestionsFor within 4s). That only happens on a
+  // panel (re)build, so for the run ALREADY open, go to its glance and scroll now.
+  if (ask && !open) wantQuestionsFor = { runId: ask, at: Date.now() };
+  const to = (a.getAttribute('href') || '').replace(/^#/, '');
+  if (to && location.hash.slice(1) !== to) location.hash = to;
+  if (open) {
+    setRdMode(screen, 'glance', '', { focus: false });   // idempotent; the hashchange echo is too
+    scrollToQuestions(screen);
+  }
+});
+function toggleRunsGroup(key) {
+  if (runsUi.query.trim()) return;                   // a search shows every match; fold after it
+  if (runsUi.collapsed.has(key)) runsUi.collapsed.delete(key); else runsUi.collapsed.add(key);
+  persistIdSet(RUNS_COLLAPSED_KEY, runsUi.collapsed);
+  paintRunsList();
+}
+function setRunsSearchOpen(open) {
+  if (!el.runsSearchRow || !el.runsSearch || !el.runsSearchBtn) return;
+  el.runsSearchRow.hidden = !open;
+  el.runsSearchBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  el.runsSearchBtn.classList.toggle('on', open);
+  if (open) { el.runsSearch.focus({ preventScroll: true }); return; }
+  const had = !!runsUi.query;
+  el.runsSearch.value = '';
+  runsUi.query = '';
+  if (had) paintRunsList();
+  el.runsSearchBtn.focus({ preventScroll: true });
+}
+el.runsSearchBtn?.addEventListener('click', () => setRunsSearchOpen(el.runsSearchRow.hidden));
+function paintRunsFilter() {
+  for (const b of el.runsFilter ? el.runsFilter.querySelectorAll('button[data-filter]') : []) {
+    const on = b.dataset.filter === runsUi.filter;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+}
+el.runsFilter?.addEventListener('click', (e) => {
+  const b = e.target.closest && e.target.closest('button[data-filter]');
+  if (!b || b.dataset.filter === runsUi.filter) return;
+  runsUi.filter = b.dataset.filter;
+  try { localStorage.setItem(RUNS_FILTER_KEY, runsUi.filter); } catch { /* private mode */ }
+  paintRunsFilter();
+  paintRunsList();
+});
+paintRunsFilter();
+
+// "Group by" menu: opens under its header button; a pick, Escape or a click elsewhere closes it.
+function paintRunsGroupBy() {
+  for (const b of el.runsGroupMenu ? el.runsGroupMenu.querySelectorAll('[data-group-by]') : []) {
+    b.setAttribute('aria-checked', b.dataset.groupBy === runsUi.groupBy ? 'true' : 'false');
+  }
+  el.runsGroupBtn?.classList.toggle('on', runsUi.groupBy !== 'project');
+}
+function setRunsGroupMenuOpen(open, { focusBtn = false } = {}) {
+  if (!el.runsGroupMenu || !el.runsGroupBtn) return;
+  el.runsGroupMenu.hidden = !open;
+  el.runsGroupBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) el.runsGroupMenu.querySelector('[aria-checked="true"]')?.focus({ preventScroll: true });
+  else if (focusBtn) el.runsGroupBtn.focus({ preventScroll: true });
+}
+el.runsGroupBtn?.addEventListener('click', () => setRunsGroupMenuOpen(el.runsGroupMenu.hidden));
+el.runsGroupMenu?.addEventListener('click', (e) => {
+  const b = e.target.closest && e.target.closest('[data-group-by]');
+  if (!b) return;
+  setRunsGroupMenuOpen(false, { focusBtn: true });
+  if (b.dataset.groupBy === runsUi.groupBy) return;
+  runsUi.groupBy = b.dataset.groupBy;
+  try { localStorage.setItem(RUNS_GROUP_BY_KEY, runsUi.groupBy); } catch { /* private mode */ }
+  paintRunsGroupBy();
+  paintRunsList();
+});
+el.runsGroupMenu?.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { e.preventDefault(); setRunsGroupMenuOpen(false, { focusBtn: true }); return; }
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+  e.preventDefault();
+  const items = [...el.runsGroupMenu.querySelectorAll('[data-group-by]')];
+  const i = items.indexOf(document.activeElement);
+  items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length]?.focus();
+});
+document.addEventListener('click', (e) => {
+  if (!el.runsGroupMenu || el.runsGroupMenu.hidden) return;
+  if (!e.target.closest || !e.target.closest('.runs-group-wrap')) setRunsGroupMenuOpen(false);
+});
+paintRunsGroupBy();
+el.runsSearch?.addEventListener('input', () => { runsUi.query = el.runsSearch.value; paintRunsList(); });
+el.runsSearch?.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  e.preventDefault();
+  setRunsSearchOpen(false);
+});
+// Projects page: "Show in Runs" unfolds the project's group and scrolls to it (D17).
+function openRunsForProject(key) {
+  if (runsUi.collapsed.delete(key)) persistIdSet(RUNS_COLLAPSED_KEY, runsUi.collapsed);
+  runsUi.reveal = key;
+  goRunsList();          // the list itself: no D6 restore over the group it reveals
+}
+
+// ── The Runs page's two panes: layout, which detail shows, focus ────────────
+// Two panes need the list (260-320px) beside the glance card (544px + 64px padding); below
+// that the page falls back to the slide the old screens used (D7).
+const RUNS_SPLIT_MIN = 880;
+function runsLayout() {
+  return el.runsShell && el.runsShell.dataset.layout === 'slide' ? 'slide' : 'split';
+}
+// One frame without transitions: a resize, a layout flip and a detail -> detail swap all
+// re-lay the page out, and none of them may slide.
+function holdRunsAnim() {
+  const shell = el.runsShell;
+  if (!shell) return;
+  shell.classList.add('no-anim');
+  rafSafe(() => shell.classList.remove('no-anim'));
+}
+// The layout for a shell `w` px wide. 0 (a hidden section; jsdom has no layout) keeps the last.
+function setRunsLayout(w) {
+  const shell = el.runsShell;
+  if (!shell || !w) return;
+  const want = w < RUNS_SPLIT_MIN ? 'slide' : 'split';
+  if (shell.dataset.layout === want) return;
+  const a = document.activeElement;
+  const inList = !!a && !!el.runsListPane && el.runsListPane.contains(a);
+  holdRunsAnim();
+  shell.dataset.layout = want;
+  syncRunsPane();
+  // Narrowed with a run open: the list it covers just went inert under the focused row.
+  // Hand focus to the open screen's way back (the glance's, or Details' "back to the run").
+  const open = el.runsPane && el.runsPane.dataset.kind;
+  if (want !== 'slide' || !inList || !open) return;
+  const screen = open === 'live' ? el.runDetail : el.histDetail;
+  const back = screen && [...screen.querySelectorAll('.rd-back, .hd-back, .rd-to-run, .hd-to-run')].find((b) => !b.hidden);
+  if (back) back.focus({ preventScroll: true });
+}
+// showView calls this as the section becomes visible, before routing opens anything, so the
+// first open on a narrow window already knows it is in the slide (focus, inert).
+function measureRunsLayout() {
+  if (el.runsShell) setRunsLayout(el.runsShell.clientWidth);
+}
+// Which detail the pane shows, and who is inert: in the slide only the screen in view is
+// reachable; side by side, both are.
+function syncRunsPane() {
+  const shell = el.runsShell;
+  const pane = el.runsPane;
+  const list = el.runsListPane;
+  if (!shell || !pane || !list) return;
+  const kind = el.runShell && el.runShell.classList.contains('detail-open') ? 'live'
+    : el.histShell && el.histShell.classList.contains('detail-open') ? 'hist' : '';
+  pane.dataset.kind = kind;
+  if (el.runsEmpty) el.runsEmpty.hidden = !!kind;
+  shell.classList.toggle('pane-open', !!kind);
+  const slide = runsLayout() === 'slide';
+  const listAway = slide && !!kind;
+  const paneAway = slide && !kind;
+  list.toggleAttribute('inert', listAway);
+  if (listAway) list.setAttribute('aria-hidden', 'true'); else list.removeAttribute('aria-hidden');
+  pane.toggleAttribute('inert', paneAway);
+  if (paneAway) pane.setAttribute('aria-hidden', 'true'); else pane.removeAttribute('aria-hidden');
+  paintRunsSelection();
+}
+// Through `window.` like the file's other ResizeObserver sites: a test stubs the window only.
+if (el.runsShell && typeof window.ResizeObserver === 'function') {
+  new window.ResizeObserver((entries) => {
+    setRunsLayout(entries[0] && entries[0].contentRect ? entries[0].contentRect.width : 0);
+  }).observe(el.runsShell);
+}
+// Focus back to the row a run was opened from (slide layout only: side by side it never left).
+// The group copy, not the Needs-you repeat: the group is where the run lives. A finished run
+// is acknowledged when it opens, so it has left the live rows by the time it closes: its
+// History row (by pipeline id) is the fallback.
+function focusRunsRow({ runId = '', pipelineId = '', projectKey = '' } = {}) {
+  const host = el.runsList;
+  if (!host) return;
+  const sels = [];
+  if (runId) sels.push(`.runs-row[data-run-id="${cssEscape(runId)}"]`);
+  if (pipelineId) {
+    sels.push(projectKey
+      ? `.runs-row[data-pipeline-id="${cssEscape(pipelineId)}"][data-project-key="${cssEscape(projectKey)}"]`
+      : `.runs-row[data-pipeline-id="${cssEscape(pipelineId)}"]`);
+  }
+  for (const sel of sels) {
+    const node = host.querySelector(`${sel}[data-slot="group"]`) || host.querySelector(sel);
+    if (node) { node.focus({ preventScroll: true }); return; }
+  }
+}
+// Un-inert the list pane ahead of a focus hand-off into it: focus() is a no-op inside an inert
+// subtree. syncRunsPane() then settles both panes.
+function releaseRunsList() {
+  const list = el.runsListPane;
+  if (list) { list.removeAttribute('inert'); list.removeAttribute('aria-hidden'); }
+}
+// Side by side, a navigation from INSIDE the pane (a link on the old screen, "Open the saved
+// run") empties the screen that held focus, and focus drops to <body>. Land it on the new
+// glance's title. Focus that is elsewhere (the row clicked, a sidebar entry) stays put.
+function keepPaneFocus(screen) {
+  if (runsLayout() !== 'split' || !screen) return;
+  const a = document.activeElement;
+  const lost = !a || a === document.body || !document.contains(a) || (el.runsPane && el.runsPane.contains(a));
+  if (!lost) return;
+  const title = screen.querySelector('.rd-glance .rd-page-title');   // the hd glance is .rd-glance too
+  if (title) title.focus({ preventScroll: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -24663,12 +24248,84 @@ function renderOverview() {
 // is the identity every painter keys on.
 let runDetailState = { runId: '', screen: null };
 
+// ── The remembered run (D6): a bare #runs reopens the run the pane showed last ──
+const RUNS_LAST_KEY = 'worca-cc.runs.last';   // {runId, pipelineId, projectKey}: the last run the pane showed
+function rememberRun(v) {
+  try { localStorage.setItem(RUNS_LAST_KEY, JSON.stringify(v)); } catch { /* private mode */ }
+}
+function readLastRun() {
+  try {
+    const v = JSON.parse(localStorage.getItem(RUNS_LAST_KEY) || 'null');
+    return v && typeof v === 'object' ? v : null;
+  } catch { return null; }
+}
+function forgetLastRun() {
+  try { localStorage.removeItem(RUNS_LAST_KEY); } catch { /* private mode */ }
+}
+// The hash that reopens the remembered run: its live page while this tab knows the run
+// (or before `hello` could say otherwise), else its saved page, else nothing.
+function rememberedRunHash() {
+  const m = readLastRun();
+  if (!m) return '';
+  if (m.runId && (runs.has(m.runId) || !helloSeeded)) return `running/${m.runId}`;
+  if (m.pipelineId && m.projectKey) return `history/${m.projectKey}/${m.pipelineId}`;
+  forgetLastRun();
+  return '';
+}
+// The pane opened live run `runId`. Before `hello` (a reload onto #runs or #running/<id>) the
+// run is not in `runs` yet: keep the pipeline and project the memory already holds for it, or
+// bounceUnknownRun has no saved page to fall back to once `hello` says the run is gone.
+function rememberOpenRun(runId) {
+  const r = runs.get(runId);
+  const m = readLastRun();
+  const same = m && m.runId === runId ? m : null;
+  rememberRun({
+    runId,
+    pipelineId: (r && r.pipelineId) || (same && same.pipelineId) || '',
+    projectKey: (r && historyKeyForRun(r)) || (same && same.projectKey) || '',
+  });
+}
+// Keep the memory's pipeline and project current: a run learns them after it opened.
+function noteLastRun(r) {
+  const m = readLastRun();
+  if (!m || m.runId !== r.runId) return;
+  const key = historyKeyForRun(r) || m.projectKey || '';
+  if ((r.pipelineId || '') === (m.pipelineId || '') && key === (m.projectKey || '')) return;
+  rememberRun({ runId: r.runId, pipelineId: r.pipelineId || '', projectKey: key });
+}
+// Route to `hash` by REPLACING the current entry. A bounce off a dead entry must not leave
+// it behind: after a reload onto #runs whose run ended, a pushed bounce would leave
+// #running/<gone> under it, and Back would bounce forward again, forever. replaceState
+// fires no hashchange, so route on a microtask (never nested inside the showView that
+// is bouncing).
+function replaceRoute(hash) {
+  try { window.history.replaceState(null, '', `#${hash}`); } catch { location.hash = hash; return; }
+  queueMicrotask(() => { const [view, param] = parseHash(); showView(view, param); });
+}
+// The bare list, WITHOUT the D6 restore: the caller asked for the list itself.
+function goRunsList() {
+  runsUi.skipRestore = true;
+  if (location.hash.slice(1) === 'runs') showView('runs');   // no hashchange would fire
+  else location.hash = 'runs';
+}
+// An open #running/<id> the server does not know (after hello): its saved page when the
+// memory knows it, else the list — the list itself, not whatever other run the memory
+// holds (D6). Never loops: the memory is dropped before `#runs`.
+function bounceUnknownRun(runId) {
+  const m = readLastRun();
+  if (m && m.runId === runId) {
+    if (m.pipelineId && m.projectKey) { replaceRoute(`history/${m.projectKey}/${m.pipelineId}`); return; }
+    forgetLastRun();
+  }
+  runsUi.skipRestore = true;
+  replaceRoute('runs');
+}
+
 // The statuses that END a run for this screen (C14) — the ONE predicate the
 // header (below), rdStateCopy, rdAppendLogFrame and paintRdTerminal all share.
 // Deliberately NOT isTerminalStatus, whose set also contains 'interrupted',
 // 'aborted', 'failed', 'complete' and 'completed'; `interrupted` is a resumable
-// park that the list card still offers Pause/Stop for, and the detail must agree
-// with the card. NOT exported on `window.__np` (C10: it is a `const`).
+// park that still offers Pause/Stop. NOT exported on `window.__np` (C10: it is a `const`).
 const RD_TERMINAL = ['done', 'stopped', 'error'];
 
 // The Running param is `<runId>` (the glance) or `<runId>/details[/<tab>]`. The
@@ -24689,9 +24346,11 @@ function rdHash(runId, mode = 'glance', tab = '') {
 function routeRunDetail(param, { instant = false } = {}) {
   const { runId, mode, tab } = runDetailParts(param);
   if (!runId) { closeRunDetail({ instant }); return; }
+  // A finished run opens as its saved run, without mounting the live page first.
+  if (rdHandOffToSaved(runs.get(runId), mode, tab)) return;
   // Re-routing to the already-open run only switches the mode (glance <-> details).
   if (runDetailState.screen && runDetailState.runId === runId) { setRdMode(runDetailState.screen, mode, tab); return; }
-  if (!runs.has(runId) && helloSeeded) { location.hash = 'running'; return; }
+  if (!runs.has(runId) && helloSeeded) { bounceUnknownRun(runId); return; }
   openRunDetail(runId, { instant });
   if (runDetailState.screen && runDetailState.runId === runId) setRdMode(runDetailState.screen, mode, tab, { focus: false });
 }
@@ -24730,7 +24389,10 @@ function setRdMode(screen, mode, tab = '', { focus = true } = {}) {
   }
   if (changed && el.runDetail) el.runDetail.scrollTop = 0;
   if (changed && focus) {
-    const target = details ? screen.querySelector('.rd-to-run') : screen.querySelector('.rd-back');
+    // Side by side the glance's way back to the list is hidden (the list is in view), so
+    // coming back from Details lands on the glance's title (tabindex="-1") instead.
+    const target = details ? screen.querySelector('.rd-to-run')
+      : runsLayout() === 'split' ? screen.querySelector('.rd-glance .rd-page-title') : screen.querySelector('.rd-back');
     if (target && !target.hidden) target.focus({ preventScroll: true });
   }
 }
@@ -24748,7 +24410,7 @@ function openRunDetail(runId, { instant = false } = {}) {
   runDetailState = { runId, screen };
   watchPageTitle(screen, 'rd');
 
-  screen.querySelector('.rd-back').addEventListener('click', () => { location.hash = 'running'; });
+  screen.querySelector('.rd-back').addEventListener('click', () => { location.hash = 'runs'; });
   // Glance <-> Details are routes, so the browser's own back and forward walk them.
   const toDetails = (tab = '') => { location.hash = rdHash(runDetailState.runId, 'details', tab); };
   const toRun = () => { location.hash = rdHash(runDetailState.runId); };
@@ -24829,6 +24491,11 @@ function openRunDetail(runId, { instant = false } = {}) {
   screen.querySelector('.rd-stop').addEventListener('click', () => {
     openStopModal(runDetailState.runId);
   });
+  // Chain a run after this one (the list card's old schedule-after button): New pipeline, predecessor picked.
+  screen.querySelector('.rd-after').addEventListener('click', () => {
+    const r = runs.get(runId);
+    if (r && r.pipelineId) location.hash = `#new/after/${r.pipelineId}`;
+  });
 
   const r = runs.get(runId);
   if (r) repaintRunDetail(r);
@@ -24837,19 +24504,16 @@ function openRunDetail(runId, { instant = false } = {}) {
     screen.querySelector('.rd-now-title').textContent = runId;
   }
 
-  if (instant) shell.classList.add('no-anim');
-  shell.classList.add('detail-open');
+  if (instant) holdRunsAnim();
+  shell.classList.add('detail-open');                  // #run-shell: "the live detail is open"
   host.setAttribute('aria-hidden', 'false');
-  host.removeAttribute('inert');   // the previous close left it inert for the slide;
-                                   // focus() below is a no-op inside an inert subtree
-  // `aria-hidden` alone does NOT remove focusability — only `inert` does, so set BOTH.
-  const list = shell.querySelector('.run-screen-list');
-  if (list) { list.setAttribute('aria-hidden', 'true'); list.setAttribute('inert', ''); }
-  // AFTER the mount and AFTER the list went inert: leaving document.activeElement
-  // inside a subtree as it becomes inert is invalid, and `.rd-back` is the one
-  // control always present on this screen.
-  screen.querySelector('.rd-back').focus({ preventScroll: true });
-  if (instant) rafSafe(() => shell.classList.remove('no-anim'));
+  host.removeAttribute('inert');
+  syncRunsPane();
+  // In the slide the list went away (inert), so focus follows the screen. Side by side it stays
+  // where the user acted (the row, a sidebar entry), unless the old screen took it along.
+  if (runsLayout() === 'slide') screen.querySelector('.rd-back').focus({ preventScroll: true });
+  else keepPaneFocus(screen);
+  rememberOpenRun(runId);                              // keeps the saved page before `hello`
 }
 
 function closeRunDetail({ instant = false } = {}) {
@@ -24859,54 +24523,39 @@ function closeRunDetail({ instant = false } = {}) {
   if (!shell.classList.contains('detail-open')) { runDetailState = { runId: '', screen: null }; return; }
   // Tear the stop modal down: it is a TOP-LEVEL overlay, not a child of the detail
   // screen, so emptying #run-detail would otherwise strand a full-screen overlay
-  // (and its live document keydown listener) over the LIST — after which
-  // openStopModal's double-open guard makes Stop permanently dead.
-  //
-  // NOT the first statement, unlike closeHistDetail's closeShipItModal()
-  // (app.js:9480): #shipit-modal opens ONLY from the History detail, so its
-  // early-return path can never have one up. #stop-modal ALSO opens from a list
-  // card, and routeRunDetail('') calls this on every plain `#running` route — so
-  // calling it above the detail-open guard would dismiss a list-owned modal.
+  // (and its live document keydown listener) over the list — after which
+  // openStopModal's double-open guard makes Stop permanently dead. Below the
+  // detail-open guard: with no detail open there is no modal of its to close.
   closeStopModal();
   const runId = runDetailState.runId;
+  // Read before the reset: a finished run was acknowledged when it opened, so its row is its
+  // History row now (focusRunsRow's pipeline fallback).
+  const r = runs.get(runId);
+  const back = { runId, pipelineId: (r && r.pipelineId) || '', projectKey: r ? historyKeyForRun(r) : '' };
   runDetailState = { runId: '', screen: null };
   host.setAttribute('aria-hidden', 'true');
-  // Un-inert the list FIRST — focus() is a no-op inside an inert subtree.
-  const list = shell.querySelector('.run-screen-list');
-  if (list) { list.removeAttribute('aria-hidden'); list.removeAttribute('inert'); }
-  // Hand focus back to the card the detail was opened from, re-queried by
-  // data-run-id: a repaint may have replaced the node while the detail was up.
-  // NOT on the instant path — that one runs from showView, which hides this whole
-  // section a few lines later, so focusing there just drops focus to <body>.
-  if (runId && !instant) {
-    const node = $(`#run-list .run-card[data-run-id="${cssEscape(runId)}"] .rc-head`);
-    if (node) node.focus({ preventScroll: true });   // dropped from the list -> skip
-  }
-  // AFTER the focus hand-off: the screen stays MOUNTED until transitionend, so
-  // `aria-hidden` alone would leave .rd-back and the action pills tabbable behind
-  // the list for the whole slide. openRunDetail clears it.
+  const slide = runsLayout() === 'slide';
+  if (!slide) instant = true;                          // side by side: the pane swaps at once
+  // Un-inert the list, hand focus to the row, THEN make the screen inert: the screen stays
+  // MOUNTED while it slides, and `aria-hidden` alone would leave its controls tabbable.
+  if (slide && !instant) { releaseRunsList(); if (runId) focusRunsRow(back); }
   host.setAttribute('inert', '');
-  if (instant) {
-    shell.classList.add('no-anim');
-    shell.classList.remove('detail-open');
-    destroyGraphMounts(host);
-    host.innerHTML = '';
-    rafSafe(() => shell.classList.remove('no-anim'));
-    return;
-  }
+  if (instant) holdRunsAnim();
   shell.classList.remove('detail-open');
-  // Empty the screen after the slide (or via the timeout under reduced motion /
-  // jsdom, where transitionend never fires natively). transitionend BUBBLES, so a
-  // descendant's transition would otherwise clear the DOM mid-slide — hence the
-  // target + propertyName guard.
+  syncRunsPane();
+  if (instant) { destroyGraphMounts(host); host.innerHTML = ''; return; }
+  // The slide: empty the screen once the pane has slid out (or after the fallback; jsdom and
+  // reduced motion never fire transitionend). transitionend bubbles: guard target + property.
+  const pane = el.runsPane;
   const clear = () => { if (!runDetailState.screen) { destroyGraphMounts(host); host.innerHTML = ''; } };
+  if (!pane) { clear(); return; }
   const onEnd = (e) => {
-    if (e.target !== host || e.propertyName !== 'transform') return;
-    host.removeEventListener('transitionend', onEnd);
+    if (e.target !== pane || e.propertyName !== 'transform') return;
+    pane.removeEventListener('transitionend', onEnd);
     clear();
   };
-  host.addEventListener('transitionend', onEnd);
-  const t = setTimeout(() => { host.removeEventListener('transitionend', onEnd); clear(); }, 600);
+  pane.addEventListener('transitionend', onEnd);
+  const t = setTimeout(() => { pane.removeEventListener('transitionend', onEnd); clear(); }, 600);
   if (t && typeof t.unref === 'function') t.unref();
 }
 
@@ -25232,19 +24881,25 @@ function glancePrInput(record) {
   return histPrEligible(record) ? 'NONE' : 'UNAVAILABLE';
 }
 
-// "Things to check" (at most three, the rest counted) — shown only when there are any.
-function glanceChecks(checks) {
-  if (!checks.length) return [];
-  const out = [rdSheetGroup('Things to check', [issueList(checks.slice(0, 3))])];
-  if (checks.length > 3) {
-    const more = document.createElement('div');
-    more.className = 'hint';
-    more.textContent = `and ${checks.length - 3} more in Overview`;
-    out.push(more);
-  }
-  return out;
+// The glance's action buttons lead with a glyph: 24-unit, stroked like HD_TAB_ICONS.
+const CTA_ICONS = {
+  // A pull request with a plus where its head will be.
+  'pr-create': '<circle cx="6" cy="6" r="2.5"/><path d="M6 8.5V21M13 6h3a2 2 0 0 1 2 2v3M18 15v6M15 18h6"/>',
+  // A pull request: the base line, and the branch line arrowing into it.
+  'pr-open': '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5V21M12.5 6H16a2 2 0 0 1 2 2v7.5M15 3.5 12.5 6 15 8.5"/>',
+  // Merged: two lines joining into one.
+  merged: '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5V21M6 9a9 9 0 0 0 9 9h.5"/>',
+  resume: '<path d="M7 4.5v15l12-7.5z"/>',
+  // A follow-up: the next run branches off this one.
+  'follow-up': '<path d="M5 4v7a4 4 0 0 0 4 4h10M15 11l4 4-4 4"/>',
+  schedule: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+};
+function setCtaContent(node, icon, label) {
+  node.innerHTML = `<svg class="rd-cta-ico" data-icon="${icon}" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${CTA_ICONS[icon]}</svg>`;
+  const tx = document.createElement('span');
+  tx.textContent = label;
+  node.appendChild(tx);
 }
-
 
 function rdSheetGroup(title, rows) {
   const g = document.createElement('div');
@@ -25308,7 +24963,7 @@ function rdFilesChanged(r) {
   return s ? (s.filesNew || 0) + (s.filesChanged || 0) + (s.filesDeleted || 0) : null;
 }
 
-// Every tab (Activity) always; once the run is over, also things to check and the
+// Every tab (Activity) always; once the run is over, also the
 // actions (the facts row above carries Time · Cost · Changes in every state). Numbers come from
 // results.json; "Create pull request" hands over to History's ship-it modal
 // (pendingShipIt), which owns the remotes picker and the push. Rebuilt only when its
@@ -25340,7 +24995,6 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
   host.replaceChildren();
 
   const results = data && data.results;
-  host.append(...glanceChecks(results ? hdChecks(results) : []));
   host.append(...rdActivityGroups(screen, { overview: activityOverviewValue(results), workflow: steps, diff: rdDiffRowValue(r) }));
 
   const acts = document.createElement('div');
@@ -25357,13 +25011,13 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
       a.href = pr.url;
       a.target = '_blank';
       a.rel = 'noopener';
-      a.textContent = 'View pull request';
+      setCtaContent(a, prState === 'MERGED' ? 'merged' : 'pr-open', 'View pull request');
       acts.appendChild(a);
     } else if (histPrEligible(record) && record.pr !== undefined) {
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'rd-cta rd-create-pr';
-      b.textContent = 'Create pull request';
+      setCtaContent(b, 'pr-create', 'Create pull request');
       b.addEventListener('click', () => {
         pendingShipIt = { id: r.pipelineId, projectKey: key };
         location.hash = `history/${key}/${r.pipelineId}`;
@@ -25375,7 +25029,7 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'rd-cta alt rd-follow-up';
-    b.textContent = 'Start a follow-up run';
+    setCtaContent(b, 'follow-up', 'Start a follow-up run');
     b.addEventListener('click', () => { location.hash = `#new/after/${r.pipelineId}`; });
     acts.appendChild(b);
   }
@@ -25411,9 +25065,8 @@ function paintRdQuestions(screen, r) {
   // rebuild would therefore wipe, mid-answer: the options the user already picked
   // (`.qopt.sel`), the free text being typed, the per-panel `panel.__answers`
   // slots those clicks wrote into, and setPanelBusy's in-flight disabled state.
-  // The card never had this bug because paintRunCard does not call renderQpanel —
-  // only onQuestion and buildRunCard do, i.e. exactly on identity change. This
-  // guard gives the detail the same property. Same shape as the cost-banner's
+  // A panel may be built only on identity change (a new question); this guard gives
+  // the detail that property. Same shape as the cost-banner's
   // `dataset.bkey` guard in paintRdBanners (History's twin keys on
   // `dataset.pauseReason` — don't go looking for that field here).
   //
@@ -25503,8 +25156,7 @@ function paintRdBanners(screen, r) {
   // .pauseReason` guard.
   // The key is the reason PLUS the budget figures the banner prints: keying on the
   // reason alone froze the "$X of $Y" copy for the life of the pause, since a
-  // raised limit or a window reset changes neither the status nor the reason (the
-  // card dodges this only because paintRunCard rebuilds its banner every paint).
+  // raised limit or a window reset changes neither the status nor the reason.
   const costPaused = isPaused(r) && typeof r.pauseReason === 'string' && r.pauseReason.startsWith('cost_');
   const b = budgetState.budget || {};
   // Every number the banner PRINTS is in the key, or the copy goes stale in place.
@@ -25613,15 +25265,19 @@ const LIVE_VIEW_KEY = 'worca-cc.run.liveView';
 /** The exit's fallback when no transitionend comes: past style.css's longest `.rd-live` exit. */
 const LIVE_EXIT_MS = 500;
 const LIVE_EXITS = new WeakMap();   // .rd-live -> { timer, onEnd } while it animates out
+// On unless switched off: a new user (nothing stored) sees it, and '0' keeps it off.
+// Where storage is blocked the choice lives in memory, so the switch still works.
+let liveViewMemo = null;
 function liveViewWanted() {
-  try { return localStorage.getItem(LIVE_VIEW_KEY) === '1'; } catch { return false; }
+  try { return localStorage.getItem(LIVE_VIEW_KEY) !== '0'; } catch { return liveViewMemo !== '0'; }
 }
 function reducedMotion() {
   try { return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; }
 }
 function toggleLiveView(screen) {
   const on = !liveViewWanted();
-  try { if (on) localStorage.setItem(LIVE_VIEW_KEY, '1'); else localStorage.removeItem(LIVE_VIEW_KEY); } catch { /* private mode */ }
+  liveViewMemo = on ? '1' : '0';
+  try { localStorage.setItem(LIVE_VIEW_KEY, liveViewMemo); } catch { /* private mode */ }
   const r = rdOpenRun();
   if (r) paintRdLive(screen, r);
 }
@@ -25794,11 +25450,14 @@ function paintRdHeader(screen, r) {
   const paused = isPaused(r);
   const pauseBtn = screen.querySelector('.rd-pause');
   const stopBtn = screen.querySelector('.rd-stop');
-  // Hidden iff the run is OVER. An interrupted/pausing run keeps both controls,
-  // exactly as its list card does (paintRunCard gates on isPaused only) — the two
-  // surfaces must not disagree about what a run still offers.
+  // Hidden iff the run is OVER. An interrupted/pausing run keeps both controls: it is
+  // parked, not finished, and can still be resumed or discarded.
   pauseBtn.hidden = terminal;
   stopBtn.hidden = terminal;
+  // Schedule a run after this one (the list card's old schedule-after button): a pipeline run with a
+  // pipeline id, while it is not over — a finished run gets "Start a follow-up run" instead.
+  const afterBtn = screen.querySelector('.rd-after');
+  if (afterBtn) afterBtn.hidden = terminal || !r.pipelineId || !isPipelineRun(r);
   // C16: read the PREVIOUS action before overwriting it. The disabled rule below
   // needs to tell "the run genuinely changed state" from "another frame landed
   // while a request was in flight".
@@ -25822,7 +25481,7 @@ function paintRdHeader(screen, r) {
   const busy = !lbl;
   if (lbl) lbl.textContent = paused ? 'Resume' : 'Pause';
   // A total-budget pause is 403'd by the server until the window resets or the
-  // limit is raised — the same gating paintRunCard applies.
+  // limit is raised, so Resume is disabled up front.
   const totalBlocked = paused && r.pauseReason === 'cost_total' && budgetState.budget?.blocked;
   // C16 — NEVER re-enable a control this painter did not disable.
   // `pauseRun` disables the button and re-enables it ONLY on failure; the server
@@ -25833,13 +25492,14 @@ function paintRdHeader(screen, r) {
   // re-arms Pause mid-request and a second click POSTs /api/pause twice, which is
   // precisely what the disable exists to prevent.
   // Rule: widen freely, narrow only when the control's ACTION flipped (the run
-  // really did park or resume, at which point pauseRun's disable is meaningless)
-  // or when the button is already enabled (nothing is in flight).
-  // The list card has no equivalent hazard — paintRunCard gates `.btn-resume`
-  // only and never writes `.btn-pause.disabled`.
-  if (!busy && (actionChanged || !pauseBtn.disabled)) {
+  // really did park or resume, at which point pauseRun's disable is meaningless),
+  // when the button is already enabled (nothing is in flight), or when the disable
+  // is this painter's own budget gate (a gated button cannot have been clicked).
+  const gated = pauseBtn.dataset.gated === '1';
+  if (!busy && (actionChanged || !pauseBtn.disabled || gated)) {
     pauseBtn.disabled = !!totalBlocked || r.status === 'pausing';
   }
+  pauseBtn.dataset.gated = totalBlocked ? '1' : '';
   pauseBtn.title = totalBlocked
     ? `Total budget reached — blocked until ${fmtResetAtLocal(budgetState.budget.windowEndMs)} or a higher total limit`
     : (paused ? 'Resume — restart this paused pipeline where it left off'
@@ -25863,213 +25523,23 @@ function paintRdHeader(screen, r) {
   }
 }
 
-let runningCollapsed = false; // in-memory only; auto-expanded whenever ≥1 child exists
-
-// The rail shows a 36px square per run instead of a titled row.
-
-// The run's display name for the TOOLTIP and the accessible name. The initials
-// deliberately read the raw title instead, so a blank one still degrades to '?'
-// rather than to 'UR'. `.trim()` before the fallback is load-bearing: a
-// whitespace-only title is TRUTHY, so `r.title || …` opens with a bare separator.
-function railName(r) {
-  return String(r.title || '').trim() || 'Untitled run';
-}
-
-// Initials are the mock's algorithm with two corrections it does not make:
-// `w[0]` is a UTF-16 CODE UNIT, so an emoji title yields a lone high surrogate
-// ('🎉 launch' -> "\ud83cL" -> "?L"); and 'ß'.toUpperCase() is 'SS', so a
-// two-glyph tile would render three. The final `|| '?'` covers a blank or
-// whitespace-only title, which splits to nothing.
-function railInitials(title) {
-  const firstGlyph = (w) => {
-    const c = [...w][0] || '';
-    return [...c.toUpperCase()][0] || c;
-  };
-  return String(title || '').split(/\s+/).filter(Boolean).slice(0, 2)
-    .map(firstGlyph).join('') || '?';
-}
-
-// The word the tile's tooltip ends with. The two branches the expanded tab row
-// also has words for — pending-input and finished — are copied verbatim from it,
-// so the rail and the row can never disagree where both speak. The remaining
-// four are new: the expanded row deliberately renders NO end marker for a
-// paused/starting/pausing/plain-running run, and a 36px square with no label
-// needs a word for each. They intentionally do NOT follow statusPill
-// ('Stopped'/'Error'/'Implementing'/…), which is the run CARD's vocabulary; the
-// tile's sibling is the tab row, not the card. `starting` and `pausing` are
-// named explicitly because runDotClass gives them their own grey-pulse dot — a
-// grey-pulsing dot next to the word "Running" is the dot and the label
-// disagreeing on one 36px square. Because those two share a dot class AND a sig
-// marker, Step 4 puts this function's OUTPUT in the signature.
-function tabStatusWord(r) {
-  if (r.pendingQuestion != null) return 'Waiting for your input';
-  if (isPaused(r)) return 'Paused';
-  if (r._finished || isTerminalStatus(r.status)) {
-    return r.status === 'done' ? 'Completed' : 'Did not complete';
-  }
-  if (r.status === 'starting') return 'Starting';
-  if (r.status === 'pausing') return 'Pausing';
-  return 'Running';
-}
-
-function railTileEl(r) {
-  const tile = document.createElement('button');
-  tile.type = 'button';
-  tile.className = 'rail-tile';
-  // Same distinct dataset key the expanded row uses — NOT data-run-id, which is
-  // the run-card's identifier and is queried unscoped across the suite.
-  tile.dataset.childRunId = r.runId;
-  tile.classList.toggle('active', r.runId === state.selectedRunId);
-  if (isLingering(r)) tile.classList.add('lingering');
-  const label = `${railName(r)} · ${tabStatusWord(r)}`;
-  tile.title = label;
-  // The initials are meaningless to a screen reader, so the tile needs a real
-  // name; `aria-label` also beats name-from-contents, which would read "FA".
-  tile.setAttribute('aria-label', label);
-  tile.appendChild(document.createTextNode(railInitials(r.title)));
-
-  const dot = document.createElement('span');
-  dot.className = `child-dot ${runDotClass(r)}`;
-  tile.appendChild(dot);
-
-  // Only the pending-input marker is carried over. The expanded row also shows a
-  // green/red finished-unseen "●", but the tile's corner dot ALREADY carries
-  // green/red from runDotClass — a second marker on a 36px square is unreadable.
-  if (r.pendingQuestion != null) {
-    const q = document.createElement('span');
-    q.className = 'child-q';
-    q.textContent = '?';
-    tile.appendChild(q);
-  }
-
-  tile.addEventListener('click', () => { location.hash = `running/${r.runId}`; });
-  return tile;
-}
-
+// The sidebar no longer lists runs under Runs: the Runs page's own list (Needs you
+// first) is always one click away, and the Runs badge carries the count. What is
+// left is the phone roll-up: the hamburger's amber dot while the drawer is shut.
 function renderPipelineTabs() {
-  const rows = pipelineTabRuns();
-
-  // Roll-up amber dot = ANY child needs input. Visible from every view — on phones it
-  // rides the hamburger, whose name says so while the drawer (and its "?" rows) is shut.
-  const needs = rows.some((r) => r.pendingQuestion != null);
-  for (const id of ['#nav-running-rollup', '#mbar-rollup']) {
-    const dot = $(id); if (dot) dot.hidden = !needs;
-  }
+  const needs = pipelineTabRuns().some((r) => r.pendingQuestion != null);
+  const dot = $('#mbar-rollup'); if (dot) dot.hidden = !needs;
   $('#mbar-menu')?.setAttribute('aria-label', needs ? 'Menu — a pipeline needs your input' : 'Menu');
-
-  const host = $('#nav-running-children');
-  if (!host) return;
-  if (rows.length === 0) {
-    host.innerHTML = ''; host.dataset.tabsSig = ''; host.classList.add('hidden');
-    return;
-  }
-
-  // Rebuild gate: every tagged event (incl. every log line) lands here, but a
-  // log frame changes nothing a row renders. Skip identical rebuilds so the
-  // sidebar DOM (and its scroll position) stays put; any rendered datum
-  // changing — order, dot, title, project, end marker, active, lingering,
-  // collapsed — changes the signature and repaints as before. JSON.stringify
-  // is the encoding: titles/labels are free text, so a hand-joined concat
-  // could alias two different states; JSON escaping is unambiguous.
-  // railCollapsed() is FIRST and load-bearing: this function early-returns on an
-  // unchanged signature, so without it a collapse/expand leaves the previous
-  // mode's markup on screen until the next server event happens to arrive.
-  const rail = railCollapsed();
-  const sig = JSON.stringify([rail, runningCollapsed, rows.map((r) => [
-    r.runId,
-    runDotClass(r),
-    r.title,
-    Array.isArray(r.projectNames) && r.projectNames.length
-      ? r.projectNames.join(' · ') : projectName(r.projectDir),
-    r.pendingQuestion != null ? 'q'
-      : isPaused(r) ? 'p'
-      : (r._finished || isTerminalStatus(r.status)) ? (r.status === 'done' ? 'ok' : 'bad')
-      : '',
-    r.runId === state.selectedRunId,
-    isLingering(r),
-    // The tile renders a status WORD the expanded row never shows, and
-    // starting/pausing are indistinguishable in every field above. Without this
-    // a run paused while still starting keeps a stale "· Starting" tooltip and
-    // aria-label. Costs the expanded state one extra (identical) repaint on that
-    // one transition and nothing else.
-    tabStatusWord(r),
-    personShown(r.startedBy),
-  ])]);
-  if (host.dataset.tabsSig === sig) return;
-  host.dataset.tabsSig = sig;
-
-  host.classList.remove('hidden');
-  host.classList.toggle('collapsed', runningCollapsed);  // auto-expanded: default false
-  host.innerHTML = '';
-  for (const r of rows) {
-    if (rail) { host.appendChild(railTileEl(r)); continue; }
-    const row = document.createElement('button');
-    row.type = 'button';
-    row.className = 'nav-child';
-    // NB: a distinct dataset key (NOT data-run-id) — `data-run-id` is the run-card's
-    // unique identifier queried unscoped across the suite; reusing it here would make
-    // a child row shadow its card in document-order lookups.
-    row.dataset.childRunId = r.runId;
-    row.classList.toggle('active', r.runId === state.selectedRunId);
-    if (isLingering(r)) row.classList.add('lingering'); // greyed
-
-    const dot = document.createElement('span');
-    dot.className = `child-dot ${runDotClass(r)}`;
-
-    const body = document.createElement('span');
-    body.className = 'child-body';
-
-    const title = document.createElement('span');
-    title.className = 'child-title';
-    title.textContent = r.title;
-
-    const hint = document.createElement('span');
-    hint.className = 'child-proj';
-    // Workspace runs list every member project (CSS clamps at three lines);
-    // single-project runs keep the lone basename.
-    const projLabel = Array.isArray(r.projectNames) && r.projectNames.length
-      ? r.projectNames.join(' · ')
-      : projectName(r.projectDir);
-    hint.textContent = projLabel;
-    hint.title = projLabel;
-
-    body.append(title, hint);
-    row.append(dot, body);
-    // Who started it (shared deployments only): just the initials; space is tight.
-    const starter = personShown(r.startedBy);
-    if (starter) {
-      const ini = personIni(starter, `Started by ${starter}`);
-      ini.classList.add('child-by');
-      row.appendChild(ini);
-    }
-
-    // End-of-row marker (same slot, three mutually exclusive states):
-    //  - pending input  → pulsing amber "?"   (needs your answer)
-    //  - finished done   → static green "●"    (completed, unseen)
-    //  - finished failed → static red "●"      (error/stopped, unseen)
-    // The green/red marker persists until the run is acknowledged (opened), at
-    // which point isLingering() goes false and the row leaves the list entirely.
-    if (r.pendingQuestion != null) {
-      const q = document.createElement('span');
-      q.className = 'child-q';
-      q.textContent = '?';
-      q.title = 'Waiting for your input';
-      row.appendChild(q);
-    } else if (isPaused(r)) {
-      // Paused: no end marker — it's parked (amber leading dot), not a result.
-    } else if (r._finished || isTerminalStatus(r.status)) {
-      const ok = r.status === 'done';
-      const m = document.createElement('span');
-      m.className = `child-q ${ok ? 'ok' : 'bad'}`;
-      m.textContent = '●';
-      m.title = ok ? 'Completed' : 'Did not complete';
-      row.appendChild(m);
-    }
-    row.addEventListener('click', () => { location.hash = `running/${r.runId}`; });
-    host.appendChild(row);
-  }
 }
 
+// Needs you, counted without building the list (this runs on every WS frame): the same rule
+// as the Runs list's Needs-you group, over the same rows (runs-list.mjs countNeedsYou).
+function runsNeedsCount() {
+  return countNeedsYou({
+    live: overviewRuns().map((r) => ({ pipelineId: r.pipelineId || '', status: r.status, ask: r.pendingQuestion != null, unread: isLingering(r) })),
+    history: Array.isArray(state.historyAll) ? state.historyAll : [],
+  });
+}
 function updateNavCounts() {
   const live = liveRuns().length;
   const c = $('#nav-running-count');
@@ -26082,41 +25552,39 @@ function updateNavCounts() {
     c.classList.toggle('n-run', live > 0);
     c.classList.toggle('n-grey', live === 0);
   }
-  // Paused pipelines get their own amber badge (hidden at zero); liveRuns()
-  // excludes status 'paused', so the two counts never overlap.
-  const paused = [...runs.values()].filter((r) => isPipelineRun(r) && isPaused(r)).length;
-  const pc = $('#nav-paused-count');
-  if (pc) pc.textContent = String(paused);
-  const pb = $('#nav-paused-badge');
-  if (pb) pb.hidden = paused === 0;
-  // The rail hides #nav-paused-badge (it would collide with the live count in
-  // the same corner) and shows no label, so the button's own name has to carry
+  // One badge on Runs (D11): while anything needs you, the amber Needs-you count shows and
+  // CSS hides the live count beside it.
+  const needs = runsNeedsCount();
+  const nc = $('#nav-needs-count');
+  if (nc) { nc.textContent = String(needs); nc.hidden = needs === 0; }
+  // The rail shows no label and only one badge, so the button's own name has to carry
   // both numbers. aria-label as well as title: a title is a DESCRIPTION, and
   // name-from-contents would otherwise announce this button as bare "4".
   // Written in BOTH states so the two can never drift apart — but at zero it
-  // degrades to the plain label, because "Running — 0 live" is noise on a
-  // resting sidebar, and zero is where most users are most of the time. The
-  // accessible name still CONTAINS the visible label, so WCAG 2.5.3 holds.
-  const rb = $('.nav button[data-nav="running"]');
+  // degrades to the plain label, because "Runs — 0 live" is noise on a resting
+  // sidebar, and zero is where most users are most of the time. The accessible
+  // name still CONTAINS the visible label, so WCAG 2.5.3 holds.
+  const rb = $('.nav button[data-nav="runs"]');
   if (rb) {
-    const t = paused ? `Running — ${live} live, ${paused} paused`
-      : live ? `Running — ${live} live`
-      : 'Running';
-    // A tooltip only when it says more than the label beside it ("Running" over
-    // "Running" is noise); the collapsed rail has no label, so it always gets one.
+    const parts = [];
+    if (needs) parts.push(`${needs} need${needs === 1 ? 's' : ''} you`);
+    if (live) parts.push(`${live} live`);
+    const t = parts.length ? `Runs — ${parts.join(', ')}` : 'Runs';
+    // A tooltip only when it says more than the label beside it ("Runs" over "Runs" is
+    // noise); the collapsed rail has no label, so it always gets one.
     const railed = !!rb.closest('.sidebar.collapsed');
-    if (t !== 'Running' || railed) rb.title = t; else rb.removeAttribute('title');
+    if (t !== 'Runs' || railed) rb.title = t; else rb.removeAttribute('title');
     rb.setAttribute('aria-label', t);
   }
 }
 
-// Single authoritative refresh for the sidebar counts. Only Running and Schedules carry a
-// number in the main menu. Running is derived from the in-memory runs map (synchronous,
+// Single authoritative refresh for the sidebar counts. Only Runs and Schedules carry a
+// number in the main menu. Runs is derived from the in-memory runs map (synchronous,
 // always live); Schedules comes from one cheap /api/counts snapshot — NOT the full list
 // endpoints. Counts are SET to absolute values, so this is safe to call redundantly
 // (boot, every view switch, hello, each *-changed broadcast) without drift. Never throws.
 async function refreshAllCounts() {
-  updateNavCounts();                                     // Running (in-memory, synchronous)
+  updateNavCounts();                                     // Runs (in-memory, synchronous)
   renderPipelineTabs();   // sidebar tabs + roll-up update on every view switch / hello / broadcast
   let data;
   try {
@@ -26380,14 +25848,14 @@ const gsDialogUp = (id) => { const m = document.getElementById(id); return !!(m 
 /** The run just started, on its own page (beginRun opens it): the closing stops of every tour
  *  that starts one — what it is doing, its numbers, a waiting question (only while one waits),
  *  then the rows that open each part of it. `first` is the tour's own line for the first stop.
- *  On the Running list instead (the user went back), one stop on the run's card. */
+ *  On the Runs list instead (the user went back), one stop on the run's row. */
 const gsRunPageHops = (first) => {
-  // The run Start just began (beginRun notes it) when it is on the list; the first card otherwise.
-  const card = [...(gs.startedRunId ? [`#run-list [data-run-id="${gs.startedRunId}"]`] : []), '#run-list [data-run-id]'];
+  // The run Start just began (beginRun notes it) when it is on the list; the first row otherwise.
+  const card = [...(gs.startedRunId ? [`#runs-list [data-run-id="${gs.startedRunId}"]`] : []), '#runs-list [data-run-id]'];
   const [view, param] = parseHash();
   if (view !== 'running' || !param) {
     return [{ id: 'card', info: true, nextLabel: 'Done', target: card,
-      text: 'This is your run. Open it to follow what it is doing; a question it needs answered shows there too. When it finishes it moves to History.' }];
+      text: 'This is your run. Open it to follow what it is doing; a question it needs answered shows there too. When it finishes, its row says how it ended.' }];
   }
   const on = (sel) => [`#run-detail .rd[data-mode="glance"] ${sel}`, ...card];
   const asking = !!document.querySelector('#run-detail .rd[data-mode="glance"] .rd-questions:not([hidden])');
@@ -26398,13 +25866,13 @@ const gsRunPageHops = (first) => {
     asking ? { id: 'ask', info: true, target: on('.rd-questions .rd-ask-head'),
       text: 'A question from the run lands here, below its panel. Answer, then Submit, and it carries on. The status line at the top leads here too.' } : null,
     { id: 'rows', info: true, nextLabel: 'Done', target: on('.rd-result'),
-      text: 'Each row opens a part of the run: its Overview, the Diff of the changes so far, the Workflow, the Logs and more. When it finishes, it moves to History.' },
+      text: 'Each row opens a part of the run: its Overview, the Diff of the changes so far, the Workflow, the Logs and more. When it finishes, its row says how it ended.' },
   ].filter(Boolean);
 };
 // Test hook, added here: the object at the top of the file is built while this const is
-// still in its temporal dead zone.
-if (typeof window !== 'undefined') window.__np = Object.assign(window.__np || {}, { gsRunPageHops });
-/** The two run steps: nav → project → (workflow) → task → Mock → Start → Running → the run's card. */
+// still in its temporal dead zone. `gsHops` is a hoisted declaration.
+if (typeof window !== 'undefined') window.__np = Object.assign(window.__np || {}, { gsRunPageHops, gsHops });
+/** The two run steps: nav → project → (workflow) → task → Mock → Start → Runs → the run's page. */
 function gsRunHops(g, mock) {
   const prompt = document.getElementById('prompt');
   const wf = document.getElementById('workflowSelect');
@@ -26436,11 +25904,11 @@ function gsRunHops(g, mock) {
     // A refused form (the message under Start) keeps ringing Start.
     { id: 'start', target: '#start-btn', click: 'started', met: () => g.started && !(onView('new') && formErr()),
       text: mock
-        ? 'Start it. Its page opens, and it appears under Running in the sidebar.'
+        ? 'Start it. Its page opens, and it appears under Runs in the sidebar.'
         : 'Start the run. Worca answers loop gates itself and pauses only for the questions that matter.' },
-    NAV('running', mock
-      ? 'Your runs live under Running. Open this one to follow it.'
-      : 'Your runs live under Running. Open this one to follow it; when it finishes it moves to History.'),
+    NAV('runs', mock
+      ? 'Your runs live under Runs. Open this one to follow it.'
+      : 'Your runs live under Runs. Open this one to follow it; a finished run stays in its project group.', ['running', 'history']),
     ...gsRunPageHops(mock
       ? 'This is your run’s page. The line at the top of its card says what it is doing: the state, then the step.'
       : 'This is your run’s page. The line at the top of its card says what it is doing: the state, then the step, and whether it waits for you.'),
@@ -26510,8 +25978,8 @@ function gsNextHop(step, g = gs.guide || {}) {
   return hop ? gsPhoneNavHop(gsRaiseLevelHop(hop)) : hop;
 }
 // Every tour runs to its LOGICAL end — the thing the tile promises — not to the first click of
-// a multi-step action: a project is registered (not just the dialog opened), a run is on its card
-// under Running, a workspace is saved, team metrics is enabled, a policy home is on its page, the
+// a multi-step action: a project is registered (not just the dialog opened), a run is on its page
+// under Runs, a workspace is saved, team metrics is enabled, a policy home is on its page, the
 // answer has landed. A tour
 // that needs a project first walks the whole Add project dialog and then carries on.
 function gsHops(step, g) {
@@ -26576,7 +26044,7 @@ function gsHops(step, g) {
         { ...run.prompt, text: 'Now describe the task for it, in a sentence or two. The planner asks when something matters.',
           already: 'The task goes here — a sentence or two; the planner asks when something matters.' },
         { ...run.start, text: 'Start the run with that workflow. Mock mode, beside it, tries the loop offline first.' },
-        run.running,
+        run.runs,
         ...gsRunPageHops('This is your run’s page, on the workflow you picked. The line at the top of its card says what it is doing: the state, then the step.'),
       ];
     }
@@ -26593,7 +26061,7 @@ function gsHops(step, g) {
           text: 'Tick the projects that belong together — two or more.',
           already: 'The projects that belong together — two or more are ticked.' },
         { id: 'scan', target: '#wiz-start-scan', final: true,
-          text: 'Scan them. Worca starts a scan run you can follow under Running; when it finishes, the workspace appears here with its description, ready to edit.' },
+          text: 'Scan them. Worca starts a scan run you can follow under Runs; when it finishes, the workspace appears here with its description, ready to edit.' },
       ];
     }
     case 'teamMetrics': {
@@ -26834,7 +26302,13 @@ const navLinks = $$('.nav button[data-nav]');
 // workspace-create is in the array (so deep-links resolve) but has no nav link.
 // plugins/guardrails/models LEFT this array: they are Settings tabs now, reached
 // as #settings/<tab> (legacy bare hashes redirect — see LEGACY_TAB_VIEWS).
-const VIEW_NAMES = ['new', 'getting-started', 'running', 'schedules', 'history', 'stats', 'team-metrics', 'team-policy', 'composer', 'workspaces', 'workspace-create', 'agents', 'scripts', 'agent-create', 'projects', 'settings'];
+const VIEW_NAMES = ['new', 'getting-started', 'runs', 'running', 'schedules', 'history', 'stats', 'team-metrics', 'team-policy', 'composer', 'workspaces', 'workspace-create', 'agents', 'scripts', 'agent-create', 'projects', 'settings'];
+// One Runs page, three route names: the bare list (#runs) and the two detail routes every
+// deep link already uses (#running/<id>…, #history/<projectKey>/<id>…). All three render
+// the `data-view="runs"` section and light the one Runs nav button.
+const RUNS_VIEWS = new Set(['runs', 'running', 'history']);
+const viewSection = (name) => (RUNS_VIEWS.has(name) ? 'runs' : name);
+function inRunsView(v = currentView()) { return RUNS_VIEWS.has(v); }
 
 // ── Interface mode (docs/ui-levels.md) ──────────────────────────────────────
 // simple | advanced | expert: a VIEW preference, server-rendered into <html data-level>.
@@ -26950,6 +26424,34 @@ function legacyTabRoute(view, param = '') {
 let currentSettingsTab = null;
 
 function showView(name, param = '') {
+  // A bare #running / #history is the Runs list now (both lists merged into it). Replace the
+  // entry rather than letting the hash sync below PUSH #runs: Back would land on #history
+  // again, normalize again, and never get past it.
+  if ((name === 'running' || name === 'history') && !param) {
+    name = 'runs';
+    if (/^#(running|history)\/?$/.test(location.hash)) {
+      try { window.history.replaceState(null, '', '#runs'); } catch { /* sandboxed */ }
+    }
+  }
+  // #runs with nothing selected: reopen the run the pane showed last (D6) — on the way in
+  // from another page, and always when the list stands beside the pane. Inside the page in
+  // the narrow slide layout, #runs IS the list (the back button), so it never restores there.
+  // A caller that asked for the list itself ("Show in Runs", a bounce off a dead run) set
+  // runsUi.skipRestore (goRunsList / bounceUnknownRun). It holds while the route stays the bare
+  // list, so a repeated #runs route (a hashchange echo, a Runs nav click on #runs) keeps
+  // showing the list, and any other route clears it.
+  if (name === 'runs' && !param) {
+    if (!runsUi.skipRestore && (!RUNS_VIEWS.has(currentShownView) || runsLayout() === 'split')) {
+      const want = rememberedRunHash();
+      if (want) {
+        try { window.history.replaceState(null, '', `#${want}`); } catch { /* sandboxed */ }
+        const i = want.indexOf('/');
+        return showView(want.slice(0, i), want.slice(i + 1));
+      }
+    }
+  } else {
+    runsUi.skipRestore = false;
+  }
   // #report-modal is a top-level `position:fixed;inset:0` overlay with a live document
   // keydown listener — the same class as #stop-modal below. Leaving the view with one
   // up would float a dialog for a run the user has navigated away from over the next
@@ -26982,9 +26484,11 @@ function showView(name, param = '') {
     // down so the next entry mounts a fresh one (and a stray frame paints nothing).
     if (currentSettingsTab === 'memory' && memoryTabCtl) { memoryTabCtl.destroy(); memoryTabCtl = null; }
   }
-  // Leaving History resets the two-screen track, so the next visit lands on the
-  // list instead of a stale detail screen sliding in behind the new view.
-  if (currentShownView === 'history' && name !== 'history') closeHistDetail({ instant: true });
+  // Moving between the three Runs routes swaps the pane at once; going back to the bare
+  // list (#runs) slides the detail away in the narrow layout and hands focus back to its
+  // row (close*Detail force `instant` side by side). Leaving Runs hides the whole section,
+  // so there the close is instant, as before.
+  if (currentShownView === 'history' && name !== 'history') closeHistDetail({ instant: name !== 'runs' });
   // Same for the Projects track: leaving must not park a project page mid-slide behind the next
   // view, and its Memory controller must not outlive the view.
   if (currentShownView === 'projects' && name !== 'projects') closeProjDetail({ instant: true });
@@ -26996,20 +26500,16 @@ function showView(name, param = '') {
     scriptsCtl = null;
   }
   if (currentShownView === 'workspaces' && name !== 'workspaces') closeWsDetail({ instant: true });
-  // Same for Running's two-screen track (spec §5.1): leaving must not park a
-  // detail screen mid-slide behind the next view.
+  // Same for the live run in the pane (spec §5.1): leaving must not park it mid-slide.
   //
   // closeStopModal() is called HERE and not from closeRunDetail, whose teardown
-  // sits below a `detail-open` early return: `routeRunDetail('')` calls that on
-  // every plain `#running` route, so hoisting it there would dismiss a modal a
-  // LIST card had just opened. A view change has no such conflict — #stop-modal
-  // is a top-level `position:fixed;inset:0` overlay with a live document keydown
-  // listener, so leaving Running with one up (from either opener) would float it
-  // over the next view. Same class of guard as the guardrail wizard and info-tip
-  // above.
+  // sits below a `detail-open` early return. A route change away from the live run is
+  // the moment to drop it — #stop-modal is a top-level `position:fixed;inset:0` overlay
+  // with a live document keydown listener, so leaving with one up would float it over
+  // the next view. Same class of guard as the guardrail wizard and info-tip above.
   if (currentShownView === 'running' && name !== 'running') {
     closeStopModal();
-    closeRunDetail({ instant: true });
+    closeRunDetail({ instant: name !== 'runs' });
   }
   // Canonicalise the Settings param before the hash sync below: General is always
   // plain '#settings', and an unknown tab (#settings/bogus) falls back to it
@@ -27040,14 +26540,14 @@ function showView(name, param = '') {
   }
   refreshAllCounts();        // every view switch re-reads the authoritative counts
 
-  views.forEach((v) => v.classList.toggle('hidden', v.dataset.view !== name));
+  views.forEach((v) => v.classList.toggle('hidden', v.dataset.view !== viewSection(name)));
   navLinks.forEach((b) => {
-    const on = b.dataset.nav === name;
+    const on = b.dataset.nav === viewSection(name);
     b.classList.toggle('active', on);
     if (on) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   });
-  paintMobileBar(name);
+  paintMobileBar(viewSection(name));
   setMobileNavOpen(false);   // any route (a drawer tap, back/forward, a deep link) puts the drawer away
   // Nodes (Agents, Scripts): tint the parent while a child page is open, and
   // unfold it — a deep link or a drawer click must never land on a hidden row.
@@ -27056,36 +26556,39 @@ function showView(name, param = '') {
     nodesGroup.classList.toggle('has-active', inNodes);
     if (inNodes && nodesGroup.getAttribute('aria-expanded') === 'false') setNodesCollapsed(false);
   }
-  // Toggle a body flag so CSS can drop .main's top padding for the History view,
-  // letting the sticky pills toolbar + project headers pin flush to the top.
-  document.body.classList.toggle('view-history', name === 'history');
-  document.body.classList.toggle('view-running', name === 'running');
+  // Body flags let CSS drop .main's padding for the full-height pages (the Runs panes).
+  document.body.classList.toggle('view-runs', RUNS_VIEWS.has(name));
   document.body.classList.toggle('view-projects', name === 'projects');
   document.body.classList.toggle('view-workspaces', name === 'workspaces');
-  if (name === 'running') {
-    renderRunningView();
-    // The Scheduled group (runs due within 24 h) reads the same store as the Schedules view.
-    if (prevView !== 'running') void withWorkspaces().then(() => schedulesView.load()).then(paintScheduledGroup);
-    routeRunDetail(param, { instant: prevView !== 'running' });
-    // Opening a run's detail page acknowledges it (linger → drops on next render).
-    // ONLY a finished run: opening a still-live run must NOT pre-acknowledge, or
-    // its later linger is suppressed (markLingering no-ops on acknowledged) and it
-    // skips Running straight into History. The acknowledge happens when the user
-    // opens the lingering row AFTER it finishes.
-    if (state.selectedRunId) {
-      const sr = runs.get(state.selectedRunId);
-      // A paused run is _finished but NOT a result to acknowledge — opening it to
-      // Resume must not drop it from Running.
-      if (sr && !isPaused(sr) && (sr._finished || isTerminalStatus(sr.status))) acknowledgeRun(state.selectedRunId);
+  if (RUNS_VIEWS.has(name)) {
+    const entering = !RUNS_VIEWS.has(prevView);
+    // The section is visible now (the toggle above): measure before anything opens, so the
+    // first open on a narrow window already knows it is in the slide (focus, inert).
+    if (entering) measureRunsLayout();
+    if (entering) {
+      // No refetch on in-page hops (list <-> run <-> saved run): a reload re-runs PR
+      // enrichment and blanks resolved PR words mid-navigation (was the History rule).
+      loadHistoryView();
+      void withWorkspaces().then(() => schedulesView.load()).then(() => { if (inRunsView()) paintRunsList(); });
     }
-  }
-  if (name === 'history') {
-    // List<->detail hops stay in-view: do NOT refetch /api/history on every hop —
-    // a reload re-triggers PR enrichment and the cache branch strips `pr` from
-    // every row, blanking resolved PR pills mid-navigation. Refresh is the
-    // refresh affordance; pipelines-changed broadcasts still force-reload.
-    if (prevView !== 'history') loadHistoryView();
-    routeHistoryDetail(param, { instant: prevView !== 'history' });
+    if (name === 'running') {
+      routeRunDetail(param, { instant: entering });
+      // Opening a run's detail page acknowledges it (linger → drops on next render).
+      // ONLY a finished run: opening a still-live run must NOT pre-acknowledge, or
+      // its later linger is suppressed (markLingering no-ops on acknowledged) and it
+      // skips straight to its saved row. The acknowledge happens when the user
+      // opens the lingering row AFTER it finishes.
+      if (state.selectedRunId) {
+        const sr = runs.get(state.selectedRunId);
+        // A paused run is _finished but NOT a result to acknowledge — opening it to
+        // Resume must not drop it from the live rows.
+        if (sr && !isPaused(sr) && (sr._finished || isTerminalStatus(sr.status))) acknowledgeRun(state.selectedRunId);
+      }
+    } else if (name === 'history') {
+      routeHistoryDetail(param, { instant: entering });
+    }
+    paintRunsList();
+    syncRunsPane();
   }
   if (name === 'stats') loadStatsView();
   if (name === 'schedules') { schedulesView.showTab(param); void withWorkspaces().then(() => schedulesView.load()); }
@@ -27233,10 +26736,10 @@ window.addEventListener('hashchange', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Live timer: tick running cards once a second so timers advance without events.
+// Live timer: tick running runs once a second so timers advance without events.
 // ---------------------------------------------------------------------------
-// Every mounted surface showing THIS run's live timers: its list card and, when
-// the detail screen happens to be showing the same run, that screen. One walk,
+// Every mounted surface showing THIS run's live timers: the detail screen, when it
+// happens to be showing the same run (r.el, the old list card, is always null). One walk,
 // one interval — a second timer for the detail would drift against this one and
 // double the per-second work (§11).
 function rdTickHosts(r) {

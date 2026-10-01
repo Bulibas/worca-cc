@@ -432,6 +432,8 @@ test('Archive: honest copy + danger styling, DELETE, back to the list, row dropp
   await openDetail(ctx);
   const { window } = ctx;
   const doc = window.document;
+  const rowSel = `#runs-list .runs-row[data-kind="hist"][data-pipeline-id="${ROW.id}"]`;
+  assert.ok(doc.querySelector(rowSel), 'the run is listed before the archive');
   const archive = doc.querySelector('#hist-detail .hd-archive');
   assert.equal(archive.hidden, false, 'a finished run is archivable');
 
@@ -455,8 +457,9 @@ test('Archive: honest copy + danger styling, DELETE, back to the list, row dropp
   await settle(window, 5);
   assert.equal(deletes.length, 1);
   assert.equal(deletes[0], `/api/runs/${ROW.id}?projectKey=${KEY}`);
-  assert.equal(window.location.hash.replace(/^#/, ''), 'history');
-  assert.equal(doc.querySelector('#history .hist-card'), null, 'the row is dropped from the list');
+  // goRunsList(): the bare list, not the remembered (now archived) run.
+  assert.equal(window.location.hash.replace(/^#/, ''), 'runs');
+  assert.equal(doc.querySelector(rowSel), null, 'the row is dropped from the list');
 });
 
 test('Archive is hidden while the run is still live (running/pausing)', async () => {
@@ -521,10 +524,14 @@ test('an in-flight Archive survives a concurrent repaint (never a second DELETE)
   assert.equal(doc.querySelector('#confirm-modal').classList.contains('hidden'), true,
     'a second click is swallowed by the disabled guard — no second confirm');
 
+  // Take the error node BEFORE the DELETE lands: the archive's goRunsList() closes the
+  // saved page at once in the split layout, so it is gone from #hist-detail afterwards.
+  const err = doc.querySelector('#hist-detail .hd-error');
+  assert.ok(err, 'the saved page is still open while the DELETE is in flight');
   release();
   await settle(window, 6);
   assert.equal(deletes.length, 1, 'exactly one DELETE for one archive');
-  assert.equal(doc.querySelector('#hist-detail .hd-error').hidden, true, 'and no error stamped');
+  assert.equal(err.hidden, true, 'and no error stamped');
 });
 
 test('a DEEP-LINKED Archive names the run in the confirm copy', async () => {
@@ -582,10 +589,9 @@ test('discarding the retained worktree clears the banner and re-enables Archive'
   assert.equal(doc.querySelector('#hist-detail .retained-banner').hidden, true);
   assert.equal(doc.querySelector('#hist-detail .hist-discard').hidden, true);
   assert.equal(doc.querySelector('#hist-detail .hd-archive').disabled, false);
-  // The mutation must land on the ROW that lives in state.historyAll, not on a
-  // copy: the same paintHistory() rebuilds the list card from that array.
-  assert.equal(doc.querySelector('#history .hist-card .hist-retained-badge').hidden, true,
-    'the discard mutated the row, not a throwaway copy');
+  // A discard is not an archive: the run stays listed.
+  assert.ok(doc.querySelector(`#runs-list .runs-row[data-kind="hist"][data-pipeline-id="${ROW.id}"]`),
+    'the discarded run is still listed');
 });
 
 test('deep-linked discard still clears the banner after the real row lands', async () => {
@@ -617,8 +623,9 @@ test('deep-linked discard still clears the banner after the real row lands', asy
   await settle(ctx.window, 6);
   assert.equal(doc.querySelector('#hist-detail .retained-banner').hidden, true);
   assert.equal(doc.querySelector('#hist-detail .hd-archive').disabled, false);
-  assert.equal(doc.querySelector('#history .hist-card .hist-retained-badge').hidden, true,
-    'the bound handler mutated the ROW, not the orphaned deep-link stub');
+  // A discard is not an archive: the run stays listed.
+  assert.ok(doc.querySelector(`#runs-list .runs-row[data-kind="hist"][data-pipeline-id="${ROW.id}"]`),
+    'the discarded run is still listed');
 });
 
 test('deep link derives retained work from state.branch.commitFailed, then DEFERS to the row', async () => {
@@ -1070,8 +1077,8 @@ test('non-done run (results null) shows the empty state and never fetches /diff'
   // persist one, so that sentence must be gone.
   assert.doesNotMatch(empty.textContent, /captured when a run completes/);
   assert.equal(doc.querySelector('#hist-detail .hd-diff-file'), null);
-  // endsWith, not includes: /api/diff-comments/counts (the History pill's own
-  // endpoint) contains "/diff" as a substring and is unrelated to the patch.
+  // endsWith, not includes: the diff-comments endpoints contain "/diff" as a
+  // substring and are unrelated to the patch.
   assert.ok(ctx.calls.every((c) => !c.url.endsWith('/diff')), 'the patch is never requested');
 });
 
@@ -1462,7 +1469,7 @@ test('a patch resolving after navigation cannot append a body or start highlight
   await openDetail(ctx);
   const retiredPane = paneOf(ctx.window.document);
   assert.equal(retiredPane.querySelector('.hd-diff-body'), null);
-  go(ctx.window, 'history');
+  go(ctx.window, 'new');   // leave Runs: a bare #history would restore this same run (D6)
   await settle(ctx.window);
   release();
   await settle(ctx.window, 6);
@@ -1481,7 +1488,7 @@ test('a highlighter resolving after navigation leaves the retired plain body unt
   await settle(ctx.window);
   const retiredBody = paneOf(ctx.window.document).querySelector('.hd-diff-body');
   assert.ok(retiredBody);
-  go(ctx.window, 'history');
+  go(ctx.window, 'new');   // leave Runs: a bare #history would restore this same run (D6)
   await settle(ctx.window);
   release({
     lang: 'javascript',
@@ -2235,7 +2242,7 @@ test('Logs tab renders the shared filter bar + lines + cycle separator', async (
   const ctx = await bootDetail({ detail: LOGS_DETAIL, arms: logArm(LOG_NDJSON) });
   const sec = await openTab(ctx, 'logs');
 
-  assert.ok(sec.querySelector('.log-filters'), 'the shared bar, cloned from #run-card-tpl');
+  assert.ok(sec.querySelector('.log-filters'), 'the shared bar, cloned from #log-bar-tpl');
   assert.equal(sec.querySelectorAll('.log-line').length, 3);
   const seps = sec.querySelectorAll('.log-sep');
   assert.equal(seps.length, 1, 'one separator at the cycle 1 -> 2 boundary');
@@ -2764,11 +2771,11 @@ test('History opens on the glance: page title, status line, facts, the tab rows;
   assert.equal(hd.querySelector('.rd-trail-btn'), null, 'no trail of dots');
   assert.equal(hd.querySelectorAll('.rd-facts .rd-stats > div').length, 3, 'time · cost · changes');
   assert.deepEqual([...hd.querySelectorAll('.rd-facts .rd-stats > div > span')].map((s) => s.textContent).slice(0, 2), ['time', 'cost']);
-  assert.match(hd.querySelector('.hd-result .issues').textContent, /Uploads fall back to IP/);
+  assert.equal(hd.querySelector('.hd-result .issues'), null, 'the things to check live in Overview only');
   assert.equal(hd.querySelector('.rd-nowlist').textContent, '', 'no step list on a finished run');
   // Every tab is a row, in tab order, under Results and How it ran.
   const groups = [...hd.querySelectorAll('.hd-result .rd-sgroup')];
-  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent).filter((t) => t !== 'Things to check'), ['Results', 'How it ran']);
+  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent), ['Results', 'How it ran']);
   const rows = [...hd.querySelectorAll('.hd-result [data-rd-tab]')].map((b) => b.dataset.rdTab);
   const tabs = [...doc.querySelectorAll('#hist-detail .hd-tab')].map((b) => b.dataset.sec);
   assert.deepEqual(rows, tabs, 'one row per tab, in the tab bar\'s order');
@@ -2803,7 +2810,12 @@ test('History glance mirrors the header actions: Resume on a paused run clicks t
   const real = hd.querySelector('.hd-resume');
   const mirror = hd.querySelector('.hd-result .hd-g-resume');
   assert.equal(!!mirror, !real.hidden, 'the glance offers Resume exactly when the header does');
+  for (const b of hd.querySelectorAll('.hd-result .rd-cta')) {
+    assert.ok(b.firstElementChild.matches('svg.rd-cta-ico'), `${b.textContent} leads with a glyph`);
+  }
   if (mirror) {
+    assert.equal(mirror.querySelector('.rd-cta-ico').dataset.icon, 'resume');
+    assert.equal(mirror.textContent, 'Resume');
     let clicked = 0;
     real.addEventListener('click', () => { clicked += 1; });
     mirror.dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));

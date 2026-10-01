@@ -51,28 +51,28 @@ async function boot({ counts = { pipelines: 0, projects: 0, workspaces: 0 }, has
   return { window, wsBox, calls, box };
 }
 
-// Only Running and Schedules carry a number in the main menu; every other entry is a
+// Only Runs and Schedules carry a number in the main menu; every other entry is a
 // bare label, whatever /api/counts reports.
 const navButton = (doc, nav) => doc.querySelector(`.nav button[data-nav="${nav}"]`);
 
-test('only Running and Schedules carry a count badge in the sidebar markup', () => {
+test('only Runs and Schedules carry a count badge in the sidebar markup', () => {
   const doc = new JSDOM(readFileSync(htmlPath, 'utf8')).window.document;
   const counted = [...doc.querySelectorAll('.nav button[data-nav]')]
     .filter((b) => b.querySelector('.nav-count'))
     .map((b) => b.dataset.nav);
-  assert.deepEqual(counted, ['running', 'schedules']);
+  assert.deepEqual(counted, ['runs', 'schedules']);
   for (const id of ['nav-history-count', 'nav-projects-count', 'nav-workspaces-count'])
     assert.equal(doc.getElementById(id), null, `#${id} is gone`);
 });
 
-test('boot paints Running + Schedules from /api/counts and no number on History/Projects/Workspaces', async () => {
+test('boot paints Runs + Schedules from /api/counts and no number on Projects/Workspaces', async () => {
   const { window } = await boot({
     counts: { pipelines: 7, projects: 3, workspaces: 2, schedules: { scheduled: 4, missed: 1, recurring: 0, unread: 0 } },
   });
   const doc = window.document;
   assert.equal(doc.querySelector('#nav-running-count').textContent, '0');
   assert.equal(doc.querySelector('#nav-schedules-count').textContent, '5');
-  for (const nav of ['history', 'projects', 'workspaces']) {
+  for (const nav of ['projects', 'workspaces']) {
     const b = navButton(doc, nav);
     assert.ok(b, `${nav} nav button present`);
     assert.equal(b.querySelector('.nav-count'), null, `${nav} has no count badge`);
@@ -93,24 +93,27 @@ test('a projects-changed broadcast re-reads /api/counts without adding a number 
   assert.doesNotMatch(navButton(doc, 'projects').textContent, /\d/, 'Projects shows no number');
 });
 
-test('pipelines-changed while on History reloads the list (cards reflect a delete)', async () => {
-  const { wsBox, calls } = await boot({ counts: { pipelines: 1, projects: 0, workspaces: 0 }, hash: 'history' });
+test('pipelines-changed while on Runs reloads the list (rows reflect a delete)', async () => {
+  const { wsBox, calls } = await boot({ counts: { pipelines: 1, projects: 0, workspaces: 0 }, hash: 'runs' });
   const before = calls.filter((u) => u.includes('/api/history')).length;
   wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'pipelines-changed', action: 'deleted' }) });
   await new Promise((r) => setTimeout(r, 5));
-  assert.ok(calls.filter((u) => u.includes('/api/history')).length > before, 'History view re-fetched its rows');
+  assert.ok(calls.filter((u) => u.includes('/api/history')).length > before, 'the Runs view re-fetched its finished rows');
 });
 
-test('Running empty-state hides when a run appears (0 -> 1), no lingering placeholder', async () => {
-  const { window, wsBox } = await boot({ counts: { pipelines: 0, projects: 0, workspaces: 0 }, hash: 'running' });
+test('the Runs empty note turns into a row when a run appears (0 -> 1), no lingering placeholder', async () => {
+  const { window, wsBox } = await boot({ counts: { pipelines: 0, projects: 0, workspaces: 0 }, hash: 'runs' });
   const doc = window.document;
 
   wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'hello', runs: [] }) });
   await new Promise((r) => setTimeout(r, 0));
-  assert.ok(doc.querySelector('#run-list .run-empty'), 'empty-state shown when no runs');
+  const note = doc.querySelector('#runs-list .runs-note');
+  assert.ok(note, 'empty note shown when no runs');
+  assert.match(note.textContent, /^No runs yet/);
+  assert.equal(doc.querySelectorAll('#runs-list .runs-row').length, 0);
 
   wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'hello', runs: [{ runId: 'r1', status: 'running', title: 'Demo' }] }) });
   await new Promise((r) => setTimeout(r, 0));
-  assert.equal(doc.querySelector('#run-list .run-empty'), null, 'placeholder removed once a run is live');
-  assert.ok(doc.querySelector('#run-list [data-run-id="r1"]'), 'live card rendered');
+  assert.equal(doc.querySelector('#runs-list .runs-note'), null, 'placeholder removed once a run is live');
+  assert.ok(doc.querySelector('#runs-list .runs-row[data-run-id="r1"]'), 'live row rendered');
 });

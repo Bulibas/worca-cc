@@ -368,7 +368,7 @@ test('Create workspace button routes to the wizard (#workspace-create)', async (
   assert.equal(doc.querySelector('.view[data-view="workspace-create"]').classList.contains('hidden'), false);
 });
 
-test('Re-scan from the page starts the scan run and follows it on Running', async () => {
+test('Re-scan from the page starts the scan run and follows it on Runs', async () => {
   const posts = [];
   const metricsScans = [];
   const { window, show } = await boot({
@@ -396,8 +396,8 @@ test('Re-scan from the page starts the scan run and follows it on Running', asyn
   assert.deepEqual(posts[0], {}, 'the server reads the persisted set');
   assert.equal(metricsScans.length, 1, 're-scan also refreshes member discovery');
   assert.deepEqual(metricsScans[0], { projectPaths: WS[0].projectPaths });
-  assert.equal(doc.querySelector('.view[data-view="running"]').classList.contains('hidden'), false, 'on Running');
-  assert.ok(doc.querySelector('#run-list [data-run-id="run-rescan"]'), 'the scan run has a card');
+  assert.equal(doc.querySelector('.view[data-view="runs"]').classList.contains('hidden'), false, 'on Runs');
+  assert.ok(doc.querySelector('#runs-list [data-run-id="run-rescan"]'), 'the scan run has a row');
 });
 
 test('Re-scan refused (409) stays on the workspace page with the error', async () => {

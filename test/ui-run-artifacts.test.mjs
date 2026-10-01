@@ -593,7 +593,6 @@ test('a live artifact event keeps the byte size the hydrated row already carried
   const ctx = await boot();
   const np = ctx.window.__np;
   const r = np.upsertRun({ runId: 'r1', title: 't', projectDir: PROJECT, status: 'running' });
-  r.el = np.buildRunCard(r);
   r.artifacts = [{ kind: 'deck', relPath: 'deck/deck.md', nodeId: 'builder', stepKey: 'build#1', cycle: 1, bytes: 4096 }];
 
   // The builder rewrites the file on its next fix cycle; the re-index re-emits it.
@@ -648,7 +647,6 @@ test('a live artifact event binds to the closest-matching row, not the first suf
   const ctx = await boot();
   const np = ctx.window.__np;
   const r = np.upsertRun({ runId: 'r1', title: 't', projectDir: PROJECT, status: 'running' });
-  r.el = np.buildRunCard(r);
   r.artifacts = [
     { kind: 'deck', relPath: 'index.html', nodeId: 'builder', stepKey: 'build#1', cycle: 1 },
     { kind: 'deck', relPath: 'deck/index.html', nodeId: 'builder', stepKey: 'build#1', cycle: 1 },
@@ -911,7 +909,6 @@ test('a prune removes every row for the file, whatever kind it was listed under'
   const ctx = await boot();
   const np = ctx.window.__np;
   const r = np.upsertRun({ runId: 'r1', title: 't', projectDir: PROJECT, status: 'running' });
-  r.el = np.buildRunCard(r);
   r.artifacts = [
     { kind: 'deck', relPath: 'deck/deck-stage.js', nodeId: 'n_build', stepKey: 'b#1', cycle: 1 },
     { kind: 'deck-asset', relPath: 'deck/deck-stage.js', nodeId: 'n_build', stepKey: 'b#2', cycle: 2 },
