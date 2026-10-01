@@ -90,7 +90,7 @@ export function renderProjectTpChip(s, { doc = globalThis.document, now = Date.n
   chip.dataset.key = s.key;
   const sum = projectTpSummary(s, { now });
   chip.dataset.kind = sum.kind;
-  if (sum.tone !== 'muted') chip.append(dot(doc, sum.tone));
+  chip.append(dot(doc, sum.tone));   // muted = a hollow dot: the list lines its dots up in one column
   const state = h(doc, 'span', `pl-team-state${sum.tone === 'muted' ? ' muted' : ''}`);
   state.append(withRef(doc, sum.short, sum.ref));
   chip.append(h(doc, 'span', 'pl-team-name', 'Policy'), ' ', state);

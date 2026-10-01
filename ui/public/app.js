@@ -172,7 +172,7 @@ import { paintAboutInto } from './about-links.mjs';
 import { renderReasonOptions, renderOptIns, previewText, reportBlobParts, REPORT_PREVIEW_DEBOUNCE_MS } from './report-run.mjs';
 import { openScheduleSheet, closeScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
 import {
-  freshSyncState, ago, listRowModel, wsRollupModel, ffRefusalCopy, syncStageLabel, fetchedAgo, isSyncableBranchName,
+  freshSyncState, ago, listRowModel, projectBarModel, wsRollupModel, ffRefusalCopy, syncStageLabel, fetchedAgo, isSyncableBranchName,
   runOutcomeModel, openSyncDialog, chooseSyncRefusal,
 } from './branch-sync.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
@@ -382,7 +382,9 @@ const el = {
 
   // Projects management view
   projectsList: $('#projects-list'),
-  projectsSyncAll: $('#projects-sync-all'),
+  // Sync all rides the list card's head (design 2026-10-01): one node every render re-homes, so a
+  // Sync all in flight keeps its busy state through a projects-changed repaint.
+  projectsSyncAll: Object.assign(document.createElement('button'), { type: 'button', id: 'projects-sync-all', className: 'btn btn-primary btn-mini', hidden: true, textContent: 'Sync all' }),
   projectsMsg: $('#projects-msg'),
   projectAddBtn: $('#project-add-btn'),
   projShell: $('#proj-shell'),
@@ -6669,6 +6671,9 @@ const OUTCOME_ICONS = {
   branch: '<circle cx="6" cy="5.5" r="2"/><circle cx="6" cy="18.5" r="2"/><circle cx="18" cy="7.5" r="2"/><path d="M6 7.5v9M18 9.5c0 4-3 5.6-7.5 6.3"/>',
   chevDown: '<path d="M6 9l6 6 6-6"/>',
   chevUp: '<path d="M6 15l6-6 6 6"/>',
+  // The Projects sync bar only (projectBarModel): listRowModel never names these.
+  noRemote: '<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/>',
+  spin: '<path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5"/>',
 };
 /** Paint one "What the run gets" cell from a runOutcomeModel. Text only ever via textContent. */
 function paintOutcomeCell(host, m, { onRetry = null, busy = false } = {}) {
@@ -10204,18 +10209,23 @@ function buildProjectRow(p) {
   }
   const path = document.createElement('div');
   path.className = 'proj-path';
-  path.textContent = p.path;
+  appendBreakable(path, p.path);   // a narrow column breaks it after a /, not mid-name
   path.title = p.path;
   main.append(name, path);
-  // #527: the sync chip slot, always there for a keyed row (paintSyncChips fills and unhides it).
+  row.appendChild(main);
+  // #527 / design 2026-10-01: the sync bar's own column (branch | origin status | action). A keyed
+  // row's bar is always there; paintSyncChips fills it, and hides it only for a project the
+  // status read skips (a folder that is gone).
+  const sync = document.createElement('div');
+  sync.className = 'pl-sync';
   if (p.key) {
     const syncSlot = document.createElement('div');
     syncSlot.className = 'proj-sync';
     syncSlot.dataset.key = p.key;
     syncSlot.hidden = true;
-    main.appendChild(syncSlot);
+    sync.appendChild(syncSlot);
   }
-  row.appendChild(main);
+  row.appendChild(sync);
 
   // The team column: two one-line chips (metrics, policy) that paintProjectTmCells /
   // paintProjectPolicyCells fill from the scopes payloads. Status only — every control and
@@ -10255,24 +10265,16 @@ function syncProjectName(key) {
   const p = state.projects.find((x) => x && x.key === key);
   return (p && p.name) || key;
 }
+function projBehindCount() {
+  return Object.values(state.syncChips || {}).filter((b) => b && listRowModel(b).action === 'sync').length;
+}
 function paintSyncChips() {
-  for (const slot of document.querySelectorAll('.proj-sync[data-key]')) {
-    const key = slot.dataset.key;
-    const b = state.syncChips[key];
-    // No answer yet, or no remote: nothing to say on a Projects row.
-    if (!b || !b.remote) { slot.hidden = true; slot.replaceChildren(); continue; }
-    const m = listRowModel(b);
-    const c = syncRowCells(key, m, b.base || '', syncProjectName(key));
-    slot.hidden = false;
-    slot.className = `proj-sync tone-${m.tone}`;
-    slot.replaceChildren(c.icon, c.branch, c.status, c.action);
-  }
-  if (el.projectsSyncAll) {
-    const behind = Object.values(state.syncChips || {}).filter((b) => b && listRowModel(b).action === 'sync').length;
-    if (!el.projectsSyncAll.classList.contains('busy')) {
-      el.projectsSyncAll.hidden = !behind;
-      el.projectsSyncAll.textContent = `Sync all (${behind})`;
-    }
+  for (const slot of document.querySelectorAll('.proj-sync[data-key]')) paintProjSyncBar(slot);
+  paintProjFilters();
+  if (el.projectsSyncAll && !el.projectsSyncAll.classList.contains('busy')) {
+    const behind = projBehindCount();
+    el.projectsSyncAll.hidden = !behind;
+    el.projectsSyncAll.textContent = `Sync all (${behind})`;
   }
   paintSyncChecked();
   for (const item of document.querySelectorAll('.ws-item[data-workspace-id]')) paintWsSyncItem(item);
@@ -10346,8 +10348,9 @@ function paintWsSyncItem(item) {
     return tr;
   }));
 }
-/** The cells every sync row shares (Workspaces table, Projects list): icon, branch, status + hint,
- *  and the one action Worca can take — Sync (behind), Details… (diverged), Retry (offline). */
+/** The cells of a Workspaces table sync row: icon, branch, status + hint, and the one action Worca
+ *  can take — Sync (behind), Details… (diverged), Retry (offline). The Projects list draws its own
+ *  bar (paintProjSyncBar). */
 function syncRowCells(key, m, branchName, name) {
   const branch = document.createElement('span'); branch.className = 'ws-tbranch';
   if (branchName) { branch.append(wsIcon('branch', 14)); const t = document.createElement('span'); t.textContent = branchName; branch.append(t); }
@@ -10364,13 +10367,163 @@ function syncRowCells(key, m, branchName, name) {
     btn.dataset.syncKey = key;
     btn.setAttribute('aria-label', `${btn.textContent.replace('…', '')} ${name}`);
     btn.addEventListener('click', (e) => {
-      e.stopPropagation();   // a Projects row opens its page on click
+      e.stopPropagation();   // a workspace row opens its page on click
       if (m.action === 'details') void openChipSyncDialog(key, btn);
       else void syncChipNow(key, btn);
     });
     action.append(btn);
   }
   return { icon: wsIcon(m.icon, 18), branch, status, action };
+}
+
+// ---- The Projects sync bar (design 2026-10-01): branch | origin status | action, one object
+// tinted by state (projectBarModel). Every bar has the same inner columns, so Sync, Retry and
+// Review… line up down the list. Text only ever via textContent.
+
+/** Text that is never cut: it may break after / _ or -, and nowhere else unless it must. */
+function appendBreakable(node, text) {
+  for (const piece of String(text).split(/(?<=[/_-])/)) {
+    node.append(piece);
+    if (/[/_-]$/.test(piece)) node.append(document.createElement('wbr'));
+  }
+  return node;
+}
+/** A branch name never ends in "…" (design 2026-10-01). */
+function projBranchName(name) {
+  return appendBreakable(Object.assign(document.createElement('span'), { className: 'ps-bname' }), name);
+}
+// Keys whose row Sync / Retry is in flight: a repaint under it keeps the spinner.
+const projSyncBusy = new Set();
+async function projSyncNow(key) {
+  if (projSyncBusy.has(key)) return;
+  projSyncBusy.add(key);
+  const repaint = () => {
+    const slot = document.querySelector(`.proj-sync[data-key="${cssEscape(key)}"]`);
+    if (slot) paintProjSyncBar(slot);
+    return slot;
+  };
+  repaint();
+  let synced = false;
+  try { await postProjectSync(key); synced = true; } catch { /* the bar keeps its last state */ }
+  projSyncBusy.delete(key);
+  const slot = repaint();
+  if (synced && slot) slot.querySelector('.ps-pill')?.classList.add('ps-flash');
+  // Keyboard focus was on the button the repaint replaced: hand it to the new one, else the row.
+  if (slot && document.activeElement === document.body) (slot.querySelector('.ps-btn') || slot.closest('.pl-row'))?.focus();
+}
+function paintProjSyncBar(slot) {
+  const key = slot.dataset.key;
+  const b = state.syncChips[key];
+  // No answer after the first read: the status read skips a folder that is gone.
+  if (b === undefined && syncChipsLoaded) { slot.hidden = true; slot.className = 'proj-sync'; slot.replaceChildren(); return; }
+  const m = projectBarModel(b);
+  slot.hidden = false;
+  slot.className = `proj-sync tone-${m.tone}`;
+  if (m.tone === 'none') {
+    const empty = document.createElement('div');
+    empty.className = 'ps-empty';
+    const what = document.createElement('b');
+    what.append(wsIcon(m.icon, 15), m.label);
+    empty.append(what, m.hint);
+    slot.replaceChildren(empty);
+    return;
+  }
+  const branch = document.createElement('div');
+  branch.className = 'ps-branch';
+  if (b && b.base) {
+    const line = document.createElement('div');
+    line.className = 'ps-bline';
+    line.title = b.base;
+    line.append(wsIcon('branch', 15), projBranchName(b.base));
+    branch.append(line);
+    if (m.vs) {
+      const vs = document.createElement('div');
+      vs.className = 'ps-vs';
+      const code = document.createElement('code');
+      code.textContent = m.vs;
+      vs.append('vs ', code);
+      branch.append(vs);
+    }
+  } else {
+    branch.append(Object.assign(document.createElement('span'), { className: 'ps-bnone', textContent: '—' }));
+  }
+  const status = document.createElement('div');
+  status.className = 'ps-status';
+  const pill = document.createElement('span');
+  pill.className = 'ps-pill';
+  const icon = wsIcon(m.icon, 15);
+  if (m.icon === 'spin') icon.classList.add('ps-spin');
+  pill.append(icon, Object.assign(document.createElement('span'), { className: 'ps-label', textContent: m.label }));
+  status.append(pill);
+  if (m.hint) status.append(Object.assign(document.createElement('div'), { className: 'ps-hint', textContent: m.hint }));
+  const action = document.createElement('div');
+  action.className = 'ps-act';
+  if (m.action) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-mini ps-btn';
+    btn.dataset.syncKey = key;
+    btn.setAttribute('aria-label', `${m.actionLabel.replace('…', '')} ${syncProjectName(key)}`);
+    if (projSyncBusy.has(key)) {
+      btn.disabled = true;
+      btn.classList.add('busy');
+      btn.append(wsIcon('spin', 14), m.action === 'retry' ? 'Retrying' : 'Syncing');
+    } else {
+      btn.textContent = m.actionLabel;
+    }
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();   // the row opens its page on click
+      if (m.action === 'details') void openChipSyncDialog(key, btn);
+      else void projSyncNow(key);
+    });
+    action.append(btn);
+  }
+  slot.replaceChildren(branch, status, action);
+}
+
+// The head's counts double as filters (design 2026-10-01). A chip shows only while its state has a
+// project; a filter whose last project leaves goes back to All. Rows without an answer count
+// toward All only.
+const PROJ_FILTERS = [
+  ['behind', 'Behind', 'blue'], ['diverged', 'Diverged', 'amber'], ['dirty', 'Uncommitted', 'peach'],
+  ['ok', 'Up to date', 'green'], ['offline', 'Offline', 'grey'], ['local', 'Local only', 'grey'],
+];
+let projFilter = 'all';
+function paintProjFilters() {
+  const card = el.projectsList && el.projectsList.querySelector('.proj-card');
+  if (!card) return;
+  const items = [...card.querySelectorAll('.pl-item')];
+  const groups = items.map((it) => {
+    const b = it.dataset.key ? state.syncChips[it.dataset.key] : undefined;
+    return b === undefined ? null : projectBarModel(b).group;
+  });
+  const counts = {};
+  for (const g of groups) if (g) counts[g] = (counts[g] || 0) + 1;
+  if (projFilter !== 'all' && !counts[projFilter]) projFilter = 'all';
+  const defs = PROJ_FILTERS.filter(([k]) => counts[k]);
+  const host = card.querySelector('.proj-filters');
+  host.hidden = !defs.length;
+  host.replaceChildren(...[['all', 'All', '']].concat(defs).map(([k, label, dot]) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'proj-fchip';
+    chip.dataset.filter = k;
+    chip.setAttribute('aria-pressed', String(projFilter === k));
+    if (dot) chip.append(Object.assign(document.createElement('span'), { className: `proj-fdot ${dot}` }));
+    chip.append(`${label} `, Object.assign(document.createElement('span'), { className: 'n', textContent: String(k === 'all' ? items.length : counts[k]) }));
+    chip.addEventListener('click', () => {
+      projFilter = k;
+      paintProjFilters();
+      host.querySelector(`.proj-fchip[data-filter="${k}"]`)?.focus();
+    });
+    return chip;
+  }));
+  let shown = 0;
+  items.forEach((it, i) => {
+    it.hidden = projFilter !== 'all' && groups[i] !== projFilter;
+    if (!it.hidden) shown++;
+  });
+  card.querySelector('.proj-empty').hidden = shown > 0;
 }
 
 // One "Checked 1 min ago ↻" per list (design board 1): the oldest fetch among the shown projects,
@@ -10476,17 +10629,16 @@ if (el.projectsSyncAll) {
     if (btn.disabled) return;
     btn.disabled = true;
     btn.classList.add('busy');
+    btn.textContent = `Syncing ${projBehindCount()}…`;
     try {
       const res = await fetch('/api/sync/all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'ff' }) });
       const data = await safeJson(res);
-      if (res.ok && data && data.projects && typeof data.projects === 'object') {
-        state.syncChips = data.projects;
-        paintSyncChips();
-      }
+      if (res.ok && data && data.projects && typeof data.projects === 'object') state.syncChips = data.projects;
     } catch { /* the chips keep their last state */ }
     finally {
       btn.disabled = false;
       btn.classList.remove('busy');
+      paintSyncChips();   // the label and count come back with the rows
     }
   });
 }
@@ -10500,22 +10652,46 @@ function renderProjectsList() {
     return;
   }
   const card = document.createElement('section');
-  card.className = 'card saved-card';
+  card.className = 'card saved-card proj-card';
 
+  // Design 2026-10-01: title · state filters (paintProjFilters) · "Checked … ↻" and Sync all.
   const head = document.createElement('div');
   head.className = 'saved-head';
+  const title = document.createElement('div');
+  title.className = 'proj-head-title';
   const b = document.createElement('b');
   b.textContent = 'Projects';
   const cnt = document.createElement('span');
   cnt.className = 'cnt';
   cnt.textContent = String(state.projects.length);
-  head.append(b, cnt, syncCheckedNodes());
+  title.append(b, cnt);
+  const filters = document.createElement('div');
+  filters.className = 'proj-filters';
+  filters.setAttribute('role', 'group');
+  filters.setAttribute('aria-label', 'Filter by sync state');
+  filters.hidden = true;
+  const tools = document.createElement('div');
+  tools.className = 'proj-head-tools';
+  tools.append(syncCheckedNodes(), el.projectsSyncAll);
+  head.append(title, filters, tools);
+
+  // Column header, wide cards only; its sync cell shares the bars' inner columns.
+  const cols = document.createElement('div');
+  cols.className = 'proj-cols';
+  cols.setAttribute('aria-hidden', 'true');
+  const colSync = document.createElement('span');
+  colSync.className = 'proj-cols-sync';
+  colSync.append(...['Branch', 'Origin', ''].map((t) => Object.assign(document.createElement('span'), { textContent: t })));
+  const colTeam = Object.assign(document.createElement('span'), { textContent: 'Team' });
+  tagLevel(colTeam, 'expert');
+  cols.append(Object.assign(document.createElement('span'), { textContent: 'Project' }), colSync, colTeam, document.createElement('span'));
 
   const list = document.createElement('div');
   list.className = 'saved-list';   // real, styled class (style.css:671)
   for (const p of state.projects) list.appendChild(buildProjectRow(p));
+  const empty = Object.assign(document.createElement('div'), { className: 'proj-empty', textContent: 'No projects in this state.', hidden: true });
 
-  card.append(head, list);
+  card.append(head, cols, list, empty);
   host.appendChild(card);
   paintProjectTmCells();
   paintProjectPolicyCells();
@@ -16150,7 +16326,7 @@ async function loadTpScopes({ force = false } = {}) {
   return p;
 }
 
-// Projects list: fills the .tp-slot placeholders left by buildProjectRow (board 2).
+// Projects list: fills the .pl-tp chips left by buildProjectRow (board 2).
 async function paintProjectPolicyCells(force = false) {
   const data = await loadTpScopes({ force });
   const byKey = new Map(data.projects.map((s) => [s.key, s]));
