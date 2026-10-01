@@ -126,6 +126,7 @@ test('popover: over the window — Used past 100%, nothing free, bar clamped, co
   assert.equal(pop.querySelector('.ask-pop-caption-meter').textContent, '230.0k / 200k (115%)');
   assert.equal(pop.querySelector('.ask-ctx-bar-used').style.width, '100%');
   assert.ok(pop.querySelector('.ask-ctx-bar-used').classList.contains('is-ctx-high'));
+  assert.equal(pop.querySelector('.ask-ctx-bar-buffer'), null, 'no window left to hatch: the buffer never draws over the fill');
   assert.deepEqual(stats(pop).map((r) => r[3]), ['115.0%', '16.5%', '0.0%']);
   const foot = pop.querySelector('.ask-ctx-foot');
   assert.equal(foot.textContent, 'Compaction soon');
@@ -179,5 +180,32 @@ test('popover: its right edge lines up with the trigger, kept inside the sheet',
   btn.click();
   btn.getBoundingClientRect = rect(110, 230);                    // too far left for a 320px panel
   assert.equal(openCtx(ctx).style.right, '494px', 'clamped: 820 − 320 − 6 keeps 6px to the sheet edge');
+  ctx.panel.destroy();
+});
+
+test('popover: past the compaction point the hatch only covers what is left of the window', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ thread: thread({ totals: T({ ctx: 180000, ctxWindow: 200000 }) }) }) });
+  await openThread(ctx);
+  const pop = openCtx(ctx);
+  assert.equal(pop.querySelector('.ask-ctx-bar-used').style.width, '90%');
+  assert.equal(pop.querySelector('.ask-ctx-bar-buffer').style.width, '10%', '20k left, not the full 33k');
+  assert.equal(stats(pop)[1][2], '33.0k', 'the row still reports the whole buffer');
+  ctx.panel.destroy();
+});
+
+test('popover: a window resize while open moves it back over the trigger', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ thread: thread() }) });
+  await openThread(ctx);
+  const btn = ctx.doc.querySelector('[data-ask-ctx-btn]');
+  const sheet = btn.closest('.ask-sheet');
+  const rect = (left, right) => () => ({ left, right, width: right - left, top: 0, bottom: 0, height: 0, x: left, y: 0 });
+  sheet.getBoundingClientRect = rect(100, 920);
+  btn.getBoundingClientRect = rect(350, 505);
+  const pop = openCtx(ctx);
+  assert.equal(pop.style.right, '415px');
+  sheet.getBoundingClientRect = rect(0, 600);                    // the window got narrower
+  btn.getBoundingClientRect = rect(300, 420);
+  ctx.window.dispatchEvent(new ctx.window.Event('resize'));
+  assert.equal(pop.style.right, '180px', '600 − 420');
   ctx.panel.destroy();
 });

@@ -69,6 +69,8 @@ test('topics: "Asked from" rows in stored order, links route + close, pinned mar
   assert.ok(rows[2].querySelector('svg'), 'pin icon');
   assert.equal(rows[2].querySelector('.ask-ctx-topic-pin').textContent, 'pinned');
   assert.equal(rows[0].querySelector('.ask-ctx-topic-pin'), null);
+  assert.deepEqual(rows.map((r) => r.title), ['worca-cc', 'Fix login', 'havn (pinned)', 'Settings', 'Live run'],
+    'the hover names the topic (for an ellipsized name) without repeating kind and id');
   assert.equal(ctx.doc.activeElement, rows[0], 'focus lands on the first topic');
   rows[1].click();
   assert.equal(ctx.window.location.hash, '#history/worca-cc-ace1a602/1a2b3c4d');
@@ -99,6 +101,7 @@ test('topics: mentioned ones get their own group, muted, routing like page topic
   assert.equal(pop.querySelector('[data-ctx-group="mentioned"] .ask-ctx-group').textContent, 'Mentioned in chat');
   const [m] = topics(pop, 'mentioned');
   assert.ok(m.classList.contains('is-mentioned'));
+  assert.equal(m.title, 'Fix login (mentioned)', 'same wording as the History hover');
   assert.ok(!m.classList.contains('is-pinned'));
   assert.equal(topics(pop, 'asked').length, 1);
   m.click();

@@ -1380,6 +1380,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.destroyed || !st.open || st.drag) return;
     if (st.size) restoreSize();
     relayoutCards();
+    if (st.popover && st.popover.trigger === el.meterTokens) anchorCtxPopover(st.popover.panel, el.meterTokens);
   }
 
   // ---- keyboard + pointer routing ------------------------------------------
@@ -2302,7 +2303,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (mentioned) row.classList.add('is-mentioned');
     if (pinned) row.classList.add('is-pinned');
     row.dataset.kind = c.kind;
-    row.title = `${c.kind} ${c.id} — ${c.label || c.id}`;
+    row.title = `${c.label || c.id}${mentioned ? ' (mentioned)' : pinned ? ' (pinned)' : ''}`;   // the full name when it is cut off; History's wording
     row.appendChild(make('span', 'ask-ctx-swatch'));
     row.appendChild(make('span', 'ask-ctx-topic-name', c.label || c.id));
     if (pinned) {
@@ -2349,9 +2350,12 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       const used = make('span', `ask-ctx-bar-used${levelClass(b.level)}`);
       used.style.width = `${+Math.min(100, (ctx / win) * 100).toFixed(2)}%`;
       bar.appendChild(used);
-      if (b.buffer > 0) {
+      // The hatch covers only the window the fill has not reached, so past the compaction point it shrinks
+      // instead of painting over the fill (the row below still reports the whole buffer).
+      const hatch = Math.min(b.buffer, Math.max(0, win - ctx));
+      if (hatch > 0) {
         const buf = make('span', 'ask-ctx-bar-buffer');
-        buf.style.width = `${+((b.buffer / win) * 100).toFixed(2)}%`;
+        buf.style.width = `${+((hatch / win) * 100).toFixed(2)}%`;
         bar.appendChild(buf);
       }
       p.appendChild(bar);
@@ -2383,12 +2387,16 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     });
     if (!panel) return;
     panel.setAttribute('aria-label', 'Context window');
-    // Right edge flush with the trigger: the meter moves with the interface level and the controls
-    // beside it, so a fixed CSS offset would miss it. Kept 6px inside the sheet.
+    anchorCtxPopover(panel, trigger);
+    trigger.setAttribute('aria-expanded', 'true');
+  }
+
+  /** Right edge flush with the trigger: the meter moves with the interface level and the controls
+   *  beside it, so a fixed CSS offset would miss it. Kept 6px inside the sheet; re-run on window resize. */
+  function anchorCtxPopover(panel, trigger) {
     const sr = el.sheet.getBoundingClientRect();
     const tr = trigger.getBoundingClientRect();
     if (sr.width > 0) panel.style.right = `${Math.max(0, Math.min(sr.right - tr.right, sr.width - CTX_POP_WIDTH - 6))}px`;
-    trigger.setAttribute('aria-expanded', 'true');
   }
 
   // ---- thread actions -------------------------------------------------------
