@@ -104,19 +104,21 @@ test('#new/after/p1: the pick waits on the form, the branch select leads with th
   assert.equal('sourceBranch' in runBodies[0], false);
 });
 
-test('the Sync row follows the value the pick sets without a change event: hidden for the run before it, back for HEAD (#527)', async () => {
+test('the Branches row follows the value the pick sets without a change event: the run before it, then back to HEAD (#527)', async () => {
   const { window } = await boot('#new/after/p1', { withSync: true });
   const doc = window.document;
   await branchesReady(doc);
   await tick(40);
-  const row = doc.getElementById('sync-row');
+  const mode = doc.getElementById('branches-mode-wrap');
+  const text = () => doc.querySelector('#bt-project-outcome .bt-text')?.textContent || '';
   assert.equal(doc.getElementById('sourceBranch').value, '__previous__');
-  assert.equal(row.hidden, true, 'the previous run\'s branch is not HEAD\'s: no HEAD pill');
+  assert.equal(mode.hidden, true, 'the previous run\'s branch is not HEAD\'s: nothing to sync');
+  assert.equal(text(), 'Starts from the branch of the run before it');
   doc.getElementById('new-sched-clear').click();
-  for (let i = 0; i < 100 && row.hidden; i++) await tick(5);
+  for (let i = 0; i < 100 && mode.hidden; i++) await tick(5);
   assert.equal(doc.getElementById('sourceBranch').value, 'main');
-  assert.equal(row.hidden, false, 'back on HEAD\'s branch: its pill returns');
-  assert.equal(doc.querySelector('#sync-pill .sync-pill-txt').textContent, '2 behind');
+  assert.equal(mode.hidden, false, 'back on HEAD\'s branch: the choice returns');
+  assert.equal(text(), 'Gets 2 new commits from origin first');
 });
 
 test('Start now instead drops the pick and the previous-run option', async () => {

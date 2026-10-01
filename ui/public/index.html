@@ -304,41 +304,45 @@
                   <div id="extrasPills" class="extras-pills" hidden></div>
                 </div>
 
-                <!-- Branch pair: one decision (from → into), so one compact row. -->
-                <div class="field-grid-2 branch-pair" id="branch-fields" data-min-level="advanced">
-                  <div class="field field-compact">
-                    <label for="sourceBranch">Source branch</label>
-                    <div class="select-wrap" id="sourceBranchWrap">
-                      <select id="sourceBranch" class="select"></select>
-                    </div>
-                    <!-- Workspace mode: one source-branch dropdown per member project. -->
-                    <div class="ws-source-branches hidden" id="ws-source-branches"></div>
-                    <div class="switch-row ws-src-prev hidden" id="ws-source-previous-row">
-                      <div class="switch" id="ws-source-previous" role="switch" tabindex="0" aria-checked="false" aria-label="Branch off the run before it"></div>
-                      <span class="txt">Branch off the run before it</span>
-                    </div>
-                    <!-- Sync before run (#527): status pill, Sync, Auto-sync — one left-aligned row. -->
-                    <div class="sync-row" id="sync-row" hidden>
-                      <button type="button" class="sync-pill grey" id="sync-pill" aria-haspopup="dialog">
-                        <span class="sdot" aria-hidden="true"></span><span class="sync-pill-txt">Checking…</span>
-                        <svg class="chev" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                      </button>
-                      <button type="button" class="btn btn-mini sync-btn" id="sync-btn">
-                        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5V5h-2.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                        <span>Sync</span>
-                      </button>
-                      <label class="switch-row sync-auto" id="sync-auto-row">
-                        <input id="syncAuto" class="sw-input" type="checkbox" checked>
-                        <span class="switch switch-sm"></span><span class="txt">Auto-sync</span>
-                      </label>
-                    </div>
+                <!-- Branches (design v3): one table for a project or a workspace — a project
+                     run is the same table with one row. One choice (where the code comes from),
+                     then each row says in words what the run will get. -->
+                <div class="field field-compact branches" id="branch-fields" data-min-level="advanced">
+                  <div class="branches-head">
+                    <span class="branches-title" id="branches-title">Branches</span>
+                    <span class="branches-ctx" id="branches-ctx"></span>
+                    <span class="branches-mode" id="branches-mode-wrap" hidden>
+                      <span class="branches-mode-label" id="branches-mode-label">Use branches from</span>
+                      <span class="seg seg-sm" id="branches-mode" role="group" aria-labelledby="branches-mode-label">
+                        <button type="button" data-mode="origin" aria-pressed="true" class="on" id="branches-mode-origin">Origin · latest</button>
+                        <button type="button" data-mode="local" aria-pressed="false" id="branches-mode-local">Local copy</button>
+                      </span>
+                    </span>
                   </div>
-
-                  <div class="field field-compact">
-                    <label for="featureBranch">Feature branch <span class="opt">(optional)</span></label>
+                  <div class="branch-table" id="branch-table" role="table" aria-labelledby="branches-title">
+                    <div class="bt-head" role="row">
+                      <span role="columnheader">Project</span><span role="columnheader">Start from</span><span role="columnheader">What the run gets</span>
+                    </div>
+                    <!-- Project mode: the one row. Workspace mode hides it and fills #ws-source-branches. -->
+                    <div class="bt-row" id="bt-project-row" role="row">
+                      <span class="bt-name" id="bt-project-name" role="cell"></span>
+                      <div class="select-wrap" id="sourceBranchWrap" role="cell">
+                        <select id="sourceBranch" class="select" aria-labelledby="bt-project-name"></select>
+                      </div>
+                      <div class="bt-outcome" id="bt-project-outcome" role="cell"></div>
+                    </div>
+                    <div class="ws-source-branches hidden" id="ws-source-branches" role="rowgroup"></div>
+                  </div>
+                  <div class="switch-row ws-src-prev hidden" id="ws-source-previous-row">
+                    <div class="switch" id="ws-source-previous" role="switch" tabindex="0" aria-checked="false" aria-label="Branch off the run before it"></div>
+                    <span class="txt">Branch off the run before it</span>
+                  </div>
+                  <div class="branches-new">
+                    <label for="featureBranch">New branch <span class="opt">(optional)</span></label>
                     <input id="featureBranch" class="input" type="text" placeholder="e.g. feat/rate-limiter" spellcheck="false" />
-                    <small class="hint">Leave empty and Worca will propose one.</small>
+                    <small class="hint" id="featureBranchHint">Leave empty and Worca will propose one.</small>
                   </div>
+                  <small class="hint err" id="branches-blocked" hidden></small>
                 </div>
 
                 <!-- Advanced: how the run is executed, as opposed to what it runs.
@@ -1118,7 +1122,7 @@
                   </button>
                   <h1 class="pd-title"></h1>
                 </div>
-                <div class="pd-meta mono"><span class="pd-path"></span></div>
+                <div class="pd-meta mono"><span class="pd-path"></span><button type="button" class="pd-path-copy" aria-label="Copy path" title="Copy path"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8.5" y="8.5" width="11" height="11" rx="2"></rect><path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5"></path></svg></button></div>
                 <div class="pd-actions">
                   <button type="button" class="pd-new btn-ghost">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>

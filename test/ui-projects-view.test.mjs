@@ -218,7 +218,10 @@ test('a row click opens the project page: slide, header, focus on Back, hash #pr
   assert.equal(shell.querySelector('.proj-screen-list').hasAttribute('inert'), true, 'the list is inert behind the detail');
   // The Overview pill is lit and its section built.
   assert.equal(d.querySelector('.pd-tab.active').dataset.sec, 'overview');
-  assert.ok(d.querySelector('.pd-sec[data-sec="overview"] .pd-ov-card-path'), 'PATH card');
+  // The path lives in the header only (with a copy button); the Overview opens on BRANCH instead.
+  assert.ok(d.querySelector('.pd-meta .pd-path-copy'), 'the header path has a copy button');
+  assert.equal(d.querySelector('.pd-sec[data-sec="overview"] .pd-ov-card-path'), null, 'no PATH card repeating the header');
+  assert.ok(d.querySelector('.pd-sec[data-sec="overview"] .pd-ov-card-branch'), 'BRANCH card');
 });
 
 test('Enter on a focused row and the chevron button both open the page; a keyless row is inert', async () => {
@@ -255,10 +258,11 @@ test('#projects/<key> on boot: Overview reads the History dataset (RUNS, LAST RU
   const doc = window.document;
   const ov = doc.querySelector('#proj-detail .pd-sec[data-sec="overview"]');
   assert.equal(ov.querySelector('.pd-ov-card-runs .pd-ov-value').textContent, '2');
-  assert.match(ov.querySelector('.pd-ov-card-runs .pd-ov-sub').textContent, /1 done · 0 paused · 1 stopped · 0 error/);
+  assert.equal(ov.querySelector('.pd-ov-card-runs .pd-ov-sub').textContent, '1 done · 1 stopped', 'only the counts that are not zero');
   const last = ov.querySelector('button.pd-ov-card-last');
   assert.ok(last, 'LAST RUN is a button');
-  assert.equal(last.querySelector('.pd-ov-sub').textContent, 'Newest run');
+  assert.match(last.querySelector('.pd-ov-sub').textContent, /^Newest run · \w+$/, 'its title and how it ended');
+  assert.match(last.querySelector('.pd-ov-value').textContent, /ago$|^just now$/, 'a relative time; the full date is in the title');
   assert.equal(ov.querySelector('.pd-ov-card-key .pd-ov-value').textContent, 'alpha-00000001');
   assert.equal(ov.querySelector('.pd-ov-card-key .pd-ov-sub').textContent, 'memory scope projects/alpha-00000001');
   assert.equal(doc.querySelector('#proj-detail .pd-history').disabled, false);
@@ -266,15 +270,21 @@ test('#projects/<key> on boot: Overview reads the History dataset (RUNS, LAST RU
   assert.equal(window.location.hash, '#history/alpha-00000001/p-new');
 });
 
-test('a project with no runs: LAST RUN is a dash and Show in Runs is disabled', async () => {
+test('a project with no runs: one wide RUNS card with Start one, no LAST RUN; Show in Runs is disabled', async () => {
   const { window } = await boot({
     fetchHandler: (u) => (u.includes('/api/history') ? Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines: [], ghAvailable: false }) }) : null),
   });
   await goHash(window, 'projects/alpha-00000001');
   await tick(); await tick();
   const doc = window.document;
-  assert.equal(doc.querySelector('#proj-detail .pd-ov-card-last .pd-ov-value').textContent, '—');
-  assert.equal(doc.querySelector('#proj-detail .pd-ov-card-last .pd-ov-sub').textContent, 'No runs yet');
+  const runsCard = doc.querySelector('#proj-detail .pd-ov-card-runs');
+  assert.equal(runsCard.querySelector('.pd-ov-value').textContent, 'No runs yet');
+  assert.ok(runsCard.classList.contains('pd-ov-wide'), 'one card for one fact');
+  assert.equal(doc.querySelector('#proj-detail .pd-ov-card-last'), null, 'no "—" beside it');
+  click(window, runsCard.querySelector('.pd-ov-start'));
+  assert.equal(window.location.hash, '#new', 'Start one opens New pipeline for this project');
+  await goHash(window, 'projects/alpha-00000001');
+  await tick(); await tick();
   const btn = doc.querySelector('#proj-detail .pd-history');
   assert.equal(btn.disabled, true);
   assert.equal(btn.title, 'No runs yet');
@@ -694,7 +704,7 @@ test('rows carry compact team chips (status only, no controls); the project page
   assert.equal(betaTeam.querySelector('.pl-tm').textContent, 'Metrics on · 3 runs');
   assert.ok(betaTeam.querySelector('.pl-tm .tm-dot.green'));
   assert.equal(doc.querySelector('#projects-list .tm-cell'), null, 'no cell on the list any more');
-  assert.equal(doc.querySelector('#projects-list button:not(.proj-open)'), null, 'the chevron is the only button on a row');
+  assert.equal(doc.querySelector('#projects-list .pl-item button:not(.proj-open)'), null, 'the chevron is the only button on a row');
   // The page: Overview carries a TEAM METRICS card that opens the Team tab; the tab carries the block.
   click(window, rows[0].querySelector('.pl-row'));
   await tick(); await tick(); await tick();

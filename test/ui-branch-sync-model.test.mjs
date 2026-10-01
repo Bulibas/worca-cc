@@ -8,12 +8,66 @@ import {
   ago, syncPillModel, chipState, projectChipModel, worstChip, sourceRefNote,
   fetchFailureCopy, ffRefusalCopy, syncStageLabel, freshSyncState, cssEscape,
   mountSyncRow, paintSyncRow, isSyncableBranchName, fetchedAgo, syncPrefsModel, syncPrefsPatch,
+  runOutcomeModel, listRowModel, wsRollupModel,
 } from '../ui/public/branch-sync.mjs';
 import { isSafeBranchName } from '../src/core/git-sync.mjs';
 
 const block = (over = {}) => ({
   base: 'dev', remote: 'origin', state: 'up-to-date', ahead: 0, behind: 0,
   dirty: false, checkedOutHere: true, shallow: false, stale: false, ...over,
+});
+
+test('runOutcomeModel: what the run gets, per state and per choice (Origin · latest | Local copy)', () => {
+  const o = (b, origin = true) => runOutcomeModel(b, { origin, base: 'dev' });
+  assert.equal(o(undefined).text, 'Checking…');
+  assert.equal(o(null).text, 'No remote · uses your local copy');
+  assert.deepEqual([o(block()).text, o(block()).tone], ['Up to date', 'ok']);
+  assert.deepEqual([o(block({ state: 'behind', behind: 3 })).text, o(block({ state: 'behind', behind: 3 })).tone],
+    ['Gets 3 new commits from origin first', 'blue']);
+  assert.deepEqual([o(block({ state: 'behind', behind: 1 }), false).text, o(block({ state: 'behind', behind: 1 }), false).tone],
+    ['Misses 1 newer commit on origin', 'amber']);
+  const div = block({ state: 'diverged', ahead: 1, behind: 5 });
+  assert.equal(o(div).text, 'Your 1 unpushed commit is left out');
+  assert.equal(o(block({ state: 'diverged', ahead: 2, behind: 5 })).text, 'Your 2 unpushed commits are left out');
+  assert.deepEqual([o(div, false).text, o(div, false).note], ['Includes your 1 unpushed commit', 'Misses 5 newer commits on origin']);
+  const fail = o(block({ state: 'diverged', ahead: 2, behind: 5, settings: { onDiverged: 'fail' } }));
+  assert.deepEqual([fail.text, fail.tone, fail.blocked], ['Can’t start from origin', 'red', true]);
+  assert.equal(o(block({ state: 'diverged', ahead: 2, behind: 5, settings: { onDiverged: 'fail' } }), false).blocked, false, 'Local copy unblocks');
+  const off = o(block({ stale: true, fetchError: { kind: 'network' } }));
+  assert.equal(off.retry, true);
+  assert.match(off.text, /^Can’t reach origin · uses the last fetch/);
+  assert.equal(o(block({ stale: true }), false).text, 'Uses your local dev');
+  assert.equal(o(block({ state: 'no-upstream' })).text, 'Not on origin yet · uses your local copy');
+  assert.equal(o(block({ state: 'unknown' })).text, 'Status unknown');
+  // Dirty no longer hides behind: two facts, joined.
+  const both = o(block({ state: 'behind', behind: 2, dirty: true }));
+  assert.deepEqual([both.text, both.note], ['Gets 2 new commits from origin first', 'Uncommitted changes not included']);
+  assert.equal(o(block({ dirty: true })).text, 'Uncommitted changes not included');
+  assert.equal(o(block({ dirty: true, checkedOutHere: false })).text, 'Up to date', 'dirt elsewhere is not this checkout');
+});
+
+test('listRowModel: one action at most, and only one Worca can take', () => {
+  const m = (over) => listRowModel(block(over));
+  assert.deepEqual([m({}).label, m({}).action], ['Up to date', null]);
+  assert.deepEqual([m({ state: 'behind', behind: 3 }).label, m({ state: 'behind', behind: 3 }).action], ['3 commits behind', 'sync']);
+  assert.equal(m({ state: 'behind', behind: 3, settings: { beforeRun: false } }).hint, 'Runs start from your local copy');
+  assert.deepEqual([m({ state: 'diverged', ahead: 2, behind: 5 }).action, m({ state: 'diverged', ahead: 2, behind: 5 }).hint],
+    ['details', '2 ahead, 5 behind · next run will ask']);
+  assert.match(m({ state: 'diverged', ahead: 1, behind: 1, settings: { onDiverged: 'fail' } }).hint, /won’t start/);
+  assert.deepEqual([m({ stale: true }).label, m({ stale: true }).action], ['Can’t reach origin', 'retry']);
+  const dirtyBehind = m({ state: 'behind', behind: 1, dirty: true });
+  assert.deepEqual([dirtyBehind.label, dirtyBehind.action, dirtyBehind.dirty], ['1 commit behind', null, true]);
+  assert.deepEqual([m({ dirty: true }).label, m({ dirty: true }).action], ['Uncommitted changes', null]);
+  assert.equal(listRowModel(null).label, 'No remote');
+});
+
+test('wsRollupModel: one sentence, worst state sets the tone', () => {
+  const rows = (...states) => states.map((s) => listRowModel(s));
+  assert.deepEqual(wsRollupModel(rows(block(), block())), { text: 'All 2 up to date', tone: 'ok' });
+  assert.deepEqual(wsRollupModel(rows(block({ state: 'diverged', ahead: 1, behind: 1 }), block({ state: 'behind', behind: 2 }), block({ dirty: true }))),
+    { text: '1 diverged · 1 behind · 1 with uncommitted changes', tone: 'amber' });
+  assert.deepEqual(wsRollupModel(rows(block({ state: 'behind', behind: 2 }), block())), { text: '1 behind · 1 up to date', tone: 'blue' });
+  assert.equal(wsRollupModel([{ state: 'none' }]).text, 'Checking…');
 });
 
 test('syncPillModel: the four required colours, hidden without a remote, diverged amber', () => {
@@ -289,15 +343,22 @@ test('chooseSyncRefusal: diverged → origin; forbidden → Cancel only; fetch-f
 });
 
 // ── Markup + stylesheet, by source (jsdom cannot see the cascade) ─────────
-test('index.html: branch pair, sync row after the previous-run switch, run-header Sync, Ship-it warn, topbar wrapper', async () => {
+test('index.html: Branches table, previous-run switch after it, run-header Sync, Ship-it warn, topbar wrapper', async () => {
   const { readFileSync } = await import('node:fs');
   const html = readFileSync(new URL('../ui/public/index.html', import.meta.url), 'utf8');
-  assert.match(html, /<div class="field-grid-2 branch-pair" id="branch-fields" data-min-level="advanced">/);
+  assert.match(html, /<div class="field field-compact branches" id="branch-fields" data-min-level="advanced">/);
   assert.ok(!html.includes('sourceBranchHint'), 'the hint is gone');
+  // Design v3: one table — the project row holds #sourceBranch, workspace rows fill #ws-source-branches.
+  const table = html.indexOf('id="branch-table"');
+  const projectRow = html.indexOf('id="bt-project-row"');
+  const select = html.indexOf('<select id="sourceBranch"');
+  const members = html.indexOf('id="ws-source-branches"');
   const prev = html.indexOf('id="ws-source-previous-row"');
-  const row = html.indexOf('<div class="sync-row" id="sync-row" hidden>');
-  assert.ok(prev > 0 && row > prev, 'the sync row follows #ws-source-previous-row');
-  for (const id of ['sync-pill', 'sync-btn', 'syncAuto', 'sync-auto-row']) assert.ok(html.includes(`id="${id}"`), id);
+  const feature = html.indexOf('id="featureBranch"');
+  assert.ok(table > 0 && projectRow > table && select > projectRow && members > select, 'project row, then the member rows, inside the table');
+  assert.ok(prev > members && feature > prev, 'the previous-run switch, then New branch, follow the table');
+  for (const id of ['branches-mode', 'branches-mode-origin', 'branches-mode-local', 'bt-project-outcome', 'featureBranchHint', 'branches-blocked']) assert.ok(html.includes(`id="${id}"`), id);
+  for (const id of ['sync-row', 'sync-pill', 'sync-btn', 'syncAuto']) assert.ok(!html.includes(`id="${id}"`), `${id} is gone`);
   const copied = html.indexOf('<span class="rd-copied">');
   const rdSync = html.indexOf('<button type="button" class="rd-sync" hidden data-min-level="advanced" title="Show the Sync log"></button>');
   const spacer = html.indexOf('<span class="rd-spacer">');
@@ -313,12 +374,14 @@ test('style.css: §6.3 block before the 6193 reduced-motion line, explicit [hidd
   const block = css.indexOf('/* Sync before run (#527) */');
   assert.ok(block > css.indexOf('.confirm-modal .card{width:min(440px,100%);}'), 'after .confirm-modal .card');
   assert.ok(block < css.indexOf('@media (prefers-reduced-motion: reduce){.mode-modal .card'), 'before the 6193 block');
-  assert.match(css, /\.sync-row\[hidden\],\.sync-pill\[hidden\],\.sync-note\[hidden\],\.sync-commits\[hidden\],\.sync-go\[hidden\],\.rd-sync\[hidden\],#shipit-base-warn\[hidden\],\.proj-sync\[hidden\],\.ws-sync\[hidden\]\{display:none;\}/);
+  assert.match(css, /\.sync-row\[hidden\],\.sync-pill\[hidden\],\.sync-note\[hidden\],\.sync-commits\[hidden\],\.sync-go\[hidden\],\.rd-sync\[hidden\],#shipit-base-warn\[hidden\],\.proj-sync\[hidden\]\{display:none;\}/);
   assert.match(css, /\.sync-pill\.blue\{background:var\(--blue-bg\);color:var\(--blue-ink-strong\);\}/);
-  assert.match(css, /\.field-grid-2\.branch-pair\{/);
-  assert.match(css, /\.ws-src-row \.sync-pill\{align-self:flex-start;\}/);
+  // Design v3: the Branches table, and its member rows sitting row for row in it.
+  assert.match(css, /\.bt-head,\.bt-row\{display:grid;/);
+  assert.match(css, /\.ws-source-branches\{display:contents;\}/);
+  assert.match(css, /\.sync-checked\[hidden\]\{display:none;\}/);
   const last = css.lastIndexOf('@media (prefers-reduced-motion: reduce)');
-  assert.ok(css.slice(last).includes('.sync-btn.busy svg{animation:none;}'), 'the override lives in the final block');
+  assert.ok(css.slice(last).includes('.sync-btn.busy svg,.sync-check-now.busy svg{animation:none;}'), 'the override lives in the final block');
   assert.ok(css.indexOf('.sync-btn.busy svg{animation:ws-spin') < last);
 });
 

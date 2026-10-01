@@ -172,8 +172,8 @@ import { paintAboutInto } from './about-links.mjs';
 import { renderReasonOptions, renderOptIns, previewText, reportBlobParts, REPORT_PREVIEW_DEBOUNCE_MS } from './report-run.mjs';
 import { openScheduleSheet, closeScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
 import {
-  freshSyncState, syncPillModel, projectChipModel, worstChip, ffRefusalCopy, syncStageLabel, fetchedAgo, isSyncableBranchName,
-  mountSyncRow, paintSyncRow, openSyncDialog, chooseSyncRefusal,
+  freshSyncState, ago, listRowModel, wsRollupModel, ffRefusalCopy, syncStageLabel, fetchedAgo, isSyncableBranchName,
+  runOutcomeModel, openSyncDialog, chooseSyncRefusal,
 } from './branch-sync.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
@@ -319,7 +319,9 @@ const el = {
   workspaceSelect: $('#workspaceSelect'),
   wsMembers: $('#ws-members'),
   sourceBranchWrap: $('#sourceBranchWrap'),
-  syncRow: $('#sync-row'), syncPill: $('#sync-pill'), syncBtn: $('#sync-btn'), syncAuto: $('#syncAuto'),
+  branchesCtx: $('#branches-ctx'), branchesModeWrap: $('#branches-mode-wrap'), branchesMode: $('#branches-mode'),
+  btProjectRow: $('#bt-project-row'), btProjectName: $('#bt-project-name'), btProjectOutcome: $('#bt-project-outcome'),
+  featureBranchHint: $('#featureBranchHint'), branchesBlocked: $('#branches-blocked'),
   wsSourceBranches: $('#ws-source-branches'),
   wsSourcePreviousRow: $('#ws-source-previous-row'), wsSourcePrevious: $('#ws-source-previous'),
 
@@ -1232,7 +1234,7 @@ function handleServerMessage(msg) {
     if (v === 'projects' || v === 'workspaces') void refreshSyncChips();
     // GET /api/sync (no network). Not while this form's own Sync POST is in flight (its answer is
     // authoritative), not in workspace mode, and '' (auto) is a valid base.
-    if (v === 'new' && state.runTarget !== 'workspace' && !state.sync.busy && el.syncRow && !el.syncRow.hidden && effectiveBase()) void refreshSyncStatusQuiet();
+    if (v === 'new' && state.runTarget !== 'workspace' && !state.sync.busy && syncApplies() && effectiveBase()) void refreshSyncStatusQuiet();
     return;
   }
 
@@ -6458,7 +6460,7 @@ function onProjectChanged() {
   // #527: a new project starts with no sync answer; the row stays hidden until branches-fresh.
   state.sync = freshSyncState(state.sync.gen + 1);
   syncHasRemote = null;
-  if (el.syncRow) el.syncRow.hidden = true;
+  paintBranches();
   // The source profile is bound to the PROJECT, so a different project may pull
   // from a different tracker: re-resolve rather than keep listing the old one's.
   if (state.activePluginSource && state.activePluginSource.multiProfile) {
@@ -6640,13 +6642,130 @@ function effectiveBase() {
 // false once the fresh list said this project has no such remote: a branch change then needs no status read.
 let syncHasRemote = null;
 
-function paintSyncRowNow() {
-  if (!el.syncRow) return;
-  if (state.runTarget === 'workspace') { paintWorkspaceSyncRow(); return; }
-  // "Branch off the run before it": that start is the previous run's branch, not HEAD's.
-  if (el.sourceBranch && el.sourceBranch.value === PREVIOUS_BRANCH) { el.syncRow.hidden = true; return; }
-  paintSyncRow(el.syncRow, state.sync.block, { autoSync: el.syncAuto.checked, busy: state.sync.busy });
+// ---- Branches table (design v3): one layout for a project (one row) or a workspace (a row each).
+
+/** "Use branches from": this run's choice once touched, else the project's (every member's) own beforeRun. */
+function shownAutoSync() {
+  if (state.sync.autoSync !== null) return state.sync.autoSync;
+  if (state.runTarget === 'workspace') return membersBeforeRun();
+  return state.sync.block?.settings?.beforeRun ?? true;
 }
+/** Is there a remote to start from anywhere in the table? Without one there is nothing to choose. */
+function syncApplies() {
+  if (state.runTarget === 'workspace') return Object.values(state.sync.members).some((b) => b && b.remote);
+  // "Branch off the run before it": that start is the previous run's branch, not HEAD's.
+  if (el.sourceBranch && el.sourceBranch.value === PREVIOUS_BRANCH) return false;
+  return !!(state.sync.block && state.sync.block.remote);
+}
+
+const OUTCOME_ICONS = {
+  ok: '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.7 2.6L16 9.6"/>',
+  behind: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v8.5M8.2 12.6L12 16.4l3.8-3.8"/>',
+  dirty: '<path d="M4.5 19.5h4l10-10-4-4-10 10v4z"/><path d="M12.8 7.2l4 4"/>',
+  diverged: '<circle cx="6.5" cy="5.5" r="2"/><circle cx="17.5" cy="5.5" r="2"/><circle cx="12" cy="18.5" r="2"/><path d="M6.5 7.5v1.5a3 3 0 0 0 3 3h5a3 3 0 0 0 3-3V7.5M12 12v4.5"/>',
+  offline: '<path d="M3.5 3.5l17 17"/><path d="M9 7.3A5.5 5.5 0 0 1 16.6 11h.4a3.5 3.5 0 0 1 2.6 5.8M15.5 18H7a4 4 0 0 1-1.2-7.8"/>',
+  blocked: '<circle cx="12" cy="12" r="9"/><path d="M5.7 5.7l12.6 12.6"/>',
+  local: '<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2.5 19.5h19"/>',
+  branch: '<circle cx="6" cy="5.5" r="2"/><circle cx="6" cy="18.5" r="2"/><circle cx="18" cy="7.5" r="2"/><path d="M6 7.5v9M18 9.5c0 4-3 5.6-7.5 6.3"/>',
+  chevDown: '<path d="M6 9l6 6 6-6"/>',
+  chevUp: '<path d="M6 15l6-6 6 6"/>',
+};
+/** Paint one "What the run gets" cell from a runOutcomeModel. Text only ever via textContent. */
+function paintOutcomeCell(host, m, { onRetry = null, busy = false } = {}) {
+  if (!host) return;
+  host.className = `bt-outcome tone-${m.tone}`;
+  host.dataset.icon = m.icon;
+  const icon = document.createElement('span');
+  icon.className = 'bt-icon';
+  if (OUTCOME_ICONS[m.icon]) {
+    icon.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${OUTCOME_ICONS[m.icon]}</svg>`;
+  }
+  const words = document.createElement('span');
+  words.className = 'bt-words';
+  const text = document.createElement('span');
+  text.className = 'bt-text'; text.textContent = m.text;
+  words.appendChild(text);
+  if (m.note) {
+    const note = document.createElement('span');
+    note.className = 'bt-note'; note.textContent = m.note;
+    words.appendChild(note);
+  }
+  host.replaceChildren(icon, words);
+  if (m.retry && onRetry) {
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'btn btn-mini bt-retry'; btn.textContent = busy ? 'Retrying…' : 'Retry';
+    btn.disabled = busy;
+    btn.addEventListener('click', onRetry);
+    host.appendChild(btn);
+  }
+}
+
+/** The project row's outcome: Checking… until the fresh list answers, then the SyncBlock in words. */
+function projectOutcome() {
+  if (el.sourceBranch && el.sourceBranch.value === PREVIOUS_BRANCH) {
+    return { icon: 'none', tone: 'muted', text: 'Starts from the branch of the run before it', note: '', retry: false, blocked: false };
+  }
+  const block = syncHasRemote === false ? null : (state.sync.block || undefined);
+  return runOutcomeModel(block, { origin: shownAutoSync(), base: effectiveBase() });
+}
+
+/** New branch hint: the real names the run creates — one per project in a workspace, suffixed. */
+function paintFeatureHint() {
+  if (!el.featureBranchHint) return;
+  const f = el.featureBranch ? el.featureBranch.value.trim() : '';
+  const ws = state.runTarget === 'workspace' ? state.workspaces.find((w) => w && w.id === state.selectedWorkspaceId) : null;
+  const paths = ws && Array.isArray(ws.projectPaths) ? ws.projectPaths : [];
+  if (!f) {
+    el.featureBranchHint.textContent = paths.length > 1
+      ? 'Leave empty and Worca will propose one for each project.'
+      : 'Leave empty and Worca will propose one.';
+    return;
+  }
+  if (state.runTarget !== 'workspace' || !paths.length) { el.featureBranchHint.textContent = `Creates ${f}.`; return; }
+  // Mirrors run-harness _resolveMemberBranches: `${feature}-${slugify(projectName)}`, sanitized.
+  const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-{2,}/g, '-').replace(/^-+|-+$/g, '') || 'untitled';
+  const names = paths.map((p) => `${f}-${slug(wsBasename(p))}`);
+  el.featureBranchHint.textContent = `Creates ${names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`}.`;
+}
+
+/** Repaint the whole Branches block: the choice, the context, every row's outcome, the blocked line. */
+function paintBranches() {
+  if (!el.btProjectRow) return;
+  const ws = state.runTarget === 'workspace';
+  const origin = shownAutoSync();
+  if (el.branchesModeWrap) el.branchesModeWrap.hidden = !syncApplies();
+  el.branchesMode?.querySelectorAll('button[data-mode]').forEach((b) => {
+    const on = (b.dataset.mode === 'origin') === origin;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+  });
+  let blocked = '';
+  if (ws) {
+    const w = state.workspaces.find((x) => x && x.id === state.selectedWorkspaceId);
+    const n = w && Array.isArray(w.projectPaths) ? w.projectPaths.length : 0;
+    if (el.branchesCtx) el.branchesCtx.textContent = w ? `${w.name || w.id} · ${n} project${n === 1 ? '' : 's'}` : '';
+    if (el.btProjectName) el.btProjectName.textContent = 'Every project';
+    if (el.btProjectOutcome) paintOutcomeCell(el.btProjectOutcome, { icon: 'none', tone: 'muted', text: 'Each project starts from its current branch', note: '' });
+    el.wsSourceBranches?.querySelectorAll('.ws-src-row[data-project-key]').forEach((row) => {
+      const key = row.dataset.projectKey;
+      if (paintMemberRow(key)?.blocked && !blocked) blocked = wsMemberName(key);
+    });
+  } else {
+    const name = selectedProjectName();
+    if (el.branchesCtx) el.branchesCtx.textContent = name || '';
+    if (el.btProjectName) el.btProjectName.textContent = name || '—';
+    const m = selectedProjectPath() ? projectOutcome() : { icon: 'none', tone: 'muted', text: 'Pick a project first', note: '' };
+    paintOutcomeCell(el.btProjectOutcome, m, { onRetry: () => { void syncNow(); }, busy: state.sync.busy });
+    if (m.blocked) blocked = name || 'This project';
+  }
+  if (el.branchesBlocked) {
+    el.branchesBlocked.hidden = !blocked;
+    el.branchesBlocked.textContent = blocked ? `${blocked} can’t start from origin yet.` : '';
+  }
+  state.sync.blocked = blocked;
+  paintFeatureHint();
+}
+const paintSyncRowNow = paintBranches;
 
 /** GET /api/sync for the current base (no network: the list fetch already fetched). */
 async function refreshSyncStatusQuiet() {
@@ -6713,6 +6832,9 @@ async function syncNow() {
 
 // ---- workspace members ----
 function wsMemberName(key) {
+  // The registered project name, as the Projects list shows it; the folder name only as a fallback.
+  const p = state.projects.find((x) => x && x.key === key);
+  if (p && p.name) return p.name;
   const ws = state.workspaces.find((w) => w && w.id === state.selectedWorkspaceId);
   const i = ws && Array.isArray(ws.projectKeys) ? ws.projectKeys.indexOf(key) : -1;
   return i >= 0 ? wsBasename(ws.projectPaths[i]) : key;
@@ -6720,45 +6842,32 @@ function wsMemberName(key) {
 function wsMemberSelect(key) {
   return el.wsSourceBranches ? [...el.wsSourceBranches.querySelectorAll('select.ws-src-select')].find((s) => s.dataset.projectKey === key) || null : null;
 }
-/** Will this member sync before the run? The touched switch for every member, else its own beforeRun. */
+/** Will this member sync before the run? The touched choice for every member, else its own beforeRun. */
 function memberAutoSync(key) {
   if (state.sync.autoSync !== null) return state.sync.autoSync;
   const b = state.sync.members[key];
   return !(b && b.settings && b.settings.beforeRun === false);
 }
-function paintMemberPill(key) {
-  const sel = wsMemberSelect(key);
-  const pill = sel && sel.closest('.ws-src-row') ? sel.closest('.ws-src-row').querySelector('.sync-pill') : null;
-  if (!pill) return;
-  const model = syncPillModel(state.sync.members[key], { autoSync: memberAutoSync(key) });
-  pill.hidden = !!model.hidden;
-  if (model.hidden) return;
-  pill.className = `sync-pill ${model.tone}`;
-  pill.querySelector('.sync-pill-txt').textContent = model.label;
-  pill.setAttribute('aria-label', `${wsMemberName(key)} sync status: ${model.label}. Show details`);
+/** Paint one member row's "What the run gets". Returns its model (blocked rows stop Start). */
+function paintMemberRow(key) {
+  const row = el.wsSourceBranches ? [...el.wsSourceBranches.querySelectorAll('.ws-src-row')].find((r) => r.dataset.projectKey === key) : null;
+  const cell = row ? row.querySelector('.bt-outcome') : null;
+  if (!cell) return null;
+  const sel = row.querySelector('select');
+  let m;
+  if (row.dataset.missing === '1') m = { icon: 'blocked', tone: 'muted', text: 'Folder missing · skipped', note: '' };
+  else if (el.wsSourcePrevious && el.wsSourcePrevious.classList.contains('on')) m = { icon: 'none', tone: 'muted', text: 'Starts from the branch of the run before it', note: '' };
+  else {
+    const v = sel ? sel.value : '';
+    m = runOutcomeModel(key in state.sync.members ? state.sync.members[key] : undefined,
+      { origin: memberAutoSync(key), base: v && v !== PREVIOUS_BRANCH ? v : ((sel && sel.dataset.current) || '') });
+  }
+  paintOutcomeCell(cell, m, { onRetry: () => { void syncMember(key); }, busy: row.dataset.busy === '1' });
+  return m;
 }
-/** Untouched switch in workspace mode shows what the run will do: every member's own beforeRun. */
+/** Untouched choice in workspace mode shows what the run will do: every member's own beforeRun. */
 function membersBeforeRun() {
   return Object.values(state.sync.members).filter(Boolean).every((b) => !b.settings || b.settings.beforeRun !== false);
-}
-function worstMemberKey() {
-  const w = worstChip(Object.values(state.sync.members));
-  if (!w) return null;
-  return Object.keys(state.sync.members).find((k) => worstChip([state.sync.members[k]])?.state === w.state) || null;
-}
-function paintWorkspaceSyncRow() {
-  const w = worstChip(Object.values(state.sync.members));
-  el.syncRow.hidden = !w;
-  if (!w) return;
-  // Auto-sync off turns a blue "behind" amber, as syncPillModel does — per member while the switch is untouched.
-  const behindOff = Object.keys(state.sync.members).some((k) => worstChip([state.sync.members[k]])?.state === 'behind' && !memberAutoSync(k));
-  const tone = w.state === 'behind' && behindOff ? 'amber' : w.tone;
-  const text = w.text.charAt(0).toUpperCase() + w.text.slice(1);
-  el.syncPill.className = `sync-pill ${tone}`;
-  el.syncPill.querySelector('.sync-pill-txt').textContent = text;
-  el.syncPill.setAttribute('aria-label', `Sync status: ${text}. Show details`);
-  el.syncBtn.classList.toggle('busy', state.sync.busy);
-  el.syncBtn.disabled = state.sync.busy;
 }
 async function syncMember(key) {
   const sel = wsMemberSelect(key);
@@ -6768,14 +6877,20 @@ async function syncMember(key) {
   if (!sel || i < 0) return cur;
   const v = sel.value;
   const base = v && v !== PREVIOUS_BRANCH ? v : (sel.dataset.current || '');
+  const row = sel.closest('.ws-src-row');
+  if (row) { row.dataset.busy = '1'; paintMemberRow(key); }
   try {
     const res = await fetch('/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: ws.projectPaths[i], base, mode: 'ff' }) });
     const data = await safeJson(res);
     // A 4xx is a refusal (e.g. a base the server will not sync), not a failed fetch.
     if (!res.ok || !data || !data.sync) return cur && !(res.status >= 400 && res.status < 500) ? { ...cur, stale: true, fetchError: { kind: 'failed' } } : cur;
-    if (sel.isConnected) { state.sync.members[key] = data.sync; paintMemberPill(key); paintWorkspaceSyncRow(); }
+    if (sel.isConnected) state.sync.members[key] = data.sync;
     return data.sync;
   } catch { return cur; }
+  finally {
+    if (row) delete row.dataset.busy;
+    if (sel.isConnected) paintBranches();
+  }
 }
 /** The sync dialog's "This project" section: GET/PUT /api/projects/:key/sync/settings.
  *  onSaved(view) lets the opener repaint what follows the project's settings. */
@@ -6802,77 +6917,19 @@ function selectedProjectKey() {
   const p = path ? state.projects.find((x) => x && x.path === path) : null;
   return p ? p.key : '';
 }
-function openMemberSyncDialog(key, opener) {
-  const b = state.sync.members[key];
-  if (!b) return;
-  void openSyncDialog({ title: 'Sync status', subtitle: `${wsMemberName(key)} · ${b.base || ''}`, sync: b,
-    autoSync: memberAutoSync(key), opener, onSync: () => syncMember(key),
-    prefs: projectSyncPrefs(key, (view) => {
-      const m = state.sync.members[key];
-      if (m && view && view.settings) {
-        m.settings = { beforeRun: view.settings.beforeRun, onDiverged: view.settings.onDiverged };
-        paintMemberPill(key);
-        paintWorkspaceSyncRow();
-      }
-    }) });
-}
-/** Shared Sync in workspace mode: one POST for every member, with each member's picked base. */
-async function syncWorkspaceNow() {
-  const id = state.selectedWorkspaceId;
-  if (!id || state.sync.busy) return;
-  const bases = {};
-  el.wsSourceBranches?.querySelectorAll('select.ws-src-select').forEach((s) => {
-    const v = (s.value || '').trim();
-    if (s.dataset.projectKey && v && v !== PREVIOUS_BRANCH) bases[s.dataset.projectKey] = v;
+// "Use branches from Origin · latest | Local copy": this run's choice, for every row at once.
+el.branchesMode?.querySelectorAll('button[data-mode]').forEach((b) => {
+  b.addEventListener('click', () => {
+    // autoSync !== null means "the person made the choice for this run".
+    state.sync.autoSync = b.dataset.mode === 'origin';
+    paintBranches();
   });
-  state.sync.busy = true;
-  paintWorkspaceSyncRow();
-  try {
-    const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}/sync`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'ff', bases }) });
-    const data = await safeJson(res);
-    if (res.ok && data && Array.isArray(data.members) && state.selectedWorkspaceId === id && state.runTarget === 'workspace') {
-      for (const m of data.members) {
-        if (!m || !m.projectKey || !(m.projectKey in state.sync.members)) continue;
-        state.sync.members[m.projectKey] = m.remote ? m : null;
-        paintMemberPill(m.projectKey);
-      }
-    }
-  } catch { /* the pills keep their last state */ }
-  finally {
-    state.sync.busy = false;
-    paintWorkspaceSyncRow();
-  }
-}
-
-if (el.syncRow) {
-  mountSyncRow(el.syncRow, {
-    onPill: () => {
-      if (state.runTarget === 'workspace') { const k = worstMemberKey(); if (k) openMemberSyncDialog(k, el.syncPill); return; }
-      const key = selectedProjectKey();
-      void openSyncDialog({ title: 'Sync status', subtitle: `${selectedProjectName()} · ${effectiveBase()}`, sync: state.sync.block,
-        autoSync: el.syncAuto.checked, opener: el.syncPill, onSync: syncNow,
-        prefs: key ? projectSyncPrefs(key, (view) => {
-          if (selectedProjectKey() !== key || !view || !view.settings) return;
-          if (state.sync.block) state.sync.block = { ...state.sync.block, settings: { beforeRun: view.settings.beforeRun, onDiverged: view.settings.onDiverged } };
-          // An untouched switch follows the project's beforeRun; a touched one is this run's choice.
-          if (state.sync.autoSync === null) el.syncAuto.checked = view.settings.beforeRun !== false;
-          paintSyncRowNow();
-        }) : null });
-    },
-    onSync: () => { if (state.runTarget === 'workspace') void syncWorkspaceNow(); else void syncNow(); },
-    onToggle: (on) => {
-      // autoSync !== null means "the person touched the switch for this run".
-      state.sync.autoSync = on;
-      if (state.runTarget === 'workspace') Object.keys(state.sync.members).forEach(paintMemberPill);
-      paintSyncRowNow();
-    },
-  });
-}
+});
+el.featureBranch?.addEventListener('input', paintFeatureHint);
 if (el.sourceBranch) {
   el.sourceBranch.addEventListener('branches-fresh', (e) => {
     if (state.runTarget === 'workspace') return;
     const detail = e.detail || {};
-    if (state.sync.autoSync === null) el.syncAuto.checked = !!(detail.sync?.settings?.beforeRun ?? true);
     if (!detail.remote) {
       syncHasRemote = false;
       ++state.sync.gen;
@@ -6890,17 +6947,15 @@ if (el.sourceBranch) {
   });
   el.sourceBranch.addEventListener('change', () => {
     if (state.runTarget === 'workspace') return;
-    if (el.sourceBranch.value === PREVIOUS_BRANCH) { el.syncRow.hidden = true; return; }
+    if (el.sourceBranch.value === PREVIOUS_BRANCH) { paintBranches(); return; }
+    paintBranches();
     void refreshSyncStatusQuiet();
   });
 }
-/** After an accepted start: Auto-sync was a choice for that run only. */
+/** After an accepted start: "Use branches from" was a choice for that run only. */
 function resetSyncChoice() {
-  if (!el.syncAuto) return;
   state.sync.autoSync = null;
-  el.syncAuto.checked = state.runTarget === 'workspace' ? membersBeforeRun() : (state.sync.block?.settings?.beforeRun ?? true);
-  if (state.runTarget === 'workspace') Object.keys(state.sync.members).forEach(paintMemberPill);
-  paintSyncRowNow();
+  paintBranches();
 }
 
 el.projectSelect.addEventListener('change', () => {
@@ -7191,25 +7246,26 @@ function setRunTarget(target) {
     }
   } else {
     // Restore the single project-driven dropdown; clear the per-project list.
-    if (el.sourceBranchWrap) el.sourceBranchWrap.classList.remove('hidden');
+    if (el.btProjectRow) el.btProjectRow.hidden = false;
     if (el.sourceBranch) el.sourceBranch.disabled = false;
     if (el.wsSourceBranches) { el.wsSourceBranches.classList.add('hidden'); el.wsSourceBranches.innerHTML = ''; }
     // Restore the project-driven branch list + config for the selected project.
     onProjectChanged();
   }
   syncPreviousBranchEverywhere();
+  paintBranches();
 }
 
 // Workspace mode with nothing to pick per member yet: keep the field occupied by
 // a disabled dropdown that says what the run will do. Its value is never read —
 // the submit handler deletes sourceBranch in workspace mode.
 function showWorkspaceBranchPlaceholder() {
-  if (el.sourceBranchWrap) el.sourceBranchWrap.classList.remove('hidden');
+  if (el.btProjectRow) el.btProjectRow.hidden = false;
   if (!el.sourceBranch) return;
   // #527: a project-mode fresh answer still in flight must not repaint the stand-in.
   el.sourceBranch._branchGen = (el.sourceBranch._branchGen || 0) + 1;
   state.sync = freshSyncState(state.sync.gen + 1);
-  if (el.syncRow) el.syncRow.hidden = true;
+  paintBranches();
   seedBranchPlaceholder(el.sourceBranch, 'current branch (auto)');
   el.sourceBranch.disabled = true;
   el.sourceBranch.title = "Set per project once a workspace is chosen; each defaults to its current branch.";
@@ -7240,61 +7296,63 @@ function renderWorkspaceSourceBranches() {
   host.innerHTML = '';
   // #527: the old member selects are gone (their late branches-fresh checks isConnected).
   state.sync.members = {};
-  if (el.syncRow) el.syncRow.hidden = true;
   const ws = state.workspaces.find((w) => w && w.id === state.selectedWorkspaceId);
   if (!ws || !Array.isArray(ws.projectPaths) || !ws.projectPaths.length) {
     host.classList.add('hidden');
     showWorkspaceBranchPlaceholder(); // nothing per-member to show: keep the field occupied
     syncPreviousBranchEverywhere();
+    paintBranches();
     return;
   }
   host.classList.remove('hidden');
   // Real per-member pickers now exist, so the disabled stand-in would only be a
   // dead control sitting above live ones.
-  if (el.sourceBranchWrap) el.sourceBranchWrap.classList.add('hidden');
+  if (el.btProjectRow) el.btProjectRow.hidden = true;
   ws.projectPaths.forEach((p, i) => {
     const key = (Array.isArray(ws.projectKeys) && ws.projectKeys[i]) || '';
     const missing = Array.isArray(ws.exists) && ws.exists[i] === false;
 
+    // Same three cells as the project row (design v3): Project · Start from · What the run gets.
     const row = document.createElement('div');
-    row.className = 'ws-src-row';
+    row.className = 'bt-row ws-src-row';
+    row.setAttribute('role', 'row');
+    row.dataset.projectKey = key;
 
     const name = document.createElement('span');
-    name.className = 'ws-src-name';
-    name.textContent = wsBasename(p) + (missing ? ' (missing)' : '');
+    name.className = 'bt-name ws-src-name';
+    name.setAttribute('role', 'cell');
+    name.id = `bt-name-${i}`;
+    name.textContent = (key ? wsMemberName(key) : wsBasename(p)) + (missing ? ' (missing)' : '');
 
     const wrap = document.createElement('div');
     wrap.className = 'select-wrap';
+    wrap.setAttribute('role', 'cell');
     const sel = document.createElement('select');
     sel.className = 'select ws-src-select';
     sel.dataset.projectKey = key;
+    sel.setAttribute('aria-labelledby', name.id);
     wrap.appendChild(sel);
 
-    row.appendChild(name);
-    row.appendChild(wrap);
+    const outcome = document.createElement('div');
+    outcome.className = 'bt-outcome';
+    outcome.setAttribute('role', 'cell');
+
+    row.append(name, wrap, outcome);
     host.appendChild(row);
 
     if (missing) {
       sel.disabled = true;
       sel.dataset.missing = '1';
+      row.dataset.missing = '1';
       seedBranchPlaceholder(sel, 'current branch (auto)');
+      paintMemberRow(key);
     } else {
-      // #527: this member's sync pill, painted from its own select's fresh answer.
-      const pill = document.createElement('button');
-      pill.type = 'button'; pill.className = 'sync-pill grey'; pill.hidden = true;
-      pill.setAttribute('aria-haspopup', 'dialog');
-      const dot = document.createElement('span'); dot.className = 'sdot'; dot.setAttribute('aria-hidden', 'true');
-      const txt = document.createElement('span'); txt.className = 'sync-pill-txt';
-      pill.append(dot, txt);
-      pill.addEventListener('click', () => openMemberSyncDialog(key, pill));
-      row.appendChild(pill);
+      paintMemberRow(key);   // Checking… until its fresh list answers
       sel.addEventListener('branches-fresh', (e) => {
         if (!sel.isConnected || state.runTarget !== 'workspace' || !key) return;
         const d = e.detail || {};
         state.sync.members[key] = d.remote && d.sync ? d.sync : null;
-        if (state.sync.autoSync === null) el.syncAuto.checked = membersBeforeRun();
-        paintMemberPill(key);
-        paintWorkspaceSyncRow();
+        paintBranches();
       });
       sel.addEventListener('change', async () => {
         // A new pick: re-read that member's status (no network) when it has a remote.
@@ -7305,8 +7363,7 @@ function renderWorkspaceSourceBranches() {
         const unknown = () => {
           if (!sel.isConnected || sel.value !== v || (prev.base === v && prev.state !== 'unknown')) return;
           state.sync.members[key] = { base: v, remote: prev.remote || 'origin', state: 'unknown', settings: prev.settings };
-          paintMemberPill(key);
-          paintWorkspaceSyncRow();
+          paintBranches();
         };
         if (!isSyncableBranchName(v)) { unknown(); return; }
         try {
@@ -7316,14 +7373,14 @@ function renderWorkspaceSourceBranches() {
           if (!res.ok || !(data && data.sync)) { unknown(); return; }
           // The status read carries the server's standing fetch failure (stale), so Offline survives a pick.
           state.sync.members[key] = data.sync.remote ? data.sync : null;
-          paintMemberPill(key);
-          paintWorkspaceSyncRow();
+          paintBranches();
         } catch { unknown(); }
       });
       populateBranchSelect(sel, p); // async; defaults to HEAD per the clarification
     }
   });
   syncPreviousBranchEverywhere();
+  paintBranches();
 }
 
 // Populate #workspaceSelect from state.workspaces (loading them if empty).
@@ -7444,7 +7501,7 @@ function renderWorkspaces() {
   const cnt = document.createElement('span');
   cnt.className = 'cnt';
   cnt.textContent = String(state.workspaces.length);
-  head.append(b, cnt);
+  head.append(b, cnt, syncCheckedNodes());
   const list = document.createElement('div');
   list.className = 'saved-list';
   // What is known before /scopes answers: this session's payload or the persisted copy paints the
@@ -7481,28 +7538,57 @@ function buildWorkspaceRow(w, known) {
     stale.textContent = 'missing projects';
     name.append(' ', stale);
   }
+  // Design board 1 (collapsed rollup): the name and one sentence with the counts, then a strip
+  // with an icon per project and the metrics summary. paintSyncChips fills the sync parts;
+  // paintWsMetricsRows rewrites .ws-projects on every team-metrics frame.
+  const roll = document.createElement('span');
+  roll.className = 'ws-rollup tone-muted';
+  const rollDot = document.createElement('span'); rollDot.className = 'ws-rollup-dot'; rollDot.setAttribute('aria-hidden', 'true');
+  const rollTxt = document.createElement('span'); rollTxt.className = 'ws-rollup-txt'; rollTxt.textContent = 'Checking…';
+  roll.append(rollDot, rollTxt);
+  const head = document.createElement('div');
+  head.className = 'ws-head-line';
+  head.append(name, roll);
+  const strip = document.createElement('div');
+  strip.className = 'ws-strip';
+  const members = document.createElement('span');
+  members.className = 'ws-strip-members';
+  const sep = document.createElement('span');
+  sep.className = 'ws-strip-sep'; sep.setAttribute('aria-hidden', 'true'); sep.textContent = '|';
   const sum = document.createElement('small');
   sum.className = 'ws-projects';
   sum.replaceChildren(known ? renderWsSummary(known, { doc: document }) : renderWsSummary(w, { doc: document, pending: true }));
-  // #527: the worst member's sync state, and one chip per member in a slot of its own
-  // (paintWsMetricsRows rewrites .ws-projects on every team-metrics frame).
-  const worst = document.createElement('span');
-  worst.className = 'sync-pill ws-sync-worst';
-  worst.hidden = true;
-  const syncSlot = document.createElement('div');
-  syncSlot.className = 'ws-sync';
-  syncSlot.hidden = true;
-  main.append(name, worst, sum, syncSlot);
+  strip.append(members, sep, sum);
+  main.append(head, strip);
+  const actions = document.createElement('div');
+  actions.className = 'ws-actions';
+  const syncAll = document.createElement('button');
+  syncAll.type = 'button'; syncAll.className = 'btn btn-primary btn-mini ws-sync-all'; syncAll.hidden = true;
+  const n = Array.isArray(w.projectPaths) ? w.projectPaths.length : 0;
+  const toggle = document.createElement('button');
+  toggle.type = 'button'; toggle.className = 'btn btn-mini ws-toggle';
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.textContent = `Show ${n} project${n === 1 ? '' : 's'}`;
   const open = document.createElement('button');
   open.type = 'button';
   open.className = 'proj-open ws-open';
   open.setAttribute('aria-label', 'Open workspace details');
   open.innerHTML = CHEVRON_RIGHT_SVG;   // static markup
-  row.append(main, open);
-  item.appendChild(row);
+  actions.append(syncAll, toggle, open);
+  row.append(main, actions);
+  // The project table sits outside the row, so its buttons never open the workspace page.
+  const table = document.createElement('div');
+  table.className = 'ws-table';
+  table.hidden = true;
+  table.id = `ws-table-${w.id}`;
+  toggle.setAttribute('aria-controls', table.id);
+  item.append(row, table);
   if (!known) item.setAttribute('aria-busy', 'true');
   return item;
 }
+// workspaceId → open (true) / closed (false), once someone pressed Show/Hide. Untouched: open
+// only when a member has diverged, the one state that wants a look before the next run.
+const wsTableOpen = new Map();
 
 // workspaceId → last "Route all members" payload. Routing emits one team-metrics-changed per
 // member, and each repaint rebuilds the metrics block — the per-member result list (the only
@@ -7797,9 +7883,17 @@ function buildWdOverview(sec, id) {
   const missing = Array.isArray(w.exists) ? w.exists.filter((e) => !e).length : 0;
   const grid = document.createElement('div');
   grid.className = 'pd-ov-grid';
-  const projCard = pdStatCard('projects', 'PROJECTS', String(paths.length), missing ? `${missing} missing on disk` : 'all on disk');
+  // "On disk" is the normal case, so the sub names the members instead and only a missing one is called out.
+  const shortNames = paths.map((path, i) => {
+    const k = Array.isArray(w.projectKeys) ? w.projectKeys[i] : null;
+    const pr = k ? projectByKey(k) : null;
+    return wsShortName((pr && pr.name) || basenameOf(path), w.name);
+  });
+  const projCard = pdStatCard('projects', 'PROJECTS', String(paths.length), missing ? `${missing} missing on disk` : shortNames.join(' · '));
   if (missing) projCard.querySelector('.pd-ov-sub').classList.add('pd-ov-missing');
   grid.appendChild(projCard);
+  // The Workspaces list's rollup sentence, as a card: the worst state up front, Sync all (N).
+  grid.appendChild(pdBranchCard('branches', 'BRANCHES'));
   // The team half: one card each, filled by the scopes painters; a click lands on the Team tab.
   for (const which of ['metrics', 'policy']) {
     const card = pdStatCard(which, which === 'metrics' ? 'METRICS HOME' : 'POLICY HOME', '…', 'checking…', { tag: 'button' });
@@ -7812,6 +7906,9 @@ function buildWdOverview(sec, id) {
   const [upDate, upTime] = w.updatedAt ? String(fmtDate(w.updatedAt)).split(', ') : ['—', ''];
   grid.appendChild(pdStatCard('updated', 'UPDATED', upDate, [upTime, w.createdAt ? `created ${String(fmtDate(w.createdAt)).split(', ')[0]}` : ''].filter(Boolean).join(' · ')));
   sec.appendChild(grid);
+  // wsDetail is set before the tab builds, so the card can paint at once (and again per status read).
+  paintPdBranchCards();
+  void refreshSyncChips();
 
   // Projects: every member once, each a hop to its project page (a registered one).
   const members = document.createElement('section');
@@ -10158,66 +10255,165 @@ function syncProjectName(key) {
   const p = state.projects.find((x) => x && x.key === key);
   return (p && p.name) || key;
 }
-function syncChipNodes(key, block, label = '') {
-  const m = projectChipModel(block);
-  if (!m) return null;
-  const pill = document.createElement('span');
-  pill.className = `sync-pill ${m.tone}`;
-  const dot = document.createElement('span'); dot.className = 'sdot'; dot.setAttribute('aria-hidden', 'true');
-  const txt = document.createElement('span'); txt.className = 'sync-pill-txt';
-  txt.textContent = label ? `${label} · ${m.text}` : m.text;
-  pill.append(dot, txt);
-  const when = document.createElement('span');
-  when.className = 'sync-when';
-  when.textContent = `fetched ${fetchedAgo(block)}`;
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'btn btn-mini';
-  btn.textContent = m.action;
-  btn.dataset.syncKey = key;
-  // The chips sit inside a row that opens its page on click: keep the click here.
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (m.state === 'diverged') void openChipSyncDialog(key, btn);
-    else void syncChipNow(key, btn);
-  });
-  return [pill, when, btn];
-}
 function paintSyncChips() {
   for (const slot of document.querySelectorAll('.proj-sync[data-key]')) {
-    const nodes = syncChipNodes(slot.dataset.key, state.syncChips[slot.dataset.key]);
-    slot.hidden = !nodes;
-    slot.replaceChildren(...(nodes || []));
+    const key = slot.dataset.key;
+    const b = state.syncChips[key];
+    // No answer yet, or no remote: nothing to say on a Projects row.
+    if (!b || !b.remote) { slot.hidden = true; slot.replaceChildren(); continue; }
+    const m = listRowModel(b);
+    const c = syncRowCells(key, m, b.base || '', syncProjectName(key));
+    slot.hidden = false;
+    slot.className = `proj-sync tone-${m.tone}`;
+    slot.replaceChildren(c.icon, c.branch, c.status, c.action);
   }
-  for (const item of document.querySelectorAll('.ws-item[data-workspace-id]')) {
-    const w = state.workspaces.find((x) => x && x.id === item.dataset.workspaceId);
-    const keys = w && Array.isArray(w.projectKeys) ? w.projectKeys : [];
-    const slot = item.querySelector('.ws-sync');
-    if (slot) {
-      const groups = keys.map((k) => {
-        const nodes = syncChipNodes(k, state.syncChips[k], syncProjectName(k));
-        if (!nodes) return null;
-        const g = document.createElement('span');
-        g.className = 'ws-sync-member';
-        g.dataset.key = k;
-        g.append(...nodes);
-        return g;
-      }).filter(Boolean);
-      slot.hidden = !groups.length;
-      slot.replaceChildren(...groups);
+  if (el.projectsSyncAll) {
+    const behind = Object.values(state.syncChips || {}).filter((b) => b && listRowModel(b).action === 'sync').length;
+    if (!el.projectsSyncAll.classList.contains('busy')) {
+      el.projectsSyncAll.hidden = !behind;
+      el.projectsSyncAll.textContent = `Sync all (${behind})`;
     }
-    const pill = item.querySelector('.ws-sync-worst');
-    if (pill) {
-      const worst = worstChip(keys.map((k) => state.syncChips[k]));
-      pill.hidden = !worst;
-      pill.className = `sync-pill ws-sync-worst${worst ? ` ${worst.tone}` : ''}`;
-      pill.textContent = worst ? worst.text : '';
-    }
+  }
+  paintSyncChecked();
+  for (const item of document.querySelectorAll('.ws-item[data-workspace-id]')) paintWsSyncItem(item);
+  paintPdBranchCards();
+}
+/** A short name for the strip: "ACME Web" in workspace "ACME" reads "Web". */
+function wsShortName(full, wsName) {
+  const pre = `${wsName || ''} `;
+  return wsName && full.toLowerCase().startsWith(pre.toLowerCase()) && full.length > pre.length ? full.slice(pre.length) : full;
+}
+function wsIcon(kind, size) {
+  const span = document.createElement('span');
+  span.className = 'ws-icon';
+  if (OUTCOME_ICONS[kind]) span.innerHTML = `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${OUTCOME_ICONS[kind]}</svg>`;   // static markup
+  return span;
+}
+function paintWsSyncItem(item) {
+  const w = state.workspaces.find((x) => x && x.id === item.dataset.workspaceId);
+  if (!w) return;
+  const keys = Array.isArray(w.projectKeys) ? w.projectKeys : [];
+  const rows = keys.map((k, i) => {
+    const b = state.syncChips[k];
+    const name = syncProjectName(k) === k && Array.isArray(w.projectPaths) ? wsBasename(w.projectPaths[i]) : syncProjectName(k);
+    return { key: k, name, short: wsShortName(name, w.name), branch: (b && b.base) || '', m: b === undefined ? { icon: 'none', tone: 'muted', label: 'Checking…', hint: '', action: null, state: 'none' } : listRowModel(b) };
+  });
+  const roll = wsRollupModel(rows.map((r) => r.m));
+  const rollEl = item.querySelector('.ws-rollup');
+  if (rollEl) { rollEl.className = `ws-rollup tone-${roll.tone}`; rollEl.querySelector('.ws-rollup-txt').textContent = roll.text; }
+  const strip = item.querySelector('.ws-strip-members');
+  if (strip) {
+    strip.replaceChildren(...rows.map((r) => {
+      const s = document.createElement('span');
+      s.className = `ws-strip-member tone-${r.m.tone}`;
+      s.title = `${r.name}: ${r.m.label}`;
+      const nm = document.createElement('span'); nm.className = 'ws-strip-name'; nm.textContent = r.short;
+      s.append(wsIcon(r.m.icon, 14), nm);
+      return s;
+    }));
+  }
+  const behind = rows.filter((r) => r.m.action === 'sync').map((r) => r.key);
+  const syncAll = item.querySelector('.ws-sync-all');
+  if (syncAll && !syncAll.classList.contains('busy')) {
+    syncAll.hidden = !behind.length;
+    syncAll.textContent = `Sync all (${behind.length})`;
+    syncAll.onclick = async (e) => {
+      e.stopPropagation();
+      syncAll.disabled = true; syncAll.classList.add('busy');
+      await Promise.all(behind.map((k) => postProjectSync(k).catch(() => null)));
+      syncAll.disabled = false; syncAll.classList.remove('busy');
+      paintWsSyncItem(item);
+    };
+  }
+  const open = wsTableOpen.has(w.id) ? wsTableOpen.get(w.id) : rows.some((r) => r.m.state === 'diverged');
+  const toggle = item.querySelector('.ws-toggle');
+  const table = item.querySelector('.ws-table');
+  if (toggle) {
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.replaceChildren(open ? 'Hide projects' : `Show ${rows.length} project${rows.length === 1 ? '' : 's'}`, wsIcon(open ? 'chevUp' : 'chevDown', 14));
+    toggle.onclick = (e) => { e.stopPropagation(); wsTableOpen.set(w.id, !open); paintWsSyncItem(item); };
+  }
+  if (!table) return;
+  table.hidden = !open;
+  if (!open) return;
+  table.replaceChildren(...rows.map((r) => {
+    const tr = document.createElement('div');
+    tr.className = `ws-trow tone-${r.m.tone}`;
+    tr.dataset.key = r.key;
+    const nm = document.createElement('span'); nm.className = 'ws-tname'; nm.textContent = r.name;
+    const c = syncRowCells(r.key, r.m, r.branch, r.name);
+    tr.append(c.icon, nm, c.branch, c.status, c.action);
+    return tr;
+  }));
+}
+/** The cells every sync row shares (Workspaces table, Projects list): icon, branch, status + hint,
+ *  and the one action Worca can take — Sync (behind), Details… (diverged), Retry (offline). */
+function syncRowCells(key, m, branchName, name) {
+  const branch = document.createElement('span'); branch.className = 'ws-tbranch';
+  if (branchName) { branch.append(wsIcon('branch', 14)); const t = document.createElement('span'); t.textContent = branchName; branch.append(t); }
+  const status = document.createElement('span'); status.className = 'ws-tstatus';
+  const lab = document.createElement('span'); lab.className = 'ws-tlabel'; lab.textContent = m.label;
+  status.append(lab);
+  if (m.hint) { const hint = document.createElement('span'); hint.className = 'ws-thint'; hint.textContent = m.hint; status.append(hint); }
+  const action = document.createElement('span'); action.className = 'ws-tact';
+  if (m.action) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `btn btn-mini ws-tbtn ws-tbtn-${m.action}`;
+    btn.textContent = m.action === 'details' ? 'Details…' : m.action === 'retry' ? 'Retry' : 'Sync';
+    btn.dataset.syncKey = key;
+    btn.setAttribute('aria-label', `${btn.textContent.replace('…', '')} ${name}`);
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();   // a Projects row opens its page on click
+      if (m.action === 'details') void openChipSyncDialog(key, btn);
+      else void syncChipNow(key, btn);
+    });
+    action.append(btn);
+  }
+  return { icon: wsIcon(m.icon, 18), branch, status, action };
+}
+
+// One "Checked 1 min ago ↻" per list (design board 1): the oldest fetch among the shown projects,
+// and a button that fetches every project and moves nothing (POST /api/sync/all mode 'fetch').
+function syncCheckedNodes() {
+  const wrap = document.createElement('span');
+  wrap.className = 'sync-checked';
+  const txt = document.createElement('span');
+  txt.className = 'sync-checked-txt';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'sync-check-now';
+  btn.setAttribute('aria-label', 'Check origin now');
+  btn.title = 'Fetch every project now; moves nothing';
+  btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/></svg>';   // static markup
+  btn.addEventListener('click', async () => {
+    if (btn.disabled) return;
+    btn.disabled = true; btn.classList.add('busy');
+    try {
+      const res = await fetch('/api/sync/all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'fetch' }) });
+      const data = await safeJson(res);
+      if (res.ok && data && data.projects && typeof data.projects === 'object') { state.syncChips = data.projects; paintSyncChips(); }
+    } catch { /* the rows keep their last state */ }
+    finally { btn.disabled = false; btn.classList.remove('busy'); }
+  });
+  wrap.append(txt, btn);
+  return wrap;
+}
+function paintSyncChecked() {
+  for (const wrap of document.querySelectorAll('.sync-checked')) {
+    const blocks = Object.values(state.syncChips || {}).filter((b) => b && b.remote);
+    const times = blocks.map((b) => Date.parse(b.fetchedAt || '')).filter(Number.isFinite);
+    wrap.hidden = !blocks.length;
+    const txt = wrap.querySelector('.sync-checked-txt');
+    if (txt) txt.textContent = times.length ? `Checked ${ago(new Date(Math.min(...times)).toISOString())}` : 'Not checked yet';
   }
 }
+// unref: under Node (the jsdom tests) a bare interval would keep the process alive.
+setInterval(() => { if (document.querySelector('.sync-checked:not([hidden])')) paintSyncChecked(); }, 30000).unref?.();
 // Coalesced: Sync all and the background refresh emit one project-sync-changed per project.
 const SYNC_CHIPS_MS = 300;
 let syncChipsTimer = null;
+let syncChipsLoaded = false;   // the Branch cards say "checking…" until the first status read lands
 let syncChipsBusy = false;
 let syncChipsQueued = false;
 function refreshSyncChips() {
@@ -10231,6 +10427,7 @@ function refreshSyncChips() {
       const data = await safeJson(res);
       // The server's status read reports a standing fetch failure (background or Sync) as stale.
       state.syncChips = data && data.projects && typeof data.projects === 'object' ? data.projects : {};
+      syncChipsLoaded = true;
       paintSyncChips();
     } catch { /* the chips keep their last state */ }
     finally {
@@ -10312,7 +10509,7 @@ function renderProjectsList() {
   const cnt = document.createElement('span');
   cnt.className = 'cnt';
   cnt.textContent = String(state.projects.length);
-  head.append(b, cnt);
+  head.append(b, cnt, syncCheckedNodes());
 
   const list = document.createElement('div');
   list.className = 'saved-list';   // real, styled class (style.css:671)
@@ -10454,6 +10651,23 @@ function paintProjHeader(screen, p) {
   const path = screen.querySelector('.pd-path');
   path.textContent = p.path;
   path.title = p.path;
+  // The path lives here only (the Overview no longer repeats it): one line, and a copy button.
+  const copy = screen.querySelector('.pd-path-copy');
+  if (copy && !copy.dataset.wired) {
+    copy.dataset.wired = '1';
+    copy.addEventListener('click', async () => {
+      const text = (projectByKey(projDetail && projDetail.key) || p).path;
+      let ok = true;
+      try {
+        if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+        else ok = legacyCopy(text);
+      } catch { ok = legacyCopy(text); }
+      copy.classList.toggle('copied', ok);
+      copy.setAttribute('aria-label', ok ? 'Path copied' : 'Copy failed');
+      clearTimeout(copy._t);
+      copy._t = setTimeout(() => { copy.classList.remove('copied'); copy.setAttribute('aria-label', 'Copy path'); }, 1200);
+    });
+  }
   const fresh = screen.querySelector('.pd-new');
   fresh.disabled = !p.exists;
   fresh.title = p.exists ? 'Start a pipeline in this project' : 'The folder is missing on disk';
@@ -10644,29 +10858,43 @@ function buildPdOverview(sec, key) {
   const grid = document.createElement('div');
   grid.className = 'pd-ov-grid';
 
-  const pathCard = pdStatCard('path', 'PATH', p.path, p.exists ? 'On disk' : 'Missing on disk');
-  pathCard.querySelector('.pd-ov-value').classList.add('pd-ov-wrap');
-  if (!p.exists) pathCard.querySelector('.pd-ov-sub').classList.add('pd-ov-missing');
-  grid.appendChild(pathCard);
+  // BRANCH replaces PATH (the header carries the path): the same row model as the Projects list,
+  // painted by paintSyncChips from /api/sync/projects.
+  grid.appendChild(pdBranchCard('branch', 'BRANCH'));
 
   const rows = projectHistoryRows(key);
   const fam = { done: 0, paused: 0, stopped: 0, error: 0 };
   for (const r of rows) { const f = histStatusMeta(r).family; if (f in fam) fam[f] += 1; }
   const live = [...runs.values()].filter((r) => r && r.projectDir === p.path && (r.status === 'running' || r.status === 'starting')).length;
-  const parts = [`${fam.done} done`, `${fam.paused} paused`, `${fam.stopped} stopped`, `${fam.error} error`];
-  if (live) parts.push(`${live} running now`);
-  grid.appendChild(pdStatCard('runs', 'RUNS', String(rows.length), parts.join(' · ')));
-
-  let last = null;
-  for (const r of rows) { const t = histTs(r.startedAt || r.mtime); if (!last || t > last.t) last = { t, r }; }
-  if (last) {
-    const card = pdStatCard('last', 'LAST RUN', fmtDate(last.r.startedAt || last.r.mtime), last.r.title || last.r.id, { tag: 'button' });
-    card.classList.add('pd-ov-link');
-    card.title = 'Open this run';
-    card.addEventListener('click', () => { location.hash = `history/${histDetailParam(last.r)}`; });
+  if (!rows.length && !live) {
+    // Nothing to count yet: one wide card that says so and starts the first run, not "0" beside "—".
+    const card = pdStatCard('runs', 'RUNS', 'No runs yet', p.exists ? 'Runs started here show up on this page.' : 'The folder is missing on disk.');
+    card.classList.add('pd-ov-wide');
+    card.querySelector('.pd-ov-value').classList.remove('mono');
+    const start = document.createElement('button');
+    start.type = 'button';
+    start.className = 'btn btn-mini pd-ov-act pd-ov-start';
+    start.textContent = 'Start one';
+    start.disabled = !p.exists;
+    start.addEventListener('click', () => { newPipelineForProject(key); });
+    card.appendChild(start);
     grid.appendChild(card);
   } else {
-    grid.appendChild(pdStatCard('last', 'LAST RUN', '—', 'No runs yet'));
+    // Only the counts that are not zero: "10 done · 2 error", never five zeros.
+    const parts = Object.entries(fam).filter(([, n]) => n).map(([f, n]) => `${n} ${f}`);
+    if (live) parts.push(`${live} running now`);
+    grid.appendChild(pdStatCard('runs', 'RUNS', String(rows.length), parts.join(' · ')));
+    let last = null;
+    for (const r of rows) { const t = histTs(r.startedAt || r.mtime); if (!last || t > last.t) last = { t, r }; }
+    if (last) {
+      const when = Number.isFinite(last.t) && last.t ? ago(new Date(last.t).toISOString()) : fmtDate(last.r.startedAt || last.r.mtime);
+      const card = pdStatCard('last', 'LAST RUN', when, [last.r.title || last.r.id, histStatusMeta(last.r).family].filter(Boolean).join(' · '), { tag: 'button' });
+      card.querySelector('.pd-ov-value').classList.remove('mono');
+      card.classList.add('pd-ov-link');
+      card.title = `Open this run · ${fmtDate(last.r.startedAt || last.r.mtime)}`;
+      card.addEventListener('click', () => { location.hash = `history/${histDetailParam(last.r)}`; });
+      grid.appendChild(card);
+    }
   }
   grid.appendChild(tagLevel(pdStatCard('key', 'KEY', p.key, `memory scope projects/${p.key}`), 'expert'));
   // The team half (docs/team-metrics.md, docs/team-policy.md): one card each, filled by the
@@ -10682,6 +10910,79 @@ function buildPdOverview(sec, key) {
   ensureHistoryLoaded();
   void paintProjectTmCells();
   void paintProjectPolicyCells();
+  paintPdBranchCards();
+  void refreshSyncChips();
+}
+
+// ---- Branch card (project page) / Branches card (workspace page) ----
+// The stat-card shape (label, short value, one sub line) with the lists' one action. Filled from
+// state.syncChips by paintPdBranchCards, which paintSyncChips calls after every status read.
+function pdBranchCard(kind, label) {
+  const card = pdStatCard(kind, label, '…', 'checking…');
+  card.classList.add('pd-ov-branch');
+  const value = card.querySelector('.pd-ov-value');
+  value.classList.remove('mono');
+  const status = document.createElement('div');
+  status.className = 'pd-ov-status';
+  card.insertBefore(status, card.querySelector('.pd-ov-sub'));
+  const act = document.createElement('div');
+  act.className = 'pd-ov-actrow';
+  card.appendChild(act);
+  return card;
+}
+function paintPdBranchCards() {
+  const pcard = projDetail && projDetail.screen && projDetail.screen.querySelector('.pd-ov-card-branch');
+  if (pcard) {
+    const key = projDetail.key;
+    const b = state.syncChips[key];
+    const value = pcard.querySelector('.pd-ov-value');
+    const status = pcard.querySelector('.pd-ov-status');
+    const sub = pcard.querySelector('.pd-ov-sub');
+    const act = pcard.querySelector('.pd-ov-actrow');
+    if (!syncChipsLoaded) {
+      value.textContent = '…'; status.replaceChildren(); sub.textContent = 'checking…'; act.replaceChildren();
+    } else if (!b || !b.remote) {
+      value.textContent = (b && b.base) || '—';
+      status.replaceChildren(); sub.textContent = 'No remote · runs use your local copy'; act.replaceChildren();
+    } else {
+      const m = listRowModel(b);
+      const c = syncRowCells(key, m, '', projDetail.name);
+      value.replaceChildren(wsIcon('branch', 18), Object.assign(document.createElement('span'), { className: 'mono', textContent: b.base || '—' }));
+      status.className = `pd-ov-status tone-${m.tone}`;
+      status.replaceChildren(c.icon, c.status.querySelector('.ws-tlabel'));
+      sub.textContent = m.hint || `Checked ${fetchedAgo(b)}`;
+      act.replaceChildren(...c.action.childNodes);
+    }
+  }
+  const wcard = wsDetail && wsDetail.screen && wsDetail.screen.querySelector('.pd-ov-card-branches');
+  if (wcard) {
+    const w = workspaceById(wsDetail.id);
+    const keys = w && Array.isArray(w.projectKeys) ? w.projectKeys : [];
+    const value = wcard.querySelector('.pd-ov-value');
+    const status = wcard.querySelector('.pd-ov-status');
+    const sub = wcard.querySelector('.pd-ov-sub');
+    const act = wcard.querySelector('.pd-ov-actrow');
+    if (!syncChipsLoaded) { value.textContent = '…'; sub.textContent = 'checking…'; status.replaceChildren(); act.replaceChildren(); return; }
+    const models = keys.map((k) => (state.syncChips[k] ? listRowModel(state.syncChips[k]) : { state: 'none', action: null }));
+    const roll = wsRollupModel(models);
+    const [head, ...rest] = roll.text.split(' · ');
+    value.textContent = head;
+    value.className = `pd-ov-value tone-${roll.tone}`;
+    status.replaceChildren();
+    sub.textContent = rest.join(' · ') || (models.some((x) => x.state === 'none') ? 'Some projects have no remote' : '');
+    const behind = keys.filter((k, i) => models[i].action === 'sync');
+    if (!behind.length) { act.replaceChildren(); return; }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-mini pd-ov-act';
+    btn.textContent = `Sync all (${behind.length})`;
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; btn.classList.add('busy');
+      await Promise.all(behind.map((k) => postProjectSync(k).catch(() => null)));
+      if (btn.isConnected) { btn.disabled = false; btn.classList.remove('busy'); }
+    });
+    act.replaceChildren(btn);
+  }
 }
 
 // ---- Team tab ----
@@ -11685,7 +11986,8 @@ el.form.addEventListener('submit', async (e) => {
   const scheduling = !!pendingSchedule;
   // #527: Auto-sync only when the person touched the switch for this run (untouched, each
   // member follows its own sync.beforeRun). Before the schedule merge, so the sheet's choice wins.
-  if (state.sync.autoSync !== null && el.syncRow && !el.syncRow.hidden && levelAtLeast('advanced')) body.syncBeforeStart = state.sync.autoSync;
+  if (state.sync.blocked && levelAtLeast('advanced')) return setFormMsg(`${state.sync.blocked} can’t start from origin yet. Push its commits, or use Local copy.`, 'err');
+  if (state.sync.autoSync !== null && syncApplies() && levelAtLeast('advanced')) body.syncBeforeStart = state.sync.autoSync;
   if (scheduling) {
     const { sync: schedSync, ...schedRest } = pendingSchedule;
     Object.assign(body, schedRest);
@@ -11802,9 +12104,9 @@ function scheduleSyncOpt() {
   const od = state.sync.block?.settings?.onDiverged;
   const projectOnDiverged = state.sync.block ? (od === 'fail' ? 'fail' : 'origin') : null;
   return {
-    show: !!el.syncRow && !el.syncRow.hidden && levelAtLeast('advanced'),
+    show: syncApplies() && levelAtLeast('advanced'),
     beforeRun: state.sync.autoSync,                 // null = untouched → each member's own sync.beforeRun
-    shownBeforeRun: !!(el.syncAuto && el.syncAuto.checked),
+    shownBeforeRun: shownAutoSync(),
     onDiverged: state.runTarget === 'workspace' ? null : projectOnDiverged,
   };
 }
@@ -11898,6 +12200,7 @@ function setWsSourcePrevious(on) {
   el.wsSourcePrevious.classList.toggle('on', on);
   el.wsSourcePrevious.setAttribute('aria-checked', on ? 'true' : 'false');
   el.wsSourceBranches?.querySelectorAll('select.ws-src-select').forEach((s) => { s.disabled = on || s.dataset.missing === '1'; });
+  if (state.runTarget === 'workspace') paintBranches();
 }
 const flipWsSourcePrevious = () => {
   const on = !el.wsSourcePrevious.classList.contains('on');

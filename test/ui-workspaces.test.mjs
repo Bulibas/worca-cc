@@ -94,7 +94,11 @@ test('the list: one card headed "Workspaces · N", one row per workspace with na
   assert.equal(rows[0].querySelector('.ws-name').textContent, 'Alpha WS');
   assert.equal(rows[0].querySelector('.ws-projects').textContent, '2 projects · no metrics home', 'a summary, not the member list');
   assert.ok(rows[0].querySelector('.proj-open.ws-open'), 'the chevron');
-  assert.equal(rows[0].querySelectorAll('button').length, 1, 'the chevron is the only button on a row: nothing on the list edits');
+  // Design board 1: Sync all (only when something is behind), Show/Hide projects, the chevron.
+  // Nothing on the list edits the workspace itself.
+  assert.deepEqual([...rows[0].querySelectorAll('.ws-row button')].map((b) => b.className.split(' ').find((c) => c.startsWith('ws-'))),
+    ['ws-sync-all', 'ws-toggle', 'ws-open']);
+  assert.equal(rows[0].querySelector('.ws-sync-all').hidden, true, 'no sync answer yet: no Sync all');
   assert.equal(doc.querySelector('#ws-list .ws-card'), null, 'no expandable cards any more');
   // Invariant (a): NO add/remove-project control anywhere on the view.
   assert.equal(doc.querySelector('.view[data-view="workspaces"] [class*="add-project"]'), null);
