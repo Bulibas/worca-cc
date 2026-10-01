@@ -1607,6 +1607,7 @@ function contribSummary(x) {
     [n(b.scripts), 'script', 'scripts'],
     [n(b.skills), 'skill', 'skills'],
     [n(b.workflows), 'workflow', 'workflows'],
+    [n(b.mcpServers), 'MCP server', 'MCP servers'],
   ]
     .filter(([count]) => count > 0)
     .map(([count, one, many]) => `${count} ${count === 1 ? one : many}`);
@@ -1642,6 +1643,7 @@ async function printInventory(inv) {
   if (summary) out(`  ${summary}`);
   const notice = await pythonNoticeFor(i.scripts);
   if (notice) out(c('yellow', `  ${notice}`));
+  for (const s of i.mcpServers || []) out(`  MCP server: ${s.name} (${s.type}) — ${s.command || s.url}`);
   for (const s of i.skills || []) out(`  skill: ${s}`);
   for (const w of i.workflows || []) out(`  workflow: ${w}`);
   if (i.depCount != null) out(`  npm dependencies: ${i.depCount}`);
@@ -1940,6 +1942,13 @@ async function cmdPlugin(argv) {
   const store = await import('../core/plugin-store.mjs');
   const repoMod = await import('../core/plugin-repo.mjs');
   const manifestMod = await import('../core/plugin-manifest.mjs');
+  // MCP registry (§4.4): persist the bases of servers that became honoured with
+  // no install event. Never fails the command; the next start or write retries.
+  try {
+    await (await import('../core/mcp/catalog.mjs')).reconcileMcpStore();
+  } catch (err) {
+    process.stderr.write(`warning: MCP registry reconcile skipped: ${err?.message || err}\n`);
+  }
 
   try {
     switch (verb) {
@@ -1956,7 +1965,7 @@ async function cmdPlugin(argv) {
         const name = a._[0];
         if (!name) fail('Usage: worca plugin install <name> [--repo <url>] [--marketplace <id>] [--ref <sha>] [--yes]');
         const mkt = await import('../core/marketplaces.mjs');
-        try { mkt.seedBuiltinMarketplace(); } catch { /* non-checkout install */ }
+        try { mkt.seedBuiltinMarketplace(); } catch { /* registry unwritable: go on without the builtin */ }
         let repoUrl = a.repo;
         let marketplace = a.marketplace || null;
         if (!repoUrl && marketplace) {
@@ -1999,6 +2008,11 @@ async function cmdPlugin(argv) {
         for (const s of m.taskSources || []) {
           const secrets = (s.configSchema || []).filter((f) => f.secret).map((f) => f.key);
           out(`  task source: ${s.id} (${s.displayName})${secrets.length ? ` — requests secrets: ${secrets.join(', ')}` : ''}`);
+        }
+        // MCP servers (registry §13): the honoured block is knowable before export too.
+        for (const n of Object.keys(m.mcpServers || {}).sort()) {
+          const s = store.mcpInventoryRow(n, m.mcpServers[n]);
+          out(`  MCP server: ${s.name} (${s.type}) — ${s.command || s.url}`);
         }
         if (m.setup?.node) out('  setup: npm ci --prefix <versionDir> --ignore-scripts --omit=dev');
         if (m.setup?.python) out('  setup: uv sync --project <versionDir>');
@@ -2047,6 +2061,7 @@ async function cmdPlugin(argv) {
         for (const s of delta.newTaskSources || []) out(c('yellow', `  new task source: ${s}`));
         for (const ag of delta.newAgents || []) out(c('yellow', `  new agent: ${ag}`));
         if (delta.setupChanged) out(c('yellow', '  setup commands changed'));
+        for (const l of delta.mcpLines || []) out(c(l.red ? 'red' : 'yellow', `  ${l.text}`));
         if (a.diff && cand.diffFull) out(cand.diffFull);
         if (!(await confirmPlugin('Update?', !!a.yes))) {
           out('aborted (still pinned)');
@@ -2290,7 +2305,7 @@ async function cmdMarketplace(argv) {
     return 0;
   }
   const mkt = await import('../core/marketplaces.mjs');
-  try { mkt.seedBuiltinMarketplace(); } catch { /* non-checkout install: skip */ }
+  try { mkt.seedBuiltinMarketplace(); } catch { /* registry unwritable: go on without the builtin */ }
   try {
     switch (verb) {
       case 'add': {
@@ -3023,7 +3038,7 @@ async function cmdPolicy(argv) {
   if (!verb || verb === 'help') { process.stdout.write(POLICY_HELP); return 0; }
   const sync = await import('../core/policy/sync.mjs');
   const { effectiveRows } = await import('../core/policy/effective.mjs');
-  const { localSnapshot, pluginRequirements, marketplaceSeedCandidates, seedPolicyMarketplaces } = await import('../core/policy/local.mjs');
+  const { localSnapshot, withMcpLocal, pluginRequirements, marketplaceSeedCandidates, seedPolicyMarketplaces } = await import('../core/policy/local.mjs');
   try {
     switch (verb) {
       case 'show': {
@@ -3035,7 +3050,7 @@ async function cmdPolicy(argv) {
           else out(`no team policy for ${projectDir}: ${r.detail || r.reason}`);
           return r.reason === 'not-enabled' || r.reason === 'no-origin' ? 0 : 1;
         }
-        const rows = effectiveRows({ doc: r.doc, workspaceRun: false, local: localSnapshot(projectDir) });
+        const rows = effectiveRows({ doc: r.doc, workspaceRun: false, local: await withMcpLocal(localSnapshot(projectDir), { slug: r.home, sha: r.sha, doc: r.doc }) });
         if (a.json) { out(JSON.stringify({ home: r.home, sha: r.sha, delegated: r.delegated, from: r.from, doc: r.doc, rows }, null, 2)); return 0; }
         out(c('bold', `team policy ${r.home}${r.sha ? ` @ ${String(r.sha).slice(0, 7)}` : ''}${r.delegated ? ` (followed by ${r.from})` : ''}`));
         if (r.doc.title) out(`  ${r.doc.title}${r.doc.updatedBy ? ` · updated by ${r.doc.updatedBy}` : ''}${r.doc.updatedAt ? ` · ${r.doc.updatedAt}` : ''}`);

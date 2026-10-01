@@ -58,7 +58,7 @@ const OPEN_BACKOFF_MS = 15;
 /** Latest schema version. Bump + append a new migration step when the DDL grows.
  *  Exported so migration tests assert "reached the module's current version"
  *  instead of hardcoding the number — a schema bump then touches no test file. */
-export const SCHEMA_VERSION = 45;
+export const SCHEMA_VERSION = 46;
 
 /** Absolute path to the database file: <worcaHome>/worca-cc.db. */
 export function dbPath() {
@@ -855,7 +855,9 @@ const INCREMENTAL_COLUMNS = {
   project_config:         { human_in_loop: 'INTEGER NOT NULL DEFAULT 1' },   // v28: the Auto entry's human-in-the-loop switch
   diff_comments:          { parent_id: 'TEXT REFERENCES diff_comments(id) ON DELETE CASCADE',  // v29: reply threads; NULL = thread root
                             author_name: 'TEXT' },   // v37: who wrote it (identity.mjs actor); NULL = before attribution / Ask
-  ask_threads:            { created_by: 'TEXT', contexts: 'TEXT' },    // v37: the thread's owner (identity.mjs actor); NULL = ownerless (legacy). v45: contexts = JSON [{kind,id,label,home?,pinned?}] the chat was asked in, origin first; NULL = before v45 (no indicator)
+  ask_threads:            { created_by: 'TEXT',      // v37: the thread's owner (identity.mjs actor); NULL = ownerless (legacy)
+                            mcp_off: 'TEXT',         // v45: JSON {sets, members} the chat's MCP picker switched off; NULL = none
+                            contexts: 'TEXT' },      // v46: JSON [{kind,id,label,home?,pinned?,source?}] the chat was asked in / talked about, origin first; NULL = before v46 (no indicator)
   pipeline_events:        { actor: 'TEXT' },         // v38: who did it (identity.mjs actor); NULL = the run itself / before attribution
   workspaces:             { metrics_project: 'TEXT',    // v30: team-metrics home (member absolute path); NULL = no home
                             policy_project: 'TEXT',     // v32: team-policy home (member absolute path); NULL = no home
@@ -1496,6 +1498,14 @@ function applySchemaV44(db) {
   repairSchemaGaps(db, schemaGaps(db));
 }
 
+/** v45 (MCP registry §9.4): ask_threads.mcp_off — the per-chat MCP picker's switched-off sets and
+ *  memberships (JSON), a plain additive column declared in INCREMENTAL_COLUMNS, applySchemaV30's
+ *  shape. NULL on every existing row = nothing switched off. Same body as v44: a DB stamped 44 by
+ *  either side (scheduled resume on dev, this column on the MCP branch) gets the other column here. */
+function applySchemaV45(db) {
+  repairSchemaGaps(db, schemaGaps(db));
+}
+
 /** Move every stored pin on model id `from` (lower-case) to `to`. Each table
  *  is guarded like V24's: hand-seeded upgrade fixtures (and a DB from before the
  *  fs->db import) reach this step without some of them. */
@@ -1920,7 +1930,8 @@ export function migrate(db) {
     if (current < SCHEMA_VERSION) refreshPresentationSeed(db);
     if (current < 42) applySchemaV42(db);            // deck subresources -> the unlisted deck-asset kind
     if (current < 44) applySchemaV44(db);            // scheduled resume: scheduled_runs.resume_pipeline_id
-    // v45 (Ask context chips): ask_threads.contexts, an INCREMENTAL_COLUMNS entry the hoisted
+    if (current < 45) applySchemaV45(db);            // MCP registry: ask_threads.mcp_off (per-chat picker)
+    // v46 (Ask context chips): ask_threads.contexts, an INCREMENTAL_COLUMNS entry the hoisted
     // repairSchemaGaps above adds — no step of its own. NULL on every existing thread = no indicator.
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');

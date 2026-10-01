@@ -3,11 +3,11 @@
 // dirs (§6.6 `worca plugin validate [--strict]`). Pure: fs reads only, no
 // writes, no DB, no worcaHome — callers pass absolute dirs.
 
-import { readFileSync, readdirSync, readlinkSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, readlinkSync, existsSync, statSync } from 'node:fs';
 import { join, resolve, dirname, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { WORCA_PLUGIN_API, WORCA_PLUGIN_APIS, WORCA_AGENT_DATA_API, WORCA_ASK_FORMS_API } from './plugin-api.mjs';
-import { EFFORTS, isReservedModelEnvKey, assertModelCost, assertModelUpstream, upstreamEnvConflict } from './model-env.mjs';
+import { WORCA_PLUGIN_API, WORCA_PLUGIN_APIS, WORCA_AGENT_DATA_API, WORCA_ASK_FORMS_API, WORCA_MCP_API } from './plugin-api.mjs';
+import { EFFORTS, isReservedModelEnvKey, isMcpRegistryEnvKey, assertModelCost, assertModelUpstream, upstreamEnvConflict } from './model-env.mjs';
 import { validateMetaV2, normalizeAgentMeta, indexByKey } from '../shared/graph/agent-meta.mjs';
 import { portsFnFor } from '../shared/graph/ports.mjs';
 import { validateGraph } from '../shared/graph/validate.mjs';
@@ -15,6 +15,7 @@ import { validateScriptMetaV2, normalizeScriptMeta } from '../shared/graph/scrip
 import { normalizeCases } from '../shared/graph/script-cases.mjs';
 import { normalizeAskBlock, validateFormDef } from '../shared/forms/form-def.mjs';
 import { ASK_LIMITS } from '../shared/forms/catalog.mjs';
+import { validateMcpDefinition } from './mcp/definitions.mjs';
 
 /** Plugin names are kebab-case, machine-unique, dir-name safe (spec §4.1). */
 export const PLUGIN_NAME_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
@@ -26,7 +27,7 @@ const FIELD_TYPES = new Set(['text', 'select']);
 const INPUT_TYPES = new Set(['text', 'select', 'remote-select', 'task-browser']);
 // `worca` is a free-form tool-metadata block (the workflow exporter records
 // `worca.exports` there — issue #421); the loader never reads it.
-const KNOWN_TOP = new Set(['name', 'version', 'description', 'author', 'homepage', 'license', 'engines', 'taskSources', 'chatChannels', 'setup', 'models', 'modelSecrets', 'worca']);
+const KNOWN_TOP = new Set(['name', 'version', 'description', 'author', 'homepage', 'license', 'engines', 'taskSources', 'chatChannels', 'setup', 'models', 'modelSecrets', 'mcpServers', 'worca']);
 
 /** The built-in agent layer (repo agents/). Same URL math as agent-registry's
  *  DEFAULT_AGENTS_DIR, duplicated because agent-registry imports THIS module
@@ -140,6 +141,19 @@ export const NOT_GRAPH_V2 = 'not a version-2 graph template (nodes/wires) — po
  *  two can never drift — never re-word it in a second place. */
 export const ASK_NEEDS_API_4 = `ask forms need plugin API ${WORCA_ASK_FORMS_API}`
   + ' (declare "engines": { "worca-cc-api": ">=4 <5" }) — the ask block is ignored and the agent keeps generic questions';
+
+/** The ONE sentence for a plugin that declares MCP servers without negotiating
+ *  WORCA_MCP_API: validatePluginDir's warning and ignoredContributions' reason. */
+export const MCP_NEEDS_API_5 = `MCP servers need plugin API ${WORCA_MCP_API}`
+  + ' (declare "engines": { "worca-cc-api": ">=5 <6" }) — the mcpServers block is ignored';
+
+/** True when a RAW manifest declares at least one MCP server that this host
+ *  strips because the plugin negotiates below WORCA_MCP_API. */
+export function mcpBlockIgnored(raw) {
+  const block = raw && raw.mcpServers;
+  return !!block && typeof block === 'object' && Object.keys(block).length > 0
+    && !(Number(negotiatedApi(raw.engines ? raw.engines['worca-cc-api'] : '')) >= WORCA_MCP_API);
+}
 
 /** The host API a range was BUILT FOR: the lowest integer it accepts. ">=1 <2"
  *  and "1" both answer 1; an unconstrained range answers 0; null when nothing
@@ -485,7 +499,7 @@ export function normalizeManifest(raw, { dir = '' } = {}) {
         // host that grows the reserved list (e.g. CLAUDE_CODE_SUBAGENT_MODEL)
         // must not retroactively brick installed/marketplace plugins. The
         // user's own catalog (settings.mjs) still hard-rejects: that author CAN fix it.
-        if (isReservedModelEnvKey(k)) { warnings.push(`${at} ("${id}"): env key ${JSON.stringify(k)} is reserved — ignored`); continue; }
+        if (isReservedModelEnvKey(k) || isMcpRegistryEnvKey(k)) { warnings.push(`${at} ("${id}"): env key ${JSON.stringify(k)} is reserved — ignored`); continue; }
         if (isSecretRef(v)) {
           if (!secretKeys.has(v.secret)) { errors.push(`${at} ("${id}"): env ${k} references undeclared modelSecrets key ${JSON.stringify(v.secret)}`); continue; }
           env[k] = { secret: v.secret };
@@ -537,6 +551,24 @@ export function normalizeManifest(raw, { dir = '' } = {}) {
     }
   }
 
+  // mcpServers (API 5, MCP registry §4.1): name -> definition, checked by the
+  // registry's own validator. Honoured only when the plugin NEGOTIATES
+  // WORCA_MCP_API; below it the block is stripped HERE, unvalidated, so every
+  // reader (consent, catalog, update delta) sees none and it can never break
+  // an older plugin. mcpBlockIgnored names it for validate and the card.
+  const mcpServers = Object.create(null);
+  if (raw.mcpServers !== undefined && Number(negotiatedApi(worcaApi ?? '')) >= WORCA_MCP_API) {
+    if (!raw.mcpServers || typeof raw.mcpServers !== 'object' || Array.isArray(raw.mcpServers)) {
+      errors.push(`${where}: "mcpServers" must be an object`);
+    } else {
+      for (const [n, rawDef] of Object.entries(raw.mcpServers)) {
+        const res = validateMcpDefinition(rawDef, { name: n, source: 'plugin' });
+        for (const e of res.errors) errors.push(`${where}: mcpServers.${n}: ${e}`);
+        if (res.def) mcpServers[n] = res.def;
+      }
+    }
+  }
+
   if (errors.length) return { ok: false, errors };
   return {
     ok: true,
@@ -545,7 +577,7 @@ export function normalizeManifest(raw, { dir = '' } = {}) {
       name, version,
       description: str(raw.description), author: str(raw.author),
       homepage: str(raw.homepage), license: str(raw.license),
-      engines: { worcaApi }, setup, taskSources, chatChannels, models, modelSecrets,
+      engines: { worcaApi }, setup, taskSources, chatChannels, models, modelSecrets, mcpServers,
     },
   };
 }
@@ -612,7 +644,20 @@ export function validatePluginDir(absDir, { strict = false, builtinMetas } = {})
     for (const c of manifest.chatChannels) {
       if (!existsSync(join(absDir, c.module))) push('error', `chatChannels "${c.id}": module ${c.module} not found`);
     }
+    // MCP stdio `./` paths resolve against the plugin dir at spawn (§4.1): same
+    // containment as a module path, and it must ship — the command as a file, an
+    // arg may name a dir (`uv run --directory ./`).
+    for (const [n, def] of Object.entries(manifest.mcpServers)) {
+      for (const [p, isCommand] of [[def.command, true], ...(def.args || []).map((a) => [a, false])]) {
+        if (typeof p !== 'string' || !p.startsWith('./')) continue;
+        const bad = badModulePath(p);
+        if (bad) push('error', `mcpServers "${n}": ${p} ${bad}`);
+        else if (!existsSync(join(absDir, p))) push('error', `mcpServers "${n}": ${p} not found`);
+        else if (isCommand && !statSync(join(absDir, p)).isFile()) push('error', `mcpServers "${n}": ${p} is not a file`);
+      }
+    }
   }
+  if (mcpBlockIgnored(raw)) push('warn', `worca-cc-plugin.json: ${MCP_NEEDS_API_5}`);
 
   // agents/: <key>.md + <key>.meta.json pairs, existing dual-file format (§4.2).
   // API 3: the sidecar must pass the SAME meta v2 gate the agent-store save path

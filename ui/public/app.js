@@ -32,6 +32,8 @@ const state = {
   subagentModels: ['sonnet', 'opus', 'fable', 'auto', 'inherit'],
   workflowId: 'wf_default', // currently selected workflow in New Pipeline
   guardrailsId: 'permissive', // the guardrail set the next run applies ('permissive' = unrestricted default)
+  mcpOptOut: [], // New Pipeline › MCP servers: the '<setId>|<serverId>' memberships the next run opts out of
+  mcpPreview: null, // POST /api/mcp/preview for the selected target, or null (control hidden)
   memoryScope: 'global', // Memory defragment only: the scope the next run restructures
   guardrailSets: [], // GET /api/guardrails cache for the picker + hint
   agents: {}, // registry { [key]: AgentMeta }, lazily loaded from /api/agents
@@ -82,6 +84,7 @@ import {
   renderMemoryHistory, MEMORY_NAME_HELP,
 } from './memory-view.mjs';
 import { createScriptsController } from './scripts-view.mjs';
+import { createMcpView, mountProjectMcp, paintMcpResolution, paintAskMcpBlock, setMcpStripRenderer } from './mcp-view.mjs';
 import { createAskPanel } from './ask-panel.mjs';
 import { createVoiceController } from './ask-voice.mjs';
 import { renderGettingStarted, renderGettingStartedPill, bindWelcome, doneCount, allStepsDone, GETTING_STARTED_STEPS } from './getting-started.mjs';
@@ -160,8 +163,9 @@ import {
   renderProjectTpCell, renderProjectTpChip, projectTpSummary, renderPolicyEnableDialogBody, renderEffectiveTable, renderPolicyEditor, docFromEditor, editorDirty,
   renderPolicyEmptyState, renderPolicySyncChip, renderWsPolicyLine, renderTeamCapsReadout, renderTeamChip, renderPolicyNotesLine,
   renderRequiredStrip, renderSetupChecklist, relTime as tpRelTime,
-  renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel,
+  renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel, renderMcpStrip, renderMcpConsent,
 } from './team-policy-view.mjs';
+import { mcpRunsLabel, renderMcpRunsPop } from './mcp-run-picker.mjs';
 import { aggregate, toCsv } from '../../src/shared/team-metrics/aggregate.mjs';
 import { buildWorkItems, prLookupFor } from '../../src/shared/team-metrics/timeline.mjs';
 import { renderTimeline, renderTimelinePopover, timelineWindow, shiftAnchor, TL_MODES, TL_ZOOMS } from './team-metrics-timeline.mjs';
@@ -368,6 +372,9 @@ const el = {
   // Team policy surfaces (team-policy design §11)
   teamCapsReadout: $('#teamCapsReadout'),
   policyLine: $('#policyLine'),
+  mcpRunsField: $('#mcpRunsField'),
+  mcpRunsLabel: $('#mcpRunsLabel'),
+  mcpRunsPop: $('#mcpRunsPop'),
   pluginsPolicy: $('#plugins-policy'),
   tpBody: $('#tp-body'),
   tpScope: $('#tp-scope'),
@@ -1186,6 +1193,7 @@ function handleServerMessage(msg) {
     if (currentView() === 'team-policy' && !tpState.editing) loadTeamPolicyView();
     if (currentView() === 'settings' && currentSettingsTab === 'runs') paintTeamCapsReadout(true);
     if (currentView() === 'settings' && currentSettingsTab === 'plugins') paintPluginsPolicy(true);
+    if (currentView() === 'settings' && currentSettingsTab === 'mcp') refreshMcpSurfaces();   // the MCP strip and the Team set
     if (currentView() === 'new') schedulePolicyLine();
     return;
   }
@@ -3228,6 +3236,9 @@ async function renderWorkflowConfig(workflowId) {
   // Memory defragment (agent memory §7.3 / B11): the ONE run option that workflow needs. Every
   // path that changes the picker ends here, so this single line covers them all.
   if (el.memoryScopeRow) el.memoryScopeRow.hidden = workflowId !== MEMORY_DEFRAG_WORKFLOW_ID;
+  // MCP registry (§6.1): a memory-defrag run starts no registry servers, so the control hides at
+  // once; the policy-line repaint at the end refetches the preview for every other workflow.
+  if (el.mcpRunsField) renderMcpRuns();
   if (isAuto) {
     // Auto picks the agents per run (spec §7.2 / D20): no accordion, one switch, read from the project config.
     // The switch is per PROJECT like the accordion's rows, and saveHumanInLoop drops the
@@ -7984,6 +7995,11 @@ function buildWdOverview(sec, id) {
     + '<button type="button" class="ws-desc-save btn btn-primary btn-mini">Save</button></div>';   // static markup
   desc.append(dh, view, pane);
   sec.appendChild(desc);
+  // MCP servers a run on this workspace gets (the workspace policy's Team set, not the members').
+  const mcp = tagLevel(document.createElement('div'), 'advanced');
+  mcp.className = 'wd-mcp';
+  sec.appendChild(mcp);
+  void paintMcpResolution(mcp, { target: { workspaceId: id }, title: `MCP servers in runs on ${w.name || w.id}`, api: mcpApi });
   if (!hdMarkdown.isReady()) void bindMarkdownReady().then((ok) => { if (ok) repaintWsDescription(); });
   void paintWsMetricsRows();
   void paintWsPolicyLines();
@@ -10742,7 +10758,7 @@ const capFirst = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
 // (Memory tab) or "<key>/memory/<enc name>" (that file open). Keys are `<slug>-<8hex>`
 // (store.mjs#projectKey) and never contain "/", so the first slash splits key from tab. An
 // unknown tab word reads as Overview (the hash is left alone, as History leaves an odd param alone).
-const PROJ_TABS = ['overview', 'team', 'memory'];
+const PROJ_TABS = ['overview', 'team', 'memory', 'mcp'];
 function parseProjParam(param = '') {
   const s = String(param || '');
   if (!s) return null;
@@ -10757,7 +10773,7 @@ function parseProjParam(param = '') {
 }
 // The canonical param for a tab: Overview is plain '<key>', never '<key>/overview'.
 function projParamFor(key, tab = 'overview', sub = '') {
-  if (tab === 'team') return `${key}/team`;
+  if (tab === 'team' || tab === 'mcp') return `${key}/${tab}`;
   if (tab !== 'memory') return key;
   return sub ? `${key}/memory/${encodeURIComponent(sub)}` : `${key}/memory`;
 }
@@ -10968,12 +10984,14 @@ const PD_TAB_ICONS = {
   memory: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"></path><path d="M4 20.5V5.5M8 7h8M8 10.5h6"></path></svg>',
   map: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"></circle><circle cx="19" cy="5" r="2.5"></circle><circle cx="19" cy="19" r="2.5"></circle><path d="M7.3 10.9l9.4-4.8M7.3 13.1l9.4 4.8"></path></svg>',
   team: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"></circle><path d="M3.5 19c.6-3 2.8-4.6 5.5-4.6S13.9 16 14.5 19"></path><circle cx="17.5" cy="9.5" r="2.4"></circle><path d="M15.5 14.6c2.7 0 4.4 1.4 5 4.4"></path></svg>',
+  mcp: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5"></path><path d="M6 8h12v3a6 6 0 0 1-12 0z"></path><path d="M12 17v4"></path></svg>',
 };
 // Table-driven, like HD_TABS. `build(sec, key)` takes the KEY (buildArgs), never the project object.
 const PD_TABS = [
   { key: 'overview', label: 'Overview', level: 'simple', badge: () => null, visible: () => true, build: (sec, key) => buildPdOverview(sec, key) },
   { key: 'team', label: 'Team', level: 'expert', badge: () => null, visible: () => true, build: (sec, key) => buildPdTeam(sec, key) },
   { key: 'memory', label: 'Memory', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMemory(sec, key) },
+  { key: 'mcp', label: 'MCP', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMcp(sec, key) },
 ];
 function initPdTabs(screen, p) {
   initDetailTabs(screen, PD_TABS.map((t) => ({ ...t, icon: PD_TAB_ICONS[t.key] })), p, {
@@ -11159,6 +11177,14 @@ function paintPdBranchCards() {
     });
     act.replaceChildren(btn);
   }
+}
+
+// ---- MCP tab (docs/mcp-servers.md): the project's sets and the servers its runs get ----
+function buildPdMcp(sec, key) {
+  sec.innerHTML = '';
+  sec.classList.add('pd-sec-mcp');
+  const p = projectByKey(key);
+  void mountProjectMcp(sec, { key, name: p ? p.name : key, api: mcpApi });
 }
 
 // ---- Team tab ----
@@ -12095,6 +12121,9 @@ el.form.addEventListener('submit', async (e) => {
     // be equivalent but would change every legacy-shaped request for no gain.)
     guardrailsId: isDefragRun && state.guardrailsId === 'permissive' ? 'normal'
       : (state.guardrailsId !== 'permissive' ? state.guardrailsId : undefined),
+    // MCP registry (§6.2): absent unless something is opted out, so default bodies stay byte-identical;
+    // a memory-defrag run starts no registry servers (§6.1), so it sends none.
+    mcpOptOut: state.mcpOptOut.length && !isDefragRun ? [...state.mcpOptOut] : undefined,
     mock: el.mock.checked,
     sourceBranch: (el.sourceBranch && el.sourceBranch.value) || undefined,
     featureBranch: (el.featureBranch && el.featureBranch.value.trim()) || undefined,
@@ -14031,7 +14060,8 @@ if (el.pluginsList) el.pluginsList.addEventListener('click', async (e) => {
   } else if (t.classList.contains('pl-remove')) {
     const res = await confirmModal({
       title: 'Uninstall plugin',
-      message: `Uninstall "${name}"?`,
+      message: `Uninstall "${name}"?${t.dataset.mcpSets
+        ? `\n\nIts MCP servers leave these sets, with their values, secrets and test results: ${t.dataset.mcpSets}.` : ''}`,
       confirmLabel: 'Uninstall',
       checkbox: { label: 'Also delete config, secrets and state (purge — cannot be undone)' },
     });
@@ -16711,7 +16741,66 @@ let policyLineSeq = 0;
 function schedulePolicyLine() {
   if (!el.policyLine) return;
   clearTimeout(policyLineTimer);
-  policyLineTimer = setTimeout(() => { void paintPolicyLine(); }, 150);
+  policyLineTimer = setTimeout(() => { void paintPolicyLine(); void paintMcpRuns(); }, 150);
+}
+/** The models the run will pick: the Agents accordion's selects, else the legacy per-role config. */
+function selectedRunModels() {
+  const picked = [...document.querySelectorAll('#agents-rows select.step-model')].map((s) => s.value).filter((v) => v && v !== '__add__');
+  const models = picked.length ? picked
+    : Object.values((state.config && state.config.steps) || {}).map((s) => s && s.model).filter((m) => typeof m === 'string' && m);
+  return [...new Set(models)];
+}
+// New pipeline › MCP servers (MCP registry §6.2): the target's registry copies, fetched with the
+// form's models (they set the tool-name limit) and without the opt-out, which is toggled locally.
+let mcpRunsSeq = 0;
+async function paintMcpRuns() {
+  if (!el.mcpRunsField || currentView() !== 'new') return;
+  const scope = currentRunScopeId();
+  const seq = ++mcpRunsSeq;
+  const i = scope.indexOf(':');
+  const kind = scope.slice(0, i);
+  let data = null;
+  if (scope) {
+    try {
+      const r = await fetch('/api/mcp/preview', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: kind === 'project' ? { projectKey: scope.slice(i + 1) } : { workspaceId: scope.slice(i + 1) }, models: selectedRunModels() }),
+      });
+      data = r.ok ? await safeJson(r) : null;
+    } catch { data = null; }
+  }
+  if (seq !== mcpRunsSeq) return;
+  const valid = !!data && Array.isArray(data.sets) && Array.isArray(data.copies) && Array.isArray(data.skipped);
+  // An answer prunes the opt-out to the target's memberships; no answer (no target, defrag, a
+  // failed fetch) keeps it: the server drops whatever the run's target does not know.
+  if (valid) {
+    const known = new Set([...data.copies, ...data.skipped].map((m) => `${m.setId}|${m.serverId}`));
+    state.mcpOptOut = state.mcpOptOut.filter((k) => known.has(k));
+  }
+  state.mcpPreview = valid && data.copies.length + data.skipped.length > 0 ? { ...data, workspace: kind === 'workspace' } : null;
+  renderMcpRuns();
+}
+function renderMcpRuns() {
+  // §6.1: a memory-defrag run starts no registry servers, so the control hides for it.
+  const p = state.workflowId === MEMORY_DEFRAG_WORKFLOW_ID ? null : state.mcpPreview;
+  el.mcpRunsField.hidden = !p;
+  if (!p) { el.mcpRunsPop.replaceChildren(); return; }
+  el.mcpRunsLabel.textContent = mcpRunsLabel(p, state.mcpOptOut);
+  // A toggle re-renders the popover: the keyboard focus goes back to the box that was ticked.
+  const active = document.activeElement;
+  const focused = active && el.mcpRunsPop.contains(active) ? { keys: active.dataset.keys, kind: active.dataset.kind } : null;
+  el.mcpRunsPop.replaceChildren(renderMcpRunsPop(p, state.mcpOptOut, {
+    doc: document,
+    projectName: p.workspace ? (k) => (state.projects.find((x) => x && x.key === k) || {}).name || k : null,
+    onToggle: (keys, on) => {
+      const off = new Set(state.mcpOptOut);
+      for (const k of keys) { if (on) off.delete(k); else off.add(k); }
+      state.mcpOptOut = [...off];
+      renderMcpRuns();
+      void paintPolicyLine();                 // an opted-out required server is off-policy
+    },
+  }));
+  if (focused) [...el.mcpRunsPop.querySelectorAll('input')].find((i) => i.dataset.keys === focused.keys && i.dataset.kind === focused.kind)?.focus();
 }
 function currentRunScopeId() {
   if (state.runTarget === 'workspace') {
@@ -16731,10 +16820,9 @@ async function paintPolicyLine() {
   const qs = new URLSearchParams({ scope, guardrailsId: state.guardrailsId || 'permissive' });
   // What the run will actually pick: the Agents accordion's model selects (per workflow node),
   // falling back to the legacy per-role config when the accordion has not painted yet.
-  const picked = [...document.querySelectorAll('#agents-rows select.step-model')].map((s) => s.value).filter((v) => v && v !== '__add__');
-  const models = picked.length ? picked
-    : Object.values((state.config && state.config.steps) || {}).map((s) => s && s.model).filter((m) => typeof m === 'string' && m);
-  if (models.length) qs.set('models', [...new Set(models)].join(','));
+  const models = selectedRunModels();
+  if (models.length) qs.set('models', models.join(','));
+  if (state.mcpOptOut.length) qs.set('mcpOptOut', state.mcpOptOut.join(','));
   let data = null;
   try { const r = await fetch(`/api/policy/notes?${qs}`); data = r.ok ? await safeJson(r) : null; } catch { data = null; }
   if (seq !== policyLineSeq) return;
@@ -16872,11 +16960,13 @@ if (el.pluginsPolicy) el.pluginsPolicy.addEventListener('click', (e) => { void h
 async function openSetupChecklist() {
   const data = await loadTpScopes({ force: true });
   const reqs = data.requirements || [];
-  const homes = [...new Set(reqs.flatMap((r) => r.homes || []))];
+  const mcp = data.mcpRequirements || [];
+  const homes = [...new Set([...reqs.flatMap((r) => r.homes || []), ...mcp.map((r) => r.home)])];
   const home = homes[0] || (data.homes[0] && data.homes[0].slug) || '';
-  const body = renderSetupChecklist({ home, requirements: reqs, seeds: [], trusted: policyHomeTrusted(home) }, { doc: document });
+  const body = renderSetupChecklist({ home, requirements: reqs, seeds: [], trusted: policyHomeTrusted(home), mcp }, { doc: document });
   body.addEventListener('click', (e) => {
     if (e.target.closest('.tp-install-all')) { closePluginModal(); void installAllRequired(reqs); return; }
+    if (e.target.closest('.tp-mcp-act')) { void handleMcpTeamClick(e); return; }
     void handlePolicyPluginClick(e);
   });
   body.addEventListener('change', (e) => {
@@ -16884,6 +16974,75 @@ async function openSetupChecklist() {
     if (cb) { try { localStorage.setItem(TP_TRUST_PREFIX + cb.dataset.home, cb.checked ? '1' : '0'); } catch { /* private mode */ } }
   });
   pluginModal(`Set up for ${home || 'the team policy'}`, body);
+}
+// MCP requirements (MCP registry spec §11.3): Install / Turn on / Update post only { expectHash } — the
+// hash the dialog showed; the server reads the definition from the cached policy. Trust never reaches here.
+const MCP_TEAM_TITLE = { install: 'Install MCP server', 'turn-on': 'Turn on MCP server', update: 'Update MCP server' };
+const MCP_TEAM_VERB = { install: 'Install', 'turn-on': 'Turn on', update: 'Update' };
+async function paintMcpStrip(host) {
+  if (!host.dataset.wired) {
+    host.dataset.wired = '1';
+    host.addEventListener('click', (e) => {
+      if (e.target.closest('.tp-mcp-act')) void handleMcpTeamClick(e);
+      else if (e.target.closest('.pl-policy-setup')) void openSetupChecklist();
+    });
+  }
+  const fill = (data) => { const strip = renderMcpStrip(data.mcpRequirements || [], { doc: document }); host.replaceChildren(strip || ''); host.hidden = !strip; };
+  // P6 hands a fresh, hidden host on every paint of the pane: paint the last state at once (no flicker; a button painted
+  // from it that has moved on repaints instead of acting), then read fresh — the pane repaints after each write on it
+  // (a token set, a switch), and the strip must show that state.
+  if (tpCache.data) fill(tpCache.data);
+  fill(await loadTpScopes({ force: true }));
+}
+setMcpStripRenderer((host) => { void paintMcpStrip(host); });
+/** After a Team action, every surface that shows Team state reads it again: `openSetId` (Install, Set <field>) opens
+ *  that Team set; on the MCP tab the pane reloads (its paint repaints the strip), so a card never contradicts the strip;
+ *  the Team policy page reloads ("Yours", deviations). */
+function refreshMcpSurfaces(openSetId = null) {
+  const to = openSetId ? `settings/mcp/sets/${encodeURIComponent(openSetId)}` : null;
+  if (to && location.hash.slice(1) !== to) { location.hash = to; return; }
+  if (currentView() === 'settings' && currentSettingsTab === 'mcp') { void mcpTab().show(location.hash.slice(1).replace(/^settings\/mcp\/?/, '')); return; }
+  if (currentView() === 'team-policy' && !tpState.editing) loadTeamPolicyView();
+}
+async function runMcpTeamAction(r, action, { owner = null } = {}) {
+  // mcpApi never rejects: offline or a restarting server is an answer the error modal shows.
+  const res = await mcpApi('POST', `/api/mcp/teams/${encodeURIComponent(r.home)}/members/${encodeURIComponent(r.serverId)}/${action}`, { expectHash: r.hash });
+  await loadTpScopes({ force: true });   // the checklist, the strip and the Projects cells read the new state; an older in-flight read never lands
+  if (!res.ok) {
+    pluginModal(`${MCP_TEAM_TITLE[action]}: ${r.name}`, Object.assign(document.createElement('p'), { className: 'form-msg err', textContent: res.data?.error || `${action} failed` }));
+    refreshMcpSurfaces();   // a 409 means the row moved on: show where it is now
+    return;
+  }
+  // The dialog the action came from (the checklist, the consent dialog) closes, only while it is still the one shown: an
+  // action from the strip opened none, and no action closes a dialog the user opened while its POST was out.
+  if (owner && el.pluginModalBody.contains(owner)) closePluginModal();
+  refreshMcpSurfaces(action === 'install' ? res.data.setId : null);   // Install opens its Team set
+}
+async function handleMcpTeamClick(e) {
+  const t = e.target.closest('.tp-mcp-act');
+  e.stopPropagation();
+  if (t.dataset.busy === '1') return;   // a double click acts once: one POST, one dialog
+  t.dataset.busy = '1';
+  try {
+    // The dialog the click came from (read before the await: a repaint meanwhile detaches `t`).
+    const owner = t.closest('#plugin-modal') ? el.pluginModalBody.firstElementChild : null;
+    const r = ((await loadTpScopes({ force: true })).mcpRequirements || []).find((x) => x.home === t.dataset.home && x.serverId === t.dataset.server);
+    // The button was painted for one state. When the row has moved on (a new team definition, another tab), repaint instead
+    // of acting: a Turn on painted without the consent dialog must never post for a member that now needs one.
+    if (!r || r.state !== t.dataset.state) {
+      if (owner) void openSetupChecklist(); else refreshMcpSurfaces();
+      return;
+    }
+    const action = t.dataset.action;
+    if (action === 'set') { if (owner && el.pluginModalBody.contains(owner)) closePluginModal(); refreshMcpSurfaces(r.setId); return; }
+    if (t.dataset.consent !== '1') { await runMcpTeamAction(r, action, { owner }); return; }
+    const body = renderMcpConsent(r, action, { doc: document });
+    let sent = false;   // a double click posts once (a second Install would answer 409 "already installed")
+    pluginModal(MCP_TEAM_TITLE[action], body, [
+      ['Cancel', 'btn btn-ghost btn-mini', closePluginModal],
+      [MCP_TEAM_VERB[action], 'btn btn-primary btn-mini', () => { if (sent) return; sent = true; void runMcpTeamAction(r, action, { owner: body }); }],
+    ]);
+  } finally { delete t.dataset.busy; }
 }
 // One dialog after another — a consent dialog for each missing plugin, an update preview for each
 // one below the floor — the next opens when the previous closes (done or cancelled). Nothing runs
@@ -27082,11 +27241,11 @@ const VIEW_MIN_LEVEL = Object.freeze({
   'team-metrics': 'expert', 'team-policy': 'expert', agents: 'expert', scripts: 'expert',
   schedules: 'advanced',
 });
-const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ ask: 'advanced', guardrails: 'advanced', plugins: 'advanced', memory: 'advanced', models: 'expert', providers: 'expert' });
+const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ ask: 'advanced', guardrails: 'advanced', plugins: 'advanced', mcp: 'advanced', memory: 'advanced', models: 'expert', providers: 'expert' });
 const VIEW_TITLES = Object.freeze({
   stats: 'Statistics', composer: 'Workflow Composer', workspaces: 'Workspaces', 'workspace-create': 'Workspaces',
   'agent-create': 'Create agent', 'team-metrics': 'Team metrics', 'team-policy': 'Team policy', agents: 'Agents', scripts: 'Scripts',
-  guardrails: 'Guardrails', plugins: 'Plugins', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
+  guardrails: 'Guardrails', plugins: 'Plugins', mcp: 'MCP servers', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
   schedules: 'Schedules',
 });
 function pageMinLevel() {
@@ -27143,7 +27302,7 @@ document.addEventListener('worca:level', () => {
 // The tab is the Settings view's hash param; a guardrail deep link nests its id
 // behind it (#settings/guardrails/<id>). parseHash splits on the FIRST '/' only,
 // so that is view 'settings', param 'guardrails/<id>' — no parseHash change.
-const SETTINGS_TABS = ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'models', 'providers'];
+const SETTINGS_TABS = ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'mcp', 'models', 'providers'];
 // The tabs whose cards GET /api/settings paints (loadSettings paints every card, wherever it sits).
 // Models is not one: loadModelsView repaints its two helper-model cards with the catalog.
 const SETTINGS_FORM_TABS = ['general', 'runs', 'ask'];
@@ -27234,6 +27393,8 @@ function showView(name, param = '') {
     // The Memory controller owns two delegated listeners and a painted host; a tab switch tears it
     // down so the next entry mounts a fresh one (and a stray frame paints nothing).
     if (currentSettingsTab === 'memory' && memoryTabCtl) { memoryTabCtl.destroy(); memoryTabCtl = null; }
+    // MCP servers' pickers and forms open in #plugin-modal, which lives outside the pane.
+    if (currentSettingsTab === 'mcp') closePluginModal();
   }
   // Moving between the three Runs routes swaps the pane at once; going back to the bare
   // list (#runs) slides the detail away in the narrow layout and hands focus back to its
@@ -27424,11 +27585,38 @@ function showSettingsTab(param = '') {
   // '#settings/guardrails/<id>' -> '#settings/guardrails' hop reset the wizard).
   paintLevelBanner();
   if (SETTINGS_FORM_TABS.includes(tab)) loadSettings();
+  if (tab === 'ask') void paintAskMcpBlock(document.getElementById('ask-mcp-host'), { api: mcpApi });
   if (tab === 'guardrails') loadGuardrailsView(sub);
   if (tab === 'models') loadModelsView(sub);
   if (tab === 'providers') loadProvidersView();
   if (tab === 'plugins') loadPluginsView({ refresh: true });
   if (tab === 'memory') loadMemoryTab(sub);
+  if (tab === 'mcp') void mcpTab().show(sub);
+}
+
+// Settings › MCP servers (mcp-view.mjs): one controller, made on first entry; its sub-route
+// ('', 'sets/<id>', 'servers') rides behind #settings/mcp/.
+async function mcpApi(method, path, body) {
+  try {
+    const res = await fetch(path, body === undefined ? { method }
+      : { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    return { ok: res.ok, status: res.status, data: await safeJson(res) };
+  } catch (err) {   // offline, or the server restarting: an answer the views show, never a rejection under `void`
+    return { ok: false, status: 0, data: { error: err?.message || 'network error' } };
+  }
+}
+let mcpViewCtl = null;
+function mcpTab() {
+  if (!mcpViewCtl) {
+    mcpViewCtl = createMcpView({
+      host: document.querySelector('.settings-pane[data-tab="mcp"]'),
+      api: mcpApi,
+      navigate: (hash) => { if (location.hash.slice(1) !== hash) location.hash = hash; },
+      confirm: confirmModal,
+      modal: { open: pluginModal, close: closePluginModal },
+    });
+  }
+  return mcpViewCtl;
 }
 
 // Tracks the currently shown view so the leave-guard can fire on transition.
@@ -27625,6 +27813,17 @@ function getPageContext() {
     ctx.workspaceId = state.selectedWorkspaceId;
     return ctx;
   }
+  // The New Pipeline page is ABOUT its project target (MCP registry §9.1): untagged, unlike the fallback below.
+  if (ctx.view === 'new' && state.runTarget !== 'workspace') {
+    const dir = selectedProjectPath();
+    if (dir) ctx.projectDir = dir;
+    return ctx;
+  }
+  // A workspace page names its workspace (§9.1), like a project page names its project.
+  if (ctx.view === 'workspaces' && param) {
+    const ws = parseWsParam(param);
+    if (ws && workspaceById(ws.id)) { ctx.workspaceId = ws.id; return ctx; }
+  }
   // The Team metrics page's selection: scope id, range, group-by and the active filters, so
   // "why did spend jump?" refers to the chart on screen. Ids and enum slugs only — the server
   // validates each and resolves the scope name itself.
@@ -27640,8 +27839,10 @@ function getPageContext() {
     if (f) ctx.tmFilter = f.slice(0, 200);
     return ctx;
   }
+  // The generic fallback: the dropdown's project on a page that is not about one. Tagged, so the server
+  // ignores it for MCP servers, the context header and the memory mount (§9.1).
   const dir = selectedProjectPath();
-  if (dir) ctx.projectDir = dir;
+  if (dir) { ctx.projectDir = dir; ctx.projectSource = 'fallback'; }
   return ctx;
 }
 

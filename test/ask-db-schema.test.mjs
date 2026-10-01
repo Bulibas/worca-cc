@@ -26,7 +26,7 @@ test('fresh DB: user_version = SCHEMA_VERSION, the four ask tables, the index an
   for (const t of ASK_TABLES) assert.ok(tableNames(db).includes(t), `${t} exists`);
   assert.ok(indexNames(db).includes('idx_ask_messages_thread'));
   assert.deepEqual(cols(db, 'ask_threads'),
-    ['id', 'title', 'created_at', 'updated_at', 'model', 'effort', 'session_id', 'context', 'totals', 'created_by', 'contexts']);   // v37 owner, v45 context chips appended
+    ['id', 'title', 'created_at', 'updated_at', 'model', 'effort', 'session_id', 'context', 'totals', 'created_by', 'mcp_off', 'contexts']);   // v37 owner, v45 MCP picker choices, v46 context chips appended
   assert.deepEqual(cols(db, 'ask_messages'),
     ['id', 'thread_id', 'seq', 'role', 'text', 'blocks', 'status', 'reason', 'model', 'effort', 'usage', 'cost_usd', 'duration_ms', 'created_at']);
   // ALTER TABLE ADD COLUMN appends, so the v27 columns (#398) are LAST.
@@ -155,21 +155,21 @@ test('ask_attachments has a thread_id index on a fresh DB; self-heal recreates i
   assert.ok(indexNames(db2).includes('idx_ask_attachments_thread'), 'healed by reconcileSchema');
 });
 
-test('v45 ladder: a stamped-44 DB gains ask_threads.contexts; existing threads read NULL', () => {
+test('v46 ladder: a stamped-45 DB gains ask_threads.contexts; existing threads read NULL', () => {
   const db = new DatabaseSync(':memory:');
   db.exec(MINIMAL_SEED);
-  // the exact pre-v45 ask_threads shape (ASK_DDL + v37's created_by), one row in it
+  // the exact pre-v46 ask_threads shape (ASK_DDL + v37's created_by + v45's mcp_off), one row in it
   db.exec(`CREATE TABLE ask_threads (
     id TEXT PRIMARY KEY, title TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     model TEXT, effort TEXT, session_id TEXT, context TEXT, totals TEXT NOT NULL DEFAULT '{}',
-    created_by TEXT);`);
+    created_by TEXT, mcp_off TEXT);`);
   db.prepare('INSERT INTO ask_threads (id, created_at, updated_at, context) VALUES (?, ?, ?, ?)')
     .run('ask_00000001', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z', '{"view":"settings"}');
-  db.exec('PRAGMA user_version = 44');
+  db.exec('PRAGMA user_version = 45');
   migrate(db);
   assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
   assert.ok(cols(db, 'ask_threads').includes('contexts'));
   const row = db.prepare('SELECT context, contexts FROM ask_threads WHERE id = ?').get('ask_00000001');
-  assert.equal(row.contexts, null, 'a pre-v45 chat has no recorded contexts (no indicator)');
+  assert.equal(row.contexts, null, 'a pre-v46 chat has no recorded contexts (no indicator)');
   assert.equal(row.context, '{"view":"settings"}', 'the last-context column is untouched');
 });

@@ -1364,3 +1364,184 @@ test('the MCP config is readable by the agent user on a relayed turn, by worca a
   await plainTurn.run();
   assert.deepEqual(modes, [0o640, 0o600]);
 });
+
+// ── MCP registry: threading (§9.2), the Ask column of §10, the turn-end notice (§9.1 D17) ──
+const MCP = (extra = []) => ({
+  servers: {
+    sentry_billing: { type: 'http', url: 'https://mcp.sentry.dev/mcp', headers: { Authorization: 'Bearer ${MCPSECRET_2EB4507A}' } },
+    ...Object.fromEntries(extra.map((n) => [n, { type: 'http', url: `https://${n}.example.com/mcp` }])),
+  },
+  env: { MCPSECRET_2EB4507A: 'sntrys_live_secret_value', MCP_TIMEOUT: '15000' },
+  secretValues: ['sntrys_live_secret_value'],
+  grants: ['mcp__sentry_billing', ...extra.map((n) => `mcp__${n}`)],
+  disallowedTools: [],
+  copies: [{ name: 'sentry_billing', setId: 'billing', setName: 'Billing', untested: true },
+    ...extra.map((n) => ({ name: n, setId: 'shop', setName: 'Shop', untested: false }))],
+  skipped: [], skippedTools: [], sets: [],
+});
+const INIT = (statuses) => ({ type: 'system', subtype: 'init', session_id: 'sess-2', parent_tool_use_id: null,
+  mcp_servers: [{ name: 'worca', status: 'connected' }, ...Object.entries(statuses).map(([name, status]) => ({ name, status }))] });
+
+test('MCP §9.2: both attempts carry the registry; the per-turn file lists the copies after worca with refs only', async () => {
+  const s = seed();
+  const seen = [];
+  let cfgText = null;
+  const { turn } = makeTurn(s, { mcp: MCP(), resumeSessionId: 'dead-sid' }, {
+    runClaudeImpl: async (opts) => {
+      cfgText ??= readFileSync(opts.mcpConfigPath, 'utf8');
+      seen.push(opts);
+      if (seen.length === 1) {
+        push(opts.onEvent, RESULT({ subtype: 'error_during_execution', is_error: true, total_cost_usd: 0, errors: ['No conversation found with session ID: dead-sid'] }));
+        throw new Error('claude exited with code 1: No conversation found with session ID: dead-sid');
+      }
+      push(opts.onEvent, RESULT());
+      return { text: '', exitCode: 0 };
+    },
+  });
+  await turn.run();
+  assert.equal(seen.length, 2, 'the resume-fallback retry ran');
+  for (const o of seen) {
+    assert.deepEqual(o.spawnEnv, { MCPSECRET_2EB4507A: 'sntrys_live_secret_value', MCP_TIMEOUT: '15000' });
+    assert.deepEqual(o.redactValues, ['sntrys_live_secret_value']);
+    assert.ok(o.tools.includes('ToolSearch'));
+    assert.deepEqual(o.mcpServerGrants, ['mcp__worca', 'mcp__sentry_billing']);
+  }
+  const cfg = JSON.parse(cfgText);
+  assert.deepEqual(Object.keys(cfg.mcpServers), ['worca', 'sentry_billing']);
+  assert.equal(cfg.mcpServers.worca.alwaysLoad, true);
+  assert.ok(cfgText.includes('${MCPSECRET_2EB4507A}'), 'refs only');
+  assert.ok(!cfgText.includes('sntrys_live_secret_value'), 'the per-turn file never holds a secret value');
+});
+
+test('MCP §9.2 relay: the copies ride the relay config and the secret env reaches the agent spawn (sudo -n -E keeps it)', async () => {
+  const s = seed();
+  let cfg = null; let o = null;
+  const { turn } = makeTurn(s, { mcp: MCP() }, {
+    agentRelay: () => ({ url: 'http://127.0.0.1:1/api/ask/relay', token: 't', dispose: () => {} }),
+    runClaudeImpl: async (opts) => { cfg = JSON.parse(readFileSync(opts.mcpConfigPath, 'utf8')); o = opts; throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' }); },
+  });
+  await turn.run();
+  assert.equal(o.asAgent, true);
+  assert.equal(o.spawnEnv.MCPSECRET_2EB4507A, 'sntrys_live_secret_value');
+  assert.deepEqual(Object.keys(cfg.mcpServers), ['worca', 'sentry_billing']);
+  assert.ok(cfg.mcpServers.worca.args.includes('--relay'));
+});
+
+test('MCP §10 Ask: one muted line per copy the CLI could not start (failed, needs-auth, disabled, absent); connected/pending and an init without a list say nothing; once per turn across the retry', async () => {
+  const s = seed();
+  let n = 0;
+  // linear: absent from init; odd: a status that is no own key of the table (never a prototype lookup) says nothing
+  const statuses = { sentry_billing: 'failed', jira: 'connected', pg: 'needs-auth', gh: 'disabled', slow: 'pending', odd: 'toString' };
+  const { turn } = makeTurn(s, { mcp: MCP(['jira', 'pg', 'gh', 'linear', 'slow', 'odd']), resumeSessionId: 'dead-sid' }, {
+    runClaudeImpl: async (opts) => {
+      n += 1;
+      push(opts.onEvent, { ...INIT({}), parent_tool_use_id: 'toolu_sub' });   // a sub-agent's init is not the turn's
+      push(opts.onEvent, { type: 'system', subtype: 'init', session_id: 'sess-2', parent_tool_use_id: null });   // no list: says nothing (never "absent")
+      push(opts.onEvent, INIT(statuses));
+      push(opts.onEvent, INIT(statuses));                     // a second init in the same attempt adds nothing
+      if (n === 1) {
+        push(opts.onEvent, RESULT({ subtype: 'error_during_execution', is_error: true, total_cost_usd: 0, errors: ['No conversation found with session ID: dead-sid'] }));
+        throw new Error('claude exited with code 1: No conversation found with session ID: dead-sid');
+      }
+      push(opts.onEvent, RESULT());
+      return { text: '', exitCode: 0 };
+    },
+  });
+  await turn.run();
+  assert.equal(n, 2);
+  const lines = getMessage(s.asst.id).blocks.filter((b) => b.kind === 'notice' && / unavailable \(/.test(b.text)).map((b) => b.text);
+  assert.deepEqual(lines.sort(), [
+    'gh unavailable (disabled by your Claude Code settings)',
+    'linear unavailable (blocked by managed MCP policy)',
+    'pg unavailable (needs-auth)',
+    'sentry_billing unavailable (failed)',
+  ]);
+});
+
+test('MCP §10 Ask: a 400 on a too-long tool name becomes one muted line naming the untested copies and their sets', async () => {
+  const s = seed();
+  const tooLong = async () => {
+    throw Object.assign(new Error('claude exited with code 1: API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"tools.12.custom.name: String should have at most 128 characters"}}'), { errorClass: 'api' });
+  };
+  const { turn } = makeTurn(s, { mcp: MCP(['jira_shop']) }, { runClaudeImpl: tooLong });
+  await turn.run();
+  const lines = (id) => getMessage(id).blocks.filter((b) => b.kind === 'notice' && /too long for this model/.test(b.text)).map((b) => b.text);
+  assert.deepEqual(lines(s.asst.id), ['an MCP tool name is too long for this model — Test the servers in Billing (sentry_billing)']);
+  const tested = seed();
+  const allTested = MCP(['jira_shop']);
+  allTested.copies[0].untested = false;
+  await makeTurn(tested, { mcp: allTested }, { runClaudeImpl: tooLong }).turn.run();
+  assert.deepEqual(lines(tested.asst.id), ['an MCP tool name is too long for this model — Test the servers in Billing, Shop'], 'none untested ⇒ every copy\'s set');
+  const other = seed();
+  // another 400 in the same "at most 128" words, about a message instead of a tool name
+  const plain = makeTurn(other, { mcp: MCP() }, { runClaudeImpl: async () => { throw Object.assign(new Error('claude exited with code 1: API Error: 400 {"message":"messages.3.content.0.text: String should have at most 128 characters"}'), { errorClass: 'api' }); } }).turn;
+  await plain.run();
+  assert.ok(!getMessage(other.asst.id).blocks.some((b) => b.kind === 'notice' && /too long/.test(b.text)), 'any other failure adds nothing');
+});
+
+test('MCP §9.1 D17: a turn that changed a worktree ends with the join notice the server computes (flagged mcp for the picker link); no change, no resolve', async () => {
+  const text = "shop's MCP servers (sentry_shop, postgres-ro_shop) join from the next message";
+  const opened = (opts) => {
+    toolUse(opts.onEvent, 'm1', 'toolu_1', 'mcp__worca__open_worktree', { projectKey: 'shop-00000002', ref: 'main' });
+    toolResult(opts.onEvent, 'toolu_1', '{}');
+    push(opts.onEvent, RESULT());
+    return { text: '', exitCode: 0 };
+  };
+  const s = seed();
+  await makeTurn(s, { mcp: MCP() }, { mcpJoinNotice: async () => text, runClaudeImpl: opened }).turn.run();
+  assert.deepEqual(getMessage(s.asst.id).blocks.filter((b) => b.kind === 'notice'), [{ kind: 'notice', text, mcp: true }]);
+  let asked = 0;
+  await makeTurn(seed(), { mcp: MCP() }, {
+    mcpJoinNotice: async () => { asked += 1; return text; },
+    runClaudeImpl: async (opts) => { push(opts.onEvent, RESULT()); return { text: '', exitCode: 0 }; },
+  }).turn.run();
+  assert.equal(asked, 0, 'no worktree change: no second resolve at turn end');
+  const quiet = seed();
+  const q = makeTurn(quiet, {}, {
+    mcpJoinNotice: async () => { throw new Error('store unreadable'); },
+    runClaudeImpl: opened,
+  }).turn;
+  assert.equal((await q.run()).status, 'done', 'a failing notice never breaks the turn');
+  assert.ok(!(getMessage(quiet.asst.id).blocks || []).some((b) => b.kind === 'notice'));
+});
+
+test('MCP §15 global: a turn with copies writes only its per-turn MCP file — never ~/.claude.json or a .mcp.json', async () => {
+  const writes = [];
+  const fs = { mkdir: async () => {}, writeFile: async (p, d) => { writes.push({ p, d }); }, unlink: async () => {} };
+  const { turn } = makeTurn(seed(), { mcp: MCP() }, { fs, runClaudeImpl: async (opts) => { push(opts.onEvent, RESULT()); return { text: '', exitCode: 0 }; } });
+  await turn.run();
+  assert.equal(writes.length, 1);
+  assert.match(writes[0].p, /[\\/]tmp[\\/]ask[\\/]mcp-askm_[0-9a-f]{8}\.json$/);
+  assert.ok(!writes.some((w) => /\.claude\.json$|\.mcp\.json$/.test(w.p)));
+  assert.ok(!writes[0].d.includes('sntrys_live_secret_value'));
+});
+
+test('MCP §5.5.3: the persisted answer is redacted whole with the turn\'s registry values', async () => {
+  const s = seed();
+  const mcp = { ...MCP(), env: { MCPSECRET_2EB4507A: 'plainvalue9f3k2x7q' }, secretValues: ['plainvalue9f3k2x7q'] };   // no token shape: patterns miss it
+  await makeTurn(s, { mcp }, {
+    runClaudeImpl: async (opts) => {
+      say(opts.onEvent, 'msg_1', 'we found plainvalue9f3k2x7q in the reply');
+      push(opts.onEvent, RESULT());
+      return { text: '', exitCode: 0 };
+    },
+  }).turn.run();
+  const text = getMessage(s.asst.id).text;
+  assert.ok(!text.includes('plainvalue9f3k2x7q'), 'the runner redacts per event; the persisted text is redacted whole here');
+  assert.match(text, /\[redacted\]/);
+});
+
+test('MCP §9.1 D17: a hung join notice is bounded — the turn still completes, without a notice', { timeout: 10000 }, async () => {
+  const s = seed();
+  const { turn } = makeTurn(s, { mcp: MCP() }, {
+    mcpJoinNotice: () => new Promise(() => {}), mcpJoinNoticeMs: 20,
+    runClaudeImpl: (opts) => {
+      toolUse(opts.onEvent, 'm1', 'toolu_1', 'mcp__worca__open_worktree', { projectKey: 'shop-00000002', ref: 'main' });
+      toolResult(opts.onEvent, 'toolu_1', '{}');
+      push(opts.onEvent, RESULT());
+      return { text: '', exitCode: 0 };
+    },
+  });
+  assert.equal((await turn.run()).status, 'done');
+  assert.ok(!(getMessage(s.asst.id).blocks || []).some((b) => b.kind === 'notice'));
+});

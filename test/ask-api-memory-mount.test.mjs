@@ -87,6 +87,24 @@ test('the message route mounts global + the resolved project under <home>/ask/me
   } finally { ws.close(); }
 });
 
+test('MCP registry §9.1: a fallback-tagged projectDir gets no project: header line and a global-only mount', async () => {
+  const header = await mod._testing.resolveAskContext('ask_00000000', { view: 'settings', projectDir: project.path, projectSource: 'fallback' });
+  assert.equal(header.project, undefined, 'the generic fallback is ignored');
+  assert.deepEqual((await mod._testing.resolveAskContext('ask_00000000', { view: 'new', projectDir: project.path })).project, { name: project.name, key: project.key }, 'an untagged projectDir still resolves');
+  const { thread } = await (await post('/api/ask/threads', {})).json();
+  const { ws, msgs, opened } = openWs();
+  await opened;
+  try {
+    const r = await post(`/api/ask/threads/${thread.id}/messages`, { text: 'hello', ...MODEL, context: { view: 'settings', projectDir: project.path, projectSource: 'fallback' } });
+    assert.equal(r.status, 202, await r.text());
+    await waitFor(() => msgs.some((m) => m.threadId === thread.id && typeof m.seq === 'number'));
+    const turn = mod._testing.askJobs.get(thread.id)?.turn;
+    await waitFor(() => turn.memoryDir === join(worcaHome(), 'ask', 'memory', 'global'));
+    assert.ok(!turn.prompt.includes('project: '), 'no project: header line');
+    await waitFor(() => msgs.some((m) => m.threadId === thread.id && m.type === 'ask-done'));
+  } finally { ws.close(); }
+});
+
 test('no project in the context ⇒ the global-only mount; an empty store ⇒ no mount dir at all (byte-identical spawn)', async () => {
   const { refreshAskMemoryMount } = await import('../src/core/ask/memory-deps.mjs');
   const g = await refreshAskMemoryMount({});

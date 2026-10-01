@@ -1,0 +1,23 @@
+{
+  "name": "cloudflare-mcp",
+  "version": "0.1.0",
+  "description": "Cloudflare MCP servers: the whole Cloudflare API (API token) and the Cloudflare docs",
+  "license": "MIT",
+  "engines": { "worca-cc-api": ">=5 <6" },
+  "mcpServers": {
+    "cloudflare": {
+      "type": "http",
+      "url": "https://mcp.cloudflare.com/mcp",
+      "headers": { "Authorization": { "field": "token", "prefix": "Bearer " } },
+      "fields": [
+        { "key": "token", "label": "Cloudflare API token", "secret": true, "required": true }
+      ],
+      "description": "The whole Cloudflare API (Workers, DNS, R2, D1, KV, zones and more) through code-mode search and execute tools"
+    },
+    "cloudflare-docs": {
+      "type": "http",
+      "url": "https://docs.mcp.cloudflare.com/mcp",
+      "description": "Search the Cloudflare developer documentation (no credentials)"
+    }
+  }
+}

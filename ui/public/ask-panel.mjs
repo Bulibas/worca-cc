@@ -18,6 +18,8 @@ import { buildTrace, scheduleTrace, playAssembly } from './auto-build.mjs';
 import { buildNodeConfigRows, pruneNodeSelection, modifiedFieldsOf } from './node-tunables.mjs';
 import { classifyLoops } from '../../src/shared/graph/loops.mjs';
 import { portsFnFor } from '../../src/shared/graph/ports.mjs';
+import { parseMcpToolName } from '../../src/shared/mcp-tool-name.mjs';
+import { mcpSkipView, mcpCopyNote } from './mcp-run-picker.mjs';
 
 /**
  * Cold-start pick, used ONLY until GET /api/ask/models resolves — and afterwards
@@ -208,6 +210,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     threadsRefresh: null,     // the debounce timer behind the History popover's ask-run-status refetch
     expandedAgents: new Set(),
     worktrees: [],            // P4 §10: the chat's open worktrees (snapshot-fed)
+    // MCP registry §9.4: the chat's picker choices (held here, sent with every message, PATCHed between turns),
+    // the last POST /api/ask/mcp-preview body and whether it failed; gen drops a stale response, render repaints
+    // an open picker, saving chains the PATCHes so they land in toggle order.
+    mcp: { off: { sets: [], members: [] }, preview: null, failed: false, gen: 0, queued: false, render: null, saving: Promise.resolve() },
     pinned: true,
     prevFocus: null,
     size: readStoredSize(),   // {w,h} the user's persisted sheet size (hoisted reader); null = stylesheet default
@@ -852,12 +858,16 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         renderTranscript();
         storeThread(id);
       }
+      const sentOff = st.mcp.off;
       const payload = {
         text,
         model: st.picker.model,
         effort: st.picker.effort,
         // The browser's zone rides along: "tomorrow 02:00" is read in it (docs/scheduled-runs.md "Ask Worca").
         context: { ...scopedContext(getPageContext() || {}), timeZone: browserTimeZone() },
+        // MCP registry §9.4: every message carries the picker's choices, so each turn runs what the picker shows —
+        // a refused first message (429/403/400, network) or a PATCH still in flight would leave the stored ones behind.
+        mcpOff: sentOff,
         ...(st.pendingFiles.length ? { attachments: st.pendingFiles.map((f) => ({ name: f.name, dataBase64: f.dataBase64 })) } : {}),
       };
       const model = st.model;
@@ -875,6 +885,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         setComposerMsg(msg);
         return false;
       }
+      // A toggle made while this POST was out PATCHed a value the route then overwrote with sentOff: re-send the latest.
+      if (st.mcp.off !== sentOff) patchMcpOff(id, st.mcp.off);
       const { userMessageId, attachments: stored, contexts } = await res.json();
       if (Array.isArray(contexts)) renderContextChips(contexts);   // an older server omits it: keep what is shown
       // Prefer the server's rows: they carry the store-minted ids that key the
@@ -957,6 +969,20 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     el.scopeBtn = scopeBtn;
     scopeBtn.dataset.minLevel = 'advanced';      // interface mode (docs/ui-levels.md): Auto scope is the simple path
     row.appendChild(scopeBtn);
+
+    // MCP registry §9.4: the per-chat MCP picker — `MCP · N` (N = copies that start next turn), hidden while no
+    // set in play has a member. Styled as the scope pill; opens like the model button's Effort sub-picker.
+    const mcpBtn = make('button', 'ask-scope-btn ask-mcp-btn');
+    mcpBtn.type = 'button';
+    mcpBtn.setAttribute('data-ask-mcp-btn', '');
+    mcpBtn.title = 'MCP servers for this chat';
+    mcpBtn.hidden = true;
+    mcpBtn.dataset.minLevel = 'advanced';
+    el.mcpBtnLabel = make('span', 'ask-scope-label', 'MCP · 0');
+    mcpBtn.appendChild(el.mcpBtnLabel);
+    mcpBtn.addEventListener('click', () => openMcpPopover(mcpBtn));
+    el.mcpBtn = mcpBtn;
+    row.appendChild(mcpBtn);
 
     row.appendChild(make('span', 'ask-composer-spacer'));
 
@@ -1057,6 +1083,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     focusComposer();
     scheduleFlush();
     repaintProgressCards({ hydrate: true });
+    scheduleMcpRefresh();                          // the page may have changed while the sheet was closed
     if (createVoice && voiceUsedBefore()) voice().preload();   // the mic is ready by the time it is clicked
   }
 
@@ -1323,7 +1350,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (focusTrigger) { try { p.trigger.focus(); } catch { /* ignore */ } }
   }
 
-  function menuItems(panel) { return [...panel.querySelectorAll('[role="menuitem"]:not([disabled])')]; }
+  function menuItems(panel) { return [...panel.querySelectorAll('[role="menuitem"]:not([disabled]),[role="menuitemcheckbox"]:not([disabled])')]; }
 
   function onPopKeydown(e) {
     const p = st.popover;
@@ -1580,6 +1607,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const effort = wantedEntry ? wanted.effort : fallback.effort;
     const next = { model: entry.id, effort: coerceEffort(entry, effort) };
     const changed = next.model !== st.picker.model || next.effort !== st.picker.effort;
+    if (next.model !== st.picker.model) scheduleMcpRefresh();   // MCP registry §9.4: the model sets the §5.6 tool-name limit
     st.picker = next;
     // D11: persist ONLY a repair of a pick the user actually made. Writing the
     // backend default here would make it authoritative exactly once, ever — and a
@@ -1683,6 +1711,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     storeModel();
     persistThreadPick();
     updatePickerButton();
+    scheduleMcpRefresh();                           // the model sets the §5.6 tool-name limit
     closePopover({ focusTrigger: false });
     focusComposer();
   }
@@ -1790,6 +1819,164 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     renderPane('main');
   }
 
+  // ---- MCP picker (MCP registry §9.4) -----------------------------------------
+  const MCP_ROUTE_LABEL = { pinned: 'pinned', page: 'this page', worktree: 'open worktree' };
+  const mcpOffOf = (v) => ({
+    sets: v && Array.isArray(v.sets) ? [...v.sets] : [],
+    members: v && Array.isArray(v.members) ? [...v.members] : [],
+  });
+
+  /** One POST /api/ask/mcp-preview per tick, whatever asked for it; only while the sheet is open. */
+  function scheduleMcpRefresh() {
+    if (st.mcp.queued || st.destroyed || !st.open) return;
+    st.mcp.queued = true;
+    Promise.resolve().then(refreshMcp);
+  }
+
+  async function refreshMcp() {
+    st.mcp.queued = false;
+    const gen = ++st.mcp.gen;
+    const body = {
+      context: scopedContext(getPageContext() || {}),
+      mcpOff: st.mcp.off,                       // the client holds the choices: they override the stored ones
+      ...(st.picker.model ? { model: st.picker.model } : {}),
+      ...(st.threadId ? { threadId: st.threadId } : {}),
+    };
+    let data = null;
+    try {
+      const r = await fetch('/api/ask/mcp-preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      data = r && r.ok ? await r.json() : null;
+    } catch { data = null; }
+    if (gen !== st.mcp.gen || st.destroyed) return;
+    st.mcp.failed = !(data && Array.isArray(data.sets));
+    st.mcp.preview = st.mcp.failed ? null : data;
+    const p = st.mcp.preview;
+    // A failed preview leaves the chip as it was (the open picker says so): the user can reopen it to retry.
+    if (p) el.mcpBtn.hidden = !p.sets.some((x) => x.members > 0);
+    el.mcpBtnLabel.textContent = p ? `MCP · ${p.started}` : 'MCP · ?';
+    if (st.mcp.render) st.mcp.render();
+  }
+
+  /** Save the choices: every message carries them; once a thread exists they are also PATCHed (card-event turns and
+   *  reloads read the stored value) — one PATCH at a time, in toggle order, since two in flight can land out of order. */
+  function patchMcpOff(tid, value) {
+    const body = JSON.stringify({ mcpOff: value });
+    st.mcp.saving = st.mcp.saving
+      .then(() => fetch(`/api/ask/threads/${tid}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }))
+      .catch(() => { /* the picker keeps the choice; the next message carries it */ });
+  }
+  function setMcpOff(next) {
+    st.mcp.off = next;
+    if (st.threadId) patchMcpOff(st.threadId, next);
+    if (st.mcp.render) st.mcp.render();          // the switch moves now; the counts follow the preview
+    scheduleMcpRefresh();
+  }
+  const toggle = (list, v) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
+
+  function mcpSwitch(on, label, onToggle, focusKey) {
+    const b = make('button', `switch ask-mcp-switch${on ? ' on' : ''}`);
+    b.dataset.mcpKey = focusKey;
+    b.type = 'button';
+    b.setAttribute('role', 'menuitemcheckbox');
+    b.setAttribute('aria-checked', String(on));
+    b.setAttribute('aria-label', label);
+    b.tabIndex = -1;
+    b.addEventListener('click', onToggle);
+    return b;
+  }
+
+  function mcpManageItem(text, hash) {
+    const item = menuItem('ask-mcp-manage', () => {
+      closeSheet();                                 // the progress card's precedent: close, then route
+      if (win.location.hash !== hash) win.location.hash = hash.slice(1);
+    });
+    item.dataset.mcpKey = 'manage';                 // a re-render keeps focus on the footer too
+    item.appendChild(make('span', null, text));
+    return item;
+  }
+
+  function openMcpPopover(trigger) {
+    const panel = openPopover({ panelClass: 'ask-pop-mcp', trigger, build: () => {}, onClose: () => { st.mcp.render = null; } });
+    if (!panel) return;
+    let pane = null;                                // null = level 1; else the set id drilled into
+    let first = true;
+    const render = (focusKey = null) => {
+      const p = st.mcp.preview || { sets: [], copies: [], skipped: [] };
+      // A re-render (a toggle, a preview landing) keeps keyboard focus on the same control.
+      const keep = focusKey ?? (panel.contains(doc.activeElement) ? doc.activeElement.dataset.mcpKey || '' : null);
+      panel.replaceChildren();
+      const set = pane ? p.sets.find((x) => x.id === pane) : null;
+      if (pane && set) {
+        // Level 2: one row per membership of the set; a skipped one is a disabled row with its reason.
+        const back = menuItem('ask-pane-back', () => { const from = pane; pane = null; render(`drill:${from}`); });
+        back.setAttribute('data-ask-pane-back', '');
+        back.appendChild(make('span', null, `‹ ${set.name}`));
+        panel.appendChild(back);
+        panel.appendChild(make('div', 'ask-pop-divider'));
+        const setOff = st.mcp.off.sets.includes(set.id);
+        const rows = [
+          ...p.copies.filter((c) => c.setId === set.id).map((c) => ({ copy: c.name, serverId: c.serverId, skip: null, note: mcpCopyNote(p, c) })),
+          ...p.skipped.filter((x) => x.setId === set.id).map((x) => ({ copy: mcpSkipView(x).name, serverId: x.serverId, skip: x, note: '' })),
+        ].sort((a, b) => (Number(!!a.skip && a.skip.reason !== 'chat-off') - Number(!!b.skip && b.skip.reason !== 'chat-off'))
+          || (a.copy < b.copy ? -1 : a.copy > b.copy ? 1 : 0));   // switches first, then the disabled rows (Appendix B 10, P4)
+        for (const m of rows) {
+          if (m.skip && m.skip.reason !== 'chat-off') {
+            // §5.7 in the New Pipeline picker's wording: choices (off, needs-consent) muted, problems amber.
+            const v = mcpSkipView(m.skip);
+            const item = menuItem(`ask-mcp-member is-skipped${v.problem ? ' is-problem' : ''}`);
+            item.disabled = true;
+            item.appendChild(make('span', 'ask-model-name', m.copy));
+            item.appendChild(make('span', 'ask-pop-row-value', v.why));
+            panel.appendChild(item);
+            continue;
+          }
+          const k = `${set.id}|${m.serverId}`;
+          const row = make('div', 'ask-mcp-row');
+          row.setAttribute('role', 'none');
+          const shown = m.note ? `${m.copy} · ${m.note}` : m.copy;   // §4.4 name provisional, §5.6 withheld tools
+          row.appendChild(make('span', 'ask-mcp-copy', shown));
+          const sw = mcpSwitch(!setOff && !st.mcp.off.members.includes(k), shown,
+            () => setMcpOff({ ...st.mcp.off, members: toggle(st.mcp.off.members, k) }), `member:${k}`);
+          if (setOff) { sw.disabled = true; sw.title = `${set.name} is off in this chat`; }   // the whole set is off
+          row.appendChild(sw);
+          panel.appendChild(row);
+        }
+        panel.appendChild(make('div', 'ask-pop-divider'));
+        panel.appendChild(mcpManageItem(`Manage ${set.name} in Settings › MCP servers`, `#settings/mcp/sets/${encodeURIComponent(set.id)}`));
+      } else {
+        pane = null;
+        // Level 1: one row per set in play, in the resolver's picker order (General, user sets by rank, Team).
+        for (const x of p.sets) {
+          const row = make('div', 'ask-mcp-row');
+          row.setAttribute('role', 'none');
+          row.appendChild(mcpSwitch(!st.mcp.off.sets.includes(x.id), x.name,
+            () => setMcpOff({ ...st.mcp.off, sets: toggle(st.mcp.off.sets, x.id) }), `set:${x.id}`));
+          const drill = menuItem('ask-mcp-set', () => { pane = x.id; render(); });
+          drill.dataset.mcpKey = `drill:${x.id}`;
+          const route = x.routes[0]?.route;          // the resolver sorts a set's routes by rank
+          drill.appendChild(make('span', 'ask-model-name', x.group === 'set' && route ? `${x.name} · ${MCP_ROUTE_LABEL[route] || route}` : x.name));
+          drill.appendChild(make('span', 'ask-pop-row-value', `${x.started}/${x.members}`));
+          drill.appendChild(make('span', 'ask-pop-row-chev', '›'));
+          row.appendChild(drill);
+          panel.appendChild(row);
+        }
+        // Before the first preview lands, or when it failed: say so rather than show an empty menu.
+        if (!p.sets.length) panel.appendChild(make('div', 'ask-pop-empty', st.mcp.failed ? 'Could not load the MCP servers — reopen to retry.' : !st.mcp.preview ? 'Loading…' : 'No MCP servers in play.'));
+        panel.appendChild(make('div', 'ask-pop-divider'));
+        panel.appendChild(mcpManageItem('Manage in Settings › MCP servers', '#settings/mcp'));
+      }
+      if (first || keep !== null) {
+        const items = menuItems(panel);
+        const f = items.find((x) => keep && x.dataset.mcpKey === keep) || items[0];
+        if (f) { f.tabIndex = 0; try { f.focus(); } catch { /* ignore */ } }
+      }
+      first = false;
+    };
+    st.mcp.render = render;
+    render();
+    scheduleMcpRefresh();
+  }
+
   // ---- scope selector (#397) ------------------------------------------------
   /** Per-field merge: the pinned scope replaces the page context's TARGET keys;
    *  view/run/diff-file context still follow the page. Auto sends pinned:false so
@@ -1800,6 +1987,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     delete ctx.projectDir;
     delete ctx.projectKey;
     delete ctx.workspaceId;
+    delete ctx.projectSource;                     // the fallback tag goes with the target keys (MCP registry §9.1)
     ctx.pinned = true;
     if (st.scope.projectKey) ctx.projectKey = st.scope.projectKey;
     else if (st.scope.workspaceId) ctx.workspaceId = st.scope.workspaceId;
@@ -1822,6 +2010,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       label: next.label || null,
     };
     updateScopeButton();
+    scheduleMcpRefresh();
     closePopover({ focusTrigger: false });
     focusComposer();
     // Persist on the thread so the pin survives reload with no message sent. A
@@ -1908,7 +2097,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   // ---- run-info popover ("Agents this chat") --------------------------------
   // ---- worktrees (P4 §10) ---------------------------------------------------
   function setWorktrees(list) {
-    st.worktrees = Array.isArray(list) ? list : [];
+    const ids = (l) => l.map((w) => w && w.worktreeId).join(',');
+    const next = Array.isArray(list) ? list : [];
+    if (ids(next) !== ids(st.worktrees)) scheduleMcpRefresh();   // an open worktree brings its project's sets (D17)
+    st.worktrees = next;
     if (!el.wtBtn) return;
     el.wtBtn.hidden = st.worktrees.length === 0;
     el.wtBtnLabel.textContent = `${st.worktrees.length} worktree${st.worktrees.length === 1 ? '' : 's'}`;
@@ -2029,6 +2221,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     applyThreadScope(null);             // #397: a brand-new chat starts on Auto
     renderContextChips([]);
     restoreBrowserPick();               // …and on the browser-level pick, not the last chat's
+    st.mcp.off = { sets: [], members: [] };   // …and with every MCP server on
+    scheduleMcpRefresh();
     pruneCardEls();                     // st.model is already null — renderTranscript's keep set cannot see the old ids
     renderTranscript();
     updateMeters();
@@ -2095,6 +2289,14 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       const a = make('a', 'ask-notice-link', 'open');
       a.setAttribute('href', b.href);
       n.appendChild(a);
+    }
+    if (b.mcp) {
+      // MCP registry §9.1 (D17): the worktree join notice's "MCP" opens the per-chat picker.
+      n.appendChild(doc.createTextNode(' · '));
+      const mcp = make('button', 'ask-notice-mcp', 'MCP');
+      mcp.type = 'button';
+      mcp.addEventListener('click', () => { if (el.mcpBtn) openMcpPopover(el.mcpBtn); });
+      n.appendChild(mcp);
     }
     // The raw failure evidence, for those who debug: expert only — the human
     // line above is the explanation at every level.
@@ -3846,16 +4048,24 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   function toolRow(block) {
     const rowEl = make('div', 'ask-tool-row');
     rowEl.dataset.minLevel = 'advanced';            // what the assistant ran, step by step
-    const short = String(block.name || '').replace(/^mcp__worca__/, '');
-    const parts = short.split('_');
-    rowEl.appendChild(make('span', 'ask-tool-op', parts[0] || short));
-    // A script tool reads as `test script runTests → blocking, exit 1` (§9.3): the op column
-    // (a fixed 38 px cell) keeps the verb, the target column carries the key and the outcome —
-    // a script's input is a whole program, so the JSON preview is worth nothing there.
-    const script = scriptToolLine(short, block);
-    const target = script ? script.target : parts.slice(1).join(' ');
-    const preview = script ? '' : clipInput(block.input);
-    rowEl.appendChild(make('span', 'ask-tool-target', preview ? (target ? `${target} · ${preview}` : preview) : target));
+    const mcp = parseMcpToolName(block.name);
+    if (mcp && mcp.server !== 'worca') {
+      // A registry copy's tool (MCP registry §9.7): `<copy> · <tool>` in the name cell, then the
+      // input preview — no op cell, since a third-party tool name has no worca verb to show.
+      rowEl.appendChild(make('span', 'ask-tool-mcp', `${mcp.server} · ${mcp.tool}`));
+      rowEl.appendChild(make('span', 'ask-tool-target', clipInput(block.input)));
+    } else {
+      const short = String(block.name || '').replace(/^mcp__worca__/, '');
+      const parts = short.split('_');
+      rowEl.appendChild(make('span', 'ask-tool-op', parts[0] || short));
+      // A script tool reads as `test script runTests → blocking, exit 1` (§9.3): the op column
+      // (a fixed 38 px cell) keeps the verb, the target column carries the key and the outcome —
+      // a script's input is a whole program, so the JSON preview is worth nothing there.
+      const script = scriptToolLine(short, block);
+      const target = script ? script.target : parts.slice(1).join(' ');
+      const preview = script ? '' : clipInput(block.input);
+      rowEl.appendChild(make('span', 'ask-tool-target', preview ? (target ? `${target} · ${preview}` : preview) : target));
+    }
     const note = block.status === 'error' ? 'error' : block.status === 'running' ? '…' : fmtElapsed(block.durationMs);
     rowEl.appendChild(make('span', 'ask-tool-note', note || ''));
     return rowEl;
@@ -4229,6 +4439,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // The picker follows the chat — on a SWITCH only: a resync of the same thread
     // would otherwise clobber a pick the user just made (its PATCH may not have landed).
     if (switched) applyThreadPick(snap.thread);
+    if (switched) st.mcp.off = mcpOffOf(snap.thread && snap.thread.mcpOff);   // §9.4: the chat's own choices
+    scheduleMcpRefresh();
     renderTranscript();
     updateMeters();
     // P4: the count rides the snapshot loadThread ALREADY fetched — no extra GET.
@@ -4490,6 +4702,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   doc.addEventListener('keydown', onDocKeydown, true);
   doc.addEventListener('pointerdown', onDocPointerdown, true);
   win.addEventListener('resize', onWinResize);
+  // MCP registry §9.4: in Auto the page is the scope, so a route change re-previews the picker.
+  const onHashChange = () => { if (!st.scope.pinned) scheduleMcpRefresh(); };
+  win.addEventListener('hashchange', onHashChange);
   // The rail collapsing changes the dock width by 222px with no window resize;
   // observe the dock itself (guarded: jsdom has no ResizeObserver — P5's idiom).
   let dockRo = null;
@@ -4509,6 +4724,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     doc.removeEventListener('keydown', onDocKeydown, true);
     doc.removeEventListener('pointerdown', onDocPointerdown, true);
     win.removeEventListener('resize', onWinResize);
+    win.removeEventListener('hashchange', onHashChange);
     if (dockRo) { dockRo.disconnect(); dockRo = null; }
     if (st.runTick) { clearInterval(st.runTick); st.runTick = null; }
     if (st.runUnsub) { try { st.runUnsub(); } catch { /* ignore */ } st.runUnsub = null; }
