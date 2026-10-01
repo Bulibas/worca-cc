@@ -11745,13 +11745,15 @@ async function fetchAwayMode(dir = null) {
   } catch { return null; }
 }
 let _awayPaintSeq = 0;
+// Held by reference: renderNightForm moves it below the summary, and every re-render detaches it first.
+const awayStatusEl = document.getElementById('awayStatus');
 /** Spec §7: the card always renders its fields. Before the first GET answers, or when it fails, paint the
  *  stored user layer from the /api/settings body; the summary then says "Away mode settings could not be read." */
 function paintNightFallback(host, data) {
   const user = (data && data.nightMode && typeof data.nightMode === 'object') ? data.nightMode : {};
   const toggle = typeof data?.nightModeToggle === 'string' ? data.nightModeToggle : 'auto';
   paintAwayStatus(toggle);
-  renderNightForm(host, { level: 'user', values: user, effective: data?.nightModeEffective || user, sources: {}, inherited: { config: null, sources: {} }, toggle, now: Date.now() });
+  renderNightForm(host, { level: 'user', values: user, effective: data?.nightModeEffective || user, sources: {}, inherited: { config: null, sources: {} }, toggle, now: Date.now(), statusEl: awayStatusEl });
 }
 async function paintNightSettings(data) {
   try {
@@ -11765,11 +11767,11 @@ async function paintNightSettings(data) {
     state.awayMode = d;
     paintAwayStatus(d.toggle);
     if (host.dataset.dirty === '1') { updateAwaySummary(host, { toggle: d.toggle, now: Date.now(), inherited: d.inherited }); return; }   // keep unsaved edits
-    renderNightForm(host, { level: 'user', values: d.user, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, now: Date.now() });
+    renderNightForm(host, { level: 'user', values: d.user, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, now: Date.now(), statusEl: awayStatusEl });
   } catch { /* the card keeps what it shows; never an unhandled rejection */ }
 }
 function paintAwayStatus(toggle) {
-  const bar = document.getElementById('awayStatus');
+  const bar = awayStatusEl;
   if (!bar) return;
   bar.replaceChildren(...(STATUS_ACTIONS[toggle] || STATUS_ACTIONS.auto).map((a) => {
     const b = document.createElement('button');
@@ -11777,7 +11779,7 @@ function paintAwayStatus(toggle) {
     return b;
   }));
 }
-document.getElementById('awayStatus')?.addEventListener('click', (e) => {
+awayStatusEl?.addEventListener('click', (e) => {
   const b = e.target.closest('button[data-mode]'); if (!b) return;
   // Only the toggle: the paint callback repaints the strip and the summary, never the unsaved fields.
   postSettingsCard({ nightModeToggle: b.dataset.mode }, { setMsg: setNightModeMsg, paint: () => paintNightSettings(null), savedText: '' });

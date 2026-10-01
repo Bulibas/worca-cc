@@ -176,6 +176,7 @@ test('settings card: paints the stored layer, Save posts {nightMode}, the status
   assert.equal(all.checked, true);
   assert.equal(host.querySelector('.night-window-start').value, '22:00');
   assert.deepEqual([...doc.querySelectorAll('#awayStatus button')].map((b) => b.textContent), ["I'm back"]);
+  assert.equal(host.querySelector('.away-summary').nextElementSibling, doc.getElementById('awayStatus'), 'the status buttons sit right below the summary');
   host.querySelector('.night-strategy').value = 'analysis';
   click(ctx, doc.getElementById('nightModeSave'));
   await settle();

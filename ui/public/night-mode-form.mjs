@@ -120,7 +120,7 @@ function details(doc, title) {
  *   values: the layer's own fields; effective/sources: what applies and where it comes from;
  *   inherited: what an EMPTY field falls back to (GET /api/away-mode), null config = unknown.
  */
-export function renderNightForm(root, { level, values = {}, effective = {}, sources = {}, inherited = { config: effective, sources }, toggle = 'auto', now = Date.now(), projectName = null }) {
+export function renderNightForm(root, { level, values = {}, effective = {}, sources = {}, inherited = { config: effective, sources }, toggle = 'auto', now = Date.now(), projectName = null, statusEl = null }) {
   const doc = root.ownerDocument;
   root.replaceChildren();
   delete root.dataset.dirty;
@@ -130,7 +130,9 @@ export function renderNightForm(root, { level, values = {}, effective = {}, sour
 
   const summary = el(doc, 'p', 'away-summary'); summary.setAttribute('aria-live', 'polite');
   const body = el(doc, 'div', 'away-body');      // fresh on every render: its listeners never stack
-  root.append(summary, body);
+  // statusEl: the Settings card's status buttons, kept right below the summary (moved, not copied:
+  // the caller keeps the element and its click listener across renders).
+  root.append(summary, ...(statusEl ? [statusEl] : []), body);
 
   // C. When and where worca answers (open).
   const basic = el(doc, 'div', 'away-basic');
