@@ -1,9 +1,10 @@
 // test/ui-attribution.test.mjs
 // Attribution in the UI (the server's identity.mjs). People are shown ONLY on a shared
 // deployment (whoami.shared: a real per-person sign-in): "Signed in as" in the rail foot,
-// an initials circle + "by <name>" / "by you" on run cards, History cards and sidebar rows,
+// an initials circle on sidebar rows (the compact Runs list rows carry no "by", D14),
 // the person chip (full name) in both detail headers, "Paused by …" banners, and a
-// "Started by" History filter. A local install or a one-person deployment shows none of it.
+// "Started by" filter over the Runs list. A local install or a one-person deployment
+// shows none of it.
 // Nothing shows for a null or 'local' identity, and every name is painted as text.
 //
 // boot() is a local copy of the jsdom harness in test/ui-running-card.test.mjs and
@@ -97,7 +98,7 @@ test('rail foot: a name is painted as text, never markup', async () => {
   assert.equal(name.querySelector('img'), null);
 });
 
-// ── History cards + the "Started by" filter ─────────────────────────────────────
+// ── The "Started by" filter over the Runs list ───────────────────────────────────
 
 const ROW = (over = {}) => ({
   id: 'a1', title: 'Alpha one', status: 'done', startedAt: '2026-06-01T00:00:00Z',
@@ -110,43 +111,23 @@ async function history(rows, whoami = SHARED) {
     if (u.endsWith('/api/history')) return ok({ pipelines: rows, ghAvailable: false });
     return null;
   } });
-  go(ctx.window, 'history');
+  go(ctx.window, 'runs');                 // nothing remembered at boot: the bare list
   await settle(ctx.window, 6);
   return ctx;
 }
-const cardsOf = (ctx) => [...ctx.doc.querySelectorAll('#history .hist-card')];
+// The listed finished runs, by pipeline id (group copies only: Needs you repeats rows).
+const rowIds = (ctx) => [...ctx.doc.querySelectorAll('#runs-list .runs-row[data-slot="group"][data-kind="hist"]')]
+  .map((r) => r.dataset.pipelineId).sort();
 
-test('History card: initials + "by <name>" / "by you" on a shared deployment; nothing for null or local', async () => {
-  const ctx = await history([
-    ROW({ id: 'a4', startedBy: 'ada.lovelace@example.com' }),
-    ROW({ id: 'a3', startedBy: ME }),
-    ROW({ id: 'a2', startedBy: 'local' }),
-    ROW({ id: 'a1', startedBy: null }),
-  ]);
-  const cards = cardsOf(ctx);
-  assert.equal(cards.length, 4);
-  const seg = (c) => c.querySelector('.hist-by-seg');
-  assert.equal(cards[0].querySelector('.hist-by').textContent, 'by ada.lovelace@example.com');
-  assert.equal(cards[0].querySelector('.hist-by').title, 'Started by ada.lovelace@example.com');
-  assert.equal(seg(cards[0]).querySelector('.person-ini').textContent, 'AL');
-  assert.equal(cards[1].querySelector('.hist-by').textContent, 'by you');
-  assert.equal(cards[1].querySelector('.hist-by').title, `Started by ${ME}`, 'the tooltip keeps the full name');
-  assert.equal(seg(cards[2]).hidden, true, "'local' is nobody in particular");
-  assert.equal(seg(cards[3]).hidden, true, 'a run from before attribution');
-});
-
-test('History card: a one-person or local deployment shows no people at all', async () => {
+test('Runs list: a one-person or local deployment shows no Started-by filter', async () => {
   for (const whoami of [SOLO, { name: null, source: 'local', shared: false }]) {
     const ctx = await history([ROW({ id: 'a2', startedBy: 'ada@example.com' }), ROW({ id: 'a1', startedBy: 'Solo Operator' })], whoami);
-    for (const c of cardsOf(ctx)) {
-      assert.equal(c.querySelector('.hist-by-seg').hidden, true);
-      assert.equal(c.querySelector('.person-ini'), null);
-    }
+    assert.deepEqual(rowIds(ctx), ['a1', 'a2'], 'the runs are listed');
     assert.equal(ctx.doc.querySelectorAll('#historyFilter .hist-pill.person').length, 0, 'no Started by filter');
   }
 });
 
-test('History filter: "Started by" pills, you first; one filters, again clears; combines with the project', async () => {
+test('Runs filter: "Started by" pills, you first; one filters every group, again clears', async () => {
   const ctx = await history([
     ROW({ id: 'b3', startedBy: 'ada@example.com', projectKey: 'beta-00000002', projectName: 'Beta', projectDir: '/x/beta' }),
     ROW({ id: 'a3', startedBy: 'ada@example.com' }),
@@ -155,76 +136,26 @@ test('History filter: "Started by" pills, you first; one filters, again clears; 
   ]);
   const pills = () => [...ctx.doc.querySelectorAll('#historyFilter .hist-pill.person')];
   assert.deepEqual(pills().map((b) => b.textContent.replace(/\s+/g, ' ').trim()), ['Myou 1', 'Aada@example.com 2', 'Ggrace@example.com 1']);
+  assert.deepEqual(rowIds(ctx), ['a1', 'a2', 'a3', 'b3']);
   pills()[1].dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
   await settle(ctx.window);
-  assert.deepEqual(cardsOf(ctx).map((c) => c.querySelector('.hist-by').textContent), ['by ada@example.com', 'by ada@example.com']);
+  assert.deepEqual(rowIds(ctx), ['a3', 'b3'], "only ada's runs, in both projects");
   assert.equal(pills()[1].getAttribute('aria-pressed'), 'true');
-  // + the project filter
-  ctx.doc.querySelector('#historyFilter .hist-pill[data-project-key="alpha-00000001"]').dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
-  await settle(ctx.window);
-  assert.equal(cardsOf(ctx).length, 1);
-  // clicking the active person pill again shows everyone (on Alpha)
+  // clicking the active person pill again shows everyone
   pills()[1].dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
   await settle(ctx.window);
-  assert.equal(cardsOf(ctx).length, 3);
+  assert.deepEqual(rowIds(ctx), ['a1', 'a2', 'a3', 'b3']);
+  assert.equal(pills()[1].getAttribute('aria-pressed'), 'false');
 });
 
-// ── live run cards, sidebar rows ────────────────────────────────────────────────
+// ── sidebar rows ────────────────────────────────────────────────────────────────
 
 const RUN_ID = 'run-aaa';
 function hello(ctx, extra = {}) {
   ctx.wsBox.ws.dispatch('open', {});
   ctx.dispatch({ type: 'hello', runs: [{ runId: RUN_ID, title: 'Demo run', projectDir: '/tmp/p', status: 'running', startedAt: '2026-01-01T00:00:00Z', ...extra }] });
-  go(ctx.window, 'running');
+  go(ctx.window, 'runs');
 }
-const card = (ctx) => ctx.doc.querySelector(`.run-card[data-run-id="${RUN_ID}"]`);
-
-test('run card: initials + "by <name>" from the state snapshot, hidden until then', async () => {
-  const ctx = await boot({ whoami: SHARED });
-  hello(ctx);
-  await settle(ctx.window);
-  const by = card(ctx).querySelector('.rc-by');
-  assert.equal(by.hidden, true, 'unknown yet');
-  assert.match(card(ctx).querySelector('.rm-text').textContent, /^started \d\d:\d\d:\d\d$/, 'the started segment is unchanged');
-  ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'running', startedBy: 'ada@example.com' });
-  await settle(ctx.window);
-  assert.equal(by.hidden, false);
-  assert.equal(by.querySelector('.rc-by-text').textContent, 'by ada@example.com');
-  assert.equal(by.querySelector('.person-ini').textContent, 'A');
-  assert.equal(by.title, 'Started by ada@example.com');
-});
-
-test('run card: "by you" for the viewer\'s own run; local and not-shared stay hidden', async () => {
-  const ctx = await boot({ whoami: SHARED });
-  hello(ctx, { startedBy: 'ME@example.com' });
-  await settle(ctx.window);
-  assert.equal(card(ctx).querySelector('.rc-by-text').textContent, 'by you', 'case-insensitive');
-
-  const local = await boot({ whoami: SHARED });
-  hello(local, { startedBy: 'local' });
-  await settle(local.window);
-  assert.equal(card(local).querySelector('.rc-by').hidden, true);
-
-  const solo = await boot({ whoami: SOLO });
-  hello(solo, { startedBy: 'grace@example.com' });
-  await settle(solo.window);
-  assert.equal(card(solo).querySelector('.rc-by').hidden, true);
-});
-
-test('sidebar row: just the initials with a tooltip, shared deployments only', async () => {
-  const ctx = await boot({ whoami: SHARED });
-  hello(ctx, { startedBy: 'grace.hopper@example.com' });
-  await settle(ctx.window);
-  const ini = ctx.doc.querySelector(`#nav-running-children [data-child-run-id="${RUN_ID}"] .child-by`);
-  assert.ok(ini);
-  assert.equal(ini.textContent, 'GH');
-  assert.equal(ini.title, 'Started by grace.hopper@example.com');
-
-  const solo = await boot({ whoami: SOLO });
-  hello(solo, { startedBy: 'grace.hopper@example.com' });
-  await settle(solo.window);
-  assert.equal(solo.doc.querySelector(`#nav-running-children .child-by`), null);
-});
 
 // ── live run detail: the person chip ────────────────────────────────────────────
 
@@ -236,20 +167,20 @@ async function runDetail(extra, whoami = SHARED) {
   return ctx;
 }
 
-test('live run detail: a person chip beside the status pill with the full name, never "you"', async () => {
+test('live run detail: a person chip on the page title\'s meta line with the full name, never "you"', async () => {
   const ctx = await runDetail({ startedBy: 'ada.lovelace@example.com' });
-  const chip = ctx.doc.querySelector('.rd-row1 .person-chip');
+  const chip = ctx.doc.querySelector('.rd-page-meta .person-chip');
   assert.ok(chip);
-  assert.equal(chip.nextElementSibling.classList.contains('rd-status'), true, 'right beside the status pill');
+  assert.equal(chip.nextElementSibling, null, 'at the end of the line under the run\'s name');
   assert.equal(chip.querySelector('.person-ini').textContent, 'AL');
   assert.equal(chip.querySelector('.person-chip-name').textContent, 'ada.lovelace@example.com');
   assert.equal(chip.title, 'Started by ada.lovelace@example.com');
   assert.doesNotMatch(ctx.doc.querySelector('.rd-meta').textContent, /\bby\b/, 'the meta line no longer repeats it');
 
   const own = await runDetail({ startedBy: ME });
-  assert.equal(own.doc.querySelector('.rd-row1 .person-chip-name').textContent, ME, 'the full name, even for the viewer');
-  assert.equal((await runDetail({ startedBy: 'local' })).doc.querySelector('.rd-row1 .person-chip'), null);
-  assert.equal((await runDetail({ startedBy: 'ada@example.com' }, SOLO)).doc.querySelector('.rd-row1 .person-chip'), null);
+  assert.equal(own.doc.querySelector('.rd-page-meta .person-chip-name').textContent, ME, 'the full name, even for the viewer');
+  assert.equal((await runDetail({ startedBy: 'local' })).doc.querySelector('.rd-page-meta .person-chip'), null);
+  assert.equal((await runDetail({ startedBy: 'ada@example.com' }, SOLO)).doc.querySelector('.rd-page-meta .person-chip'), null);
 });
 
 test('run detail banner: "Paused by <name>" / "Paused by you" / "Stopped by <name>" when shared; plain otherwise', async () => {

@@ -1,6 +1,6 @@
-// test/ui-cost-paused.test.mjs — cost-paused UX: run-card banners, the
-// continue-without-cap override flow, total-cap resume gating, and the History
-// parity (pause note in the head, banner in the expanded detail, gated Resume).
+// test/ui-cost-paused.test.mjs — cost-paused UX: the Runs list row's word (in Needs you and in
+// its project group), the run page's banners and Resume, the continue-without-cap override flow,
+// total-cap resume gating, and the History parity (the row word, banner in the detail, gated Resume).
 // Harness: jsdom boot of the REAL index.html + app.js, with the dispatchable
 // WebSocket stub from test/ui-history-cache.test.mjs (so `done`/`budget-changed`
 // frames can be pushed into the running client), the mutable `box.budget`
@@ -67,9 +67,14 @@ async function boot({ budget = okBudget(), fetchHandler } = {}) {
   await new Promise((r) => setTimeout(r, 0));
   const tick = () => new Promise((r) => setTimeout(r, 0));
   const recv = (obj) => wsBox.ws.dispatch('message', { data: JSON.stringify(obj) });
-  const showRunning = () => { window.location.hash = 'running'; window.dispatchEvent(new window.Event('hashchange')); };
+  // The bare Runs list with nothing open: forget the remembered run first, or a bare route
+  // would reopen it side by side (rule 5).
+  const showRunning = () => {
+    window.localStorage.removeItem('worca-cc.runs.last');
+    window.location.hash = 'running'; window.dispatchEvent(new window.Event('hashchange'));
+  };
   const showHistory = () => { window.location.hash = 'history'; window.dispatchEvent(new window.Event('hashchange')); };
-  // The card no longer expands — open the run's DETAIL screen (#history/<key>/<id>).
+  // Open the saved run's DETAIL screen (#history/<key>/<id>) in the Runs pane.
   const showDetail = (key, id) => { window.location.hash = `history/${key}/${id}`; window.dispatchEvent(new window.Event('hashchange')); };
   const settle = async (n = 3) => { for (let i = 0; i < n; i++) await tick(); };
   await tick();  // let the boot /api/budget land
@@ -79,9 +84,16 @@ async function boot({ budget = okBudget(), fetchHandler } = {}) {
 const historyList = (pipelines) =>
   Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines, live: [], ghAvailable: false }) });
 
+// A run's row in its project group, and its copy in Needs you (null when it is not there).
+const groupRow = (ctx, sel) => ctx.window.document.querySelector(`#runs-list .runs-row[data-slot="group"]${sel}`);
+const needsRow = (ctx, sel) => ctx.window.document.querySelector(`#runs-list .runs-needs .runs-row${sel}`);
+// The row's word: the subline's head, before " · <time or project>".
+const rowWord = (row) => row.querySelector('.runs-row-sub').textContent.split(' · ')[0];
+
 // Seed one live run via `hello`, then drive it paused with a `done` frame that
 // carries the pause reason (the server's done broadcast really carries it —
 // orchestrator._completePaused emits it and wireRun spreads the payload).
+// Resolves to the run's row in its project group.
 async function pausedRun(ctx, reason, detail = undefined) {
   ctx.showRunning();
   ctx.recv({
@@ -90,28 +102,47 @@ async function pausedRun(ctx, reason, detail = undefined) {
   });
   await ctx.tick();
   ctx.recv({ type: 'done', runId: 'r1', status: 'paused', reason, ...(detail !== undefined ? { detail } : {}) });
-  await ctx.tick();
-  return ctx.window.document.querySelector('#run-list .run-card');
+  await ctx.settle();
+  return groupRow(ctx, '[data-run-id="r1"]');
 }
 
-test('cost_pipeline pause renders the amber banner with an enabled Resume', async () => {
+// The cost/error banners and the run's Resume live on the run page (#running/<id>);
+// the list row only names the pause and puts the run in Needs you.
+async function openRunPage(ctx, runId = 'r1') {
+  ctx.window.location.hash = `running/${runId}`;
+  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+  await ctx.settle();
+  return ctx.window.document.querySelector('#run-detail');
+}
+const resumeOf = (page) => page.querySelector('.rd-pause');
+
+test('cost_pipeline pause: the row reads "Cost limit" in Needs you, the run page shows the amber banner with an enabled Resume', async () => {
   const ctx = await boot();
   const card = await pausedRun(ctx, 'cost_pipeline');
-  assert.ok(card, 'paused run still has a card in the Overview list');
-  const banner = card.querySelector('.cost-banner');
-  assert.ok(banner, 'card carries a .cost-banner slot');
+  assert.ok(card, 'paused run still has a row in the Runs list');
+  assert.equal(card.querySelector('.cost-banner'), null, 'the list row carries no banner');
+  assert.equal(rowWord(card), 'Cost limit');
+  const needs = needsRow(ctx, '[data-run-id="r1"]');
+  assert.ok(needs, 'the pause puts the run in Needs you, which points at the run page');
+  assert.equal(rowWord(needs), 'Cost limit');
+  assert.equal(needs.dataset.icon, 'paused', 'a pause is not a question');
+  const page = await openRunPage(ctx);
+  const banner = page.querySelector('.rd-banners .cost-banner');
+  assert.ok(banner, 'the run page carries the cost-pause banner');
   assert.equal(banner.hidden, false, 'banner is revealed for a cost pause');
   assert.ok(banner.classList.contains('cb-pipeline'), 'amber per-pipeline variant');
   assert.match(banner.textContent, /pipeline cost limit/);
   assert.ok(banner.querySelector('.cb-override'), 'override action offered');
-  assert.equal(card.querySelector('.btn-resume').disabled, false, 'per-pipeline pause never blocks Resume');
-  assert.equal(card.querySelector('.rc-status-word').textContent, 'Paused · cost limit');
+  assert.equal(resumeOf(page).dataset.action, 'resume', 'the pane control is Resume while paused');
+  assert.equal(resumeOf(page).disabled, false, 'per-pipeline pause never blocks the run page Resume');
+  assert.equal(resumeOf(page).querySelector('.rd-btn-label').textContent, 'Resume');
 });
 
 test('cb-override: confirm modal -> single resume POST with ignoreCostCap:true', async () => {
   const ctx = await boot();
-  const card = await pausedRun(ctx, 'cost_pipeline');
-  card.querySelector('.cb-override').click();
+  await pausedRun(ctx, 'cost_pipeline');
+  const page = await openRunPage(ctx);
+  page.querySelector('.cb-override').click();
   await ctx.tick();
   const modal = ctx.window.document.querySelector('#confirm-modal');
   assert.equal(modal.classList.contains('hidden'), false, 'override asks for confirmation first');
@@ -124,13 +155,14 @@ test('cb-override: confirm modal -> single resume POST with ignoreCostCap:true',
   await ctx.tick();
   const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/resume'));
   assert.equal(posts.length, 1, 'exactly one resume POST');
-  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'pl_1', ignoreCostCap: true });
+  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'pl_1', baseCheck: true, ignoreCostCap: true });
 });
 
 test('cb-override: cancelling the confirm posts nothing', async () => {
   const ctx = await boot();
-  const card = await pausedRun(ctx, 'cost_pipeline');
-  card.querySelector('.cb-override').click();
+  await pausedRun(ctx, 'cost_pipeline');
+  const page = await openRunPage(ctx);
+  page.querySelector('.cb-override').click();
   await ctx.tick();
   ctx.window.document.querySelector('#confirm-cancel').click();
   await ctx.tick();
@@ -141,62 +173,59 @@ test('cb-override: cancelling the confirm posts nothing', async () => {
 test('cost_total pause: red banner, Resume disabled with reset-date tooltip', async () => {
   const ctx = await boot({ budget: blockedBudget() });
   const card = await pausedRun(ctx, 'cost_total');
-  assert.ok(card.querySelector('.cost-banner.cb-total'), 'red total-budget variant');
-  assert.equal(card.querySelector('.cost-banner .cb-override'), null, 'no per-pipeline override on a total-cap pause');
-  const resume = card.querySelector('.btn-resume');
-  assert.equal(resume.disabled, true);
-  assert.match(resume.title, /Total budget reached/);
-  assert.equal(card.querySelector('.rc-status-word').textContent, 'Paused · total budget');
+  assert.equal(card.querySelector('.cost-banner'), null, 'no banner on the list row');
+  assert.equal(rowWord(card), 'Total budget');
+  assert.equal(rowWord(needsRow(ctx, '[data-run-id="r1"]')), 'Total budget', 'in Needs you too');
+  const page = await openRunPage(ctx);
+  assert.ok(page.querySelector('.rd-banners .cost-banner.cb-total'), 'red total-budget variant on the run page');
+  assert.equal(page.querySelector('.cost-banner .cb-override'), null, 'no per-pipeline override on a total-cap pause');
+  const pageResume = resumeOf(page);
+  assert.equal(pageResume.dataset.action, 'resume');
+  assert.equal(pageResume.disabled, true, 'the run page Resume is gated');
+  assert.match(pageResume.title, /Total budget reached/);
 });
 
-test('budget-changed unblocking re-enables Resume and clears the total banner', async () => {
+test('budget-changed unblocking re-enables Resume on the run page', async () => {
   const ctx = await boot({ budget: blockedBudget() });
-  const card = await pausedRun(ctx, 'cost_total');
-  assert.equal(card.querySelector('.btn-resume').disabled, true);
+  await pausedRun(ctx, 'cost_total');
+  await openRunPage(ctx);
+  const resume = () => ctx.window.document.querySelector('#run-detail .rd-pause[data-action="resume"]');
+  assert.ok(resume(), 'the pane offers Resume for the paused run');
+  assert.equal(resume().disabled, true, 'blocked while the total budget is over');
   ctx.box.budget = okBudget();
   ctx.recv({ type: 'budget-changed', action: null });
-  await ctx.tick();
-  await ctx.tick();
-  const resume = ctx.window.document.querySelector('#run-list .run-card .btn-resume');
-  assert.equal(resume.disabled, false, 'a raised/reset budget must unblock the parked run');
-  // Clearing the blocked tooltip must RESTORE the template's help text, not
-  // blank the button — every ordinary paused card is painted through here too.
-  const stock = ctx.window.document.getElementById('run-card-tpl')
-    .content.querySelector('.btn-resume').title;
-  assert.ok(stock, 'the template ships a stock Resume tooltip');
-  assert.equal(resume.title, stock, 'the stock tooltip comes back');
+  await ctx.settle();
+  assert.equal(resume().disabled, false, 'a raised/reset budget must unblock the parked run');
+  // Clearing the blocked tooltip must restore the Resume help text, not blank the button.
+  assert.doesNotMatch(resume().title, /Total budget reached/);
+  assert.match(resume().title, /^Resume/, 'the ordinary Resume tooltip comes back');
 });
 
-test('an ordinary paused run keeps the template Resume tooltip', async () => {
-  const ctx = await boot();
-  const card = await pausedRun(ctx, null);
-  const resume = card.querySelector('.btn-resume');
-  const stock = ctx.window.document.getElementById('run-card-tpl')
-    .content.querySelector('.btn-resume').title;
-  assert.equal(resume.disabled, false);
-  assert.equal(resume.title, stock, 'painting must not strip the stock tooltip');
-});
-
-test('a non-cost pause leaves the banner hidden and the pill plain', async () => {
+test('a non-cost pause reads a plain "Paused" and shows no banner', async () => {
   const ctx = await boot();
   const card = await pausedRun(ctx, undefined);   // manual pause carries no reason
-  assert.equal(card.querySelector('.cost-banner').hidden, true);
-  assert.equal(card.querySelector('.rc-status-word').textContent, 'Paused');
-  assert.equal(card.querySelector('.btn-resume').disabled, false);
+  assert.equal(rowWord(card), 'Paused');
+  assert.equal(rowWord(needsRow(ctx, '[data-run-id="r1"]')), 'Paused', 'every pause needs you (D5)');
+  const page = await openRunPage(ctx);
+  assert.equal(page.querySelector('.rd-banners .cost-banner'), null, 'no cost banner on the run page');
+  assert.equal(page.querySelector('.rd-banners .pause-error-banner'), null, 'no error banner either');
+  assert.equal(resumeOf(page).disabled, false);
 });
 
-test('an error pause: pill "Paused · error", no cost banner, Resume enabled with the detail as tooltip', async () => {
+test('an error pause: the row reads "Paused" in Needs you, error banner (no cost banner) on the run page, Resume enabled', async () => {
   const ctx = await boot();
   const card = await pausedRun(ctx, 'error', 'claude exited with code 1: disk full');
-  assert.equal(card.querySelector('.rc-status-word').textContent, 'Paused · error');
-  assert.equal(card.querySelector('.cost-banner').hidden, true);
-  const resume = card.querySelector('.btn-resume');
-  assert.equal(resume.disabled, false, 'an error pause is always resumable');
-  assert.match(resume.title, /disk full/);
+  assert.equal(rowWord(card), 'Paused');
+  assert.equal(card.querySelector('.cost-banner'), null);
+  assert.equal(rowWord(needsRow(ctx, '[data-run-id="r1"]')), 'Paused');
+  const page = await openRunPage(ctx);
+  assert.equal(page.querySelector('.rd-banners .cost-banner'), null, 'no cost banner for an error pause');
+  assert.match(page.querySelector('.rd-banners .pause-error-banner').textContent, /disk full/);
+  assert.equal(resumeOf(page).disabled, false, 'an error pause is always resumable from the run page too');
 });
 
-// Resume + the cost-pause banner moved to the History DETAIL screen; the card
-// keeps only the pausenote caption and the dataset.pauseReason stamp.
+// Resume + the cost-pause banner live on the History DETAIL screen; the list row
+// only names the pause ("Cost limit", "Total budget").
 const PAUSED_ENTRIES = [
   { id: 'h1', projectKey: 'k1', title: 'Pipe cap', status: 'paused', pauseReason: 'cost_pipeline', startedAt: '2026-01-01T00:00:00Z' },
   { id: 'h2', projectKey: 'k1', title: 'Total cap', status: 'paused', pauseReason: 'cost_total', startedAt: '2026-01-01T00:00:00Z' },
@@ -213,21 +242,16 @@ const pausedArms = (url) => {
   return null;
 };
 
-test('history: pausenote on the card; the detail screen shows the banner and gates Resume', async () => {
+test('history: the row names the pause; the detail screen shows the banner and gates Resume', async () => {
   const ctx = await boot({ budget: blockedBudget(), fetchHandler: pausedArms });
   ctx.showHistory();
-  await ctx.tick();
-  const cards = ctx.window.document.querySelectorAll('#history .hist-card');
+  await ctx.settle();
+  const cards = ctx.window.document.querySelectorAll('#runs-list .runs-row[data-slot="group"][data-kind="hist"]');
   assert.equal(cards.length, 2);
 
-  const note1 = cards[0].querySelector('.hist-pausenote');
-  assert.ok(note1, 'hist-card template carries a .hist-pausenote slot');
-  assert.equal(note1.hidden, false);
-  assert.equal(note1.textContent, 'paused · cost limit');
-  const note2 = cards[1].querySelector('.hist-pausenote');
-  assert.equal(note2.textContent, 'paused · total budget');
-  assert.ok(note2.classList.contains('total'), 'total-budget note uses the red modifier');
-  assert.equal(cards[1].dataset.pauseReason, 'cost_total', 'reason stamped for later re-gating');
+  assert.equal(rowWord(groupRow(ctx, '[data-pipeline-id="h1"]')), 'Cost limit');
+  assert.equal(rowWord(groupRow(ctx, '[data-pipeline-id="h2"]')), 'Total budget');
+  assert.ok(needsRow(ctx, '[data-pipeline-id="h2"]'), 'a paused saved run not live in this tab needs you (D5)');
 
   // The total-cap run is blocked while the budget is over.
   ctx.showDetail('k1', 'h2');
@@ -252,7 +276,7 @@ test('history: pausenote on the card; the detail screen shows the banner and gat
   await ctx.settle();
   const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/resume'));
   assert.equal(posts.length, 1);
-  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'h1', ignoreCostCap: true });
+  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'h1', baseCheck: true, ignoreCostCap: true });
 });
 
 test('history: a budget-changed unblock re-enables the gated detail Resume', async () => {
@@ -268,7 +292,7 @@ test('history: a budget-changed unblock re-enables the gated detail Resume', asy
   assert.equal(ctx.window.document.querySelector('#hist-detail .hd-resume').disabled, false);
 });
 
-test('reload parity: a hello-seeded paused run with pauseReason renders the banner', async () => {
+test('reload parity: a hello-seeded paused run with pauseReason renders its row word and, on its page, the banner', async () => {
   const ctx = await boot();
   ctx.showRunning();
   // Field-for-field the real hello summary: every key ui/server.mjs
@@ -293,17 +317,20 @@ test('reload parity: a hello-seeded paused run with pauseReason renders the bann
       projectNames: null,
     }],
   });
-  await ctx.tick();
-  const card = ctx.window.document.querySelector('#run-list .run-card');
-  assert.ok(card, 'a hello-seeded paused run still renders in the Overview');
+  await ctx.settle();
+  const card = groupRow(ctx, '[data-run-id="r9"]');
+  assert.ok(card, 'a hello-seeded paused run still renders in the Runs list');
   // Without makeRun declaring the field, upsertRun's CREATE path drops it.
   assert.equal(ctx.window.__np.getRun('r9').pauseReason, 'cost_pipeline');
-  assert.ok(card.querySelector('.cost-banner.cb-pipeline'), 'banner survives a reload');
-  assert.equal(card.querySelector('.rc-status-word').textContent, 'Paused · cost limit');
+  assert.equal(rowWord(needsRow(ctx, '[data-run-id="r9"]')), 'Cost limit', 'Needs you survives a reload');
+  assert.equal(card.querySelector('.cost-banner'), null, 'the banner is a run-page thing');
+  assert.equal(rowWord(card), 'Cost limit');
+  const page = await openRunPage(ctx, 'r9');
+  assert.ok(page.querySelector('.rd-banners .cost-banner.cb-pipeline'), 'banner survives a reload');
 });
 
 // ---------------------------------------------------------------------------
-// Error pauses in History: the red card note, the detail banner, and the
+// Error pauses in History: the row word, the detail banner, and the
 // deep-link fallback onto the DETAIL payload (rowToState now carries both keys).
 // ---------------------------------------------------------------------------
 const ERROR_ENTRIES = [
@@ -321,17 +348,13 @@ const errorArms = (url) => {
   return null;
 };
 
-test('history: an error pause renders the red "paused · error" note; the detail screen shows the error banner and an enabled Resume', async () => {
+test('history: an error pause reads "Paused" on its row; the detail screen shows the error banner and an enabled Resume', async () => {
   const ctx = await boot({ fetchHandler: errorArms });
   ctx.showHistory();
-  await ctx.tick();
-  const card = ctx.window.document.querySelector('#history .hist-card');
-  const note = card.querySelector('.hist-pausenote');
-  assert.equal(note.hidden, false);
-  assert.equal(note.textContent, 'paused · error');
-  assert.ok(note.classList.contains('error'), 'error note uses the red modifier');
-  assert.match(note.title, /disk full/);
-  assert.equal(card.dataset.pauseReason, 'error');
+  await ctx.settle();
+  const card = groupRow(ctx, '[data-pipeline-id="h3"]');
+  assert.ok(card, 'the paused saved run is listed');
+  assert.equal(rowWord(card), 'Paused');
 
   ctx.showDetail('k1', 'h3');
   await ctx.settle();

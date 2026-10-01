@@ -450,12 +450,21 @@ test('Running: a cost_pipeline_policy pause shows the blue banner; "Continue pas
   await settle();
   recv({ type: 'done', runId: 'r1', status: 'paused', reason: 'cost_pipeline_policy', detail: 'team cost cap reached ($10.00 >= $10.00, acme/gateway)' });
   await settle();
-  const card = doc.querySelector('#run-list .run-card');
-  const banner = card.querySelector('.cost-banner');
+  const row = () => doc.querySelector('#runs-list .runs-row[data-slot="group"][data-run-id="r1"]');
+  const word = (a) => a.querySelector('.runs-row-sub').textContent.split(' \u00b7 ')[0];
+  assert.ok(row(), 'the paused run is listed in its project group');
+  assert.equal(row().querySelector('.cost-banner'), null, 'the list row carries no cost banner');
+  const needs = doc.querySelector('#runs-list .runs-needs .runs-row[data-run-id="r1"]');
+  assert.ok(needs, 'Needs you says the run is parked');
+  assert.equal(word(needs), 'Team cap');
+  await ctx.go('running/r1');                                  // the banner lives on the run page
+  await settle(6);
+  const banner = doc.querySelector('#run-detail .cost-banner');
+  assert.ok(banner, 'the run page carries the cost banner');
   assert.equal(banner.hidden, false);
   assert.ok(banner.classList.contains('cb-policy'), 'the blue team-cap variant');
   assert.match(banner.textContent, /Paused — team cost cap reached/);
-  assert.equal(card.querySelector('.rc-status-word').textContent, 'Paused · team cap');
+  assert.equal(word(row()), 'Team cap', 'the group row names the team cap');
   assert.ok(banner.querySelector('.cb-past-team-cap'));
   assert.equal(banner.querySelector('.cb-override'), null);
   banner.querySelector('.cb-past-team-cap').click();
@@ -471,7 +480,7 @@ test('Running: a cost_pipeline_policy pause shows the blue banner; "Continue pas
   await settle(6);
   const posts = fetchCalls.filter((c) => c.url.includes('/api/resume'));
   assert.equal(posts.length, 1);
-  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'pl_1', pastTeamCap: true, policyReason: 'release hotfix' });
+  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'pl_1', baseCheck: true, pastTeamCap: true, policyReason: 'release hotfix' });
 });
 
 test('MCP rows in the setup checklist: Install opens the consent dialog, then posts only { expectHash }; a trusted home never installs or turns on one', async () => {

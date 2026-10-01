@@ -54,7 +54,30 @@ Ask: <one line>
 rows may all be `—`.
 
 ## Approval checkpoint
-When "Asking the user (enabled)" appears in your prompt: after writing spine.md, ask exactly ONE question — id `approve-spine`, question "spine.md is written (path in your prompt). Approve it, or say what to change?", options `["Approve as written", "Revise — see my notes"]`, `allowFreeText: true` — then STOP. On resume, apply the notes to spine.md and finish. If asking is disabled, finish without asking.
+**Already answered?** If your prompt carries a `## Your form answers` block for `approve-spine` — or a line under `## Already answered` whose question is "Approve the narrative spine" (the form fell back to a plain question) — you have your answer: go straight to **On resume** below and do NOT ask again.
+
+Otherwise, ask only when "Asking the user (enabled)" appears in your prompt; if it does not, finish without asking.
+
+To ask, after writing spine.md, use the `approve-spine` form; its data, answer and example are listed under "Forms you may ask with". Write exactly one JSON object, `{"form":"approve-spine","data":{…}}`, to the file named there (never the `{"questions":[…]}` shape), then STOP. Build `data` from the spine.md you just wrote:
+- `headline`: `<Deck title> — <N> slides · <M> sections`.
+- `sentence`: the sentence under `## The sentence`, verbatim.
+- `sections`: one entry per `## Spine` item, in order: `{"id":"s1","name":"<Section name>","establishes":"<what it establishes>"}`, then `s2`, `s3` and so on.
+- `slides`: one entry per `## Slides` row, in order: `{"id":"<the # cell>","title":"<Takeaway title>","meta":"<Section>"}`. Append ` · reset: <Reset>` to `meta` when Reset is not `—`, and ` · hero` when Hero is `yes`. At most 60 rows: past 60, list the first 60 and end `headline` with ` (first 60 shown)`.
+- `spine`: the file name of your `spine` output (the `- Write **spine** to:` line under `## Ports (this run)`), relative to the pipeline directory — usually `"spine.md"` (never an absolute path).
+
+If the host refuses the form (`## Your form ask was refused`), fix `data` from the listed errors and write it again to the file named there.
+
+**On resume** (the `values` of `approve-spine`), compare them with what you wrote:
+- **Nothing edited**: `sentence` equals your sentence, `sectionOrder` is absent or `s1, s2, …` in order, every `slides` entry is `keep`, and `notes` is absent. With `decision` `approve`, spine.md stands; finish. With `decision` `changes` and nothing edited, re-check spine.md against the takeaway-title and reset rules above, fix what fails, and finish.
+- **Anything edited is a change, even when `decision` is still `approve`.** Apply all of it, matching every `slides` entry to its row by the ORIGINAL `#`, before any renumbering:
+  - a new `sentence` replaces the one under `## The sentence`;
+  - a new `sectionOrder` reorders the `## Spine` items (a section it leaves out keeps its relative place after the listed ones), and each section's slide rows move with it; rows whose Section is not a `## Spine` item (the cover) keep their place;
+  - `rework` rewrites that slide's row, title first, as its `note` says (no note: sharpen the title into a conclusion yourself); a reworked slide's caption follows its new title;
+  - `cut` deletes that row and its caption; if the hero row is cut, mark the strongest remaining slide as the hero (its Hero cell `yes`);
+  - `notes` are applied as written.
+
+  Then re-walk the reset rule (no four consecutive `—` rows), then renumber `#` and `## Captions` last, since re-walking can insert rows, and finish. Leave `Slide budget` as it is: it is the duration's cap, not the slide count. Do NOT ask again.
+- **A plain answer** (the fallback): empty or "approve" is approval; any other text is notes to apply as above.
 
 ## Directions from the user
 

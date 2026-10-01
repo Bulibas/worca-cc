@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // tools/verify-run-monitor-cdp.mjs — headless-Chrome proof of the RUN MONITOR
 // (spec §8 / node-graph v2 P6): the `.run-flow.gv-host` reset on all three
-// hosts, the Running card's 300px band, the footer bands against the SHARED
+// hosts, the Running list card's History-level shape, the footer bands against the SHARED
 // nodeSize, the marching ants, the `N×` loop badge, the canvas nav (drag-pan,
 // ⌘/ctrl zoom, the button cluster), the chrome that must never cover a card
 // title, the History End chip and the log-filter node axis. NOT part of `npm test`: it needs Chrome and a live
@@ -13,8 +13,8 @@
 // pull request. What remains CDP-only is every measurement and computed style
 // jsdom cannot produce:
 //   STILL CDP-ONLY
-//     (1a)(1b)(1c) .gv-stage === the .run-flow-wrap padding box on all 3 hosts
-//     (2)       the 300px band, node-box containment, 0.3 <= z <= 1
+//     (1b)(1c) .gv-stage === the .run-flow-wrap padding box on the Running detail and the History detail
+//     (1a)     the Runs list row carries no graph, log or inline panel; a waiting run sits in Needs you
 //     (3)       the 26/22px footer bands and offsetHeight === nodeSize()
 //     (4a)(4b)  computed animationName on a live wire, live and under .settled
 //     (5)       the COMPUTED font-size that hides the composer's <=N pill
@@ -33,7 +33,7 @@
 //         clamps, (8)(8b) the End chip and the quiescence copy,
 //     (9b) the .xrow log narrowing, and the (1*)(2)(3)(4a) CSS text and
 //          band-count math                      -> test/ui-run-hosts.test.mjs
-//     (9a) the node axis on the card bar        -> test/ui-log-filter-node-axis.test.mjs
+//     (9a) the node axis on the Logs tab bar    -> test/ui-log-filter-node-axis.test.mjs
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -313,40 +313,29 @@ try {
   if (!entry.pendingQuestion) throw new Error('the mock run never reached the clarify question');
   log(`run ${runId} holding at ${entry.pendingQuestion.id} (status ${entry.status})`);
 
-  // ================ PHASE 1 — the LIVE run (Running page) ====================
-  const CARD_ROOT = `#run-list .run-card[data-run-id=${JSON.stringify(runId)}]`;
-  const CARD = `${CARD_ROOT} .rc-detailed .run-flow-wrap`;
-  await go('running', { first: true });
-  await until(`document.querySelector(${JSON.stringify(CARD)}+' .gv-stage .gv-world .node')`, 'the live card graph');
+  // ================ PHASE 1 — the LIVE run (the Runs page) ==================
+  // The waiting run's Needs-you row (it repeats in its project group below).
+  const CARD_ROOT = `#runs-list .runs-needs .runs-row[data-run-id=${JSON.stringify(runId)}]`;
+  await go('runs', { first: true });
+  await ev(`localStorage.removeItem('worca-cc.runs.last');0`);   // the bare list: nothing remembered reopens
+  await go('runs');
+  await until(`document.querySelector(${JSON.stringify(CARD_ROOT)})`, 'the waiting run in Needs you');
   await settle('card');
 
-  // (1a) the static host reset
-  const g1 = await ev(HOSTGEO(CARD));
-  check('1a', 'Running card: .gv-stage === the .run-flow-wrap padding box (the .run-flow.gv-host reset)',
-    !g1.missing && Math.abs(g1.stage.t - g1.pad.t) < 0.6 && Math.abs(g1.stage.h - g1.pad.h) < 0.6
-    && Math.abs(g1.stage.l - (g1.pad.l - g1.scrollLeft)) < 0.6
-    && Math.abs(g1.stage.w - Math.max(g1.pad.w, parseFloat(g1.hostInlineWidth) || 0)) < 0.6
-    && g1.hostPos === 'absolute' && g1.hostPad === '0px' && g1.hostDisplay === 'block', g1);
-
-  // (2) the 300px band, every node inside the stage, 0.3 ≤ z ≤ 1
-  const boxes = await ev(NODEBOXES(CARD));
-  const inside = boxes.nodes.every((n) => n.l >= -0.6 && n.t >= -0.6
-    && n.r <= boxes.stage.w + 0.6 && n.b <= boxes.stage.h + 0.6);
-  check(2, `Running card: the wrap is ${STATIC_HOST_H}px tall, every node box is inside the stage, 0.3 ≤ z ≤ 1`,
-    Math.abs(g1.wrap.h - STATIC_HOST_H) < 0.6 && boxes.nodes.length > 1 && inside
-    && g1.z >= 0.3 - 1e-9 && g1.z <= 1 + 1e-9,
-    { wrapBorderBoxH: g1.wrap.h, wrapPaddingBoxH: g1.pad.h, z: g1.z, stage: boxes.stage, nodes: boxes.nodes });
-
-  // (9a) the node axis is live on the card bar, with MANIFEST labels
-  const axis = await ev(`(()=>{const sel=document.querySelector(${JSON.stringify(CARD_ROOT)}+' .log-filters .log-f-step');
-    return {axis:sel.dataset.axis,aria:sel.getAttribute('aria-label'),opts:[...sel.options].map((o)=>o.textContent)};})()`);
-  check('9a', 'the card bar re-purposes .log-f-step as the node select (data-axis="node", manifest labels)',
-    axis.axis === 'node' && axis.aria === 'Filter by node'
-    && axis.opts[0] === 'all nodes' && axis.opts.includes('Clarify'), axis);
+  // (1a) the row is compact: an icon, a title and a subline — no graph, log, banner or inline panel
+  const shape = await ev(`(()=>{const c=document.querySelector(${JSON.stringify(CARD_ROOT)});
+    return {graph:!!c.querySelector('.run-flow-wrap,.run-flow'),log:!!c.querySelector('.log,.log-filters'),
+      panel:!!c.querySelector('.qpanel'),banner:!!c.querySelector('.cost-banner'),density:!!document.querySelector('.run-density'),
+      icon:c.dataset.icon,sub:(c.querySelector('.runs-row-sub')||{}).textContent||''};})()`);
+  check('1a', 'Runs list row: no graph, log, banner or inline panel; the waiting run sits in Needs you, says what it waits for, and opens the run page',
+    !shape.graph && !shape.log && !shape.panel && !shape.banner && !shape.density
+    && shape.icon === 'ask' && shape.sub.length > 0, shape);
+  await clickCentre(CARD_ROOT, 'the Needs-you row');
+  await until(`location.hash === '#running/${runId}' && document.querySelector('#run-detail .rd-questions:not([hidden])')`, 'the run page with its question');
 
   // ---- the Running DETAIL (a monitor host) ---------------------------------
   const RD = '#run-detail .rd-graph .run-flow-wrap';
-  await go(`running/${runId}`);
+  await go(`running/${runId}/details/workflow`);   // the graph lives in Details › Workflow
   await until(`document.querySelector('${RD} .gv-stage .gv-world .node')`, 'the detail graph');
   await ev('window.scrollTo(0,0);0'); await settle('detail');
 
@@ -356,6 +345,17 @@ try {
     !g2.missing && Math.abs(g2.stage.t - g2.pad.t) < 0.6 && Math.abs(g2.stage.h - g2.pad.h) < 0.6
     && Math.abs(g2.stage.l - g2.pad.l) < 0.6 && Math.abs(g2.stage.w - g2.pad.w) < 0.6
     && g2.hostPos === 'absolute' && g2.hostPad === '0px' && g2.hostDisplay === 'block', g2);
+
+  // (9a) the node axis is live on the Logs tab bar, with MANIFEST labels
+  await go(`running/${runId}/details/logs`);
+  await until(`document.querySelector('#run-detail .rd-sec-logs .log-filters .log-f-step')`, 'the Logs tab bar');
+  const axis = await ev(`(()=>{const sel=document.querySelector('#run-detail .rd-sec-logs .log-filters .log-f-step');
+    return {axis:sel.dataset.axis,aria:sel.getAttribute('aria-label'),opts:[...sel.options].map((o)=>o.textContent)};})()`);
+  check('9a', 'the Logs tab bar re-purposes .log-f-step as the node select (data-axis="node", manifest labels)',
+    axis.axis === 'node' && axis.aria === 'Filter by node'
+    && axis.opts[0] === 'all nodes' && axis.opts.includes('Clarify'), axis);
+  await go(`running/${runId}/details/workflow`);
+  await until(`document.querySelector('${RD} .gv-stage .gv-world .node')`, 'the detail graph again');
 
   // (4a) ants: the in-flight execution's trigger wire marches. The animation lives
   // ON THE PATH (the :root clock is retired — it forced a whole-document style
@@ -500,10 +500,10 @@ try {
     { stage: [s0, sZoom, sIdle, sAfterClick, sBefore, sUnder, sDrag], world: [w0, w1], cursor,
       prevented: [preventedZ, prevented0, prevented1], nav: [nav0, nav1, nav2], fitted });
 
-  // (9b) a footer-row click narrows the log to ONE execution, on BOTH bars.
+  // (9b) a footer-row click narrows the log to ONE execution on the Logs tab bar.
   // Reload first: check (6) left the view panned and zoomed, and the Escape leg
   // re-lays the shell out — a fresh screen puts every card back under its fit.
-  await go(`running/${runId}`);
+  await go(`running/${runId}/details/workflow`);   // the graph lives in Details › Workflow
   await until(`document.querySelector('${RD} .gv-stage .gv-world .node[data-node-id="n_clarify"] .xtoggle')`, 'the clarify strip');
   await clickCentre(`${RD} .gv-world .node[data-node-id="n_clarify"] .xtoggle`, 'clarify strip');
   await settle('expand');
@@ -511,20 +511,28 @@ try {
   await clickCentre(`${RD} .gv-world .node[data-node-id="n_clarify"] .xrow`, 'clarify exec row');
   await settle('row-click');
   const chips = await ev(`(()=>{const d=document.querySelector('#run-detail .rd-sec-logs .log-f-exec');
-    const c=document.querySelector(${JSON.stringify(CARD_ROOT)}+' .log-f-exec');
     const r=window.__np.getRun(${JSON.stringify(runId)});
     return {detail:{hidden:d.hidden,text:d.querySelector('.lfe-text').textContent,id:d.dataset.executionId},
-      card:{hidden:c.hidden,text:c.querySelector('.lfe-text').textContent,id:c.dataset.executionId},
       filter:{node:r.logFilter.node,execution:r.logFilter.execution},
       nodeSelect:document.querySelector('#run-detail .rd-sec-logs .log-f-step').value,
       visible:[...document.querySelectorAll('#run-detail .rd-sec-logs .log .log-line')].length};})()`);
-  check('9b', 'an .xrow click narrows the log to `Label #ordinal` on BOTH the detail bar and the card bar',
+  check('9b', 'an .xrow click narrows the log to `Label #ordinal` on the Logs tab bar',
     chips.detail.hidden === false && chips.detail.text === 'Clarify #1' && chips.detail.id === 'x:n_clarify:1'
-    && chips.card.hidden === false && chips.card.text === 'Clarify #1' && chips.card.id === 'x:n_clarify:1'
     && chips.nodeSelect === 'n_clarify'
     && chips.filter.execution === 'x:n_clarify:1' && chips.filter.node === 'n_clarify', chips);
 
   // ================ PHASE 2 — answer, finish, settle =========================
+  // A finished run hands the page over to its saved run (#history/…) as soon as History lists
+  // its finished row (app.js rdSavedRoute). (4b) measures the terminal Running page itself, so
+  // the page's /api/history reads leave this pipeline out until (4b) is done.
+  await ev(`(()=>{const pid=${JSON.stringify(entry.pipelineId)};const f=window.fetch.bind(window);
+    window.__realFetch=f;
+    window.fetch=async(...a)=>{const r=await f(...a);const u=String((a[0]&&a[0].url)||a[0]);
+      if(!/^\\/api\\/history(\\?|$)/.test(u.replace(location.origin,'')))return r;
+      const j=await r.clone().json();
+      if(Array.isArray(j.pipelines))j.pipelines=j.pipelines.filter((p)=>p.id!==pid);
+      return new Response(JSON.stringify(j),{status:r.status,headers:r.headers});};
+    return 1;})()`);
   const q = entry.pendingQuestion;
   await api('/api/answer', { method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ runId, id: q.id, payload: { answers: (q.questions || []).map((x) => ({ id: x.id, text: 'yes' })) } }) });
@@ -548,13 +556,14 @@ try {
   check('4b', 'under .rd-graph.settled a live wire is pinned still (animationName "none", offset 0px)',
     settledAnts.settled === true && settledAnts.liveBefore === 0 && settledAnts.animationName === 'none'
     && settledAnts.strokeDashoffset === '0px', settledAnts);
+  await ev('window.fetch=window.__realFetch;delete window.__realFetch;0');
 
   // ---- the History detail --------------------------------------------------
   const hist = await api('/api/history');
   const rec = (hist.body.pipelines || []).find((p) => p.id === entry.pipelineId);
   if (!rec) throw new Error(`pipeline ${entry.pipelineId} is not in /api/history`);
   const HD = '#hist-detail .hd-graph .run-flow-wrap';
-  await go(`history/${rec.projectKey}/${rec.id}`);
+  await go(`history/${rec.projectKey}/${rec.id}/details/workflow`);   // the graph lives in Details › Workflow
   await until(`document.querySelector('${HD} .gv-stage .gv-world .node')`, 'the History graph');
   await ev('window.scrollTo(0,0);0'); await settle('history');
   await ev(`(async()=>{const r=await fetch('/api/history/${rec.projectKey}/${rec.id}');

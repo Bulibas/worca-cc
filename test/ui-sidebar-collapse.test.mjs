@@ -201,33 +201,39 @@ test('the expanded wordmark keeps its own sizing rule', () => {
   assert.match(logo, /height:\s*34px/);
 });
 
-test('the toggle is one bare chevron and nothing else', () => {
-  // The toggle lives in .side-foot, UNDER the spend block — not in .brand. The
-  // foot's only other child is the (empty at boot) #side-spend mount, so this
-  // slice is the button and nothing else.
-  const foot = html.match(/<div class="side-foot">[\s\S]*?<\/button>\s*<\/div>/);
-  assert.ok(foot, '.side-foot must close after the toggle button');
-  assert.match(foot[0], /<div id="side-spend"><\/div>\s*<button[^>]*id="side-toggle"/,
-    'the toggle follows the spend mount — moving it back into .brand reds this');
-  assert.equal((foot[0].match(/<svg/g) || []).length, 1);
-  // ONE path: no panel outline, no divider, no second stroke to explain. Both
-  // states are the same arrow with a rewritten `d`.
-  assert.equal((foot[0].match(/<path/g) || []).length, 1,
+test('the toggle ends the wordmark row: the rail mark plus one bare chevron', () => {
+  // The toggle lives in .brand after the mock pill (the pill's margin-right:auto parks it
+  // at the row's end) — not in .side-foot, which keeps only the spend mount.
+  const brand = html.match(/<div class="brand">[\s\S]*?id="side-close"/);
+  assert.ok(brand, '.brand holds the toggle before the phone close button');
+  const toggle = brand[0].match(/<button[^>]*id="side-toggle"[\s\S]*?<\/button>/);
+  assert.ok(toggle, 'the toggle sits in .brand');
+  assert.ok(brand[0].indexOf('side-mock-pill') < brand[0].indexOf('id="side-toggle"'), 'after the mock pill');
+  assert.doesNotMatch(html.match(/<div class="side-foot">[\s\S]*?<\/aside>/)[0], /side-toggle/, 'nothing left in the foot');
+  // The round mark rides inside the button (shown on the rail only), hidden from AT: the
+  // button's aria-label names it.
+  assert.match(toggle[0], /<span class="logo-mark side-toggle-mark" aria-hidden="true"><\/span>/);
+  assert.equal((toggle[0].match(/<svg/g) || []).length, 1);
+  // ONE path: both states are the same arrow with a rewritten `d`.
+  assert.equal((toggle[0].match(/<path/g) || []).length, 1,
     'a lone chevron — anything else and it stops reading as an arrow');
-  assert.doesNotMatch(foot[0], /<rect/, 'the boxed panel glyph is gone');
-  assert.match(foot[0], /stroke-width="2"/,
-    'a hairline reads as a stray mark once the box around it is gone');
-  assert.match(foot[0], /<path class="chev" d="M15 6l-6 6 6 6">/,
+  assert.doesNotMatch(toggle[0], /<rect/, 'the boxed panel glyph is gone');
+  assert.match(toggle[0], /stroke-width="2"/);
+  assert.match(toggle[0], /<path class="chev" d="M15 6l-6 6 6 6">/,
     'markup ships the expanded "<" — app.js only ever rewrites this one hook');
   // scaleX(-1) shifts a chevron's visual mass off centre; app.js swaps `d`.
   assert.doesNotMatch(ruleBody('.sidebar.collapsed .side-toggle svg'), /transform:/);
+  // Expanded the mark is hidden; on the rail it shows and the bare mark beside it goes.
+  assert.match(ruleBody('.brand .side-toggle-mark'), /display:\s*none/);
+  assert.match(ruleBody('.sidebar.collapsed .side-toggle .side-toggle-mark'), /display:\s*block/);
+  assert.match(ruleBody('.sidebar.collapsed .brand > .logo-mark'), /display:\s*none/);
 });
 
-test('the toggle stays OUT of <nav>, which keeps exactly 15 buttons (13 routes + the mode item + the Nodes disclosure)', () => {
+test('the toggle stays OUT of <nav>, which keeps exactly 14 buttons (12 routes + the mode item + the Nodes disclosure)', () => {
   // ui-nav-sections.test.mjs:39 asserts this count, :40 forbids <a>, and :26-35
   // pins the token stream. A toggle inside <nav class="nav"> reds all three.
   const nav = html.match(/<nav class="nav"[\s\S]*?<\/nav>/)[0];
-  assert.equal((nav.match(/<button type="button"/g) || []).length, 15);   // + interface mode, + Schedules, + Team policy, + Scripts, + the Nodes disclosure
+  assert.equal((nav.match(/<button type="button"/g) || []).length, 14);   // + interface mode, + Schedules, + Team policy, + Scripts, + the Nodes disclosure (Running + History merged into Runs)
   assert.equal(nav.includes('side-toggle'), false);
   assert.match(html, /<aside class="sidebar" id="side-rail">/,
     'aria-controls targets the whole aside — brand, nav AND the spend foot reshape');
@@ -236,8 +242,8 @@ test('the toggle stays OUT of <nav>, which keeps exactly 15 buttons (13 routes +
 // ---- CSS contract: the icon-rail nav ----
 
 test('collapsed nav buttons become 40px squares and drop their labels', () => {
-  const btn = ruleBody('.sidebar.collapsed .nav button:not(.rail-tile)');
-  assert.ok(btn, 'the generic collapsed button rule must exclude .rail-tile');
+  const btn = ruleBody('.sidebar.collapsed .nav button');
+  assert.ok(btn, 'the generic collapsed button rule');
   assert.match(btn, /width:\s*40px/);
   assert.match(btn, /height:\s*40px/);
   assert.match(btn, /justify-content:\s*center/);
@@ -249,10 +255,9 @@ test('collapsed nav buttons become 40px squares and drop their labels', () => {
 });
 
 test('label spans are visually hidden but KEEP their accessible name', () => {
-  const rule = '.sidebar.collapsed .nav button:not(.rail-tile) > span:not(.nav-count):not(.nav-rollup)';
+  const rule = '.sidebar.collapsed .nav button > span:not(.nav-count):not(.nav-rollup)';
   const body = ruleBody(rule);
-  assert.ok(body, 'the label rule must carry the :not(.rail-tile) guard — '
-    + 'without it a run tile loses its status dot and its "?" badge');
+  assert.ok(body, 'the label rule, which leaves the count badges alone');
   // display:none removes the node from the accessibility tree, and this span is
   // the ONLY source of an accessible name for every nav button (index.html
   // carries no aria-label on any of the 13 and the SVGs carry no <title> — the
@@ -280,7 +285,7 @@ test('section headers collapse to hairlines but keep their text nodes', () => {
   assert.match(html, /class="nav-sect">Manage</);
 });
 
-test('counts become corner badges; inert grey ones and the paused pill drop out', () => {
+test('counts become corner badges; inert grey ones drop out, and the Needs-you count hides the live one', () => {
   const badge = ruleBody('.sidebar.collapsed .nav-count');
   assert.ok(badge);
   assert.match(badge, /position:\s*absolute/);
@@ -291,8 +296,10 @@ test('counts become corner badges; inert grey ones and the paused pill drop out'
   const grey = ruleBody('.sidebar.collapsed .nav-count.n-grey');
   assert.ok(grey, 'zero/inert grey badges drop out on the rail');
   assert.match(grey, /display:\s*none/);
-  const hidden = ruleBody('.sidebar.collapsed #nav-paused-badge');
-  assert.ok(hidden, 'the paused pill would collide with the live count in the same corner');
+  // One badge on Runs (D11): the amber Needs-you count and the live count would
+  // collide in the same corner, so while Needs-you shows, the live count hides.
+  const hidden = ruleBody('#nav-needs-count:not([hidden]) + #nav-running-count');
+  assert.ok(hidden, 'the Needs-you badge would collide with the live count in the same corner');
   assert.match(hidden, /display:\s*none/);
 });
 
@@ -334,12 +341,9 @@ test('the rail stops reserving a scrollbar gutter it cannot afford', () => {
   const foot = ruleBody('.sidebar.collapsed .side-foot');
   assert.ok(foot, 'the collapsed foot needs its own centring rule');
   assert.match(foot, /align-items:\s*center/);
-  // The toggle carries `align-self:flex-end` so it sits bottom-RIGHT under the
-  // spend block while expanded. align-self on the child beats align-items on the
-  // parent, so the collapsed rail has to re-centre it explicitly or the 40px
-  // square hangs off the right edge of the 76px column.
-  assert.match(ruleBody('.side-toggle'), /align-self:\s*flex-end/);
-  assert.match(ruleBody('.sidebar.collapsed .side-toggle'), /align-self:\s*center/);
+  // On the rail .brand is a column: the toggle (the mark) goes first, above the mock pill
+  // that precedes it in the markup.
+  assert.match(ruleBody('.sidebar.collapsed .side-toggle'), /order:\s*-1/);
 });
 
 test('the width change is a transition, so reduced motion actually kills it', () => {
@@ -451,7 +455,7 @@ test('every collapsed nav button gains a tooltip, and loses it on expand', async
   const doc = window.document;
   const rows = () => [...doc.querySelectorAll('.nav button[data-nav]')]
     .map((b) => [b.dataset.nav, b.title]);
-  assert.deepEqual(rows().filter(([n, t]) => n !== 'running' && t), [],
+  assert.deepEqual(rows().filter(([n, t]) => n !== 'runs' && t), [],
     'expanded rows must not grow redundant tooltips — the label is right there');
   click('#side-toggle');
   for (const [nav, title] of rows()) assert.ok(title, `collapsed ${nav} must carry a tooltip`);
@@ -460,8 +464,8 @@ test('every collapsed nav button gains a tooltip, and loses it on expand', async
   assert.equal(doc.querySelector('.nav button[data-nav="new"]').title, 'New pipeline');
   assert.equal(doc.querySelector('.nav button[data-nav="stats"]').title, 'Statistics',
     'the tooltip is the SIDEBAR label, Statistics (index.html)');
-  assert.match(doc.querySelector('.nav button[data-nav="running"]').title, /^Running/,
-    'Running keeps the count tooltip updateNavCounts owns (set at boot by '
+  assert.match(doc.querySelector('.nav button[data-nav="runs"]').title, /^Runs/,
+    'Runs keeps the count tooltip updateNavCounts owns (set at boot by '
     + 'refreshAllCounts, app.js:14034)');
   click('#side-toggle');
   assert.equal(doc.querySelector('.nav button[data-nav="composer"]').hasAttribute('title'), false);
@@ -480,7 +484,7 @@ test('the live count still updates on the rail (n-grey hides only the inert ones
   assert.equal(c.classList.contains('n-grey'), false);
 });
 
-test('the Running tooltip carries the live and paused counts', async () => {
+test('the Runs tooltip carries the Needs-you and live counts', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [
     { runId: 'a', title: 'a', projectDir: PROJECT, status: 'running', kind: 'run',
@@ -488,54 +492,57 @@ test('the Running tooltip carries the live and paused counts', async () => {
     { runId: 'b', title: 'b', projectDir: PROJECT, status: 'paused', kind: 'run',
       startedAt: '10:00:00', pendingQuestion: null },
   ] });
-  const btn = window.document.querySelector('.nav button[data-nav="running"]');
-  assert.equal(btn.title, 'Running — 1 live, 1 paused',
-    'the paused badge is hidden on the rail, so its count has to survive here');
-  assert.equal(btn.getAttribute('aria-label'), 'Running — 1 live, 1 paused',
+  const btn = window.document.querySelector('.nav button[data-nav="runs"]');
+  // A paused run needs you (D5). The rail shows one badge, so both counts have to survive here.
+  assert.equal(btn.title, 'Runs — 1 needs you, 1 live',
+    'the live badge hides behind the Needs-you one, so its count has to survive here');
+  assert.equal(btn.getAttribute('aria-label'), 'Runs — 1 needs you, 1 live',
     'a title is a DESCRIPTION; name-from-contents would otherwise announce "1"');
 });
 
-test('with nothing paused the tooltip names only the live count', async () => {
+test('with nothing needing you the tooltip names only the live count', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [
     { runId: 'a', title: 'a', projectDir: PROJECT, status: 'running', kind: 'run',
       startedAt: '10:00:00', pendingQuestion: null },
   ] });
-  assert.equal(window.document.querySelector('.nav button[data-nav="running"]').title,
-    'Running — 1 live');
+  assert.equal(window.document.querySelector('.nav button[data-nav="runs"]').title,
+    'Runs — 1 live');
 });
 
 test('with nothing running at all the tooltip degrades to the bare label', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [] });
-  // "Running — 0 live" on a resting sidebar is noise, and zero is the state most
-  // users are in most of the time.
-  assert.equal(window.document.querySelector('.nav button[data-nav="running"]').title,
-    'Running');
+  // "Runs — 0 live" on a resting sidebar is noise, and zero is the state most
+  // users are in most of the time. Expanded, the label is on screen, so a tooltip saying
+  // only "Runs" would repeat it: none then; the collapsed rail (no label) keeps it.
+  const b = window.document.querySelector('.nav button[data-nav="runs"]');
+  assert.equal(b.getAttribute('aria-label'), 'Runs');
+  assert.equal(b.title, b.closest('.sidebar.collapsed') ? 'Runs' : '');
 });
 
-test('paused-only names the paused count without a phantom live one', async () => {
+test('paused-only names the Needs-you count without a phantom live one', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [
     { runId: 'p', title: 'p', projectDir: PROJECT, status: 'paused', kind: 'run',
       startedAt: '10:00:00', pendingQuestion: null }] });
-  // liveRuns() (app.js:12329-12336) excludes status 'paused', so live really is 0.
-  assert.equal(window.document.querySelector('.nav button[data-nav="running"]').title,
-    'Running — 0 live, 1 paused');
+  // liveRuns() excludes status 'paused', so live really is 0 — and a zero part is dropped.
+  assert.equal(window.document.querySelector('.nav button[data-nav="runs"]').title,
+    'Runs — 1 needs you');
 });
 
 test('a collapsed nav button still routes', async () => {
   const { window, click, tick } = await boot({ seed: { [KEY]: '1' } });
-  click('.nav button[data-nav="history"]');
+  click('.nav button[data-nav="runs"]');
   await tick();
-  assert.equal(window.location.hash, '#history');
-  assert.ok(window.document.querySelector('.nav button[data-nav="history"]')
+  assert.equal(window.location.hash, '#runs');
+  assert.ok(window.document.querySelector('.nav button[data-nav="runs"]')
     .classList.contains('active'));
 });
 
 test('the toggle still works after a view switch and a repaint', async () => {
   const { window, click, tick } = await boot();
-  click('.nav button[data-nav="history"]');
+  click('.nav button[data-nav="runs"]');
   await tick();
   click('#side-toggle');
   assert.equal(window.document.querySelector('.sidebar').classList.contains('collapsed'), true,
@@ -558,233 +565,6 @@ test('toggling before the first hello or budget response does not throw', async 
   // paintBudget early-returns at app.js:369 before touching the mount, and
   // index.html:94 ships <div id="side-spend"></div> empty.
   assert.equal(window.document.querySelector('#side-spend').children.length, 0);
-});
-
-// ---- Task 2: per-run initials tiles ----
-
-const liveRun = (runId, title, extra = {}) => ({
-  runId, title, projectDir: PROJECT, status: 'running', kind: 'run',
-  startedAt: '10:00:00', pendingQuestion: null, ...extra,
-});
-
-test('rail tiles are 36px and out-specify the generic collapsed button rule', () => {
-  const tile = ruleBody('.nav .rail-tile');
-  assert.ok(tile, 'scoped `.nav .rail-tile` so it outranks `.nav button` (same idiom as .nav .nav-child, :149-155)');
-  assert.match(tile, /width:\s*36px/);
-  assert.match(tile, /height:\s*36px/);
-  // `.nav button` sets padding:11px 13px (:93) and gap:13px (:92). The collapsed
-  // `padding:0` lives on `…button:not(.rail-tile)`, which excludes tiles BY
-  // DESIGN — so the tile must zero them itself. Without this a 36px border-box
-  // tile has an 8px content box holding 13.9px of text.
-  assert.match(tile, /padding:\s*0/,
-    'without this the tile inherits padding:11px 13px and its content box is 8px');
-  assert.match(tile, /flex:\s*0 0 auto/, 'fixed-size box in a column flex container');
-  assert.match(tile, /font-weight:\s*400/, 'the base .nav button is 500; the mock is 400');
-  const dot = ruleBody('.nav .rail-tile .child-dot');
-  assert.match(dot, /position:\s*absolute/);
-  assert.doesNotMatch(dot, /box-sizing/,
-    'box-sizing:content-box would make the 9px dot a 13px box (15.3px mid-pulse) '
-    + 'on a 36px tile; the global border-box (:52) gives the mock its 9px total');
-  const q = ruleBody('.nav .rail-tile .child-q');
-  assert.match(q, /position:\s*absolute/);
-  assert.match(q, /margin:\s*0/,
-    'the base .child-q carries margin-left:6px (:207-211), which would shove the badge off the corner');
-});
-
-test('a hovered tile keeps its own fill — .nav button:hover out-specifies the base tile rule', () => {
-  // `.nav .rail-tile` is (0,2,0); `.nav button:hover` (style.css:100,
-  // background:var(--field);color:var(--ink)) is (0,2,1) and WINS on
-  // specificity, so the tile's resting fill dies on every hover unless the
-  // (0,3,0) :hover rule restates it. The mock's hover changes border-color only.
-  const hov = ruleBody('.nav .rail-tile:hover');
-  assert.ok(hov, '.nav .rail-tile:hover must exist');
-  assert.match(hov, /border-color:\s*var\(--ink\)/);
-  assert.match(hov, /background:\s*var\(--panel\)/,
-    'without this, hovering a rail tile turns it var(--field) grey');
-  assert.match(hov, /color:\s*var\(--ink-2\)/,
-    'without this, hovering darkens the initials to var(--ink)');
-  // All three of :hover, .lingering and .active are (0,3,0), so ORDER decides.
-  // .lingering after :hover keeps a hovered lingering tile grey; .active last so
-  // a selected tile never renders --ink-3 text on an --ink fill. The expanded
-  // row gets the same precedence on specificity (:177 beats :178).
-  const iH = css.indexOf('.nav .rail-tile:hover');
-  const iL = css.indexOf('.nav .rail-tile.lingering');
-  const iA = css.indexOf('.nav .rail-tile.active');
-  assert.ok(iH < iL && iL < iA,
-    'declare :hover, then .lingering, then .active — all three tie at (0,3,0)');
-  // Ordering without declarations is ordering of nothing: both bodies below can
-  // be emptied with the indexOf check still green. .active is the selected-run
-  // highlight and .lingering the finished-unseen grey-out, i.e. the two states
-  // the tile actually has.
-  const ling = ruleBody('.nav .rail-tile.lingering');
-  assert.ok(ling, '.nav .rail-tile.lingering must exist');
-  assert.match(ling, /(?:^|[;{\s])color:\s*var\(--ink-3\)/,
-    'a lingering tile greys its initials, like .nav-child.lingering (:178)');
-  const act = ruleBody('.nav .rail-tile.active');
-  assert.ok(act, '.nav .rail-tile.active must exist');
-  assert.match(act, /background:\s*var\(--ink\)/,
-    'the selected tile is a filled square, not just a bordered one');
-  assert.match(act, /border-color:\s*var\(--ink\)/,
-    'without this the --line-2 resting border rings the dark fill');
-  assert.match(act, /(?:^|[;{\s])color:\s*var\(--on-ink\)/,
-    'and its initials have to invert, or they are --ink-2 on --ink');
-});
-
-test('collapsed, child rows render as initials tiles instead', async () => {
-  const { window, recv } = await boot({ seed: { [KEY]: '1' } });
-  recv({ type: 'hello', runs: [liveRun('r1', 'Fix auth bug'), liveRun('r2', 'seo')] });
-  const doc = window.document;
-  const tiles = doc.querySelectorAll('#nav-running-children .rail-tile');
-  assert.equal(tiles.length, 2);
-  assert.equal(doc.querySelectorAll('#nav-running-children .nav-child').length, 0);
-  // Address by run id, NEVER by index: cmpTabRuns (app.js:12464-12474) sorts by
-  // tabGroupRank first, then newest-orderKey first, so this payload renders
-  // [r2, r1]. Every existing ui-pipeline-tabs test uses the same idiom.
-  const t1 = doc.querySelector('.rail-tile[data-child-run-id="r1"]');
-  const t2 = doc.querySelector('.rail-tile[data-child-run-id="r2"]');
-  assert.equal(t1.textContent.trim(), 'FA', 'first letters of the first two words');
-  assert.equal(t2.textContent.trim(), 'S', 'a one-word title yields one letter');
-  assert.match(t1.title, /^Fix auth bug · Running$/);
-});
-
-test('each tile carries the same status dot family the expanded row uses', async () => {
-  const { window, recv } = await boot({ seed: { [KEY]: '1' } });
-  recv({ type: 'hello', runs: [
-    liveRun('r1', 'One'),
-    liveRun('r2', 'Two', { status: 'paused' }),
-  ] });
-  const doc = window.document;
-  assert.ok(doc.querySelector('.rail-tile[data-child-run-id="r1"] .child-dot.peach'),
-    'a running run with no phaseKey is peach, exactly as runDotClass says (:12489)');
-  assert.ok(doc.querySelector('.rail-tile[data-child-run-id="r2"] .child-dot.paused'),
-    'pipelineTabRuns (:12364) keeps paused runs in the list');
-  assert.match(doc.querySelector('.rail-tile[data-child-run-id="r2"]').title, /· Paused$/);
-});
-
-test('a run awaiting input gets a "?" badge and still raises the roll-up dot', async () => {
-  const { window, recv } = await boot({ seed: { [KEY]: '1' } });
-  recv({ type: 'hello', runs: [liveRun('r1', 'Needs me', { pendingQuestion: { id: 'q1', text: 'go?' } })] });
-  const doc = window.document;
-  const q = doc.querySelector('.rail-tile[data-child-run-id="r1"] .child-q');
-  assert.ok(q, 'the tile carries its own "?" marker');
-  assert.equal(q.textContent, '?');
-  assert.equal(doc.querySelector('#nav-running-rollup').hidden, false);
-  assert.match(doc.querySelector('.rail-tile[data-child-run-id="r1"]').title,
-    /· Waiting for your input$/);
-});
-
-test('clicking a tile opens that run and marks it active', async () => {
-  const { window, recv, tick } = await boot({ seed: { [KEY]: '1' } });
-  recv({ type: 'hello', runs: [liveRun('r1', 'One'), liveRun('r2', 'Two')] });
-  window.document.querySelector('.rail-tile[data-child-run-id="r2"]')
-    .dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  await tick();
-  await tick();
-  assert.equal(window.location.hash, '#running/r2');
-  assert.equal(window.document.querySelector('.rail-tile.active')?.dataset.childRunId, 'r2');
-});
-
-test('toggling with runs on screen repaints rows into tiles (signature regression)', async () => {
-  const { window, recv, click } = await boot();
-  recv({ type: 'hello', runs: [liveRun('r1', 'One'), liveRun('r2', 'Two')] });
-  const doc = window.document;
-  assert.equal(doc.querySelectorAll('#nav-running-children .nav-child').length, 2);
-  click('#side-toggle');
-  assert.equal(doc.querySelectorAll('#nav-running-children .rail-tile').length, 2,
-    'sidebarCollapsed must be part of the tabsSig (:13692), or the rebuild gate '
-    + 'at :13711 suppresses this');
-  assert.equal(doc.querySelectorAll('#nav-running-children .nav-child').length, 0);
-  click('#side-toggle');
-  assert.equal(doc.querySelectorAll('#nav-running-children .nav-child').length, 2);
-});
-
-test('a run paused while still STARTING updates its tile word, not just its dot', async () => {
-  const { window, recv } = await boot({ seed: { [KEY]: '1' } });
-  const doc = window.document;
-  const word = () => doc.querySelector('.rail-tile[data-child-run-id="r1"]').title;
-  recv({ type: 'hello', runs: [liveRun('r1', 'Boot me', { status: 'starting' })] });
-  assert.match(word(), /· Starting$/);
-  assert.equal(doc.querySelector('.rail-tile[data-child-run-id="r1"] .child-dot.grey-pulse')
-    != null, true, 'starting is grey-pulse (app.js:12476)');
-  // The trap this test exists for: runDotClass returns 'grey-pulse' for BOTH
-  // starting and pausing (:12476), and the sig's end-marker char is '' for BOTH
-  // ('pausing' is not 'paused', :13698-13701). Every other field in the tuple is
-  // unchanged too — so without tabStatusWord(r) in it the signature is
-  // BYTE-IDENTICAL, :13711 early-returns, and the tile keeps a stale
-  // "· Starting" tooltip AND aria-label on a run that is pausing. The expanded
-  // row renders no status word at all, which is why nothing caught this before.
-  // Reachable: onHello upserts `status` on every hello (upsertRun, :1217) and
-  // isLive (:12345-12348) counts `pausing`, so the run stays in the tab list.
-  recv({ type: 'hello', runs: [liveRun('r1', 'Boot me', { status: 'pausing' })] });
-  assert.match(word(), /· Pausing$/);
-  assert.equal(doc.querySelector('.rail-tile[data-child-run-id="r1"]')
-    .getAttribute('aria-label'), 'Boot me · Pausing');
-});
-
-test('a blank title still yields a readable tile, never an empty square', async () => {
-  const { window, recv } = await boot({ seed: { [KEY]: '1' } });
-  recv({ type: 'hello', runs: [liveRun('r1', '   ')] });
-  const tile = window.document.querySelector('.rail-tile[data-child-run-id="r1"]');
-  // Proven vacuous in v1: deleting the `|| '?'` fallback kept every test green.
-  assert.equal(tile.textContent.trim(), '?',
-    'a titleless run must not render a blank tile');
-  // '   ' is a TRUTHY string, so a bare `r.title || 'Untitled run'` renders
-  // "    · Running" — three spaces and a separator. The fallback has to trim
-  // first. This assertion is the only thing that catches it.
-  assert.match(tile.title, /^Untitled run · /,
-    'and its tooltip must not open with a bare separator');
-  assert.equal(tile.getAttribute('aria-label'), 'Untitled run · Running');
-});
-
-test('initials survive emoji, CJK and sharp-s', async () => {
-  const { window, recv } = await boot({ seed: { [KEY]: '1' } });
-  recv({ type: 'hello', runs: [
-    liveRun('e', '🎉 launch'), liveRun('c', '修复 登录'), liveRun('s', 'ß sharp'),
-  ] });
-  const t = (id) => window.document
-    .querySelector(`.rail-tile[data-child-run-id="${id}"]`).textContent.trim();
-  // The mock's `w[0]` is a UTF-16 CODE UNIT: '🎉 launch' would yield a lone high
-  // surrogate ("\ud83cL") and render as "?L". Run titles are free text.
-  assert.equal([...t('e')].length, 2, 'one emoji + one letter, not a lone surrogate');
-  assert.equal(t('e'), '🎉L');
-  assert.equal(t('c'), '修登');
-  // 'ß'.toUpperCase() is 'SS' — two glyphs from one letter would make three on
-  // a two-glyph tile.
-  assert.equal(t('s'), 'SS', 'S from ß, S from sharp — never SSS');
-});
-
-test('a run that ends badly says so, rather than borrowing "Completed"', async () => {
-  // The other arm of tabStatusWord's terminal branch (:13625). Only the `done`
-  // arm was reached, so returning 'Completed' unconditionally stayed green.
-  const { window, recv } = await boot({ seed: { [KEY]: '1' } });
-  recv({ type: 'hello', runs: [liveRun('r1', 'Fix auth bug')] });
-  recv({ type: 'done', runId: 'r1', status: 'error' });
-  const tile = window.document.querySelector('.rail-tile[data-child-run-id="r1"]');
-  assert.equal(tile.getAttribute('aria-label'), 'Fix auth bug · Did not complete');
-});
-
-test('a tile is labelled for screen readers, and greys out once it lingers', async () => {
-  const { window, recv } = await boot({ seed: { [KEY]: '1' } });
-  const doc = window.document;
-  recv({ type: 'hello', runs: [liveRun('r1', 'Fix auth bug')] });
-  let tile = doc.querySelector('.rail-tile[data-child-run-id="r1"]');
-  assert.equal(tile.getAttribute('aria-label'), 'Fix auth bug · Running',
-    'the initials alone are meaningless to a screen reader');
-  assert.equal(tile.classList.contains('lingering'), false);
-  recv({ type: 'done', runId: 'r1', status: 'done' });   // finishes live -> lingers
-  tile = doc.querySelector('.rail-tile[data-child-run-id="r1"]');
-  assert.ok(tile.classList.contains('lingering'),
-    'a finished-unseen run is greyed on the rail exactly as its expanded row is');
-  assert.equal(tile.getAttribute('aria-label'), 'Fix auth bug · Completed');
-});
-
-test('an empty run list renders an empty rail without throwing', async () => {
-  const { window, recv } = await boot({ seed: { [KEY]: '1' } });
-  recv({ type: 'hello', runs: [] });
-  // renderPipelineTabs early-returns at :13677-13680 before the sig gate.
-  const host = window.document.querySelector('#nav-running-children');
-  assert.equal(host.querySelectorAll('.rail-tile').length, 0);
-  assert.equal(window.document.querySelector('#nav-running-rollup').hidden, true);
 });
 
 // ---- Task 3: circular budget indicator ----
@@ -914,29 +694,22 @@ test('every remaining new rule carries the declarations it exists for', () => {
   };
   // The favicon the rail shows instead of the wordmark; display is pinned above.
   mark('.brand .logo-mark', /width:\s*32px/, /height:\s*32px/, /border-radius:\s*50%/);
-  // The toggle is a bare glyph next to the wordmark, and a 40px square on the
-  // rail — the same box the twelve nav buttons get.
+  // The toggle is a bare glyph at the end of the wordmark row; on the rail it is the mark
+  // plus a small ">" whose negative margins keep the mark where the bare mark sat.
   mark('.side-toggle', /width:\s*30px/, /height:\s*30px/, /border:\s*0/,
     /background:\s*transparent/);
-  mark('.sidebar.collapsed .side-toggle', /width:\s*40px/, /height:\s*40px/,
-    /border-radius:\s*12px/);
-  // Both glyph sizes; the rail one stays the larger of the two.
-  mark('.side-toggle svg', /width:\s*23px/, /height:\s*23px/);
-  mark('.sidebar.collapsed .side-toggle svg', /width:\s*26px/, /height:\s*26px/);
+  mark('.sidebar.collapsed .side-toggle', /width:\s*auto/, /padding:\s*3px/,
+    /margin:\s*-3px -18px -3px -3px/, /border-radius:\s*12px/);
+  mark('.side-toggle svg', /width:\s*20px/, /height:\s*20px/);
+  mark('.sidebar.collapsed .side-toggle svg', /width:\s*14px/, /height:\s*14px/);
   // Both flex columns centre their fixed-width children; without this the 40px
-  // squares and 36px tiles sit left-aligned in a 39px content box.
+  // squares sit left-aligned in a 39px content box.
   mark('.sidebar.collapsed .nav', /align-items:\s*center/);
   mark('.sidebar.collapsed .nav-children', /align-items:\s*center/);
   // New pipeline is the rail's one filled control (mock); outlined-at-rest only
   // reads as a button next to a label.
   mark('.sidebar.collapsed .nav button.nav-cta', /background:\s*var\(--ink\)/,
     /(?:^|[;{\s])color:\s*var\(--on-ink\)/);
-  // Pinned to the Running square's corner, and ringed in --panel like both
-  // sibling markers — .nav button.active .nav-rollup fills it #fff (:140), which
-  // is invisible on the white sidebar for the half of the dot that overhangs.
-  mark('.sidebar.collapsed .nav-rollup', /position:\s*absolute/,
-    /border:\s*2px solid var\(--panel\)/);
-  mark('.nav .rail-tile:focus-visible', /outline:\s*2px solid var\(--ink\)/);
   // The ring's inner disc: without the --panel fill the conic-gradient covers
   // the whole 38px circle and there is no annulus.
   mark('.spend-ring-val', /width:\s*29px/, /border-radius:\s*50%/,

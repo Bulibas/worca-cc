@@ -52,7 +52,7 @@ test('tree native controls hide groups explicitly and preserve visible focus', (
     /display:flex/, /align-items:center/, /gap:8px/, /cursor:pointer/,
   ]) assert.match(buttons, declaration);
   assert.match(bodyAfter('.hd-tree-dir:hover,.hd-tree-file:hover,.hd-tree-file.active{'),
-    /background:var\(--field\)/);
+    /background:var\(--hover\)/);
   assert.match(bodyAfter('.hd-tree-dir:focus-visible,.hd-tree-file:focus-visible{'),
     /outline:2px solid var\(--ink\)/);
   const leaf = bodyAfter('.hd-tree-file .hd-diff-path{');
@@ -169,7 +169,7 @@ test('comment threads: surface cards, the sidebar rail recipe, quiet buttons, a 
   assert.match(btn, /height:26px/);
   assert.match(btn, /border-radius:8px/);
   assert.match(btn, /color:var\(--ink-2\)/);
-  assert.match(bodyAfter('.hd-cmt-btn:hover{'), /background:var\(--field\)/);
+  assert.match(bodyAfter('.hd-cmt-btn:hover{'), /background:var\(--hover\)/);
   assert.match(bodyAfter('.hd-cmt-delete:hover{'), /color:var\(--red-ink\)/);
   const reply = bodyAfter('.hd-cmt-btn.hd-cmt-reply{');
   assert.match(reply, /border:1px solid var\(--line-2\)/);

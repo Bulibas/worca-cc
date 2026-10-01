@@ -68,7 +68,7 @@ test('node corners follow the card scale in lockstep: header and footer sit 1.5p
 });
 
 test('the canvas nav cluster floats clear of the rail in both rail states', () => {
-  const nav = css.match(/\.gv-nav\s*\{[^}]*\}/);
+  const nav = css.match(/^\.gv-nav\s*\{[^}]*\}/m);   // anchored: the wf-popup overrides ".wf-pop-canvas .gv-nav{" also contain the token
   assert.ok(nav, '.gv-nav rule exists');
   const body = nav[0].replace(/\s+/g, '');
   assert.ok(body.includes('position:absolute'), 'absolutely placed inside the canvas host');

@@ -32,7 +32,7 @@ test('the family exists and is anchored on the question panel wash', () => {
   assert.match(form, /display:\s*flex/);
   assert.match(ruleBody('.af-label'), /var\(--ink\)/);
   assert.match(ruleBody('.af-err'), /var\(--red-ink\)/);
-  assert.match(ruleBody('.af-choice.on'), /var\(--green-bg\)/);   // ruleBody escapes; pass raw selectors
+  assert.match(ruleBody('.af-choice.on'), /border-color:\s*var\(--ink\)/);   // ruleBody escapes; pass raw selectors; ink, like .qopt.sel
   assert.match(ruleBody('.af-pill[data-tone="bad"]'), /var\(--red-ink\)/, 'the closed tone families are styled');
 });
 
@@ -90,7 +90,7 @@ test('focus-visible and the keyboard affordances are styled', () => {
   assert.match(ruleBody('.af-choice:focus-visible'), /outline:\s*2px solid var\(--ink\)/);
   assert.match(ruleBody('.af-icon-btn:focus-visible'), /outline:\s*2px solid var\(--ink\)/);
   assert.match(ruleBody('.af-tab:focus-visible'), /outline:\s*2px solid var\(--ink\)/);
-  assert.match(ruleBody('.af-inp:focus'), /var\(--green\)/);
+  assert.match(ruleBody('.af-inp:focus'), /var\(--ink\)/);
 });
 
 test('the detail screen scales the family up, like the clarify body', () => {

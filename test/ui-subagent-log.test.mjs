@@ -39,12 +39,17 @@ async function boot() {
 test('a log frame with sub:true renders a .log-line.sub-agent; a main line does not', async () => {
   const ctx = await boot();
   ctx.selectProject();
-  ctx.window.location.hash = 'running';
+  ctx.recv({ type: 'run-created', runId: 'p1', title: 't', projectDir: PROJECT, status: 'running', kind: 'run', startedAt: '10:00:00' });
+  ctx.recv({ type: 'state', runId: 'p1', id: 'p1', status: 'running', steps: [] });
+  await new Promise((r) => setTimeout(r, 0));
+  // The Running list card carries no log; the line lands in the run page's Live log tab.
+  ctx.window.location.hash = 'running/p1/details/logs';
   ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
-  ctx.recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });  // mounts the card
+  await new Promise((r) => setTimeout(r, 0));
+  const card = ctx.window.document.querySelector('#run-detail .rd-sec-logs');
+  assert.ok(card, 'the run page has its Live log tab');
   ctx.recv({ type: 'log', runId: 'p1', source: 'planner ▸ research auth', level: 'info', text: 'hi', sub: true });
   await new Promise((r) => setTimeout(r, 0));
-  const card = ctx.window.document.querySelector('[data-run-id="p1"]');
   assert.ok(card.querySelector('.log-line.sub-agent'), 'sub-agent line is styled');
   ctx.recv({ type: 'log', runId: 'p1', source: 'planner', level: 'info', text: 'main', sub: false });
   await new Promise((r) => setTimeout(r, 0));

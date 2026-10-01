@@ -21,7 +21,8 @@ test('yaml and smol-toml are exact-pinned runtime dependencies, locked with inte
     assert.notEqual(entry.dev, true);
   }
   if (pkg.name === '@worca/app') {
-    assert.deepEqual(Object.keys(pkg.dependencies).sort(), ['@highlightjs/cdn-assets', '@modelcontextprotocol/sdk', 'dompurify', 'express', 'htmlparser2', 'marked', 'smol-toml', 'ws', 'yaml']);
+    // @ricky0123/vad-web + onnxruntime-web: Ask Worca voice mode's in-page Silero VAD (docs/speech.md).
+    assert.deepEqual(Object.keys(pkg.dependencies).sort(), ['@highlightjs/cdn-assets', '@modelcontextprotocol/sdk', '@ricky0123/vad-web', 'dompurify', 'express', 'htmlparser2', 'marked', 'onnxruntime-web', 'smol-toml', 'ws', 'yaml']);
   }
 });
 

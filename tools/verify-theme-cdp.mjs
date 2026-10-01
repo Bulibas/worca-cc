@@ -210,7 +210,9 @@ async function go(hash) {
   await cdp('Page.reload', {});
   await waitEvent('Page.loadEventFired');
   await until('window.__np && window.__np.getRun', 'app boot');          // the house boot marker (app.js:2344)
-  const view = hash.split('/')[0];                                        // the routed section must be the visible one
+  const route = hash.split('/')[0];
+  // The routed section must be the visible one. #running/… and #history/… render the Runs section.
+  const view = ['running', 'history'].includes(route) ? 'runs' : route;
   await until(`document.querySelector('[data-view=${JSON.stringify(view)}]:not(.hidden)')`, `view ${view}`);
   await sleep(400);                                                       // async list loads (projects, agents, stats, plugins) land here
   await ev(READY);
@@ -334,7 +336,7 @@ const WALKER = (rootSel, withStyles = false) => `(() => {
 // A selector with no element on the current screen is skipped (nodeId 0). At 5a22ca47 `.icon-btn` and `.field-clear`
 // have hover RULES but no live element (the buttons are `.ask-icon-btn`; `.field-clear` lives only in a mockup) — kept
 // so a future element is sampled; `.sidebar.collapsed .nav button.nav-cta` matches only in the rail-collapsed state.
-const HOVER_SELECTORS = ['.icon-btn', '.ask-icon-btn', '.btn', '.btn-ghost', '.btn-primary', '.hist-open', '.rc-open', '.wiz-proj', '.sp-row', '.grv-source-row',
+const HOVER_SELECTORS = ['.icon-btn', '.ask-icon-btn', '.btn', '.btn-ghost', '.btn-primary', '.runs-row', '.runs-group-head', '.wiz-proj', '.sp-row', '.grv-source-row',
   '.gr-rm', '.field-clear', '.agent-row-head', '.sidebar.collapsed .nav button.nav-cta', '.nav button', '.spend-ind', '.hd-tree-file', '.ap'];
 async function hoverSamples() {
   // CDP node ids die on every Page.reload (every go()): fetch the document per call, and let a
@@ -389,15 +391,22 @@ let runId = null; let pipelineId = null; let projectKey = null;
 const states = [
   ['new', async () => { await go('new'); await until(`document.querySelector('.agent-row-head')`, 'the agent rows (rendered after /api/agents)'); await clickSel('.agent-row-head'); await ev(`document.querySelector('details.advanced')?.setAttribute('open','');0`); await freeze('new'); }],
   ['new-error', async () => { await ev(`document.getElementById('prompt').value='';0`); await clickSel('#start-btn'); await until(`document.querySelector('.form-msg.err')`, 'the empty-prompt error'); }],
-  ['running-list', async () => { await go('running'); await until(`document.querySelector('#run-list .run-card')`, 'a run card'); }],
-  ['running-list-compact', async () => { await clickSel('.run-density .rc-dseg[data-density="compact"]'); }, async () => { await clickSel('.run-density .rc-dseg[data-density="detailed"]'); }],
-  ['running-detail', async () => { await go(`running/${runId}`); await until(`document.querySelector('#run-detail .rd-tabs .rd-tab')`, 'detail tabs'); }],
+  // The Runs list (one list for live and finished runs). The audit id keeps its old name so
+  // test/fixtures/contrast-baseline-light.json still matches.
+  ['running-list', async () => { await go('runs'); await until(`document.querySelector('#runs-list .runs-row')`, 'a run row'); }],
+  // The Running detail has two modes on one route: the glance (#running/<id>) and
+  // Details (#running/<id>/details[/<tab>]). Each mode is its own audited state.
+  ['running-detail', async () => { await go(`running/${runId}`); await until(`document.querySelector('#run-detail .rd-glance:not([hidden]) .rd-now-title')?.textContent`, 'the glance'); }],
+  ['running-detail-details', async () => { await go(`running/${runId}/details`); await until(`document.querySelector('#run-detail .rd-details:not([hidden]) .rd-tabs .rd-tab')`, 'detail tabs'); await freeze('details'); }],
   ['running-detail-tabs', async () => { const n = await ev(`document.querySelectorAll('#run-detail .rd-tab').length`); if (n < 2) throw new Error(`running-detail has ${n} tab(s): nothing to audit`); for (let i = 1; i < n; i += 1) { await ev(`document.querySelectorAll('#run-detail .rd-tab')[${i}].click();0`); await freeze('tab'); await auditCurrent(`running-detail-tab-${i}`); } }],
-  ['running-detail-done', async () => { await go(`running/${runId}`); await until(`document.querySelector('#run-detail .rd-graph.settled, #run-detail .rd-tabs .rd-tab')`, 'settled detail'); }],
-  // The just-finished mock run LINGERS on the Running page and renderHistory hides
-  // its pipeline until the linger key is cleared (app.js isLingering).
-  ['history-list', async () => { await ev(`localStorage.removeItem('worca-cc.lingerRuns');0`); await go('history'); await until(`document.querySelector('#hist-shell .hist-card')`, 'a history card'); }],
-  ['history-detail', async () => { await go(`history/${projectKey}/${pipelineId}`); await until(`document.querySelector('.hd-tabs .hd-tab')`, 'history tabs'); }],
+  // No finished Running page: a finished run IS its saved run (app.js rdSavedRoute), and after
+  // the reload every go() does, #running/<id> lands on #history/… — the history-detail states.
+  // The just-finished mock run LINGERS as a live row and the list hides its History row
+  // until the linger key is cleared (app.js isLingering).
+  ['history-list', async () => { await ev(`localStorage.removeItem('worca-cc.lingerRuns');0`); await go('runs'); await until(`document.querySelector('#runs-list .runs-row[data-kind="hist"]')`, 'a finished run row'); }],
+  // History opens on the glance (like the Running detail); Details is its own state.
+  ['history-detail', async () => { await go(`history/${projectKey}/${pipelineId}`); await until(`document.querySelector('.hd-glance:not([hidden]) .hd-result .rd-sgroup')`, 'the history glance'); }],
+  ['history-detail-details', async () => { await go(`history/${projectKey}/${pipelineId}/details`); await until(`document.querySelector('.hd-details:not([hidden]) .hd-tabs .hd-tab')`, 'history tabs'); await freeze('details'); }],
   ['history-detail-tabs', async () => { const n = await ev(`document.querySelectorAll('.hd-tabs .hd-tab').length`); if (n < 2) throw new Error(`history-detail has ${n} tab(s): nothing to audit`); for (let i = 1; i < n; i += 1) { await ev(`document.querySelectorAll('.hd-tabs .hd-tab')[${i}].click();0`); await until(`!document.querySelector('.hd-diff-pane') || document.querySelector('.hd-diff-pane .hd-dl-row, .hd-diff-none, .hd-diff-note')`, 'tab content'); await freeze('tab'); await auditCurrent(`history-detail-tab-${i}`); } }],
   // The fresh canvas holds a Task and an End node only (no <select> in their inspectors); the
   // seeded default pipeline (.pl-item[data-id=wf_default], click loads it) carries agent nodes.
@@ -480,9 +489,9 @@ const report = { light: [], dark: [], 'system-dark': [], 'system-light': [] };  
 const identity = {};                                                             // light identity rows per state
 let sampleCount = 0; let cappedStates = [];
 async function auditCurrent(stateId) {
-  // `#refresh-history.busy` paints color:transparent while /api/history is in flight — sampling
-  // through it made the snapshot bistable (measured: 4 cells flipping between runs).
-  await until(`!document.querySelector('#refresh-history.busy')`, 'the history refresh to settle');
+  // The Runs list is aria-busy while /api/history is in flight — sampling through a reload
+  // made the snapshot bistable (measured: 4 cells flipping between runs).
+  await until(`!document.querySelector('#runs-list[aria-busy="true"]')`, 'the history refresh to settle');
   for (const theme of THEMES) {
     await setTheme(theme);
     const { samples, styles, capped } = await ev(WALKER(null, theme[0] === 'light'), 90000);   // identity rows only for the light pass
@@ -519,7 +528,7 @@ try {
   await until('window.__np && window.__np.getRun', 'app boot');
 
   // Phase A: the live run (question panel visible) — running states only.
-  const phaseA = new Set(['running-list', 'running-list-compact', 'running-detail', 'running-detail-tabs']);   // running-detail-done is a Phase-B state on purpose: the run must be finished
+  const phaseA = new Set(['running-list', 'running-list-compact', 'running-detail', 'running-detail-details', 'running-detail-tabs']);
   for (const [id, prepare, cleanup] of states) {
     if (!phaseA.has(id) || (ONLY.length && !ONLY.includes(id))) continue;
     log(`state ${id}`); await prepare(); if (id !== 'running-detail-tabs') await auditCurrent(id); if (cleanup) await cleanup();

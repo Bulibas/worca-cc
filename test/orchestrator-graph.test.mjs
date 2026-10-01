@@ -287,7 +287,9 @@ test('bookends are exec rows carrying an executionId, and no phase event is emit
   // stepRowToStep never restores it, and both readers (run-decor's ledgerRows,
   // render.mjs's summary) stop filtering the bookends on a REHYDRATED run.
   const live = orch.getState();
-  for (const id of BOOKEND_EXECUTION_IDS) {
+  // x:sync:1 is a bookend too, but it exists only when a base sync happened (lazy row,
+  // covered in test/run-harness-sync.test.mjs); preflight and done are always written.
+  for (const id of ['x:preflight:1', 'x:done:1']) {
     const row = live.steps.find((s) => s.key === id);
     assert.ok(row, `the ledger keeps ${id}`);
     assert.equal(row.executionId, id, `${id} carries its executionId`);
@@ -298,11 +300,48 @@ test('bookends are exec rows carrying an executionId, and no phase event is emit
   // path the two readers actually run on in History).
   const rehydrated = readPipelineForResume(live.id).steps
     ?? (await import('../src/core/artifacts.mjs')).readPipeline(live.id).steps;
-  for (const id of BOOKEND_EXECUTION_IDS) {
+  for (const id of ['x:preflight:1', 'x:done:1']) {
     const row = (rehydrated || []).find((s) => s.key === id);
     assert.ok(row, `${id} round-tripped`);
     assert.equal(row.executionId, id, `${id} kept execution_id through the DB`);
   }
+});
+
+// The run page's clock and status line read the ledger: between run start and the first
+// node, the only row that can run is the preflight bookend. It must stay open (clock
+// running) through ALL of the setup — worktree, knowledge graph, context, memory — or the
+// run shows a frozen clock and "Between steps" for the whole setup (a graphify build of a
+// big repo alone is a minute).
+test('the preflight bookend stays open through the whole setup and names each stage', { timeout: 120000 }, async () => {
+  const dir = gitDir('gpre');
+  const orch = createOrchestrator({
+    projectDir: dir, workflowId: 'wf_default', prompt: 'demo task',
+    claude: { mock: true }, auto: true,
+  });
+  const seen = {};
+  const spy = (name) => {
+    const real = orch[name].bind(orch);
+    orch[name] = async (...a) => {
+      const out = await real(...a);
+      const row = orch.state.steps.find((s) => s.key === 'x:preflight:1');
+      seen[name] = { status: row?.status, ticking: row?.runningSince != null, stage: orch.state.setupStage };
+      return out;
+    };
+  };
+  for (const name of ['_setupRunRoot', '_buildWorktreeGraph', '_mountMemory']) spy(name);
+  let firstNode = null;
+  orch.on('exec', (e) => {
+    if (firstNode || e.executionId === 'x:preflight:1' || e.status !== 'start') return;
+    const row = orch.state.steps.find((s) => s.key === 'x:preflight:1');
+    firstNode = { status: row?.status, stage: orch.state.setupStage };
+  });
+  const res = await orch.run();
+  assert.equal(res.status, 'done', res.error);
+
+  assert.deepEqual(seen._setupRunRoot, { status: 'start', ticking: true, stage: 'Creating the worktree' });
+  assert.deepEqual(seen._buildWorktreeGraph, { status: 'start', ticking: true, stage: 'Building the knowledge graph' });
+  assert.deepEqual(seen._mountMemory, { status: 'start', ticking: true, stage: 'Preparing the agents' });
+  assert.deepEqual(firstNode, { status: 'done', stage: null }, 'the first node starts after preflight closed');
 });
 
 // ── MAJ-3: two cards on ONE agent key must not clobber one persisted artifact ──

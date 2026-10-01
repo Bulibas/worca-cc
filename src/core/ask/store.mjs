@@ -47,7 +47,7 @@ function rowToThread(r) {
     totals: { ...emptyTotals(), ...(parse(r.totals, {}) || {}) },
     // The thread's owner (identity.mjs actor); null = ownerless (before attribution).
     createdBy: r.created_by ?? null,
-    // MCP registry §9.4: the picker's switched-off {sets, members}; null = none (v44).
+    // MCP registry §9.4: the picker's switched-off {sets, members}; null = none (v45).
     mcpOff: parse(r.mcp_off, null),
   };
 }
@@ -427,11 +427,6 @@ export function readAttachmentRaw(threadId, id) {
   } catch {
     return null;
   }
-}
-
-export function threadAttachmentBytes(threadId) {
-  getDb();
-  return prepare('SELECT COALESCE(SUM(bytes), 0) AS n FROM ask_attachments WHERE thread_id = ?').get(threadId).n;
 }
 
 // ── run links ───────────────────────────────────────────────────────────────

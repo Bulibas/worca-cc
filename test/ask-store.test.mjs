@@ -14,7 +14,7 @@ import {
   countThreads, listThreadIds, countWorktrees, countAttachments,
   appendMessage, getMessage, listMessages, finishMessage, setMessageBlocks, findCard, updateCardBlock, sweepStreamingMessages,
   addAttachment, listAttachments, getAttachment, readAttachmentText, readAttachmentRaw,
-  attachmentPath, threadAttachmentBytes,
+  attachmentPath,
   linkRun, updateRunLink, listRunLinks,
 } from '../src/core/ask/store.mjs';
 
@@ -37,7 +37,7 @@ test('createThread / getThread / updateThread / setThreadTitle', () => {
   assert.match(t.id, /^ask_[0-9a-f]{8}$/);
   assert.deepEqual(Object.keys(t).sort(),
     ['context', 'createdAt', 'createdBy', 'effort', 'id', 'mcpOff', 'model', 'sessionId', 'title', 'totals', 'updatedAt']);
-  assert.equal(t.mcpOff, null, 'no MCP picker choices yet (v44)');
+  assert.equal(t.mcpOff, null, 'no MCP picker choices yet (v45)');
   assert.equal(t.createdBy, null, 'ownerless unless created with an owner');
   assert.equal(t.title, null);
   assert.equal(t.sessionId, null);
@@ -293,7 +293,6 @@ test('attachments: file under askRoot/<thread>/att/<id>.txt, thread-scoped reads
   assert.equal(readAttachmentText(createThread().id, a.id), null, 'another thread cannot read it');
   assert.equal(getAttachment(t.id, 'att_ffffffff'), null);
   addAttachment(t.id, m.id, { name: 'b.txt', text: 'xx' });
-  assert.equal(threadAttachmentBytes(t.id), 8);
   assert.equal(listAttachments(t.id).length, 2);
   assert.throws(() => addAttachment('ask_ffffffff', null, { name: 'x', text: 'y' }), /unknown thread/);
 });
@@ -319,7 +318,6 @@ test('binary attachments (#398): raw bytes under <id>.<ext>, kind/mime on the ro
   const txt = addAttachment(t.id, m.id, { name: 'n.txt', text: 'hey' });
   assert.equal(txt.kind, 'text');
   assert.equal(readAttachmentRaw(t.id, txt.id).buffer.toString('utf8'), 'hey');
-  assert.equal(threadAttachmentBytes(t.id), png.length + 3, 'the thread byte total spans kinds');
   assert.throws(() => addAttachment(t.id, m.id, { name: 'x.png', kind: 'image', mime: 'image/png' }),
     /Buffer/, 'a non-text attachment without a Buffer body is refused');
   // a row that outlived its body must not hand out a dangling pointer

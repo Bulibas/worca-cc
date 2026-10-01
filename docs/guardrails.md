@@ -247,6 +247,22 @@ enforces the set's latest definition.
   which also closes `ls-tree → blob-sha → show <sha>`. Everything that survives is
   redacted. `SSH_AUTH_SOCK` is the one env var allowlisted into the child, for
   ssh-remote `fetch`.
+  **Branch fetches outside the worktrees** (#527). Three more Ask paths fetch:
+  `list_branches` (unless called with `fresh:false`), `open_worktree`'s fallback
+  for a branch only the remote has (a bare name resolved to `<remote>/<name>`, or
+  a `<remote>/<name>` pushed since the last fetch), and `propose_run`'s check of
+  its `sourceBranch`. Each runs `git fetch --prune --no-tags <sync.remote>` in the
+  **project folder**, not in an Ask worktree, through the same 45-second cache the
+  app uses, so it only moves that remote's remote-tracking refs and `FETCH_HEAD`:
+  nothing is fast-forwarded, no branch is created and no working tree is touched
+  (`src/core/ask/branch-deps.mjs` is pinned to import no write helper). The
+  credential differs by mode. In classic mode the tools run in the MCP child,
+  whose env is scrubbed, so the fetch carries no worca GitHub credential: git
+  falls back to the user's own credential helpers or ssh-agent, and on a hosted
+  instance with an env-only token a private remote answers `auth`, which
+  `list_branches` reports as `stale` with the last fetch time. In relay mode the
+  tools run inside the worca server, so the fetch uses worca's read credential.
+  Tokens are never forwarded into the MCP child's env.
   **Scripts the chat can write and run.** With **Create and run scripts**
   (Settings → Ask Worca, on by default) the assistant holds four more worca MCP
   tools: `list_scripts` and `get_script` read the registry, `save_script` writes

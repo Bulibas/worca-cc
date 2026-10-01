@@ -1,10 +1,15 @@
-// test/ui-running-card.test.mjs — run-card v2 header: status avatar, title, meta
-// line, branch chip, action cluster, and header-click navigation.
+// test/ui-running-card.test.mjs — a live run's ROW in the Runs list: a link built by
+// ui/public/runs-list.mjs holding a status icon, the title and a one-line subline
+// ("<word> · <step or start time>"), and a click that opens the run in the pane
+// (#running/<id>). The run card it replaced (header avatar, meta line, branch chip,
+// Pause/Resume/Stop cluster, waiting strip) is gone (D14): Pause/Stop/Resume live in
+// the pane's bar (test/ui-running-detail.test.mjs, test/ui-running-stop-modal.test.mjs,
+// test/ui-running-resume.test.mjs) and a waiting run is listed under Needs you.
 //
-// boot()/dispatch()/showRunning()/helloRunning() are copied VERBATIM from
-// test/ui-question.test.mjs (boot 19-82, RUN_ID 84, helloRunning 88-96) — the
-// nearest suite that both captures the WebSocket instance and lets a case
-// intercept fetch, which the Pause/Stop POST assertions need.
+// boot()/dispatch()/helloRunning() are copied from test/ui-question.test.mjs (boot
+// 19-82, RUN_ID 84, helloRunning 88-96) — the nearest suite that captures the
+// WebSocket instance. showRunning() follows test/helpers/run-page-boot.mjs: the bare
+// list with nothing selected (a bare #runs would otherwise reopen the remembered run, D6).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -17,6 +22,10 @@ const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 async function boot({ fetchHandler } = {}) {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
   const { window } = dom;
+  window.Element.prototype.scrollIntoView = function () {};
+  // jsdom has no rAF; the run page defers its scroll-to-question by a frame
+  // (paintRdQuestions). Same shim as test/ui-sidebar-counts.test.mjs.
+  window.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 
   const wsBox = { ws: null };
   window.WebSocket = class {
@@ -49,7 +58,7 @@ async function boot({ fetchHandler } = {}) {
     });
   };
 
-  for (const k of ['window', 'document', 'location', 'localStorage', 'WebSocket', 'fetch', 'navigator']) {
+  for (const k of ['window', 'document', 'location', 'localStorage', 'WebSocket', 'fetch', 'navigator', 'requestAnimationFrame']) {
     try {
       Object.defineProperty(globalThis, k, { value: window[k], configurable: true, writable: true });
     } catch {
@@ -65,245 +74,238 @@ async function boot({ fetchHandler } = {}) {
   function dispatch(msg) {
     wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
   }
-  function showRunning() {
-    window.location.hash = 'running';
+  function go(hash) {
+    window.location.hash = hash;
     window.dispatchEvent(new window.Event('hashchange'));
   }
-  return { window, dispatch, showRunning, calls, wsBox };
+  // The bare list with nothing selected: forget the remembered run first (rule 5).
+  function showRunning() {
+    window.localStorage.removeItem('worca-cc.runs.last');
+    go('runs');
+  }
+  // Rows repaint on a microtask and a changed row is REPLACED: settle, then re-query.
+  const settle = async (n = 3) => {
+    for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+  return { window, dispatch, go, showRunning, settle, calls, wsBox };
 }
 
 const RUN_ID = 'run-aaa';
 
-function helloRunning(ctx, extra = {}) {
+// A bare HH:MM:SS start is today's clock (makeRun), so the subline's time is stable.
+function helloRunning(ctx, extra = {}, more = []) {
   ctx.wsBox.ws.dispatch('open', {});
   ctx.dispatch({
     type: 'hello',
     runs: [
-      { runId: RUN_ID, title: 'Demo run', projectDir: '/tmp/p', status: 'running', startedAt: '2026-01-01T00:00:00Z', ...extra },
+      { runId: RUN_ID, title: 'Demo run', projectDir: '/tmp/p', status: 'running', kind: 'run', startedAt: '09:30:15', ...extra },
+      ...more,
     ],
   });
 }
 
-const cardOf = (ctx) => ctx.window.document.querySelector(`.run-card[data-run-id="${RUN_ID}"]`);
+// The run's row in its project group (a Needs-you run is repeated above it: rule 6).
+const rowOf = (ctx, runId = RUN_ID) =>
+  ctx.window.document.querySelector(`#runs-list .runs-row[data-slot="group"][data-run-id="${runId}"]`);
+const needsRowOf = (ctx, runId = RUN_ID) =>
+  ctx.window.document.querySelector(`#runs-list .runs-needs .runs-row[data-run-id="${runId}"]`);
+const subOf = (row) => row.querySelector('.runs-row-sub').textContent;
+const wordOf = (row) => subOf(row).split(' · ')[0];
 
-test('header anatomy: avatar, ellipsised title, meta line, action cluster — and no .run-foot', async () => {
+// Two agent nodes (the manifest shape test/ui-run-hosts.test.mjs:15-26 uses).
+const MANIFEST = {
+  version: 2, template: { id: 'wf_t', name: 'T' },
+  graph: {
+    nodes: [
+      { id: 'n_a', kind: 'agent', key: 'planner', x: 0, y: 0, label: 'Planner', color: 'violet',
+        ports: { inputs: [{ id: 'task', type: 'md', loop: false }], outputs: [{ id: 'plan', type: 'md', when: 'always' }], await: true } },
+      { id: 'n_b', kind: 'agent', key: 'implementer', x: 200, y: 0, label: 'Implement', color: 'blue',
+        ports: { inputs: [{ id: 'plan', type: 'md', loop: false }], outputs: [{ id: 'code', type: 'md', when: 'always' }], await: true } },
+      { id: 'n_end', kind: 'end', key: null, x: 400, y: 0, label: 'End', color: '',
+        ports: { inputs: [{ id: 'result', type: 'any' }], outputs: [], await: false } },
+    ],
+    wires: [
+      { id: 'w1', from: { node: 'n_a', port: 'plan' }, to: { node: 'n_b', port: 'plan' } },
+      { id: 'w2', from: { node: 'n_b', port: 'code' }, to: { node: 'n_end', port: 'result' } },
+    ],
+  },
+};
+const step = (nodeId) => ({ key: `x:${nodeId}:1`, executionId: `x:${nodeId}:1`, nodeId, ordinal: 1, status: 'start',
+  activeMs: 10, startedAt: '2026-08-26T10:00:00Z' });
+
+test('row anatomy: a link with a status icon, the title and one subline — no card chrome', async () => {
   const ctx = await boot();
   helloRunning(ctx);
   ctx.showRunning();
+  await ctx.settle();
 
-  const card = cardOf(ctx);
-  assert.ok(card, 'run card built');
-  const head = card.querySelector('.rc-head');
-  assert.ok(head, '.rc-head present');
-  assert.equal(head.getAttribute('role'), 'button', 'header is a button for AT');
-  assert.equal(head.getAttribute('tabindex'), '0', 'header is focusable');
+  const row = rowOf(ctx);
+  assert.ok(row, 'the live run is listed in its project group');
+  assert.equal(row.tagName, 'A', 'a row is a plain link');
+  assert.equal(row.getAttribute('href'), `#running/${RUN_ID}`);
+  assert.equal(row.dataset.kind, 'live');
 
-  assert.ok(head.querySelector('.rc-sic'), '.rc-sic status avatar present');
-  assert.equal(head.querySelector('.rc-title').textContent, 'Demo run');
-  assert.ok(head.querySelector('.rc-meta .rc-status-word'), 'status word lives in the meta line');
-  assert.ok(head.querySelector('.rc-meta .rm-text'), 'started-at segment kept');
-  assert.ok(head.querySelector('.rc-meta .run-time'), '.run-time kept (the 1s ticker writes it)');
-  assert.ok(head.querySelector('.rc-meta .run-cost'), '.run-cost kept');
-  assert.ok(head.querySelector('.rc-branch'), 'branch chip slot present');
+  const [ic, body, ...rest] = row.children;
+  assert.equal(rest.length, 0, 'icon + body, nothing else');
+  assert.ok(ic.classList.contains('runs-ic') && ic.classList.contains('runs-ic-run'), 'a running run wears the run icon');
+  assert.equal(ic.getAttribute('aria-hidden'), 'true', 'the icon is decoration: the subline says the state');
+  assert.ok(ic.querySelector('svg.runs-glyph-run'), 'one glyph for the state');
+  assert.ok(body.classList.contains('runs-row-body'));
+  assert.equal(body.querySelector('.runs-row-title').textContent, 'Demo run');
+  assert.equal(subOf(row), 'Running · 09:30', 'no step yet: the word and the start time');
 
-  assert.ok(head.querySelector('.rc-acts .btn-pause'), 'Pause moved into the action cluster');
-  assert.ok(head.querySelector('.rc-acts .btn-resume'), 'Resume moved into the action cluster');
-  assert.ok(head.querySelector('.rc-acts .btn-stop'), 'Stop moved into the action cluster');
-  assert.ok(head.querySelector('.rc-acts .rc-open'), 'chevron present');
-
-  assert.equal(card.querySelector('.run-foot'), null, '.run-foot is gone');
-  assert.equal(card.querySelector('.run-top'), null, '.run-top is gone');
-  assert.equal(card.querySelector('.chip'), null, 'the phase chip is gone');
-  assert.equal(card.querySelector('.pill-run'), null, 'the old status pill is gone from the card');
+  assert.equal(row.querySelector('button'), null, 'no per-row actions (D14)');
+  for (const sel of ['.rc-head', '.rc-sic', '.rc-meta', '.rc-acts', '.btn-pause', '.btn-resume', '.btn-stop', '.rc-open',
+    '.rc-branch', '.run-time', '.run-cost', '.rc-wait', '.qpanel', '.log', '.run-foot'])
+    assert.equal(row.querySelector(sel), null, `no ${sel} on the row`);
 });
 
-test('status avatar: family + single glyph per run state, word from statusPill', async () => {
+test('status icon + word per run state', async () => {
   const ctx = await boot();
-  const { upsertRun, buildRunCard, paintRunCard } = ctx.window.__np;
+  const run = (runId, extra) => ({ runId, title: runId, projectDir: '/tmp/p', kind: 'run', startedAt: '09:30:15', ...extra });
+  helloRunning(ctx, {}, [
+    run('s-starting', { status: 'starting' }),
+    run('s-ask', { status: 'running', pendingQuestion: { id: 'q', questions: [{ question: 'x?' }] } }),
+    run('s-paused', { status: 'paused' }),
+    run('s-pausing', { status: 'pausing' }),
+    run('s-interrupted', { status: 'running' }),
+    run('s-done', { status: 'running' }),
+    run('s-stopped', { status: 'running' }),
+    run('s-error', { status: 'running' }),
+  ]);
+  // A run that ends LIVE lingers in the list until it is opened; hello-seeded
+  // terminal runs never list (ui-pipeline-tabs: seed-on-first-hello).
+  ctx.dispatch({ type: 'done', runId: 's-interrupted', status: 'interrupted' });
+  ctx.dispatch({ type: 'done', runId: 's-done', status: 'done' });
+  ctx.dispatch({ type: 'done', runId: 's-stopped', status: 'stopped' });
+  ctx.dispatch({ type: 'done', runId: 's-error', status: 'error' });
+  ctx.showRunning();
+  await ctx.settle();
+
   const cases = [
-    ['running',  { status: 'running' },  'st-blue',  'sic-spin',   'Running'],
-    ['starting', { status: 'starting' }, 'st-blue',  'sic-spin',   'Starting'],
-    ['ask',      { status: 'running', pendingQuestion: { id: 'q', questions: [{ question: 'x?' }] } },
-                                          'st-amber', 'sic-ask',    'Paused · awaiting answers'],
-    ['paused',   { status: 'paused' },   'st-amber', 'sic-pause',  'Paused'],
-    ['pausing',  { status: 'pausing' },  'st-amber', 'sic-pause',  'Pausing…'],
-    ['interrupted', { status: 'interrupted' }, 'st-amber', 'sic-pause', 'Interrupted'],
-    ['done',     { status: 'done' },     'st-green', 'sic-check',  'Done'],
-    ['stopped',  { status: 'stopped' },  'st-red',   'sic-square', 'Stopped'],
-    ['error',    { status: 'error' },    'st-red',   'sic-bang',   'Error'],
-    // Reachable on reload: onHello seeds pendingQuestion regardless of status, so
-    // a run parked on a question can arrive carrying a terminal one. statusPill
-    // tests pendingQuestion BEFORE done/stopped/error, and the avatar has to
-    // agree — otherwise a green check sits beside "Paused · awaiting answers"
-    // and the "?" that is the only cue the user must act never appears.
-    ['done+ask', { status: 'done', pendingQuestion: { id: 'q', questions: [{ question: 'x?' }] } },
-                                          'st-amber', 'sic-ask',    'Paused · awaiting answers'],
+    [RUN_ID,          'run',    'Running'],
+    ['s-starting',    'start',  'Starting'],
+    ['s-ask',         'ask',    'Question'],
+    ['s-paused',      'paused', 'Paused'],
+    ['s-pausing',     'paused', 'Pausing'],
+    ['s-interrupted', 'paused', 'Interrupted'],
+    ['s-done',        'done',   'Finished'],
+    ['s-stopped',     'stop',   'Stopped'],
+    ['s-error',       'fail',   'Failed'],
   ];
-  for (const [id, patch, family, glyph, word] of cases) {
-    const r = upsertRun({ runId: `s-${id}`, title: 't', projectDir: '/tmp/p', ...patch });
-    r.el = buildRunCard(r);
-    paintRunCard(r);
-    const sic = r.el.querySelector('.rc-sic');
-    assert.ok(sic.classList.contains(family), `${id}: avatar family ${family}`);
-    const on = [...sic.querySelectorAll('.sic')].filter((s) => !s.hasAttribute('hidden'));
-    assert.equal(on.length, 1, `${id}: exactly one glyph visible`);
-    assert.ok(on[0].classList.contains(glyph), `${id}: glyph is ${glyph}`);
-    assert.equal(sic.title, word, `${id}: avatar title is the status word`);
-    assert.equal(sic.getAttribute('aria-label'), word, `${id}: avatar aria-label is the status word`);
-    assert.equal(r.el.querySelector('.rc-status-word').textContent, word, `${id}: meta word`);
+  for (const [id, icon, word] of cases) {
+    const row = rowOf(ctx, id);
+    assert.ok(row, `${id}: listed`);
+    const ics = [...row.querySelectorAll('.runs-ic')];
+    assert.equal(ics.length, 1, `${id}: exactly one icon`);
+    assert.ok(ics[0].classList.contains(`runs-ic-${icon}`), `${id}: icon is ${icon}`);
+    assert.equal(row.dataset.icon, icon);
+    assert.equal(wordOf(row), word, `${id}: word`);
   }
+  // Needs you (D5): the question, the pause and the unread failure; not pausing/interrupted.
+  const needs = [...ctx.window.document.querySelectorAll('#runs-list .runs-needs .runs-row')].map((a) => a.dataset.runId);
+  assert.deepEqual(needs, ['s-ask', 's-paused', 's-error']);
 });
 
-test('meta line: status-word family follows statusPill, started-at renders, elapsed + cost paint', async () => {
-  const ctx = await boot();
-  const { upsertRun, buildRunCard, paintRunCard, onState } = ctx.window.__np;
-  const r = upsertRun({ runId: 'm1', title: 't', projectDir: '/tmp/p', status: 'running', startedAt: '2026-01-01T09:30:15Z' });
-  r.el = buildRunCard(r);
-  // A run with no manifest yet has no active agent, so the pill reads plainly
-  // "Running" (the v1 phaseKey switch that used to name the phase is gone).
-  onState(r, { status: 'running', totalCostUsd: 1.25 });
-  const word = r.el.querySelector('.rc-status-word');
-  assert.equal(word.textContent, 'Running');
-  assert.ok(word.classList.contains('st-peach'), "statusPill's family lands on the word");
-  assert.match(r.el.querySelector('.rm-text').textContent, /^started \d\d:\d\d:\d\d$/,
-    'the meta segment is the started-at clock only (project moved to the sidebar/detail)');
-  assert.equal(r.el.querySelector('.run-cost').textContent, '$1.25');
-  assert.ok(r.el.querySelector('.run-time').textContent, 'elapsed painted');
-});
-
-test('branch chip: base → feature, copies on click, and never opens the run', async () => {
-  const ctx = await boot();
-  const { upsertRun, buildRunCard, onState } = ctx.window.__np;
-  // Stub the clipboard AFTER boot, on the RETURNED window — copyBranchToClipboard
-  // reads navigator.clipboard at CLICK time. Precedent: ui-history-detail.test.mjs:266-270.
-  const writes = [];
-  Object.defineProperty(ctx.window.navigator, 'clipboard', {
-    value: { writeText: async (t) => { writes.push(t); } },
-    configurable: true,
-  });
-
-  const r = upsertRun({ runId: 'br1', title: 't', projectDir: '/tmp/p', status: 'running' });
-  r.el = buildRunCard(r);
-  const chip = r.el.querySelector('.rc-branch');
-  assert.equal(chip.hidden, true, 'no chip before a branch is known');
-
-  onState(r, { branch: { feature: 'feat/x', source: 'main' } });
-  assert.equal(chip.hidden, false, 'the chip appears when the branch lands on a later state event');
-  assert.equal(r.el.querySelector('.rc-branch-name').textContent, 'feat/x');
-  assert.equal(r.el.querySelector('.rc-base').textContent, 'main →');
-  assert.equal(r.el.querySelector('.rc-base').hidden, false);
-
-  const before = ctx.window.location.hash;
-  r.el.querySelector('.rc-branch-copy').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
-  await new Promise((res) => setTimeout(res, 0));
-  assert.deepEqual(writes, ['feat/x'], 'the copy button copies the feature branch');
-  assert.equal(ctx.window.location.hash, before, 'copying must not navigate');
-});
-
-test('a source-less branch hides only the "base →" prefix', async () => {
-  const ctx = await boot();
-  const { upsertRun, buildRunCard, onState } = ctx.window.__np;
-  const r = upsertRun({ runId: 'br2', title: 't', projectDir: '/tmp/p', status: 'running' });
-  r.el = buildRunCard(r);
-  onState(r, { branch: { feature: 'feat/y' } });
-  assert.equal(r.el.querySelector('.rc-branch').hidden, false);
-  assert.equal(r.el.querySelector('.rc-base').hidden, true, 'no source branch -> no "base →" prefix');
-});
-
-test('clicking the card header opens #running/<runId>', async () => {
+test('the subline names the running step: the active agent, or how many run', async () => {
   const ctx = await boot();
   helloRunning(ctx);
   ctx.showRunning();
-  cardOf(ctx).querySelector('.rc-head').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
+  await ctx.settle();
+  assert.equal(subOf(rowOf(ctx)), 'Running · 09:30', 'no manifest yet: the start time');
+
+  ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'running', stepper: MANIFEST,
+    active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }], steps: [step('n_a')] });
+  await ctx.settle();
+  assert.equal(subOf(rowOf(ctx)), 'Running · Planner', 'the active agent’s label');
+
+  ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'running', stepper: MANIFEST,
+    active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }, { nodeId: 'n_b', executionId: 'x:n_b:1' }],
+    steps: [step('n_a'), step('n_b')] });
+  await ctx.settle();
+  assert.equal(subOf(rowOf(ctx)), 'Running · 2 agents', 'several agents: the count');
+});
+
+test('clicking a row opens #running/<runId> in the pane beside the list', async () => {
+  const ctx = await boot();
+  helloRunning(ctx);
+  ctx.showRunning();
+  await ctx.settle();
+  const doc = ctx.window.document;
+  assert.equal(doc.getElementById('run-shell').classList.contains('detail-open'), false, 'nothing open yet');
+  assert.equal(doc.getElementById('runs-empty').hidden, false, 'the pane shows its empty state');
+
+  rowOf(ctx).dispatchEvent(new ctx.window.Event('click', { bubbles: true, cancelable: true }));
   assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`);
+  await ctx.settle();
+  assert.ok(doc.getElementById('run-shell').classList.contains('detail-open'), 'the pane opened the run');
+  assert.equal(doc.querySelector('#run-detail .rd-title').textContent, 'Demo run');
+  assert.ok(rowOf(ctx), 'the list stays beside it');
+  assert.ok(rowOf(ctx).classList.contains('selected'), 'the open run’s row is marked');
+  assert.equal(rowOf(ctx).getAttribute('aria-current'), 'true');
 });
 
-test('Enter on the focused header opens #running/<runId>', async () => {
+test('a pause repaints the row in place and lists the run under Needs you', async () => {
   const ctx = await boot();
   helloRunning(ctx);
   ctx.showRunning();
-  cardOf(ctx).querySelector('.rc-head')
-    .dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`);
+  await ctx.settle();
+  assert.equal(wordOf(rowOf(ctx)), 'Running');
+  assert.equal(needsRowOf(ctx), null);
+
+  ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'paused' });
+  await ctx.settle();
+  const row = rowOf(ctx);
+  assert.ok(row.classList.contains('runs-row-live'), 'still the live row (resumable, not a finished result)');
+  assert.equal(row.dataset.icon, 'paused');
+  assert.equal(wordOf(row), 'Paused');
+  assert.ok(needsRowOf(ctx), 'a paused run needs you');
+  assert.equal(wordOf(needsRowOf(ctx)), 'Paused');
 });
 
-test('Space on the focused header opens #running/<runId>', async () => {
+test('a pending question lists the run under Needs you; its row opens the run page, where the panel lives', async () => {
   const ctx = await boot();
   helloRunning(ctx);
   ctx.showRunning();
-  cardOf(ctx).querySelector('.rc-head')
-    .dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: ' ', bubbles: true }));
-  assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`);
-});
+  await ctx.settle();
+  const doc = ctx.window.document;
+  assert.equal(doc.querySelector('#runs-list .runs-needs'), null, 'nothing needs you without a question');
 
-test('the chevron opens #running/<runId>', async () => {
-  const ctx = await boot();
-  helloRunning(ctx);
-  ctx.showRunning();
-  cardOf(ctx).querySelector('.rc-open').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
-  assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`);
-});
-
-// REGRESSION GUARD: the action buttons ride the DELEGATED #run-list listener
-// (app.js:7957-8062). A stopPropagation on them would silently kill Pause/Stop.
-// Stop now confirms first (D5, Task 10), so its POST lands only after
-// `.stop-confirm`. What this case guards is the delegated hop and the "an action
-// button must not open the run" rule — not the directness of the call.
-test('Pause and Stop still reach their endpoints from the header cluster, without navigating', async () => {
-  const posts = [];
-  const ctx = await boot({
-    fetchHandler: (url, opts) => {
-      if (url.includes('/api/pause') || url.includes('/api/stop')) {
-        posts.push({ url, body: JSON.parse(opts.body) });
-        return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
-      }
-      return null;
-    },
-  });
-  helloRunning(ctx);
-  ctx.showRunning();
-  const card = cardOf(ctx);
-  const before = ctx.window.location.hash;
-  card.querySelector('.btn-pause').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
-  card.querySelector('.btn-stop').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
-  const modal = ctx.window.document.getElementById('stop-modal');
-  assert.equal(modal.dataset.runId, RUN_ID, 'Stop reached the delegated listener and opened the modal');
-  modal.querySelector('.stop-confirm').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(posts.length, 2, 'both actions posted');
-  assert.ok(posts[0].url.includes('/api/pause'));
-  assert.deepEqual(posts[0].body, { runId: RUN_ID });
-  assert.ok(posts[1].url.includes('/api/stop'));
-  assert.deepEqual(posts[1].body, { runId: RUN_ID });
-  assert.equal(ctx.window.location.hash, before, 'an action button must not open the run');
-});
-
-test('a paused run swaps Pause for Resume inside the cluster', async () => {
-  const ctx = await boot();
-  const { upsertRun, buildRunCard, paintRunCard, onState } = ctx.window.__np;
-  const r = upsertRun({ runId: 'p9', title: 't', projectDir: '/tmp/p', status: 'running' });
-  r.el = buildRunCard(r);
-  paintRunCard(r);
-  assert.equal(r.el.querySelector('.rc-acts .btn-pause').hidden, false);
-  assert.equal(r.el.querySelector('.rc-acts .btn-resume').hidden, true);
-  onState(r, { status: 'paused' });
-  assert.equal(r.el.querySelector('.rc-acts .btn-pause').hidden, true);
-  assert.equal(r.el.querySelector('.rc-acts .btn-resume').hidden, false);
-});
-
-test('a pending question shows the amber question-count pill in the action cluster', async () => {
-  const ctx = await boot();
-  helloRunning(ctx);
-  ctx.showRunning();
-  assert.equal(cardOf(ctx).querySelector('.rc-qpill').hidden, true, 'no pill without a question');
   ctx.dispatch({
     type: 'question', runId: RUN_ID, id: 'q1', kind: 'clarify',
     questions: [{ id: 'a', question: 'x?', options: ['1'] }, { id: 'b', question: 'y?', options: ['2'] }],
   });
-  const pill = cardOf(ctx).querySelector('.rc-qpill');
-  assert.equal(pill.hidden, false);
-  assert.equal(pill.textContent, '2 questions');
+  await ctx.settle();
+  const needs = needsRowOf(ctx);
+  assert.ok(needs, 'the asking run is listed under Needs you');
+  assert.equal(wordOf(needs), 'Question');
+  assert.equal(wordOf(rowOf(ctx)), 'Question', 'its group row says the same');
+  assert.ok(rowOf(ctx).querySelector('.runs-ic-ask'), 'and wears the question icon');
+  assert.equal(doc.querySelector('#runs-list .qpanel'), null, 'the question panel is NOT mounted on the list');
+
+  let scrolled = 0;
+  ctx.window.Element.prototype.scrollIntoView = function () { scrolled += 1; };
+  needs.dispatchEvent(new ctx.window.Event('click', { bubbles: true, cancelable: true }));
+  assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`, 'the row opens the run page');
+  await ctx.settle();
+  assert.ok(doc.querySelector('#run-detail .rd-questions .qpanel'), 'the panel is on the run page');
+  assert.ok(scrolled > 0, 'and the page lands on it (the removed strip’s job)');
+
   ctx.dispatch({ type: 'question-resolved', runId: RUN_ID, id: 'q1' });
-  assert.equal(cardOf(ctx).querySelector('.rc-qpill').hidden, true, 'pill clears when the question resolves');
+  await ctx.settle();
+  assert.equal(needsRowOf(ctx), null, 'the run leaves Needs you when the question resolves');
+  assert.equal(wordOf(rowOf(ctx)), 'Running');
+});
+
+test('a workflow proposal reads "Workflow review" on the row', async () => {
+  const ctx = await boot();
+  helloRunning(ctx);
+  ctx.showRunning();
+  ctx.dispatch({
+    type: 'question', runId: RUN_ID, id: 'w1', kind: 'workflow',
+    questions: [{ id: 'a', question: 'Pick', options: ['x'] }],
+  });
+  await ctx.settle();
+  assert.equal(wordOf(rowOf(ctx)), 'Workflow review');
+  assert.equal(wordOf(needsRowOf(ctx)), 'Workflow review');
 });

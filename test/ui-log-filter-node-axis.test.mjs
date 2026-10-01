@@ -1,8 +1,8 @@
 // test/ui-log-filter-node-axis.test.mjs
 // P6b — the shared log-filter bar on a v2 (graph) run: the `.log-f-step` select
 // re-purposed as the node select, the `.log-f-exec` execution chip, and the ONE
-// setter behind a footer-row click (applyRunLogFilter) on the card, the Running
-// detail and the History detail. Own boot idiom (a copy of
+// setter behind a footer-row click (applyRunLogFilter) on the run page's Logs tab
+// and the History detail. Own boot idiom (a copy of
 // test/ui-subagent-cycle-split.test.mjs:11-26) plus a WebSocket driver for the
 // Running detail and a fetch-armed History detail (the arm order is the one
 // test/ui-history-graph-log-link.test.mjs:200-215 documents as load-bearing).
@@ -72,96 +72,102 @@ const LINES = [
   { source: 'implementer', level: 'info', text: 'building', ts: 4, nodeId: 'n_b', executionId: 'x:n_b:1:p1t2', cycle: 1 },
 ];
 
-// A registered run whose card sits in #run-list (the delegated filter listeners
-// need both), with the manifest, the ledger and the lines already arrived.
-function liveRun(window, id = 'r1') {
+// A registered run with the manifest, the ledger and (optionally) the lines
+// already arrived, opened on its run page's Logs tab (the Running list card no
+// longer carries a log or a filter bar). Returns the `.rd-sec-logs` pane.
+async function liveRun(ctx, { id = 'r1', withLines = true } = {}) {
+  const { window, recv } = ctx;
   const np = window.__np;
-  const r = np.upsertRun({ runId: id, title: 't', projectDir: PROJECT, status: 'running' });
+  recv({ type: 'hello', runs: [{ runId: id, title: id, projectDir: PROJECT, status: 'running', kind: 'run', startedAt: '10:00:00', pendingQuestion: null }] });
+  await settle();
+  const r = np.getRun(id);
   np.onState(r, { status: 'running', stepper: MANIFEST, active: [], steps: STEPS });
-  for (const l of LINES) np.onLog(r, l);
-  const card = np.buildRunCard(r);
-  r.el = card;
-  window.document.getElementById('run-list').appendChild(card);
-  return { np, r, card };
+  if (withLines) for (const l of LINES) np.onLog(r, l);
+  go(window, `running/${id}/details/logs`);   // Details › Live log (the glance is the default)
+  await settle();
+  const sec = $(window, '#run-detail .rd-sec-logs');
+  assert.ok(sec, 'the run page has its Live log tab');
+  return { np, r, sec };
 }
 
-// ── the card ────────────────────────────────────────────────────────────────
+// ── the run page's Logs tab ─────────────────────────────────────────────────
 
-test('the live record keeps executionId, and the card bar re-purposes the step select as the node select', async () => {
-  const { window } = await boot();
-  const { np, r, card } = liveRun(window);
+test('the live record keeps executionId, and the Logs bar re-purposes the step select as the node select', async () => {
+  const ctx = await boot();
+  const { np, r, sec } = await liveRun(ctx);
   assert.deepEqual(r.logLines.map((l) => l.executionId), [undefined, 'x:n_a:1', 'x:n_a:2', 'x:n_b:1:p1t2']);
-  const sel = card.querySelector('.log-f-step');
+  const sel = sec.querySelector('.log-f-step');
   assert.equal(sel.dataset.axis, 'node');
   assert.equal(sel.getAttribute('aria-label'), 'Filter by node');
   assert.deepEqual([...sel.options].map((o) => o.textContent), ['all nodes', 'Planner', 'Implementer']);
   sel.value = 'n_a';
-  assert.equal(np.readLogFilterFrom(card).node, 'n_a');
-  assert.equal(np.readLogFilterFrom(card).step, '', 'the step axis is empty in node mode');
-  assert.equal(card.querySelector('.log-f-exec').hidden, true, 'the chip ships hidden');
-  assert.equal(np.readLogFilterFrom(card).execution, '');
-  // A node that first logs AFTER the card exists takes the incremental path
-  // (maybePaintLogFilters): with source, level and cycle all seen before, the
-  // node facet key is the ONLY thing that can rebuild the dropdowns.
+  assert.equal(np.readLogFilterFrom(sec).node, 'n_a');
+  assert.equal(np.readLogFilterFrom(sec).step, '', 'the step axis is empty in node mode');
+  assert.equal(sec.querySelector('.log-f-exec').hidden, true, 'the chip ships hidden');
+  assert.equal(np.readLogFilterFrom(sec).execution, '');
+  // A node that first logs AFTER the tab is open: the node facet key is the ONLY
+  // thing that can rebuild the dropdowns (source, level and cycle were seen before).
   np.onLog(r, { source: 'planner', level: 'info', text: 'bound', ts: 5, nodeId: 'n_end', executionId: 'x:n_end:1', cycle: 1 });
   assert.deepEqual([...sel.options].map((o) => o.textContent), ['all nodes', 'Planner', 'Implementer', 'End']);
 });
 
-test('applyRunLogFilter narrows the card to one execution and paints the chip; the chip click clears it', async () => {
-  const { window } = await boot();
-  const { np, r, card } = liveRun(window);
+test('applyRunLogFilter narrows the Logs tab to one execution and paints the chip; the chip click clears it', async () => {
+  const ctx = await boot();
+  const { window } = ctx;
+  const { np, r, sec } = await liveRun(ctx);
   np.applyRunLogFilter(r, { execution: 'x:n_a:2', node: 'n_a' });
-  const chip = card.querySelector('.log-f-exec');
+  const chip = sec.querySelector('.log-f-exec');
   assert.equal(chip.hidden, false);
   assert.equal(chip.querySelector('.lfe-text').textContent, 'Planner #2');
   assert.equal(chip.dataset.executionId, 'x:n_a:2');
-  assert.equal(card.querySelector('.log-f-step').value, 'n_a', 'the node select follows the patch');
-  assert.equal(np.readLogFilterFrom(card).execution, 'x:n_a:2');
-  assert.deepEqual(lines(card).map((t) => /second pass/.test(t)), [true], 'one execution → one line');
+  assert.equal(sec.querySelector('.log-f-step').value, 'n_a', 'the node select follows the patch');
+  assert.equal(np.readLogFilterFrom(sec).execution, 'x:n_a:2');
+  assert.deepEqual(lines(sec).map((t) => /second pass/.test(t)), [true], 'one execution → one line');
   click(window, chip.querySelector('.lfe-x'));
   assert.equal(chip.hidden, true);
   assert.equal(r.logFilter.execution, '');
-  assert.equal(np.readLogFilterFrom(card).execution, '');
-  assert.equal(lines(card).length, 2, 'back to the node axis: both Planner lines');
+  assert.equal(np.readLogFilterFrom(sec).execution, '');
+  assert.equal(lines(sec).length, 2, 'back to the node axis: both Planner lines');
 });
 
 test('a task slice names its title on the chip; a row is matched by executionId only, never by key', async () => {
-  const { window } = await boot();
-  const { np, r, card } = liveRun(window);
+  const ctx = await boot();
+  const { np, r, sec } = await liveRun(ctx);
   np.applyRunLogFilter(r, { execution: 'x:n_b:1:p1t2', node: 'n_b' });
-  assert.equal(card.querySelector('.log-f-exec .lfe-text').textContent, 'Implementer #1 · Add schema');
+  assert.equal(sec.querySelector('.log-f-exec .lfe-text').textContent, 'Implementer #1 · Add schema');
   np.applyRunLogFilter(r, { execution: 'x:n_zz:9', node: '' });
-  assert.equal(card.querySelector('.log-f-exec .lfe-text').textContent, 'x:n_zz:9', 'an unknown execution shows its id');
+  assert.equal(sec.querySelector('.log-f-exec .lfe-text').textContent, 'x:n_zz:9', 'an unknown execution shows its id');
   assert.equal(np.executionChipText({ steps: [{ key: 'x:n_a:2', nodeId: 'n_a', ordinal: 2 }], stepper: MANIFEST }, 'x:n_a:2'),
     'x:n_a:2', 'a key-only row (no executionId) is not the execution');
 });
 
-test('a manual node or cycle pick on the card bar clears the execution chip and keeps the pick', async () => {
-  const { window } = await boot();
-  const { np, r, card } = liveRun(window);
+test('a manual node or cycle pick on the Logs bar clears the execution chip and keeps the pick', async () => {
+  const ctx = await boot();
+  const { window } = ctx;
+  const { np, r, sec } = await liveRun(ctx);
   np.applyRunLogFilter(r, { execution: 'x:n_a:2', node: 'n_a' });
-  const sel = card.querySelector('.log-f-step');
+  const sel = sec.querySelector('.log-f-step');
   sel.value = 'n_b';
   change(window, sel);
   assert.equal(r.logFilter.execution, '', 'the manual pick cleared the execution axis');
   assert.equal(r.logFilter.node, 'n_b', 'and the pick itself survived the chip repaint');
-  assert.equal(card.querySelector('.log-f-exec').hidden, true);
+  assert.equal(sec.querySelector('.log-f-exec').hidden, true);
   assert.equal(sel.value, 'n_b');
-  assert.deepEqual(lines(card).map((t) => /building/.test(t)), [true]);
+  assert.deepEqual(lines(sec).map((t) => /building/.test(t)), [true]);
   // A level pick is not a broader pick: it leaves the chip alone.
   np.applyRunLogFilter(r, { execution: 'x:n_a:2', node: 'n_a' });
-  const lvl = card.querySelector('.log-f-level');
+  const lvl = sec.querySelector('.log-f-level');
   lvl.value = 'info';
   change(window, lvl);
   assert.equal(r.logFilter.execution, 'x:n_a:2');
-  assert.equal(card.querySelector('.log-f-exec').hidden, false);
+  assert.equal(sec.querySelector('.log-f-exec').hidden, false);
 });
 
 test('a pre-P6 filter literal (no node/execution keys) does not force a repaint on every paint', async () => {
-  const { window } = await boot();
-  const { np, r } = liveRun(window);
+  const ctx = await boot();
+  const { np, r, sec } = await liveRun(ctx);
   r.logFilter = { source: '', level: '', step: '', cycle: '', search: '' };
-  assert.equal(np.paintLogFilters(r, r.el), false);
+  assert.equal(np.paintLogFilters(r, sec), false);
 });
 
 // P6a seam (found by the merged-tree CDP run): the footer rows a click comes from
@@ -169,54 +175,19 @@ test('a pre-P6 filter literal (no node/execution keys) does not force a repaint 
 // a node that has not logged yet must keep the node axis and offer its own option,
 // or readLogFilterFrom reads `node: ''` back and the reconcile wipes the pick.
 test('a node pick that the log has not produced yet keeps the node axis and survives the next paint', async () => {
-  const { window } = await boot();
-  const np = window.__np;
-  const r = np.upsertRun({ runId: 'r9', title: 't', projectDir: PROJECT, status: 'running' });
-  np.onState(r, { status: 'running', stepper: MANIFEST, active: [], steps: STEPS });
-  const card = np.buildRunCard(r);
-  r.el = card;
-  window.document.getElementById('run-list').appendChild(card);
+  const ctx = await boot();
+  const { np, r, sec } = await liveRun(ctx, { id: 'r9', withLines: false });
   assert.deepEqual(r.logLines, [], 'no line has arrived: facets.nodes is empty');
 
   np.applyRunLogFilter(r, { node: 'n_a' });
-  const sel = card.querySelector('.log-f-step');
+  const sel = sec.querySelector('.log-f-step');
   assert.equal(sel.dataset.axis, 'node', 'the axis stays on nodes for a pending pick');
   assert.deepEqual([...sel.options].map((o) => o.textContent), ['all nodes', 'Planner'],
     'the picked node is injected as its own option (same honesty as History __setLogFilter)');
   assert.equal(sel.value, 'n_a');
-  assert.equal(np.readLogFilterFrom(card).node, 'n_a', 'so the DOM can represent the model value');
-  np.paintLogFilters(r, card);
+  assert.equal(np.readLogFilterFrom(sec).node, 'n_a', 'so the DOM can represent the model value');
+  np.paintLogFilters(r, sec);
   assert.equal(r.logFilter.node, 'n_a', 'a second paint does not wipe the pick');
-});
-
-// ── the Running detail ──────────────────────────────────────────────────────
-
-test('the Running-detail bar mirrors the chip through applyRunLogFilter, and its chip click clears both bars', async () => {
-  const { window, recv } = await boot();
-  const np = window.__np;
-  recv({ type: 'hello', runs: [{ runId: 'r1', title: 'r1', projectDir: PROJECT, status: 'running', kind: 'run', startedAt: '10:00:00', pendingQuestion: null }] });
-  await settle();
-  const r = np.getRun('r1');
-  np.onState(r, { status: 'running', stepper: MANIFEST, active: [], steps: STEPS });
-  for (const l of LINES) np.onLog(r, l);
-  go(window, 'running/r1');
-  await settle();
-  const sec = $(window, '#run-detail .rd-sec-logs');
-  assert.ok(sec, 'the Live log tab is the default section');
-  const dsel = sec.querySelector('.log-f-step');
-  assert.equal(dsel.dataset.axis, 'node');
-  np.applyRunLogFilter(r, { execution: 'x:n_a:2', node: 'n_a' });
-  const dchip = sec.querySelector('.log-f-exec');
-  assert.equal(dchip.hidden, false);
-  assert.equal(dchip.querySelector('.lfe-text').textContent, 'Planner #2');
-  assert.equal(dsel.value, 'n_a');
-  assert.deepEqual(lines(sec).map((t) => /second pass/.test(t)), [true]);
-  assert.equal(r.el.querySelector('.log-f-exec').hidden, false, 'the card bar shows the same chip');
-  click(window, dchip.querySelector('.lfe-x'));
-  assert.equal(dchip.hidden, true);
-  assert.equal(r.logFilter.execution, '');
-  assert.equal(r.el.querySelector('.log-f-exec').hidden, true, 'the detail chip clears the card bar too');
-  assert.equal(lines(sec).length, 2);
 });
 
 // ── the History detail ──────────────────────────────────────────────────────

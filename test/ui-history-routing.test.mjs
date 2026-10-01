@@ -5,10 +5,13 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 
-// Behavior tests for the two-screen History shell: `#history/<projectKey>/<id>`
-// routes through the existing parseHash/showView machinery into the detail
-// screen, and `#history` (or Back / Escape / leaving the view) returns to the
-// list. We boot the REAL app.js against the REAL index.html under jsdom, stub
+// Behavior tests for the saved run in the Runs pane: `#history/<projectKey>/<id>`
+// routes through the existing parseHash/showView machinery into `#hist-detail`,
+// inside `#runs-pane`, beside the compact list. Side by side (the `split` layout,
+// jsdom's default) a bare `#runs`/`#history` reopens the remembered run, so nothing
+// on the page closes the pane; in the narrow `slide` layout (set by hand: jsdom has
+// no ResizeObserver) `#runs` (Back / Escape) slides the saved run away and returns
+// to the list. We boot the REAL app.js against the REAL index.html under jsdom, stub
 // fetch + WebSocket, and drive navigation purely through the hash.
 //
 // Each test gets a fresh DOM + a fresh module import (cache-busted) so module
@@ -95,6 +98,12 @@ function go(window, hash) {
   window.dispatchEvent(new window.Event('hashchange'));
 }
 
+// The narrow layout, by hand: jsdom has no ResizeObserver, so #runs-shell stays `split`
+// unless a test flips it (measureRunsLayout keeps the last value on a 0px width).
+function slide(window) {
+  window.document.getElementById('runs-shell').dataset.layout = 'slide';
+}
+
 const KEY = 'proj-alpha-abcd1234';
 const ROW = {
   id: 'fcec04e8', projectKey: KEY, projectName: 'Alpha', projectDir: '/tmp/proj',
@@ -163,44 +172,70 @@ test('#history/<key>/<id> opens the detail screen and fetches the keyed detail U
   assert.equal(window.document.querySelector('#hist-detail .hd-title').textContent, ROW.title);
 });
 
-test('back to #history closes the detail screen', async () => {
+test('back to #history: side by side it reopens the saved run; in the slide it closes the detail screen', async () => {
   const ctx = await boot({ fetchHandler: handler });
   const shell = await openDetail(ctx);
   assert.ok(shell.classList.contains('detail-open'));
 
+  // Split: a bare #history is #runs, which restores the run the pane showed last (D6).
   go(ctx.window, 'history');
   await settle(ctx.window);
-  assert.equal(shell.classList.contains('detail-open'), false, 'the track slides back to the list');
+  assert.equal(ctx.window.location.hash.replace(/^#/, ''), detailHash, 'side by side the pane keeps the saved run');
+  assert.ok(shell.classList.contains('detail-open'));
+
+  slide(ctx.window);
+  go(ctx.window, 'history');
+  await settle(ctx.window);
+  assert.equal(ctx.window.location.hash, '#runs', 'the legacy bare hash lands on #runs');
+  assert.equal(shell.classList.contains('detail-open'), false, 'the pane slides back to the list');
   // NOT asserting #hist-detail is empty here: this is the ANIMATED close path and
   // jsdom never fires `transitionend`, so the screen is emptied only by the 600ms
   // fallback timer. The INSTANT path's clearing is covered synchronously by
   // 'leaving the history view resets the track' below.
 });
 
-test('the Back button returns to the list', async () => {
+test('the Back button: slide returns to the list; side by side it keeps the saved run', async () => {
   const ctx = await boot({ fetchHandler: handler });
   const shell = await openDetail(ctx);
   const back = ctx.window.document.querySelector('#hist-detail .hd-back');
   assert.ok(back, 'the detail header carries a Back button');
 
+  // Split: CSS hides the button (the list is in view); a stray click lands on #runs, which
+  // restores this very run, so the glance stays.
   back.dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
   await settle(ctx.window);
-  assert.equal(ctx.window.location.hash.replace(/^#/, ''), 'history');
+  assert.equal(ctx.window.location.hash.replace(/^#/, ''), detailHash);
+  assert.ok(shell.classList.contains('detail-open'));
+
+  slide(ctx.window);
+  ctx.window.document.querySelector('#hist-detail .hd-back')
+    .dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
+  await settle(ctx.window);
+  assert.equal(ctx.window.location.hash.replace(/^#/, ''), 'runs');
   assert.equal(shell.classList.contains('detail-open'), false);
 });
 
-test('Escape with the detail open and no modal navigates back', async () => {
+test('Escape with the detail open and no modal: side by side it keeps the pane; in the slide it navigates back', async () => {
   const ctx = await boot({ fetchHandler: handler });
   const shell = await openDetail(ctx);
 
   ctx.window.document.dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await settle(ctx.window);
-  assert.equal(ctx.window.location.hash.replace(/^#/, ''), 'history');
+  assert.equal(ctx.window.location.hash.replace(/^#/, ''), detailHash,
+    'split: Escape on the glance does nothing, the list is already in view (D16)');
+  assert.ok(shell.classList.contains('detail-open'));
+
+  slide(ctx.window);
+  ctx.window.document.dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle(ctx.window);
+  assert.equal(ctx.window.location.hash.replace(/^#/, ''), 'runs');
   assert.equal(shell.classList.contains('detail-open'), false);
 });
 
 test('Escape is swallowed while a modal owns it', async () => {
   const ctx = await boot({ fetchHandler: handler });
+  // Slide: there a leaked Escape WOULD navigate to #runs (side by side it does nothing anyway).
+  slide(ctx.window);
   const shell = await openDetail(ctx);
   // At this task the detail screen has no overlay trigger of its own, so reveal
   // #confirm-modal directly. This exercises the same capture-phase guard every
@@ -244,9 +279,12 @@ test('unknown id renders the detail error state with a working Back', async () =
   assert.equal(err.hidden, false, 'the error slot is revealed');
   assert.match(err.textContent, /Could not load run/);
 
+  // Back is shown in the slide layout only (side by side the list is in view).
+  slide(window);
   window.document.querySelector('#hist-detail .hd-back').dispatchEvent(new window.Event('click', { bubbles: true }));
   await settle(window);
-  assert.equal(window.location.hash.replace(/^#/, ''), 'history');
+  assert.equal(window.location.hash.replace(/^#/, ''), 'runs');
+  assert.equal(window.document.querySelector('#hist-shell').classList.contains('detail-open'), false);
 });
 
 test('deep-link boot opens the detail directly (the list still loads behind it)', async () => {
@@ -261,6 +299,8 @@ test('deep-link boot opens the detail directly (the list still loads behind it)'
   assert.ok(window.document.querySelector('#hist-shell').classList.contains('detail-open'));
   assert.ok(calls.some((c) => c.url.includes(`/api/history/${KEY}/${ROW.id}`)));
   assert.ok(calls.some((c) => c.url === '/api/history'), 'the list loads behind the detail');
+  assert.ok(window.document.querySelector(`#runs-list .runs-row[data-slot="group"][data-pipeline-id="${ROW.id}"]`),
+    'and its row is in the list beside the pane');
 });
 
 test('deep-link boot with BOTH endpoints live still upgrades the record from the stub', async () => {
@@ -307,50 +347,61 @@ test('routing into the detail paints the header meta and the branch row', async 
     'a done run offers no Resume');
 });
 
-test('opening the detail moves focus to Back', async () => {
-  // Spec §11, direction 1. It also has to happen AFTER the list is marked inert:
-  // moving focus into a subtree is fine, but leaving document.activeElement
-  // inside a freshly-inert one is not.
+test('opening the detail: side by side focus lands on the glance title; in the slide on Back', async () => {
+  // Spec §11, direction 1. In the slide it also has to happen AFTER the list is marked
+  // inert: moving focus into a subtree is fine, but leaving document.activeElement
+  // inside a freshly-inert one is not. Side by side Back is hidden (the list is in
+  // view), so a hash-driven open lands on the glance's title instead of <body>.
   const ctx = await boot({ fetchHandler: handler });
+  await openDetail(ctx);
+  assert.equal(ctx.window.document.activeElement,
+    ctx.window.document.querySelector('#hist-detail .hd-glance .rd-page-title'),
+    'split: focus lands on the saved run\'s glance title');
+
+  go(ctx.window, 'new');
+  await settle(ctx.window);
+  slide(ctx.window);
   await openDetail(ctx);
   const back = ctx.window.document.querySelector('#hist-detail .hd-back');
   assert.equal(ctx.window.document.activeElement, back,
-    'focus lands on the detail screen, not on whatever the list left behind');
+    'slide: focus lands on the detail screen, not on whatever the list left behind');
 });
 
-test('closing the detail restores focus to the card that opened it', async () => {
-  // Spec §11, direction 2. The click must go through the CARD's own handler:
-  // that is what records the return target (a deep link leaves it null and the
-  // restore is skipped).
+test('slide layout: closing the detail restores focus to the row that opened it', async () => {
+  // Spec §11, direction 2. The row the focus comes home to is re-queried by its data
+  // stamps (pipeline id + project key), recorded when the saved run opened.
   const { window } = await boot({ fetchHandler: handler });
-  go(window, 'history');
+  slide(window);
+  go(window, 'runs');
   await settle(window, 6);
-  const head = window.document.querySelector('#history .hist-card .hist-head');
-  assert.ok(head, 'the list painted a card to open from');
+  const row = window.document.querySelector(`#runs-list .runs-row[data-slot="group"][data-pipeline-id="${ROW.id}"]`);
+  assert.ok(row, 'the list painted a row to open from');
 
-  head.dispatchEvent(new window.Event('click', { bubbles: true }));
+  row.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
   window.dispatchEvent(new window.Event('hashchange'));
   await settle(window);
-  assert.equal(window.location.hash.replace(/^#/, ''), detailHash, 'the card navigated');
+  assert.equal(window.location.hash.replace(/^#/, ''), detailHash, 'the row navigated');
 
   window.document.querySelector('#hist-detail .hd-back')
     .dispatchEvent(new window.Event('click', { bubbles: true }));
   window.dispatchEvent(new window.Event('hashchange'));
   await settle(window);
-  // Matched by data stamps, not by node identity: the restore re-queries the card
+  // Matched by data stamps, not by node identity: the restore re-queries the row
   // so it survives a list repaint between open and close.
   const active = window.document.activeElement;
-  assert.ok(active && active.classList.contains('hist-head'),
-    'focus returned to a list card head, not to <body>');
-  assert.equal(active.closest('.hist-card').dataset.pipelineId, ROW.id,
-    'and to the card the detail was opened from');
+  assert.ok(active && active.classList.contains('runs-row'),
+    'focus returned to a list row, not to <body>');
+  assert.equal(active.dataset.pipelineId, ROW.id,
+    'and to the row the detail was opened from');
+  assert.equal(active.dataset.projectKey, KEY);
 });
 
-test('the closing detail is inert for the whole slide-out', async () => {
+test('slide layout: the closing detail is inert for the whole slide-out', async () => {
   // Its content is only removed on transitionend, so for those ~460ms `.hd-back`,
   // the tab pills and `.hd-archive` sit off-screen behind the list. `aria-hidden`
   // alone does NOT remove focusability — only `inert` does.
   const ctx = await boot({ fetchHandler: handler });
+  slide(ctx.window);
   await openDetail(ctx);
   const host = ctx.window.document.querySelector('#hist-detail');
   assert.equal(host.hasAttribute('inert'), false, 'the open screen is interactive');
@@ -367,23 +418,25 @@ test('the closing detail is inert for the whole slide-out', async () => {
   assert.equal(host.hasAttribute('inert'), false, 'reopening restores it');
 });
 
-test('leaving the history view does not park focus on a hidden list card', async () => {
-  // The focus restore exists for list<->detail hops. On the instant path the whole
-  // section is hidden 17 lines later, so restoring there hands focus to a node
-  // inside a `display:none` subtree.
+test('leaving the history view does not park focus on a hidden list row', async () => {
+  // The focus restore exists for list<->detail hops (slide layout only). On the instant
+  // path the whole section is hidden, so restoring there hands focus to a node inside
+  // a `display:none` subtree.
   const { window } = await boot({ fetchHandler: handler });
-  go(window, 'history');
+  slide(window);   // the only layout whose close hands focus to a row
+  go(window, 'runs');
   await settle(window, 6);
-  window.document.querySelector('#history .hist-card .hist-head')
-    .dispatchEvent(new window.Event('click', { bubbles: true }));
+  window.document.querySelector(`#runs-list .runs-row[data-slot="group"][data-pipeline-id="${ROW.id}"]`)
+    .dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
   window.dispatchEvent(new window.Event('hashchange'));
   await settle(window);
+  assert.equal(window.location.hash.replace(/^#/, ''), detailHash);
 
-  go(window, 'running');
+  go(window, 'new');
   await settle(window);
   const active = window.document.activeElement;
-  assert.equal(active ? active.closest('.hist-card') : null, null,
-    'focus is not restored into the History list the view switch just hid');
+  assert.equal(active ? active.closest('.runs-row') : null, null,
+    'focus is not restored into the Runs list the view switch just hid');
 });
 
 test('leaving the history view resets the track', async () => {
@@ -391,7 +444,7 @@ test('leaving the history view resets the track', async () => {
   const shell = await openDetail(ctx);
   assert.ok(shell.classList.contains('detail-open'));
 
-  go(ctx.window, 'running');
+  go(ctx.window, 'new');
   await settle(ctx.window);
   assert.equal(shell.classList.contains('detail-open'), false);
   assert.equal(ctx.window.document.querySelector('#hist-detail').children.length, 0,

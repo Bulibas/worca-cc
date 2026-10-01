@@ -13,9 +13,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { app } from '../ui/server.mjs';
 import { _testing as gitInfo } from '../src/core/git-info.mjs';
+import { _testing as gitSync } from '../src/core/git-sync.mjs';
 import { projectKey } from '../src/core/store.mjs';
 import { _resetForTests } from '../src/core/db.mjs';
-import { writeStoreMeta, persistPrState } from '../src/core/artifacts.mjs';
+import { writeStoreMeta, persistPrState, createPipeline, writeState } from '../src/core/artifacts.mjs';
+import { _testing as prDesc, PR_BODY_MAX } from '../src/core/pr-description.mjs';
 import { setPrRemotePrefs, readPrRemotePrefs } from '../src/core/config.mjs';
 import { createTicket, markTicketFired } from '../src/core/scheduler.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
@@ -42,12 +44,25 @@ before(async () => {
 after(async () => {
   if (srv) await new Promise((r) => srv.close(r));
   gitInfo.reset();
+  gitSync.reset();
   _resetForTests();
   if (prevHome === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prevHome;
   await rm(home, { recursive: true, force: true });
 });
 
-beforeEach(() => gitInfo.reset());
+beforeEach(() => { gitInfo.reset(); gitSync.reset(); prDesc.reset(); });
+
+// git-sync's runner (the base-freshness fetch, #527): upstream is a github remote; every argv
+// lands in `seen`; `rev-list --count` answers `moved`.
+function stubSyncRepo(seen, { moved = '0' } = {}) {
+  gitSync.setRunner((args) => {
+    seen.push(args);
+    if (args[0] === 'remote' && args[1] === 'get-url') return Promise.resolve({ ok: true, stdout: 'git@github.com:up/repo.git\n', stderr: '', code: 0 });
+    if (args[0] === 'rev-list' && args[1] === '--count') return Promise.resolve({ ok: true, stdout: `${moved}\n`, stderr: '', code: 0 });
+    if (args[0] === 'rev-parse') return Promise.resolve({ ok: false, stdout: '', stderr: '', code: 1 });
+    return Promise.resolve({ ok: true, stdout: '', stderr: '', code: 0 });
+  });
+}
 
 const post = (body) => fetch(`${base}/api/pr`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -320,13 +335,39 @@ test('GET /api/pr/remotes lists each remote\'s branches (local refs, no HEAD, no
   assert.equal(j.defaultBase, 'main');
   assert.deepEqual(j.branches, { origin: ['main', 'release'], upstream: ['dev', 'main'] });
   assert.ok(seen.some((c) => c[1] === 'for-each-ref'), 'read from the local remote-tracking refs');
-  assert.ok(!seen.some((c) => c[1] === 'fetch' || c[1] === 'ls-remote'), 'never the network');
+  assert.ok(!seen.some((c) => c[1] === 'fetch' || c[1] === 'ls-remote'), 'git-info itself never goes to the network');
+  // The fixture dir is not a git repo: "no remote" is nothing to compare, never "stale".
+  assert.deepEqual(j.baseStatus, { base: 'main', remote: 'upstream', movedSinceRun: null, fetchedAt: null, stale: false });
   // Refs that cannot be read are no reason to fail the dialog: no branches, same chain.
   gitInfo.setRunner((cmd, args) => (cmd === 'git' && args[0] === 'for-each-ref'
     ? Promise.resolve({ ok: false, stdout: '', stderr: 'fatal: bad', code: 128 })
     : Promise.resolve({ ok: true, stdout: cmd === 'git' && args[0] === 'remote' ? REMOTES_V : '', stderr: '', code: 0 })));
   const k = await (await getRemotes({ projectKey: betaKey, id: betaId })).json();
   assert.deepEqual([k.branches, k.chain, k.defaultBase], [{}, ['main'], 'main']);
+});
+
+test('GET /api/pr/remotes fetches the base remote once (git-sync) and reports baseStatus', async () => {
+  await setPrRemotePrefs(betaRepo, {});
+  stubForkRepo([]);
+  const seen = [];
+  stubSyncRepo(seen);
+  const j = await (await getRemotes({ projectKey: betaKey, id: betaId })).json();
+  assert.deepEqual(seen.filter((a) => a[0] === 'fetch'), [['fetch', '--prune', '--no-tags', 'upstream']], 'exactly one fetch of the base remote');
+  assert.equal(j.baseStatus.remote, 'upstream');
+  assert.equal(j.baseStatus.stale, false);
+  assert.equal(j.baseStatus.movedSinceRun, null, 'no recorded baseSha: unknown, never 0');
+});
+
+test('GET /api/pr/remotes: a run with baseSha gets baseStatus.movedSinceRun from rev-list --count', async () => {
+  await setPrRemotePrefs(betaRepo, {});
+  const seeded = await seedPipeline(betaRepo, { title: 'Base moved', status: 'stopped', startedAt: '2026-06-02T00:00:00Z',
+    branch: { source: 'main', feature: 'worca-cc/base-moved', branchKept: true, commit: 'abc', baseSha: 'a'.repeat(40) } });
+  stubForkRepo([]);
+  const seen = [];
+  stubSyncRepo(seen, { moved: '3' });
+  const j = await (await getRemotes({ projectKey: betaKey, id: seeded.id })).json();
+  assert.equal(j.baseStatus.movedSinceRun, 3);
+  assert.ok(seen.some((a) => a[0] === 'rev-list' && a[2] === `${'a'.repeat(40)}..refs/remotes/upstream/main`), 'measured from baseSha to the base remote');
 });
 
 test('POST /api/pr baseBranch reaches gh pr create --base; the response shape and the remembered remotes are unchanged', async () => {
@@ -395,4 +436,125 @@ test('a chained run: GET offers the chain root first as the default; POST withou
   stubForkRepo(s2);
   assert.equal((await post({ projectKey: betaKey, id: nb3, baseBranch: 'dev' })).status, 200);
   assert.deepEqual(s2.find((c) => c[2] === 'create').slice(5, 7), ['--base', 'dev']);
+});
+
+// ---------------------------------------------------------------------------
+// The "Ship it?" modal's PR description: an optional `body` on POST /api/pr, and
+// POST /api/pr/describe behind its Generate with AI button.
+// ---------------------------------------------------------------------------
+const bodyArg = (seen) => {
+  const c = seen.find((x) => x[0] === 'gh' && x[1] === 'pr' && x[2] === 'create');
+  return c[c.indexOf('--body') + 1];
+};
+
+test('POST /api/pr without a body (absent, null or blank) keeps today\'s --body byte-for-byte', async () => {
+  for (const extra of [{}, { body: null }, { body: '' }, { body: '  \n ' }]) {
+    const seen = [];
+    stubForkRepo(seen);
+    assert.equal((await post({ projectKey: betaKey, id: betaId, ...extra })).status, 200, JSON.stringify(extra));
+    assert.equal(bodyArg(seen), 'My feature', `${JSON.stringify(extra)}: createPr falls back to the title`);
+  }
+});
+
+test('POST /api/pr sends the user description as the PR body, the attribution footer after it', async () => {
+  let seen = [];
+  stubForkRepo(seen);
+  assert.equal((await post({ projectKey: betaKey, id: betaId, body: '## Summary\nRetries fetch.\n\n' })).status, 200);
+  assert.equal(bodyArg(seen), '## Summary\nRetries fetch.', 'a local run has no footer; trailing whitespace is dropped');
+
+  const { id, dir } = await createPipeline(betaRepo, { prompt: 'p', title: 'Signed feature', startedBy: 'grace@example.com' });
+  await writeState(dir, { projectKey: betaKey, id, title: 'Signed feature', status: 'done',
+    branch: { source: 'main', feature: 'worca-cc/signed', branchKept: true } });
+  seen = [];
+  stubForkRepo(seen);
+  assert.equal((await post({ projectKey: betaKey, id, body: 'Did the thing.' })).status, 200);
+  assert.equal(bodyArg(seen), 'Did the thing.\n\n---\nStarted by grace@example.com via worca');
+  seen = [];
+  stubForkRepo(seen);
+  assert.equal((await post({ projectKey: betaKey, id })).status, 200);
+  assert.equal(bodyArg(seen), 'Signed feature\n\n---\nStarted by grace@example.com via worca', 'no description: today\'s title + footer');
+});
+
+test('POST /api/pr refuses a non-string or oversized body with 400 before anything is pushed; the largest one fits the JSON limit', async () => {
+  for (const bad of [42, true, { text: 'x' }, ['x'], 'x'.repeat(PR_BODY_MAX + 1)]) {
+    const seen = [];
+    stubForkRepo(seen);
+    const r = await post({ projectKey: betaKey, id: betaId, body: bad });
+    assert.equal(r.status, 400, JSON.stringify(bad).slice(0, 40));
+    assert.match((await r.json()).error, /body/);
+    assert.ok(!seen.some((c) => c[0] === 'git' && c[1] === 'push'), 'nothing pushed');
+  }
+  const seen = [];
+  stubForkRepo(seen);
+  // Multi-byte on purpose: ~120 KB of JSON, well inside the global express.json limit (8mb).
+  const big = 'é'.repeat(PR_BODY_MAX);
+  assert.equal((await post({ projectKey: betaKey, id: betaId, body: big })).status, 200);
+  assert.equal(bodyArg(seen), big);
+});
+
+const postDescribe = (body, opts = {}) => fetch(`${base}/api/pr/describe`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), ...opts,
+});
+
+test('POST /api/pr/describe drafts the description from the run — no gh needed — and forwards the base branch', async () => {
+  gitInfo.setRunner((cmd) => Promise.resolve(
+    cmd === 'gh' ? { ok: false, stdout: '', stderr: 'not found', code: 127 }
+                 : { ok: true, stdout: '', stderr: '', code: 0 }));
+  const seen = [];
+  prDesc.setRunClaude(async (o) => { seen.push(o); return { text: '```markdown\n## Summary\nDoes x.\n```' }; });
+  const r = await postDescribe({ projectKey: betaKey, id: betaId, baseBranch: 'dev' });
+  assert.equal(r.status, 200);
+  assert.deepEqual(await r.json(), { ok: true, body: '## Summary\nDoes x.' });
+  assert.equal(seen.length, 1);
+  assert.match(seen[0].prompt, /My feature/);
+  assert.match(seen[0].prompt, /## Target branch\ndev/);
+  assert.deepEqual(seen[0].allowedTools, []);
+  assert.ok(seen[0].signal, 'the call carries a signal, so a closed request can abort it');
+  const byDir = await postDescribe({ projectDir: betaRepo, id: betaId });
+  assert.equal(byDir.status, 200, 'the project dir resolves the same run');
+  assert.equal(seen.length, 2);
+  assert.doesNotMatch(seen[1].prompt, /## Target branch/, 'no baseBranch: none named');
+});
+
+test('POST /api/pr/describe: 400 without id or with a bad baseBranch, 404 for an unknown run — the model never runs', async () => {
+  let calls = 0;
+  prDesc.setRunClaude(async () => { calls++; return { text: 'x' }; });
+  assert.equal((await postDescribe({ projectKey: betaKey })).status, 400);
+  assert.equal((await postDescribe({ projectKey: betaKey, id: betaId, baseBranch: 'bad ref..' })).status, 400);
+  assert.equal((await postDescribe({ projectKey: betaKey, id: 'deadbeef' })).status, 404);
+  assert.equal((await postDescribe({ projectKey: 'Not A Key', id: betaId })).status, 404);
+  assert.equal(calls, 0);
+});
+
+test('POST /api/pr/describe maps a signed-out CLI to 409 claude-signed-out, any other failure to 500', async () => {
+  prDesc.setRunClaude(async () => { throw new Error('claude exited with code 1: Not logged in · Please run /login'); });
+  let r = await postDescribe({ projectKey: betaKey, id: betaId });
+  let j = await r.json();
+  assert.equal(r.status, 409, JSON.stringify(j));
+  assert.equal(j.code, 'claude-signed-out');
+  prDesc.setRunClaude(async () => ({ text: '   ' }));
+  r = await postDescribe({ projectKey: betaKey, id: betaId });
+  j = await r.json();
+  assert.equal(r.status, 500, JSON.stringify(j));
+  assert.match(j.error, /empty description/);
+});
+
+test('POST /api/pr/describe: a request the client abandons aborts the model call', async () => {
+  let aborted = false;
+  const started = new Promise((resolve) => {
+    prDesc.setRunClaude((o) => {
+      resolve();
+      return new Promise((_, reject) => o.signal.addEventListener('abort', () => {
+        aborted = true;
+        const e = new Error('aborted'); e.name = 'AbortError'; reject(e);
+      }));
+    });
+  });
+  const ac = new AbortController();
+  const pending = postDescribe({ projectKey: betaKey, id: betaId }, { signal: ac.signal }).catch(() => null);
+  await started;
+  ac.abort();
+  await pending;
+  for (let i = 0; i < 200 && !aborted; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(aborted, true);
 });

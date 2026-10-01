@@ -1,6 +1,6 @@
 // test/ui-report-run.test.mjs — "Report this run": the preview modal History detail's
 // per-run ⋯ menu opens. Running detail does not offer it; a finished run there links
-// to History instead. The modal renders the EXACT payload
+// to its saved page instead. The modal renders the EXACT payload
 // POST /api/pipelines/:id/report returns, and nothing leaves the machine until the
 // user presses Copy, Download, or the issue link — worca itself never calls GitHub.
 //
@@ -17,9 +17,23 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM, VirtualConsole } from 'jsdom';
+import { previewText, REPORT_PREVIEW_DEBOUNCE_MS } from '../ui/public/report-run.mjs';
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
+const cssPath = fileURLToPath(new URL('../ui/public/style.css', import.meta.url));
+// Comments are stripped FIRST. This file documents several of its own rules in
+// prose that contains braces, and a `{` or `}` inside one is read as a rule
+// boundary — which splits the capture in two and makes the "exactly one rule"
+// count below see a phantom. Stripping removes that whole class of accident.
+const css = readFileSync(cssPath, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+
+/** The first flat rule whose selector list contains `sel` — test/ui-pinned-sidebar.test.mjs:16-20. */
+function ruleBody(sel) {
+  const escaped = sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = css.match(new RegExp('(?:^|[\\s,}])' + escaped + '\\s*\\{([^}]*)\\}'));
+  return m ? m[1] : null;
+}
 
 const PKEY = 'proj-alpha-11111111';
 const PID = 'abc123de';
@@ -175,13 +189,13 @@ function arms({ report = REPORT, reportStatus = 200, filed = FILED, filedStatus 
 }
 
 /**
- * Land on History detail. Visit the LIST first so /api/history delivers the
+ * Land on History detail. Visit the Runs LIST first so /api/history delivers the
  * authoritative row: go straight to the detail hash and `record` is the minimal
  * {id, projectKey} deep-link stub, which is a different (and, for the .hd-report gate,
  * more dangerous) code path — covered separately below.
  */
 async function openHistoryDetail(ctx) {
-  go(ctx.window, 'history');
+  go(ctx.window, 'runs');
   await settle(ctx.window, 6);
   go(ctx.window, DETAIL_HASH);
   await settle(ctx.window, 8);
@@ -294,11 +308,12 @@ test('the issue link is inert while a rebuild is in flight', async () => {
 });
 
 // The report flow is reached from ONE place: History's per-run ⋯ menu. A finished run
-// on Running detail offers "View in History" instead, and the link follows the
-// (hidden) Stop directly — no hidden button or empty slot is left in the row.
+// on Running detail has no report button; its saved page (where the menu is) takes over.
 for (const status of ['done', 'stopped', 'error']) {
-  test(`a ${status} run's Running header has no report button, only View in History`, async () => {
-    const ctx = await boot({ fetchHandler: arms() });
+  test(`a ${status} run's Running header has no report button`, async () => {
+    // Its History row is still `live` (the refetch after the finish has not landed), so
+    // the Running page shows the finished run instead of handing over to the saved one.
+    const ctx = await boot({ fetchHandler: arms({ rows: [{ ...ROW, live: true }] }) });
     // `hello` is what populates `runs` and sets helloSeeded; without it routeRunDetail
     // mounts a title-only screen, repaintRunDetail never runs, and paintRdTerminal —
     // the thing that paints the terminal header — is never called at all.
@@ -313,10 +328,8 @@ for (const status of ['done', 'stopped', 'error']) {
     assert.equal(header.querySelector('.rd-report'), null, 'a finished run has no report button');
     assert.equal([...header.querySelectorAll('button, a')].some((b) => /Report this run/.test(b.textContent)),
       false, 'nothing in the header offers to report the run');
-    const link = header.querySelector('.rd-history-link');
-    assert.equal(link.hidden, false, 'View in History stays');
-    assert.equal(link.previousElementSibling, header.querySelector('.rd-stop'),
-      'the link sits right after Stop — no leftover control between them');
+    assert.equal(header.querySelector('.rd-history-link'), null, 'no link to click: the saved run opens on its own');
+    assert.equal(doc.querySelector('#run-detail .rd-bar .rd-report'), null, 'nor does the shared bar');
   });
 }
 
@@ -347,6 +360,9 @@ test('the History ⋯ menu carries "Report this run" and it opens the report mod
 
 test('Escape closes the report modal WITHOUT navigating the detail screen away', async () => {
   const ctx = await boot({ fetchHandler: arms() });
+  // Slide: there the saved run's own Escape WOULD navigate to #runs (side by side it does
+  // nothing on the glance), so a leak past the modal's guard shows in the hash.
+  ctx.window.document.getElementById('runs-shell').dataset.layout = 'slide';
   await openHistoryReport(ctx);
   const before = ctx.window.location.hash;
   esc(ctx.window);
@@ -363,16 +379,21 @@ test('Escape closes the report modal WITHOUT navigating the detail screen away',
 // closeHistDetail). Leaving the screen with one up floats a full-screen dialog for a
 // run the user has navigated away from over an unrelated view, and a pending debounce
 // can still POST /report for it.
-test('going back to the History list tears the report modal down', async () => {
+test('going back to the Runs list tears the report modal down', async () => {
   const ctx = await boot({ fetchHandler: arms() });
+  // The detail -> list hop exists in the narrow slide layout only: side by side a bare
+  // #runs reopens the remembered run (this one), so it does not mean "the list" there.
+  ctx.window.document.getElementById('runs-shell').dataset.layout = 'slide';
   await openHistoryReport(ctx);
   const modal = ctx.window.document.getElementById('report-modal');
   assert.equal(modal.classList.contains('hidden'), false, 'the modal is up');
 
-  go(ctx.window, 'history');
+  go(ctx.window, 'runs');
   await settle(ctx.window, 8);
+  assert.equal(ctx.window.document.getElementById('hist-shell').classList.contains('detail-open'), false,
+    'the saved run slid away');
   assert.equal(modal.classList.contains('hidden'), true,
-    'detail -> list stays inside the History view, so closeHistDetail is what must close it');
+    'detail -> list stays inside the Runs view, so closeHistDetail is what must close it');
 });
 
 // History detail -> another view: the modal must not outlive the screen it opened on.
@@ -389,7 +410,7 @@ test('switching views tears the report modal down', async () => {
 });
 
 // D24 covers a rebuild that is in flight; a rebuild that is merely PENDING behind the
-// 250 ms debounce is exactly as stale. Between the keystroke and the timer the link
+// debounce is exactly as stale. Between the keystroke and the timer the link
 // still carries the href built from the previous text, and mousedown on it fires that
 // href — the precise failure the `input` binding was chosen to avoid.
 test('typing an expectation invalidates the issue link BEFORE the debounce fires (D24)', async () => {
@@ -414,11 +435,66 @@ test('typing an expectation invalidates the issue link BEFORE the debounce fires
   assert.equal(copied.length, 0,
     'neither the link nor Copy JSON can ship a payload the preview is not showing');
 
-  await new Promise((r) => ctx.window.setTimeout(r, 300));
+  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS + 50));
   await settle(ctx.window, 8);
   assert.equal(link.getAttribute('href'), REPORT.issue.url, 'the fresh payload revives it');
   assert.equal(JSON.parse(reportPosts(ctx).at(-1).opts.body).expectation,
     'the reviewer looped forever', 'and the rebuild carried the typed text');
+});
+
+test('typing does not rebuild the preview until the reporter has been quiet for 1s', async () => {
+  assert.equal(REPORT_PREVIEW_DEBOUNCE_MS, 1000, 'the delay the reporter asked for');
+  const ctx = await boot({ fetchHandler: arms() });
+  await openHistoryReport(ctx);
+  const before = reportPosts(ctx).length;
+
+  const box = ctx.window.document.getElementById('report-expectation');
+  box.value = 'the diff swallowed my change';
+  box.dispatchEvent(new ctx.window.Event('input', { bubbles: true }));
+  // A FRACTION of the window, not a few zero-delay macrotasks and not the full
+  // constant. Settling on zero-delay ticks passes for any delay above ~0, and
+  // waiting the whole constant would move in lockstep with whatever app.js does —
+  // both let a hardcoded 250 back in unnoticed. A quarter of the way in is far
+  // past a regression and far short of the real delay, so the assert polices the
+  // WIRING (app.js must use REPORT_PREVIEW_DEBOUNCE_MS) rather than restating the
+  // number. The `assert.equal` above still pins the value itself.
+  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS / 4));
+  await settle(ctx.window, 8);
+  assert.equal(reportPosts(ctx).length, before,
+    'a quarter of the window in, no rebuild yet');
+
+  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS + 50));
+  await settle(ctx.window, 8);
+  assert.equal(reportPosts(ctx).length, before + 1, 'exactly one rebuild once typing stops');
+  assert.equal(JSON.parse(reportPosts(ctx).at(-1).opts.body).expectation,
+    'the diff swallowed my change', 'carrying the final text');
+});
+
+test('a control change inside the wait supersedes the queued rebuild instead of re-blanking', async () => {
+  const ctx = await boot({ fetchHandler: arms() });
+  await openHistoryReport(ctx);
+  const before = reportPosts(ctx).length;
+  const preview = ctx.window.document.getElementById('report-preview');
+
+  const box = ctx.window.document.getElementById('report-expectation');
+  box.value = 'the diff swallowed my change';
+  box.dispatchEvent(new ctx.window.Event('input', { bubbles: true }));
+
+  // Inside the 1s window: switching the reason rebuilds at once, as it always has.
+  const reason = ctx.window.document.getElementById('report-reason');
+  reason.value = reason.options[1].value;
+  reason.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
+  await settle(ctx.window, 8);
+  assert.equal(reportPosts(ctx).length, before + 1, 'the control change rebuilt immediately');
+  assert.equal(preview.textContent, previewText(REPORT.payload),
+    'and the fresh JSON is on screen — not the building placeholder');
+
+  // Past the point where the textarea's own timer would have fired.
+  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS + 50));
+  await settle(ctx.window, 8);
+  assert.equal(reportPosts(ctx).length, before + 1,
+    'the superseded rebuild never ran — the preview is not re-blanked after it');
+  assert.equal(preview.textContent, previewText(REPORT.payload), 'and the JSON never left the screen');
 });
 
 test('Copy JSON copies the exact preview text', async () => {
@@ -555,7 +631,7 @@ test('a pending rebuild makes the create button inert, like the link (D24)', asy
   assert.equal(issuePosts(ctx).length, 0,
     'a report cannot be filed from a payload the preview is not showing');
 
-  await new Promise((r) => ctx.window.setTimeout(r, 300));
+  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS + 50));
   await settle(ctx.window, 8);
   click(ctx.window, createBtn(ctx.window));
   await settle(ctx.window, 8);
@@ -605,4 +681,23 @@ test('the actions sit in a sticky header above the form, not below the preview',
   assert.equal(
     doc.getElementById('report-create-issue').compareDocumentPosition(doc.getElementById('report-close')) & 4,
     4, 'and sits to the LEFT of Close');
+});
+
+test('the JSON preview box is a FIXED height, so rebuilding it cannot resize the card', () => {
+  const body = ruleBody('.report-modal #report-preview');
+  assert.ok(body, 'the preview rule exists');
+  // `(?:^|;)` is load-bearing: plain /height:\s*300px/ matches "max-height:300px" and
+  // "min-height:300px" as substrings, so it cannot tell a fixed height from either
+  // flexible one. Anchored on the declaration boundary it cannot.
+  assert.match(body, /(?:^|;)\s*height:\s*300px/,
+    'a fixed height — a min-height would still grow with tall JSON');
+  assert.doesNotMatch(body, /min-height/, 'and no min-height competing with it');
+  assert.doesNotMatch(body, /max-height:\s*300px/, 'and the old max-height is gone, not merely shadowed');
+  // The card is content-driven (style.css:1330) inside a `place-items:center` grid
+  // (:1320), so ANY height change in here re-centres the whole dialog. A fixed box is
+  // what stops the "dancing"; the debounce only reduces how often it repaints.
+  // Count the rules instead of substring-matching one: a later override would silently
+  // undo the fix, and only the COUNT is order- and formatting-independent.
+  const rules = [...css.matchAll(/(?:^|[\s,}])[^{}]*#report-preview[^{}]*\{[^}]*\}/g)];
+  assert.equal(rules.length, 1, 'exactly one rule for the preview in the whole stylesheet');
 });

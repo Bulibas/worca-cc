@@ -1,95 +1,65 @@
 // test/ui-question-workflow.test.mjs — the `workflow` question arm (spec §7.4/§5.4): Auto's proposal
-// rendered inside the run card's and the detail's question panel, with the tunables table and the
-// Accept / Revise / Cancel payloads. Boot preamble copied from test/ui-question.test.mjs:19-82
-// (house convention: duplicated per suite) and wrapped with an /api/answer recorder.
+// rendered in the run page's question panel ("Review the workflow"): the name row, the always-visible
+// preview button (opens the pan/zoom popup), the "Customize agents" tunables and "Why this?" facts
+// disclosures, and the Accept / Revise / Cancel payloads. The panel mounts only on the run page
+// (test/helpers/run-page-boot.mjs); the Runs list row just reads "Workflow review" in Needs you.
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { JSDOM } from 'jsdom';
 import { confirmDialog, cancelDialog, dialogText } from './helpers/confirm-modal.mjs';
 import { proposalFor, WEB_TASK } from './helpers/auto-proposal-fixture.mjs';
 import { FLOW_PAD_Y } from '../src/shared/graph/flow-layout.mjs';
-
-const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
-const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
+import { bootApp, helloRun, runCard, runPanel } from './helpers/run-page-boot.mjs';
 
 const wins = [];
 afterEach(() => { for (const w of wins.splice(0)) w.close(); });
 
-async function bootBase({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
-  const { window } = dom;
-  wins.push(window);
-
-  const wsBox = { ws: null };
-  window.WebSocket = class {
-    constructor() { this.readyState = 1; this._listeners = {}; wsBox.ws = this; }
-    send() {}
-    close() {}
-    addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
-    dispatch(type, evt) { (this._listeners[type] || []).forEach((fn) => fn(evt)); }
-  };
-
-  const calls = [];
-  window.fetch = (url, opts) => {
-    calls.push({ url: String(url), opts: opts || {} });
-    if (fetchHandler) { const r = fetchHandler(String(url), opts || {}); if (r) return r; }
-    return Promise.resolve({ ok: true, status: 200, json: async () => ({ projects: [], config: { steps: {}, customModels: [] }, models: [], efforts: [] }) });
-  };
-
-  for (const k of ['window', 'document', 'location', 'localStorage', 'WebSocket', 'fetch', 'navigator']) {
-    try { Object.defineProperty(globalThis, k, { value: window[k], configurable: true, writable: true }); } catch { /* read-only */ }
-  }
-  globalThis.window = window;
-  globalThis.document = window.document;
-
-  await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
-  await new Promise((r) => setTimeout(r, 0));
-
-  const dispatch = (msg) => wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
-  const showRunning = () => { window.location.hash = 'running'; window.dispatchEvent(new window.Event('hashchange')); };
-  return { window, dispatch, showRunning, calls, wsBox };
-}
-
 async function boot({ answerOk = true } = {}) {
   const answers = [];
-  const ctx = await bootBase({
+  const ctx = await bootApp({
     fetchHandler: (url, opts) => {
       if (url.endsWith('/api/answer') && (opts.method || 'GET') === 'POST') {
         answers.push(JSON.parse(opts.body));
         if (!answerOk) return Promise.resolve({ ok: false, status: 503, json: async () => ({ error: 'the run went away' }) });
         return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
       }
-      return null;                                   // falsy => bootBase's default 200 for the boot fetches
+      return null;                                   // falsy => the default 200 for the boot fetches
     },
   });
+  wins.push(ctx.window);
   return { ...ctx, answers };
 }
 
 const RUN_ID = 'run-aaa';
 const settle = async (window, n = 3) => { for (let i = 0; i < n; i += 1) await new Promise((r) => setTimeout(r, 0)); };
 
-function helloRunning(ctx, extra = {}) {
-  ctx.wsBox.ws.dispatch('open', {});
-  ctx.dispatch({ type: 'hello', runs: [{ runId: RUN_ID, title: 'Demo run', projectDir: '/tmp/p', status: 'running', startedAt: '2026-01-01T00:00:00Z', ...extra }] });
-}
-const cardOf = (ctx) => ctx.window.document.querySelector(`.run-card[data-run-id="${RUN_ID}"]`);
-
 const DECIDING = { version: 2, template: { id: 'wf_auto', name: 'Auto' }, auto: { status: 'deciding', humanInLoop: true }, graph: { nodes: [], wires: [] }, bookends: { preflight: true, done: true }, steps: [{ kind: 'preflight', nodes: [{ id: 'preflight', label: 'Preflight', sub: 'checks' }] }, { kind: 'done', nodes: [{ id: 'done', label: 'Done', sub: 'complete' }] }], feedbacks: [] };
 
 const ask = (ctx, p = proposalFor()) => { ctx.dispatch({ type: 'question', runId: RUN_ID, id: `auto-${p.round}`, kind: 'workflow', workflow: p }); return p; };
-const panelOf = (ctx) => cardOf(ctx).querySelector('.qpanel');
+const panelOf = (ctx) => runPanel(ctx);
+// hello a deciding Auto run, open its run page, then park it on the round-1 proposal.
+// The "Why this?" facts are a <dl>: the value <dd> following the <dt> with this label.
+const factOf = (panel, label) => {
+  const dt = [...panel.querySelectorAll('.wf-facts dt')].find((n) => n.textContent === label);
+  return dt ? dt.nextElementSibling.textContent : null;
+};
+async function openWf(ctx) {
+  helloRun(ctx, { runId: RUN_ID, stepper: DECIDING });
+  ctx.go(`running/${RUN_ID}`); await settle(ctx.window);
+  ask(ctx); await settle(ctx.window);
+  return panelOf(ctx);
+}
 
 test('the workflow question renders head, the shared body, the graph at chat scale (4 per row in a 702 host) and the table', async () => {
-  const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
-  const p = ask(ctx);
-  const panel = panelOf(ctx);
+  const ctx = await boot(); const panel = await openWf(ctx); const p = proposalFor();
   assert.ok(panel.classList.contains('qpanel-workflow')); assert.equal(panel.classList.contains('hidden'), false);
-  assert.equal(panel.querySelector('.qpanel-head b').textContent, 'Auto proposes a workflow · round 1');
+  assert.equal(panel.closest('#run-detail').querySelector('.rd-ask-head').textContent, 'Review the workflow');
   assert.equal(panel.querySelector('.qcount').textContent, 'workflow');
   assert.equal(panel.querySelectorAll('.qblock').length, 0, 'not the clarify body');
-  const stage = panel.querySelector('.ask-wfcard-graph .gv-stage.gv-flow');
+  assert.equal(panel.querySelector('.wf-namelabel').textContent, 'Workflow:');
+  assert.ok(panel.querySelector('.wf-namelabel').parentElement.querySelector('.ask-wfcard-name'), 'the editable name sits beside the label');
+  const preview = panel.querySelector('button.wf-preview');
+  assert.ok(preview, 'the preview is an always-visible button');
+  const stage = preview.querySelector('.ask-wfcard-graph .gv-stage.gv-flow');
   assert.ok(stage); assert.equal(stage.style.getPropertyValue('--gv-scale'), '0.65');
   const cards = [...panel.querySelectorAll('.ask-wfcard-graph .node')];
   assert.equal(cards.length, p.manifest.graph.nodes.length);
@@ -101,9 +71,15 @@ test('the workflow question renders head, the shared body, the graph at chat sca
   assert.equal(first.querySelector('select[aria-label^="Model"]').value, 'claude-sonnet-5');
   assert.deepEqual([...panel.querySelectorAll('.qpanel-foot button')].map((b) => b.textContent.trim()), ['Cancel run', 'Revise', 'Send', 'Accept & run']);
   assert.equal(panel.querySelector('.wf-send').hidden, true);
-  assert.match(panel.querySelector('.ask-wfcard-meta').textContent, /^classifier ≈ \$0\.02 · /);
-  const table = panel.querySelector('.qtune'); const meta = panel.querySelector('.ask-wfcard-meta');
-  assert.ok(table.compareDocumentPosition(meta) & ctx.window.Node.DOCUMENT_POSITION_FOLLOWING, 'the table sits above the meta line');
+  // the disclosures: Customize agents (table) above Why this? (facts); the old reasoning/chips/meta lines are gone
+  const discs = [...panel.querySelectorAll('details.wf-disc')];
+  assert.deepEqual(discs.map((d) => d.querySelector('summary').textContent), ['Customize agents', 'Why this?']);
+  assert.ok(discs[0].querySelector('.qtune'), 'the tunables live in Customize agents');
+  assert.equal(discs[0].open, p.order.length > 1, 'open by default only when there is more than one agent');
+  assert.ok(discs[1].querySelector('dl.wf-facts'), 'the facts live in Why this?');
+  assert.deepEqual([...panel.querySelectorAll('.wf-facts dt')].map((n) => n.textContent).filter((t) => t !== 'Classified as'), ['Saved as', 'Classifier cost']);
+  assert.match(factOf(panel, 'Classifier cost'), /^≈ \$0\.02/);
+  assert.equal(panel.querySelector('.ask-wfcard-meta'), null, 'the meta line is not shown in this host');
   // jsdom has no ResizeObserver and clientWidth is 0, so drive the relayout the observer would.
   panel.__wf.handle.relayout(310);
   assert.equal(panel.__wf.handle.graph.flowLayout().perRow, 1, 'one card per row in a 310px host');
@@ -112,8 +88,7 @@ test('the workflow question renders head, the shared body, the graph at chat sca
 });
 
 test('Accept posts the §5.4 payload with only the changed tunables and the edited name', async () => {
-  const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
-  const p = ask(ctx); const panel = panelOf(ctx);
+  const ctx = await boot(); const panel = await openWf(ctx); const p = proposalFor();
   const row = panel.querySelector(`.qtune tr[data-node-id="${p.order[1]}"]`);
   // the model `change` re-fills the effort select from the fixture's MODELS (opus: medium/high/max)
   // BEFORE `.value = 'max'` — jsdom silently drops a value the select does not offer
@@ -132,8 +107,7 @@ test('Accept posts the §5.4 payload with only the changed tunables and the edit
 });
 
 test('B1: a model change posts its effort even when that effort equals the base\'s (the resolver would otherwise drop it)', async () => {
-  const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
-  const p = ask(ctx); const panel = panelOf(ctx);
+  const ctx = await boot(); const panel = await openWf(ctx); const p = proposalFor();
   // the fixture's FIRST node (clarify) carries model claude-sonnet-5 + effort medium; opus offers medium too, so
   // the "keep the current effort" rule leaves effort at the BASE value — and the old diff dropped it.
   const row = panel.querySelector(`.qtune tr[data-node-id="${p.order[0]}"]`);
@@ -145,8 +119,7 @@ test('B1: a model change posts its effort even when that effort equals the base\
 });
 
 test('Revise reveals the box, refuses empty text, posts the text; the next round shows the note', async () => {
-  const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
-  ask(ctx); const panel = panelOf(ctx);
+  const ctx = await boot(); const panel = await openWf(ctx);
   panel.querySelector('.wf-revise').click();
   const ta = panel.querySelector('.qfree-area'); assert.equal(ta.hidden, false); assert.equal(panel.querySelector('.wf-send').hidden, false);
   panel.querySelector('.wf-send').click(); await settle(ctx.window);
@@ -165,8 +138,7 @@ test('Revise reveals the box, refuses empty text, posts the text; the next round
 // re-enables the panel and logs — it must not leave the next round quoting text the
 // classifier never saw.
 test('a revise that fails to POST leaves the panel usable and records no echo', async () => {
-  const ctx = await boot({ answerOk: false }); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
-  ask(ctx); const panel = panelOf(ctx);
+  const ctx = await boot({ answerOk: false }); const panel = await openWf(ctx);
   panel.querySelector('.wf-revise').click();
   const ta = panel.querySelector('.qfree-area');
   ta.value = 'never arrives'; ta.dispatchEvent(new ctx.window.Event('input'));
@@ -180,8 +152,7 @@ test('a revise that fails to POST leaves the panel usable and records no echo', 
 });
 
 test('Cancel run asks first, then posts cancel; a kept run posts nothing; resolving the question disposes the graph', async () => {
-  const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
-  ask(ctx); const panel = panelOf(ctx);
+  const ctx = await boot(); const panel = await openWf(ctx);
   panel.querySelector('.wf-cancel').click(); await settle(ctx.window);
   assert.equal(ctx.window.document.getElementById('confirm-modal').classList.contains('hidden'), false, 'the confirm opened (cancelDialog asserts nothing itself)');
   assert.equal(dialogText(ctx.window).title, 'Cancel this run?'); assert.equal(dialogText(ctx.window).confirmLabel, 'Cancel run');
@@ -197,21 +168,42 @@ test('Cancel run asks first, then posts cancel; a kept run posts nothing; resolv
   assert.equal(panel.__wf, null);
 });
 
-test('the Running detail paints its own panel for the same question (two mounts, two states)', async () => {
-  const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
-  ask(ctx);
-  ctx.window.location.hash = `running/${RUN_ID}`; ctx.window.dispatchEvent(new ctx.window.Event('hashchange')); await settle(ctx.window);
-  const detail = ctx.window.document.querySelector('#run-detail .rd-questions .qpanel');
-  assert.ok(detail && !detail.classList.contains('hidden'));
-  assert.ok(detail.querySelector('.ask-wfcard-graph .gv-stage'));
-  assert.notEqual(detail, panelOf(ctx));
+test('clicking the preview opens the pan/zoom popup titled with the workflow name; Close removes it', async () => {
+  const ctx = await boot(); const panel = await openWf(ctx);
+  assert.equal(ctx.window.document.querySelector('.wf-pop'), null, 'closed until asked for');
+  panel.querySelector('.wf-preview').click();
+  const pop = ctx.window.document.querySelector('.wf-pop');
+  assert.ok(pop, 'the popup opened');
+  assert.equal(pop.querySelector('.wf-pop-head h2').textContent, `Workflow: ${proposalFor().name}`);
+  assert.ok(pop.querySelector('.gv-stage'), 'it renders the graph');
+  assert.equal(ctx.answers.length, 0, 'opening the preview never posts an answer');
+  pop.querySelector('.wf-pop-head button').click();
+  assert.equal(ctx.window.document.querySelector('.wf-pop'), null, 'Close removes it');
+});
+
+test('the list row holds no workflow panel: it reads "Workflow review" and opens the run page', async () => {
+  const ctx = await boot(); await openWf(ctx);
+  // The bare list with nothing open (rule 5): a click on the OPEN run's row would prove nothing.
+  ctx.showRunning(); await settle(ctx.window);
+  assert.equal(ctx.window.location.hash, '#runs');
+  const card = runCard(ctx, RUN_ID);
+  assert.ok(card, 'the run is listed in its project group');
+  assert.equal(card.querySelector('.qpanel'), null, 'no panel on the row');
+  assert.equal(card.querySelector('.gv-stage'), null, 'and no graph');
+  // The ask frame carries no nodeId, so no step names it: the generic "Workflow review".
+  assert.equal(card.querySelector('.runs-row-sub').textContent.split(' · ')[0], 'Workflow review', 'the row names the workflow review');
+  assert.ok(ctx.window.document.querySelector(`#runs-list .runs-needs .runs-row[data-run-id="${RUN_ID}"]`), 'and it is in Needs you');
+  card.click();
+  assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`);
 });
 
 test('B5: the cost line is max(Σ auto-classify rows, proposal.costUsd) — rows that undercount after a resume never hide the spend', async () => {
-  const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING }); ctx.showRunning();
+  const ctx = await boot();
+  helloRun(ctx, { runId: RUN_ID, stepper: DECIDING });
+  ctx.go(`running/${RUN_ID}`); await settle(ctx.window);
   // resume() rehydrates no sub-agent rows: a resumed run's state carries only the rounds spawned since (here round 2's $0.01),
   // while the proposal's own costUsd (restored from the resume point) is the whole spend ($0.02).
   ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'running', steps: [], stepper: DECIDING, subAgents: [{ id: 'auto-classify-2', label: 'Auto workflow (round 2)', subagentType: 'auto-classify', status: 'finished', nodeId: 'preflight', uiPhase: 'preflight', stepKey: 'x:preflight:1', costUsd: 0.01 }] });
-  ask(ctx, proposalFor(WEB_TASK, { round: 2 }));
-  assert.match(panelOf(ctx).querySelector('.ask-wfcard-meta').textContent, /^classifier ≈ \$0\.02 · /);
+  ask(ctx, proposalFor(WEB_TASK, { round: 2 })); await settle(ctx.window);
+  assert.equal(factOf(panelOf(ctx), 'Classifier cost'), '≈ $0.02 · 2 rounds');
 });

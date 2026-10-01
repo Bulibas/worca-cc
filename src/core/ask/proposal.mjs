@@ -19,6 +19,8 @@ import { listTaskSources as realListTaskSources } from '../sources.mjs';
 import { afterRefOf as realAfterRefOf } from '../scheduler.mjs';
 import { resolveProfile as realResolveProfile } from '../source-bindings.mjs';
 import { listProfileIds as realListProfileIds } from '../plugin-config.mjs';
+import { resolveSourceRef as resolveGitSourceRef } from '../git-sync.mjs';
+import { effectiveSyncSettings } from '../project-sync.mjs';
 
 export const PROPOSAL_ERRORS = Object.freeze({
   bothTargets: 'provide workspaceId OR projectKey, not both',
@@ -41,6 +43,7 @@ export const PROPOSAL_ERRORS = Object.freeze({
   badSource: (v) => `unknown or invalid sourceBranch: ${v}`,
   byKeyUnknown: (k) => `sourceBranchByKey has an unknown project key: ${k}`,
   byKeyProjectOnly: 'sourceBranchByKey is only valid for a workspace',
+  missingSource: (v, remote) => `sourceBranch "${v}" exists neither locally nor on ${remote}`,
 });
 
 const CARD_HEX_RE = /^card_([0-9a-f]{8})$/;
@@ -110,6 +113,10 @@ export function createProposalValidator({
   // Run chains: the predecessor reader (core afterRefOf; tests inject a stub). The MCP child gets
   // the same default — tool-deps.mjs re-exports this module's default-bound validateProposal.
   afterRef = realAfterRefOf,
+  // #527: (dir, name, {projectKey}) → git-sync resolveSourceRef's answer. Null by default, so a
+  // validator built on fake dirs never asks git; the module singleton below binds the real one.
+  resolveSourceRef = null,
+  remoteName = () => 'origin',
 } = {}) {
   /**
    * @param {object} input  the propose_run tool input
@@ -252,6 +259,20 @@ export function createProposalValidator({
       errors.push('sourceFromPrevious and sourceBranch / sourceBranchByKey cannot both be given');
     }
 
+    // ── source branch vs the remote (#527): only for a card that is otherwise valid ──
+    let sourceRef = null;
+    if (!errors.length && sourceBranch && target.target === 'project' && typeof resolveSourceRef === 'function') {
+      let r = null;
+      try { r = await resolveSourceRef(target.projectDir, sourceBranch, { projectKey: target.projectKey }); } catch { r = null; }
+      if (r && r.ok && (r.remoteOnly || r.behind > 0 || r.stale)) {
+        sourceRef = { ref: r.ref, remoteOnly: !!r.remoteOnly, behind: r.behind || 0, ...(r.stale ? { stale: true } : {}) };
+      } else if (r && !r.ok && r.kind === 'missing') {
+        errors.push(PROPOSAL_ERRORS.missingSource(sourceBranch, remoteName(target.projectKey)));
+      } else if (r && !r.ok && r.kind === 'stale') {
+        sourceRef = { ref: sourceBranch, remoteOnly: false, behind: 0, stale: true };   // offline: never reject what may exist
+      }
+    }
+
     if (errors.length) return fail();
     return {
       ok: true,
@@ -261,11 +282,17 @@ export function createProposalValidator({
         ...(spec.schedule ? { schedule: spec.schedule } : {}),
         // Likewise a proposal whose task is a plugin task (an issue), not a brief.
         ...(runSource ? { source: runSource } : {}),
-        ...(sourceWarning ? { sourceWarning } : {}) },
+        ...(sourceWarning ? { sourceWarning } : {}),
+        // Only when the source is remote-only, behind its remote or unverifiable (offline).
+        ...(sourceRef ? { sourceRef } : {}) },
     };
   }
   return { validateProposal };
 }
 
 /** Bound to the real readers — the server's authoritative re-validation and the MCP child both use it. */
-export const validateProposal = createProposalValidator().validateProposal;
+export const validateProposal = createProposalValidator({
+  resolveSourceRef: (dir, name, { projectKey } = {}) =>
+    resolveGitSourceRef(dir, name, { remote: effectiveSyncSettings(projectKey).remote }),
+  remoteName: (projectKey) => effectiveSyncSettings(projectKey).remote,
+}).validateProposal;

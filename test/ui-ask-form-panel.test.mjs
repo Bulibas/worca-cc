@@ -1,53 +1,11 @@
-// test/ui-ask-form-panel.test.mjs — a kind:'form' ask end to end in the run card
-// and the run detail (ask-forms design §6): the panel head, the mounted form, the
-// submit payload, the 422 arm, the busy sweep, the dual mount, and the rebuild
-// key that must include `form` + `version`.
-//
-// boot()/dispatch()/showRunning() are a deliberate local copy of
-// test/ui-question.test.mjs:19-82 — the suites do not import each other.
+// test/ui-ask-form-panel.test.mjs — a kind:'form' ask end to end on the run page
+// (ask-forms design §6): the panel head, the mounted form, the submit payload, the
+// 422 arm, the busy sweep, and the rebuild key that must include `form` + `version`.
+// The panel mounts only on the run page (test/helpers/run-page-boot.mjs); the Runs
+// list row is just a link to it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { JSDOM } from 'jsdom';
-
-const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
-const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
-
-async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
-  const { window } = dom;
-  const wsBox = { ws: null };
-  window.WebSocket = class {
-    constructor() { this.readyState = 1; this._listeners = {}; wsBox.ws = this; }
-    send() {} close() {}
-    addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
-    dispatch(type, evt) { (this._listeners[type] || []).forEach((fn) => fn(evt)); }
-  };
-  const calls = [];
-  window.fetch = (url, opts) => {
-    calls.push({ url: String(url), opts: opts || {} });
-    if (fetchHandler) { const r = fetchHandler(String(url), opts || {}); if (r) return r; }
-    return Promise.resolve({ ok: true, status: 200,
-      json: async () => ({ projects: [], config: { steps: {}, customModels: [] }, models: [], efforts: [] }) });
-  };
-  for (const k of ['window', 'document', 'location', 'localStorage', 'WebSocket', 'fetch', 'navigator']) {
-    try { Object.defineProperty(globalThis, k, { value: window[k], configurable: true, writable: true }); }
-    catch { /* read-only global already present */ }
-  }
-  globalThis.window = window;
-  globalThis.document = window.document;
-  await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
-  await new Promise((r) => setTimeout(r, 0));
-  const dispatch = (msg) => wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
-  const showRunning = () => { window.location.hash = 'running'; window.dispatchEvent(new window.Event('hashchange')); };
-  const openDetail = async () => {
-    window.location.hash = `running/${RUN_ID}`;
-    window.dispatchEvent(new window.Event('hashchange'));
-    await new Promise((r) => setTimeout(r, 0));
-  };
-  return { window, dispatch, showRunning, openDetail, calls, wsBox };
-}
+import { bootApp as boot, runPanel, openRunPanel } from './helpers/run-page-boot.mjs';
 
 const RUN_ID = 'run-form-1';
 // X1: `id` is the question id (POST /api/answer, the rebuild key); `askId` is the
@@ -69,21 +27,14 @@ const ASK = {
   files: [],
 };
 
-function seed(ctx, ask = ASK) {
-  ctx.wsBox.ws.dispatch('open', {});
-  ctx.dispatch({ type: 'hello', runs: [{ runId: RUN_ID, title: 'Demo run', projectDir: '/tmp/p',
-    status: 'running', startedAt: '2026-01-01T00:00:00Z', kind: 'run' }] });
-  ctx.showRunning();
-  ctx.dispatch(ask);
-}
-const cardPanel = (w) => w.document.querySelector('#run-list .run-card .qpanel');
-const detailPanel = (w) => w.document.querySelector('#run-detail .rd-questions .qpanel');
+// Open the run page for a run parked on `ask`; resolves to its .qpanel.
+const seed = (ctx, ask = ASK) => openRunPanel(ctx, { runId: RUN_ID, question: ask });
+const cardPanel = (w) => w.document.querySelector('#runs-list .qpanel');
 const click = (w, n) => n.dispatchEvent(new w.Event('click', { bubbles: true }));
 
 test('a form ask paints the agent title, a field count and the mounted form', async () => {
   const ctx = await boot();
-  seed(ctx);
-  const panel = cardPanel(ctx.window);
+  const panel = await seed(ctx);
   assert.ok(panel && !panel.classList.contains('hidden'));
   assert.equal(panel.querySelector('.qpanel-head b').textContent, 'Review mockups');
   assert.equal(panel.querySelector('.qcount').textContent, '1 field');
@@ -91,13 +42,14 @@ test('a form ask paints the agent title, a field count and the mounted form', as
   assert.ok(panel.__askForm, 'the handle rides on the panel, per mount');
   assert.equal(panel.querySelector('.qanswered').textContent, '0 of 1 answered');
   assert.ok(panel.querySelector('.btn-go'), 'the panel keeps the house Submit button');
-  assert.ok(panel.querySelector('.qopen'), 'the card keeps Open run');
+  assert.equal(panel.querySelector('.qopen'), null, 'no Open run: you are on the run page');
+  assert.ok(ctx.window.document.querySelector(`#runs-list .runs-row[data-run-id="${RUN_ID}"]`), 'the run is listed beside the page');
+  assert.equal(cardPanel(ctx.window), null, 'and the list mounts no panel');
 });
 
 test('a valid answer posts { values } and leaves the question open until resume', async () => {
   const ctx = await boot();
-  seed(ctx);
-  const panel = cardPanel(ctx.window);
+  const panel = await seed(ctx);
   click(ctx.window, panel.querySelectorAll('.af-choice')[1]);   // "changes"
   const ta = panel.querySelector('textarea');
   assert.equal(ta.closest('.af-fld').hidden, false, '`when` revealed the notes field');
@@ -120,16 +72,14 @@ test('a preview file URL is built from askId, never from the question id', async
     fileRefs: [{ path: 'data.hero', rel: 'shots/a.png' }],
     files: [{ index: 0, rel: 'shots/a.png', name: 'a.png', mime: 'image/png', bytes: 2048, sha256: 'z' }] };
   const ctx = await boot();
-  seed(ctx, ask);
-  const src = cardPanel(ctx.window).querySelector('.af-img img').getAttribute('src');
+  const src = (await seed(ctx, ask)).querySelector('.af-img img').getAttribute('src');
   assert.equal(src, `/api/runs/${RUN_ID}/ask-files/q_2/0`);
   assert.ok(!src.includes('q:2'), 'a raw question id is not a legal path segment');
 });
 
 test('an invalid answer never leaves the browser: the field is marked, nothing is posted', async () => {
   const ctx = await boot();
-  seed(ctx);
-  const panel = cardPanel(ctx.window);
+  const panel = await seed(ctx);
   click(ctx.window, panel.querySelector('.btn-go'));
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(ctx.calls.some((c) => c.url === '/api/answer'), false);
@@ -145,8 +95,7 @@ test('a 422 un-busies the panel, marks the field and keeps the question open', a
     json: async () => ({ error: 'invalid answer',
       errors: [{ path: 'notes', code: 'maxLength', message: 'At most 4000 characters.' }] }),
   }) : null) });
-  seed(ctx);
-  const panel = cardPanel(ctx.window);
+  const panel = await seed(ctx);
   click(ctx.window, panel.querySelectorAll('.af-choice')[1]);
   panel.querySelector('textarea').value = 'x';
   panel.querySelector('textarea').dispatchEvent(new ctx.window.Event('input'));
@@ -167,8 +116,7 @@ test('a resubmit that passes locally clears the previous 422 marks before it pos
     ? { ok: false, status: 422, json: async () => ({ error: 'invalid answer',
       errors: [{ path: 'notes', code: 'maxLength', message: 'At most 4000 characters.' }] }) }
     : { ok: true, status: 200, json: async () => ({ ok: true }) }) : null) });
-  seed(ctx);
-  const panel = cardPanel(ctx.window);
+  const panel = await seed(ctx);
   click(ctx.window, panel.querySelectorAll('.af-choice')[1]);
   panel.querySelector('textarea').value = 'x';
   panel.querySelector('textarea').dispatchEvent(new ctx.window.Event('input'));
@@ -184,42 +132,35 @@ test('a resubmit that passes locally clears the previous 422 marks before it pos
   assert.equal(panel.querySelector('.btn-go').disabled, true, 'busy until the run resumes');
 });
 
-test('submitting busies both mounted panels, including the rank drag rows', async () => {
+test('submitting busies the run page panel, including the rank drag rows', async () => {
   const ask = { ...ASK, id: 'q:rank', askId: 'q_rank', layout: [
     { widget: 'rank', field: 'order', label: 'Order', bind: 'data.items', titleKey: 'title' },
   ], data: { items: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }] },
   answerSchema: { type: 'object', required: ['order'], properties: { order: { type: 'array', items: { type: 'string' } } } } };
   const ctx = await boot({ fetchHandler: (url) => (url === '/api/answer'
     ? new Promise(() => {}) : null) });          // never resolves: the panel stays busy
-  seed(ctx, ask);
-  await ctx.openDetail();
-  const card = cardPanel(ctx.window);
-  const detail = detailPanel(ctx.window);
-  assert.ok(card && detail, 'both panels are mounted');
-  assert.notEqual(card.__askForm, detail.__askForm, 'and hold independent handles');
-  click(ctx.window, detail.querySelector('.btn-go'));
+  const panel = await seed(ctx, ask);
+  assert.ok(panel.querySelector('.af-rank li'), 'the rank rows are mounted');
+  assert.equal(panel.querySelector('.af-rank li').draggable, true, 'draggable before submitting');
+  click(ctx.window, panel.querySelector('.btn-go'));
   await new Promise((r) => setTimeout(r, 0));
-  for (const p of [card, detail]) {
-    assert.equal(p.querySelector('.btn-go').disabled, true);
-    assert.equal(p.querySelector('.af-rank li').draggable, false, 'drag is off while an answer is in flight');
-  }
+  assert.equal(panel.querySelector('.btn-go').disabled, true);
+  assert.equal(panel.querySelector('.af-rank li').draggable, false, 'drag is off while an answer is in flight');
 });
 
-test('the detail rebuild key includes form + version', async () => {
+test('the run page rebuild key includes form + version', async () => {
   const ctx = await boot();
-  seed(ctx);
-  await ctx.openDetail();
-  const before = detailPanel(ctx.window);
+  const before = await seed(ctx);
   assert.equal(before.dataset.qid, 'questions-x:n_impl:1-r1|form|review-mockups|1|0',
     'the rebuild key is keyed on the QUESTION id plus form + version');
   before.querySelector('.af-choice').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
   ctx.dispatch({ type: 'log', runId: 'another-run', source: 'x', level: 'info', text: 'noise', ts: Date.now() });
   await new Promise((r) => setTimeout(r, 0));
-  assert.equal(detailPanel(ctx.window).querySelector('.af-choice').getAttribute('aria-pressed'), 'true',
+  assert.equal(runPanel(ctx).querySelector('.af-choice').getAttribute('aria-pressed'), 'true',
     'an unrelated frame never wipes the picked choice');
 
   ctx.dispatch({ ...ASK, version: 2 });
-  const after = detailPanel(ctx.window);
+  const after = runPanel(ctx);
   assert.equal(after.dataset.qid, 'questions-x:n_impl:1-r1|form|review-mockups|2|0');
   assert.equal(after.querySelector('.af-choice').getAttribute('aria-pressed'), 'false',
     'a changed version forces a rebuild');
@@ -227,11 +168,10 @@ test('the detail rebuild key includes form + version', async () => {
 
 test('resolving the question disposes the form handle', async () => {
   const ctx = await boot();
-  seed(ctx);
-  const panel = cardPanel(ctx.window);
+  const panel = await seed(ctx);
   assert.ok(panel.__askForm);
   ctx.dispatch({ type: 'question-resolved', runId: RUN_ID, id: 'questions-x:n_impl:1-r1' });
   assert.equal(panel.__askForm, null);
   assert.equal(panel.innerHTML, '');
-  assert.equal(panel.dataset.qid, undefined);
+  assert.equal(panel.dataset.qid || '', '', 'the rebuild stamp is cleared (paintRdQuestions stamps \'\')');
 });

@@ -8,13 +8,14 @@ import { autoWorkflowModel } from '../settings.mjs';
 export const AUTO_MODEL_ENV = 'WORCA_AUTO_MODEL';
 
 /**
+ * The catalog half of that order, shared by every Sonnet-class helper call (the
+ * Auto classifier, the PR description): the setting while the catalog still
+ * carries it (in the catalog's casing) > Sonnet 5 > any Sonnet > the first entry.
  * @param {Array<{id:string}>} models the effective catalog (listModels)
- * @param {{env?:object, setting?:string}} [o] injectable for tests
- * @returns {string} a model id, or '' when the catalog is empty and nothing is configured
+ * @param {string} [setting] the stored id, '' when unset
+ * @returns {string} a model id, or '' when the catalog is empty
  */
-export function resolveAutoModel(models, { env = process.env, setting = autoWorkflowModel() } = {}) {
-  const fromEnv = typeof env?.[AUTO_MODEL_ENV] === 'string' ? env[AUTO_MODEL_ENV].trim() : '';
-  if (fromEnv) return fromEnv;
+export function pickCatalogModel(models, setting) {
   const ids = (Array.isArray(models) ? models : []).map((m) => m && m.id).filter((id) => typeof id === 'string' && id);
   const find = (id) => ids.find((x) => x.toLowerCase() === String(id || '').trim().toLowerCase());
   return find(setting)
@@ -22,4 +23,15 @@ export function resolveAutoModel(models, { env = process.env, setting = autoWork
     || ids.find((id) => /^claude-sonnet/i.test(id))
     || ids[0]
     || '';
+}
+
+/**
+ * @param {Array<{id:string}>} models the effective catalog (listModels)
+ * @param {{env?:object, setting?:string}} [o] injectable for tests
+ * @returns {string} a model id, or '' when the catalog is empty and nothing is configured
+ */
+export function resolveAutoModel(models, { env = process.env, setting = autoWorkflowModel() } = {}) {
+  const fromEnv = typeof env?.[AUTO_MODEL_ENV] === 'string' ? env[AUTO_MODEL_ENV].trim() : '';
+  if (fromEnv) return fromEnv;
+  return pickCatalogModel(models, setting);
 }
