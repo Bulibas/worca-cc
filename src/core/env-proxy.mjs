@@ -4,39 +4,78 @@
 // network whose only way out is a proxy (a corporate LAN), every outbound call then died
 // with "fetch failed" (ENOTFOUND github.com: Copilot sign-in) while curl and git, which
 // honor the variables, worked. Each process entry point (ui/server.mjs, the CLI) calls
-// useEnvProxy() once at boot, through http.setGlobalProxyFromEnv (newer Node).
+// useEnvProxy() once at boot. A Node with http.setGlobalProxyFromEnv uses it (fetch and
+// the http(s) global agents); every other supported Node (22.x, 24.x LTS today) gets
+// undici's EnvHttpProxyAgent as fetch's global dispatcher, which works from 22.13 on.
 //
 // Loopback always bypasses the proxy: the app calls itself (the model bridge, the UI
 // probe, the broker on this host), and a machine with HTTP_PROXY but no NO_PROXY would
-// otherwise send those calls to the proxy. Nothing here throws: no proxy set, an older
-// Node, or a malformed proxy URL leaves fetch exactly as it was.
+// otherwise send those calls to the proxy. Nothing here throws: no proxy set or a
+// malformed proxy URL leaves fetch exactly as it was.
 
 import http from 'node:http';
+import { createRequire } from 'node:module';
+import { LOCAL_HOSTNAMES } from './remote-access.mjs';
 
-const LOOPBACK = ['localhost', '127.0.0.1', '::1'];
+const require = createRequire(import.meta.url);
+
+/** undici is CommonJS, so it loads synchronously; null when it can't be loaded. */
+function loadUndici() {
+  try { return require('undici'); } catch { return null; }
+}
 
 /**
- * Route this process's fetch() and http(s) global agents through the proxy named by the
- * environment, with loopback always direct.
- * @param {{env?: Record<string, string|undefined>, api?: {setGlobalProxyFromEnv?: Function}}} [opts]
+ * Route this process's fetch() through the proxy named by the environment, with loopback
+ * always direct.
+ * @param {{env?: Record<string, string|undefined>, api?: {setGlobalProxyFromEnv?: Function}, undici?: object|null}} [opts]
  * @returns {{status: 'off'|'on'|'unsupported'|'invalid', error?: string, restore: () => void}}
  */
-export function useEnvProxy({ env = process.env, api = http } = {}) {
+export function useEnvProxy({ env = process.env, api = http, undici } = {}) {
   const none = () => {};
   const proxied = env.https_proxy || env.HTTPS_PROXY || env.http_proxy || env.HTTP_PROXY;
   if (!proxied) return { status: 'off', restore: none };
-  if (typeof api.setGlobalProxyFromEnv !== 'function') return { status: 'unsupported', restore: none };
-  // Node reads no_proxy before NO_PROXY; set both so the merged list wins either way.
-  const listed = String(env.no_proxy || env.NO_PROXY || '').split(',').map((s) => s.trim()).filter(Boolean);
-  const noProxy = [...listed, ...LOOPBACK.filter((h) => !listed.includes(h))].join(',');
+  // Node and undici read no_proxy before NO_PROXY; merge both and set both so the list wins.
+  const listed = [];
+  for (const v of [env.no_proxy, env.NO_PROXY]) {
+    for (const h of String(v || '').split(',').map((s) => s.trim()).filter(Boolean)) {
+      if (!listed.includes(h)) listed.push(h);
+    }
+  }
+  const noProxy = [...listed, ...[...LOCAL_HOSTNAMES].filter((h) => !listed.includes(h))].join(',');
   try {
-    const restore = api.setGlobalProxyFromEnv({ ...env, no_proxy: noProxy, NO_PROXY: noProxy });
-    return { status: 'on', restore: typeof restore === 'function' ? restore : none };
+    if (typeof api.setGlobalProxyFromEnv === 'function') {
+      const restore = api.setGlobalProxyFromEnv({ ...env, no_proxy: noProxy, NO_PROXY: noProxy });
+      return { status: 'on', restore: typeof restore === 'function' ? restore : none };
+    }
+    const lib = undici === undefined ? loadUndici() : undici;
+    if (!lib || typeof lib.EnvHttpProxyAgent !== 'function') return { status: 'unsupported', restore: none };
+    const agent = new lib.EnvHttpProxyAgent({
+      httpProxy: env.http_proxy || env.HTTP_PROXY,
+      httpsProxy: env.https_proxy || env.HTTPS_PROXY,
+      noProxy,
+    });
+    const before = lib.getGlobalDispatcher();
+    lib.setGlobalDispatcher(agent);
+    return { status: 'on', restore: () => { lib.setGlobalDispatcher(before); agent.close().catch(() => {}); } };
   } catch (err) {
     // Node's message for a bad URL is the URL itself, and proxy URLs often carry user:password.
-    const error = err && err.code === 'ERR_PROXY_INVALID_CONFIG'
+    const error = err && (err.code === 'ERR_PROXY_INVALID_CONFIG' || err.code === 'ERR_INVALID_URL' || err instanceof TypeError)
       ? 'HTTP_PROXY / HTTPS_PROXY is not a valid proxy URL'
       : (err && err.message) || String(err);
     return { status: 'invalid', error, restore: none };
+  }
+}
+
+/**
+ * The one line an entry point prints about useEnvProxy()'s result, or null for 'off'.
+ * @param {{status: string, error?: string}} result
+ * @returns {{level: 'info'|'warn', text: string}|null}
+ */
+export function proxyNotice(result) {
+  switch (result.status) {
+    case 'on': return { level: 'info', text: 'outbound requests use the proxy from HTTP(S)_PROXY (NO_PROXY and loopback go direct)' };
+    case 'invalid': return { level: 'warn', text: `proxy: ${result.error}; outbound requests go direct` };
+    case 'unsupported': return { level: 'warn', text: `proxy: HTTP(S)_PROXY is set, but Node ${process.version} cannot apply it to fetch; outbound requests go direct` };
+    default: return null;
   }
 }

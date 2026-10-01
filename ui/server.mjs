@@ -293,7 +293,7 @@ import {
 } from '../src/core/run-report.mjs';
 import { REPORT_REASON_IDS } from '../src/shared/report-reasons.mjs';
 import { HLJS_GRAMMAR_IDS } from './public/hljs-loader.mjs';
-import { useEnvProxy } from '../src/core/env-proxy.mjs';
+import { useEnvProxy, proxyNotice } from '../src/core/env-proxy.mjs';
 
 // ── node:sqlite runtime guard + warning filter ──────────────────────────────────
 // Drop ONLY the one-time ExperimentalWarning emitted by node:sqlite (the module is
@@ -10075,10 +10075,8 @@ const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv
 if (isMain) {
   // Outbound calls honor HTTP(S)_PROXY / NO_PROXY (src/core/env-proxy.mjs). First: the
   // broker check below is already one.
-  const proxy = useEnvProxy();
-  if (proxy.status === 'on') console.log('[worca-ui] outbound requests use the proxy from HTTP(S)_PROXY (NO_PROXY and loopback go direct)');
-  else if (proxy.status === 'invalid') console.warn(`[worca-ui] proxy: ${proxy.error}; outbound requests go direct`);
-  else if (proxy.status === 'unsupported') console.warn(`[worca-ui] proxy: HTTP(S)_PROXY is set, but Node ${process.version} cannot apply it to fetch; outbound requests go direct`);
+  const proxyLine = proxyNotice(useEnvProxy());
+  if (proxyLine) console[proxyLine.level === 'warn' ? 'warn' : 'log'](`[worca-ui] ${proxyLine.text}`);
 
   // Remote access fails closed: an unsafe or broken config never starts serving.
   if (REMOTE_ACCESS_CHECK.errors.length) {

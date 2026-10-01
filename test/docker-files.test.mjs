@@ -248,6 +248,7 @@ test('egress proxy survives a client that resets a denied CONNECT (the sidecar u
 test('compose.broker.yml: worca gets the broker address and no key; the broker publishes no port', () => {
   const b = read('docker/compose.broker.yml');
   assert.match(b, /WORCA_BROKER_URL: http:\/\/broker:8080/);
+  assert.match(b, /NO_PROXY: .*\bbroker\b/, 'worca fetch() honors a proxy from .env, so the broker sidecar must bypass it');
   assert.match(b, /ANTHROPIC_API_KEY: ""/, 'the key is blanked in worca');
   assert.match(b, /CLAUDE_CODE_OAUTH_TOKEN: ""/);
   assert.match(b, /command: \["worca", "broker"\]/);
