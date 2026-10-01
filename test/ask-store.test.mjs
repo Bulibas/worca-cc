@@ -497,3 +497,18 @@ test('addThreadContexts accumulates; updateThread/scope writes never touch conte
   assert.equal(addThreadContexts('ask_ffffffff', [p]), null);
   assert.deepEqual(addThreadContexts(t.id, []), [p, s], 'an empty turn is a no-op');
 });
+
+test('addThreadTotals: usage.ctxWindow REPLACES the stored window; a turn without one, or a garbage one, leaves it', () => {
+  const t = createThread({});
+  let tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 1000 } });
+  assert.equal('ctxWindow' in tot, false, 'never reported: absent');
+  tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 2000, ctxWindow: 1000000 } });
+  assert.equal(tot.ctxWindow, 1000000);
+  tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 3000 } });
+  assert.equal(tot.ctxWindow, 1000000, 'a turn with no result keeps the last known window');
+  tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 3000, ctxWindow: 0 } });
+  assert.equal(tot.ctxWindow, 1000000, 'garbage is ignored');
+  tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 3000, ctxWindow: 200000 } });
+  assert.equal(tot.ctxWindow, 200000, 'a model switch replaces it');
+  assert.equal(getThread(t.id).totals.ctxWindow, 200000, 'rowToThread surfaces it');
+});

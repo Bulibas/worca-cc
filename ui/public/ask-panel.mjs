@@ -59,10 +59,53 @@ export function fmtTokens(n) {
   if (!Number.isFinite(n) || n <= 0) return null;
   return n < 1000 ? `${n} tok` : `${(n / 1000).toFixed(1)}k tok`;
 }
-/** Context fill (usage.ctx / totals.ctx) — a snapshot, never a cumulative sum. */
-export function fmtCtx(n) {
+/** Context window meter (docs: Claude Code compacts about 33k short of the window — 967k of 1M). */
+export const CTX_COMPACT_BUFFER = 33000;
+export const CTX_WARN = 0.75;          // amber, as a share of the compaction trigger
+export const CTX_HIGH = 0.9;           // red: compaction soon
+export const CTX_COST_HINT = 200000;   // from here the hover notes every message re-sends the whole context
+const validWindow = (w) => Number.isInteger(w) && w > 0;
+const kTok = (n) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`);
+
+/** 1000000 → "1M", 1500000 → "1.5M", 200000 → "200k"; null for an unknown window. */
+export function fmtWindow(w) {
+  if (!validWindow(w)) return null;
+  if (w >= 1e6) return `${+(w / 1e6).toFixed(1)}M`;
+  if (w >= 1000) return `${+(w / 1000).toFixed(1)}k`;
+  return String(w);
+}
+/** Where automatic compaction starts: window − buffer (the window itself when it is too small for one). */
+export function ctxTrigger(w) {
+  if (!validWindow(w)) return null;
+  return w > 2 * CTX_COMPACT_BUFFER ? w - CTX_COMPACT_BUFFER : w;
+}
+export function ctxLevel(ctx, w) {
+  const t = ctxTrigger(w);
+  if (!t || !Number.isFinite(ctx) || ctx <= 0) return null;
+  const r = ctx / t;
+  return r >= CTX_HIGH ? 'high' : r >= CTX_WARN ? 'warn' : 'ok';
+}
+/** Share of the FULL window (Claude's own meter does the same); not clamped — a model switch can pass 100. */
+export function ctxPercent(ctx, w) {
+  return validWindow(w) && Number.isFinite(ctx) && ctx > 0 ? Math.round((ctx / w) * 100) : null;
+}
+/** Context fill (usage.ctx / totals.ctx) — a snapshot, never a cumulative sum — against the window when known. */
+export function fmtCtx(n, w) {
   if (!Number.isFinite(n) || n <= 0) return null;
-  return n < 1000 ? `${n} ctx` : `${(n / 1000).toFixed(1)}k ctx`;
+  const win = fmtWindow(w);
+  return win ? `${kTok(n)} / ${win} ctx` : `${kTok(n)} ctx`;
+}
+/** The meter's hover text, or null when there is nothing worth saying. */
+export function ctxTitle(ctx, w) {
+  if (!Number.isFinite(ctx) || ctx <= 0) return null;
+  const parts = [];
+  const pct = ctxPercent(ctx, w);
+  if (pct != null) {
+    if (ctxLevel(ctx, w) === 'high') parts.push('Compaction soon.');
+    parts.push(`${pct}% of the ${fmtWindow(w)} context window. Automatic compaction starts around ${fmtWindow(ctxTrigger(w))}.`);
+  }
+  if (ctx >= CTX_COST_HINT) parts.push(`Each message re-sends about ${(ctx / 1000).toFixed(1)}k tokens.`);
+  return parts.length ? parts.join(' ') : null;
 }
 export function fmtUsd(x) {
   return Number.isFinite(x) ? `$${x.toFixed(2)}` : null;
@@ -664,9 +707,19 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const totals = st.model ? st.model.totals() : { live: null };
     // Context fill: the streaming call's figure while live, else the last turn's.
     // A thread with turns but no ctx predates the metric — show nothing, never a fake 0.
-    const liveCtx = totals.live && totals.live.usage ? totals.live.usage.ctx : null;
-    const ctx = Number.isFinite(liveCtx) ? liveCtx : totals.ctx;
-    el.meterTokens.textContent = fmtCtx(ctx) || ((totals.turns || 0) > 0 ? '' : '0 ctx');
+    const liveUsage = totals.live && totals.live.usage ? totals.live.usage : null;
+    const ctx = liveUsage && Number.isFinite(liveUsage.ctx) ? liveUsage.ctx : totals.ctx;
+    // The window: this turn's once its result landed, else the thread's last known (same model, as a rule).
+    const win = liveUsage && Number.isInteger(liveUsage.ctxWindow) ? liveUsage.ctxWindow : totals.ctxWindow;
+    const pct = ctxPercent(ctx, win);
+    el.meterTokens.textContent = fmtCtx(ctx, win)
+      ? `${fmtCtx(ctx, win)}${pct != null ? ` · ${pct}%` : ''}`
+      : ((totals.turns || 0) > 0 ? '' : '0 ctx');
+    const level = ctxLevel(ctx, win);
+    el.meterTokens.classList.toggle('is-ctx-warn', level === 'warn');
+    el.meterTokens.classList.toggle('is-ctx-high', level === 'high');
+    const title = ctxTitle(ctx, win);
+    if (title) el.meterTokens.setAttribute('title', title); else el.meterTokens.removeAttribute('title');
     // Cost: the stored thread total; while a turn streams, "≈" + that total plus
     // this turn's live figure — the CLI's once its result landed, else the
     // display-only list-price estimate the ask-usage frame carries. ask-done
@@ -1445,11 +1498,24 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   // colour. An unusable createdAt drops the span and its separator with it.
   function threadMeter(t) {
     const meter = make('span', 'ask-thread-meter');
+    const tot = t.totals || {};
     const when = fmtStarted(t.createdAt, now());
-    const rest = [fmtCtx(t.totals && t.totals.ctx), fmtUsd(t.totals && t.totals.costUsd), fmtAgents(t.totals && t.totals.agents)]
-      .filter(Boolean).join(' · ');
     if (when) meter.appendChild(make('span', 'ask-thread-when', when));
-    if (rest) meter.appendChild(doc.createTextNode(when ? ` · ${rest}` : rest));
+    // With a known window the fill is its own span (level colour + hover); without one it stays plain
+    // text, so a legacy row's meter is exactly the date element plus "… · $x · n agents".
+    const fillText = fmtCtx(tot.ctx, tot.ctxWindow);
+    let fill = fillText;
+    if (fillText && Number.isInteger(tot.ctxWindow) && tot.ctxWindow > 0) {
+      const level = ctxLevel(tot.ctx, tot.ctxWindow);
+      fill = make('span', `ask-thread-fill${level === 'warn' ? ' is-ctx-warn' : level === 'high' ? ' is-ctx-high' : ''}`, fillText);
+      const title = ctxTitle(tot.ctx, tot.ctxWindow);
+      if (title) fill.title = title;
+    }
+    const parts = [fill, fmtUsd(tot.costUsd), fmtAgents(tot.agents)].filter(Boolean);
+    parts.forEach((p, i) => {
+      if (when || i > 0) meter.appendChild(doc.createTextNode(' · '));
+      meter.appendChild(typeof p === 'string' ? doc.createTextNode(p) : p);
+    });
     return meter;
   }
 
@@ -2199,7 +2265,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         row.appendChild(make('span', `ask-dot${a.status === 'running' ? ' ask-dot-run' : a.status === 'done' ? ' ask-dot-done' : ''}`));
         const col = make('span', 'ask-runinfo-col');
         col.appendChild(make('span', 'ask-runinfo-name', a.label || a.type || 'agent'));
-        col.appendChild(make('span', 'ask-runinfo-sub', [a.model, fmtCtx(a.ctx) || fmtTokens(a.tokens), Number.isFinite(a.costUsd) ? `≈${fmtUsd(a.costUsd)}` : null, a.status || null].filter(Boolean).join(' · ')));
+        col.appendChild(make('span', 'ask-runinfo-sub', [a.model, fmtCtx(a.ctx, a.ctxWindow) || fmtTokens(a.tokens), Number.isFinite(a.costUsd) ? `≈${fmtUsd(a.costUsd)}` : null, a.status || null].filter(Boolean).join(' · ')));
         row.appendChild(col);
         row.appendChild(make('span', 'ask-runinfo-elapsed', fmtElapsed(a.durationMs) || '—'));
         p.appendChild(row);
@@ -4078,7 +4144,12 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     rowEl.appendChild(make('span', `ask-dot${block.status === 'running' ? ' ask-dot-run' : block.status === 'done' ? ' ask-dot-done' : ''}`));
     rowEl.appendChild(make('span', 'ask-agent-name', block.label || block.type || 'agent'));
     rowEl.appendChild(make('span', 'ask-agent-model', block.model || ''));
-    rowEl.appendChild(make('span', 'ask-agent-tokens', fmtCtx(block.ctx) || fmtTokens(block.tokens) || ''));
+    const fillEl = make('span', 'ask-agent-tokens', fmtCtx(block.ctx, block.ctxWindow) || fmtTokens(block.tokens) || '');
+    const level = ctxLevel(block.ctx, block.ctxWindow);             // null without a window: no colour, as before
+    if (level === 'warn' || level === 'high') fillEl.classList.add(`is-ctx-${level}`);
+    const fillTitle = Number.isInteger(block.ctxWindow) ? ctxTitle(block.ctx, block.ctxWindow) : null;
+    if (fillTitle) fillEl.title = fillTitle;
+    rowEl.appendChild(fillEl);
     rowEl.appendChild(make('span', 'ask-agent-cost', Number.isFinite(block.costUsd) ? `≈${fmtUsd(block.costUsd)}` : ''));
     rowEl.appendChild(make('span', `ask-agent-status${block.status === 'done' ? ' is-done' : ''}`, block.status || ''));
     rowEl.addEventListener('click', () => {
@@ -4091,7 +4162,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.expandedAgents.has(block.id)) {
       const log = make('div', 'ask-agent-log');
       const head = make('div', 'ask-agent-log-head');
-      head.appendChild(make('span', null, [block.model, fmtCtx(block.ctx) || fmtTokens(block.tokens), Number.isFinite(block.costUsd) ? `≈${fmtUsd(block.costUsd)}` : null].filter(Boolean).join(' · ')));
+      head.appendChild(make('span', null, [block.model, fmtCtx(block.ctx, block.ctxWindow) || fmtTokens(block.tokens), Number.isFinite(block.costUsd) ? `≈${fmtUsd(block.costUsd)}` : null].filter(Boolean).join(' · ')));
       head.appendChild(make('span', 'ask-agent-log-type', block.type || ''));
       log.appendChild(head);
       const body = make('div', 'ask-agent-log-body');
