@@ -12,6 +12,7 @@
 #   CLAUDE_CODE_VERSION  the @anthropic-ai/claude-code version to pin              [required]
 #   VARIANT              slim | full                                               [slim]
 #   NODE_IMAGE           base image                                                [node:22-bookworm-slim]
+#   APT_REFRESH          any string; a new value rebuilds the OS layer (CI: ISO week)
 
 ARG NODE_IMAGE=node:22-bookworm-slim
 FROM ${NODE_IMAGE}
@@ -19,14 +20,20 @@ FROM ${NODE_IMAGE}
 ARG WORCA_TARBALL
 ARG CLAUDE_CODE_VERSION
 ARG VARIANT=slim
+# Changes weekly in CI (ISO week) so the cached OS layer picks up Debian fixes.
+ARG APT_REFRESH=
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # OS layer: git is mandatory (worktrees); gh backs one-click PRs and the GitHub
 # Issues source; tini reaps orphaned claude/MCP children; procps gives agents
-# `ps` for the host guard's "look the PID up first" rule.
-# hadolint ignore=DL3008
-RUN apt-get update \
+# `ps` for the host guard's "look the PID up first" rule. The upgrade pulls in
+# Debian security fixes the node base image has not picked up yet (it lags; the
+# Trivy scan fails on fixed HIGH CVEs such as libexpat1's).
+# hadolint ignore=DL3005,DL3008
+RUN echo "apt refresh: ${APT_REFRESH:-none}" \
+ && apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git gnupg jq less openssh-client procps ripgrep sudo tini \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
