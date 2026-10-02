@@ -251,7 +251,7 @@ move the Worca home to a shorter path.
 | "Stop the running actions of this project before running setup again." (`SERVICES_RUNNING`) | Setup would rewrite files a running service uses. Stop its services, then Run setup again |
 | "The setup command failed." (`SETUP_FAILED`) | Read the setup log on the card, fix the command (Project page › Actions), then **Run setup again** |
 | "The branch … no longer exists locally or on a remote." | Nothing to check out. Copy command still shows the branch name |
-| "The branch … is checked out in <path>." | Your own clone (or another worktree) has the branch. Switch that folder to another branch, or use it directly |
+| "Can't check out: … is already checked out in <path>." | Your own clone (or another worktree) has the branch. Switch that folder to another branch, or use it directly |
 | "<path> already exists and is not this run's checkout." | A folder sits where the checkout goes. Move or delete it; Worca never deletes it for you |
 | A new run fails: the branch is "already checked out in worktree <path>" | A checkout holds the branch the new run wants. Discard the checkout, then start the run again |
 | "No free port between 4400 and 4499 …" | Widen the port range in Settings › Runs › Actions |

@@ -97,7 +97,7 @@ export function checkoutRun({ id, members = null, by = null, policy = 'on-demand
       if (holder && existsSync(target) && canon(holder) === canon(target)) {   // already checked out here (D27)
         kept.push({ m, target: canon(target), feature }); continue;
       }
-      if (holder) throw cerr(`The branch ${feature} is checked out in ${holder}. Switch that folder to another branch, or use it directly.`, 'BRANCH_CHECKED_OUT');
+      if (holder) throw cerr(`Can't check out: ${feature} is already checked out in ${holder}. Open that folder to try the run, or switch it to another branch and check out again.`, 'BRANCH_CHECKED_OUT');
       if (existsSync(target)) throw cerr(`${target} already exists and is not this run's checkout. Move or delete it, then try again.`, 'TARGET_EXISTS');
       if (!(await branchExists(m.projectDir, feature))) {
         const pushed = await branchPushedTo(m.projectDir, feature);

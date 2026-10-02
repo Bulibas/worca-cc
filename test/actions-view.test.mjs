@@ -27,23 +27,30 @@ test('four states (plus pending / interrupted setup)', () => {
   assert.equal(memberViewState(member({ checkout: { setup: { status: 'ok' } } }), [task]), 'task-result');
 });
 
-test('not checked out: folder to come, estimate, Check out + Copy command, the other built-ins disabled until Check out', () => {
+test('not checked out: folder to come, estimate, Check out + Copy command, the other built-ins check out first', () => {
   const el = renderActionsCard(model(member()), { doc, handlers: {} });
   assert.doesNotMatch(el.textContent, /\/h\/runs\/ab\/repos\/app-0cea65fb/, 'no folder path before it exists');
   assert.match(el.querySelector('.act-meta').textContent, /FolderCreated when you check out/);
   assert.match(el.querySelector('.act-missing').textContent, /^Check out takes about 42 s\./);
   assert.deepEqual(labelsOf(el), ['Check out', 'Copy command', 'VS Code', 'Terminal', 'Finder']);
-  const waiting = [...el.querySelectorAll('button')].filter((b) => b.disabled);
-  assert.deepEqual(waiting.map((b) => b.textContent), ['VS Code', 'Terminal', 'Finder']);
-  assert.ok(waiting.every((b) => b.title === 'Available after Check out'));
-  assert.match(el.textContent, /VS Code, Terminal and Finder open the checkout, so they work after Check out\./);
+  const opens = [...el.querySelectorAll('button')].filter((b) => ['VS Code', 'Terminal', 'Finder'].includes(b.textContent));
+  assert.ok(opens.every((b) => !b.disabled && b.title === 'Checks out the run first, then opens'));
+  assert.match(el.textContent, /VS Code, Terminal and Finder open the checkout, so they check out first\./);
+  const seen = [];
+  const el2 = renderActionsCard(model(member()), { doc, handlers: { onOpenBeforeCheckout: (...a) => seen.push(a) } });
+  [...el2.querySelectorAll('button')].find((b) => b.textContent === 'Terminal').click();
+  assert.deepEqual(seen, [['app-0cea65fb', 'terminal', 'Terminal']]);
+  const ws = model(member()); ws.workspace = true;
+  const wsEl = renderActionsCard(ws, { doc, handlers: {} });
+  assert.ok([...wsEl.querySelectorAll('button')].filter((b) => b.textContent === 'Terminal').every((b) => b.disabled && b.title === 'Available after Check out'),
+    'a workspace run checks out from its checklist');
 });
 
 test('a built-in switched on but not found on this machine is named, before and after Check out', () => {
   const m = member({ builtins: [{ key: 'terminal', label: 'Terminal' }, { key: 'copyCommand', label: 'Copy command' }], unavailableBuiltins: ['editor'] });
   const before = renderActionsCard(model(m), { doc, handlers: {} });
   assert.match(before.textContent, /No editor was found on this machine\. Set one in Settings › Runs › Actions\./);
-  assert.match(before.textContent, /Terminal open the checkout/);
+  assert.match(before.textContent, /Terminal open the checkout, so they check out first/);
   const after = renderActionsCard(model({ ...m, checkout: { setup: { status: 'ok' } } }), { doc, handlers: {} });
   assert.match(after.textContent, /No editor was found on this machine/);
   const off = model(m); off.enabled = false;
@@ -378,4 +385,38 @@ test('middleClip keeps both ends', async () => {
   const c = middleClip('a'.repeat(40) + 'END', 20);
   assert.equal(c.length, 20);
   assert.ok(c.startsWith('aaaa') && c.endsWith('END') && c.includes('…'));
+});
+
+test('controller: Terminal before Check out asks, then checks out this member and opens it; Cancel does nothing', async () => {
+  const m = model(member());
+  const { api, calls } = fakeApi((method) => (method === 'GET' ? { ok: true, status: 200, data: m } : null));
+  const asked = [];
+  let answer = false;
+  const host = doc.createElement('div');
+  const ctl = createActionsController({ runId: 'ab', scopeQuery: 'projectKey=app', api, ws: { send: () => {} }, host, doc,
+    confirm: async (o) => { asked.push(o); return answer; }, navigate: () => {} });
+  await ctl.refresh();
+  const click = () => [...host.querySelectorAll('button')].find((b) => b.textContent === 'Terminal').click();
+  click(); await tick(); await tick();
+  assert.equal(asked[0].title, 'Check out to open Terminal?');
+  assert.match(asked[0].message, /checks out worca-cc\/x first \(a few seconds\), then opens Terminal\. Then the setup command runs: npm ci$/);
+  assert.equal(asked[0].confirmLabel, 'Check out and open');
+  assert.ok(!calls.some((c) => c[0] === 'POST'), 'cancel: nothing posted');
+  answer = true;
+  click(); for (let i = 0; i < 6; i++) await tick();
+  const posts = calls.filter((c) => c[0] === 'POST');
+  assert.deepEqual(posts.map((c) => [c[1], c[2]]), [
+    ['/api/runs/ab/checkout?projectKey=app', { members: ['app-0cea65fb'] }],
+    ['/api/runs/ab/builtins/terminal?projectKey=app', { member: 'app-0cea65fb' }],
+  ]);
+  ctl.destroy();
+});
+
+test('an error notice is a red alert; a success notice a green status', () => {
+  const err = renderActionsCard(model(member()), { doc, handlers: {}, notice: { kind: 'error', text: "Can't check out: x is already checked out in /p." } }).querySelector('.act-notice');
+  assert.equal(err.className, 'act-notice err');
+  assert.equal(err.getAttribute('role'), 'alert');
+  const ok = renderActionsCard(model(member()), { doc, handlers: {}, notice: { kind: 'ok', text: 'Copied' } }).querySelector('.act-notice');
+  assert.equal(ok.className, 'act-notice ok');
+  assert.equal(ok.getAttribute('role'), 'status');
 });

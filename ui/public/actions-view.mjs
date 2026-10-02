@@ -170,15 +170,22 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
     const row = h(doc, 'div', 'act-row');
     if (!model.workspace) row.append(btn(doc, 'Check out', 'btn-primary', () => handlers.onCheckout?.([m.projectKey])));
     const c = copyBtn(); if (c) row.append(c);
-    // The other built-ins open the checkout folder, so they wait for it: shown, disabled, and said why.
+    // The other built-ins open the checkout folder, which Check out creates: a click asks first, then checks
+    // out and opens (a workspace run checks out from its checklist, so there they wait for it).
     const opens = model.enabled ? (m.builtins || []).filter((b) => b.key !== 'copyCommand') : [];
     if (opens.length) {
       row.append(h(doc, 'span', 'act-sep'));
-      for (const b of opens) { const d = btn(doc, b.label); d.disabled = true; d.title = 'Available after Check out'; row.append(d); }
+      for (const b of opens) {
+        const o = btn(doc, b.label, null, () => handlers.onOpenBeforeCheckout?.(m.projectKey, b.key, b.label));
+        if (model.workspace) { o.disabled = true; o.title = 'Available after Check out'; } else o.title = 'Checks out the run first, then opens';
+        row.append(o);
+      }
     }
     if (row.childNodes.length) sec.append(row);
     // One note under the row: what waits for Check out, then what this machine lacks.
-    const waits = opens.length ? `${opens.map((b) => b.label).join(', ').replace(/, ([^,]*)$/, ' and $1')} open the checkout, so they work after Check out.` : '';
+    const names = opens.map((b) => b.label).join(', ').replace(/, ([^,]*)$/, ' and $1');
+    const waits = !opens.length ? '' : model.workspace ? `${names} open the checkout, so they work after Check out.`
+      : `${names} open the checkout, so they check out first.`;
     const note = missingNote(`Check out takes ${estimateText(model.estimate?.lastSetupMs, !!m.setup)}.${waits ? ` ${waits}` : ''}`);
     if (note) sec.append(note);
     return sec;
@@ -240,7 +247,13 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
 /** One section.card.act-card per member. A workspace run adds a member checklist and stack rows on top. */
 export function renderActionsCard(model, { doc, handlers = {}, logs = null, queued = null, notice = null } = {}) {
   const root = h(doc, 'div', 'act-view');
-  if (notice) root.append(appendWithPageLinks(doc, h(doc, 'p', `hint act-notice${notice.kind ? ` ${notice.kind}` : ''}`), notice.text));
+  if (notice) {
+    // kind 'error' | 'ok' (and older 'err'): an error is a tinted alert box, a success a green status line.
+    const err = notice.kind === 'error' || notice.kind === 'err';
+    const p = h(doc, 'p', `act-notice ${err ? 'err' : notice.kind === 'ok' ? 'ok' : ''}`.trim());
+    p.setAttribute('role', err ? 'alert' : 'status');
+    root.append(appendWithPageLinks(doc, p, notice.text));
+  }
   const members = model.members || [];
   if (model.workspace && model.finished !== false) {
     const open = members.filter((m) => m.branch && !m.checkout);
@@ -429,6 +442,17 @@ export function createActionsController({ runId, scopeQuery, api, ws, host, doc,
     },
     onStop: async (member, actionId) => after(await api('POST', `${base}/actions/${encodeURIComponent(actionId)}/stop${q}`, { member })),
     onBuiltin: async (member, key) => { const r = await api('POST', `${base}/builtins/${encodeURIComponent(key)}${q}`, { member }); if (!r.ok) fail(r); },
+    // Terminal / Finder / Editor before Check out: they open the checkout folder, so ask, check out, then open.
+    onOpenBeforeCheckout: async (member, key, label) => {
+      const m = (st.model?.members || []).find((x) => x.projectKey === member);
+      const setup = m?.setup ? ` Then the setup command runs: ${m.setup}` : '';
+      const ok = await confirm({ title: `Check out to open ${label}?`,
+        message: `${label} opens the run's checkout, which doesn't exist yet. Worca checks out ${m?.branch || 'the run\'s branch'} first (a few seconds), then opens ${label}.${setup}`,
+        confirmLabel: `Check out and open` });
+      if (!ok) return;
+      const r = await after(await api('POST', `${base}/checkout${q}`, { members: [member] }));
+      if (r?.ok) await handlers.onBuiltin(member, key);
+    },
     onSetupAgain: async (member) => {
       const r = await api('POST', `${base}/setup${q}`, { member });
       if (!r.ok) return fail(r);
