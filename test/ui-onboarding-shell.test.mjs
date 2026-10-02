@@ -4,12 +4,17 @@
 // before About, the one-time welcome, Hide → POST, Show again, and the guides:
 // nav hops across views, a replay that walks every stop again, the Composer tour,
 // and the interface-mode switch (asked up front, or raised mid-tour).
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs). That
+// also clears the poll of a guide a failed assertion left mid-tour, so it cannot cascade.
+const trackDom = useDomRelease(afterEach);
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..', 'ui', 'public');
@@ -65,10 +70,7 @@ const status = (done = [], flags = {}) => ({
 async function boot({ onboarding = status(['claude']), projects = [], level = null, width = null } = {}) {
   // `level`: the server-rendered interface mode (docs/ui-levels.md); null = no attribute (gates nothing).
   const shellHtml = level ? html.replace('<html lang="en" data-theme="system">', `<html lang="en" data-theme="system" data-level="${level}">`) : html;
-  // A guide left running by an earlier test (an assertion failed mid-tour) polls the GLOBAL
-  // document, which this boot replaces: end it first so one failure cannot cascade.
-  try { globalThis.document?.dispatchEvent(new globalThis.window.KeyboardEvent('keydown', { key: 'Escape' })); } catch { /* no page yet */ }
-  const dom = new JSDOM(shellHtml, { url: 'http://localhost:4317/', pretendToBeVisual: true });
+  const dom = trackDom(new JSDOM(shellHtml, { url: 'http://localhost:4317/', pretendToBeVisual: true }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   // jsdom has no matchMedia: a null width keeps every existing test on the desktop path;
@@ -100,7 +102,7 @@ async function boot({ onboarding = status(['claude']), projects = [], level = nu
 // ---- static shell ----
 
 test('shell: Getting started is its own view with the shelf host; the Settings card precedes About; both dialogs exist', () => {
-  const doc = new JSDOM(html).window.document;
+  const doc = trackDom(new JSDOM(html)).window.document;
   const view = doc.querySelector('.view[data-view="getting-started"]');
   assert.ok(view, 'a routed view of its own');
   assert.equal(view.querySelector('.topbar h1').textContent, 'Getting started');

@@ -3,11 +3,15 @@
 // "Use branches from Origin · latest | Local copy", and a "What the run gets" cell per row). Boot copied from
 // test/ui-workspace-source-branches.test.mjs, with a fake socket (ui-history-shipit.test.mjs:33-48)
 // and per-test stubs for /api/branches, /api/sync and /api/run that can hold a response.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -49,7 +53,7 @@ function hold() {
 }
 
 async function boot({ fresh = null, syncGet = null, syncPost = null, run = null, workspaces = [] } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   let lastWs = null;

@@ -1,18 +1,22 @@
 // test/ui-settings-tabs.test.mjs — Guardrails/Models/Plugins are Settings TABS,
 // not views: the nav entries are gone, the panes live inside
 // [data-view="settings"] and the tab rides in the hash (#settings/<tab>).
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 const html = readFileSync(htmlPath, 'utf8');
 
 const settingsView = () =>
-  new JSDOM(html, { url: 'http://localhost:4319/' })
+  trackDom(new JSDOM(html, { url: 'http://localhost:4319/' }))
     .window.document.querySelector('.view[data-view="settings"]');
 
 test('the three nav entries are gone from BOTH menus', () => {
@@ -85,7 +89,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 const click = (window, node) => node.dispatchEvent(new window.Event('click', { bubbles: true }));
 
 async function boot({ url = 'http://localhost:4319/' } = {}) {
-  const dom = new JSDOM(html, { url });
+  const dom = trackDom(new JSDOM(html, { url }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = WSStub;

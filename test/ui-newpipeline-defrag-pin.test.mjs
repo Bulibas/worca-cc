@@ -3,13 +3,17 @@
 // app.js against a fetch stub whose GET /api/workflows/wf_memory_defrag is built by the REAL
 // server-side view builder. A save of another tunable keeps the project's own (hidden) pick, and a
 // settings-changed frame re-reads the pin while the page is open.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { GRAPH_MEMORY_DEFRAG_WORKFLOW } from '../src/core/graph/builtin-workflows.mjs';
 import { defragWorkflowView, resolveDefragModel } from '../src/core/memory-defrag-model.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -68,7 +72,7 @@ function makeServer({ stored, pick = null }) {
 }
 
 async function boot(srv) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4319/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4319/' }));
   const { window } = dom;
   window.document.documentElement.dataset.level = 'expert';
   window.Element.prototype.scrollIntoView = function () {};
