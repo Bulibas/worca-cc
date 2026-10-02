@@ -1628,8 +1628,8 @@ test('style.css: the saved run bar shares the run page bar\'s rules; the PR butt
   assert.match(css, /\.hd-pr-link\{[^}]*background:var\(--blue-bg\);color:var\(--blue-ink-strong\);/);
   assert.match(css, /\.hd-pr-link\.merged\{background:var\(--violet-bg\);color:var\(--violet-ink\);\}/);
   assert.doesNotMatch(css, /hd-g-resume|\.rd-cta\.alt/, 'the card\'s Resume split and grey secondary are gone');
-  // Both pages' bars: the run's name right-aligned beside the controls (one shared rule).
-  assert.match(css, /\n\.rd-bar-mid\{[^}]*justify-content:flex-end/);
+  // Both pages' bars: the run's name left-aligned, the controls at the right (one shared rule).
+  assert.match(css, /\n\.rd-bar-mid\{[^}]*justify-content:flex-start/);
   // The glance's branch chip and PR slot take display rules, so their [hidden] is restated.
   assert.match(css, /\.rd-page-branch\[hidden\]\{display:none;\}/);
   assert.match(css, /\.rd-pr-slot\[hidden\]\{display:none;\}/);

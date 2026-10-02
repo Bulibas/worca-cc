@@ -4307,7 +4307,7 @@ body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:
    switch's visible label first: the select keeps its aria-label and tooltip, the pill says what
    happens. */
 @container rd-bar (max-width:900px){ .rd-night-wrap > .txt{display:none;} }
-.rd-bar-mid{flex:1 1 0;display:flex;justify-content:flex-end;align-items:center;gap:8px;min-width:0;}   /* basis 0: the name truncates before the controls wrap; flex-end: it sits just left of them */
+.rd-bar-mid{flex:1 1 0;display:flex;justify-content:flex-start;align-items:center;gap:8px;min-width:0;}   /* basis 0: the name truncates before the controls wrap; flex-start: it sits at the bar's left, the controls at its right */
 /* The run's name. Details has it as its header's title, so the bar leaves it blank there. */
 /* The glance's page title owns the name; the bar repeats it only once that heading has
    scrolled out of view (app.js watchPageTitle sets data-title-out), like a large title
@@ -4523,7 +4523,6 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 
 @media (max-width:640px){
   .rd-bar,.hd-bar{padding:10px 16px;flex-wrap:wrap;gap:8px;}
-  .rd-bar-mid{justify-content:flex-start;flex-basis:0;}   /* the name truncates beside the back button */
   .rd-bar-end{margin-left:auto;gap:6px;}
   .rd-bar-end:empty{display:none;}
   .rd-bar .rd-pause,.rd-bar .rd-stop,.hd-bar .hd-resume,.hd-bar .hd-pause,.hd-bar .hd-stop{padding:0 11px;}

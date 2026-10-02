@@ -1529,10 +1529,10 @@ test('the glance\'s meta line carries the feature branch: one chip, updated in p
   assert.deepEqual(writes, [name, 'worca-cc/renamed']);
 });
 
-test('style.css: the bar\'s run name sits right, beside the controls, and still truncates and fades', () => {
+test('style.css: the bar\'s run name sits left, away from the controls, and still truncates and fades', () => {
   const mid = (css.match(/\n\.rd-bar-mid\{([^}]*)\}/) || [])[1];
   assert.ok(mid, 'the bar middle rule');
-  assert.match(mid, /justify-content:flex-end/);
+  assert.match(mid, /justify-content:flex-start/);
   assert.match(mid, /flex:1 1 0/, 'it takes the free space and shrinks before the controls wrap');
   assert.match(mid, /min-width:0/);
   assert.match(css, /\n\.rd-bar-title\{[^}]*text-overflow:ellipsis[^}]*opacity:0;transition:opacity/);
