@@ -4263,8 +4263,13 @@ body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:
    and Details (header card, tabs, mini bar). The bar is shared and sticky. Every
    control on it is one height so the row reads as one strip. */
 .rd-bar,.hd-bar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;
-  padding:12px 32px;background:var(--bg);border-bottom:1px solid var(--line);}
-.rd-bar-mid{flex:1 1 auto;display:flex;justify-content:center;align-items:center;gap:8px;min-width:0;}
+  padding:12px 32px;background:var(--bg);border-bottom:1px solid var(--line);
+  container:rd-bar / inline-size;}
+/* A bar too narrow for every control at once (the Runs list pane beside it at ~1280 px) drops the
+   switch's visible label first: the select keeps its aria-label and tooltip, the pill says what
+   happens. */
+@container rd-bar (max-width:900px){ .rd-night-wrap > .txt{display:none;} }
+.rd-bar-mid{flex:1 1 0;display:flex;justify-content:center;align-items:center;gap:8px;min-width:0;}   /* basis 0: the name truncates before the controls wrap */
 /* The run's name. Details has it as its header's title, so the bar leaves it blank there. */
 /* The glance's page title owns the name; the bar repeats it only once that heading has
    scrolled out of view (app.js watchPageTitle sets data-title-out), like a large title
@@ -4430,7 +4435,6 @@ button.rd-srow:hover{background:var(--hover-on-field);}
   .rd-bar,.hd-bar{padding:10px 16px;flex-wrap:wrap;gap:8px;}
   .rd-bar-mid{justify-content:flex-start;flex-basis:0;}   /* the name truncates beside the back button */
   .rd-bar-end{margin-left:auto;gap:6px;}
-  .rd-night-wrap > .txt{display:none;}   /* the select keeps its aria-label; the pill still says what happens */
   .rd-bar-end:empty{display:none;}
   .rd-bar .rd-pause,.rd-bar .rd-stop,.hd-bar .hd-resume,.hd-bar .hd-pause,.hd-bar .hd-stop{padding:0 11px;}
   .rd-glance{padding:20px 16px var(--ask-dock-clearance);}
