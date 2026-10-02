@@ -1,9 +1,13 @@
 // test/ui-history-graph-log-link.test.mjs
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 // Behavior tests for the History DETAIL run-graph -> Logs tab link: clicking a
 // workflow node activates the Logs tab and narrows its `source` filter to that
@@ -23,7 +27,7 @@ const cssPath = fileURLToPath(new URL('../ui/public/style.css', import.meta.url)
 const PROJECT = '/tmp/proj';
 
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
 
   // jsdom does not implement scrollIntoView, and the graph link calls it on the

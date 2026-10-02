@@ -1,12 +1,16 @@
 // test/ui-nav-buttons.test.mjs — sidebar menu items are buttons, not links.
 // They must drive the hash router exactly like the anchors did (reload restore,
 // back/forward, deep links), while producing no browser status-bar link preview.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..', 'ui', 'public');
@@ -22,7 +26,7 @@ const hidden = (doc, view) =>
   doc.querySelector(`[data-view="${view}"]`).classList.contains('hidden');
 
 async function boot(url = 'http://localhost:4317/') {
-  const dom = new JSDOM(html, { url });
+  const dom = trackDom(new JSDOM(html, { url }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   let lastWs = null;

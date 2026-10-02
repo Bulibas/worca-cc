@@ -1,7 +1,7 @@
 // test/ui-mcp-view.test.mjs — Settings › MCP servers (spec §7): hashes, set list order and warning
 // dot, Used by × semantics, member card states, Team locks, Delete confirm, the read-only Servers view,
 // Add server → Save and test, the strip hook; plus the booted app's tab, level map and deep links.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -9,6 +9,10 @@ import { JSDOM } from 'jsdom';
 import {
   parseMcpParam, mcpRoute, memberStateText, createMcpView, setMcpStripRenderer, collectFieldInputs,
 } from '../ui/public/mcp-view.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const doc = new JSDOM('<!doctype html><body></body>').window.document;
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -498,7 +502,7 @@ const html = readFileSync(htmlPath, 'utf8');
 class WSStub { constructor() { this.readyState = 1; WSStub.last = this; this._l = {}; } send() {} close() {}
   addEventListener(t, fn) { (this._l[t] = this._l[t] || []).push(fn); } _open() { (this._l.open || []).forEach((fn) => fn({})); } }
 async function boot(url) {
-  const dom = new JSDOM(html, { url });
+  const dom = trackDom(new JSDOM(html, { url }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = WSStub;
@@ -523,7 +527,7 @@ async function boot(url) {
 const go = async (window, hash) => { window.location.hash = hash; window.dispatchEvent(new window.Event('hashchange')); await settle(); };
 
 test('the tab: after Plugins, Advanced, titled "MCP servers" for the level banner', () => {
-  const d = new JSDOM(html).window.document;
+  const d = trackDom(new JSDOM(html)).window.document;
   const tabs = [...d.querySelectorAll('#settings-tabs button[data-tab]')];
   const i = tabs.findIndex((b) => b.dataset.tab === 'mcp');
   assert.equal(tabs[i - 1].dataset.tab, 'plugins');

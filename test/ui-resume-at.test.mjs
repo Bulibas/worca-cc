@@ -11,6 +11,10 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -27,7 +31,7 @@ async function boot({ fetchHandler, level } = {}) {
   let html = readFileSync(htmlPath, 'utf8');
   if (level) html = html.replace('<html lang="en" data-theme="system">',
     `<html lang="en" data-theme="system" data-level="${level}">`);
-  const dom = new JSDOM(html, { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(html, { url: 'http://localhost:4317/' }));
   live.push(dom);
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
@@ -92,9 +96,11 @@ async function confirmSheet(ctx) {
   const missed = modal.querySelector('#sched-missed');
   assert.equal(missed.value, 'skip', 'missed policy is pre-selected to Skip');
   assert.equal(missed.disabled, false, 'the user may still pick "Start it late"');
+  // Tomorrow in LOCAL time: the sheet reads date + time in the browser's zone, and a UTC
+  // date is still today's local date past midnight east of UTC, putting 02:00 in the past.
   const d = new Date(Date.now() + 86400000);
   const dateIn = modal.querySelector('#sched-date');
-  dateIn.value = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  dateIn.value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   dateIn.dispatchEvent(new window.Event('input', { bubbles: true }));
   const timeIn = modal.querySelector('#sched-time');
   timeIn.value = '02:00';

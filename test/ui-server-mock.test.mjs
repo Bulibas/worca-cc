@@ -12,18 +12,18 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 
-const _openDoms = [];
-afterEach(() => { for (const d of _openDoms.splice(0)) { try { d.window.close(); } catch { /* closed */ } } });
+const trackDom = useDomRelease(afterEach);
 
 const ok = (body) => Promise.resolve({ ok: true, status: 200, json: async () => body });
 
 async function boot() {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
-  _openDoms.push(dom);
+  trackDom(dom);
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   const wsBox = { ws: null };

@@ -1,12 +1,16 @@
 // test/ui-mcp-project.test.mjs — the project MCP tab, the workspace overview card and the Ask Worca
 // settings block (spec §8, §9.5): chips and ×, Add set, "Include General in runs", the zero-set text,
 // the resolution table from POST /api/mcp/preview, and the booted #projects/<key>/mcp route.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { renderResolution, mountProjectMcp, paintMcpResolution, paintAskMcpBlock } from '../ui/public/mcp-view.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const doc = new JSDOM('<!doctype html><body></body>').window.document;
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -131,7 +135,7 @@ class WSStub { constructor() { WSStub.last = this; this._l = {}; } send() {} clo
   addEventListener(t, fn) { (this._l[t] = this._l[t] || []).push(fn); } _open() { (this._l.open || []).forEach((fn) => fn({})); } }
 
 test('#projects/<key>/mcp opens the MCP tab (Advanced) and the pill writes that hash; Settings › Ask Worca paints its MCP block', async () => {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4321/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4321/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = WSStub;

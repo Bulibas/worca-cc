@@ -2,12 +2,16 @@
 // Activity / Build / Manage sections, Settings pinned at the bottom behind a
 // divider. Markup+CSS only — app.js wires nav via `.nav button[data-nav]`, so
 // headers are divs and Settings stays inside <nav class="nav">.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..', 'ui', 'public');
@@ -66,7 +70,7 @@ const click = (window, node) =>
   node.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
 
 async function boot() {
-  const dom = new JSDOM(html, { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(html, { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; }

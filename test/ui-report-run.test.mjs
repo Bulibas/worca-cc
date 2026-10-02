@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM, VirtualConsole } from 'jsdom';
 import { previewText, REPORT_PREVIEW_DEBOUNCE_MS } from '../ui/public/report-run.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -39,13 +40,9 @@ const PKEY = 'proj-alpha-11111111';
 const PID = 'abc123de';
 const RUN_ID = 'run-report-1';
 
-// Close each booted window: ui-history-detail.test.mjs:33-38 records that a file
-// booting many jsdom DOMs (~79 there) crossed Node's ~2GB heap on the Windows CI VM.
-// A dozen is far from that, but the cleanup is two lines.
-const _openDoms = [];
-afterEach(() => {
-  for (const d of _openDoms.splice(0)) { try { d.window.close(); } catch { /* already closed */ } }
-});
+// Release each booted window (test/helpers/jsdom-release.mjs): every boot leaves an
+// app.js instance that pins its DOM for the life of the process.
+const trackDom = useDomRelease(afterEach);
 
 const REPORT = {
   payload: { schemaVersion: 1, reason: 'too-slow', run: { id: PID },
@@ -58,7 +55,7 @@ const REPORT = {
 const FILED_URL = 'https://github.com/SinishaDjukic/worca-cc/issues/512';
 const FILED = { ok: true, url: FILED_URL, labeled: true };
 
-// ── boot(): test/ui-running-stop-modal.test.mjs:22-82, plus _openDoms and clipboard ──
+// ── boot(): test/ui-running-stop-modal.test.mjs:22-82, plus trackDom and clipboard ──
 async function boot({ fetchHandler, clipboard } = {}) {
   // #report-issue is a real <a href> and two tests click it. jsdom has no navigation,
   // so its activation behaviour raises a `jsdomError` ("Not implemented: navigation
@@ -75,7 +72,7 @@ async function boot({ fetchHandler, clipboard } = {}) {
   virtualConsole.forwardTo(console, { jsdomErrors: 'none' });
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'),
     { url: 'http://localhost:4317/', virtualConsole });
-  _openDoms.push(dom);
+  trackDom(dom);
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
 

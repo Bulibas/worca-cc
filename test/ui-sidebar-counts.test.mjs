@@ -1,10 +1,14 @@
 // test/ui-sidebar-counts.test.mjs
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const htmlPath = join(__dirname, '../ui/public/index.html');
@@ -25,7 +29,7 @@ function makeWsStub(wsBox) {
 async function boot({ counts = { pipelines: 0, projects: 0, workspaces: 0 }, hash = '' } = {}) {
   const calls = [];
   const box = { counts };                                 // mutable so a test can change the server's reply
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: `http://localhost:4321/#${hash}` });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: `http://localhost:4321/#${hash}` }));
   const { window } = dom;
   const wsBox = {};
   window.Element.prototype.scrollIntoView = function () {};
@@ -56,7 +60,7 @@ async function boot({ counts = { pipelines: 0, projects: 0, workspaces: 0 }, has
 const navButton = (doc, nav) => doc.querySelector(`.nav button[data-nav="${nav}"]`);
 
 test('only Runs and Schedules carry a count badge in the sidebar markup', () => {
-  const doc = new JSDOM(readFileSync(htmlPath, 'utf8')).window.document;
+  const doc = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'))).window.document;
   const counted = [...doc.querySelectorAll('.nav button[data-nav]')]
     .filter((b) => b.querySelector('.nav-count'))
     .map((b) => b.dataset.nav);
