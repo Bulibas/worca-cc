@@ -72,7 +72,7 @@ import { describeTitleModel } from '../src/core/title.mjs';
 import { effectiveHumanRateUsd } from '../src/core/human-rate.mjs';
 import {
   ASK_ID_RE, createThread as askCreateThread, getThread as askGetThread,
-  listThreads as askListThreads, updateThread as askUpdateThread,
+  listThreads as askListThreads, updateThread as askUpdateThread, addThreadContexts as askAddThreadContexts,
   deleteThread as askDeleteThread, sweepEmptyThreads, sweepStreamingMessages, sweepCloningCards,
   countThreads as askCountThreads, listThreadIds as askListThreadIds,
   countWorktrees as askCountWorktrees, countAttachments as askCountAttachments,
@@ -87,6 +87,7 @@ import {
 } from '../src/core/ask/store.mjs';
 import { sanitizeTitle as askSanitizeTitle } from '../src/core/title.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
+import { contextEntries as askContextEntries } from '../src/core/ask/contexts.mjs';
 import { askWebAccess, WEB_OFF } from '../src/core/ask/web-access.mjs';
 import { askCatalog, validateModelEffort } from '../src/core/ask/models.mjs';
 import { buildCatalog as askBuildCatalog } from '../src/core/ask/catalog.mjs';
@@ -8225,6 +8226,57 @@ function askCardScheduleLine(b, tz = null) {
   return '';
 }
 
+/** One run's header shape by pipeline id, scoped to a store key when known (any key otherwise), or null.
+ *  `home` = the run's #history route prefix (context chips); never rendered into the header. */
+function askRunByPipelineId(pipelineId, key) {
+  const row = (key ? lookupPipelineRow(key, pipelineId) : null) || findPipelineRowById(pipelineId);
+  if (!row) return null;
+  const home = row.workspace_key ? `workspaces/${row.workspace_key}` : (row.project_key || null);
+  return { ...askRunFromPipelineRow(row), home };
+}
+
+/** A live run's header shape from the runs Map (the app run id), or null. `home` (context chips) only
+ *  once the pipeline id is known: the run-id prefix fallback is not the id a later turn resolves, so
+ *  contextEntries skips a run without one. (The LIVE entry really is camelCase — no row mapping.) */
+function askLiveRun(runId) {
+  const entry = runs.get(runId);
+  if (!entry) return null;
+  const home = !entry.pipelineId ? null
+    : entry.workspaceId ? `workspaces/${entry.workspaceId}`
+      : (entry.projectDir ? projectKey(entry.projectDir) : null);
+  return {
+    id: entry.pipelineId || runId.slice(0, 8), title: entry.title || '',
+    status: entry.status || '', startedAt: entry.startedAt || '', branch: null, home,
+  };
+}
+
+/** Conversation chips: resolve one finished turn's mentioned refs (contexts.mjs mentionedRefs) exactly like
+ *  the page's — project and workspace names, a run's title and home, a live run through the runs Map —
+ *  dropping any that do not resolve. Each entry is marked source 'chat'. Lookups are individually guarded. */
+async function resolveAskMentions(refs) {
+  let projects = null;
+  const out = [];
+  for (const ref of refs) {
+    const header = {};
+    try {
+      if (ref.kind === 'project') {
+        projects ??= await listProjects();
+        const p = projects.find((x) => x.key === ref.id);
+        if (p) header.project = { name: p.name, key: p.key };
+      } else if (ref.kind === 'workspace') {
+        const ws = await readWorkspace(ref.id);
+        if (ws) header.workspace = { name: ws.name, id: ws.id };
+      } else if (ref.kind === 'run') {
+        header.run = askRunByPipelineId(ref.id, ref.workspaceId ? `workspaces/${ref.workspaceId}` : ref.projectKey);
+      } else if (ref.kind === 'liveRun') {
+        header.run = askLiveRun(ref.id);
+      }
+    } catch { /* an unresolved ref earns no chip */ }
+    for (const e of askContextEntries({}, header)) out.push({ ...e, source: 'chat' });
+  }
+  return out;
+}
+
 /** Resolve the VALIDATED client context into the server-side shape
  *  buildContextHeader consumes (§6.5: server-resolved rows only — never
  *  client-supplied titles or paths). Every lookup is individually guarded:
@@ -8300,19 +8352,13 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
   } catch { /* absent line */ }
   try {
     if (ctx.pipelineId) {
-      const key = ctx.workspaceId ? `workspaces/${ctx.workspaceId}` : out.project?.key;
-      const row = (key ? lookupPipelineRow(key, ctx.pipelineId) : null) || findPipelineRowById(ctx.pipelineId);
-      if (row) out.run = askRunFromPipelineRow(row);
-    } else if (ctx.runId && runs.has(ctx.runId)) {
-      const entry = runs.get(ctx.runId);
-      out.run = {
-        id: entry.pipelineId || ctx.runId.slice(0, 8), title: entry.title || '',
-        status: entry.status || '', startedAt: entry.startedAt || '', branch: null,
-      };
+      const run = askRunByPipelineId(ctx.pipelineId, ctx.workspaceId ? `workspaces/${ctx.workspaceId}` : out.project?.key);
+      if (run) out.run = run;
+    } else if (ctx.runId) {
+      const run = askLiveRun(ctx.runId);
+      if (run) out.run = run;
     }
   } catch { /* absent line */ }
-  // (the ctx.runId branch reads the LIVE runs-Map entry, which really is
-  // camelCase — only the DB pipeline row needs askRunFromPipelineRow)
   try {
     const links = askListRunLinks(threadId).slice(0, ASK_LIMITS.headerRuns).map((l) => {
       const live = runs.get(l.runId);
@@ -8470,6 +8516,11 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     const withText = attRows.map((a, i) => ({ id: a.id, name: a.name, bytes: a.bytes, kind: a.kind, mime: a.mime, text: files[i].text }));
     const { inline, listed } = askSelectInlineAttachments(withText);
     const headerCtx = await resolveAskContext(id, ctx, listed, userMsg.id, { signedIn });
+    // Context chips: accumulate the project/run/workspace/named page this turn ran in
+    // (origin first, deduped; contexts.mjs). Cosmetic — a failure must never fail the turn.
+    try { askAddThreadContexts(id, askContextEntries(ctx, headerCtx)); } catch (e) {
+      console.error(`[worca-ui] ask contexts not recorded: ${e && e.message ? e.message : e}`);
+    }
     // Web access (docs/guardrails.md "Web access"): resolved ONCE per turn — local settings ⊕ the pinned project's
     // team policy — so the prompt section, the sub-agent note and the MCP child's tools agree.
     const pinned = askPinnedScope(ctx);
@@ -8526,6 +8577,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         trackRun: (input, { pin } = {}) => askTrackRun(id, input, pin ?? null),
         // set_away_now / set_run_away_mode: the parent applies what the MCP child validated.
         awaySwitch: (req) => askAwaySwitch(req, { actor: turnReader || 'local' }),
+        resolveMentions: resolveAskMentions,
         // pause / resume / skip / mark-read in the MCP child: the Schedules page and the badges repaint.
         onScheduleMutation: () => { emitChanged('schedules-changed', 'ask'); emitChanged('notifications-changed'); },
       },
@@ -8658,7 +8710,11 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
     // `attachments` carries the store-minted ids so the sender's own echo can key
     // image thumbnails and the thread budget off them (the ask-message broadcast
     // may have raced ahead of this response, or been missed on a brand-new thread).
-    res.status(202).json({ userMessageId: r.userMessageId, assistantMessageId: r.assistantMessageId, attachments: r.attachments });
+    res.status(202).json({
+      userMessageId: r.userMessageId, assistantMessageId: r.assistantMessageId, attachments: r.attachments,
+      // the thread's context chips after this turn's merge, so the header repaints without a re-fetch
+      contexts: askGetThread(id)?.contexts ?? [],
+    });
   } catch (err) {
     // startAskTurn never throws (it returns {ok:false,…}); only the route's own
     // pre-checks can land here, so there is no slot to release.

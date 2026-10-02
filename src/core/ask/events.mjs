@@ -77,8 +77,9 @@ export function normalizeUsage(u) {
   };
 }
 
-/** result.modelUsage key for an agent's model: exact → canonicalModel → stripped -YYYYMMDD → the single key. */
-export function matchModelKey(model, modelUsage) {
+/** result.modelUsage key for an agent's model: exact → canonicalModel → stripped -YYYYMMDD → the single key
+ *  (unless `single: false`, for callers that must not guess). */
+export function matchModelKey(model, modelUsage, { single = true } = {}) {
   const mu = modelUsage && typeof modelUsage === 'object' ? modelUsage : {};
   const keys = Object.keys(mu);
   if (!keys.length) return null;
@@ -93,7 +94,7 @@ export function matchModelKey(model, modelUsage) {
       || keys.find((k) => strip(k.toLowerCase()) === strip(m));
     if (stripped) return stripped;
   }
-  return keys.length === 1 ? keys[0] : null;
+  return single && keys.length === 1 ? keys[0] : null;
 }
 
 /** Spec §6.6: costUSD × w(agent) / w(model total), clamped; null without usage or a matching model. Always estimated:true. */
@@ -301,6 +302,7 @@ export function createTurnReducer({
   let sawResult = false;
   let sessionId = null;
   let lastResult = null;
+  let mainModel = null;           // the init frame's model — picks this turn's entry out of result.modelUsage
   let reducerErrors = 0;
   let summary = null;
   let cliErrorText = '';          // what a <synthetic> CLI message said (its API-error line)
@@ -328,7 +330,23 @@ export function createTurnReducer({
   // Context fill = the last MAIN call's per-call total. The cumulative result
   // usage never feeds it — a result would report the whole turn, not one call.
   const ctxNow = () => { const e = lastMainUsageMsg ? usageByMsg.get(lastMainUsageMsg) : null; return e ? ctxOf(e.usage) : null; };
-  const currentUsage = () => ({ ...(lastResult && lastResult.usage ? normalizeUsage(lastResult.usage) : usageSum()), ctx: ctxNow() });
+  // The main model's context window, from the result's modelUsage (the CLI reports it per model).
+  // modelUsage also carries the CLI's title call and sub-agent models, so an unmatched main model
+  // yields null — never another model's window.
+  const resultModelUsage = () => (lastResult && lastResult.modelUsage && typeof lastResult.modelUsage === 'object' ? lastResult.modelUsage : null);
+  const windowAt = (mu, key) => { const w = key ? mu[key]?.contextWindow : null; return Number.isInteger(w) && w > 0 ? w : null; };
+  const ctxWindowNow = () => {
+    const mu = resultModelUsage();
+    // A lone entry stands in for the main model only when the init frame named none: with a named
+    // model, a lone mismatch is the title call of a turn whose main call failed.
+    return mu ? windowAt(mu, matchModelKey(mainModel, mu, { single: !mainModel })) : null;
+  };
+  const currentUsage = () => {
+    const u = { ...(lastResult && lastResult.usage ? normalizeUsage(lastResult.usage) : usageSum()), ctx: ctxNow() };
+    const w = ctxWindowNow();
+    if (w) u.ctxWindow = w;                                               // absent, not null, when unknown: old payloads stay byte-identical
+    return u;
+  };
   /** What the CLI itself reported for this turn — null until the `result` frame lands. */
   const cliCost = () => (lastResult && typeof lastResult.total_cost_usd === 'number' && Number.isFinite(lastResult.total_cost_usd) ? lastResult.total_cost_usd : null);
   // The AUTHORITATIVE turn cost: cliCost() re-priced by the injected override, if
@@ -703,7 +721,11 @@ export function createTurnReducer({
     const isMain = ptu === null;
     switch (raw.type) {
       case 'system':
-        if (raw.subtype === 'init') { sawInit = true; if (typeof raw.session_id === 'string') sessionId = raw.session_id; }
+        if (raw.subtype === 'init') {
+          sawInit = true;
+          if (typeof raw.session_id === 'string') sessionId = raw.session_id;
+          if (typeof raw.model === 'string' && raw.model) mainModel = raw.model;
+        }
         return;                                                           // status, thinking_tokens, task_*, background_tasks_changed, hook_*
       case 'stream_event': return onStreamEvent(raw, ptu, isMain);
       case 'assistant': return onAssistant(raw, ptu, isMain);
@@ -770,6 +792,13 @@ export function createTurnReducer({
       }
       const agents = blocks.filter((b) => b.kind === 'agent');
       if (agents.length && lastResult) {
+        // Each agent's context window: its own (resolved) model's modelUsage entry, never a lone
+        // guess; an agent with no model inherits the main model, so the main window.
+        const mu = resultModelUsage();
+        for (const a of agents) {
+          const w = a.model ? (mu ? windowAt(mu, matchModelKey(a.model, mu, { single: false })) : null) : ctxWindowNow();
+          if (w) a.ctxWindow = w;
+        }
         const est = estimateAgentCosts(agents, lastResult);
         // §6.6 splits the CLI's OWN modelUsage costUSD across agents. When an
         // override re-prices the turn, the shares must ride the same scale or the
