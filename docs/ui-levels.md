@@ -159,6 +159,8 @@ be skipped by forgetting it.
 | Live log pane (run page › Logs), log search / copy / auto-scroll | A |
 | Branch chip, progress n/m · step on the card, model · effort pill, graph zoom cluster | A |
 | Auto proposal Revise; Artifacts tab | A |
+| Actions tab, Overview actions strip, Ship It 'Try it first' strip | A |
+| Running-action pill in the header, sidebar Running actions card | all — shown only while a service runs |
 | Log filters (source, level, node, cycle) | E |
 | Graph node totals, fan and execution strips, loop badges | E |
 | Agents tab, worktree row, Auto proposal tunables table | E |
@@ -170,6 +172,8 @@ be skipped by forgetting it.
 | List, project filter, Refresh; Overview (verdict, findings, duration, cost, task); Clarify tab; Resume | S |
 | "Files changed" list on the Overview | S — the stand-in for the Diff tab |
 | Diff tab, diff pill, inline comments; Create PR / View PR; branch line; ⋯ menu (Archive, Report); Artifacts tab | A |
+| Actions tab, Overview actions strip, Ship It 'Try it first' strip | A |
+| Running-action pill in the header, sidebar Running actions card | all — shown only while a service runs |
 | Mergeability pill; Logs tab; Agents tab; team-metrics status; MEMORY CHANGES; worktree row | E |
 
 ### Workflow Composer (page: A)
@@ -201,8 +205,10 @@ Everything on the page: the list, the runtime step, the workspace and the bench 
 |---|---|
 | Projects list, add, project page Overview, remove | S |
 | Project Memory tab (view and edit files) | A |
+| Project page Actions tab | A |
 | Workspaces list, create wizard, workspace page Overview (projects, description, re-scan, delete) | A |
 | Workspace page Map tab (coverage, graph, edges, confirm / reject / clear, add / delete manual edges, Regenerate description) | A |
+| Workspace page Actions tab | A |
 | Memory health, Defragment, snapshot restore | E — the health card stays visible when overdue or failing |
 | Projects-row team chips; project page Team tab and its TEAM METRICS / TEAM POLICY cards; KEY card | E |
 | Workspace page Team tab (members table, metrics home, policy home) and its METRICS HOME / POLICY HOME cards | E |
@@ -214,6 +220,7 @@ Everything on the page: the list, the runtime step, the workspace and the bench 
 | General: Appearance, Interface mode, Getting started, About | S |
 | Runs tab: Budget & cost limits | S |
 | General: root folders; Runs tab: Scheduled runs defaults, Workspaces (scan models), chat notifications; Ask Worca tab (limits, tools, web access, chat history) | A |
+| Runs tab: Actions (keep policy, port range, editor/terminal, cap) | A |
 | Guardrails tab (list, details); Plugins tab (installed, available, install); Memory tab (files) | A |
 | General: spawn diagnostics; Models tab: Title generation, Auto workflow model, PR description model; Memory tab: Defragment model | E — the Defragment model card stays visible while a model is set |
 | Guardrails create / delete; Models tab; Providers tab; marketplaces, Doctor, leftover data | E |

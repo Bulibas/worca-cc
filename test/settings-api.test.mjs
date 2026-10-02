@@ -147,6 +147,7 @@ test('every SETTINGS_POST_KEYS key is exempt from the legacy "no known key clear
       workspaceScan: null,
       schedule: {},
       sync: null,
+      actions: {},
     };
     for (const k of SETTINGS_POST_KEYS) {
       if (k === 'root') continue;

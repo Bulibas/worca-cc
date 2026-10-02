@@ -555,6 +555,33 @@ export async function listRemoteBranches(projectDir, remoteNames = []) {
   return { ok: true, byRemote };
 }
 
+// ── Check out (#529) ────────────────────────────────────────────────────────
+
+/** OPEN | MERGED | CLOSED | null — unlike findPrForBranch, CLOSED is reported (keep policy `until-pr`). */
+export async function prLifecycleState({ projectDir, prUrl }) {
+  if (!projectDir || !prUrl) return null;
+  const v = await _run('gh', ['pr', 'view', prUrl, '--json', 'state'],
+    { cwd: projectDir, env: (await githubEnv('read', { repo: ownerRepoOfPrUrl(prUrl) })).env });
+  if (!v.ok) return null;
+  try { const s = JSON.parse(v.stdout || 'null')?.state; return ['OPEN', 'MERGED', 'CLOSED'].includes(s) ? s : null; } catch { return null; }
+}
+
+/** The remote whose tracking ref holds `branch` ({ remote }), preferring origin; null = not pushed. No network. */
+export async function branchPushedTo(projectDir, branch) {
+  const r = await _run('git', ['for-each-ref', '--format=%(refname)', `refs/remotes/*/${branch}`], { cwd: projectDir });
+  if (!r.ok) return null;
+  const remotes = (r.stdout || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+    .map((ref) => ref.slice('refs/remotes/'.length, ref.length - branch.length - 1));
+  if (!remotes.length) return null;
+  return { remote: remotes.includes('origin') ? 'origin' : remotes[0] };
+}
+
+/** Recreate a local branch from its remote-tracking ref (checkout D7). */
+export async function restoreBranchFromRemote(projectDir, branch, remote) {
+  const r = await _run('git', ['branch', '--', branch, `refs/remotes/${remote}/${branch}`], { cwd: projectDir });
+  return r.ok;
+}
+
 // Test seam: swap the command runner + clear the gh memo. Mirrors server.mjs#_testing.
 export const _testing = {
   defaultRun,

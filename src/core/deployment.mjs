@@ -29,5 +29,7 @@ export function githubMode(env = process.env) {
 export function deploymentFacts(env = process.env, { remoteMode = false, projectsRoot = null } = {}) {
   const deployment = detectDeployment(env, { remoteMode });
   if (deployment === 'local') return null;
-  return { deployment, projectsRoot: projectsRoot || null, github: githubMode(env) };
+  // Actions (docs/actions.md "Security"): a hosted worca runs none unless the operator set WORCA_ACTIONS_REMOTE.
+  return { deployment, projectsRoot: projectsRoot || null, github: githubMode(env),
+    ...(deployment === 'hosted' && !on(env.WORCA_ACTIONS_REMOTE) ? { actions: 'off' } : {}) };
 }
