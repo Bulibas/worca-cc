@@ -1892,9 +1892,11 @@ export function checkoutRecordsFor(row) {
   const members = [];
   for (const [pk, br] of candidates) {
     const c = br?.checkout;
-    if (!c || !br?.worktreeDir || !existsSync(br.worktreeDir)) continue;
-    members.push({ projectKey: pk || null, worktreeDir: br.worktreeDir, branch: br.feature || null,
-      at: c.at || null, policy: c.policy || 'on-demand', setup: c.setup || { status: 'none' } });
+    // A linked folder (checkout.external) lives at checkout.dir; br.worktreeDir is the run's own path.
+    const dir = c?.external ? c.dir : br?.worktreeDir;
+    if (!c || !dir || !existsSync(dir)) continue;
+    members.push({ projectKey: pk || null, worktreeDir: dir, branch: br.feature || null,
+      at: c.at || null, policy: c.policy || 'on-demand', setup: c.setup || { status: 'none' }, ...(c.external ? { external: true } : {}) });
   }
   return members.length ? { members } : null;
 }

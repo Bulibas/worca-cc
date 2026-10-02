@@ -312,3 +312,33 @@ test('a stack step on a member whose setup is pending runs that setup first (D29
   assert.equal((await getJson('/api/actions/running')).some((x) => x.runId === wsId), false);
   assert.equal((await fetch(`${base}/api/runs/${wsId}/checkout?${scope}`, { method: 'DELETE', headers: JSONH, body: '{}' })).status, 200);
 });
+
+test('a branch checked out in the project folder: the model names it (heldBy), Check out answers 409 with the holder, useExisting links it', async () => {
+  const { seedPipeline } = await import('./helpers/db-seed.mjs');
+  const { worcaHome } = await import('../src/core/projects.mjs');
+  git(repo, ['switch', '-q', '-c', 'worca-cc/held']);                 // the person works on the run's branch in the project folder
+  try {
+    const s = await seedPipeline(repo, { status: 'done',
+      branch: { source: 'main', feature: 'worca-cc/held', runRootMode: 'detached', worktreeRemoved: true, branchKept: true } });
+    getDb().prepare(`UPDATE pipelines SET branch = json_set(branch, '$.worktreeDir', ?) WHERE id = ?`).run(join(worcaHome(), 'runs', s.id, 'repos', s.key), s.id);
+    const q = `projectKey=${key}`;
+    const m0 = (await getJson(`/api/runs/${s.id}/actions?${q}`)).members[0];
+    assert.equal(m0.state, 'not-checked-out');
+    assert.equal(await realpath(m0.heldBy), repo);
+    const refused = await post(`/api/runs/${s.id}/checkout?${q}`, {});
+    assert.equal(refused.status, 409);
+    const body = await refused.json();
+    assert.equal(body.code, 'BRANCH_CHECKED_OUT');
+    assert.equal(await realpath(body.holder), repo);
+    const linked = await post(`/api/runs/${s.id}/checkout?${q}`, { useExisting: true });
+    assert.equal(linked.status, 200, await linked.clone().text());
+    const m1 = (await getJson(`/api/runs/${s.id}/actions?${q}`)).members[0];
+    assert.equal(m1.state, 'checked-out');
+    assert.equal(m1.checkout.external, true);
+    assert.equal(await realpath(m1.checkout.worktreeDir), repo);
+    assert.equal(m1.checkout.setup.status, 'skipped', 'setup never runs by itself in the person\'s folder');
+    const unlink = await fetch(`${base}/api/runs/${s.id}/checkout?${q}`, { method: 'DELETE', headers: JSONH, body: '{}' });
+    assert.equal(unlink.status, 200);
+    assert.ok((await realpath(repo)) && git(repo, ['branch', '--show-current']).stdout.trim() === 'worca-cc/held', 'the folder is left as it was');
+  } finally { git(repo, ['switch', '-q', 'main']); }
+});

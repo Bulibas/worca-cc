@@ -218,7 +218,7 @@ import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
 import { loadScriptRegistry } from '../src/core/script-registry.mjs';
 import { probePython, pythonRuntimeState } from '../src/core/graph/python-probe.mjs';
 import {
-  listLocalBranches, currentBranch, isValidSourceRef, sweepRunRoots, sweepLegacyWorktreesAll, resolveDefaultBranch,
+  listLocalBranches, currentBranch, isValidSourceRef, sweepRunRoots, sweepLegacyWorktreesAll, resolveDefaultBranch, worktreePathForBranch,
 } from '../src/core/worktree.mjs';
 import {
   fetchRemote, remoteInfo, syncStatus, resolveSourceRef, commitsBetween, isSafeBranchName, isSafeRemoteName, scrubGitText,
@@ -5127,14 +5127,17 @@ function ensureSetup(runId, pk, { enabled, rerun = false }) {
 function sendCheckoutError(res, e) {
   const map = { NOT_FOUND: 404, BAD_REQUEST: 400, NOT_FINISHED: 409, RETAINED: 409, BRANCH_MISSING: 409,
     BRANCH_CHECKED_OUT: 409, TARGET_EXISTS: 409, SNAPSHOT_FAILED: 409 };
-  res.status(map[e?.code] || 500).json({ error: e?.message || String(e), code: e?.code || 'ERROR' });
+  res.status(map[e?.code] || 500).json({ error: e?.message || String(e), code: e?.code || 'ERROR',
+    ...(e?.holder ? { holder: e.holder, projectKey: e.projectKey || null } : {}) });
 }
 
 app.post('/api/runs/:id/checkout', async (req, res) => {
   const row = runRowForScope(req, res); if (!row) return;
   const members = Array.isArray(req.body?.members) ? req.body.members.filter((x) => typeof x === 'string') : null;
   try {
-    const r = await checkoutRun({ id: row.id, members, by: actorOf(req), isLive: isLiveRun, isFinishing: isFinishingRun });
+    // useExisting: the branch is already checked out in the person's own folder; link it (checkout.mjs).
+    const r = await checkoutRun({ id: row.id, members, by: actorOf(req), isLive: isLiveRun, isFinishing: isFinishingRun,
+      useExisting: req.body?.useExisting === true });
     const enabled = actionsEnabledHere(req);
     for (const m of r.members.filter((x) => x.state === 'checked-out')) ensureSetup(row.id, m.projectKey, { enabled });   // not awaited: frames stream
     const { maxCheckouts } = actionsSettings();
@@ -5305,10 +5308,14 @@ app.get('/api/runs/:id/actions', async (req, res) => {
         const cfg = readProjectActions(m.projectKey);
         const rec = checkoutRecordsFor(row)?.members.find((x) => x.projectKey === m.projectKey) || null;
         const pushed = m.br?.feature && m.projectDir ? await branchPushedTo(m.projectDir, m.br.feature) : null;
+        // Not checked out, but the branch is in another folder (the person's own clone): Check out would be refused,
+        // so the card offers that folder instead ("Use that folder", checkout useExisting).
+        const held = !rec && m.br?.feature && m.projectDir ? await worktreePathForBranch(m.projectDir, m.br.feature).catch(() => null) : null;
         // Coarse, server-side: 'no-branch' | 'not-checked-out' | 'checked-out'. The card's finer view state
         // (setting-up / setup-failed / ready / running / task-result) is memberViewState() in the browser.
         const state = !m.br?.feature ? 'no-branch' : rec ? 'checked-out' : 'not-checked-out';
         return { projectKey: m.projectKey, projectName: m.projectName, projectDir: m.projectDir, state, branch: m.br?.feature || null,
+          ...(held ? { heldBy: held } : {}),
           worktreeDir: m.projectDir ? checkoutPathFor(row, m) : null, checkout: rec, pushed,
           setupQueued: setupJobs.has(`${row.id}:${m.projectKey}`),
           copyCommand: m.br?.feature && m.projectDir ? copyCommandText({ projectDir: m.projectDir, branch: m.br.feature, pushed }) : null,

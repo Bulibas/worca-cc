@@ -216,3 +216,39 @@ test('a derived path (row without a recorded worktreeDir) is written back and pr
   const rec = checkoutRecordsFor(lookupPipelineRow(key, id));
   assert.equal(rec.members[0].worktreeDir, m.worktreeDir);   // visible to the UI and to the legacy sweep's referencedPaths
 });
+
+// A branch already checked out in the person's own folder: refused with the folder named, or linked
+// with useExisting. A linked folder is never Worca's: its own field, never removed, never capped.
+test('useExisting links the folder that has the branch; Discard only unlinks it; the cap never touches it', async () => {
+  const repo = await freshRepo();
+  git(repo, ['switch', '-q', '-c', 'worca-cc/mine']);                  // the person works on the run's branch here
+  const { id, key } = await seedDoneRun(repo, 'worca-cc/mine');
+  const ownPath = lookupPipelineRow(key, id) && JSON.parse(lookupPipelineRow(key, id).branch).worktreeDir;
+
+  await assert.rejects(checkoutRun({ id }), (e) => e.code === 'BRANCH_CHECKED_OUT' && canon(e.holder) === canon(repo) && e.projectKey === key);
+
+  const r = await checkoutRun({ id, useExisting: true });
+  assert.equal(r.members[0].external, true);
+  assert.equal(canon(r.members[0].worktreeDir), canon(repo));
+  const br = JSON.parse(lookupPipelineRow(key, id).branch);
+  assert.equal(br.worktreeDir, ownPath, "the run's own path is untouched (teardown and the sweep may delete it)");
+  assert.equal(br.checkout.external, true);
+  assert.deepEqual(br.checkout.setup, { status: 'skipped' }, 'setup never runs by itself in the person\'s folder');
+  const rec = checkoutRecordsFor(lookupPipelineRow(key, id)).members[0];
+  assert.equal(canon(rec.worktreeDir), canon(repo));
+  assert.equal(rec.external, true);
+
+  const again = await checkoutRun({ id });                             // already linked: the same link, not a refusal
+  assert.equal(again.members[0].external, true);
+
+  const { evicted } = await enforceCheckoutCap({ max: 0, busy: new Set() });   // other tests' checkouts may go; this one stays
+  assert.ok(!evicted.includes(id), 'the cap skips a linked folder');
+  assert.equal(checkoutRecordsFor(lookupPipelineRow(key, id)).members[0].external, true);
+  await writeFile(join(repo, 'dirty.txt'), 'mine\n');
+  const d = await discardCheckout({ id });
+  assert.deepEqual(d.unlinked, [key]);
+  assert.deepEqual(d.patches, [], 'no snapshot of the person\'s folder');
+  assert.ok(existsSync(join(repo, 'dirty.txt')) && existsSync(join(repo, '.git')), 'the folder and its changes stay');
+  assert.equal(git(repo, ['branch', '--show-current']).stdout.trim(), 'worca-cc/mine');
+  assert.equal(checkoutRecordsFor(lookupPipelineRow(key, id)), null);
+});

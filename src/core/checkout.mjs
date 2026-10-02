@@ -26,7 +26,7 @@ const withLock = (id, fn) => {
   locks.set(id, tail);
   return next;
 };
-const cerr = (msg, code) => Object.assign(new Error(msg), { code });
+const cerr = (msg, code, extra = {}) => Object.assign(new Error(msg), { code, ...extra });
 const parse = (t) => { if (t && typeof t === 'object') return t; try { return JSON.parse(t); } catch { return null; } };
 /** D27: git prints realpaths; the Worca home or a temp dir may sit behind a symlink (/var → /private/var). */
 export const canon = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
@@ -71,10 +71,13 @@ async function pruneWorktrees(projectDir) {
 
 /**
  * Check out a finished run. Idempotent. `members` limits a workspace run to those keys.
- * Returns { members:[{projectKey, worktreeDir, branch, state}], warnings }.
+ * Returns { members:[{projectKey, worktreeDir, branch, state, external?}], warnings }.
  * The setup command is NOT run here; the server runs it right after (it owns the registry, D25).
+ * useExisting: when the branch is already checked out in another folder (the person's own clone), link
+ * that folder instead of refusing. A linked folder is never Worca's: it is recorded as checkout.dir (never
+ * br.worktreeDir, which teardown and the run-root sweep may delete), and Discard only unlinks it.
  */
-export function checkoutRun({ id, members = null, by = null, policy = 'on-demand', isLive = () => false, isFinishing = () => false }) {
+export function checkoutRun({ id, members = null, by = null, policy = 'on-demand', isLive = () => false, isFinishing = () => false, useExisting = false }) {
   return withLock(id, async () => {
     const row = findPipelineRowById(id);
     assertEligible(row, isLive);
@@ -97,7 +100,10 @@ export function checkoutRun({ id, members = null, by = null, policy = 'on-demand
       if (holder && existsSync(target) && canon(holder) === canon(target)) {   // already checked out here (D27)
         kept.push({ m, target: canon(target), feature }); continue;
       }
-      if (holder) throw cerr(`Can't check out: ${feature} is already checked out in ${holder}. Open that folder to try the run, or switch it to another branch and check out again.`, 'BRANCH_CHECKED_OUT');
+      // Already linked to this folder (an earlier useExisting): the same link again, not a refusal.
+      const linked = m.br?.checkout?.external && m.br.checkout.dir && holder && canon(m.br.checkout.dir) === canon(holder);
+      if (holder && (useExisting || linked)) { kept.push({ m, target: canon(holder), feature, external: true }); continue; }
+      if (holder) throw cerr(`Can't check out: ${feature} is already checked out in ${holder}. Use that folder, or switch it to another branch and check out again.`, 'BRANCH_CHECKED_OUT', { holder, projectKey: m.projectKey });
       if (existsSync(target)) throw cerr(`${target} already exists and is not this run's checkout. Move or delete it, then try again.`, 'TARGET_EXISTS');
       if (!(await branchExists(m.projectDir, feature))) {
         const pushed = await branchPushedTo(m.projectDir, feature);
@@ -121,11 +127,14 @@ export function checkoutRun({ id, members = null, by = null, policy = 'on-demand
     if (kept.length) {
       // D27: the stamped worktreeDir is the path on disk, so a path derived for an old row becomes the record.
       const dirOf = Object.fromEntries(kept.map((k) => [k.m.projectKey, k.target]));
-      stampCheckout(row, dirOf, { at: new Date().toISOString(), by, policy, fresh: kept.filter((k) => k.fresh).map((k) => k.m.projectKey) });
-      if (kept.some((k) => isUnder(k.target, join(worcaHome(), 'runs', row.id)))) await writeCheckoutManifest(row, kept, policy);
-      appendAuditById(row.id, `Checked out ${kept.map((k) => `\`${k.feature}\``).join(', ')} (${policy}).`, { actor: by });
+      stampCheckout(row, dirOf, { at: new Date().toISOString(), by, policy, fresh: kept.filter((k) => k.fresh).map((k) => k.m.projectKey),
+        external: kept.filter((k) => k.external).map((k) => k.m.projectKey) });
+      const own = kept.filter((k) => !k.external);
+      if (own.some((k) => isUnder(k.target, join(worcaHome(), 'runs', row.id)))) await writeCheckoutManifest(row, own, policy);
+      if (own.length) appendAuditById(row.id, `Checked out ${own.map((k) => `\`${k.feature}\``).join(', ')} (${policy}).`, { actor: by });
+      for (const k of kept.filter((x) => x.external)) appendAuditById(row.id, `Linked ${k.target} as the checkout of \`${k.feature}\` (the branch was already checked out there).`, { actor: by });
     }
-    for (const k of kept) out.push({ projectKey: k.m.projectKey, worktreeDir: k.target, branch: k.feature, state: 'checked-out' });
+    for (const k of kept) out.push({ projectKey: k.m.projectKey, worktreeDir: k.target, branch: k.feature, state: 'checked-out', ...(k.external ? { external: true } : {}) });
     return { members: out, warnings };
   });
 }
@@ -154,8 +163,15 @@ export function updateBranchRecords(rowId, keys, mutate) {
  * dirOf = { [projectKey]: worktreeDir actually on disk }. `fresh` = keys whose folder was just created:
  * a marker left over from a hand-deleted or half-discarded checkout must not carry `setup: ok` into it (D25).
  */
-function stampCheckout(row, dirOf, { at, by, policy, fresh = [] }) {
+function stampCheckout(row, dirOf, { at, by, policy, fresh = [], external = [] }) {
   updateBranchRecords(row.id, Object.keys(dirOf), (br, k) => {
+    if (external.includes(k)) {
+      // A linked folder: its own field, and br.worktreeDir / worktreeRemoved stay as they were. Setup does not
+      // run by itself in the person's own clone (status skipped; "Run setup" stays on the card).
+      const prev = br.checkout?.external && br.checkout.dir === dirOf[k] ? br.checkout : {};
+      br.checkout = { at: prev.at || at, by: prev.by || by, policy: 'external', external: true, dir: dirOf[k], setup: prev.setup || { status: 'skipped' } };
+      return;
+    }
     const prev = fresh.includes(k) ? {} : (br.checkout || {});
     br.checkout = { at: prev.at || at, by: prev.by || by, policy: prev.policy && prev.policy !== 'on-demand' ? prev.policy : policy,
       setup: prev.setup || { status: 'pending' } };
@@ -215,8 +231,10 @@ export function discardCheckout({ id, members = null, force = false, stopService
     const recs = (checkoutRecordsFor(row)?.members || []).filter((m) => !members || members.includes(m.projectKey));
     const patches = []; const removed = []; let failure = null;
     const patchDir = recs.length ? await patchDirFor(row.id) : null;
+    const unlinked = [];
     for (const rec of recs) {
       await stopServices(rec.projectKey, row.id);                           // FIRST (acceptance); the cap evicts other runs
+      if (rec.external) { unlinked.push(rec.projectKey); continue; }       // a linked folder: never snapshot, never remove
       const out = join(patchDir, `checkout-discard-${rec.projectKey}-${Date.now()}.patch`);
       const snap = await snapshotWorktreePatch(rec.worktreeDir, out);        // {ok,file,bytes} | {ok:false,step,message}
       if (!snap.ok && !force) throw cerr(`Could not save uncommitted changes (${snap.message || snap.step}). Discard anyway to lose them.`, 'SNAPSHOT_FAILED');
@@ -233,6 +251,10 @@ export function discardCheckout({ id, members = null, force = false, stopService
       }
       removed.push(rec.projectKey);
     }
+    if (unlinked.length) {
+      updateBranchRecords(row.id, unlinked, (br) => { if (br.checkout?.external) delete br.checkout; });
+      appendAuditById(row.id, `Unlinked the folder used as the checkout (${unlinked.join(', ')}); it was left as it was.`, { actor: by });
+    }
     if (removed.length) {
       updateBranchRecords(row.id, removed, (br) => { delete br.checkout; br.worktreeRemoved = true; br.branchKept = true; });
       const runRoot = join(worcaHome(), 'runs', row.id);
@@ -245,7 +267,7 @@ export function discardCheckout({ id, members = null, force = false, stopService
       appendAuditById(row.id, `Discarded the checkout${patches.length ? ` (uncommitted changes saved as ${patches.map((p) => basename(p)).join(', ')})` : ''}.`, { actor: by });
     }
     if (failure) throw failure;
-    return { removed, patches };
+    return { removed, patches, unlinked };
   });
 }
 
@@ -271,7 +293,9 @@ function checkedOutRows() {
 
 /** All live checkouts, oldest first: [{ runId, at, policy }]. */
 export function listCheckouts() {
+  // A linked folder (useExisting) is the person's own: the cap and the keep policy never unlink it.
   return checkedOutRows()
+    .filter(({ rec }) => rec.members.some((m) => !m.external))
     .map(({ row, rec }) => ({ runId: row.id, at: rec.members.map((m) => m.at || '').sort()[0] || '', policy: rec.members[0].policy }))
     .sort((a, b) => a.at.localeCompare(b.at));
 }

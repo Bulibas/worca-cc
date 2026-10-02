@@ -126,10 +126,12 @@ function metaRows(doc, m, handlers) {
   if (!m.branch) { row('Branch', h(doc, 'span', 'act-later', 'None: this run made no branch')); return dl; }
   const br = h(doc, 'code', 'act-branch', middleClip(m.branch)); br.title = m.branch;
   row('Branch', br, copyIconButton(doc, 'Copy branch name', () => handlers.onCopy?.(m.branch)));
-  const dir = m.checkout ? (m.checkout.worktreeDir || m.worktreeDir) : null;
+  const dir = m.checkout ? (m.checkout.worktreeDir || m.worktreeDir) : (m.heldBy || null);
   if (dir) {
     const p = h(doc, 'code', 'act-path', middleClip(dir, 64)); p.title = dir;
-    row('Folder', p, copyIconButton(doc, 'Copy folder path', () => handlers.onCopy?.(dir)));
+    const extra = m.checkout?.external ? [h(doc, 'span', 'badge act-linked', 'Your folder')]
+      : !m.checkout && m.heldBy ? [h(doc, 'span', 'act-later', 'already has this branch')] : [];
+    row('Folder', p, copyIconButton(doc, 'Copy folder path', () => handlers.onCopy?.(dir)), ...extra);
   } else row('Folder', h(doc, 'span', 'act-later', 'Created when you check out'));
   return dl;
 }
@@ -154,7 +156,9 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
   }
   if (!model.enabled) sec.append(h(doc, 'p', 'hint', 'Actions are turned off on this hosted deployment. Check out and Copy command still work.'));
   const copyBtn = () => (m.copyCommand ? btn(doc, 'Copy command', null, () => handlers.onCopy?.(m.copyCommand)) : null);
-  const discardBtn = () => btn(doc, 'Discard', 'btn-ghost act-discard', () => handlers.onDiscard?.([m.projectKey]));
+  const discardBtn = () => (m.checkout?.external
+    ? btn(doc, 'Unlink', 'btn-ghost act-discard', () => handlers.onUnlink?.(m.projectKey))
+    : btn(doc, 'Discard', 'btn-ghost act-discard', () => handlers.onDiscard?.([m.projectKey])));
   // A built-in switched on for the project but not found on this machine (the server's detection) says so,
   // instead of quietly missing from the row; the project's Actions tab says "not found on this machine".
   // `lead` is text that comes first in the same note (what waits for Check out); null when there is nothing to say.
@@ -168,7 +172,8 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
 
   if (state === 'not-checked-out') {
     const row = h(doc, 'div', 'act-row');
-    if (!model.workspace) row.append(btn(doc, 'Check out', 'btn-primary', () => handlers.onCheckout?.([m.projectKey])));
+    if (!model.workspace && m.heldBy) row.append(btn(doc, 'Use that folder', 'btn-primary', () => handlers.onUseExisting?.(m.projectKey)));
+    else if (!model.workspace) row.append(btn(doc, 'Check out', 'btn-primary', () => handlers.onCheckout?.([m.projectKey])));
     const c = copyBtn(); if (c) row.append(c);
     // The other built-ins open the checkout folder, which Check out creates: a click asks first, then checks
     // out and opens (a workspace run checks out from its checklist, so there they wait for it).
@@ -177,7 +182,7 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
       row.append(h(doc, 'span', 'act-sep'));
       for (const b of opens) {
         const o = btn(doc, b.label, null, () => handlers.onOpenBeforeCheckout?.(m.projectKey, b.key, b.label));
-        if (model.workspace) { o.disabled = true; o.title = 'Available after Check out'; } else o.title = 'Checks out the run first, then opens';
+        if (model.workspace) { o.disabled = true; o.title = 'Available after Check out'; } else o.title = m.heldBy ? 'Opens the folder that has this branch' : 'Checks out the run first, then opens';
         row.append(o);
       }
     }
@@ -185,8 +190,11 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
     // One note under the row: what waits for Check out, then what this machine lacks.
     const names = opens.map((b) => b.label).join(', ').replace(/, ([^,]*)$/, ' and $1');
     const waits = !opens.length ? '' : model.workspace ? `${names} open the checkout, so they work after Check out.`
-      : `${names} open the checkout, so they check out first.`;
-    const note = missingNote(`Check out takes ${estimateText(model.estimate?.lastSetupMs, !!m.setup)}.${waits ? ` ${waits}` : ''}`);
+      : m.heldBy ? `${names} open that folder.` : `${names} open the checkout, so they check out first.`;
+    const lead = m.heldBy && !model.workspace
+      ? 'This branch is already checked out in that folder, so Worca can use it instead of making a copy. Worca never deletes or changes your folder.'
+      : `Check out takes ${estimateText(model.estimate?.lastSetupMs, !!m.setup)}.`;
+    const note = missingNote(`${lead}${waits ? ` ${waits}` : ''}`);
     if (note) sec.append(note);
     return sec;
   }
@@ -414,10 +422,31 @@ export function createActionsController({ runId, scopeQuery, api, ws, host, doc,
     onModel?.(st.model);
     render();
   }
-  const after = async (r) => { if (!r.ok) return fail(r); st.notice = null; await refresh(); return r; };
+  const after = async (r) => {
+    if (!r.ok && r.data?.code === 'BRANCH_CHECKED_OUT') { st.notice = null; await refresh(); return undefined; }   // the card offers that folder
+    if (!r.ok) return fail(r);
+    st.notice = null; await refresh(); return r;
+  };
 
   const handlers = {
     onCheckout: async (members) => after(await api('POST', `${base}/checkout${q}`, members ? { members } : {})),
+    // The branch is already checked out in another folder (the person's clone): link it as the checkout.
+    onUseExisting: async (member, { then = null } = {}) => {
+      const m = (st.model?.members || []).find((x) => x.projectKey === member);
+      const ok = await confirm({ title: then ? `Open ${then.label} in your folder?` : 'Use the folder that has this branch?',
+        message: ['Worca will use ', { strong: m?.heldBy || 'that folder' }, ' for this run: ',
+          then ? `${then.label} opens there, and so do` : 'Terminal, Finder and', ' the project\'s actions. It is your folder, so Worca never deletes or changes it, and setup does not run there by itself. Unlink stops using it.'],
+        confirmLabel: then ? `Use it and open ${then.label}` : 'Use this folder' });
+      if (!ok) return;
+      const r = await after(await api('POST', `${base}/checkout${q}`, { members: [member], useExisting: true }));
+      if (r?.ok && then) await handlers.onBuiltin(member, then.key);
+    },
+    onUnlink: async (member) => {
+      const m = (st.model?.members || []).find((x) => x.projectKey === member);
+      const dir = m?.checkout?.worktreeDir || 'the folder';
+      if (!(await confirm({ title: 'Stop using this folder?', message: ['Running services stop first. ', { strong: dir }, ' stays exactly as it is.'], confirmLabel: 'Unlink' }))) return;
+      await after(await api('DELETE', `${base}/checkout${q}`, { members: [member] }));
+    },
     onDiscard: async (members) => {
       if (!(await confirm({ title: 'Discard the checkout?', message: 'Running services stop first. Uncommitted changes are saved as a patch in the run\'s files.', danger: true, confirmLabel: 'Discard' }))) return;
       let r = await api('DELETE', `${base}/checkout${q}`, { members });
@@ -445,6 +474,7 @@ export function createActionsController({ runId, scopeQuery, api, ws, host, doc,
     // Terminal / Finder / Editor before Check out: they open the checkout folder, so ask, check out, then open.
     onOpenBeforeCheckout: async (member, key, label) => {
       const m = (st.model?.members || []).find((x) => x.projectKey === member);
+      if (m?.heldBy) return handlers.onUseExisting(member, { then: { key, label } });
       // Parts, not one string: the branch and the setup command are bold in the dialog (confirmModal).
       const ok = await confirm({ title: `Check out to open ${label}?`,
         message: [`${label} opens the run's checkout, which doesn't exist yet. Worca checks out `,

@@ -421,3 +421,79 @@ test('an error notice is a red alert; a success notice a green status', () => {
   assert.equal(ok.className, 'act-notice ok');
   assert.equal(ok.getAttribute('role'), 'status');
 });
+
+// ---------------------------------------------------------------------------
+// The branch is already checked out in the person's own folder (heldBy / a linked checkout)
+// ---------------------------------------------------------------------------
+
+test('a branch held in another folder offers "Use that folder" instead of Check out, and shows the folder', () => {
+  const el = renderActionsCard(model(member({ heldBy: '/Users/ada/dev/app' })), { doc, handlers: {} });
+  const labels = labelsOf(el);
+  assert.ok(labels.includes('Use that folder') && !labels.includes('Check out'));
+  assert.equal(el.querySelector('.act-path').title, '/Users/ada/dev/app');
+  assert.match(el.querySelector('.act-meta').textContent, /already has this branch/);
+  assert.match(el.querySelector('.act-missing').textContent, /^This branch is already checked out in that folder, so Worca can use it instead of making a copy\. Worca never deletes or changes your folder\. VS Code, Terminal and Finder open that folder\.$/);
+  const term = [...el.querySelectorAll('button')].find((b) => b.textContent === 'Terminal');
+  assert.equal(term.title, 'Opens the folder that has this branch');
+});
+
+test('a linked folder: "Your folder" badge and Unlink instead of Discard', () => {
+  const m = member({ checkout: { external: true, worktreeDir: '/Users/ada/dev/app', setup: { status: 'skipped' } } });
+  const el = renderActionsCard(model(m), { doc, handlers: {} });
+  assert.equal(el.querySelector('.act-linked').textContent, 'Your folder');
+  const labels = labelsOf(el);
+  assert.ok(labels.includes('Unlink') && !labels.includes('Discard'));
+  assert.ok(labels.includes('Run setup'), 'setup did not run by itself; it stays one click away');
+});
+
+test('controller: Use that folder confirms, links with useExisting; Terminal before it links then opens; Unlink deletes the link', async () => {
+  const held = model(member({ heldBy: '/Users/ada/dev/app' }));
+  const { api, calls } = fakeApi((method) => (method === 'GET' ? { ok: true, status: 200, data: held } : null));
+  const asked = [];
+  const host = doc.createElement('div');
+  const ctl = createActionsController({ runId: 'ab', scopeQuery: 'projectKey=app', api, ws: { send: () => {} }, host, doc,
+    confirm: async (o) => { asked.push(o); return true; }, navigate: () => {} });
+  await ctl.refresh();
+  const press = async (label) => { [...host.querySelectorAll('button')].find((b) => b.textContent === label).click(); for (let i = 0; i < 6; i++) await tick(); };
+  await press('Use that folder');
+  assert.equal(asked[0].title, 'Use the folder that has this branch?');
+  assert.deepEqual(asked[0].message[1], { strong: '/Users/ada/dev/app' });
+  await press('Terminal');
+  assert.equal(asked[1].title, 'Open Terminal in your folder?');
+  assert.equal(asked[1].confirmLabel, 'Use it and open Terminal');
+  const posts = calls.filter((c) => c[0] === 'POST').map((c) => [c[1], c[2]]);
+  assert.deepEqual(posts, [
+    ['/api/runs/ab/checkout?projectKey=app', { members: ['app-0cea65fb'], useExisting: true }],
+    ['/api/runs/ab/checkout?projectKey=app', { members: ['app-0cea65fb'], useExisting: true }],
+    ['/api/runs/ab/builtins/terminal?projectKey=app', { member: 'app-0cea65fb' }],
+  ]);
+  ctl.destroy();
+
+  const linked = model(member({ checkout: { external: true, worktreeDir: '/Users/ada/dev/app', setup: { status: 'skipped' } } }));
+  const two = fakeApi((method) => (method === 'GET' ? { ok: true, status: 200, data: linked } : null));
+  const host2 = doc.createElement('div');
+  const asked2 = [];
+  const ctl2 = createActionsController({ runId: 'ab', scopeQuery: 'projectKey=app', api: two.api, ws: { send: () => {} }, host: host2, doc,
+    confirm: async (o) => { asked2.push(o); return true; }, navigate: () => {} });
+  await ctl2.refresh();
+  [...host2.querySelectorAll('button')].find((b) => b.textContent === 'Unlink').click();
+  for (let i = 0; i < 6; i++) await tick();
+  assert.equal(asked2[0].title, 'Stop using this folder?');
+  assert.ok(!asked2[0].danger, 'nothing is deleted');
+  assert.deepEqual(two.calls.filter((c) => c[0] === 'DELETE').map((c) => [c[1], c[2]]), [['/api/runs/ab/checkout?projectKey=app', { members: ['app-0cea65fb'] }]]);
+  ctl2.destroy();
+});
+
+test('controller: a Check out refused because the branch is held elsewhere refreshes into "Use that folder", with no red error', async () => {
+  let current = model(member());
+  const { api } = fakeApi((method) => (method === 'GET' ? { ok: true, status: 200, data: current }
+    : method === 'POST' ? (current = model(member({ heldBy: '/Users/ada/dev/app' })), { ok: false, status: 409, data: { code: 'BRANCH_CHECKED_OUT', error: 'x', holder: '/Users/ada/dev/app' } }) : null));
+  const host = doc.createElement('div');
+  const ctl = createActionsController({ runId: 'ab', scopeQuery: 'projectKey=app', api, ws: { send: () => {} }, host, doc, confirm: async () => true, navigate: () => {} });
+  await ctl.refresh();
+  [...host.querySelectorAll('button')].find((b) => b.textContent === 'Check out').click();
+  for (let i = 0; i < 6; i++) await tick();
+  assert.equal(host.querySelector('.act-notice'), null);
+  assert.ok(labelsOf(host).includes('Use that folder'));
+  ctl.destroy();
+});
