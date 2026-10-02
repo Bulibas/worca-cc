@@ -14,22 +14,22 @@ import {
 
 useTempHome(after);
 
-test('v46 adds workspaces.actions_json to a v45 DB without touching rows', () => {
+test('v47 adds workspaces.actions_json to a v46 DB without touching rows', () => {
   const db = new DatabaseSync(':memory:');
   migrate(db);
   db.exec('ALTER TABLE workspaces DROP COLUMN actions_json');
   db.prepare("INSERT INTO workspaces (id, name, description, created_at, updated_at) VALUES ('wks-a-0cea65fb','A','', 'x','x')").run();
-  db.exec('PRAGMA user_version = 45');
+  db.exec('PRAGMA user_version = 46');
   migrate(db);
   const cols = db.prepare('PRAGMA table_info(workspaces)').all().map((c) => c.name);
   assert.ok(cols.includes('actions_json'));
   assert.equal(db.prepare('SELECT actions_json FROM workspaces').get().actions_json, null);
   assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
-  assert.ok(SCHEMA_VERSION >= 46);
+  assert.ok(SCHEMA_VERSION >= 47);
 });
 
 test('workspace stacks: [] by default, update round-trips, members sorted by key', async (t) => {
-  const root = mkdtempSync(join(tmpdir(), 'worca-v46-ws-'));
+  const root = mkdtempSync(join(tmpdir(), 'worca-v47-ws-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const dirs = ['web', 'api'].map((n) => {
     const d = join(root, n);
