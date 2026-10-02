@@ -1,7 +1,8 @@
 // test/night-analysis.test.mjs
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeAnalysis, buildAnalysisPrompt, runNightAnalysis } from '../src/core/night/analysis.mjs';
+import { normalizeAnalysis, buildAnalysisPrompt, runNightAnalysis, readMemoryText, capText } from '../src/core/night/analysis.mjs';
+import { writeMemory, memoryRoot, projectScope, GLOBAL_SCOPE } from '../src/core/memory-store.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 
 useTempHome(after);
@@ -55,4 +56,37 @@ test('runNightAnalysis parses the reply and reports cost', async () => {
 test('mock mode answers offline: recommended else first, confident', async () => {
   const r = await runNightAnalysis({ mock: true, questions: [{ id: 'a', options: ['x', 'y'], recommended: 'y' }, { id: 'b', options: ['p'] }] });
   assert.deepEqual([r.byId.a.choice, r.byId.b.choice, r.costUsd], ['y', 'p', 0]);
+});
+
+test('capText cuts at a byte budget, never inside a character, and says why', () => {
+  assert.equal(capText('short', 100, 'x'), 'short');
+  const cut = capText('é'.repeat(10), 5, 'the rest is elsewhere');   // 2 bytes each: 2 whole characters fit
+  assert.equal(cut, 'éé\n…(truncated: the rest is elsewhere)');
+});
+
+test('the task is capped in the prompt and points to task.md for the rest', () => {
+  const p = buildAnalysisPrompt({ questions: [{ id: 'q1', question: '?', options: ['a', 'b'] }], task: 'x'.repeat(40_000), criteria: {} });
+  assert.ok(p.includes('…(truncated: the full task is in task.md when it is listed below)'));
+  assert.ok(!p.includes('x'.repeat(16_001)), 'at most 16 KB of the task is inlined');
+});
+
+test('memory: project rules come before global ones, so a cut drops global rules first', async () => {
+  await writeMemory(memoryRoot(), GLOBAL_SCOPE, 'global-rule', 'prefer small diffs');
+  await writeMemory(memoryRoot(), projectScope('proj-00000001'), 'project-rule', 'use Postgres here');
+  const text = await readMemoryText('proj-00000001');
+  assert.ok(text.indexOf('### Project: project-rule') >= 0);
+  assert.ok(text.indexOf('### Project: project-rule') < text.indexOf('### Global: global-rule'));
+});
+
+test('runNightAnalysis reports the fullest its own context got (sub-agent turns do not count)', async () => {
+  const run = async (o) => {
+    const turn = (usage, parent = null) => o.onEvent({ type: 'assistant', raw: { type: 'assistant', parent_tool_use_id: parent, message: { usage } } });
+    turn({ input_tokens: 1000, cache_read_input_tokens: 500, cache_creation_input_tokens: 200 });
+    turn({ input_tokens: 300, cache_read_input_tokens: 2700 });
+    turn({ input_tokens: 99_999 }, 'toolu_sub');
+    o.onEvent({ type: 'result', costUsd: 0.01, raw: { usage: { input_tokens: 1300, output_tokens: 40 } } });
+    return { text: '{"decisions":[]}' };
+  };
+  const r = await runNightAnalysis({ questions: [{ id: 'q1', question: '?', options: ['a'] }], cwd: '/tmp', run, memory: '', task: 't' });
+  assert.equal(r.peakContextTokens, 3000);
 });

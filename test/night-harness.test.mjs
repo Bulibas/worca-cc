@@ -3,7 +3,7 @@
 // through answer(id, payload, 'night-mode'), guardrails pause, and the per-run switch.
 import { test, after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
@@ -11,6 +11,7 @@ import { isPause } from '../src/core/run-harness.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { setNightMode, setNightModeToggle } from '../src/core/settings.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
+import { artifactPaths, recordArtifact } from '../src/core/artifacts.mjs';
 import { writeNightDecision } from '../src/core/night/store.mjs';
 import { recordCostDelta } from '../src/core/cost-budget.mjs';
 
@@ -249,16 +250,33 @@ test('analysis strategy books the nightDecider call on the run', async () => {
   await setNightModeToggle('on');
   const clock = fakeClock();
   const nightRunClaude = async (o) => {
+    o.onEvent({ type: 'assistant', raw: { type: 'assistant', message: { usage: { input_tokens: 1200, cache_read_input_tokens: 800 } } } });
     o.onEvent({ type: 'result', costUsd: 0.05, raw: { usage: { input_tokens: 3, output_tokens: 2 } } });
     return { text: '{"decisions":[{"id":"a","choice":"y","confidence":90,"rationale":"fits","reversible":true,"scores":{}}]}' };
   };
   const orch = createOrchestrator({ projectDir: '/tmp/night-h12', nightClock: clock, nightRunClaude });
   const p = orch._ask({ id: 'c12', kind: 'clarify', questions: [{ id: 'a', question: 'A?', options: ['x', 'y'] }] });
-  await clock.tick(0);
-  for (let i = 0; i < 20 && orch.pendingQuestion; i++) await clock.tick(0);
+  await settle(clock, () => !orch.pendingQuestion);
   assert.deepEqual(await p, { answers: [{ id: 'a', choice: 'y' }] });
   assert.equal(orch.nightDecision('c12').strategy, 'analysis');
+  assert.equal(orch.nightDecision('c12').meta.reviewPeakContextTokens, 2000, 'the review\'s fullest context rides on the answer');
   assert.ok(orch.state.subAgents.some((s) => s.subagentType === 'night-decider'));
+});
+
+test('the review reads task.md and only the newest plan from the store, never superseded versions', async () => {
+  const projectDir = await mkdtemp(join(tmpdir(), 'night-plans-'));
+  const { id, dir } = await seedPipeline(projectDir, { title: 'plans' });
+  await writeFile(join(dir, 'task.md'), '# task');
+  const { root } = artifactPaths(projectDir);
+  await mkdir(join(root, 'plans'), { recursive: true });
+  for (const name of ['01-01-26-x.md', '01-01-26-x-v2.md']) {       // usually the same millisecond
+    await writeFile(join(root, 'plans', name), name);
+    recordArtifact(id, 'plan', `plans/${name}`);
+  }
+  const orch = createOrchestrator({ projectDir });
+  orch.pipeline = { id, dir };
+  assert.deepEqual(await orch._nightPlanPaths(), [join(dir, 'task.md'), join(root, 'plans', '01-01-26-x-v2.md')]);
+  await rm(projectDir, { recursive: true, force: true });
 });
 
 // ── Robustness: errors, stop, switching off, resume (review cycle 1: M1-M4) ────────────

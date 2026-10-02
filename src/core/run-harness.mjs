@@ -19,13 +19,13 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, basename, dirname, resolve, sep, relative } from 'node:path';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { readFile, writeFile, readdir, mkdir, realpath, rename } from 'node:fs/promises';
+import { readFile, writeFile, readdir, mkdir, realpath, rename, stat } from 'node:fs/promises';
 
 import { generateTitle } from './title.mjs';
 import {
   createPipeline, updatePipelineTitle, appendAudit, writeState, artifactPaths, slugify, today,
   recordArtifact, writeClarify, readPipelineExtras, claimPipelineOwnership, touchHeartbeat,
-  clearPipelineOwnership, HEARTBEAT_INTERVAL_MS, upsertSubAgent,
+  clearPipelineOwnership, HEARTBEAT_INTERVAL_MS, upsertSubAgent, listRunArtifacts,
 } from './artifacts.mjs';
 import { diffNameStatus, diffNumstat, diffPatch, untrackedFiles, untrackedPatch } from './git-info.mjs';
 import {
@@ -4012,9 +4012,10 @@ export class RunHarness extends EventEmitter {
       }
       return;
     }
+    const analysis = {};                        // the review's peak context, when one ran for this ask
     const result = await decideAsk(q, {
       config,
-      analyze: (qs) => this._nightAnalyze(qs, q),
+      analyze: (qs) => this._nightAnalyze(qs, q, analysis),
       gateCyclesUsed: (wireId) => (this.pipeline?.id ? nightGateCycles(this.pipeline.id, wireId) : 0),
       budget: config.spendCapUsd != null ? { spent: this._nightSpentUsd(config), cap: config.spendCapUsd } : null,
       // sleepAbortable RESOLVES early on a pause; pause() has then nulled pendingQuestion, so
@@ -4030,6 +4031,7 @@ export class RunHarness extends EventEmitter {
       return 'rearm';
     }
     let record = result.record;
+    if (Number.isFinite(analysis.peakContextTokens)) record = { ...record, meta: { ...(record.meta || {}), reviewPeakContextTokens: analysis.peakContextTokens } };
     // The record must be readable by nightDecision(id) BEFORE answer() resolves the ask (the
     // answer writers run right after), so stage it first; it is written/emitted only once an
     // answer landed.
@@ -4158,17 +4160,34 @@ export class RunHarness extends EventEmitter {
   nightConfigChanged() { this._nightArm(); }
 
   /** Plan/task artifacts of this run for the nightDecider to read. Never throws. */
+  /** What the Away mode review reads: the run's task.md and its NEWEST plan. Plans live in the
+   *  store's plans/ folder (indexed as kind 'plan', store-root-relative), not the run folder, and
+   *  superseded versions would only contradict the current one. Never throws. */
   async _nightPlanPaths() {
     if (!this.pipeline?.dir) return [];
+    const isFile = async (f) => { try { return (await stat(f)).isFile(); } catch { return false; } };
+    const out = [];
+    const task = join(this.pipeline.dir, 'task.md');
+    if (await isFile(task)) out.push(task);
     try {
-      return (await readdir(this.pipeline.dir)).filter((n) => n === 'task.md' || /^plan.*\.md$/.test(n)).sort().map((n) => join(this.pipeline.dir, n));
-    } catch { return []; }
+      const root = this.isWorkspace ? workspaceStorePath(this.workspaceKey) : projectStorePath(projectKey(this.projectDir));
+      // Newest first: by time, then by the -vN suffix (two writes in one millisecond share a time,
+      // and the index's tie-break, the file name, sorts "x-v2.md" before "x.md").
+      const ver = (rel) => Number(/-v(\d+)\.md$/.exec(rel)?.[1] || 1);
+      const plans = (await listRunArtifacts(this.pipeline.id, { kind: 'plan' }))
+        .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || ver(b.relPath) - ver(a.relPath));
+      for (const a of plans) {
+        const f = join(root, a.relPath);
+        if (await isFile(f)) { out.push(f); break; }
+      }
+    } catch { /* no index yet: the task alone */ }
+    return out;
   }
 
   /** One nightDecider call for an ask; books cost like the Auto classifier (_recordAutoCost).
    *  Deliberately no _checkCostLimits(): a cap pause raised from a timer callback would not
    *  unwind the pending _ask; the next step's cap check catches it. */
-  async _nightAnalyze(questions, q) {
+  async _nightAnalyze(questions, q, into = {}) {
     const startedAt = new Date().toISOString();
     const n = (this._nightSeq = (this._nightSeq || 0) + 1);
     let res;
@@ -4184,8 +4203,10 @@ export class RunHarness extends EventEmitter {
     } catch (err) {
       // Book what a failed call cost, then let the strategy fall back (flagged).
       if (err?.costUsd > 0) this._nightBookAnalysis(n, q, startedAt, { costUsd: err.costUsd, usage: err.usage || {} }, 'error');
+      if (Number.isFinite(err?.peakContextTokens)) into.peakContextTokens = err.peakContextTokens;
       throw err;
     }
+    if (Number.isFinite(res.peakContextTokens)) into.peakContextTokens = res.peakContextTokens;
     this._nightBookAnalysis(n, q, startedAt, res, 'finished');
     return res.byId;
   }
