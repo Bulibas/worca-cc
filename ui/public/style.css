@@ -99,20 +99,6 @@
   --shadow-hover:0 6px 18px light-dark(rgba(25,25,27,.10),rgba(0,0,0,.55));
   --shadow-menu:0 12px 34px light-dark(rgba(25,25,27,.12),rgba(0,0,0,.6));
   --knob-shadow:0 1px 3px light-dark(rgba(0,0,0,.18),rgba(0,0,0,.6));
-  /* The sidebar "I'm here | I'm away" lit side: light in both themes, so equal arms. */
-  --side-on-ink:light-dark(#17181c,#17181c);
-  --side-sheen:light-dark(rgba(255,255,255,.34),rgba(255,255,255,.34));
-  --side-rim:light-dark(rgba(255,255,255,.45),rgba(255,255,255,.45));
-  --side-here-a:light-dark(rgba(232,246,236,.9),rgba(232,246,236,.9));
-  --side-here-b:light-dark(rgba(160,208,198,.85),rgba(160,208,198,.85));
-  --side-here-c:light-dark(rgba(164,204,178,.8),rgba(164,204,178,.8));
-  --side-here-base:light-dark(#c6e3d2,#c6e3d2);
-  --side-here-drop:light-dark(rgba(40,90,64,.16),rgba(40,90,64,.16));
-  --side-away-a:light-dark(rgba(222,236,248,.9),rgba(222,236,248,.9));
-  --side-away-b:light-dark(rgba(196,184,236,.9),rgba(196,184,236,.9));
-  --side-away-c:light-dark(rgba(168,178,226,.8),rgba(168,178,226,.8));
-  --side-away-base:light-dark(#c9d0f0,#c9d0f0);
-  --side-away-drop:light-dark(rgba(48,56,120,.16),rgba(48,56,120,.16));
   --ask-dock-clearance:96px;
 
   --sans:'Poppins',system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
@@ -2973,36 +2959,17 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .tm-route-list .tm-stderr{white-space:pre-wrap;margin:4px 0 0;}
 
 /* ---------- Sidebar "I'm here | I'm away" (app.js#paintSideAway) ---------- */
-/* The same .seg as every other two-way choice, smaller: no colour of its own. */
+/* The same .seg as every other two-way choice, smaller. */
 .seg.side-away{display:flex;width:100%;padding:3px;gap:3px;border-radius:10px;}
 .seg.side-away button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap:6px;
   padding:6px 8px;font-size:12px;border-radius:7px;white-space:nowrap;}
 .seg.side-away button svg{width:14px;height:14px;flex:0 0 auto;}
 .seg.side-away button:not(.on) svg{opacity:.7;}
 .seg.side-away button[aria-disabled="true"]{cursor:default;opacity:.6;}
-/* The lit side is the one exception: a still, pale "shader" (light, haze, grain), sage green for here and
-   periwinkle for away, so the two read apart at a glance. Painted once, nothing moves; light in both
-   themes, so its text stays dark in both. */
-.seg.side-away{--side-grain:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 0 0 0 0 .18'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>") 0 0/160px 160px;}
-.seg.side-away button.on{color:var(--side-on-ink);background-blend-mode:overlay,normal,normal,normal,normal;}
-.seg.side-away button[data-side="here"].on{
-  background:
-    var(--side-grain),
-    linear-gradient(116deg, transparent 50%, var(--side-sheen) 63%, transparent 78%),
-    radial-gradient(85% 130% at 4% 0%, var(--side-here-a), transparent 62%),
-    radial-gradient(80% 140% at 100% 0%, var(--side-here-b), transparent 66%),
-    radial-gradient(60% 120% at 0% 100%, var(--side-here-c), transparent 72%),
-    var(--side-here-base);
-  box-shadow:inset 0 0 0 1px var(--side-rim), 0 1px 3px var(--side-here-drop);}
-.seg.side-away button[data-side="away"].on{
-  background:
-    var(--side-grain),
-    linear-gradient(116deg, transparent 50%, var(--side-sheen) 63%, transparent 78%),
-    radial-gradient(85% 130% at 4% 0%, var(--side-away-a), transparent 62%),
-    radial-gradient(80% 140% at 100% 0%, var(--side-away-b), transparent 66%),
-    radial-gradient(60% 120% at 0% 100%, var(--side-away-c), transparent 72%),
-    var(--side-away-base);
-  box-shadow:inset 0 0 0 1px var(--side-rim), 0 1px 3px var(--side-away-drop);}
+/* The lit side takes the flat status pair our chips use: green for here, violet for away. */
+.seg.side-away button[data-side="here"].on{background:var(--green-bg);color:var(--green-ink);box-shadow:none;}
+.seg.side-away button[data-side="away"].on{background:var(--violet-bg);color:var(--violet-ink);box-shadow:none;}
+.seg.side-away button.on svg{opacity:1;}
 /* The rail: the two icons stacked, the lit one raised. */
 .sidebar.collapsed .seg.side-away{flex-direction:column;width:auto;}
 .sidebar.collapsed .seg.side-away button{padding:6px;}
