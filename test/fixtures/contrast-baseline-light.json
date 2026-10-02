@@ -569,6 +569,7 @@
   "running-detail-tab-7|text|span.child-q||rgb(230, 150, 42)|rgb(246,246,244)",
   "running-detail-tab-7|text|span.mono.rd-ag-meta||rgb(154, 154, 161)|rgb(255,255,255)",
   "running-detail-tab-7|text|span.mono.rd-base||rgb(154, 154, 161)|rgb(255,255,255)",
+  "running-detail-tab-7|text|span.n-amber.nav-count||rgb(255, 255, 255)|rgb(230,150,42)",
   "running-detail-tab-7|text|span.n-grey.nav-count||rgb(154, 154, 161)|rgb(246,246,244)",
   "running-detail-tab-7|text|span.n-run.nav-count||rgb(255, 255, 255)|rgb(91,174,91)",
   "running-detail-tab-7|text|span.rd-clock||rgb(154, 154, 161)|rgb(255,255,255)",
