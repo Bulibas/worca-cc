@@ -61,9 +61,14 @@ import {
   memoryDefragModel, setMemoryDefragModel, assertMemoryDefragModelInput,
   workspaceScanModels, setWorkspaceScanModels, assertWorkspaceScanInput,
   scheduleDefaults, setScheduleDefaults,
+  nightModeSettings, setNightMode, nightModeToggle, nightModeHereSince, setNightModeToggle, assertNightModeToggleInput,
   actionsSettings, setActionsSettings, assertActionsInput,
   syncDefaults, setSyncDefaults, assertSyncSettingsInput, DEFAULT_SYNC_SETTINGS,
 } from '../src/core/settings.mjs';
+import { resolveNightConfig, validateNightPatch } from '../src/core/night/config.mjs';
+import { effectiveNightConfig, nightLayers } from '../src/core/night/effective.mjs';
+import { readNightDecisions, nightAnsweredSince } from '../src/core/night/store.mjs';
+import { createAwayHoursWatch } from '../src/core/night/hours-watch.mjs';
 import { resolveDefragModel, defragDefaultModel, defragWorkflowView, checkStartPair } from '../src/core/memory-defrag-model.mjs';
 import { describeTitleModel } from '../src/core/title.mjs';
 import { effectiveHumanRateUsd } from '../src/core/human-rate.mjs';
@@ -165,6 +170,7 @@ import {
   readRunConfig, setNodeModel, setFeedbackCycles, setWireCycles, setActiveWorkflow, setHumanInLoop, resetWorkflowConfig,
   globalModelRefs, removeGlobalModelAndRefs, promoteCustomModel, costUnreliableModelIds,
   readPrRemotePrefs, setPrRemotePrefs, modelHasBaseUrlRouting, writeSyncPrefs, readSyncPrefs,
+  readNightModePrefs, writeNightModePrefs,
   readProjectActions, writeProjectActions, readActionsMeta, writeActionsMeta,
 } from '../src/core/config.mjs';
 import { listGlobalModels, addGlobalModel, updateGlobalModel } from '../src/core/settings.mjs';
@@ -199,6 +205,8 @@ import {
 import { applyMetricsChange } from '../src/core/ask/metrics-deps.mjs';
 import { metricsEventPrompt, metricsNoticeText } from '../src/core/ask/metrics-proposal.mjs';
 import { applyPolicyChange } from '../src/core/ask/policy-deps.mjs';
+import { createAwaySwitch, applyAwayChange } from '../src/core/ask/away-deps.mjs';
+import { awayEventPrompt, awayNoticeText } from '../src/core/ask/away-proposal.mjs';
 import { policyEventPrompt, policyNoticeText } from '../src/core/ask/policy-proposal.mjs';
 import { scheduleEventPrompt, scheduleNoticeText } from '../src/core/ask/schedule-spec.mjs';
 import { applyModelChange } from '../src/core/ask/model-deps.mjs';
@@ -522,7 +530,7 @@ function liveRunIds() {
 // engine AND for the v2 shim until the graph cut-over retires it.
 // `artifact-gone` is this branch's: an indexed artifact whose file the run later
 // removed, so the client can drop the row instead of leaving one that 404s.
-const EVENT_NAMES = ['exec', 'token', 'log', 'question', 'artifact', 'artifact-gone', 'state', 'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title'];
+const EVENT_NAMES = ['exec', 'token', 'log', 'question', 'artifact', 'artifact-gone', 'state', 'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title', 'night-decision'];
 // The agentgen-* WS family (Agent Platform, Phase 2): a NEW family in the SAME
 // runs Map. createAgentGen emits many agentgen-progress then exactly one terminal
 // agentgen-done OR agentgen-error. (The scan-* family is gone: dev made a
@@ -886,6 +894,8 @@ function summarizeRuns() {
     // Who last stopped / paused / resumed it ({ kind, by, at }), or null.
     lastAction: r.lastAction || r.orch?.state?.lastAction || null,
     pendingQuestion: r.pendingQuestion || null,
+    // Night mode switches + counters ({optIn, override, decisions, flagged}), so a reconnect paints the run-view switch.
+    night: r.orch?.state?.night || null,
     // kind discriminator so the client routes runs vs agent generations vs
     // workspace runs without guessing; genId/workspaceId are the matching
     // attribution fields.
@@ -959,6 +969,13 @@ function wireRun(entry) {
 
       if (name === 'question') {
         entry.pendingQuestion = event;
+      }
+      if (name === 'night-decision') {
+        (entry.nightDecisions ||= []).push(payload.record);
+        // The harness emits night-decision only AFTER answer() accepted the payload, so the
+        // card can go. A guardrail row answered nothing: its pause's `done` frame clears the
+        // card, and a refused pause leaves the question open for the user.
+        if (!payload.record?.guardrail) resolvePending(entry, { id: payload.id, reason: 'night-mode' });
       }
       if (name === 'done') {
         entry.status = (payload && payload.status) || 'done';
@@ -1954,6 +1971,10 @@ const startRunHandler = async (req, res) => {
     // Human in the loop (spec D15): the body wins, else the project's stored
     // switch, else on. Resolved per target below (it needs the project dir).
     const bodyHumanInLoop = typeof body.humanInLoop === 'boolean' ? body.humanInLoop : null;
+    // Night mode per-run opt-in (src/core/night/*). A scheduled ticket keeps the whole request
+    // body, so the flag survives the wait.
+    if (body.nightMode !== undefined && typeof body.nightMode !== 'boolean') return badRequest(res, 'nightMode must be true or false');
+    const nightMode = body.nightMode === true;
 
     // Optional guardrailsId selects the named guardrail set that IS this run's
     // policy (applied uniformly to every member — guardrails are per-run only).
@@ -2108,6 +2129,7 @@ const startRunHandler = async (req, res) => {
         claude: { permissionMode: stored.permissionMode || 'acceptEdits', ...(stored.model ? { model: stored.model } : {}), mock },
         // A CLI-made ticket may carry `--yes`: the explicit non-interactive choice survives the wait.
         ...(stored.auto ? { auto: true } : {}),
+        ...(nightMode ? { nightMode: true } : {}),
       });
 
       entry = {
@@ -2221,6 +2243,7 @@ const startRunHandler = async (req, res) => {
         },
         // A CLI-made ticket may carry `--yes`: the explicit non-interactive choice survives the wait.
         ...(stored.auto ? { auto: true } : {}),
+        ...(nightMode ? { nightMode: true } : {}),
       });
 
       entry = {
@@ -2756,6 +2779,27 @@ onNotification((n) => {
   broadcast({ type: 'notification', notification: n });
   try { chatNotifier.notifySchedule(n); } catch { /* never break the writer */ }
 });
+
+// Away hours starting or ending by themselves (night/hours-watch.mjs): every open tab shows one line
+// under the menu's "I'm here | I'm away"; chat hears it only when a run is answered by worca.
+const AWAY_WATCH_TICK_MS = 30_000;
+let _awayWatchTimer = null;
+function startAwayHoursWatch() {
+  if (_awayWatchTimer) return;
+  const watch = createAwayHoursWatch({
+    readStatus: () => ({ config: resolveNightConfig({ user: nightModeSettings() }).config, toggle: nightModeToggle(), hereSince: nightModeHereSince() }),
+    liveRuns: () => [...runs.values()].map((e) => ({ projectDir: e.projectDir, status: e.orch?.state?.status || e.status, night: e.orch?.state?.night })),
+    effective: effectiveNightConfig,
+    answeredSince: nightAnsweredSince,
+    onEdge: (e) => {
+      broadcast({ type: 'away-hours', edge: e.edge, text: e.text });
+      if (e.chat) { try { chatNotifier.notifyAway(e.text); } catch { /* never break the watch */ } }
+    },
+  });
+  watch.tick();                                   // the baseline: a restart never announces an edge
+  _awayWatchTimer = setInterval(() => watch.tick(), AWAY_WATCH_TICK_MS);
+  _awayWatchTimer.unref();
+}
 
 /** A schedule item (ticket or series) by id, for the unified /api/schedules routes. */
 function findScheduleItem(id) {
@@ -3353,6 +3397,52 @@ app.post('/api/stop', (req, res) => {
 // in-flight node children, persists a resume point, and lands on status 'paused'
 // (announced via the normal state/done events; wireRun mirrors entry.status).
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// POST /api/run/night { runId, mode: 'auto'|'on'|'off' } — the run-view night mode switch.
+// A paused run stores it in its resume point; a finished run refuses it (400).
+// ---------------------------------------------------------------------------
+function setRunNightMode(runId, mode, by = 'local') {
+  const entry = runs.get(runId);
+  if (!entry) throw new Error('unknown runId');
+  if (typeof entry.orch?.setNightOverride !== 'function') throw Object.assign(new Error('run does not support Away mode'), { code: 'BAD_NIGHT_MODE' });
+  entry.orch.setNightOverride(mode, by || 'local');
+}
+app.post('/api/run/night', (req, res) => {
+  const { runId, mode } = req.body || {};
+  if (!runId || !runs.has(runId)) return badRequest(res, 'unknown runId');
+  try {
+    setRunNightMode(runId, mode, actorOf(req));
+    res.json({ ok: true });
+  } catch (err) {
+    if (err?.code === 'BAD_NIGHT_MODE' || err?.code === 'NIGHT_NOT_LIVE') return badRequest(res, err.message);
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+// GET /api/night-decisions?pipelineId=… | ?runId=… — what night mode decided on one run.
+app.get('/api/night-decisions', (req, res) => {
+  const pipelineId = String(req.query.pipelineId || '') || runs.get(String(req.query.runId || ''))?.orch?.pipeline?.id;
+  if (!pipelineId) return badRequest(res, 'pipelineId or runId required');
+  res.json({ decisions: readNightDecisions(pipelineId) });
+});
+
+// GET /api/away-mode[?projectDir=] — what Away mode will do: the effective config (with the team
+// layer when a project is given), where each field comes from, what an empty field falls back to,
+// the live status (toggle, and hereSince: when "I'm here" was last said) and the raw layers the forms edit. Every surface renders its text from this
+// through src/shared/away-mode/describe.mjs.
+app.get('/api/away-mode', (req, res) => {
+  const raw = typeof req.query.projectDir === 'string' && req.query.projectDir ? req.query.projectDir : null;
+  const projectDir = raw ? resolveProjectDir(raw) : null;          // same key as PATCH /api/config (~ expanded)
+  const user = nightModeSettings() || {};
+  if (!projectDir) {
+    const { config, sources } = resolveNightConfig({ user });
+    return res.json({ config, sources, inherited: resolveNightConfig({}), toggle: nightModeToggle(), hereSince: nightModeHereSince(), user, project: null });
+  }
+  const L = nightLayers(projectDir);
+  const { config, sources } = resolveNightConfig(L);
+  res.json({ config, sources, inherited: resolveNightConfig({ user: L.user, team: L.team }), toggle: nightModeToggle(), hereSince: nightModeHereSince(), user, project: L.project || {} });
+});
+
 app.post('/api/pause', (req, res) => {
   const { runId } = req.body || {};
   if (!runId || !runs.has(runId)) return badRequest(res, 'unknown runId');
@@ -6753,6 +6843,9 @@ const settingsState = () => ({
   memoryDefragDefault: defragDefaultModel(),              // what "(default)" means there: the built-in's own model
   workspaceScan: workspaceScanModels(),                   // Settings › Runs › Workspaces: the STORED pick (null = the defaults)
   workspaceScanDefault: WORKSPACE_SCAN_DEFAULT_MODELS,    // what null means: Sonnet 5 · medium, project agents sonnet · medium
+  nightMode: nightModeSettings(),                         // night mode: the user layer (only the fields set)
+  nightModeEffective: resolveNightConfig({ user: nightModeSettings() }).config,   // no project: the global view
+  nightModeToggle: nightModeToggle(),                     // auto | on | off (live switch)
   actions: actionsSettings(),                             // Settings › Runs › Actions (issue #529)
   actionsDetected: autoDetectedBuiltins(),                // what Editor / Terminal fall back to when left blank (null = none found)
   actionsGate: { remote: REMOTE_MODE, enabled: actionsEnabledHere() },
@@ -6853,6 +6946,9 @@ app.get('/api/credentials', async (req, res) => {
 // which cannot read worca's database. Its MCP child then only relays each JSON-RPC line
 // here; the worca tools run in this process (createAskToolServer), in the chat owner's
 // billing context. One token per turn, loopback callers only, dropped when the turn ends.
+// set_away_now / set_run_away_mode: the parent's half, over the settings and THIS process's live runs.
+const askAwaySwitch = createAwaySwitch({ liveRun: liveRunEntry, runs, emitChanged });
+
 const askRelays = new Map();   // token -> { rpc, out, billTo, owner }
 
 function askAgentRelay({ threadId, reader, web = null }) {
@@ -6872,6 +6968,14 @@ function askAgentRelay({ threadId, reader, web = null }) {
         if (!live || !live.orch || typeof live.orch.liveDiff !== 'function') return null;
         const out = await liveDiffOf(live).catch(() => null);
         return out && typeof out.patch === 'string' ? out.patch : null;
+      },
+      // Away mode on a live run (get_away_mode): its switch, mark and open question live only here.
+      readLiveNight: (id) => {
+        const live = liveRunEntry(id);
+        if (!live || !live.orch) return null;
+        const dir = live.projectDir || null;
+        return { status: live.orch.state?.status ?? live.status ?? null, night: live.orch.state?.night || null, waiting: live.orch.pendingQuestion != null,
+          projectDir: dir, projectKey: dir ? projectKey(dir) : null };
       },
     },
   });
@@ -6979,6 +7083,7 @@ app.post('/api/settings', async (req, res) => {
   const hasThemeKey = has('theme');
   const hasUiLevelKey = has('uiLevel');
   const hasAutoKey = has('autoWorkflowModel');
+  const hasNightKey = has('nightMode') || has('nightModeToggle');
   const autoModels = hasAutoKey ? await listModels('') : null;
   const hasPrDescKey = has('prDescriptionModel');
   const prDescModels = hasPrDescKey ? (autoModels || await listModels('')) : null;
@@ -7031,6 +7136,13 @@ app.post('/api/settings', async (req, res) => {
     if (hasPrDescKey) assertPrDescriptionModelInput(body.prDescriptionModel ?? '', prDescModels);
     if (hasMemoryDefragKey) assertMemoryDefragModelInput(body.memoryDefrag, defragModels);
     if (hasWorkspaceScanKey) assertWorkspaceScanInput(body.workspaceScan, wsScanModels);
+    if (has('nightMode') && body.nightMode !== null) {
+      const { __unset, ...patch } = body.nightMode && typeof body.nightMode === 'object' && !Array.isArray(body.nightMode) ? body.nightMode : { __invalid: true };
+      if (patch.__invalid) throw new Error('nightMode must be an object or null');
+      if (__unset !== undefined && !Array.isArray(__unset)) throw new Error('nightMode.__unset must be a list of field names');
+      validateNightPatch(patch);
+    }
+    if (has('nightModeToggle')) assertNightModeToggleInput(body.nightModeToggle);
     if (hasActionsKey) assertActionsInput(body.actions);
     if (has('sync')) assertSyncSettingsInput(body.sync);
     // Root first: it is the one key whose setter can still fail AFTER the asserts
@@ -7062,12 +7174,16 @@ app.post('/api/settings', async (req, res) => {
     if (hasMemoryDefragKey) await setMemoryDefragModel(body.memoryDefrag, { models: defragModels });
     if (hasWorkspaceScanKey) await setWorkspaceScanModels(body.workspaceScan, { models: wsScanModels });
     if (has('schedule')) await setScheduleDefaults(body.schedule && typeof body.schedule === 'object' ? body.schedule : {});
+    if (has('nightMode')) await setNightMode(body.nightMode);
+    if (has('nightModeToggle')) await setNightModeToggle(body.nightModeToggle);
     if (has('sync')) await setSyncDefaults(body.sync);
+    // Live runs re-evaluate their open question against the new night settings.
+    if (hasNightKey) for (const e of runs.values()) e.orch?.nightConfigChanged?.();
     if (hasActionsKey) { await setActionsSettings(body.actions); builtinsDetected = null; }   // re-detect the built-ins lazily
     if (hasBudgetKey) emitChanged('budget-changed');
     // Other open tabs repaint their Settings cards (a stale tab could otherwise
     // "save" its old checkbox state over this one with no feedback to either).
-    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule') || has('sync') || hasActionsKey) emitChanged('settings-changed');
+    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule') || has('sync') || hasActionsKey || hasNightKey) emitChanged('settings-changed');
     // Editor / Terminal: saved as typed; a program Worca cannot find comes back as a warning on its field.
     const actionsWarnings = hasActionsKey ? Object.fromEntries(['editor', 'terminal']
       .map((k) => [k, launcherWarning(actionsSettings()[k], { findOnPath: (n) => findOnPath(n) })]).filter(([, w]) => w)) : null;
@@ -7083,6 +7199,11 @@ app.post('/api/settings', async (req, res) => {
 // Per-project model/effort config + custom-model registry. Validation lives in
 // src/core/config.mjs; these routes are thin delegation (mirror /api/projects).
 // ---------------------------------------------------------------------------
+/** A project's night mode view: its own layer and the resolved config with per-field sources. */
+function projectNightMode(projectDir) {
+  return { project: readNightModePrefs(projectKey(projectDir)), ...effectiveNightConfig(projectDir) };
+}
+
 app.get('/api/config', async (req, res) => {
   const raw = req.query.projectDir;
   // No project selected yet (e.g. a fresh clone): still return the catalog so
@@ -7112,6 +7233,9 @@ app.get('/api/config', async (req, res) => {
     ]);
     res.json({
       config, models, steps: agentSteps(), efforts: EFFORTS,
+      // Night mode: the project's own layer plus what applies ({config, sources}) per field.
+      // Beside `config`, not in it: clients assign `config` to their whole config state.
+      nightMode: projectNightMode(projectDir),
       // The sub-agent model policy vocabulary is a FIXED alias enum (the CLI's Task
       // tool refuses catalog ids), so it ships beside `efforts` rather than being
       // derived from `models`.
@@ -7202,8 +7326,13 @@ app.patch('/api/config', async (req, res) => {
       await setActiveWorkflow(projectDir, active);
     }
     if (typeof body.humanInLoop === 'boolean') await setHumanInLoop(projectDir, body.humanInLoop);
+    if (body.nightMode !== undefined) {
+      // Night mode project layer (a patch; `null` resets to inherited). Validation errors → 400 below.
+      writeNightModePrefs(projectKey(projectDir), body.nightMode);
+      for (const e of runs.values()) if (e.projectDir === projectDir) e.orch?.nightConfigChanged?.();
+    }
     const config = await readRunConfig(projectDir);
-    res.json({ config });
+    res.json({ config, nightMode: projectNightMode(projectDir) });
   } catch (err) {
     // The config.mjs setters throw only on validation (unknown model/effort,
     // maxCycles < 1) -> client error, mirroring POST /api/config.
@@ -8784,7 +8913,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
         // workflowId once the user saved it; a run card keeps its pre-P3 line byte for byte.
         const wf = !!(b.card && b.card.type === 'workflow');
         if (wf && b.state === 'building') continue;   // transient (no name yet) — never worth a header line
-        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'workspace' || b.card.type === 'actions')) {
+        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'workspace' || b.card.type === 'actions' || b.card.type === 'away')) {
           cards.push({ id: b.id, type: b.card.type, state: b.state, summary: b.card.summary || '' });
           continue;
         }
@@ -8942,10 +9071,12 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     const attachmentNames = {};
     for (const a of askListAttachments(id)) attachmentNames[a.id] = a.name;
 
+    // A shared sign-in's name: the MCP child reads/marks notifications per person (step 3); Away mode
+    // switches are attributed to it.
+    const turnReader = reader || (thread.createdBy && askSharedOwner(thread) ? thread.createdBy : null);
     turn = createAskTurn({
       threadId: id, assistantMessageId: asstMsg.id, userMessageId: userMsg.id,
-      // A shared sign-in's name: the MCP child reads/marks notifications per person (step 3).
-      reader: reader || (thread.createdBy && askSharedOwner(thread) ? thread.createdBy : null),
+      reader: turnReader,
       prompt, systemPrompt, restoredPrompt,
       model, effort,
       resumeSessionId: thread.sessionId || null,
@@ -8979,6 +9110,8 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         // the open Scripts tabs drop their list and the composer marks its script list dirty.
         onScriptMutation: () => { emitChanged('scripts-changed', 'updated'); },
         trackRun: (input, { pin } = {}) => askTrackRun(id, input, pin ?? null),
+        // set_away_now / set_run_away_mode: the parent applies what the MCP child validated.
+        awaySwitch: (req) => askAwaySwitch(req, { actor: turnReader || 'local' }),
         resolveMentions: resolveAskMentions,
         // pause / resume / skip / mark-read in the MCP child: the Schedules page and the badges repaint.
         onScheduleMutation: () => { emitChanged('schedules-changed', 'ask'); emitChanged('notifications-changed'); },
@@ -9280,9 +9413,9 @@ async function startMetricsEventTurn(threadId, block) {
   const state = block.state === 'declined' ? 'declined' : block.state === 'failed' ? 'failed' : 'applied';
   const result = card.result || null;
   // One event turn for every non-workflow card; the type picks the wording. Metrics is the fallback.
-  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'actions' ? card.type : 'metrics';
-  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, workspace: workspaceEventPrompt, actions: actionsEventPrompt, metrics: metricsEventPrompt }[kind];
-  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, workspace: workspaceNoticeText, actions: actionsNoticeText, metrics: metricsNoticeText }[kind];
+  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'actions' || card.type === 'away' ? card.type : 'metrics';
+  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, workspace: workspaceEventPrompt, actions: actionsEventPrompt, away: awayEventPrompt, metrics: metricsEventPrompt }[kind];
+  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, workspace: workspaceNoticeText, actions: actionsNoticeText, away: awayNoticeText, metrics: metricsNoticeText }[kind];
   const text = eventPrompt({ cardId: block.id, state, card, result });
   const notice = noticeText({ state, card, result });
   let mv = await validateModelEffort(thread.model, thread.effort);
@@ -9520,12 +9653,14 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
       followCloneCard(id, cardId, job);
       return res.json({ block });
     }
-    if (found.block.card && (found.block.card.type === 'metrics' || found.block.card.type === 'policy')) {
+    if (found.block.card && ['metrics', 'policy', 'away'].includes(found.block.card.type)) {
       // Metrics / policy card (docs/team-metrics.md, docs/team-policy.md "Ask Worca"): proposed → applied | failed |
       // declined. The change is the outward-facing part — a branch on origin, a commit to the team's policy, a
       // marker on another repo, this machine's switch, the workspace's home — so it happens HERE, behind the
       // click, never in the model's tool.
-      const apply = found.block.card.type === 'policy' ? applyPolicyChange : applyMetricsChange;
+      // An Away mode card writes this machine's stored settings (user) or one project's layer, like POST /api/settings / PATCH /api/config.
+      const type = found.block.card.type;
+      const apply = type === 'policy' ? applyPolicyChange : type === 'away' ? applyAwayChange : applyMetricsChange;
       if (body.state !== 'applied' && body.state !== 'declined') return badRequest(res, 'state must be "applied" or "declined"');
       if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
       if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
@@ -9546,6 +9681,11 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
         block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
       } finally { askCardBusy.delete(cardId); }
       if (!block) return res.status(409).json({ error: 'card vanished' });
+      if (type === 'away' && block && block.state === 'applied') {
+        // What POST /api/settings / PATCH /api/config do after a write: refresh every surface and re-arm live runs.
+        emitChanged('settings-changed');
+        for (const e of runs.values()) { try { e.orch?.nightConfigChanged?.(); } catch { /* keep going */ } }
+      }
       const turn = await startMetricsEventTurn(id, block);
       return res.json({ block, turn });
     }
@@ -11436,6 +11576,7 @@ if (isMain) {
     } catch (err) { console.warn(`[worca-ui] team policy background: ${err?.message || err}`); }
     // Scheduled runs: boot catch-up + the 30 s tick (the server IS the scheduler).
     try { startScheduler(); } catch (err) { console.warn(`[worca-ui] scheduler: ${err?.message || err}`); }
+    startAwayHoursWatch();
     // Keep policy until-pr (D11): release kept checkouts whose PR merged or closed, hourly.
     const keptTimer = setInterval(() => {
       releaseKeptCheckouts({ busy: busyActionRunIds(), stopServices: stopCheckoutServices })

@@ -19,7 +19,7 @@ test('renders event checkboxes from prefs and channel rows with state badges', (
   }, { doc });
 
   const evs = [...el.querySelectorAll('input.chat-ev')];
-  assert.deepEqual(evs.map((e) => e.dataset.ev), ['question', 'done', 'error', 'paused']);
+  assert.deepEqual(evs.map((e) => e.dataset.ev), ['question', 'done', 'error', 'paused', 'away']);
   assert.equal(evs.find((e) => e.dataset.ev === 'question').checked, false);
   assert.equal(evs.find((e) => e.dataset.ev === 'done').checked, true);
 
@@ -43,7 +43,7 @@ test('collect round-trips edits; empty channel list renders a hint', () => {
   el.querySelector('input.chat-ev[data-ev="done"]').checked = false;
   el.querySelector('input.chat-ch[data-channel-key="telegram-chat/main"]').checked = false;
   assert.deepEqual(collectChatSettings(el), {
-    notify: { question: true, done: false, error: true, paused: true },
+    notify: { question: true, done: false, error: true, paused: true, away: true },
     channels: { 'telegram-chat/main': { enabled: false }, 'teams-chat/main': { enabled: true } },
   });
 

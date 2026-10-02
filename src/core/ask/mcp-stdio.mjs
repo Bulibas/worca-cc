@@ -30,6 +30,7 @@ import { defaultCommentDeps } from './comment-deps.mjs';
 import { defaultWorkflowDeps } from './workflow-deps.mjs';
 import { defaultMetricsDeps } from './metrics-deps.mjs';
 import { defaultPolicyDeps } from './policy-deps.mjs';
+import { defaultAwayDeps } from './away-deps.mjs';
 import { defaultScheduleDeps } from './schedule-deps.mjs';
 import { defaultSourceDeps } from './source-deps.mjs';
 import { defaultModelDeps } from './model-deps.mjs';
@@ -73,6 +74,7 @@ export function createAskToolServer({ threadId, reader = null, signal, write, lo
       ...defaultWorkflowDeps({ threadId, signal }),
       ...defaultMetricsDeps({ threadId }),
       ...defaultPolicyDeps({ threadId }),
+      ...defaultAwayDeps(),
       ...defaultScheduleDeps({ threadId, reader }),
       ...defaultSourceDeps(),
       ...defaultModelDeps({ threadId }),

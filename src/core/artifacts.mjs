@@ -480,6 +480,11 @@ function answeredByOf(aWrap) {
   return aWrap && typeof aWrap.answeredBy === 'string' && aWrap.answeredBy ? { answeredBy: aWrap.answeredBy } : {};
 }
 
+/** `{night}` when night mode answered the round (src/core/night/*), else {} — additive like answeredBy. */
+function nightOf(aWrap) {
+  return aWrap && aWrap.night && typeof aWrap.night === 'object' ? { night: aWrap.night } : {};
+}
+
 function formFieldsOf(qWrap, aWrap) {
   const ask = formAskOf(qWrap, aWrap);
   return ask ? { ask, formAnswer: formAnswerOf(aWrap) } : {};
@@ -517,6 +522,7 @@ export function readStepQuestions(pipelineId) {
       // byte-identical; consumers test `row.ask`, never `'ask' in row`.
       ...formFieldsOf(qWrap, aWrap),
       ...answeredByOf(aWrap),
+      ...nightOf(aWrap),
     };
   });
 }
@@ -597,6 +603,7 @@ export function readPipelineExtras(pipelineId) {
     answers: Array.isArray(aWrap?.answers) ? aWrap.answers : [],
     ...formFieldsOf(qWrap, aWrap),   // spec §9: `ask` + `formAnswer` on a form row only
     ...answeredByOf(aWrap),
+    ...nightOf(aWrap),
   };
   const reviews = getDb().prepare(
     'SELECT kind, cycle, verdict FROM reviews WHERE pipeline_id = ? ORDER BY kind, cycle'

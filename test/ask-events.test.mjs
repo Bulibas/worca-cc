@@ -848,6 +848,25 @@ test('propose_web_access: labelled, and its RESULT reaches onWebProposal with th
   assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
 });
 
+test('onAwaySwitch fires on set_away_now and set_run_away_mode results, with their labels', () => {
+  const calls = [];
+  const h = harness({ onAwaySwitch: (e) => calls.push(e) });
+  h.push(session(), init(), atool('msg_1', 't1', 'mcp__worca__set_away_now', { mode: 'away' }), uresult('t1', '{"ok":true}'));
+  assert.deepEqual(calls, [{ toolUseId: 't1', input: { mode: 'away' }, text: '{"ok":true}', isError: false }]);
+  assert.ok(h.frames.some((f) => f.type === 'ask-label' && f.label === 'Switching Away mode'));
+  h.push(atool('msg_2', 't2', 'mcp__worca__set_run_away_mode', { runId: 'abcd1234', mode: 'off' }), uresult('t2', 'error: nope', { isError: true }));
+  assert.deepEqual(calls[1], { toolUseId: 't2', input: { runId: 'abcd1234', mode: 'off' }, text: 'error: nope', isError: true });
+  assert.ok(h.frames.some((f) => f.type === 'ask-label' && f.label === 'Setting Away mode on a run'));
+});
+
+test('onAwayProposal fires on the propose_away_mode_change result, with its label', () => {
+  const calls = [];
+  const h = harness({ onAwayProposal: (e) => calls.push(e) });
+  h.push(session(), init(), atool('msg_1', 't1', 'mcp__worca__propose_away_mode_change', { level: 'user', set: { enabled: true } }), uresult('t1', '{"ok":true}'));
+  assert.deepEqual(calls, [{ toolUseId: 't1', input: { level: 'user', set: { enabled: true } }, text: '{"ok":true}', isError: false }]);
+  assert.ok(h.frames.some((f) => f.type === 'ask-label' && f.label === 'Proposing an Away mode change'));
+});
+
 test('propose_workspace_change: labelled, and its RESULT reaches onWorkspaceProposal with the full input; a sub-agent call never does', () => {
   assert.equal(labelForTool('mcp__worca__propose_workspace_change', {}), 'Proposing a workspace change');
   const seen = [];

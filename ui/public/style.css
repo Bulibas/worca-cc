@@ -819,8 +819,8 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .qopt{display:flex;align-items:center;gap:10px;font-family:inherit;font-weight:500;font-size:12.5px;
   color:var(--ink);background:var(--panel);border:1.5px solid var(--line);border-radius:11px;
   padding:9px 14px 9px 10px;cursor:pointer;transition:.14s;text-align:left;width:100%;}
-/* The letter key and its check are drawn entirely in CSS: renderClarifyBody keeps
-   emitting a bare <button> with one text node, its letter in data-key. Picked, the
+/* The letter key and its check are drawn entirely in CSS: renderClarifyBody emits
+   a <button> with the option's label span (plus the night-mode badge/bar), its letter in data-key. Picked, the
    square fills ink and the check is a HOLE masked out of it, so it shows the tile's
    own panel colour in both themes — no painted glyph colour to go wrong in dark. */
 .qopt::before{content:attr(data-key);flex:0 0 auto;display:grid;place-items:center;box-sizing:border-box;
@@ -828,6 +828,12 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
   font:600 10.5px var(--mono);color:var(--ink-2);}
 .qopt.sel::before{content:'';background:var(--ink);border-color:var(--ink);
   -webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><mask id='k'><rect width='20' height='20' fill='white'/><path d='M7.1 10.2l1.8 1.9 4-4' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></mask><rect width='20' height='20' mask='url(%23k)'/></svg>") center/100% 100% no-repeat;mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><mask id='k'><rect width='20' height='20' fill='white'/><path d='M7.1 10.2l1.8 1.9 4-4' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></mask><rect width='20' height='20' mask='url(%23k)'/></svg>") center/100% 100% no-repeat;}
+/* Night mode (Step 14): the agent's recommendation badge and per-option confidence bar. */
+.qopt .qrec{margin-left:8px;padding:1px 6px;border-radius:999px;font-size:11px;font-weight:600;background:var(--blue-bg);color:var(--blue-ink-strong)}   /* 11px on --blue-bg: --blue-ink is 3.6:1 in light */
+/* The bar wraps onto its own line under the label (key square 20px + gap 10px = the 30px indent). */
+.qopt:has(.qconf){flex-wrap:wrap;row-gap:6px}
+.qopt .qconf{display:block;flex:0 0 calc(100% - 30px);margin-left:30px;height:3px;border-radius:2px;background:var(--line)}
+.qopt .qconf-fill{display:block;height:100%;border-radius:2px;background:var(--blue)}
 .qopt:hover{border-color:var(--ink-3);}
 .qopt.sel{background:var(--panel);color:var(--ink);border-color:var(--ink);box-shadow:0 0 0 3px var(--line);}
 .qopt:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
@@ -897,14 +903,17 @@ fieldset.source legend{font-weight:600;font-size:13px;padding:0 6px;color:var(--
 .rd-questions .qtext{grid-column:1;grid-row:1 / span 2;display:grid;grid-template-columns:minmax(0,1fr);row-gap:12px;
   margin:0;font-weight:500;font-size:16px;line-height:1.5;letter-spacing:-.005em;}
 .rd-questions .qtext .qn{grid-area:1 / 1;justify-self:start;width:22px;height:22px;font-size:11.5px;margin-top:0;}
-/* Answered: read off the picked state the renderer already keeps, so no extra markup. The
+/* Answered: read off the picked state the renderer already keeps, so no extra markup (a
+   night-mode recommendation preselected with data-preset is not an answer yet). The
    pill shares the number's cell, pushed past the 22px circle. */
-.rd-questions .qblock:has(.qopt.sel,.qfree.has) .qtext::after{content:'Answered';grid-area:1 / 1;justify-self:start;
+.rd-questions .qblock:has(.qopt.sel:not([data-preset]),.qfree.has) .qtext::after{content:'Answered';grid-area:1 / 1;justify-self:start;
   align-self:center;margin-left:32px;padding:3px 10px;border-radius:999px;background:var(--green-bg);color:var(--green-ink);
   font-size:11.5px;font-weight:600;line-height:1.4;letter-spacing:0;}
 .rd-questions .qopts{grid-column:2;gap:8px;margin:0;padding-left:0;}
 .rd-questions .qopt{min-height:52px;gap:14px;padding:11px 16px 11px 12px;border-radius:12px;font-size:14.5px;line-height:1.5;}
 .rd-questions .qopt::before{width:28px;height:28px;border-radius:8px;font-size:12px;}
+/* Night mode: the confidence bar keeps its indent under the bigger key (28px + 14px gap). */
+.rd-questions .qopt .qconf{flex-basis:calc(100% - 42px);margin-left:42px}
 /* "Write your own" is the last tile: dashed until it holds a value, a pencil where the
    options have their key, its text lined up with theirs (1.5 + 12 + 28 + 14 = 55.5px). */
 .rd-questions .qblock > .qfree{grid-column:2;margin-left:0;width:100%;min-height:52px;padding:11px 16px 11px 54px;
@@ -2949,6 +2958,21 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .tm-route-list{list-style:none;padding:0;margin:8px 0 0;} .tm-route-list li.failed{color:var(--red-ink);}
 .tm-route-list .tm-stderr{white-space:pre-wrap;margin:4px 0 0;}
 
+/* ---------- Sidebar "I'm here | I'm away" (app.js#paintSideAway) ---------- */
+/* The same .seg as every other two-way choice, smaller: no colour of its own. */
+.seg.side-away{display:flex;width:100%;padding:3px;gap:3px;border-radius:10px;}
+.seg.side-away button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap:6px;
+  padding:6px 8px;font-size:12px;border-radius:7px;white-space:nowrap;}
+.seg.side-away button svg{width:14px;height:14px;flex:0 0 auto;}
+.seg.side-away button:not(.on) svg{opacity:.7;}
+.seg.side-away button[aria-disabled="true"]{cursor:default;opacity:.6;}
+/* The rail: the two icons stacked, the lit one raised. */
+.sidebar.collapsed .seg.side-away{flex-direction:column;width:auto;}
+.sidebar.collapsed .seg.side-away button{padding:6px;}
+.sidebar.collapsed .side-away-label{display:none;}
+.side-away-note{display:block;padding:6px 4px 0;font-size:11.5px;line-height:1.35;color:var(--ink-3);}
+.sidebar.collapsed .side-away-note{display:none;}
+
 /* ---------- Sidebar spend indicator ---------- */
 .spend-ind{display:block;width:100%;text-align:left;border:1px solid var(--line);border-radius:var(--r-ctrl);
   background:var(--field);padding:10px 12px;cursor:pointer;font-family:inherit;}
@@ -3834,6 +3858,9 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hd-cl-a{margin-top:12px;color:var(--ink-2);}
 .hd-cl-q > span:last-child{font:600 13.5px/1.6 var(--sans);}
 .hd-cl-a > span:last-child{font:400 13.5px/1.7 var(--sans);}
+/* Away mode's reason under an answer it gave (indented to the answer text: chip 22px + gap 12px). */
+.hd-cl-away{margin:8px 0 0 34px;}
+.hd-cl-away.flagged{color:var(--amber-ink, var(--ink-2));font-weight:500;}
 /* One letter (Q / A) in a fixed square, so the question and answer rows line up. */
 .hd-cl-chip{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;
   border-radius:7px;font-size:12px;font-weight:700;}
@@ -4237,8 +4264,13 @@ body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:
    and Details (header card, tabs, mini bar). The bar is shared and sticky. Every
    control on it is one height so the row reads as one strip. */
 .rd-bar,.hd-bar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;
-  padding:12px 32px;background:var(--bg);border-bottom:1px solid var(--line);}
-.rd-bar-mid{flex:1 1 auto;display:flex;justify-content:center;align-items:center;gap:8px;min-width:0;}
+  padding:12px 32px;background:var(--bg);border-bottom:1px solid var(--line);
+  container:rd-bar / inline-size;}
+/* A bar too narrow for every control at once (the Runs list pane beside it at ~1280 px) drops the
+   switch's visible label first: the select keeps its aria-label and tooltip, the pill says what
+   happens. */
+@container rd-bar (max-width:900px){ .rd-night-wrap > .txt{display:none;} }
+.rd-bar-mid{flex:1 1 0;display:flex;justify-content:center;align-items:center;gap:8px;min-width:0;}   /* basis 0: the name truncates before the controls wrap */
 /* The run's name. Details has it as its header's title, so the bar leaves it blank there. */
 /* The glance's page title owns the name; the bar repeats it only once that heading has
    scrolled out of view (app.js watchPageTitle sets data-title-out), like a large title
@@ -4247,7 +4279,10 @@ body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:
   opacity:0;transition:opacity .2s;}
 .rd[data-title-out="1"][data-mode="glance"] .rd-bar-title,.hd[data-title-out="1"][data-mode="glance"] .rd-bar-title{opacity:1;}
 @media (prefers-reduced-motion:reduce){.rd-bar-title{transition:none;}}
-.rd-bar-end{display:flex;align-items:center;gap:8px;}
+.rd-bar-end{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;min-width:0;}
+/* Every control in the bar keeps its words on one line: a squeezed bar wraps whole controls
+   onto a second row, never the text inside one ("Run after" over two lines). */
+.rd-bar-end > *{flex:none;white-space:nowrap;}
 .rd-bar .rd-back,.rd-bar .rd-to-run,.hd-bar .hd-back,.hd-bar .hd-to-run,.rd-bar .rd-pause,.rd-bar .rd-stop,
 .hd-bar .hd-resume,.hd-bar .hd-pause,.hd-bar .hd-stop{height:36px;box-sizing:border-box;}
 .rd-to-run,.hd-to-run{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;}
@@ -4439,6 +4474,38 @@ button.rd-srow:hover{background:var(--hover-on-field);}
    options, the "N of M answered" footer, "Open run") is T11 for BOTH mounts. */
 .rd-questions{margin-top:0;animation:wr-rise .3s cubic-bezier(.2,.7,.3,1) both;
   display:flex;flex-direction:column;gap:10px;}   /* its heading, then the panel */
+/* Night mode (Step 14): the run-view switch and the decisions list; flagged rows need review. */
+.rd-night-wrap{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2)}
+.rd-night-wrap[hidden]{display:none}
+.rd-bar .rd-night{width:auto;height:36px;box-sizing:border-box;padding:0 14px;font-size:12px;}   /* the bar's control size, not a form field's */
+.rd-night-pill{font-size:11.5px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);color:var(--ink-2);white-space:nowrap}
+.rd-night-pill:empty{display:none}
+.rd-night-pill[data-state="now"]{border-color:var(--amber);background:var(--amber-wash)}
+.rd-night-sec{margin:14px 0}
+/* The finished run's Away mode note, at the top of the result sheet. */
+.rd-away-note{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--panel);font-size:13px}
+.rd-away-note.has-checks{border-left:3px solid var(--amber);background:var(--amber-wash)}
+.rd-night-sec h3{font-size:13px;margin:0 0 8px}
+.rd-night-decisions{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+.rd-night-decisions li{padding:8px 12px;border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--panel)}
+.rd-night-decisions li.flagged{border-left:3px solid var(--amber);background:var(--amber-wash)}
+.rd-nd-head{font-weight:600;font-size:12.5px}
+.rd-nd-why{font-size:12px;color:var(--ink-2);white-space:pre-wrap}
+.night-crit{display:inline-flex;align-items:center;gap:4px;margin:0 10px 6px 0;font-size:12px}
+.pd-night-card{margin-top:14px}
+/* Away mode card (night-mode-form.mjs): live summary, status strip, sections, radio group. */
+.away-summary{margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--panel);font-size:13px;line-height:1.5}
+.away-line{display:block}
+.away-status{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+.away-basic h3{font-size:13px;margin:4px 0 10px}
+.away-input-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.away-which{display:flex;flex-direction:column;gap:2px}
+.away-radio{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.away-adv{margin:10px 0 0;padding:8px 0 0;border-top:1px solid var(--line)}
+.away-adv > summary{cursor:pointer;font-weight:600;font-size:13px;margin-bottom:8px}
+/* The empty fields' placeholders ARE the value that applies, and "(default)" / the hints say why:
+   content, not decoration. --ink-3 reads at 2.6-2.8:1 in light, so they take --ink-2. */
+.away-body .hint,.away-body .input::placeholder{color:var(--ink-2)}
 /* Explicit twin: the UA [hidden] rule is (0,0,0) and loses to any author
    `display`, so without this the panel would render even while hidden. */
 .rd-questions[hidden]{display:none;}
@@ -5298,6 +5365,11 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-mcard-before.is-unset,.ask-mcard-after.is-unset{text-decoration:none;font-style:italic;color:var(--ink-3);}
 .ask-mcard-arrow{color:var(--ink-3);}
 .ask-mcard-after{color:var(--ink);font-weight:600;}
+.ask-awcard-now,.ask-awcard-after,.ask-awcard-changed{margin-top:6px;font-size:12.5px}
+.ask-awcard-line{margin:2px 0 0}
+.ask-awcard-after mark{background:var(--amber-wash);color:inherit;border-radius:3px;padding:0 2px}
+.ask-awcard-changes{margin:4px 0 0;padding-left:18px}
+.ask-awcard-saved{margin-top:8px;font-size:12.5px}
 /* actions card (buildActionsCard; docs/actions.md "Ask Worca"): each command block shown whole, word for word */
 .ask-acard-change{flex-direction:column;align-items:stretch;}
 .ask-acard-change .ask-mcard-change-val{display:flex;flex-direction:column;align-items:stretch;gap:4px;}

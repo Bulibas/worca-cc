@@ -38,8 +38,8 @@
 // bootstrap value or a plain scalar toggle, so a table would buy nothing.
 //
 // IMPORTANT: this module imports NOTHING from the core graph (Node builtins
-// plus the zero-import model-env.mjs leaf and the web-allowlist.mjs leaf, which
-// imports only node:net and node:url). projects.mjs imports it, so
+// plus the zero-import model-env.mjs and night/config.mjs leaves and the
+// web-allowlist.mjs leaf, which imports only node:net and node:url). projects.mjs imports it, so
 // importing projects.mjs back would make worcaHome() -> getWorcaRoot() ->
 // projects.mjs an infinite cycle.
 //
@@ -58,6 +58,7 @@ import {
   UPSTREAM_PROVIDERS, COPILOT_ACCOUNT_TYPES, DEFAULT_PROVIDER_CONCURRENCY, MAX_PROVIDER_CONCURRENCY,
   COPILOT_TERMS_VERSION, isUpstreamBaseUrl,
 } from './model-env.mjs';
+import { validateNightPatch, NIGHT_TOGGLES } from './night/config.mjs';
 import { normalizeDomainList, normalizeDomainPattern, domainError, DOMAIN_LIST_MAX, RESERVED_KEY_VAR } from './web-allowlist.mjs';
 
 /**
@@ -773,6 +774,65 @@ export async function setAskWeb(input) {
   return { askWeb: askWeb() };
 }
 
+// ── Night mode (src/core/night/*) ─────────────────────────────────────────────
+// `nightMode` is the user layer of the night config (only the fields the user set);
+// `nightModeToggle` is the live global switch and is NOT part of the field precedence.
+const nightModeWarned = new Set();
+
+/** The user's night mode layer: only the fields the user set (validated; bad fields dropped). */
+export function nightModeSettings() {
+  const raw = readSettings().nightMode;
+  if (!isObj(raw)) return {};
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    try { Object.assign(out, validateNightPatch({ [k]: v })); }
+    catch {
+      if (!nightModeWarned.has(k)) { nightModeWarned.add(k); console.warn(`[worca] ignoring invalid nightMode.${k} in settings.json`); }
+    }
+  }
+  return out;
+}
+
+/** Merge a patch into settings.nightMode. `null` clears the whole block; a key listed in
+ *  `patch.__unset` (array of field names) is removed so the team value applies again. */
+export async function setNightMode(patch) {
+  const settings = readSettings();
+  if (patch === null) { delete settings.nightMode; return persistSettings(settings); }
+  const { __unset = [], ...rest } = patch || {};
+  const clean = validateNightPatch(rest, { level: 'user' });
+  const next = { ...(isObj(settings.nightMode) ? settings.nightMode : {}), ...clean };
+  for (const k of Array.isArray(__unset) ? __unset : []) delete next[k];
+  if (Object.keys(next).length) settings.nightMode = next; else delete settings.nightMode;
+  return persistSettings(settings);
+}
+
+export function nightModeToggle() {
+  const v = readSettings().nightModeToggle;
+  return NIGHT_TOGGLES.includes(v) ? v : 'auto';
+}
+
+/** When the user last said "I'm here" (ms), or null. It only skips the away-hours stretch it was said in. */
+export function nightModeHereSince() {
+  const t = Date.parse(readSettings().nightModeHereSince);
+  return Number.isFinite(t) ? t : null;
+}
+
+// 'here' is an INPUT, not a stored status: "I'm here" = follow my away hours, minus the stretch I am in now.
+const NIGHT_TOGGLE_INPUTS = [...NIGHT_TOGGLES, 'here'];
+
+export function assertNightModeToggleInput(v) {
+  if (!NIGHT_TOGGLE_INPUTS.includes(v)) throw Object.assign(new Error(`nightModeToggle must be one of ${NIGHT_TOGGLE_INPUTS.join(' | ')}`), { status: 400 });
+  return v;
+}
+
+export async function setNightModeToggle(v, { now = Date.now() } = {}) {
+  assertNightModeToggleInput(v);
+  const settings = readSettings();
+  if (v === 'auto' || v === 'here') delete settings.nightModeToggle; else settings.nightModeToggle = v;
+  if (v === 'here') settings.nightModeHereSince = new Date(now).toISOString(); else delete settings.nightModeHereSince;
+  return persistSettings(settings);
+}
+
 /** The web card's "Always allow": one exact host joins the stored allowlist; everything else is kept. */
 export async function addAskWebHost(host) {
   const h = normalizeDomainPattern(host);
@@ -816,7 +876,7 @@ export const setHumanRateUsdPerHour = (input) => setUsdCap('humanRateUsdPerHour'
 
 // ── chat notification preferences (chat-connectivity-design.md §4.5) ─────────
 
-const CHAT_NOTIFY_EVENTS = ['done', 'error', 'question', 'paused'];
+const CHAT_NOTIFY_EVENTS = ['done', 'error', 'question', 'paused', 'away'];
 
 /**
  * Effective chat preferences. Every notification event defaults ON; channels default
@@ -839,7 +899,7 @@ export function chatPrefs() {
 }
 
 /**
- * Merge-patch the chat prefs: {notify?: {done?, error?, question?, paused?},
+ * Merge-patch the chat prefs: {notify?: {done?, error?, question?, paused?, away?},
  * channels?: {"<plugin>/<id>"?: {enabled: boolean}}, scriptTools?: boolean}. Unknown
  * notify keys and a non-boolean scriptTools are rejected (400 at the API layer);
  * channels merge per key.
@@ -987,6 +1047,8 @@ export const SETTINGS_POST_KEYS = Object.freeze([
   'memoryDefrag',                            // Settings › Memory: the defragment model + effort
   'workspaceScan',                           // Settings › Runs › Workspaces: the scan's models
   'schedule',                                // scheduled-run defaults { graceMin, ifMissed, maxFailures }
+  'nightMode',                               // night mode user layer (night/config.mjs fields)
+  'nightModeToggle',                         // night mode live switch: auto | on | off
   'sync',                                    // sync before run (#527) { beforeRun, remote, refreshMinutes, onDiverged }
   'actions',                                 // Settings › Runs › Actions { keep, portLow, portHigh, editor, terminal, maxCheckouts }
 ]);

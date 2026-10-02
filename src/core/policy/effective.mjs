@@ -73,6 +73,7 @@ export function fmtValue(meta, v) {
     case 'plugins': return v.length ? v.map((p) => `${p.name}${p.minVersion ? ` ≥ ${p.minVersion}` : ''}`).join(', ') : '(none)';
     case 'mcpServers': return v.length ? v.map(mcpLine).join(', ') : '(none)';
     case 'steps': return Object.entries(v).map(([r, s]) => `${r} ${s.model || '·'}${s.effort ? ` / ${s.effort}` : ''}`).join(' · ') || '(none)';
+    case 'criteria': return Object.entries(v).map(([k, w]) => `${k} ${w}`).join(' · ') || '(defaults)';
     default: return String(v);
   }
 }

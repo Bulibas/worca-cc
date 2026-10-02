@@ -135,6 +135,9 @@
           <!-- Who this browser is signed in as (GET /api/whoami). Filled only behind an
                identity proxy or an operator-set name; a local install never shows it. -->
           <div class="side-who" id="side-who" hidden><span class="side-who-label">Signed in as</span> <span class="side-who-name"></span></div>
+          <!-- "I'm here | I'm away" (app.js#paintSideAway): the lit side is what applies right now, the
+               away hours included (wording §3.8). Pause stays in Settings › Away mode. -->
+          <div id="side-away"></div>
           <!-- Running actions (issue #529): its own mount, since paintBudget replaces #side-spend's children.
                Not level-gated: it shows only while a service runs, and it must stay stoppable. -->
           <div id="side-actions" class="side-actions" hidden aria-label="Running actions"></div>
@@ -388,6 +391,14 @@
                       <span class="txt">Human in the loop — Auto shows its proposal, clarifies, and agents may ask</span>
                     </label>
                     <small class="hint" id="hitlHint">Off: the proposal is accepted as proposed, no clarify card, no agent questions. A loop that runs out of cycles, a recovery prompt, a cost cap or an error still pause the run.</small>
+                    <!-- Away mode per-run mark (src/core/night/*): worca may answer this run's
+                         questions while you are away (Settings › Away mode sets when and how). -->
+                    <label class="switch-row" id="night-row">
+                      <input id="nightMode" class="sw-input" type="checkbox">
+                      <span class="switch"></span>
+                      <span class="txt">Mark this run: worca may answer for me</span>
+                    </label>
+                    <small class="hint" id="nightModeHint"></small>
 
                     <!-- Guardrails picker (built-ins + named sets; the selection IS the
                          run's policy, applied uniformly to every member). app.js populates
@@ -563,6 +574,10 @@
                 <!-- The run's name: the glance's headline carries its state. -->
                 <span class="rd-bar-mid"><span class="rd-bar-title"></span></span>
                 <span class="rd-bar-end">
+                  <!-- Away mode on this run (POST /api/run/night); hidden once the run is over. -->
+                  <label class="rd-night-wrap" hidden><span class="txt">Away mode on this run</span>
+                    <select class="rd-night select input-mini" aria-label="Away mode on this run"></select>
+                    <span class="rd-night-pill" aria-live="polite"></span></label>
                   <!-- Chain a run after this one (the list card's old schedule-after button): "Schedule a run
                        after this" while it goes, "Start a follow-up run" once it ends (paintRdHeader). The
                        saved run's bar carries the same button (.hd-after). -->
@@ -645,6 +660,8 @@
                   <h3 class="rd-ask-head"></h3>
                   <div class="qpanel hidden"></div>
                 </div>
+                <!-- What night mode decided on this run; flagged rows need review. -->
+                <section class="rd-night-sec" hidden><h3>Answers while you were away <span class="rd-night-count"></span></h3><ol class="rd-night-decisions"></ol></section>
               </section>
 
               <section class="rd-details" hidden aria-label="Run details">
@@ -757,6 +774,8 @@
                   <div class="rd-nowlist"></div>
                   <div class="rd-result hd-result"></div>
                 </div>
+                <!-- What Away mode answered on this run (GET /api/night-decisions); flagged rows need review. -->
+                <section class="rd-night-sec hd-night-sec" hidden><h3>Answers while you were away <span class="rd-night-count"></span></h3><ol class="rd-night-decisions"></ol></section>
               </section>
               <section class="rd-details hd-details" hidden aria-label="Run details">
               <header class="hd-header">
@@ -1608,6 +1627,26 @@
                 <button type="button" id="budgetSave" class="btn btn-primary btn-mini">Save</button>
               </div>
               <small class="hint" id="budgetMsg"></small>
+            </section>
+
+            <!-- Away mode (src/core/night/*): the user layer of the Away mode config, rendered by
+                 night-mode-form.mjs with its live summary, plus the status buttons (nightModeToggle). -->
+            <section class="card settings-card" id="night-settings-card" data-min-level="advanced">
+              <div class="card-head">
+                <div class="label-row">
+                  <h2>Away mode</h2>
+                  <button type="button" class="info-tip" aria-label="About Away mode">i<span class="tip-content hidden">
+                    While you're away, worca answers the questions your runs are waiting on. You can see every answer and why it was chosen. When worca isn't sure, it marks the answer "please check" and keeps going. When the run ends, it tells you how many answers to check.
+                  </span></button>
+                </div>
+              </div>
+              <div class="away-status" id="awayStatus" role="group" aria-label="Away mode status"></div>
+              <div id="night-mode-host"></div>
+              <div class="add-project-actions" style="margin-top:14px">
+                <button type="button" id="nightModeReset" class="btn btn-ghost btn-mini">Use defaults</button>
+                <button type="button" id="nightModeSave" class="btn btn-primary btn-mini">Save</button>
+              </div>
+              <small class="hint" id="nightModeMsg"></small>
             </section>
 
             <!-- Scheduled runs: the defaults a NEW schedule inherits. Each schedule keeps

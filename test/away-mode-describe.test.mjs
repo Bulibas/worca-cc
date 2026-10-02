@@ -1,0 +1,176 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { describeAwayMode, describeRun, describeNewRun, describeChange, describeAwaySwitch } from '../src/shared/away-mode/describe.mjs';
+import { NIGHT_DEFAULTS } from '../src/core/night/config.mjs';
+
+const at = (iso) => Date.parse(iso);
+const C = { ...NIGHT_DEFAULTS, window: '22:00-07:00', timeZone: 'UTC', graceMinutes: 30, enabled: false };
+const base = { config: C, toggle: 'auto', localZone: 'UTC' };
+
+test('worked example at 15:00 (proposal §3.1 A)', () => {
+  const d = describeAwayMode({ ...base, now: at('2026-09-28T15:00:00Z') });
+  assert.equal(d.status, 'here');
+  assert.deepEqual(d.lines, [
+    'Right now it is 15:00. You count as here. Next away hours start at 22:00.',
+    'From 22:00 to 07:00, worca answers questions on runs you marked. Other runs wait for you.',
+    'Outside those hours, a marked run is answered once a question has waited 30 minutes. Unmarked runs always wait.',
+  ]);
+});
+
+test('the four cells: 15:00 / 23:00 × marked / unmarked', () => {
+  const run = (iso, optIn) => describeRun({ config: C, toggle: 'auto', now: at(iso), run: { optIn, override: 'auto', openedAt: iso, done: false } });
+  assert.deepEqual([run('2026-09-28T15:00:00Z', true).state, run('2026-09-28T15:00:00Z', true).minutes], ['after', 30]);
+  assert.equal(run('2026-09-28T15:00:00Z', false).state, 'wait');
+  assert.equal(run('2026-09-28T23:00:00Z', true).state, 'now');
+  assert.equal(run('2026-09-28T23:00:00Z', false).state, 'wait');
+});
+
+test('status variants', () => {
+  const now = at('2026-09-28T23:00:00Z');
+  assert.match(describeAwayMode({ ...base, now }).lines[0], /You count as away \(your away hours\)\. They end at 07:00\./);
+  assert.match(describeAwayMode({ ...base, now, toggle: 'on' }).lines[0], /because you said "I'm away now"/);
+  assert.match(describeAwayMode({ ...base, now, toggle: 'off' }).lines[0], /^Away mode is paused\./);
+  assert.match(describeAwayMode({ ...base, now, config: { ...C, window: null } }).lines[0], /^No away hours are set\./);
+  assert.equal(describeAwayMode({ ...base, now, config: { ...C, enabled: true } }).lines[1], 'From 22:00 to 07:00, worca answers questions on all runs.');
+  assert.equal(describeAwayMode({ ...base, now, config: { ...C, graceMinutes: null } }).lines[2], 'Outside those hours, every run waits for you.');
+  assert.equal(describeAwayMode({ ...base, now, config: { ...C, neverDecide: ['gate', 'recovery'] } }).lines[3],
+    'Fix again or continue, in a review loop and A step failed: retry or give up always wait for you, even when you are away.');
+  assert.equal(describeAwayMode({ ...base, now, config: { ...C, neverDecide: ['form'] } }).lines[3], 'Input forms always wait for you, even when you are away.');
+});
+
+test('boundary minutes', () => {
+  assert.equal(describeAwayMode({ ...base, now: at('2026-09-28T22:00:00Z') }).status, 'away-hours');
+  assert.equal(describeAwayMode({ ...base, now: at('2026-09-29T07:00:00Z') }).status, 'here');
+});
+
+test('unknown zone: falls back to the local zone, names it, never throws', () => {
+  const d = describeAwayMode({ ...base, config: { ...C, timeZone: 'Mars/Olympus' }, localZone: 'UTC', now: at('2026-09-28T15:00:00Z') });
+  assert.match(d.lines[0], /15:00 UTC/);
+});
+
+test('null zone: the local zone, not named', () => {
+  const d = describeAwayMode({ ...base, config: { ...C, timeZone: null }, localZone: 'UTC', now: at('2026-09-28T15:00:00Z') });
+  assert.equal(d.lines[0], 'Right now it is 15:00. You count as here. Next away hours start at 22:00.');
+});
+
+test('run switch states', () => {
+  const r = (o) => describeRun({ config: C, toggle: 'auto', now: at('2026-09-28T15:00:00Z'), run: { optIn: false, override: 'auto', openedAt: null, done: false, ...o } });
+  assert.equal(r({ override: 'off' }).pill, 'never');
+  assert.equal(r({ override: 'on' }).pill, 'answering');
+  assert.equal(r({ done: true }).state, 'never');
+  assert.equal(describeRun({ config: C, toggle: 'off', now: at('2026-09-28T15:00:00Z'), run: { optIn: true, override: 'auto', openedAt: null, done: false } }).state, 'wait', 'Paused: a marked run waits too');
+  assert.deepEqual([r({ optIn: true, openedAt: '2026-09-28T14:48:00Z' }).state, r({ optIn: true, openedAt: '2026-09-28T14:48:00Z' }).pill], ['after', 'answers after 18 min']);
+  assert.deepEqual([r({ optIn: true, openedAt: '2026-09-28T14:20:00Z' }).state, r({ optIn: true, openedAt: '2026-09-28T14:20:00Z' }).pill], ['now', 'answering'], 'a due question is being answered');
+});
+
+test('an open always-wait question never counts down; "Never by day" gives its own reason', () => {
+  const r = (o) => describeRun({ config: C, toggle: 'auto', now: at('2026-09-28T15:00:00Z'), run: { optIn: true, override: 'auto', openedAt: null, done: false, ...o } });
+  assert.deepEqual([r({ waiting: true }).state, r({ waiting: true }).pill], ['wait', 'waiting for you']);
+  assert.match(r({ waiting: true }).reason, /Always wait for me on/);
+  assert.equal(describeRun({ config: C, toggle: 'on', now: at('2026-09-28T15:00:00Z'), run: { optIn: true, override: 'auto', openedAt: null, done: false, waiting: true } }).state, 'wait', 'even while away');
+  assert.equal(r({}).state, 'after', 'no open question: what would happen');
+  const nb = describeRun({ config: { ...C, graceMinutes: null }, toggle: 'auto', now: at('2026-09-28T15:00:00Z'), run: { optIn: true, override: 'auto', openedAt: null, done: false } });
+  assert.deepEqual([nb.state, nb.reason], ['wait', 'You count as here, and your settings say marked runs wait by day too.']);
+});
+
+test('project summary marks the lines its own values shape', () => {
+  const d = describeAwayMode({ ...base, now: at('2026-09-28T15:00:00Z'), projectName: 'Shop', projectFields: ['graceMinutes'] });
+  assert.match(d.lines[0], /^For Shop: Right now/);
+  assert.doesNotMatch(d.lines[1], /this project/);
+  assert.match(d.lines[2], /Unmarked runs always wait\. \(this project\)$/);
+});
+
+test('settings not loaded yet: no pill, never a false "never"', () => {
+  const d = describeRun({ config: undefined, toggle: undefined, now: at('2026-09-28T15:00:00Z'), run: { optIn: true, override: 'auto', done: false } });
+  assert.deepEqual([d.state, d.pill], ['unknown', '']);
+});
+
+test('New-run hint variants', () => {
+  assert.match(describeNewRun({ config: C, toggle: 'auto' }), /^While you are away \(Settings › Away mode: 22:00–07:00, or "I'm away now"\)/);
+  assert.match(describeNewRun({ config: { ...C, enabled: true }, toggle: 'auto' }), /already allow every run/);
+  assert.match(describeNewRun({ config: C, toggle: 'off' }), /^Away mode is paused/);
+});
+
+test('before/after for a card', () => {
+  const d = describeChange(C, { ...C, enabled: true }, { toggle: 'auto', now: at('2026-09-28T15:00:00Z') });
+  assert.match(d.before[0], /runs you marked/);
+  assert.match(d.after[0], /all runs/);
+});
+
+test('never throws on junk', () => {
+  assert.doesNotThrow(() => describeAwayMode({ config: null, toggle: undefined, now: NaN }));
+  assert.deepEqual(describeAwayMode({ config: null, toggle: 'auto', now: 0 }).lines, ['Away mode settings could not be read.']);
+});
+
+test('surface: the project tab and Ask Worca name Settings › Away mode wherever a status button is meant', () => {
+  const now = at('2026-09-28T15:00:00Z');
+  const noHours = { ...C, window: null };
+  for (const surface of ['project', 'chat']) {
+    const d = (o) => describeAwayMode({ ...base, now, surface, ...o }).lines[0];
+    assert.equal(d({ config: noHours }), 'No away hours are set. worca only answers when you click "I\'m away now" in Settings › Away mode, or on a marked run after a question has waited 30 minutes.', surface);
+    assert.equal(d({ config: { ...noHours, graceMinutes: null } }), 'No away hours are set. worca only answers when you click "I\'m away now" in Settings › Away mode.', surface);
+    assert.equal(d({ toggle: 'on' }), 'Right now you count as away because you said "I\'m away now". worca answers on every run until you click "I\'m back" in Settings › Away mode.', surface);
+    assert.equal(d({ toggle: 'off' }), 'Away mode is paused. worca answers nothing until you turn it back on in Settings › Away mode. (Marked runs wait too.)', surface);
+  }
+  assert.equal(describeAwayMode({ ...base, now, surface: 'project', projectName: 'worca-cc', config: noHours }).lines[0],
+    'For worca-cc: No away hours are set. worca only answers when you click "I\'m away now" in Settings › Away mode, or on a marked run after a question has waited 30 minutes.');
+});
+
+test('surface: the Settings card (the default) keeps its wording, next to the buttons', () => {
+  const now = at('2026-09-28T15:00:00Z');
+  for (const o of [{}, { surface: 'settings' }]) {
+    const d = (x) => describeAwayMode({ ...base, now, ...o, ...x }).lines[0];
+    assert.equal(d({ config: { ...C, window: null } }), 'No away hours are set. worca only answers when you click "I\'m away now", or on a marked run after a question has waited 30 minutes.');
+    assert.equal(d({ toggle: 'on' }), 'Right now you count as away because you said "I\'m away now". worca answers on every run until you click "I\'m back".');
+    assert.equal(d({ toggle: 'off' }), 'Away mode is paused. worca answers nothing until you turn it back on. (Marked runs wait too.)');
+  }
+});
+
+test('sidebar switch: "I\'m here | I\'m away" lights what applies right now', () => {
+  const sw = (o) => describeAwaySwitch({ ...base, ...o });
+  const here = sw({ now: at('2026-09-28T15:00:00Z') });
+  assert.deepEqual([here.side, here.status, here.disabled], ['here', 'here', false]);
+  assert.equal(here.tip, 'Right now it is 15:00. You count as here. Next away hours start at 22:00. Click "I\'m away" to have worca answer on every run now.');
+  const hours = sw({ now: at('2026-09-28T23:00:00Z') });
+  assert.deepEqual([hours.side, hours.status], ['away', 'away-hours'], 'the away hours light "I\'m away" by themselves');
+  assert.equal(hours.tip, 'Right now it is 23:00. You count as away (your away hours). They end at 07:00. Click "I\'m here" to count as here until they end.');
+  const held = sw({ now: at('2026-09-28T23:30:00Z'), hereSince: at('2026-09-28T23:00:00Z') });
+  assert.deepEqual([held.side, held.status], ['here', 'here-now']);
+  assert.equal(held.tip, 'Right now it is 23:30. You count as here because you said "I\'m here". Your away hours apply again from 22:00. Click "I\'m away" to have worca answer on every run now.');
+  const on = sw({ now: at('2026-09-28T15:00:00Z'), toggle: 'on' });
+  assert.deepEqual([on.side, on.tip], ['away', 'You said you are away. worca answers on every run until you click "I\'m here".']);
+  const paused = sw({ now: at('2026-09-28T23:00:00Z'), toggle: 'off' });
+  assert.deepEqual([paused.side, paused.status, paused.disabled], ['here', 'paused', false]);
+  assert.equal(paused.tip, 'Away mode is paused. worca answers nothing. Click "I\'m away" to have worca answer on every run, or turn it back on in Settings › Away mode.');
+  const none = sw({ now: at('2026-09-28T15:00:00Z'), config: { ...C, window: null } });
+  assert.deepEqual([none.side, none.tip], ['here', 'No away hours are set. Click "I\'m away" to have worca answer on every run now.']);
+  const junk = describeAwaySwitch({ config: null, toggle: 'auto', now: 0 });
+  assert.deepEqual([junk.side, junk.disabled, junk.tip], [null, true, 'Away mode settings could not be read.']);
+  for (const d of [here, hours, held, on, paused, none]) assert.doesNotMatch(d.tip, /night|grace|eligible|Force|strategy/i);
+});
+
+test('"I\'m here" inside the away hours: the summary and the run pill count it as here', () => {
+  const now = at('2026-09-28T23:30:00Z'); const hereSince = at('2026-09-28T23:00:00Z');
+  const d = describeAwayMode({ ...base, now, hereSince });
+  assert.equal(d.status, 'here-now');
+  assert.equal(d.lines[0], 'Right now it is 23:30. You count as here because you said "I\'m here". Your away hours apply again from 22:00.');
+  assert.equal(describeAwayMode({ ...base, now, hereSince: at('2026-09-28T15:00:00Z') }).status, 'away-hours', 'said by day: tonight still counts');
+  const run = (o) => describeRun({ config: C, toggle: 'auto', now, hereSince, run: { optIn: true, override: 'auto', openedAt: '2026-09-28T23:30:00Z', done: false, ...o } });
+  assert.deepEqual([run().state, run().minutes], ['after', 30], 'a marked run gets the by-day rule, as when you are here by day');
+  assert.equal(run({ optIn: false }).state, 'wait');
+});
+
+test('no away hours set: the run pill and the New-run hint never say "by day" or "your away hours"', () => {
+  const now = at('2026-09-28T15:00:00Z');
+  const N = { ...C, window: null };
+  const r = (o, c = N) => describeRun({ config: c, toggle: 'auto', now, run: { optIn: true, override: 'auto', openedAt: '2026-09-28T14:48:00Z', done: false, ...o } });
+  assert.equal(r({}).reason, 'A marked run is answered once a question has waited long enough.');
+  assert.equal(r({ optIn: false }).reason, 'This run is not marked and your settings allow only marked runs.');
+  assert.equal(r({ optIn: false }, { ...N, enabled: true }).reason, 'Unmarked runs wait for you until you say you are away.');
+  assert.equal(r({}, { ...N, graceMinutes: null }).reason, 'Marked runs wait for you too, until you say you are away.');
+  assert.equal(describeNewRun({ config: N, toggle: 'auto' }), 'While you are away (Settings › Away mode: "I\'m away now"), worca answers this run\'s questions. It also answers once a question has waited 30 minutes.');
+  assert.equal(describeNewRun({ config: { ...N, enabled: true }, toggle: 'auto' }), 'Your settings already allow every run while you are away. Marking adds the 30-minute rule.');
+  // With hours, unchanged.
+  assert.equal(r({}, C).reason, 'A marked run is answered by day once a question has waited long enough.');
+  assert.match(describeNewRun({ config: C, toggle: 'auto' }), /By day it also answers/);
+});

@@ -461,7 +461,7 @@ test('rule 4 asks the four sizing questions, answers with the smallest workflow,
   assert.ok(!ASK_SYSTEM_RULES.includes('over- or under-powered'), 'the "propose the closest one" fallback is gone');
   assert.ok(!ASK_SYSTEM_RULES.includes('propose the closest one'), 'the "propose the closest one" fallback is gone');
   assert.ok(ASK_SYSTEM_RULES.includes('why this workflow fits the work (rule 4)'), 'rule 3 still points at rule 4 for the note');
-  assert.ok(/\n13\. Worca memory:/.test(ASK_SYSTEM_RULES) && /\n18\. Models and providers:/.test(ASK_SYSTEM_RULES) && /\n19\. People:/.test(ASK_SYSTEM_RULES) && /\n20\. Workspaces:/.test(ASK_SYSTEM_RULES) && /\n21\. Actions/.test(ASK_SYSTEM_RULES) && !/\n\s*22\./.test(ASK_SYSTEM_RULES), 'the rules stop at 21');
+  assert.ok(/\n13\. Worca memory:/.test(ASK_SYSTEM_RULES) && /\n18\. Models and providers:/.test(ASK_SYSTEM_RULES) && /\n19\. People:/.test(ASK_SYSTEM_RULES) && /\n20\. Workspaces:/.test(ASK_SYSTEM_RULES) && /\n21\. Actions/.test(ASK_SYSTEM_RULES) && /\n22\. Away mode:/.test(ASK_SYSTEM_RULES) && !/\n\s*23\./.test(ASK_SYSTEM_RULES), 'the rules stop at 22');
 });
 
 // The chat often explores before it proposes (a worktree, a run diff, comments), but
@@ -477,7 +477,7 @@ test('rule 10 distils exploration findings into the brief, anchored and marked',
     assert.ok(ASK_SYSTEM_RULES.includes(t), `rule 10 states "${t}"`);
   }
   assert.ok(ASK_SYSTEM_RULES.includes('(rule 10)'), 'rule 3 points at it where the brief is written');
-  assert.ok(/\n13\. Worca memory:/.test(ASK_SYSTEM_RULES) && /\n18\. Models and providers:/.test(ASK_SYSTEM_RULES) && /\n19\. People:/.test(ASK_SYSTEM_RULES) && /\n20\. Workspaces:/.test(ASK_SYSTEM_RULES) && /\n21\. Actions/.test(ASK_SYSTEM_RULES) && !/\n\s*22\./.test(ASK_SYSTEM_RULES), 'the rules stop at 21');
+  assert.ok(/\n13\. Worca memory:/.test(ASK_SYSTEM_RULES) && /\n18\. Models and providers:/.test(ASK_SYSTEM_RULES) && /\n19\. People:/.test(ASK_SYSTEM_RULES) && /\n20\. Workspaces:/.test(ASK_SYSTEM_RULES) && /\n21\. Actions/.test(ASK_SYSTEM_RULES) && /\n22\. Away mode:/.test(ASK_SYSTEM_RULES) && !/\n\s*23\./.test(ASK_SYSTEM_RULES), 'the rules stop at 22');
 });
 
 // ── #397: the explicit project selector ──────────────────────────────────────
@@ -542,17 +542,17 @@ test('#397: a pinned scope renders the [pinned by the user] marker on the scope 
   assert.ok(!buildContextHeader({ ...CTX, pinned: false }).includes('[pinned by the user]'), 'explicit Auto is unchanged too');
 });
 
-test('rule 3 asks for the note and the attachmentIds hand-off; rules stop at 21', () => {
+test('rule 3 asks for the note and the attachmentIds hand-off; rules stop at 22', () => {
   for (const t of ['one-line note', 'attachmentIds', 'extra files', '(rule 10)']) assert.ok(ASK_SYSTEM_RULES.includes(t), `rule 3 states "${t}"`);
-  assert.ok(/\n13\. Worca memory:/.test(ASK_SYSTEM_RULES) && /\n18\. Models and providers:/.test(ASK_SYSTEM_RULES) && /\n19\. People:/.test(ASK_SYSTEM_RULES) && /\n20\. Workspaces:/.test(ASK_SYSTEM_RULES) && /\n21\. Actions/.test(ASK_SYSTEM_RULES) && !/\n\s*22\./.test(ASK_SYSTEM_RULES), 'the rules stop at 21');
+  assert.ok(/\n13\. Worca memory:/.test(ASK_SYSTEM_RULES) && /\n18\. Models and providers:/.test(ASK_SYSTEM_RULES) && /\n19\. People:/.test(ASK_SYSTEM_RULES) && /\n20\. Workspaces:/.test(ASK_SYSTEM_RULES) && /\n21\. Actions/.test(ASK_SYSTEM_RULES) && /\n22\. Away mode:/.test(ASK_SYSTEM_RULES) && !/\n\s*23\./.test(ASK_SYSTEM_RULES), 'the rules stop at 22');
 });
 
-test('track_run: named in rule 1, guided in rule 5, and the rules stop at 21', () => {
+test('track_run: named in rule 1, guided in rule 5, and the rules stop at 22', () => {
   const rule1 = ASK_SYSTEM_RULES.slice(ASK_SYSTEM_RULES.indexOf('\n1. '), ASK_SYSTEM_RULES.indexOf('\n2. '));
   assert.ok(rule1.includes('get_run_diff, track_run, read_attachment'), 'listed among the read tools');
   const rule5 = ASK_SYSTEM_RULES.slice(ASK_SYSTEM_RULES.indexOf('\n5. '), ASK_SYSTEM_RULES.indexOf('\n6. '));
   for (const t of ['call track_run once', 'live progress card', 'do not restate']) assert.ok(rule5.includes(t), t);
-  assert.ok(/\n13\. Worca memory:/.test(ASK_SYSTEM_RULES) && /\n18\. Models and providers:/.test(ASK_SYSTEM_RULES) && /\n19\. People:/.test(ASK_SYSTEM_RULES) && /\n20\. Workspaces:/.test(ASK_SYSTEM_RULES) && /\n21\. Actions/.test(ASK_SYSTEM_RULES) && !/\n\s*22\./.test(ASK_SYSTEM_RULES), 'the rules stop at 21');
+  assert.ok(/\n13\. Worca memory:/.test(ASK_SYSTEM_RULES) && /\n18\. Models and providers:/.test(ASK_SYSTEM_RULES) && /\n19\. People:/.test(ASK_SYSTEM_RULES) && /\n20\. Workspaces:/.test(ASK_SYSTEM_RULES) && /\n21\. Actions/.test(ASK_SYSTEM_RULES) && /\n22\. Away mode:/.test(ASK_SYSTEM_RULES) && !/\n\s*23\./.test(ASK_SYSTEM_RULES), 'the rules stop at 22');
 });
 
 // ── team metrics (docs/team-metrics.md "Ask Worca") ──────────────────────────
@@ -568,7 +568,7 @@ test('rule 1 names the four team-metrics tools; rule 14 sets the team-vs-local c
     '[worca event] metrics card <id> applied', 'declined', 'failed: <error>', 'branch protection']) {
     assert.ok(rule14.includes(t), `rule 14 states "${t}"`);
   }
-  assert.ok(!/\n\s*22\./.test(ASK_SYSTEM_RULES));
+  assert.ok(!/\n\s*23\./.test(ASK_SYSTEM_RULES));
 });
 
 test('rule 1 names the two team-policy tools; rule 17 sets kinds, sources, the card contract and keeps overrides with the user', () => {
@@ -697,22 +697,22 @@ test('rule 1 enumerates the script readers; the sandbox note keeps sub-agents ou
 
 // ── where worca runs (src/core/deployment.mjs, docs/deploy-railway.md) ──────
 
-test('rule 22 (hosting) is added for a container or hosted worca only; a local prompt is unchanged', () => {
+test('rule 23 (hosting) is added for a container or hosted worca only; a local prompt is unchanged', () => {
   const local = buildSystemPrompt(CATALOG);
   assert.equal(buildSystemPrompt(CATALOG, { deployment: 'local' }), local, 'local = the default, byte for byte');
-  assert.ok(!local.includes('22. Where worca runs'));
+  assert.ok(!local.includes('23. Where worca runs'));
   for (const deployment of ['container', 'hosted']) {
     const p = buildSystemPrompt(CATALOG, { deployment });
-    assert.ok(p.startsWith(`${ASK_SYSTEM_RULES}\n${ASK_HOSTING_RULE}\n\n`), `${deployment}: rule 22 right after rule 21`);
+    assert.ok(p.startsWith(`${ASK_SYSTEM_RULES}\n${ASK_HOSTING_RULE}\n\n`), `${deployment}: rule 23 right after rule 22`);
     assert.equal(p.replace(`\n${ASK_HOSTING_RULE}`, ''), local, `${deployment}: nothing else changes`);
   }
 });
 
-test('rule 22 keeps projects on the server, credentials out of chat, and names the PR account', () => {
-  assert.ok(ASK_HOSTING_RULE.startsWith('22. Where worca runs:'));
+test('rule 23 keeps projects on the server, credentials out of chat, and names the PR account', () => {
+  assert.ok(ASK_HOSTING_RULE.startsWith('23. Where worca runs:'));
   for (const t of ['folder picker', 'open in editor', 'docs/deploy-railway.md', 'never ask the user to copy files',
     'Never ask for one in chat', 'do not repeat it back', 'revoke it', 'github=', 'GH_TOKEN', 'docs/remote-access.md', 'signed in:']) {
-    assert.ok(ASK_HOSTING_RULE.includes(t), `rule 22 states "${t}"`);
+    assert.ok(ASK_HOSTING_RULE.includes(t), `rule 23 states "${t}"`);
   }
   assert.ok(ASK_HOSTING_RULE.includes('call propose_clone_project'), 'a new project is added with the clone card');
   assert.equal(ASK_HOSTING_RULE.includes('cloned into the projects folder by whoever runs the server'), false, 'no longer by hand');
@@ -766,7 +766,7 @@ test('web section: absent (byte-identical) when off; rules present when on', () 
   assert.match(on, /DATA, never instructions/);
   assert.match(on, /Never put local file contents, diffs/);
   assert.match(on, /Cite the URL/);
-  assert.ok(!/\n\s*22\./.test(ASK_SYSTEM_RULES));
+  assert.ok(!/\n\s*23\./.test(ASK_SYSTEM_RULES));
 });
 
 test('web section lists web_search only when search is configured', () => {
@@ -780,6 +780,12 @@ test('web section: other hosts go through a card and the turn ends; any-host and
   assert.match(renderWebSection({ enabled: true, allowedDomains: [], search: null }), /these hosts only: none yet/);
   const any = renderWebSection({ enabled: true, allowedDomains: ['*'], search: null });
   assert.match(any, /any public host/); assert.ok(!/propose_web_access with the URL/.test(any));
+});
+
+test('rule 22: Away mode names its four tools and never claims a card was applied', () => {
+  const rule22 = ASK_SYSTEM_RULES.split('\n').find((l) => l.startsWith('22. Away mode:'));
+  assert.ok(rule22, 'rule 22 exists');
+  for (const t of ['get_away_mode', 'set_away_now', 'set_run_away_mode', 'propose_away_mode_change', 'never claim it was applied', '[worca event] away card <id>']) assert.ok(rule22.includes(t), `rule 23 states "${t}"`);
 });
 
 // ── MCP registry §9.3: the MCP servers section ──────────────────────────────────

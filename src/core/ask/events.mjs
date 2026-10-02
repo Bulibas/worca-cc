@@ -144,6 +144,10 @@ export function labelForTool(name, input = {}, attachmentNames = {}) {
     case 'push_team_metrics': return 'Pushing team metrics';
     case 'get_team_policy': return 'Reading team policy';
     case 'propose_policy_change': return 'Proposing a policy change';
+    case 'get_away_mode': return 'Reading Away mode';
+    case 'set_away_now': return 'Switching Away mode';
+    case 'set_run_away_mode': return 'Setting Away mode on a run';
+    case 'propose_away_mode_change': return 'Proposing an Away mode change';
     case 'track_run': return 'Tracking a run';
     case 'read_attachment': return `Reading ${(attachmentNames && attachmentNames[id]) || 'attachment'}`;
     case 'list_diff_comments': return id ? `Reading comments on ${id.slice(0, 12)}` : 'Reading diff comments';
@@ -268,6 +272,8 @@ export function createTurnReducer({
   onWebProposal = null,          // propose_web_access RESULT (web card; same split)
   onScheduleMutation = null,     // a direct schedule write succeeded in the MCP child
   onTrackRun = null,
+  onAwaySwitch = null,           // set_away_now / set_run_away_mode RESULT (the parent applies the switch)
+  onAwayProposal = null,         // propose_away_mode_change RESULT (Away mode card; the parent re-validates the input)
   onCommentMutation = null,
   onWorktreeMutation = null,
   onMemoryMutation = null,
@@ -635,6 +641,12 @@ export function createTurnReducer({
           if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
         } catch { reducerErrors += 1; }
       }
+      if (b.name === 'mcp__worca__propose_away_mode_change' && typeof onAwayProposal === 'function') {
+        try {
+          const ret = onAwayProposal({ toolUseId: b.id, input: fullInputs.get(b.id) ?? {}, text, isError: !!c.is_error });
+          if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
+        } catch { reducerErrors += 1; }
+      }
       if (b.name === 'mcp__worca__propose_policy_change' && typeof onPolicyProposal === 'function') {
         // Same split as the metrics card: the parent re-validates from the INPUT (policy-proposal.mjs).
         try {
@@ -688,6 +700,12 @@ export function createTurnReducer({
         // The parent owns the runs Map, the link rows and the followers: it re-resolves the id itself (D4).
         try {
           const ret = onTrackRun({ toolUseId: b.id, input: fullInputs.get(b.id) ?? {}, text, isError: !!c.is_error });
+          if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
+        } catch { reducerErrors += 1; }
+      }
+      if ((b.name === 'mcp__worca__set_away_now' || b.name === 'mcp__worca__set_run_away_mode') && typeof onAwaySwitch === 'function') {
+        try {
+          const ret = onAwaySwitch({ toolUseId: b.id, input: fullInputs.get(b.id) ?? {}, text, isError: !!c.is_error });
           if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
         } catch { reducerErrors += 1; }
       }

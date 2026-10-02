@@ -30,6 +30,7 @@ import { buildAskSpawnOptions, buildMcpConfig, ASK_MCP_SERVER_PATH } from './spa
 import { refreshAskMemoryMount } from './memory-deps.mjs';
 import { validateProposal } from './proposal.mjs';
 import { validateMetricsChange } from './metrics-deps.mjs';
+import { validateAwayChange } from './away-deps.mjs';
 import { validatePolicyChange } from './policy-deps.mjs';
 import { validateModelChange } from './model-deps.mjs';
 import { validateCloneProposal } from './clone-deps.mjs';
@@ -144,6 +145,7 @@ class AskTurn extends EventEmitter {
       validateProposal: deps.validateProposal ?? validateProposal,
       revalidateWorkflow: deps.revalidateWorkflow ?? revalidateWorkflowProposal,
       validateMetricsChange: deps.validateMetricsChange ?? validateMetricsChange,
+      validateAwayChange: deps.validateAwayChange ?? validateAwayChange,
       validatePolicyChange: deps.validatePolicyChange ?? validatePolicyChange,
       validateScheduleChange: deps.validateScheduleChange ?? validateScheduleChange,
       validateModelChange: deps.validateModelChange ?? validateModelChange,
@@ -157,6 +159,7 @@ class AskTurn extends EventEmitter {
       // A proposed plugin task is looked up here, once: it must exist, and the card shows its title.
       lookupTask: deps.lookupTask === undefined ? lookupTask : deps.lookupTask,
       trackRun: deps.trackRun ?? null,
+      awaySwitch: deps.awaySwitch ?? null,
       // Conversation chips: (refs) → resolved chip entries (ui/server.mjs resolveAskMentions). null = none.
       resolveMentions: deps.resolveMentions ?? null,
       generateTitle: deps.generateTitle ?? generateTitle,
@@ -301,6 +304,21 @@ class AskTurn extends EventEmitter {
     this._persistBlocks();                                       // a store write; the browser gets the reducer's ask-card frame
   }
 
+  /** set_away_now / set_run_away_mode RESULT: the child validated; the parent owns settings and live runs. */
+  async _onAwaySwitch(text, isError) {
+    if (isError || typeof this.deps.awaySwitch !== 'function') return;
+    let req = null;
+    try { req = JSON.parse(text)?.requested || null; } catch { req = null; }
+    if (!req || (req.kind !== 'global' && req.kind !== 'run')) return;
+    let r;
+    try { r = await this.deps.awaySwitch(req); }
+    catch (err) { r = { ok: false, error: err?.message || String(err) }; }
+    // One closing mark, never two: the paused line already ends "(Marked runs wait too.)".
+    const line = String(r?.line ?? '').trim();
+    this.reducer.addBlock({ kind: 'notice', text: r?.ok ? `Done — ${/[.!?)]$/.test(line) ? line : `${line}.`}` : `Could not change Away mode${req.kind === 'run' ? ' on this run' : ''}: ${r?.error || 'unknown error'}` });
+    this._persistBlocks();
+  }
+
   /**
    * propose_metrics_change RESULT: the child validated for the model's self-correction; the parent re-validates the
    * same INPUT authoritatively (metrics-proposal.mjs is pure over the real readers) and mints the card. An isError
@@ -330,6 +348,33 @@ class AskTurn extends EventEmitter {
       }
     } catch (err) {
       this.reducer.addBlock({ kind: 'notice', text: `Metrics change rejected: ${err?.message || err}` });
+    }
+    this._persistBlocks();
+  }
+
+  /**
+   * propose_away_mode_change RESULT: the metrics card's split — the child validated for the model, the parent
+   * re-validates the same INPUT over the real readers (away-proposal.mjs) and mints the card.
+   */
+  async _onAwayProposal(input, text, isError) {
+    if (isError) return;
+    let out = null;
+    try { out = JSON.parse(text); } catch { out = null; }
+    if (!out || out.ok !== true) return;
+    const d = this.deps;
+    const raw = input && typeof input === 'object' ? input : {};
+    // The child's pinned-project default, replayed (tools.mjs propose_away_mode_change).
+    const pin = this.pinnedScope;
+    const inp = raw.level === 'project' && !(typeof raw.projectKey === 'string' && raw.projectKey.trim()) && pin && pin.projectKey ? { ...raw, projectKey: pin.projectKey } : raw;
+    try {
+      const r = await d.validateAwayChange(inp);
+      if (r && r.ok) this.reducer.addBlock({ kind: 'card', id: d.newAskId('card'), state: 'proposed', card: r.card });
+      else {
+        const errors = (r && Array.isArray(r.errors) && r.errors.length) ? r.errors : ['invalid proposal'];
+        this.reducer.addBlock({ kind: 'notice', text: `Away mode change rejected: ${errors.join('; ')}` });
+      }
+    } catch (err) {
+      this.reducer.addBlock({ kind: 'notice', text: `Away mode change rejected: ${err?.message || err}` });
     }
     this._persistBlocks();
   }
@@ -599,7 +644,9 @@ class AskTurn extends EventEmitter {
       onWorkflowStart: ({ toolUseId, input }) => this._onWorkflowStart(toolUseId, input),
       onWorkflowResult: ({ toolUseId, text, isError }) => this._onWorkflowResult(toolUseId, text, isError),   // the hook's `input` is not needed here: the card is rebuilt from `out`
       onTrackRun: ({ input, isError }) => this._onTrackRun(input, isError),
+      onAwaySwitch: ({ text, isError }) => this._onAwaySwitch(text, isError),
       onMetricsProposal: ({ input, text, isError }) => this._onMetricsProposal(input, text, isError),
+      onAwayProposal: ({ input, text, isError }) => this._onAwayProposal(input, text, isError),
       onPolicyProposal: ({ input, text, isError }) => this._onPolicyProposal(input, text, isError),
       onScheduleProposal: ({ input, text, isError }) => this._onScheduleProposal(input, text, isError),
       onModelProposal: ({ input, text, isError }) => this._onModelProposal(input, text, isError),

@@ -18,6 +18,7 @@ import { htmlToText } from './html-text.mjs';
 import { ASK_LIMITS } from './limits.mjs';
 import { askProgress } from '../ask-projection.mjs';
 import { getDb } from '../db.mjs';
+import { readNightDecisions } from '../night/store.mjs';
 
 /** Who started runs (pipelines.started_by), one row per person, most active first. Scope: a
  *  projectKey or a workspaceKey, else everything. Archived and pre-attribution (NULL) runs are
@@ -100,7 +101,8 @@ export function defaultToolDeps({ threadId, viewer = null }) {
     readRunMemory,
     listRunArtifacts: (row, filter) => listRunArtifacts(row.id, filter),
     readRunArtifact: (row, rel) => resolveIndexedArtifactForRow(row, rel), // {rel, text}|null
-    readRunProgress: (row) => readRunProgress(row.id),
+    // Night mode decisions ride the progress report (artifacts.mjs stays free of the night store).
+    readRunProgress: async (row) => ({ ...(await readRunProgress(row.id)), nightDecisions: readNightDecisions(row.id) }),
     // Ask forms (spec D9, ruling X17): a persisted form round as text for the model.
     // Injected, never imported — tools.mjs stays import-free by house rule.
     askProgress,

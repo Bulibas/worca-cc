@@ -58,7 +58,7 @@ const OPEN_BACKOFF_MS = 15;
 /** Latest schema version. Bump + append a new migration step when the DDL grows.
  *  Exported so migration tests assert "reached the module's current version"
  *  instead of hardcoding the number — a schema bump then touches no test file. */
-export const SCHEMA_VERSION = 47;
+export const SCHEMA_VERSION = 48;
 
 /** Absolute path to the database file: <worcaHome>/worca-cc.db. */
 export function dbPath() {
@@ -907,6 +907,22 @@ CREATE TABLE IF NOT EXISTS notification_reads (
 );
 `;
 
+/** night_decisions (v48): one row per ask Away mode answered (src/core/night/*).
+ *  `record` is the JSON decision record {choice, strategy, confidence, scores, rationale,
+ *  reversible, flagged, questions?, guardrail?, meta?}. Pipelines are soft-deleted, so the
+ *  cascade only matters for test DBs. */
+const NIGHT_DECISIONS_DDL = `
+CREATE TABLE IF NOT EXISTS night_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pipeline_id TEXT NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+  question_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  record TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_night_decisions_pipeline ON night_decisions(pipeline_id, id);
+`;
+
 const INCREMENTAL_TABLES = {
   config_workflow_wires: CONFIG_WORKFLOW_WIRES_DDL,
   step_questions:    STEP_QUESTIONS_DDL,
@@ -926,6 +942,7 @@ const INCREMENTAL_TABLES = {
   scheduled_runs:    SCHEDULED_RUNS_DDL,
   notifications:     SCHEDULED_RUNS_DDL,
   notification_reads: NOTIFICATION_READS_DDL,
+  night_decisions:   NIGHT_DECISIONS_DDL,
 };
 
 /**
@@ -1507,6 +1524,14 @@ function applySchemaV45(db) {
   repairSchemaGaps(db, schemaGaps(db));
 }
 
+/** v48 (Away mode): night_decisions (INCREMENTAL_TABLES), one row per ask Away mode answered.
+ *  v46 is the Ask context chips' column, v47 the workspace actions'. A DB stamped 44, 46 or 47 by an
+ *  earlier build of the Away mode branch (night_decisions at v44, v46, then v47) already has the
+ *  table (IF NOT EXISTS) and gets the columns it skipped from the gap repair above. */
+function applySchemaV48(db) {
+  db.exec(NIGHT_DECISIONS_DDL);
+}
+
 /** Move every stored pin on model id `from` (lower-case) to `to`. Each table
  *  is guarded like V24's: hand-seeded upgrade fixtures (and a DB from before the
  *  fs->db import) reach this step without some of them. */
@@ -1935,6 +1960,7 @@ export function migrate(db) {
     // v46 (Ask context chips): ask_threads.contexts, an INCREMENTAL_COLUMNS entry the hoisted
     // repairSchemaGaps above adds — no step of its own. NULL on every existing thread = no indicator.
     // (v47: workspaces.actions_json arrives through the same repair — additive column only, issue #529.)
+    if (current < 48) applySchemaV48(db);            // Away mode: one row per answered ask
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {
