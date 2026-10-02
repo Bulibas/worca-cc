@@ -296,7 +296,7 @@ test('History Clarify: an Away mode answer says so, solo or shared, with its rea
   assert.equal(step.querySelector('.hd-cl-by')?.textContent, 'Answered by Away mode');
 });
 
-test('History run page: "Answers while you were away" lists the stored answers', async () => {
+test('History run page: "Answered for you" lists the stored answers', async () => {
   const decisions = [
     { questionId: 'clarify-1', kind: 'clarify', choice: 'pg', strategy: 'weights', flagged: false, rationale: 'q1: the agent recommended this at 80%' },
     { questionId: 'gate-1', kind: 'gate', choice: 'another', strategy: 'rule', flagged: true, rationale: '2 critical issues left, one more fix round' },
@@ -314,11 +314,9 @@ test('History run page: "Answers while you were away" lists the stored answers',
   await settle(ctx.window, 8);
   const sec = ctx.doc.querySelector('#hist-detail .rd-night-sec');
   assert.ok(sec && !sec.hidden, 'the section shows');
-  assert.equal(sec.querySelector('.rd-night-count').textContent, '(2 answers, 1 to check)');
-  const rows = [...sec.querySelectorAll('.rd-night-decisions li')];
-  assert.equal(rows.length, 2);
-  assert.ok(rows[1].classList.contains('flagged'));
-  assert.match(rows[1].textContent, /Fix again or continue, in a review loop/);
+  assert.deepEqual([...sec.querySelectorAll('.rd-na .rd-slabel')].map((e) => e.textContent.split(' · ')[0]), ['Clarifying questions', 'Review loop']);
+  const rows = [...sec.querySelectorAll('.rd-na-row')];
+  assert.deepEqual(rows.map((r) => [r.querySelector('.rd-na-a').textContent, !!r.querySelector('.rd-na-check')]), [['pg', false], ['One more fix round', true]]);
 });
 
 test('History run page: a note at the top of the result says how many answers to check', async () => {

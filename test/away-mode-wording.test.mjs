@@ -24,7 +24,7 @@ test('Away mode UI strings in index.html use the glossary words only', () => {
   check('settings card', slice(html, 'id="night-settings-card"', '</section>'));
   check('run bar', slice(html, 'rd-night-wrap', '</label>'));
   check('New-run toggle', slice(html, 'id="night-row"', '</label>'));
-  check('decisions heading', slice(html, '<h3>Answers while you were away', '</h3>'));
+  check('answers heading', slice(html, '<h3 class="rd-night-h">Answered for you', '</h3>'));
 });
 
 test('Away mode strings in the form and the shared modules use the glossary words only', () => {
