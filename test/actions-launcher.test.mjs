@@ -172,3 +172,20 @@ test('launchAndWatch runs a real shell line (POSIX): a missing program fails wit
   assert.equal(r.ok, false);
   assert.match(r.error, /worca-no-such-editor-xyz/);
 });
+
+test('lineForPickedApp: a known app gets its own command; any other app opens the folder the general way', async () => {
+  const { lineForPickedApp } = await import('../src/core/actions/launcher.mjs');
+  assert.deepEqual(lineForPickedApp('/Applications/Xcode.app/', { platform: 'darwin', exists: has(['/usr/bin/xed']) }), { label: 'Xcode', line: 'xed {folder}' });
+  assert.deepEqual(lineForPickedApp('/Applications/Visual Studio Code.app', { platform: 'darwin', exists: has(['/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code']) }),
+    { label: 'Visual Studio Code', line: "'/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code' {folder}" });
+  assert.deepEqual(lineForPickedApp('/Applications/Nova.app', { platform: 'darwin', exists: () => false }), { label: 'Nova', line: "open -a '/Applications/Nova.app' {folder}" });
+  assert.deepEqual(lineForPickedApp('/Applications/kitty.app', { kind: 'terminal', platform: 'darwin', exists: () => true }),
+    { label: 'kitty', line: "'/Applications/kitty.app/Contents/MacOS/kitty' --directory {folder}" });
+  assert.deepEqual(lineForPickedApp('/System/Applications/Utilities/Terminal.app', { kind: 'terminal', platform: 'darwin', exists: () => false }), { label: 'Terminal', line: 'open -a Terminal {folder}' });
+  assert.deepEqual(lineForPickedApp('C:\\Program Files\\Git\\git-bash.exe', { kind: 'terminal', platform: 'win32' }), { label: 'git-bash', line: '"C:\\Program Files\\Git\\git-bash.exe" --cd={folder}' });
+  assert.deepEqual(lineForPickedApp('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', { kind: 'terminal', platform: 'win32' }).line,
+    'start "" /D {folder} "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoExit');
+  assert.deepEqual(lineForPickedApp('C:\\Tools\\My Ed\\ed.exe', { platform: 'win32' }), { label: 'ed', line: '"C:\\Tools\\My Ed\\ed.exe" {folder}' });
+  assert.deepEqual(lineForPickedApp('/usr/bin/konsole', { kind: 'terminal', platform: 'linux' }), { label: 'konsole', line: "'/usr/bin/konsole' --workdir {folder}" });
+  assert.throws(() => lineForPickedApp('', { platform: 'darwin' }), (e) => e.code === 'EMPTY');
+});

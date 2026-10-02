@@ -108,6 +108,19 @@ export function middleClip(text, max = 56) {
   return `${s.slice(0, head)}…${s.slice(s.length - (max - 1 - head))}`;
 }
 const SVG_NS = 'http://www.w3.org/2000/svg';
+/** A running service's button: a stop square and its own name (■ Start worca), not "Stop Start worca".
+ *  Screen readers and the tooltip still say what it does. */
+function stopButton(doc, label, onClick) {
+  const b = btn(doc, '', 'btn-danger act-stop-btn', onClick, `Stop ${label} and free its port`);
+  b.setAttribute('aria-label', `Stop ${label}`);
+  const svg = doc.createElementNS(SVG_NS, 'svg');
+  for (const [k, v] of [['width', '11'], ['height', '11'], ['viewBox', '0 0 24 24'], ['fill', 'currentColor'], ['aria-hidden', 'true']]) svg.setAttribute(k, v);
+  const sq = doc.createElementNS(SVG_NS, 'rect');
+  for (const [k, v] of [['x', '5'], ['y', '5'], ['width', '14'], ['height', '14'], ['rx', '2.5']]) sq.setAttribute(k, v);
+  svg.append(sq);
+  b.append(svg, h(doc, 'span', null, label));
+  return b;
+}
 function copyIconButton(doc, label, onClick) {
   const b = h(doc, 'button', 'act-copy');
   b.type = 'button';
@@ -141,8 +154,6 @@ function metaRows(doc, m, handlers) {
   return dl;
 }
 
-const BUILTIN_NAME = { editor: 'editor', terminal: 'terminal', fileManager: 'file manager' };
-
 function memberCard(model, m, { doc, handlers, logs, queued }) {
   const sec = h(doc, 'section', 'card act-card');
   sec.dataset.member = m.projectKey;
@@ -167,15 +178,18 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
       'Stop using your folder for this run. Running services stop; the folder and its changes stay as they are.')
     : btn(doc, 'Discard', 'btn-ghost act-discard', () => handlers.onDiscard?.([m.projectKey]),
       'Delete the checkout folder. Running services stop, and uncommitted changes are saved as a patch first.'));
-  // A built-in switched on for the project but not found on this machine (the server's detection) says so,
-  // instead of quietly missing from the row; the project's Actions tab says "not found on this machine".
-  // `lead` is text that comes first in the same note (what waits for Check out); null when there is nothing to say.
-  const missingNote = (lead = '') => {
-    const names = model.enabled ? (m.unavailableBuiltins || []).map((k) => BUILTIN_NAME[k] || k) : [];
-    if (!lead && !names.length) return null;
+  // The note under the row names the apps a click opens and where they are changed (Settings › Runs › Actions).
+  // An app that is not there is simply not mentioned: no nagging on every run (the Settings card says it).
+  // `lead` comes first in the same note (before Check out: what waits for it, which already names the buttons).
+  const appsNote = (lead = '') => {
+    const picks = model.enabled ? (m.builtins || []).filter((b) => b.key === 'editor' || b.key === 'terminal') : [];
+    const apps = picks.map((b) => b.label);
+    const set = !apps.length ? ''
+      : lead ? `Change the ${picks.map((b) => b.key).join(' and ')} in Settings › Runs › Actions.`
+        : `Opens in ${apps.join(' and ')}. Change ${apps.length > 1 ? 'them' : 'it'} in Settings › Runs › Actions.`;
+    if (!lead && !set) return null;
     // The link lands on the card itself: showSettingsTab scrolls to it and focuses its first field.
-    const text = [lead, names.length ? `No ${names.join(' or ')} was found on this machine. Set one in Settings › Runs › Actions.` : ''].filter(Boolean).join(' ');
-    return appendWithPageLinks(doc, h(doc, 'p', 'hint act-missing'), text);
+    return appendWithPageLinks(doc, h(doc, 'p', 'hint act-apps'), [lead, set].filter(Boolean).join(' '));
   };
 
   if (state === 'not-checked-out') {
@@ -205,7 +219,7 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
     const lead = m.heldBy && !model.workspace
       ? 'This branch is already checked out in that folder, so Worca can use it instead of making a copy. Worca never deletes or changes your folder.'
       : `Check out takes ${estimateText(model.estimate?.lastSetupMs, !!m.setup)}.`;
-    const note = missingNote(`${lead}${waits ? ` ${waits}` : ''}`);
+    const note = appsNote(`${lead}${waits ? ` ${waits}` : ''}`);
     if (note) sec.append(note);
     return sec;
   }
@@ -222,7 +236,7 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
   } else if (model.enabled) {
     for (const a of m.actions || []) {
       const live = a.kind === 'service' ? activeService(mine, a.id) : null;
-      if (live) { row.append(btn(doc, `Stop ${a.label}`, 'btn-danger', () => handlers.onStop?.(m.projectKey, a.id), `Stop ${a.label} and free its port`)); continue; }
+      if (live) { row.append(stopButton(doc, a.label, () => handlers.onStop?.(m.projectKey, a.id))); continue; }
       if (queued?.has(`${m.projectKey}:${a.id}`)) { const b = btn(doc, 'Starts after setup', null, null, `${a.label} starts when the setup command finishes`); b.disabled = true; row.append(b); continue; }
       row.append(btn(doc, a.label, a.kind === 'service' ? 'btn-primary' : null, () => handlers.onStart?.(m.projectKey, a.id), actionTip(a)));
     }
@@ -242,12 +256,15 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
   sec.append(row);
   // The notes under the row sit together as one block (not paragraphs with their own margins).
   const notes = h(doc, 'div', 'act-notes');
-  if (model.enabled && state !== 'setting-up' && state !== 'setup-failed' && !(m.actions || []).length) {
+  // Where the project's actions are edited, with or without any (instructional text: no project name in it).
+  if (model.enabled && state !== 'setting-up' && state !== 'setup-failed') {
     const tab = "the project's Actions tab";
-    notes.append(appendWithPageLinks(doc, h(doc, 'p', 'hint act-none'),
-      `${m.projectName || 'This project'} has no actions yet. Add a Run or Test command on ${tab}.`, [[tab, projectActionsHref(m.projectKey)]]));
+    const none = !(m.actions || []).length;
+    notes.append(appendWithPageLinks(doc, h(doc, 'p', `hint ${none ? 'act-none' : 'act-edit'}`),
+      none ? `This project has no actions yet. Add a Run or Test command on ${tab}.` : `Add or change actions on ${tab}.`,
+      [[tab, projectActionsHref(m.projectKey)]]));
   }
-  if (state !== 'setting-up' && state !== 'setup-failed') { const miss = missingNote(); if (miss) notes.append(miss); }
+  if (state !== 'setting-up' && state !== 'setup-failed') { const apps = appsNote(); if (apps) notes.append(apps); }
   if (state === 'ready' && setup.status === 'pending') notes.append(h(doc, 'p', 'hint', 'Setup runs before the first action.'));
   if (notes.childNodes.length) sec.append(notes);
 

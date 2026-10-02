@@ -318,19 +318,21 @@ test('Settings › Runs › Actions: blank Editor / Terminal say what detection 
   assert.equal(doc.getElementById('act-editor-note').hidden, false, 'cleared: the note is back');
 });
 
-test('Editor / Terminal: Choose… fills the command, the ⓘ shows the server OS examples, Try and a save warning land on the field', async () => {
+test('Editor / Terminal: the dropdown (Browse… first, then the found apps) fills the command, the ⓘ shows the server OS examples, Try and a save warning land on the field', async () => {
   const { window } = await boot();
   const base = globalThis.fetch;
   let tryAnswer = { ok: true, status: 200, json: async () => ({ ok: true }) };
+  let browseAnswer = { status: 'picked', path: 'C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe', label: 'Code', line: '"C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe" {folder}' };
   const tries = [];
   globalThis.fetch = window.fetch = (u, opts) => {
     const s = String(u);
     if (s.includes('/api/actions/launchers/try')) { tries.push(JSON.parse(opts.body)); return Promise.resolve(tryAnswer); }
+    if (s.includes('/api/actions/launchers/browse')) return Promise.resolve({ ok: true, status: 200, json: async () => browseAnswer });
     if (s.includes('/api/actions/launchers')) {
       return Promise.resolve({ ok: true, status: 200, json: async () => ({ platform: 'win32',
         editor: [{ label: 'VS Code', line: '"C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe" {folder}' }], terminal: [],
         examples: { editor: ['code {folder}', '"C:\\Program Files\\Microsoft VS Code\\Code.exe" --new-window {folder}'], terminal: ['wt -d {folder}'] },
-        detected: { editor: null, terminal: 'Command Prompt' } }) });
+        detected: { editor: null, terminal: 'Command Prompt' }, browse: true }) });
     }
     if (s.includes('/api/settings')) {
       return Promise.resolve({ ok: true, status: 200, json: async () => ({ root: '/tmp/x', default: '/tmp/x',
@@ -342,20 +344,35 @@ test('Editor / Terminal: Choose… fills the command, the ⓘ shows the server O
   await go(window, 'settings/runs');
   for (let i = 0; i < 4; i++) await tick();
   const doc = window.document;
-  const choose = doc.getElementById('act-editor-choose');
-  assert.deepEqual([...choose.querySelectorAll('optgroup option')].map((o) => o.textContent), ['VS Code']);
-  assert.equal(doc.getElementById('act-terminal-choose').querySelector('option[disabled]').textContent, 'No terminal found on this machine');
+  const sel = doc.getElementById('act-editor-choose');
+  const opts = [...sel.querySelectorAll('option')];
+  assert.equal(opts[0].hidden, true, 'the closed dropdown reads Browse… through a hidden placeholder');
+  assert.equal(opts[0].textContent, 'Browse…');
+  assert.deepEqual(opts.slice(1).map((o) => o.textContent), ['Browse…', 'VS Code'], 'Browse… first, then what was found');
+  assert.equal(sel.querySelector('optgroup').label, 'Found on this machine');
+  assert.equal(doc.getElementById('act-terminal-choose').querySelector('optgroup').label, 'No terminal found on this machine');
   const tip = doc.getElementById('act-editor-tip');
   assert.match(tip.textContent, /Examples on Windows:/);
   assert.deepEqual([...tip.querySelectorAll('code')].map((c) => c.textContent), ['code {folder}', '"C:\\Program Files\\Microsoft VS Code\\Code.exe" --new-window {folder}']);
   assert.equal(doc.getElementById('act-terminal-note').textContent, 'wtt was not found on this machine. It is saved anyway; use Try to check it.');
   assert.ok(doc.getElementById('act-terminal-note').classList.contains('warn'));
 
-  choose.value = choose.querySelector('optgroup option').value;
-  choose.dispatchEvent(new window.Event('change', { bubbles: true }));
   const input = doc.getElementById('act-editor');
+  const pick = async (value) => { sel.value = value; sel.dispatchEvent(new window.Event('change', { bubbles: true })); for (let i = 0; i < 4; i++) await tick(); };
+  // A found app fills its command line; the dropdown goes back to its label.
+  await pick(opts[2].value);
   assert.equal(input.value, '"C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe" {folder}');
-  assert.equal(choose.value, '', 'the menu resets to Choose…');
+  assert.equal(sel.value, '');
+  assert.equal(doc.getElementById('act-editor-note').textContent, 'Picked VS Code. Try checks that it opens a folder; Save keeps it.');
+  // Browse… opens the system picker; its pick comes back as a command line.
+  input.value = '';
+  await pick('__browse__');
+  assert.equal(input.value, '"C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe" {folder}');
+  assert.equal(doc.getElementById('act-editor-note').textContent, 'Picked Code. Try checks that it opens a folder; Save keeps it.');
+  browseAnswer = { status: 'unsupported' };
+  await pick('__browse__');
+  assert.equal(doc.getElementById('act-editor-note').textContent, 'No app picker can open on this machine. Pick a found app or type the command.');
+
 
   doc.getElementById('act-editor-try').click();
   for (let i = 0; i < 4; i++) await tick();
@@ -372,4 +389,23 @@ test('Editor / Terminal: Choose… fills the command, the ⓘ shows the server O
   input.value = 'code {folder}';
   input.dispatchEvent(new window.Event('input', { bubbles: true }));
   assert.ok(!note.classList.contains('err'), 'editing clears the Try result');
+});
+
+test('Editor / Terminal: where no app picker can open, the dropdown reads "Pick an app" and has no Browse…', async () => {
+  const { window } = await boot();
+  const base = globalThis.fetch;
+  globalThis.fetch = window.fetch = (u, opts) => {
+    const s = String(u);
+    if (s.includes('/api/actions/launchers')) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ platform: 'linux', editor: [{ label: 'VS Code', line: 'code {folder}' }], terminal: [],
+        examples: { editor: ['code {folder}'], terminal: ['konsole --workdir {folder}'] }, detected: { editor: 'VS Code', terminal: null }, browse: false }) });
+    }
+    return base(u, opts);
+  };
+  await go(window, 'settings/runs');
+  for (let i = 0; i < 4; i++) await tick();
+  const opts = [...window.document.getElementById('act-editor-choose').querySelectorAll('option')];
+  assert.equal(opts[0].textContent, 'Pick an app');
+  assert.deepEqual(opts.slice(1).map((o) => o.textContent), ['VS Code']);
+  assert.ok(!opts.some((o) => o.value === '__browse__'));
 });

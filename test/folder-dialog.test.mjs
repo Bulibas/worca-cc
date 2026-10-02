@@ -3,7 +3,7 @@
 // no real dialog ever opens; platform/env are forced per test.
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickFolderNative, _testing } from '../src/core/folder-dialog.mjs';
+import { pickFolderNative, pickAppNative, _testing } from '../src/core/folder-dialog.mjs';
 
 afterEach(() => _testing.reset());
 
@@ -186,4 +186,58 @@ test('win32 multiple: FolderBrowserDialog is single-select; one path comes back 
   _testing.set({ platform: 'win32', env: {} });
   runner({ ok: true, stdout: 'C:\\dev\\app\r\n', stderr: '', code: 0, timedOut: false });
   assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'picked', path: 'C:\\dev\\app', paths: ['C:\\dev\\app'] });
+});
+
+// ── Browse… for Settings › Runs › Actions › Editor / Terminal: pickAppNative ──
+
+test('pickAppNative darwin: choose application as alias; the .app path comes back without its trailing slash', async () => {
+  _testing.set({ platform: 'darwin', env: {} });
+  const calls = runner({ ok: true, stdout: '/Applications/Zed.app/\n', stderr: '', code: 0, timedOut: false });
+  assert.deepEqual(await pickAppNative({ kind: 'editor' }), { status: 'picked', path: '/Applications/Zed.app' });
+  assert.equal(calls[0].cmd, 'osascript');
+  assert.ok(calls[0].args.includes('POSIX path of (choose application with prompt "Select your editor or IDE" as alias)'));
+});
+
+test('pickAppNative: cancel, no GUI, busy, WORCA_NO_NATIVE_DIALOG, and the title comes from a closed set', async () => {
+  _testing.set({ platform: 'darwin', env: {} });
+  runner({ ok: false, stdout: '', stderr: 'execution error: User canceled. (-128)', code: 1, timedOut: false });
+  assert.deepEqual(await pickAppNative({ kind: 'terminal' }), { status: 'canceled' });
+  runner({ ok: false, stdout: '', stderr: 'no window server', code: 1, timedOut: false });
+  assert.deepEqual(await pickAppNative({ kind: 'editor' }), { status: 'unsupported' });
+  _testing.set({ platform: 'darwin', env: { WORCA_NO_NATIVE_DIALOG: '1' } });
+  assert.deepEqual(await pickAppNative({ kind: 'editor' }), { status: 'unsupported' });
+  _testing.set({ platform: 'darwin', env: {} });
+  let release;
+  _testing.set({ runner: () => new Promise((r) => { release = () => r({ ok: true, stdout: '/Applications/A.app/\n', stderr: '', code: 0 }); }) });
+  const first = pickAppNative({ kind: 'editor' });
+  assert.deepEqual(await pickAppNative({ kind: 'editor' }), { status: 'busy' });
+  release();
+  assert.equal((await first).status, 'picked');
+  const seen = runner({ ok: false, stdout: '', stderr: '(-128)', code: 1 });
+  await pickAppNative({ kind: '"; do shell script "x' });
+  assert.ok(seen[0].args.some((a) => a.includes('"Select your editor or IDE"')), 'unknown kind: the editor title, never caller text');
+});
+
+test('pickAppNative win32: OpenFileDialog for programs from Program Files; empty output is a cancel', async () => {
+  _testing.set({ platform: 'win32', env: {} });
+  const calls = runner({ ok: true, stdout: 'C:\\Program Files\\Git\\git-bash.exe\r\n', stderr: '', code: 0 });
+  assert.deepEqual(await pickAppNative({ kind: 'terminal' }), { status: 'picked', path: 'C:\\Program Files\\Git\\git-bash.exe' });
+  assert.equal(calls[0].cmd, 'powershell.exe');
+  const script = calls[0].args.at(-1);
+  assert.match(script, /OpenFileDialog/);
+  assert.match(script, /\*\.exe;\*\.cmd;\*\.bat/);
+  assert.match(script, /InitialDirectory = \$env:ProgramFiles/);
+  assert.match(script, /'Select your terminal app'/);
+  runner({ ok: true, stdout: '\r\n', stderr: '', code: 0 });
+  assert.deepEqual(await pickAppNative({ kind: 'terminal' }), { status: 'canceled' });
+});
+
+test('pickAppNative linux: headless is unsupported; zenity picks a file, kdialog is the fallback', async () => {
+  _testing.set({ platform: 'linux', env: {} });
+  assert.deepEqual(await pickAppNative({ kind: 'editor' }), { status: 'unsupported' });
+  _testing.set({ platform: 'linux', env: { DISPLAY: ':0' } });
+  const calls = runner({ ok: true, stdout: '/usr/bin/kate\n', stderr: '', code: 0 });
+  assert.deepEqual(await pickAppNative({ kind: 'editor' }), { status: 'picked', path: '/usr/bin/kate' });
+  assert.equal(calls[0].cmd, 'zenity');
+  assert.ok(!calls[0].args.includes('--directory'), 'a file, not a folder');
 });

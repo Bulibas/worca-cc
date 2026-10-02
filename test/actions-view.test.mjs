@@ -12,7 +12,8 @@ const member = (over = {}) => ({ projectKey: 'app-0cea65fb', projectName: 'app',
   actions: [{ id: 'run', label: 'Run', kind: 'service' }, { id: 'test', label: 'Test', kind: 'task' }],
   builtins: [{ key: 'editor', label: 'VS Code' }, { key: 'terminal', label: 'Terminal' }, { key: 'fileManager', label: 'Finder' }, { key: 'copyCommand', label: 'Copy command' }], ...over });
 const model = (m, instances = []) => ({ enabled: true, finished: true, workspace: false, estimate: { lastSetupMs: 42000 }, members: [m], stacks: [], stackStates: [], instances });
-const labelsOf = (el) => [...el.querySelectorAll('button:not(.act-copy)')].map((b) => b.textContent);   // icon-only copy buttons have no text
+// A button's accessible name (aria-label when it has one: the stop button reads "Stop Run"); icon-only copy buttons are left out.
+const labelsOf = (el) => [...el.querySelectorAll('button:not(.act-copy)')].map((b) => b.getAttribute('aria-label') || b.textContent);
 
 test('four states (plus pending / interrupted setup)', () => {
   assert.equal(memberViewState(member(), []), 'not-checked-out');
@@ -31,7 +32,7 @@ test('not checked out: folder to come, estimate, Check out + Copy command, the o
   const el = renderActionsCard(model(member()), { doc, handlers: {} });
   assert.doesNotMatch(el.textContent, /\/h\/runs\/ab\/repos\/app-0cea65fb/, 'no folder path before it exists');
   assert.match(el.querySelector('.act-meta').textContent, /FolderCreated when you check out/);
-  assert.match(el.querySelector('.act-missing').textContent, /^Check out takes about 42 s\./);
+  assert.match(el.querySelector('.act-apps').textContent, /^Check out takes about 42 s\./);
   assert.deepEqual(labelsOf(el), ['Check out', 'Copy command', 'VS Code', 'Terminal', 'Finder']);
   const opens = [...el.querySelectorAll('button')].filter((b) => ['VS Code', 'Terminal', 'Finder'].includes(b.textContent));
   assert.ok(opens.every((b) => !b.disabled && b.title.startsWith('Check out first (asks), then: ')));
@@ -47,21 +48,25 @@ test('not checked out: folder to come, estimate, Check out + Copy command, the o
     'a workspace run checks out from its checklist');
 });
 
-test('a built-in switched on but not found on this machine is named, before and after Check out', () => {
-  const m = member({ builtins: [{ key: 'terminal', label: 'Terminal' }, { key: 'copyCommand', label: 'Copy command' }], unavailableBuiltins: ['editor'] });
+test('an editor that is not there is not mentioned on the run card: only what opens is named (no nagging)', () => {
+  const m = member({ builtins: [{ key: 'terminal', label: 'Terminal' }, { key: 'copyCommand', label: 'Copy command' }] });
   const before = renderActionsCard(model(m), { doc, handlers: {} });
-  assert.match(before.textContent, /No editor was found on this machine\. Set one in Settings › Runs › Actions\./);
-  assert.match(before.textContent, /Terminal open the checkout, so they check out first/);
+  assert.doesNotMatch(before.textContent, /editor was found|No editor/i);
+  assert.match(before.querySelector('.act-apps').textContent, /Terminal open the checkout, so they check out first\. Change the terminal in Settings › Runs › Actions\.$/);
   const after = renderActionsCard(model({ ...m, checkout: { setup: { status: 'ok' } } }), { doc, handlers: {} });
-  assert.match(after.textContent, /No editor was found on this machine/);
-  const off = model(m); off.enabled = false;
-  assert.doesNotMatch(renderActionsCard(off, { doc, handlers: {} }).textContent, /No editor was found/, 'hosted: nothing to set');
+  assert.equal(after.querySelector('.act-apps').textContent, 'Opens in Terminal. Change it in Settings › Runs › Actions.');
+  const none = renderActionsCard(model(member({ builtins: [{ key: 'copyCommand', label: 'Copy command' }], checkout: { setup: { status: 'ok' } } })), { doc, handlers: {} });
+  assert.equal(none.querySelector('.act-apps'), null, 'no editor and no terminal: nothing to say');
 });
 
 test('running: Stop Run, Test, built-ins, open link, Discard', () => {
   const run = { instanceId: 'i', member: 'app-0cea65fb', actionId: 'run', kind: 'service', status: 'ready', ports: { PORT: 4417 }, url: 'http://localhost:4417', startedAt: Date.now() - 65000 };
   const el = renderActionsCard(model(member({ checkout: { setup: { status: 'ok' } } }), [run]), { doc, handlers: {} });
   const labels = labelsOf(el);
+  const stop = el.querySelector('.act-stop-btn');
+  assert.equal(stop.textContent, 'Run', 'the service name, not "Stop Run"');
+  assert.ok(stop.querySelector('svg rect') && stop.classList.contains('btn-danger'), 'a stop square, in the stop colour');
+  assert.equal(stop.title, 'Stop Run and free its port');
   for (const l of ['Stop Run', 'Test', 'VS Code', 'Terminal', 'Finder', 'Copy command', 'Discard']) assert.ok(labels.includes(l), l);
   assert.equal(el.querySelector('a.act-open').getAttribute('href'), 'http://localhost:4417');
   assert.equal(el.querySelector('a.act-open').getAttribute('rel'), 'noopener noreferrer');
@@ -336,19 +341,22 @@ test('controller: a declined Discard sends nothing', async () => {
 
 const hrefs = (el) => [...el.querySelectorAll('a.act-page-link')].map((a) => [a.textContent, a.getAttribute('href')]);
 
-test('the missing-editor note links to the Settings card', () => {
-  const m = member({ builtins: [{ key: 'terminal', label: 'Terminal' }, { key: 'copyCommand', label: 'Copy command' }], unavailableBuiltins: ['editor'] });
+test('the apps note links to the Settings card', () => {
+  const m = member({ builtins: [{ key: 'terminal', label: 'Terminal' }, { key: 'copyCommand', label: 'Copy command' }] });
   const el = renderActionsCard(model(m), { doc, handlers: {} });
   assert.deepEqual(hrefs(el), [['Settings › Runs › Actions', '#settings/runs/actions']]);
-  assert.match(el.querySelector('.act-missing').textContent, /Set one in Settings › Runs › Actions\.$/);
+  assert.match(el.querySelector('.act-apps').textContent, /in Settings › Runs › Actions\.$/);
 });
 
 test('a checked-out project with no actions says where to add them, linked to its Actions tab', () => {
   const m = member({ actions: [], checkout: { setup: { status: 'ok' } } });
   const el = renderActionsCard(model(m), { doc, handlers: {} });
-  assert.match(el.querySelector('.act-none').textContent, /^app has no actions yet\. Add a Run or Test command on the project's Actions tab\.$/);
-  assert.deepEqual(hrefs(el), [["the project's Actions tab", '#projects/app-0cea65fb/actions']]);
-  assert.equal(renderActionsCard(model(member({ checkout: { setup: { status: 'ok' } } })), { doc, handlers: {} }).querySelector('.act-none'), null, 'not when it has actions');
+  assert.match(el.querySelector('.act-none').textContent, /^This project has no actions yet\. Add a Run or Test command on the project's Actions tab\.$/);
+  assert.deepEqual(hrefs(el), [["the project's Actions tab", '#projects/app-0cea65fb/actions'], ['Settings › Runs › Actions', '#settings/runs/actions']]);
+  const withActions = renderActionsCard(model(member({ checkout: { setup: { status: 'ok' } } })), { doc, handlers: {} });
+  assert.equal(withActions.querySelector('.act-none'), null, 'not when it has actions');
+  assert.equal(withActions.querySelector('.act-edit').textContent, "Add or change actions on the project's Actions tab.");
+  assert.equal(withActions.querySelector('.act-edit a').getAttribute('href'), '#projects/app-0cea65fb/actions');
   const off = model(m); off.enabled = false;
   assert.equal(renderActionsCard(off, { doc, handlers: {} }).querySelector('.act-none'), null, 'not on a hosted worca with actions off');
 });
@@ -433,7 +441,7 @@ test('a branch held in another folder offers "Use that folder" instead of Check 
   assert.ok(labels.includes('Use that folder') && !labels.includes('Check out'));
   assert.equal(el.querySelector('.act-path').title, '/Users/ada/dev/app');
   assert.match(el.querySelector('.act-meta').textContent, /already has this branch/);
-  assert.match(el.querySelector('.act-missing').textContent, /^This branch is already checked out in that folder, so Worca can use it instead of making a copy\. Worca never deletes or changes your folder\. VS Code, Terminal and Finder open that folder\.$/);
+  assert.match(el.querySelector('.act-apps').textContent, /^This branch is already checked out in that folder, so Worca can use it instead of making a copy\. Worca never deletes or changes your folder\. VS Code, Terminal and Finder open that folder\. Change the editor and terminal in Settings › Runs › Actions\.$/);
   const term = [...el.querySelectorAll('button')].find((b) => b.textContent === 'Terminal');
   assert.equal(term.title, 'Open Terminal in the folder that has this branch (asks first)');
 });
@@ -522,9 +530,10 @@ test('every command on the Actions surfaces says what it does on hover', () => {
 });
 
 test('the notes under a card sit together in one block', () => {
-  const m = member({ actions: [], unavailableBuiltins: ['editor'], checkout: { setup: { status: 'ok' } } });
+  const m = member({ actions: [], checkout: { setup: { status: 'ok' } } });
   const notes = renderActionsCard(model(m), { doc, handlers: {} }).querySelector('.act-notes');
-  assert.deepEqual([...notes.children].map((c) => c.className), ['hint act-none', 'hint act-missing']);
+  assert.deepEqual([...notes.children].map((c) => c.className), ['hint act-none', 'hint act-apps']);
+  assert.ok(!notes.textContent.includes('app has'), 'instructional text never names the project');
 });
 
 test('Run setup shows only when setup was skipped AND the project has a setup command', () => {
@@ -534,4 +543,17 @@ test('Run setup shows only when setup was skipped AND the project has a setup co
     'no setup command: nothing to run, no button');
   assert.ok(!labelsOf(renderActionsCard(model(member({ checkout: { setup: { status: 'ok' } } })), { doc, handlers: {} })).includes('Run setup'),
     'setup already ran: no button');
+});
+
+test('all set: the note names what opens and links to Settings; before Check out it only says where to change them', () => {
+  const after = renderActionsCard(model(member({ checkout: { setup: { status: 'ok' } } })), { doc, handlers: {} });
+  const note = after.querySelector('.act-apps');
+  assert.equal(note.textContent, 'Opens in VS Code and Terminal. Change them in Settings › Runs › Actions.');
+  assert.equal(note.querySelector('a').getAttribute('href'), '#settings/runs/actions');
+  const one = renderActionsCard(model(member({ builtins: [{ key: 'terminal', label: 'iTerm' }], checkout: { setup: { status: 'ok' } } })), { doc, handlers: {} });
+  assert.equal(one.querySelector('.act-apps').textContent, 'Opens in iTerm. Change it in Settings › Runs › Actions.');
+  const before = renderActionsCard(model(member()), { doc, handlers: {} });
+  assert.match(before.querySelector('.act-apps').textContent, /open the checkout, so they check out first\. Change the editor and terminal in Settings › Runs › Actions\.$/);
+  const off = model(member({ checkout: { setup: { status: 'ok' } } })); off.enabled = false;
+  assert.equal(renderActionsCard(off, { doc, handlers: {} }).querySelector('.act-apps'), null, 'hosted with actions off: nothing to change');
 });

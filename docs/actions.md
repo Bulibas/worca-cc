@@ -137,8 +137,13 @@ Linux, `cmd.exe /d /s /c` on Windows), so arguments, quotes, `~`, `$VAR` / `%VAR
 - **A macOS app** (`/Applications/Xcode.app`, or just `Xcode.app`) opens with `open -a`.
 - **An unquoted path with spaces** at the start is quoted for you, such as
   `C:\Program Files\Microsoft VS Code\Code.exe --new-window`.
-- **Choose…** lists the editors and terminals found on the machine that runs Worca, each with a line that
-  works as it is. The ⓘ next to each field shows examples for that machine's operating system.
+- **The dropdown** next to each field starts with **Browse…**, which opens your system's app picker on the
+  machine that runs Worca (the macOS app chooser, a Windows file dialog for programs, zenity or kdialog
+  on Linux), then lists the editors and terminals found there. Either way the field gets a working
+  command line: a known app its own command (Xcode `xed {folder}`, VS Code its `code` tool), any other
+  `open -a "<app>" {folder}` or `"<path>" {folder}`. Where no picker can open (a container, a hosted worca,
+  `WORCA_NO_NATIVE_DIALOG=1`) Browse… is left out. The ⓘ next to each field shows examples for that
+  machine's operating system.
 - **Try** runs the line on your home folder and says on the field whether it opened, or why not (the
   shell's own error). A program Worca cannot find gives a warning on Save; the line is saved anyway.
 

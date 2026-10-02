@@ -14865,8 +14865,17 @@ function paintActionsDetectNote(key) {
   note.hidden = !note.textContent;
 }
 const ACT_OS_NAME = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' };
-const actOption = (label, value) => Object.assign(document.createElement('option'), { textContent: label, value });
-/** "Choose…" lists what is installed on the machine that runs the command (the server), and the ⓘ shows
+const ACT_BROWSE = '__browse__';   // the dropdown's Browse… entry (an app path never looks like this)
+/** A picked app (a found one, or Browse…) fills the field with its command line. */
+function useActionsLine(key, label, line) {
+  const input = document.getElementById(`act-${key}`);
+  if (!input) return;
+  input.value = line;
+  actionsFieldMsg[key] = { kind: 'ok', text: `Picked ${label}. Try checks that it opens a folder; Save keeps it.` };
+  paintActionsDetectNote(key);
+  input.focus();
+}
+/** The dropdown lists what is installed on the machine that runs the command (the server), and the ⓘ shows
  *  that machine's examples: a Windows browser on a Mac server gets the macOS forms. */
 async function loadActionsLaunchers() {
   if (actionsLaunchers) return actionsLaunchers;
@@ -14878,15 +14887,20 @@ async function loadActionsLaunchers() {
   for (const key of ['editor', 'terminal']) {
     const sel = document.getElementById(`act-${key}-choose`);
     if (sel) {
+      // The closed dropdown shows its label through a hidden placeholder, so the first real entry (Browse…)
+      // can be picked like any other: picking the entry that is already selected fires no change.
+      const opt = (label, value) => Object.assign(document.createElement('option'), { textContent: label, value });
+      const label = actionsLaunchers.browse ? 'Browse…' : 'Pick an app';
+      const ph = opt(label, ''); ph.hidden = true; ph.disabled = true; ph.selected = true;
+      const items = [ph];
+      if (actionsLaunchers.browse) items.push(opt('Browse…', ACT_BROWSE));
       const found = actionsLaunchers[key] || [];
-      sel.replaceChildren(actOption('Choose…', ''));
-      if (!found.length) { const o = actOption(`No ${key} found on this machine`, ''); o.disabled = true; sel.append(o); }
-      else {
-        const group = document.createElement('optgroup');
-        group.label = 'Found on this machine';
-        for (const f of found) group.append(actOption(f.label, f.line));
-        sel.append(group);
-      }
+      const group = document.createElement('optgroup');
+      group.label = found.length ? 'Found on this machine' : `No ${key} found on this machine`;
+      for (const f of found) group.append(opt(f.label, f.line));
+      items.push(group);
+      sel.replaceChildren(...items);
+      sel.value = '';
     }
     const tip = document.getElementById(`act-${key}-tip`);
     const ex = (actionsLaunchers.examples || {})[key] || [];
@@ -14903,13 +14917,32 @@ async function loadActionsLaunchers() {
 for (const key of ['editor', 'terminal']) {
   const input = document.getElementById(`act-${key}`);
   input?.addEventListener('input', () => { delete actionsFieldMsg[key]; paintActionsDetectNote(key); });
-  document.getElementById(`act-${key}-choose`)?.addEventListener('change', (e) => {
-    if (!input || !e.target.value) return;
-    input.value = e.target.value;
-    e.target.value = '';
-    delete actionsFieldMsg[key];
-    paintActionsDetectNote(key);
-    input.focus();
+  // The dropdown: a found app fills its command line; Browse… opens the system's app picker on the machine
+  // that runs Worca, and the pick comes back as a command line too.
+  document.getElementById(`act-${key}-choose`)?.addEventListener('change', async (e) => {
+    const sel = e.target;
+    const value = sel.value;
+    sel.value = '';                                   // back to the label, so any entry can be picked again
+    if (!value) return;
+    if (value !== ACT_BROWSE) {
+      const f = ((actionsLaunchers || {})[key] || []).find((x) => x.line === value);
+      useActionsLine(key, f ? f.label : 'the app', value);
+      return;
+    }
+    sel.disabled = true;
+    try {
+      const r = await fetch('/api/actions/launchers/browse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: key }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) actionsFieldMsg[key] = { kind: 'err', text: j.error || `Browse failed (HTTP ${r.status}).` };
+      else if (j.status === 'picked') { useActionsLine(key, j.label, j.line); return; }
+      else if (j.status === 'busy') actionsFieldMsg[key] = { kind: 'warn', text: 'A picker is already open on this machine. Finish or cancel it first.' };
+      else if (j.status === 'unsupported') actionsFieldMsg[key] = { kind: 'warn', text: 'No app picker can open on this machine. Pick a found app or type the command.' };
+    } catch (err) {
+      actionsFieldMsg[key] = { kind: 'err', text: `Browse failed: ${err?.message || err}` };
+    } finally {
+      sel.disabled = false;
+      paintActionsDetectNote(key);
+    }
   });
   // Try: run what is typed (or the detected default) on the home folder, and say what happened on the field.
   document.getElementById(`act-${key}-try`)?.addEventListener('click', async (e) => {

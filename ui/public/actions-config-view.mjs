@@ -74,7 +74,7 @@ function portValue(raw) {
 // ---- Project editor ------------------------------------------------------------------------
 function envRow(doc, row, onChange) {
   const r = h(doc, 'div', 'ac-env-row');
-  const name = input(doc, 'mono ac-env-name', row?.name, 'NAME');
+  const name = input(doc, 'mono ac-env-name', row?.name, 'e.g. PORT');
   const kind = select(doc, 'ac-env-type', [['text', 'Text'], ['port', 'Port']], row?.type === 'port' ? 'port' : 'text');
   const value = input(doc, 'mono ac-env-value', row?.value ?? (row?.type === 'port' ? 'auto' : ''), 'value or auto');
   const err = h(doc, 'span', 'field-err');
@@ -105,8 +105,8 @@ function placeholderText(actionEl) {
 function actionRow(doc, a, { onTry } = {}) {
   const row = h(doc, 'div', 'ac-action');
   const head = h(doc, 'div', 'ac-action-head');
-  const id = input(doc, 'mono ac-f-id', a?.id, 'run');
-  const label = input(doc, 'ac-f-label', a?.label, 'Run');
+  const id = input(doc, 'mono ac-f-id', a?.id, 'e.g. run');
+  const label = input(doc, 'ac-f-label', a?.label, 'e.g. Run');
   const kind = select(doc, 'ac-f-kind', KIND_OPTIONS, a?.kind === 'task' ? 'task' : 'service');
   head.append(field(doc, 'Id', id), field(doc, 'Label', label), field(doc, 'Kind', kind));
   if (onTry) {
@@ -121,10 +121,10 @@ function actionRow(doc, a, { onTry } = {}) {
   const hint = h(doc, 'p', 'ac-placeholders mono');
   const refresh = () => { hint.textContent = placeholderText(row); };
 
-  const cmd = input(doc, 'mono ac-f-cmd', a?.cmd, 'npm start');
+  const cmd = input(doc, 'mono ac-f-cmd', a?.cmd, 'e.g. npm start');
   const cmdWin32 = input(doc, 'mono ac-f-cmdwin32', a?.cmdWin32, 'same as above');
   const cwd = input(doc, 'mono ac-f-cwd', a?.cwd ?? '.', '.');
-  const openUrl = input(doc, 'mono ac-f-openurl', a?.openUrl, 'http://localhost:{PORT}');
+  const openUrl = input(doc, 'mono ac-f-openurl', a?.openUrl, 'e.g. http://localhost:{PORT}');
 
   const envList = h(doc, 'div', 'ac-env-list');
   for (const e of a?.env || []) envList.append(envRow(doc, e, refresh));
@@ -134,8 +134,8 @@ function actionRow(doc, a, { onTry } = {}) {
   const ready = a?.ready || { kind: 'immediate' };
   const readyBox = h(doc, 'div', 'ac-ready');
   const readyKind = select(doc, 'ac-ready-kind', READY_OPTIONS, ready.kind || 'immediate');
-  const readyPort = input(doc, 'mono ac-ready-port', ready.port, 'PORT');
-  const readyText = input(doc, 'mono ac-ready-text', ready.text, 'ready in');
+  const readyPort = input(doc, 'mono ac-ready-port', ready.port, 'e.g. PORT');
+  const readyText = input(doc, 'mono ac-ready-text', ready.text, 'e.g. ready in');
   const timeout = input(doc, 'ac-ready-timeout', Math.round((ready.timeoutMs || DEFAULT_TIMEOUT_MS) / 1000), '60');
   const portField = field(doc, 'Port variable', readyPort);
   const textField = field(doc, 'Text', readyText);
@@ -205,7 +205,7 @@ export function renderProjectActionsEditor(cfg, { doc, detected = {}, onSave, on
   const root = h(doc, 'div', 'actions-config');
 
   const setupCard = card(doc, 'ac-setup-card', 'Setup', 'Runs once in a fresh checkout before the first action.');
-  setupCard.append(field(doc, 'Setup command', input(doc, 'mono ac-setup', cfg?.setup, 'npm ci')));
+  setupCard.append(field(doc, 'Setup command', input(doc, 'mono ac-setup', cfg?.setup, 'e.g. npm ci')));
 
   const actionsCard = card(doc, 'ac-actions-card', 'Actions', 'Services keep running; tasks run to the end.');
   const list = h(doc, 'div', 'ac-action-list');
@@ -252,7 +252,7 @@ function stepEnvRow(doc, row) {
   const r = h(doc, 'div', 'ac-step-env-row');
   const remove = btn(doc, 'ac-remove-step-env', 'Remove');
   remove.addEventListener('click', () => r.remove());
-  r.append(input(doc, 'mono ac-step-env-name', row?.name, 'NAME'), input(doc, 'mono ac-step-env-value', row?.value, 'http://localhost:{api.PORT}'), remove);
+  r.append(input(doc, 'mono ac-step-env-name', row?.name, 'e.g. API_URL'), input(doc, 'mono ac-step-env-value', row?.value, 'e.g. http://localhost:{api.PORT}'), remove);
   return r;
 }
 
@@ -288,8 +288,8 @@ function stackRow(doc, s, members) {
   const remove = btn(doc, 'ac-remove-stack', 'Remove stack');
   remove.addEventListener('click', () => el.remove());
   head.append(
-    field(doc, 'Id', input(doc, 'mono ac-stack-id', s?.id, 'dev')),
-    field(doc, 'Label', input(doc, 'ac-stack-label', s?.label, 'Dev stack')),
+    field(doc, 'Id', input(doc, 'mono ac-stack-id', s?.id, 'e.g. dev')),
+    field(doc, 'Label', input(doc, 'ac-stack-label', s?.label, 'e.g. Dev stack')),
     field(doc, 'Kind', select(doc, 'ac-stack-kind', KIND_OPTIONS, s?.kind === 'task' ? 'task' : 'service')),
     remove);
   const steps = h(doc, 'div', 'ac-step-list');

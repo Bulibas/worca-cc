@@ -203,6 +203,39 @@ export function installedLaunchers({ platform = process.platform, env = process.
   return { editor, terminal };
 }
 
+const WIN_TERMINAL_EXES = { 'wt.exe': () => 'wt -d {folder}', 'pwsh.exe': (p) => `start "" /D {folder} "${p}" -NoExit`,
+  'powershell.exe': (p) => `start "" /D {folder} "${p}" -NoExit`, 'cmd.exe': () => 'start "" /D {folder} cmd', 'git-bash.exe': (p) => `"${p}" --cd={folder}` };
+
+/**
+ * The command line for an app picked with Browse… (folder-dialog.mjs pickAppNative). A known app gets its
+ * own command (Xcode -> xed, VS Code -> its code tool, kitty -> --directory); anything else opens the
+ * folder the general way for its OS. The person can still edit the line, and Try checks it.
+ * @returns {{ label: string, line: string }}
+ */
+export function lineForPickedApp(rawPath, { kind = 'editor', platform = process.platform, exists = existsSync } = {}) {
+  const p = String(rawPath ?? '').trim().replace(/[\\/]+$/, '');
+  if (!p) throw Object.assign(new Error('no app was picked'), { code: 'EMPTY' });
+  if (platform === 'darwin' && /\.app$/i.test(p)) {
+    const name = basename(p);
+    const label = name.replace(/\.app$/i, '');
+    const q = (x) => shellQuote(x, platform);
+    if (kind === 'editor' && name === 'Xcode.app' && exists('/usr/bin/xed')) return { label, line: 'xed {folder}' };
+    const known = (kind === 'terminal' ? MAC_TERMINALS : MAC_EDITORS).find(([n]) => n === name);
+    if (known && known[1] && exists(join(p, known[1]))) return { label, line: `${q(join(p, known[1]))} ${known[2] || '{folder}'}` };
+    if (kind === 'terminal' && name === 'Terminal.app') return { label, line: 'open -a Terminal {folder}' };
+    return { label, line: `open -a ${q(p)} {folder}` };
+  }
+  if (platform === 'win32') {
+    const file = p.split('\\').pop();
+    const label = file.replace(/\.(exe|cmd|bat|com)$/i, '');
+    const term = kind === 'terminal' && WIN_TERMINAL_EXES[file.toLowerCase()];
+    return { label, line: term ? term(p) : `"${p}" {folder}` };
+  }
+  const label = basename(p);
+  const term = kind === 'terminal' && LINUX_TERMINALS.find(([cmd]) => cmd === label);
+  return { label, line: `${shellQuote(p, platform)} ${term ? term[2] : '{folder}'}` };
+}
+
 /** The hover examples for this OS (Settings › Runs › Actions): forms that work, not product promises. */
 export function launcherExamples(platform = process.platform) {
   if (platform === 'win32') {

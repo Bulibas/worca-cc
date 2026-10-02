@@ -363,6 +363,12 @@ test('launchers: what Choose… lists and the examples for this OS; Try runs a l
   if (process.platform === 'darwin') assert.ok(l.terminal.some((t) => t.label === 'Terminal'));
 
   assert.equal((await post('/api/actions/launchers/try', { kind: 'browser', line: 'x' })).status, 400);
+  // Browse… with no app picker on this machine answers unsupported (the page then lists what it found).
+  process.env.WORCA_NO_NATIVE_DIALOG = '1';
+  try {
+    assert.deepEqual(await (await post('/api/actions/launchers/browse', { kind: 'editor' })).json(), { status: 'unsupported' });
+    assert.equal((await post('/api/actions/launchers/browse', { kind: 'x' })).status, 400);
+  } finally { delete process.env.WORCA_NO_NATIVE_DIALOG; }
   const ok = await post('/api/actions/launchers/try', { kind: 'editor', line: `${NODE} -e 0` });
   assert.equal(ok.status, 200, await ok.clone().text());
   assert.equal((await ok.json()).ok, true);

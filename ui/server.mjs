@@ -131,7 +131,7 @@ import { readPolicyState } from '../src/core/policy/state.mjs';
 import { teamAction, teamForget } from '../src/core/mcp/team.mjs';
 import { policyForScope, policyPayload } from '../src/core/policy/scope.mjs';
 import { policyCatalogModels } from '../src/core/policy/cache.mjs';
-import { pickFolderNative } from '../src/core/folder-dialog.mjs';
+import { pickFolderNative, pickAppNative, nativeDialogAvailable } from '../src/core/folder-dialog.mjs';
 import {
   readRemoteAccessConfig, checkRemoteAccessConfig, isRemoteMode, createHostGuard, createIdentityCheck, isInContainer,
   isPeerThisMachine,
@@ -144,7 +144,7 @@ import { spawn } from 'node:child_process';
 import { ActionRegistry, instanceIdFor, reapOrphans, busyRunIdsFromPidFile, actionsPidFile, actionsStateFile } from '../src/core/actions/registry.mjs';
 import { runStack, stopStack } from '../src/core/actions/stack.mjs';
 import { detectBuiltins, builtinLaunch, copyCommandText, findOnPath } from '../src/core/actions/builtins.mjs';
-import { buildLauncherCommand, launchAndWatch, installedLaunchers, launcherExamples, launcherWarning } from '../src/core/actions/launcher.mjs';
+import { buildLauncherCommand, launchAndWatch, installedLaunchers, launcherExamples, launcherWarning, lineForPickedApp } from '../src/core/actions/launcher.mjs';
 import { assertNoRawCommand, normalizeStacks, memberAliases, SETUP_ACTION_ID, ActionConfigError } from '../src/core/actions/model.mjs';
 import { parsePortRange } from '../src/core/actions/ports.mjs';
 import { checkoutRun, discardCheckout, membersOfRow, checkoutPathFor, setSetupState, markInterruptedSetups,
@@ -5305,7 +5305,22 @@ const BUILTIN_NAMES = { editor: 'Editor', terminal: 'Terminal', fileManager: 'Th
 let launchersFound = null;
 app.get('/api/actions/launchers', (req, res) => {
   launchersFound ??= installedLaunchers({ findOnPath: (n) => findOnPath(n) });
-  res.json({ platform: process.platform, ...launchersFound, examples: launcherExamples(), detected: autoDetectedBuiltins() });
+  // browse: a native picker can open here. Never on a hosted worca: it would open on the server, not on the viewer's screen.
+  res.json({ platform: process.platform, ...launchersFound, examples: launcherExamples(), detected: autoDetectedBuiltins(),
+    browse: !REMOTE_MODE && nativeDialogAvailable() });
+});
+
+// "Browse…": the platform's app picker on this machine; the pick comes back as a ready command line
+// (lineForPickedApp). Where no picker can open (container, hosted, no display) it answers unsupported and the
+// page shows what installedLaunchers found instead.
+app.post('/api/actions/launchers/browse', async (req, res) => {
+  if (!requireActions(req, res)) return;
+  const kind = req.body?.kind;
+  if (kind !== 'editor' && kind !== 'terminal') return badRequest(res, 'kind must be editor or terminal');
+  const r = await pickAppNative({ kind });
+  if (r.status !== 'picked') return res.json(r);
+  try { res.json({ status: 'picked', path: r.path, ...lineForPickedApp(r.path, { kind }) }); }
+  catch (e) { res.json({ status: 'canceled', error: e.message }); }
 });
 
 // "Try": run the typed Editor / Terminal line (or the detected default when blank) on the home folder.
@@ -5351,9 +5366,7 @@ app.get('/api/runs/:id/actions', async (req, res) => {
           setupQueued: setupJobs.has(`${row.id}:${m.projectKey}`),
           copyCommand: m.br?.feature && m.projectDir ? copyCommandText({ projectDir: m.projectDir, branch: m.br.feature, pushed }) : null,
           setup: cfg.setup, actions: cfg.actions.map(({ id, label, kind, openUrl }) => ({ id, label, kind, openUrl })),
-          builtins: Object.entries(builtins()).filter(([k, v]) => v && cfg.builtins[k] !== false).map(([k, v]) => ({ key: k, label: v.label })),
-          // Switched on for the project but not detected here (no editor on PATH): the card says so.
-          unavailableBuiltins: Object.entries(builtins()).filter(([k, v]) => !v && cfg.builtins[k] !== false).map(([k]) => k) };
+          builtins: Object.entries(builtins()).filter(([k, v]) => v && cfg.builtins[k] !== false).map(([k, v]) => ({ key: k, label: v.label })) };
       })),
       stacks: row.target === 'workspace' ? readWorkspaceStacks(bareWorkspaceKey(row)) : [],
       stackStates: [...stackStates.values()].filter((s) => s.runId === row.id),
