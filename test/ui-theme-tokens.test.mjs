@@ -141,6 +141,24 @@ test('theme: the dark arms are the warm-charcoal palette and none of the removed
   for (const dead of ['#0e1116', '#0a0d12', '#232c38', '#4f9cf9']) assert.ok(!css.toLowerCase().includes(dead), dead);
 });
 
+// The glance's branch chip and pull request slot (the placeholder, the morph's colour layer):
+// every value through an existing token, and the layer in exactly the button's state colours.
+test('theme: the glance\'s branch chip and PR slot paint only through existing tokens', () => {
+  const rules = [...bare.matchAll(/([^{}]*\.(?:rd-pr-|rd-page-branch)[^{}]*)\{([^{}]*)\}/g)];
+  assert.ok(rules.length >= 10, `${rules.length} rules`);
+  for (const [, sel, body] of rules) {
+    for (const [, name] of body.matchAll(/var\((--[\w-]+)\)/g)) assert.ok(tokens.has(name), `${sel.trim()}: ${name} is no theme token`);
+    for (const [, prop, value] of body.matchAll(/(?:^|;)\s*(background|color|border(?:-[a-z]+)*-color|box-shadow):([^;]+)/g)) {
+      assert.ok(/var\(--/.test(value) || /^(?:none|transparent)$/.test(value.trim()), `${sel.trim()} ${prop}: ${value}`);
+    }
+  }
+  assert.match(ruleBody('.rd-pr-fill'), /background:var\(--ink\);/, 'Create: the solid ink of .rd-cta');
+  assert.equal(ruleBody('.rd-pr-fill.pr-view'), 'background:var(--blue-bg);', 'View: .rd-cta.pr-view');
+  assert.equal(ruleBody('.rd-pr-fill.pr-merged'), 'background:var(--violet-bg);', 'Merged: .rd-cta.pr-merged');
+  assert.match(bare, /\.rd-pr-slot:is\(\.is-pending,\.is-morph,\.is-out\)\{[^}]*background:var\(--panel\);[^}]*box-shadow:inset 0 0 0 1px var\(--line\)/,
+    'the placeholder: white (panel) with a hairline');
+});
+
 test('theme: no colour literal outside the token blocks (spec §4.2; Task 2 codemod)', () => {
   const noData = bare.replace(/url\("data:[^"]*"\)/g, 'url(DATA)');              // :805 keeps stroke='%23fff' inside its SVG
   const withoutTokens = noData.replace(rootBody, '').replace(hdBody, '').replace(synBody, '');

@@ -1330,11 +1330,11 @@ test('a finished run: its headline, the facts, what to check, Create pull reques
   assert.equal(result.hidden, false);
   assert.equal(result.querySelector('.issues'), null, 'the things to check live in Overview only');
   assert.equal(result.querySelector('[data-rd-tab="diff"] .rd-srow-v').textContent, '2 files');
-  const pr = result.querySelector('.rd-create-pr');
+  const pr = rd.querySelector('.rd-pr-slot .rd-create-pr');
   assert.ok(pr, 'an eligible run offers Create pull request');
   assert.equal(pr.textContent, 'Create pull request');
   // The card's one button is the pull request, behind its glyph; following up is the bar's Run after.
-  assert.deepEqual([...result.querySelectorAll('.rd-result-actions > *')].map((b) => b.firstElementChild.dataset.icon),
+  assert.deepEqual([...rd.querySelectorAll('.rd-pr-slot > *')].map((b) => b.firstElementChild.dataset.icon),
     ['pr-create']);
   assert.equal(result.querySelector('.rd-follow-up'), null, 'no follow-up CTA on the card');
   const after = rd.querySelector('.rd-bar .rd-after');
@@ -1363,7 +1363,8 @@ for (const [state, icon, cls] of [['OPEN', 'external', 'pr-view'], ['MERGED', 'm
     const rd = await openGlance(ctx);
     frame(ctx, { type: 'done', runId: 'r1', status: 'done' });
     await settle(ctx.window, 10);
-    const link = rd.querySelector('.rd-result a.rd-cta');
+    const slot = rd.querySelector('.rd-pr-slot');
+    const link = slot.querySelector('a.rd-cta');
     assert.ok(link, 'the pull request is a link');
     assert.equal(link.getAttribute('href'), url);
     assert.equal(link.textContent, 'View pull request');
@@ -1371,9 +1372,192 @@ for (const [state, icon, cls] of [['OPEN', 'external', 'pr-view'], ['MERGED', 'm
     assert.ok(link.classList.contains(cls), `the ${state.toLowerCase()} PR wears its colour: ${link.className}`);
     assert.equal(link.classList.contains('alt'), false, 'never the grey secondary');
     assert.equal(link.target, '_blank', 'GitHub opens in a new tab');
-    assert.equal(rd.querySelectorAll('.rd-result-actions > *').length, 1, 'the card carries the pull request alone');
+    assert.equal(slot.children.length, 1, 'the card carries the pull request alone');
+    // Known when the run finished: the button directly, no placeholder and no morph.
+    assert.equal(slot.classList.contains('is-pending') || slot.classList.contains('is-morph'), false, slot.className);
+    assert.equal(slot.querySelector('.rd-pr-spin, .rd-pr-fill'), null);
   });
 }
+
+// ---------- the pull request button: a placeholder while the lookup runs, then a morph ----------
+const PR_URL = 'https://github.com/o/r/pull/7';
+const PR_ROW = { ...HISTORY_ROW, id: 'p1', live: true, survived: true, branch: 'worca-cc/dark-p1', sourceBranch: 'main' };
+// Longer than the morph and the exit (paintPrCta's PR_CTA_MORPH_MS / PR_CTA_OUT_MS).
+const afterMorph = () => new Promise((r) => setTimeout(r, 600));
+
+// A run opened on its glance, then finished, over the History rows `rows` (copied per
+// response: patchHistoryPr writes `pr` into the row object it is handed).
+async function finishedGlance({ rows, ghAvailable = true }) {
+  const ctx = await boot({
+    fetchHandler: (u) => {
+      if (u.endsWith('/api/history/pr')) return ok({ ok: true });
+      if (u.endsWith('/api/history')) return ok({ pipelines: rows.map((row) => ({ ...row })), ghAvailable });
+      if (u.endsWith('/api/budget')) return ok(okBudget());
+      if (u.includes('/api/runs/p1?projectDir=')) return ok({ state: { status: 'done' }, results: null, clarify: { questions: [], answers: [] } });
+      return null;
+    },
+  });
+  frame(ctx, { type: 'hello', runs: [] });
+  await settle(ctx.window, 6);
+  const rd = await openGlance(ctx);
+  frame(ctx, { type: 'done', runId: 'r1', status: 'done' });
+  await settle(ctx.window, 10);
+  return { ctx, rd };
+}
+
+// gh's answer, as the server pushes it (onHistoryPr drops a batch carrying a stale token).
+function prBatch(ctx, items) {
+  const token = ctx.calls.filter((c) => c.url.endsWith('/api/history/pr') && c.opts.body)
+    .map((c) => JSON.parse(c.opts.body).token).at(-1);
+  frame(ctx, { type: 'history-pr', token, done: true, items });
+}
+
+test('while the PR lookup runs, the slot is a busy placeholder at the button\'s place, nothing to click', async () => {
+  const { rd } = await finishedGlance({ rows: [PR_ROW] });
+  const slot = rd.querySelector('.rd-pr-slot');
+  assert.ok(slot, 'one pull request slot per screen');
+  assert.equal(slot.closest('.rd-result'), null, 'outside the result host its painter rebuilds');
+  assert.equal(slot.hidden, false);
+  assert.ok(slot.classList.contains('is-pending'), slot.className);
+  assert.equal(slot.getAttribute('aria-busy'), 'true');
+  assert.ok(slot.querySelector('.rd-pr-spin'), 'a spinner');
+  assert.match(slot.textContent, /Checking the pull request…/);
+  assert.equal(slot.querySelector('button, a, .rd-cta'), null, 'not clickable');
+});
+
+for (const [label, pr, sel, fill] of [
+  ['an open PR', { state: 'OPEN', url: PR_URL }, 'a.rd-cta.pr-view', 'pr-view'],
+  ['a merged PR', { state: 'MERGED', url: PR_URL }, 'a.rd-cta.pr-merged', 'pr-merged'],
+  ['no PR', null, 'button.rd-cta.rd-create-pr', ''],
+]) {
+  test(`the lookup answers ${label}: the SAME slot morphs into the button, once`, async () => {
+    const { ctx, rd } = await finishedGlance({ rows: [PR_ROW] });
+    const slot = rd.querySelector('.rd-pr-slot');
+    const spin = slot.querySelector('.rd-pr-spin');
+    prBatch(ctx, [{ projectKey: KEY, id: 'p1', pr }]);
+    await settle(ctx.window, 4);
+    assert.equal(rd.querySelector('.rd-pr-slot'), slot, 'the slot is never replaced');
+    assert.ok(slot.classList.contains('is-morph'), slot.className);
+    assert.equal(slot.classList.contains('is-pending'), false);
+    assert.equal(slot.getAttribute('aria-busy'), null);
+    const layer = slot.querySelector('.rd-pr-fill');
+    assert.ok(layer, 'the colour grows from the spinner');
+    assert.deepEqual([...layer.classList].filter((c) => c !== 'rd-pr-fill'), fill ? [fill] : [], 'in the button\'s colour');
+    assert.equal(slot.querySelector('.rd-pr-spin'), spin, 'the spinner fades out where it turns');
+    const cta = slot.querySelector(sel);
+    assert.ok(cta, `the button: ${slot.innerHTML}`);
+    await afterMorph();
+    assert.equal(slot.classList.contains('is-morph'), false);
+    assert.equal(slot.querySelector('.rd-pr-spin, .rd-pr-fill'), null, 'the spinner and the colour layer are removed');
+    assert.deepEqual([...slot.children], [cta], 'the button alone');
+    // An ordinary repaint (gh answers the same again) neither rebuilds the button nor replays the morph.
+    prBatch(ctx, [{ projectKey: KEY, id: 'p1', pr }]);
+    await settle(ctx.window, 4);
+    assert.equal(slot.classList.contains('is-morph'), false, 'the morph plays once');
+    assert.equal(slot.querySelector(sel), cta, 'the same button');
+    if (pr) {
+      assert.equal(cta.getAttribute('href'), PR_URL);
+      assert.equal(cta.target, '_blank');
+      assert.equal(cta.rel, 'noopener');
+    } else {
+      click(ctx.window, cta);
+      assert.equal(ctx.window.location.hash, `#history/${KEY}/p1`, 'Create hands over to the ship-it flow');
+    }
+  });
+}
+
+test('the lookup answers no button: the placeholder fades out, then the slot collapses', async () => {
+  const { ctx, rd } = await finishedGlance({ rows: [{ ...PR_ROW, survived: false }] });
+  const slot = rd.querySelector('.rd-pr-slot');
+  assert.ok(slot.classList.contains('is-pending'), 'pending until gh answers');
+  prBatch(ctx, [{ projectKey: KEY, id: 'p1', pr: null }]);
+  await settle(ctx.window, 4);
+  assert.equal(slot.hidden, false, 'still in place while it fades');
+  assert.ok(slot.classList.contains('is-out'), slot.className);
+  assert.equal(slot.querySelector('button, a'), null);
+  await afterMorph();
+  assert.equal(slot.hidden, true, 'then the slot is gone');
+  assert.equal(slot.children.length, 0);
+  assert.equal(slot.classList.contains('is-out'), false);
+});
+
+test('no placeholder where no button can appear: gh missing, or the run still going', async () => {
+  const ctx = await bootRunning();
+  const rd = await openGlance(ctx);
+  assert.equal(rd.querySelector('.rd-pr-slot').hidden, true, 'a live run has no pull request yet');
+  const { rd: noGh } = await finishedGlance({ rows: [PR_ROW], ghAvailable: false });
+  const slot = noGh.querySelector('.rd-pr-slot');
+  assert.equal(slot.hidden, true);
+  assert.equal(slot.classList.contains('is-pending'), false);
+  assert.equal(slot.querySelector('.rd-pr-spin'), null);
+});
+
+test('a finished run whose History row has not loaded yet is pending too', async () => {
+  // Another run of the project resolves the key; this run's own row is not in yet.
+  const { rd } = await finishedGlance({ rows: [HISTORY_ROW] });
+  const slot = rd.querySelector('.rd-pr-slot');
+  assert.equal(slot.hidden, false);
+  assert.ok(slot.classList.contains('is-pending'), slot.className);
+});
+
+test('the glance\'s meta line carries the feature branch: one chip, updated in place, that copies it', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  const rd = await openGlance(ctx);
+  const meta = rd.querySelector('.rd-glance .rd-page-meta');
+  const chip = meta.querySelector('.rd-page-branch');
+  assert.ok(chip, 'the chip is in the meta line');
+  assert.equal(chip.hidden, true, 'no feature branch yet: no chip');
+  assert.equal(chip.dataset.minLevel, 'advanced', 'the Details branch button\'s level');
+  const name = 'worca-cc/rate-limit-uploads-p1';
+  frame(ctx, { type: 'state', runId: 'r1', status: 'running', branch: { source: 'main', feature: name } });
+  await settle(window, 4);
+  assert.equal(meta.querySelector('.rd-page-branch'), chip, 'the same node');
+  assert.equal(chip.hidden, false);
+  assert.equal(chip.querySelector('.rd-page-branch-name').textContent, name);
+  assert.equal(chip.title, name, 'the full name in the tooltip');
+  assert.equal(meta.firstChild.nodeType, 3, 'the meta text stays the line\'s first node');
+  assert.match(meta.firstChild.data, /^proj · started /);
+  assert.equal(meta.querySelectorAll('.rd-page-branch').length, 1);
+  const writes = [];
+  Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText: async (t) => { writes.push(t); } } });
+  click(window, chip);
+  await settle(window, 2);
+  assert.deepEqual(writes, [name]);
+  assert.ok(chip.classList.contains('copied'), 'the copied tick, as in Details');
+  // Renamed: the click copies the name painted now, never the one bound first.
+  frame(ctx, { type: 'state', runId: 'r1', status: 'running', branch: { source: 'main', feature: 'worca-cc/renamed' } });
+  await settle(window, 4);
+  assert.equal(chip.querySelector('.rd-page-branch-name').textContent, 'worca-cc/renamed');
+  click(window, chip);
+  await settle(window, 2);
+  assert.deepEqual(writes, [name, 'worca-cc/renamed']);
+});
+
+test('style.css: the bar\'s run name sits left, away from the controls, and still truncates and fades', () => {
+  const mid = (css.match(/\n\.rd-bar-mid\{([^}]*)\}/) || [])[1];
+  assert.ok(mid, 'the bar middle rule');
+  assert.match(mid, /justify-content:flex-start/);
+  assert.match(mid, /flex:1 1 0/, 'it takes the free space and shrinks before the controls wrap');
+  assert.match(mid, /min-width:0/);
+  assert.match(css, /\n\.rd-bar-title\{[^}]*text-overflow:ellipsis[^}]*opacity:0;transition:opacity/);
+});
+
+test('style.css: the PR slot morphs on the compositor only; reduced motion crossfades', () => {
+  assert.match(css, /\.rd-pr-slot\[hidden\]\{display:none;\}/);
+  const kf = (name) => (css.match(new RegExp(`@keyframes ${name}\\{((?:[^{}]*\\{[^{}]*\\})+)\\}`)) || [])[1];
+  for (const name of ['rd-pr-grow', 'rd-pr-fade', 'rd-pr-in', 'rd-pr-show']) {
+    const body = kf(name);
+    assert.ok(body, `@keyframes ${name}`);
+    const props = [...body.matchAll(/([a-z-]+):/g)].map((m) => m[1]);
+    assert.ok(props.length && props.every((p) => p === 'transform' || p === 'opacity'), `${name}: ${props}`);
+  }
+  // The placeholder holds the button's height; hover's lift sits out the morph.
+  assert.match(css, /\.rd-pr-wait\{[^}]*padding:13px;[^}]*font:600 15px var\(--sans\)/);
+  assert.match(css, /\.rd-cta\{[^}]*font:600 15px var\(--sans\)[^}]*padding:13px;/);
+  assert.match(css, /\.rd-pr-slot\.is-morph > \.rd-cta\{[^}]*transform:none/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)\{[^@]*\.rd-pr-fill\{[^}]*animation-name:rd-pr-show/);
+});
 
 test('Details › Diff reads the live worktree while the run goes', async () => {
   const patch = 'diff --git a/src/limiter.js b/src/limiter.js\nnew file mode 100644\n--- /dev/null\n+++ b/src/limiter.js\n@@ -0,0 +1,2 @@\n+export const a = 1;\n+export const b = 2;\n';

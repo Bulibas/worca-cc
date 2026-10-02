@@ -4340,7 +4340,7 @@ body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:
    switch's visible label first: the select keeps its aria-label and tooltip, the pill says what
    happens. */
 @container rd-bar (max-width:900px){ .rd-night-wrap > .txt{display:none;} }
-.rd-bar-mid{flex:1 1 0;display:flex;justify-content:center;align-items:center;gap:8px;min-width:0;}   /* basis 0: the name truncates before the controls wrap */
+.rd-bar-mid{flex:1 1 0;display:flex;justify-content:flex-start;align-items:center;gap:8px;min-width:0;}   /* basis 0: the name truncates before the controls wrap; flex-start: it sits at the bar's left, the controls at its right */
 /* The run's name. Details has it as its header's title, so the bar leaves it blank there. */
 /* The glance's page title owns the name; the bar repeats it only once that heading has
    scrolled out of view (app.js watchPageTitle sets data-title-out), like a large title
@@ -4374,8 +4374,23 @@ body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:
 /* The run's name is the page's subject: the largest type on it. */
 .rd-page-head{min-width:0;}
 .rd-page-title{margin:0;font:700 28px/1.2 var(--sans);letter-spacing:-.02em;overflow-wrap:anywhere;text-wrap:balance;}
-.rd-page-meta{margin:6px 0 0;color:var(--ink-2);font-size:13px;}
+/* A row: the text (app.js paintPageHead), the branch chip, the person chip. A chip too long
+   for the rest of the line wraps under the text and truncates there. */
+.rd-page-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:6px 0 0;color:var(--ink-2);font-size:13px;}
 .rd-page-meta:empty{display:none;}
+/* The run's feature branch (app.js paintPageBranch): a compact mono chip that copies it, with the
+   Details header's copied tick (.rd-branch-copy). The full name is its tooltip. */
+.rd-page-branch{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:100%;padding:3px 9px;
+  border:1px solid var(--line);border-radius:999px;background:var(--field);
+  font:600 11.5px var(--mono);color:var(--ink-2);cursor:pointer;}
+.rd-page-branch[hidden]{display:none;}
+.rd-page-branch:hover{border-color:var(--hover-outline);color:var(--ink);}
+.rd-page-branch:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.rd-page-branch-name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.rd-page-branch svg{flex:none;}
+.rd-page-branch .ico-check{display:none;}
+.rd-page-branch.copied .ico-copy{display:none;}
+.rd-page-branch.copied .ico-check{display:inline;color:var(--green-ink);}
 /* The card's head: the status line top left, the Live view switch (app.js paintRdLive)
    top right, level with the state word. */
 .rd-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;min-width:0;}
@@ -4469,7 +4484,6 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .rd-stats .hd-diff-counts .diff-add{color:var(--hd-count-add);}
 .rd-stats .hd-diff-counts .diff-del{color:var(--hd-count-del);}
 .rd-stats > div > span{font-size:11.5px;color:var(--ink-2);}
-.rd-result-actions{display:flex;flex-direction:column;gap:8px;}
 .rd-cta{display:flex;align-items:center;justify-content:center;gap:9px;box-sizing:border-box;width:100%;text-align:center;font:600 15px var(--sans);border:0;border-radius:var(--r-ctrl);
   padding:13px;cursor:pointer;background:var(--ink);color:var(--on-ink);text-decoration:none;
   transition:filter .15s,transform .15s,box-shadow .15s;}
@@ -4481,6 +4495,44 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .rd-cta:is(.pr-view,.pr-merged):hover{box-shadow:inset 0 0 0 1.5px currentColor;transform:none;}
 .rd-cta:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .rd-cta-ico{flex:0 0 auto;}
+/* The pull request button's slot (app.js paintPrCta): one node for the screen's life, so the
+   lookup's placeholder can become the button. Pending: a white button with a hairline and a
+   spinner, at the button's own height (.rd-pr-wait holds its glyph and line, invisible). On
+   the answer, the state's colour grows as a circle from the spinner (.rd-pr-fill, the size of
+   the slot's diagonal and more, clipped by the slot's radius), the spinner fades, then the icon
+   and label come in. Compositor-only: transform and opacity, will-change only on the nodes
+   that animate; the slot's height never changes during the morph. With no button after all,
+   the placeholder fades out and the slot then folds away (the one height change, at the end). */
+.rd-pr-slot{position:relative;border-radius:var(--r-ctrl);}
+.rd-pr-slot[hidden]{display:none;}
+.rd-pr-slot:is(.is-pending,.is-morph,.is-out){overflow:hidden;background:var(--panel);box-shadow:inset 0 0 0 1px var(--line);}
+.rd-pr-slot > .rd-cta{position:relative;}   /* above the colour layer */
+.rd-pr-wait{display:flex;align-items:center;justify-content:center;gap:9px;box-sizing:border-box;width:100%;padding:13px;
+  font:600 15px var(--sans);color:var(--ink-2);cursor:default;}
+.rd-pr-wait > *{opacity:0;}
+.rd-pr-spin{position:absolute;left:50%;top:50%;width:20px;height:20px;margin:-10px 0 0 -10px;box-sizing:border-box;
+  border-radius:50%;border:2px solid var(--line-2);border-top-color:var(--ink);animation:ws-spin .9s linear infinite;}
+.rd-pr-fill{position:absolute;left:50%;top:50%;width:calc(100% + 64px);aspect-ratio:1;margin:calc(-50% - 32px) 0 0 calc(-50% - 32px);
+  border-radius:50%;background:var(--ink);will-change:transform;animation:rd-pr-grow .32s cubic-bezier(.2,.8,.2,1) both;}
+.rd-pr-fill.pr-view{background:var(--blue-bg);}
+.rd-pr-fill.pr-merged{background:var(--violet-bg);}
+/* While it morphs the button lends its colour to the layer and sits out its hover (no lift, no
+   ring): only its icon and label move. */
+.rd-pr-slot.is-morph > .rd-cta{background:transparent;box-shadow:none;transform:none;transition:none;}
+.rd-pr-slot.is-morph > .rd-cta > *{will-change:transform,opacity;animation:rd-pr-in .18s ease-out .22s both;}
+.rd-pr-slot.is-morph > .rd-pr-spin{animation:ws-spin .9s linear infinite,rd-pr-fade .15s ease-out both;}
+.rd-pr-slot.is-out{will-change:opacity;animation:rd-pr-fade .18s ease-out both,rd-pr-fold .2s ease-in-out .18s both;}
+@keyframes rd-pr-grow{from{transform:scale(0);}to{transform:scale(1);}}
+@keyframes rd-pr-fade{to{opacity:0;}}
+@keyframes rd-pr-in{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+@keyframes rd-pr-show{from{opacity:0;}to{opacity:1;}}
+/* The no-button exit: from the slot's height (app.js sets --h) to nothing, the sheet's 16px gap
+   above it included, so hiding it afterwards moves nothing. */
+@keyframes rd-pr-fold{from{height:var(--h);}to{height:0;margin-top:-16px;}}
+@media (prefers-reduced-motion: reduce){
+  .rd-pr-fill{animation-name:rd-pr-show;}
+  .rd-pr-slot.is-morph > .rd-cta > *{animation-name:rd-pr-show;}
+}
 /* Details: the header card and the tabs. The shared bar above carries the status and the way back. */
 .rd-details{display:flex;flex-direction:column;min-height:100%;}
 .rd-details .rd-body{flex:1 0 auto;}
@@ -4504,7 +4556,6 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 
 @media (max-width:640px){
   .rd-bar,.hd-bar{padding:10px 16px;flex-wrap:wrap;gap:8px;}
-  .rd-bar-mid{justify-content:flex-start;flex-basis:0;}   /* the name truncates beside the back button */
   .rd-bar-end{margin-left:auto;gap:6px;}
   .rd-bar-end:empty{display:none;}
   .rd-bar .rd-pause,.rd-bar .rd-stop,.hd-bar .hd-resume,.hd-bar .hd-pause,.hd-bar .hd-stop{padding:0 11px;}
