@@ -4980,6 +4980,13 @@ const stackTokens = new Map();                     // `${runId}:${stackId}` -> t
 const setupJobs = new Map();                       // `${runId}:${member}` -> Promise<boolean> (D25)
 let builtinsDetected = null;
 const builtins = () => (builtinsDetected ??= detectBuiltins({ overrides: actionsSettings() }));
+// What detection finds with NO override (Settings › Runs › Actions shows it next to Editor and Terminal).
+// PATH does not change under a running server, so once is enough.
+let builtinsAuto = null;
+const autoDetectedBuiltins = () => {
+  const d = (builtinsAuto ??= detectBuiltins({ overrides: {} }));
+  return { editor: d.editor?.label || null, terminal: d.terminal?.label || null };
+};
 
 /**
  * D4: under agent isolation a caller on this machine may be the agent itself. Identity is skipped for a
@@ -6695,6 +6702,7 @@ const settingsState = () => ({
   workspaceScan: workspaceScanModels(),                   // Settings › Runs › Workspaces: the STORED pick (null = the defaults)
   workspaceScanDefault: WORKSPACE_SCAN_DEFAULT_MODELS,    // what null means: Sonnet 5 · medium, project agents sonnet · medium
   actions: actionsSettings(),                             // Settings › Runs › Actions (issue #529)
+  actionsDetected: autoDetectedBuiltins(),                // what Editor / Terminal fall back to when left blank (null = none found)
   actionsGate: { remote: REMOTE_MODE, enabled: actionsEnabledHere() },
 });
 

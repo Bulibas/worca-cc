@@ -290,3 +290,26 @@ test('#settings/runs/actions opens Runs, scrolls to the Actions card and focuses
   assert.equal(shown(window, 'runs'), true, 'an unknown card still opens the tab');
   assert.equal(seen.length, before, 'and scrolls nowhere');
 });
+
+test('Settings › Runs › Actions: blank Editor / Terminal say what detection found, or that nothing was', async () => {
+  const { window } = await boot();
+  const base = globalThis.fetch;
+  globalThis.fetch = window.fetch = (u, opts) => (String(u).includes('/api/settings')
+    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ root: '/tmp/x', default: '/tmp/x',
+      actions: { keep: 'never', editor: '', terminal: '' }, actionsDetected: { editor: null, terminal: 'Terminal' } }) })
+    : base(u, opts));
+  await go(window, 'settings/runs');
+  await tick(); await tick();
+  const doc = window.document;
+  const editor = doc.getElementById('act-editor');
+  assert.equal(editor.placeholder, 'None found on this machine');
+  assert.equal(doc.getElementById('act-editor-note').textContent, 'No editor was found on this machine. Enter code, cursor or the full path to your editor.');
+  assert.equal(doc.getElementById('act-terminal').placeholder, 'Terminal (detected)');
+  assert.equal(doc.getElementById('act-terminal-note').textContent, 'Left blank, Worca uses Terminal.');
+  editor.value = 'zed';
+  editor.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.equal(doc.getElementById('act-editor-note').hidden, true, 'a typed command needs no note');
+  editor.value = '';
+  editor.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.equal(doc.getElementById('act-editor-note').hidden, false, 'cleared: the note is back');
+});

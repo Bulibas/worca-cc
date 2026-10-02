@@ -14828,6 +14828,26 @@ function paintActionsSettings(data) {
   set('act-editor', a.editor);
   set('act-terminal', a.terminal);
   set('act-max', a.maxCheckouts);
+  actionsDetected = (data && data.actionsDetected) || {};
+  for (const key of ['editor', 'terminal']) paintActionsDetectNote(key);
+}
+// Blank Editor / Terminal fall back to detection: the placeholder and the note say what it found, so a
+// blank field never claims "detected" when nothing was (the run page then says "No editor was found").
+let actionsDetected = {};
+const ACT_DETECT_EXAMPLE = { editor: 'code, cursor or the full path to your editor', terminal: 'the command that opens your terminal' };
+function paintActionsDetectNote(key) {
+  const input = document.getElementById(`act-${key}`);
+  const note = document.getElementById(`act-${key}-note`);
+  if (!input || !note) return;
+  const label = actionsDetected[key] || null;
+  input.placeholder = label ? `${label} (detected)` : 'None found on this machine';
+  note.textContent = input.value.trim() ? ''
+    : label ? `Left blank, Worca uses ${label}.`
+      : `No ${key} was found on this machine. Enter ${ACT_DETECT_EXAMPLE[key]}.`;
+  note.hidden = !note.textContent;
+}
+for (const key of ['editor', 'terminal']) {
+  document.getElementById(`act-${key}`)?.addEventListener('input', () => paintActionsDetectNote(key));
 }
 function saveActionsSettings(actions) {
   return postSettingsCard({ actions }, {

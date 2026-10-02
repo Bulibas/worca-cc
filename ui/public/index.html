@@ -1729,8 +1729,8 @@
               <div class="field act-port-range"><label for="act-port-low">Ports for automatic port variables</label>
                 <input id="act-port-low" class="input" type="number" min="1024" max="65535" placeholder="4400"> –
                 <input id="act-port-high" class="input" type="number" min="1024" max="65535" placeholder="4499" aria-label="High port"></div>
-              <div class="field"><label for="act-editor">Editor</label><input id="act-editor" class="input" placeholder="Detected automatically"></div>
-              <div class="field"><label for="act-terminal">Terminal</label><input id="act-terminal" class="input" placeholder="Detected automatically"></div>
+              <div class="field"><label for="act-editor">Editor</label><input id="act-editor" class="input" placeholder="Detected automatically" aria-describedby="act-editor-note"><small class="hint act-hint" id="act-editor-note"></small></div>
+              <div class="field"><label for="act-terminal">Terminal</label><input id="act-terminal" class="input" placeholder="Detected automatically" aria-describedby="act-terminal-note"><small class="hint act-hint" id="act-terminal-note"></small></div>
               <div class="field"><label for="act-max">Keep at most</label><input id="act-max" class="input" type="number" min="1" max="100" placeholder="No limit"> checkouts (oldest removed first)</div>
               <div class="add-project-actions"><button type="button" class="btn btn-ghost btn-mini" id="act-reset">Reset</button>
                 <button type="button" class="btn btn-primary btn-mini" id="act-save">Save</button></div>
