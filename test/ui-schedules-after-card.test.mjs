@@ -2,11 +2,15 @@
 // Schedules › Once with an after-ticket (run chains): the card says what it waits for and how it
 // stands, "Schedule next…" deep-links, Details names the policy and the branch, and the Runs
 // list's upcoming() carries waiting after-tickets although their runAt is the sentinel.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const viewPath = fileURLToPath(new URL('../ui/public/schedules-view.mjs', import.meta.url));
 const tick = (n = 1) => new Promise((r) => setTimeout(r, n));
@@ -20,7 +24,7 @@ const MISSED_T = { ...AFTER_T, id: 'cccccccc-0000-4000-8000-000000000003', title
   after: { ...AFTER_T.after, status: 'error' } };
 
 async function boot(tickets = [AFTER_T]) {
-  const dom = new JSDOM('<!doctype html><body><div id="tabs"><button data-tab="activity"></button><button data-tab="once"></button><button data-tab="repeating"></button></div><div id="feed"></div><div id="once"></div><div id="rep"></div></body>', { url: 'http://localhost/#schedules/once' });
+  const dom = trackDom(new JSDOM('<!doctype html><body><div id="tabs"><button data-tab="activity"></button><button data-tab="once"></button><button data-tab="repeating"></button></div><div id="feed"></div><div id="once"></div><div id="rep"></div></body>', { url: 'http://localhost/#schedules/once' }));
   const { window } = dom;
   for (const k of ['window', 'document', 'Node', 'HTMLElement', 'Event', 'DOMParser', 'location']) {
     try { Object.defineProperty(globalThis, k, { value: window[k], configurable: true, writable: true }); } catch {}
@@ -92,19 +96,23 @@ test('Cancel: the dependents read holds the button, so a double-click sends ONE 
 test('style.css and index.html carry the run-chain entry points', () => {
   const css = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8');
   const html = readFileSync(fileURLToPath(new URL('../ui/public/index.html', import.meta.url)), 'utf8');
-  assert.match(css, /\.rd-after\[hidden\]\{display:none;\}/);
-  assert.match(css, /\.hd-after\[hidden\]\{display:none;\}/);
+  // The saved run's bar button shares every rule of the run page's (one look, no copy).
+  assert.match(css, /\.hd-after\[hidden\],\.rd-after\[hidden\]\{display:none;\}/);
   // The skin, the hover and the focus ring: without them the button is a borderless
   // square with no hover and no keyboard ring beside Pause/Stop, which have all three.
-  assert.match(css, /\.rd-after\{[^}]*border:1\.5px solid var\(--line\);[^}]*color:var\(--ink-2\);/);
-  assert.match(css, /\.rd-after:hover\{/);
-  assert.match(css, /\.rd-after:focus-visible\{/);
-  assert.match(css, /\.hd-after:focus-visible,/);
+  assert.match(css, /\.hd-after,\.rd-after\{[^}]*border:1\.5px solid var\(--line\);[^}]*color:var\(--ink-2\);/);
+  assert.match(css, /\.hd-after:hover,\.rd-after:hover\{/);
+  assert.match(css, /\.hd-after:focus-visible,\.rd-after:focus-visible\{/);
   // The live run's button lives in the run page bar (the list card that carried .rc-after is gone).
   const tpl = html.match(/<template id="run-detail-tpl">[\s\S]*?<\/template>/);
   assert.ok(tpl, '#run-detail-tpl exists');
   assert.match(tpl[0], /class="rd-after"[^>]*data-min-level="advanced"[^>]*hidden/);
-  assert.match(html, /class="hd-after btn-ghost" hidden data-min-level="advanced"/);
+  // The saved run's lives in its page bar, too.
+  const hist = html.match(/<template id="hist-detail-tpl">[\s\S]*?<\/template>/);
+  assert.ok(hist, '#hist-detail-tpl exists');
+  const bar = hist[0].match(/<div class="hd-bar">[\s\S]*?<div class="hd-error"/);
+  assert.ok(bar, 'the saved run page has its bar');
+  assert.match(bar[0], /class="hd-after"[^>]*data-min-level="advanced"[^>]*hidden/);
 });
 
 // The run page's button, the History-detail button and the Archive note, driven through window.__np —
@@ -113,7 +121,7 @@ test('style.css and index.html carry the run-chain entry points', () => {
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 async function bootLive(dependents = []) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
@@ -134,7 +142,7 @@ async function bootLive(dependents = []) {
   return { window, calls };
 }
 
-test('Run page: the after button appears once the pipeline id is known, deep-links to it, and hides once the run ends', async () => {
+test('Run page: the after button appears once the pipeline id is known, deep-links to it, and turns into the follow-up once the run ends', async () => {
   const { window } = await bootLive();
   const { upsertRun, onState, repaintRunDetail } = window.__np;
   const r = upsertRun({ runId: 'ra1', title: 't', projectDir: '/tmp/proj', status: 'running' });
@@ -152,24 +160,34 @@ test('Run page: the after button appears once the pipeline id is known, deep-lin
   assert.equal(btn().hidden, true, 'no pipeline id yet: nothing to wait for');
   state({ id: 'p1a2b3c4', status: 'running' });
   assert.equal(btn().hidden, false);
+  assert.equal(btn().title, 'Schedule a run after this');
   btn().click();
   assert.equal(window.location.hash, '#new/after/p1a2b3c4');
-  // Once the run is over, "Start a follow-up run" takes over: the bar's button hides.
+  // Once the run is over, the same button follows it up (the card carries no follow-up CTA).
   await open();
   assert.equal(btn().hidden, false, 'reopened while it still runs');
   state({ status: 'done' });
-  assert.equal(btn().hidden, true, 'a finished run offers no schedule-after in the bar');
+  assert.equal(btn().hidden, false, 'a finished run keeps Run after in the bar');
+  assert.equal(btn().title, 'Start a follow-up run');
+  assert.equal(btn().getAttribute('aria-label'), 'Start a follow-up run');
+  btn().click();
+  assert.equal(window.location.hash, '#new/after/p1a2b3c4');
 });
 
 test('History detail: paintHdAfter shows the button for a record and deep-links; afterDependentsNote builds the pinned sentence', async () => {
   const { window, calls } = await bootLive([{ id: 'x', kind: 'once', title: 'Tests' }, { id: 'y', kind: 'once', title: 'Docs' }]);
   const { paintHdAfter, afterDependentsNote } = window.__np;
   const screen = window.document.createElement('div');
-  screen.innerHTML = '<button type="button" class="hd-after btn-ghost" hidden data-min-level="advanced">Schedule a run after this</button>';
+  screen.innerHTML = '<button type="button" class="hd-after" hidden data-min-level="advanced"><span class="hd-btn-label">Run after</span></button>';
   paintHdAfter(screen, null);
   assert.equal(screen.querySelector('.hd-after').hidden, true, 'no record, no button');
-  paintHdAfter(screen, { id: 'h0000001', status: 'done' });
+  paintHdAfter(screen, { id: 'h0000001', status: 'paused' });
   assert.equal(screen.querySelector('.hd-after').hidden, false);
+  assert.equal(screen.querySelector('.hd-after').title, 'Schedule a run after this', 'a parked run is waited for');
+  // The detail payload's status counts when the record carries none (a deep link's stub).
+  paintHdAfter(screen, { id: 'h0000001' }, { state: { status: 'done' } });
+  assert.equal(screen.querySelector('.hd-after').title, 'Start a follow-up run', 'a finished run is followed up');
+  assert.equal(screen.querySelector('.hd-after').getAttribute('aria-label'), 'Start a follow-up run');
   screen.querySelector('.hd-after').click();
   assert.equal(window.location.hash, '#new/after/h0000001');
   assert.equal(await afterDependentsNote('pipelineId=h0000001'), '\n\n“Tests”, “Docs” wait for this run and will be marked missed.');

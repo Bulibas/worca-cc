@@ -1422,12 +1422,14 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hist-merge.bad{background:var(--red-bg);color:var(--red-ink);}
 .hist-merge.unknown{background:var(--amber-bg);color:var(--amber-ink);}
 
-/* These three rules are the ONLY thing that styles a PR link (the saved run's
-   Details header). Without them it ships as a default UA anchor — browser blue,
-   underlined — and MERGED would lose its grey. */
-.hd-pr-link{font-size:12px;font-weight:600;color:var(--green-ink);text-decoration:none;white-space:nowrap;}
-.hd-pr-link:hover{text-decoration:underline;}
-.hd-pr-link.merged{color:var(--ink-3);}
+/* The PR link (the saved run's Details header). Without these rules it ships as a
+   default UA anchor — browser blue, underlined. A pill beside .hd-pr in the glance
+   card's colours (.rd-cta.pr-view / .pr-merged): blue while the PR is open, violet
+   once merged. Its font and flex sizing sit with .hd-pr's rules. */
+.hd-pr-link{display:inline-flex;align-items:center;padding:9px 18px;border:1.5px solid transparent;border-radius:999px;
+  background:var(--blue-bg);color:var(--blue-ink-strong);text-decoration:none;white-space:nowrap;}
+.hd-pr-link:hover{border-color:currentColor;}
+.hd-pr-link.merged{background:var(--violet-bg);color:var(--violet-ink);}
 
 /* Discard-worktree button. The class moved from the retired card accordion to the
    detail screen's banner block; nothing about it was card-position-dependent. */
@@ -3338,8 +3340,7 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
    .hd-report has no icon, but it stands in the SAME row as .hd-archive and needs the
    same padding for the same reason: on .btn-ghost's own 13px it measured 48px beside
    a 38px Archive (headless Chrome, both themes). */
-.hd-back,.hd-resume,.hd-report,.pd-back,.pd-new,.pd-history,.ws-rescan{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;}   /* one height for every header action */
-.hd-resume[hidden]{display:none;}
+.hd-back,.hd-report,.pd-back,.pd-new,.pd-history,.ws-rescan{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;}   /* one height for every header action */
 /* Same trap as the fallback issue link in the report modal: the author `display`
    above beats the UA's `[hidden]{display:none}`, and this button ships hidden. */
 .hd-report[hidden]{display:none;}
@@ -3851,17 +3852,14 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hd-sec-logs .log-filters{margin-bottom:10px;}
 
 /* ---------- History detail: PR controls + the "Ship it?" modal ---------- */
-/* Detail-header PR controls (spec §5.2: black pill). `.hd-pr-link` carries no rule
-   of its own — its colour, its removed underline and the MERGED grey all come from
-   the `.hist-pr-link` selector lists at :848-:850, extended in place. */
+/* Detail-header PR controls (spec §5.2: black pill). `.hd-pr-link`'s pill, its removed
+   underline and its open/merged colours live beside .hist-merge. */
 .hd-pr{padding:9px 18px;border:1.5px solid var(--ink);border-radius:999px;background:var(--ink);
   font:600 12.5px var(--sans);color:var(--on-ink);cursor:pointer;flex:0 0 auto;}
 .hd-pr[hidden]{display:none;}
 .hd-pr:hover{box-shadow:inset 0 0 0 999px var(--solid-hover);transform:translateY(-1px);}
 .hd-pr-link{flex:0 0 auto;font:600 12.5px var(--sans);}
 .hd-pr-link[hidden]{display:none;}
-.hd-after{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;flex:0 0 auto;}
-.hd-after[hidden]{display:none;}
 
 /* WIDTH GOES ON `#shipit-modal .card`, NOT `.shipit-card`. The markup is
    `<div class="card shipit-card">` inside `.viewer-modal`, and
@@ -4003,13 +4001,14 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
    Every other interactive control in this stylesheet carries a ring (.btn,
    .btn-go, .nav button, .seg button, .info-tip, .ws-head, .ch-hit); none of the
    new controls did. `.btn-ghost` declares no
-   ring to inherit and carries no `btn` class, so `.hd-back`, `.hd-resume` and
-   `.shipit-cancel` had nothing at all — which matters most for `.hd-back`, the
+   ring to inherit and carries no `btn` class, so `.hd-back` and `.shipit-cancel`
+   had nothing at all, and neither has the bar's `.hd-resume` (styled like the run
+   page's Resume, no `.btn` either) — which matters most for `.hd-back`, the
    node openHistDetail focuses programmatically, and for the `.hd-tab` tablist.
    `.hd-diff-file` already has its own (inset) ring and is not repeated here. */
 .hd-tab:focus-visible,.hd-back:focus-visible,.hd-resume:focus-visible,.pd-tab:focus-visible,.pd-back:focus-visible,.pd-new:focus-visible,.pd-history:focus-visible,.pd-remove:focus-visible,.pd-sec:focus-visible,.proj-open:focus-visible,.pd-ov-link:focus-visible,
 .hd-more:focus-visible,.hd-report:focus-visible,
-.hd-archive:focus-visible,.hd-pr:focus-visible,.hd-pr-link:focus-visible,.hd-after:focus-visible,
+.hd-archive:focus-visible,.hd-pr:focus-visible,.hd-pr-link:focus-visible,
 .hd-branch-copy:focus-visible,.hd-sec:focus-visible,.shipit-ok:focus-visible,.shipit-cancel:focus-visible{
   outline:2px solid var(--ink);outline-offset:2px;}
 
@@ -4156,12 +4155,13 @@ body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:
    shown, and stays amber on the active (dark) item — the generic active rule would wash it out. */
 #nav-needs-count:not([hidden]) + #nav-running-count{display:none;}
 .nav button.active #nav-needs-count{background:var(--amber);color:var(--on-status);}
-/* Schedule a run after this one (the list card's old schedule-after button): a quiet pill beside Pause/Stop. */
-.rd-after{display:flex;align-items:center;gap:8px;padding:9px 15px;border:1.5px solid var(--line);
+/* Run after this one (the list card's old schedule-after button): a quiet pill beside Pause/Stop,
+   on the run page's bar and the saved run's (.hd-after). */
+.hd-after,.rd-after{display:flex;align-items:center;gap:8px;padding:9px 15px;border:1.5px solid var(--line);
   border-radius:999px;background:var(--panel);font:600 12.5px var(--sans);color:var(--ink-2);cursor:pointer;}
-.rd-after[hidden]{display:none;}
-.rd-after:hover{border-color:var(--ink-2);color:var(--ink);}
-.rd-after:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.hd-after[hidden],.rd-after[hidden]{display:none;}
+.hd-after:hover,.rd-after:hover{border-color:var(--ink-2);color:var(--ink);}
+.hd-after:focus-visible,.rd-after:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 @media (prefers-reduced-motion: reduce){
   .runs-shell > *,.runs-chev{transition:none !important;}
   .runs-ic-run .runs-glyph{animation:none;}
@@ -4204,23 +4204,25 @@ body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:
 .rd-copied{display:none;font:500 11.5px var(--sans);color:var(--green-ink);}
 .rd-branch-copy.copied + .rd-copied{display:inline;}
 .rd-spacer{flex:1 1 24px;}
-.rd-pause{display:flex;align-items:center;gap:8px;padding:9px 15px;border:1.5px solid var(--amber-bg);
+/* Pause/Resume and Stop. The saved run's bar (.hd-resume, .hd-pause, .hd-stop) wears the same
+   rules: its Resume and Pause are two buttons where this page toggles one. */
+.hd-resume,.hd-pause,.rd-pause{display:flex;align-items:center;gap:8px;padding:9px 15px;border:1.5px solid var(--amber-bg);
   border-radius:999px;background:var(--panel);font:600 12.5px var(--sans);color:var(--amber-ink);cursor:pointer;}
-.rd-pause[hidden]{display:none;}
-.rd-pause:hover:not([disabled]){border-color:var(--amber);}
-.rd-pause[disabled]{opacity:.55;cursor:not-allowed;}
+.hd-resume[hidden],.hd-pause[hidden],.rd-pause[hidden]{display:none;}
+.hd-resume:hover:not([disabled]),.hd-pause:hover:not([disabled]),.rd-pause:hover:not([disabled]){border-color:var(--amber);}
+.hd-resume[disabled],.hd-pause[disabled],.rd-pause[disabled]{opacity:.55;cursor:not-allowed;}
 /* Only one of the two glyphs shows; data-action decides which. */
 .rd-pause[data-action="pause"] .ico-play,.rd-pause[data-action="resume"] .ico-pause{display:none;}
-.rd-stop{display:flex;align-items:center;gap:8px;padding:9px 15px;border:1.5px solid var(--red-bg);
+.hd-stop,.rd-stop{display:flex;align-items:center;gap:8px;padding:9px 15px;border:1.5px solid var(--red-bg);
   border-radius:999px;background:var(--panel);font:600 12.5px var(--sans);color:var(--red-ink);cursor:pointer;}
-.rd-stop[hidden]{display:none;}
-.rd-stop:hover:not([disabled]){border-color:var(--red);}
+.hd-stop[hidden],.rd-stop[hidden]{display:none;}
+.hd-stop:hover:not([disabled]),.rd-stop:hover:not([disabled]){border-color:var(--red);}
 .rd-error{margin-top:24px;color:var(--red-ink);font-size:12.5px;}
 .rd-error[hidden]{display:none;}
 /* .btn-ghost declares no focus ring and .rd-back is focused programmatically by
    openRunDetail — same reasoning as the .hd-back arm. */
 .rd-back{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;}
-.rd-back:focus-visible,.rd-pause:focus-visible,.rd-stop:focus-visible,
+.rd-back:focus-visible,.rd-pause:focus-visible,.rd-stop:focus-visible,.hd-pause:focus-visible,.hd-stop:focus-visible,
 .rd-branch-copy:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 
 /* MUST sit after the rules above: @media contributes no specificity, so an
@@ -4245,7 +4247,8 @@ body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:
 .rd[data-title-out="1"][data-mode="glance"] .rd-bar-title,.hd[data-title-out="1"][data-mode="glance"] .rd-bar-title{opacity:1;}
 @media (prefers-reduced-motion:reduce){.rd-bar-title{transition:none;}}
 .rd-bar-end{display:flex;align-items:center;gap:8px;}
-.rd-bar .rd-back,.rd-bar .rd-to-run,.hd-bar .hd-back,.hd-bar .hd-to-run,.rd-bar .rd-pause,.rd-bar .rd-stop{height:36px;box-sizing:border-box;}
+.rd-bar .rd-back,.rd-bar .rd-to-run,.hd-bar .hd-back,.hd-bar .hd-to-run,.rd-bar .rd-pause,.rd-bar .rd-stop,
+.hd-bar .hd-resume,.hd-bar .hd-pause,.hd-bar .hd-stop{height:36px;box-sizing:border-box;}
 .rd-to-run,.hd-to-run{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;}
 .rd-to-run.ask{background:var(--panel);border-color:var(--amber);color:var(--amber-ink);}   /* a question waits on the glance */
 .rd-back[hidden],.hd-bar .hd-back[hidden],.hd-to-run[hidden],.rd-to-run[hidden]{display:none;}
@@ -4365,9 +4368,11 @@ button.rd-srow:hover{background:var(--hover-on-field);}
   padding:13px;cursor:pointer;background:var(--ink);color:var(--on-ink);text-decoration:none;
   transition:filter .15s,transform .15s,box-shadow .15s;}
 .rd-cta:hover{box-shadow:inset 0 0 0 999px var(--solid-hover);transform:translateY(-1px);}
-/* The grey secondary: the outline rule, drawn inset (it has no border to recolour). */
-.rd-cta.alt{background:var(--field);color:var(--ink);}   /* secondary: ink like .btn/.btn-ghost; blue is for links */
-.rd-cta.alt:hover{filter:none;transform:none;box-shadow:inset 0 0 0 1.5px var(--hover-outline);}
+/* The pull request by state: solid ink to create one, then the PR orbs' tints — blue while it
+   is open, violet once merged. Their hover is an inset ring, no lift (they have no border to recolour). */
+.rd-cta.pr-view{background:var(--blue-bg);color:var(--blue-ink-strong);}
+.rd-cta.pr-merged{background:var(--violet-bg);color:var(--violet-ink);}
+.rd-cta:is(.pr-view,.pr-merged):hover{box-shadow:inset 0 0 0 1.5px currentColor;transform:none;}
 .rd-cta:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .rd-cta-ico{flex:0 0 auto;}
 /* Details: the header card and the tabs. The shared bar above carries the status and the way back. */
@@ -4396,7 +4401,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
   .rd-bar-mid{justify-content:flex-start;flex-basis:0;}   /* the name truncates beside the back button */
   .rd-bar-end{margin-left:auto;gap:6px;}
   .rd-bar-end:empty{display:none;}
-  .rd-bar .rd-pause,.rd-bar .rd-stop{padding:0 11px;}
+  .rd-bar .rd-pause,.rd-bar .rd-stop,.hd-bar .hd-resume,.hd-bar .hd-pause,.hd-bar .hd-stop{padding:0 11px;}
   .rd-glance{padding:20px 16px var(--ask-dock-clearance);}
   .rd-page-title{font-size:24px;}
   .rd-details .rd-header{margin:16px 16px 0;}
@@ -6103,37 +6108,22 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 .rc-resume-split[hidden],.rc-resume-split > .rc-resume-more[hidden]{display:none;}
 :root[data-level="simple"] .rc-resume-split > .btn-resume{border-radius:9px;border-right:1px solid var(--amber);}
 
+/* The run page's split and the saved run's (.hd-resume-split, whose Resume is its own button and
+   whose caret is never `hidden`: the wrapper is) share one look. */
 .rd-resume-split:has(> .rd-pause[hidden]){display:none;}
-.rd-resume-split > .rd-pause:has(~ .rd-resume-more:not([hidden])){border-radius:999px 0 0 999px;border-right:none;padding-right:12px;}
-.btn-split.rd-resume-split > .rd-resume-more{
+.hd-resume-split > .hd-resume,.rd-resume-split > .rd-pause:has(~ .rd-resume-more:not([hidden])){border-radius:999px 0 0 999px;border-right:none;padding-right:12px;}
+.btn-split.hd-resume-split > .hd-resume-more,.btn-split.rd-resume-split > .rd-resume-more{
   display:inline-flex;align-items:center;justify-content:center;
   height:36px;padding:0 13px 0 10px;box-sizing:border-box;
   background:var(--panel);color:var(--amber-ink);
   border:1.5px solid var(--amber-bg);border-radius:0 999px 999px 0;
   font-family:inherit;cursor:pointer;transition:border-color .15s;}
-.btn-split.rd-resume-split > .rd-resume-more:hover{border-color:var(--amber);}
-.btn-split.rd-resume-split > .rd-resume-more:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.btn-split.hd-resume-split > .hd-resume-more:hover,.btn-split.rd-resume-split > .rd-resume-more:hover{border-color:var(--amber);}
+.btn-split.hd-resume-split > .hd-resume-more:focus-visible,.btn-split.rd-resume-split > .rd-resume-more:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .btn-split.rd-resume-split > .rd-resume-more[hidden]{display:none;}
-:root[data-level="simple"] .rd-resume-split > .rd-pause{border-radius:999px;border-right:1.5px solid var(--amber-bg);padding-right:15px;}
-
-.hd-resume-split > .hd-resume{border-radius:999px 0 0 999px;border-right:none;padding-right:12px;}
-.btn-split.hd-resume-split > .hd-resume-more{
-  display:inline-flex;align-items:center;justify-content:center;
-  padding:0 13px 0 10px;box-sizing:border-box;
-  background:var(--surface);color:var(--ink);
-  border:1.5px solid var(--line-2);border-radius:0 999px 999px 0;
-  font-family:inherit;cursor:pointer;transition:border-color .15s;}
-.btn-split.hd-resume-split > .hd-resume-more:hover{border-color:var(--hover-outline);}
-.btn-split.hd-resume-split > .hd-resume-more:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .hd-resume-split[hidden],.hd-resume-split > .hd-resume-more[hidden]{display:none;}
-:root[data-level="simple"] .hd-resume-split > .hd-resume{border-radius:999px;border-right:1.5px solid var(--line-2);padding-right:15px;}
+:root[data-level="simple"] .hd-resume-split > .hd-resume,:root[data-level="simple"] .rd-resume-split > .rd-pause{border-radius:999px;border-right:1.5px solid var(--amber-bg);padding-right:15px;}
 
-/* History glance: its full-width Resume CTA takes the caret exactly as #start-split does. */
-.hd-g-resume-split{display:flex;width:100%;}
-.hd-g-resume-split > .rd-cta{flex:1 1 auto;width:auto;border-radius:var(--r-ctrl) 0 0 var(--r-ctrl);}
-.hd-g-resume-split > .rd-cta:hover{transform:none;}
-.btn-split.hd-g-resume-split > .hd-g-resume-more{border-radius:0 var(--r-ctrl) var(--r-ctrl) 0;padding:0 18px 0 15px;}
-.hd-g-resume-split .btn-split-menu{bottom:auto;top:calc(100% + 8px);}
 /* Disabled "Resume at…" menu item: greyed, and its hover must not light it up. */
 .btn-split-menu button:disabled{opacity:.45;cursor:not-allowed;}
 .btn-split-menu button:disabled:hover,.btn-split-menu button:disabled:focus-visible{background:transparent;outline:none;}

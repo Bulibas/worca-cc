@@ -6,6 +6,10 @@ import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const htmlPath = join(__dir, '..', 'ui', 'public', 'index.html');
@@ -30,7 +34,7 @@ const live = (runId, extra = {}) => ({ runId, title: runId, projectDir: PROJECT,
 
 // `setup(window)` runs before app.js loads: a stub its module-load wiring must see goes there.
 async function boot({ url = 'http://localhost:4317/', storage = {}, projects = [{ name: 'proj', path: PROJECT, exists: true }], history = HIST, setup } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url }));
   const { window } = dom;
   windows.push(window);
   window.Element.prototype.scrollIntoView = function () {};
