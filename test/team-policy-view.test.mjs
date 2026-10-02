@@ -476,7 +476,7 @@ test('Plugins tab: a row per expected plugin with its state and action, then wha
   assert.deepEqual([install.dataset.name, install.dataset.marketplace], ['github-source', 'acme']);
   assert.equal(root.querySelector('tr[data-name="linear"] .tp-plugin-act').textContent, '');
   assert.match(root.querySelector('.tp-blocked-row').textContent, /shell-runner.*enabled here.*blocked by gateway/s);
-  assert.ok(root.querySelector('.tp-plugins-msg'), 'the tab has its own message line');
+  assert.equal(root.querySelector('.form-msg'), null, '#555: install / update results are toasts, so the tab has no message line');
   const none = renderPolicyPluginsPanel({ requirements: [], blockedPlugins: [] }, { doc });
   assert.match(none.querySelector('.hist-empty').textContent, /expects no plugins/);
   assert.equal(none.querySelector('.tp-blocked'), null);

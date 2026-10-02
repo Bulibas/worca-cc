@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { confirmDialog } from './helpers/confirm-modal.mjs';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -307,6 +308,8 @@ test('retained work renders from branch.commitFailed and binds Discard exactly o
   await confirmDialog(window);
   await settle(window, 5);
   assert.equal(posts.length, 1, 'exactly one POST per click, after three paints');
+  assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Retained worktree discarded',
+    detail: 'Nothing uncommitted needed saving.', action: '' }, 'no Details when no patch was saved');
 });
 
 // The success path of setupDiscardWorktreeButton was written for History, which
@@ -344,6 +347,8 @@ test('a successful discard clears the Running banner for good and re-arms the bu
     'and so does the action');
   assert.equal(btn.disabled, false, 'the control is not left permanently disabled');
   assert.equal(btn.textContent, before, 'nor stuck reading "Saving patch…"');
+  assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Retained worktree discarded',
+    detail: '1 recovery patch saved.', action: 'Details' }, 'the result is a toast, not a viewer');
 
   // The orchestrator keeps stamping commitFailed in its in-memory state; the next
   // frame must NOT resurrect a banner for a worktree that no longer exists.
@@ -1760,4 +1765,79 @@ test('Live view CSS: two columns when the page is wide, a fog mask, and no motio
   assert.match(css, /@container rd \(min-width:/, 'side by side follows the page area, not the window');
   assert.match(css, /\.rd-live[^{]*\{[^}]*mask-image:radial-gradient/, 'the fog');
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)\{[^}]*\.rd-live/, 'reduced motion drops the animation');
+});
+
+// #555: a run-page action that fails is said where the user is — a toast — not only in the run log.
+const fail = (status, body) => Promise.resolve({ ok: false, status, json: async () => body });
+const clickToastAction = (window) => {
+  const all = window.document.querySelectorAll('#toasts > .toast');
+  all[all.length - 1].querySelector('.toast-act').click();
+};
+
+test('a failed resume raises an error toast whose Retry replays the same options', async () => {
+  const bodies = [];
+  const ctx = await openDetail({
+    bootOpts: { fetchHandler: (u, opts) => {
+      if (!u.includes('/api/resume')) return null;
+      bodies.push(JSON.parse(opts.body));
+      return fail(400, { error: 'pipeline not found' });
+    } },
+  });
+  const { window, recv } = ctx;
+  window.__np.getRun(ID).pipelineId = 'p1';
+  recv({ type: 'state', runId: ID, status: 'paused', steps: [] });
+  await settle(window);
+  await window.__np.resumeRunFromCard(ID, null, { ignoreCostCap: true });
+  assert.deepEqual(lastToast(window.document), { tone: 'err', title: 'Could not resume the run',
+    detail: 'pipeline not found', action: 'Retry' });
+  assert.ok(window.__np.getRun(ID).logLines.some((l) => /resume failed: pipeline not found/.test(String(l.text))),
+    'the run-log line stays');
+  clickToastAction(window);
+  await settle(window, 5);
+  assert.equal(bodies.length, 2, 'Retry resumes again');
+  assert.equal(bodies[1].ignoreCostCap, true, 'with the same options');
+});
+
+test('a resume of a run with no pipeline id says so in a toast', async () => {
+  const ctx = await openDetail();
+  const { window, recv } = ctx;
+  recv({ type: 'state', runId: ID, status: 'paused', steps: [] });
+  await settle(window);
+  window.__np.getRun(ID).pipelineId = '';
+  await window.__np.resumeRunFromCard(ID, null);
+  const t = lastToast(window.document);
+  assert.equal(t.tone, 'err');
+  assert.equal(t.title, 'Could not resume the run');
+  assert.match(t.detail, /no pipeline id/);
+});
+
+test('a refused pause on the run page raises an error toast', async () => {
+  const ctx = await openDetail({
+    bootOpts: { fetchHandler: (u) => (u.includes('/api/pause') ? fail(409, { error: 'run is not live' }) : null) },
+  });
+  const { window, screen } = ctx;
+  const btn = screen.querySelector('.rd-pause');
+  assert.notEqual(btn.dataset.action, 'resume');
+  btn.click();
+  await settle(window, 5);
+  assert.deepEqual(lastToast(window.document), { tone: 'err', title: 'Could not pause the run',
+    detail: 'run is not live', action: '' });
+  assert.equal(btn.disabled, false, 'Pause can be tried again');
+});
+
+test('a refused Away-mode change puts the select back and raises a toast', async () => {
+  const ctx = await openDetail({
+    bootOpts: { fetchHandler: (u) => (u.includes('/api/run/night') ? fail(400, { error: 'run is over' }) : null) },
+  });
+  const { window, screen } = ctx;
+  const sel = screen.querySelector('.rd-night');
+  assert.equal(sel.value, 'auto');
+  sel.value = 'on';
+  sel.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await settle(window, 5);
+  assert.equal(sel.value, 'auto', 'the select reverts to what the run still has');
+  assert.deepEqual(lastToast(window.document), { tone: 'err', title: 'Could not change Away mode for this run',
+    detail: 'run is over', action: '' });
+  assert.ok(window.__np.getRun(ID).logLines.some((l) => /Away mode: run is over/.test(String(l.text))),
+    'the run-log line stays');
 });

@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast, edit } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -86,10 +87,12 @@ test('the card sits after the Auto workflow model on the Models tab; options com
 
 test('Save posts prDescriptionModel; a stored id paints its own line; one that left the catalog paints "not installed"', async () => {
   const { window, openSettings, posts, setSettings } = await boot(); await openSettings();
-  const sel = window.document.getElementById('prDescModel'); sel.value = 'claude-opus-5-5';
+  const sel = window.document.getElementById('prDescModel');
+  edit(window, sel, 'claude-opus-5-5');
   window.document.getElementById('prDescModelSave').click(); await settle(window);
   assert.deepEqual(posts.at(-1), { prDescriptionModel: 'claude-opus-5-5' });
-  assert.match(window.document.getElementById('prDescModelMsg').textContent, /Saved/);
+  assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Saved', detail: 'Applies to the next Generate with AI.', action: '' });
+  assert.equal(window.document.getElementById('prDescModelMsg').textContent, '', 'no grey "Saved." line');
   setSettings({ prDescriptionModel: 'claude-opus-5-5', prDescriptionModelEffective: { model: 'claude-opus-5-5', source: 'settings' } }); await openSettings();
   assert.equal(sel.value, 'claude-opus-5-5');
   assert.match(window.document.getElementById('prDescModelNote').textContent, /PR descriptions are written with claude-opus-5-5\.$/);
@@ -97,9 +100,9 @@ test('Save posts prDescriptionModel; a stored id paints its own line; one that l
   const stale = [...sel.options].find((o) => o.value === 'claude-gone-1');
   assert.ok(stale && stale.disabled && /not installed/.test(stale.textContent));
   assert.match(window.document.getElementById('prDescModelNote').textContent, /no longer in the catalog/);
+  // Save is still showing "Saved" from the first save; a click on its clean card is ignored.
   window.document.getElementById('prDescModelSave').click(); await settle(window);
-  assert.match(window.document.getElementById('prDescModelMsg').textContent, /no longer installed/);
-  assert.equal(posts.length, 1, 'a stale pick is refused client-side');
+  assert.equal(posts.length, 1, 'a stale pick is never posted');
 });
 
 test('a failed catalog GET never becomes a "no longer in the catalog" verdict', async () => {
@@ -119,7 +122,9 @@ test('Use default posts an empty prDescriptionModel; Test sends one tiny prompt 
   await openSettings();
   window.document.getElementById('prDescModelTest').click(); await settle(window);
   assert.ok(calls.some((c) => c.method === 'POST' && c.url.endsWith('/api/models/claude-opus-5-5/test')));
-  assert.match(window.document.getElementById('prDescModelMsg').textContent, /claude-opus-5-5 replied: pong/);
+  assert.equal(window.document.getElementById('prDescModelMsg').textContent, 'claude-opus-5-5 replied: pong');
+  assert.equal(window.document.getElementById('prDescModelMsg').className, 'hint ok');
+  assert.equal(window.document.getElementById('prDescModelTest').textContent, 'Works');
   window.document.getElementById('prDescModelReset').click(); await settle(window);
   assert.deepEqual(posts.at(-1), { prDescriptionModel: '' });
 });

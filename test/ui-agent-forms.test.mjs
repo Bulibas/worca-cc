@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { fieldErrorText } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -237,7 +238,9 @@ test('two rows with one form id: Save refuses, names the id, and sends nothing (
   click(window, pane.querySelector('.agent-edit-save'));
   await tick(); await tick(); await tick();
   assert.deepEqual(puts, [], 'a JSON object cannot carry two rows with one key, so nothing is sent');
-  assert.match(pane.querySelector('.agent-edit-msg').textContent, /duplicate form id "pick-one"/);
+  // #555: the refusal is a field error on the clashing id, not a line under the editor.
+  assert.match(fieldErrorText(rows[1].querySelector('.afm-id')), /duplicate form id "pick-one"/);
+  assert.equal(rows[1].querySelector('.afm-id').getAttribute('aria-invalid'), 'true');
   assert.equal(pane.hidden, false, 'the editor stays open');
 });
 
@@ -272,7 +275,7 @@ test('a row with a def but NO id: Save refuses, names the rule, and sends nothin
   click(window, pane.querySelector('.agent-edit-save'));
   await tick(); await tick(); await tick();
   assert.deepEqual(puts, [], 'a row with no id is not in the payload at all, so Save would silently drop it \u2014 refuse instead');
-  assert.match(pane.querySelector('.agent-edit-msg').textContent, /a form id is required/);
+  assert.match(fieldErrorText(rows[1].querySelector('.afm-id')), /a form id is required/);
   assert.equal(pane.hidden, false, 'the editor stays open with the typed def still in it');
   assert.match(rows[1].querySelector('.afm-editor .code-editor-ta').value, /Unnamed/);
 });

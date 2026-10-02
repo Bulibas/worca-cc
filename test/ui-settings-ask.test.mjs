@@ -15,6 +15,7 @@ import { JSDOM } from 'jsdom';
 
 import { confirmDialog, cancelDialog, dialogText } from './helpers/confirm-modal.mjs';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { fieldErrorText, cardAlertOf, edit, lastToast } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -115,23 +116,26 @@ test('ui-settings-ask: GET paints the card (defaults: 400 turns, No cap ticked)'
   assert.equal($('#askMaxBudgetUsd').disabled, true);
 });
 
+const settle = async (tick, n = 4) => { for (let i = 0; i < n; i++) await tick(); };
+
 const untickNoCap = ($) => {
   $('#askNoCap').checked = false;
   $('#askNoCap').dispatchEvent(new window.Event('change', { bubbles: true }));
 };
 
 test('ui-settings-ask: Save posts exactly the two ask keys', async () => {
-  const { $, posts, tick, openSettings } = await boot();
+  const { window, $, posts, tick, openSettings } = await boot();
   await openSettings();
   untickNoCap($);
   assert.equal($('#askMaxBudgetUsd').disabled, false, 'unticking No cap opens the amount field');
-  $('#askMaxTurns').value = '55';
-  $('#askMaxBudgetUsd').value = '3.5';
+  edit(window, $('#askMaxTurns'), '55');
+  edit(window, $('#askMaxBudgetUsd'), '3.5');
   $('#askLimitsSave').click();
-  await tick();
+  await settle(tick);
   assert.equal(posts.length, 1, 'exactly one POST');
   assert.deepEqual(posts[0], { askMaxTurns: 55, askMaxBudgetUsd: 3.5, chat: { scriptTools: true } });
-  assert.match($('#askLimitsMsg').textContent, /Saved/);
+  assert.equal($('#askLimitsSave').textContent, 'Saved');
+  assert.ok($('#askLimitsSave').classList.contains('is-done'));
   assert.equal($('#askNoCap').checked, false, 'an amount turns the guard on');
   assert.equal($('#askMaxBudgetUsd').value, '3.5');
 });
@@ -148,30 +152,35 @@ test('ui-settings-ask: No cap unticked with the amount left empty posts the clea
 });
 
 test('ui-settings-ask: client validation short-circuits the POST', async () => {
-  const { $, posts, tick, openSettings } = await boot();
+  const { window, $, posts, tick, openSettings } = await boot();
   await openSettings();
-  $('#askMaxTurns').value = '0';
+  edit(window, $('#askMaxTurns'), '0');
   $('#askLimitsSave').click();
   await tick();
   assert.equal(posts.length, 0, 'out-of-range turns never reaches the server');
-  assert.ok($('#askLimitsMsg').classList.contains('err'));
-  $('#askMaxTurns').value = '400';
+  assert.equal(fieldErrorText($('#askMaxTurns')), 'Enter a whole number from 1 to 500, or leave it blank.');
+  assert.equal($('#askMaxTurns').getAttribute('aria-invalid'), 'true');
+  assert.equal(window.document.activeElement, $('#askMaxTurns'));
+  edit(window, $('#askMaxTurns'), '400');
+  assert.equal(fieldErrorText($('#askMaxTurns')), '', 'editing the field clears its error');
   untickNoCap($);
-  $('#askMaxBudgetUsd').value = '0.05';
+  edit(window, $('#askMaxBudgetUsd'), '0.05');
   $('#askLimitsSave').click();
   await tick();
   assert.equal(posts.length, 0, 'sub-floor budget rejected too');
+  assert.equal(fieldErrorText($('#askMaxBudgetUsd')), 'Enter an amount from 0.1 to 100, or tick No cap.');
 });
 
-test('ui-settings-ask: a server 400 lands verbatim', async () => {
-  const { $, tick, openSettings } = await boot({
-    postResponse: { ok: false, status: 400, json: async () => ({ error: 'askMaxTurns must be an integer between 1 and 500' }) },
+test('ui-settings-ask: a server 400 lands verbatim on the field it names', async () => {
+  const { window, $, tick, openSettings } = await boot({
+    postResponse: { ok: false, status: 400, json: async () => ({ error: '“Turn limit” must be an integer between 1 and 500.', field: 'askMaxTurns' }) },
   });
   await openSettings();
-  $('#askMaxTurns').value = '77';
+  edit(window, $('#askMaxTurns'), '77');
   $('#askLimitsSave').click();
-  await tick();
-  assert.equal($('#askLimitsMsg').textContent, 'askMaxTurns must be an integer between 1 and 500');
+  await settle(tick);
+  assert.equal(fieldErrorText($('#askMaxTurns')), '“Turn limit” must be an integer between 1 and 500.');
+  assert.equal(cardAlertOf($('#ask-settings-card')), null, 'a field error is not also a card alert');
 });
 
 test('ui-settings-ask: the No-cap checkbox disables the field and posts null', async () => {
@@ -182,9 +191,11 @@ test('ui-settings-ask: the No-cap checkbox disables the field and posts null', a
   $('#askNoCap').checked = true;
   $('#askNoCap').dispatchEvent(new window.Event('change', { bubbles: true }));
   assert.equal($('#askMaxBudgetUsd').disabled, true);
+  assert.equal($('#askLimitsSave').disabled, true, 'back to the stored values: nothing to save');
+  edit(window, $('#askMaxTurns'), '55');
   $('#askLimitsSave').click();
   await tick();
-  assert.deepEqual(posts[0], { askMaxTurns: 400, askMaxBudgetUsd: null, chat: { scriptTools: true } });
+  assert.deepEqual(posts[0], { askMaxTurns: 55, askMaxBudgetUsd: null, chat: { scriptTools: true } });
 });
 
 test('ui-settings-ask: Use defaults posts empty strings (the clear-to-default wire value)', async () => {
@@ -291,8 +302,8 @@ test('ui-settings-ask: Confirm sends ONE DELETE /api/ask/threads, reports the ou
   await confirmDialog(window);
   await tick();
   assert.equal(deletes.length, 1, 'exactly one bulk DELETE');
-  assert.equal($('#askHistoryMsg').textContent, 'Deleted 3 chats and 2 worktrees.');
-  assert.ok(!$('#askHistoryMsg').classList.contains('err'));
+  assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Deleted 3 chats and 2 worktrees.', detail: '', action: '' });
+  assert.equal($('#askHistoryMsg').textContent, '');
   assert.equal(historyGets.length, painted + 2, 'pre-dialog + post-delete refresh');
   assert.equal($('#askHistoryCounts').textContent, 'No saved chats.');
   assert.equal($('#askHistoryDelete').disabled, true);
@@ -308,18 +319,18 @@ test('ui-settings-ask: a failed bulk DELETE lands its error in the hint', async 
   await tick();
   await confirmDialog(window);
   await tick();
-  assert.equal($('#askHistoryMsg').textContent, 'database is locked');
-  assert.ok($('#askHistoryMsg').classList.contains('err'));
+  assert.deepEqual(lastToast(window.document), { tone: 'err', title: 'database is locked', detail: '', action: '' });
+  assert.equal($('#askHistoryMsg').textContent, '');
 });
 
 test('ui-settings-ask: the script toggle paints from chat prefs and rides the card\'s Save', async () => {
-  const { $, posts, tick, openSettings } = await boot();
+  const { window, $, posts, tick, openSettings } = await boot();
   await openSettings();
   const cb = $('#askScriptTools');
   assert.ok(cb, 'the toggle is mounted in the Ask Worca card');
   assert.equal(cb.checked, true, 'an absent pref is ON');
   assert.equal($('#ask-script-tools-host').textContent.trim(), 'Create and run scripts');
-  cb.checked = false;
+  edit(window, cb, false);
   $('#askLimitsSave').click();
   await tick();
   assert.deepEqual(posts[0].chat, { scriptTools: false });
@@ -340,8 +351,9 @@ test('ui-settings-ask: web fields paint, and a touched card posts askWeb (trimme
 });
 
 test('ui-settings-ask: an untouched web section is not posted', async () => {
-  const { $, posts, tick, openSettings } = await boot();
+  const { window, $, posts, tick, openSettings } = await boot();
   await openSettings();
+  edit(window, $('#askMaxTurns'), '55');
   $('#askLimitsSave').click(); await tick();
   assert.ok(!('askWeb' in posts[0]));
 });
@@ -351,6 +363,7 @@ test('ui-settings-ask: toggling web off posts an explicit off', async () => {
   await openSettings();
   $('#askWebEnabled').checked = true; $('#askWebEnabled').dispatchEvent(new window.Event('change', { bubbles: true }));
   $('#askWebEnabled').checked = false; $('#askWebEnabled').dispatchEvent(new window.Event('change', { bubbles: true }));
+  edit(window, $('#askMaxTurns'), '55');            // the web toggle is back where it was: make the card dirty
   $('#askLimitsSave').click(); await tick();
   assert.deepEqual(posts[0].askWeb, { enabled: false, anyHost: false, allowedDomains: [], search: null });
 });
@@ -362,4 +375,78 @@ test('ui-settings-ask: "Any site, without asking" paints and posts anyHost', asy
   $('#askWebAnyHost').checked = false; $('#askWebAnyHost').dispatchEvent(new window.Event('change', { bubbles: true }));
   $('#askLimitsSave').click(); await tick();
   assert.equal(posts[0].askWeb.anyHost, false);
+});
+
+// ---- #555: busy → Saved on the button, field errors, card alerts, dirty-state Save -------------
+
+test('#555 Ask limits: Save is disabled until a change, then busy → Saved; no grey line', async () => {
+  const { window, $, tick, posts } = await boot({ postResponse: { ok: true, status: 200, json: async () => ({ askMaxTurns: 200 }) } });
+  const save = $('#askLimitsSave');
+  assert.equal(save.disabled, true);
+  save.click();
+  await settle(tick);
+  assert.equal(posts.length, 0, 'a disabled Save posts nothing');
+  edit(window, $('#askMaxTurns'), '200');
+  assert.equal(save.disabled, false);
+  assert.equal($('#ask-settings-card .dirty-mark').hidden, false);
+  save.click();
+  assert.equal(save.textContent, 'Saving…');
+  await settle(tick);
+  assert.equal(posts.length, 1);
+  assert.deepEqual({ t: posts[0].askMaxTurns, b: posts[0].askMaxBudgetUsd }, { t: 200, b: '' }, 'body unchanged from today');
+  assert.equal(save.textContent, 'Saved');
+  assert.ok(save.classList.contains('is-done'));
+  assert.equal($('#askLimitsMsg'), null);
+});
+
+test('#555 Ask limits: a server error naming a field lands on that input', async () => {
+  const { window, $, tick } = await boot({ postResponse: { ok: false, status: 400,
+    json: async () => ({ error: '“Turn limit” must be an integer between 1 and 500.', field: 'askMaxTurns' }) } });
+  edit(window, $('#askMaxTurns'), '7');
+  $('#askLimitsSave').click();
+  await settle(tick);
+  assert.equal($('#askMaxTurns').getAttribute('aria-invalid'), 'true');
+  assert.equal(fieldErrorText($('#askMaxTurns')), '“Turn limit” must be an integer between 1 and 500.');
+  assert.equal(window.document.activeElement, $('#askMaxTurns'));
+  assert.equal($('#askLimitsSave').disabled, false, 'still dirty → Save stays enabled for the retry');
+});
+
+test('#555 Ask limits: a server error with no field is a card alert above the buttons', async () => {
+  const { window, $, tick } = await boot({ postResponse: { ok: false, status: 400,
+    json: async () => ({ error: 'Another Worca process is writing the settings file. Try again in a moment.' }) } });
+  edit(window, $('#askMaxTurns'), '9');
+  $('#askLimitsSave').click();
+  await settle(tick);
+  assert.deepEqual(cardAlertOf($('#ask-settings-card')), { title: 'Not saved', detail: 'Another Worca process is writing the settings file. Try again in a moment.' });
+  assert.ok($('#ask-settings-card .card-alert').nextElementSibling.classList.contains('add-project-actions'));
+});
+
+test('#555 Ask limits: Reset keeps its body and is never locked', async () => {
+  const { $, tick, posts } = await boot({ postResponse: { ok: true, status: 200, json: async () => ({}) } });
+  $('#askLimitsReset').click();
+  await settle(tick);
+  assert.deepEqual({ t: posts[0].askMaxTurns, b: posts[0].askMaxBudgetUsd }, { t: '', b: '' });
+});
+
+test('#555 Ask limits: a server error on a web field lands on that field', async () => {
+  const { window, $, tick, openSettings } = await boot({ postResponse: { ok: false, status: 400,
+    json: async () => ({ error: '“Allowed domains”: "foo bar" is not a host name.', field: 'askWeb.allowedDomains' }) } });
+  await openSettings();
+  edit(window, $('#askWebDomains'), 'foo bar');
+  $('#askLimitsSave').click();
+  await settle(tick);
+  assert.equal($('#askWebDomains').getAttribute('aria-label'), 'Allowed domains');
+  assert.equal(fieldErrorText($('#askWebDomains')), '“Allowed domains”: "foo bar" is not a host name.');
+});
+
+test('#555 Ask limits: a repaint re-cleans the card', async () => {
+  const { window, $, tick, openSettings } = await boot();
+  await openSettings();
+  await settle(tick);
+  assert.equal($('#askLimitsSave').disabled, true, 'freshly painted: clean');
+  assert.equal($('#ask-settings-card .dirty-mark').hidden, true);
+  edit(window, $('#askMaxTurns'), '12');
+  assert.equal($('#ask-settings-card .dirty-mark').hidden, false);
+  edit(window, $('#askMaxTurns'), '400');
+  assert.equal($('#askLimitsSave').disabled, true, 'reverted: clean again');
 });

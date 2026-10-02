@@ -6,6 +6,7 @@
 // secret value is ever fetched. The modal shells (#plugin-modal, confirm) are app.js's, passed in.
 import { relTime } from './plugins-view.mjs';
 import { compileDefinition, formFromDefinition, blankDefinitionForm, createDefinitionForm } from './mcp-definition-form.mjs';
+import { splitMessage } from './feedback.mjs';
 
 const enc = encodeURIComponent;
 function h(doc, tag, cls, text) {
@@ -92,10 +93,18 @@ export function collectFieldInputs(root) {
 }
 
 // ── the Settings tab controller ──────────────────────────────────────────────────────────────────
-export function createMcpView({ host, api, navigate, confirm, modal, doc = globalThis.document, now = () => Date.now() }) {
+export function createMcpView({ host, api, navigate, confirm, modal, doc = globalThis.document, now = () => Date.now(), notify = null }) {
   const st = { view: 'sets', setId: 'general', sets: null, set: null, servers: null, testing: new Set(), msg: '', msgKind: '' };
-  const say = (text, kind = '') => { st.msg = text; st.msgKind = kind; const el = host.querySelector('.form-msg'); if (el) { el.textContent = text; el.className = `form-msg${kind ? ` ${kind}` : ''}`; } };
+  // #555: a result is a toast; 'err-inline' (what load() reports) stays on the page's .form-msg line.
+  const say = (text, kind = '') => {
+    if (kind && kind !== 'err-inline' && text && notify) { notify({ tone: kind, ...splitMessage(text) }); text = ''; kind = ''; }
+    if (kind === 'err-inline') kind = 'err';
+    st.msg = text; st.msgKind = kind;
+    const el = host.querySelector('.form-msg');
+    if (el) { el.textContent = text; el.className = `form-msg${kind ? ` ${kind}` : ''}`; }
+  };
   const fail = (r) => say((r.data && r.data.error) || `HTTP ${r.status}`, 'err');
+  const failInline = (r) => say((r.data && r.data.error) || `HTTP ${r.status}`, 'err-inline');
   const setPath = (id) => `/api/mcp/sets/${enc(id)}`;
   const isTeam = (set) => set.group === 'team';
   const memberPath = (id, serverId) => `${setPath(id)}/members/${enc(serverId)}`;
@@ -110,15 +119,15 @@ export function createMcpView({ host, api, navigate, confirm, modal, doc = globa
       if (seq !== loadSeq) return;
       st.servers = r.ok ? r.data.servers : [];
       if (s) st.sets = s.ok ? s.data.sets : [];
-      if (!r.ok) fail(r);
-      else if (r.data.newer) say('MCP registry files need a newer Worca', 'err');
+      if (!r.ok) failInline(r);
+      else if (r.data.newer) say('MCP registry files need a newer Worca', 'err-inline');
     } else {
       const [l, s] = await Promise.all([api('GET', '/api/mcp/sets'), api('GET', setPath(st.setId))]);
       if (seq !== loadSeq) return;
       st.sets = l.ok ? l.data.sets : [];
       st.set = s.ok ? s.data : null;
-      if (!s.ok) fail(s);
-      else if (l.data.newer) say('MCP registry files need a newer Worca', 'err');
+      if (!s.ok) failInline(s);
+      else if (l.data.newer) say('MCP registry files need a newer Worca', 'err-inline');
     }
     paint();
   }
@@ -387,7 +396,7 @@ export function createMcpView({ host, api, navigate, confirm, modal, doc = globa
       const target = setId || picked;
       const server = serverId || picked;
       const { values, secrets } = collectFieldInputs(slot);
-      const r = await write('PUT', memberPath(target, server), { enabled: true, values, secrets }, '', msg);
+      const r = await write('PUT', memberPath(target, server), { enabled: true, values, secrets }, 'Server added', msg);
       if (!r) return;
       modal.close();
       st.setId = target;
@@ -435,14 +444,14 @@ export function createMcpView({ host, api, navigate, confirm, modal, doc = globa
     if (d.act === 'add-server') return openDefinition(null);
     if (d.act === 'rename') {
       const v = await promptName('Rename set', cur.name);
-      if (v && await write('PUT', setPath(cur.id), { name: v })) await load();
+      if (v && await write('PUT', setPath(cur.id), { name: v }, 'Set renamed')) await load();
       return;
     }
     if (d.act === 'duplicate') {
       // P1 reserves "Team · " names and caps one at 40: a Team set's copy is named after its home.
       const v = await promptName(`Duplicate ${cur.name}`, `${cur.group === 'team' ? cur.name.slice('Team · '.length) : cur.name} copy`.slice(0, 40));
       if (!v) return;
-      const r = await write('POST', `${setPath(cur.id)}/duplicate`, { name: v });
+      const r = await write('POST', `${setPath(cur.id)}/duplicate`, { name: v }, 'Set duplicated');
       if (r) navigate(mcpRoute(r.data.id));
       return;
     }
@@ -465,7 +474,7 @@ export function createMcpView({ host, api, navigate, confirm, modal, doc = globa
     if (d.remove) {
       const m = st.set.members.find((x) => x.serverId === d.remove);
       const ok = await confirm({ title: 'Remove from set', message: `Remove ${m.copy} from ${cur.name}? Its values, secrets and test result go.`, confirmLabel: 'Remove', danger: true });
-      if (ok && await write('DELETE', memberPath(cur.id, d.remove))) await load();
+      if (ok && await write('DELETE', memberPath(cur.id, d.remove), undefined, 'Server removed')) await load();
       return;
     }
     if (d.secret) return replaceSecret(d.server, d.secret);
@@ -482,7 +491,7 @@ export function createMcpView({ host, api, navigate, confirm, modal, doc = globa
       const s = st.servers.find((x) => x.id === d.removeServer);
       const leaves = s.inSets.length ? ` It leaves ${s.inSets.map((x) => x.name).join(', ')}.` : '';
       const ok = await confirm({ title: 'Remove MCP server', message: `Remove ${s.base} from worca?${leaves} Its values, secrets and test results go.`, confirmLabel: 'Remove', danger: true });
-      if (ok && await write('DELETE', `/api/mcp/servers/${enc(s.id)}`)) await load();
+      if (ok && await write('DELETE', `/api/mcp/servers/${enc(s.id)}`, undefined, 'Server removed')) await load();
     }
   }
 
@@ -557,7 +566,7 @@ export function createMcpView({ host, api, navigate, confirm, modal, doc = globa
     const uses = set.usedBy.length ? `\nUsed by ${set.usedBy.map((p) => p.name).join(', ')}.` : '';
     const none = left.length ? `\n${left.join(', ')} will have no MCP servers in runs.` : '';
     const ok = await confirm({ title: 'Delete set', message: `Delete ${set.name}? Its values, secrets and test results go.${uses}${none}`, confirmLabel: 'Delete set', danger: true });
-    if (ok && await write('DELETE', setPath(set.id))) navigate(mcpRoute('general'));
+    if (ok && await write('DELETE', setPath(set.id), undefined, 'Set deleted')) navigate(mcpRoute('general'));
   }
 
   function openDefinition(server) {

@@ -7,6 +7,7 @@ import { JSDOM } from 'jsdom';
 import { SEED_TEMPLATES } from '../src/core/graph/seed-templates.mjs';
 import { realRegistryIndex } from './helpers/graph-ports.mjs';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -36,7 +37,7 @@ const V1_ROW = { id: 'wf_old', name: 'Legacy one', version: 1, domain: 'coding',
 const DEFAULT_ROW = { id: 'wf_default', name: 'Default', version: 2, domain: 'coding',
   nodes: [{ id: 'n_task', kind: 'task', x: 60, y: 200, config: {} }, { id: 'n_end', kind: 'end', x: 960, y: 200, config: {} }], wires: [] };
 
-async function boot({ agentsFail = false, archived = [], workflows = null, del = null } = {}) {
+async function boot({ agentsFail = false, archived = [], workflows = null, del = null, exportStatus = 0 } = {}) {
   const rows = workflows || [V2_ROW, V1_ROW];
   const deletes = [];
   const importBodies = [];
@@ -76,6 +77,7 @@ async function boot({ agentsFail = false, archived = [], workflows = null, del =
       if (at >= 0) rows.splice(at, 1);
       return json({ ok: true });
     }
+    if (exportStatus && /\/api\/workflows\/[^/]+\/export$/.test(url)) return json({ error: 'disk full' }, exportStatus);
     if (url.includes('/api/scripts')) return json({ scripts: SCRIPTS });
     if (url.includes('/api/agents')) {
       agentFetches += 1;
@@ -280,6 +282,21 @@ test('Export… opens the format dialog for a v2 row, not a v1 row', async () =>
   doc.getElementById('export-cancel').dispatchEvent(new win.Event('click'));
 });
 
+// #555 D2c: a failed export says so in the error tone, not the neutral one.
+test('#555 D2c: a failed export marks #export-msg with the err class', async () => {
+  const win = await boot({ workflows: [DEFAULT_ROW, V2_ROW, V1_ROW], exportStatus: 500 });
+  const doc = win.document;
+  const row = [...doc.querySelectorAll('#gv-saved-list .pl-item')].find((r) => r.dataset.id === 'wf_g');
+  row.querySelector('.pl-export').dispatchEvent(new win.Event('click'));
+  doc.querySelector('#export-format .seg-btn[data-format="skill"]').dispatchEvent(new win.Event('click'));
+  doc.getElementById('export-apply-btn').dispatchEvent(new win.Event('click'));
+  for (let i = 0; i < 6; i += 1) await new Promise((r) => setTimeout(r, 0));
+  const msg = doc.getElementById('export-msg');
+  assert.match(msg.textContent, /^Export failed/);
+  assert.ok(msg.classList.contains('err'), 'the failure line carries the err class');
+  doc.getElementById('export-cancel').dispatchEvent(new win.Event('click'));
+});
+
 // One tab per domain; the row no longer shows its domain; Import… selects the
 // imported row's tab and pins a NEW pill on it for the page session.
 const GENERAL_ROW = { id: 'wf_gen', name: 'General one', version: 2, domain: 'general',
@@ -311,7 +328,8 @@ test('the saved list is tabbed by domain, and Import… lands on the imported ro
   const pill = doc.querySelector('#gv-saved-list .pl-item[data-id="wf_shared-in"] .pl-new');
   assert.ok(pill && pill.textContent === 'NEW', 'the imported row carries a NEW pill');
   assert.equal(doc.querySelector('#gv-saved-list .pl-item[data-id="wf_g"] .pl-new'), null, 'only the imported one');
-  assert.equal(doc.getElementById('gv-saved-msg').textContent, 'Imported "Shared In".');
+  assert.equal(lastToast(doc).title, 'Imported "Shared In".', 'the result is a toast (#555)');
+  assert.equal(doc.getElementById('gv-saved-msg').textContent, '');
   assert.deepEqual(tabs().map((t) => t.querySelector('.gv-saved-tab-badge').textContent), ['3', '1']);
 });
 
@@ -396,9 +414,9 @@ test('MAJ-17: a refused delete surfaces the server error and leaves the list alo
   await tick();
   doc.getElementById('confirm-ok').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
   await tick();
-  const msg = doc.getElementById('gv-saved-msg');
-  assert.equal(msg.textContent, 'the default workflow cannot be deleted', 'the server string, verbatim');
-  assert.equal(msg.className, 'form-msg err');
+  assert.deepEqual(lastToast(doc), { tone: 'err', title: 'the default workflow cannot be deleted', detail: '', action: '' },
+    'the server string, verbatim, as an error toast (#555)');
+  assert.equal(doc.getElementById('gv-saved-msg').textContent, '');
   assert.equal(doc.querySelectorAll('#gv-saved-list .pl-item').length, before, 'the row is still there');
 });
 
@@ -411,6 +429,7 @@ test('MAJ-17: a successful delete clears the message and refreshes', async () =>
   doc.getElementById('confirm-ok').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
   await tick();
   assert.equal(doc.getElementById('gv-saved-msg').textContent, '');
+  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Pipeline deleted', detail: 'Graph one', action: '' }, 'a silent success gains a toast (#555)');
   assert.equal(win.__deletes.length, 1);
   assert.equal(doc.querySelector('#gv-saved-list .pl-item[data-id="wf_g"]'), null,
     'the list is refreshed: the deleted row is gone');
@@ -455,7 +474,7 @@ test('MAJ-17: the archived chip surfaces its refusal too', async () => {
   const doc = win.document;
   doc.querySelector('#gv-archived .pl-chip').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
   await tick();
-  assert.equal(doc.getElementById('gv-saved-msg').textContent, 'workflow not found');
+  assert.equal(lastToast(doc).title, 'workflow not found');
   assert.equal(doc.querySelectorAll('#gv-archived .pl-chip').length, 1, 'the chip is still there');
 });
 
@@ -627,7 +646,7 @@ test('importing a workflow with script commands shows them first; Cancel and Clo
   assert.equal(await p2, true);
   assert.equal(win.__rows.length, n0 + 1);
   assert.equal(win.__importBodies.at(-1).acceptScripts, true, 'the confirmed import carries the confirmation');
-  assert.match(doc.getElementById('gv-saved-msg').textContent, /Imported "Shelly"/);
+  assert.match(lastToast(doc).title, /Imported "Shelly"/);
   const plain = win.__gvImport({ ...V2_ROW, id: undefined, name: 'Plain' });
   await tick();
   assert.equal(doc.getElementById('plugin-modal').classList.contains('hidden'), true, 'no scripts: no dialog');

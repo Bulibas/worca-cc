@@ -176,11 +176,32 @@ export function pillText(state, minutes = 0) {
   }
 }
 
+/** How many answers the answers list shows for these stored records, and how many of them are to
+ *  check: one per answered question (awayAnswerRows), never one per stored ask. A pause is not an answer. */
+export function awayAnswerCounts(records) {
+  let answers = 0;
+  let checks = 0;
+  for (const d of Array.isArray(records) ? records : []) {
+    if (!d || typeof d !== 'object' || d.choice == null) continue;
+    for (const row of awayAnswerRows(d)) {
+      answers += 1;
+      if (row.check) checks += 1;
+    }
+  }
+  return { answers, checks };
+}
+
+/** The rows to check first, each side in its own order (the answers list, per ask). */
+export const checksFirst = (rows) => [...rows.filter((r) => r.check), ...rows.filter((r) => !r.check)];
+
 /** The end-of-run line every existing channel uses (chat, CLI, run pages): "5 answers while you were
- *  away — 2 to check", or null when Away mode gave no answer. `night` = the run's {decisions, flagged}. */
+ *  away — 2 to check", or null when Away mode gave no answer. `night` = the run's counters: the
+ *  per-question {answers, checks} (awayAnswerCounts) when the run has them, else the per-ask
+ *  {decisions, flagged} a run recorded before them. */
 export function awayAnswersSummary(night) {
-  const n = Math.max(0, Number(night && night.decisions) || 0);
+  const perQuestion = night && night.answers != null;
+  const n = Math.max(0, Number(night && (perQuestion ? night.answers : night.decisions)) || 0);
   if (!n) return null;
-  const m = Math.min(n, Math.max(0, Number(night.flagged) || 0));
+  const m = Math.min(n, Math.max(0, Number(perQuestion ? night.checks : night.flagged) || 0));
   return `${n} answer${n === 1 ? '' : 's'} while you were away — ${m ? `${m} to check` : 'nothing to check'}`;
 }

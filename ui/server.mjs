@@ -262,6 +262,7 @@ import {
 } from '../src/core/memory-store.mjs';
 import { memoryCaps } from '../src/core/settings.mjs';
 import { onboardingPrefs, setOnboardingPrefs } from '../src/core/settings.mjs';
+import { settingsErrorReply, asSettingsField } from '../src/core/settings-errors.mjs';
 import { configuredClaudeBin, onboardingStatus } from '../src/core/onboarding.mjs';   // a THIRD settings import line (the two blocks above are unrelated readers)
 import { probeClaudeAuth, CLAUDE_SIGNED_OUT_CODE, CLAUDE_SIGNED_OUT_MESSAGE } from '../src/core/preflight.mjs';
 import { failedBecauseSignedOut } from '../src/core/claude-auth.mjs';
@@ -7118,44 +7119,58 @@ app.post('/api/settings', async (req, res) => {
   if (has('askMaxTurns')) ask.askMaxTurns = body.askMaxTurns ?? '';
   if (has('askMaxBudgetUsd')) ask.askMaxBudgetUsd = body.askMaxBudgetUsd === undefined ? '' : body.askMaxBudgetUsd;
   try {
-    assertCostLimitInputs(budget);
-    if (hasHumanRateKey) assertHumanRateInput(body.humanRateUsdPerHour ?? '');
-    assertAskLimitInputs(ask);
-    if (hasAskWeb && body.askWeb !== null) assertAskWebInput(body.askWeb);
-    if (hasDebugSpawnKey) assertDebugSpawnInput(body.debugSpawnEnabled);
-    if (hasTitleModelKey) {
+    // Each validator / setter that can refuse a value runs tagged with the body key it checks,
+    // so the 400 can name the field (#555). Every argument is exactly as before. With no budget
+    // or ask key the object is {}, which both set-validators accept, so the guards change nothing.
+    // assertCostLimitInputs and assertAskLimitInputs name the failing key first ("askMaxTurns must…").
+    if (hasBudgetKey) {
+      try { assertCostLimitInputs(budget); } catch (e) {
+        e.settingsCtx = ['pipelineCostLimitUsd', 'totalCostLimitUsd', 'costLimitResetPeriod'].find((k) => String(e.message).startsWith(k)) || 'pipelineCostLimitUsd';
+        throw e;
+      }
+    }
+    if (hasHumanRateKey) asSettingsField('humanRateUsdPerHour', () => assertHumanRateInput(body.humanRateUsdPerHour ?? ''));
+    if (hasAskKey) {
+      try { assertAskLimitInputs(ask); } catch (e) {
+        e.settingsCtx = ['askMaxTurns', 'askMaxBudgetUsd'].find((k) => String(e.message).startsWith(k)) || 'askMaxTurns';
+        throw e;
+      }
+    }
+    if (hasAskWeb && body.askWeb !== null) asSettingsField('askWeb', () => assertAskWebInput(body.askWeb));
+    if (hasDebugSpawnKey) asSettingsField('debugSpawnEnabled', () => assertDebugSpawnInput(body.debugSpawnEnabled));
+    if (hasTitleModelKey) asSettingsField('titleModel', () => {
       assertTitleModelInput(titleModelInput);
       if (titleModelInput !== '' && titleModelInput !== null && !catalogHasModel(titleModelInput)) {
         throw new Error(`unknown model ${JSON.stringify(String(titleModelInput))} — pick one from the catalog`);
       }
-    }
-    if (hasHideBuiltinKey) assertHideBuiltinModelsInput(body.hideBuiltinModels);
-    if (hasThemeKey) assertThemeInput(body.theme);
-    if (hasUiLevelKey) assertUiLevelInput(body.uiLevel);
-    if (hasAutoKey) assertAutoWorkflowModelInput(body.autoWorkflowModel ?? '', autoModels);
-    if (hasPrDescKey) assertPrDescriptionModelInput(body.prDescriptionModel ?? '', prDescModels);
-    if (hasMemoryDefragKey) assertMemoryDefragModelInput(body.memoryDefrag, defragModels);
-    if (hasWorkspaceScanKey) assertWorkspaceScanInput(body.workspaceScan, wsScanModels);
-    if (has('nightMode') && body.nightMode !== null) {
+    });
+    if (hasHideBuiltinKey) asSettingsField('hideBuiltinModels', () => assertHideBuiltinModelsInput(body.hideBuiltinModels));
+    if (hasThemeKey) asSettingsField('theme', () => assertThemeInput(body.theme));
+    if (hasUiLevelKey) asSettingsField('uiLevel', () => assertUiLevelInput(body.uiLevel));
+    if (hasAutoKey) asSettingsField('autoWorkflowModel', () => assertAutoWorkflowModelInput(body.autoWorkflowModel ?? '', autoModels));
+    if (hasPrDescKey) asSettingsField('prDescriptionModel', () => assertPrDescriptionModelInput(body.prDescriptionModel ?? '', prDescModels));
+    if (hasMemoryDefragKey) asSettingsField('memoryDefrag', () => assertMemoryDefragModelInput(body.memoryDefrag, defragModels));
+    if (hasWorkspaceScanKey) asSettingsField('workspaceScan', () => assertWorkspaceScanInput(body.workspaceScan, wsScanModels));
+    if (has('nightMode') && body.nightMode !== null) asSettingsField('nightMode', () => {
       const { __unset, ...patch } = body.nightMode && typeof body.nightMode === 'object' && !Array.isArray(body.nightMode) ? body.nightMode : { __invalid: true };
       if (patch.__invalid) throw new Error('nightMode must be an object or null');
       if (__unset !== undefined && !Array.isArray(__unset)) throw new Error('nightMode.__unset must be a list of field names');
       validateNightPatch(patch);
-    }
-    if (has('nightModeToggle')) assertNightModeToggleInput(body.nightModeToggle);
-    if (hasActionsKey) assertActionsInput(body.actions);
-    if (has('sync')) assertSyncSettingsInput(body.sync);
+    });
+    if (has('nightModeToggle')) asSettingsField('nightModeToggle', () => assertNightModeToggleInput(body.nightModeToggle));
+    if (hasActionsKey) asSettingsField('actions', () => assertActionsInput(body.actions));
+    if (has('sync')) asSettingsField('sync', () => assertSyncSettingsInput(body.sync));
     // Root first: it is the one key whose setter can still fail AFTER the asserts
     // above (an unusable path), so every other key's write must come after it or
     // a mixed POST would answer 400 with those keys already applied on disk.
     // Legacy contract: a POST that names NO known key clears root; the known
     // keys live beside their setters (SETTINGS_POST_KEYS), not in a list here.
     if (has('root') || !SETTINGS_POST_KEYS.some(has)) {
-      await setWorcaRoot(typeof body.root === 'string' ? body.root : '');
+      await asSettingsField('root', () => setWorcaRoot(typeof body.root === 'string' ? body.root : ''));
     }
-    if (has('chat')) await setChatPrefs(body.chat);
+    if (has('chat')) await asSettingsField('chat', () => setChatPrefs(body.chat));
     if (has('projectsRoot')) {
-      await setProjectsRoot(typeof body.projectsRoot === 'string' ? body.projectsRoot : '');
+      await asSettingsField('projectsRoot', () => setProjectsRoot(typeof body.projectsRoot === 'string' ? body.projectsRoot : ''));
     }
     if (has('pipelineCostLimitUsd')) await setPipelineCostLimitUsd(budget.pipelineCostLimitUsd);
     if (has('totalCostLimitUsd')) await setTotalCostLimitUsd(budget.totalCostLimitUsd);
@@ -7173,7 +7188,7 @@ app.post('/api/settings', async (req, res) => {
     if (hasPrDescKey) await setPrDescriptionModel(body.prDescriptionModel ?? '', { models: prDescModels });
     if (hasMemoryDefragKey) await setMemoryDefragModel(body.memoryDefrag, { models: defragModels });
     if (hasWorkspaceScanKey) await setWorkspaceScanModels(body.workspaceScan, { models: wsScanModels });
-    if (has('schedule')) await setScheduleDefaults(body.schedule && typeof body.schedule === 'object' ? body.schedule : {});
+    if (has('schedule')) await asSettingsField('schedule', () => setScheduleDefaults(body.schedule && typeof body.schedule === 'object' ? body.schedule : {}));
     if (has('nightMode')) await setNightMode(body.nightMode);
     if (has('nightModeToggle')) await setNightModeToggle(body.nightModeToggle);
     if (has('sync')) await setSyncDefaults(body.sync);
@@ -7190,8 +7205,9 @@ app.post('/api/settings', async (req, res) => {
     res.json({ ...settingsState(), ...(await autoModelState()), ...(await prDescriptionModelState()), chat: chatPrefs(),
       ...(actionsWarnings ? { actionsWarnings } : {}) });
   } catch (err) {
-    // The setters throw only on an unusable path -> client error (400).
-    return badRequest(res, err && err.message ? err.message : String(err));
+    // 400 with the user's words and, when known, the body path of the bad field (#555).
+    const { error, field } = settingsErrorReply(err, err && err.settingsCtx);
+    return res.status(400).json({ error, ...(field ? { field } : {}) });
   }
 });
 

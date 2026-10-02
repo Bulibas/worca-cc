@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { renderProjectActionsEditor, readEditorForm, renderStackEditor, readStackForm } from '../ui/public/actions-config-view.mjs';
+import { editorFieldEl, renderProjectActionsEditor, readEditorForm, renderStackEditor, readStackForm } from '../ui/public/actions-config-view.mjs';
 
 const dom = new JSDOM('<!doctype html><body></body>');
 const doc = dom.window.document;
@@ -133,4 +133,41 @@ test('stack editor: a member with no actions links to its Actions tab', () => {
   const line = [...root.querySelectorAll('.ac-member')].find((l) => l.textContent.includes('web'));
   assert.match(line.textContent, /no actions yet, add them on its Actions tab/);
   assert.equal(line.querySelector('a').getAttribute('href'), '#projects/web-5e6f7a8b/actions');
+});
+
+// #555: a server ActionConfigError.field names an input; the app puts the error on it.
+test('editorFieldEl resolves ActionConfigError fields to the editor inputs', () => {
+  const cfg = CFG();
+  cfg.actions.push({ id: 'test', label: 'Test', kind: 'task', cmd: 'npm test', cmdWin32: null, cwd: '.', env: [], openUrl: null, ready: { kind: 'immediate' } });
+  cfg.actions[0].env.push({ name: 'MODE', type: 'text', value: 'dev' });
+  const root = renderProjectActionsEditor(cfg, { doc, detected: {} });
+  const rows = root.querySelectorAll('.ac-action');
+  assert.equal(editorFieldEl(root, 'setup'), root.querySelector('.ac-setup'));
+  assert.equal(editorFieldEl(root, 'actions[1].cmd'), rows[1].querySelector('.ac-f-cmd'));
+  assert.equal(editorFieldEl(root, 'actions[0].env[1]'), rows[0].querySelectorAll('.ac-env-name')[1]);
+  assert.equal(editorFieldEl(root, 'actions[0].ready'), rows[0].querySelector('.ac-ready-port'));
+  rows[0].querySelector('.ac-ready-kind').value = 'output';
+  assert.equal(editorFieldEl(root, 'actions[0].ready'), rows[0].querySelector('.ac-ready-text'));
+  assert.equal(editorFieldEl(root, 'actions'), null);
+  assert.equal(editorFieldEl(root, 'bogus'), null);
+
+  const stacks = renderStackEditor(STACK_DATA(), { doc });
+  const stack = stacks.querySelector('.ac-stack');
+  assert.equal(editorFieldEl(stacks, 'stacks[0].label'), stack.querySelector('.ac-stack-label'));
+  assert.equal(editorFieldEl(stacks, 'stacks[0].steps[1].action'), stack.querySelectorAll('.ac-step')[1].querySelector('.ac-step-action'));
+  assert.equal(editorFieldEl(stacks, 'stacks[0].steps'), null);
+});
+
+test('onSave gets the form and the Save button, in both editors', () => {
+  const calls = [];
+  const onSave = (form, button) => calls.push([form, button]);
+  const root = renderProjectActionsEditor(CFG(), { doc, detected: {}, onSave });
+  fire(root.querySelector('.ac-save'), 'click');
+  const stacks = renderStackEditor(STACK_DATA(), { doc, onSave });
+  fire(stacks.querySelector('.ac-save'), 'click');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][0].setup, 'npm ci');
+  assert.ok(calls[0][1].classList.contains('ac-save'));
+  assert.equal(calls[1][0].stacks.length, 1);
+  assert.ok(calls[1][1].classList.contains('ac-save'));
 });

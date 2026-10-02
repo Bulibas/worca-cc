@@ -319,27 +319,31 @@ test('History run page: "Answered for you" lists the stored answers', async () =
   assert.deepEqual(rows.map((r) => [r.querySelector('.rd-na-a').textContent, !!r.querySelector('.rd-na-check')]), [['pg', false], ['One more fix round', true]]);
 });
 
-test('History run page: a note at the top of the result says how many answers to check', async () => {
-  const sec = await detailNote({ night: { optIn: true, override: 'auto', decisions: 4, flagged: 1 } });
-  assert.equal(sec.querySelector('.rd-away-note-text').textContent, 'Away mode: 4 answers while you were away — 1 to check.');
-  assert.equal(sec.querySelector('.rd-away-note button').textContent, 'See the answers');
-  assert.equal(await detailNote({ night: { decisions: 0, flagged: 0 } }), null);
+test('History run page: a note at the top of the card says how many answers to check', async () => {
+  const decisions = [
+    { questionId: 'clarify-1', kind: 'clarify', choice: 'a | b', strategy: 'weights', flagged: true, questions: [{ id: 'q1', choice: 'a', flagged: false }, { id: 'q2', choice: 'b', flagged: true }] },
+    { questionId: 'gate-1', kind: 'gate', choice: 'continue', strategy: 'rule', flagged: false },
+  ];
+  const note = await detailNote(decisions);
+  assert.equal(note.hidden, false);
+  assert.equal(note.querySelector('.rd-away-note-text').textContent, 'Away mode: 3 answers while you were away — 1 to check.');
+  assert.equal(note.querySelector('button').textContent, 'See the answers');
+  assert.equal((await detailNote([])).hidden, true);
 });
 
-async function detailNote(state) {
+async function detailNote(decisions) {
   const ctx = await boot({ whoami: SOLO, fetchHandler: (u) => {
-    if (u.includes('/api/night-decisions')) return ok({ decisions: [] });
+    if (u.includes('/api/night-decisions')) return ok({ decisions });
     if (u.endsWith('/api/history/pr')) return ok({ ok: true });
     if (u.endsWith('/diff')) return fail(404, { error: 'no diff' });
     if (u.endsWith('/log')) return fail(404, { error: 'no log' });
     if (u.endsWith('/api/history')) return ok({ pipelines: [DETAIL_ROW], ghAvailable: false });
-    if (u.endsWith(`/api/history/${KEY}/${DETAIL_ROW.id}`)) return ok(detailOf(state));
+    if (u.endsWith(`/api/history/${KEY}/${DETAIL_ROW.id}`)) return ok(detailOf({}));
     return null;
   } });
   go(ctx.window, `history/${KEY}/${DETAIL_ROW.id}`);
   await settle(ctx.window, 8);
-  const note = ctx.doc.querySelector('#hist-detail .hd-result .rd-away-note');
-  return note ? note.parentElement : null;
+  return ctx.doc.querySelector('#hist-detail .rd-sheet .rd-away-note');
 }
 
 test('History run page: no Away mode answers, no section', async () => {

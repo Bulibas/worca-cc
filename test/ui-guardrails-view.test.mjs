@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -129,7 +130,7 @@ test('create wizard: New -> Step 1 -> Next -> Step 2 -> Create POSTs {name, sett
   assert.ok(modal.classList.contains('hidden'), 'closes on success');
 });
 
-test('delete flow: confirm -> DELETE; a 409 renders the pinning-run list in the modal', async () => {
+test('delete flow: confirm -> DELETE; a 409 is an error toast whose Details renders the pinning-run list', async () => {
   const deletes = [];
   const { window } = await boot({
     fetchHandler: (u, opts) => {
@@ -150,7 +151,15 @@ test('delete flow: confirm -> DELETE; a 409 renders the pinning-run list in the 
   click(window, window.document.querySelector('#confirm-ok'));
   await tick(); await tick();
   assert.equal(deletes.length, 1);
+  // #555: the refusal is an error toast named for the set; Details opens the pinning-run list.
+  const toast = lastToast(window.document);
+  assert.equal(toast.tone, 'err');
+  assert.match(toast.title, /^Cannot delete /);
+  assert.equal(toast.detail, 'cannot delete guardrail set "gr_org" — still referenced');
+  assert.equal(toast.action, 'Details');
   const modal = window.document.querySelector('#plugin-modal');
+  assert.ok(modal.classList.contains('hidden'), 'no dialog until Details is pressed');
+  click(window, window.document.querySelector('#toasts .toast-act'));
   assert.ok(!modal.classList.contains('hidden'), '409 modal shown');
   assert.match(modal.querySelector('.grv-refs409 .mono').textContent, /pipeline p1/);
 });
@@ -352,7 +361,8 @@ test('deep link to a non-existent id shows a message and opens no modal', async 
   await openGuardrails(window, 'nope');
   const modal = window.document.querySelector('#plugin-modal');
   assert.ok(modal.classList.contains('hidden'), 'no wizard for a missing id');
-  assert.match(window.document.querySelector('#guardrails-msg').textContent, /not found/);
+  assert.match(lastToast(window.document).title, /not found/);
+  assert.equal(window.document.querySelector('#guardrails-msg').textContent, '');
 });
 
 test('built-in view is read-only: clicking a disabled switch is a no-op', async () => {

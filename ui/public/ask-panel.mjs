@@ -20,6 +20,7 @@ import { classifyLoops } from '../../src/shared/graph/loops.mjs';
 import { portsFnFor } from '../../src/shared/graph/ports.mjs';
 import { parseMcpToolName } from '../../src/shared/mcp-tool-name.mjs';
 import { mcpSkipView, mcpCopyNote } from './mcp-run-picker.mjs';
+import { notify } from './feedback.mjs';
 
 /**
  * Cold-start pick, used ONLY until GET /api/ask/models resolves — and afterwards
@@ -2195,6 +2196,22 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       });
   }
 
+  /** DELETE `url`; a refusal or a network failure raises an error toast in this panel's own
+   *  document (#555). Returns true only when the server accepted it. */
+  async function deleteOrReport(url, title, key) {
+    let detail = '';
+    try {
+      const res = await fetch(url, { method: 'DELETE' });
+      if (res.ok) return true;
+      const data = await res.json().catch(() => ({}));
+      detail = (data && data.error) || `request failed (${res.status})`;
+    } catch (e) {
+      detail = (e && e.message) || 'network error';
+    }
+    notify({ tone: 'err', title, detail, key }, { doc });
+    return false;
+  }
+
   const wtShortSha = (c) => (typeof c === 'string' ? c.slice(0, 7) : '');
 
   async function deleteWorktree(w) {
@@ -2205,8 +2222,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       danger: true,
     });
     if (!ok) return;
-    try { await fetch(`/api/ask/threads/${st.threadId}/worktrees/${w.worktreeId}`, { method: 'DELETE' }); } catch { /* refetch shows the truth */ }
-    await refreshWorktrees();
+    await deleteOrReport(`/api/ask/threads/${st.threadId}/worktrees/${w.worktreeId}`, 'Could not remove the worktree', `ask-wt-del-${w.worktreeId}`);
+    await refreshWorktrees();   // the refetch shows the truth either way
   }
 
   function renderWorktreeRows(panel, list) {
@@ -2442,7 +2459,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       danger: true,
     });
     if (!ok) { focusComposer(); return; }
-    try { await fetch(`/api/ask/threads/${t.id}`, { method: 'DELETE' }); } catch { /* the list will show it either way */ }
+    if (!(await deleteOrReport(`/api/ask/threads/${t.id}`, 'Could not delete the chat', `ask-thread-del-${t.id}`))) { focusComposer(); return; }
     if (readStoredThread() === t.id) storeThread(null);
     if (st.threadId === t.id) newThread(); // clears + focuses the textarea (D14)
     else focusComposer();

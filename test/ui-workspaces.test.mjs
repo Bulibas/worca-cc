@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { confirmDialog } from './helpers/confirm-modal.mjs';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -325,7 +326,8 @@ test('delete 200 from the page: confirm → DELETE → back on the list without 
   assert.equal(window.location.hash, '#workspaces');
   assert.equal(doc.querySelectorAll('#ws-list .ws-item').length, 1, 'Beta removed');
   assert.equal(doc.querySelector('#ws-list .saved-head .cnt').textContent, '1');
-  assert.match(doc.querySelector('#ws-msg').textContent, /Workspace deleted/);
+  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Workspace deleted.', detail: '', action: '' });
+  assert.equal(doc.querySelector('#ws-msg').textContent, '');
 });
 
 test('delete 409 (live run) keeps the page open + surfaces the error on its header', async () => {
@@ -356,7 +358,7 @@ test('an unknown id shows the list with the not-registered message; a workspaces
   await settle();
   const doc = window.document;
   assert.equal(doc.getElementById('ws-shell').classList.contains('detail-open'), false);
-  assert.match(doc.querySelector('#ws-msg').textContent, /not registered here/);
+  assert.match(lastToast(doc).title, /not registered here/);
   await open(window, 'wks-beta-00000002');
   assert.equal(doc.getElementById('ws-shell').classList.contains('detail-open'), true);
   list = [WS[0]];
@@ -364,7 +366,7 @@ test('an unknown id shows the list with the not-registered message; a workspaces
   await settle();
   assert.equal(window.location.hash, '#workspaces');
   assert.equal(doc.querySelectorAll('#ws-list .ws-item').length, 1);
-  assert.match(doc.querySelector('#ws-msg').textContent, /"Beta WS" was removed/);
+  assert.match(lastToast(doc).title, /"Beta WS" was removed/);
 });
 
 test('Create workspace button routes to the wizard (#workspace-create)', async () => {
@@ -776,4 +778,38 @@ test('Add projects with nothing left to add leads to the Projects page and start
   await settle(8);
   assert.equal(window.location.hash, '#projects', 'on the Projects page');
   assert.equal(doc.getElementById('plugin-modal').classList.contains('hidden'), true, 'the dialog closed');
+});
+
+// #555 D10: a failed metrics-home save reuses one error line instead of appending
+// a new one per click.
+test('#555 D10: two failed metrics-home saves leave exactly one .tm-home-err', async () => {
+  const patches = [];
+  const { window, show } = await boot({
+    fetchHandler: (u, opts) => {
+      if (u.includes('/api/team-metrics/scopes')) return Promise.resolve({ ok: true, status: 200, json: async () => TM_SCOPES });
+      if (/\/api\/workspaces\/metrics-scan$/.test(u) && opts.method === 'POST') {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ members: [
+          { path: WS[0].projectPaths[0], key: 'k1', slug: 'acme/gateway', hasOrigin: true, recordsLocally: true },
+        ] }) });
+      }
+      if (/\/api\/workspaces\/wks-alpha-00000001$/.test(u) && opts.method === 'PATCH') {
+        patches.push(JSON.parse(opts.body));
+        return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'disk full' }) });
+      }
+      return null;
+    },
+  });
+  show('workspaces/wks-alpha-00000001/team');
+  await settle();
+  const doc = window.document;
+  click(window, doc.querySelector('#ws-detail .ws-home-change'));
+  await settle();
+  assert.equal(doc.getElementById('plugin-modal').classList.contains('hidden'), false, 'the Metrics home sheet is open');
+  const save = [...doc.querySelectorAll('#plugin-modal button')].find((b) => b.textContent === 'Save');
+  click(window, save); await settle();
+  click(window, save); await settle();
+  assert.equal(patches.length, 2, 'both saves reached the server');
+  const errs = doc.querySelectorAll('#plugin-modal .tm-home-err');
+  assert.equal(errs.length, 1, 'one error line, reused');
+  assert.equal(errs[0].textContent, 'disk full');
 });

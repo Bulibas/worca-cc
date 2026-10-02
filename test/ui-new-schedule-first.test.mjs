@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { fieldErrorText } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -87,6 +88,12 @@ test('#new/schedule opens the sheet first; the pick waits on the form and the ha
   assert.equal(runBodies[0].ifMissed, 'run');
   assert.equal(doc.querySelector('[data-view="schedules"]').classList.contains('hidden'), false, 'lands on Schedules');
   assert.equal(line.hidden, true, 'the form is a plain Start run form again');
+  // #555: Start reads a green "Scheduled" for BUTTON_DONE_MS; the label written meanwhile shows once idle.
+  const btn = doc.getElementById('start-btn');
+  assert.equal(btn.dataset.fbState, 'done');
+  assert.equal(btn.textContent.trim(), 'Scheduled');
+  for (let i = 0; i < 300 && btn.dataset.fbState; i++) await tick(10);
+  assert.equal(doc.getElementById('start-btn-label').parentElement, btn, 'the cached label node is back');
   assert.equal(doc.getElementById('start-btn-label').textContent, 'Start run');
 });
 
@@ -132,6 +139,7 @@ test('a plain #new never opens the sheet; the split menu\'s Schedule… opens it
   await tick();
   assert.ok(doc.getElementById('schedule-modal'), 'the sheet opens without validating the form');
   assert.equal(doc.getElementById('form-msg').textContent, '', 'no "provide a prompt" complaint');
+  assert.equal(doc.getElementById('prompt').getAttribute('aria-invalid'), null, 'no field error either');
   pickTomorrow(window);
   await tick();
   assert.equal(doc.getElementById('new-sched').hidden, false);
@@ -144,6 +152,6 @@ test('a plain #new never opens the sheet; the split menu\'s Schedule… opens it
   doc.querySelector('#run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
   await tick(5);
   assert.equal(runBodies.length, 0);
-  assert.match(doc.getElementById('form-msg').textContent, /prompt/i);
+  assert.match(fieldErrorText(doc.querySelector('#prompt')), /prompt/i);
   assert.equal(doc.getElementById('new-sched').hidden, false, 'the pick survives a validation error');
 });
