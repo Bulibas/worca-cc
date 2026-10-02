@@ -69,9 +69,10 @@ test('plain-text: text equals the assistant blocks, usage/cost equal the result 
   assert.equal(r.summary.text, mainText(r.frames));
   assert.ok(r.summary.text.length > 0);
   assert.deepEqual(r.summary.blocks, []);
-  const { ctx, ...buckets } = r.summary.usage;
+  const { ctx, ctxWindow, ...buckets } = r.summary.usage;
   assert.deepEqual(buckets, normalizeUsage(r.result.usage));
   assert.ok(Number.isFinite(ctx) && ctx > 0, 'context fill carries the last main call figure');
+  assert.equal(ctxWindow, 200000, 'the real capture reports the main model\'s contextWindow');
   assert.equal(r.summary.costUsd, r.result.total_cost_usd);
   assert.equal(r.summary.status, 'done');
   assert.equal(r.summary.sawAssistant, true);

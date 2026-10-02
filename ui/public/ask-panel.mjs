@@ -38,18 +38,94 @@ const ICONS = {
   mic: ['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M19 11a7 7 0 0 1-14 0', 'M12 18v3'],
   voiceTalk: ['M7.9 20A9 9 0 1 0 4 16.1L2 22z', 'M8 10h8M8 14h5'],           // chat bubble with text lines: speak in, read the reply
   voiceHandsFree: ['M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4'],               // waveform: a live conversation
+  pin: ['M12 17v5', 'M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z'],
 };
 // One icon per voice mode; the mic button and the ▾ menu both draw from this.
 const VOICE_MODE_ICONS = { dictate: ICONS.mic, talk: ICONS.voiceTalk, handsfree: ICONS.voiceHandsFree };
+
+/** A context chip's in-app route, or null when it has none (a run with no known home). */
+function contextHref(c) {
+  const e = encodeURIComponent;
+  if (c.kind === 'project') return `#projects/${e(c.id)}`;
+  if (c.kind === 'workspace') return `#workspaces/${e(c.id)}`;
+  if (c.kind === 'page') return `#${e(c.id)}`;
+  if (c.kind === 'run' && typeof c.home === 'string' && c.home) return `#history/${c.home.split('/').map(e).join('/')}/${e(c.id)}`;
+  return null;
+}
 
 export function fmtTokens(n) {
   if (!Number.isFinite(n) || n <= 0) return null;
   return n < 1000 ? `${n} tok` : `${(n / 1000).toFixed(1)}k tok`;
 }
-/** Context fill (usage.ctx / totals.ctx) — a snapshot, never a cumulative sum. */
-export function fmtCtx(n) {
+/** Context window meter (docs: Claude Code compacts about 33k short of the window — 967k of 1M). */
+export const CTX_COMPACT_BUFFER = 33000;
+export const CTX_WARN = 0.75;          // amber, as a share of the compaction trigger
+export const CTX_HIGH = 0.9;           // red: compaction soon
+export const CTX_COST_HINT = 200000;   // from here the hover notes every message re-sends the whole context
+const validWindow = (w) => Number.isInteger(w) && w > 0;
+const kTok = (n) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`);
+
+/** 1000000 → "1M", 1500000 → "1.5M", 200000 → "200k"; null for an unknown window. */
+export function fmtWindow(w) {
+  if (!validWindow(w)) return null;
+  if (w >= 1e6) return `${+(w / 1e6).toFixed(1)}M`;
+  if (w >= 1000) return `${+(w / 1000).toFixed(1)}k`;
+  return String(w);
+}
+/** Where automatic compaction starts: window − buffer (the window itself when it is too small for one). */
+export function ctxTrigger(w) {
+  if (!validWindow(w)) return null;
+  return w > 2 * CTX_COMPACT_BUFFER ? w - CTX_COMPACT_BUFFER : w;
+}
+export function ctxLevel(ctx, w) {
+  const t = ctxTrigger(w);
+  if (!t || !Number.isFinite(ctx) || ctx <= 0) return null;
+  const r = ctx / t;
+  return r >= CTX_HIGH ? 'high' : r >= CTX_WARN ? 'warn' : 'ok';
+}
+/** Share of the FULL window (Claude's own meter does the same); not clamped — a model switch can pass 100. */
+export function ctxPercent(ctx, w) {
+  return validWindow(w) && Number.isFinite(ctx) && ctx > 0 ? Math.round((ctx / w) * 100) : null;
+}
+/** Context fill (usage.ctx / totals.ctx) — a snapshot, never a cumulative sum — against the window when known. */
+export function fmtCtx(n, w) {
   if (!Number.isFinite(n) || n <= 0) return null;
-  return n < 1000 ? `${n} ctx` : `${(n / 1000).toFixed(1)}k ctx`;
+  const win = fmtWindow(w);
+  return win ? `${kTok(n)} / ${win} ctx` : `${kTok(n)} ctx`;
+}
+/** The meter's hover text, or null when there is nothing worth saying. */
+export function ctxTitle(ctx, w) {
+  if (!Number.isFinite(ctx) || ctx <= 0) return null;
+  const parts = [];
+  const pct = ctxPercent(ctx, w);
+  if (pct != null) {
+    if (ctxLevel(ctx, w) === 'high') parts.push('Compaction soon.');
+    parts.push(`${pct}% of the ${fmtWindow(w)} context window. Automatic compaction starts around ${fmtWindow(ctxTrigger(w))}.`);
+  }
+  if (ctx >= CTX_COST_HINT) parts.push(`Each message re-sends about ${(ctx / 1000).toFixed(1)}k tokens.`);
+  return parts.length ? parts.join(' ') : null;
+}
+/** Share of the window with one decimal, as the popover's rows show it: 120400 of 1M → "12.0%". */
+export function fmtShare(n, w) {
+  return validWindow(w) && Number.isFinite(n) && n >= 0 ? `${((n / w) * 100).toFixed(1)}%` : null;
+}
+/** The context popover's figures, or null without a known window and fill. Only what Worca knows:
+ *  the fill, the window and the documented compaction buffer — never a per-category split. */
+export function ctxBreakdown(ctx, w) {
+  if (!validWindow(w) || !Number.isFinite(ctx) || ctx <= 0) return null;
+  const trigger = ctxTrigger(w);
+  const buffer = w - trigger;
+  return {
+    used: ctx, buffer, free: Math.max(0, w - ctx - buffer), untilCompact: Math.max(0, trigger - ctx),
+    pct: ctxPercent(ctx, w), level: ctxLevel(ctx, w),
+  };
+}
+const validContexts = (list) => (Array.isArray(list) ? list : [])
+  .filter((c) => c && typeof c.kind === 'string' && typeof c.id === 'string' && c.id);
+/** A chat's topics split for the popover: where it was asked from (page) and what it mentioned (source 'chat'). */
+export function groupContexts(list) {
+  const all = validContexts(list);
+  return { asked: all.filter((c) => c.source !== 'chat'), mentioned: all.filter((c) => c.source === 'chat') };
 }
 export function fmtUsd(x) {
   return Number.isFinite(x) ? `$${x.toFixed(2)}` : null;
@@ -194,6 +270,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // page — today's behaviour). label caches the display name once resolved.
     scope: { pinned: false, projectKey: null, workspaceId: null, label: null },
     popover: null,            // {panel, trigger, onClose, build, refreshOn, refresh}
+    contexts: [],             // the open chat's topics (thread.contexts), shown in the context popover
     threadsRefresh: null,     // the debounce timer behind the History popover's ask-run-status refetch
     expandedAgents: new Set(),
     worktrees: [],            // P4 §10: the chat's open worktrees (snapshot-fed)
@@ -639,14 +716,29 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (el.pillOrb) el.pillOrb.stop();
   }
 
+  /** The open chat's context fill and window: the streaming call's while live, else the last turn's.
+   *  A thread with turns but no ctx predates the metric — null, never a fake 0. */
+  function currentCtx() {
+    const totals = st.model ? st.model.totals() : { live: null };
+    const liveUsage = totals.live && totals.live.usage ? totals.live.usage : null;
+    const ctx = liveUsage && Number.isFinite(liveUsage.ctx) ? liveUsage.ctx : totals.ctx;
+    // The window: this turn's once its result landed, else the thread's last known (same model, as a rule).
+    const win = liveUsage && Number.isInteger(liveUsage.ctxWindow) ? liveUsage.ctxWindow : totals.ctxWindow;
+    return { ctx: Number.isFinite(ctx) ? ctx : null, win: Number.isInteger(win) ? win : null, turns: totals.turns || 0 };
+  }
+
   function updateMeters() {
     if (!el.meterTokens) return;
     const totals = st.model ? st.model.totals() : { live: null };
-    // Context fill: the streaming call's figure while live, else the last turn's.
-    // A thread with turns but no ctx predates the metric — show nothing, never a fake 0.
-    const liveCtx = totals.live && totals.live.usage ? totals.live.usage.ctx : null;
-    const ctx = Number.isFinite(liveCtx) ? liveCtx : totals.ctx;
-    el.meterTokens.textContent = fmtCtx(ctx) || ((totals.turns || 0) > 0 ? '' : '0 ctx');
+    const { ctx, win, turns } = currentCtx();
+    const pct = ctxPercent(ctx, win);
+    el.meterTokensLabel.textContent = fmtCtx(ctx, win)
+      ? `${fmtCtx(ctx, win)}${pct != null ? ` · ${pct}%` : ''}`
+      : (turns > 0 ? '' : '0 ctx');
+    const level = ctxLevel(ctx, win);
+    el.meterTokens.classList.toggle('is-ctx-warn', level === 'warn');
+    el.meterTokens.classList.toggle('is-ctx-high', level === 'high');
+    el.meterTokens.setAttribute('aria-label', pct != null ? `Context window, ${pct}% full` : 'Context window');
     // Cost: the stored thread total; while a turn streams, "≈" + that total plus
     // this turn's live figure — the CLI's once its result landed, else the
     // display-only list-price estimate the ask-usage frame carries. ask-done
@@ -834,6 +926,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         st.threadId = id;
         st.model = createThreadModel({ threadId: id });
         st.model.load({ thread: body.thread, messages: [], attachments: [], runLinks: [], inFlight: null });
+        setContexts(body.thread && body.thread.contexts);
         renderTranscript();
         storeThread(id);
       }
@@ -866,7 +959,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       }
       // A toggle made while this POST was out PATCHed a value the route then overwrote with sentOff: re-send the latest.
       if (st.mcp.off !== sentOff) patchMcpOff(id, st.mcp.off);
-      const { userMessageId, attachments: stored } = await res.json();
+      const { userMessageId, attachments: stored, contexts } = await res.json();
+      if (Array.isArray(contexts)) setContexts(contexts);   // an older server omits it: keep what is shown
       // Prefer the server's rows: they carry the store-minted ids that key the
       // image thumbnail (#398) and the thread's attachment ledger. The pending
       // files are the fallback for a server that predates the field.
@@ -964,15 +1058,28 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
     row.appendChild(make('span', 'ask-composer-spacer'));
 
+    // The context fill opens the context popover (window + this chat's topics), so it shows at every
+    // interface level; the cost and its separators stay an Advanced detail.
     const meter = make('span', 'ask-meter');
     meter.setAttribute('data-ask-meter', '');
-    el.meterTokens = make('span', 'ask-meter-tokens', '0 ctx');
-    meter.appendChild(el.meterTokens);
-    { const sep = make('span', 'ask-meter-sep', '|'); sep.setAttribute('aria-hidden', 'true'); meter.appendChild(sep); }
+    const ctxBtn = make('button', 'ask-meter-tokens');
+    ctxBtn.type = 'button';
+    ctxBtn.setAttribute('data-ask-ctx-btn', '');
+    ctxBtn.setAttribute('aria-haspopup', 'menu');
+    ctxBtn.setAttribute('aria-expanded', 'false');
+    ctxBtn.setAttribute('aria-label', 'Context window');
+    el.meterTokensLabel = make('span', 'ask-meter-tokens-label', '0 ctx');
+    ctxBtn.appendChild(el.meterTokensLabel);
+    ctxBtn.appendChild(svgIcon('M6 15l6-6 6 6', 11, 2));
+    ctxBtn.addEventListener('click', () => openCtxPopover(ctxBtn));
+    el.meterTokens = ctxBtn;
+    meter.appendChild(ctxBtn);
+    const sep = () => { const s = make('span', 'ask-meter-sep', '|'); s.setAttribute('aria-hidden', 'true'); s.dataset.minLevel = 'advanced'; return s; };
+    meter.appendChild(sep());
     el.meterCost = make('span', 'ask-meter-cost', '');
+    el.meterCost.dataset.minLevel = 'advanced';
     meter.appendChild(el.meterCost);
-    { const sep = make('span', 'ask-meter-sep', '|'); sep.setAttribute('aria-hidden', 'true'); meter.appendChild(sep); }
-    meter.dataset.minLevel = 'advanced';
+    meter.appendChild(sep());
     row.appendChild(meter);
 
     const wtBtn = make('button', 'ask-agents-btn ask-wt-btn');
@@ -1273,6 +1380,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.destroyed || !st.open || st.drag) return;
     if (st.size) restoreSize();
     relayoutCards();
+    if (st.popover && st.popover.trigger === el.meterTokens) anchorCtxPopover(st.popover.panel, el.meterTokens);
   }
 
   // ---- keyboard + pointer routing ------------------------------------------
@@ -1362,6 +1470,18 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return panel;
   }
 
+  /** Rebuild an open popover in place. Keyboard focus inside it moves to the item at the same place in
+   *  the new list (or to the trigger when the list got shorter than that), so Escape and the arrows keep working. */
+  function rebuildPopover(pop) {
+    const at = pop.panel.contains(doc.activeElement) ? menuItems(pop.panel).indexOf(doc.activeElement) : null;
+    pop.panel.replaceChildren();
+    pop.build(pop.panel);
+    if (at === null) return;
+    const item = at >= 0 ? menuItems(pop.panel)[at] : null;
+    if (item) item.tabIndex = 0;
+    try { (item || pop.trigger).focus(); } catch { /* ignore */ }
+  }
+
   function menuItem(className, onPick) {
     const b = make('button', `ask-pop-item ${className}`.trim());
     b.type = 'button';
@@ -1372,17 +1492,40 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   }
 
   // ---- threads popover (list; switching/delete land in Task 7) -------------
+  /** History-row topics: the first one's name plus "+N", every name in the hover. Display-only — the row is the click target. */
+  function threadTopics(t) {
+    const list = validContexts(t.contexts);
+    if (!list.length) return null;
+    const name = (c) => c.label || c.id;
+    const span = make('span', 'ask-thread-topics', list.length > 1 ? `${name(list[0])} +${list.length - 1}` : name(list[0]));
+    span.title = list.map((c) => `${name(c)}${c.source === 'chat' ? ' (mentioned)' : ''}`).join('\n');
+    return span;
+  }
+
   // The start date leads the meter line, bold and on the primary ink, so the eye
   // scans it down the list while the cost/agent figures keep the meter's grey.
   // Hence an element rather than a string: only the date changes weight and
   // colour. An unusable createdAt drops the span and its separator with it.
   function threadMeter(t) {
     const meter = make('span', 'ask-thread-meter');
+    const tot = t.totals || {};
     const when = fmtStarted(t.createdAt, now());
-    const rest = [fmtCtx(t.totals && t.totals.ctx), fmtUsd(t.totals && t.totals.costUsd), fmtAgents(t.totals && t.totals.agents)]
-      .filter(Boolean).join(' · ');
     if (when) meter.appendChild(make('span', 'ask-thread-when', when));
-    if (rest) meter.appendChild(doc.createTextNode(when ? ` · ${rest}` : rest));
+    // With a known window the fill is its own span (level colour + hover); without one it stays plain
+    // text, so a legacy row's meter is exactly the date element plus "… · $x · n agents".
+    const fillText = fmtCtx(tot.ctx, tot.ctxWindow);
+    let fill = fillText;
+    if (fillText && Number.isInteger(tot.ctxWindow) && tot.ctxWindow > 0) {
+      const level = ctxLevel(tot.ctx, tot.ctxWindow);
+      fill = make('span', `ask-thread-fill${level === 'warn' ? ' is-ctx-warn' : level === 'high' ? ' is-ctx-high' : ''}`, fillText);
+      const title = ctxTitle(tot.ctx, tot.ctxWindow);
+      if (title) fill.title = title;
+    }
+    const parts = [threadTopics(t), fill, fmtUsd(tot.costUsd), fmtAgents(tot.agents)].filter(Boolean);
+    parts.forEach((p, i) => {
+      if (when || i > 0) meter.appendChild(doc.createTextNode(' · '));
+      meter.appendChild(typeof p === 'string' ? doc.createTextNode(p) : p);
+    });
     return meter;
   }
 
@@ -2130,12 +2273,130 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         row.appendChild(make('span', `ask-dot${a.status === 'running' ? ' ask-dot-run' : a.status === 'done' ? ' ask-dot-done' : ''}`));
         const col = make('span', 'ask-runinfo-col');
         col.appendChild(make('span', 'ask-runinfo-name', a.label || a.type || 'agent'));
-        col.appendChild(make('span', 'ask-runinfo-sub', [a.model, fmtCtx(a.ctx) || fmtTokens(a.tokens), Number.isFinite(a.costUsd) ? `≈${fmtUsd(a.costUsd)}` : null, a.status || null].filter(Boolean).join(' · ')));
+        col.appendChild(make('span', 'ask-runinfo-sub', [a.model, fmtCtx(a.ctx, a.ctxWindow) || fmtTokens(a.tokens), Number.isFinite(a.costUsd) ? `≈${fmtUsd(a.costUsd)}` : null, a.status || null].filter(Boolean).join(' · ')));
         row.appendChild(col);
         row.appendChild(make('span', 'ask-runinfo-elapsed', fmtElapsed(a.durationMs) || '—'));
         p.appendChild(row);
       }
     } });
+  }
+
+  // ---- context popover (window fill + this chat's topics) -------------------
+  /** The open chat's topics; an open context popover is rebuilt in place (same node, focus kept). */
+  function setContexts(list) {
+    st.contexts = validContexts(list);
+    const pop = st.popover;
+    if (pop && pop.trigger === el.meterTokens) rebuildPopover(pop);
+  }
+
+  const CTX_POP_WIDTH = 320;                                      // .ask-pop-ctx width
+  const levelClass = (level) => (level === 'warn' || level === 'high' ? ` is-ctx-${level}` : '');
+
+  /** One topic row: a menuitem that closes the sheet and routes, or a plain row when it has no route. */
+  function topicRow(c) {
+    const href = contextHref(c);
+    const mentioned = c.source === 'chat';                       // only a page topic is ever pinned
+    const pinned = c.pinned && !mentioned;
+    const row = href
+      ? menuItem('ask-ctx-topic', () => { closeSheet(); if (win.location.hash !== href) win.location.hash = href.slice(1); })
+      : make('div', 'ask-ctx-topic');
+    if (mentioned) row.classList.add('is-mentioned');
+    if (pinned) row.classList.add('is-pinned');
+    row.dataset.kind = c.kind;
+    row.title = `${c.label || c.id}${mentioned ? ' (mentioned)' : pinned ? ' (pinned)' : ''}`;   // the full name when it is cut off; History's wording
+    row.appendChild(make('span', 'ask-ctx-swatch'));
+    row.appendChild(make('span', 'ask-ctx-topic-name', c.label || c.id));
+    if (pinned) {
+      row.appendChild(svgIcon(ICONS.pin, 11, 2));
+      row.appendChild(make('span', 'ask-ctx-topic-pin', 'pinned'));
+    }
+    row.appendChild(make('span', 'ask-ctx-topic-kind', c.kind));
+    return row;
+  }
+
+  function topicsSection() {
+    const box = make('div', 'ask-ctx-topics');
+    const { asked, mentioned } = groupContexts(st.contexts);
+    const total = asked.length + mentioned.length;
+    const head = make('div', 'ask-pop-caption-row');
+    head.appendChild(make('span', 'ask-pop-caption', 'Topics'));
+    head.appendChild(make('span', 'ask-pop-caption-meter', total ? String(total) : ''));
+    box.appendChild(head);
+    if (!total) { box.appendChild(make('div', 'ask-pop-empty', 'No topics yet.')); return box; }
+    for (const [key, label, list] of [['asked', 'Asked from', asked], ['mentioned', 'Mentioned in chat', mentioned]]) {
+      if (!list.length) continue;
+      const g = make('div', 'ask-ctx-topic-group');
+      g.dataset.ctxGroup = key;
+      g.appendChild(make('div', 'ask-ctx-group', label));
+      for (const c of list) g.appendChild(topicRow(c));
+      box.appendChild(g);
+    }
+    return box;
+  }
+
+  /** Caption, then the window's bar / rows / footer (or one line while the window is unknown), then the topics. */
+  function buildCtxPopover(p) {
+    const { ctx, win } = currentCtx();
+    const b = ctxBreakdown(ctx, win);
+    const head = make('div', 'ask-pop-caption-row');
+    head.appendChild(make('span', 'ask-pop-caption', 'Context window'));
+    head.appendChild(make('span', 'ask-pop-caption-meter', b ? `${kTok(ctx)} / ${fmtWindow(win)} (${b.pct}%)` : (ctx > 0 ? kTok(ctx) : '')));
+    p.appendChild(head);
+    if (!b) {
+      p.appendChild(make('div', 'ask-pop-empty', 'The window shows after the first answer.'));
+    } else {
+      const bar = make('div', 'ask-ctx-bar');
+      bar.setAttribute('aria-hidden', 'true');               // the rows below carry the numbers
+      const used = make('span', `ask-ctx-bar-used${levelClass(b.level)}`);
+      used.style.width = `${+Math.min(100, (ctx / win) * 100).toFixed(2)}%`;
+      bar.appendChild(used);
+      // The hatch covers only the window the fill has not reached, so past the compaction point it shrinks
+      // instead of painting over the fill (the row below still reports the whole buffer).
+      const hatch = Math.min(b.buffer, Math.max(0, win - ctx));
+      if (hatch > 0) {
+        const buf = make('span', 'ask-ctx-bar-buffer');
+        buf.style.width = `${+((hatch / win) * 100).toFixed(2)}%`;
+        bar.appendChild(buf);
+      }
+      p.appendChild(bar);
+      const rows = [['used', 'Used', b.used], ['buffer', 'Autocompact buffer', b.buffer], ['free', 'Free space', b.free]];
+      for (const [key, name, n] of rows) {
+        if (key === 'buffer' && n <= 0) continue;
+        const r = make('div', `ask-ctx-stat${key === 'used' ? levelClass(b.level) : ''}`);
+        r.dataset.stat = key;
+        r.appendChild(make('span', 'ask-ctx-swatch'));
+        r.appendChild(make('span', 'ask-ctx-stat-name', name));
+        r.appendChild(make('span', 'ask-ctx-stat-tokens', kTok(n)));
+        r.appendChild(make('span', 'ask-ctx-stat-share', fmtShare(n, win)));
+        p.appendChild(r);
+      }
+      p.appendChild(b.level === 'high'
+        ? make('div', 'ask-ctx-foot is-ctx-high', 'Compaction soon')
+        : make('div', 'ask-ctx-foot', `${kTok(b.untilCompact)} until auto-compact`));
+    }
+    if (ctx >= CTX_COST_HINT) p.appendChild(make('div', 'ask-ctx-hint', `Each message re-sends about ${(ctx / 1000).toFixed(1)}k tokens.`));
+    p.appendChild(make('div', 'ask-pop-divider'));
+    p.appendChild(topicsSection());
+  }
+
+  function openCtxPopover(trigger) {
+    const panel = openPopover({
+      panelClass: 'ask-pop-ctx', trigger, refreshOn: (d) => d.meters,
+      onClose: () => trigger.setAttribute('aria-expanded', 'false'),
+      build: buildCtxPopover,
+    });
+    if (!panel) return;
+    panel.setAttribute('aria-label', 'Context window');
+    anchorCtxPopover(panel, trigger);
+    trigger.setAttribute('aria-expanded', 'true');
+  }
+
+  /** Right edge flush with the trigger: the meter moves with the interface level and the controls
+   *  beside it, so a fixed CSS offset would miss it. Kept 6px inside the sheet; re-run on window resize. */
+  function anchorCtxPopover(panel, trigger) {
+    const sr = el.sheet.getBoundingClientRect();
+    const tr = trigger.getBoundingClientRect();
+    if (sr.width > 0) panel.style.right = `${Math.max(0, Math.min(sr.right - tr.right, sr.width - CTX_POP_WIDTH - 6))}px`;
   }
 
   // ---- thread actions -------------------------------------------------------
@@ -2150,6 +2411,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     storeThread(null);
     el.title.textContent = 'Ask Worca';
     applyThreadScope(null);             // #397: a brand-new chat starts on Auto
+    setContexts([]);
     restoreBrowserPick();               // …and on the browser-level pick, not the last chat's
     st.mcp.off = { sets: [], members: [] };   // …and with every MCP server on
     scheduleMcpRefresh();
@@ -4008,7 +4270,12 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     rowEl.appendChild(make('span', `ask-dot${block.status === 'running' ? ' ask-dot-run' : block.status === 'done' ? ' ask-dot-done' : ''}`));
     rowEl.appendChild(make('span', 'ask-agent-name', block.label || block.type || 'agent'));
     rowEl.appendChild(make('span', 'ask-agent-model', block.model || ''));
-    rowEl.appendChild(make('span', 'ask-agent-tokens', fmtCtx(block.ctx) || fmtTokens(block.tokens) || ''));
+    const fillEl = make('span', 'ask-agent-tokens', fmtCtx(block.ctx, block.ctxWindow) || fmtTokens(block.tokens) || '');
+    const level = ctxLevel(block.ctx, block.ctxWindow);             // null without a window: no colour, as before
+    if (level === 'warn' || level === 'high') fillEl.classList.add(`is-ctx-${level}`);
+    const fillTitle = Number.isInteger(block.ctxWindow) ? ctxTitle(block.ctx, block.ctxWindow) : null;
+    if (fillTitle) fillEl.title = fillTitle;
+    rowEl.appendChild(fillEl);
     rowEl.appendChild(make('span', 'ask-agent-cost', Number.isFinite(block.costUsd) ? `≈${fmtUsd(block.costUsd)}` : ''));
     rowEl.appendChild(make('span', `ask-agent-status${block.status === 'done' ? ' is-done' : ''}`, block.status || ''));
     rowEl.addEventListener('click', () => {
@@ -4021,7 +4288,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.expandedAgents.has(block.id)) {
       const log = make('div', 'ask-agent-log');
       const head = make('div', 'ask-agent-log-head');
-      head.appendChild(make('span', null, [block.model, fmtCtx(block.ctx) || fmtTokens(block.tokens), Number.isFinite(block.costUsd) ? `≈${fmtUsd(block.costUsd)}` : null].filter(Boolean).join(' · ')));
+      head.appendChild(make('span', null, [block.model, fmtCtx(block.ctx, block.ctxWindow) || fmtTokens(block.tokens), Number.isFinite(block.costUsd) ? `≈${fmtUsd(block.costUsd)}` : null].filter(Boolean).join(' · ')));
       head.appendChild(make('span', 'ask-agent-log-type', block.type || ''));
       log.appendChild(head);
       const body = make('div', 'ask-agent-log-body');
@@ -4365,6 +4632,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     st.model.load(snap);
     el.title.textContent = (snap.thread && snap.thread.title) || 'Ask Worca';
     applyThreadScope(snap.thread && snap.thread.context);   // #397: restore the pin
+    setContexts(snap.thread && snap.thread.contexts);
     // The picker follows the chat — on a SWITCH only: a resync of the same thread
     // would otherwise clobber a pick the user just made (its PATCH may not have landed).
     if (switched) applyThreadPick(snap.thread);
@@ -4463,6 +4731,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     }
     if (frame.type === 'ask-done' || frame.type === 'ask-error') {
       stopElapsed(); updateSendStop(); announce('answer finished');
+      // Conversation chips: the turn's resolved list rides ask-done (an older server omits it: keep what is shown).
+      if (frame.type === 'ask-done' && Array.isArray(frame.contexts)) setContexts(frame.contexts);
       // P4: a finished turn may have created/removed/navigated worktrees. This must
       // NOT live in updateSendStop() — that also runs from loadThread, so a
       // running→idle latch there fires a SECOND snapshot GET on every resync.
@@ -4575,7 +4845,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // (same node — never reopened, never refocused). Runs AFTER the mirror and
     // the meters above: the worktrees build() reads st.worktrees.
     const pop = st.popover;
-    if (pop && typeof pop.refreshOn === 'function' && pop.refreshOn(d)) { pop.panel.replaceChildren(); pop.build(pop.panel); }
+    if (pop && typeof pop.refreshOn === 'function' && pop.refreshOn(d)) rebuildPopover(pop);
     updateLiveElapsed();
   }
 
