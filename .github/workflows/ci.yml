@@ -65,7 +65,8 @@ jobs:
         run: npm ci
 
       # No build step: plain Node ESM plus a vanilla HTML/CSS/JS frontend.
-      # The script points WORCA_HOME at ./.worca-cc-test, so nothing touches a
+      # The script points WORCA_HOME at ./.worca-cc-test and HOME/USERPROFILE at
+      # a fresh temp dir (settings.json lives under HOME), so nothing touches a
       # real home directory, and no test may spawn a live `claude`.
       # No retry: the ENOTEMPTY teardown race this step used to re-run for was
       # a test waiting on a stale "newest row" and leaving its run alive
