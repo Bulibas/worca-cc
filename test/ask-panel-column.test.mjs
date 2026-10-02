@@ -101,7 +101,7 @@ test('ask-panel-column: the composer controls live inside .ask-composer-box, in 
   assert.ok(box, 'the box is a direct child of the band');
   assert.equal(composer.children.length, 1, 'and its only child');
   assert.deepEqual([...box.children].map((c) => c.className), ['ask-chips', 'ask-input', 'ask-composer-msg', 'ask-composer-row'], 'chips → textarea → msg → row, all direct children of the box');
-  for (const sel of ['[data-ask-attach-btn]', '[data-ask-scope-btn]', '[data-ask-meter]', '[data-ask-wt-btn]', '[data-ask-agents-btn]', '[data-ask-model-btn]', '[data-ask-send]', '[data-ask-stop]']) {
+  for (const sel of ['[data-ask-attach-btn]', '[data-ask-scope-btn]', '[data-ask-meter]', '[data-ask-ctx-btn]', '[data-ask-model-btn]', '[data-ask-send]', '[data-ask-stop]']) {
     const n = ctx.doc.querySelector(sel);
     assert.ok(n, `${sel} still exists`);
     assert.equal(n.closest('.ask-composer-box'), box, `${sel} is inside the box`);
@@ -127,11 +127,11 @@ test('ask-panel-column: the composer popovers stay children of the sheet (CSS-an
   const model = ctx.doc.querySelector('.ask-pop-model');
   assert.ok(model, 'model popover opened');
   assert.equal(model.parentElement, sheet);
-  ctx.doc.querySelector('[data-ask-agents-btn]').click();
+  ctx.doc.querySelector('[data-ask-ctx-btn]').click();
   await ctx.tick();
-  const runinfo = ctx.doc.querySelector('.ask-pop-runinfo');
-  assert.ok(runinfo, 'agents popover opened');
-  assert.equal(runinfo.parentElement, sheet);
+  const ctxPop = ctx.doc.querySelector('.ask-pop-ctx');
+  assert.ok(ctxPop, 'context popover opened');
+  assert.equal(ctxPop.parentElement, sheet);
   ctx.doc.querySelector('[data-ask-threads-btn]').click();
   await ctx.tick();
   assert.equal(ctx.doc.querySelector('.ask-pop-threads').parentElement, sheet, 'the threads popover is untouched');

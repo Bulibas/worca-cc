@@ -244,6 +244,7 @@ Everything on the page: the list, the runtime step, the workspace and the bench 
 | Ask: a classified failure's human notice (what happened and where the remedy lives) | all — recovery instructions are never hidden (rule 1); Simple gets no Models-view navigation, the copy names the mode instead |
 | Ask: a classified failure's raw-detail expander ("Details") | E |
 | Ask: proposal cards themselves | all (rule 4) |
-| Ask: model picker, scope, ctx and cost meter, tool rows, branches, guardrails, "Open in New Pipeline" | A |
-| Ask: per-agent lane, worktrees, agents popover, sub-agent logs | E |
+| Ask: the context ring and its popover's window fill and topics | S |
+| Ask: model picker, scope, cost meter, tool rows, branches, guardrails, "Open in New Pipeline" | A |
+| Ask: per-agent lane, the context popover's Agents and Worktrees sections, sub-agent logs | E |
 | Getting started: all nine tiles show at every level, ordered Simple → Advanced → Expert; steps 6 and 7 wear "Advanced", steps 8 and 9 "Expert" | S |

@@ -245,18 +245,18 @@ test('ask-panel-pickers: the send body carries the picked model', async () => {
   assert.equal(bodies[0].effort, 'high');
 });
 
-test('ask-panel-pickers: run-info popover lists agents with model and meter; empty state', async () => {
+test('ask-panel-pickers: the context popover lists agents with model and meter; empty state', async () => {
   const agent = { kind: 'agent', id: 'toolu_1', label: 'count runs', type: 'general-purpose', model: 'claude-haiku-4-5', tokens: 5321, usage: { input: 10, output: 69, cacheRead: 4564, cacheCreation: 678 }, costUsd: 0.62, estimated: true, status: 'done', durationMs: 2861, log: [] };
   const messages = [{ id: 'askm_00000001', threadId: TID, seq: 1, role: 'assistant', text: 'ok', blocks: [agent], status: 'done', reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't' }];
   const ctx = makePanel({ fetchHandler: handler({ messages }) });
   ctx.storage.setItem('worca-cc.ask.thread', TID);
   ctx.panel.open();
   await ctx.tick(); await ctx.tick(); await ctx.tick();
-  ctx.doc.querySelector('[data-ask-agents-btn]').click();
+  ctx.doc.querySelector('[data-ask-ctx-btn]').click();
   await ctx.tick();
-  const pop = ctx.doc.querySelector('.ask-pop-runinfo');
+  const pop = ctx.doc.querySelector('.ask-pop-ctx .ask-ctx-agents');
   assert.ok(pop);
-  assert.match(pop.textContent, /Agents this chat/);
+  assert.equal(pop.querySelector('.ask-pop-caption').textContent, 'Agents');
   assert.match(pop.textContent, /count runs/);
   assert.match(pop.textContent, /claude-haiku-4-5/);
   assert.match(pop.textContent, /5\.3k tok/);
@@ -265,9 +265,9 @@ test('ask-panel-pickers: run-info popover lists agents with model and meter; emp
   const ctx2 = makePanel({ fetchHandler: handler() });
   ctx2.panel.open();
   await ctx2.tick(); await ctx2.tick();
-  ctx2.doc.querySelector('[data-ask-agents-btn]').click();
+  ctx2.doc.querySelector('[data-ask-ctx-btn]').click();
   await ctx2.tick();
-  assert.match(ctx2.doc.querySelector('.ask-pop-runinfo').textContent, /No agents spawned yet\./);
+  assert.match(ctx2.doc.querySelector('.ask-pop-ctx .ask-ctx-agents').textContent, /No agents spawned yet\./);
 });
 
 test('ask-panel-pickers: delete asks with the exact copy, DELETEs, clears the current thread', async () => {
@@ -343,18 +343,18 @@ test('ask-panel-pickers: New chat clears the thread; the next send creates a fre
   assert.ok(ctx.fetchCalls.some((c) => c.url === '/api/ask/threads' && c.opts.method === 'POST'), 'thread created on send');
 });
 
-test('ask-panel-pickers: run-info popover shows per-agent ctx and a cost-only header (no token sum)', async () => {
+test('ask-panel-pickers: the Agents section shows per-agent ctx and a count + cost header (no token sum)', async () => {
   const agent = { kind: 'agent', id: 'toolu_1', label: 'count runs', type: 'general-purpose', model: 'claude-haiku-4-5', tokens: 25321, ctx: 11645, usage: null, costUsd: 0.62, estimated: true, status: 'done', durationMs: 2861, log: [] };
   const messages = [{ id: 'askm_00000001', threadId: TID, seq: 1, role: 'assistant', text: 'ok', blocks: [agent], status: 'done', reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't' }];
   const ctx = makePanel({ fetchHandler: handler({ messages }) });
   ctx.storage.setItem('worca-cc.ask.thread', TID);
   ctx.panel.open();
   await ctx.tick(); await ctx.tick(); await ctx.tick();
-  ctx.doc.querySelector('[data-ask-agents-btn]').click();
+  ctx.doc.querySelector('[data-ask-ctx-btn]').click();
   await ctx.tick();
-  const pop = ctx.doc.querySelector('.ask-pop-runinfo');
+  const pop = ctx.doc.querySelector('.ask-pop-ctx .ask-ctx-agents');
   assert.match(pop.textContent, /11\.6k ctx/, 'the row shows the agent context fill');
-  assert.equal(pop.querySelector('.ask-pop-caption-meter').textContent, '≈$0.62', 'header: cost only — summing ctx across agents means nothing');
+  assert.equal(pop.querySelector('.ask-pop-caption-meter').textContent, '1 · ≈$0.62', 'header: count and cost — summing ctx across agents means nothing');
 });
 
 test('ask-panel-pickers: plugin models group by plugin — one per plugin up front, the rest in More', async () => {

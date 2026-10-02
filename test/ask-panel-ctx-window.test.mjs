@@ -76,20 +76,22 @@ async function sendAndFinish(ctx, done) {
   ], { threadId: TID, messageId: MID });
   for (const f of frames) ctx.panel.pushServerFrame(f);
   ctx.flush();
-  return ctx.doc.querySelector('.ask-meter-tokens');
+  return ctx.doc.querySelector('[data-ask-ctx-btn]');
 }
+const arc = (m) => m.querySelector('.ask-ctx-ring-arc').getAttribute('stroke-dasharray');
 const T = (over) => ({ costUsd: 0.1, input: 1, output: 1, cacheRead: 0, cacheCreation: 0, turns: 1, agents: 0, ...over });
 
-test('composer meter: "fill / window ctx · N%", coloured by level, hover title', async () => {
+test('composer ring: arc = fill / window, "fill / window ctx · N%" in the hover, coloured by level', async () => {
   const ctx = makePanel({ fetchHandler: apiHandler() });
   const m = await sendAndFinish(ctx, { usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 214400, ctxWindow: 1000000 }, totals: T({ ctx: 214400, ctxWindow: 1000000 }) });
-  assert.equal(m.textContent, '214.4k / 1M ctx · 21%');
+  assert.equal(m.title, '214.4k / 1M ctx · 21%');
+  assert.equal(arc(m), '21.44 100');
   assert.ok(!m.classList.contains('is-ctx-warn') && !m.classList.contains('is-ctx-high'));
   assert.equal(m.getAttribute('aria-label'), 'Context window, 21% full');
   ctx.panel.destroy();
 });
 
-test('composer meter: amber at 75% and red at 90% of the trigger on a 200k window', async () => {
+test('composer ring: amber at 75% and red at 90% of the trigger on a 200k window', async () => {
   let ctx = makePanel({ fetchHandler: apiHandler() });
   let m = await sendAndFinish(ctx, { usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 130000, ctxWindow: 200000 }, totals: T({ ctx: 130000, ctxWindow: 200000 }) });
   assert.ok(m.classList.contains('is-ctx-warn'));
@@ -97,16 +99,17 @@ test('composer meter: amber at 75% and red at 90% of the trigger on a 200k windo
   ctx = makePanel({ fetchHandler: apiHandler() });
   m = await sendAndFinish(ctx, { usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 230000, ctxWindow: 200000 }, totals: T({ ctx: 230000, ctxWindow: 200000 }) });
   assert.ok(m.classList.contains('is-ctx-high') && !m.classList.contains('is-ctx-warn'));
-  assert.equal(m.textContent, '230.0k / 200k ctx · 115%', 'past the window after a model switch: shown, not clamped');
+  assert.equal(m.title, '230.0k / 200k ctx · 115%', 'past the window after a model switch: shown, not clamped');
+  assert.equal(arc(m), '100 100', 'the ring itself stops at full');
   ctx.panel.destroy();
 });
 
-test('composer meter: a thread with no window renders exactly as before (no %, no class, no title under 200k)', async () => {
+test('composer ring: a thread with no window keeps an empty ring (no %, no level class)', async () => {
   const ctx = makePanel({ fetchHandler: apiHandler() });
   const m = await sendAndFinish(ctx, { usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 68400 }, totals: T({ ctx: 68400 }) });
-  assert.equal(m.textContent, '68.4k ctx');
-  assert.equal(m.className, 'ask-meter-tokens');
-  assert.equal(m.hasAttribute('title'), false);
+  assert.equal(m.title, '68.4k ctx');
+  assert.equal(m.className, 'ask-ctx-ring');
+  assert.equal(arc(m), '0 100');
   ctx.panel.destroy();
 });
 

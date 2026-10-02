@@ -5429,20 +5429,20 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-composer-row{display:flex;align-items:center;gap:8px;position:relative;}
 .ask-meter{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10.5px;
   color:var(--ink-3);white-space:nowrap;}
-.ask-meter-sep{color:var(--line-2);}
 .ask-meter-cost{color:var(--ink-2);}
-/* The context fill is the context popover's trigger: a bare button that keeps the meter's mono look. */
-.ask-meter-tokens{display:inline-flex;align-items:center;gap:5px;margin:-4px -6px;padding:4px 6px;border:0;border-radius:8px;
-  background:transparent;color:inherit;font:inherit;white-space:nowrap;cursor:pointer;transition:.15s;}
-.ask-meter-tokens:hover,.ask-meter-tokens[aria-expanded="true"]{background:var(--hover);color:var(--ink);}
-.ask-meter-tokens:focus-visible{outline:2px solid var(--ink);outline-offset:1px;}
+/* The context ring opens the context popover. ask-panel.mjs ctxRing: a track and an arc on a 100-unit
+   path; updateMeters sets the arc's stroke-dasharray to the fill. */
+.ask-ctx-ring{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;flex:none;padding:0;
+  border:0;border-radius:50%;background:transparent;cursor:pointer;transition:.15s;}
+.ask-ctx-ring:hover,.ask-ctx-ring[aria-expanded="true"]{background:var(--hover);}
+.ask-ctx-ring:focus-visible{outline:2px solid var(--ink);outline-offset:1px;}
+.ask-ctx-ring-track{stroke:var(--line-2);}
+.ask-ctx-ring-arc{stroke:var(--blue);transition:stroke-dasharray .3s;}
 /* Context window levels (ask-panel.mjs ctxLevel): amber from 75% of the compaction trigger, red from 90%. */
-.ask-meter-tokens.is-ctx-warn,.ask-thread-fill.is-ctx-warn,.ask-agent-tokens.is-ctx-warn{color:var(--amber-ink);}
-.ask-meter-tokens.is-ctx-high,.ask-thread-fill.is-ctx-high,.ask-agent-tokens.is-ctx-high{color:var(--red-ink);font-weight:600;}
-.ask-agents-btn{display:flex;align-items:center;gap:6px;padding:5px 8px;border:0;border-radius:8px;
-  background:transparent;color:var(--ink-3);font-family:var(--mono);font-size:10.5px;white-space:nowrap;
-  cursor:pointer;transition:.15s;}
-.ask-agents-btn:hover{background:var(--hover);color:var(--ink);}
+.ask-ctx-ring.is-ctx-warn .ask-ctx-ring-arc{stroke:var(--amber);}
+.ask-ctx-ring.is-ctx-high .ask-ctx-ring-arc{stroke:var(--red);}
+.ask-thread-fill.is-ctx-warn,.ask-agent-tokens.is-ctx-warn{color:var(--amber-ink);}
+.ask-thread-fill.is-ctx-high,.ask-agent-tokens.is-ctx-high{color:var(--red-ink);font-weight:600;}
 .ask-model-btn{display:flex;align-items:center;gap:7px;padding:6px 10px;border:0;border-radius:9px;
   background:transparent;color:var(--ink);font-family:inherit;font-weight:600;font-size:12.5px;cursor:pointer;transition:.15s;}
 .ask-model-btn:hover{background:var(--hover);}
@@ -5472,18 +5472,13 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-pop-voice{right:var(--ask-col-inset);bottom:calc(var(--ask-box-top) + 6px);width:260px;}
 .ask-voice-item svg{flex:0 0 auto;}
 .ask-composer :is(.ask-voice-mic,.ask-voice-caret):focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-.ask-composer :is(.ask-agents-btn,.ask-wt-btn,.ask-model-btn,.ask-send,.ask-stop,.ask-chip-x):focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-/* The button shares .ask-agents-btn, which is display:flex — that AUTHOR rule
-   outranks the UA [hidden]{display:none}, so without this twin the button never
-   hides and shows a permanent "0 worktrees". */
-.ask-wt-btn[hidden]{display:none;}
+.ask-composer :is(.ask-model-btn,.ask-send,.ask-stop,.ask-chip-x):focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 
 .ask-pop{position:absolute;z-index:3;background:var(--panel);border:1px solid var(--line-2);
   padding:6px;box-shadow:var(--shadow-menu);border-radius:var(--r-card);}
 .ask-pop-threads{top:46px;right:76px;width:326px;}
 /* The composer popovers hug the box (--ask-col-inset, see .ask-sheet) and float
-   just above it (--ask-box-top); agents/worktrees keep their old offsets left of
-   the model popover. */
+   just above it (--ask-box-top). */
 .ask-pop-scope{left:var(--ask-col-inset);bottom:calc(var(--ask-box-top) + 6px);width:300px;max-height:min(420px,70%);overflow-y:auto;}
 .ask-pop-model{right:var(--ask-col-inset);bottom:calc(var(--ask-box-top) + 6px);width:292px;border-radius:var(--r-card);}
 /* The per-chat MCP picker (MCP registry §9.4) opens over the scope pill it sits beside. Level 1 rows hold a
@@ -5500,9 +5495,9 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-mcp-member.is-skipped .ask-model-name{font-family:var(--mono);font-size:12px;color:var(--ink-3);}
 .ask-mcp-member.is-problem .ask-pop-row-value{color:var(--amber-ink);}
 .ask-notice-mcp{padding:0;border:0;background:none;color:var(--blue-ink);font:inherit;cursor:pointer;}
-.ask-pop-runinfo{right:calc(var(--ask-col-inset) + 66px);bottom:calc(var(--ask-box-top) + 6px);width:326px;z-index:4;}
-/* Context popover (ask-panel.mjs buildCtxPopover): the window's fill, then the chat's topics. Above the meter. */
-.ask-pop-ctx{right:calc(var(--ask-col-inset) + 120px);bottom:calc(var(--ask-box-top) + 6px);width:320px;z-index:4;
+/* Context popover (ask-panel.mjs buildCtxPopover): the window's fill, the chat's topics, agents and
+   worktrees. Above the ring (JS sets its right edge); capped, it scrolls when the lists run long. */
+.ask-pop-ctx{right:calc(var(--ask-col-inset) + 120px);bottom:calc(var(--ask-box-top) + 6px);width:340px;z-index:4;
   max-height:min(460px,70%);overflow-y:auto;}
 .ask-ctx-bar{position:relative;height:6px;margin:2px 10px 8px;border-radius:999px;background:var(--field);overflow:hidden;}
 .ask-ctx-bar-used{position:absolute;left:0;top:0;bottom:0;background:var(--blue);}
@@ -5612,13 +5607,10 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-thread-trash:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-runinfo-row{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:10px;}
 .ask-runinfo-row:hover{background:var(--hover);}
-.ask-runinfo-col{display:flex;flex-direction:column;gap:1px;min-width:0;}
+.ask-runinfo-col{display:flex;flex-direction:column;gap:1px;flex:1 1 auto;min-width:0;}
 .ask-runinfo-name{font-family:var(--mono);font-size:11.5px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.ask-runinfo-sub{font-family:var(--mono);font-size:10px;color:var(--ink-3);}
-.ask-runinfo-elapsed{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--seq);}
-/* .ask-pop-worktrees inherits .ask-pop-runinfo's bottom offset, which is
-   calibrated for the AGENTS button; the worktrees button sits to its left. */
-.ask-pop-worktrees{min-width:340px;right:calc(var(--ask-col-inset) + 157px);}
+.ask-runinfo-sub{font-family:var(--mono);font-size:10px;color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ask-runinfo-elapsed{flex:none;margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--seq);white-space:nowrap;}
 .ask-wt-row .ask-runinfo-sub.ask-wt-path{cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px;}
 .ask-wt-row .ask-thread-trash{flex:none;}
 
