@@ -374,9 +374,9 @@ test('the one line: month in ink and semibold, Spent small/thin/grey, Saved bigg
   // Spent: ~11px, regular, --ink-2 (--ink-3 is 2.58:1 on --field, under verify:theme's 4.5:1).
   mark('.spend-ind-figs', /font-size:\s*11px/, /color:\s*var\(--ink-2\)/);
   mark('.spend-ind-spent .spend-ind-amt', /font-size:\s*11px/, /font-weight:\s*400/, /color:\s*var\(--ink-2\)/);
-  // Saved: semibold, the amount ~14px and the word a little smaller.
-  mark('.spend-ind-saved', /font-size:\s*12px/, /font-weight:\s*600/, /color:\s*var\(--ink\)/);
-  mark('.spend-ind-saved .spend-ind-amt', /font-size:\s*14px/);
+  // Saved: semibold, the word at the spent size and the amount one step up (~12px).
+  mark('.spend-ind-saved', /font-size:\s*11px/, /font-weight:\s*600/, /color:\s*var\(--ink\)/);
+  mark('.spend-ind-saved .spend-ind-amt', /font-size:\s*12px/);
   // A gain greens the word too, in --green-ink-strong (--green-ink is 4.44:1 on the hover fill).
   mark('.spend-ind-saved.pos,.spend-ind-saved.pos .spend-ind-amt', /color:\s*var\(--green-ink-strong\)/);
   for (const sel of ['.spend-ind-line', '.spend-ind-period', '.spend-ind-figs',

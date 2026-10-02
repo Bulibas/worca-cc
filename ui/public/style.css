@@ -3065,7 +3065,7 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .spend-ind.over .spend-ind-sub{color:var(--red-ink);}
 /* No total limit: one line, "Oct  $163 spent · $3,591 saved", on one shared baseline. The
    month leads in ink. Spent is small, regular and --ink-2 (--ink-3 is 2.58:1 on --field).
-   Saved is bigger and semibold; a gain is green — --green-ink-strong, since --green-ink
+   Saved is a size up and semibold; a gain is green — --green-ink-strong, since --green-ink
    measures 4.44:1 on this card's hover fill, under verify:theme's 4.5:1. A loss ("−$40 net")
    keeps neutral ink (--red-ink fails there too); its "−" carries it. The line never wraps:
    the figures ellipsize as a safety net. Width budget: the card's content box is 235 px;
@@ -3076,8 +3076,8 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .spend-ind-period{flex:none;font-size:12px;font-weight:600;color:var(--ink);}
 .spend-ind-figs{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:11px;color:var(--ink-2);}
 .spend-ind-spent .spend-ind-amt{font-size:11px;font-weight:400;color:var(--ink-2);}
-.spend-ind-saved{font-size:12px;font-weight:600;color:var(--ink);}
-.spend-ind-saved .spend-ind-amt{font-size:14px;}
+.spend-ind-saved{font-size:11px;font-weight:600;color:var(--ink);}
+.spend-ind-saved .spend-ind-amt{font-size:12px;}
 .spend-ind-saved.pos,.spend-ind-saved.pos .spend-ind-amt{color:var(--green-ink-strong);}
 /* OpenRouter free-model requests (openrouter-free-view.mjs): a second block under the spend block. */
 .free-ind{margin-top:8px;}
