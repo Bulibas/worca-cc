@@ -5306,7 +5306,9 @@ app.get('/api/runs/:id/actions', async (req, res) => {
           setupQueued: setupJobs.has(`${row.id}:${m.projectKey}`),
           copyCommand: m.br?.feature && m.projectDir ? copyCommandText({ projectDir: m.projectDir, branch: m.br.feature, pushed }) : null,
           setup: cfg.setup, actions: cfg.actions.map(({ id, label, kind, openUrl }) => ({ id, label, kind, openUrl })),
-          builtins: Object.entries(builtins()).filter(([k, v]) => v && cfg.builtins[k] !== false).map(([k, v]) => ({ key: k, label: v.label })) };
+          builtins: Object.entries(builtins()).filter(([k, v]) => v && cfg.builtins[k] !== false).map(([k, v]) => ({ key: k, label: v.label })),
+          // Switched on for the project but not detected here (no editor on PATH): the card says so.
+          unavailableBuiltins: Object.entries(builtins()).filter(([k, v]) => !v && cfg.builtins[k] !== false).map(([k]) => k) };
       })),
       stacks: row.target === 'workspace' ? readWorkspaceStacks(bareWorkspaceKey(row)) : [],
       stackStates: [...stackStates.values()].filter((s) => s.runId === row.id),

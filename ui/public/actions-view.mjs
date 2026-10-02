@@ -75,6 +75,8 @@ function renderLog(doc, instanceId, lines) {
 }
 function logLine(doc, l) { return h(doc, 'span', l.stream === 'out' ? null : l.stream, `${l.text}\n`); }
 
+const BUILTIN_NAME = { editor: 'editor', terminal: 'terminal', fileManager: 'file manager' };
+
 function memberCard(model, m, { doc, handlers, logs, queued }) {
   const sec = h(doc, 'section', 'card act-card');
   sec.dataset.member = m.projectKey;
@@ -96,13 +98,31 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
   if (!model.enabled) sec.append(h(doc, 'p', 'hint', 'Actions are turned off on this hosted deployment. Check out and Copy command still work.'));
   const copyBtn = () => (m.copyCommand ? btn(doc, 'Copy command', null, () => handlers.onCopy?.(m.copyCommand)) : null);
   const discardBtn = () => btn(doc, 'Discard', 'btn-ghost act-discard', () => handlers.onDiscard?.([m.projectKey]));
+  // A built-in switched on for the project but not found on this machine (the server's detection) says so,
+  // instead of quietly missing from the row; the project's Actions tab says "not found on this machine".
+  const missingNote = () => {
+    const names = (m.unavailableBuiltins || []).map((k) => BUILTIN_NAME[k] || k);
+    return model.enabled && names.length
+      ? h(doc, 'p', 'hint act-missing', `No ${names.join(' or ')} was found on this machine. Set one in Settings › Runs › Actions.`) : null;
+  };
 
   if (state === 'not-checked-out') {
     sec.append(h(doc, 'p', 'hint', `Check out takes ${estimateText(model.estimate?.lastSetupMs, !!m.setup)}.`));
     const row = h(doc, 'div', 'act-row');
     if (!model.workspace) row.append(btn(doc, 'Check out', 'btn-primary', () => handlers.onCheckout?.([m.projectKey])));
     const c = copyBtn(); if (c) row.append(c);
+    // The other built-ins open the checkout folder, so they wait for it: shown, disabled, and said why.
+    const opens = model.enabled ? (m.builtins || []).filter((b) => b.key !== 'copyCommand') : [];
+    if (opens.length) {
+      row.append(h(doc, 'span', 'act-sep'));
+      for (const b of opens) { const d = btn(doc, b.label); d.disabled = true; d.title = 'Available after Check out'; row.append(d); }
+    }
     if (row.childNodes.length) sec.append(row);
+    // One note under the row: what waits for Check out, then what this machine lacks.
+    const waits = opens.length ? `${opens.map((b) => b.label).join(', ').replace(/, ([^,]*)$/, ' and $1')} open the checkout, so they work after Check out.` : '';
+    const miss = missingNote();
+    const note = [waits, miss ? miss.textContent : ''].filter(Boolean).join(' ');
+    if (note) sec.append(h(doc, 'p', 'hint act-missing', note));
     return sec;
   }
 
@@ -132,6 +152,7 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
   } else { const c = copyBtn(); if (c) row.append(c); }
   row.append(discardBtn());
   sec.append(row);
+  if (state !== 'setting-up' && state !== 'setup-failed') { const miss = missingNote(); if (miss) sec.append(miss); }
   if (state === 'ready' && setup.status === 'pending') sec.append(h(doc, 'p', 'hint', 'Setup runs before the first action.'));
 
   for (const s of mine.filter((x) => x.kind === 'service' && ACTIVE.has(x.status))) {

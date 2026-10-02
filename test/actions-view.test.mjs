@@ -27,11 +27,26 @@ test('four states (plus pending / interrupted setup)', () => {
   assert.equal(memberViewState(member({ checkout: { setup: { status: 'ok' } } }), [task]), 'task-result');
 });
 
-test('not checked out: path, estimate, Check out + Copy command', () => {
+test('not checked out: path, estimate, Check out + Copy command, the other built-ins disabled until Check out', () => {
   const el = renderActionsCard(model(member()), { doc, handlers: {} });
   assert.match(el.textContent, /\/h\/runs\/ab\/repos\/app-0cea65fb/);
   assert.match(el.textContent, /about 42 s/);
-  assert.deepEqual(labelsOf(el), ['Check out', 'Copy command']);
+  assert.deepEqual(labelsOf(el), ['Check out', 'Copy command', 'VS Code', 'Terminal', 'Finder']);
+  const waiting = [...el.querySelectorAll('button')].filter((b) => b.disabled);
+  assert.deepEqual(waiting.map((b) => b.textContent), ['VS Code', 'Terminal', 'Finder']);
+  assert.ok(waiting.every((b) => b.title === 'Available after Check out'));
+  assert.match(el.textContent, /VS Code, Terminal and Finder open the checkout, so they work after Check out\./);
+});
+
+test('a built-in switched on but not found on this machine is named, before and after Check out', () => {
+  const m = member({ builtins: [{ key: 'terminal', label: 'Terminal' }, { key: 'copyCommand', label: 'Copy command' }], unavailableBuiltins: ['editor'] });
+  const before = renderActionsCard(model(m), { doc, handlers: {} });
+  assert.match(before.textContent, /No editor was found on this machine\. Set one in Settings › Runs › Actions\./);
+  assert.match(before.textContent, /Terminal open the checkout/);
+  const after = renderActionsCard(model({ ...m, checkout: { setup: { status: 'ok' } } }), { doc, handlers: {} });
+  assert.match(after.textContent, /No editor was found on this machine/);
+  const off = model(m); off.enabled = false;
+  assert.doesNotMatch(renderActionsCard(off, { doc, handlers: {} }).textContent, /No editor was found/, 'hosted: nothing to set');
 });
 
 test('running: Stop Run, Test, built-ins, open link, Discard', () => {
