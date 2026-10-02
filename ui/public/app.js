@@ -19748,33 +19748,24 @@ function paintHdGlance(screen, record, data) {
     workflow: trail.count ? `${trail.count} step${trail.count === 1 ? '' : 's'}` : '',
   }));
 
-  // The pull request, mirrored from the Details header's control: visible exactly when
-  // it is, so at most one button, coloured by the PR's state (paintRdResult's classes).
-  const acts = document.createElement('div');
-  acts.className = 'rd-result-actions';
-  const mirror = (sel, label, cls, icon) => {
-    const src = screen.querySelector(sel);
-    if (!src || src.hidden || !levelAtLeast(src.dataset.minLevel || 'simple')) return;
-    if (src.tagName === 'A') {
-      const a = document.createElement('a');
-      a.className = `rd-cta ${cls}`;
-      a.href = src.href;
-      a.target = '_blank';
-      a.rel = 'noopener';
-      setCtaContent(a, icon, label);
-      acts.appendChild(a);
-      return;
-    }
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = `rd-cta ${cls}`;
-    setCtaContent(b, icon, label);
-    b.addEventListener('click', () => src.click());
-    acts.appendChild(b);
-  };
-  mirror('.hd-pr', 'Create pull request', 'hd-g-pr', 'pr-create');
-  mirror('.hd-pr-link', 'View pull request', `hd-g-pr-link ${pr === 'MERGED' ? 'pr-merged' : 'pr-view'}`, pr === 'MERGED' ? 'merged' : 'external');
-  if (acts.childNodes.length) host.appendChild(acts);
+  // The pull request, mirrored from the Details header's control into the card's slot
+  // (paintPrCta, outside the host rebuilt above): visible exactly when it is, so at most one
+  // button, coloured by the PR's state. While the lookup runs (and the control's level shows
+  // it), the slot holds the placeholder that morphs into whichever button the answer brings.
+  const shown = (src) => !!src && levelAtLeast(src.dataset.minLevel || 'simple');
+  const createBtn = screen.querySelector('.hd-pr');
+  const link = screen.querySelector('.hd-pr-link');
+  const slot = glance.querySelector('.rd-pr-slot');
+  if (shown(link) && !link.hidden) {
+    paintPrCta(slot, { state: pr === 'MERGED' ? 'merged' : 'view', href: link.href, cls: 'hd-g-pr-link' });
+  } else if (shown(createBtn) && !createBtn.hidden) {
+    // The one wiring: the header's button opens the ship-it modal (re-read at click time).
+    paintPrCta(slot, { state: 'create', cls: 'hd-g-pr', onClick: () => { const b = screen.querySelector('.hd-pr'); if (b) b.click(); } });
+  } else if (pr === 'PENDING' && shown(createBtn)) {
+    paintPrCta(slot, { state: 'pending' });
+  } else {
+    paintPrCta(slot, { state: 'none' });
+  }
 }
 
 // Detail-header PR control from the record's tri-state (undefined = enrichment
@@ -20045,6 +20036,7 @@ function paintHdHeaderMeta(screen, record, data) {
   base.textContent = source ? `${source} →` : '';
   base.hidden = !source;
   copyBtn.hidden = !feature;
+  paintPageBranch(screen.querySelector('.hd-glance'), feature);
   if (feature) {
     screen.querySelector('.hd-branch-name').textContent = feature;
     if (copyBtn.dataset.bound !== '1') {              // paintHdHeaderMeta re-runs (refreshHdFromRow)
@@ -26631,6 +26623,29 @@ function paintPageHead(glance, title, meta) {
   }
 }
 
+// The run's feature branch in the glance's meta line: the template's one chip, updated in
+// place (paintPageHead owns the line's first text node, the Running page appends a person
+// chip after it), hidden when there is none. Copies like the Details header's button. Bound
+// once; the click reads the PAINTED name, never the one this paint saw (the stale-capture
+// note in paintHdHeaderMeta).
+function paintPageBranch(glance, name) {
+  const btn = glance && glance.querySelector('.rd-page-branch');
+  if (!btn) return;
+  btn.hidden = !name;
+  const label = btn.querySelector('.rd-page-branch-name');
+  if (name && label.textContent !== name) {
+    label.textContent = name;
+    btn.title = name;
+    btn.setAttribute('aria-label', `Copy branch name ${name}`);
+  }
+  if (btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', () => {
+    const painted = label.textContent || '';
+    if (painted) copyBranchToClipboard(btn, painted, painted);
+  });
+}
+
 // The bar repeats the run's name only once the page title has scrolled under it
 // (CSS: [data-title-out]). One observer per page kind; a new screen replaces the old.
 const pageTitleWatch = { rd: null, hd: null };
@@ -26730,6 +26745,94 @@ function setCtaContent(node, icon, label) {
   node.appendChild(tx);
 }
 
+// The glance's pull request button, in its slot: one node per screen (the templates'
+// .rd-pr-slot, outside the result hosts their painters rebuild), because a recreated node
+// cannot morph. `state`: 'pending' (the lookup runs: a white placeholder with a spinner at
+// the button's height, nothing to click), 'create' | 'view' | 'merged' (the button in its
+// colour; View and Merged link to `href`, Create calls `onClick`), 'none' (no slot).
+// Pending -> a button morphs: the colour grows as a circle from the spinner (.rd-pr-fill),
+// the spinner fades, the icon and label come in. Pending -> none fades out and collapses.
+// Any other change paints the end state at once, so a known state (a cached row) never
+// animates and a repaint never replays. Every animation is CSS; these timers only end them
+// (the slowest CSS animation is shorter) and remove the spinner and the colour layer.
+const PR_CTA_MORPH_MS = 420;
+const PR_CTA_OUT_MS = 380;
+const PR_CTA_LOOK = {
+  create: { look: '', icon: 'pr-create', label: 'Create pull request' },
+  view: { look: 'pr-view', icon: 'external', label: 'View pull request' },
+  merged: { look: 'pr-merged', icon: 'merged', label: 'View pull request' },
+};
+function paintPrCta(slot, { state = 'none', href = '', onClick = null, cls = '' } = {}) {
+  if (!slot) return;
+  slot._prClick = onClick;                         // read at click time: a repaint re-binds it
+  const sig = `${state}|${href}|${cls}`;
+  if (slot.dataset.sig === sig) return;
+  const from = slot.dataset.state || 'none';
+  slot.dataset.sig = sig;
+  slot.dataset.state = state;
+  clearTimeout(slot._prTimer);
+  slot.classList.remove('is-pending', 'is-morph', 'is-out');
+  slot.style.removeProperty('--h');
+  slot.removeAttribute('aria-busy');
+  const done = (fn) => { slot._prTimer = setTimeout(fn, state === 'none' ? PR_CTA_OUT_MS : PR_CTA_MORPH_MS); };
+
+  if (state === 'pending') {
+    const spin = document.createElement('span');
+    spin.className = 'rd-pr-spin';
+    // The button's own glyph and line, invisible, hold its final height.
+    const wait = document.createElement('div');
+    wait.className = 'rd-pr-wait';
+    setCtaContent(wait, 'pr-create', 'Checking the pull request…');
+    slot.replaceChildren(spin, wait);
+    slot.classList.add('is-pending');
+    slot.setAttribute('aria-busy', 'true');
+    slot.hidden = false;
+    return;
+  }
+
+  if (state === 'none') {
+    if (from !== 'pending') { slot.replaceChildren(); slot.hidden = true; return; }
+    slot.style.setProperty('--h', `${slot.offsetHeight}px`);
+    slot.classList.add('is-out');
+    done(() => {
+      slot.classList.remove('is-out');
+      slot.style.removeProperty('--h');
+      slot.replaceChildren();
+      slot.hidden = true;
+    });
+    return;
+  }
+
+  const { look, icon, label } = PR_CTA_LOOK[state];
+  let ctl;
+  if (state === 'create') {
+    ctl = document.createElement('button');
+    ctl.type = 'button';
+    ctl.addEventListener('click', () => { if (slot._prClick) slot._prClick(); });
+  } else {
+    ctl = document.createElement('a');
+    ctl.href = href;
+    ctl.target = '_blank';
+    ctl.rel = 'noopener';
+  }
+  ctl.className = ['rd-cta', look, cls].filter(Boolean).join(' ');
+  setCtaContent(ctl, icon, label);
+  slot.hidden = false;
+  const wait = from === 'pending' && slot.querySelector('.rd-pr-wait');
+  if (!wait) { slot.replaceChildren(ctl); return; }
+  // The spinner stays where it turns (a moved node would restart its spin) and fades out.
+  const fill = document.createElement('span');
+  fill.className = ['rd-pr-fill', look].filter(Boolean).join(' ');
+  wait.replaceWith(ctl);
+  slot.prepend(fill);
+  slot.classList.add('is-morph');
+  done(() => {
+    slot.classList.remove('is-morph');
+    fill.remove();
+    slot.querySelector('.rd-pr-spin')?.remove();
+  });
+}
+
 function rdSheetGroup(title, rows) {
   const g = document.createElement('div');
   g.className = 'rd-sgroup';
@@ -26792,14 +26895,45 @@ function rdFilesChanged(r) {
   return s ? (s.filesNew || 0) + (s.filesChanged || 0) + (s.filesDeleted || 0) : null;
 }
 
-// Every tab (Activity) always; once the run is over, also the
-// pull request (the facts row above carries Time · Cost · Changes in every state). Numbers come from
-// results.json; "Create pull request" hands over to History's ship-it modal
-// (pendingShipIt), which owns the remotes picker and the push. Rebuilt only when its
-// content changes (a replaced row loses :hover).
+// The pull request button under the result, in its slot (paintPrCta). Same tri-state as
+// paintHdPr: an open or merged PR links, `null` (resolved, none) offers Create when
+// eligible, `undefined` (the lookup runs) and a History row not loaded yet hold the
+// placeholder. One button at most, in the state's colour: ink to create, blue while open,
+// violet once merged (the orb's). Only a finished run whose History key resolves.
+// "Create pull request" hands over to History's ship-it modal (pendingShipIt), which owns
+// the remotes picker and the push.
+function paintRdPrCta(screen, r) {
+  const slot = screen.querySelector('.rd-pr-slot');
+  if (!slot) return;
+  const key = r.status === 'done' ? historyKeyForRun(r) : '';
+  if (!key) { paintPrCta(slot, { state: 'none' }); return; }
+  const record = rdHistoryRecord(r);
+  if (glancePrInput(record) === 'PENDING') { paintPrCta(slot, { state: 'pending' }); return; }
+  const pr = record.pr && typeof record.pr === 'object' ? record.pr : null;
+  const prState = pr ? String(pr.state || '').toUpperCase() : '';
+  if (pr && (prState === 'OPEN' || prState === 'MERGED') && pr.url) {
+    paintPrCta(slot, { state: prState === 'MERGED' ? 'merged' : 'view', href: pr.url });
+  } else if (histPrEligible(record) && record.pr !== undefined) {
+    paintPrCta(slot, {
+      state: 'create', cls: 'rd-create-pr',
+      onClick: () => {
+        pendingShipIt = { id: r.pipelineId, projectKey: key };
+        location.hash = `history/${key}/${r.pipelineId}`;
+      },
+    });
+  } else {
+    paintPrCta(slot, { state: 'none' });
+  }
+}
+
+// Every tab (Activity) always; once the run is over, the pull request under it (its own
+// slot, paintRdPrCta; the facts row above carries Time · Cost · Changes in every state).
+// Numbers come from results.json. Rebuilt only when its content changes (a replaced row
+// loses :hover).
 function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
   const host = screen.querySelector('.rd-result');
   if (!host) return;
+  paintRdPrCta(screen, r);
   const terminal = RD_TERMINAL.includes(r.status);
   const steps = trailCount ? `${trailCount} step${trailCount === 1 ? '' : 's'}` : '';
   if (!terminal) {
@@ -26814,12 +26948,8 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
   }
   host.hidden = false;
   const data = r._rdData && r._rdData.data;
-  const key = historyKeyForRun(r);
-  const record = rdHistoryRecord(r);
-  // `undefined` (lookup pending) and `null` (none) must differ: only the second offers Create.
-  const prSig = record ? `${record.pr === undefined ? 'u' : JSON.stringify(record.pr)}${histPrEligible(record) ? 1 : 0}` : '';
   const awaySig = r.night ? `${r.night.decisions || 0}/${r.night.flagged || 0}` : '';
-  const sig = [r.status, glance, data ? 1 : 0, key, prSig, r.totalCostUsd, steps, currentLevel(), awaySig].join('|');
+  const sig = [r.status, glance, data ? 1 : 0, r.totalCostUsd, steps, currentLevel(), awaySig].join('|');
   if (host.dataset.key === sig) return;
   host.dataset.key = sig;
   host.replaceChildren();
@@ -26828,37 +26958,6 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
   const away = awayNoteEl(screen, r.night);
   if (away) host.append(away);
   host.append(...rdActivityGroups(screen, { overview: activityOverviewValue(results), workflow: steps, diff: rdDiffRowValue(r) }));
-
-  const acts = document.createElement('div');
-  acts.className = 'rd-result-actions';
-  // Same tri-state as paintHdPr: an open or merged PR links, `null` (resolved, none)
-  // offers Create when eligible, `undefined` (enrichment pending) offers nothing yet.
-  // One button at most, in the state's colour: ink to create, blue while open, violet
-  // once merged (the orb's). Following up is the bar's Run after.
-  const pr = record && record.pr && typeof record.pr === 'object' ? record.pr : null;
-  const prState = pr ? String(pr.state || '').toUpperCase() : '';
-  if (r.status === 'done' && record && key) {
-    if (pr && (prState === 'OPEN' || prState === 'MERGED') && pr.url) {
-      const a = document.createElement('a');
-      a.className = `rd-cta ${prState === 'MERGED' ? 'pr-merged' : 'pr-view'}`;
-      a.href = pr.url;
-      a.target = '_blank';
-      a.rel = 'noopener';
-      setCtaContent(a, prState === 'MERGED' ? 'merged' : 'external', 'View pull request');
-      acts.appendChild(a);
-    } else if (histPrEligible(record) && record.pr !== undefined) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'rd-cta rd-create-pr';
-      setCtaContent(b, 'pr-create', 'Create pull request');
-      b.addEventListener('click', () => {
-        pendingShipIt = { id: r.pipelineId, projectKey: key };
-        location.hash = `history/${key}/${r.pipelineId}`;
-      });
-      acts.appendChild(b);
-    }
-  }
-  if (acts.childNodes.length) host.appendChild(acts);
 }
 
 // The heading over a waiting question on the glance: what is asked, by which step. It
@@ -27269,6 +27368,7 @@ function paintRdHeader(screen, r) {
   const copyBtn = screen.querySelector('.rd-branch-copy');
   copyBtn.hidden = !feature;
   if (feature) screen.querySelector('.rd-branch-name').textContent = feature;
+  paintPageBranch(screen.querySelector('.rd-glance'), feature);
 
   // Actions. A terminal run offers neither (D8); a later task adds the History
   // link here.

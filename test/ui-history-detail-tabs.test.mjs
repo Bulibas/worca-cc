@@ -1462,9 +1462,14 @@ for (const [label, pr, cls, icon, text] of [
     });
     await openDetail(ctx, '');
     await settle(ctx.window, 6);
-    const acts = ctx.window.document.querySelector('#hist-detail .hd-result .rd-result-actions');
-    assert.ok(acts, 'the card has its actions row');
-    const ctas = [...acts.children];
+    const slot = ctx.window.document.querySelector('#hist-detail .hd-glance .rd-pr-slot');
+    assert.ok(slot, 'the card has its pull request slot');
+    assert.equal(slot.closest('.hd-result'), null, 'outside the result host paintHdGlance rebuilds');
+    assert.equal(slot.hidden, false);
+    // Known at first paint (a cached row): the button directly, no placeholder and no morph.
+    assert.equal(slot.classList.contains('is-pending') || slot.classList.contains('is-morph'), false, slot.className);
+    assert.equal(slot.querySelector('.rd-pr-spin, .rd-pr-fill'), null);
+    const ctas = [...slot.children];
     assert.equal(ctas.length, 1, 'one button, the pull request');
     const [cta] = ctas;
     assert.ok(cta.classList.contains('rd-cta') && cta.classList.contains(cls), `${cls}: ${cta.className}`);
@@ -1478,6 +1483,134 @@ for (const [label, pr, cls, icon, text] of [
     }
   });
 }
+
+// The PR lookup still running: a placeholder in the slot, which then morphs in place.
+// gh's answer for the open run, as the server pushes it (onHistoryPr drops a stale token).
+function prBatch(ctx, items) {
+  const token = ctx.calls.filter((c) => c.url.endsWith('/api/history/pr') && c.opts.body)
+    .map((c) => JSON.parse(c.opts.body).token).at(-1);
+  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'history-pr', token, done: true, items }) });
+}
+// Longer than the morph and the exit (paintPrCta's PR_CTA_MORPH_MS / PR_CTA_OUT_MS).
+const afterMorph = () => new Promise((r) => setTimeout(r, 600));
+async function pendingGlance(shared = ROW, { ghAvailable = true, level = '' } = {}) {
+  // A copy without `pr` (the lookup has not answered): patchHistoryPr writes `pr` into the row
+  // object it is handed, and an earlier test's PR watchdog (finalizeHistoryPr, 15 s) can still
+  // write `pr: null` into the shared ROW during a slow run.
+  const { pr: _answered, ...row } = shared;
+  const ctx = await bootDetail({
+    rows: [row],
+    arms: (url) => (url.endsWith('/api/history') ? ok({ pipelines: [row], ghAvailable }) : null),
+  });
+  if (level) ctx.window.document.documentElement.dataset.level = level;
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  return { ctx, slot: ctx.window.document.querySelector('#hist-detail .hd-glance .rd-pr-slot') };
+}
+
+test('History glance, PR lookup pending: a busy placeholder, then the SAME slot morphs into the link', async () => {
+  const { ctx, slot } = await pendingGlance();
+  assert.equal(slot.hidden, false);
+  assert.ok(slot.classList.contains('is-pending'), slot.className);
+  assert.equal(slot.getAttribute('aria-busy'), 'true');
+  assert.ok(slot.querySelector('.rd-pr-spin'), 'a spinner');
+  assert.match(slot.textContent, /Checking the pull request…/);
+  assert.equal(slot.querySelector('button, a, .rd-cta'), null, 'not clickable');
+  const url = 'https://github.com/o/r/pull/7';
+  prBatch(ctx, [{ projectKey: KEY, id: ROW.id, pr: { state: 'MERGED', url } }]);
+  await settle(ctx.window, 4);
+  assert.equal(ctx.window.document.querySelector('#hist-detail .hd-glance .rd-pr-slot'), slot, 'the slot is never replaced');
+  assert.ok(slot.classList.contains('is-morph'), slot.className);
+  assert.equal(slot.getAttribute('aria-busy'), null);
+  assert.ok(slot.querySelector('.rd-pr-fill.pr-merged'), 'the merged colour grows from the spinner');
+  const link = slot.querySelector('a.rd-cta.hd-g-pr-link.pr-merged');
+  assert.ok(link, slot.innerHTML);
+  assert.equal(link.getAttribute('href'), url);
+  assert.equal(link.target, '_blank');
+  assert.equal(link.rel, 'noopener');
+  await afterMorph();
+  assert.equal(slot.classList.contains('is-morph'), false);
+  assert.deepEqual([...slot.children], [link], 'the spinner and the colour layer are removed');
+  // paintHdGlance repaints on every PR batch for this run: no rebuild, no replay.
+  prBatch(ctx, [{ projectKey: KEY, id: ROW.id, pr: { state: 'MERGED', url } }]);
+  await settle(ctx.window, 4);
+  assert.equal(slot.classList.contains('is-morph'), false, 'the morph plays once');
+  assert.equal(slot.querySelector('a.rd-cta'), link, 'the same link');
+});
+
+test('History glance: a pending lookup that finds no PR morphs into Create, which forwards to the header\'s button', async () => {
+  const { ctx, slot } = await pendingGlance();
+  prBatch(ctx, [{ projectKey: KEY, id: ROW.id, pr: null }]);
+  await settle(ctx.window, 4);
+  assert.ok(slot.classList.contains('is-morph'), slot.className);
+  const btn = slot.querySelector('button.rd-cta.hd-g-pr');
+  assert.ok(btn, slot.innerHTML);
+  assert.equal(btn.textContent, 'Create pull request');
+  let forwarded = 0;
+  ctx.window.document.querySelector('#hist-detail .hd-pr').onclick = () => { forwarded += 1; };
+  click(ctx.window, btn);
+  assert.equal(forwarded, 1, 'the one wiring: .hd-pr opens the ship-it modal');
+});
+
+test('History glance: a pending lookup that ends with no button fades out and collapses the slot', async () => {
+  const { ctx, slot } = await pendingGlance({ ...ROW, survived: false });
+  assert.ok(slot.classList.contains('is-pending'), slot.className);
+  prBatch(ctx, [{ projectKey: KEY, id: ROW.id, pr: null }]);
+  await settle(ctx.window, 4);
+  assert.equal(slot.hidden, false, 'still in place while it fades');
+  assert.ok(slot.classList.contains('is-out'), slot.className);
+  await afterMorph();
+  assert.equal(slot.hidden, true);
+  assert.equal(slot.children.length, 0);
+});
+
+for (const [label, opts] of [['gh missing', { ghAvailable: false }], ['at Simple', { level: 'simple' }]]) {
+  test(`History glance: no placeholder where no button can appear (${label})`, async () => {
+    const { slot } = await pendingGlance(ROW, opts);
+    assert.equal(slot.hidden, true);
+    assert.equal(slot.classList.contains('is-pending'), false);
+    assert.equal(slot.querySelector('.rd-pr-spin'), null);
+  });
+}
+
+test('History glance: the meta line carries the feature branch as a chip that copies it', async () => {
+  const ctx = await bootDetail();
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const { window } = ctx;
+  const meta = window.document.querySelector('#hist-detail .hd-glance .rd-page-meta');
+  const chip = meta.querySelector('.rd-page-branch');
+  assert.ok(chip, 'the chip is in the meta line');
+  assert.equal(chip.hidden, false);
+  assert.equal(chip.dataset.minLevel, 'advanced', 'the Details branch button\'s level');
+  assert.equal(chip.querySelector('.rd-page-branch-name').textContent, ROW.branch);
+  assert.equal(chip.title, ROW.branch, 'the full name in the tooltip');
+  assert.equal(meta.firstChild.nodeType, 3, 'paintPageHead\'s text stays the line\'s first node');
+  assert.match(meta.firstChild.data, /^proj · /);
+  const writes = [];
+  Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText: async (t) => { writes.push(t); } } });
+  click(window, chip);
+  await settle(window, 2);
+  assert.deepEqual(writes, [ROW.branch]);
+  assert.ok(chip.classList.contains('copied'), 'the copied tick, as in Details');
+  // The row repaints the header (refreshHdFromRow): the same chip, bound once.
+  await deliverRows(ctx, [{ ...ROW }]);
+  assert.equal(meta.querySelectorAll('.rd-page-branch').length, 1);
+  assert.equal(meta.querySelector('.rd-page-branch'), chip);
+  click(window, chip);
+  await settle(window, 2);
+  assert.deepEqual(writes, [ROW.branch, ROW.branch], 'one copy per click');
+});
+
+test('History glance: a run without a feature branch shows no chip', async () => {
+  const ctx = await bootDetail({
+    rows: [{ ...ROW, branch: undefined }],
+    detail: { ...DETAIL, state: { ...DETAIL.state, branch: null } },
+  });
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  assert.equal(ctx.window.document.querySelector('#hist-detail .hd-glance .rd-page-branch').hidden, true);
+});
 
 // jsdom reads the `hidden` PROPERTY, not the cascade, and the bar's buttons take the run page
 // bar's display:flex rules, which beat the UA [hidden] rule: pin the shared CSS by source.
@@ -1495,6 +1628,11 @@ test('style.css: the saved run bar shares the run page bar\'s rules; the PR butt
   assert.match(css, /\.hd-pr-link\{[^}]*background:var\(--blue-bg\);color:var\(--blue-ink-strong\);/);
   assert.match(css, /\.hd-pr-link\.merged\{background:var\(--violet-bg\);color:var\(--violet-ink\);\}/);
   assert.doesNotMatch(css, /hd-g-resume|\.rd-cta\.alt/, 'the card\'s Resume split and grey secondary are gone');
+  // Both pages' bars: the run's name right-aligned beside the controls (one shared rule).
+  assert.match(css, /\n\.rd-bar-mid\{[^}]*justify-content:flex-end/);
+  // The glance's branch chip and PR slot take display rules, so their [hidden] is restated.
+  assert.match(css, /\.rd-page-branch\[hidden\]\{display:none;\}/);
+  assert.match(css, /\.rd-pr-slot\[hidden\]\{display:none;\}/);
 });
 
 test('a deep link to a History Details tab opens it once the run loads', async () => {
