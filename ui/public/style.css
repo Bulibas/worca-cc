@@ -4273,7 +4273,10 @@ body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:
   opacity:0;transition:opacity .2s;}
 .rd[data-title-out="1"][data-mode="glance"] .rd-bar-title,.hd[data-title-out="1"][data-mode="glance"] .rd-bar-title{opacity:1;}
 @media (prefers-reduced-motion:reduce){.rd-bar-title{transition:none;}}
-.rd-bar-end{display:flex;align-items:center;gap:8px;}
+.rd-bar-end{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;min-width:0;}
+/* Every control in the bar keeps its words on one line: a squeezed bar wraps whole controls
+   onto a second row, never the text inside one ("Run after" over two lines). */
+.rd-bar-end > *{flex:none;white-space:nowrap;}
 .rd-bar .rd-back,.rd-bar .rd-to-run,.hd-bar .hd-back,.hd-bar .hd-to-run,.rd-bar .rd-pause,.rd-bar .rd-stop,
 .hd-bar .hd-resume,.hd-bar .hd-pause,.hd-bar .hd-stop{height:36px;box-sizing:border-box;}
 .rd-to-run,.hd-to-run{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;}
@@ -4427,6 +4430,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
   .rd-bar,.hd-bar{padding:10px 16px;flex-wrap:wrap;gap:8px;}
   .rd-bar-mid{justify-content:flex-start;flex-basis:0;}   /* the name truncates beside the back button */
   .rd-bar-end{margin-left:auto;gap:6px;}
+  .rd-night-wrap > .txt{display:none;}   /* the select keeps its aria-label; the pill still says what happens */
   .rd-bar-end:empty{display:none;}
   .rd-bar .rd-pause,.rd-bar .rd-stop,.hd-bar .hd-resume,.hd-bar .hd-pause,.hd-bar .hd-stop{padding:0 11px;}
   .rd-glance{padding:20px 16px var(--ask-dock-clearance);}
@@ -4468,7 +4472,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 /* Night mode (Step 14): the run-view switch and the decisions list; flagged rows need review. */
 .rd-night-wrap{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2)}
 .rd-night-wrap[hidden]{display:none}
-.rd-night{font-size:12px}
+.rd-bar .rd-night{width:auto;height:36px;box-sizing:border-box;padding:0 14px;font-size:12px;}   /* the bar's control size, not a form field's */
 .rd-night-pill{font-size:11.5px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);color:var(--ink-2);white-space:nowrap}
 .rd-night-pill:empty{display:none}
 .rd-night-pill[data-state="now"]{border-color:var(--amber);background:var(--amber-wash)}
