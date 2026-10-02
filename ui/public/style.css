@@ -3063,14 +3063,24 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .spend-ind.over .spend-ind-meter{background:var(--red-bg);}
 .spend-ind.over .spend-ind-meter-fill{background:var(--red-ink);}
 .spend-ind.over .spend-ind-sub{color:var(--red-ink);}
-/* No total limit: the Saved row takes the place the "no total limit" note held. A gain
-   is green — --green-ink-strong, since --green-ink measures 4.48:1 on this card's hover
-   fill (--line), under verify:theme's 4.5:1. A loss keeps neutral ink (--red-ink is
-   4.07:1 there); its "−" carries it. */
-.spend-ind-saved{margin-top:6px;}
+/* No total limit: one line, "Oct  $163 spent · $3,591 saved", on one shared baseline. The
+   month leads in ink. Spent is small, regular and --ink-2 (--ink-3 is 2.58:1 on --field).
+   Saved is a size up and semibold; a gain is green — --green-ink-strong, since --green-ink
+   measures 4.44:1 on this card's hover fill, under verify:theme's 4.5:1. A loss ("−$40 net")
+   keeps neutral ink (--red-ink fails there too); its "−" carries it. The line never wraps:
+   the figures ellipsize as a safety net. Width budget: the card's content box is 235 px;
+   "$99,999 spent · $99,999 saved" fits after "Oct" (11 px spare at May) and "Week" (3 px) —
+   "This week" ran 22 px over, so a size or gap bump here needs a re-measure. New class names only — the OpenRouter block below
+   reuses .spend-ind-row, -label and -amt, so the amount overrides are scoped to a segment. */
+.spend-ind-line{display:flex;align-items:baseline;gap:10px;min-width:0;white-space:nowrap;}
+.spend-ind-period{flex:none;font-size:12px;font-weight:600;color:var(--ink);}
+.spend-ind-figs{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:11px;color:var(--ink-2);}
+.spend-ind-spent .spend-ind-amt{font-size:11px;font-weight:400;color:var(--ink-2);}
+.spend-ind-saved{font-size:11px;font-weight:600;color:var(--ink);}
+.spend-ind-saved .spend-ind-amt{font-size:12px;}
+.spend-ind-saved.pos,.spend-ind-saved.pos .spend-ind-amt{color:var(--green-ink-strong);}
 /* OpenRouter free-model requests (openrouter-free-view.mjs): a second block under the spend block. */
 .free-ind{margin-top:8px;}
-.spend-ind-saved.pos .spend-ind-label,.spend-ind-saved.pos .spend-ind-amt{color:var(--green-ink-strong);}
 
 /* ---------- Settings cards ---------- */
 /* One width/centering/gap rule for every Settings card. */

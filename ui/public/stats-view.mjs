@@ -285,9 +285,42 @@ function indRow(doc, label, amount) {
   return row;
 }
 
+/** Whole-dollar money for the one-line indicator: "$163", "$3,591", "$99,999"; from $100k up
+ *  (decided on the rounded value) the rail's compact tiers, "$120k", "$1.2M". Signed like
+ *  railUsd: "−$40", never "−$0". */
+function lineUsd(n) {
+  const v = Number(n) || 0;
+  const a = Math.round(Math.abs(v));
+  if (a >= 100000) return railUsd(v);
+  return `${v < 0 && a > 0 ? '−' : ''}$${a.toLocaleString('en-US')}`;
+}
+
+/** The one-line indicator's period: "Week" (a week can straddle two months; "This week" is
+ *  22 px too wide for the line at $99,999 ×2), else the month's short name. The server's
+ *  monthly window is a calendar month in the SERVER's zone (costWindowStart is the 1st at its
+ *  local midnight), so the window's midpoint names it — mid-month in any browser zone up to
+ *  ±14 h. From a payload with one bound: the start, or the instant before the exclusive end.
+ *  "Month" when neither bound is there. */
+function periodLabel(b) {
+  if (periodWord(b) === 'week') return 'Week';
+  const start = Number.isFinite(b.windowStartMs), end = Number.isFinite(b.windowEndMs);
+  const ms = start && end ? (b.windowStartMs + b.windowEndMs) / 2
+    : start ? b.windowStartMs : end ? b.windowEndMs - 1 : null;
+  return ms == null ? 'Month' : MO[new Date(ms).getMonth()];
+}
+
+/** "<amount> <word>": the amount mono (.spend-ind-amt), the word in the UI font. */
+function indFigure(doc, cls, amount, word) {
+  const seg = h(doc, 'span', cls);
+  seg.appendChild(h(doc, 'span', 'spend-ind-amt mono', amount));
+  seg.appendChild(doc.createTextNode(` ${word}`));
+  return seg;
+}
+
 /** Sidebar spend indicator (whole block navigates to #stats). With a total limit: Spent +
- *  meter. Without one there is no meter to show, so the second row states what the period
- *  saved instead — the old "no total limit" note said only what was missing. */
+ *  meter. Without one there is no meter to show, so the card is one line instead — "Oct
+ *  $163 spent · $3,591 saved", whole dollars — and the exact figures move to the title and
+ *  the accessible name. */
 export function renderBudgetIndicator(budget, { doc = globalThis.document, fmt = DEFAULT_FMT } = {}) {
   const b = budget || {};
   const btn = h(doc, 'button', 'spend-ind');
@@ -302,19 +335,29 @@ export function renderBudgetIndicator(budget, { doc = globalThis.document, fmt =
     (hasLimit ? ` of ${fmt.usd(b.totalLimitUsd)}` : '') +
     ` · resets ${fmtResetAt(b.windowEndMs)} — Claude Code client-side estimate (total_cost_usd), not authoritative billing` +
     (saved != null ? `. Saved this ${periodWord(b)}: ${signedUsd(fmt, saved)} (${SAVED_NOTE})` : '');
-  btn.appendChild(indRow(doc, `Spent this ${periodWord(b)}`, fmt.usd(b.windowSpendUsd)));
   if (hasLimit) {
+    btn.appendChild(indRow(doc, `Spent this ${periodWord(b)}`, fmt.usd(b.windowSpendUsd)));
     btn.appendChild(meterEl(doc, 'spend-ind-meter', b.blocked ? 100 : ratio * 100));
     if (b.blocked) btn.appendChild(h(doc, 'small', 'spend-ind-sub', 'limit reached · new runs blocked'));
-  } else if (saved != null) {
-    // A gain is green (.pos → --green-ink-strong, which clears verify:theme's 4.5:1 on the
-    // card's hover fill). A loss stays neutral ink — --red-ink is 4.07:1 there — and its
-    // "−" sign carries it.
-    const row = indRow(doc, `Saved this ${periodWord(b)}`, signedUsd(fmt, saved));
-    row.classList.add('spend-ind-saved');
-    if (saved >= 0) row.classList.add('pos');
-    btn.appendChild(row);
+    return btn;
   }
+  btn.setAttribute('aria-label', `Spent this ${periodWord(b)}: ${fmt.usd(b.windowSpendUsd)}` +
+    (saved != null ? ` · Saved this ${periodWord(b)}: ${signedUsd(fmt, saved)}` : ''));
+  const line = h(doc, 'span', 'spend-ind-line');
+  line.appendChild(h(doc, 'span', 'spend-ind-period', periodLabel(b)));
+  const figs = h(doc, 'span', 'spend-ind-figs');
+  figs.appendChild(indFigure(doc, 'spend-ind-spent', lineUsd(b.windowSpendUsd), 'spent'));
+  if (saved != null) {
+    figs.appendChild(h(doc, 'span', 'spend-ind-sep', ' · '));
+    // A gain is green (.pos → --green-ink-strong, which clears verify:theme's 4.5:1 on the
+    // card's hover fill). A loss stays neutral ink — --red-ink is 4.07:1 there — and reads
+    // "−$40 net": its "−" carries it, and "−$40 saved" would contradict itself.
+    const seg = indFigure(doc, 'spend-ind-saved', lineUsd(saved), saved < 0 ? 'net' : 'saved');
+    if (saved >= 0) seg.classList.add('pos');
+    figs.appendChild(seg);
+  }
+  line.appendChild(figs);
+  btn.appendChild(line);
   return btn;
 }
 

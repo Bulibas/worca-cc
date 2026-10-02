@@ -609,17 +609,17 @@ test('the stack is a 40px column that overrides the block card and never wraps a
   // anything under 4.5:1 (measured, v1 dry run). No red variant: --red-ink is 4.07:1.
   assert.match(ruleBody('.spend-stack-val'), /color:\s*var\(--ink\)/);
   assert.match(ruleBody('.spend-ind-amt'), /color:\s*var\(--ink\)/);
-  assert.match(ruleBody('.spend-ind-saved.pos .spend-ind-label,.spend-ind-saved.pos .spend-ind-amt'),
+  assert.match(ruleBody('.spend-ind-saved.pos,.spend-ind-saved.pos .spend-ind-amt'),
     /color:\s*var\(--green-ink-strong\)/);
   assert.match(ruleBody('.spend-stack-pair.pos .spend-stack-lbl,.spend-stack-pair.pos .spend-stack-val'),
     /color:\s*var\(--green-ink-strong\)/);
   assert.match(css, /--green-ink-strong:\s*light-dark\(#2C7535,/, '4.79:1 on --line (light)');
   assert.doesNotMatch(css, /\.spend-(?:stack|ind)[\w-]*\.(?:is-)?neg\b/,
     'no red variant for the sidebar amounts');
-  assert.match(ruleBody('.spend-ind-saved'), /margin-top:\s*6px/);
+  assert.match(ruleBody('.spend-ind-saved'), /font-weight:\s*600/);
 });
 
-test('no total limit: the rail mounts the Spent/Saved stack, and expanding restores the two-row block', async () => {
+test('no total limit: the rail mounts the Spent/Saved stack, and expanding restores the one-line block', async () => {
   const { window, click } = await boot({ seed: { [KEY]: '1' },
     budgetOver: { totalLimitUsd: null, remainingUsd: null, windowSpendUsd: 10604.7,
       windowHumanHours: 1512, windowSavedUsd: 42315.3 } });
@@ -632,10 +632,11 @@ test('no total limit: the rail mounts the Spent/Saved stack, and expanding resto
 
   click('#side-toggle');
   assert.equal(doc.querySelector('#side-spend .spend-stack'), null);
-  const rows = [...doc.querySelectorAll('#side-spend .spend-ind-row')];
-  assert.deepEqual(rows.map((r) => r.querySelector('.spend-ind-label').textContent),
-    ['Spent this month', 'Saved this month']);
-  assert.equal(rows[1].querySelector('.spend-ind-amt').textContent, '$42,315.30');
+  const lines = [...doc.querySelectorAll('#side-spend .spend-ind-line')];
+  assert.equal(lines.length, 1, 'one line, not two rows');
+  assert.equal(lines[0].querySelector('.spend-ind-figs').textContent, '$10,605 spent · $42,315 saved');
+  assert.equal(doc.querySelector('#side-spend .spend-ind').getAttribute('aria-label'),
+    'Spent this month: $10,604.70 · Saved this month: $42,315.30');
   assert.doesNotMatch(doc.querySelector('#side-spend').textContent, /no total limit/i);
 });
 
