@@ -10,6 +10,10 @@ test('every kind, method, criterion and field has a plain label', () => {
   for (const f of NIGHT_FIELDS) assert.ok(FIELD_LABELS[f]?.label, f);
 });
 
+test('the extra fix rounds hint names both severities that block a review loop', () => {
+  assert.equal(FIELD_LABELS.maxExtraCycles.hint, 'When critical or major issues remain, worca may ask for this many more fix rounds. After that it continues and flags it.');
+});
+
 test('labels use the glossary words only', () => {
   // Scan the TEXT only: object keys and `value`/`mode` entries are stored field names (e.g. `strategy`), exempt by the
   // Global Constraints.

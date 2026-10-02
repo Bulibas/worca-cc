@@ -1,5 +1,6 @@
 // src/core/night/strategies.mjs
 // Pure decision rules. The only side effect is the injected `analyze` call.
+import { BLOCKING, SEVERITIES, normalizeSeverity } from '../../shared/graph/verdict.mjs';
 
 const realOpts = (q) => (Array.isArray(q?.options) ? q.options.filter((o) => typeof o === 'string' && o.trim()) : []);
 
@@ -83,11 +84,13 @@ export async function decideQuestion(q, cfg, { analyze } = {}) {
     reversible: true, flagged: true };
 }
 
+/** Extra fix rounds for every issue the review loop blocks on (critical AND major), read the way the loop reads them. */
 export function gateRule({ issues = [], extraUsed = 0 }, cfg) {
-  const critical = issues.filter((i) => String(i?.severity || '').toLowerCase() === 'critical');
-  if (!critical.length) return { decision: 'continue', flagged: false, reason: 'no critical issues left, continuing' };
-  const n = critical.length;
-  const left = `${n} critical issue${n === 1 ? '' : 's'} left`;
+  const sev = issues.map((i) => normalizeSeverity(i?.severity)).filter((s) => BLOCKING.has(s));
+  if (!sev.length) return { decision: 'continue', flagged: false, reason: 'no critical or major issues left, continuing' };
+  const n = sev.length;
+  const counts = SEVERITIES.filter((s) => BLOCKING.has(s)).map((s) => [sev.filter((x) => x === s).length, s]).filter(([c]) => c);
+  const left = `${counts.map(([c, s]) => `${c} ${s}`).join(' and ')} issue${n === 1 ? '' : 's'} left`;
   if (extraUsed < cfg.maxExtraCycles) return { decision: 'another', flagged: false, reason: `${left}, one more fix round` };
   return { decision: 'continue', flagged: true, reason: `${left} but the extra fix rounds are used up; continuing` };
 }
