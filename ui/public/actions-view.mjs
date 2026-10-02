@@ -95,6 +95,45 @@ function renderLog(doc, instanceId, lines) {
 }
 function logLine(doc, l) { return h(doc, 'span', l.stream === 'out' ? null : l.stream, `${l.text}\n`); }
 
+/** Long branch names and paths keep both ends (the run id is at the end): "worca-cc/github-…-da7d143d". */
+export function middleClip(text, max = 56) {
+  const s = String(text ?? '');
+  if (s.length <= max) return s;
+  const head = Math.ceil((max - 1) * 0.55);
+  return `${s.slice(0, head)}…${s.slice(s.length - (max - 1 - head))}`;
+}
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function copyIconButton(doc, label, onClick) {
+  const b = h(doc, 'button', 'act-copy');
+  b.type = 'button';
+  b.setAttribute('aria-label', label);
+  b.title = label;
+  const svg = doc.createElementNS(SVG_NS, 'svg');
+  for (const [k, v] of [['width', '14'], ['height', '14'], ['viewBox', '0 0 24 24'], ['fill', 'none'], ['stroke', 'currentColor'], ['stroke-width', '2'], ['aria-hidden', 'true']]) svg.setAttribute(k, v);
+  const rect = doc.createElementNS(SVG_NS, 'rect');
+  for (const [k, v] of [['x', '9'], ['y', '9'], ['width', '12'], ['height', '12'], ['rx', '2.5']]) rect.setAttribute(k, v);
+  const path = doc.createElementNS(SVG_NS, 'path');
+  path.setAttribute('d', 'M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5');
+  svg.append(rect, path);
+  b.append(svg);
+  b.addEventListener('click', onClick);
+  return b;
+}
+/** Branch and Folder as labelled rows: each mono string says what it is. */
+function metaRows(doc, m, handlers) {
+  const dl = h(doc, 'dl', 'act-meta');
+  const row = (label, ...value) => { const dd = h(doc, 'dd'); dd.append(...value); dl.append(h(doc, 'dt', null, label), dd); };
+  if (!m.branch) { row('Branch', h(doc, 'span', 'act-later', 'None: this run made no branch')); return dl; }
+  const br = h(doc, 'code', 'act-branch', middleClip(m.branch)); br.title = m.branch;
+  row('Branch', br, copyIconButton(doc, 'Copy branch name', () => handlers.onCopy?.(m.branch)));
+  const dir = m.checkout ? (m.checkout.worktreeDir || m.worktreeDir) : null;
+  if (dir) {
+    const p = h(doc, 'code', 'act-path', middleClip(dir, 64)); p.title = dir;
+    row('Folder', p, copyIconButton(doc, 'Copy folder path', () => handlers.onCopy?.(dir)));
+  } else row('Folder', h(doc, 'span', 'act-later', 'Created when you check out'));
+  return dl;
+}
+
 const BUILTIN_NAME = { editor: 'editor', terminal: 'terminal', fileManager: 'file manager' };
 
 function memberCard(model, m, { doc, handlers, logs, queued }) {
@@ -103,18 +142,16 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
   const mine = instancesOf(model, m.projectKey);
   const state = memberViewState(m, mine);
   sec.dataset.state = state;
-  const head = h(doc, 'div', 'act-row act-head');
-  head.append(h(doc, 'h3', 'act-name', m.projectName || m.projectKey));
-  if (m.branch) head.append(h(doc, 'code', 'act-branch', m.branch));
-  head.append(h(doc, 'span', 'badge act-state', STATE_TEXT[state]));
-  sec.append(head);
+  // Name and state on top (the badge keeps one place, top right), then Branch and Folder as labelled rows.
+  const head = h(doc, 'div', 'act-head');
+  head.append(h(doc, 'h3', 'act-name', m.projectName || m.projectKey), h(doc, 'span', 'badge act-state', STATE_TEXT[state]));
+  sec.append(head, metaRows(doc, m, handlers));
 
-  if (state === 'no-branch') { sec.append(h(doc, 'p', 'hint', 'No branch to check out.')); return sec; }
+  if (state === 'no-branch') return sec;
   if (model.finished === false) {
     sec.append(h(doc, 'p', 'hint', 'Check out is available once the run has finished. Resume or stop the run first.'));
     return sec;
   }
-  if (m.worktreeDir) sec.append(h(doc, 'div', 'act-path', m.worktreeDir));
   if (!model.enabled) sec.append(h(doc, 'p', 'hint', 'Actions are turned off on this hosted deployment. Check out and Copy command still work.'));
   const copyBtn = () => (m.copyCommand ? btn(doc, 'Copy command', null, () => handlers.onCopy?.(m.copyCommand)) : null);
   const discardBtn = () => btn(doc, 'Discard', 'btn-ghost act-discard', () => handlers.onDiscard?.([m.projectKey]));
@@ -130,7 +167,6 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
   };
 
   if (state === 'not-checked-out') {
-    sec.append(h(doc, 'p', 'hint', `Check out takes ${estimateText(model.estimate?.lastSetupMs, !!m.setup)}.`));
     const row = h(doc, 'div', 'act-row');
     if (!model.workspace) row.append(btn(doc, 'Check out', 'btn-primary', () => handlers.onCheckout?.([m.projectKey])));
     const c = copyBtn(); if (c) row.append(c);
@@ -143,7 +179,7 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
     if (row.childNodes.length) sec.append(row);
     // One note under the row: what waits for Check out, then what this machine lacks.
     const waits = opens.length ? `${opens.map((b) => b.label).join(', ').replace(/, ([^,]*)$/, ' and $1')} open the checkout, so they work after Check out.` : '';
-    const note = missingNote(waits);
+    const note = missingNote(`Check out takes ${estimateText(model.estimate?.lastSetupMs, !!m.setup)}.${waits ? ` ${waits}` : ''}`);
     if (note) sec.append(note);
     return sec;
   }
@@ -401,7 +437,7 @@ export function createActionsController({ runId, scopeQuery, api, ws, host, doc,
     },
     onCopy: async (text) => {
       try { await doc.defaultView?.navigator?.clipboard?.writeText(text); st.notice = { text: 'Copied', kind: 'ok' }; }
-      catch { st.notice = { text: 'Copy failed; select the command by hand.', kind: 'error' }; }
+      catch { st.notice = { text: 'Copy failed; select the text by hand.', kind: 'error' }; }
       render();
     },
     onStack: async (stackId, op) => after(await api('POST', `${base}/stacks/${encodeURIComponent(stackId)}/${op === 'stop' ? 'stop' : 'start'}${q}`, {})),

@@ -12,7 +12,7 @@ const member = (over = {}) => ({ projectKey: 'app-0cea65fb', projectName: 'app',
   actions: [{ id: 'run', label: 'Run', kind: 'service' }, { id: 'test', label: 'Test', kind: 'task' }],
   builtins: [{ key: 'editor', label: 'VS Code' }, { key: 'terminal', label: 'Terminal' }, { key: 'fileManager', label: 'Finder' }, { key: 'copyCommand', label: 'Copy command' }], ...over });
 const model = (m, instances = []) => ({ enabled: true, finished: true, workspace: false, estimate: { lastSetupMs: 42000 }, members: [m], stacks: [], stackStates: [], instances });
-const labelsOf = (el) => [...el.querySelectorAll('button')].map((b) => b.textContent);
+const labelsOf = (el) => [...el.querySelectorAll('button:not(.act-copy)')].map((b) => b.textContent);   // icon-only copy buttons have no text
 
 test('four states (plus pending / interrupted setup)', () => {
   assert.equal(memberViewState(member(), []), 'not-checked-out');
@@ -27,10 +27,11 @@ test('four states (plus pending / interrupted setup)', () => {
   assert.equal(memberViewState(member({ checkout: { setup: { status: 'ok' } } }), [task]), 'task-result');
 });
 
-test('not checked out: path, estimate, Check out + Copy command, the other built-ins disabled until Check out', () => {
+test('not checked out: folder to come, estimate, Check out + Copy command, the other built-ins disabled until Check out', () => {
   const el = renderActionsCard(model(member()), { doc, handlers: {} });
-  assert.match(el.textContent, /\/h\/runs\/ab\/repos\/app-0cea65fb/);
-  assert.match(el.textContent, /about 42 s/);
+  assert.doesNotMatch(el.textContent, /\/h\/runs\/ab\/repos\/app-0cea65fb/, 'no folder path before it exists');
+  assert.match(el.querySelector('.act-meta').textContent, /FolderCreated when you check out/);
+  assert.match(el.querySelector('.act-missing').textContent, /^Check out takes about 42 s\./);
   assert.deepEqual(labelsOf(el), ['Check out', 'Copy command', 'VS Code', 'Terminal', 'Finder']);
   const waiting = [...el.querySelectorAll('button')].filter((b) => b.disabled);
   assert.deepEqual(waiting.map((b) => b.textContent), ['VS Code', 'Terminal', 'Finder']);
@@ -111,7 +112,7 @@ test('pill, sidebar card, history badges', () => {
 test('every member state renders a section.act-card, including no-branch', () => {
   const el = renderActionsCard(model(member({ branch: null, copyCommand: null })), { doc, handlers: {} });
   assert.equal(el.querySelectorAll('section.card.act-card').length, 1);
-  assert.match(el.textContent, /No branch to check out/);
+  assert.match(el.querySelector('.act-meta').textContent, /BranchNone: this run made no branch/);
 });
 
 test('setup failed: exit code and "Run setup again"', () => {
@@ -352,4 +353,29 @@ test('an error notice that names the Settings card links it; other text stays te
   assert.deepEqual(hrefs(n), [['Settings › Runs › Actions', '#settings/runs/actions']]);
   const plain = renderActionsCard(model(member()), { doc, handlers: {}, notice: { kind: 'err', text: 'Request failed (500)' } });
   assert.equal(plain.querySelectorAll('.act-notice a').length, 0);
+});
+
+test('layout: name and state on top, then Branch and Folder as labelled rows with copy buttons', () => {
+  const copied = [];
+  const long = 'worca-cc/github-source-sinishadjukic-worca-cc-529-da7d143d';
+  const m = member({ branch: long, checkout: { worktreeDir: '/Users/ada/.worca-cc/runs/da7d143d/repos/worca-cc-189d6679', setup: { status: 'ok' } } });
+  const el = renderActionsCard(model(m), { doc, handlers: { onCopy: (t) => copied.push(t) } });
+  const head = el.querySelector('.act-head');
+  assert.deepEqual([...head.children].map((c) => c.className), ['act-name', 'badge act-state'], 'the branch left the title line');
+  assert.deepEqual([...el.querySelectorAll('.act-meta dt')].map((d) => d.textContent), ['Branch', 'Folder']);
+  const br = el.querySelector('.act-branch');
+  assert.equal(br.title, long);
+  assert.ok(br.textContent.length <= 56 && br.textContent.includes('…') && br.textContent.endsWith('da7d143d'), br.textContent);
+  assert.equal(el.querySelector('.act-path').title, m.checkout.worktreeDir);
+  for (const b of el.querySelectorAll('.act-meta .act-copy')) b.click();
+  assert.deepEqual(copied, [long, m.checkout.worktreeDir]);
+  assert.deepEqual([...el.querySelectorAll('.act-meta .act-copy')].map((b) => b.getAttribute('aria-label')), ['Copy branch name', 'Copy folder path']);
+});
+
+test('middleClip keeps both ends', async () => {
+  const { middleClip } = await import('../ui/public/actions-view.mjs');
+  assert.equal(middleClip('short'), 'short');
+  const c = middleClip('a'.repeat(40) + 'END', 20);
+  assert.equal(c.length, 20);
+  assert.ok(c.startsWith('aaaa') && c.endsWith('END') && c.includes('…'));
 });

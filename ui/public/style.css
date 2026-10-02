@@ -7492,7 +7492,18 @@ input.gv-name:focus-visible{outline:none;}
 .act-card{display:grid;gap:12px}
 .act-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .act-row .act-sep{width:1px;align-self:stretch;background:var(--line)}
-.act-path{font-family:var(--mono);color:var(--ink-2);word-break:break-all}
+.act-head{display:flex;align-items:center;gap:12px;min-width:0}
+.act-head .act-name{margin:0;min-width:0;overflow-wrap:anywhere}
+.act-head .act-state{margin-left:auto;flex:none}
+/* Branch / Folder: labelled rows, so each mono string says what it is (long values keep both ends, full on hover) */
+.act-meta{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 16px;margin:0;font-size:13px;align-items:center}
+.act-meta dt{color:var(--ink-2)}
+.act-meta dd{margin:0;display:flex;align-items:center;gap:4px;min-width:0}
+.act-meta code{font-family:var(--mono);font-size:12.5px;color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.act-later{color:var(--ink-2)}
+.act-copy{border:0;background:none;color:var(--ink-2);cursor:pointer;padding:5px;border-radius:7px;display:inline-grid;place-items:center;flex:none}
+.act-copy:hover{background:var(--field);color:var(--ink)}
+.act-copy:focus-visible{outline:2px solid var(--blue-ink-strong);outline-offset:1px}
 .act-log{max-height:280px;overflow:auto;background:var(--field);border:1px solid var(--line);border-radius:var(--r-ctrl);padding:8px 10px;font:12px/1.5 var(--mono);color:var(--ink)}
 .act-log .err{color:var(--red-ink)}
 .act-log .sys{color:var(--ink-3)}
