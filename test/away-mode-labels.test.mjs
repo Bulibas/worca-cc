@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { awayAnswersSummary, KIND_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, FIELD_LABELS, WHICH_RUNS_OPTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, STATUS_ACTIONS, statusActions, GRACE_NO_HOURS, kindLabel, pillText, KIND_SHORT, kindShort, awayAnswerRows, DECIDER_WORDS, DECIDER_GROUPS, decidedByText } from '../src/shared/away-mode/labels.mjs';
+import { awayAnswersSummary, KIND_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, FIELD_LABELS, WHICH_RUNS_OPTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, STATUS_ACTIONS, statusActions, GRACE_NO_HOURS, kindLabel, pillText, KIND_SHORT, kindShort, awayAnswerRows, awayAnswerCounts, checksFirst, DECIDER_WORDS, DECIDER_GROUPS, decidedByText } from '../src/shared/away-mode/labels.mjs';
 import { NIGHT_KINDS, NIGHT_STRATEGIES, NIGHT_CRITERIA, NIGHT_FIELDS } from '../src/core/night/config.mjs';
 
 test('every kind, method, criterion and field has a plain label', () => {
@@ -58,6 +58,28 @@ test('awayAnswersSummary: the one line every end-of-run channel uses', () => {
   assert.equal(awayAnswersSummary({ decisions: 0, flagged: 0 }), null);
   assert.equal(awayAnswersSummary(null), null);
   assert.equal(awayAnswersSummary({ decisions: 2, flagged: 9 }), '2 answers while you were away — 2 to check', 'never more to check than answers');
+  // Per-question counts win over the per-ask ones when the run has them.
+  assert.equal(awayAnswersSummary({ decisions: 1, flagged: 1, answers: 7, checks: 2 }), '7 answers while you were away — 2 to check');
+  assert.equal(awayAnswersSummary({ decisions: 1, flagged: 0, answers: 3, checks: 0 }), '3 answers while you were away — nothing to check');
+});
+
+test('awayAnswerCounts: counts the rows the answers list shows, not the stored asks', () => {
+  const clarify = { kind: 'clarify', choice: 'a | b | c', flagged: true, questions: [
+    { id: 'q1', choice: 'a', flagged: false }, { id: 'q2', choice: 'b', flagged: true }, { id: 'q3', choice: 'c', flagged: true },
+  ] };
+  assert.deepEqual(awayAnswerCounts([clarify]), { answers: 3, checks: 2 });
+  // A pause is a row but not an answer; a flagged form with no question marked marks them all.
+  const pause = { kind: 'clarify', choice: null, guardrail: 'maxDecisions' };
+  const form = { kind: 'form', choice: 'defaults', flagged: true, questions: [{ id: 'a', choice: 'x' }, { id: 'b', choice: 'y' }] };
+  const gate = { kind: 'gate', choice: 'continue', flagged: false };
+  assert.deepEqual(awayAnswerCounts([clarify, pause, form, gate]), { answers: 6, checks: 4 });
+  assert.deepEqual(awayAnswerCounts([]), { answers: 0, checks: 0 });
+  assert.deepEqual(awayAnswerCounts(null), { answers: 0, checks: 0 });
+});
+
+test('checksFirst: the rows to check lead, each side keeps its order', () => {
+  const rows = [{ a: '1', check: false }, { a: '2', check: true }, { a: '3', check: false }, { a: '4', check: true }];
+  assert.deepEqual(checksFirst(rows).map((r) => r.a), ['2', '4', '1', '3']);
 });
 
 test('kindShort: a short caption for every kind the answers list shows', () => {

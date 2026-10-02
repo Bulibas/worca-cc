@@ -4584,8 +4584,9 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .rd-night-pill{font-size:11.5px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);color:var(--ink-2);white-space:nowrap}
 .rd-night-pill:empty{display:none}
 .rd-night-pill[data-state="now"]{border-color:var(--amber);background:var(--amber-wash)}
-/* The finished run's Away mode note, at the top of the result sheet. */
+/* Away mode's note, in the run's card under its facts, in every state (paintAwayNote). */
 .rd-away-note{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--panel);font-size:13px}
+.rd-away-note[hidden]{display:none}
 .rd-away-note.has-checks{border-left:3px solid var(--amber);background:var(--amber-wash)}
 /* "Answered for you": a card like the run card above it, one group per ask (the card's own label +
    list rows), the question small over the answer; Check marks what worca was not sure of. */
@@ -4593,6 +4594,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
   padding:18px;display:flex;flex-direction:column;gap:14px;}
 .rd-night-sec[hidden]{display:none;}
 .rd-night-h{margin:0;font:600 15px/1.3 var(--sans);letter-spacing:-.01em;}
+.rd-night-count{font-weight:400;color:var(--ink-2);}
 .rd-night-asks{display:flex;flex-direction:column;gap:16px;}
 .rd-na-list{margin:0;padding:0;list-style:none;}
 .rd-na-list > li + li{border-top:1px solid var(--line);}

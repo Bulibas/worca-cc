@@ -183,7 +183,7 @@ import {
   runOutcomeModel, openSyncDialog, chooseSyncRefusal,
 } from './branch-sync.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
-import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindShort, awayAnswerRows, awayAnswersSummary, decidedByText } from '../../src/shared/away-mode/labels.mjs';
+import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindShort, awayAnswerRows, awayAnswerCounts, checksFirst, awayAnswersSummary, decidedByText } from '../../src/shared/away-mode/labels.mjs';
 import { parseWindow } from '../../src/shared/away-mode/activation.mjs';
 import { describeRun, describeNewRun, describeAwaySwitch } from '../../src/shared/away-mode/describe.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
@@ -20075,8 +20075,6 @@ function paintHdGlance(screen, record, data) {
   const host = glance.querySelector('.hd-result');
   host.replaceChildren();
   const trail = trailColumns(run);
-  const away = awayNoteEl(screen, st.night);
-  if (away) host.append(away);
   host.append(...rdActivityGroups(screen, {
     overview: activityOverviewValue(results),
     workflow: trail.count ? `${trail.count} step${trail.count === 1 ? '' : 's'}` : '',
@@ -26643,26 +26641,21 @@ async function loadHdAwayAnswers(screen, pipelineId) {
   } catch { /* the section stays hidden */ }
 }
 
-/** The finished run's note (run page and History run page): how many answers Away mode gave and how
- *  many to check, with a button down to the list. null when Away mode gave no answer. */
-function awayNoteEl(screen, night) {
-  const line = awayAnswersSummary(night);
-  if (!line) return null;
-  const note = document.createElement('div');
-  note.className = 'rd-away-note' + (Number(night.flagged) > 0 ? ' has-checks' : '');
-  const text = document.createElement('span');
-  text.className = 'rd-away-note-text';
-  text.textContent = `Away mode: ${line}.`;
-  const b = document.createElement('button');
-  b.type = 'button';
-  b.className = 'btn btn-ghost btn-mini';
-  b.textContent = 'See the answers';
-  b.addEventListener('click', () => {
-    const sec = screen.querySelector('.rd-night-sec');
-    if (sec && !sec.hidden) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  });
-  note.append(text, b);
-  return note;
+/** The note at the top of the run's card (run page and History run page), painted from the same
+ *  answers as the list below it, so the two never disagree: how many answers, how many to check,
+ *  and a button down to the first one to check. Hidden when Away mode gave no answer. */
+function paintAwayNote(sec, counts) {
+  const note = sec.closest('.rd-glance')?.querySelector('.rd-away-note');
+  if (!note) return;
+  const line = awayAnswersSummary(counts);
+  note.hidden = !line;
+  if (!line) return;
+  note.classList.toggle('has-checks', counts.checks > 0);
+  note.querySelector('.rd-away-note-text').textContent = `Away mode: ${line}.`;
+  note.querySelector('.rd-away-jump').onclick = () => {
+    const to = sec.querySelector('.rd-na-row.is-check') || sec;
+    if (!sec.hidden) to.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
 }
 
 /** "Answered for you" into `sec` (run page and History run page): one group per ask, captioned with
@@ -26676,6 +26669,10 @@ function paintAwayAnswers(sec, decisions) {
   const sig = JSON.stringify(list);
   if (sec.__awaySig === sig) return;
   sec.__awaySig = sig;
+  const counts = awayAnswerCounts(list);
+  sec.querySelector('.rd-night-count').textContent = counts.answers
+    ? ` · ${counts.answers} answer${counts.answers === 1 ? '' : 's'}${counts.checks ? `, ${counts.checks} to check` : ''}` : '';
+  paintAwayNote(sec, counts);
   const host = sec.querySelector('.rd-night-asks');
   const open = new Set([...host.querySelectorAll('.rd-na-row.open')].map((li) => li.dataset.key));
   const focused = document.activeElement && host.contains(document.activeElement) ? document.activeElement.closest('.rd-na-row') : null;
@@ -26690,10 +26687,12 @@ function paintAwayAnswers(sec, decisions) {
     cap.textContent = at ? `${kindShort(d.kind)} · ${at}` : kindShort(d.kind);
     const ul = document.createElement('ul');
     ul.className = 'rd-slist rd-na-list';
-    awayAnswerRows(d).forEach((row, j) => {
-      const key = `${d.questionId || i}:${j}`;
+    // The answers to check lead their ask; the key stays the row's own place, so an open row survives.
+    const rows = awayAnswerRows(d).map((row, j) => ({ ...row, key: `${d.questionId || i}:${j}` }));
+    checksFirst(rows).forEach((row) => {
+      const key = row.key;
       const li = document.createElement('li');
-      li.className = 'rd-na-row';
+      li.className = 'rd-na-row' + (row.check ? ' is-check' : '');
       li.dataset.key = key;
       const head = document.createElement(row.why ? 'button' : 'div');
       head.className = 'rd-srow rd-na-btn';
@@ -27161,15 +27160,12 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
   const record = rdHistoryRecord(r);
   // `undefined` (lookup pending) and `null` (none) must differ: only the second offers Create.
   const prSig = record ? `${record.pr === undefined ? 'u' : JSON.stringify(record.pr)}${histPrEligible(record) ? 1 : 0}` : '';
-  const awaySig = r.night ? `${r.night.decisions || 0}/${r.night.flagged || 0}` : '';
-  const sig = [r.status, glance, data ? 1 : 0, key, prSig, r.totalCostUsd, steps, currentLevel(), awaySig].join('|');
+  const sig = [r.status, glance, data ? 1 : 0, key, prSig, r.totalCostUsd, steps, currentLevel()].join('|');
   if (host.dataset.key === sig) return;
   host.dataset.key = sig;
   host.replaceChildren();
 
   const results = data && data.results;
-  const away = awayNoteEl(screen, r.night);
-  if (away) host.append(away);
   host.append(...rdActivityGroups(screen, { overview: activityOverviewValue(results), workflow: steps, diff: rdDiffRowValue(r) }));
 
   const acts = document.createElement('div');
