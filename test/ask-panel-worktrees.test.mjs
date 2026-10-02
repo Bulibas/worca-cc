@@ -1,7 +1,7 @@
 // test/ask-panel-worktrees.test.mjs
-// P4/T9: the "N worktrees" button + popover — count from the snapshot, rows,
-// manual delete round trip. Harness + frame driving as in the other
-// ask-panel-*.test.mjs files.
+// P4/T9: the chat's worktrees — the Worktrees section of the context popover:
+// count from the snapshot, rows, manual delete round trip. Harness + frame
+// driving as in the other ask-panel-*.test.mjs files.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makePanel } from './helpers/ask-panel-harness.mjs';
@@ -42,7 +42,16 @@ function seededStorage() {
   };
 }
 
-test('worktrees button appears with the count after a thread loads; popover lists rows; trash deletes', async () => {
+// The ring opens the context popover; the Worktrees section is there only while the chat has one.
+async function openPop(ctx) {
+  ctx.doc.querySelector('[data-ask-ctx-btn]').click();
+  await ctx.tick(); await ctx.tick(); await ctx.tick(); ctx.flush();   // the on-open heal's dirty.worktrees flush
+  return ctx.doc.querySelector('.ask-pop-ctx');
+}
+const section = (ctx) => ctx.doc.querySelector('.ask-pop-ctx .ask-ctx-worktrees');
+const count = (ctx) => section(ctx).querySelector('.ask-pop-caption-meter').textContent;
+
+test('the context popover lists the chat\'s worktrees after a thread loads; trash deletes and the section goes', async () => {
   const state = { deleted: false };
   const confirms = [];
   const ctx = makePanel({
@@ -53,24 +62,21 @@ test('worktrees button appears with the count after a thread loads; popover list
   ctx.panel.open();                       // ensureFirstOpen → switchThread(TID) → snapshot
   await ctx.tick(); await ctx.tick(); await ctx.tick();
   ctx.flush();
-  const btn = ctx.doc.querySelector('[data-ask-wt-btn]');
-  assert.ok(btn, 'button exists');
-  assert.equal(btn.hidden, false);
-  assert.match(btn.textContent, /1 worktree\b/);
-  btn.click();
-  await ctx.tick(); await ctx.tick(); await ctx.tick();
-  const pop = ctx.doc.querySelector('.ask-pop-worktrees');
-  assert.ok(pop, 'popover open');
-  assert.match(pop.textContent, /demo-00000001 · worca-cc\/feat-1@abcdef1/);
-  assert.match(pop.textContent, /\/wt\/wt_00000001/);
-  const trash = pop.querySelector('.ask-wt-row .ask-thread-trash');
+  await openPop(ctx);
+  assert.ok(section(ctx), 'Worktrees section in the popover');
+  assert.equal(count(ctx), '1');
+  assert.match(section(ctx).textContent, /demo-00000001 · worca-cc\/feat-1@abcdef1/);
+  assert.match(section(ctx).textContent, /\/wt\/wt_00000001/);
+  const trash = section(ctx).querySelector('.ask-wt-row .ask-thread-trash');
   assert.ok(trash, 'per-row trash');
   trash.click();
   await ctx.tick(); await ctx.tick(); await ctx.tick();
   assert.equal(confirms.length, 1, 'confirm dialog invoked');
   assert.match(confirms[0].message, /branches are untouched/);
   assert.equal(state.deleted, true, 'DELETE was issued');
-  assert.equal(ctx.doc.querySelector('[data-ask-wt-btn]').hidden, true, 'count back to 0 hides the button');
+  assert.equal(ctx.doc.querySelector('.ask-pop-ctx'), null, 'the trash closed the popover before the confirm');
+  await openPop(ctx);
+  assert.equal(section(ctx), null, 'no worktrees left: no section');
 });
 
 test('turn end refetches worktrees (count refresh on ask-done)', async () => {
@@ -98,22 +104,22 @@ test('turn end refetches worktrees (count refresh on ask-done)', async () => {
   assert.equal(state.snapshots, before + 1, 'exactly one refetch from afterFrame — no resync, no double GET');
 });
 
-test('cancel at the confirm dialog issues NO delete and leaves the button visible', async () => {
+test('cancel at the confirm dialog issues NO delete and keeps the worktree listed', async () => {
   // The harness confirm defaults to true, so the destructive path is otherwise
   // untested. A confirm→false must NOT fetch DELETE and must keep the worktree.
   const state = { deleted: false };
   const ctx = makePanel({ fetchHandler: snapshotHandler(state), storage: seededStorage(), confirm: async () => false });
   ctx.panel.open();
   await ctx.tick(); await ctx.tick(); await ctx.tick(); ctx.flush();
-  ctx.doc.querySelector('[data-ask-wt-btn]').click();
-  await ctx.tick(); await ctx.tick();
-  ctx.doc.querySelector('.ask-wt-row .ask-thread-trash').click();
+  await openPop(ctx);
+  section(ctx).querySelector('.ask-wt-row .ask-thread-trash').click();
   await ctx.tick(); await ctx.tick(); await ctx.tick();
   assert.equal(state.deleted, false, 'cancelled → no DELETE issued');
-  assert.equal(ctx.doc.querySelector('[data-ask-wt-btn]').hidden, false, 'worktree still present, button visible');
+  await openPop(ctx);
+  assert.equal(count(ctx), '1', 'worktree still listed');
 });
 
-test('an ask-worktrees frame moves the count with NO snapshot GET; another thread\'s frame is ignored', async () => {
+test('an ask-worktrees frame moves an open popover\'s section with NO snapshot GET; another thread\'s frame is ignored', async () => {
   const state = { deleted: false, snapshots: 0 };
   const inner = snapshotHandler(state);
   const handler = (url, opts) => {
@@ -123,35 +129,20 @@ test('an ask-worktrees frame moves the count with NO snapshot GET; another threa
   const ctx = makePanel({ fetchHandler: handler, storage: seededStorage() });
   ctx.panel.open();
   await ctx.tick(); await ctx.tick(); await ctx.tick(); ctx.flush();
-  const btn = ctx.doc.querySelector('[data-ask-wt-btn]');
-  assert.match(btn.textContent, /1 worktree\b/);
+  const pop = await openPop(ctx);
+  assert.equal(count(ctx), '1');
   const before = state.snapshots;
   ctx.panel.pushServerFrame({ type: 'ask-worktrees', threadId: TID, worktrees: [WT, { ...WT, worktreeId: 'wt_00000002', ref: 'main' }] });
   ctx.flush();
-  assert.match(btn.textContent, /2 worktrees/);
-  assert.equal(btn.hidden, false);
+  assert.equal(ctx.doc.querySelector('.ask-pop-ctx'), pop, 'same panel, still open');
+  assert.equal(count(ctx), '2');
+  assert.equal(section(ctx).querySelectorAll('.ask-wt-row').length, 2);
   ctx.panel.pushServerFrame({ type: 'ask-worktrees', threadId: 'ask_ffffffff', worktrees: [] });
   ctx.flush();
-  assert.match(btn.textContent, /2 worktrees/, 'another thread\'s frame is ignored');
+  assert.equal(count(ctx), '2', 'another thread\'s frame is ignored');
   ctx.panel.pushServerFrame({ type: 'ask-worktrees', threadId: TID, worktrees: [] });
   ctx.flush();
-  assert.equal(btn.hidden, true, 'an empty list hides the button');
+  assert.equal(section(ctx), null, 'an empty list drops the section');
+  assert.ok(pop.querySelector('.ask-ctx-topics'), 'the rest of the popover survives the re-render');
   assert.equal(state.snapshots, before, 'the frame carried the list — no GET');
-});
-
-test('an open worktrees popover re-renders in place on the frame', async () => {
-  const state = { deleted: false, snapshots: 0 };
-  const ctx = makePanel({ fetchHandler: snapshotHandler(state), storage: seededStorage() });
-  ctx.panel.open();
-  await ctx.tick(); await ctx.tick(); await ctx.tick(); ctx.flush();
-  ctx.doc.querySelector('[data-ask-wt-btn]').click();
-  await ctx.tick(); await ctx.tick(); await ctx.tick(); ctx.flush();   // the on-open heal's dirty.worktrees flush
-  const pop = ctx.doc.querySelector('.ask-pop-worktrees');
-  assert.equal(pop.querySelectorAll('.ask-wt-row').length, 1);
-  ctx.panel.pushServerFrame({ type: 'ask-worktrees', threadId: TID, worktrees: [] });
-  ctx.flush();
-  assert.equal(ctx.doc.querySelector('.ask-pop-worktrees'), pop, 'same panel, still open');
-  assert.equal(pop.querySelectorAll('.ask-wt-row').length, 0);
-  assert.match(pop.textContent, /No worktrees open\./);
-  assert.match(pop.textContent, /Worktrees this chat/, 'the caption survives the re-render');
 });

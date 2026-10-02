@@ -59,30 +59,35 @@ async function openThread(ctx) {
   await ctx.tick(); await ctx.tick(); await ctx.tick();
 }
 
-test('trigger: a button with the meter text, popup semantics, no hover title, visible at every level', async () => {
+const arc = (btn) => btn.querySelector('.ask-ctx-ring-arc').getAttribute('stroke-dasharray');
+
+test('trigger: a ring button — arc = the fill, the figure in the hover, popup semantics, visible at every level', async () => {
   const ctx = makePanel({ fetchHandler: handler({ thread: thread() }) });
   await openThread(ctx);
   const btn = ctx.doc.querySelector('[data-ask-ctx-btn]');
   assert.equal(btn.tagName, 'BUTTON');
   assert.equal(btn.type, 'button');
-  assert.ok(btn.classList.contains('ask-meter-tokens'));
-  assert.equal(btn.textContent, '120.4k / 1M ctx · 12%');
-  assert.ok(btn.querySelector('svg'), 'a chevron');
+  assert.equal(btn.className, 'ask-ctx-ring');
+  assert.equal(btn.textContent, '', 'a ring, no text');
+  assert.ok(btn.querySelector('svg .ask-ctx-ring-track'), 'the track');
+  assert.equal(arc(btn), '12.04 100', 'the arc covers the fill on a 100-unit path');
+  assert.equal(btn.title, '120.4k / 1M ctx · 12%', 'the old meter text moved into the hover');
   assert.equal(btn.getAttribute('aria-haspopup'), 'menu');
   assert.equal(btn.getAttribute('aria-expanded'), 'false');
   assert.equal(btn.getAttribute('aria-label'), 'Context window, 12% full');
-  assert.equal(btn.hasAttribute('title'), false, 'the hover text moved into the popover');
   assert.equal(btn.closest('[data-min-level]'), null, 'shown in every interface mode');
   assert.equal(ctx.doc.querySelector('.ask-meter-cost').dataset.minLevel, 'advanced', 'cost stays Advanced');
-  for (const s of ctx.doc.querySelectorAll('.ask-meter-sep')) assert.equal(s.dataset.minLevel, 'advanced');
+  assert.equal(ctx.doc.querySelector('.ask-meter-cost').nextElementSibling, btn, 'the cost, then the ring');
+  assert.equal(ctx.doc.querySelectorAll('.ask-meter-sep').length, 0, 'no separators');
   ctx.panel.destroy();
 });
 
-test('trigger: aria-label without a known share; click toggles the popover and aria-expanded', async () => {
+test('trigger: an unknown window keeps the ring empty; click toggles the popover and aria-expanded', async () => {
   const ctx = makePanel({ fetchHandler: handler({ thread: thread({ totals: T({ ctx: 68400 }) }) }) });
   await openThread(ctx);
   const btn = ctx.doc.querySelector('[data-ask-ctx-btn]');
-  assert.equal(btn.textContent, '68.4k ctx');
+  assert.equal(arc(btn), '0 100');
+  assert.equal(btn.title, '68.4k ctx');
   assert.equal(btn.getAttribute('aria-label'), 'Context window');
   btn.click();
   assert.ok(ctx.doc.querySelector('.ask-pop-ctx'));
@@ -90,6 +95,23 @@ test('trigger: aria-label without a known share; click toggles the popover and a
   btn.click();
   assert.equal(ctx.doc.querySelector('.ask-pop-ctx'), null);
   assert.equal(btn.getAttribute('aria-expanded'), 'false');
+  ctx.panel.destroy();
+});
+
+test('trigger: past the window the arc is a full circle', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ thread: thread({ totals: T({ ctx: 230000, ctxWindow: 200000 }) }) }) });
+  await openThread(ctx);
+  const btn = ctx.doc.querySelector('[data-ask-ctx-btn]');
+  assert.equal(arc(btn), '100 100');
+  assert.ok(btn.classList.contains('is-ctx-high'));
+  ctx.panel.destroy();
+});
+
+test('footer: the agents and worktrees buttons are gone — their lists live in the context popover', async () => {
+  const ctx = makePanel({ fetchHandler: handler({ thread: thread() }) });
+  await openThread(ctx);
+  assert.equal(ctx.doc.querySelector('[data-ask-agents-btn]'), null);
+  assert.equal(ctx.doc.querySelector('[data-ask-wt-btn]'), null);
   ctx.panel.destroy();
 });
 
@@ -178,8 +200,8 @@ test('popover: its right edge lines up with the trigger, kept inside the sheet',
   btn.getBoundingClientRect = rect(350, 505);
   assert.equal(openCtx(ctx).style.right, '415px', '920 − 505: flush with the trigger');
   btn.click();
-  btn.getBoundingClientRect = rect(110, 230);                    // too far left for a 320px panel
-  assert.equal(openCtx(ctx).style.right, '494px', 'clamped: 820 − 320 − 6 keeps 6px to the sheet edge');
+  btn.getBoundingClientRect = rect(110, 230);                    // too far left for a 340px panel
+  assert.equal(openCtx(ctx).style.right, '474px', 'clamped: 820 − 340 − 6 keeps 6px to the sheet edge');
   ctx.panel.destroy();
 });
 
@@ -207,5 +229,62 @@ test('popover: a window resize while open moves it back over the trigger', async
   btn.getBoundingClientRect = rect(300, 420);
   ctx.window.dispatchEvent(new ctx.window.Event('resize'));
   assert.equal(pop.style.right, '180px', '600 − 420');
+  ctx.panel.destroy();
+});
+
+// ── agents and worktrees: Expert sections under the topics ───────────────────
+const agentBlock = (id, over = {}) => ({ kind: 'agent', id, label: 'count runs', type: 'general-purpose', model: 'claude-haiku-4-5', tokens: 25321, ctx: 11645, usage: null, costUsd: 0.62, estimated: true, status: 'done', durationMs: 2861, log: [], ...over });
+const WT = {
+  worktreeId: 'wt_00000001', projectKey: 'demo-00000001', ref: 'worca-cc/feat-1',
+  commit: 'abcdef1234567890abcdef1234567890abcdef12',
+  path: '/home/u/.worca-cc/ask/ask_0000c0de/wt/wt_00000001', createdAt: '2026-08-24T00:00:00.000Z',
+};
+function richHandler({ blocks = [], worktrees = [] }) {
+  const messages = blocks.length ? [{ id: 'askm_00000001', threadId: TID, seq: 1, role: 'assistant', text: 'ok', blocks, status: 'done', reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't' }] : [];
+  return (url, opts = {}) => {
+    const method = opts.method || 'GET';
+    if (url === '/api/ask/threads?limit=50') return ok({ threads: [thread()], total: 1 });
+    if (url === `/api/ask/threads/${TID}` && method === 'GET') {
+      return ok({ thread: thread(), messages, attachments: [], runLinks: [], worktrees, inFlight: null });
+    }
+    return ok({});
+  };
+}
+
+test('popover: Agents then Worktrees follow the topics, each an Expert section behind its own divider', async () => {
+  const ctx = makePanel({ fetchHandler: richHandler({ blocks: [agentBlock('toolu_1'), agentBlock('toolu_2', { label: 'scan logs', costUsd: 0.18, status: 'running' })], worktrees: [WT] }) });
+  await openThread(ctx);
+  const pop = openCtx(ctx);
+  await ctx.tick(); await ctx.tick(); await ctx.tick(); ctx.flush();   // the on-open worktree heal
+  const agents = pop.querySelector('.ask-ctx-agents');
+  const wts = pop.querySelector('.ask-ctx-worktrees');
+  assert.equal(pop.querySelector('.ask-ctx-topics').nextElementSibling, agents, 'agents right after the topics');
+  assert.equal(agents.nextElementSibling, wts, 'worktrees last');
+  for (const sec of [agents, wts]) {
+    assert.equal(sec.dataset.minLevel, 'expert', 'Expert only, as the footer buttons were');
+    assert.ok(sec.firstElementChild.classList.contains('ask-pop-divider'), 'the divider hides with its section');
+  }
+  assert.equal(agents.querySelector('.ask-pop-caption').textContent, 'Agents');
+  assert.equal(agents.querySelector('.ask-pop-caption-meter').textContent, '2 · ≈$0.80', 'count, then the summed cost');
+  const rows = [...agents.querySelectorAll('.ask-runinfo-row')];
+  assert.deepEqual(rows.map((r) => r.querySelector('.ask-runinfo-name').textContent), ['count runs', 'scan logs']);
+  assert.match(rows[0].querySelector('.ask-runinfo-sub').textContent, /claude-haiku-4-5 · 11\.6k ctx · ≈\$0\.62 · done/);
+  assert.equal(rows[0].querySelector('.ask-runinfo-sub').title, rows[0].querySelector('.ask-runinfo-sub').textContent, 'cut to one line; the whole line on hover');
+  assert.ok(rows[1].querySelector('.ask-dot-run'), 'a running agent keeps its dot');
+  assert.equal(wts.querySelector('.ask-pop-caption').textContent, 'Worktrees');
+  assert.equal(wts.querySelector('.ask-pop-caption-meter').textContent, '1');
+  assert.match(wts.querySelector('.ask-wt-row').textContent, /demo-00000001 · worca-cc\/feat-1@abcdef1/);
+  ctx.panel.destroy();
+});
+
+test('popover: no agents → an empty line; no worktrees → no Worktrees section at all', async () => {
+  const ctx = makePanel({ fetchHandler: richHandler({}) });
+  await openThread(ctx);
+  const pop = openCtx(ctx);
+  await ctx.tick(); await ctx.tick(); await ctx.tick(); ctx.flush();
+  const agents = pop.querySelector('.ask-ctx-agents');
+  assert.equal(agents.querySelector('.ask-pop-caption-meter').textContent, '');
+  assert.equal(agents.querySelector('.ask-pop-empty').textContent, 'No agents spawned yet.');
+  assert.equal(pop.querySelector('.ask-ctx-worktrees'), null);
   ctx.panel.destroy();
 });

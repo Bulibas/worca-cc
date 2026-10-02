@@ -251,10 +251,12 @@ test('ask-panel-composer (#398): the 202 attachment rows give the echo its ids �
   assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 1, 'the new file is accepted');
 });
 
-test('ask-panel-composer: the meter shows context fill — 0 ctx on a fresh panel, the live ctx while streaming, the thread ctx after done', async () => {
+test('ask-panel-composer: the ring shows context fill — empty on a fresh panel, the live ctx while streaming, the thread ctx after done', async () => {
   const ctx = makePanel({ fetchHandler: apiHandler() });
   ctx.panel.open();
-  assert.equal(ctx.doc.querySelector('.ask-meter-tokens').textContent, '0 ctx', 'fresh panel: no session, no fill');
+  const ring = () => ctx.doc.querySelector('[data-ask-ctx-btn]');
+  assert.equal(ring().hasAttribute('title'), false, 'fresh panel: no session, no fill');
+  assert.equal(ring().querySelector('.ask-ctx-ring-arc').getAttribute('stroke-dasharray'), '0 100');
   ctx.doc.querySelector('textarea.ask-input').value = 'meter me';
   ctx.doc.querySelector('[data-ask-send]').click();
   await ctx.tick(); await ctx.tick(); await ctx.tick();
@@ -267,14 +269,13 @@ test('ask-panel-composer: the meter shows context fill — 0 ctx on a fresh pane
   ctx.panel.pushServerFrame(frames[0]);
   ctx.panel.pushServerFrame(frames[1]);
   ctx.flush();
-  assert.match(ctx.doc.querySelector('.ask-meter-tokens').textContent, /61\.2k ctx/, 'live: the streaming call\'s fill');
+  assert.equal(ring().title, '61.2k ctx', 'live: the streaming call\'s fill');
   ctx.panel.pushServerFrame(frames[2]);
   ctx.flush();
+  assert.equal(ring().title, '68.4k ctx');
   const meter = ctx.doc.querySelector('[data-ask-meter]');
-  assert.match(meter.textContent, /68\.4k ctx/);
   assert.ok(!/tok/.test(meter.textContent), 'cumulative token count is gone');
-  assert.match(meter.textContent, /\$0\.25/);
-  assert.match(ctx.doc.querySelector('[data-ask-agents-btn]').textContent, /6 agents/);
+  assert.equal(meter.textContent, '$0.25', 'the cost is the meter\'s only text');
 });
 
 test('ask-panel-composer: a legacy thread (totals without ctx) hides the fill but keeps the cost', async () => {
@@ -289,7 +290,7 @@ test('ask-panel-composer: a legacy thread (totals without ctx) hides the fill bu
   ], { threadId: TID, messageId: MID });
   for (const f of frames) ctx.panel.pushServerFrame(f);
   ctx.flush();
-  assert.equal(ctx.doc.querySelector('.ask-meter-tokens').textContent, '', 'no fabricated 0 ctx on a thread that has turns');
+  assert.equal(ctx.doc.querySelector('[data-ask-ctx-btn]').hasAttribute('title'), false, 'no fabricated 0 ctx on a thread that has turns');
   assert.match(ctx.doc.querySelector('[data-ask-meter]').textContent, /\$0\.25/);
 });
 
