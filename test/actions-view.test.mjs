@@ -34,7 +34,8 @@ test('not checked out: folder to come, estimate, Check out + Copy command, the o
   assert.match(el.querySelector('.act-missing').textContent, /^Check out takes about 42 s\./);
   assert.deepEqual(labelsOf(el), ['Check out', 'Copy command', 'VS Code', 'Terminal', 'Finder']);
   const opens = [...el.querySelectorAll('button')].filter((b) => ['VS Code', 'Terminal', 'Finder'].includes(b.textContent));
-  assert.ok(opens.every((b) => !b.disabled && b.title === 'Checks out the run first, then opens'));
+  assert.ok(opens.every((b) => !b.disabled && b.title.startsWith('Check out first (asks), then: ')));
+  assert.equal(opens.find((b) => b.textContent === 'Terminal').title, 'Check out first (asks), then: open Terminal in the checkout');
   assert.match(el.textContent, /VS Code, Terminal and Finder open the checkout, so they check out first\./);
   const seen = [];
   const el2 = renderActionsCard(model(member()), { doc, handlers: { onOpenBeforeCheckout: (...a) => seen.push(a) } });
@@ -434,7 +435,7 @@ test('a branch held in another folder offers "Use that folder" instead of Check 
   assert.match(el.querySelector('.act-meta').textContent, /already has this branch/);
   assert.match(el.querySelector('.act-missing').textContent, /^This branch is already checked out in that folder, so Worca can use it instead of making a copy\. Worca never deletes or changes your folder\. VS Code, Terminal and Finder open that folder\.$/);
   const term = [...el.querySelectorAll('button')].find((b) => b.textContent === 'Terminal');
-  assert.equal(term.title, 'Opens the folder that has this branch');
+  assert.equal(term.title, 'Open Terminal in the folder that has this branch (asks first)');
 });
 
 test('a linked folder: "Your folder" badge and Unlink instead of Discard', () => {
@@ -496,4 +497,41 @@ test('controller: a Check out refused because the branch is held elsewhere refre
   assert.equal(host.querySelector('.act-notice'), null);
   assert.ok(labelsOf(host).includes('Use that folder'));
   ctl.destroy();
+});
+
+test('every command on the Actions surfaces says what it does on hover', () => {
+  const run = { instanceId: 'act:ab:app-0cea65fb:run', runId: 'ab', member: 'app-0cea65fb', actionId: 'run', label: 'Run', kind: 'service', status: 'ready', ports: { PORT: 4417 }, url: 'http://localhost:4417', startedAt: Date.now() };
+  const untitled = (el) => [...el.querySelectorAll('button')].filter((b) => !b.title).map((b) => b.textContent || b.getAttribute('aria-label'));
+  const states = [
+    model(member()),
+    model(member({ heldBy: '/Users/ada/dev/app' })),
+    model(member({ checkout: { setup: { status: 'ok' } } }), [run]),
+    model(member({ checkout: { setup: { status: 'skipped' } } })),
+    model(member({ checkout: { setup: { status: 'failed', exitCode: 1 } } })),
+    model(member({ checkout: { external: true, worktreeDir: '/Users/ada/dev/app', setup: { status: 'skipped' } } })),
+  ];
+  for (const m of states) assert.deepEqual(untitled(renderActionsCard(m, { doc, handlers: {} })), [], JSON.stringify(m.members[0].checkout));
+  assert.deepEqual(untitled(renderOverviewStrip(model(member()), { doc, handlers: {} })), []);
+  assert.deepEqual(untitled(renderOverviewStrip(model(member({ checkout: { setup: { status: 'ok' } } }), [run]), { doc, handlers: {} })), []);
+  assert.deepEqual(untitled(renderShipItStrip(model(member()), { doc, handlers: {} })), []);
+  assert.deepEqual(untitled(renderShipItStrip(model(member({ checkout: { setup: { status: 'ok' } } }), [run]), { doc, handlers: {} })), []);
+  const discard = [...renderActionsCard(states[2], { doc, handlers: {} }).querySelectorAll('button')].find((b) => b.textContent === 'Discard');
+  assert.match(discard.title, /^Delete the checkout folder\. .*saved as a patch first\.$/);
+  const unlink = [...renderActionsCard(states[5], { doc, handlers: {} }).querySelectorAll('button')].find((b) => b.textContent === 'Unlink');
+  assert.equal(unlink.title, 'Stop using your folder for this run. Running services stop; the folder and its changes stay as they are.');
+});
+
+test('the notes under a card sit together in one block', () => {
+  const m = member({ actions: [], unavailableBuiltins: ['editor'], checkout: { setup: { status: 'ok' } } });
+  const notes = renderActionsCard(model(m), { doc, handlers: {} }).querySelector('.act-notes');
+  assert.deepEqual([...notes.children].map((c) => c.className), ['hint act-none', 'hint act-missing']);
+});
+
+test('Run setup shows only when setup was skipped AND the project has a setup command', () => {
+  const linked = { external: true, worktreeDir: '/Users/ada/dev/app', setup: { status: 'skipped' } };
+  assert.ok(labelsOf(renderActionsCard(model(member({ checkout: linked })), { doc, handlers: {} })).includes('Run setup'));
+  assert.ok(!labelsOf(renderActionsCard(model(member({ checkout: linked, setup: null })), { doc, handlers: {} })).includes('Run setup'),
+    'no setup command: nothing to run, no button');
+  assert.ok(!labelsOf(renderActionsCard(model(member({ checkout: { setup: { status: 'ok' } } })), { doc, handlers: {} })).includes('Run setup'),
+    'setup already ran: no button');
 });

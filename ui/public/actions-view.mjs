@@ -24,7 +24,12 @@ export function appendWithPageLinks(doc, el, text, extra = []) {
 }
 /** The project's own Actions tab, where its setup and actions are edited. */
 export const projectActionsHref = (key) => `#projects/${encodeURIComponent(key)}/actions`;
-const btn = (doc, label, cls, onClick) => { const b = h(doc, 'button', `btn ${cls || 'btn-ghost'} btn-mini`, label); b.type = 'button'; if (onClick) b.addEventListener('click', onClick); return b; };
+// `tip`: what the button does, on hover (every command on the Actions surfaces says it).
+const btn = (doc, label, cls, onClick, tip) => { const b = h(doc, 'button', `btn ${cls || 'btn-ghost'} btn-mini`, label); b.type = 'button'; if (tip) b.title = tip; if (onClick) b.addEventListener('click', onClick); return b; };
+/** Hover text of a built-in: what it opens, and where. */
+const builtinTip = (key, label, where = 'the checkout') => (key === 'editor' ? `Open ${where} in ${label}`
+  : key === 'terminal' ? `Open ${label} in ${where}` : key === 'fileManager' ? `Show ${where} in ${label}` : label);
+const actionTip = (a) => (a.kind === 'service' ? `Start ${a.label}. It keeps running; its log and Open link show below.` : `Run ${a.label} to the end. Its exit code and log show below.`);
 const portOf = (s) => Object.values(s.ports || {})[0];
 /** "Run :4417", or just "Run" for a service without a port variable (never "Run :undefined"). Used by the
  *  pill, the sidebar rows and the "Running :4417" History badge alike. */
@@ -155,10 +160,13 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
     return sec;
   }
   if (!model.enabled) sec.append(h(doc, 'p', 'hint', 'Actions are turned off on this hosted deployment. Check out and Copy command still work.'));
-  const copyBtn = () => (m.copyCommand ? btn(doc, 'Copy command', null, () => handlers.onCopy?.(m.copyCommand)) : null);
+  const copyBtn = () => (m.copyCommand ? btn(doc, 'Copy command', null, () => handlers.onCopy?.(m.copyCommand),
+    'Copy the git commands that put this branch in your own clone') : null);
   const discardBtn = () => (m.checkout?.external
-    ? btn(doc, 'Unlink', 'btn-ghost act-discard', () => handlers.onUnlink?.(m.projectKey))
-    : btn(doc, 'Discard', 'btn-ghost act-discard', () => handlers.onDiscard?.([m.projectKey])));
+    ? btn(doc, 'Unlink', 'btn-ghost act-discard', () => handlers.onUnlink?.(m.projectKey),
+      'Stop using your folder for this run. Running services stop; the folder and its changes stay as they are.')
+    : btn(doc, 'Discard', 'btn-ghost act-discard', () => handlers.onDiscard?.([m.projectKey]),
+      'Delete the checkout folder. Running services stop, and uncommitted changes are saved as a patch first.'));
   // A built-in switched on for the project but not found on this machine (the server's detection) says so,
   // instead of quietly missing from the row; the project's Actions tab says "not found on this machine".
   // `lead` is text that comes first in the same note (what waits for Check out); null when there is nothing to say.
@@ -172,8 +180,10 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
 
   if (state === 'not-checked-out') {
     const row = h(doc, 'div', 'act-row');
-    if (!model.workspace && m.heldBy) row.append(btn(doc, 'Use that folder', 'btn-primary', () => handlers.onUseExisting?.(m.projectKey)));
-    else if (!model.workspace) row.append(btn(doc, 'Check out', 'btn-primary', () => handlers.onCheckout?.([m.projectKey])));
+    if (!model.workspace && m.heldBy) row.append(btn(doc, 'Use that folder', 'btn-primary', () => handlers.onUseExisting?.(m.projectKey),
+      'Use the folder that already has this branch for this run. Worca never changes or deletes it.'));
+    else if (!model.workspace) row.append(btn(doc, 'Check out', 'btn-primary', () => handlers.onCheckout?.([m.projectKey]),
+      `Put this run's branch in a folder of its own${m.setup ? ', then run the setup command' : ''}`));
     const c = copyBtn(); if (c) row.append(c);
     // The other built-ins open the checkout folder, which Check out creates: a click asks first, then checks
     // out and opens (a workspace run checks out from its checklist, so there they wait for it).
@@ -182,7 +192,8 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
       row.append(h(doc, 'span', 'act-sep'));
       for (const b of opens) {
         const o = btn(doc, b.label, null, () => handlers.onOpenBeforeCheckout?.(m.projectKey, b.key, b.label));
-        if (model.workspace) { o.disabled = true; o.title = 'Available after Check out'; } else o.title = m.heldBy ? 'Opens the folder that has this branch' : 'Checks out the run first, then opens';
+        if (model.workspace) { o.disabled = true; o.title = 'Available after Check out'; }
+        else o.title = m.heldBy ? `${builtinTip(b.key, b.label, 'the folder that has this branch')} (asks first)` : `Check out first (asks), then: ${builtinTip(b.key, b.label).replace(/^./, (c) => c.toLowerCase())}`;
         row.append(o);
       }
     }
@@ -206,32 +217,39 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
   } else if (state === 'setup-failed') {
     const why = setup.status === 'interrupted' ? 'Setup was interrupted.' : `Setup failed${setup.exitCode != null ? ` (exit ${setup.exitCode})` : ''}.`;
     sec.append(h(doc, 'p', 'hint act-exit fail', why));
-    if (model.enabled) row.append(btn(doc, 'Run setup again', 'btn-primary', () => handlers.onSetupAgain?.(m.projectKey)));
+    if (model.enabled) row.append(btn(doc, 'Run setup again', 'btn-primary', () => handlers.onSetupAgain?.(m.projectKey),
+      m.setup ? `Run the setup command again: ${m.setup}` : 'Run the setup command again'));
   } else if (model.enabled) {
     for (const a of m.actions || []) {
       const live = a.kind === 'service' ? activeService(mine, a.id) : null;
-      if (live) { row.append(btn(doc, `Stop ${a.label}`, 'btn-danger', () => handlers.onStop?.(m.projectKey, a.id))); continue; }
-      if (queued?.has(`${m.projectKey}:${a.id}`)) { const b = btn(doc, 'Starts after setup'); b.disabled = true; row.append(b); continue; }
-      row.append(btn(doc, a.label, a.kind === 'service' ? 'btn-primary' : null, () => handlers.onStart?.(m.projectKey, a.id)));
+      if (live) { row.append(btn(doc, `Stop ${a.label}`, 'btn-danger', () => handlers.onStop?.(m.projectKey, a.id), `Stop ${a.label} and free its port`)); continue; }
+      if (queued?.has(`${m.projectKey}:${a.id}`)) { const b = btn(doc, 'Starts after setup', null, null, `${a.label} starts when the setup command finishes`); b.disabled = true; row.append(b); continue; }
+      row.append(btn(doc, a.label, a.kind === 'service' ? 'btn-primary' : null, () => handlers.onStart?.(m.projectKey, a.id), actionTip(a)));
     }
-    if (setup.status === 'skipped') row.append(btn(doc, 'Run setup', null, () => handlers.onSetupAgain?.(m.projectKey)));
+    // Setup was skipped (a linked folder of yours, or actions off when checked out): it never runs by itself
+    // there, so this is the way to run it. Only when the project has a setup command: otherwise nothing would run.
+    if (setup.status === 'skipped' && m.setup) row.append(btn(doc, 'Run setup', null, () => handlers.onSetupAgain?.(m.projectKey),
+      `Run the project's setup command here: ${m.setup}`));
   }
   if (model.enabled && state !== 'setting-up' && state !== 'setup-failed' && (m.builtins || []).length) {
     if (row.childNodes.length) row.append(h(doc, 'span', 'act-sep'));
     for (const b of m.builtins) {
       if (b.key === 'copyCommand') { const c = copyBtn(); if (c) row.append(c); continue; }
-      row.append(btn(doc, b.label, null, () => handlers.onBuiltin?.(m.projectKey, b.key)));
+      row.append(btn(doc, b.label, null, () => handlers.onBuiltin?.(m.projectKey, b.key), builtinTip(b.key, b.label, m.checkout?.external ? 'your folder' : 'the checkout')));
     }
   } else { const c = copyBtn(); if (c) row.append(c); }
   row.append(discardBtn());
   sec.append(row);
+  // The notes under the row sit together as one block (not paragraphs with their own margins).
+  const notes = h(doc, 'div', 'act-notes');
   if (model.enabled && state !== 'setting-up' && state !== 'setup-failed' && !(m.actions || []).length) {
     const tab = "the project's Actions tab";
-    sec.append(appendWithPageLinks(doc, h(doc, 'p', 'hint act-none'),
+    notes.append(appendWithPageLinks(doc, h(doc, 'p', 'hint act-none'),
       `${m.projectName || 'This project'} has no actions yet. Add a Run or Test command on ${tab}.`, [[tab, projectActionsHref(m.projectKey)]]));
   }
-  if (state !== 'setting-up' && state !== 'setup-failed') { const miss = missingNote(); if (miss) sec.append(miss); }
-  if (state === 'ready' && setup.status === 'pending') sec.append(h(doc, 'p', 'hint', 'Setup runs before the first action.'));
+  if (state !== 'setting-up' && state !== 'setup-failed') { const miss = missingNote(); if (miss) notes.append(miss); }
+  if (state === 'ready' && setup.status === 'pending') notes.append(h(doc, 'p', 'hint', 'Setup runs before the first action.'));
+  if (notes.childNodes.length) sec.append(notes);
 
   for (const s of mine.filter((x) => x.kind === 'service' && ACTIVE.has(x.status))) {
     const line = h(doc, 'div', 'act-row act-service');
@@ -275,7 +293,7 @@ export function renderActionsCard(model, { doc, handlers = {}, logs = null, queu
       }
       list.append(btn(doc, 'Check out selected', 'btn-primary', () => {
         handlers.onCheckout?.([...list.querySelectorAll('input[type="checkbox"]')].filter((x) => x.checked).map((x) => x.value));
-      }));
+      }, 'Put the ticked members\' branches in folders of their own'));
       root.append(list);
     }
     for (const st of model.stacks || []) {
@@ -284,8 +302,8 @@ export function renderActionsCard(model, { doc, handlers = {}, logs = null, queu
       const line = h(doc, 'div', 'act-row act-stack');
       line.append(h(doc, 'span', 'act-label', st.label || st.id));
       if (cur) line.append(h(doc, 'span', 'badge act-state', cur.status));
-      if (busy) line.append(btn(doc, 'Stop stack', 'btn-danger', () => handlers.onStack?.(st.id, 'stop')));
-      else if (model.enabled) line.append(btn(doc, 'Start stack', 'btn-primary', () => handlers.onStack?.(st.id, 'start')));
+      if (busy) line.append(btn(doc, 'Stop stack', 'btn-danger', () => handlers.onStack?.(st.id, 'stop'), 'Stop what this stack started, newest first'));
+      else if (model.enabled) line.append(btn(doc, 'Start stack', 'btn-primary', () => handlers.onStack?.(st.id, 'start'), 'Start this stack\'s steps in order, each member checked out and set up first'));
       if (cur?.error) line.append(h(doc, 'span', 'hint act-exit fail', cur.error));
       root.append(line);
     }
@@ -305,14 +323,14 @@ export function renderOverviewStrip(model, { doc, handlers = {} } = {}) {
     row.append(h(doc, 'span', 'badge act-running', withPort('Running', live)));
     const link = openLink(doc, live.url, portOf(live) != null ? `Open :${portOf(live)}` : 'Open');
     if (link) row.append(link);
-    row.append(btn(doc, 'Stop', 'btn-danger', () => handlers.onStop?.(live.member, live.actionId)));
+    row.append(btn(doc, 'Stop', 'btn-danger', () => handlers.onStop?.(live.member, live.actionId), `Stop ${live.label || 'the service'} and free its port`));
   } else if (members.some((m) => m.checkout)) {
     row.append(h(doc, 'span', 'badge act-kept', 'Checked out'));
   } else {
     row.append(h(doc, 'span', 'act-label', 'Try the result in a local checkout.'));
-    if (model.finished !== false) row.append(btn(doc, 'Check out', 'btn-primary', () => handlers.onCheckout?.()));
+    if (model.finished !== false) row.append(btn(doc, 'Check out', 'btn-primary', () => handlers.onCheckout?.(), 'Put this run\'s branch in a folder of its own, to try it'));
   }
-  row.append(btn(doc, 'Open tab ›', null, () => handlers.onOpenTab?.()));
+  row.append(btn(doc, 'Open tab ›', null, () => handlers.onOpenTab?.(), 'Open the run\'s Actions tab'));
   return row;
 }
 
@@ -324,7 +342,7 @@ export function renderShipItStrip(model, { doc, handlers = {} } = {}) {
   const row = h(doc, 'div', 'act-row act-shipit');
   row.append(h(doc, 'span', 'act-label', 'Try it first'));
   if (!m.checkout) {
-    row.append(btn(doc, 'Check out', 'btn-primary', () => handlers.onCheckout?.(model.workspace ? undefined : [m.projectKey])));
+    row.append(btn(doc, 'Check out', 'btn-primary', () => handlers.onCheckout?.(model.workspace ? undefined : [m.projectKey]), 'Put this run\'s branch in a folder of its own, to try it before you open the PR'));
     return row;
   }
   const mine = instancesOf(model, m.projectKey);
@@ -336,12 +354,12 @@ export function renderShipItStrip(model, { doc, handlers = {} } = {}) {
   if (model.enabled) {
     for (const a of m.actions || []) {
       if (a.kind === 'service' && activeService(mine, a.id)) continue;
-      row.append(btn(doc, a.label, null, () => handlers.onStart?.(m.projectKey, a.id)));
+      row.append(btn(doc, a.label, null, () => handlers.onStart?.(m.projectKey, a.id), actionTip(a)));
     }
     const editor = (m.builtins || []).find((b) => b.key === 'editor');
-    if (editor) row.append(btn(doc, editor.label, null, () => handlers.onBuiltin?.(m.projectKey, 'editor')));
+    if (editor) row.append(btn(doc, editor.label, null, () => handlers.onBuiltin?.(m.projectKey, 'editor'), builtinTip('editor', editor.label)));
   }
-  if (live) row.append(btn(doc, 'Stop', 'btn-danger', () => handlers.onStop?.(live.member, live.actionId)));
+  if (live) row.append(btn(doc, 'Stop', 'btn-danger', () => handlers.onStop?.(live.member, live.actionId), `Stop ${live.label || 'the service'} and free its port`));
   return row;
 }
 
@@ -360,7 +378,7 @@ export function renderRunningActionsCard(services, { doc, titleOf = (s) => s.run
     if (title.tagName === 'BUTTON') { title.type = 'button'; title.addEventListener('click', () => onOpen(s)); }
     row.append(title, h(doc, 'span', 'act-label', withPort(s.label, s)));
     if (s.startedAt) row.append(h(doc, 'span', 'act-uptime', formatUptime(Date.now() - s.startedAt)));
-    row.append(btn(doc, 'Stop', 'btn-ghost act-stop', () => onStop?.(s)));
+    row.append(btn(doc, 'Stop', 'btn-ghost act-stop', () => onStop?.(s), `Stop ${s.label || 'this service'} and free its port`));
     card.append(row);
   }
   return card;
