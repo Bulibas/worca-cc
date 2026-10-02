@@ -11293,8 +11293,13 @@ function modalShell({
   return new Promise((resolve) => {
     el.confirmTitle.textContent = title;
     el.confirmTitle.classList.toggle('danger', !!danger);
-    el.confirmMessage.textContent = message;
-    el.confirmMessage.hidden = !message;
+    // message: a string, or parts [text | { strong: text }] so the variable bits (a branch, a command)
+    // stand out. Every part goes in as text, never as markup.
+    if (Array.isArray(message)) {
+      el.confirmMessage.replaceChildren(...message.map((p) => (typeof p === 'string' ? document.createTextNode(p)
+        : Object.assign(document.createElement('strong'), { textContent: String(p?.strong ?? '') }))));
+    } else el.confirmMessage.textContent = message;
+    el.confirmMessage.hidden = Array.isArray(message) ? !message.length : !message;
     // messageTone:'err' paints the shared message in the app's error colour
     // (.confirm-message.err → --red-ink); done() always drops it again so the
     // tint never leaks to the next caller of this shared modal.
@@ -14834,16 +14839,18 @@ function paintActionsSettings(data) {
 // Blank Editor / Terminal fall back to detection: the placeholder and the note say what it found, so a
 // blank field never claims "detected" when nothing was (the run page then says "No editor was found").
 let actionsDetected = {};
-const ACT_DETECT_EXAMPLE = { editor: 'code, cursor or the full path to your editor', terminal: 'the command that opens your terminal' };
+// What the field takes: ONE program, run as `<program> <checkout folder>` (no shell). Umbrella terms, no product names.
+const ACT_DETECT_MISSING = {
+  editor: 'No editor was found on this machine. Enter the command or full path of an IDE or code editor that opens a folder.',
+  terminal: 'No terminal was found on this machine. Enter the command or full path of a terminal app that opens in a folder.',
+};
 function paintActionsDetectNote(key) {
   const input = document.getElementById(`act-${key}`);
   const note = document.getElementById(`act-${key}-note`);
   if (!input || !note) return;
   const label = actionsDetected[key] || null;
   input.placeholder = label ? `${label} (detected)` : 'None found on this machine';
-  note.textContent = input.value.trim() ? ''
-    : label ? `Left blank, Worca uses ${label}.`
-      : `No ${key} was found on this machine. Enter ${ACT_DETECT_EXAMPLE[key]}.`;
+  note.textContent = input.value.trim() ? '' : label ? `Left blank, Worca uses ${label}.` : ACT_DETECT_MISSING[key];
   note.hidden = !note.textContent;
 }
 for (const key of ['editor', 'terminal']) {

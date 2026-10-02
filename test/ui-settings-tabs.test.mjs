@@ -303,7 +303,7 @@ test('Settings › Runs › Actions: blank Editor / Terminal say what detection 
   const doc = window.document;
   const editor = doc.getElementById('act-editor');
   assert.equal(editor.placeholder, 'None found on this machine');
-  assert.equal(doc.getElementById('act-editor-note').textContent, 'No editor was found on this machine. Enter code, cursor or the full path to your editor.');
+  assert.equal(doc.getElementById('act-editor-note').textContent, 'No editor was found on this machine. Enter the command or full path of an IDE or code editor that opens a folder.');
   assert.equal(doc.getElementById('act-terminal').placeholder, 'Terminal (detected)');
   assert.equal(doc.getElementById('act-terminal-note').textContent, 'Left blank, Worca uses Terminal.');
   editor.value = 'zed';

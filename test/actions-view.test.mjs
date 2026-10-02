@@ -399,7 +399,8 @@ test('controller: Terminal before Check out asks, then checks out this member an
   const click = () => [...host.querySelectorAll('button')].find((b) => b.textContent === 'Terminal').click();
   click(); await tick(); await tick();
   assert.equal(asked[0].title, 'Check out to open Terminal?');
-  assert.match(asked[0].message, /checks out worca-cc\/x first \(a few seconds\), then opens Terminal\. Then the setup command runs: npm ci$/);
+  assert.deepEqual(asked[0].message, ["Terminal opens the run's checkout, which doesn't exist yet. Worca checks out ", { strong: 'worca-cc/x' },
+    ' first (a few seconds), then opens Terminal.', ' Then the setup command runs: ', { strong: 'npm ci' }], 'the branch and the setup command are bold');
   assert.equal(asked[0].confirmLabel, 'Check out and open');
   assert.ok(!calls.some((c) => c[0] === 'POST'), 'cancel: nothing posted');
   answer = true;

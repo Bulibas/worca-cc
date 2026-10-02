@@ -1591,3 +1591,22 @@ test('a running service shows in the sidebar, the header pill and the tab dot; S
   assert.equal(stop.url, `/api/actions/instances/${encodeURIComponent(ACT_RUNNING[0].instanceId)}/stop`);
   assert.equal(stop.opts.method, 'POST');
 });
+
+test('Terminal before Check out opens the confirm dialog with the branch and the setup command in bold', async () => {
+  const model = { ...ACT_MODEL, members: [{ ...ACT_MODEL.members[0], setup: 'npm ci', builtins: [{ key: 'terminal', label: 'Terminal' }] }] };
+  const ctx = await bootDetail({ arms: (url) => (url.includes(`/api/runs/${ROW.id}/actions?`) ? ok(model) : actionArms()(url)) });
+  await openDetail(ctx, 'details/actions');
+  await settle(ctx.window, 4);
+  const doc = ctx.window.document;
+  const term = [...secOf(doc, 'actions').querySelectorAll('.act-card button')].find((b) => b.textContent === 'Terminal');
+  assert.equal(term.disabled, false);
+  click(ctx.window, term);
+  await settle(ctx.window, 2);
+  const msg = doc.querySelector('#confirm-message');
+  assert.equal(doc.querySelector('#confirm-title').textContent, 'Check out to open Terminal?');
+  assert.deepEqual([...msg.querySelectorAll('strong')].map((s) => s.textContent), [ROW.branch, 'npm ci']);
+  assert.match(msg.textContent, new RegExp(`Worca checks out ${ROW.branch.replace(/[/.]/g, '\\$&')} first`));
+  click(ctx.window, doc.querySelector('#confirm-cancel'));
+  await settle(ctx.window, 2);
+  assert.ok(!ctx.calls.some((c) => c.url.includes('/checkout')), 'cancel posts nothing');
+});

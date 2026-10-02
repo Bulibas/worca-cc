@@ -445,9 +445,11 @@ export function createActionsController({ runId, scopeQuery, api, ws, host, doc,
     // Terminal / Finder / Editor before Check out: they open the checkout folder, so ask, check out, then open.
     onOpenBeforeCheckout: async (member, key, label) => {
       const m = (st.model?.members || []).find((x) => x.projectKey === member);
-      const setup = m?.setup ? ` Then the setup command runs: ${m.setup}` : '';
+      // Parts, not one string: the branch and the setup command are bold in the dialog (confirmModal).
       const ok = await confirm({ title: `Check out to open ${label}?`,
-        message: `${label} opens the run's checkout, which doesn't exist yet. Worca checks out ${m?.branch || 'the run\'s branch'} first (a few seconds), then opens ${label}.${setup}`,
+        message: [`${label} opens the run's checkout, which doesn't exist yet. Worca checks out `,
+          m?.branch ? { strong: m.branch } : "the run's branch", ` first (a few seconds), then opens ${label}.`,
+          ...(m?.setup ? [' Then the setup command runs: ', { strong: m.setup }] : [])],
         confirmLabel: `Check out and open` });
       if (!ok) return;
       const r = await after(await api('POST', `${base}/checkout${q}`, { members: [member] }));
