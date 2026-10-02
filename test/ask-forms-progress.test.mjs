@@ -136,3 +136,15 @@ test('get_run_progress: the tool description names the form text', () => {
   const def = tools(progressWith({})).list().find((d) => d.name === 'get_run_progress');
   assert.match(def.description, /form ask as text plus its answered values/);
 });
+
+test('get_run_progress: nightDecisions lists what night mode decided, rationale redacted', async () => {
+  const out = await tools(progressWith({ nightDecisions: [
+    { questionId: 'clarify-n-1', kind: 'clarify', at: '2026-09-27T23:00:00Z', choice: 'A', strategy: 'weights', confidence: 80, flagged: true, rationale: 'key sk-secret', reversible: true },
+    { questionId: 'clarify-n-2', kind: 'clarify', at: '2026-09-27T23:05:00Z', choice: null, strategy: 'guardrail', flagged: true, guardrail: 'maxDecisions', rationale: 'limit' },
+  ] })).call('get_run_progress', { runId: 'r1' });
+  assert.deepEqual(out.nightDecisions[0], { questionId: 'clarify-n-1', kind: 'clarify', at: '2026-09-27T23:00:00Z', choice: 'A', strategy: 'weights', confidence: 80, reversible: true, flagged: true, rationale: 'key [redacted]' });
+  assert.equal(out.nightDecisions[1].guardrail, 'maxDecisions');
+  assert.equal(out.nightDecisions[1].choice, null);
+  const none = await tools(progressWith({})).call('get_run_progress', { runId: 'r1' });
+  assert.deepEqual(none.nightDecisions, []);
+});

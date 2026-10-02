@@ -213,6 +213,7 @@ async function requestFromFlags(flags, { projectDir, extras, promptText, stageId
     ...(flags.featureBranch ? { featureBranch: flags.featureBranch } : {}),
     ...(flags.memoryScope ? { memoryScope: flags.memoryScope } : {}),
     ...(flags.humanInLoop === false ? { humanInLoop: false } : {}),
+    ...(flags.nightMode ? { nightMode: true } : {}),   // --night: POST /api/run's own opt-in field
   };
   // Text the user authored is frozen on the ticket — including a --file's content.
   if (flags.file) request.promptMarkdown = promptText;

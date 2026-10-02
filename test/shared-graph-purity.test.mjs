@@ -41,7 +41,7 @@ test('src/shared/** is pure, relative-only, self-contained, stateless ESM', () =
     }
     for (const [label, re] of [
       ['node: builtin', /['"]node:/], ['require()', /\brequire\s*\(/], ['process', /\bprocess\./],
-      ['DOM global', /\b(window|document|navigator|localStorage)\b/], ['fetch', /\bfetch\s*\(/],
+      ['DOM global', /(?<![.\w$'"])(window|document|navigator|localStorage)\b(?!\s*:)/], ['fetch', /\bfetch\s*\(/],
       ['import.meta', /import\.meta\b/], ['top-level mutable binding', /^(let|var)\s/m],
     ]) assert.doesNotMatch(code, re, `${f}: ${label}`);
   }

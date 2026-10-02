@@ -177,8 +177,8 @@ test('below the cards the footer is a white pill bar', () => {
   assert.match(pill, /(?:^|;)\s*border:\s*1px solid var\(--line\)/, 'the in-card divider gives way to the pill outline');
 });
 
-test('an answered question says so beside its number, from the picked state alone', () => {
-  const pill = ruleBody('.rd-questions .qblock:has(.qopt.sel,.qfree.has) .qtext::after');
+test('an answered question says so beside its number, from the picked state alone (a preselected recommendation is not picked)', () => {
+  const pill = ruleBody('.rd-questions .qblock:has(.qopt.sel:not([data-preset]),.qfree.has) .qtext::after');
   assert.ok(pill, 'the Answered pill rule is missing');
   assert.match(pill, /content:\s*'Answered'/);
   assert.match(pill, /var\(--green-bg\)/);

@@ -224,3 +224,9 @@ test('a script card renders like a keyed card, with the exit code where an agent
   assert.equal(s({ nodeId: 'n_tests', executionId: 'x:n_tests:1', ordinal: 1, status: 'done', durationMs: 1200, costUsd: 0, exitCode: 0, verdict: { hasBlocking: false } }), '✓ Run tests #1  1s · exit 0 — clean');
   assert.equal(s({ nodeId: 'n_tests', executionId: 'x:n_tests:2', ordinal: 2, status: 'error', durationMs: 300, exitCode: 2, error: 'script "runTests" exited 2' }), '✗ Run tests #2  0s — script "runTests" exited 2');
 });
+
+test('formatRunSummary: the Away mode line, only when it answered', () => {
+  const base = { stepper: { version: 2 }, steps: [], endReached: true, result: null, totalCostUsd: 0 };
+  assert.ok(formatRunSummary({ ...base, night: { decisions: 3, flagged: 1 } }).includes('Away mode: 3 answers while you were away — 1 to check'));
+  assert.ok(!formatRunSummary({ ...base, night: { decisions: 0, flagged: 0 } }).some((l) => /Away mode/.test(l)));
+});

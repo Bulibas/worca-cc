@@ -745,6 +745,17 @@ function valueControl(doc, meta, entry, row) {
       add.append(role, model, sw, b); wrap.append(add);
       break;
     }
+    case 'criteria': {
+      // Night mode criteria weights (0-10); a blank input keeps that criterion's default.
+      for (const c of ['matchesMemory', 'reversible', 'smallestScope', 'codebaseConventions', 'cost']) {
+        const lab = h(doc, 'label', 'tp-crit', `${c} `);
+        const inp = h(doc, 'input', 'input input-mini tp-crit-val'); inp.type = 'number'; inp.min = '0'; inp.max = '10'; inp.step = '0.5';
+        inp.dataset.crit = c; inp.setAttribute('aria-label', `${meta.label}: ${c}`);
+        if (v && Number.isFinite(v[c])) inp.value = String(v[c]);
+        lab.append(inp); wrap.append(lab);
+      }
+      break;
+    }
     case 'mcpServers': {
       // One chip per entry; + Add opens a JSON box for one entry, checked on blur (the full rules run
       // at publish, POST /api/policy/validate).
@@ -1123,6 +1134,7 @@ function rowValue(row, meta) {
     case 'string[]': return readItems(row);
     case 'plugins': case 'mcpServers': return readItems(row);
     case 'steps': { const out = {}; for (const it of readItems(row)) { const s = {}; if (it.model) s.model = it.model; if (it.effort) s.effort = it.effort; out[it.role] = s; } return out; }
+    case 'criteria': { const out = {}; for (const i of row.querySelectorAll('.tp-crit-val')) { const t = i.value.trim(); const n = Number(t); if (t !== '' && Number.isFinite(n)) out[i.dataset.crit] = n; } return Object.keys(out).length ? out : undefined; }
     default: return undefined;
   }
 }

@@ -183,3 +183,67 @@ async function pickLinux(run, env, prompt, multiple) {
   if (kd.code === 1 && !kd.timedOut) return { status: 'canceled' };
   return { status: 'unsupported' };
 }
+
+// ── "Browse…" for Settings › Runs › Actions › Editor / Terminal: the platform's app picker ──────────
+// Same rules as the folder picker: a closed set of titles, one dialog at a time, anything but a
+// recognized cancel degrades to `unsupported` (the page then offers what it found instead).
+const APP_PROMPTS = Object.freeze({ editor: 'Select your editor or IDE', terminal: 'Select your terminal app' });
+
+/**
+ * @param {{kind?: 'editor'|'terminal'}} [opts]
+ * @returns {Promise<{status:'picked', path:string} | {status:'canceled'} | {status:'unsupported'} | {status:'busy'}>}
+ */
+export async function pickAppNative({ kind } = {}) {
+  if (_inFlight) return { status: 'busy' };
+  _inFlight = true;
+  try {
+    const platform = _ov.platform || process.platform;
+    const env = _ov.env || process.env;
+    const run = _ov.runner || defaultRun;
+    const prompt = APP_PROMPTS[kind] || APP_PROMPTS.editor;
+    if ((env.WORCA_NO_NATIVE_DIALOG || '') === '1') return { status: 'unsupported' };
+    let r = { status: 'unsupported' };
+    if (platform === 'darwin') {
+      // `choose application … as alias`: the system's app chooser (with its own Browse… for any .app).
+      const out = await run('osascript', ['-e', 'tell application "System Events" to activate',
+        '-e', `POSIX path of (choose application with prompt "${prompt}" as alias)`]);
+      if (out.ok) r = parsePicked(out.stdout);
+      else r = /-128|User cancell?ed/i.test(out.stderr || '') ? { status: 'canceled' } : { status: 'unsupported' };
+    } else if (platform === 'win32') {
+      const script =
+        'Add-Type -AssemblyName System.Windows.Forms | Out-Null; ' +
+        '$o = New-Object System.Windows.Forms.Form; $o.TopMost = $true; $o.ShowInTaskbar = $false; ' +
+        "$o.FormBorderStyle = 'None'; $o.Opacity = 0; $o.StartPosition = 'CenterScreen'; " +
+        '$o.Size = New-Object System.Drawing.Size(1, 1); $o.Show(); ' +
+        '$d = New-Object System.Windows.Forms.OpenFileDialog; ' +
+        `$d.Title = '${prompt}'; $d.Filter = 'Programs (*.exe;*.cmd;*.bat)|*.exe;*.cmd;*.bat|All files (*.*)|*.*'; ` +
+        '$d.InitialDirectory = $env:ProgramFiles; ' +
+        "if ($d.ShowDialog($o) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.WriteLine($d.FileName) }";
+      const out = await run('powershell.exe', ['-NoProfile', '-STA', '-Command', script]);
+      if (!out.ok) r = { status: 'unsupported' };
+      else { const p = out.stdout.trim(); r = p ? { status: 'picked', paths: [p] } : { status: 'canceled' }; }
+    } else if (platform === 'linux') {
+      if (!env.DISPLAY && !env.WAYLAND_DISPLAY) r = { status: 'unsupported' };
+      else {
+        const zen = await run('zenity', ['--file-selection', `--title=${prompt}`, '--filename=/usr/bin/']);
+        if (zen.ok) r = parsePicked(zen.stdout);
+        else if (zen.code === 1 && !zen.timedOut) r = { status: 'canceled' };
+        else {
+          const kd = await run('kdialog', ['--title', prompt, '--getopenfilename', '/usr/bin']);
+          if (kd.ok) r = parsePicked(kd.stdout);
+          else r = kd.code === 1 && !kd.timedOut ? { status: 'canceled' } : { status: 'unsupported' };
+        }
+      }
+    }
+    return r.status === 'picked' ? { status: 'picked', path: r.paths[0] } : r;
+  } finally {
+    _inFlight = false;
+  }
+}
+
+/** Whether a native picker can open on this machine at all (the page leaves "Browse…" out when not). */
+export function nativeDialogAvailable({ platform = _ov.platform || process.platform, env = _ov.env || process.env } = {}) {
+  if ((env.WORCA_NO_NATIVE_DIALOG || '') === '1') return false;
+  if (platform === 'darwin' || platform === 'win32') return true;
+  return platform === 'linux' && !!(env.DISPLAY || env.WAYLAND_DISPLAY);
+}

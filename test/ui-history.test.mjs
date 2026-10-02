@@ -1,8 +1,12 @@
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 // Behavior tests for the finished runs in the Runs list (`#runs-list .runs-row[data-kind="hist"]`,
 // the History rows from GET /api/history). We boot the REAL app.js against the REAL
@@ -21,7 +25,7 @@ const PROJECT = '/tmp/proj';
 // Boot app.js into a fresh jsdom window. `fetchHandler(url, opts)` may return a
 // Promise to override a request; returning null falls through to the defaults.
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
 
   // jsdom doesn't implement scrollIntoView; the viewer modal calls it on open.

@@ -4,12 +4,16 @@
 // whenever a child page is shown so "where am I" never hides. The children keep
 // their #agents / #scripts hashes and their data-nav wiring (app.js snapshots
 // `.nav button[data-nav]`, which reaches nested buttons).
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..', 'ui', 'public');
@@ -68,7 +72,7 @@ const click = (window, node) =>
   node.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
 
 async function boot({ seed = {}, level } = {}) {
-  const dom = new JSDOM(html, { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(html, { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; }

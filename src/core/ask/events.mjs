@@ -77,8 +77,9 @@ export function normalizeUsage(u) {
   };
 }
 
-/** result.modelUsage key for an agent's model: exact → canonicalModel → stripped -YYYYMMDD → the single key. */
-export function matchModelKey(model, modelUsage) {
+/** result.modelUsage key for an agent's model: exact → canonicalModel → stripped -YYYYMMDD → the single key
+ *  (unless `single: false`, for callers that must not guess). */
+export function matchModelKey(model, modelUsage, { single = true } = {}) {
   const mu = modelUsage && typeof modelUsage === 'object' ? modelUsage : {};
   const keys = Object.keys(mu);
   if (!keys.length) return null;
@@ -93,7 +94,7 @@ export function matchModelKey(model, modelUsage) {
       || keys.find((k) => strip(k.toLowerCase()) === strip(m));
     if (stripped) return stripped;
   }
-  return keys.length === 1 ? keys[0] : null;
+  return single && keys.length === 1 ? keys[0] : null;
 }
 
 /** Spec §6.6: costUSD × w(agent) / w(model total), clamped; null without usage or a matching model. Always estimated:true. */
@@ -143,6 +144,10 @@ export function labelForTool(name, input = {}, attachmentNames = {}) {
     case 'push_team_metrics': return 'Pushing team metrics';
     case 'get_team_policy': return 'Reading team policy';
     case 'propose_policy_change': return 'Proposing a policy change';
+    case 'get_away_mode': return 'Reading Away mode';
+    case 'set_away_now': return 'Switching Away mode';
+    case 'set_run_away_mode': return 'Setting Away mode on a run';
+    case 'propose_away_mode_change': return 'Proposing an Away mode change';
     case 'track_run': return 'Tracking a run';
     case 'read_attachment': return `Reading ${(attachmentNames && attachmentNames[id]) || 'attachment'}`;
     case 'list_diff_comments': return id ? `Reading comments on ${id.slice(0, 12)}` : 'Reading diff comments';
@@ -177,6 +182,11 @@ export function labelForTool(name, input = {}, attachmentNames = {}) {
     case 'propose_model_change': return 'Proposing a model change';
     case 'propose_clone_project': return 'Proposing a project clone';
     case 'propose_workspace_change': return 'Proposing a workspace change';
+    case 'get_project_actions': return 'Looking at project actions';
+    case 'get_workspace_stacks': return 'Looking at workspace stacks';
+    case 'get_run_checkout': return input?.id ? `Checking the checkout of ${String(input.id).slice(0, 40)}` : 'Checking a run checkout';
+    case 'list_running_actions': return 'Looking at running actions';
+    case 'propose_actions_change': return 'Proposing an actions change';
     case 'web_fetch': { let host = ''; try { host = new URL(String(input?.url ?? '')).hostname; } catch { /* label only */ } return host ? `Reading ${host}` : 'Reading a web page'; }
     case 'web_search': return 'Searching the web';
     case 'propose_web_access': return 'Asking to read a new site';
@@ -258,9 +268,12 @@ export function createTurnReducer({
   onModelProposal = null,        // propose_model_change RESULT (model card; same split)
   onCloneProposal = null,        // propose_clone_project RESULT (clone card; same split)
   onWorkspaceProposal = null,    // propose_workspace_change RESULT (workspace card; same split)
+  onActionsProposal = null,      // propose_actions_change RESULT (actions card; same split)
   onWebProposal = null,          // propose_web_access RESULT (web card; same split)
   onScheduleMutation = null,     // a direct schedule write succeeded in the MCP child
   onTrackRun = null,
+  onAwaySwitch = null,           // set_away_now / set_run_away_mode RESULT (the parent applies the switch)
+  onAwayProposal = null,         // propose_away_mode_change RESULT (Away mode card; the parent re-validates the input)
   onCommentMutation = null,
   onWorktreeMutation = null,
   onMemoryMutation = null,
@@ -295,6 +308,7 @@ export function createTurnReducer({
   let sawResult = false;
   let sessionId = null;
   let lastResult = null;
+  let mainModel = null;           // the init frame's model — picks this turn's entry out of result.modelUsage
   let reducerErrors = 0;
   let summary = null;
   let cliErrorText = '';          // what a <synthetic> CLI message said (its API-error line)
@@ -322,7 +336,23 @@ export function createTurnReducer({
   // Context fill = the last MAIN call's per-call total. The cumulative result
   // usage never feeds it — a result would report the whole turn, not one call.
   const ctxNow = () => { const e = lastMainUsageMsg ? usageByMsg.get(lastMainUsageMsg) : null; return e ? ctxOf(e.usage) : null; };
-  const currentUsage = () => ({ ...(lastResult && lastResult.usage ? normalizeUsage(lastResult.usage) : usageSum()), ctx: ctxNow() });
+  // The main model's context window, from the result's modelUsage (the CLI reports it per model).
+  // modelUsage also carries the CLI's title call and sub-agent models, so an unmatched main model
+  // yields null — never another model's window.
+  const resultModelUsage = () => (lastResult && lastResult.modelUsage && typeof lastResult.modelUsage === 'object' ? lastResult.modelUsage : null);
+  const windowAt = (mu, key) => { const w = key ? mu[key]?.contextWindow : null; return Number.isInteger(w) && w > 0 ? w : null; };
+  const ctxWindowNow = () => {
+    const mu = resultModelUsage();
+    // A lone entry stands in for the main model only when the init frame named none: with a named
+    // model, a lone mismatch is the title call of a turn whose main call failed.
+    return mu ? windowAt(mu, matchModelKey(mainModel, mu, { single: !mainModel })) : null;
+  };
+  const currentUsage = () => {
+    const u = { ...(lastResult && lastResult.usage ? normalizeUsage(lastResult.usage) : usageSum()), ctx: ctxNow() };
+    const w = ctxWindowNow();
+    if (w) u.ctxWindow = w;                                               // absent, not null, when unknown: old payloads stay byte-identical
+    return u;
+  };
   /** What the CLI itself reported for this turn — null until the `result` frame lands. */
   const cliCost = () => (lastResult && typeof lastResult.total_cost_usd === 'number' && Number.isFinite(lastResult.total_cost_usd) ? lastResult.total_cost_usd : null);
   // The AUTHORITATIVE turn cost: cliCost() re-priced by the injected override, if
@@ -611,6 +641,12 @@ export function createTurnReducer({
           if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
         } catch { reducerErrors += 1; }
       }
+      if (b.name === 'mcp__worca__propose_away_mode_change' && typeof onAwayProposal === 'function') {
+        try {
+          const ret = onAwayProposal({ toolUseId: b.id, input: fullInputs.get(b.id) ?? {}, text, isError: !!c.is_error });
+          if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
+        } catch { reducerErrors += 1; }
+      }
       if (b.name === 'mcp__worca__propose_policy_change' && typeof onPolicyProposal === 'function') {
         // Same split as the metrics card: the parent re-validates from the INPUT (policy-proposal.mjs).
         try {
@@ -653,10 +689,23 @@ export function createTurnReducer({
           if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
         } catch { reducerErrors += 1; }
       }
+      if (b.name === 'mcp__worca__propose_actions_change' && typeof onActionsProposal === 'function') {
+        // Same split as the workspace card: the parent re-validates the INPUT against the stored config (actions-proposal.mjs).
+        try {
+          const ret = onActionsProposal({ toolUseId: b.id, input: fullInputs.get(b.id) ?? {}, text, isError: !!c.is_error });
+          if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
+        } catch { reducerErrors += 1; }
+      }
       if (b.name === 'mcp__worca__track_run' && typeof onTrackRun === 'function') {
         // The parent owns the runs Map, the link rows and the followers: it re-resolves the id itself (D4).
         try {
           const ret = onTrackRun({ toolUseId: b.id, input: fullInputs.get(b.id) ?? {}, text, isError: !!c.is_error });
+          if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
+        } catch { reducerErrors += 1; }
+      }
+      if ((b.name === 'mcp__worca__set_away_now' || b.name === 'mcp__worca__set_run_away_mode') && typeof onAwaySwitch === 'function') {
+        try {
+          const ret = onAwaySwitch({ toolUseId: b.id, input: fullInputs.get(b.id) ?? {}, text, isError: !!c.is_error });
           if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
         } catch { reducerErrors += 1; }
       }
@@ -685,7 +734,11 @@ export function createTurnReducer({
     const isMain = ptu === null;
     switch (raw.type) {
       case 'system':
-        if (raw.subtype === 'init') { sawInit = true; if (typeof raw.session_id === 'string') sessionId = raw.session_id; }
+        if (raw.subtype === 'init') {
+          sawInit = true;
+          if (typeof raw.session_id === 'string') sessionId = raw.session_id;
+          if (typeof raw.model === 'string' && raw.model) mainModel = raw.model;
+        }
         return;                                                           // status, thinking_tokens, task_*, background_tasks_changed, hook_*
       case 'stream_event': return onStreamEvent(raw, ptu, isMain);
       case 'assistant': return onAssistant(raw, ptu, isMain);
@@ -752,6 +805,13 @@ export function createTurnReducer({
       }
       const agents = blocks.filter((b) => b.kind === 'agent');
       if (agents.length && lastResult) {
+        // Each agent's context window: its own (resolved) model's modelUsage entry, never a lone
+        // guess; an agent with no model inherits the main model, so the main window.
+        const mu = resultModelUsage();
+        for (const a of agents) {
+          const w = a.model ? (mu ? windowAt(mu, matchModelKey(a.model, mu, { single: false })) : null) : ctxWindowNow();
+          if (w) a.ctxWindow = w;
+        }
         const est = estimateAgentCosts(agents, lastResult);
         // §6.6 splits the CLI's OWN modelUsage costUSD across agents. When an
         // override re-prices the turn, the shares must ride the same scale or the

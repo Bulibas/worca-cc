@@ -106,6 +106,52 @@ test('happy path: frames ordered, session stored immediately, row + totals persi
   assert.deepEqual(done.threadTotals, totals);
 });
 
+test('conversation chips: the answer\'s refs are resolved, merged as chat chips and ride ask-done', async () => {
+  const s = seed();
+  let seen = null;
+  const { turn, frames } = makeTurn(s, {}, {
+    runClaudeImpl: async (opts) => {
+      say(opts.onEvent, 'msg_1', 'See [Fix login](#history/demo-00000001/1a2b3c4d).');
+      push(opts.onEvent, RESULT());
+      return { text: '', exitCode: 0 };
+    },
+    resolveMentions: async (refs) => {
+      seen = refs;
+      return [{ kind: 'run', id: '1a2b3c4d', label: 'Fix login', home: 'demo-00000001', source: 'chat' }];
+    },
+  });
+  await turn.run();
+  assert.deepEqual(seen, [{ kind: 'run', id: '1a2b3c4d', projectKey: 'demo-00000001' }]);
+  const chip = { kind: 'run', id: '1a2b3c4d', label: 'Fix login', home: 'demo-00000001', source: 'chat' };
+  assert.deepEqual(getThread(s.thread.id).contexts, [chip]);
+  assert.deepEqual(frames.at(-1).contexts, [chip]);
+});
+
+test('conversation chips: a failing resolver is logged and the turn still ends done, without contexts', async () => {
+  const s = seed();
+  const warn = console.warn;
+  const warned = [];
+  console.warn = (m) => warned.push(String(m));
+  try {
+    const { turn, frames } = makeTurn(s, {}, {
+      runClaudeImpl: async (opts) => {
+        say(opts.onEvent, 'msg_1', 'See #projects/demo-00000001');
+        push(opts.onEvent, RESULT());
+        return { text: '', exitCode: 0 };
+      },
+      resolveMentions: async () => { throw new Error('db gone'); },
+    });
+    const out = await turn.run();
+    assert.equal(out.status, 'done');
+    const done = frames.at(-1);
+    assert.equal(done.type, 'ask-done');
+    assert.equal(Object.hasOwn(done, 'contexts'), false);
+    assert.ok(warned.some((m) => /mentioned contexts not recorded: db gone/.test(m)));
+  } finally {
+    console.warn = warn;
+  }
+});
+
 test('web access: the turn hands WORCA_ASK_WEB to the child, writes the config 0600, and swaps the sub-agent note', async () => {
   const s = seed();
   let cfg = null; let mode = null; let note = null;
@@ -1317,6 +1363,70 @@ test('the MCP config is readable by the agent user on a relayed turn, by worca a
   const plainTurn = makeTurn(seed(), {}, { fs, runClaudeImpl: fail }).turn;
   await plainTurn.run();
   assert.deepEqual(modes, [0o640, 0o600]);
+});
+
+// set_away_now / set_run_away_mode: the child validated; the parent applies and the chat shows the line.
+const awayCall = (onEvent, n, name, input, content, isError = false) => {
+  push(onEvent, { type: 'assistant', parent_tool_use_id: null, message: { id: `msg_${n}`, content: [{ type: 'tool_use', id: `toolu_${n}`, name, input }] } });
+  push(onEvent, { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: `toolu_${n}`, content, ...(isError ? { is_error: true } : {}) }] } });
+};
+async function runAway(s, awaySwitch, calls) {
+  let mid = null;
+  const { turn } = makeTurn(s, {}, {
+    awaySwitch,
+    runClaudeImpl: async (opts) => {
+      calls.forEach((c, i) => awayCall(opts.onEvent, i + 1, ...c));
+      for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r));
+      mid = getMessage(s.asst.id).blocks;
+      push(opts.onEvent, RESULT());
+      return { text: '', exitCode: 0 };
+    },
+  });
+  await turn.run();
+  return (mid || []).filter((b) => b.kind === 'notice').map((b) => b.text);
+}
+
+test('away switches: the notice reads "Done — <line>." with one closing mark; a refusal names the run', async () => {
+  const seen = [];
+  const lines = { g: 'Right now you count as away.', r: 'on run Fix login: never', p: 'Away mode is paused. worca answers nothing until you turn it back on. (Marked runs wait too.)' };
+  const G = (line) => ['mcp__worca__set_away_now', { mode: 'away' }, JSON.stringify({ ok: true, requested: { kind: 'global', toggle: line } })];
+  const notices = await runAway(seed(), async (req) => { seen.push(req); return req.kind === 'run' ? { ok: true, line: lines.r } : { ok: true, line: lines[req.toggle] }; }, [
+    G('g'), G('p'),
+    ['mcp__worca__set_run_away_mode', { runId: 'u1', mode: 'off' }, JSON.stringify({ ok: true, requested: { kind: 'run', runId: 'u1', mode: 'off' } })],
+    ['mcp__worca__set_away_now', { mode: 'x' }, 'error: set_away_now: mode must be', true],
+  ]);
+  assert.equal(seen.length, 3, 'an isError result applies nothing');
+  assert.deepEqual(notices, ['Done — Right now you count as away.', `Done — ${lines.p}`, 'Done — on run Fix login: never.']);
+});
+
+test('away switches: a finished run reaches the parent and the chat says why (Review Focus 4)', async () => {
+  const seen = [];
+  const notices = await runAway(seed(), async (req) => { seen.push(req); return { ok: false, error: 'the run is done' }; }, [
+    ['mcp__worca__set_run_away_mode', { runId: 'aaaa0001', mode: 'on' }, JSON.stringify({ ok: false, error: 'the run is done', requested: { kind: 'run', runId: 'aaaa0001', status: 'done', mode: 'on' } })],
+  ]);
+  assert.equal(seen[0].status, 'done');
+  assert.deepEqual(notices, ['Could not change Away mode on this run: the run is done']);
+});
+
+test('propose_away_mode_change: the parent re-validates the input and mints the card; a refusal is a notice', async () => {
+  const s = seed();
+  const seen = [];
+  let mid = null;
+  const { turn } = makeTurn(s, { pinnedScope: { projectKey: 'demo-00000001' } }, {
+    validateAwayChange: async (inp) => { seen.push(inp); return inp.set?.enabled ? { ok: true, card: { type: 'away', summary: 'Which runs: All runs' } } : { ok: false, errors: ['nothing to change'] }; },
+    runClaudeImpl: async (opts) => {
+      awayCall(opts.onEvent, 1, 'mcp__worca__propose_away_mode_change', { level: 'project', set: { enabled: true } }, '{"ok":true}');
+      awayCall(opts.onEvent, 2, 'mcp__worca__propose_away_mode_change', { level: 'user' }, '{"ok":true}');
+      for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r));
+      mid = getMessage(s.asst.id).blocks;
+      push(opts.onEvent, RESULT());
+      return { text: '', exitCode: 0 };
+    },
+  });
+  await turn.run();
+  assert.equal(seen[0].projectKey, 'demo-00000001', 'the pinned project is replayed');
+  assert.deepEqual(mid.filter((b) => b.kind === 'card').map((b) => [b.state, b.card.type]), [['proposed', 'away']]);
+  assert.ok(mid.some((b) => b.kind === 'notice' && b.text === 'Away mode change rejected: nothing to change'));
 });
 
 // ── MCP registry: threading (§9.2), the Ask column of §10, the turn-end notice (§9.1 D17) ──
