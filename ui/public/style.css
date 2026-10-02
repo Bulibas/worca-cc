@@ -6410,10 +6410,10 @@ html{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin;}
 .sched-feed{padding:20px 22px;}
 .sched-feed-head{flex-wrap:wrap;gap:12px;margin-bottom:8px;}
 .sched-feed-tools{display:flex;flex-wrap:wrap;align-items:center;gap:10px;}
-.sched-feed-item{display:grid;grid-template-columns:92px minmax(0,1fr) auto;gap:4px 12px;align-items:start;padding:13px 0 13px 12px;
-  border-top:1px solid var(--line);border-left:3px solid transparent;margin-left:-12px;}
+.sched-feed-item{display:grid;grid-template-columns:92px minmax(0,1fr) auto;gap:4px 12px;align-items:start;padding:13px 12px;
+  border-top:1px solid var(--line);margin:0 -12px;}
 .sched-feed-item:first-child{border-top:none;}
-.sched-feed-item.unread{border-left-color:var(--amber);}
+.sched-feed-item.unread{background:var(--amber-wash);}
 .sched-feed-item .badge{justify-self:start;margin-top:1px;}
 .sched-feed-text{font-size:13px;line-height:1.5;color:var(--ink-2);overflow-wrap:anywhere;}
 .sched-feed-text b{font-weight:600;color:var(--ink);}
@@ -7228,7 +7228,7 @@ input.gv-name:focus-visible{outline:none;}
 /* Legacy (v1) run strip — frozen runs only; no wires, no executions footer. */
 .run-strip{display:flex;flex-wrap:wrap;gap:8px;padding:14px 16px;}
 .run-strip .rchip{--c:var(--line-2);font-size:11.5px;font-weight:600;color:var(--ink-2);
-  background:var(--field);border:1px solid var(--line);border-left:3px solid var(--c);
+  background:var(--field);border:1px solid var(--line);
   border-radius:8px;padding:5px 10px;white-space:nowrap;}
 .run-strip .rchip.is-pending{opacity:.5;}
 .run-strip .rchip.is-done{color:var(--green-ink);}
