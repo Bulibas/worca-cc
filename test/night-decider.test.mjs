@@ -44,6 +44,8 @@ test('gate uses extra cycles from the counter', async () => {
   assert.equal(r.record.meta.wireId, 'w');
   const spent = await decideAsk({ kind: 'gate', id: 'g', wireId: 'w', issues: [{ severity: 'critical' }] }, { config: cfg, gateCyclesUsed: () => 1 });
   assert.deepEqual([spent.payload.decision, spent.record.flagged], ['continue', true]);
+  const major = await decideAsk({ kind: 'gate', id: 'g', wireId: 'w', issues: [{ severity: 'major' }] }, { config: cfg, gateCyclesUsed: () => 0 });
+  assert.deepEqual([major.payload.decision, major.record.reversible], ['another', true], 'a major-only hold gets the extra round');
 });
 
 test('workflow accepts the proposal by name', async () => {

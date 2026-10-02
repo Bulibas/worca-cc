@@ -147,6 +147,9 @@ test('workflows: release publishes the image after npm; CI smokes the image; reb
   const rel = read('.github/workflows/release-npm-app.yml');
   assert.match(rel, /image:\s*\n\s*needs: build-and-publish\s*\n\s*uses: \.\/\.github\/workflows\/docker-image\.yml/);
   assert.match(rel, /release:\s*\n\s*needs: \[build-and-publish, image\]/, 'the GitHub Release waits for the image');
+  assert.match(rel, /build-and-publish:\s*\n\s*needs: test\b/, 'nothing publishes until every test shard passes');
+  assert.match(rel, /shard: \[1, 2, 3, 4\]/, 'release tests split 4 ways like ci.yml');
+  assert.match(rel, /WORCA_TEST_SHARD: \$\{\{ matrix\.shard \}\}\/4/);
   const ci = read('.github/workflows/ci.yml');
   assert.match(ci, /npm run docker:smoke -- --image/);
   assert.match(ci, /hadolint/);

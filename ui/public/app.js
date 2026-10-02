@@ -182,7 +182,7 @@ import {
   runOutcomeModel, openSyncDialog, chooseSyncRefusal,
 } from './branch-sync.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
-import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindLabel, awayAnswersSummary } from '../../src/shared/away-mode/labels.mjs';
+import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindShort, awayAnswerRows, awayAnswersSummary } from '../../src/shared/away-mode/labels.mjs';
 import { parseWindow } from '../../src/shared/away-mode/activation.mjs';
 import { describeRun, describeNewRun, describeAwaySwitch } from '../../src/shared/away-mode/describe.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
@@ -26317,31 +26317,79 @@ function awayNoteEl(screen, night) {
   return note;
 }
 
-/** "Answers while you were away" into `sec` (run page and History run page). */
+/** "Answered for you" into `sec` (run page and History run page): one group per ask, captioned with
+ *  what kind of ask it was and when, one row per answer; a row with a reason opens it underneath. */
 function paintAwayAnswers(sec, decisions) {
   if (!sec) return;
   const list = Array.isArray(decisions) ? decisions : [];
   sec.hidden = !list.length;
-  // A guardrail row (choice null) is a pause, not an answer: it counts neither as an answer nor as one to check.
-  const answers = list.filter((d) => d.choice != null);
-  const n = answers.length; const m = answers.filter((d) => d.flagged).length;
-  sec.querySelector('.rd-night-count').textContent = list.length ? `(${n} answer${n === 1 ? '' : 's'}, ${m} to check)` : '';
-  const ol = sec.querySelector('.rd-night-decisions');
-  ol.replaceChildren();
-  for (const d of list) {
-    const li = document.createElement('li');
-    if (d.flagged) li.classList.add('flagged');
-    const head = document.createElement('div');
-    head.className = 'rd-nd-head';
-    head.textContent = kindLabel(d.kind);
-    const why = document.createElement('div');
-    why.className = 'rd-nd-why';
-    const reason = String(d.rationale || '').trim().replace(/\.$/, '');
-    why.textContent = d.choice == null
-      ? (reason ? `${reason}.` : `Paused: ${d.guardrail || 'Away mode limit reached'}.`)                 // a guardrail row: no answer was given
-      : `${d.flagged ? 'Answered for you, please check' : 'Answered for you'}: ${d.choice === '' ? '' : `"${d.choice}" — `}${reason}.`;   // a free-text question records choice ''
-    li.append(head, why);
-    ol.appendChild(li);
+  // The run page repaints on every frame: rebuild only when the answers changed, so an open
+  // reason, a hover and the keyboard focus survive.
+  const sig = JSON.stringify(list);
+  if (sec.__awaySig === sig) return;
+  sec.__awaySig = sig;
+  const host = sec.querySelector('.rd-night-asks');
+  const open = new Set([...host.querySelectorAll('.rd-na-row.open')].map((li) => li.dataset.key));
+  const focused = document.activeElement && host.contains(document.activeElement) ? document.activeElement.closest('.rd-na-row') : null;
+  const refocus = focused ? focused.dataset.key : null;
+  host.replaceChildren();
+  list.forEach((d, i) => {
+    const group = document.createElement('div');
+    group.className = 'rd-sgroup rd-na';
+    const cap = document.createElement('div');
+    cap.className = 'rd-slabel';
+    const at = d.at ? startedLabel(d.at).slice(0, 5) : '';
+    cap.textContent = at ? `${kindShort(d.kind)} · ${at}` : kindShort(d.kind);
+    const ul = document.createElement('ul');
+    ul.className = 'rd-slist rd-na-list';
+    awayAnswerRows(d).forEach((row, j) => {
+      const key = `${d.questionId || i}:${j}`;
+      const li = document.createElement('li');
+      li.className = 'rd-na-row';
+      li.dataset.key = key;
+      const head = document.createElement(row.why ? 'button' : 'div');
+      head.className = 'rd-srow rd-na-btn';
+      const tx = document.createElement('span');
+      tx.className = 'rd-srow-tx';
+      if (row.q) {
+        const q = document.createElement('small');
+        q.className = 'rd-na-q';
+        q.textContent = row.q;
+        tx.appendChild(q);
+      }
+      const a = document.createElement('span');
+      a.className = 'rd-na-a';
+      a.textContent = row.a;
+      tx.appendChild(a);
+      head.appendChild(tx);
+      if (row.check) {
+        const chip = document.createElement('span');
+        chip.className = 'rd-na-check';
+        chip.textContent = 'Check';
+        chip.title = 'worca was not sure: please check this answer';
+        head.appendChild(chip);
+      }
+      li.appendChild(head);
+      if (row.why) {
+        head.type = 'button';
+        head.classList.add('chv');
+        const why = document.createElement('p');
+        why.className = 'rd-na-why';
+        why.textContent = row.why;
+        li.appendChild(why);
+        const setOpen = (on) => { li.classList.toggle('open', on); head.setAttribute('aria-expanded', String(on)); why.hidden = !on; };
+        setOpen(open.has(key));
+        head.addEventListener('click', () => setOpen(!li.classList.contains('open')));
+      }
+      ul.appendChild(li);
+    });
+    group.append(cap, ul);
+    host.appendChild(group);
+  });
+  if (refocus) {
+    const back = [...host.querySelectorAll('.rd-na-row')].find((li) => li.dataset.key === refocus);
+    const btn = back && back.querySelector('button.rd-na-btn');
+    if (btn) btn.focus();
   }
 }
 
