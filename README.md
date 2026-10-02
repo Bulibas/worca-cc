@@ -369,6 +369,10 @@ worca runs
 worca runs --status paused
 worca runs <pipelineId>    # one run in detail (any unique prefix; --json for machines)
 
+# read a run's live log from the terminal; -f follows (Ctrl-C detaches, the run continues)
+worca logs <pipelineId>
+worca logs <pipelineId> -f
+
 # run it later: once, from this terminal, or on a repeat (needs `worca ui` up, or --wait)
 worca --project /path/to/your/project --prompt "Upgrade dependencies" --at "tomorrow 02:00"
 worca --project /path/to/your/project --prompt "Upgrade dependencies" --at 02:00 --wait --yes
