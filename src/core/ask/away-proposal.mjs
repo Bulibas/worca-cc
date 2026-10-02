@@ -2,7 +2,7 @@
 // confirm card (wording §3.7). Never writes; away-deps.mjs applyAwayChange does, behind the card's Apply.
 import { validateNightPatch, resolveNightConfig, NIGHT_FIELDS } from '../night/config.mjs';
 import { describeChange } from '../../shared/away-mode/describe.mjs';
-import { FIELD_LABELS, WHICH_RUNS_OPTIONS, METHOD_OPTIONS, CRITERIA_LABELS, kindLabel } from '../../shared/away-mode/labels.mjs';
+import { FIELD_LABELS, WHICH_RUNS_OPTIONS, METHOD_OPTIONS, CRITERIA_LABELS, DECIDER_WORDS, kindLabel } from '../../shared/away-mode/labels.mjs';
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const without = (o, keys) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !keys.includes(k)));
@@ -22,6 +22,8 @@ export function fmtAwayValue(field, v) {
     case 'neverDecide': return (v || []).length ? v.map(kindLabel).join(', ') : 'nothing';
     case 'spendCapUsd': return v == null ? 'No cap' : `$${v}`;
     case 'allowCostCapOverride': return v ? 'On' : 'Off';
+    case 'deciderModel': return v || DECIDER_WORDS.sameAsRun;
+    case 'deciderEffort': return v || DECIDER_WORDS.defaultEffort;
     default: return String(v);
   }
 }

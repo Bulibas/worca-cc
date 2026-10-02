@@ -22,7 +22,7 @@ afterEach(() => {
   for (const w of wins.splice(0)) { try { w.close(); } catch { /* already closed */ } }
 });
 
-async function boot({ settings = {}, decisions = [], away } = {}) {
+async function boot({ settings = {}, decisions = [], away, models = [] } = {}) {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
   const { window } = dom;
   wins.push(window);
@@ -59,7 +59,7 @@ async function boot({ settings = {}, decisions = [], away } = {}) {
     }
     if (path.endsWith('/api/night-decisions')) return ok({ decisions });
     if (path.endsWith('/api/settings')) return ok({ nightMode: {}, nightModeToggle: 'auto', nightModeEffective: { strategy: 'mixed', criteria: {} }, ...settings });
-    if (path.endsWith('/api/config')) return ok({ config: { steps: {}, customModels: [], activeWorkflowId: 'wf_default' }, models: [], efforts: [] });
+    if (path.endsWith('/api/config')) return ok({ config: { steps: {}, customModels: [], activeWorkflowId: 'wf_default' }, models, efforts: [] });
     if (path.endsWith('/api/workflows')) return ok({ workflows: [{ id: 'wf_default', name: 'Default' }] });
     if (path.endsWith('/api/guardrails')) return ok({ guardrails: [{ id: 'permissive', name: 'Permissive' }] });
     if (path.endsWith('/api/branches')) return ok({ branches: ['main'], current: 'main' });
@@ -666,4 +666,130 @@ test('project page: Away mode is its own tab after Memory, and the Overview no l
   await settle(8);
   assert.equal(ctx.window.location.hash, '#projects/proj-1/away', 'the pill writes its own route');
   assert.ok(doc.querySelector('.pd-sec[data-sec="away"] .pd-night-card'));
+});
+
+// "Decided by" + "Effort" (How worca picks an answer) and the answers card's "Decided by" line.
+const DM_MODELS = [
+  { id: 'claude-opus-5-5', label: 'Opus 5.5', efforts: ['medium', 'high', 'xhigh', 'max'], custom: false },
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5', efforts: ['medium', 'high'], custom: false, hidden: true },
+  { id: 'corp-model', label: 'Corp', efforts: ['medium'], custom: 'global' },
+  { id: 'plug-model', label: 'Plug', efforts: ['medium'], custom: 'plugin', plugin: 'vendor' },
+  { id: 'team-model', label: 'Team pick', efforts: ['medium'], custom: 'policy' },
+  { id: 'legacy-model', label: 'Legacy', efforts: ['medium'], custom: 'project' },
+  { id: 'bridged-x', label: 'Bridged', efforts: ['medium'], custom: 'global', bridged: 'openai', needsSignIn: true },
+];
+const optionsOf = (sel) => [...sel.options].map((o) => [o.value, o.textContent, o.disabled]);
+
+test('answers card: "Decided by" under an answer the review gave, never under the agent\'s own or a rule', async () => {
+  const ctx = await boot({ models: DM_MODELS, decisions: [
+    { questionId: 'c-1', kind: 'clarify', at: '2026-01-01T13:12:00', choice: 'Redis | Calm', strategy: 'analysis+weights', model: 'claude-opus-5-5', effort: 'high', flagged: false, rationale: 'r',
+      questions: [{ id: 'store', question: 'Which store?', choice: 'Redis', strategy: 'analysis', confidence: 80, flagged: false, rationale: 'fits' },
+        { id: 'tone', question: 'Which tone?', choice: 'Calm', strategy: 'weights', confidence: 90, flagged: false, rationale: 'sure' }] },
+    { questionId: 'c-2', kind: 'clarify', at: '2026-01-01T13:20:00', choice: 'S', strategy: 'analysis', model: null, effort: 'medium', flagged: false, rationale: 'r',
+      questions: [{ id: 'size', question: 'Which size?', choice: 'S', strategy: 'analysis', confidence: 75, flagged: false, rationale: 'small' }] },
+    { questionId: 'gate-w-2', kind: 'gate', at: '2026-01-01T13:40:00', choice: 'continue', strategy: 'rule', confidence: null, flagged: false, rationale: 'no issues' },
+  ] });
+  const screen = await openDetail(ctx);
+  await settle();
+  const rows = [...screen.querySelectorAll('.rd-night-sec .rd-na-row')];
+  assert.deepEqual(rows.map((r) => r.querySelector('.rd-na-by')?.textContent ?? null), ['Decided by Opus 5.5', null, 'Decided by the default model', null]);
+  assert.equal(rows[0].querySelector('.rd-na-by').tagName, 'SMALL', 'small secondary text');
+});
+
+test('form: "Decided by" offers what the title-model picker offers; "Effort" the effort levels; both read back', () => {
+  const root = formRoot();
+  renderNightForm(root, { level: 'user', values: {}, effective: { ...NIGHT_DEFAULTS }, sources: {}, inherited: resolveNightConfig({}), toggle: 'auto', now: 0, models: DM_MODELS });
+  const model = root.querySelector('.night-decider-model');
+  const effort = root.querySelector('.night-decider-effort');
+  assert.equal(model.closest('.night-field').querySelector('.label-row label').textContent, 'Decided by');
+  assert.equal(effort.closest('.night-field').querySelector('.label-row label').textContent, 'Effort');
+  assert.ok(model.closest('details.away-adv'), 'inside "How worca picks an answer"');
+  assert.deepEqual(optionsOf(model), [['', 'Same as the run', false], ['corp-model', 'Corp', false], ['team-model', 'Team pick', false], ['plug-model', 'Plug (vendor)', false], ['claude-opus-5-5', 'Opus 5.5', false]]);
+  assert.deepEqual([...model.querySelectorAll('optgroup')].map((g) => g.label), ['Your models', 'Team policy', 'From plugins', 'Built-in'], 'grouped like the title-model picker');
+  assert.deepEqual(optionsOf(effort), [['', 'Not set', false], ['medium', 'medium', false], ['high', 'high', false], ['xhigh', 'xhigh', false], ['max', 'max', false]]);
+  assert.equal(model.closest('.night-field').querySelector('.away-inherited').textContent, '(default)');
+  let p = readNightForm(root, { level: 'user' });
+  assert.ok(p.__unset.includes('deciderModel') && p.__unset.includes('deciderEffort'));
+  assert.equal('deciderModel' in p || 'deciderEffort' in p, false);
+  model.value = 'claude-opus-5-5'; effort.value = 'high'; fire(effort, 'change');
+  p = readNightForm(root, { level: 'user' });
+  assert.deepEqual([p.deciderModel, p.deciderEffort], ['claude-opus-5-5', 'high']);
+  assert.ok(!p.__unset.includes('deciderModel') && !p.__unset.includes('deciderEffort'));
+  assert.match(root.querySelector('.away-summary').textContent, /worca weighs the options with Opus 5\.5 at high effort\./, 'the live summary follows the pickers');
+});
+
+test('form: a stored hidden, signed-out or stale model stays visible and saving keeps it; an empty catalog condemns nothing', () => {
+  const root = formRoot();
+  // Each group sorted by label: Haiku before Opus among the built-ins, Bridged before Corp among yours.
+  for (const [id, order] of [['claude-haiku-4-5', ['', 'corp-model', 'team-model', 'plug-model', 'claude-haiku-4-5', 'claude-opus-5-5']],
+    ['bridged-x', ['', 'bridged-x', 'corp-model', 'team-model', 'plug-model', 'claude-opus-5-5']]]) {
+    renderNightForm(root, { level: 'user', values: { deciderModel: id }, inherited: resolveNightConfig({}), now: 0, models: DM_MODELS });
+    const sel = root.querySelector('.night-decider-model');
+    assert.equal(sel.value, id);
+    assert.equal(optionsOf(sel).find((o) => o[0] === id)[2], false, `${id}: offered because it IS the stored pick`);
+    assert.deepEqual(optionsOf(sel).map((o) => o[0]), order);
+  }
+  renderNightForm(root, { level: 'user', values: { deciderModel: 'gone-model', deciderEffort: 'max' }, inherited: resolveNightConfig({}), now: 0, models: DM_MODELS });
+  const sel = root.querySelector('.night-decider-model');
+  assert.deepEqual(optionsOf(sel).at(-1), ['gone-model', 'gone-model — not installed', true]);
+  assert.equal(sel.value, 'gone-model');
+  const p = readNightForm(root, { level: 'user' });
+  assert.deepEqual([p.deciderModel, p.deciderEffort], ['gone-model', 'max']);
+  // User level: the first entry is always "Same as the run", whatever is inherited.
+  renderNightForm(root, { level: 'user', values: {}, inherited: resolveNightConfig({ team: { deciderModel: 'claude-opus-5-5' } }), now: 0, models: DM_MODELS });
+  assert.equal(root.querySelector('.night-decider-model').options[0].textContent, 'Same as the run');
+  // An empty catalog (not loaded yet, or a failed GET) condemns nothing: the stored pick stays selectable.
+  renderNightForm(root, { level: 'user', values: { deciderModel: 'claude-opus-5-5' }, inherited: resolveNightConfig({}), now: 0, models: [] });
+  assert.deepEqual(optionsOf(root.querySelector('.night-decider-model')), [['', 'Same as the run', false], ['claude-opus-5-5', 'claude-opus-5-5', false]]);
+  assert.equal(root.querySelector('.night-decider-model optgroup'), null, 'no empty groups');
+  // Ids match case-insensitively, like the resolver: other casing is not "not installed".
+  renderNightForm(root, { level: 'user', values: { deciderModel: 'CLAUDE-OPUS-5-5' }, inherited: resolveNightConfig({}), now: 0, models: DM_MODELS });
+  assert.deepEqual(optionsOf(root.querySelector('.night-decider-model')).at(-1), ['CLAUDE-OPUS-5-5', 'CLAUDE-OPUS-5-5', false]);
+});
+
+test('form, project level: empty reads "Same as my settings (…)" with where it comes from, and is sent as __unset', () => {
+  const root = formRoot();
+  renderNightForm(root, { level: 'project', values: {}, inherited: resolveNightConfig({ user: { deciderModel: 'claude-opus-5-5' }, team: { deciderEffort: 'high' } }), now: 0, models: DM_MODELS });
+  const model = root.querySelector('.night-decider-model'); const effort = root.querySelector('.night-decider-effort');
+  assert.equal(model.options[0].textContent, 'Same as my settings (Opus 5.5)');
+  assert.equal(effort.options[0].textContent, 'Same as my settings (high)');
+  assert.equal(model.closest('.night-field').querySelector('.away-inherited').textContent, '(your setting)');
+  assert.equal(effort.closest('.night-field').querySelector('.away-inherited').textContent, '(team default)');
+  const p = readNightForm(root, { level: 'project' });
+  assert.ok(p.__unset.includes('deciderModel') && p.__unset.includes('deciderEffort'));
+  assert.equal('deciderModel' in p || 'deciderEffort' in p, false, 'never null: an empty choice removes the key');
+  renderNightForm(root, { level: 'project', values: {}, inherited: resolveNightConfig({}), now: 0, models: DM_MODELS });
+  assert.equal(root.querySelector('.night-decider-model').options[0].textContent, "Same as my settings (the run's model)");
+  assert.equal(root.querySelector('.night-decider-effort').options[0].textContent, 'Same as my settings (medium)');
+  renderNightForm(root, { level: 'project', values: {}, inherited: { config: null, sources: {} }, now: 0 });
+  assert.equal(root.querySelector('.night-decider-model').options[0].textContent, 'Same as my settings', 'nothing inherited yet: no guess');
+  assert.equal(root.querySelector('.night-decider-effort').options[0].textContent, 'Same as my settings');
+});
+
+test('settings card: "Decided by" lists the catalog and Save posts the pick with the effort', async () => {
+  const ctx = await boot({ models: DM_MODELS, settings: { nightMode: { deciderEffort: 'xhigh' } } });
+  const doc = await openSettings(ctx);
+  const host = doc.getElementById('night-mode-host');
+  const sel = host.querySelector('.night-decider-model');
+  assert.deepEqual([...sel.options].map((o) => o.value), ['', 'corp-model', 'team-model', 'plug-model', 'claude-opus-5-5']);
+  assert.equal(host.querySelector('.night-decider-effort').value, 'xhigh');
+  sel.value = 'claude-opus-5-5';
+  click(ctx, doc.getElementById('nightModeSave'));
+  await settle();
+  const post = ctx.posts.filter((p) => p.path.endsWith('/api/settings')).at(-1);
+  assert.deepEqual([post.body.nightMode.deciderModel, post.body.nightMode.deciderEffort], ['claude-opus-5-5', 'xhigh']);
+});
+
+test('project card: an empty "Decided by" reads the inherited model and is sent as __unset', async () => {
+  const body = { config: { ...NIGHT_DEFAULTS, deciderModel: 'claude-opus-5-5' }, sources: {}, inherited: resolveNightConfig({ user: { deciderModel: 'claude-opus-5-5' } }), toggle: 'auto', user: { deciderModel: 'claude-opus-5-5' }, project: {} };
+  const ctx = await boot({ models: DM_MODELS, away: () => body });
+  ctx.window.location.hash = 'projects/proj-1/away';
+  await settle(12);
+  const card = ctx.window.document.querySelector('.pd-sec[data-sec="away"] .pd-night-card');
+  assert.equal(card.querySelector('.night-decider-model').options[0].textContent, 'Same as my settings (Opus 5.5)');
+  card.querySelector('.pd-night-save').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
+  await settle(8);
+  const nm = ctx.posts.filter((p) => p.path.endsWith('/api/config')).at(-1).body.nightMode;
+  assert.ok(nm.__unset.includes('deciderModel') && nm.__unset.includes('deciderEffort'));
+  assert.equal('deciderModel' in nm || 'deciderEffort' in nm, false);
 });

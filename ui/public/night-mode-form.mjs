@@ -3,7 +3,7 @@
 // Pure DOM: renderNightForm builds the live summary and the inputs, readNightForm reads them back
 // into a patch. A field left empty is "not set here": it is sent as `__unset` so the next layer applies.
 // Every word comes from src/shared/away-mode (labels.mjs, describe.mjs); copy: plans/away-mode-wording.md §3.
-import { FIELD_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, KIND_LABELS, WHICH_RUNS_OPTIONS, GRACE_NO_HOURS } from '../../src/shared/away-mode/labels.mjs';
+import { FIELD_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, KIND_LABELS, WHICH_RUNS_OPTIONS, GRACE_NO_HOURS, DECIDER_EFFORTS, DECIDER_WORDS, DECIDER_GROUPS } from '../../src/shared/away-mode/labels.mjs';
 import { parseWindow } from '../../src/shared/away-mode/activation.mjs';
 import { describeAwayMode } from '../../src/shared/away-mode/describe.mjs';
 
@@ -15,7 +15,7 @@ const NUM_LIMITS = { graceMinutes: [1, 1440], minConfidence: [0, 100], minMargin
 const SOURCE_TAG = { default: '(default)', team: '(team default)', user: '(your setting)' };
 // The project level's empty choice: never "(undefined)" when nothing is inherited yet.
 const sameAs = (shown) => (shown == null || shown === '' ? 'Same as my settings' : `Same as my settings (${shown})`);
-const CTX = new WeakMap();   // root → {level, inherited, toggle, hereSince, offset, projectName}
+const CTX = new WeakMap();   // root → {level, inherited, toggle, hereSince, offset, projectName, models}
 
 function el(doc, tag, cls, text) {
   const n = doc.createElement(tag);
@@ -107,6 +107,75 @@ function whichRuns(doc, level, own, inh, inhSrc) {
   return wrap;
 }
 
+const byLabel = (a, b) => (a.label || a.id).localeCompare(b.label || b.id, undefined, { sensitivity: 'base' });
+/** The models "Decided by" offers, filtered and grouped like the Settings title-model picker
+ *  (app.js buildTitleModelOptions): no legacy per-project entries; hidden built-ins and models that
+ *  need a sign-in only when one IS the stored pick. @returns {Array<[string, object[]]>} non-empty groups */
+function pickerGroups(models, stored) {
+  const ms = (Array.isArray(models) ? models : [])
+    .filter((m) => m && typeof m.id === 'string' && m.custom !== 'project' && (!m.hidden || m.id === stored) && (!m.needsSignIn || m.id === stored));
+  return [
+    [DECIDER_GROUPS.mine, ms.filter((m) => m.custom && m.custom !== 'plugin' && m.custom !== 'policy')],
+    [DECIDER_GROUPS.policy, ms.filter((m) => m.custom === 'policy')],
+    [DECIDER_GROUPS.plugins, ms.filter((m) => m.custom === 'plugin')],
+    [DECIDER_GROUPS.builtIn, ms.filter((m) => !m.custom)],
+  ].filter(([, xs]) => xs.length).map(([label, xs]) => [label, xs.sort(byLabel)]);
+}
+/** A model's catalog label, else its id. */
+const modelName = (models, id) => {
+  const m = (Array.isArray(models) ? models : []).find((x) => x && x.id === id);
+  return m ? (m.label || m.id) : id;
+};
+
+/** "Decided by": '' = not set here, then the catalog. The empty choice reads "Same as the run" at
+ *  user level, and "Same as my settings (…)" on the project tab (the inherited model, else the run's). */
+function deciderModelField(doc, level, values, inh, inhSrc, models) {
+  const w = field(doc, FIELD_LABELS.deciderModel.label, FIELD_LABELS.deciderModel.hint);
+  const sel = el(doc, 'select', 'select night-decider-model'); sel.dataset.field = 'deciderModel';
+  const stored = typeof values.deciderModel === 'string' ? values.deciderModel : '';
+  // inh.deciderModel undefined = the inherited layers have not loaded yet: no guess.
+  const none = el(doc, 'option', null, level === 'project'
+    ? sameAs(inh.deciderModel === undefined ? null : inh.deciderModel ? modelName(models, inh.deciderModel) : DECIDER_WORDS.runModel)
+    : DECIDER_WORDS.sameAsRun);
+  none.value = ''; sel.append(none);
+  const groups = pickerGroups(models, stored);
+  for (const [label, xs] of groups) {
+    const og = el(doc, 'optgroup'); og.label = label;
+    for (const m of xs) {
+      const o = el(doc, 'option', null, (m.label || m.id) + (m.custom === 'plugin' && m.plugin ? ` (${m.plugin})` : ''));
+      o.value = m.id; og.append(o);
+    }
+    sel.append(og);
+  }
+  if (stored && !groups.some(([, xs]) => xs.some((m) => m.id === stored))) {
+    // The stored id stays visible, and saving keeps it. Only an id MISSING from a loaded catalog reads
+    // "not installed" (the review then uses the run's model): an empty catalog (not loaded yet, or a
+    // failed GET) condemns nothing. Ids match case-insensitively, like the resolver.
+    const lc = stored.toLowerCase();
+    const gone = Array.isArray(models) && models.length > 0 && !models.some((m) => m && typeof m.id === 'string' && m.id.toLowerCase() === lc);
+    const o = el(doc, 'option', null, gone ? `${stored} — ${DECIDER_WORDS.notInstalled}` : stored);
+    o.value = stored; o.disabled = gone; sel.append(o);
+  }
+  sel.value = stored;
+  w.append(sel);
+  sourceHint(doc, w, values, inhSrc, 'deciderModel');
+  return w;
+}
+
+/** "Effort": '' = not set here (the inherited effort, else medium), then the effort levels. */
+function deciderEffortField(doc, level, values, inh, inhSrc) {
+  const w = field(doc, FIELD_LABELS.deciderEffort.label, FIELD_LABELS.deciderEffort.hint);
+  const sel = el(doc, 'select', 'select night-decider-effort'); sel.dataset.field = 'deciderEffort';
+  const inherited = inh.deciderEffort === undefined ? null : (inh.deciderEffort || DECIDER_WORDS.defaultEffort);
+  const none = el(doc, 'option', null, level === 'project' ? sameAs(inherited) : 'Not set');
+  none.value = ''; sel.append(none);
+  for (const e of DECIDER_EFFORTS) { const o = el(doc, 'option', null, e); o.value = e; sel.append(o); }
+  sel.value = DECIDER_EFFORTS.includes(values.deciderEffort) ? values.deciderEffort : '';
+  w.append(sel);
+  sourceHint(doc, w, values, inhSrc, 'deciderEffort');
+  return w;
+}
+
 function details(doc, title) {
   const d = el(doc, 'details', 'away-adv');
   d.append(el(doc, 'summary', null, title));
@@ -117,11 +186,13 @@ function details(doc, title) {
  * Build the summary and the fields into `root` (replacing its content).
  * @param {HTMLElement} root
  * @param {{level:'user'|'project', values?:object, effective?:object, sources?:object,
- *   inherited?:{config:object|null, sources:object}, toggle?:string, now?:number, projectName?:string|null}} o
+ *   inherited?:{config:object|null, sources:object}, toggle?:string, now?:number, projectName?:string|null,
+ *   models?:Array<{id:string, label?:string, custom?:string|false, plugin?:string, hidden?:boolean, needsSignIn?:boolean}>}} o
  *   values: the layer's own fields; effective/sources: what applies and where it comes from;
- *   inherited: what an EMPTY field falls back to (GET /api/away-mode), null config = unknown.
+ *   inherited: what an EMPTY field falls back to (GET /api/away-mode), null config = unknown;
+ *   models: the project-less catalog (GET /api/config `models`) the "Decided by" picker offers.
  */
-export function renderNightForm(root, { level, values = {}, effective = {}, sources = {}, inherited = { config: effective, sources }, toggle = 'auto', hereSince = null, now = Date.now(), projectName = null, statusEl = null }) {
+export function renderNightForm(root, { level, values = {}, effective = {}, sources = {}, inherited = { config: effective, sources }, toggle = 'auto', hereSince = null, now = Date.now(), projectName = null, statusEl = null, models = [] }) {
   const doc = root.ownerDocument;
   root.replaceChildren();
   delete root.dataset.dirty;
@@ -205,6 +276,8 @@ export function renderNightForm(root, { level, values = {}, effective = {}, sour
     lab.append(inp); cr.append(lab);
   }
   pick.append(cr);
+  pick.append(deciderModelField(doc, level, values, inh, inhSrc, models));
+  pick.append(deciderEffortField(doc, level, values, inh, inhSrc));
   body.append(pick);
 
   // E. Limits (collapsed).
@@ -243,7 +316,7 @@ export function renderNightForm(root, { level, values = {}, effective = {}, sour
   }
   body.append(wait);
 
-  CTX.set(root, { level, inherited, toggle, hereSince, offset: now - Date.now(), projectName });
+  CTX.set(root, { level, inherited, toggle, hereSince, offset: now - Date.now(), projectName, models });
   const onEdit = () => { root.dataset.dirty = '1'; updateAwaySummary(root); };
   body.addEventListener('input', onEdit); body.addEventListener('change', onEdit);
   updateAwaySummary(root);
@@ -270,6 +343,10 @@ export function readNightForm(root, { level }) {
   if (tz) out.timeZone = tz; else unset.push('timeZone');
   const st = q('.night-strategy').value;
   if (st) out.strategy = st; else unset.push('strategy');
+  const dm = q('.night-decider-model').value;
+  if (dm) out.deciderModel = dm; else unset.push('deciderModel');
+  const de = q('.night-decider-effort').value;
+  if (de) out.deciderEffort = de; else unset.push('deciderEffort');
   for (const inp of root.querySelectorAll('.night-num')) {
     const f = inp.dataset.field; const s = inp.value.trim();
     if (f === 'graceMinutes' && q('.night-grace-off').checked) { out.graceMinutes = null; continue; }
@@ -295,9 +372,9 @@ function formPatch(root) {
 }
 
 /** The live summary: one `<span>` per line of describeAwayMode. */
-export function paintAwaySummary(host, { config, toggle, hereSince = null, now, projectName = null, projectFields = null, surface = 'settings' }) {
+export function paintAwaySummary(host, { config, toggle, hereSince = null, now, projectName = null, projectFields = null, surface = 'settings', modelLabel = null }) {
   const doc = host.ownerDocument;
-  host.replaceChildren(...describeAwayMode({ config, toggle, hereSince, now, projectName, projectFields, surface }).lines.map((l) => el(doc, 'span', 'away-line', `${l} `)));
+  host.replaceChildren(...describeAwayMode({ config, toggle, hereSince, now, projectName, projectFields, surface, modelLabel }).lines.map((l) => el(doc, 'span', 'away-line', `${l} `)));
 }
 
 /** "Marked runs by day" only makes sense with away hours; without them it reads "Marked runs" (no day). */
@@ -328,5 +405,6 @@ export function updateAwaySummary(root, { toggle, hereSince, now, inherited } = 
     toggle: c.toggle, hereSince: c.hereSince, now: Date.now() + c.offset, projectName: c.projectName,
     projectFields: c.level === 'project' ? Object.keys(patch) : null,   // "(this project)" on the lines it overrides
     surface: c.level === 'project' ? 'project' : 'settings',            // no status buttons on the project tab
+    modelLabel: (id) => modelName(c.models, id),                          // "… with Opus 5.5": the catalog label
   });
 }

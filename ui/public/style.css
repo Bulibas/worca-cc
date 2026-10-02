@@ -4534,6 +4534,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .rd-srow-tx .rd-na-q{-webkit-line-clamp:2;line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden;margin-bottom:2px;}
 .rd-na-row.open .rd-srow-tx .rd-na-q{display:block;}
 .rd-na-a{font-weight:500;}
+.rd-srow-tx .rd-na-by{margin-top:2px;font-size:11.5px;}
 .rd-na-check{flex:none;padding:2px 9px;border-radius:999px;background:var(--amber-bg);color:var(--amber-ink);font:600 11.5px/1.5 var(--sans);}
 .rd-na-btn.chv::after{transition:transform .15s ease;}
 .rd-na-row.open .rd-na-btn.chv::after{transform:rotate(90deg);}
