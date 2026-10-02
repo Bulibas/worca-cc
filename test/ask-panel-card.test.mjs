@@ -1051,3 +1051,58 @@ test('workspace card: members, warnings and effects as text; Apply / Decline pos
   await ctx.tick();
   assert.deepEqual(rec.cardPosts.at(-1), ['card_00000012', { state: 'declined' }]);
 });
+
+test('actions card: each command whole, Now / New on a change, warnings and effects as text; Save / Decline post the verbs', async () => {
+  const rec = { cardPosts: [] };
+  const base = apiHandler(rec);
+  const ctx = await openWithCard(PROJECT_CARD, rec, { fetchHandler: (url, opts) => {
+    const m = /^\/api\/ask\/threads\/[^/]+\/cards\/(card_[0-9a-f]{8})$/.exec(url);
+    if (m && (opts.method || '').toUpperCase() === 'POST' && m[1] !== CARD_ID) { rec.cardPosts.push([m[1], JSON.parse(opts.body)]); return { ok: true, status: 200, json: async () => ({}) }; }
+    return base(url, opts);
+  } });
+  const card = { type: 'actions', kind: 'project', summary: 'Change the actions of acme-web', projectKey: 'acme-web-0000abcd', projectName: 'acme-web',
+    note: '<i>start needs PORT</i>',
+    changes: [
+      { op: 'add', label: 'Setup', before: null, after: 'npm ci' },
+      { op: 'change', label: 'Run', id: 'run', before: 'npm start\nservice · ready once it starts', after: 'npm start\nservice · ready when port PORT answers (60 s)\nPORT = port (automatic)' },
+      { op: 'remove', label: 'Lint', id: 'lint', before: 'npm run lint\ntask · runs to an exit code' },
+    ],
+    warnings: ['Stack "Dev" of workspace Shop starts lint — change that stack too, or it stops working'],
+    effects: ['Commands run on this machine as the user worca runs as, only when a person clicks Start'],
+    change: { projectKey: 'acme-web-0000abcd', config: {} } };
+  const AC = 'card_00000020';
+  ctx.panel.pushServerFrame({ type: 'ask-card', block: { kind: 'card', id: AC, state: 'proposed', card }, threadId: TID, messageId: MID, seq: 3 });
+  ctx.flush();
+  const el = ctx.doc.querySelector('[data-ask-acard="proposed"]');
+  assert.ok(el);
+  assert.equal(el.querySelector('.ask-mcard-title').textContent, 'Proposed actions change');
+  assert.equal(el.querySelector('.ask-mcard-kind').textContent, 'Project actions');
+  assert.deepEqual([...el.querySelectorAll('.ask-mcard-change-label')].map((x) => x.textContent), ['Add Setup', 'Change Run', 'Remove Lint']);
+  const rows = [...el.querySelectorAll('.ask-acard-change')];
+  assert.deepEqual([...rows[1].querySelectorAll('.ask-acard-tag')].map((x) => x.textContent), ['Now', 'New']);
+  assert.equal(rows[1].querySelector('.ask-mcard-after').textContent, card.changes[1].after, 'the whole command block, word for word');
+  assert.equal(rows[2].querySelector('.ask-mcard-before').textContent, card.changes[2].before);
+  assert.equal(rows[0].querySelectorAll('.ask-acard-tag').length, 0, 'a plain add has no tags');
+  assert.match(el.querySelector('.ask-wscard-warn li').textContent, /starts lint/);
+  assert.match(el.querySelector('.ask-wscard-effects li').textContent, /only when a person clicks Start/);
+  assert.equal(el.querySelector('.ask-mcard-note i'), null, 'text, never markup');
+  el.querySelector('[data-ask-act-apply]').click();
+  await ctx.tick();
+  assert.deepEqual(rec.cardPosts.at(-1), [AC, { state: 'applied' }]);
+  ctx.panel.pushServerFrame({ type: 'ask-card', block: { kind: 'card', id: AC, state: 'applied', card: { ...card, result: { ok: true, projectKey: card.projectKey, detail: '1 action and a setup command saved' } } }, threadId: TID, messageId: MID, seq: 4 });
+  ctx.flush();
+  const done = ctx.doc.querySelector('[data-ask-acard="applied"]');
+  assert.equal(done.querySelector('.ask-mcard-title').textContent, 'Applied actions change');
+  assert.equal(done.querySelector('.ask-mcard-detail').textContent, '1 action and a setup command saved');
+  assert.equal(done.querySelector('.ask-wscard-warn'), null, 'warnings belong to the proposal');
+  assert.equal(done.querySelector('.ask-mcard-before'), null, 'the old commands belong to the proposal');
+  assert.equal(done.querySelector('a.ask-card-sched-link').getAttribute('href'), '#projects/acme-web-0000abcd/actions');
+  const st = { ...card, kind: 'stacks', summary: 'Add stacks to Shop', workspaceId: 'wks-shop-0000abcd', projectKey: undefined };
+  ctx.panel.pushServerFrame({ type: 'ask-card', block: { kind: 'card', id: 'card_00000021', state: 'proposed', card: st }, threadId: TID, messageId: MID, seq: 5 });
+  ctx.flush();
+  const stEl = ctx.doc.querySelector('[data-ask-acard="proposed"]');
+  assert.equal(stEl.querySelector('.ask-mcard-kind').textContent, 'Workspace stacks');
+  stEl.querySelector('[data-ask-act-decline]').click();
+  await ctx.tick();
+  assert.deepEqual(rec.cardPosts.at(-1), ['card_00000021', { state: 'declined' }]);
+});

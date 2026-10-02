@@ -177,6 +177,11 @@ export function labelForTool(name, input = {}, attachmentNames = {}) {
     case 'propose_model_change': return 'Proposing a model change';
     case 'propose_clone_project': return 'Proposing a project clone';
     case 'propose_workspace_change': return 'Proposing a workspace change';
+    case 'get_project_actions': return 'Looking at project actions';
+    case 'get_workspace_stacks': return 'Looking at workspace stacks';
+    case 'get_run_checkout': return input?.id ? `Checking the checkout of ${String(input.id).slice(0, 40)}` : 'Checking a run checkout';
+    case 'list_running_actions': return 'Looking at running actions';
+    case 'propose_actions_change': return 'Proposing an actions change';
     case 'web_fetch': { let host = ''; try { host = new URL(String(input?.url ?? '')).hostname; } catch { /* label only */ } return host ? `Reading ${host}` : 'Reading a web page'; }
     case 'web_search': return 'Searching the web';
     case 'propose_web_access': return 'Asking to read a new site';
@@ -258,6 +263,7 @@ export function createTurnReducer({
   onModelProposal = null,        // propose_model_change RESULT (model card; same split)
   onCloneProposal = null,        // propose_clone_project RESULT (clone card; same split)
   onWorkspaceProposal = null,    // propose_workspace_change RESULT (workspace card; same split)
+  onActionsProposal = null,      // propose_actions_change RESULT (actions card; same split)
   onWebProposal = null,          // propose_web_access RESULT (web card; same split)
   onScheduleMutation = null,     // a direct schedule write succeeded in the MCP child
   onTrackRun = null,
@@ -650,6 +656,13 @@ export function createTurnReducer({
         // Same split as the model card: the parent re-validates the INPUT against the live registry (workspace-proposal.mjs).
         try {
           const ret = onWorkspaceProposal({ toolUseId: b.id, input: fullInputs.get(b.id) ?? {}, text, isError: !!c.is_error });
+          if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
+        } catch { reducerErrors += 1; }
+      }
+      if (b.name === 'mcp__worca__propose_actions_change' && typeof onActionsProposal === 'function') {
+        // Same split as the workspace card: the parent re-validates the INPUT against the stored config (actions-proposal.mjs).
+        try {
+          const ret = onActionsProposal({ toolUseId: b.id, input: fullInputs.get(b.id) ?? {}, text, isError: !!c.is_error });
           if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
         } catch { reducerErrors += 1; }
       }

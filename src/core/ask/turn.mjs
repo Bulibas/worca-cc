@@ -34,6 +34,8 @@ import { validatePolicyChange } from './policy-deps.mjs';
 import { validateModelChange } from './model-deps.mjs';
 import { validateCloneProposal } from './clone-deps.mjs';
 import { validateWorkspaceChange } from './workspace-deps.mjs';
+import { validateActionsChange } from './actions-deps.mjs';
+import { actionsProposalInput } from './actions-proposal.mjs';
 import { createWebValidator } from './web-proposal.mjs';
 import { validateScheduleChange } from './schedule-deps.mjs';
 import { lookupTask } from './source-deps.mjs';
@@ -146,6 +148,7 @@ class AskTurn extends EventEmitter {
       validateModelChange: deps.validateModelChange ?? validateModelChange,
       validateCloneProposal: deps.validateCloneProposal ?? validateCloneProposal,
       validateWorkspaceChange: deps.validateWorkspaceChange ?? validateWorkspaceChange,
+      validateActionsChange: deps.validateActionsChange ?? validateActionsChange,
       // The web card's authoritative check runs against THIS turn's resolved access (allowlist + team cap).
       validateWebProposal: deps.validateWebProposal ?? ((input) => createWebValidator({
         allowed: () => (this.web ? this.web.allowedDomains : []), teamCap: () => (this.web ? this.web.teamCap ?? null : null) })(input)),
@@ -481,6 +484,31 @@ class AskTurn extends EventEmitter {
     this._persistBlocks();
   }
 
+  /**
+   * propose_actions_change RESULT: the workspace card's split — the child validated for the model, the parent
+   * re-validates the same INPUT against the stored config and mints the card. The child's pinned-target default
+   * is replayed (actionsProposalInput) so the card matches what the model saw. A child {ok:false} already
+   * reached the model as text: no card, no notice.
+   */
+  async _onActionsProposal(input, text, isError) {
+    if (isError) return;
+    let out = null;
+    try { out = JSON.parse(text); } catch { out = null; }
+    if (!out || out.ok !== true) return;
+    const d = this.deps;
+    try {
+      const r = await d.validateActionsChange(actionsProposalInput(input, this.pinnedScope));
+      if (r && r.ok) this.reducer.addBlock({ kind: 'card', id: d.newAskId('card'), state: 'proposed', card: r.card });
+      else {
+        const errors = (r && Array.isArray(r.errors) && r.errors.length) ? r.errors : ['invalid proposal'];
+        this.reducer.addBlock({ kind: 'notice', text: `Actions change rejected: ${errors.join('; ')}` });
+      }
+    } catch (err) {
+      this.reducer.addBlock({ kind: 'notice', text: `Actions change rejected: ${err?.message || err}` });
+    }
+    this._persistBlocks();
+  }
+
   /** The card exists from the tool_use on (spec §8.2, PD7): a building block with the four-step trace, persisted. */
   _onWorkflowStart(toolUseId, input) {
     const d = this.deps;
@@ -574,6 +602,7 @@ class AskTurn extends EventEmitter {
       onModelProposal: ({ input, text, isError }) => this._onModelProposal(input, text, isError),
       onCloneProposal: ({ input, text, isError }) => this._onCloneProposal(input, text, isError),
       onWorkspaceProposal: ({ input, text, isError }) => this._onWorkspaceProposal(input, text, isError),
+      onActionsProposal: ({ input, text, isError }) => this._onActionsProposal(input, text, isError),
       onWebProposal: ({ input, text, isError }) => this._onWebProposal(input, text, isError),
       // pause / resume / skip / mark-read in the child → the server's schedules-changed frames.
       onScheduleMutation: (e) => { try { this.deps.onScheduleMutation(e); } catch { /* a broken sink never breaks the turn */ } },

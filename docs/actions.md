@@ -180,6 +180,37 @@ A workspace's Actions tab defines **stacks**: one start for actions across membe
 - **Stop** stops exactly what the stack started, newest first.
 - A `task` stack may contain only task actions.
 
+## Ask Worca
+
+Ask Worca reads Actions and drafts their config, but it never runs anything.
+
+| Tool | What it returns |
+| --- | --- |
+| `get_project_actions` | A project's setup, actions (commands included), built-ins, last setup time, and the stacks that use its actions |
+| `get_workspace_stacks` | A workspace's stacks, and each member's alias and action ids |
+| `get_run_checkout` | One run: each member's checkout, setup status and error, its actions, why Check out is refused, and the instances started for the run (status, ports, Open link, ready error, the last lines of the log) |
+| `list_running_actions` | Every action still starting or running, on any run |
+| `propose_actions_change` | A card with a project's new setup and actions, or a workspace's new stacks |
+
+- **Configure from the chat.** Ask "set up actions for this project": Ask Worca reads the project's
+  files in a worktree (`package.json` scripts, a `Makefile`, the README) and proposes a card. The
+  card shows every command word for word, next to what it replaces, and nothing is stored until you
+  click **Save**. Saving goes through the same validation as the Project and Workspace Actions tabs.
+- **Debug from the chat.** "Why is Run stuck on starting?" reads the instance's ready error and log
+  tail. Usually the app listens on another port than the `PORT` Worca gave it.
+- **No start, stop, check out or discard.** There is no tool for them: Ask Worca names the button
+  instead. Under agent isolation the card's Save is refused like the config routes
+  (`ACTIONS_AGENT_BLOCKED`).
+- **Redaction.** Commands and log lines are redacted like every other text Ask Worca reads. An action
+  that comes back with a redacted value is kept as stored when it is sent back unchanged. A changed
+  one is refused, so a redaction marker is never saved.
+- **Hosted.** The context's `deployment:` line says `actions=off` while `WORCA_ACTIONS_REMOTE` is
+  unset, so Ask Worca says why nothing can run.
+
+Running services reach Ask Worca through `<worca home>/actions/state.json`, which the server's
+registry rewrites on every status change. It holds each active instance, the 20 newest finished
+ones, and up to 40 log lines per instance.
+
 ## Security
 
 - **Ids only.** Start, stop, setup, stack, built-in and Try it requests carry ids. A body with any of

@@ -141,7 +141,7 @@ import { resolveIdentity, startedByOf, prAttributionFooter, actorOf, isSharedIde
 import { withBillTo, currentBillTo, currentOwner } from '../src/core/billing.mjs';
 import { agentIdentity } from '../src/core/agent-user.mjs';
 import { spawn } from 'node:child_process';
-import { ActionRegistry, instanceIdFor, reapOrphans, busyRunIdsFromPidFile, actionsPidFile } from '../src/core/actions/registry.mjs';
+import { ActionRegistry, instanceIdFor, reapOrphans, busyRunIdsFromPidFile, actionsPidFile, actionsStateFile } from '../src/core/actions/registry.mjs';
 import { runStack, stopStack } from '../src/core/actions/stack.mjs';
 import { detectBuiltins, builtinLaunch, copyCommandText } from '../src/core/actions/builtins.mjs';
 import { assertNoRawCommand, normalizeStacks, memberAliases, SETUP_ACTION_ID, ActionConfigError } from '../src/core/actions/model.mjs';
@@ -204,6 +204,8 @@ import { modelEventPrompt, modelNoticeText } from '../src/core/ask/model-proposa
 import { cloneEventPrompt, cloneNoticeText } from '../src/core/ask/clone-proposal.mjs';
 import { workspaceEventPrompt, workspaceNoticeText } from '../src/core/ask/workspace-proposal.mjs';
 import { applyWorkspaceChange } from '../src/core/ask/workspace-deps.mjs';
+import { actionsEventPrompt, actionsNoticeText } from '../src/core/ask/actions-proposal.mjs';
+import { applyActionsChange } from '../src/core/ask/actions-deps.mjs';
 import { webEventPrompt, webNoticeText, chatWebHosts } from '../src/core/ask/web-proposal.mjs';
 import { hostAllowed as askHostAllowed } from '../src/core/web-allowlist.mjs';
 import { registryPortsFn } from '../src/core/graph/registry-ports.mjs';
@@ -4972,6 +4974,7 @@ const ACTION_ENTRY_CAP = 50;                        // finished action entries k
 const actionsPidFileNow = () => actionsPidFile(worcaHome());
 const actions = new ActionRegistry({ portRange: () => parsePortRange(actionsSettings()) });
 Object.defineProperty(actions, 'pidFile', { get: actionsPidFileNow });
+Object.defineProperty(actions, 'stateFile', { get: () => actionsStateFile(worcaHome()) });   // Ask Worca reads it (readActionsState)
 const stackStates = new Map();                     // `${runId}:${stackId}` -> state reported by runStack (D26)
 const stackTokens = new Map();                     // `${runId}:${stackId}` -> token of the live start; deleted by Stop
 const setupJobs = new Map();                       // `${runId}:${member}` -> Promise<boolean> (D25)
@@ -8670,7 +8673,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
         // workflowId once the user saved it; a run card keeps its pre-P3 line byte for byte.
         const wf = !!(b.card && b.card.type === 'workflow');
         if (wf && b.state === 'building') continue;   // transient (no name yet) — never worth a header line
-        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'workspace')) {
+        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'workspace' || b.card.type === 'actions')) {
           cards.push({ id: b.id, type: b.card.type, state: b.state, summary: b.card.summary || '' });
           continue;
         }
@@ -9156,9 +9159,9 @@ async function startMetricsEventTurn(threadId, block) {
   const state = block.state === 'declined' ? 'declined' : block.state === 'failed' ? 'failed' : 'applied';
   const result = card.result || null;
   // One event turn for every non-workflow card; the type picks the wording. Metrics is the fallback.
-  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' ? card.type : 'metrics';
-  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, workspace: workspaceEventPrompt, metrics: metricsEventPrompt }[kind];
-  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, workspace: workspaceNoticeText, metrics: metricsNoticeText }[kind];
+  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'actions' ? card.type : 'metrics';
+  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, workspace: workspaceEventPrompt, actions: actionsEventPrompt, metrics: metricsEventPrompt }[kind];
+  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, workspace: workspaceNoticeText, actions: actionsNoticeText, metrics: metricsNoticeText }[kind];
   const text = eventPrompt({ cardId: block.id, state, card, result });
   const notice = noticeText({ state, card, result });
   let mv = await validateModelEffort(thread.model, thread.effort);
@@ -9329,6 +9332,36 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
           emitChanged('workspaces-changed', card.kind === 'create' ? 'created' : card.kind === 'rename' ? 'renamed' : 'members');
           if (result.clearedHomes.includes('policy')) emitChanged('team-policy-changed', 'policy-home');
         } catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err), code: (err && err.code) || 'ERROR' }; }
+        block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
+      } finally { askCardBusy.delete(cardId); }
+      if (!block) return res.status(409).json({ error: 'card vanished' });
+      const turn = await startMetricsEventTurn(id, block);
+      return res.json({ block, turn });
+    }
+    if (found.block.card && found.block.card.type === 'actions') {
+      // Actions card (docs/actions.md "Ask Worca"): proposed → applied | failed | declined. The config write happens
+      // HERE, behind the click, through the same core setters as PUT /api/projects/:key/actions and
+      // /api/workspaces/:id/actions — each re-validates — and behind the same D4 guard: an isolated agent must
+      // not plant a command a person's later click would run. Applying stores config; it starts nothing.
+      if (body.state !== 'applied' && body.state !== 'declined') return badRequest(res, 'state must be "applied" or "declined"');
+      if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
+      if (body.state === 'applied' && agentMayBeCaller(req)) return refuseAgentCaller(res);
+      if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
+      if (body.state === 'declined') {
+        const block = flipCard(id, cardId, { state: 'declined' });
+        if (!block) return res.status(409).json({ error: 'card vanished' });
+        const turn = await startMetricsEventTurn(id, block);
+        return res.json({ block, turn });
+      }
+      askCardBusy.add(cardId);
+      let block;
+      try {
+        let result;
+        try { result = await applyActionsChange(found.block.card); }
+        catch (err) {
+          const field = err && err.field ? ` (${err.field})` : '';
+          result = { ok: false, error: `${err && err.message ? err.message : String(err)}${field}`, code: (err && err.code) || 'ERROR' };
+        }
         block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
       } finally { askCardBusy.delete(cardId); }
       if (!block) return res.status(409).json({ error: 'card vanished' });

@@ -5292,6 +5292,12 @@ body.rail-collapsed .ask-dock{left:76px;}
 .ask-mcard-before.is-unset,.ask-mcard-after.is-unset{text-decoration:none;font-style:italic;color:var(--ink-3);}
 .ask-mcard-arrow{color:var(--ink-3);}
 .ask-mcard-after{color:var(--ink);font-weight:600;}
+/* actions card (buildActionsCard; docs/actions.md "Ask Worca"): each command block shown whole, word for word */
+.ask-acard-change{flex-direction:column;align-items:stretch;}
+.ask-acard-change .ask-mcard-change-val{display:flex;flex-direction:column;align-items:stretch;gap:4px;}
+.ask-acard-cmd{display:block;white-space:pre-wrap;overflow-wrap:anywhere;font-weight:400;}
+.ask-acard-cmd.ask-mcard-before{text-decoration:none;opacity:.7;}
+.ask-acard-tag{font-family:var(--sans);font-size:11px;color:var(--ink-3);}
 /* schedule card (buildScheduleCard; docs/scheduled-runs.md "Ask Worca"): the metrics card's chrome + a before/after grid */
 .ask-scard-kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 14px;margin-top:4px;font-size:12.5px;}
 .ask-scard-k{color:var(--ink-3);}

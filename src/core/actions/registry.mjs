@@ -12,11 +12,18 @@ import { expandPlaceholders, resolveCwd } from './model.mjs';
 export const instanceIdFor = (runId, member, actionId) => `act:${runId}:${member}:${actionId}`;
 const ACTIVE = new Set(['starting', 'running', 'ready']);
 const TERMINAL = new Set(['exited', 'failed', 'stopped']);
+// The state file (Ask Worca reads it from its own process): the last lines of each log, and how many
+// finished instances it keeps. Small on purpose: it is rewritten on every status change.
+const TAIL_LINES = 40;
+const TAIL_LINE_CHARS = 400;
+const STATE_FINISHED_KEEP = 20;
+const STATE_WRITE_DELAY_MS = 500;
 
 export class ActionRegistry extends EventEmitter {
-  constructor({ pidFile, portRange = () => DEFAULT_PORT_RANGE, platform = process.platform, now = Date.now } = {}) {
+  constructor({ pidFile, stateFile = null, portRange = () => DEFAULT_PORT_RANGE, platform = process.platform, now = Date.now } = {}) {
     super();
-    this.pidFile = pidFile; this.portRange = portRange; this.platform = platform; this.now = now;
+    this.pidFile = pidFile; this.stateFile = stateFile; this.portRange = portRange; this.platform = platform; this.now = now;
+    this._stateTimer = null;
     // instanceId -> { snap, child, reserved:Set<number>, pending:Promise|null }. `snap` is NEVER
     // null: a slot is inserted with a complete 'starting' snapshot, so readers (get/list/heldPorts,
     // a concurrent start) never see a half-built entry.
@@ -47,7 +54,7 @@ export class ActionRegistry extends EventEmitter {
     if (!worktreeDir) throw Object.assign(new Error('the run is not checked out'), { code: 'NOT_CHECKED_OUT' });
     const cwd = resolveCwd(worktreeDir, action.cwd);          // throws ActionConfigError (400)
 
-    const slot = { child: null, reserved: new Set(), pending: null, snap: {
+    const slot = { child: null, reserved: new Set(), pending: null, tail: [], snap: {
       instanceId, runId, member, actionId: action.id, label: action.label, kind: action.kind,
       status: 'starting', pid: null, ports: {}, url: null,
       startedAt: this.now(), endedAt: null, exitCode: null, readyError: null, stackId: spec.stackId || null,
@@ -99,7 +106,7 @@ export class ActionRegistry extends EventEmitter {
     const child = spawnActionProcess({
       command, cwd, env, platform: this.platform,
       onLine: (stream, text) => {
-        this.emit('line', { instanceId, stream, text });
+        this._line(instanceId, stream, text);
         if (outputHit && text.includes(action.ready.text)) outputHit();
       },
     });
@@ -197,8 +204,38 @@ export class ActionRegistry extends EventEmitter {
     this._writePidFile();
     this._status(slot);
   }
-  _status(slot) { this.emit('status', { ...slot.snap }); }
-  _sys(instanceId, text) { this.emit('line', { instanceId, stream: 'sys', text }); }
+  _status(slot) { this.emit('status', { ...slot.snap }); this._writeStateFile(); }
+  _sys(instanceId, text) { this._line(instanceId, 'sys', text); }
+  _line(instanceId, stream, text) {
+    const slot = this.instances.get(instanceId);
+    if (slot) {
+      slot.tail.push({ stream, text: String(text).slice(0, TAIL_LINE_CHARS) });
+      if (slot.tail.length > TAIL_LINES) slot.tail.splice(0, slot.tail.length - TAIL_LINES);
+      this._scheduleStateWrite();
+    }
+    this.emit('line', { instanceId, stream, text });
+  }
+
+  /** Lines arrive in bursts: one write per STATE_WRITE_DELAY_MS at most. A status change writes at once. */
+  _scheduleStateWrite() {
+    if (!this.stateFile || this._stateTimer) return;
+    this._stateTimer = setTimeout(() => { this._stateTimer = null; this._writeStateFile(); }, STATE_WRITE_DELAY_MS);
+    this._stateTimer.unref?.();
+  }
+
+  /** Every active instance plus the newest finished ones, each with its log tail (Ask Worca, readActionsState). */
+  _writeStateFile() {
+    if (!this.stateFile) return;
+    if (this._stateTimer) { clearTimeout(this._stateTimer); this._stateTimer = null; }
+    const all = [...this.instances.values()];
+    const done = all.filter((i) => TERMINAL.has(i.snap.status)).sort((a, b) => (b.snap.endedAt || 0) - (a.snap.endedAt || 0)).slice(0, STATE_FINISHED_KEEP);
+    const rows = [...all.filter((i) => !TERMINAL.has(i.snap.status)), ...done].map((i) => ({ ...i.snap, tail: i.tail.slice() }));
+    try {
+      mkdirSync(dirname(this.stateFile), { recursive: true });
+      writeFileSync(`${this.stateFile}.tmp`, JSON.stringify({ ownerPid: process.pid, updatedAt: this.now(), instances: rows }));
+      renameSync(`${this.stateFile}.tmp`, this.stateFile);
+    } catch { /* best-effort: only Ask Worca reads it */ }
+  }
 
   _writePidFile() {
     if (!this.pidFile) return;
@@ -259,3 +296,19 @@ export function busyRunIdsFromPidFile(pidFile, { isAlive = defaultAlive } = {}) 
 
 /** The one pid-file location, shared by the server registry and the harness. */
 export const actionsPidFile = (home) => join(home, 'actions', 'live.json');
+
+/** Where the server's registry publishes its instances for readers in other processes (Ask Worca). */
+export const actionsStateFile = (home) => join(home, 'actions', 'state.json');
+
+/**
+ * The registry's instances as the state file last recorded them. When the server that wrote it is
+ * gone, its processes went with it (reapOrphans): active ones then read as 'stopped'.
+ * @returns {{ serverRunning: boolean, instances: object[] }}
+ */
+export function readActionsState(stateFile, { isAlive = defaultAlive } = {}) {
+  let doc = null;
+  try { doc = JSON.parse(readFileSync(stateFile, 'utf8')); } catch { return { serverRunning: false, instances: [] }; }
+  const list = Array.isArray(doc?.instances) ? doc.instances.filter((r) => r && typeof r.instanceId === 'string') : [];
+  const serverRunning = !!(doc?.ownerPid && isAlive(doc.ownerPid));
+  return { serverRunning, instances: serverRunning ? list : list.map((r) => (ACTIVE.has(r.status) ? { ...r, status: 'stopped' } : r)) };
+}
