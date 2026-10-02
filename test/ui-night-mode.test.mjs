@@ -118,30 +118,70 @@ test('a hidden night switch really is hidden (its display rule must not beat [hi
   assert.match(css, /\.rd-night-wrap\[hidden\]\s*\{\s*display:\s*none/);
 });
 
-test('run view: stored decisions load on open; a night-decision frame appends; flagged rows are marked', async () => {
-  const ctx = await boot({ decisions: [{ questionId: 'clarify-a-1', kind: 'clarify', choice: 'Redis', strategy: 'weights', confidence: 80, flagged: false, rationale: 'r1' }] });
+test('run view: stored answers load on open; a night-decision frame appends a group; flagged rows carry Check', async () => {
+  const ctx = await boot({ decisions: [{ questionId: 'clarify-a-1', kind: 'clarify', at: '2026-01-01T13:12:00', choice: 'Redis | Live', strategy: 'weights', confidence: 80, flagged: true,
+    rationale: 'store: r1\ndelivery: r2', questions: [
+      { id: 'store', question: 'Which store?', choice: 'Redis', flagged: false, rationale: 'r1' },
+      { id: 'delivery', choice: 'Live', flagged: true, rationale: 'the agent was not sure enough; took the option easiest to undo' }] }] });
   const screen = await openDetail(ctx);
   await settle();
   const sec = screen.querySelector('.rd-night-sec');
   assert.equal(sec.hidden, false);
+  assert.equal(sec.querySelector('h3').textContent, 'Answered for you');
   ctx.dispatch({ type: 'night-decision', runId: RUN.runId, seq: 9, id: 'gate-w-2', kind: 'gate',
-    record: { questionId: 'gate-w-2', kind: 'gate', choice: 'continue', strategy: 'rule', confidence: null, flagged: true, rationale: 'critical remain' } });
+    record: { questionId: 'gate-w-2', kind: 'gate', at: '2026-01-01T13:40:00', choice: 'continue', strategy: 'rule', confidence: null, flagged: true, rationale: 'critical remain' } });
   await settle();
-  const rows = [...screen.querySelectorAll('.rd-night-decisions li')];
-  assert.equal(rows.length, 2);
-  assert.equal(rows[0].classList.contains('flagged'), false);
-  assert.ok(rows[1].classList.contains('flagged'));
-  assert.equal(rows[1].querySelector('.rd-nd-head').textContent, 'Fix again or continue, in a review loop');
-  assert.equal(rows[1].querySelector('.rd-nd-why').textContent, 'Answered for you, please check: "continue" — critical remain.');
-  assert.equal(rows[0].querySelector('.rd-nd-why').textContent, 'Answered for you: "Redis" — r1.');
-  assert.equal(screen.querySelector('.rd-night-count').textContent, '(2 answers, 1 to check)');
-  assert.equal(screen.querySelector('.rd-night-sec h3').firstChild.textContent.trim(), 'Answers while you were away');
-  ctx.dispatch({ type: 'night-decision', runId: RUN.runId, seq: 10, id: 'clarify-g-3', kind: 'clarify',
+  const groups = [...sec.querySelectorAll('.rd-na')];
+  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent), ['Clarifying questions · 13:12', 'Review loop · 13:40']);
+  const rows = [...sec.querySelectorAll('.rd-na-row')];
+  assert.deepEqual(rows.map((r) => [r.querySelector('.rd-na-q')?.textContent ?? null, r.querySelector('.rd-na-a').textContent, !!r.querySelector('.rd-na-check')]),
+    [['Which store?', 'Redis', false], ['Delivery', 'Live', true], [null, 'Continued', true]]);
+  assert.equal(rows[1].querySelector('.rd-na-check').textContent, 'Check');
+  // The reason is one click away: closed by default, a click opens it, another closes it.
+  const btn = rows[1].querySelector('button.rd-na-btn');
+  const why = rows[1].querySelector('.rd-na-why');
+  assert.equal(why.hidden, true);
+  assert.equal(btn.getAttribute('aria-expanded'), 'false');
+  btn.click();
+  assert.equal(why.hidden, false);
+  assert.equal(btn.getAttribute('aria-expanded'), 'true');
+  assert.equal(why.textContent, 'The agent was not sure enough; took the option easiest to undo.');
+  // A repaint with the same answers leaves the open row (and its focus) alone.
+  btn.focus();
+  ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 10, status: 'running', night: { optIn: true, override: 'auto', decisions: 2, flagged: 2 } });
+  await settle();
+  assert.equal(sec.querySelectorAll('.rd-na-row')[1].querySelector('.rd-na-why').hidden, false, 'still open');
+  assert.equal(ctx.window.document.activeElement, btn, 'still focused');
+  // A limit row: no Check, its own words; an open row stays open when the list grows.
+  ctx.dispatch({ type: 'night-decision', runId: RUN.runId, seq: 11, id: 'clarify-g-3', kind: 'clarify',
     record: { questionId: 'clarify-g-3', kind: 'clarify', choice: null, strategy: 'guardrail', guardrail: 'maxDecisions', confidence: null, flagged: true, rationale: 'Paused: worca answered 1 times on this run, the limit you set.' } });
   await settle();
-  const g = [...screen.querySelectorAll('.rd-night-decisions li')][2];
-  assert.equal(g.querySelector('.rd-nd-why').textContent, 'Paused: worca answered 1 times on this run, the limit you set.');
-  assert.equal(screen.querySelector('.rd-night-count').textContent, '(2 answers, 1 to check)');
+  const after = [...sec.querySelectorAll('.rd-na-row')];
+  assert.equal(after.length, 4);
+  assert.equal(after[3].querySelector('.rd-na-a').textContent, 'Paused: answer limit reached');
+  assert.equal(after[3].querySelector('.rd-na-check'), null);
+  assert.equal(after[1].querySelector('.rd-na-why').hidden, false, 'the open row survived the rebuild');
+  assert.equal(ctx.window.document.activeElement, after[1].querySelector('button.rd-na-btn'), 'focus follows the rebuilt row');
+});
+
+test('run view: a row with no reason is not a button', async () => {
+  const ctx = await boot({ decisions: [{ questionId: 'wf-1', kind: 'workflow', choice: 'accept', flagged: false, rationale: '' }] });
+  const screen = await openDetail(ctx);
+  await settle();
+  const row = screen.querySelector('.rd-na-row');
+  assert.equal(row.querySelector('button'), null);
+  assert.equal(row.querySelector('.rd-na-why'), null);
+  assert.equal(row.querySelector('.rd-na-a').textContent, 'Accepted');
+});
+
+test('the answers sit under the run card: Live view keeps them in its first column', () => {
+  const css = readFileSync(new URL('../ui/public/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.rd-glance\[data-live="on"\] > \.rd-night-sec\s*\{\s*grid-column:\s*1;/);
+  assert.match(css, /\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\) > :is\(\.rd-now,\.rd-sheet,\.rd-night-sec\)/);
+  assert.match(css, /\.rd-night-sec\[hidden\]\s*\{\s*display:\s*none/);
+  const html = readFileSync(htmlPath, 'utf8');
+  const glance = html.slice(html.indexOf('<section class="rd-glance"'), html.indexOf('<section class="rd-details"'));
+  assert.ok(glance.indexOf('rd-night-sec') > glance.indexOf('class="rd-sheet"'), 'after the run card in the page order');
 });
 
 test('start form: nightMode is sent only when the checkbox is ticked', async () => {

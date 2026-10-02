@@ -94,3 +94,17 @@ test('rationales in plain words (wording §3.6)', async () => {
   const unsure = await decideQuestion(Q({}), { ...C, strategy: 'analysis' }, { analyze: async () => ({ choice: 'A', confidence: 10, rationale: 'r', scores: {} }) });
   assert.match(unsure.rationale, /^the agent was not sure enough; took the option easiest to undo\. r$/);
 });
+
+test('every answer carries the question it answers (the run page lists it)', async () => {
+  const q = { id: 'delivery', question: 'How will the deck be delivered?', options: ['Live', 'Read'] };
+  const paths = [
+    decideQuestion({ ...q, confidence: [80, 20], recommended: 'Live' }, { ...C, strategy: 'weights' }, {}),
+    decideQuestion({ ...q, confidence: [50, 50], recommended: 'Live' }, { ...C, strategy: 'weights' }, {}),
+    decideQuestion(q, { ...C, strategy: 'analysis' }, {}),
+    decideQuestion(q, { ...C, strategy: 'analysis' }, { analyze: async () => ({ choice: 'Read', confidence: 90, rationale: 'r', scores: {} }) }),
+    decideQuestion(q, { ...C, strategy: 'analysis' }, { analyze: async () => ({ choice: 'Read', confidence: 10, rationale: 'r', scores: {} }) }),
+    decideQuestion({ ...q, options: [] }, C, {}),
+  ];
+  for (const d of await Promise.all(paths)) assert.equal(d.question, 'How will the deck be delivered?', d.strategy);
+  assert.equal((await decideQuestion({ id: 'x', options: ['A', 'B'] }, { ...C, strategy: 'weights' }, {})).question, undefined, 'no text, no field');
+});

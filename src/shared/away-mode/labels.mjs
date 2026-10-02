@@ -12,6 +12,63 @@ export const KIND_LABELS = Object.freeze({
 });
 export const kindLabel = (k) => KIND_LABELS[k] || String(k);
 
+/** The answers list's caption for one ask (run page, History run page). */
+export const KIND_SHORT = Object.freeze({
+  clarify: 'Clarifying questions',
+  questions: 'Questions mid-step',
+  form: 'Input form',
+  gate: 'Review loop',
+  workflow: 'Proposed workflow',
+  recovery: 'Failed step',
+  'cost-cap': "Team's cost cap",
+});
+export const kindShort = (k) => KIND_SHORT[k] || String(k);
+
+// What a rule-based answer did, in words (the stored choice is the payload's value).
+const OUTCOMES = Object.freeze({
+  gate: { continue: 'Continued', another: 'One more fix round' },
+  workflow: { accept: 'Accepted' },
+  recovery: { retry: 'Retried', pause: 'Stopped retrying' },
+  'cost-cap': { continue: 'Continued past the cap' },
+});
+const LIMITS = Object.freeze({ maxDecisions: 'Paused: answer limit reached', spendCap: 'Paused: spending cap reached' });
+const sentence = (s) => {
+  const t = String(s ?? '').trim().replace(/\.$/, '');
+  return t ? `${t[0].toUpperCase()}${t.slice(1)}.` : '';
+};
+// A row stored before the question's words were kept reads its id: "feature-scope" → "Feature scope".
+const fromId = (id) => {
+  const s = String(id ?? '').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[-_\s]+/g, ' ').trim();
+  const n = /^q(\d+)$/i.exec(s);
+  if (n) return `Question ${n[1]}`;
+  return s ? `${s[0].toUpperCase()}${s.slice(1).toLowerCase()}` : 'Question';
+};
+
+/** The rows one stored answer shows: one per question it answered, else one outcome.
+ *  `q` = what was asked (null for an ask without questions), `a` = the answer, `why` = the reason
+ *  ('' when there is none), `check` = worca was not sure. A limit row is a pause: never one to check.
+ *  @returns {{q: string|null, a: string, why: string, check: boolean}[]} */
+export function awayAnswerRows(d) {
+  const rec = d && typeof d === 'object' ? d : {};
+  if (rec.choice == null) return [{ q: null, a: LIMITS[rec.guardrail] || 'Paused', why: sentence(rec.rationale), check: false }];
+  const qs = Array.isArray(rec.questions) ? rec.questions.filter((x) => x && typeof x === 'object') : [];
+  if (qs.length) {
+    // A flagged ask none of whose questions is marked (a form that fell back to its defaults): mark them all.
+    const all = rec.flagged === true && !qs.some((x) => x.flagged === true);
+    return qs.map((x) => ({
+      q: typeof x.question === 'string' && x.question.trim() && x.question !== x.id ? x.question.trim() : fromId(x.id),
+      a: x.choice == null || x.choice === '' ? 'No answer' : String(x.choice),
+      why: sentence(x.rationale),
+      check: all || x.flagged === true,
+    }));
+  }
+  const check = rec.flagged === true;
+  if (rec.strategy === 'auto') return [{ q: null, a: 'Default answer', why: sentence(rec.rationale), check }];
+  if (rec.kind === 'form') return [{ q: null, a: 'Default values', why: '', check }];
+  const said = OUTCOMES[rec.kind] && OUTCOMES[rec.kind][rec.choice];
+  return [{ q: null, a: said || String(rec.choice), why: sentence(rec.rationale), check }];
+}
+
 export const METHOD_OPTIONS = Object.freeze([
   { value: 'mixed', label: 'Trust the agent when it is sure, otherwise weigh the options', hint: '' },
   { value: 'weights', label: "Always trust the agent's recommendation", hint: '' },

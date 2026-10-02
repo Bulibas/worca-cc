@@ -47,7 +47,9 @@ export function mostReversible(options, scores, totals) {
  */
 export async function decideQuestion(q, cfg, { analyze } = {}) {
   const opts = realOpts(q);
-  const base = { id: q.id, scores: null, reversible: null };
+  // The question's own words ride along: the run page lists each answer under the question it answers.
+  const asked = typeof q.question === 'string' && q.question.trim() ? { question: q.question.trim().slice(0, 500) } : {};
+  const base = { id: q.id, ...asked, scores: null, reversible: null };
   if (!opts.length) return { ...base, choice: '', strategy: 'none', confidence: null, rationale: 'free-text question; worca cannot answer it', flagged: true };
   const w = weightsVerdict(q, cfg);
   if (cfg.strategy === 'weights' || (cfg.strategy === 'mixed' && w.met)) {
@@ -72,11 +74,11 @@ export async function decideQuestion(q, cfg, { analyze } = {}) {
   if (conf >= cfg.minConfidence) {
     const rationale = valid ? String(a.rationale || '')
       : `the review picked "${String(a.choice).slice(0, 80)}", which is not an option; took the best-scored option. ${String(a.rationale || '')}`.trim();
-    return { id: q.id, choice: pick, strategy: 'analysis', confidence: conf, scores, rationale, reversible: a.reversible === true, flagged: !valid };
+    return { ...base, choice: pick, strategy: 'analysis', confidence: conf, scores, rationale, reversible: a.reversible === true, flagged: !valid };
   }
   // User decision "never park": continue with the most reversible option, flagged.
   const rev = mostReversible(opts, scores, totals);
-  return { id: q.id, choice: rev, strategy: 'analysis', confidence: conf, scores,
+  return { ...base, choice: rev, strategy: 'analysis', confidence: conf, scores,
     rationale: `the agent was not sure enough; took the option easiest to undo. ${String(a.rationale || '')}`.trim(),
     reversible: true, flagged: true };
 }

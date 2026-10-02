@@ -587,9 +587,9 @@ test('a waiting question gets twice the run panel\'s width; the header and panel
   const base = px(/\.rd-glance\{[^}]*max-width:(\d+)px/) - 64;
   const wide = px(/\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\)\{[^}]*max-width:(\d+)px/) - 64;
   assert.ok(wide >= 2 * base, `questions column ${wide}px is at least twice the panel's ${base}px`);
-  assert.match(css, /\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\) > :is\(\.rd-now,\.rd-sheet\)\{[^}]*max-width:(\d+)px/,
-    'the header and the run panel stay at their own measure while the column widens');
-  assert.equal(px(/\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\) > :is\(\.rd-now,\.rd-sheet\)\{[^}]*max-width:(\d+)px/), base,
+  assert.match(css, /\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\) > :is\(\.rd-now,\.rd-sheet,\.rd-night-sec\)\{[^}]*max-width:(\d+)px/,
+    'the header, the run panel and the answers under it stay at their own measure while the column widens');
+  assert.equal(px(/\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\) > :is\(\.rd-now,\.rd-sheet,\.rd-night-sec\)\{[^}]*max-width:(\d+)px/), base,
     'the run panel does not move when a question arrives');
 });
 
