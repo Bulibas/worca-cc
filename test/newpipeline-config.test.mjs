@@ -1,5 +1,5 @@
 // test/newpipeline-config.test.mjs
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -11,7 +11,7 @@ const PROJECT = '/tmp/proj';
 
 // Boot app.js in jsdom with a controllable fetch. Mirrors test/ui-cost.test.mjs.
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4319/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4319/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class {
@@ -109,6 +109,10 @@ test('buildNodeConfigRows on the Default 4-step topology yields the original fou
 });
 
 import { readFileSync as _rf } from 'node:fs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 const indexHtml = _rf(fileURLToPath(new URL('../ui/public/index.html', import.meta.url)), 'utf8');
 
 test('index.html exposes the workflow select + the agents accordion containers', () => {

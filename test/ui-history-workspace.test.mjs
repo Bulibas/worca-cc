@@ -3,11 +3,15 @@
 // target:'workspace') forms its own group keyed by that literal path segment,
 // and the group's name prefers p.workspaceName. (The project pills, and the "WS"
 // badge they carried, are gone: D4.)
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -26,7 +30,7 @@ const WKS_KEY = 'workspaces/wks-iot-9f3a1c20';
 const PIPELINE_DETAIL = { state: { id: 'w2', status: 'done', stepper: null, steps: [], totalCostUsd: 0, totalActiveMs: 0, phase: 'done' }, auditMarkdown: '# audit' };
 
 async function boot({ local, fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   const reqs = []; // every requested URL (+ method), for action-routing assertions
   window.Element.prototype.scrollIntoView = function () {};

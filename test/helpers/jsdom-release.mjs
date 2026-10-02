@@ -15,13 +15,25 @@
 // behind them. It measured a 57% lower heap at the end of
 // test/ui-history-detail.test.mjs. The module's own code and state still leak;
 // keep files that boot app.js per test from growing without bound.
+//
+// app.js's bare setTimeout/setInterval are Node's timers, not the window's, so
+// close() does not stop them. A guide's poll interval kept the process alive,
+// and a live view's exit timeout fired into the released DOM after its test.
+// useDomRelease() clears the intervals started while a tracked window was open.
+// Timeouts end on their own and some free app.js state when they fire (clearing
+// them measured 40% more heap), so they still run; an error one throws after
+// its window was released is swallowed, since only the teardown caused it.
+
+import { promisify } from 'node:util';
 
 /**
  * Close a jsdom window and take its DOM apart.
  * @param {import('jsdom').JSDOM} dom
+ * @param {Document} [document]  the window's document; pass it when the test may
+ *   already have closed the window, since a closed window's `document` is undefined
  */
-export function releaseDom(dom) {
-  const { document } = dom.window;
+export function releaseDom(dom, document = dom.window.document) {
+  if (!document) return;
   // Collect before close(): the walk must not race app.js handlers, and close()
   // stops the window's timers and observers first.
   const elements = [...document.querySelectorAll('*')];
@@ -33,13 +45,54 @@ export function releaseDom(dom) {
   document.replaceChildren();
 }
 
+// Node timers started while any tracked window is open. Shared by every
+// useDomRelease() caller in the process (a test file and a boot helper may both
+// track), so the globals are wrapped once.
+const intervals = new Set();
+let openCount = 0;
+let generation = 0;   // bumped at every release; a timeout from an older one is stale
+let wrapped = false;
+function wrapTimers() {
+  if (wrapped) return;
+  wrapped = true;
+  const { setTimeout: startTimeout, setInterval: startInterval } = globalThis;
+  globalThis.setInterval = function (...args) {
+    const handle = startInterval.apply(this, args);
+    if (openCount) intervals.add(handle);
+    return handle;
+  };
+  globalThis.setTimeout = function (fn, ...rest) {
+    if (!openCount || typeof fn !== 'function') return startTimeout.call(this, fn, ...rest);
+    const born = generation;
+    return startTimeout.call(this, function (...args) {
+      if (born === generation) return fn.apply(this, args);
+      try {
+        const out = fn.apply(this, args);
+        if (typeof out?.then === 'function') out.then(undefined, () => { /* its window was released */ });
+        return out;
+      } catch { /* its window was released */ }
+    }, ...rest);
+  };
+  // util.promisify(setTimeout) resolves through this symbol; keep it working.
+  globalThis.setTimeout[promisify.custom] = startTimeout[promisify.custom];
+}
+
 /**
- * Release every DOM the current test tracked, after each test.
+ * Release every DOM the current test tracked, after each test: clear the Node
+ * intervals started while it was open, then close and take apart each window.
  * @param {(fn: () => void) => void} afterEach  the node:test `afterEach` hook
  * @returns {<T extends import('jsdom').JSDOM>(dom: T) => T}  track a DOM; returns it
  */
 export function useDomRelease(afterEach) {
+  wrapTimers();
   const open = [];
-  afterEach(() => { for (const dom of open.splice(0)) releaseDom(dom); });
-  return (dom) => { open.push(dom); return dom; };
+  afterEach(() => {
+    if (!open.length) return;
+    openCount -= open.length;
+    generation++;
+    for (const handle of intervals) clearInterval(handle);
+    intervals.clear();
+    for (const [dom, document] of open.splice(0)) releaseDom(dom, document);
+  });
+  return (dom) => { open.push([dom, dom.window.document]); openCount++; return dom; };
 }
