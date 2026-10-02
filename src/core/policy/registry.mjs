@@ -78,6 +78,8 @@ export const FIELDS = Object.freeze([
   { key: 'night.maxDecisions', group: 'night', label: FIELD_LABELS.maxDecisions.label, help: FIELD_LABELS.maxDecisions.hint, type: 'int', min: 1, max: 500, kinds: ['default'], night: true },
   { key: 'night.maxExtraCycles', group: 'night', label: FIELD_LABELS.maxExtraCycles.label, help: FIELD_LABELS.maxExtraCycles.hint, type: 'int', min: 0, max: 10, kinds: ['default'], night: true },
   { key: 'night.allowCostCapOverride', group: 'night', label: FIELD_LABELS.allowCostCapOverride.label, help: FIELD_LABELS.allowCostCapOverride.hint, type: 'bool', kinds: ['default'], night: true },
+  { key: 'night.deciderModel', group: 'night', label: FIELD_LABELS.deciderModel.label, help: FIELD_LABELS.deciderModel.hint, type: 'string', kinds: ['default'], night: true },
+  { key: 'night.deciderEffort', group: 'night', label: FIELD_LABELS.deciderEffort.label, help: FIELD_LABELS.deciderEffort.hint, type: 'enum', values: [...NIGHT_EFFORTS], kinds: ['default'], night: true },
 ]);
 
 const BY_KEY = new Map(FIELDS.map((f) => [f.key, f]));
@@ -94,7 +96,7 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 // Zero-import leaves only: model-env for the bridged-model `upstream` validator every
 // catalog layer shares (model-bridge-design.md §6.3), night/config for the night.* rules.
 import { assertModelUpstream, upstreamEnvConflict } from '../model-env.mjs';
-import { fieldError as nightFieldError } from '../night/config.mjs';
+import { fieldError as nightFieldError, NIGHT_EFFORTS } from '../night/config.mjs';
 // The MCP definition rules (MCP registry spec §4.1, §4.3): pure, shared with manual definitions.
 import { validateMcpDefinition, screenNonSecretValue, SERVER_NAME_RE } from '../mcp/definitions.mjs';
 

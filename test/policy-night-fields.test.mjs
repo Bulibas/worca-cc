@@ -20,7 +20,7 @@ test('the policy editor can render, read and format every night.* field', () => 
   // Every night row uses a type the editor already handles, or the new 'criteria' type.
   const EDITOR_TYPES = ['usd', 'int', 'usd-or-null', 'bool', 'enum', 'string', 'semver', 'string[]', 'plugins', 'steps', 'criteria'];
   const rows = FIELDS.filter((x) => x.key.startsWith('night.'));
-  assert.equal(rows.length, 13);
+  assert.equal(rows.length, 15);
   for (const f of rows) assert.ok(EDITOR_TYPES.includes(f.type), `${f.key} type ${f.type}`);
   assert.equal(fmtValue(fieldMeta('night.criteria'), { cost: 2, reversible: 3 }), 'cost 2 · reversible 3');
 });

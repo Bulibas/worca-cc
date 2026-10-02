@@ -56,7 +56,7 @@ import {
   probeClaudeCapabilities, explainUnspawnableClaude,
 } from './preflight.mjs';
 import { fanoutCap, mapWithCap } from './fanout.mjs';
-import { resolveStepModels, observeModelCost, resolveModelCost, modelCostConfig, readTeamMetricsPrefs, catalogHasModel } from './config.mjs';
+import { resolveStepModels, observeModelCost, resolveModelCost, modelCostConfig, readTeamMetricsPrefs, catalogHasModel, listModels } from './config.mjs';
 import { bridgeCallsFor, bridgeCostFor, forgetBridgeTag } from './bridge/telemetry.mjs';
 import { readGuardrailSet } from './guardrail-store.mjs';
 import { unionGuardrails, guardrailsToPermissionRules, mergePermissionRules } from './guardrails.mjs';
@@ -109,6 +109,7 @@ import { effectiveNightConfig } from './night/effective.mjs';
 import { nightState, decideDelayMs, nightAnchorMs, runAllowed } from './night/activation.mjs';
 import { decideAsk } from './night/decider.mjs';
 import { runNightAnalysis, readMemoryText } from './night/analysis.mjs';
+import { resolveDeciderPair } from './night/decider-model.mjs';
 import { writeNightDecision, countNightDecisions, nightCounts, nightGateCycles, nightSpendSinceUsd } from './night/store.mjs';
 import { NIGHT_ACTOR, NIGHT_TOGGLES, nightNeverDecides } from './night/config.mjs';
 import { nightModeToggle, nightModeHereSince } from './settings.mjs';
@@ -4054,6 +4055,8 @@ export class RunHarness extends EventEmitter {
     }
     let record = result.record;
     if (Number.isFinite(analysis.peakContextTokens)) record = { ...record, meta: { ...(record.meta || {}), reviewPeakContextTokens: analysis.peakContextTokens } };
+    // The review ran for this ask: the record names its model (null = the CLI default) and effort.
+    if (analysis.model !== undefined) record = { ...record, model: analysis.model, effort: analysis.effort };
     // The record must be readable by nightDecision(id) BEFORE answer() resolves the ask (the
     // answer writers run right after), so stage it first; it is written/emitted only once an
     // answer landed.
@@ -4212,33 +4215,57 @@ export class RunHarness extends EventEmitter {
   async _nightAnalyze(questions, q, into = {}) {
     const startedAt = new Date().toISOString();
     const n = (this._nightSeq = (this._nightSeq || 0) + 1);
+    const { config } = effectiveNightConfig(this.projectDir);
+    const pair = await this._nightDeciderPair(config);
+    // The decision record names the pair the review ran with, even when the call then fails.
+    into.model = pair.model; into.effort = pair.effort;
     let res;
     try {
       res = await runNightAnalysis({
         questions, cwd: this.runCwd || this.workDir || this.projectDir,
         task: this.pipeline?.promptText ?? this.opts.prompt ?? '', planPaths: await this._nightPlanPaths(),
-        memory: await readMemoryText(projectKey(this.projectDir)), criteria: effectiveNightConfig(this.projectDir).config.criteria,
-        context: q.kind === 'questions' ? `Asked by ${q.agent || 'an agent'} mid-step.` : '', model: this.claude.model || null,
+        memory: await readMemoryText(projectKey(this.projectDir)), criteria: config.criteria,
+        context: q.kind === 'questions' ? `Asked by ${q.agent || 'an agent'} mid-step.` : '', model: pair.model, effort: pair.effort,
         bin: this.claude.bin, mock: !!this.claude.mock, envScrub: this.guardrails?.envScrub, signal: this._nightSignal(),
         run: this.opts.nightRunClaude,          // test seam; undefined → runClaude
       });
     } catch (err) {
       // Book what a failed call cost, then let the strategy fall back (flagged).
-      if (err?.costUsd > 0) this._nightBookAnalysis(n, q, startedAt, { costUsd: err.costUsd, usage: err.usage || {} }, 'error');
+      if (err?.costUsd > 0) this._nightBookAnalysis(n, q, startedAt, { costUsd: err.costUsd, usage: err.usage || {} }, 'error', pair);
       if (Number.isFinite(err?.peakContextTokens)) into.peakContextTokens = err.peakContextTokens;
       throw err;
     }
     if (Number.isFinite(res.peakContextTokens)) into.peakContextTokens = res.peakContextTokens;
-    this._nightBookAnalysis(n, q, startedAt, res, 'finished');
+    this._nightBookAnalysis(n, q, startedAt, res, 'finished', pair);
     return res.byId;
   }
 
-  /** One nightDecider call as a sub-agent row plus its cost on the run (like _recordAutoCost). */
-  _nightBookAnalysis(n, q, startedAt, res, status) {
+  /** The nightDecider's model + effort for this call (night/decider-model.mjs). A configured model
+   *  that cannot run here never fails or pauses the run: the review falls back to the run's model,
+   *  and the run log says so ONCE per run (per distinct line). Never throws. */
+  async _nightDeciderPair(config) {
+    let models = [];
+    try { models = await listModels(''); } catch { /* unreadable catalog: a configured id reads as not in it */ }
+    const pair = resolveDeciderPair({ deciderModel: config.deciderModel, deciderEffort: config.deciderEffort, runModel: this.claude.model }, { models });
+    const warn = (text) => {
+      if ((this._nightWarned ||= new Set()).has(text)) return;
+      this._nightWarned.add(text);
+      this._log('night', 'warn', text);
+    };
+    const used = pair.model ? JSON.stringify(pair.model) : 'the default model';
+    if (pair.stale) warn(`Away mode: the model set to weigh the options, ${JSON.stringify(pair.stale)}, ${pair.staleWhy === 'sign-in' ? 'needs its provider set up' : 'is not in the model catalog'} — the review uses ${used} instead`);
+    if (pair.effortDropped) warn(`Away mode: ${used} does not offer effort "${pair.effortDropped}" — the review runs at ${pair.effort} effort`);
+    return pair;
+  }
+
+  /** One nightDecider call as a sub-agent row plus its cost on the run (like _recordAutoCost).
+   *  `runModel` is what the row's model pill and sub_agents.run_model show: the model the review
+   *  ACTUALLY ran on (the decider's), not the run's. */
+  _nightBookAnalysis(n, q, startedAt, res, status, pair) {
     const stepKey = q.executionId || this._runningStepKeys()[0] || this.state.steps.at(-1)?.key || 'x:preflight:1';
     const rec = { id: `night-decider-${n}`, label: `Night decider (${q.kind})`, status, startedAt, finishedAt: new Date().toISOString(),
       costUsd: res.costUsd, tokens: (res.usage.input_tokens || 0) + (res.usage.output_tokens || 0), subagentType: 'night-decider',
-      nodeId: q.nodeId || null, stepKey, runModel: this.claude.model || null };
+      nodeId: q.nodeId || null, stepKey, runModel: pair.model || null, effort: pair.effort || null };
     if (!this.state.subAgents.some((s) => s.id === rec.id)) this.state.subAgents.push(rec);
     this._upsertSubAgent(rec);
     this._subAgentTransition('spawn', rec);

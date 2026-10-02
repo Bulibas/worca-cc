@@ -183,7 +183,7 @@ import {
   runOutcomeModel, openSyncDialog, chooseSyncRefusal,
 } from './branch-sync.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
-import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindShort, awayAnswerRows, awayAnswersSummary } from '../../src/shared/away-mode/labels.mjs';
+import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindShort, awayAnswerRows, awayAnswersSummary, decidedByText } from '../../src/shared/away-mode/labels.mjs';
 import { parseWindow } from '../../src/shared/away-mode/activation.mjs';
 import { describeRun, describeNewRun, describeAwaySwitch } from '../../src/shared/away-mode/describe.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
@@ -11354,9 +11354,11 @@ function buildPdNightCard(p) {
   let seq = 0;
   const load = async () => {
     const mine = ++seq;
-    const d = await fetchAwayMode(p.path);                  // guarded fetch: null on any failure
+    // Both guarded: null / [] on any failure. The catalog feeds the "Decided by" picker.
+    const [d, models] = await Promise.all([fetchAwayMode(p.path), fetchTitleModelCatalog()]);
     if (mine !== seq || !d) return;
-    renderNightForm(host, { level: 'project', values: d.project || {}, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), projectName: p.name });
+    awayModelCatalog = models;
+    renderNightForm(host, { level: 'project', values: d.project || {}, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), projectName: p.name, models });
   };
   const send = async (nightMode) => {
     msg.textContent = ''; msg.className = 'hint pd-night-msg';
@@ -11372,7 +11374,7 @@ function buildPdNightCard(p) {
   save.addEventListener('click', () => send(readNightForm(host, { level: 'project' })));
   reset.addEventListener('click', () => send(null));
   // Never a blank card before the GET lands: nothing is inherited yet, so every choice reads plainly.
-  renderNightForm(host, { level: 'project', values: {}, inherited: { config: null, sources: {} }, projectName: p.name });
+  renderNightForm(host, { level: 'project', values: {}, inherited: { config: null, sources: {} }, projectName: p.name, models: awayModelCatalog });
   void load().catch(() => {});
   return card;
 }
@@ -13303,6 +13305,8 @@ async function fetchAwayMode(dir = null) {
   } catch { return null; }
 }
 let _awayPaintSeq = 0;
+// The catalog the Away mode forms' "Decided by" picker offers (fetchTitleModelCatalog): the last one fetched.
+let awayModelCatalog = [];
 // Held by reference: renderNightForm moves it below the summary, and every re-render detaches it first.
 const awayStatusEl = document.getElementById('awayStatus');
 /** Spec §7: the card always renders its fields. Before the first GET answers, or when it fails, paint the
@@ -13311,7 +13315,7 @@ function paintNightFallback(host, data) {
   const user = (data && data.nightMode && typeof data.nightMode === 'object') ? data.nightMode : {};
   const toggle = typeof data?.nightModeToggle === 'string' ? data.nightModeToggle : 'auto';
   paintAwayStatus(toggle, !!parseWindow(user.window));
-  renderNightForm(host, { level: 'user', values: user, effective: data?.nightModeEffective || user, sources: {}, inherited: { config: null, sources: {} }, toggle, now: Date.now(), statusEl: awayStatusEl });
+  renderNightForm(host, { level: 'user', values: user, effective: data?.nightModeEffective || user, sources: {}, inherited: { config: null, sources: {} }, toggle, now: Date.now(), statusEl: awayStatusEl, models: awayModelCatalog });
   settingsCardPainted('nightModeSave');
 }
 async function paintNightSettings(data) {
@@ -13320,14 +13324,15 @@ async function paintNightSettings(data) {
     if (!host) return;
     const seq = ++_awayPaintSeq;
     if (!host.firstChild && host.dataset.dirty !== '1') paintNightFallback(host, data);   // never a blank card while the GET is in flight
-    const d = await fetchAwayMode();
+    const [d, models] = await Promise.all([fetchAwayMode(), fetchTitleModelCatalog()]);
     if (seq !== _awayPaintSeq) return;                       // a newer paint won
+    awayModelCatalog = models;
     if (!d) { if (host.dataset.dirty !== '1' && data) paintNightFallback(host, data); return; }
     state.awayMode = d;
     paintAwayStatus(d.toggle, !!parseWindow(d.config.window));
     paintSideAway();
     if (host.dataset.dirty === '1') { updateAwaySummary(host, { toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), inherited: d.inherited }); return; }   // keep unsaved edits
-    renderNightForm(host, { level: 'user', values: d.user, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), statusEl: awayStatusEl });
+    renderNightForm(host, { level: 'user', values: d.user, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), statusEl: awayStatusEl, models });
     // Never on the keep-dirty branch above: settings-changed from another card's save lands
     // here too, and re-cleaning would hide unsaved Away edits.
     settingsCardPainted('nightModeSave');
@@ -26704,6 +26709,13 @@ function paintAwayAnswers(sec, decisions) {
       a.className = 'rd-na-a';
       a.textContent = row.a;
       tx.appendChild(a);
+      if (row.by !== undefined) {
+        // Only an answer the review gave names its model (awayAnswerRows); the catalog label when known.
+        const by = document.createElement('small');
+        by.className = 'rd-na-by';
+        by.textContent = decidedByText(row.by ? (modelById(row.by)?.label || row.by) : null);
+        tx.appendChild(by);
+      }
       head.appendChild(tx);
       if (row.check) {
         const chip = document.createElement('span');

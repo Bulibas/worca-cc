@@ -61,13 +61,23 @@ function scheduleLines(config) {
 }
 
 // Which stored fields shape each summary line (wording §3.2: a project marks its overridden lines).
-const LINE_FIELDS = { status: ['window', 'timeZone'], schedule: ['window', 'enabled'], byDay: ['graceMinutes'], kinds: ['neverDecide'] };
+const LINE_FIELDS = { status: ['window', 'timeZone'], schedule: ['window', 'enabled'], byDay: ['graceMinutes'], kinds: ['neverDecide'], decider: ['deciderModel', 'deciderEffort'] };
 const PROJECT_TAG = ' (this project)';
+
+/** "worca weighs the options with Opus 5.5 at high effort." — only when a model is set and the
+ *  method may weigh the options (never with "Always trust the agent's recommendation"). */
+function deciderLine(config, modelLabel) {
+  const id = typeof config.deciderModel === 'string' && config.deciderModel ? config.deciderModel : null;
+  if (!id || config.strategy === 'weights') return null;
+  const name = (typeof modelLabel === 'function' && modelLabel(id)) || id;
+  return `worca weighs the options with ${name}${config.deciderEffort ? ` at ${config.deciderEffort} effort` : ''}.`;
+}
 
 /** The card summary. `surface`: 'settings' (the card with the status buttons), 'project' (the project tab) or
  *  'chat' (Ask Worca); off Settings, a line that asks for a status button says where it is.
+ *  `modelLabel(id)` names a model for the "Decided by" line (the catalog label); absent → the id.
  *  @returns {{status:string, lines:string[]}} */
-export function describeAwayMode({ config, toggle = 'auto', now, localZone = null, projectName = null, projectFields = null, surface = 'settings', hereSince = null } = {}) {
+export function describeAwayMode({ config, toggle = 'auto', now, localZone = null, projectName = null, projectFields = null, surface = 'settings', hereSince = null, modelLabel = null } = {}) {
   try {
     if (!config || typeof config !== 'object' || !Number.isFinite(now)) return { status: 'unknown', lines: ['Away mode settings could not be read.'] };
     const local = localZone || Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -79,6 +89,8 @@ export function describeAwayMode({ config, toggle = 'auto', now, localZone = nul
     const lines = [tag(s.text, 'status'), ...sched.map((l, i) => tag(l, i === 0 ? 'schedule' : 'byDay'))];
     const kinds = Array.isArray(config.neverDecide) ? config.neverDecide : [];
     if (kinds.length) lines.push(tag(`${joinAnd(kinds.map(kindLabel))} always wait for you, even when you are away.`, 'kinds'));   // wording §3.1 A line 4, fixed text
+    const decider = deciderLine(config, modelLabel);
+    if (decider) lines.push(tag(decider, 'decider'));
     if (projectName) lines[0] = `For ${projectName}: ${lines[0]}`;
     return { status: s.status, lines };
   } catch {

@@ -196,6 +196,10 @@ Field hint under the select: *Answers below the bar are still given, but flagged
 - `Follows the codebase's conventions` `[2]` (`codebaseConventions`)
 - `Costs the least` `[1]` (`cost`)
 
+`Decided by` (select: `Same as the run` first, then the model catalog grouped and filtered as Settings › Title generation lists it) — *The model worca uses when it weighs the options.* On the project tab the empty choice reads `Same as my settings ({model})`, or `Same as my settings (the run's model)`.
+`Effort` (select: `Not set`, `medium`, `high`, `xhigh`, `max`) — *How hard that model thinks while it weighs the options. Higher costs more. Not set = medium.*
+Summary line, only when a model is set and the method may weigh the options: `worca weighs the options with {model}[ at {effort} effort].`
+
 #### E. Limits (collapsed)
 
 `Pause a run after` `[20]` `answers` — *When worca has answered this many times on one run, the run pauses and waits for you.*
@@ -263,6 +267,8 @@ Hint when away mode is paused: *Away mode is paused: even a marked run waits for
 Decision list entry, normal: `Answered for you: "{choice}" — {rationale}.`
 Flagged: `Answered for you, please check: "{choice}" — {rationale}.` with the list header
 `{n} answers, {m} to check`.
+
+Under an answer the review gave (never the agent's own answer or a rule), a small line names the model: `Decided by {model}` (`Decided by the default model` when no model was named).
 
 Specific rationale strings (replacing today's):
 - `recommended at 82% (lead 30)` → `the agent recommended this at 82%, well ahead of the next option`
@@ -410,7 +416,7 @@ the `--night` flag, whose help line explains itself.
 | I'm away now / I'm back / Pause away mode | Force on, Force off, Auto, take over |
 | marked run / unmarked run | ticked, opted-in, eligible, `--night` run |
 | Marked runs by day: N minutes | grace, grace timeout |
-| answers / answered for you | decisions, decided |
+| answers / answered for you | decisions, decided (except the `Decided by` model picker and its line under an answer) |
 | please check | flagged |
 | Which runs: Only runs I marked / All runs | Night mode: Not set / On / Off |
 | Always wait for me on… | Never decide |

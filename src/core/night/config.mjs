@@ -10,6 +10,12 @@ export const NIGHT_STRATEGIES = Object.freeze(['weights', 'analysis', 'mixed']);
 export const NIGHT_CRITERIA = Object.freeze(['matchesMemory', 'reversible', 'smallestScope', 'codebaseConventions', 'cost']);
 export const NIGHT_TOGGLES = Object.freeze(['auto', 'on', 'off']);
 export const NIGHT_ACTOR = 'night-mode';
+/** The decider's effort levels: a copy of model-env.mjs EFFORTS (this leaf imports nothing;
+ *  test/night-decider-model.test.mjs pins the two equal). */
+export const NIGHT_EFFORTS = Object.freeze(['medium', 'high', 'xhigh', 'max']);
+/** The effort the decider runs at when none is set (what it always ran at before). */
+export const NIGHT_DEFAULT_EFFORT = 'medium';
+const MODEL_ID_MAX_LEN = 200;   // settings.mjs TITLE_MODEL_MAX_LEN
 
 export const NIGHT_DEFAULTS = Object.freeze({
   enabled: false, window: null, timeZone: null, graceMinutes: 30, strategy: 'mixed',
@@ -17,6 +23,9 @@ export const NIGHT_DEFAULTS = Object.freeze({
   criteria: Object.freeze({ matchesMemory: 3, reversible: 3, smallestScope: 2, codebaseConventions: 2, cost: 1 }),
   neverDecide: Object.freeze([]), spendCapUsd: null, maxDecisions: 20, maxExtraCycles: 1,
   allowCostCapOverride: false,
+  // The nightDecider's model (a catalog id; null = the run's model) and effort (null = medium).
+  // Shape only here: catalog membership is checked when the decider runs (night/decider-model.mjs).
+  deciderModel: null, deciderEffort: null,
 });
 export const NIGHT_FIELDS = Object.freeze(Object.keys(NIGHT_DEFAULTS));
 
@@ -27,7 +36,8 @@ export function nightNeverDecides(config, { kind, origin } = {}) {
 }
 /** Fields a project may NOT set: the spend cap is measured across all runs. */
 const USER_TEAM_ONLY = new Set(['spendCapUsd']);
-/** Fields where an explicit null is a meaningful "off". */
+/** Fields where an explicit null is a meaningful "off". deciderModel / deciderEffort are NOT here:
+ *  their null is only the default ("same as the run", medium), so a stored null never hides a team value. */
 const NULLABLE = new Set(['window', 'timeZone', 'graceMinutes', 'spendCapUsd']);
 
 const WINDOW_RE = /^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$/;
@@ -59,6 +69,9 @@ export function fieldError(field, v) {
     case 'spendCapUsd': return typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 10_000 ? null : 'spendCapUsd must be a positive number or null';
     case 'maxDecisions': return intIn(v, 1, 500) ? null : 'maxDecisions must be an integer 1-500';
     case 'maxExtraCycles': return intIn(v, 0, 10) ? null : 'maxExtraCycles must be an integer 0-10';
+    case 'deciderModel': return typeof v === 'string' && v.trim() !== '' && v === v.trim() && v.length <= MODEL_ID_MAX_LEN
+      ? null : `deciderModel must be a model id (at most ${MODEL_ID_MAX_LEN} characters, no surrounding spaces)`;
+    case 'deciderEffort': return NIGHT_EFFORTS.includes(v) ? null : `deciderEffort must be one of ${NIGHT_EFFORTS.join(' | ')}`;
     default: return `unknown night mode field "${field}"`;
   }
 }
