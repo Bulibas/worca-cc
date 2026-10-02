@@ -660,8 +660,9 @@
                   <h3 class="rd-ask-head"></h3>
                   <div class="qpanel hidden"></div>
                 </div>
-                <!-- What night mode decided on this run; flagged rows need review. -->
-                <section class="rd-night-sec" hidden><h3>Answers while you were away <span class="rd-night-count"></span></h3><ol class="rd-night-decisions"></ol></section>
+                <!-- What Away mode answered on this run, under the run card: one group per ask, one row
+                     per answer; a row opens its reason, Check marks the ones worca was not sure of. -->
+                <section class="rd-night-sec" hidden><h3 class="rd-night-h">Answered for you</h3><div class="rd-night-asks"></div></section>
               </section>
 
               <section class="rd-details" hidden aria-label="Run details">
@@ -774,8 +775,8 @@
                   <div class="rd-nowlist"></div>
                   <div class="rd-result hd-result"></div>
                 </div>
-                <!-- What Away mode answered on this run (GET /api/night-decisions); flagged rows need review. -->
-                <section class="rd-night-sec hd-night-sec" hidden><h3>Answers while you were away <span class="rd-night-count"></span></h3><ol class="rd-night-decisions"></ol></section>
+                <!-- What Away mode answered on this run (GET /api/night-decisions), as on the run page. -->
+                <section class="rd-night-sec hd-night-sec" hidden><h3 class="rd-night-h">Answered for you</h3><div class="rd-night-asks"></div></section>
               </section>
               <section class="rd-details hd-details" hidden aria-label="Run details">
               <header class="hd-header">

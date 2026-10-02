@@ -51,14 +51,26 @@ test('weightedTotals / mostReversible', () => {
 });
 
 test('gate rule', () => {
-  const crit = [{ severity: 'critical', title: 'x' }], major = [{ severity: 'major', title: 'y' }];
-  assert.deepEqual(gateRule({ issues: major, extraUsed: 0 }, C), { decision: 'continue', flagged: false, reason: 'no critical issues left, continuing' });
+  const crit = [{ severity: 'critical', title: 'x' }], major = [{ severity: 'major', title: 'y' }], minor = [{ severity: 'minor', title: 'z' }];
+  assert.deepEqual(gateRule({ issues: minor, extraUsed: 0 }, C), { decision: 'continue', flagged: false, reason: 'no critical or major issues left, continuing' });
   assert.equal(gateRule({ issues: crit, extraUsed: 0 }, C).decision, 'another');
   assert.equal(gateRule({ issues: crit, extraUsed: 0 }, C).reason, '1 critical issue left, one more fix round');
   assert.equal(gateRule({ issues: [...crit, ...crit], extraUsed: 0 }, C).reason, '2 critical issues left, one more fix round');
   const spent = gateRule({ issues: crit, extraUsed: 1 }, C);
   assert.deepEqual([spent.decision, spent.flagged], ['continue', true]);
   assert.equal(spent.reason, '1 critical issue left but the extra fix rounds are used up; continuing');
+});
+
+test('gate rule: major issues get the extra fix rounds too (the loop blocks on them)', () => {
+  const crit = { severity: 'critical', title: 'x' }, major = { severity: 'major', title: 'y' };
+  assert.deepEqual(gateRule({ issues: [major], extraUsed: 0 }, C), { decision: 'another', flagged: false, reason: '1 major issue left, one more fix round' });
+  assert.equal(gateRule({ issues: [crit, major, major], extraUsed: 0 }, C).reason, '1 critical and 2 major issues left, one more fix round');
+  assert.equal(gateRule({ issues: [{ severity: ' Major ' }], extraUsed: 0 }, C).decision, 'another', 'severity read like the loop reads it');
+  const spent = gateRule({ issues: [major, major], extraUsed: 1 }, C);
+  assert.deepEqual(spent, { decision: 'continue', flagged: true, reason: '2 major issues left but the extra fix rounds are used up; continuing' });
+  // Every configured round is used, not just one.
+  assert.equal(gateRule({ issues: [major], extraUsed: 2 }, { ...C, maxExtraCycles: 3 }).decision, 'another');
+  assert.equal(gateRule({ issues: [major], extraUsed: 3 }, { ...C, maxExtraCycles: 3 }).decision, 'continue');
 });
 
 test('workflow rule: accept; flag when the night budget is ≥80% used', () => {
@@ -93,4 +105,18 @@ test('rationales in plain words (wording §3.6)', async () => {
   assert.equal(firstOpt.rationale, 'could not weigh the options (boom); first option taken');
   const unsure = await decideQuestion(Q({}), { ...C, strategy: 'analysis' }, { analyze: async () => ({ choice: 'A', confidence: 10, rationale: 'r', scores: {} }) });
   assert.match(unsure.rationale, /^the agent was not sure enough; took the option easiest to undo\. r$/);
+});
+
+test('every answer carries the question it answers (the run page lists it)', async () => {
+  const q = { id: 'delivery', question: 'How will the deck be delivered?', options: ['Live', 'Read'] };
+  const paths = [
+    decideQuestion({ ...q, confidence: [80, 20], recommended: 'Live' }, { ...C, strategy: 'weights' }, {}),
+    decideQuestion({ ...q, confidence: [50, 50], recommended: 'Live' }, { ...C, strategy: 'weights' }, {}),
+    decideQuestion(q, { ...C, strategy: 'analysis' }, {}),
+    decideQuestion(q, { ...C, strategy: 'analysis' }, { analyze: async () => ({ choice: 'Read', confidence: 90, rationale: 'r', scores: {} }) }),
+    decideQuestion(q, { ...C, strategy: 'analysis' }, { analyze: async () => ({ choice: 'Read', confidence: 10, rationale: 'r', scores: {} }) }),
+    decideQuestion({ ...q, options: [] }, C, {}),
+  ];
+  for (const d of await Promise.all(paths)) assert.equal(d.question, 'How will the deck be delivered?', d.strategy);
+  assert.equal((await decideQuestion({ id: 'x', options: ['A', 'B'] }, { ...C, strategy: 'weights' }, {})).question, undefined, 'no text, no field');
 });
