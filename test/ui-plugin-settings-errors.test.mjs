@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -110,7 +111,8 @@ test('a rejected Save keeps the Settings modal open and shows the error inside i
   input.value = 'https://tracker.example.com/browse/PROJ-1';
   actionBtn(doc, 'Save').click();
   await waitFor(() => !modalOpen(doc, 'plugin-modal'), 'the modal to close on success');
-  assert.equal(doc.getElementById('plugins-msg').textContent, 'Settings saved.');
+  assert.equal(lastToast(doc).title, 'Settings saved.');
+  assert.equal(doc.getElementById('plugins-msg').textContent, '');
   assert.equal(puts.at(-1).values.sampleUrl, 'https://tracker.example.com/browse/PROJ-1');
 });
 

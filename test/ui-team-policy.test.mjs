@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -148,6 +149,46 @@ test('Team policy page: the Plugins tab lists what the policy expects and instal
   assert.equal(doc.querySelector('#tp-sec-plugins .card-head .pl-policy-all').textContent, 'Install all…', 'the fixture has one missing plugin');
 });
 
+test('#555 D5: Team policy Install reports where the install happens — a failure is an error toast, not a line on the Plugins page', async () => {
+  const MKT = { id: 'acme', name: 'acme', url: 'https://example.com/acme.git', lastSync: { sha: 'abc1234' }, plugins: [{ name: 'acme-jira', subdir: 'plugins/jira', inventory: {} }] };
+  let installStatus = 500;
+  const installs = [];
+  const { doc, go, settle } = await boot({
+    fetchHandler: (u, opts) => {
+      if (u === '/api/marketplaces' && !opts.method) return json({ marketplaces: [MKT] });
+      if (u === '/api/plugins/install' && opts.method === 'POST') { installs.push(JSON.parse(opts.body)); return installStatus === 200 ? json({ ok: true }) : json({ error: 'clone failed' }, installStatus); }
+      return null;
+    },
+  });
+  await go('team-policy');
+  await settle();
+  doc.querySelector('#tp-tab-plugins').click();
+  await settle();
+  const install = () => doc.querySelector('#tp-sec-plugins tr[data-name="acme-jira"] .pl-policy-install');
+  install().click();
+  await settle();
+  assert.equal(install().dataset.fbState, undefined, 'opening the consent dialog is not a result: the Team-policy button shows no state');
+  assert.equal(install().textContent, 'Install…');
+  const confirm = () => [...doc.querySelectorAll('#plugin-modal-actions button')].find((b) => b.textContent === 'Install');
+  confirm().click();
+  await settle(8);
+  assert.equal(installs.length, 1);
+  assert.equal(lastToast(doc).tone, 'err');
+  assert.equal(lastToast(doc).title, 'clone failed');
+  assert.equal(doc.getElementById('plugins-msg').textContent, '', 'nothing lands on the Plugins page line');
+  assert.equal(doc.querySelectorAll('#toasts > .toast').length, 1, 'the progress toast was replaced by the result');
+
+  installStatus = 200;
+  install().click();
+  await settle();
+  assert.equal(install().dataset.fbState, undefined, 'no "Installed" state before the consent is confirmed');
+  confirm().click();
+  await settle(8);
+  assert.equal(installs.length, 2);
+  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Installed acme-jira.', detail: '', action: 'Open' });
+  assert.equal(doc.getElementById('plugins-msg').textContent, '');
+});
+
 test('Team policy page: scope select, effective table, Edit policy → editor → publish', async () => {
   const puts = [];
   const { doc, go, settle, fetchCalls } = await boot({
@@ -192,7 +233,28 @@ test('Team policy page: scope select, effective table, Edit policy → editor �
   assert.equal(puts[0].doc.fields['cost.pipelineLimitUsd'].value, 12);
   assert.ok(fetchCalls.some((c) => c.url.includes('/api/policy/validate')), 'validated before publishing');
   assert.ok(doc.querySelector('#tp-body table.tp-tbl'), 'back in read mode after a publish');
-  assert.match(doc.querySelector('#tp-body .form-msg.ok').textContent, /Published · commit abc1234/);
+  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Policy published', detail: 'Commit abc1234', action: '' });
+  assert.equal(doc.querySelector('#tp-body .form-msg.ok'), null, 'the result is a toast, not a line the next repaint drops');
+});
+
+test('#555: a failed Check now is an error toast with Retry', async () => {
+  let discover = 0;
+  const { doc, go, settle } = await boot({
+    fetchHandler: (u, opts) => {
+      if (u.includes('/api/policy/discover') && opts.method === 'POST') { discover += 1; return json({ error: 'git fetch failed' }, 502); }
+      return null;
+    },
+  });
+  await go('team-policy');
+  await settle();
+  doc.querySelector('#tp-sync .tp-check-now').click();
+  await settle(8);
+  assert.equal(discover, 1);
+  assert.deepEqual(lastToast(doc), { tone: 'err', title: 'Check failed', detail: 'git fetch failed', action: 'Retry' });
+  doc.querySelector('#toasts .toast-act').click();
+  await settle(8);
+  assert.equal(discover, 2, 'Retry runs the check again');
+  assert.equal(doc.querySelectorAll('#toasts > .toast').length, 1, 'the keyed toast replaces itself');
 });
 
 test('Team policy page: a publish rejection is printed verbatim under the bar', async () => {

@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { cardAlertOf } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -218,9 +219,11 @@ test('a failed /api/stop renders inline in the modal and re-arms the button', as
   await new Promise((r) => setTimeout(r, 0));
 
   assert.equal(modal.classList.contains('hidden'), false, 'the modal stays open on failure');
-  const err = modal.querySelector('.stop-err');
-  assert.equal(err.hidden, false, 'the inline error slot is shown');
-  assert.match(err.textContent, /run already finished/);
+  const alert = cardAlertOf(modal.querySelector('.stop-card'));
+  assert.ok(alert, 'a card alert is shown above the buttons');
+  assert.equal(alert.title, 'Could not stop the run');
+  assert.match(alert.detail, /run already finished/);
+  assert.equal(modal.querySelector('.stop-err'), null, 'the old inline slot is gone');
   assert.equal(ok.disabled, false, 'the confirm button is re-enabled');
   assert.equal(ok.textContent, 'Stop pipeline', 'the busy label is restored');
   assert.equal(modal.querySelector('.stop-cancel').disabled, false, 'Keep running is armed again');

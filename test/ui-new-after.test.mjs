@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast, fieldErrorText, cardAlertOf } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -35,11 +36,13 @@ async function branchesReady(doc) {
   for (let i = 0; i < 200 && !doc.getElementById('sourceBranch').dataset.current; i++) await tick(5);
 }
 
-async function boot(hash, { withSync = false } = {}) {
+async function boot(hash, { withSync = false, runReply = null, seedProject = '' } = {}) {
   const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: `http://localhost:4317/${hash}` }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
+  // app-js-jsdom-traps: a plain #new restores the project by NAME, and a previous test's workspace choice must not leak in.
+  if (seedProject) { window.localStorage.setItem('worca-cc.lastProject', seedProject); window.localStorage.setItem('worca-cc.runTarget', 'project'); }
   const runBodies = []; const calls = [];
   const json = (data, status = 200) => Promise.resolve({ ok: status < 400, status, json: async () => data });
   // The branch fetch resolves LATE on purpose: the previous-run option must be re-applied
@@ -69,6 +72,7 @@ async function boot(hash, { withSync = false } = {}) {
       }
       return slow(b);
     }
+    if (u.endsWith('/api/run') && opts && opts.method === 'POST' && runReply) { const body = JSON.parse(opts.body); runBodies.push(body); const r = runReply(body, runBodies.length); return json(r.data, r.status); }
     if (u.endsWith('/api/run') && opts && opts.method === 'POST') { const body = JSON.parse(opts.body); runBodies.push(body); return json({ runId: 'r-2', status: 'scheduled', scheduledFor: null, after: body.after }, 202); }
     if (u.includes('/api/schedules')) return json({ schedules: [], tickets: [], counts: { scheduled: 0, missed: 0, recurring: 0, unread: 0 }, defaults: { graceMin: 360, ifMissed: 'run', maxFailures: 3 } });
     return json({ config: { steps: {}, customModels: [] }, models: [], efforts: [] });
@@ -233,4 +237,110 @@ test('#new/after/w2: a workspace without members keeps the previous-run option O
   assert.equal(doc.getElementById('new-sched-badge').textContent, 'After run');
   assert.equal(doc.getElementById('ws-source-previous-row').classList.contains('hidden'), false, 'the switch row is the workspace-mode control');
   assert.equal([...doc.getElementById('sourceBranch').options].some((o) => o.value === '__previous__'), false, 'never on the stand-in the single select becomes in workspace mode');
+});
+
+// #555 §7.4: the Start flow reports through #start-btn, refusals through a card alert above the
+// form's own action row, and "Run started" is a toast — never a line on a page the user has left (D6).
+async function bootNew(runReply) {
+  const ctx = await boot('#new', { runReply, seedProject: 'svc-iam' });
+  await branchesReady(ctx.window.document);
+  return ctx;
+}
+const settle = async (doc) => { for (let i = 0; i < 200 && doc.getElementById('start-btn').dataset.fbState === 'busy'; i++) await tick(5); };
+
+test('D6: a started run raises a "Run started" toast with Open run, and leaves no line on #form-msg', async () => {
+  const { window, runBodies } = await bootNew(() => ({ data: { runId: 'r-9' }, status: 200 }));
+  const doc = window.document;
+  doc.getElementById('prompt').value = 'Add tests';
+  doc.getElementById('start-btn').click();
+  await settle(doc);
+  assert.equal(runBodies.length, 1);
+  assert.match(window.location.hash, /^#running\/r-9/);
+  assert.equal(doc.getElementById('form-msg').textContent, '');
+  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Run started', detail: '', action: 'Open run' });
+  assert.equal(doc.getElementById('start-btn').dataset.fbState, 'done');
+  assert.equal(doc.getElementById('start-btn').textContent.trim(), 'Started');
+});
+
+test('a failed start never shows Started: a "Run not started" card alert sits directly above the form\'s own action row', async () => {
+  const { window, runBodies } = await bootNew(() => ({ data: { error: 'disk full' }, status: 500 }));
+  const doc = window.document;
+  const btn = doc.getElementById('start-btn');
+  let sawDone = false;
+  new window.MutationObserver(() => { if (btn.classList.contains('is-done') || btn.dataset.fbState === 'done') sawDone = true; })
+    .observe(btn, { attributes: true });
+  doc.getElementById('prompt').value = 'Add tests';
+  btn.click();
+  await settle(doc);
+  await tick(5);
+  assert.equal(runBodies.length, 1);
+  assert.equal(sawDone, false);
+  assert.equal(btn.classList.contains('is-done'), false);
+  assert.equal(btn.dataset.fbState, undefined, 'idle again');
+  assert.equal(btn.disabled, false);
+  const form = doc.getElementById('run-form');
+  assert.deepEqual(cardAlertOf(form), { title: 'Run not started', detail: 'disk full' });
+  const actions = form.querySelector('.card-alert').nextElementSibling;
+  assert.equal(actions.parentElement, form);
+  assert.ok(actions.matches('div.actions'));
+  assert.ok(actions.contains(btn));
+  assert.equal(doc.getElementById('start-btn-label').parentElement, btn, 'the cached label node is back inside the button');
+  assert.equal(doc.getElementById('form-msg').textContent, '');
+  // The next submit clears the alert.
+  btn.click();
+  await settle(doc);
+  assert.equal(runBodies.length, 2);
+  assert.equal(form.querySelectorAll('.card-alert').length, 1, 'one alert, replaced');
+});
+
+test('an empty prompt is a field error: no busy state on Start and no POST', async () => {
+  const { window, runBodies } = await bootNew(() => ({ data: { runId: 'r-1' }, status: 200 }));
+  const doc = window.document;
+  const prompt = doc.getElementById('prompt');
+  prompt.value = '';
+  doc.getElementById('start-btn').click();
+  await tick(5);
+  assert.equal(runBodies.length, 0);
+  assert.match(fieldErrorText(prompt), /prompt/i);
+  assert.equal(prompt.getAttribute('aria-invalid'), 'true');
+  assert.equal(doc.getElementById('start-btn').hasAttribute('data-fb-state'), false);
+  assert.equal(doc.getElementById('form-msg').textContent, '');
+});
+
+test('a cancelled sync dialog never shows Started: a "Start cancelled" warn toast, Start idle again', async () => {
+  const refusal = { error: 'diverged', code: 'sync-diverged', options: ['origin', 'cancel'],
+    members: [{ base: 'main', remote: 'origin', ahead: 1, behind: 2 }] };
+  const { window, runBodies } = await bootNew(() => ({ data: refusal, status: 409 }));
+  const doc = window.document;
+  const btn = doc.getElementById('start-btn');
+  doc.getElementById('prompt').value = 'Add tests';
+  btn.click();
+  let cancel = null;
+  for (let i = 0; i < 200 && !cancel; i++) { await tick(5); cancel = [...doc.querySelectorAll('.sync-modal .qpanel-foot button')].find((b) => b.textContent === 'Cancel'); }
+  assert.ok(cancel, 'the sync dialog is up');
+  assert.equal(btn.dataset.fbState, 'busy');
+  cancel.click();
+  await settle(doc);
+  assert.equal(runBodies.length, 1);
+  assert.equal(btn.dataset.fbState, undefined);
+  assert.equal(btn.disabled, false);
+  assert.deepEqual(lastToast(doc), { tone: 'warn', title: 'Start cancelled', detail: '', action: '' });
+  assert.equal(cardAlertOf(doc.getElementById('run-form')), null);
+  assert.equal(doc.getElementById('form-msg').textContent, '');
+});
+
+test('a second Start while the first still reads "Started" posts again and never leaves the form stuck', async () => {
+  const { window, runBodies } = await bootNew((body, n) => ({ data: { runId: `r-${n}` }, status: 200 }));
+  const doc = window.document;
+  const btn = doc.getElementById('start-btn');
+  doc.getElementById('prompt').value = 'Add tests';
+  btn.click();
+  await settle(doc);
+  assert.equal(btn.dataset.fbState, 'done');
+  doc.getElementById('run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(doc);
+  assert.equal(runBodies.length, 2, 'the second submit was not skipped');
+  doc.getElementById('run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(doc);
+  assert.equal(runBodies.length, 3, 'nor the third');
 });

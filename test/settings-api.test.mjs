@@ -219,7 +219,9 @@ test('POST { theme } stores the mode, answers the full shape, does not touch roo
 test('POST rejects an unknown theme → 400, nothing written', async () => {
   const r = await postJson({ theme: 'blue' });
   assert.equal(r.status, 400);
-  assert.match((await r.json()).error, /theme must be system, light or dark/);
+  const body = await r.json();
+  assert.match(body.error, /“Theme” must be system, light or dark/);
+  assert.equal(body.field, 'theme');
   const j = await (await fetch(`${base}/api/settings`)).json();
   assert.equal(j.theme, 'system');
 });

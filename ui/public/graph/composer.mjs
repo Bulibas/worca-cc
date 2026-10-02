@@ -15,6 +15,7 @@ import { renderPalette, applyFilter, FLOW_GROUP } from './palette.mjs';
 import { renderNodeInspector, renderWireInspector, renderEmptyInspector } from './inspector.mjs';
 import { paramEditorHook } from '../script-forms.mjs';
 import { renderSaveDialog, openDialog, closeDialog } from './save-dialog.mjs';
+import { withButton, fieldError, clearFieldErrors, cardAlert } from '../feedback.mjs';
 import { PORT_HIT_R, SNAP, ZOOM_MIN, ZOOM_MAX, ZOOM_K, ZOOM_STEP, NODE_W, snap }
   from '../../../src/shared/graph/geometry.mjs';
 import { hitRoute } from '../../../src/shared/graph/route.mjs';
@@ -49,7 +50,7 @@ export const pluginOriginName = (origin) => (typeof origin === 'string' && origi
   ? origin.slice('plugin:'.length) : '');
 const isTyping = (t) => !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
 
-export function createComposer(hostEls, { doc = globalThis.document, api, raf = null, viewport = null, storage = null, portsFn, highlight = null } = {}) {
+export function createComposer(hostEls, { doc = globalThis.document, api, raf = null, viewport = null, storage = null, portsFn, highlight = null, notify = null } = {}) {
   const win = doc.defaultView || globalThis;
   const schedule = raf || ((fn) => win.requestAnimationFrame(fn));
   const stats = { rectReads: 0, frames: 0, pointerMoves: 0, validations: 0 };
@@ -847,6 +848,7 @@ export function createComposer(hostEls, { doc = globalThis.document, api, raf = 
       doc,
     });
     dialog.dataset.saveAs = mode.copy ? '1' : '';
+    dialog.querySelector('.sd-actions').dataset.cardActions = '';   // a refusal's cardAlert lands above it
     hostEls.dialogHost.replaceChildren(dialog);
     dialog.querySelector('.sd-cancel').addEventListener('click', () => closeDialog(dialog));
     dialog.querySelector('.sd-confirm').addEventListener('click', () => { confirmSave(); });
@@ -854,39 +856,53 @@ export function createComposer(hostEls, { doc = globalThis.document, api, raf = 
     return dialog;
   }
 
+  // #555: with an injected `notify` (app.js), refusals are a cardAlert on the dialog and an
+  // empty name a fieldError; without one (the Pattern-A suites) they keep the .sd-msg line.
   async function confirmSave() {
     if (!dialog) return;
-    const msg = dialog.querySelector('.sd-msg');
-    const name = dialog.querySelector('.sd-name').value.trim();
+    const dlg = dialog;
+    const panel = dlg.querySelector('.sd-body');
+    const msg = dlg.querySelector('.sd-msg');
+    const nameInput = dlg.querySelector('.sd-name');
+    const name = nameInput.value.trim();
     msg.className = 'sd-msg';
-    if (!name) { msg.textContent = 'name is required'; msg.className = 'sd-msg err'; return; }
-    const domain = dialog.querySelector('.sd-domain').value.trim();
-    const saveAs = dialog.dataset.saveAs === '1';
+    if (notify) { clearFieldErrors(panel); cardAlert(panel, null); }
+    const refuse = (text) => {
+      if (notify) cardAlert(panel, { title: 'Not saved', detail: text });
+      else { msg.textContent = text; msg.className = 'sd-msg err'; }
+    };
+    if (!name) {
+      if (notify) fieldError(nameInput, 'Name is required.');
+      else { msg.textContent = 'name is required'; msg.className = 'sd-msg err'; }
+      return;
+    }
+    const domain = dlg.querySelector('.sd-domain').value.trim();
+    const saveAs = dlg.dataset.saveAs === '1';
     const body = { ...serializeTemplate(tpl), version: 2, name, domain };
     // Save on a LOADED row sends its id; a copy omits it so the server mints
     // wf_${slugify(name)}. `dataset.saveAs` already carries saveMode()'s verdict,
     // so the reserved built-in and every plugin-owned row land here as copies.
     if (!saveAs && tpl.id && !isReservedWorkflowId(tpl.id)) body.id = tpl.id;
     else delete body.id;
-    try {
+    // withButton never throws: a throw comes back as { ok: false, error }.
+    const r = await withButton(dlg.querySelector('.sd-confirm'), async () => {
       const res = await api.saveWorkflow(body);
       if (res && res.ok === false) {
         // 422 = the shared validator's issues; render them VERBATIM.
         const issues = Array.isArray(res.issues) ? res.issues : [];
-        msg.textContent = issues.length
+        refuse(issues.length
           ? issues.map((i) => (i.code ? `${i.code}: ${i.message}` : i.message)).join('\n')
-          : (res.error || `save failed (${res.status || 'error'})`);
-        msg.className = 'sd-msg err';
-        return;
+          : (res.error || `save failed (${res.status || 'error'})`));
+        return { ok: false };
       }
       composer.markSaved(res && res.workflow && res.workflow.id, name, domain);
-      closeDialog(dialog);
+      closeDialog(dlg);
       if (hooks.onSaved) hooks.onSaved(res && res.workflow);
       render();
-    } catch (err) {
-      msg.textContent = err && err.message ? err.message : String(err);
-      msg.className = 'sd-msg err';
-    }
+      notify?.({ tone: 'ok', title: 'Pipeline saved' });
+      return { ok: true };
+    });
+    if (r.ok === false && r.error) refuse(r.error);
   }
 
   function firstErrorNode() {

@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { cardAlertOf } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -333,9 +334,15 @@ test('PR failure shows the error inside the modal and re-enables confirm', async
   const modal = await openModal(ctx);
   click(ctx.window, modal.querySelector('.shipit-ok'));
   await settle(ctx.window, 6);
-  const err = modal.querySelector('.shipit-err');
-  assert.equal(err.hidden, false);
-  assert.match(err.textContent, /push failed/);
+  const alert = cardAlertOf(modal.querySelector('.shipit-card'));
+  assert.ok(alert, 'a card alert is shown');
+  assert.equal(alert.title, 'Not shipped');
+  assert.match(alert.detail, /push failed/);
+  const alertEl = modal.querySelector('.shipit-card .card-alert');
+  const follows = (a, b) => !!(a.compareDocumentPosition(b) & ctx.window.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.ok(follows(modal.querySelector('.shipit-desc'), alertEl), 'the alert sits below the description box');
+  assert.equal(alertEl.nextElementSibling, modal.querySelector('.shipit-actions'), 'just above the buttons');
+  assert.equal(modal.querySelector('.shipit-err'), null, 'the old inline slot is gone');
   assert.equal(modal.classList.contains('hidden'), false, 'a failure keeps the modal open');
   assert.equal(modal.querySelector('.shipit-ok').disabled, false, 'confirm is retryable');
   assert.equal(hdPrLink(ctx.window).hidden, true, 'no link for a PR that was never opened');
@@ -723,7 +730,7 @@ test('selects are disabled while the POST is in flight and re-enabled on failure
   await settle(ctx.window, 6);
   assert.equal(sel.disabled, false, 'unlocked so the user can pick another remote and retry');
   assert.equal(baseSelOf(modal).disabled, false);
-  assert.match(modal.querySelector('.shipit-err').textContent, /push failed/);
+  assert.match(cardAlertOf(modal.querySelector('.shipit-card')).detail, /push failed/);
 });
 
 test('remotes that arrive after confirm was pressed stay disabled until that POST settles', async () => {
@@ -826,7 +833,7 @@ test('remotes that cannot be loaded still offer the known chain, and the pick un
   assert.equal(baseSelOf(modal).disabled, true, 'locked while the POST is in flight');
   await settle(ctx.window, 6);
   assert.deepEqual(JSON.parse(prPosts(ctx)[0].opts.body), { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id, baseBranch: 'dev' });
-  assert.match(modal.querySelector('.shipit-err').textContent, /no such base/, 'gh\'s error surfaces in the dialog');
+  assert.match(cardAlertOf(modal.querySelector('.shipit-card')).detail, /no such base/, 'gh\'s error surfaces in the dialog');
   assert.equal(baseSelOf(modal).disabled, false, 'unlocked for a retry with another base');
 });
 
@@ -881,7 +888,7 @@ test('the description field sits between the remotes and the error line: empty, 
   const box = modal.querySelector('.shipit-desc');
   const follows = (a, b) => !!(a.compareDocumentPosition(b) & ctx.window.Node.DOCUMENT_POSITION_FOLLOWING);
   assert.ok(follows(modal.querySelector('.shipit-remotes'), box), 'below the summary / remotes block');
-  assert.ok(follows(box, modal.querySelector('.shipit-err')), 'above the "Could not open PR" line');
+  assert.ok(follows(box, modal.querySelector('.shipit-actions')), 'above the button row, where the "Not shipped" alert renders');
   assert.deepEqual([...box.querySelectorAll('.shipit-desc-tab')].map((b) => b.textContent), ['Write', 'Preview']);
   assert.equal(tabOf(modal, 'text').getAttribute('aria-selected'), 'true');
   assert.equal(descOf(modal).value, '');
@@ -1057,7 +1064,7 @@ test('a failed generation shows its error on its own line, never on the "Could n
   await settle(ctx.window, 6);
   assert.equal(descErrOf(modal).hidden, false);
   assert.match(descErrOf(modal).textContent, /isn't signed in/);
-  assert.equal(modal.querySelector('.shipit-err').hidden, true);
+  assert.equal(cardAlertOf(modal.querySelector('.shipit-card')), null, 'no card alert for a describe failure');
   assert.equal(genBtnOf(modal).disabled, false, 'the user can retry');
   assert.equal(descOf(modal).value, '');
 });

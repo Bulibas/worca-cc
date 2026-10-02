@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -93,19 +94,19 @@ test('GET paints the segmented control and applies the stored mode', async () =>
 });
 
 test('click Light: applied at once, POST is exactly { theme: "light" }, the response repaints', async () => {
-  const { $, posts, tick, openSettings, root, on, themeEvents } = await boot({ initialTheme: 'dark' });
+  const { window, $, posts, tick, openSettings, root, on, themeEvents } = await boot({ initialTheme: 'dark' });
   await openSettings();
   $('#theme-seg button[data-theme-mode="light"]').click();
   assert.equal(root(), 'light', 'optimistic, before the POST resolves');
   await tick(); await tick();
   assert.deepEqual(posts, [{ theme: 'light' }]);
   assert.deepEqual(on(), ['light']);
-  assert.equal($('#themeMsg').textContent, '');
+  assert.equal(lastToast(window.document), null, 'a saved theme raises no toast');
   assert.ok(themeEvents.includes('light'));
 });
 
-test('a 400 reverts to the server value and lands the message', async () => {
-  const { $, tick, openSettings, root, on } = await boot({
+test('a 400 reverts to the server value and raises an error toast', async () => {
+  const { window, $, tick, openSettings, root, on } = await boot({
     initialTheme: 'dark',
     postResponse: { ok: false, status: 400, json: async () => ({ error: 'theme must be system, light or dark' }) },
   });
@@ -114,8 +115,8 @@ test('a 400 reverts to the server value and lands the message', async () => {
   await tick(); await tick();
   assert.equal(root(), 'dark', 'reverted');
   assert.deepEqual(on(), ['dark']);
-  assert.equal($('#themeMsg').textContent, 'theme must be system, light or dark');
-  assert.equal($('#themeMsg').className, 'hint err');
+  assert.deepEqual(lastToast(window.document), { tone: 'err', title: 'Theme not saved', detail: 'theme must be system, light or dark', action: '' });
+  assert.equal($('#themeMsg'), null, 'no grey status line');
 });
 
 test('settings-changed from another tab re-fetches and re-applies, on any view', async () => {

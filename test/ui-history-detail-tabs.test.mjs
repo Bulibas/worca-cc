@@ -10,6 +10,13 @@ import {
   fail, DETAIL_URL, detailHash, bootDetail, openDetail, deliverRows, click, secOf, badgeOf, PATCH,
   diffResults, diffDetail, patchArm, filesOf, paneOf, confirmDialog, proposalFor,
 } from './helpers/history-detail-boot.mjs';
+import { lastToast } from './helpers/feedback.mjs';
+
+// Click the action button of the newest toast (Retry | Details).
+const clickToastAction = (window) => {
+  const all = window.document.querySelectorAll('#toasts > .toast');
+  click(window, all[all.length - 1].querySelector('.toast-act'));
+};
 
 // ---------------------------------------------------------------------------
 // Overview tab
@@ -612,6 +619,10 @@ test('discard confirms honestly, POSTs the keyed route, and shows the saved reco
   assert.match(request.url, /\/api\/runs\/fcec04e8\/discard-worktree\?projectKey=/);
   assert.match(confirmText, /exists only in the retained worktree/);
   assert.match(confirmText, /recovery patch of uncommitted changes will be saved/);
+  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Retained worktree discarded',
+    detail: '1 recovery patch saved.', action: 'Details' });
+  clickToastAction(ctx.window);
+  assert.equal(doc.querySelector('#viewer-title').textContent, 'Retained worktree discarded');
   assert.match(doc.querySelector('#viewer').textContent, /retained-work\.patch/,
     'the saved patch path is surfaced, not swallowed');
 });
@@ -639,7 +650,41 @@ test('a failed discard keeps the banner, the badge and the Archive block — and
   const discardBtn = doc.querySelector('#hist-detail .hist-discard');
   assert.equal(discardBtn.disabled, false, 'the user can retry');
   assert.match(discardBtn.textContent, /Discard/);
+  assert.deepEqual(lastToast(doc), { tone: 'warn', title: 'Discard incomplete',
+    detail: 'The retained checkout is still on disk.', action: 'Details' });
+  clickToastAction(ctx.window);
+  assert.equal(doc.querySelector('#viewer-title').textContent, 'Discard incomplete');
   assert.match(doc.querySelector('#viewer').textContent, /worktree still exists/);
+  assert.ok(![...doc.querySelectorAll('*')].some((n) => n.textContent.includes('Saved: Discard')),
+    'the viewer title carries no "Saved: " prefix');
+});
+
+test('a discard the server refuses raises an error toast whose Retry asks again', async () => {
+  let posts = 0;
+  const ctx = await bootDetail({
+    rows: [retainedRow()],
+    arms: (url) => {
+      if (!url.includes('/discard-worktree')) return null;
+      posts++;
+      return fail(500, { error: 'disk on fire' });
+    },
+  });
+  await openDetail(ctx);
+  const doc = ctx.window.document;
+  click(ctx.window, doc.querySelector('#hist-detail .hist-discard'));
+  await confirmDialog(ctx.window);
+  await settle(ctx.window, 5);
+
+  assert.equal(posts, 1);
+  assert.deepEqual(lastToast(doc), { tone: 'err', title: 'Could not discard the retained worktree',
+    detail: 'disk on fire', action: 'Retry' });
+  const discardBtn = doc.querySelector('#hist-detail .hist-discard');
+  assert.equal(discardBtn.disabled, false, 'the user can retry');
+  assert.match(discardBtn.title, /disk on fire/, 'the button keeps its title');
+  clickToastAction(ctx.window);
+  await confirmDialog(ctx.window);
+  await settle(ctx.window, 5);
+  assert.equal(posts, 2, 'Retry runs the discard again');
 });
 
 test('the retained-work banner explains how to clear the warning after a manual commit', async () => {
@@ -1609,4 +1654,56 @@ test('Terminal before Check out opens the confirm dialog with the branch and the
   click(ctx.window, doc.querySelector('#confirm-cancel'));
   await settle(ctx.window, 2);
   assert.ok(!ctx.calls.some((c) => c.url.includes('/checkout')), 'cancel posts nothing');
+});
+
+// #555: the saved run's Resume and Archive report their result in a toast.
+test('a refused Resume on the saved run keeps the button title and raises a toast with Retry', async () => {
+  const bodies = [];
+  const ctx = await bootDetail({
+    rows: [{ ...ROW, status: 'paused' }],
+    detail: { ...DETAIL, state: { ...DETAIL.state, status: 'paused', resumable: true } },
+    arms: (url, opts) => {
+      if (url !== '/api/resume') return null;
+      bodies.push(JSON.parse(opts.body));
+      return fail(400, { error: 'pipeline not found' });
+    },
+  });
+  await openDetail(ctx);
+  const doc = ctx.window.document;
+  const btn = doc.querySelector('#hist-detail .hd-resume');
+  click(ctx.window, btn);
+  await settle(ctx.window, 6);
+  assert.equal(bodies.length, 1);
+  assert.match(btn.title, /Could not resume: pipeline not found/);
+  assert.deepEqual(lastToast(doc), { tone: 'err', title: 'Could not resume the run',
+    detail: 'pipeline not found', action: 'Retry' });
+  clickToastAction(ctx.window);
+  await settle(ctx.window, 6);
+  assert.equal(bodies.length, 2, 'Retry resumes again');
+});
+
+test('Archive confirms with a toast; a refused archive raises an error toast with Retry', async () => {
+  let deletes = 0;
+  const ctx = await bootDetail({
+    arms: (url, opts) => {
+      if (!(url.startsWith(`/api/runs/${ROW.id}`) && opts.method === 'DELETE')) return null;
+      return ++deletes === 1 ? fail(500, { error: 'branch is checked out' }) : ok({ ok: true });
+    },
+  });
+  await openDetail(ctx);
+  const doc = ctx.window.document;
+  click(ctx.window, doc.querySelector('#hist-detail .hd-archive'));
+  await settle(ctx.window);
+  doc.querySelector('#confirm-ok').click();
+  await settle(ctx.window, 6);
+  assert.deepEqual(lastToast(doc), { tone: 'err', title: 'Could not archive the run',
+    detail: 'branch is checked out', action: 'Retry' });
+  assert.equal(doc.querySelector('#hist-detail .hd-error').hidden, true, 'no inline error behind the toast');
+  clickToastAction(ctx.window);
+  await settle(ctx.window);
+  doc.querySelector('#confirm-ok').click();
+  await settle(ctx.window, 6);
+  assert.equal(deletes, 2);
+  assert.equal(lastToast(doc).title, 'Run archived');
+  assert.equal(lastToast(doc).tone, 'ok');
 });

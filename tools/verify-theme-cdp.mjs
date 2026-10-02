@@ -390,7 +390,7 @@ async function focusSamples() {
 let runId = null; let pipelineId = null; let projectKey = null;
 const states = [
   ['new', async () => { await go('new'); await until(`document.querySelector('.agent-row-head')`, 'the agent rows (rendered after /api/agents)'); await clickSel('.agent-row-head'); await ev(`document.querySelector('details.advanced')?.setAttribute('open','');0`); await freeze('new'); }],
-  ['new-error', async () => { await ev(`document.getElementById('prompt').value='';0`); await clickSel('#start-btn'); await until(`document.querySelector('.form-msg.err')`, 'the empty-prompt error'); }],
+  ['new-error', async () => { await ev(`document.getElementById('prompt').value='';0`); await clickSel('#start-btn'); await until(`document.querySelector('#run-form .field-invalid')`, 'the submit-time field error'); }],
   // The Runs list (one list for live and finished runs). The audit id keeps its old name so
   // test/fixtures/contrast-baseline-light.json still matches.
   ['running-list', async () => { await go('runs'); await until(`document.querySelector('#runs-list .runs-row')`, 'a run row'); }],
@@ -495,6 +495,29 @@ const states = [
     await go(`projects/${projectKey}/actions`); await until(`document.querySelector('.actions-config .ac-action')`, 'the actions editor'); }],
   ['history-actions', async () => { await go(`history/${projectKey}/${pipelineId}/details/actions`); await until(`document.querySelector('.hd-details:not([hidden]) .act-card')`, 'the actions card'); }],
   ['settings-runs-actions', async () => { await go('settings/runs'); await until(`document.querySelector('#actions-settings-card')`, 'the actions card'); }],
+  ['feedback-toasts', async () => {
+    await go('settings/runs');
+    await until(`document.querySelector('.settings-pane[data-tab="runs"]:not(.hidden) #actions-settings-card')`, 'runs pane');
+    await ev(`(async()=>{const m=await import('/feedback.mjs');
+      m.notify({tone:'ok',title:'Actions saved for acme-web',detail:'Applies to new checkouts.',timeout:0});
+      m.notify({tone:'ok',title:'Installed acme-lint',detail:'Its agents are in the Agents list.',action:{label:'Open',run(){}},timeout:0});
+      m.notify({tone:'err',title:'Push failed',detail:'The metrics home rejected the token (401).',action:{label:'Retry',run(){}}});
+      return 1;})()`);
+    await until(`document.querySelectorAll('#toasts > .toast').length===3`, 'three toasts');
+    await freeze('toast');
+  }, async () => { await ev(`(()=>{document.querySelectorAll('#toasts > .toast').forEach((t)=>t.remove());return 1;})()`); }],
+  ['feedback-card-alert', async () => {
+    await go('settings/runs');
+    await until(`document.querySelector('.settings-pane[data-tab="runs"]:not(.hidden) #actions-settings-card')`, 'runs pane');
+    await ev(`(async()=>{const m=await import('/feedback.mjs');const c=document.getElementById('actions-settings-card');
+      const lo=document.getElementById('act-port-low'),hi=document.getElementById('act-port-high');
+      lo.value='5000';hi.value='4000';lo.dispatchEvent(new Event('input',{bubbles:true}));
+      m.fieldError([lo,hi],'The low port can’t be higher than the high port.',{focus:false});
+      m.cardAlert(c,{title:'Not saved',detail:'Another Worca process is writing the settings file. Try again in a moment.'});
+      const s=document.getElementById('act-save');s.textContent='Saved';s.classList.add('is-done');s.dataset.fbState='done';s.disabled=false;
+      return 1;})()`);
+    await until(`document.querySelector('#actions-settings-card .card-alert')`, 'card alert');
+  }],
 ];
 
 // ---- collection ---------------------------------------------------------------

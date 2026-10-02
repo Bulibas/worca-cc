@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { fieldErrorText, edit } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -408,4 +409,136 @@ test('Editor / Terminal: where no app picker can open, the dropdown reads "Pick 
   assert.equal(opts[0].textContent, 'Pick an app');
   assert.deepEqual(opts.slice(1).map((o) => o.textContent), ['VS Code']);
   assert.ok(!opts.some((o) => o.value === '__browse__'));
+});
+
+// #555 D8: a failed Settings GET used to land in the Root folders card, which
+// Simple mode hides. It now shows above the tabs, outside every level-gated card.
+test('#555 D8: a failed /api/settings load shows above the tabs, outside every card', async () => {
+  const { window } = await boot();
+  const base = globalThis.fetch;
+  globalThis.fetch = window.fetch = (u, opts) => (String(u).includes('/api/settings')
+    ? Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'disk full' }) })
+    : base(u, opts));
+  await go(window, 'settings');
+  await tick(); await tick();
+  const msg = window.document.getElementById('settingsLoadMsg');
+  assert.equal(msg.hidden, false, 'the load error is visible');
+  assert.equal(msg.textContent, 'Could not load settings: disk full');
+  assert.equal(msg.closest('[data-min-level]'), null, 'no UI level hides it');
+  assert.equal(msg.closest('.settings-card'), null, 'it is not inside a settings card');
+});
+
+// ── #555: Settings cards report on the button, the field or the card ────────
+// Wrap the boot's fetch: record POST /api/settings bodies and answer them with `answer(body)`.
+function recordSettingsPosts(window, answer = null) {
+  const posts = [];
+  const base = globalThis.fetch;
+  globalThis.fetch = window.fetch = (u, opts = {}) => {
+    if (String(u).includes('/api/settings') && (opts.method || 'GET').toUpperCase() === 'POST') {
+      const body = JSON.parse(opts.body);
+      posts.push(body);
+      if (answer) return Promise.resolve(answer(body));
+    }
+    return base(u, opts);
+  };
+  return posts;
+}
+const ticks = async (n = 6) => { for (let i = 0; i < n; i++) await tick(); };
+
+test('#555 Actions: a low port above the high port flags both ports with one message and posts nothing', async () => {
+  const { window } = await boot();
+  const posts = recordSettingsPosts(window);
+  await go(window, 'settings/runs');
+  await ticks();
+  const doc = window.document;
+  const low = doc.getElementById('act-port-low');
+  const high = doc.getElementById('act-port-high');
+  assert.equal(low.getAttribute('aria-label'), 'Low port');
+  assert.equal(doc.getElementById('act-save').disabled, true, 'clean card: Save waits for a change');
+  edit(window, low, '5000');
+  edit(window, high, '4000');
+  doc.getElementById('act-save').click();
+  await ticks();
+  assert.equal(posts.length, 0, 'nothing reaches the server');
+  const msg = 'The low port can’t be higher than the high port.';
+  assert.equal(fieldErrorText(low), msg);
+  assert.equal(fieldErrorText(high), msg);
+  assert.equal(doc.querySelectorAll('#actions-settings-card .field-error').length, 1, 'one message for the pair');
+  assert.equal(low.getAttribute('aria-invalid'), 'true');
+  assert.equal(high.getAttribute('aria-invalid'), 'true');
+  assert.equal(doc.getElementById('actSettingsMsg'), null, 'no grey status line');
+});
+
+test('#555 Actions: a server error on the shared port range lands on both ports', async () => {
+  const { window } = await boot();
+  const posts = recordSettingsPosts(window, () => ({ ok: false, status: 400,
+    json: async () => ({ error: 'The port range must hold at least 10 ports.', field: 'actions.portRange' }) }));
+  await go(window, 'settings/runs');
+  await ticks();
+  const doc = window.document;
+  edit(window, doc.getElementById('act-port-low'), '4400');
+  edit(window, doc.getElementById('act-port-high'), '4401');
+  doc.getElementById('act-save').click();
+  await ticks();
+  assert.equal(posts.length, 1);
+  assert.equal(fieldErrorText(doc.getElementById('act-port-low')), 'The port range must hold at least 10 ports.');
+  assert.equal(fieldErrorText(doc.getElementById('act-port-high')), 'The port range must hold at least 10 ports.');
+});
+
+test('#555 Chat: after a save the card is clean once the done state ends, with no repaint', async () => {
+  const { window } = await boot();
+  const posts = recordSettingsPosts(window, () => ({ ok: true, status: 200, json: async () => ({ ok: true }) }));
+  await go(window, 'settings/runs');
+  await ticks();
+  const doc = window.document;
+  const save = doc.getElementById('chatSettingsSave');
+  const mark = () => doc.querySelector('#chat-settings-card .dirty-mark');
+  assert.equal(save.disabled, true);
+  const cb = doc.querySelector('#chat-settings-host input.chat-ev');
+  assert.equal(cb.dataset.setting, 'chat');
+  edit(window, cb, !cb.checked);
+  assert.equal(save.disabled, false);
+  assert.equal(mark().hidden, false);
+  save.click();
+  await ticks();
+  assert.equal(posts.length, 1);
+  assert.ok('chat' in posts[0]);
+  assert.equal(save.textContent, 'Saved');
+  await new Promise((r) => setTimeout(r, 2100));
+  assert.equal(save.textContent, 'Save');
+  assert.equal(save.disabled, true, 'clean after the done state');
+  assert.equal(mark().hidden, true);
+});
+
+test('#555 Away: unsaved edits stay dirty when another card\'s save fires settings-changed', async () => {
+  const { window } = await boot();
+  await go(window, 'settings/runs');
+  await ticks();
+  const doc = window.document;
+  const save = doc.getElementById('nightModeSave');
+  assert.equal(save.disabled, true);
+  const num = doc.querySelector('#night-mode-host [data-field="maxDecisions"]');
+  edit(window, num, '12');
+  assert.equal(save.disabled, false);
+  WSStub.last._l.message.forEach((fn) => fn({ data: JSON.stringify({ type: 'settings-changed' }) }));
+  await ticks(10);
+  assert.equal(doc.querySelector('#night-mode-host [data-field="maxDecisions"]').value, '12', 'the edit survived the repaint');
+  assert.equal(save.disabled, false, 'Save stays enabled');
+  assert.equal(doc.querySelector('#night-settings-card .dirty-mark').hidden, false, 'the marker stays');
+});
+
+test('#555 Away: a server field nightMode.maxDecisions lands on the data-field input', async () => {
+  const { window } = await boot();
+  recordSettingsPosts(window, () => ({ ok: false, status: 400,
+    json: async () => ({ error: '“Answer limit” must be a whole number from 1 to 500.', field: 'nightMode.maxDecisions' }) }));
+  await go(window, 'settings/runs');
+  await ticks();
+  const doc = window.document;
+  const num = doc.querySelector('#night-mode-host [data-field="maxDecisions"]');
+  edit(window, num, '7');
+  doc.getElementById('nightModeSave').click();
+  await ticks();
+  assert.equal(num.getAttribute('aria-invalid'), 'true');
+  assert.equal(fieldErrorText(num), '“Answer limit” must be a whole number from 1 to 500.');
+  assert.equal(doc.getElementById('nightModeMsg'), null, 'no grey status line');
 });

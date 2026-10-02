@@ -136,14 +136,16 @@ test('a payload with no `app` block leaves the static fallback alone (never blan
   assert.equal($('#aboutVersion').hasAttribute('href'), false, 'placeholder still unlinked');
   assert.equal($('#aboutRepoLink').getAttribute('href'), REPO_URL, 'static href kept');
   // Without paintAbout's `if (!info) return` the throw would abort every later paint.
-  assert.equal($('#settingsMsg').textContent.trim(), '', 'the rest of the settings paint still ran');
+  assert.equal($('#settingsLoadMsg').hidden, true, 'the rest of the settings paint still ran');
+  assert.equal($('#settingsLoadMsg').textContent, '');
 });
 
 test('malformed `repoUrl`/`releaseUrl` cannot abort the rest of the settings paint', async () => {
   const badUrl = () => ({ ...okSettings(), app: { version: PAINTED_VERSION, repoUrl: 42, releaseUrl: null } });
   const { $, openSettings } = await boot({ settings: badUrl });
   await openSettings();
-  assert.equal($('#settingsMsg').textContent.trim(), '', 'no throw reached the loadSettings catch');
+  assert.equal($('#settingsLoadMsg').hidden, true, 'no throw reached the loadSettings catch');
+  assert.equal($('#settingsLoadMsg').textContent, '');
   assert.equal($('#aboutRepoLink').getAttribute('href'), REPO_URL, 'static href kept');
   assert.equal($('#aboutVersion').textContent.trim(), PAINTED_VERSION, 'the usable part still painted');
   assert.equal($('#aboutVersion').hasAttribute('href'), false, 'no release link without a usable URL');
