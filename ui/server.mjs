@@ -11545,7 +11545,7 @@ if (isMain) {
       pid: process.pid, host: HOST, port, token: uiControl.token,
       version: PKG_VERSION, startedAt: uiControl.startedAt,
     }).then(() => { wroteInstanceFile = true; }, (err) => {
-      console.error(`[worca-ui] could not write the instance file (\`worca ui stop\` will fall back to a signal): ${err && err.message ? err.message : err}`);
+      console.error(`[worca-ui] could not write the instance file (\`worca ui stop\` cannot stop this server — use Ctrl+C): ${err && err.message ? err.message : err}`);
     });
     try { channelHost.start(); } catch (err) {
       console.error(`[worca-ui] chat channel host failed to start: ${err && err.message ? err.message : err}`);

@@ -17,7 +17,10 @@
 // Stopping goes through POST /api/shutdown with the file's bearer token so the
 // server runs its graceful path (chat channel workers die cleanly) on every
 // platform — a bare signal is a hard kill on Windows. The signal is the fallback
-// when the token is unavailable (file missing, or a server too old to have one).
+// when the token is refused, and ONLY for a server this worcaHome's instance file
+// names (same port, same pid): a stop that resolved the default port from another
+// WORCA_HOME, a test, or a server whose file is not written yet must never SIGTERM
+// a UI it does not own.
 
 import fs from 'node:fs';
 import http from 'node:http';
@@ -213,10 +216,12 @@ export function processAlive(pid) {
  * Stop the Worca UI on host:port, gracefully when possible.
  *
  * Order: (1) POST /api/shutdown with the instance file's token — the server
- * answers 202 and exits through its signal path; (2) if that is refused or no
- * token is known, SIGTERM the pid the health probe reported; (3) wait for the
- * port to free up. Idempotent: a port with no Worca UI is `notRunning`, not an
- * error. The instance file is cleaned up whenever the port ends up free.
+ * answers 202 and exits through its signal path; (2) if that is refused, SIGTERM
+ * the pid the health probe reported; (3) wait for the port to free up. Both (1)'s
+ * file token and (2) require the instance file to name this port AND the pid the
+ * probe reported — a Worca UI this worcaHome did not start is `failed`, never
+ * signalled. Idempotent: a port with no Worca UI is `notRunning`, not an error.
+ * The instance file is cleaned up whenever the port ends up free.
  *
  * @returns {Promise<{status:'stopped', method:'request'|'signal', pid:number|null}
  *                  |{status:'not-running'}
@@ -233,8 +238,10 @@ export async function stopUi({ host = DEFAULT_UI_HOST, port = DEFAULT_UI_PORT, t
   }
   const pid = Number(probe.info.pid) || null;
 
+  // Ownership: this worcaHome's instance file names this exact server.
   const file = readUiInstance();
-  const bearer = token || (file && file.port === port ? file.token : null);
+  const owned = !!(file && pid && file.port === port && file.pid === pid);
+  const bearer = token || (owned ? file.token : null);
   let method = null;
 
   if (bearer) {
@@ -250,10 +257,16 @@ export async function stopUi({ host = DEFAULT_UI_HOST, port = DEFAULT_UI_PORT, t
       method = 'request';
     }
   }
-  if (!method && pid) {
-    try { process.kill(pid, 'SIGTERM'); method = 'signal'; } catch { /* already gone, or not ours */ }
+  if (!method && owned) {
+    try { process.kill(pid, 'SIGTERM'); method = 'signal'; } catch { /* already gone */ }
   }
-  if (!method) return { status: 'failed', pid, reason: 'no shutdown token in the instance file and no pid to signal' };
+  if (!method) {
+    return {
+      status: 'failed', pid,
+      reason: owned ? 'it refused the shutdown request and could not be signalled'
+        : `${uiInstanceFile()} does not name this server${pid ? ` (pid ${pid})` : ''} — it was started with another WORCA_HOME, or its instance file is missing; stop it from its own terminal (Ctrl+C)`,
+    };
+  }
 
   const freed = await waitForUiState({ host, port, states: ['free'], timeoutMs });
   if (!freed) return { status: 'timeout', pid };
