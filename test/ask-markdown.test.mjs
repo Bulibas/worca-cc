@@ -1,5 +1,5 @@
 // test/ask-markdown.test.mjs — the sandboxed markdown pipeline (spec §10.7)
-// against the REAL pinned marked@18.0.10 + dompurify@3.4.14 under jsdom.
+// against the REAL pinned marked@18.0.10 + dompurify@3.4.16 under jsdom.
 // npm ci is a prerequisite — without it both imports fail for reasons
 // unrelated to this module.
 import { test, before } from 'node:test';
