@@ -1,11 +1,15 @@
 // test/ui-clone-project.test.mjs
 // Projects → Add project → "Clone from URL" (POST /api/projects/clone, a job followed by the
 // WS 'clone-changed' frame with a GET poll as the fallback). jsdom, fetch and WS stubbed.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -23,7 +27,7 @@ const json = (status, body) => Promise.resolve({ ok: status >= 200 && status < 3
 async function boot({ pick = 'unsupported', clone } = {}) {
   let projects = [{ name: 'alpha', path: '/data/projects/alpha', exists: true, key: 'alpha-00000001' }];
   const calls = [];
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4321/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4321/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = WSStub;
