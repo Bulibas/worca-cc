@@ -27,6 +27,7 @@ import {
   readRunLogText, readRunArtifactText, countPipelines, runRootSweepLookups, legacySweepLookups, slugify,
   listArtifacts, listRunArtifacts, lookupPipelineRow, findPipelineRowById, readPipelineStateById, resolveIndexedArtifact, resolveIndexedArtifactForRow,
   resolveIndexedArtifactFileForRow, readPromptFile, runDirForRow, recordArtifact, appendAudit,
+  checkoutRecordsFor, retainedWorkFor,
 } from '../src/core/artifacts.mjs';
 import { mimeForPath, viewerKindFor } from '../src/shared/artifact-kinds.mjs';
 import { appendDirection, DIRECTION_MAX_CHARS, DIRECTIONS_KIND, DIRECTIONS_FILE, DIRECTIONS_CLOSED } from '../src/core/directions.mjs';
@@ -61,6 +62,7 @@ import {
   workspaceScanModels, setWorkspaceScanModels, assertWorkspaceScanInput,
   scheduleDefaults, setScheduleDefaults,
   nightModeSettings, setNightMode, nightModeToggle, nightModeHereSince, setNightModeToggle, assertNightModeToggleInput,
+  actionsSettings, setActionsSettings, assertActionsInput,
   syncDefaults, setSyncDefaults, assertSyncSettingsInput, DEFAULT_SYNC_SETTINGS,
 } from '../src/core/settings.mjs';
 import { resolveNightConfig, validateNightPatch } from '../src/core/night/config.mjs';
@@ -135,14 +137,24 @@ import { readPolicyState } from '../src/core/policy/state.mjs';
 import { teamAction, teamForget } from '../src/core/mcp/team.mjs';
 import { policyForScope, policyPayload } from '../src/core/policy/scope.mjs';
 import { policyCatalogModels } from '../src/core/policy/cache.mjs';
-import { pickFolderNative } from '../src/core/folder-dialog.mjs';
+import { pickFolderNative, pickAppNative, nativeDialogAvailable } from '../src/core/folder-dialog.mjs';
 import {
   readRemoteAccessConfig, checkRemoteAccessConfig, isRemoteMode, createHostGuard, createIdentityCheck, isInContainer,
+  isPeerThisMachine,
 } from '../src/core/remote-access.mjs';
 import { detectDeployment, deploymentFacts } from '../src/core/deployment.mjs';
 import { resolveIdentity, startedByOf, prAttributionFooter, actorOf, isSharedIdentity, byActor } from '../src/core/identity.mjs';
 import { withBillTo, currentBillTo, currentOwner } from '../src/core/billing.mjs';
 import { agentIdentity } from '../src/core/agent-user.mjs';
+import { spawn } from 'node:child_process';
+import { ActionRegistry, instanceIdFor, reapOrphans, busyRunIdsFromPidFile, actionsPidFile, actionsStateFile } from '../src/core/actions/registry.mjs';
+import { runStack, stopStack } from '../src/core/actions/stack.mjs';
+import { detectBuiltins, builtinLaunch, copyCommandText, findOnPath } from '../src/core/actions/builtins.mjs';
+import { buildLauncherCommand, launchAndWatch, installedLaunchers, launcherExamples, launcherWarning, lineForPickedApp } from '../src/core/actions/launcher.mjs';
+import { assertNoRawCommand, normalizeStacks, memberAliases, SETUP_ACTION_ID, ActionConfigError } from '../src/core/actions/model.mjs';
+import { parsePortRange } from '../src/core/actions/ports.mjs';
+import { checkoutRun, discardCheckout, membersOfRow, checkoutPathFor, setSetupState, markInterruptedSetups,
+  enforceCheckoutCap, releaseKeptCheckouts } from '../src/core/checkout.mjs';
 import { createAskToolServer } from '../src/core/ask/mcp-stdio.mjs';
 import { webMcpEnv as askWebMcpEnv } from '../src/core/ask/spawn.mjs';
 import { brokerEnabled, brokerInfo, personSlots, brokerUsageSummary, foldUsageByPerson } from '../src/core/broker-client.mjs';
@@ -159,6 +171,7 @@ import {
   globalModelRefs, removeGlobalModelAndRefs, promoteCustomModel, costUnreliableModelIds,
   readPrRemotePrefs, setPrRemotePrefs, modelHasBaseUrlRouting, writeSyncPrefs, readSyncPrefs,
   readNightModePrefs, writeNightModePrefs,
+  readProjectActions, writeProjectActions, readActionsMeta, writeActionsMeta,
 } from '../src/core/config.mjs';
 import { listGlobalModels, addGlobalModel, updateGlobalModel } from '../src/core/settings.mjs';
 import { modelEnvRef, maskModelEnvValue, SUBAGENT_MODEL_VALUES, subagentModelIssue, UPSTREAM_PROVIDERS } from '../src/core/model-env.mjs';
@@ -201,6 +214,8 @@ import { modelEventPrompt, modelNoticeText } from '../src/core/ask/model-proposa
 import { cloneEventPrompt, cloneNoticeText } from '../src/core/ask/clone-proposal.mjs';
 import { workspaceEventPrompt, workspaceNoticeText } from '../src/core/ask/workspace-proposal.mjs';
 import { applyWorkspaceChange } from '../src/core/ask/workspace-deps.mjs';
+import { actionsEventPrompt, actionsNoticeText } from '../src/core/ask/actions-proposal.mjs';
+import { applyActionsChange } from '../src/core/ask/actions-deps.mjs';
 import { webEventPrompt, webNoticeText, chatWebHosts } from '../src/core/ask/web-proposal.mjs';
 import { hostAllowed as askHostAllowed } from '../src/core/web-allowlist.mjs';
 import { registryPortsFn } from '../src/core/graph/registry-ports.mjs';
@@ -213,7 +228,7 @@ import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
 import { loadScriptRegistry } from '../src/core/script-registry.mjs';
 import { probePython, pythonRuntimeState } from '../src/core/graph/python-probe.mjs';
 import {
-  listLocalBranches, currentBranch, isValidSourceRef, sweepRunRoots, sweepLegacyWorktreesAll, resolveDefaultBranch,
+  listLocalBranches, currentBranch, isValidSourceRef, sweepRunRoots, sweepLegacyWorktreesAll, resolveDefaultBranch, worktreePathForBranch,
 } from '../src/core/worktree.mjs';
 import {
   fetchRemote, remoteInfo, syncStatus, resolveSourceRef, commitsBetween, isSafeBranchName, isSafeRemoteName, scrubGitText,
@@ -223,14 +238,14 @@ import {
   projectSyncBlock, workspaceSyncBlocks, effectiveSyncSettings, projectSyncEvents, startProjectSyncBackground,
 } from '../src/core/project-sync.mjs';
 import { mapWithCap, fanoutCap } from '../src/core/fanout.mjs';
-import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, listRemoteBranches, sameRepo } from '../src/core/git-info.mjs';
+import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, listRemoteBranches, sameRepo, branchPushedTo } from '../src/core/git-info.mjs';
 import { isSyntacticRef } from '../src/core/ask/proposal.mjs';
 import { archivePipeline, discardRetainedWorktrees } from '../src/core/pipeline-delete.mjs';
 import {
   listWorkspaces, readWorkspace, checkNewWorkspace, scanMemberProblems,
   updateWorkspace, deleteWorkspace, isGitRepo, WORKSPACE_KEY_RE, countWorkspaces,
   readWorkspaceMap, setWorkspaceEdgeState, addWorkspaceManualEdge, removeWorkspaceManualEdge,
-  regenerateWorkspaceDescription,
+  regenerateWorkspaceDescription, readWorkspaceStacks, updateWorkspaceStacks, workspaceMembers,
   addWorkspaceMembers, removeWorkspaceMember, rootsHash, workspaceSetHash,
 } from '../src/core/workspaces.mjs';
 import { effectiveEdges } from '../src/shared/workspace-map/overrides.mjs';
@@ -498,6 +513,7 @@ const runs = new Map();
 function liveRunIds() {
   const ids = [];
   for (const r of runs.values()) {
+    if (r.kind === 'action') continue;
     const s = String(r.status || '').toLowerCase();
     if (s === 'running' || s === 'starting' || s === 'created' || s === 'pausing') {
       if (r.pipelineId) ids.push(r.pipelineId);
@@ -616,20 +632,23 @@ wss.on('connection', (ws, req) => {
   let requestedRunId = null;
   let requestedGenId = null;
   let requestedBenchId = null;
+  let requestedInstanceId = null;
   let requestedThreadId = null;
   try {
     const u = new URL(req.url, 'http://localhost');
     requestedRunId = u.searchParams.get('runId');
     requestedGenId = u.searchParams.get('genId');
     requestedBenchId = u.searchParams.get('benchId');
+    requestedInstanceId = u.searchParams.get('instanceId');
     requestedThreadId = u.searchParams.get('threadId');
   } catch {
     requestedRunId = null;
     requestedGenId = null;
     requestedBenchId = null;
+    requestedInstanceId = null;
     requestedThreadId = null;
   }
-  const id = requestedRunId || requestedGenId || requestedBenchId;
+  const id = requestedRunId || requestedGenId || requestedBenchId || requestedInstanceId;
 
   send(ws, { type: 'hello', bootId: BOOT_ID, serverMock: serverMockMode(), runs: summarizeRuns(), ask: askHello(ws) });
 
@@ -653,7 +672,7 @@ wss.on('connection', (ws, req) => {
     } catch {
       return;
     }
-    const subId = msg && msg.type === 'subscribe' ? (msg.runId || msg.genId || msg.benchId) : null;
+    const subId = msg && msg.type === 'subscribe' ? (msg.runId || msg.genId || msg.benchId || msg.instanceId) : null;
     if (subId && runs.has(subId)) {
       replayEntry(ws, runs.get(subId));
     }
@@ -854,7 +873,7 @@ function summarizeRuns() {
   // plumbing only — leaving it here puts "bench: <key>" in every hello and the
   // client's liveRuns() (which does NOT filter by kind) raises the rail's
   // Running badge over an empty Running list.
-  return [...runs.values()].filter((r) => r.kind !== 'scriptbench').map((r) => ({
+  return [...runs.values()].filter((r) => r.kind !== 'scriptbench' && r.kind !== 'action').map((r) => ({
     runId: r.id,
     stepper: r.orch?.state?.stepper ?? null,
     pipelineId: r.pipelineId || null,
@@ -2301,7 +2320,8 @@ const startRunHandler = async (req, res) => {
         entry.status = 'error';
         entry.events.push(event);
         broadcast(event);
-      });
+      })
+      .finally(() => { entry.settled = true; });
 
     // A scan's launcher needs the card attribution the wizard cannot compute (the key is a hash).
     res.json(scanTarget
@@ -3685,7 +3705,8 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
       entry.status = 'error';
       entry.events.push(event);
       broadcast(event);
-    });
+    })
+    .finally(() => { entry.settled = true; });
 
   return { ok: true, runId, pipelineId };
 }
@@ -5035,6 +5056,508 @@ app.post('/api/runs/:id/discard-worktree', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Actions (issue #529): check out a finished run, run its setup once, and start the project's
+// actions (services and tasks) from Worca. Processes live in an ActionRegistry; each instance gets
+// a kind:'action' entry in the shared runs Map for the WS ring buffer and replay (D15).
+// ---------------------------------------------------------------------------
+const ACTION_ENTRY_CAP = 50;                        // finished action entries kept in `runs`
+// Resolved per use, never at import: worcaHome() throws under node:test while WORCA_HOME is unset, and
+// several suites import this module without one.
+const actionsPidFileNow = () => actionsPidFile(worcaHome());
+const actions = new ActionRegistry({ portRange: () => parsePortRange(actionsSettings()) });
+Object.defineProperty(actions, 'pidFile', { get: actionsPidFileNow });
+Object.defineProperty(actions, 'stateFile', { get: () => actionsStateFile(worcaHome()) });   // Ask Worca reads it (readActionsState)
+const stackStates = new Map();                     // `${runId}:${stackId}` -> state reported by runStack (D26)
+const stackTokens = new Map();                     // `${runId}:${stackId}` -> token of the live start; deleted by Stop
+const setupJobs = new Map();                       // `${runId}:${member}` -> Promise<boolean> (D25)
+let builtinsDetected = null;
+const builtins = () => (builtinsDetected ??= detectBuiltins({ overrides: actionsSettings() }));
+// What detection finds with NO override (Settings › Runs › Actions shows it next to Editor and Terminal).
+// PATH does not change under a running server, so once is enough.
+let builtinsAuto = null;
+const autoDetectedBuiltins = () => {
+  const d = (builtinsAuto ??= detectBuiltins({ overrides: {} }));
+  return { editor: d.editor?.label || null, terminal: d.terminal?.label || null };
+};
+
+/**
+ * D4: under agent isolation a caller on this machine may be the agent itself. Identity is skipped for a
+ * loopback peer + loopback Host (requestIdentity). In local mode the host guard accepts `Host: localhost`
+ * from ANY peer, so a peer at one of this machine's own addresses (the container's eth0) counts too.
+ * A request that carries a verified sign-in (`req.worcaUser` with an email/sub) is a person: the agent
+ * holds no identity token. Actions run as the server user, so a possible agent never gets them.
+ * agentIdentity() reads process.env per call (tests flip it between requests).
+ */
+const signedInPerson = (req) => !!(req.worcaUser && (req.worcaUser.email || req.worcaUser.sub));
+const agentMayBeCaller = (req) => !!(req && agentIdentity() && !signedInPerson(req) && (isInContainer(req) || isPeerThisMachine(req)));
+/** D4: actions run locally, or on a hosted deployment that opted in. No isInContainer exemption. */
+const actionsEnabledHere = (req = null) =>
+  !agentMayBeCaller(req) && (!REMOTE_MODE || isTruthy(process.env.WORCA_ACTIONS_REMOTE));
+function requireActions(req, res) {
+  if (agentMayBeCaller(req)) { refuseAgentCaller(res); return false; }
+  if (actionsEnabledHere(req)) return true;
+  res.status(403).json({ error: 'Actions are turned off on this hosted deployment. An administrator can enable them with WORCA_ACTIONS_REMOTE=1.', code: 'ACTIONS_DISABLED' });
+  return false;
+}
+function refuseAgentCaller(res) {
+  res.status(403).json({ error: 'Actions cannot be run or edited from inside the container while agent isolation is on. Open Worca through its published address.', code: 'ACTIONS_AGENT_BLOCKED' });
+}
+function noRawCommand(req, res) {
+  try { assertNoRawCommand(req.body); return true; } catch (e) { res.status(400).json({ error: e.message, code: e.code }); return false; }
+}
+/** D12: live actions of this server plus any other process that shares the pid file. */
+const busyActionRunIds = (extra = []) =>
+  new Set([...actions.running().map((s) => s.runId), ...busyRunIdsFromPidFile(actionsPidFileNow()), ...extra]);
+
+// ── registry → runs Map entry + frames (wireScriptBench's ring buffer, D15) ──────
+function actionEntry(instanceId) {
+  let e = runs.get(instanceId);
+  if (!e || e.kind !== 'action') {
+    e = { id: instanceId, kind: 'action', status: 'starting', events: [], seq: 0, forRun: null, endedAt: null,
+      orch: { stop: () => actions.stop(instanceId) } };
+    runs.set(instanceId, e);
+    evictFinishedActionEntries();
+  }
+  return e;
+}
+function evictFinishedActionEntries() {
+  const done = [...runs.values()].filter((r) => r.kind === 'action' && ['exited', 'failed', 'stopped'].includes(r.status))
+    .sort((a, b) => (a.endedAt || 0) - (b.endedAt || 0));
+  for (const r of done.slice(0, Math.max(0, done.length - ACTION_ENTRY_CAP))) runs.delete(r.id);
+}
+function recordActionFrame(instanceId, frame) {
+  const e = actionEntry(instanceId);
+  e.seq += 1;
+  const tagged = { ...frame, instanceId, seq: e.seq };
+  e.events.push(tagged);
+  if (e.events.length > MAX_BUFFER) e.events.splice(0, e.events.length - MAX_BUFFER);
+  broadcast(tagged);
+}
+actions.on('line', ({ instanceId, stream, text }) => recordActionFrame(instanceId, { type: 'action-line', stream, text }));
+actions.on('status', (snap) => {
+  const e = actionEntry(snap.instanceId);
+  if (snap.status === 'starting' && e.status !== 'starting') { e.events = []; }   // re-run: fresh buffer, seq keeps rising
+  e.status = snap.status; e.forRun = snap.runId; e.endedAt = snap.endedAt;
+  recordActionFrame(snap.instanceId, { type: 'action-status', snapshot: snap });
+  emitChanged('actions-changed', snap.status);
+});
+
+/**
+ * The bare `wks-…` id of a workspace row, else null. Live rows store it bare. Rows from the legacy fs→DB
+ * migration can hold the composite `workspaces/<dir>` and even `target = 'project'`
+ * (migrate-fs-to-db.mjs:360-374), which is why artifacts.mjs reads `target === 'workspace' || !!workspace_key`.
+ */
+const bareWorkspaceKey = (row) =>
+  (row.target === 'workspace' || row.workspace_key) && row.workspace_key ? String(row.workspace_key).replace(/^workspaces\//, '') : null;
+
+function runRowForScope(req, res) {
+  const scope = resolveRunScope(req, res);          // query params; answers 400/404 itself
+  if (!scope) return null;
+  const row = findPipelineRowById(req.params.id);
+  const matches = row && (scope.workspaceId ? bareWorkspaceKey(row) === scope.workspaceId : (row.project_key === (scope.projectKey || projectKey(scope.projectDir))));
+  if (!matches || row.archived_at) { res.status(404).json({ error: 'pipeline not found' }); return null; }
+  return row;
+}
+const isLiveRun = (id) => liveRunIds().includes(id);
+/**
+ * D30: this process is still inside the run's orch.run()/orch.resume() promise. liveRunIds() drops a run
+ * the moment its status reads 'done', and that happens BEFORE the harness's finally (teardown + keep
+ * policy). `settled` is set by the .finally at each launch site, so a run torn down long ago, or one whose
+ * teardown skipped the worktreeRemoved stamp, never reads as finishing.
+ */
+const isFinishingRun = (id) => [...runs.values()].some((r) => r.kind !== 'action' && r.kind !== 'scriptbench' && r.pipelineId === id && !r.settled);
+const memberFor = (row, key) => { const ms = membersOfRow(row); return key ? ms.find((m) => m.projectKey === key) : (ms.length === 1 ? ms[0] : null); };
+const checkoutRecOf = (runId, pk) => checkoutRecordsFor(findPipelineRowById(runId))?.members.find((x) => x.projectKey === pk) || null;
+async function stopMemberServices(runId, projectKey) {
+  for (const k of [...stackTokens.keys()]) if (k.startsWith(`${runId}:`)) stackTokens.delete(k);   // cancel starting stacks first
+  // stop() awaits a pending spawn, so a stack step that was mid-launch is caught here too.
+  await actions.stopWhere((s) => s.runId === runId && (!projectKey || s.member === projectKey));
+  for (const [k, st] of stackStates) if (st.runId === runId) stackStates.delete(k);
+}
+/** The discardCheckout callback: (projectKey, runId) of the run being discarded, never the caller's run. */
+const stopCheckoutServices = (pk, runId) => stopMemberServices(runId, pk);
+
+/**
+ * D25: one setup per checked-out member. Concurrent callers share the promise.
+ * Resolves true when actions may start (setup ok / none / skipped), false otherwise. Never throws.
+ * `enabled` is the D4 gate, computed by the CALLER while it still holds the live request
+ * (`actionsEnabledHere(req)`): the job outlives the response, and isInContainer(req) reads req.socket.
+ * Taking a value, not `req`, lets the stack loop (which runs after its response) call it too.
+ */
+function ensureSetup(runId, pk, { enabled, rerun = false }) {
+  const key = `${runId}:${pk}`;
+  if (setupJobs.has(key)) return setupJobs.get(key);
+  const job = (async () => {
+    const rec = checkoutRecOf(runId, pk);
+    if (!rec) return false;
+    const status = rec.setup?.status;
+    if (!rerun && ['ok', 'none', 'skipped'].includes(status)) return true;
+    if (!rerun && status === 'failed') return false;
+    const cfg = readProjectActions(pk);
+    if (!cfg.setup) { setSetupState(runId, pk, { status: 'none', at: new Date().toISOString() }); return true; }
+    if (!enabled) { setSetupState(runId, pk, { status: 'skipped', at: new Date().toISOString() }); return true; }
+    const t0 = Date.now();
+    setSetupState(runId, pk, { status: 'running', at: new Date().toISOString() });
+    emitChanged('pipelines-changed', 'updated');
+    let end = null;
+    try {
+      const snap = await actions.start({ runId, member: pk, worktreeDir: rec.worktreeDir, branch: rec.branch,
+        action: { id: SETUP_ACTION_ID, label: 'Setup', kind: 'task', cmd: cfg.setup, cmdWin32: null, cwd: '.', env: [], openUrl: null, ready: { kind: 'immediate' } } });
+      end = await actions.waitFor(snap.instanceId, (s) => ['exited', 'failed', 'stopped'].includes(s.status), 3_600_000);
+    } catch { /* start failed or timed out → failed below */ }
+    const ok = end?.status === 'exited' && end.exitCode === 0;
+    const ms = Date.now() - t0;
+    setSetupState(runId, pk, { status: ok ? 'ok' : 'failed', exitCode: end?.exitCode ?? null, at: new Date().toISOString(), ms });
+    if (ok) writeActionsMeta(pk, { lastSetupMs: ms });
+    emitChanged('pipelines-changed', 'updated');
+    return ok;
+  })().catch(() => false).finally(() => setupJobs.delete(key));
+  setupJobs.set(key, job);
+  return job;
+}
+
+function sendCheckoutError(res, e) {
+  const map = { NOT_FOUND: 404, BAD_REQUEST: 400, NOT_FINISHED: 409, RETAINED: 409, BRANCH_MISSING: 409,
+    BRANCH_CHECKED_OUT: 409, TARGET_EXISTS: 409, SNAPSHOT_FAILED: 409 };
+  res.status(map[e?.code] || 500).json({ error: e?.message || String(e), code: e?.code || 'ERROR',
+    ...(e?.holder ? { holder: e.holder, projectKey: e.projectKey || null } : {}) });
+}
+
+app.post('/api/runs/:id/checkout', async (req, res) => {
+  const row = runRowForScope(req, res); if (!row) return;
+  const members = Array.isArray(req.body?.members) ? req.body.members.filter((x) => typeof x === 'string') : null;
+  try {
+    // useExisting: the branch is already checked out in the person's own folder; link it (checkout.mjs).
+    const r = await checkoutRun({ id: row.id, members, by: actorOf(req), isLive: isLiveRun, isFinishing: isFinishingRun,
+      useExisting: req.body?.useExisting === true });
+    const enabled = actionsEnabledHere(req);
+    for (const m of r.members.filter((x) => x.state === 'checked-out')) ensureSetup(row.id, m.projectKey, { enabled });   // not awaited: frames stream
+    const { maxCheckouts } = actionsSettings();
+    if (maxCheckouts) {
+      enforceCheckoutCap({ max: maxCheckouts, busy: busyActionRunIds([row.id]), stopServices: stopCheckoutServices })
+        .then(({ evicted }) => { if (evicted.length) emitChanged('pipelines-changed', 'updated'); }).catch(() => {});
+    }
+    emitChanged('pipelines-changed', 'updated');
+    res.json(r);
+  } catch (e) { sendCheckoutError(res, e); }
+});
+
+app.delete('/api/runs/:id/checkout', async (req, res) => {
+  const row = runRowForScope(req, res); if (!row) return;
+  const members = Array.isArray(req.body?.members) ? req.body.members : null;
+  try {
+    const r = await discardCheckout({ id: row.id, members, force: req.body?.force === true, by: actorOf(req),
+      stopServices: stopCheckoutServices });
+    emitChanged('pipelines-changed', 'updated');
+    res.json(r);
+  } catch (e) { sendCheckoutError(res, e); }
+});
+
+app.post('/api/runs/:id/setup', async (req, res) => {
+  if (!requireActions(req, res) || !noRawCommand(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  const m = memberFor(row, req.body?.member);
+  if (!m) return badRequest(res, 'member is required for a workspace run');
+  if (!checkoutRecOf(row.id, m.projectKey)) return res.status(409).json({ error: 'Check out the run first.', code: 'NOT_CHECKED_OUT' });
+  // Re-running `npm ci` under a live dev server would pull node_modules out from under it.
+  if (actions.listFor(row.id).some((s) => s.member === m.projectKey && s.actionId !== SETUP_ACTION_ID && ['starting', 'running', 'ready'].includes(s.status))) {
+    return res.status(409).json({ error: 'Stop the running actions of this project before running setup again.', code: 'SERVICES_RUNNING' });
+  }
+  // rerun covers failed, interrupted and skipped (actions were off at checkout, D25), and a manual "Run setup again".
+  ensureSetup(row.id, m.projectKey, { enabled: true, rerun: true });   // requireActions passed above
+  res.status(202).json({ queued: true, instanceId: instanceIdFor(row.id, m.projectKey, SETUP_ACTION_ID) });
+});
+
+/** Start now, or, while setup is pending/running/interrupted, queue behind it (D25). */
+async function startOrQueue(req, res, row, m, action, extra = {}) {
+  const rec = checkoutRecOf(row.id, m.projectKey);
+  if (!rec) return res.status(409).json({ error: 'Check out the run first.', code: 'NOT_CHECKED_OUT' });
+  const setup = rec.setup?.status;
+  if (setup === 'failed') return res.status(409).json({ error: 'The setup command failed. Fix it and run setup again.', code: 'SETUP_FAILED' });
+  const spec = { runId: row.id, member: m.projectKey, worktreeDir: rec.worktreeDir, branch: rec.branch, action };
+  if (['pending', 'running', 'interrupted'].includes(setup) || setupJobs.has(`${row.id}:${m.projectKey}`)) {
+    const instanceId = instanceIdFor(row.id, m.projectKey, action.id);
+    // A queued start that cannot start must say so; nobody is waiting on the HTTP answer any more.
+    const report = (text) => {
+      recordActionFrame(instanceId, { type: 'action-line', stream: 'sys', text });
+      const e = runs.get(instanceId);                        // never started: mark it finished so the cap can evict it
+      if (e && !actions.get(instanceId)) { e.status = 'failed'; e.endedAt = Date.now(); }
+      // No registry snapshot exists for a start that never happened: a snapshot-less status frame tells the
+      // card to leave "Starts after setup" and carries the reason.
+      recordActionFrame(instanceId, { type: 'action-status', snapshot: null, error: text });
+      emitChanged('actions-changed', 'queued-failed');
+    };
+    ensureSetup(row.id, m.projectKey, { enabled: true, rerun: setup === 'interrupted' })   // every caller passed requireActions
+      .then((ok) => (ok ? actions.start(spec) : report('Not started: the setup command did not finish successfully.')))
+      .catch((e) => report(`Not started: ${e?.message || e}`));
+    return res.status(202).json({ ...extra, queued: true, instanceId });
+  }
+  try {
+    res.json({ ...extra, ...(await actions.start(spec)) });
+  } catch (e) {
+    const status = e?.code === 'PORTS_EXHAUSTED' || e?.code === 'NOT_CHECKED_OUT' ? 409 : e instanceof ActionConfigError ? 400 : 500;
+    res.status(status).json({ error: e.message, code: e.code || 'ERROR' });
+  }
+}
+
+app.post('/api/runs/:id/actions/:actionId/start', async (req, res) => {
+  if (!requireActions(req, res) || !noRawCommand(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  const m = memberFor(row, req.body?.member);
+  if (!m) return badRequest(res, 'member is required for a workspace run');
+  const action = readProjectActions(m.projectKey).actions.find((a) => a.id === req.params.actionId);
+  if (!action) return res.status(404).json({ error: 'no such action', code: 'NOT_FOUND' });
+  return startOrQueue(req, res, row, m, action);
+});
+
+// Stop is not gated by D4: a service started before the gate closed can always be stopped.
+app.post('/api/runs/:id/actions/:actionId/stop', async (req, res) => {
+  if (!noRawCommand(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  const m = memberFor(row, req.body?.member);
+  if (!m) return badRequest(res, 'member is required for a workspace run');
+  await actions.stop(instanceIdFor(row.id, m.projectKey, req.params.actionId));
+  res.json({ ok: true });
+});
+
+app.post('/api/runs/:id/stacks/:stackId/start', async (req, res) => {
+  if (!requireActions(req, res) || !noRawCommand(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  if (row.target !== 'workspace') return badRequest(res, 'stacks belong to workspace runs');
+  const stack = readWorkspaceStacks(bareWorkspaceKey(row)).find((s) => s.id === req.params.stackId);
+  if (!stack) return res.status(404).json({ error: 'no such stack', code: 'NOT_FOUND' });
+  const key = `${row.id}:${stack.id}`;
+  if (['starting', 'running'].includes(stackStates.get(key)?.status)) return res.json(stackStates.get(key));
+  const members = membersOfRow(row);
+  const aliases = memberAliases(members.map((m) => ({ projectKey: m.projectKey, name: m.projectName || path.basename(m.projectDir || '') })));
+  const nameOf = Object.fromEntries(members.map((m) => [m.projectKey, m.projectName || m.projectKey]));
+  // D29: a step whose member has not run setup yet (kept by policy → `pending`, or `interrupted`, or a
+  // setup still running from Check out) runs/awaits that setup first, like a single start does (D25).
+  // Resolved lazily, step by step, so the setup state is read when the step is reached.
+  const resolveStep = async (st) => {
+    const action = readProjectActions(st.member).actions.find((a) => a.id === st.action) || null;
+    let rec = checkoutRecOf(row.id, st.member);
+    if (!rec) return { action, worktreeDir: null, error: `${nameOf[st.member]} is not checked out` };
+    const setup = rec.setup?.status;
+    if (setup === 'failed') return { action, worktreeDir: null, error: `the setup command of ${nameOf[st.member]} failed; run setup again` };
+    if (!['ok', 'none', 'skipped'].includes(setup) || setupJobs.has(`${row.id}:${st.member}`)) {
+      const ok = await ensureSetup(row.id, st.member, { enabled: true, rerun: setup === 'interrupted' });   // requireActions passed
+      if (!ok) return { action, worktreeDir: null, error: `the setup command of ${nameOf[st.member]} did not finish successfully` };
+      rec = checkoutRecOf(row.id, st.member);
+    }
+    return { worktreeDir: rec?.worktreeDir || null, branch: rec?.branch || null, action };
+  };
+  // One token per start: Stop (or a newer start) replaces it, and the old loop sees it is cancelled.
+  const token = {};
+  stackTokens.set(key, token);
+  const live = () => stackTokens.get(key) === token;
+  const onState = (s) => { if (live()) stackStates.set(key, s); emitChanged('actions-changed', `stack-${s.status}`); };
+  onState({ stackId: stack.id, runId: row.id, status: 'starting', step: 0, error: null, instances: [] });
+  runStack({ runId: row.id, stack, aliases, registry: actions, resolveStep, onState, isCancelled: () => !live() })
+    .catch(() => {});   // not awaited
+  res.json(stackStates.get(key));
+});
+
+app.post('/api/runs/:id/stacks/:stackId/stop', async (req, res) => {
+  if (!noRawCommand(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  const key = `${row.id}:${req.params.stackId}`;
+  const cur = stackStates.get(key);
+  stackTokens.delete(key);                                 // a still-starting runStack sees this before its next step
+  await stopStack(actions, cur);
+  stackStates.delete(key);
+  emitChanged('actions-changed', 'stack-stopped');
+  res.json({ ok: true });
+});
+
+const BUILTIN_ROUTE_KEYS = ['editor', 'terminal', 'fileManager'];
+app.post('/api/runs/:id/builtins/:builtin', async (req, res) => {
+  if (!requireActions(req, res) || !noRawCommand(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  const key = req.params.builtin;
+  if (!BUILTIN_ROUTE_KEYS.includes(key)) return badRequest(res, `built-in must be one of ${BUILTIN_ROUTE_KEYS.join(', ')}`);
+  const m = memberFor(row, req.body?.member);
+  if (!m) return badRequest(res, 'member is required for a workspace run');
+  if (readProjectActions(m.projectKey).builtins[key] === false) return res.status(409).json({ error: `${key} is turned off for this project`, code: 'DISABLED' });
+  const rec = checkoutRecOf(row.id, m.projectKey);
+  if (!rec) return res.status(409).json({ error: 'Check out the run first.', code: 'NOT_CHECKED_OUT' });
+  let l;
+  try { l = builtinLaunch(key, rec.worktreeDir, builtins(), { vars: { branch: rec.branch, project: m.projectKey, runId: row.id } }); }
+  catch (e) { return res.status(409).json({ error: e.message, code: e.code || 'NOT_AVAILABLE' }); }
+  // Watched for a moment: a command that fails at once (not found, a typo) says why on the card.
+  const r = await launchAndWatch(l, { spawn });
+  if (!r.ok) return res.status(409).json({ error: `${BUILTIN_NAMES[key] || key} did not open: ${r.error}`, code: 'LAUNCH_FAILED' });
+  res.json({ ok: true });
+});
+
+// Settings › Runs › Actions: what "Choose…" lists (found on THIS machine, which is where commands run),
+// and the hover examples for this OS. Scanned once per server process.
+const BUILTIN_NAMES = { editor: 'Editor', terminal: 'Terminal', fileManager: 'The file manager' };
+let launchersFound = null;
+app.get('/api/actions/launchers', (req, res) => {
+  launchersFound ??= installedLaunchers({ findOnPath: (n) => findOnPath(n) });
+  // browse: a native picker can open here. Never on a hosted worca: it would open on the server, not on the viewer's screen.
+  res.json({ platform: process.platform, ...launchersFound, examples: launcherExamples(), detected: autoDetectedBuiltins(),
+    browse: !REMOTE_MODE && nativeDialogAvailable() });
+});
+
+// "Browse…": the platform's app picker on this machine; the pick comes back as a ready command line
+// (lineForPickedApp). Where no picker can open (container, hosted, no display) it answers unsupported and the
+// page shows what installedLaunchers found instead.
+app.post('/api/actions/launchers/browse', async (req, res) => {
+  if (!requireActions(req, res)) return;
+  const kind = req.body?.kind;
+  if (kind !== 'editor' && kind !== 'terminal') return badRequest(res, 'kind must be editor or terminal');
+  const r = await pickAppNative({ kind });
+  if (r.status !== 'picked') return res.json(r);
+  try { res.json({ status: 'picked', path: r.path, ...lineForPickedApp(r.path, { kind }) }); }
+  catch (e) { res.json({ status: 'canceled', error: e.message }); }
+});
+
+// "Try": run the typed Editor / Terminal line (or the detected default when blank) on the home folder.
+// The one route that takes a command line from the request: the person is testing what they are about to
+// save. Same guards as saving it (D4) and as running actions on a hosted worca.
+app.post('/api/actions/launchers/try', async (req, res) => {
+  if (!requireActions(req, res)) return;
+  const kind = req.body?.kind;
+  if (kind !== 'editor' && kind !== 'terminal') return badRequest(res, 'kind must be editor or terminal');
+  const line = typeof req.body?.line === 'string' ? req.body.line.trim() : '';
+  if (line.length > 2000) return badRequest(res, 'the command is too long');
+  const folder = os.homedir();
+  let l;
+  try {
+    l = line ? buildLauncherCommand(line, { folder }) : builtinLaunch(kind, folder, detectBuiltins({ overrides: {} }));
+  } catch (e) { return res.status(409).json({ error: e.message, code: e.code || 'NOT_AVAILABLE' }); }
+  const r = await launchAndWatch(l, { spawn });
+  if (!r.ok) return res.status(409).json({ error: r.error, code: 'LAUNCH_FAILED' });
+  res.json({ ok: true, folder });
+});
+
+app.get('/api/runs/:id/actions', async (req, res) => {
+  const row = runRowForScope(req, res); if (!row) return;
+  try {
+    res.json({
+      enabled: actionsEnabledHere(req), runStatus: row.status, finished: ['done', 'stopped', 'error'].includes(row.status),
+      workspace: row.target === 'workspace',
+      // A workspace row can have an empty projects list (old or partial rows): never index [0] blindly.
+      estimate: { lastSetupMs: (() => { const pk = membersOfRow(row)[0]?.projectKey; return pk ? readActionsMeta(pk).lastSetupMs || null : null; })() },
+      members: await Promise.all(membersOfRow(row).map(async (m) => {
+        const cfg = readProjectActions(m.projectKey);
+        const rec = checkoutRecordsFor(row)?.members.find((x) => x.projectKey === m.projectKey) || null;
+        const pushed = m.br?.feature && m.projectDir ? await branchPushedTo(m.projectDir, m.br.feature) : null;
+        // Not checked out, but the branch is in another folder (the person's own clone): Check out would be refused,
+        // so the card offers that folder instead ("Use that folder", checkout useExisting).
+        const held = !rec && m.br?.feature && m.projectDir ? await worktreePathForBranch(m.projectDir, m.br.feature).catch(() => null) : null;
+        // Coarse, server-side: 'no-branch' | 'not-checked-out' | 'checked-out'. The card's finer view state
+        // (setting-up / setup-failed / ready / running / task-result) is memberViewState() in the browser.
+        const state = !m.br?.feature ? 'no-branch' : rec ? 'checked-out' : 'not-checked-out';
+        return { projectKey: m.projectKey, projectName: m.projectName, projectDir: m.projectDir, state, branch: m.br?.feature || null,
+          ...(held ? { heldBy: held } : {}),
+          worktreeDir: m.projectDir ? checkoutPathFor(row, m) : null, checkout: rec, pushed,
+          setupQueued: setupJobs.has(`${row.id}:${m.projectKey}`),
+          copyCommand: m.br?.feature && m.projectDir ? copyCommandText({ projectDir: m.projectDir, branch: m.br.feature, pushed }) : null,
+          setup: cfg.setup, actions: cfg.actions.map(({ id, label, kind, openUrl }) => ({ id, label, kind, openUrl })),
+          builtins: Object.entries(builtins()).filter(([k, v]) => v && cfg.builtins[k] !== false).map(([k, v]) => ({ key: k, label: v.label })) };
+      })),
+      stacks: row.target === 'workspace' ? readWorkspaceStacks(bareWorkspaceKey(row)) : [],
+      stackStates: [...stackStates.values()].filter((s) => s.runId === row.id),
+      instances: actions.listFor(row.id),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// D28: every running instance, with where it belongs (the History route's project segment).
+app.get('/api/actions/running', (req, res) => {
+  const rowOf = new Map();
+  res.json(actions.running().map((s) => {
+    if (!rowOf.has(s.runId)) rowOf.set(s.runId, findPipelineRowById(s.runId) || null);
+    const row = rowOf.get(s.runId);
+    const ws = row ? bareWorkspaceKey(row) : null;
+    return { ...s, workspaceId: ws, histKey: row ? (ws ? `workspaces/${ws}` : row.project_key) : null, runTitle: row?.title || null };
+  }));
+});
+
+// D28: scope-free stop for the sidebar and the header pill. Not gated by D4, like the scoped stop.
+app.post('/api/actions/instances/:instanceId/stop', async (req, res) => {
+  if (!noRawCommand(req, res)) return;
+  const id = String(req.params.instanceId || '');
+  if (!actions.get(id)) return res.status(404).json({ error: 'no such running action', code: 'NOT_FOUND' });
+  await actions.stop(id);            // false when it had already ended; still ok
+  res.json({ ok: true });
+});
+
+app.get('/api/projects/:key/actions', async (req, res) => {
+  const p = await tmProject(req, res); if (!p) return;
+  res.json({ config: readProjectActions(p.key), detected: builtins(), meta: { lastSetupMs: readActionsMeta(p.key).lastSetupMs || null },
+    enabled: actionsEnabledHere(req) });
+});
+
+// D4: an isolated agent must not plant a command that a person's later click, or the automatic setup
+// on Check out, would run as the server user. Not otherwise gated: an operator can prepare the config
+// while actions are off.
+app.put('/api/projects/:key/actions', async (req, res) => {
+  if (agentMayBeCaller(req)) return refuseAgentCaller(res);
+  const p = await tmProject(req, res); if (!p) return;
+  try {
+    res.json(writeProjectActions(p.key, req.body || {}));
+  } catch (e) {
+    if (e instanceof ActionConfigError) return res.status(400).json({ error: e.message, code: 'BAD_REQUEST', field: e.field });
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+/** The members' action ids and kinds, for stack validation: { [projectKey]: [{id, kind}] }. */
+const memberActionsOf = (members) =>
+  Object.fromEntries(members.map((m) => [m.projectKey, readProjectActions(m.projectKey).actions.map(({ id, kind }) => ({ id, kind }))]));
+
+app.get('/api/workspaces/:id/actions', async (req, res) => {
+  if (!WORKSPACE_KEY_RE.test(req.params.id)) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  const members = await workspaceMembers(req.params.id);
+  if (!members) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  const aliases = memberAliases(members);
+  res.json({ stacks: readWorkspaceStacks(req.params.id),
+    members: members.map((m) => ({ projectKey: m.projectKey, name: m.name, alias: aliases[m.projectKey],
+      actions: readProjectActions(m.projectKey).actions.map(({ id, label, kind }) => ({ id, label, kind })) })) });
+});
+
+app.put('/api/workspaces/:id/actions', async (req, res) => {
+  if (agentMayBeCaller(req)) return refuseAgentCaller(res);
+  if (!WORKSPACE_KEY_RE.test(req.params.id)) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  const members = await workspaceMembers(req.params.id);
+  if (!members) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  try {
+    const { stacks } = normalizeStacks(req.body || {}, { memberActions: memberActionsOf(members) });
+    res.json({ stacks: await updateWorkspaceStacks(req.params.id, stacks) });
+  } catch (e) {
+    if (e instanceof ActionConfigError) return res.status(400).json({ error: e.message, code: 'BAD_REQUEST', field: e.field });
+    if (e?.code === 'NOT_FOUND') return res.status(404).json({ error: e.message, code: 'NOT_FOUND' });
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// D3: "Try it" — the newest eligible finished run of the project, checked out if needed, then started.
+app.post('/api/projects/:key/actions/:actionId/try', async (req, res) => {
+  if (!requireActions(req, res) || !noRawCommand(req, res)) return;
+  if (!PROJECT_KEY_RE.test(req.params.key)) return badRequest(res, 'invalid project key');
+  // `branch LIKE '%"feature"%'` also matches `"feature":null`, and SQL cannot see retained work or
+  // liveness, so pick in JS from the newest few candidates.
+  const row = getDb().prepare(`SELECT * FROM pipelines WHERE project_key = ? AND target = 'project' AND archived_at IS NULL
+      AND status IN ('done','stopped','error') ORDER BY started_at DESC LIMIT 25`).all(req.params.key)
+    .find((r) => membersOfRow(r)[0]?.br?.feature && !retainedWorkFor(r) && !isLiveRun(r.id));
+  if (!row) return res.status(404).json({ error: 'No finished run yet.', code: 'NO_FINISHED_RUN' });
+  const action = readProjectActions(req.params.key).actions.find((a) => a.id === req.params.actionId);
+  if (!action) return res.status(404).json({ error: 'no such action', code: 'NOT_FOUND' });
+  try {
+    if (!checkoutRecOf(row.id, req.params.key)) await checkoutRun({ id: row.id, by: actorOf(req), isLive: isLiveRun, isFinishing: isFinishingRun });
+  } catch (e) { return sendCheckoutError(res, e); }
+  const m = memberFor(findPipelineRowById(row.id), req.params.key);
+  // 200 {runId, histKey, …snapshot} when started, 202 {runId, histKey, queued, instanceId} when queued behind setup.
+  return startOrQueue(req, res, row, m, action, { runId: row.id, histKey: row.project_key });
+});
+
+// ---------------------------------------------------------------------------
 // PR remotes (fork support). The ship-it dialog picks (1) the remote the feature
 // branch is pushed to and (2) the remote whose repo the PR is opened in — GitHub's
 // "compare across forks". Names are user-defined, so nothing is special-cased
@@ -6323,6 +6846,9 @@ const settingsState = () => ({
   nightMode: nightModeSettings(),                         // night mode: the user layer (only the fields set)
   nightModeEffective: resolveNightConfig({ user: nightModeSettings() }).config,   // no project: the global view
   nightModeToggle: nightModeToggle(),                     // auto | on | off (live switch)
+  actions: actionsSettings(),                             // Settings › Runs › Actions (issue #529)
+  actionsDetected: autoDetectedBuiltins(),                // what Editor / Terminal fall back to when left blank (null = none found)
+  actionsGate: { remote: REMOTE_MODE, enabled: actionsEnabledHere() },
 });
 
 /** Settings ▸ Auto workflow model: the stored id + what the classifier will actually use
@@ -6566,6 +7092,9 @@ app.post('/api/settings', async (req, res) => {
   const hasMemoryDefragKey = has('memoryDefrag');
   const defragModels = hasMemoryDefragKey ? (autoModels || await listModels('')) : null;
   const hasWorkspaceScanKey = has('workspaceScan');
+  const hasActionsKey = has('actions');
+  // D4: actions.editor / actions.terminal are command paths the built-ins route spawns as the server user.
+  if (hasActionsKey && agentMayBeCaller(req)) return refuseAgentCaller(res);
   const wsScanModels = hasWorkspaceScanKey ? (autoModels || defragModels || await listModels('')) : null;
   // #422: the title model is a SELECT over the catalog, so an id that is not a
   // catalog member is a client bug (or a stale option) — refuse it here rather
@@ -6614,6 +7143,7 @@ app.post('/api/settings', async (req, res) => {
       validateNightPatch(patch);
     }
     if (has('nightModeToggle')) assertNightModeToggleInput(body.nightModeToggle);
+    if (hasActionsKey) assertActionsInput(body.actions);
     if (has('sync')) assertSyncSettingsInput(body.sync);
     // Root first: it is the one key whose setter can still fail AFTER the asserts
     // above (an unusable path), so every other key's write must come after it or
@@ -6649,11 +7179,16 @@ app.post('/api/settings', async (req, res) => {
     if (has('sync')) await setSyncDefaults(body.sync);
     // Live runs re-evaluate their open question against the new night settings.
     if (hasNightKey) for (const e of runs.values()) e.orch?.nightConfigChanged?.();
+    if (hasActionsKey) { await setActionsSettings(body.actions); builtinsDetected = null; }   // re-detect the built-ins lazily
     if (hasBudgetKey) emitChanged('budget-changed');
     // Other open tabs repaint their Settings cards (a stale tab could otherwise
     // "save" its old checkbox state over this one with no feedback to either).
-    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule') || has('sync') || hasNightKey) emitChanged('settings-changed');
-    res.json({ ...settingsState(), ...(await autoModelState()), ...(await prDescriptionModelState()), chat: chatPrefs() });
+    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule') || has('sync') || hasActionsKey || hasNightKey) emitChanged('settings-changed');
+    // Editor / Terminal: saved as typed; a program Worca cannot find comes back as a warning on its field.
+    const actionsWarnings = hasActionsKey ? Object.fromEntries(['editor', 'terminal']
+      .map((k) => [k, launcherWarning(actionsSettings()[k], { findOnPath: (n) => findOnPath(n) })]).filter(([, w]) => w)) : null;
+    res.json({ ...settingsState(), ...(await autoModelState()), ...(await prDescriptionModelState()), chat: chatPrefs(),
+      ...(actionsWarnings ? { actionsWarnings } : {}) });
   } catch (err) {
     // The setters throw only on an unusable path -> client error (400).
     return badRequest(res, err && err.message ? err.message : String(err));
@@ -8378,7 +8913,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
         // workflowId once the user saved it; a run card keeps its pre-P3 line byte for byte.
         const wf = !!(b.card && b.card.type === 'workflow');
         if (wf && b.state === 'building') continue;   // transient (no name yet) — never worth a header line
-        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'workspace' || b.card.type === 'away')) {
+        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'workspace' || b.card.type === 'actions' || b.card.type === 'away')) {
           cards.push({ id: b.id, type: b.card.type, state: b.state, summary: b.card.summary || '' });
           continue;
         }
@@ -8878,9 +9413,9 @@ async function startMetricsEventTurn(threadId, block) {
   const state = block.state === 'declined' ? 'declined' : block.state === 'failed' ? 'failed' : 'applied';
   const result = card.result || null;
   // One event turn for every non-workflow card; the type picks the wording. Metrics is the fallback.
-  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'away' ? card.type : 'metrics';
-  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, workspace: workspaceEventPrompt, away: awayEventPrompt, metrics: metricsEventPrompt }[kind];
-  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, workspace: workspaceNoticeText, away: awayNoticeText, metrics: metricsNoticeText }[kind];
+  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'actions' || card.type === 'away' ? card.type : 'metrics';
+  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, workspace: workspaceEventPrompt, actions: actionsEventPrompt, away: awayEventPrompt, metrics: metricsEventPrompt }[kind];
+  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, workspace: workspaceNoticeText, actions: actionsNoticeText, away: awayNoticeText, metrics: metricsNoticeText }[kind];
   const text = eventPrompt({ cardId: block.id, state, card, result });
   const notice = noticeText({ state, card, result });
   let mv = await validateModelEffort(thread.model, thread.effort);
@@ -9051,6 +9586,36 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
           emitChanged('workspaces-changed', card.kind === 'create' ? 'created' : card.kind === 'rename' ? 'renamed' : 'members');
           if (result.clearedHomes.includes('policy')) emitChanged('team-policy-changed', 'policy-home');
         } catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err), code: (err && err.code) || 'ERROR' }; }
+        block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
+      } finally { askCardBusy.delete(cardId); }
+      if (!block) return res.status(409).json({ error: 'card vanished' });
+      const turn = await startMetricsEventTurn(id, block);
+      return res.json({ block, turn });
+    }
+    if (found.block.card && found.block.card.type === 'actions') {
+      // Actions card (docs/actions.md "Ask Worca"): proposed → applied | failed | declined. The config write happens
+      // HERE, behind the click, through the same core setters as PUT /api/projects/:key/actions and
+      // /api/workspaces/:id/actions — each re-validates — and behind the same D4 guard: an isolated agent must
+      // not plant a command a person's later click would run. Applying stores config; it starts nothing.
+      if (body.state !== 'applied' && body.state !== 'declined') return badRequest(res, 'state must be "applied" or "declined"');
+      if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
+      if (body.state === 'applied' && agentMayBeCaller(req)) return refuseAgentCaller(res);
+      if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
+      if (body.state === 'declined') {
+        const block = flipCard(id, cardId, { state: 'declined' });
+        if (!block) return res.status(409).json({ error: 'card vanished' });
+        const turn = await startMetricsEventTurn(id, block);
+        return res.json({ block, turn });
+      }
+      askCardBusy.add(cardId);
+      let block;
+      try {
+        let result;
+        try { result = await applyActionsChange(found.block.card); }
+        catch (err) {
+          const field = err && err.field ? ` (${err.field})` : '';
+          result = { ok: false, error: `${err && err.message ? err.message : String(err)}${field}`, code: (err && err.code) || 'ERROR' };
+        }
         block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
       } finally { askCardBusy.delete(cardId); }
       if (!block) return res.status(409).json({ error: 'card vanished' });
@@ -9242,7 +9807,8 @@ function startAgentGen(input) {
       entry.status = 'error';
       entry.events.push(event);
       broadcast(event);
-    });
+    })
+    .finally(() => { entry.settled = true; });
 
   return genId;
 }
@@ -9419,7 +9985,8 @@ function startScriptBench(request) {
       entry.status = 'error';
       entry.events.push(event);
       broadcast(event);
-    });
+    })
+    .finally(() => { entry.settled = true; });
 
   return benchId;
 }
@@ -10817,6 +11384,23 @@ export async function bootMaintenance({ log } = {}) {
     console.error(`[worca-ui] legacy worktree sweep failed: ${err && err.message ? err.message : err} — nothing was removed`);
   }
 
+  // Actions (issue #529): reap orphaned action processes, mark interrupted setups, release
+  // until-pr checkouts whose PR closed (D11) and apply the checkout cap (D12).
+  try {
+    const orphans = await reapOrphans({ pidFile: actionsPidFileNow() });
+    if (orphans) console.log(`[worca-ui] actions: stopped ${orphans} orphaned process(es) from a previous server`);
+    const interrupted = markInterruptedSetups();
+    const { released } = await releaseKeptCheckouts({ busy: busyActionRunIds(), stopServices: stopCheckoutServices });
+    const { maxCheckouts } = actionsSettings();
+    const { evicted } = maxCheckouts
+      ? await enforceCheckoutCap({ max: maxCheckouts, busy: busyActionRunIds(), stopServices: stopCheckoutServices })
+      : { evicted: [] };
+    summary.actions = { orphans, interrupted, released: released.length, evicted: evicted.length };
+  } catch (err) {
+    summary.actions = { orphans: 0, interrupted: 0, released: 0, evicted: 0 };
+    console.error(`[worca-ui] actions boot maintenance failed: ${err?.message || err}`);
+  }
+
   // Ask Worca (§6.2): mark turns orphaned by a restart, sweep stale empty threads.
   try {
     const interrupted = sweepStreamingMessages();
@@ -10938,7 +11522,7 @@ if (isMain) {
   const shutdown = (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    channelHost.stop().finally(() => process.exit(exitCodeFor(signal)));
+    Promise.allSettled([channelHost.stop(), actions.stopAll()]).finally(() => process.exit(exitCodeFor(signal)));
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -10993,6 +11577,13 @@ if (isMain) {
     // Scheduled runs: boot catch-up + the 30 s tick (the server IS the scheduler).
     try { startScheduler(); } catch (err) { console.warn(`[worca-ui] scheduler: ${err?.message || err}`); }
     startAwayHoursWatch();
+    // Keep policy until-pr (D11): release kept checkouts whose PR merged or closed, hourly.
+    const keptTimer = setInterval(() => {
+      releaseKeptCheckouts({ busy: busyActionRunIds(), stopServices: stopCheckoutServices })
+        .then(({ released }) => { if (released.length) emitChanged('pipelines-changed', 'updated'); })
+        .catch(() => {});
+    }, 3_600_000);
+    keptTimer.unref();
   });
 }
 

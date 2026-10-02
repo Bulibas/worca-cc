@@ -75,9 +75,9 @@ test('get_run: `actions` lists who acted, redacted; absent when nobody did', asy
   ] });
   const r = await withActions.call('get_run', { id: 'aaaaaaa1' });
   assert.equal(r.startedBy, 'ada@example.com');
-  assert.equal(r.actions.length, 2);
-  assert.deepEqual(r.actions[0], { at: '2026-09-22T10:05:00Z', by: 'grace@example.com', what: 'Pipeline paused by grace@example.com.' });
-  assert.ok(!r.actions[1].what.includes('ghp_abcdefghijklmnopqrstuvwxyz0123456789'), 'action text is redacted like every run text');
+  assert.equal(r.actedBy.length, 2);
+  assert.deepEqual(r.actedBy[0], { at: '2026-09-22T10:05:00Z', by: 'grace@example.com', what: 'Pipeline paused by grace@example.com.' });
+  assert.ok(!r.actedBy[1].what.includes('ghp_abcdefghijklmnopqrstuvwxyz0123456789'), 'action text is redacted like every run text');
   assert.equal('actions' in await toolsWith({ readRunActions: async () => [] }).call('get_run', { id: 'aaaaaaa1' }), false);
 });
 
@@ -113,20 +113,20 @@ test('the real readers: listPeople groups by person over pipelines, readRunActio
   assert.equal(defaultToolDeps({ threadId: null }).viewer, null, 'no shared sign-in: no "me"');
 });
 
-test('rule 19 (people) is in every prompt; rule 22 (hosting) only on a container or hosted worca', () => {
+test('rule 19 (people) is in every prompt; rule 23 (hosting) only on a container or hosted worca', () => {
   const rule19 = ASK_SYSTEM_RULES.slice(ASK_SYSTEM_RULES.indexOf('\n19. '));
   assert.ok(rule19.startsWith('\n19. People:'));
-  for (const t of ['startedBy', '`actions`', 'createdBy, updatedBy', 'Cloudflare Access', 'WORCA_IDENTITY_HEADER', 'WORCA_IDENTITY_NAME', '"local"',
+  for (const t of ['startedBy', '`actedBy`', 'createdBy, updatedBy', 'Cloudflare Access', 'WORCA_IDENTITY_HEADER', 'WORCA_IDENTITY_NAME', '"local"',
     'list_people', '"me"', 'signed in: line', 'Never infer a person', 'attribution, not permissions']) {
     assert.ok(rule19.includes(t), `rule 19 states "${t}"`);
   }
   const rule1 = ASK_SYSTEM_RULES.slice(ASK_SYSTEM_RULES.indexOf('\n1. '), ASK_SYSTEM_RULES.indexOf('\n2. '));
   assert.ok(rule1.includes('list_runs, list_people, get_run'));
   assert.ok(buildSystemPrompt({ projects: [], workspaces: [], workflows: [] }).includes('\n19. People:'), 'a local install gets rule 19 too');
-  assert.ok(ASK_HOSTING_RULE.startsWith('22. Where worca runs:'));
+  assert.ok(ASK_HOSTING_RULE.startsWith('23. Where worca runs:'));
   for (const t of ['single (GH_TOKEN)', 'split (WORCA_GH_READ_TOKEN', 'app (a GitHub App', 'agents never get a GitHub credential', 'one credential per call',
     'worca-agent', 'CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY', 'WORCA_AGENT_ISOLATION=0', 'WORCA_CLONE_ALLOW', 'Cloudflare Access policy, never in worca',
     '"Adding people later"', '"Who started a run"', '"GitHub App"']) {
-    assert.ok(ASK_HOSTING_RULE.includes(t), `rule 22 states "${t}"`);
+    assert.ok(ASK_HOSTING_RULE.includes(t), `rule 23 states "${t}"`);
   }
 });

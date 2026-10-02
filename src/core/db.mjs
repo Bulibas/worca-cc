@@ -58,7 +58,7 @@ const OPEN_BACKOFF_MS = 15;
 /** Latest schema version. Bump + append a new migration step when the DDL grows.
  *  Exported so migration tests assert "reached the module's current version"
  *  instead of hardcoding the number — a schema bump then touches no test file. */
-export const SCHEMA_VERSION = 47;
+export const SCHEMA_VERSION = 48;
 
 /** Absolute path to the database file: <worcaHome>/worca-cc.db. */
 export function dbPath() {
@@ -863,7 +863,8 @@ const INCREMENTAL_COLUMNS = {
                             policy_project: 'TEXT',     // v32: team-policy home (member absolute path); NULL = no home
                             map_json: 'TEXT',           // v40: the last scan's { map, synthesis } (workspace map); NULL = none yet
                             map_overrides_json: 'TEXT', // v40: confirm / reject / manual edge overrides; NULL = none
-                            description_origin: 'TEXT' },   // v40: 'generated' | 'edited'; NULL = before v40
+                            description_origin: 'TEXT',     // v40: 'generated' | 'edited'; NULL = before v40
+                            actions_json: 'TEXT' },         // v47: stack actions { stacks:[…] } (issue #529); NULL = none
   schedules:              { ask_thread_id: 'TEXT', ask_card_id: 'TEXT',   // v31: the Ask Worca card a series came from
                             created_by: 'TEXT', updated_by: 'TEXT' },   // v39: who made / last changed it (identity.mjs actor)
   scheduled_runs:         { after_kind: 'TEXT', after_id: 'TEXT', after_policy: "TEXT NOT NULL DEFAULT 'done'",
@@ -906,7 +907,7 @@ CREATE TABLE IF NOT EXISTS notification_reads (
 );
 `;
 
-/** night_decisions (v47): one row per ask Away mode answered (src/core/night/*).
+/** night_decisions (v48): one row per ask Away mode answered (src/core/night/*).
  *  `record` is the JSON decision record {choice, strategy, confidence, scores, rationale,
  *  reversible, flagged, questions?, guardrail?, meta?}. Pipelines are soft-deleted, so the
  *  cascade only matters for test DBs. */
@@ -1523,11 +1524,11 @@ function applySchemaV45(db) {
   repairSchemaGaps(db, schemaGaps(db));
 }
 
-/** v47 (Away mode): night_decisions (INCREMENTAL_TABLES), one row per ask Away mode answered.
- *  v46 is the Ask context chips' column. A DB stamped 44 or 46 by an earlier build of the Away mode
- *  branch (night_decisions at v44, then v46) already has the table (IF NOT EXISTS) and gets the
- *  columns it skipped (scheduled resume, MCP picker, context chips) from the gap repair above. */
-function applySchemaV47(db) {
+/** v48 (Away mode): night_decisions (INCREMENTAL_TABLES), one row per ask Away mode answered.
+ *  v46 is the Ask context chips' column, v47 the workspace actions'. A DB stamped 44, 46 or 47 by an
+ *  earlier build of the Away mode branch (night_decisions at v44, v46, then v47) already has the
+ *  table (IF NOT EXISTS) and gets the columns it skipped from the gap repair above. */
+function applySchemaV48(db) {
   db.exec(NIGHT_DECISIONS_DDL);
 }
 
@@ -1958,7 +1959,8 @@ export function migrate(db) {
     if (current < 45) applySchemaV45(db);            // MCP registry: ask_threads.mcp_off (per-chat picker)
     // v46 (Ask context chips): ask_threads.contexts, an INCREMENTAL_COLUMNS entry the hoisted
     // repairSchemaGaps above adds — no step of its own. NULL on every existing thread = no indicator.
-    if (current < 47) applySchemaV47(db);            // Away mode: one row per answered ask
+    // (v47: workspaces.actions_json arrives through the same repair — additive column only, issue #529.)
+    if (current < 48) applySchemaV48(db);            // Away mode: one row per answered ask
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {

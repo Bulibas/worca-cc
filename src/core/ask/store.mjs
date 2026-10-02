@@ -313,7 +313,7 @@ export function updateCardBlock(threadId, cardId, patch = {}) {
       if (!(b && b.kind === 'card' && b.id === cardId)) return b;
       const subPatchable = !!(b.card && (b.card.type === 'workflow' || b.card.type === 'metrics'
         || b.card.type === 'policy' || b.card.type === 'schedule' || b.card.type === 'model' || b.card.type === 'clone' || b.card.type === 'web'
-        || b.card.type === 'workspace' || b.card.type === 'away'));
+        || b.card.type === 'workspace' || b.card.type === 'actions' || b.card.type === 'away'));
       return { ...b, ...allowed, ...(sub && subPatchable ? { card: { ...(b.card || {}), ...sub } } : {}) };
     });
     prepare('UPDATE ask_messages SET blocks = ? WHERE id = ?').run(JSON.stringify(blocks), found.message.id);

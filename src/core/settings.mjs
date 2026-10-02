@@ -974,6 +974,59 @@ export async function setPythonPath(input) {
   return { pythonPath: pythonPath() };
 }
 
+// ── Actions (issue #529) ─────────────────────────────────────────────────────
+// One nested key `actions`: the keep policy for finished-run checkouts, the
+// `auto` port range, the editor/terminal overrides of the built-ins, and the
+// checkout cap. editor/terminal are command paths the built-ins route spawns as
+// the server user, so POST /api/settings refuses an `actions` key from agent callers.
+export const ACTIONS_KEEP = ['never', 'on-success', 'until-pr'];
+export const DEFAULT_ACTIONS_SETTINGS = Object.freeze({ keep: 'never', portLow: 4400, portHigh: 4499, editor: '', terminal: '', maxCheckouts: null });
+const isPort = (v) => Number.isSafeInteger(v) && v >= 1024 && v <= 65535;
+const isCap = (v) => Number.isSafeInteger(v) && v >= 1 && v <= 100;
+
+export function actionsSettings() {
+  const a = readSettings().actions;
+  const s = a && typeof a === 'object' ? a : {};
+  const low = isPort(s.portLow) ? s.portLow : DEFAULT_ACTIONS_SETTINGS.portLow;
+  const high = isPort(s.portHigh) && s.portHigh >= low ? s.portHigh : Math.max(low, DEFAULT_ACTIONS_SETTINGS.portHigh);
+  return {
+    keep: ACTIONS_KEEP.includes(s.keep) ? s.keep : 'never',
+    portLow: low, portHigh: high,
+    editor: typeof s.editor === 'string' ? s.editor.trim() : '',
+    terminal: typeof s.terminal === 'string' ? s.terminal.trim() : '',
+    maxCheckouts: isCap(s.maxCheckouts) ? s.maxCheckouts : null,
+  };
+}
+
+/** @throws {Error} on any invalid key of an `actions` patch (absent / '' / null keys clear). */
+export function assertActionsInput(patch) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('actions must be an object');
+  const has = (k) => Object.hasOwn(patch, k);
+  const clear = (v) => v === '' || v === null || v === undefined;
+  if (has('keep') && !clear(patch.keep) && !ACTIONS_KEEP.includes(patch.keep)) throw new Error(`actions.keep must be one of ${ACTIONS_KEEP.join(' | ')}`);
+  for (const k of ['portLow', 'portHigh']) if (has(k) && !clear(patch[k]) && !isPort(patch[k])) throw new Error(`actions.${k} must be a whole number from 1024 to 65535`);
+  const cur = actionsSettings();
+  const low = has('portLow') && !clear(patch.portLow) ? patch.portLow : cur.portLow;
+  const high = has('portHigh') && !clear(patch.portHigh) ? patch.portHigh : cur.portHigh;
+  if (low > high) throw new Error('actions: the low port must not be above the high port');
+  if (has('maxCheckouts') && !clear(patch.maxCheckouts) && !isCap(patch.maxCheckouts)) throw new Error('actions.maxCheckouts must be a whole number from 1 to 100');
+  // A command line run through the shell (src/core/actions/launcher.mjs); the person decides what it runs.
+  for (const k of ['editor', 'terminal']) if (has(k) && !clear(patch[k]) && (typeof patch[k] !== 'string' || patch[k].length > 2000)) throw new Error(`The ${k} command must be text of at most 2000 characters`);
+}
+
+export async function setActionsSettings(patch = {}) {
+  assertActionsInput(patch);
+  const settings = readSettings();
+  const next = { ...(settings.actions && typeof settings.actions === 'object' ? settings.actions : {}) };
+  for (const [k, v] of Object.entries(patch)) {
+    if (!(k in DEFAULT_ACTIONS_SETTINGS)) continue;
+    if (v === '' || v === null || v === undefined) delete next[k]; else next[k] = typeof v === 'string' ? v.trim() : v;
+  }
+  if (Object.keys(next).length) settings.actions = next; else delete settings.actions;
+  await persistSettings(settings);
+  return actionsSettings();
+}
+
 // ── The keys POST /api/settings understands ──────────────────────────────────
 // The route keeps a legacy contract: a body naming NONE of these clears root
 // (test/settings-projects-root.test.mjs "a bodyless POST resets root"). Every
@@ -997,6 +1050,7 @@ export const SETTINGS_POST_KEYS = Object.freeze([
   'nightMode',                               // night mode user layer (night/config.mjs fields)
   'nightModeToggle',                         // night mode live switch: auto | on | off
   'sync',                                    // sync before run (#527) { beforeRun, remote, refreshMinutes, onDiverged }
+  'actions',                                 // Settings › Runs › Actions { keep, portLow, portHigh, editor, terminal, maxCheckouts }
 ]);
 
 // ── Title-generation model + hidden built-ins (#422) ─────────────────────────

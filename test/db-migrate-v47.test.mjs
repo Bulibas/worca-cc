@@ -1,55 +1,55 @@
-// test/db-migrate-v47.test.mjs
-// v47 = night_decisions (Away mode: one row per answered ask); v46 is the Ask context chips' column.
-// A DB stamped 46 gains the table through the ladder. A DB stamped by an earlier build of the
-// Away mode branch (night_decisions at v44, then v46) keeps its rows and gains the columns it skipped.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { migrate, SCHEMA_VERSION } from '../src/core/db.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
-import { getDb, SCHEMA_VERSION, _resetForTests } from '../src/core/db.mjs';
+import { projectKey } from '../src/core/store.mjs';
+import {
+  createWorkspace, readWorkspaceStacks, updateWorkspaceStacks, workspaceMembers,
+} from '../src/core/workspaces.mjs';
 
 useTempHome(after);
 
-const cols = (db, table) => db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name);
-const NIGHT_COLS = ['id', 'pipeline_id', 'question_id', 'kind', 'ts', 'record'];
-
-test('a DB stamped 46 gains night_decisions through the ladder', () => {
-  let db = getDb();
+test('v47 adds workspaces.actions_json to a v46 DB without touching rows', () => {
+  const db = new DatabaseSync(':memory:');
+  migrate(db);
+  db.exec('ALTER TABLE workspaces DROP COLUMN actions_json');
+  db.prepare("INSERT INTO workspaces (id, name, description, created_at, updated_at) VALUES ('wks-a-0cea65fb','A','', 'x','x')").run();
+  db.exec('PRAGMA user_version = 46');
+  migrate(db);
+  const cols = db.prepare('PRAGMA table_info(workspaces)').all().map((c) => c.name);
+  assert.ok(cols.includes('actions_json'));
+  assert.equal(db.prepare('SELECT actions_json FROM workspaces').get().actions_json, null);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
   assert.ok(SCHEMA_VERSION >= 47);
-  assert.deepEqual(cols(db, 'night_decisions'), NIGHT_COLS);
-  db.exec('DROP TABLE night_decisions');
-  db.exec('PRAGMA user_version = 46');
-  _resetForTests();
-
-  db = getDb();
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
-  assert.deepEqual(cols(db, 'night_decisions'), NIGHT_COLS);
-  assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_night_decisions_pipeline'").get());
 });
 
-test('a DB stamped 46 by an earlier Away mode build keeps night_decisions and gains ask_threads.contexts', () => {
-  let db = getDb();
-  db.exec('ALTER TABLE ask_threads DROP COLUMN contexts');
-  db.exec('PRAGMA user_version = 46');
-  _resetForTests();
+test('workspace stacks: [] by default, update round-trips, members sorted by key', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'worca-v47-ws-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dirs = ['web', 'api'].map((n) => {
+    const d = join(root, n);
+    execFileSync('git', ['init', '-q', d]);
+    return d;
+  });
+  const ws = await createWorkspace({ name: 'Stack WS', projectPaths: dirs });
 
-  db = getDb();
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
-  assert.deepEqual(cols(db, 'night_decisions'), NIGHT_COLS);
-  assert.ok(cols(db, 'ask_threads').includes('contexts'));
-});
+  assert.deepEqual(readWorkspaceStacks(ws.id), []);
+  assert.deepEqual(readWorkspaceStacks('wks-missing-00000000'), []);
 
-test('a DB stamped 44 by the old night-mode branch keeps night_decisions and gains every later column', () => {
-  let db = getDb();
-  db.exec('ALTER TABLE scheduled_runs DROP COLUMN resume_pipeline_id');
-  db.exec('ALTER TABLE ask_threads DROP COLUMN mcp_off');
-  db.exec('ALTER TABLE ask_threads DROP COLUMN contexts');
-  db.exec('PRAGMA user_version = 44');
-  _resetForTests();
+  const stacks = [{ id: 'dev', label: 'Dev stack', kind: 'service', steps: [] }];
+  assert.deepEqual(await updateWorkspaceStacks(ws.id, stacks), stacks);
+  assert.deepEqual(readWorkspaceStacks(ws.id), stacks);
+  await assert.rejects(updateWorkspaceStacks('wks-missing-00000000', stacks), { code: 'NOT_FOUND' });
 
-  db = getDb();
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
-  assert.deepEqual(cols(db, 'night_decisions'), NIGHT_COLS);
-  assert.ok(cols(db, 'scheduled_runs').includes('resume_pipeline_id'));
-  assert.ok(cols(db, 'ask_threads').includes('mcp_off'));
-  assert.ok(cols(db, 'ask_threads').includes('contexts'));
+  const members = await workspaceMembers(ws.id);
+  const expected = dirs.map((d) => ({ projectKey: projectKey(d), name: basename(d) }))
+    .sort((a, b) => a.projectKey.localeCompare(b.projectKey));
+  assert.deepEqual(members.map(({ projectKey: k, name }) => ({ projectKey: k, name })), expected);
+  assert.ok(members.every((m) => typeof m.projectDir === 'string' && m.projectDir));
+  assert.equal(await workspaceMembers('wks-missing-00000000'), null);
 });

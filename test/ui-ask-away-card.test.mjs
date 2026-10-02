@@ -59,13 +59,13 @@ const proposed = (card) => ({ kind: 'card', id: CARD_ID, state: 'proposed', card
 test('proposed: title, Now / After / Changed, both buttons; Apply posts applied', async () => {
   const rec = {};
   const ctx = await openWith(proposed(AWAY_CARD), rec);
-  const el = ctx.doc.querySelector('.ask-card.ask-acard');
+  const el = ctx.doc.querySelector('.ask-card.ask-awcard');
   assert.ok(el, 'the Away mode card renders as its own card');
   assert.equal(el.querySelector('.ask-mcard-title').textContent, 'Change Away mode? (user settings)');
-  assert.match(el.querySelector('.ask-acard-now').textContent, /^Now:.*runs you marked/);
-  assert.match(el.querySelector('.ask-acard-after').textContent, /^After:.*on all runs/);
-  assert.deepEqual([...el.querySelectorAll('.ask-acard-after mark')].map((m) => m.textContent), ['all', 'runs.']);
-  assert.deepEqual([...el.querySelectorAll('.ask-acard-changes li')].map((li) => li.textContent), ['Which runs: Only runs I marked → All runs']);
+  assert.match(el.querySelector('.ask-awcard-now').textContent, /^Now:.*runs you marked/);
+  assert.match(el.querySelector('.ask-awcard-after').textContent, /^After:.*on all runs/);
+  assert.deepEqual([...el.querySelectorAll('.ask-awcard-after mark')].map((m) => m.textContent), ['all', 'runs.']);
+  assert.deepEqual([...el.querySelectorAll('.ask-awcard-changes li')].map((li) => li.textContent), ['Which runs: Only runs I marked → All runs']);
   assert.equal(el.querySelector('[data-ask-ac-decline]').textContent, 'Keep as is');
   const apply = el.querySelector('[data-ask-ac-apply]');
   assert.equal(apply.textContent, 'Apply');
@@ -77,7 +77,7 @@ test('proposed: title, Now / After / Changed, both buttons; Apply posts applied'
 test('a project card names the project; Keep as is posts declined', async () => {
   const rec = {};
   const ctx = await openWith(proposed({ ...AWAY_CARD, level: 'project', projectKey: 'shop-1', projectName: 'Shop' }), rec);
-  const el = ctx.doc.querySelector('.ask-card.ask-acard');
+  const el = ctx.doc.querySelector('.ask-card.ask-awcard');
   assert.equal(el.querySelector('.ask-mcard-title').textContent, 'Change Away mode? (project Shop)');
   el.querySelector('[data-ask-ac-decline]').click();
   await ctx.tick(); await ctx.tick();
@@ -86,7 +86,7 @@ test('a project card names the project; Keep as is posts declined', async () => 
 
 test('applied: "Saved. <detail>"', async () => {
   const ctx = await openWith({ kind: 'card', id: CARD_ID, state: 'applied', card: { ...AWAY_CARD, result: { ok: true, detail: 'Right now it is 15:00. You count as here. Next away hours start at 22:00.' } } });
-  const el = ctx.doc.querySelector('.ask-card.ask-acard');
-  assert.equal(el.querySelector('.ask-acard-saved').textContent, 'Saved. Right now it is 15:00. You count as here. Next away hours start at 22:00.');
+  const el = ctx.doc.querySelector('.ask-card.ask-awcard');
+  assert.equal(el.querySelector('.ask-awcard-saved').textContent, 'Saved. Right now it is 15:00. You count as here. Next away hours start at 22:00.');
   assert.equal(el.querySelector('[data-ask-ac-apply]'), null, 'no buttons once applied');
 });

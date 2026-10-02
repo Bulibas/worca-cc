@@ -380,7 +380,7 @@ export function createAskTools(deps) {
       description: 'Who has started runs on this worca: one row per person (the name recorded when they started a run — a verified sign-in email, a trusted-header name, or the operator\'s declared name; "local" = runs started on this machine with no identity) with runs, lastRunAt and totalCostUsd, most active first. Optional scope: projectKey OR workspaceId. Runs from before attribution existed have no person and are not counted. Read-only; this machine\'s runs only (team-wide people are in get_team_metrics actor breakdowns).',
       inputSchema: SCHEMA.obj({ projectKey: SCHEMA.s('project key from list_projects'), workspaceId: SCHEMA.s('workspace id from list_projects') }) },
     { name: 'get_run',
-      description: 'Read one run: its metadata, the user\'s original prompt, startedBy (the person who started it), `scheduled` when a schedule started it, and `actions` — the people who acted on it (paused, resumed, stopped, answered its questions, continued past a cost cap, opened its PR, archived it) with when. Give projectKey or workspaceId when known; without them the user-pinned scope (when the chat has one) is tried first, then the id is searched everywhere.',
+      description: 'Read one run: its metadata, the user\'s original prompt, startedBy (the person who started it), `scheduled` when a schedule started it, and `actedBy` — the people who acted on it (paused, resumed, stopped, answered its questions, continued past a cost cap, opened its PR, archived it) with when (not the run\'s Actions: those are get_run_checkout). Give projectKey or workspaceId when known; without them the user-pinned scope (when the chat has one) is tried first, then the id is searched everywhere.',
       inputSchema: SCHEMA.obj({ id: SCHEMA.s('run id (8 hex)'), projectKey: SCHEMA.s('scope to a project'), workspaceId: SCHEMA.s('scope to a workspace') }, ['id']) },
     { name: 'get_run_diff',
       description: 'Read the unified diff of a run, paged by byte offset (use nextOffset until truncated is false). Optional path = one file only. files[] lists every file with added/removed counts; credential files are omitted. For a run still in progress it returns the changes so far in its worktree, with live: true — they will keep moving until the run ends.',
@@ -679,6 +679,32 @@ export function createAskTools(deps) {
           name: SCHEMA.s('create / rename: the workspace name'),
           projectKeys: { type: 'array', items: { type: 'string' }, description: 'create: the member projects; add_members: the projects to add (keys from list_projects)' },
           projectKey: SCHEMA.s('remove_member: the member to remove'),
+          note: SCHEMA.s('one line shown on the card: why (≤ 200 chars)') }, ['kind']) },
+    ] : []),
+    // Actions (docs/actions.md "Ask Worca"): read the config, a run's checkout and the running services, and
+    // propose config changes. Nothing here starts, stops, checks out or discards — that is a person's click.
+    ...(deps.actions ? [
+      { name: 'get_project_actions',
+        description: 'Read one project\'s Actions config: its setup command (run once per checkout, before the first action), its actions (id, label, kind service | task, cmd, cmdWin32, cwd, env rows {name, type text | port, value}, openUrl, ready check), which built-in buttons are on (editor, terminal, fileManager, copyCommand), how long setup took last time, and the workspace stacks that start its actions. projectKey defaults to the pinned project. Secrets in commands come back redacted.',
+        inputSchema: SCHEMA.obj({ projectKey: SCHEMA.s('the project (default: the pinned one)') }) },
+      { name: 'get_workspace_stacks',
+        description: 'Read one workspace\'s stacks (one click starts actions across members, in order) and, per member, its projectKey, alias (what {alias.NAME} placeholders use) and action ids. workspaceId defaults to the pinned workspace.',
+        inputSchema: SCHEMA.obj({ workspaceId: SCHEMA.s('the workspace (default: the pinned one)') }) },
+      { name: 'get_run_checkout',
+        description: 'Read a run\'s checkout for Actions: per member its branch, state (no-branch | not-checked-out | checked-out), checkout folder, when it was checked out and its keep policy, setup status (pending | running | ok | failed | none, with the error), and its actions; checkoutBlocked says why Check out is not offered (not finished, archived, kept uncommitted work). instances are the actions started for this run: status (starting | running | ready | exited | failed | stopped), ports, url, readyError (a service that never answered its ready check), exitCode and the last lines of the log (tail). serverRunning false means the worca server that ran them is gone, so nothing is running. Give projectKey or workspaceId when known.',
+        inputSchema: SCHEMA.obj({ id: SCHEMA.s('run id'), projectKey: SCHEMA.s('the run\'s project'), workspaceId: SCHEMA.s('the run\'s workspace') }, ['id']) },
+      { name: 'list_running_actions',
+        description: 'Every action still starting or running, on any run: its run, label, kind, status, ports, url, readyError and log tail — what the sidebar\'s Running actions card shows. Use it for "what is running" and "which port is X on".',
+        inputSchema: SCHEMA.obj({}) },
+      { name: 'propose_actions_change',
+        description: 'Propose an Actions config change for the user to confirm — it never changes anything itself and never runs anything; the user sees a card with every command word for word and applies or declines it. kind "project" (projectKey, default the pinned project): setup (the command run once per checkout, null for none; left out keeps the stored one), actions (the WHOLE new list — call get_project_actions first and send every action back, changed or not; [] removes them all), builtins ({editor, terminal, fileManager, copyCommand}: false turns one off; left out keeps them). An action: {id: lowercase letters, digits and dashes, label, kind: "service" (keeps running: a dev server) or "task" (runs to an exit code: tests, a build), cmd (run through /bin/sh -c in the checkout), cmdWin32?, cwd? (relative, inside the checkout), env?: [{name, type: "text" | "port", value}] (a port row with value "auto" gets a free port from the range in Settings), openUrl? (http(s), may use {PORT}), ready?: {kind: "port", port: <a port row name>, timeoutMs?} | {kind: "output", text, timeoutMs?} | {kind: "immediate"}}. Placeholders: {branch} {worktree} {runId} {member} {NAME} (a port row); ${X} is shell syntax and reaches the shell unchanged. kind "stacks" (workspaceId, default the pinned workspace): stacks, the WHOLE new list (get_workspace_stacks first): [{id, label, kind: "service" | "task", steps: [{member: projectKey, action: one of its action ids, env?: [{name, value}] (text; {alias.NAME} is an earlier step\'s port)}]}]. Build commands from the project\'s own files (open_worktree, then read package.json, Makefile, README) — never invent a script. Returns {ok:true, card} (card.warnings: stacks a change breaks) or {ok:false, errors} to fix and retry. Never claim a change was applied — the card says so when it happens.',
+        inputSchema: SCHEMA.obj({ kind: SCHEMA.s('project | stacks'),
+          projectKey: SCHEMA.s('project: the project (default: the pinned one)'),
+          setup: { type: ['string', 'null'], description: 'project: the setup command, null for none (left out: unchanged)' },
+          actions: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'project: the whole new action list' },
+          builtins: { type: 'object', description: 'project: {editor?, terminal?, fileManager?, copyCommand?} booleans', additionalProperties: true },
+          workspaceId: SCHEMA.s('stacks: the workspace (default: the pinned one)'),
+          stacks: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'stacks: the whole new stack list' },
           note: SCHEMA.s('one line shown on the card: why (≤ 200 chars)') }, ['kind']) },
     ] : []),
     // Web access (docs/guardrails.md "Web access"): only when the parent turned it on for this turn (WORCA_ASK_WEB ⇒ deps.web).
@@ -1200,6 +1226,18 @@ export function createAskTools(deps) {
   }
 
   // ---- scheduled runs: shaping (every string a person typed is redacted; times in the user's zone)
+  // ---- Actions (docs/actions.md "Ask Worca"): every string read back is redacted — commands and logs can hold keys.
+  const actionsOf = (tool) => {
+    if (!deps.actions) throw new AskToolError(`${tool}: actions are unavailable`);
+    return deps.actions;
+  };
+  /** The pinned project / workspace fills a missing target (actions-proposal.mjs actionsProposalInput, replayed by turn.mjs). */
+  const actionsProposalInput = (input, pin) => {
+    const inp = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+    if (str(inp.kind) === 'project' && !str(inp.projectKey) && pin?.projectKey) return { ...inp, projectKey: pin.projectKey };
+    if (str(inp.kind) === 'stacks' && !str(inp.workspaceId) && pin?.workspaceId) return { ...inp, workspaceId: pin.workspaceId };
+    return inp;
+  };
   const modelsOf = (tool) => {
     if (!deps.models) throw new AskToolError(`${tool}: models are unavailable`);
     return deps.models;
@@ -1543,7 +1581,7 @@ export function createAskTools(deps) {
       const baseMoved = await baseMovedOf(row, run.baseSha, run.sourceBranch);
       return { ...run, hasDiff: !run.archived && await deps.hasDiffPatch(row), ...(memory ? { memory } : {}), ...(policy ? { policy } : {}),
         ...(baseMoved ? { baseMoved } : {}),
-        ...(actions.length ? { actions: actions.map((a) => ({ at: a.at, by: a.by, what: deps.redact(a.what) })) } : {}) };
+        ...(actions.length ? { actedBy: actions.map((a) => ({ at: a.at, by: a.by, what: deps.redact(a.what) })) } : {}) };
     },
     async list_people(input) {
       const projectKey = str(input.projectKey);
@@ -2217,6 +2255,35 @@ export function createAskTools(deps) {
       const pin = pinnedScope();
       const inp = pin && pin.workspaceId && str(input.kind) !== 'create' && !str(input.workspaceId) ? { ...input, workspaceId: pin.workspaceId } : input;
       return deps.workspaceChanges.validateChange(inp);
+    },
+    async get_project_actions(input) {
+      const a = actionsOf('get_project_actions');
+      const key = str(input.projectKey) || pinnedScope()?.projectKey || '';
+      if (!key) throw new AskToolError('get_project_actions: projectKey is required (no project is pinned)');
+      const out = await a.projectActions(key);
+      if (!out) throw new AskToolError(`get_project_actions: unknown projectKey "${key.slice(0, 120)}" — list_projects names the registered projects`);
+      return redactDeep(out);
+    },
+    async get_workspace_stacks(input) {
+      const a = actionsOf('get_workspace_stacks');
+      const id = str(input.workspaceId) || pinnedScope()?.workspaceId || '';
+      if (!id) throw new AskToolError('get_workspace_stacks: workspaceId is required (no workspace is pinned)');
+      const out = await a.workspaceStacks(id);
+      if (!out) throw new AskToolError(`get_workspace_stacks: unknown workspace "${id.slice(0, 120)}" — list_projects names the workspaces`);
+      return redactDeep(out);
+    },
+    async get_run_checkout(input) {
+      const a = actionsOf('get_run_checkout');
+      const row = await resolveRow(input, 'get_run_checkout');
+      return redactDeep(await a.runCheckout(row));
+    },
+    async list_running_actions() {
+      return redactDeep(await actionsOf('list_running_actions').runningActions());
+    },
+    async propose_actions_change(input) {
+      const a = actionsOf('propose_actions_change');
+      // A change falls back to the pinned project / workspace (turn.mjs replays this, actionsProposalInput).
+      return a.validateChange(actionsProposalInput(input, pinnedScope()));
     },
     async propose_clone_project(input) {
       if (!deps.clones) throw new AskToolError('propose_clone_project: cloning is unavailable');
