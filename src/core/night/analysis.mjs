@@ -98,7 +98,7 @@ export function normalizeAnalysis(parsed) {
  * cache write) of any of its own turns. `usage` sums every turn, so it cannot say that.
  * @returns {Promise<{byId:Record<string,object>, costUsd:number, usage:object, peakContextTokens:number}>}
  */
-export async function runNightAnalysis({ questions, cwd, task, planPaths, memory, criteria, context, model = null,
+export async function runNightAnalysis({ questions, cwd, task, planPaths, memory, criteria, context, model = null, effort = 'medium',
   run = runClaude, bin, mock = false, envScrub, envAllowlist, signal } = {}) {
   if (mockEnabled({ mock })) {
     // Offline mock (claude.mock / WORCA_MOCK, like the Auto classifier): deterministic, $0 — recommended else first, confident enough to pass 60.
@@ -115,7 +115,8 @@ export async function runNightAnalysis({ questions, cwd, task, planPaths, memory
     const res = await run({
       cwd, systemPrompt: NIGHT_DECIDER_SYSTEM_PROMPT,
       prompt: buildAnalysisPrompt({ questions, task, planPaths, memory, criteria: criteria || {}, context }),
-      model, modelEnv: resolveModelEnv(model), effort: 'medium',
+      // `model` / `effort` = the RESOLVED decider pair (night/decider-model.mjs): env and cost follow it.
+      model, modelEnv: resolveModelEnv(model), effort,
       // The prompt carries agent-written question text, so the spawn is sandboxed like Ask Worca's:
       // no MCP servers, user hooks/plugins or slash commands, no edit mode, secret paths denied.
       permissionMode: 'dontAsk', strictMcpConfig: true, settingSources: ['project'], disableSlashCommands: true,

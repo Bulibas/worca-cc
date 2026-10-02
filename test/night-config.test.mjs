@@ -54,3 +54,28 @@ test('night/config.mjs is a zero-import leaf (keeps settings.mjs cycle-free)', a
   const src = await readFile(new URL('../src/core/night/config.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(src, /^import /m);
 });
+
+test('deciderModel / deciderEffort: shape-only validation; null is the default, never a stored value', () => {
+  assert.equal(NIGHT_DEFAULTS.deciderModel, null);
+  assert.equal(NIGHT_DEFAULTS.deciderEffort, null);
+  assert.deepEqual(validateNightPatch({ deciderModel: 'claude-opus-5-5', deciderEffort: 'xhigh' }, { level: 'project' }), { deciderModel: 'claude-opus-5-5', deciderEffort: 'xhigh' });
+  assert.deepEqual(validateNightPatch({ deciderModel: 'not-in-any-catalog' }), { deciderModel: 'not-in-any-catalog' }, 'catalog membership is checked when the review runs');
+  for (const bad of ['', '   ', ' padded ', 'x'.repeat(201), 42, null]) assert.throws(() => validateNightPatch({ deciderModel: bad }), /deciderModel/, JSON.stringify(bad));
+  assert.doesNotThrow(() => validateNightPatch({ deciderModel: 'x'.repeat(200) }));
+  for (const bad of ['low', 'MAX', '', null, 1]) assert.throws(() => validateNightPatch({ deciderEffort: bad }), /deciderEffort/, JSON.stringify(bad));
+});
+
+test('deciderModel / deciderEffort: project > user > team; a stored null never hides the team value', () => {
+  const team = teamNightLayer((k) => ({ 'night.deciderModel': 'claude-opus-5-5', 'night.deciderEffort': 'high' })[k]);
+  assert.deepEqual(team, { deciderModel: 'claude-opus-5-5', deciderEffort: 'high' });
+  let r = resolveNightConfig({ team });
+  assert.deepEqual([r.config.deciderModel, r.sources.deciderModel, r.config.deciderEffort, r.sources.deciderEffort], ['claude-opus-5-5', 'team', 'high', 'team']);
+  r = resolveNightConfig({ user: { deciderModel: 'claude-sonnet-5-5' }, team });
+  assert.deepEqual([r.config.deciderModel, r.sources.deciderModel, r.config.deciderEffort, r.sources.deciderEffort], ['claude-sonnet-5-5', 'user', 'high', 'team']);
+  r = resolveNightConfig({ project: { deciderEffort: 'max' }, user: { deciderModel: 'claude-sonnet-5-5', deciderEffort: 'medium' }, team });
+  assert.deepEqual([r.config.deciderModel, r.sources.deciderModel, r.config.deciderEffort, r.sources.deciderEffort], ['claude-sonnet-5-5', 'user', 'max', 'project']);
+  r = resolveNightConfig({ project: { deciderModel: null }, user: { deciderEffort: null }, team });
+  assert.deepEqual([r.config.deciderModel, r.sources.deciderModel, r.config.deciderEffort, r.sources.deciderEffort], ['claude-opus-5-5', 'team', 'high', 'team']);
+  r = resolveNightConfig({});
+  assert.deepEqual([r.config.deciderModel, r.sources.deciderModel, r.config.deciderEffort, r.sources.deciderEffort], [null, 'default', null, 'default']);
+});

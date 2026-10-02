@@ -38,3 +38,13 @@ test('event prompt and notice', () => {
   assert.equal(awayEventPrompt({ cardId: 'c1', state: 'applied', card: { summary: 'Which runs: All runs' } }), '[worca event] away card c1 applied; "Which runs: All runs"');
   assert.equal(awayNoticeText({ state: 'declined', card: { summary: 'Which runs: All runs' } }), 'Declined — Which runs: All runs');
 });
+
+test('the Decided by model and its effort read in words on the card', async () => {
+  const r = await mk({ user: { deciderModel: 'claude-opus-5-5' } })({ level: 'user', set: { deciderEffort: 'high' }, unset: ['deciderModel'] });
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.deepEqual(r.card.changes, [
+    { field: 'deciderEffort', label: 'Effort', before: 'medium', after: 'high' },
+    { field: 'deciderModel', label: 'Decided by', before: 'claude-opus-5-5', after: 'Same as the run (inherited)' },
+  ]);
+  assert.match((await mk()({ level: 'user', set: { deciderEffort: 'low' } })).errors[0], /deciderEffort/);
+});

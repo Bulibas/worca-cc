@@ -174,3 +174,15 @@ test('no away hours set: the run pill and the New-run hint never say "by day" or
   assert.equal(r({}, C).reason, 'A marked run is answered by day once a question has waited long enough.');
   assert.match(describeNewRun({ config: C, toggle: 'auto' }), /By day it also answers/);
 });
+
+test('the summary names the Decided by model when one is set, and only while worca may weigh the options', () => {
+  const now = at('2026-09-28T15:00:00Z');
+  const lines = (o, extra = {}) => describeAwayMode({ ...base, config: { ...C, ...o }, now, ...extra }).lines;
+  const weighs = (ls) => ls.some((l) => /weighs the options/.test(l));
+  assert.equal(weighs(lines({})), false, 'nothing set: no line');
+  assert.equal(weighs(lines({ deciderEffort: 'high' })), false, 'an effort alone adds no line');
+  assert.equal(lines({ deciderModel: 'claude-opus-5-5', deciderEffort: 'high' }).at(-1), 'worca weighs the options with claude-opus-5-5 at high effort.');
+  assert.equal(lines({ deciderModel: 'claude-opus-5-5' }, { modelLabel: (id) => (id === 'claude-opus-5-5' ? 'Opus 5.5' : null) }).at(-1), 'worca weighs the options with Opus 5.5.');
+  assert.equal(weighs(lines({ deciderModel: 'claude-opus-5-5', strategy: 'weights' })), false, '"Always trust the agent\'s recommendation" never weighs');
+  assert.equal(lines({ deciderModel: 'claude-opus-5-5' }, { projectFields: ['deciderModel'] }).at(-1), 'worca weighs the options with claude-opus-5-5. (this project)');
+});

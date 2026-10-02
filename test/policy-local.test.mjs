@@ -106,6 +106,6 @@ test('localSnapshot: night.* rows carry the developer layers only', async () => 
   s = localSnapshot(null);
   assert.deepEqual(s['night.enabled'], { value: true, set: true });
   assert.deepEqual(s['night.maxDecisions'], { value: 7, set: true });
-  assert.equal(Object.keys(s).filter((k) => k.startsWith('night.')).length, 13);
+  assert.equal(Object.keys(s).filter((k) => k.startsWith('night.')).length, 15);
   await setNightMode(null);
 });

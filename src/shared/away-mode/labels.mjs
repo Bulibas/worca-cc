@@ -44,10 +44,17 @@ const fromId = (id) => {
   return s ? `${s[0].toUpperCase()}${s.slice(1).toLowerCase()}` : 'Question';
 };
 
+/** Did the review (the nightDecider) give this question's answer? Judged per question: an ask's
+ *  `strategy` joins its questions' ('weights+analysis'). A review that failed leaves the answer
+ *  with no confidence (strategies.mjs decideQuestion), and the agent's own answer is 'weights'. */
+const reviewAnswered = (x) => x.strategy === 'analysis' && Number.isFinite(x.confidence);
+
 /** The rows one stored answer shows: one per question it answered, else one outcome.
  *  `q` = what was asked (null for an ask without questions), `a` = the answer, `why` = the reason
  *  ('' when there is none), `check` = worca was not sure. A limit row is a pause: never one to check.
- *  @returns {{q: string|null, a: string, why: string, check: boolean}[]} */
+ *  `by` (only on an answer the review gave, on a record that names its model) = the model id it ran
+ *  on, null for the CLI's default model.
+ *  @returns {{q: string|null, a: string, why: string, check: boolean, by?: string|null}[]} */
 export function awayAnswerRows(d) {
   const rec = d && typeof d === 'object' ? d : {};
   if (rec.choice == null) return [{ q: null, a: LIMITS[rec.guardrail] || 'Paused', why: sentence(rec.rationale), check: false }];
@@ -55,11 +62,14 @@ export function awayAnswerRows(d) {
   if (qs.length) {
     // A flagged ask none of whose questions is marked (a form that fell back to its defaults): mark them all.
     const all = rec.flagged === true && !qs.some((x) => x.flagged === true);
+    // Records stored before the model was kept have no `model` key: they show none.
+    const model = rec.model === undefined ? undefined : (typeof rec.model === 'string' && rec.model ? rec.model : null);
     return qs.map((x) => ({
       q: typeof x.question === 'string' && x.question.trim() && x.question !== x.id ? x.question.trim() : fromId(x.id),
       a: x.choice == null || x.choice === '' ? 'No answer' : String(x.choice),
       why: sentence(x.rationale),
       check: all || x.flagged === true,
+      ...(model !== undefined && reviewAnswered(x) ? { by: model } : {}),
     }));
   }
   const check = rec.flagged === true;
@@ -97,7 +107,24 @@ export const FIELD_LABELS = Object.freeze({
   maxDecisions: { label: 'Pause a run after', hint: 'When worca has answered this many times on one run, the run pauses and waits for you.' },
   maxExtraCycles: { label: 'Extra fix rounds in a review loop', hint: 'When critical or major issues remain, worca may ask for this many more fix rounds. After that it continues and flags it.' },
   allowCostCapOverride: { label: "May exceed the team's cost cap", hint: "Off: a run pauses at the team's soft cost cap while you are away. On: worca keeps going and flags it." },
+  deciderModel: { label: 'Decided by', hint: 'The model worca uses when it weighs the options.' },
+  deciderEffort: { label: 'Effort', hint: 'How hard that model thinks while it weighs the options. Higher costs more. Not set = medium.' },
 });
+
+/** The "Decided by" effort choices: model-env.mjs EFFORTS (test/night-decider-model.test.mjs pins them equal). */
+export const DECIDER_EFFORTS = Object.freeze(['medium', 'high', 'xhigh', 'max']);
+/** The words around the "Decided by" picker and the answers list. */
+export const DECIDER_WORDS = Object.freeze({
+  sameAsRun: 'Same as the run',          // deciderModel not set: the run's model
+  runModel: "the run's model",           // …inside "Same as my settings (…)" on the project tab
+  defaultEffort: 'medium',               // deciderEffort not set
+  notInstalled: 'not installed',         // a stored model that left the catalog
+  defaultModel: 'the default model',     // the review ran with no model named (the CLI's own)
+});
+/** The "Decided by" picker's option groups: the Settings title-model picker's (app.js buildTitleModelOptions). */
+export const DECIDER_GROUPS = Object.freeze({ mine: 'Your models', policy: 'Team policy', plugins: 'From plugins', builtIn: 'Built-in' });
+/** The answers list's small line under an answer the review gave: "Decided by Opus 5.5". */
+export const decidedByText = (label) => `Decided by ${label || DECIDER_WORDS.defaultModel}`;
 
 export const WHICH_RUNS_OPTIONS = Object.freeze([
   { value: false, label: 'Only runs I marked', hint: 'Mark a run when you start it (New run → "Mark this run", or --night). Other runs wait for you.' },

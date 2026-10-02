@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { awayAnswersSummary, KIND_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, FIELD_LABELS, WHICH_RUNS_OPTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, STATUS_ACTIONS, statusActions, GRACE_NO_HOURS, kindLabel, pillText, KIND_SHORT, kindShort, awayAnswerRows } from '../src/shared/away-mode/labels.mjs';
+import { awayAnswersSummary, KIND_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, FIELD_LABELS, WHICH_RUNS_OPTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, STATUS_ACTIONS, statusActions, GRACE_NO_HOURS, kindLabel, pillText, KIND_SHORT, kindShort, awayAnswerRows, DECIDER_WORDS, DECIDER_GROUPS, decidedByText } from '../src/shared/away-mode/labels.mjs';
 import { NIGHT_KINDS, NIGHT_STRATEGIES, NIGHT_CRITERIA, NIGHT_FIELDS } from '../src/core/night/config.mjs';
 
 test('every kind, method, criterion and field has a plain label', () => {
@@ -122,4 +122,32 @@ test('awayAnswerRows: row text uses the glossary words only', () => {
   for (const r of recs.flatMap((d) => awayAnswerRows(d))) for (const t of [r.q, r.a].filter(Boolean)) {
     for (const bad of [/\bnight\b/i, /\bstrategy\b/i, /\bdecisions?\b/i, /\bguardrail\b/i]) assert.doesNotMatch(t, bad, t);
   }
+});
+
+test('the "Decided by" and "Effort" fields have plain labels and hints', () => {
+  assert.equal(FIELD_LABELS.deciderModel.label, 'Decided by');
+  assert.equal(FIELD_LABELS.deciderEffort.label, 'Effort');
+  assert.ok(FIELD_LABELS.deciderModel.hint && FIELD_LABELS.deciderEffort.hint, 'the policy registry needs a non-empty help');
+  assert.equal(decidedByText('Opus 5.5'), 'Decided by Opus 5.5');
+  assert.equal(decidedByText(null), 'Decided by the default model');
+  assert.deepEqual(Object.values(DECIDER_GROUPS), ['Your models', 'Team policy', 'From plugins', 'Built-in'], 'the title-model picker\'s groups');
+  for (const t of [...Object.values(DECIDER_WORDS), ...Object.values(DECIDER_GROUPS), FIELD_LABELS.deciderModel.hint, FIELD_LABELS.deciderEffort.hint, decidedByText('X')]) for (const bad of [/\bnight\b/i, /\bstrategy\b/i, /\bdecisions?\b/i]) assert.doesNotMatch(t, bad, t);
+});
+
+test('awayAnswerRows: only an answer the review gave names its model (judged per question)', () => {
+  const qs = [
+    { id: 'store', question: 'Which store?', choice: 'Redis', strategy: 'analysis', confidence: 80, flagged: false, rationale: 'fits' },
+    { id: 'tone', question: 'Which tone?', choice: 'Calm', strategy: 'weights', confidence: 90, flagged: false, rationale: 'the agent recommended this at 90%, well ahead of the next option' },
+    { id: 'size', question: 'Which size?', choice: 'S', strategy: 'analysis', confidence: null, flagged: true, rationale: 'could not weigh the options (boom); first option taken' },
+  ];
+  const rows = awayAnswerRows({ kind: 'clarify', choice: 'Redis | Calm | S', strategy: 'analysis+weights', model: 'claude-opus-5-5', effort: 'high', flagged: true, questions: qs });
+  assert.deepEqual(rows.map((r) => r.by), ['claude-opus-5-5', undefined, undefined]);
+  assert.equal('by' in rows[1], false, 'no key at all on a row the review did not give');
+  assert.equal('by' in rows[2], false, 'a review that failed gave no answer');
+  // The review ran with no model named (no run model, nothing set): null = the CLI default.
+  assert.equal(awayAnswerRows({ kind: 'clarify', choice: 'Redis', model: null, effort: 'medium', questions: [qs[0]] })[0].by, null);
+  // A record stored before the model was kept shows none, even for an answer the review gave.
+  assert.equal('by' in awayAnswerRows({ kind: 'clarify', choice: 'Redis', questions: [qs[0]] })[0], false);
+  // Rule-based answers never show one.
+  assert.equal('by' in awayAnswerRows({ kind: 'gate', choice: 'continue', strategy: 'rule', model: 'claude-opus-5-5' })[0], false);
 });

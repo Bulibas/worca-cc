@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { normalizeAnalysis, buildAnalysisPrompt, runNightAnalysis, readMemoryText, capText } from '../src/core/night/analysis.mjs';
 import { writeMemory, memoryRoot, projectScope, GLOBAL_SCOPE } from '../src/core/memory-store.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { resolveModelEnv } from '../src/core/config.mjs';
 
 useTempHome(after);
 
@@ -56,6 +57,21 @@ test('runNightAnalysis parses the reply and reports cost', async () => {
 test('mock mode answers offline: recommended else first, confident', async () => {
   const r = await runNightAnalysis({ mock: true, questions: [{ id: 'a', options: ['x', 'y'], recommended: 'y' }, { id: 'b', options: ['p'] }] });
   assert.deepEqual([r.byId.a.choice, r.byId.b.choice, r.costUsd], ['y', 'p', 0]);
+});
+
+test('runNightAnalysis runs the model and effort it is given (medium when none), with that model\'s env', async () => {
+  const seen = [];
+  const run = async (o) => { seen.push(o); return { text: '{"decisions":[]}' }; };
+  const qs = [{ id: 'q1', question: '?', options: ['a'] }];
+  await runNightAnalysis({ questions: qs, cwd: '/tmp', run, memory: '', task: 't', model: 'claude-haiku-4-5', effort: 'high' });
+  await runNightAnalysis({ questions: qs, cwd: '/tmp', run, memory: '', task: 't' });
+  assert.deepEqual(seen.map((o) => [o.model, o.effort]), [['claude-haiku-4-5', 'high'], [null, 'medium']]);
+  assert.deepEqual(seen[0].modelEnv, resolveModelEnv('claude-haiku-4-5'));
+  assert.equal(seen[1].modelEnv, undefined, 'no model, no routing env');
+  let called = false;
+  const r = await runNightAnalysis({ mock: true, model: 'claude-haiku-4-5', effort: 'max', run: async () => { called = true; return { text: '' }; }, questions: [{ id: 'a', options: ['x'] }] });
+  assert.equal(called, false, 'the mock branch still returns before any spawn');
+  assert.deepEqual([r.byId.a.choice, r.costUsd], ['x', 0]);
 });
 
 test('capText cuts at a byte budget, never inside a character, and says why', () => {
