@@ -143,7 +143,8 @@ import { agentIdentity } from '../src/core/agent-user.mjs';
 import { spawn } from 'node:child_process';
 import { ActionRegistry, instanceIdFor, reapOrphans, busyRunIdsFromPidFile, actionsPidFile, actionsStateFile } from '../src/core/actions/registry.mjs';
 import { runStack, stopStack } from '../src/core/actions/stack.mjs';
-import { detectBuiltins, builtinLaunch, copyCommandText } from '../src/core/actions/builtins.mjs';
+import { detectBuiltins, builtinLaunch, copyCommandText, findOnPath } from '../src/core/actions/builtins.mjs';
+import { buildLauncherCommand, launchAndWatch, installedLaunchers, launcherExamples, launcherWarning } from '../src/core/actions/launcher.mjs';
 import { assertNoRawCommand, normalizeStacks, memberAliases, SETUP_ACTION_ID, ActionConfigError } from '../src/core/actions/model.mjs';
 import { parsePortRange } from '../src/core/actions/ports.mjs';
 import { checkoutRun, discardCheckout, membersOfRow, checkoutPathFor, setSetupState, markInterruptedSetups,
@@ -5290,10 +5291,40 @@ app.post('/api/runs/:id/builtins/:builtin', async (req, res) => {
   const rec = checkoutRecOf(row.id, m.projectKey);
   if (!rec) return res.status(409).json({ error: 'Check out the run first.', code: 'NOT_CHECKED_OUT' });
   let l;
-  try { l = builtinLaunch(key, rec.worktreeDir, builtins()); }
+  try { l = builtinLaunch(key, rec.worktreeDir, builtins(), { vars: { branch: rec.branch, project: m.projectKey, runId: row.id } }); }
   catch (e) { return res.status(409).json({ error: e.message, code: e.code || 'NOT_AVAILABLE' }); }
-  const c = spawn(l.file, l.args, l.opts); c.on('error', () => {}); c.unref();
+  // Watched for a moment: a command that fails at once (not found, a typo) says why on the card.
+  const r = await launchAndWatch(l, { spawn });
+  if (!r.ok) return res.status(409).json({ error: `${BUILTIN_NAMES[key] || key} did not open: ${r.error}`, code: 'LAUNCH_FAILED' });
   res.json({ ok: true });
+});
+
+// Settings › Runs › Actions: what "Choose…" lists (found on THIS machine, which is where commands run),
+// and the hover examples for this OS. Scanned once per server process.
+const BUILTIN_NAMES = { editor: 'Editor', terminal: 'Terminal', fileManager: 'The file manager' };
+let launchersFound = null;
+app.get('/api/actions/launchers', (req, res) => {
+  launchersFound ??= installedLaunchers({ findOnPath: (n) => findOnPath(n) });
+  res.json({ platform: process.platform, ...launchersFound, examples: launcherExamples(), detected: autoDetectedBuiltins() });
+});
+
+// "Try": run the typed Editor / Terminal line (or the detected default when blank) on the home folder.
+// The one route that takes a command line from the request: the person is testing what they are about to
+// save. Same guards as saving it (D4) and as running actions on a hosted worca.
+app.post('/api/actions/launchers/try', async (req, res) => {
+  if (!requireActions(req, res)) return;
+  const kind = req.body?.kind;
+  if (kind !== 'editor' && kind !== 'terminal') return badRequest(res, 'kind must be editor or terminal');
+  const line = typeof req.body?.line === 'string' ? req.body.line.trim() : '';
+  if (line.length > 2000) return badRequest(res, 'the command is too long');
+  const folder = os.homedir();
+  let l;
+  try {
+    l = line ? buildLauncherCommand(line, { folder }) : builtinLaunch(kind, folder, detectBuiltins({ overrides: {} }));
+  } catch (e) { return res.status(409).json({ error: e.message, code: e.code || 'NOT_AVAILABLE' }); }
+  const r = await launchAndWatch(l, { spawn });
+  if (!r.ok) return res.status(409).json({ error: r.error, code: 'LAUNCH_FAILED' });
+  res.json({ ok: true, folder });
 });
 
 app.get('/api/runs/:id/actions', async (req, res) => {
@@ -7023,7 +7054,11 @@ app.post('/api/settings', async (req, res) => {
     // Other open tabs repaint their Settings cards (a stale tab could otherwise
     // "save" its old checkbox state over this one with no feedback to either).
     if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule') || has('sync') || hasActionsKey) emitChanged('settings-changed');
-    res.json({ ...settingsState(), ...(await autoModelState()), ...(await prDescriptionModelState()), chat: chatPrefs() });
+    // Editor / Terminal: saved as typed; a program Worca cannot find comes back as a warning on its field.
+    const actionsWarnings = hasActionsKey ? Object.fromEntries(['editor', 'terminal']
+      .map((k) => [k, launcherWarning(actionsSettings()[k], { findOnPath: (n) => findOnPath(n) })]).filter(([, w]) => w)) : null;
+    res.json({ ...settingsState(), ...(await autoModelState()), ...(await prDescriptionModelState()), chat: chatPrefs(),
+      ...(actionsWarnings ? { actionsWarnings } : {}) });
   } catch (err) {
     // The setters throw only on an unusable path -> client error (400).
     return badRequest(res, err && err.message ? err.message : String(err));

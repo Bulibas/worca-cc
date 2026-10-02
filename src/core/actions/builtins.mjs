@@ -1,5 +1,6 @@
 // src/core/actions/builtins.mjs — the four built-in actions. Detection is injectable
 // (platform, env, exists) so every OS is tested from any OS.
+import { buildLauncherCommand, launcherLabel } from './launcher.mjs';
 import { statSync } from 'node:fs';
 
 const EDITORS = [['code', 'VS Code'], ['cursor', 'Cursor'], ['idea', 'IntelliJ IDEA'], ['webstorm', 'WebStorm']];
@@ -27,12 +28,13 @@ const hasDisplay = (env) => !!(env.DISPLAY || env.WAYLAND_DISPLAY);
 export function detectBuiltins({ platform = process.platform, env = process.env, exists = defaultExists, overrides = {} } = {}) {
   const find = (n) => findOnPath(n, { env, platform, exists });
   let editor = null;
-  if (overrides.editor) editor = { label: overrides.editor.split(/[\\/]/).pop(), cmd: overrides.editor };
+  // A saved Editor / Terminal is a command line (launcher.mjs): run through the shell, {folder} placed.
+  if (overrides.editor) editor = { label: launcherLabel(overrides.editor), line: overrides.editor, kind: 'line' };
   else for (const [bin, label] of EDITORS) { const p = find(bin); if (p) { editor = { label, cmd: p }; break; } }
 
   let terminal = null;
   let fileManager = null;
-  if (overrides.terminal) terminal = { label: overrides.terminal.split(/[\\/]/).pop(), cmd: overrides.terminal, kind: 'override' };
+  if (overrides.terminal) terminal = { label: launcherLabel(overrides.terminal), line: overrides.terminal, kind: 'line' };
   if (platform === 'darwin') {
     terminal ??= { label: 'Terminal', kind: 'mac' };
     fileManager = { label: 'Finder', kind: 'mac' };
@@ -49,18 +51,18 @@ export function detectBuiltins({ platform = process.platform, env = process.env,
 }
 
 /** { file, args, opts } for a detached, fire-and-forget launch of a built-in on `dir`. */
-export function builtinLaunch(key, dir, detected, { platform = process.platform, env = process.env } = {}) {
+export function builtinLaunch(key, dir, detected, { platform = process.platform, env = process.env, vars = {} } = {}) {
   const base = { detached: true, stdio: 'ignore', windowsHide: false };
   const viaCmd = (bin, args) => ({ file: env.ComSpec || 'cmd.exe',
     args: ['/d', '/s', '/c', `"${[bin, ...args].map((a) => `"${a}"`).join(' ')}"`], opts: { ...base, windowsVerbatimArguments: true } });
   const d = detected[key];
   if (!d) { const e = new Error(`${key} is not available on this machine`); e.code = 'NOT_AVAILABLE'; throw e; }
+  if (d.kind === 'line') { const c = buildLauncherCommand(d.line, { folder: dir, vars, platform, env }); return { file: c.file, args: c.args, opts: c.opts }; }
   if (key === 'editor') {
     if (platform === 'win32' && /\.(cmd|bat)$/i.test(d.cmd)) return viaCmd(d.cmd, [dir]);
     return { file: d.cmd, args: [dir], opts: base };
   }
   if (key === 'terminal') {
-    if (d.kind === 'override') return { file: d.cmd, args: [dir], opts: { ...base, cwd: dir } };
     if (d.kind === 'mac') return { file: 'open', args: ['-a', 'Terminal', dir], opts: base };
     if (d.kind === 'wt') return { file: d.cmd, args: ['-d', dir], opts: base };
     // Verbatim command line: Node's default quoting would turn the empty title "" into \"\",

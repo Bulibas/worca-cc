@@ -14834,11 +14834,19 @@ function paintActionsSettings(data) {
   set('act-terminal', a.terminal);
   set('act-max', a.maxCheckouts);
   actionsDetected = (data && data.actionsDetected) || {};
-  for (const key of ['editor', 'terminal']) paintActionsDetectNote(key);
+  // A save answers with actionsWarnings (a program Worca cannot find): amber on that field until it changes.
+  for (const key of ['editor', 'terminal']) {
+    const warn = data && data.actionsWarnings && data.actionsWarnings[key];
+    if (warn) actionsFieldMsg[key] = { kind: 'warn', text: warn }; else delete actionsFieldMsg[key];
+    paintActionsDetectNote(key);
+  }
+  void loadActionsLaunchers();
 }
 // Blank Editor / Terminal fall back to detection: the placeholder and the note say what it found, so a
 // blank field never claims "detected" when nothing was (the run page then says "No editor was found").
 let actionsDetected = {};
+const actionsFieldMsg = {};   // editor | terminal -> { kind: ok | warn | err, text }: a Try result or a save warning, until the field changes
+let actionsLaunchers = null;  // GET /api/actions/launchers (what "Choose…" lists, the hover examples), loaded once
 // What the field takes: ONE program, run as `<program> <checkout folder>` (no shell). Umbrella terms, no product names.
 const ACT_DETECT_MISSING = {
   editor: 'No editor was found on this machine. Enter the command or full path of an IDE or code editor that opens a folder.',
@@ -14850,11 +14858,80 @@ function paintActionsDetectNote(key) {
   if (!input || !note) return;
   const label = actionsDetected[key] || null;
   input.placeholder = label ? `${label} (detected)` : 'None found on this machine';
+  note.classList.remove('ok', 'warn', 'err');
+  const msg = actionsFieldMsg[key];
+  if (msg) { note.textContent = msg.text; note.classList.add(msg.kind); note.hidden = false; return; }
   note.textContent = input.value.trim() ? '' : label ? `Left blank, Worca uses ${label}.` : ACT_DETECT_MISSING[key];
   note.hidden = !note.textContent;
 }
+const ACT_OS_NAME = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' };
+const actOption = (label, value) => Object.assign(document.createElement('option'), { textContent: label, value });
+/** "Choose…" lists what is installed on the machine that runs the command (the server), and the ⓘ shows
+ *  that machine's examples: a Windows browser on a Mac server gets the macOS forms. */
+async function loadActionsLaunchers() {
+  if (actionsLaunchers) return actionsLaunchers;
+  try {
+    const r = await fetch('/api/actions/launchers');
+    if (!r.ok) return null;
+    actionsLaunchers = await r.json();
+  } catch { return null; }
+  for (const key of ['editor', 'terminal']) {
+    const sel = document.getElementById(`act-${key}-choose`);
+    if (sel) {
+      const found = actionsLaunchers[key] || [];
+      sel.replaceChildren(actOption('Choose…', ''));
+      if (!found.length) { const o = actOption(`No ${key} found on this machine`, ''); o.disabled = true; sel.append(o); }
+      else {
+        const group = document.createElement('optgroup');
+        group.label = 'Found on this machine';
+        for (const f of found) group.append(actOption(f.label, f.line));
+        sel.append(group);
+      }
+    }
+    const tip = document.getElementById(`act-${key}-tip`);
+    const ex = (actionsLaunchers.examples || {})[key] || [];
+    if (tip && ex.length) {
+      tip.dataset.base ??= tip.textContent.trim();
+      const os = ACT_OS_NAME[actionsLaunchers.platform] || actionsLaunchers.platform;
+      tip.replaceChildren(document.createTextNode(tip.dataset.base), document.createElement('br'), document.createElement('br'),
+        document.createTextNode(`Examples on ${os}:`));
+      for (const line of ex) tip.append(document.createElement('br'), Object.assign(document.createElement('code'), { textContent: line }));
+    }
+  }
+  return actionsLaunchers;
+}
 for (const key of ['editor', 'terminal']) {
-  document.getElementById(`act-${key}`)?.addEventListener('input', () => paintActionsDetectNote(key));
+  const input = document.getElementById(`act-${key}`);
+  input?.addEventListener('input', () => { delete actionsFieldMsg[key]; paintActionsDetectNote(key); });
+  document.getElementById(`act-${key}-choose`)?.addEventListener('change', (e) => {
+    if (!input || !e.target.value) return;
+    input.value = e.target.value;
+    e.target.value = '';
+    delete actionsFieldMsg[key];
+    paintActionsDetectNote(key);
+    input.focus();
+  });
+  // Try: run what is typed (or the detected default) on the home folder, and say what happened on the field.
+  document.getElementById(`act-${key}-try`)?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const line = (input?.value || '').trim();
+    btn.disabled = true;
+    btn.textContent = 'Trying…';
+    try {
+      const r = await fetch('/api/actions/launchers/try', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: key, line }) });
+      const j = await r.json().catch(() => ({}));
+      const what = line ? 'It' : (actionsDetected[key] || `The detected ${key}`);
+      actionsFieldMsg[key] = r.ok ? { kind: 'ok', text: `${what} opened your home folder as a test.${line ? ' Save to keep it.' : ''}` }
+        : { kind: 'err', text: j.error ? `It did not open: ${j.error}` : `Try failed (HTTP ${r.status}).` };
+    } catch (err) {
+      actionsFieldMsg[key] = { kind: 'err', text: `Try failed: ${err?.message || err}` };
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Try';
+      paintActionsDetectNote(key);
+    }
+  });
 }
 function saveActionsSettings(actions) {
   return postSettingsCard({ actions }, {

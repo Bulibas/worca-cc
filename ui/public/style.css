@@ -7502,6 +7502,18 @@ input.gv-name:focus-visible{outline:none;}
 .act-meta dd{margin:0;display:flex;align-items:center;gap:4px;min-width:0}
 .act-meta code{font-family:var(--mono);font-size:12.5px;color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .act-later{color:var(--ink-2)}
+.act-notes{display:grid;gap:4px}
+.act-notes .hint,.act-card > p.hint{margin:0}
+/* Settings › Runs › Actions: Editor / Terminal = command line + Choose… + Try, and one note (detected / Try / warning) */
+.act-launcher-row{display:flex;gap:8px;align-items:center}
+.act-launcher-row .input{flex:1 1 auto;min-width:0}
+.act-launcher .input::placeholder{color:var(--ink-2)}   /* says what blank means (detected, or none found): readable, not decorative */
+.act-choose-wrap{flex:0 0 170px}
+.act-hint.ok{color:var(--green-ink)}
+.act-hint.warn{color:var(--amber-ink)}
+.act-hint.err{color:var(--red-ink)}
+.info-bubble code{font-family:var(--mono);font-size:.92em}
+@media (max-width:560px){.act-launcher-row{flex-wrap:wrap}.act-launcher-row .input{flex-basis:100%}.act-choose-wrap{flex:1 1 auto}}
 .act-meta .badge.act-linked{background:var(--blue-bg);color:var(--blue-ink-strong);margin-left:4px}   /* a linked folder: the person's own */
 .act-copy{border:0;background:none;color:var(--ink-2);cursor:pointer;padding:5px;border-radius:7px;display:inline-grid;place-items:center;flex:none}
 .act-copy:hover{background:var(--field);color:var(--ink)}

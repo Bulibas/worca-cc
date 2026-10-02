@@ -125,8 +125,33 @@ Next to the project's own actions, each checkout offers four buttons (turn any o
 | Open folder | `open <dir>` (Finder) | `xdg-open <dir>` (needs a display) | `explorer.exe <dir>` |
 | Copy command | Copies the git commands that put the branch in your own clone (below) | | |
 
-Settings › Runs › Actions › **Editor** and **Terminal** replace the detection: Worca runs
-`<your command> <dir>`. With no editor found, the button is not offered.
+### Your own editor and terminal
+
+Settings › Runs › Actions › **Editor** and **Terminal** replace the detection. Each takes a command line,
+typed as you would in a terminal, and runs it through the system shell (`/bin/sh -c` on macOS and
+Linux, `cmd.exe /d /s /c` on Windows), so arguments, quotes, `~`, `$VAR` / `%VAR%` and `&&` work.
+
+- **`{folder}`** (or `{worktree}`) marks where the checkout folder goes, quoted for the shell. Without it the
+  folder is added at the end, so a bare command such as `xed` works. `{branch}`, `{project}` and `{runId}`
+  work too.
+- **A macOS app** (`/Applications/Xcode.app`, or just `Xcode.app`) opens with `open -a`.
+- **An unquoted path with spaces** at the start is quoted for you, such as
+  `C:\Program Files\Microsoft VS Code\Code.exe --new-window`.
+- **Choose…** lists the editors and terminals found on the machine that runs Worca, each with a line that
+  works as it is. The ⓘ next to each field shows examples for that machine's operating system.
+- **Try** runs the line on your home folder and says on the field whether it opened, or why not (the
+  shell's own error). A program Worca cannot find gives a warning on Save; the line is saved anyway.
+
+| OS | Editor examples | Terminal examples |
+| --- | --- | --- |
+| macOS | `xed`, `open -a "Visual Studio Code" {folder}`, `/Applications/Zed.app` | `open -a iTerm {folder}`, `open -a Terminal {folder}` |
+| Windows | `code {folder}`, `"C:\Program Files\Microsoft VS Code\Code.exe" --new-window {folder}` | `wt -d {folder}`, `start "" /D {folder} powershell -NoExit` |
+| Linux | `code {folder}`, `zeditor {folder}` | `gnome-terminal --working-directory={folder}`, `konsole --workdir {folder}` |
+
+The line runs as the user Worca runs as, whenever someone clicks the button. Saving it, and Try, are
+refused for a possible agent under agent isolation, like the project actions config (see Security), and a
+hosted worca runs neither unless `WORCA_ACTIONS_REMOTE=1` is set. With no editor found and none set, the
+Editor button is not offered.
 
 ### Copy command
 
@@ -227,7 +252,8 @@ ones, and up to 40 log lines per instance.
 
 - **Ids only.** Start, stop, setup, stack, built-in and Try it requests carry ids. A body with any of
   `cmd`, `cmdWin32`, `command`, `setup`, `env`, `cwd`, `shell` or `args` is refused with
-  `400 RAW_COMMAND`. The command always comes from stored config.
+  `400 RAW_COMMAND`. The command always comes from stored config. The one exception is **Try** next to Settings › Runs › Actions ›
+  Editor and Terminal: it runs the line being edited, behind the same guards as saving it.
 - **cwd pinned.** `cwd` must stay inside the worktree: checked when the config is saved, and again
   before every spawn.
 - **Open links** are `http`/`https` only, checked on save and again before they are rendered.

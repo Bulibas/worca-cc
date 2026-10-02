@@ -317,3 +317,59 @@ test('Settings › Runs › Actions: blank Editor / Terminal say what detection 
   editor.dispatchEvent(new window.Event('input', { bubbles: true }));
   assert.equal(doc.getElementById('act-editor-note').hidden, false, 'cleared: the note is back');
 });
+
+test('Editor / Terminal: Choose… fills the command, the ⓘ shows the server OS examples, Try and a save warning land on the field', async () => {
+  const { window } = await boot();
+  const base = globalThis.fetch;
+  let tryAnswer = { ok: true, status: 200, json: async () => ({ ok: true }) };
+  const tries = [];
+  globalThis.fetch = window.fetch = (u, opts) => {
+    const s = String(u);
+    if (s.includes('/api/actions/launchers/try')) { tries.push(JSON.parse(opts.body)); return Promise.resolve(tryAnswer); }
+    if (s.includes('/api/actions/launchers')) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ platform: 'win32',
+        editor: [{ label: 'VS Code', line: '"C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe" {folder}' }], terminal: [],
+        examples: { editor: ['code {folder}', '"C:\\Program Files\\Microsoft VS Code\\Code.exe" --new-window {folder}'], terminal: ['wt -d {folder}'] },
+        detected: { editor: null, terminal: 'Command Prompt' } }) });
+    }
+    if (s.includes('/api/settings')) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ root: '/tmp/x', default: '/tmp/x',
+        actions: { keep: 'never', editor: '', terminal: '' }, actionsDetected: { editor: null, terminal: 'Command Prompt' },
+        actionsWarnings: { terminal: 'wtt was not found on this machine. It is saved anyway; use Try to check it.' } }) });
+    }
+    return base(u, opts);
+  };
+  await go(window, 'settings/runs');
+  for (let i = 0; i < 4; i++) await tick();
+  const doc = window.document;
+  const choose = doc.getElementById('act-editor-choose');
+  assert.deepEqual([...choose.querySelectorAll('optgroup option')].map((o) => o.textContent), ['VS Code']);
+  assert.equal(doc.getElementById('act-terminal-choose').querySelector('option[disabled]').textContent, 'No terminal found on this machine');
+  const tip = doc.getElementById('act-editor-tip');
+  assert.match(tip.textContent, /Examples on Windows:/);
+  assert.deepEqual([...tip.querySelectorAll('code')].map((c) => c.textContent), ['code {folder}', '"C:\\Program Files\\Microsoft VS Code\\Code.exe" --new-window {folder}']);
+  assert.equal(doc.getElementById('act-terminal-note').textContent, 'wtt was not found on this machine. It is saved anyway; use Try to check it.');
+  assert.ok(doc.getElementById('act-terminal-note').classList.contains('warn'));
+
+  choose.value = choose.querySelector('optgroup option').value;
+  choose.dispatchEvent(new window.Event('change', { bubbles: true }));
+  const input = doc.getElementById('act-editor');
+  assert.equal(input.value, '"C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe" {folder}');
+  assert.equal(choose.value, '', 'the menu resets to Choose…');
+
+  doc.getElementById('act-editor-try').click();
+  for (let i = 0; i < 4; i++) await tick();
+  assert.deepEqual(tries[0], { kind: 'editor', line: input.value });
+  const note = doc.getElementById('act-editor-note');
+  assert.equal(note.textContent, 'It opened your home folder as a test. Save to keep it.');
+  assert.ok(note.classList.contains('ok'));
+
+  tryAnswer = { ok: false, status: 409, json: async () => ({ error: "'zedd' is not recognized as an internal or external command", code: 'LAUNCH_FAILED' }) };
+  doc.getElementById('act-editor-try').click();
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(note.textContent, "It did not open: 'zedd' is not recognized as an internal or external command");
+  assert.ok(note.classList.contains('err'));
+  input.value = 'code {folder}';
+  input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.ok(!note.classList.contains('err'), 'editing clears the Try result');
+});

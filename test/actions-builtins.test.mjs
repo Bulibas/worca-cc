@@ -21,7 +21,9 @@ test('headless Linux hides terminal and file manager; override wins for editor',
   const d = detectBuiltins({ platform: 'linux', env: { PATH: '/usr/bin' }, exists: fsWith(['/usr/bin/xdg-open', '/usr/bin/gnome-terminal']), overrides: { editor: 'zed' } });
   assert.equal(d.terminal, null);
   assert.equal(d.fileManager, null);
-  assert.deepEqual(d.editor, { label: 'zed', cmd: 'zed' });
+  assert.deepEqual(d.editor, { label: 'zed', line: 'zed', kind: 'line' }, 'a saved editor is a command line');
+  const l = builtinLaunch('editor', '/w/my repo', d, { platform: 'linux', env: {} });
+  assert.deepEqual([l.file, l.args], ['/bin/sh', ['-c', "zed '/w/my repo'"]], 'run through the shell, the folder quoted and appended');
 });
 
 test('Windows: wt then cmd; code.cmd launches through cmd.exe', () => {

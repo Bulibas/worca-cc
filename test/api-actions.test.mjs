@@ -175,6 +175,9 @@ test('agent isolation: a loopback caller cannot start actions or set the actions
     assert.equal((await getJson('/api/settings')).actions.editor, '');
     // the gate is keyed on `actions` only
     assert.equal((await post('/api/settings', { schedule: {} })).status, 200);
+    const t = await post('/api/actions/launchers/try', { kind: 'editor', line: 'true' });
+    assert.equal(t.status, 403, 'Try runs a command line: the same guard as saving one');
+    assert.equal((await t.json()).code, 'ACTIONS_AGENT_BLOCKED');
   } finally {
     delete process.env.WORCA_AGENT_USER; delete process.env.WORCA_AGENT_HOME;
   }
@@ -337,8 +340,43 @@ test('a branch checked out in the project folder: the model names it (heldBy), C
     assert.equal(m1.checkout.external, true);
     assert.equal(await realpath(m1.checkout.worktreeDir), repo);
     assert.equal(m1.checkout.setup.status, 'skipped', 'setup never runs by itself in the person\'s folder');
+    // The Editor built-in runs the saved command line through the shell; a failure at once says why.
+    assert.equal((await post('/api/settings', { actions: { editor: `${NODE} -e "process.exit(3)"` } })).status, 200);
+    const failed = await post(`/api/runs/${s.id}/builtins/editor?${q}`, { member: key });
+    assert.equal(failed.status, 409);
+    assert.deepEqual(await failed.json(), { error: 'Editor did not open: the command exited with code 3', code: 'LAUNCH_FAILED' });
+    assert.equal((await post('/api/settings', { actions: { editor: `${NODE} -e 0 {folder} {branch}` } })).status, 200);
+    assert.equal((await post(`/api/runs/${s.id}/builtins/editor?${q}`, { member: key })).status, 200);
+    assert.equal((await post('/api/settings', { actions: { editor: '' } })).status, 200);
     const unlink = await fetch(`${base}/api/runs/${s.id}/checkout?${q}`, { method: 'DELETE', headers: JSONH, body: '{}' });
     assert.equal(unlink.status, 200);
     assert.ok((await realpath(repo)) && git(repo, ['branch', '--show-current']).stdout.trim() === 'worca-cc/held', 'the folder is left as it was');
   } finally { git(repo, ['switch', '-q', 'main']); }
+});
+
+test('launchers: what Choose… lists and the examples for this OS; Try runs a line on the home folder; a save warns about a missing program', async () => {
+  const l = await getJson('/api/actions/launchers');
+  assert.equal(l.platform, process.platform);
+  assert.ok(Array.isArray(l.editor) && Array.isArray(l.terminal));
+  assert.ok(l.examples.editor.length && l.examples.terminal.length);
+  assert.deepEqual(Object.keys(l.detected).sort(), ['editor', 'terminal']);
+  if (process.platform === 'darwin') assert.ok(l.terminal.some((t) => t.label === 'Terminal'));
+
+  assert.equal((await post('/api/actions/launchers/try', { kind: 'browser', line: 'x' })).status, 400);
+  const ok = await post('/api/actions/launchers/try', { kind: 'editor', line: `${NODE} -e 0` });
+  assert.equal(ok.status, 200, await ok.clone().text());
+  assert.equal((await ok.json()).ok, true);
+  if (process.platform !== 'win32') {
+    const bad = await post('/api/actions/launchers/try', { kind: 'editor', line: 'worca-no-such-editor-xyz' });
+    assert.equal(bad.status, 409);
+    assert.match((await bad.json()).error, /worca-no-such-editor-xyz/);
+  }
+
+  const saved = await (await post('/api/settings', { actions: { editor: 'worca-no-such-editor-xyz {folder}', terminal: '' } })).json();
+  assert.equal(saved.actions.editor, 'worca-no-such-editor-xyz {folder}', 'saved as typed');
+  assert.match(saved.actionsWarnings.editor, /^worca-no-such-editor-xyz was not found on this machine/);
+  assert.equal(saved.actionsWarnings.terminal, undefined);
+  const cleared = await (await post('/api/settings', { actions: { editor: '' } })).json();
+  assert.deepEqual(cleared.actionsWarnings, {});
+  assert.equal((await post('/api/settings', { actions: { editor: 'x'.repeat(2001) } })).status, 400);
 });

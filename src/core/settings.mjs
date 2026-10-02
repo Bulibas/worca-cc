@@ -950,7 +950,8 @@ export function assertActionsInput(patch) {
   const high = has('portHigh') && !clear(patch.portHigh) ? patch.portHigh : cur.portHigh;
   if (low > high) throw new Error('actions: the low port must not be above the high port');
   if (has('maxCheckouts') && !clear(patch.maxCheckouts) && !isCap(patch.maxCheckouts)) throw new Error('actions.maxCheckouts must be a whole number from 1 to 100');
-  for (const k of ['editor', 'terminal']) if (has(k) && !clear(patch[k]) && (typeof patch[k] !== 'string' || patch[k].length > 400)) throw new Error(`actions.${k} must be a command name or path`);
+  // A command line run through the shell (src/core/actions/launcher.mjs); the person decides what it runs.
+  for (const k of ['editor', 'terminal']) if (has(k) && !clear(patch[k]) && (typeof patch[k] !== 'string' || patch[k].length > 2000)) throw new Error(`The ${k} command must be text of at most 2000 characters`);
 }
 
 export async function setActionsSettings(patch = {}) {

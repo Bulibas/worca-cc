@@ -1729,8 +1729,28 @@
               <div class="field act-port-range"><label for="act-port-low">Ports for automatic port variables</label>
                 <input id="act-port-low" class="input" type="number" min="1024" max="65535" placeholder="4400"> –
                 <input id="act-port-high" class="input" type="number" min="1024" max="65535" placeholder="4499" aria-label="High port"></div>
-              <div class="field"><label for="act-editor">Editor</label><input id="act-editor" class="input" placeholder="Detected automatically" aria-describedby="act-editor-note"><small class="hint act-hint" id="act-editor-note"></small></div>
-              <div class="field"><label for="act-terminal">Terminal</label><input id="act-terminal" class="input" placeholder="Detected automatically" aria-describedby="act-terminal-note"><small class="hint act-hint" id="act-terminal-note"></small></div>
+              <div class="field act-launcher" data-launcher="editor">
+                <div class="label-row"><label for="act-editor">Editor</label>
+                  <button type="button" class="info-tip" aria-label="About the editor command">i<span class="tip-content hidden" id="act-editor-tip">
+                    The command that opens a folder in your IDE or code editor, as you would type it in a terminal. Leave it blank to use the one Worca detects. {folder} marks where the checkout folder goes; without it, the folder is added at the end.
+                  </span></button></div>
+                <div class="act-launcher-row">
+                  <input id="act-editor" class="input mono" placeholder="Detected automatically" aria-describedby="act-editor-note" autocomplete="off" spellcheck="false">
+                  <div class="select-wrap act-choose-wrap"><select id="act-editor-choose" class="select" aria-label="Choose an installed editor"><option value="">Choose…</option></select></div>
+                  <button type="button" class="btn btn-ghost btn-mini act-try" id="act-editor-try">Try</button>
+                </div>
+                <small class="hint act-hint" id="act-editor-note"></small></div>
+              <div class="field act-launcher" data-launcher="terminal">
+                <div class="label-row"><label for="act-terminal">Terminal</label>
+                  <button type="button" class="info-tip" aria-label="About the terminal command">i<span class="tip-content hidden" id="act-terminal-tip">
+                    The command that opens a terminal in a folder, as you would type it in a terminal. Leave it blank to use the one Worca detects. {folder} marks where the checkout folder goes; without it, the folder is added at the end.
+                  </span></button></div>
+                <div class="act-launcher-row">
+                  <input id="act-terminal" class="input mono" placeholder="Detected automatically" aria-describedby="act-terminal-note" autocomplete="off" spellcheck="false">
+                  <div class="select-wrap act-choose-wrap"><select id="act-terminal-choose" class="select" aria-label="Choose an installed terminal"><option value="">Choose…</option></select></div>
+                  <button type="button" class="btn btn-ghost btn-mini act-try" id="act-terminal-try">Try</button>
+                </div>
+                <small class="hint act-hint" id="act-terminal-note"></small></div>
               <div class="field"><label for="act-max">Keep at most</label><input id="act-max" class="input" type="number" min="1" max="100" placeholder="No limit"> checkouts (oldest removed first)</div>
               <div class="add-project-actions"><button type="button" class="btn btn-ghost btn-mini" id="act-reset">Reset</button>
                 <button type="button" class="btn btn-primary btn-mini" id="act-save">Save</button></div>
