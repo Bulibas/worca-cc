@@ -229,7 +229,7 @@ test('window-only config (grace null) wakes the open question at the window star
 test('resume point carries night {optIn, override} and the constructor reads it back', () => {
   const orch = createOrchestrator({ projectDir: '/tmp/night-h10', resume: { resumePoint: { night: { optIn: true, override: 'on' } } } });
   assert.deepEqual([orch._night.optIn, orch._night.override], [true, 'on']);
-  assert.deepEqual(orch.state.night, { optIn: true, override: 'on', decisions: 0, flagged: 0, openedAt: null });
+  assert.deepEqual(orch.state.night, { optIn: true, override: 'on', decisions: 0, flagged: 0, answers: 0, checks: 0, openedAt: null });
 });
 
 test('setNightOverride on re-arms and decides', async () => {

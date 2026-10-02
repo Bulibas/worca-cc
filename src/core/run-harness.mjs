@@ -62,7 +62,7 @@ import { readGuardrailSet } from './guardrail-store.mjs';
 import { unionGuardrails, guardrailsToPermissionRules, mergePermissionRules } from './guardrails.mjs';
 import { collectRequiredSkills, validateSkills, injectSkills, pluginSkillDirs, pluginAssetDirs } from './skills.mjs';
 import { isBrowsableKind, BULK_ARTIFACT_THRESHOLD } from '../shared/artifact-kinds.mjs';
-import { RUN_SWITCH_OPTIONS } from '../shared/away-mode/labels.mjs';
+import { RUN_SWITCH_OPTIONS, awayAnswerCounts } from '../shared/away-mode/labels.mjs';
 import { collectRequiredAssets, stageAssets } from './run-assets.mjs';
 import { loadAgentRegistry, DEFAULT_AGENTS_DIR } from './agent-registry.mjs';
 import {
@@ -935,6 +935,7 @@ export class RunHarness extends EventEmitter {
       since: Number.isFinite(savedNight?.since) ? savedNight.since : null,   // start of the unattended stretch (spend-cap anchor); a human answer ends it
       decisions: new Map(),                // question id -> decision record (for the answer writers)
       count: 0, flagged: 0,
+      answers: 0, checks: 0,               // what the answers list shows: one per answered question
     };
     this._nightClock = this.opts.nightClock || { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) };
     this.state.night = this._nightSnapshot();
@@ -4130,11 +4131,13 @@ export class RunHarness extends EventEmitter {
     else {
       if (record.guardrail == null && q.kind !== 'cost-cap') this._night.count += 1;
       if (rec.flagged) this._night.flagged += 1;
+      const c = awayAnswerCounts([rec]);
+      this._night.answers += c.answers; this._night.checks += c.checks;
     }
     this._log('night', rec.flagged ? 'warn' : 'info', `Away mode ${record.guardrail ? `limit ${record.guardrail}` : `answered ${q.kind} ${q.id} → ${String(record.choice).slice(0, 120)}`}${rec.flagged ? ' (please check)' : ''}`);
     this.state.night = this._nightSnapshot();
     this._emit('state', this.getState());
-    if (this.policyRun) this._persistPolicyState({ unattended: true, night: { decisions: this._night.count, flagged: this._night.flagged } });
+    if (this.policyRun) this._persistPolicyState({ unattended: true, night: { decisions: this._night.count, flagged: this._night.flagged, answers: this._night.answers, checks: this._night.checks } });
     return rec;
   }
 
@@ -4148,6 +4151,7 @@ export class RunHarness extends EventEmitter {
     try {
       const c = nightCounts(this.pipeline.id);
       this._night.count = c.decisions; this._night.flagged = c.flagged;
+      this._night.answers = c.answers; this._night.checks = c.checks;
       this.state.night = this._nightSnapshot();
     } catch (err) { this._log('night', 'warn', `could not read the Away mode answers: ${err?.message || err}`); }
   }
@@ -4155,7 +4159,7 @@ export class RunHarness extends EventEmitter {
   _nightSnapshot() {
     const n = this._night;
     const open = n.q && this.pendingQuestion?.id === n.q.id && n.decidable !== false && n.openedAt != null;
-    return { optIn: n.optIn, override: n.override, decisions: n.count, flagged: n.flagged, openedAt: open ? new Date(n.openedAt).toISOString() : null };
+    return { optIn: n.optIn, override: n.override, decisions: n.count, flagged: n.flagged, answers: n.answers, checks: n.checks, openedAt: open ? new Date(n.openedAt).toISOString() : null };
   }
 
   /** Run-view switch. @param {'auto'|'on'|'off'} mode */

@@ -118,7 +118,7 @@ test('a hidden night switch really is hidden (its display rule must not beat [hi
   assert.match(css, /\.rd-night-wrap\[hidden\]\s*\{\s*display:\s*none/);
 });
 
-test('run view: stored answers load on open; a night-decision frame appends a group; flagged rows carry Check', async () => {
+test('run view: stored answers load on open; a night-decision frame appends a group; flagged rows carry Check and lead their ask', async () => {
   const ctx = await boot({ decisions: [{ questionId: 'clarify-a-1', kind: 'clarify', at: '2026-01-01T13:12:00', choice: 'Redis | Live', strategy: 'weights', confidence: 80, flagged: true,
     rationale: 'store: r1\ndelivery: r2', questions: [
       { id: 'store', question: 'Which store?', choice: 'Redis', flagged: false, rationale: 'r1' },
@@ -127,7 +127,10 @@ test('run view: stored answers load on open; a night-decision frame appends a gr
   await settle();
   const sec = screen.querySelector('.rd-night-sec');
   assert.equal(sec.hidden, false);
-  assert.equal(sec.querySelector('h3').textContent, 'Answered for you');
+  assert.equal(sec.querySelector('h3').textContent, 'Answered for you · 2 answers, 1 to check');
+  const note = screen.querySelector('.rd-sheet .rd-away-note');
+  assert.equal(note.hidden, false, 'the note shows on a live run, at the top of its card');
+  assert.equal(note.querySelector('.rd-away-note-text').textContent, 'Away mode: 2 answers while you were away — 1 to check.');
   ctx.dispatch({ type: 'night-decision', runId: RUN.runId, seq: 9, id: 'gate-w-2', kind: 'gate',
     record: { questionId: 'gate-w-2', kind: 'gate', at: '2026-01-01T13:40:00', choice: 'continue', strategy: 'rule', confidence: null, flagged: true, rationale: 'critical remain' } });
   await settle();
@@ -135,11 +138,13 @@ test('run view: stored answers load on open; a night-decision frame appends a gr
   assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent), ['Clarifying questions · 13:12', 'Review loop · 13:40']);
   const rows = [...sec.querySelectorAll('.rd-na-row')];
   assert.deepEqual(rows.map((r) => [r.querySelector('.rd-na-q')?.textContent ?? null, r.querySelector('.rd-na-a').textContent, !!r.querySelector('.rd-na-check')]),
-    [['Which store?', 'Redis', false], ['Delivery', 'Live', true], [null, 'Continued', true]]);
-  assert.equal(rows[1].querySelector('.rd-na-check').textContent, 'Check');
+    [['Delivery', 'Live', true], ['Which store?', 'Redis', false], [null, 'Continued', true]]);
+  assert.equal(rows[0].querySelector('.rd-na-check').textContent, 'Check');
+  assert.equal(sec.querySelector('h3').textContent, 'Answered for you · 3 answers, 2 to check');
+  assert.equal(note.querySelector('.rd-away-note-text').textContent, 'Away mode: 3 answers while you were away — 2 to check.');
   // The reason is one click away: closed by default, a click opens it, another closes it.
-  const btn = rows[1].querySelector('button.rd-na-btn');
-  const why = rows[1].querySelector('.rd-na-why');
+  const btn = rows[0].querySelector('button.rd-na-btn');
+  const why = rows[0].querySelector('.rd-na-why');
   assert.equal(why.hidden, true);
   assert.equal(btn.getAttribute('aria-expanded'), 'false');
   btn.click();
@@ -150,7 +155,7 @@ test('run view: stored answers load on open; a night-decision frame appends a gr
   btn.focus();
   ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 10, status: 'running', night: { optIn: true, override: 'auto', decisions: 2, flagged: 2 } });
   await settle();
-  assert.equal(sec.querySelectorAll('.rd-na-row')[1].querySelector('.rd-na-why').hidden, false, 'still open');
+  assert.equal(sec.querySelectorAll('.rd-na-row')[0].querySelector('.rd-na-why').hidden, false, 'still open');
   assert.equal(ctx.window.document.activeElement, btn, 'still focused');
   // A limit row: no Check, its own words; an open row stays open when the list grows.
   ctx.dispatch({ type: 'night-decision', runId: RUN.runId, seq: 11, id: 'clarify-g-3', kind: 'clarify',
@@ -160,8 +165,9 @@ test('run view: stored answers load on open; a night-decision frame appends a gr
   assert.equal(after.length, 4);
   assert.equal(after[3].querySelector('.rd-na-a').textContent, 'Paused: answer limit reached');
   assert.equal(after[3].querySelector('.rd-na-check'), null);
-  assert.equal(after[1].querySelector('.rd-na-why').hidden, false, 'the open row survived the rebuild');
-  assert.equal(ctx.window.document.activeElement, after[1].querySelector('button.rd-na-btn'), 'focus follows the rebuilt row');
+  assert.equal(after[0].querySelector('.rd-na-why').hidden, false, 'the open row survived the rebuild');
+  assert.equal(ctx.window.document.activeElement, after[0].querySelector('button.rd-na-btn'), 'focus follows the rebuilt row');
+  assert.equal(sec.querySelector('h3').textContent, 'Answered for you · 3 answers, 2 to check', 'a pause is not an answer');
 });
 
 test('run view: a row with no reason is not a button', async () => {
@@ -630,26 +636,27 @@ test('New run: "Mark this run" and the hint from describeNewRun', async () => {
   assert.match(off.window.document.getElementById('nightModeHint').textContent, /^Away mode is paused/);
 });
 
-test('run view: a finished run Away mode answered gets a note at the top of its result', async () => {
-  const ctx = await boot();
+test('run view: the note counts the answers the list shows, in every state, and hides with none', async () => {
+  const ctx = await boot({ decisions: [{ questionId: 'clarify-a-1', kind: 'clarify', choice: 'a | b | c', strategy: 'weights', flagged: true, questions: [
+    { id: 'q1', choice: 'a', flagged: false }, { id: 'q2', choice: 'b', flagged: true }, { id: 'q3', choice: 'c', flagged: true }] }] });
   const screen = await openDetail(ctx);
-  ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 7, status: 'done', night: { optIn: true, override: 'auto', decisions: 5, flagged: 2 } });
   await settle();
-  const note = screen.querySelector('.rd-result .rd-away-note');
-  assert.ok(note, 'the note shows on the finished run');
-  assert.equal(note.querySelector('.rd-away-note-text').textContent, 'Away mode: 5 answers while you were away — 2 to check.');
+  const note = screen.querySelector('.rd-sheet .rd-away-note');
+  assert.equal(note.hidden, false);
+  assert.equal(note.querySelector('.rd-away-note-text').textContent, 'Away mode: 3 answers while you were away — 2 to check.', 'one stored ask, three answers');
   assert.ok(note.classList.contains('has-checks'));
+  ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 7, status: 'done', night: { optIn: true, override: 'auto', decisions: 1, flagged: 1 } });
+  await settle();
+  assert.equal(note.hidden, false, 'still there once the run is over');
+  assert.equal(screen.querySelector('.rd-result .rd-away-note'), null, 'one note, not a second in the result');
 });
 
-test('run view: no note while the run is live, none when Away mode never answered', async () => {
+test('run view: no note when Away mode never answered', async () => {
   const ctx = await boot();
   const screen = await openDetail(ctx);
-  ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 7, status: 'running', night: { optIn: true, override: 'auto', decisions: 3, flagged: 1 } });
-  await settle();
-  assert.equal(screen.querySelector('.rd-away-note'), null, 'live run: the answers list carries it');
   ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 8, status: 'done', night: { optIn: true, override: 'auto', decisions: 0, flagged: 0 } });
   await settle();
-  assert.equal(screen.querySelector('.rd-away-note'), null);
+  assert.equal(screen.querySelector('.rd-sheet .rd-away-note').hidden, true);
 });
 
 test('project page: Away mode is its own tab after Memory, and the Overview no longer carries it', async () => {

@@ -3,6 +3,7 @@
 // The counters live in the DB, not the harness, so they survive a pause/resume.
 import { prepare } from '../db.mjs';
 import { windowedSpendUsd } from '../cost-budget.mjs';
+import { awayAnswerCounts } from '../../shared/away-mode/labels.mjs';
 
 export function writeNightDecision(pipelineId, { questionId, kind, ...record }) {
   if (!pipelineId) return;
@@ -28,11 +29,12 @@ export function countNightDecisions(pipelineId) {
 }
 
 /** The run's night counters as the run view and policy state show them: `decisions` spends the
- *  maxDecisions budget (countNightDecisions), `flagged` counts every flagged row. */
+ *  maxDecisions budget (countNightDecisions), `flagged` counts every flagged row; `answers` and
+ *  `checks` count what the answers list shows, one per answered question (awayAnswerCounts). */
 export function nightCounts(pipelineId) {
-  if (!pipelineId) return { decisions: 0, flagged: 0 };
+  if (!pipelineId) return { decisions: 0, flagged: 0, answers: 0, checks: 0 };
   const flagged = prepare("SELECT COUNT(*) AS n FROM night_decisions WHERE pipeline_id = ? AND json_extract(record, '$.flagged') = 1").get(pipelineId).n;
-  return { decisions: countNightDecisions(pipelineId), flagged };
+  return { decisions: countNightDecisions(pipelineId), flagged, ...awayAnswerCounts(readNightDecisions(pipelineId)) };
 }
 
 /** Night-granted extra cycles on one loop wire (gate decisions answered `another`). */
@@ -46,10 +48,13 @@ export function nightSpendSinceUsd(sinceMs) {
   return windowedSpendUsd(sinceMs);
 }
 
-/** Answers worca gave on every run since `sinceMs`, and how many of them are marked to check. Guardrail
- *  rows and cost-cap overrides are not answers. `ts` is an ISO string, so compare it as one. */
+/** Answers worca gave on every run since `sinceMs`, and how many of them are marked to check, one per
+ *  answered question (awayAnswerCounts). Guardrail rows and cost-cap overrides are not answers. `ts` is
+ *  an ISO string, so compare it as one. */
 export function nightAnsweredSince(sinceMs) {
-  const r = prepare(`SELECT COUNT(*) AS answered, COALESCE(SUM(CASE WHEN json_extract(record, '$.flagged') = 1 THEN 1 ELSE 0 END), 0) AS flagged
-    FROM night_decisions WHERE ts >= ? AND kind != 'cost-cap' AND json_extract(record, '$.guardrail') IS NULL`).get(new Date(sinceMs).toISOString());
-  return { answered: r.answered, flagged: r.flagged };
+  const rows = prepare(`SELECT kind, record FROM night_decisions
+    WHERE ts >= ? AND kind != 'cost-cap' AND json_extract(record, '$.guardrail') IS NULL`).all(new Date(sinceMs).toISOString())
+    .map((r) => { try { return { kind: r.kind, ...JSON.parse(r.record) }; } catch { return null; } });
+  const { answers, checks } = awayAnswerCounts(rows);
+  return { answered: answers, flagged: checks };
 }

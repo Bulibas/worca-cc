@@ -30,8 +30,22 @@ test('night decisions round-trip in order; counters derive from rows', async () 
   assert.equal(rows[0].flagged, false);
   assert.deepEqual(readNightDecisions(null), []);
   assert.equal(countNightDecisions(null), 0);
-  assert.deepEqual(nightCounts(pid), { decisions: 2, flagged: 3 }, 'flagged counts every flagged row');
-  assert.deepEqual(nightCounts(null), { decisions: 0, flagged: 0 });
+  // answers/checks count what the list shows: the cost-cap override is a row, the pause is not.
+  assert.deepEqual(nightCounts(pid), { decisions: 2, flagged: 3, answers: 3, checks: 2 }, 'flagged counts every flagged row');
+  assert.deepEqual(nightCounts(null), { decisions: 0, flagged: 0, answers: 0, checks: 0 });
+});
+
+test('nightCounts and nightAnsweredSince count one answer per question, not one per stored ask', async () => {
+  const t0 = Date.now() - 1000;
+  const { id: pid } = await seedPipeline(await tmpProject());
+  writeNightDecision(pid, { questionId: 'clarify-n-1', kind: 'clarify', choice: 'a | b | c', strategy: 'weights+analysis', flagged: true, questions: [
+    { id: 'q1', question: 'One?', choice: 'a', flagged: false },
+    { id: 'q2', question: 'Two?', choice: 'b', flagged: true },
+    { id: 'q3', question: 'Three?', choice: 'c', flagged: true },
+  ] });
+  assert.deepEqual(nightCounts(pid), { decisions: 1, flagged: 1, answers: 3, checks: 2 });
+  const since = nightAnsweredSince(t0);
+  assert.ok(since.answered >= 3 && since.flagged >= 2, JSON.stringify(since));
 });
 
 test('nightSpendSinceUsd sums cost_ledger across all pipelines since the anchor (ts is epoch ms)', async () => {
