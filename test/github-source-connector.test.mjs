@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import createTaskSource, { parseFilter } from '../plugins/github-source/connector/index.mjs';
+import createTaskSource, { parseFilter, parseIssueRef } from '../plugins/github-source/connector/index.mjs';
 import { ghAuthToken } from '../plugins/github-source/connector/gh-cli.mjs';
 
 // ── harness ────────────────────────────────────────────────────────────────────
@@ -106,6 +106,79 @@ test('listTasks: sends If-None-Match on page 1 and serves the cached list on 304
   const second = await src.listTasks({ inputs: { repo: 'acme/api', filter: 'state:open' } });
   assert.equal(hits, 2);
   assert.deepEqual(second.tasks, first.tasks);
+});
+
+// ── listTasks: issue reference lookup ──────────────────────────────────────────
+/** Fake fetch serving one issue at /repos/<repo>/issues/<n>; any list call fails the test. */
+function refFetch(repo, n, reply) {
+  const esc = repo.replace('/', '\\/');
+  return fakeFetch([{ match: new RegExp(`/repos/${esc}/issues/${n}$`), reply }]);
+}
+
+test('parseIssueRef: URL, owner/repo#N, #N and N; anything else -> null', () => {
+  assert.deepEqual(parseIssueRef('https://github.com/octo/tools/issues/42', 'acme/api'), { repo: 'octo/tools', number: 42 });
+  assert.deepEqual(parseIssueRef('  https://github.com/octo/tools/issues/42/#issuecomment-1 ', ''), { repo: 'octo/tools', number: 42 });
+  assert.deepEqual(parseIssueRef('github.com/octo/tools/pull/9', ''), { repo: 'octo/tools', number: 9 });
+  assert.deepEqual(parseIssueRef('octo/tools#7', 'acme/api'), { repo: 'octo/tools', number: 7 });
+  assert.deepEqual(parseIssueRef('#12', 'acme/api'), { repo: 'acme/api', number: 12 });
+  assert.deepEqual(parseIssueRef('12', 'acme/api'), { repo: 'acme/api', number: 12 });
+  assert.equal(parseIssueRef('#12', ''), null, '#N needs a selected repo');
+  assert.equal(parseIssueRef('fix #12 please', 'acme/api'), null);
+  assert.equal(parseIssueRef('alpha', 'acme/api'), null);
+  assert.equal(parseIssueRef('', 'acme/api'), null);
+  assert.equal(parseIssueRef('https://gitlab.com/octo/tools/issues/42', 'acme/api'), null);
+});
+
+test('listTasks: a pasted issue URL returns exactly that issue, skipping the Filter', async () => {
+  const closed = issue(42, 'Closed elsewhere', {
+    html_url: 'https://github.com/octo/tools/issues/42', state: 'closed', assignee: { login: 'someone' },
+  });
+  const fetch = refFetch('octo/tools', 42, res(200, closed));
+  const src = createTaskSource(makeCtx(), { fetch });
+  const out = await src.listTasks({
+    inputs: { repo: 'acme/api', filter: 'assignee:@me state:open' },
+    search: 'https://github.com/octo/tools/issues/42',
+  });
+  assert.deepEqual(out.tasks.map((t) => t.id), ['octo/tools#42']);
+  assert.equal(out.tasks[0].state, 'closed');
+  assert.equal(out.cursor, undefined);
+  assert.equal(fetch.calls.length, 1, 'no /user lookup, no list request');
+});
+
+test('listTasks: owner/repo#N looks up that repo even with no repo selected', async () => {
+  const fetch = refFetch('octo/tools', 7, res(200, issue(7, 'Seven')));
+  const src = createTaskSource(makeCtx(), { fetch });
+  const out = await src.listTasks({ inputs: {}, search: 'octo/tools#7' });
+  assert.deepEqual(out.tasks.map((t) => t.id), ['octo/tools#7']);
+});
+
+test('listTasks: #N and N look up the selected repo', async () => {
+  for (const search of ['#12', '12']) {
+    const fetch = refFetch('acme/api', 12, res(200, issue(12, 'Twelve')));
+    const src = createTaskSource(makeCtx(), { fetch });
+    const out = await src.listTasks({ inputs: { repo: 'acme/api', filter: 'state:open' }, search });
+    assert.deepEqual(out.tasks.map((t) => t.id), ['acme/api#12'], search);
+  }
+});
+
+test('listTasks: a reference to a pull request returns no tasks', async () => {
+  const fetch = refFetch('acme/api', 5, res(200, issue(5, 'A PR', { pull_request: { url: 'x' } })));
+  const src = createTaskSource(makeCtx(), { fetch });
+  const out = await src.listTasks({ inputs: { repo: 'acme/api' }, search: 'https://github.com/acme/api/pull/5' });
+  assert.deepEqual(out, { tasks: [] });
+});
+
+test('listTasks: a reference to a missing issue (404) returns no tasks, not an error', async () => {
+  const fetch = refFetch('acme/api', 999, res(404, { message: 'Not Found' }));
+  const src = createTaskSource(makeCtx(), { fetch });
+  const out = await src.listTasks({ inputs: { repo: 'acme/api' }, search: '#999' });
+  assert.deepEqual(out, { tasks: [] });
+});
+
+test('listTasks: a reference lookup still surfaces auth errors', async () => {
+  const fetch = refFetch('acme/api', 3, res(401, {}));
+  const src = createTaskSource(makeCtx(), { fetch });
+  await assert.rejects(() => src.listTasks({ inputs: { repo: 'acme/api' }, search: '#3' }), (e) => e.kind === 'auth');
 });
 
 // ── getTask ────────────────────────────────────────────────────────────────────

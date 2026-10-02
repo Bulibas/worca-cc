@@ -34,6 +34,22 @@ export function parseFilter(filter) {
   return q;
 }
 
+/**
+ * Search text that names one issue -> { repo, number }, else null. Accepts
+ * `https://github.com/o/r/issues/123` (or /pull/123), `o/r#123`, and `#123` /
+ * `123` against the selected repo.
+ */
+export function parseIssueRef(search, selectedRepo) {
+  const s = String(search || '').trim();
+  let m = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^\s/#?]+\/[^\s/#?]+)\/(?:issues|pull)\/(\d+)(?:[/?#]\S*)?$/i.exec(s);
+  if (m) return { repo: m[1], number: Number(m[2]) };
+  m = /^([^\s#/]+\/[^\s#/]+)#(\d+)$/.exec(s);
+  if (m) return { repo: m[1], number: Number(m[2]) };
+  m = /^#?(\d+)$/.exec(s);
+  if (m && selectedRepo) return { repo: selectedRepo, number: Number(m[1]) };
+  return null;
+}
+
 function toSummary(repo, it) {
   return {
     id: `${repo}#${it.number}`,
@@ -87,6 +103,19 @@ export default function createTaskSource(ctx, deps = {}) {
 
     async listTasks({ inputs = {}, search, cursor } = {}) {
       const repo = String(inputs.repo || '');
+      // A pasted URL / o/r#N / #N names one issue: fetch it directly, ignoring
+      // the Filter, so closed, foreign-assigned or deep-paged issues are reachable.
+      const ref = parseIssueRef(search, repo);
+      if (ref) {
+        let it;
+        try {
+          it = (await ghFetch(gh, `/repos/${ref.repo}/issues/${ref.number}`)).json;
+        } catch (e) {
+          if (e.status === 404 || e.status === 410) return { tasks: [] };
+          throw e;
+        }
+        return { tasks: it.pull_request ? [] : [toSummary(ref.repo, it)] };
+      }
       if (!repo) return { tasks: [] };
       const page = Math.max(1, Number(cursor) || 1);
       const f = parseFilter(inputs.filter);
