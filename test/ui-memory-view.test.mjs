@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { confirmDialog } from './helpers/confirm-modal.mjs';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { cardAlertOf, lastToast, edit, fieldErrorText } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -147,9 +148,9 @@ test('#settings/memory/<name> opens the editor; Save PUTs the text; Delete confi
   const put = calls.find((c) => c.method === 'PUT');
   assert.equal(put.url.endsWith('/api/memory/global/files/testing'), true);
   assert.deepEqual(put.body, { text: '---\nname: testing\ndescription: Tests\n---\nedited\n' });
-  const msgEl = window.document.getElementById('memory-msg');
-  assert.match(msgEl.textContent, /Saved testing\.md/, 'the success message survives the reload');
-  assert.ok(msgEl.classList.contains('ok'));
+  assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Memory saved', detail: 'testing.md', action: '' },
+    'the success message survives the reload as a toast (#555)');
+  assert.equal(window.document.getElementById('memory-msg').textContent, '');
   click(window, memPane(window).querySelector('.mem-delete'));
   const message = await confirmDialog(window);
   assert.match(message, /Delete “testing\.md”/);
@@ -171,10 +172,12 @@ test('New file: an editable name, a client-side name check, then Save PUTs to th
   ed.querySelector('.mem-text').value = 'x\n';
   click(window, ed.querySelector('.mem-save'));
   await tick();
-  assert.match(pane.querySelector('.mem-msg').textContent, /letters, digits/);
+  // #555: the name rule is a field error on the name input; the editor is not repainted.
+  assert.match(fieldErrorText(ed.querySelector('.mem-name')), /letters, digits/);
+  assert.equal(pane.querySelector('.mem-msg').textContent, '');
   assert.ok(!calls.some((c) => c.method === 'PUT'), 'no request for an invalid name');
-  // The refused save repainted the host: the first editor node is detached now.
   const ed2 = pane.querySelector('.mem-editor');
+  assert.equal(ed2, ed, 'the refused save kept the editor the user typed into');
   ed2.querySelector('.mem-name').value = 'new-topic';
   ed2.querySelector('.mem-text').value = 'x\n';
   click(window, ed2.querySelector('.mem-save'));
@@ -182,6 +185,24 @@ test('New file: an editable name, a client-side name check, then Save PUTs to th
   const put = calls.find((c) => c.method === 'PUT');
   assert.ok(put && put.url.endsWith('/api/memory/global/files/new-topic'));
   assert.equal(window.location.hash, '#settings/memory/new-topic', 'a saved new file routes to itself');
+});
+
+test('#555: a refused memory Save is a card alert in the editor; nothing is lost', async () => {
+  const { window } = await boot({
+    fetchHandler: (u, o) => (o.method === 'PUT' ? Promise.resolve({ ok: false, status: 422, json: async () => ({ error: 'frontmatter: name must match the file' }) }) : null),
+  });
+  await go(window, 'settings/memory/testing');
+  const pane = memPane(window);
+  const ed = pane.querySelector('.mem-editor');
+  ed.querySelector('.mem-text').value = 'edited\n';
+  click(window, ed.querySelector('.mem-save'));
+  await tick(); await tick(); await tick();
+  assert.equal(pane.querySelector('.mem-editor'), ed, 'the editor stays as typed');
+  assert.deepEqual(cardAlertOf(ed), { title: 'Not saved', detail: 'frontmatter: name must match the file' });
+  assert.ok(ed.querySelector('.card-alert').nextElementSibling.classList.contains('mem-actions'), 'directly above the buttons');
+  assert.equal(ed.querySelector('.mem-save').dataset.fbState, undefined);
+  assert.equal(ed.querySelector('.mem-text').value, 'edited\n');
+  assert.equal(lastToast(window.document), null);
 });
 
 test('New file then Cancel clears the editor even though the hash never changed', async () => {
@@ -288,7 +309,7 @@ test('Defragment never discards a dirty draft', async () => {
   await tick(); await tick(); await tick(); await tick();
   assert.ok(calls.some((c) => c.url.endsWith('/api/memory/global/defragment') && c.method === 'POST'), 'the run was started');
   assert.equal(memPane(window).querySelector('.mem-text').value, 'my unsaved edit\n', 'the draft survived the reload');
-  assert.match(window.document.getElementById('memory-msg').textContent, /Defragment run started\./);
+  assert.match(lastToast(window.document).title, /Defragment run started\./);
 });
 
 test('linked History memory chips keep their kind colour: the kind rules outrank button.hd-mem-chip', () => {
@@ -523,14 +544,28 @@ test('Settings › Memory: the Defragment model card paints the stored pair — 
   assert.equal(esel.value, 'high');
   assert.match(doc.getElementById('memDefragModelNote').textContent, /Every Memory defragment run uses Opus 5\.5 · high/);
   // Another model: its own efforts; an effort it offers survives the switch.
-  msel.value = 'claude-haiku-4-5'; msel.dispatchEvent(new window.Event('change'));
+  edit(window, msel, 'claude-haiku-4-5');
   assert.deepEqual([...esel.options].map((o) => o.value), ['', 'medium', 'high']);
   assert.equal(esel.value, 'high');
-  esel.value = 'medium';
-  click(window, doc.getElementById('memDefragModelSave'));
+  edit(window, esel, 'medium');
+  doc.getElementById('memDefragModelSave').click();
   await settle();
   assert.deepEqual(posts.at(-1), { memoryDefrag: { model: 'claude-haiku-4-5', effort: 'medium' } });
-  assert.match(doc.getElementById('memDefragModelMsg').textContent, /Saved/);
+  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Saved', detail: 'Applies to the next defragment run.', action: '' });
+  assert.equal(doc.getElementById('memDefragModelMsg').textContent, '', 'no grey "Saved." line');
+});
+
+test('Settings › Memory: the Defragment model Save starts disabled; picking another model enables it', async () => {
+  const { window } = await boot({ fetchHandler: dmHandler([]) });
+  await go(window, 'settings/memory');
+  await settle();
+  const doc = window.document;
+  const save = doc.getElementById('memDefragModelSave');
+  assert.equal(save.disabled, true, 'a freshly painted card is clean');
+  assert.equal(doc.querySelector('#mem-defrag-model-card .dirty-mark').hidden, true);
+  edit(window, doc.getElementById('memDefragModel'), 'claude-haiku-4-5');
+  assert.equal(save.disabled, false);
+  assert.equal(doc.querySelector('#mem-defrag-model-card .dirty-mark').hidden, false);
 });
 
 test('Settings › Memory: clearing the model clears and disables the effort; Save sends the empty pair, Use default sends null; a save reloads the health card', async () => {
@@ -541,11 +576,11 @@ test('Settings › Memory: clearing the model clears and disables the effort; Sa
   const doc = window.document;
   const msel = doc.getElementById('memDefragModel');
   const esel = doc.getElementById('memDefragEffort');
-  msel.value = ''; msel.dispatchEvent(new window.Event('change'));
+  edit(window, msel, '');
   assert.equal(esel.value, '');
   assert.equal(esel.disabled, true, 'an effort without a model means nothing');
   const before = getCount(calls);
-  click(window, doc.getElementById('memDefragModelSave'));
+  doc.getElementById('memDefragModelSave').click();
   await settle();
   assert.deepEqual(posts.at(-1), { memoryDefrag: { model: '', effort: '' } });
   assert.equal(getCount(calls), before + 1, 'the health card refetched: its host hint names the model');
@@ -565,10 +600,10 @@ test('Settings › Memory: a stored model that left the catalog paints disabled 
   assert.equal(opt.textContent, 'gone-model — not installed');
   assert.equal(opt.disabled, true);
   assert.match(doc.getElementById('memDefragModelNote').textContent, /no longer in the catalog — defragment runs fall back to claude-sonnet-5, or the model a project picked for the Memory defragmenter\./);
-  click(window, doc.getElementById('memDefragModelSave'));
+  assert.equal(doc.getElementById('memDefragModelSave').disabled, true, 'the painted card is clean');
+  doc.getElementById('memDefragModelSave').click();
   await settle();
   assert.equal(posts.length, 0, 'no request for a model that cannot run');
-  assert.match(doc.getElementById('memDefragModelMsg').textContent, /no longer installed/);
 });
 
 test('Settings › Memory: the health card\'s host hint names the defragment model the report carries', async () => {
@@ -613,10 +648,12 @@ test('Settings › Memory: when the model list did not load, Save refuses instea
   const { window } = await boot({ fetchHandler: (u, o) => (u === '/api/config' ? Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'boom' }) }) : base(u, o)) });
   await go(window, 'settings/memory');
   await settle();
-  click(window, window.document.getElementById('memDefragModelSave'));
+  edit(window, window.document.getElementById('memDefragModel'), '');
+  window.document.getElementById('memDefragModelSave').click();
   await settle();
   assert.equal(posts.length, 0, 'no request: the empty select would have posted { model: "", effort: "" } — a clear');
-  assert.match(window.document.getElementById('memDefragModelMsg').textContent, /the model list did not load/);
+  assert.deepEqual(cardAlertOf(window.document.getElementById('mem-defrag-model-card')),
+    { title: 'Not saved', detail: 'The model list did not load. Reload the page to change this.' });
 });
 
 test('Settings › Memory: a stored effort the model no longer offers is named as dropped, never promised', async () => {
@@ -651,13 +688,14 @@ test('Settings › Memory: a failed re-read of the setting (a settings-changed f
   failSettings = true;
   WSStub.last._message({ type: 'settings-changed' });
   await settle();
-  click(window, window.document.getElementById('memDefragModelSave'));
+  edit(window, window.document.getElementById('memDefragModel'), 'claude-haiku-4-5');
+  window.document.getElementById('memDefragModelSave').click();
   await settle();
   assert.equal(posts.length, 0, 'the stale paint is never posted over what another tab saved');
-  assert.match(window.document.getElementById('memDefragModelMsg').textContent, /the model list did not load/);
+  assert.match(cardAlertOf(window.document.getElementById('mem-defrag-model-card')).detail, /The model list did not load/);
 });
 
-test('Settings › Memory: a re-read that works lifts the error a failed one left behind; a "Saved." line survives the save\'s own frame', async () => {
+test('Settings › Memory: a re-read that works lifts the error a failed one left behind; the save\'s own frame leaves no error', async () => {
   const posts = [];
   const base = dmHandler(posts);
   let failSettings = false;
@@ -674,12 +712,15 @@ test('Settings › Memory: a re-read that works lifts the error a failed one lef
   WSStub.last._message({ type: 'settings-changed' });
   await settle();
   assert.equal(msg.textContent, '', 'the card works again: no stale error');
-  click(window, window.document.getElementById('memDefragModelSave'));
+  edit(window, window.document.getElementById('memDefragModel'), 'claude-haiku-4-5');
+  window.document.getElementById('memDefragModelSave').click();
   await settle();
   assert.equal(posts.length, 1, 'and Save posts again');
+  assert.equal(lastToast(window.document).detail, 'Applies to the next defragment run.');
   WSStub.last._message({ type: 'settings-changed' });   // the save's own frame
   await settle();
-  assert.match(msg.textContent, /Saved/, 'a success line is not an error: the frame keeps it');
+  assert.equal(msg.textContent, '', 'no error line after the save\'s own frame');
+  assert.equal(cardAlertOf(window.document.getElementById('mem-defrag-model-card')), null);
 });
 
 test('Settings › Memory: a settings-changed reload that overtakes a memory-changed one keeps the conflict warning', async () => {

@@ -199,7 +199,7 @@ function detectNote(entry) {
 /**
  * The project's Actions config editor: Setup, Actions (inline editor) and Built in cards.
  * `detected` maps editor/terminal/fileManager to `{label}` or null (not found). onSave gets
- * readEditorForm(root); onTry gets (actionId, button).
+ * (readEditorForm(root), saveButton); onTry gets (actionId, button).
  */
 export function renderProjectActionsEditor(cfg, { doc, detected = {}, onSave, onTry } = {}) {
   const root = h(doc, 'div', 'actions-config');
@@ -231,7 +231,7 @@ export function renderProjectActionsEditor(cfg, { doc, detected = {}, onSave, on
 
   const foot = h(doc, 'div', 'ac-foot');
   const save = btn(doc, 'ac-save', 'Save', true);
-  save.addEventListener('click', () => onSave?.(readEditorForm(root)));
+  save.addEventListener('click', () => onSave?.(readEditorForm(root), save));
   foot.append(save);
 
   root.append(setupCard, actionsCard, builtinsCard, foot);
@@ -314,7 +314,7 @@ function memberLine(doc, m) {
 /**
  * The workspace's stack editor. `data` is GET /api/workspaces/:id/actions:
  * `{stacks, members:[{projectKey, name, alias, actions:[{id,label,kind}]}]}`. Steps run in
- * order; `{alias.NAME}` reaches a member's port variable. onSave gets readStackForm(root).
+ * order; `{alias.NAME}` reaches a member's port variable. onSave gets (readStackForm(root), saveButton).
  */
 export function renderStackEditor(data, { doc, onSave } = {}) {
   const root = h(doc, 'div', 'actions-config ac-stacks');
@@ -334,7 +334,7 @@ export function renderStackEditor(data, { doc, onSave } = {}) {
 
   const foot = h(doc, 'div', 'ac-foot');
   const save = btn(doc, 'ac-save', 'Save', true);
-  save.addEventListener('click', () => onSave?.(readStackForm(root)));
+  save.addEventListener('click', () => onSave?.(readStackForm(root), save));
   foot.append(save);
 
   root.append(membersCard, stacksCard, foot);
@@ -355,4 +355,42 @@ export function readStackForm(root) {
       })),
     })),
   };
+}
+
+// ---- Server field errors --------------------------------------------------------------------
+const ACTION_FIELD_CLASS = { id: 'ac-f-id', label: 'ac-f-label', kind: 'ac-f-kind', cmd: 'ac-f-cmd', cmdWin32: 'ac-f-cmdwin32',
+  cwd: 'ac-f-cwd', openUrl: 'ac-f-openurl', ready: 'ac-ready-port', env: 'ac-env-name' };
+const STACK_FIELD_CLASS = { id: 'ac-stack-id', label: 'ac-stack-label', kind: 'ac-stack-kind' };
+const STEP_FIELD_CLASS = { member: 'ac-step-member', action: 'ac-step-action', env: 'ac-step-env-name' };
+
+/**
+ * The input an `ActionConfigError.field` names (src/core/actions/model.mjs), or null:
+ * setup | actions[i](.key)(.env[j]) | stacks[i](.key) | stacks[i].steps[j](.member|.action|.env[k]).
+ */
+export function editorFieldEl(root, field) {
+  if (!root || !field) return null;
+  if (field === 'setup') return root.querySelector('.ac-setup');
+  let m = /^actions\[(\d+)\](?:\.(\w+))?(?:\[(\d+)\])?/.exec(field);
+  if (m) {
+    const row = root.querySelectorAll('.ac-action')[Number(m[1])];
+    if (!row) return null;
+    if (m[2] === 'env' && m[3] != null) return row.querySelectorAll('.ac-env-row')[Number(m[3])]?.querySelector('.ac-env-name') || null;
+    // `ready` is a port OR an "output contains" text, depending on the kind select.
+    if (m[2] === 'ready') return row.querySelector(row.querySelector('.ac-ready-kind')?.value === 'output' ? '.ac-ready-text' : '.ac-ready-port');
+    return row.querySelector(`.${ACTION_FIELD_CLASS[m[2]] || 'ac-f-id'}`);
+  }
+  m = /^stacks\[(\d+)\](?:\.(\w+))?(?:\[(\d+)\])?(?:\.(\w+))?(?:\[(\d+)\])?/.exec(field);
+  if (m) {
+    const stack = root.querySelectorAll('.ac-stack')[Number(m[1])];
+    if (!stack) return null;
+    if (m[2] === 'steps' && m[3] == null) return null;      // "a stack needs at least one step" → card alert
+    if (m[2] === 'steps') {
+      const step = stack.querySelectorAll('.ac-step')[Number(m[3])];
+      if (!step) return null;
+      if (m[4] === 'env' && m[5] != null) return step.querySelectorAll('.ac-step-env-row')[Number(m[5])]?.querySelector('.ac-step-env-name') || null;
+      return step.querySelector(`.${STEP_FIELD_CLASS[m[4]] || 'ac-step-member'}`);
+    }
+    return stack.querySelector(`.${STACK_FIELD_CLASS[m[2]] || 'ac-stack-id'}`);
+  }
+  return null;
 }

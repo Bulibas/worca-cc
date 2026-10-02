@@ -37,6 +37,7 @@ export function renderChatSettings({ prefs, channels } = {}, { doc = globalThis.
     const cb = h(doc, 'input', 'sw-input chat-ev');
     cb.type = 'checkbox';
     cb.dataset.ev = key;
+    cb.dataset.setting = 'chat';
     cb.checked = p.notify?.[key] !== false;
     cb.setAttribute('aria-label', label);
     row.appendChild(cb);
@@ -61,6 +62,7 @@ export function renderChatSettings({ prefs, channels } = {}, { doc = globalThis.
     const cb = h(doc, 'input', 'sw-input chat-ch');
     cb.type = 'checkbox';
     cb.dataset.channelKey = key;
+    cb.dataset.setting = 'chat';
     cb.checked = p.channels?.[key]?.enabled !== false;
     cb.setAttribute('aria-label', `Enable ${c.displayName || c.channelId}`);
     toggle.appendChild(cb);
@@ -149,12 +151,14 @@ export function renderAskWebFields({ askWeb } = {}, { doc = globalThis.document 
   anyRow.append(any, doc.createTextNode(' Any site, without asking'));
   const anyHint = h(doc, 'small', 'hint', 'Risky: a web page or a file Ask reads can then make it send data to any site in a URL. Leave off to approve each new site from the chat.');
   const domains = h(doc, 'textarea', 'input'); domains.id = 'askWebDomains'; domains.rows = 4;
+  domains.dataset.setting = 'askWeb.allowedDomains'; domains.setAttribute('aria-label', 'Allowed domains');
   domains.placeholder = 'docs.python.org\n*.mozilla.org'; domains.value = (w.allowedDomains || []).join('\n');
   const dHint = h(doc, 'small', 'hint', 'Sites Ask may read without asking. One host per line: example.com, or *.example.com for its subdomains. For any other site Ask shows a card in the chat: allow it for that chat, always (it is added here), or deny. https only. A site sees every URL Ask requests from it, so only allow sites you trust.');
-  const field = (id, label, placeholder, value) => {
+  const field = (id, label, placeholder, value, setting) => {
     const box = h(doc, 'div', 'field');
     const l = h(doc, 'label', null, label); l.setAttribute('for', id);
     const i = h(doc, 'input', 'input'); i.id = id; i.placeholder = placeholder; i.value = value || '';
+    i.dataset.setting = setting;
     box.append(l, i); return box;
   };
   const s = w.search || {};
@@ -164,10 +168,10 @@ export function renderAskWebFields({ askWeb } = {}, { doc = globalThis.document 
   wrap.addEventListener('input', markDirty);
   wrap.addEventListener('change', markDirty);
   wrap.append(row, anyRow, anyHint, domains, dHint,
-    field('askWebSearchUrl', 'Search endpoint (optional)', 'https://api.search.brave.com/res/v1/web/search?q={query}', s.url),
-    field('askWebSearchKey', 'Search key variable', '${BRAVE_API_KEY}', s.key),
-    field('askWebSearchHeader', 'Key header', 'X-Subscription-Token', s.keyHeader),
-    field('askWebSearchPrefix', 'Key prefix', 'Bearer ', s.keyPrefix),
+    field('askWebSearchUrl', 'Search endpoint (optional)', 'https://api.search.brave.com/res/v1/web/search?q={query}', s.url, 'askWeb.search.url'),
+    field('askWebSearchKey', 'Search key variable', '${BRAVE_API_KEY}', s.key, 'askWeb.search.key'),
+    field('askWebSearchHeader', 'Key header', 'X-Subscription-Token', s.keyHeader, 'askWeb.search.keyHeader'),
+    field('askWebSearchPrefix', 'Key prefix', 'Bearer ', s.keyPrefix, 'askWeb.search.keyPrefix'),
     h(doc, 'small', 'hint', 'Any GET search API that returns JSON. Use {query} (and optionally {key}) in the URL; the key is always a ${VAR} read from worca\'s environment.'));
   return wrap;
 }

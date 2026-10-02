@@ -75,7 +75,9 @@ test('POST /api/settings workspaceScan: round trip, 400 on a bad pick (nothing w
   assert.deepEqual((await readSettingsJson()).workspaces.scan, PICK);
   const bad = await post('/api/settings', { workspaceScan: { ...PICK, agentModel: 'haiku' } });
   assert.equal(bad.status, 400);
-  assert.match((await bad.json()).error, /agentModel/);
+  const badBody = await bad.json();
+  assert.match(badBody.error, /Project agents/);
+  assert.equal(badBody.field, 'workspaceScan.agentModel');
   assert.deepEqual((await readSettingsJson()).workspaces.scan, PICK, 'nothing written on a 400');
   assert.equal((await (await post('/api/settings', { workspaceScan: null })).json()).workspaceScan, null);
   await post('/api/settings', { root: '' });

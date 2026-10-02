@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast, edit } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -78,9 +79,12 @@ test('the card sits after Title generation on the Models tab; options come from 
 
 test('Save posts autoWorkflowModel; env override paints a warning; a stored id that left the catalog paints "not installed"', async () => {
   const { window, openSettings, posts, setSettings } = await boot(); await openSettings();
-  const sel = window.document.getElementById('autoModel'); sel.value = 'claude-opus-5-5';
+  const sel = window.document.getElementById('autoModel');
+  assert.equal(window.document.getElementById('autoModelSave').disabled, true, 'Save starts disabled');
+  edit(window, sel, 'claude-opus-5-5');
   window.document.getElementById('autoModelSave').click(); await settle(window);
   assert.deepEqual(posts.at(-1), { autoWorkflowModel: 'claude-opus-5-5' });
+  assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Saved', detail: 'Applies to the next Auto run.', action: '' });
   setSettings({ autoWorkflowModel: 'claude-opus-5-5', autoWorkflowModelEffective: { model: 'claude-haiku-4-5', source: 'env' } }); await openSettings();
   assert.match(window.document.getElementById('autoModelEnvNote').textContent, /WORCA_AUTO_MODEL is set in the environment: Auto uses claude-haiku-4-5/);
   setSettings({ autoWorkflowModel: 'claude-gone-1', autoWorkflowModelEffective: { model: 'claude-sonnet-5', source: 'default' } }); await openSettings();
@@ -102,8 +106,13 @@ test('a failed catalog GET never becomes a "no longer in the catalog" verdict', 
   assert.equal(sel.value, 'claude-opus-5-5');
   assert.doesNotMatch(window.document.getElementById('autoModelEnvNote').textContent, /no longer in the catalog/);
   assert.equal(window.document.getElementById('autoModelTest').disabled, false, 'Test stays available');
-  window.document.getElementById('autoModelSave').click(); await settle(window);
-  assert.deepEqual(posts.at(-1), { autoWorkflowModel: 'claude-opus-5-5' }, 'Save is not refused');
+  const save = window.document.getElementById('autoModelSave');
+  edit(window, sel, '');
+  edit(window, sel, 'claude-opus-5-5');
+  assert.equal(save.disabled, true, 'a reverted card is clean');
+  edit(window, sel, '');
+  save.click(); await settle(window);
+  assert.deepEqual(posts.at(-1), { autoWorkflowModel: '' }, 'Save is not refused');
 });
 
 // The card's own "back to the default" affordance — nothing pinned the empty POST.

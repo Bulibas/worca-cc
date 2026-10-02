@@ -84,9 +84,9 @@ test('POST /api/settings memoryDefrag: round trip through GET and settings.json;
     assert.deepEqual(j.memoryDefrag, { model: 'claude-opus-5-5', effort: 'high' });
     // Refusals change nothing on disk.
     for (const [bad, re] of [
-      [{ model: 'gone-model' }, /unknown model "gone-model"/],
+      [{ model: 'gone-model' }, /The model “gone-model” is not in the catalog/],
       [{ model: 'claude-haiku-4-5', effort: 'max' }, /does not offer effort "max"/],
-      [{ model: '', effort: 'high' }, /effort needs a model/],
+      [{ model: '', effort: 'high' }, /“Effort” needs a model/],
       ['claude-opus-5-5', /must be \{ model, effort \}/],
     ]) {
       r = await post('/api/settings', { memoryDefrag: bad });

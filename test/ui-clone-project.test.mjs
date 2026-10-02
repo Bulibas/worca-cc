@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -143,7 +144,7 @@ test('a running job shows progress; the WS done frame closes the dialog and refr
   await tick(); await tick(); await tick();
   assert.equal($(doc, '#project-add-modal').classList.contains('hidden'), true);
   assert.ok(calls.filter((c) => c.u.endsWith('/api/projects') && c.method === 'GET').length >= 2, 'the list is refetched');
-  assert.match($(doc, '#projects-msg').textContent, /Cloned and added “api”/);
+  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Cloned and added “api”.', detail: '', action: '' });
   assert.ok([...doc.querySelectorAll('#projects-list .pl-item')].some((n) => n.textContent.includes('api')), 'the new project is listed');
 });
 

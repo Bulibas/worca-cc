@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { confirmDialog } from './helpers/confirm-modal.mjs';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -107,7 +108,7 @@ test('Delete issues DELETE /api/agents/:key; a 409 keeps the card + surfaces the
   await confirmDialog(window);
   assert.equal(calls.length, 1);
   assert.ok(doc.querySelector('.agent-card[data-agent-key="docsWriter"]'), '409 keeps the card');
-  assert.match(doc.querySelector('#agents-msg').textContent, /Uses Docs/);
+  assert.deepEqual(lastToast(doc), { tone: 'err', title: 'used by saved workflow(s)', detail: 'Uses Docs', action: '' });
   mode = 200;
   click(window, doc.querySelector('.agent-card[data-agent-key="docsWriter"] .agent-delete'));
   await confirmDialog(window);

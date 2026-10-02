@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast, edit } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -82,13 +83,14 @@ test('the Workspaces card sits on the Runs tab between Scheduled runs and Chat n
 test('Save posts the four picks; Use default posts null; changing the scan model repaints its efforts', async () => {
   const { window, openSettings, posts, tick } = await boot(); await openSettings();
   const doc = window.document;
-  doc.getElementById('wsScanModel').value = 'claude-opus-5-5';
-  doc.getElementById('wsScanModel').dispatchEvent(new window.Event('change'));
-  doc.getElementById('wsScanEffort').value = 'xhigh';
-  doc.getElementById('wsAgentModel').value = 'fable';
-  doc.getElementById('wsAgentEffort').value = 'high';
+  assert.equal(doc.getElementById('wsScanModelsSave').disabled, true, 'Save starts disabled');
+  edit(window, doc.getElementById('wsScanModel'), 'claude-opus-5-5');
+  edit(window, doc.getElementById('wsScanEffort'), 'xhigh');
+  edit(window, doc.getElementById('wsAgentModel'), 'fable');
+  edit(window, doc.getElementById('wsAgentEffort'), 'high');
   doc.getElementById('wsScanModelsSave').click(); await tick(); await tick();
   assert.deepEqual(posts.at(-1), { workspaceScan: { scanModel: 'claude-opus-5-5', scanEffort: 'xhigh', agentModel: 'fable', agentEffort: 'high' } });
+  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Saved', detail: 'Applies to the next scan.', action: '' });
   doc.getElementById('wsScanModelsReset').click(); await tick(); await tick();
   assert.deepEqual(posts.at(-1), { workspaceScan: null });
 });
@@ -102,7 +104,8 @@ test('a stored scan model that left the catalog is shown as not installed and Sa
   assert.equal(sel.options[sel.selectedIndex].disabled, true);
   assert.match(doc.getElementById('wsScanModelsNote').textContent, /no longer in the catalog/);
   const before = posts.length;
+  assert.equal(doc.getElementById('wsScanModelsSave').disabled, true, 'the painted card is clean');
   doc.getElementById('wsScanModelsSave').click(); await tick();
   assert.equal(posts.length, before, 'nothing posted');
-  assert.match(doc.getElementById('wsScanModelsMsg').textContent, /no longer installed/);
+  assert.equal(doc.getElementById('wsScanModelsMsg'), null, 'no save line');
 });
