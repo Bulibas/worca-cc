@@ -1361,8 +1361,14 @@ function handleServerMessage(msg) {
 function onHello(msg) {
   const ws = state.ws;
   const list = Array.isArray(msg.runs) ? msg.runs : [];
+  const rebooted = !!(msg.bootId && state.serverBootId && state.serverBootId !== msg.bootId);
   noteBoot(state, msg.bootId, runs);   // a restarted server numbers run events from 1 again
   applyServerMock(msg.serverMock);     // every hello: a restarted server may have changed mode
+  // A restarted server lists only the runs IT started, and nothing below drops the old ones: mark
+  // every entry stale, and the upserts below clear the ones it lists. The saved run's bar skips a
+  // stale entry (hdPipelineRun), which would otherwise offer a Pause / Stop the server answers
+  // "unknown runId" to and hide the run's working Resume.
+  if (rebooted) for (const r of runs.values()) r.staleBoot = true;
 
   if (!helloSeeded) {
     helloSeeded = true;
@@ -1563,6 +1569,7 @@ function makeRun({
     active: [], endReached: undefined, result: null, warnings: [], wireDeliveries: {}, tokens: {}, gate: null,
     el: null,
     _finished: false,
+    staleBoot: false,  // a restarted server never re-listed it (onHello): the run died with the old process
   };
 }
 
@@ -1578,6 +1585,7 @@ function upsertRun(partial) {
     for (const k of Object.keys(partial)) {
       if (partial[k] !== undefined) r[k] = partial[k];
     }
+    r.staleBoot = false;   // every caller relays the current server: it knows this runId
   }
   return r;
 }
@@ -16296,6 +16304,7 @@ async function stopRun(runId, btn) {
 // 'pausing' (state event keeps the card visible via liveRuns) and the eventual
 // done(paused) routes through finishRun — the record resurfaces in History
 // with a Resume button. On failure re-enable the button and log to that card.
+// Resolves to the failure's reason (a page that does not show the log says it), or null.
 async function pauseRun(runId, btn) {
   if (btn) btn.disabled = true;
   try {
@@ -16309,11 +16318,14 @@ async function pauseRun(runId, btn) {
       if (btn) btn.disabled = false;
       const r = runs.get(runId);
       if (r) onLog(r, { source: 'ui', level: 'error', text: `pause failed: ${err.error || res.status}`, ts: Date.now() });
+      return String(err.error || `HTTP ${res.status}`);
     }
+    return null;
   } catch (e) {
     if (btn) btn.disabled = false;
     const r = runs.get(runId);
     if (r) onLog(r, { source: 'ui', level: 'error', text: `pause error: ${e.message}`, ts: Date.now() });
+    return e.message;
   }
 }
 
@@ -16433,12 +16445,12 @@ async function resumeRunFromCard(runId, btn, { ignoreCostCap = false, pastTeamCa
   }
 }
 
-// Resume splits (run page, History detail + its glance): a click outside any split closes every
+// Resume splits (the run page's bar and the saved run's): a click outside any split closes every
 // open resume menu. One listener covers every location; the caret/item clicks already
 // stopPropagation, so the parity with #start-split's click-away holds (closeStartMenu).
 document.addEventListener('click', (e) => {
-  if (e.target.closest && e.target.closest('.hd-resume-split, .rd-resume-split, .hd-g-resume-split')) return;
-  for (const menu of document.querySelectorAll('.hd-resume-menu, .rd-resume-menu, .hd-g-resume-menu')) {
+  if (e.target.closest && e.target.closest('.hd-resume-split, .rd-resume-split')) return;
+  for (const menu of document.querySelectorAll('.hd-resume-menu, .rd-resume-menu')) {
     if (!menu.hidden) {
       menu.hidden = true;
       const more = menu.closest('.btn-split')?.querySelector('.btn-split-more');
@@ -18265,26 +18277,18 @@ function applyHistResumeGate(btn, pauseReason, budget, pauseDetail = '') {
   }
 }
 
-// Re-gate the mounted history Resume button from the dataset.pauseReason stamp
-// paintHdBanners left behind, so a budget change unblocks it without a refetch.
-// Detail-screen roots ONLY: Resume left the list card with the accordion.
+// Re-gate the mounted history Resume button from its pause reason (the live run's,
+// else the dataset.pauseReason stamp paintHdBanners left behind), so a budget change
+// unblocks it without a refetch. Detail-screen roots ONLY: Resume left the list card
+// with the accordion.
 function refreshHistResumeGating() {
   const roots = el.histDetail ? [...el.histDetail.querySelectorAll('.hd')] : [];
   for (const root of roots) {
     const btn = root.querySelector('.hd-resume');
     if (!btn || btn.hidden) continue;
-    // An IN-FLIGHT resume owns its button outright: applyHistResumeGate would
-    // re-enable it mid-POST (second click = second POST /api/resume).
-    if (btn.dataset.resumeState === 'busy') continue;
-    // A FAILED one does not get to opt out of budget gating for the life of the
-    // screen (the detail screen is never rebuilt, and nothing clears the flag) —
-    // otherwise a `cost_total` block that lands later leaves the button enabled and
-    // the user clicks into a guaranteed 403. Re-gate, then restore the D3 error
-    // title when gating did not take the button away.
-    applyHistResumeGate(btn, root.dataset.pauseReason || '', budgetState.budget, root.dataset.pauseDetail || '');
-    if (btn.dataset.resumeState === 'error' && btn.dataset.resumeError && !btn.disabled) {
-      btn.title = btn.dataset.resumeError;
-    }
+    if (btn.dataset.resumeState === 'busy') continue;   // an in-flight resume (gateHdResume)
+    const live = histDetailState && histDetailState.screen === root ? hdLiveRun(histDetailState.record) : null;
+    gateHdResume(btn, hdResumeReason(root, live));
   }
 }
 
@@ -18812,14 +18816,16 @@ function closeHistDetail({ instant = false } = {}) {
   // Same class, same reason — and the detail->list hop inside History never reaches
   // showView (the view name does not change), so this is the only call that covers it.
   // Safe above the detail-open early return, like closeShipItModal: #report-modal
-  // opens ONLY from the detail screen, never from a list card (that is what keeps
-  // #stop-modal below closeRunDetail's guard).
+  // opens ONLY from the detail screen, never from a list card.
   closeReportModal();
   const shell = el.histShell;
   const host = el.histDetail;
   if (!shell || !host) return;
   if (!shell.classList.contains('detail-open')) { histDetailState = null; hdCommentState = null; return; }
   destroyActionsIn(host);
+  // The bar's Stop opens #stop-modal too, and showView closes it only when leaving
+  // Running. Below the early return: the run page's own Stop is closeRunDetail's.
+  closeStopModal();
   histDetailState = null;
   hdCommentState = null;
   host.setAttribute('aria-hidden', 'true');
@@ -18922,7 +18928,7 @@ async function loadHistDetailScreen(screen, record, parsed, ship = null) {
     // (else the intent is dropped on essentially every cache-warm navigation).
     if (rec.pr === undefined) rec.pr = null;
     paintHdPr(screen, rec, data);
-    paintHdAfter(screen, rec);
+    paintHdAfter(screen, rec, data);
     // Two belts, both load-bearing:
     //  - `!rec.pr` — the stale-button -> double-POST race is fixed at the source
     //    (the ship path calls patchHistoryPr); this is the backstop.
@@ -19295,7 +19301,7 @@ function openShipItModal(record, data) {
       const screen = histDetailState && histDetailState.screen;
       if (screen) {
         paintHdPr(screen, record, histDetailState.data);
-        paintHdAfter(screen, record);
+        paintHdAfter(screen, record, histDetailState.data);
         const mergeEl = screen.querySelector('.hist-merge');
         if (mergeEl) {
           setMergePill(mergeEl, dd.mergeable);
@@ -19362,14 +19368,15 @@ function hdSyncPr(projectKey, id, row) {
   if (histDetailState.id !== id || histDetailState.key !== projectKey) return;
   if (row) histDetailState.record = row;   // a deep link's minimal record upgrades to the real row
   paintHdPr(histDetailState.screen, histDetailState.record, histDetailState.data);
-  paintHdAfter(histDetailState.screen, histDetailState.record);
+  paintHdAfter(histDetailState.screen, histDetailState.record, histDetailState.data);
   paintHdGlance(histDetailState.screen, histDetailState.record, histDetailState.data);
 }
 
 // ── History glance ──────────────────────────────────────────────────────────
-// The Running page's status line, trail and result sheet over the SAVED run. The
-// actions are mirrors: each glance button clicks the Details header's own control
-// (Create PR, Resume, Schedule after), so there is one wiring and one busy state.
+// The Running page's status line, trail and result sheet over the SAVED run. The run
+// controls sit in the shared bar, as on the Running page; the card's one action, the
+// pull request, mirrors the Details header's control, so there is one wiring and one
+// busy state.
 function paintHdGlance(screen, record, data) {
   const glance = screen && screen.querySelector('.hd-glance');
   if (!glance || !data || !data.state) return;
@@ -19402,15 +19409,14 @@ function paintHdGlance(screen, record, data) {
   // The result: every tab, the actions. The things to check live in Overview only.
   const host = glance.querySelector('.hd-result');
   host.replaceChildren();
-  const done = copy.state === 'done';
   const trail = trailColumns(run);
   host.append(...rdActivityGroups(screen, {
     overview: activityOverviewValue(results),
     workflow: trail.count ? `${trail.count} step${trail.count === 1 ? '' : 's'}` : '',
   }));
 
-  // Mirrors of the Details header's controls: visible exactly when theirs are. A
-  // merged pull request is a fact (the headline), so its link is secondary.
+  // The pull request, mirrored from the Details header's control: visible exactly when
+  // it is, so at most one button, coloured by the PR's state (paintRdResult's classes).
   const acts = document.createElement('div');
   acts.className = 'rd-result-actions';
   const mirror = (sel, label, cls, icon) => {
@@ -19433,68 +19439,9 @@ function paintHdGlance(screen, record, data) {
     b.addEventListener('click', () => src.click());
     acts.appendChild(b);
   };
-  const finished = done || RD_TERMINAL.includes(st.status);
-  mirror('.hd-resume', 'Resume', 'hd-g-resume', 'resume');
-  splitGlanceResume(screen, acts);
   mirror('.hd-pr', 'Create pull request', 'hd-g-pr', 'pr-create');
-  mirror('.hd-pr-link', 'View pull request', `hd-g-pr-link${pr === 'MERGED' ? ' alt' : ''}`, pr === 'MERGED' ? 'merged' : 'pr-open');
-  mirror('.hd-after', finished ? 'Start a follow-up run' : 'Schedule a run after this', 'alt hd-g-after', finished ? 'follow-up' : 'schedule');
+  mirror('.hd-pr-link', 'View pull request', `hd-g-pr-link ${pr === 'MERGED' ? 'pr-merged' : 'pr-view'}`, pr === 'MERGED' ? 'merged' : 'external');
   if (acts.childNodes.length) host.appendChild(acts);
-}
-
-// The glance's Resume mirrors the Details split as well: a caret whose "Resume at…"
-// drives the Details item, so there is one scheduling path and one cap gate. Rebuilt
-// with the glance on every repaint, like the mirrors themselves.
-function splitGlanceResume(screen, acts) {
-  const cta = acts.querySelector('.hd-g-resume');
-  const split = screen.querySelector('.hd-resume-split');
-  const srcMore = screen.querySelector('.hd-resume-more');
-  const srcItem = screen.querySelector('.hd-resume-at-item');
-  if (!cta || !split || split.hidden || !srcMore || !srcItem || !levelAtLeast(srcMore.dataset.minLevel || 'simple')) return;
-  const wrap = document.createElement('div');
-  wrap.className = 'btn-split hd-g-resume-split';
-  const more = document.createElement('button');
-  more.type = 'button';
-  more.className = 'btn-split-more hd-g-resume-more';
-  more.setAttribute('aria-haspopup', 'menu');
-  more.setAttribute('aria-expanded', 'false');
-  more.title = 'Schedule the resume';
-  more.setAttribute('aria-label', 'Schedule the resume');
-  const caret = srcMore.querySelector('svg');
-  if (caret) more.append(caret.cloneNode(true));
-  const menu = document.createElement('div');
-  menu.className = 'btn-split-menu hd-g-resume-menu';
-  menu.setAttribute('role', 'menu');
-  menu.hidden = true;
-  const item = document.createElement('button');
-  item.type = 'button';
-  item.setAttribute('role', 'menuitem');
-  item.className = 'hd-g-resume-at';
-  const b = document.createElement('b'); b.textContent = 'Resume at…';
-  const small = document.createElement('small'); small.textContent = 'Schedule the resume';
-  item.append(b, small);
-  item.disabled = srcItem.disabled;
-  item.title = srcItem.title;
-  menu.append(item);
-  cta.replaceWith(wrap);
-  wrap.append(cta, more, menu);
-  const close = () => { if (!menu.hidden) { menu.hidden = true; more.setAttribute('aria-expanded', 'false'); } };
-  more.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const open = menu.hidden;
-    menu.hidden = !open;
-    more.setAttribute('aria-expanded', open ? 'true' : 'false');
-    (open ? item : more).focus();
-  });
-  item.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (item.disabled) return;
-    close();
-    srcItem.click();
-  });
-  menu.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { e.stopPropagation(); close(); more.focus(); }
-  });
 }
 
 // Detail-header PR control from the record's tri-state (undefined = enrichment
@@ -19502,12 +19449,110 @@ function splitGlanceResume(screen, acts) {
 // Link-first, matching setupPrButton's order (app.js:8552-8569): a merged-but-
 // branch-gone run still shows "Merged".
 // Run chains: every pipeline can be waited for — the button deep-links to New pipeline with the pick made.
-function paintHdAfter(screen, record) {
+// The record's status is the list row's (fresher than the load-time payload); a deep link's stub has
+// none, so the detail payload's stands in.
+function paintHdAfter(screen, record, data = null) {
   const btn = screen.querySelector('.hd-after');
   if (!btn) return;
   const id = record && record.id ? record.id : null;
   btn.hidden = !id;
   btn.onclick = id ? () => { location.hash = `#new/after/${id}`; } : null;   // never a handler over a null record
+  const status = (record && record.status) || (data && data.state && data.state.status) || '';
+  const title = runAfterTitle(String(status).toLowerCase());
+  btn.title = title;
+  btn.setAttribute('aria-label', title);
+}
+
+// Run after's words, on both run pages' bars: a finished run is followed up, any other waited for.
+function runAfterTitle(status) {
+  return RD_TERMINAL.includes(status) ? 'Start a follow-up run' : 'Schedule a run after this';
+}
+
+// The pipeline's newest run in this tab's runs map (latestPipelineRun: never a superseded
+// lineage) that the current server knows. An entry from before a server restart died with the
+// old process: its run is neither live nor the end of the pipeline (the saved state rules).
+function hdPipelineRun(record) {
+  return record && record.id ? latestPipelineRun(record.id, { currentBoot: true }) : null;
+}
+
+// That run while it is not over. POST /api/pause and /api/stop take a live runId, which the
+// saved run does not have.
+function hdLiveRun(record) {
+  const r = hdPipelineRun(record);
+  return r && !RD_TERMINAL.includes(r.status) ? r : null;
+}
+
+// What the bar's Resume is gated on: the live run's pause reason when the pipeline has one (it
+// paused after this screen loaded), else the one paintHdBanners stamped on the screen.
+function hdResumeReason(screen, live) {
+  return live
+    ? { reason: live.pauseReason || '', detail: live.pauseDetail || '' }
+    : { reason: screen.dataset.pauseReason || '', detail: screen.dataset.pauseDetail || '' };
+}
+
+// Budget-gate the bar's Resume. Callers skip an IN-FLIGHT resume: it owns its button outright,
+// and applyHistResumeGate would re-enable it mid-POST (second click = second POST /api/resume).
+// A FAILED one does not get to opt out of budget gating for the life of the screen (the detail
+// screen is never rebuilt, and nothing clears the flag) — otherwise a `cost_total` block that
+// lands later leaves the button enabled and the user clicks into a guaranteed 403. Re-gate,
+// then restore the D3 error title when gating did not take the button away.
+function gateHdResume(btn, { reason, detail }) {
+  applyHistResumeGate(btn, reason, budgetState.budget, detail);
+  if (btn.dataset.resumeState === 'error' && btn.dataset.resumeError && !btn.disabled) {
+    btn.title = btn.dataset.resumeError;
+  }
+}
+
+// The bar's run controls that follow the pipeline's live run, by paintRdHeader's rules: Pause
+// while it is not paused, Stop while it is not over, the Resume split while it is paused. With
+// no live run, Resume keeps the saved state's rule (paused + interrupted only, D3, and only while
+// a resume point exists — v1 points were retired by the v2 upgrade; a LIVE snapshot has no
+// `resumable` field, so `!== false` keeps the live path untouched).
+// Idempotent: runs on load, when the row lands and on every run frame (renderRunningView).
+function paintHdLive(screen, record, data) {
+  const pauseBtn = screen.querySelector('.hd-pause');
+  const stopBtn = screen.querySelector('.hd-stop');
+  if (!pauseBtn || !stopBtn) return;
+  const live = hdLiveRun(record);
+  pauseBtn.hidden = !live || isPaused(live);
+  stopBtn.hidden = !live;
+  // pauseRun disables Pause and re-enables it only on failure, and frames keep landing before
+  // the run flips to `pausing` (C16): never re-enable mid-request. Only a new live run (a
+  // resume mints a fresh runId) re-arms it.
+  const runId = live ? live.runId : '';
+  if (pauseBtn.dataset.runId !== runId) { pauseBtn.dataset.runId = runId; pauseBtn.disabled = false; }
+  if (live && live.status === 'pausing') pauseBtn.disabled = true;
+
+  const split = screen.querySelector('.hd-resume-split');
+  const resumeBtn = screen.querySelector('.hd-resume');
+  if (!split || !resumeBtn || resumeBtn.dataset.resumeState === 'busy') return;
+  const st = data.state;
+  // No live run but a pipeline run in this tab: its newest run ended (resumed elsewhere, then
+  // finished), so the load-time pause is stale and the pipeline is over.
+  const over = !live && !!hdPipelineRun(record);
+  const resumable = live ? isPaused(live)
+    : !over && HD_RESUMABLE.has(String(st.status || '').toLowerCase()) && st.resumable !== false;
+  split.hidden = !resumable;
+  resumeBtn.hidden = !resumable;
+  const resumeMore = screen.querySelector('.hd-resume-more');
+  const resumeMenu = screen.querySelector('.hd-resume-menu');
+  if (!resumable) {
+    if (resumeMenu) resumeMenu.hidden = true;
+    if (resumeMore) resumeMore.setAttribute('aria-expanded', 'false');
+    return;
+  }
+  const gate = hdResumeReason(screen, live);
+  gateHdResume(resumeBtn, gate);
+  // Scheduled resume ("Resume at…" in the split's menu): every resumable pause; cap pauses
+  // KEEP the arrow but DISABLE the item (clarify: caps are live decisions).
+  const resumeAtItem = screen.querySelector('.hd-resume-at-item');
+  if (resumeAtItem) {
+    const refused = SCHEDULE_REFUSED_PAUSE.has(gate.reason);
+    resumeAtItem.disabled = refused;
+    resumeAtItem.title = refused
+      ? 'This run paused on a cost cap — continuing past it is a live decision and cannot be scheduled.'
+      : '';
+  }
 }
 
 function paintHdPr(screen, record, data) {
@@ -20018,61 +20063,63 @@ function hdSetArchiveGate(btn, retained) {
 
 function setupHdActions(screen, record, data) {
   const st = data.state;
-  const status = String(st.status || '').toLowerCase();
   const retained = paintHdBanners(screen, record, data);
 
-  // Resume: paused + interrupted only (D3), and only while a resume point exists
-  // (v1 points were retired by the v2 upgrade). A LIVE snapshot has no
-  // `resumable` field, so `!== false` keeps the live path untouched.
+  // The bar's run controls. Bound unconditionally, once: their visibility follows the
+  // pipeline's live run (paintHdLive, every frame), so a pipeline that pauses after the
+  // screen loaded offers a working Resume. Every handler resolves the record at CLICK time.
   const resumeBtn = screen.querySelector('.hd-resume');
-  if (HD_RESUMABLE.has(status) && st.resumable !== false) {
-    resumeBtn.hidden = false;
-    applyHistResumeGate(resumeBtn, screen.dataset.pauseReason || '', budgetState.budget, screen.dataset.pauseDetail || '');
-    resumeBtn.addEventListener('click', () => {
-      const r = hdCurrentRecord(record);              // never the load-time object
-      resumePipeline(r, r.projectDir || null, resumeBtn);
-    });
-  }
+  resumeBtn.addEventListener('click', () => {
+    const r = hdCurrentRecord(record);              // never the load-time object
+    resumePipeline(r, r.projectDir || null, resumeBtn);
+  });
 
-  // Scheduled resume ("Resume at…" in the split's menu): every resumable pause; cap
-  // pauses KEEP the arrow but DISABLE the item (clarify: caps are live decisions).
-  const resumeSplit = screen.querySelector('.hd-resume-split');
+  // Scheduled resume ("Resume at…" in the split's menu); paintHdLive gates the item.
   const resumeMore = screen.querySelector('.hd-resume-more');
   const resumeMenu = screen.querySelector('.hd-resume-menu');
   const resumeAtItem = screen.querySelector('.hd-resume-at-item');
-  const pauseReasonForSchedule = screen.dataset.pauseReason || '';
-  if (HD_RESUMABLE.has(status) && st.resumable !== false) {
-    if (resumeSplit) resumeSplit.hidden = false;
-    const refused = SCHEDULE_REFUSED_PAUSE.has(pauseReasonForSchedule);
-    if (resumeAtItem) {
-      resumeAtItem.disabled = refused;
-      resumeAtItem.title = refused
-        ? 'This run paused on a cost cap — continuing past it is a live decision and cannot be scheduled.'
-        : '';
-    }
-    if (resumeMore && resumeMenu && resumeAtItem) {
-      const closeResumeMenu = () => {
-        if (!resumeMenu.hidden) { resumeMenu.hidden = true; resumeMore.setAttribute('aria-expanded', 'false'); }
-      };
-      resumeMore.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const open = resumeMenu.hidden;
-        resumeMenu.hidden = !open;
-        resumeMore.setAttribute('aria-expanded', open ? 'true' : 'false');
-        (open ? resumeAtItem : resumeMore).focus();
-      });
-      resumeAtItem.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (resumeAtItem.disabled) return;
-        closeResumeMenu();
-        const r = hdCurrentRecord(record);   // never the load-time object (record-identity rule)
-        scheduleResumeAt({ pipelineId: r.id, title: r.title, projectDir: r.projectDir || null, workspaceId: r.workspaceId || null }, resumeAtItem);
-      });
-      resumeMenu.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') { e.stopPropagation(); closeResumeMenu(); resumeMore.focus(); }
-      });
-    }
+  if (resumeMore && resumeMenu && resumeAtItem) {
+    const closeResumeMenu = () => {
+      if (!resumeMenu.hidden) { resumeMenu.hidden = true; resumeMore.setAttribute('aria-expanded', 'false'); }
+    };
+    resumeMore.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = resumeMenu.hidden;
+      resumeMenu.hidden = !open;
+      resumeMore.setAttribute('aria-expanded', open ? 'true' : 'false');
+      (open ? resumeAtItem : resumeMore).focus();
+    });
+    resumeAtItem.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (resumeAtItem.disabled) return;
+      closeResumeMenu();
+      const r = hdCurrentRecord(record);   // never the load-time object (record-identity rule)
+      scheduleResumeAt({ pipelineId: r.id, title: r.title, projectDir: r.projectDir || null, workspaceId: r.workspaceId || null }, resumeAtItem);
+    });
+    resumeMenu.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); closeResumeMenu(); resumeMore.focus(); }
+    });
   }
+
+  // Pause / Stop: the pipeline's live run, resolved at CLICK time (record-identity rule; a
+  // resume mints a new live run), never the one painted at bind time.
+  const pauseBtn = screen.querySelector('.hd-pause');
+  pauseBtn.addEventListener('click', async () => {
+    if (pauseBtn.disabled) return;   // a pause request is in flight (C16)
+    const live = hdLiveRun(hdCurrentRecord(record));
+    if (!live) return;
+    // pauseRun logs a failure to the run's log, which this page does not show: say it inline, and
+    // take it away once a retry goes through (only our own line: the slot is shared).
+    const failed = await pauseRun(live.runId, pauseBtn);
+    const errEl = screen.querySelector('.hd-error');
+    if (failed && errEl) { errEl.hidden = false; errEl.textContent = `Could not pause: ${failed}`; }
+    else if (errEl && errEl.textContent.startsWith('Could not pause: ')) { errEl.hidden = true; errEl.textContent = ''; }
+  });
+  screen.querySelector('.hd-stop').addEventListener('click', () => {
+    const live = hdLiveRun(hdCurrentRecord(record));
+    if (live) openStopModal(live.runId);
+  });
+  paintHdLive(screen, record, data);
 
   // Archive: honest copy (D2), confirmModal (not window.confirm). Deletability is
   // judged on the AUTHORITATIVE detail status (a deep link's minimal record has none).
@@ -20161,7 +20208,7 @@ function setupHdActions(screen, record, data) {
   });
 
   paintHdPr(screen, record, data);
-  paintHdAfter(screen, record);
+  paintHdAfter(screen, record, data);
 }
 
 // Re-run only the IDEMPOTENT painters after the open detail's real list row
@@ -20221,7 +20268,8 @@ function refreshHdFromRow() {
   hdSetArchiveGate(screen.querySelector('.hd-archive'), retained);
   refreshHistResumeGating();
   paintHdPr(screen, row, data);                         // idempotent; re-binds btn.onclick
-  paintHdAfter(screen, row);
+  paintHdAfter(screen, row, data);
+  paintHdLive(screen, row, data);
   refreshHdOverviewTab();   // the one tab body that reads mutable record fields
 }
 
@@ -23897,19 +23945,25 @@ function askRunSnapshot(r) {
     stepper: graph ? r.stepper : null, decor,
   };
 }
+// A pipeline's current run in this tab's runs Map. D23: a resumed pipeline can leave its superseded lineage in
+// this Map — another tab's paused entry (only the acting tab deletes it, resumeRunFromCard/resumePipeline), a
+// scheduled "Resume at…", a History resume whose paused run had no log lines to match — and Map order lists that
+// dead entry FIRST. The lineage still live wins; among settled ones the newest (orderKey, minted once per runId)
+// does. Shared by Ask's progress cards and the saved run's bar (hdPipelineRun), which passes `currentBoot` to
+// skip the runs a restarted server no longer knows (staleBoot).
+function latestPipelineRun(pipelineId, { currentBoot = false } = {}) {
+  if (!pipelineId) return null;
+  let best = null;
+  for (const r of runs.values()) {
+    if (!isPipelineRun(r) || r.pipelineId !== pipelineId || (currentBoot && r.staleBoot)) continue;
+    if (!best || (isLive(r) && !isLive(best)) || (isLive(r) === isLive(best) && (r.orderKey || 0) > (best.orderKey || 0))) best = r;
+  }
+  return best;
+}
 const askRunStore = Object.freeze({
   get(runId) { const r = runId ? runs.get(runId) : null; return r && isPipelineRun(r) ? askRunSnapshot(r) : null; },
   byPipeline(pipelineId) {
-    if (!pipelineId) return null;
-    // D23: a resumed pipeline can leave its superseded lineage in this Map — another tab's paused entry (only the
-    // acting tab deletes it, resumeRunFromCard/resumePipeline), a History resume whose paused run had no log lines
-    // to match — and Map order lists that dead entry FIRST. The lineage still live wins; among settled ones the
-    // newest (orderKey, minted once per runId) does.
-    let best = null;
-    for (const r of runs.values()) {
-      if (!isPipelineRun(r) || r.pipelineId !== pipelineId) continue;
-      if (!best || (isLive(r) && !isLive(best)) || (isLive(r) === isLive(best) && (r.orderKey || 0) > (best.orderKey || 0))) best = r;
-    }
+    const best = latestPipelineRun(pipelineId);
     return best ? askRunSnapshot(best) : null;
   },
   subscribe(fn) { askRunListeners.add(fn); return () => { askRunListeners.delete(fn); }; },
@@ -25035,6 +25089,11 @@ function questionCount(pq) {
 
 function renderRunningView({ skipDetail = false } = {}) {
   if (!skipDetail) scheduleRunsPaint();   // a log line changes nothing a row shows
+  // An open saved run whose pipeline is still live: its bar's Pause / Stop / Resume follow the
+  // run. Only once the detail landed: setupHdActions binds them after that fetch.
+  if (!skipDetail && histDetailState && histDetailState.screen && histDetailState.data) {
+    paintHdLive(histDetailState.screen, histDetailState.record, histDetailState.data);
+  }
   const screen = runDetailState.screen;
   if (!screen) return;
   const r = runs.get(runDetailState.runId);
@@ -26146,14 +26205,10 @@ function glancePrInput(record) {
 const CTA_ICONS = {
   // A pull request with a plus where its head will be.
   'pr-create': '<circle cx="6" cy="6" r="2.5"/><path d="M6 8.5V21M13 6h3a2 2 0 0 1 2 2v3M18 15v6M15 18h6"/>',
-  // A pull request: the base line, and the branch line arrowing into it.
-  'pr-open': '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5V21M12.5 6H16a2 2 0 0 1 2 2v7.5M15 3.5 12.5 6 15 8.5"/>',
+  // An open pull request is on GitHub: a box with an arrow leaving it (a new tab).
+  external: '<path d="M18 13.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4.5"/><path d="M14 4h6v6M20 4l-9 9"/>',
   // Merged: two lines joining into one.
   merged: '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5V21M6 9a9 9 0 0 0 9 9h.5"/>',
-  resume: '<path d="M7 4.5v15l12-7.5z"/>',
-  // A follow-up: the next run branches off this one.
-  'follow-up': '<path d="M5 4v7a4 4 0 0 0 4 4h10M15 11l4 4-4 4"/>',
-  schedule: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
 };
 function setCtaContent(node, icon, label) {
   node.innerHTML = `<svg class="rd-cta-ico" data-icon="${icon}" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${CTA_ICONS[icon]}</svg>`;
@@ -26225,7 +26280,7 @@ function rdFilesChanged(r) {
 }
 
 // Every tab (Activity) always; once the run is over, also the
-// actions (the facts row above carries Time · Cost · Changes in every state). Numbers come from
+// pull request (the facts row above carries Time · Cost · Changes in every state). Numbers come from
 // results.json; "Create pull request" hands over to History's ship-it modal
 // (pendingShipIt), which owns the remotes picker and the push. Rebuilt only when its
 // content changes (a replaced row loses :hover).
@@ -26262,17 +26317,18 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
   acts.className = 'rd-result-actions';
   // Same tri-state as paintHdPr: an open or merged PR links, `null` (resolved, none)
   // offers Create when eligible, `undefined` (enrichment pending) offers nothing yet.
-  // A merged PR is a fact (the headline says so), so its link is secondary.
+  // One button at most, in the state's colour: ink to create, blue while open, violet
+  // once merged (the orb's). Following up is the bar's Run after.
   const pr = record && record.pr && typeof record.pr === 'object' ? record.pr : null;
   const prState = pr ? String(pr.state || '').toUpperCase() : '';
   if (r.status === 'done' && record && key) {
     if (pr && (prState === 'OPEN' || prState === 'MERGED') && pr.url) {
       const a = document.createElement('a');
-      a.className = `rd-cta${prState === 'MERGED' ? ' alt' : ''}`;
+      a.className = `rd-cta ${prState === 'MERGED' ? 'pr-merged' : 'pr-view'}`;
       a.href = pr.url;
       a.target = '_blank';
       a.rel = 'noopener';
-      setCtaContent(a, prState === 'MERGED' ? 'merged' : 'pr-open', 'View pull request');
+      setCtaContent(a, prState === 'MERGED' ? 'merged' : 'external', 'View pull request');
       acts.appendChild(a);
     } else if (histPrEligible(record) && record.pr !== undefined) {
       const b = document.createElement('button');
@@ -26285,14 +26341,6 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
       });
       acts.appendChild(b);
     }
-  }
-  if (r.pipelineId) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'rd-cta alt rd-follow-up';
-    setCtaContent(b, 'follow-up', 'Start a follow-up run');
-    b.addEventListener('click', () => { location.hash = `#new/after/${r.pipelineId}`; });
-    acts.appendChild(b);
   }
   if (acts.childNodes.length) host.appendChild(acts);
 }
@@ -26715,10 +26763,15 @@ function paintRdHeader(screen, r) {
   // parked, not finished, and can still be resumed or discarded.
   pauseBtn.hidden = terminal;
   stopBtn.hidden = terminal;
-  // Schedule a run after this one (the list card's old schedule-after button): a pipeline run with a
-  // pipeline id, while it is not over — a finished run gets "Start a follow-up run" instead.
+  // Run after this one (the list card's old schedule-after button): a pipeline run with a pipeline
+  // id, in every state. A finished run is followed up, as on the saved run's bar (paintHdAfter).
   const afterBtn = screen.querySelector('.rd-after');
-  if (afterBtn) afterBtn.hidden = terminal || !r.pipelineId || !isPipelineRun(r);
+  if (afterBtn) {
+    afterBtn.hidden = !r.pipelineId || !isPipelineRun(r);
+    const afterTitle = runAfterTitle(r.status);
+    afterBtn.title = afterTitle;
+    afterBtn.setAttribute('aria-label', afterTitle);
+  }
   // C16: read the PREVIOUS action before overwriting it. The disabled rule below
   // needs to tell "the run genuinely changed state" from "another frame landed
   // while a request was in flight".

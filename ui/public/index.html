@@ -563,8 +563,9 @@
                 <!-- The run's name: the glance's headline carries its state. -->
                 <span class="rd-bar-mid"><span class="rd-bar-title"></span></span>
                 <span class="rd-bar-end">
-                  <!-- Chain a run after this one while it is still going (the list card's old schedule-after button).
-                       Once it ends, the terminal CTA "Start a follow-up run" takes over (paintRdTerminal). -->
+                  <!-- Chain a run after this one (the list card's old schedule-after button): "Schedule a run
+                       after this" while it goes, "Start a follow-up run" once it ends (paintRdHeader). The
+                       saved run's bar carries the same button (.hd-after). -->
                   <button type="button" class="rd-after" data-min-level="advanced" title="Schedule a run after this" aria-label="Schedule a run after this" hidden>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h12"></path><path d="M13 6l6 6-6 6"></path></svg>
                     <span class="rd-btn-label">Run after</span>
@@ -695,7 +696,40 @@
                   Run
                 </button>
                 <span class="rd-bar-mid"><span class="rd-bar-title"></span></span>
-                <span class="rd-bar-end"></span>
+                <!-- The run page bar's controls, in its order and with its look (style.css shares their
+                     rules): Run after, the Resume split, Pause, Stop. History's own class names, so
+                     setupHdActions, paintHdAfter, paintHdLive and resumePipeline's busy label reach them. -->
+                <span class="rd-bar-end">
+                  <button type="button" class="hd-after" data-min-level="advanced" title="Schedule a run after this" aria-label="Schedule a run after this" hidden>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h12"></path><path d="M13 6l6 6-6 6"></path></svg>
+                    <span class="hd-btn-label">Run after</span>
+                  </button>
+                  <!-- The label lives in its own span: the busy state ("Resuming…") swaps ONLY that
+                       node, so the inline SVG survives and the error path can restore the word.
+                       Split Resume: paused + interrupted runs, or the pipeline's live run once it
+                       pauses (paintHdLive); the caret opens the schedule-resume menu, gated at Advanced. -->
+                  <div class="btn-split mini hd-resume-split" hidden>
+                    <button type="button" class="hd-resume" hidden>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
+                      <span class="hd-btn-label">Resume</span>
+                    </button>
+                    <button type="button" class="btn-split-more hd-resume-more" data-min-level="advanced" aria-haspopup="menu" aria-expanded="false" title="Schedule the resume" aria-label="Schedule the resume">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+                    </button>
+                    <div class="btn-split-menu hd-resume-menu" role="menu" hidden>
+                      <button type="button" role="menuitem" class="hd-resume-at-item"><b>Resume at…</b><small>Schedule the resume</small></button>
+                    </div>
+                  </div>
+                  <!-- Pause and Stop act on the pipeline's live run, while this tab knows one (paintHdLive). -->
+                  <button type="button" class="hd-pause" hidden>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.5"></rect><rect x="14" y="5" width="4" height="14" rx="1.5"></rect></svg>
+                    <span class="hd-btn-label">Pause</span>
+                  </button>
+                  <button type="button" class="hd-stop" hidden>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
+                    <span class="hd-btn-label">Stop</span>
+                  </button>
+                </span>
               </div>
               <!-- The inline error sits under the shared bar so both modes show it (a load
                    failure, an archive failure); writers resolve it with screen.querySelector. -->
@@ -733,7 +767,6 @@
                   <button type="button" class="hd-pr" hidden data-min-level="advanced">Create PR</button>
                   <span class="act-pill-slot"></span>
                   <a class="hd-pr-link" hidden data-min-level="advanced" target="_blank" rel="noopener"></a>
-                  <button type="button" class="hd-after btn-ghost" hidden data-min-level="advanced">Schedule a run after this</button>
                 </div>
                 <!-- Status pip leads the META line, not row 1: it reads as the icon
                      for the status WORD it now sits next to (same pairing the list
@@ -761,23 +794,9 @@
                        outranks the UA [hidden] rule either way. -->
                   <span class="hd-copied">Copied</span>
                   <span class="hd-spacer"></span>
-                  <!-- The label lives in its own span: the busy states ("Resuming…" /
-                       "Archiving…") swap ONLY that node, so the inline SVG survives and
-                       the error path can restore the word. -->
-                  <!-- Split Resume (History detail): the ghost Resume keeps its look; the caret opens
-                       the schedule-resume menu. Gated at Advanced like .hd-more-wrap. -->
-                  <div class="btn-split mini hd-resume-split" hidden>
-                    <button type="button" class="hd-resume btn-ghost" hidden>
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
-                      <span class="hd-btn-label">Resume</span>
-                    </button>
-                    <button type="button" class="btn-split-more hd-resume-more" data-min-level="advanced" aria-haspopup="menu" aria-expanded="false" title="Schedule the resume" aria-label="Schedule the resume">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
-                    </button>
-                    <div class="btn-split-menu hd-resume-menu" role="menu" hidden>
-                      <button type="button" role="menuitem" class="hd-resume-at-item"><b>Resume at…</b><small>Schedule the resume</small></button>
-                    </div>
-                  </div>
+                  <!-- The label lives in its own span: the busy state ("Archiving…") swaps
+                       ONLY that node, so the inline SVG survives and the error path can
+                       restore the word. -->
                   <!-- Archive and Report live behind one ⋯ trigger, but keep their own
                        classes: every gate, the busy-label swap and hdSetArchiveGate all
                        address them directly, and only their PLACEMENT moved here.
