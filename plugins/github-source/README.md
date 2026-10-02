@@ -48,6 +48,12 @@ Verify with "Test connection" in the settings UI, or:
 login (cached after Test connection); unknown tokens are ignored; free text in
 the task browser searches titles client-side.
 
+Pasting an issue reference into the search box skips the Filter and fetches
+that one issue, whatever its state or assignee: a full URL
+(`https://github.com/owner/repo/issues/123`), `owner/repo#123`, or `#123` /
+`123` against the selected repo. A pull request or a missing issue shows no
+results.
+
 ## Publishing
 
 This directory (`plugins/github-source` in the worca-cc repo) is the source of
