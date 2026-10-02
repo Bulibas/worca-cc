@@ -351,9 +351,9 @@ test('ask-panel-stream: an open History popover refetches its rows on ask-run-st
   ctx.panel.pushServerFrame({ type: 'ask-run-status', threadId: TID2, runId: 'uuid-1', pipelineId: 'aaaa1111', cardId: null, status: 'running', phase: 'y' });
   await settle();
   assert.equal(listFetches(), 4, 'no refetch once the popover is gone');
-  // Another popover open (agents) is left alone.
-  ctx.doc.querySelector('[data-ask-agents-btn]').click();
-  assert.ok(ctx.doc.querySelector('.ask-pop'), 'the agents popover is open');
+  // Another popover open (context) is left alone.
+  ctx.doc.querySelector('[data-ask-ctx-btn]').click();
+  assert.ok(ctx.doc.querySelector('.ask-pop-ctx'), 'the context popover is open');
   assert.equal(ctx.doc.querySelector('.ask-pop-threads'), null);
   ctx.panel.pushServerFrame({ type: 'ask-run-status', threadId: TID2, runId: 'uuid-1', pipelineId: 'aaaa1111', cardId: null, status: 'running', phase: 'z' });
   await settle();

@@ -1,7 +1,7 @@
 // test/ui-scripts-view.test.mjs — the Scripts page's list half (scripts-workbench §5.1):
 // the pure renderers, the controller against a fake api, and one booted-app pass for
 // the rail entry, the route and the no-prose rule.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -10,6 +10,10 @@ import {
   scriptRoute, parseScriptsParam, originLabel, portLineOf, buildScriptCard,
   renderScriptsList, createScriptsController, newScriptRoute,
 } from '../ui/public/scripts-view.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -265,7 +269,7 @@ class WSStub {
 }
 
 async function boot({ scripts = SCRIPTS } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = WSStub;

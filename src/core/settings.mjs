@@ -38,8 +38,8 @@
 // bootstrap value or a plain scalar toggle, so a table would buy nothing.
 //
 // IMPORTANT: this module imports NOTHING from the core graph (Node builtins
-// plus the zero-import model-env.mjs leaf and the web-allowlist.mjs leaf, which
-// imports only node:net and node:url). projects.mjs imports it, so
+// plus the zero-import model-env.mjs and night/config.mjs leaves and the
+// web-allowlist.mjs leaf, which imports only node:net and node:url). projects.mjs imports it, so
 // importing projects.mjs back would make worcaHome() -> getWorcaRoot() ->
 // projects.mjs an infinite cycle.
 //
@@ -58,6 +58,7 @@ import {
   UPSTREAM_PROVIDERS, COPILOT_ACCOUNT_TYPES, DEFAULT_PROVIDER_CONCURRENCY, MAX_PROVIDER_CONCURRENCY,
   COPILOT_TERMS_VERSION, isUpstreamBaseUrl,
 } from './model-env.mjs';
+import { validateNightPatch, NIGHT_TOGGLES } from './night/config.mjs';
 import { normalizeDomainList, normalizeDomainPattern, domainError, DOMAIN_LIST_MAX, RESERVED_KEY_VAR } from './web-allowlist.mjs';
 
 /**
@@ -773,6 +774,65 @@ export async function setAskWeb(input) {
   return { askWeb: askWeb() };
 }
 
+// ── Night mode (src/core/night/*) ─────────────────────────────────────────────
+// `nightMode` is the user layer of the night config (only the fields the user set);
+// `nightModeToggle` is the live global switch and is NOT part of the field precedence.
+const nightModeWarned = new Set();
+
+/** The user's night mode layer: only the fields the user set (validated; bad fields dropped). */
+export function nightModeSettings() {
+  const raw = readSettings().nightMode;
+  if (!isObj(raw)) return {};
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    try { Object.assign(out, validateNightPatch({ [k]: v })); }
+    catch {
+      if (!nightModeWarned.has(k)) { nightModeWarned.add(k); console.warn(`[worca] ignoring invalid nightMode.${k} in settings.json`); }
+    }
+  }
+  return out;
+}
+
+/** Merge a patch into settings.nightMode. `null` clears the whole block; a key listed in
+ *  `patch.__unset` (array of field names) is removed so the team value applies again. */
+export async function setNightMode(patch) {
+  const settings = readSettings();
+  if (patch === null) { delete settings.nightMode; return persistSettings(settings); }
+  const { __unset = [], ...rest } = patch || {};
+  const clean = validateNightPatch(rest, { level: 'user' });
+  const next = { ...(isObj(settings.nightMode) ? settings.nightMode : {}), ...clean };
+  for (const k of Array.isArray(__unset) ? __unset : []) delete next[k];
+  if (Object.keys(next).length) settings.nightMode = next; else delete settings.nightMode;
+  return persistSettings(settings);
+}
+
+export function nightModeToggle() {
+  const v = readSettings().nightModeToggle;
+  return NIGHT_TOGGLES.includes(v) ? v : 'auto';
+}
+
+/** When the user last said "I'm here" (ms), or null. It only skips the away-hours stretch it was said in. */
+export function nightModeHereSince() {
+  const t = Date.parse(readSettings().nightModeHereSince);
+  return Number.isFinite(t) ? t : null;
+}
+
+// 'here' is an INPUT, not a stored status: "I'm here" = follow my away hours, minus the stretch I am in now.
+const NIGHT_TOGGLE_INPUTS = [...NIGHT_TOGGLES, 'here'];
+
+export function assertNightModeToggleInput(v) {
+  if (!NIGHT_TOGGLE_INPUTS.includes(v)) throw Object.assign(new Error(`nightModeToggle must be one of ${NIGHT_TOGGLE_INPUTS.join(' | ')}`), { status: 400 });
+  return v;
+}
+
+export async function setNightModeToggle(v, { now = Date.now() } = {}) {
+  assertNightModeToggleInput(v);
+  const settings = readSettings();
+  if (v === 'auto' || v === 'here') delete settings.nightModeToggle; else settings.nightModeToggle = v;
+  if (v === 'here') settings.nightModeHereSince = new Date(now).toISOString(); else delete settings.nightModeHereSince;
+  return persistSettings(settings);
+}
+
 /** The web card's "Always allow": one exact host joins the stored allowlist; everything else is kept. */
 export async function addAskWebHost(host) {
   const h = normalizeDomainPattern(host);
@@ -816,7 +876,7 @@ export const setHumanRateUsdPerHour = (input) => setUsdCap('humanRateUsdPerHour'
 
 // ── chat notification preferences (chat-connectivity-design.md §4.5) ─────────
 
-const CHAT_NOTIFY_EVENTS = ['done', 'error', 'question', 'paused'];
+const CHAT_NOTIFY_EVENTS = ['done', 'error', 'question', 'paused', 'away'];
 
 /**
  * Effective chat preferences. Every notification event defaults ON; channels default
@@ -839,7 +899,7 @@ export function chatPrefs() {
 }
 
 /**
- * Merge-patch the chat prefs: {notify?: {done?, error?, question?, paused?},
+ * Merge-patch the chat prefs: {notify?: {done?, error?, question?, paused?, away?},
  * channels?: {"<plugin>/<id>"?: {enabled: boolean}}, scriptTools?: boolean}. Unknown
  * notify keys and a non-boolean scriptTools are rejected (400 at the API layer);
  * channels merge per key.
@@ -914,6 +974,59 @@ export async function setPythonPath(input) {
   return { pythonPath: pythonPath() };
 }
 
+// ── Actions (issue #529) ─────────────────────────────────────────────────────
+// One nested key `actions`: the keep policy for finished-run checkouts, the
+// `auto` port range, the editor/terminal overrides of the built-ins, and the
+// checkout cap. editor/terminal are command paths the built-ins route spawns as
+// the server user, so POST /api/settings refuses an `actions` key from agent callers.
+export const ACTIONS_KEEP = ['never', 'on-success', 'until-pr'];
+export const DEFAULT_ACTIONS_SETTINGS = Object.freeze({ keep: 'never', portLow: 4400, portHigh: 4499, editor: '', terminal: '', maxCheckouts: null });
+const isPort = (v) => Number.isSafeInteger(v) && v >= 1024 && v <= 65535;
+const isCap = (v) => Number.isSafeInteger(v) && v >= 1 && v <= 100;
+
+export function actionsSettings() {
+  const a = readSettings().actions;
+  const s = a && typeof a === 'object' ? a : {};
+  const low = isPort(s.portLow) ? s.portLow : DEFAULT_ACTIONS_SETTINGS.portLow;
+  const high = isPort(s.portHigh) && s.portHigh >= low ? s.portHigh : Math.max(low, DEFAULT_ACTIONS_SETTINGS.portHigh);
+  return {
+    keep: ACTIONS_KEEP.includes(s.keep) ? s.keep : 'never',
+    portLow: low, portHigh: high,
+    editor: typeof s.editor === 'string' ? s.editor.trim() : '',
+    terminal: typeof s.terminal === 'string' ? s.terminal.trim() : '',
+    maxCheckouts: isCap(s.maxCheckouts) ? s.maxCheckouts : null,
+  };
+}
+
+/** @throws {Error} on any invalid key of an `actions` patch (absent / '' / null keys clear). */
+export function assertActionsInput(patch) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('actions must be an object');
+  const has = (k) => Object.hasOwn(patch, k);
+  const clear = (v) => v === '' || v === null || v === undefined;
+  if (has('keep') && !clear(patch.keep) && !ACTIONS_KEEP.includes(patch.keep)) throw new Error(`actions.keep must be one of ${ACTIONS_KEEP.join(' | ')}`);
+  for (const k of ['portLow', 'portHigh']) if (has(k) && !clear(patch[k]) && !isPort(patch[k])) throw new Error(`actions.${k} must be a whole number from 1024 to 65535`);
+  const cur = actionsSettings();
+  const low = has('portLow') && !clear(patch.portLow) ? patch.portLow : cur.portLow;
+  const high = has('portHigh') && !clear(patch.portHigh) ? patch.portHigh : cur.portHigh;
+  if (low > high) throw new Error('actions: the low port must not be above the high port');
+  if (has('maxCheckouts') && !clear(patch.maxCheckouts) && !isCap(patch.maxCheckouts)) throw new Error('actions.maxCheckouts must be a whole number from 1 to 100');
+  // A command line run through the shell (src/core/actions/launcher.mjs); the person decides what it runs.
+  for (const k of ['editor', 'terminal']) if (has(k) && !clear(patch[k]) && (typeof patch[k] !== 'string' || patch[k].length > 2000)) throw new Error(`The ${k} command must be text of at most 2000 characters`);
+}
+
+export async function setActionsSettings(patch = {}) {
+  assertActionsInput(patch);
+  const settings = readSettings();
+  const next = { ...(settings.actions && typeof settings.actions === 'object' ? settings.actions : {}) };
+  for (const [k, v] of Object.entries(patch)) {
+    if (!(k in DEFAULT_ACTIONS_SETTINGS)) continue;
+    if (v === '' || v === null || v === undefined) delete next[k]; else next[k] = typeof v === 'string' ? v.trim() : v;
+  }
+  if (Object.keys(next).length) settings.actions = next; else delete settings.actions;
+  await persistSettings(settings);
+  return actionsSettings();
+}
+
 // ── The keys POST /api/settings understands ──────────────────────────────────
 // The route keeps a legacy contract: a body naming NONE of these clears root
 // (test/settings-projects-root.test.mjs "a bodyless POST resets root"). Every
@@ -934,7 +1047,10 @@ export const SETTINGS_POST_KEYS = Object.freeze([
   'memoryDefrag',                            // Settings › Memory: the defragment model + effort
   'workspaceScan',                           // Settings › Runs › Workspaces: the scan's models
   'schedule',                                // scheduled-run defaults { graceMin, ifMissed, maxFailures }
+  'nightMode',                               // night mode user layer (night/config.mjs fields)
+  'nightModeToggle',                         // night mode live switch: auto | on | off
   'sync',                                    // sync before run (#527) { beforeRun, remote, refreshMinutes, onDiverged }
+  'actions',                                 // Settings › Runs › Actions { keep, portLow, portHigh, editor, terminal, maxCheckouts }
 ]);
 
 // ── Title-generation model + hidden built-ins (#422) ─────────────────────────

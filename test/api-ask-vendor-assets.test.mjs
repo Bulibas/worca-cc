@@ -46,7 +46,7 @@ test('dependencies and lock pin the reviewed markdown packages exactly', () => {
   const pkg = JSON.parse(readFileSync(`${root}/package.json`, 'utf8'));
   const lock = JSON.parse(readFileSync(`${root}/package-lock.json`, 'utf8'));
   assert.equal(pkg.dependencies.marked, '18.0.10');
-  assert.equal(pkg.dependencies.dompurify, '3.4.14');
+  assert.equal(pkg.dependencies.dompurify, '3.4.16');
   assert.equal((pkg.devDependencies || {}).marked, undefined);
   assert.equal((pkg.devDependencies || {}).dompurify, undefined);
   const markedLock = lock.packages['node_modules/marked'];
@@ -55,9 +55,9 @@ test('dependencies and lock pin the reviewed markdown packages exactly', () => {
     'sha512-FJeH4bRpYoXiggcgriCGItKCSv3xkngJc4QCZ/rkQCogU3VYaLxYJoZl8Nw/b4+x7iij/pd+09mZ6A1dXzpL0A==');
   assert.notEqual(markedLock.dev, true);
   const purifyLock = lock.packages['node_modules/dompurify'];
-  assert.equal(purifyLock.version, '3.4.14');
+  assert.equal(purifyLock.version, '3.4.16');
   assert.equal(purifyLock.integrity,
-    'sha512-dVoH9z+MY+C9IilgGCk3YfFqjLi3fChm2OiKJMzh6axrJ5qwxqWaZamgmHrpv22CN/KdbZJuGEGgfQoL00LTdg==');
+    'sha512-sqo+pNp3qRhCIpbgRi1y8Tgk27Bo2Ry7w0dC1NBeNTdZChWjz9Xb/KOoZbRP/R6pQZ80Qw8YhXw13hWWBbMRnQ==');
   assert.notEqual(purifyLock.dev, true);
 });
 

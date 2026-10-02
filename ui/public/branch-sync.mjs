@@ -129,6 +129,26 @@ export function listRowModel(b) {
   return { icon: 'ok', tone: 'ok', label: 'Up to date', hint: '', action: null, state: 'ok' };
 }
 
+const BAR_TONE = { ok: 'ok', behind: 'blue', diverged: 'amber', dirty: 'peach' };
+const BAR_ACTION = { sync: 'Sync', details: 'Review…', retry: 'Retry' };
+const BAR_GROUP = { ok: 'ok', behind: 'behind', diverged: 'diverged', dirty: 'dirty', offline: 'offline', local: 'local' };
+/** The Projects list's sync bar (branch | origin status | action, design 2026-10-01): listRowModel's
+ *  facts in the list's own words. `tone` tints the pill and the bar (none = dashed, no remote);
+ *  `vs` is the ref the branch is compared with — refs/remotes/<remote>/<base>, not the configured
+ *  upstream — so it is left out where the branch is not on the remote; `group` is the header filter
+ *  the row counts toward. `b === undefined` = no answer yet. */
+export function projectBarModel(b) {
+  const base = { hint: '', action: null, actionLabel: '', vs: '' };
+  if (b === undefined) return { ...base, icon: 'spin', tone: 'grey', label: 'Checking…', state: 'checking', group: null };
+  if (!b || !b.remote) return { ...base, icon: 'noRemote', tone: 'none', label: 'No git remote', hint: 'Local folder · nothing to sync', state: 'none', group: 'local' };
+  const m = listRowModel(b);
+  const bar = { ...m, tone: BAR_TONE[m.state] || 'grey', actionLabel: BAR_ACTION[m.action] || '',
+    vs: b.base && m.state !== 'local' ? `${b.remote}/${b.base}` : '', group: BAR_GROUP[m.state] || null };
+  if (m.action === 'sync') bar.hint = b.settings && b.settings.beforeRun === false ? 'Auto-sync is off · runs start from your local copy' : 'Next run syncs it first';
+  if (m.state === 'local' && !m.hint) bar.hint = 'Runs use your local copy';
+  return bar;
+}
+
 /** The collapsed workspace header: one sentence with the counts, its tone, and who Sync all moves. */
 export function wsRollupModel(rows) {
   const n = (s) => rows.filter((r) => r.state === s).length;

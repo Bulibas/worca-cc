@@ -1,9 +1,13 @@
 // test/ui-history-shipit.test.mjs
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 // Behavior tests for the "Ship it?" confirm modal and the History DETAIL header's
 // PR control: one shared eligibility predicate (histPrEligible), a modal that
@@ -23,7 +27,7 @@ const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 const PROJECT = '/tmp/proj';
 
 async function boot({ fetchHandler, url = 'http://localhost:4317/', hooks = null } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url }));
   const { window } = dom;
   if (hooks) window.__worcaTestHooks = hooks;   // e.g. the real marked + DOMPurify for the Preview tab
 
@@ -1099,6 +1103,30 @@ test('every open starts from an empty description on the Write tab', async () =>
   assert.equal(descOf(modal).hidden, false);
   assert.equal(previewOf(modal).hidden, true);
   assert.equal(descErrOf(modal).hidden, true);
+});
+
+// ---------------------------------------------------------------------------
+// Actions (issue #529): "Try it first" follows actions-changed while the dialog is open
+// ---------------------------------------------------------------------------
+
+test('"Try it first" drops Open/Stop when the service stops elsewhere (actions-changed)', async () => {
+  const inst = { instanceId: `act:${ROW.id}:${KEY}:run`, runId: ROW.id, member: KEY, actionId: 'run', label: 'Run', kind: 'service',
+    status: 'ready', ports: { PORT: 4417 }, url: 'http://localhost:4417', startedAt: Date.now() };
+  const model = (instances) => ({ runId: ROW.id, workspace: false, finished: true, enabled: true, stacks: [], stackStates: [], instances,
+    members: [{ projectKey: KEY, projectName: 'Alpha', branch: ROW.branch, checkout: { setup: { status: 'ok' } },
+      actions: [{ id: 'run', label: 'Run', kind: 'service' }], builtins: [] }] });
+  let current = model([inst]);
+  const ctx = await bootShip({ arms: (url) => (url.includes(`/api/runs/${ROW.id}/actions?`) ? ok(current)
+    : url.endsWith('/api/actions/running') ? ok([]) : null) });
+  const modal = await openModal(ctx);
+  await settle(ctx.window, 4);
+  const box = modal.querySelector('.shipit-try');
+  assert.match(box.textContent, /Open :4417/);
+  current = model([{ ...inst, status: 'stopped' }]);
+  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'actions-changed', action: 'stopped' }) });
+  await settle(ctx.window, 4);
+  assert.doesNotMatch(box.textContent, /Open :4417/);
+  assert.ok(![...box.querySelectorAll('button')].some((b) => b.textContent === 'Stop'));
 });
 
 // ---------------------------------------------------------------------------

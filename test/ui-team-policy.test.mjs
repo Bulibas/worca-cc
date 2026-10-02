@@ -3,11 +3,15 @@
 // state / editor), the Settings readout, the New pipeline notes line, the History meta segment,
 // and the team-cap pause banner with its "continue past" flow. Harness: the ui-cost-paused idiom
 // (dispatchable WebSocket stub, recorded fetch calls).
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -52,7 +56,7 @@ const NOTES = { scope: { kind: 'project', id: 'gateway-00000001' }, policy: { ho
 const json = (body, status = 200) => Promise.resolve({ ok: status < 400, status, json: async () => body });
 
 async function boot({ fetchHandler, scopes = SCOPES, policy = POLICY } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   const wsBox = { ws: null };
@@ -357,6 +361,72 @@ test('New pipeline: the policy notes line paints for the selected project and hi
   assert.match(line.querySelector('.pl-note.warn').textContent, /acme-jira is not installed/);
 });
 
+test('New pipeline: MCP servers paints under Guardrails; an unticked membership reaches the policy notes and the run body', async () => {
+  const PREVIEW = {
+    sets: [{ id: 'billing', name: 'Billing', group: 'set' }],
+    copies: [
+      { name: 'pg_billing', copy: 'pg_billing', setId: 'billing', serverId: 'manual:pg' },
+      { name: 'sentry_billing', copy: 'sentry_billing', setId: 'billing', serverId: 'plugin:acme-tools/sentry' },
+    ],
+    skipped: [{ setId: 'billing', setName: 'Billing', serverId: 'manual:jira', copy: 'jira_billing', reason: 'missing:token', why: 'API token not set' }],
+    started: 2, deviations: [],
+  };
+  const CONFIG = { config: { steps: { planner: { model: 'gw-gpt' } }, customModels: [] }, models: [], efforts: [], branches: [], workspaces: [], agents: [], channels: [], plugins: [], marketplaces: [] };
+  let previewFails = false;
+  const { doc, go, settle, window, fetchCalls } = await boot({ fetchHandler: (u) => (u === '/api/mcp/preview' ? (previewFails ? json({ error: 'boom' }, 500) : json(PREVIEW)) : u.startsWith('/api/config') ? json(CONFIG) : null) });
+  await go('new');
+  await settle();
+  assert.equal(doc.getElementById('mcpRunsField').hidden, true, 'no target yet');
+  const sel = doc.getElementById('projectSelect');
+  sel.value = PROJECT;
+  sel.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 200));
+  await settle();
+  assert.equal(doc.getElementById('mcpRunsField').hidden, false);
+  assert.equal(doc.getElementById('mcpRunsLabel').textContent, '2 of 2 MCP servers');
+  assert.deepEqual(JSON.parse(fetchCalls.findLast((c) => c.url === '/api/mcp/preview').opts.body), { target: { projectKey: 'gateway-00000001' }, models: ['gw-gpt'] }, 'the form\'s models set the preview\'s tool-name limit');
+  const rows = [...doc.querySelectorAll('#mcpRunsPop .mcp-runs-row')];
+  assert.equal(rows.at(-1).textContent, 'jira_billingAPI token not set', 'the skipped membership is a row with its reason');
+  rows[0].querySelector('input').focus();
+  rows[0].querySelector('input').click();
+  await settle();
+  assert.equal(doc.getElementById('mcpRunsLabel').textContent, '1 of 2 MCP servers');
+  assert.equal(doc.activeElement?.dataset.keys, 'billing|manual:pg', 'the re-render keeps the keyboard focus on the ticked box');
+  assert.equal(doc.activeElement?.dataset.kind, 'row');
+  assert.ok(fetchCalls.some((c) => c.url.includes('/api/policy/notes') && new URL(c.url, 'http://x').searchParams.get('mcpOptOut') === 'billing|manual:pg'));
+  // A failed preview refetch hides the control but keeps the opt-out (the server drops unknown entries).
+  const repaint = async () => {
+    sel.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 200));
+    await settle();
+  };
+  previewFails = true;
+  await repaint();
+  assert.equal(doc.getElementById('mcpRunsField').hidden, true);
+  doc.getElementById('prompt').value = 'demo task';
+  doc.getElementById('run-form').dispatchEvent(new window.Event('submit', { cancelable: true }));
+  await settle();
+  assert.deepEqual(JSON.parse(fetchCalls.findLast((c) => c.url === '/api/run').opts.body).mcpOptOut, ['billing|manual:pg']);
+  previewFails = false;
+  await repaint();
+  assert.equal(doc.getElementById('mcpRunsField').hidden, false);
+  assert.equal(doc.getElementById('mcpRunsLabel').textContent, '1 of 2 MCP servers', 'the opt-out held through the failed fetch');
+  // §6.1: a memory-defrag run gets no registry servers: the control hides and the body carries none.
+  const runs = fetchCalls.filter((c) => c.url === '/api/run').length;
+  const wf = doc.getElementById('workflowSelect');
+  wf.append(Object.assign(doc.createElement('option'), { value: 'wf_memory_defrag', textContent: 'Memory defragment' }));
+  wf.value = 'wf_memory_defrag';
+  wf.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 200));
+  await settle();
+  assert.equal(doc.getElementById('mcpRunsField').hidden, true);
+  doc.getElementById('run-form').dispatchEvent(new window.Event('submit', { cancelable: true }));
+  await settle();
+  const defrag = fetchCalls.filter((c) => c.url === '/api/run');
+  assert.equal(defrag.length, runs + 1, 'the defrag run was started');
+  assert.equal(JSON.parse(defrag.at(-1).opts.body).mcpOptOut, undefined);
+});
+
 test('History detail meta: the policy segment names overrides and off-policy picks', async () => {
   const detail = { state: { id: 'h1', phase: 'implement', status: 'done', totalCostUsd: 5.2, steps: [] }, policy: { home: 'acme/gateway', sha: '3f2a1bc0', overrides: ['pipeline'], exceeded: [], deviations: ['model:claude-opus-4-8'], unattended: false, reason: 'hotfix' } };
   const { doc, go, settle } = await boot({
@@ -415,4 +485,258 @@ test('Running: a cost_pipeline_policy pause shows the blue banner; "Continue pas
   const posts = fetchCalls.filter((c) => c.url.includes('/api/resume'));
   assert.equal(posts.length, 1);
   assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'pl_1', baseCheck: true, pastTeamCap: true, policyReason: 'release hotfix' });
+});
+
+test('MCP rows in the setup checklist: Install opens the consent dialog, then posts only { expectHash }; a trusted home never installs or turns on one', async () => {
+  const LINEAR = { home: 'acme/gateway', sha: '3f2a1bc0', setId: 'team-acme-gateway-1a2b', setName: 'Team · acme/gateway', serverId: 'policy:acme/gateway/linear', name: 'linear', plugin: null, type: 'http',
+    state: 'not-installed', working: false, hash: 'd'.repeat(64), field: null, base: 'linear', def: { type: 'http', url: 'https://mcp.linear.app/mcp', fields: [], description: '' }, values: {}, before: null, running: null };
+  const SENTRY = { ...LINEAR, serverId: 'plugin:acme-tools/sentry', name: 'sentry', plugin: 'acme-tools', state: 'never-consented', hash: 'b'.repeat(64) };
+  const posts = [];
+  const { window, doc, go, settle, fetchCalls } = await boot({
+    scopes: { ...SCOPES, mcpRequirements: [LINEAR, SENTRY] },
+    fetchHandler: (u, opts) => {
+      if (u.startsWith('/api/mcp/teams/') && opts.method === 'POST') { posts.push({ url: u, body: JSON.parse(opts.body) }); return json({ ok: true, setId: LINEAR.setId, serverId: LINEAR.serverId }); }
+      if (u.startsWith('/api/mcp/sets')) return json({ error: 'not in this test' }, 404);   // the card Install opens (P6's view)
+      return null;
+    },
+  });
+  window.localStorage.setItem('worca.policy.trust.acme/gateway', '1');
+  await go('settings/plugins');
+  await settle(6);
+  assert.equal(fetchCalls.some((c) => c.url.startsWith('/api/mcp/teams/')), false, 'trust covers plugins only');
+  await go('team-policy');
+  await settle();
+  doc.querySelector('#tp-tab-plugins').click();
+  await settle();
+  doc.querySelector('#tp-sec-plugins .pl-policy-setup').click();
+  await settle(6);
+  const modal = doc.getElementById('plugin-modal');
+  assert.equal(modal.querySelectorAll('.tp-mcp-row').length, 2);
+  modal.querySelector('.tp-mcp-act[data-server="policy:acme/gateway/linear"]').click();
+  await settle(6);
+  assert.equal(doc.getElementById('plugin-modal-title').textContent, 'Install MCP server');
+  assert.match(modal.textContent, /https:\/\/mcp\.linear\.app\/mcp/);
+  assert.equal(posts.length, 0, 'nothing is posted before the click in the dialog');
+  const install = [...modal.querySelectorAll('#plugin-modal-actions button')].find((b) => b.textContent === 'Install');
+  install.click(); install.click();   // a double click posts once
+  await settle(6);
+  assert.deepEqual(posts, [{ url: '/api/mcp/teams/acme%2Fgateway/members/policy%3Aacme%2Fgateway%2Flinear/install', body: { expectHash: 'd'.repeat(64) } }]);
+  assert.equal(window.location.hash, '#settings/mcp/sets/team-acme-gateway-1a2b', 'Install opens its card');
+  assert.equal(modal.classList.contains('hidden'), true, 'the consent dialog closes');
+});
+
+test('the MCP tab strip: a Team action reloads the Sets view under it; a row that moved on repaints instead of posting (§11.3)', async () => {
+  const PG = { home: 'acme/gateway', sha: '3f2a1bc0', setId: 'team-acme-gateway-1a2b', setName: 'Team · acme/gateway', serverId: 'policy:acme/gateway/pg', name: 'pg', plugin: null, type: 'stdio',
+    state: 'off', working: false, hash: 'e'.repeat(64), field: null, base: 'pg', def: { type: 'stdio', command: 'pg-mcp', fields: [], description: '' }, values: {}, before: null, running: null };
+  let rows = [PG];
+  const posts = [];
+  const { doc, go, settle, recv, fetchCalls } = await boot({
+    fetchHandler: (u, opts) => {
+      if (u.includes('/api/policy/scopes')) return json({ ...SCOPES, mcpRequirements: rows });
+      if (u.startsWith('/api/mcp/teams/') && opts.method === 'POST') { posts.push(u); return json({ ok: true, setId: PG.setId, serverId: PG.serverId }); }
+      if (u.startsWith('/api/mcp/sets')) return json({ error: 'not in this test' }, 404);   // P6's Sets view: only its reloads are counted
+      return null;
+    },
+  });
+  await go(`settings/mcp/sets/${PG.setId}`);
+  await settle(8);
+  const strip = () => doc.querySelector('.settings-pane[data-tab="mcp"] [data-mcp-strip] .tp-mcp-strip');
+  const setGets = () => fetchCalls.filter((c) => c.url === `/api/mcp/sets/${PG.setId}`).length;
+  assert.ok(strip(), 'the strip paints above the Sets view');
+  const before = setGets();
+  const pg = strip().querySelector('.tp-mcp-act[data-server="policy:acme/gateway/pg"]');
+  pg.click(); pg.click();   // Off · Turn on: consented, no dialog; a double click posts once
+  await settle(8);
+  assert.deepEqual(posts, ['/api/mcp/teams/acme%2Fgateway/members/policy%3Aacme%2Fgateway%2Fpg/turn-on']);
+  assert.ok(setGets() > before, 'the Sets view reloads: its card never contradicts the strip');
+  // The team changed the definition; the strip still shows the Turn on it painted. The click repaints (Update), never posts.
+  rows = [{ ...PG, state: 'changed', hash: 'f'.repeat(64), before: { def: PG.def, values: {} } }];
+  strip().querySelector('.tp-mcp-act[data-server="policy:acme/gateway/pg"]').click();
+  await settle(8);
+  assert.equal(posts.length, 1, 'no consent without the dialog');
+  assert.equal(strip().querySelector('.tp-mcp-act[data-server="policy:acme/gateway/pg"]').dataset.action, 'update');
+  // A policy change elsewhere (discovery, another tab) reloads the pane and its strip.
+  const n = setGets();
+  recv({ type: 'team-policy-changed', action: 'updated' });
+  await settle(8);
+  assert.ok(setGets() > n, 'team-policy-changed reloads the MCP pane');
+  // Every repaint of the pane (a token set, a switch on a card) reads the scopes again, never a copy up to 15 s old.
+  rows = [];
+  await go('settings/mcp/servers');
+  await settle(8);
+  assert.equal(strip(), null, 'nothing open: no strip');
+});
+
+// One Team member switched off (consented): its strip row is "Off · Turn on", with no consent dialog.
+const PG_OFF = { home: 'acme/gateway', sha: '3f2a1bc0', setId: 'team-acme-gateway-1a2b', setName: 'Team · acme/gateway', serverId: 'policy:acme/gateway/pg', name: 'pg', plugin: null, type: 'stdio',
+  state: 'off', working: false, hash: 'e'.repeat(64), field: null, problem: null, base: 'pg', def: { type: 'stdio', command: 'pg-mcp', fields: [], description: '' }, values: {}, before: null, running: null };
+
+test('the MCP tab strip: the host shows while an item is open; a refused action reloads the pane; Set up… opens the checklist', async () => {
+  const { doc, go, settle, fetchCalls } = await boot({
+    fetchHandler: (u, opts) => {
+      if (u.includes('/api/policy/scopes')) return json({ ...SCOPES, mcpRequirements: [PG_OFF] });
+      if (u.startsWith('/api/mcp/teams/') && opts.method === 'POST') return json({ error: 'the team definition changed, review it again' }, 409);
+      if (u.startsWith('/api/mcp/sets')) return json({ error: 'not in this test' }, 404);
+      return null;
+    },
+  });
+  await go(`settings/mcp/sets/${PG_OFF.setId}`);
+  await settle(8);
+  const host = () => doc.querySelector('.settings-pane[data-tab="mcp"] [data-mcp-strip]');
+  assert.equal(host().hidden, false, 'an open item shows the strip');
+  const setGets = () => fetchCalls.filter((c) => c.url === `/api/mcp/sets/${PG_OFF.setId}`).length;
+  const before = setGets();
+  host().querySelector('.tp-mcp-act').click();
+  await settle(8);
+  assert.ok(setGets() > before, 'a refused action reloads the pane: the strip shows where the row is now');
+  host().querySelector('.pl-policy-setup').click();
+  await settle(8);
+  assert.equal(doc.getElementById('plugin-modal-title').textContent, 'Set up for acme/gateway');
+  assert.equal(doc.getElementById('plugin-modal').querySelectorAll('.tp-mcp-row').length, 1);
+});
+
+test('the checklist on the Team policy page closes and reloads the page after a Team action; a moved-on row repaints it; Set <field> opens the Team set', async () => {
+  const GH = { ...PG_OFF, serverId: 'policy:acme/gateway/github', name: 'github', state: 'skipped', field: 'Token', problem: 'Token not set', hash: 'a'.repeat(64),
+    def: { type: 'stdio', command: 'npx', fields: [{ key: 'token', label: 'Token', secret: true, oauth: false, required: true }], description: '' } };
+  let rows = [PG_OFF, GH];
+  const posts = [];
+  const { window, doc, go, settle, fetchCalls } = await boot({
+    fetchHandler: (u, opts) => {
+      if (u.includes('/api/policy/scopes')) return json({ ...SCOPES, mcpRequirements: rows });
+      if (u.startsWith('/api/mcp/teams/') && opts.method === 'POST') { posts.push(u); return json({ ok: true, setId: PG_OFF.setId, serverId: PG_OFF.serverId }); }
+      if (u.startsWith('/api/mcp/sets')) return json({ error: 'not in this test' }, 404);
+      return null;
+    },
+  });
+  await go('team-policy');
+  await settle();
+  doc.querySelector('#tp-tab-plugins').click();
+  await settle();
+  const modal = doc.getElementById('plugin-modal');
+  const openChecklist = async () => { doc.querySelector('#tp-sec-plugins .pl-policy-setup').click(); await settle(6); };
+  const policyGets = () => fetchCalls.filter((c) => c.url.startsWith('/api/policy?')).length;
+  await openChecklist();
+  assert.equal(modal.classList.contains('hidden'), false);
+  const n = policyGets();
+  modal.querySelector('.tp-mcp-act[data-server="policy:acme/gateway/pg"]').click();   // Off · Turn on: consented, no dialog
+  await settle(8);
+  assert.equal(posts.length, 1);
+  assert.equal(modal.classList.contains('hidden'), true, 'done: the checklist closes');
+  assert.ok(policyGets() > n, 'the Team policy page reloads ("Yours", deviations)');
+  await openChecklist();
+  rows = [{ ...PG_OFF, state: 'changed', hash: 'f'.repeat(64), before: { def: PG_OFF.def, values: {} } }, GH];
+  modal.querySelector('.tp-mcp-act[data-server="policy:acme/gateway/pg"]').click();
+  await settle(8);
+  assert.equal(posts.length, 1, 'never posted for a row that moved on');
+  assert.equal(modal.querySelector('.tp-mcp-act[data-server="policy:acme/gateway/pg"]').dataset.action, 'update', 'the checklist repaints at the new state');
+  modal.querySelector('.tp-mcp-act[data-server="policy:acme/gateway/github"]').click();   // Set Token
+  await settle(8);
+  assert.equal(window.location.hash, `#settings/mcp/sets/${PG_OFF.setId}`, 'Set Token opens the Team set');
+  assert.equal(modal.classList.contains('hidden'), true, 'the checklist closes over the Team set it opens');
+});
+
+test('with only MCP items open, the checklist is for their home, not the first home listed', async () => {
+  const homes = [{ ...SCOPES.homes[0], slug: 'acme/other', key: 'other-00000003' }, SCOPES.homes[0]];
+  const { doc, go, settle } = await boot({
+    fetchHandler: (u) => {
+      if (u.includes('/api/policy/scopes')) return json({ ...SCOPES, homes, mcpRequirements: [PG_OFF] });
+      if (u.startsWith('/api/mcp/sets')) return json({ error: 'not in this test' }, 404);
+      return null;
+    },
+  });
+  await go(`settings/mcp/sets/${PG_OFF.setId}`);
+  await settle(8);
+  doc.querySelector('.settings-pane[data-tab="mcp"] [data-mcp-strip] .pl-policy-setup').click();
+  await settle(8);
+  assert.equal(doc.getElementById('plugin-modal-title').textContent, 'Set up for acme/gateway');
+  assert.equal(doc.querySelector('#plugin-modal .tp-trust').dataset.home, 'acme/gateway', 'trust is offered for the home the items come from');
+});
+
+test('the MCP tab strip stays painted while a repaint of the pane reads the scopes again', async () => {
+  let hold = null;
+  const { doc, go, settle, recv } = await boot({
+    fetchHandler: (u) => {
+      if (u.includes('/api/policy/scopes')) { const body = json({ ...SCOPES, mcpRequirements: [PG_OFF] }); return hold ? hold.then(() => body) : body; }
+      if (u.startsWith('/api/mcp/sets')) return json({ error: 'not in this test' }, 404);
+      return null;
+    },
+  });
+  await go(`settings/mcp/sets/${PG_OFF.setId}`);
+  await settle(8);
+  const host = () => doc.querySelector('.settings-pane[data-tab="mcp"] [data-mcp-strip]');
+  assert.equal(host().hidden, false);
+  let release; hold = new Promise((res) => { release = res; });
+  recv({ type: 'team-policy-changed', action: 'updated' });   // reloads the pane: P6 hands the strip a fresh, hidden host
+  await settle(8);
+  assert.equal(host().hidden, false, 'the last state stays painted while the scopes are read again: no flicker');
+  assert.ok(host().querySelector('.tp-mcp-act[data-server="policy:acme/gateway/pg"]'));
+  release();
+  await settle(8);
+  assert.equal(host().hidden, false);
+});
+
+test('a strip Turn on (no dialog) that lands later never closes a dialog opened meanwhile', async () => {
+  let hold = null;
+  const posts = [];
+  const { doc, go, settle } = await boot({
+    fetchHandler: (u, opts) => {
+      if (u.includes('/api/policy/scopes')) return json({ ...SCOPES, mcpRequirements: [PG_OFF] });
+      if (u.startsWith('/api/mcp/teams/') && opts.method === 'POST') { posts.push(u); const body = json({ ok: true, setId: PG_OFF.setId, serverId: PG_OFF.serverId }); return hold ? hold.then(() => body) : body; }
+      if (u.startsWith('/api/mcp/sets')) return json({ error: 'not in this test' }, 404);
+      return null;
+    },
+  });
+  await go(`settings/mcp/sets/${PG_OFF.setId}`);
+  await settle(8);
+  const host = () => doc.querySelector('.settings-pane[data-tab="mcp"] [data-mcp-strip]');
+  let release; hold = new Promise((res) => { release = res; });
+  host().querySelector('.tp-mcp-act').click();   // Off · Turn on: consented, no dialog; its POST is still out
+  await settle(8);
+  assert.equal(posts.length, 1);
+  host().querySelector('.pl-policy-setup').click();   // the user opens a dialog meanwhile
+  await settle(8);
+  const modal = doc.getElementById('plugin-modal');
+  assert.equal(modal.classList.contains('hidden'), false);
+  release();
+  await settle(8);
+  assert.equal(modal.classList.contains('hidden'), false, 'the Turn on that landed never closes the dialog the user opened');
+});
+
+test('a consent dialog whose POST lands after the user moved on never closes the dialog opened meanwhile', async () => {
+  const NEW = { ...PG_OFF, state: 'never-consented' };
+  let hold = null;
+  const posts = [];
+  const { doc, go, settle } = await boot({
+    fetchHandler: (u, opts) => {
+      if (u.includes('/api/policy/scopes')) return json({ ...SCOPES, mcpRequirements: [NEW] });
+      if (u.startsWith('/api/mcp/teams/') && opts.method === 'POST') { posts.push(u); const body = json({ ok: true, setId: NEW.setId, serverId: NEW.serverId }); return hold ? hold.then(() => body) : body; }
+      if (u.startsWith('/api/mcp/sets')) return json({ error: 'not in this test' }, 404);
+      return null;
+    },
+  });
+  await go(`settings/mcp/sets/${NEW.setId}`);
+  await settle(8);
+  const host = () => doc.querySelector('.settings-pane[data-tab="mcp"] [data-mcp-strip]');
+  const modal = doc.getElementById('plugin-modal');
+  const button = (label) => [...modal.querySelectorAll('#plugin-modal-actions button')].find((b) => b.textContent === label);
+  const turnOn = host().querySelector('.tp-mcp-act');
+  turnOn.click();   // Off · Turn on, never consented: the consent dialog first
+  await settle(8);
+  assert.equal(doc.getElementById('plugin-modal-title').textContent, 'Turn on MCP server');
+  button('Cancel').click();
+  assert.ok(turnOn.isConnected);
+  turnOn.click();   // the same button again: a cancelled dialog never leaves it dead
+  await settle(8);
+  assert.equal(modal.classList.contains('hidden'), false, 'the consent dialog opens again');
+  let release; hold = new Promise((res) => { release = res; });
+  button('Turn on').click();
+  await settle(8);
+  assert.equal(posts.length, 1);
+  button('Cancel').click();
+  host().querySelector('.pl-policy-setup').click();   // the user opens the checklist while the POST is out
+  await settle(8);
+  assert.equal(doc.getElementById('plugin-modal-title').textContent, 'Set up for acme/gateway');
+  release();
+  await settle(8);
+  assert.equal(modal.classList.contains('hidden'), false, 'the Turn on that landed never closes the checklist the user opened');
 });

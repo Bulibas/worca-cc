@@ -880,7 +880,11 @@ export class GraphOrchestrator extends RunHarness {
           pending: this._auto.pending ? jsonClone(this._auto.pending) : null,            // B4/B6
         }
         : null,
+      // Night mode: the run's own switches (the start opt-in and the run-view override),
+      // read back by the harness constructor. `auto` above is the Auto-workflow state.
+      night: { optIn: this._night.optIn, override: this._night.override, ...(this._night.since != null ? { since: this._night.since } : {}) },
       guardrailsId: this.guardrailsId,
+      ...(this.mcpOptOut?.length ? { mcpOptOut: [...this.mcpOptOut] } : {}),   // MCP registry §6.2: resume re-resolves minus it
       memoryScope: this.memoryScope || null,   // agent memory §7.3: a paused defrag resumes with ONE scope (B10)
       checkpointRef: this.checkpointRef || null,
       checkpointRefs: { ...this.checkpointRefs },
@@ -1247,6 +1251,11 @@ export class GraphOrchestrator extends RunHarness {
       runRoot: this.runRoot,
       mcpConfigPath: this.mcpConfigPath,
       mcpServerGrants: this.mcpServerGrants,
+      // MCP registry (design §6.1): the copies' secret env, the values to redact and the tools
+      // withheld for the run's tool-name limit. Never persisted anywhere.
+      mcpEnv: this.mcpLayer?.env,
+      mcpRedact: this.mcpLayer?.redact,
+      mcpDisallowed: this.mcpLayer?.disallowed,
       repos: this._reposCtx(),
       pipelineDir: this.pipeline.dir,
       pipelineId: this.pipeline.id,
@@ -1310,6 +1319,8 @@ export class GraphOrchestrator extends RunHarness {
       // Who answered question `id` (identity.mjs actor; answer() records it) — the clarifier
       // stores it with the answer and audits it.
       answeredBy: (id) => this.answeredBy(id),
+      // The night mode decision behind question `id`, or null — stored beside the answer.
+      nightDecision: (id) => this.nightDecision(id),
       onEvent: (e) => this._onAgentEvent(nc.key || node.kind, e, attr),
       claudeOpts: {
         bin: this.claude.bin,
@@ -1318,7 +1329,10 @@ export class GraphOrchestrator extends RunHarness {
         effort: nc.effort,                     // per-node effort (undefined when unset)
         permissionRules: this.guardrailPermissionRules || undefined,
         envScrub: this.guardrails?.envScrub || undefined,
-        envAllowlist: this.guardrails?.envScrub ? this.guardrails.envAllowlist : undefined,
+        // §5.5.1: a scrubbed spawn with a registry stdio copy keeps the launcher's keep-list.
+        envAllowlist: this.guardrails?.envScrub
+          ? (this.mcpLayer?.allowlist?.length ? [...this.guardrails.envAllowlist, ...this.mcpLayer.allowlist] : this.guardrails.envAllowlist)
+          : undefined,
         mock: this.claude.mock,
       },
     };
@@ -1734,7 +1748,9 @@ export class GraphOrchestrator extends RunHarness {
    * clarifier nodes have their own gate; auto mode would answer noise.
    */
   _primeQuestions(nc, ctx) {
-    const enabled = !!nc.askQuestions && nc.runnerType !== 'clarifier' && !this.auto && !ctx.slice;
+    // --yes blocks agent questions unless night mode owns this run's answers.
+    const autoBlocks = this.auto && !this._nightOwnsAuto('questions');
+    const enabled = !!nc.askQuestions && nc.runnerType !== 'clarifier' && !autoBlocks && !ctx.slice;
     ctx.questionsEnabled = enabled;
     if (!enabled) return;
     ctx.questionsAnswered = readStepQuestions(this.pipeline.id)
@@ -1879,6 +1895,7 @@ export class GraphOrchestrator extends RunHarness {
         const answered = await this._enqueueAsk(() => this._ask({
           id: `questions-${stepKey}-r${round}`,
           kind: 'form',
+          origin: 'questions',               // night mode: neverDecide 'questions' covers it
           agent: agentLabel,
           nodeId: ctx.nodeId,
           executionId: ctx.executionId,
@@ -1901,9 +1918,10 @@ export class GraphOrchestrator extends RunHarness {
         const { values, held } = redactSecrets((answered && typeof answered === 'object' && answered.values) || {}, formSecrets);
         Object.assign(this._secretEnv, held);
         const formBy = this.answeredBy(`questions-${stepKey}-r${round}`);
+        const formNight = this.nightDecision(`questions-${stepKey}-r${round}`);
         await writeStepQuestions(this.pipeline.id, stepKey, round, {
           agentKey: nc.key, nodeId: ctx.nodeId,
-          answers: { kind: 'form', form: formAsk.form, version: formAsk.version, values, ...(formBy ? { answeredBy: formBy } : {}) },
+          answers: { kind: 'form', form: formAsk.form, version: formAsk.version, values, ...(formBy ? { answeredBy: formBy } : {}), ...(formNight ? { night: formNight } : {}) },
         });
         await appendAudit(this.pipeline.dir, `${agentLabel}: form "${formAsk.form}" answered${byActor(formBy)} (round ${round}).`, { actor: formBy }).catch(() => {});
         await rm(qPath, { force: true }).catch(() => {});
@@ -1935,8 +1953,9 @@ export class GraphOrchestrator extends RunHarness {
       const byId = new Map(questions.map((q) => [q.id, q]));
       const enriched = answers.map((a) => ({ id: a.id, question: byId.get(a.id)?.question || '', choice: a.choice }));
       const answerBy = this.answeredBy(`questions-${stepKey}-r${round}`);
+      const answerNight = this.nightDecision(`questions-${stepKey}-r${round}`);
       await writeStepQuestions(this.pipeline.id, stepKey, round, {
-        agentKey: nc.key, nodeId: ctx.nodeId, answers: { answers: enriched, ...(answerBy ? { answeredBy: answerBy } : {}) },
+        agentKey: nc.key, nodeId: ctx.nodeId, answers: { answers: enriched, ...(answerBy ? { answeredBy: answerBy } : {}), ...(answerNight ? { night: answerNight } : {}) },
       });
       await appendAudit(this.pipeline.dir, `${agentLabel}: ${enriched.length} answer(s) received${byActor(answerBy)} (round ${round}).`, { actor: answerBy }).catch(() => {});
       // Consume the processed round file: the DB row is authoritative, and a

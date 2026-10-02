@@ -16,10 +16,10 @@
 // value never touches disk. Explicitly NOT in worca-cc.db.
 // All functions are sync (contract; callers are the shim + server routes).
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync, chmodSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { pluginDataDir } from './plugins-lock.mjs';
+import { writeJsonAtomic } from './json-atomic.mjs';
 
 /** The bucket every source gets for free; the only one a single-profile source uses. */
 export const DEFAULT_PROFILE = 'default';
@@ -76,14 +76,6 @@ function readBuckets(file) {
 function readBucket(file, profile) {
   const b = readBuckets(file)[profile];
   return b && typeof b === 'object' && !Array.isArray(b) ? b : {};
-}
-
-function writeJsonAtomic(file, obj, { mode } = {}) {
-  mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${randomBytes(4).toString('hex')}.tmp`;
-  writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', mode !== undefined ? { mode } : { encoding: 'utf8' });
-  if (mode !== undefined) chmodSync(tmp, mode); // umask-proof: mode is exact
-  renameSync(tmp, file);
 }
 
 /** Replace one profile's bag inside a file, leaving every other profile alone. */

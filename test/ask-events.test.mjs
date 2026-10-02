@@ -165,7 +165,7 @@ test('tool lifecycle: labels, running → done/error blocks, durations, input cl
   h.push(atool('msg_1', 'toolu_4', 'mcp__worca__read_attachment', { id: 'att_unknown' }));
   assert.equal(h.frames.at(-2).label, 'Reading attachment');
   h.push(atool('msg_1', 'toolu_5', 'mcp__other__thing', {}));
-  assert.equal(h.frames.at(-2).label, 'Using mcp__other__thing');
+  assert.equal(h.frames.at(-2).label, 'Using other · thing', '§9.7: a registry copy reads <copy> · <tool>');
   const before = h.frames.length;
   h.push(atool('msg_1', 'toolu_6', 'mcp__worca__list_runs', {}), atool('msg_1', 'toolu_7', 'mcp__worca__list_runs', {}));
   assert.deepEqual(h.frames.slice(before).map((f) => f.type), ['ask-label', 'ask-block', 'ask-block'], 'the same label is never repeated back to back');
@@ -848,6 +848,25 @@ test('propose_web_access: labelled, and its RESULT reaches onWebProposal with th
   assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
 });
 
+test('onAwaySwitch fires on set_away_now and set_run_away_mode results, with their labels', () => {
+  const calls = [];
+  const h = harness({ onAwaySwitch: (e) => calls.push(e) });
+  h.push(session(), init(), atool('msg_1', 't1', 'mcp__worca__set_away_now', { mode: 'away' }), uresult('t1', '{"ok":true}'));
+  assert.deepEqual(calls, [{ toolUseId: 't1', input: { mode: 'away' }, text: '{"ok":true}', isError: false }]);
+  assert.ok(h.frames.some((f) => f.type === 'ask-label' && f.label === 'Switching Away mode'));
+  h.push(atool('msg_2', 't2', 'mcp__worca__set_run_away_mode', { runId: 'abcd1234', mode: 'off' }), uresult('t2', 'error: nope', { isError: true }));
+  assert.deepEqual(calls[1], { toolUseId: 't2', input: { runId: 'abcd1234', mode: 'off' }, text: 'error: nope', isError: true });
+  assert.ok(h.frames.some((f) => f.type === 'ask-label' && f.label === 'Setting Away mode on a run'));
+});
+
+test('onAwayProposal fires on the propose_away_mode_change result, with its label', () => {
+  const calls = [];
+  const h = harness({ onAwayProposal: (e) => calls.push(e) });
+  h.push(session(), init(), atool('msg_1', 't1', 'mcp__worca__propose_away_mode_change', { level: 'user', set: { enabled: true } }), uresult('t1', '{"ok":true}'));
+  assert.deepEqual(calls, [{ toolUseId: 't1', input: { level: 'user', set: { enabled: true } }, text: '{"ok":true}', isError: false }]);
+  assert.ok(h.frames.some((f) => f.type === 'ask-label' && f.label === 'Proposing an Away mode change'));
+});
+
 test('propose_workspace_change: labelled, and its RESULT reaches onWorkspaceProposal with the full input; a sub-agent call never does', () => {
   assert.equal(labelForTool('mcp__worca__propose_workspace_change', {}), 'Proposing a workspace change');
   const seen = [];
@@ -861,4 +880,62 @@ test('propose_workspace_change: labelled, and its RESULT reaches onWorkspaceProp
   h.push(atool('msg_c', 'toolu_ws2', 'mcp__worca__propose_workspace_change', input, 'toolu_task'));
   h.push(uresult('toolu_ws2', '{"ok":true}', { ptu: 'toolu_task' }));
   assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
+});
+
+test('ctxWindow: the main model\'s contextWindow rides the usage once the result lands', () => {
+  const h = harness();
+  h.push(session(), init({ model: 'claude-opus-5-5' }), mstart('msg_1'), atext('msg_1', 'ok'), mdelta({ output_tokens: 4, input_tokens: 2 }));
+  assert.equal('ctxWindow' in h.r.snapshot().usage, false, 'no result yet: window unknown');
+  h.push(result({ modelUsage: {
+    'claude-opus-5-5': { inputTokens: 2, outputTokens: 4, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.01, contextWindow: 1000000, canonicalModel: 'claude-opus-5-5' },
+    'claude-haiku-4-5-20251001': { inputTokens: 900, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.001, contextWindow: 200000, canonicalModel: 'claude-haiku-4-5' },
+  } }));
+  assert.equal(h.r.snapshot().usage.ctxWindow, 1000000, 'the main model, never the title call');
+  assert.equal(h.frames.filter((f) => f.type === 'ask-usage').at(-1).usage.ctxWindow, 1000000);
+  assert.equal(h.r.finish().usage.ctxWindow, 1000000);
+});
+
+test('ctxWindow: absent when the main model cannot be matched or the window is garbage', () => {
+  const two = {
+    a: { contextWindow: 1000000, canonicalModel: 'a' },
+    b: { contextWindow: 200000, canonicalModel: 'b' },
+  };
+  let h = harness();
+  h.push(session(), init(), mstart('msg_1'), atext('msg_1', 'ok'), result({ modelUsage: two }));   // no init model, two keys
+  assert.equal('ctxWindow' in h.r.snapshot().usage, false);
+  for (const bad of [0, -5, '1000000', 1.5, null]) {
+    h = harness();
+    h.push(session(), init({ model: 'm' }), mstart('msg_1'), atext('msg_1', 'ok'), result({ modelUsage: { m: { contextWindow: bad } } }));
+    assert.equal('ctxWindow' in h.r.snapshot().usage, false, `window ${JSON.stringify(bad)} is unknown`);
+  }
+  h = harness();
+  h.push(session(), init(), mstart('msg_1'), atext('msg_1', 'ok'), result({ modelUsage: { only: { contextWindow: 200000 } } }));
+  assert.equal(h.r.snapshot().usage.ctxWindow, 200000, 'a single entry is the main model (matchModelKey fallback)');
+});
+
+test('ctxWindow: a lone modelUsage entry that is not the init model is never taken (failed main call, title call only)', () => {
+  const h = harness();
+  h.push(session(), init({ model: 'claude-opus-5-5' }), mstart('msg_1'), atext('msg_1', 'ok'), result({ modelUsage: {
+    'claude-haiku-4-5-20251001': { inputTokens: 900, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.001, contextWindow: 200000, canonicalModel: 'claude-haiku-4-5' },
+  } }));
+  assert.equal('ctxWindow' in h.r.snapshot().usage, false, 'the Haiku title call must not supply the Opus window');
+});
+
+test('agent ctxWindow: each sub-agent gets its own model\'s window at finish; an inheriting agent gets the main window; an unresolved alias gets none', () => {
+  const h = harness();
+  h.push(session(), init({ model: 'claude-opus-5-5' }));
+  h.push(atool('msg_1', 'toolu_h', 'Agent', { description: 'haiku child', subagent_type: 'general-purpose', model: 'haiku' }));
+  h.push(atool('msg_2', 'toolu_i', 'Agent', { description: 'inherits', subagent_type: 'general-purpose' }));
+  h.push(atool('msg_3', 'toolu_s', 'Agent', { description: 'sonnet alias, never resolved', subagent_type: 'general-purpose', model: 'sonnet' }));
+  h.push(uresult('toolu_h', [{ type: 'text', text: 'ok' }], { tur: { ...AGENT_TUR, resolvedModel: 'claude-haiku-4-5-20251001' } }));
+  h.push(uresult('toolu_i', [{ type: 'text', text: 'ok' }], { tur: { ...AGENT_TUR, resolvedModel: undefined } }));
+  h.push(uresult('toolu_s', [{ type: 'text', text: 'boom' }], { isError: true }));
+  h.push(result({ modelUsage: {
+    'claude-opus-5-5': { inputTokens: 2, outputTokens: 4, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.01, contextWindow: 1000000, canonicalModel: 'claude-opus-5-5' },
+    'claude-haiku-4-5-20251001': { inputTokens: 4016, outputTokens: 123, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.001, contextWindow: 200000, canonicalModel: 'claude-haiku-4-5' },
+  } }));
+  const agents = Object.fromEntries(h.r.finish().blocks.filter((b) => b.kind === 'agent').map((b) => [b.id, b]));
+  assert.equal(agents.toolu_h.ctxWindow, 200000, 'the Haiku child: its own window');
+  assert.equal(agents.toolu_i.ctxWindow, 1000000, 'no model: it inherits the main model, so the main window');
+  assert.equal('ctxWindow' in agents.toolu_s, false, 'an alias that never resolved matches nothing: no guess');
 });

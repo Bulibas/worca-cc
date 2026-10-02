@@ -1,10 +1,14 @@
 // test/ui-running-detail.test.mjs
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { confirmDialog } from './helpers/confirm-modal.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 // The Running detail screen's body: live pipeline graph, banners, question panel.
 //
@@ -26,7 +30,7 @@ const STEPPER3 = { steps: [{ label: 'Plan', nodes: [{ id: 'a', label: 'Planner' 
                            { label: 'Review', nodes: [{ id: 'c', label: 'Reviewer' }] }] };
 
 async function boot({ url = 'http://localhost:4317/', fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
 
@@ -591,15 +595,16 @@ test('a waiting question gets twice the run panel\'s width; the header and panel
 
 // --- T7: tabs ---------------------------------------------------------------
 
-test('Details has seven tabs, results first; the route picks the open one', async () => {
+test('Details has eight tabs, results first; the route picks the open one', async () => {
   const ctx = await bootRunning();
   await openRun(ctx);
   const { window } = ctx;
   const tabs = [...window.document.querySelectorAll('#run-detail .rd-tab')];
-  assert.deepEqual(tabs.map((b) => b.dataset.sec), ['overview', 'diff', 'artifacts', 'workflow', 'qa', 'logs', 'agents']);
+  assert.deepEqual(tabs.map((b) => b.dataset.sec), ['overview', 'diff', 'artifacts', 'actions', 'workflow', 'qa', 'logs', 'agents']);
   assert.match(tabs[0].textContent, /Overview/);
-  assert.match(tabs[5].textContent, /Logs/);
-  assert.match(tabs[4].textContent, /Q&A/);
+  assert.match(tabs[3].textContent, /Actions/);
+  assert.match(tabs[6].textContent, /Logs/);
+  assert.match(tabs[5].textContent, /Q&A/);
   // openRun lands on #running/r1/details/logs.
   assert.equal(window.document.querySelector('#run-detail .rd').dataset.mode, 'details');
   assert.ok(tabOf(window, 'logs').classList.contains('active'), 'the routed tab is open');
@@ -1323,15 +1328,19 @@ test('a finished run: its headline, the facts, what to check, Create pull reques
   const pr = result.querySelector('.rd-create-pr');
   assert.ok(pr, 'an eligible run offers Create pull request');
   assert.equal(pr.textContent, 'Create pull request');
-  assert.equal(result.querySelector('.rd-follow-up').textContent, 'Start a follow-up run');
-  // Every action leads with its glyph, not words alone.
-  assert.deepEqual([...result.querySelectorAll('.rd-cta')].map((b) => b.firstElementChild.dataset.icon),
-    ['pr-create', 'follow-up']);
+  // The card's one button is the pull request, behind its glyph; following up is the bar's Run after.
+  assert.deepEqual([...result.querySelectorAll('.rd-result-actions > *')].map((b) => b.firstElementChild.dataset.icon),
+    ['pr-create']);
+  assert.equal(result.querySelector('.rd-follow-up'), null, 'no follow-up CTA on the card');
+  const after = rd.querySelector('.rd-bar .rd-after');
+  assert.equal(after.hidden, false, 'a finished run keeps Run after in the bar');
+  assert.equal(after.title, 'Start a follow-up run');
+  assert.equal(after.getAttribute('aria-label'), 'Start a follow-up run');
   click(window, pr);
   assert.equal(window.location.hash, `#history/${KEY}/p1`, 'it hands over to the ship-it flow');
 });
 
-for (const [state, icon, alt] of [['OPEN', 'pr-open', false], ['MERGED', 'merged', true]]) {
+for (const [state, icon, cls] of [['OPEN', 'external', 'pr-view'], ['MERGED', 'merged', 'pr-merged']]) {
   test(`a finished run with an ${state.toLowerCase()} pull request links to it, behind its glyph`, async () => {
     const url = 'https://github.com/o/r/pull/7';
     const row = { ...HISTORY_ROW, id: 'p1', live: true, survived: true, branch: 'worca-cc/dark-p1', sourceBranch: 'main', pr: { state, url } };
@@ -1354,8 +1363,10 @@ for (const [state, icon, alt] of [['OPEN', 'pr-open', false], ['MERGED', 'merged
     assert.equal(link.getAttribute('href'), url);
     assert.equal(link.textContent, 'View pull request');
     assert.equal(link.firstElementChild.dataset.icon, icon);
-    assert.equal(link.classList.contains('alt'), alt, 'a merged PR is a fact: its link is secondary');
-    assert.equal(rd.querySelector('.rd-follow-up').firstElementChild.dataset.icon, 'follow-up');
+    assert.ok(link.classList.contains(cls), `the ${state.toLowerCase()} PR wears its colour: ${link.className}`);
+    assert.equal(link.classList.contains('alt'), false, 'never the grey secondary');
+    assert.equal(link.target, '_blank', 'GitHub opens in a new tab');
+    assert.equal(rd.querySelectorAll('.rd-result-actions > *').length, 1, 'the card carries the pull request alone');
   });
 }
 

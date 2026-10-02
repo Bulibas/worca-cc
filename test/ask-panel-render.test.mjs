@@ -127,6 +127,24 @@ test('ask-panel-render: tool rows — op, target with input preview, note', asyn
   assert.equal(rows[1].querySelector('.ask-tool-note').textContent, 'error');
 });
 
+test('ask-panel-render: a registry tool row reads <copy> · <tool> then the input preview, with no op cell (§9.7)', async () => {
+  const snap = snapBody([asstRow('askm_00000001', 1, {
+    blocks: [
+      { kind: 'tool', id: 't1', name: 'mcp__sentry_billing__search_issues', input: { query: 'checkout' }, status: 'done', durationMs: 400 },
+      { kind: 'tool', id: 't2', name: 'mcp__worca__list_runs', input: {}, status: 'done', durationMs: 100 },
+    ],
+  })]);
+  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+  await openThread(ctx);
+  const [mcp, worca] = [...ctx.doc.querySelectorAll('.ask-tool-row')];
+  assert.equal(mcp.querySelector('.ask-tool-op'), null, 'no 38 px op cell');
+  assert.equal(mcp.querySelector('.ask-tool-mcp').textContent, 'sentry_billing · search_issues');
+  assert.equal(mcp.querySelector('.ask-tool-target').textContent, '{"query":"checkout"}');
+  assert.equal(mcp.querySelector('.ask-tool-note').textContent, '0.4s');
+  assert.equal(worca.querySelector('.ask-tool-op').textContent, 'list', 'worca tools keep the op cell');
+  assert.equal(worca.querySelector('.ask-tool-mcp'), null);
+});
+
 test('ask-panel-render: agent row carries name · model · tokens · ≈$ · status; expand survives update', async () => {
   const agent = { kind: 'agent', id: 'toolu_1', label: 'count runs', type: 'general-purpose', model: 'claude-haiku-4-5', tokens: 5321, usage: { input: 10, output: 69, cacheRead: 4564, cacheCreation: 678 }, costUsd: 0.0017, estimated: true, status: 'done', durationMs: 2861, log: [{ t: 0, text: '→ list_runs {}' }, { t: 61000, text: '← ok 0.0s' }] };
   const snap = snapBody([asstRow('askm_00000001', 1, { blocks: [agent] })]);
@@ -393,4 +411,18 @@ test('ask-panel-render: the script tools show the key and what came back (§9.3)
   assert.equal(rows[3].querySelector('.ask-tool-target').textContent, 'script runTests', 'a call without a stamp still reads the key off the input');
   assert.equal(rows[3].querySelector('.ask-tool-note').textContent, 'error');
   for (const r of rows) assert.equal(r.dataset.minLevel, 'advanced', 'tool rows stay an Advanced-level detail');
+});
+
+test('ask-panel-render: an agent row with a known window shows "fill / window ctx", coloured, with a hover; the context popover\'s Agents list shows it too', async () => {
+  const agent = { kind: 'agent', id: 'toolu_1', label: 'scan logs', type: 'general-purpose', model: 'claude-haiku-4-5-20251001', tokens: 160000, ctx: 160000, ctxWindow: 200000, usage: { input: 10, output: 69, cacheRead: 4564, cacheCreation: 678 }, costUsd: 0.0017, estimated: true, status: 'done', durationMs: 2861, log: [] };
+  const snap = snapBody([asstRow('askm_00000001', 1, { blocks: [agent] })]);
+  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+  await openThread(ctx);
+  const fill = ctx.doc.querySelector('.ask-agent-row .ask-agent-tokens');
+  assert.equal(fill.textContent, '160.0k / 200k ctx');
+  assert.ok(fill.classList.contains('is-ctx-high'), '160k of a 167k trigger: red');
+  assert.match(fill.getAttribute('title'), /^Compaction soon\. 80% of the 200k context window/);
+  ctx.doc.querySelector('[data-ask-ctx-btn]').click();
+  await ctx.tick();
+  assert.match(ctx.doc.querySelector('.ask-ctx-agents .ask-runinfo-sub').textContent, /160\.0k \/ 200k ctx/);
 });

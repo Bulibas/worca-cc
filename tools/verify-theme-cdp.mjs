@@ -482,6 +482,19 @@ const states = [
   ['modal-shipit', async () => { await unhide('#shipit-modal'); }, async () => { await rehide('#shipit-modal'); }],
   ['modal-viewer', async () => { await unhide('#viewer-card'); }, async () => { await rehide('#viewer-card'); }],
   ['kitchen', async () => { await go('new'); await injectKitchen(); }],
+  // Actions (Phase B: pipelineId/projectKey exist only once the mock run finished). The first state registers
+  // the run's folder as a project (its key is the run's projectKey) and seeds its action config, so the editor
+  // renders an action row; they sit last so the extra project changes no earlier state. The fixture has no
+  // workspace, and the workspace Actions tab reuses the project tab's classes, so there is no workspace state.
+  ['project-actions', async () => {
+    const reg = await api('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'themerun', path: proj }) });
+    if (!(reg.body.projects || []).some((x) => x.key === projectKey)) throw new Error(`could not register the run's project: ${JSON.stringify(reg.body)}`);
+    const r = await api(`/api/projects/${projectKey}/actions`, { method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ setup: 'true', actions: [{ id: 'test', label: 'Test', kind: 'task', cmd: 'node -e 0' }] }) });
+    if (r.status !== 200) throw new Error(`seeding the project actions answered ${r.status}`);
+    await go(`projects/${projectKey}/actions`); await until(`document.querySelector('.actions-config .ac-action')`, 'the actions editor'); }],
+  ['history-actions', async () => { await go(`history/${projectKey}/${pipelineId}/details/actions`); await until(`document.querySelector('.hd-details:not([hidden]) .act-card')`, 'the actions card'); }],
+  ['settings-runs-actions', async () => { await go('settings/runs'); await until(`document.querySelector('#actions-settings-card')`, 'the actions card'); }],
 ];
 
 // ---- collection ---------------------------------------------------------------

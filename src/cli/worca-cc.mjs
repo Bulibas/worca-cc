@@ -36,6 +36,7 @@ import { promptFields, projectForm, coerceInput } from '../shared/forms/project.
 import { whenOk } from '../shared/forms/layout.mjs';
 import { validate } from '../shared/forms/schema.mjs';
 import { collectAnswer } from '../shared/forms/answer.mjs';
+import { kindLabel } from '../shared/away-mode/labels.mjs';
 import { pauseExitCode, describePauseReason, promptOptions, REASON } from '../core/failure-policy.mjs';
 import { effectiveDebugSpawn } from '../core/settings.mjs';
 import { SCHEDULE_VALUE_FLAGS, wantsSchedule, readScheduleFlags, createFromFlags, waitAndRun, cmdSchedule } from './schedule.mjs';
@@ -114,6 +115,7 @@ function parseArgs(argv) {
     workflow: undefined,
     mock: false,
     auto: false,
+    nightMode: false,       // --night: this run opts into night mode (src/core/night/*)
     pastTeamCap: false,     // team policy (design §12): start with the total-cap acknowledgement recorded
     reason: undefined,      // …and the reason the team sees for it
     install: null,
@@ -171,6 +173,10 @@ function parseArgs(argv) {
     }
     if (arg === '--yes' || arg === '--non-interactive') {
       out.auto = true;
+      continue;
+    }
+    if (arg === '--night') {
+      out.nightMode = true;
       continue;
     }
     if (arg === '--no-human') {
@@ -323,7 +329,10 @@ Options:
   --after <id>             Start when another run ends: a run id or a scheduled run id (any unique prefix)
   --after-any              …even if that run fails or is stopped
   --source-from-previous   Start on that run's feature branch (with --after)
-  --yes, --non-interactive Auto-answer clarify (first option) and gates (continue)
+  --yes, --non-interactive Auto-answer clarify (recommended, else first option) and gates (continue)
+  --night                  Mark this run: worca may answer its questions while you are away
+                           (your away hours or "I'm away now"), and by day once a question has
+                           waited 30 min. Configure in Settings > Away mode.
   --ui                     Same as "worca ui start" (accepts --port, --open, --mock)
   --install <targetDir>    Copy agents + /worca skill into <targetDir>/.claude
   -h, --help               Show this help
@@ -340,6 +349,7 @@ const COLORS = {
   yellow: '\x1b[33m',
   red: '\x1b[31m',
   cyan: '\x1b[36m',
+  magenta: '\x1b[35m',
   gray: '\x1b[90m',
 };
 const useColor = process.stdout.isTTY;
@@ -369,8 +379,21 @@ function makeRl() {
   return rl;
 }
 
+// The open prompt's cancel switch: night mode may answer a question while its readline
+// prompt is still open, and that prompt must go away or the next one stacks on it.
+let promptAbort = null;
+const NIGHT_ANSWERED = 'NIGHT_ANSWERED';
+
 function question(rl, q) {
-  return new Promise((res) => rl.question(q, (a) => res(a)));
+  const signal = promptAbort?.signal;
+  if (!signal) return new Promise((res) => rl.question(q, (a) => res(a)));
+  return new Promise((res, rej) => {
+    // An aborted readline question never calls its callback: settle here instead.
+    const cancel = () => rej(Object.assign(new Error('answered by night mode'), { code: NIGHT_ANSWERED }));
+    if (signal.aborted) { cancel(); return; }
+    signal.addEventListener('abort', cancel, { once: true });
+    rl.question(q, { signal }, (a) => { signal.removeEventListener('abort', cancel); res(a); });
+  });
 }
 
 /**
@@ -735,6 +758,9 @@ async function attachAndDrive(orch, flags, start) {
     const { id, kind, questions, issues, recovery, agent } = payload;
     if (flags.auto || !rl) return; // auto mode resolves internally
     answering = true;
+    const ctrl = new AbortController();
+    promptAbort = ctrl;
+    promptAbort.questionId = id;
     try {
       if (kind === 'clarify') {
         const answer = await askClarify(rl, questions || []);
@@ -790,6 +816,8 @@ async function attachAndDrive(orch, flags, start) {
         }
       }
     } catch (err) {
+      // Night mode answered while the prompt was open: nothing to answer, nothing failed.
+      if (err?.code === NIGHT_ANSWERED) { out(''); return; }
       process.stderr.write(`Failed to read answer: ${err?.message || err}\n`);
       // Never swallow: orch.answer() was not called, so the ask stays open and the
       // run would hang on it (or be abandoned at EOF with its row left `running`
@@ -800,7 +828,17 @@ async function attachAndDrive(orch, flags, start) {
       abandonAnswer(err);
     } finally {
       answering = false;
+      if (promptAbort === ctrl) promptAbort = null;
     }
+  });
+
+  orch.on('night-decision', ({ id, kind, record }) => {
+    // Close the readline prompt night mode just made moot.
+    if (promptAbort && promptAbort.questionId === id && !record?.guardrail) promptAbort.abort();
+    const what = record?.guardrail
+      ? `paused: ${String(record.rationale || record.guardrail).replace(/^Paused:\s*/, '')}`
+      : `answered ${kindLabel(kind)} ${id}: ${String(record?.choice).slice(0, 120)}`;
+    out(c('magenta', `Away mode ${what}${record?.flagged && !record?.guardrail ? ' (please check)' : ''}`));
   });
 
   // Ctrl+C: 1st -> graceful pause (falls back to stop when not pausable);
@@ -1607,6 +1645,7 @@ function contribSummary(x) {
     [n(b.scripts), 'script', 'scripts'],
     [n(b.skills), 'skill', 'skills'],
     [n(b.workflows), 'workflow', 'workflows'],
+    [n(b.mcpServers), 'MCP server', 'MCP servers'],
   ]
     .filter(([count]) => count > 0)
     .map(([count, one, many]) => `${count} ${count === 1 ? one : many}`);
@@ -1642,6 +1681,7 @@ async function printInventory(inv) {
   if (summary) out(`  ${summary}`);
   const notice = await pythonNoticeFor(i.scripts);
   if (notice) out(c('yellow', `  ${notice}`));
+  for (const s of i.mcpServers || []) out(`  MCP server: ${s.name} (${s.type}) — ${s.command || s.url}`);
   for (const s of i.skills || []) out(`  skill: ${s}`);
   for (const w of i.workflows || []) out(`  workflow: ${w}`);
   if (i.depCount != null) out(`  npm dependencies: ${i.depCount}`);
@@ -1940,6 +1980,13 @@ async function cmdPlugin(argv) {
   const store = await import('../core/plugin-store.mjs');
   const repoMod = await import('../core/plugin-repo.mjs');
   const manifestMod = await import('../core/plugin-manifest.mjs');
+  // MCP registry (§4.4): persist the bases of servers that became honoured with
+  // no install event. Never fails the command; the next start or write retries.
+  try {
+    await (await import('../core/mcp/catalog.mjs')).reconcileMcpStore();
+  } catch (err) {
+    process.stderr.write(`warning: MCP registry reconcile skipped: ${err?.message || err}\n`);
+  }
 
   try {
     switch (verb) {
@@ -1956,7 +2003,7 @@ async function cmdPlugin(argv) {
         const name = a._[0];
         if (!name) fail('Usage: worca plugin install <name> [--repo <url>] [--marketplace <id>] [--ref <sha>] [--yes]');
         const mkt = await import('../core/marketplaces.mjs');
-        try { mkt.seedBuiltinMarketplace(); } catch { /* non-checkout install */ }
+        try { mkt.seedBuiltinMarketplace(); } catch { /* registry unwritable: go on without the builtin */ }
         let repoUrl = a.repo;
         let marketplace = a.marketplace || null;
         if (!repoUrl && marketplace) {
@@ -1999,6 +2046,11 @@ async function cmdPlugin(argv) {
         for (const s of m.taskSources || []) {
           const secrets = (s.configSchema || []).filter((f) => f.secret).map((f) => f.key);
           out(`  task source: ${s.id} (${s.displayName})${secrets.length ? ` — requests secrets: ${secrets.join(', ')}` : ''}`);
+        }
+        // MCP servers (registry §13): the honoured block is knowable before export too.
+        for (const n of Object.keys(m.mcpServers || {}).sort()) {
+          const s = store.mcpInventoryRow(n, m.mcpServers[n]);
+          out(`  MCP server: ${s.name} (${s.type}) — ${s.command || s.url}`);
         }
         if (m.setup?.node) out('  setup: npm ci --prefix <versionDir> --ignore-scripts --omit=dev');
         if (m.setup?.python) out('  setup: uv sync --project <versionDir>');
@@ -2047,6 +2099,7 @@ async function cmdPlugin(argv) {
         for (const s of delta.newTaskSources || []) out(c('yellow', `  new task source: ${s}`));
         for (const ag of delta.newAgents || []) out(c('yellow', `  new agent: ${ag}`));
         if (delta.setupChanged) out(c('yellow', '  setup commands changed'));
+        for (const l of delta.mcpLines || []) out(c(l.red ? 'red' : 'yellow', `  ${l.text}`));
         if (a.diff && cand.diffFull) out(cand.diffFull);
         if (!(await confirmPlugin('Update?', !!a.yes))) {
           out('aborted (still pinned)');
@@ -2290,7 +2343,7 @@ async function cmdMarketplace(argv) {
     return 0;
   }
   const mkt = await import('../core/marketplaces.mjs');
-  try { mkt.seedBuiltinMarketplace(); } catch { /* non-checkout install: skip */ }
+  try { mkt.seedBuiltinMarketplace(); } catch { /* registry unwritable: go on without the builtin */ }
   try {
     switch (verb) {
       case 'add': {
@@ -3023,7 +3076,7 @@ async function cmdPolicy(argv) {
   if (!verb || verb === 'help') { process.stdout.write(POLICY_HELP); return 0; }
   const sync = await import('../core/policy/sync.mjs');
   const { effectiveRows } = await import('../core/policy/effective.mjs');
-  const { localSnapshot, pluginRequirements, marketplaceSeedCandidates, seedPolicyMarketplaces } = await import('../core/policy/local.mjs');
+  const { localSnapshot, withMcpLocal, pluginRequirements, marketplaceSeedCandidates, seedPolicyMarketplaces } = await import('../core/policy/local.mjs');
   try {
     switch (verb) {
       case 'show': {
@@ -3035,7 +3088,7 @@ async function cmdPolicy(argv) {
           else out(`no team policy for ${projectDir}: ${r.detail || r.reason}`);
           return r.reason === 'not-enabled' || r.reason === 'no-origin' ? 0 : 1;
         }
-        const rows = effectiveRows({ doc: r.doc, workspaceRun: false, local: localSnapshot(projectDir) });
+        const rows = effectiveRows({ doc: r.doc, workspaceRun: false, local: await withMcpLocal(localSnapshot(projectDir), { slug: r.home, sha: r.sha, doc: r.doc }) });
         if (a.json) { out(JSON.stringify({ home: r.home, sha: r.sha, delegated: r.delegated, from: r.from, doc: r.doc, rows }, null, 2)); return 0; }
         out(c('bold', `team policy ${r.home}${r.sha ? ` @ ${String(r.sha).slice(0, 7)}` : ''}${r.delegated ? ` (followed by ${r.from})` : ''}`));
         if (r.doc.title) out(`  ${r.doc.title}${r.doc.updatedBy ? ` · updated by ${r.doc.updatedBy}` : ''}${r.doc.updatedAt ? ` · ${r.doc.updatedAt}` : ''}`);
@@ -3348,6 +3401,7 @@ async function main() {
     },
     auto: flags.auto,
     humanInLoop: flags.humanInLoop === false ? false : undefined,
+    ...(flags.nightMode ? { nightMode: true } : {}),
   });
 
   if (waitTicketId) {

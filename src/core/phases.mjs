@@ -622,8 +622,11 @@ export function questionsPromptBlock(ctx) {
     'If a decision materially shapes the outcome and you cannot resolve it from the task, ' +
     'the inputs, or the codebase — including anything material you are about to silently ' +
     'assume:\n' +
-    '1. Write {"questions":[{"id","question","options":[2-4 strings],"allowFreeText":true}]} ' +
+    '1. Write {"questions":[{"id","question","options":[2-4 strings],"allowFreeText":true,' +
+    '"confidence":[one integer 0-100 per option, summing to 100],"recommended":"<one option verbatim>"}]} ' +
     `(max 8 questions) to: ${ctx.questionsFile}\n` +
+    '   `confidence` is how likely you think each option is the right one; `recommended` is your pick. ' +
+    'Both are optional but strongly preferred: they let an unattended run decide for the user.\n' +
     '2. STOP immediately — do no further work. You will be resumed with the answers.\n' +
     'Assume freely on minor choices; on material ones, ask instead of assuming. Never pad, ' +
     'and never re-ask an answered question.\n\n' +
@@ -654,6 +657,12 @@ export function workspaceWriteTargetsFor(ctx) {
 /** Map the orchestrator's claudeOpts into runClaude options shared by every role. */
 export function runOpts(ctx, { role, prompt, systemPrompt, allowedTools }) {
   const c = ctx.claudeOpts || {};
+  // MCP registry (design §6.1): the copies' secret env joins the fan-out env, and the tools
+  // withheld for the run's tool-name limit join the bridge's. Both stay undefined without a
+  // registry layer, so every other spawn is byte-identical.
+  const fanEnv = fanOutSpawnEnv(ctx);
+  const mcpEnv = ctx.mcpEnv && Object.keys(ctx.mcpEnv).length ? ctx.mcpEnv : null;
+  const excluded = bridgedModelInfo(c.model)?.excludeTools;
   return {
     cwd: ctx.projectDir,
     systemPrompt,
@@ -698,11 +707,13 @@ export function runOpts(ctx, { role, prompt, systemPrompt, allowedTools }) {
     // tasks off on the scan's two fan-out nodes (so the cap holds there), merged OVER the guardrail env
     // and UNDER modelEnv. undefined for every non-fan-out node ⇒ nothing merged ⇒ that spawn env is
     // byte-identical.
-    spawnEnv: fanOutSpawnEnv(ctx),
+    spawnEnv: fanEnv || mcpEnv ? { ...fanEnv, ...mcpEnv } : undefined,
+    // MCP registry (§5.5.3): every registry secret value is redacted from what the run records.
+    redactValues: ctx.mcpRedact?.length ? ctx.mcpRedact : undefined,
     // Model bridge (model-bridge-design.md §5.3): a translated model has no
     // server-side web tools, so the runner withholds them. undefined for every
     // non-bridged model ⇒ nothing emitted ⇒ argv byte-identical.
-    disallowedTools: bridgedModelInfo(c.model)?.excludeTools,
+    disallowedTools: ctx.mcpDisallowed?.length ? [...(excluded || []), ...ctx.mcpDisallowed] : excluded,
     // Agent memory (§4.3): Task-tool sub-agents inherit the rules natively but not
     // --append-system-prompt, so the pointer block rides the sub-agent flag. undefined when the
     // run has no mount ⇒ buildClaudeArgs emits nothing and legacy argv stays byte-identical.

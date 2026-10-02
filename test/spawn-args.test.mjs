@@ -298,6 +298,59 @@ test('runClaude mock path is unaffected by permissionRules (no spawn, no error)'
   assert.equal(r.exitCode, 0);
 });
 
+// ── MCP registry §5.5.3: redactValues, forwarded through the runClaude gate ───
+
+/** A fake `claude` that prints a secret on stdout (an assistant event, then the result) and on stderr. */
+async function fakeLeakBin(dir, exitCode) {
+  const bin = join(dir, `fake-claude-leak-${exitCode}.sh`);
+  await writeFile(bin, '#!/bin/sh\n'
+    + `echo '{"type":"assistant","message":{"content":[{"type":"text","text":"key s3cret-value-123"}]}}'\n`
+    + "echo 'stderr s3cret-value-123' >&2\n"
+    // A failure's detail keeps stderr's last 2000 chars: 1990 more put that cut inside the secret.
+    + (exitCode ? `echo '${'p'.repeat(1990)}' >&2\n` : `echo '{"type":"result","result":"done s3cret-value-123"}'\n`)
+    + `exit ${exitCode}\n`, 'utf8');
+  await chmod(bin, 0o755);
+  return bin;
+}
+
+test('runClaude FORWARDS redactValues: every event, the result text and the error message are redacted', POSIX_SHIM, async () => {
+  const dir = await tmp();
+  const prevMock = process.env.WORCA_MOCK;
+  delete process.env.WORCA_MOCK;
+  const events = [];
+  const onEvent = (e) => events.push(e);
+  // no 8-char piece of the secret either: a cut that splits a value leaves a piece no value matches
+  const partial = (s) => [...Array(9).keys()].some((i) => String(s).includes('s3cret-value-123'.slice(i, i + 8)));
+  try {
+    const ok = await runClaude({ cwd: dir, bin: await fakeLeakBin(dir, 0), prompt: 'p', redactValues: ['s3cret-value-123'], onEvent });
+    assert.equal(ok.text, 'done [redacted]');
+    await assert.rejects(runClaude({ cwd: dir, bin: await fakeLeakBin(dir, 3), prompt: 'p', redactValues: ['s3cret-value-123'], onEvent }),
+      (err) => /exited with code 3/.test(err.message) && !partial(err.message) && !partial(err.stack));
+    // Past 8000 chars the stderr buffer keeps its last 4000, which can cut a secret in two; with the lines after it
+    // benign (left out of the detail), that piece would be the whole detail.
+    const trimBin = join(dir, 'fake-claude-leak-trim.sh');
+    await writeFile(trimBin, `#!/bin/sh\necho '${'p'.repeat(4100)}' >&2\necho 'stderr s3cret-value-123' >&2\n`
+      + `echo '[claude-code:unrecognized_model] ${'q'.repeat(3951)}' >&2\nexit 5\n`, 'utf8');
+    await chmod(trimBin, 0o755);
+    await assert.rejects(runClaude({ cwd: dir, bin: trimBin, prompt: 'p', redactValues: ['s3cret-value-123'], onEvent }),
+      (err) => /exited with code 5/.test(err.message) && !partial(err.message) && !partial(err.stack));
+    // A stdout-borne detail (the result envelope of a failed run) takes the same 2000-char tail cut.
+    const resultBin = join(dir, 'fake-claude-leak-result.sh');
+    await writeFile(resultBin, `#!/bin/sh\necho '{"type":"result","is_error":true,"result":"err s3cret-value-123${'p'.repeat(1986)}"}'\nexit 6\n`, 'utf8');
+    await chmod(resultBin, 0o755);
+    await assert.rejects(runClaude({ cwd: dir, bin: resultBin, prompt: 'p', redactValues: ['s3cret-value-123'], onEvent }),
+      (err) => /exited with code 6/.test(err.message) && !partial(err.message) && !partial(err.stack));
+    // A spawn that fails before any output names its bin in the message: only rejectP's own redaction covers that.
+    await assert.rejects(runClaude({ cwd: dir, bin: join(dir, 'no-claude-s3cret-value-123'), prompt: 'p', redactValues: ['s3cret-value-123'], onEvent }),
+      (err) => /ENOENT/.test(err.message) && !partial(err.message) && !partial(err.stack));
+    const plain = await runClaude({ cwd: dir, bin: await fakeLeakBin(dir, 0), prompt: 'p' });
+    assert.equal(plain.text, 'done s3cret-value-123', 'absent ⇒ nothing is redacted');
+  } finally {
+    if (prevMock === undefined) delete process.env.WORCA_MOCK; else process.env.WORCA_MOCK = prevMock;
+  }
+  assert.ok(events.some((e) => e.type === 'stderr') && events.some((e) => e.type === 'assistant'));
+  assert.ok(!JSON.stringify(events).includes('s3cret-value-123'));
+});
 // ── guardrails: env scrub ────────────────────────────────────────────────────
 import { buildSpawnEnv } from '../src/core/claude-runner.mjs';
 

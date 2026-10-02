@@ -104,6 +104,8 @@ test('Ask threads: owned by their creator; others get 404; "delete all" deletes 
   assert.equal((await req('GET', `/api/ask/threads/${g.id}`, null, 'ada@example.com')).status, 404);
   assert.equal((await req('PATCH', `/api/ask/threads/${g.id}`, { title: 'mine now' }, 'ada@example.com')).status, 404);
   assert.equal((await req('DELETE', `/api/ask/threads/${g.id}`, null, 'ada@example.com')).status, 404);
+  assert.equal((await req('POST', '/api/ask/mcp-preview', { threadId: g.id, context: {} }, 'grace@example.com')).status, 200);
+  assert.equal((await req('POST', '/api/ask/mcp-preview', { threadId: g.id, context: {} }, 'ada@example.com')).status, 404, 'the MCP picker preview reads a thread too');
   assert.equal((await req('GET', `/api/ask/threads/${g.id}`, null, 'grace@example.com')).status, 200);
   const cleared = (await req('DELETE', '/api/ask/threads', null, 'ada@example.com')).body;
   assert.equal(cleared.removed.threads, 1);

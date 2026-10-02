@@ -30,11 +30,13 @@ import { defaultCommentDeps } from './comment-deps.mjs';
 import { defaultWorkflowDeps } from './workflow-deps.mjs';
 import { defaultMetricsDeps } from './metrics-deps.mjs';
 import { defaultPolicyDeps } from './policy-deps.mjs';
+import { defaultAwayDeps } from './away-deps.mjs';
 import { defaultScheduleDeps } from './schedule-deps.mjs';
 import { defaultSourceDeps } from './source-deps.mjs';
 import { defaultModelDeps } from './model-deps.mjs';
 import { defaultCloneDeps } from './clone-deps.mjs';
 import { defaultWorkspaceDeps } from './workspace-deps.mjs';
+import { defaultActionsDeps } from './actions-deps.mjs';
 import { defaultWebDeps } from './web-deps.mjs';
 import { defaultBranchDeps } from './branch-deps.mjs';
 
@@ -72,11 +74,14 @@ export function createAskToolServer({ threadId, reader = null, signal, write, lo
       ...defaultWorkflowDeps({ threadId, signal }),
       ...defaultMetricsDeps({ threadId }),
       ...defaultPolicyDeps({ threadId }),
+      ...defaultAwayDeps(),
       ...defaultScheduleDeps({ threadId, reader }),
       ...defaultSourceDeps(),
       ...defaultModelDeps({ threadId }),
       ...defaultCloneDeps(),
       ...defaultWorkspaceDeps(),
+      // Actions (docs/actions.md "Ask Worca"): read the config, checkouts and running services; propose config.
+      ...defaultActionsDeps(),
       // Branch reads + fetch-only (#527): list_branches, list_projects.sync, get_run.baseMoved.
       ...defaultBranchDeps(),
       // Web access: present only when this turn's env carries WORCA_ASK_WEB (web-deps.mjs) — the
@@ -192,6 +197,9 @@ export function createRpcServer({ tools, write, log = (s) => process.stderr.writ
 }
 
 export async function main({ argv = process.argv.slice(2), env = process.env, stdin = process.stdin, stdout = process.stdout } = {}) {
+  // MCP registry §5.5.2: the CLI hands this child every registry copy's secret (MCPSECRET_*); worca's own tools,
+  // the scripts test_script runs in-process and their nested spawns get none of them.
+  for (const e of new Set([process.env, env])) for (const k of Object.keys(e)) if (/^MCPSECRET_/i.test(k)) delete e[k];
   const { home, thread, relay } = parseArgv(argv);
   if (relay) {
     return relayMain({ url: relay, token: String(env.WORCA_ASK_RELAY_TOKEN || ''), stdin, stdout });

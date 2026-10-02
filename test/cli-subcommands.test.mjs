@@ -84,22 +84,25 @@ test('add uses cwd basename as default name', async () => {
 
 test('add accepts explicit name and --path', async () => {
   const home = await freshHome();
-  const r = await run(['add', 'demo', '--path', '/tmp/nope-explicit'], { home });
+  // A not-yet-existing path under a fresh dir: add accepts it, and nothing else can own it.
+  const path = join(await freshProj(), 'nope-explicit');
+  const r = await run(['add', 'demo', '--path', path], { home });
   assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, new RegExp(`Added project "demo" -> ${reEsc(resolve('/tmp/nope-explicit'))}`));
+  assert.match(r.stdout, new RegExp(`Added project "demo" -> ${reEsc(path)}`));
 });
 
 test('add supports --path=<dir> form', async () => {
   const home = await freshHome();
-  const r = await run(['add', 'demo', '--path=/tmp/nope-inline'], { home });
+  const path = join(await freshProj(), 'nope-inline');
+  const r = await run(['add', 'demo', `--path=${path}`], { home });
   assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, new RegExp(`-> ${reEsc(resolve('/tmp/nope-inline'))}`));
+  assert.match(r.stdout, new RegExp(`-> ${reEsc(path)}`));
 });
 
 test('add expands a leading ~ in --path using HOME', async () => {
   const home = await freshHome();
   // Force a known HOME for the spawned CLI so we can predict the expansion.
-  const fakeHome = '/tmp/worca-cc-fake-home';
+  const fakeHome = join(await freshProj(), 'fake-home');
   const r = await run(['add', 'demo', '--path=~/sub/dir'], { home, extraEnv: { HOME: fakeHome } });
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, new RegExp(`-> ${reEsc(resolve(fakeHome, 'sub', 'dir'))}`));
@@ -121,8 +124,9 @@ test('add rejects unknown flag (exit 2)', async () => {
 
 test('duplicate add exits 1 with stderr message', async () => {
   const home = await freshHome();
-  await run(['add', 'demo', '--path', '/tmp/x'], { home });
-  const r = await run(['add', 'demo', '--path', '/tmp/y'], { home });
+  const first = await run(['add', 'demo', '--path', await freshProj()], { home });
+  assert.equal(first.code, 0, first.stderr);
+  const r = await run(['add', 'demo', '--path', await freshProj()], { home });
   assert.equal(r.code, 1);
   assert.match(r.stderr, /already exists/);
 });
@@ -159,7 +163,8 @@ test('remove on unknown name exits 1', async () => {
 
 test('remove drops the entry, exits 0', async () => {
   const home = await freshHome();
-  await run(['add', 'demo', '--path', '/tmp/x'], { home });
+  const added = await run(['add', 'demo', '--path', await freshProj()], { home });
+  assert.equal(added.code, 0, added.stderr);
   const r = await run(['remove', 'demo'], { home });
   assert.equal(r.code, 0);
   assert.match(r.stdout, /Removed project "demo"/);

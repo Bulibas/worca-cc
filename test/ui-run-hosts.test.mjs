@@ -2,7 +2,7 @@
 // P6a — the DOM half of the run monitor: the view's decor fast paths (consumer-side
 // pins of P5's contract), the run-monitor CSS block, applyDecor, the host adapters
 // and the app.js version arms. (The artifact routes live in test/api-run-artifact.test.mjs.)
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -26,7 +26,7 @@ const MANIFEST = {
 };
 
 function mountView(mode = 'monitor') {
-  const dom = new JSDOM('<!doctype html><div id="h" style="width:800px;height:400px"></div>');
+  const dom = trackDom(new JSDOM('<!doctype html><div id="h" style="width:800px;height:400px"></div>'));
   const { window } = dom;
   const host = window.document.getElementById('h');
   const view = createGraphView(host, {
@@ -312,7 +312,7 @@ test('the stacked-row / wrapped-fan CSS exists and keeps every height on the --g
 import { mountRunGraph, STATIC_HOST_H, HINT_TEXT } from '../ui/public/graph/run-hosts.mjs';
 
 function mountHost(mode, w = 800) {
-  const dom = new JSDOM('<!doctype html><div class="run-flow-wrap"><div class="run-flow"></div></div>');
+  const dom = trackDom(new JSDOM('<!doctype html><div class="run-flow-wrap"><div class="run-flow"></div></div>'));
   const { window } = dom;
   const wrap = window.document.querySelector('.run-flow-wrap');
   const host = window.document.querySelector('.run-flow');
@@ -597,7 +597,7 @@ test('destroy() unbinds everything and gives the host and the wrap back untouche
 // so view.readRect() returns the host's own box). The constant viewport above
 // cannot see the oscillation this pins.
 function mountLiveWidthHost(w = 800) {
-  const dom = new JSDOM('<!doctype html><div class="run-flow-wrap"><div class="run-flow"></div></div>');
+  const dom = trackDom(new JSDOM('<!doctype html><div class="run-flow-wrap"><div class="run-flow"></div></div>'));
   const { window } = dom;
   const host = window.document.querySelector('.run-flow');
   const m = mountRunGraph(host, { mode: 'static', doc: window.document, raf: (fn) => { fn(); return 1; },
@@ -624,7 +624,7 @@ test('a hidden host (0×0) is never fitted — on EITHER host — and the first 
   // `display:none` (compact density, a closed detail screen) measures 0×0 in
   // every engine; jsdom's injected viewport says the same.
   const hidden = (mode) => {
-    const dom = new JSDOM('<!doctype html><div class="run-flow-wrap"><div class="run-flow"></div></div>');
+    const dom = trackDom(new JSDOM('<!doctype html><div class="run-flow-wrap"><div class="run-flow"></div></div>'));
     const { window } = dom;
     const wrap = window.document.querySelector('.run-flow-wrap');
     const host = window.document.querySelector('.run-flow');
@@ -672,7 +672,7 @@ test('destroy() re-arms bind(): a re-mounted host delegates clicks again', () =>
 async function bootApp() {
   const htmlPath2 = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
   const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
-  const dom = new JSDOM(readFileSync(htmlPath2, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath2, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
@@ -1208,6 +1208,10 @@ test('a log-line artifact click carries its kind, so an extension-less plan rend
 
 // ── the focus host (the glance's Live view) ───────────────────────────────────
 import { focusNodeIds, FOCUS_PAD, FOCUS_CLEAR } from '../ui/public/graph/run-hosts.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 // Four agents in a row, 300px apart: far wider than a 600px panel at 1×.
 const LINE = {
@@ -1225,7 +1229,7 @@ const running = (...ids) => ({
 });
 
 function mountFocus(w = 600, h = 400) {
-  const dom = new JSDOM('<!doctype html><div class="run-flow-wrap"><div class="run-flow"></div></div>');
+  const dom = trackDom(new JSDOM('<!doctype html><div class="run-flow-wrap"><div class="run-flow"></div></div>'));
   const { window } = dom;
   const wrap = window.document.querySelector('.run-flow-wrap');
   const host = window.document.querySelector('.run-flow');

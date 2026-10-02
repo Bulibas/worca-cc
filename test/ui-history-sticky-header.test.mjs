@@ -1,9 +1,13 @@
 // test/ui-history-sticky-header.test.mjs
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -27,7 +31,7 @@ test('the Started-by pills are one static row above the list scroller; they no l
   assert.match(body, /flex-wrap:\s*nowrap/, 'one row of pills');
   assert.match(body, /overflow-x:\s*auto/, 'that scrolls sideways instead of wrapping (D4)');
   // Static is right only because the row is outside the scrolling list.
-  const doc = new JSDOM(readFileSync(htmlPath, 'utf8')).window.document;
+  const doc = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'))).window.document;
   const pills = doc.getElementById('historyFilter');
   assert.ok(pills.classList.contains('runs-people'));
   assert.equal(pills.closest('#runs-list'), null, 'the pill row is not inside #runs-list');
@@ -65,7 +69,7 @@ const histResp = (pipelines, ghAvailable = false) =>
   Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines, ghAvailable }) });
 
 async function boot({ fetchHandler, local } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };

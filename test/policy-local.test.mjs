@@ -97,3 +97,15 @@ test('marketplace seeding: added once, remembered, a removal is not undone; fail
   assert.deepEqual(await seedPolicyMarketplaces(homes(), { add }), []);
   assert.equal(calls.length, 2);
 });
+
+test('localSnapshot: night.* rows carry the developer layers only', async () => {
+  const { setNightMode } = await import('../src/core/settings.mjs');
+  let s = localSnapshot(null);
+  assert.deepEqual(s['night.enabled'], { value: false, set: false });
+  await setNightMode({ enabled: true, maxDecisions: 7 });
+  s = localSnapshot(null);
+  assert.deepEqual(s['night.enabled'], { value: true, set: true });
+  assert.deepEqual(s['night.maxDecisions'], { value: 7, set: true });
+  assert.equal(Object.keys(s).filter((k) => k.startsWith('night.')).length, 13);
+  await setNightMode(null);
+});

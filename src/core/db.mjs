@@ -58,7 +58,7 @@ const OPEN_BACKOFF_MS = 15;
 /** Latest schema version. Bump + append a new migration step when the DDL grows.
  *  Exported so migration tests assert "reached the module's current version"
  *  instead of hardcoding the number — a schema bump then touches no test file. */
-export const SCHEMA_VERSION = 44;
+export const SCHEMA_VERSION = 48;
 
 /** Absolute path to the database file: <worcaHome>/worca-cc.db. */
 export function dbPath() {
@@ -855,13 +855,16 @@ const INCREMENTAL_COLUMNS = {
   project_config:         { human_in_loop: 'INTEGER NOT NULL DEFAULT 1' },   // v28: the Auto entry's human-in-the-loop switch
   diff_comments:          { parent_id: 'TEXT REFERENCES diff_comments(id) ON DELETE CASCADE',  // v29: reply threads; NULL = thread root
                             author_name: 'TEXT' },   // v37: who wrote it (identity.mjs actor); NULL = before attribution / Ask
-  ask_threads:            { created_by: 'TEXT' },    // v37: the thread's owner (identity.mjs actor); NULL = ownerless (legacy)
+  ask_threads:            { created_by: 'TEXT',      // v37: the thread's owner (identity.mjs actor); NULL = ownerless (legacy)
+                            mcp_off: 'TEXT',         // v45: JSON {sets, members} the chat's MCP picker switched off; NULL = none
+                            contexts: 'TEXT' },      // v46: JSON [{kind,id,label,home?,pinned?,source?}] the chat was asked in / talked about, origin first; NULL = before v46 (no indicator)
   pipeline_events:        { actor: 'TEXT' },         // v38: who did it (identity.mjs actor); NULL = the run itself / before attribution
   workspaces:             { metrics_project: 'TEXT',    // v30: team-metrics home (member absolute path); NULL = no home
                             policy_project: 'TEXT',     // v32: team-policy home (member absolute path); NULL = no home
                             map_json: 'TEXT',           // v40: the last scan's { map, synthesis } (workspace map); NULL = none yet
                             map_overrides_json: 'TEXT', // v40: confirm / reject / manual edge overrides; NULL = none
-                            description_origin: 'TEXT' },   // v40: 'generated' | 'edited'; NULL = before v40
+                            description_origin: 'TEXT',     // v40: 'generated' | 'edited'; NULL = before v40
+                            actions_json: 'TEXT' },         // v47: stack actions { stacks:[…] } (issue #529); NULL = none
   schedules:              { ask_thread_id: 'TEXT', ask_card_id: 'TEXT',   // v31: the Ask Worca card a series came from
                             created_by: 'TEXT', updated_by: 'TEXT' },   // v39: who made / last changed it (identity.mjs actor)
   scheduled_runs:         { after_kind: 'TEXT', after_id: 'TEXT', after_policy: "TEXT NOT NULL DEFAULT 'done'",
@@ -904,6 +907,22 @@ CREATE TABLE IF NOT EXISTS notification_reads (
 );
 `;
 
+/** night_decisions (v48): one row per ask Away mode answered (src/core/night/*).
+ *  `record` is the JSON decision record {choice, strategy, confidence, scores, rationale,
+ *  reversible, flagged, questions?, guardrail?, meta?}. Pipelines are soft-deleted, so the
+ *  cascade only matters for test DBs. */
+const NIGHT_DECISIONS_DDL = `
+CREATE TABLE IF NOT EXISTS night_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pipeline_id TEXT NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+  question_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  record TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_night_decisions_pipeline ON night_decisions(pipeline_id, id);
+`;
+
 const INCREMENTAL_TABLES = {
   config_workflow_wires: CONFIG_WORKFLOW_WIRES_DDL,
   step_questions:    STEP_QUESTIONS_DDL,
@@ -923,6 +942,7 @@ const INCREMENTAL_TABLES = {
   scheduled_runs:    SCHEDULED_RUNS_DDL,
   notifications:     SCHEDULED_RUNS_DDL,
   notification_reads: NOTIFICATION_READS_DDL,
+  night_decisions:   NIGHT_DECISIONS_DDL,
 };
 
 /**
@@ -1496,6 +1516,22 @@ function applySchemaV44(db) {
   repairSchemaGaps(db, schemaGaps(db));
 }
 
+/** v45 (MCP registry §9.4): ask_threads.mcp_off — the per-chat MCP picker's switched-off sets and
+ *  memberships (JSON), a plain additive column declared in INCREMENTAL_COLUMNS, applySchemaV30's
+ *  shape. NULL on every existing row = nothing switched off. Same body as v44: a DB stamped 44 by
+ *  either side (scheduled resume on dev, this column on the MCP branch) gets the other column here. */
+function applySchemaV45(db) {
+  repairSchemaGaps(db, schemaGaps(db));
+}
+
+/** v48 (Away mode): night_decisions (INCREMENTAL_TABLES), one row per ask Away mode answered.
+ *  v46 is the Ask context chips' column, v47 the workspace actions'. A DB stamped 44, 46 or 47 by an
+ *  earlier build of the Away mode branch (night_decisions at v44, v46, then v47) already has the
+ *  table (IF NOT EXISTS) and gets the columns it skipped from the gap repair above. */
+function applySchemaV48(db) {
+  db.exec(NIGHT_DECISIONS_DDL);
+}
+
 /** Move every stored pin on model id `from` (lower-case) to `to`. Each table
  *  is guarded like V24's: hand-seeded upgrade fixtures (and a DB from before the
  *  fs->db import) reach this step without some of them. */
@@ -1920,6 +1956,11 @@ export function migrate(db) {
     if (current < SCHEMA_VERSION) refreshPresentationSeed(db);
     if (current < 42) applySchemaV42(db);            // deck subresources -> the unlisted deck-asset kind
     if (current < 44) applySchemaV44(db);            // scheduled resume: scheduled_runs.resume_pipeline_id
+    if (current < 45) applySchemaV45(db);            // MCP registry: ask_threads.mcp_off (per-chat picker)
+    // v46 (Ask context chips): ask_threads.contexts, an INCREMENTAL_COLUMNS entry the hoisted
+    // repairSchemaGaps above adds — no step of its own. NULL on every existing thread = no indicator.
+    // (v47: workspaces.actions_json arrives through the same repair — additive column only, issue #529.)
+    if (current < 48) applySchemaV48(db);            // Away mode: one row per answered ask
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {

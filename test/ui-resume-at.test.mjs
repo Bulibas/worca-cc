@@ -11,6 +11,10 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -27,7 +31,7 @@ async function boot({ fetchHandler, level } = {}) {
   let html = readFileSync(htmlPath, 'utf8');
   if (level) html = html.replace('<html lang="en" data-theme="system">',
     `<html lang="en" data-theme="system" data-level="${level}">`);
-  const dom = new JSDOM(html, { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(html, { url: 'http://localhost:4317/' }));
   live.push(dom);
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
@@ -92,9 +96,11 @@ async function confirmSheet(ctx) {
   const missed = modal.querySelector('#sched-missed');
   assert.equal(missed.value, 'skip', 'missed policy is pre-selected to Skip');
   assert.equal(missed.disabled, false, 'the user may still pick "Start it late"');
+  // Tomorrow in LOCAL time: the sheet reads date + time in the browser's zone, and a UTC
+  // date is still today's local date past midnight east of UTC, putting 02:00 in the past.
   const d = new Date(Date.now() + 86400000);
   const dateIn = modal.querySelector('#sched-date');
-  dateIn.value = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  dateIn.value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   dateIn.dispatchEvent(new window.Event('input', { bubbles: true }));
   const timeIn = modal.querySelector('#sched-time');
   timeIn.value = '02:00';
@@ -280,17 +286,20 @@ test('run page: a cap pause keeps the caret but disables "Resume at…"', async 
   assert.equal(ctx.doc.querySelector('.rd-resume-at').disabled, true);
 });
 
-test('History glance: the Resume CTA is a split whose "Resume at…" posts', async () => {
+test('History glance: the bar carries the Resume split, whose "Resume at…" posts', async () => {
   const ctx = await boot({ level: 'advanced', fetchHandler: histFetch() });
   ctx.go(`history/${KEY}/fcec04e8`);
   await ctx.settle(8);
-  const split = ctx.doc.querySelector('.hd-g-resume-split');
-  assert.ok(split, 'the glance Resume is wrapped in a split');
-  assert.ok(split.querySelector('.hd-g-resume'), 'the Resume CTA is its left half');
-  split.querySelector('.hd-g-resume-more').click();
+  assert.equal(ctx.doc.querySelector('#hist-detail .hd').dataset.mode, 'glance');
+  const split = ctx.doc.querySelector('#hist-detail .hd-bar .rd-bar-end .hd-resume-split');
+  assert.ok(split, 'the Resume split sits in the bar, shared by both modes');
+  assert.equal(split.hidden, false);
+  assert.equal(split.querySelector('.hd-resume').hidden, false, 'Resume is its left half');
+  assert.equal(ctx.doc.querySelector('#hist-detail [class*="hd-g-resume"]'), null, 'the card carries no Resume of its own');
+  split.querySelector('.hd-resume-more').click();
   await ctx.settle();
-  assert.equal(split.querySelector('.hd-g-resume-menu').hidden, false, 'caret opens the menu');
-  split.querySelector('.hd-g-resume-at').click();
+  assert.equal(split.querySelector('.hd-resume-menu').hidden, false, 'caret opens the menu');
+  split.querySelector('.hd-resume-at-item').click();
   await ctx.settle();
   await confirmSheet(ctx);
   const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/schedules/resume'));
@@ -298,16 +307,17 @@ test('History glance: the Resume CTA is a split whose "Resume at…" posts', asy
   assert.equal(JSON.parse(posts[0].opts.body).pipelineId, 'fcec04e8');
 });
 
-test('History glance: simple level keeps the plain Resume CTA; a cap pause disables the item', async () => {
+test('History glance: at simple level the bar\'s caret is the Advanced one; a cap pause disables the item', async () => {
   const ctx = await boot({ level: 'simple', fetchHandler: histFetch() });
   ctx.go(`history/${KEY}/fcec04e8`);
   await ctx.settle(8);
-  assert.ok(ctx.doc.querySelector('.hd-g-resume'), 'Resume CTA shown');
-  assert.equal(ctx.doc.querySelector('.hd-g-resume-split'), null, 'no caret at simple');
+  const bar = ctx.doc.querySelector('#hist-detail .hd-bar');
+  assert.equal(bar.querySelector('.hd-resume').hidden, false, 'Resume shown');
+  assert.equal(bar.querySelector('.hd-resume-more').getAttribute('data-min-level'), 'advanced', 'the CSS gate hides the caret at simple');
   const ctx2 = await boot({ level: 'advanced', fetchHandler: histFetch('cost_total') });
   ctx2.go(`history/${KEY}/fcec04e8`);
   await ctx2.settle(8);
-  assert.equal(ctx2.doc.querySelector('.hd-g-resume-at').disabled, true);
+  assert.equal(ctx2.doc.querySelector('#hist-detail .hd-bar .hd-resume-at-item').disabled, true);
 });
 
 test('a refused schedule surfaces its reason in the confirm modal', async () => {

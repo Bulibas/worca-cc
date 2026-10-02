@@ -2,25 +2,29 @@
 // Settings view: gray helper text lives in ⓘ info-tip tooltips, not visible hints.
 // Structure here; hover/focus behavior in the "behavior" tests added with the
 // app.js wiring (Task 2 of the settings-tooltips plan).
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const cssPath = fileURLToPath(new URL('../ui/public/style.css', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 
 const settingsView = () => {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   return dom.window.document.querySelector('.view[data-view="settings"]');
 };
 
-test('settings: twenty-two info-tip icons, each with non-empty tip content', () => {
+test('settings: twenty-six info-tip icons, each with non-empty tip content', () => {
   const view = settingsView();
   const tips = [...view.querySelectorAll('button.info-tip')];
-  assert.equal(tips.length, 22, 'twenty-two ⓘ icons (appearance, model credentials, interface mode, 2 folder fields, budget heading, 3 budget fields, ask heading, 2 ask fields, chat history, scheduled-runs heading + failures field, title generation, auto workflow model, PR description model, spawn diagnostics, workspace scan models, sync-before-run heading + diverged field)');
+  assert.equal(tips.length, 26, 'twenty-six ⓘ icons (appearance, model credentials, interface mode, 2 folder fields, budget heading, 3 budget fields, ask heading, 2 ask fields, chat history, Away mode heading, scheduled-runs heading + failures field, title generation, auto workflow model, PR description model, spawn diagnostics, workspace scan models, sync-before-run heading + diverged field, actions, editor and terminal commands)');
   for (const tip of tips) {
     assert.equal(tip.getAttribute('type'), 'button', 'icon must not submit anything');
     assert.match(tip.getAttribute('aria-label') || '', /^About /, 'icon names its setting');
@@ -87,7 +91,7 @@ test('style.css defines the info-tip icon and the floating bubble', () => {
 });
 
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };

@@ -53,3 +53,17 @@ test('snapshotFromHarness reads pipelines.policy_state and carries the auto flag
   const rec = buildRunRecord(s);
   assert.equal(rec.policy.reason, 'sprint end'); assert.equal(rec.policy.unattended, true);
 });
+
+test('night mode counters ride the policy object; a harness that decided at night marks the run unattended', async () => {
+  const rec = buildRunRecord(snap({ home: 'acme/gateway', unattended: true, night: { decisions: 3, flagged: 1 } }));
+  assert.deepEqual(rec.policy.night, { decisions: 3, flagged: 1 });
+  assert.equal(rec.policy.unattended, true);
+  assert.equal('night' in buildRunRecord(snap({ home: 'acme/gateway' })).policy, false, 'no night block on other runs');
+  const { id } = await seedPipeline(proj, { title: 'n', status: 'done' });
+  writePolicyState(id, { home: 'acme/gateway', sha: 'abc1234', night: { decisions: 2, flagged: 0 } });
+  const h = fakeHarness({ projectDir: proj, runId: id });
+  h.state = { ...(h.state || {}), night: { decisions: 2, flagged: 0 } };
+  const s = await snapshotFromHarness(h, { status: 'done' });
+  assert.equal(s.policy.unattended, true);
+  assert.deepEqual(buildRunRecord(s).policy.night, { decisions: 2, flagged: 0 });
+});

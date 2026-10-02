@@ -72,7 +72,7 @@ test('the Projects management view + modals exist in markup and are wired', () =
 // .gv-saved). The Projects card reuses those class names, so it silently lost its
 // layout: the bin button dropped under the path and the head no longer shared the
 // rows' left edge. The view must own these rules under its own scope.
-test('the projects card owns its row layout (bin button on the right, head aligned with rows)', () => {
+test('the projects card owns its row layout (one grid: project · sync · team · open; head aligned with rows)', () => {
   const css = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8');
   // Every declaration block whose selector list is exactly `#projects-list <cls>`,
   // joined — a rule scoped elsewhere (.gv-saved .pl-row) must not satisfy this.
@@ -81,9 +81,9 @@ test('the projects card owns its row layout (bin button on the right, head align
     return [...css.matchAll(new RegExp(`(?:^|[}\\n])\\s*${sel}\\s*\\{([^}]*)\\}`, 'g'))].map((m) => m[1]).join(';');
   };
   assert.match(rules('.saved-card'), /padding:\s*0\b/, 'card padding must be 0 so the head and rows share one left edge');
-  assert.match(rules('.pl-row'), /display:\s*flex/, 'row must be a flex row so the bin button sits on the right');
-  assert.match(rules('.pl-row'), /align-items:\s*center/, 'bin button centred on the row');
-  assert.match(rules('.pl-main'), /flex:\s*1/, '.pl-main must grow to push the bin button to the right edge');
+  assert.match(rules('.pl-row'), /display:\s*grid/, 'a row is one grid, so the sync bars line up down the list');
+  assert.match(rules('.pl-row'), /align-items:\s*center/, 'cells centred on the row');
+  assert.match(rules('.pl-main'), /grid-area:\s*proj/, '.pl-main is the project cell');
   assert.match(rules('.pl-item'), /border-bottom/, 'rows must be separated by a rule');
   assert.match(rules('.pl-name'), /font-weight:\s*600/, 'project name keeps its weight');
 });

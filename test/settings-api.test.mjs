@@ -146,7 +146,9 @@ test('every SETTINGS_POST_KEYS key is exempt from the legacy "no known key clear
       memoryDefrag: null,
       workspaceScan: null,
       schedule: {},
+      nightMode: {}, nightModeToggle: 'auto',
       sync: null,
+      actions: {},
     };
     for (const k of SETTINGS_POST_KEYS) {
       if (k === 'root') continue;

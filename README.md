@@ -152,6 +152,12 @@ and durations, the clarify Q&A, agent transcripts, and logs:
   worktree per member, one cross-project review verdict at the end. See
   [`docs/workspace-map.md`](docs/workspace-map.md).
 
+### Actions
+
+- **Try the result before you ship it** — check out a finished run's branch and run the
+  project's own commands (dev server, tests, a workspace stack) from Worca, with ports, a ready
+  check and live logs. See [`docs/actions.md`](docs/actions.md).
+
 ### Plugins & chat
 
 - **Plugin system with marketplaces** — plugins contribute task sources
@@ -159,7 +165,10 @@ and durations, the clarify Q&A, agent transcripts, and logs:
   templates, models, and chat channels. Install from a marketplace with an
   explicit consent ceremony (what's installed, which ask forms an agent can show
   and which file types they may display, which secrets are required, which setup
-  commands run); updates show a commit-level preview before you accept.
+  commands run); updates show a commit-level preview before you accept. The
+  built-in marketplace is worca's GitHub repository on its `dev` branch; set
+  `WORCA_BUILTIN_MARKETPLACE` to another repo URL or a local checkout to use
+  that instead (followed at its HEAD).
 - **Drive runs from chat** — bundled two-way **Telegram**, **Slack**,
   **Discord**, and **Microsoft Teams** channels: get notified on questions,
   finishes, failures, and cost pauses, and answer back with commands —
@@ -424,6 +433,7 @@ The skill starts the same deterministic orchestrator.
 
 - [Architecture](docs/ARCHITECTURE.md) — the whole stack in one picture
 - [Guardrails](docs/guardrails.md) — policy model, enforcement, limitations
+- [MCP servers](docs/mcp-servers.md) — worca's own MCP registry: catalog, sets, copies, secrets, Test
 - [Team metrics](docs/team-metrics.md) — git-backed, team-wide run records
 - [Team policy](docs/team-policy.md) — team-set cost caps, plugins, models and guardrails from a `worca-policy` branch
 - [Models](docs/models.md) — the catalog, providers (GitHub Copilot, OpenAI-compatible) and the built-in bridge
@@ -432,6 +442,7 @@ The skill starts the same deterministic orchestrator.
 - [Getting started](docs/getting-started.md) — the in-app checklist, welcome and spotlight guides
 - [Storage](docs/storage.md) — where state lives, project keys, migration
 - [Workspace map](docs/workspace-map.md) — how a workspace scan maps relations, reviewing them, measuring a scan
+- [Actions](docs/actions.md) — check out a finished run and run the project's commands from Worca
 - [Remote access](docs/remote-access.md) — opt-in, behind Cloudflare Access, with worca checking the token
 - [Deploy on Railway](docs/deploy-railway.md) — the container as a hosted service behind Cloudflare Access
 - [Releasing](docs/RELEASING.md) — how `@worca/app` versions are published

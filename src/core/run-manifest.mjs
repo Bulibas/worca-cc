@@ -20,7 +20,7 @@ import { join, resolve, sep, basename, dirname } from 'node:path';
 export const RUN_MANIFEST_FILE = 'run.json';
 
 /** Stable machine-readable reasons why a terminal run root must be retained. */
-export const RETAIN_REASONS = Object.freeze({ COMMIT_FAILED: 'commit_failed' });
+export const RETAIN_REASONS = Object.freeze({ COMMIT_FAILED: 'commit_failed', CHECKOUT: 'checkout' });
 
 /** Entries worca-cc itself owns at a run root. Anything else there is a STRAY (§8.11). */
 export const RUN_ROOT_KNOWN_SET = new Set(['CLAUDE.md', 'mcp.json', RUN_MANIFEST_FILE, '.claude', 'repos']);

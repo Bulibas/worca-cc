@@ -27,6 +27,7 @@ import {
   readRunLogText, readRunArtifactText, countPipelines, runRootSweepLookups, legacySweepLookups, slugify,
   listArtifacts, listRunArtifacts, lookupPipelineRow, findPipelineRowById, readPipelineStateById, resolveIndexedArtifact, resolveIndexedArtifactForRow,
   resolveIndexedArtifactFileForRow, readPromptFile, runDirForRow, recordArtifact, appendAudit,
+  checkoutRecordsFor, retainedWorkFor,
 } from '../src/core/artifacts.mjs';
 import { mimeForPath, viewerKindFor } from '../src/shared/artifact-kinds.mjs';
 import { appendDirection, DIRECTION_MAX_CHARS, DIRECTIONS_KIND, DIRECTIONS_FILE, DIRECTIONS_CLOSED } from '../src/core/directions.mjs';
@@ -60,14 +61,20 @@ import {
   memoryDefragModel, setMemoryDefragModel, assertMemoryDefragModelInput,
   workspaceScanModels, setWorkspaceScanModels, assertWorkspaceScanInput,
   scheduleDefaults, setScheduleDefaults,
+  nightModeSettings, setNightMode, nightModeToggle, nightModeHereSince, setNightModeToggle, assertNightModeToggleInput,
+  actionsSettings, setActionsSettings, assertActionsInput,
   syncDefaults, setSyncDefaults, assertSyncSettingsInput, DEFAULT_SYNC_SETTINGS,
 } from '../src/core/settings.mjs';
+import { resolveNightConfig, validateNightPatch } from '../src/core/night/config.mjs';
+import { effectiveNightConfig, nightLayers } from '../src/core/night/effective.mjs';
+import { readNightDecisions, nightAnsweredSince } from '../src/core/night/store.mjs';
+import { createAwayHoursWatch } from '../src/core/night/hours-watch.mjs';
 import { resolveDefragModel, defragDefaultModel, defragWorkflowView, checkStartPair } from '../src/core/memory-defrag-model.mjs';
 import { describeTitleModel } from '../src/core/title.mjs';
 import { effectiveHumanRateUsd } from '../src/core/human-rate.mjs';
 import {
   ASK_ID_RE, createThread as askCreateThread, getThread as askGetThread,
-  listThreads as askListThreads, updateThread as askUpdateThread,
+  listThreads as askListThreads, updateThread as askUpdateThread, addThreadContexts as askAddThreadContexts,
   deleteThread as askDeleteThread, sweepEmptyThreads, sweepStreamingMessages, sweepCloningCards,
   countThreads as askCountThreads, listThreadIds as askListThreadIds,
   countWorktrees as askCountWorktrees, countAttachments as askCountAttachments,
@@ -82,6 +89,7 @@ import {
 } from '../src/core/ask/store.mjs';
 import { sanitizeTitle as askSanitizeTitle } from '../src/core/title.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
+import { contextEntries as askContextEntries } from '../src/core/ask/contexts.mjs';
 import { askWebAccess, WEB_OFF } from '../src/core/ask/web-access.mjs';
 import { askCatalog, validateModelEffort } from '../src/core/ask/models.mjs';
 import { buildCatalog as askBuildCatalog } from '../src/core/ask/catalog.mjs';
@@ -101,6 +109,7 @@ import {
   sweepAskWorktrees,
 } from '../src/core/ask/worktrees.mjs';
 import { createAskTurn } from '../src/core/ask/turn.mjs';
+import { validateMcpOff, resolveAskMcp, askMcpPromptInput, askMcpPreview, askMcpJoinNotice } from '../src/core/ask/mcp.mjs';
 import { attachRunFollower } from '../src/core/ask/follow.mjs';
 import { mockEnabled, MOCK_WRITER_ROLES } from '../src/core/claude-runner.mjs';
 import { budgetStatus, readCostCapOverride, setCostCapOverride } from '../src/core/cost-budget.mjs';
@@ -117,21 +126,35 @@ import {
   policyEvents, discoverPolicy, discoverAllPolicies, resolveProjectPolicy, resolveWorkspacePolicy, enableTeamPolicy, publishPolicy,
   projectPolicyStatus, listPolicyScopes, routeWorkspaceMembersPolicy, startTeamPolicyBackground,
 } from '../src/core/policy/sync.mjs';
-import { deviationsFor, fieldsForRun, capSummary } from '../src/core/policy/effective.mjs';
-import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
+import { deviationsFor, fieldsForRun, capSummary, mcpDeviations } from '../src/core/policy/effective.mjs';
+import { resolveRegistry, cachedTeamFor, toolNameLimitFor, skipMessage, skipReasonText } from '../src/core/mcp/registry.mjs';
+import { MEMBERSHIP_KEY_RE } from '../src/core/mcp/definitions.mjs';
+import { loadCatalog } from '../src/core/mcp/catalog.mjs';
+import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, mcpRequirements, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
 import { normalizePolicyDoc } from '../src/core/policy/registry.mjs';
 import { checkTeamTotalGate, checkTeamPipelineGate, teamCapsForTarget } from '../src/core/policy/gate.mjs';
 import { readPolicyState } from '../src/core/policy/state.mjs';
+import { teamAction, teamForget } from '../src/core/mcp/team.mjs';
 import { policyForScope, policyPayload } from '../src/core/policy/scope.mjs';
 import { policyCatalogModels } from '../src/core/policy/cache.mjs';
-import { pickFolderNative } from '../src/core/folder-dialog.mjs';
+import { pickFolderNative, pickAppNative, nativeDialogAvailable } from '../src/core/folder-dialog.mjs';
 import {
   readRemoteAccessConfig, checkRemoteAccessConfig, isRemoteMode, createHostGuard, createIdentityCheck, isInContainer,
+  isPeerThisMachine,
 } from '../src/core/remote-access.mjs';
 import { detectDeployment, deploymentFacts } from '../src/core/deployment.mjs';
 import { resolveIdentity, startedByOf, prAttributionFooter, actorOf, isSharedIdentity, byActor } from '../src/core/identity.mjs';
 import { withBillTo, currentBillTo, currentOwner } from '../src/core/billing.mjs';
 import { agentIdentity } from '../src/core/agent-user.mjs';
+import { spawn } from 'node:child_process';
+import { ActionRegistry, instanceIdFor, reapOrphans, busyRunIdsFromPidFile, actionsPidFile, actionsStateFile } from '../src/core/actions/registry.mjs';
+import { runStack, stopStack } from '../src/core/actions/stack.mjs';
+import { detectBuiltins, builtinLaunch, copyCommandText, findOnPath } from '../src/core/actions/builtins.mjs';
+import { buildLauncherCommand, launchAndWatch, installedLaunchers, launcherExamples, launcherWarning, lineForPickedApp } from '../src/core/actions/launcher.mjs';
+import { assertNoRawCommand, normalizeStacks, memberAliases, SETUP_ACTION_ID, ActionConfigError } from '../src/core/actions/model.mjs';
+import { parsePortRange } from '../src/core/actions/ports.mjs';
+import { checkoutRun, discardCheckout, membersOfRow, checkoutPathFor, setSetupState, markInterruptedSetups,
+  enforceCheckoutCap, releaseKeptCheckouts } from '../src/core/checkout.mjs';
 import { createAskToolServer } from '../src/core/ask/mcp-stdio.mjs';
 import { webMcpEnv as askWebMcpEnv } from '../src/core/ask/spawn.mjs';
 import { brokerEnabled, brokerInfo, personSlots, brokerUsageSummary, foldUsageByPerson } from '../src/core/broker-client.mjs';
@@ -147,6 +170,8 @@ import {
   readRunConfig, setNodeModel, setFeedbackCycles, setWireCycles, setActiveWorkflow, setHumanInLoop, resetWorkflowConfig,
   globalModelRefs, removeGlobalModelAndRefs, promoteCustomModel, costUnreliableModelIds,
   readPrRemotePrefs, setPrRemotePrefs, modelHasBaseUrlRouting, writeSyncPrefs, readSyncPrefs,
+  readNightModePrefs, writeNightModePrefs,
+  readProjectActions, writeProjectActions, readActionsMeta, writeActionsMeta,
 } from '../src/core/config.mjs';
 import { listGlobalModels, addGlobalModel, updateGlobalModel } from '../src/core/settings.mjs';
 import { modelEnvRef, maskModelEnvValue, SUBAGENT_MODEL_VALUES, subagentModelIssue, UPSTREAM_PROVIDERS } from '../src/core/model-env.mjs';
@@ -180,6 +205,8 @@ import {
 import { applyMetricsChange } from '../src/core/ask/metrics-deps.mjs';
 import { metricsEventPrompt, metricsNoticeText } from '../src/core/ask/metrics-proposal.mjs';
 import { applyPolicyChange } from '../src/core/ask/policy-deps.mjs';
+import { createAwaySwitch, applyAwayChange } from '../src/core/ask/away-deps.mjs';
+import { awayEventPrompt, awayNoticeText } from '../src/core/ask/away-proposal.mjs';
 import { policyEventPrompt, policyNoticeText } from '../src/core/ask/policy-proposal.mjs';
 import { scheduleEventPrompt, scheduleNoticeText } from '../src/core/ask/schedule-spec.mjs';
 import { applyModelChange } from '../src/core/ask/model-deps.mjs';
@@ -187,6 +214,8 @@ import { modelEventPrompt, modelNoticeText } from '../src/core/ask/model-proposa
 import { cloneEventPrompt, cloneNoticeText } from '../src/core/ask/clone-proposal.mjs';
 import { workspaceEventPrompt, workspaceNoticeText } from '../src/core/ask/workspace-proposal.mjs';
 import { applyWorkspaceChange } from '../src/core/ask/workspace-deps.mjs';
+import { actionsEventPrompt, actionsNoticeText } from '../src/core/ask/actions-proposal.mjs';
+import { applyActionsChange } from '../src/core/ask/actions-deps.mjs';
 import { webEventPrompt, webNoticeText, chatWebHosts } from '../src/core/ask/web-proposal.mjs';
 import { hostAllowed as askHostAllowed } from '../src/core/web-allowlist.mjs';
 import { registryPortsFn } from '../src/core/graph/registry-ports.mjs';
@@ -199,7 +228,7 @@ import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
 import { loadScriptRegistry } from '../src/core/script-registry.mjs';
 import { probePython, pythonRuntimeState } from '../src/core/graph/python-probe.mjs';
 import {
-  listLocalBranches, currentBranch, isValidSourceRef, sweepRunRoots, sweepLegacyWorktreesAll, resolveDefaultBranch,
+  listLocalBranches, currentBranch, isValidSourceRef, sweepRunRoots, sweepLegacyWorktreesAll, resolveDefaultBranch, worktreePathForBranch,
 } from '../src/core/worktree.mjs';
 import {
   fetchRemote, remoteInfo, syncStatus, resolveSourceRef, commitsBetween, isSafeBranchName, isSafeRemoteName, scrubGitText,
@@ -209,14 +238,14 @@ import {
   projectSyncBlock, workspaceSyncBlocks, effectiveSyncSettings, projectSyncEvents, startProjectSyncBackground,
 } from '../src/core/project-sync.mjs';
 import { mapWithCap, fanoutCap } from '../src/core/fanout.mjs';
-import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, listRemoteBranches, sameRepo } from '../src/core/git-info.mjs';
+import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, listRemoteBranches, sameRepo, branchPushedTo } from '../src/core/git-info.mjs';
 import { isSyntacticRef } from '../src/core/ask/proposal.mjs';
 import { archivePipeline, discardRetainedWorktrees } from '../src/core/pipeline-delete.mjs';
 import {
   listWorkspaces, readWorkspace, checkNewWorkspace, scanMemberProblems,
   updateWorkspace, deleteWorkspace, isGitRepo, WORKSPACE_KEY_RE, countWorkspaces,
   readWorkspaceMap, setWorkspaceEdgeState, addWorkspaceManualEdge, removeWorkspaceManualEdge,
-  regenerateWorkspaceDescription,
+  regenerateWorkspaceDescription, readWorkspaceStacks, updateWorkspaceStacks, workspaceMembers,
   addWorkspaceMembers, removeWorkspaceMember, rootsHash, workspaceSetHash,
 } from '../src/core/workspaces.mjs';
 import { effectiveEdges } from '../src/shared/workspace-map/overrides.mjs';
@@ -251,6 +280,9 @@ import {
   listOrphanPluginData, purgePluginData,
 } from '../src/core/plugin-store.mjs';
 import { fetchCandidate } from '../src/core/plugin-repo.mjs';
+import { reconcileMcpStore } from '../src/core/mcp/catalog.mjs';
+import { readMcpStore } from '../src/core/mcp/store.mjs';
+import { mcpFootprint } from '../src/core/mcp/plugin-lifecycle.mjs';
 import {
   addMarketplace, listMarketplaces, syncMarketplace, refreshAllMarketplaces,
   removeMarketplace, readMarketplaces, seedBuiltinMarketplace,
@@ -296,6 +328,15 @@ import {
   repoSlugFromBugsUrl, BUGS_URL,
 } from '../src/core/run-report.mjs';
 import { REPORT_REASON_IDS } from '../src/shared/report-reasons.mjs';
+import {
+  McpStoreError, createSet, renameSet, deleteSet, duplicateSet, putMember, deleteMember, setProjectAssignment,
+  addManualServer, editManualServer, removeServerEverywhere,
+} from '../src/core/mcp/store.mjs';
+import { validateMcpDefinition, SET_ID_RE, SERVER_ID_RE } from '../src/core/mcp/definitions.mjs';
+import {
+  viewContext, listCatalogView, listSetsView, getSetView, projectAssignmentView, teamMemberRefusal, teamDuplicateSource,
+} from '../src/core/mcp/views.mjs';
+import { testMembership, retestAfterSave, retestServers } from '../src/core/mcp/test.mjs';
 import { HLJS_GRAMMAR_IDS } from './public/hljs-loader.mjs';
 import { useEnvProxy, proxyNotice } from '../src/core/env-proxy.mjs';
 
@@ -472,6 +513,7 @@ const runs = new Map();
 function liveRunIds() {
   const ids = [];
   for (const r of runs.values()) {
+    if (r.kind === 'action') continue;
     const s = String(r.status || '').toLowerCase();
     if (s === 'running' || s === 'starting' || s === 'created' || s === 'pausing') {
       if (r.pipelineId) ids.push(r.pipelineId);
@@ -488,7 +530,7 @@ function liveRunIds() {
 // engine AND for the v2 shim until the graph cut-over retires it.
 // `artifact-gone` is this branch's: an indexed artifact whose file the run later
 // removed, so the client can drop the row instead of leaving one that 404s.
-const EVENT_NAMES = ['exec', 'token', 'log', 'question', 'artifact', 'artifact-gone', 'state', 'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title'];
+const EVENT_NAMES = ['exec', 'token', 'log', 'question', 'artifact', 'artifact-gone', 'state', 'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title', 'night-decision'];
 // The agentgen-* WS family (Agent Platform, Phase 2): a NEW family in the SAME
 // runs Map. createAgentGen emits many agentgen-progress then exactly one terminal
 // agentgen-done OR agentgen-error. (The scan-* family is gone: dev made a
@@ -590,20 +632,23 @@ wss.on('connection', (ws, req) => {
   let requestedRunId = null;
   let requestedGenId = null;
   let requestedBenchId = null;
+  let requestedInstanceId = null;
   let requestedThreadId = null;
   try {
     const u = new URL(req.url, 'http://localhost');
     requestedRunId = u.searchParams.get('runId');
     requestedGenId = u.searchParams.get('genId');
     requestedBenchId = u.searchParams.get('benchId');
+    requestedInstanceId = u.searchParams.get('instanceId');
     requestedThreadId = u.searchParams.get('threadId');
   } catch {
     requestedRunId = null;
     requestedGenId = null;
     requestedBenchId = null;
+    requestedInstanceId = null;
     requestedThreadId = null;
   }
-  const id = requestedRunId || requestedGenId || requestedBenchId;
+  const id = requestedRunId || requestedGenId || requestedBenchId || requestedInstanceId;
 
   send(ws, { type: 'hello', bootId: BOOT_ID, serverMock: serverMockMode(), runs: summarizeRuns(), ask: askHello(ws) });
 
@@ -627,7 +672,7 @@ wss.on('connection', (ws, req) => {
     } catch {
       return;
     }
-    const subId = msg && msg.type === 'subscribe' ? (msg.runId || msg.genId || msg.benchId) : null;
+    const subId = msg && msg.type === 'subscribe' ? (msg.runId || msg.genId || msg.benchId || msg.instanceId) : null;
     if (subId && runs.has(subId)) {
       replayEntry(ws, runs.get(subId));
     }
@@ -828,7 +873,7 @@ function summarizeRuns() {
   // plumbing only — leaving it here puts "bench: <key>" in every hello and the
   // client's liveRuns() (which does NOT filter by kind) raises the rail's
   // Running badge over an empty Running list.
-  return [...runs.values()].filter((r) => r.kind !== 'scriptbench').map((r) => ({
+  return [...runs.values()].filter((r) => r.kind !== 'scriptbench' && r.kind !== 'action').map((r) => ({
     runId: r.id,
     stepper: r.orch?.state?.stepper ?? null,
     pipelineId: r.pipelineId || null,
@@ -849,6 +894,8 @@ function summarizeRuns() {
     // Who last stopped / paused / resumed it ({ kind, by, at }), or null.
     lastAction: r.lastAction || r.orch?.state?.lastAction || null,
     pendingQuestion: r.pendingQuestion || null,
+    // Night mode switches + counters ({optIn, override, decisions, flagged}), so a reconnect paints the run-view switch.
+    night: r.orch?.state?.night || null,
     // kind discriminator so the client routes runs vs agent generations vs
     // workspace runs without guessing; genId/workspaceId are the matching
     // attribution fields.
@@ -922,6 +969,13 @@ function wireRun(entry) {
 
       if (name === 'question') {
         entry.pendingQuestion = event;
+      }
+      if (name === 'night-decision') {
+        (entry.nightDecisions ||= []).push(payload.record);
+        // The harness emits night-decision only AFTER answer() accepted the payload, so the
+        // card can go. A guardrail row answered nothing: its pause's `done` frame clears the
+        // card, and a refused pause leaves the question open for the user.
+        if (!payload.record?.guardrail) resolvePending(entry, { id: payload.id, reason: 'night-mode' });
       }
       if (name === 'done') {
         entry.status = (payload && payload.status) || 'done';
@@ -1917,6 +1971,10 @@ const startRunHandler = async (req, res) => {
     // Human in the loop (spec D15): the body wins, else the project's stored
     // switch, else on. Resolved per target below (it needs the project dir).
     const bodyHumanInLoop = typeof body.humanInLoop === 'boolean' ? body.humanInLoop : null;
+    // Night mode per-run opt-in (src/core/night/*). A scheduled ticket keeps the whole request
+    // body, so the flag survives the wait.
+    if (body.nightMode !== undefined && typeof body.nightMode !== 'boolean') return badRequest(res, 'nightMode must be true or false');
+    const nightMode = body.nightMode === true;
 
     // Optional guardrailsId selects the named guardrail set that IS this run's
     // policy (applied uniformly to every member — guardrails are per-run only).
@@ -1933,6 +1991,11 @@ const startRunHandler = async (req, res) => {
     if (!(await readGuardrailSet(guardrailsId))) {
       return badRequest(res, `unknown guardrailsId "${guardrailsId}"`);
     }
+    // MCP registry (§6.2, D16): the per-run opt-out. Shape-checked here; entries that are not a
+    // membership of the target's sets are dropped per target below — a stored schedule keeps the
+    // body as sent, so its firing drops what is unknown by then.
+    const optOut = parseMcpOptOut(body.mcpOptOut);
+    if (optOut.error) return badRequest(res, optOut.error);
 
     // Budget gate: no new pipelines while the total window is spent (F6).
     const budget = budgetStatus();
@@ -2030,6 +2093,7 @@ const startRunHandler = async (req, res) => {
         sched.afterRef = r.after;
       }
       if (sched) return res.status(202).json(await scheduleRequest({ body, sched, title, askLink, budget, workspaceId: ws.id, projectDir: projects[0].projectDir, startedBy }));
+      const mcpOptOut = await knownMcpOptOut(optOut.list, mcpWorkspaceTarget(ws));
 
       const wsBuilt = buildWorkspaceMembers(projects, branch, sourceByKey);
       const wsMembers = [];
@@ -2058,12 +2122,14 @@ const startRunHandler = async (req, res) => {
         template: workflowRow,
         ...(scanTarget && scanTarget.models ? { scanModels: scanTarget.models } : {}),
         guardrailsId,
+        ...(mcpOptOut.length ? { mcpOptOut } : {}),
         startedBy,
         branch,
         sync,
         claude: { permissionMode: stored.permissionMode || 'acceptEdits', ...(stored.model ? { model: stored.model } : {}), mock },
         // A CLI-made ticket may carry `--yes`: the explicit non-interactive choice survives the wait.
         ...(stored.auto ? { auto: true } : {}),
+        ...(nightMode ? { nightMode: true } : {}),
       });
 
       entry = {
@@ -2141,6 +2207,7 @@ const startRunHandler = async (req, res) => {
       // A schedule stores the pair as checked (the catalog's casing, trimmed): its ticket takes it verbatim.
       const storedBody = startPair ? { ...body, model: startPair.model, effort: startPair.effort || undefined } : body;
       if (sched) return res.status(202).json(await scheduleRequest({ body: storedBody, sched, title, askLink, budget, projectDir, startedBy }));
+      const mcpOptOut = await knownMcpOptOut(optOut.list, { kind: 'project', key: projectKey(projectDir), name: path.basename(projectDir), rank: 0 });
 
       // Scans and defrag never sync: skip the default-branch lookup and settings reads entirely, so
       // the window between the one-defrag-per-scope check and runs.set does not widen.
@@ -2163,6 +2230,7 @@ const startRunHandler = async (req, res) => {
         workflowId,
         template: workflowRow,
         guardrailsId,
+        ...(mcpOptOut.length ? { mcpOptOut } : {}),
         startedBy,
         branch,
         sync,
@@ -2175,6 +2243,7 @@ const startRunHandler = async (req, res) => {
         },
         // A CLI-made ticket may carry `--yes`: the explicit non-interactive choice survives the wait.
         ...(stored.auto ? { auto: true } : {}),
+        ...(nightMode ? { nightMode: true } : {}),
       });
 
       entry = {
@@ -2251,7 +2320,8 @@ const startRunHandler = async (req, res) => {
         entry.status = 'error';
         entry.events.push(event);
         broadcast(event);
-      });
+      })
+      .finally(() => { entry.settled = true; });
 
     // A scan's launcher needs the card attribution the wizard cannot compute (the key is a hash).
     res.json(scanTarget
@@ -2262,6 +2332,90 @@ const startRunHandler = async (req, res) => {
   }
 };
 app.post('/api/run', startRunHandler);
+
+// ---------------------------------------------------------------------------
+// MCP registry, pipeline side (MCP registry design §6.2, §8, §12): what a run on a target would
+// start, resolved the way the harness resolves it (the Team set from the policy cache here). One
+// preview route serves New Pipeline, the project MCP tab and the workspace overview.
+// ---------------------------------------------------------------------------
+
+/** `mcpOptOut` (D16): at most 100 '<setId>|<serverId>' entries, de-duplicated. */
+function parseMcpOptOut(v) {
+  if (v == null) return { list: [] };
+  if (!Array.isArray(v) || v.length > 100 || !v.every((e) => typeof e === 'string' && MEMBERSHIP_KEY_RE.test(e))) {
+    return { error: 'mcpOptOut must be at most 100 "<setId>|<serverId>" entries' };
+  }
+  return { list: [...new Set(v)] };
+}
+
+const mcpWorkspaceTarget = (ws) => ({
+  kind: 'workspace', id: ws.id, name: ws.name, rank: 0,
+  members: ws.projectPaths.map((d) => ({ key: projectKey(d), name: path.basename(d) })),
+});
+
+/** The resolver target of a `{ projectKey } | { workspaceId }` body: undefined when malformed, null when unknown. */
+async function mcpTargetOf(t) {
+  if (!t || typeof t !== 'object') return undefined;
+  if (typeof t.projectKey === 'string' && PROJECT_KEY_RE.test(t.projectKey) && t.workspaceId === undefined) {
+    const p = (await listProjects()).find((x) => x.key === t.projectKey);
+    return p ? { kind: 'project', key: p.key, name: p.name, rank: 0 } : null;
+  }
+  if (typeof t.workspaceId === 'string' && WORKSPACE_KEY_RE.test(t.workspaceId) && t.projectKey === undefined) {
+    const ws = await readWorkspace(t.workspaceId);
+    return ws ? mcpWorkspaceTarget(ws) : null;
+  }
+  return undefined;
+}
+
+/** One pipeline target through the resolver, its Team set from the policy cache; `opts` = the rest of the input. */
+async function mcpResolve(target, opts = {}) {
+  const project = target.kind === 'project';
+  const team = await cachedTeamFor(project ? { projectKey: target.key } : { workspaceId: target.id });
+  const result = await resolveRegistry({ surface: 'pipeline', targets: [target], teams: { [project ? target.key : `ws:${target.id}`]: team }, ...opts });
+  return { result, team };
+}
+
+/** What a run on the target would start (§5.6: `models` sets the tool-name limit). */
+async function mcpRunPreview(target, { optOut = [], models = [] } = {}) {
+  const [{ result, team }, catalog] = await Promise.all([mcpResolve(target, { optOut, toolNameLimit: toolNameLimitFor(models) }), loadCatalog()]);
+  return { result, catalog, team };
+}
+
+/** The opt-out entries that are memberships of the target's sets (unknown ones are dropped). A
+ *  registry fault keeps the list as sent: it must not block the run, whose own resolution matches
+ *  the opt-out by exact key (and adds nothing when it fails too). */
+async function knownMcpOptOut(list, target) {
+  if (!list.length) return list;
+  let result;
+  try { ({ result } = await mcpResolve(target)); } catch { return list; }
+  const known = new Set([...result.copies, ...result.skipped].map((m) => `${m.setId}|${m.serverId}`));
+  return list.filter((k) => known.has(k));
+}
+
+app.post('/api/mcp/preview', async (req, res) => {
+  const b = req.body || {};
+  const opt = parseMcpOptOut(b.mcpOptOut);
+  if (opt.error) return badRequest(res, opt.error);
+  if (b.models != null && (!Array.isArray(b.models) || b.models.length > 100 || !b.models.every((m) => typeof m === 'string'))) {
+    return badRequest(res, 'models must be an array of model ids');
+  }
+  try {
+    const target = await mcpTargetOf(b.target);
+    if (target === undefined) return badRequest(res, 'target must be { projectKey } or { workspaceId }');
+    if (!target) return res.status(404).json({ error: 'target not found' });
+    const { result, catalog, team } = await mcpRunPreview(target, { optOut: opt.list, models: b.models || [] });
+    const why = (sk) => skipReasonText(sk, catalog);
+    res.json({
+      sets: result.sets,
+      copies: result.copies,
+      skipped: result.skipped.map((sk) => ({ ...sk, message: skipMessage(sk, catalog), why: why(sk) })),
+      skippedTools: result.skippedTools,   // §5.6: `tool-name-too-long:<tool>`; the copy still starts
+      started: result.copies.length,
+      newer: !!result.newer,   // §4.5: a store written by a newer Worca resolves to nothing; say why
+      deviations: mcpDeviations(team ? { 'mcp.required': { value: team.required } } : {}, result, why),
+    });
+  } catch (err) { res.status(500).json({ error: err?.message || String(err) }); }
+});
 
 // ---------------------------------------------------------------------------
 // Scheduled runs (schema v31, src/core/scheduler.mjs). A schedule is a TICKET, not a
@@ -2625,6 +2779,27 @@ onNotification((n) => {
   broadcast({ type: 'notification', notification: n });
   try { chatNotifier.notifySchedule(n); } catch { /* never break the writer */ }
 });
+
+// Away hours starting or ending by themselves (night/hours-watch.mjs): every open tab shows one line
+// under the menu's "I'm here | I'm away"; chat hears it only when a run is answered by worca.
+const AWAY_WATCH_TICK_MS = 30_000;
+let _awayWatchTimer = null;
+function startAwayHoursWatch() {
+  if (_awayWatchTimer) return;
+  const watch = createAwayHoursWatch({
+    readStatus: () => ({ config: resolveNightConfig({ user: nightModeSettings() }).config, toggle: nightModeToggle(), hereSince: nightModeHereSince() }),
+    liveRuns: () => [...runs.values()].map((e) => ({ projectDir: e.projectDir, status: e.orch?.state?.status || e.status, night: e.orch?.state?.night })),
+    effective: effectiveNightConfig,
+    answeredSince: nightAnsweredSince,
+    onEdge: (e) => {
+      broadcast({ type: 'away-hours', edge: e.edge, text: e.text });
+      if (e.chat) { try { chatNotifier.notifyAway(e.text); } catch { /* never break the watch */ } }
+    },
+  });
+  watch.tick();                                   // the baseline: a restart never announces an edge
+  _awayWatchTimer = setInterval(() => watch.tick(), AWAY_WATCH_TICK_MS);
+  _awayWatchTimer.unref();
+}
 
 /** A schedule item (ticket or series) by id, for the unified /api/schedules routes. */
 function findScheduleItem(id) {
@@ -3222,6 +3397,52 @@ app.post('/api/stop', (req, res) => {
 // in-flight node children, persists a resume point, and lands on status 'paused'
 // (announced via the normal state/done events; wireRun mirrors entry.status).
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// POST /api/run/night { runId, mode: 'auto'|'on'|'off' } — the run-view night mode switch.
+// A paused run stores it in its resume point; a finished run refuses it (400).
+// ---------------------------------------------------------------------------
+function setRunNightMode(runId, mode, by = 'local') {
+  const entry = runs.get(runId);
+  if (!entry) throw new Error('unknown runId');
+  if (typeof entry.orch?.setNightOverride !== 'function') throw Object.assign(new Error('run does not support Away mode'), { code: 'BAD_NIGHT_MODE' });
+  entry.orch.setNightOverride(mode, by || 'local');
+}
+app.post('/api/run/night', (req, res) => {
+  const { runId, mode } = req.body || {};
+  if (!runId || !runs.has(runId)) return badRequest(res, 'unknown runId');
+  try {
+    setRunNightMode(runId, mode, actorOf(req));
+    res.json({ ok: true });
+  } catch (err) {
+    if (err?.code === 'BAD_NIGHT_MODE' || err?.code === 'NIGHT_NOT_LIVE') return badRequest(res, err.message);
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+// GET /api/night-decisions?pipelineId=… | ?runId=… — what night mode decided on one run.
+app.get('/api/night-decisions', (req, res) => {
+  const pipelineId = String(req.query.pipelineId || '') || runs.get(String(req.query.runId || ''))?.orch?.pipeline?.id;
+  if (!pipelineId) return badRequest(res, 'pipelineId or runId required');
+  res.json({ decisions: readNightDecisions(pipelineId) });
+});
+
+// GET /api/away-mode[?projectDir=] — what Away mode will do: the effective config (with the team
+// layer when a project is given), where each field comes from, what an empty field falls back to,
+// the live status (toggle, and hereSince: when "I'm here" was last said) and the raw layers the forms edit. Every surface renders its text from this
+// through src/shared/away-mode/describe.mjs.
+app.get('/api/away-mode', (req, res) => {
+  const raw = typeof req.query.projectDir === 'string' && req.query.projectDir ? req.query.projectDir : null;
+  const projectDir = raw ? resolveProjectDir(raw) : null;          // same key as PATCH /api/config (~ expanded)
+  const user = nightModeSettings() || {};
+  if (!projectDir) {
+    const { config, sources } = resolveNightConfig({ user });
+    return res.json({ config, sources, inherited: resolveNightConfig({}), toggle: nightModeToggle(), hereSince: nightModeHereSince(), user, project: null });
+  }
+  const L = nightLayers(projectDir);
+  const { config, sources } = resolveNightConfig(L);
+  res.json({ config, sources, inherited: resolveNightConfig({ user: L.user, team: L.team }), toggle: nightModeToggle(), hereSince: nightModeHereSince(), user, project: L.project || {} });
+});
+
 app.post('/api/pause', (req, res) => {
   const { runId } = req.body || {};
   if (!runId || !runs.has(runId)) return badRequest(res, 'unknown runId');
@@ -3484,7 +3705,8 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
       entry.status = 'error';
       entry.events.push(event);
       broadcast(event);
-    });
+    })
+    .finally(() => { entry.settled = true; });
 
   return { ok: true, runId, pipelineId };
 }
@@ -4224,7 +4446,8 @@ app.get('/api/policy/scopes', async (req, res) => {
       const r = await resolveProjectPolicy(s.path, { discover: false }).catch(() => null);
       if (r?.ok) docs.push({ slug: r.home, doc: r.doc });
     }
-    res.json({ ...scopes, requirements: pluginRequirements(docs), blockedPlugins: blockedPluginFindings(docs) });
+    // MCP rows from the policy cache — the source the consent routes hash against (MCP registry spec §11.3).
+    res.json({ ...scopes, requirements: pluginRequirements(docs), blockedPlugins: blockedPluginFindings(docs), mcpRequirements: await mcpRequirements() });
   } catch (err) { sendPolicyError(res, err); }
 });
 
@@ -4234,7 +4457,17 @@ app.get('/api/policy', async (req, res) => {
   try {
     const { meta, r, workspaceRun, projectDir } = await policyForScope(scope);
     if (!r.ok) return res.status(404).json({ error: r.detail || `no team policy for this ${scope.kind}`, code: (r.code || r.reason || 'NOT_ENABLED').toString().toUpperCase().replace(/-/g, '_'), scope: meta });
-    res.json(policyPayload(meta, r, { workspaceRun, projectDir }));
+    const payload = await policyPayload(meta, r, { workspaceRun, projectDir });
+    // MCP registry spec §11.4: the off-policy card also lists the Team set's MCP deviations for this scope's runs,
+    // worded and guarded like /api/policy/notes (a registry fault adds none; the policy's own card still paints).
+    const fields = fieldsForRun(r.doc, { workspaceRun });
+    if (fields['mcp.required']) {
+      try {
+        const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
+        if (target) { const p = await mcpRunPreview(target); payload.deviations.push(...mcpDeviations(fields, p.result, (sk) => skipReasonText(sk, p.catalog))); }
+      } catch { /* a registry fault adds no MCP deviations */ }
+    }
+    res.json(payload);
   } catch (err) { sendPolicyError(res, err); }
 });
 
@@ -4243,6 +4476,11 @@ app.get('/api/policy/notes', async (req, res) => {
   const scope = parseScopeParam(req.query.scope);
   if (!scope) return badRequest(res, 'scope must be project:<projectKey> or workspace:<workspaceId>');
   try {
+    // MCP registry (§6.2): the form's opt-out, comma-joined like `models`, adds the MCP deviations. A
+    // repeated parameter arrives as an array and is checked entry by entry; any other shape is a 400.
+    const rawOptOut = req.query.mcpOptOut;
+    const optOut = parseMcpOptOut(rawOptOut == null || rawOptOut === '' ? null : typeof rawOptOut === 'string' ? rawOptOut.split(',') : rawOptOut);
+    if (optOut.error) return badRequest(res, optOut.error);
     const { meta, r, workspaceRun } = await policyForScope(scope);
     if (!r.ok) return res.json({ scope: meta, policy: null, notes: [] });
     const fields = fieldsForRun(r.doc, { workspaceRun });
@@ -4250,6 +4488,15 @@ app.get('/api/policy/notes', async (req, res) => {
     const set = await readGuardrailSet(guardrailsId);
     const models = typeof req.query.models === 'string' && req.query.models ? req.query.models.split(',').filter(Boolean).map((m) => ({ role: null, model: m })) : [];
     const dev = deviationsFor(fields, { guardrailsId, guardrailSet: set, stepModels: models, installed: installedPluginsMap(), worcaVersion: POLICY_WORCA_VERSION, metricsRecord: null });
+    if (fields['mcp.required']) {
+      try {
+        const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
+        if (target) {
+          const p = await mcpRunPreview(target, { optOut: optOut.list, models: models.map((m) => m.model) });
+          dev.push(...mcpDeviations(fields, p.result, (sk) => skipReasonText(sk, p.catalog)));
+        }
+      } catch { /* a registry fault adds no MCP notes; the policy's own notes still paint */ }
+    }
     res.json({ scope: meta, policy: { home: r.home, sha: r.sha, delegated: r.delegated, from: r.from, caps: capSummary(r.doc, { workspaceRun }) }, notes: dev, guardrailsDefault: fields['guardrails.default']?.value ?? null });
   } catch (err) { sendPolicyError(res, err); }
 });
@@ -4809,6 +5056,508 @@ app.post('/api/runs/:id/discard-worktree', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Actions (issue #529): check out a finished run, run its setup once, and start the project's
+// actions (services and tasks) from Worca. Processes live in an ActionRegistry; each instance gets
+// a kind:'action' entry in the shared runs Map for the WS ring buffer and replay (D15).
+// ---------------------------------------------------------------------------
+const ACTION_ENTRY_CAP = 50;                        // finished action entries kept in `runs`
+// Resolved per use, never at import: worcaHome() throws under node:test while WORCA_HOME is unset, and
+// several suites import this module without one.
+const actionsPidFileNow = () => actionsPidFile(worcaHome());
+const actions = new ActionRegistry({ portRange: () => parsePortRange(actionsSettings()) });
+Object.defineProperty(actions, 'pidFile', { get: actionsPidFileNow });
+Object.defineProperty(actions, 'stateFile', { get: () => actionsStateFile(worcaHome()) });   // Ask Worca reads it (readActionsState)
+const stackStates = new Map();                     // `${runId}:${stackId}` -> state reported by runStack (D26)
+const stackTokens = new Map();                     // `${runId}:${stackId}` -> token of the live start; deleted by Stop
+const setupJobs = new Map();                       // `${runId}:${member}` -> Promise<boolean> (D25)
+let builtinsDetected = null;
+const builtins = () => (builtinsDetected ??= detectBuiltins({ overrides: actionsSettings() }));
+// What detection finds with NO override (Settings › Runs › Actions shows it next to Editor and Terminal).
+// PATH does not change under a running server, so once is enough.
+let builtinsAuto = null;
+const autoDetectedBuiltins = () => {
+  const d = (builtinsAuto ??= detectBuiltins({ overrides: {} }));
+  return { editor: d.editor?.label || null, terminal: d.terminal?.label || null };
+};
+
+/**
+ * D4: under agent isolation a caller on this machine may be the agent itself. Identity is skipped for a
+ * loopback peer + loopback Host (requestIdentity). In local mode the host guard accepts `Host: localhost`
+ * from ANY peer, so a peer at one of this machine's own addresses (the container's eth0) counts too.
+ * A request that carries a verified sign-in (`req.worcaUser` with an email/sub) is a person: the agent
+ * holds no identity token. Actions run as the server user, so a possible agent never gets them.
+ * agentIdentity() reads process.env per call (tests flip it between requests).
+ */
+const signedInPerson = (req) => !!(req.worcaUser && (req.worcaUser.email || req.worcaUser.sub));
+const agentMayBeCaller = (req) => !!(req && agentIdentity() && !signedInPerson(req) && (isInContainer(req) || isPeerThisMachine(req)));
+/** D4: actions run locally, or on a hosted deployment that opted in. No isInContainer exemption. */
+const actionsEnabledHere = (req = null) =>
+  !agentMayBeCaller(req) && (!REMOTE_MODE || isTruthy(process.env.WORCA_ACTIONS_REMOTE));
+function requireActions(req, res) {
+  if (agentMayBeCaller(req)) { refuseAgentCaller(res); return false; }
+  if (actionsEnabledHere(req)) return true;
+  res.status(403).json({ error: 'Actions are turned off on this hosted deployment. An administrator can enable them with WORCA_ACTIONS_REMOTE=1.', code: 'ACTIONS_DISABLED' });
+  return false;
+}
+function refuseAgentCaller(res) {
+  res.status(403).json({ error: 'Actions cannot be run or edited from inside the container while agent isolation is on. Open Worca through its published address.', code: 'ACTIONS_AGENT_BLOCKED' });
+}
+function noRawCommand(req, res) {
+  try { assertNoRawCommand(req.body); return true; } catch (e) { res.status(400).json({ error: e.message, code: e.code }); return false; }
+}
+/** D12: live actions of this server plus any other process that shares the pid file. */
+const busyActionRunIds = (extra = []) =>
+  new Set([...actions.running().map((s) => s.runId), ...busyRunIdsFromPidFile(actionsPidFileNow()), ...extra]);
+
+// ── registry → runs Map entry + frames (wireScriptBench's ring buffer, D15) ──────
+function actionEntry(instanceId) {
+  let e = runs.get(instanceId);
+  if (!e || e.kind !== 'action') {
+    e = { id: instanceId, kind: 'action', status: 'starting', events: [], seq: 0, forRun: null, endedAt: null,
+      orch: { stop: () => actions.stop(instanceId) } };
+    runs.set(instanceId, e);
+    evictFinishedActionEntries();
+  }
+  return e;
+}
+function evictFinishedActionEntries() {
+  const done = [...runs.values()].filter((r) => r.kind === 'action' && ['exited', 'failed', 'stopped'].includes(r.status))
+    .sort((a, b) => (a.endedAt || 0) - (b.endedAt || 0));
+  for (const r of done.slice(0, Math.max(0, done.length - ACTION_ENTRY_CAP))) runs.delete(r.id);
+}
+function recordActionFrame(instanceId, frame) {
+  const e = actionEntry(instanceId);
+  e.seq += 1;
+  const tagged = { ...frame, instanceId, seq: e.seq };
+  e.events.push(tagged);
+  if (e.events.length > MAX_BUFFER) e.events.splice(0, e.events.length - MAX_BUFFER);
+  broadcast(tagged);
+}
+actions.on('line', ({ instanceId, stream, text }) => recordActionFrame(instanceId, { type: 'action-line', stream, text }));
+actions.on('status', (snap) => {
+  const e = actionEntry(snap.instanceId);
+  if (snap.status === 'starting' && e.status !== 'starting') { e.events = []; }   // re-run: fresh buffer, seq keeps rising
+  e.status = snap.status; e.forRun = snap.runId; e.endedAt = snap.endedAt;
+  recordActionFrame(snap.instanceId, { type: 'action-status', snapshot: snap });
+  emitChanged('actions-changed', snap.status);
+});
+
+/**
+ * The bare `wks-…` id of a workspace row, else null. Live rows store it bare. Rows from the legacy fs→DB
+ * migration can hold the composite `workspaces/<dir>` and even `target = 'project'`
+ * (migrate-fs-to-db.mjs:360-374), which is why artifacts.mjs reads `target === 'workspace' || !!workspace_key`.
+ */
+const bareWorkspaceKey = (row) =>
+  (row.target === 'workspace' || row.workspace_key) && row.workspace_key ? String(row.workspace_key).replace(/^workspaces\//, '') : null;
+
+function runRowForScope(req, res) {
+  const scope = resolveRunScope(req, res);          // query params; answers 400/404 itself
+  if (!scope) return null;
+  const row = findPipelineRowById(req.params.id);
+  const matches = row && (scope.workspaceId ? bareWorkspaceKey(row) === scope.workspaceId : (row.project_key === (scope.projectKey || projectKey(scope.projectDir))));
+  if (!matches || row.archived_at) { res.status(404).json({ error: 'pipeline not found' }); return null; }
+  return row;
+}
+const isLiveRun = (id) => liveRunIds().includes(id);
+/**
+ * D30: this process is still inside the run's orch.run()/orch.resume() promise. liveRunIds() drops a run
+ * the moment its status reads 'done', and that happens BEFORE the harness's finally (teardown + keep
+ * policy). `settled` is set by the .finally at each launch site, so a run torn down long ago, or one whose
+ * teardown skipped the worktreeRemoved stamp, never reads as finishing.
+ */
+const isFinishingRun = (id) => [...runs.values()].some((r) => r.kind !== 'action' && r.kind !== 'scriptbench' && r.pipelineId === id && !r.settled);
+const memberFor = (row, key) => { const ms = membersOfRow(row); return key ? ms.find((m) => m.projectKey === key) : (ms.length === 1 ? ms[0] : null); };
+const checkoutRecOf = (runId, pk) => checkoutRecordsFor(findPipelineRowById(runId))?.members.find((x) => x.projectKey === pk) || null;
+async function stopMemberServices(runId, projectKey) {
+  for (const k of [...stackTokens.keys()]) if (k.startsWith(`${runId}:`)) stackTokens.delete(k);   // cancel starting stacks first
+  // stop() awaits a pending spawn, so a stack step that was mid-launch is caught here too.
+  await actions.stopWhere((s) => s.runId === runId && (!projectKey || s.member === projectKey));
+  for (const [k, st] of stackStates) if (st.runId === runId) stackStates.delete(k);
+}
+/** The discardCheckout callback: (projectKey, runId) of the run being discarded, never the caller's run. */
+const stopCheckoutServices = (pk, runId) => stopMemberServices(runId, pk);
+
+/**
+ * D25: one setup per checked-out member. Concurrent callers share the promise.
+ * Resolves true when actions may start (setup ok / none / skipped), false otherwise. Never throws.
+ * `enabled` is the D4 gate, computed by the CALLER while it still holds the live request
+ * (`actionsEnabledHere(req)`): the job outlives the response, and isInContainer(req) reads req.socket.
+ * Taking a value, not `req`, lets the stack loop (which runs after its response) call it too.
+ */
+function ensureSetup(runId, pk, { enabled, rerun = false }) {
+  const key = `${runId}:${pk}`;
+  if (setupJobs.has(key)) return setupJobs.get(key);
+  const job = (async () => {
+    const rec = checkoutRecOf(runId, pk);
+    if (!rec) return false;
+    const status = rec.setup?.status;
+    if (!rerun && ['ok', 'none', 'skipped'].includes(status)) return true;
+    if (!rerun && status === 'failed') return false;
+    const cfg = readProjectActions(pk);
+    if (!cfg.setup) { setSetupState(runId, pk, { status: 'none', at: new Date().toISOString() }); return true; }
+    if (!enabled) { setSetupState(runId, pk, { status: 'skipped', at: new Date().toISOString() }); return true; }
+    const t0 = Date.now();
+    setSetupState(runId, pk, { status: 'running', at: new Date().toISOString() });
+    emitChanged('pipelines-changed', 'updated');
+    let end = null;
+    try {
+      const snap = await actions.start({ runId, member: pk, worktreeDir: rec.worktreeDir, branch: rec.branch,
+        action: { id: SETUP_ACTION_ID, label: 'Setup', kind: 'task', cmd: cfg.setup, cmdWin32: null, cwd: '.', env: [], openUrl: null, ready: { kind: 'immediate' } } });
+      end = await actions.waitFor(snap.instanceId, (s) => ['exited', 'failed', 'stopped'].includes(s.status), 3_600_000);
+    } catch { /* start failed or timed out → failed below */ }
+    const ok = end?.status === 'exited' && end.exitCode === 0;
+    const ms = Date.now() - t0;
+    setSetupState(runId, pk, { status: ok ? 'ok' : 'failed', exitCode: end?.exitCode ?? null, at: new Date().toISOString(), ms });
+    if (ok) writeActionsMeta(pk, { lastSetupMs: ms });
+    emitChanged('pipelines-changed', 'updated');
+    return ok;
+  })().catch(() => false).finally(() => setupJobs.delete(key));
+  setupJobs.set(key, job);
+  return job;
+}
+
+function sendCheckoutError(res, e) {
+  const map = { NOT_FOUND: 404, BAD_REQUEST: 400, NOT_FINISHED: 409, RETAINED: 409, BRANCH_MISSING: 409,
+    BRANCH_CHECKED_OUT: 409, TARGET_EXISTS: 409, SNAPSHOT_FAILED: 409 };
+  res.status(map[e?.code] || 500).json({ error: e?.message || String(e), code: e?.code || 'ERROR',
+    ...(e?.holder ? { holder: e.holder, projectKey: e.projectKey || null } : {}) });
+}
+
+app.post('/api/runs/:id/checkout', async (req, res) => {
+  const row = runRowForScope(req, res); if (!row) return;
+  const members = Array.isArray(req.body?.members) ? req.body.members.filter((x) => typeof x === 'string') : null;
+  try {
+    // useExisting: the branch is already checked out in the person's own folder; link it (checkout.mjs).
+    const r = await checkoutRun({ id: row.id, members, by: actorOf(req), isLive: isLiveRun, isFinishing: isFinishingRun,
+      useExisting: req.body?.useExisting === true });
+    const enabled = actionsEnabledHere(req);
+    for (const m of r.members.filter((x) => x.state === 'checked-out')) ensureSetup(row.id, m.projectKey, { enabled });   // not awaited: frames stream
+    const { maxCheckouts } = actionsSettings();
+    if (maxCheckouts) {
+      enforceCheckoutCap({ max: maxCheckouts, busy: busyActionRunIds([row.id]), stopServices: stopCheckoutServices })
+        .then(({ evicted }) => { if (evicted.length) emitChanged('pipelines-changed', 'updated'); }).catch(() => {});
+    }
+    emitChanged('pipelines-changed', 'updated');
+    res.json(r);
+  } catch (e) { sendCheckoutError(res, e); }
+});
+
+app.delete('/api/runs/:id/checkout', async (req, res) => {
+  const row = runRowForScope(req, res); if (!row) return;
+  const members = Array.isArray(req.body?.members) ? req.body.members : null;
+  try {
+    const r = await discardCheckout({ id: row.id, members, force: req.body?.force === true, by: actorOf(req),
+      stopServices: stopCheckoutServices });
+    emitChanged('pipelines-changed', 'updated');
+    res.json(r);
+  } catch (e) { sendCheckoutError(res, e); }
+});
+
+app.post('/api/runs/:id/setup', async (req, res) => {
+  if (!requireActions(req, res) || !noRawCommand(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  const m = memberFor(row, req.body?.member);
+  if (!m) return badRequest(res, 'member is required for a workspace run');
+  if (!checkoutRecOf(row.id, m.projectKey)) return res.status(409).json({ error: 'Check out the run first.', code: 'NOT_CHECKED_OUT' });
+  // Re-running `npm ci` under a live dev server would pull node_modules out from under it.
+  if (actions.listFor(row.id).some((s) => s.member === m.projectKey && s.actionId !== SETUP_ACTION_ID && ['starting', 'running', 'ready'].includes(s.status))) {
+    return res.status(409).json({ error: 'Stop the running actions of this project before running setup again.', code: 'SERVICES_RUNNING' });
+  }
+  // rerun covers failed, interrupted and skipped (actions were off at checkout, D25), and a manual "Run setup again".
+  ensureSetup(row.id, m.projectKey, { enabled: true, rerun: true });   // requireActions passed above
+  res.status(202).json({ queued: true, instanceId: instanceIdFor(row.id, m.projectKey, SETUP_ACTION_ID) });
+});
+
+/** Start now, or, while setup is pending/running/interrupted, queue behind it (D25). */
+async function startOrQueue(req, res, row, m, action, extra = {}) {
+  const rec = checkoutRecOf(row.id, m.projectKey);
+  if (!rec) return res.status(409).json({ error: 'Check out the run first.', code: 'NOT_CHECKED_OUT' });
+  const setup = rec.setup?.status;
+  if (setup === 'failed') return res.status(409).json({ error: 'The setup command failed. Fix it and run setup again.', code: 'SETUP_FAILED' });
+  const spec = { runId: row.id, member: m.projectKey, worktreeDir: rec.worktreeDir, branch: rec.branch, action };
+  if (['pending', 'running', 'interrupted'].includes(setup) || setupJobs.has(`${row.id}:${m.projectKey}`)) {
+    const instanceId = instanceIdFor(row.id, m.projectKey, action.id);
+    // A queued start that cannot start must say so; nobody is waiting on the HTTP answer any more.
+    const report = (text) => {
+      recordActionFrame(instanceId, { type: 'action-line', stream: 'sys', text });
+      const e = runs.get(instanceId);                        // never started: mark it finished so the cap can evict it
+      if (e && !actions.get(instanceId)) { e.status = 'failed'; e.endedAt = Date.now(); }
+      // No registry snapshot exists for a start that never happened: a snapshot-less status frame tells the
+      // card to leave "Starts after setup" and carries the reason.
+      recordActionFrame(instanceId, { type: 'action-status', snapshot: null, error: text });
+      emitChanged('actions-changed', 'queued-failed');
+    };
+    ensureSetup(row.id, m.projectKey, { enabled: true, rerun: setup === 'interrupted' })   // every caller passed requireActions
+      .then((ok) => (ok ? actions.start(spec) : report('Not started: the setup command did not finish successfully.')))
+      .catch((e) => report(`Not started: ${e?.message || e}`));
+    return res.status(202).json({ ...extra, queued: true, instanceId });
+  }
+  try {
+    res.json({ ...extra, ...(await actions.start(spec)) });
+  } catch (e) {
+    const status = e?.code === 'PORTS_EXHAUSTED' || e?.code === 'NOT_CHECKED_OUT' ? 409 : e instanceof ActionConfigError ? 400 : 500;
+    res.status(status).json({ error: e.message, code: e.code || 'ERROR' });
+  }
+}
+
+app.post('/api/runs/:id/actions/:actionId/start', async (req, res) => {
+  if (!requireActions(req, res) || !noRawCommand(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  const m = memberFor(row, req.body?.member);
+  if (!m) return badRequest(res, 'member is required for a workspace run');
+  const action = readProjectActions(m.projectKey).actions.find((a) => a.id === req.params.actionId);
+  if (!action) return res.status(404).json({ error: 'no such action', code: 'NOT_FOUND' });
+  return startOrQueue(req, res, row, m, action);
+});
+
+// Stop is not gated by D4: a service started before the gate closed can always be stopped.
+app.post('/api/runs/:id/actions/:actionId/stop', async (req, res) => {
+  if (!noRawCommand(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  const m = memberFor(row, req.body?.member);
+  if (!m) return badRequest(res, 'member is required for a workspace run');
+  await actions.stop(instanceIdFor(row.id, m.projectKey, req.params.actionId));
+  res.json({ ok: true });
+});
+
+app.post('/api/runs/:id/stacks/:stackId/start', async (req, res) => {
+  if (!requireActions(req, res) || !noRawCommand(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  if (row.target !== 'workspace') return badRequest(res, 'stacks belong to workspace runs');
+  const stack = readWorkspaceStacks(bareWorkspaceKey(row)).find((s) => s.id === req.params.stackId);
+  if (!stack) return res.status(404).json({ error: 'no such stack', code: 'NOT_FOUND' });
+  const key = `${row.id}:${stack.id}`;
+  if (['starting', 'running'].includes(stackStates.get(key)?.status)) return res.json(stackStates.get(key));
+  const members = membersOfRow(row);
+  const aliases = memberAliases(members.map((m) => ({ projectKey: m.projectKey, name: m.projectName || path.basename(m.projectDir || '') })));
+  const nameOf = Object.fromEntries(members.map((m) => [m.projectKey, m.projectName || m.projectKey]));
+  // D29: a step whose member has not run setup yet (kept by policy → `pending`, or `interrupted`, or a
+  // setup still running from Check out) runs/awaits that setup first, like a single start does (D25).
+  // Resolved lazily, step by step, so the setup state is read when the step is reached.
+  const resolveStep = async (st) => {
+    const action = readProjectActions(st.member).actions.find((a) => a.id === st.action) || null;
+    let rec = checkoutRecOf(row.id, st.member);
+    if (!rec) return { action, worktreeDir: null, error: `${nameOf[st.member]} is not checked out` };
+    const setup = rec.setup?.status;
+    if (setup === 'failed') return { action, worktreeDir: null, error: `the setup command of ${nameOf[st.member]} failed; run setup again` };
+    if (!['ok', 'none', 'skipped'].includes(setup) || setupJobs.has(`${row.id}:${st.member}`)) {
+      const ok = await ensureSetup(row.id, st.member, { enabled: true, rerun: setup === 'interrupted' });   // requireActions passed
+      if (!ok) return { action, worktreeDir: null, error: `the setup command of ${nameOf[st.member]} did not finish successfully` };
+      rec = checkoutRecOf(row.id, st.member);
+    }
+    return { worktreeDir: rec?.worktreeDir || null, branch: rec?.branch || null, action };
+  };
+  // One token per start: Stop (or a newer start) replaces it, and the old loop sees it is cancelled.
+  const token = {};
+  stackTokens.set(key, token);
+  const live = () => stackTokens.get(key) === token;
+  const onState = (s) => { if (live()) stackStates.set(key, s); emitChanged('actions-changed', `stack-${s.status}`); };
+  onState({ stackId: stack.id, runId: row.id, status: 'starting', step: 0, error: null, instances: [] });
+  runStack({ runId: row.id, stack, aliases, registry: actions, resolveStep, onState, isCancelled: () => !live() })
+    .catch(() => {});   // not awaited
+  res.json(stackStates.get(key));
+});
+
+app.post('/api/runs/:id/stacks/:stackId/stop', async (req, res) => {
+  if (!noRawCommand(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  const key = `${row.id}:${req.params.stackId}`;
+  const cur = stackStates.get(key);
+  stackTokens.delete(key);                                 // a still-starting runStack sees this before its next step
+  await stopStack(actions, cur);
+  stackStates.delete(key);
+  emitChanged('actions-changed', 'stack-stopped');
+  res.json({ ok: true });
+});
+
+const BUILTIN_ROUTE_KEYS = ['editor', 'terminal', 'fileManager'];
+app.post('/api/runs/:id/builtins/:builtin', async (req, res) => {
+  if (!requireActions(req, res) || !noRawCommand(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  const key = req.params.builtin;
+  if (!BUILTIN_ROUTE_KEYS.includes(key)) return badRequest(res, `built-in must be one of ${BUILTIN_ROUTE_KEYS.join(', ')}`);
+  const m = memberFor(row, req.body?.member);
+  if (!m) return badRequest(res, 'member is required for a workspace run');
+  if (readProjectActions(m.projectKey).builtins[key] === false) return res.status(409).json({ error: `${key} is turned off for this project`, code: 'DISABLED' });
+  const rec = checkoutRecOf(row.id, m.projectKey);
+  if (!rec) return res.status(409).json({ error: 'Check out the run first.', code: 'NOT_CHECKED_OUT' });
+  let l;
+  try { l = builtinLaunch(key, rec.worktreeDir, builtins(), { vars: { branch: rec.branch, project: m.projectKey, runId: row.id } }); }
+  catch (e) { return res.status(409).json({ error: e.message, code: e.code || 'NOT_AVAILABLE' }); }
+  // Watched for a moment: a command that fails at once (not found, a typo) says why on the card.
+  const r = await launchAndWatch(l, { spawn });
+  if (!r.ok) return res.status(409).json({ error: `${BUILTIN_NAMES[key] || key} did not open: ${r.error}`, code: 'LAUNCH_FAILED' });
+  res.json({ ok: true });
+});
+
+// Settings › Runs › Actions: what "Choose…" lists (found on THIS machine, which is where commands run),
+// and the hover examples for this OS. Scanned once per server process.
+const BUILTIN_NAMES = { editor: 'Editor', terminal: 'Terminal', fileManager: 'The file manager' };
+let launchersFound = null;
+app.get('/api/actions/launchers', (req, res) => {
+  launchersFound ??= installedLaunchers({ findOnPath: (n) => findOnPath(n) });
+  // browse: a native picker can open here. Never on a hosted worca: it would open on the server, not on the viewer's screen.
+  res.json({ platform: process.platform, ...launchersFound, examples: launcherExamples(), detected: autoDetectedBuiltins(),
+    browse: !REMOTE_MODE && nativeDialogAvailable() });
+});
+
+// "Browse…": the platform's app picker on this machine; the pick comes back as a ready command line
+// (lineForPickedApp). Where no picker can open (container, hosted, no display) it answers unsupported and the
+// page shows what installedLaunchers found instead.
+app.post('/api/actions/launchers/browse', async (req, res) => {
+  if (!requireActions(req, res)) return;
+  const kind = req.body?.kind;
+  if (kind !== 'editor' && kind !== 'terminal') return badRequest(res, 'kind must be editor or terminal');
+  const r = await pickAppNative({ kind });
+  if (r.status !== 'picked') return res.json(r);
+  try { res.json({ status: 'picked', path: r.path, ...lineForPickedApp(r.path, { kind }) }); }
+  catch (e) { res.json({ status: 'canceled', error: e.message }); }
+});
+
+// "Try": run the typed Editor / Terminal line (or the detected default when blank) on the home folder.
+// The one route that takes a command line from the request: the person is testing what they are about to
+// save. Same guards as saving it (D4) and as running actions on a hosted worca.
+app.post('/api/actions/launchers/try', async (req, res) => {
+  if (!requireActions(req, res)) return;
+  const kind = req.body?.kind;
+  if (kind !== 'editor' && kind !== 'terminal') return badRequest(res, 'kind must be editor or terminal');
+  const line = typeof req.body?.line === 'string' ? req.body.line.trim() : '';
+  if (line.length > 2000) return badRequest(res, 'the command is too long');
+  const folder = os.homedir();
+  let l;
+  try {
+    l = line ? buildLauncherCommand(line, { folder }) : builtinLaunch(kind, folder, detectBuiltins({ overrides: {} }));
+  } catch (e) { return res.status(409).json({ error: e.message, code: e.code || 'NOT_AVAILABLE' }); }
+  const r = await launchAndWatch(l, { spawn });
+  if (!r.ok) return res.status(409).json({ error: r.error, code: 'LAUNCH_FAILED' });
+  res.json({ ok: true, folder });
+});
+
+app.get('/api/runs/:id/actions', async (req, res) => {
+  const row = runRowForScope(req, res); if (!row) return;
+  try {
+    res.json({
+      enabled: actionsEnabledHere(req), runStatus: row.status, finished: ['done', 'stopped', 'error'].includes(row.status),
+      workspace: row.target === 'workspace',
+      // A workspace row can have an empty projects list (old or partial rows): never index [0] blindly.
+      estimate: { lastSetupMs: (() => { const pk = membersOfRow(row)[0]?.projectKey; return pk ? readActionsMeta(pk).lastSetupMs || null : null; })() },
+      members: await Promise.all(membersOfRow(row).map(async (m) => {
+        const cfg = readProjectActions(m.projectKey);
+        const rec = checkoutRecordsFor(row)?.members.find((x) => x.projectKey === m.projectKey) || null;
+        const pushed = m.br?.feature && m.projectDir ? await branchPushedTo(m.projectDir, m.br.feature) : null;
+        // Not checked out, but the branch is in another folder (the person's own clone): Check out would be refused,
+        // so the card offers that folder instead ("Use that folder", checkout useExisting).
+        const held = !rec && m.br?.feature && m.projectDir ? await worktreePathForBranch(m.projectDir, m.br.feature).catch(() => null) : null;
+        // Coarse, server-side: 'no-branch' | 'not-checked-out' | 'checked-out'. The card's finer view state
+        // (setting-up / setup-failed / ready / running / task-result) is memberViewState() in the browser.
+        const state = !m.br?.feature ? 'no-branch' : rec ? 'checked-out' : 'not-checked-out';
+        return { projectKey: m.projectKey, projectName: m.projectName, projectDir: m.projectDir, state, branch: m.br?.feature || null,
+          ...(held ? { heldBy: held } : {}),
+          worktreeDir: m.projectDir ? checkoutPathFor(row, m) : null, checkout: rec, pushed,
+          setupQueued: setupJobs.has(`${row.id}:${m.projectKey}`),
+          copyCommand: m.br?.feature && m.projectDir ? copyCommandText({ projectDir: m.projectDir, branch: m.br.feature, pushed }) : null,
+          setup: cfg.setup, actions: cfg.actions.map(({ id, label, kind, openUrl }) => ({ id, label, kind, openUrl })),
+          builtins: Object.entries(builtins()).filter(([k, v]) => v && cfg.builtins[k] !== false).map(([k, v]) => ({ key: k, label: v.label })) };
+      })),
+      stacks: row.target === 'workspace' ? readWorkspaceStacks(bareWorkspaceKey(row)) : [],
+      stackStates: [...stackStates.values()].filter((s) => s.runId === row.id),
+      instances: actions.listFor(row.id),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// D28: every running instance, with where it belongs (the History route's project segment).
+app.get('/api/actions/running', (req, res) => {
+  const rowOf = new Map();
+  res.json(actions.running().map((s) => {
+    if (!rowOf.has(s.runId)) rowOf.set(s.runId, findPipelineRowById(s.runId) || null);
+    const row = rowOf.get(s.runId);
+    const ws = row ? bareWorkspaceKey(row) : null;
+    return { ...s, workspaceId: ws, histKey: row ? (ws ? `workspaces/${ws}` : row.project_key) : null, runTitle: row?.title || null };
+  }));
+});
+
+// D28: scope-free stop for the sidebar and the header pill. Not gated by D4, like the scoped stop.
+app.post('/api/actions/instances/:instanceId/stop', async (req, res) => {
+  if (!noRawCommand(req, res)) return;
+  const id = String(req.params.instanceId || '');
+  if (!actions.get(id)) return res.status(404).json({ error: 'no such running action', code: 'NOT_FOUND' });
+  await actions.stop(id);            // false when it had already ended; still ok
+  res.json({ ok: true });
+});
+
+app.get('/api/projects/:key/actions', async (req, res) => {
+  const p = await tmProject(req, res); if (!p) return;
+  res.json({ config: readProjectActions(p.key), detected: builtins(), meta: { lastSetupMs: readActionsMeta(p.key).lastSetupMs || null },
+    enabled: actionsEnabledHere(req) });
+});
+
+// D4: an isolated agent must not plant a command that a person's later click, or the automatic setup
+// on Check out, would run as the server user. Not otherwise gated: an operator can prepare the config
+// while actions are off.
+app.put('/api/projects/:key/actions', async (req, res) => {
+  if (agentMayBeCaller(req)) return refuseAgentCaller(res);
+  const p = await tmProject(req, res); if (!p) return;
+  try {
+    res.json(writeProjectActions(p.key, req.body || {}));
+  } catch (e) {
+    if (e instanceof ActionConfigError) return res.status(400).json({ error: e.message, code: 'BAD_REQUEST', field: e.field });
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+/** The members' action ids and kinds, for stack validation: { [projectKey]: [{id, kind}] }. */
+const memberActionsOf = (members) =>
+  Object.fromEntries(members.map((m) => [m.projectKey, readProjectActions(m.projectKey).actions.map(({ id, kind }) => ({ id, kind }))]));
+
+app.get('/api/workspaces/:id/actions', async (req, res) => {
+  if (!WORKSPACE_KEY_RE.test(req.params.id)) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  const members = await workspaceMembers(req.params.id);
+  if (!members) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  const aliases = memberAliases(members);
+  res.json({ stacks: readWorkspaceStacks(req.params.id),
+    members: members.map((m) => ({ projectKey: m.projectKey, name: m.name, alias: aliases[m.projectKey],
+      actions: readProjectActions(m.projectKey).actions.map(({ id, label, kind }) => ({ id, label, kind })) })) });
+});
+
+app.put('/api/workspaces/:id/actions', async (req, res) => {
+  if (agentMayBeCaller(req)) return refuseAgentCaller(res);
+  if (!WORKSPACE_KEY_RE.test(req.params.id)) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  const members = await workspaceMembers(req.params.id);
+  if (!members) return res.status(404).json({ error: 'workspace not found', code: 'NOT_FOUND' });
+  try {
+    const { stacks } = normalizeStacks(req.body || {}, { memberActions: memberActionsOf(members) });
+    res.json({ stacks: await updateWorkspaceStacks(req.params.id, stacks) });
+  } catch (e) {
+    if (e instanceof ActionConfigError) return res.status(400).json({ error: e.message, code: 'BAD_REQUEST', field: e.field });
+    if (e?.code === 'NOT_FOUND') return res.status(404).json({ error: e.message, code: 'NOT_FOUND' });
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+// D3: "Try it" — the newest eligible finished run of the project, checked out if needed, then started.
+app.post('/api/projects/:key/actions/:actionId/try', async (req, res) => {
+  if (!requireActions(req, res) || !noRawCommand(req, res)) return;
+  if (!PROJECT_KEY_RE.test(req.params.key)) return badRequest(res, 'invalid project key');
+  // `branch LIKE '%"feature"%'` also matches `"feature":null`, and SQL cannot see retained work or
+  // liveness, so pick in JS from the newest few candidates.
+  const row = getDb().prepare(`SELECT * FROM pipelines WHERE project_key = ? AND target = 'project' AND archived_at IS NULL
+      AND status IN ('done','stopped','error') ORDER BY started_at DESC LIMIT 25`).all(req.params.key)
+    .find((r) => membersOfRow(r)[0]?.br?.feature && !retainedWorkFor(r) && !isLiveRun(r.id));
+  if (!row) return res.status(404).json({ error: 'No finished run yet.', code: 'NO_FINISHED_RUN' });
+  const action = readProjectActions(req.params.key).actions.find((a) => a.id === req.params.actionId);
+  if (!action) return res.status(404).json({ error: 'no such action', code: 'NOT_FOUND' });
+  try {
+    if (!checkoutRecOf(row.id, req.params.key)) await checkoutRun({ id: row.id, by: actorOf(req), isLive: isLiveRun, isFinishing: isFinishingRun });
+  } catch (e) { return sendCheckoutError(res, e); }
+  const m = memberFor(findPipelineRowById(row.id), req.params.key);
+  // 200 {runId, histKey, …snapshot} when started, 202 {runId, histKey, queued, instanceId} when queued behind setup.
+  return startOrQueue(req, res, row, m, action, { runId: row.id, histKey: row.project_key });
+});
+
+// ---------------------------------------------------------------------------
 // PR remotes (fork support). The ship-it dialog picks (1) the remote the feature
 // branch is pushed to and (2) the remote whose repo the PR is opened in — GitHub's
 // "compare across forks". Names are user-defined, so nothing is special-cased
@@ -5192,6 +5941,9 @@ app.post('/api/projects', async (req, res) => {
     discoverProject(normalizeProjectPath(body.path), { force: true })
       .then(() => emitChanged('team-metrics-changed', 'discovered'))
       .catch(() => { /* offline or not a git repo: discovery retries hourly */ });
+    // Its team policy at once too (MCP registry spec §11.2): removing a project drops its policy cache, so a re-added or
+    // re-cloned project's home must not read "no project here follows" (a greyed Team set) until the background discovery.
+    discoverPolicy(normalizeProjectPath(body.path), { force: true }).catch(() => { /* offline: the background discovery retries */ });
     res.json({ projects });
   } catch (err) {
     // addProject only throws on validation (empty/duplicate/not-a-directory), so
@@ -5223,6 +5975,7 @@ app.post('/api/projects/bulk', async (req, res) => {
             await discoverProject(p, { force: true });
             emitChanged('team-metrics-changed', 'discovered');
           } catch { /* offline or not a git repo: discovery retries hourly */ }
+          await discoverPolicy(p, { force: true }).catch(() => { /* offline: the background discovery retries */ });
         }
       })();
     }
@@ -5259,6 +6012,7 @@ async function startCloneJob(req) {
       discoverProject(project.path, { force: true })
         .then(() => emitChanged('team-metrics-changed', 'discovered'))
         .catch(() => { /* offline or not a git repo: discovery retries hourly */ });
+      discoverPolicy(project.path, { force: true }).catch(() => { /* offline: the background discovery retries */ });
     } catch (err) {
       Object.assign(job, { state: 'error', code: err instanceof CloneError ? err.code : 'failed', error: err && err.message ? err.message : String(err) });
     }
@@ -6089,6 +6843,12 @@ const settingsState = () => ({
   memoryDefragDefault: defragDefaultModel(),              // what "(default)" means there: the built-in's own model
   workspaceScan: workspaceScanModels(),                   // Settings › Runs › Workspaces: the STORED pick (null = the defaults)
   workspaceScanDefault: WORKSPACE_SCAN_DEFAULT_MODELS,    // what null means: Sonnet 5 · medium, project agents sonnet · medium
+  nightMode: nightModeSettings(),                         // night mode: the user layer (only the fields set)
+  nightModeEffective: resolveNightConfig({ user: nightModeSettings() }).config,   // no project: the global view
+  nightModeToggle: nightModeToggle(),                     // auto | on | off (live switch)
+  actions: actionsSettings(),                             // Settings › Runs › Actions (issue #529)
+  actionsDetected: autoDetectedBuiltins(),                // what Editor / Terminal fall back to when left blank (null = none found)
+  actionsGate: { remote: REMOTE_MODE, enabled: actionsEnabledHere() },
 });
 
 /** Settings ▸ Auto workflow model: the stored id + what the classifier will actually use
@@ -6186,6 +6946,9 @@ app.get('/api/credentials', async (req, res) => {
 // which cannot read worca's database. Its MCP child then only relays each JSON-RPC line
 // here; the worca tools run in this process (createAskToolServer), in the chat owner's
 // billing context. One token per turn, loopback callers only, dropped when the turn ends.
+// set_away_now / set_run_away_mode: the parent's half, over the settings and THIS process's live runs.
+const askAwaySwitch = createAwaySwitch({ liveRun: liveRunEntry, runs, emitChanged });
+
 const askRelays = new Map();   // token -> { rpc, out, billTo, owner }
 
 function askAgentRelay({ threadId, reader, web = null }) {
@@ -6205,6 +6968,14 @@ function askAgentRelay({ threadId, reader, web = null }) {
         if (!live || !live.orch || typeof live.orch.liveDiff !== 'function') return null;
         const out = await liveDiffOf(live).catch(() => null);
         return out && typeof out.patch === 'string' ? out.patch : null;
+      },
+      // Away mode on a live run (get_away_mode): its switch, mark and open question live only here.
+      readLiveNight: (id) => {
+        const live = liveRunEntry(id);
+        if (!live || !live.orch) return null;
+        const dir = live.projectDir || null;
+        return { status: live.orch.state?.status ?? live.status ?? null, night: live.orch.state?.night || null, waiting: live.orch.pendingQuestion != null,
+          projectDir: dir, projectKey: dir ? projectKey(dir) : null };
       },
     },
   });
@@ -6312,6 +7083,7 @@ app.post('/api/settings', async (req, res) => {
   const hasThemeKey = has('theme');
   const hasUiLevelKey = has('uiLevel');
   const hasAutoKey = has('autoWorkflowModel');
+  const hasNightKey = has('nightMode') || has('nightModeToggle');
   const autoModels = hasAutoKey ? await listModels('') : null;
   const hasPrDescKey = has('prDescriptionModel');
   const prDescModels = hasPrDescKey ? (autoModels || await listModels('')) : null;
@@ -6320,6 +7092,9 @@ app.post('/api/settings', async (req, res) => {
   const hasMemoryDefragKey = has('memoryDefrag');
   const defragModels = hasMemoryDefragKey ? (autoModels || await listModels('')) : null;
   const hasWorkspaceScanKey = has('workspaceScan');
+  const hasActionsKey = has('actions');
+  // D4: actions.editor / actions.terminal are command paths the built-ins route spawns as the server user.
+  if (hasActionsKey && agentMayBeCaller(req)) return refuseAgentCaller(res);
   const wsScanModels = hasWorkspaceScanKey ? (autoModels || defragModels || await listModels('')) : null;
   // #422: the title model is a SELECT over the catalog, so an id that is not a
   // catalog member is a client bug (or a stale option) — refuse it here rather
@@ -6361,6 +7136,14 @@ app.post('/api/settings', async (req, res) => {
     if (hasPrDescKey) assertPrDescriptionModelInput(body.prDescriptionModel ?? '', prDescModels);
     if (hasMemoryDefragKey) assertMemoryDefragModelInput(body.memoryDefrag, defragModels);
     if (hasWorkspaceScanKey) assertWorkspaceScanInput(body.workspaceScan, wsScanModels);
+    if (has('nightMode') && body.nightMode !== null) {
+      const { __unset, ...patch } = body.nightMode && typeof body.nightMode === 'object' && !Array.isArray(body.nightMode) ? body.nightMode : { __invalid: true };
+      if (patch.__invalid) throw new Error('nightMode must be an object or null');
+      if (__unset !== undefined && !Array.isArray(__unset)) throw new Error('nightMode.__unset must be a list of field names');
+      validateNightPatch(patch);
+    }
+    if (has('nightModeToggle')) assertNightModeToggleInput(body.nightModeToggle);
+    if (hasActionsKey) assertActionsInput(body.actions);
     if (has('sync')) assertSyncSettingsInput(body.sync);
     // Root first: it is the one key whose setter can still fail AFTER the asserts
     // above (an unusable path), so every other key's write must come after it or
@@ -6391,12 +7174,21 @@ app.post('/api/settings', async (req, res) => {
     if (hasMemoryDefragKey) await setMemoryDefragModel(body.memoryDefrag, { models: defragModels });
     if (hasWorkspaceScanKey) await setWorkspaceScanModels(body.workspaceScan, { models: wsScanModels });
     if (has('schedule')) await setScheduleDefaults(body.schedule && typeof body.schedule === 'object' ? body.schedule : {});
+    if (has('nightMode')) await setNightMode(body.nightMode);
+    if (has('nightModeToggle')) await setNightModeToggle(body.nightModeToggle);
     if (has('sync')) await setSyncDefaults(body.sync);
+    // Live runs re-evaluate their open question against the new night settings.
+    if (hasNightKey) for (const e of runs.values()) e.orch?.nightConfigChanged?.();
+    if (hasActionsKey) { await setActionsSettings(body.actions); builtinsDetected = null; }   // re-detect the built-ins lazily
     if (hasBudgetKey) emitChanged('budget-changed');
     // Other open tabs repaint their Settings cards (a stale tab could otherwise
     // "save" its old checkbox state over this one with no feedback to either).
-    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule') || has('sync')) emitChanged('settings-changed');
-    res.json({ ...settingsState(), ...(await autoModelState()), ...(await prDescriptionModelState()), chat: chatPrefs() });
+    if (hasAskKey || hasAskWeb || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasThemeKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasWorkspaceScanKey || has('schedule') || has('sync') || hasActionsKey || hasNightKey) emitChanged('settings-changed');
+    // Editor / Terminal: saved as typed; a program Worca cannot find comes back as a warning on its field.
+    const actionsWarnings = hasActionsKey ? Object.fromEntries(['editor', 'terminal']
+      .map((k) => [k, launcherWarning(actionsSettings()[k], { findOnPath: (n) => findOnPath(n) })]).filter(([, w]) => w)) : null;
+    res.json({ ...settingsState(), ...(await autoModelState()), ...(await prDescriptionModelState()), chat: chatPrefs(),
+      ...(actionsWarnings ? { actionsWarnings } : {}) });
   } catch (err) {
     // The setters throw only on an unusable path -> client error (400).
     return badRequest(res, err && err.message ? err.message : String(err));
@@ -6407,6 +7199,11 @@ app.post('/api/settings', async (req, res) => {
 // Per-project model/effort config + custom-model registry. Validation lives in
 // src/core/config.mjs; these routes are thin delegation (mirror /api/projects).
 // ---------------------------------------------------------------------------
+/** A project's night mode view: its own layer and the resolved config with per-field sources. */
+function projectNightMode(projectDir) {
+  return { project: readNightModePrefs(projectKey(projectDir)), ...effectiveNightConfig(projectDir) };
+}
+
 app.get('/api/config', async (req, res) => {
   const raw = req.query.projectDir;
   // No project selected yet (e.g. a fresh clone): still return the catalog so
@@ -6436,6 +7233,9 @@ app.get('/api/config', async (req, res) => {
     ]);
     res.json({
       config, models, steps: agentSteps(), efforts: EFFORTS,
+      // Night mode: the project's own layer plus what applies ({config, sources}) per field.
+      // Beside `config`, not in it: clients assign `config` to their whole config state.
+      nightMode: projectNightMode(projectDir),
       // The sub-agent model policy vocabulary is a FIXED alias enum (the CLI's Task
       // tool refuses catalog ids), so it ships beside `efforts` rather than being
       // derived from `models`.
@@ -6526,8 +7326,13 @@ app.patch('/api/config', async (req, res) => {
       await setActiveWorkflow(projectDir, active);
     }
     if (typeof body.humanInLoop === 'boolean') await setHumanInLoop(projectDir, body.humanInLoop);
+    if (body.nightMode !== undefined) {
+      // Night mode project layer (a patch; `null` resets to inherited). Validation errors → 400 below.
+      writeNightModePrefs(projectKey(projectDir), body.nightMode);
+      for (const e of runs.values()) if (e.projectDir === projectDir) e.orch?.nightConfigChanged?.();
+    }
     const config = await readRunConfig(projectDir);
-    res.json({ config });
+    res.json({ config, nightMode: projectNightMode(projectDir) });
   } catch (err) {
     // The config.mjs setters throw only on validation (unknown model/effort,
     // maxCycles < 1) -> client error, mirroring POST /api/config.
@@ -7693,12 +8498,18 @@ app.patch('/api/ask/threads/:id', async (req, res) => {
     const pick = body.model !== undefined || body.effort !== undefined;
     // Title keeps its original contract exactly: a PATCH that names none of the
     // fields still earns the title error, so pre-#397 callers see identical behaviour.
-    if (body.title !== undefined || (body.scope === undefined && !pick)) {
+    if (body.title !== undefined || (body.scope === undefined && body.mcpOff === undefined && !pick)) {
       const raw = body.title;
       if (typeof raw !== 'string' || !raw.trim() || raw.length > 120) {
         return badRequest(res, 'title must be a non-empty string of at most 120 characters');
       }
       patch.title = raw.trim();
+    }
+    if (body.mcpOff !== undefined) {
+      // MCP registry §9.4: the composer picker's switched-off sets and memberships, applied from the next turn.
+      const mo = validateMcpOff(body.mcpOff);
+      if (!mo.ok) return badRequest(res, mo.error);
+      patch.mcpOff = mo.value;
     }
     if (pick) {
       // The same check as the message POST. Awaited BEFORE the scope branch, so its
@@ -7720,6 +8531,7 @@ app.patch('/api/ask/threads/:id', async (req, res) => {
       delete base.projectDir;
       delete base.projectKey;
       delete base.workspaceId;
+      delete base.projectSource;
       patch.context = { ...base, ...sv.scope };
     }
     const thread = askUpdateThread(id, patch);
@@ -7898,6 +8710,7 @@ function askApplyPin(ctx, pin) {
   delete out.projectDir;
   delete out.projectKey;
   delete out.workspaceId;
+  delete out.projectSource;   // MCP registry §9.1: the fallback tag goes with the target keys
   return { ...out, ...pin };
 }
 
@@ -7928,9 +8741,10 @@ function askWebAccessFor(threadId, ctx) {
 /** The system prompt of ONE Ask turn: the rules, the catalog, and — only when the chat's
  *  "Create and run scripts" pref is on (W20) — the scripts section with the runtimes this host
  *  actually has (the python probe, cached 60 s); plus the web section when `web` (askWebAccess()
- *  for this turn) is on. Memory is mounted, not rendered. */
-async function askSystemPromptFor(catalog, { web = null } = {}) {
-  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT, web });
+ *  for this turn) is on, and the MCP servers section when the turn has registry copies (`mcp`,
+ *  askMcpPromptInput()). Memory is mounted, not rendered. */
+async function askSystemPromptFor(catalog, { web = null, mcp = null } = {}) {
+  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT, web, mcp });
 }
 
 /** "scheduled Sat Sep 19, 02:00 (run 1a2b…)" / "repeats: Every weekday at 02:00 (sch_…)" / "proposes: …" — or ''. */
@@ -7945,6 +8759,57 @@ function askCardScheduleLine(b, tz = null) {
   const s = b.card && b.card.schedule;
   if (b.state === 'proposed' && s) return s.kind === 'repeat' ? `proposes: ${s.sentence}` : s.kind === 'after' ? `proposes: ${s.text}` : `proposes: once at ${s.when}`;
   return '';
+}
+
+/** One run's header shape by pipeline id, scoped to a store key when known (any key otherwise), or null.
+ *  `home` = the run's #history route prefix (context chips); never rendered into the header. */
+function askRunByPipelineId(pipelineId, key) {
+  const row = (key ? lookupPipelineRow(key, pipelineId) : null) || findPipelineRowById(pipelineId);
+  if (!row) return null;
+  const home = row.workspace_key ? `workspaces/${row.workspace_key}` : (row.project_key || null);
+  return { ...askRunFromPipelineRow(row), home };
+}
+
+/** A live run's header shape from the runs Map (the app run id), or null. `home` (context chips) only
+ *  once the pipeline id is known: the run-id prefix fallback is not the id a later turn resolves, so
+ *  contextEntries skips a run without one. (The LIVE entry really is camelCase — no row mapping.) */
+function askLiveRun(runId) {
+  const entry = runs.get(runId);
+  if (!entry) return null;
+  const home = !entry.pipelineId ? null
+    : entry.workspaceId ? `workspaces/${entry.workspaceId}`
+      : (entry.projectDir ? projectKey(entry.projectDir) : null);
+  return {
+    id: entry.pipelineId || runId.slice(0, 8), title: entry.title || '',
+    status: entry.status || '', startedAt: entry.startedAt || '', branch: null, home,
+  };
+}
+
+/** Conversation chips: resolve one finished turn's mentioned refs (contexts.mjs mentionedRefs) exactly like
+ *  the page's — project and workspace names, a run's title and home, a live run through the runs Map —
+ *  dropping any that do not resolve. Each entry is marked source 'chat'. Lookups are individually guarded. */
+async function resolveAskMentions(refs) {
+  let projects = null;
+  const out = [];
+  for (const ref of refs) {
+    const header = {};
+    try {
+      if (ref.kind === 'project') {
+        projects ??= await listProjects();
+        const p = projects.find((x) => x.key === ref.id);
+        if (p) header.project = { name: p.name, key: p.key };
+      } else if (ref.kind === 'workspace') {
+        const ws = await readWorkspace(ref.id);
+        if (ws) header.workspace = { name: ws.name, id: ws.id };
+      } else if (ref.kind === 'run') {
+        header.run = askRunByPipelineId(ref.id, ref.workspaceId ? `workspaces/${ref.workspaceId}` : ref.projectKey);
+      } else if (ref.kind === 'liveRun') {
+        header.run = askLiveRun(ref.id);
+      }
+    } catch { /* an unresolved ref earns no chip */ }
+    for (const e of askContextEntries({}, header)) out.push({ ...e, source: 'chat' });
+  }
+  return out;
 }
 
 /** Resolve the VALIDATED client context into the server-side shape
@@ -7965,10 +8830,12 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
   if (ctx.diffPath) out.diffPath = ctx.diffPath;   // client-supplied, already length-checked by validateClientContext
   if (ctx.runPage) out.runPage = ctx.runPage;       // an enum (RUN_PAGE_PARTS), validated the same way
   try {
-    if (ctx.projectKey || ctx.projectDir) {
+    // MCP registry §9.1: a fallback-tagged projectDir (the dropdown on a page about no project) names nothing.
+    const dir = ctx.projectSource === 'fallback' ? null : ctx.projectDir;
+    if (ctx.projectKey || dir) {
       const projects = await listProjects();
       const p = projects.find((x) =>
-        (ctx.projectKey && x.key === ctx.projectKey) || (ctx.projectDir && x.path === ctx.projectDir));
+        (ctx.projectKey && x.key === ctx.projectKey) || (dir && x.path === dir));
       if (p) out.project = { name: p.name, key: p.key };
     }
   } catch { /* absent line */ }
@@ -8020,19 +8887,13 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
   } catch { /* absent line */ }
   try {
     if (ctx.pipelineId) {
-      const key = ctx.workspaceId ? `workspaces/${ctx.workspaceId}` : out.project?.key;
-      const row = (key ? lookupPipelineRow(key, ctx.pipelineId) : null) || findPipelineRowById(ctx.pipelineId);
-      if (row) out.run = askRunFromPipelineRow(row);
-    } else if (ctx.runId && runs.has(ctx.runId)) {
-      const entry = runs.get(ctx.runId);
-      out.run = {
-        id: entry.pipelineId || ctx.runId.slice(0, 8), title: entry.title || '',
-        status: entry.status || '', startedAt: entry.startedAt || '', branch: null,
-      };
+      const run = askRunByPipelineId(ctx.pipelineId, ctx.workspaceId ? `workspaces/${ctx.workspaceId}` : out.project?.key);
+      if (run) out.run = run;
+    } else if (ctx.runId) {
+      const run = askLiveRun(ctx.runId);
+      if (run) out.run = run;
     }
   } catch { /* absent line */ }
-  // (the ctx.runId branch reads the LIVE runs-Map entry, which really is
-  // camelCase — only the DB pipeline row needs askRunFromPipelineRow)
   try {
     const links = askListRunLinks(threadId).slice(0, ASK_LIMITS.headerRuns).map((l) => {
       const live = runs.get(l.runId);
@@ -8052,7 +8913,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
         // workflowId once the user saved it; a run card keeps its pre-P3 line byte for byte.
         const wf = !!(b.card && b.card.type === 'workflow');
         if (wf && b.state === 'building') continue;   // transient (no name yet) — never worth a header line
-        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'workspace')) {
+        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'workspace' || b.card.type === 'actions' || b.card.type === 'away')) {
           cards.push({ id: b.id, type: b.card.type, state: b.state, summary: b.card.summary || '' });
           continue;
         }
@@ -8116,7 +8977,7 @@ function askSignedIn(req) {
   return who.source === 'local' ? null : who.name;
 }
 
-async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, files = [], synthetic = null, signedIn = null, reader = null }) {
+async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, files = [], synthetic = null, signedIn = null, reader = null, mcpOff = undefined }) {
   // §6.2.2 ATOMIC re-check + slot reservation. Today every await between the
   // top 409/429 pair and here resolves in microtasks (validateModelEffort ->
   // composeCatalog; askBuildCatalog -> three synchronous better-sqlite3
@@ -8148,7 +9009,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // Writes. Store the LAST context + model/effort on the thread (§6.5 tail, D8).
     // `ctx` (pin-merged) rather than cv.context: the stored row is what restores
     // the selector on reopen and what the MCP child reads for tool defaulting.
-    askUpdateThread(id, { context: ctx, model, effort });
+    askUpdateThread(id, { context: ctx, model, effort, ...(mcpOff !== undefined ? { mcpOff } : {}) });
     // §7.4 — NOTHING is stamped on the row before the 202: the thread stays
     // untitled (the header reads "Ask Worca") until the D13 background title
     // announces itself. titleWasAuto gates that call: a title given at THREAD
@@ -8190,11 +9051,19 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     const withText = attRows.map((a, i) => ({ id: a.id, name: a.name, bytes: a.bytes, kind: a.kind, mime: a.mime, text: files[i].text }));
     const { inline, listed } = askSelectInlineAttachments(withText);
     const headerCtx = await resolveAskContext(id, ctx, listed, userMsg.id, { signedIn });
+    // Context chips: accumulate the project/run/workspace/named page this turn ran in
+    // (origin first, deduped; contexts.mjs). Cosmetic — a failure must never fail the turn.
+    try { askAddThreadContexts(id, askContextEntries(ctx, headerCtx)); } catch (e) {
+      console.error(`[worca-ui] ask contexts not recorded: ${e && e.message ? e.message : e}`);
+    }
     // Web access (docs/guardrails.md "Web access"): resolved ONCE per turn — local settings ⊕ the pinned project's
     // team policy — so the prompt section, the sub-agent note and the MCP child's tools agree.
     const pinned = askPinnedScope(ctx);
     const web = askWebAccessFor(id, ctx);
-    const systemPrompt = await askSystemPromptFor(catalog, { web });
+    // MCP registry §9.1–9.3: General + the targets in play (the tagged dropdown fallback excluded), minus the chat's
+    // picker choices — resolved ONCE per turn, so the per-turn file, the spawn and the prompt section agree.
+    const mcp = await resolveAskMcp({ ctx, threadId: id, off: mcpOff !== undefined ? mcpOff : thread.mcpOff, model });
+    const systemPrompt = await askSystemPromptFor(catalog, { web, mcp: await askMcpPromptInput(mcp) });
     const header = askBuildContextHeader(headerCtx);
     const prompt = askBuildTurnPrompt(header, text, inline);
     const prior = askListMessages(id).filter((m) => m.seq < userMsg.seq);
@@ -8202,10 +9071,12 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     const attachmentNames = {};
     for (const a of askListAttachments(id)) attachmentNames[a.id] = a.name;
 
+    // A shared sign-in's name: the MCP child reads/marks notifications per person (step 3); Away mode
+    // switches are attributed to it.
+    const turnReader = reader || (thread.createdBy && askSharedOwner(thread) ? thread.createdBy : null);
     turn = createAskTurn({
       threadId: id, assistantMessageId: asstMsg.id, userMessageId: userMsg.id,
-      // A shared sign-in's name: the MCP child reads/marks notifications per person (step 3).
-      reader: reader || (thread.createdBy && askSharedOwner(thread) ? thread.createdBy : null),
+      reader: turnReader,
       prompt, systemPrompt, restoredPrompt,
       model, effort,
       resumeSessionId: thread.sessionId || null,
@@ -8214,6 +9085,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
       deterministicTitle,
       pinnedScope: pinned,                          // #397: proposal defaulting + mismatch flag
       web,
+      mcp: mcp.result,
       timeZone: ctx.timeZone || (thread.context && thread.context.timeZone) || null,   // scheduled runs: the user's clock
       memoryProject: headerCtx.project ? { key: headerCtx.project.key, name: headerCtx.project.name || '' } : null,   // native-rules revision: the turn mounts global + this project through --add-dir
       mock: mockEnabled({}) ? { card: mockAskCard(ctx, text) } : null, // R-F
@@ -8226,6 +9098,8 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         onOutOfTurn: (f) => broadcast({ ...f, threadId: id }),
         onCommentMutation: ({ runId }) => { emitDiffCommentsChanged(runId); },
         onWorktreeMutation: () => { emitAskWorktrees(id); },
+        // §9.1 (D17): at turn end, name the copies a worktree opened this turn brings into the next one.
+        mcpJoinNotice: () => askMcpJoinNotice({ before: mcp, ctx, threadId: id, off: askGetThread(id)?.mcpOff ?? null, model }),
         // A remember/forget in the MCP child is the same scope change a REST write makes (B29).
         // The key is parsed out of worca's OWN tool result, never written by the model; shape-check
         // it anyway before it rides a broadcast (I2-#22).
@@ -8236,6 +9110,9 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         // the open Scripts tabs drop their list and the composer marks its script list dirty.
         onScriptMutation: () => { emitChanged('scripts-changed', 'updated'); },
         trackRun: (input, { pin } = {}) => askTrackRun(id, input, pin ?? null),
+        // set_away_now / set_run_away_mode: the parent applies what the MCP child validated.
+        awaySwitch: (req) => askAwaySwitch(req, { actor: turnReader || 'local' }),
+        resolveMentions: resolveAskMentions,
         // pause / resume / skip / mark-read in the MCP child: the Schedules page and the badges repaint.
         onScheduleMutation: () => { emitChanged('schedules-changed', 'ask'); emitChanged('notifications-changed'); },
       },
@@ -8306,6 +9183,9 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
     }
     const cv = validateClientContext(body.context);
     if (!cv.ok) return badRequest(res, cv.error);
+    // MCP registry §9.4: the composer sends the picker's choices with every message; they decide this turn and are stored.
+    const mo = body.mcpOff === undefined ? { ok: true, value: undefined } : validateMcpOff(body.mcpOff);
+    if (!mo.ok) return badRequest(res, mo.error);
     // #397: explicit pin beats page context, per field. A context carrying its own
     // `pinned` verdict is authoritative — the selector-aware client already merged
     // (true) or explicitly chose Auto (false). A context WITHOUT one comes from a
@@ -8360,15 +9240,44 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
       }
     }
 
-    const r = await startAskTurn({ threadId: id, thread, ctx, model: mv.model, effort: mv.effort, text, files, signedIn: askSignedIn(req), reader: askViewer(req) });
+    const r = await startAskTurn({ threadId: id, thread, ctx, model: mv.model, effort: mv.effort, text, files, signedIn: askSignedIn(req), reader: askViewer(req), mcpOff: mo.value });
     if (!r.ok) return res.status(r.status).json({ error: r.error, ...(r.budget ? { budget: r.budget } : {}) });
     // `attachments` carries the store-minted ids so the sender's own echo can key
     // image thumbnails and the thread budget off them (the ask-message broadcast
     // may have raced ahead of this response, or been missed on a brand-new thread).
-    res.status(202).json({ userMessageId: r.userMessageId, assistantMessageId: r.assistantMessageId, attachments: r.attachments });
+    res.status(202).json({
+      userMessageId: r.userMessageId, assistantMessageId: r.assistantMessageId, attachments: r.attachments,
+      // the thread's context chips after this turn's merge, so the header repaints without a re-fetch
+      contexts: askGetThread(id)?.contexts ?? [],
+    });
   } catch (err) {
     // startAskTurn never throws (it returns {ok:false,…}); only the route's own
     // pre-checks can land here, so there is no slot to release.
+    res.status(500).json({ error: err && err.message ? err.message : String(err) });
+  }
+});
+
+// MCP registry §9.4: the composer picker's data — the same targets in play and resolver as the turn. `threadId`
+// adds the thread's open worktrees and stored choices; a body `mcpOff` overrides them (a thread-less chat);
+// `model` (the composer's) sets the §5.6 tool-name limit.
+app.post('/api/ask/mcp-preview', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const cv = validateClientContext(body.context);
+    if (!cv.ok) return badRequest(res, cv.error);
+    let thread = null;
+    if (body.threadId !== undefined) {
+      const tid = askIdParam(res, body.threadId, 'thread');
+      if (!tid) return;
+      thread = askGetThread(tid);
+      // Someone else's thread is a 404, like every /api/ask/threads/:id route on a shared deployment.
+      if (!thread || !askThreadVisible(thread, req)) return res.status(404).json({ error: 'thread not found' });
+    }
+    const mo = body.mcpOff === undefined ? { ok: true, value: thread ? thread.mcpOff : null } : validateMcpOff(body.mcpOff);
+    if (!mo.ok) return badRequest(res, mo.error);
+    if (body.model !== undefined && (typeof body.model !== 'string' || !body.model || body.model.length > 200)) return badRequest(res, 'model must be a model id');
+    res.json(await askMcpPreview({ ctx: cv.context, threadId: thread ? thread.id : null, off: mo.value, model: body.model ?? null }));
+  } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
 });
@@ -8504,9 +9413,9 @@ async function startMetricsEventTurn(threadId, block) {
   const state = block.state === 'declined' ? 'declined' : block.state === 'failed' ? 'failed' : 'applied';
   const result = card.result || null;
   // One event turn for every non-workflow card; the type picks the wording. Metrics is the fallback.
-  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' ? card.type : 'metrics';
-  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, workspace: workspaceEventPrompt, metrics: metricsEventPrompt }[kind];
-  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, workspace: workspaceNoticeText, metrics: metricsNoticeText }[kind];
+  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'actions' || card.type === 'away' ? card.type : 'metrics';
+  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, workspace: workspaceEventPrompt, actions: actionsEventPrompt, away: awayEventPrompt, metrics: metricsEventPrompt }[kind];
+  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, workspace: workspaceNoticeText, actions: actionsNoticeText, away: awayNoticeText, metrics: metricsNoticeText }[kind];
   const text = eventPrompt({ cardId: block.id, state, card, result });
   const notice = noticeText({ state, card, result });
   let mv = await validateModelEffort(thread.model, thread.effort);
@@ -8683,6 +9592,36 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
       const turn = await startMetricsEventTurn(id, block);
       return res.json({ block, turn });
     }
+    if (found.block.card && found.block.card.type === 'actions') {
+      // Actions card (docs/actions.md "Ask Worca"): proposed → applied | failed | declined. The config write happens
+      // HERE, behind the click, through the same core setters as PUT /api/projects/:key/actions and
+      // /api/workspaces/:id/actions — each re-validates — and behind the same D4 guard: an isolated agent must
+      // not plant a command a person's later click would run. Applying stores config; it starts nothing.
+      if (body.state !== 'applied' && body.state !== 'declined') return badRequest(res, 'state must be "applied" or "declined"');
+      if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
+      if (body.state === 'applied' && agentMayBeCaller(req)) return refuseAgentCaller(res);
+      if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
+      if (body.state === 'declined') {
+        const block = flipCard(id, cardId, { state: 'declined' });
+        if (!block) return res.status(409).json({ error: 'card vanished' });
+        const turn = await startMetricsEventTurn(id, block);
+        return res.json({ block, turn });
+      }
+      askCardBusy.add(cardId);
+      let block;
+      try {
+        let result;
+        try { result = await applyActionsChange(found.block.card); }
+        catch (err) {
+          const field = err && err.field ? ` (${err.field})` : '';
+          result = { ok: false, error: `${err && err.message ? err.message : String(err)}${field}`, code: (err && err.code) || 'ERROR' };
+        }
+        block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
+      } finally { askCardBusy.delete(cardId); }
+      if (!block) return res.status(409).json({ error: 'card vanished' });
+      const turn = await startMetricsEventTurn(id, block);
+      return res.json({ block, turn });
+    }
     if (found.block.card && found.block.card.type === 'clone') {
       // Clone card (docs/deploy-railway.md "First project"): proposed → cloning → applied | failed, or declined.
       // The clone happens HERE, behind the click, as the same job the Projects view starts (startCloneJob);
@@ -8714,12 +9653,14 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
       followCloneCard(id, cardId, job);
       return res.json({ block });
     }
-    if (found.block.card && (found.block.card.type === 'metrics' || found.block.card.type === 'policy')) {
+    if (found.block.card && ['metrics', 'policy', 'away'].includes(found.block.card.type)) {
       // Metrics / policy card (docs/team-metrics.md, docs/team-policy.md "Ask Worca"): proposed → applied | failed |
       // declined. The change is the outward-facing part — a branch on origin, a commit to the team's policy, a
       // marker on another repo, this machine's switch, the workspace's home — so it happens HERE, behind the
       // click, never in the model's tool.
-      const apply = found.block.card.type === 'policy' ? applyPolicyChange : applyMetricsChange;
+      // An Away mode card writes this machine's stored settings (user) or one project's layer, like POST /api/settings / PATCH /api/config.
+      const type = found.block.card.type;
+      const apply = type === 'policy' ? applyPolicyChange : type === 'away' ? applyAwayChange : applyMetricsChange;
       if (body.state !== 'applied' && body.state !== 'declined') return badRequest(res, 'state must be "applied" or "declined"');
       if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
       if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
@@ -8740,6 +9681,11 @@ app.post('/api/ask/threads/:id/cards/:cardId', async (req, res) => {
         block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
       } finally { askCardBusy.delete(cardId); }
       if (!block) return res.status(409).json({ error: 'card vanished' });
+      if (type === 'away' && block && block.state === 'applied') {
+        // What POST /api/settings / PATCH /api/config do after a write: refresh every surface and re-arm live runs.
+        emitChanged('settings-changed');
+        for (const e of runs.values()) { try { e.orch?.nightConfigChanged?.(); } catch { /* keep going */ } }
+      }
       const turn = await startMetricsEventTurn(id, block);
       return res.json({ block, turn });
     }
@@ -8861,7 +9807,8 @@ function startAgentGen(input) {
       entry.status = 'error';
       entry.events.push(event);
       broadcast(event);
-    });
+    })
+    .finally(() => { entry.settled = true; });
 
   return genId;
 }
@@ -9038,7 +9985,8 @@ function startScriptBench(request) {
       entry.status = 'error';
       entry.events.push(event);
       broadcast(event);
-    });
+    })
+    .finally(() => { entry.settled = true; });
 
   return benchId;
 }
@@ -9285,11 +10233,14 @@ app.get('/api/plugins', async (req, res) => {
     // request, and only when some plugin ships a python script (the probe caches 60 s).
     const anyPython = rows.some((p) => Number((p.scriptRuntimes || {}).python) > 0);
     const notice = anyPython ? await pythonNoticeFor([{ runtime: 'python' }]) : null;
+    const mcp = await readMcpStore();
     res.json({
       plugins: rows.map((p) => ({
         ...p,
         marketplaceName: p.marketplace && mkts[p.marketplace] ? mkts[p.marketplace].name : null,
         pythonMissing: !!(notice && Number((p.scriptRuntimes || {}).python) > 0),
+        // The uninstall confirm names the MCP sets its servers leave (§4.6).
+        mcpSets: mcpFootprint(mcp, (id) => id.startsWith(`plugin:${p.name}/`)).sets,
       })),
       orphans: listOrphanPluginData(),
     });
@@ -9422,6 +10373,7 @@ app.post('/api/plugins/:name/update', async (req, res) => {
     }
     const updated = await updatePlugin(name);
     reloadChatWorkers(name);
+    void retestServers((s) => s.startsWith(`plugin:${name}/`));   // MCP registry §7.3
     res.json(updated);
   } catch (err) {
     sendPluginError(res, err);
@@ -9708,6 +10660,211 @@ app.get('/api/plugins/:name/model-env', (req, res) => {
     id: model.id, label: model.label, efforts: model.efforts, env, secretKeys,
     ...(model.cost ? { cost: model.cost } : {}),
   });
+});
+
+// ---------------------------------------------------------------------------
+// /api/mcp/* — the MCP registry (docs/mcp-servers.md): the catalog, sets and their memberships,
+// project assignments. The store (src/core/mcp/store.mjs) owns every rule about the files and their shapes
+// and keeps user-keyed maps null-prototype; these handlers check ids and never return a secret value.
+// ---------------------------------------------------------------------------
+const MCP_REFUSED_KEYS = ['hash', 'consent', 'bases', 'seeded'];
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+// Bodies never set what only consent or the store writes (§12); `expectHash` is a precondition, not a value.
+app.use('/api/mcp', (req, res, next) => {
+  if (isPlainObject(req.body)) {
+    const bad = MCP_REFUSED_KEYS.find((k) => Object.hasOwn(req.body, k));
+    if (bad) return badRequest(res, `"${bad}" cannot be set here`);
+  }
+  next();
+});
+
+function sendMcpError(res, err) {
+  if (err instanceof McpStoreError) return res.status(err.status).json({ error: err.message });
+  res.status(500).json({ error: err?.message || String(err) });
+}
+function mcpSetId(req, res) {
+  const id = req.params.id;
+  if (!SET_ID_RE.test(id)) { badRequest(res, 'invalid set id'); return null; }
+  return id;
+}
+function mcpServerId(req, res, param = 'serverId') {
+  const id = req.params[param];
+  if (!SERVER_ID_RE.test(id)) { badRequest(res, 'invalid server id'); return null; }
+  return id;
+}
+/** `{ name, ...definition }` → [name, definition] with the name split off. */
+function mcpDefinitionBody(req) {
+  const { name, ...raw } = isPlainObject(req.body) ? req.body : {};
+  return [typeof name === 'string' ? name : '', raw];
+}
+
+app.get('/api/mcp/servers', async (_req, res) => {
+  try { res.json(await listCatalogView()); } catch (err) { sendMcpError(res, err); }
+});
+
+// Live checks for the Add / Edit definition form (§7.2); ?edit=1 skips the name check.
+app.post('/api/mcp/servers/validate', async (req, res) => {
+  const [name, raw] = mcpDefinitionBody(req);
+  try {
+    const { errors } = validateMcpDefinition(raw, { name, source: 'manual' });
+    if (req.query.edit !== '1') {
+      const { snapshot, catalog } = await viewContext();
+      // What P1 addManualServer refuses: a manual name in use, a base another id holds (a removed manual server keeps
+      // its own base, so its name can be added again) or a catalog server's declared name.
+      const held = Object.entries(snapshot.bases).some(([sid, b]) => b === name && sid !== `manual:${name}`);
+      if (Object.hasOwn(snapshot.manual, name) || held || catalog.some((e) => e.name === name)) errors.push(`the name "${name}" is taken`);
+    }
+    res.json({ errors });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/servers', async (req, res) => {
+  const [name, raw] = mcpDefinitionBody(req);
+  try {
+    const { catalog } = await viewContext();
+    await addManualServer(name, raw, { catalogNames: catalog.map((e) => e.name) });
+    res.json({ ok: true, id: `manual:${name}` });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/servers/:id', async (req, res) => {
+  const id = mcpServerId(req, res, 'id');
+  if (!id) return;
+  if (!id.startsWith('manual:')) return badRequest(res, 'only manual servers can be edited');
+  try {
+    await editManualServer(id.slice('manual:'.length), isPlainObject(req.body) ? req.body : {});
+    void retestServers((s) => s === id);
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.delete('/api/mcp/servers/:id', async (req, res) => {
+  const id = mcpServerId(req, res, 'id');
+  if (!id) return;
+  if (id.startsWith('plugin:')) return badRequest(res, 'a plugin server leaves with its plugin');
+  try {
+    const { catalog } = await viewContext();
+    const e = catalog.find((x) => x.id === id);
+    if (!e) return res.status(404).json({ error: 'server not found' });
+    if (e.source === 'policy' && e.retired !== true) return badRequest(res, 'a server team policy requires cannot be removed here');
+    await removeServerEverywhere(id);
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.get('/api/mcp/sets', async (_req, res) => {
+  try { res.json(await listSetsView()); } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/sets', async (req, res) => {
+  try { res.json(await createSet(req.body?.name)); } catch (err) { sendMcpError(res, err); }
+});
+
+app.get('/api/mcp/sets/:id', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try {
+    const v = await getSetView(id);
+    if (!v) return res.status(404).json({ error: 'set not found' });
+    res.json(v);
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/sets/:id', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try { await renameSet(id, req.body?.name); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+app.delete('/api/mcp/sets/:id', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try { await deleteSet(id); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/sets/:id/duplicate', async (req, res) => {
+  const id = mcpSetId(req, res);
+  if (!id) return;
+  try {
+    const team = id.startsWith('team-') ? teamDuplicateSource(await viewContext(), id) : undefined;
+    if (team === null) return res.status(404).json({ error: 'set not found' });
+    res.json(await duplicateSet(id, req.body?.name, { team }));
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/sets/:id/members/:serverId', async (req, res) => {
+  const id = mcpSetId(req, res);
+  const serverId = id && mcpServerId(req, res);
+  if (!serverId) return;
+  const patch = req.body;   // P1 putMember checks enabled, values and secrets
+  if (!isPlainObject(patch)) return badRequest(res, 'body must be an object');
+  try {
+    const ctx = await viewContext();
+    const entry = ctx.catalog.find((e) => e.id === serverId);
+    if (!entry) return res.status(404).json({ error: 'server not found' });
+    const opts = { def: entry.def };
+    if (id.startsWith('team-')) {
+      const t = teamMemberRefusal(ctx, id, serverId, patch);
+      if (t.status) return res.status(t.status).json({ error: t.error });
+      opts.team = { home: t.home };
+    }
+    await putMember(id, serverId, patch, opts);
+    retestAfterSave(ctx, id, serverId, patch);   // refused quietly while a required field is unfilled; off starts nothing
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+
+app.delete('/api/mcp/sets/:id/members/:serverId', async (req, res) => {
+  const id = mcpSetId(req, res);
+  const serverId = id && mcpServerId(req, res);
+  if (!serverId) return;
+  if (id.startsWith('team-')) return res.status(409).json({ error: 'Team set members come from team policy and cannot be removed here' });
+  try { await deleteMember(id, serverId); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+app.post('/api/mcp/sets/:id/members/:serverId/test', async (req, res) => {
+  const id = mcpSetId(req, res);
+  const serverId = id && mcpServerId(req, res);
+  if (!serverId) return;
+  try { res.json(await testMembership(id, serverId)); } catch (err) { sendMcpError(res, err); }
+});
+
+app.get('/api/mcp/projects/:key', async (req, res) => {
+  if (!PROJECT_KEY_RE.test(req.params.key)) return badRequest(res, 'invalid project key');
+  try { res.json(await projectAssignmentView(req.params.key)); } catch (err) { sendMcpError(res, err); }
+});
+
+app.put('/api/mcp/projects/:key', async (req, res) => {
+  if (!PROJECT_KEY_RE.test(req.params.key)) return badRequest(res, 'invalid project key');
+  const { sets, includeGeneral } = req.body || {};   // P1 setProjectAssignment checks both
+  try { await setProjectAssignment(req.params.key, { sets, includeGeneral }); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
+// MCP Team set (MCP registry spec §11.3, §12): consent routes. The definition, values and hash are read
+// from the cached policy, never the body; `expectHash` is only a precondition (409 when it moved on).
+// A home is a lowercase policy slug (the home part of SERVER_ID_RE's `policy:` ids, within its bound: deep subgroups make
+// long slugs); ids are checked before any lookup.
+const MCP_HOME_RE = /^(?=.{1,1024}$)[a-z0-9_][a-z0-9._-]*(?:\/[a-z0-9_][a-z0-9._-]*)*$/;
+function mcpHome(req, res) {
+  const home = req.params.home;
+  if (!MCP_HOME_RE.test(home)) { badRequest(res, 'home must be a lowercase policy slug'); return null; }
+  return home;
+}
+for (const action of ['install', 'turn-on', 'update']) {
+  app.post(`/api/mcp/teams/:home/members/:serverId/${action}`, async (req, res) => {
+    const home = mcpHome(req, res); if (!home) return;
+    const serverId = mcpServerId(req, res); if (!serverId) return;
+    const expectHash = req.body?.expectHash;
+    if (typeof expectHash !== 'string' || !/^[0-9a-f]{64}$/.test(expectHash)) return badRequest(res, 'expectHash must be the hash the consent dialog showed');
+    try { res.json({ ok: true, ...(await teamAction(action, home, serverId, { expectHash })) }); }
+    catch (err) { sendMcpError(res, err); }
+  });
+}
+app.post('/api/mcp/teams/:home/forget', async (req, res) => {
+  const home = mcpHome(req, res); if (!home) return;
+  try { await teamForget(home); res.json({ ok: true }); }
+  catch (err) { sendMcpError(res, err); }
 });
 
 // ---------------------------------------------------------------------------
@@ -10227,6 +11384,23 @@ export async function bootMaintenance({ log } = {}) {
     console.error(`[worca-ui] legacy worktree sweep failed: ${err && err.message ? err.message : err} — nothing was removed`);
   }
 
+  // Actions (issue #529): reap orphaned action processes, mark interrupted setups, release
+  // until-pr checkouts whose PR closed (D11) and apply the checkout cap (D12).
+  try {
+    const orphans = await reapOrphans({ pidFile: actionsPidFileNow() });
+    if (orphans) console.log(`[worca-ui] actions: stopped ${orphans} orphaned process(es) from a previous server`);
+    const interrupted = markInterruptedSetups();
+    const { released } = await releaseKeptCheckouts({ busy: busyActionRunIds(), stopServices: stopCheckoutServices });
+    const { maxCheckouts } = actionsSettings();
+    const { evicted } = maxCheckouts
+      ? await enforceCheckoutCap({ max: maxCheckouts, busy: busyActionRunIds(), stopServices: stopCheckoutServices })
+      : { evicted: [] };
+    summary.actions = { orphans, interrupted, released: released.length, evicted: evicted.length };
+  } catch (err) {
+    summary.actions = { orphans: 0, interrupted: 0, released: 0, evicted: 0 };
+    console.error(`[worca-ui] actions boot maintenance failed: ${err?.message || err}`);
+  }
+
   // Ask Worca (§6.2): mark turns orphaned by a restart, sweep stale empty threads.
   try {
     const interrupted = sweepStreamingMessages();
@@ -10269,6 +11443,14 @@ export async function bootMaintenance({ log } = {}) {
   } catch (err) {
     summary.bench = { removed: 0 };
     console.error(`[worca-ui] bench sweep failed: ${err && err.message ? err.message : err}`);
+  }
+
+  // MCP registry (§4.4): a plugin can become honoured with no install event (a
+  // host API bump, a linked plugin's edit), so persist the bases it still lacks.
+  try {
+    await reconcileMcpStore();
+  } catch (err) {
+    console.error(`[worca-ui] MCP registry reconcile failed: ${err && err.message ? err.message : err}`);
   }
   return summary;
 }
@@ -10340,7 +11522,7 @@ if (isMain) {
   const shutdown = (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    channelHost.stop().finally(() => process.exit(exitCodeFor(signal)));
+    Promise.allSettled([channelHost.stop(), actions.stopAll()]).finally(() => process.exit(exitCodeFor(signal)));
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -10394,6 +11576,14 @@ if (isMain) {
     } catch (err) { console.warn(`[worca-ui] team policy background: ${err?.message || err}`); }
     // Scheduled runs: boot catch-up + the 30 s tick (the server IS the scheduler).
     try { startScheduler(); } catch (err) { console.warn(`[worca-ui] scheduler: ${err?.message || err}`); }
+    startAwayHoursWatch();
+    // Keep policy until-pr (D11): release kept checkouts whose PR merged or closed, hourly.
+    const keptTimer = setInterval(() => {
+      releaseKeptCheckouts({ busy: busyActionRunIds(), stopServices: stopCheckoutServices })
+        .then(({ released }) => { if (released.length) emitChanged('pipelines-changed', 'updated'); })
+        .catch(() => {});
+    }, 3_600_000);
+    keptTimer.unref();
   });
 }
 

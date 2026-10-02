@@ -18,7 +18,7 @@ import { createPolicyChangeValidator, normalizeEditOps, applyEditOps } from './p
 
 async function scopePolicy(scope) {
   const out = await policyForScope(scope);
-  const payload = out.r && out.r.ok ? policyPayload(out.meta, out.r, { workspaceRun: out.workspaceRun, projectDir: out.projectDir }) : null;
+  const payload = out.r && out.r.ok ? await policyPayload(out.meta, out.r, { workspaceRun: out.workspaceRun, projectDir: out.projectDir }) : null;
   return { ...out, canPublish: !!payload?.canPublish, payload };
 }
 

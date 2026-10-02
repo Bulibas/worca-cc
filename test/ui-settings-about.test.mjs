@@ -1,11 +1,15 @@
 // test/ui-settings-about.test.mjs
 // Settings ▸ About card: version (linked to its release tag) + repo link, painted
 // from the `app` block of GET /api/settings.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const cssPath = fileURLToPath(new URL('../ui/public/style.css', import.meta.url));
@@ -41,12 +45,12 @@ const okSettings = () => ({
 });
 
 const settingsView = () => {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   return dom.window.document.querySelector('.view[data-view="settings"]');
 };
 
 async function boot({ settings = okSettings } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
@@ -98,7 +102,7 @@ test('About is the LAST General card, read-only, with no version baked into the 
   assert.equal(version.getAttribute('rel'), 'noopener noreferrer');
 
   // The two existing settings-view invariants stay intact (ui-settings-tooltips).
-  assert.equal(view.querySelectorAll('button.info-tip').length, 22, 'About adds no ⓘ icon (22 = 14 + Interface mode + Scheduled runs heading and failures field + My model credentials + Workspaces + PR description model + Sync before run heading and diverged field)');
+  assert.equal(view.querySelectorAll('button.info-tip').length, 26, 'About adds no ⓘ icon (26 = 14 + Interface mode + Scheduled runs heading and failures field + My model credentials + Workspaces + PR description model + Sync before run heading and diverged field + Actions + the Editor and Terminal commands + Away mode)');
   for (const hint of view.querySelectorAll('.hint')) assert.equal(hint.textContent.trim(), '');
 });
 

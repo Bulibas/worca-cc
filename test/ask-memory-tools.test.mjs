@@ -177,6 +177,10 @@ test('the REAL bundle follows the PAGE project through the thread context: proje
   const tools = createAskTools({ ...defaultToolDeps({ threadId: page.id }), ...defaultMemoryDeps({ threadId: page.id }) });
   const r = await tools.call('remember', { scope: 'project', name: 'pagefollow', body: 'From the page.\n' });
   assert.equal(r.projectKey, p.key, 'B30: the page project is resolved from projectDir');
+  // MCP registry §9.1: the generic dropdown fallback is not the page's project — memory never defaults to it.
+  const fallback = createThread();
+  updateThread(fallback.id, { context: { view: 'settings', projectDir: p.path, projectSource: 'fallback', pinned: false } });
+  assert.equal(await defaultMemoryDeps({ threadId: fallback.id }).memory.contextProjectKey(), null);
   assert.ok(await readMemory(memoryRoot(), projectScope(p.key), 'pagefollow'));
   const pinnedWs = createThread();
   updateThread(pinnedWs.id, { context: { view: 'new', workspaceId: 'wks-team-0000abcd', pinned: true } });

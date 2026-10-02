@@ -1,18 +1,22 @@
 // test/ui-settings-tabs.test.mjs — Guardrails/Models/Plugins are Settings TABS,
 // not views: the nav entries are gone, the panes live inside
 // [data-view="settings"] and the tab rides in the hash (#settings/<tab>).
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 const html = readFileSync(htmlPath, 'utf8');
 
 const settingsView = () =>
-  new JSDOM(html, { url: 'http://localhost:4319/' })
+  trackDom(new JSDOM(html, { url: 'http://localhost:4319/' }))
     .window.document.querySelector('.view[data-view="settings"]');
 
 test('the three nav entries are gone from BOTH menus', () => {
@@ -20,23 +24,23 @@ test('the three nav entries are gone from BOTH menus', () => {
     assert.equal(html.includes(`data-nav="${v}"`), false, `data-nav=${v} still present`);
 });
 
-test('settings holds a .seg tab strip with the eight tabs in mode order, General preselected', () => {
+test('settings holds a .seg tab strip with the nine tabs in mode order, General preselected', () => {
   const seg = settingsView().querySelector('#settings-tabs');
   assert.ok(seg, '#settings-tabs missing');
   assert.ok(seg.classList.contains('seg'), 'reuses the .seg segmented control');
   const btns = [...seg.querySelectorAll('button[data-tab]')];
-  assert.deepEqual(btns.map((b) => b.dataset.tab), ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'models', 'providers']);
-  assert.deepEqual(btns.map((b) => b.classList.contains('on')), [true, false, false, false, false, false, false, false]);
+  assert.deepEqual(btns.map((b) => b.dataset.tab), ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'mcp', 'models', 'providers']);
+  assert.deepEqual(btns.map((b) => b.classList.contains('on')), [true, false, false, false, false, false, false, false, false]);
   // Simple, then Advanced, then Expert: every mode sees a gap-free prefix of the strip.
   const rank = { simple: 0, advanced: 1, expert: 2 };
   const ranks = btns.map((b) => rank[b.dataset.minLevel]);
   assert.deepEqual(ranks, [...ranks].sort((a, b) => a - b), 'tabs ordered by level');
 });
 
-test('eight panes live inside settings, in tab order; only General starts visible', () => {
+test('nine panes live inside settings, in tab order; only General starts visible', () => {
   const panes = [...settingsView().querySelectorAll('.settings-pane')];
-  assert.deepEqual(panes.map((p) => p.dataset.tab), ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'models', 'providers']);
-  assert.deepEqual(panes.map((p) => p.classList.contains('hidden')), [false, true, true, true, true, true, true, true]);
+  assert.deepEqual(panes.map((p) => p.dataset.tab), ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'mcp', 'models', 'providers']);
+  assert.deepEqual(panes.map((p) => p.classList.contains('hidden')), [false, true, true, true, true, true, true, true, true]);
   // A pane must NOT be a routed view: showView's views.forEach would force
   // .hidden back on it at every navigation.
   for (const p of panes) {
@@ -85,7 +89,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 const click = (window, node) => node.dispatchEvent(new window.Event('click', { bubbles: true }));
 
 async function boot({ url = 'http://localhost:4319/' } = {}) {
-  const dom = new JSDOM(html, { url });
+  const dom = trackDom(new JSDOM(html, { url }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = WSStub;
@@ -219,13 +223,13 @@ test('General keeps the machine cards; Runs, Ask Worca and Models hold the moved
     'appearance-card', 'credentials-card', 'mode-settings-card', 'root-settings-card',
     'debug-spawn-settings-card', 'getting-started-card', 'about-card',
   ]);
-  assert.deepEqual(cardIds(view, 'runs'), ['budget-settings-card', 'sync-settings-card', 'schedule-settings-card', 'ws-scan-models-card', 'chat-settings-card']);
+  assert.deepEqual(cardIds(view, 'runs'), ['budget-settings-card', 'night-settings-card', 'sync-settings-card', 'schedule-settings-card', 'actions-settings-card', 'ws-scan-models-card', 'chat-settings-card']);
   assert.deepEqual(cardIds(view, 'ask'), ['ask-settings-card']);
   assert.deepEqual(cardIds(view, 'models'), ['title-model-settings-card', 'auto-model-settings-card', 'pr-description-model-settings-card']);
-  // Nothing got lost or duplicated in the move: the sixteen cards (dev's thirteen + Workspaces + PR description model + Sync before run) are all still here, once.
+  // Nothing got lost or duplicated in the move: the eighteen cards (dev's thirteen + Workspaces + PR description model + Sync before run + Actions + Away mode) are all still here, once.
   const all = [...view.querySelectorAll('section.card.settings-card')].map((c) => c.id);
-  assert.equal(all.length, 16);
-  assert.equal(new Set(all).size, 16);
+  assert.equal(all.length, 18);
+  assert.equal(new Set(all).size, 18);
 });
 
 test('each moved card keeps its level; Runs is a Simple tab, Ask Worca an Advanced one', () => {
@@ -273,4 +277,135 @@ test('the cost-pause banners open the Runs tab, where the budget now lives', () 
     'one delegated handler: the run page (the list card no longer carries a cost banner)');
   assert.match(js, /settingsBtn\.addEventListener\('click', \(\) => \{ location\.hash = 'settings\/runs'; \}\)/);
   assert.equal(/location\.hash = 'settings';/.test(js), false, 'no bare #settings jump left for the budget');
+});
+
+test('#settings/runs/actions opens Runs, scrolls to the Actions card and focuses its first field', async () => {
+  const { window } = await boot();
+  const seen = [];
+  window.Element.prototype.scrollIntoView = function () { seen.push(this.id); };
+  await go(window, 'settings/runs/actions');
+  await tick(); await tick();
+  assert.equal(shown(window, 'runs'), true);
+  assert.ok(seen.length && seen.every((id) => id === 'actions-settings-card'), JSON.stringify(seen));
+  assert.equal(window.document.activeElement?.closest('#actions-settings-card')?.id, 'actions-settings-card');
+  const before = seen.length;
+  await go(window, 'settings/runs/bogus');
+  await tick(); await tick();
+  assert.equal(shown(window, 'runs'), true, 'an unknown card still opens the tab');
+  assert.equal(seen.length, before, 'and scrolls nowhere');
+});
+
+test('Settings › Runs › Actions: blank Editor / Terminal say what detection found, or that nothing was', async () => {
+  const { window } = await boot();
+  const base = globalThis.fetch;
+  globalThis.fetch = window.fetch = (u, opts) => (String(u).includes('/api/settings')
+    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ root: '/tmp/x', default: '/tmp/x',
+      actions: { keep: 'never', editor: '', terminal: '' }, actionsDetected: { editor: null, terminal: 'Terminal' } }) })
+    : base(u, opts));
+  await go(window, 'settings/runs');
+  await tick(); await tick();
+  const doc = window.document;
+  const editor = doc.getElementById('act-editor');
+  assert.equal(editor.placeholder, 'None found on this machine');
+  assert.equal(doc.getElementById('act-editor-note').textContent, 'No editor was found on this machine. Enter the command or full path of an IDE or code editor that opens a folder.');
+  assert.equal(doc.getElementById('act-terminal').placeholder, 'Terminal (detected)');
+  assert.equal(doc.getElementById('act-terminal-note').textContent, 'Left blank, Worca uses Terminal.');
+  editor.value = 'zed';
+  editor.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.equal(doc.getElementById('act-editor-note').hidden, true, 'a typed command needs no note');
+  editor.value = '';
+  editor.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.equal(doc.getElementById('act-editor-note').hidden, false, 'cleared: the note is back');
+});
+
+test('Editor / Terminal: the dropdown (Browse… first, then the found apps) fills the command, the ⓘ shows the server OS examples, Try and a save warning land on the field', async () => {
+  const { window } = await boot();
+  const base = globalThis.fetch;
+  let tryAnswer = { ok: true, status: 200, json: async () => ({ ok: true }) };
+  let browseAnswer = { status: 'picked', path: 'C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe', label: 'Code', line: '"C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe" {folder}' };
+  const tries = [];
+  globalThis.fetch = window.fetch = (u, opts) => {
+    const s = String(u);
+    if (s.includes('/api/actions/launchers/try')) { tries.push(JSON.parse(opts.body)); return Promise.resolve(tryAnswer); }
+    if (s.includes('/api/actions/launchers/browse')) return Promise.resolve({ ok: true, status: 200, json: async () => browseAnswer });
+    if (s.includes('/api/actions/launchers')) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ platform: 'win32',
+        editor: [{ label: 'VS Code', line: '"C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe" {folder}' }], terminal: [],
+        examples: { editor: ['code {folder}', '"C:\\Program Files\\Microsoft VS Code\\Code.exe" --new-window {folder}'], terminal: ['wt -d {folder}'] },
+        detected: { editor: null, terminal: 'Command Prompt' }, browse: true }) });
+    }
+    if (s.includes('/api/settings')) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ root: '/tmp/x', default: '/tmp/x',
+        actions: { keep: 'never', editor: '', terminal: '' }, actionsDetected: { editor: null, terminal: 'Command Prompt' },
+        actionsWarnings: { terminal: 'wtt was not found on this machine. It is saved anyway; use Try to check it.' } }) });
+    }
+    return base(u, opts);
+  };
+  await go(window, 'settings/runs');
+  for (let i = 0; i < 4; i++) await tick();
+  const doc = window.document;
+  const sel = doc.getElementById('act-editor-choose');
+  const opts = [...sel.querySelectorAll('option')];
+  assert.equal(opts[0].hidden, true, 'the closed dropdown reads Browse… through a hidden placeholder');
+  assert.equal(opts[0].textContent, 'Browse…');
+  assert.deepEqual(opts.slice(1).map((o) => o.textContent), ['Browse…', 'VS Code'], 'Browse… first, then what was found');
+  assert.equal(sel.querySelector('optgroup').label, 'Found on this machine');
+  assert.equal(doc.getElementById('act-terminal-choose').querySelector('optgroup').label, 'No terminal found on this machine');
+  const tip = doc.getElementById('act-editor-tip');
+  assert.match(tip.textContent, /Examples on Windows:/);
+  assert.deepEqual([...tip.querySelectorAll('code')].map((c) => c.textContent), ['code {folder}', '"C:\\Program Files\\Microsoft VS Code\\Code.exe" --new-window {folder}']);
+  assert.equal(doc.getElementById('act-terminal-note').textContent, 'wtt was not found on this machine. It is saved anyway; use Try to check it.');
+  assert.ok(doc.getElementById('act-terminal-note').classList.contains('warn'));
+
+  const input = doc.getElementById('act-editor');
+  const pick = async (value) => { sel.value = value; sel.dispatchEvent(new window.Event('change', { bubbles: true })); for (let i = 0; i < 4; i++) await tick(); };
+  // A found app fills its command line; the dropdown goes back to its label.
+  await pick(opts[2].value);
+  assert.equal(input.value, '"C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe" {folder}');
+  assert.equal(sel.value, '');
+  assert.equal(doc.getElementById('act-editor-note').textContent, 'Picked VS Code. Try checks that it opens a folder; Save keeps it.');
+  // Browse… opens the system picker; its pick comes back as a command line.
+  input.value = '';
+  await pick('__browse__');
+  assert.equal(input.value, '"C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe" {folder}');
+  assert.equal(doc.getElementById('act-editor-note').textContent, 'Picked Code. Try checks that it opens a folder; Save keeps it.');
+  browseAnswer = { status: 'unsupported' };
+  await pick('__browse__');
+  assert.equal(doc.getElementById('act-editor-note').textContent, 'No app picker can open on this machine. Pick a found app or type the command.');
+
+
+  doc.getElementById('act-editor-try').click();
+  for (let i = 0; i < 4; i++) await tick();
+  assert.deepEqual(tries[0], { kind: 'editor', line: input.value });
+  const note = doc.getElementById('act-editor-note');
+  assert.equal(note.textContent, 'It opened your home folder as a test. Save to keep it.');
+  assert.ok(note.classList.contains('ok'));
+
+  tryAnswer = { ok: false, status: 409, json: async () => ({ error: "'zedd' is not recognized as an internal or external command", code: 'LAUNCH_FAILED' }) };
+  doc.getElementById('act-editor-try').click();
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(note.textContent, "It did not open: 'zedd' is not recognized as an internal or external command");
+  assert.ok(note.classList.contains('err'));
+  input.value = 'code {folder}';
+  input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.ok(!note.classList.contains('err'), 'editing clears the Try result');
+});
+
+test('Editor / Terminal: where no app picker can open, the dropdown reads "Pick an app" and has no Browse…', async () => {
+  const { window } = await boot();
+  const base = globalThis.fetch;
+  globalThis.fetch = window.fetch = (u, opts) => {
+    const s = String(u);
+    if (s.includes('/api/actions/launchers')) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ platform: 'linux', editor: [{ label: 'VS Code', line: 'code {folder}' }], terminal: [],
+        examples: { editor: ['code {folder}'], terminal: ['konsole --workdir {folder}'] }, detected: { editor: 'VS Code', terminal: null }, browse: false }) });
+    }
+    return base(u, opts);
+  };
+  await go(window, 'settings/runs');
+  for (let i = 0; i < 4; i++) await tick();
+  const opts = [...window.document.getElementById('act-editor-choose').querySelectorAll('option')];
+  assert.equal(opts[0].textContent, 'Pick an app');
+  assert.deepEqual(opts.slice(1).map((o) => o.textContent), ['VS Code']);
+  assert.ok(!opts.some((o) => o.value === '__browse__'));
 });
