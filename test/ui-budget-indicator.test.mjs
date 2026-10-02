@@ -353,6 +353,53 @@ test('the stack signs a loss, follows a weekly window, and drops Saved when the 
   assert.equal(none.getAttribute('aria-label'), 'Spent this month: $10,604.70');
 });
 
+// ---- expanded card with NO total limit: the one line ----
+const css = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8');
+function ruleBody(selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = css.match(new RegExp('(?:^|[\\s,}])' + escaped + '\\s*\\{([^}]*)\\}'));
+  return m ? m[1] : null;
+}
+
+test('the one line: month in ink and semibold, Spent small/thin/grey, Saved bigger/semibold/green', () => {
+  const mark = (sel, ...pats) => {
+    const body = ruleBody(sel);
+    assert.ok(body, `${sel} must exist`);
+    for (const p of pats) assert.match(body, p, `${sel} lost ${p}`);
+  };
+  // One row that never wraps; the mixed sizes share a baseline; the figures ellipsize as a net.
+  mark('.spend-ind-line', /display:\s*flex/, /align-items:\s*baseline/, /white-space:\s*nowrap/);
+  mark('.spend-ind-figs', /min-width:\s*0/, /overflow:\s*hidden/, /text-overflow:\s*ellipsis/);
+  mark('.spend-ind-period', /color:\s*var\(--ink\)/, /font-weight:\s*600/);
+  // Spent: ~11px, regular, --ink-2 (--ink-3 is 2.58:1 on --field, under verify:theme's 4.5:1).
+  mark('.spend-ind-figs', /font-size:\s*11px/, /color:\s*var\(--ink-2\)/);
+  mark('.spend-ind-spent .spend-ind-amt', /font-size:\s*11px/, /font-weight:\s*400/, /color:\s*var\(--ink-2\)/);
+  // Saved: semibold, the amount ~14px and the word a little smaller.
+  mark('.spend-ind-saved', /font-size:\s*12px/, /font-weight:\s*600/, /color:\s*var\(--ink\)/);
+  mark('.spend-ind-saved .spend-ind-amt', /font-size:\s*14px/);
+  // A gain greens the word too, in --green-ink-strong (--green-ink is 4.44:1 on the hover fill).
+  mark('.spend-ind-saved.pos,.spend-ind-saved.pos .spend-ind-amt', /color:\s*var\(--green-ink-strong\)/);
+  for (const sel of ['.spend-ind-line', '.spend-ind-period', '.spend-ind-figs',
+    '.spend-ind-spent .spend-ind-amt', '.spend-ind-saved', '.spend-ind-saved .spend-ind-amt']) {
+    assert.doesNotMatch(ruleBody(sel), /--ink-3|--green-ink\b|--red-ink/, `${sel}: a colour that fails 4.5:1`);
+  }
+});
+
+test('the one line restyles nothing the OpenRouter free block shares (.spend-ind-row/-label/-amt)', () => {
+  assert.equal(ruleBody('.spend-ind-row'),
+    'display:flex;align-items:baseline;justify-content:space-between;gap:8px;');
+  assert.equal(ruleBody('.spend-ind-label'), 'font-size:12px;font-weight:600;color:var(--ink-2);');
+  assert.equal(ruleBody('.spend-ind-amt'),
+    'font-family:var(--mono);font-size:12px;font-weight:600;color:var(--ink);');
+  // Every other rule reaching an amount is scoped under a one-line segment.
+  const sels = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{/g)]
+    .flatMap((m) => m[1].split(',').map((s) => s.trim()))
+    .filter((s) => s.includes('.spend-ind-amt') && s !== '.spend-ind-amt');
+  assert.ok(sels.length > 0);
+  for (const s of sels) assert.match(s, /^\.spend-ind-(?:spent|saved)[.\s]/, `${s} is not scoped to the one line`);
+  assert.doesNotMatch(css, /\.free-ind[^{]*\.spend-ind-(?:line|period|figs|spent|saved|sep)\b/);
+});
+
 test('railUsd: at most five glyphs unsigned, tiers decided on the ROUNDED value', () => {
   const cases = [
     [0, '$0'], [4.21, '$4'], [317.4, '$317'], [999.49, '$999'],

@@ -159,52 +159,123 @@ test('renderBudgetIndicator: states default/warn/over/no-limit + period label + 
   el = renderBudgetIndicator({ ...BUDGET, totalLimitUsd: null, blocked: false,
     resetPeriod: 'monthly' }, { doc });
   assert.equal(el.querySelector('.spend-ind-meter'), null);
-  assert.match(el.querySelector('.spend-ind-label').textContent, /Spent this month/);
+  assert.equal(el.querySelector('.spend-ind-row'), null, 'no limit is the one-line card');
+  assert.equal(el.querySelector('.spend-ind-spent').textContent, '$41 spent');
   assert.equal(el.querySelector('.spend-ind-sub'), null, 'the "no total limit" note is gone');
 });
 
-// ---- no total limit: Spent + Saved ----
-const NO_LIMIT = { ...BUDGET, totalLimitUsd: null, remainingUsd: null, blocked: false,
-  resetPeriod: 'monthly', windowSpendUsd: 10604.7, windowHumanHours: 1512, windowSavedUsd: 42315.3 };
+// ---- no total limit: one line, "Oct  $163 spent · $3,591 saved" ----
+// Local-calendar bounds, as costWindowStart/End build them, so the month reads the same in every TZ.
+const OCT = { windowStartMs: new Date(2026, 9, 1).getTime(), windowEndMs: new Date(2026, 10, 1).getTime() };
+const NO_LIMIT = { ...BUDGET, ...OCT, totalLimitUsd: null, remainingUsd: null, blocked: false,
+  resetPeriod: 'monthly', windowSpendUsd: 163.49, windowHumanHours: 60, windowSavedUsd: 3591.31 };
+const figs = (el) => el.querySelector('.spend-ind-figs').textContent;
 
-test('renderBudgetIndicator: no limit -> a Saved row under Spent, no meter, no "no total limit"', () => {
+test('renderBudgetIndicator: no limit -> ONE line: month, then "$163 spent · $3,591 saved"', () => {
   const el = renderBudgetIndicator(NO_LIMIT, { doc });
-  const rows = el.querySelectorAll('.spend-ind-row');
-  assert.equal(rows.length, 2, 'Spent and Saved');
-  assert.equal(rows[0].querySelector('.spend-ind-label').textContent, 'Spent this month');
-  assert.equal(rows[0].querySelector('.spend-ind-amt').textContent, '$10,604.70');
-  assert.ok(rows[1].classList.contains('spend-ind-saved'));
-  assert.equal(rows[1].querySelector('.spend-ind-label').textContent, 'Saved this month');
-  const amt = rows[1].querySelector('.spend-ind-amt');
-  assert.equal(amt.textContent, '$42,315.30');
-  assert.ok(rows[1].classList.contains('pos'), 'a gain is green (.pos → --green-ink-strong)');
-  assert.equal(rows[0].classList.contains('pos'), false, 'Spent stays neutral ink');
+  assert.equal(el.dataset.nav, 'stats');
+  assert.ok(el.classList.contains('spend-ind'), 'app.js routes the click via closest(".spend-ind")');
+  const lines = el.querySelectorAll('.spend-ind-line');
+  assert.equal(lines.length, 1, 'a single row element');
+  assert.equal(el.children.length, 1, 'nothing else in the card');
+  assert.equal(el.querySelector('.spend-ind-row'), null,
+    'the two-row shape is gone (.spend-ind-row stays the OpenRouter block\'s)');
+  const [period, figsEl] = lines[0].children;
+  assert.ok(period.classList.contains('spend-ind-period'), 'the month leads the line');
+  assert.equal(period.textContent, 'Oct');
+  assert.ok(figsEl.classList.contains('spend-ind-figs'));
+  assert.equal(figs(el), '$163 spent · $3,591 saved');
+  const spent = el.querySelector('.spend-ind-spent');
+  assert.equal(spent.querySelector('.spend-ind-amt').textContent, '$163');
+  assert.ok(spent.querySelector('.spend-ind-amt').classList.contains('mono'));
+  assert.equal(spent.classList.contains('pos'), false, 'Spent stays neutral');
+  assert.equal(el.querySelector('.spend-ind-sep').textContent, ' · ');
+  const saved = el.querySelector('.spend-ind-saved');
+  assert.equal(saved.textContent, '$3,591 saved');
+  assert.equal(saved.querySelector('.spend-ind-amt').textContent, '$3,591');
+  assert.ok(saved.querySelector('.spend-ind-amt').classList.contains('mono'));
+  assert.ok(saved.classList.contains('pos'), 'a gain is green (.pos → --green-ink-strong)');
   assert.equal(el.querySelector('.spend-ind-meter'), null);
   assert.equal(el.querySelector('.spend-ind-sub'), null);
   assert.doesNotMatch(el.textContent, /no total limit/i);
-  assert.match(el.title, /Saved this month: \$42,315\.30/);
-  assert.match(el.title, /human hours × your rate − spent/);
 });
 
-test('renderBudgetIndicator: a loss prints "−$"; the period word follows resetPeriod', () => {
-  const el = renderBudgetIndicator({ ...NO_LIMIT, resetPeriod: 'weekly', windowSavedUsd: -12.5 }, { doc });
+test('renderBudgetIndicator: the one line keeps the exact figures in the title and the accessible name', () => {
+  const el = renderBudgetIndicator(NO_LIMIT, { doc });
+  assert.equal(el.getAttribute('aria-label'),
+    'Spent this month: $163.49 · Saved this month: $3,591.31');
+  assert.match(el.title, /^Estimated spend this month: \$163\.4900 · resets /);
+  assert.match(el.title, /not authoritative billing/);
+  assert.match(el.title,
+    /\. Saved this month: \$3,591\.31 \(Saved = estimated human hours × your rate − spent\)$/);
+  const week = renderBudgetIndicator({ ...NO_LIMIT, resetPeriod: 'weekly', windowSavedUsd: -40 }, { doc });
+  assert.equal(week.getAttribute('aria-label'), 'Spent this week: $163.49 · Saved this week: −$40.00');
+  assert.match(week.title, /Saved this week: −\$40\.00/);
+});
+
+test('renderBudgetIndicator: whole dollars with grouping; from $100k the compact rail form', () => {
+  const line = (windowSpendUsd, windowSavedUsd) =>
+    figs(renderBudgetIndicator({ ...NO_LIMIT, windowSpendUsd, windowSavedUsd }, { doc }));
+  assert.equal(line(163.49, 3591.31), '$163 spent · $3,591 saved');
+  assert.equal(line(0, 0), '$0 spent · $0 saved');
+  assert.equal(line(0.5, 2.5), '$1 spent · $3 saved', 'rounded half up, like railUsd');
+  assert.equal(line(99999.49, 99999), '$99,999 spent · $99,999 saved', 'the widest whole-dollar pair');
+  assert.equal(line(99999.5, 100000), '$100k spent · $100k saved', 'the tier is decided on the rounded value');
+  assert.equal(line(120000, 1.2e6), '$120k spent · $1.2M saved');
+  assert.equal(line(10604.7, 42315.3), '$10,605 spent · $42,315 saved');
+});
+
+test('renderBudgetIndicator: a loss reads "−$40 net" in neutral ink; zero is not a loss', () => {
+  const el = renderBudgetIndicator({ ...NO_LIMIT, windowSavedUsd: -40 }, { doc });
   const saved = el.querySelector('.spend-ind-saved');
-  assert.equal(saved.querySelector('.spend-ind-label').textContent, 'Saved this week');
-  const amt = saved.querySelector('.spend-ind-amt');
-  assert.equal(amt.textContent, '−$12.50', 'U+2212 before the $, never "$-12.50"');
+  assert.equal(saved.textContent, '−$40 net', 'U+2212, and never "−$40 saved"');
+  assert.equal(saved.querySelector('.spend-ind-amt').textContent, '−$40');
   assert.equal(saved.classList.contains('pos'), false,
     'a loss is neutral ink, never green: the sign carries it (--red-ink fails 4.5:1 on hover)');
+  assert.equal(figs(el), '$163 spent · −$40 net');
+  assert.equal(figs(renderBudgetIndicator({ ...NO_LIMIT, windowSavedUsd: -150000 }, { doc })),
+    '$163 spent · −$150k net');
   const zero = renderBudgetIndicator({ ...NO_LIMIT, windowSavedUsd: 0 }, { doc })
     .querySelector('.spend-ind-saved');
-  assert.equal(zero.querySelector('.spend-ind-amt').textContent, '$0.00');
+  assert.equal(zero.textContent, '$0 saved');
   assert.ok(zero.classList.contains('pos'), 'zero is not a loss');
 });
 
-test('renderBudgetIndicator: no Saved figure in the payload -> Spent alone, never a fake $0', () => {
+test('renderBudgetIndicator: the period label — the window\'s month, or "Week"', () => {
+  const label = (over) => renderBudgetIndicator({ ...NO_LIMIT, ...over }, { doc })
+    .querySelector('.spend-ind-period').textContent;
+  assert.equal(label({}), 'Oct', 'windowStartMs names the month');
+  assert.equal(label({ windowStartMs: new Date(2026, 0, 1).getTime(),
+    windowEndMs: new Date(2026, 1, 1).getTime() }), 'Jan');
+  assert.equal(label({ windowStartMs: undefined }), 'Oct',
+    'without windowStartMs: the instant before the exclusive end (Nov 1 → Oct)');
+  assert.equal(label({ windowStartMs: new Date(2026, 11, 1).getTime(),
+    windowEndMs: new Date(2027, 0, 1).getTime() }), 'Dec', 'December closes on a January 1st');
+  assert.equal(label({ windowStartMs: new Date(2026, 8, 30, 20).getTime(),
+    windowEndMs: new Date(2026, 9, 31, 20).getTime() }), 'Oct',
+    'a server zone ahead of the browser: its Oct 1 midnight reads Sep 30 here — the midpoint still names Oct');
+  assert.equal(label({ windowStartMs: new Date(2026, 9, 1, 4).getTime(),
+    windowEndMs: new Date(2026, 10, 1, 4).getTime() }), 'Oct',
+    'a server zone behind the browser: its window runs Oct 1 04:00 → Nov 1 04:00 here — still Oct');
+  assert.equal(label({ windowStartMs: undefined, windowEndMs: undefined }), 'Month',
+    'no bounds at all: no month to name — "Month", short enough to fit the line');
+  const week = renderBudgetIndicator({ ...NO_LIMIT, resetPeriod: 'weekly',
+    windowStartMs: new Date(2026, 8, 28).getTime(), windowEndMs: new Date(2026, 9, 5).getTime() }, { doc });
+  assert.equal(week.querySelector('.spend-ind-period').textContent, 'Week',
+    'a week can straddle two months — no month name; "Week", not "This week", so $99,999 ×2 fits');
+  assert.equal(figs(week), '$163 spent · $3,591 saved');
+});
+
+test('renderBudgetIndicator: no Saved figure in the payload -> "Oct  $163 spent" alone, never a fake $0', () => {
   for (const windowSavedUsd of [undefined, null, Number.NaN]) {
     const el = renderBudgetIndicator({ ...NO_LIMIT, windowSavedUsd }, { doc });
-    assert.equal(el.querySelectorAll('.spend-ind-row').length, 1, `windowSavedUsd=${windowSavedUsd}`);
+    assert.equal(el.querySelectorAll('.spend-ind-line').length, 1, `windowSavedUsd=${windowSavedUsd}`);
+    assert.equal(el.querySelector('.spend-ind-period').textContent, 'Oct');
+    assert.equal(figs(el), '$163 spent');
+    assert.equal(el.querySelector('.spend-ind-saved'), null);
+    assert.equal(el.querySelector('.spend-ind-sep'), null, 'no dangling separator');
     assert.equal(el.querySelector('.spend-ind-sub'), null);
+    assert.equal(el.getAttribute('aria-label'), 'Spent this month: $163.49');
     assert.doesNotMatch(el.title, /Saved/);
   }
 });
@@ -212,8 +283,13 @@ test('renderBudgetIndicator: no Saved figure in the payload -> Spent alone, neve
 test('renderBudgetIndicator: with a total limit the card is unchanged — Saved never shows', () => {
   const el = renderBudgetIndicator({ ...BUDGET, windowSavedUsd: 900 }, { doc });
   assert.equal(el.querySelectorAll('.spend-ind-row').length, 1);
+  assert.equal(el.querySelector('.spend-ind-label').textContent, 'Spent this week');
+  assert.equal(el.querySelector('.spend-ind-amt').textContent, '$41.23', 'cents, as before');
   assert.equal(el.querySelector('.spend-ind-saved'), null);
+  assert.equal(el.querySelector('.spend-ind-line'), null, 'the one-line shape is the no-limit card only');
+  assert.equal(el.querySelector('.spend-ind-period'), null);
   assert.ok(el.querySelector('.spend-ind-meter'));
+  assert.equal(el.hasAttribute('aria-label'), false, 'the limit card keeps its visible label as its name');
   assert.doesNotMatch(el.title, /Saved/);
 });
 
