@@ -85,9 +85,10 @@ import {
 } from './memory-view.mjs';
 import { createScriptsController } from './scripts-view.mjs';
 import { renderRunPill, renderOverviewStrip, renderShipItStrip, renderRunningActionsCard, historyActionBadges, createActionsController } from './actions-view.mjs';
-import { renderProjectActionsEditor, renderStackEditor } from './actions-config-view.mjs';
+import { editorFieldEl, renderProjectActionsEditor, renderStackEditor } from './actions-config-view.mjs';
 import { createMcpView, mountProjectMcp, paintMcpResolution, paintAskMcpBlock, setMcpStripRenderer } from './mcp-view.mjs';
 import { createAskPanel } from './ask-panel.mjs';
+import { notify, withButton, fieldError, clearFieldErrors, cardAlert, trackDirty, splitMessage, BUTTON_DONE_MS } from './feedback.mjs';
 import { createVoiceController } from './ask-voice.mjs';
 import { renderGettingStarted, renderGettingStartedPill, bindWelcome, doneCount, allStepsDone, GETTING_STARTED_STEPS } from './getting-started.mjs';
 import { createGuideSpot } from './guide-spot.mjs';
@@ -182,7 +183,7 @@ import {
   runOutcomeModel, openSyncDialog, chooseSyncRefusal,
 } from './branch-sync.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
-import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindShort, awayAnswerRows, awayAnswersSummary, decidedByText } from '../../src/shared/away-mode/labels.mjs';
+import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindShort, awayAnswerRows, awayAnswerCounts, checksFirst, awayAnswersSummary, decidedByText } from '../../src/shared/away-mode/labels.mjs';
 import { parseWindow } from '../../src/shared/away-mode/activation.mjs';
 import { describeRun, describeNewRun, describeAwaySwitch } from '../../src/shared/away-mode/describe.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
@@ -365,7 +366,6 @@ const el = {
   settingsProjectsRootBrowse: $('#settingsProjectsRootBrowse'),
   settingsSave: $('#settingsSave'),
   settingsReset: $('#settingsReset'),
-  settingsMsg: $('#settingsMsg'),
 
   // Settings: budget & cost limits card
   budgetReadout: $('#budgetReadout'),
@@ -375,7 +375,6 @@ const el = {
   budgetHumanRate: $('#budgetHumanRate'),
   budgetSave: $('#budgetSave'),
   budgetReset: $('#budgetReset'),
-  budgetMsg: $('#budgetMsg'),
   // Team policy surfaces (team-policy design §11)
   teamCapsReadout: $('#teamCapsReadout'),
   policyLine: $('#policyLine'),
@@ -474,7 +473,6 @@ const el = {
   // Chat notifications (Settings card)
   chatSettingsHost: $('#chat-settings-host'),
   chatSettingsSave: $('#chatSettingsSave'),
-  chatSettingsMsg: $('#chatSettingsMsg'),
   settingsTabs: $('#settings-tabs'),
 
   // About (Settings card): read-only app identity, painted from /api/settings
@@ -528,6 +526,10 @@ const el = {
   reportCreate: $('#report-create-issue'),
   reportFiled: $('#report-filed'),
 };
+
+// #555: one dirty tracker per Settings card, keyed by card id (settingsCardDirty). Declared up here,
+// not beside postSettingsCard: the Chat and Root cards create theirs at top level further up the file.
+const settingsDirty = new Map();
 
 // ---------------------------------------------------------------------------
 // WebSocket
@@ -2350,20 +2352,25 @@ const gvApi = {
   // delete this API can refuse (the built-in, a 404, a 409) says WHY there and
   // the user has to read it (MAJ-17).
   deleteWorkflow: async (id) => {
-    const res = await fetch(`/api/workflows/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (res.ok) return { ok: true };
-    const d = await safeJson(res);
-    return { ok: false, status: res.status, error: (d && d.error) || `delete failed (${res.status})` };
+    try {
+      const res = await fetch(`/api/workflows/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (res.ok) return { ok: true };
+      const d = await safeJson(res);
+      return { ok: false, status: res.status, error: (d && d.error) || `delete failed (${res.status})` };
+    } catch (e) { return { ok: false, status: 0, error: `Worca did not answer (${e.message}).` }; }
   },
   // Import a JSON export (#421). 422 carries the shared validator's issues plus
   // `summary` (the one-line "agents you do not have" fold) when that is the cause.
   // dryRun: validate + list the script commands, write nothing (D18). acceptScripts: the user SAW them and
   // agreed — the server refuses a command-carrying graph without the literal true (409 SCRIPTS_UNCONFIRMED).
   importWorkflow: async (workflow, { dryRun = false, acceptScripts = false } = {}) => {
-    const res = await fetch('/api/workflows/import-json', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workflow, ...(dryRun ? { dryRun: true } : {}), ...(acceptScripts ? { acceptScripts: true } : {}) }),
-    });
+    let res;
+    try {
+      res = await fetch('/api/workflows/import-json', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workflow, ...(dryRun ? { dryRun: true } : {}), ...(acceptScripts ? { acceptScripts: true } : {}) }),
+      });
+    } catch (e) { return { ok: false, status: 0, error: `Worca did not answer (${e.message}).` }; }
     const d = await safeJson(res);
     if (!res.ok) {
       return { ok: false, status: res.status, error: (d && d.error) || `import failed (${res.status})`, summary: d && d.summary, issues: d && d.errors };
@@ -2389,10 +2396,7 @@ function gvEls() {
 // The composer's saved-list message line — the same (text, kind) shape as
 // setAgentsMsg/setPluginsMsg/... elsewhere in this file.
 function setGvSavedMsg(text, kind) {
-  const n = gvEls().savedMsg;
-  if (!n) return;
-  n.textContent = text || '';
-  n.className = 'form-msg' + (kind ? ` ${kind}` : '');
+  reportStatus(gvEls().savedMsg, 'form-msg', text, kind);
 }
 
 async function gvLoadAgents() {
@@ -2436,6 +2440,7 @@ async function initComposer() {
     doc: document, api: gvApi, storage: (() => { try { return window.localStorage; } catch { return null; } })(),
     portsFn: (node) => gvPortsFn(node),
     highlight: scriptHighlight,   // a script card's command/code params get the real editor
+    notify: (o) => notify(o),
   });
   gvComposer.mount();
   gvComposer.newCanvas();
@@ -2622,7 +2627,7 @@ function gvRenderSaved() {
           if (!ok) return;
           const r = await gvApi.deleteWorkflow(wf.id);
           if (!r.ok) { setGvSavedMsg(r.error, 'err'); return; }   // the row stays; say why
-          setGvSavedMsg('');
+          setGvSavedMsg(`Pipeline deleted: ${wf.name || wf.id}`, 'ok');
           gvRefreshSaved();
         });
         row.appendChild(del);
@@ -3879,8 +3884,8 @@ async function saveActiveWorkflow(workflowId) {
     const data = await safeJson(res);
     if (res.ok && data.config) state.config = data.config;
     scheduleOnboardingRefresh();   // a picked workflow ticks "Explore the built-in workflows"
-  } catch {
-    /* selection is best-effort; ignore transient errors */
+  } catch (e) {
+    notify({ tone: 'err', title: 'Could not select the workflow', detail: e.message, key: 'select-workflow' });
   }
 }
 
@@ -3893,7 +3898,10 @@ async function saveHumanInLoop(on) {
     const data = await safeJson(res);
     if (!res.ok) appendLog({ source: 'ui', level: 'error', text: `human in the loop: ${data.error || res.status}`, ts: Date.now() });
     else if (data.config) state.config = data.config;
-  } catch { /* best-effort, like saveActiveWorkflow */ }
+  } catch (e) {
+    if (el.humanInLoop) el.humanInLoop.checked = !on;   // the switch shows what is stored
+    notify({ tone: 'err', title: 'Could not change human-in-the-loop', detail: e.message, key: 'human-in-loop' });
+  }
 }
 if (el.humanInLoop) el.humanInLoop.addEventListener('change', () => saveHumanInLoop(el.humanInLoop.checked));
 
@@ -5817,7 +5825,7 @@ async function mountPluginSourcePane(src) {
       onPick: async (profile) => {
         const r = await pluginApi('PUT', '/api/source-bindings',
           { ...resolved.ref, plugin: src.plugin, sourceId: src.sourceId, profile });
-        if (!r.ok) return setFormMsg(r.data.error || 'could not save the profile binding', 'err');
+        if (!r.ok) return notify({ tone: 'err', title: 'Could not save the profile binding', detail: r.data.error || '', key: 'profile-binding' });
         mountPluginSourcePane(src);
       },
     }));
@@ -5839,7 +5847,7 @@ async function mountPluginSourcePane(src) {
       if (!ref) return;
       const r = await pluginApi('PUT', '/api/source-bindings',
         { ...ref, plugin: src.plugin, sourceId: src.sourceId, profile });
-      if (!r.ok) return setFormMsg(r.data.error || 'could not save the profile binding', 'err');
+      if (!r.ok) return notify({ tone: 'err', title: 'Could not save the profile binding', detail: r.data.error || '', key: 'profile-binding' });
       mountPluginSourcePane(src);
     },
   }) : null;
@@ -7566,9 +7574,7 @@ async function loadWorkspaces() {
 // ---- Workspaces management view --------------------------------------------
 
 function setWsMsg(text, kind) {
-  if (!el.wsMsg) return;
-  el.wsMsg.textContent = text || '';
-  el.wsMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+  reportStatus(el.wsMsg, 'form-msg', text, kind);
 }
 
 // ---- Workspaces list ----------------------------------------------------------------------
@@ -7768,8 +7774,12 @@ async function patchWsHome(id, metricsProject) {
   const r = await fetch(`/api/workspaces/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ metricsProject }) }).catch(() => null);
   if (r && r.ok) { closePluginModal(); await paintWsMetricsRows(true); return; }
   const j = r ? await safeJson(r) : null;
-  const modalBody = document.querySelector('#plugin-modal .tm-home-list');
-  modalBody?.after(Object.assign(document.createElement('small'), { className: 'hint err', textContent: j?.error || 'Could not save the metrics home' }));
+  const list = document.querySelector('#plugin-modal .tm-home-list');
+  if (!list) return;
+  // #555 D10: one error line, reused, instead of a new node per failed save.
+  let err = list.parentElement.querySelector('.tm-home-err');
+  if (!err) { err = Object.assign(document.createElement('small'), { className: 'hint err tm-home-err' }); list.after(err); }
+  err.textContent = (j && j.error) || 'Could not save the metrics home.';
 }
 
 // Delegated actions on the workspaces list: a row (or its chevron) opens the page.
@@ -8769,7 +8779,7 @@ async function deleteWorkspaceFromPage(id) {
     renderWorkspaces();
     // The list entry (showView) clears the message line on the way in: route first, note after.
     showView('workspaces', '');
-    setWsMsg(warnings.length ? `Deleted. Warnings: ${warnings.join('; ')}` : 'Workspace deleted.', warnings.length ? '' : 'ok');
+    setWsMsg(warnings.length ? `Deleted. Warnings: ${warnings.join('; ')}` : 'Workspace deleted.', warnings.length ? 'warn' : 'ok');
   } catch (err) {
     setWdError(screen, err.message);
   } finally {
@@ -9106,9 +9116,7 @@ async function loadAgentsView() {
 }
 
 function setAgentsMsg(text, kind) {
-  if (!el.agentsMsg) return;
-  el.agentsMsg.textContent = text || '';
-  el.agentsMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+  reportStatus(el.agentsMsg, 'form-msg', text, kind);
 }
 
 function agentChip(text, cls) {
@@ -10098,6 +10106,7 @@ function agentFormRead(host) {
   // this surface instead of merging into it.
   const forms = {};
   const problems = [];
+  const problemFields = [];   // [id input, rule] per offending row, for the editor's field errors
   for (const row of root.querySelectorAll('.agent-form-row')) {
     const read = readFormRow(row);
     if (!read || !read.def) continue;
@@ -10107,12 +10116,20 @@ function agentFormRead(host) {
     // (the later one silently replaced the stored form — decision P20). Keep the
     // first of a clash, name each rule once; both save paths refuse while
     // `problems` is non-empty.
-    if (!read.id) { if (!problems.includes('a form id is required')) problems.push('a form id is required'); continue; }
-    if (Object.hasOwn(forms, read.id)) { problems.push(`duplicate form id "${read.id}"`); continue; }
+    if (!read.id) {
+      if (!problems.includes('a form id is required')) problems.push('a form id is required');
+      problemFields.push([row.querySelector('.afm-id'), 'a form id is required']);
+      continue;
+    }
+    if (Object.hasOwn(forms, read.id)) {
+      problems.push(`duplicate form id "${read.id}"`);
+      problemFields.push([row.querySelector('.afm-id'), `duplicate form id "${read.id}"`]);
+      continue;
+    }
     forms[read.id] = read.def;
   }
   if (Object.keys(forms).length) meta.ask = { forms };
-  return { meta, markdown: root.querySelector('.agent-f-md').value, problems };
+  return { meta, markdown: root.querySelector('.agent-f-md').value, problems, problemFields };
 }
 
 async function openAgentEdit(card, a) {
@@ -10129,38 +10146,48 @@ async function openAgentEdit(card, a) {
   });
   pane.hidden = false;
   pane.querySelector('.agent-edit-cancel').onclick = () => { disposeAgentForm(pane); pane.hidden = true; };
+  // #555: a refusal is a card alert directly above this row of buttons.
+  pane.querySelector('.agent-edit-save').closest('.actions')?.setAttribute('data-card-actions', '');
   pane.querySelector('.agent-edit-save').onclick = () => saveAgentEdit(card, a, pane);
 }
 
+// #555: Save shows busy → "Saved"; a client rule is a field error on the offending input, a
+// server refusal a card alert above the buttons; success closes the pane and raises a toast.
 async function saveAgentEdit(card, a, pane) {
-  const msg = pane.querySelector('.agent-edit-msg');
-  msg.textContent = '';
-  msg.className = 'agent-edit-msg form-msg';
-  const body = agentFormRead(pane);
+  clearFieldErrors(pane);
+  cardAlert(pane, null);
+  const { problems, problemFields, ...body } = agentFormRead(pane);
   // The rules the store cannot see (decisions P20, P21): two rows with one form id, a row with none.
-  if (body.problems.length) { msg.textContent = body.problems.join(' · '); msg.className = 'agent-edit-msg form-msg err'; return; }
-  try {
+  if (problems.length) {
+    problemFields.forEach(([input, rule], i) => fieldError(input, rule, { focus: i === 0 }));
+    return;
+  }
+  const r = await withButton(pane.querySelector('.agent-edit-save'), async () => {
     const res = await fetch(`/api/agents/${encodeURIComponent(a.key)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     const data = await safeJson(res);
-    if (!res.ok) { msg.textContent = data.error || `HTTP ${res.status}`; msg.className = 'agent-edit-msg form-msg err'; return; }
-    disposeAgentForm(pane);   // the editors' highlight debounce must not outlive a pane loadAgentsView() replaces
-    pane.hidden = true;
-    invalidateAgentCaches();
-    // The save SUCCEEDED. `updatedVariants` is the workspace variants this port
-    // change was propagated into (a success); `warnings` names the saved pipelines
-    // it stranded — the run gate refuses those until they are re-wired.
-    const warns = Array.isArray(data.warnings) ? data.warnings : [];
-    const variants = Array.isArray(data.updatedVariants) ? data.updatedVariants : [];
-    const parts = ['Agent saved.'];
-    if (variants.length) parts.push(`Workspace variants updated: ${variants.join(', ')}.`);
-    parts.push(...warns);
-    setAgentsMsg(parts.join(' '), warns.length ? 'warn' : 'ok');
-    await loadAgentsView();
-  } catch (err) { msg.textContent = err.message; msg.className = 'agent-edit-msg form-msg err'; }
+    if (!res.ok) return { ok: false, error: data.error || `HTTP ${res.status}` };
+    return { ok: true, data };
+  });
+  if (r.skipped) return;
+  if (!r.ok) { cardAlert(pane, { title: 'Not saved', detail: r.error }); return; }
+  const { data } = r;
+  disposeAgentForm(pane);   // the editors' highlight debounce must not outlive a pane loadAgentsView() replaces
+  pane.hidden = true;
+  invalidateAgentCaches();
+  // The save SUCCEEDED. `updatedVariants` is the workspace variants this port
+  // change was propagated into (a success); `warnings` names the saved pipelines
+  // it stranded — the run gate refuses those until they are re-wired.
+  const warns = Array.isArray(data.warnings) ? data.warnings : [];
+  const variants = Array.isArray(data.updatedVariants) ? data.updatedVariants : [];
+  const parts = ['Agent saved.'];
+  if (variants.length) parts.push(`Workspace variants updated: ${variants.join(', ')}.`);
+  parts.push(...warns);
+  setAgentsMsg(parts.join(' '), warns.length ? 'warn' : 'ok');
+  await loadAgentsView();
 }
 
 if (el.agentsList) {
@@ -10203,9 +10230,7 @@ const TRASH_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13M10 11v6M14 11v6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 function setProjectsMsg(text, kind) {
-  if (!el.projectsMsg) return;
-  el.projectsMsg.textContent = text || '';
-  el.projectsMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+  reportStatus(el.projectsMsg, 'form-msg', text, kind);
 }
 
 // Folder basename, tolerant of trailing slashes and either separator.
@@ -10414,7 +10439,7 @@ function paintWsSyncItem(item) {
     syncAll.onclick = async (e) => {
       e.stopPropagation();
       syncAll.disabled = true; syncAll.classList.add('busy');
-      await Promise.all(behind.map((k) => postProjectSync(k).catch(() => null)));
+      await syncBehindProjects(behind);
       syncAll.disabled = false; syncAll.classList.remove('busy');
       paintWsSyncItem(item);
     };
@@ -10496,7 +10521,9 @@ async function projSyncNow(key) {
   };
   repaint();
   let synced = false;
-  try { await postProjectSync(key); synced = true; } catch { /* the bar keeps its last state */ }
+  try { await postProjectSync(key); synced = true; } catch (e) {   // the bar keeps its last state
+    notify({ tone: 'err', title: 'Sync failed', detail: e.message, key: `sync-${key}` });
+  }
   projSyncBusy.delete(key);
   const slot = repaint();
   if (synced && slot) slot.querySelector('.ps-pill')?.classList.add('ps-flash');
@@ -10638,7 +10665,10 @@ function syncCheckedNodes() {
       const res = await fetch('/api/sync/all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'fetch' }) });
       const data = await safeJson(res);
       if (res.ok && data && data.projects && typeof data.projects === 'object') { state.syncChips = data.projects; paintSyncChips(); }
-    } catch { /* the rows keep their last state */ }
+      else throw new Error((data && data.error) || `The server answered ${res.status}.`);
+    } catch (e) {   // the rows keep their last state
+      notify({ tone: 'err', title: 'Check origin failed', detail: e.message, key: 'check-origin' });
+    }
     finally { btn.disabled = false; btn.classList.remove('busy'); }
   });
   wrap.append(txt, btn);
@@ -10689,10 +10719,19 @@ async function postProjectSync(key) {
   paintSyncChips();
   return data.sync;
 }
+/** Sync the behind projects of a workspace or project page; one toast tells how it went. */
+async function syncBehindProjects(behind) {
+  const results = await Promise.allSettled(behind.map((k) => postProjectSync(k)));
+  const failed = results.filter((x) => x.status === 'rejected');
+  if (failed.length) notify({ tone: 'err', title: `${failed.length} of ${behind.length} could not sync`, detail: failed[0].reason?.message || '', key: 'ws-sync' });
+  else if (behind.length) notify({ tone: 'ok', title: `Synced ${behind.length} ${behind.length === 1 ? 'project' : 'projects'}`, key: 'ws-sync' });
+}
 async function syncChipNow(key, btn) {
   btn.disabled = true;
   btn.classList.add('busy');
-  try { await postProjectSync(key); } catch { /* the chip keeps its last state */ }
+  try { await postProjectSync(key); } catch (e) {   // the chip keeps its last state
+    notify({ tone: 'err', title: 'Sync failed', detail: e.message, key: `sync-${key}` });
+  }
   // The chip was repainted (a new button) on success; this one only matters on failure.
   btn.disabled = false;
   btn.classList.remove('busy');
@@ -10710,7 +10749,12 @@ async function openChipSyncDialog(key, opener) {
     autoSync: sync.settings ? sync.settings.beforeRun !== false : true, opener,
     // A project-sync-changed repaint can replace the opener while the dialog is open.
     fallbackFocus: () => document.querySelector(`.pl-item[data-key="${cssEscape(key)}"] .pl-row`),
-    onSync: async () => { try { return await postProjectSync(key); } catch { return null; } },
+    onSync: async () => {
+      try { return await postProjectSync(key); } catch (e) {
+        notify({ tone: 'err', title: 'Sync failed', detail: e.message, key: `sync-${key}` });
+        return null;
+      }
+    },
     // The server's project-sync-changed frame repaints the chip after a save.
     prefs: projectSyncPrefs(key),
   });
@@ -10722,12 +10766,22 @@ if (el.projectsSyncAll) {
     btn.disabled = true;
     btn.classList.add('busy');
     btn.textContent = `Syncing ${projBehindCount()}…`;
+    const before = projBehindCount();
+    const retry = { label: 'Retry', run: () => el.projectsSyncAll.click() };
     try {
       const res = await fetch('/api/sync/all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'ff' }) });
       const data = await safeJson(res);
-      if (res.ok && data && data.projects && typeof data.projects === 'object') state.syncChips = data.projects;
-    } catch { /* the chips keep their last state */ }
-    finally {
+      if (res.ok && data && data.projects && typeof data.projects === 'object') {
+        state.syncChips = data.projects;
+        const left = projBehindCount();
+        notify({ tone: left ? 'warn' : 'ok', title: `Synced ${before - left} ${before - left === 1 ? 'project' : 'projects'}`,
+          detail: left ? `${left} could not be fast-forwarded. Open a project to see why.` : '', key: 'sync-all' });
+      } else {
+        notify({ tone: 'err', title: 'Sync all failed', detail: (data && data.error) || `The server answered ${res.status}.`, key: 'sync-all', action: retry });
+      }
+    } catch (e) {
+      notify({ tone: 'err', title: 'Sync all failed', detail: e.message, key: 'sync-all', action: retry });
+    } finally {
       btn.disabled = false;
       btn.classList.remove('busy');
       paintSyncChips();   // the label and count come back with the rows
@@ -11253,7 +11307,7 @@ function paintPdBranchCards() {
     btn.textContent = `Sync all (${behind.length})`;
     btn.addEventListener('click', async () => {
       btn.disabled = true; btn.classList.add('busy');
-      await Promise.all(behind.map((k) => postProjectSync(k).catch(() => null)));
+      await syncBehindProjects(behind);
       if (btn.isConnected) { btn.disabled = false; btn.classList.remove('busy'); }
     });
     act.replaceChildren(btn);
@@ -11692,7 +11746,7 @@ function onCloneJob(job) {
     } catch { /* the projects-changed frame refreshes it too */ }
     renderProjectsList();
     renderProjectOptions(localStorage.getItem(LAST_PROJECT_KEY) || '');
-    setProjectsMsg(name ? `Cloned and added “${name}”.` : 'Cloned and added the project.');
+    setProjectsMsg(name ? `Cloned and added “${name}”.` : 'Cloned and added the project.', 'ok');
   })();
 }
 
@@ -11751,6 +11805,12 @@ function setProjBulkMsg(text, kind) {
   el.projBulkMsg.textContent = text || '';
   el.projBulkMsg.className = 'hint' + (kind ? ' ' + kind : '');
 }
+// #555: a refusal concerns the dialog the user is in — a card alert above its button row.
+const projBulkCard = () => el.projectBulkModal && el.projectBulkModal.querySelector('.card');
+function projBulkAlert(title, detail = '') {
+  setProjBulkMsg('');
+  cardAlert(projBulkCard(), { title, detail });
+}
 
 function openProjectBulkModal(paths, { onDone = null } = {}) {
   const known = new Map((state.projects || []).map((p) => [p.path, p.name]));
@@ -11768,6 +11828,7 @@ function openProjectBulkModal(paths, { onDone = null } = {}) {
   projBulk = { rows, addedNames: [], onDone, saving: false };
   if (el.projBulkTitle) el.projBulkTitle.textContent = `Add ${rows.length} projects`;
   setProjBulkMsg('');
+  cardAlert(projBulkCard(), null);
   renderProjectBulkRows();
   el.projectBulkModal.classList.remove('hidden');
   const first = el.projBulkList.querySelector('.pb-name:not(:disabled)');
@@ -11825,9 +11886,13 @@ function renderProjectBulkRows() {
 async function saveProjectBulk() {
   if (!projBulk || projBulk.saving) return;
   const pending = projBulkPending();
-  if (!pending.length) return setProjBulkMsg('Tick at least one folder to add.', 'err');
+  if (!pending.length) {
+    fieldError(el.projBulkList.querySelector('.pb-include:not(:disabled)'), 'Tick at least one folder to add.');
+    return;
+  }
   projBulk.saving = true;
   syncProjBulkSave();
+  cardAlert(projBulkCard(), null);
   setProjBulkMsg(`Adding ${pending.length} …`);
   const bulk = projBulk;
   try {
@@ -11837,7 +11902,7 @@ async function saveProjectBulk() {
       body: JSON.stringify({ projects: pending.map((r) => ({ name: r.name.trim(), path: r.path })) }),
     });
     const data = await safeJson(res);
-    if (!res.ok) { setProjBulkMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
+    if (!res.ok) { projBulkAlert('Projects not added', data.error || `HTTP ${res.status}`); return; }
     if (Array.isArray(data.projects)) state.projects = data.projects;
     let addedNow = 0;
     for (const r of Array.isArray(data.results) ? data.results : []) {
@@ -11855,9 +11920,10 @@ async function saveProjectBulk() {
     const skipped = bulk.rows.filter((r) => r.status === 'skipped');
     if (!skipped.length) { closeProjectBulkModal(); return; }
     renderProjectBulkRows();
-    setProjBulkMsg(`${addedNow ? `Added ${addedNow}. ` : ''}${skipped.length} could not be added — see the reason on each row. Rename and press Add again, or close.`, 'err');
+    projBulkAlert('Not every project was added',
+      `${addedNow ? `Added ${addedNow}. ` : ''}${skipped.length} could not be added — see the reason on each row. Rename and press Add again, or close.`);
   } catch (e) {
-    setProjBulkMsg(e.message, 'err');
+    projBulkAlert('Projects not added', e.message);
   } finally {
     bulk.saving = false;
     if (projBulk === bulk) syncProjBulkSave();
@@ -11944,9 +12010,19 @@ if (el.projDetail) {
     if (e.target.closest('.tm-change')) return void openTmEnableDialog(key, { mode: 'delegate', change: true });
     if (e.target.closest('.tm-push')) {
       const s = tmCache.data?.projects.find((x) => x.key === key);
-      const btnEl = e.target.closest('.tm-push'); btnEl.disabled = true;
-      await fetch('/api/team-metrics/flush', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(s?.sinkSlug ? { slug: s.sinkSlug } : { scope: `project:${key}` }) }).catch(() => {});
-      return void paintProjectTmCells(true);
+      const btnEl = e.target.closest('.tm-push');
+      const res = await withButton(btnEl, async () => {
+        const m = await tmPost('/api/team-metrics/flush', s?.sinkSlug ? { slug: s.sinkSlug } : { scope: `project:${key}` });
+        return m ? { ok: false, error: m } : { ok: true };
+      }, { busy: 'Pushing…', done: 'Pushed' });
+      if (res.skipped) return;
+      if (res.ok) setTimeout(() => paintProjectTmCells(true), BUTTON_DONE_MS);
+      else {
+        await paintProjectTmCells(true);
+        notify({ tone: 'err', title: 'Push failed', detail: res.error, key: 'tm-push',
+          action: { label: 'Retry', run: () => document.querySelector(`#proj-detail .tm-cell[data-key="${cssEscape(key)}"] .tm-push`)?.click() } });
+      }
+      return;
     }
     // clicks elsewhere in the block (labels, the switch) are handled by 'change'
   });
@@ -11958,9 +12034,11 @@ if (el.projDetail) {
     const r = await fetch(`/api/projects/${encodeURIComponent(cb.dataset.key)}/team-metrics`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ record: cb.checked }),
     }).catch(() => null);
-    if (!r || !r.ok) cb.checked = !cb.checked;      // revert on failure
+    const err = !r ? 'Worca did not answer.' : !r.ok ? ((await safeJson(r))?.error || `The server answered ${r.status}.`) : null;
+    if (err) cb.checked = !cb.checked;      // revert on failure
     cb.disabled = false;
     paintProjectTmCells(true);
+    if (err) notify({ tone: 'err', title: 'Could not change “Include my runs”', detail: err, key: `tm-record-${cb.dataset.key}` });
   });
 }
 if (el.projectAddBtn) el.projectAddBtn.addEventListener('click', addProjectFlow);
@@ -12177,7 +12255,7 @@ function abortAgentGen() {
   if (genId) {
     fetch('/api/agents/generate/stop', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ genId }),
-    }).catch(() => {});
+    }).catch((e) => notify({ tone: 'err', title: 'Could not stop the generation', detail: e.message, key: 'agent-gen-stop' }));
     const ws = state.ws;
     if (ws && state.wsReady) { try { ws.send(JSON.stringify({ type: 'unsubscribe', genId })); } catch { /* ignore */ } }
   }
@@ -12226,6 +12304,7 @@ el.form.addEventListener('submit', async (e) => {
   // start.disabled, or a second Enter starts the same run twice.
   if (startSubmitInFlight) return;
   setFormMsg('', '');
+  clearFieldErrors(el.form); cardAlert(newFormCard(), null);
 
   // Target branch (§5.4 mutual exclusivity): workspace mode sends {workspaceId}
   // and NO projectDir; project mode sends {projectDir} and NO workspaceId.
@@ -12236,14 +12315,14 @@ el.form.addEventListener('submit', async (e) => {
   let workspaceProjectNames = null;
   if (target === 'workspace') {
     workspaceId = (el.workspaceSelect && el.workspaceSelect.value) || '';
-    if (!workspaceId) return setFormMsg('Select a workspace first (or create one).', 'err');
+    if (!workspaceId) return fieldError(el.workspaceSelect, 'Select a workspace first (or create one).');
     const ws = state.workspaces.find((w) => w && w.id === workspaceId);
     workspaceName = (ws && ws.name) || '';
     workspaceProjectNames = ws && Array.isArray(ws.projectPaths)
       ? ws.projectPaths.map(projectName) : null;
   } else {
     projectDir = selectedProjectPath();
-    if (!projectDir) return setFormMsg('Select a project first (or add one).', 'err');
+    if (!projectDir) return fieldError(el.projectSelect, 'Select a project first (or add one).');
   }
 
   const source = (el.sourceRadios.find((r) => r.checked) || {}).value || 'prompt';
@@ -12314,7 +12393,7 @@ el.form.addEventListener('submit', async (e) => {
     if (!title) body.title = state.memoryScope === 'project' ? `Memory defragment: ${pn}` : 'Memory defragment (global)';
   } else if (psrc) {
     const picked = collectSourcePane(el.pluginSourcePane);
-    if (picked.error) return setFormMsg(picked.error, 'err');
+    if (picked.error) return cardAlert(newFormCard(), { title: 'Run not started', detail: picked.error });
     // The profile travels with the run and is pinned onto the row, so a result
     // is reported back to the instance the task actually came from even if the
     // project is re-bound in the meantime.
@@ -12324,10 +12403,10 @@ el.form.addEventListener('submit', async (e) => {
       profile: state.activePluginProfile || undefined,
     };
   } else if (source === 'markdown') {
-    if (!mdText) return setFormMsg('Provide markdown text or load a .md file.', 'err');
+    if (!mdText) return fieldError(el.promptMarkdown, 'Provide markdown text or load a .md file.');
     body.promptMarkdown = mdText;
   } else {
-    if (!promptText) return setFormMsg('Provide a prompt describing the task.', 'err');
+    if (!promptText) return fieldError(el.prompt, 'Provide a prompt describing the task.');
     body.prompt = promptText;
   }
 
@@ -12336,7 +12415,7 @@ el.form.addEventListener('submit', async (e) => {
   const scheduling = !!pendingSchedule;
   // #527: Auto-sync only when the person touched the switch for this run (untouched, each
   // member follows its own sync.beforeRun). Before the schedule merge, so the sheet's choice wins.
-  if (state.sync.blocked && levelAtLeast('advanced')) return setFormMsg(`${state.sync.blocked} can’t start from origin yet. Push its commits, or use Local copy.`, 'err');
+  if (state.sync.blocked && levelAtLeast('advanced')) return cardAlert(newFormCard(), { title: 'Run not started', detail: `${state.sync.blocked} can’t start from origin yet. Push its commits, or use Local copy.` });
   if (state.sync.autoSync !== null && syncApplies() && levelAtLeast('advanced')) body.syncBeforeStart = state.sync.autoSync;
   if (scheduling) {
     const { sync: schedSync, ...schedRest } = pendingSchedule;
@@ -12345,96 +12424,115 @@ el.form.addEventListener('submit', async (e) => {
     if (schedSync && (schedSync.onDiverged === 'origin' || schedSync.onDiverged === 'fail')) body.syncOnDiverged = schedSync.onDiverged;
   }
 
-  // Guard the whole in-flight window: applyBudgetToNewView also drives
-  // start.disabled, and this run's own creation event repaints it.
-  startSubmitInFlight = true;
-  el.startBtn.disabled = true;
-  if (el.startMore) el.startMore.disabled = true;
-  setFormMsg(scheduling ? 'Scheduling…' : 'Starting run...', '');
+  // #555: withButton owns #start-btn from here, and reads undefined as success, so every exit
+  // returns an explicit { ok }. A failed or cancelled start never shows "Started".
+  const notStarted = (detail) => {
+    cardAlert(newFormCard(), { title: scheduling ? 'Not scheduled' : 'Run not started', detail });
+    return { ok: false };
+  };
 
-  // Upload the selected extra files' bytes; the server writes them to a temp
-  // dir and the orchestrator copies them into the pipeline's extras/ folder.
-  let extras = [];
-  try {
-    extras = await collectExtras();
-  } catch {
-    extras = [];
-  }
-  if (extras.length) body.extras = extras;
+  await withButton(el.startBtn, async () => {
+    // Guard the whole in-flight window: applyBudgetToNewView also drives
+    // start.disabled, and this run's own creation event repaints it. Set INSIDE the callback:
+    // idleDisabled reads it, so set before withButton it would make a second Start during the
+    // previous one's "Started" look gated, skip it and leave the flag stuck.
+    startSubmitInFlight = true;
+    if (el.startMore) el.startMore.disabled = true;
+    // Upload the selected extra files' bytes; the server writes them to a temp
+    // dir and the orchestrator copies them into the pipeline's extras/ folder.
+    let extras = [];
+    try {
+      extras = await collectExtras();
+    } catch {
+      extras = [];
+    }
+    if (extras.length) body.extras = extras;
 
-  try {
-    let res = await fetch('/api/run', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    let data = await safeJson(res);
-    let lastSentBody = body;
-    // Team total cap (team-policy design §7, board 9): soft — ask once, resend with the
-    // acknowledgement (and its reason) recorded; a required reason re-asks.
-    if (!res.ok && data && (data.needsPolicyAck || data.code === 'reason_required')) {
-      const choice = await policyRefusalRetry(data, res.status);
-      if (choice) {
-        lastSentBody = { ...body, pastTeamCap: true, ...(choice.reason ? { policyReason: choice.reason } : {}) };
-        res = await fetch('/api/run', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(lastSentBody),
-        });
+    try {
+      let res = await fetch('/api/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      let data = await safeJson(res);
+      let lastSentBody = body;
+      // Team total cap (team-policy design §7, board 9): soft — ask once, resend with the
+      // acknowledgement (and its reason) recorded; a required reason re-asks.
+      if (!res.ok && data && (data.needsPolicyAck || data.code === 'reason_required')) {
+        const choice = await policyRefusalRetry(data, res.status);
+        if (choice) {
+          lastSentBody = { ...body, pastTeamCap: true, ...(choice.reason ? { policyReason: choice.reason } : {}) };
+          res = await fetch('/api/run', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(lastSentBody),
+          });
+          data = await safeJson(res);
+        }
+      }
+      // #527: the base diverged (or could not be fetched) — ask once, resend with the choice.
+      if (!res.ok && data && (data.code === 'sync-diverged' || data.code === 'sync-fetch-failed')) {
+        const choice = await chooseSyncRefusal(data);
+        if (!choice) {
+          startSubmitInFlight = false;
+          if (el.startMore) el.startMore.disabled = false;
+          notify({ tone: 'warn', title: 'Start cancelled' });
+          return { ok: false, cancelled: true };
+        }
+        lastSentBody = { ...lastSentBody, syncPolicy: choice };   // keeps pastTeamCap/policyReason
+        res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(lastSentBody) });
         data = await safeJson(res);
       }
-    }
-    // #527: the base diverged (or could not be fetched) — ask once, resend with the choice.
-    if (!res.ok && data && (data.code === 'sync-diverged' || data.code === 'sync-fetch-failed')) {
-      const choice = await chooseSyncRefusal(data);
-      if (!choice) {
-        startSubmitInFlight = false; el.startBtn.disabled = false; if (el.startMore) el.startMore.disabled = false;
-        return setFormMsg('Start cancelled.', 'warn');
+      if (el.startMore) el.startMore.disabled = false;
+      if (!res.ok || !data.runId) {
+        startSubmitInFlight = false;
+        // The alert title already says "Run not started" / "Not scheduled".
+        return notStarted(data.error || `The server answered ${res.status}.`);
       }
-      lastSentBody = { ...lastSentBody, syncPolicy: choice };   // keeps pastTeamCap/policyReason
-      res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(lastSentBody) });
-      data = await safeJson(res);
-    }
-    if (el.startMore) el.startMore.disabled = false;
-    if (!res.ok || !data.runId) {
-      startSubmitInFlight = false;
-      el.startBtn.disabled = false;
-      return setFormMsg(`Failed to ${scheduling ? 'schedule' : 'start'}: ${data.error || res.status}`, 'err');
-    }
-    // 202: nothing is running — the request is a ticket now. Show it where it lives.
-    if (data.status === 'scheduled') {
-      startSubmitInFlight = false;
-      el.startBtn.disabled = !!budgetState.budget?.blocked;
-      setPendingSchedule(null);   // the form is a plain Start run form again
-      resetSyncChoice();
-      setFormMsg(data.budgetWarning ? `Scheduled. ${data.budgetWarning}` : 'Scheduled.', data.budgetWarning ? 'warn' : 'ok');
-      showView('schedules');
-      return;
-    }
+      // 202: nothing is running — the request is a ticket now. Show it where it lives.
+      if (data.status === 'scheduled') {
+        startSubmitInFlight = false;
+        setPendingSchedule(null);   // the form is a plain Start run form again
+        resetSyncChoice();
+        // Keep the warn tone when the server attached a budget warning. showView('schedules')
+        // already shows the ticket, so the toast needs no Open action.
+        notify({ tone: data.budgetWarning ? 'warn' : 'ok', title: 'Scheduled', detail: data.budgetWarning || title || '' });
+        showView('schedules');
+        return { ok: true };
+      }
 
-    // begin tracking the new run (creates a local model + switches to Running)
-    beginRun(data.runId, projectDir, title,
-      target === 'workspace' ? { workspaceId, workspaceName, projectNames: workspaceProjectNames } : {});
-    // Re-enable the form so more runs can be started concurrently — unless the
-    // budget just went over, in which case the gate keeps Start disabled.
-    startSubmitInFlight = false;
-    el.startBtn.disabled = !!budgetState.budget?.blocked;
-    resetSyncChoice();
-    setFormMsg('Run started.', 'ok');
-    if (extras.length) {
-      appendLog({
-        source: 'ui',
-        level: 'system',
-        text: `uploaded ${extras.length} extra file(s): ${extras.map((e) => e.name).join(', ')}`,
-        ts: Date.now(),
-      });
+      // begin tracking the new run (creates a local model + switches to Running)
+      beginRun(data.runId, projectDir, title,
+        target === 'workspace' ? { workspaceId, workspaceName, projectNames: workspaceProjectNames } : {});
+      // Re-enable the form so more runs can be started concurrently — unless the
+      // budget just went over, in which case idleDisabled keeps Start disabled.
+      startSubmitInFlight = false;
+      resetSyncChoice();
+      // D6: the user is on the run's page now, so the result is a toast, not a #form-msg line.
+      notify({ tone: 'ok', title: 'Run started', detail: title || '', key: `run-${data.runId}`,
+        action: { label: 'Open run', run: () => { location.hash = rdHash(data.runId); } } });
+      if (extras.length) {
+        appendLog({
+          source: 'ui',
+          level: 'system',
+          text: `uploaded ${extras.length} extra file(s): ${extras.map((e) => e.name).join(', ')}`,
+          ts: Date.now(),
+        });
+      }
+      return { ok: true };
+    } catch (err) {
+      startSubmitInFlight = false;
+      if (el.startMore) el.startMore.disabled = false;
+      return notStarted(`Error: ${err.message}`);
     }
-  } catch (err) {
-    startSubmitInFlight = false;
-    el.startBtn.disabled = false;
-    if (el.startMore) el.startMore.disabled = false;
-    setFormMsg(`Error: ${err.message}`, 'err');
-  }
+  }, { busy: scheduling ? 'Scheduling…' : 'Starting…', done: scheduling ? 'Scheduled' : 'Started',
+    idleDisabled: () => !!budgetState.budget?.blocked || startSubmitInFlight });
 });
+
+// #555: card alerts for New pipeline go into #run-form, directly above its own action row
+// (div.actions[data-card-actions], the parent of #start-split and a direct child of the form).
+// cardAlert picks the form's OWN row (:scope >); the first descendant row in document order is
+// the hidden inline add-project panel's .add-project-actions.
+function newFormCard() { return el.form; }
 
 // The split Start button's menu. "Schedule…" is a MODE, not a submit: it opens the sheet at
 // once, before any prompt is typed, exactly like Schedules › Schedule a run (#new/schedule).
@@ -12678,12 +12776,6 @@ function setFormMsg(text, kind) {
 // Settings view: the machine-wide Worca root folder + the projects root
 // (§5.1) whose CLAUDE.md / .claude/skills / .mcp.json every pipeline agent sees.
 // ---------------------------------------------------------------------------
-function setSettingsMsg(text, kind) {
-  if (!el.settingsMsg) return;
-  el.settingsMsg.textContent = text || '';
-  el.settingsMsg.className = 'hint' + (kind ? ' ' + kind : '');
-}
-
 // One contract for both fields: value = the RAW setting (blank when unset),
 // placeholder = what applies while it IS blank. `projectsRootDefault` is that
 // fallback for the projects root — the WORCA_PROJECTS_ROOT override when it is
@@ -12697,6 +12789,7 @@ function paintSettings(data) {
     el.settingsProjectsRoot.value = data.projectsRoot || '';
     el.settingsProjectsRoot.placeholder = projectsRootFallback(data);
   }
+  settingsCardPainted('settingsSave');
 }
 
 // `default` is the pre-projectsRoot payload's only default; keep it as the
@@ -12722,12 +12815,20 @@ function paintAbout(info) {
   paintAboutInto(document, info);
 }
 
+// #555 D8: a failed Settings GET is shown above the tabs, at every UI level.
+function setSettingsLoadMsg(text) {
+  const n = document.getElementById('settingsLoadMsg');
+  if (!n) return;
+  n.textContent = text ? `Could not load settings: ${text}` : '';
+  n.hidden = !text;
+}
+
 async function loadSettings() {
   if (!el.settingsRoot) return;
   try {
     const res = await fetch('/api/settings');
     const data = await safeJson(res);
-    if (!res.ok) { setSettingsMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
+    if (!res.ok) { setSettingsLoadMsg(data.error || `HTTP ${res.status}`); return; }
     paintSettings(data);
     paintTheme(data.theme);
     levelCtl.confirm(data.uiLevel);
@@ -12749,17 +12850,11 @@ async function loadSettings() {
     paintChatSettings(data.chat);
     paintCredentials();
     loadAskHistory();
-    setSettingsMsg('');
-  } catch (e) { setSettingsMsg(e.message, 'err'); }
+    setSettingsLoadMsg('');
+  } catch (e) { setSettingsLoadMsg(e.message || 'network error'); }
 }
 
 // ── Chat notifications card (chat-connectivity-design.md §4.8) ────────────────
-
-function setChatSettingsMsg(text, cls) {
-  if (!el.chatSettingsMsg) return;
-  el.chatSettingsMsg.textContent = text || '';
-  el.chatSettingsMsg.className = `hint${cls ? ` ${cls}` : ''}`;
-}
 
 // Settings › My model credentials (credential broker, docs/credential-broker.md): the card
 // stays hidden unless worca runs with a broker. Status only; keys live on the key page.
@@ -12782,43 +12877,49 @@ async function paintChatSettings(prefs) {
     channels = cs.channels || [];
   } catch { /* render prefs-only */ }
   el.chatSettingsHost.replaceChildren(renderChatSettings({ prefs, channels }));
+  settingsCardPainted('chatSettingsSave');
 }
 
-if (el.chatSettingsSave) el.chatSettingsSave.addEventListener('click', async () => {
-  el.chatSettingsSave.disabled = true;
-  try {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat: collectChatSettings(el.chatSettingsHost) }),
-    });
-    const data = await safeJson(res);
-    if (!res.ok) return setChatSettingsMsg(data.error || `HTTP ${res.status}`, 'err');
-    setChatSettingsMsg('Saved.');
-  } catch (e) { setChatSettingsMsg(e.message, 'err');
-  } finally { el.chatSettingsSave.disabled = false; }
-});
+// No repaint on success (and a chat-only POST sends no settings-changed): the tracker's
+// markClean in postSettingsCard is what clears the card.
+if (el.chatSettingsSave) {
+  el.chatSettingsSave.addEventListener('click', (e) => postSettingsCard(
+    { chat: collectChatSettings(el.chatSettingsHost) },
+    { card: document.getElementById('chat-settings-card'), button: e.currentTarget, dirty: settingsCardDirty('chatSettingsSave') }));
+  settingsCardDirty('chatSettingsSave');
+}
 
-// Delegated Test buttons: explicit user action -> POST /api/chat/test.
+// Delegated Test buttons: explicit user action -> POST /api/chat/test. The button shows
+// Sending… → Delivered (#555); a failure is a card alert naming the chats it missed.
 if (el.chatSettingsHost) el.chatSettingsHost.addEventListener('click', async (e) => {
   const t = e.target;
   if (!t || !t.classList || !t.classList.contains('chat-test')) return;
-  t.disabled = true;
-  setChatSettingsMsg('Sending test message…');
-  try {
-    const res = await fetch('/api/chat/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plugin: t.dataset.plugin, channelId: t.dataset.channelId }),
-    });
-    const data = await safeJson(res);
-    if (!res.ok) return setChatSettingsMsg(data.error || `HTTP ${res.status}`, 'err');
+  const card = document.getElementById('chat-settings-card');
+  cardAlert(card, null);
+  await withButton(t, async () => {
+    let res;
+    try {
+      res = await fetch('/api/chat/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plugin: t.dataset.plugin, channelId: t.dataset.channelId }),
+      });
+    } catch (err) {
+      cardAlert(card, { title: 'Test message not sent', detail: `Worca did not answer (${err.message}).` });
+      return { ok: false, error: err.message };
+    }
+    const data = (await safeJson(res)) || {};
+    if (!res.ok) {
+      const error = data.error || `The server answered ${res.status}.`;
+      cardAlert(card, { title: 'Test message not sent', detail: error });
+      return { ok: false, error };
+    }
     const failed = (data.results || []).filter((r) => !r.ok);
-    setChatSettingsMsg(failed.length
-      ? `Delivery failed for ${failed.map((f) => f.chatId).join(', ')}: ${failed[0].error?.message || failed[0].error?.kind}`
-      : 'Test message delivered.', failed.length ? 'err' : '');
-  } catch (err) { setChatSettingsMsg(err.message, 'err');
-  } finally { t.disabled = false; }
+    if (!failed.length) return { ok: true };
+    const detail = failed[0].error?.message || failed[0].error?.kind || '';
+    cardAlert(card, { title: `Delivery failed for ${failed.map((f) => f.chatId).join(', ')}`, detail });
+    return { ok: false, error: detail };
+  }, { busy: 'Sending…', done: 'Delivered' });
 });
 
 // Live channel-status events patch every visible badge in place (plugins view
@@ -12838,38 +12939,26 @@ function onChannelStatus(msg) {
 
 // POSTs both keys; the route writes only the keys present in the body, and an
 // explicitly empty one resets that key to its default (ui/server.mjs:1656).
-async function saveSettings(root, projectsRoot) {
+async function saveSettings(root, projectsRoot, opts = {}) {
   if (!el.settingsSave) return;
-  el.settingsSave.disabled = true;
-  if (el.settingsReset) el.settingsReset.disabled = true;
-  try {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ root, projectsRoot }),
-    });
-    const data = await safeJson(res);
-    if (!res.ok) { setSettingsMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
-    paintSettings(data);
-    setSettingsMsg('Saved. New runs use these folders.');
-    // The root relocates the project registry + workflows; reload projects so
-    // the UI reflects what's available under the new root.
-    loadProjects();
-  } catch (e) { setSettingsMsg(e.message, 'err'); }
-  finally {
-    el.settingsSave.disabled = false;
-    if (el.settingsReset) el.settingsReset.disabled = false;
-  }
+  const r = await postSettingsCard({ root, projectsRoot }, {
+    card: document.getElementById('root-settings-card'), paint: paintSettings,
+    dirty: settingsCardDirty('settingsSave'), appliesWhen: 'New runs use these folders.', ...opts });
+  // The root relocates the project registry + workflows; reload projects so
+  // the UI reflects what's available under the new root.
+  if (r.ok) loadProjects();
 }
 
 const settingsFieldValue = (node) => (node && node.value ? node.value.trim() : '');
 
 if (el.settingsSave) {
-  el.settingsSave.addEventListener('click', () => saveSettings(
-    settingsFieldValue(el.settingsRoot), settingsFieldValue(el.settingsProjectsRoot),
+  el.settingsSave.addEventListener('click', (e) => saveSettings(
+    settingsFieldValue(el.settingsRoot), settingsFieldValue(el.settingsProjectsRoot), { button: e.currentTarget },
   ));
 }
-if (el.settingsReset) el.settingsReset.addEventListener('click', () => saveSettings('', ''));
+if (el.settingsReset) el.settingsReset.addEventListener('click', (e) => saveSettings('', '',
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('settingsSave');
 
 // ---------------------------------------------------------------------------
 // ⓘ info tooltips (settings). Content lives in each icon's hidden .tip-content
@@ -12964,16 +13053,12 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { clearTim
 // /api/settings payload the root card uses, and renders the live spend readout
 // from the /api/budget snapshot paintBudget() already keeps fresh.
 // ---------------------------------------------------------------------------
-function setBudgetMsg(text, kind) {
-  el.budgetMsg.textContent = text || '';
-  el.budgetMsg.className = 'hint' + (kind ? ` ${kind}` : '');
-}
-
 function paintBudgetSettings(data) {
   el.budgetPerPipeline.value = data.pipelineCostLimitUsd ?? '';
   el.budgetTotal.value = data.totalCostLimitUsd ?? '';
   el.budgetResetPeriod.value = data.costLimitResetPeriod || 'monthly';
   el.budgetHumanRate.value = data.humanRateUsdPerHour ?? '';
+  settingsCardPainted('budgetSave');
 }
 
 function paintBudgetReadout() {
@@ -12993,53 +13078,44 @@ function readBudgetField(input) {
   return n;
 }
 
-async function saveBudgetSettings(payload) {
-  el.budgetSave.disabled = true;
-  el.budgetReset.disabled = true;
-  setBudgetMsg('Saving…');
-  try {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await safeJson(res);
-    if (!res.ok) { setBudgetMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
-    paintBudgetSettings(data);
-    setBudgetMsg('Saved.');
-    refreshBudget();                        // sidebar + readout repaint immediately
-  } catch (e) { setBudgetMsg(e.message, 'err'); }
-  finally {
-    el.budgetSave.disabled = false;
-    el.budgetReset.disabled = false;
-  }
+const budgetCard = () => document.getElementById('budget-settings-card');
+async function saveBudgetSettings(payload, opts = {}) {
+  const r = await postSettingsCard(payload, { card: budgetCard(), paint: paintBudgetSettings, dirty: settingsCardDirty('budgetSave'), ...opts });
+  if (r.ok) refreshBudget();                 // sidebar + readout repaint immediately
+  return r;
 }
 
 if (el.budgetSave) {
-  el.budgetSave.addEventListener('click', () => {
-    const per = readBudgetField(el.budgetPerPipeline);
-    const total = readBudgetField(el.budgetTotal);
-    const rate = readBudgetField(el.budgetHumanRate);
-    if (Number.isNaN(per) || Number.isNaN(total) || Number.isNaN(rate)) {
-      setBudgetMsg('Limits and the rate must be at least $0.01, or blank.', 'err');
+  el.budgetSave.addEventListener('click', (e) => {
+    clearFieldErrors(budgetCard());
+    const fields = [el.budgetPerPipeline, el.budgetTotal, el.budgetHumanRate];
+    const vals = fields.map(readBudgetField);
+    const bad = fields.filter((_, i) => Number.isNaN(vals[i]));
+    const [per, total, rate] = vals;
+    if (bad.length) {
+      bad.forEach((n, i) => fieldError(n, 'Enter at least $0.01, or leave it blank.', { focus: i === 0 }));
       return;
     }
     saveBudgetSettings({
       pipelineCostLimitUsd: per, totalCostLimitUsd: total,
       costLimitResetPeriod: el.budgetResetPeriod.value,
       humanRateUsdPerHour: rate,
-    });
+    }, { button: e.currentTarget });
   });
 }
 // Clears both limits and leaves the reset period alone: POSTing `null` deletes
 // the key server-side (the REST arm passes `body.x ?? ''` to the setter).
+// The inputs are emptied without an event: after a failed post postSettingsCard's
+// refresh shows the card as dirty; after a success paintBudgetSettings re-cleans it.
 if (el.budgetReset) {
-  el.budgetReset.addEventListener('click', () => {
+  el.budgetReset.addEventListener('click', (e) => {
     el.budgetPerPipeline.value = '';
     el.budgetTotal.value = '';
-    saveBudgetSettings({ pipelineCostLimitUsd: null, totalCostLimitUsd: null });
+    saveBudgetSettings({ pipelineCostLimitUsd: null, totalCostLimitUsd: null },
+      { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' });
   });
 }
+settingsCardDirty('budgetSave');
 
 // ---- Ask Worca limits card (budget-card pattern above) ---------------------
 // Shared by the small Settings cards (Ask Worca, Spawn diagnostics): one hint
@@ -13049,19 +13125,93 @@ function setHintMsg(id, text, kind) {
   const n = document.getElementById(id);
   if (n) { n.textContent = text || ''; n.className = `hint${kind ? ` ${kind}` : ''}`; }
 }
-async function postSettingsCard(body, { setMsg, paint, savedText = 'Saved.' }) {
-  setMsg('');
-  let res;
-  try {
-    res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  } catch (e) { setMsg(e.message || 'network error', 'err'); return; }
-  const data = await safeJson(res);
-  if (!res.ok) { setMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
-  // A 2xx with an unparsable body yields {} — leave the card as the user set it
-  // rather than painting every field as "unset".
-  if (Object.keys(data).length) paint(data);
-  setMsg(savedText);
+// #555: list-view result lines. A result of a user action (ok / err / warn / info) becomes
+// a toast, so a reload that clears the line can no longer erase it. Plain text (progress such
+// as "Installing…") stays on the inline line; '' clears it. Load / refresh paths and standing
+// states pass 'err-inline' / 'warn-inline': they stay on the inline line (red / amber), because
+// a toast per background refresh (window focus, WS frame) would be noise the user never asked for.
+function reportStatus(line, base, text, kind, extra = {}) {
+  if (kind === 'ok' || kind === 'err' || kind === 'warn' || kind === 'info') {
+    if (line) { line.textContent = ''; line.className = base; }
+    if (text) notify({ tone: kind, ...splitMessage(text), ...extra });
+    return;
+  }
+  const inline = kind === 'err-inline' ? 'err' : kind === 'warn-inline' ? 'warn' : '';
+  if (line) { line.textContent = text || ''; line.className = inline ? `${base} ${inline}` : base; }
 }
+// One Settings card save (#555): the clicked button shows busy → done; a server error with a
+// `field` lands on the input that carries it in data-setting; anything else is a card alert
+// above the buttons; a change that applies elsewhere also raises a toast. Never throws;
+// resolves to { ok:true, data } | { ok:false, error, field } | { ok:false, skipped:true }.
+// `gate` = this button is the card's dirty-gated Save (Reset passes gate:false, so it never
+// locks itself disabled on a clean card).
+async function postSettingsCard(body, opts = {}) {
+  const { card = null, button = null, paint = null, dirty = null, gate = true, done = 'Saved', busy = 'Saving…', appliesWhen = '' } = opts;
+  if (card) { clearFieldErrors(card); cardAlert(card, null); }
+  // Every Settings caller passes `dirty` (its card's tracker), Reset included: success is
+  // the only thing that marks a card clean when nothing repaints it (Chat; Away when
+  // fetchAwayMode fails).
+  const r = await withButton(button, async () => {
+    let res;
+    try {
+      res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    } catch (e) {
+      return { ok: false, error: `Worca did not answer (${e.message || 'network error'}). Check it is still running, then try again.` };
+    }
+    const data = (await safeJson(res)) || {};
+    if (!res.ok) return { ok: false, error: data.error || `The server answered ${res.status}.`, field: data.field || null };
+    return { ok: true, data };
+  }, { busy, done, idleDisabled: () => (gate && dirty ? !dirty.isDirty() : false) });
+  if (r.skipped) return r;
+  if (r.ok) {
+    // A 2xx with an unparsable body yields {}: leave the card as the user set it.
+    // Await the paint: the model-picker paints are async and rebuild their selects, so the clean
+    // snapshot must be taken after them.
+    if (paint && r.data && Object.keys(r.data).length) await paint(r.data);
+    dirty?.markClean();
+    if (appliesWhen) notify({ tone: 'ok', title: 'Saved', detail: appliesWhen });
+    return r;
+  }
+  dirty?.refresh();                           // still dirty after a failure: Save is offered again
+  if (!card) return r;                        // the caller reports (Away status strip)
+  const targets = settingsFieldEls(card, r.field);
+  if (targets.length) fieldError(targets, r.error);
+  else cardAlert(card, { title: 'Not saved', detail: r.error });
+  return r;
+}
+
+// The inputs a server `field` names: [data-setting~="<path>"] (space-separated tokens, so a
+// port pair can share actions.portRange). The Away form keeps its own data-field (it is the
+// key readNightForm posts), so nightMode.<key> resolves inside #night-mode-host by data-field.
+// Inputs hidden inside the card (another level, a collapsed row) are skipped → the error becomes
+// a card alert. Only the card's own subtree counts: a closed Settings tab hides every card on it.
+function settingsFieldEls(card, field) {
+  const f = String(field || '').replace(/["\\]/g, '');
+  if (!card || !f) return [];
+  let els = [...card.querySelectorAll(`[data-setting~="${f}"]`)];
+  if (!els.length && f.startsWith('nightMode.')) {
+    els = [...card.querySelectorAll(`#night-mode-host [data-field="${f.slice('nightMode.'.length).split('.')[0]}"]`)];
+  }
+  const hiddenInCard = (n) => {
+    for (let x = n; x && x !== card; x = x.parentElement) if (x.hidden || x.classList.contains('hidden')) return true;
+    return false;
+  };
+  return els.filter((n) => !hiddenInCard(n));
+}
+
+// Dirty trackers for the Settings cards, keyed by card id. `section.card`, not
+// `.settings-card`: the Defragment model card is `section.card.mem-model-card` on purpose
+// (tooltips census) and must still get one.
+function settingsCardDirty(saveId) {
+  const save = document.getElementById(saveId);
+  const card = save?.closest('section.card');
+  if (!card || !card.id) return null;
+  if (!settingsDirty.has(card.id)) settingsDirty.set(card.id, trackDirty(card, { saveBtn: save }));
+  return settingsDirty.get(card.id);
+}
+
+// #555: a card's paint just wrote the stored values: they are the new clean base.
+function settingsCardPainted(saveId) { settingsCardDirty(saveId)?.markClean(); }
 
 // ── Appearance (dark-mode design §5.3) ──────────────────────────────────────
 // The mode lives in settings.json and is server-rendered into <html data-theme>
@@ -13087,7 +13237,7 @@ function applyTheme(mode) {
   document.dispatchEvent(new window.CustomEvent('worca:theme', { detail: { mode: m } }));   // window.CustomEvent: jsdom rejects Node's
   return m;
 }
-function setThemeMsg(text, kind) { setHintMsg('themeMsg', text, kind); }
+const themeNotSaved = (detail) => notify({ tone: 'err', title: 'Theme not saved', detail, key: 'theme' });
 let confirmedTheme = 'system';       // the last SERVER-confirmed mode (GET, POST 200, settings-changed)
 let themeSeq = 0;                    // out-of-order POST resolutions never repaint a stale answer
 function paintTheme(mode) {
@@ -13106,15 +13256,14 @@ async function chooseTheme(mode) {
   for (const b of document.querySelectorAll('#theme-seg button[data-theme-mode]')) {
     b.classList.toggle('on', b.dataset.themeMode === mode); b.setAttribute('aria-pressed', b.dataset.themeMode === mode ? 'true' : 'false');
   }
-  setThemeMsg('');
   let res; let data;
   try {
     res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: mode }) });
     data = await safeJson(res);
-  } catch (e) { if (mine === themeSeq) { paintTheme(previous); setThemeMsg(e.message || 'network error', 'err'); } return; }
+  } catch (e) { if (mine === themeSeq) { paintTheme(previous); themeNotSaved(e.message || 'network error'); } return; }
   if (mine !== themeSeq) return;                                           // a later click owns the paint now
   if (!res.ok) {
-    setThemeMsg(data.error || `HTTP ${res.status}`, 'err');
+    themeNotSaved(data.error || `The server answered ${res.status}.`);
     // Spec §5.3: paint what the SERVER holds, not what this tab guessed.
     // A non-2xx on that re-fetch yields {error} (safeJson never throws): fall back to the last
     // CONFIRMED mode, never to an undefined theme (applyTheme would normalise it to 'system').
@@ -13142,11 +13291,8 @@ try {
   if (mq && typeof mq.addEventListener === 'function') mq.addEventListener('change', () => applyTheme(document.documentElement.dataset.theme));
 } catch { /* no media queries here */ }
 
-// Settings › Runs › Scheduled runs: the defaults a new schedule inherits.
-function setSchedDefaultsMsg(text, kind) { setHintMsg('schedDefaultsMsg', text, kind); }
 // ---- Away mode (Settings › Runs) ----
 // Settings › Away mode: the user layer (night-mode-form.mjs), its live summary and the status strip.
-function setNightModeMsg(text, kind) { setHintMsg('nightModeMsg', text, kind); }
 /** A GET /api/away-mode body, or null. Other UI tests' fetch stubs answer unknown URLs with
  *  unrelated JSON (e.g. {config:{steps}}), so check the shape, never just `config`. */
 const isAwayBody = (d) => !!(d && d.config && typeof d.config === 'object' && typeof d.toggle === 'string');
@@ -13170,6 +13316,7 @@ function paintNightFallback(host, data) {
   const toggle = typeof data?.nightModeToggle === 'string' ? data.nightModeToggle : 'auto';
   paintAwayStatus(toggle, !!parseWindow(user.window));
   renderNightForm(host, { level: 'user', values: user, effective: data?.nightModeEffective || user, sources: {}, inherited: { config: null, sources: {} }, toggle, now: Date.now(), statusEl: awayStatusEl, models: awayModelCatalog });
+  settingsCardPainted('nightModeSave');
 }
 async function paintNightSettings(data) {
   try {
@@ -13186,6 +13333,9 @@ async function paintNightSettings(data) {
     paintSideAway();
     if (host.dataset.dirty === '1') { updateAwaySummary(host, { toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), inherited: d.inherited }); return; }   // keep unsaved edits
     renderNightForm(host, { level: 'user', values: d.user, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), statusEl: awayStatusEl, models });
+    // Never on the keep-dirty branch above: settings-changed from another card's save lands
+    // here too, and re-cleaning would hide unsaved Away edits.
+    settingsCardPainted('nightModeSave');
   } catch { /* the card keeps what it shows; never an unhandled rejection */ }
 }
 /** `hours` = away hours are set: without them no tip mentions them. */
@@ -13198,23 +13348,37 @@ function paintAwayStatus(toggle, hours = true) {
     return b;
   }));
 }
-awayStatusEl?.addEventListener('click', (e) => {
+awayStatusEl?.addEventListener('click', async (e) => {
   const b = e.target.closest('button[data-mode]'); if (!b) return;
   // Only the toggle: the paint callback repaints the strip and the summary, never the unsaved fields.
-  postSettingsCard({ nightModeToggle: b.dataset.mode }, { setMsg: setNightModeMsg, paint: () => paintNightSettings(null), savedText: '' });
+  // No card and no tracker: the Away tracker would mark unsaved form edits clean. paintAwayStatus
+  // rebuilds these buttons, so no button state either.
+  const r = await postSettingsCard({ nightModeToggle: b.dataset.mode }, { paint: () => paintNightSettings(null) });
+  if (!r.ok) {
+    void paintNightSettings(null);
+    notify({ tone: 'err', title: 'Away mode not changed', detail: r.error, key: 'away-mode' });
+  }
 });
-function postNightSettings(body) {
+function postNightSettings(body, opts = {}) {
   // The server emits settings-changed BEFORE it answers the POST, so the event's paint can run after
   // this one. Clear the dirty flag synchronously on success: whichever paint runs last re-renders the
-  // saved values, and the form never stays stuck "dirty".
+  // saved values, and the form never stays stuck "dirty". When fetchAwayMode fails the repaint returns
+  // early, and postSettingsCard's own markClean is what clears the card.
   const host = document.getElementById('night-mode-host');
-  return postSettingsCard(body, { setMsg: setNightModeMsg, paint: () => { if (host) delete host.dataset.dirty; void paintNightSettings(null); }, savedText: 'Saved. The summary above is what will happen.' });
+  return postSettingsCard(body, {
+    card: document.getElementById('night-settings-card'), dirty: settingsCardDirty('nightModeSave'),
+    paint: () => { if (host) delete host.dataset.dirty; void paintNightSettings(null); },
+    appliesWhen: 'The summary above is what will happen.', ...opts });
 }
-document.getElementById('nightModeSave')?.addEventListener('click', () => {
-  postNightSettings({ nightMode: readNightForm(document.getElementById('night-mode-host'), { level: 'user' }) });
+document.getElementById('nightModeSave')?.addEventListener('click', (e) => {
+  postNightSettings({ nightMode: readNightForm(document.getElementById('night-mode-host'), { level: 'user' }) }, { button: e.currentTarget });
 });
 // "Use defaults" keeps today's body: it also returns the status to "follow my away hours".
-document.getElementById('nightModeReset')?.addEventListener('click', () => postNightSettings({ nightMode: null, nightModeToggle: 'auto' }));
+document.getElementById('nightModeReset')?.addEventListener('click', (e) => postNightSettings({ nightMode: null, nightModeToggle: 'auto' },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('nightModeSave');
+
+// Settings › Runs › Scheduled runs: the defaults a new schedule inherits.
 
 function paintScheduleSettings(data) {
   const d = data && data.schedule;
@@ -13227,25 +13391,32 @@ function paintScheduleSettings(data) {
   grace.value = String(d.graceMin);
   grace.disabled = d.ifMissed !== 'run';
   fails.value = String(d.maxFailures);
+  settingsCardPainted('schedDefaultsSave');
 }
-function saveScheduleDefaults() {
-  const raw = document.getElementById('schedMaxFailures').value.trim();
+function scheduleSettingsCard() { return document.getElementById('schedule-settings-card'); }
+function postScheduleDefaults(body, opts = {}) {
+  return postSettingsCard(body, { card: scheduleSettingsCard(), paint: paintScheduleSettings, dirty: settingsCardDirty('schedDefaultsSave'), ...opts });
+}
+function saveScheduleDefaults(e) {
+  clearFieldErrors(scheduleSettingsCard());
+  const failsEl = document.getElementById('schedMaxFailures');
+  const raw = failsEl.value.trim();
   const n = raw === '' ? '' : Number(raw);
-  if (n !== '' && (!Number.isInteger(n) || n < 0 || n > 100)) { setSchedDefaultsMsg('enter a whole number from 0 to 100', 'err'); return; }
-  postSettingsCard({
+  if (n !== '' && (!Number.isInteger(n) || n < 0 || n > 100)) { fieldError(failsEl, 'Enter a whole number from 0 to 100.'); return; }
+  postScheduleDefaults({
     schedule: { ifMissed: document.getElementById('schedIfMissed').value, graceMin: Number(document.getElementById('schedGraceMin').value), maxFailures: n },
-  }, { setMsg: setSchedDefaultsMsg, paint: paintScheduleSettings });
+  }, { button: e?.currentTarget || null });
 }
 document.getElementById('schedDefaultsSave')?.addEventListener('click', saveScheduleDefaults);
-document.getElementById('schedDefaultsReset')?.addEventListener('click', () => postSettingsCard(
-  { schedule: { ifMissed: '', graceMin: '', maxFailures: '' } }, { setMsg: setSchedDefaultsMsg, paint: paintScheduleSettings }));
+document.getElementById('schedDefaultsReset')?.addEventListener('click', (e) => postScheduleDefaults(
+  { schedule: { ifMissed: '', graceMin: '', maxFailures: '' } }, { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('schedDefaultsSave');
 document.getElementById('schedIfMissed')?.addEventListener('change', (e) => {
   const grace = document.getElementById('schedGraceMin');
   if (grace) grace.disabled = e.target.value !== 'run';
 });
 
 // Settings › Runs › Sync before run (#527): the instance defaults every project inherits.
-function setSyncDefaultsMsg(text, kind) { setHintMsg('syncDefaultsMsg', text, kind); }
 function paintSyncSettings(data) {
   const d = data && data.sync;
   const before = document.getElementById('syncDefBeforeRun');
@@ -13263,23 +13434,27 @@ function paintSyncSettings(data) {
     refresh.append(opt);
   }
   refresh.value = mins;
+  settingsCardPainted('syncDefaultsSave');
 }
-function saveSyncDefaults() {
+function postSyncDefaults(body, opts = {}) {
+  return postSettingsCard(body, { card: document.getElementById('sync-settings-card'), paint: paintSyncSettings, dirty: settingsCardDirty('syncDefaultsSave'), ...opts });
+}
+function saveSyncDefaults(e) {
   const remote = document.getElementById('syncDefRemote').value.trim();
-  postSettingsCard({
+  postSyncDefaults({
     sync: {
       beforeRun: document.getElementById('syncDefBeforeRun').checked,
       onDiverged: document.getElementById('syncDefOnDiverged').value,
       remote: remote || null,                            // empty = back to the default remote
       refreshMinutes: Number(document.getElementById('syncDefRefresh').value),
     },
-  }, { setMsg: setSyncDefaultsMsg, paint: paintSyncSettings });
+  }, { button: e?.currentTarget || null });
 }
 document.getElementById('syncDefaultsSave')?.addEventListener('click', saveSyncDefaults);
-document.getElementById('syncDefaultsReset')?.addEventListener('click', () => postSettingsCard(
-  { sync: null }, { setMsg: setSyncDefaultsMsg, paint: paintSyncSettings }));
+document.getElementById('syncDefaultsReset')?.addEventListener('click', (e) => postSyncDefaults(
+  { sync: null }, { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('syncDefaultsSave');
 
-function setAskLimitsMsg(text, kind) { setHintMsg('askLimitsMsg', text, kind); }
 function paintAskSettings(data) {
   const turns = document.getElementById('askMaxTurns');
   const budget = document.getElementById('askMaxBudgetUsd');
@@ -13296,25 +13471,30 @@ function paintAskSettings(data) {
   // Web access: repainted from every GET and save response, which also resets its dirty flag.
   const webHost = document.getElementById('ask-web-host');
   if (webHost) webHost.replaceChildren(renderAskWebFields({ askWeb: data.askWeb }, { doc: document }));
+  settingsCardPainted('askLimitsSave');
 }
-function postAskLimits(body) {
-  return postSettingsCard(body, { setMsg: setAskLimitsMsg, paint: paintAskSettings });
+function askLimitsCard() { return document.getElementById('ask-settings-card'); }
+function postAskLimits(body, opts = {}) {
+  return postSettingsCard(body, { card: askLimitsCard(), paint: paintAskSettings, dirty: settingsCardDirty('askLimitsSave'), ...opts });
 }
-function saveAskLimits() {
-  const turnsRaw = document.getElementById('askMaxTurns').value.trim();
+function saveAskLimits(e) {
+  clearFieldErrors(askLimitsCard());
+  const turnsEl = document.getElementById('askMaxTurns');
+  const capEl = document.getElementById('askMaxBudgetUsd');
+  const turnsRaw = turnsEl.value.trim();
   const noCap = document.getElementById('askNoCap').checked;
-  const budgetRaw = document.getElementById('askMaxBudgetUsd').value.trim();
+  const budgetRaw = capEl.value.trim();
   let askMaxTurns = '';
   if (turnsRaw !== '') {
     const n = Number(turnsRaw);
-    if (!Number.isInteger(n) || n < 1 || n > 500) { setAskLimitsMsg('the turn limit must be an integer between 1 and 500', 'err'); return; }
+    if (!Number.isInteger(n) || n < 1 || n > 500) { fieldError(turnsEl, 'Enter a whole number from 1 to 500, or leave it blank.'); return; }
     askMaxTurns = n;
   }
   let askMaxBudgetUsd = '';
   if (noCap) askMaxBudgetUsd = null;
   else if (budgetRaw !== '') {
     const b = Number(budgetRaw);
-    if (!Number.isFinite(b) || b < 0.1 || b > 100) { setAskLimitsMsg('the per-turn cap must be between 0.1 and 100', 'err'); return; }
+    if (!Number.isFinite(b) || b < 0.1 || b > 100) { fieldError(capEl, 'Enter an amount from 0.1 to 100, or tick No cap.'); return; }
     askMaxBudgetUsd = b;
   }
   const scriptHost = document.getElementById('ask-script-tools-host');
@@ -13322,10 +13502,13 @@ function saveAskLimits() {
   const askWebBody = webHost ? collectAskWebFields(webHost) : null;   // null = the web fields were not touched
   postAskLimits({ askMaxTurns, askMaxBudgetUsd,
     ...(scriptHost ? { chat: collectScriptToolsToggle(scriptHost) } : {}),
-    ...(askWebBody ? { askWeb: askWebBody } : {}) });
+    ...(askWebBody ? { askWeb: askWebBody } : {}) }, { button: e?.currentTarget || null });
 }
 document.getElementById('askLimitsSave')?.addEventListener('click', saveAskLimits);
-document.getElementById('askLimitsReset')?.addEventListener('click', () => postAskLimits({ askMaxTurns: '', askMaxBudgetUsd: '' }));
+document.getElementById('askLimitsReset')?.addEventListener('click', (e) => postAskLimits(
+  { askMaxTurns: '', askMaxBudgetUsd: '' },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('askLimitsSave');
 document.getElementById('askNoCap')?.addEventListener('change', () => {
   const budget = document.getElementById('askMaxBudgetUsd');
   if (budget) budget.disabled = document.getElementById('askNoCap').checked;
@@ -13337,8 +13520,7 @@ document.getElementById('askNoCap')?.addEventListener('change', () => {
 // DELETE /api/ask/threads. The server broadcasts ask-history-cleared afterwards
 // — the ask panel resets itself off that frame, nothing to do here.
 function setAskHistoryMsg(text, kind) {
-  const n = document.getElementById('askHistoryMsg');
-  if (n) { n.textContent = text || ''; n.className = `hint${kind ? ` ${kind}` : ''}`; }
+  reportStatus(document.getElementById('askHistoryMsg'), 'hint', text, kind);
 }
 function askHistoryCount(n, one, many = `${one}s`) {
   return `${n} ${n === 1 ? one : many}`;
@@ -13364,7 +13546,7 @@ async function fetchAskHistory() {
 }
 async function loadAskHistory() {
   if (!document.getElementById('askHistoryCounts')) return;
-  try { paintAskHistory(await fetchAskHistory()); } catch (e) { setAskHistoryMsg(e.message, 'err'); }
+  try { paintAskHistory(await fetchAskHistory()); } catch (e) { setAskHistoryMsg(e.message, 'err-inline'); }
 }
 // One bullet per non-zero count; the in-progress line only when a turn is live.
 function askHistoryConfirmMessage(c) {
@@ -13401,13 +13583,12 @@ async function deleteAskHistory() {
   const failed = Array.isArray(data.failed) ? data.failed.length : 0;
   const summary = `Deleted ${askHistoryCount(removed.threads, 'chat')} and ${askHistoryCount(removed.worktrees, 'worktree')}.`;
   if (failed) setAskHistoryMsg(`${summary} ${askHistoryCount(failed, 'chat')} could not be removed.`, 'err');
-  else setAskHistoryMsg(summary);
+  else setAskHistoryMsg(summary, 'ok');
   await loadAskHistory();
 }
 document.getElementById('askHistoryDelete')?.addEventListener('click', deleteAskHistory);
 
 // ---- Spawn-debug diagnostics card (shares the Ask card's helpers above) ----
-function setDebugSpawnMsg(text, kind) { setHintMsg('debugSpawnMsg', text, kind); }
 // The checkbox is the STORED preference; the note says when the environment
 // overrides it (a non-empty WORCA_DEBUG_SPAWN at launch), so an operator never
 // sees an unchecked box while diagnostics are flowing — or the reverse.
@@ -13420,18 +13601,21 @@ function paintDebugSpawnSettings(data) {
   setHintMsg('debugSpawnEnvNote', envOverride
     ? `WORCA_DEBUG_SPAWN is set in the environment: diagnostics are ${eff.enabled ? 'ON' : 'OFF'} regardless of this setting.`
     : '', envOverride ? 'warn' : '');
+  settingsCardPainted('debugSpawnSave');
 }
-function postDebugSpawn(body) {
+function postDebugSpawn(body, opts = {}) {
   return postSettingsCard(body, {
-    setMsg: setDebugSpawnMsg, paint: paintDebugSpawnSettings,
-    savedText: 'Saved. Applies to the next spawn — no restart needed.',
+    card: document.getElementById('debug-spawn-settings-card'), paint: paintDebugSpawnSettings,
+    dirty: settingsCardDirty('debugSpawnSave'), appliesWhen: 'Applies to the next spawn. No restart needed.', ...opts,
   });
 }
-function saveDebugSpawn() {
-  postDebugSpawn({ debugSpawnEnabled: document.getElementById('debugSpawnEnabled').checked });
+function saveDebugSpawn(e) {
+  postDebugSpawn({ debugSpawnEnabled: document.getElementById('debugSpawnEnabled').checked }, { button: e?.currentTarget || null });
 }
 document.getElementById('debugSpawnSave')?.addEventListener('click', saveDebugSpawn);
-document.getElementById('debugSpawnReset')?.addEventListener('click', () => postDebugSpawn({ debugSpawnEnabled: false }));
+document.getElementById('debugSpawnReset')?.addEventListener('click', (e) => postDebugSpawn({ debugSpawnEnabled: false },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('debugSpawnSave');
 
 // ---- Title generation card (#422) ----
 // A SELECT over the project-less catalog, never a text field: free text could
@@ -13491,20 +13675,24 @@ async function paintTitleModelSettings(data) {
   setHintMsg('titleModelEnvNote', note, kind);
   const testBtn = document.getElementById('titleModelTest');
   if (testBtn) testBtn.disabled = !sel.value || sel.options[sel.selectedIndex]?.disabled;
+  settingsCardPainted('titleModelSave');
 }
-function postTitleModel(body) {
+// A not-installed pick on a model card is a field problem: the select says what to do.
+const MODEL_GONE_TEXT = 'That model is no longer installed. Pick another, or use the default.';
+function postTitleModel(body, opts = {}) {
   return postSettingsCard(body, {
-    setMsg: setTitleModelMsg, paint: paintTitleModelSettings,
-    savedText: 'Saved. Applies to the next title — no restart needed.',
+    card: document.getElementById('title-model-settings-card'), paint: paintTitleModelSettings,
+    dirty: settingsCardDirty('titleModelSave'), appliesWhen: 'Applies to the next title.', ...opts,
   });
 }
-document.getElementById('titleModelSave')?.addEventListener('click', () => {
+document.getElementById('titleModelSave')?.addEventListener('click', (e) => {
   const sel = document.getElementById('titleModel');
   const opt = sel.options[sel.selectedIndex];
-  if (opt && opt.disabled) { setTitleModelMsg('that model is no longer installed — pick another or use the default', 'err'); return; }
-  postTitleModel({ titleModel: sel.value || '' });
+  if (opt && opt.disabled) { fieldError(sel, MODEL_GONE_TEXT); return; }
+  postTitleModel({ titleModel: sel.value || '' }, { button: e.currentTarget });
 });
-document.getElementById('titleModelReset')?.addEventListener('click', () => postTitleModel({ titleModel: '' }));
+document.getElementById('titleModelReset')?.addEventListener('click', (e) => postTitleModel({ titleModel: '' },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
 document.getElementById('titleModel')?.addEventListener('change', () => {
   const sel = document.getElementById('titleModel');
   const testBtn = document.getElementById('titleModelTest');
@@ -13514,26 +13702,32 @@ document.getElementById('titleModel')?.addEventListener('change', () => {
 // tiny spawn through the id's catalog routing. Without it the first evidence of
 // a bad pick is a missing title three minutes into a run. Shared by BOTH model
 // cards (title generation and the Auto workflow model) — one implementation.
+// #555: Test shows busy → done on the button. The model's reply stays in the card's line
+// (green); a failure is a card alert above the buttons. The paint-time and change-time
+// disabled toggles keep the no-model rule; idleDisabled holds it after a Test.
 async function testModelFromSettings(selectId, buttonId, setMsg) {
   const sel = document.getElementById(selectId);
   const btn = document.getElementById(buttonId);
   const id = sel.value;
   if (!id) return;
-  btn.disabled = true;
-  setMsg(`Testing ${id}…`);
-  try {
-    const res = await fetch(`/api/models/${encodeURIComponent(id)}/test`, { method: 'POST' });
-    const data = await safeJson(res);
-    if (!res.ok) setMsg(`✗ ${data.error || `HTTP ${res.status}`}`, 'err');
-    else if (data.ok) setMsg(`✓ ${id} replied: ${data.text}`);
-    else setMsg(`✗ ${data.hint || data.message}`, 'err');
-  } catch (e) {
-    setMsg(`✗ ${e.message}`, 'err');
-  } finally {
-    btn.disabled = false;
-  }
+  const card = btn.closest('section.card');
+  cardAlert(card, null);
+  setMsg('');
+  const noModel = () => !sel.value || !!sel.options[sel.selectedIndex]?.disabled;
+  const r = await withButton(btn, async () => {
+    try {
+      const res = await fetch(`/api/models/${encodeURIComponent(id)}/test`, { method: 'POST' });
+      const data = (await safeJson(res)) || {};
+      if (!res.ok) return { ok: false, error: data.error || `The server answered ${res.status}.` };
+      return data.ok ? { ok: true, text: data.text } : { ok: false, error: data.hint || data.message || 'The model did not reply.' };
+    } catch (e) { return { ok: false, error: `Worca did not answer (${e.message}).` }; }
+  }, { busy: 'Testing…', done: 'Works', idleDisabled: noModel });
+  if (r.skipped) return;
+  if (r.ok) setMsg(`${id} replied: ${r.text}`, 'ok');
+  else cardAlert(card, { title: `${id} did not answer`, detail: r.error });
 }
 document.getElementById('titleModelTest')?.addEventListener('click', () => testModelFromSettings('titleModel', 'titleModelTest', setTitleModelMsg));
+settingsCardDirty('titleModelSave');
 
 // ---- Auto workflow model (spec D14 / §7.7): the model that classifies a task into a workflow.
 // Reuses fetchTitleModelCatalog (the project-less /api/config catalog), setHintMsg and
@@ -13580,19 +13774,25 @@ async function paintAutoModelSettings(data) {
   setHintMsg('autoModelEnvNote', note, kind);
   const testBtn = document.getElementById('autoModelTest');
   if (testBtn) testBtn.disabled = !sel.value || sel.options[sel.selectedIndex]?.disabled;
+  settingsCardPainted('autoModelSave');
 }
-function postAutoModel(body) {
-  return postSettingsCard(body, { setMsg: setAutoModelMsg, paint: paintAutoModelSettings, savedText: 'Saved. Applies to the next Auto run — no restart needed.' });
+function postAutoModel(body, opts = {}) {
+  return postSettingsCard(body, {
+    card: document.getElementById('auto-model-settings-card'), paint: paintAutoModelSettings,
+    dirty: settingsCardDirty('autoModelSave'), appliesWhen: 'Applies to the next Auto run.', ...opts,
+  });
 }
-document.getElementById('autoModelSave')?.addEventListener('click', () => {
+document.getElementById('autoModelSave')?.addEventListener('click', (e) => {
   const sel = document.getElementById('autoModel');
   const opt = sel.options[sel.selectedIndex];
-  if (opt && opt.disabled) { setAutoModelMsg('that model is no longer installed — pick another or use the default', 'err'); return; }
-  postAutoModel({ autoWorkflowModel: sel.value || '' });
+  if (opt && opt.disabled) { fieldError(sel, MODEL_GONE_TEXT); return; }
+  postAutoModel({ autoWorkflowModel: sel.value || '' }, { button: e.currentTarget });
 });
-document.getElementById('autoModelReset')?.addEventListener('click', () => postAutoModel({ autoWorkflowModel: '' }));
+document.getElementById('autoModelReset')?.addEventListener('click', (e) => postAutoModel({ autoWorkflowModel: '' },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
 document.getElementById('autoModel')?.addEventListener('change', () => { const sel = document.getElementById('autoModel'); const b = document.getElementById('autoModelTest'); if (b) b.disabled = !sel.value || sel.options[sel.selectedIndex]?.disabled; });
 document.getElementById('autoModelTest')?.addEventListener('click', () => testModelFromSettings('autoModel', 'autoModelTest', setAutoModelMsg));
+settingsCardDirty('autoModelSave');
 
 // ---- PR description model: the model behind the "Ship it?" modal's Generate with AI.
 // The Auto workflow card's recipe verbatim (buildAutoModelOptions, the server-decided
@@ -13616,19 +13816,25 @@ async function paintPrDescModelSettings(data) {
   setHintMsg('prDescModelNote', note, kind);
   const testBtn = document.getElementById('prDescModelTest');
   if (testBtn) testBtn.disabled = !sel.value || sel.options[sel.selectedIndex]?.disabled;
+  settingsCardPainted('prDescModelSave');
 }
-function postPrDescModel(body) {
-  return postSettingsCard(body, { setMsg: setPrDescModelMsg, paint: paintPrDescModelSettings, savedText: 'Saved. Applies to the next Generate with AI — no restart needed.' });
+function postPrDescModel(body, opts = {}) {
+  return postSettingsCard(body, {
+    card: document.getElementById('pr-description-model-settings-card'), paint: paintPrDescModelSettings,
+    dirty: settingsCardDirty('prDescModelSave'), appliesWhen: 'Applies to the next Generate with AI.', ...opts,
+  });
 }
-document.getElementById('prDescModelSave')?.addEventListener('click', () => {
+document.getElementById('prDescModelSave')?.addEventListener('click', (e) => {
   const sel = document.getElementById('prDescModel');
   const opt = sel.options[sel.selectedIndex];
-  if (opt && opt.disabled) { setPrDescModelMsg('that model is no longer installed — pick another or use the default', 'err'); return; }
-  postPrDescModel({ prDescriptionModel: sel.value || '' });
+  if (opt && opt.disabled) { fieldError(sel, MODEL_GONE_TEXT); return; }
+  postPrDescModel({ prDescriptionModel: sel.value || '' }, { button: e.currentTarget });
 });
-document.getElementById('prDescModelReset')?.addEventListener('click', () => postPrDescModel({ prDescriptionModel: '' }));
+document.getElementById('prDescModelReset')?.addEventListener('click', (e) => postPrDescModel({ prDescriptionModel: '' },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
 document.getElementById('prDescModel')?.addEventListener('change', () => { const sel = document.getElementById('prDescModel'); const b = document.getElementById('prDescModelTest'); if (b) b.disabled = !sel.value || sel.options[sel.selectedIndex]?.disabled; });
 document.getElementById('prDescModelTest')?.addEventListener('click', () => testModelFromSettings('prDescModel', 'prDescModelTest', setPrDescModelMsg));
+settingsCardDirty('prDescModelSave');
 
 // ---- Settings › Memory: the Defragment model (memory-defrag-model.mjs) — the model + effort EVERY
 // Memory defragment run uses. The flat list of the Auto card (buildAutoModelOptions) over the same
@@ -13676,6 +13882,7 @@ async function paintMemDefragModelSettings(data) {
   else if (stored) note = `Every Memory defragment run uses ${memDefragLabel(stored)}${pair.effort ? ` · ${pair.effort}` : ''}, whatever the project picked.`;
   else note = `Unset: defragment runs use ${fallback}.`;
   setHintMsg('memDefragModelNote', note, kind);
+  settingsCardPainted('memDefragModelSave');
 }
 /** Once per visit to the tab (loadMemoryTab) and on a settings-changed frame — never per file route,
  *  so an unsaved pick survives opening a file. */
@@ -13694,35 +13901,39 @@ async function loadMemDefragModelCard() {
     if (msg && msg.classList.contains('err') && memDefragCatalog.length) setMemDefragMsg('');
   } catch (e) { memDefragCatalog = []; setMemDefragMsg(e.message, 'err'); }
 }
-function postMemDefragModel(body) {
+function postMemDefragModel(body, opts = {}) {
   return postSettingsCard(body, {
-    setMsg: setMemDefragMsg,
+    card: document.getElementById('mem-defrag-model-card'), dirty: settingsCardDirty('memDefragModelSave'),
+    appliesWhen: 'Applies to the next defragment run.', ...opts,
     paint: (data) => {
       // The health card's hint names the pair: reload the scope (keepDraft — an open draft stays).
       if (memoryTabCtl && memoryTabCtl.loaded()) void memoryTabCtl.load(memoryTabCtl.selectedName(), { keepDraft: true });
       return paintMemDefragModelSettings(data);
     },
-    savedText: 'Saved. Applies to the next defragment run — no restart needed.',
   });
 }
 document.getElementById('memDefragModel')?.addEventListener('change', () => {
   paintMemDefragEffort(document.getElementById('memDefragEffort')?.value || '');
 });
-document.getElementById('memDefragModelSave')?.addEventListener('click', () => {
+// Nothing painted (the settings or the model list failed to load): not a field problem.
+const MODEL_LIST_GONE = { title: 'Not saved', detail: 'The model list did not load. Reload the page to change this.' };
+document.getElementById('memDefragModelSave')?.addEventListener('click', (e) => {
   // Nothing painted (the settings or the model list failed to load, or the tab is still loading):
   // a Save would post the empty pair and CLEAR the stored one. Refuse rather than guess.
-  if (!memDefragCatalog.length) { setMemDefragMsg('the model list did not load — reload the page to change this', 'err'); return; }
+  if (!memDefragCatalog.length) { cardAlert(document.getElementById('mem-defrag-model-card'), MODEL_LIST_GONE); return; }
   const msel = document.getElementById('memDefragModel');
   const opt = msel.options[msel.selectedIndex];
-  if (opt && opt.disabled) { setMemDefragMsg('that model is no longer installed — pick another or use the default', 'err'); return; }
+  if (opt && opt.disabled) { fieldError(msel, MODEL_GONE_TEXT); return; }
   const model = msel.value || '';
-  postMemDefragModel({ memoryDefrag: { model, effort: model ? (document.getElementById('memDefragEffort').value || '') : '' } });
+  postMemDefragModel({ memoryDefrag: { model, effort: model ? (document.getElementById('memDefragEffort').value || '') : '' } },
+    { button: e.currentTarget });
 });
-document.getElementById('memDefragModelReset')?.addEventListener('click', () => postMemDefragModel({ memoryDefrag: null }));
+document.getElementById('memDefragModelReset')?.addEventListener('click', (e) => postMemDefragModel({ memoryDefrag: null },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('memDefragModelSave');
 
 // ---- Settings › Runs › Workspaces: the models every scan starts with (D17). Create workspace
 // can change them for one scan; Re-scan uses them.
-function setWsScanModelsMsg(text, kind) { setHintMsg('wsScanModelsMsg', text, kind); }
 async function paintWorkspaceScanModelsSettings(data) {
   if (!document.getElementById('wsScanModel')) return;
   wsScanCatalog = await fetchTitleModelCatalog();
@@ -13732,35 +13943,44 @@ async function paintWorkspaceScanModelsSettings(data) {
   const stale = !!pick.scanModel && wsScanCatalog.length > 0 && !wsScanCatalog.some((m) => m && m.id === pick.scanModel);
   keepVisible(document.getElementById('ws-scan-models-card'), !!(data && data.workspaceScan));
   setHintMsg('wsScanModelsNote', stale ? `Model "${pick.scanModel}" is no longer in the catalog — scans fall back to the default.` : '', stale ? 'warn' : '');
+  settingsCardPainted('wsScanModelsSave');
 }
-function postWorkspaceScanModels(body) {
-  return postSettingsCard(body, { setMsg: setWsScanModelsMsg, paint: paintWorkspaceScanModelsSettings, savedText: 'Saved. Applies to the next scan.' });
+function postWorkspaceScanModels(body, opts = {}) {
+  return postSettingsCard(body, {
+    card: document.getElementById('ws-scan-models-card'), paint: paintWorkspaceScanModelsSettings,
+    dirty: settingsCardDirty('wsScanModelsSave'), appliesWhen: 'Applies to the next scan.', ...opts,
+  });
 }
 document.getElementById('wsScanModel')?.addEventListener('change', () => {
   paintScanEffort(WS_SCAN_SETTINGS_IDS, document.getElementById('wsScanEffort')?.value || '', wsScanCatalog);
 });
-document.getElementById('wsScanModelsSave')?.addEventListener('click', () => {
-  if (!wsScanCatalog.length) { setWsScanModelsMsg('the model list did not load — reload the page to change this', 'err'); return; }
+document.getElementById('wsScanModelsSave')?.addEventListener('click', (e) => {
+  if (!wsScanCatalog.length) { cardAlert(document.getElementById('ws-scan-models-card'), MODEL_LIST_GONE); return; }
   const sel = document.getElementById('wsScanModel');
   const opt = sel && sel.options[sel.selectedIndex];
-  if (opt && opt.disabled) { setWsScanModelsMsg('that model is no longer installed — pick another or use the default', 'err'); return; }
+  if (opt && opt.disabled) { fieldError(sel, MODEL_GONE_TEXT); return; }
   const pick = readScanModelPickers(WS_SCAN_SETTINGS_IDS);
-  postWorkspaceScanModels({ workspaceScan: { ...pick, scanEffort: pick.scanEffort || null } });
+  postWorkspaceScanModels({ workspaceScan: { ...pick, scanEffort: pick.scanEffort || null } }, { button: e.currentTarget });
 });
-document.getElementById('wsScanModelsReset')?.addEventListener('click', () => postWorkspaceScanModels({ workspaceScan: null }));
+document.getElementById('wsScanModelsReset')?.addEventListener('click', (e) => postWorkspaceScanModels({ workspaceScan: null },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('wsScanModelsSave');
 
 // Browse… for the projects root: native OS dialog, in-app modal fallback —
 // the same two endpoints the add-project Browse button uses (app.js:3793).
 if (el.settingsProjectsRootBrowse) {
   el.settingsProjectsRootBrowse.addEventListener('click', async () => {
     el.settingsProjectsRootBrowse.disabled = true;
-    setSettingsMsg('');
+    const card = document.getElementById('root-settings-card');
+    cardAlert(card, null);
+    // A picked path is a write without an event: tell the card's tracker (#555).
+    const use = (p) => { el.settingsProjectsRoot.value = p; settingsCardDirty('settingsSave')?.refresh(); };
     try {
       const data = await pickFolder();
-      if (data && data.status === 'picked' && data.path) el.settingsProjectsRoot.value = data.path;
+      if (data && data.status === 'picked' && data.path) use(data.path);
       else if (data && data.status === 'canceled') { /* user dismissed the dialog */ }
-      else if (data && data.status === 'busy') setSettingsMsg('A folder dialog is already open — finish or cancel it first.', 'err');
-      else await openFolderBrowser(settingsFieldValue(el.settingsProjectsRoot), (p) => { el.settingsProjectsRoot.value = p; });
+      else if (data && data.status === 'busy') cardAlert(card, { tone: 'warn', title: 'A folder dialog is already open', detail: 'Finish or cancel it first.' });
+      else await openFolderBrowser(settingsFieldValue(el.settingsProjectsRoot), use);
     } finally {
       el.settingsProjectsRootBrowse.disabled = false;
     }
@@ -13771,10 +13991,8 @@ if (el.settingsProjectsRootBrowse) {
 // Plugins view. Pure rendering lives in plugins-view.mjs; this block owns the
 // endpoint calls, the modal shell, and ONE delegated click handler on the list.
 // ---------------------------------------------------------------------------
-function setPluginsMsg(text, kind) {
-  if (!el.pluginsMsg) return;
-  el.pluginsMsg.textContent = text || '';
-  el.pluginsMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+function setPluginsMsg(text, kind, extra) {
+  reportStatus(el.pluginsMsg, 'form-msg', text, kind, extra);
 }
 
 // Tiny modal shell around #plugin-modal: swap in a body element + action buttons.
@@ -13868,12 +14086,14 @@ async function openTmEnableDialog(projectKeyStr, { mode = 'here', change = false
 
 // JSON fetch helper: { ok, status, data } — body omitted when undefined.
 async function pluginApi(method, url, body) {
-  const res = await fetch(url, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  return { ok: res.ok, status: res.status, data: await safeJson(res) };
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { ok: res.ok, status: res.status, data: await safeJson(res) };
+  } catch (e) { return { ok: false, status: 0, data: { error: `Worca did not answer (${e.message}).` } }; }
 }
 
 // Snapshot of the last GET /api/marketplaces payload — the delegated install
@@ -13895,7 +14115,7 @@ async function loadPluginsView({ refresh = false } = {}) {
   try {
     const [pRes, mRes] = await Promise.all([fetch('/api/plugins'), fetch('/api/marketplaces')]);
     const data = await safeJson(pRes);
-    if (!pRes.ok) { renderMarketplaceSections([]); return setPluginsMsg(data.error || `HTTP ${pRes.status}`, 'err'); }
+    if (!pRes.ok) { renderMarketplaceSections([]); return setPluginsMsg(data.error || `HTTP ${pRes.status}`, 'err-inline'); }
     let channelStatus = [];
     try {
       const cs = await safeJson(await fetch('/api/chat/status'));
@@ -13906,7 +14126,7 @@ async function loadPluginsView({ refresh = false } = {}) {
     el.pluginsList.replaceChildren(...parts);
     const mData = await safeJson(mRes);
     renderMarketplaceSections(mRes.ok ? mData.marketplaces || [] : []);
-  } catch (e) { setPluginsMsg(e.message, 'err'); }
+  } catch (e) { setPluginsMsg(e.message, 'err-inline'); }
   if (refresh) refreshMarketplacesInBackground(); // C3: only the view-open path kicks the background refresh
   paintPluginsPolicy(refresh);                   // team policy (design board 10): the required-by strip
 }
@@ -13960,12 +14180,16 @@ async function addMarketplaceFromInput() {
   }
 }
 
-function openInstallConsent(entry) {
+// #555 D5: the consent dialog closes before the request, so its result is a keyed toast that
+// replaces the progress one — visible from Team policy as well as the Plugins page.
+// `onInstalled` lets the caller repaint its own page (Team policy) after a success.
+function openInstallConsent(entry, { onInstalled = null } = {}) {
   pluginModal(`Will install: ${entry.name}`, renderInstallConsent(entry, entry.inventory || {}), [
     ['Cancel', 'btn btn-ghost btn-mini', closePluginModal],
     ['Install', 'btn btn-primary btn-mini', async () => {
       closePluginModal();
-      setPluginsMsg(`Installing ${entry.name}…`);
+      const key = `plugin-install-${entry.name}`;
+      notify({ tone: 'info', title: `Installing ${entry.name}…`, key, timeout: 0 });
       const { ok, data } = await pluginApi('POST', '/api/plugins/install',
         { repoUrl: entry.repoUrl, subdir: entry.subdir, name: entry.name, sha: entry.sha,
           ...(entry.marketplace ? { marketplace: entry.marketplace } : {}) });
@@ -13973,13 +14197,14 @@ function openInstallConsent(entry) {
         // A cached snapshot can point at a sha the remote no longer has (force-push,
         // rebase): git's raw complaint is unreadable, so map it to the real fix (C3).
         if (/not a valid object name|does not exist/.test(data.error || '')) {
-          return setPluginsMsg('This plugin snapshot is stale — Refresh the marketplace and try again.', 'err');
+          return setPluginsMsg('This plugin snapshot is stale — Refresh the marketplace and try again.', 'err', { key });
         }
-        return setPluginsMsg(data.error || 'install failed', 'err');
+        return setPluginsMsg(data.error || 'install failed', 'err', { key });
       }
-      setPluginsMsg(`Installed ${entry.name}.`, 'ok');
+      setPluginsMsg(`Installed ${entry.name}.`, 'ok', { key, action: { label: 'Open', run: () => openPluginSettings(entry.name) } });
       invalidateAgentCaches();                 // plugin agents join the registry
       loadPluginsView();
+      onInstalled?.();
     }],
   ]);
 }
@@ -14290,7 +14515,9 @@ if (el.pluginsList) el.pluginsList.addEventListener('click', async (e) => {
       'DELETE', `/api/plugins/${encodeURIComponent(name)}${purge ? '?purge=1' : ''}`,
     );
     if (status === 409) {
-      pluginModal(`Cannot uninstall ${name}`, renderReferences409(data.references || []));
+      const refs = data.references || [];
+      notify({ tone: 'err', title: `Cannot uninstall ${name}`, detail: String(data.error || '').split('\n')[0],
+        action: { label: 'Details', run: () => pluginModal(`Cannot uninstall ${name}`, renderReferences409(refs)) } });
       return;
     }
     if (!ok) return setPluginsMsg(data.error || 'uninstall failed', 'err');
@@ -14372,9 +14599,7 @@ const grvClone = (o) => JSON.parse(JSON.stringify(o));
 const emptyGuardrails = () => ({ honorProjectSettings: true, envScrub: false, envAllowlist: [], protectedPaths: [], deny: [] });
 
 function setGuardrailsMsg(text, kind) {
-  if (!el.guardrailsMsg) return;
-  el.guardrailsMsg.textContent = text || '';
-  el.guardrailsMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+  reportStatus(el.guardrailsMsg, 'form-msg', text, kind);
 }
 
 const GRV_LIST_FIELDS = { 'gr-allow': 'envAllowlist', 'gr-paths': 'protectedPaths', 'gr-deny': 'deny' };
@@ -14496,8 +14721,10 @@ function memoryApiBase(scopeKey) { return scopeKey === 'global' ? '/api/memory/g
 async function memoryApi(method, url, body) {
   const init = { method };
   if (body !== undefined) { init.headers = { 'Content-Type': 'application/json' }; init.body = JSON.stringify(body); }
-  const res = await fetch(url, init);
-  return { ok: res.ok, status: res.status, data: await safeJson(res) };
+  try {
+    const res = await fetch(url, init);
+    return { ok: res.ok, status: res.status, data: await safeJson(res) };
+  } catch (e) { return { ok: false, status: 0, data: { error: `Worca did not answer (${e.message}).` } }; }
 }
 // Instant feedback only: isValidMemoryName on the server is the authority (it also knows the Win32
 // reserved stems), and both spell the rule with the SAME string.
@@ -14517,7 +14744,8 @@ function createMemoryController({ host, msgEl, scopeKey, hostProject = null, nav
   // LAST one issued must win however the responses land.
   let seq = 0;
   let frameOwed = false;
-  const say = (text, kind) => { if (msgEl) { msgEl.textContent = text || ''; msgEl.className = 'form-msg' + (kind ? ' ' + kind : ''); } };
+  // #555: a result is a toast (reportStatus); load()'s failure and the frame conflict stay inline.
+  const say = (text, kind) => reportStatus(msgEl, 'form-msg', text, kind);
   const route = (name) => { if (navigate) location.hash = memoryRoute(scopeKey, name); };
   const hostRef = () => (typeof hostProject === 'function' ? hostProject() : hostProject);
 
@@ -14569,7 +14797,7 @@ function createMemoryController({ host, msgEl, scopeKey, hostProject = null, nav
     const dirty = isDirty();
     const r = await memoryApi('GET', base);
     if (my !== seq) return;
-    if (!r.ok) { say(r.data.error || `HTTP ${r.status}`, 'err'); st.report = null; paint(); return; }
+    if (!r.ok) { say(r.data.error || `HTTP ${r.status}`, 'err-inline'); st.report = null; paint(); return; }
     const report = r.data;
     const hist = await memoryApi('GET', `${base}/history`);
     if (my !== seq) return;
@@ -14585,7 +14813,7 @@ function createMemoryController({ host, msgEl, scopeKey, hostProject = null, nav
       const owed = fromFrame || frameOwed;
       frameOwed = false;
       if (st.flash) { say(...st.flash); st.flash = null; }
-      else if (owed) say('This scope changed on disk while you were editing — Save overwrites, Cancel reloads.', 'warn');
+      else if (owed) say('This scope changed on disk while you were editing — Save overwrites, Cancel reloads.', 'warn-inline');
       return;
     }
     frameOwed = false;
@@ -14594,20 +14822,30 @@ function createMemoryController({ host, msgEl, scopeKey, hostProject = null, nav
       const f = await memoryApi('GET', `${base}/files/${encodeURIComponent(name)}`);
       if (my !== seq) return;
       if (f.ok) { st.selected = name; st.editor = { name, text: f.data.text, loaded: f.data.text }; }
-      else say(f.data.error || `memory file "${name}" not found`, 'err');
+      else say(f.data.error || `memory file "${name}" not found`, 'err-inline');
     }
     paint();
     if (st.flash) { say(...st.flash); st.flash = null; }
   }
 
+  // #555: Save shows busy → "Saved"; the name rule is a field error, a refusal a card alert above
+  // the buttons (the editor keeps what was typed, so no repaint); success is a toast.
   async function save() {
     const ed = host.querySelector('.mem-editor');
     if (!ed) return;
+    ed.querySelector('.mem-actions')?.setAttribute('data-card-actions', '');
+    clearFieldErrors(ed);
+    cardAlert(ed, null);
     const { name, text } = collectEditor(ed);
-    if (!memoryNameOk(name)) { st.editor = { ...st.editor, name, text, msg: `Name: ${MEMORY_NAME_HELP}.`, msgErr: true }; paint(); return; }
-    const r = await memoryApi('PUT', `${base}/files/${encodeURIComponent(name)}`, { text });
-    if (!r.ok) { st.editor = { ...st.editor, name, text, msg: r.data.error || `HTTP ${r.status}`, msgErr: true }; paint(); return; }
-    st.flash = [`Saved ${name}.md`, 'ok'];
+    st.editor = { ...st.editor, name, text, msg: '', msgErr: false };
+    if (!memoryNameOk(name)) { fieldError(ed.querySelector('.mem-name'), `Name: ${MEMORY_NAME_HELP}.`); return; }
+    const r = await withButton(ed.querySelector('.mem-save'), async () => {
+      const res = await memoryApi('PUT', `${base}/files/${encodeURIComponent(name)}`, { text });
+      return res.ok ? res : { ok: false, error: res.data.error || `HTTP ${res.status}` };
+    });
+    if (r.skipped) return;
+    if (!r.ok) { cardAlert(ed, { title: 'Not saved', detail: r.error }); return; }
+    st.flash = [`Memory saved: ${name}.md`, 'ok'];
     st.selected = name; st.isNew = false;
     st.editor = { ...st.editor, name, text, loaded: text, msg: '', msgErr: false };
     // Route only when the hash would actually change: an unchanged hash fires no hashchange, so the
@@ -14975,12 +15213,35 @@ function actionsTabError(sec, text) {
   const p = document.createElement('p'); p.className = 'hint err'; p.textContent = text;
   sec.replaceChildren(p);
 }
-function actionsSaveMsg(root, text, kind) {
-  let msg = root.querySelector('.act-save-msg');
-  if (!msg) { msg = document.createElement('small'); root.appendChild(msg); }
-  msg.className = `hint act-save-msg${kind ? ` ${kind}` : ''}`;
-  msg.textContent = text || '';
+// #555: the editor's Save reports on the button; a field the server names gets the error,
+// anything else is a card alert above Save; success also raises a toast naming the project.
+function actionsEditorSave(sec, url, okTitle) {
+  let dirty = null;
+  const save = async (body, button) => {
+    const editor = sec.querySelector('.actions-config');
+    dirty ||= trackDirty(editor, { saveBtn: button });
+    clearFieldErrors(editor);
+    cardAlert(editor, null);
+    // The tracker owns the idle state (withButton reads button._fbIsClean), so no idleDisabled.
+    const s = await withButton(button, () => actionsCall('PUT', url, body));
+    if (s.skipped) return;
+    if (s.ok) { dirty.markClean(); notify({ tone: 'ok', title: okTitle }); return; }
+    const text = sentenceCase(s.data?.error || `The server answered ${s.status}.`);
+    const target = editorFieldEl(editor, s.data?.field);
+    if (target) fieldError(target, text);
+    else cardAlert(editor, { title: 'Not saved', detail: text });
+  };
+  // Track from first paint so Save starts disabled. The editor is built once per tab
+  // (dataset.loaded) and not re-rendered on save, and this microtask runs after
+  // sec.replaceChildren, so the tracker is never bound to stale DOM.
+  queueMicrotask(() => {
+    const editor = sec.querySelector('.actions-config');
+    const btn = editor?.querySelector('.ac-save');
+    if (editor && btn && !dirty) dirty = trackDirty(editor, { saveBtn: btn });
+  });
+  return save;
 }
+function sentenceCase(s) { const t = String(s || '').trim(); return t ? t[0].toUpperCase() + t.slice(1) : t; }
 async function buildPdActions(sec, key) {
   sec.classList.add('pd-sec-actions');
   const url = `/api/projects/${encodeURIComponent(key)}/actions`;
@@ -14992,14 +15253,9 @@ async function buildPdActions(sec, key) {
     btn.disabled = false;
     if (t.ok) { location.hash = hdHash({ projectKey: t.data.histKey, id: t.data.runId }, 'details', 'actions'); return; }
     btn.title = t.data?.code === 'NO_FINISHED_RUN' ? 'No finished run yet' : (t.data?.error || `HTTP ${t.status}`);
-    actionsSaveMsg(sec, btn.title, 'err');
+    notify({ tone: 'err', title: `Could not try ${actionId || 'the action'}`, detail: btn.title, key: `try-${actionId}` });
   };
-  const onSave = async (cfg) => {
-    actionsSaveMsg(sec, 'Saving…');
-    const s = await actionsCall('PUT', url, cfg);
-    if (!s.ok) { actionsSaveMsg(sec, s.data?.field ? `${s.data.field}: ${s.data.error}` : (s.data?.error || `HTTP ${s.status}`), 'err'); return; }
-    actionsSaveMsg(sec, 'Saved.');
-  };
+  const onSave = actionsEditorSave(sec, url, `Actions saved for ${projectByKey(key)?.name || key}`);
   sec.replaceChildren(renderProjectActionsEditor(r.data.config, { doc: document, detected: r.data.detected, onSave, onTry }));
 }
 async function buildWdActions(sec, id) {
@@ -15007,12 +15263,7 @@ async function buildWdActions(sec, id) {
   const url = `/api/workspaces/${encodeURIComponent(id)}/actions`;
   const r = await actionsCall('GET', url);
   if (!r.ok) { actionsTabError(sec, r.data?.error || 'Could not load stacks.'); return; }
-  const onSave = async (body) => {
-    actionsSaveMsg(sec, 'Saving…');
-    const s = await actionsCall('PUT', url, body);
-    if (!s.ok) { actionsSaveMsg(sec, s.data?.field ? `${s.data.field}: ${s.data.error}` : (s.data?.error || `HTTP ${s.status}`), 'err'); return; }
-    actionsSaveMsg(sec, 'Saved.');
-  };
+  const onSave = actionsEditorSave(sec, url, 'Stacks saved');
   sec.replaceChildren(renderStackEditor(r.data, { doc: document, onSave }));
 }
 
@@ -15034,6 +15285,7 @@ function paintActionsSettings(data) {
     paintActionsDetectNote(key);
   }
   void loadActionsLaunchers();
+  settingsCardPainted('act-save');
 }
 // Blank Editor / Terminal fall back to detection: the placeholder and the note say what it found, so a
 // blank field never claims "detected" when nothing was (the run page then says "No editor was found").
@@ -15064,6 +15316,7 @@ function useActionsLine(key, label, line) {
   const input = document.getElementById(`act-${key}`);
   if (!input) return;
   input.value = line;
+  settingsCardDirty('act-save')?.refresh();          // a write without an event (Browse… lands here after an await)
   actionsFieldMsg[key] = { kind: 'ok', text: `Picked ${label}. Try checks that it opens a folder; Save keeps it.` };
   paintActionsDetectNote(key);
   input.focus();
@@ -15159,19 +15412,32 @@ for (const key of ['editor', 'terminal']) {
     }
   });
 }
-function saveActionsSettings(actions) {
+const actionsSettingsCard = () => document.getElementById('actions-settings-card');
+function saveActionsSettings(actions, opts = {}) {
   return postSettingsCard({ actions }, {
-    setMsg: (t, k) => setHintMsg('actSettingsMsg', t, k), paint: paintActionsSettings });
+    card: actionsSettingsCard(), paint: paintActionsSettings, dirty: settingsCardDirty('act-save'), ...opts });
 }
+/** The card's values, or null when a check failed (the field already says why). */
 function readActionsSettingsForm() {
   const val = (id) => (document.getElementById(id)?.value ?? '').trim();
   const num = (id) => (val(id) === '' ? null : Number(val(id)));   // blank -> null clears the key
-  return { keep: val('act-keep') || 'never', portLow: num('act-port-low'), portHigh: num('act-port-high'),
+  const form = { keep: val('act-keep') || 'never', portLow: num('act-port-low'), portHigh: num('act-port-high'),
     editor: val('act-editor'), terminal: val('act-terminal'), maxCheckouts: num('act-max') };
+  if (form.portLow != null && form.portHigh != null && form.portLow > form.portHigh) {
+    fieldError([document.getElementById('act-port-low'), document.getElementById('act-port-high')], 'The low port can’t be higher than the high port.');
+    return null;
+  }
+  return form;
 }
-document.getElementById('act-save')?.addEventListener('click', () => saveActionsSettings(readActionsSettingsForm()));
-document.getElementById('act-reset')?.addEventListener('click', () => saveActionsSettings(
-  { keep: null, portLow: null, portHigh: null, editor: null, terminal: null, maxCheckouts: null }));
+document.getElementById('act-save')?.addEventListener('click', (e) => {
+  clearFieldErrors(actionsSettingsCard());
+  const actions = readActionsSettingsForm();
+  if (actions) saveActionsSettings(actions, { button: e.currentTarget });
+});
+document.getElementById('act-reset')?.addEventListener('click', (e) => saveActionsSettings(
+  { keep: null, portLow: null, portHigh: null, editor: null, terminal: null, maxCheckouts: null },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('act-save');
 
 const scriptsApi = {
   async list() {
@@ -15215,6 +15481,7 @@ function mountScriptsView(param = '') {
       host: el.scriptsHost,
       msgEl: el.scriptsMsg,
       api: scriptsApi,
+      notify: (o) => notify(o),
       navigate: (hash) => { if (location.hash.slice(1) !== hash) location.hash = hash; },
       confirm: confirmModal,
       highlight: scriptHighlight,
@@ -15252,7 +15519,7 @@ async function loadGuardrailsView(param = '') {
   try {
     const res = await fetch('/api/guardrails');
     const data = await safeJson(res);
-    if (!res.ok) return setGuardrailsMsg(data.error || `HTTP ${res.status}`, 'err');
+    if (!res.ok) return setGuardrailsMsg(data.error || `HTTP ${res.status}`, 'err-inline');
     grvState.sets = Array.isArray(data.guardrails) ? data.guardrails : [];
     el.guardrailsList.replaceChildren(renderGuardrailList(grvState.sets));
     if (param) {
@@ -15264,7 +15531,7 @@ async function loadGuardrailsView(param = '') {
       grvState.wizard = null; grvState.editing = null; closePluginModal();
     }
   } catch (e) {
-    setGuardrailsMsg(e.message, 'err');
+    setGuardrailsMsg(e.message, 'err-inline');
   }
 }
 
@@ -15294,9 +15561,7 @@ const mvState = {
 };
 
 function setModelsMsg(text, kind) {
-  if (!el.modelsMsg) return;
-  el.modelsMsg.textContent = text || '';
-  el.modelsMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+  reportStatus(el.modelsMsg, 'form-msg', text, kind);
 }
 
 function renderModelsViewBody() {
@@ -15395,7 +15660,7 @@ async function saveHideBuiltinModels(cb) {
     });
     const data = await safeJson(res);
     if (!res.ok) { cb.checked = !wanted; return setModelsMsg(data.error || `HTTP ${res.status}`, 'err'); }
-    setModelsMsg(wanted ? 'Built-in models hidden from every picker. Runs that already use one keep working.' : 'Built-in models shown again.');
+    setModelsMsg(wanted ? 'Built-in models hidden from every picker. Runs that already use one keep working.' : 'Built-in models shown again.', 'ok');
     await refreshModelsEverywhere();
   } catch (e) {
     cb.checked = !wanted;
@@ -15540,7 +15805,7 @@ async function loadModelsView() {
   try {
     const [res, pres] = await Promise.all([fetch('/api/models'), fetch('/api/providers'), loadCredentials()]);
     const data = await safeJson(res);
-    if (!res.ok) return setModelsMsg(data.error || `HTTP ${res.status}`, 'err');
+    if (!res.ok) return setModelsMsg(data.error || `HTTP ${res.status}`, 'err-inline');
     mvState.data = data;
     // Providers are best-effort: a failed read paints the card in its
     // "not connected" state rather than hiding the catalog.
@@ -15558,7 +15823,7 @@ async function loadModelsView() {
       }).catch(() => {});
     }
   } catch (e) {
-    setModelsMsg(e.message, 'err');
+    setModelsMsg(e.message, 'err-inline');
   }
 }
 
@@ -15582,18 +15847,16 @@ async function loadProvidersView() {
   try {
     const res = await fetch('/api/providers');
     const data = await safeJson(res);
-    if (!res.ok) return setProvidersMsg(data.error || `HTTP ${res.status}`, 'err');
+    if (!res.ok) return setProvidersMsg(data.error || `HTTP ${res.status}`, 'err-inline');
     mvState.providers = data;
     renderProvidersViewBody();
   } catch (e) {
-    setProvidersMsg(e.message, 'err');
+    setProvidersMsg(e.message, 'err-inline');
   }
 }
 
 function setProvidersMsg(text, kind) {
-  if (!el.providersMsg) return;
-  el.providersMsg.textContent = text || '';
-  el.providersMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+  reportStatus(el.providersMsg, 'form-msg', text, kind);
 }
 
 function renderProvidersViewBody() {
@@ -15703,26 +15966,34 @@ async function copilotSignOutFlow() {
     if (!res.ok) return setProviderMsg('copilot', data.error || `HTTP ${res.status}`, true);
     mvState.providers = data;
     mvState.copilotModels = [];
-    setTabMsg('Signed out of GitHub Copilot.');
+    setTabMsg('Signed out of GitHub Copilot.', 'ok');
     await refreshModelsEverywhere();
   } catch (e) {
     setProviderMsg('copilot', e.message, true);
   }
 }
 
-async function patchProviderFlow(name, body, { okText = 'Saved.' } = {}) {
-  try {
+// #555: the row's Save button shows busy → "Saved"; the row's line carries only errors. A change
+// on a select (account type, concurrency) has no button, so its success is the new value itself.
+async function patchProviderFlow(name, body, { btn = null } = {}) {
+  setProviderMsg(name, '');
+  const r = await withButton(btn, async () => {
     const res = await fetch(`/api/providers/${encodeURIComponent(name)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const data = await safeJson(res);
-    if (!res.ok) return setProviderMsg(name, data.error || `HTTP ${res.status}`, true);
+    if (!res.ok) return { ok: false, error: data.error || `HTTP ${res.status}` };
     mvState.providers = data;
     repaintProviders();
     // Readiness may have changed: the catalog's needs-sign-in state and every picker follow.
     await refreshModelsEverywhere();
-    // AFTER the refresh: it repaints this card too, and would wipe a message written before it.
-    setProviderMsg(name, okText);
-  } catch (e) {
-    setProviderMsg(name, e.message, true);
+    return { ok: true };
+  }, { done: 'Saved' });
+  if (r.skipped) return;
+  if (!r.ok) { setProviderMsg(name, r.error, true); return; }
+  // The repaint replaced the clicked button: give its successor the "Saved" state.
+  if (btn && !btn.isConnected) {
+    const cls = btn.classList.contains('mv-sp-save') ? 'mv-sp-save' : 'mv-pv-save';
+    const next = providerRoot()?.querySelector(`.mv-pv-row[data-provider="${name}"] .${cls}`);
+    if (next) await withButton(next, () => undefined, { done: 'Saved' });
   }
 }
 
@@ -15787,33 +16058,38 @@ async function testProviderFlow(btn) {
   // What the user is LOOKING at, not what is stored: an unsaved base URL or key is tested as typed,
   // and a local endpoint therefore answers for itself instead of for api.openai.com.
   const typed = (name === 'copilot' ? null : collectProviderRow(providerRoot(), name)) || {};
-  btn.disabled = true;
+  const pill = providerRoot()?.querySelector(`.mv-pv-row[data-provider="${name}"] .mv-pv-result`);
+  if (pill) pill.title = '';
   setProviderResult(name, 'busy', 'Testing…');
   setProviderMsg(name, '');
-  try {
-    const res = await fetch(`/api/providers/${encodeURIComponent(name)}/test`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...(typed.baseUrl ? { baseUrl: typed.baseUrl } : {}), ...(typed.apiKey !== undefined ? { apiKey: typed.apiKey } : {}) }),
-    });
-    const data = await safeJson(res);
-    const where = typed.baseUrl || (mvState.providers && mvState.providers[name] && mvState.providers[name].baseUrl) || '';
-    const unsaved = hasUnsavedProviderEdits(name, typed);
-    if (data.ok) {
-      setProviderResult(name, 'ok', `Reachable${data.models != null ? ` — ${data.models} model${data.models === 1 ? '' : 's'}` : ''}`);
-      // `detail` is what the endpoint says about the key itself — OpenRouter's credit, free-model
-      // allowance and rate limit (provider-ops formatOpenRouterKeyInfo); never the key.
-      setProviderMsg(name, `${where}${data.models != null ? ` answered with ${data.models} model${data.models === 1 ? '' : 's'}` : ' answered'}.${data.detail ? ` Key: ${data.detail}.` : ''}${unsaved ? ' Press Save to keep these settings.' : ''}`);
-    } else {
+  // #555: the button shows Testing… → "Connected"; the pill keeps the verdict; the line only errors.
+  await withButton(btn, async () => {
+    try {
+      const res = await fetch(`/api/providers/${encodeURIComponent(name)}/test`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...(typed.baseUrl ? { baseUrl: typed.baseUrl } : {}), ...(typed.apiKey !== undefined ? { apiKey: typed.apiKey } : {}) }),
+      });
+      const data = await safeJson(res);
+      const where = typed.baseUrl || (mvState.providers && mvState.providers[name] && mvState.providers[name].baseUrl) || '';
+      const unsaved = hasUnsavedProviderEdits(name, typed);
+      if (data.ok) {
+        setProviderResult(name, 'ok', `Reachable${data.models != null ? ` — ${data.models} model${data.models === 1 ? '' : 's'}` : ''}`);
+        // `detail` is what the endpoint says about the key itself — OpenRouter's credit, free-model
+        // allowance and rate limit (provider-ops formatOpenRouterKeyInfo); never the key. It rides on
+        // the pill's tooltip now that the row's line carries only errors.
+        if (pill) pill.title = `${where}${data.models != null ? ` answered with ${data.models} model${data.models === 1 ? '' : 's'}` : ' answered'}.${data.detail ? ` Key: ${data.detail}.` : ''}${unsaved ? ' Press Save to keep these settings.' : ''}`;
+        return { ok: true };
+      }
       const why = data.message || data.error || `HTTP ${res.status}`;
       setProviderResult(name, 'err', 'Failed');
       setProviderMsg(name, `${where ? `${where}: ` : ''}${why}${providerFixHint(why)}`, true);
+      return { ok: false };
+    } catch (e) {
+      setProviderResult(name, 'err', 'Failed');
+      setProviderMsg(name, e.message, true);
+      return { ok: false };
     }
-  } catch (e) {
-    setProviderResult(name, 'err', 'Failed');
-    setProviderMsg(name, e.message, true);
-  } finally {
-    btn.disabled = false;
-  }
+  }, { busy: 'Testing…', done: 'Connected' });
 }
 
 /** Whether the row carries edits the user has not saved — the test used them, the runs will not. */
@@ -16098,31 +16374,37 @@ async function toggleModelEnvReveal(btn) {
     }
     btn.dataset.on = '1';
     btn.textContent = 'Hide values';
-  } catch { /* reveal is best-effort */ }
+  } catch (e) {
+    notify({ tone: 'err', title: 'Could not show the values', detail: e.message, key: `env-reveal-${id}` });
+  }
 }
 
+// #555: Save shows busy → "Saved"; a missing id is a field error, a server refusal a card alert
+// above the editor's buttons; success closes the dialog and raises a toast naming the model.
 async function saveModelEditorFlow() {
   const rootEl = modelEditorEl();
   if (!rootEl) return;
-  const msg = rootEl.querySelector('.mv-editor-msg');
-  const say = (text) => { if (msg) { msg.textContent = text; msg.className = 'form-msg mv-editor-msg err'; } };
+  rootEl.querySelector('.mv-editor-btns')?.setAttribute('data-card-actions', '');
+  clearFieldErrors(rootEl);
+  cardAlert(rootEl, null);
   const { id, body } = collectModelEditor(rootEl);
-  if (!id && !body.id) return say('model id is required');
-  try {
-    const res = await fetch(id ? `/api/models/${encodeURIComponent(id)}` : '/api/models', {
-      method: id ? 'PATCH' : 'POST',
+  if (!id && !body.id) { fieldError(rootEl.querySelector('.mv-id'), 'model id is required'); return; }
+  const editing = !!id;   // collectModelEditor returns an id only when editing
+  const r = await withButton(rootEl.querySelector('.mv-save'), async () => {
+    const res = await fetch(editing ? `/api/models/${encodeURIComponent(id)}` : '/api/models', {
+      method: editing ? 'PATCH' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     const data = await safeJson(res);
-    if (!res.ok) return say(data.error || `HTTP ${res.status}`);
-    // Saved work is no longer unsaved work: the dialog closes without asking.
-    await closeModelEditorDialog({ force: true });
-    setModelsMsg(id ? 'Saved.' : 'Model added.', 'ok');
-    await refreshModelsEverywhere();
-  } catch (e) {
-    say(e.message);
-  }
+    return res.ok ? { ok: true } : { ok: false, error: data.error || `HTTP ${res.status}` };
+  }, editing ? {} : { done: 'Added' });
+  if (r.skipped) return;
+  if (!r.ok) { cardAlert(rootEl, { title: editing ? 'Not saved' : 'Not added', detail: r.error }); return; }
+  // Saved work is no longer unsaved work: the dialog closes without asking.
+  await closeModelEditorDialog({ force: true });
+  setModelsMsg(editing ? 'Model saved.' : 'Model added.', 'ok');
+  await refreshModelsEverywhere();
 }
 
 async function deleteModelFlow(id) {
@@ -16198,18 +16480,22 @@ if (el.providersList) {
     if (!t) return;
     if (t.classList.contains('mv-cp-signin')) copilotSignInFlow();
     else if (t.classList.contains('mv-cp-cancel')) { stopCopilotPoll(); mvState.signIn = null; renderProvidersViewBody(); }
-    else if (t.classList.contains('mv-cp-copy')) { try { navigator.clipboard.writeText(t.dataset.code || ''); t.textContent = 'Copied'; } catch { /* no clipboard */ } }
+    else if (t.classList.contains('mv-cp-copy')) {
+      try { navigator.clipboard.writeText(t.dataset.code || ''); t.textContent = 'Copied'; } catch (e) {
+        notify({ tone: 'err', title: 'Could not copy the code', detail: e.message, key: 'copy-device-code' });
+      }
+    }
     else if (t.classList.contains('mv-cp-signout')) copilotSignOutFlow();
     else if (t.classList.contains('mv-cp-terms')) ensureCopilotTerms({ force: true }).then(() => renderProvidersViewBody());
     else if (t.classList.contains('mv-cp-fetch-models')) openImportDialog({ source: 'copilot' });
     else if (t.classList.contains('mv-cp-quota-refresh')) refreshCopilotQuotaFlow(t);
     else if (t.classList.contains('mv-pv-save')) {
       const body = collectProviderRow(providerRoot(), t.dataset.provider);
-      if (body) patchProviderFlow(t.dataset.provider, body);
+      if (body) patchProviderFlow(t.dataset.provider, body, { btn: t });
     } else if (t.classList.contains('mv-pv-test')) testProviderFlow(t);
     else if (t.classList.contains('mv-sp-save')) {
       const body = collectSpeechRow(providerRoot());
-      if (body) patchProviderFlow('speech', body);
+      if (body) patchProviderFlow('speech', body, { btn: t });
     } else if (t.classList.contains('mv-sp-test')) testSpeechFlow(t);
     else if (t.classList.contains('mv-sp-clear')) clearSpeechCacheFlow(t);
     else if (t.classList.contains('mv-pv-preset')) {
@@ -16226,8 +16512,8 @@ if (el.providersList) {
   el.providersList.addEventListener('change', (ev) => {
     const t = ev.target;
     if (!t || !t.classList) return;
-    if (t.classList.contains('mv-cp-account')) patchProviderFlow('copilot', { accountType: t.value }, { okText: 'Account type saved.' });
-    else if (t.classList.contains('mv-pv-conc') && t.dataset.provider === 'copilot') patchProviderFlow('copilot', { maxConcurrent: Number(t.value) }, { okText: 'Concurrency cap saved.' });
+    if (t.classList.contains('mv-cp-account')) patchProviderFlow('copilot', { accountType: t.value });
+    else if (t.classList.contains('mv-pv-conc') && t.dataset.provider === 'copilot') patchProviderFlow('copilot', { maxConcurrent: Number(t.value) });
   });
 }
 
@@ -16457,7 +16743,10 @@ async function deleteGuardrailSetFlow(id) {
     const res = await fetch(`/api/guardrails/${encodeURIComponent(id)}`, { method: 'DELETE' });
     const data = await safeJson(res);
     if (res.status === 409) {
-      pluginModal('Cannot delete guardrail set', renderGuardrailReferences409(data.references || []));
+      const refs = data.references || [];
+      const label = (set && set.name) || id;
+      notify({ tone: 'err', title: `Cannot delete ${label}`, detail: String(data.error || '').split('\n')[0],
+        action: { label: 'Details', run: () => pluginModal('Cannot delete guardrail set', renderGuardrailReferences409(refs)) } });
       return;
     }
     if (!res.ok) return setGuardrailsMsg(data.error || `HTTP ${res.status}`, 'err');
@@ -16715,12 +17004,14 @@ async function confirmCostOverride(runId, btn) {
   if (ok) resumeRunFromCard(runId, btn, { ignoreCostCap: true });
 }
 
-async function resumeRunFromCard(runId, btn, { ignoreCostCap = false, pastTeamCap = false, policyReason = null, baseAck = false } = {}) {
+async function resumeRunFromCard(runId, btn, opts = {}) {
+  const { ignoreCostCap = false, pastTeamCap = false, policyReason = null, baseAck = false } = opts;
   const r = runs.get(runId);
   if (!r || !isPaused(r)) return;
   const pipelineId = r.pipelineId;
   if (!pipelineId) {
     onLog(r, { source: 'ui', level: 'error', text: 'resume failed: run has no pipelineId', ts: Date.now() });
+    notify({ tone: 'err', title: 'Could not resume the run', detail: 'This run has no pipeline id, so Worca cannot find it to resume.', key: `resume-${runId}` });
     return;
   }
   // Snapshot the pre-pause log BEFORE the old run is dropped, to seed the resumed
@@ -16772,6 +17063,8 @@ async function resumeRunFromCard(runId, btn, { ignoreCostCap = false, pastTeamCa
     if (btn) { btn.disabled = false; btn.innerHTML = prevBtnHtml; }
     const rr = runs.get(runId);
     if (rr) onLog(rr, { source: 'ui', level: 'error', text: `resume failed: ${err.message}`, ts: Date.now() });
+    notify({ tone: 'err', title: 'Could not resume the run', detail: err.message, key: `resume-${runId}`,
+      action: { label: 'Retry', run: () => resumeRunFromCard(runId, btn && btn.isConnected ? btn : null, opts) } });
   }
 }
 
@@ -16821,8 +17114,8 @@ function openStopModal(runId) {
   const branchEl = q('.stop-ident-branch');
   branchEl.textContent = branch;
   branchEl.hidden = !branch;                         // no branch -> no blank line
-  const err = q('.stop-err');
-  err.hidden = true; err.textContent = '';
+  const card = q('.stop-actions').parentElement;
+  cardAlert(card, null);
   const ok = q('.stop-confirm');
   const cancel = q('.stop-cancel');
   ok.disabled = false; ok.textContent = 'Stop pipeline';
@@ -16861,6 +17154,7 @@ function openStopModal(runId) {
     ok.disabled = true;
     ok.textContent = 'Stopping…';
     cancel.disabled = true;
+    cardAlert(card, null);
     const res = await stopRun(runId, ok);
     inFlight = false;
     if (closed) return;                 // torn down from outside while in flight
@@ -16868,8 +17162,7 @@ function openStopModal(runId) {
     ok.disabled = false;                // stopRun already re-enabled it; be explicit
     ok.textContent = 'Stop pipeline';
     cancel.disabled = false;            // the run is still live — retry or keep it
-    err.hidden = false;
-    err.textContent = `Could not stop: ${(res && res.error) || 'unknown error'}`;
+    cardAlert(card, { title: 'Could not stop the run', detail: (res && res.error) || 'unknown error' });
   };
   ok.addEventListener('click', onOk);
   cancel.addEventListener('click', onCancel);
@@ -17177,7 +17470,7 @@ async function openWsPolicyHomeSheet(workspaceId) {
 }
 
 // The Team policy page (boards 4–5): read mode by default, the editor behind "Edit policy".
-const tpState = { scopeId: localStorage.getItem('worca.teamPolicy.scope') || '', data: null, loadSeq: 0, editing: false, showAll: false, notice: null, tab: 'policy', checking: false };
+const tpState = { scopeId: localStorage.getItem('worca.teamPolicy.scope') || '', data: null, loadSeq: 0, editing: false, showAll: false, tab: 'policy', checking: false };
 const semverGte = (a, b) => { const p = (v) => String(v || '').split('-')[0].split('.').map((x) => parseInt(x, 10) || 0); const x = p(a); const y = p(b); for (let i = 0; i < 3; i++) { if ((x[i] || 0) > (y[i] || 0)) return true; if ((x[i] || 0) < (y[i] || 0)) return false; } return true; };
 async function loadTeamPolicyView(param = '') {
   if (!el.tpBody || !el.tpScope) return;
@@ -17220,7 +17513,6 @@ function renderTeamPolicyRead() {
   el.tpSync.hidden = false;
   el.tpSync.replaceChildren(renderPolicySyncChip(data, { doc: document, now: Date.now(), busy: tpState.checking }));
   const parts = [];
-  if (tpState.notice) { parts.push(Object.assign(document.createElement('p'), { className: 'form-msg ok', textContent: tpState.notice })); tpState.notice = null; }
   const ver = (data.rows || []).find((r) => r.key === 'worca.minVersion' && r.team);
   if (ver && data.worcaVersion && !semverGte(data.worcaVersion, ver.team.value)) {
     parts.push(Object.assign(document.createElement('div'), { className: 'hint tm-warn', textContent: `Your Worca is ${data.worcaVersion}; this policy expects at least ${ver.team.value}. Some fields may not apply.` }));
@@ -17336,25 +17628,24 @@ async function publishFromEditor(editor, registry) {
   const doc = docFromEditor(editor, { registry });
   const msgEl = editor.querySelector('.tp-msg');
   const btn = el.tpBody.querySelector('.tp-publish');   // on the header, beside Cancel editing
-  btn.disabled = true;
-  msgEl.className = 'form-msg tp-msg'; msgEl.textContent = 'Publishing…';
-  try {
+  msgEl.className = 'form-msg tp-msg'; msgEl.textContent = '';
+  const fail = (text) => { msgEl.className = 'form-msg tp-msg err'; msgEl.textContent = text; return { ok: false }; };
+  // #555: the header button carries the progress; a rejection stays verbatim at the top of the form.
+  const r = await withButton(btn, async () => {
     const v = await safeJson(await fetch('/api/policy/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ doc }) }));
-    if (!v.ok) { msgEl.className = 'form-msg tp-msg err'; msgEl.textContent = (v.warnings || []).join('\n') || 'invalid policy document'; btn.disabled = false; return; }
-    const r = await fetch('/api/policy', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: tpState.scopeId, doc }) });
-    const j = await safeJson(r);
-    if (!r.ok) {
-      msgEl.className = 'form-msg tp-msg err';
-      msgEl.textContent = [j?.error, j?.stderr && String(j.stderr).trim(), j?.hint, ...(Array.isArray(j?.warnings) ? j.warnings : [])].filter(Boolean).join(' · ');
-      btn.disabled = false;
-      return;
-    }
-    tpCache.at = 0;
-    tpState.notice = j.unchanged ? 'Nothing to publish — the branch already holds this document.' : `Published · commit ${String(j.sha || '').slice(0, 7)}`;
-    await loadTeamPolicyView();
-  } catch (err) {
-    msgEl.className = 'form-msg tp-msg err'; msgEl.textContent = err?.message || 'publish failed'; btn.disabled = false;
-  }
+    if (!v.ok) return fail((v.warnings || []).join('\n') || 'invalid policy document');
+    const res = await fetch('/api/policy', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: tpState.scopeId, doc }) });
+    const j = await safeJson(res);
+    if (!res.ok) return fail([j?.error, j?.stderr && String(j.stderr).trim(), j?.hint, ...(Array.isArray(j?.warnings) ? j.warnings : [])].filter(Boolean).join(' · '));
+    return { ok: true, j };
+  }, { busy: 'Publishing…', done: 'Published' });
+  if (r.skipped) return;
+  if (!r.ok) { if (r.error) fail(r.error); return; }
+  tpCache.at = 0;
+  notify(r.j.unchanged
+    ? { tone: 'ok', title: 'Nothing to publish', detail: 'The branch already holds this document.' }
+    : { tone: 'ok', title: 'Policy published', detail: `Commit ${String(r.j.sha || '').slice(0, 7)}` });
+  await loadTeamPolicyView();
 }
 
 if (el.tpScope) el.tpScope.addEventListener('change', () => {
@@ -17368,10 +17659,17 @@ if (tpSection) tpSection.addEventListener('click', async (e) => {
     if (tpState.editing) renderTeamPolicyRead(); else void renderTeamPolicyEdit();
     return;
   }
-  if (e.target.closest && e.target.closest('.tp-check-now')) {
+  const checkBtn = e.target.closest && e.target.closest('.tp-check-now');
+  if (checkBtn) {
     tpState.checking = true;
     if (tpState.data && !tpState.editing) renderTeamPolicyRead();
-    await fetch('/api/policy/discover', { method: 'POST' }).catch(() => {});
+    // #555: a failed check says so (the chip repaint alone looked like success); Retry re-clicks
+    // whichever Check now the repaint left on the page.
+    const checkFailed = (detail) => notify({ tone: 'err', title: 'Check failed', detail, key: 'tp-check',
+      action: { label: 'Retry', run: () => (document.querySelector('#tp-sync .tp-check-now, #tp-body .tp-check-now') || checkBtn)?.click() } });
+    await fetch('/api/policy/discover', { method: 'POST' })
+      .then(async (r) => { if (!r.ok) checkFailed((await safeJson(r))?.error || `The server answered ${r.status}.`); })
+      .catch((err) => checkFailed(err?.message || 'network error'));
     tpCache.at = 0;
     tpState.checking = false;
     loadTeamPolicyView();
@@ -17568,12 +17866,13 @@ function marketplaceEntryFor(name, marketplaceHint) {
 }
 async function installRequiredPlugin(name, { marketplace = '', silent = false } = {}) {
   const hit = marketplaceEntryFor(name, marketplace);
-  if (!hit) { setPluginsMsg(`${name}: not found in a synced marketplace — refresh marketplaces${marketplace ? ` (the policy names ${marketplace})` : ''}.`, 'err'); return false; }
+  if (!hit) { setPluginsMsg(`${name}: not found in a synced marketplace — refresh marketplaces${marketplace ? ` (the policy names ${marketplace})` : ''}.`, silent ? 'err-inline' : 'err'); return false; }
   const entry = { name: hit.p.name, subdir: hit.p.subdir, repoUrl: hit.m.url, sha: hit.m.lastSync.sha, inventory: hit.p.inventory || {}, marketplace: hit.m.id };
-  if (!silent) { openInstallConsent(entry); return true; }
+  // The dialog only opens here: the result is reported by the consent handler, not by this button.
+  if (!silent) { openInstallConsent(entry, { onInstalled: () => { tpCache.at = 0; if (currentView() === 'team-policy') loadTeamPolicyView(); } }); return true; }
   setPluginsMsg(`Installing ${name} (trusted policy home)…`);
   const { ok, data } = await pluginApi('POST', '/api/plugins/install', { repoUrl: entry.repoUrl, subdir: entry.subdir, name: entry.name, sha: entry.sha, marketplace: entry.marketplace });
-  if (!ok) { setPluginsMsg(`${name}: ${data.error || 'install failed'}`, 'err'); return false; }
+  if (!ok) { setPluginsMsg(`${name}: ${data.error || 'install failed'}`, 'err-inline'); return false; }
   setPluginsMsg(`Installed ${name} (trusted policy home).`, 'ok');
   invalidateAgentCaches();
   tpCache.at = 0;
@@ -17609,15 +17908,20 @@ async function updateRequiredPlugin(name) {
   const body = renderUpdatePreview(data);
   pluginModal(`Update ${name}`, body);
   const confirmBtn = body.querySelector('.pl-confirm-update');
+  // #555 D5: the dialog's own button carries the progress; the result is a toast after it closes.
   if (confirmBtn) confirmBtn.addEventListener('click', async () => {
-    confirmBtn.disabled = true;
-    const r2 = await pluginApi('POST', `/api/plugins/${encodeURIComponent(name)}/update`, { confirm: true });
+    const r2 = await withButton(confirmBtn, async () => {
+      const r = await pluginApi('POST', `/api/plugins/${encodeURIComponent(name)}/update`, { confirm: true });
+      return r.ok ? r : { ...r, ok: false };
+    }, { busy: 'Updating…', done: 'Updated' });
+    if (r2.skipped) return;
     closePluginModal();
-    if (!r2.ok) return setPluginsMsg(r2.data.error || 'update failed', 'err');
+    if (!r2.ok) return setPluginsMsg((r2.data && r2.data.error) || r2.error || 'update failed', 'err');
     setPluginsMsg(`Updated ${name}.`, 'ok');
     invalidateAgentCaches();
     tpCache.at = 0;
     loadPluginsView();
+    if (currentView() === 'team-policy') loadTeamPolicyView();
   });
   return true;
 }
@@ -17785,6 +18089,13 @@ function setTmChipBusy(on) {
  * (decision 36). Verified without it: delaying scope A's response by 150 ms and switching to
  * B left the select on B while the body — and "Export CSV" — showed A's runs.
  */
+/** POST a team-metrics action; null on success, else what went wrong. */
+async function tmPost(url, body) {
+  try {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    return r.ok ? null : ((await safeJson(r))?.error || `The server answered ${r.status}.`);
+  } catch (e) { return e.message || 'network error'; }
+}
 async function loadTeamMetricsView({ refresh = false } = {}) {
   const body = document.getElementById('tm-body');
   const chip = document.getElementById('tm-sync');
@@ -18142,13 +18453,30 @@ if (tmSection) {
     }
     if (e.target.closest('.tm-refresh')) return loadTeamMetricsView({ refresh: true });
     if (e.target.closest('.tm-push-now')) {
-      e.target.closest('.tm-push-now').disabled = true;
-      await fetch('/api/team-metrics/flush', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: tmState.scopeId }) }).catch(() => {});
-      return loadTeamMetricsView();
+      const b = e.target.closest('.tm-push-now');
+      const res = await withButton(b, async () => { const m = await tmPost('/api/team-metrics/flush', { scope: tmState.scopeId }); return m ? { ok: false, error: m } : { ok: true }; },
+        { busy: 'Pushing…', done: 'Pushed' });
+      if (res.skipped) return;
+      // loadTeamMetricsView re-renders the section and replaces this button, so reloading at
+      // once would wipe "Pushed" before anyone sees it. Reload after the done state on success.
+      if (res.ok) setTimeout(() => loadTeamMetricsView(), BUTTON_DONE_MS);
+      else {
+        await loadTeamMetricsView();
+        notify({ tone: 'err', title: 'Push failed', detail: res.error, key: 'tm-push', action: { label: 'Retry', run: () => document.querySelector('.tm-push-now')?.click() } });
+      }
+      return;
     }
     if (e.target.closest('.tm-check-now')) {
-      await fetch('/api/team-metrics/discover', { method: 'POST' }).catch(() => {});
-      return loadTeamMetricsView();
+      const b = e.target.closest('.tm-check-now');
+      const res = await withButton(b, async () => { const m = await tmPost('/api/team-metrics/discover'); return m ? { ok: false, error: m } : { ok: true }; },
+        { busy: 'Checking…', done: 'Checked' });
+      if (res.skipped) return;
+      if (res.ok) setTimeout(() => loadTeamMetricsView(), BUTTON_DONE_MS);
+      else {
+        await loadTeamMetricsView();
+        notify({ tone: 'err', title: 'Check failed', detail: res.error, key: 'tm-check', action: { label: 'Retry', run: () => document.querySelector('.tm-check-now')?.click() } });
+      }
+      return;
     }
   });
   tmSection.addEventListener('keydown', (e) => {
@@ -18555,10 +18883,11 @@ function setupDiscardWorktreeButton(node, projectDir, p, onDiscarded) {
         // is still true — repaint nothing away, tell the user what happened.
         btn.disabled = false;
         btn.textContent = previous;
-        showViewer('Discard incomplete',
-          'The retained worktree could not be fully removed:\n\n' +
+        const text = 'The retained worktree could not be fully removed:\n\n' +
           `${Array.isArray(data.warnings) && data.warnings.length ? data.warnings.join('\n') : 'unknown error'}\n\n` +
-          'The retained-work warning stays until the checkout is gone.');
+          'The retained-work warning stays until the checkout is gone.';
+        notify({ tone: 'warn', title: 'Discard incomplete', detail: 'The retained checkout is still on disk.', key: 'discard-wt',
+          action: { label: 'Details', run: () => showViewer('Discard incomplete', text) } });
         return;
       }
       p.retainedWork = null;
@@ -18572,13 +18901,18 @@ function setupDiscardWorktreeButton(node, projectDir, p, onDiscarded) {
       btn.textContent = previous;
       if (typeof onDiscarded === 'function') onDiscarded(data);
       const paths = Array.isArray(data.patches) ? data.patches : [];
-      showViewer('Retained worktree discarded', paths.length
+      const text = paths.length
         ? `Recovery patch${paths.length === 1 ? '' : 'es'} saved before removal:\n\n${paths.join('\n')}`
-        : 'No recovery patch was needed (nothing uncommitted remained to save); the retained checkout is gone.');
+        : 'No recovery patch was needed (nothing uncommitted remained to save); the retained checkout is gone.';
+      notify({ tone: 'ok', title: 'Retained worktree discarded',
+        detail: paths.length ? `${paths.length} recovery patch${paths.length === 1 ? '' : 'es'} saved.` : 'Nothing uncommitted needed saving.',
+        key: 'discard-wt', action: paths.length ? { label: 'Details', run: () => showViewer('Retained worktree discarded', text) } : null });
     } catch (err) {
       btn.disabled = false;
       btn.textContent = previous;
       btn.title = `Could not discard retained worktree: ${err.message}`;
+      notify({ tone: 'err', title: 'Could not discard the retained worktree', detail: err.message, key: 'discard-wt',
+        action: { label: 'Retry', run: () => btn.isConnected && btn.click() } });
     }
   });
 }
@@ -19501,8 +19835,8 @@ function openShipItModal(record, data) {
   // (No `&& !record.branch` term: histPrEligible gates BOTH doors into this modal
   // and requires `branch`, so that clause could never be false.)
   q('.shipit-summary').hidden = nFiles == null && added == null;
-  const err = q('.shipit-err');
-  err.hidden = true; err.textContent = '';
+  const card = q('.shipit-actions').parentElement;
+  cardAlert(card, null);
   resetShipItDesc(modal);
   const okBtn = q('.shipit-ok');
   okBtn.disabled = false; okBtn.textContent = 'Open pull request';
@@ -19603,6 +19937,7 @@ function openShipItModal(record, data) {
     okBtn.disabled = true;
     okBtn.textContent = 'Opening…';
     setShipItRemotesDisabled(modal, true);
+    cardAlert(card, null);
     const payload = { projectDir: record.projectDir || null, projectKey: record.projectKey, id: record.id };
     if (!q('.shipit-remotes').hidden) {
       payload.pushRemote = q('.shipit-push-remote').value;
@@ -19650,8 +19985,7 @@ function openShipItModal(record, data) {
       okBtn.disabled = false;
       okBtn.textContent = 'Open pull request';
       if (!q('.shipit-remotes').hidden || !q('.shipit-base-wrap').hidden) setShipItRemotesDisabled(modal, false);
-      err.hidden = false;
-      err.textContent = `Could not open PR: ${e2.message}`;
+      cardAlert(card, { title: 'Not shipped', detail: e2.message });
     }
   };
   okBtn.addEventListener('click', onOk);
@@ -19741,8 +20075,6 @@ function paintHdGlance(screen, record, data) {
   const host = glance.querySelector('.hd-result');
   host.replaceChildren();
   const trail = trailColumns(run);
-  const away = awayNoteEl(screen, st.night);
-  if (away) host.append(away);
   host.append(...rdActivityGroups(screen, {
     overview: activityOverviewValue(results),
     workflow: trail.count ? `${trail.count} step${trail.count === 1 ? '' : 's'}` : '',
@@ -20072,7 +20404,8 @@ function btnLabelEl(btn) { return btn.querySelector('.hd-btn-label') || btn; }
 
 // The POST /api/resume -> upsert -> seed-log -> land-on-running recipe, shared by
 // the detail header and the cost-override path.
-async function resumePipeline(p, projectDir, btn, { ignoreCostCap = false, pastTeamCap = false, policyReason = null, baseAck = false } = {}) {
+async function resumePipeline(p, projectDir, btn, opts = {}) {
+  const { ignoreCostCap = false, pastTeamCap = false, policyReason = null, baseAck = false } = opts;
   const labelEl = btnLabelEl(btn);
   btn.disabled = true;
   // Claim the button for the duration of the round-trip (and keep the failure
@@ -20149,6 +20482,8 @@ async function resumePipeline(p, projectDir, btn, { ignoreCostCap = false, pastT
     btn.disabled = false;
     labelEl.textContent = label;
     btn.title = btn.dataset.resumeError;             // D3: the server's 400 surfaces here
+    notify({ tone: 'err', title: 'Could not resume the run', detail: err.message, key: `resume-${p.id}`,
+      action: { label: 'Retry', run: () => resumePipeline(p, projectDir, btn, opts) } });
   }
 }
 
@@ -20189,11 +20524,8 @@ async function scheduleResumeAt({ pipelineId, title, projectDir = null, workspac
   } catch (err) {
     if (btn) btn.disabled = false;
     // The menu has closed by now, so the reason needs a surface of its own.
-    const open = await confirmModal({
-      title: 'Could not schedule the resume', message: err.message, messageTone: 'err',
-      confirmLabel: 'Open Schedules', cancelLabel: 'Close',
-    });
-    if (open) location.hash = 'schedules/once';
+    notify({ tone: 'err', title: 'Could not schedule the resume', detail: err.message,
+      action: { label: 'Open Schedules', run: () => { location.hash = 'schedules'; } } });
   }
 }
 
@@ -20499,14 +20831,15 @@ function setupHdActions(screen, record, data) {
         if (m && m.pipelineId === r.id && (!m.projectKey || m.projectKey === r.projectKey)) forgetLastRun();
         paintHistory();
         goRunsList();                               // the list itself: the archived run is gone
+        notify({ tone: 'ok', title: 'Run archived' });
       } catch (err) {
         // Cleared only on failure: the success path navigates back to the list and
         // the screen (button included) is discarded.
         delete archiveBtn.dataset.archiveState;
         archiveBtn.disabled = false;
         label.textContent = 'Archive';
-        const errEl = screen.querySelector('.hd-error');   // spec §5.2: inline error
-        if (errEl) { errEl.hidden = false; errEl.textContent = `Could not archive: ${err.message}`; }
+        notify({ tone: 'err', title: 'Could not archive the run', detail: err.message, key: `archive-${r.id}`,
+          action: { label: 'Retry', run: () => archiveBtn.isConnected && archiveBtn.click() } });
       }
     });
   }
@@ -24035,7 +24368,7 @@ el.reportDownload.addEventListener('click', () => {
 
 // The shared viewer with a plain string: errors, notices, anything that is text.
 function showViewer(title, text) {
-  el.viewerTitle.textContent = title ? `Saved: ${title}` : 'Saved pipeline';
+  el.viewerTitle.textContent = title || 'Saved pipeline';
   // Only hideViewer cleared this, so an artifact fetch that failed rendered its
   // error string — and any saved pipeline opened next without closing the modal —
   // in a shell with no padding, border or scroll container.
@@ -24050,9 +24383,8 @@ function showViewer(title, text) {
  *  upstream's DOM tests describe this path unchanged. The <pre>'s white-space is
  *  neutralised by `.artifact-view{white-space:normal}`, which is why an
  *  iframe/img/embed is safe in here.
- *  `title` is the FULL heading text: unlike showViewerNode/showViewer, which
- *  prepend "Saved: " themselves, callers here pass their own
- *  "Saved: "/"Artifact: " prefix. */
+ *  `title` is the FULL heading text, as it is for showViewer: callers pass
+ *  their own "Saved: "/"Artifact: " prefix. */
 function showViewerHost(title) {
   el.viewerTitle.textContent = title || 'Saved pipeline';
   const host = document.createElement('div');
@@ -24854,7 +25186,7 @@ async function openRunArtifact(ctx, path, srcKind) {
     // already-relative rel (`deck/deck.html` says more than the basename does).
     const url = rawArtifactUrl(base, rel);
     const err = await rawArtifactError(url);
-    if (err) { showViewer(name, `Error: ${err}`); return; }
+    if (err) { showViewer(`Saved: ${name}`, `Error: ${err}`); return; }
     await renderArtifact({ kind: srcKind || null, relPath: rel, url },
       showViewerHost(`Saved: ${isAbsoluteArtifactPath(rel) ? name : rel}`));
     return;
@@ -24862,10 +25194,10 @@ async function openRunArtifact(ctx, path, srcKind) {
   try {
     const res = await fetch(`${base}/artifact?rel=${encodeURIComponent(rel)}`);
     const data = await safeJson(res);
-    if (!res.ok) { showViewer(name, `Error: ${data.error || res.status}`); return; }
+    if (!res.ok) { showViewer(`Saved: ${name}`, `Error: ${data.error || res.status}`); return; }
     await renderArtifact({ kind: srcKind || null, relPath: rel, text: data.text || '' },
       showViewerHost(`Saved: ${data.rel || name}`), artifactViewerDeps());
-  } catch (e) { showViewer(name, `Error: ${e.message}`); }
+  } catch (e) { showViewer(`Saved: ${name}`, `Error: ${e.message}`); }
 }
 
 // ── Per-step artifact viewers (Phase 3 UI) ──────────────────────────────────
@@ -25475,6 +25807,7 @@ const schedulesView = createSchedulesView({
   msgEl: $('#schedules-msg'),
   deps: {
     confirmModal: (opts) => confirmModal(opts),
+    notify: (o) => notify(o),
     // "Project · demo-shop" / "Workspace · Storefront": the kind first, then the name the
     // rest of the app shows — every scheduled run card says what it runs against.
     targetLabel: (item) => {
@@ -26126,8 +26459,11 @@ function openRunDetail(runId, { instant = false } = {}) {
     // has to hold for programmatic dispatch — but the double-POST it prevents is
     // exactly what the disable exists for, so the guard belongs on the handler.
     if (btn.disabled) return;
-    if (btn.dataset.action === 'resume') resumeRunFromCard(runDetailState.runId, btn);
-    else pauseRun(runDetailState.runId, btn);
+    const runId = runDetailState.runId;
+    if (btn.dataset.action === 'resume') { resumeRunFromCard(runId, btn); return; }
+    pauseRun(runId, btn).then((reason) => {
+      if (reason) notify({ tone: 'err', title: 'Could not pause the run', detail: reason, key: `pause-${runId}` });
+    });
   });
   // Resume split: same menu as the run card's. The run is read at CLICK time (a
   // detail->detail hop must never schedule the run that was open at bind time).
@@ -26165,13 +26501,19 @@ function openRunDetail(runId, { instant = false } = {}) {
   screen.querySelector('.rd-night').addEventListener('change', async (e) => {
     const sel = e.currentTarget;
     const runId = runDetailState.runId;
+    // A refused change puts the select back on what the run still has (the state-only rule).
+    const failed = (detail) => {
+      const run = runs.get(runId);
+      if (run) onLog(run, { source: 'ui', level: 'error', text: `Away mode: ${detail}`, ts: Date.now() });
+      if (runDetailState.runId === runId) sel.value = (run && run.night && run.night.override) || 'auto';
+      notify({ tone: 'err', title: 'Could not change Away mode for this run', detail: String(detail), key: `away-${runId}` });
+    };
     sel.disabled = true;
     try {
       const res = await fetch('/api/run/night', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId, mode: sel.value }) });
       if (!res.ok) {
         const err = await safeJson(res);
-        const run = runs.get(runId);
-        if (run) onLog(run, { source: 'ui', level: 'error', text: `Away mode: ${err.error || res.status}`, ts: Date.now() });
+        failed(err.error || res.status);
       } else {
         const run = runs.get(runId);
         if (run) {
@@ -26180,8 +26522,7 @@ function openRunDetail(runId, { instant = false } = {}) {
         }
       }
     } catch (err) {
-      const run = runs.get(runId);
-      if (run) onLog(run, { source: 'ui', level: 'error', text: `Away mode: ${err.message || err}`, ts: Date.now() });
+      failed(err.message || err);
     } finally { sel.disabled = false; }
   });
 
@@ -26300,26 +26641,21 @@ async function loadHdAwayAnswers(screen, pipelineId) {
   } catch { /* the section stays hidden */ }
 }
 
-/** The finished run's note (run page and History run page): how many answers Away mode gave and how
- *  many to check, with a button down to the list. null when Away mode gave no answer. */
-function awayNoteEl(screen, night) {
-  const line = awayAnswersSummary(night);
-  if (!line) return null;
-  const note = document.createElement('div');
-  note.className = 'rd-away-note' + (Number(night.flagged) > 0 ? ' has-checks' : '');
-  const text = document.createElement('span');
-  text.className = 'rd-away-note-text';
-  text.textContent = `Away mode: ${line}.`;
-  const b = document.createElement('button');
-  b.type = 'button';
-  b.className = 'btn btn-ghost btn-mini';
-  b.textContent = 'See the answers';
-  b.addEventListener('click', () => {
-    const sec = screen.querySelector('.rd-night-sec');
-    if (sec && !sec.hidden) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  });
-  note.append(text, b);
-  return note;
+/** The note at the top of the run's card (run page and History run page), painted from the same
+ *  answers as the list below it, so the two never disagree: how many answers, how many to check,
+ *  and a button down to the first one to check. Hidden when Away mode gave no answer. */
+function paintAwayNote(sec, counts) {
+  const note = sec.closest('.rd-glance')?.querySelector('.rd-away-note');
+  if (!note) return;
+  const line = awayAnswersSummary(counts);
+  note.hidden = !line;
+  if (!line) return;
+  note.classList.toggle('has-checks', counts.checks > 0);
+  note.querySelector('.rd-away-note-text').textContent = `Away mode: ${line}.`;
+  note.querySelector('.rd-away-jump').onclick = () => {
+    const to = sec.querySelector('.rd-na-row.is-check') || sec;
+    if (!sec.hidden) to.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
 }
 
 /** "Answered for you" into `sec` (run page and History run page): one group per ask, captioned with
@@ -26333,6 +26669,10 @@ function paintAwayAnswers(sec, decisions) {
   const sig = JSON.stringify(list);
   if (sec.__awaySig === sig) return;
   sec.__awaySig = sig;
+  const counts = awayAnswerCounts(list);
+  sec.querySelector('.rd-night-count').textContent = counts.answers
+    ? ` · ${counts.answers} answer${counts.answers === 1 ? '' : 's'}${counts.checks ? `, ${counts.checks} to check` : ''}` : '';
+  paintAwayNote(sec, counts);
   const host = sec.querySelector('.rd-night-asks');
   const open = new Set([...host.querySelectorAll('.rd-na-row.open')].map((li) => li.dataset.key));
   const focused = document.activeElement && host.contains(document.activeElement) ? document.activeElement.closest('.rd-na-row') : null;
@@ -26347,10 +26687,12 @@ function paintAwayAnswers(sec, decisions) {
     cap.textContent = at ? `${kindShort(d.kind)} · ${at}` : kindShort(d.kind);
     const ul = document.createElement('ul');
     ul.className = 'rd-slist rd-na-list';
-    awayAnswerRows(d).forEach((row, j) => {
-      const key = `${d.questionId || i}:${j}`;
+    // The answers to check lead their ask; the key stays the row's own place, so an open row survives.
+    const rows = awayAnswerRows(d).map((row, j) => ({ ...row, key: `${d.questionId || i}:${j}` }));
+    checksFirst(rows).forEach((row) => {
+      const key = row.key;
       const li = document.createElement('li');
-      li.className = 'rd-na-row';
+      li.className = 'rd-na-row' + (row.check ? ' is-check' : '');
       li.dataset.key = key;
       const head = document.createElement(row.why ? 'button' : 'div');
       head.className = 'rd-srow rd-na-btn';
@@ -26818,15 +27160,12 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
   const record = rdHistoryRecord(r);
   // `undefined` (lookup pending) and `null` (none) must differ: only the second offers Create.
   const prSig = record ? `${record.pr === undefined ? 'u' : JSON.stringify(record.pr)}${histPrEligible(record) ? 1 : 0}` : '';
-  const awaySig = r.night ? `${r.night.decisions || 0}/${r.night.flagged || 0}` : '';
-  const sig = [r.status, glance, data ? 1 : 0, key, prSig, r.totalCostUsd, steps, currentLevel(), awaySig].join('|');
+  const sig = [r.status, glance, data ? 1 : 0, key, prSig, r.totalCostUsd, steps, currentLevel()].join('|');
   if (host.dataset.key === sig) return;
   host.dataset.key = sig;
   host.replaceChildren();
 
   const results = data && data.results;
-  const away = awayNoteEl(screen, r.night);
-  if (away) host.append(away);
   host.append(...rdActivityGroups(screen, { overview: activityOverviewValue(results), workflow: steps, diff: rdDiffRowValue(r) }));
 
   const acts = document.createElement('div');
@@ -27542,18 +27881,15 @@ async function setOnboardingPrefs(patch) {
   try {
     res = await fetch('/api/onboarding', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
     data = await safeJson(res);
-  } catch (e) { setGsSettingsMsg(e.message || 'network error', 'err'); return false; }
-  if (!res.ok) { setGsSettingsMsg(data.error || `HTTP ${res.status}`, 'err'); return false; }
+  } catch (e) { setGsSettingsMsg(e.message || 'network error', 'err-inline'); return false; }
+  if (!res.ok) { setGsSettingsMsg(data.error || `HTTP ${res.status}`, 'err-inline'); return false; }
   if (data && data.steps) { gs.status = data; paintOnboarding(); }
   return true;
 }
 
 // ── Settings › General › Getting started ────────────────────────────────────
 function setGsSettingsMsg(text, cls) {
-  const m = document.getElementById('gsSettingsMsg');
-  if (!m) return;
-  m.textContent = text || '';
-  m.className = `hint${cls ? ` ${cls}` : ''}`;
+  reportStatus(document.getElementById('gsSettingsMsg'), 'hint', text, cls);
 }
 function paintGsSettings() {
   const btn = document.getElementById('gsShowAgain');
@@ -28367,6 +28703,8 @@ function showView(name, param = '') {
     param = settingsParamFor(tab, sub);
   }
   const prevView = currentShownView;
+  if (prevView === 'agents' && name !== 'agents') setAgentsMsg('');
+  if (prevView === 'new' && name !== 'new') setFormMsg('');
   // The schedule sheet and the Start menu are body-level overlays of the view that opened them.
   if (prevView !== name) { closeScheduleSheet(); closeStartMenu(); }
   currentShownView = name;
@@ -28560,6 +28898,7 @@ function mcpTab() {
       navigate: (hash) => { if (location.hash.slice(1) !== hash) location.hash = hash; },
       confirm: confirmModal,
       modal: { open: pluginModal, close: closePluginModal },
+      notify: (o) => notify(o),
     });
   }
   return mcpViewCtl;
@@ -29016,7 +29355,8 @@ sideAwayMount?.addEventListener('click', async (e) => {
     if (!res.ok) _sideAwayErr = (await safeJson(res)).error || `HTTP ${res.status}`;
   } catch (err) { _sideAwayErr = err.message || 'network error'; }
   _sideAwayBusy = false;
-  await refreshAwayBodies().catch(() => {});                 // settings-changed does the same; the newest refresh wins
+  // settings-changed does the same; the newest refresh wins
+  await refreshAwayBodies().catch((e) => notify({ tone: 'err', title: 'Could not refresh Away mode', detail: e.message, key: 'away-refresh' }));
   paintSideAway();
 });
 
@@ -29095,6 +29435,14 @@ document.body.appendChild(askPanel.root);
 // (Re-homed from the retired v1 composer after the Node-graph v2 rebase.)
 // ---------------------------------------------------------------------------
 
+// #555 D2c: every export status line says whether it is an error.
+function exportSay(text, err = false) {
+  const m = document.getElementById('export-msg');
+  if (!m) return;
+  m.textContent = text || '';
+  m.classList.toggle('err', !!err);
+}
+
 async function exportCall(id, opts) {
   const res = await fetch(`/api/workflows/${encodeURIComponent(id)}/export`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts),
@@ -29126,7 +29474,7 @@ function openExportModal(item) {
   document.getElementById('export-plugin-name').value = '';
   document.getElementById('export-keep-version').checked = false;
   document.getElementById('export-include-agents').checked = true;
-  document.getElementById('export-msg').textContent = '';
+  exportSay('');
   const planEl = document.getElementById('export-plan');
   planEl.textContent = ''; planEl.classList.add('hidden');
   exportSetDone(false);
@@ -29333,8 +29681,7 @@ function exportInvalidatePlan() {
   // Export re-plans on its own, so a stale preview never leaves the button dead.
   const applyBtn = document.getElementById('export-apply-btn');
   if (applyBtn) applyBtn.disabled = false;
-  const msg = document.getElementById('export-msg');
-  if (msg) msg.textContent = '';
+  exportSay('');
 }
 function bindExportModal() {
   const modal = document.getElementById('export-modal');
@@ -29360,26 +29707,24 @@ function bindExportModal() {
     const data = await pickFolder(exportModalState.format === 'plugin' ? 'plugin' : 'export');
     if (data && data.status === 'picked' && data.path) { set(data.path); return; }
     if (data && data.status === 'canceled') return;
-    if (data && data.status === 'busy') { document.getElementById('export-msg').textContent = 'A folder dialog is already open — finish or cancel it first.'; return; }
+    if (data && data.status === 'busy') { exportSay('A folder dialog is already open — finish or cancel it first.'); return; }
     openFolderBrowser(folder.value.trim(), set);
   });
   document.getElementById('export-cancel').addEventListener('click', closeExportModal);
   document.getElementById('export-done-close').addEventListener('click', closeExportModal);
   // Preview: the optional dry run — shows what Export would write, writes nothing.
   document.getElementById('export-plan-btn').addEventListener('click', async () => {
-    const msg = document.getElementById('export-msg');
-    msg.textContent = 'Previewing…';
+    exportSay('Previewing…');
     try {
       const plan = await exportPlan(exportModalState.item.id, exportBuildOpts());
       exportRenderPlan(plan);
-      msg.textContent = plan.conflicts.length ? 'Resolve each conflict below, then Export.' : 'Preview only — nothing is written until you click Export.';
-    } catch (err) { msg.textContent = `Preview failed: ${err.message}`; }
+      exportSay(plan.conflicts.length ? 'Resolve each conflict below, then Export.' : 'Preview only — nothing is written until you click Export.');
+    } catch (err) { exportSay(`Preview failed: ${err.message}`, true); }
   });
   // Export: writes. Without a preview for the current inputs it runs the dry run
   // itself first; a conflict (only the skill format can raise one) stops it and is
   // shown for per-file resolution — nothing is ever written past an unresolved one.
   document.getElementById('export-apply-btn').addEventListener('click', async () => {
-    const msg = document.getElementById('export-msg');
     if (exportModalState.format === 'json') {
       // A plain download of the stored graph — the server sets Content-Disposition.
       const a = document.createElement('a');
@@ -29395,13 +29740,13 @@ function bindExportModal() {
       });
       return;
     }
-    msg.textContent = 'Exporting…';
+    exportSay('Exporting…');
     try {
       if (!exportModalState.planned) {
         const plan = await exportPlan(exportModalState.item.id, exportBuildOpts());
         if ((plan.conflicts || []).length) {
           exportRenderPlan(plan);
-          msg.textContent = 'Resolve each conflict below, then Export.';
+          exportSay('Resolve each conflict below, then Export.');
           return;
         }
       }
@@ -29415,7 +29760,7 @@ function bindExportModal() {
       if (unwritten.length) {
         exportRenderPlan(applied);
         appendLog({ source: 'ui', level: 'error', text: `export of ${exportModalState.item.name} incomplete: ${applied.written.length} written, ${unwritten.length} conflict(s) left unwritten` });
-        msg.textContent = `${unwritten.length} unresolved conflict(s) were left unwritten — resolve below and Export again.`;
+        exportSay(`${unwritten.length} unresolved conflict(s) were left unwritten — resolve below and Export again.`, true);
         return;
       }
       // A plugin folder that does not validate stays open: the recipient's
@@ -29424,7 +29769,7 @@ function bindExportModal() {
         exportRenderPlan(applied);
         const problems = applied.validation.problems.filter((p) => p.level === 'error').map((p) => p.message);
         appendLog({ source: 'ui', level: 'error', text: `plugin export of ${exportModalState.item.name} does not validate: ${problems.join('; ')}` });
-        msg.textContent = `Written, but the plugin folder does not validate: ${problems.join('; ')}`;
+        exportSay(`Written, but the plugin folder does not validate: ${problems.join('; ')}`, true);
         return;
       }
       appendLog({ source: 'ui', level: 'info', text: `exported ${exportModalState.item.name}: ${applied.written.length} written, ${applied.skipped.length} skipped` });
@@ -29449,7 +29794,7 @@ function bindExportModal() {
       }
     } catch (err) {
       exportInvalidatePlan();
-      msg.textContent = `Export failed: ${err.message}`;
+      exportSay(`Export failed: ${err.message}`, true);
     }
   });
   // Backdrop click (the overlay itself, not the inner card) closes the modal.

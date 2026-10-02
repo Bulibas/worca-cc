@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast, cardAlertOf } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -188,8 +189,11 @@ test('a 400 on save keeps the pane open and surfaces the store rule VERBATIM', a
   click(window, pane.querySelector('.agent-edit-save'));
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(pane.hidden, false, 'the pane stays open on a rejection');
-  assert.equal(pane.querySelector('.agent-edit-msg').textContent, rule, 'verbatim — never re-worded');
-  assert.ok(pane.querySelector('.agent-edit-msg').className.includes('err'));
+  // #555: a refusal is a card alert above the editor's buttons, the rule verbatim.
+  assert.deepEqual(cardAlertOf(pane), { title: 'Not saved', detail: rule }, 'verbatim — never re-worded');
+  assert.ok(pane.querySelector('.card-alert').nextElementSibling.contains(pane.querySelector('.agent-edit-save')), 'directly above the action row');
+  assert.equal(pane.querySelector('.agent-edit-save').dataset.fbState, undefined, 'a refusal never shows "Saved"');
+  assert.equal(pane.querySelector('.agent-edit-save').disabled, false);
 });
 
 // MAJ-15 (UI half): a port change that strands a saved wire is reported by
@@ -211,10 +215,9 @@ test('a PUT that returns warnings surfaces them beside the save confirmation', a
   await new Promise((r) => setTimeout(r, 0));
   click(window, card.querySelector('.agent-edit-save'));
   await new Promise((r) => setTimeout(r, 0));
-  const msg = window.document.querySelector('#agents-msg');
-  assert.equal(msg.textContent,
-    'Agent saved. saved pipelines reference a removed port: Docs Flow (n_d.review)');
-  assert.equal(msg.className, 'form-msg warn', 'a saved-with-caveats banner is not an error');
+  assert.deepEqual(lastToast(window.document), { tone: 'warn', action: '',
+    title: 'Agent saved. saved pipelines reference a removed port: Docs Flow (n_d.review)', detail: '' },
+  'a saved-with-caveats result is a warn toast, not an error');
 });
 
 // MIN-19 (UI half): propagating a port change to a workspace variant is a SUCCESS,
@@ -234,7 +237,5 @@ test('a PUT that updated workspace variants names them and stays an ok banner', 
   await new Promise((r) => setTimeout(r, 0));
   click(window, card.querySelector('.agent-edit-save'));
   await new Promise((r) => setTimeout(r, 0));
-  const msg = window.document.querySelector('#agents-msg');
-  assert.equal(msg.textContent, 'Agent saved. Workspace variants updated: docsWriterWs.');
-  assert.equal(msg.className, 'form-msg ok');
+  assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Agent saved. Workspace variants updated', detail: 'docsWriterWs.', action: '' });
 });

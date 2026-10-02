@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { fieldErrorText, lastToast, edit } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -60,6 +61,8 @@ async function boot({ postResponse, initialDebugSpawnEnabled = false, initialEff
   return { window, posts, tick, $, openSettings };
 }
 
+const settle = async (tick, n = 4) => { for (let i = 0; i < n; i++) await tick(); };
+
 test('ui-settings-debug-spawn: GET paints the checkbox unchecked by default', async () => {
   const { $, openSettings } = await boot();
   await openSettings();
@@ -73,33 +76,38 @@ test('ui-settings-debug-spawn: GET paints a stored true value as checked', async
 });
 
 test('ui-settings-debug-spawn: Save posts exactly { debugSpawnEnabled: true }', async () => {
-  const { $, posts, tick, openSettings } = await boot();
+  const { window, $, posts, tick, openSettings } = await boot();
   await openSettings();
-  $('#debugSpawnEnabled').checked = true;
+  assert.equal($('#debugSpawnSave').disabled, true, 'nothing to save on a freshly painted card');
+  edit(window, $('#debugSpawnEnabled'), true);
   $('#debugSpawnSave').click();
-  await tick();
+  await settle(tick);
   assert.equal(posts.length, 1, 'exactly one POST');
   assert.deepEqual(posts[0], { debugSpawnEnabled: true });
-  assert.match($('#debugSpawnMsg').textContent, /Saved/);
+  assert.equal($('#debugSpawnSave').textContent, 'Saved');
+  assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Saved', detail: 'Applies to the next spawn. No restart needed.', action: '' });
+  assert.equal($('#debugSpawnMsg'), null, 'no grey status line');
 });
 
 test('ui-settings-debug-spawn: Reset posts { debugSpawnEnabled: false }', async () => {
   const { $, posts, tick, openSettings } = await boot({ initialDebugSpawnEnabled: true });
   await openSettings();
   $('#debugSpawnReset').click();
-  await tick();
+  await settle(tick);
   assert.deepEqual(posts[0], { debugSpawnEnabled: false });
+  assert.equal($('#debugSpawnReset').textContent, 'Reset');
   assert.equal($('#debugSpawnEnabled').checked, false, 'painted back from the response');
 });
 
-test('ui-settings-debug-spawn: a server 400 lands verbatim', async () => {
-  const { $, tick, openSettings } = await boot({
-    postResponse: { ok: false, status: 400, json: async () => ({ error: 'debugSpawnEnabled must be true or false' }) },
+test('ui-settings-debug-spawn: a server 400 lands on the field', async () => {
+  const { window, $, tick, openSettings } = await boot({
+    postResponse: { ok: false, status: 400, json: async () => ({ error: '“Spawn diagnostics” must be true or false.', field: 'debugSpawnEnabled' }) },
   });
   await openSettings();
+  edit(window, $('#debugSpawnEnabled'), true);
   $('#debugSpawnSave').click();
-  await tick();
-  assert.equal($('#debugSpawnMsg').textContent, 'debugSpawnEnabled must be true or false');
+  await settle(tick);
+  assert.equal(fieldErrorText($('#debugSpawnEnabled')), '“Spawn diagnostics” must be true or false.');
 });
 
 test('ui-settings-debug-spawn: no env override ⇒ the env note is empty', async () => {
@@ -124,13 +132,13 @@ test('ui-settings-debug-spawn: the mirror case — stored true, env forces OFF',
 });
 
 test('ui-settings-debug-spawn: a 2xx with an unparsable body leaves the checkbox as the user set it', async () => {
-  const { $, tick, openSettings } = await boot({
+  const { window, $, tick, openSettings } = await boot({
     postResponse: { ok: true, status: 200, json: async () => { throw new Error('bad json'); } },
   });
   await openSettings();
-  $('#debugSpawnEnabled').checked = true;
+  edit(window, $('#debugSpawnEnabled'), true);
   $('#debugSpawnSave').click();
-  await tick();
+  await settle(tick);
   assert.equal($('#debugSpawnEnabled').checked, true, 'not repainted as unset from an empty body');
-  assert.match($('#debugSpawnMsg').textContent, /Saved/);
+  assert.equal($('#debugSpawnSave').textContent, 'Saved');
 });

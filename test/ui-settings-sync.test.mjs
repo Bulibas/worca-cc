@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { fieldErrorText, edit } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -30,7 +31,7 @@ async function boot({ settings = SETTINGS, postStatus = 200 } = {}) {
       if (method === 'POST') {
         const body = JSON.parse(opts.body);
         posts.push(body);
-        if (postStatus !== 200) return Promise.resolve({ ok: false, status: postStatus, json: async () => ({ error: 'sync.remote must be a remote NAME (e.g. origin), never a URL' }) });
+        if (postStatus !== 200) return Promise.resolve({ ok: false, status: postStatus, json: async () => ({ error: '“Remote” must be a remote name (for example origin), never a URL.', field: 'sync.remote' }) });
         if ('sync' in body) {
           const next = body.sync === null ? {} : Object.fromEntries(Object.entries(body.sync).filter(([, v]) => v !== null));
           box.settings = { ...box.settings, sync: { ...BUILT_IN, ...next } };
@@ -90,14 +91,15 @@ test('Save posts all four fields (an empty remote resets it); Use defaults posts
   const { window, openSettings, posts, tick } = await boot();
   await openSettings();
   const doc = window.document;
-  doc.getElementById('syncDefBeforeRun').checked = false;
-  doc.getElementById('syncDefOnDiverged').value = 'origin';
-  doc.getElementById('syncDefRemote').value = '  ';
-  doc.getElementById('syncDefRefresh').value = '0';
+  edit(window, doc.getElementById('syncDefBeforeRun'), false);
+  edit(window, doc.getElementById('syncDefOnDiverged'), 'origin');
+  edit(window, doc.getElementById('syncDefRemote'), '  ');
+  edit(window, doc.getElementById('syncDefRefresh'), '0');
   doc.getElementById('syncDefaultsSave').click();
   await tick(); await tick();
   assert.deepEqual(posts.at(-1), { sync: { beforeRun: false, onDiverged: 'origin', remote: null, refreshMinutes: 0 } });
-  assert.equal(doc.getElementById('syncDefaultsMsg').textContent, 'Saved.');
+  assert.equal(doc.getElementById('syncDefaultsSave').textContent, 'Saved');
+  assert.equal(doc.getElementById('syncDefaultsMsg'), null, 'no grey status line');
   assert.deepEqual(read(doc), { beforeRun: false, onDiverged: 'origin', remote: 'origin', refreshMinutes: '0' });
 
   doc.getElementById('syncDefaultsReset').click();
@@ -110,11 +112,10 @@ test('a refused save shows the server error and leaves the fields as typed', asy
   const { window, openSettings, tick } = await boot({ postStatus: 400 });
   await openSettings();
   const doc = window.document;
-  doc.getElementById('syncDefRemote').value = 'https://example.com/x.git';
+  edit(window, doc.getElementById('syncDefRemote'), 'https://example.com/x.git');
   doc.getElementById('syncDefaultsSave').click();
   await tick(); await tick();
-  const msg = doc.getElementById('syncDefaultsMsg');
-  assert.match(msg.textContent, /never a URL/);
-  assert.ok(msg.classList.contains('err'));
+  assert.equal(fieldErrorText(doc.getElementById('syncDefRemote')), '“Remote” must be a remote name (for example origin), never a URL.');
+  assert.equal(doc.getElementById('syncDefRemote').getAttribute('aria-invalid'), 'true');
   assert.equal(doc.getElementById('syncDefRemote').value, 'https://example.com/x.git');
 });

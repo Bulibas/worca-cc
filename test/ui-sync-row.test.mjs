@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast, cardAlertOf } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -219,7 +220,7 @@ test('6. a diverged project set to stop blocks Start under Origin; Local copy un
   $(ctx.doc, '#run-form').dispatchEvent(new ctx.window.Event('submit', { bubbles: true, cancelable: true }));
   await tick(); await tick();
   assert.equal(ctx.posted.length, 0, 'Start is refused before any request');
-  assert.match($(ctx.doc, '#form-msg').textContent, /can’t start from origin yet/);
+  assert.match(cardAlertOf($(ctx.doc, '#run-form')).detail, /can’t start from origin yet/);   // #555: a card alert above Start
   click(ctx.window, $(ctx.doc, '#branches-mode-local'));
   assert.equal(outcomeText(ctx.doc), 'Includes your 2 unpushed commits');
   assert.equal($(ctx.doc, '#branches-blocked').hidden, true);
@@ -264,7 +265,7 @@ test('8b. options:[cancel] offers no Start button; Cancel reports it', async () 
   const btns = [...$(ctx.doc, '.sync-modal').querySelectorAll('button')].map((b) => b.textContent);
   assert.deepEqual(btns, ['Cancel']);
   click(ctx.window, $(ctx.doc, '.sync-modal button'));
-  await waitFor(() => /Start cancelled/.test($(ctx.doc, '#form-msg').textContent));
+  await waitFor(() => lastToast(ctx.doc)?.title === 'Start cancelled' && !$(ctx.doc, '#start-btn').dataset.fbState);   // #555: a warn toast
   assert.equal(ctx.posted.length, 1);
   assert.equal($(ctx.doc, '#start-btn').disabled, false);
 });

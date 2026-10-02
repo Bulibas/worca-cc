@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -325,12 +326,13 @@ test('Escape on the project page goes back to the list; not while the confirm mo
   assert.equal(window.location.hash, '#projects');
 });
 
-test('an unknown key shows the list with the not-registered message; the message clears on the next #projects entry', async () => {
+test('an unknown key shows the list with the not-registered toast; the list line stays empty', async () => {
   const { window } = await boot();
   await goHash(window, 'projects/ghost-00000009');
   const doc = window.document;
   assert.equal(doc.getElementById('proj-shell').classList.contains('detail-open'), false);
-  assert.match(doc.getElementById('projects-msg').textContent, /project "ghost-00000009" is not registered here/);
+  assert.deepEqual(lastToast(doc), { tone: 'err', title: 'project "ghost-00000009" is not registered here', detail: '', action: '' });
+  assert.equal(doc.getElementById('projects-msg').textContent, '');
   await goHash(window, 'workspaces');
   await goHash(window, 'projects');
   assert.equal(doc.getElementById('projects-msg').textContent, '');
@@ -354,7 +356,7 @@ test('projects-changed while a page is open: the list rebuilds and the page stay
   await tick(); await tick(); await tick();
   assert.equal(doc.getElementById('proj-shell').classList.contains('detail-open'), false, 'closed');
   assert.equal(window.location.hash, '#projects');
-  assert.match(doc.getElementById('projects-msg').textContent, /project "alpha" was removed/);
+  assert.match(lastToast(doc).title, /project "alpha" was removed/);
 });
 
 test('#projects/<key>/memory/<name> lands on the Memory tab with the file open; the Overview pill routes back', async () => {

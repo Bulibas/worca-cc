@@ -50,7 +50,7 @@ test('POST /api/settings {uiLevel} stores a choice and rejects anything else', a
   assert.equal(await shellLevel(), 'advanced');
   const bad = await post('/api/settings', { uiLevel: 'wizard' });
   assert.equal(bad.status, 400);
-  assert.match((await bad.json()).error, /uiLevel must be simple, advanced or expert/);
+  assert.match((await bad.json()).error, /“Interface mode” must be simple, advanced or expert/);
   assert.equal(await stored(), 'advanced', 'a refused POST changes nothing');
 });
 

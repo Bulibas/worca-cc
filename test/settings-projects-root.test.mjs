@@ -346,11 +346,11 @@ test('REGRESSION (Ask Worca): an ask-only POST must not clear the root or the bu
     assert.equal(j.askMaxBudgetUsd, null, 'null = no cap round-trips');
     const bad = await postApi({ askMaxTurns: 0 });
     assert.equal(bad.status, 400);
-    assert.equal((await bad.json()).error, 'askMaxTurns must be an integer between 1 and 500');
+    assert.equal((await bad.json()).error, '“Turn limit” must be an integer between 1 and 500.');
     assert.equal((await getApi()).askMaxTurns, 12, 'rejected: nothing written');
     const multi = await postApi({ askMaxTurns: 7, askMaxBudgetUsd: 1000 });   // first key valid, second invalid
     assert.equal(multi.status, 400);
-    assert.equal((await multi.json()).error, 'askMaxBudgetUsd must be null (no cap) or a number between 0.1 and 100');
+    assert.equal((await multi.json()).error, '“Per-turn cost cap” must be a number from 0.1 to 100, or tick No cap.');
     assert.equal((await getApi()).askMaxTurns, 12, 'validated as a SET before any write: the valid first key was NOT persisted');
     const cleared = await postApi({ askMaxTurns: '', askMaxBudgetUsd: '' });
     assert.equal(cleared.status, 200);

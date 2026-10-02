@@ -451,7 +451,7 @@
                 <div class="hint err" id="newBlockedNote" hidden></div>
                 <!-- OpenRouter free requests left today vs what a run here takes (openrouter-free-view.mjs). -->
                 <div class="hint warn" id="newFreeNote" hidden></div>
-                <div class="actions" style="justify-content:flex-end">
+                <div class="actions" style="justify-content:flex-end" data-card-actions>
                   <!-- A time picked BEFORE the task (Schedules › Schedule a run, or Change… here):
                        it waits on the form and Start run becomes Schedule. -->
                   <div class="ask-card-sched new-sched" id="new-sched" hidden>
@@ -642,6 +642,9 @@
                   </div>
                   <!-- Time · Cost · Changes, in every state (the time ticks while live). -->
                   <div class="rd-facts"></div>
+                  <!-- Away mode's answers on this run, at the top where they are seen: how many, how many to
+                       check, and a jump to the first one to check (paintAwayAnswers). -->
+                  <div class="rd-away-note" hidden><span class="rd-away-note-text"></span><button type="button" class="btn btn-ghost btn-mini rd-away-jump">See the answers</button></div>
                   <div class="rd-nowlist"></div>
                   <div class="rd-result" hidden></div>
                 </div>
@@ -662,7 +665,7 @@
                 </div>
                 <!-- What Away mode answered on this run, under the run card: one group per ask, one row
                      per answer; a row opens its reason, Check marks the ones worca was not sure of. -->
-                <section class="rd-night-sec" hidden><h3 class="rd-night-h">Answered for you</h3><div class="rd-night-asks"></div></section>
+                <section class="rd-night-sec" hidden><h3 class="rd-night-h">Answered for you<span class="rd-night-count"></span></h3><div class="rd-night-asks"></div></section>
               </section>
 
               <section class="rd-details" hidden aria-label="Run details">
@@ -772,11 +775,14 @@
                     <button type="button" class="hist-discard btn-ghost" hidden>Discard worktree</button>
                   </div>
                   <div class="rd-facts"></div>
+                  <!-- Away mode's answers on this run, at the top where they are seen: how many, how many to
+                       check, and a jump to the first one to check (paintAwayAnswers). -->
+                  <div class="rd-away-note" hidden><span class="rd-away-note-text"></span><button type="button" class="btn btn-ghost btn-mini rd-away-jump">See the answers</button></div>
                   <div class="rd-nowlist"></div>
                   <div class="rd-result hd-result"></div>
                 </div>
                 <!-- What Away mode answered on this run (GET /api/night-decisions), as on the run page. -->
-                <section class="rd-night-sec hd-night-sec" hidden><h3 class="rd-night-h">Answered for you</h3><div class="rd-night-asks"></div></section>
+                <section class="rd-night-sec hd-night-sec" hidden><h3 class="rd-night-h">Answered for you<span class="rd-night-count"></span></h3><div class="rd-night-asks"></div></section>
               </section>
               <section class="rd-details hd-details" hidden aria-label="Run details">
               <header class="hd-header">
@@ -1386,6 +1392,7 @@
             <button type="button" data-tab="models" data-min-level="expert" aria-pressed="false">Models</button>
             <button type="button" data-tab="providers" data-min-level="expert" aria-pressed="false">Providers</button>
           </div>
+          <p id="settingsLoadMsg" class="form-msg err settings-load-msg" role="alert" hidden></p>
 
           <section class="settings-pane" data-tab="general">
             <div class="topbar">
@@ -1409,7 +1416,6 @@
                 <button type="button" data-theme-mode="light" aria-pressed="false">Light</button>
                 <button type="button" data-theme-mode="dark" aria-pressed="false">Dark</button>
               </div>
-              <small class="hint" id="themeMsg"></small>
             </section>
 
             <!-- Credential broker (docs/credential-broker.md): shown only when worca runs with one. -->
@@ -1459,7 +1465,7 @@
                     the old root is left in place.
                   </span></button>
                 </div>
-                <input id="settingsRoot" class="input" type="text" placeholder="" spellcheck="false" autocomplete="off" />
+                <input id="settingsRoot" data-setting="root" class="input" type="text" placeholder="" spellcheck="false" autocomplete="off" />
               </div>
               <div class="field">
                 <div class="label-row">
@@ -1470,7 +1476,7 @@
                   </span></button>
                 </div>
                 <div class="path-row">
-                  <input id="settingsProjectsRoot" class="input" type="text" placeholder="" spellcheck="false" autocomplete="off" />
+                  <input id="settingsProjectsRoot" data-setting="projectsRoot" class="input" type="text" placeholder="" spellcheck="false" autocomplete="off" />
                   <button type="button" id="settingsProjectsRootBrowse" class="btn btn-ghost btn-mini" title="Pick the projects root folder">Browse&hellip;</button>
                 </div>
               </div>
@@ -1500,14 +1506,13 @@
                 </div>
               </div>
               <div class="field">
-                <label class="check-row" for="debugSpawnEnabled"><input id="debugSpawnEnabled" type="checkbox" /> Log claude spawn details (binary, argv, routing env)</label>
+                <label class="check-row" for="debugSpawnEnabled"><input id="debugSpawnEnabled" data-setting="debugSpawnEnabled" type="checkbox" /> Log claude spawn details (binary, argv, routing env)</label>
               </div>
               <small class="hint" id="debugSpawnEnvNote"></small>
               <div class="add-project-actions" style="margin-top:14px">
                 <button type="button" id="debugSpawnReset" class="btn btn-ghost btn-mini">Reset to default</button>
                 <button type="button" id="debugSpawnSave" class="btn btn-primary btn-mini">Save</button>
               </div>
-              <small class="hint" id="debugSpawnMsg"></small>
             </section>
 
             <!-- Getting started: the checklist's Hide is undone here. Only the checklist —
@@ -1591,7 +1596,7 @@
                     Pause a pipeline when its estimated cost reaches this amount. Leave empty for no limit.
                   </span></button>
                 </div>
-                <input id="budgetPerPipeline" class="input" type="number" min="0" step="0.01" inputmode="decimal" placeholder="No limit" autocomplete="off" />
+                <input id="budgetPerPipeline" data-setting="pipelineCostLimitUsd" class="input" type="number" min="0" step="0.01" inputmode="decimal" placeholder="No limit" autocomplete="off" />
               </div>
               <div class="field">
                 <div class="label-row">
@@ -1601,7 +1606,7 @@
                     Leave empty for no limit.
                   </span></button>
                 </div>
-                <input id="budgetTotal" class="input" type="number" min="0" step="0.01" inputmode="decimal" placeholder="No limit" autocomplete="off" />
+                <input id="budgetTotal" data-setting="totalCostLimitUsd" class="input" type="number" min="0" step="0.01" inputmode="decimal" placeholder="No limit" autocomplete="off" />
               </div>
               <div class="field">
                 <div class="label-row">
@@ -1611,7 +1616,7 @@
                   </span></button>
                 </div>
                 <div class="select-wrap">
-                  <select id="budgetResetPeriod" class="select">
+                  <select id="budgetResetPeriod" data-setting="costLimitResetPeriod" class="select">
                     <option value="weekly">Weekly &mdash; resets Monday 00:00</option>
                     <option value="monthly">Monthly &mdash; resets on the 1st, 00:00</option>
                   </select>
@@ -1621,7 +1626,7 @@
                 <div class="label-row">
                   <label for="budgetHumanRate">Developer rate (USD/h)</label>
                 </div>
-                <input id="budgetHumanRate" class="input" type="number" min="0" step="1" inputmode="decimal" placeholder="35" autocomplete="off" />
+                <input id="budgetHumanRate" data-setting="humanRateUsdPerHour" class="input" type="number" min="0" step="1" inputmode="decimal" placeholder="35" autocomplete="off" />
               </div>
               <div class="add-project-actions" style="margin-top:14px">
                 <button type="button" id="budgetReset" class="btn btn-ghost btn-mini">Clear limits</button>
@@ -1647,7 +1652,6 @@
                 <button type="button" id="nightModeReset" class="btn btn-ghost btn-mini">Use defaults</button>
                 <button type="button" id="nightModeSave" class="btn btn-primary btn-mini">Save</button>
               </div>
-              <small class="hint" id="nightModeMsg"></small>
             </section>
 
             <!-- Scheduled runs: the defaults a NEW schedule inherits. Each schedule keeps
@@ -1663,7 +1667,7 @@
                 </div>
               </div>
               <label class="switch-row" id="syncDefBeforeRunRow">
-                <input id="syncDefBeforeRun" class="sw-input" type="checkbox" checked>
+                <input id="syncDefBeforeRun" data-setting="sync.beforeRun" class="sw-input" type="checkbox" checked>
                 <span class="switch"></span><span class="txt">Sync the source branch before each run</span>
               </label>
               <div class="field-grid-2" style="margin-top:14px">
@@ -1675,7 +1679,7 @@
                     </span></button>
                   </div>
                   <div class="select-wrap">
-                    <select id="syncDefOnDiverged" class="select">
+                    <select id="syncDefOnDiverged" data-setting="sync.onDiverged" class="select">
                       <option value="ask">Ask me</option>
                       <option value="origin">Start from origin</option>
                       <option value="fail">Don't run</option>
@@ -1684,13 +1688,13 @@
                 </div>
                 <div class="field">
                   <label for="syncDefRemote">Remote</label>
-                  <input id="syncDefRemote" class="input" type="text" placeholder="origin" spellcheck="false" autocomplete="off" />
+                  <input id="syncDefRemote" data-setting="sync.remote" class="input" type="text" placeholder="origin" spellcheck="false" autocomplete="off" />
                 </div>
               </div>
               <div class="field">
                 <label for="syncDefRefresh">Check remotes in the background</label>
                 <div class="select-wrap">
-                  <select id="syncDefRefresh" class="select">
+                  <select id="syncDefRefresh" data-setting="sync.refreshMinutes" class="select">
                     <option value="0">Off</option>
                     <option value="5">Every 5 minutes</option>
                     <option value="10">Every 10 minutes</option>
@@ -1703,7 +1707,6 @@
                 <button type="button" id="syncDefaultsReset" class="btn btn-ghost btn-mini">Use defaults</button>
                 <button type="button" id="syncDefaultsSave" class="btn btn-primary btn-mini">Save</button>
               </div>
-              <small class="hint" id="syncDefaultsMsg"></small>
             </section>
 
             <section class="card settings-card" id="schedule-settings-card" data-min-level="advanced">
@@ -1719,7 +1722,7 @@
                 <div class="field">
                   <label for="schedIfMissed">If Worca is not running at that time</label>
                   <div class="select-wrap">
-                    <select id="schedIfMissed" class="select">
+                    <select id="schedIfMissed" data-setting="schedule.ifMissed" class="select">
                       <option value="run">Start it late</option>
                       <option value="skip">Skip it</option>
                     </select>
@@ -1728,7 +1731,7 @@
                 <div class="field">
                   <label for="schedGraceMin">At most this late</label>
                   <div class="select-wrap">
-                    <select id="schedGraceMin" class="select">
+                    <select id="schedGraceMin" data-setting="schedule.graceMin" class="select">
                       <option value="30">30 minutes</option>
                       <option value="60">1 hour</option>
                       <option value="120">2 hours</option>
@@ -1746,13 +1749,12 @@
                     A run that could not start, a missed slot, or a run that ended in an error each count. A successful run resets the count. 0 never pauses a schedule. Every failure is reported in Schedules either way.
                   </span></button>
                 </div>
-                <input id="schedMaxFailures" class="input" type="number" min="0" max="100" step="1" inputmode="numeric" placeholder="3" autocomplete="off" />
+                <input id="schedMaxFailures" data-setting="schedule.maxFailures" class="input" type="number" min="0" max="100" step="1" inputmode="numeric" placeholder="3" autocomplete="off" />
               </div>
               <div class="add-project-actions" style="margin-top:14px">
                 <button type="button" id="schedDefaultsReset" class="btn btn-ghost btn-mini">Use defaults</button>
                 <button type="button" id="schedDefaultsSave" class="btn btn-primary btn-mini">Save</button>
               </div>
-              <small class="hint" id="schedDefaultsMsg"></small>
             </section>
 
             <!-- Actions (issue #529): keep policy for finished-run checkouts, the port range for
@@ -1763,20 +1765,20 @@
                   Check out a finished run and run its project's actions from Worca. Actions are off on hosted
                   deployments unless an administrator enables them.
                 </span></button></div></div>
-              <div class="field"><label for="act-keep">Keep checkouts</label><div class="select-wrap"><select id="act-keep" class="select">
+              <div class="field"><label for="act-keep">Keep checkouts</label><div class="select-wrap"><select id="act-keep" data-setting="actions.keep" class="select">
                 <option value="never">Re-create on demand</option><option value="on-success">Keep after a successful run</option>
                 <option value="until-pr">Keep until the PR is merged or closed</option></select></div></div>
               <div class="field act-port-range"><label for="act-port-low">Ports for automatic port variables</label>
-                <input id="act-port-low" class="input" type="number" min="1024" max="65535" placeholder="4400"> –
-                <input id="act-port-high" class="input" type="number" min="1024" max="65535" placeholder="4499" aria-label="High port"></div>
+                <input id="act-port-low" data-setting="actions.portLow actions.portRange" class="input" type="number" min="1024" max="65535" placeholder="4400" aria-label="Low port"> –
+                <input id="act-port-high" data-setting="actions.portHigh actions.portRange" class="input" type="number" min="1024" max="65535" placeholder="4499" aria-label="High port"></div>
               <div class="field act-launcher" data-launcher="editor">
                 <div class="label-row"><label for="act-editor">Editor</label>
                   <button type="button" class="info-tip" aria-label="About the editor command">i<span class="tip-content hidden" id="act-editor-tip">
                     The command that opens a folder in your IDE or code editor, as you would type it in a terminal. Leave it blank to use the one Worca detects. {folder} marks where the checkout folder goes; without it, the folder is added at the end.
                   </span></button></div>
                 <div class="act-launcher-row">
-                  <input id="act-editor" class="input mono" placeholder="Detected automatically" aria-describedby="act-editor-note" autocomplete="off" spellcheck="false">
-                  <div class="select-wrap act-choose-wrap"><select id="act-editor-choose" class="select" aria-label="Pick an installed editor, or browse for one"><option value="">Pick an app</option></select></div>
+                  <input id="act-editor" data-setting="actions.editor" class="input mono" placeholder="Detected automatically" aria-describedby="act-editor-note" autocomplete="off" spellcheck="false">
+                  <div class="select-wrap act-choose-wrap" data-dirty-ignore><select id="act-editor-choose" class="select" aria-label="Pick an installed editor, or browse for one"><option value="">Pick an app</option></select></div>
                   <button type="button" class="btn btn-ghost btn-mini act-try" id="act-editor-try">Try</button>
                 </div>
                 <small class="hint act-hint" id="act-editor-note"></small></div>
@@ -1786,15 +1788,14 @@
                     The command that opens a terminal in a folder, as you would type it in a terminal. Leave it blank to use the one Worca detects. {folder} marks where the checkout folder goes; without it, the folder is added at the end.
                   </span></button></div>
                 <div class="act-launcher-row">
-                  <input id="act-terminal" class="input mono" placeholder="Detected automatically" aria-describedby="act-terminal-note" autocomplete="off" spellcheck="false">
-                  <div class="select-wrap act-choose-wrap"><select id="act-terminal-choose" class="select" aria-label="Pick an installed terminal, or browse for one"><option value="">Pick an app</option></select></div>
+                  <input id="act-terminal" data-setting="actions.terminal" class="input mono" placeholder="Detected automatically" aria-describedby="act-terminal-note" autocomplete="off" spellcheck="false">
+                  <div class="select-wrap act-choose-wrap" data-dirty-ignore><select id="act-terminal-choose" class="select" aria-label="Pick an installed terminal, or browse for one"><option value="">Pick an app</option></select></div>
                   <button type="button" class="btn btn-ghost btn-mini act-try" id="act-terminal-try">Try</button>
                 </div>
                 <small class="hint act-hint" id="act-terminal-note"></small></div>
-              <div class="field"><label for="act-max">Keep at most</label><input id="act-max" class="input" type="number" min="1" max="100" placeholder="No limit"> checkouts (oldest removed first)</div>
+              <div class="field"><label for="act-max">Keep at most</label><input id="act-max" data-setting="actions.maxCheckouts" class="input" type="number" min="1" max="100" placeholder="No limit"> checkouts (oldest removed first)</div>
               <div class="add-project-actions"><button type="button" class="btn btn-ghost btn-mini" id="act-reset">Reset</button>
                 <button type="button" class="btn btn-primary btn-mini" id="act-save">Save</button></div>
-              <small class="hint" id="actSettingsMsg"></small>
             </section>
 
             <section class="card settings-card" id="ws-scan-models-card" data-min-level="advanced">
@@ -1811,21 +1812,21 @@
               <div class="mem-model-row">
                 <div class="field">
                   <div class="label-row"><label for="wsScanModel">Scan agent</label></div>
-                  <select id="wsScanModel" class="select" aria-label="Scan agent model"></select>
+                  <select id="wsScanModel" class="select" data-setting="workspaceScan.scanModel" aria-label="Scan agent model"></select>
                 </div>
                 <div class="field">
                   <div class="label-row"><label for="wsScanEffort">Effort</label></div>
-                  <select id="wsScanEffort" class="select" aria-label="Scan agent effort"></select>
+                  <select id="wsScanEffort" class="select" data-setting="workspaceScan.scanEffort" aria-label="Scan agent effort"></select>
                 </div>
               </div>
               <div class="mem-model-row" style="margin-top:12px">
                 <div class="field">
                   <div class="label-row"><label for="wsAgentModel">Project agents</label></div>
-                  <select id="wsAgentModel" class="select" aria-label="Project agents model"></select>
+                  <select id="wsAgentModel" class="select" data-setting="workspaceScan.agentModel" aria-label="Project agents model"></select>
                 </div>
                 <div class="field">
                   <div class="label-row"><label for="wsAgentEffort">Effort</label></div>
-                  <select id="wsAgentEffort" class="select" aria-label="Project agents effort"></select>
+                  <select id="wsAgentEffort" class="select" data-setting="workspaceScan.agentEffort" aria-label="Project agents effort"></select>
                 </div>
               </div>
               <small class="hint" id="wsScanModelsNote"></small>
@@ -1833,7 +1834,6 @@
                 <button type="button" id="wsScanModelsReset" class="btn btn-ghost btn-mini">Use default</button>
                 <button type="button" id="wsScanModelsSave" class="btn btn-primary btn-mini">Save</button>
               </div>
-              <small class="hint" id="wsScanModelsMsg"></small>
             </section>
 
             <!-- Chat notifications (chat-connectivity-design.md §4.8): which run
@@ -1847,7 +1847,6 @@
               <div class="add-project-actions" style="margin-top:14px">
                 <button id="chatSettingsSave" class="btn btn-primary btn-mini" type="button">Save</button>
               </div>
-              <small class="hint" id="chatSettingsMsg"></small>
             </section>
           </section>
           <!-- /pane runs -->
@@ -1882,7 +1881,7 @@
                     Maximum assistant/tool turns one chat message may use (1&ndash;500). Leave empty to restore the default of 400.
                   </span></button>
                 </div>
-                <input id="askMaxTurns" class="input" type="number" min="1" max="500" step="1" inputmode="numeric" placeholder="400" autocomplete="off" />
+                <input id="askMaxTurns" data-setting="askMaxTurns" class="input" type="number" min="1" max="500" step="1" inputmode="numeric" placeholder="400" autocomplete="off" />
               </div>
               <div class="field">
                 <div class="label-row">
@@ -1891,8 +1890,8 @@
                     There is no cap by default. Untick No cap and enter an amount (0.1&ndash;100) to turn the guard on: a chat turn then stops when its estimated cost reaches it. Leaving the amount empty, or pressing Use defaults, means no cap.
                   </span></button>
                 </div>
-                <input id="askMaxBudgetUsd" class="input" type="number" min="0.1" max="100" step="0.1" inputmode="decimal" placeholder="No cap" autocomplete="off" />
-                <label class="check-row" for="askNoCap"><input id="askNoCap" type="checkbox" /> No cap</label>
+                <input id="askMaxBudgetUsd" data-setting="askMaxBudgetUsd" class="input" type="number" min="0.1" max="100" step="0.1" inputmode="decimal" placeholder="No cap" autocomplete="off" />
+                <label class="check-row" for="askNoCap"><input id="askNoCap" data-setting="askMaxBudgetUsd" type="checkbox" /> No cap</label>
               </div>
               <!-- Scripts workbench W20: the chat's save_script / test_script switch. Body
                    rendered by chat-settings-view.mjs; saved with this card's Save button. -->
@@ -1907,7 +1906,6 @@
                 <button type="button" id="askLimitsReset" class="btn btn-ghost btn-mini">Use defaults</button>
                 <button type="button" id="askLimitsSave" class="btn btn-primary btn-mini">Save</button>
               </div>
-              <small class="hint" id="askLimitsMsg"></small>
               <!-- Chat history: the counts paint with the view; the button opens a
                    danger confirm quoting FRESH counts, then DELETE /api/ask/threads. -->
               <div class="field" style="margin-top:14px">
@@ -1960,11 +1958,11 @@
               <div class="mem-model-row">
                 <div class="field">
                   <div class="label-row"><label for="memDefragModel">Model</label></div>
-                  <select id="memDefragModel" class="select" aria-label="Defragment model"></select>
+                  <select id="memDefragModel" class="select" data-setting="memoryDefrag.model" aria-label="Defragment model"></select>
                 </div>
                 <div class="field">
                   <div class="label-row"><label for="memDefragEffort">Effort</label></div>
-                  <select id="memDefragEffort" class="select" aria-label="Defragment effort"></select>
+                  <select id="memDefragEffort" class="select" data-setting="memoryDefrag.effort" aria-label="Defragment effort"></select>
                 </div>
               </div>
               <small class="hint" id="memDefragModelNote"></small>
@@ -2054,7 +2052,7 @@
                   <div class="label-row">
                     <label for="titleModel">Model</label>
                   </div>
-                  <select id="titleModel" class="select" aria-label="Title model"></select>
+                  <select id="titleModel" class="select" data-setting="titleModel" aria-label="Title model"></select>
                 </div>
                 <small class="hint" id="titleModelEnvNote"></small>
                 <div class="add-project-actions" style="margin-top:14px">
@@ -2081,7 +2079,7 @@
                 </div>
                 <div class="field">
                   <div class="label-row"><label for="autoModel">Model</label></div>
-                  <select id="autoModel" class="select" aria-label="Auto workflow model"></select>
+                  <select id="autoModel" class="select" data-setting="autoWorkflowModel" aria-label="Auto workflow model"></select>
                 </div>
                 <small class="hint" id="autoModelEnvNote"></small>
                 <div class="add-project-actions" style="margin-top:14px">
@@ -2107,7 +2105,7 @@
                 </div>
                 <div class="field">
                   <div class="label-row"><label for="prDescModel">Model</label></div>
-                  <select id="prDescModel" class="select" aria-label="PR description model"></select>
+                  <select id="prDescModel" class="select" data-setting="prDescriptionModel" aria-label="PR description model"></select>
                 </div>
                 <small class="hint" id="prDescModelNote"></small>
                 <div class="add-project-actions" style="margin-top:14px">
@@ -2471,12 +2469,8 @@
           </div>
           <div class="shipit-desc-err hint err" hidden></div>
         </div>
-        <!-- `hint err`, not `err`: style.css has no standalone .err rule, only
-             .hint.err (:284). .hint sets display:block, so .shipit-err ships an
-             explicit [hidden] twin. -->
-        <div class="shipit-err hint err" hidden></div>
         <div class="shipit-try" hidden data-min-level="advanced" aria-label="Try it first"></div>
-        <div class="shipit-actions">
+        <div class="shipit-actions" data-card-actions>
           <button type="button" class="shipit-cancel btn-ghost">Cancel</button>
           <button type="button" class="shipit-ok">Open pull request</button>
         </div>
@@ -2564,12 +2558,7 @@
           <div class="stop-ident-title"></div>
           <div class="stop-ident-branch" hidden></div>
         </div>
-        <!-- `hint err`, not `err`: style.css has no standalone .err rule, only
-             .hint.err (:286). .hint (:285) sets display:block, so .stop-err ships
-             an explicit [hidden] twin in the stylesheet — same as .shipit-err
-             (base :1891, [hidden] :1896). -->
-        <div class="stop-err hint err" hidden></div>
-        <div class="stop-actions">
+        <div class="stop-actions" data-card-actions>
           <button type="button" class="stop-cancel">Keep running</button>
           <button type="button" class="stop-confirm">Stop pipeline</button>
         </div>
@@ -2638,7 +2627,7 @@
         <p class="hint">Untick a folder to leave it out. Names default to the folder name.</p>
         <ul id="proj-bulk-list" class="proj-bulk-list"></ul>
         <small class="hint" id="proj-bulk-msg" aria-live="polite"></small>
-        <div class="confirm-actions">
+        <div class="confirm-actions" data-card-actions>
           <button type="button" id="proj-bulk-save" class="btn btn-primary btn-mini">Add projects</button>
         </div>
       </div>
@@ -2655,6 +2644,10 @@
         <div class="confirm-actions" id="plugin-modal-actions"></div>
       </div>
     </div>
+
+    <!-- Action results (#555, ui/public/feedback.mjs): bottom-right toasts, at most 3.
+         Polite region; an error toast carries role="alert" itself. Never takes focus. -->
+    <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 
     <script src="/app.js" type="module"></script>
   </body>

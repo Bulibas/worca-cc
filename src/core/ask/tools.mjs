@@ -825,7 +825,7 @@ export function createAskTools(deps) {
       overrides: has ? list(st.overrides) : [], exceeded: has ? list(st.exceeded) : [], deviations: has ? list(st.deviations) : [],
       unattended: has ? st.unattended === true : false, reason: has && typeof st.reason === 'string' ? deps.redact(st.reason) : null,
       // Night mode counters, only on a run night mode decided anything in (older shapes unchanged).
-      ...(has && st.night && typeof st.night === 'object' ? { night: { decisions: Number(st.night.decisions) || 0, flagged: Number(st.night.flagged) || 0 } } : {}),
+      ...(has && st.night && typeof st.night === 'object' ? { night: { decisions: Number(st.night.decisions) || 0, flagged: Number(st.night.flagged) || 0, ...(st.night.answers != null ? { answers: Number(st.night.answers) || 0, checks: Number(st.night.checks) || 0 } : {}) } } : {}),
       ...(pause ? { pause } : {}),
     };
   }

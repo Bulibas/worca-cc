@@ -19,6 +19,7 @@ import {
 } from '../../src/shared/graph/script-infer.mjs';
 import { SCRIPT_COLORS, SCRIPT_KEY_RE, RESERVED_SCRIPT_KEYS } from '../../src/shared/graph/script-meta.mjs';
 import { iconSvgOf } from '../../src/shared/graph/script-icons.mjs';
+import { splitMessage } from './feedback.mjs';
 import {
   SCRIPT_TEMPLATES, SCRIPT_WIN32_TEMPLATE, SHELL_COMMAND_TEMPLATE, SCRIPT_EXAMPLES, RUNTIME_DEFAULTS, blankScriptMeta,
 } from '../../src/shared/graph/script-templates.mjs';
@@ -194,7 +195,7 @@ function nextCopyKey(key, list) {
  */
 export function createScriptsController({
   host, msgEl = null, api, navigate, confirm, highlight, renderMarkdown = async () => {}, modal = null,
-  ws = null, doc = globalThis.document, inferDelayMs = 150,
+  ws = null, doc = globalThis.document, inferDelayMs = 150, notify = null,
 } = {}) {
   const win = doc.defaultView || globalThis;
   const st = {
@@ -208,10 +209,15 @@ export function createScriptsController({
   // at once, and the LAST one issued must win however the responses land.
   let seq = 0;
   const say = (textValue, kind) => {
+    // #555: a result is a toast; progress text (no kind) stays on the inline line.
+    if (kind && textValue && notify) { notify({ tone: kind, ...splitMessage(textValue) }); textValue = ''; kind = ''; }
     if (!msgEl) return;
     msgEl.textContent = textValue || '';
     msgEl.className = 'form-msg' + (kind ? ` ${kind}` : '');
   };
+  // A result that outlives a route change: a toast survives the navigation by itself; the
+  // inline fallback (no `notify` injected) is carried across it and painted by showFlash().
+  const flash = (textValue, kind) => { if (notify) notify({ tone: kind, ...splitMessage(textValue) }); else st.flash = [textValue, kind]; };
   const fail = (r) => say((r && r.data && r.data.error) || `HTTP ${r && r.status}`, 'err');
   const val = (name) => { const n = st.root && st.root.querySelector(`[data-field="${name}"]`); return n ? String(n.value) : ''; };
   const onWorkspace = () => Boolean(st.root && st.root.dataset.step === '2');
@@ -567,7 +573,7 @@ export function createScriptsController({
     if (st.mode !== 'list') { const l = await api.list(); list = l.ok && Array.isArray(l.data.scripts) ? l.data.scripts : []; }
     const r = await api.duplicate(key, nextCopyKey(key, list));
     if (!r.ok) { fail(r); return; }
-    st.flash = [`Duplicated as "${r.data.meta.key}".`, 'ok'];
+    flash(`Duplicated as "${r.data.meta.key}".`, 'ok');
     if (st.mode === 'list') { await route(st.param); return; }
     await leaveDetail(scriptRoute(r.data.meta.key));
   }
@@ -579,13 +585,16 @@ export function createScriptsController({
     const r = await api.remove(key);
     if (!r.ok) {
       if (r.status === 409) {
-        await confirm({ title: 'Cannot delete script', message: (r.data && r.data.error) || 'This script is in use.', confirmLabel: 'Close', cancelLabel: 'Close' });
+        // #555 D9: a refusal is an error toast, not a dialog with two Close buttons.
+        const why = (r.data && r.data.error) || 'This script is in use.';
+        if (notify) notify({ tone: 'err', title: 'Cannot delete script', detail: why, key: `script-del-${key}` });
+        else await confirm({ title: 'Cannot delete script', message: why, confirmLabel: 'Close', cancelLabel: 'Close' });
         return;
       }
       fail(r);
       return;
     }
-    st.flash = [`Deleted "${key}".`, 'ok'];
+    flash(`Deleted "${key}".`, 'ok');
     if (st.mode === 'list') { await route(''); return; }
     navigate(scriptRoute());
   }
@@ -604,7 +613,7 @@ export function createScriptsController({
     const warnings = Array.isArray(r.data.warnings) ? r.data.warnings : [];
     if (st.isNew) {
       st.baseline = JSON.stringify(draft);                 // the page is clean now: no leave-guard on the way to its own hash
-      st.flash = [`Saved "${key}".`, 'ok'];
+      flash(`Saved "${key}".`, 'ok');
       navigate(scriptRoute(key));
       return;
     }

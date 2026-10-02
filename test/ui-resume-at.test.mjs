@@ -9,6 +9,7 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { lastToast } from './helpers/feedback.mjs';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
@@ -320,7 +321,7 @@ test('History glance: at simple level the bar\'s caret is the Advanced one; a ca
   assert.equal(ctx2.doc.querySelector('#hist-detail .hd-bar .hd-resume-at-item').disabled, true);
 });
 
-test('a refused schedule surfaces its reason in the confirm modal', async () => {
+test('a refused schedule surfaces its reason in an error toast with Open Schedules (#555)', async () => {
   const ctx = await boot({
     level: 'advanced',
     fetchHandler: (url) => (url.includes('/api/schedules/resume')
@@ -331,9 +332,12 @@ test('a refused schedule surfaces its reason in the confirm modal', async () => 
   card.querySelector('.rd-resume-at').click();
   await ctx.settle();
   await confirmSheet(ctx);
-  const modal = ctx.doc.getElementById('confirm-modal');
-  assert.equal(modal.classList.contains('hidden'), false, 'the modal is up');
-  assert.match(ctx.doc.getElementById('confirm-message').textContent, /already exists/);
-  assert.equal(ctx.doc.getElementById('confirm-ok').textContent, 'Open Schedules');
+  const t = lastToast(ctx.doc);
+  assert.equal(t.tone, 'err');
+  assert.equal(t.title, 'Could not schedule the resume');
+  assert.match(t.detail, /already exists/);
+  assert.equal(t.action, 'Open Schedules');
+  ctx.doc.querySelector('#toasts > .toast .toast-act').click();
+  assert.equal(ctx.window.location.hash, '#schedules');
   assert.equal(card.querySelector('.rd-resume-at').disabled, false, 'the item is usable again');
 });

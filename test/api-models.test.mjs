@@ -503,7 +503,7 @@ test('#422: POST /api/settings titleModel — catalog member stored, unknown id 
   const { PREDEFINED_MODELS } = await import('../src/core/config.mjs');
   const unknown = await post('/api/settings', { titleModel: 'no-such-model' });
   assert.equal(unknown.status, 400);
-  assert.match(unknown.body.error, /unknown model "no-such-model"/);
+  assert.match(unknown.body.error, /The model “no-such-model” is not in the catalog/);
   const builtin = await post('/api/settings', { titleModel: PREDEFINED_MODELS[0].id });
   assert.equal(builtin.status, 200, JSON.stringify(builtin.body));
   assert.equal(builtin.body.titleModel, PREDEFINED_MODELS[0].id);

@@ -418,7 +418,6 @@ export function renderPolicyPluginsPanel(payload, { doc = globalThis.document } 
   head.append(actions);
   card.append(head);
   card.append(h(doc, 'small', 'hint tp-plugins-hint', 'Installing shows the plugin\'s source, commit and what it ships, and waits for your click. Nothing installs on its own unless you trust the policy home on the Plugins page.'));
-  card.append(h(doc, 'p', 'form-msg tp-plugins-msg'));
   if (!reqs.length) card.append(h(doc, 'div', 'hist-empty', 'This policy expects no plugins.'));
   else {
     const table = h(doc, 'table', 'tm-tbl tp-tbl tp-plugins-tbl');

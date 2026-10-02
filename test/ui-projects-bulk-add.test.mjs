@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast, cardAlertOf } from './helpers/feedback.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -114,7 +115,10 @@ test('partial success: added rows lock, skipped rows show the reason, a rename +
   assert.ok(rows[0].classList.contains('added'));
   assert.equal(rows[0].querySelector('.pb-name').disabled, true);
   assert.match(rows[1].querySelector('.pb-status').textContent, /already exists/);
-  assert.match(doc.querySelector('#proj-bulk-msg').textContent, /Added 1\. 1 could not be added/);
+  const alert = cardAlertOf(doc.querySelector('#project-bulk-modal .card'));
+  assert.equal(alert.title, 'Not every project was added', 'a refusal is a card alert on the dialog (#555)');
+  assert.match(alert.detail, /Added 1\. 1 could not be added/);
+  assert.equal(doc.querySelector('#proj-bulk-msg').textContent, '');
 
   const name = rows[1].querySelector('.pb-name');
   name.value = 'beta-2'; name.dispatchEvent(new window.Event('input', { bubbles: true }));
@@ -122,7 +126,7 @@ test('partial success: added rows lock, skipped rows show the reason, a rename +
   await tick(); await tick(); await tick();
   assert.deepEqual(posts[1], { projects: [{ name: 'beta-2', path: '/Users/me/other/beta' }] }, 'only the skipped row is re-sent');
   assert.ok(doc.querySelector('#project-bulk-modal').classList.contains('hidden'), 'nothing left skipped -> closes');
-  assert.match(doc.querySelector('#projects-msg').textContent, /Added 2 projects\./);
+  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Added 2 projects.', detail: '', action: '' });
 });
 
 test('closing with a skipped row reports it in #projects-msg as a warning', async () => {
@@ -145,9 +149,8 @@ test('closing with a skipped row reports it in #projects-msg as a warning', asyn
   click(window, doc.querySelector('#proj-bulk-save'));
   await tick(); await tick(); await tick();
   click(window, doc.querySelector('#proj-bulk-close'));
-  const msg = doc.querySelector('#projects-msg');
-  assert.equal(msg.textContent, 'Added “x”. Skipped 1: gone (folder does not exist).');
-  assert.ok(msg.classList.contains('warn'));
+  assert.deepEqual(lastToast(doc), { tone: 'warn', title: 'Added “x”. Skipped 1', detail: 'gone (folder does not exist).', action: '' });
+  assert.equal(doc.querySelector('#projects-msg').textContent, '');
 });
 
 test('unticking every row disables Add; Escape closes without a request', async () => {
