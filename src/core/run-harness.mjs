@@ -19,13 +19,13 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, basename, dirname, resolve, sep, relative } from 'node:path';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { readFile, writeFile, readdir, mkdir, realpath, rename } from 'node:fs/promises';
+import { readFile, writeFile, readdir, mkdir, realpath, rename, stat } from 'node:fs/promises';
 
 import { generateTitle } from './title.mjs';
 import {
   createPipeline, updatePipelineTitle, appendAudit, writeState, artifactPaths, slugify, today,
   recordArtifact, writeClarify, readPipelineExtras, claimPipelineOwnership, touchHeartbeat,
-  clearPipelineOwnership, HEARTBEAT_INTERVAL_MS, upsertSubAgent,
+  clearPipelineOwnership, HEARTBEAT_INTERVAL_MS, upsertSubAgent, listRunArtifacts,
 } from './artifacts.mjs';
 import { diffNameStatus, diffNumstat, diffPatch, untrackedFiles, untrackedPatch } from './git-info.mjs';
 import {
@@ -62,6 +62,7 @@ import { readGuardrailSet } from './guardrail-store.mjs';
 import { unionGuardrails, guardrailsToPermissionRules, mergePermissionRules } from './guardrails.mjs';
 import { collectRequiredSkills, validateSkills, injectSkills, pluginSkillDirs, pluginAssetDirs } from './skills.mjs';
 import { isBrowsableKind, BULK_ARTIFACT_THRESHOLD } from '../shared/artifact-kinds.mjs';
+import { RUN_SWITCH_OPTIONS } from '../shared/away-mode/labels.mjs';
 import { collectRequiredAssets, stageAssets } from './run-assets.mjs';
 import { loadAgentRegistry, DEFAULT_AGENTS_DIR } from './agent-registry.mjs';
 import {
@@ -103,6 +104,14 @@ import { createRedactor } from './redact.mjs';
 import { finalizeWorkspaceScan } from './workspace-scan-run.mjs';
 import { readWorkspaceMap } from './workspaces.mjs';
 import { redactSecrets } from '../shared/workspace-map/redact.mjs';
+// Night mode (src/core/night/*): a decider answers the open question while the user is away.
+import { effectiveNightConfig } from './night/effective.mjs';
+import { nightState, decideDelayMs, nightAnchorMs, runAllowed } from './night/activation.mjs';
+import { decideAsk } from './night/decider.mjs';
+import { runNightAnalysis, readMemoryText } from './night/analysis.mjs';
+import { writeNightDecision, countNightDecisions, nightCounts, nightGateCycles, nightSpendSinceUsd } from './night/store.mjs';
+import { NIGHT_ACTOR, NIGHT_TOGGLES, nightNeverDecides } from './night/config.mjs';
+import { nightModeToggle, nightModeHereSince } from './settings.mjs';
 import { MCP_TOOL_NAME_400_RE, MCP_TOOL_NAME_TOO_LONG } from '../shared/mcp-tool-name.mjs';
 
 // worca-cc repo root; holds skills/. fileURLToPath, never URL.pathname: the
@@ -625,6 +634,29 @@ export function normalizeClarifyAnswer(payload, questions) {
   }));
 }
 
+/** The --yes pick: the agent's recommendation when it is a real option, else the first non-blank option. */
+export function autoChoice(q) {
+  const opts = (q && Array.isArray(q.options) ? q.options : []).filter((o) => typeof o === 'string' && o.trim());
+  if (typeof q?.recommended === 'string' && opts.includes(q.recommended)) return q.recommended;
+  return opts[0] || 'auto';
+}
+
+/**
+ * The answer `--yes` would give an ask, as an `answer()`-valid payload. Night mode uses it
+ * as the last-resort fallback in a night-owned `--yes` run, which must never hang. Mirrors
+ * the `_ask` auto branch except `workflow`, which uses the shape `sanitizeProposalAnswer`
+ * accepts through `answer()`.
+ */
+export function autoAnswerPayload(q) {
+  switch (q?.kind) {
+    case 'clarify': case 'questions': return { answers: (q.questions || []).map((x) => ({ id: x.id, choice: autoChoice(x) })) };
+    case 'form': return { form: q.form, version: q.version, values: q.autoValues || {} };
+    case 'recovery': return { decision: 'pause' };
+    case 'workflow': return { decision: 'accept', name: q.workflow?.name, nodes: {} };
+    default: return { decision: 'continue' };
+  }
+}
+
 // Upper bound for one RunHarness._git call. Matches worktree.mjs's slow-git
 // budget (SLOW_GIT_TIMEOUT_MS): `diff --cached` on a large agent change is the
 // slowest command issued here, and it legitimately takes seconds, never minutes.
@@ -889,6 +921,22 @@ export class RunHarness extends EventEmitter {
       subAgents: [],
       directions: null,   // { posted, applied, pending: [{id,text}] } — set at done from directions.ndjson
     };
+
+    // Night mode (src/core/night/*): the run's own switches. `optIn` comes from the start
+    // request (or the resume point); `override` is the run-view switch. Both live in the
+    // resume point (`resumePoint.night`) because a UI resume passes only `resume: saved`.
+    const savedNight = this.resumeOpts?.resumePoint?.night || null;
+    this._night = {
+      // A resume with --night opts in a run that was not; it never drops a saved opt-in.
+      optIn: savedNight?.optIn === true || this.opts.nightMode === true,
+      override: NIGHT_TOGGLES.includes(savedNight?.override) ? savedNight.override : 'auto',
+      q: null, timer: null, openedAt: null, deciding: false,
+      since: Number.isFinite(savedNight?.since) ? savedNight.since : null,   // start of the unattended stretch (spend-cap anchor); a human answer ends it
+      decisions: new Map(),                // question id -> decision record (for the answer writers)
+      count: 0, flagged: 0,
+    };
+    this._nightClock = this.opts.nightClock || { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) };
+    this.state.night = this._nightSnapshot();
   }
 
   /** @returns {object} a deep-ish snapshot of current state. */
@@ -907,6 +955,7 @@ export class RunHarness extends EventEmitter {
     // the answer (answeredBy on the row) and audited for decisions below.
     const settle = (value) => {
       if (typeof by === 'string' && by) this._answeredBy.set(id, by);
+      if (this._night && by !== NIGHT_ACTOR) this._night.since = null;   // someone is back: the unattended stretch ends
       this._auditDecision(pq, value, typeof by === 'string' && by ? by : null);
     };
     if (!pq || pq.id !== id) {
@@ -1106,9 +1155,9 @@ export class RunHarness extends EventEmitter {
       audit = `Pipeline **paused**: recoverable ${cls || 'error'} error on ${where} — ${line}.${hint ? ` ${hint[0].toUpperCase()}${hint.slice(1)}.` : ''} Resume to retry.`;
     } else {
       this._log(where, 'warn', `${text} — pausing for manual resume`, meta);
-      audit = `Pipeline **paused**: ${text}.`;
+      audit = `Pipeline **paused**: ${text.replace(/^Paused:\s*/, '').replace(/\.$/, '')}.`;
     }
-    appendAudit(this.pipeline.dir, audit).catch(() => {});
+    if (this.pipeline?.dir) appendAudit(this.pipeline.dir, audit).catch(() => {});
     this.pause();
     return true;
   }
@@ -1515,6 +1564,7 @@ export class RunHarness extends EventEmitter {
       // work) and the run root are the things we resume into (§8.13).
       if (this.state.status !== 'paused' && this.state.status !== 'pausing') {
         await this._teardownRunRoot().catch(() => {});
+        await this._keepCheckoutByPolicy().catch((e) => this._log('worktree', 'warn', `keep policy: ${e?.message || e}`));
       }
       await this.logWriter.close().catch(() => {}); // flush + stop timer (last, to capture teardown logs)
     }
@@ -1589,6 +1639,7 @@ export class RunHarness extends EventEmitter {
       this.planDatePrefix = row.date_prefix;
       this.pipeline = { id: row.id, dir: rp.pipelineDir, promptText: row.prompt || '' };
       this.state.pipelineDir = rp.pipelineDir;
+      this._nightSyncCounts();              // night counters continue from the DB, not from 0
       this.logWriter.bind(rp.pipelineDir);
       recordArtifact(row.id, RUN_LOG_KIND, RUN_LOG_FILE);
       if (this._staleResumeModel) {
@@ -1888,6 +1939,7 @@ export class RunHarness extends EventEmitter {
       // next boot, no stray scan, no injected-path cleanup.
       if (this.state.status !== 'paused' && this.state.status !== 'pausing') {
         await this._teardownRunRoot().catch(() => {});
+        await this._keepCheckoutByPolicy().catch((e) => this._log('worktree', 'warn', `keep policy: ${e?.message || e}`));
       }
       await this.logWriter.close().catch(() => {}); // flush + stop timer (last, to capture teardown logs)
     }
@@ -3249,6 +3301,26 @@ export class RunHarness extends EventEmitter {
     return true;
   }
 
+  /** Keep policy (issue #529, D10): re-create the checkout the teardown just removed. */
+  async _keepCheckoutByPolicy() {
+    if (this._isWorkspaceScan() || this.state.status !== 'done' || !this.state.id) return;
+    const { keepAfterRun } = await import('./checkout.mjs');   // lazy: no import cycle, no cost when unused
+    const kept = await keepAfterRun({ pipelineId: this.state.id, log: (m) => this._log('worktree', 'info', m) });
+    if (!kept) return;
+    // _teardownRunRoot already _persist()ed the pre-checkout branch record. keepAfterRun stamped the
+    // checkout with a targeted UPDATE, so mirror it into memory: a later _persist() must not erase it.
+    const { findPipelineRowById } = await import('./artifacts.mjs');
+    const row = findPipelineRowById(this.state.id);
+    const parse = (t) => { try { return typeof t === 'string' ? JSON.parse(t) : t; } catch { return null; } };
+    if (row?.target === 'workspace') {
+      const branches = parse(row.workspace_meta)?.branches || {};
+      for (const [k, v] of Object.entries(branches)) if (this.state.branches?.[k]) this.state.branches[k] = v;
+    } else if (row?.branch) {
+      const br = parse(row.branch);
+      if (br) this.state.branch = br;
+    }
+  }
+
   /** A Workspace scan run (wf_workspace_scan on a workspace target) is READ-ONLY: nothing is
    *  committed and every member's run branch is deleted at teardown. Read live, never cached:
    *  resume() restores this.workflowId from the resume point AFTER construction. */
@@ -3538,12 +3610,23 @@ export class RunHarness extends EventEmitter {
    */
   _teamCapBreach(which, team, detail, reason) {
     const breach = team?.onBreach || 'pause';
-    if (breach === 'warn' || this.auto) {
+    // Night mode may continue past a TEAM soft cap when allowed (never a developer's own caps):
+    // the unattended run then behaves like --yes here, and the override is a flagged decision.
+    const nightOverride = !this.auto && breach !== 'warn' && this._nightActiveNow()
+      && effectiveNightConfig(this.projectDir).config.allowCostCapOverride === true;
+    if (breach === 'warn' || this.auto || nightOverride) {
       if (this._policyWarned.has(which)) return;
       this._policyWarned.add(which);
-      const why = breach === 'warn' ? 'the policy says warn' : 'unattended run, nobody can continue past a pause';
+      const why = breach === 'warn' ? 'the policy says warn'
+        : nightOverride ? 'Away mode may continue past the team\'s cost cap (allowCostCapOverride)'
+          : 'unattended run, nobody can continue past a pause';
       this._log('policy', 'warn', `${detail} — continuing: ${why}`);
       this._persistPolicyState({ exceeded: [which] });
+      if (nightOverride) {
+        const q = { id: `cost-cap-${which}`, kind: 'cost-cap' };
+        const rec = this._nightRecord(q, { choice: 'continue', strategy: 'rule', flagged: true, rationale: detail, reversible: false });
+        this._emit('night-decision', { id: q.id, kind: q.kind, record: rec });   // no pending question has this id
+      }
       return;
     }
     this._capReached(reason, detail);
@@ -3590,7 +3673,7 @@ export class RunHarness extends EventEmitter {
 
     this._recovery ||= new Map();
     if (!this._recovery.has(cls)) {
-      const p = this._enqueueRecoveryPrompt(cls, firstLine(err.message), verdict.options)
+      const p = this._enqueueRecoveryPrompt(cls, firstLine(err.message), verdict.options, attempt)
         .finally(() => { if (this._recovery) this._recovery.delete(cls); });
       this._recovery.set(cls, p);
     }
@@ -3603,12 +3686,12 @@ export class RunHarness extends EventEmitter {
    *  distinct classes must queue — see the clarify answer). The prompt carries the
    *  row's options (what the give-up choice does); resolves the policy answer
    *  'retry' | 'giveup' (the legacy `{ decision: 'abort' }` wire value is a give-up). */
-  _enqueueRecoveryPrompt(cls, message, options) {
+  _enqueueRecoveryPrompt(cls, message, options, attempt = 1) {
     const run = () =>
       this._ask({
         id: `recovery-${cls}-${this._recoveryNonce()}`,
         kind: 'recovery',
-        recovery: { cls, message, options },
+        recovery: { cls, message, options, attempt },
       }).then((ans) => answerFromDecision(ans && ans.decision));
     return this._enqueueAsk(run);
   }
@@ -3700,7 +3783,7 @@ export class RunHarness extends EventEmitter {
    * @returns {Promise<any>} the answer payload
    */
   async _ask({ id, kind, questions, issues, recovery, agent, nodeId, wireId, executionId, deliveryNo, holdNo, workflow,
-    askId, form, version, title, surface, data, layout, answerSchema, fileRefs, files, autoValues, validate }) {
+    askId, form, version, title, surface, data, layout, answerSchema, fileRefs, files, autoValues, validate, origin }) {
     this._checkAbort();
     // No interactive prompt may OPEN on a pausing run. pause() rejects only the
     // prompt that is currently open; a queued ask (a parallel sibling's questions
@@ -3745,7 +3828,9 @@ export class RunHarness extends EventEmitter {
     this._metricsIv.questions += 1;
 
     try {
-      if (this.auto) {
+      // A night-eligible --yes run hands the ask to night mode: it is answered through the
+      // same pendingQuestion + answer() path below (delay 0), so it is attributed and audited.
+      if (this.auto && !this._nightOwnsAuto({ kind, origin })) {
         if (kind === 'recovery') {
           // Auto mode handles recovery in _recover before ever calling _ask;
           // this is a defensive fallback so an auto run can never hang. Giving up
@@ -3766,20 +3851,24 @@ export class RunHarness extends EventEmitter {
         }
         if (kind === 'clarify' || kind === 'questions') {
           this._log('orchestrator', 'info', `auto-answering ${kind} ${id}`);
-          return {
-            answers: (questions || []).map((q) => ({
-              id: q.id,
-              choice: (q.options && q.options.find((o) => o && o.trim())) || 'auto',
-            })),
-          };
+          return { answers: (questions || []).map((q) => ({ id: q.id, choice: autoChoice(q) })) };
         }
         this._log('orchestrator', 'info', `auto-answering gate ${id} -> continue`);
         return { decision: 'continue' };
       }
       return await new Promise((resolveP, rejectP) => {
         this.pendingQuestion = { id, kind, resolve: resolveP, reject: rejectP, validate: typeof validate === 'function' ? validate : null };
+        // A throw inside a Promise executor REJECTS the ask (and fails the node): night mode
+        // must never break a question the user could still answer.
+        const nq = { id, kind, questions, issues, recovery, wireId, executionId, deliveryNo, holdNo, workflow, form, version, answerSchema, autoValues, nodeId, agent, origin };
+        try {
+          this._nightArm(nq);
+        } catch (err) { this._nightFailed(nq, `Away mode could not get ready for ${kind} ${id}: ${err?.message || err}`); }
       });
     } finally {
+      this._nightDisarm();
+      this._nightCancel(id);
+      this._nightPublish();
       // Resume only the rows that are STILL running AND only while the run has not
       // gone terminal. stop() sets status before rejecting the pending promise, so
       // on a stop-while-blocked we must NOT resume (the terminal _setStatus already
@@ -3799,6 +3888,362 @@ export class RunHarness extends EventEmitter {
         this._persist().catch(() => {});
       }
     }
+  }
+
+  // ── Night mode (src/core/night/*) ──────────────────────────────────────────
+  // While the user is away, a decider answers the open question in their place through
+  // answer(id, payload, NIGHT_ACTOR), so validation, answeredBy and every audit/persist
+  // path run unchanged. The user can still answer first; _ask's finally disarms the timer.
+
+  /** A --yes run hands an ask to Away mode when the run is allowed (settings / mark / its switch) and the ask is decidable. */
+  _nightOwnsAuto(q) {
+    try {
+      const { config } = effectiveNightConfig(this.projectDir);
+      return runAllowed({ config, optIn: this._night.optIn, override: this._night.override }) && !nightNeverDecides(config, q);
+    } catch { return false; }            // never let Away mode break today's --yes behaviour
+  }
+
+  _nightStateNow(config) {
+    return nightState({ config, toggle: nightModeToggle(), hereSince: nightModeHereSince(), optIn: this._night.optIn, override: this._night.override, now: this._nightClock.now() });
+  }
+
+  /** True when night mode may currently decide (used by the team soft-cap override). */
+  _nightActiveNow() {
+    try {
+      const { config } = effectiveNightConfig(this.projectDir);
+      return this._nightStateNow(config).active;
+    } catch { return false; }
+  }
+
+  /** Schedule (or re-schedule) the decision for the open question. `q` = a newly opened ask. */
+  _nightArm(q) {
+    if (!this._night) return;            // a harness built without the constructor (unit seams)
+    this._nightDisarm();
+    if (q) { this._night.q = q; this._night.openedAt = this._nightClock.now(); }
+    q = this._night.q;
+    if (!q || this.pendingQuestion?.id !== q.id) return;
+    try {
+      const { config } = effectiveNightConfig(this.projectDir);
+      this._night.decidable = !nightNeverDecides(config, q);
+      if (!this._night.decidable) {
+        // The kind joined neverDecide after a --yes run handed the ask to night mode: nobody else
+        // will answer, so give today's --yes answer rather than hang.
+        if (this.auto) this._nightAutoFallback(q, `${q.kind} is on the never-decide list`);
+        return;
+      }
+      const st = this.auto ? { eligible: true, active: true, graceOn: false, wakeOn: false } : this._nightStateNow(config);
+      const delay = decideDelayMs({ state: st, config, openedAt: this._night.openedAt, now: this._nightClock.now() });
+      if (delay == null) return;
+      this._night.timer = this._nightClock.setTimeout(() => {
+        this._night.timer = null;
+        this._nightFire(q.id).catch((err) => this._nightFailed(q, `night decision failed: ${err?.message || err}`));
+      }, delay);
+    } finally { this._nightPublish(); }
+  }
+
+  /** Republish state.night when the open question's openedAt changed (the run page pill reads it). */
+  _nightPublish() {
+    if (!this._night) return;
+    const snap = this._nightSnapshot();
+    if (snap.openedAt === (this.state.night?.openedAt ?? null)) return;
+    this.state.night = snap;
+    this._emit('state', this.getState());
+  }
+
+  /** Night mode broke on `q`: log it, and in a night-owned --yes run give today's auto answer
+   *  (nobody else will answer — an unattended run must never hang). */
+  _nightFailed(q, why) {
+    if (this.pendingQuestion?.id !== q.id) return;   // superseded (answered, paused, stopped): nothing failed
+    this._log('night', 'warn', why);
+    if (this.auto && this.pendingQuestion?.id === q.id) this._nightAutoFallback(q, why);
+  }
+
+  /** May night mode decide the open question now? A night-owned --yes run always may. */
+  _nightDue(config) {
+    if (this.auto) return true;
+    const st = this._nightStateNow(config);
+    const graceDue = st.graceOn && config.graceMinutes != null && this._nightClock.now() - this._night.openedAt >= config.graceMinutes * 60_000;
+    return st.eligible && (st.active || graceDue);
+  }
+
+  /** Stop kills this.abort, pause kills this.pauseAbort: night work started from a timer must honour both. */
+  _nightSignal() {
+    const sigs = [this.abort.signal, this.pauseAbort.signal];
+    if (this._night?.decideAbort) sigs.push(this._night.decideAbort.signal);
+    return AbortSignal.any(sigs);
+  }
+
+  /** The ask `id` closed (answered by someone else, paused, stopped): kill its in-flight decision
+   *  (a running nightDecider child keeps billing, and `deciding` would hold up the next question). */
+  _nightCancel(id) {
+    if (this._night?.decideAbort && this._night.decidingId === id) this._night.decideAbort.abort();
+  }
+
+  _nightDisarm() {
+    if (!this._night) return;
+    if (this._night.timer != null) this._nightClock.clearTimeout(this._night.timer);
+    this._night.timer = null;
+  }
+
+  /** Timer fired: re-check activation (the window/grace may not be reached yet), then decide. */
+  async _nightFire(id) {
+    if (this.pendingQuestion?.id !== id || this._night.deciding) return;
+    const { config } = effectiveNightConfig(this.projectDir);
+    if (!this._nightDue(config)) { this._nightArm(); return; }
+    this._night.deciding = true;
+    this._night.decidingId = id;
+    this._night.decideAbort = new AbortController();
+    let outcome;
+    try { outcome = await this._nightDecide(this._night.q, config); }
+    finally {
+      this._night.deciding = false;
+      this._night.decidingId = null;
+      this._night.decideAbort = null;
+      // A NEW question may have been armed (and its timer fired and returned early above)
+      // while this decision was running — e.g. the user answered during a slow analysis.
+      // Re-arm it, or it would never be decided. A dropped decision re-arms its own question.
+      if (this.pendingQuestion && (outcome === 'rearm' || this.pendingQuestion.id !== id) && this._night.q?.id === this.pendingQuestion.id) this._nightArm();
+    }
+  }
+
+  /** Decisions that spend the per-run maxDecisions budget (from the DB, so they survive a resume). */
+  _nightCount() { return this.pipeline?.id ? countNightDecisions(this.pipeline.id) : this._night.count; }
+
+  async _nightDecide(q, config) {
+    // The user was already away when this question opened: the stretch the spend cap counts starts there.
+    this._night.since ??= this._night.openedAt;
+    // Guardrails: pause with a flagged reason.
+    const guard = this._nightGuardrail(config);
+    if (guard) {
+      // Night mode is done for this run: a resumed run must wait for the user rather than
+      // re-pause on its next question (the counters are read from the DB and still exceed
+      // the limit). The run-view switch turns it back on. Set BEFORE the pause so the
+      // resume point carries it.
+      this._night.override = 'off';
+      this.state.night = this._nightSnapshot();
+      // pause() acts only on a RUNNING run; otherwise (already pausing, stopped, not started)
+      // the question simply stays open. _pauseFor would record the reason even when pause()
+      // then refuses, so only a running run is asked to pause.
+      const paused = this.state.status === 'running' && this._pauseFor(REASON.NIGHT_GUARDRAIL, null, { label: 'night', detail: guard.detail });
+      const rec = this._nightRecord(q, { choice: null, strategy: 'guardrail', flagged: true, guardrail: guard.code, rationale: guard.detail });
+      this._emit('night-decision', { id: q.id, kind: q.kind, record: rec });
+      if (!paused) {
+        // A --yes run has nobody to wait for: give today's auto answer instead of hanging.
+        if (this.auto) return this._nightAutoFallback(q, `guardrail ${guard.code} and the run could not pause`);
+        this._log('night', 'warn', `Away mode limit ${guard.code}: the run could not pause; ${q.id} waits for the user`);
+      }
+      return;
+    }
+    const analysis = {};                        // the review's peak context, when one ran for this ask
+    const result = await decideAsk(q, {
+      config,
+      analyze: (qs) => this._nightAnalyze(qs, q, analysis),
+      gateCyclesUsed: (wireId) => (this.pipeline?.id ? nightGateCycles(this.pipeline.id, wireId) : 0),
+      budget: config.spendCapUsd != null ? { spent: this._nightSpentUsd(config), cap: config.spendCapUsd } : null,
+      // sleepAbortable RESOLVES early on a pause; pause() has then nulled pendingQuestion, so
+      // the check below drops the decision.
+      sleep: (ms) => sleepAbortable(ms, this._nightSignal()),
+    });
+    if (!result || this.pendingQuestion?.id !== q.id) return;   // neverDecide, or the user answered while we thought
+    // The user may have switched night mode off while we thought (a slow analysis, a backoff):
+    // re-resolve the switches and drop the decision unless night mode may still decide.
+    const { config: nowConfig } = effectiveNightConfig(this.projectDir);
+    if (nightNeverDecides(nowConfig, q) || !this._nightDue(nowConfig)) {
+      this._log('night', 'info', `Away mode was switched off while answering ${q.kind} ${q.id}; it waits for the user`);
+      return 'rearm';
+    }
+    let record = result.record;
+    if (Number.isFinite(analysis.peakContextTokens)) record = { ...record, meta: { ...(record.meta || {}), reviewPeakContextTokens: analysis.peakContextTokens } };
+    // The record must be readable by nightDecision(id) BEFORE answer() resolves the ask (the
+    // answer writers run right after), so stage it first; it is written/emitted only once an
+    // answer landed.
+    this._night.decisions.set(q.id, { ...record, kind: q.kind, questionId: q.id });
+    let ok;
+    try {
+      ok = this.answer(q.id, result.payload, NIGHT_ACTOR);
+    } catch (err) {
+      if (err?.code !== 'INVALID_ANSWER' || q.kind !== 'form') { this._night.decisions.delete(q.id); throw err; }
+      // A decided form value failed gate 3: fall back to the proven auto answer, flagged.
+      record = { ...record, flagged: true, rationale: `${record.rationale}\nthe answer did not fit the form, so its default values were used` };
+      this._night.decisions.set(q.id, { ...record, kind: q.kind, questionId: q.id });
+      try { ok = this.answer(q.id, { form: q.form, version: q.version, values: q.autoValues || {} }, NIGHT_ACTOR); } catch { ok = false; }
+    }
+    if (!ok) {
+      // Stale id (the user won the race) or a validator that refused the payload: nothing was answered.
+      this._night.decisions.delete(q.id);
+      if (this.auto && this.pendingQuestion?.id === q.id) return this._nightAutoFallback(q, 'the answer was refused');
+      this._log('night', 'warn', `Away mode could not answer ${q.kind} ${q.id}; it waits for the user`);
+      return;
+    }
+    const rec = this._nightRecord(q, record);
+    this._emit('night-decision', { id: q.id, kind: q.kind, record: rec });
+  }
+
+  /** Night-owned --yes run only: answer with what --yes would have answered, flagged. If even
+   *  that is refused, reject the ask so the run fails loudly instead of hanging unattended. */
+  _nightAutoFallback(q, why) {
+    if (this.pendingQuestion?.id !== q.id) return;
+    const payload = autoAnswerPayload(q);
+    const record = { choice: JSON.stringify(payload).slice(0, 500), strategy: 'auto', confidence: null, flagged: true, rationale: `gave the --yes answer instead: ${why}`, reversible: null };
+    this._night.decisions.set(q.id, { ...record, kind: q.kind, questionId: q.id });
+    let ok = false;
+    try { ok = this.answer(q.id, payload, NIGHT_ACTOR); } catch { ok = false; }
+    if (!ok) {
+      this._night.decisions.delete(q.id);
+      const pq = this.pendingQuestion;
+      if (pq?.id === q.id) { this.pendingQuestion = null; pq.reject(new Error(`Away mode could not answer ${q.kind} ${q.id} in an unattended run`)); }
+      return;
+    }
+    const rec = this._nightRecord(q, record);
+    this._emit('night-decision', { id: q.id, kind: q.kind, record: rec });
+  }
+
+  /** Spend across all runs since the night anchor (the window start and/or this run's unattended stretch). */
+  _nightSpentUsd(config) {
+    return nightSpendSinceUsd(nightAnchorMs(config, this._nightClock.now(), this._night.since));
+  }
+
+  /** @returns {{code:'maxDecisions'|'spendCap', detail:string}|null} */
+  _nightGuardrail(config) {
+    const n = this._nightCount();
+    if (n >= config.maxDecisions) return { code: 'maxDecisions', detail: `Paused: worca answered ${n} times on this run, the limit you set. Resume to continue, or raise the limit in Settings › Away mode › Limits.` };
+    if (config.spendCapUsd != null) {
+      const spent = this._nightSpentUsd(config);
+      if (spent >= config.spendCapUsd) return { code: 'spendCap', detail: `Paused: spending while away reached $${config.spendCapUsd.toFixed(2)}. Resume to continue, or raise the cap.` };
+    }
+    return null;
+  }
+
+  /** Persist a decision that HAPPENED (table row, counters, log, state, policy run state).
+   *  The caller emits `night-decision` — only once the answer landed (or the guardrail paused).
+   *  @returns {object} the stored record */
+  _nightRecord(q, record) {
+    const rec = { ...record, kind: q.kind, questionId: q.id, at: new Date(this._nightClock.now()).toISOString() };
+    // Guardrail rows and cost-cap overrides are not "decisions" for the maxDecisions budget.
+    if (record.guardrail == null) this._night.decisions.set(q.id, rec);
+    try { writeNightDecision(this.pipeline?.id, { questionId: q.id, kind: q.kind, ...record }); }
+    catch (err) { this._log('night', 'warn', `could not record the Away mode answer: ${err?.message || err}`); }
+    if (this.pipeline?.id) this._nightSyncCounts();
+    else {
+      if (record.guardrail == null && q.kind !== 'cost-cap') this._night.count += 1;
+      if (rec.flagged) this._night.flagged += 1;
+    }
+    this._log('night', rec.flagged ? 'warn' : 'info', `Away mode ${record.guardrail ? `limit ${record.guardrail}` : `answered ${q.kind} ${q.id} → ${String(record.choice).slice(0, 120)}`}${rec.flagged ? ' (please check)' : ''}`);
+    this.state.night = this._nightSnapshot();
+    this._emit('state', this.getState());
+    if (this.policyRun) this._persistPolicyState({ unattended: true, night: { decisions: this._night.count, flagged: this._night.flagged } });
+    return rec;
+  }
+
+  /** The night decision record for question `id`, or null (read by the answer writers). */
+  nightDecision(id) { return this._night.decisions.get(id) ?? null; }
+
+  /** Reload the counters from night_decisions, so a resumed run continues its totals instead
+   *  of overwriting the stored ones with numbers restarted at 0. Never throws. */
+  _nightSyncCounts() {
+    if (!this.pipeline?.id) return;
+    try {
+      const c = nightCounts(this.pipeline.id);
+      this._night.count = c.decisions; this._night.flagged = c.flagged;
+      this.state.night = this._nightSnapshot();
+    } catch (err) { this._log('night', 'warn', `could not read the Away mode answers: ${err?.message || err}`); }
+  }
+
+  _nightSnapshot() {
+    const n = this._night;
+    const open = n.q && this.pendingQuestion?.id === n.q.id && n.decidable !== false && n.openedAt != null;
+    return { optIn: n.optIn, override: n.override, decisions: n.count, flagged: n.flagged, openedAt: open ? new Date(n.openedAt).toISOString() : null };
+  }
+
+  /** Run-view switch. @param {'auto'|'on'|'off'} mode */
+  setNightOverride(mode, by = 'local') {
+    if (!NIGHT_TOGGLES.includes(mode)) throw Object.assign(new Error('mode must be auto | on | off'), { code: 'BAD_NIGHT_MODE' });
+    const status = this.state.status;
+    if (status === 'done' || status === 'stopped' || status === 'error') {
+      throw Object.assign(new Error(`the run is ${status}: its Away mode switch can no longer change`), { code: 'NIGHT_NOT_LIVE' });
+    }
+    this._night.override = mode;
+    // A paused run resumes from its saved point, which captured the switch at pause time.
+    if (status === 'paused' && this.state.resumePoint?.night) {
+      this.state.resumePoint.night.override = mode;
+      this._persist().catch(() => {});
+    }
+    // No _recordAction: lastAction is "who stopped / paused / resumed" (the Paused-by banner and
+    // _auditAction read it). The audit line below names who flipped the switch.
+    const label = RUN_SWITCH_OPTIONS.find((o) => o.value === mode)?.label ?? mode;
+    if (this.pipeline?.dir) appendAudit(this.pipeline.dir, `- Away mode on this run set to **${label}**${byActor(by)}.`, { actor: by }).catch(() => {});
+    this.state.night = this._nightSnapshot();
+    this._emit('state', this.getState());
+    this._nightArm();
+    return true;
+  }
+
+  /** Settings / project prefs changed: re-evaluate the open question. */
+  nightConfigChanged() { this._nightArm(); }
+
+  /** Plan/task artifacts of this run for the nightDecider to read. Never throws. */
+  /** What the Away mode review reads: the run's task.md and its NEWEST plan. Plans live in the
+   *  store's plans/ folder (indexed as kind 'plan', store-root-relative), not the run folder, and
+   *  superseded versions would only contradict the current one. Never throws. */
+  async _nightPlanPaths() {
+    if (!this.pipeline?.dir) return [];
+    const isFile = async (f) => { try { return (await stat(f)).isFile(); } catch { return false; } };
+    const out = [];
+    const task = join(this.pipeline.dir, 'task.md');
+    if (await isFile(task)) out.push(task);
+    try {
+      const root = this.isWorkspace ? workspaceStorePath(this.workspaceKey) : projectStorePath(projectKey(this.projectDir));
+      // Newest first: by time, then by the -vN suffix (two writes in one millisecond share a time,
+      // and the index's tie-break, the file name, sorts "x-v2.md" before "x.md").
+      const ver = (rel) => Number(/-v(\d+)\.md$/.exec(rel)?.[1] || 1);
+      const plans = (await listRunArtifacts(this.pipeline.id, { kind: 'plan' }))
+        .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || ver(b.relPath) - ver(a.relPath));
+      for (const a of plans) {
+        const f = join(root, a.relPath);
+        if (await isFile(f)) { out.push(f); break; }
+      }
+    } catch { /* no index yet: the task alone */ }
+    return out;
+  }
+
+  /** One nightDecider call for an ask; books cost like the Auto classifier (_recordAutoCost).
+   *  Deliberately no _checkCostLimits(): a cap pause raised from a timer callback would not
+   *  unwind the pending _ask; the next step's cap check catches it. */
+  async _nightAnalyze(questions, q, into = {}) {
+    const startedAt = new Date().toISOString();
+    const n = (this._nightSeq = (this._nightSeq || 0) + 1);
+    let res;
+    try {
+      res = await runNightAnalysis({
+        questions, cwd: this.runCwd || this.workDir || this.projectDir,
+        task: this.pipeline?.promptText ?? this.opts.prompt ?? '', planPaths: await this._nightPlanPaths(),
+        memory: await readMemoryText(projectKey(this.projectDir)), criteria: effectiveNightConfig(this.projectDir).config.criteria,
+        context: q.kind === 'questions' ? `Asked by ${q.agent || 'an agent'} mid-step.` : '', model: this.claude.model || null,
+        bin: this.claude.bin, mock: !!this.claude.mock, envScrub: this.guardrails?.envScrub, signal: this._nightSignal(),
+        run: this.opts.nightRunClaude,          // test seam; undefined → runClaude
+      });
+    } catch (err) {
+      // Book what a failed call cost, then let the strategy fall back (flagged).
+      if (err?.costUsd > 0) this._nightBookAnalysis(n, q, startedAt, { costUsd: err.costUsd, usage: err.usage || {} }, 'error');
+      if (Number.isFinite(err?.peakContextTokens)) into.peakContextTokens = err.peakContextTokens;
+      throw err;
+    }
+    if (Number.isFinite(res.peakContextTokens)) into.peakContextTokens = res.peakContextTokens;
+    this._nightBookAnalysis(n, q, startedAt, res, 'finished');
+    return res.byId;
+  }
+
+  /** One nightDecider call as a sub-agent row plus its cost on the run (like _recordAutoCost). */
+  _nightBookAnalysis(n, q, startedAt, res, status) {
+    const stepKey = q.executionId || this._runningStepKeys()[0] || this.state.steps.at(-1)?.key || 'x:preflight:1';
+    const rec = { id: `night-decider-${n}`, label: `Night decider (${q.kind})`, status, startedAt, finishedAt: new Date().toISOString(),
+      costUsd: res.costUsd, tokens: (res.usage.input_tokens || 0) + (res.usage.output_tokens || 0), subagentType: 'night-decider',
+      nodeId: q.nodeId || null, stepKey, runModel: this.claude.model || null };
+    if (!this.state.subAgents.some((s) => s.id === rec.id)) this.state.subAgents.push(rec);
+    this._upsertSubAgent(rec);
+    this._subAgentTransition('spawn', rec);
+    this._subAgentTransition('finish', rec);
+    this._recordCost(res.costUsd, stepKey);
   }
 
   /** List the user's attached files copied into <pipeline>/extras/ (basename + abs

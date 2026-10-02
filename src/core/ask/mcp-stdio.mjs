@@ -30,11 +30,13 @@ import { defaultCommentDeps } from './comment-deps.mjs';
 import { defaultWorkflowDeps } from './workflow-deps.mjs';
 import { defaultMetricsDeps } from './metrics-deps.mjs';
 import { defaultPolicyDeps } from './policy-deps.mjs';
+import { defaultAwayDeps } from './away-deps.mjs';
 import { defaultScheduleDeps } from './schedule-deps.mjs';
 import { defaultSourceDeps } from './source-deps.mjs';
 import { defaultModelDeps } from './model-deps.mjs';
 import { defaultCloneDeps } from './clone-deps.mjs';
 import { defaultWorkspaceDeps } from './workspace-deps.mjs';
+import { defaultActionsDeps } from './actions-deps.mjs';
 import { defaultWebDeps } from './web-deps.mjs';
 import { defaultBranchDeps } from './branch-deps.mjs';
 
@@ -72,11 +74,14 @@ export function createAskToolServer({ threadId, reader = null, signal, write, lo
       ...defaultWorkflowDeps({ threadId, signal }),
       ...defaultMetricsDeps({ threadId }),
       ...defaultPolicyDeps({ threadId }),
+      ...defaultAwayDeps(),
       ...defaultScheduleDeps({ threadId, reader }),
       ...defaultSourceDeps(),
       ...defaultModelDeps({ threadId }),
       ...defaultCloneDeps(),
       ...defaultWorkspaceDeps(),
+      // Actions (docs/actions.md "Ask Worca"): read the config, checkouts and running services; propose config.
+      ...defaultActionsDeps(),
       // Branch reads + fetch-only (#527): list_branches, list_projects.sync, get_run.baseMoved.
       ...defaultBranchDeps(),
       // Web access: present only when this turn's env carries WORCA_ASK_WEB (web-deps.mjs) — the

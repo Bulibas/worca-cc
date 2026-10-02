@@ -8,6 +8,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { writePluginsLock, pluginCurrentDir } from '../src/core/plugins-lock.mjs';
@@ -24,8 +26,14 @@ const SCHEMA = [
 ];
 
 let channelHost, chatActions, enqueueChatWork, runs, app, srv, base;
+let home, prevHome, prevProfile;
 
 before(async () => {
+  // settings.json lives under HOME, not WORCA_HOME: sandbox it before the
+  // server import so the /api/settings round-trip never touches the real file.
+  home = await mkdtemp(join(tmpdir(), 'worca-cc-chat-e2e-home-'));
+  prevHome = process.env.HOME; prevProfile = process.env.USERPROFILE;
+  process.env.HOME = home; process.env.USERPROFILE = home;
   const cur = pluginCurrentDir(NAME);
   mkdirSync(join(cur, 'channel'), { recursive: true });
   writeFileSync(join(cur, 'worca-cc-plugin.json'), JSON.stringify({
@@ -48,7 +56,12 @@ before(async () => {
   base = `http://127.0.0.1:${srv.address().port}`;
 });
 
-after(async () => { srv?.close(); await channelHost?.stop(); delete process.env.WORCA_MOCK; });
+after(async () => {
+  srv?.close(); await channelHost?.stop(); delete process.env.WORCA_MOCK;
+  if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+  if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
+  await rm(home, { recursive: true, force: true });
+});
 
 const lastReplyText = () => {
   const sent = mockSentMessages();
@@ -142,7 +155,7 @@ test('GET /api/chat/status lists channels; POST /api/chat/test needs notifyChatI
 
 test('settings round-trip: chat prefs ride GET/POST /api/settings without clearing root', async () => {
   const before0 = await (await fetch(`${base}/api/settings`)).json();
-  assert.deepEqual(before0.chat.notify, { done: true, error: true, question: true, paused: true });
+  assert.deepEqual(before0.chat.notify, { done: true, error: true, question: true, paused: true, away: true });
   const posted = await (await fetch(`${base}/api/settings`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat: { notify: { question: false } } }),
@@ -152,11 +165,6 @@ test('settings round-trip: chat prefs ride GET/POST /api/settings without cleari
   const after1 = await (await fetch(`${base}/api/settings`)).json();
   assert.equal(after1.chat.notify.question, false);
   assert.equal(after1.root, before0.root, 'a chat-only POST must not clear root (legacy contract)');
-  // restore
-  await fetch(`${base}/api/settings`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat: { notify: { question: true } } }),
-  });
 });
 
 test('same-chat commands execute strictly in order (batched /use then /runs)', async () => {

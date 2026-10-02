@@ -54,3 +54,14 @@ test('answers-only partial call preserves previously written identity columns', 
   assert.equal(rows[0].agentKey, 'reviewer', 'agentKey survives identity-omitting call');
   assert.deepEqual(rows[0].answers, AS.answers);
 });
+
+test('a round night mode answered carries its night record; others gain no key', async () => {
+  const { id } = await seedPipeline(await tmpProject());
+  await writeStepQuestions(id, '1:s0_0', 1, { agentKey: 'planner', nodeId: 's0_0', questions: QS });
+  await writeStepQuestions(id, '1:s0_0', 1, { answers: { ...AS, answeredBy: 'night-mode', night: { strategy: 'weights', flagged: false } } });
+  await writeStepQuestions(id, '2:s1_0', 1, { agentKey: 'reviewer', nodeId: 's1_0', questions: QS });
+  const [night, plain] = readStepQuestions(id);
+  assert.deepEqual(night.night, { strategy: 'weights', flagged: false });
+  assert.equal(night.answeredBy, 'night-mode');
+  assert.equal('night' in plain, false);
+});

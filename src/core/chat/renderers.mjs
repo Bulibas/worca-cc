@@ -12,6 +12,7 @@
 import { pauseConsequences, describePauseReason, giveUpOption } from '../failure-policy.mjs';
 import { projectForm } from '../../shared/forms/project.mjs';
 import { CHAT_PROJECTION_MAX } from '../ask-projection.mjs';
+import { awayAnswersSummary } from '../../shared/away-mode/labels.mjs';
 
 const md = (value) => ({ kind: 'markdown', value });
 
@@ -65,6 +66,7 @@ export function renderDone(meta, payload = {}) {
       // cause survives) — a head clip here would throw exactly that tail away.
       parts.push(`   **${isError ? 'Error' : 'Cause'}:** ${String(payload.detail)}`);
     }
+    pushAway(parts, meta);
     parts.push(`   Resume from the worca-cc UI, or reply: /resume ${runRef(meta.runId)}`);
     return mdMsg(parts.join('\n'), isError ? 'error' : 'warning');
   }
@@ -72,6 +74,7 @@ export function renderDone(meta, payload = {}) {
     const parts = head('⏹', meta);
     parts.push('   **Status:** stopped');
     pushPending(parts, meta);
+  pushAway(parts, meta);
     return mdMsg(parts.join('\n'), 'warning');
   }
   const parts = head('✅', meta);
@@ -81,6 +84,7 @@ export function renderDone(meta, payload = {}) {
   const cost = fmtUsd(meta.totalCostUsd);
   if (cost) parts.push(`   **Cost:** ${cost}`);
   pushPending(parts, meta);
+  pushAway(parts, meta);
   return mdMsg(parts.join('\n'), 'success');
 }
 
@@ -92,6 +96,12 @@ export function renderDone(meta, payload = {}) {
  *  errors — the person who posted the direction was never told it went unread,
  *  while the CLI (src/cli/render.mjs) and the audit line reported it regardless of
  *  status. */
+/** Away mode's answers on this run, so a run that finished overnight says what to look at. */
+function pushAway(parts, meta) {
+  const line = awayAnswersSummary(meta.night);
+  if (line) parts.push(`   **Away mode:** ${line}`);
+}
+
 function pushPending(parts, meta) {
   const pending = meta.directions?.pending?.length;
   if (pending) parts.push(`   **Directions pending:** ${pending}`);
@@ -105,6 +115,7 @@ export function renderError(meta, payload = {}) {
   const msg = String(payload.message || 'unknown error');
   parts.push(`   **Error:** ${msg.length > 300 ? `${msg.slice(0, 300)}…` : msg}`);
   pushPending(parts, meta);
+  pushAway(parts, meta);
   return mdMsg(parts.join('\n'), 'error');
 }
 
@@ -199,6 +210,11 @@ export function renderSchedule(n = {}) {
   const name = title.length > 60 ? `${title.slice(0, 60)}…` : title;
   const msg = String(n.message || '');
   return mdMsg(`${icon} **Schedule:** ${name}\n   ${msg.length > 300 ? `${msg.slice(0, 300)}…` : msg}`, n.severity === 'info' ? 'info' : 'warning');
+}
+
+/** The away hours started or ended by themselves (night/hours-watch.mjs). */
+export function renderAway(text) {
+  return mdMsg(`\u{1F552} **Away mode:** ${String(text || '').slice(0, 300)}`, 'info');
 }
 
 export function renderTest() {

@@ -519,3 +519,15 @@ test('row chip + summary (policy): a dot, the word and the short state; the cap 
   assert.equal(cell.querySelector('.tm-label'), null);
   assert.ok(cell.querySelector('.tp-open'));
 });
+
+test('editor: a night.criteria row renders five weight inputs and reads back the set ones', () => {
+  const registry = [{ key: 'night.criteria', group: 'night', label: 'Criteria weights', type: 'criteria', kinds: ['default'], night: true }];
+  const policy = { schema: 1, title: 't', fields: { 'night.criteria': { kind: 'default', value: { matchesMemory: 4, cost: 2 } } }, workspaceRuns: {}, catalogs: { guardrailSets: [], models: [] } };
+  const root = renderPolicyEditor(policy, { registry, doc });
+  const row = root.querySelector('.tp-edit-row[data-key="night.criteria"][data-scope="fields"]');
+  const inputs = [...row.querySelectorAll('.tp-crit-val')];
+  assert.deepEqual(inputs.map((i) => i.dataset.crit), ['matchesMemory', 'reversible', 'smallestScope', 'codebaseConventions', 'cost']);
+  assert.deepEqual(inputs.map((i) => i.value), ['4', '', '', '', '2']);
+  inputs[1].value = '7';
+  assert.deepEqual(docFromEditor(root, { registry }).fields['night.criteria'].value, { matchesMemory: 4, reversible: 7, cost: 2 });
+});

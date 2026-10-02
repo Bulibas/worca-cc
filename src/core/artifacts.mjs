@@ -480,6 +480,11 @@ function answeredByOf(aWrap) {
   return aWrap && typeof aWrap.answeredBy === 'string' && aWrap.answeredBy ? { answeredBy: aWrap.answeredBy } : {};
 }
 
+/** `{night}` when night mode answered the round (src/core/night/*), else {} — additive like answeredBy. */
+function nightOf(aWrap) {
+  return aWrap && aWrap.night && typeof aWrap.night === 'object' ? { night: aWrap.night } : {};
+}
+
 function formFieldsOf(qWrap, aWrap) {
   const ask = formAskOf(qWrap, aWrap);
   return ask ? { ask, formAnswer: formAnswerOf(aWrap) } : {};
@@ -517,6 +522,7 @@ export function readStepQuestions(pipelineId) {
       // byte-identical; consumers test `row.ask`, never `'ask' in row`.
       ...formFieldsOf(qWrap, aWrap),
       ...answeredByOf(aWrap),
+      ...nightOf(aWrap),
     };
   });
 }
@@ -597,6 +603,7 @@ export function readPipelineExtras(pipelineId) {
     answers: Array.isArray(aWrap?.answers) ? aWrap.answers : [],
     ...formFieldsOf(qWrap, aWrap),   // spec §9: `ask` + `formAnswer` on a form row only
     ...answeredByOf(aWrap),
+    ...nightOf(aWrap),
   };
   const reviews = getDb().prepare(
     'SELECT kind, cycle, verdict FROM reviews WHERE pipeline_id = ? ORDER BY kind, cycle'
@@ -1881,6 +1888,26 @@ export function retainedWorkFor(row) {
   return { reason: members[0].code || 'unknown', members };
 }
 
+/** Checked-out members of a finished run (issue #529) — never an error, unlike retainedWorkFor. */
+export function checkoutRecordsFor(row) {
+  if (!row || typeof row !== 'object') return null;
+  const branch = typeof row.branch === 'string' ? j(row.branch, null) : row.branch;
+  const wm = typeof row.workspace_meta === 'string' ? j(row.workspace_meta, null) : row.workspace_meta;
+  const wsBranches = wm?.branches || row.branches;
+  const isWorkspace = row.target === 'workspace' && wsBranches && typeof wsBranches === 'object';
+  const candidates = isWorkspace ? Object.entries(wsBranches) : [[row.project_key ?? row.projectKey ?? null, branch]];
+  const members = [];
+  for (const [pk, br] of candidates) {
+    const c = br?.checkout;
+    // A linked folder (checkout.external) lives at checkout.dir; br.worktreeDir is the run's own path.
+    const dir = c?.external ? c.dir : br?.worktreeDir;
+    if (!c || !dir || !existsSync(dir)) continue;
+    members.push({ projectKey: pk || null, worktreeDir: dir, branch: br.feature || null,
+      at: c.at || null, policy: c.policy || 'on-demand', setup: c.setup || { status: 'none' }, ...(c.external ? { external: true } : {}) });
+  }
+  return members.length ? { members } : null;
+}
+
 // Kept local, not imported: results.mjs (which exports RESULTS_FILE) imports this module.
 const RESULTS_FILE = 'results.json';
 
@@ -1991,6 +2018,7 @@ async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
     pauseReason: row.pause_reason ?? null,
     pauseDetail: row.pause_detail ?? null,
     retainedWork: retainedWorkFor(row),
+    checkout: checkoutRecordsFor(row),
     survived,
     added,
     removed,
@@ -2450,7 +2478,7 @@ export function runRootSweepLookups() {
     statusOf: (id) => rowById(id)?.status ?? null,
     retainOf: (id) => {
       const row = rowById(id);
-      return row ? retainedWorkFor(row) : null;
+      return row ? (retainedWorkFor(row) || checkoutRecordsFor(row)) : null;
     },
     membersOf: async (id) => {
       const row = rowById(id);

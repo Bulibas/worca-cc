@@ -38,18 +38,94 @@ const ICONS = {
   mic: ['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M19 11a7 7 0 0 1-14 0', 'M12 18v3'],
   voiceTalk: ['M7.9 20A9 9 0 1 0 4 16.1L2 22z', 'M8 10h8M8 14h5'],           // chat bubble with text lines: speak in, read the reply
   voiceHandsFree: ['M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4'],               // waveform: a live conversation
+  pin: ['M12 17v5', 'M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z'],
 };
 // One icon per voice mode; the mic button and the ▾ menu both draw from this.
 const VOICE_MODE_ICONS = { dictate: ICONS.mic, talk: ICONS.voiceTalk, handsfree: ICONS.voiceHandsFree };
+
+/** A context chip's in-app route, or null when it has none (a run with no known home). */
+function contextHref(c) {
+  const e = encodeURIComponent;
+  if (c.kind === 'project') return `#projects/${e(c.id)}`;
+  if (c.kind === 'workspace') return `#workspaces/${e(c.id)}`;
+  if (c.kind === 'page') return `#${e(c.id)}`;
+  if (c.kind === 'run' && typeof c.home === 'string' && c.home) return `#history/${c.home.split('/').map(e).join('/')}/${e(c.id)}`;
+  return null;
+}
 
 export function fmtTokens(n) {
   if (!Number.isFinite(n) || n <= 0) return null;
   return n < 1000 ? `${n} tok` : `${(n / 1000).toFixed(1)}k tok`;
 }
-/** Context fill (usage.ctx / totals.ctx) — a snapshot, never a cumulative sum. */
-export function fmtCtx(n) {
+/** Context window meter (docs: Claude Code compacts about 33k short of the window — 967k of 1M). */
+export const CTX_COMPACT_BUFFER = 33000;
+export const CTX_WARN = 0.75;          // amber, as a share of the compaction trigger
+export const CTX_HIGH = 0.9;           // red: compaction soon
+export const CTX_COST_HINT = 200000;   // from here the hover notes every message re-sends the whole context
+const validWindow = (w) => Number.isInteger(w) && w > 0;
+const kTok = (n) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`);
+
+/** 1000000 → "1M", 1500000 → "1.5M", 200000 → "200k"; null for an unknown window. */
+export function fmtWindow(w) {
+  if (!validWindow(w)) return null;
+  if (w >= 1e6) return `${+(w / 1e6).toFixed(1)}M`;
+  if (w >= 1000) return `${+(w / 1000).toFixed(1)}k`;
+  return String(w);
+}
+/** Where automatic compaction starts: window − buffer (the window itself when it is too small for one). */
+export function ctxTrigger(w) {
+  if (!validWindow(w)) return null;
+  return w > 2 * CTX_COMPACT_BUFFER ? w - CTX_COMPACT_BUFFER : w;
+}
+export function ctxLevel(ctx, w) {
+  const t = ctxTrigger(w);
+  if (!t || !Number.isFinite(ctx) || ctx <= 0) return null;
+  const r = ctx / t;
+  return r >= CTX_HIGH ? 'high' : r >= CTX_WARN ? 'warn' : 'ok';
+}
+/** Share of the FULL window (Claude's own meter does the same); not clamped — a model switch can pass 100. */
+export function ctxPercent(ctx, w) {
+  return validWindow(w) && Number.isFinite(ctx) && ctx > 0 ? Math.round((ctx / w) * 100) : null;
+}
+/** Context fill (usage.ctx / totals.ctx) — a snapshot, never a cumulative sum — against the window when known. */
+export function fmtCtx(n, w) {
   if (!Number.isFinite(n) || n <= 0) return null;
-  return n < 1000 ? `${n} ctx` : `${(n / 1000).toFixed(1)}k ctx`;
+  const win = fmtWindow(w);
+  return win ? `${kTok(n)} / ${win} ctx` : `${kTok(n)} ctx`;
+}
+/** The meter's hover text, or null when there is nothing worth saying. */
+export function ctxTitle(ctx, w) {
+  if (!Number.isFinite(ctx) || ctx <= 0) return null;
+  const parts = [];
+  const pct = ctxPercent(ctx, w);
+  if (pct != null) {
+    if (ctxLevel(ctx, w) === 'high') parts.push('Compaction soon.');
+    parts.push(`${pct}% of the ${fmtWindow(w)} context window. Automatic compaction starts around ${fmtWindow(ctxTrigger(w))}.`);
+  }
+  if (ctx >= CTX_COST_HINT) parts.push(`Each message re-sends about ${(ctx / 1000).toFixed(1)}k tokens.`);
+  return parts.length ? parts.join(' ') : null;
+}
+/** Share of the window with one decimal, as the popover's rows show it: 120400 of 1M → "12.0%". */
+export function fmtShare(n, w) {
+  return validWindow(w) && Number.isFinite(n) && n >= 0 ? `${((n / w) * 100).toFixed(1)}%` : null;
+}
+/** The context popover's figures, or null without a known window and fill. Only what Worca knows:
+ *  the fill, the window and the documented compaction buffer — never a per-category split. */
+export function ctxBreakdown(ctx, w) {
+  if (!validWindow(w) || !Number.isFinite(ctx) || ctx <= 0) return null;
+  const trigger = ctxTrigger(w);
+  const buffer = w - trigger;
+  return {
+    used: ctx, buffer, free: Math.max(0, w - ctx - buffer), untilCompact: Math.max(0, trigger - ctx),
+    pct: ctxPercent(ctx, w), level: ctxLevel(ctx, w),
+  };
+}
+const validContexts = (list) => (Array.isArray(list) ? list : [])
+  .filter((c) => c && typeof c.kind === 'string' && typeof c.id === 'string' && c.id);
+/** A chat's topics split for the popover: where it was asked from (page) and what it mentioned (source 'chat'). */
+export function groupContexts(list) {
+  const all = validContexts(list);
+  return { asked: all.filter((c) => c.source !== 'chat'), mentioned: all.filter((c) => c.source === 'chat') };
 }
 export function fmtUsd(x) {
   return Number.isFinite(x) ? `$${x.toFixed(2)}` : null;
@@ -194,6 +270,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // page — today's behaviour). label caches the display name once resolved.
     scope: { pinned: false, projectKey: null, workspaceId: null, label: null },
     popover: null,            // {panel, trigger, onClose, build, refreshOn, refresh}
+    contexts: [],             // the open chat's topics (thread.contexts), shown in the context popover
     threadsRefresh: null,     // the debounce timer behind the History popover's ask-run-status refetch
     expandedAgents: new Set(),
     worktrees: [],            // P4 §10: the chat's open worktrees (snapshot-fed)
@@ -320,6 +397,31 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (text != null) n.textContent = text;
     return n;
   }
+  /** The context ring: a track and an arc on a 100-unit path, so stroke-dasharray "<fill%> 100" draws the fill. */
+  function ctxRing() {
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = doc.createElementNS(NS, 'svg');
+    svg.setAttribute('width', '16');
+    svg.setAttribute('height', '16');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('aria-hidden', 'true');
+    for (const cls of ['ask-ctx-ring-track', 'ask-ctx-ring-arc']) {
+      const c = doc.createElementNS(NS, 'circle');
+      c.setAttribute('class', cls);
+      c.setAttribute('cx', '8');
+      c.setAttribute('cy', '8');
+      c.setAttribute('r', '6');
+      c.setAttribute('stroke-width', '2.5');
+      svg.appendChild(c);
+    }
+    el.ctxArc = svg.lastChild;
+    el.ctxArc.setAttribute('pathLength', '100');
+    el.ctxArc.setAttribute('transform', 'rotate(-90 8 8)');   // the fill starts at 12 o'clock
+    el.ctxArc.setAttribute('stroke-dasharray', '0 100');
+    return svg;
+  }
+
   function svgIcon(d, size = 17, sw = 1.9) {
     const svg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('width', String(size));
@@ -639,14 +741,32 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (el.pillOrb) el.pillOrb.stop();
   }
 
-  function updateMeters() {
-    if (!el.meterTokens) return;
+  /** The open chat's context fill and window: the streaming call's while live, else the last turn's.
+   *  A thread with turns but no ctx predates the metric — null, never a fake 0. */
+  function currentCtx() {
     const totals = st.model ? st.model.totals() : { live: null };
-    // Context fill: the streaming call's figure while live, else the last turn's.
-    // A thread with turns but no ctx predates the metric — show nothing, never a fake 0.
-    const liveCtx = totals.live && totals.live.usage ? totals.live.usage.ctx : null;
-    const ctx = Number.isFinite(liveCtx) ? liveCtx : totals.ctx;
-    el.meterTokens.textContent = fmtCtx(ctx) || ((totals.turns || 0) > 0 ? '' : '0 ctx');
+    const liveUsage = totals.live && totals.live.usage ? totals.live.usage : null;
+    const ctx = liveUsage && Number.isFinite(liveUsage.ctx) ? liveUsage.ctx : totals.ctx;
+    // The window: this turn's once its result landed, else the thread's last known (same model, as a rule).
+    const win = liveUsage && Number.isInteger(liveUsage.ctxWindow) ? liveUsage.ctxWindow : totals.ctxWindow;
+    return { ctx: Number.isFinite(ctx) ? ctx : null, win: Number.isInteger(win) ? win : null, turns: totals.turns || 0 };
+  }
+
+  function updateMeters() {
+    if (!el.ctxBtn) return;
+    const totals = st.model ? st.model.totals() : { live: null };
+    const { ctx, win } = currentCtx();
+    const pct = ctxPercent(ctx, win);
+    // The ring: the arc is the fill (full past the window), the figure is the hover.
+    const fill = pct != null ? +Math.min(100, (ctx / win) * 100).toFixed(2) : 0;
+    el.ctxArc.setAttribute('stroke-dasharray', `${fill} 100`);
+    const figure = fmtCtx(ctx, win);
+    if (figure) el.ctxBtn.title = `${figure}${pct != null ? ` · ${pct}%` : ''}`;
+    else el.ctxBtn.removeAttribute('title');
+    const level = ctxLevel(ctx, win);
+    el.ctxBtn.classList.toggle('is-ctx-warn', level === 'warn');
+    el.ctxBtn.classList.toggle('is-ctx-high', level === 'high');
+    el.ctxBtn.setAttribute('aria-label', pct != null ? `Context window, ${pct}% full` : 'Context window');
     // Cost: the stored thread total; while a turn streams, "≈" + that total plus
     // this turn's live figure — the CLI's once its result landed, else the
     // display-only list-price estimate the ask-usage frame carries. ask-done
@@ -657,7 +777,6 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const liveCost = lv ? (Number.isFinite(lv.costUsd) ? lv.costUsd : (Number.isFinite(lv.estimatedCostUsd) ? lv.estimatedCostUsd : null)) : null;
     if (liveCost != null) el.meterCost.textContent = `≈${fmtUsd((Number.isFinite(totals.costUsd) ? totals.costUsd : 0) + liveCost)}`;
     else el.meterCost.textContent = totals.costUsd == null ? '' : (fmtUsd(totals.costUsd) || '');
-    el.agentsBtnLabel.textContent = fmtAgents(totals.agents) || '0 agents';   // totals().agents already includes the live row's agents
   }
 
   function stopTurn() {
@@ -834,6 +953,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         st.threadId = id;
         st.model = createThreadModel({ threadId: id });
         st.model.load({ thread: body.thread, messages: [], attachments: [], runLinks: [], inFlight: null });
+        setContexts(body.thread && body.thread.contexts);
         renderTranscript();
         storeThread(id);
       }
@@ -866,7 +986,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       }
       // A toggle made while this POST was out PATCHed a value the route then overwrote with sentOff: re-send the latest.
       if (st.mcp.off !== sentOff) patchMcpOff(id, st.mcp.off);
-      const { userMessageId, attachments: stored } = await res.json();
+      const { userMessageId, attachments: stored, contexts } = await res.json();
+      if (Array.isArray(contexts)) setContexts(contexts);   // an older server omits it: keep what is shown
       // Prefer the server's rows: they carry the store-minted ids that key the
       // image thumbnail (#398) and the thread's attachment ledger. The pending
       // files are the fallback for a server that predates the field.
@@ -964,38 +1085,24 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
     row.appendChild(make('span', 'ask-composer-spacer'));
 
+    // The cost (an Advanced detail), then the context ring. The ring opens the context popover — the
+    // window, this chat's topics, its agents and worktrees — so it shows at every interface level.
     const meter = make('span', 'ask-meter');
     meter.setAttribute('data-ask-meter', '');
-    el.meterTokens = make('span', 'ask-meter-tokens', '0 ctx');
-    meter.appendChild(el.meterTokens);
-    { const sep = make('span', 'ask-meter-sep', '|'); sep.setAttribute('aria-hidden', 'true'); meter.appendChild(sep); }
     el.meterCost = make('span', 'ask-meter-cost', '');
+    el.meterCost.dataset.minLevel = 'advanced';
     meter.appendChild(el.meterCost);
-    { const sep = make('span', 'ask-meter-sep', '|'); sep.setAttribute('aria-hidden', 'true'); meter.appendChild(sep); }
-    meter.dataset.minLevel = 'advanced';
+    const ctxBtn = make('button', 'ask-ctx-ring');
+    ctxBtn.type = 'button';
+    ctxBtn.setAttribute('data-ask-ctx-btn', '');
+    ctxBtn.setAttribute('aria-haspopup', 'menu');
+    ctxBtn.setAttribute('aria-expanded', 'false');
+    ctxBtn.setAttribute('aria-label', 'Context window');
+    ctxBtn.appendChild(ctxRing());
+    ctxBtn.addEventListener('click', () => openCtxPopover(ctxBtn));
+    el.ctxBtn = ctxBtn;
+    meter.appendChild(ctxBtn);
     row.appendChild(meter);
-
-    const wtBtn = make('button', 'ask-agents-btn ask-wt-btn');
-    wtBtn.type = 'button';
-    wtBtn.setAttribute('data-ask-wt-btn', '');
-    wtBtn.hidden = true;
-    wtBtn.dataset.minLevel = 'expert';
-    el.wtBtn = wtBtn;
-    el.wtBtnLabel = make('span', null, '0 worktrees');
-    wtBtn.appendChild(el.wtBtnLabel);
-    wtBtn.appendChild(svgIcon('M6 15l6-6 6 6', 11, 2));
-    wtBtn.addEventListener('click', () => openWorktreesPopover(wtBtn));
-    row.appendChild(wtBtn);
-
-    const agentsBtn = make('button', 'ask-agents-btn');
-    agentsBtn.type = 'button';
-    agentsBtn.setAttribute('data-ask-agents-btn', '');
-    agentsBtn.dataset.minLevel = 'expert';
-    el.agentsBtnLabel = make('span', null, '0 agents');
-    agentsBtn.appendChild(el.agentsBtnLabel);
-    agentsBtn.appendChild(svgIcon('M6 15l6-6 6 6', 11, 2));
-    agentsBtn.addEventListener('click', () => openRunInfoPopover(agentsBtn));
-    row.appendChild(agentsBtn);
 
     const modelBtn = make('button', 'ask-model-btn');
     modelBtn.type = 'button';
@@ -1273,6 +1380,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.destroyed || !st.open || st.drag) return;
     if (st.size) restoreSize();
     relayoutCards();
+    if (st.popover && st.popover.trigger === el.ctxBtn) anchorCtxPopover(st.popover.panel, el.ctxBtn);
   }
 
   // ---- keyboard + pointer routing ------------------------------------------
@@ -1362,6 +1470,18 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return panel;
   }
 
+  /** Rebuild an open popover in place. Keyboard focus inside it moves to the item at the same place in
+   *  the new list (or to the trigger when the list got shorter than that), so Escape and the arrows keep working. */
+  function rebuildPopover(pop) {
+    const at = pop.panel.contains(doc.activeElement) ? menuItems(pop.panel).indexOf(doc.activeElement) : null;
+    pop.panel.replaceChildren();
+    pop.build(pop.panel);
+    if (at === null) return;
+    const item = at >= 0 ? menuItems(pop.panel)[at] : null;
+    if (item) item.tabIndex = 0;
+    try { (item || pop.trigger).focus(); } catch { /* ignore */ }
+  }
+
   function menuItem(className, onPick) {
     const b = make('button', `ask-pop-item ${className}`.trim());
     b.type = 'button';
@@ -1372,17 +1492,40 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   }
 
   // ---- threads popover (list; switching/delete land in Task 7) -------------
+  /** History-row topics: the first one's name plus "+N", every name in the hover. Display-only — the row is the click target. */
+  function threadTopics(t) {
+    const list = validContexts(t.contexts);
+    if (!list.length) return null;
+    const name = (c) => c.label || c.id;
+    const span = make('span', 'ask-thread-topics', list.length > 1 ? `${name(list[0])} +${list.length - 1}` : name(list[0]));
+    span.title = list.map((c) => `${name(c)}${c.source === 'chat' ? ' (mentioned)' : ''}`).join('\n');
+    return span;
+  }
+
   // The start date leads the meter line, bold and on the primary ink, so the eye
   // scans it down the list while the cost/agent figures keep the meter's grey.
   // Hence an element rather than a string: only the date changes weight and
   // colour. An unusable createdAt drops the span and its separator with it.
   function threadMeter(t) {
     const meter = make('span', 'ask-thread-meter');
+    const tot = t.totals || {};
     const when = fmtStarted(t.createdAt, now());
-    const rest = [fmtCtx(t.totals && t.totals.ctx), fmtUsd(t.totals && t.totals.costUsd), fmtAgents(t.totals && t.totals.agents)]
-      .filter(Boolean).join(' · ');
     if (when) meter.appendChild(make('span', 'ask-thread-when', when));
-    if (rest) meter.appendChild(doc.createTextNode(when ? ` · ${rest}` : rest));
+    // With a known window the fill is its own span (level colour + hover); without one it stays plain
+    // text, so a legacy row's meter is exactly the date element plus "… · $x · n agents".
+    const fillText = fmtCtx(tot.ctx, tot.ctxWindow);
+    let fill = fillText;
+    if (fillText && Number.isInteger(tot.ctxWindow) && tot.ctxWindow > 0) {
+      const level = ctxLevel(tot.ctx, tot.ctxWindow);
+      fill = make('span', `ask-thread-fill${level === 'warn' ? ' is-ctx-warn' : level === 'high' ? ' is-ctx-high' : ''}`, fillText);
+      const title = ctxTitle(tot.ctx, tot.ctxWindow);
+      if (title) fill.title = title;
+    }
+    const parts = [threadTopics(t), fill, fmtUsd(tot.costUsd), fmtAgents(tot.agents)].filter(Boolean);
+    parts.forEach((p, i) => {
+      if (when || i > 0) meter.appendChild(doc.createTextNode(' · '));
+      meter.appendChild(typeof p === 'string' ? doc.createTextNode(p) : p);
+    });
     return meter;
   }
 
@@ -2025,16 +2168,12 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     });
   }
 
-  // ---- run-info popover ("Agents this chat") --------------------------------
   // ---- worktrees (P4 §10) ---------------------------------------------------
   function setWorktrees(list) {
     const ids = (l) => l.map((w) => w && w.worktreeId).join(',');
     const next = Array.isArray(list) ? list : [];
     if (ids(next) !== ids(st.worktrees)) scheduleMcpRefresh();   // an open worktree brings its project's sets (D17)
     st.worktrees = next;
-    if (!el.wtBtn) return;
-    el.wtBtn.hidden = st.worktrees.length === 0;
-    el.wtBtnLabel.textContent = `${st.worktrees.length} worktree${st.worktrees.length === 1 ? '' : 's'}`;
   }
 
   function refreshWorktrees() {
@@ -2070,21 +2209,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     await refreshWorktrees();
   }
 
-  function openWorktreesPopover(trigger) {
-    const panel = openPopover({ panelClass: 'ask-pop-runinfo ask-pop-worktrees', trigger, refreshOn: (d) => d.worktrees, build: (p) => {
-      p.appendChild(make('div', 'ask-pop-caption', 'Worktrees this chat'));
-      // Synchronous: st.worktrees is the DOM mirror, already fed by the snapshot
-      // or the last frame, and flushExtra refreshes it BEFORE re-running build().
-      renderWorktreeRows(p, st.worktrees);
-    } });
-    if (!panel) return;
-    // Heal on open (one snapshot GET): the list lands in the model and the
-    // dirty.worktrees flush re-runs build() above — one render path.
-    refreshWorktrees();
-  }
-
   function renderWorktreeRows(panel, list) {
-    if (!list.length) { panel.appendChild(make('div', 'ask-pop-empty', 'No worktrees open.')); return; }
     for (const w of list) {
       const row = make('div', 'ask-runinfo-row ask-wt-row');
       const col = make('span', 'ask-runinfo-col');
@@ -2108,34 +2233,179 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     }
   }
 
-  function openRunInfoPopover(trigger) {
-    // Rebuilt on every meters flush: agent blocks mark meters dirty (ask-model),
-    // so rows, dots, ctx and cost move while agents run.
-    openPopover({ panelClass: 'ask-pop-runinfo', trigger, refreshOn: (d) => d.meters, build: (p) => {
-      const agents = [];
-      if (st.model) {
-        for (const row of st.model.messages()) {
-          for (const b of row.blocks || []) if (b && b.kind === 'agent') agents.push(b);
-        }
+  /** A popover section under its own divider, captioned "<title>" with a meter on the right. Expert-only
+   *  sections carry the level on the box, so the divider hides with them. */
+  function popSection(className, title, meter, minLevel) {
+    const box = make('div', className);
+    if (minLevel) box.dataset.minLevel = minLevel;
+    box.appendChild(make('div', 'ask-pop-divider'));
+    const head = make('div', 'ask-pop-caption-row');
+    head.appendChild(make('span', 'ask-pop-caption', title));
+    head.appendChild(make('span', 'ask-pop-caption-meter', meter));
+    box.appendChild(head);
+    return box;
+  }
+
+  /** The chat's sub-agents, one row each. Rebuilt on every meters flush: agent blocks mark meters
+   *  dirty (ask-model), so rows, dots, ctx and cost move while agents run. */
+  function agentsSection() {
+    const agents = [];
+    if (st.model) {
+      for (const row of st.model.messages()) {
+        for (const b of row.blocks || []) if (b && b.kind === 'agent') agents.push(b);
       }
-      const head = make('div', 'ask-pop-caption-row');
-      head.appendChild(make('span', 'ask-pop-caption', 'Agents this chat'));
-      const cost = agents.reduce((n, a) => n + (Number.isFinite(a.costUsd) ? a.costUsd : 0), 0);
-      // Cost only: costs sum across agents; context fills do not.
-      head.appendChild(make('span', 'ask-pop-caption-meter', agents.length ? `≈${fmtUsd(cost)}` : ''));
-      p.appendChild(head);
-      if (!agents.length) { p.appendChild(make('div', 'ask-pop-empty', 'No agents spawned yet.')); return; }
-      for (const a of agents) {
-        const row = make('div', 'ask-runinfo-row');
-        row.appendChild(make('span', `ask-dot${a.status === 'running' ? ' ask-dot-run' : a.status === 'done' ? ' ask-dot-done' : ''}`));
-        const col = make('span', 'ask-runinfo-col');
-        col.appendChild(make('span', 'ask-runinfo-name', a.label || a.type || 'agent'));
-        col.appendChild(make('span', 'ask-runinfo-sub', [a.model, fmtCtx(a.ctx) || fmtTokens(a.tokens), Number.isFinite(a.costUsd) ? `≈${fmtUsd(a.costUsd)}` : null, a.status || null].filter(Boolean).join(' · ')));
-        row.appendChild(col);
-        row.appendChild(make('span', 'ask-runinfo-elapsed', fmtElapsed(a.durationMs) || '—'));
-        p.appendChild(row);
+    }
+    // Count and cost: costs sum across agents; context fills do not.
+    const cost = agents.reduce((n, a) => n + (Number.isFinite(a.costUsd) ? a.costUsd : 0), 0);
+    const box = popSection('ask-ctx-agents', 'Agents', agents.length ? `${agents.length} · ≈${fmtUsd(cost)}` : '', 'expert');
+    if (!agents.length) { box.appendChild(make('div', 'ask-pop-empty', 'No agents spawned yet.')); return box; }
+    for (const a of agents) {
+      const row = make('div', 'ask-runinfo-row');
+      row.appendChild(make('span', `ask-dot${a.status === 'running' ? ' ask-dot-run' : a.status === 'done' ? ' ask-dot-done' : ''}`));
+      const col = make('span', 'ask-runinfo-col');
+      col.appendChild(make('span', 'ask-runinfo-name', a.label || a.type || 'agent'));
+      const sub = make('span', 'ask-runinfo-sub', [a.model, fmtCtx(a.ctx, a.ctxWindow) || fmtTokens(a.tokens), Number.isFinite(a.costUsd) ? `≈${fmtUsd(a.costUsd)}` : null, a.status || null].filter(Boolean).join(' · '));
+      sub.title = sub.textContent;                                // one line in the popover; the whole of it on hover
+      col.appendChild(sub);
+      row.appendChild(col);
+      row.appendChild(make('span', 'ask-runinfo-elapsed', fmtElapsed(a.durationMs) || '—'));
+      box.appendChild(row);
+    }
+    return box;
+  }
+
+  /** The chat's open worktrees, or null while it has none. Synchronous: st.worktrees is the DOM mirror,
+   *  fed by the snapshot or the last frame, and flushExtra refreshes it BEFORE rebuilding the popover. */
+  function worktreesSection() {
+    if (!st.worktrees.length) return null;
+    const box = popSection('ask-ctx-worktrees', 'Worktrees', String(st.worktrees.length), 'expert');
+    renderWorktreeRows(box, st.worktrees);
+    return box;
+  }
+
+  // ---- context popover (window fill, topics, agents, worktrees) -------------
+  /** The open chat's topics; an open context popover is rebuilt in place (same node, focus kept). */
+  function setContexts(list) {
+    st.contexts = validContexts(list);
+    const pop = st.popover;
+    if (pop && pop.trigger === el.ctxBtn) rebuildPopover(pop);
+  }
+
+  const CTX_POP_WIDTH = 340;                                      // .ask-pop-ctx width
+  const levelClass = (level) => (level === 'warn' || level === 'high' ? ` is-ctx-${level}` : '');
+
+  /** One topic row: a menuitem that closes the sheet and routes, or a plain row when it has no route. */
+  function topicRow(c) {
+    const href = contextHref(c);
+    const mentioned = c.source === 'chat';                       // only a page topic is ever pinned
+    const pinned = c.pinned && !mentioned;
+    const row = href
+      ? menuItem('ask-ctx-topic', () => { closeSheet(); if (win.location.hash !== href) win.location.hash = href.slice(1); })
+      : make('div', 'ask-ctx-topic');
+    if (mentioned) row.classList.add('is-mentioned');
+    if (pinned) row.classList.add('is-pinned');
+    row.dataset.kind = c.kind;
+    row.title = `${c.label || c.id}${mentioned ? ' (mentioned)' : pinned ? ' (pinned)' : ''}`;   // the full name when it is cut off; History's wording
+    row.appendChild(make('span', 'ask-ctx-swatch'));
+    row.appendChild(make('span', 'ask-ctx-topic-name', c.label || c.id));
+    if (pinned) {
+      row.appendChild(svgIcon(ICONS.pin, 11, 2));
+      row.appendChild(make('span', 'ask-ctx-topic-pin', 'pinned'));
+    }
+    row.appendChild(make('span', 'ask-ctx-topic-kind', c.kind));
+    return row;
+  }
+
+  function topicsSection() {
+    const box = make('div', 'ask-ctx-topics');
+    const { asked, mentioned } = groupContexts(st.contexts);
+    const total = asked.length + mentioned.length;
+    const head = make('div', 'ask-pop-caption-row');
+    head.appendChild(make('span', 'ask-pop-caption', 'Topics'));
+    head.appendChild(make('span', 'ask-pop-caption-meter', total ? String(total) : ''));
+    box.appendChild(head);
+    if (!total) { box.appendChild(make('div', 'ask-pop-empty', 'No topics yet.')); return box; }
+    for (const [key, label, list] of [['asked', 'Asked from', asked], ['mentioned', 'Mentioned in chat', mentioned]]) {
+      if (!list.length) continue;
+      const g = make('div', 'ask-ctx-topic-group');
+      g.dataset.ctxGroup = key;
+      g.appendChild(make('div', 'ask-ctx-group', label));
+      for (const c of list) g.appendChild(topicRow(c));
+      box.appendChild(g);
+    }
+    return box;
+  }
+
+  /** Caption, then the window's bar / rows / footer (or one line while the window is unknown), then the
+   *  topics, the agents and (while there are any) the worktrees. */
+  function buildCtxPopover(p) {
+    const { ctx, win } = currentCtx();
+    const b = ctxBreakdown(ctx, win);
+    const head = make('div', 'ask-pop-caption-row');
+    head.appendChild(make('span', 'ask-pop-caption', 'Context window'));
+    head.appendChild(make('span', 'ask-pop-caption-meter', b ? `${kTok(ctx)} / ${fmtWindow(win)} (${b.pct}%)` : (ctx > 0 ? kTok(ctx) : '')));
+    p.appendChild(head);
+    if (!b) {
+      p.appendChild(make('div', 'ask-pop-empty', 'The window shows after the first answer.'));
+    } else {
+      const bar = make('div', 'ask-ctx-bar');
+      bar.setAttribute('aria-hidden', 'true');               // the rows below carry the numbers
+      const used = make('span', `ask-ctx-bar-used${levelClass(b.level)}`);
+      used.style.width = `${+Math.min(100, (ctx / win) * 100).toFixed(2)}%`;
+      bar.appendChild(used);
+      // The hatch covers only the window the fill has not reached, so past the compaction point it shrinks
+      // instead of painting over the fill (the row below still reports the whole buffer).
+      const hatch = Math.min(b.buffer, Math.max(0, win - ctx));
+      if (hatch > 0) {
+        const buf = make('span', 'ask-ctx-bar-buffer');
+        buf.style.width = `${+((hatch / win) * 100).toFixed(2)}%`;
+        bar.appendChild(buf);
       }
-    } });
+      p.appendChild(bar);
+      const rows = [['used', 'Used', b.used], ['buffer', 'Autocompact buffer', b.buffer], ['free', 'Free space', b.free]];
+      for (const [key, name, n] of rows) {
+        if (key === 'buffer' && n <= 0) continue;
+        const r = make('div', `ask-ctx-stat${key === 'used' ? levelClass(b.level) : ''}`);
+        r.dataset.stat = key;
+        r.appendChild(make('span', 'ask-ctx-swatch'));
+        r.appendChild(make('span', 'ask-ctx-stat-name', name));
+        r.appendChild(make('span', 'ask-ctx-stat-tokens', kTok(n)));
+        r.appendChild(make('span', 'ask-ctx-stat-share', fmtShare(n, win)));
+        p.appendChild(r);
+      }
+      p.appendChild(b.level === 'high'
+        ? make('div', 'ask-ctx-foot is-ctx-high', 'Compaction soon')
+        : make('div', 'ask-ctx-foot', `${kTok(b.untilCompact)} until auto-compact`));
+    }
+    if (ctx >= CTX_COST_HINT) p.appendChild(make('div', 'ask-ctx-hint', `Each message re-sends about ${(ctx / 1000).toFixed(1)}k tokens.`));
+    p.appendChild(make('div', 'ask-pop-divider'));
+    p.appendChild(topicsSection());
+    p.appendChild(agentsSection());
+    const wts = worktreesSection();
+    if (wts) p.appendChild(wts);
+  }
+
+  function openCtxPopover(trigger) {
+    const panel = openPopover({
+      panelClass: 'ask-pop-ctx', trigger, refreshOn: (d) => d.meters || d.worktrees,
+      onClose: () => trigger.setAttribute('aria-expanded', 'false'),
+      build: buildCtxPopover,
+    });
+    if (!panel) return;
+    panel.setAttribute('aria-label', 'Context window');
+    anchorCtxPopover(panel, trigger);
+    trigger.setAttribute('aria-expanded', 'true');
+    // Heal the worktree list on open (one snapshot GET): it lands in the model and the
+    // dirty.worktrees flush rebuilds the popover — one render path.
+    refreshWorktrees();
+  }
+
+  /** Right edge flush with the trigger: the meter moves with the interface level and the controls
+   *  beside it, so a fixed CSS offset would miss it. Kept 6px inside the sheet; re-run on window resize. */
+  function anchorCtxPopover(panel, trigger) {
+    const sr = el.sheet.getBoundingClientRect();
+    const tr = trigger.getBoundingClientRect();
+    if (sr.width > 0) panel.style.right = `${Math.max(0, Math.min(sr.right - tr.right, sr.width - CTX_POP_WIDTH - 6))}px`;
   }
 
   // ---- thread actions -------------------------------------------------------
@@ -2150,6 +2420,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     storeThread(null);
     el.title.textContent = 'Ask Worca';
     applyThreadScope(null);             // #397: a brand-new chat starts on Auto
+    setContexts([]);
     restoreBrowserPick();               // …and on the browser-level pick, not the last chat's
     st.mcp.off = { sets: [], members: [] };   // …and with every MCP server on
     scheduleMcpRefresh();
@@ -2799,6 +3070,71 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return { el: rootEl };
   }
 
+  // ---- Away mode card (plans/away-mode-wording.md §3.7): a proposed change to the stored Away mode settings -------
+  // The metrics card's frame (ask-mcard) with its own body: the summary lines before and after, the changed words
+  // marked, one line per changed field.
+  /** One After line, each word that its Before line (same index) lacks wrapped in <mark>. */
+  function awayLineWithMarks(after, before) {
+    const line = make('div', 'ask-awcard-line');
+    const had = new Set(String(before || '').split(/\s+/).filter(Boolean));
+    for (const part of String(after || '').split(/(\s+)/)) {
+      if (!part) continue;
+      if (/^\s+$/.test(part) || had.has(part)) line.appendChild(doc.createTextNode(part));
+      else line.appendChild(make('mark', null, part));
+    }
+    return line;
+  }
+  function buildAwayCard(block) {
+    const card = block.card || {};
+    const summary = card.summary || 'Away mode change';
+    if (block.state === 'declined') return { el: make('div', 'ask-card-stub', `Declined — ${summary}`) };
+    const rootEl = make('div', `ask-card ask-mcard ask-awcard is-${block.state}`);
+    rootEl.setAttribute('data-ask-awcard', block.state);
+    const head = make('div', 'ask-mcard-head');
+    const where = card.level === 'project' ? `(project ${card.projectName || card.projectKey || ''})` : '(user settings)';
+    head.appendChild(make('span', 'ask-mcard-title', `Change Away mode? ${where}`));
+    rootEl.appendChild(head);
+    const body = make('div', 'ask-mcard-body');
+    if (card.note) body.appendChild(make('div', 'ask-mcard-note', card.note));
+    const before = Array.isArray(card.before) ? card.before : [];
+    const after = Array.isArray(card.after) ? card.after : [];
+    const now = make('div', 'ask-awcard-now');
+    now.appendChild(make('b', null, 'Now: '));
+    for (const l of before) now.appendChild(make('div', 'ask-awcard-line', l));
+    const next = make('div', 'ask-awcard-after');
+    next.appendChild(make('b', null, 'After: '));
+    after.forEach((l, i) => next.appendChild(awayLineWithMarks(l, before[i])));
+    body.append(now, next);
+    if (Array.isArray(card.changes) && card.changes.length) {
+      const changed = make('div', 'ask-awcard-changed');
+      changed.appendChild(make('b', null, 'Changed:'));
+      const ul = make('ul', 'ask-awcard-changes');
+      for (const c of card.changes) ul.appendChild(make('li', null, `${c.label || c.field || ''}: ${c.before ?? ''} → ${c.after ?? ''}`));
+      changed.appendChild(ul);
+      body.appendChild(changed);
+    }
+    const result = card.result || null;
+    if (block.state === 'failed') body.appendChild(make('div', 'ask-mcard-failed', `Could not apply: ${block.error || (result && result.error) || 'unknown error'}`));
+    else if (block.state === 'applied') body.appendChild(make('div', 'ask-awcard-saved', `Saved.${result && result.detail ? ` ${result.detail}` : ''}`));
+    rootEl.appendChild(body);
+    rootEl.appendChild(make('div', 'ask-card-err'));
+    if (block.state === 'proposed') {
+      const actions = make('div', 'ask-mcard-actions');
+      const btn = (cls, text, attr, icon) => {
+        const b = make('button', cls, text); b.type = 'button'; b.setAttribute(attr, '');
+        if (icon) b.prepend(svgIcon(icon, 12, 2.2));
+        return b;
+      };
+      const keep = btn('ask-card-not-now', 'Keep as is', 'data-ask-ac-decline');
+      keep.addEventListener('click', () => postCard(block, rootEl, { state: 'declined' }, keep));
+      const apply = btn('ask-card-start', 'Apply', 'data-ask-ac-apply', WF_ICO.save);
+      apply.addEventListener('click', () => postCard(block, rootEl, { state: 'applied' }, apply));
+      actions.append(make('span', 'ask-card-actions-spacer'), keep, apply);
+      rootEl.appendChild(actions);
+    }
+    return { el: rootEl };
+  }
+
   // ---- Schedule card (docs/scheduled-runs.md "Ask Worca"): a proposed change to an existing schedule ------------
   const SC_ACTION_LABEL = { run_now: 'Run now', move: 'Change time', edit: 'Edit schedule', cancel: 'Cancel run', delete: 'Delete schedule' };
   const SC_APPLY_LABEL = { run_now: 'Run now', move: 'Move', edit: 'Apply', cancel: 'Cancel run', delete: 'Delete' };
@@ -3108,6 +3444,86 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       decline.addEventListener('click', () => postCard(block, rootEl, { state: 'declined' }, decline));
       const destructive = card.kind === 'remove_member';
       const apply = btn(destructive ? 'ask-card-start is-danger' : 'ask-card-start', WS_APPLY_LABEL[card.kind] || 'Apply', 'data-ask-ws-apply', destructive ? null : WF_ICO.save);
+      apply.addEventListener('click', () => postCard(block, rootEl, { state: 'applied' }, apply));
+      actions.append(make('span', 'ask-card-actions-spacer'), decline, apply);
+      rootEl.appendChild(actions);
+    }
+    return { el: rootEl };
+  }
+
+  // ---- Actions card (propose_actions_change): a project's setup + actions, or a workspace's stacks ----------------
+  // Every command the card would store is shown word for word (docs/actions.md "Ask Worca"): applying stores config,
+  // and a person's Start is what later runs it. Every value is text.
+  const ACT_KIND_LABEL = { project: 'Project actions', stacks: 'Workspace stacks' };
+  const ACT_OP_LABEL = { add: 'Add', change: 'Change', remove: 'Remove' };
+  /** proposed → applied | failed, or declined. */
+  function buildActionsCard(block) {
+    const card = block.card || {};
+    const summary = card.summary || 'actions change';
+    if (block.state === 'declined') return { el: make('div', 'ask-card-stub', `Declined — ${summary}`) };
+    const rootEl = make('div', `ask-card ask-mcard ask-acard is-${block.state}`);
+    rootEl.setAttribute('data-ask-acard', block.state);
+    const head = make('div', 'ask-mcard-head');
+    head.appendChild(make('span', 'ask-mcard-title', block.state === 'applied' ? 'Applied actions change' : block.state === 'failed' ? 'Actions change failed' : 'Proposed actions change'));
+    head.appendChild(make('span', 'ask-mcard-kind', ACT_KIND_LABEL[card.kind] || card.kind || ''));
+    rootEl.appendChild(head);
+    const body = make('div', 'ask-mcard-body');
+    const sum = make('div', 'ask-mcard-summary');
+    if (block.state === 'applied') sum.appendChild(svgIcon(WF_ICO.check, 15, 2.4));
+    sum.appendChild(make('span', null, summary));
+    body.appendChild(sum);
+    if (card.note) body.appendChild(make('div', 'ask-mcard-note', card.note));
+    const ul = make('ul', 'ask-mcard-changes');
+    for (const c of Array.isArray(card.changes) ? card.changes : []) {
+      const li = make('li', 'ask-acard-change');
+      li.setAttribute('data-op', c.op || '');
+      li.appendChild(make('span', 'ask-mcard-change-label', `${ACT_OP_LABEL[c.op] || ''} ${c.label || c.id || ''}`.trim()));
+      const val = make('span', 'ask-mcard-change-val');
+      const both = c.before != null && c.after != null;
+      if (c.before != null && block.state === 'proposed') {
+        if (both) val.appendChild(make('span', 'ask-acard-tag', 'Now'));
+        val.appendChild(make('span', 'ask-mcard-before ask-acard-cmd', String(c.before)));
+      }
+      if (c.after != null) {
+        if (both && block.state === 'proposed') val.appendChild(make('span', 'ask-acard-tag', 'New'));
+        val.appendChild(make('span', 'ask-mcard-after ask-acard-cmd', String(c.after)));
+      }
+      li.appendChild(val);
+      ul.appendChild(li);
+    }
+    body.appendChild(ul);
+    if (block.state === 'proposed') {
+      for (const [items, cls] of [[card.warnings, 'ask-mcard-effects ask-wscard-warn'], [card.effects, 'ask-mcard-effects ask-wscard-effects']]) {
+        if (!Array.isArray(items) || !items.length) continue;
+        const list = make('ul', cls);
+        for (const w of items) list.appendChild(make('li', null, w));
+        body.appendChild(list);
+      }
+    }
+    const result = card.result || null;
+    if (block.state === 'failed') body.appendChild(make('div', 'ask-mcard-failed', `Could not apply: ${block.error || (result && result.error) || 'unknown error'}`));
+    else if (block.state === 'applied' && result && result.detail) body.appendChild(make('div', 'ask-mcard-detail', result.detail));
+    if (block.state === 'applied') {
+      const href = card.kind === 'stacks' && card.workspaceId ? `#workspaces/${encodeURIComponent(card.workspaceId)}`
+        : card.projectKey ? `#projects/${encodeURIComponent(card.projectKey)}/actions` : null;
+      if (href) {
+        const open = make('a', 'ask-card-sched-link', card.kind === 'stacks' ? 'Open the workspace' : 'Open the Actions tab');
+        open.href = href;
+        body.appendChild(open);
+      }
+    }
+    rootEl.appendChild(body);
+    rootEl.appendChild(make('div', 'ask-card-err'));
+    if (block.state === 'proposed') {
+      const actions = make('div', 'ask-mcard-actions');
+      const btn = (cls, text, attr, icon) => {
+        const b = make('button', cls, text); b.type = 'button'; b.setAttribute(attr, '');
+        if (icon) b.prepend(svgIcon(icon, 12, 2.2));
+        return b;
+      };
+      const decline = btn('ask-card-not-now', 'Decline', 'data-ask-act-decline');
+      decline.addEventListener('click', () => postCard(block, rootEl, { state: 'declined' }, decline));
+      const apply = btn('ask-card-start', 'Save', 'data-ask-act-apply', WF_ICO.save);
       apply.addEventListener('click', () => postCard(block, rootEl, { state: 'applied' }, apply));
       actions.append(make('span', 'ask-card-actions-spacer'), decline, apply);
       rootEl.appendChild(actions);
@@ -3803,7 +4219,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   function isProgressBlock(block) {
     const card = block.card || {};
     if (card.type === PROGRESS_CARD_TYPE) return true;
-    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace') return false;
+    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'actions' || card.type === 'away') return false;
     return block.state === 'started' || (block.state === 'failed' && !!block.runId);
   }
   function buildCard(block) {
@@ -3817,8 +4233,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const isClone = !!(block.card && block.card.type === 'clone');
     const isWorkspace = !!(block.card && block.card.type === 'workspace');
     const isWeb = !!(block.card && block.card.type === 'web');
+    const isActions = !!(block.card && block.card.type === 'actions');
+    const isAway = !!(block.card && block.card.type === 'away');
     const isProgress = isProgressBlock(block);
-    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isWeb || isWorkspace || isProgress || block.state === 'proposed')) return cached.el;
+    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isWeb || isWorkspace || isActions || isAway || isProgress || block.state === 'proposed')) return cached.el;
     if (cached) disposeCardEntry(cached);
     const built = isWorkflow ? buildWorkflowCard(block, cached)
       : isMetrics ? buildMetricsCard(block)
@@ -3827,6 +4245,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       : isClone ? buildCloneCard(block)
       : isWeb ? buildWebCard(block)
       : isWorkspace ? buildWorkspaceCard(block)
+      : isActions ? buildActionsCard(block)
+      : isAway ? buildAwayCard(block)
       : isProgress ? buildProgressCard(block)
         : { el: block.state === 'proposed' ? buildCardForm(block) : buildCardTerminal(block) };
     st.cardEls.set(block.id, { el: built.el, state: block.state, handle: built.handle || null, dispose: built.dispose || null, animate: !!built.animate, cancelAnim: null, lastW: -1 });
@@ -4008,7 +4428,12 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     rowEl.appendChild(make('span', `ask-dot${block.status === 'running' ? ' ask-dot-run' : block.status === 'done' ? ' ask-dot-done' : ''}`));
     rowEl.appendChild(make('span', 'ask-agent-name', block.label || block.type || 'agent'));
     rowEl.appendChild(make('span', 'ask-agent-model', block.model || ''));
-    rowEl.appendChild(make('span', 'ask-agent-tokens', fmtCtx(block.ctx) || fmtTokens(block.tokens) || ''));
+    const fillEl = make('span', 'ask-agent-tokens', fmtCtx(block.ctx, block.ctxWindow) || fmtTokens(block.tokens) || '');
+    const level = ctxLevel(block.ctx, block.ctxWindow);             // null without a window: no colour, as before
+    if (level === 'warn' || level === 'high') fillEl.classList.add(`is-ctx-${level}`);
+    const fillTitle = Number.isInteger(block.ctxWindow) ? ctxTitle(block.ctx, block.ctxWindow) : null;
+    if (fillTitle) fillEl.title = fillTitle;
+    rowEl.appendChild(fillEl);
     rowEl.appendChild(make('span', 'ask-agent-cost', Number.isFinite(block.costUsd) ? `≈${fmtUsd(block.costUsd)}` : ''));
     rowEl.appendChild(make('span', `ask-agent-status${block.status === 'done' ? ' is-done' : ''}`, block.status || ''));
     rowEl.addEventListener('click', () => {
@@ -4021,7 +4446,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.expandedAgents.has(block.id)) {
       const log = make('div', 'ask-agent-log');
       const head = make('div', 'ask-agent-log-head');
-      head.appendChild(make('span', null, [block.model, fmtCtx(block.ctx) || fmtTokens(block.tokens), Number.isFinite(block.costUsd) ? `≈${fmtUsd(block.costUsd)}` : null].filter(Boolean).join(' · ')));
+      head.appendChild(make('span', null, [block.model, fmtCtx(block.ctx, block.ctxWindow) || fmtTokens(block.tokens), Number.isFinite(block.costUsd) ? `≈${fmtUsd(block.costUsd)}` : null].filter(Boolean).join(' · ')));
       head.appendChild(make('span', 'ask-agent-log-type', block.type || ''));
       log.appendChild(head);
       const body = make('div', 'ask-agent-log-body');
@@ -4365,6 +4790,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     st.model.load(snap);
     el.title.textContent = (snap.thread && snap.thread.title) || 'Ask Worca';
     applyThreadScope(snap.thread && snap.thread.context);   // #397: restore the pin
+    setContexts(snap.thread && snap.thread.contexts);
     // The picker follows the chat — on a SWITCH only: a resync of the same thread
     // would otherwise clobber a pick the user just made (its PATCH may not have landed).
     if (switched) applyThreadPick(snap.thread);
@@ -4463,6 +4889,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     }
     if (frame.type === 'ask-done' || frame.type === 'ask-error') {
       stopElapsed(); updateSendStop(); announce('answer finished');
+      // Conversation chips: the turn's resolved list rides ask-done (an older server omits it: keep what is shown).
+      if (frame.type === 'ask-done' && Array.isArray(frame.contexts)) setContexts(frame.contexts);
       // P4: a finished turn may have created/removed/navigated worktrees. This must
       // NOT live in updateSendStop() — that also runs from loadThread, so a
       // running→idle latch there fires a SECOND snapshot GET on every resync.
@@ -4575,7 +5003,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // (same node — never reopened, never refocused). Runs AFTER the mirror and
     // the meters above: the worktrees build() reads st.worktrees.
     const pop = st.popover;
-    if (pop && typeof pop.refreshOn === 'function' && pop.refreshOn(d)) { pop.panel.replaceChildren(); pop.build(pop.panel); }
+    if (pop && typeof pop.refreshOn === 'function' && pop.refreshOn(d)) rebuildPopover(pop);
     updateLiveElapsed();
   }
 

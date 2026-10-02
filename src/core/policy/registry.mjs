@@ -16,6 +16,7 @@
 // format change). Every field lists the kinds it accepts; the editor disables the rest.
 
 import { domainError } from '../web-allowlist.mjs';
+import { FIELD_LABELS } from '../../shared/away-mode/labels.mjs';
 
 export const POLICY_SCHEMA = 1;
 export const KINDS = Object.freeze(['default', 'soft', 'hard']);
@@ -27,6 +28,7 @@ export const TEXT_MAX = 200;
 
 const GROUPS = Object.freeze({
   cost: 'Cost', ask: 'Ask Worca', guardrails: 'Guardrails', models: 'Models', plugins: 'Plugins', runs: 'Runs',
+  night: 'Away mode',
 });
 
 /**
@@ -61,6 +63,21 @@ export const FIELDS = Object.freeze([
   { key: 'run.humanInLoop', group: 'runs', label: 'Human in the loop', help: 'Applies until the project sets its own switch.', type: 'bool', kinds: ['default'] },
   { key: 'metrics.record', group: 'runs', label: 'Record runs to team metrics', help: 'Expected on: the Projects cell hints when "Include my runs" is off.', type: 'bool', kinds: ['soft'] },
   { key: 'worca.minVersion', group: 'runs', label: 'Minimum Worca version', help: 'An older client shows a banner and logs a note.', type: 'semver', kinds: ['soft'] },
+  // Away mode (src/core/night/*): `night: true` makes validateValue run the night leaf's own
+  // field rules after the base-type check, so the rules live in one place. Labels: src/shared/away-mode/labels.mjs.
+  { key: 'night.enabled', group: 'night', label: FIELD_LABELS.enabled.label, help: FIELD_LABELS.enabled.hint || 'On: All runs. Off: Only runs I marked.', type: 'bool', kinds: ['default'], night: true },
+  { key: 'night.window', group: 'night', label: FIELD_LABELS.window.label, help: FIELD_LABELS.window.hint, type: 'string', kinds: ['default'], night: true },
+  { key: 'night.timeZone', group: 'night', label: FIELD_LABELS.timeZone.label, help: FIELD_LABELS.timeZone.hint, type: 'string', kinds: ['default'], night: true },
+  { key: 'night.graceMinutes', group: 'night', label: FIELD_LABELS.graceMinutes.label, help: FIELD_LABELS.graceMinutes.hint, type: 'int', min: 1, max: 1440, kinds: ['default'], night: true },
+  { key: 'night.strategy', group: 'night', label: FIELD_LABELS.strategy.label, help: FIELD_LABELS.strategy.hint, type: 'enum', values: ['weights', 'analysis', 'mixed'], kinds: ['default'], night: true },
+  { key: 'night.minConfidence', group: 'night', label: FIELD_LABELS.minConfidence.label, help: FIELD_LABELS.minConfidence.hint, type: 'int', min: 0, max: 100, kinds: ['default'], night: true },
+  { key: 'night.minMargin', group: 'night', label: FIELD_LABELS.minMargin.label, help: FIELD_LABELS.minMargin.hint, type: 'int', min: 0, max: 100, kinds: ['default'], night: true },
+  { key: 'night.criteria', group: 'night', label: FIELD_LABELS.criteria.label, help: FIELD_LABELS.criteria.hint, type: 'criteria', kinds: ['default'], night: true },
+  { key: 'night.neverDecide', group: 'night', label: FIELD_LABELS.neverDecide.label, help: FIELD_LABELS.neverDecide.hint, type: 'string[]', kinds: ['default'], night: true },
+  { key: 'night.spendCapUsd', group: 'night', label: FIELD_LABELS.spendCapUsd.label, help: FIELD_LABELS.spendCapUsd.hint, type: 'usd-or-null', min: 0.1, max: 10000, kinds: ['default'], night: true },
+  { key: 'night.maxDecisions', group: 'night', label: FIELD_LABELS.maxDecisions.label, help: FIELD_LABELS.maxDecisions.hint, type: 'int', min: 1, max: 500, kinds: ['default'], night: true },
+  { key: 'night.maxExtraCycles', group: 'night', label: FIELD_LABELS.maxExtraCycles.label, help: FIELD_LABELS.maxExtraCycles.hint, type: 'int', min: 0, max: 10, kinds: ['default'], night: true },
+  { key: 'night.allowCostCapOverride', group: 'night', label: FIELD_LABELS.allowCostCapOverride.label, help: FIELD_LABELS.allowCostCapOverride.hint, type: 'bool', kinds: ['default'], night: true },
 ]);
 
 const BY_KEY = new Map(FIELDS.map((f) => [f.key, f]));
@@ -74,9 +91,10 @@ const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:\-[\]]{0,199}$/;
 const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]{0,63}$/;
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
-// The one import: the zero-import model-env leaf, for the bridged-model
-// `upstream` validator every catalog layer shares (model-bridge-design.md §6.3).
+// Zero-import leaves only: model-env for the bridged-model `upstream` validator every
+// catalog layer shares (model-bridge-design.md §6.3), night/config for the night.* rules.
 import { assertModelUpstream, upstreamEnvConflict } from '../model-env.mjs';
+import { fieldError as nightFieldError } from '../night/config.mjs';
 // The MCP definition rules (MCP registry spec §4.1, §4.3): pure, shared with manual definitions.
 import { validateMcpDefinition, screenNonSecretValue, SERVER_NAME_RE } from '../mcp/definitions.mjs';
 
@@ -167,6 +185,12 @@ export function mcpListComplete(warnings = []) {
  * Shared by the editor (before publish) and the reader (dropping bad fields with a warning).
  */
 export function validateValue(meta, value) {
+  const err = baseError(meta, value);
+  if (err || !meta.night) return err;
+  return nightFieldError(meta.key.slice('night.'.length), value);
+}
+
+function baseError(meta, value) {
   switch (meta.type) {
     case 'usd': return finiteNum(value) && value > 0 ? null : 'must be a positive number of USD';
     case 'usd-or-null':
@@ -211,6 +235,7 @@ export function validateValue(meta, value) {
       }
       return null;
     }
+    case 'criteria': return isPlainObject(value) ? null : 'must be an object of criterion → weight';
     case 'mcpServers':
       if (!Array.isArray(value)) return 'must be a list of MCP server entries';
       return normalizeMcpRequired(value).dropped[0] ?? null;

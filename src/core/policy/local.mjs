@@ -14,6 +14,8 @@ import { readPluginsLock } from '../plugins-lock.mjs';
 import { readMarketplaces, writeMarketplaces, normalizeMarketplaceUrl, marketplaceId, addMarketplace } from '../marketplaces.mjs';
 import { fieldsForRun } from './effective.mjs';
 import { semverAtLeast } from './registry.mjs';
+import { effectiveNightConfigLocalOnly } from '../night/effective.mjs';
+import { NIGHT_FIELDS } from '../night/config.mjs';
 import { cachedPolicyHomes } from './cache.mjs';
 import { readMcpStore } from '../mcp/store.mjs';
 import { loadCatalog } from '../mcp/catalog.mjs';
@@ -57,6 +59,9 @@ export function localSnapshot(projectDir = null) {
     const tm = readTeamMetricsPrefs(key);
     out['metrics.record'] = { value: tm ? tm.record !== false : null, set: !!tm && tm.record === false };
   }
+  // Night mode: the developer's own layers (project only with a project), never the team layer.
+  const { config: nc, sources: ns } = effectiveNightConfigLocalOnly(projectDir);
+  for (const f of NIGHT_FIELDS) out[`night.${f}`] = { value: nc[f], set: ns[f] === 'project' || ns[f] === 'user' };
   return out;
 }
 

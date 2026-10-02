@@ -321,6 +321,7 @@ function toRunRow(r, humanRateUsd = 0) {
       exceeded: Array.isArray(r.policy.exceeded) ? r.policy.exceeded : [],
       deviations: Array.isArray(r.policy.deviations) ? r.policy.deviations : [],
       unattended: r.policy.unattended === true,
+      ...(r.policy.night && typeof r.policy.night === 'object' ? { night: r.policy.night } : {}),
       reason: typeof r.policy.reason === 'string' ? r.policy.reason : null,
     } } : {}),
   };

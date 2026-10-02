@@ -3,12 +3,16 @@
 // preference untouched. Phone (<=760px): the #mbar top bar whose hamburger opens the
 // FULL sidebar as a slide-in drawer (counts, live runs, spend, signed-in: parity).
 // jsdom has no matchMedia, so boot() installs a width-driven stub BEFORE app.js loads.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..', 'ui', 'public');
@@ -51,7 +55,7 @@ function mediaStub(width) {
 }
 
 async function boot({ width = 1280, seed = {} } = {}) {
-  const dom = new JSDOM(html, { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(html, { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.__budgetTickMs = DAY;   // the budget ticker must not repaint a later test's DOM (ui-sidebar-collapse:142-151)
@@ -106,7 +110,7 @@ test('the compact .topnav is removed from markup, CSS and JS', () => {
 });
 
 test('phone bar markup: hamburger (controls the sidebar), rollup dot, title; scrim; drawer close', () => {
-  const doc = new JSDOM(html).window.document;
+  const doc = trackDom(new JSDOM(html)).window.document;
   const bar = doc.querySelector('.app > #mbar.mbar');
   assert.ok(bar, '#mbar is a direct child of .app');
   const menu = bar.querySelector('#mbar-menu');

@@ -73,7 +73,7 @@ test('ui-ask-style: the transcript scrollport keeps scroll anchoring', () => {
 
 test('ui-ask-style: hidden twins exist for the hideable ask elements', () => {
   for (const sel of ['.ask-sheet[hidden]', '.ask-pill[hidden]', '.ask-jump[hidden]', '.ask-composer-msg[hidden]', '.ask-chips[hidden]',
-    '.ask-wt-btn[hidden]', '.ask-mcp-btn[hidden]']) {   // shares display:flex from .ask-agents-btn, so without the twin it never hides (jsdom cannot catch it)
+    '.ask-mcp-btn[hidden]']) {   // shares display:inline-flex from .ask-scope-btn, so without the twin it never hides (jsdom cannot catch it)
     const body = ruleBody(sel);
     assert.ok(body, `${sel} twin exists`);
     assert.match(body, /display:none/);
@@ -214,10 +214,24 @@ test('ui-ask-style: a model row survives an arbitrarily long plugin name', () =>
   assert.match(name, /text-overflow:ellipsis/);
 });
 
-test('ui-ask-style: only the threads popover was widened', () => {
+test('ui-ask-style: popover widths — the context popover is wide enough for a worktree row', () => {
   assert.match(ruleBody('.ask-pop-model') || '', /width:292px/);
-  assert.match(ruleBody('.ask-pop-runinfo') || '', /width:326px/);
-  assert.match(ruleBody('.ask-pop-worktrees') || '', /min-width:340px/);
+  assert.match(ruleBody('.ask-pop-ctx') || '', /width:340px/, 'ask-panel.mjs CTX_POP_WIDTH says the same');
+});
+
+test('ui-ask-style: the context ring — track, blue arc, amber / red by level; the old footer buttons are gone', () => {
+  const btn = ruleBody('.ask-ctx-ring');
+  assert.ok(btn, '.ask-ctx-ring rule exists');
+  assert.match(btn, /width:26px;height:26px/);
+  assert.match(ruleBody('.ask-ctx-ring-track') || '', /stroke:var\(--line-2\)/);
+  assert.match(ruleBody('.ask-ctx-ring-arc') || '', /stroke:var\(--blue\)/);
+  assert.match(ruleBody('.ask-ctx-ring.is-ctx-warn .ask-ctx-ring-arc') || '', /stroke:var\(--amber\)/);
+  assert.match(ruleBody('.ask-ctx-ring.is-ctx-high .ask-ctx-ring-arc') || '', /stroke:var\(--red\)/);
+  assert.match(ruleBody('.ask-runinfo-sub') || '', /text-overflow:ellipsis;white-space:nowrap/, 'an agent row\'s figures stay on one line in the 340px popover');
+  assert.match(ruleBody('.ask-runinfo-elapsed') || '', /flex:none;.*white-space:nowrap/, 'an age like "10m 37s" never wraps under the name');
+  for (const sel of ['.ask-agents-btn', '.ask-wt-btn[hidden]', '.ask-pop-runinfo', '.ask-pop-worktrees', '.ask-meter-tokens', '.ask-meter-sep']) {
+    assert.equal(ruleBody(sel), null, `${sel} is gone with its element`);
+  }
 });
 
 test('ui-ask-style: composer textarea overrides the global textarea rules', () => {
@@ -349,8 +363,9 @@ test('ui-ask-style: the composer popovers follow the box, not the sheet corners'
   assert.match(sheet, /--ask-box-top:103px/, 'sheet bottom → box top with an empty one-line composer: 14px band + 1+8+36+4+31+8+1 box');
   assert.match(ruleBody('.ask-pop-scope') || '', /left:var\(--ask-col-inset\);bottom:calc\(var\(--ask-box-top\) \+ 6px\)/, 'scope: box left edge, floats above the box');
   assert.match(ruleBody('.ask-pop-model') || '', /right:var\(--ask-col-inset\);bottom:calc\(var\(--ask-box-top\) \+ 6px\)/, 'model: box right edge');
-  assert.match(ruleBody('.ask-pop-runinfo') || '', /right:calc\(var\(--ask-col-inset\) \+ 66px\);bottom:calc\(var\(--ask-box-top\) \+ 6px\)/, 'agents: the same 66px left of the model popover as before');
-  assert.match(ruleBody('.ask-pop-worktrees') || '', /right:calc\(var\(--ask-col-inset\) \+ 157px\)/, 'worktrees: the same 157px left of the model popover as before');
+  const ctxPop = ruleBody('.ask-pop-ctx') || '';
+  assert.match(ctxPop, /bottom:calc\(var\(--ask-box-top\) \+ 6px\)/, 'context: floats above the box (its right edge is JS-anchored to the ring)');
+  assert.match(ctxPop, /max-height:min\(460px,70%\);overflow-y:auto/, 'context: capped and scrolls — agents and worktrees can be many');
   assert.match(ruleBody('.ask-jump') || '', /bottom:calc\(var\(--ask-box-top\) \+ 9px\)/, 'the jump pill floats just above the box');
   // untouched: the threads popover hangs off the header, the chip picker is JS-positioned
   assert.match(ruleBody('.ask-pop-threads') || '', /top:46px;right:76px/);

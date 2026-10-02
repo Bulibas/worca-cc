@@ -1,10 +1,14 @@
 // test/ui-running-detail.test.mjs
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { confirmDialog } from './helpers/confirm-modal.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 // The Running detail screen's body: live pipeline graph, banners, question panel.
 //
@@ -26,7 +30,7 @@ const STEPPER3 = { steps: [{ label: 'Plan', nodes: [{ id: 'a', label: 'Planner' 
                            { label: 'Review', nodes: [{ id: 'c', label: 'Reviewer' }] }] };
 
 async function boot({ url = 'http://localhost:4317/', fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
 
@@ -583,23 +587,24 @@ test('a waiting question gets twice the run panel\'s width; the header and panel
   const base = px(/\.rd-glance\{[^}]*max-width:(\d+)px/) - 64;
   const wide = px(/\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\)\{[^}]*max-width:(\d+)px/) - 64;
   assert.ok(wide >= 2 * base, `questions column ${wide}px is at least twice the panel's ${base}px`);
-  assert.match(css, /\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\) > :is\(\.rd-now,\.rd-sheet\)\{[^}]*max-width:(\d+)px/,
-    'the header and the run panel stay at their own measure while the column widens');
-  assert.equal(px(/\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\) > :is\(\.rd-now,\.rd-sheet\)\{[^}]*max-width:(\d+)px/), base,
+  assert.match(css, /\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\) > :is\(\.rd-now,\.rd-sheet,\.rd-night-sec\)\{[^}]*max-width:(\d+)px/,
+    'the header, the run panel and the answers under it stay at their own measure while the column widens');
+  assert.equal(px(/\.rd-glance:has\(> \.rd-questions:not\(\[hidden\]\)\) > :is\(\.rd-now,\.rd-sheet,\.rd-night-sec\)\{[^}]*max-width:(\d+)px/), base,
     'the run panel does not move when a question arrives');
 });
 
 // --- T7: tabs ---------------------------------------------------------------
 
-test('Details has seven tabs, results first; the route picks the open one', async () => {
+test('Details has eight tabs, results first; the route picks the open one', async () => {
   const ctx = await bootRunning();
   await openRun(ctx);
   const { window } = ctx;
   const tabs = [...window.document.querySelectorAll('#run-detail .rd-tab')];
-  assert.deepEqual(tabs.map((b) => b.dataset.sec), ['overview', 'diff', 'artifacts', 'workflow', 'qa', 'logs', 'agents']);
+  assert.deepEqual(tabs.map((b) => b.dataset.sec), ['overview', 'diff', 'artifacts', 'actions', 'workflow', 'qa', 'logs', 'agents']);
   assert.match(tabs[0].textContent, /Overview/);
-  assert.match(tabs[5].textContent, /Logs/);
-  assert.match(tabs[4].textContent, /Q&A/);
+  assert.match(tabs[3].textContent, /Actions/);
+  assert.match(tabs[6].textContent, /Logs/);
+  assert.match(tabs[5].textContent, /Q&A/);
   // openRun lands on #running/r1/details/logs.
   assert.equal(window.document.querySelector('#run-detail .rd').dataset.mode, 'details');
   assert.ok(tabOf(window, 'logs').classList.contains('active'), 'the routed tab is open');

@@ -2,11 +2,15 @@
 // Schedules › Once with an after-ticket (run chains): the card says what it waits for and how it
 // stands, "Schedule next…" deep-links, Details names the policy and the branch, and the Runs
 // list's upcoming() carries waiting after-tickets although their runAt is the sentinel.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const viewPath = fileURLToPath(new URL('../ui/public/schedules-view.mjs', import.meta.url));
 const tick = (n = 1) => new Promise((r) => setTimeout(r, n));
@@ -20,7 +24,7 @@ const MISSED_T = { ...AFTER_T, id: 'cccccccc-0000-4000-8000-000000000003', title
   after: { ...AFTER_T.after, status: 'error' } };
 
 async function boot(tickets = [AFTER_T]) {
-  const dom = new JSDOM('<!doctype html><body><div id="tabs"><button data-tab="activity"></button><button data-tab="once"></button><button data-tab="repeating"></button></div><div id="feed"></div><div id="once"></div><div id="rep"></div></body>', { url: 'http://localhost/#schedules/once' });
+  const dom = trackDom(new JSDOM('<!doctype html><body><div id="tabs"><button data-tab="activity"></button><button data-tab="once"></button><button data-tab="repeating"></button></div><div id="feed"></div><div id="once"></div><div id="rep"></div></body>', { url: 'http://localhost/#schedules/once' }));
   const { window } = dom;
   for (const k of ['window', 'document', 'Node', 'HTMLElement', 'Event', 'DOMParser', 'location']) {
     try { Object.defineProperty(globalThis, k, { value: window[k], configurable: true, writable: true }); } catch {}
@@ -117,7 +121,7 @@ test('style.css and index.html carry the run-chain entry points', () => {
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 async function bootLive(dependents = []) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };

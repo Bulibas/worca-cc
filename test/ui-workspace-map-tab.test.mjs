@@ -4,12 +4,16 @@
 // filters (graph pair by click and by keyboard, coverage chip, selects), the add-form draft, focus
 // and scroll that survive a repaint, Regenerate after a description save, and Re-scan from the
 // empty state. Edge ids are real (x_ / m_ + 12 hex): P5 answers 400 to any other id.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { edgeId, manualEdgeId } from '../src/shared/workspace-map/ids.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -57,7 +61,7 @@ const ok = (body, status = 200) => Promise.resolve({ ok: status < 400, status, j
 // A tiny server: GET /map answers `server.payload`; every call is logged as "METHOD path body".
 async function boot({ payload = payloadOf(), route = null } = {}) {
   const server = { payload, calls: [], workspaces: WS };
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = WSStub;

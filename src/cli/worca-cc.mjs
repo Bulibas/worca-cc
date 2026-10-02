@@ -36,6 +36,7 @@ import { promptFields, projectForm, coerceInput } from '../shared/forms/project.
 import { whenOk } from '../shared/forms/layout.mjs';
 import { validate } from '../shared/forms/schema.mjs';
 import { collectAnswer } from '../shared/forms/answer.mjs';
+import { kindLabel } from '../shared/away-mode/labels.mjs';
 import { pauseExitCode, describePauseReason, promptOptions, REASON } from '../core/failure-policy.mjs';
 import { effectiveDebugSpawn } from '../core/settings.mjs';
 import { SCHEDULE_VALUE_FLAGS, wantsSchedule, readScheduleFlags, createFromFlags, waitAndRun, cmdSchedule } from './schedule.mjs';
@@ -115,6 +116,7 @@ function parseArgs(argv) {
     workflow: undefined,
     mock: false,
     auto: false,
+    nightMode: false,       // --night: this run opts into night mode (src/core/night/*)
     pastTeamCap: false,     // team policy (design §12): start with the total-cap acknowledgement recorded
     reason: undefined,      // …and the reason the team sees for it
     install: null,
@@ -172,6 +174,10 @@ function parseArgs(argv) {
     }
     if (arg === '--yes' || arg === '--non-interactive') {
       out.auto = true;
+      continue;
+    }
+    if (arg === '--night') {
+      out.nightMode = true;
       continue;
     }
     if (arg === '--no-human') {
@@ -326,7 +332,10 @@ Options:
   --after <id>             Start when another run ends: a run id or a scheduled run id (any unique prefix)
   --after-any              …even if that run fails or is stopped
   --source-from-previous   Start on that run's feature branch (with --after)
-  --yes, --non-interactive Auto-answer clarify (first option) and gates (continue)
+  --yes, --non-interactive Auto-answer clarify (recommended, else first option) and gates (continue)
+  --night                  Mark this run: worca may answer its questions while you are away
+                           (your away hours or "I'm away now"), and by day once a question has
+                           waited 30 min. Configure in Settings > Away mode.
   --ui                     Same as "worca ui start" (accepts --port, --open, --mock)
   --install <targetDir>    Copy agents + /worca skill into <targetDir>/.claude
   -h, --help               Show this help
@@ -343,6 +352,7 @@ const COLORS = {
   yellow: '\x1b[33m',
   red: '\x1b[31m',
   cyan: '\x1b[36m',
+  magenta: '\x1b[35m',
   gray: '\x1b[90m',
 };
 const useColor = process.stdout.isTTY;
@@ -372,8 +382,21 @@ function makeRl() {
   return rl;
 }
 
+// The open prompt's cancel switch: night mode may answer a question while its readline
+// prompt is still open, and that prompt must go away or the next one stacks on it.
+let promptAbort = null;
+const NIGHT_ANSWERED = 'NIGHT_ANSWERED';
+
 function question(rl, q) {
-  return new Promise((res) => rl.question(q, (a) => res(a)));
+  const signal = promptAbort?.signal;
+  if (!signal) return new Promise((res) => rl.question(q, (a) => res(a)));
+  return new Promise((res, rej) => {
+    // An aborted readline question never calls its callback: settle here instead.
+    const cancel = () => rej(Object.assign(new Error('answered by night mode'), { code: NIGHT_ANSWERED }));
+    if (signal.aborted) { cancel(); return; }
+    signal.addEventListener('abort', cancel, { once: true });
+    rl.question(q, { signal }, (a) => { signal.removeEventListener('abort', cancel); res(a); });
+  });
 }
 
 /**
@@ -738,6 +761,9 @@ async function attachAndDrive(orch, flags, start) {
     const { id, kind, questions, issues, recovery, agent } = payload;
     if (flags.auto || !rl) return; // auto mode resolves internally
     answering = true;
+    const ctrl = new AbortController();
+    promptAbort = ctrl;
+    promptAbort.questionId = id;
     try {
       if (kind === 'clarify') {
         const answer = await askClarify(rl, questions || []);
@@ -793,6 +819,8 @@ async function attachAndDrive(orch, flags, start) {
         }
       }
     } catch (err) {
+      // Night mode answered while the prompt was open: nothing to answer, nothing failed.
+      if (err?.code === NIGHT_ANSWERED) { out(''); return; }
       process.stderr.write(`Failed to read answer: ${err?.message || err}\n`);
       // Never swallow: orch.answer() was not called, so the ask stays open and the
       // run would hang on it (or be abandoned at EOF with its row left `running`
@@ -803,7 +831,17 @@ async function attachAndDrive(orch, flags, start) {
       abandonAnswer(err);
     } finally {
       answering = false;
+      if (promptAbort === ctrl) promptAbort = null;
     }
+  });
+
+  orch.on('night-decision', ({ id, kind, record }) => {
+    // Close the readline prompt night mode just made moot.
+    if (promptAbort && promptAbort.questionId === id && !record?.guardrail) promptAbort.abort();
+    const what = record?.guardrail
+      ? `paused: ${String(record.rationale || record.guardrail).replace(/^Paused:\s*/, '')}`
+      : `answered ${kindLabel(kind)} ${id}: ${String(record?.choice).slice(0, 120)}`;
+    out(c('magenta', `Away mode ${what}${record?.flagged && !record?.guardrail ? ' (please check)' : ''}`));
   });
 
   // Ctrl+C: 1st -> graceful pause (falls back to stop when not pausable);
@@ -3367,6 +3405,7 @@ async function main() {
     },
     auto: flags.auto,
     humanInLoop: flags.humanInLoop === false ? false : undefined,
+    ...(flags.nightMode ? { nightMode: true } : {}),
   });
 
   if (waitTicketId) {

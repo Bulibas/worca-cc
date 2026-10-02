@@ -23,7 +23,7 @@ useTempHome(after);
 
 const origCwd = process.cwd();
 let cwdSandbox = null;
-let homeDir, srv, base, wsBase, mod, prevHome;
+let homeDir, srv, base, wsBase, mod, prevHome, prevOsHome, prevProfile;
 let projectDir, projectDir2, projectKey, workspaceId;
 const JSONH = { 'Content-Type': 'application/json' };
 const MODEL = { model: 'claude-opus-5-5', effort: 'high' };
@@ -42,6 +42,10 @@ before(async () => {
   homeDir = await mkdtemp(join(tmpdir(), 'worca-cc-askwfcards-'));
   prevHome = process.env.WORCA_HOME;
   process.env.WORCA_HOME = homeDir;
+  // settings.json lives under HOME, not WORCA_HOME: the budget tests' cost-limit
+  // setters must never write the developer's real ~/.worca-cc/settings.json.
+  prevOsHome = process.env.HOME; prevProfile = process.env.USERPROFILE;
+  process.env.HOME = homeDir; process.env.USERPROFILE = homeDir;
   process.env.WORCA_MOCK = '1';
   mod = await import('../ui/server.mjs');
   srv = mod.server;
@@ -84,6 +88,8 @@ after(async () => {
     ]);
   }
   if (prevHome === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prevHome;
+  if (prevOsHome === undefined) delete process.env.HOME; else process.env.HOME = prevOsHome;
+  if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
   delete process.env.WORCA_MOCK;
   process.chdir(origCwd);
   // A stopped orchestrator still flushes artifacts for a few ticks, so a plain

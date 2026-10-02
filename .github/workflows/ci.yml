@@ -3,7 +3,12 @@ name: CI
 # Until this file existed the repository had NO branch or pull-request CI at all:
 # the only workflow (release-npm-app.yml) triggers on `push: tags` — so `npm test`
 # gated a publish, never a merge. Tags are left to that workflow; this one gates
-# every branch push and every pull request.
+# every pull request and every push to dev.
+#
+# Pushes to other branches don't run: a branch with an open PR is covered by the
+# pull_request run, and running both made the later cancel the earlier, which
+# left the cancelled push run's checks red on the PR. A branch gets CI once it
+# has a PR (a draft PR is enough).
 #
 # Docs-only changes skip CI, except the two docs paths a test reads:
 # test/deck-kit-sync (docs/why-worca/) and test/ui-levels (docs/ui-levels.md).
@@ -12,7 +17,7 @@ name: CI
 # otherwise leave a required check pending forever.
 on:
   push:
-    branches: ["**"]
+    branches: [dev]
     paths:
       - "**"
       - "!docs/**"
@@ -28,10 +33,9 @@ on:
 permissions:
   contents: read
 
-# A branch push and its open PR both fire. github.ref differs between them
-# (refs/heads/x vs refs/pull/N/merge), so group on the branch name instead —
-# head_ref on pull_request, ref_name on push — plus the head repo, so a fork's
-# same-named branch can't cancel ours. The later of the pair cancels the first.
+# A new push to a PR (or to dev) cancels the run it supersedes. Group on the
+# branch name — head_ref on pull_request, ref_name on push — plus the head repo,
+# so a fork's same-named branch can't cancel ours.
 concurrency:
   group: ci-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
@@ -61,7 +65,8 @@ jobs:
         run: npm ci
 
       # No build step: plain Node ESM plus a vanilla HTML/CSS/JS frontend.
-      # The script points WORCA_HOME at ./.worca-cc-test, so nothing touches a
+      # The script points WORCA_HOME at ./.worca-cc-test and HOME/USERPROFILE at
+      # a fresh temp dir (settings.json lives under HOME), so nothing touches a
       # real home directory, and no test may spawn a live `claude`.
       # No retry: the ENOTEMPTY teardown race this step used to re-run for was
       # a test waiting on a stale "newest row" and leaving its run alive

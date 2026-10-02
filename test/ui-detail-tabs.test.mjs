@@ -10,11 +10,15 @@
 // boot()/settle()/go() are a deliberate local copy of
 // test/ui-history-detail.test.mjs:25-93 (itself a copy of
 // test/ui-history-routing.test.mjs:25-96) — the suites do not import each other.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -22,7 +26,7 @@ const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 const PROJECT = '/tmp/proj';
 
 async function boot({ fetchHandler, url = 'http://localhost:4317/' } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url }));
   const { window } = dom;
 
   // jsdom doesn't implement scrollIntoView; the viewer modal calls it on open.
@@ -297,4 +301,16 @@ test('detailTabsOf returns null for a screen that was never initialised', async 
   const { window } = await boot();
   assert.equal(window.__np.detailTabsOf(makeScreen(window, 'rd')), null);
   assert.equal(window.__np.detailTabsOf(null), null);
+});
+
+test('History and the run page list their tabs in one order (Clarify is the run page\'s Q&A)', () => {
+  const app = readFileSync(appPath, 'utf8');
+  const keysOf = (table) => {
+    const start = app.indexOf(`const ${table} = [`);
+    assert.ok(start > 0, `${table} exists`);
+    return [...app.slice(start, app.indexOf('\n];', start)).matchAll(/key: '([a-z-]+)'/g)].map((m) => m[1]);
+  };
+  const hd = keysOf('HD_TABS').map((k) => (k === 'clarify' ? 'qa' : k));
+  assert.deepEqual(hd, keysOf('RD_TABS'));
+  assert.ok(hd.includes('actions'), 'both pages carry the Actions tab');
 });

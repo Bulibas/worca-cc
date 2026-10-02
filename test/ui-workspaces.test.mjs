@@ -3,12 +3,16 @@
 // page (#workspaces/<id>[/team]) where all editing happens: the description editor and PATCH,
 // delete (200 + 409-keep), re-scan, the metrics home block and routing, adding / removing
 // member projects on the page (never from the list), and the list's no-add/remove invariant.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { confirmDialog } from './helpers/confirm-modal.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -45,7 +49,7 @@ const TM_SCOPES = {
 };
 
 async function boot({ fetchHandler, workspaces = WS, hooks } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   if (hooks) window.__worcaTestHooks = hooks;   // e.g. the real marked + DOMPurify for the markdown tests
   window.Element.prototype.scrollIntoView = function () {};
@@ -141,7 +145,8 @@ test('a row click opens the workspace page: slide, header, tabs, focus on Back, 
   const page = doc.querySelector('#ws-detail .pd.wd');
   assert.ok(page, 'the page rides the project page\'s pd- shell');
   assert.equal(page.querySelector('.pd-title').textContent, 'Alpha WS');
-  assert.deepEqual([...page.querySelectorAll('.pd-tab')].map((b) => b.dataset.sec), ['overview', 'map', 'team']);
+  assert.deepEqual([...page.querySelectorAll('.pd-tab')].map((b) => b.dataset.sec), ['overview', 'map', 'team', 'actions']);
+  assert.equal(page.querySelector('.pd-tab[data-sec="actions"]').dataset.minLevel, 'advanced');
   assert.equal(page.querySelector('.pd-tab[data-sec="map"]').dataset.minLevel, 'advanced');
   assert.equal(page.querySelector('.pd-tab[data-sec="team"]').dataset.minLevel, 'expert');
   assert.equal(doc.activeElement, page.querySelector('.pd-back'), 'focus lands on Back');
