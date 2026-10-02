@@ -245,6 +245,11 @@ read worca's settings, database, `HOME` or environment. Give Claude Code a token
 as a variable (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`); a login stored in
 worca's `HOME` is not visible to agents. `WORCA_AGENT_ISOLATION=0` turns it off. A
 bind-mount setup keeps one user, so files agents write on your disk keep your uid.
+While isolation is on, the [actions](actions.md) API and the `actions` settings key refuse
+callers on the box itself (`403 ACTIONS_AGENT_BLOCKED`), so an agent cannot start a command, or
+plant one, that runs as the `worca` user. In local mode there is no identity, so a request an agent
+loops back through a published port cannot be told apart from a person: run an isolated box in
+remote mode.
 
 **Reaching the host** (a database on your laptop): `host.docker.internal` on
 Docker Desktop, `--add-host=host.docker.internal:host-gateway` on Engine. Off

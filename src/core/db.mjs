@@ -58,7 +58,7 @@ const OPEN_BACKOFF_MS = 15;
 /** Latest schema version. Bump + append a new migration step when the DDL grows.
  *  Exported so migration tests assert "reached the module's current version"
  *  instead of hardcoding the number — a schema bump then touches no test file. */
-export const SCHEMA_VERSION = 46;
+export const SCHEMA_VERSION = 47;
 
 /** Absolute path to the database file: <worcaHome>/worca-cc.db. */
 export function dbPath() {
@@ -863,7 +863,8 @@ const INCREMENTAL_COLUMNS = {
                             policy_project: 'TEXT',     // v32: team-policy home (member absolute path); NULL = no home
                             map_json: 'TEXT',           // v40: the last scan's { map, synthesis } (workspace map); NULL = none yet
                             map_overrides_json: 'TEXT', // v40: confirm / reject / manual edge overrides; NULL = none
-                            description_origin: 'TEXT' },   // v40: 'generated' | 'edited'; NULL = before v40
+                            description_origin: 'TEXT',     // v40: 'generated' | 'edited'; NULL = before v40
+                            actions_json: 'TEXT' },         // v47: stack actions { stacks:[…] } (issue #529); NULL = none
   schedules:              { ask_thread_id: 'TEXT', ask_card_id: 'TEXT',   // v31: the Ask Worca card a series came from
                             created_by: 'TEXT', updated_by: 'TEXT' },   // v39: who made / last changed it (identity.mjs actor)
   scheduled_runs:         { after_kind: 'TEXT', after_id: 'TEXT', after_policy: "TEXT NOT NULL DEFAULT 'done'",
@@ -1933,6 +1934,7 @@ export function migrate(db) {
     if (current < 45) applySchemaV45(db);            // MCP registry: ask_threads.mcp_off (per-chat picker)
     // v46 (Ask context chips): ask_threads.contexts, an INCREMENTAL_COLUMNS entry the hoisted
     // repairSchemaGaps above adds — no step of its own. NULL on every existing thread = no indicator.
+    // (v47: workspaces.actions_json arrives through the same repair — additive column only, issue #529.)
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {
