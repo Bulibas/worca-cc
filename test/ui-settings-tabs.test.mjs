@@ -274,3 +274,19 @@ test('the cost-pause banners open the Runs tab, where the budget now lives', () 
   assert.match(js, /settingsBtn\.addEventListener\('click', \(\) => \{ location\.hash = 'settings\/runs'; \}\)/);
   assert.equal(/location\.hash = 'settings';/.test(js), false, 'no bare #settings jump left for the budget');
 });
+
+test('#settings/runs/actions opens Runs, scrolls to the Actions card and focuses its first field', async () => {
+  const { window } = await boot();
+  const seen = [];
+  window.Element.prototype.scrollIntoView = function () { seen.push(this.id); };
+  await go(window, 'settings/runs/actions');
+  await tick(); await tick();
+  assert.equal(shown(window, 'runs'), true);
+  assert.ok(seen.length && seen.every((id) => id === 'actions-settings-card'), JSON.stringify(seen));
+  assert.equal(window.document.activeElement?.closest('#actions-settings-card')?.id, 'actions-settings-card');
+  const before = seen.length;
+  await go(window, 'settings/runs/bogus');
+  await tick(); await tick();
+  assert.equal(shown(window, 'runs'), true, 'an unknown card still opens the tab');
+  assert.equal(seen.length, before, 'and scrolls nowhere');
+});

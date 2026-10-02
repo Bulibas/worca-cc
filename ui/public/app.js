@@ -27988,7 +27988,15 @@ function showSettingsTab(param = '') {
   // request, and re-entry refetches (which is what lets grvExitWizard's
   // '#settings/guardrails/<id>' -> '#settings/guardrails' hop reset the wizard).
   paintLevelBanner();
-  if (SETTINGS_FORM_TABS.includes(tab)) loadSettings();
+  if (SETTINGS_FORM_TABS.includes(tab)) {
+    // '#settings/runs/actions' and the like: a link to one card (the Actions tab's "Set one in Settings").
+    const card = sub ? document.getElementById(`${sub}-settings-card`) : null;
+    void loadSettings().then(() => {
+      if (!card || card.closest('.settings-pane')?.dataset.tab !== tab) return;
+      card.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      card.querySelector('input, select, textarea')?.focus({ preventScroll: true });
+    });
+  }
   if (tab === 'ask') void paintAskMcpBlock(document.getElementById('ask-mcp-host'), { api: mcpApi });
   if (tab === 'guardrails') loadGuardrailsView(sub);
   if (tab === 'models') loadModelsView(sub);

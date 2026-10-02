@@ -7542,6 +7542,7 @@ input.gv-name:focus-visible{outline:none;}
 .ac-member-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
 .ac-foot{display:flex;justify-content:flex-end;gap:8px}
 .act-exit.ok{color:var(--green-ink)} .act-exit.fail{color:var(--red-ink)}
+.act-page-link{color:var(--blue-ink-strong);text-decoration:underline;text-underline-offset:2px;white-space:nowrap;}   /* a page an Actions message names (appendWithPageLinks) */
 /* spacing comes from .side-foot's gap:10px; no margin */
 #side-actions{border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--field);padding:10px 12px}
 #side-actions[hidden]{display:none}

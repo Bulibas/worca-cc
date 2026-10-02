@@ -4,6 +4,8 @@
 // network — app.js loads the config, saves what onSave hands back and shows server errors.
 // The listeners here are purely local (add/remove rows, inline port checks, refills).
 
+import { appendWithPageLinks, projectActionsHref } from './actions-view.mjs';
+
 const BASE_PLACEHOLDERS = ['{branch}', '{worktree}', '{runId}', '{member}'];
 const BUILTINS = [
   { key: 'editor', label: 'Editor', detect: true },
@@ -14,6 +16,7 @@ const BUILTINS = [
 const READY_OPTIONS = [['immediate', 'Right away'], ['port', 'Port answers'], ['output', 'Output contains']];
 const KIND_OPTIONS = [['service', 'Service'], ['task', 'Task']];
 const DEFAULT_TIMEOUT_MS = 60_000;
+
 
 function h(doc, tag, cls, text) {
   const n = doc.createElement(tag);
@@ -186,6 +189,8 @@ function readAction(row) {
   };
 }
 
+const BUILTIN_SETTING = new Set(['editor', 'terminal']);   // the two a Settings field can name
+
 function detectNote(entry) {
   if (entry === undefined) return '';
   return entry ? entry.label || 'found' : 'not found on this machine';
@@ -218,7 +223,9 @@ export function renderProjectActionsEditor(cfg, { doc, detected = {}, onSave, on
     box.checked = b[bi.key] !== false;
     line.append(box, h(doc, 'span', 'ac-builtin-label', bi.label));
     const note = bi.detect ? detectNote(detected?.[bi.key]) : '';
-    if (note) line.append(h(doc, 'span', `ac-builtin-note${detected?.[bi.key] ? '' : ' muted'}`, note));
+    // Not found: say where to name one (Settings › Runs › Actions › Editor / Terminal), as a link.
+    if (note) line.append(appendWithPageLinks(doc, h(doc, 'span', `ac-builtin-note${detected?.[bi.key] ? '' : ' muted'}`),
+      detected?.[bi.key] || !BUILTIN_SETTING.has(bi.key) ? note : `${note} · set one in Settings › Runs › Actions`));
     builtinsCard.append(line);
   }
 
@@ -298,7 +305,9 @@ function memberLine(doc, m) {
   const line = h(doc, 'li', 'ac-member');
   line.append(h(doc, 'b', 'ref mono', m.name), ' ', h(doc, 'span', 'ac-member-alias mono', `{${m.alias}.PORT}`));
   const acts = (m.actions || []).map((a) => `${a.label || a.id} (${a.kind})`).join(', ');
-  line.append(h(doc, 'span', 'ac-member-actions muted', acts ? ` · ${acts}` : ' · no actions yet'));
+  const span = h(doc, 'span', 'ac-member-actions muted', acts ? ` · ${acts}` : ' · no actions yet, ');
+  if (!acts && m.projectKey) appendWithPageLinks(doc, span, 'add them on its Actions tab', [['its Actions tab', projectActionsHref(m.projectKey)]]);
+  line.append(span);
   return line;
 }
 

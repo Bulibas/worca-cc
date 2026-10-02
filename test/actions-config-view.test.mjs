@@ -116,3 +116,21 @@ test('stack editor: changing a member refills its actions; add/remove steps renu
   assert.equal(saved[0].stacks.length, 2);
   assert.deepEqual(saved[0].stacks[1], { id: '', label: '', kind: 'service', steps: [] });
 });
+
+test('Built in: an editor or terminal not found links to the Settings card; a found one and the file manager do not', () => {
+  const root = renderProjectActionsEditor(CFG(), { doc, detected: { editor: null, terminal: { label: 'Terminal' }, fileManager: null } });
+  const note = (key) => root.querySelector(`.ac-builtin-${key}`).closest('.ac-builtin').querySelector('.ac-builtin-note');
+  assert.equal(note('editor').textContent, 'not found on this machine · set one in Settings › Runs › Actions');
+  assert.equal(note('editor').querySelector('a').getAttribute('href'), '#settings/runs/actions');
+  assert.equal(note('terminal').querySelector('a'), null);
+  assert.equal(note('fileManager').textContent, 'not found on this machine', 'no setting names a file manager');
+});
+
+test('stack editor: a member with no actions links to its Actions tab', () => {
+  const data = STACK_DATA();
+  data.members[1] = { ...data.members[1], actions: [] };
+  const root = renderStackEditor(data, { doc });
+  const line = [...root.querySelectorAll('.ac-member')].find((l) => l.textContent.includes('web'));
+  assert.match(line.textContent, /no actions yet, add them on its Actions tab/);
+  assert.equal(line.querySelector('a').getAttribute('href'), '#projects/web-5e6f7a8b/actions');
+});

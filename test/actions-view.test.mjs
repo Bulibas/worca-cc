@@ -320,3 +320,36 @@ test('controller: a declined Discard sends nothing', async () => {
   assert.equal(calls.some((c) => c[0] === 'DELETE'), false);
   ctl.destroy();
 });
+
+// ---------------------------------------------------------------------------
+// Page links: a message that names an in-app page links to it (appendWithPageLinks)
+// ---------------------------------------------------------------------------
+
+const hrefs = (el) => [...el.querySelectorAll('a.act-page-link')].map((a) => [a.textContent, a.getAttribute('href')]);
+
+test('the missing-editor note links to the Settings card', () => {
+  const m = member({ builtins: [{ key: 'terminal', label: 'Terminal' }, { key: 'copyCommand', label: 'Copy command' }], unavailableBuiltins: ['editor'] });
+  const el = renderActionsCard(model(m), { doc, handlers: {} });
+  assert.deepEqual(hrefs(el), [['Settings › Runs › Actions', '#settings/runs/actions']]);
+  assert.match(el.querySelector('.act-missing').textContent, /Set one in Settings › Runs › Actions\.$/);
+});
+
+test('a checked-out project with no actions says where to add them, linked to its Actions tab', () => {
+  const m = member({ actions: [], checkout: { setup: { status: 'ok' } } });
+  const el = renderActionsCard(model(m), { doc, handlers: {} });
+  assert.match(el.querySelector('.act-none').textContent, /^app has no actions yet\. Add a Run or Test command on the project's Actions tab\.$/);
+  assert.deepEqual(hrefs(el), [["the project's Actions tab", '#projects/app-0cea65fb/actions']]);
+  assert.equal(renderActionsCard(model(member({ checkout: { setup: { status: 'ok' } } })), { doc, handlers: {} }).querySelector('.act-none'), null, 'not when it has actions');
+  const off = model(m); off.enabled = false;
+  assert.equal(renderActionsCard(off, { doc, handlers: {} }).querySelector('.act-none'), null, 'not on a hosted worca with actions off');
+});
+
+test('an error notice that names the Settings card links it; other text stays text', () => {
+  const el = renderActionsCard(model(member()), { doc, handlers: {},
+    notice: { kind: 'err', text: 'no free port between 4400 and 4499; widen the range in Settings › Runs › Actions' } });
+  const n = el.querySelector('.act-notice');
+  assert.equal(n.textContent, 'no free port between 4400 and 4499; widen the range in Settings › Runs › Actions');
+  assert.deepEqual(hrefs(n), [['Settings › Runs › Actions', '#settings/runs/actions']]);
+  const plain = renderActionsCard(model(member()), { doc, handlers: {}, notice: { kind: 'err', text: 'Request failed (500)' } });
+  assert.equal(plain.querySelectorAll('.act-notice a').length, 0);
+});

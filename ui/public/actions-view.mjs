@@ -4,6 +4,26 @@ export const TERMINAL = new Set(['exited', 'failed', 'stopped']);
 const ACTIVE = new Set(['starting', 'running', 'ready']);
 const LOG_TAIL = 400;
 function h(doc, tag, cls, text) { const el = doc.createElement(tag); if (cls) el.className = cls; if (text != null) el.textContent = text; return el; }
+
+// In-app pages an Actions message names. appendWithPageLinks keeps the message's words and turns each
+// page name into a link to it; `extra` adds [label, href] pairs for this message (a project's own tab).
+const PAGE_LINKS = [['Settings › Runs › Actions', '#settings/runs/actions']];
+export function appendWithPageLinks(doc, el, text, extra = []) {
+  const links = [...extra, ...PAGE_LINKS];
+  let rest = String(text ?? '');
+  while (rest) {
+    const hit = links.map(([label, href]) => ({ label, href, i: rest.indexOf(label) })).filter((x) => x.i >= 0).sort((a, b) => a.i - b.i)[0];
+    if (!hit) { el.append(rest); break; }
+    if (hit.i) el.append(rest.slice(0, hit.i));
+    const a = h(doc, 'a', 'act-page-link', hit.label);
+    a.href = hit.href;
+    el.append(a);
+    rest = rest.slice(hit.i + hit.label.length);
+  }
+  return el;
+}
+/** The project's own Actions tab, where its setup and actions are edited. */
+export const projectActionsHref = (key) => `#projects/${encodeURIComponent(key)}/actions`;
 const btn = (doc, label, cls, onClick) => { const b = h(doc, 'button', `btn ${cls || 'btn-ghost'} btn-mini`, label); b.type = 'button'; if (onClick) b.addEventListener('click', onClick); return b; };
 const portOf = (s) => Object.values(s.ports || {})[0];
 /** "Run :4417", or just "Run" for a service without a port variable (never "Run :undefined"). Used by the
@@ -100,10 +120,13 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
   const discardBtn = () => btn(doc, 'Discard', 'btn-ghost act-discard', () => handlers.onDiscard?.([m.projectKey]));
   // A built-in switched on for the project but not found on this machine (the server's detection) says so,
   // instead of quietly missing from the row; the project's Actions tab says "not found on this machine".
-  const missingNote = () => {
-    const names = (m.unavailableBuiltins || []).map((k) => BUILTIN_NAME[k] || k);
-    return model.enabled && names.length
-      ? h(doc, 'p', 'hint act-missing', `No ${names.join(' or ')} was found on this machine. Set one in Settings › Runs › Actions.`) : null;
+  // `lead` is text that comes first in the same note (what waits for Check out); null when there is nothing to say.
+  const missingNote = (lead = '') => {
+    const names = model.enabled ? (m.unavailableBuiltins || []).map((k) => BUILTIN_NAME[k] || k) : [];
+    if (!lead && !names.length) return null;
+    // The link lands on the card itself: showSettingsTab scrolls to it and focuses its first field.
+    const text = [lead, names.length ? `No ${names.join(' or ')} was found on this machine. Set one in Settings › Runs › Actions.` : ''].filter(Boolean).join(' ');
+    return appendWithPageLinks(doc, h(doc, 'p', 'hint act-missing'), text);
   };
 
   if (state === 'not-checked-out') {
@@ -120,9 +143,8 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
     if (row.childNodes.length) sec.append(row);
     // One note under the row: what waits for Check out, then what this machine lacks.
     const waits = opens.length ? `${opens.map((b) => b.label).join(', ').replace(/, ([^,]*)$/, ' and $1')} open the checkout, so they work after Check out.` : '';
-    const miss = missingNote();
-    const note = [waits, miss ? miss.textContent : ''].filter(Boolean).join(' ');
-    if (note) sec.append(h(doc, 'p', 'hint act-missing', note));
+    const note = missingNote(waits);
+    if (note) sec.append(note);
     return sec;
   }
 
@@ -152,6 +174,11 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
   } else { const c = copyBtn(); if (c) row.append(c); }
   row.append(discardBtn());
   sec.append(row);
+  if (model.enabled && state !== 'setting-up' && state !== 'setup-failed' && !(m.actions || []).length) {
+    const tab = "the project's Actions tab";
+    sec.append(appendWithPageLinks(doc, h(doc, 'p', 'hint act-none'),
+      `${m.projectName || 'This project'} has no actions yet. Add a Run or Test command on ${tab}.`, [[tab, projectActionsHref(m.projectKey)]]));
+  }
   if (state !== 'setting-up' && state !== 'setup-failed') { const miss = missingNote(); if (miss) sec.append(miss); }
   if (state === 'ready' && setup.status === 'pending') sec.append(h(doc, 'p', 'hint', 'Setup runs before the first action.'));
 
@@ -177,7 +204,7 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
 /** One section.card.act-card per member. A workspace run adds a member checklist and stack rows on top. */
 export function renderActionsCard(model, { doc, handlers = {}, logs = null, queued = null, notice = null } = {}) {
   const root = h(doc, 'div', 'act-view');
-  if (notice) root.append(h(doc, 'p', `hint act-notice${notice.kind ? ` ${notice.kind}` : ''}`, notice.text));
+  if (notice) root.append(appendWithPageLinks(doc, h(doc, 'p', `hint act-notice${notice.kind ? ` ${notice.kind}` : ''}`), notice.text));
   const members = model.members || [];
   if (model.workspace && model.finished !== false) {
     const open = members.filter((m) => m.branch && !m.checkout);
