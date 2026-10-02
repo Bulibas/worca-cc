@@ -12,6 +12,7 @@
 
 import { readFile, stat, open } from 'node:fs/promises';
 import { join } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 
 import { getDb } from '../core/db.mjs';
 import { runDirForRow } from '../core/artifacts.mjs';
@@ -40,8 +41,9 @@ Reads come straight from the run's log file — no Worca server needs to be up.
 const LEVELS = ['debug', 'info', 'warn', 'error'];
 /** The same level palette the foreground run uses (worca-cc.mjs LEVEL_COLOR). */
 const LEVEL_COLOR = { info: 'reset', debug: 'gray', warn: 'yellow', error: 'red' };
-/** Statuses after which a run writes nothing more, so following can end. */
-const SETTLED = ['done', 'stopped', 'interrupted'];
+/** Statuses after which a run writes nothing more, so following can end
+ *  (run-report.mjs TERMINAL_STATUSES; 'paused' is parked, not settled). */
+const SETTLED = ['done', 'error', 'stopped', 'interrupted'];
 
 /**
  * Parse the logs verb's options. `--x v` and `--x=v` both land; unknown
@@ -126,7 +128,7 @@ function renderLine(line, { out, c }) {
     ? `${new Date(evt.ts).toTimeString().slice(0, 8)} `
     : '';
   const level = String(evt.level || 'info').toLowerCase();
-  const color = LEVEL_COLOR[evt.level] || 'reset';
+  const color = LEVEL_COLOR[level] || 'reset';
   const text = String(evt.text).replace(/\n/g, '\n    ');
   out(`  ${c('gray', clock)}${c(color, level.padStart(5))} ${c('gray', `[${evt.source ?? '?'}] `)}${text}`);
 }
@@ -151,9 +153,14 @@ function emitTail(text, opts, ctx) {
  * Poll interval: 1s by default (matched to the writer's flushMs),
  * WORCA_LOGS_FOLLOW_MS to tune, clamped to [100, 5000].
  */
-async function follow(row, path, opts, { out, c }) {
+async function follow(row, path, opts, startOffset, { out, c }) {
   const ms = Math.min(5000, Math.max(100, Number(process.env.WORCA_LOGS_FOLLOW_MS) || 1000));
-  const print = (line) => (opts.json ? out(line) : renderLine(line, { out, c }));
+  // The same filters the initial tail applied hold for every appended line.
+  const print = (line) => {
+    if (!passes(line, opts)) return;
+    if (opts.json) out(line);
+    else renderLine(line, { out, c });
+  };
   const status = () => {
     try { return (getDb().prepare('SELECT status FROM pipelines WHERE id = ?').get(row.id) || {}).status; }
     catch { return null; } // a locked store mid-write must not kill the follow
@@ -166,23 +173,45 @@ async function follow(row, path, opts, { out, c }) {
   };
   process.on('SIGINT', onInt);
   try {
-    let offset = (await stat(path)).size;
+    // Start exactly where the initial tail's read ended (0 when there was no
+    // file yet), so nothing written in between is skipped.
+    let offset = startOffset;
+    // A trailing line without its newline yet (read mid-append) waits here
+    // until the rest of it lands, so one record never prints as two.
+    let pending = '';
+    // Streaming decode: a multi-byte character split across two reads stays whole.
+    let decoder = new StringDecoder('utf8');
+    const drain = async () => {
+      let s = null;
+      try { s = await stat(path); } catch {
+        // Not there (yet / any more). A run that has not started has no named
+        // run dir yet, so re-resolve it: the dir appears under its final name.
+        try { path = join(await runDirForRow(row), RUN_LOG_FILE); } catch { /* next tick */ }
+        return;
+      }
+      if (s.size < offset) { offset = 0; pending = ''; decoder = new StringDecoder('utf8'); }
+      if (s.size <= offset) return;
+      const fh = await open(path, 'r');
+      try {
+        const buf = Buffer.alloc(s.size - offset);
+        const { bytesRead } = await fh.read(buf, 0, buf.length, offset);
+        offset += bytesRead;
+        const parts = (pending + decoder.write(buf.subarray(0, bytesRead))).split('\n');
+        pending = parts.pop();
+        for (const line of parts) if (line) print(line);
+      } finally { await fh.close(); }
+    };
     for (;;) {
       await new Promise((r) => setTimeout(r, ms));
-      let s = null;
-      try { s = await stat(path); } catch { continue; } // vanished: the next tick re-checks
-      if (s.size < offset) offset = 0;
-      if (s.size > offset) {
-        const fh = await open(path, 'r');
-        try {
-          const buf = Buffer.alloc(s.size - offset);
-          await fh.read(buf, 0, buf.length, offset);
-          offset = s.size;
-          for (const line of buf.toString('utf8').split('\n')) if (line) print(line);
-        } finally { await fh.close(); }
-      }
+      await drain();
       const st = status();
       if (st && SETTLED.includes(st)) {
+        // The writer flushes on its own timer, so the last lines can land just
+        // after the status flips: one more beat, one more read, then flush
+        // whatever partial line is left.
+        await new Promise((r) => setTimeout(r, ms));
+        await drain();
+        if (pending) print(pending);
         out(c('gray', `run ${row.id} ${st}.`));
         return 0;
       }
@@ -212,8 +241,15 @@ export async function cmdLogs(rest, { out, c, fail }) {
   try { text = await readFile(path, 'utf8'); } catch { text = null; }
 
   if (opts.follow) {
-    if (text != null) emitTail(text, opts, { out, c });
-    return follow(row, path, opts, { out, c });
+    if (text == null) {
+      out(c('gray', `No log yet for run ${id} — waiting for the first lines (Ctrl-C detaches).`));
+      return follow(row, path, opts, 0, { out, c });
+    }
+    // Tail only the complete lines; a last line still mid-append is left for
+    // the follow loop to read whole.
+    const complete = text.slice(0, text.lastIndexOf('\n') + 1);
+    emitTail(complete, opts, { out, c });
+    return follow(row, path, opts, Buffer.byteLength(complete, 'utf8'), { out, c });
   }
 
   if (text == null) {

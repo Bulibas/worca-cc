@@ -210,3 +210,67 @@ test('follow picks up a truncation (the log resets) without dying', { timeout: 1
   assert.equal(code, 0, text);
   assert.match(text, /new era/, 'post-truncation lines are picked up from offset 0');
 });
+
+test('follow on a run with no log file yet waits for it instead of crashing', { timeout: 15000 }, async () => {
+  const id = '33330004';
+  insertPipeline({ id, projectKey: 'proj-a', title: 'not started', status: 'running' });
+  const child = spawnFollow(['logs', id, '-f', '--json']);
+  const done = collect(child);
+  await new Promise((r) => setTimeout(r, 400));
+  const dir = join(projectStorePath('proj-a'), 'pipelines', `run-${id}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, RUN_LOG_FILE), line('orchestrator', 'info', 'first ever line') + '\n');
+  await new Promise((r) => setTimeout(r, 700));
+  child.kill('SIGINT');
+  const { code, text } = await done;
+  assert.equal(code, 0, text);
+  assert.match(text, /No log yet for run 33330004 — waiting/);
+  assert.match(text, /first ever line/, 'the file appearing mid-follow is picked up from offset 0');
+});
+
+test('follow applies --level and --component to appended lines too', { timeout: 15000 }, async () => {
+  const id = '33330005';
+  const dir = seedLog(id, [line('claude', 'error', 'seed error')]);
+  const child = spawnFollow(['logs', id, '-f', '--json', '--level', 'warn', '--component', 'claude']);
+  const done = collect(child);
+  await new Promise((r) => setTimeout(r, 400));
+  appendFileSync(join(dir, RUN_LOG_FILE), [
+    line('claude', 'info', 'below the threshold'),
+    line('orchestrator', 'error', 'other component'),
+    line('claude', 'warn', 'kept warn'),
+  ].join('\n') + '\n');
+  await new Promise((r) => setTimeout(r, 700));
+  child.kill('SIGINT');
+  const { code, text } = await done;
+  assert.equal(code, 0, text);
+  assert.match(text, /seed error/);
+  assert.match(text, /kept warn/);
+  assert.doesNotMatch(text, /below the threshold/);
+  assert.doesNotMatch(text, /other component/);
+});
+
+test('follow on a run that ended in error ends on its own', { timeout: 15000 }, async () => {
+  seedLog('33330006', [line('orchestrator', 'error', 'boom')], { status: 'error' });
+  const { code, text } = await collect(spawnFollow(['logs', '33330006', '-f', '--json']));
+  assert.equal(code, 0, text);
+  assert.match(text, /run 33330006 error\./);
+});
+
+test('follow never splits a record that is mid-append when read', { timeout: 15000 }, async () => {
+  const id = '33330007';
+  const dir = seedLog(id, [line('orchestrator', 'info', 'whole')]);
+  const file = join(dir, RUN_LOG_FILE);
+  const rec = line('claude', 'info', 'split across two flushes ✓');
+  const cut = Buffer.from(rec).length - 3; // inside the multi-byte ✓
+  appendFileSync(file, Buffer.from(rec).subarray(0, cut)); // a partial record before following starts
+  const child = spawnFollow(['logs', id, '-f', '--json']);
+  const done = collect(child);
+  await new Promise((r) => setTimeout(r, 400));
+  appendFileSync(file, Buffer.concat([Buffer.from(rec).subarray(cut), Buffer.from('\n')]));
+  await new Promise((r) => setTimeout(r, 700));
+  child.kill('SIGINT');
+  const { code, text } = await done;
+  assert.equal(code, 0, text);
+  const recs = text.split('\n').filter((l) => l.startsWith('{'));
+  assert.deepEqual(recs, [line('orchestrator', 'info', 'whole'), rec], 'each record printed once, whole');
+});
