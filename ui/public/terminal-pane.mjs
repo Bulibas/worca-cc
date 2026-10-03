@@ -91,8 +91,22 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
   const host = make('div', 'term-host');
   screen.append(probe, ...ansiProbes.map(([, p]) => p), host);
   root.append(resizer, head, context, banners, screen);
-  const handle = button('Terminal', 'term-handle', () => toggle());
+  // The opener: a terminal-window glyph in the rail's icon style (24 grid, 1.9 stroke, round caps), top
+  // right. Not the rail's `>_` (Scripts), so the two never read as the same thing.
+  const handle = button(null, 'term-handle', () => toggle());
   handle.setAttribute('aria-label', 'Open the terminal pane');
+  handle.title = 'Terminal (Ctrl+`)';
+  const SVG = 'http://www.w3.org/2000/svg';
+  const glyph = doc.createElementNS(SVG, 'svg');
+  for (const [k, v] of Object.entries({ viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.9',
+    'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) glyph.setAttribute(k, v);
+  for (const [tag, attrs] of [['rect', { x: '3', y: '4.5', width: '18', height: '15', rx: '2.5' }],
+    ['path', { d: 'M7.5 9.5l3 2.5-3 2.5' }], ['path', { d: 'M13 15h3.5' }]]) {
+    const n = doc.createElementNS(SVG, tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    glyph.append(n);
+  }
+  handle.append(glyph);
 
   // ── network ──────────────────────────────────────────────────────────────────────────────────────
   async function api(method, url, body) {
