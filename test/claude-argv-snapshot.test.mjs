@@ -33,6 +33,7 @@ import {
   runAgentExecution, runClarifierExecution,
 } from '../src/core/graph/executor.mjs';
 import { buildAskSpawnOptions } from '../src/core/ask/spawn.mjs';
+import { STREAM_TIMEOUT_ENV_KEYS } from '../src/core/model-env.mjs';
 import { runClaude } from '../src/core/claude-runner.mjs';
 import { generateTitle } from '../src/core/title.mjs';
 import { addGlobalModel, updateProvider } from '../src/core/settings.mjs';
@@ -86,7 +87,7 @@ chmodSync(SHIM, 0o755);
 // machine, whatever the developer's shell exports.
 const ENV_KEYS = [
   'WORCA_MOCK', 'ORCH_MOCK', 'WORCA_SUBAGENT_HOOKS', 'WORCA_HOST_GUARD', 'WORCA_EFFORT_FLAG', 'WORCA_DEBUG_SPAWN', 'WORCA_AGENT_USER',
-  'ENABLE_TOOL_SEARCH',
+  'ENABLE_TOOL_SEARCH', ...STREAM_TIMEOUT_ENV_KEYS,   // API_TIMEOUT_MS & co. are set only when the shell has not (Claude Code exports one)
   ...Object.keys(process.env).filter((k) => k.startsWith('ANTHROPIC_') || k.startsWith('CLAUDE_')),
 ];
 const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -213,7 +214,9 @@ function snapshotOf(rec, { prompt, systemPrompt, secrets = [] }) {
 function assertSnapshot(name, actual) {
   const file = join(SNAPSHOT_DIR, `${name}.json`);
   const text = `${JSON.stringify(actual, null, 2)}\n`;
-  for (const leak of [tmpdir(), shimDir, `PID ${process.pid}`]) {
+  // The run's own temp paths (every tmp() dir, the shim's included, and the stage dirs), not tmpdir() itself: where that
+  // is /tmp, it is also a substring of the Ask deny rule Read(//**/.worca-cc/tmp/**), which is correct output.
+  for (const leak of [...scratch, join(tmpdir(), 'worca-claude-'), `PID ${process.pid}`]) {
     assert.equal(text.includes(leak), false, `${name}: un-normalised value leaked: ${leak}`);
   }
   if (process.env.UPDATE_ARGV_SNAPSHOTS === '1') {
