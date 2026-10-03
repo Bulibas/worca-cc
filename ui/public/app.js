@@ -20822,10 +20822,12 @@ function setupHdActions(screen, record, data) {
       delete archiveBtn.dataset.archiveState; archiveBtn.disabled = false;
       // Spec §5.2/D2 fixes this copy VERBATIM — do not paraphrase (only the
       // run-title context line above it is ours; only the page name changed when
-      // History merged into Runs). `.confirm-message` already
+      // History merged into Runs). The title says "run", matching the Runs page's
+      // own naming; the message body below is the spec's, untouched.
+      // `.confirm-message` already
       // declares white-space:pre-line, so the blank line renders as a paragraph.
       const ok = await confirmModal({
-        title: 'Archive this pipeline?',
+        title: 'Archive this run?',
         message: `${r.title || r.id}\n\nIt moves out of Runs. The local branch, worktree, and run artifacts (logs, results, diff) are removed. The remote branch and any open PR stay untouched.${chainNote}`,
         confirmLabel: 'Archive',
         danger: true,
