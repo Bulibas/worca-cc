@@ -1432,7 +1432,7 @@ export async function writeState(pipelineDir, stateObj) {
       // v2 rows: execution_id === key. v1 rows leave every exec_* column NULL, so
       // the readers below reproduce today's exact shape for a v1 pipeline.
       const hasMeta = st.taskId != null || st.parentExecutionId != null || st.title != null || st.phaseOrdinal != null
-        || st.nodeKey != null || st.runtime != null || st.exitCode != null || st.bridgeCalls != null;
+        || st.nodeKey != null || st.runtime != null || st.exitCode != null || st.bridgeCalls != null || st.auxCosts != null || st.stoppedTurns != null;
       const meta = hasMeta
         ? s({ taskId: st.taskId ?? null, parentExecutionId: st.parentExecutionId ?? null,
               title: st.title ?? null, phaseOrdinal: st.phaseOrdinal ?? null,
@@ -1441,7 +1441,11 @@ export async function writeState(pipelineDir, stateObj) {
               // Model bridge (§8.6): requests the node initiated through the bridge.
               ...(st.bridgeCalls != null ? { bridgeCalls: st.bridgeCalls, bridgeContinued: st.bridgeContinued ?? 0 } : {}),
               // OpenRouter `:free` requests the node spent (openrouter-free.mjs).
-              ...(st.bridgeFreeCalls ? { bridgeFreeCalls: st.bridgeFreeCalls } : {}) })
+              ...(st.bridgeFreeCalls ? { bridgeFreeCalls: st.bridgeFreeCalls } : {}),
+              // Worca's own AI spend inside the step cost (Away mode, Auto workflow, run title).
+              ...(st.auxCosts ? { auxCosts: st.auxCosts } : {}),
+              // Agent turns cut before their `result`: a count and a lower bound, never in the cost.
+              ...(st.stoppedTurns ? { stoppedTurns: st.stoppedTurns } : {}) })
         : null;
       ins.run(
         id, st.key, st.nodeId ?? null, st.phase ?? null,
@@ -1466,6 +1470,21 @@ export async function writeState(pipelineDir, stateObj) {
     }
   });
   return obj;
+}
+
+/**
+ * The status of a pipeline row and the pause token its resume point carries (`pausedBy`; null
+ * when there is no row). A paused run harness compares them with its own token, to tell whether
+ * another writer — a resumed run's NEW harness — has taken the row over since it paused.
+ * @param {string} pipelineId
+ * @returns {{status:string|null, pausedBy:string|null}|null}
+ */
+export function pipelineRowStamp(pipelineId) {
+  if (!pipelineId) return null;
+  const row = getDb().prepare(`SELECT status,
+      json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pausedBy') AS paused_by
+    FROM pipelines WHERE id = ?`).get(pipelineId);
+  return row ? { status: row.status ?? null, pausedBy: row.paused_by ?? null } : null;
 }
 
 /**
@@ -2272,6 +2291,8 @@ function stepRowToStep(r) {
     if (em.exitCode != null) step.exitCode = em.exitCode;
     if (em.bridgeCalls != null) { step.bridgeCalls = em.bridgeCalls; step.bridgeContinued = em.bridgeContinued ?? 0; }
     if (em.bridgeFreeCalls) step.bridgeFreeCalls = em.bridgeFreeCalls;
+    if (em.auxCosts && typeof em.auxCosts === 'object') step.auxCosts = em.auxCosts;
+    if (em.stoppedTurns && typeof em.stoppedTurns === 'object') step.stoppedTurns = em.stoppedTurns;
   }
   return step;
 }

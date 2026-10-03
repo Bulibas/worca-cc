@@ -1,9 +1,10 @@
 // src/core/title.mjs
 import { runClaude } from './claude-runner.mjs';
-import { resolveModelEnv, catalogHasModel } from './config.mjs';
+import { resolveModelEnv, resolveModelCost, catalogHasModel } from './config.mjs';
 import { titleModel as storedTitleModel } from './settings.mjs';
 import { AUX_EFFORT } from './model-env.mjs';
 import { withRecoveryRetry } from './recovery-backoff.mjs';
+import { bridgeCostFor, forgetBridgeTag } from './bridge/telemetry.mjs';
 
 // The last-resort title model: the BUILT-IN Haiku id (config.mjs PREDEFINED_MODELS),
 // not the dated API id it used to be — a global entry that shadows the built-in
@@ -116,7 +117,7 @@ export function isRefusalTitle(t) {
  * an abort (a spawn failure, a refusal, an empty reply) — the caller logs it on
  * its own channel; the return value stays '' so every existing caller is unchanged.
  * @param {string} prompt
- * @param {{cwd:string, signal?:AbortSignal, model?:string, runModel?:string, onError?:(info:{model:string, error:Error})=>void, bin?:string, mock?:boolean, envScrub?:boolean, envAllowlist?:string[], tools?:string[], strictMcpConfig?:boolean, settingSources?:string[], disableSlashCommands?:boolean, mcpConfigPath?:string, permissionMode?:string}} opts
+ * @param {{cwd:string, signal?:AbortSignal, model?:string, runModel?:string, onError?:(info:{model:string, error:Error})=>void, bin?:string, mock?:boolean, envScrub?:boolean, envAllowlist?:string[], tools?:string[], strictMcpConfig?:boolean, settingSources?:string[], disableSlashCommands?:boolean, mcpConfigPath?:string, permissionMode?:string, onCost?:(c:{costUsd:number, usage:object|null, model:string})=>void, run?:Function, bridgeTag?:string}} opts
  * @returns {Promise<string>}
  */
 export async function generateTitle(prompt, opts = {}) {
@@ -132,7 +133,7 @@ export async function generateTitle(prompt, opts = {}) {
     // A provider 429 (a shared free pool) is retried with the recovery backoff;
     // nothing else is — a title is cosmetic, and an unspawnable CLI (stamped
     // network) would only make the run wait for it.
-    const { text: out } = await withRecoveryRetry(() => runClaude({
+    const { text: out } = await withRecoveryRetry(() => (opts.run || runClaude)({
       cwd: opts.cwd || process.cwd(),
       systemPrompt: SYSTEM,
       prompt: `Write the title for this task:\n\n${text.slice(0, 4000)}`,
@@ -140,7 +141,7 @@ export async function generateTitle(prompt, opts = {}) {
       // Aux calls keep their model choice but still route through the catalog's
       // env (design §4.8) — a global entry matching this id carries its routing
       // env everywhere the id is used.
-      modelEnv: resolveModelEnv(model),
+      modelEnv: resolveModelEnv(model, { tag: opts.bridgeTag || undefined }),   // tag: read a bridged model's upstream cost back
       effort: AUX_EFFORT,
       permissionMode: opts.permissionMode || 'acceptEdits',
       allowedTools: [],            // empty → no --allowedTools flag → claude defaults; pure text gen
@@ -165,13 +166,27 @@ export async function generateTitle(prompt, opts = {}) {
       settingSources: opts.settingSources,
       disableSlashCommands: opts.disableSlashCommands,
       mcpConfigPath: opts.mcpConfigPath,
-      onEvent: () => {},
+      // Every priced result is real spend (a 429 retry spawns again): hand it to the caller to book.
+      onEvent: (e) => {
+        if (e?.type !== 'result' || e.costUsd == null || typeof opts.onCost !== 'function') return;
+        const usage = e.raw && typeof e.raw === 'object' ? e.raw.usage ?? null : null;
+        const up = opts.bridgeTag ? bridgeCostFor(opts.bridgeTag) : null;   // a bridged model: the upstream's own figure wins
+        if (up) forgetBridgeTag(opts.bridgeTag);
+        const c = up ? up.costUsd : resolveModelCost(model, Number(e.costUsd), usage);
+        try { opts.onCost({ costUsd: Number.isFinite(c) ? c : Number(e.costUsd), usage, model }); } catch { /* a sink never fails the title */ }
+      },
     }), { classes: ['rate_limit'], signal: opts.signal });
     const title = sanitizeTitle(out);
     if (!title) { report(new Error('the model returned an empty reply')); return ''; }
     if (isRefusalTitle(title)) { report(new Error(`the model did not write a title: ${title.slice(0, 120)}`)); return ''; }
     return title;
   } catch (err) {
+    // A bridged title call cut before its `result` (a stop) was still billed by its upstream: book that figure.
+    const up = opts.bridgeTag ? bridgeCostFor(opts.bridgeTag) : null;
+    if (up && typeof opts.onCost === 'function') {
+      forgetBridgeTag(opts.bridgeTag);
+      try { opts.onCost({ costUsd: up.costUsd, usage: null, model }); } catch { /* a sink never fails the title */ }
+    }
     if (err && err.name === 'AbortError') return ''; // run was stopped — caller keeps provisional
     report(err instanceof Error ? err : new Error(String(err)));
     return '';

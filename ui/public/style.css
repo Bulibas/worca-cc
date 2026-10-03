@@ -3485,6 +3485,29 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
    both themes (--amber itself is the solid chip colour). */
 .hd-menu .hd-report{color:var(--amber-ink);}
 .hd-menu .hd-report:hover{background:var(--amber-bg);}
+/* The header cost's breakdown (app.js paintCostBreakdown): the meta line's cost becomes a
+   trigger, its panel hangs off the header card. While it is open the card lifts above the
+   sticky tabs, exactly like the ⋯ menu above. Tokens only; the Away mode row is marked by a
+   small amber swatch, never by an accent edge. */
+.cost-bd-btn{all:unset;cursor:pointer;font:inherit;border-bottom:1px dotted var(--ink-3);}
+.cost-bd-btn:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radius:4px;}
+.rd-header:has(> .cost-pop:not([hidden])),.hd-header:has(> .cost-pop:not([hidden])){position:relative;z-index:6;}
+/* The page's sticky top bar (z-index 5) stays above that lifted card: scrolling closes nothing, and an
+   open panel must never cover Back, Pause or Stop. */
+.rd:has(> .rd-details > .rd-header > .cost-pop:not([hidden])) > .rd-bar,.hd:has(> .hd-details > .hd-header > .cost-pop:not([hidden])) > .hd-bar{z-index:7;}
+.cost-pop{position:absolute;z-index:1;box-sizing:border-box;min-width:220px;max-width:calc(100% - 16px);padding:10px 12px;
+  background:var(--panel);color:var(--ink);border:1px solid var(--line-2);border-radius:var(--r-card);
+  box-shadow:var(--shadow-menu);font:400 12.5px var(--sans);}
+.cost-pop[hidden]{display:none;}
+.cost-bd{display:grid;grid-template-columns:1fr auto;gap:4px 16px;}
+.cost-bd-row{display:contents;}
+.cost-bd-v{font-family:var(--mono);text-align:right;font-variant-numeric:tabular-nums;}
+.cost-bd-n{grid-column:1 / -1;margin-top:-3px;font-size:11.5px;color:var(--ink-2);}
+.cost-bd-row[data-kind="away"] > .cost-bd-l::before{content:"";display:inline-block;width:8px;height:8px;margin-right:6px;
+  border-radius:2px;background:var(--amber);}
+.cost-bd-hr{grid-column:1 / -1;margin:4px 0;border:0;border-top:1px solid var(--line);}
+.cost-bd-total{font-weight:600;}
+.cost-bd-floor{color:var(--ink-2);}
 /* 9px, not the 8px its siblings use: this one is 12.5px type against .hd-back's
    13.5px, so equal padding renders it 36px tall in a row of 38px buttons
    (measured in headless Chrome). The extra pixel per side matches .hd-pr, which
@@ -6802,11 +6825,19 @@ body.view-workspaces .level-banner{margin:12px 32px 0;flex:0 0 auto;}
 .gv-world .xfoot .xrow.is-active .led{background:var(--blue);}
 .gv-world .xfoot .xrow.is-done .led{background:var(--green);}
 .gv-world .xfoot .xrow.is-error .led{background:var(--red);}
+/* Away mode under the execution it answered: ONE --gv-exec-row-h line (bandUnits bills 1), the glyph
+   centred on the exec led's column, an amber wash for booked spend — never an edge line. */
+.gv-world .xfoot>.xaway{height:var(--gv-exec-row-h);display:flex;align-items:center;gap:7px;padding:0 11px 0 9px;background:var(--amber-wash);}
+.gv-world .xfoot>.xaway.is-stopped{background:none;}
+.gv-world .xfoot .xaway-ico{display:inline-flex;flex:0 0 auto;width:12px;height:12px;color:var(--amber-ink);}
+.gv-world .xfoot .xaway-ico svg{width:12px;height:12px;}
+.gv-world .xfoot .xaway.is-stopped .xaway-ico{color:var(--ink-3);}
 .gv-world .ngate{position:absolute;top:-7px;right:-7px;width:15px;height:15px;border-radius:50%;
   background:var(--amber-bg);color:var(--amber-ink);border:1px solid var(--amber);
   font:9px/13px var(--sans);text-align:center;z-index:3;}
 .gv-world .nrun{position:absolute;top:-9px;right:16px;display:flex;gap:6px;background:var(--panel);
   border:1px solid var(--line-2);border-radius:999px;padding:1px 8px;font:10px/1.4 var(--mono);color:var(--ink-3);}
+.gv-world .nrun .away{padding:0 5px;border-radius:999px;background:var(--amber-wash);color:var(--amber-ink);}
 .gv-world .wbadge .wfired{margin-left:5px;font-weight:700;}
 .gv-chip{position:absolute;z-index:6;pointer-events:none;background:var(--red-bg);color:var(--red-ink);
   border:1px solid var(--red);border-radius:8px;padding:4px 8px;font-size:11px;font-weight:600;white-space:nowrap;}

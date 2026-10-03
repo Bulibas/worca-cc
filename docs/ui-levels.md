@@ -153,8 +153,10 @@ be skipped by forgetting it.
 | "Scheduled" group (runs due within 24 h) | S — it only exists when something is scheduled |
 | Needs-input pill and banner; clarify questions; Auto proposal ("Review the workflow": preview that opens a pan/zoom popup, Accept) — all answered on the run page | S |
 | Recovery prompt, cycle gate, cost-pause banner, retained-work banner | all |
-| Run page glance: the run's name as the page title, the status line (state, then the step), time · cost · changes, the Live view switch and its fogged graph of the running step(s), parallel steps (Now), one row per tab, a waiting question below its own heading, the result actions | S |
+| Run page glance: the run's name as the page title, the status line (state, then the step), time · cost (with its Away mode share) · changes, the Live view switch and its fogged graph of the running step(s), parallel steps (Now), one row per tab, a waiting question below its own heading, the result actions | S |
 | Workflow graph with status colours, gate pip, End result; Workflow, Overview and Q&A tabs | S |
+| Run header cost and its breakdown (agents, Away mode, Auto workflow, run title; stopped reviews and stopped agent turns apart); the Overview cost card's Away mode share | S |
+| "Answered for you": one group per ask (kind · time · model · cost of its review, or "review stopped" and its lower bound), the answers, Check; the heading's answer count and what the Away mode reviews cost | S |
 | Diff tab (live worktree while running, the final patch after) | A |
 | Live log pane (run page › Logs), log search / copy / auto-scroll | A |
 | Branch chip, progress n/m · step on the card, model · effort pill, graph zoom cluster | A |
@@ -162,7 +164,7 @@ be skipped by forgetting it.
 | Actions tab, Overview actions strip, Ship It 'Try it first' strip | A |
 | Running-action pill in the header, sidebar Running actions card | all — shown only while a service runs |
 | Log filters (source, level, node, cycle) | E |
-| Graph node totals, fan and execution strips, loop badges | E |
+| Graph node totals, fan and execution strips, Away mode chips and bands, loop badges | E |
 | Agents tab, worktree row, Auto proposal tunables table | E |
 
 ### History
@@ -170,6 +172,8 @@ be skipped by forgetting it.
 | Element | Level |
 |---|---|
 | List, project filter, Refresh; Overview (verdict, findings, duration, cost, task); Clarify tab; Resume | S |
+| Header cost and its breakdown (agents, Away mode, Auto workflow, run title; stopped reviews and stopped agent turns apart); the glance and Overview cost's Away mode share | S |
+| "Answered for you", as on the run page | S |
 | "Files changed" list on the Overview | S — the stand-in for the Diff tab |
 | Diff tab, diff pill, inline comments; Create PR / View PR; branch line; ⋯ menu (Archive, Report); Artifacts tab | A |
 | Actions tab, Overview actions strip, Ship It 'Try it first' strip | A |

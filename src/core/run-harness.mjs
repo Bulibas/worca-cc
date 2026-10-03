@@ -14,6 +14,7 @@
 // interaction via answer()/stop().
 
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -25,7 +26,7 @@ import { generateTitle } from './title.mjs';
 import {
   createPipeline, updatePipelineTitle, appendAudit, writeState, artifactPaths, slugify, today,
   recordArtifact, writeClarify, readPipelineExtras, claimPipelineOwnership, touchHeartbeat,
-  clearPipelineOwnership, HEARTBEAT_INTERVAL_MS, upsertSubAgent, listRunArtifacts,
+  clearPipelineOwnership, HEARTBEAT_INTERVAL_MS, upsertSubAgent, listRunArtifacts, pipelineRowStamp,
 } from './artifacts.mjs';
 import { diffNameStatus, diffNumstat, diffPatch, untrackedFiles, untrackedPatch } from './git-info.mjs';
 import { claimPipelineCommand, discardPendingPipelineCommands, CONTROL_CHECK_INTERVAL_MS } from './pipeline-commands.mjs';
@@ -57,7 +58,7 @@ import {
   probeClaudeCapabilities, explainUnspawnableClaude,
 } from './preflight.mjs';
 import { fanoutCap, mapWithCap } from './fanout.mjs';
-import { resolveStepModels, observeModelCost, resolveModelCost, modelCostConfig, readTeamMetricsPrefs, catalogHasModel, listModels } from './config.mjs';
+import { resolveStepModels, observeModelCost, resolveModelCost, modelCostConfig, readTeamMetricsPrefs, catalogHasModel, listModels, liveCostRates, estimateCost } from './config.mjs';
 import { bridgeCallsFor, bridgeCostFor, forgetBridgeTag } from './bridge/telemetry.mjs';
 import { readGuardrailSet } from './guardrail-store.mjs';
 import { unionGuardrails, guardrailsToPermissionRules, mergePermissionRules } from './guardrails.mjs';
@@ -1591,6 +1592,7 @@ export class RunHarness extends EventEmitter {
   }
 
   async _resume() {
+    this._pausedHandoff = false; this._handedOff = false; this._pauseToken = null;   // this harness owns its row again
     const saved = this.resumeOpts;
     if (!saved?.row || !saved?.resumePoint) throw new Error('resume(): no saved pipeline provided');
     const { row, resumePoint: rp, steps } = saved;
@@ -1638,6 +1640,9 @@ export class RunHarness extends EventEmitter {
         return { ...s, activeMs: (s.activeMs || 0) + Math.max(0, Math.min(anchor, now) - s.runningSince), runningSince: null };
       });
       this.state.totalActiveMs = sumStepActive(this.state.steps);
+      // The total is Σ steps (I2): rehydrate it with them, or the first persist of a resumed run writes
+      // $0 and a resumed run that books nothing new finishes at $0 while its ledger keeps the spend.
+      this.state.totalCostUsd = sumStepCosts(this.state.steps);
       this.baseName = row.base_name;
       this.planDatePrefix = row.date_prefix;
       this.pipeline = { id: row.id, dir: rp.pipelineDir, promptText: row.prompt || '' };
@@ -4059,6 +4064,14 @@ export class RunHarness extends EventEmitter {
     if (Number.isFinite(analysis.peakContextTokens)) record = { ...record, meta: { ...(record.meta || {}), reviewPeakContextTokens: analysis.peakContextTokens } };
     // The review ran for this ask: the record names its model (null = the CLI default) and effort.
     if (analysis.model !== undefined) record = { ...record, model: analysis.model, effort: analysis.effort };
+    // The review's identity and spend, per ASK (one review answers every question of it). A review
+    // stopped before its result has no cost (null) — only its list-price LOWER BOUND (I4).
+    if (analysis.reviewId) {
+      record = { ...record, reviewId: analysis.reviewId, reviewStatus: analysis.reviewStatus, costUsd: analysis.costUsd ?? null,
+        tokens: analysis.tokens ?? null, ...(analysis.reviewStatus === 'stopped' ? { floorUsd: analysis.floorUsd ?? null } : {}) };
+    }
+    const askExec = this._nightAskExecution(q);
+    if (askExec) record = { ...record, executionId: askExec };
     // The record must be readable by nightDecision(id) BEFORE answer() resolves the ask (the
     // answer writers run right after), so stage it first; it is written/emitted only once an
     // answer landed.
@@ -4219,11 +4232,18 @@ export class RunHarness extends EventEmitter {
    *  unwind the pending _ask; the next step's cap check catches it. */
   async _nightAnalyze(questions, q, into = {}) {
     const startedAt = new Date().toISOString();
-    const n = (this._nightSeq = (this._nightSeq || 0) + 1);
+    // Pin the asker while its row is still open: the user's answer ends the ask at once, so a clarifier
+    // can finish (and the next node start) before the cut review settles and books.
+    const asker = this._nightAskExecution(q);
+    if (asker && !q.executionId) q = { ...q, executionId: asker };
+    // Random, not a per-instance counter: a resumed run is a NEW harness whose counter restarted at 1,
+    // so `night-decider-1` was upserted over the first review's row (sub_agents ON CONFLICT, artifacts.mjs).
+    const id = `night-decider-${randomUUID().slice(0, 8)}`;
     const { config } = effectiveNightConfig(this.projectDir);
     const pair = await this._nightDeciderPair(config);
     // The decision record names the pair the review ran with, even when the call then fails.
     into.model = pair.model; into.effort = pair.effort;
+    const tokensOf = (u) => (Number(u?.input_tokens) || 0) + (Number(u?.output_tokens) || 0);
     let res;
     try {
       res = await runNightAnalysis({
@@ -4233,15 +4253,32 @@ export class RunHarness extends EventEmitter {
         context: q.kind === 'questions' ? `Asked by ${q.agent || 'an agent'} mid-step.` : '', model: pair.model, effort: pair.effort,
         bin: this.claude.bin, mock: !!this.claude.mock, envScrub: this.guardrails?.envScrub, signal: this._nightSignal(),
         run: this.opts.nightRunClaude,          // test seam; undefined → runClaude
+        bridgeTag: id,                          // a bridged decider model: its upstream cost comes back under this tag
       });
     } catch (err) {
-      // Book what a failed call cost, then let the strategy fall back (flagged).
-      if (err?.costUsd > 0) this._nightBookAnalysis(n, q, startedAt, { costUsd: err.costUsd, usage: err.usage || {} }, 'error', pair);
       if (Number.isFinite(err?.peakContextTokens)) into.peakContextTokens = err.peakContextTokens;
+      if (err?.notStarted) throw err;                       // aborted before the spawn: nothing ran, nothing to book
+      into.reviewId = id;
+      if (err?.priced) {
+        // A failed call that still reported its cost: book it, then let the strategy fall back (flagged).
+        this._nightBookAnalysis(id, q, startedAt, { costUsd: err.costUsd, usage: err.usage || {} }, 'error', pair);
+        Object.assign(into, { reviewStatus: 'error', costUsd: err.costUsd, tokens: tokensOf(err.usage) });
+      } else {
+        const floorUsd = this._nightBookStopped(id, q, startedAt, err?.turnUsage || {}, pair, err?.turnModel);
+        Object.assign(into, { reviewStatus: 'stopped', costUsd: null, tokens: tokensOf(err?.turnUsage), floorUsd });
+      }
       throw err;
     }
     if (Number.isFinite(res.peakContextTokens)) into.peakContextTokens = res.peakContextTokens;
-    this._nightBookAnalysis(n, q, startedAt, res, 'finished', pair);
+    into.reviewId = id;
+    if (res.priced) {
+      this._nightBookAnalysis(id, q, startedAt, res, 'finished', pair);
+      Object.assign(into, { reviewStatus: 'finished', costUsd: res.costUsd, tokens: tokensOf(res.usage) });
+    } else {
+      // A reply with no priced `result` frame: its cost is unknown, never a silent $0.
+      const floorUsd = this._nightBookStopped(id, q, startedAt, res.turnUsage || {}, pair, res.turnModel);
+      Object.assign(into, { reviewStatus: 'stopped', costUsd: null, tokens: tokensOf(res.turnUsage), floorUsd });
+    }
     return res.byId;
   }
 
@@ -4266,16 +4303,60 @@ export class RunHarness extends EventEmitter {
   /** One nightDecider call as a sub-agent row plus its cost on the run (like _recordAutoCost).
    *  `runModel` is what the row's model pill and sub_agents.run_model show: the model the review
    *  ACTUALLY ran on (the decider's), not the run's. */
-  _nightBookAnalysis(n, q, startedAt, res, status, pair) {
-    const stepKey = q.executionId || this._runningStepKeys()[0] || this.state.steps.at(-1)?.key || 'x:preflight:1';
-    const rec = { id: `night-decider-${n}`, label: `Night decider (${q.kind})`, status, startedAt, finishedAt: new Date().toISOString(),
+  _nightBookAnalysis(id, q, startedAt, res, status, pair) {
+    const stepKey = this._nightStepKey(q);
+    const rec = { id, label: `Away mode review (${q.kind})`, status, startedAt, finishedAt: new Date().toISOString(),
       costUsd: res.costUsd, tokens: (res.usage.input_tokens || 0) + (res.usage.output_tokens || 0), subagentType: 'night-decider',
       nodeId: q.nodeId || null, stepKey, runModel: pair.model || null, effort: pair.effort || null };
-    if (!this.state.subAgents.some((s) => s.id === rec.id)) this.state.subAgents.push(rec);
+    // A review settling after a resumed run took the row over: its sub_agents row (a random id) and its
+    // ledger line (_recordCost) are kept, but this harness no longer speaks for the run (no state, no frames).
+    const handedOff = this._rowHandedOff();
+    if (!handedOff && !this.state.subAgents.some((s) => s.id === rec.id)) this.state.subAgents.push(rec);
     this._upsertSubAgent(rec);
-    this._subAgentTransition('spawn', rec);
-    this._subAgentTransition('finish', rec);
-    this._recordCost(res.costUsd, stepKey);
+    if (!handedOff) {
+      this._subAgentTransition('spawn', rec);
+      this._subAgentTransition('finish', rec);
+    }
+    this._recordCost(res.costUsd, stepKey, { aux: 'away' });
+  }
+
+  /** The step an Away mode review books on: the asking execution, else a running step, else the last row. */
+  _nightStepKey(q) {
+    return this._nightAskExecution(q) || this._runningStepKeys()[0] || this.state.steps.at(-1)?.key || 'x:preflight:1';
+  }
+
+  /** The execution an ask came from: the one it names, else its node's open row. A clarifier's asks name
+   *  only their node (graph/executor.mjs), and _ask froze every running clock before the decision, so
+   *  neither `_runningStepKeys()` nor the last row is the asker in a parallel graph. Null when unknown. */
+  _nightAskExecution(q) {
+    return q.executionId || (q.nodeId && this.state.steps.findLast((s) => s.nodeId === q.nodeId && s.status === 'start')?.key) || null;
+  }
+
+  /** A review that ended with no priced `result` (the user answered, a pause or stop, the 5-min
+   *  timeout, a reply with no cost): a `stopped` row with its tokens and NO cost, and its list-price
+   *  LOWER BOUND kept apart (I4: input/cache tokens are exact at message start, output is a placeholder
+   *  ≤ the final count). The floor is priced at the decider pair's model; with none configured (the
+   *  CLI's default model) at `turnModel`, the model the review's own messages named. Returns the floor:
+   *  a number (0 for a {free} model or nothing streamed), or null when no model is known or it has no
+   *  list price. */
+  _nightBookStopped(id, q, startedAt, turnUsage, pair, turnModel = null) {
+    const stepKey = this._nightStepKey(q);
+    const tokens = (Number(turnUsage.input_tokens) || 0) + (Number(turnUsage.output_tokens) || 0);
+    const rec = { id, label: `Away mode review (${q.kind})`, status: 'stopped', startedAt, finishedAt: new Date().toISOString(),
+      costUsd: null, tokens, subagentType: 'night-decider', nodeId: q.nodeId || null, stepKey, runModel: pair.model || null, effort: pair.effort || null };
+    // As _nightBookAnalysis: a harness a resumed run replaced keeps the row, never the state or a frame.
+    const handedOff = this._rowHandedOff();
+    if (!handedOff && !this.state.subAgents.some((s) => s.id === rec.id)) this.state.subAgents.push(rec);
+    this._upsertSubAgent(rec);
+    if (!handedOff) {
+      this._subAgentTransition('spawn', rec);
+      this._subAgentTransition('finish', rec);
+    }
+    let floorUsd = null;
+    try { const rates = liveCostRates(pair.model || turnModel); floorUsd = rates ? estimateCost(turnUsage, rates) : null; } catch { floorUsd = null; }
+    if (!Number.isFinite(floorUsd)) floorUsd = null;
+    this._recordAuxStopped(stepKey, 'away', floorUsd);
+    return floorUsd;
   }
 
   /** List the user's attached files copied into <pipeline>/extras/ (basename + abs
@@ -5020,6 +5101,11 @@ export class RunHarness extends EventEmitter {
       if (text) this._log(role, 'warn', text, { ...attr, stream: 'err' });
       return;
     }
+    // I1: a turn the CLI never closes with a `result` (pause, stop, a crash, a retried attempt) was
+    // still billed. Keep the latest usage per top-level message id (the CLI repeats it on every content
+    // block) until the step's `result` books the real figure; _execStep closes what is left.
+    const am = e.raw && typeof e.raw === 'object' && e.raw.type === 'assistant' && !e.raw.parent_tool_use_id ? e.raw.message : null;
+    if (am && am.usage && attr?.stepKey) this._noteOpenTurn(attr.stepKey, attr.model, am);
     // Capture actual spend before anything returns early. The runner tags the
     // terminal stream-json `result` with costUsd (Claude's total_cost_usd; 0 in
     // mock). Fall back to raw.total_cost_usd defensively. e.raw may be a string
@@ -5051,7 +5137,11 @@ export class RunHarness extends EventEmitter {
       : costCfg
         ? resolveModelCost(attr.model, rawCost, e.raw.usage, costCfg)
         : rawCost;
+    if (isResult) this._openTurns?.delete(attr?.stepKey);        // the result prices every turn it closes
     if (isResult) this._recordBridgeCalls(attr?.stepKey, attr?.executionId);
+    // Booked here, so never again at _closeOpenTurns' flush: _recordBridgeCalls keeps a tag under which
+    // no call was counted, and the call and cost maps evict apart (bridge/telemetry.mjs MAX_TAGS).
+    if (upstreamCost) forgetBridgeTag(attr.executionId);
     if (Number.isFinite(cost)) this._recordCost(cost, attr?.stepKey);
     else if (isResult && !this.claude.mock) {
       // A {perMtok} model prices from tokens alone, so a result with no usage is
@@ -5534,12 +5624,37 @@ export class RunHarness extends EventEmitter {
     this._persist().catch(() => {});
   }
 
-  _recordCost(costUsd, stepKey = null) {
+  /** Book `costUsd` on step `stepKey` (and the run total + spend ledger). `aux` names a worca-owned
+   *  AI call (Away mode review, Auto workflow, run title): its share is ALSO tallied in
+   *  step.auxCosts[aux] — at the SAME roundUsd grain as step.costUsd, so Σ aux never exceeds the
+   *  step (I3) — so every surface can show it apart from, never instead of, the step cost.
+   *  A key that names no step falls back to the preflight bookend (logged once): dropping it would
+   *  leave the ledger above the run total. */
+  _recordCost(costUsd, stepKey = null, { aux = null } = {}) {
     if (!Number.isFinite(costUsd) || costUsd < 0) return;
     const key = stepKey
       || (this.state.cycle ? `${this.state.phase}#${this.state.cycle}` : this.state.phase);
-    const step = this.state.steps.find((s) => s.key === key);
-    if (step) step.costUsd = roundUsd((step.costUsd || 0) + costUsd);
+    if (this._rowHandedOff()) {
+      // A paused harness whose row a resumed run now owns (a late run title): the call was billed,
+      // so the ledger keeps it, but this stale state is never written over that run, broadcast as
+      // its state, or logged into its run log. The resumed run's total never saw this call.
+      if (costUsd > 0 && this.pipeline?.id) {
+        try { recordCostDelta({ pipelineId: this.pipeline.id, stepKey: key, amountUsd: costUsd }); } catch { /* best-effort */ }
+      }
+      return;
+    }
+    const step = this._costStep(key);
+    if (step) {
+      step.costUsd = roundUsd((step.costUsd || 0) + costUsd);
+      if (aux) {
+        const b = ((step.auxCosts ||= {})[aux] ||= { usd: 0, calls: 0 });
+        b.usd = roundUsd(b.usd + costUsd); b.calls += 1;
+      }
+    } else if (costUsd > 0 && !this._costNoRowLogged) {
+      // No step rows at all (before the preflight bookend): the ledger below still sees it, the total cannot.
+      this._costNoRowLogged = true;
+      this._log('orchestrator', 'warn', `cost for "${key}" has no step row yet; it is in the spend ledger but not in this run's total`);
+    }
     // Derive the pipeline total from the per-step figures so it ALWAYS equals
     // their sum. Keeping a separate running total and rounding it on every add
     // drifts from Σ steps (e.g. 0.00005 + 0.00015 gave total 0.0003 vs Σ 0.0002).
@@ -5548,12 +5663,85 @@ export class RunHarness extends EventEmitter {
     // accounting must never kill a run; ledger and state share the same DB,
     // so failures co-occur with the _persist catch below anyway.
     if (costUsd > 0 && this.pipeline?.id) {
-      try { recordCostDelta({ pipelineId: this.pipeline.id, stepKey: key, amountUsd: costUsd }); }
+      try { recordCostDelta({ pipelineId: this.pipeline.id, stepKey: step?.key ?? key, amountUsd: costUsd }); }
       catch (err) { this._log('orchestrator', 'warn', `cost ledger write failed: ${err?.message || err}`); }
     }
     this.state.updatedAt = new Date().toISOString();
     this._emit('state', this.getState());
     this._persist().catch(() => {});
+  }
+
+  /** The step a cost books on: `key`, else the preflight bookend, else the first row (null when
+   *  there are no rows yet). Logs the fallback once per harness. */
+  _costStep(key) {
+    const hit = this.state.steps.find((s) => s.key === key);
+    if (hit) return hit;
+    const fb = this.state.steps.find((s) => s.key === 'x:preflight:1') || this.state.steps[0] || null;
+    if (fb && !this._costFallbackLogged) {
+      this._costFallbackLogged = true;
+      this._log('orchestrator', 'warn', `cost for "${key}" has no step row; booked on ${fb.key}`);
+    }
+    return fb;
+  }
+
+  /** A worca AI call that ended before a priced `result` frame: count it on its step and keep its
+   *  LOWER BOUND apart — never costUsd, the total, the ledger or a cap (I4). `floorUsd` is the
+   *  list-price floor of what it streamed (≥ 0; a {free} model gives 0), or null/undefined when the
+   *  model has no list price (counted, not priced). */
+  _recordAuxStopped(stepKey, kind, floorUsd) {
+    if (this._rowHandedOff()) return;      // a lower bound is display-only: nothing to keep for a row this harness no longer owns
+    const step = this._costStep(stepKey);
+    if (!step) return;
+    const b = ((step.auxCosts ||= {})[kind] ||= { usd: 0, calls: 0 });
+    b.stopped = (b.stopped || 0) + 1;
+    if (Number.isFinite(floorUsd) && floorUsd >= 0) b.floorUsd = (b.floorUsd || 0) + floorUsd;
+    this.state.updatedAt = new Date().toISOString();
+    this._emit('state', this.getState());
+    this._persist().catch(() => {});
+  }
+
+  /** Remember one streamed top-level assistant message of step `stepKey` until a `result` prices it. */
+  _noteOpenTurn(stepKey, model, message) {
+    const open = (this._openTurns ||= new Map());
+    let t = open.get(stepKey);
+    if (!t) open.set(stepKey, (t = { model: model || null, msgModel: null, perMsg: new Map() }));
+    t.perMsg.set(message.id ?? `n${t.perMsg.size}`, message.usage);
+    // The model the CLI's own message names: the floor's price when the node has no configured model
+    // (the CLI's default). The last non-empty one wins.
+    if (typeof message.model === 'string' && message.model) t.msgModel = message.model;
+  }
+
+  /** Step `stepKey` ended (paused, stopped, failed, retried) with turns no `result` priced.
+   *  A BRIDGED node first: the requests its upstream already answered were priced by the upstream
+   *  itself (OpenRouter's usage.cost, booked by the bridge under the execution id — the step key of
+   *  a v2 row). That figure is real spend, never a floor: it is booked exactly as the result path
+   *  books it (_onAgentEvent: the upstream wins over the CLI and over a pin), the request counters
+   *  are folded, and the tag is forgotten so a --resume'd spawn starts from zero. Turns the upstream
+   *  priced are NOT counted again below. Every other node: count the turns on the step with their
+   *  tokens and a list-price LOWER BOUND apart (I4) — never costUsd, the total, the ledger or a cap.
+   *  Input/cache tokens are exact at message start, output is a placeholder ≤ the final count.
+   *  `step.stoppedTurns = { turns, tokens, floorUsd }`; floorUsd stays null while no closed turn had
+   *  a list price ({free} → 0). The caller (_execStep) emits and persists; the bridged branch books
+   *  through _recordCost, which persists itself. */
+  _closeOpenTurns(stepKey) {
+    const t = this._openTurns?.get(stepKey);
+    this._openTurns?.delete(stepKey);
+    const step = this.state.steps.find((s) => s.key === stepKey);
+    if (!step) return;
+    const up = bridgeCostFor(stepKey);
+    this._recordBridgeCalls(stepKey, stepKey);
+    forgetBridgeTag(stepKey);
+    if (up && Number.isFinite(up.costUsd)) { this._recordCost(up.costUsd, stepKey); return; }
+    if (!t || !t.perMsg.size) return;
+    const u = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+    for (const m of t.perMsg.values()) for (const k of Object.keys(u)) u[k] += Number(m?.[k]) || 0;
+    let floor = null;
+    // The node's configured model wins; with none (the CLI's default), the model its messages named.
+    try { const rates = liveCostRates(t.model || t.msgModel); floor = rates ? estimateCost(u, rates) : null; } catch { floor = null; }
+    const b = (step.stoppedTurns ||= { turns: 0, tokens: 0, floorUsd: null });
+    b.turns += t.perMsg.size;
+    b.tokens += u.input_tokens + u.output_tokens;
+    if (Number.isFinite(floor)) b.floorUsd = (b.floorUsd || 0) + floor;
   }
 
   _emit(event, payload) {
@@ -5585,6 +5773,9 @@ export class RunHarness extends EventEmitter {
       // The run's own model is the title default (#422, title.mjs#resolveTitleModel):
       // an install with no first-party model titles its runs with no setup.
       runModel: this.claude.model,
+      run: this.opts.titleRunClaude,            // test seam (like nightRunClaude); undefined → runClaude
+      bridgeTag: `run-title:${this.pipeline?.id || 'run'}`,   // a bridged title model: its upstream cost comes back under this tag
+      onCost: (c) => this._bookTitleCost(c),
       // A failed title used to vanish into a kept provisional title. Say so in
       // the run log — once per run, there is only ever one title call.
       onError: ({ model, error }) => this._log('orchestrator', 'warn',
@@ -5594,6 +5785,24 @@ export class RunHarness extends EventEmitter {
       envScrub: this.guardrails?.envScrub || undefined,
       envAllowlist: this.guardrails?.envScrub ? this.guardrails.envAllowlist : undefined,
     };
+  }
+
+  /** The run-title call is worca's own AI spend during the run: a row + an aux 'title' share on preflight. */
+  _bookTitleCost({ costUsd, usage, model }) {
+    const now = new Date().toISOString();
+    const rec = { id: `run-title-${randomUUID().slice(0, 8)}`, label: 'Run title', status: 'finished', startedAt: now, finishedAt: now,
+      costUsd, tokens: (Number(usage?.input_tokens) || 0) + (Number(usage?.output_tokens) || 0),
+      subagentType: 'run-title', uiPhase: 'preflight', nodeId: 'preflight', stepKey: 'x:preflight:1', runModel: model || null };
+    // A title landing after a resumed run took the row over: its sub_agents row (keyed) and its ledger
+    // line (_recordCost) are kept, but this harness no longer speaks for the run (no state, no frames).
+    const handedOff = this._rowHandedOff();
+    if (!handedOff) this.state.subAgents.push(rec);
+    this._upsertSubAgent(rec);
+    if (!handedOff) {
+      this._subAgentTransition('spawn', rec);
+      this._subAgentTransition('finish', rec);
+    }
+    this._recordCost(costUsd, 'x:preflight:1', { aux: 'title' });
   }
 
   /**
@@ -5620,15 +5829,40 @@ export class RunHarness extends EventEmitter {
       .catch(() => { /* generateTitle already swallows; this is a final backstop */ });
   }
 
+  /** @returns {Promise<boolean>} whether the state reached the row. */
   async _persist() {
     const rpNow = this.state.resumePoint;
     if (rpNow && typeof rpNow === 'object' && this._metricsIv) rpNow.interventions = { ...this._metricsIv };
-    if (!this.pipeline) return;
+    if (!this.pipeline) return false;
+    if (this._rowHandedOff()) return false;
     try {
-      await writeState(this.pipeline.dir, this.state);
+      // A paused harness names itself in the saved point (`pausedBy`, written here only, never kept
+      // in state): _rowHandedOff reads it back. A resumed run's new harness never writes this token.
+      const st = this._pauseToken && rpNow && typeof rpNow === 'object'
+        ? { ...this.state, resumePoint: { ...rpNow, pausedBy: this._pauseToken } } : this.state;
+      await writeState(this.pipeline.dir, st);
+      return true;
     } catch {
       /* persistence is best-effort */
+      return false;
     }
+  }
+
+  /** True once a PAUSED harness no longer owns its pipeline row. A resume builds a NEW harness on
+   *  the same row, and work started here can outlive the pause (the fire-and-forget run title gets
+   *  only the stop signal). writeState replaces the row and every step row, so a late write from
+   *  this harness would put its paused snapshot over the resumed run: a finished run read `paused`,
+   *  with its later steps gone. Owned while the row is still `paused` with THIS pause's token in
+   *  its resume point. A token only this harness writes, so its own late writes (a booking, the
+   *  title's updatePipelineTitle, the Away mode switch) never read as a takeover; a resumed run
+   *  (running, finished, or paused again under its own token) has taken the row over for good. */
+  _rowHandedOff() {
+    if (!this._pausedHandoff || !this.pipeline?.id) return false;
+    if (this._handedOff) return true;
+    let row = null;
+    try { row = pipelineRowStamp(this.pipeline.id); } catch { return false; }
+    this._handedOff = !row || row.status !== 'paused' || row.pausedBy !== this._pauseToken;
+    return this._handedOff;
   }
 
   /**
@@ -5734,9 +5968,16 @@ export class RunHarness extends EventEmitter {
       // Who paused it survives a restart (rowToState reads it back).
       if (this.state.lastAction && this.state.lastAction.kind === 'pause') rp.lastAction = { ...this.state.lastAction };
       else delete rp.lastAction;
+      // The token this pause is written with (_persist stamps it into the saved point as `pausedBy`).
+      this._pauseToken ||= randomUUID();
     }
     this._setStatus('paused');
-    await this._persist();
+    const persisted = await this._persist();
+    // From here a resume may build a new harness on this row: a late write from this one (the run
+    // title outlives a pause) checks the row is still its own first (_rowHandedOff). Only once the
+    // row carries this pause's token: a failed write left the row running, and a point-less pause
+    // cannot be resumed by anyone else.
+    if (persisted && this._pauseToken) this._pausedHandoff = true;
     // A plain manual pause has no reason; every reasoned pause audited at its site.
     if (!this.pauseReason) await this._auditAction('pause', 'Pipeline **paused**').catch(() => {});
     // A FORCED pause (pauseReason set: usage limit, cost cap, auto-mode

@@ -1845,3 +1845,71 @@ test('Archive confirms with a toast; a refused archive raises an error toast wit
   assert.equal(lastToast(doc).title, 'Run archived');
   assert.equal(lastToast(doc).tone, 'ok');
 });
+
+// Uses the file's own bootDetail / openTab / DETAIL. Fixture: one agent execution whose only rows are
+// worca's Away mode reviews (an OLD "Night decider" row + a NEW stopped one), a second execution with an
+// ordinary sub-agent that reported tokens but no cost, and the preflight bookend's two Auto workflow
+// rounds + the run-title row.
+const AW_MANIFEST = {
+  version: 2, template: { id: 'wf', name: 'WF' },
+  graph: { nodes: [{ id: 'n_impl', kind: 'agent', key: 'implementer', label: 'Implementer', color: 'blue', x: 0, y: 0, ports: { inputs: [], outputs: [], await: true } }], wires: [] },
+  // The bookend cells every v2 manifest carries (buildGraphManifest): the preflight group's label comes from here.
+  steps: [{ kind: 'preflight', nodes: [{ id: 'preflight', label: 'Preflight', sub: 'checks' }] }, { kind: 'done', nodes: [{ id: 'done', label: 'Done', sub: 'complete' }] }],
+};
+const AW_DETAIL = {
+  ...DETAIL,
+  state: {
+    ...DETAIL.state,
+    stepper: AW_MANIFEST,
+    steps: [
+      { key: 'x:preflight:1', executionId: 'x:preflight:1', nodeId: 'preflight', ordinal: 1, kind: 'cycle', cycle: 1, status: 'done', skills: [], graphifyCount: 0 },
+      { key: 'x:n_impl:1', executionId: 'x:n_impl:1', nodeId: 'n_impl', ordinal: 1, kind: 'cycle', cycle: 1, status: 'done', skills: [], graphifyCount: 0 },
+      { key: 'x:n_impl:2', executionId: 'x:n_impl:2', nodeId: 'n_impl', ordinal: 2, kind: 'cycle', cycle: 2, status: 'done', skills: [], graphifyCount: 0 },
+    ],
+    subAgents: [
+      { id: 'auto-classify-1', label: 'Auto workflow (round 1)', subagentType: 'auto-classify', uiPhase: 'preflight', nodeId: 'preflight', stepKey: 'x:preflight:1', status: 'finished', costUsd: 0.03, tokens: 2100, skills: [] },
+      { id: 'auto-classify-2', label: 'Auto workflow (round 2)', subagentType: 'auto-classify', uiPhase: 'preflight', nodeId: 'preflight', stepKey: 'x:preflight:1', status: 'finished', costUsd: 0.0098, tokens: 900, skills: [] },
+      { id: 'run-title-0a0b0c0d', label: 'Run title', subagentType: 'run-title', uiPhase: 'preflight', nodeId: 'preflight', stepKey: 'x:preflight:1', status: 'finished', costUsd: 0.0021, tokens: 98, skills: [] },
+      { id: 'night-decider-1', label: 'Night decider (questions)', subagentType: 'night-decider', nodeId: 'n_impl', stepKey: 'x:n_impl:1', status: 'finished', costUsd: 0.05, tokens: 4200, runModel: 'claude-opus-5-5', skills: [] },
+      { id: 'night-decider-ab12cd34', label: 'Away mode review (questions)', subagentType: 'night-decider', nodeId: 'n_impl', stepKey: 'x:n_impl:1', status: 'stopped', costUsd: null, tokens: 18400, runModel: 'claude-opus-5-5', skills: [] },
+      { id: 'sub-1', label: 'Explore repo', subagentType: 'Explore', nodeId: 'n_impl', stepKey: 'x:n_impl:2', status: 'finished', costUsd: null, tokens: 5000, skills: [] },
+    ],
+  },
+};
+
+test("Agents tab: worca's own calls are named, a stopped review shows its tokens, and none of them stop the step", async () => {
+  const ctx = await bootDetail({ detail: AW_DETAIL });
+  const sec = await openTab(ctx, 'agents');
+  assert.doesNotMatch(sec.textContent, /night[ -]decider/i, 'UI never says "night decider" (stored labels and types are mapped)');
+  const groups = [...sec.querySelectorAll('.hd-ag-group')];
+  const byHead = new Map(groups.map((g) => [g.querySelector('.hd-ag-head b').textContent, g]));
+  // The preflight bookend's group keeps its spec'd caption (Auto spec §7.5/§7.7; the "Preflight" test above).
+  assert.deepEqual([...byHead.keys()], ['Implementer #1', 'Implementer #2', 'Preflight #1']);
+  const names = (g) => [...g.querySelectorAll('.hd-ag-row .hd-ag-name')].map((n) => n.textContent);
+  const pills = (g) => [...g.querySelectorAll('.hd-ag-row .agent-type-pill')].map((n) => n.textContent);
+  // An OLD row ("Night decider (questions)", COALESCE-frozen) reads the new label; the kind survives.
+  assert.deepEqual(names(byHead.get('Implementer #1')), ['Away mode review (questions)', 'Away mode review (questions)']);
+  assert.deepEqual(pills(byHead.get('Implementer #1')), ['Away mode', 'Away mode']);
+  // The stopped review: no cost (it never reached its result frame) — '—', never a blank — its tokens, the honest state word.
+  const stopped = byHead.get('Implementer #1').querySelectorAll('.hd-ag-row')[1];
+  assert.equal(stopped.querySelector('.hd-ag-cost').textContent, '—');
+  assert.equal(stopped.querySelector('.sub-tok-pill').textContent, '18.4k tok');
+  assert.equal(stopped.querySelector('.st').textContent, 'stopped');
+  // ...but a review the user's own answer cut short never rolls the agent's group up to "stopped".
+  assert.ok(byHead.get('Implementer #1').querySelector('.hd-ag-head .subs-stat.done'), 'the step finished: the group reads done');
+  // An ordinary sub-agent with tokens and no cost keeps today's row: blank cost, no token pill.
+  assert.equal(byHead.get('Implementer #2').querySelector('.sub-tok-pill'), null);
+  assert.equal(byHead.get('Implementer #2').querySelector('.hd-ag-cost').textContent, '');
+  // The preflight bookend's rows: one group, each Auto round keeps its own label, the title row, the sum.
+  const setup = byHead.get('Preflight #1');
+  assert.deepEqual(names(setup), ['Auto workflow (round 1)', 'Auto workflow (round 2)', 'Run title']);
+  assert.deepEqual(pills(setup), ['Auto workflow', 'Auto workflow', 'Run title']);
+  assert.match(setup.querySelector('.hd-ag-meta').textContent, /\$0\.0419/);
+});
+
+test("Overview: worca's own AI calls are not counted as the run's sub-agents", async () => {
+  const ctx = await bootDetail({ detail: AW_DETAIL });
+  const sec = await openTab(ctx, 'overview');
+  // AW_DETAIL: two Auto workflow rounds, the run title and two Away mode reviews are worca's; one Explore row is the agent's.
+  assert.deepEqual([...sec.querySelectorAll('.hd-ov-tag')].map((c) => c.textContent).filter((t) => /sub-agent/.test(t)), ['1 sub-agent']);
+});

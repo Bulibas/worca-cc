@@ -71,6 +71,7 @@ import { logLineVisible, logFacets, compileLogFilter } from './log-filter.mjs';
 import { alreadyApplied, noteBoot } from './ws-seq.mjs';
 import { decorFromState, applyDecor, isGraphManifest, ledgerRows } from './graph/run-decor.mjs';
 import { mountRunGraph } from './graph/run-hosts.mjs';
+import { AWAY_GLYPH } from './away-glyph.mjs';
 import { trailColumns, nowRows, glanceCopy, renderOrb, nodeLabel, preflightOpen, dotState } from './run-glance.mjs';
 import { buildRunsModel, countNeedsYou, isRowSelected, renderRunsList, RUNS_FILTERS, RUNS_GROUPINGS } from './runs-list.mjs';
 // Import list only — `statusChip`/`diffBadges`/`mergeFindings`/`reportResultControl`
@@ -183,8 +184,10 @@ import {
   runOutcomeModel, openSyncDialog, chooseSyncRefusal,
 } from './branch-sync.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
-import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindShort, awayAnswerRows, awayAnswerCounts, checksFirst, awayAnswersSummary, decidedByText } from '../../src/shared/away-mode/labels.mjs';
+import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindShort, awayAnswerRows, awayAnswerCounts, checksFirst, awayAnswersSummary, decidedByText, awayAskCaption } from '../../src/shared/away-mode/labels.mjs';
 import { parseWindow } from '../../src/shared/away-mode/activation.mjs';
+import { runCostBreakdown, floorText, auxLabelForSubagent } from '../../src/shared/cost/breakdown.mjs';
+import { costBreakdownEl, costSummaryText, awayTotalText } from './cost-breakdown.mjs';
 import { describeRun, describeNewRun, describeAwaySwitch } from '../../src/shared/away-mode/describe.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
 import { createLevelController, levelAtLeast, currentLevel, tagLevel, keepVisible, minLevelFor, LEVEL_INFO, UI_LEVELS } from './ui-level.mjs';
@@ -19568,7 +19571,7 @@ async function loadHistDetailScreen(screen, record, parsed, ship = null) {
   // carries `record` in the bag for the keyed artifact route); v1: the untouched
   // column painter, as a thunk.
   paintGraphFor(flow, st.stepper, isGraphManifest(st.stepper) ? Object.assign(
-    decorFromState(st, { live: false, now: 0, subsOf: (id) => subAgentsForNode(st, id) }),
+    decorFromState(st, { live: false, now: 0, subsOf: (id) => subAgentsForNode(st, id), modelLabel: graphModelLabel }),
     { run: st, runId: parsed.id, mode: 'monitor', record: rec }) : null, st.steps);
   if (isGraphManifest(st.stepper)) paintQuiescenceBanner(screen.querySelector('.hd-banners'), decorFromState(st, { live: false, now: 0 }));
 
@@ -20044,7 +20047,7 @@ function hdSyncPr(projectKey, id, row) {
 function paintHdGlance(screen, record, data) {
   const glance = screen && screen.querySelector('.hd-glance');
   if (!glance || !data || !data.state) return;
-  void loadHdAwayAnswers(screen, record && record.id);
+  void loadHdAwayAnswers(screen, record && record.id, data.state.steps);   // `st` is declared below (TDZ)
   const st = data.state;
   const run = { status: st.status, steps: st.steps, stepper: st.stepper, pendingQuestion: null, active: st.active };
   const meta = histStatusMeta({ status: st.status });
@@ -20069,7 +20072,8 @@ function paintHdGlance(screen, record, data) {
 
   // Time · Cost · Changes, as on the Running page in every state.
   const activeMs = typeof st.totalActiveMs === 'number' ? st.totalActiveMs : liveTotalMs(st.steps, 0);
-  paintGlanceFacts(glance, { summary: s || null, activeMs, cost: st.totalCostUsd || 0 });
+  paintGlanceFacts(glance, { summary: s || null, activeMs, cost: st.totalCostUsd || 0,
+    costNote: costSummaryText(runCostBreakdown(st.steps, st.totalCostUsd), fmtUsd) });
 
   // The result: every tab, the actions. The things to check live in Overview only.
   const host = glance.querySelector('.hd-result');
@@ -20257,6 +20261,7 @@ function paintHdHeaderMeta(screen, record, data) {
   const st = data.state;
   paintAutoBadge(screen.querySelector('.hd-row1 .auto-badge'), st && st.stepper);
   const meta = screen.querySelector('.hd-meta');
+  const costFocus = costTriggerFocused(meta);
   meta.innerHTML = '';
   const { family, word } = histStatusMeta({ status: st.status });
   const w = document.createElement('span');
@@ -20278,6 +20283,7 @@ function paintHdHeaderMeta(screen, record, data) {
     if (cls === 'hd-cost') seg.title = estTitle(st.totalCostUsd);
     meta.appendChild(seg);
   }
+  paintCostBreakdown(screen.querySelector('.hd-header'), meta.querySelector('.hd-cost'), runCostBreakdown(st.steps, st.totalCostUsd), costFocus);
   // Scheduled runs: say HOW this run started — "by schedule" links to the Schedules view.
   if (st.scheduledFor) {
     meta.appendChild(hdDot());
@@ -20913,6 +20919,125 @@ document.addEventListener('click', (e) => {
   if (t && typeof t.closest === 'function' && t.closest('#hist-detail .hd-more')) return;
   closeHdMenu();
 }, true);
+
+// ---- the header cost's breakdown (run page and History run page) -------------
+// The run page's meta line is rebuilt whenever what it says changes, and History's on every
+// paint, so a cost trigger can be replaced; the panel hangs off the header card (outside the
+// meta line), so an open panel survives the repaint. Old runs (no
+// Away mode, Auto workflow or run title share, no cut agent turns) keep the plain cost text and
+// get no panel. Bound once, module-level, like the ⋯ menu above. Escape is handled by the two
+// capture-phase detail-screen arms (closeCostPop), which would otherwise navigate before a local
+// listener ran.
+function costTriggerFocused(meta) {
+  const a = document.activeElement;
+  return !!(a && meta && meta.contains(a) && a.classList.contains('cost-bd-btn'));
+}
+
+function costPopFor(header) {
+  let pop = header.querySelector(':scope > .cost-pop');
+  if (!pop) {
+    pop = document.createElement('div');
+    pop.className = 'cost-pop';
+    pop.id = header.classList.contains('hd-header') ? 'hd-cost-pop' : 'rd-cost-pop';
+    pop.setAttribute('role', 'group');
+    pop.setAttribute('aria-label', 'Cost breakdown');
+    pop.hidden = true;
+    header.appendChild(pop);
+  }
+  return pop;
+}
+
+/** Under the trigger, clamped inside the header card (a phone-width card included). */
+function placeCostPop(header, btn, pop) {
+  const hb = header.getBoundingClientRect();
+  const bb = btn.getBoundingClientRect();
+  const w = pop.offsetWidth || 240;
+  pop.style.top = `${Math.round(bb.bottom - hb.top + 6)}px`;
+  pop.style.left = `${Math.round(Math.max(8, Math.min(bb.left - hb.left, hb.width - w - 8)))}px`;
+}
+
+/** Turn the meta line's cost segment into the panel's trigger when the run has a share or a cut-off
+ *  lower bound to show. */
+function paintCostBreakdown(header, seg, b, refocus = false) {
+  if (!header) return;
+  const pop = costPopFor(header);
+  if (!seg || (!b.lines.length && !b.cut.turns)) {
+    pop.hidden = true;
+    pop.replaceChildren();
+    delete pop.dataset.sig;
+    // A trigger the meta line kept, with nothing left to open: the plain cost again.
+    if (seg && seg.classList.contains('cost-bd-btn')) {
+      const span = document.createElement('span');
+      span.className = seg.className;
+      span.classList.remove('cost-bd-btn');
+      span.textContent = seg.textContent;
+      if (seg.title) span.title = seg.title;
+      seg.replaceWith(span);
+    }
+    return;
+  }
+  // A trigger the meta line kept (nothing it says changed) is reused as it is: a <button>
+  // replaced between a press and its release loses the click.
+  let btn = seg;
+  if (!seg.classList.contains('cost-bd-btn')) {
+    btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `${seg.className} cost-bd-btn`;
+    btn.textContent = seg.textContent;
+    if (seg.title) btn.title = seg.title;
+    seg.replaceWith(btn);
+  }
+  btn.setAttribute('aria-controls', pop.id);
+  btn.setAttribute('aria-expanded', String(!pop.hidden));
+  // Rebuilt only when the numbers change, so an open panel does not flicker on every frame.
+  const sig = JSON.stringify(b);
+  if (pop.dataset.sig !== sig) {
+    pop.dataset.sig = sig;
+    pop.replaceChildren(costBreakdownEl(document, b, { fmtUsd }));
+  }
+  if (!pop.hidden) placeCostPop(header, btn, pop);
+  // preventScroll: a browser focuses a clicked button, so a plain focus() after a rebuild scrolled
+  // the page back to the header while the user read further down.
+  if (refocus && document.activeElement !== btn) btn.focus({ preventScroll: true });
+}
+
+/** Close any open cost panel. @returns whether one was open. */
+function closeCostPop({ focusTrigger = false } = {}) {
+  let closed = false;
+  for (const pop of document.querySelectorAll('.cost-pop:not([hidden])')) {
+    pop.hidden = true;
+    closed = true;
+    const btn = pop.parentElement && pop.parentElement.querySelector('.cost-bd-btn');
+    if (btn) {
+      btn.setAttribute('aria-expanded', 'false');
+      if (focusTrigger) btn.focus();
+    }
+  }
+  return closed;
+}
+
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  const btn = t && typeof t.closest === 'function' ? t.closest('.cost-bd-btn') : null;
+  if (!btn) return;
+  const header = btn.closest('.rd-header, .hd-header');
+  const pop = header && header.querySelector(':scope > .cost-pop');
+  if (!pop) return;
+  pop.hidden = !pop.hidden;
+  btn.setAttribute('aria-expanded', String(!pop.hidden));
+  if (!pop.hidden) placeCostPop(header, btn, pop);
+});
+// A click anywhere else closes it (capture phase, like the ⋯ menu's closer); the trigger toggles itself.
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  if (t && typeof t.closest === 'function' && (t.closest('.cost-bd-btn') || t.closest('.cost-pop'))) return;
+  closeCostPop();
+}, true);
+// Back and Forward change the route with no click, so the outside closer never runs: close the panel
+// here, or one left open on a screen the route hid would eat the next Escape (closeCostPop looks
+// through the whole document). A route change through replaceState fires no hashchange; the one that
+// leaves Details that way (the finished-run hand-off) empties the screen, the panel with it.
+window.addEventListener('hashchange', () => { closeCostPop(); });
 
 function refreshHdFromRow() {
   if (!histDetailState || !histDetailState.screen || !histDetailState.data) return;
@@ -22648,7 +22773,8 @@ function buildHdOverview(sec, record, data) {
       : `${steps.length} step${steps.length === 1 ? '' : 's'} · ${maxCycle} cycle${maxCycle === 1 ? '' : 's'}`));
   const costCard = hdStatCard('cost', 'COST',
     typeof st.totalCostUsd === 'number' ? fmtUsd(st.totalCostUsd) : '—',
-    `across ${steps.length} step${steps.length === 1 ? '' : 's'}`);
+    [`across ${steps.length} step${steps.length === 1 ? '' : 's'}`,
+      costSummaryText(runCostBreakdown(steps, st.totalCostUsd), fmtUsd)].filter(Boolean).join(' · '));
   if (typeof st.totalCostUsd === 'number') costCard.querySelector('.hd-ov-value').title = estTitle(st.totalCostUsd);
   grid.appendChild(costCard);
   const wt = st.branch && typeof st.branch === 'object' ? st.branch : {};
@@ -22742,7 +22868,8 @@ function buildHdOverview(sec, record, data) {
   }
   const chips = document.createElement('div');
   chips.className = 'hd-ov-chips';
-  const subCount = Array.isArray(st.subAgents) ? st.subAgents.length : 0;
+  // The agents' own sub-agents: worca's AI calls (run title, Auto workflow, Away mode) are on the Agents tab.
+  const subCount = Array.isArray(st.subAgents) ? st.subAgents.filter((s) => !isWorcaSub(s)).length : 0;
   for (const text of [
     record.projectName || record.projectKey || '',
     (st.branch && typeof st.branch === 'object' ? st.branch.source : '') || record.sourceBranch || '',
@@ -22797,7 +22924,7 @@ function buildHdAgents(sec, record, data) {
     card.className = 'hd-ag-group';
     // Non-empty: roll up from the rows. Empty: the main agent's own step status —
     // subGroupStatus would report a bare 'done' for an agent that is still running.
-    const gstat = list.length ? subGroupStatus(list) : (statusOf[key] || 'done');
+    const gstat = agentGroupStatus(list, statusOf[key], 'done');
     const durSum = list.reduce((n, s) => n + (hdSubDuration(s) || 0), 0);
     const costSum = list.reduce((n, s) => n + (Number(s && s.costUsd) || 0), 0);
     const metaBits = [
@@ -22835,13 +22962,14 @@ function buildHdAgents(sec, record, data) {
       // `margin-left:auto`. Last = the pills get their own row under a complete
       // first line, which is the intended design.
       row.innerHTML =
-        `<span class="hd-ag-name">${escapeHtml((s && s.label) || (s && s.id) || '')}</span>` +
-        agentTypePillHtml(s && s.subagentType) +
+        `<span class="hd-ag-name">${escapeHtml(subRowLabel(s))}</span>` +
+        subTypePillHtml(s) +
         subModelPillHtml(s && s.runModel) +
+        subTokPillHtml(s) +
         graphifyCountPillHtml(s && s.graphifyCount) +
         `<span class="st ${rstat}">${SUBS_STAT_TEXT[rstat] || rstat}</span>` +
         `<span class="hd-ag-dur mono">${dur != null ? escapeHtml(fmtDuration(dur)) : ''}</span>` +
-        `<span class="hd-ag-cost mono">${s && s.costUsd != null ? escapeHtml(fmtUsd4(s.costUsd)) : ''}</span>` +
+        `<span class="hd-ag-cost mono">${subCostCellHtml(s)}</span>` +
         skillPillsHtml(s && s.skills);
       card.appendChild(row);
     }
@@ -23143,8 +23271,12 @@ function rdLoadData(r, { force = false } = {}) {
     .catch(() => null)
     .then((data) => {
       entry.data = data;
-      // Repaint the open glance once the numbers land (a stale entry stays silent).
-      if (r._rdData === entry && rdOpenRun() === r && runDetailState.screen) paintRdGlance(runDetailState.screen, r);
+      // Repaint the open glance once the numbers land (a stale entry stays silent), and the
+      // "Answered for you" heading, whose Away mode cost reads the same saved steps (rdGlanceRun).
+      if (r._rdData === entry && rdOpenRun() === r && runDetailState.screen) {
+        paintRdGlance(runDetailState.screen, r);
+        paintNightDecisions(runDetailState.screen, r);
+      }
       return data;
     });
   r._rdData = entry;
@@ -23636,9 +23768,10 @@ function rdOvStats(host, r) {
   // null/absent means no cap is configured, and the sub-line falls back to a fact
   // rather than a fabricated number.
   const cap = Number(budgetState.budget && budgetState.budget.pipelineLimitUsd);
-  const costSub = Number.isFinite(cap) && cap > 0
+  const costSub = [Number.isFinite(cap) && cap > 0
     ? `cap ${fmtUsd(cap)} per pipeline`
-    : `across ${steps.length} step${steps.length === 1 ? '' : 's'}`;
+    : `across ${steps.length} step${steps.length === 1 ? '' : 's'}`,
+  costSummaryText(runCostBreakdown(steps, r.totalCostUsd), fmtUsd)].filter(Boolean).join(' · ');
   const cost = hdStatCard('cost', 'COST SO FAR', fmtUsd(r.totalCostUsd || 0), costSub);
   cost.querySelector('.hd-ov-value').title = estTitle(r.totalCostUsd || 0);
   host.appendChild(cost);
@@ -23677,7 +23810,8 @@ function rdOvTask(r) {
   }
   const chips = document.createElement('div');
   chips.className = 'hd-ov-chips';
-  const subCount = Array.isArray(r.subAgents) ? r.subAgents.length : 0;
+  // The agents' own sub-agents: worca's AI calls (run title, Auto workflow, Away mode) are on the Agents tab.
+  const subCount = Array.isArray(r.subAgents) ? r.subAgents.filter((s) => !isWorcaSub(s)).length : 0;
   // A workspace run carries NO projectDir (the New form sends workspaceId
   // instead) — name it by its member list rather than letting projectName()
   // print "(no project)".
@@ -23761,7 +23895,7 @@ function rdAgentsBody(sec, r) {
     // Non-empty: roll up from the rows. Empty: the main agent's own step status.
     // History's twin defaults to 'done' here because it paints a FINISHED run; a
     // live one must default to 'run' or an agent still in flight would read "done".
-    const gstat = list.length ? subGroupStatus(list) : (statusOf[key] || 'run');
+    const gstat = agentGroupStatus(list, statusOf[key], 'run');
     const durSum = list.reduce((n, s) => n + (hdSubDuration(s) || 0), 0);
     const costSum = list.reduce((n, s) => n + (Number(s && s.costUsd) || 0), 0);
     const sep = String(key).indexOf(CYCLE_KEY_SEP);
@@ -23799,14 +23933,15 @@ function rdAgentsBody(sec, r) {
       row.innerHTML =
         `<span class="rd-ag-name">` +
           `<span class="rd-ag-dot ${st.family}"></span>` +
-          `<span class="rd-ag-label">${escapeHtml((s && s.label) || (s && s.id) || '')}</span>` +
-          agentTypePillHtml(s && s.subagentType) +
+          `<span class="rd-ag-label">${escapeHtml(subRowLabel(s))}</span>` +
+          subTypePillHtml(s) +
           subModelPillHtml(s && s.runModel) +
+          subTokPillHtml(s) +
           graphifyCountPillHtml(s && s.graphifyCount) +
         `</span>` +
         `<span class="rd-ag-state ${st.family}">${escapeHtml(st.word)}</span>` +
         `<span class="rd-ag-dur mono">${dur != null ? escapeHtml(fmtDuration(dur)) : ''}</span>` +
-        `<span class="rd-ag-cost mono">${s && s.costUsd != null ? escapeHtml(fmtUsd4(s.costUsd)) : ''}</span>` +
+        `<span class="rd-ag-cost mono">${subCostCellHtml(s)}</span>` +
         skillPillsHtml(s && s.skills);
       card.appendChild(row);
     }
@@ -24047,6 +24182,7 @@ document.addEventListener('keydown', (e) => {
   // screen. Handled HERE rather than in its own listener because this one is capture
   // phase — a separate listener would fire after the navigation had already run.
   if (closeHdMenu({ focusTrigger: true })) return;
+  if (closeCostPop({ focusTrigger: true })) return;
   // Details steps back to the run's glance; the glance steps back to the list, in the
   // slide only: side by side the list is already there.
   const hs = histDetailState;
@@ -24074,6 +24210,8 @@ document.addEventListener('keydown', (e) => {
   if (el.reportModal && !el.reportModal.classList.contains('hidden')) return;
   const stop = document.getElementById('stop-modal');
   if (stop && !stop.classList.contains('hidden')) return;
+  // The header cost's breakdown owns Escape while it is open (same reason as History's ⋯ menu).
+  if (closeCostPop({ focusTrigger: true })) return;
   // Details steps back to the run's glance; the glance steps back to the list, in the
   // slide only: side by side the list is already there.
   const screen = runDetailState.screen;
@@ -24554,6 +24692,10 @@ function activeCopy(r) {
   return { family: 'peach', text: 'Running' };
 }
 
+/** A model id as the graph's Away mode band names it: the catalog label when known, else the raw id.
+ *  A declaration, not a const: History's paint (above) and runDecorFor may run before this line is reached. */
+function graphModelLabel(id) { return id ? (modelById(id)?.label || id) : null; }
+
 /** The decor bag for a run, memoised per state generation: onState / onSubagent /
  *  onQuestion / onQuestionResolved / finishRun bump `r._decorSeq`, and every caller
  *  in between (the card, the detail, the pill, the progress chip) shares ONE
@@ -24568,7 +24710,7 @@ function runDecorFor(r, mode = 'monitor') {
   const seq = r._decorSeq || 0;
   if (!r._decorCache || r._decorCache.seq !== seq) {
     r._decorCache = { seq, views: new Map(),
-      decor: decorFromState(r, { live: isLive(r), now: Date.now(), subsOf: (id) => subAgentsForNode(r, id), lastLines: liveLinesOf(r) }) };
+      decor: decorFromState(r, { live: isLive(r), now: Date.now(), subsOf: (id) => subAgentsForNode(r, id), lastLines: liveLinesOf(r), modelLabel: graphModelLabel }) };
   }
   const cache = r._decorCache;
   let bag = cache.views.get(mode);
@@ -24840,6 +24982,43 @@ function agentTypePillHtml(type) {
   const t = type == null ? '' : String(type).trim();
   if (!t) return '';
   return `<span class="agent-type-pill">${escapeHtml(t)}</span>`;
+}
+
+// worca's own AI calls during a run, by stored subagent_type -> the type pill they wear. Stored labels
+// and types are frozen (an old Away mode row says "Night decider (clarify)"), so the tab maps them here.
+const WORCA_SUB_PILL = Object.freeze({ 'night-decider': 'Away mode', 'auto-classify': 'Auto workflow', 'run-title': 'Run title' });
+const isWorcaSub = (s) => !!s && Object.hasOwn(WORCA_SUB_PILL, String(s.subagentType));
+const kindFromLabel = (label) => (/\(([^)]+)\)\s*$/.exec(String(label || '')) || [])[1] || null;
+/** An Away mode review that ended before its result frame: it booked no cost (its lower bound is on
+ *  the step and the answer, never on the row). */
+const isCutReview = (s) => !!s && s.subagentType === 'night-decider' && s.costUsd == null;
+/** A sub-agent row's label. Only the Away mode review is relabelled (its kind in parentheses survives);
+ *  every other row, Auto workflow's "(round N)" included, keeps its own stored label. */
+function subRowLabel(s) {
+  if (s && s.subagentType === 'night-decider') return auxLabelForSubagent('night-decider', kindFromLabel(s.label));
+  return (s && s.label) || (s && s.id) || '';
+}
+/** The type pill: worca's own calls by name, every other row its raw subagent_type. */
+const subTypePillHtml = (s) => agentTypePillHtml(s && (isWorcaSub(s) ? WORCA_SUB_PILL[s.subagentType] : s.subagentType));
+/** A stopped review's tokens beside its cost cell. Every other row keeps today's pills. */
+function subTokPillHtml(s) {
+  if (!isCutReview(s) || !(Number(s.tokens) > 0)) return '';
+  const n = Number(s.tokens);
+  return `<span class="sub-model-pill sub-tok-pill">${n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n} tok</span>`;
+}
+/** The cost cell: the row's cost; '—' for a stopped review (never a blank that reads as free); blank
+ *  for every other cost-less row, as before. */
+function subCostCellHtml(s) {
+  if (s && s.costUsd != null) return escapeHtml(fmtUsd4(s.costUsd));
+  return isCutReview(s) ? '—' : '';
+}
+/** An Agents group's status. worca's own rows are not the step's sub-agents: a review the user's answer cut
+ *  short is `stopped` by design and must never paint the step stopped (or done while it still runs). With
+ *  no rows of its own the step's status decides, then `fallback` (History 'done', a live run 'run'). */
+function agentGroupStatus(list, stepStatus, fallback) {
+  const own = list.filter((s) => !isWorcaSub(s));
+  if (own.length) return subGroupStatus(own);
+  return stepStatus || (list.length ? 'done' : fallback);
 }
 
 // The model a sub-agent actually ran on (sub_agents.run_model): the alias its Task
@@ -26616,11 +26795,11 @@ async function loadNightDecisions(r) {
 }
 
 function paintNightDecisions(screen, r) {
-  paintAwayAnswers(screen.querySelector('.rd-night-sec'), r.nightDecisions);
+  paintAwayAnswers(screen.querySelector('.rd-night-sec'), r.nightDecisions, rdGlanceRun(r).steps);
 }
 
 /** The History run page's copy of the list: read once per run from the stored answers. */
-async function loadHdAwayAnswers(screen, pipelineId) {
+async function loadHdAwayAnswers(screen, pipelineId, steps = []) {
   const sec = screen && screen.querySelector('.hd-night-sec');
   if (!sec || !pipelineId || sec.dataset.for === pipelineId) return;
   sec.dataset.for = pipelineId;
@@ -26629,7 +26808,7 @@ async function loadHdAwayAnswers(screen, pipelineId) {
     const res = await fetch(`/api/night-decisions?pipelineId=${encodeURIComponent(pipelineId)}`);
     const data = res.ok ? await safeJson(res) : null;
     if (sec.dataset.for !== pipelineId) return;                 // another run was opened meanwhile
-    paintAwayAnswers(sec, data && Array.isArray(data.decisions) ? data.decisions : []);
+    paintAwayAnswers(sec, data && Array.isArray(data.decisions) ? data.decisions : [], steps);
   } catch { /* the section stays hidden */ }
 }
 
@@ -26651,19 +26830,23 @@ function paintAwayNote(sec, counts) {
 }
 
 /** "Answered for you" into `sec` (run page and History run page): one group per ask, captioned with
- *  what kind of ask it was and when, one row per answer; a row with a reason opens it underneath. */
-function paintAwayAnswers(sec, decisions) {
+ *  what kind of ask it was, when, and — when a review answered it — the model and what that review
+ *  cost; one row per answer; a row with a reason opens it underneath. The heading adds what every
+ *  Away mode review of the run cost, read from the steps (`steps[].auxCosts.away`). */
+function paintAwayAnswers(sec, decisions, steps = []) {
   if (!sec) return;
   const list = Array.isArray(decisions) ? decisions : [];
   sec.hidden = !list.length;
-  // The run page repaints on every frame: rebuild only when the answers changed, so an open
-  // reason, a hover and the keyboard focus survive.
-  const sig = JSON.stringify(list);
+  const spent = awayTotalText(runCostBreakdown(steps), fmtUsd);
+  // The run page repaints on every frame: rebuild only when the answers or the reviews' cost
+  // changed, so an open reason, a hover and the keyboard focus survive.
+  const sig = `${JSON.stringify(list)}|${spent}`;
   if (sec.__awaySig === sig) return;
   sec.__awaySig = sig;
   const counts = awayAnswerCounts(list);
-  sec.querySelector('.rd-night-count').textContent = counts.answers
-    ? ` · ${counts.answers} answer${counts.answers === 1 ? '' : 's'}${counts.checks ? `, ${counts.checks} to check` : ''}` : '';
+  sec.querySelector('.rd-night-count').textContent = (counts.answers
+    ? ` · ${counts.answers} answer${counts.answers === 1 ? '' : 's'}${counts.checks ? `, ${counts.checks} to check` : ''}` : '')
+    + (spent ? ` · ${spent}` : '');
   paintAwayNote(sec, counts);
   const host = sec.querySelector('.rd-night-asks');
   const open = new Set([...host.querySelectorAll('.rd-na-row.open')].map((li) => li.dataset.key));
@@ -26676,7 +26859,10 @@ function paintAwayAnswers(sec, decisions) {
     const cap = document.createElement('div');
     cap.className = 'rd-slabel';
     const at = d.at ? startedLabel(d.at).slice(0, 5) : '';
-    cap.textContent = at ? `${kindShort(d.kind)} · ${at}` : kindShort(d.kind);
+    // One review answers the whole ask, so its model and cost are the group's, never a row's.
+    cap.textContent = [kindShort(d.kind), at, ...awayAskCaption(d, {
+      fmtUsd, modelLabel: (id) => modelById(id)?.label || id, fmtFloor: (v) => floorText(v, fmtUsd),
+    })].filter(Boolean).join(' · ');
     const ul = document.createElement('ul');
     ul.className = 'rd-slist rd-na-list';
     // The answers to check lead their ask; the key stays the row's own place, so an open row survives.
@@ -26834,6 +27020,7 @@ function paintRdGlance(screen, r) {
   paintGlanceFacts(glance, {
     summary, liveFiles: liveDiff != null && liveDiff !== '' ? Number(liveDiff) : null,
     activeMs: rdActiveMs(r), cost: r.totalCostUsd || 0,
+    costNote: costSummaryText(runCostBreakdown(r.steps, r.totalCostUsd), fmtUsd),
     ticking: (r.status === 'running' || r.status === 'starting') && r.pendingQuestion == null,
   });
 
@@ -27016,7 +27203,7 @@ function activityOverviewValue(results) {
 // the time to the 1 s ticker (`.run-time`, rdTickHosts) while the run executes; a live
 // run knows only how many files its worktree changed (`liveFiles`), a finished one the
 // line counts too (`summary`).
-function glanceTiles({ summary = null, liveFiles = null, activeMs = null, cost = null, ticking = false } = {}) {
+function glanceTiles({ summary = null, liveFiles = null, activeMs = null, cost = null, costNote = '', ticking = false } = {}) {
   const tiles = document.createElement('div');
   tiles.className = 'rd-stats';
   const tile = (big, small, cls = '') => {
@@ -27030,7 +27217,7 @@ function glanceTiles({ summary = null, liveFiles = null, activeMs = null, cost =
     return t;
   };
   if (activeMs != null) tiles.append(tile(fmtDuration(activeMs) || '0s', 'time', ticking ? 'run-time' : ''));
-  if (cost != null) tiles.append(tile(fmtUsd(cost), 'cost'));
+  if (cost != null) tiles.append(tile(fmtUsd(cost), costNote || 'cost'));
   if (summary) {
     const files = (summary.filesNew || 0) + (summary.filesChanged || 0);
     tiles.append(tile(hdFileCountsNode(document, { added: summary.linesAdded || 0, removed: summary.linesRemoved || 0 }),
@@ -27655,7 +27842,7 @@ function paintRdHeader(screen, r) {
 
   // Meta: project · started · elapsed · cost · step n/m · step name.
   const meta = screen.querySelector('.rd-meta');
-  meta.innerHTML = '';
+  const costFocus = costTriggerFocused(meta);
   const step = runStepLabel(r);
   // Guard on `name`, not on `n`: runStepLabel always returns n >= 1, so `step.n`
   // can never be falsy and an unresolvable node would render `step 1/7 · ` with a
@@ -27677,7 +27864,22 @@ function paintRdHeader(screen, r) {
     ['rd-cost', fmtUsd(r.totalCostUsd || 0) + (freeRequestsSuffix(r.steps) || bridgeRequestsSuffix(r.steps)), true],
     ['rd-step', stepText, false],
   ];
-  segs.forEach(([cls, txt, strong]) => {
+  // Rebuilt only when what it says changed. Every frame of every run repaints this header, and a
+  // <button> rebuilt between a press and its release loses the click (the two land on different
+  // nodes). The elapsed segment changes on every frame, so it is written in place instead (the
+  // 1 s ticker writes it too).
+  const metaSig = JSON.stringify([r.runId, r.totalCostUsd || 0,
+    segs.map(([cls, txt]) => (cls.includes('run-time') ? [cls, !!txt] : [cls, txt]))]);
+  const rebuild = meta.dataset.sig !== metaSig;
+  if (rebuild) {
+    meta.dataset.sig = metaSig;
+    meta.innerHTML = '';
+  } else {
+    const dur = meta.querySelector('.run-time');
+    const durText = segs.find(([cls]) => cls.includes('run-time'))[1];
+    if (dur && dur.textContent !== durText) dur.textContent = durText;
+  }
+  if (rebuild) segs.forEach(([cls, txt, strong]) => {
     if (!txt) return;
     if (meta.childNodes.length) meta.appendChild(rdDot());
     const seg = document.createElement('span');
@@ -27687,6 +27889,7 @@ function paintRdHeader(screen, r) {
     else if (cls === 'rd-cost') seg.title = estTitle(r.totalCostUsd || 0) + (bridgeRequestsSuffix(r.steps) ? ' Requests: calls this run initiated through the model bridge (Copilot bills premium requests, not tokens); tool-loop continuations are not counted.' : '');
     meta.appendChild(seg);
   });
+  paintCostBreakdown(screen.querySelector('.rd-header'), meta.querySelector('.rd-cost'), runCostBreakdown(r.steps, r.totalCostUsd), costFocus);
 
   // Branch row.
   const br = r.branch && typeof r.branch === 'object' ? r.branch : {};
@@ -29405,7 +29608,7 @@ const SIDE_AWAY_NOTE_MS = 60_000;
 const sideAwayMount = document.getElementById('side-away');   // held, like awayStatusEl: the 1 s tick paints this page's own mount
 const SIDE_AWAY_ICONS = {         // shown alone on the collapsed menu
   here: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-4v-5h-6v5H5a1 1 0 0 1-1-1z"></path></svg>',
-  away: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"></path><path d="M10 16l4-4-4-4"></path><path d="M14 12H4"></path></svg>',
+  away: AWAY_GLYPH,                // shared with the workflow graph's Away mode band (away-glyph.mjs)
 };
 function paintSideAway() {
   const mount = sideAwayMount;
