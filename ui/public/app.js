@@ -26246,9 +26246,9 @@ function openRunsForProject(key) {
 }
 
 // ── The Runs page's two panes: layout, which detail shows, focus ────────────
-// Two panes need the list (260-320px) beside the glance card (544px + 64px padding); below
+// Two panes need the list (308-320px) beside the glance card (544px + 64px padding); below
 // that the page falls back to the slide the old screens used (D7).
-const RUNS_SPLIT_MIN = 880;
+const RUNS_SPLIT_MIN = 928;
 function runsLayout() {
   return el.runsShell && el.runsShell.dataset.layout === 'slide' ? 'slide' : 'split';
 }

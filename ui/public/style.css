@@ -3473,11 +3473,22 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 /* The menu drops over the sticky .hd-tabs (same z-index, later in the DOM): lift the
    header above them only while it is open, so scrolled tabs still cover the header. */
 .hd-header:has(.hd-menu:not([hidden])){position:relative;z-index:6;}
-/* Both items shed their pill dressing in here and become full-width rows. Higher
-   specificity than the standalone rules above, which still hold nowhere else. */
-.hd-menu .hd-archive,.hd-menu .hd-report{width:100%;justify-content:flex-start;gap:10px;
+/* All items shed their pill dressing in here and become full-width rows. Higher
+   specificity than the standalone rules above, which still hold nowhere else.
+   display:flex here (not only in the standalone rules): .hd-restore has no
+   standalone rule of its own, and without it gap:10px is inert on an
+   inline-block button — icon and label collapse together. */
+.hd-menu .hd-archive,.hd-menu .hd-report,.hd-menu .hd-restore{display:flex;align-items:center;width:100%;justify-content:flex-start;gap:10px;
   padding:9px 11px;border:0;border-radius:12px;background:transparent;
   font:600 13px var(--sans);text-align:left;}
+/* Restore is Archive's inverse, not a report: neutral ink, and the house hover
+   for borderless menu items (--hover, design comment at the token block). */
+.hd-menu .hd-restore{color:var(--ink);}
+.hd-menu .hd-restore:hover{background:var(--hover);}
+/* Same guard as its siblings (.hd-archive[hidden], .hd-report[hidden]): the flex
+   display above beats the UA [hidden] rule, so a non-archived run's Restore
+   would otherwise stay visible inside the flex .hd-menu. */
+.hd-restore[hidden]{display:none;}
 .hd-menu .hd-archive{color:var(--red-ink);}
 .hd-menu .hd-archive:hover:not([disabled]){background:var(--red-bg);border-color:transparent;}
 /* Amber, the exact twin of Archive's red: both rows report a problem, and reporting
@@ -4164,7 +4175,7 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 /* ---------- Runs: one list beside one content pane (index.html section "runs") ---------- */
 .view[data-view="runs"]{flex:1 1 auto;min-height:0;padding:0;position:relative;}
 body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:0;}
-.runs-shell{position:relative;height:100%;display:grid;grid-template-columns:clamp(260px,24%,320px) minmax(0,1fr);grid-template-rows:minmax(0,1fr);overflow:hidden;}
+.runs-shell{position:relative;height:100%;display:grid;grid-template-columns:clamp(308px,24%,320px) minmax(0,1fr);grid-template-rows:minmax(0,1fr);overflow:hidden;}
 .runs-list-pane{display:flex;flex-direction:column;min-height:0;background:var(--panel);border-right:1px solid var(--line);}
 .runs-head{flex:none;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:22px 14px 10px 20px;}
 .runs-head h1{margin:0;font:700 20px/1.2 var(--sans);letter-spacing:-.01em;}
@@ -4185,9 +4196,11 @@ body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:
 .runs-group-menu button[aria-checked="true"]::after{content:"\2713";margin-left:auto;font-size:12px;}
 .runs-search-row{flex:none;padding:0 12px 10px;}
 .runs-search-row[hidden]{display:none;}
-/* The filter chips: .seg chrome, tightened to fit the 270px list pane on one row. */
+/* The filter chips: .seg chrome, tightened to fit the list pane on one row. Five filters
+   (with the Archived chip) need the pane's 308px floor (up from 260) plus 6px chip
+   side padding (down from 8); with less, the row overflows the panel edge. */
 .seg.runs-filter{display:flex;flex:none;margin:0 12px 12px;padding:3px;gap:2px;border-radius:10px;}
-.seg.runs-filter button{flex:1 1 auto;padding:6px 8px;border-radius:8px;font-size:12.5px;white-space:nowrap;}
+.seg.runs-filter button{flex:1 1 auto;padding:6px 6px;border-radius:8px;font-size:12.5px;white-space:nowrap;}
 .seg.runs-filter button:not(.on):hover{color:var(--ink);}
 /* A bare input[type=search] matches none of the global field rules (text/number only), so it is
    skinned here the way .pal-filter is; the UA placeholder grey is 2.6:1 on dark. */

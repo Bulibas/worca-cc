@@ -165,7 +165,7 @@ test('narrow (slide) layout: the back button slides the run away and hands focus
   assert.equal(doc.getElementById('run-detail').innerHTML, '', 'emptied after the slide');
 });
 
-// The page's width decides the layout (D7): below 880px the panes slide instead.
+// The page's width decides the layout (D7): below 928px the panes slide instead.
 // jsdom has no layout, so the shell's width is stubbed, and ResizeObserver is captured.
 function sized(width) {
   const box = { width, resize: null };
@@ -185,17 +185,17 @@ test('entering Runs measures the page: narrow slides, wide splits, an unmeasured
   const { window, doc } = await boot({ setup });
   const layout = () => doc.getElementById('runs-shell').dataset.layout;
   go(window, 'runs'); await settle(window);
-  assert.equal(layout(), 'slide', '700px < 880px');
+  assert.equal(layout(), 'slide', '700px < 928px');
   go(window, 'new'); await settle(window);
-  box.width = 880;
+  box.width = 928;
   go(window, 'runs'); await settle(window);
-  assert.equal(layout(), 'split', '880px is wide enough');
+  assert.equal(layout(), 'split', '928px is wide enough');
   go(window, 'new'); await settle(window);
   box.width = 0;
   go(window, 'runs'); await settle(window);
   assert.equal(layout(), 'split', '0px (a hidden section) keeps the last layout');
   go(window, 'new'); await settle(window);
-  box.width = 879;
+  box.width = 927;
   go(window, 'runs'); await settle(window);
   assert.equal(layout(), 'slide');
 });
