@@ -38,6 +38,7 @@ import { defaultCloneDeps } from './clone-deps.mjs';
 import { defaultWorkspaceDeps } from './workspace-deps.mjs';
 import { defaultActionsDeps } from './actions-deps.mjs';
 import { defaultWebDeps } from './web-deps.mjs';
+import { defaultFileDeps } from './file-deps.mjs';
 import { defaultBranchDeps } from './branch-deps.mjs';
 
 const SUPPORTED_PROTOCOLS = Object.freeze(['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25']);
@@ -71,7 +72,7 @@ export function createAskToolServer({ threadId, reader = null, signal, write, lo
       // ending or being stopped also stops a bench run still going.
       ...defaultScriptDeps({ threadId, signal }),
       ...defaultCommentDeps(),
-      ...defaultWorkflowDeps({ threadId, signal }),
+      ...defaultWorkflowDeps({ threadId, signal, env }),
       ...defaultMetricsDeps({ threadId }),
       ...defaultPolicyDeps({ threadId }),
       ...defaultAwayDeps(),
@@ -87,6 +88,8 @@ export function createAskToolServer({ threadId, reader = null, signal, write, lo
       // Web access: present only when this turn's env carries WORCA_ASK_WEB (web-deps.mjs) — the
       // child's env (classic), or the relay's own copy built from the turn's web access (ui/server.mjs).
       ...defaultWebDeps({ threadId, signal, env }),
+      // Codex chats only (WORCA_ASK_ENGINE=codex): read_file / grep / glob under the shared deny rules (D13).
+      ...defaultFileDeps({ threadId, env, signal }),
       // Readers only the host process can supply (relay mode: ui/server.mjs passes
       // readLiveDiff, which needs the live runs). Absent in the classic child.
       ...extraDeps,

@@ -276,3 +276,44 @@ test('the agent-card signal survives the cap: it takes the LAST slot, never the 
   assert.deepEqual(capped.signals.slice(0, 7), eight.slice(0, 7));
   assert.deepEqual(withCardsSignal(capped, 9).signals, capped.signals, 'idempotent: a second stamp replaces, never appends');
 });
+
+test('a runner that emits the normalized vocabulary is read the same way (turn cap, usage, cost)', async () => {
+  const capped = (o) => {
+    o.onEvent?.({ type: 'result', text: '', costUsd: 0.01, subtype: 'error_max_turns', isError: true, terminalReason: 'max_turns', usage: { input_tokens: 10, output_tokens: 5 } });
+    throw new Error('claude exited with code 1: no stderr');
+  };
+  const ok = (o) => {
+    o.onEvent?.({ type: 'result', text: '', costUsd: 0.01, isError: false, usage: { input_tokens: 10, output_tokens: 5 } });
+    return { text: reply(GOOD), exitCode: 0 };
+  };
+  const { run } = fakeRun([capped, ok]);
+  const r = await classifyTask(base({ repoLook: true }), { run });
+  assert.equal(r.attempts, 2);
+  assert.equal(r.costUsd, 0.02);
+  assert.deepEqual(r.usage, { input_tokens: 20, output_tokens: 10 });
+  assert.match(r.warnings[0].message, /ran out of turns/);
+});
+
+test('on codex the classifier runs on codex: read-only, text only (its shell is off, so no repo look), no Claude routing env, Codex models only', async () => {
+  const CODEX = [{ id: 'gpt-5.5', label: 'GPT-5.5', efforts: ['minimal', 'low', 'medium', 'high'], engine: 'codex' }];
+  const shape = { name: 'Plan and build', taskKind: 'prompt', reasoning: 'r', stages: [{ agent: 'planner', model: 'gpt-5.5', effort: 'low' }, { agent: 'implementer' }, { agent: 'reviewer' }] };
+  const { run, calls } = fakeRun([reply(shape)]);
+  const r = await classifyTask(base({ models: CODEX, model: '', engine: 'codex', repoLook: true }), { run });
+  assert.equal(r.shape.stages[0].tunables.model, 'gpt-5.5');
+  const o = calls[0];
+  assert.equal(o.engine, 'codex');
+  assert.equal(o.sandbox, 'read-only');
+  assert.equal(o.modelEnv, undefined);
+  assert.equal('maxTurns' in o, false);
+  assert.deepEqual(o.tools, [], 'asked for a repo look, but codex has nothing to look with');
+  assert.equal(o.systemPrompt.includes('## Repository'), false, 'the prompt does not promise a look');
+  assert.ok(o.systemPrompt.includes('- gpt-5.5 (GPT-5.5): efforts minimal/low/medium/high'));
+  assert.equal(/^- claude-/m.test(o.systemPrompt), false, 'no Claude model is offered');
+});
+
+test('on Claude the classifier spawn is unchanged: no engine, no sandbox', async () => {
+  const { run, calls } = fakeRun([reply(GOOD)]);
+  await classifyTask(base(), { run });
+  assert.equal('engine' in calls[0], false);
+  assert.equal('sandbox' in calls[0], false);
+});

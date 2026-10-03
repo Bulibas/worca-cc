@@ -3,6 +3,7 @@
 // on weighted criteria. Inline prompt (like the Auto classifier), NOT a registered agent,
 // so it never appears in the workflow/step catalogs.
 import { runClaude, mockEnabled } from '../claude-runner.mjs';
+import { normalizingOnEvent } from '../engines/claude-events.mjs';
 import { resolveModelEnv, resolveModelCost } from '../config.mjs';
 import { safeParseJson } from '../protocol.mjs';
 import { memoryRoot, GLOBAL_SCOPE, projectScope, listMemory, readMemory } from '../memory-store.mjs';
@@ -123,19 +124,21 @@ export async function runNightAnalysis({ questions, cwd, task, planPaths, memory
       permissionRules: { deny: [...NIGHT_DENY_RULES] },
       allowedTools: [...TOOLS], tools: [...TOOLS], maxTurns: MAX_TURNS,
       signal: ctrl.signal, bin, envScrub, envAllowlist, spawnKind: 'aux',
-      onEvent: (e) => {
-        const mu = e?.type === 'assistant' && !e.raw?.parent_tool_use_id ? e.raw?.message?.usage : null;
+      onEvent: normalizingOnEvent((e) => {
+        // A main-stream message's own usage (`phase: 'message'`: the completed assistant
+        // message, not a partial-message start/delta); sub-agent turns do not count.
+        const mu = e.type === 'usage' && e.phase === 'message' && (e.parentId ?? null) === null ? e.usage : null;
         if (mu) {
           const ctx = (Number(mu.input_tokens) || 0) + (Number(mu.cache_read_input_tokens) || 0) + (Number(mu.cache_creation_input_tokens) || 0);
           if (ctx > peakContextTokens) peakContextTokens = ctx;
         }
-        if (e?.type !== 'result') return;
-        const u = e.raw?.usage;
+        if (e.type !== 'result') return;
+        const u = e.usage;
         if (u) { usage.input_tokens += Number(u.input_tokens) || 0; usage.output_tokens += Number(u.output_tokens) || 0; }
         if (e.costUsd == null) return;
         const c = resolveModelCost(model, Number(e.costUsd), u);
         if (Number.isFinite(c)) costUsd += c;
-      },
+      }),
     });
     return { byId: normalizeAnalysis(safeParseJson(String(res?.text || ''))), costUsd, usage, peakContextTokens };
   } catch (err) {

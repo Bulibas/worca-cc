@@ -6,6 +6,7 @@
 // catalog, so plugin agents and custom models are covered automatically. Mock
 // mode answers from recipes.mjs without spawning.
 import { runClaude, mockEnabled } from '../claude-runner.mjs';
+import { normalizingOnEvent } from '../engines/claude-events.mjs';
 import { resolveModelEnv, resolveModelCost } from '../config.mjs';
 import { safeParseJson } from '../protocol.mjs';
 import { classifyError } from '../recoverable-error.mjs';
@@ -260,8 +261,11 @@ export function withCardsSignal(shape, n) {
 export async function classifyTask(input, deps = {}) {
   const {
     taskText = '', extras = [], fingerprint = '', models = [], humanInLoop = true, feedback = [], priorShape = null, registry = {}, domain = null, requireModel = false,
-    model, modelEnv, cwd = process.cwd(), bin, mock = false, signal, envScrub, envAllowlist, maxAttempts = 2, repoLook = false, timeoutMs,
+    model, modelEnv, engine, cwd = process.cwd(), bin, mock = false, signal, envScrub, envAllowlist, maxAttempts = 2, repoLook: lookAsked = false, timeoutMs,
   } = input || {};
+  // The repo look is Claude's Read/Grep/Glob. On codex the classifier is a read-only spawn with its shell off
+  // (codex.mjs CODEX_SHELL_OFF), so it has nothing to look with and classifies from the text alone.
+  const repoLook = lookAsked && (!engine || engine === 'claude');
   const timeout = Number.isFinite(timeoutMs) ? timeoutMs : (repoLook ? REPO_LOOK_TIMEOUT_MS : CLASSIFIER_TIMEOUT_MS);
   const run = deps.run || runClaude;
   const usage = { input_tokens: 0, output_tokens: 0 };
@@ -277,6 +281,9 @@ export async function classifyTask(input, deps = {}) {
   let prior = priorShape;
   let costUsd = 0;
   const warnings = [];
+  // D8/D11: the classifier runs on the run's engine. Another engine gets no Claude routing env,
+  // a read-only sandbox, and no turn cap (it has none): the timeout bounds the repository look.
+  const onClaude = !engine || engine === 'claude';
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const prompt = buildClassifierUserPrompt({ taskText, extras, fingerprint, feedback: fb, priorShape: prior });
     const ctrl = new AbortController();
@@ -293,24 +300,23 @@ export async function classifyTask(input, deps = {}) {
     let text = '';
     try {
       const res = await run({
-        cwd, systemPrompt, prompt, model, modelEnv: modelEnv ?? resolveModelEnv(model),
+        cwd, systemPrompt, prompt, model, modelEnv: onClaude ? (modelEnv ?? resolveModelEnv(model)) : undefined,
+        ...(onClaude ? {} : { engine, sandbox: 'read-only' }),
         effort: 'medium', permissionMode: 'acceptEdits',
         // Text-only: no built-in tools at all. Repo look: the three read-only tools, hard-capped
         // by --max-turns (the prompt budget is smaller, so a normal reply lands first).
         allowedTools: repoLook ? [...REPO_LOOK_TOOLS] : [], tools: repoLook ? [...REPO_LOOK_TOOLS] : [],
-        ...(repoLook ? { maxTurns: REPO_LOOK_MAX_TURNS } : {}),
+        ...(repoLook && onClaude ? { maxTurns: REPO_LOOK_MAX_TURNS } : {}),
         signal: ctrl.signal, bin, mock, envScrub, envAllowlist,
-        onEvent: (e) => {
-          // ONLY the terminal `result` frame is booked: it is the one frame whose
-          // top-level `usage` is the whole call (assistant frames nest a running
-          // `message.usage`; partial-message frames repeat it), and runClaude puts
-          // `costUsd` on result frames only — so cost and tokens come from the same frame.
-          if (e?.type !== 'result') return;
-          const r = e.raw && typeof e.raw === 'object' ? e.raw : null;
-          // The --max-turns cap ends the call with THIS frame and an exit 1 whose stderr is
-          // empty (claude-runner.mjs:849-861): the frame is the only evidence, so note it here.
-          if (r && (r.subtype === 'error_max_turns' || r.terminal_reason === 'max_turns')) turnCap = true;
-          const u = r && r.usage && typeof r.usage === 'object' ? r.usage : null;
+        onEvent: normalizingOnEvent((e) => {
+          // ONLY the terminal `result` event is booked: its `usage` is the whole call
+          // (per-message usage arrives separately), and it carries the cost — so cost
+          // and tokens come from the same event.
+          if (e.type !== 'result') return;
+          // The --max-turns cap ends the call with THIS event and an exit 1 whose stderr is
+          // empty: the event is the only evidence, so note it here.
+          if (e.subtype === 'error_max_turns' || e.terminalReason === 'max_turns') turnCap = true;
+          const u = e.usage && typeof e.usage === 'object' ? e.usage : null;
           if (u) {
             usage.input_tokens += Number(u.input_tokens) || 0;
             usage.output_tokens += Number(u.output_tokens) || 0;
@@ -318,7 +324,7 @@ export async function classifyTask(input, deps = {}) {
           if (e.costUsd == null) return;
           const c = resolveModelCost(model, Number(e.costUsd), u);
           if (Number.isFinite(c)) costUsd += c;
-        },
+        }),
       });
       text = res?.text || '';
     } catch (err) {
