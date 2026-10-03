@@ -801,6 +801,24 @@ test('a stale index.lock left by a killed git is removed and the commit goes thr
   assert.ok(treeOf(repo, 'main').includes('feature.mjs'));
 });
 
+test('per-step staging clears a stale index.lock and records a run warning', async () => {
+  const repo = await freshRepo();
+  await writeFile(join(repo, 'feature.mjs'), 'export {};\n');
+  const lock = await plantIndexLock(repo, STALE_INDEX_LOCK_MS + 60_000);
+  const orch = createOrchestrator({
+    projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
+  });
+  orch.workDirs = new Map([['k', repo]]);
+  const warnings = [];
+  orch._recordRunWarning = async (text) => { warnings.push(text); };
+  await orch._stageWorkingTree();
+  assert.equal(existsSync(lock), false);
+  assert.match(spawnSync('git', ['-C', repo, 'diff', '--name-only'], { encoding: 'utf8' }).stdout, /feature\.mjs/,
+    'the new file is intent-to-added, so the reviewer diff sees it');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /removed a stale git index lock/);
+});
+
 test('a fresh index.lock is left alone: a live git may own it', async () => {
   const repo = await freshRepo();
   await writeFile(join(repo, 'feature.mjs'), 'export {};\n');

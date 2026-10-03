@@ -4650,13 +4650,11 @@ export class RunHarness extends EventEmitter {
   async _gitIndexWrite(args, opts) {
     const res = await this._git(args, opts);
     if (res.ok) return res;
-    const cleared = await clearStaleIndexLock(res.stderr);
+    const cleared = await clearStaleIndexLock(opts?.cwd || this.projectDir);
     if (!cleared) return res;
-    if (cleared.ageMs != null) {
-      await this._recordRunWarning(
-        `removed a stale git index lock (${Math.round(cleared.ageMs / 60_000)} min old, left by a killed git process): ${cleared.path}`,
-      );
-    }
+    await this._recordRunWarning(
+      `removed a stale git index lock (${Math.round(cleared.ageMs / 60_000)} min old, left by a killed git process): ${cleared.path}`,
+    );
     return this._git(args, opts);
   }
 
