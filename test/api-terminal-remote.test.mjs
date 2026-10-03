@@ -94,6 +94,9 @@ test('hosted without WORCA_TERMINAL_REMOTE: open refused, nothing listed', async
   assert.equal(r.status, 403);
   assert.equal(r.body.code, 'TERMINAL_DISABLED');
   assert.equal((await remote('GET', '/api/terminal/audit?runId=run-live')).body.code, 'TERMINAL_DISABLED');
+  const p = await remote('POST', `/api/projects/${key}/terminal`, {});
+  assert.equal(p.status, 403, 'nor in the project\'s own folder');
+  assert.equal(p.body.code, 'TERMINAL_DISABLED');
 });
 
 test('WORCA_TERMINAL_REMOTE=1 lets a signed-in person open one', async () => {

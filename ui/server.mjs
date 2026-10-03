@@ -5344,16 +5344,25 @@ app.get('/api/projects/:key/terminal', async (req, res) => {
   try {
     const p = await tmProject(req, res); if (!p) return;
     const [branches, current] = await Promise.all([listLocalBranches(p.path), currentBranch(p.path)]);
-    res.json({ enabled: true, projectKey: p.key, branches, current, worktrees: listBranchWorktrees(p.key),
-      sessions: terminals.list().filter((s) => s.scope === 'branch' && s.projectKey === p.key) });
+    res.json({ enabled: true, projectKey: p.key, dir: p.path, branches, current, worktrees: listBranchWorktrees(p.key),
+      sessions: terminals.list().filter((s) => (s.scope === 'project' || s.scope === 'branch') && s.projectKey === p.key) });
   } catch (e) { terminalError(res, e); }
 });
 
+// No `branch`: a shell in the project's own folder, on whatever is checked out there (scope 'project').
+// That folder is the person's: nothing here, nor the branch-folder release, sweep or cap, ever removes it.
+// With `branch`: a Worca-owned worktree of that branch (scope 'branch'; the pane no longer asks for one).
 app.post('/api/projects/:key/terminal', async (req, res) => {
   if (!requireTerminal(req, res) || !rejectRawTerminalFields(req, res)) return;
   try {
     const p = await tmProject(req, res); if (!p) return;
     const by = actorOf(req);
+    if (req.body?.branch == null) {
+      const branch = await currentBranch(p.path);
+      const session = await terminals.open({ cwd: p.path, scope: 'project', label: branch ? `${p.name} · ${branch}` : p.name, projectKey: p.key,
+        branch, by, cols: req.body?.cols, rows: req.body?.rows });
+      return res.status(201).json({ session, warning: null });
+    }
     const wt = await openBranchWorktree({ projectKey: p.key, projectDir: p.path, branch: req.body?.branch, by });
     let session;
     try {

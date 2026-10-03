@@ -31,3 +31,8 @@ test('a DB stamped at the current version without the tables is repaired', () =>
   db = getDb();
   assert.ok(cols(db, 'terminal_audit').length > 0);
 });
+
+test('terminal_sessions.scope is free text: run, project and branch sessions all fit (no CHECK to migrate)', () => {
+  const db = getDb();
+  assert.doesNotMatch(db.prepare("SELECT sql FROM sqlite_master WHERE name = 'terminal_sessions'").get().sql, /CHECK/i);
+});

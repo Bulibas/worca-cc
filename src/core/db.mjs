@@ -950,8 +950,9 @@ CREATE TABLE IF NOT EXISTS pipeline_commands (
 CREATE INDEX IF NOT EXISTS idx_pipeline_commands_pending ON pipeline_commands (pipeline_id, consumed_at);
 `;
 
-// v50 (issue #573): the built-in terminal. Sessions, one row per recorded command (a block), an audit
-// log (who opened, ran, stopped, closed) and the worca-owned worktrees opened for a project branch.
+// v50 (issue #573): the built-in terminal. Sessions (scope: run, project = the project's own folder, or
+// branch), one row per recorded command (a block), an audit log (who opened, ran, stopped, closed) and
+// the worca-owned worktrees opened for a project branch.
 // No FK to pipelines: blocks and audit rows are kept even after a run is deleted.
 const TERMINAL_DDL = `
 CREATE TABLE IF NOT EXISTS terminal_sessions (

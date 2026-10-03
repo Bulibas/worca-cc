@@ -1,5 +1,6 @@
-// src/core/terminal/worktrees.mjs — worca-owned worktrees for a project branch (issue #573, D6). The
-// project page's terminal opens in one, under <home>/terminal/worktrees/<projectKey>/. They follow the
+// src/core/terminal/worktrees.mjs — worca-owned worktrees for a project branch (issue #573, D6), opened
+// through the API only (the pane's project terminal uses the project's own folder, which is never one of
+// these), under <home>/terminal/worktrees/<projectKey>/. They follow the
 // Actions keep policy: `never` removes a CLEAN one when its last terminal ends (and at boot); on-success
 // and until-pr keep it until someone removes it; maxCheckouts caps how many stay. Nothing here ever
 // deletes a branch, and a dirty worktree goes only on an explicit force.
@@ -8,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { mkdir, realpath } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { worcaHome } from '../projects.mjs';
 import { createDetachedWorktree, removeWorktree, worktreePathForBranch, listLocalBranches } from '../worktree.mjs';
 import { isSafeBranchName } from '../git-sync.mjs';
@@ -99,6 +100,7 @@ async function removeNow(dir, { force = false, projectDirOf, isBusy = () => fals
   if (row.detached && !force && (await hasUnreachedCommits(dir))) return { removed: false, reason: 'unpushed-commits' };
   const projectDir = await projectDirOf(row.projectKey);
   if (!projectDir) return { removed: false, reason: 'no-project' };
+  if (resolve(dir) === resolve(projectDir)) return { removed: false, reason: 'project-dir' };   // the person's own checkout: never
   if (isBusy()) return { removed: false, reason: 'in-use' };
   const r = await removeWorktree({ projectDir, worktreeDir: dir, force });   // no `branch:` — the branch is the person's
   if (existsSync(dir)) return { removed: false, reason: r.ok ? 'busy' : 'dirty' };

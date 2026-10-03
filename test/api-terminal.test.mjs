@@ -262,3 +262,32 @@ test('a branch terminal that cannot start leaves no new folder behind', { skip: 
     for (const id of opened) await closeSession(id);
   }
 });
+
+test('a project terminal without a branch opens in the project\'s own folder, and closing it removes nothing', { skip: !BASH }, async () => {
+  const before = spawnSync('git', ['worktree', 'list'], { cwd: repo, encoding: 'utf8' }).stdout;
+  const r = await post(`/api/projects/${key}/terminal`, { cols: 80, rows: 20 });
+  assert.equal(r.status, 201);
+  const { session, warning } = await r.json();
+  assert.equal(warning, null);
+  assert.deepEqual([session.scope, session.cwd, session.branch, session.runId], ['project', repo, 'main', null]);
+  const ctx = await getJson(`/api/projects/${key}/terminal`);
+  assert.equal(ctx.dir, repo);
+  assert.ok(ctx.sessions.some((s) => s.id === session.id && s.scope === 'project'));
+  assert.equal(listBranchWorktrees(key).some((w) => w.dir === repo), false, 'the project folder is not a worca folder');
+  const audit = await getJson(`/api/terminal/audit?sessionId=${session.id}`);
+  assert.deepEqual(audit.audit.map((a) => [a.action, a.detail]), [['open', repo]]);
+  assert.deepEqual(await closeSession(session.id), { ok: true });
+  await waitFor(async () => (await getJson('/api/terminal')).sessions.find((s) => s.id === session.id)?.status === 'closed');
+  await new Promise((res) => setTimeout(res, 200));        // the status listener's release runs async
+  assert.ok(existsSync(join(repo, '.git')), 'the project folder is still there');
+  assert.equal(spawnSync('git', ['worktree', 'list'], { cwd: repo, encoding: 'utf8' }).stdout, before);
+});
+
+test('a project terminal has the same gates as the others: raw fields and other origins are refused', async () => {
+  const r = await post(`/api/projects/${key}/terminal`, { cwd: '/' });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).code, 'RAW_FIELD');
+  const foreign = await raw('POST', `/api/projects/${key}/terminal`, { host: `127.0.0.1:${port}`, origin: 'http://127.0.0.1:4401' }, {});
+  assert.equal(foreign.status, 403);
+  assert.equal(foreign.body.code, 'TERMINAL_CROSS_ORIGIN');
+});

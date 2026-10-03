@@ -6,8 +6,8 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync, realpathSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
-import { openBranchWorktree, removeBranchWorktree, releaseBranchWorktree, enforceBranchWorktreeCap, branchCheckoutName } from '../src/core/terminal/worktrees.mjs';
-import { listBranchWorktrees } from '../src/core/terminal/store.mjs';
+import { openBranchWorktree, removeBranchWorktree, releaseBranchWorktree, enforceBranchWorktreeCap, sweepBranchWorktrees, branchCheckoutName } from '../src/core/terminal/worktrees.mjs';
+import { listBranchWorktrees, insertBranchWorktree, deleteBranchWorktree } from '../src/core/terminal/store.mjs';
 
 useTempHome(after);
 const git = (cwd, ...a) => spawnSync('git', a, { cwd, encoding: 'utf8' });
@@ -115,4 +115,18 @@ test('a folder that became busy while the release checked it is kept (busyDirs r
   busyNow = true;
   assert.deepEqual(await released, { removed: false, reason: 'in-use' });
   assert.ok(existsSync(z.dir));
+});
+
+test('the project\'s own folder is never removed, even if a row ever named it: release, cap, sweep and force all refuse', async () => {
+  insertBranchWorktree({ dir: repo, projectKey: PK, branch: 'main', detached: false });
+  try {
+    assert.deepEqual(await releaseBranchWorktree(repo, { keep: 'never', busyDirs: new Set(), projectDirOf }), { removed: false, reason: 'project-dir' });
+    assert.ok(!(await enforceBranchWorktreeCap({ max: 0, busyDirs: new Set(), projectDirOf })).evicted.includes(repo));
+    await sweepBranchWorktrees({ keep: 'never', maxCheckouts: 0, busyDirs: new Set(), projectDirOf });
+    assert.deepEqual(await removeBranchWorktree(repo, { force: true, projectDirOf }), { removed: false, reason: 'project-dir' });
+    assert.ok(existsSync(join(repo, 'a.txt')), 'the checkout and its files are there');
+    assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').stdout.trim(), 'main');
+  } finally {
+    deleteBranchWorktree(repo);
+  }
 });

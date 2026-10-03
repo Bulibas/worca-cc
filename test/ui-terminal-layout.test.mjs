@@ -55,3 +55,16 @@ test('app.js: sendWs reports a dropped socket and the pane hears about it', () =
   assert.ok(app.includes('if (!ws || !state.wsReady) return false;'));
   assert.ok(app.includes('if (terminalPane) terminalPane.onConnection(false);'));
 });
+
+test('the header toggle shows its pressed state; the old tab row and branch rows are gone', () => {
+  assert.match(css, /\.term-cmds\[aria-pressed="true"\]\{[^}]*color:var\(--ink\);/);
+  assert.doesNotMatch(css, /\.term-tabs?\b/);
+  assert.doesNotMatch(css, /\.term-wt\b/);
+  assert.ok(css.includes('.term-sessions[hidden]{display:none;}'));
+});
+
+test('the context is one line that fits a phone: the folder ellipsizes, an empty context takes no room', () => {
+  assert.match(css, /\.term-folder\{[^}]*min-width:0;[^}]*text-overflow:ellipsis;white-space:nowrap;\}/);
+  assert.ok(css.includes('.term-context:empty{display:none;}'));
+  assert.doesNotMatch(css.slice(css.indexOf('.term-pane{'), css.indexOf('@media (max-width:760px){ body.term-open')), /#[0-9a-f]{3,8}\b/i, 'tokens only');
+});

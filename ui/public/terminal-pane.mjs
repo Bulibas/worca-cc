@@ -1,7 +1,8 @@
 // ui/public/terminal-pane.mjs — the terminal pane on the right of every page (issue #573). The shell
 // runs on the worca server (src/core/terminal/manager.mjs); this pane draws it with xterm.js over /ws
-// (term-* frames), follows the page (a run's folder, a project's branch) and lists each recorded command
-// as a block. Built in JS and appended to <body>, like the Ask dock: index.html is untouched.
+// (term-* frames), follows the page (a run's folder, a project's own folder: opening the pane starts or
+// reattaches that shell) and lists each recorded command as a block. Built in JS and appended to <body>,
+// like the Ask dock: index.html is untouched.
 import { createLineEditor } from './terminal-line.mjs';
 
 const OPEN_KEY = 'worca-cc.terminal.open';
@@ -15,7 +16,7 @@ const ANSI = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'whi
 const ansiToken = (name) => `--term-ansi-${name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`;
 
 /**
- * What the pane opens for this page: a run, a project (branch picker), or nothing new. The run id is the
+ * What the pane opens for this page: a run, a project (its own folder), or nothing new. The run id is the
  * pipeline id (`/api/runs/:id` resolves it; `ctx.runId` is the live in-memory key). A live run gets its
  * pipeline id a moment after it starts: until then the target is `pending`.
  */
@@ -66,12 +67,16 @@ export function defaultLoadXterm(doc) {
   return xtermPromise;
 }
 
-export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, confirm = async () => true, storage = null, loadXterm = null }) {
+export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, storage = null, loadXterm = null }) {
   const load = loadXterm || (() => defaultLoadXterm(doc));
   const st = { open: false, enabled: true, pty: { available: true, reason: null }, sessions: new Map(), current: null, lastSeq: 0,
-    target: { kind: 'other' }, targetKey: '', ctx: null, ctxGen: 0, blocks: new Map(), blocksOlder: 0, tab: 'term', term: null,
-    fit: null, line: null, bootId: null, member: '', branch: '', note: '', online: true, destroyed: false,
-    warnings: new Map() };       // session id → the warning its open returned (a detached branch copy): shown while attached
+    target: { kind: 'other' }, targetKey: '', ctx: null, ctxGen: 0, blocks: new Map(), blocksOlder: 0, view: 'term', term: null,
+    fit: null, line: null, bootId: null, member: '', note: '', busy: '', online: true, destroyed: false,
+    warnings: new Map(),         // session id → the warning its open returned (a detached branch copy): shown while attached
+    tried: new Set(),            // start keys auto-started since the pane opened: each at most once (D3)
+    starting: null,              // the start key whose shell is being made
+    restartKey: null,            // Enter starts a new shell for this start key (the last one exited, or never started)
+    why: null, focusNext: false, linking: false, pendingTimer: null };
   const rows = new Map();          // seq → { row, update }: Commands rows are patched in place, so an open Output stays open
   const drawn = { picker: '', context: '' };   // what the picker and the context bar show: unchanged → not rebuilt (an open select stays open)
 
@@ -79,6 +84,16 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
   const button = (label, cls, onClick) => { const b = make('button', `btn ${cls}`.trim(), label); b.type = 'button'; b.addEventListener('click', onClick); return b; };
   const readStore = (k) => { try { return storage ? storage.getItem(k) : null; } catch { return null; } };
   const writeStore = (k, v) => { try { if (storage) storage.setItem(k, v); } catch { /* private mode */ } };
+  function icon(paths) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = doc.createElementNS(NS, 'svg');
+    for (const [k, v] of Object.entries({ width: '15', height: '15', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+      'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) svg.setAttribute(k, v);
+    for (const d of paths) { const p = doc.createElementNS(NS, 'path'); p.setAttribute('d', d); svg.append(p); }
+    return svg;
+  }
+  const LIST_ICON = ['M9 6h11', 'M9 12h11', 'M9 18h11', 'M4 6h.01', 'M4 12h.01', 'M4 18h.01'];
+  const PROMPT_ICON = ['M5 7l5 5-5 5', 'M12 18h7'];
 
   // ── DOM ──────────────────────────────────────────────────────────────────────────────────────────
   const root = make('aside', 'term-pane');
@@ -88,18 +103,16 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
   const head = make('div', 'term-head');
   const picker = make('select', 'term-sessions');
   picker.setAttribute('aria-label', 'Terminal session');
+  picker.hidden = true;
   picker.addEventListener('change', () => { if (picker.value) attach(picker.value); });
-  const stopBtn = button('Stop', 'btn-danger term-stop', () => stopCurrent());
-  const closeSessBtn = button('Close terminal', 'btn-ghost term-close-session', () => closeCurrent());
-  const hideBtn = button('×', 'btn-ghost term-hide', () => close());
+  // One toggle between the terminal and its Commands list: pressed = the list is showing.
+  const cmdsBtn = button('', 'btn-ghost term-icon term-cmds', () => setView(st.view === 'term' ? 'blocks' : 'term'));
+  const hideBtn = button('×', 'btn-ghost term-icon term-hide', () => close());
   hideBtn.setAttribute('aria-label', 'Hide the terminal pane');
-  head.append(make('span', 'term-title', 'Terminal'), picker, stopBtn, closeSessBtn, hideBtn);
+  hideBtn.title = 'Hide (the shell keeps running)';
+  head.append(make('span', 'term-title', 'Terminal'), picker, cmdsBtn, hideBtn);
   const context = make('div', 'term-context');
   const banners = make('div', 'term-banners');
-  const tabs = make('div', 'term-tabs');
-  const tabTerm = button('Terminal', 'btn-ghost term-tab', () => setTab('term'));
-  const tabBlocks = button('Commands', 'btn-ghost term-tab', () => setTab('blocks'));
-  tabs.append(tabTerm, tabBlocks);
   const screen = make('div', 'term-screen');
   const probe = make('span', 'term-sel-probe');      // its token background becomes xterm's selection colour
   const ansiProbes = ANSI.map((name) => {            // their token colours become xterm's ANSI palette
@@ -113,7 +126,8 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
   screen.append(probe, ...ansiProbes.map(([, p]) => p), host);
   const blocksEl = make('div', 'term-blocks');
   blocksEl.hidden = true;
-  root.append(resizer, head, context, banners, tabs, screen, blocksEl);
+  root.append(resizer, head, context, banners, screen, blocksEl);
+  renderToggle();
   const handle = button('Terminal', 'term-handle', () => toggle());
   handle.setAttribute('aria-label', 'Open the terminal pane');
 
@@ -141,21 +155,28 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
     doc.body.style.setProperty('--term-w', `${w}px`);
     return w;
   }
-  async function open() {
+  /** `focus`: a person opened it (the edge tab, Ctrl+`): their next keys go to the shell. */
+  async function open({ focus = false } = {}) {
     st.open = true;
+    st.focusNext = focus;
     root.hidden = false;
     doc.body.classList.add('term-open');
     writeStore(OPEN_KEY, '1');
     await refreshInfo();
     await refreshContext(true);
+    if (st.focusNext && st.current && st.term) { st.focusNext = false; focusTerm(); }
   }
+  /** Hides the pane. The shell keeps running and stays attached; the next open may start one again. */
   function close() {
     st.open = false;
     root.hidden = true;
     doc.body.classList.remove('term-open');
     writeStore(OPEN_KEY, '0');
+    st.tried.clear();
+    win.clearTimeout(st.pendingTimer);
   }
-  const toggle = () => (st.open ? close() : open());
+  const toggle = () => (st.open ? close() : open({ focus: true }));
+  const focusTerm = () => { try { st.term?.focus?.(); } catch { /* not drawn */ } };
 
   async function refreshInfo() {
     try {
@@ -170,12 +191,34 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
     } catch (e) { st.note = e.message; }
   }
 
+  const newestFirst = (a, z) => String(z.createdAt || '').localeCompare(String(a.createdAt || ''));
   function sessionsForTarget() {
     const all = [...st.sessions.values()];
     if (st.target.kind === 'run') return all.filter((s) => s.runId === st.target.runId && (!st.member || s.member === st.member));
-    if (st.target.kind === 'project') return all.filter((s) => s.scope === 'branch' && s.projectKey === st.target.projectKey);
+    if (st.target.kind === 'project') return all.filter((s) => s.scope === 'project' && s.projectKey === st.target.projectKey);
     if (st.target.kind === 'pending') return [];
     return all;
+  }
+  const memberNow = () => st.ctx?.members?.find((x) => x.projectKey === st.member) || st.ctx?.members?.[0] || null;
+  /** What a new shell on this page would be: one per run member, or the project's own folder. null: none here. */
+  function startKey() {
+    if (st.target.kind === 'run') {
+      const m = memberNow();
+      return m && m.state !== 'unavailable' ? `${st.targetKey}|${m.projectKey}` : null;
+    }
+    if (st.target.kind === 'project') return st.ctx ? st.targetKey : null;
+    return null;
+  }
+
+  // A live run gets its pipeline id a moment after it starts: look again until it has one.
+  function schedulePending() {
+    win.clearTimeout(st.pendingTimer);
+    if (st.target.kind !== 'pending' || !st.open || st.destroyed) return;
+    st.pendingTimer = win.setTimeout(() => {
+      if (st.destroyed) return;
+      refreshContext();
+      if (st.target.kind === 'pending') schedulePending();
+    }, 1500);
   }
 
   async function refreshContext(force = false) {
@@ -188,9 +231,11 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
     st.target = target;
     st.ctx = null;
     st.note = '';
+    if (changed) st.restartKey = null;
     // A new page whose terminals do not include the attached one: let go of it now, so no keystroke reaches
     // a shell other than the one the context bar shows (its own running session is reattached below).
     if (changed && st.current && !sessionsForTarget().some((s) => s.id === st.current)) detachCurrent();
+    schedulePending();
     if (!st.open || !st.enabled) { render(); return; }
     let ctx = null;
     try {
@@ -201,47 +246,85 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
     st.ctx = ctx;
     for (const s of ctx?.sessions || []) st.sessions.set(s.id, s);
     if (target.kind === 'run' && ctx && !ctx.members.some((m) => m.projectKey === st.member)) st.member = ctx.members[0]?.projectKey || '';
-    // D3: follow the page by reattaching its running session; never spawn one unasked.
-    const mine = sessionsForTarget().find((s) => s.status === 'running');
-    if (mine && mine.id !== st.current) await attach(mine.id);
     render();
+    await follow();
+    render();
+  }
+
+  /**
+   * D3: the pane shows this page's shell. Its running session is reattached; with none, one is started,
+   * at most once per start key while the pane is open (a later one needs Enter, see promptRestart).
+   * Other pages start nothing: they keep the attached shell, or attach the newest running one.
+   */
+  async function follow() {
+    const cur = st.sessions.get(st.current);
+    const live = sessionsForTarget().filter((s) => s.status === 'running').sort(newestFirst);
+    if (st.target.kind === 'other') {
+      if (!(cur && cur.status === 'running') && live[0]) await attach(live[0].id);
+      return;
+    }
+    const key = startKey();
+    if (key && live.length) st.tried.add(key);            // this page has had its shell: a later one needs Enter
+    if (cur && cur.status === 'running' && live.some((s) => s.id === cur.id)) return;
+    if (live[0]) { await attach(live[0].id); return; }
+    if (!key || st.starting === key || st.linking) return;
+    if (st.tried.has(key)) { promptRestart(key); return; }
+    st.tried.add(key);
+    await start(key);
+  }
+
+  /** A dim line in the terminal; Enter (that keypress only) then starts a new shell for `key`. Never on its own. */
+  function promptRestart(key, why = st.why) {
+    st.why = null;
+    if (st.restartKey === key) return;
+    st.restartKey = key;
+    const text = why ? `[${why} — press Enter for a new one]` : '[no shell here — press Enter to start one]';
+    ensureTerm().then((t) => { if (st.restartKey === key) t.write(`\r\n\x1b[2m${text}\x1b[0m\r\n`); }).catch(() => {});
   }
 
   // ── sessions ─────────────────────────────────────────────────────────────────────────────────────
   async function termSize() {
     try { await ensureTerm(); return { cols: st.term.cols, rows: st.term.rows }; } catch { return { cols: 100, rows: 30 }; }
   }
-  async function adopt(r) {
-    if (!r) return;
-    st.sessions.set(r.session.id, r.session);
-    st.note = '';                                        // it opened: an earlier error no longer applies
-    if (r.warning) st.warnings.set(r.session.id, r.warning);
-    await attach(r.session.id);
-  }
-  async function openRun(member) {
-    const t = st.target;
-    const size = await termSize();
-    await adopt(await api('POST', `/api/runs/${encodeURIComponent(t.runId)}/terminal?${t.query}`, { member, ...size }).catch(showError));
-  }
-  async function openBranch(branch) {
-    const size = await termSize();
-    await adopt(await api('POST', `/api/projects/${encodeURIComponent(st.target.projectKey)}/terminal`, { branch, ...size }).catch(showError));
-  }
-  async function checkout(member) {
-    const t = st.target;
-    const r = await api('POST', `/api/runs/${encodeURIComponent(t.runId)}/checkout?${t.query}`, { members: [member] }).catch(showError);
-    if (r) await refreshContext(true);
-  }
-  async function removeFolder(w) {
-    const url = `/api/projects/${encodeURIComponent(st.target.projectKey)}/terminal/worktrees`;
+  /** Starts this page's shell. Attached only if the page still wants it; otherwise it waits in the picker. */
+  async function start(key) {
+    st.starting = key;
+    st.restartKey = null;
+    render();
+    let r = null;
     try {
-      await api('DELETE', url, { branch: w.branch });
-    } catch (e) {
-      if (e.code !== 'DIRTY') { showError(e); return; }
-      if (!(await confirm({ title: 'Discard uncommitted changes?', message: `${w.dir} has uncommitted changes. Removing it discards them. The branch itself stays.`, confirmLabel: 'Discard and remove', danger: true }))) return;
-      await api('DELETE', url, { branch: w.branch, force: true }).catch(showError);
+      r = st.target.kind === 'run' ? await startRun(key) : await startProject();
+    } finally {
+      if (st.starting === key) st.starting = null;
+      st.busy = '';
     }
-    await refreshContext(true);
+    if (!r) { if (startKey() === key) promptRestart(key); render(); return; }
+    st.sessions.set(r.session.id, r.session);
+    if (r.warning) st.warnings.set(r.session.id, r.warning);
+    if (startKey() === key) { st.note = ''; await attach(r.session.id); }
+    render();
+  }
+  async function startRun(key) {
+    const t = st.target;
+    let m = memberNow();
+    if (m.state === 'needs-checkout') {                  // a finished run with no checkout: make it, then start there
+      st.busy = 'Making a checkout of this run…';
+      render();
+      const ok = await api('POST', `/api/runs/${encodeURIComponent(t.runId)}/checkout?${t.query}`, { members: [m.projectKey] }).catch(showError);
+      if (!ok || startKey() !== key) return null;
+      const ctx = await api('GET', `/api/runs/${encodeURIComponent(t.runId)}/terminal?${t.query}`).catch(showError);
+      if (!ctx || startKey() !== key) return null;
+      st.ctx = ctx;
+      m = memberNow();
+      if (!m?.cwd) { st.note = m?.reason || 'This run has no folder.'; return null; }
+    }
+    const size = await termSize();
+    if (startKey() !== key) return null;
+    return api('POST', `/api/runs/${encodeURIComponent(t.runId)}/terminal?${t.query}`, { member: m.projectKey, ...size }).catch(showError);
+  }
+  async function startProject() {
+    const size = await termSize();
+    return api('POST', `/api/projects/${encodeURIComponent(st.target.projectKey)}/terminal`, size).catch(showError);
   }
 
   /** Forgets the attached session: the screen, its commands and any half-typed line. */
@@ -263,6 +346,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
     if (st.current && st.current !== id) send({ type: 'term-detach', sessionId: st.current });
     resetCurrent();
     st.current = id;
+    st.restartKey = null;
     const s = st.sessions.get(id);
     st.line = s && s.mode === 'pipes' ? createLineEditor() : null;
     try {
@@ -274,6 +358,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
     const blocks = loadBlocks(id);
     render();
     fitNow();                                            // the width may have changed since the session started
+    if (st.focusNext && st.open) { st.focusNext = false; focusTerm(); }
     return blocks;
   }
   async function loadBlocks(id) {
@@ -300,13 +385,6 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
   function stopCurrent() {
     if (st.current) api('POST', `/api/terminal/sessions/${encodeURIComponent(st.current)}/stop`).catch(showError);
   }
-  async function closeCurrent() {
-    const id = st.current;
-    if (!id) return;
-    if (!(await confirm({ title: 'Close this terminal?', message: 'The shell and anything still running in it are stopped. Its commands stay recorded.', confirmLabel: 'Close terminal' }))) return;
-    await api('DELETE', `/api/terminal/sessions/${encodeURIComponent(id)}`).catch(showError);
-  }
-
   // ── xterm ────────────────────────────────────────────────────────────────────────────────────────
   function themeNow() {
     const cs = win.getComputedStyle(screen);
@@ -342,25 +420,29 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
   }
   function onKeys(data) {
     const s = st.sessions.get(st.current);
-    if (!s || s.status !== 'running') return;
+    if (!s || s.status !== 'running') {
+      // No shell: Enter starts a new one for this page (and is not sent anywhere); other keys do nothing.
+      if (st.restartKey && st.online && /[\r\n]/.test(data) && st.restartKey === startKey() && !st.starting) start(st.restartKey);
+      return;
+    }
     if (!st.online) return;                              // reconnecting: the banner says keys are not sent
     if (!st.line) { send({ type: 'term-input', sessionId: s.id, data }); return; }
     const r = st.line.feed(data);
     if (r.echo) st.term.write(r.echo);
     if (r.send && !send({ type: 'term-input', sessionId: s.id, data: r.send })) st.term.write('[not sent: reconnecting]\r\n');
-    if (r.interrupt) stopCurrent();
+    if (r.interrupt) stopCurrent();                      // over pipes Ctrl+C has no tty to reach: the stop API does it
   }
   function runAgain(command) {
     const s = st.sessions.get(st.current);
     if (!s || s.status !== 'running') return;
     // Never type into a running program (a REPL, a prompt): only at the shell's prompt.
-    if (s.currentBlock) { st.note = 'A command is still running in this terminal. Stop it first, or open another terminal.'; render(); return; }
+    if (s.currentBlock) { st.note = 'A command is still running in this terminal. Stop it first with Ctrl+C.'; render(); return; }
     if (!st.online) return;
     // Under a PTY, Ctrl+U first clears anything half-typed at the prompt. Over pipes the half-typed line is
     // only ours: drop it (and its echo), then echo the command, as the shell will not.
     if (st.line && st.term) st.term.write(`${st.line.clear()}${command}\r\n`);
     send({ type: 'term-input', sessionId: s.id, data: st.line ? `${command}\n` : `\x15${command}\r` });
-    setTab('term');
+    setView('term');
   }
 
   // ── frames ───────────────────────────────────────────────────────────────────────────────────────
@@ -369,8 +451,11 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
       const prev = st.sessions.get(msg.snapshot.id);
       st.sessions.set(msg.snapshot.id, msg.snapshot);
       if (msg.snapshot.id === st.current && prev?.status === 'running' && msg.snapshot.status !== 'running' && st.term) {
-        st.term.write(msg.snapshot.status === 'closed' ? '\r\n[terminal closed]\r\n'
-          : `\r\n[shell exited${msg.snapshot.exitCode == null ? '' : ` with code ${msg.snapshot.exitCode}`}]\r\n`);
+        // `exit`, a crash or a close: say so, and never start another shell unasked (Enter does).
+        const why = msg.snapshot.status === 'closed' ? 'terminal closed'
+          : `shell exited${msg.snapshot.exitCode == null ? '' : ` with code ${msg.snapshot.exitCode}`}`;
+        const key = startKey();
+        if (key) { st.restartKey = null; promptRestart(key, why); } else st.term.write(`\r\n\x1b[2m[${why}]\x1b[0m\r\n`);
       }
       if (st.open) render();
       return;
@@ -397,11 +482,19 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
     st.bootId = msg.bootId || st.bootId;
     const wasOffline = !st.online;
     st.online = true;
-    if (restarted) {                                     // the server restarted: its shells are gone
+    if (restarted) {                                     // the server restarted: its shells are gone, and none respawns
       const had = st.current;
       resetCurrent();
       st.sessions.clear();
-      const say = () => { if (had && !st.current) { st.note = 'The worca server restarted, which closed its terminals. Open a new one.'; render(); } };
+      if (had) st.why = 'the worca server restarted';
+      const say = () => {
+        if (!had || st.current) return;
+        st.note = 'The worca server restarted, which closed its terminals. Press Enter in the terminal for a new one.';
+        const key = startKey();
+        if (key) promptRestart(key);
+        st.why = null;
+        render();
+      };
       if (st.open) refreshInfo().then(() => refreshContext(true)).then(say);
       else { render(); say(); }
       return;
@@ -419,100 +512,100 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
 
   // ── render ───────────────────────────────────────────────────────────────────────────────────────
   function render() {
-    const s = st.sessions.get(st.current);
-    const all = [...st.sessions.values()].sort((a, z) => (a.status === 'running' ? 0 : 1) - (z.status === 'running' ? 0 : 1) || z.createdAt.localeCompare(a.createdAt));
+    // The picker lists the open (running) terminals, and the attached one: shown only when there is a choice.
+    const all = [...st.sessions.values()].filter((x) => x.status === 'running' || x.id === st.current)
+      .sort((a, z) => (a.status === 'running' ? 0 : 1) - (z.status === 'running' ? 0 : 1) || newestFirst(a, z));
     const pickerKey = JSON.stringify([st.current, all.map((x) => [x.id, x.label, x.status])]);
     if (pickerKey !== drawn.picker) {
       drawn.picker = pickerKey;
       picker.replaceChildren();
-      picker.hidden = !all.length;
-      if (all.length && !s) {                            // nothing attached: say so rather than show another shell's name
+      picker.hidden = all.length < 2;
+      if (all.length && !st.sessions.has(st.current)) {   // nothing attached: say so rather than show another shell's name
         const o = make('option', null, 'Pick a terminal');
         o.value = ''; o.selected = true; o.disabled = true;
         picker.append(o);
       }
       for (const x of all) {
-        const o = make('option', null, `${x.label || x.id} — ${x.status}`);
+        const o = make('option', null, x.status === 'running' ? (x.label || x.id) : `${x.label || x.id} — ${x.status}`);
         o.value = x.id;
         o.selected = x.id === st.current;
         picker.append(o);
       }
     }
-    stopBtn.disabled = !(s && s.status === 'running');
-    closeSessBtn.disabled = !(s && s.status === 'running');
     renderContext();
     renderBanners();
     renderBlocks();
-    tabTerm.classList.toggle('on', st.tab === 'term');
-    tabBlocks.classList.toggle('on', st.tab === 'blocks');
+    renderToggle();
   }
-  function setTab(tab) {
-    st.tab = tab;
-    screen.hidden = tab !== 'term';
-    blocksEl.hidden = tab !== 'blocks';
+  function renderToggle() {
+    const list = st.view === 'blocks';
+    const label = list ? 'Back to terminal' : 'Commands';
+    if (cmdsBtn.getAttribute('aria-label') === label) return;
+    cmdsBtn.setAttribute('aria-label', label);
+    cmdsBtn.setAttribute('aria-pressed', String(list));
+    cmdsBtn.replaceChildren(icon(list ? PROMPT_ICON : LIST_ICON));
+  }
+  function setView(view) {
+    st.view = view;
+    screen.hidden = view !== 'term';
+    blocksEl.hidden = view !== 'blocks';
     render();
-    if (tab === 'term') fitNow();
+    if (view === 'term') { fitNow(); focusTerm(); }
   }
 
+  const LIVE_WARNING = 'This pipeline is still running and changing these files.';
+  /** The amber line of the attached shell: a live run's (while it runs), or what its open returned. */
+  function sessionWarning(s) {
+    if (s.scope === 'run') return s.status === 'running' && s.runLive ? (st.warnings.get(s.id) || LIVE_WARNING) : null;
+    return st.warnings.get(s.id) || null;
+  }
+  /** What the context line shows, as data: it is rebuilt only when this changes (an open select stays open). */
+  function contextParts() {
+    if (!st.enabled) return [['note', 'The terminal is turned off on this hosted deployment. An administrator can enable it with WORCA_TERMINAL_REMOTE=1.']];
+    const parts = [];
+    if (st.note) parts.push(['error', st.note]);
+    if (st.busy) parts.push(['note', st.busy]);
+    const s = st.sessions.get(st.current);
+    const c = st.ctx;
+    const m = st.target.kind === 'run' ? memberNow() : null;
+    if (m && c.members.length > 1) parts.push(['members', c.members.map((x) => [x.projectKey, x.projectName]), st.member]);
+    if (m && m.state === 'unavailable' && !s) parts.push(['note', m.reason || 'This run has no folder.']);
+    const folder = s?.cwd || m?.cwd || (st.target.kind === 'project' ? c?.dir : null);
+    if (folder) parts.push(['folder', folder]);
+    const warn = s ? sessionWarning(s) : m?.warning;
+    if (warn) parts.push(['warn', warn]);
+    if (st.target.kind === 'pending') parts.push(['note', 'This run is starting. Its terminal opens in a moment.']);
+    if (st.target.kind === 'other' && !s) parts.push(['note', 'Open a run or a project to start a terminal.']);
+    return parts;
+  }
   function renderContext() {
-    // Rebuilt only when what it shows changed: a term-status frame must not close an open select.
-    const key = JSON.stringify([st.enabled, st.note, st.warnings.get(st.current) || '', st.targetKey, st.ctxGen, !!st.ctx, st.member, st.branch, st.sessions.size > 0,
-      sessionsForTarget().some((x) => x.status === 'running')]);
+    const parts = contextParts();
+    const key = JSON.stringify(parts);
     if (key === drawn.context) return;
     drawn.context = key;
     context.replaceChildren();
-    if (!st.enabled) {
-      context.append(make('p', 'term-note', 'The terminal is turned off on this hosted deployment. An administrator can enable it with WORCA_TERMINAL_REMOTE=1.'));
-      return;
-    }
-    if (st.note) context.append(make('p', 'term-note term-error', st.note));
-    if (st.warnings.has(st.current)) context.append(make('p', 'term-warn', st.warnings.get(st.current)));
-    const c = st.ctx;
-    if (st.target.kind === 'run' && c) {
-      if (c.members.length > 1) {
+    for (const [kind, value, chosen] of parts) {
+      if (kind === 'members') {
         const sel = make('select', 'term-member');
         sel.setAttribute('aria-label', 'Project');
-        for (const m of c.members) { const o = make('option', null, m.projectName); o.value = m.projectKey; o.selected = m.projectKey === st.member; sel.append(o); }
+        for (const [k, name] of value) { const o = make('option', null, name); o.value = k; o.selected = k === chosen; sel.append(o); }
         sel.addEventListener('change', () => {
           st.member = sel.value;
-          const s = sessionsForTarget().find((x) => x.status === 'running');
-          if (s) attach(s.id);
-          else {                                         // this project has no shell: never keep typing into the other's
-            if (st.current && !sessionsForTarget().some((x) => x.id === st.current)) detachCurrent();
-            render();
-          }
+          st.restartKey = null;
+          // this project's shell, never the other's: let go first, then follow (attach or start once)
+          if (st.current && !sessionsForTarget().some((x) => x.id === st.current)) detachCurrent();
+          render();
+          follow().then(render);
         });
         context.append(sel);
+      } else if (kind === 'folder') {
+        const f = make('span', 'term-folder', value);
+        f.title = value;
+        context.append(f);
+      } else {
+        context.append(make('p', { error: 'term-note term-error', warn: 'term-warn', note: 'term-note' }[kind], value));
       }
-      const m = c.members.find((x) => x.projectKey === st.member) || c.members[0];
-      if (!m) return;
-      const attached = sessionsForTarget().some((x) => x.status === 'running');
-      if (m.warning && !attached) context.append(make('p', 'term-warn', m.warning));
-      if (m.state === 'needs-checkout') context.append(make('p', 'term-note', 'This run has no checkout yet.'), button('Check out', 'btn-primary term-checkout', () => checkout(m.projectKey)));
-      else if (m.state === 'unavailable') context.append(make('p', 'term-note', m.reason || 'This run has no folder.'));
-      else context.append(make('p', 'term-folder', m.cwd), button(attached ? 'Open another terminal' : 'Open terminal', 'btn-primary term-new', () => openRun(m.projectKey)));
-      return;
     }
-    if (st.target.kind === 'project' && c) {
-      const sel = make('select', 'term-branch');
-      sel.setAttribute('aria-label', 'Branch');
-      for (const b of c.branches || []) { const o = make('option', null, b === c.current ? `${b} (current)` : b); o.value = b; o.selected = b === (st.branch || c.current); sel.append(o); }
-      sel.addEventListener('change', () => { st.branch = sel.value; });
-      context.append(sel, button('Open terminal', 'btn-primary term-new', () => openBranch(sel.value)));
-      for (const w of c.worktrees || []) {
-        const row = make('div', 'term-wt');
-        row.append(make('span', 'term-folder', `${w.branch}${w.detached ? ' (detached)' : ''} — ${w.dir}`), button('Remove folder', 'btn-ghost term-wt-remove', () => removeFolder(w)));
-        context.append(row);
-      }
-      return;
-    }
-    if (st.target.kind === 'pending') {
-      context.append(make('p', 'term-note', 'This run is starting. Its folder is ready in a moment.'), button('Refresh', 'btn-ghost term-refresh', () => refreshContext(true)));
-      return;
-    }
-    context.append(make('p', 'term-note', st.sessions.size
-      ? 'Open a run or a project to start a new terminal, or pick an open one above.'
-      : 'Open a run or a project to start a terminal.'));
   }
 
   function renderBanners() {
@@ -521,10 +614,9 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
     if (!st.online && st.open) banners.append(make('p', 'term-warn term-offline', 'Reconnecting to the worca server. Keys typed now are not sent.'));
     root.classList.toggle('term-is-offline', !st.online);
     if (!s) return;
-    if (s.mode === 'pipes') banners.append(make('p', 'term-banner', `Full-screen programs (vim, top, less) do not work here: ${st.pty.reason || 'node-pty is not available on this server'}. Commands, blocks and Stop still work.`));
-    if (s.status === 'running' && s.runLive) banners.append(make('p', 'term-warn', 'This pipeline is still running and changing these files.'));
-    if (s.folder === 'gone') banners.append(make('p', 'term-banner', 'This folder was removed when the run finished. Open a new terminal on the run to keep working.'));
-    if (s.folder === 'replaced') banners.append(make('p', 'term-banner', 'This folder was re-created when the run finished. Run cd "$PWD" here, or open a new terminal.'));
+    if (s.mode === 'pipes') banners.append(make('p', 'term-banner', `Full-screen programs (vim, top, less) do not work here: ${st.pty.reason || 'node-pty is not available on this server'}. Commands, blocks and Ctrl+C still work.`));
+    if (s.folder === 'gone') banners.append(make('p', 'term-banner', 'This folder was removed when the run finished. Type exit, then press Enter for a new terminal on the run.'));
+    if (s.folder === 'replaced') banners.append(make('p', 'term-banner', 'This folder was re-created when the run finished. Run cd "$PWD" here, or type exit and press Enter for a new terminal.'));
   }
 
   // Rows are kept by seq and patched (status, meta): rebuilding them would close an expanded Output.
@@ -534,7 +626,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
     // The list is the newest page plus what arrived since; the count is every command (or "+" when unknown).
     const shown = st.blocks.size;
     const total = st.blocksOlder == null ? null : shown + st.blocksOlder;
-    tabBlocks.textContent = shown ? `Commands (${total == null ? `${shown}+` : total})` : 'Commands';
+    cmdsBtn.title = shown ? `Commands (${total == null ? `${shown}+` : total})` : 'Commands';
     noteTrimmed.textContent = `Showing the latest ${shown}${total == null ? '' : ` of ${total}`} commands. Older ones are recorded but not listed here.`;
     const s = st.sessions.get(st.current);
     const want = [];
@@ -563,16 +655,16 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
     const copy = (text) => { try { win.navigator.clipboard?.writeText(text); } catch { /* no clipboard */ } };
     const acts = make('div', 'term-block-acts');
     acts.append(
-      button('Output', 'btn-ghost', async () => {
+      button('Output', 'btn-ghost btn-mini', async () => {
         if (out.hidden && !out.textContent) {
           const full = await api('GET', `/api/terminal/sessions/${encodeURIComponent(b.sessionId)}/blocks/${b.seq}`).catch(showError);
           if (full) out.textContent = `${full.truncated ? `(earlier output trimmed; ${full.outputBytes} bytes in total)\n` : ''}${stripAnsi(full.output)}`;
         }
         out.hidden = !out.hidden;
       }),
-      button('Copy', 'btn-ghost', () => copy(b.command)),
-      button('Run again', 'btn-ghost', () => runAgain(b.command)),
-      button('Copy link', 'btn-ghost', () => copy(`${win.location.origin}/?terminal=${encodeURIComponent(b.sessionId)}&block=${b.seq}`)),
+      button('Copy', 'btn-ghost btn-mini', () => copy(b.command)),
+      button('Run again', 'btn-ghost btn-mini', () => runAgain(b.command)),
+      button('Copy link', 'btn-ghost btn-mini', () => copy(`${win.location.origin}/?terminal=${encodeURIComponent(b.sessionId)}&block=${b.seq}`)),
     );
     row.append(top, meta, acts, out);
     let status = null;
@@ -616,10 +708,12 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
   // D9: /?terminal=<id>&block=<seq> opens that session on its Commands tab.
   const link = new URLSearchParams(win.location.search || '');
   if (link.get('terminal')) {
+    st.linking = true;                                     // the link's session, not a new shell for this page
     open().then(async () => {
       const id = link.get('terminal');
       await attach(id);
-      setTab('blocks');
+      st.linking = false;
+      setView('blocks');
       const seq = link.get('block');
       const n = Number(seq);                               // a seq is an integer: no selector escaping needed
       if (seq == null || !Number.isInteger(n)) return;
@@ -633,6 +727,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
 
   function destroy() {
     st.destroyed = true;
+    win.clearTimeout(st.pendingTimer);
     doc.removeEventListener('keydown', onDocKey, true);
     doc.removeEventListener('worca:theme', onTheme);
     win.removeEventListener('hashchange', onHash);

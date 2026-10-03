@@ -79,3 +79,11 @@ test('newest: a long session lists its last blocks, oldest first; countBlocks sa
   assert.equal(store.countBlocks('t-many'), 250);
   assert.equal(store.countBlocks('t-many', 240), 10);
 });
+
+test('a project-scope session (the project\'s own folder) is stored like any other: no run, its scope kept', () => {
+  store.insertSession(session('t-proj', { scope: 'project', runId: null, member: null, branch: 'main', cwd: '/home/me/app' }));
+  const s = store.getSession('t-proj');
+  assert.equal(s.scope, 'project');
+  assert.equal(s.runId, null);
+  assert.equal(s.cwd, '/home/me/app');
+});

@@ -29543,7 +29543,8 @@ askPanel = createAskPanel({
 document.body.appendChild(askPanel.root);
 
 // Terminal pane (issue #573): a JS-built body-level pane on the right, like the Ask dock above. No
-// network until it is opened (or was left open); xterm.js loads on first open.
+// network until it is opened (or was left open); xterm.js loads on first open, and opening it on a run
+// or a project starts (or reattaches) that page's shell.
 terminalPane = createTerminalPane({
   doc: document,
   win: window,
@@ -29555,7 +29556,6 @@ terminalPane = createTerminalPane({
     try { ws.send(JSON.stringify(obj)); return true; } catch { return false; }
   },
   getPageContext,
-  confirm: confirmModal,
   storage: window.localStorage,
 });
 document.body.appendChild(terminalPane.root);

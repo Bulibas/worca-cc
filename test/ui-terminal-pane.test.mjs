@@ -1,5 +1,6 @@
-// test/ui-terminal-pane.test.mjs — the right-side terminal pane (#573): follows the page, opens, attaches,
-// checks out, shows blocks, pipes banner, the hosted message. xterm is faked (jsdom has no canvas).
+// test/ui-terminal-pane.test.mjs — the right-side terminal pane (#573): follows the page, starts or
+// reattaches its shell on open (once), checks out first, Enter restarts an ended shell, shows blocks, the
+// pipes banner, the hosted message. xterm is faked (jsdom has no canvas).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
@@ -50,6 +51,15 @@ const RUN_CTX = { view: 'running', runId: 'uuid-1', pipelineId: 'r1', projectDir
 const SNAP = { id: 't-1', scope: 'run', label: 'r1 · app', runId: 'r1', member: 'app-0000aaaa', mode: 'pty', integration: true,
   status: 'running', runLive: true, folder: 'ok', currentBlock: null, createdAt: '2026-10-03T10:00:00.000Z' };
 
+const MEMBERS = [{ projectKey: 'app-0000aaaa', projectName: 'app', state: 'worktree', cwd: '/x' }];
+const attachedRoutes = (extra = {}) => ({
+  'GET /api/terminal': { ...INFO, sessions: [SNAP] },
+  'GET /api/runs/r1/terminal': { enabled: true, live: true, workspace: false, sessions: [SNAP], members: MEMBERS },
+  'GET /api/terminal/sessions/t-1': { session: SNAP, blocks: [] },
+  ...extra,
+});
+const block = (seq, over = {}) => ({ sessionId: 't-1', seq, command: `cmd ${seq}`, status: 'done', exitCode: 0, durationMs: 5, ...over });
+
 test('paneTargetOf follows the page', () => {
   assert.deepEqual(paneTargetOf(RUN_CTX), { kind: 'run', runId: 'r1', query: 'projectDir=%2Fp%2Fapp' });
   assert.deepEqual(paneTargetOf({ view: 'history-detail', pipelineId: 'r2', workspaceId: 'wks-1' }), { kind: 'run', runId: 'r2', query: 'workspaceId=wks-1' });
@@ -69,78 +79,314 @@ test('formatDuration and blockStatusLabel', () => {
   assert.deepEqual(blockStatusLabel({ status: 'stopped' }), { text: 'stopped', tone: 'bad' });
 });
 
-test('a live run: the warning, Open terminal posts the member and size, then attaches', async () => {
+const posts = (calls, path) => calls.filter((c) => c.method === 'POST' && (!path || c.url.split('?')[0] === path));
+const LIVE_MEMBER = { projectKey: 'app-0000aaaa', projectName: 'app', state: 'worktree', cwd: '/runs/r1/repos/app',
+  warning: 'This pipeline is still running and changing these files.' };
+
+test('a live run: opening the pane starts a shell in its folder, with the member and size, attaches it and warns', async () => {
   const { pane, doc, sent, calls } = makePane({ ctx: RUN_CTX, routes: {
     'GET /api/terminal': INFO,
-    'GET /api/runs/r1/terminal': { enabled: true, live: true, workspace: false, sessions: [],
-      members: [{ projectKey: 'app-0000aaaa', projectName: 'app', state: 'worktree', cwd: '/runs/r1/repos/app', warning: 'This pipeline is still running and changing these files.' }] },
-    'POST /api/runs/r1/terminal': { session: SNAP, warning: null },
+    'GET /api/runs/r1/terminal': { enabled: true, live: true, workspace: false, sessions: [], members: [LIVE_MEMBER] },
+    'POST /api/runs/r1/terminal': { session: { ...SNAP, cwd: LIVE_MEMBER.cwd }, warning: LIVE_MEMBER.warning },
     'GET /api/terminal/sessions/t-1': { session: SNAP, blocks: [] },
   } });
   await pane.open();
   await tick();
   assert.equal(doc.body.classList.contains('term-open'), true);
-  assert.match(doc.querySelector('.term-context').textContent, /still running and changing these files/);
-  doc.querySelector('.term-new').click();
-  await tick();
-  const post = calls.find((c) => c.method === 'POST');
+  const [post] = posts(calls);
+  assert.equal(posts(calls).length, 1);
   assert.equal(post.url, '/api/runs/r1/terminal?projectDir=%2Fp%2Fapp');
   assert.deepEqual(post.body, { member: 'app-0000aaaa', cols: 80, rows: 24 });
   assert.ok(sent.some((m) => m.type === 'term-attach' && m.sessionId === 't-1'));
+  const ctx = doc.querySelector('.term-context');
+  assert.equal(ctx.querySelector('.term-folder').textContent, '/runs/r1/repos/app');
+  assert.match(ctx.querySelector('.term-warn').textContent, /still running and changing these files/);
+  assert.equal(ctx.querySelector('button'), null, 'no buttons in the context line');
 });
 
-test('a branch warning belongs to its terminal: amber, and gone once another terminal is attached', async () => {
-  const DEV = { ...SNAP, id: 't-dev', scope: 'branch', runId: null, member: null, projectKey: 'app-0000aaaa', branch: 'dev', label: 'app · dev' };
-  const DOCS = { ...DEV, id: 't-docs', branch: 'docs/x', label: 'app · docs/x' };
-  const detached = 'Branch "dev" is checked out in /p/app, so this folder is a detached copy of its latest commit.';
-  const { pane, doc } = makePane({ ctx: { view: 'project-detail', projectKey: 'app-0000aaaa' }, routes: {
+test('the header: title, the hide button and the Commands toggle; no Stop, Close, Open or branch controls', async () => {
+  const { pane, doc } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
+  await pane.open();
+  await tick();
+  const labels = [...doc.querySelectorAll('.term-pane button')].map((b) => b.getAttribute('aria-label') || b.textContent);
+  assert.deepEqual(labels, ['Commands', 'Hide the terminal pane']);
+  for (const gone of ['.term-stop', '.term-close-session', '.term-new', '.term-checkout', '.term-branch', '.term-tabs', '.term-wt-remove']) {
+    assert.equal(doc.querySelector(gone), null, gone);
+  }
+});
+
+test('reopening the pane on the same page reattaches its running shell instead of starting another', async () => {
+  const routes = attachedRoutes();
+  const { pane, calls, sent } = makePane({ ctx: RUN_CTX, routes });
+  await pane.open();
+  await tick();
+  pane.close();
+  await pane.open();
+  await tick();
+  assert.equal(posts(calls).length, 0);
+  assert.equal(sent.filter((m) => m.type === 'term-detach').length, 0, 'hiding the pane keeps the shell attached');
+});
+
+test('a project page: the shell opens in the project\'s own folder (no branch in the request)', async () => {
+  const PROJ = { ...SNAP, id: 't-p', scope: 'project', runId: null, member: null, projectKey: 'app-0000aaaa', branch: 'dev', cwd: '/p/app', label: 'app · dev', runLive: false };
+  const { pane, doc, calls, sent } = makePane({ ctx: { view: 'project-detail', projectKey: 'app-0000aaaa' }, routes: {
     'GET /api/terminal': INFO,
-    'GET /api/projects/app-0000aaaa/terminal': { enabled: true, sessions: [], branches: ['dev', 'docs/x'], current: 'dev', worktrees: [] },
-    'POST /api/projects/app-0000aaaa/terminal': (url, opts) => (JSON.parse(opts.body).branch === 'dev'
-      ? { session: DEV, warning: detached } : { session: DOCS, warning: null }),
-    'GET /api/terminal/sessions/t-dev': { session: DEV, blocks: [] },
-    'GET /api/terminal/sessions/t-docs': { session: DOCS, blocks: [] },
+    'GET /api/projects/app-0000aaaa/terminal': { enabled: true, sessions: [], dir: '/p/app', branches: ['dev'], current: 'dev', worktrees: [] },
+    'POST /api/projects/app-0000aaaa/terminal': { session: PROJ, warning: null },
+    'GET /api/terminal/sessions/t-p': { session: PROJ, blocks: [] },
   } });
   await pane.open();
   await tick();
-  doc.querySelector('.term-new').click();
-  await tick();
-  const warn = doc.querySelector('.term-context .term-warn');
-  assert.match(warn?.textContent || '', /detached copy/);
-  assert.equal(doc.querySelector('.term-context .term-error'), null, 'a warning is not shown as an error');
-  const sel = doc.querySelector('.term-branch');
-  sel.value = 'docs/x';
-  sel.dispatchEvent(new doc.defaultView.Event('change'));
-  doc.querySelector('.term-new').click();
-  await tick();
-  assert.doesNotMatch(doc.querySelector('.term-context').textContent, /detached copy/, 'the dev warning does not follow the docs terminal');
+  const p = posts(calls);
+  assert.equal(p.length, 1);
+  assert.deepEqual(p[0].body, { cols: 80, rows: 24 });
+  assert.ok(sent.some((m) => m.type === 'term-attach' && m.sessionId === 't-p'));
+  assert.equal(doc.querySelector('.term-folder').textContent, '/p/app');
+  assert.equal(doc.querySelector('.term-warn'), null);
 });
 
-test('a finished run without a checkout offers Check out', async () => {
+test('a project page reattaches its own-folder shell, never a branch-folder one opened through the API', async () => {
+  const PROJ = { ...SNAP, id: 't-p', scope: 'project', runId: null, projectKey: 'app-0000aaaa', cwd: '/p/app' };
+  const BR = { ...PROJ, id: 't-b', scope: 'branch', cwd: '/home/terminal/worktrees/app/dev', createdAt: '2026-10-03T11:00:00.000Z' };
+  const { pane, calls, sent } = makePane({ ctx: { view: 'project-detail', projectKey: 'app-0000aaaa' }, routes: {
+    'GET /api/terminal': { ...INFO, sessions: [PROJ, BR] },
+    'GET /api/projects/app-0000aaaa/terminal': { enabled: true, sessions: [PROJ, BR], dir: '/p/app', branches: [], current: 'dev', worktrees: [] },
+    'GET /api/terminal/sessions/t-p': { session: PROJ, blocks: [] },
+  } });
+  await pane.open();
+  await tick();
+  assert.equal(posts(calls).length, 0);
+  assert.equal(sent.find((m) => m.type === 'term-attach').sessionId, 't-p');
+});
+
+test('a finished run without a checkout: the checkout is made first, then the shell starts in it', async () => {
+  let checkedOut = false;
+  const DONE = { ...SNAP, runLive: false, cwd: '/home/checkouts/r1/app' };
+  const { pane, doc, calls, sent } = makePane({ ctx: RUN_CTX, routes: {
+    'GET /api/terminal': INFO,
+    'GET /api/runs/r1/terminal': () => ({ enabled: true, live: false, finished: true, workspace: false, sessions: [],
+      members: [checkedOut ? { projectKey: 'app-0000aaaa', projectName: 'app', state: 'checkout', cwd: DONE.cwd }
+        : { projectKey: 'app-0000aaaa', projectName: 'app', state: 'needs-checkout', cwd: null }] }),
+    'POST /api/runs/r1/checkout': () => { checkedOut = true; return { members: [] }; },
+    'POST /api/runs/r1/terminal': { session: DONE, warning: null },
+    'GET /api/terminal/sessions/t-1': { session: DONE, blocks: [] },
+  } });
+  await pane.open();
+  await tick();
+  const p = posts(calls);
+  assert.deepEqual(p.map((c) => c.url), ['/api/runs/r1/checkout?projectDir=%2Fp%2Fapp', '/api/runs/r1/terminal?projectDir=%2Fp%2Fapp']);
+  assert.deepEqual(p[0].body, { members: ['app-0000aaaa'] });
+  assert.ok(sent.some((m) => m.type === 'term-attach' && m.sessionId === 't-1'));
+  assert.equal(doc.querySelector('.term-folder').textContent, DONE.cwd);
+});
+
+test('a run with no folder shows the reason and starts nothing', async () => {
   const { pane, doc, calls } = makePane({ ctx: RUN_CTX, routes: {
     'GET /api/terminal': INFO,
-    'GET /api/runs/r1/terminal': { enabled: true, live: false, finished: true, workspace: false, sessions: [],
-      members: [{ projectKey: 'app-0000aaaa', projectName: 'app', state: 'needs-checkout', cwd: null }] },
-    'POST /api/runs/r1/checkout': { members: [] },
+    'GET /api/runs/r1/terminal': { enabled: true, live: true, workspace: false, sessions: [],
+      members: [{ projectKey: 'app-0000aaaa', projectName: 'app', state: 'unavailable', cwd: null, reason: 'This run has no folder yet.' }] },
   } });
   await pane.open();
   await tick();
-  doc.querySelector('.term-checkout').click();
-  await tick();
-  const c = calls.find((x) => x.method === 'POST');
-  assert.equal(c.url, '/api/runs/r1/checkout?projectDir=%2Fp%2Fapp');
-  assert.deepEqual(c.body, { members: ['app-0000aaaa'] });
+  assert.equal(posts(calls).length, 0);
+  assert.equal(doc.querySelector('.term-context').textContent, 'This run has no folder yet.');
 });
 
-test('a workspace run has a member picker', async () => {
-  const { pane, doc } = makePane({ ctx: { view: 'running', pipelineId: 'w1', workspaceId: 'wks-1' }, routes: {
+test('a starting run (no pipeline id yet) starts nothing and says it opens in a moment', async () => {
+  const { pane, doc, calls } = makePane({ ctx: { view: 'running', runId: 'live-1' }, routes: { 'GET /api/terminal': INFO } });
+  await pane.open();
+  await tick();
+  assert.equal(posts(calls).length, 0);
+  assert.match(doc.querySelector('.term-context').textContent, /starting/);
+  pane.destroy();
+});
+
+test('other pages start nothing: the hint with no terminals, else the newest running one', async () => {
+  const one = makePane({ ctx: { view: 'stats' }, routes: { 'GET /api/terminal': INFO } });
+  await one.pane.open();
+  await tick();
+  assert.equal(posts(one.calls).length, 0);
+  assert.equal(one.doc.querySelector('.term-context').textContent, 'Open a run or a project to start a terminal.');
+
+  const older = { ...SNAP, id: 't-old', createdAt: '2026-10-03T09:00:00.000Z' };
+  const newer = { ...SNAP, id: 't-new', createdAt: '2026-10-03T12:00:00.000Z' };
+  const ended = { ...SNAP, id: 't-end', status: 'exited', createdAt: '2026-10-03T13:00:00.000Z' };
+  const two = makePane({ ctx: { view: 'stats' }, routes: { 'GET /api/terminal': { ...INFO, sessions: [older, ended, newer] },
+    'GET /api/terminal/sessions/t-new': { session: newer, blocks: [] } } });
+  await two.pane.open();
+  await tick();
+  assert.equal(posts(two.calls).length, 0);
+  assert.equal(two.sent.find((m) => m.type === 'term-attach').sessionId, 't-new');
+  assert.doesNotMatch(two.doc.querySelector('.term-context').textContent, /Open a run/, 'no hint while a shell is attached');
+});
+
+test('a workspace run: the member select, a shell started on the selected member, and one more on the other member', async () => {
+  const api = { ...SNAP, id: 't-a', runId: 'w1', member: 'api-0000bbbb', cwd: '/a', runLive: false };
+  const web = { ...SNAP, id: 't-w', runId: 'w1', member: 'web-0000cccc', cwd: '/w', runLive: false };
+  const { pane, doc, calls, sent } = makePane({ ctx: { view: 'running', pipelineId: 'w1', workspaceId: 'wks-1' }, routes: {
     'GET /api/terminal': INFO,
     'GET /api/runs/w1/terminal': { enabled: true, live: true, workspace: true, sessions: [], members: [
       { projectKey: 'api-0000bbbb', projectName: 'api', state: 'worktree', cwd: '/a' }, { projectKey: 'web-0000cccc', projectName: 'web', state: 'worktree', cwd: '/w' }] },
+    'POST /api/runs/w1/terminal': (url, opts) => ({ session: JSON.parse(opts.body).member === 'api-0000bbbb' ? api : web, warning: null }),
+    'GET /api/terminal/sessions/t-a': { session: api, blocks: [] },
+    'GET /api/terminal/sessions/t-w': { session: web, blocks: [] },
   } });
   await pane.open();
   await tick();
   assert.deepEqual([...doc.querySelectorAll('.term-member option')].map((o) => o.textContent), ['api', 'web']);
+  assert.deepEqual(posts(calls).map((c) => c.body.member), ['api-0000bbbb']);
+  const sel = doc.querySelector('.term-member');
+  sel.value = 'web-0000cccc';
+  sel.dispatchEvent(new doc.defaultView.Event('change'));
+  await tick();
+  assert.deepEqual(posts(calls).map((c) => c.body.member), ['api-0000bbbb', 'web-0000cccc']);
+  assert.ok(sent.some((m) => m.type === 'term-detach' && m.sessionId === 't-a'));
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-w');
+  const sel2 = doc.querySelector('.term-member');
+  sel2.value = 'api-0000bbbb';
+  sel2.dispatchEvent(new doc.defaultView.Event('change'));
+  await tick();
+  assert.equal(posts(calls).length, 2, 'back on api: its running shell is reattached, not a new one');
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-a');
+});
+
+test('a warning belongs to its terminal: shown with it, gone once another member\'s shell is attached', async () => {
+  const api = { ...SNAP, id: 't-a', scope: 'run', runId: 'w1', member: 'api-0000bbbb', runLive: true };
+  const web = { ...SNAP, id: 't-w', scope: 'run', runId: 'w1', member: 'web-0000cccc', runLive: false };
+  const { pane, doc } = makePane({ ctx: { view: 'running', pipelineId: 'w1', workspaceId: 'wks-1' }, routes: {
+    'GET /api/terminal': INFO,
+    'GET /api/runs/w1/terminal': { enabled: true, live: true, workspace: true, sessions: [], members: [
+      { projectKey: 'api-0000bbbb', projectName: 'api', state: 'worktree', cwd: '/a' }, { projectKey: 'web-0000cccc', projectName: 'web', state: 'worktree', cwd: '/w' }] },
+    'POST /api/runs/w1/terminal': (url, opts) => (JSON.parse(opts.body).member === 'api-0000bbbb'
+      ? { session: api, warning: 'API is still changing.' } : { session: web, warning: null }),
+    'GET /api/terminal/sessions/t-a': { session: api, blocks: [] },
+    'GET /api/terminal/sessions/t-w': { session: web, blocks: [] },
+  } });
+  await pane.open();
+  await tick();
+  assert.equal(doc.querySelector('.term-context .term-warn')?.textContent, 'API is still changing.');
+  assert.equal(doc.querySelector('.term-context .term-error'), null, 'a warning is not shown as an error');
+  const sel = doc.querySelector('.term-member');
+  sel.value = 'web-0000cccc';
+  sel.dispatchEvent(new doc.defaultView.Event('change'));
+  await tick();
+  assert.equal(doc.querySelector('.term-context .term-warn'), null);
+});
+
+test('never two shells for one page: quick context changes while the start is in flight post once', async () => {
+  const env = {};
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const { pane, calls, sent } = makePane({ ctx: RUN_CTX, env, routes: {
+    'GET /api/terminal': INFO,
+    'GET /api/runs/r1/terminal': { enabled: true, live: true, workspace: false, sessions: [], members: [LIVE_MEMBER] },
+    'GET /api/runs/r2/terminal': { enabled: true, live: true, workspace: false, sessions: [], members: [{ ...LIVE_MEMBER, cwd: '/r2' }] },
+    'POST /api/runs/r1/terminal': () => gate.then(() => ({ session: SNAP, warning: null })),
+    'POST /api/runs/r2/terminal': () => gate.then(() => ({ session: { ...SNAP, id: 't-2', runId: 'r2' }, warning: null })),
+    'GET /api/terminal/sessions/t-1': { session: SNAP, blocks: [] },
+    'GET /api/terminal/sessions/t-2': { session: { ...SNAP, id: 't-2', runId: 'r2' }, blocks: [] },
+  } });
+  const opening = pane.open();
+  pane.onContextChange();
+  pane.onContextChange();
+  await tick();
+  env.ctx = { ...RUN_CTX, pipelineId: 'r2' };
+  pane.onContextChange();
+  await tick();
+  env.ctx = RUN_CTX;
+  pane.onContextChange();
+  await tick();
+  release();
+  await opening;
+  await tick(12);
+  assert.deepEqual(posts(calls).map((c) => c.url.split('?')[0]), ['/api/runs/r1/terminal', '/api/runs/r2/terminal']);
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-1', 'the page in view gets its shell; r2\'s waits in the picker');
+  await pane.open();
+  await tick();
+  assert.equal(posts(calls).length, 2, 'a forced refresh on the same page reattaches');
+});
+
+test('an exited shell is not replaced on its own: a dim line, then Enter (only) starts one', async () => {
+  const T2 = { ...SNAP, id: 't-2', createdAt: '2026-10-03T11:00:00.000Z' };
+  const { pane, calls, sent, xt } = makePane({ ctx: RUN_CTX, routes: attachedRoutes({
+    'POST /api/runs/r1/terminal': { session: T2, warning: null },
+    'GET /api/terminal/sessions/t-2': { session: T2, blocks: [] },
+  }) });
+  await pane.open();
+  await tick();
+  pane.onFrame({ type: 'term-status', snapshot: { ...SNAP, status: 'exited', exitCode: 0 } });
+  await tick();
+  assert.match(xt.writes.join(''), /\x1b\[2m\[shell exited with code 0 — press Enter for a new one\]/);
+  pane.onContextChange();
+  await tick();
+  assert.equal(posts(calls).length, 0, 'no respawn');
+  xt.type('ls');
+  await tick();
+  assert.equal(posts(calls).length, 0, 'other keys do nothing');
+  assert.equal(sent.filter((m) => m.type === 'term-input').length, 0);
+  xt.type('\r');
+  xt.type('\r');
+  await tick();
+  assert.equal(posts(calls).length, 1, 'one Enter, one shell');
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-2');
+  assert.equal(sent.filter((m) => m.type === 'term-input').length, 0, 'the Enter itself is not sent');
+});
+
+test('the session picker shows only when more than one terminal is open', async () => {
+  const routes = attachedRoutes();
+  const { pane, doc } = makePane({ ctx: RUN_CTX, routes });
+  await pane.open();
+  await tick();
+  assert.equal(doc.querySelector('.term-sessions').hidden, true);
+  pane.onFrame({ type: 'term-status', snapshot: { ...SNAP, id: 't-9', label: 'other', runId: 'r9' } });
+  assert.equal(doc.querySelector('.term-sessions').hidden, false);
+  assert.deepEqual([...doc.querySelectorAll('.term-sessions option')].map((o) => o.value).sort(), ['t-1', 't-9']);
+  pane.onFrame({ type: 'term-status', snapshot: { ...SNAP, id: 't-9', label: 'other', runId: 'r9', status: 'exited' } });
+  assert.equal(doc.querySelector('.term-sessions').hidden, true, 'an ended terminal is not one to pick');
+});
+
+test('the Commands toggle switches views and says which way it goes', async () => {
+  const { pane, doc } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
+  await pane.open();
+  await tick();
+  const btn = doc.querySelector('.term-cmds');
+  assert.equal(btn.getAttribute('aria-label'), 'Commands');
+  assert.equal(btn.getAttribute('aria-pressed'), 'false');
+  assert.ok(btn.querySelector('svg'));
+  btn.click();
+  assert.equal(btn.getAttribute('aria-label'), 'Back to terminal');
+  assert.equal(btn.getAttribute('aria-pressed'), 'true');
+  assert.equal(doc.querySelector('.term-blocks').hidden, false);
+  assert.equal(doc.querySelector('.term-screen').hidden, true);
+  btn.click();
+  assert.equal(btn.getAttribute('aria-label'), 'Commands');
+  assert.equal(doc.querySelector('.term-blocks').hidden, true);
+  assert.equal(doc.querySelector('.term-screen').hidden, false);
+});
+
+test('pipes mode: Ctrl+C typed in the pane calls the stop API', async () => {
+  const pipes = { ...SNAP, mode: 'pipes' };
+  const { pane, calls, xt } = makePane({ ctx: RUN_CTX, routes: attachedRoutes({
+    'GET /api/terminal': { ...INFO, sessions: [pipes] },
+    'GET /api/runs/r1/terminal': { enabled: true, live: false, workspace: false, sessions: [pipes], members: MEMBERS },
+    'GET /api/terminal/sessions/t-1': { session: pipes, blocks: [] },
+    'POST /api/terminal/sessions/t-1/stop': { ok: true, blockSeq: 1 },
+  }) });
+  await pane.open();
+  await tick();
+  xt.type('\x03');
+  await tick();
+  assert.deepEqual(posts(calls).map((c) => c.url), ['/api/terminal/sessions/t-1/stop']);
+});
+
+test('pty mode: Ctrl+C goes to the shell as a keystroke, not to the stop API', async () => {
+  const { pane, calls, sent, xt } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
+  await pane.open();
+  await tick();
+  xt.type('\x03');
+  await tick();
+  assert.equal(posts(calls).length, 0);
+  assert.ok(sent.some((m) => m.type === 'term-input' && m.data === '\x03'));
 });
 
 test('pipes mode: the banner, local echo, and a line sent on Enter', async () => {
@@ -225,15 +471,6 @@ test('Run again clears a half-typed line, and never types into a running command
   assert.match(doc.querySelector('.term-context').textContent, /still running in this terminal/);
 });
 
-const MEMBERS = [{ projectKey: 'app-0000aaaa', projectName: 'app', state: 'worktree', cwd: '/x' }];
-const attachedRoutes = (extra = {}) => ({
-  'GET /api/terminal': { ...INFO, sessions: [SNAP] },
-  'GET /api/runs/r1/terminal': { enabled: true, live: true, workspace: false, sessions: [SNAP], members: MEMBERS },
-  'GET /api/terminal/sessions/t-1': { session: SNAP, blocks: [] },
-  ...extra,
-});
-const block = (seq, over = {}) => ({ sessionId: 't-1', seq, command: `cmd ${seq}`, status: 'done', exitCode: 0, durationMs: 5, ...over });
-
 test('xterm opens in an unpadded host inside the framed screen, so FitAddon does not count the frame (finding 1)', async () => {
   const { pane, doc, xt } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
   await pane.open();
@@ -253,14 +490,14 @@ test('the Commands list is the newest page: the count is the total, and a note s
   const { pane, doc } = makePane({ ctx: RUN_CTX, routes: attachedRoutes({ 'GET /api/terminal/sessions/t-1': { session: SNAP, blocks: page, totalBlocks: 300 } }) });
   await pane.open();
   await tick();
-  const tab = [...doc.querySelectorAll('.term-tab')].find((b) => /Commands/.test(b.textContent));
-  assert.equal(tab.textContent, 'Commands (300)');
+  const tab = doc.querySelector('.term-cmds');
+  assert.equal(tab.title, 'Commands (300)');
   assert.match(doc.querySelector('.term-blocks').textContent, /Showing the latest 200 of 300 commands/);
   pane.onFrame({ type: 'term-block', sessionId: 't-1', block: block(301) });
-  assert.equal(tab.textContent, 'Commands (301)');
+  assert.equal(tab.title, 'Commands (301)');
   assert.match(doc.querySelector('.term-blocks').textContent, /Showing the latest 201 of 301 commands/);
   pane.onFrame({ type: 'term-block', sessionId: 't-1', block: block(301, { exitCode: 1 }) });
-  assert.equal(tab.textContent, 'Commands (301)', 'an update of a listed command is not a new one');
+  assert.equal(tab.title, 'Commands (301)', 'an update of a listed command is not a new one');
 });
 
 test('a full page from a server without totalBlocks still says older ones may exist', async () => {
@@ -268,7 +505,7 @@ test('a full page from a server without totalBlocks still says older ones may ex
   const { pane, doc } = makePane({ ctx: RUN_CTX, routes: attachedRoutes({ 'GET /api/terminal/sessions/t-1': { session: SNAP, blocks: page } }) });
   await pane.open();
   await tick();
-  assert.equal([...doc.querySelectorAll('.term-tab')].find((b) => /Commands/.test(b.textContent)).textContent, 'Commands (200+)');
+  assert.equal(doc.querySelector('.term-cmds').title, 'Commands (200+)');
   assert.match(doc.querySelector('.term-blocks').textContent, /Showing the latest 200 commands/);
 });
 
@@ -276,7 +513,7 @@ test('a short history has a plain count and no note', async () => {
   const { pane, doc } = makePane({ ctx: RUN_CTX, routes: attachedRoutes({ 'GET /api/terminal/sessions/t-1': { session: SNAP, blocks: [block(1), block(2)] } }) });
   await pane.open();
   await tick();
-  assert.equal([...doc.querySelectorAll('.term-tab')].find((b) => /Commands/.test(b.textContent)).textContent, 'Commands (2)');
+  assert.equal(doc.querySelector('.term-cmds').title, 'Commands (2)');
   assert.equal(doc.querySelector('.term-trimmed'), null);
 });
 
@@ -297,10 +534,15 @@ test('a permalink to a command that does not exist says so', async () => {
   assert.match(doc.querySelector('.term-context').textContent, /Command #9 of this terminal was not found/);
 });
 
-test('moving to a run without a terminal lets go of the previous shell (finding 3)', async () => {
+test('moving to another run lets go of the previous shell and starts that run\'s own (finding 3)', async () => {
   const env = {};
-  const { pane, doc, sent, xt } = makePane({ ctx: RUN_CTX, env, routes: attachedRoutes({
+  const T2 = { ...SNAP, id: 't-2', runId: 'r2', cwd: '/runs/r2' };
+  let releaseT2;
+  const t2Gate = new Promise((r) => { releaseT2 = r; });
+  const { pane, doc, sent, xt, calls } = makePane({ ctx: RUN_CTX, env, routes: attachedRoutes({
     'GET /api/runs/r2/terminal': { enabled: true, live: false, workspace: false, sessions: [], members: [{ ...MEMBERS[0], cwd: '/runs/r2' }] },
+    'POST /api/runs/r2/terminal': () => t2Gate.then(() => ({ session: T2, warning: null })),
+    'GET /api/terminal/sessions/t-2': { session: T2, blocks: [] },
   }) });
   await pane.open();
   await tick();
@@ -311,13 +553,14 @@ test('moving to a run without a terminal lets go of the previous shell (finding 
   assert.ok(sent.some((m) => m.type === 'term-detach' && m.sessionId === 't-1'));
   assert.deepEqual(xt.writes, [], 'the old screen is cleared');
   assert.match(doc.querySelector('.term-context').textContent, /\/runs\/r2/);
-  assert.equal(doc.querySelector('.term-new').textContent, 'Open terminal');
-  assert.equal(doc.querySelector('.term-sessions').value, '');
   const before = sent.length;
   xt.type('rm -rf build\r');
   assert.equal(sent.slice(before).filter((m) => m.type === 'term-input').length, 0, 'no keystroke reaches the other run\'s shell');
+  releaseT2();
+  await tick();
+  assert.deepEqual(posts(calls).map((c) => c.url.split('?')[0]), ['/api/runs/r2/terminal']);
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-2');
 });
-
 test('a page change while the pane is closed also lets go of the shell', async () => {
   const env = {};
   const { pane, sent } = makePane({ ctx: RUN_CTX, env, routes: attachedRoutes() });
@@ -331,32 +574,31 @@ test('a page change while the pane is closed also lets go of the shell', async (
 });
 
 test('an expanded Output and an open select survive unrelated updates (finding 6)', async () => {
+  const api = { ...SNAP, runId: 'w1', member: 'api-0000bbbb' };
+  const other = { ...SNAP, id: 't-9', runId: 'r9', member: 'x', label: 'other', createdAt: '2026-10-03T09:00:00.000Z' };
   const { pane, doc } = makePane({ ctx: { view: 'running', pipelineId: 'w1', workspaceId: 'wks-1' }, routes: {
-    'GET /api/terminal': { ...INFO, sessions: [] },
-    'GET /api/runs/w1/terminal': { enabled: true, live: true, workspace: true, sessions: [], members: [
+    'GET /api/terminal': { ...INFO, sessions: [api, other] },
+    'GET /api/runs/w1/terminal': { enabled: true, live: true, workspace: true, sessions: [api], members: [
       { projectKey: 'api-0000bbbb', projectName: 'api', state: 'worktree', cwd: '/a' }, { projectKey: 'web-0000cccc', projectName: 'web', state: 'worktree', cwd: '/w' }] },
-    'GET /api/terminal/sessions/t-1': { session: SNAP, blocks: [block(1, { status: 'running', exitCode: null })] },
+    'GET /api/terminal/sessions/t-1': { session: api, blocks: [block(1, { status: 'running', exitCode: null })] },
     'GET /api/terminal/sessions/t-1/blocks/1': { ...block(1), output: 'hello' },
   } });
   await pane.open();
   await tick();
-  // a shell opens on the api member (its status frame), and the picker attaches it
-  pane.onFrame({ type: 'term-status', snapshot: { ...SNAP, runId: 'w1', member: 'api-0000bbbb' } });
-  doc.querySelector('.term-sessions').value = 't-1';
-  doc.querySelector('.term-sessions').dispatchEvent(new doc.defaultView.Event('change'));
-  await tick();
   const member = doc.querySelector('.term-member');
+  assert.equal(doc.querySelector('.term-sessions').hidden, false, 'two open terminals: the picker shows');
   const pickerOpts = [...doc.querySelectorAll('.term-sessions option')];
-  pane.onFrame({ type: 'term-status', snapshot: { ...SNAP, runId: 'w1', member: 'api-0000bbbb', currentBlock: { seq: 1, command: 'cmd 1' } } });
+  pane.onFrame({ type: 'term-status', snapshot: { ...api, currentBlock: { seq: 1, command: 'cmd 1' } } });
   assert.equal(doc.querySelector('.term-member'), member, 'the member select is not rebuilt by a status frame');
   assert.deepEqual([...doc.querySelectorAll('.term-sessions option')], pickerOpts, 'nor is the session picker');
+  doc.querySelector('.term-cmds').click();
   const row = doc.querySelector('.term-block[data-seq="1"]');
   [...row.querySelectorAll('button')].find((b) => b.textContent === 'Output').click();
   await tick();
   const out = row.querySelector('.term-out');
   assert.equal(out.hidden, false);
   assert.match(out.textContent, /hello/);
-  pane.onFrame({ type: 'term-status', snapshot: { ...SNAP, runId: 'w1', member: 'api-0000bbbb', currentBlock: null } });
+  pane.onFrame({ type: 'term-status', snapshot: { ...api, currentBlock: null } });
   pane.onFrame({ type: 'term-block', sessionId: 't-1', block: block(2) });
   pane.onFrame({ type: 'term-block', sessionId: 't-1', block: block(1, { exitCode: 3 }) });
   assert.equal(doc.querySelector('.term-block[data-seq="1"]'), row, 'the row is patched, not rebuilt');
@@ -364,7 +606,6 @@ test('an expanded Output and an open select survive unrelated updates (finding 6
   assert.match(row.textContent, /exit 3/);
   assert.deepEqual([...doc.querySelectorAll('.term-block')].map((r) => r.dataset.seq), ['2', '1']);
 });
-
 test('xterm gets all 16 ANSI colours, each from its --term-ansi-* token (finding 7)', async () => {
   const { pane, xt } = makePane({ ctx: RUN_CTX, routes: attachedRoutes(), beforeCreate: (win) => {
     const real = win.getComputedStyle.bind(win);
@@ -400,30 +641,37 @@ test('pipes mode: Run again drops the half-typed line and echoes the command (fi
   assert.deepEqual(sent.filter((m) => m.type === 'term-input').map((m) => m.data), ['npm test\n', '\n']);
 });
 
-test('a server restart forgets the shell, its screen, its commands and the stale picker entries (finding 9)', async () => {
-  const routes = attachedRoutes({ 'GET /api/terminal/sessions/t-1': { session: SNAP, blocks: [block(1)] } });
-  const { pane, doc, sent, xt } = makePane({ ctx: { view: 'stats' }, routes });
+test('a server restart forgets the shell, its screen and its commands, and starts a new one only on Enter (finding 9)', async () => {
+  const T2 = { ...SNAP, id: 't-2' };
+  const routes = attachedRoutes({ 'GET /api/terminal/sessions/t-1': { session: SNAP, blocks: [block(1)] },
+    'POST /api/runs/r1/terminal': { session: T2, warning: null }, 'GET /api/terminal/sessions/t-2': { session: T2, blocks: [] } });
+  const { pane, doc, sent, xt, calls } = makePane({ ctx: RUN_CTX, routes });
   pane.onHello({ type: 'hello', bootId: 'boot-a' });
   await pane.open();
-  doc.querySelector('.term-sessions').value = 't-1';
-  doc.querySelector('.term-sessions').dispatchEvent(new doc.defaultView.Event('change'));
   await tick();
   pane.onFrame({ type: 'term-data', sessionId: 't-1', data: 'before', seq: 1 });
   assert.ok(doc.querySelector('.term-block[data-seq="1"]'));
   routes['GET /api/terminal'] = { ...INFO, sessions: [] };
+  routes['GET /api/runs/r1/terminal'] = { enabled: true, live: true, workspace: false, sessions: [], members: MEMBERS };
   pane.onHello({ type: 'hello', bootId: 'boot-b' });
-  await tick();
-  assert.deepEqual(xt.writes, []);
+  await tick(12);
+  assert.doesNotMatch(xt.writes.join(''), /before/);
+  assert.match(xt.writes.join(''), /\[the worca server restarted — press Enter for a new one\]/);
   assert.equal(doc.querySelector('.term-block'), null);
   assert.equal(doc.querySelector('.term-sessions').hidden, true);
   assert.match(doc.querySelector('.term-context').textContent, /server restarted/);
+  assert.equal(posts(calls).length, 0, 'no respawn');
   const before = sent.length;
-  xt.type('ls\r');
+  xt.type('ls');
   assert.equal(sent.slice(before).filter((m) => m.type === 'term-input').length, 0);
+  xt.type('\r');
+  await tick();
+  assert.equal(posts(calls).length, 1);
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-2');
 });
-
 test('the picker drops sessions the server no longer lists', async () => {
-  const routes = { 'GET /api/terminal': { ...INFO, sessions: [SNAP, { ...SNAP, id: 't-2', label: 'gone' }] } };
+  const routes = { 'GET /api/terminal': { ...INFO, sessions: [SNAP, { ...SNAP, id: 't-2', label: 'gone', createdAt: '2026-10-03T09:00:00.000Z' }] },
+    'GET /api/terminal/sessions/t-1': { session: SNAP, blocks: [] } };
   const { pane, doc } = makePane({ ctx: { view: 'stats' }, routes });
   await pane.open();
   await tick();
@@ -433,8 +681,8 @@ test('the picker drops sessions the server no longer lists', async () => {
   await pane.open();
   await tick();
   assert.deepEqual([...doc.querySelectorAll('.term-sessions option[value^="t-"]')].map((o) => o.value), ['t-1']);
+  assert.equal(doc.querySelector('.term-sessions').hidden, true);
 });
-
 test('while /ws reconnects the pane says so and does not echo a line it could not send (finding 10)', async () => {
   const pipes = { ...SNAP, mode: 'pipes' };
   const env = {};
@@ -472,4 +720,26 @@ test('a send that fails mid-line (the socket just dropped) shows the reconnectin
   xt.type('\r');
   assert.match(xt.writes.join(''), /\[not sent: reconnecting\]/);
   assert.match(doc.querySelector('.term-banners').textContent, /Reconnecting/);
+});
+
+test('hiding and reopening the pane after the shell exited starts one new shell (an open shows a live shell)', async () => {
+  const T2 = { ...SNAP, id: 't-2' };
+  const routes = attachedRoutes({
+    'POST /api/runs/r1/terminal': { session: T2, warning: null },
+    'GET /api/terminal/sessions/t-2': { session: T2, blocks: [] },
+  });
+  const { pane, calls, sent } = makePane({ ctx: RUN_CTX, routes });
+  await pane.open();
+  await tick();
+  const ended = { ...SNAP, status: 'exited', exitCode: 0 };
+  pane.onFrame({ type: 'term-status', snapshot: ended });
+  routes['GET /api/terminal'] = { ...INFO, sessions: [ended] };
+  routes['GET /api/runs/r1/terminal'] = { enabled: true, live: true, workspace: false, sessions: [ended], members: MEMBERS };
+  pane.close();
+  await pane.open();
+  await tick();
+  await pane.open();
+  await tick();
+  assert.equal(posts(calls).length, 1);
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-2');
 });

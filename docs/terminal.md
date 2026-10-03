@@ -9,45 +9,51 @@ duration, who ran it and when.
 
 ## Where it opens
 
+Open the pane with the **Terminal** tab on the right edge or Ctrl+\`. On a run or a project page it
+shows a live shell right away: it reattaches the page's running terminal, or starts one.
+
 | Page | Folder |
 | --- | --- |
 | A running run | its live worktree. The pane warns that the pipeline is still changing those files. |
-| A finished run | its checkout (see [Actions](actions.md)). With none yet, the pane offers **Check out**. |
-| A workspace run | one terminal per member; pick the member first. |
-| A project page | a Worca-owned worktree of the branch you pick (below). |
-| Any other page | no new folder: pick an open terminal from the list. |
+| A finished run | its checkout (see [Actions](actions.md)). With none yet, Worca makes the checkout first. |
+| A workspace run | one terminal per member; the select next to the folder picks the member. |
+| A project page | your own checkout of the project (the folder you registered), on whatever is checked out there. |
+| Any other page | no new terminal: the pane shows the most recent one that is still running. |
 
-Opening the pane never starts a shell by itself. **Open terminal** does, and reattaches when one is
-already running for that run.
+The header holds the title, a list of open terminals (only when more than one is open), a toggle
+between the terminal and its **Commands** list, and **×**, which hides the pane: the shell keeps
+running, and opening the pane again on the same page reattaches it. Worca starts a shell for a page at
+most once each time you open the pane. When the shell ends (you typed `exit`, or it died) or Worca
+restarts, the terminal says so and starts a new one only when you press Enter.
 
-### Branch folders
+### Branch folders (API only)
 
-A project page's terminal opens in `~/.worca-cc/terminal/worktrees/<project>/…`, a worktree of the
-branch. If that branch is checked out somewhere else (often your own checkout), the folder is a
-**detached** copy of its latest commit, and commits made there are not on the branch. Worca never
-deletes the branch. These folders follow **Keep checkouts** (Settings › Runs › Actions): with
-`never` a clean folder goes when its last terminal closes; otherwise it stays until you click
-**Remove folder**. **Max checkouts** caps how many stay. A folder with uncommitted changes is only
-removed after you confirm discarding them, and the same holds for a detached copy that holds
-commits no branch, remote or tag reaches: Worca never removes it automatically, and **Remove
-folder** asks you to confirm losing them.
+The pane no longer offers them, but `POST /api/projects/<key>/terminal` with a `branch` still opens a
+terminal in `~/.worca-cc/terminal/worktrees/<project>/…`, a worktree of that branch. Without `branch` it
+opens in the project's own folder, which Worca never removes. If the branch is checked out somewhere
+else (often your own checkout), the branch folder is a **detached** copy of its latest commit, and
+commits made there are not on the branch. Worca never deletes the branch. These folders follow **Keep
+checkouts** (Settings › Runs › Actions): with `never` a clean folder goes when its last terminal closes;
+otherwise it stays until `DELETE /api/projects/<key>/terminal/worktrees` removes it. **Max checkouts**
+caps how many stay. A folder with uncommitted changes, or a detached copy holding commits no branch,
+remote or tag reaches, is never removed automatically; the DELETE needs `force: true` for it.
 
 ## Sessions
 
 Each terminal has an id, a folder, a status (`running`, `exited`, `closed`, `interrupted`), an exit
 code and its output. It survives a page reload: the pane replays the last 512 KB. It ends when the
-shell exits, when you click **Close terminal**, or when Worca stops. A terminal left running by a
+shell exits (type `exit`), when `DELETE /api/terminal/sessions/<id>` closes it, or when Worca stops. A terminal left running by a
 Worca that crashed is stopped on the next start and shows as `interrupted`. At most 16 run at once.
 
 When a run finishes, its worktree is removed (and re-created if a keep policy keeps it). A terminal
-open there says so: open a new one, or `cd "$PWD"`. Before it is removed, Worca commits what is in
+open there says so: `cd "$PWD"`, or type `exit` and press Enter for a new one. Before it is removed, Worca commits what is in
 the worktree onto the run's branch, so changes you make in a running run's terminal become part of
 the run's commit. To keep your own changes apart, wait for the run to finish and use its checkout.
 
 ## Commands are blocks
 
 In bash and zsh, Worca loads your own `~/.bashrc` / `.zshrc` and adds a few lines that mark where each
-command starts and ends. The **Commands** tab lists them: the command, exit code, duration, who ran it
+command starts and ends. The **Commands** toggle in the header lists them: the command, exit code, duration, who ran it
 and when; **Output** shows what it printed (the last 256 KB), **Run again**, **Copy**, and **Copy link**
 (`/?terminal=<id>&block=<n>`). Other shells (sh, fish, cmd.exe, PowerShell) work, but their commands are
 not recorded as blocks. A command typed with a leading space is still recorded: the record is the audit.
@@ -86,13 +92,18 @@ another home (the Docker image uses `/worca`), run `export WORCA_HOME=/worca` fi
 
 ## Stop
 
-**Stop** sends Ctrl+C to the running command. If it is still running 3 seconds later, Worca kills every
-process the terminal started, including jobs you put in the background with `&`. Without node-pty (see
-below) there is no foreground job to aim at, so the first Ctrl+C also reaches those background jobs. It
-is recorded with who stopped it. In a shell without blocks (sh, fish, cmd.exe), Worca cannot tell when a
-command ends, so Stop sends Ctrl+C only and never escalates: use **Close terminal** for a command that
-ignores it. Stop and Close always work, even when the terminal is turned off.
-Discarding a run's checkout closes the terminals open in it, as it stops the run's Actions.
+Ctrl+C typed in the terminal stops the running command. With node-pty it reaches the program as in any
+terminal. Without node-pty (see below) the pane calls the stop API instead
+(`POST /api/terminal/sessions/<id>/stop`, which is also there for scripts): it sends Ctrl+C to the
+running command and, if that command is still running 3 seconds later, kills every process the
+terminal started, including jobs you put in the background with `&`. There is no foreground job to aim
+at, so the first Ctrl+C also reaches those background jobs. A stop through the API is recorded with who
+stopped it. In a shell without blocks (sh, fish, cmd.exe), Worca cannot tell when a command ends, so
+the stop API sends Ctrl+C only and never escalates.
+
+To end a terminal, type `exit`; `DELETE /api/terminal/sessions/<id>` closes it from outside. The stop
+and close APIs always work, even when the terminal is turned off. Discarding a run's checkout closes
+the terminals open in it, as it stops the run's Actions.
 
 ## Audit log
 
@@ -101,7 +112,7 @@ time. Blocks and audit rows are kept. `GET /api/terminal/audit?runId=<id>` lists
 
 ## Security
 
-- The browser never chooses the folder, the shell or the environment: Worca picks them from the run or branch.
+- The browser never chooses the folder, the shell or the environment: Worca picks them from the run or project.
 - **Hosted mode:** off unless the server starts with `WORCA_TERMINAL_REMOTE=1`. With it on, anyone signed
   in can run commands as the server user: that is the point, but know it before you turn it on.
 - With agent isolation on, callers inside the box (which could be an agent) can never use the terminal.
@@ -134,9 +145,9 @@ The shell is `cmd.exe` (`ComSpec`): a working terminal without blocks. Stop send
 | You see | Why, and what to do |
 | --- | --- |
 | "Full-screen programs … do not work here" | node-pty is not installed. Install build tools and reinstall, or use the `-full` image. |
-| No Commands tab entries | The shell is not bash or zsh, or your rc file replaced `PROMPT_COMMAND` / `precmd_functions` after Worca's lines ran. |
+| An empty Commands list | The shell is not bash or zsh, or your rc file replaced `PROMPT_COMMAND` / `precmd_functions` after Worca's lines ran. |
 | "The terminal is turned off on this hosted deployment" | Set `WORCA_TERMINAL_REMOTE=1` on the server. |
-| "This folder was removed when the run finished" | Open a new terminal on the run (Check out first if needed). |
+| "This folder was removed when the run finished" | Type `exit`, then press Enter: the new terminal opens in the run's checkout (Worca makes one if needed). |
 | 409 "At most 16 terminals" | Close one. |
 | 403 `TERMINAL_CROSS_ORIGIN` | The page's address differs from the `Host` the server received, for example a proxy that rewrites `Host`. Forward `Host` unchanged. |
 | `bash: !": event not found` | Bash history expansion, as in any bash: quote `!` with single quotes. |
