@@ -16,6 +16,12 @@ import { branchWorktreeRoot } from './paths.mjs';
 import * as store from './store.mjs';
 
 const codeError = (code, message) => Object.assign(new Error(message), { code });
+// `busyDirs` may be a Set or a getter (() => Set): a getter is read again right before git removes the
+// folder, since a terminal may have opened there while the checks before it ran.
+const busyOf = (busyDirs) => (typeof busyDirs === 'function' ? busyDirs : () => busyDirs || new Set());
+// dir → its removal in flight. Opening the same folder waits for it: the folder is either gone (and is
+// made again) or stays, never removed under a shell that just started in it.
+const removing = new Map();
 
 export function branchCheckoutName(branch) {
   const slug = String(branch).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 60) || 'branch';
@@ -37,7 +43,11 @@ async function attachWorktree(projectDir, dir, branch) {
 export async function openBranchWorktree({ projectKey, projectDir, branch, by = 'local', now = Date.now() }) {
   if (!/^[A-Za-z0-9._-]+$/.test(String(projectKey || ''))) throw codeError('BAD_PROJECT', 'Unknown project.');
   if (!isSafeBranchName(branch)) throw codeError('BAD_BRANCH', 'That is not a branch name worca can open.');
-  const known = store.findBranchWorktree(projectKey, branch);
+  let known = store.findBranchWorktree(projectKey, branch);
+  while (known && removing.has(known.dir)) {
+    await removing.get(known.dir);
+    known = store.findBranchWorktree(projectKey, branch);
+  }
   if (known && existsSync(known.dir)) {
     store.touchBranchWorktree(known.dir, now);
     return { ...known, reused: true, warning: known.detached ? detachedWarning(branch, null) : null };
@@ -71,14 +81,25 @@ async function hasUnreachedCommits(dir) {
   } catch { return true; }
 }
 
-/** Remove worca's folder (never the branch). Without `force`, git refuses a dirty one and it stays. */
-export async function removeBranchWorktree(dir, { force = false, projectDirOf }) {
+/**
+ * Remove worca's folder (never the branch). Without `force`, git refuses a dirty one and it stays.
+ * `isBusy` is asked once more just before git runs: a terminal that opened there meanwhile keeps it.
+ */
+export function removeBranchWorktree(dir, opts) {
+  const run = (removing.get(dir) || Promise.resolve()).then(() => removeNow(dir, opts));
+  const done = run.then(() => {}, () => {}).finally(() => { if (removing.get(dir) === done) removing.delete(dir); });
+  removing.set(dir, done);
+  return run;
+}
+
+async function removeNow(dir, { force = false, projectDirOf, isBusy = () => false }) {
   const row = store.getBranchWorktree(dir);
   if (!row) return { removed: false, reason: 'unknown' };
   if (!existsSync(dir)) { store.deleteBranchWorktree(dir); return { removed: true }; }
   if (row.detached && !force && (await hasUnreachedCommits(dir))) return { removed: false, reason: 'unpushed-commits' };
   const projectDir = await projectDirOf(row.projectKey);
   if (!projectDir) return { removed: false, reason: 'no-project' };
+  if (isBusy()) return { removed: false, reason: 'in-use' };
   const r = await removeWorktree({ projectDir, worktreeDir: dir, force });   // no `branch:` — the branch is the person's
   if (existsSync(dir)) return { removed: false, reason: r.ok ? 'busy' : 'dirty' };
   store.deleteBranchWorktree(dir);
@@ -87,8 +108,9 @@ export async function removeBranchWorktree(dir, { force = false, projectDirOf })
 
 /** A branch terminal ended: under keep `never`, remove its folder once no live terminal uses it. */
 export async function releaseBranchWorktree(dir, { keep, busyDirs = new Set(), projectDirOf }) {
-  if (keep !== 'never' || busyDirs.has(dir) || !store.getBranchWorktree(dir)) return { removed: false };
-  return removeBranchWorktree(dir, { projectDirOf });
+  const isBusy = () => busyOf(busyDirs)().has(dir);
+  if (keep !== 'never' || isBusy() || !store.getBranchWorktree(dir)) return { removed: false };
+  return removeBranchWorktree(dir, { projectDirOf, isBusy });
 }
 
 export async function enforceBranchWorktreeCap({ max, busyDirs = new Set(), projectDirOf }) {
@@ -98,8 +120,9 @@ export async function enforceBranchWorktreeCap({ max, busyDirs = new Set(), proj
   const evicted = [];
   for (const w of all) {
     if (over <= 0) break;
-    if (busyDirs.has(w.dir)) continue;
-    if ((await removeBranchWorktree(w.dir, { projectDirOf })).removed) { evicted.push(w.dir); over--; }
+    const isBusy = () => busyOf(busyDirs)().has(w.dir);
+    if (isBusy()) continue;
+    if ((await removeBranchWorktree(w.dir, { projectDirOf, isBusy })).removed) { evicted.push(w.dir); over--; }
   }
   return { evicted };
 }
@@ -109,7 +132,8 @@ export async function sweepBranchWorktrees({ keep, maxCheckouts, busyDirs = new 
   let removed = 0;
   for (const w of store.listBranchWorktrees()) {
     if (!existsSync(w.dir)) { store.deleteBranchWorktree(w.dir); removed++; continue; }
-    if (keep === 'never' && !busyDirs.has(w.dir) && (await removeBranchWorktree(w.dir, { projectDirOf })).removed) removed++;
+    const isBusy = () => busyOf(busyDirs)().has(w.dir);
+    if (keep === 'never' && !isBusy() && (await removeBranchWorktree(w.dir, { projectDirOf, isBusy })).removed) removed++;
   }
   const { evicted } = await enforceBranchWorktreeCap({ max: maxCheckouts, busyDirs, projectDirOf });
   return { removed, evicted: evicted.length };

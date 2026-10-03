@@ -93,7 +93,14 @@ function viaPipes({ file, args, cwd, env, platform }) {
   return {
     pid: child.pid,
     mode: 'pipes',
-    write: (s) => { if (child.stdin?.writable) child.stdin.write(String(s).replace(/\r\n?/g, '\n')); },
+    write: (s) => {
+      if (!child.stdin?.writable) return;
+      // No tty to turn Ctrl+D into end-of-input: the pane sends a lone \x04 for Ctrl+D on an
+      // empty line, and closing stdin is the only EOF a pipe has. The shell shares that stdin,
+      // so it ends too once the program reading it is done — at a prompt, the same as a tty.
+      if (s === '\x04') { child.stdin.end(); return; }
+      child.stdin.write(String(s).replace(/\r\n?/g, '\n'));
+    },
     resize: () => {},
     signal: (sig) => groupSignal(child.pid, sig, platform, (s) => child.kill(s)),
     onData: (cb) => { child.stdout?.on('data', cb); child.stderr?.on('data', cb); },

@@ -570,6 +570,7 @@ function connectWS() {
 
   ws.addEventListener('close', () => {
     state.wsReady = false;
+    if (terminalPane) terminalPane.onConnection(false);   // its keys are not sent until the next hello
     sessionGuard.check(); // behind an identity proxy, a dropped socket may be an expired sign-in
     scheduleReconnect();
   });
@@ -29547,11 +29548,11 @@ terminalPane = createTerminalPane({
   doc: document,
   win: window,
   fetch: (...args) => fetch(...args),
+  // false while /ws is down: the pane shows it is reconnecting instead of dropping keys silently.
   sendWs: (obj) => {
     const ws = state.ws;
-    if (ws && state.wsReady) {
-      try { ws.send(JSON.stringify(obj)); } catch { /* ignore */ }
-    }
+    if (!ws || !state.wsReady) return false;
+    try { ws.send(JSON.stringify(obj)); return true; } catch { return false; }
   },
   getPageContext,
   confirm: confirmModal,

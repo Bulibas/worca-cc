@@ -67,3 +67,15 @@ test('branch worktree rows', () => {
   store.deleteBranchWorktree('/w/b');
   assert.equal(store.getBranchWorktree('/w/b'), null);
 });
+
+test('newest: a long session lists its last blocks, oldest first; countBlocks says how many there are', () => {
+  store.insertSession(session('t-many'));
+  for (let seq = 1; seq <= 250; seq++) store.startBlock({ sessionId: 't-many', seq, command: `c${seq}`, now: T0 + seq });
+  const recent = store.listBlocks({ sessionId: 't-many', newest: true });
+  assert.equal(recent.length, 200);
+  assert.deepEqual([recent[0].seq, recent.at(-1).seq], [51, 250]);
+  assert.deepEqual(store.listBlocks({ sessionId: 't-many', afterSeq: 240, newest: true }).map((b) => b.seq), [241, 242, 243, 244, 245, 246, 247, 248, 249, 250]);
+  assert.equal(store.listBlocks({ sessionId: 't-many' })[0].seq, 1, 'the default still reads forward from afterSeq');
+  assert.equal(store.countBlocks('t-many'), 250);
+  assert.equal(store.countBlocks('t-many', 240), 10);
+});

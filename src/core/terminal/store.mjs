@@ -77,11 +77,16 @@ export function finishBlock({ sessionId, seq, status, exitCode = null, output = 
     .run(status, exitCode, iso(now), durationMs, output, outputBytes, truncated ? 1 : 0, stoppedBy, sessionId, seq);
   return getBlock(sessionId, seq, { output: false });
 }
-/** Blocks of one session (oldest first, after `afterSeq`) or of one run (newest first). Never the output. */
-export function listBlocks({ sessionId = null, runId = null, afterSeq = 0, limit = 200 } = {}) {
+/**
+ * Blocks of one session (oldest first, after `afterSeq`) or of one run (newest first). Never the output.
+ * `newest`: a session's LAST `limit` blocks, still oldest first (the pane shows the recent end).
+ */
+export function listBlocks({ sessionId = null, runId = null, afterSeq = 0, limit = 200, newest = false } = {}) {
   if (sessionId) {
-    return prepare('SELECT * FROM terminal_blocks WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?')
-      .all(sessionId, Number(afterSeq) || 0, limitOf(limit, 200)).map((r) => blockOf(r, false));
+    const sql = newest
+      ? 'SELECT * FROM (SELECT * FROM terminal_blocks WHERE session_id = ? AND seq > ? ORDER BY seq DESC LIMIT ?) ORDER BY seq'
+      : 'SELECT * FROM terminal_blocks WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?';
+    return prepare(sql).all(sessionId, Number(afterSeq) || 0, limitOf(limit, 200)).map((r) => blockOf(r, false));
   }
   if (runId) {
     return prepare('SELECT * FROM terminal_blocks WHERE run_id = ? ORDER BY started_at DESC, id DESC LIMIT ?')
@@ -89,6 +94,8 @@ export function listBlocks({ sessionId = null, runId = null, afterSeq = 0, limit
   }
   return [];
 }
+export const countBlocks = (sessionId, afterSeq = 0) =>
+  prepare('SELECT COUNT(*) AS n FROM terminal_blocks WHERE session_id = ? AND seq > ?').get(sessionId, Number(afterSeq) || 0).n;
 
 // ── audit ────────────────────────────────────────────────────────────────────────────────────────
 /** One audit row. Never throws into the terminal: a failed write is a [worca] warning. */

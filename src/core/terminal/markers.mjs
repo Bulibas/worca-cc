@@ -11,6 +11,9 @@ const OSC = `${ESC}]`;
 const CAN = '\x18';
 const SUB = '\x1a';
 const MAX_PENDING = 8192;   // an unterminated OSC longer than this is not one of ours: flush it as text
+// …unless it opens with this session's nonce: a C mark carries the whole command line in base64, and a
+// long one (a pasted script) arrives over many chunks. Still bounded, so a runaway OSC cannot grow memory.
+const MAX_MARK_PENDING = 1024 * 1024;
 
 export function decodeB64(b64) {
   return Buffer.from(String(b64 || ''), 'base64').toString('utf8');
@@ -56,6 +59,7 @@ export class MarkerParser {
   constructor({ nonce } = {}) {
     this.nonce = nonce || null;
     this.pending = '';      // an OSC (or a lone ESC) cut by a chunk boundary
+    this.scanned = 0;       // how much of `pending` was already searched for a terminator
     this.inCommand = false;
     this.seen = false;      // any of our marks yet: the shell has worca's integration
   }
@@ -64,7 +68,11 @@ export class MarkerParser {
   push(chunk) {
     const events = [];
     const s = this.pending + String(chunk);
+    // A held OSC starts at 0; its terminator search resumes where the last one stopped (one char back: a
+    // final ESC there may be completed by this chunk's `\`), so a long mark is not rescanned per chunk.
+    const resume = this.scanned;
     this.pending = '';
+    this.scanned = 0;
     let text = '';
     let i = 0;
     while (i < s.length) {
@@ -76,11 +84,11 @@ export class MarkerParser {
         break;
       }
       text += s.slice(i, j);
-      const end = oscEnd(s, j + 2);
+      const end = oscEnd(s, j === 0 ? Math.max(2, resume - 1) : j + 2);
       if (!end) {
         const rest = s.slice(j);
-        if (rest.length > MAX_PENDING) text += rest;
-        else this.pending = rest;
+        if (rest.length > (this.#ownMark(rest) ? MAX_MARK_PENDING : MAX_PENDING)) text += rest;
+        else { this.pending = rest; this.scanned = rest.length; }
         break;
       }
       if (end.aborted) {                     // not a complete OSC: keep it as text, parse on from the ESC/CAN
@@ -100,6 +108,13 @@ export class MarkerParser {
     }
     this.#output(text, events);
     return events;
+  }
+
+  /** An unterminated OSC that opens like one of this session's marks: `ESC ] 133 ; <kind> ; <nonce> ;`. */
+  #ownMark(rest) {
+    if (!this.nonce || !rest.startsWith(`${OSC}133;`)) return false;
+    const [, , n] = rest.slice(2, 2 + 16 + this.nonce.length).split(';');
+    return n === this.nonce;
   }
 
   #output(text, events) {

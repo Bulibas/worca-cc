@@ -30,3 +30,28 @@ test('Escape typed in the terminal is the shell\'s: the wizard and the three det
 test('the Commands list actually hides: an author display rule needs its own [hidden] override', () => {
   assert.ok(css.includes('.term-blocks[hidden]{display:none;}'));
 });
+
+test('the xterm host has no padding or border: the frame lives on .term-screen, outside what FitAddon measures', () => {
+  assert.ok(css.includes('.term-host{flex:1;min-height:0;min-width:0;padding:0;border:0;}'));
+  assert.match(css, /\.term-screen\{[^}]*display:flex;flex-direction:column;\}/);
+});
+
+test('phones: the Ask pill never covers the open terminal\'s input row', () => {
+  const at = css.indexOf('@media (max-width:760px){ body.term-open .app{margin-right:0;}');
+  const block = css.slice(at, css.indexOf('} }', at) + 3);
+  assert.ok(at > 0 && block.includes('body.term-open .ask-dock>.ask-pill{display:none;}'), block);
+});
+
+test('every one of xterm\'s 16 ANSI colours has a token, and the dark tones of the base eight differ per theme', () => {
+  for (const c of ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white']) {
+    assert.match(css, new RegExp(`--term-ansi-${c}:`), c);
+    assert.match(css, new RegExp(`--term-ansi-bright-${c}:`), `bright ${c}`);
+  }
+  assert.ok(css.includes('--term-ansi-red:light-dark(var(--red-ink),var(--red));'));
+  assert.doesNotMatch(css.slice(css.indexOf('.term-pane{'), css.indexOf('.term-pane[hidden]')), /#[0-9a-f]{3,8}\b/i, 'tokens only');
+});
+
+test('app.js: sendWs reports a dropped socket and the pane hears about it', () => {
+  assert.ok(app.includes('if (!ws || !state.wsReady) return false;'));
+  assert.ok(app.includes('if (terminalPane) terminalPane.onConnection(false);'));
+});

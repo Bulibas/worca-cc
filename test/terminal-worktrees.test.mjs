@@ -93,3 +93,26 @@ test('a detached copy holding commits no branch reaches is never auto-removed (d
   assert.deepEqual(await removeBranchWorktree(m.dir, { force: true, projectDirOf }), { removed: true });
   assert.equal(existsSync(m.dir), false);
 });
+
+test('closing and quickly reopening a branch terminal never removes the new terminal\'s folder', async () => {
+  git(repo, 'branch', 'feat/z');
+  const z = await openBranchWorktree({ projectKey: PK, projectDir: repo, branch: 'feat/z' });
+  const busy = new Set();
+  // The shell exited (nothing busy), then a new terminal opens the same branch while git works.
+  const released = releaseBranchWorktree(z.dir, { keep: 'never', busyDirs: () => busy, projectDirOf });
+  const again = await openBranchWorktree({ projectKey: PK, projectDir: repo, branch: 'feat/z' });
+  busy.add(again.dir);                                       // its shell starts in it
+  await released;
+  assert.ok(existsSync(again.dir), 'the reopened terminal\'s folder is there');
+  assert.equal(git(again.dir, 'rev-parse', '--abbrev-ref', 'HEAD').stdout.trim(), 'feat/z');
+  assert.ok(listBranchWorktrees().some((w) => w.dir === again.dir), 'and still recorded');
+});
+
+test('a folder that became busy while the release checked it is kept (busyDirs read again before git)', async () => {
+  const z = await openBranchWorktree({ projectKey: PK, projectDir: repo, branch: 'feat/z' });
+  let busyNow = false;
+  const released = releaseBranchWorktree(z.dir, { keep: 'never', busyDirs: () => new Set(busyNow ? [z.dir] : []), projectDirOf });
+  busyNow = true;
+  assert.deepEqual(await released, { removed: false, reason: 'in-use' });
+  assert.ok(existsSync(z.dir));
+});

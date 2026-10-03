@@ -118,7 +118,9 @@ time. Blocks and audit rows are kept. `GET /api/terminal/audit?runId=<id>` lists
 The terminal uses `node-pty`, an optional native module: prebuilt on macOS and Windows, compiled on
 Linux (it needs python3, make and a C++ compiler; the `-full` Docker image has them). Without it,
 terminals run over plain pipes: commands, blocks and Stop work, but full-screen programs (vim, top,
-less) and arrow-key history do not, and the pane says so. `WORCA_TERMINAL_PTY=0` forces this mode.
+less) and arrow-key history do not, and the pane says so. Ctrl+D on an empty line closes the
+shell's input: the program reading it gets end-of-input, and the shell then exits too.
+`WORCA_TERMINAL_PTY=0` forces this mode.
 node-pty 1.1.0's macOS package ships its `spawn-helper` without the execute bit; Worca sets it the
 first time a terminal opens. If it cannot (a read-only install), or node-pty still fails to start a
 shell, terminals use pipes and the banner gives the reason.

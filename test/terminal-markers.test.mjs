@@ -79,3 +79,29 @@ test('an OSC cut off by ESC or CAN stays output and never swallows the next mark
   q.push(C('y'));
   assert.deepEqual(q.push(`a\x1b]2;t\x18b${D(0)}`), [{ type: 'output', text: 'a\x1b]2;t\x18b' }, { type: 'end', exitCode: 0 }]);
 });
+
+test('a long command\'s C mark (base64 over 8 KB) split across chunks still starts a block', () => {
+  const cmd = `echo ${'long-arg '.repeat(3000)}`;                       // ~36 KB of base64
+  const whole = `${C(cmd)}out\n${D(0)}`;
+  for (const size of [4096, 1000, 3]) {
+    const p = parser();
+    const events = [];
+    for (let k = 0; k < whole.length; k += size) events.push(...p.push(whole.slice(k, k + size)));
+    assert.deepEqual(events.filter((e) => e.type !== 'output'), [{ type: 'start', command: cmd }, { type: 'end', exitCode: 0 }], `chunk size ${size}`);
+    assert.equal(events.filter((e) => e.type === 'output').map((e) => e.text).join(''), 'out\n');
+  }
+});
+
+test('an unterminated mark of ours is still bounded: past 1 MB it is flushed as text', () => {
+  const p = parser();
+  p.push(C('y'));
+  const head = `\x1b]133;C;${N};`;
+  assert.deepEqual(p.push(head + 'A'.repeat(512 * 1024)), [], 'held: it may still be a long command');
+  const ev = p.push('A'.repeat(600 * 1024));
+  assert.equal(ev.map((e) => e.text).join('').length, head.length + 1112 * 1024);
+  assert.equal(p.pending, '');
+  const q = parser();
+  q.push(C('z'));
+  const other = `\x1b]133;C;n0tours;${'A'.repeat(9000)}`;                // another nonce: the 8 KB bound
+  assert.equal(q.push(other).map((e) => e.text).join(''), other);
+});

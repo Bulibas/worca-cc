@@ -12,6 +12,10 @@ import { spawnSync } from 'node:child_process';
 import { WebSocket } from 'ws';
 import { _resetForTests, getDb } from '../src/core/db.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
+import { insertSession, startBlock, listBranchWorktrees } from '../src/core/terminal/store.mjs';
+import { branchCheckoutName } from '../src/core/terminal/worktrees.mjs';
+import { branchWorktreeRoot } from '../src/core/terminal/paths.mjs';
+import { worcaHome } from '../src/core/projects.mjs';
 
 const ENV_KEYS = ['WORCA_HOME', 'HOME', 'USERPROFILE', 'WORCA_TERMINAL_PTY', 'SHELL'];
 const prev = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -222,5 +226,39 @@ test('the xterm assets are served from node_modules', async () => {
     assert.equal(r.status, 200, p);
     assert.match(r.headers.get('content-type'), new RegExp(type));
     await r.arrayBuffer();
+  }
+});
+
+test('a session with more than 200 commands lists its newest 200, oldest first, and says how many there are', async () => {
+  insertSession({ id: 't-long', scope: 'run', runId: 'run-done', cwd: wt, shell: '/bin/bash', shellKind: 'bash', mode: 'pipes',
+    status: 'exited', createdAt: new Date().toISOString() });
+  for (let seq = 1; seq <= 230; seq++) startBlock({ sessionId: 't-long', seq, command: `echo ${seq}`, runId: 'run-done' });
+  const r = await getJson('/api/terminal/sessions/t-long');
+  assert.equal(r.blocks.length, 200);
+  assert.deepEqual([r.blocks[0].seq, r.blocks.at(-1).seq], [31, 230]);
+  assert.equal(r.totalBlocks, 230);
+  const tail = await getJson('/api/terminal/sessions/t-long?after=225');
+  assert.deepEqual(tail.blocks.map((b) => b.seq), [226, 227, 228, 229, 230]);
+  assert.equal(tail.totalBlocks, 5);
+});
+
+test('a branch terminal that cannot start leaves no new folder behind', { skip: !BASH }, async () => {
+  spawnSync('git', ['branch', 'feat/leak'], { cwd: repo });
+  const opened = [];
+  for (;;) {                                                   // fill every terminal slot
+    const r = await post(`/api/runs/run-live/terminal?${q()}`, {});
+    const body = await r.json();
+    if (r.status !== 201) { assert.equal(body.code, 'TOO_MANY_SESSIONS'); break; }
+    opened.push(body.session.id);
+  }
+  try {
+    const r = await post(`/api/projects/${key}/terminal`, { branch: 'feat/leak' });
+    assert.equal(r.status, 409);
+    assert.equal((await r.json()).code, 'TOO_MANY_SESSIONS');
+    assert.equal(listBranchWorktrees(key).some((w) => w.branch === 'feat/leak'), false, 'no row');
+    assert.equal(existsSync(join(branchWorktreeRoot(worcaHome()), key, branchCheckoutName('feat/leak'))), false, 'no folder');
+    assert.equal(spawnSync('git', ['worktree', 'list'], { cwd: repo, encoding: 'utf8' }).stdout.includes(branchCheckoutName('feat/leak')), false);
+  } finally {
+    for (const id of opened) await closeSession(id);
   }
 });

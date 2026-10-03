@@ -98,8 +98,15 @@ export class TerminalManager extends EventEmitter {
       proc, parser: new MarkerParser({ nonce }), chunks: [], chunkChars: 0, seq: 0, pendingOut: '', flushTimer: null,
       block: null, blockSeq: 0, lastInputBy: by, cwdNow: cwd, ino, stopTimer: null, closing: null, exitWaiters: [],
     };
+    try {
+      store.insertSession(s.snap);
+    } catch (e) {
+      // No row means no record of what runs here, and nothing would ever end it: do not leave the shell.
+      if (proc.pid) killDescendants(proc.pid, this.platform);
+      proc.signal('SIGKILL');
+      throw e;
+    }
     this.sessions.set(id, s);
-    store.insertSession(s.snap);
     store.recordAudit({ sessionId: id, runId, actor: by, action: 'open', detail: cwd, now: at });
     proc.onData((d) => this._onData(s, d));
     proc.onExit((e) => this._onExit(s, e));

@@ -39,6 +39,18 @@ test('pipes: stdout and stderr both arrive; CR becomes LF on the way in; exit co
   assert.equal(r.exitCode, 3);
 });
 
+test('pipes: a lone Ctrl+D closes stdin, so the program reading it sees end-of-input', async () => {
+  const h = spawnTerminal({ file: '/bin/sh', args: [], cwd: tmpdir(), env: { PATH: process.env.PATH }, pty: null });
+  const done = collect(h);
+  h.write('cat; echo "cat-done"\r');
+  h.write('hello\r');
+  h.write('\x04');
+  const r = await done;
+  assert.match(r.out, /hello/);
+  assert.match(r.out, /cat-done/, 'cat ended on EOF and the rest of the line ran');
+  assert.equal(r.exitCode, 0, 'the shell then ends too, as at a tty prompt');
+});
+
 test('a missing shell reports an exit instead of throwing', async () => {
   const h = spawnTerminal({ file: '/nope/sh', args: [], cwd: tmpdir(), env: {}, pty: null });
   const r = await collect(h);

@@ -105,7 +105,7 @@ test('WORCA_TERMINAL_REMOTE=1 lets a signed-in person open one', async () => {
   } finally { delete process.env.WORCA_TERMINAL_REMOTE; }
 });
 
-test('a possible agent (in-container caller under isolation) is refused even when enabled; a person is not', async () => {
+test('a possible agent (in-container caller under isolation) cannot open, stop or close; a person can', async () => {
   process.env.WORCA_TERMINAL_REMOTE = '1';
   process.env.WORCA_AGENT_USER = 'worca-agent';
   process.env.WORCA_AGENT_HOME = join(homeDir, 'agent');
@@ -115,8 +115,27 @@ test('a possible agent (in-container caller under isolation) is refused even whe
     assert.equal(r.body.code, 'TERMINAL_AGENT_BLOCKED');
     const person = await remote('POST', openPath(), {});
     assert.equal(person.status, 201);
-    assert.equal((await local('DELETE', `/api/terminal/sessions/${person.body.session.id}`)).status, 200, 'Close stays open to anyone');
+    const id = person.body.session.id;
+    for (const [method, path] of [['POST', `/api/terminal/sessions/${id}/stop`], ['DELETE', `/api/terminal/sessions/${id}`]]) {
+      const r = await local(method, path, method === 'POST' ? {} : undefined);
+      assert.equal(r.status, 403, `${method} ${path}: an agent cannot stop or close a person's terminal`);
+      assert.equal(r.body.code, 'TERMINAL_AGENT_BLOCKED');
+    }
+    assert.equal((await remote('POST', `/api/terminal/sessions/${id}/stop`, {})).status, 200, 'the person can stop it');
+    assert.equal((await remote('DELETE', `/api/terminal/sessions/${id}`)).status, 200, 'and close it');
   } finally {
     delete process.env.WORCA_TERMINAL_REMOTE; delete process.env.WORCA_AGENT_USER; delete process.env.WORCA_AGENT_HOME;
   }
+});
+
+test('Stop and Close skip the hosted gate: a person can end a terminal after WORCA_TERMINAL_REMOTE is turned off (D4)', async () => {
+  process.env.WORCA_TERMINAL_REMOTE = '1';
+  let id;
+  try {
+    const r = await remote('POST', openPath(), {});
+    assert.equal(r.status, 201);
+    id = r.body.session.id;
+  } finally { delete process.env.WORCA_TERMINAL_REMOTE; }
+  assert.equal((await remote('POST', `/api/terminal/sessions/${id}/stop`, {})).status, 200);
+  assert.equal((await remote('DELETE', `/api/terminal/sessions/${id}`)).status, 200);
 });

@@ -152,7 +152,7 @@ import { runStack, stopStack } from '../src/core/actions/stack.mjs';
 import { TerminalManager, MAX_SESSIONS as TERMINAL_MAX_SESSIONS } from '../src/core/terminal/manager.mjs';
 import { terminalPidFile, zshDotDir } from '../src/core/terminal/paths.mjs';
 import { terminalTargets } from '../src/core/terminal/context.mjs';
-import { getSession as getTerminalSession, listBlocks as listTerminalBlocks, getBlock as getTerminalBlock,
+import { getSession as getTerminalSession, listBlocks as listTerminalBlocks, countBlocks as countTerminalBlocks, getBlock as getTerminalBlock,
   listAudit as listTerminalAudit, listBranchWorktrees, findBranchWorktree, markInterruptedSessions } from '../src/core/terminal/store.mjs';
 import { openBranchWorktree, removeBranchWorktree, releaseBranchWorktree, enforceBranchWorktreeCap, sweepBranchWorktrees } from '../src/core/terminal/worktrees.mjs';
 import { pidAlive, killDescendants } from '../src/core/terminal/pty.mjs';
@@ -5243,12 +5243,15 @@ function terminalOriginOk(req, res) {
 }
 const terminalEnabledHere = (req = null) =>
   !agentMayBeCaller(req) && (!REMOTE_MODE || isTruthy(process.env.WORCA_TERMINAL_REMOTE));
-function requireTerminal(req, res) {
+/** Same origin and not a possible agent: what even Stop and Close need (they skip only the hosted gate). */
+function terminalCallerOk(req, res) {
   if (!terminalOriginOk(req, res)) return false;
-  if (agentMayBeCaller(req)) {
-    res.status(403).json({ error: 'The terminal cannot be used from inside the container while agent isolation is on. Open Worca through its published address.', code: 'TERMINAL_AGENT_BLOCKED' });
-    return false;
-  }
+  if (!agentMayBeCaller(req)) return true;
+  res.status(403).json({ error: 'The terminal cannot be used from inside the container while agent isolation is on. Open Worca through its published address.', code: 'TERMINAL_AGENT_BLOCKED' });
+  return false;
+}
+function requireTerminal(req, res) {
+  if (!terminalCallerOk(req, res)) return false;
   if (terminalEnabledHere(req)) return true;
   res.status(403).json({ error: 'The terminal is turned off on this hosted deployment. An administrator can enable it with WORCA_TERMINAL_REMOTE=1.', code: 'TERMINAL_DISABLED' });
   return false;
@@ -5281,7 +5284,8 @@ terminals.on('block', (block) => terminalFanout.toAttached(block.sessionId, { ty
 terminals.on('status', (snapshot) => {
   terminalFanout.toAllowed({ type: 'term-status', snapshot });
   if (snapshot.status !== 'running' && snapshot.scope === 'branch') {
-    releaseBranchWorktree(snapshot.cwd, { keep: actionsSettings().keep, busyDirs: terminals.busyDirs(), projectDirOf: projectDirForKey })
+    // busyDirs as a getter: git work runs async, and a terminal may reopen the folder meanwhile.
+    releaseBranchWorktree(snapshot.cwd, { keep: actionsSettings().keep, busyDirs: () => terminals.busyDirs(), projectDirOf: projectDirForKey })
       .catch((e) => console.warn(`[worca-ui] terminal: could not release ${snapshot.cwd}: ${e?.message || e}`));
   }
 });
@@ -5351,10 +5355,20 @@ app.post('/api/projects/:key/terminal', async (req, res) => {
     const p = await tmProject(req, res); if (!p) return;
     const by = actorOf(req);
     const wt = await openBranchWorktree({ projectKey: p.key, projectDir: p.path, branch: req.body?.branch, by });
-    const session = await terminals.open({ cwd: wt.dir, scope: 'branch', label: `${p.name} · ${wt.branch}`, projectKey: p.key,
-      branch: wt.branch, by, cols: req.body?.cols, rows: req.body?.rows });
+    let session;
+    try {
+      session = await terminals.open({ cwd: wt.dir, scope: 'branch', label: `${p.name} · ${wt.branch}`, projectKey: p.key,
+        branch: wt.branch, by, cols: req.body?.cols, rows: req.body?.rows });
+    } catch (e) {
+      // A folder made for this terminal, which never started, is not left behind (it is clean: just made).
+      if (!wt.reused) {
+        await removeBranchWorktree(wt.dir, { projectDirOf: projectDirForKey, isBusy: () => terminals.busyDirs().has(wt.dir) })
+          .catch((err) => console.warn(`[worca-ui] terminal: could not remove ${wt.dir}: ${err?.message || err}`));
+      }
+      throw e;
+    }
     const { maxCheckouts } = actionsSettings();
-    if (maxCheckouts) await enforceBranchWorktreeCap({ max: maxCheckouts, busyDirs: terminals.busyDirs(), projectDirOf: projectDirForKey });
+    if (maxCheckouts) await enforceBranchWorktreeCap({ max: maxCheckouts, busyDirs: () => terminals.busyDirs(), projectDirOf: projectDirForKey });
     res.status(201).json({ session, warning: wt.warning || null });
   } catch (e) { terminalError(res, e); }
 });
@@ -5367,9 +5381,11 @@ app.delete('/api/projects/:key/terminal/worktrees', async (req, res) => {
     const w = findBranchWorktree(p.key, req.body.branch);
     if (!w) return res.status(404).json({ error: 'No worca folder for that branch.', code: 'NOT_FOUND' });
     if (terminals.busyDirs().has(w.dir)) return res.status(409).json({ error: 'A terminal is still open in this folder. Close it first.', code: 'IN_USE' });
-    const r = await removeBranchWorktree(w.dir, { force: req.body?.force === true, projectDirOf: projectDirForKey });
+    const r = await removeBranchWorktree(w.dir, { force: req.body?.force === true, projectDirOf: projectDirForKey,
+      isBusy: () => terminals.busyDirs().has(w.dir) });
     if (r.removed) return res.json({ removed: true });
     const WORKTREE_REMOVE_REASON = { dirty: ['DIRTY', 'This folder has uncommitted changes.'],
+      'in-use': ['IN_USE', 'A terminal is still open in this folder. Close it first.'],
       'unpushed-commits': ['UNPUSHED_COMMITS', 'This folder has commits that are not on any branch. Removing it would lose them.'] };
     const [code, msg] = WORKTREE_REMOVE_REASON[r.reason] || ['NOT_REMOVED', `The folder could not be removed (${r.reason}).`];
     res.status(409).json({ error: msg, code });
@@ -5382,7 +5398,11 @@ app.get('/api/terminal/sessions/:id', (req, res) => {
   if (!requireTerminal(req, res)) return;
   const session = terminalSessionOf(req.params.id);
   if (!session) return res.status(404).json({ error: 'terminal not found' });
-  res.json({ session, blocks: listTerminalBlocks({ sessionId: session.id, afterSeq: Number(req.query.after) || 0 }) });
+  // The newest blocks (oldest first): a session with more than the limit shows its recent end, and
+  // totalBlocks (> blocks.length) says older ones were left out.
+  const afterSeq = Number(req.query.after) || 0;
+  res.json({ session, blocks: listTerminalBlocks({ sessionId: session.id, afterSeq, newest: true }),
+    totalBlocks: countTerminalBlocks(session.id, afterSeq) });
 });
 
 app.get('/api/terminal/sessions/:id/blocks/:seq', (req, res) => {
@@ -5400,16 +5420,16 @@ app.get('/api/terminal/audit', (req, res) => {
 });
 
 // Stop and Close are not behind the hosted gate (like actions stop): a person can always end what is
-// running. They still refuse a page from another origin (D13).
+// running. They still refuse a page from another origin (D13) and a possible agent.
 app.post('/api/terminal/sessions/:id/stop', (req, res) => {
-  if (!terminalOriginOk(req, res)) return;
+  if (!terminalCallerOk(req, res)) return;
   const r = terminals.interrupt(req.params.id, actorOf(req));
   if (!r) return res.status(404).json({ error: 'No running terminal with that id.' });
   res.json({ ok: true, blockSeq: r.blockSeq });
 });
 
 app.delete('/api/terminal/sessions/:id', async (req, res) => {
-  if (!terminalOriginOk(req, res)) return;
+  if (!terminalCallerOk(req, res)) return;
   const ok = await terminals.close(req.params.id, actorOf(req), 'closed in the pane');
   if (!ok) return res.status(404).json({ error: 'No running terminal with that id.' });
   res.json({ ok: true });
@@ -11637,6 +11657,25 @@ export async function bootMaintenance({ log } = {}) {
     console.error(`[worca-ui] legacy worktree sweep failed: ${err && err.message ? err.message : err} — nothing was removed`);
   }
 
+  // Terminal (#573): kill shells a crashed server left (and the jobs under them), mark their rows
+  // interrupted, and sweep the branch worktrees under the keep policy and cap. Before Actions: its keep
+  // policy and checkout cap read the terminal pid file, which must not still hold the last server's rows.
+  try {
+    const orphans = await reapOrphans({ pidFile: terminalPidFileNow(),
+      kill: (pid) => { killDescendants(pid); try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } } });
+    // reapOrphans keeps rows stamped with this pid; a restarted container reuses the old server's pid, so
+    // such rows would keep their runs "busy" for ever. Nothing is live here yet: rewrite the file.
+    terminals.writePidFile();
+    const interrupted = markInterruptedSessions({ isAlive: pidAlive, liveIds: new Set(terminals.live().map((t) => t.snap.id)) });
+    const { keep, maxCheckouts } = actionsSettings();
+    const swept = await sweepBranchWorktrees({ keep, maxCheckouts, busyDirs: () => terminals.busyDirs(), projectDirOf: projectDirForKey });
+    summary.terminal = { orphans, interrupted, ...swept };
+    if (orphans) console.log(`[worca-ui] terminal: stopped ${orphans} orphaned shell(s) from a previous server`);
+  } catch (err) {
+    summary.terminal = { orphans: 0, interrupted: 0, removed: 0, evicted: 0 };
+    console.error(`[worca-ui] terminal boot maintenance failed: ${err?.message || err}`);
+  }
+
   // Actions (issue #529): reap orphaned action processes, mark interrupted setups, release
   // until-pr checkouts whose PR closed (D11) and apply the checkout cap (D12).
   try {
@@ -11652,24 +11691,6 @@ export async function bootMaintenance({ log } = {}) {
   } catch (err) {
     summary.actions = { orphans: 0, interrupted: 0, released: 0, evicted: 0 };
     console.error(`[worca-ui] actions boot maintenance failed: ${err?.message || err}`);
-  }
-
-  // Terminal (#573): kill shells a crashed server left (and the jobs under them), mark their rows
-  // interrupted, and sweep the branch worktrees under the keep policy and cap.
-  try {
-    const orphans = await reapOrphans({ pidFile: terminalPidFileNow(),
-      kill: (pid) => { killDescendants(pid); try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } } });
-    // reapOrphans keeps rows stamped with this pid; a restarted container reuses the old server's pid, so
-    // such rows would keep their runs "busy" for ever. Nothing is live here yet: rewrite the file.
-    terminals.writePidFile();
-    const interrupted = markInterruptedSessions({ isAlive: pidAlive, liveIds: new Set(terminals.live().map((t) => t.snap.id)) });
-    const { keep, maxCheckouts } = actionsSettings();
-    const swept = await sweepBranchWorktrees({ keep, maxCheckouts, busyDirs: terminals.busyDirs(), projectDirOf: projectDirForKey });
-    summary.terminal = { orphans, interrupted, ...swept };
-    if (orphans) console.log(`[worca-ui] terminal: stopped ${orphans} orphaned shell(s) from a previous server`);
-  } catch (err) {
-    summary.terminal = { orphans: 0, interrupted: 0, removed: 0, evicted: 0 };
-    console.error(`[worca-ui] terminal boot maintenance failed: ${err?.message || err}`);
   }
 
   // Ask Worca (§6.2): mark turns orphaned by a restart, sweep stale empty threads.

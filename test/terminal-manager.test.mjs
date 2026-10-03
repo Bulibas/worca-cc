@@ -116,3 +116,13 @@ test('a PTY that cannot spawn falls back to pipes, says why, and stays on pipes'
   await m.open({ cwd: work, scope: 'run', by: 'ada', baseEnv });
   assert.deepEqual(calls, [['pty', 'xterm-256color'], ['pipes', 'dumb'], ['pipes', 'dumb']]);
 });
+
+test('a session row that cannot be written kills the shell and leaves nothing live', async () => {
+  const signals = [];
+  const m = new TerminalManager({ ptyInfo: () => ({ pty: null }), shell: () => ({ file: null, kind: 'other', platform: process.platform }),   // shell NOT NULL: the insert fails
+    spawnImpl: () => ({ pid: null, mode: 'pipes', write() {}, resize() {}, signal(sig) { signals.push(sig); }, onData() {}, onExit() {} }) });
+  await assert.rejects(m.open({ cwd: work, scope: 'run', by: 'ada', baseEnv }), /NOT NULL/);
+  assert.deepEqual(signals, ['SIGKILL']);
+  assert.deepEqual(m.list(), []);
+  assert.equal(m.live().length, 0);
+});
