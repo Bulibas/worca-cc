@@ -89,6 +89,33 @@ test('a live run: the warning, Open terminal posts the member and size, then att
   assert.ok(sent.some((m) => m.type === 'term-attach' && m.sessionId === 't-1'));
 });
 
+test('a branch warning belongs to its terminal: amber, and gone once another terminal is attached', async () => {
+  const DEV = { ...SNAP, id: 't-dev', scope: 'branch', runId: null, member: null, projectKey: 'app-0000aaaa', branch: 'dev', label: 'app · dev' };
+  const DOCS = { ...DEV, id: 't-docs', branch: 'docs/x', label: 'app · docs/x' };
+  const detached = 'Branch "dev" is checked out in /p/app, so this folder is a detached copy of its latest commit.';
+  const { pane, doc } = makePane({ ctx: { view: 'project-detail', projectKey: 'app-0000aaaa' }, routes: {
+    'GET /api/terminal': INFO,
+    'GET /api/projects/app-0000aaaa/terminal': { enabled: true, sessions: [], branches: ['dev', 'docs/x'], current: 'dev', worktrees: [] },
+    'POST /api/projects/app-0000aaaa/terminal': (url, opts) => (JSON.parse(opts.body).branch === 'dev'
+      ? { session: DEV, warning: detached } : { session: DOCS, warning: null }),
+    'GET /api/terminal/sessions/t-dev': { session: DEV, blocks: [] },
+    'GET /api/terminal/sessions/t-docs': { session: DOCS, blocks: [] },
+  } });
+  await pane.open();
+  await tick();
+  doc.querySelector('.term-new').click();
+  await tick();
+  const warn = doc.querySelector('.term-context .term-warn');
+  assert.match(warn?.textContent || '', /detached copy/);
+  assert.equal(doc.querySelector('.term-context .term-error'), null, 'a warning is not shown as an error');
+  const sel = doc.querySelector('.term-branch');
+  sel.value = 'docs/x';
+  sel.dispatchEvent(new doc.defaultView.Event('change'));
+  doc.querySelector('.term-new').click();
+  await tick();
+  assert.doesNotMatch(doc.querySelector('.term-context').textContent, /detached copy/, 'the dev warning does not follow the docs terminal');
+});
+
 test('a finished run without a checkout offers Check out', async () => {
   const { pane, doc, calls } = makePane({ ctx: RUN_CTX, routes: {
     'GET /api/terminal': INFO,

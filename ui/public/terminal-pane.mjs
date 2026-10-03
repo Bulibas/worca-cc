@@ -70,7 +70,8 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
   const load = loadXterm || (() => defaultLoadXterm(doc));
   const st = { open: false, enabled: true, pty: { available: true, reason: null }, sessions: new Map(), current: null, lastSeq: 0,
     target: { kind: 'other' }, targetKey: '', ctx: null, ctxGen: 0, blocks: new Map(), blocksOlder: 0, tab: 'term', term: null,
-    fit: null, line: null, bootId: null, member: '', branch: '', note: '', online: true, destroyed: false };
+    fit: null, line: null, bootId: null, member: '', branch: '', note: '', online: true, destroyed: false,
+    warnings: new Map() };       // session id → the warning its open returned (a detached branch copy): shown while attached
   const rows = new Map();          // seq → { row, update }: Commands rows are patched in place, so an open Output stays open
   const drawn = { picker: '', context: '' };   // what the picker and the context bar show: unchanged → not rebuilt (an open select stays open)
 
@@ -213,7 +214,8 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
   async function adopt(r) {
     if (!r) return;
     st.sessions.set(r.session.id, r.session);
-    if (r.warning) st.note = r.warning;
+    st.note = '';                                        // it opened: an earlier error no longer applies
+    if (r.warning) st.warnings.set(r.session.id, r.warning);
     await attach(r.session.id);
   }
   async function openRun(member) {
@@ -454,7 +456,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
 
   function renderContext() {
     // Rebuilt only when what it shows changed: a term-status frame must not close an open select.
-    const key = JSON.stringify([st.enabled, st.note, st.targetKey, st.ctxGen, !!st.ctx, st.member, st.branch, st.sessions.size > 0,
+    const key = JSON.stringify([st.enabled, st.note, st.warnings.get(st.current) || '', st.targetKey, st.ctxGen, !!st.ctx, st.member, st.branch, st.sessions.size > 0,
       sessionsForTarget().some((x) => x.status === 'running')]);
     if (key === drawn.context) return;
     drawn.context = key;
@@ -464,6 +466,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, co
       return;
     }
     if (st.note) context.append(make('p', 'term-note term-error', st.note));
+    if (st.warnings.has(st.current)) context.append(make('p', 'term-warn', st.warnings.get(st.current)));
     const c = st.ctx;
     if (st.target.kind === 'run' && c) {
       if (c.members.length > 1) {
