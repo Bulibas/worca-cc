@@ -58,7 +58,7 @@ const OPEN_BACKOFF_MS = 15;
 /** Latest schema version. Bump + append a new migration step when the DDL grows.
  *  Exported so migration tests assert "reached the module's current version"
  *  instead of hardcoding the number — a schema bump then touches no test file. */
-export const SCHEMA_VERSION = 48;
+export const SCHEMA_VERSION = 49;
 
 /** Absolute path to the database file: <worcaHome>/worca-cc.db. */
 export function dbPath() {
@@ -923,6 +923,33 @@ CREATE TABLE IF NOT EXISTS night_decisions (
 CREATE INDEX IF NOT EXISTS idx_night_decisions_pipeline ON night_decisions(pipeline_id, id);
 `;
 
+/**
+ * v49: run-control commands (#513) — a transient mailbox any client (the CLI today;
+ * chat / the UI for runs they do not own, later) writes and the run's OWNING process
+ * claims and executes through its own orchestrator. The scheduled_runs transport
+ * pattern for a second kind of intent. Deliberately a separate table: a ticket is a
+ * run-CREATION intent whose row then lives on as the run's provenance record (fired →
+ * pipeline_id, outcome, retries, run chains), while a command is transient, targets an
+ * EXISTING run, and wants to die once consumed — disjoint state machines and retention;
+ * what they share (the guarded-UPDATE claim, scheduler.mjs#claimTicket's shape) is a
+ * pattern to reuse, not a table to merge. No FK to pipelines: pipeline rows are never
+ * deleted (archived at most), so orphaned commands are reaped (pipeline-commands.mjs),
+ * not cascaded.
+ */
+const PIPELINE_COMMANDS_DDL = `
+CREATE TABLE IF NOT EXISTS pipeline_commands (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,  -- FIFO arrival order; commands are anonymous (a ticket's id becomes its run's id, a command's does not)
+  pipeline_id  TEXT NOT NULL,                -- the 8-hex History id, prefix-resolved client-side before insert
+  action       TEXT NOT NULL,                -- 'stop' | 'pause' (payload-bearing actions, e.g. answer, ride the same table later)
+  payload      TEXT,                         -- JSON, reserved for those future actions
+  by           TEXT,                         -- who issued it (identity.mjs actor; 'local' from the CLI)
+  created_at   TEXT NOT NULL,
+  consumed_at  TEXT,                         -- NULL until claimed: the claim marker AND the CLI's "executed vs enqueued" signal
+  consumed_by  TEXT                          -- who claimed it (pid@host), for audit
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_commands_pending ON pipeline_commands (pipeline_id, consumed_at);
+`;
+
 const INCREMENTAL_TABLES = {
   config_workflow_wires: CONFIG_WORKFLOW_WIRES_DDL,
   step_questions:    STEP_QUESTIONS_DDL,
@@ -941,6 +968,7 @@ const INCREMENTAL_TABLES = {
   schedules:         SCHEDULED_RUNS_DDL,
   scheduled_runs:    SCHEDULED_RUNS_DDL,
   notifications:     SCHEDULED_RUNS_DDL,
+  pipeline_commands: PIPELINE_COMMANDS_DDL,
   notification_reads: NOTIFICATION_READS_DDL,
   night_decisions:   NIGHT_DECISIONS_DDL,
 };
@@ -1961,6 +1989,7 @@ export function migrate(db) {
     // repairSchemaGaps above adds — no step of its own. NULL on every existing thread = no indicator.
     // (v47: workspaces.actions_json arrives through the same repair — additive column only, issue #529.)
     if (current < 48) applySchemaV48(db);            // Away mode: one row per answered ask
+    if (current < 49) db.exec(PIPELINE_COMMANDS_DDL); // run-control mailbox (#513) — IF NOT EXISTS, reconcile-safe
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {
