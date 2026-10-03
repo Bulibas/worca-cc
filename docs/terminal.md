@@ -20,9 +20,9 @@ shows a live shell right away: it reattaches the page's running terminal, or sta
 | A project page | your own checkout of the project (the folder you registered), on whatever is checked out there. |
 | Any other page | no new terminal: the pane shows the most recent one that is still running. |
 
-The header holds the title, a list of open terminals (only when more than one is open), a toggle
-between the terminal and its **Commands** list, and **×**, which hides the pane: the shell keeps
-running, and opening the pane again on the same page reattaches it. Worca starts a shell for a page at
+The header holds the title, a list of open terminals (only when more than one is open), and **×**,
+which hides the pane: the shell keeps running, and opening the pane again on the same page reattaches
+it. Below it is the terminal's folder, with a warning or the member select when they apply. Worca starts a shell for a page at
 most once each time you open the pane. When the shell ends (you typed `exit`, or it died) or Worca
 restarts, the terminal says so and starts a new one only when you press Enter.
 
@@ -50,13 +50,15 @@ open there says so: `cd "$PWD"`, or type `exit` and press Enter for a new one. B
 the worktree onto the run's branch, so changes you make in a running run's terminal become part of
 the run's commit. To keep your own changes apart, wait for the run to finish and use its checkout.
 
-## Commands are blocks
+## Recorded commands
 
 In bash and zsh, Worca loads your own `~/.bashrc` / `.zshrc` and adds a few lines that mark where each
-command starts and ends. The **Commands** toggle in the header lists them: the command, exit code, duration, who ran it
-and when; **Output** shows what it printed (the last 256 KB), **Run again**, **Copy**, and **Copy link**
-(`/?terminal=<id>&block=<n>`). Other shells (sh, fish, cmd.exe, PowerShell) work, but their commands are
-not recorded as blocks. A command typed with a leading space is still recorded: the record is the audit.
+command starts and ends. Each command is recorded for the audit log as a block: the command, its exit
+code, duration and output (the last 256 KB), who ran it and when. The pane does not show them; read
+them through the API: `GET /api/terminal/sessions/<id>` lists a terminal's newest commands, and
+`GET /api/terminal/sessions/<id>/blocks/<n>` returns one with its output. Other shells (sh, fish,
+cmd.exe, PowerShell) work, but their commands are not recorded. A command typed with a leading space is
+still recorded: the record is the audit.
 When bash leaves a line out of its history (`HISTCONTROL=ignorespace`, `ignoredups` or `ignoreboth`,
 which Ubuntu's default `.bashrc` sets), the block shows only the line's first command: a repeated
 `cd x && make` is recorded as `cd x`.
@@ -73,7 +75,7 @@ Keys you type in the terminal are the shell's: Escape and Ctrl+K never act on th
 Ctrl+\` shows and hides the pane from anywhere.
 
 If a command prints faster than the page can draw it (`yes`, a large `cat`), Worca skips ahead: the
-pane jumps to the latest output instead of queueing everything. The block still keeps its last 256 KB.
+pane jumps to the latest output instead of queueing everything. The recorded block still keeps its last 256 KB.
 
 ## Environment
 
@@ -145,7 +147,7 @@ The shell is `cmd.exe` (`ComSpec`): a working terminal without blocks. Stop send
 | You see | Why, and what to do |
 | --- | --- |
 | "Full-screen programs … do not work here" | node-pty is not installed. Install build tools and reinstall, or use the `-full` image. |
-| An empty Commands list | The shell is not bash or zsh, or your rc file replaced `PROMPT_COMMAND` / `precmd_functions` after Worca's lines ran. |
+| No commands recorded for a terminal | The shell is not bash or zsh, or your rc file replaced `PROMPT_COMMAND` / `precmd_functions` after Worca's lines ran. |
 | "The terminal is turned off on this hosted deployment" | Set `WORCA_TERMINAL_REMOTE=1` on the server. |
 | "This folder was removed when the run finished" | Type `exit`, then press Enter: the new terminal opens in the run's checkout (Worca makes one if needed). |
 | 409 "At most 16 terminals" | Close one. |

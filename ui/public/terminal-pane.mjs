@@ -1,15 +1,14 @@
 // ui/public/terminal-pane.mjs — the terminal pane on the right of every page (issue #573). The shell
 // runs on the worca server (src/core/terminal/manager.mjs); this pane draws it with xterm.js over /ws
 // (term-* frames), follows the page (a run's folder, a project's own folder: opening the pane starts or
-// reattaches that shell) and lists each recorded command as a block. Built in JS and appended to <body>,
-// like the Ask dock: index.html is untouched.
+// reattaches that shell). The server records each command for the audit log; the pane does not list them.
+// Built in JS and appended to <body>, like the Ask dock: index.html is untouched.
 import { createLineEditor } from './terminal-line.mjs';
 
 const OPEN_KEY = 'worca-cc.terminal.open';
 const WIDTH_KEY = 'worca-cc.terminal.width';
 const MIN_W = 320;
 const DEFAULT_W = 460;
-const BLOCKS_PAGE = 200;     // GET /api/terminal/sessions/:id returns at most the newest 200 blocks (and totalBlocks)
 // xterm's 16 ANSI colours, each read from a --term-ansi-* token (style.css), so both themes stay readable.
 const ANSI = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white',
   'brightBlack', 'brightRed', 'brightGreen', 'brightYellow', 'brightBlue', 'brightMagenta', 'brightCyan', 'brightWhite'];
@@ -33,26 +32,6 @@ export function paneTargetOf(ctx = {}) {
   return { kind: 'other' };
 }
 
-export function formatDuration(ms) {
-  if (ms == null) return '';
-  if (ms < 1000) return `${ms} ms`;
-  const s = ms / 1000;
-  if (s < 60) return `${s < 10 ? s.toFixed(1) : Math.round(s)} s`;
-  return `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
-}
-
-export function blockStatusLabel(b) {
-  if (b.status === 'running') return { text: 'running', tone: 'run' };
-  if (b.status === 'stopped' || b.status === 'interrupted') return { text: b.status, tone: 'bad' };
-  if (b.exitCode === 0) return { text: 'exit 0', tone: 'ok' };
-  return { text: b.exitCode == null ? 'ended' : `exit ${b.exitCode}`, tone: 'bad' };
-}
-
-export const stripAnsi = (s) => String(s || '')
-  .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
-  .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
-  .replace(/\x1b[@-Z\\-_]/g, '');
-
 let xtermPromise = null;
 /** xterm.js + the fit addon, loaded on first use: pages that never open the pane never pay for it. */
 export function defaultLoadXterm(doc) {
@@ -70,30 +49,19 @@ export function defaultLoadXterm(doc) {
 export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, storage = null, loadXterm = null }) {
   const load = loadXterm || (() => defaultLoadXterm(doc));
   const st = { open: false, enabled: true, pty: { available: true, reason: null }, sessions: new Map(), current: null, lastSeq: 0,
-    target: { kind: 'other' }, targetKey: '', ctx: null, ctxGen: 0, blocks: new Map(), blocksOlder: 0, view: 'term', term: null,
+    target: { kind: 'other' }, targetKey: '', ctx: null, ctxGen: 0, term: null,
     fit: null, line: null, bootId: null, member: '', note: '', busy: '', online: true, destroyed: false,
     warnings: new Map(),         // session id → the warning its open returned (a detached branch copy): shown while attached
     tried: new Set(),            // start keys auto-started since the pane opened: each at most once (D3)
     starting: null,              // the start key whose shell is being made
     restartKey: null,            // Enter starts a new shell for this start key (the last one exited, or never started)
-    why: null, focusNext: false, linking: false, pendingTimer: null };
-  const rows = new Map();          // seq → { row, update }: Commands rows are patched in place, so an open Output stays open
+    why: null, focusNext: false, pendingTimer: null };
   const drawn = { picker: '', context: '' };   // what the picker and the context bar show: unchanged → not rebuilt (an open select stays open)
 
   const make = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
   const button = (label, cls, onClick) => { const b = make('button', `btn ${cls}`.trim(), label); b.type = 'button'; b.addEventListener('click', onClick); return b; };
   const readStore = (k) => { try { return storage ? storage.getItem(k) : null; } catch { return null; } };
   const writeStore = (k, v) => { try { if (storage) storage.setItem(k, v); } catch { /* private mode */ } };
-  function icon(paths) {
-    const NS = 'http://www.w3.org/2000/svg';
-    const svg = doc.createElementNS(NS, 'svg');
-    for (const [k, v] of Object.entries({ width: '15', height: '15', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
-      'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) svg.setAttribute(k, v);
-    for (const d of paths) { const p = doc.createElementNS(NS, 'path'); p.setAttribute('d', d); svg.append(p); }
-    return svg;
-  }
-  const LIST_ICON = ['M9 6h11', 'M9 12h11', 'M9 18h11', 'M4 6h.01', 'M4 12h.01', 'M4 18h.01'];
-  const PROMPT_ICON = ['M5 7l5 5-5 5', 'M12 18h7'];
 
   // ── DOM ──────────────────────────────────────────────────────────────────────────────────────────
   const root = make('aside', 'term-pane');
@@ -105,12 +73,10 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
   picker.setAttribute('aria-label', 'Terminal session');
   picker.hidden = true;
   picker.addEventListener('change', () => { if (picker.value) attach(picker.value); });
-  // One toggle between the terminal and its Commands list: pressed = the list is showing.
-  const cmdsBtn = button('', 'btn-ghost term-icon term-cmds', () => setView(st.view === 'term' ? 'blocks' : 'term'));
   const hideBtn = button('×', 'btn-ghost term-icon term-hide', () => close());
   hideBtn.setAttribute('aria-label', 'Hide the terminal pane');
   hideBtn.title = 'Hide (the shell keeps running)';
-  head.append(make('span', 'term-title', 'Terminal'), picker, cmdsBtn, hideBtn);
+  head.append(make('span', 'term-title', 'Terminal'), picker, hideBtn);
   const context = make('div', 'term-context');
   const banners = make('div', 'term-banners');
   const screen = make('div', 'term-screen');
@@ -124,10 +90,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
   // parent's computed height and width, and under border-box those would include the frame's.
   const host = make('div', 'term-host');
   screen.append(probe, ...ansiProbes.map(([, p]) => p), host);
-  const blocksEl = make('div', 'term-blocks');
-  blocksEl.hidden = true;
-  root.append(resizer, head, context, banners, screen, blocksEl);
-  renderToggle();
+  root.append(resizer, head, context, banners, screen);
   const handle = button('Terminal', 'term-handle', () => toggle());
   handle.setAttribute('aria-label', 'Open the terminal pane');
 
@@ -183,8 +146,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
       const info = await api('GET', '/api/terminal');
       st.enabled = !!info.enabled;
       st.pty = info.pty || st.pty;
-      // The server's list is the truth: sessions it no longer has leave the picker. The attached one stays
-      // (a permalink can attach a finished session the list does not carry).
+      // The server's list is the truth: sessions it no longer has leave the picker. The attached one stays.
       const keep = st.current && st.sessions.get(st.current);
       st.sessions = new Map((info.sessions || []).map((s) => [s.id, s]));
       if (keep && !st.sessions.has(keep.id)) st.sessions.set(keep.id, keep);
@@ -267,7 +229,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
     if (key && live.length) st.tried.add(key);            // this page has had its shell: a later one needs Enter
     if (cur && cur.status === 'running' && live.some((s) => s.id === cur.id)) return;
     if (live[0]) { await attach(live[0].id); return; }
-    if (!key || st.starting === key || st.linking) return;
+    if (!key || st.starting === key) return;
     if (st.tried.has(key)) { promptRestart(key); return; }
     st.tried.add(key);
     await start(key);
@@ -327,14 +289,11 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
     return api('POST', `/api/projects/${encodeURIComponent(st.target.projectKey)}/terminal`, size).catch(showError);
   }
 
-  /** Forgets the attached session: the screen, its commands and any half-typed line. */
+  /** Forgets the attached session: the screen and any half-typed line. */
   function resetCurrent() {
     st.current = null;
     st.lastSeq = 0;
-    st.blocks = new Map();
-    st.blocksOlder = 0;
     st.line = null;
-    rows.clear();
     try { st.term?.reset(); } catch { /* not drawn yet */ }
   }
   function detachCurrent() {
@@ -355,32 +314,9 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
       term.options.convertEol = !!(s && s.mode === 'pipes');
     } catch (e) { st.note = `The terminal could not load: ${e.message}`; }
     if (!s || s.status === 'running') send({ type: 'term-attach', sessionId: id });
-    const blocks = loadBlocks(id);
     render();
     fitNow();                                            // the width may have changed since the session started
     if (st.focusNext && st.open) { st.focusNext = false; focusTerm(); }
-    return blocks;
-  }
-  async function loadBlocks(id) {
-    const r = await api('GET', `/api/terminal/sessions/${encodeURIComponent(id)}`).catch(() => null);
-    if (!r || st.current !== id) return;
-    if (r.session && !st.sessions.has(id)) st.sessions.set(id, r.session);
-    // The server sends the newest BLOCKS_PAGE commands and how many there are in all. Older ones are
-    // counted, not listed (null: a full page from a server that does not say, so maybe some).
-    const listed = (r.blocks || []).length;
-    st.blocksOlder = Number.isInteger(r.totalBlocks) ? Math.max(0, r.totalBlocks - listed) : (listed >= BLOCKS_PAGE ? null : 0);
-    for (const b of r.blocks || []) st.blocks.set(b.seq, b);
-    renderBlocks();
-  }
-  /** A permalink's command, fetched on its own when it is older than the newest page. */
-  async function ensureBlock(id, seq) {
-    if (st.blocks.has(seq)) return true;
-    const b = await api('GET', `/api/terminal/sessions/${encodeURIComponent(id)}/blocks/${seq}`).catch(() => null);
-    if (!b || st.current !== id) return false;
-    if (st.blocksOlder) st.blocksOlder -= 1;             // it is listed now
-    st.blocks.set(seq, { ...b, output: undefined });
-    renderBlocks();
-    return true;
   }
   function stopCurrent() {
     if (st.current) api('POST', `/api/terminal/sessions/${encodeURIComponent(st.current)}/stop`).catch(showError);
@@ -432,18 +368,6 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
     if (r.send && !send({ type: 'term-input', sessionId: s.id, data: r.send })) st.term.write('[not sent: reconnecting]\r\n');
     if (r.interrupt) stopCurrent();                      // over pipes Ctrl+C has no tty to reach: the stop API does it
   }
-  function runAgain(command) {
-    const s = st.sessions.get(st.current);
-    if (!s || s.status !== 'running') return;
-    // Never type into a running program (a REPL, a prompt): only at the shell's prompt.
-    if (s.currentBlock) { st.note = 'A command is still running in this terminal. Stop it first with Ctrl+C.'; render(); return; }
-    if (!st.online) return;
-    // Under a PTY, Ctrl+U first clears anything half-typed at the prompt. Over pipes the half-typed line is
-    // only ours: drop it (and its echo), then echo the command, as the shell will not.
-    if (st.line && st.term) st.term.write(`${st.line.clear()}${command}\r\n`);
-    send({ type: 'term-input', sessionId: s.id, data: st.line ? `${command}\n` : `\x15${command}\r` });
-    setView('term');
-  }
 
   // ── frames ───────────────────────────────────────────────────────────────────────────────────────
   function onFrame(msg) {
@@ -470,11 +394,6 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
       if (msg.seq <= st.lastSeq) return;
       st.lastSeq = msg.seq;
       if (st.term) st.term.write(msg.data);
-      return;
-    }
-    if (msg.type === 'term-block' && msg.block) {
-      st.blocks.set(msg.block.seq, msg.block);
-      renderBlocks();
     }
   }
   function onHello(msg) {
@@ -534,25 +453,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
     }
     renderContext();
     renderBanners();
-    renderBlocks();
-    renderToggle();
   }
-  function renderToggle() {
-    const list = st.view === 'blocks';
-    const label = list ? 'Back to terminal' : 'Commands';
-    if (cmdsBtn.getAttribute('aria-label') === label) return;
-    cmdsBtn.setAttribute('aria-label', label);
-    cmdsBtn.setAttribute('aria-pressed', String(list));
-    cmdsBtn.replaceChildren(icon(list ? PROMPT_ICON : LIST_ICON));
-  }
-  function setView(view) {
-    st.view = view;
-    screen.hidden = view !== 'term';
-    blocksEl.hidden = view !== 'blocks';
-    render();
-    if (view === 'term') { fitNow(); focusTerm(); }
-  }
-
   const LIVE_WARNING = 'This pipeline is still running and changing these files.';
   /** The amber line of the attached shell: a live run's (while it runs), or what its open returned. */
   function sessionWarning(s) {
@@ -614,71 +515,9 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
     if (!st.online && st.open) banners.append(make('p', 'term-warn term-offline', 'Reconnecting to the worca server. Keys typed now are not sent.'));
     root.classList.toggle('term-is-offline', !st.online);
     if (!s) return;
-    if (s.mode === 'pipes') banners.append(make('p', 'term-banner', `Full-screen programs (vim, top, less) do not work here: ${st.pty.reason || 'node-pty is not available on this server'}. Commands, blocks and Ctrl+C still work.`));
+    if (s.mode === 'pipes') banners.append(make('p', 'term-banner', `Full-screen programs (vim, top, less) do not work here: ${st.pty.reason || 'node-pty is not available on this server'}. Commands and Ctrl+C still work.`));
     if (s.folder === 'gone') banners.append(make('p', 'term-banner', 'This folder was removed when the run finished. Type exit, then press Enter for a new terminal on the run.'));
     if (s.folder === 'replaced') banners.append(make('p', 'term-banner', 'This folder was re-created when the run finished. Run cd "$PWD" here, or type exit and press Enter for a new terminal.'));
-  }
-
-  // Rows are kept by seq and patched (status, meta): rebuilding them would close an expanded Output.
-  const noteNoBlocks = make('p', 'term-note', 'Commands are not recorded as blocks in this shell. Use bash or zsh to get them.');
-  const noteTrimmed = make('p', 'term-note term-trimmed');
-  function renderBlocks() {
-    // The list is the newest page plus what arrived since; the count is every command (or "+" when unknown).
-    const shown = st.blocks.size;
-    const total = st.blocksOlder == null ? null : shown + st.blocksOlder;
-    cmdsBtn.title = shown ? `Commands (${total == null ? `${shown}+` : total})` : 'Commands';
-    noteTrimmed.textContent = `Showing the latest ${shown}${total == null ? '' : ` of ${total}`} commands. Older ones are recorded but not listed here.`;
-    const s = st.sessions.get(st.current);
-    const want = [];
-    if (s && !s.integration) want.push(noteNoBlocks);
-    const sorted = [...st.blocks.values()].sort((a, z) => z.seq - a.seq);
-    for (const b of sorted) {
-      let r = rows.get(b.seq);
-      if (!r) { r = blockRow(b); rows.set(b.seq, r); }
-      r.update(b);
-      want.push(r.row);
-    }
-    for (const seq of [...rows.keys()]) if (!st.blocks.has(seq)) rows.delete(seq);
-    if (st.blocksOlder !== 0) want.push(noteTrimmed);
-    const have = [...blocksEl.children];
-    if (have.length !== want.length || have.some((n, i) => n !== want[i])) blocksEl.replaceChildren(...want);   // moving keeps each row's state
-  }
-  function blockRow(b) {
-    const row = make('div', 'term-block');
-    row.dataset.seq = String(b.seq);
-    const badge = make('span', 'term-badge');
-    const top = make('div', 'term-block-top');
-    top.append(badge, make('code', 'term-cmd', b.command));
-    const meta = make('div', 'term-block-meta');
-    const out = make('pre', 'term-out');
-    out.hidden = true;
-    const copy = (text) => { try { win.navigator.clipboard?.writeText(text); } catch { /* no clipboard */ } };
-    const acts = make('div', 'term-block-acts');
-    acts.append(
-      button('Output', 'btn-ghost btn-mini', async () => {
-        if (out.hidden && !out.textContent) {
-          const full = await api('GET', `/api/terminal/sessions/${encodeURIComponent(b.sessionId)}/blocks/${b.seq}`).catch(showError);
-          if (full) out.textContent = `${full.truncated ? `(earlier output trimmed; ${full.outputBytes} bytes in total)\n` : ''}${stripAnsi(full.output)}`;
-        }
-        out.hidden = !out.hidden;
-      }),
-      button('Copy', 'btn-ghost btn-mini', () => copy(b.command)),
-      button('Run again', 'btn-ghost btn-mini', () => runAgain(b.command)),
-      button('Copy link', 'btn-ghost btn-mini', () => copy(`${win.location.origin}/?terminal=${encodeURIComponent(b.sessionId)}&block=${b.seq}`)),
-    );
-    row.append(top, meta, acts, out);
-    let status = null;
-    const update = (nb) => {
-      const lab = blockStatusLabel(nb);
-      badge.className = `term-badge term-badge-${lab.tone}`;
-      badge.textContent = lab.text;
-      const when = nb.startedAt ? new Date(nb.startedAt).toLocaleTimeString() : '';
-      meta.textContent = [nb.runBy && nb.runBy !== 'local' ? `by ${nb.runBy}` : null, when, formatDuration(nb.durationMs)].filter(Boolean).join(' · ');
-      // A fetched output of a command that has since finished is stale: closed, it is fetched again next time.
-      if (status && status !== nb.status && out.hidden) out.textContent = '';
-      status = nb.status;
-    };
-    return { row, update };
   }
 
   // ── global listeners ─────────────────────────────────────────────────────────────────────────────
@@ -705,25 +544,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
   });
 
   applyWidth(readStore(WIDTH_KEY));
-  // D9: /?terminal=<id>&block=<seq> opens that session on its Commands tab.
-  const link = new URLSearchParams(win.location.search || '');
-  if (link.get('terminal')) {
-    st.linking = true;                                     // the link's session, not a new shell for this page
-    open().then(async () => {
-      const id = link.get('terminal');
-      await attach(id);
-      st.linking = false;
-      setView('blocks');
-      const seq = link.get('block');
-      const n = Number(seq);                               // a seq is an integer: no selector escaping needed
-      if (seq == null || !Number.isInteger(n)) return;
-      // The list carries the newest commands only: an older one is fetched on its own; a missing one is said.
-      if (!(await ensureBlock(id, n))) { if (st.current === id) { st.note = `Command #${n} of this terminal was not found.`; render(); } return; }
-      win.setTimeout(() => blocksEl.querySelector(`.term-block[data-seq="${n}"]`)?.scrollIntoView?.({ block: 'center' }), 300);
-    });
-  } else if (readStore(OPEN_KEY) === '1') {
-    open();
-  }
+  if (readStore(OPEN_KEY) === '1') open();
 
   function destroy() {
     st.destroyed = true;

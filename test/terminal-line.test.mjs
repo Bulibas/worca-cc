@@ -61,10 +61,7 @@ test('Backspace erases a whole cluster, as many cells as the terminal drew', () 
   assert.equal(ed.feed('\x15').echo, '\b \b'.repeat(5));
 });
 
-test('clear() drops a half-typed line and returns its erase', () => {
+test('a CRLF is one line end, and a lone LF after it is a separate blank line', () => {
   const ed = createLineEditor();
-  ed.feed('ls 中');
-  assert.equal(ed.clear(), '\b \b'.repeat(5));
-  assert.equal(ed.pending, '');
   assert.equal(ed.feed('\nx\r\n\n').send, '\nx\n\n', 'CRLF as one cluster, then a separate blank line');
 });

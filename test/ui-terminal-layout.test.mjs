@@ -27,8 +27,9 @@ test('Escape typed in the terminal is the shell\'s: the wizard and the three det
   assert.equal(app.match(/if \(e\.target\?\.closest\?\.\('\.term-pane'\)\) return;/g)?.length, 4);
 });
 
-test('the Commands list actually hides: an author display rule needs its own [hidden] override', () => {
-  assert.ok(css.includes('.term-blocks[hidden]{display:none;}'));
+test('the Commands list is gone: no rules for it, or for its toggle, remain', () => {
+  assert.doesNotMatch(css, /\.term-(blocks?|cmds?|badge|out)\b/);
+  assert.doesNotMatch(app, /[?&]terminal=|ensureBlock/);
 });
 
 test('the xterm host has no padding or border: the frame lives on .term-screen, outside what FitAddon measures', () => {
@@ -56,8 +57,7 @@ test('app.js: sendWs reports a dropped socket and the pane hears about it', () =
   assert.ok(app.includes('if (terminalPane) terminalPane.onConnection(false);'));
 });
 
-test('the header toggle shows its pressed state; the old tab row and branch rows are gone', () => {
-  assert.match(css, /\.term-cmds\[aria-pressed="true"\]\{[^}]*color:var\(--ink\);/);
+test('the header has no toggle; the old tab row and branch rows are gone; the picker hides', () => {
   assert.doesNotMatch(css, /\.term-tabs?\b/);
   assert.doesNotMatch(css, /\.term-wt\b/);
   assert.ok(css.includes('.term-sessions[hidden]{display:none;}'));

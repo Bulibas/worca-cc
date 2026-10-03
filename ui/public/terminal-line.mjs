@@ -61,12 +61,6 @@ export function createLineEditor() {
       }
       return { echo, send, interrupt };
     },
-    /** Drops the half-typed line; returns what erases it on screen. */
-    clear() {
-      const echo = buf.map(erase).join('');
-      buf = [];
-      return echo;
-    },
     get pending() { return buf.join(''); },
   };
 }
