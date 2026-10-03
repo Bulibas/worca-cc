@@ -81,6 +81,7 @@ cosign verify ghcr.io/sinishadjukic/worca:1.3.0 \
 
 The pinned Claude Code version is a label: `docker inspect --format '{{index .Config.Labels "dev.worca.claude-code.version"}}' <image>`.
 The CLI's own updater is off inside the image; a newer CLI is a newer image tag.
+The slim image has no compiler, so node-pty (the terminal's PTY) is skipped and terminals run over pipes; the -full image builds it.
 
 **Your project needs a toolchain the image lacks?** Pull `-full`, or extend:
 

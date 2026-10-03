@@ -736,3 +736,15 @@ test('ask-panel: bytesToBase64 is declared once — the composer upload and the 
   const src = readFileSync(fileURLToPath(new URL('../ui/public/ask-panel.mjs', import.meta.url)), 'utf8');
   assert.equal((src.match(/function bytesToBase64\(/g) || []).length, 1);
 });
+
+test('ask-panel: Ctrl+K inside the terminal pane belongs to the shell (#573)', () => {
+  const { panel, window, doc } = makePanel();
+  const pane = doc.createElement('aside');
+  pane.className = 'term-pane';
+  const inner = doc.createElement('textarea');                 // xterm's hidden input is a textarea
+  pane.appendChild(inner);
+  doc.body.appendChild(pane);
+  const e = key(window, inner, 'k', { ctrlKey: true });
+  assert.equal(panel.isOpen(), false);
+  assert.equal(e.defaultPrevented, false);
+});

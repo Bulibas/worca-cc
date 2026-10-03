@@ -1,0 +1,303 @@
+// src/core/terminal/manager.mjs — worca-owned terminal sessions (issue #573). Each session is a shell
+// the server runs under a PTY (or over pipes, pty.mjs); its output streams to the pane over /ws, and
+// every command it runs is recorded as a block (markers.mjs) with who pressed Enter. Mirrors
+// ActionRegistry: live state in memory, a pid file so the next boot reaps a crashed server's shells.
+import { EventEmitter } from 'node:events';
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { MarkerParser } from './markers.mjs';
+import { pickShell, shellLaunch, ensureZshDir } from './shell.mjs';
+import { spawnTerminal, loadPty, killDescendants, descendantPids, signalPids, signalDescendants } from './pty.mjs';
+import { terminalEnv } from './context.mjs';
+import * as store from './store.mjs';
+
+export const MAX_SESSIONS = 16;
+export const REPLAY_CHARS = 512 * 1024;        // live output kept per session for a reload's replay
+export const BLOCK_OUTPUT_CAP = 256 * 1024;    // a block keeps the tail of its output
+const MAX_INPUT = 64 * 1024;
+const FLUSH_MS = 16;
+const FLUSH_CHARS = 64 * 1024;                  // flush early once this much output is pending
+const STOP_ESCALATE_MS = 3000;
+const CLOSE_GRACE_MS = 1000;
+const FOLDER_CHECK_MS = 5000;
+const ENDED_KEEP = 20;                          // ended sessions kept in memory (their replay); the DB keeps all
+
+const iso = (ms) => new Date(ms).toISOString();
+const clamp = (n, lo, hi, dflt) => { const v = Math.round(Number(n)); return Number.isFinite(v) ? Math.min(Math.max(v, lo), hi) : dflt; };
+const codeError = (code, message) => Object.assign(new Error(message), { code });
+
+function snapshot(s) {
+  const b = s.block;
+  return { ...s.snap, currentBlock: b ? { seq: b.seq, command: b.command, startedAt: iso(b.startedAt), runBy: b.runBy } : null };
+}
+
+export class TerminalManager extends EventEmitter {
+  constructor({ pidFile = null, zshDir = null, spawnImpl = spawnTerminal, ptyInfo = () => loadPty(), shell = () => pickShell(),
+    runLive = () => false, now = Date.now, platform = process.platform } = {}) {
+    super();
+    this.pidFile = pidFile;          // the server redefines these two as lazy getters (worcaHome() at use)
+    this.zshDir = zshDir;
+    Object.assign(this, { spawnImpl, ptyInfo, shell, runLive, now, platform });
+    this.sessions = new Map();
+    this.ptyError = null;          // D14: set once node-pty failed to spawn here
+    this._folderTimer = null;
+  }
+
+  ptyStatus() {
+    if (this.ptyError) return { available: false, reason: this.ptyError };
+    const { pty, reason } = this.ptyInfo();
+    return { available: !!pty, reason: pty ? null : (reason || null) };
+  }
+  get(id) { const s = this.sessions.get(id); return s ? snapshot(s) : null; }
+  list() { return [...this.sessions.values()].map(snapshot).sort((a, z) => z.createdAt.localeCompare(a.createdAt)); }
+  live() { return [...this.sessions.values()].filter((s) => s.snap.status === 'running'); }
+  busyRunIds() { return new Set(this.live().map((s) => s.snap.runId).filter(Boolean)); }
+  busyDirs() { return new Set(this.live().map((s) => s.snap.cwd)); }
+
+  /** Everything still buffered, for a page that (re)attaches: { data, seq } (seq = the last chunk's). */
+  replay(id) {
+    const s = this.sessions.get(id);
+    if (!s) return null;
+    this._flush(s);
+    return { data: s.chunks.map((c) => c.data).join(''), seq: s.seq };
+  }
+
+  async open({ cwd, scope, label = null, runId = null, member = null, projectKey = null, branch = null, workspace = false,
+    runLive = false, by = 'local', cols = 100, rows = 30, actionSnaps = [], baseEnv = process.env }) {
+    if (this.live().length >= MAX_SESSIONS) throw codeError('TOO_MANY_SESSIONS', `At most ${MAX_SESSIONS} terminals can be open at once. Close one first.`);
+    let ino;
+    try { const st = statSync(cwd); if (!st.isDirectory()) throw new Error('not a folder'); ino = st.ino; }
+    catch { throw codeError('NO_FOLDER', 'The folder for this terminal does not exist.'); }
+    const id = `t-${randomBytes(5).toString('hex')}`;
+    const nonce = randomBytes(8).toString('hex');                // D12: a mark without it is plain output
+    const shell = this.shell();
+    const zshDir = shell.kind === 'zsh' && this.zshDir ? ensureZshDir(this.zshDir) : null;
+    const launch = shellLaunch(shell, { env: baseEnv, zshDir, nonce });
+    const size = { cols: clamp(cols, 2, 500, 100), rows: clamp(rows, 1, 300, 30) };
+    const spawnAs = (pty) => this.spawnImpl({ file: shell.file, args: launch.args, cwd, ...size, platform: this.platform, pty,
+      env: terminalEnv({ base: baseEnv, sessionId: id, mode: pty ? 'pty' : 'pipes', runId, member, projectKey, branch, cwd, workspace,
+        actionSnaps, shellEnv: launch.env }) });
+    const pty = this.ptyError ? null : this.ptyInfo().pty;
+    let proc;
+    try {
+      proc = spawnAs(pty);
+    } catch (e) {
+      if (!pty) throw e;
+      // D14: node-pty loads but cannot start a shell here. This and every later session use pipes.
+      this.ptyError = `node-pty could not start a shell on this server (${String(e?.message || e).slice(0, 120)})`;
+      console.warn(`[worca] terminal: ${this.ptyError}; using pipes`);
+      proc = spawnAs(null);
+    }
+    const mode = proc.mode;
+    const at = this.now();
+    const s = {
+      snap: { id, scope, label, runId, member, projectKey, branch, cwd, shell: shell.file, shellKind: shell.kind, mode, integration: false,
+        status: 'running', exitCode: null, pid: proc.pid ?? null, createdBy: by, createdAt: iso(at), endedAt: null, closedBy: null,
+        runLive: !!runLive, folder: 'ok' },
+      proc, parser: new MarkerParser({ nonce }), chunks: [], chunkChars: 0, seq: 0, pendingOut: '', flushTimer: null,
+      block: null, blockSeq: 0, lastInputBy: by, cwdNow: cwd, ino, stopTimer: null, closing: null, exitWaiters: [],
+    };
+    this.sessions.set(id, s);
+    store.insertSession(s.snap);
+    store.recordAudit({ sessionId: id, runId, actor: by, action: 'open', detail: cwd, now: at });
+    proc.onData((d) => this._onData(s, d));
+    proc.onExit((e) => this._onExit(s, e));
+    this.writePidFile();
+    this._watchFolders();
+    this.emit('status', snapshot(s));
+    return snapshot(s);
+  }
+
+  /** Keystrokes from a person. A line end makes them the author of the command it submits. */
+  write(id, data, by = 'local') {
+    const s = this.sessions.get(id);
+    if (!s || s.snap.status !== 'running' || typeof data !== 'string') return false;
+    const text = data.slice(0, MAX_INPUT);
+    if (/[\r\n]/.test(text)) s.lastInputBy = by;
+    s.proc.write(text);
+    return true;
+  }
+
+  resize(id, cols, rows) {
+    const s = this.sessions.get(id);
+    if (s && s.snap.status === 'running') s.proc.resize(clamp(cols, 2, 500, 100), clamp(rows, 1, 300, 30));
+  }
+
+  /** Stop the running command (D4): Ctrl+C / SIGINT, then SIGKILL its processes if it is still running 3 s later. */
+  interrupt(id, by = 'local') {
+    const s = this.sessions.get(id);
+    if (!s || s.snap.status !== 'running') return null;
+    const b = s.block;
+    if (b) b.stopRequestedBy = by;
+    store.recordAudit({ sessionId: id, blockSeq: b?.seq ?? null, runId: s.snap.runId, actor: by, action: 'stop', detail: b?.command ?? null, now: this.now() });
+    // Under a PTY the tty delivers ^C to the foreground job. Over pipes there is no tty, and bash still
+    // starts each command in its own process group, so SIGINT goes to each of the shell's descendants.
+    if (s.proc.mode === 'pty') s.proc.write('\x03');
+    else signalDescendants(s.proc.pid, 'SIGINT', this.platform);
+    clearTimeout(s.stopTimer);
+    if (b) {
+      s.stopTimer = setTimeout(() => { if (s.block === b) killDescendants(s.proc.pid, this.platform); }, STOP_ESCALATE_MS);
+      s.stopTimer.unref?.();
+    }
+    return { blockSeq: b?.seq ?? null };
+  }
+
+  /** Close: SIGHUP (a terminal closing), then SIGKILL the shell and everything under it. */
+  async close(id, by = 'local', reason = null) {
+    const s = this.sessions.get(id);
+    if (!s || s.snap.status !== 'running') return false;
+    s.closing = { by, reason };
+    const exited = new Promise((r) => s.exitWaiters.push(r));
+    const wait = (ms) => Promise.race([exited, new Promise((r) => setTimeout(r, ms).unref?.())]);
+    // Jobs in their own process groups outlive the SIGHUP, and once the shell exits they are no longer its
+    // descendants: list them first, kill them after the grace period.
+    const tree = this.platform === 'win32' ? [] : descendantPids(s.proc.pid);
+    s.proc.signal('SIGHUP');
+    await wait(CLOSE_GRACE_MS);
+    signalPids(new Set([...tree, ...descendantPids(s.proc.pid)]), 'SIGKILL', this.platform);
+    if (s.snap.status === 'running') {
+      s.proc.signal('SIGKILL');
+      await wait(2000);
+    }
+    if (s.snap.status === 'running') this._onExit(s, { exitCode: null });   // never left half-open
+    return true;
+  }
+
+  closeWhere(pred, by = 'system', reason = null) {
+    return Promise.allSettled(this.live().filter((s) => pred(snapshot(s))).map((s) => this.close(s.snap.id, by, reason)));
+  }
+  closeAll(by = 'system') { return this.closeWhere(() => true, by, 'worca stopped'); }
+
+  /** D7: a run's teardown may remove (or remove and re-create) the folder under a live shell. */
+  checkFolders() {
+    const live = this.live();
+    if (!live.length) { clearInterval(this._folderTimer); this._folderTimer = null; return; }
+    for (const s of live) {
+      let folder = 'ok';
+      try { if (statSync(s.snap.cwd).ino !== s.ino) folder = 'replaced'; } catch { folder = 'gone'; }
+      const runLive = s.snap.runId ? !!this.runLive(s.snap.runId) : false;
+      if (folder !== s.snap.folder || runLive !== s.snap.runLive) {
+        s.snap.folder = folder;
+        s.snap.runLive = runLive;
+        this.emit('status', snapshot(s));
+      }
+    }
+  }
+
+  // ── internals ──────────────────────────────────────────────────────────────────────────────────
+  _onData(s, d) {
+    const text = String(d);
+    for (const ev of s.parser.push(text)) this._onMark(s, ev);
+    s.pendingOut += text;
+    if (s.pendingOut.length >= FLUSH_CHARS) { this._flush(s); return; }   // a flood: bounded frames, not one per 16 ms
+    if (!s.flushTimer) { s.flushTimer = setTimeout(() => this._flush(s), FLUSH_MS); s.flushTimer.unref?.(); }
+  }
+
+  _flush(s) {
+    clearTimeout(s.flushTimer);
+    s.flushTimer = null;
+    if (!s.pendingOut) return;
+    const data = s.pendingOut;
+    s.pendingOut = '';
+    s.seq += 1;
+    s.chunks.push({ seq: s.seq, data });
+    s.chunkChars += data.length;
+    // Keep exactly the last REPLAY_CHARS: drop whole chunks, then trim the oldest one kept. Dropping only
+    // whole chunks would leave a reload with almost nothing after one large chunk.
+    while (s.chunkChars > REPLAY_CHARS) {
+      const head = s.chunks[0];
+      const over = s.chunkChars - REPLAY_CHARS;
+      if (head.data.length <= over) { s.chunks.shift(); s.chunkChars -= head.data.length; continue; }
+      const cut = /[\uDC00-\uDFFF]/.test(head.data[over] || '') ? over + 1 : over;   // never split a surrogate pair
+      head.data = head.data.slice(cut);
+      s.chunkChars -= cut;
+    }
+    this.emit('data', { sessionId: s.snap.id, data, seq: s.seq });
+  }
+
+  _onMark(s, ev) {
+    if (!s.snap.integration) {
+      s.snap.integration = true;
+      store.setSessionIntegration(s.snap.id);
+      this.emit('status', snapshot(s));
+    }
+    if (ev.type === 'cwd') { s.cwdNow = ev.cwd; return; }
+    if (ev.type === 'output') {
+      const b = s.block;
+      if (!b) return;
+      b.bytes += Buffer.byteLength(ev.text);
+      b.out += ev.text;
+      if (b.out.length > BLOCK_OUTPUT_CAP) { b.out = b.out.slice(-BLOCK_OUTPUT_CAP); b.truncated = true; }
+      return;
+    }
+    if (ev.type === 'end') { this._endBlock(s, 'done', ev.exitCode); return; }
+    if (ev.type === 'start') {
+      const at = this.now();
+      s.blockSeq += 1;
+      s.block = { seq: s.blockSeq, command: ev.command, startedAt: at, out: '', bytes: 0, truncated: false, runBy: s.lastInputBy, stopRequestedBy: null };
+      const rec = store.startBlock({ sessionId: s.snap.id, seq: s.blockSeq, command: ev.command, cwd: s.cwdNow,
+        runId: s.snap.runId, member: s.snap.member, runBy: s.lastInputBy, now: at });
+      store.recordAudit({ sessionId: s.snap.id, blockSeq: s.blockSeq, runId: s.snap.runId, actor: s.lastInputBy, action: 'command', detail: ev.command, now: at });
+      this.emit('block', rec);
+      this.emit('status', snapshot(s));
+    }
+  }
+
+  _endBlock(s, status, exitCode) {
+    const b = s.block;
+    if (!b) return;
+    s.block = null;
+    clearTimeout(s.stopTimer);
+    const final = b.stopRequestedBy ? 'stopped' : status;
+    const rec = store.finishBlock({ sessionId: s.snap.id, seq: b.seq, status: final, exitCode, output: b.out, outputBytes: b.bytes,
+      truncated: b.truncated, stoppedBy: b.stopRequestedBy, now: this.now() });
+    this.emit('block', rec);
+    this.emit('status', snapshot(s));
+  }
+
+  _onExit(s, { exitCode = null } = {}) {
+    if (s.snap.status !== 'running') return;
+    this._flush(s);
+    clearTimeout(s.stopTimer);
+    if (s.block) {
+      if (s.closing && !s.block.stopRequestedBy) s.block.stopRequestedBy = s.closing.by;
+      this._endBlock(s, 'done', exitCode);      // `exit` typed at the prompt ends with the shell's code
+    }
+    const at = this.now();
+    const status = s.closing ? 'closed' : 'exited';
+    Object.assign(s.snap, { status, exitCode, endedAt: iso(at), closedBy: s.closing?.by ?? null });
+    store.endSession(s.snap.id, { status, exitCode, closedBy: s.snap.closedBy, now: at });
+    store.recordAudit({ sessionId: s.snap.id, runId: s.snap.runId, actor: s.closing?.by ?? null, action: s.closing ? 'close' : 'exit',
+      detail: s.closing?.reason ?? (exitCode == null ? null : `exit ${exitCode}`), now: at });
+    this.writePidFile();
+    this._evictEnded();
+    this.emit('status', snapshot(s));
+    for (const w of s.exitWaiters.splice(0)) w();
+  }
+
+  _evictEnded() {
+    const ended = [...this.sessions.values()].filter((s) => s.snap.status !== 'running')
+      .sort((a, z) => (a.snap.endedAt || '').localeCompare(z.snap.endedAt || ''));
+    for (const s of ended.slice(0, Math.max(0, ended.length - ENDED_KEEP))) this.sessions.delete(s.snap.id);
+  }
+
+  /** This server's live shells, whole file. Also called once at boot, after reaping, to drop stale rows. */
+  writePidFile() {
+    const file = this.pidFile;
+    if (!file) return;
+    const rows = this.live().filter((s) => s.proc.pid).map((s) => ({ pid: s.proc.pid, ownerPid: process.pid, sessionId: s.snap.id,
+      ...(s.snap.runId ? { instanceId: `term:${s.snap.runId}:${s.snap.id}` } : {}) }));
+    try {                                    // tmp + rename, like ActionRegistry: the harness reads it from another process
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(`${file}.tmp`, JSON.stringify(rows));
+      renameSync(`${file}.tmp`, file);
+    } catch { /* best-effort, like actions */ }
+  }
+
+  _watchFolders() {
+    if (this._folderTimer) return;
+    this._folderTimer = setInterval(() => this.checkFolders(), FOLDER_CHECK_MS);
+    this._folderTimer.unref?.();
+  }
+}
