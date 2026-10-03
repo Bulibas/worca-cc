@@ -143,6 +143,27 @@ test('ui start against another program: three-line conflict on stderr, exit 1', 
   } finally { await close(); }
 });
 
+test('ui stop without --port never signals a Worca UI this WORCA_HOME did not start', { skip: process.platform === 'win32' && 'signal semantics differ on Windows' }, async () => {
+  // Incident 2026-10-02: no instance file, so the portless stop fell back to PORT
+  // (inherited 4317) and SIGTERMed the pid the real UI's /api/health reported.
+  // Here PORT points at a fake Worca UI reporting a bystander pid the test owns.
+  const bystander = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  let signalled = null;
+  bystander.on('exit', (_c, sig) => { signalled = sig || 'exited'; });
+  const { port, close } = await serve((req, res) => {
+    if (req.url === '/api/health') return json(res, 200, { name: UI_HEALTH_NAME, version: '1.0.0', pid: bystander.pid });
+    json(res, 401, {});
+  });
+  try {
+    const home = await freshHome();
+    const r = await run(['ui', 'stop'], { home, extraEnv: { PORT: String(port) } });
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /does not name this server/);
+    await new Promise((res) => setTimeout(res, 200));
+    assert.equal(signalled, null, 'the bystander must not be signalled');
+  } finally { try { bystander.kill('SIGKILL'); } catch { /* gone */ } await close(); }
+});
+
 test('lifecycle: real server start -> instance file -> restart (new pid) -> stop (graceful, exit 0)', { timeout: 90000 }, async () => {
   const home = await freshHome();
   const port = await freePort();
@@ -179,6 +200,15 @@ test('lifecycle: real server start -> instance file -> restart (new pid) -> stop
         await new Promise((res) => setTimeout(res, 150));
       }
       assert.ok(pid2, `restart did not bring up a new server: ${second.out()} ${second.err()}`);
+      // The server answers /api/health before it writes ui.json; a portless stop in
+      // that window resolves PORT/4317 instead (incident 2026-10-02). Wait for the
+      // file to name the new server before relying on it.
+      let named = false;
+      for (let i = 0; i < 100 && !named; i++) {
+        try { named = JSON.parse(await readFile(file, 'utf8')).pid === pid2; } catch { /* not yet */ }
+        if (!named) await new Promise((res) => setTimeout(res, 50));
+      }
+      assert.ok(named, 'restarted server wrote its instance file');
       assert.match(second.out(), /Starting Worca UI/);
       assert.doesNotMatch(second.out(), /not running/, 'restart is quiet about the stop it just did');
 

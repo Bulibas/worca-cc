@@ -461,7 +461,8 @@ test('plugin validate --run-cases: SIGTERM stops the running case — exit 2, no
       }
       assert.equal(alive, false, `script process ${pid} outlived the CLI`);
     } finally {
-      try { process.kill(pid); } catch { /* already gone — the point of the test */ }   // a RED run must not leave it behind
+      // A RED run must not leave it behind — but a pid seen dead may be reused, so only a live one.
+      try { process.kill(pid, 0); process.kill(pid); } catch { /* already gone — the point of the test */ }
     }
   });
 
