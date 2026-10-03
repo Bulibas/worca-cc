@@ -25,6 +25,12 @@ const HIST = [
 const windows = [];
 afterEach(() => { while (windows.length) windows.pop().close(); });
 
+// An archived row as GET /api/history?archived=1 serves it: the row is flagged, the
+// stamp rides along, and the branch/worktree behind it are gone.
+const ARCH = { id: 'cccc0009', projectKey: KEY, projectName: 'proj', projectDir: PROJECT,
+  title: 'Archived thing', status: 'done', startedAt: '2026-09-01T09:00:00Z', mtime: 1,
+  archived: true, archivedAt: '2026-09-01T10:00:00Z' };
+
 async function settle(window, n = 4) { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); }
 function go(window, hash) { window.location.hash = hash; window.dispatchEvent(new window.Event('hashchange')); }
 const click = (window, node) => node.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
@@ -33,7 +39,7 @@ const live = (runId, extra = {}) => ({ runId, title: runId, projectDir: PROJECT,
   startedAt: '10:00:00', pendingQuestion: null, ...extra });
 
 // `setup(window)` runs before app.js loads: a stub its module-load wiring must see goes there.
-async function boot({ url = 'http://localhost:4317/', storage = {}, projects = [{ name: 'proj', path: PROJECT, exists: true }], history = HIST, setup } = {}) {
+async function boot({ url = 'http://localhost:4317/', storage = {}, projects = [{ name: 'proj', path: PROJECT, exists: true }], history = HIST, archived = [ARCH], setup } = {}) {
   const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url }));
   const { window } = dom;
   windows.push(window);
@@ -50,9 +56,13 @@ async function boot({ url = 'http://localhost:4317/', storage = {}, projects = [
     const s = String(u);
     if (s.includes('/api/projects')) return ok({ projects });
     // `history` may be a function: a test that reloads History can answer differently each time.
+    if (s.includes('/api/history?archived=1')) return ok({ pipelines: archived, ghAvailable: true });
     if (s.endsWith('/api/history')) return ok({ pipelines: typeof history === 'function' ? history() : history, ghAvailable: true });
     // The detail itself only: a looser match would answer its /log, /diff and /comments with a state body.
     if (/\/api\/history\/[^/]+\/aaaa000[12]$/.test(s)) return ok({ state: { title: 'Merged thing', status: 'done', steps: [], stepper: null } });
+    // An archived run's detail: the stamp is what flips the header to Restore.
+    if (/\/api\/history\/[^/]+\/cccc0009$/.test(s)) return ok({ state: { title: 'Archived thing', status: 'done', steps: [], stepper: null, archivedAt: ARCH.archivedAt } });
+    if (s.includes('/api/runs/cccc0009/restore')) return ok({ ok: true, id: 'cccc0009', restored: true, warnings: [] });
     if (s.includes('/api/workspaces')) return ok({ workspaces: [] });
     if (s.endsWith('/api/schedules')) return ok({ schedules: [], tickets: [], counts: {} });
     return ok({ config: { steps: {}, customModels: [] }, models: [], efforts: [], pipelines: 0, projects: 0, workspaces: 0 });
@@ -499,4 +509,80 @@ test('the Group by menu switches to date sections, closes on a pick or a click o
   go(second.window, 'runs'); await settle(second.window);
   assert.equal(second.doc.getElementById('runs-group-btn').classList.contains('on'), true);
   assert.ok(second.doc.querySelector('#runs-list .runs-group[data-group-key^="date:"]'), 'date sections after a reload');
+});
+
+// ── Archived Runs view (issue #575) ──────────────────────────────────────────
+
+test('the Archived chip fetches the archived feed only when picked, and lists its rows', async () => {
+  const { window, doc } = await boot();
+  go(window, 'runs'); await settle(window);
+  let archivedFetches = 0;
+  const inner = window.fetch;
+  const wrapped = (u, init) => {
+    if (String(u).includes('/api/history?archived=1')) archivedFetches += 1;
+    return inner(u, init);
+  };
+  window.fetch = wrapped; globalThis.fetch = wrapped;
+  assert.equal(archivedFetches, 0, 'nothing archived is fetched until the chip is picked');
+  const chip = (f) => doc.querySelector(`#runs-filter [data-filter="${f}"]`);
+  assert.ok(chip('archived'), 'the chip is in the filter row');
+  click(window, chip('archived')); await settle(window);
+  assert.equal(archivedFetches, 1, 'one archived fetch per activation');
+  assert.equal(chip('archived').getAttribute('aria-pressed'), 'true');
+  const titles = () => [...doc.querySelectorAll('#runs-list .runs-group .runs-row-title')].map((n) => n.textContent);
+  assert.deepEqual(titles(), ['Archived thing']);
+  const row = doc.querySelector('#runs-list .runs-row[data-pipeline-id="cccc0009"]');
+  assert.equal(row.querySelector('.runs-row-sub').textContent, 'Archived · Sep 1', 'the word says where the run lives');
+  assert.equal(row.dataset.icon, 'done', 'the terminal icon stays');
+  assert.equal(window.localStorage.getItem('worca-cc.runs.filter'), 'archived');
+  click(window, chip('all')); await settle(window);
+  assert.deepEqual(titles().sort(), ['Merged thing', 'Stopped thing'],
+    'All shows the active history only (the archived feed is a separate array)');
+  assert.equal(archivedFetches, 1, 'switching back does not re-fetch');
+  click(window, chip('archived')); await settle(window);
+  assert.equal(archivedFetches, 2, 'each activation re-fetches (cheap, stays fresh)');
+});
+
+test('an archived run’s detail offers Restore, not Archive, and hides Resume and follow-up', async () => {
+  const { window, doc } = await boot();
+  go(window, 'runs'); await settle(window);
+  click(window, doc.querySelector('#runs-filter [data-filter="archived"]')); await settle(window);
+  const posts = [];
+  const inner = window.fetch;
+  const wrapped = (u, init) => {
+    if (String(u).includes('/restore')) posts.push({ url: String(u), method: (init && init.method) || 'GET' });
+    return inner(u, init);
+  };
+  window.fetch = wrapped; globalThis.fetch = wrapped;
+  click(window, doc.querySelector('#runs-list .runs-row[data-pipeline-id="cccc0009"]')); await settle(window);
+  assert.equal(window.location.hash, `#history/${KEY}/cccc0009`);
+  const archiveBtn = doc.querySelector('#hist-detail .hd-archive');
+  const restoreBtn = doc.querySelector('#hist-detail .hd-restore');
+  assert.equal(archiveBtn.hidden, true, 'no Archive over an archived run');
+  assert.equal(restoreBtn.hidden, false, 'Restore is offered in the ⋯ menu');
+  assert.equal(doc.querySelector('#hist-detail .hd-after').hidden, true, 'no follow-up off an archived run');
+  assert.equal(doc.querySelector('#hist-detail .hd-resume-split').hidden, true, 'no resume either');
+  click(window, restoreBtn); await settle(window);
+  assert.equal(doc.getElementById('confirm-title').textContent, 'Restore this run?');
+  click(window, doc.getElementById('confirm-ok')); await settle(window);
+  assert.deepEqual(posts, [{ url: `/api/runs/cccc0009/restore?projectKey=${KEY}`, method: 'POST' }],
+    'the restore posts the runActionQuery-scoped URL');
+  assert.equal(window.location.hash, '#runs', 'back to the Runs list');
+  assert.ok(doc.getElementById('confirm-modal').classList.contains('hidden'), 'the modal is down');
+});
+
+test('a remembered Archived filter fetches its feed on the first paint, chip hidden or not', async () => {
+  const { window, doc } = await boot({ storage: { 'worca-cc.runs.filter': 'archived' } });
+  let archivedFetches = 0;
+  const inner = window.fetch;
+  const wrapped = (u, init) => {
+    if (String(u).includes('/api/history?archived=1')) archivedFetches += 1;
+    return inner(u, init);
+  };
+  window.fetch = wrapped; globalThis.fetch = wrapped;
+  go(window, 'runs'); await settle(window);
+  assert.ok(archivedFetches >= 1, 'the feed loads without a chip click');
+  assert.equal(doc.querySelector('#runs-filter [data-filter="archived"]').classList.contains('on'), true);
+  const titles = () => [...doc.querySelectorAll('#runs-list .runs-group .runs-row-title')].map((n) => n.textContent);
+  assert.deepEqual(titles(), ['Archived thing']);
 });

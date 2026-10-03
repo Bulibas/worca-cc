@@ -43,6 +43,8 @@ const state = {
   scriptsList: [],   // GET /api/scripts cache; dropped on every scripts-changed frame
   mockWriterRoles: [], // closed mock-role list from /api/agents (drives the agent form)
   historyAll: [],    // full /api/history dataset; client-side filter cache
+  historyArchived: null, // GET /api/history?archived=1 rows, lazy per Archived-chip activation (null = never loaded)
+  historyArchivedError: '', // the last archived-feed load error, shown in the Runs list while it has no rows
   historyPerson: '', // active "Started by" filter (lower-cased name); '' === everyone. Shared deployments only.
   historyError: '',  // the last /api/history load error, shown in the Runs list while it has no rows
   ghAvailable: false,// gh CLI availability, from the last /api/history load
@@ -20110,9 +20112,13 @@ function paintHdGlance(screen, record, data) {
 function paintHdAfter(screen, record, data = null) {
   const btn = screen.querySelector('.hd-after');
   if (!btn) return;
+  // An ARCHIVED run is a read-only record: the chain gate deliberately refuses an
+  // archived predecessor ("was archived", spec D9), so hide the follow-up until the
+  // run is restored — hiding beats a late failure in the New-pipeline form.
+  const archived = !!(data && data.state && data.state.archivedAt);
   const id = record && record.id ? record.id : null;
-  btn.hidden = !id;
-  btn.onclick = id ? () => { location.hash = `#new/after/${id}`; } : null;   // never a handler over a null record
+  btn.hidden = !id || archived;
+  btn.onclick = (id && !archived) ? () => { location.hash = `#new/after/${id}`; } : null;   // never a handler over a null record
   const status = (record && record.status) || (data && data.state && data.state.status) || '';
   const title = runAfterTitle(String(status).toLowerCase());
   btn.title = title;
@@ -20186,8 +20192,12 @@ function paintHdLive(screen, record, data) {
   // No live run but a pipeline run in this tab: its newest run ended (resumed elsewhere, then
   // finished), so the load-time pause is stale and the pipeline is over.
   const over = !live && !!hdPipelineRun(record);
-  const resumable = live ? isPaused(live)
-    : !over && HD_RESUMABLE.has(String(st.status || '').toLowerCase()) && st.resumable !== false;
+  // An ARCHIVED run has no run dir to resume from (archive reclaimed it); a restored one
+  // keeps its resume_point but the detail read has already dropped st.resumable for the
+  // same reason — hide the split either way instead of failing deep in the engine.
+  const archived = !!st.archivedAt;
+  const resumable = !archived && (live ? isPaused(live)
+    : !over && HD_RESUMABLE.has(String(st.status || '').toLowerCase()) && st.resumable !== false);
   split.hidden = !resumable;
   resumeBtn.hidden = !resumable;
   const resumeMore = screen.querySelector('.hd-resume-more');
@@ -20780,8 +20790,12 @@ function setupHdActions(screen, record, data) {
 
   // Archive: honest copy (D2), confirmModal (not window.confirm). Deletability is
   // judged on the AUTHORITATIVE detail status (a deep link's minimal record has none).
+  // An ARCHIVED run flips the menu to Restore instead: Archive must not re-run over a
+  // row whose FS was already reclaimed (the server would only stamp a second archive).
   const archiveBtn = screen.querySelector('.hd-archive');
-  if (isDeletableEntry({ ...record, status: st.status })) {
+  const restoreBtn = screen.querySelector('.hd-restore');
+  const archived = !!st.archivedAt;
+  if (!archived && isDeletableEntry({ ...record, status: st.status })) {
     archiveBtn.hidden = false;
     hdSetArchiveGate(archiveBtn, retained);
     archiveBtn.addEventListener('click', async () => {
@@ -20814,6 +20828,12 @@ function setupHdActions(screen, record, data) {
         const dd = await safeJson(res);
         if (!res.ok) throw new Error((dd && dd.error) || `HTTP ${res.status}`);
         state.historyAll = state.historyAll.filter((x) => !(x && x.id === r.id && x.projectKey === r.projectKey));
+        // The archived feed too, so a revisit of the Archived chip does not show the
+        // just-archived run as still archived.
+        if (state.historyArchived) {
+          state.historyArchived = state.historyArchived.filter((x) => !(x && x.id === r.id && x.projectKey === r.projectKey));
+          paintRunsList();
+        }
         // The same guard loadHistoryView uses ("never cache empty/error"):
         // archiving the LAST pipeline would otherwise persist `{pipelines: []}`
         // and the next boot would paint an empty History from cache before the
@@ -20836,6 +20856,44 @@ function setupHdActions(screen, record, data) {
     });
   }
 
+  // Restore (the Archived chip's inverse): shown only when the AUTHORITATIVE detail says
+  // the run is archived. Same confirmModal pattern as Archive; the server clears
+  // archived_at, and nothing on disk comes back — the restored run is a read-only record
+  // with a working PR link, its audit timeline and its Statistics cost.
+  if (archived && restoreBtn) {
+    restoreBtn.hidden = false;
+    restoreBtn.addEventListener('click', async () => {
+      if (restoreBtn.disabled) return;
+      const r = hdCurrentRecord(record);              // never the load-time object
+      const ok = await confirmModal({
+        title: 'Restore this run?',
+        message: `${r.title || r.id}\n\nIt moves back into Runs with its PR link, Q&A, review verdicts and audit timeline. The run artifacts (logs, results, diff), branch and worktree were reclaimed by the archive and are not rebuilt.`,
+        confirmLabel: 'Restore',
+      });
+      if (!ok) return;
+      const label = btnLabelEl(restoreBtn);
+      restoreBtn.disabled = true;
+      label.textContent = 'Restoring…';
+      try {
+        const qs = runActionQuery(r.projectDir || null, r);
+        const res = await fetch(`/api/runs/${encodeURIComponent(r.id)}/restore?${qs.toString()}`, { method: 'POST' });
+        const dd = await safeJson(res);
+        if (!res.ok) throw new Error((dd && dd.error) || `HTTP ${res.status}`);
+        // The archived feed loses the row, and the plain list refreshes so the run
+        // re-enters Finished (its status is terminal).
+        state.historyArchived = (state.historyArchived || []).filter((x) => !(x && x.id === r.id && x.projectKey === r.projectKey));
+        loadHistoryView({ force: true });
+        goRunsList();                               // the list itself: the restored run is there
+        notify({ tone: 'ok', title: 'Run restored' });
+      } catch (err) {
+        restoreBtn.disabled = false;
+        label.textContent = 'Restore';
+        notify({ tone: 'err', title: 'Could not restore the run', detail: err.message, key: `restore-${r.id}`,
+          action: { label: 'Retry', run: () => restoreBtn.isConnected && restoreBtn.click() } });
+      }
+    });
+  }
+
   const reportBtn = screen.querySelector('.hd-report');
   // `{ ...record, status: st.status }`, exactly like the .hd-archive gate above —
   // NOT isDeletableEntry(record). That predicate is a DENY-list, so a deep link's
@@ -20854,11 +20912,12 @@ function setupHdActions(screen, record, data) {
   // that goes terminal while the screen is open offers the button on the next visit,
   // exactly like Archive.
 
-  // The ⋯ trigger, gated on its own contents: a live run can be neither archived nor
-  // reported, and a trigger that opens onto an empty menu is worse than no trigger.
+  // The ⋯ trigger, gated on its own contents: a live run can be neither archived,
+  // restored nor reported, and a trigger that opens onto an empty menu is worse than
+  // no trigger.
   const moreBtn = screen.querySelector('.hd-more');
   const moreMenu = screen.querySelector('.hd-menu');
-  moreBtn.hidden = archiveBtn.hidden && reportBtn.hidden;
+  moreBtn.hidden = archiveBtn.hidden && reportBtn.hidden && (!restoreBtn || restoreBtn.hidden);
   moreBtn.addEventListener('click', () => {
     const opening = moreMenu.hidden;
     moreMenu.hidden = !opening;
@@ -25922,6 +25981,7 @@ function runsHistItem(p) {
     id: p.id, projectKey: p.projectKey, title: p.title, status: p.status, pauseReason: p.pauseReason,
     startedAt: p.startedAt, mtime: p.mtime, groupName: histGroupName(p), by: runsPersonKey(p.startedBy),
     pr: glancePrInput(p),
+    archived: !!p.archived,
     checks: typeof p.checks === 'number' ? p.checks : null,
     files: typeof p.files === 'number' ? p.files : null,
   };
@@ -25953,14 +26013,23 @@ function runsFocusTarget(host, { key, slot, pid, group }) {
 function paintRunsList() {
   const host = el.runsList;
   if (!host) return;
+  // The Archived chip reads its own lazy-loaded feed: archived rows never enter
+  // state.historyAll (that keeps meaning "active history").
+  const archivedView = runsUi.filter === 'archived';
+  const histSource = archivedView ? (state.historyArchived || []) : (state.historyAll || []);
   const model = buildRunsModel({
     live: overviewRuns().map(runsLiveItem),
-    history: (Array.isArray(state.historyAll) ? state.historyAll : []).filter(Boolean).map(runsHistItem),
+    history: histSource.filter(Boolean).map(runsHistItem),
     scheduled: schedulesView.upcoming(SCHEDULED_GROUP_WINDOW_MS).map(runsSchedItem),
     person: viewer.shared ? state.historyPerson : '',
     query: runsUi.query, filter: runsUi.filter, groupBy: runsUi.groupBy, collapsed: runsUi.collapsed, now: Date.now(),
   });
-  const note = state.historyError && !(state.historyAll || []).length ? `Could not load finished runs: ${state.historyError}` : '';
+  const note = archivedView
+    ? (state.historyArchivedError && !histSource.length ? `Could not load archived runs: ${state.historyArchivedError}` : '')
+    : (state.historyError && !(state.historyAll || []).length ? `Could not load finished runs: ${state.historyError}` : '');
+  // The filter survives a reload (and a level change can hide the chip that set it):
+  // a first paint under the Archived chip fetches its feed without a click.
+  if (archivedView && state.historyArchived === null) loadHistoryArchived();
   const sig = JSON.stringify([
     model.needs.map(runsRowSig),
     model.groups.map((g) => [g.key, g.name, g.count, g.collapsed, g.collapsed ? [] : g.rows.map(runsRowSig)]),
@@ -26072,8 +26141,37 @@ el.runsFilter?.addEventListener('click', (e) => {
   try { localStorage.setItem(RUNS_FILTER_KEY, runsUi.filter); } catch { /* private mode */ }
   paintRunsFilter();
   paintRunsList();
+  if (runsUi.filter === 'archived') loadHistoryArchived();
 });
 paintRunsFilter();
+
+// The Archived chip's feed (issue #575): fetched lazily, once per chip activation — cheap,
+// and it keeps the view fresh after archives/restores done elsewhere. Deliberately NOT the
+// Phase-2 PR enrichment: an archived run's branch is gone, so there is nothing to enrich.
+let historyArchivedInFlight = 0;
+let historyArchivedLoading = false;   // one fetch at a time; the newest token wins the paint
+async function loadHistoryArchived() {
+  if (historyArchivedLoading) return;
+  historyArchivedLoading = true;
+  const token = ++historyArchivedInFlight;
+  setHistoryLoading(true);
+  try {
+    const res = await fetch('/api/history?archived=1');
+    const data = await safeJson(res);
+    if (token !== historyArchivedInFlight) return;   // a newer activation owns the feed
+    if (!res.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
+    state.historyArchived = Array.isArray(data.pipelines) ? data.pipelines.filter(Boolean) : [];
+    state.historyArchivedError = '';
+  } catch (e) {
+    if (token !== historyArchivedInFlight) return;
+    state.historyArchived = state.historyArchived || [];
+    state.historyArchivedError = e.message;
+  } finally {
+    if (token === historyArchivedInFlight) setHistoryLoading(false);
+    historyArchivedLoading = false;
+  }
+  paintRunsList();
+}
 
 // "Group by" menu: opens under its header button; a pick, Escape or a click elsewhere closes it.
 function paintRunsGroupBy() {

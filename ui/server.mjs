@@ -240,7 +240,7 @@ import {
 import { mapWithCap, fanoutCap } from '../src/core/fanout.mjs';
 import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, listRemoteBranches, sameRepo, branchPushedTo } from '../src/core/git-info.mjs';
 import { isSyntacticRef } from '../src/core/ask/proposal.mjs';
-import { archivePipeline, discardRetainedWorktrees } from '../src/core/pipeline-delete.mjs';
+import { archivePipeline, restorePipeline, discardRetainedWorktrees } from '../src/core/pipeline-delete.mjs';
 import {
   listWorkspaces, readWorkspace, checkNewWorkspace, scanMemberProblems,
   updateWorkspace, deleteWorkspace, isGitRepo, WORKSPACE_KEY_RE, countWorkspaces,
@@ -4152,8 +4152,14 @@ app.post('/api/runs/:id/overview', async (req, res) => {
 // ---------------------------------------------------------------------------
 // GET /api/history  -> machine-wide history across every onboarded project
 // ---------------------------------------------------------------------------
-app.get('/api/history', async (_req, res) => {
+app.get('/api/history', async (req, res) => {
   try {
+    // The Runs page's Archived chip (?archived=1): the soft-deleted rows, same wire
+    // shape as the active list. They cannot be stale-running, so no self-heal here —
+    // and `lite` (no git/gh fans), since an archived run's branch and worktree are gone.
+    if (req.query.archived === '1' || req.query.archived === 'true') {
+      return res.json({ pipelines: (await listAllPipelines({ archived: true, lite: true })) || [], ghAvailable: await hasGh() });
+    }
     // Self-heal records left 'running' by a dead process before listing, so History
     // never shows a phantom Running run and its Delete button appears (see
     // pipeline-delete ACTIVE / app.js isDeletableEntry — both allow 'interrupted').
@@ -5021,6 +5027,57 @@ app.delete('/api/runs/:id', async (req, res) => {
   } catch (e) {
     if (e && e.code === 'RUNNING') return res.status(409).json({ error: e.message });
     if (e && e.code === 'RETAINED_WORKTREE') return res.status(409).json({ error: e.message });
+    if (e && e.code === 'BAD_REQUEST') return badRequest(res, e.message);
+    res.status(500).json({ error: e && e.message ? e.message : String(e) });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/runs/:id/restore?projectKey=...  (or ?projectDir=... / ?workspaceId=...)
+// RESTORE an ARCHIVED pipeline: clear its `archived_at` so it is listed (and
+// chain-gated) again. The inverse of DELETE /api/runs/:id above — same query
+// scoping, same guards, same status codes. Nothing on disk comes back (the run
+// dir, branch and worktree stay reclaimed), so the restored run is a read-only
+// record with a working PR link. Mirrors the DELETE route's shape throughout.
+// ---------------------------------------------------------------------------
+app.post('/api/runs/:id/restore', async (req, res) => {
+  const id = req.params.id;
+  const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId.trim() : '';
+  const projectKey = typeof req.query.projectKey === 'string' ? req.query.projectKey.trim() : '';
+  const projectDir = resolveProjectDir(req.query.projectDir);
+  if (workspaceId && !WORKSPACE_KEY_RE.test(workspaceId)) {
+    return res.status(404).json({ error: 'pipeline not found' });
+  }
+  if (projectKey && !/^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/.test(projectKey)) {
+    return res.status(404).json({ error: 'pipeline not found' });
+  }
+  if (!workspaceId && !projectKey && !projectDir) {
+    return badRequest(res, 'workspaceId, projectKey or projectDir is required');
+  }
+
+  // Mirror of the DELETE route's guard: never restore while the pipeline is live
+  // in this process (defensive — an archived run cannot be live).
+  const liveActive = [...runs.values()].some((r) =>
+    (r.pipelineId === id || r.id === id) &&
+    ['running', 'starting', 'created', 'pausing'].includes(String(r.status || '').toLowerCase()));
+  if (liveActive) return res.status(409).json({ error: 'cannot restore a running pipeline' });
+
+  try {
+    const report = await restorePipeline({
+      workspaceKey: workspaceId || null,
+      key: workspaceId ? null : (projectKey || null),
+      projectDir: (workspaceId || projectKey) ? null : projectDir,
+      id,
+    });
+    if (!report) return res.status(404).json({ error: 'pipeline not found' });
+    if (report.restored) {
+      const restBy = actorOf(req);
+      appendAuditById(report.id, `Run restored${byActor(restBy)}.`, { actor: restBy });
+    }
+    emitChanged('pipelines-changed', 'restored');
+    res.json({ ok: true, ...report });
+  } catch (e) {
+    if (e && e.code === 'RUNNING') return res.status(409).json({ error: e.message });
     if (e && e.code === 'BAD_REQUEST') return badRequest(res, e.message);
     res.status(500).json({ error: e && e.message ? e.message : String(e) });
   }
