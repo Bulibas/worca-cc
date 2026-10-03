@@ -19399,6 +19399,11 @@ function routeHistoryDetail(param, { instant = false } = {}) {
 function histRecordFor(parsed) {
   const hit = (state.historyAll || []).find((r) => r && r.id === parsed.id && r.projectKey === parsed.projectKey);
   if (hit) return hit;
+  // The Archived feed is its own source of truth (archived rows never enter
+  // historyAll): without this an archived run opens as the stub below — no
+  // projectDir, no title — and the glance head prints "(no project)".
+  const arch = (state.historyArchived || []).find((r) => r && r.id === parsed.id && r.projectKey === parsed.projectKey);
+  if (arch) return arch;
   // Deep link before the list loaded: a minimal record is enough for the keyed
   // detail/log/diff URL builders (they only read projectKey/target). It has NO
   // pauseReason and NO retainedWork — neither lives in the detail payload — so
@@ -19554,9 +19559,17 @@ async function loadHistDetailScreen(screen, record, parsed, ship = null) {
   // continuation runs first — the list paint happens while this screen's `data`
   // is still null, and nothing else would re-resolve the record afterwards. The
   // minimal {id, projectKey} stub would then stick for the life of the screen.
-  const row = (state.historyAll || []).find(
-    (r) => r && r.id === parsed.id && r.projectKey === parsed.projectKey);
+  const matchRow = (r) => r && r.id === parsed.id && r.projectKey === parsed.projectKey;
+  const row = (state.historyAll || []).find(matchRow)
+    // An ARCHIVED deep link resolves from the Archived feed when it has loaded;
+    // an archived row never appears in historyAll, so without this the stub —
+    // no projectDir, no title — sticks and the glance head prints "(no project)".
+    || (state.historyArchived || []).find(matchRow);
   if (row) histDetailState.record = row;
+  // A deep-linked ARCHIVED run on a cold feed: the payload's stamp says the row
+  // lives in the archived feed, so fetch that feed now (its lazy load runs
+  // refreshHdFromRow at the end, which repairs the stub record and repaints).
+  if (!row && data.state.archivedAt) loadHistoryArchived();
   const rec = histDetailState.record;
 
   // (3) PAINT — deliberately OUTSIDE the fetch try. A painter bug must not be
@@ -20975,9 +20988,13 @@ document.addEventListener('click', (e) => {
 
 function refreshHdFromRow() {
   if (!histDetailState || !histDetailState.screen || !histDetailState.data) return;
-  const row = (state.historyAll || []).find(
-    (r) => r && r.id === histDetailState.id && r.projectKey === histDetailState.key);
-  if (!row) return;                       // archived / filtered out of the model entirely
+  const match = (r) => r && r.id === histDetailState.id && r.projectKey === histDetailState.key;
+  // historyAll first, then the Archived feed: an open ARCHIVED run's row lives
+  // only there, and without this lookup its stub deep-link record (no
+  // projectDir, no title) is never repaired once the feed lands.
+  const row = (state.historyAll || []).find(match)
+    || (state.historyArchived || []).find(match);
+  if (!row) return;                       // filtered out of the model entirely
   histDetailState.record = row;
   const { screen, data } = histDetailState;
   paintHdHeaderMeta(screen, row, data);
@@ -20987,6 +21004,7 @@ function refreshHdFromRow() {
   paintHdPr(screen, row, data);                         // idempotent; re-binds btn.onclick
   paintHdAfter(screen, row, data);
   paintHdLive(screen, row, data);
+  paintHdGlance(screen, row, data);   // the head's project/day/clock line re-reads the record
   refreshHdOverviewTab();   // the one tab body that reads mutable record fields
 }
 
@@ -26171,6 +26189,9 @@ async function loadHistoryArchived() {
     historyArchivedLoading = false;
   }
   paintRunsList();
+  // An archived run opened by deep link (before the feed loaded) carries a stub
+  // record — no projectDir, no title. Now that the feed landed, repair it.
+  refreshHdFromRow();
 }
 
 // "Group by" menu: opens under its header button; a pick, Escape or a click elsewhere closes it.

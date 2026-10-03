@@ -586,3 +586,34 @@ test('a remembered Archived filter fetches its feed on the first paint, chip hid
   const titles = () => [...doc.querySelectorAll('#runs-list .runs-group .runs-row-title')].map((n) => n.textContent);
   assert.deepEqual(titles(), ['Archived thing']);
 });
+
+test('an archived run opened from the loaded feed shows its project in the glance head', async () => {
+  // Regression (issue #575 review): histRecordFor used to search only historyAll,
+  // so the clicked archived row fell through to the {id, projectKey} stub — no
+  // projectDir, no title — and the glance head printed "(no project)".
+  const { window, doc } = await boot();
+  go(window, 'runs'); await settle(window);
+  click(window, doc.querySelector('#runs-filter [data-filter="archived"]')); await settle(window);
+  click(window, doc.querySelector('#runs-list .runs-row[data-pipeline-id="cccc0009"]')); await settle(window);
+  assert.equal(window.location.hash, `#history/${KEY}/cccc0009`);
+  const meta = doc.querySelector('#hist-detail .hd-glance .rd-page-meta');
+  assert.ok(meta, 'the glance head carries a meta line');
+  assert.doesNotMatch(meta.textContent, /\(no project\)/);
+  assert.match(meta.textContent, /proj/, 'the project name comes from the archived row');
+  assert.equal(doc.querySelector('#hist-detail .rd-page-title').textContent, 'Archived thing',
+    'the title comes from the archived row, not the raw id');
+});
+
+test('a deep-linked archived run on a cold feed repairs its stub record once the feed lands', async () => {
+  // The deep link opens the detail BEFORE any archived fetch: the record is the
+  // minimal stub. The payload's archivedAt stamp kicks the lazy feed load, whose
+  // refreshHdFromRow pass repairs the record and repaints the head.
+  const { window, doc } = await boot({ url: `http://localhost:4317/#history/${KEY}/cccc0009` });
+  await settle(window, 8);
+  assert.equal(window.location.hash, `#history/${KEY}/cccc0009`);
+  const meta = doc.querySelector('#hist-detail .hd-glance .rd-page-meta');
+  assert.ok(meta, 'the glance head carries a meta line');
+  assert.doesNotMatch(meta.textContent, /\(no project\)/, 'the stub never sticks');
+  assert.match(meta.textContent, /proj/);
+  assert.equal(doc.querySelector('#hist-detail .rd-page-title').textContent, 'Archived thing');
+});
