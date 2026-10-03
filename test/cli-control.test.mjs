@@ -138,6 +138,18 @@ test('a stop left pending before a resume does NOT stop the resumed run', () => 
   } finally { RunHarness.prototype._stopHeartbeat.call(owner); }
 });
 
+test("the owner's control timer picks a command up within its ~1s interval", { timeout: 10000 }, async () => {
+  insertPipeline({ id: 'ggg10002', title: 'timer run', status: 'running' });
+  const owner = fakeOwner('ggg10002');
+  RunHarness.prototype._startHeartbeat.call(owner);
+  try {
+    enqueuePipelineCommand('ggg10002', 'stop', { by: 'bob' });
+    const deadline = Date.now() + 3000;
+    while (!owner.calls.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    assert.deepEqual(owner.calls, [['stop', 'bob']]);
+  } finally { RunHarness.prototype._stopHeartbeat.call(owner); }
+});
+
 // ── the CLI: the live boundary, the refusals, the dispatch ───────────────────────
 
 test('stop on an already-stopped run succeeds — idempotent, for scripts', async () => {
@@ -202,8 +214,10 @@ const OWNER_SCRIPT = `
   for (;;) {
     const cmd = claimPipelineCommand(process.env.OWNER_PIPELINE);
     if (cmd) {
-      getDb().prepare('UPDATE pipelines SET status = ? WHERE id = ?')
-        .run(cmd.action === 'stop' ? 'stopped' : 'paused', process.env.OWNER_PIPELINE);
+      // OWNER_SET: 'none' = a no-op consumption (the moment passed), any other value
+      // = the status the run settles in instead; default = the command's own effect.
+      const set = process.env.OWNER_SET || (cmd.action === 'stop' ? 'stopped' : 'paused');
+      if (set !== 'none') getDb().prepare('UPDATE pipelines SET status = ? WHERE id = ?').run(set, process.env.OWNER_PIPELINE);
       process.exit(0);
     }
     if (Date.now() > deadline) process.exit(1);
@@ -211,9 +225,9 @@ const OWNER_SCRIPT = `
   }
 `;
 
-function spawnOwner(pipelineId) {
+function spawnOwner(pipelineId, ownerSet = '') {
   return spawn(process.execPath, ['--disable-warning=ExperimentalWarning', '--input-type=module', '-e', OWNER_SCRIPT], {
-    env: { ...process.env, WORCA_HOME: home, HOME: home, USERPROFILE: home, OWNER_PIPELINE: pipelineId },
+    env: { ...process.env, WORCA_HOME: home, HOME: home, USERPROFILE: home, OWNER_PIPELINE: pipelineId, OWNER_SET: ownerSet },
     stdio: 'ignore',
   });
 }
@@ -249,6 +263,31 @@ test('an unconfirmed command gets the honest enqueued line, exit 0', async () =>
   insertPipeline({ id: 'eee10003', title: 'nobody answers', status: 'running', ownerPid: process.pid, ownerHost: HOST, heartbeatAt: new Date().toISOString() });
   const r = await run(['stop', 'eee10003'], { WORCA_CONTROL_CONFIRM_MS: '700' });
   assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /enqueued — the run has not confirmed yet/);
+  assert.match(r.stdout, /enqueued — the run has not picked it up yet/);
   assert.equal(commandsOf('eee10003').length, 1, 'the command stays for the owner');
+});
+
+test('a command the owner consumed as a no-op reports "received", not "enqueued"', { timeout: 30000 }, async () => {
+  insertPipeline({ id: 'eee10004', title: 'moment passed', status: 'running', ownerPid: process.pid, ownerHost: HOST, heartbeatAt: new Date().toISOString() });
+  const owner = spawnOwner('eee10004', 'none');
+  try {
+    const r = await run(['pause', '--json', 'eee10004'], { WORCA_CONTROL_CONFIRM_MS: '2000' });
+    assert.equal(r.code, 0, r.stderr);
+    const j = JSON.parse(r.stdout);
+    assert.equal(j.outcome, 'received');
+    assert.equal(j.consumed, true);
+    assert.equal(j.status, 'running');
+  } finally { owner.kill(); }
+});
+
+test('a run that settles in another status ends the wait early: "did not apply", exit 1', { timeout: 30000 }, async () => {
+  insertPipeline({ id: 'eee10005', title: 'stopped meanwhile', status: 'running', ownerPid: process.pid, ownerHost: HOST, heartbeatAt: new Date().toISOString() });
+  const owner = spawnOwner('eee10005', 'stopped');
+  try {
+    const t0 = Date.now();
+    const r = await run(['pause', 'eee10005']);
+    assert.equal(r.code, 1, r.stdout);
+    assert.match(r.stderr, /the pause did not apply: run eee10005 is now "stopped"/);
+    assert.ok(Date.now() - t0 < 8000, 'no full 10s wait once the run settled');
+  } finally { owner.kill(); }
 });

@@ -35,6 +35,9 @@ is not controllable — resume it with: worca resume <id>.
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Statuses with no live orchestrator: once the run is in one, a command can no longer act. */
+const SETTLED = new Set(['done', 'stopped', 'paused', 'interrupted']);
+
 /** How long the CLI waits for the owner to confirm the effect. WORCA_CONTROL_CONFIRM_MS
  *  exists for tests (the same pattern as WORCA_HEARTBEAT_STALE_MS); real users get 10s,
  *  which covers a run that is mid-execution before it can act. */
@@ -102,9 +105,12 @@ async function controlRun(argv, action, { out, c, fail }) {
 
   // The waitAndRun-shaped confirmation poll (schedule.mjs): poll the run's own
   // row — the same read `worca runs show` does — adaptive sleep with a 250ms
-  // floor, ~10s deadline. The effect is visible in the ROW (stopped/paused),
-  // never inferred from the command: the owner may legitimately consume a
-  // command as a no-op when the state moved on first.
+  // floor, ~10s deadline. The effect is read from the ROW (stopped/paused); the
+  // command's consumed_at only tells "the owner received it" apart from "still
+  // queued", because the owner may legitimately consume a command as a no-op when
+  // the state moved on first. A run that settles in some OTHER status ends the
+  // wait early: the command can no longer apply (a settled run has no owner, and
+  // the next owner discards leftovers).
   const target = action === 'stop' ? 'stopped' : 'paused';
   const deadline = Date.now() + confirmMs();
   let status = row.status;
@@ -112,38 +118,43 @@ async function controlRun(argv, action, { out, c, fail }) {
     await sleep(Math.min(500, Math.max(250, deadline - Date.now())));
     const r = getDb().prepare('SELECT status FROM pipelines WHERE id = ?').get(row.id);
     status = (r && r.status) || status;
-    if (status === target || status === 'done') break;
+    if (status === target || SETTLED.has(status)) break;
   }
+  const consumed = Boolean(getDb().prepare('SELECT consumed_at FROM pipeline_commands WHERE id = ?').get(commandId)?.consumed_at);
 
   const title = row.title || row.id;
-  const outcome = status === target ? action : (status === 'done' ? 'finished' : 'enqueued');
+  const outcome = status === target ? action
+    : status === 'done' ? 'finished'
+    : SETTLED.has(status) ? 'not-applied'
+    : consumed ? 'received' : 'enqueued';
+  const code = outcome === 'not-applied' ? 1 : 0; // received/enqueued are accepted commands
   if (json) {
-    out(JSON.stringify({ id: row.id, title, action, commandId, outcome, status }, null, 2));
-    return 0; // enqueued-but-unconfirmed is still an accepted command
+    out(JSON.stringify({ id: row.id, title, action, commandId, outcome, status, consumed }, null, 2));
+    return code;
   }
+  const Verb = action === 'stop' ? 'Stop' : 'Pause';
   if (outcome === action) {
     out(`${c('green', action === 'stop' ? 'Stopped' : 'Paused')} ${c('bold', title)}${action === 'pause' ? c('gray', ' — resume with: worca resume ' + row.id) : ''}`);
   } else if (outcome === 'finished') {
     out(c('yellow', `The run finished before the ${action} could act (${title}).`));
+  } else if (outcome === 'not-applied') {
+    const resumeHint = status === 'paused' || status === 'interrupted' ? ` — resume it with: worca resume ${row.id}` : '';
+    return refusal(`the ${action} did not apply: run ${row.id} is now "${status}"${resumeHint}`);
+  } else if (outcome === 'received') {
+    out(c('gray', `${Verb} received by the run, which has not reached "${target}" yet (status: ${status}) — check: worca runs ${row.id}`));
   } else {
-    out(c('gray', `${action === 'stop' ? 'Stop' : 'Pause'} command enqueued — the run has not confirmed yet (check: worca runs ${row.id}).`));
+    out(c('gray', `${Verb} command enqueued — the run has not picked it up yet (check: worca runs ${row.id}).`));
   }
   return 0;
 }
 
 /**
- * `worca stop|pause` — dispatch. The entry point passes the verb and the args
- * after it separately (its dispatcher has already split `sub` off, the same way
- * cmdRuns receives the rest). `help` after the verb prints the usage, like
- * `worca runs help`.
+ * `worca stop|pause` — dispatch. The entry point routes only `stop` and `pause`
+ * here and passes the args after the verb separately (the same way cmdRuns
+ * receives the rest). `help` after the verb prints the usage, like `worca runs help`.
  * @returns {Promise<number>} exit code
  */
 export async function cmdControl(verb, rest, { out, c, fail }) {
-  if (verb === 'help' || verb === '--help' || verb === '-h') { process.stdout.write(CONTROL_HELP); return 0; }
-  if (verb !== 'stop' && verb !== 'pause') {
-    fail(`unknown verb "${verb ?? ''}" — usage: worca stop|pause <id> (see: worca runs help)`);
-    return 2;
-  }
   if (rest[0] === 'help' || rest[0] === '--help' || rest[0] === '-h') { process.stdout.write(CONTROL_HELP); return 0; }
   return controlRun(rest, verb, { out, c, fail });
 }
