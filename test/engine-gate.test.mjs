@@ -16,6 +16,7 @@ import { readPipelineForResume } from '../src/core/artifacts.mjs';
 import { ENGINES } from './helpers/engines.mjs';
 import { fakeCodex } from './helpers/fake-codex.mjs';
 import { mockSpawnLog } from '../src/core/claude-runner.mjs';
+import { CODEX_DEFAULT_MODEL } from '../src/core/engines/codex.mjs';
 
 useTempHome(after);
 const POSIX = process.platform === 'win32' ? { skip: 'POSIX shell fixtures' } : {};
@@ -47,7 +48,7 @@ test('claude (the default) passes the gate with nothing to say', () => {
 test('codex: every missing capability is one audit line with its fallback', () => {
   const lines = withNodes(orch({ engine: 'codex' }), {})._engineGate();
   assert.deepEqual(lines.map((l) => l.split(':')[1].trim().split(' ')[1]).sort(),
-    ['allowedTools', 'hookTelemetry', 'mcpTools', 'permissionRules', 'skills', 'subagentSystemPrompt', 'subagents', 'turnBudget']);
+    ['allowedTools', 'hookTelemetry', 'permissionRules', 'skills', 'subagentSystemPrompt', 'subagents', 'turnBudget']);
   assert.ok(lines.every((l) => /^engine codex: no \w+ — .{10,}$/.test(l)), lines.join('\n'));
 });
 
@@ -66,9 +67,9 @@ test('--allow-unguarded-engine runs it anyway and says so in the audit', () => {
   assert.ok(lines.some((l) => /guardrail set "strict": permission rules NOT enforced on codex \(--allow-unguarded-engine\)/.test(l)));
 });
 
-test('codex refuses a node that needs MCP tools', () => {
+test('codex runs a node that needs MCP tools: it attaches the run\'s servers', () => {
   const o = withNodes(orch({ engine: 'codex' }), { n1: { key: 'manualWebUiTesting', tools: ['Read', 'mcp__plugin_playwright_playwright__browser_click'] } });
-  assert.throws(() => o._engineGate(), /node "manualWebUiTesting" needs MCP tools/);
+  assert.doesNotThrow(() => o._engineGate());
 });
 
 test('codex refuses a run while the credential broker is on (it signs in with its own credentials)', () => {
@@ -83,20 +84,26 @@ test('codex refuses a run while the credential broker is on (it signs in with it
   }
 });
 
-test('codex refuses a run whose MCP registry layer attaches servers; claude and an empty layer pass', async () => {
-  const layer = (copies) => async () => ({ result: { copies }, catalog: {} });
+test('codex attaches a registry layer\'s stdio copies and refuses its remote ones; claude and an empty layer pass', async () => {
+  const STDIO = { command: process.execPath, args: ['/launch.mjs'] };
+  const HTTP = { type: 'http', url: 'https://mcp.example/' };
+  const layer = (copies, servers = {}) => async () => ({ result: { copies, servers }, catalog: {} });
   const o = orch({ engine: 'codex' });
-  o._resolveMcp = layer([{ name: 'sentry_billing', setName: 'Billing' }, { name: 'jira', setName: 'General' }]);
-  await assert.rejects(() => o._engineMcpGate(), /engine codex: this run attaches MCP servers \(sentry_billing, jira\), which this engine cannot attach/);
+  o._resolveMcp = layer([{ name: 'sentry_billing', setName: 'Billing' }, { name: 'jira', setName: 'General' }], { sentry_billing: HTTP, jira: STDIO });
+  await assert.rejects(() => o._engineMcpGate(), /engine codex: this run attaches remote MCP servers \(sentry_billing\), and codex attaches stdio servers only/);
   // The run's own resolution refuses too (a resume's early look runs before its team policy).
-  assert.match(o._engineMcpRefusal([{ name: 'pg' }]), /attaches MCP servers \(pg\)/);
+  assert.match(o._engineMcpRefusal({ copies: [{ name: 'pg' }], servers: { pg: HTTP } }), /attaches remote MCP servers \(pg\)/);
+  assert.equal(o._engineMcpRefusal({ copies: [{ name: 'pg' }], servers: { pg: STDIO } }), null, 'a stdio copy is attached');
+  const stdio = orch({ engine: 'codex' });
+  stdio._resolveMcp = layer([{ name: 'jira' }], { jira: STDIO });
+  await stdio._engineMcpGate();
   const none = orch({ engine: 'codex' });
   none._resolveMcp = layer([]);
   await none._engineMcpGate();
   const claude = orch();
-  claude._resolveMcp = layer([{ name: 'sentry_billing' }]);
+  claude._resolveMcp = layer([{ name: 'sentry_billing' }], { sentry_billing: HTTP });
   await claude._engineMcpGate();
-  assert.equal(claude._engineMcpRefusal([{ name: 'pg' }]), null);
+  assert.equal(claude._engineMcpRefusal({ copies: [{ name: 'pg' }], servers: { pg: HTTP } }), null);
 });
 
 test('codex refuses a model routed to a custom endpoint (the model bridge included)', async () => {
@@ -128,21 +135,22 @@ test('a Claude model runs on codex\'s default model: dropped from the spawn, nam
   assert.equal(orch()._engineModel('claude-sonnet-5'), 'claude-sonnet-5', 'claude keeps its model');
 });
 
-test('the night decider stays on Claude: another engine\'s model is dropped, a Claude model kept', async () => {
+test('the night decider runs on the run\'s engine: that engine\'s model kept, another engine\'s dropped, codex\'s default named', async () => {
   const seen = [];
   const decide = async (claude) => {
     const o = createOrchestrator({ projectDir: '/tmp/gate-proj', claude: { mock: false, ...claude },
-      nightRunClaude: async (opts) => { seen.push(opts.model); return { text: '{"decisions":[]}' }; } });
+      nightRunClaude: async (opts) => { seen.push([opts.engine || 'claude', opts.model]); return { text: '{"decisions":[]}' }; } });
     Object.assign(o, { state: { subAgents: [], steps: [] }, _upsertSubAgent: () => {}, _subAgentTransition: () => {},
       _recordCost: () => {}, _nightPlanPaths: async () => [], _runningStepKeys: () => [] });
     await o._nightAnalyze([{ id: 'q1', question: '?', options: ['a', 'b'] }], { kind: 'clarify' });
     return o.state.subAgents[0].runModel;                     // the decider's row names the model it ran
   };
-  assert.equal(await decide({ engine: 'codex', model: 'gpt-5.6-sol' }), null);
-  assert.equal(await decide({ engine: 'codex', model: 'claude-sonnet-5' }), 'claude-sonnet-5');
+  assert.equal(await decide({ engine: 'codex', model: 'gpt-5.5' }), 'gpt-5.5');
+  assert.equal(await decide({ engine: 'codex', model: 'claude-sonnet-5' }), CODEX_DEFAULT_MODEL);
   assert.equal(await decide({ engine: 'claude', model: 'claude-opus-5-5' }), 'claude-opus-5-5');
-  assert.equal(await decide({ engine: 'codex' }), null);
-  assert.deepEqual(seen, [null, 'claude-sonnet-5', 'claude-opus-5-5', null]);
+  assert.equal(await decide({ engine: 'claude', model: 'gpt-5.5' }), null);
+  assert.equal(await decide({ engine: 'codex' }), CODEX_DEFAULT_MODEL);
+  assert.deepEqual(seen, [['codex', 'gpt-5.5'], ['codex', CODEX_DEFAULT_MODEL], ['claude', 'claude-opus-5-5'], ['claude', null], ['codex', CODEX_DEFAULT_MODEL]]);
 });
 
 test('the run title runs on the run\'s engine: codex gets no model, Claude keeps the run model', () => {
@@ -292,7 +300,7 @@ test('the MCP layer refusal runs at run start and before a resume touches the pa
   const engine = ENGINES[0];
   const dir = tmp();
   execSync('git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', { cwd: dir });
-  const withCopies = (o) => { o._resolveMcp = async () => ({ result: { copies: [{ name: 'sentry_billing', setName: 'Billing' }] }, catalog: {} }); return o; };
+  const withCopies = (o) => { o._resolveMcp = async () => ({ result: { copies: [{ name: 'sentry_billing', setName: 'Billing' }], servers: { sentry_billing: { type: 'http', url: 'https://mcp.example/' } } }, catalog: {} }); return o; };
   const claude = { mock: true, engine: 'codex' };
   const runners = (onProduce) => ({
     producer: async (ctx) => onProduce(ctx),
@@ -301,7 +309,7 @@ test('the MCP layer refusal runs at run start and before a resume touches the pa
   const ok = () => ({ status: 'ok', summary: 'ok' });
   const refused = await withCopies(engine.create({ projectDir: dir, prompt: 'demo', auto: true, claude, runners: runners(ok) })).run();
   assert.equal(refused.status, 'error');
-  assert.match(refused.error, /engine codex: this run attaches MCP servers \(sentry_billing\)/);
+  assert.match(refused.error, /engine codex: this run attaches remote MCP servers \(sentry_billing\)/);
   // A paused codex run whose layer gained a copy since: the resume is refused and the row stays paused.
   let ref = null;
   ref = engine.create({ projectDir: dir, prompt: 'demo', auto: true, claude, runners: runners((ctx) => {
@@ -314,7 +322,7 @@ test('the MCP layer refusal runs at run start and before a resume touches the pa
   assert.equal((await ref.run()).status, 'paused');
   const saved = readPipelineForResume(ref.state.id);
   await assert.rejects(() => withCopies(engine.create({ projectDir: dir, auto: true, claude, runners: runners(ok), resume: saved })).resume(),
-    /engine codex: this run attaches MCP servers \(sentry_billing\)/);
+    /engine codex: this run attaches remote MCP servers \(sentry_billing\)/);
   assert.equal(readPipelineForResume(ref.state.id).row.status, 'paused');
 });
 
@@ -371,11 +379,12 @@ test('engineStartRefusal answers before a run exists, and says when the consent 
 
 test('engineStartRefusal reports an MCP registry layer as not liftable', async () => {
   // The same stub as the MCP refusal test above (:84): _resolveMcp is the only seam.
-  const layer = (copies) => async () => ({ result: { copies }, catalog: {} });
+  const HTTP = { type: 'http', url: 'https://mcp.example/' };
+  const layer = (copies) => async () => ({ result: { copies, servers: Object.fromEntries(copies.map((c) => [c.name, HTTP])) }, catalog: {} });
   const o = createOrchestrator({ projectDir: tmp(), claude: { mock: true, engine: 'codex', allowUnguardedEngine: true } });
   o._resolveMcp = layer([{ name: 'sentry_billing', setName: 'Billing' }]);
   assert.deepEqual(await o.engineStartRefusal(), {
-    error: 'engine codex: this run attaches MCP servers (sentry_billing), which this engine cannot attach',
+    error: 'engine codex: this run attaches remote MCP servers (sentry_billing), and codex attaches stdio servers only',
     overridable: false,
   });
   // Rules AND copies: the consent would lift only the rules, so the answer is the copies, not liftable.
@@ -383,7 +392,7 @@ test('engineStartRefusal reports an MCP registry layer as not liftable', async (
   both._resolveMcp = layer([{ name: 'pg' }]);
   const r = await both.engineStartRefusal();
   assert.equal(r.overridable, false);
-  assert.match(r.error, /attaches MCP servers \(pg\)/);
+  assert.match(r.error, /attaches remote MCP servers \(pg\)/);
 });
 
 test('engineStartRefusal reports a failed preflight as not liftable', POSIX, async () => {

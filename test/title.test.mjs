@@ -6,6 +6,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fakeCodex } from './helpers/fake-codex.mjs';
+import { CODEX_DEFAULT_MODEL } from '../src/core/engines/codex.mjs';
 
 const POSIX_SHIM = { skip: process.platform === 'win32' ? 'fake claude shim is a POSIX shell script (no .exe stand-in on Windows)' : false };
 
@@ -150,7 +151,7 @@ test('generateTitle honors opts.mock without WORCA_MOCK — no spawn even with a
   }
 });
 
-test('generateTitle on codex: one codex spawn, read-only, no -m and no Claude title model', POSIX_SHIM, async () => {
+test('generateTitle on codex: one codex spawn, read-only, codex\'s default model and no Claude title model', POSIX_SHIM, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'worca-title-codex-'));
   const codex = fakeCodex(dir, 'Add Billing Export');
   const prev = process.env.WORCA_TITLE_MODEL;
@@ -166,7 +167,7 @@ test('generateTitle on codex: one codex spawn, read-only, no -m and no Claude ti
   const args = codex.args();
   assert.equal(args[0], 'exec');
   assert.deepEqual(args.slice(args.indexOf('--sandbox'), args.indexOf('--sandbox') + 2), ['--sandbox', 'read-only']);
-  assert.equal(args.includes('-m'), false, 'no title model on codex: its own default');
+  assert.equal(args[args.indexOf('-m') + 1], CODEX_DEFAULT_MODEL, 'no title model on codex: its own default, named so it is priced');
   assert.equal(args.includes('--add-dir'), false);
   assert.ok(args.includes('model_reasoning_effort="low"'), 'the aux effort travels');
 });

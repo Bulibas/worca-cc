@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   buildCodexArgs, createCodexNormalizer, codexMcpOverrides, mcpResultText, codexModelPriced, codexResumeNotFound,
-  CODEX_ASK_LOCKDOWN, runCodexProcess, codexCapabilities,
+  CODEX_ASK_LOCKDOWN, CODEX_DEFAULT_MODEL, runCodexProcess, codexCapabilities,
 } from '../src/core/engines/codex.mjs';
 import { runClaude } from '../src/core/claude-runner.mjs';
 import { fakeCodex } from './helpers/fake-codex.mjs';
@@ -22,9 +22,9 @@ after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true });
 // the candidate list explicitly (askLockdown accepts a list), so the MCP / image / env path stays covered.
 const CANDIDATE_LOCKDOWN = ['--disable', 'shell_tool', '--disable', 'unified_exec', '-c', 'web_search="disabled"', '--ignore-rules'];
 
-test('the lockdown is null (Task 0 (a) NOT CONFIRMED) and pipelines keep no MCP capability', () => {
+test('the lockdown is null (Task 0 (a) NOT CONFIRMED); pipelines attach MCP servers (stdio only)', () => {
   assert.equal(CODEX_ASK_LOCKDOWN, null);
-  assert.equal(codexCapabilities.mcpTools, false);
+  assert.equal(codexCapabilities.mcpTools, true);
 });
 
 test('runCodexProcess: askLockdown with no verified lockdown refuses before spawning', POSIX, async () => {
@@ -109,6 +109,7 @@ test('mcpResultText: a text-content wrapper becomes its text; anything else stay
 test('codexModelPriced and codexResumeNotFound', () => {
   assert.equal(codexModelPriced('gpt-5.5'), true);
   assert.equal(codexModelPriced('my-local-codex'), false);
+  assert.equal(codexModelPriced(undefined), true, 'no model is CODEX_DEFAULT_MODEL, which is priced');
   assert.equal(codexResumeNotFound(new Error('codex: no rollout found for thread id 0000')), true);
   assert.equal(codexResumeNotFound(new Error('codex: 401 Unauthorized')), false);
 });
@@ -134,11 +135,58 @@ test('runCodexProcess: an Ask lockdown spawn reads the MCP config, keeps its env
   assert.equal(fake.env().CODEX_TEST_MARK, '1');
 });
 
-test('runCodexProcess: without askLockdown an mcpConfigPath is ignored (pipelines unchanged)', POSIX, async () => {
+test('runCodexProcess: a pipeline spawn attaches its stdio servers, fills ${VAR} refs from the spawn env, redacts the secrets, skips remote ones', POSIX, async () => {
+  const dir = tmp();
+  const fake = fakeCodex(dir, 'answer tok-SECRET');
+  const cfg = join(dir, 'mcp.json');
+  writeFileSync(cfg, JSON.stringify({ mcpServers: {
+    pg: { type: 'stdio', command: process.execPath, args: ['/launch.mjs', '--copy', 'pg'], env: { MCPCHILD_PGPASS: '${MCPSECRET_PG}', PLAIN: 'x' } },
+    web: { type: 'http', url: 'https://mcp.example/' },
+  } }));
+  const events = [];
+  const res = await runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', mcpConfigPath: cfg, spawnEnv: { MCPSECRET_PG: 'tok-SECRET' },
+    redactValues: ['tok-SECRET'], onEvent: (e) => events.push(e), usageDir: dir });
+  const args = fake.args();
+  assert.ok(args.includes('mcp_servers.pg.required=true'));
+  assert.equal(args.some((a) => a.startsWith('mcp_servers.web.')), false, 'codex takes stdio servers only');
+  assert.ok(events.some((e) => e.type === 'stderr' && /not attached: web/.test(e.text)));
+  assert.equal(args.join(' ').includes('tok-SECRET'), false, 'values never ride argv');
+  assert.equal(fake.env().MCPCHILD_PGPASS, 'tok-SECRET', 'the reference is filled from the spawn env');
+  assert.equal(fake.env().MCPSECRET_PG, undefined, 'the secret reaches codex only through the reference');
+  assert.equal(res.text.includes('tok-SECRET'), false, 'the reply is redacted');
+  assert.equal(JSON.stringify(events).includes('tok-SECRET'), false, 'so is every event');
+});
+
+test('codexMcpOverrides: one server never gets another\'s env, and a clash in the shared env is refused', () => {
+  const two = { a: { command: 'x', env: { A_KEY: '1' } }, b: { command: 'y', env: { B_KEY: '2' } } };
+  const { args } = codexMcpOverrides(two, { passEnv: ['PATH', 'A_KEY', 'B_KEY'] });
+  assert.ok(args.includes('mcp_servers.a.env_vars=["A_KEY","PATH"]'));
+  assert.ok(args.includes('mcp_servers.b.env_vars=["B_KEY","PATH"]'));
+  assert.throws(() => codexMcpOverrides({ a: { command: 'x', env: { K: '1' } }, b: { command: 'y', env: { K: '2' } } }), /K with different values/);
+});
+
+test('runCodexProcess: no model names CODEX_DEFAULT_MODEL, so the turn is priced', POSIX, async () => {
   const dir = tmp();
   const fake = fakeCodex(dir, 'ok');
-  await runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', mcpConfigPath: join(dir, 'missing.json'), usageDir: dir });
-  assert.equal(fake.args().some((a) => a.startsWith('mcp_servers.')), false);
+  const events = [];
+  await runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', onEvent: (e) => events.push(e), usageDir: dir });
+  const args = fake.args();
+  assert.equal(args[args.indexOf('-m') + 1], CODEX_DEFAULT_MODEL);
+  assert.ok(events.find((e) => e.type === 'result').costUsd > 0);
+});
+
+test('runCodexProcess: maxTurns caps the main agent\'s tool calls with a turnCap error', POSIX, async () => {
+  const cmd = (id) => [
+    { type: 'item.started', item: { id, type: 'command_execution', command: 'ls', aggregated_output: '', exit_code: null, status: 'in_progress' } },
+    { type: 'item.completed', item: { id, type: 'command_execution', command: 'ls', aggregated_output: '', exit_code: 0, status: 'completed' } },
+  ];
+  const lines = [{ type: 'thread.started', thread_id: '00000000-0000-4000-8000-0000000000ac' }, { type: 'turn.started' }, ...cmd('i1'), ...cmd('i2'),
+    { type: 'item.completed', item: { id: 'i3', type: 'agent_message', text: 'done' } }, { type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 1 } }];
+  const dir = tmp();
+  const fake = fakeCodex(dir, null, { lines });
+  await assert.rejects(runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', maxTurns: 1, usageDir: dir }), (e) => e.turnCap === true && /stopped after 1 tool calls/.test(e.message));
+  const ok = await runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', maxTurns: 2, usageDir: dir });
+  assert.equal(ok.text, 'done', 'at the cap, not past it: the turn runs out');
 });
 
 test('runClaude forwards images and askLockdown to the codex adapter', POSIX, async () => {

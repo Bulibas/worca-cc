@@ -76,6 +76,7 @@ import { syncBaseForRun, ensureLocalBranch, fetchRemote, isSafeBranchName, runSy
 import { SYNC_EXECUTION_ID } from '../shared/graph/constants.mjs';
 import { readPluginsLock, pluginCurrentDir } from './plugins-lock.mjs'; // §9.4 disabled-plugin hint
 import { classifyError, rateLimitHint, brokerHint, freeDailyHint } from './recoverable-error.mjs';
+import { CODEX_DEFAULT_MODEL, codexUnattachableMcp } from './engines/codex.mjs';
 import { isNormalized } from './engines/events.mjs';
 import { createClaudeNormalizer } from './engines/claude-events.mjs';
 import { cachedFreeDailyCounts } from './openrouter-free.mjs';
@@ -2318,7 +2319,9 @@ export class RunHarness extends EventEmitter {
       lines.push(`engine ${name}: the project's .claude/settings.json deny rules NOT enforced on ${name} (--allow-unguarded-engine): ${ruleList(projectRules)}`);
     }
     for (const m of this._engineGateModels(nodes).filter((id) => engineOfModel(id, { projectDir: this.projectDir }) === 'claude')) {
-      lines.push(`engine ${name}: model "${m}" is a Claude model — the nodes that name it run on ${name}'s default model, so their cost stays unknown`);
+      lines.push(name === 'codex'
+        ? `engine ${name}: model "${m}" is a Claude model — the nodes that name it run on ${name}'s default model, ${CODEX_DEFAULT_MODEL}`
+        : `engine ${name}: model "${m}" is a Claude model — the nodes that name it run on ${name}'s default model, so their cost stays unknown`);
     }
     for (const l of lines) this._log('orchestrator', 'warn', l);
     return lines;
@@ -2432,7 +2435,7 @@ export class RunHarness extends EventEmitter {
     try {
       const { id, rules, projectRules } = await this._engineSetRules(guardrailsId, { quiet: true });
       args = { rules, guardrailsId: id, projectRules, nodes: await gateNodes() };
-      mcp = this._engineMcpRefusal((await this._resolveMcp(new Set()))?.result?.copies);
+      mcp = this._engineMcpRefusal((await this._resolveMcp(new Set()))?.result);
     } catch (err) {
       // The preflight's refusal (codex missing or signed out): the consent cannot lift it.
       if (err?.engineRefused) return { error: err.message, overridable: false };
@@ -2454,15 +2457,39 @@ export class RunHarness extends EventEmitter {
    * copy (a resume, whose team policy is resolved later).
    */
   async _engineMcpGate() {
-    const why = this._engineMcpRefusal((await this._resolveMcp(new Set()))?.result?.copies);
+    const why = this._engineMcpRefusal((await this._resolveMcp(new Set()))?.result);
     if (why) throw engineRefusal(this.claude.engine, why);
   }
 
-  /** Why this run's engine refuses these MCP registry copies, or null. */
-  _engineMcpRefusal(copies) {
+  /** What a non-Claude run's agents will not get of the merged MCP servers: the ones Claude Code loads on its own
+   *  (the checkout's .mcp.json, user scope, plugins — codex runs with --ignore-user-config) and, on Codex, the
+   *  project servers that are not stdio (a remote registry copy is refused instead, _engineMcpRefusal). Never throws. */
+  _engineMcpWarnings(rc) {
     const name = this.claude.engine || 'claude';
-    if (name === 'claude' || getEngine(name).capabilities.mcpTools !== false || !copies?.length) return null;
-    return `this run attaches MCP servers (${copies.map((c) => c.name).join(', ')}), which this engine cannot attach`;
+    if (name === 'claude' || !rc) return [];
+    let written = {};
+    try { if (rc.mcpConfigPath) written = JSON.parse(readFileSync(rc.mcpConfigPath, 'utf8'))?.mcpServers || {}; } catch { /* unreadable: nothing to say */ }
+    const out = [];
+    const native = (rc.mcpServerNames || []).filter((n) => !Object.hasOwn(written, n));
+    if (native.length) out.push(`engine ${name}: MCP servers Claude Code loads on its own are not attached on ${name}: ${native.join(', ')}`);
+    const remote = name === 'codex' ? codexUnattachableMcp(written) : [];
+    if (remote.length) out.push(`engine ${name}: remote MCP servers are not attached on ${name} (stdio only): ${remote.join(', ')}`);
+    return out;
+  }
+
+  /** Why this run's engine refuses these MCP registry copies ({copies, servers}: a registry result), or null.
+   *  Codex attaches stdio servers only, so a remote (http/sse) copy is refused there. */
+  _engineMcpRefusal(layer) {
+    const name = this.claude.engine || 'claude';
+    const copies = layer?.copies;
+    if (name === 'claude' || !copies?.length) return null;
+    if (getEngine(name).capabilities.mcpTools === false) {
+      return `this run attaches MCP servers (${copies.map((c) => c.name).join(', ')}), which this engine cannot attach`;
+    }
+    if (name !== 'codex') return null;
+    const servers = layer.servers || {};
+    const remote = codexUnattachableMcp(Object.fromEntries(copies.map((c) => [c.name, servers[c.name]])));
+    return remote.length ? `this run attaches remote MCP servers (${remote.join(', ')}), and ${name} attaches stdio servers only` : null;
   }
 
   /**
@@ -2531,8 +2558,7 @@ export class RunHarness extends EventEmitter {
     return slot.model ? { model: slot.model, ...(slot.effort ? { effort: slot.effort } : {}) } : {};
   }
 
-  /** The run's model for a call that always runs on Claude, whatever the run's engine
-   *  (the run title, the night decider). Another engine's model means nothing to Claude,
+  /** The run's model for a call on Claude (the run title on a Claude run). Another engine's model means nothing to Claude,
    *  so it is dropped there and Claude runs its default. */
   _claudeCallModel() {
     return modelForEngine(this.claude.model || null, 'claude', { projectDir: this.projectDir }) || null;
@@ -2631,8 +2657,9 @@ export class RunHarness extends EventEmitter {
       // §5.5.1: a scrubbed spawn keeps the launcher's keep-list when a stdio copy runs.
       allowlist: Object.values(reg.result.servers).some((s) => typeof s.command === 'string') ? keepListNames() : [],
       copies: reg.result.copies,
+      servers: reg.result.servers,
     };
-    const mcpWhy = this._engineMcpRefusal(this.mcpLayer?.copies);
+    const mcpWhy = this._engineMcpRefusal(this.mcpLayer);
     if (mcpWhy) throw engineRefusal(this.claude.engine, mcpWhy);
     // §11.4: MCP deviations need the resolution, so they land here, after _resolvePolicy (which
     // resets the list on resume). Persisted now, with the WHOLE list: when this is the run's first
@@ -2692,6 +2719,7 @@ export class RunHarness extends EventEmitter {
       this._log('context', 'warn', w);
     }
     await appendAudit(this.pipeline.dir, renderContextAudit(rc)).catch(() => {});
+    for (const w of this._engineMcpWarnings(rc)) if (!alreadyReported.has(w)) await this._recordRunWarning(w);
     await this._recordCapabilities();
     return rc;
   }
@@ -3111,6 +3139,14 @@ export class RunHarness extends EventEmitter {
     if (this.claude.mock) {
       await updateRunManifest(this.runRoot, {
         capabilities: { mcpGrants: MCP_GRANT_MODE, mcpConfig: null, version: null, probed: false },
+      });
+      return;
+    }
+    // The probe asks the `claude` binary: a run on another engine spawns no claude (and this.claude.bin is that
+    // engine's binary), so its MCP config is never dropped on what claude says.
+    if ((this.claude.engine || 'claude') !== 'claude') {
+      await updateRunManifest(this.runRoot, {
+        capabilities: { mcpGrants: MCP_GRANT_MODE, mcpConfig: null, version: null, probed: false, engine: this.claude.engine },
       });
       return;
     }
@@ -4536,7 +4572,7 @@ export class RunHarness extends EventEmitter {
         task: this.pipeline?.promptText ?? this.opts.prompt ?? '', planPaths: await this._nightPlanPaths(),
         memory: await readMemoryText(projectKey(this.projectDir)), criteria: config.criteria,
         context: q.kind === 'questions' ? `Asked by ${q.agent || 'an agent'} mid-step.` : '', model: pair.model, effort: pair.effort,
-        bin: this.claude.bin, mock: !!this.claude.mock, envScrub: this.guardrails?.envScrub, signal: this._nightSignal(),
+        engine: this.claude.engine || 'claude', bin: this.claude.bin, mock: !!this.claude.mock, envScrub: this.guardrails?.envScrub, signal: this._nightSignal(),
         run: this.opts.nightRunClaude,          // test seam; undefined → runClaude
       });
     } catch (err) {
@@ -4556,10 +4592,14 @@ export class RunHarness extends EventEmitter {
   async _nightDeciderPair(config) {
     let models = [];
     try { models = await listModels(''); } catch { /* unreadable catalog: a configured id reads as not in it */ }
-    // The decider runs on Claude whatever the run's engine (owner ruling): a Codex row is not a model it can pick, and a
-    // Codex run's own model is dropped (_claudeCallModel), so the CLI default runs instead.
-    const pair = resolveDeciderPair({ deciderModel: config.deciderModel, deciderEffort: config.deciderEffort, runModel: this._claudeCallModel() },
-      { models: models.filter((m) => m && m.engine !== 'codex') });
+    // The decider runs on the run's engine, like every other run-scoped helper job: only that engine's catalog rows
+    // can be picked, the run's model counts only when that engine owns it, and on Codex an unnamed model is
+    // codex's own default, named so the decision record and the cost say which model weighed the options.
+    const engine = this.claude.engine || 'claude';
+    const runModel = modelForEngine(this.claude.model || null, engine, { projectDir: this.projectDir }) || null;
+    const pair = resolveDeciderPair({ deciderModel: config.deciderModel, deciderEffort: config.deciderEffort, runModel },
+      { models: models.filter((m) => m && (m.engine || 'claude') === engine) });
+    if (!pair.model && engine === 'codex') { pair.model = CODEX_DEFAULT_MODEL; pair.source = 'default'; }
     const warn = (text) => {
       if ((this._nightWarned ||= new Set()).has(text)) return;
       this._nightWarned.add(text);

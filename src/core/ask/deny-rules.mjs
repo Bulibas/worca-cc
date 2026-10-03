@@ -37,6 +37,10 @@ export const ASK_DENY_RULES = Object.freeze([
   'Read(//proc/**)',                   // the server's own environment (/proc/<pid>/environ holds its GitHub and model tokens)
 ]);
 
+/** The same denies minus the run store and checkouts, for a read of ONE run: the night decider and the Auto
+ *  classifier read the run's checkout (under .worca-cc/runs) and its plans (in the store). */
+export const RUN_READ_DENY_RULES = Object.freeze(ASK_DENY_RULES.filter((r) => !/\.worca-cc\/(store|runs)\//.test(r)));
+
 const READ_RULE = /^Read\((.+)\)$/;
 export const toPosix = (p) => String(p).replace(/\\/g, '/');
 
