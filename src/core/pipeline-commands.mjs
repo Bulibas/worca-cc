@@ -85,12 +85,28 @@ export function claimPipelineCommand(pipelineId, { now = Date.now(), by } = {}) 
 }
 
 /**
+ * Drop every UNCLAIMED command for one pipeline — called by the harness the
+ * moment it takes ownership (start or resume). Anything pending then was written
+ * for an earlier incarnation of the run: an unconfirmed `worca stop` whose run
+ * was paused or interrupted another way must not stop the run once resumed.
+ * Claimed rows stay (they are the audit trail of what was executed).
+ * @param {string} pipelineId
+ * @returns {number} rows removed
+ */
+export function discardPendingPipelineCommands(pipelineId) {
+  if (!pipelineId || typeof pipelineId !== 'string') return 0;
+  return getDb().prepare(
+    'DELETE FROM pipeline_commands WHERE pipeline_id = ? AND consumed_at IS NULL',
+  ).run(pipelineId).changes;
+}
+
+/**
  * Drop command rows whose target pipeline is settled — the mailbox's reaper. A
  * command for a done/stopped/paused/interrupted run can never be executed (no
  * live orchestrator), so consuming it would be a lie; deleting is the honest
- * end, and the issuing CLI reports it through the run's status instead. Runs
- * alongside the stale-run reconcile (same idea, same place): best-effort, never
- * load-bearing.
+ * end, and the issuing CLI reports it through the run's status instead. Called
+ * best-effort by the control CLI before each enqueue; never load-bearing — the
+ * harness discards a resumed run's leftovers itself (discardPendingPipelineCommands).
  * @param {{ now?:number }} [opts]
  * @returns {number} rows removed
  */

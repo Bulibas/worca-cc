@@ -12,7 +12,8 @@ import { fileURLToPath } from 'node:url';
 import { hostname } from 'node:os';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { getDb } from '../src/core/db.mjs';
-import { enqueuePipelineCommand, claimPipelineCommand, reapPipelineCommands } from '../src/core/pipeline-commands.mjs';
+import { enqueuePipelineCommand, claimPipelineCommand, reapPipelineCommands, discardPendingPipelineCommands } from '../src/core/pipeline-commands.mjs';
+import { RunHarness } from '../src/core/run-harness.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, '..', 'src', 'cli', 'worca-cc.mjs');
@@ -89,6 +90,52 @@ test('reap drops commands whose run settled and keeps the live ones', () => {
   assert.equal(commandsOf('ccc10002').length, 0, 'a settled run can never execute a command');
   assert.equal(commandsOf('ccc10003').length, 1);
   assert.equal(commandsOf('ccc10003')[0].id, keep.id);
+});
+
+test('discard drops only the UNCLAIMED commands of one pipeline', () => {
+  insertPipeline({ id: 'ccc10004', title: 'discard demo', status: 'running' });
+  insertPipeline({ id: 'ccc10005', title: 'bystander', status: 'running' });
+  enqueuePipelineCommand('ccc10004', 'stop');
+  claimPipelineCommand('ccc10004');                 // executed: stays as the audit trail
+  enqueuePipelineCommand('ccc10004', 'pause');      // pending: dropped
+  enqueuePipelineCommand('ccc10005', 'stop');       // another run's: untouched
+  assert.equal(discardPendingPipelineCommands('ccc10004'), 1);
+  assert.deepEqual(commandsOf('ccc10004').map((r) => Boolean(r.consumed_at)), [true]);
+  assert.equal(commandsOf('ccc10005').length, 1);
+});
+
+// ── the harness: ownership start discards stale commands, then the slot executes ──
+
+/** The harness's control methods on a stand-in `this` — the real prototype code,
+ *  without booting a whole run. */
+function fakeOwner(pipelineId) {
+  const calls = [];
+  return {
+    calls,
+    pipeline: { id: pipelineId },
+    _log() {},
+    stop: (by) => calls.push(['stop', by]),
+    pause: (by) => { calls.push(['pause', by]); return true; },
+    _checkControlSlot: RunHarness.prototype._checkControlSlot,
+  };
+}
+
+test('a stop left pending before a resume does NOT stop the resumed run', () => {
+  // `worca stop` timed out unconfirmed, then the run was paused another way: the
+  // command is still pending when `worca resume` re-takes ownership.
+  insertPipeline({ id: 'ggg10001', title: 'resumed run', status: 'running' });
+  enqueuePipelineCommand('ggg10001', 'stop');
+  const owner = fakeOwner('ggg10001');
+  RunHarness.prototype._startHeartbeat.call(owner);
+  try {
+    assert.equal(commandsOf('ggg10001').length, 0, 'the stale stop is discarded on ownership');
+    owner._checkControlSlot();
+    assert.deepEqual(owner.calls, [], 'nothing executes against the resumed run');
+    // A command written AFTER ownership is the live path: claimed and executed with its actor.
+    enqueuePipelineCommand('ggg10001', 'pause', { by: 'alice' });
+    owner._checkControlSlot();
+    assert.deepEqual(owner.calls, [['pause', 'alice']]);
+  } finally { RunHarness.prototype._stopHeartbeat.call(owner); }
 });
 
 // ── the CLI: the live boundary, the refusals, the dispatch ───────────────────────

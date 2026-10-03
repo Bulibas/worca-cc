@@ -28,7 +28,7 @@ import {
   clearPipelineOwnership, HEARTBEAT_INTERVAL_MS, upsertSubAgent, listRunArtifacts,
 } from './artifacts.mjs';
 import { diffNameStatus, diffNumstat, diffPatch, untrackedFiles, untrackedPatch } from './git-info.mjs';
-import { claimPipelineCommand, CONTROL_CHECK_INTERVAL_MS } from './pipeline-commands.mjs';
+import { claimPipelineCommand, discardPendingPipelineCommands, CONTROL_CHECK_INTERVAL_MS } from './pipeline-commands.mjs';
 import {
   assembleResults, persistResults, persistDiffPatch, buildPerProject, rollupSummary,
   retainedWorkPatchName,
@@ -5647,6 +5647,14 @@ export class RunHarness extends EventEmitter {
     }, HEARTBEAT_INTERVAL_MS);
     this._heartbeatTimer.unref?.(); // never hold the process open
     if (!this._controlTimer) {
+      // A command still pending at the moment this process takes ownership was
+      // aimed at an earlier incarnation of the run (an unconfirmed `worca stop`
+      // whose run was then paused or interrupted another way). Executing it now
+      // would stop or pause the run the user just resumed — drop it instead.
+      try {
+        const stale = discardPendingPipelineCommands(this.pipeline.id);
+        if (stale) this._log('orchestrator', 'info', `control: discarded ${stale} stale command(s) from before this run was (re)started`);
+      } catch { /* best-effort */ }
       this._controlTimer = setInterval(() => {
         try { this._checkControlSlot(); } catch { /* best-effort: the next tick retries */ }
       }, CONTROL_CHECK_INTERVAL_MS);

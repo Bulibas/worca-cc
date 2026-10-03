@@ -933,7 +933,7 @@ CREATE INDEX IF NOT EXISTS idx_night_decisions_pipeline ON night_decisions(pipel
  * EXISTING run, and wants to die once consumed — disjoint state machines and retention;
  * what they share (the guarded-UPDATE claim, scheduler.mjs#claimTicket's shape) is a
  * pattern to reuse, not a table to merge. No FK to pipelines: pipeline rows are never
- * deleted (archived at most), so orphaned commands are reaped by the reconcile sweep,
+ * deleted (archived at most), so orphaned commands are reaped (pipeline-commands.mjs),
  * not cascaded.
  */
 const PIPELINE_COMMANDS_DDL = `
