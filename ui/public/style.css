@@ -1985,7 +1985,7 @@ button.wd-member:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;
    run records one, so a filled colour would out-shout the type + graphify badges that
    only some rows carry. Sits right after the violet type pill. The head scopes carry
    the SAME pill for the main agent's configured model · effort (stepModelPillHtml). */
-.rd-ag-name .sub-model-pill,.hd-ag-row .sub-model-pill,.rd-ag-head .sub-model-pill,.hd-ag-head .sub-model-pill{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.01em;padding:1px 8px;border-radius:999px;white-space:nowrap;background:transparent;color:var(--ink-3);border:1px solid var(--line-2);}
+.rd-ag-name .sub-model-pill,.hd-ag-row .sub-model-pill,.rd-ag-head .sub-model-pill,.hd-ag-head .sub-model-pill{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.01em;padding:1px 8px;border-radius:999px;white-space:nowrap;background:transparent;color:var(--ink-2);border:1px solid var(--line-2);}
 /* graphify-use count badge (amber) — how many times an agent / sub-agent invoked the
    graphify CLI. Rendered INLINE: in the phase/node header next to the status, and on a
    sub-agent row right after the violet type pill. inline-block + parent flex `gap` size
@@ -4786,7 +4786,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .rd-tab:hover{border-color:var(--ink-3);color:var(--ink);}
 .rd-tab.active{background:var(--ink);color:var(--on-ink);border-color:var(--ink);}
 .rd-tab:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-.rd-tab-badge{padding:2px 8px;border-radius:999px;background:var(--field);color:var(--ink-3);
+.rd-tab-badge{padding:2px 8px;border-radius:999px;background:var(--field);color:var(--ink-2);
   font:600 10.5px var(--mono);}
 .rd-tab.active .rd-tab-badge{background:var(--blue-bg);color:var(--blue-ink-strong);}
 /* .rd-sections needs no rule of its own — the inset comes from .rd-body's
