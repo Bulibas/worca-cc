@@ -28,6 +28,7 @@ import {
   clearPipelineOwnership, HEARTBEAT_INTERVAL_MS, upsertSubAgent, listRunArtifacts,
 } from './artifacts.mjs';
 import { diffNameStatus, diffNumstat, diffPatch, untrackedFiles, untrackedPatch } from './git-info.mjs';
+import { claimPipelineCommand, discardPendingPipelineCommands, CONTROL_CHECK_INTERVAL_MS } from './pipeline-commands.mjs';
 import {
   assembleResults, persistResults, persistDiffPatch, buildPerProject, rollupSummary,
   retainedWorkPatchName,
@@ -5630,7 +5631,13 @@ export class RunHarness extends EventEmitter {
     }
   }
 
-  /** Begin owning this run's row: stamp pid/host + start the heartbeat timer. Idempotent. */
+  /**
+   * Begin owning this run's row: stamp pid/host + start the heartbeat timer.
+   * The CONTROL timer rides the same lifecycle (started with ownership, stopped
+   * with it): while this process owns the run it polls the control mailbox for
+   * `stop`/`pause` commands written by clients that do NOT hold this
+   * orchestrator (#513 — the CLI, later chat/UI for foreign runs). Idempotent.
+   */
   _startHeartbeat() {
     if (!this.pipeline?.id) return;
     claimPipelineOwnership(this.pipeline.id);
@@ -5639,12 +5646,54 @@ export class RunHarness extends EventEmitter {
       try { touchHeartbeat(this.pipeline.id); } catch { /* best-effort */ }
     }, HEARTBEAT_INTERVAL_MS);
     this._heartbeatTimer.unref?.(); // never hold the process open
+    if (!this._controlTimer) {
+      // A command still pending at the moment this process takes ownership was
+      // aimed at an earlier incarnation of the run (an unconfirmed `worca stop`
+      // whose run was then paused or interrupted another way). Executing it now
+      // would stop or pause the run the user just resumed — drop it instead.
+      try {
+        const stale = discardPendingPipelineCommands(this.pipeline.id);
+        if (stale) this._log('orchestrator', 'info', `control: discarded ${stale} stale command(s) from before this run was (re)started`);
+      } catch { /* best-effort */ }
+      this._controlTimer = setInterval(() => {
+        try { this._checkControlSlot(); } catch { /* best-effort: the next tick retries */ }
+      }, CONTROL_CHECK_INTERVAL_MS);
+      this._controlTimer.unref?.();
+    }
   }
 
   /** Stop heartbeating and drop ownership (terminal/paused). Safe to call repeatedly. */
   _stopHeartbeat() {
     if (this._heartbeatTimer) { clearInterval(this._heartbeatTimer); this._heartbeatTimer = null; }
+    if (this._controlTimer) { clearInterval(this._controlTimer); this._controlTimer = null; }
     if (this.pipeline?.id) clearPipelineOwnership(this.pipeline.id);
+  }
+
+  /**
+   * Claim and execute ONE command from the control mailbox. Claiming IS
+   * consuming (the guarded UPDATE), so the row is gone whoever acts next; an
+   * action whose moment has passed (a `pause` while the run is no longer
+   * `running`) is therefore an honest no-op consumption — the issuing client
+   * reads the run's status, not the command, for what actually happened. The
+   * command's `by` (who issued it) rides into stop()/pause(), so
+   * state.lastAction — and every audit that reads it — names the real actor.
+   */
+  _checkControlSlot() {
+    if (!this.pipeline?.id) return;
+    const cmd = claimPipelineCommand(this.pipeline.id);
+    if (!cmd) return;
+    const by = cmd.by || 'local';
+    if (cmd.action === 'stop') {
+      this._log('orchestrator', 'info', `control: stop requested by ${by} (via the run-control mailbox)`);
+      this.stop(by);
+      return;
+    }
+    if (cmd.action === 'pause') {
+      this._log('orchestrator', 'info', `control: pause requested by ${by} (via the run-control mailbox)`);
+      this.pause(by);
+      return;
+    }
+    this._log('orchestrator', 'warn', `control: unknown command action "${cmd.action}" — consumed, ignored`);
   }
 
   /** Terminal bookkeeping for a pause: persist the resume point + paused status.

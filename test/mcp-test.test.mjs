@@ -111,7 +111,8 @@ test('a hanging server is killed with its whole tree when the timeout fires; the
   await assert.rejects(probe({ command: process.execPath, args: [FIXTURE, 'hang', pidFile], env: {} }, { timeoutMs: 1500 }), /no answer within/);
   const [pid, gc] = readFileSync(pidFile, 'utf8').split(' ').map(Number);
   try { await until(() => !alive(pid) && !alive(gc), 3000); }
-  finally { for (const p of [pid, gc]) try { process.kill(p, 'SIGKILL'); } catch { /* dead, as it should be */ } }
+  // Only a still-live pid: once seen dead it may already belong to an unrelated process.
+  finally { for (const p of [pid, gc]) if (alive(p)) try { process.kill(p, 'SIGKILL'); } catch { /* dead, as it should be */ } }
 });
 
 test('http: headers carry the expanded secret; a 401 or a 403 reads "token rejected"', async () => {

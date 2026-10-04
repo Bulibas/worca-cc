@@ -1645,10 +1645,11 @@ export function clearPipelineOwnership(pipelineId) {
  *     Preserves today's behavior for pre-v10 rows. NULL-timestamp ownerless rows return false.
  *
  * @param {object} row
- * @param {{ host:string, now:number, staleMs:number, hbStaleMs:number, pidAlive?:(pid:number)=>boolean }} ctx
+ * @param {{ host?:string, now?:number, staleMs?:number, hbStaleMs?:number, pidAlive?:(pid:number)=>boolean }} [ctx]
+ *        All defaulted (house values); the control CLI calls it with just a row.
  * @returns {boolean}
  */
-export function isDeadOwner(row, { host, now, staleMs, hbStaleMs, pidAlive = defaultPidAlive }) {
+export function isDeadOwner(row, { host = hostname(), now = Date.now(), staleMs = staleRunMs(), hbStaleMs = heartbeatStaleMs(), pidAlive = defaultPidAlive } = {}) {
   const ownedHere = row.owner_host === host && row.owner_pid != null;
 
   // Arm 1: dead pid on this host → dead immediately.
