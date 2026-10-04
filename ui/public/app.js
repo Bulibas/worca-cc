@@ -23603,22 +23603,32 @@ function rdStateCopy(r, stepName) {
   return `${activeCopy(r).text}.`;
 }
 
+/** The Overview's step name: the agents running now, or '' when none is. runStepLabel's name is
+ *  activeCopy's, whose "Running" fallback is a live pill's word, not a step: on a paused or
+ *  finished run it would name a step that is not running. */
+function rdOvStepName(r) {
+  return activeNodes(r).length ? runStepLabel(r).name : '';
+}
+
 function rdOvStateBanner(host, r) {
   host.innerHTML = '';
-  const { n, m, name } = runStepLabel(r);
+  // The chip says what the header pill says (statusPill): the active agent while one runs,
+  // else why the run is parked or how it ended.
+  const meta = runStatusMeta(r);
   const chip = document.createElement('span');
-  chip.className = `rd-ov-chip st-${runStatusMeta(r).family}`;
-  chip.textContent = name || `step ${n}/${m}`;
+  chip.className = `rd-ov-chip st-${meta.family}`;
+  chip.textContent = meta.word;
   const copy = document.createElement('span');
   copy.className = 'rd-ov-copy';
-  copy.textContent = rdStateCopy(r, name);
+  copy.textContent = rdStateCopy(r, rdOvStepName(r));
   host.append(chip, copy);
 }
 
 function rdOvStats(host, r) {
   const prevWt = host.querySelector('.hd-ov-wt');
   host.innerHTML = '';
-  const { n, m, name } = runStepLabel(r);
+  const { n, m } = runStepLabel(r);
+  const name = rdOvStepName(r);
   const stepSub = `step ${n}/${m}${name ? ` · ${name}` : ''}`;
 
   const elapsed = hdStatCard('elapsed', 'ELAPSED',

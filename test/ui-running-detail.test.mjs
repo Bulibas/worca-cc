@@ -957,6 +957,20 @@ test('Overview reads the terminal state once the run has finished', async () => 
   const copy = secOf(window, 'overview').querySelector('.rd-ov-copy').textContent;
   assert.match(copy, /^Stopped\. Finished at \d\d:\d\d:\d\d\.$/);
   assert.ok(secOf(window, 'overview').querySelector('.rd-ov-chip').classList.contains('st-red'));
+  assert.equal(secOf(window, 'overview').querySelector('.rd-ov-chip').textContent, 'Stopped');
+});
+
+test('Overview of a paused run says why it is parked, never "Running"', async () => {
+  const ctx = await bootRunning();
+  await openRun(ctx);
+  const { window } = ctx;
+  click(window, tabOf(window, 'overview'));
+  await settle(window);
+  frame(ctx, { type: 'done', runId: 'r1', status: 'paused', reason: 'usage_limit' });
+  await settle(window, 6);
+  const ov = secOf(window, 'overview');
+  assert.equal(ov.querySelector('.rd-ov-chip').textContent, 'Paused · usage limit', 'the chip reads like the header pill');
+  assert.doesNotMatch(ov.querySelector('.hd-ov-grid').textContent, /Running/, 'no agent runs, so the stats name none');
 });
 
 test('a run that finishes while open moves to its saved run, on the same tab, once History has it', async () => {
