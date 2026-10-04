@@ -61,7 +61,7 @@ export function checkoutPathFor(row, member) {
 
 function assertEligible(row, isLive) {
   if (!row || row.archived_at) throw cerr('pipeline not found', 'NOT_FOUND');
-  if (isLive(row.id) || !FINISHED.has(row.status)) throw cerr('Check out is available once the run has finished. Resume or stop it first.', 'NOT_FINISHED');
+  if (isLive(row.id) || !FINISHED.has(row.status)) throw cerr('Check out is available once the run has finished.', 'NOT_FINISHED');
   if (retainedWorkFor(row)) throw cerr('This run kept uncommitted work in its worktree. Recover or discard it first.', 'RETAINED');
 }
 

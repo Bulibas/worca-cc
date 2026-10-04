@@ -1432,7 +1432,7 @@ export async function writeState(pipelineDir, stateObj) {
       // v2 rows: execution_id === key. v1 rows leave every exec_* column NULL, so
       // the readers below reproduce today's exact shape for a v1 pipeline.
       const hasMeta = st.taskId != null || st.parentExecutionId != null || st.title != null || st.phaseOrdinal != null
-        || st.nodeKey != null || st.runtime != null || st.exitCode != null || st.bridgeCalls != null;
+        || st.nodeKey != null || st.runtime != null || st.exitCode != null || st.bridgeCalls != null || st.auxCosts != null || st.stoppedTurns != null;
       const meta = hasMeta
         ? s({ taskId: st.taskId ?? null, parentExecutionId: st.parentExecutionId ?? null,
               title: st.title ?? null, phaseOrdinal: st.phaseOrdinal ?? null,
@@ -1441,7 +1441,11 @@ export async function writeState(pipelineDir, stateObj) {
               // Model bridge (§8.6): requests the node initiated through the bridge.
               ...(st.bridgeCalls != null ? { bridgeCalls: st.bridgeCalls, bridgeContinued: st.bridgeContinued ?? 0 } : {}),
               // OpenRouter `:free` requests the node spent (openrouter-free.mjs).
-              ...(st.bridgeFreeCalls ? { bridgeFreeCalls: st.bridgeFreeCalls } : {}) })
+              ...(st.bridgeFreeCalls ? { bridgeFreeCalls: st.bridgeFreeCalls } : {}),
+              // Worca's own AI spend inside the step cost (Away mode, Auto workflow, run title).
+              ...(st.auxCosts ? { auxCosts: st.auxCosts } : {}),
+              // Agent turns cut before their `result`: a count and a lower bound, never in the cost.
+              ...(st.stoppedTurns ? { stoppedTurns: st.stoppedTurns } : {}) })
         : null;
       ins.run(
         id, st.key, st.nodeId ?? null, st.phase ?? null,
@@ -1466,6 +1470,21 @@ export async function writeState(pipelineDir, stateObj) {
     }
   });
   return obj;
+}
+
+/**
+ * The status of a pipeline row and the pause token its resume point carries (`pausedBy`; null
+ * when there is no row). A paused run harness compares them with its own token, to tell whether
+ * another writer — a resumed run's NEW harness — has taken the row over since it paused.
+ * @param {string} pipelineId
+ * @returns {{status:string|null, pausedBy:string|null}|null}
+ */
+export function pipelineRowStamp(pipelineId) {
+  if (!pipelineId) return null;
+  const row = getDb().prepare(`SELECT status,
+      json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pausedBy') AS paused_by
+    FROM pipelines WHERE id = ?`).get(pipelineId);
+  return row ? { status: row.status ?? null, pausedBy: row.paused_by ?? null } : null;
 }
 
 /**
@@ -1594,6 +1613,44 @@ export function claimPipelineOwnership(pipelineId, { pid = process.pid, host = h
       `).run(pid, host, new Date(now).toISOString(), pipelineId);
     });
   } catch { /* liveness is best-effort; never crash a run */ }
+}
+
+/**
+ * Claim a PAUSED run for a stop (stop-paused.mjs): ONE atomic UPDATE flips it to
+ * `stopped` and drops its resume point, so a racing resume (resumeRun re-reads the row
+ * before it goes live) or a second stop loses — across processes too, SQLite serializes
+ * the write. False when the row is anything else by now (resumed, stopped, interrupted,
+ * archived, gone): the caller lost and must not touch it. An interrupted row never
+ * passes — it stays resumable.
+ * @param {string} pipelineId
+ * @returns {boolean} true only for the caller that flipped it
+ */
+export function claimPausedForStop(pipelineId) {
+  if (!pipelineId) return false;
+  const r = getDb().prepare(`
+    UPDATE pipelines SET status = 'stopped', resume_point = NULL, updated_at = ?
+    WHERE id = ? AND status = 'paused' AND archived_at IS NULL
+  `).run(new Date().toISOString(), pipelineId);
+  return r.changes === 1;
+}
+
+/**
+ * Take a parked run over for a resume — claimPausedForStop's twin: ONE atomic UPDATE flips the
+ * row to `running` and stamps this process as its owner, unless it has settled since (stopped,
+ * done, error). A resume and a stop of one paused run, in this process or two, can then never
+ * both win: whichever UPDATE lands first decides, and the other sees the row it left. True when
+ * there is no row (the caller's snapshot is all there is), false when the caller lost.
+ * @param {string} pipelineId
+ * @returns {boolean}
+ */
+export function claimForResume(pipelineId, { pid = process.pid, host = hostname(), now = Date.now() } = {}) {
+  if (!pipelineId) return true;
+  const ts = new Date(now).toISOString();
+  const r = getDb().prepare(`
+    UPDATE pipelines SET status = 'running', owner_pid = ?, owner_host = ?, heartbeat_at = ?, updated_at = ?
+    WHERE id = ? AND status NOT IN ('stopped', 'done', 'error')
+  `).run(pid, host, ts, ts, pipelineId);
+  return r.changes === 1 || !getDb().prepare('SELECT 1 FROM pipelines WHERE id = ?').get(pipelineId);
 }
 
 /**
@@ -1740,8 +1797,9 @@ export function foreignActiveWorkspaceRuns(workspaceKey, { liveIds = [], pid = p
 }
 
 /**
- * Load everything resume needs for one pipeline: the raw pipelines row, the parsed
- * resume_point, and the saved steps (camelCase via rowToState, sessionId included).
+ * Load everything resume (and a paused run's stop) needs for one pipeline: the raw
+ * pipelines row, the parsed resume_point, the saved steps (camelCase via rowToState,
+ * sessionId included) and the full rowToState snapshot (`state`).
  * Returns null when the id is unknown. Pure read — no status checks here (callers
  * guard on row.status).
  */
@@ -1755,7 +1813,7 @@ export function readPipelineForResume(pipelineId) {
     resumePoint = null;
   }
   const state = rowToState(row);
-  return { row, resumePoint, steps: state?.steps || [] };
+  return { row, resumePoint, steps: state?.steps || [], state };
 }
 
 /**
@@ -2275,6 +2333,8 @@ function stepRowToStep(r) {
     if (em.exitCode != null) step.exitCode = em.exitCode;
     if (em.bridgeCalls != null) { step.bridgeCalls = em.bridgeCalls; step.bridgeContinued = em.bridgeContinued ?? 0; }
     if (em.bridgeFreeCalls) step.bridgeFreeCalls = em.bridgeFreeCalls;
+    if (em.auxCosts && typeof em.auxCosts === 'object') step.auxCosts = em.auxCosts;
+    if (em.stoppedTurns && typeof em.stoppedTurns === 'object') step.stoppedTurns = em.stoppedTurns;
   }
   return step;
 }

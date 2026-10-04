@@ -733,7 +733,7 @@ worca runs <pipelineId>    # one run in detail (any unique prefix; --json for ma
 worca logs <pipelineId>
 worca logs <pipelineId> -f
 
-# stop or pause a live run from the terminal — even one started in another terminal
+# stop a live or paused run, or pause a live one — even one started in another terminal
 worca stop <pipelineId>
 worca pause <pipelineId>   # resume later with: worca resume <pipelineId>
 

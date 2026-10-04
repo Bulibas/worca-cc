@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { awayAnswersSummary, KIND_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, FIELD_LABELS, WHICH_RUNS_OPTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, STATUS_ACTIONS, statusActions, GRACE_NO_HOURS, kindLabel, pillText, KIND_SHORT, kindShort, awayAnswerRows, awayAnswerCounts, checksFirst, DECIDER_WORDS, DECIDER_GROUPS, decidedByText } from '../src/shared/away-mode/labels.mjs';
+import { awayAnswersSummary, KIND_LABELS, METHOD_OPTIONS, CRITERIA_LABELS, FIELD_LABELS, WHICH_RUNS_OPTIONS, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, STATUS_ACTIONS, statusActions, GRACE_NO_HOURS, kindLabel, pillText, KIND_SHORT, kindShort, awayAnswerRows, awayAnswerCounts, checksFirst, DECIDER_WORDS, DECIDER_GROUPS, decidedByText, awayAskCaption } from '../src/shared/away-mode/labels.mjs';
+import { floorText } from '../src/shared/cost/breakdown.mjs';
 import { NIGHT_KINDS, NIGHT_STRATEGIES, NIGHT_CRITERIA, NIGHT_FIELDS } from '../src/core/night/config.mjs';
 
 test('every kind, method, criterion and field has a plain label', () => {
@@ -8,6 +9,33 @@ test('every kind, method, criterion and field has a plain label', () => {
   assert.deepEqual(METHOD_OPTIONS.map((m) => m.value).sort(), [...NIGHT_STRATEGIES].sort());
   for (const c of NIGHT_CRITERIA) assert.ok(CRITERIA_LABELS[c], c);
   for (const f of NIGHT_FIELDS) assert.ok(FIELD_LABELS[f]?.label, f);
+});
+
+test('awayAskCaption: a review names its model and cost, a stopped one its lower bound; no review → how, $0.00; a pause or an old review → nothing', () => {
+  const f = (n) => `$${Number(n).toFixed(2)}`;
+  const m = (id) => (id === 'claude-opus-5-5' ? 'Opus 5.5' : null);
+  const cap = (d) => awayAskCaption(d, { fmtUsd: f, modelLabel: m, fmtFloor: (v) => floorText(v, f) });
+  const review = { kind: 'clarify', choice: 'Redis', strategy: 'analysis', model: 'claude-opus-5-5', reviewId: 'night-decider-ab12cd34', reviewStatus: 'finished', tokens: 900 };
+  assert.deepEqual(cap({ ...review, costUsd: 0.05 }), ['Opus 5.5', '$0.05']);
+  assert.deepEqual(cap({ ...review, costUsd: 0 }), ['Opus 5.5', '$0.00'], 'a $0 review (mock, free model) still shows its cost');
+  assert.deepEqual(cap({ ...review, reviewStatus: 'error', costUsd: 0.01 }), ['Opus 5.5', '$0.01'], 'priced, then failed: its cost was booked');
+  assert.deepEqual(cap({ ...review, strategy: 'weights+analysis', costUsd: 0.07 }), ['Opus 5.5', '$0.07'], 'a mixed ask: one review answered it');
+  assert.deepEqual(cap({ ...review, model: null, costUsd: 0.05 }), [DECIDER_WORDS.defaultModel, '$0.05'], 'no model named: the CLI default');
+  assert.deepEqual(cap({ ...review, model: 'gone-model', costUsd: 0.05 }), [DECIDER_WORDS.defaultModel, '$0.05'], 'modelLabel decides the words; the app passes the id as its fallback');
+  const stopped = { ...review, reviewStatus: 'stopped', costUsd: null, tokens: 1800 };
+  assert.deepEqual(cap({ ...stopped, floorUsd: 0.0234 }), ['Opus 5.5', 'review stopped', '≥$0.02', 'not in total'], 'a lower bound, apart — never "$0.00"');
+  assert.deepEqual(cap({ ...stopped, floorUsd: null }), ['Opus 5.5', 'review stopped'], 'no list price: no figure');
+  assert.deepEqual(cap({ ...stopped, floorUsd: 0 }), ['Opus 5.5', 'review stopped'], 'a {free} model: never "≥$0.00"');
+  assert.deepEqual(awayAskCaption({ ...stopped, floorUsd: 0.0234 }, { fmtUsd: f, modelLabel: m }), ['Opus 5.5', 'review stopped'], 'no fmtFloor: no figure');
+  assert.deepEqual(cap({ kind: 'clarify', choice: 'a', strategy: 'analysis', model: 'claude-opus-5-5', costUsd: 0.04 }), ['Opus 5.5', '$0.04'], 'a booked cost names the review even without its id');
+  assert.deepEqual(cap({ kind: 'gate', choice: 'continue', strategy: 'rule' }), ['rule', '$0.00']);
+  assert.deepEqual(cap({ kind: 'clarify', choice: 'a', strategy: 'weights' }), ["agent's pick", '$0.00']);
+  assert.deepEqual(cap({ kind: 'form', choice: '{}', strategy: 'defaults' }), ['defaults', '$0.00']);
+  assert.deepEqual(cap({ kind: 'clarify', choice: 'a', strategy: 'auto' }), ['defaults', '$0.00']);
+  assert.deepEqual(cap({ kind: 'clarify', choice: 'a', strategy: 'analysis', model: 'claude-opus-5-5' }), [], 'stored before the cost was kept: nothing invented');
+  assert.deepEqual(cap({ kind: 'clarify', choice: 'a | b', strategy: 'analysis+weights', model: 'claude-opus-5-5' }), []);
+  assert.deepEqual(cap({ kind: 'clarify', choice: null, strategy: 'guardrail', guardrail: 'maxDecisions' }), [], 'a pause is not an answer');
+  assert.deepEqual(cap(null), []);
 });
 
 test('the extra fix rounds hint names both severities that block a review loop', () => {

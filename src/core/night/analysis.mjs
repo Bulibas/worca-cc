@@ -4,6 +4,7 @@
 // so it never appears in the workflow/step catalogs.
 import { runClaude, mockEnabled } from '../claude-runner.mjs';
 import { resolveModelEnv, resolveModelCost } from '../config.mjs';
+import { bridgeCostFor, forgetBridgeTag } from '../bridge/telemetry.mjs';
 import { safeParseJson } from '../protocol.mjs';
 import { memoryRoot, GLOBAL_SCOPE, projectScope, listMemory, readMemory } from '../memory-store.mjs';
 import { NIGHT_CRITERIA } from './config.mjs';
@@ -92,31 +93,62 @@ export function normalizeAnalysis(parsed) {
   return out;
 }
 
+const zeroTurnUsage = () => ({ input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 });
+
 /**
  * One analysis call for all questions of an ask.
  * `peakContextTokens` = the fullest the call's context got: the largest prompt (input + cache read +
  * cache write) of any of its own turns. `usage` sums every turn, so it cannot say that.
- * @returns {Promise<{byId:Record<string,object>, costUsd:number, usage:object, peakContextTokens:number}>}
+ * `priced` = at least one `result` frame carried a cost (re-priced by resolveModelCost). A call that
+ * ends without one has an unknown cost, so the caller keeps only a list-price LOWER BOUND of
+ * `turnUsage` (the per-message usage, each message id counted once — the CLI repeats a message's
+ * usage on every content block). `turnModel` = the last model id those messages named: the floor's
+ * price when no model was configured (the CLI's default). A thrown error carries the same fields;
+ * `notStarted` marks a call that never reached the API, so it costs nothing: its signal was already aborted
+ * (nothing is spawned), or it ended with no stream-json frame and nothing priced (the CLI's system/init
+ * line precedes every API request).
+ * @returns {Promise<{byId:Record<string,object>, costUsd:number, priced:boolean, usage:object, turnUsage:object, turnModel:string|null, peakContextTokens:number}>}
  */
 export async function runNightAnalysis({ questions, cwd, task, planPaths, memory, criteria, context, model = null, effort = 'medium',
-  run = runClaude, bin, mock = false, envScrub, envAllowlist, signal } = {}) {
+  run = runClaude, bin, mock = false, envScrub, envAllowlist, signal, bridgeTag = null } = {}) {
   if (mockEnabled({ mock })) {
     // Offline mock (claude.mock / WORCA_MOCK, like the Auto classifier): deterministic, $0 — recommended else first, confident enough to pass 60.
     const byId = {};
     for (const q of questions) byId[q.id] = { choice: q.recommended || q.options[0], confidence: 70, rationale: '[mock] night analysis', reversible: true, scores: {} };
-    return { byId, costUsd: 0, usage: {}, peakContextTokens: 0 };
+    return { byId, costUsd: 0, priced: true, usage: {}, turnUsage: zeroTurnUsage(), turnModel: null, peakContextTokens: 0 };
+  }
+  // Aborted while the review was being prepared (the user answered, a pause or a stop): spawn nothing.
+  if (signal?.aborted) {
+    throw Object.assign(new Error('aborted'), { name: 'AbortError', notStarted: true, costUsd: 0, priced: false, usage: {}, turnUsage: zeroTurnUsage(), turnModel: null, peakContextTokens: 0 });
   }
   const ctrl = new AbortController();
   const onAbort = () => ctrl.abort();
   if (signal?.aborted) ctrl.abort(); else signal?.addEventListener?.('abort', onAbort, { once: true });
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-  let costUsd = 0; let peakContextTokens = 0; const usage = { input_tokens: 0, output_tokens: 0 };
+  let costUsd = 0; let priced = false; let peakContextTokens = 0; const usage = { input_tokens: 0, output_tokens: 0 };
+  const perMsg = new Map();                       // message.id → its (last) usage
+  let turnModel = null;                           // the last model id the call's own messages named
+  let sawFrame = false;                           // any stream-json frame: the CLI started (its system/init line precedes every API request)
+  const turnUsage = () => {
+    const t = zeroTurnUsage();
+    for (const u of perMsg.values()) for (const k of Object.keys(t)) t[k] += Number(u?.[k]) || 0;
+    return t;
+  };
+  // The upstream-reported USD booked under this call's bridge tag since the last read (null when none).
+  const takeUpstream = () => {
+    const up = bridgeTag ? bridgeCostFor(bridgeTag) : null;
+    if (!up) return null;
+    forgetBridgeTag(bridgeTag);
+    return up.costUsd;
+  };
   try {
     const res = await run({
       cwd, systemPrompt: NIGHT_DECIDER_SYSTEM_PROMPT,
       prompt: buildAnalysisPrompt({ questions, task, planPaths, memory, criteria: criteria || {}, context }),
       // `model` / `effort` = the RESOLVED decider pair (night/decider-model.mjs): env and cost follow it.
-      model, modelEnv: resolveModelEnv(model), effort,
+      // `bridgeTag` names this call to worca's model bridge, so a bridged model's upstream-reported cost
+      // can be read back below (the CLI prices an id it does not know at $0). No-op for other models.
+      model, modelEnv: resolveModelEnv(model, { tag: bridgeTag || undefined }), effort,
       // The prompt carries agent-written question text, so the spawn is sandboxed like Ask Worca's:
       // no MCP servers, user hooks/plugins or slash commands, no edit mode, secret paths denied.
       permissionMode: 'dontAsk', strictMcpConfig: true, settingSources: ['project'], disableSlashCommands: true,
@@ -124,26 +156,40 @@ export async function runNightAnalysis({ questions, cwd, task, planPaths, memory
       allowedTools: [...TOOLS], tools: [...TOOLS], maxTurns: MAX_TURNS,
       signal: ctrl.signal, bin, envScrub, envAllowlist, spawnKind: 'aux',
       onEvent: (e) => {
+        if (e?.raw && typeof e.raw === 'object') sawFrame = true;
         const mu = e?.type === 'assistant' && !e.raw?.parent_tool_use_id ? e.raw?.message?.usage : null;
         if (mu) {
           const ctx = (Number(mu.input_tokens) || 0) + (Number(mu.cache_read_input_tokens) || 0) + (Number(mu.cache_creation_input_tokens) || 0);
           if (ctx > peakContextTokens) peakContextTokens = ctx;
+          perMsg.set(e.raw?.message?.id ?? `n${perMsg.size}`, mu);
+          const mm = e.raw?.message?.model;
+          if (typeof mm === 'string' && mm) turnModel = mm;
         }
         if (e?.type !== 'result') return;
         const u = e.raw?.usage;
         if (u) { usage.input_tokens += Number(u.input_tokens) || 0; usage.output_tokens += Number(u.output_tokens) || 0; }
         if (e.costUsd == null) return;
-        const c = resolveModelCost(model, Number(e.costUsd), u);
-        if (Number.isFinite(c)) costUsd += c;
+        // A bridged model: what the upstream said the call cost wins over the CLI's figure (the same
+        // precedence as a pipeline node, run-harness _onAgentEvent).
+        const up = takeUpstream();
+        const c = up != null ? up : resolveModelCost(model, Number(e.costUsd), u);
+        if (Number.isFinite(c)) { costUsd += c; priced = true; }
       },
     });
-    return { byId: normalizeAnalysis(safeParseJson(String(res?.text || ''))), costUsd, usage, peakContextTokens };
+    return { byId: normalizeAnalysis(safeParseJson(String(res?.text || ''))), costUsd, priced, usage, turnUsage: turnUsage(), turnModel, peakContextTokens };
   } catch (err) {
     // A failed or aborted call was still billed for what it ran: hand the cost to the caller.
-    if (err && typeof err === 'object') Object.assign(err, { costUsd, usage, peakContextTokens });
+    // A bridged upstream may have billed turns that never reached a `result`: that figure is real (priced).
+    const up = takeUpstream();
+    if (up != null) { costUsd += up; priced = true; }
+    // No frame at all and nothing priced (a missing binary, a broker error, a model env that would not
+    // resolve, an abort before the CLI's first line): the call never reached the API — like a call that
+    // never spawned, it is no review and costs nothing (notStarted).
+    if (err && typeof err === 'object') Object.assign(err, { costUsd, priced, usage, turnUsage: turnUsage(), turnModel, peakContextTokens, ...(sawFrame || priced ? {} : { notStarted: true }) });
     throw err;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener?.('abort', onAbort);
+    if (bridgeTag) forgetBridgeTag(bridgeTag);
   }
 }
