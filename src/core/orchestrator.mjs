@@ -20,6 +20,7 @@ import {
 } from './run-harness.mjs';
 import { resolveGraph, loadAgentFile, GRAPH_DEFAULT_WORKFLOW, writeGraphWorkflow, readWorkflow } from './workflows.mjs';
 import { loadScriptRegistry } from './script-registry.mjs';
+import { loadAgentRegistry } from './agent-registry.mjs';
 import { AUTO_WORKFLOW_ID, AUTO_WORKFLOW_NAME } from './graph/builtin-workflows.mjs';
 import { classifyLoops } from '../shared/graph/loops.mjs';
 import { buildGraphManifest, manifestTemplate, manifestPortsFn } from '../shared/graph/manifest.mjs';
@@ -1487,6 +1488,34 @@ export class GraphOrchestrator extends RunHarness {
       const est = estimateStepHours(evidence, resolveConstants(humanEstimateOverrides()));
       ctx.human = { hours: est.hours, signals: { ...est.signals, method: est.method } };
     }).catch(() => { ctx.human = null; });
+  }
+
+  /**
+   * Engine hook (stopPaused): the executions a pause parked end for good at the stop. A pause
+   * skips their estimate (_execute's finally) because the resume credits it at their real
+   * terminal, from the cursor the resume point carries, and a stop is that terminal. Credit the
+   * pre-pause work as _execute's finally would have: the code delta since that cursor (the
+   * checkouts are re-attached and still live) under the agent's estimate overrides. Their md/json
+   * outputs are not read: the process that paused allocated their paths. Never throws.
+   * @param {object} rp the resume point
+   * @param {Set<string>} keys the ledger keys (execution ids) of the parked executions
+   */
+  async _engineCreditParked(rp, keys) {
+    if (!rp?.humanCursor) return;   // no agent or script ever started: nothing was parked mid-work
+    let nodes;
+    try { nodes = resolvedFromManifest(rp.manifest || this.state.stepper, this.registry || loadAgentRegistry(this.agentsDir)).nodes; } catch { return; }
+    this._humanCursor = rp.humanCursor;
+    for (const step of this.state.steps || []) {
+      const nc = keys.has(step.key) ? nodes[step.nodeId] : null;
+      // Agents only: nothing runs after a stop, so a parked script advancing the cursor would only hand the
+      // agents' code to an execution that earns no hours (a live stop unwinds the agent first).
+      if (!nc || nc.kind !== 'agent') continue;
+      // _execute's finally for an agent execution that ends here.
+      const ctx = { node: { id: step.nodeId, kind: nc.kind, key: nc.key }, meta: nc.meta || {} };
+      await this._humanEstimate(ctx);
+      if (ctx.human) { step.humanHours = ctx.human.hours; step.humanSignals = ctx.human.signals; }
+    }
+    this.state.humanHours = sumStepHours(this.state.steps);
   }
 
   /** The retry loop around ONE execution — the NODE site of failure-policy.mjs.

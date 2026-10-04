@@ -1112,7 +1112,7 @@ for (const [status, resumable, finished] of [
   ['done', false, true], ['paused', true, false], ['interrupted', true, false],
   ['stopped', false, true], ['error', false, true],
 ]) {
-  test(`History bar, ${status} run: Run after${resumable ? ' and the Resume split' : ''}, no Pause or Stop without a live run`, async () => {
+  test(`History bar, ${status} run: Run after${resumable ? ' and the Resume split' : ''}, ${status === 'paused' ? 'Stop' : 'no Stop'} and no Pause without a live run`, async () => {
     const ctx = await bootDetail({ detail: { ...DETAIL, state: { ...DETAIL.state, status } }, rows: [{ ...ROW, status }] });
     await openDetail(ctx, '');
     await settle(ctx.window, 6);
@@ -1131,7 +1131,8 @@ for (const [status, resumable, finished] of [
     assert.equal(end.querySelector('.hd-resume').hidden, !resumable);
     assert.ok(end.querySelector('.hd-resume svg'), 'Resume leads with the play glyph');
     assert.equal(end.querySelector('.hd-pause').hidden, true, 'no live run: nothing to pause');
-    assert.equal(end.querySelector('.hd-stop').hidden, true, 'no live run: nothing to stop');
+    assert.equal(end.querySelector('.hd-stop').hidden, status !== 'paused',
+      status === 'paused' ? 'a paused saved run is stopped through its row' : 'no live run: nothing to stop');
     const header = hd.querySelector('.hd-header');
     for (const sel of ['.hd-after', '.hd-resume-split', '.hd-resume', '.hd-pause', '.hd-stop']) {
       assert.equal(header.querySelector(sel), null, `${sel} is not in the Details header`);
@@ -1328,7 +1329,7 @@ test('History bar of a paused pipeline resumed elsewhere: Pause and Stop replace
   const split = end.querySelector('.hd-resume-split');
   assert.equal(split.hidden, false, 'paused: Resume');
   assert.equal(end.querySelector('.hd-pause').hidden, true);
-  assert.equal(end.querySelector('.hd-stop').hidden, true);
+  assert.equal(end.querySelector('.hd-stop').hidden, false, 'paused: Stop through its row');
   // Its menu is open when another tab resumes the run.
   click(ctx.window, end.querySelector('.hd-resume-more'));
   const frame = (msg) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
@@ -1373,7 +1374,8 @@ for (const [stale, saved] of [['running', 'interrupted'], ['paused', 'paused'], 
     assert.equal(resume.hidden, false);
     assert.equal(resume.disabled, false);
     assert.equal(pause.hidden, true, 'no Pause on a run the server lost');
-    assert.equal(stop.hidden, true, 'no Stop on a run the server lost');
+    assert.equal(stop.hidden, saved !== 'paused',
+      saved === 'paused' ? 'a paused saved run is stopped through its row' : 'no Stop on an interrupted run');
     // The new server resumes the pipeline: that run is live.
     frame({ type: 'run-created', runId: 'r-2', title: ROW.title, projectDir: PROJECT, status: 'running', kind: 'run' });
     frame({ type: 'state', runId: 'r-2', id: ROW.id, status: 'running' });
@@ -1390,6 +1392,110 @@ for (const [stale, saved] of [['running', 'interrupted'], ['paused', 'paused'], 
     assert.deepEqual(ctx.calls.filter((c) => c.url.endsWith('/api/pause')).map((c) => JSON.parse(c.opts.body)), [{ runId: 'r-2' }]);
   });
 }
+
+test('History bar, paused saved run: Stop settles it through its row, then the page reloads stopped', async () => {
+  const ctx = await bootDetail({
+    rows: [{ ...ROW, status: 'paused' }], detail: PAUSED_DETAIL,
+    arms: (url, opts, box) => {
+      if (!url.endsWith('/api/stop')) return null;
+      box.detail = { ...DETAIL, state: { ...DETAIL.state, status: 'stopped' } };
+      box.rows = [{ ...ROW, status: 'stopped' }];
+      return ok({ ok: true, pipelineId: ROW.id, runId: null, status: 'stopped' });
+    },
+  });
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const doc = ctx.window.document;
+  const stop = doc.querySelector('#hist-detail .hd-bar .hd-stop');
+  assert.equal(stop.hidden, false);
+  click(ctx.window, stop);
+  const modal = doc.getElementById('stop-modal');
+  assert.equal(modal.classList.contains('hidden'), false, 'Stop confirms first');
+  assert.equal(modal.dataset.pipelineId, ROW.id);
+  assert.equal(modal.dataset.runId, undefined);
+  assert.equal(modal.querySelector('.stop-ident-title').textContent, ROW.title);
+  assert.equal(modal.querySelector('.stop-ident-branch').textContent, ROW.branch);
+  assert.equal(modal.querySelector('.stop-cancel').textContent, 'Keep paused');
+  const fetchesBefore = ctx.calls.filter((c) => c.url.endsWith(DETAIL_URL)).length;
+  click(ctx.window, modal.querySelector('.stop-confirm'));
+  await settle(ctx.window, 10);
+  assert.deepEqual(ctx.calls.filter((c) => c.url.endsWith('/api/stop')).map((c) => JSON.parse(c.opts.body)), [{ pipelineId: ROW.id }]);
+  assert.ok(modal.classList.contains('hidden'), 'closed on success');
+  assert.ok(ctx.calls.filter((c) => c.url.endsWith(DETAIL_URL)).length > fetchesBefore, 'the saved run was fetched again');
+  const end = doc.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  assert.equal(end.querySelector('.hd-stop').hidden, true, 'stopped: nothing left to stop');
+  assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'stopped: nothing to resume');
+});
+
+test('History bar, paused saved run with a pre-restart copy in this tab: Stop settles that copy too', async () => {
+  const ctx = await bootDetail({ rows: [{ ...ROW, status: 'paused' }], detail: PAUSED_DETAIL,
+    arms: (url, opts, box) => {
+      if (!url.endsWith('/api/stop')) return null;
+      box.detail = { ...DETAIL, state: { ...DETAIL.state, status: 'stopped' } };
+      box.rows = [{ ...ROW, status: 'stopped' }];
+      return ok({ ok: true, pipelineId: ROW.id, runId: null, status: 'stopped' });
+    } });
+  const send = (m) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify(m) });
+  ctx.wsBox.ws.dispatch('open', {});
+  // A paused run this tab learnt of in the old boot; the new boot (a restart) no longer holds it.
+  send({ type: 'hello', bootId: 'b1', runs: [{ runId: 'old1', title: ROW.title, projectDir: ROW.projectDir,
+    status: 'paused', startedAt: ROW.startedAt, kind: 'run', pipelineId: ROW.id }] });
+  send({ type: 'done', runId: 'old1', status: 'paused' });
+  send({ type: 'hello', bootId: 'b2', runs: [] });
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const doc = ctx.window.document;
+  click(ctx.window, doc.querySelector('#hist-detail .hd-bar .hd-stop'));
+  click(ctx.window, doc.getElementById('stop-modal').querySelector('.stop-confirm'));
+  await settle(ctx.window, 10);
+  assert.equal(doc.getElementById('nav-needs-count').hidden, true, 'the old copy no longer reads Paused');
+});
+
+test('History bar, paused saved run stopped from elsewhere: the row refresh takes Stop and Resume away', async () => {
+  const ctx = await bootDetail({ rows: [{ ...ROW, status: 'paused' }], detail: PAUSED_DETAIL });
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const end = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  assert.equal(end.querySelector('.hd-stop').hidden, false);
+  assert.equal(end.querySelector('.hd-resume-split').hidden, false);
+  // Its Stop dialog is open when the run is stopped elsewhere: it closes with the page it was opened on.
+  click(ctx.window, end.querySelector('.hd-stop'));
+  const modal = ctx.window.document.getElementById('stop-modal');
+  assert.equal(modal.classList.contains('hidden'), false);
+  ctx.box.detail = { ...DETAIL, state: { ...DETAIL.state, status: 'stopped' } };   // what the server now holds
+  await deliverRows(ctx, [{ ...ROW, status: 'stopped' }]);   // another tab / the CLI / chat stopped it
+  assert.ok(modal.classList.contains('hidden'), 'no dialog left asking to stop a stopped run');
+  const end2 = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');   // the page was re-read
+  assert.equal(end2.querySelector('.hd-stop').hidden, true, 'no Stop on a stopped run');
+  assert.equal(end2.querySelector('.hd-resume-split').hidden, true, 'no Resume on a stopped run');
+  assert.equal(ctx.window.document.querySelector('#hist-detail .hd-status-word').textContent, 'Stopped', 'the page reads stopped, not Paused');
+});
+
+test('History bar, paused saved run stopped from elsewhere under an open comment draft: the page keeps the draft', async () => {
+  const ctx = await bootDetail({ rows: [{ ...ROW, status: 'paused' }], detail: PAUSED_DETAIL });
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const doc = ctx.window.document;
+  const fetches = () => ctx.calls.filter((c) => c.url.endsWith(DETAIL_URL)).length;
+  const before = fetches();
+  ctx.box.detail = { ...DETAIL, state: { ...DETAIL.state, status: 'stopped' } };
+  // A reply draft in a thread, then a new comment's composer: each lives only in the page.
+  for (const [cls, key] of [['hd-cmt-thread', 'draft'], ['hd-cmt-block', 'composer']]) {
+    const draft = doc.createElement('div');
+    draft.className = cls;
+    draft.dataset[key] = '1';
+    doc.querySelector('#hist-detail').firstElementChild.appendChild(draft);
+    await deliverRows(ctx, [{ ...ROW, status: 'stopped' }]);
+    assert.equal(fetches(), before, `not re-read under an open ${cls} draft`);
+    assert.ok(draft.isConnected, 'the draft is kept');
+    draft.remove();
+  }
+  const end = doc.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  assert.equal(end.querySelector('.hd-stop').hidden, true, 'the bar still drops Stop');
+  assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'and Resume');
+  await deliverRows(ctx, [{ ...ROW, status: 'stopped' }]);
+  assert.ok(fetches() > before, 'with no draft open, the next row refresh re-reads the page');
+});
 
 // The tab can learn of a run before the restarted server's hello (this tab's own resume POST
 // answered while the socket was down): the hello lists it, so it stays the pipeline's live run.

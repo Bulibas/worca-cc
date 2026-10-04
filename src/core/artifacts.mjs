@@ -1616,6 +1616,44 @@ export function claimPipelineOwnership(pipelineId, { pid = process.pid, host = h
 }
 
 /**
+ * Claim a PAUSED run for a stop (stop-paused.mjs): ONE atomic UPDATE flips it to
+ * `stopped` and drops its resume point, so a racing resume (resumeRun re-reads the row
+ * before it goes live) or a second stop loses — across processes too, SQLite serializes
+ * the write. False when the row is anything else by now (resumed, stopped, interrupted,
+ * archived, gone): the caller lost and must not touch it. An interrupted row never
+ * passes — it stays resumable.
+ * @param {string} pipelineId
+ * @returns {boolean} true only for the caller that flipped it
+ */
+export function claimPausedForStop(pipelineId) {
+  if (!pipelineId) return false;
+  const r = getDb().prepare(`
+    UPDATE pipelines SET status = 'stopped', resume_point = NULL, updated_at = ?
+    WHERE id = ? AND status = 'paused' AND archived_at IS NULL
+  `).run(new Date().toISOString(), pipelineId);
+  return r.changes === 1;
+}
+
+/**
+ * Take a parked run over for a resume — claimPausedForStop's twin: ONE atomic UPDATE flips the
+ * row to `running` and stamps this process as its owner, unless it has settled since (stopped,
+ * done, error). A resume and a stop of one paused run, in this process or two, can then never
+ * both win: whichever UPDATE lands first decides, and the other sees the row it left. True when
+ * there is no row (the caller's snapshot is all there is), false when the caller lost.
+ * @param {string} pipelineId
+ * @returns {boolean}
+ */
+export function claimForResume(pipelineId, { pid = process.pid, host = hostname(), now = Date.now() } = {}) {
+  if (!pipelineId) return true;
+  const ts = new Date(now).toISOString();
+  const r = getDb().prepare(`
+    UPDATE pipelines SET status = 'running', owner_pid = ?, owner_host = ?, heartbeat_at = ?, updated_at = ?
+    WHERE id = ? AND status NOT IN ('stopped', 'done', 'error')
+  `).run(pid, host, ts, ts, pipelineId);
+  return r.changes === 1 || !getDb().prepare('SELECT 1 FROM pipelines WHERE id = ?').get(pipelineId);
+}
+
+/**
  * Lightweight heartbeat tick: refresh heartbeat_at ONLY. Status-guarded so a beat that fires
  * after a terminal write is a no-op. Returns the number of rows updated (0 or 1).
  * @param {string} pipelineId
@@ -1759,8 +1797,9 @@ export function foreignActiveWorkspaceRuns(workspaceKey, { liveIds = [], pid = p
 }
 
 /**
- * Load everything resume needs for one pipeline: the raw pipelines row, the parsed
- * resume_point, and the saved steps (camelCase via rowToState, sessionId included).
+ * Load everything resume (and a paused run's stop) needs for one pipeline: the raw
+ * pipelines row, the parsed resume_point, the saved steps (camelCase via rowToState,
+ * sessionId included) and the full rowToState snapshot (`state`).
  * Returns null when the id is unknown. Pure read — no status checks here (callers
  * guard on row.status).
  */
@@ -1774,7 +1813,7 @@ export function readPipelineForResume(pipelineId) {
     resumePoint = null;
   }
   const state = rowToState(row);
-  return { row, resumePoint, steps: state?.steps || [] };
+  return { row, resumePoint, steps: state?.steps || [], state };
 }
 
 /**

@@ -21,6 +21,7 @@ import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import { preflightNode } from '../src/core/preflight-node.mjs';
 import { preflightDeps } from '../src/core/preflight-deps.mjs';
 import { createOrchestratorFor } from '../src/core/engine-select.mjs';
+import { stopPausedRun, StopPausedError } from '../src/core/stop-paused.mjs';
 import {
   listPipelines, readPipeline, listAllPipelines, readPipelineByKey,
   enrichPipelinesPr, reconcileStaleRunning, foreignActiveWorkspaceRuns, readPipelineForResume, persistPrState, readPrState,
@@ -622,6 +623,9 @@ wss.on('connection', (ws, req) => {
     try { ws.close(1008, 'forbidden'); } catch { /* already closing */ }
     return;
   }
+  // A paused run this server holds may have been stopped from a terminal since: settle its entry
+  // before this tab's hello (and, through the frames, in every open tab), so a reload reads it stopped.
+  settleStaleParkedEntries();
   sockets.add(ws);
   trackHeartbeat(ws);
   // Whose Ask threads this socket may see (a shared sign-in's name, else null = all).
@@ -2313,8 +2317,9 @@ const startRunHandler = async (req, res) => {
     }
     announceRun(entry);
 
-    // Fire-and-forget; all progress is surfaced through events.
-    Promise.resolve()
+    // Fire-and-forget; all progress is surfaced through events. Kept on the entry: a Stop of the
+    // run once it paused waits for its pause to finish unwinding (stopPausedPipelineOnce).
+    entry.launch = Promise.resolve()
       .then(() => orch.run())
       .catch((err) => {
         const event = { runId, type: 'error', message: err && err.message ? err.message : String(err) };
@@ -2749,6 +2754,8 @@ export async function schedulerTick({ now = Date.now() } = {}) {
     const sig = scheduleSignature();
     if (_lastScheduleSig !== null && sig !== _lastScheduleSig && !out.fired.length) emitChanged('schedules-changed', 'external');
     _lastScheduleSig = sig;
+    // ...and `worca stop` settles paused runs from ITS process: settle the entries this server holds for them.
+    settleStaleParkedEntries();
     return out;
   } catch (err) {
     console.error(`[worca-ui] scheduler tick failed: ${err && err.message ? err.message : err}`);
@@ -3207,6 +3214,11 @@ const chatActions = {
     return postDirection(entry ? (entry.pipelineId || entry.id) : runId, text, `chat:${platform || 'chat'}`);
   },
   stop: (runId, by) => stopRun(runId, by || 'local'),
+  // A paused run (chat `/stop *<ref>` on a History row): the same stop the UI's button runs.
+  stopPaused: async (pipelineId, by) => {
+    try { return await stopPausedPipeline(pipelineId, by || 'local'); }
+    catch (err) { return { ok: false, code: err?.code || null, error: err?.message || String(err) }; }
+  },
   pause: (runId, by) => pauseRun(runId, by || 'local'),
   // The long chain of budget/worktree/double-resume guards lives in resumeRun();
   // call it in-process. (It used to be reached by POSTing to 127.0.0.1:PORT — a
@@ -3336,15 +3348,23 @@ function answerRun(runId, id, payload, by = 'local') {
   entry.orch.answer(id, payload, by || 'local');
   resolvePending(entry, { id, reason: 'answered' });
 }
-/** `by` = who asked (identity.mjs actorOf / chatActor); recorded on the entry and the run state. */
-function stopRun(runId, by = 'local') {
+/** `by` = who asked (identity.mjs actorOf / chatActor); recorded on the entry and the run state.
+ *  A PAUSED entry has no run loop to abort — orch.stop() would flip its status in memory only
+ *  (no done, no persist, no teardown) — so it settles from its saved row (stopPausedPipeline).
+ *  An interrupted one is never stopped: it stays resumable. */
+async function stopRun(runId, by = 'local') {
   const entry = runs.get(runId);
   if (!entry) throw new Error('unknown runId');
+  if (entry.status === 'paused' && entry.pipelineId) return stopPausedPipeline(entry.pipelineId, by);
+  if (entry.status === 'interrupted') {
+    throw new StopPausedError('INTERRUPTED', 'pipeline is interrupted — it stays resumable; only a paused run can be stopped');
+  }
   entry.lastAction = { kind: 'stop', by: by || 'local', at: new Date().toISOString() };
   entry.orch.stop(entry.lastAction.by);
   entry.status = 'stopped';
   if (entry.pipelineId) cancelScheduledResumes(entry.pipelineId, { by, reason: `the run was stopped${byActor(by || 'local')}` });
   resolvePending(entry, { reason: 'stopped' });
+  return { ok: true };
 }
 function pauseRun(runId, by = 'local') {
   const entry = runs.get(runId);
@@ -3354,6 +3374,137 @@ function pauseRun(runId, by = 'local') {
   entry.lastAction = { kind: 'pause', by: by || 'local', at: new Date().toISOString() };
   entry.status = 'pausing';
   resolvePending(entry, { reason: 'paused' });
+}
+
+/** In-process stops in flight, by pipeline id. A second click, tab or chat command for the same
+ *  run joins the stop that is already running: it would otherwise lose the claim (NOT_PAUSED) and
+ *  settleStaleParked would tell the tabs "stopped" while the first stop is still tearing down. */
+const STOPS_IN_FLIGHT = new Map();
+
+/**
+ * Stop a PAUSED run (stop-paused.mjs) — behind POST /api/stop, a paused entry's Stop
+ * (stopRun) and chat `/stop *<ref>`. Awaited to the end, so callers report what happened.
+ * A run this server paused in this boot keeps its runId: the stopping orchestrator is wired
+ * to that entry, so every tab holding it gets state(stopped) + done(stopped) and settles it
+ * like a live stop. Otherwise (a restart since, or the CLI paused it) chat and Ask cards are
+ * told directly, and the tabs learn from `pipelines-changed`. A second click, tab or chat
+ * command for the same run joins the stop already in flight (STOPS_IN_FLIGHT).
+ * @returns {Promise<{ok:true, pipelineId:string, runId:string|null, status:'stopped'}>}
+ * @throws {StopPausedError}
+ */
+async function stopPausedPipeline(pipelineId, by = 'local') {
+  const running = STOPS_IN_FLIGHT.get(pipelineId);
+  if (running) return running;
+  const p = stopPausedPipelineOnce(pipelineId, by);
+  STOPS_IN_FLIGHT.set(pipelineId, p);
+  try { return await p; } finally { STOPS_IN_FLIGHT.delete(pipelineId); }
+}
+
+/** One stop of a paused run. Called only through stopPausedPipeline, which joins concurrent stops. */
+async function stopPausedPipelineOnce(pipelineId, by = 'local') {
+  const parked = () => [...runs.values()].find((e) => e.pipelineId === pipelineId && e.status === 'paused') || null;
+  // A pause still unwinding: its state(paused) frame is out, so the entry reads paused, but its
+  // harness is still finishing the pause (the persist, the audit, a forced pause's diff and task-source
+  // write-back, then done(paused) and its finally). Let it finish first: two harnesses must never work
+  // one run, and its late done(paused) would turn the stopped entry back to paused.
+  const unwinding = parked();
+  if (unwinding && !unwinding.settled && unwinding.launch) await unwinding.launch.catch(() => {});
+  let entry = null;
+  let prev = null;
+  let out;
+  try {
+    out = await stopPausedRun(pipelineId, {
+      by: by || 'local',
+      agentsDir: AGENTS_DIR,
+      // A run started with a per-request mock on a real server stays a mock run (no team metrics).
+      claude: { mock: serverMockMode() || !!parked()?.orch?.claude?.mock },
+      projectDirFor: projectDirForKey,
+      beforeStop: (orch) => {
+        // Synchronous with the claim (stopPausedRun's contract), and resumeRun re-reads the row
+        // right before its runs.set: either a resume that went live meanwhile is seen here and
+        // wins, or the resume sees the stopped row and refuses.
+        for (const e of runs.values()) {
+          if (e.pipelineId === pipelineId && !SETTLED_RUN.has(String(e.status || ''))) {
+            throw new StopPausedError('LIVE', 'pipeline is live — stop its run instead');
+          }
+        }
+        // Read before the entry is re-pointed: nothing that can throw runs after the swap below.
+        const links = askFindRunLinksByPipeline(pipelineId);
+        entry = parked();
+        if (entry) {
+          prev = { orch: entry.orch, lastAction: entry.lastAction };   // restored unless the stop lands
+          entry.orch = orch;
+          entry.lastAction = { kind: 'stop', by: by || 'local', at: new Date().toISOString() };
+          // The pause latched both (its done frame): re-arm them so wireRun records the stop on
+          // a scheduled run's ticket feed and opens a waiting run chain at once.
+          entry._outcomeRecorded = false;
+          entry._chainNudged = false;
+          wireRun(entry);                     // tab frames + chat notifier, on the same runId
+        } else {
+          try { chatNotifier.attach(orch, { runId: pipelineId }); }
+          catch (err) { console.error(`[worca-ui] chat notifier attach failed: ${err && err.message ? err.message : err}`); }
+        }
+        for (const link of links) {
+          try { attachAskFollower(orch, { threadId: link.threadId, runId: link.runId, cardId: link.cardId }); }
+          catch (err) { console.error(`[worca-ui] ask follower attach failed: ${err && err.message ? err.message : err}`); }
+        }
+      },
+    });
+  } catch (err) {
+    // The claim lost (NOT_PAUSED) or never ran (a throw before it, e.g. the database locked past its
+    // busy timeout): put the paused orchestrator back on the entry, which a reload snapshots. The
+    // stop's own was never rehydrated. A stop whose claim landed has settled it as stopped, and keeps it.
+    if (entry && prev && entry.orch?.state?.status !== 'stopped') { entry.orch = prev.orch; entry.lastAction = prev.lastAction; }
+    if (['NOT_PAUSED', 'NOT_FOUND'].includes(err?.code)) settleStaleParked(pipelineId);
+    throw err;
+  }
+  cancelScheduledResumes(pipelineId, { by, reason: `the run was stopped${byActor(by || 'local')}` });
+  emitChanged('pipelines-changed', 'stopped');
+  // Run chains without a wired entry: a run waiting on this one decides now, not at the next
+  // 30 s tick (a wired entry's done frame nudges them through wireRun).
+  if (!entry) {
+    try { if (dependentsOfRun({ pipelineId }).length) setTimeout(() => { void schedulerTick(); }, 0); }
+    catch (err) { console.error(`[worca-ui] chain nudge failed: ${err && err.message ? err.message : err}`); }
+  }
+  return { ...out, runId: entry ? entry.id : null };
+}
+
+/** A paused entry this server still holds for a run that was settled ELSEWHERE (`worca stop`
+ *  from a terminal, another server, an archive): its row is no longer parked, so tell the tabs —
+ *  state + done on the entry's own runId, the frames a live stop sends — and drop it from
+ *  "Needs you", instead of offering a Stop and a Resume the row refuses forever. */
+function settleStaleParked(pipelineId) {
+  const row = findPipelineRowById(pipelineId);
+  const status = row ? row.status : 'stopped';
+  if (!['done', 'stopped', 'error'].includes(status)) return;   // still parked, or live elsewhere: not ours to settle
+  for (const e of runs.values()) {
+    if (e.pipelineId !== pipelineId || e.status !== 'paused') continue;
+    e.status = status;
+    e.pauseReason = null;
+    e.pauseDetail = null;
+    // A later subscribe snapshots the entry's orchestrator (sendStateSnapshot): it must read the same.
+    if (e.orch && e.orch.state) e.orch.state.status = status;
+    broadcast(bufferEvent(e, { type: 'state', status, id: pipelineId }));
+    broadcast(bufferEvent(e, { type: 'done', status, pipelineDir: null }));
+  }
+}
+
+/** The paused entries this server holds whose rows another process settled meanwhile (`worca stop`
+ *  from a terminal): settle them for the tabs (settleStaleParked). Run before each new tab's hello
+ *  and on each scheduler tick, so neither a reload nor an open tab keeps offering a Stop and a
+ *  Resume the row refuses. This server's own stop in flight is left alone: its row reads stopped
+ *  from the claim on, and its own state + done frames settle the entry. Never throws. */
+function settleStaleParkedEntries() {
+  try {
+    const ids = new Set();
+    for (const e of runs.values()) {
+      if (e.status === 'paused' && e.pipelineId && !STOPS_IN_FLIGHT.has(e.pipelineId)) ids.add(e.pipelineId);
+    }
+    for (const id of ids) {
+      const row = findPipelineRowById(id);
+      if (row && ['done', 'stopped', 'error'].includes(row.status)) settleStaleParked(id);
+    }
+  } catch (err) { console.error(`[worca-ui] stale paused entries: ${err && err.message ? err.message : err}`); }
 }
 
 // ---------------------------------------------------------------------------
@@ -3379,16 +3530,26 @@ app.post('/api/answer', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/stop  -> abort a run
-// body: { runId }
+// POST /api/stop  -> abort a live run, or stop a paused one for good
+// body: { runId } | { pipelineId } | { runId, pipelineId }
+// A known runId acts on that entry (stopRun routes a paused one to stopPausedPipeline).
+// A pipelineId alone — or with a runId this server does not know (a tab from before a
+// restart) — stops the paused run from its saved row.
 // ---------------------------------------------------------------------------
-app.post('/api/stop', (req, res) => {
-  const { runId } = req.body || {};
-  if (!runId || !runs.has(runId)) return badRequest(res, 'unknown runId');
+app.post('/api/stop', async (req, res) => {
+  const { runId, pipelineId } = req.body || {};
   try {
-    stopRun(runId, actorOf(req));
-    res.json({ ok: true });
+    if (runId && runs.has(runId)) return res.json(await stopRun(runId, actorOf(req)));
+    if (pipelineId && typeof pipelineId === 'string') {
+      // A tab from before a restart may still show the run paused while this server already
+      // resumed it: stop the run that is live now, rather than refusing a stale runId.
+      const live = liveRunEntry(pipelineId);
+      if (live && !SETTLED_RUN.has(String(live.status || ''))) return res.json(await stopRun(live.id, actorOf(req)));
+      return res.json(await stopPausedPipeline(pipelineId, actorOf(req)));
+    }
+    return badRequest(res, 'unknown runId');
   } catch (err) {
+    if (err instanceof StopPausedError) return res.status(err.status).json({ error: err.message, code: err.code });
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
 });
@@ -3516,7 +3677,13 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
   if (!pipelineId || typeof pipelineId !== 'string') throw new ResumeError(400, { error: 'pipelineId is required' });
   const saved = readPipelineForResume(pipelineId);
   if (!saved) throw new ResumeError(404, { error: 'pipeline not found' });
-  if (saved.row.status !== 'paused' && saved.row.status !== 'interrupted') throw new ResumeError(400, { error: `pipeline is "${saved.row.status}", not resumable` });
+  if (saved.row.status !== 'paused' && saved.row.status !== 'interrupted') {
+    // A paused entry this server still holds for a run settled elsewhere (`worca stop` from a
+    // terminal) offers a Resume the row refuses: settle it for its tabs (settleStaleParked). Not
+    // while this server's own stop of it is in flight: that stop sends its tabs the frames itself.
+    if (!STOPS_IN_FLIGHT.has(pipelineId)) settleStaleParked(pipelineId);
+    throw new ResumeError(400, { error: `pipeline is "${saved.row.status}", not resumable` });
+  }
   if (!saved.resumePoint) throw new ResumeError(400, { error: 'pipeline has no resume point' });
   if (saved.resumePoint.version !== 2) {
     throw new ResumeError(409, { code: 'ENGINE_RETIRED', error: V1_RUN_RETIRED });
@@ -3645,6 +3812,14 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     resume: saved,
     resumedBy: by || 'local',
   });
+  // A stop may have claimed the row while the gates above awaited (claimPausedForStop flips
+  // it to stopped atomically). Re-read it with NOTHING awaited between here and runs.set, so
+  // either the stop sees this entry (stopPausedPipeline's beforeStop, and refuses) or this
+  // resume sees the stopped row (and refuses).
+  const fresh = readPipelineForResume(pipelineId);
+  if (!fresh || (fresh.row.status !== 'paused' && fresh.row.status !== 'interrupted')) {
+    throw new ResumeError(409, { error: `pipeline is "${fresh ? fresh.row.status : 'gone'}", not resumable` });
+  }
   const entry = {
     id: runId,
     orch,
@@ -3698,8 +3873,9 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     }
   }
 
-  // Fire-and-forget; all progress is surfaced through events (same idiom as /api/run).
-  Promise.resolve()
+  // Fire-and-forget; all progress is surfaced through events (same idiom as /api/run). Kept on
+  // the entry: a Stop of the run once it paused again waits for its pause to finish unwinding.
+  entry.launch = Promise.resolve()
     .then(() => orch.resume())
     .catch((err) => {
       const event = { runId, type: 'error', message: err && err.message ? err.message : String(err) };
@@ -5164,9 +5340,11 @@ const isLiveRun = (id) => liveRunIds().includes(id);
  * D30: this process is still inside the run's orch.run()/orch.resume() promise. liveRunIds() drops a run
  * the moment its status reads 'done', and that happens BEFORE the harness's finally (teardown + keep
  * policy). `settled` is set by the .finally at each launch site, so a run torn down long ago, or one whose
- * teardown skipped the worktreeRemoved stamp, never reads as finishing.
+ * teardown skipped the worktreeRemoved stamp, never reads as finishing. A paused run being stopped
+ * (STOPS_IN_FLIGHT) is finishing too: its entry settled long ago, its row and its done frame read
+ * stopped, and its teardown is still committing and removing the worktree.
  */
-const isFinishingRun = (id) => [...runs.values()].some((r) => r.kind !== 'action' && r.kind !== 'scriptbench' && r.pipelineId === id && !r.settled);
+const isFinishingRun = (id) => STOPS_IN_FLIGHT.has(id) || [...runs.values()].some((r) => r.kind !== 'action' && r.kind !== 'scriptbench' && r.pipelineId === id && !r.settled);
 const memberFor = (row, key) => { const ms = membersOfRow(row); return key ? ms.find((m) => m.projectKey === key) : (ms.length === 1 ? ms[0] : null); };
 const checkoutRecOf = (runId, pk) => checkoutRecordsFor(findPipelineRowById(runId))?.members.find((x) => x.projectKey === pk) || null;
 async function stopMemberServices(runId, projectKey) {
@@ -6373,13 +6551,17 @@ function markResumedRescan(entry) {
   broadcast({ type: 'workspaces-changed', action: 'rescan-resumed', workspaceId: entry.workspaceId, runId: entry.id });
 }
 
-/** Stop the automatic re-scan still owning a workspace: its member set is out of date. */
-function supersedeRescans(id) {
+/** Stop the automatic re-scan still owning a workspace: its member set is out of date.
+ *  Awaited: a PAUSED re-scan settles only when its teardown ends, and until then it still
+ *  owns the workspace — the new re-scan would be refused. */
+async function supersedeRescans(id) {
+  const stops = [];
   for (const r of runs.values()) {
     if (r.workspaceId !== id || !r.autoRescan || !ownsWorkspaceTarget(r)) continue;
     r.superseded = true;
-    try { stopRun(r.id, 'worca'); } catch { /* best-effort: its save refuses a changed set anyway */ }
+    stops.push(stopRun(r.id, 'worca').catch(() => { /* best-effort: its save refuses a changed set anyway */ }));
   }
+  await Promise.all(stops);
 }
 
 /**
@@ -6426,7 +6608,7 @@ async function afterMembersChanged(workspace, added = []) {
     discoverProject(dir, { force: true }).then(() => emitChanged('team-metrics-changed', 'discovered')).catch(() => { /* retried hourly */ });
     discoverPolicy(dir, { force: true }).then(() => emitChanged('team-policy-changed', 'discovered')).catch(() => { /* retried hourly */ });
   }
-  supersedeRescans(workspace.id);
+  await supersedeRescans(workspace.id);
   try { return await startAutoRescan(workspace); }
   catch (err) { return { skipped: err && err.message ? err.message : String(err) }; }
 }
@@ -11613,6 +11795,6 @@ export const _testing = {
   askTrackRun, liveRunEntry, liveDefragRun, memoryScopeKey, startRunHandler, emitMemoryChanged, askSystemPromptFor,
   uiControl, bearerMatches,
   broadcast, askFilesRunDir,
-  validateResumeTarget, resumeTargetOf, fireResumeTicket, cancelScheduledResumes,
+  validateResumeTarget, resumeTargetOf, fireResumeTicket, cancelScheduledResumes, stopPausedPipeline,
   trackHeartbeat, heartbeatTick, BOOT_ID,
 };

@@ -27,6 +27,7 @@ import {
   createPipeline, updatePipelineTitle, appendAudit, writeState, artifactPaths, slugify, today,
   recordArtifact, writeClarify, readPipelineExtras, claimPipelineOwnership, touchHeartbeat,
   clearPipelineOwnership, HEARTBEAT_INTERVAL_MS, upsertSubAgent, listRunArtifacts, pipelineRowStamp,
+  claimPausedForStop, claimForResume, findPipelineRowById, readPipelineForResume,
 } from './artifacts.mjs';
 import { diffNameStatus, diffNumstat, diffPatch, untrackedFiles, untrackedPatch } from './git-info.mjs';
 import { claimPipelineCommand, discardPendingPipelineCommands, CONTROL_CHECK_INTERVAL_MS } from './pipeline-commands.mjs';
@@ -680,6 +681,16 @@ function mcpStatusWarning(name, status, setName) {
   if (status === 'absent') return `${name}: blocked by managed MCP policy${set}`;
   return null;
 }
+
+/** What stopPaused() must NOT take from a paused row's saved state (readPipelineForResume().state).
+ *  Everything else goes back onto this.state, so every column writeState's upsert rewrites
+ *  survives the stop — a denylist on purpose: an allowlist would silently reset a column added
+ *  later (a $0 total, an empty step ledger). Skipped: the status and pause bookkeeping the stop
+ *  replaces, the identity the constructor owns, and read-side extras that are not run state. */
+const PAUSED_STATE_SKIP = new Set([
+  'id', 'status', 'updatedAt', 'resumePoint', 'pauseReason', 'pauseDetail', 'lastAction',
+  'projectDir', 'projectKey', 'resumable', 'scheduledFor', 'scheduleId', 'active', 'gate',
+]);
 
 export class RunHarness extends EventEmitter {
   constructor(opts) {
@@ -1492,33 +1503,7 @@ export class RunHarness extends EventEmitter {
         this._emit('done', { status: 'stopped', pipelineDir: null });
         return { status: 'stopped', pipelineDir: null };
       }
-      if (isAbort(err) || this.state.status === 'stopped') {
-        this._setStatus('stopped');
-        await this._finalizeDirections();   // report an unread inbox on every terminal outcome
-        // Stopped runs are not resumable: never persist a resume point (e.g. one
-        // _dispatch assigned before stop won the race) alongside a torn-down worktree.
-        this.state.resumePoint = null;
-        if (this.pipeline) {
-          await this._persist().catch(() => {});
-          await this._auditAction('stop', 'Pipeline **stopped**').catch(() => {});
-          // The diff artifact must survive a non-done terminal path too: the work done
-          // up to this point IS committed onto the kept feature branch by the teardown
-          // in the finally below, so History has to be able to show it. Safe HERE and
-          // only here — the checkpoint refs and the worktree are still live until that
-          // teardown runs. Best-effort by construction (its own try/catch logs a warn
-          // and never rethrows), and a no-op when the run stopped before any checkpoint
-          // existed. The terminal `done` event is emitted AFTER it so the History row never
-          // paints as "no diff captured" for the tick before the artifact lands.
-          await this._buildResults({ stage: true });
-          await this._reportToSource(); // statusToResult('stopped') -> 'failed' (design PR12: no longer success-only)
-        }
-        await this._recordRunMetrics('stopped');
-        this._emit('done', {
-          status: 'stopped',
-          pipelineDir: this.pipeline?.dir || null,
-        });
-        return { status: 'stopped', pipelineDir: this.pipeline?.dir || null };
-      }
+      if (isAbort(err) || this.state.status === 'stopped') return await this._settleStopped();
       if (this.pipeline) {
         // The SETUP / SHELL site (failure-policy.mjs): a failure once the row exists.
         try {
@@ -1609,6 +1594,13 @@ export class RunHarness extends EventEmitter {
     // may be async; v1's synchronous return is awaited unchanged.
     const rehydrated = await this._engineRehydrate(rp);
     if (!rehydrated || typeof rehydrated.audit !== 'string' || !Array.isArray(rehydrated.memberWorktrees)) throw new Error('engine hook contract: _engineRehydrate must return { checkpointRef, memberWorktrees:[], audit }');
+    // The snapshot can be stale: a stop (claimPausedForStop, in this process or another) may have
+    // claimed the row since it was read. Take the row over ATOMICALLY, here: after the engine hook,
+    // so a rejected point leaves the row alone, and before the rehydration awaits anything.
+    if (!claimForResume(row.id)) {
+      const now = findPipelineRowById(row.id)?.status ?? 'gone';
+      throw new Error(`resume(): pipeline is "${now}", not resumable`);
+    }
     // D7: the point tells us whether run() ever finished its setup. Until the replay
     // below re-runs it, a pause here must re-stamp the flag (_completePaused reads it).
     this._setupDone = rp.setupIncomplete !== true;
@@ -1647,6 +1639,11 @@ export class RunHarness extends EventEmitter {
       this.planDatePrefix = row.date_prefix;
       this.pipeline = { id: row.id, dir: rp.pipelineDir, promptText: row.prompt || '' };
       this.state.pipelineDir = rp.pipelineDir;
+      // Ownership starts at the claim (claimForResume above; nothing awaited since): beat from here,
+      // so no liveness sweep reads the rehydrating row as dead, and drop the store commands aimed at
+      // the run's earlier incarnation NOW. A command mailed from here on is meant for this run: the
+      // control poller holds it until the run is rehydrated (_checkControlSlot), then executes it.
+      this._startHeartbeat();
       this._nightSyncCounts();              // night counters continue from the DB, not from 0
       this.logWriter.bind(rp.pipelineDir);
       recordArtifact(row.id, RUN_LOG_KIND, RUN_LOG_FILE);
@@ -1682,98 +1679,8 @@ export class RunHarness extends EventEmitter {
       // run suppressed. (Fallback keeps old-shape resume points working.)
       this.toolInstruction = typeof rp.toolInstruction === 'string' ? rp.toolInstruction : (this.state.tools?.instruction || '');
 
-      // ── run-root mode: read the RECORDED value, never the live flag (§10) ──
-      // Single-project rides state.branch.runRootMode (the pipelines.branch JSON
-      // column); workspace rides workspace_meta.runRootMode (real only because of the
-      // artifacts.mjs whitelist fold). Absent ⇒ 'legacy', correct for every
-      // pre-change row. A run can therefore never be resumed into a mode it was not
-      // started in, no matter when the default flips or rolls back.
-      const meta = safeParse(row.workspace_meta);
-      const recordedRaw = this.isWorkspace ? meta?.runRootMode : this.state.branch?.runRootMode;
-      this._modeRecorded = !!recordedRaw;                       // a setup-incomplete point may carry none
-      // (A setup paused in createWorktree now persists a pending member record in `branch`,
-      // so its replay pins the first attempt's mode too — the more correct behaviour.)
-      const recordedMode = recordedRaw || 'legacy';
-      this.runRootMode = recordedMode === 'detached' ? 'detached' : 'legacy';
-      // Re-stamp BEFORE the first persist so a resumed workspace run re-persists the
-      // pin rather than dropping it (toPipelineRow reads it off state every persist).
-      this.state.runRootMode = this.runRootMode;
       /** The persisted manifest, read once on a detached resume (re-assembly below). */
-      let resumeManifest = null;
-      if (this.runRootMode === 'detached') {
-        this.runRoot = join(worcaHome(), 'runs', row.id);
-        // Rehydrate the §8.8 injected set from the manifest FIRST, so teardown still
-        // excludes/rescues/cleans even if re-assembly is skipped or degrades; the
-        // re-assembly result then overwrites it.
-        resumeManifest = await readRunManifest(this.runRoot);
-        if (resumeManifest?.injectedPaths && typeof resumeManifest.injectedPaths === 'object') {
-          this.injectedPaths = resumeManifest.injectedPaths;
-        }
-      }
-
-      // ── worktree re-attach (single-project; workspace below) ──
-      const wt = this.state.branch?.worktreeDir;
-      if (wt && !existsSync(wt)) throw new Error(`worktree missing: ${wt} — cannot resume`);
-      if (wt) {
-        this.workDir = wt;
-        this.branchInfo = {
-          worktreeDir: wt,
-          branch: this.state.branch.feature,
-          sourceBranch: this.state.branch.source,
-          reusedExisting: true,
-        };
-        if (!this.isWorkspace) {
-          // Unified shapes must hold on resume too: one workDirs entry + one
-          // checkpointRefs entry, so _buildResults / _reposCtx / _teardownRunRoot
-          // read the same shape they do on a fresh run.
-          const onlyKey = this.members[0]?.projectKey;
-          if (onlyKey) {
-            this.workDirs.set(onlyKey, wt);
-            this.branchInfos.set(onlyKey, this.branchInfo);
-            this.checkpointRefs[onlyKey] = rehydrated.checkpointRef;
-            this.state.branches = { ...(this.state.branches || {}), [onlyKey]: { ...this.state.branch } };
-            this.state.checkpointRefs = { ...this.checkpointRefs };
-          }
-        }
-      }
-      this.checkpointRef = rehydrated.checkpointRef;
-      // §5.3: cwd for every spawn. Detached workspace runs start at the neutral run
-      // root; everything else at the recorded worktree — identical to a legacy run
-      // that never paused.
-      this.runCwd = (this.runRootMode === 'detached' && this.isWorkspace)
-        ? this.runRoot
-        : (wt || null);
-
-      // ── workspace rehydration (no-op on single-project) ──
-      if (this.isWorkspace && meta) {
-        this.workspaceDescription = meta.workspaceDescription || '';
-        this.workspaceOverrides = await this._scanOverrides();
-        this.checkpointRefs = meta.checkpointRefs || {};
-        for (const p of rehydrated.memberWorktrees) {
-          if (p.projectKey && p.worktreeDir) {
-            if (!existsSync(p.worktreeDir)) throw new Error(`worktree missing: ${p.worktreeDir} — cannot resume`);
-            this.workDirs.set(p.projectKey, p.worktreeDir);
-            this.toolInstructions.set(p.projectKey, p.graphInstruction || '');
-            // Re-arm teardown: _teardownWorktreeAll returns immediately on an empty
-            // branchInfos map, so without this a resumed workspace run reaching
-            // done/stopped/error would leak every member worktree and never run
-            // _commitWork (resumed work silently absent from the feature branches).
-            // Shape mirrors createWorktree()'s result as registered by _setupRunRoot.
-            this.branchInfos.set(p.projectKey, {
-              worktreeDir: p.worktreeDir,
-              branch: meta.branches?.[p.projectKey]?.feature,
-              sourceBranch: meta.branches?.[p.projectKey]?.source,
-              reusedExisting: true,
-            });
-          }
-        }
-        Object.assign(this.state, {
-          target: 'workspace', workspaceId: meta.workspaceId, workspaceKey: this.workspaceKey,
-          workspaceName: meta.workspaceName, workspaceDescription: this.workspaceDescription,
-          projectKeys: meta.projectKeys || [], projects: meta.projects || [],
-          checkpointRefs: this.checkpointRefs, branches: meta.branches || {},
-        });
-      }
+      let resumeManifest = await this._reattachCheckouts(row, rehydrated);
 
       // ── prompts/registry (cheap, local) ──
       this.registry = loadAgentRegistry(this.agentsDir);
@@ -1879,30 +1786,7 @@ export class RunHarness extends EventEmitter {
           return await this._completePaused();
         }
       }
-      if (isAbort(err) || this.state.status === 'stopped') {
-        this._setStatus('stopped');
-        await this._finalizeDirections();   // report an unread inbox on every terminal outcome
-        // Stopped runs are not resumable: never persist a resume point alongside
-        // a torn-down worktree (mirrors run()'s stopped branch).
-        this.state.resumePoint = null;
-        if (this.pipeline) {
-          await this._persist().catch(() => {});
-          await this._auditAction('stop', 'Pipeline **stopped**').catch(() => {});
-          // The diff artifact must survive a non-done terminal path too: the work done
-          // up to this point IS committed onto the kept feature branch by the teardown
-          // in the finally below, so History has to be able to show it. Safe HERE and
-          // only here — the checkpoint refs and the worktree are still live until that
-          // teardown runs. Best-effort by construction (its own try/catch logs a warn
-          // and never rethrows), and a no-op when the run stopped before any checkpoint
-          // existed. The terminal `done` event is emitted AFTER it so the History row never
-          // paints as "no diff captured" for the tick before the artifact lands.
-          await this._buildResults({ stage: true });
-          await this._reportToSource(); // statusToResult('stopped') -> 'failed' (design PR12: no longer success-only)
-        }
-        await this._recordRunMetrics('stopped');
-        this._emit('done', { status: 'stopped', pipelineDir: this.pipeline?.dir || null });
-        return { status: 'stopped', pipelineDir: this.pipeline?.dir || null };
-      }
+      if (isAbort(err) || this.state.status === 'stopped') return await this._settleStopped();
       if (this.pipeline) {
         // The SETUP / SHELL site (failure-policy.mjs). `rp` is the point this resume
         // consumed — the fallback when the engine holds none.
@@ -1951,6 +1835,240 @@ export class RunHarness extends EventEmitter {
       }
       await this.logWriter.close().catch(() => {}); // flush + stop timer (last, to capture teardown logs)
     }
+  }
+
+  /**
+   * Re-attach a parked run's checkouts from its saved row — the run-root mode it RECORDED,
+   * the single-project worktree and every workspace member's — so the teardown (and, on a
+   * resume, the agents) read the same shapes a fresh run builds. Shared by resume() and
+   * stopPaused(). `strict` (resume): a missing worktree throws — the run cannot continue
+   * without it. Not strict (a stop): it is logged and skipped — there is nothing to commit
+   * from a checkout that is gone, and the stop must still land.
+   * @param {object} row the pipelines row
+   * @param {{checkpointRef:string|null, memberWorktrees:Array}} rehydrated _engineRehydrate's result
+   * @param {{strict?:boolean}} [opts]
+   * @returns {Promise<object|null>} the run manifest read on a detached run (resume re-assembles from it)
+   */
+  async _reattachCheckouts(row, rehydrated, { strict = true } = {}) {
+    // ── run-root mode: read the RECORDED value, never the live flag (§10) ──
+    // Single-project rides state.branch.runRootMode (the pipelines.branch JSON
+    // column); workspace rides workspace_meta.runRootMode (real only because of the
+    // artifacts.mjs whitelist fold). Absent ⇒ 'legacy', correct for every
+    // pre-change row. A run can therefore never be resumed into a mode it was not
+    // started in, no matter when the default flips or rolls back.
+    const meta = safeParse(row.workspace_meta);
+    const recordedRaw = this.isWorkspace ? meta?.runRootMode : this.state.branch?.runRootMode;
+    this._modeRecorded = !!recordedRaw;                       // a setup-incomplete point may carry none
+    // (A setup paused in createWorktree now persists a pending member record in `branch`,
+    // so its replay pins the first attempt's mode too — the more correct behaviour.)
+    const recordedMode = recordedRaw || 'legacy';
+    this.runRootMode = recordedMode === 'detached' ? 'detached' : 'legacy';
+    // Re-stamp BEFORE the first persist so a resumed workspace run re-persists the
+    // pin rather than dropping it (toPipelineRow reads it off state every persist).
+    this.state.runRootMode = this.runRootMode;
+    let resumeManifest = null;
+    if (this.runRootMode === 'detached') {
+      this.runRoot = join(worcaHome(), 'runs', row.id);
+      // Rehydrate the §8.8 injected set from the manifest FIRST, so teardown still
+      // excludes/rescues/cleans even if re-assembly is skipped or degrades; the
+      // re-assembly result then overwrites it.
+      resumeManifest = await readRunManifest(this.runRoot);
+      if (resumeManifest?.injectedPaths && typeof resumeManifest.injectedPaths === 'object') {
+        this.injectedPaths = resumeManifest.injectedPaths;
+      }
+    }
+
+    // ── worktree re-attach (single-project; workspace below) ──
+    let wt = this.state.branch?.worktreeDir;
+    if (wt && !existsSync(wt)) {
+      if (strict) throw new Error(`worktree missing: ${wt} — cannot resume`);
+      // A workspace's `branch` mirrors a member, and the member loop below warns for it.
+      if (!this.isWorkspace) this._log('worktree', 'warn', `worktree missing: ${wt} — nothing to commit or remove`);
+      wt = null;
+    }
+    if (wt) {
+      this.workDir = wt;
+      this.branchInfo = {
+        worktreeDir: wt,
+        branch: this.state.branch.feature,
+        sourceBranch: this.state.branch.source,
+        reusedExisting: true,
+      };
+      if (!this.isWorkspace) {
+        // Unified shapes must hold on resume too: one workDirs entry + one
+        // checkpointRefs entry, so _buildResults / _reposCtx / _teardownRunRoot
+        // read the same shape they do on a fresh run.
+        const onlyKey = this.members[0]?.projectKey;
+        if (onlyKey) {
+          this.workDirs.set(onlyKey, wt);
+          this.branchInfos.set(onlyKey, this.branchInfo);
+          this.checkpointRefs[onlyKey] = rehydrated.checkpointRef;
+          this.state.branches = { ...(this.state.branches || {}), [onlyKey]: { ...this.state.branch } };
+          this.state.checkpointRefs = { ...this.checkpointRefs };
+        }
+      }
+    }
+    this.checkpointRef = rehydrated.checkpointRef;
+    // §5.3: cwd for every spawn. Detached workspace runs start at the neutral run
+    // root; everything else at the recorded worktree — identical to a legacy run
+    // that never paused.
+    this.runCwd = (this.runRootMode === 'detached' && this.isWorkspace)
+      ? this.runRoot
+      : (wt || null);
+
+    // ── workspace rehydration (no-op on single-project) ──
+    if (this.isWorkspace && meta) {
+      this.workspaceDescription = meta.workspaceDescription || '';
+      this.workspaceOverrides = await this._scanOverrides();
+      this.checkpointRefs = meta.checkpointRefs || {};
+      for (const p of rehydrated.memberWorktrees) {
+        if (p.projectKey && p.worktreeDir) {
+          if (!existsSync(p.worktreeDir)) {
+            if (strict) throw new Error(`worktree missing: ${p.worktreeDir} — cannot resume`);
+            this._log('worktree', 'warn', `worktree missing: ${p.worktreeDir} — nothing to commit or remove`);
+            continue;
+          }
+          this.workDirs.set(p.projectKey, p.worktreeDir);
+          this.toolInstructions.set(p.projectKey, p.graphInstruction || '');
+          // Re-arm teardown: _teardownWorktreeAll returns immediately on an empty
+          // branchInfos map, so without this a resumed workspace run reaching
+          // done/stopped/error would leak every member worktree and never run
+          // _commitWork (resumed work silently absent from the feature branches).
+          // Shape mirrors createWorktree()'s result as registered by _setupRunRoot.
+          this.branchInfos.set(p.projectKey, {
+            worktreeDir: p.worktreeDir,
+            branch: meta.branches?.[p.projectKey]?.feature,
+            sourceBranch: meta.branches?.[p.projectKey]?.source,
+            reusedExisting: true,
+          });
+        }
+      }
+      Object.assign(this.state, {
+        target: 'workspace', workspaceId: meta.workspaceId, workspaceKey: this.workspaceKey,
+        workspaceName: meta.workspaceName, workspaceDescription: this.workspaceDescription,
+        projectKeys: meta.projectKeys || [], projects: meta.projects || [],
+        checkpointRefs: this.checkpointRefs, branches: meta.branches || {},
+      });
+    }
+    return resumeManifest;
+  }
+
+  /**
+   * Stop a PAUSED run for good — stop()'s twin for a run no process drives. A paused run's
+   * loop has already unwound, so stop() would only flip the status in memory (no `done`,
+   * no persist, no teardown). This claims the row (claimPausedForStop: paused -> stopped,
+   * atomic), rehydrates what the stopped path and the teardown read, settles it through
+   * _settleStopped and tears the checkout down as resume()'s finally does: the work so far
+   * is committed onto the kept branch and the worktree is removed. Input: opts.resume, the
+   * readPipelineForResume shape. `by` = who asked (identity.mjs actor).
+   * @returns {Promise<{status:'stopped', pipelineDir:string|null}>}
+   * @throws {Error} code 'NOT_PAUSED' when the row is no longer paused — nothing was touched
+   */
+  stopPaused(by = null) {
+    const who = currentBillTo();
+    const starter = this.resumeOpts?.row?.started_by ?? this.opts.startedBy ?? null;
+    // resume()'s identities: billed to whoever asked, else the starter. A stop spawns no agent, so
+    // the owner never picks an OS user here: the teardown's git runs as this process.
+    return withBillTo(who && who !== 'local' ? who : (starter || who), () => this._stopPaused(by), { owner: starter || who });
+  }
+
+  async _stopPaused(by) {
+    const saved = this.resumeOpts;
+    if (!saved?.row || !saved?.resumePoint) throw new Error('stopPaused(): no saved pipeline provided');
+    const { row, resumePoint: rp } = saved;
+    // FIRST, before any await: the claim is what makes a racing resume or a second stop
+    // lose, and stopPausedRun's beforeStop hook relies on nothing running in between.
+    if (!claimPausedForStop(row.id)) {
+      throw Object.assign(new Error(`pipeline ${row.id} is no longer paused`), { code: 'NOT_PAUSED' });
+    }
+    // Set once the checkouts are re-attached: only then does the teardown know every checkout it
+    // removes. A run-root teardown on a half re-attached run would remove the run root with an
+    // uncommitted worktree inside it.
+    let reattached = false;
+    try {
+      try {
+        // The snapshot was read before the awaits that led here (stopPausedRun): re-read the row now
+        // that it is ours, so a booking that landed on it meanwhile (a title call outlives a pause) is
+        // written back too. The claim dropped the resume point: the snapshot's stays.
+        this._rehydratePausedState({ ...saved, state: readPipelineForResume(row.id)?.state || saved.state });
+        this._recordAction('stop', by);
+        const rehydrated = await this._engineRehydrate(rp);
+        await this._reattachCheckouts(row, rehydrated, { strict: false });
+        reattached = true;
+        // The parked executions end here: credit their pre-pause work while the checkouts are live.
+        await this._engineCreditParked(rp, this._parkedKeys);
+        await this._reattachMemoryForStop();
+      } catch (err) {
+        // The stop stands — the row is already claimed. Settle with what is known (identity and
+        // the pipeline dir at least), so the stopped path still persists, audits and emits done.
+        // Only what failed is lost: e.g. a checkout that was not re-attached stays where it is
+        // (Archive reclaims it).
+        this.state.id = row.id;
+        if (!this.pipeline) this.pipeline = { id: row.id, dir: rp.pipelineDir, promptText: row.prompt || '' };
+        if (this.state.lastAction?.kind !== 'stop') this._recordAction('stop', by);
+        this._log('orchestrator', 'warn', `stop: the run could not be fully restored (${err?.message || err}) — settling it as stopped anyway`);
+      }
+      return await this._settleStopped();
+    } finally {
+      this._stopHeartbeat();
+      // resume()'s teardown on a stop: commit the work onto the kept branch, remove the checkout.
+      if (reattached) await this._teardownRunRoot().catch(() => {});
+      await this.logWriter.close().catch(() => {}); // last, to capture the teardown's log lines
+    }
+  }
+
+  /** The saved row back into this harness, for a stop: identity, the pipeline dir and log,
+   *  every field _persist() writes back (all but PAUSED_STATE_SKIP), and the pause bookkeeping
+   *  the team metrics record (parked time up to now; why it parked stays on the record). */
+  _rehydratePausedState({ row, resumePoint: rp, state: snap }) {
+    for (const [k, v] of Object.entries(snap || {})) if (!PAUSED_STATE_SKIP.has(k) && v !== undefined) this.state[k] = v;
+    // The execution the pause parked never runs again: it ends `stopped`, as a live stop leaves it,
+    // and its pre-pause work is credited at this stop (_engineCreditParked, once re-attached).
+    this._parkedKeys = new Set((this.state.steps || []).filter((s) => s.status === 'paused').map((s) => s.key));
+    this.state.steps = (this.state.steps || []).map((s) => (s.status === 'paused' ? { ...s, status: 'stopped' } : s));
+    // I2: the total is the sum of the step costs — rehydrated from them, exactly as resume() does.
+    this.state.totalCostUsd = sumStepCosts(this.state.steps);
+    this.state.id = row.id;
+    this.state.status = row.status;            // 'paused' until _settleStopped flips it (no event here)
+    this.state.lastAction = null;
+    this._clearPauseReason();                  // a stopped run shows no pause banner
+    this.baseName = row.base_name;
+    this.planDatePrefix = row.date_prefix;
+    this.workflowId = rp.workflowId || this.workflowId;
+    this.pipeline = { id: row.id, dir: rp.pipelineDir, promptText: row.prompt || '' };
+    this.state.pipelineDir = rp.pipelineDir;
+    this._nightSyncCounts();                   // the Away mode counters the stopped frame reports
+    this.logWriter.bind(rp.pipelineDir);
+    recordArtifact(row.id, RUN_LOG_KIND, RUN_LOG_FILE);
+    const iv = rp.interventions && typeof rp.interventions === 'object' ? rp.interventions : {};
+    const pausedAt = Date.parse(iv.pausedAt || row.updated_at);
+    this._metricsIv = {
+      questions: iv.questions | 0, pauses: iv.pauses | 0, resumes: iv.resumes | 0,
+      pausedMs: (Number.isFinite(iv.pausedMs) ? iv.pausedMs : 0) + (Number.isFinite(pausedAt) ? Math.max(0, Date.now() - pausedAt) : 0),
+      pausedAt: null,
+      lastPauseReason: iv.lastPauseReason ?? null, lastPauseDetail: iv.lastPauseDetail ?? null,
+    };
+  }
+
+  /** The interrupted execution's memory writes, back to the store. A pause does not sync the
+   *  execution it killed — resume()'s _mountMemory does, first thing. A stop never remounts:
+   *  it adopts the ledger's mount as this run's memory instead, so _settleStopped's
+   *  _buildResults runs the run-end sync (exactly as a live stop's does), the teardown excludes
+   *  and removes the §8.8 entry, and the server's done hook pokes the open Memory views. */
+  async _reattachMemoryForStop() {
+    if (!this.pipeline?.dir) return;
+    let ledger = null;
+    try { ledger = JSON.parse(await readFile(this._memoryLedgerPath(), 'utf8')); } catch { return; }   // never mounted
+    if (!ledger || !ledger.baseline || !Array.isArray(ledger.dirs)) return;
+    const cwd = this.runCwd || null;
+    const scope = (this.runRoot && cwd === this.runRoot) ? 'runRoot'
+      : ([...this.workDirs.entries()].find(([, d]) => d === cwd)?.[0] ?? null);
+    if (scope) await this._registerMemoryMount(scope);
+    // The ledger's mount: the writable copy since the write split, or the in-checkout rules dir
+    // of a run paused before it (a pause keeps the checkout) — whichever still exists.
+    const mount = (typeof ledger.mount === 'string' && existsSync(ledger.mount)) ? ledger.mount : memoryWorkPath(this.pipeline.dir);
+    this.memoryChanges = Array.isArray(ledger.changes) ? ledger.changes : [];
+    this.memory = { root: memoryRoot(), mount, rules: null, dirs: ledger.dirs, baseline: ledger.baseline };
   }
 
   /** Single-project branch resolution — VERBATIM _setupWorktree semantics.
@@ -4596,6 +4714,38 @@ export class RunHarness extends EventEmitter {
     }
   }
 
+  /**
+   * The stopped terminal path — ONE body for run(), resume() and stopPaused(): the row
+   * reads stopped with no resume point, the audit says who, the work so far becomes the
+   * diff artifact (the caller's finally then commits it onto the kept branch and removes
+   * the checkout), the task source and team metrics hear about it, then `done`.
+   * @returns {Promise<{status:'stopped', pipelineDir:string|null}>}
+   */
+  async _settleStopped() {
+    this._setStatus('stopped');
+    await this._finalizeDirections();   // report an unread inbox on every terminal outcome
+    // Stopped runs are not resumable: never persist a resume point (e.g. one _dispatch
+    // assigned before stop won the race) alongside a torn-down worktree.
+    this.state.resumePoint = null;
+    if (this.pipeline) {
+      await this._persist().catch(() => {});
+      await this._auditAction('stop', 'Pipeline **stopped**').catch(() => {});
+      // The diff artifact must survive a non-done terminal path too: the work done
+      // up to this point IS committed onto the kept feature branch by the teardown
+      // in the caller's finally, so History has to be able to show it. Safe HERE and
+      // only here — the checkpoint refs and the worktree are still live until that
+      // teardown runs. Best-effort by construction (its own try/catch logs a warn
+      // and never rethrows), and a no-op when the run stopped before any checkpoint
+      // existed. The terminal `done` event is emitted AFTER it so the History row never
+      // paints as "no diff captured" for the tick before the artifact lands.
+      await this._buildResults({ stage: true });
+      await this._reportToSource(); // statusToResult('stopped') -> 'failed' (design PR12: no longer success-only)
+    }
+    await this._recordRunMetrics('stopped');
+    this._emit('done', { status: 'stopped', pipelineDir: this.pipeline?.dir || null });
+    return { status: 'stopped', pipelineDir: this.pipeline?.dir || null };
+  }
+
   /** Team metrics (team-metrics-design.md §4.5): one record per terminal run. Idempotent per
    *  instance and fail-soft — a metrics failure is a log line, never a run failure. */
   async _recordRunMetrics(status, error = null) {
@@ -5914,6 +6064,9 @@ export class RunHarness extends EventEmitter {
    */
   _checkControlSlot() {
     if (!this.pipeline?.id) return;
+    // A resume still rehydrating leaves the command pending: stop() and pause() act on a RUNNING
+    // run, which this one is only once rehydrated. A later tick executes it.
+    if (this._rehydrated === false) return;
     const cmd = claimPipelineCommand(this.pipeline.id);
     if (!cmd) return;
     const by = cmd.by || 'local';
@@ -6006,6 +6159,10 @@ export class RunHarness extends EventEmitter {
    *  failure fallback prefers it over the pre-dispatch point so a failure AFTER the
    *  engine finished never re-runs the graph (D14). Base engines: none. */
   _engineLastPoint() { return null; }
+
+  /** Engine hook (optional, stopPaused): credit the executions a pause parked (`keys`, their ledger
+   *  keys) at the stop that ends them for good, while the checkouts are still live. Base engines: none. */
+  async _engineCreditParked(_rp, _keys) {}
 
   /** Engine hook (optional): the run's distinct agent keys from the frozen manifest —
    *  what the skills gate needs on a setup replay (D7). Base engines: none. */

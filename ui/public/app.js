@@ -5549,6 +5549,7 @@ function clearQpanel(r) {
 function finishRun(r, status) {
   if (r._finished) return;
   r._finished = true;
+  r._finishedAs = status;   // onDone re-arms a run that finished as paused (it is stopped later)
   scheduleOnboardingRefresh();
   r._decorSeq = (r._decorSeq || 0) + 1;   // isLive(r) reads _finished/status/pendingQuestion
   r.status = status;
@@ -5605,6 +5606,10 @@ function onDone(r, msg) {
   // An 'error' pause also carries the cause it parked on; assigned unconditionally
   // for the same reason as the code above — a later reasonless done must clear it.
   r.pauseDetail = msg.detail || null;
+  // A paused run already finished once, as paused. Its stop (or a settle from elsewhere) sends a
+  // terminal done on the same runId: finish it again, for real. Never on an `error` frame: onError
+  // stays guarded, so a stray error after the pause cannot turn the parked run red.
+  if (r._finished && r._finishedAs === 'paused' && RD_TERMINAL.includes(msg.status)) r._finished = false;
   finishRun(r, msg.status || 'done');
   // Nothing else picks up the FINAL spend delta: a non-cost `done` broadcasts no
   // budget-changed, and startBudgetTick refetches only while runs are live. Without
@@ -16897,26 +16902,49 @@ if (typeof window !== 'undefined') {
 // Returns {ok:true} | {ok:false,error} so a caller with its own error surface
 // (the stop modal) can render the failure inline. The card log write below is
 // unchanged, so the run's own log still records every failure.
-async function stopRun(runId, btn) {
+// A PAUSED run also sends its pipeline id — and a paused saved run no run in this tab
+// stands for sends only that (runId ''): the server settles it from its saved row, even
+// when this tab's runId is from before a server restart. When the server drove no run of
+// ours (it answers another runId, or none), no frame will settle our copy: finish it here,
+// as done(stopped) would — and every other paused copy of the pipeline (one from before a
+// server restart). A paused run already went through finishRun(r, 'paused') (it is
+// _finished), so re-arm it first or finishRun returns at its guard.
+// On the run page the server's done(stopped) frame can hand the page off to the saved run
+// (closing the dialog) before this response lands — the teardown commits and removes the
+// worktree after the frames. That is the success path, not a bug: the dialog's `closed`
+// guard drops the late response.
+async function stopRun(runId, btn, { pipelineId = '' } = {}) {
   if (btn) btn.disabled = true;
+  const r = runId ? runs.get(runId) : null;
+  const pid = pipelineId || (r && isPaused(r) ? (r.pipelineId || '') : '');
   try {
     const res = await fetch('/api/stop', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ runId }),
+      body: JSON.stringify({ ...(runId ? { runId } : {}), ...(pid ? { pipelineId: pid } : {}) }),
     });
     if (!res.ok) {
       const err = await safeJson(res);
       if (btn) btn.disabled = false;
       const msg = String((err && err.error) || res.status);
-      const r = runs.get(runId);
-      if (r) onLog(r, { source: 'ui', level: 'error', text: `stop failed: ${msg}`, ts: Date.now() });
+      const rr = runs.get(runId);
+      if (rr) onLog(rr, { source: 'ui', level: 'error', text: `stop failed: ${msg}`, ts: Date.now() });
       return { ok: false, error: msg };
+    }
+    const data = await safeJson(res);
+    // Every paused copy of this pipeline in this tab that the server's frames will not reach — this
+    // run, or a copy from before a server restart — is finished here.
+    if (pid) {
+      for (const x of [...runs.values()]) {
+        if (x.pipelineId !== pid || !isPaused(x) || (data && data.runId === x.runId)) continue;
+        x._finished = false;
+        finishRun(x, 'stopped');
+      }
     }
   } catch (e) {
     if (btn) btn.disabled = false;
-    const r = runs.get(runId);
-    if (r) onLog(r, { source: 'ui', level: 'error', text: `stop error: ${e.message}`, ts: Date.now() });
+    const rr = runs.get(runId);
+    if (rr) onLog(rr, { source: 'ui', level: 'error', text: `stop error: ${e.message}`, ts: Date.now() });
     return { ok: false, error: e.message };
   }
   return { ok: true };
@@ -17103,17 +17131,21 @@ document.addEventListener('click', (e) => {
 let stopModalClose = null;
 function closeStopModal() { if (stopModalClose) stopModalClose(); }
 
-function openStopModal(runId) {
+// `target`: { runId } — a run this tab holds (the run page; the saved run's live run) — or
+// { pipelineId, title, branch, onStopped } — a paused saved run no run in this tab stands for.
+function openStopModal(target) {
   const modal = document.getElementById('stop-modal');
-  const r = runs.get(runId);
-  if (!modal || !r) return;
+  const t = target || {};
+  const r = t.runId ? runs.get(t.runId) : null;
+  if (!modal || (t.runId ? !r : !t.pipelineId)) return;
   if (!modal.classList.contains('hidden')) return;   // double-open guard: a second
                                                      // open would stack a second
                                                      // onOk -> two POST /api/stop
   const q = (sel) => modal.querySelector(sel);
-  modal.dataset.runId = runId;                       // both openers stamp the target
-  q('.stop-ident-title').textContent = r.title || runId;
-  const branch = r.branchFeature || '';
+  if (t.runId) modal.dataset.runId = t.runId;        // both openers stamp the target
+  else modal.dataset.pipelineId = t.pipelineId;
+  q('.stop-ident-title').textContent = (r ? r.title : t.title) || t.runId || t.pipelineId;
+  const branch = (r ? r.branchFeature : t.branch) || '';
   const branchEl = q('.stop-ident-branch');
   branchEl.textContent = branch;
   branchEl.hidden = !branch;                         // no branch -> no blank line
@@ -17122,6 +17154,8 @@ function openStopModal(runId) {
   const ok = q('.stop-confirm');
   const cancel = q('.stop-cancel');
   ok.disabled = false; ok.textContent = 'Stop pipeline';
+  // A paused run is not running: the way out of the dialog keeps it paused.
+  cancel.textContent = (r ? isPaused(r) : true) ? 'Keep paused' : 'Keep running';
   cancel.disabled = false;                           // a prior generation may have parked it
   modal.classList.remove('hidden');
   ok.focus();
@@ -17140,6 +17174,7 @@ function openStopModal(runId) {
     closed = true;
     modal.classList.add('hidden');
     delete modal.dataset.runId;
+    delete modal.dataset.pipelineId;
     if (stopModalClose === done) stopModalClose = null;  // never clobber a newer handle
     ok.removeEventListener('click', onOk);
     cancel.removeEventListener('click', onCancel);
@@ -17158,10 +17193,10 @@ function openStopModal(runId) {
     ok.textContent = 'Stopping…';
     cancel.disabled = true;
     cardAlert(card, null);
-    const res = await stopRun(runId, ok);
+    const res = await stopRun(t.runId || '', ok, { pipelineId: t.pipelineId || '' });
     inFlight = false;
     if (closed) return;                 // torn down from outside while in flight
-    if (res && res.ok) { done(); return; }
+    if (res && res.ok) { done(); if (t.onStopped) t.onStopped(); return; }
     ok.disabled = false;                // stopRun already re-enabled it; be explicit
     ok.textContent = 'Stop pipeline';
     cancel.disabled = false;            // the run is still live — retry or keep it
@@ -20136,7 +20171,7 @@ function hdPipelineRun(record) {
 }
 
 // That run while it is not over. POST /api/pause and /api/stop take a live runId, which the
-// saved run does not have.
+// saved run does not have (a PAUSED saved run is stopped by its pipeline id instead).
 function hdLiveRun(record) {
   const r = hdPipelineRun(record);
   return r && !RD_TERMINAL.includes(r.status) ? r : null;
@@ -20164,7 +20199,8 @@ function gateHdResume(btn, { reason, detail }) {
 }
 
 // The bar's run controls that follow the pipeline's live run, by paintRdHeader's rules: Pause
-// while it is not paused, Stop while it is not over, the Resume split while it is paused. With
+// while it is not paused, Stop while it is not over, the Resume split while it is paused (with no
+// live run, a paused saved run offers Stop too: it is stopped through its row). With
 // no live run, Resume keeps the saved state's rule (paused + interrupted only, D3, and only while
 // a resume point exists — v1 points were retired by the v2 upgrade; a LIVE snapshot has no
 // `resumable` field, so `!== false` keeps the live path untouched).
@@ -20174,8 +20210,18 @@ function paintHdLive(screen, record, data) {
   const stopBtn = screen.querySelector('.hd-stop');
   if (!pauseBtn || !stopBtn) return;
   const live = hdLiveRun(record);
+  // No live run but a pipeline run in this tab: its newest run ended (resumed elsewhere, then
+  // finished), so the load-time pause is stale and the pipeline is over.
+  const over = !live && !!hdPipelineRun(record);
+  // The saved run's status: the History row when it has one — `pipelines-changed` refreshes it
+  // (refreshHdFromRow), so a stop or resume from another tab, the CLI or chat lands here — else
+  // the detail loaded with the page (a deep link's minimal record carries no status).
+  const savedStatus = String((record && record.status) || (data.state && data.state.status) || '').toLowerCase();
+  // A paused saved run no run in this tab stands for is stopped through its row (POST /api/stop
+  // {pipelineId}). An interrupted one never is: it stays resumable.
+  const pausedSaved = !live && !over && savedStatus === 'paused';
   pauseBtn.hidden = !live || isPaused(live);
-  stopBtn.hidden = !live;
+  stopBtn.hidden = live ? live.status === 'interrupted' : !pausedSaved;
   // pauseRun disables Pause and re-enables it only on failure, and frames keep landing before
   // the run flips to `pausing` (C16): never re-enable mid-request. Only a new live run (a
   // resume mints a fresh runId) re-arms it.
@@ -20187,11 +20233,8 @@ function paintHdLive(screen, record, data) {
   const resumeBtn = screen.querySelector('.hd-resume');
   if (!split || !resumeBtn || resumeBtn.dataset.resumeState === 'busy') return;
   const st = data.state;
-  // No live run but a pipeline run in this tab: its newest run ended (resumed elsewhere, then
-  // finished), so the load-time pause is stale and the pipeline is over.
-  const over = !live && !!hdPipelineRun(record);
   const resumable = live ? isPaused(live)
-    : !over && HD_RESUMABLE.has(String(st.status || '').toLowerCase()) && st.resumable !== false;
+    : !over && HD_RESUMABLE.has(savedStatus) && st.resumable !== false;
   split.hidden = !resumable;
   resumeBtn.hidden = !resumable;
   const resumeMore = screen.querySelector('.hd-resume-more');
@@ -20779,8 +20822,23 @@ function setupHdActions(screen, record, data) {
     else if (errEl && errEl.textContent.startsWith('Could not pause: ')) { errEl.hidden = true; errEl.textContent = ''; }
   });
   screen.querySelector('.hd-stop').addEventListener('click', () => {
-    const live = hdLiveRun(hdCurrentRecord(record));
-    if (live) openStopModal(live.runId);
+    const rec = hdCurrentRecord(record);
+    const live = hdLiveRun(rec);
+    if (live) { openStopModal({ runId: live.runId }); return; }
+    // A paused saved run: stopped through its row, then this page re-reads what it became.
+    const st = histDetailState && histDetailState.data ? histDetailState.data.state : null;
+    if (!st || String((rec && rec.status) || st.status || '').toLowerCase() !== 'paused') return;
+    openStopModal({
+      pipelineId: rec.id, title: st.title || rec.title || rec.id,
+      branch: (st.branch && st.branch.feature) || '',
+      onStopped: () => {
+        // The list row says so at once (Needs you drops it) and its repaint re-reads this page
+        // (refreshHdFromRow) — once, whichever lands first, this or the `pipelines-changed` reload.
+        const row = (state.historyAll || []).find((p) => p && p.id === rec.id && p.projectKey === rec.projectKey);
+        if (row) { row.status = 'stopped'; paintHistory(); }
+        else reloadHistDetail();
+      },
+    });
   });
   paintHdLive(screen, record, data);
 
@@ -21044,6 +21102,10 @@ function refreshHdFromRow() {
   const row = (state.historyAll || []).find(
     (r) => r && r.id === histDetailState.id && r.projectKey === histDetailState.key);
   if (!row) return;                       // archived / filtered out of the model entirely
+  // A parked saved run that ended under the page (stopped through this tab's paused entry, or from
+  // another tab, the CLI or chat): its header, banners and tabs read the loaded detail, so load it again.
+  const loaded = String((histDetailState.data.state && histDetailState.data.state.status) || '').toLowerCase();
+  if (HD_RESUMABLE.has(loaded) && RD_TERMINAL.includes(String(row.status || '').toLowerCase()) && reloadHistDetail()) return;
   histDetailState.record = row;
   const { screen, data } = histDetailState;
   paintHdHeaderMeta(screen, row, data);
@@ -21054,6 +21116,23 @@ function refreshHdFromRow() {
   paintHdAfter(screen, row, data);
   paintHdLive(screen, row, data);
   refreshHdOverviewTab();   // the one tab body that reads mutable record fields
+}
+
+// Re-open the saved run in place (a fresh detail fetch): its status moved under the page — a
+// Stop — and the bar, banners and tabs all read the loaded detail, which refreshHdFromRow keeps.
+function reloadHistDetail() {
+  if (!histDetailState || !histDetailState.screen) return false;
+  const parsed = parseHistDetailParam(location.hash.replace(/^#history\//, ''));
+  if (!parsed || parsed.id !== histDetailState.id || parsed.projectKey !== histDetailState.key) return false;
+  // A Stop dialog opened on this page asks about the run it was (another tab, the CLI or chat may have
+  // stopped it): it closes with the page, as leaving the page closes it (closeHistDetail).
+  closeStopModal();
+  // An open diff-comment draft lives only in this page: keep the page, whose bar still repaints from
+  // the row (refreshHdFromRow). The next row refresh with no draft open re-reads it.
+  if (histDetailState.screen.querySelector('.hd-cmt-thread[data-draft="1"], .hd-cmt-block[data-composer="1"]')) return false;
+  openHistDetail(parsed, { instant: true });
+  if (histDetailState && histDetailState.screen) setHdMode(histDetailState.screen, parsed.mode, parsed.tab, { focus: false });
+  return true;
 }
 
 // --- section tabs: pill row + lazily-built section bodies -------------------
@@ -26665,7 +26744,7 @@ function openRunDetail(runId, { instant = false } = {}) {
   // module state at CLICK time, so a detail->detail hop can never stop the run
   // that was open when the listener was bound.
   screen.querySelector('.rd-stop').addEventListener('click', () => {
-    openStopModal(runDetailState.runId);
+    openStopModal({ runId: runDetailState.runId });
   });
   // Away mode on this run (POST /api/run/night). Reads the run at CHANGE time, like Stop; the run id is
   // captured before the POST, since the user may open another run while it is in flight.
@@ -27917,10 +27996,11 @@ function paintRdHeader(screen, r) {
   const paused = isPaused(r);
   const pauseBtn = screen.querySelector('.rd-pause');
   const stopBtn = screen.querySelector('.rd-stop');
-  // Hidden iff the run is OVER. An interrupted/pausing run keeps both controls: it is
-  // parked, not finished, and can still be resumed or discarded.
+  // Hidden iff the run is OVER. A paused/pausing run keeps both controls: it is parked,
+  // not finished. An interrupted one keeps no Stop: it is only ever resumed.
   pauseBtn.hidden = terminal;
-  stopBtn.hidden = terminal;
+  // An interrupted run is never stopped — it stays resumable (stop-paused.mjs refuses it).
+  stopBtn.hidden = terminal || r.status === 'interrupted';
   // Run after this one (the list card's old schedule-after button): a pipeline run with a pipeline
   // id, in every state. A finished run is followed up, as on the saved run's bar (paintHdAfter).
   const afterBtn = screen.querySelector('.rd-after');

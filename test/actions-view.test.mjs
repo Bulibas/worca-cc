@@ -87,10 +87,11 @@ test('ready with setup pending: action buttons shown, with the "Setup runs befor
   assert.match(el.textContent, /Setup runs before the first action/);
 });
 
-test('run not finished (interrupted / paused): no Check out, a "resume or stop" hint', () => {
+test('run not finished (interrupted / paused): no Check out, a hint', () => {
   const m = model(member()); m.finished = false; m.runStatus = 'interrupted';
   const el = renderActionsCard(m, { doc, handlers: {} });
-  assert.match(el.textContent, /Resume or stop the run first/);
+  assert.match(el.textContent, /Check out is available once the run has finished\./);
+  assert.doesNotMatch(el.textContent, /stop the run/);
   assert.equal(labelsOf(el).some((t) => t === 'Check out'), false);
 });
 

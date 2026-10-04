@@ -14,6 +14,14 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { getDb } from '../src/core/db.mjs';
 import { enqueuePipelineCommand, claimPipelineCommand, reapPipelineCommands, discardPendingPipelineCommands } from '../src/core/pipeline-commands.mjs';
 import { RunHarness } from '../src/core/run-harness.mjs';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { gitDir } from './helpers/git-dir.mjs';
+import { graphResumePoint } from './helpers/graph-templates.mjs';
+import { projectKey } from '../src/core/store.mjs';
+import { addProject } from '../src/core/projects.mjs';
+import { createTicket, resumeTicketsFor } from '../src/core/scheduler.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, '..', 'src', 'cli', 'worca-cc.mjs');
@@ -45,6 +53,19 @@ function insertPipeline({ id, title, status, minutesAgo = 1, ownerPid = null, ow
     getDb().prepare('UPDATE pipelines SET owner_pid = ?, owner_host = ?, heartbeat_at = ? WHERE id = ?')
       .run(ownerPid, ownerHost, heartbeatAt, id);
   }
+}
+
+/** A paused (or interrupted) row the CLI can stop in-process: registered project, v2 resume
+ *  point, no worktree (the harness suite covers the teardown). */
+async function insertParked({ id, title, status = 'paused' }) {
+  const dir = gitDir(`cli-${id}`);
+  await addProject({ name: `cli-${id}`, path: dir });
+  const iso = new Date().toISOString();
+  getDb().prepare(`
+    INSERT INTO pipelines (id, project_key, target, title, status, phase, cycle, started_at, updated_at, resume_point)
+    VALUES (?, ?, 'project', ?, ?, 'plan', 1, ?, ?, ?)
+  `).run(id, projectKey(dir), title, status, iso, iso,
+    JSON.stringify(graphResumePoint({ pipelineDir: mkdtempSync(join(tmpdir(), 'cli-stop-pdir-')) })));
 }
 
 const commandsOf = (pipelineId) => getDb().prepare(
@@ -167,12 +188,100 @@ test('pause refuses a paused run and points at resume', async () => {
   assert.match(r.stderr, /is "paused" — pause targets a live run — resume it with: worca resume ddd10002/);
 });
 
+test('stop a PAUSED run: settled right here — stopped, no resume point, nothing enqueued', async () => {
+  await insertParked({ id: 'hhh10001', title: 'parked work' });
+  const r = await run(['stop', 'hhh10001']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /Stopped parked work/);
+  const row = getDb().prepare('SELECT status, resume_point FROM pipelines WHERE id = ?').get('hhh10001');
+  assert.equal(row.status, 'stopped');
+  assert.equal(row.resume_point, null);
+  assert.equal(commandsOf('hhh10001').length, 0, 'a paused run has no owner to mail');
+});
+
+test('stop --json on a paused run reports the outcome', async () => {
+  await insertParked({ id: 'hhh10002', title: 'parked json' });
+  const r = await run(['stop', '--json', 'hhh10002']);
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.outcome, 'stop');
+  assert.equal(out.status, 'stopped');
+  assert.equal(out.commandId, null, 'same keys as a live stop: no command was mailed');
+  assert.equal(out.consumed, null);
+});
+
+test('stop refuses an INTERRUPTED run and points at resume — it stays resumable', async () => {
+  await insertParked({ id: 'hhh10003', title: 'crashed', status: 'interrupted' });
+  const r = await run(['stop', 'hhh10003']);
+  assert.equal(r.code, 1, r.stderr);
+  assert.match(r.stderr, /is "interrupted" — stop targets a live or paused run — resume it with: worca resume hhh10003/);
+  const row = getDb().prepare('SELECT status, resume_point FROM pipelines WHERE id = ?').get('hhh10003');
+  assert.equal(row.status, 'interrupted');
+  assert.ok(row.resume_point);
+});
+
+test('stop a PAUSED run cancels its pending "Resume at…" ticket, as the UI stop does', async () => {
+  await insertParked({ id: 'hhh10004', title: 'parked with a ticket' });
+  createTicket({ title: 'resume later', runAtMs: Date.now() + 3_600_000, request: {}, resumePipelineId: 'hhh10004' });
+  const r = await run(['stop', 'hhh10004']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(resumeTicketsFor('hhh10004').length, 0, 'a stopped run has nothing left to resume');
+});
+
+test('two terminals stopping one PAUSED run at once: both succeed (stopping a stopped run is idempotent)', async () => {
+  await insertParked({ id: 'hhh10005', title: 'parked twice' });
+  const [a, b] = await Promise.all([run(['stop', 'hhh10005']), run(['stop', 'hhh10005'])]);
+  assert.deepEqual([a.code, b.code], [0, 0], `${a.stderr} | ${b.stderr}`);
+  assert.match(a.stdout + b.stdout, /Stopped parked twice/);
+  assert.equal(getDb().prepare('SELECT status FROM pipelines WHERE id = ?').get('hhh10005').status, 'stopped');
+});
+
+test('stop a PAUSED run whose project is not registered here: refused, with how to register it, and left paused', async () => {
+  const iso = new Date().toISOString();
+  getDb().prepare(`
+    INSERT INTO pipelines (id, project_key, target, title, status, phase, cycle, started_at, updated_at, resume_point)
+    VALUES (?, ?, 'project', ?, 'paused', 'plan', 1, ?, ?, ?)
+  `).run('hhh10006', projectKey(gitDir('cli-hhh10006')), 'unregistered', iso, iso,
+    JSON.stringify(graphResumePoint({ pipelineDir: mkdtempSync(join(tmpdir(), 'cli-stop-pdir-')) })));
+  const r = await run(['stop', 'hhh10006']);
+  assert.equal(r.code, 1, r.stderr);
+  assert.match(r.stderr, /not onboarded on this machine — register it \(worca add --path <project dir>\) or run this from the project directory/);
+  assert.equal(getDb().prepare('SELECT status FROM pipelines WHERE id = ?').get('hhh10006').status, 'paused');
+});
+
+test('stop a PAUSED run: Ctrl+C is held while the stop commits the work, and released after it', async () => {
+  await insertParked({ id: 'hhh10007', title: 'parked, interrupted' });
+  const { cmdControl } = await import('../src/cli/control.mjs');
+  const metrics = RunHarness.prototype._recordRunMetrics;
+  let inStop = false;
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  // Hold the stop after its claim, before its teardown (the window a Ctrl+C must not cut short).
+  RunHarness.prototype._recordRunMetrics = async function held(...a) { inStop = true; await gate; return metrics.apply(this, a); };
+  const before = process.listenerCount('SIGINT');
+  try {
+    const out = [];
+    const p = cmdControl('stop', ['hhh10007'], { out: (l) => out.push(l), c: (_k, s) => s, fail: (m) => { throw new Error(m); } });
+    for (let i = 0; i < 200 && !inStop; i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(inStop, 'the stop reached its settle');
+    assert.equal(process.listenerCount('SIGINT'), before + 1, 'a Ctrl+C mid-stop is held');
+    release();
+    assert.equal(await p, 0);
+    assert.match(out.join('\n'), /Stopped parked, interrupted/);
+  } finally {
+    release();
+    RunHarness.prototype._recordRunMetrics = metrics;
+  }
+  assert.equal(process.listenerCount('SIGINT'), before, 'and released once the stop is over');
+  assert.equal(getDb().prepare('SELECT status FROM pipelines WHERE id = ?').get('hhh10007').status, 'stopped');
+});
+
 test('a done run is refused for both verbs', async () => {
   insertPipeline({ id: 'ddd10003', title: 'finished run', status: 'done' });
   for (const verb of ['stop', 'pause']) {
     const r = await run([verb, 'ddd10003']);
     assert.equal(r.code, 1, r.stderr);
-    assert.match(r.stderr, new RegExp(`is "done" — ${verb} targets a live run`));
+    assert.match(r.stderr, new RegExp(`is "done" — ${verb} targets a live ${verb === 'stop' ? 'or paused ' : ''}run`));
   }
 });
 
@@ -196,7 +305,7 @@ test('unknown options, missing id, ambiguous prefix and help all fail cleanly', 
   assert.match(amb.stderr, /matches 2 runs/);
   const help = await run(['stop', 'help']);
   assert.equal(help.code, 0, help.stderr);
-  assert.match(help.stdout, /worca stop \| worca pause — control a live run/);
+  assert.match(help.stdout, /worca stop \| worca pause — control a run from the terminal/);
 });
 
 // ── the transport: owner claims and executes, the CLI reports from the ROW ───────
