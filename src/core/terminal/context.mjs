@@ -1,0 +1,59 @@
+// src/core/terminal/context.mjs — what folder a run's terminal opens in, and the env every terminal
+// starts with (issue #573). A running run: its live worktree (with a warning: the pipeline is still
+// changing it). A finished run: its Actions checkout, or "needs-checkout". A workspace run: one per member.
+import { existsSync } from 'node:fs';
+import { membersOfRow, checkoutPathFor } from '../checkout.mjs';
+import { checkoutRecordsFor } from '../artifacts.mjs';
+import { actionBaseEnv } from '../actions/spawn.mjs';
+import { RUN_ROOT_REMOVE as FINISHED } from '../worktree.mjs';   // done | stopped | error
+
+export const LIVE_WARNING = 'This pipeline is still running and changing these files. Changes you make here are committed with the run when it ends.';
+
+export function terminalTargets(row, { isLive = () => false, exists = existsSync } = {}) {
+  const live = !!isLive(row.id);
+  const finished = FINISHED.has(row.status) && !live;
+  const recs = finished ? (checkoutRecordsFor(row)?.members || []) : [];
+  const members = membersOfRow(row).map((m) => {
+    const base = { projectKey: m.projectKey, projectName: m.projectName || m.projectKey, branch: m.br?.feature || null };
+    if (finished) {
+      const rec = recs.find((r) => r.projectKey === m.projectKey);
+      return rec ? { ...base, state: 'checkout', cwd: rec.worktreeDir, ...(rec.external ? { external: true } : {}) }
+        : { ...base, state: 'needs-checkout', cwd: null };
+    }
+    let dir = null;
+    try { dir = checkoutPathFor(row, m); } catch { dir = null; }        // a legacy row with no project dir
+    if (!dir || !exists(dir)) return { ...base, state: 'unavailable', cwd: null, reason: 'This run has no folder yet.' };
+    return { ...base, state: 'worktree', cwd: dir, ...(live ? { warning: LIVE_WARNING } : {}) };
+  });
+  return { runId: row.id, status: row.status, live, finished, workspace: row.target === 'workspace', members };
+}
+
+/** An env-name part: upper-case, anything but A-Z/0-9 becomes `_`. */
+const envPart = (s) => String(s).toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+
+/**
+ * The env a terminal starts with: the server's env without credentials (actionBaseEnv) and without
+ * PORT (worca's own port), the shell's launch vars, and the run's facts. Each RUNNING action adds
+ * WORCA_PORT_[<MEMBER>_]<ACTION>_<NAME> and WORCA_URL_[<MEMBER>_]<ACTION> (member only on a workspace
+ * run). Read once, at session start.
+ */
+export function terminalEnv({ base = process.env, sessionId, mode, runId = null, member = null, projectKey = null, branch = null,
+  cwd, workspace = false, actionSnaps = [], shellEnv = {} }) {
+  const env = { ...actionBaseEnv(base), ...shellEnv,
+    TERM: mode === 'pty' ? 'xterm-256color' : 'dumb', COLORTERM: 'truecolor',
+    WORCA_TERMINAL: '1', WORCA_TERMINAL_SESSION: sessionId, WORCA_WORKTREE: cwd };
+  delete env.PORT;                   // worca's own port (`worca ui`, the Docker image): an app started here must not bind it
+  if (mode !== 'pty') { env.PAGER = 'cat'; env.GIT_PAGER = 'cat'; }   // no tty: a pager would wait forever
+  if (runId) env.WORCA_RUN_ID = runId;
+  if (branch) env.WORCA_BRANCH = branch;
+  if (projectKey) env.WORCA_PROJECT_KEY = projectKey;
+  if (member) env.WORCA_MEMBER = member;
+  for (const s of actionSnaps) {
+    const who = workspace && s.member ? envPart(s.member) : null;
+    for (const [name, port] of Object.entries(s.ports || {})) {
+      env[['WORCA_PORT', who, envPart(s.actionId), envPart(name)].filter(Boolean).join('_')] = String(port);
+    }
+    if (s.url) env[['WORCA_URL', who, envPart(s.actionId)].filter(Boolean).join('_')] = s.url;
+  }
+  return env;
+}

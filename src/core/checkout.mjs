@@ -15,6 +15,7 @@ import { findPipelineRowById, retainedWorkFor, checkoutRecordsFor, readPrState, 
 import { branchExists, branchPushedTo, restoreBranchFromRemote, prLifecycleState } from './git-info.mjs';
 import { actionsSettings } from './settings.mjs';
 import { busyRunIdsFromPidFile, actionsPidFile } from './actions/registry.mjs';
+import { terminalPidFile } from './terminal/paths.mjs';
 
 const execFileP = promisify(execFile);
 const FINISHED = new Set(['done', 'stopped', 'error']);
@@ -33,8 +34,9 @@ const parse = (t) => { if (t && typeof t === 'object') return t; try { return JS
 export const canon = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
 const isUnder = (child, parent) => { const c = canon(child); const p = canon(parent); return c === p || c.startsWith(p + sep); };
 
-/** Busy = run ids with a live action process (pid file), plus whatever the caller adds (D12). */
-export const busyRunIds = (extra = []) => new Set([...busyRunIdsFromPidFile(actionsPidFile(worcaHome())), ...extra]);
+/** Runs with a live action process or an open terminal (#573): the cap and until-pr never touch their checkout. */
+export const busyRunIds = (extra = []) => new Set([
+  ...busyRunIdsFromPidFile(actionsPidFile(worcaHome())), ...busyRunIdsFromPidFile(terminalPidFile(worcaHome())), ...extra]);
 
 /** The project dir of a single-project row, exactly as rowToState derives it (artifacts.mjs:2249). */
 const projectDirOfRow = (row) => readStoreMeta(row.project_key)?.path ?? null;

@@ -1105,9 +1105,9 @@ test('History opens on the glance: page title, status line, facts, the tab rows;
 });
 
 // The saved run's bar carries the Running bar's controls in its order (Run after, the
-// Resume split, Pause, Stop), in both modes. The Details header keeps only the PR
-// controls and the ⋯ menu, and the glance card carries no run control.
-const HD_BAR_ORDER = ['hd-after', 'hd-resume-split', 'hd-pause', 'hd-stop'];
+// Resume split, Pause, Stop, then the terminal button), in both modes. The Details header keeps
+// only the PR controls and the ⋯ menu, and the glance card carries no run control.
+const HD_BAR_ORDER = ['hd-after', 'hd-resume-split', 'hd-pause', 'hd-stop', 'term-opener'];
 for (const [status, resumable, finished] of [
   ['done', false, true], ['paused', true, false], ['interrupted', true, false],
   ['stopped', false, true], ['error', false, true],

@@ -91,7 +91,7 @@ log(`server on ${base}`);
 // ---- Chrome, with the REAL home back for its caches
 profile = await mkdtemp(path.join(tmpdir(), 'worca-askforms-profile-'));
 chrome = spawn(CHROME, [`--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`,
-  '--headless=new', '--disable-gpu', '--window-size=1400,1000', ...SANDBOX, 'about:blank'],
+  '--headless=new', '--disable-gpu', '--use-mock-keychain', '--window-size=1400,1000', ...SANDBOX, 'about:blank'],
 { env: { ...process.env, ...REAL_ENV }, stdio: 'ignore' });
 
 let wsUrl = '';

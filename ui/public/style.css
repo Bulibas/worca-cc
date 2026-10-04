@@ -1985,7 +1985,7 @@ button.wd-member:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;
    run records one, so a filled colour would out-shout the type + graphify badges that
    only some rows carry. Sits right after the violet type pill. The head scopes carry
    the SAME pill for the main agent's configured model · effort (stepModelPillHtml). */
-.rd-ag-name .sub-model-pill,.hd-ag-row .sub-model-pill,.rd-ag-head .sub-model-pill,.hd-ag-head .sub-model-pill{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.01em;padding:1px 8px;border-radius:999px;white-space:nowrap;background:transparent;color:var(--ink-3);border:1px solid var(--line-2);}
+.rd-ag-name .sub-model-pill,.hd-ag-row .sub-model-pill,.rd-ag-head .sub-model-pill,.hd-ag-head .sub-model-pill{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.01em;padding:1px 8px;border-radius:999px;white-space:nowrap;background:transparent;color:var(--ink-2);border:1px solid var(--line-2);}
 /* graphify-use count badge (amber) — how many times an agent / sub-agent invoked the
    graphify CLI. Rendered INLINE: in the phase/node header next to the status, and on a
    sub-agent row right after the violet type pill. inline-block + parent flex `gap` size
@@ -4786,7 +4786,7 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .rd-tab:hover{border-color:var(--ink-3);color:var(--ink);}
 .rd-tab.active{background:var(--ink);color:var(--on-ink);border-color:var(--ink);}
 .rd-tab:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-.rd-tab-badge{padding:2px 8px;border-radius:999px;background:var(--field);color:var(--ink-3);
+.rd-tab-badge{padding:2px 8px;border-radius:999px;background:var(--field);color:var(--ink-2);
   font:600 10.5px var(--mono);}
 .rd-tab.active .rd-tab-badge{background:var(--blue-bg);color:var(--blue-ink-strong);}
 /* .rd-sections needs no rule of its own — the inset comes from .rd-body's
@@ -5166,6 +5166,68 @@ body.rail-collapsed .ask-dock{left:76px;}
 @media (max-width:760px){
   .ask-dock,body.rail-collapsed .ask-dock{left:0;}
 }
+
+/* ── Terminal pane (GitHub issue 573): the right side of every page. Opening it shifts the page, the Ask
+   dock and the toasts left of it; --term-w is set by the pane's resize handle (default 460px). ── */
+.term-pane{position:fixed;top:0;right:0;bottom:0;width:var(--term-w,460px);z-index:39;display:flex;flex-direction:column;
+  background:var(--panel);border-left:1px solid var(--line);box-shadow:var(--shadow-sheet);
+  /* xterm's 16 ANSI colours (terminal-pane.mjs reads them through probes). Each theme takes its own tone of a
+     token: the -ink tones are the ones written to be read on a light --field, the plain tones on a dark one.
+     "black" and "white" are ink greys, so neither disappears into the background in either theme. */
+  --term-ansi-black:light-dark(var(--ink),var(--ink-3));        --term-ansi-bright-black:var(--ink-3);
+  --term-ansi-red:light-dark(var(--red-ink),var(--red));        --term-ansi-bright-red:var(--red-ink);
+  --term-ansi-green:light-dark(var(--green-ink),var(--green));  --term-ansi-bright-green:var(--green-ink);
+  --term-ansi-yellow:light-dark(var(--amber-ink),var(--amber)); --term-ansi-bright-yellow:var(--amber-ink);
+  --term-ansi-blue:light-dark(var(--blue-ink),var(--blue));     --term-ansi-bright-blue:var(--blue-ink);
+  --term-ansi-magenta:light-dark(var(--violet-ink),var(--violet)); --term-ansi-bright-magenta:var(--pink-ink);
+  --term-ansi-cyan:light-dark(var(--teal-ink),var(--teal));     --term-ansi-bright-cyan:var(--teal-ink);
+  --term-ansi-white:var(--ink-2);                               --term-ansi-bright-white:var(--ink);}
+.term-pane[hidden]{display:none;}
+body.term-open .app{margin-right:var(--term-w,460px);}
+body.term-open .ask-dock{right:var(--term-w,460px);}
+body.term-open .toasts{right:calc(var(--term-w,460px) + 20px);}
+/* The opener: an icon button in the run bar and the project page's title row, at their controls' height. */
+.term-opener{display:inline-flex;align-items:center;justify-content:center;flex:none;width:36px;height:36px;padding:0;box-sizing:border-box;color:var(--ink-2);}
+.term-opener:hover{color:var(--ink);}
+.term-opener[aria-expanded="true"]{color:var(--ink);background:var(--hover);}
+.term-opener:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.pd-row1 .term-opener{margin-left:auto;width:39px;height:39px;}   /* Back and Remove are 39px here */
+.term-resize{position:absolute;left:-3px;top:0;bottom:0;width:6px;cursor:col-resize;}
+.term-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);}
+.term-title{font:600 13px/1 var(--sans);color:var(--ink);margin-right:auto;}
+.term-tabs{display:flex;align-items:flex-end;gap:2px;padding:6px 12px 0;border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none;}
+.term-tabs[hidden]{display:none;}
+.term-tab{flex:0 1 auto;min-width:0;max-width:180px;height:28px;padding:0 10px;margin-bottom:-1px;border:1px solid transparent;border-bottom:0;
+  border-radius:var(--r-ctrl) var(--r-ctrl) 0 0;background:none;color:var(--ink-3);font:12px/1 var(--sans);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;}
+.term-tab:hover{color:var(--ink);background:var(--hover);}
+.term-tab[aria-selected="true"]{color:var(--ink);background:var(--panel);border-color:var(--line);}
+.term-tab-ended{font-style:italic;}
+.term-tab-add{flex:none;width:28px;padding:0;font-size:16px;}
+.term-tab:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
+.term-icon{display:inline-flex;align-items:center;justify-content:center;min-width:30px;height:30px;padding:0 6px;font-size:16px;line-height:1;color:var(--ink-2);}
+.term-icon:hover{color:var(--ink);}
+.term-context{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;padding:6px 12px;border-bottom:1px solid var(--line);}
+.term-context:empty{display:none;}
+.term-member{max-width:160px;min-width:0;}
+.term-folder{flex:1 1 0;min-width:0;font:11.5px/1.4 var(--mono);color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.term-note{margin:0;color:var(--ink-2);font-size:12.5px;flex-basis:100%;}
+.term-error{color:var(--red-ink);}
+.term-warn{margin:0;padding:6px 10px;border-radius:var(--r-ctrl);background:var(--amber-bg);color:var(--amber-ink);font-size:12.5px;flex-basis:100%;}
+.term-banners:empty{display:none;}
+.term-banners{display:grid;gap:6px;padding:8px 12px 0;}
+.term-banner{margin:0;padding:6px 10px;border-radius:var(--r-ctrl);background:var(--field);color:var(--ink-2);border:1px solid var(--line);font-size:12px;}
+.term-screen{flex:1;min-height:0;margin:8px 12px 12px;padding:6px 8px;background:var(--field);color:var(--ink);
+  border:1px solid var(--line);border-radius:var(--r-ctrl);font-family:var(--mono);overflow:hidden;display:flex;flex-direction:column;}
+/* xterm opens in the host, never in .term-screen itself: FitAddon fits rows and columns to its parent's computed
+   height and width, which under border-box would count the frame's padding and border (one row clipped). */
+.term-host{flex:1;min-height:0;min-width:0;padding:0;border:0;}
+.term-sel-probe{display:none;background:var(--blue-bg);}
+.term-ansi-probe{display:none;}
+@media (max-width:760px){ body.term-open .app{margin-right:0;} .term-pane{width:100vw;} body.term-open .ask-dock{right:0;} body.term-open .toasts{right:12px;}
+  /* The dock (z-40) sits over the full-width pane (z-39): its pill would cover the terminal's input row. */
+  body.term-open .ask-dock>.ask-pill{display:none;}
+ }
 
 .ask-pill{pointer-events:auto;display:flex;align-items:center;gap:10px;padding:11px 18px 11px 14px;
   border:1.5px solid var(--line-2);border-radius:999px;background:var(--panel);color:var(--ink);

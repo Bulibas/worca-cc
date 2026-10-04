@@ -147,6 +147,8 @@ Linux, `cmd.exe /d /s /c` on Windows), so arguments, quotes, `~`, `$VAR` / `%VAR
 - **Try** runs the line on your home folder and says on the field whether it opened, or why not (the
   shell's own error). A program Worca cannot find gives a warning on Save; the line is saved anyway.
 
+To work in the checkout without leaving Worca, use the built-in [terminal](terminal.md).
+
 | OS | Editor examples | Terminal examples |
 | --- | --- | --- |
 | macOS | `xed`, `open -a "Visual Studio Code" {folder}`, `/Applications/Zed.app` | `open -a iTerm {folder}`, `open -a Terminal {folder}` |

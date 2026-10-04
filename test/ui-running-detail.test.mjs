@@ -1842,6 +1842,25 @@ test('a refused Away-mode change puts the select back and raises a toast', async
     'the run-log line stays');
 });
 
+test('Escape typed in the terminal pane belongs to the shell: the run screen stays (#573)', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  const rd = await openGlance(ctx);
+  click(window, rd.querySelector('.rd-result [data-rd-tab="workflow"]'));
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle(window, 4);
+  assert.equal(window.location.hash, '#running/r1/details/workflow');
+  const pane = window.document.querySelector('body > .term-pane');
+  assert.ok(pane, 'the terminal pane is mounted');
+  const input = window.document.createElement('textarea');            // xterm's hidden input is a textarea
+  pane.appendChild(input);
+  input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle(window, 4);
+  assert.equal(window.location.hash, '#running/r1/details/workflow');
+  assert.equal(rd.dataset.mode, 'details');
+});
+
 // The REAL live path: WS state frame -> run model -> Details › Agents (rdAgentsBody). The implementer is
 // still RUNNING; its only rows are a finished Away mode review and one the user's answer stopped.
 test("Agents (live): a stopped Away mode review is named, shows its tokens, and the running step still reads running", async () => {

@@ -91,6 +91,7 @@ import { renderRunPill, renderOverviewStrip, renderShipItStrip, renderRunningAct
 import { editorFieldEl, renderProjectActionsEditor, renderStackEditor } from './actions-config-view.mjs';
 import { createMcpView, mountProjectMcp, paintMcpResolution, paintAskMcpBlock, setMcpStripRenderer } from './mcp-view.mjs';
 import { createAskPanel } from './ask-panel.mjs';
+import { createTerminalPane } from './terminal-pane.mjs';
 import { notify, withButton, fieldError, clearFieldErrors, cardAlert, trackDirty, splitMessage, BUTTON_DONE_MS } from './feedback.mjs';
 import { createVoiceController } from './ask-voice.mjs';
 import { renderGettingStarted, renderGettingStartedPill, bindWelcome, doneCount, allStepsDone, GETTING_STARTED_STEPS } from './getting-started.mjs';
@@ -233,6 +234,7 @@ function bindMarkdownReady() {
 const pageMarkdown = (text) => (hdMarkdown.isReady() ? hdMarkdown.render(text) : { kind: 'plain' });
 
 let askPanel = null;           // Ask Worca panel — assigned by the boot mount; every seam uses askPanel?.
+let terminalPane = null;       // terminal pane (#573) — assigned by the boot mount; every seam uses terminalPane?.
 let newPipelinePrefill = null; // one-shot card → New Pipeline handoff (§10.2 seam 7, consumed by Task 11)
 
 // ---------------------------------------------------------------------------
@@ -574,6 +576,7 @@ function connectWS() {
 
   ws.addEventListener('close', () => {
     state.wsReady = false;
+    if (terminalPane) terminalPane.onConnection(false);   // its keys are not sent until the next hello
     sessionGuard.check(); // behind an identity proxy, a dropped socket may be an expired sign-in
     scheduleReconnect();
   });
@@ -753,7 +756,7 @@ function setMobileNavOpen(open) {
   document.body.classList.toggle('nav-open', next);
   mbarMenu?.setAttribute('aria-expanded', String(next));
   if (navScrim) navScrim.hidden = !next;
-  for (const n of [$('.main'), $('#mbar'), $('body > .ask-dock')]) {
+  for (const n of [$('.main'), $('#mbar'), $('body > .ask-dock'), $('body > .term-pane')]) {
     if (n) n.toggleAttribute('inert', next);
   }
   if (next) $('#side-close')?.focus();
@@ -1068,6 +1071,7 @@ function handleServerMessage(msg) {
   if (msg.type === 'hello') {
     onHello(msg);
     refreshRunningActions();
+    if (terminalPane) terminalPane.onHello(msg);
     return;
   }
 
@@ -1239,6 +1243,11 @@ function handleServerMessage(msg) {
   // socket. Handle them BEFORE the !msg.runId early-return below.
   if (typeof msg.type === 'string' && msg.type.startsWith('scriptbench-')) {
     if (scriptsCtl) scriptsCtl.onFrame(msg);
+    return;
+  }
+  // Terminal frames are tagged by sessionId (#573); the pane keeps its own.
+  if (typeof msg.type === 'string' && msg.type.startsWith('term-')) {
+    if (terminalPane) terminalPane.onFrame(msg);
     return;
   }
   // Action frames are tagged by instanceId (not runId); each controller keeps its own run's.
@@ -9091,6 +9100,7 @@ if (el.wizName) el.wizName.addEventListener('input', () => { state.wizard.name =
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (currentView() !== 'workspace-create') return;
+  if (e.target?.closest?.('.term-pane')) return;                     // Escape typed in the terminal (vim, less) is the shell's
   if (el.viewerCard && !el.viewerCard.classList.contains('hidden')) return; // modal owns Escape
   if (el.folderBrowser && !el.folderBrowser.classList.contains('hidden')) return; // modal owns Escape
   if (el.wizClose) el.wizClose.click();
@@ -10962,6 +10972,7 @@ function openProjDetail(p, parsed, { instant = false } = {}) {
   screen.querySelector('.pd-history').addEventListener('click', () => { openRunsForProject(p.key); });
   screen.querySelector('.pd-remove').addEventListener('click', () => { void removeProjectFromPage(p.key); });
   paintProjHeader(screen, p);
+  terminalPane?.syncOpeners();             // the cloned header's terminal button says whether the pane is open
   initPdTabs(screen, p);
   activateProjTab(parsed.tab, parsed.sub);
 
@@ -24338,6 +24349,7 @@ function rdHandOffOpen() {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (askPanel?.ownsKey(e)) return;
+  if (e.target?.closest?.('.term-pane')) return;                     // Escape typed in the terminal (vim, less) is the shell's
   // #527: a sync dialog (details / refusal card) owns Escape; the detail screen stays.
   if (document.querySelector('.viewer-modal.sync-modal')) return;
   if (currentView() !== 'history') return;
@@ -24376,6 +24388,7 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (askPanel?.ownsKey(e)) return;
+  if (e.target?.closest?.('.term-pane')) return;                     // Escape typed in the terminal (vim, less) is the shell's
   // #527: a sync dialog (details / refusal card) owns Escape; the detail screen stays.
   if (document.querySelector('.viewer-modal.sync-modal')) return;
   if (currentView() !== 'running') return;
@@ -24405,6 +24418,7 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (askPanel?.ownsKey(e)) return;
+  if (e.target?.closest?.('.term-pane')) return;                     // Escape typed in the terminal (vim, less) is the shell's
   // #527: a sync dialog (details / refusal card) owns Escape; the detail screen stays.
   if (document.querySelector('.viewer-modal.sync-modal')) return;
   if (currentView() !== 'projects') return;
@@ -29258,6 +29272,7 @@ function showView(name, param = '') {
   // The guide re-derives its hop on a tick, so it is told here — before a view's
   // own loader runs — and never misses a switch because a loader threw.
   onboardingViewChanged(name);
+  if (terminalPane) terminalPane.onContextChange();
 
   // Focus selection lives only while on the Running view.
   state.selectedRunId = (name === 'running') ? runDetailParts(param).runId : '';
@@ -29973,6 +29988,28 @@ askPanel = createAskPanel({
   createVoice: (hooks) => createVoiceController({ win: window, doc: document, fetch: (...args) => fetch(...args), ...hooks }),
 });
 document.body.appendChild(askPanel.root);
+
+// Terminal pane (issue #573): a JS-built body-level pane on the right, like the Ask dock above. No
+// network until it is opened (or was left open); xterm.js loads on first open, and opening it on a run
+// or a project starts (or reattaches) that page's shell.
+terminalPane = createTerminalPane({
+  doc: document,
+  win: window,
+  fetch: (...args) => fetch(...args),
+  // false while /ws is down: the pane shows it is reconnecting instead of dropping keys silently.
+  sendWs: (obj) => {
+    const ws = state.ws;
+    if (!ws || !state.wsReady) return false;
+    try { ws.send(JSON.stringify(obj)); return true; } catch { return false; }
+  },
+  getPageContext,
+  storage: window.localStorage,
+});
+document.body.appendChild(terminalPane.root);
+// Its openers are the run and project pages' header buttons (.term-opener); a page cloned later (the
+// project page) syncs its own, see openProjDetail.
+document.addEventListener('click', (e) => { if (e.target.closest?.('.term-opener')) terminalPane?.toggle(); });
+terminalPane.syncOpeners();
 
 // ---------------------------------------------------------------------------
 // Export to Claude Code — modal wiring. Turns a saved v2 workflow into a runnable

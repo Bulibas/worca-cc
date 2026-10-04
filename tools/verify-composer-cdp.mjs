@@ -88,7 +88,7 @@ log(`server ${base}`);
 // ---- chrome + cdp
 profile = await mkdtemp(path.join(tmpdir(), 'worca-cdp-profile-'));
 chrome = spawn(CHROME, ['--headless=new', ...SANDBOX, `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`,
-  '--window-size=1280,900', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check',
+  '--window-size=1280,900', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check', '--use-mock-keychain',
   '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank'],
 { stdio: ['ignore', 'pipe', 'pipe'] });
 // Keep Chrome's last stderr lines: when no DevTools target ever appears, its own

@@ -1400,6 +1400,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.destroyed) return;
     if (st.drag && e.key === 'Escape') { e.preventDefault(); cancelResize(); return; }
     if (isToggleCombo(e)) {
+      // The terminal pane (#573) owns its keys: Ctrl+K is the shell's kill-line there.
+      if (e.target && typeof e.target.closest === 'function' && e.target.closest('.term-pane')) return;
       if (e.repeat || e.isComposing) return;
       e.preventDefault();
       toggleSheet();

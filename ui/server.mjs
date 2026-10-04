@@ -150,6 +150,14 @@ import { agentIdentity } from '../src/core/agent-user.mjs';
 import { spawn } from 'node:child_process';
 import { ActionRegistry, instanceIdFor, reapOrphans, busyRunIdsFromPidFile, actionsPidFile, actionsStateFile } from '../src/core/actions/registry.mjs';
 import { runStack, stopStack } from '../src/core/actions/stack.mjs';
+import { TerminalManager, MAX_SESSIONS as TERMINAL_MAX_SESSIONS } from '../src/core/terminal/manager.mjs';
+import { terminalPidFile, zshDotDir } from '../src/core/terminal/paths.mjs';
+import { terminalTargets } from '../src/core/terminal/context.mjs';
+import { getSession as getTerminalSession, listBlocks as listTerminalBlocks, countBlocks as countTerminalBlocks, getBlock as getTerminalBlock,
+  listAudit as listTerminalAudit, listBranchWorktrees, findBranchWorktree, markInterruptedSessions } from '../src/core/terminal/store.mjs';
+import { openBranchWorktree, removeBranchWorktree, releaseBranchWorktree, enforceBranchWorktreeCap, sweepBranchWorktrees } from '../src/core/terminal/worktrees.mjs';
+import { pidAlive, killDescendants } from '../src/core/terminal/pty.mjs';
+import { createTerminalFanout } from '../src/core/terminal/fanout.mjs';
 import { detectBuiltins, builtinLaunch, copyCommandText, findOnPath } from '../src/core/actions/builtins.mjs';
 import { buildLauncherCommand, launchAndWatch, installedLaunchers, launcherExamples, launcherWarning, lineForPickedApp } from '../src/core/actions/launcher.mjs';
 import { assertNoRawCommand, normalizeStacks, memberAliases, SETUP_ACTION_ID, ActionConfigError } from '../src/core/actions/model.mjs';
@@ -434,11 +442,11 @@ const ASK_VENDOR_ASSETS = {
 // An explicit allow-list per prefix — never a directory listing — and an
 // unresolvable package leaves its routes unregistered (the /vendor 404 answers;
 // the mic then reports "voice activity detection unavailable").
-function resolveVendorDir(spec, resolve = (s) => import.meta.resolve(s), warn = (msg) => console.warn(msg)) {
+function resolveVendorDir(spec, resolve = (s) => import.meta.resolve(s), warn = (msg) => console.warn(msg), what = 'voice') {
   try {
     return path.dirname(fileURLToPath(resolve(spec)));
   } catch (err) {
-    warn(`[worca-ui] voice asset unavailable (${spec}): ${err?.message || err}`);
+    warn(`[worca-ui] ${what} asset unavailable (${spec}): ${err?.message || err}`);
     return null;
   }
 }
@@ -630,6 +638,10 @@ wss.on('connection', (ws, req) => {
   trackHeartbeat(ws);
   // Whose Ask threads this socket may see (a shared sign-in's name, else null = all).
   ws.worcaViewer = askViewer(req);
+  // Terminal (#573, D13): whether this socket may see and drive terminals, and who its keystrokes belong to.
+  ws.terminalAllowed = terminalSameOrigin(req) && terminalEnabledHere(req);
+  ws.terminalActor = actorOf(req);
+  ws.termAttached = new Set();
   // Optional ?runId=... (or ?genId=/?benchId=) -> replay that entry's buffered
   // events so a reconnecting client immediately sees the full state. Agentgen and
   // bench entries live in the SAME runs Map keyed by genId/benchId, so a single id
@@ -677,6 +689,7 @@ wss.on('connection', (ws, req) => {
     } catch {
       return;
     }
+    if (msg && typeof msg.type === 'string' && msg.type.startsWith('term-')) { handleTerminalMessage(ws, msg); return; }
     const subId = msg && msg.type === 'subscribe' ? (msg.runId || msg.genId || msg.benchId || msg.instanceId) : null;
     if (subId && runs.has(subId)) {
       replayEntry(ws, runs.get(subId));
@@ -1360,6 +1373,29 @@ for (const { prefix, dir, files } of VOICE_VENDOR) {
       res.sendFile(file, (err) => { if (!err) return; if (res.headersSent) return next(err); next(); });
     });
   }
+}
+
+// The terminal pane (issue #573): xterm.js and its fit addon, served from node_modules on an explicit
+// allow-list like the voice assets above. resolveVendorDir answers the folder of the package's `main`
+// (`<pkg>/lib` for both). A missing package leaves its routes unregistered (the /vendor 404 answers
+// and the pane says the terminal could not load).
+function terminalVendorFiles(resolveDir = (spec) => resolveVendorDir(spec, undefined, undefined, 'terminal')) {
+  const xterm = resolveDir('@xterm/xterm');
+  const fit = resolveDir('@xterm/addon-fit');
+  return [
+    ...(xterm ? [['/vendor/xterm/xterm.mjs', path.join(xterm, 'xterm.mjs'), 'text/javascript'],
+      ['/vendor/xterm/xterm.css', path.join(xterm, '..', 'css', 'xterm.css'), 'text/css']] : []),
+    ...(fit ? [['/vendor/xterm/addon-fit.mjs', path.join(fit, 'addon-fit.mjs'), 'text/javascript']] : []),
+  ];
+}
+for (const [route, file, type] of terminalVendorFiles()) {
+  if (!fs.existsSync(file)) { console.warn(`[worca-ui] terminal asset missing: ${file}`); continue; }
+  app.get(route, (_req, res, next) => {
+    res.type(type);
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.sendFile(file, (err) => { if (!err) return; if (res.headersSent) return next(err); next(); });
+  });
 }
 
 // The in-browser speech engines (docs/speech.md): pinned runtime + model files,
@@ -5364,7 +5400,9 @@ function noRawCommand(req, res) {
 }
 /** D12: live actions of this server plus any other process that shares the pid file. */
 const busyActionRunIds = (extra = []) =>
-  new Set([...actions.running().map((s) => s.runId), ...busyRunIdsFromPidFile(actionsPidFileNow()), ...extra]);
+  new Set([...actions.running().map((s) => s.runId), ...busyRunIdsFromPidFile(actionsPidFileNow()),
+    // #573: open terminals too. `terminals` is declared below; this only runs at request/boot time.
+    ...terminals.busyRunIds(), ...busyRunIdsFromPidFile(terminalPidFileNow()), ...extra]);
 
 // ── registry → runs Map entry + frames (wireScriptBench's ring buffer, D15) ──────
 function actionEntry(instanceId) {
@@ -5432,9 +5470,237 @@ async function stopMemberServices(runId, projectKey) {
   // stop() awaits a pending spawn, so a stack step that was mid-launch is caught here too.
   await actions.stopWhere((s) => s.runId === runId && (!projectKey || s.member === projectKey));
   for (const [k, st] of stackStates) if (st.runId === runId) stackStates.delete(k);
+  await terminals.closeWhere((s) => s.runId === runId && (!projectKey || s.member === projectKey), 'system', 'checkout discarded');
 }
 /** The discardCheckout callback: (projectKey, runId) of the run being discarded, never the caller's run. */
 const stopCheckoutServices = (pk, runId) => stopMemberServices(runId, pk);
+
+// ---------------------------------------------------------------------------
+// Terminal (issue #573): worca-owned shells in the right-side pane. Sessions live in a TerminalManager;
+// their output rides /ws as term-* frames to the sockets that attached (D1). Gated like Actions:
+// local, or a hosted worca that set WORCA_TERMINAL_REMOTE; never a possible agent; and only for
+// pages served by this server (D13).
+// ---------------------------------------------------------------------------
+const terminalPidFileNow = () => terminalPidFile(worcaHome());
+const terminals = new TerminalManager({ runLive: (id) => isLiveRun(id) });
+Object.defineProperty(terminals, 'pidFile', { get: terminalPidFileNow, set: () => {} });
+Object.defineProperty(terminals, 'zshDir', { get: () => zshDotDir(worcaHome()), set: () => {} });
+
+// D13: isLocalRequest checks the Origin's hostname only, so a page on another localhost port (a dev
+// server, an Action service running agent-written code) passes it. The terminal runs commands, so a
+// browser Origin must name this server exactly. No Origin = not a browser page (the agent gate applies).
+function terminalSameOrigin(req) {
+  const origin = req?.headers?.origin;
+  if (!origin) return true;
+  try { return new URL(origin).host.toLowerCase() === String(req.headers.host || '').toLowerCase(); } catch { return false; }
+}
+function terminalOriginOk(req, res) {
+  if (terminalSameOrigin(req)) return true;
+  res.status(403).json({ error: 'The terminal only answers pages served by this Worca.', code: 'TERMINAL_CROSS_ORIGIN' });
+  return false;
+}
+const terminalEnabledHere = (req = null) =>
+  !agentMayBeCaller(req) && (!REMOTE_MODE || isTruthy(process.env.WORCA_TERMINAL_REMOTE));
+/** Same origin and not a possible agent: what even Stop and Close need (they skip only the hosted gate). */
+function terminalCallerOk(req, res) {
+  if (!terminalOriginOk(req, res)) return false;
+  if (!agentMayBeCaller(req)) return true;
+  res.status(403).json({ error: 'The terminal cannot be used from inside the container while agent isolation is on. Open Worca through its published address.', code: 'TERMINAL_AGENT_BLOCKED' });
+  return false;
+}
+function requireTerminal(req, res) {
+  if (!terminalCallerOk(req, res)) return false;
+  if (terminalEnabledHere(req)) return true;
+  res.status(403).json({ error: 'The terminal is turned off on this hosted deployment. An administrator can enable it with WORCA_TERMINAL_REMOTE=1.', code: 'TERMINAL_DISABLED' });
+  return false;
+}
+const TERMINAL_RAW_FIELDS = ['cwd', 'dir', 'path', 'shell', 'env', 'args', 'command', 'cmd'];
+function rejectRawTerminalFields(req, res) {
+  const bad = TERMINAL_RAW_FIELDS.find((k) => req.body && Object.hasOwn(req.body, k));
+  if (!bad) return true;
+  res.status(400).json({ error: `A terminal opens in the folder Worca picks; "${bad}" cannot be sent.`, code: 'RAW_FIELD' });
+  return false;
+}
+const TERMINAL_ERROR_STATUS = { TOO_MANY_SESSIONS: 409, NO_FOLDER: 409, WORKTREE_FAILED: 409, BAD_BRANCH: 400, BAD_PROJECT: 400, NO_BRANCH: 404 };
+function terminalError(res, e) {
+  const status = TERMINAL_ERROR_STATUS[e?.code];
+  if (status) return res.status(status).json({ error: e.message, code: e.code });
+  console.error(`[worca-ui] terminal: ${e?.message || e}`);
+  return res.status(500).json({ error: e?.message || 'terminal failed' });
+}
+const activeActionSnaps = (runId) => actions.listFor(runId).filter((s) => ['starting', 'running', 'ready'].includes(s.status));
+
+// Frames go out through the fan-out (fanout.mjs): a socket that falls behind skips term-data and gets one
+// term-replay once its send buffer drains, so a `yes` in a terminal never grows this server's memory.
+function terminalReplayFrame(sessionId) {
+  const r = terminals.replay(sessionId);
+  return r ? { type: 'term-replay', sessionId, data: r.data, seq: r.seq, snapshot: terminals.get(sessionId) } : null;
+}
+const terminalFanout = createTerminalFanout({ sockets, replayFrame: terminalReplayFrame });
+terminals.on('data', (f) => terminalFanout.toAttached(f.sessionId, { type: 'term-data', ...f }));
+terminals.on('block', (block) => terminalFanout.toAttached(block.sessionId, { type: 'term-block', sessionId: block.sessionId, block }));
+terminals.on('status', (snapshot) => {
+  terminalFanout.toAllowed({ type: 'term-status', snapshot });
+  if (snapshot.status !== 'running' && snapshot.scope === 'branch') {
+    // busyDirs as a getter: git work runs async, and a terminal may reopen the folder meanwhile.
+    releaseBranchWorktree(snapshot.cwd, { keep: actionsSettings().keep, busyDirs: () => terminals.busyDirs(), projectDirOf: projectDirForKey })
+      .catch((e) => console.warn(`[worca-ui] terminal: could not release ${snapshot.cwd}: ${e?.message || e}`));
+  }
+});
+
+function handleTerminalMessage(ws, msg) {
+  if (!ws.terminalAllowed) return;
+  const id = typeof msg.sessionId === 'string' ? msg.sessionId : '';
+  if (!terminals.get(id)) return;
+  if (msg.type === 'term-attach') {
+    ws.termAttached.add(id);
+    ws.termLagging?.delete(id);                    // a fresh replay supersedes any pending resync
+    const frame = terminalReplayFrame(id);
+    if (frame) send(ws, frame);
+    return;
+  }
+  if (msg.type === 'term-detach') { ws.termAttached.delete(id); return; }
+  if (!ws.termAttached.has(id)) return;
+  if (msg.type === 'term-input' && typeof msg.data === 'string') terminals.write(id, msg.data, ws.terminalActor);
+  else if (msg.type === 'term-resize') terminals.resize(id, msg.cols, msg.rows);
+}
+
+app.get('/api/terminal', (req, res) => {
+  const enabled = terminalSameOrigin(req) && terminalEnabledHere(req);
+  res.json({ enabled, pty: terminals.ptyStatus(), maxSessions: TERMINAL_MAX_SESSIONS, sessions: enabled ? terminals.list() : [] });
+});
+
+app.get('/api/runs/:id/terminal', (req, res) => {
+  if (!requireTerminal(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  res.json({ enabled: true, ...terminalTargets(row, { isLive: isLiveRun }), sessions: terminals.list().filter((s) => s.runId === row.id) });
+});
+
+app.post('/api/runs/:id/terminal', async (req, res) => {
+  if (!requireTerminal(req, res) || !rejectRawTerminalFields(req, res)) return;
+  try {
+    const row = runRowForScope(req, res); if (!row) return;
+    const t = terminalTargets(row, { isLive: isLiveRun });
+    const want = typeof req.body?.member === 'string' ? req.body.member : null;
+    const m = want ? t.members.find((x) => x.projectKey === want) : (t.members.length === 1 ? t.members[0] : null);
+    if (!m) return res.status(400).json({ error: want ? 'That project is not part of this run.' : 'Pick a project: this run has more than one.', code: 'MEMBER_REQUIRED' });
+    if (!m.cwd) {
+      const code = m.state === 'needs-checkout' ? 'NOT_CHECKED_OUT' : 'NO_FOLDER';
+      return res.status(409).json({ error: code === 'NOT_CHECKED_OUT' ? 'Check out this run first.' : (m.reason || 'This run has no folder.'), code });
+    }
+    const by = actorOf(req);
+    const session = await terminals.open({ cwd: m.cwd, scope: 'run', label: `${row.title || row.id} · ${m.projectName}`, runId: row.id,
+      member: m.projectKey, projectKey: m.projectKey, branch: m.branch, workspace: t.workspace, runLive: t.live, by,
+      cols: req.body?.cols, rows: req.body?.rows, actionSnaps: activeActionSnaps(row.id) });
+    appendAuditById(row.id, `Terminal opened${byActor(by)} in ${m.projectName}.`, { actor: by });
+    res.status(201).json({ session, warning: m.warning || null });
+  } catch (e) { terminalError(res, e); }
+});
+
+app.get('/api/projects/:key/terminal', async (req, res) => {
+  if (!requireTerminal(req, res)) return;
+  try {
+    const p = await tmProject(req, res); if (!p) return;
+    const [branches, current] = await Promise.all([listLocalBranches(p.path), currentBranch(p.path)]);
+    res.json({ enabled: true, projectKey: p.key, dir: p.path, branches, current, worktrees: listBranchWorktrees(p.key),
+      sessions: terminals.list().filter((s) => (s.scope === 'project' || s.scope === 'branch') && s.projectKey === p.key) });
+  } catch (e) { terminalError(res, e); }
+});
+
+// No `branch`: a shell in the project's own folder, on whatever is checked out there (scope 'project').
+// That folder is the person's: nothing here, nor the branch-folder release, sweep or cap, ever removes it.
+// With `branch`: a Worca-owned worktree of that branch (scope 'branch'; the pane no longer asks for one).
+app.post('/api/projects/:key/terminal', async (req, res) => {
+  if (!requireTerminal(req, res) || !rejectRawTerminalFields(req, res)) return;
+  try {
+    const p = await tmProject(req, res); if (!p) return;
+    const by = actorOf(req);
+    if (req.body?.branch == null) {
+      const branch = await currentBranch(p.path);
+      const session = await terminals.open({ cwd: p.path, scope: 'project', label: branch ? `${p.name} · ${branch}` : p.name, projectKey: p.key,
+        branch, by, cols: req.body?.cols, rows: req.body?.rows });
+      return res.status(201).json({ session, warning: null });
+    }
+    const wt = await openBranchWorktree({ projectKey: p.key, projectDir: p.path, branch: req.body?.branch, by });
+    let session;
+    try {
+      session = await terminals.open({ cwd: wt.dir, scope: 'branch', label: `${p.name} · ${wt.branch}`, projectKey: p.key,
+        branch: wt.branch, by, cols: req.body?.cols, rows: req.body?.rows });
+    } catch (e) {
+      // A folder made for this terminal, which never started, is not left behind (it is clean: just made).
+      if (!wt.reused) {
+        await removeBranchWorktree(wt.dir, { projectDirOf: projectDirForKey, isBusy: () => terminals.busyDirs().has(wt.dir) })
+          .catch((err) => console.warn(`[worca-ui] terminal: could not remove ${wt.dir}: ${err?.message || err}`));
+      }
+      throw e;
+    }
+    const { maxCheckouts } = actionsSettings();
+    if (maxCheckouts) await enforceBranchWorktreeCap({ max: maxCheckouts, busyDirs: () => terminals.busyDirs(), projectDirOf: projectDirForKey });
+    res.status(201).json({ session, warning: wt.warning || null });
+  } catch (e) { terminalError(res, e); }
+});
+
+app.delete('/api/projects/:key/terminal/worktrees', async (req, res) => {
+  if (!requireTerminal(req, res)) return;
+  if (typeof req.body?.branch !== 'string') return res.status(400).json({ error: 'That is not a branch name worca can open.', code: 'BAD_BRANCH' });
+  try {
+    const p = await tmProject(req, res); if (!p) return;
+    const w = findBranchWorktree(p.key, req.body.branch);
+    if (!w) return res.status(404).json({ error: 'No worca folder for that branch.', code: 'NOT_FOUND' });
+    if (terminals.busyDirs().has(w.dir)) return res.status(409).json({ error: 'A terminal is still open in this folder. Close it first.', code: 'IN_USE' });
+    const r = await removeBranchWorktree(w.dir, { force: req.body?.force === true, projectDirOf: projectDirForKey,
+      isBusy: () => terminals.busyDirs().has(w.dir) });
+    if (r.removed) return res.json({ removed: true });
+    const WORKTREE_REMOVE_REASON = { dirty: ['DIRTY', 'This folder has uncommitted changes.'],
+      'in-use': ['IN_USE', 'A terminal is still open in this folder. Close it first.'],
+      'unpushed-commits': ['UNPUSHED_COMMITS', 'This folder has commits that are not on any branch. Removing it would lose them.'] };
+    const [code, msg] = WORKTREE_REMOVE_REASON[r.reason] || ['NOT_REMOVED', `The folder could not be removed (${r.reason}).`];
+    res.status(409).json({ error: msg, code });
+  } catch (e) { terminalError(res, e); }
+});
+
+const terminalSessionOf = (id) => terminals.get(id) || getTerminalSession(id);
+
+app.get('/api/terminal/sessions/:id', (req, res) => {
+  if (!requireTerminal(req, res)) return;
+  const session = terminalSessionOf(req.params.id);
+  if (!session) return res.status(404).json({ error: 'terminal not found' });
+  // The newest blocks (oldest first): a session with more than the limit shows its recent end, and
+  // totalBlocks (> blocks.length) says older ones were left out.
+  const afterSeq = Number(req.query.after) || 0;
+  res.json({ session, blocks: listTerminalBlocks({ sessionId: session.id, afterSeq, newest: true }),
+    totalBlocks: countTerminalBlocks(session.id, afterSeq) });
+});
+
+app.get('/api/terminal/sessions/:id/blocks/:seq', (req, res) => {
+  if (!requireTerminal(req, res)) return;
+  const block = getTerminalBlock(req.params.id, Number(req.params.seq));
+  if (!block) return res.status(404).json({ error: 'block not found' });
+  res.json(block);
+});
+
+app.get('/api/terminal/audit', (req, res) => {
+  if (!requireTerminal(req, res)) return;
+  const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : null;
+  const runId = typeof req.query.runId === 'string' ? req.query.runId : null;
+  res.json({ audit: listTerminalAudit({ sessionId, runId, limit: Number(req.query.limit) || 200 }) });
+});
+
+// Stop and Close are not behind the hosted gate (like actions stop): a person can always end what is
+// running. They still refuse a page from another origin (D13) and a possible agent.
+app.post('/api/terminal/sessions/:id/stop', (req, res) => {
+  if (!terminalCallerOk(req, res)) return;
+  const r = terminals.interrupt(req.params.id, actorOf(req));
+  if (!r) return res.status(404).json({ error: 'No running terminal with that id.' });
+  res.json({ ok: true, blockSeq: r.blockSeq });
+});
+
+app.delete('/api/terminal/sessions/:id', async (req, res) => {
+  if (!terminalCallerOk(req, res)) return;
+  const ok = await terminals.close(req.params.id, actorOf(req), 'closed in the pane');
+  if (!ok) return res.status(404).json({ error: 'No running terminal with that id.' });
+  res.json({ ok: true });
+});
 
 /**
  * D25: one setup per checked-out member. Concurrent callers share the promise.
@@ -11662,6 +11928,25 @@ export async function bootMaintenance({ log } = {}) {
     console.error(`[worca-ui] legacy worktree sweep failed: ${err && err.message ? err.message : err} — nothing was removed`);
   }
 
+  // Terminal (#573): kill shells a crashed server left (and the jobs under them), mark their rows
+  // interrupted, and sweep the branch worktrees under the keep policy and cap. Before Actions: its keep
+  // policy and checkout cap read the terminal pid file, which must not still hold the last server's rows.
+  try {
+    const orphans = await reapOrphans({ pidFile: terminalPidFileNow(),
+      kill: (pid) => { killDescendants(pid); try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } } });
+    // reapOrphans keeps rows stamped with this pid; a restarted container reuses the old server's pid, so
+    // such rows would keep their runs "busy" for ever. Nothing is live here yet: rewrite the file.
+    terminals.writePidFile();
+    const interrupted = markInterruptedSessions({ isAlive: pidAlive, liveIds: new Set(terminals.live().map((t) => t.snap.id)) });
+    const { keep, maxCheckouts } = actionsSettings();
+    const swept = await sweepBranchWorktrees({ keep, maxCheckouts, busyDirs: () => terminals.busyDirs(), projectDirOf: projectDirForKey });
+    summary.terminal = { orphans, interrupted, ...swept };
+    if (orphans) console.log(`[worca-ui] terminal: stopped ${orphans} orphaned shell(s) from a previous server`);
+  } catch (err) {
+    summary.terminal = { orphans: 0, interrupted: 0, removed: 0, evicted: 0 };
+    console.error(`[worca-ui] terminal boot maintenance failed: ${err?.message || err}`);
+  }
+
   // Actions (issue #529): reap orphaned action processes, mark interrupted setups, release
   // until-pr checkouts whose PR closed (D11) and apply the checkout cap (D12).
   try {
@@ -11800,7 +12085,7 @@ if (isMain) {
   const shutdown = (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    Promise.allSettled([channelHost.stop(), actions.stopAll()]).finally(() => process.exit(exitCodeFor(signal)));
+    Promise.allSettled([channelHost.stop(), actions.stopAll(), terminals.closeAll()]).finally(() => process.exit(exitCodeFor(signal)));
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
