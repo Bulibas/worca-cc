@@ -57,10 +57,10 @@ test('app.js: sendWs reports a dropped socket and the pane hears about it', () =
   assert.ok(app.includes('if (terminalPane) terminalPane.onConnection(false);'));
 });
 
-test('the header has no toggle; the old tab row and branch rows are gone; the picker hides', () => {
-  assert.doesNotMatch(css, /\.term-tabs?\b/);
+test('the header has no toggle; the branch rows and the session picker are gone; the tab row hides', () => {
   assert.doesNotMatch(css, /\.term-wt\b/);
-  assert.ok(css.includes('.term-sessions[hidden]{display:none;}'));
+  assert.doesNotMatch(css, /\.term-sessions\b/);
+  assert.ok(css.includes('.term-tabs[hidden]{display:none;}'));
 });
 
 test('the context is one line that fits a phone: the folder ellipsizes, an empty context takes no room', () => {

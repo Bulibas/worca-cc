@@ -96,10 +96,10 @@ test('the header: the title and the hide button; no Stop, Close, Open or branch 
   const { pane, doc } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
   await pane.open();
   await tick();
-  const labels = [...doc.querySelectorAll('.term-pane button')].map((b) => b.getAttribute('aria-label') || b.textContent);
+  const labels = [...doc.querySelectorAll('.term-head button')].map((b) => b.getAttribute('aria-label') || b.textContent);
   assert.deepEqual(labels, ['Hide the terminal pane']);
   assert.equal(doc.querySelector('.term-head .term-title').textContent, 'Terminal');
-  for (const gone of ['.term-stop', '.term-close-session', '.term-new', '.term-checkout', '.term-branch', '.term-tabs', '.term-wt-remove']) {
+  for (const gone of ['.term-stop', '.term-close-session', '.term-checkout', '.term-branch', '.term-sessions', '.term-wt-remove']) {
     assert.equal(doc.querySelector(gone), null, gone);
   }
 });
@@ -324,17 +324,50 @@ test('an exited shell is not replaced on its own: a dim line, then Enter (only) 
   assert.equal(sent.filter((m) => m.type === 'term-input').length, 0, 'the Enter itself is not sent');
 });
 
-test('the session picker shows only when more than one terminal is open', async () => {
-  const routes = attachedRoutes();
-  const { pane, doc } = makePane({ ctx: RUN_CTX, routes });
+const tabTexts = (doc) => [...doc.querySelectorAll('.term-tabs .term-tab')].map((t) => t.getAttribute('aria-label') || t.textContent);
+
+test('the tabs: this page\'s open terminals, then a small (+) tab; other pages\' and ended shells are not tabs', async () => {
+  const { pane, doc } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
   await pane.open();
   await tick();
-  assert.equal(doc.querySelector('.term-sessions').hidden, true);
+  assert.equal(doc.querySelector('.term-tabs').hidden, false);
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'New terminal']);
+  assert.equal(doc.querySelector('.term-tab[aria-selected="true"]').textContent, 'r1 · app');
   pane.onFrame({ type: 'term-status', snapshot: { ...SNAP, id: 't-9', label: 'other', runId: 'r9' } });
-  assert.equal(doc.querySelector('.term-sessions').hidden, false);
-  assert.deepEqual([...doc.querySelectorAll('.term-sessions option')].map((o) => o.value).sort(), ['t-1', 't-9']);
-  pane.onFrame({ type: 'term-status', snapshot: { ...SNAP, id: 't-9', label: 'other', runId: 'r9', status: 'exited' } });
-  assert.equal(doc.querySelector('.term-sessions').hidden, true, 'an ended terminal is not one to pick');
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'New terminal'], 'another run\'s shell is not a tab here');
+  pane.onFrame({ type: 'term-status', snapshot: { ...SNAP, id: 't-3', createdAt: '2026-10-03T11:00:00.000Z' } });
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'r1 · app 2', 'New terminal'], 'a second shell of the folder: numbered, on the right');
+  pane.onFrame({ type: 'term-status', snapshot: { ...SNAP, id: 't-3', createdAt: '2026-10-03T11:00:00.000Z', status: 'exited' } });
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'New terminal'], 'an ended terminal that is not attached leaves');
+});
+
+test('the (+) tab starts another shell in the same folder and attaches it; a tab click switches back', async () => {
+  const T2 = { ...SNAP, id: 't-2', createdAt: '2026-10-03T11:00:00.000Z' };
+  const { pane, doc, sent, calls } = makePane({ ctx: RUN_CTX, routes: attachedRoutes({ 'POST /api/runs/r1/terminal': { session: T2, warning: null } }) });
+  await pane.open();
+  await tick();
+  assert.equal(posts(calls).length, 0, 'the running shell is reattached');
+  doc.querySelector('.term-tab-add').click();
+  await tick();
+  const [post] = posts(calls);
+  assert.equal(posts(calls).length, 1);
+  assert.deepEqual(post.body, { member: 'app-0000aaaa', cols: 80, rows: 24 });
+  assert.ok(sent.some((m) => m.type === 'term-detach' && m.sessionId === 't-1'));
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-2');
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'r1 · app 2', 'New terminal']);
+  assert.equal(doc.querySelector('.term-tab[aria-selected="true"]').textContent, 'r1 · app 2');
+  doc.querySelector('.term-tab').click();
+  await tick();
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-1');
+  assert.equal(doc.querySelector('.term-tab[aria-selected="true"]').textContent, 'r1 · app');
+  assert.equal(posts(calls).length, 1, 'switching starts nothing');
+});
+
+test('a page that starts no shell has no (+) tab', async () => {
+  const { pane, doc } = makePane({ ctx: { view: 'stats' }, routes: { 'GET /api/terminal': { ...INFO, sessions: [SNAP] } } });
+  await pane.open();
+  await tick();
+  assert.deepEqual(tabTexts(doc), ['r1 · app']);
 });
 
 test('pipes mode: Ctrl+C typed in the pane calls the stop API', async () => {
@@ -469,11 +502,10 @@ test('an open select survives unrelated updates (finding 6)', async () => {
   await pane.open();
   await tick();
   const member = doc.querySelector('.term-member');
-  assert.equal(doc.querySelector('.term-sessions').hidden, false, 'two open terminals: the picker shows');
-  const pickerOpts = [...doc.querySelectorAll('.term-sessions option')];
+  const tabEls = [...doc.querySelectorAll('.term-tabs .term-tab')];
   pane.onFrame({ type: 'term-status', snapshot: { ...api, currentBlock: { seq: 1, command: 'cmd 1' } } });
   assert.equal(doc.querySelector('.term-member'), member, 'the member select is not rebuilt by a status frame');
-  assert.deepEqual([...doc.querySelectorAll('.term-sessions option')], pickerOpts, 'nor is the session picker');
+  assert.deepEqual([...doc.querySelectorAll('.term-tabs .term-tab')], tabEls, 'nor are the tabs');
 });
 test('xterm gets all 16 ANSI colours, each from its --term-ansi-* token (finding 7)', async () => {
   const { pane, xt } = makePane({ ctx: RUN_CTX, routes: attachedRoutes(), beforeCreate: (win) => {
@@ -507,7 +539,7 @@ test('a server restart forgets the shell and its screen, and starts a new one on
   await tick(12);
   assert.doesNotMatch(xt.writes.join(''), /before/);
   assert.match(xt.writes.join(''), /\[the worca server restarted — press Enter for a new one\]/);
-  assert.equal(doc.querySelector('.term-sessions').hidden, true);
+  assert.deepEqual(tabTexts(doc), ['New terminal'], 'the gone shell\'s tab leaves');
   assert.match(doc.querySelector('.term-context').textContent, /server restarted/);
   assert.equal(posts(calls).length, 0, 'no respawn');
   const before = sent.length;
@@ -518,18 +550,17 @@ test('a server restart forgets the shell and its screen, and starts a new one on
   assert.equal(posts(calls).length, 1);
   assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-2');
 });
-test('the picker drops sessions the server no longer lists', async () => {
+test('the tabs drop sessions the server no longer lists', async () => {
   const routes = { 'GET /api/terminal': { ...INFO, sessions: [SNAP, { ...SNAP, id: 't-2', label: 'gone', createdAt: '2026-10-03T09:00:00.000Z' }] } };
   const { pane, doc } = makePane({ ctx: { view: 'stats' }, routes });
   await pane.open();
   await tick();
-  assert.equal(doc.querySelectorAll('.term-sessions option[value^="t-"]').length, 2);
+  assert.deepEqual(tabTexts(doc), ['gone', 'r1 · app']);
   pane.close();
   routes['GET /api/terminal'] = { ...INFO, sessions: [SNAP] };
   await pane.open();
   await tick();
-  assert.deepEqual([...doc.querySelectorAll('.term-sessions option[value^="t-"]')].map((o) => o.value), ['t-1']);
-  assert.equal(doc.querySelector('.term-sessions').hidden, true);
+  assert.deepEqual(tabTexts(doc), ['r1 · app']);
 });
 test('while /ws reconnects the pane says so and does not echo a line it could not send (finding 10)', async () => {
   const pipes = { ...SNAP, mode: 'pipes' };

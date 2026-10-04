@@ -20,9 +20,10 @@ shows a live shell right away: it reattaches the page's running terminal, or sta
 | A project page | your own checkout of the project (the folder you registered), on whatever is checked out there. |
 | Any other page | no new terminal: the pane shows the most recent one that is still running. |
 
-The header holds the title, a list of open terminals (only when more than one is open), and **×**,
-which hides the pane: the shell keeps running, and opening the pane again on the same page reattaches
-it. Below it is the terminal's folder, with a warning or the member select when they apply. Worca starts a shell for a page at
+The header holds the title and **×**, which hides the pane: the shell keeps running, and opening the
+pane again on the same page reattaches it. Below it is a tab for each open terminal of the page, then a
+small **+** tab that starts another shell in the same folder (a second shell of a folder is numbered,
+like `demo · main 2`). Click a tab to switch; `exit` in a shell closes it. Below it is the terminal's folder, with a warning or the member select when they apply. Worca starts a shell for a page at
 most once each time you open the pane. When the shell ends (you typed `exit`, or it died) or Worca
 restarts, the terminal says so and starts a new one only when you press Enter.
 

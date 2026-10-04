@@ -56,10 +56,10 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
     starting: null,              // the start key whose shell is being made
     restartKey: null,            // Enter starts a new shell for this start key (the last one exited, or never started)
     why: null, focusNext: false, pendingTimer: null };
-  const drawn = { picker: '', context: '' };   // what the picker and the context bar show: unchanged → not rebuilt (an open select stays open)
+  const drawn = { tabs: '', context: '' };     // what the tabs and the context bar show: unchanged → not rebuilt (an open select stays open)
 
   const make = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
-  const button = (label, cls, onClick) => { const b = make('button', `btn ${cls}`.trim(), label); b.type = 'button'; b.addEventListener('click', onClick); return b; };
+  const button = (label, cls, onClick, base = 'btn ') => { const b = make('button', `${base}${cls}`.trim(), label); b.type = 'button'; b.addEventListener('click', onClick); return b; };
   const readStore = (k) => { try { return storage ? storage.getItem(k) : null; } catch { return null; } };
   const writeStore = (k, v) => { try { if (storage) storage.setItem(k, v); } catch { /* private mode */ } };
 
@@ -69,14 +69,15 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
   root.setAttribute('aria-label', 'Terminal');
   const resizer = make('div', 'term-resize');
   const head = make('div', 'term-head');
-  const picker = make('select', 'term-sessions');
-  picker.setAttribute('aria-label', 'Terminal session');
-  picker.hidden = true;
-  picker.addEventListener('change', () => { if (picker.value) attach(picker.value); });
   const hideBtn = button('×', 'btn-ghost term-icon term-hide', () => close());
   hideBtn.setAttribute('aria-label', 'Hide the terminal pane');
   hideBtn.title = 'Hide (the shell keeps running)';
-  head.append(make('span', 'term-title', 'Terminal'), picker, hideBtn);
+  head.append(make('span', 'term-title', 'Terminal'), hideBtn);
+  // One tab per open terminal of this page, then a small (+) tab that starts another shell in the same folder.
+  const tabs = make('div', 'term-tabs');
+  tabs.setAttribute('role', 'tablist');
+  tabs.setAttribute('aria-label', 'Terminals');
+  tabs.hidden = true;
   const context = make('div', 'term-context');
   const banners = make('div', 'term-banners');
   const screen = make('div', 'term-screen');
@@ -90,7 +91,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
   // parent's computed height and width, and under border-box those would include the frame's.
   const host = make('div', 'term-host');
   screen.append(probe, ...ansiProbes.map(([, p]) => p), host);
-  root.append(resizer, head, context, banners, screen);
+  root.append(resizer, head, tabs, context, banners, screen);
   // The opener: a terminal-window glyph in the rail's icon style (24 grid, 1.9 stroke, round caps), top
   // right. Not the rail's `>_` (Scripts), so the two never read as the same thing.
   const handle = button(null, 'term-handle', () => toggle());
@@ -335,6 +336,14 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
   function stopCurrent() {
     if (st.current) api('POST', `/api/terminal/sessions/${encodeURIComponent(st.current)}/stop`).catch(showError);
   }
+  /** The (+) tab: another shell for this page, next to the ones it has. */
+  function addShell() {
+    const key = startKey();
+    if (!key || st.starting || !st.online) return;
+    st.tried.add(key);
+    st.focusNext = true;
+    start(key);
+  }
   // ── xterm ────────────────────────────────────────────────────────────────────────────────────────
   function themeNow() {
     const cs = win.getComputedStyle(screen);
@@ -445,28 +454,44 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
 
   // ── render ───────────────────────────────────────────────────────────────────────────────────────
   function render() {
-    // The picker lists the open (running) terminals, and the attached one: shown only when there is a choice.
-    const all = [...st.sessions.values()].filter((x) => x.status === 'running' || x.id === st.current)
-      .sort((a, z) => (a.status === 'running' ? 0 : 1) - (z.status === 'running' ? 0 : 1) || newestFirst(a, z));
-    const pickerKey = JSON.stringify([st.current, all.map((x) => [x.id, x.label, x.status])]);
-    if (pickerKey !== drawn.picker) {
-      drawn.picker = pickerKey;
-      picker.replaceChildren();
-      picker.hidden = all.length < 2;
-      if (all.length && !st.sessions.has(st.current)) {   // nothing attached: say so rather than show another shell's name
-        const o = make('option', null, 'Pick a terminal');
-        o.value = ''; o.selected = true; o.disabled = true;
-        picker.append(o);
-      }
-      for (const x of all) {
-        const o = make('option', null, x.status === 'running' ? (x.label || x.id) : `${x.label || x.id} — ${x.status}`);
-        o.value = x.id;
-        o.selected = x.id === st.current;
-        picker.append(o);
-      }
-    }
+    renderTabs();
     renderContext();
     renderBanners();
+  }
+  /** This page's open (running) terminals and the attached one, oldest first: a new shell's tab lands on the right. */
+  function tabSessions() {
+    const list = sessionsForTarget().filter((x) => x.status === 'running');
+    const cur = st.sessions.get(st.current);
+    if (cur && !list.includes(cur)) list.push(cur);
+    return list.sort((a, z) => newestFirst(z, a));
+  }
+  function renderTabs() {
+    const list = tabSessions();
+    const canAdd = st.enabled && !!startKey() && !st.starting;
+    const key = JSON.stringify([st.current, canAdd, list.map((x) => [x.id, x.label, x.status])]);
+    if (key === drawn.tabs) return;
+    drawn.tabs = key;
+    tabs.replaceChildren();
+    tabs.hidden = !list.length && !canAdd;
+    const seen = new Map();                              // shells of one folder share a label: the second is "… 2"
+    for (const x of list) {
+      const base = x.label || x.id;
+      const n = (seen.get(base) || 0) + 1;
+      seen.set(base, n);
+      const text = n > 1 ? `${base} ${n}` : base;
+      const t = button(text, 'term-tab', () => { if (x.id !== st.current) { st.focusNext = true; attach(x.id); } else focusTerm(); }, '');
+      t.setAttribute('role', 'tab');
+      t.setAttribute('aria-selected', String(x.id === st.current));
+      t.title = x.status === 'running' ? text : `${text} — ${x.status}`;
+      if (x.status !== 'running') t.classList.add('term-tab-ended');
+      tabs.append(t);
+    }
+    if (canAdd) {
+      const add = button('+', 'term-tab term-tab-add', () => addShell(), '');
+      add.setAttribute('aria-label', 'New terminal');
+      add.title = 'New terminal in this folder';
+      tabs.append(add);
+    }
   }
   const LIVE_WARNING = 'This pipeline is still running and changing these files.';
   /** The amber line of the attached shell: a live run's (while it runs), or what its open returned. */
