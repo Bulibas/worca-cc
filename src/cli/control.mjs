@@ -14,23 +14,28 @@
 // another terminal is controllable from here, and that terminal keeps its own
 // Ctrl+C controls too.
 
+import { resolve } from 'node:path';
+import { listProjects } from '../core/projects.mjs';
+import { projectKey } from '../core/store.mjs';
 import { getDb } from '../core/db.mjs';
 import { isDeadOwner } from '../core/artifacts.mjs';
 import { enqueuePipelineCommand, reapPipelineCommands } from '../core/pipeline-commands.mjs';
 import { resolveRunRef } from './runs.mjs';
 
-export const CONTROL_HELP = `worca stop | worca pause — control a live run
+export const CONTROL_HELP = `worca stop | worca pause — control a run from the terminal
 
 Usage:
-  worca stop <id>              Abort a live run (any unique prefix)
+  worca stop <id>              Stop a live or paused run for good (any unique prefix)
   worca pause <id>             Gracefully pause a live run — in-flight nodes are
                                stopped, a resume point is kept; resume with: worca resume <id>
   worca stop --json <id>       Machine-readable output (pause takes it too)
 
-The command is written to the Worca store and the process that owns the run
-picks it up within about a second — no Worca server needs to be up. Stopping an
-already-stopped run succeeds (idempotent, for scripts); a paused or finished run
-is not controllable — resume it with: worca resume <id>.
+A live run: the command is written to the Worca store and the process that owns the
+run picks it up within about a second — no Worca server needs to be up. A paused run
+has no owner: stop settles it right here — its work so far is committed onto the run
+branch and its worktree is removed; a stopped run cannot be resumed. Stopping an
+already-stopped run succeeds (idempotent, for scripts); an interrupted or finished run
+is not controllable — resume an interrupted one with: worca resume <id>.
 `;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -54,6 +59,66 @@ function refusal(msg) {
   return 1;
 }
 
+/** A row's project dir: the registry, else the current directory when it IS that project
+ *  (the default run flow needs no registration) — cmdResume's rule. */
+async function cliProjectDirFor(key) {
+  for (const p of await listProjects()) if (projectKey(p.path) === key) return p.path;
+  return projectKey(resolve(process.cwd())) === key ? process.cwd() : null;
+}
+
+/** `worca stop` on a PAUSED run: no process owns it, so there is no mailbox to write to —
+ *  settle it here, through the same action the UI and chat use (stop-paused.mjs). */
+async function stopPaused(row, { json, out, c }) {
+  const title = row.title || row.id;
+  // Ctrl+C mid-stop: the row reads stopped from the claim on, but the work is committed onto the run
+  // branch only at the end, and a worktree left uncommitted is later removed by Archive. The first
+  // Ctrl+C is answered and the stop goes on; a second one abandons it.
+  let interrupts = 0;
+  const onSigint = () => {
+    interrupts += 1;
+    if (interrupts > 1) process.exit(130);
+    process.stderr.write("worca: still stopping — the run's work is being committed onto its branch (Ctrl+C again to abandon)\n");
+  };
+  process.on('SIGINT', onSigint);
+  try {
+    const { stopPausedRun } = await import('../core/stop-paused.mjs');
+    await stopPausedRun(row.id, { by: 'local', projectDirFor: cliProjectDirFor });
+  } catch (err) {
+    // Lost to a stop that landed meanwhile (another terminal, the UI, chat): stopping an
+    // already-stopped run succeeds, as the help promises.
+    if (err?.code === 'NOT_PAUSED' && getDb().prepare('SELECT status FROM pipelines WHERE id = ?').get(row.id)?.status === 'stopped') {
+      if (json) out(JSON.stringify({ id: row.id, action: 'stop', outcome: 'already-stopped', status: 'stopped' }, null, 2));
+      else out(`${title} is already stopped.`);
+      return 0;
+    }
+    // A single-project row whose project is not registered here; a workspace row reads its own metadata.
+    const msg = (err?.message || String(err))
+      + (err?.code === 'NO_PROJECT' && /not onboarded/.test(err?.message || '') ? ' — register it (worca add --path <project dir>) or run this from the project directory' : '');
+    if (json) {
+      out(JSON.stringify({ id: row.id, action: 'stop', commandId: null, outcome: 'refused', status: row.status, consumed: null, error: msg }, null, 2));
+      return 1;
+    }
+    return refusal(`could not stop run ${row.id}: ${msg}`);
+  } finally {
+    process.off('SIGINT', onSigint);
+  }
+  // What stopPausedPipeline does after the stop on a server, done here (no server may be up):
+  // a pending "Resume at…" has nothing left to resume, and the metrics push gets its window.
+  try {
+    const { cancelResumeTicketsFor } = await import('../core/scheduler.mjs');
+    const { byActor } = await import('../core/identity.mjs');
+    cancelResumeTicketsFor(row.id, { by: 'local', reason: `the run was stopped${byActor('local')}` });
+  } catch { /* best-effort: a ticket that fires on a stopped run skips it */ }
+  try {
+    const { drainFlushes } = await import('../core/metrics/sync.mjs');
+    await drainFlushes({ timeoutMs: 30_000 });
+  } catch { /* metrics never block the CLI exit */ }
+  // The live path's JSON keys, so scripts read one shape: no command was mailed, so none was consumed.
+  if (json) out(JSON.stringify({ id: row.id, title, action: 'stop', commandId: null, outcome: 'stop', status: 'stopped', consumed: null }, null, 2));
+  else out(`${c('green', 'Stopped')} ${c('bold', title)}`);
+  return 0;
+}
+
 /**
  * One control verb, stop or pause — the flows are identical except for the
  * status they wait for and the success line they print.
@@ -75,10 +140,11 @@ async function controlRun(argv, action, { out, c, fail }) {
   ).get(id);
   if (!row) fail(`no run matches "${ref}" (see: worca runs list)`);
 
-  // The live boundary (decision "paused ≠ controllable") + stop's idempotence
+  // The live boundary — stop also takes a PAUSED run (it has no owner: settled in-process) — + stop's idempotence
   // (decision 3): stop on an already-stopped run SUCCEEDS, everything else that
   // is not `running` is refused with the row's own status and the way out.
   if (row.status !== 'running') {
+    if (action === 'stop' && row.status === 'paused') return stopPaused(row, { json, out, c });
     if (action === 'stop' && row.status === 'stopped') {
       if (json) out(JSON.stringify({ id: row.id, action, outcome: 'already-stopped', status: row.status }, null, 2));
       else out(`${row.title || row.id} is already stopped.`);
@@ -86,10 +152,10 @@ async function controlRun(argv, action, { out, c, fail }) {
     }
     const resumeHint = row.status === 'paused' || row.status === 'interrupted' ? ` — resume it with: worca resume ${row.id}` : '';
     if (json) {
-      out(JSON.stringify({ id: row.id, action, outcome: 'refused', status: row.status, error: `run is "${row.status}", not live${resumeHint}` }, null, 2));
+      out(JSON.stringify({ id: row.id, action, outcome: 'refused', status: row.status, error: `run is "${row.status}", not ${action === 'stop' ? 'live or paused' : 'live'}${resumeHint}` }, null, 2));
       return 1;
     }
-    return refusal(`run ${row.id} is "${row.status}" — ${action} targets a live run${resumeHint}`);
+    return refusal(`run ${row.id} is "${row.status}" — ${action} targets a live ${action === 'stop' ? 'or paused ' : ''}run${resumeHint}`);
   }
 
   // Dead owner: never enqueue a command nobody will read (issue decision).

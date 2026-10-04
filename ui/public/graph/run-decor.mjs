@@ -11,6 +11,7 @@ import { levelAtLeast } from '../ui-level.mjs';
 import { manifestPortsFn, manifestTemplate } from '../../../src/shared/graph/manifest.mjs';
 import { BOOKEND_EXECUTION_IDS, DEFAULT_MAX_CYCLES, KEYED_KINDS } from '../../../src/shared/graph/constants.mjs';
 import { fanLines } from '../../../src/shared/graph/geometry.mjs';
+import { stepAux, fmtAuxCalls, floorText } from '../../../src/shared/cost/breakdown.mjs';
 
 /** The run-level warning a run that drained without binding End carries. */
 export const QUIESCENCE_WARNING = 'finished at quiescence — End not reached';
@@ -154,9 +155,10 @@ export function statusOf(node, rows, ctx) {
  * (orchestrator `state` events) and frozen (`rowToState` off pipelines +
  * pipeline_steps), so both surfaces call this with no adapter.
  * @param {object} st                 { stepper, status, steps, active, endReached, result, warnings, wireDeliveries, tokens, gate }
- * @param {{live?:boolean, now?:number, subsOf?:(nodeId:string)=>Array}} opts
+ * @param {{live?:boolean, now?:number, subsOf?:(nodeId:string)=>Array, lastLines?:Map, modelLabel?:(id:string)=>string}} opts
+ *   `modelLabel` names a model id for the Away mode band (the catalog lives in app.js; default: the raw id).
  */
-export function decorFromState(st, { live = true, now = Date.now(), subsOf = null, lastLines = null } = {}) {
+export function decorFromState(st, { live = true, now = Date.now(), subsOf = null, lastLines = null, modelLabel = null } = {}) {
   const state = st || {};
   const stepper = state.stepper || null;
   const nodes = manifestNodes(stepper);
@@ -229,7 +231,8 @@ export function decorFromState(st, { live = true, now = Date.now(), subsOf = nul
     executions: rows.length, loopDeliveries,
     nodeIds: nodes.map((n) => n.id), wireIds: wires.map((w) => w.id), expanded: null,
   };
-  decorateExecutions(decor, { stepper, nodes, wires, grouped, rows, activeList, rowFor, stepByExec, state, now, live, subsOf, lastLines, status });
+  decorateExecutions(decor, { stepper, nodes, wires, grouped, rows, activeList, rowFor, stepByExec, state, now, live, subsOf, lastLines, status,
+    modelLabel: typeof modelLabel === 'function' ? modelLabel : (id) => id });
   return decor;
 }
 
@@ -291,11 +294,32 @@ export function execBandLayout(label, right) {
   return { units: l2 ? 3 : 2, stack: true, l2 };
 }
 
+/** Away mode (worca's own review of an ask): the step's booked share, `stepAux(row).away`
+ *  ({usd, calls, floorUsd, stopped}; Task 1 books it inside the step cost), plus the model the
+ *  review ran on — read off its sub-agent row (`subagentType 'night-decider'`, stepKey === the
+ *  execution id, `runModel`), which rides the live run AND History's frozen state through the
+ *  same `subsOf`. Null when the execution had no review. */
+function awayOf(row, reviewModels, modelLabel) {
+  const ax = stepAux(row).away;
+  if (!ax) return null;
+  const model = reviewModels.get(row.executionId) || null;
+  return { ...ax, model, modelText: model ? modelLabel(model) : null };
+}
+
+/** The node chip's tooltip: `Away mode · 2 reviews · 1 stopped`, and `not in total` when the chip
+ *  itself shows the stopped reviews' lower bound. */
+const awayTitle = (a, floorShown) => ['Away mode', a.calls ? fmtAuxCalls('away', a.calls) : '', a.stopped ? `${a.stopped} stopped` : '',
+  floorShown ? 'not in total' : ''].filter(Boolean).join(' · ');
+
 function decorateExecutions(decor, ctx) {
-  const { nodes, wires, grouped, activeList, rowFor, state, now, live, subsOf, lastLines, status } = ctx;
+  const { nodes, wires, grouped, activeList, rowFor, state, now, live, subsOf, lastLines, status, modelLabel } = ctx;
 
   for (const node of nodes) {
     const list = grouped.get(node.id) || [];
+    const subs = typeof subsOf === 'function' ? (subsOf(node.id) || []) : [];
+    // executionId -> the model its LAST Away mode review ran on (one execution may raise several asks).
+    const reviewModels = new Map();
+    for (const s of subs) if (s && s.subagentType === 'night-decider' && s.stepKey && s.runModel) reviewModels.set(s.stepKey, s.runModel);
     // A FLOW node (task/and/or/combine/end) executes instantly and for free: its
     // rows carry no duration and no cost pill, and its card no header totals.
     const flow = !KEYED_KINDS.includes(node.kind);
@@ -307,6 +331,7 @@ function decorateExecutions(decor, ctx) {
       // consumer that sums the numbers must not pick up a flow row's real ms).
       const durMs = flow ? 0 : rowMs(row, now, live);
       const costUsd = flow || script ? 0 : round2(row.costUsd);
+      const away = flow || script ? null : awayOf(row, reviewModels, modelLabel);
       return {
         executionId: row.executionId, nodeId: node.id,
         kind: row.kind === 'task' ? 'task' : 'cycle',
@@ -316,10 +341,10 @@ function decorateExecutions(decor, ctx) {
         cost: flow || script ? '' : fmtUsd(costUsd),
         exit: script && row.exitCode != null ? `exit ${row.exitCode}` : '',
         durMs, costUsd, flow,
+        ...(away ? { away } : {}),
       };
     });
 
-    const subs = typeof subsOf === 'function' ? (subsOf(node.id) || []) : [];
     const fan = subs.length
       ? { leds: subs.slice(0, SUB_SQUARE_CAP).map((s) => (s && s.status === 'running' ? 'run' : 'done')), count: subs.length }
       : null;
@@ -340,6 +365,16 @@ function decorateExecutions(decor, ctx) {
         durMs, dur: fmtDur(durMs), costUsd, cost: script ? '' : fmtUsd(costUsd),
         hasStep: rows.some((r) => r.dur !== ''),
       };
+      // The node's Away mode share, kept apart from (and already inside) `cost`. Booked reviews show
+      // their cost — $0.00 included (mock / a free model); a node whose reviews were ALL stopped shows
+      // their lower bound (≥$x, not in total); unpriced, {free} or sub-cent shows no chip (never $0.00).
+      const aw = rows.filter((r) => r.away).map((r) => r.away);
+      if (aw.length) {
+        const a = aw.reduce((t, x) => ({ usd: t.usd + x.usd, calls: t.calls + x.calls, stopped: t.stopped + x.stopped,
+          floorUsd: x.floorUsd == null ? t.floorUsd : (t.floorUsd || 0) + x.floorUsd }), { usd: 0, calls: 0, stopped: 0, floorUsd: null });
+        const floor = a.calls > 0 ? '' : floorText(a.floorUsd, fmtUsd);
+        decor.totals[node.id].away = { ...a, text: a.calls > 0 ? fmtUsd(a.usd) : floor, title: awayTitle(a, !!floor) };
+      }
     }
   }
 
@@ -378,13 +413,33 @@ function decorateExecutions(decor, ctx) {
   }
 }
 
+/** One execution's Away mode bands (one 22px line each — "Away mode" itself does not fit a 220px
+ *  card line, so the band leads with the Away mode glyph and `title` carries the words). A booked
+ *  band shows even at $0.00; a stopped one shows its lower bound (≥$x, "not in total" in its title),
+ *  or nothing when it is not priced, {free} or under a cent. */
+function awayBands(r) {
+  const a = r.away;
+  if (!a) return [];
+  const out = [];
+  if (a.calls > 0) {
+    const label = [fmtAuxCalls('away', a.calls), a.modelText].filter(Boolean).join(' · ');
+    out.push({ kind: 'away', executionId: r.executionId, variant: 'booked', label, title: `Away mode · ${label}`, right: fmtUsd(a.usd) });
+  }
+  if (a.stopped > 0) {
+    const label = a.stopped === 1 ? 'review stopped' : `${a.stopped} reviews stopped`;
+    const right = floorText(a.floorUsd, fmtUsd);
+    out.push({ kind: 'away', executionId: r.executionId, variant: 'stopped', label, title: `Away mode · ${label}${right ? ' · not in total' : ''}`, right });
+  }
+  return out;
+}
+
 /**
  * Lay the decor over an already-rendered view. Idempotent and self-clearing:
  * every ornament is rebuilt from the bag, so a repaint after the run settles
  * cannot strand an ant, a badge or a gate pip. NEVER writes a card height —
  * `view.setFooter` re-runs `nodeSize` for the band count it was handed.
  * Band order inside a footer, top → bottom: fan → strip → exec×N (only for the
- * ONE expanded node) → result.
+ * ONE expanded node; each followed by its Away mode bands, booked then stopped) → result.
  */
 export function applyDecor(view, decor) {
   if (!view || !decor) return;
@@ -413,6 +468,7 @@ export function applyDecor(view, decor) {
           const right = [r.dur, r.cost || r.exit].filter(Boolean).join(' · ');
           bands.push({ kind: 'exec', executionId: r.executionId, led: r.led, label: r.label,
             right, ...execBandLayout(r.label, right) });
+          bands.push(...awayBands(r));
         }
       }
     }

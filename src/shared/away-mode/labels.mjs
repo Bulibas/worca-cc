@@ -126,6 +126,32 @@ export const DECIDER_GROUPS = Object.freeze({ mine: 'Your models', policy: 'Team
 /** The answers list's small line under an answer the review gave: "Decided by Opus 5.5". */
 export const decidedByText = (label) => `Decided by ${label || DECIDER_WORDS.defaultModel}`;
 
+// How an ask was answered when no review ran (one stored strategy word, or several joined by '+').
+const NO_REVIEW = Object.freeze({ rule: 'rule', weights: "agent's pick", defaults: 'defaults', auto: 'defaults' });
+/** The answers list's caption after "kind · time", per ASK (one review answers every question of it):
+ *  - a review ran (`reviewId`/`reviewStatus`, or a booked `costUsd`): [the model it ran on, what it cost];
+ *    one stopped before its result (`reviewStatus 'stopped'`, `costUsd` null) reads 'review stopped',
+ *    then its lower bound and 'not in total' when `fmtFloor` prints one — never '$0.00';
+ *  - no review call (a rule, the agent's own pick, default values): [how, fmtUsd(0)];
+ *  - a pause (strategy 'guardrail'), a review stored before its cost was kept, or one whose call never
+ *    reached the API: [] (nothing invented).
+ *  `modelLabel(id)` → the catalog label (or null); a review with no model ran on the CLI's default.
+ *  `fmtFloor(floorUsd)` → '≥$x' or '' (the app passes Task 6's floorText; this module keeps zero imports).
+ *  @returns {string[]} */
+export function awayAskCaption(d, { fmtUsd, modelLabel = () => null, fmtFloor = () => '' } = {}) {
+  const rec = d && typeof d === 'object' ? d : {};
+  if (rec.reviewId || rec.reviewStatus || Number.isFinite(rec.costUsd)) {
+    const model = (typeof rec.model === 'string' && rec.model && modelLabel(rec.model)) || DECIDER_WORDS.defaultModel;
+    if (rec.reviewStatus !== 'stopped' && Number.isFinite(rec.costUsd)) return [model, fmtUsd(rec.costUsd)];
+    const floor = fmtFloor(rec.floorUsd);
+    return floor ? [model, 'review stopped', floor, 'not in total'] : [model, 'review stopped'];
+  }
+  const parts = String(rec.strategy || '').split('+');
+  if (parts.includes('analysis')) return [];
+  const how = parts.map((p) => NO_REVIEW[p]).find(Boolean);
+  return how ? [how, fmtUsd(0)] : [];
+}
+
 export const WHICH_RUNS_OPTIONS = Object.freeze([
   { value: false, label: 'Only runs I marked', hint: 'Mark a run when you start it (New run → "Mark this run", or --night). Other runs wait for you.' },
   { value: true, label: 'All runs', hint: 'Every run is answered while you are away, marked or not.' },

@@ -1112,7 +1112,7 @@ for (const [status, resumable, finished] of [
   ['done', false, true], ['paused', true, false], ['interrupted', true, false],
   ['stopped', false, true], ['error', false, true],
 ]) {
-  test(`History bar, ${status} run: Run after${resumable ? ' and the Resume split' : ''}, no Pause or Stop without a live run`, async () => {
+  test(`History bar, ${status} run: Run after${resumable ? ' and the Resume split' : ''}, ${status === 'paused' ? 'Stop' : 'no Stop'} and no Pause without a live run`, async () => {
     const ctx = await bootDetail({ detail: { ...DETAIL, state: { ...DETAIL.state, status } }, rows: [{ ...ROW, status }] });
     await openDetail(ctx, '');
     await settle(ctx.window, 6);
@@ -1131,7 +1131,8 @@ for (const [status, resumable, finished] of [
     assert.equal(end.querySelector('.hd-resume').hidden, !resumable);
     assert.ok(end.querySelector('.hd-resume svg'), 'Resume leads with the play glyph');
     assert.equal(end.querySelector('.hd-pause').hidden, true, 'no live run: nothing to pause');
-    assert.equal(end.querySelector('.hd-stop').hidden, true, 'no live run: nothing to stop');
+    assert.equal(end.querySelector('.hd-stop').hidden, status !== 'paused',
+      status === 'paused' ? 'a paused saved run is stopped through its row' : 'no live run: nothing to stop');
     const header = hd.querySelector('.hd-header');
     for (const sel of ['.hd-after', '.hd-resume-split', '.hd-resume', '.hd-pause', '.hd-stop']) {
       assert.equal(header.querySelector(sel), null, `${sel} is not in the Details header`);
@@ -1328,7 +1329,7 @@ test('History bar of a paused pipeline resumed elsewhere: Pause and Stop replace
   const split = end.querySelector('.hd-resume-split');
   assert.equal(split.hidden, false, 'paused: Resume');
   assert.equal(end.querySelector('.hd-pause').hidden, true);
-  assert.equal(end.querySelector('.hd-stop').hidden, true);
+  assert.equal(end.querySelector('.hd-stop').hidden, false, 'paused: Stop through its row');
   // Its menu is open when another tab resumes the run.
   click(ctx.window, end.querySelector('.hd-resume-more'));
   const frame = (msg) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify(msg) });
@@ -1373,7 +1374,8 @@ for (const [stale, saved] of [['running', 'interrupted'], ['paused', 'paused'], 
     assert.equal(resume.hidden, false);
     assert.equal(resume.disabled, false);
     assert.equal(pause.hidden, true, 'no Pause on a run the server lost');
-    assert.equal(stop.hidden, true, 'no Stop on a run the server lost');
+    assert.equal(stop.hidden, saved !== 'paused',
+      saved === 'paused' ? 'a paused saved run is stopped through its row' : 'no Stop on an interrupted run');
     // The new server resumes the pipeline: that run is live.
     frame({ type: 'run-created', runId: 'r-2', title: ROW.title, projectDir: PROJECT, status: 'running', kind: 'run' });
     frame({ type: 'state', runId: 'r-2', id: ROW.id, status: 'running' });
@@ -1390,6 +1392,110 @@ for (const [stale, saved] of [['running', 'interrupted'], ['paused', 'paused'], 
     assert.deepEqual(ctx.calls.filter((c) => c.url.endsWith('/api/pause')).map((c) => JSON.parse(c.opts.body)), [{ runId: 'r-2' }]);
   });
 }
+
+test('History bar, paused saved run: Stop settles it through its row, then the page reloads stopped', async () => {
+  const ctx = await bootDetail({
+    rows: [{ ...ROW, status: 'paused' }], detail: PAUSED_DETAIL,
+    arms: (url, opts, box) => {
+      if (!url.endsWith('/api/stop')) return null;
+      box.detail = { ...DETAIL, state: { ...DETAIL.state, status: 'stopped' } };
+      box.rows = [{ ...ROW, status: 'stopped' }];
+      return ok({ ok: true, pipelineId: ROW.id, runId: null, status: 'stopped' });
+    },
+  });
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const doc = ctx.window.document;
+  const stop = doc.querySelector('#hist-detail .hd-bar .hd-stop');
+  assert.equal(stop.hidden, false);
+  click(ctx.window, stop);
+  const modal = doc.getElementById('stop-modal');
+  assert.equal(modal.classList.contains('hidden'), false, 'Stop confirms first');
+  assert.equal(modal.dataset.pipelineId, ROW.id);
+  assert.equal(modal.dataset.runId, undefined);
+  assert.equal(modal.querySelector('.stop-ident-title').textContent, ROW.title);
+  assert.equal(modal.querySelector('.stop-ident-branch').textContent, ROW.branch);
+  assert.equal(modal.querySelector('.stop-cancel').textContent, 'Keep paused');
+  const fetchesBefore = ctx.calls.filter((c) => c.url.endsWith(DETAIL_URL)).length;
+  click(ctx.window, modal.querySelector('.stop-confirm'));
+  await settle(ctx.window, 10);
+  assert.deepEqual(ctx.calls.filter((c) => c.url.endsWith('/api/stop')).map((c) => JSON.parse(c.opts.body)), [{ pipelineId: ROW.id }]);
+  assert.ok(modal.classList.contains('hidden'), 'closed on success');
+  assert.ok(ctx.calls.filter((c) => c.url.endsWith(DETAIL_URL)).length > fetchesBefore, 'the saved run was fetched again');
+  const end = doc.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  assert.equal(end.querySelector('.hd-stop').hidden, true, 'stopped: nothing left to stop');
+  assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'stopped: nothing to resume');
+});
+
+test('History bar, paused saved run with a pre-restart copy in this tab: Stop settles that copy too', async () => {
+  const ctx = await bootDetail({ rows: [{ ...ROW, status: 'paused' }], detail: PAUSED_DETAIL,
+    arms: (url, opts, box) => {
+      if (!url.endsWith('/api/stop')) return null;
+      box.detail = { ...DETAIL, state: { ...DETAIL.state, status: 'stopped' } };
+      box.rows = [{ ...ROW, status: 'stopped' }];
+      return ok({ ok: true, pipelineId: ROW.id, runId: null, status: 'stopped' });
+    } });
+  const send = (m) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify(m) });
+  ctx.wsBox.ws.dispatch('open', {});
+  // A paused run this tab learnt of in the old boot; the new boot (a restart) no longer holds it.
+  send({ type: 'hello', bootId: 'b1', runs: [{ runId: 'old1', title: ROW.title, projectDir: ROW.projectDir,
+    status: 'paused', startedAt: ROW.startedAt, kind: 'run', pipelineId: ROW.id }] });
+  send({ type: 'done', runId: 'old1', status: 'paused' });
+  send({ type: 'hello', bootId: 'b2', runs: [] });
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const doc = ctx.window.document;
+  click(ctx.window, doc.querySelector('#hist-detail .hd-bar .hd-stop'));
+  click(ctx.window, doc.getElementById('stop-modal').querySelector('.stop-confirm'));
+  await settle(ctx.window, 10);
+  assert.equal(doc.getElementById('nav-needs-count').hidden, true, 'the old copy no longer reads Paused');
+});
+
+test('History bar, paused saved run stopped from elsewhere: the row refresh takes Stop and Resume away', async () => {
+  const ctx = await bootDetail({ rows: [{ ...ROW, status: 'paused' }], detail: PAUSED_DETAIL });
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const end = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  assert.equal(end.querySelector('.hd-stop').hidden, false);
+  assert.equal(end.querySelector('.hd-resume-split').hidden, false);
+  // Its Stop dialog is open when the run is stopped elsewhere: it closes with the page it was opened on.
+  click(ctx.window, end.querySelector('.hd-stop'));
+  const modal = ctx.window.document.getElementById('stop-modal');
+  assert.equal(modal.classList.contains('hidden'), false);
+  ctx.box.detail = { ...DETAIL, state: { ...DETAIL.state, status: 'stopped' } };   // what the server now holds
+  await deliverRows(ctx, [{ ...ROW, status: 'stopped' }]);   // another tab / the CLI / chat stopped it
+  assert.ok(modal.classList.contains('hidden'), 'no dialog left asking to stop a stopped run');
+  const end2 = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');   // the page was re-read
+  assert.equal(end2.querySelector('.hd-stop').hidden, true, 'no Stop on a stopped run');
+  assert.equal(end2.querySelector('.hd-resume-split').hidden, true, 'no Resume on a stopped run');
+  assert.equal(ctx.window.document.querySelector('#hist-detail .hd-status-word').textContent, 'Stopped', 'the page reads stopped, not Paused');
+});
+
+test('History bar, paused saved run stopped from elsewhere under an open comment draft: the page keeps the draft', async () => {
+  const ctx = await bootDetail({ rows: [{ ...ROW, status: 'paused' }], detail: PAUSED_DETAIL });
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const doc = ctx.window.document;
+  const fetches = () => ctx.calls.filter((c) => c.url.endsWith(DETAIL_URL)).length;
+  const before = fetches();
+  ctx.box.detail = { ...DETAIL, state: { ...DETAIL.state, status: 'stopped' } };
+  // A reply draft in a thread, then a new comment's composer: each lives only in the page.
+  for (const [cls, key] of [['hd-cmt-thread', 'draft'], ['hd-cmt-block', 'composer']]) {
+    const draft = doc.createElement('div');
+    draft.className = cls;
+    draft.dataset[key] = '1';
+    doc.querySelector('#hist-detail').firstElementChild.appendChild(draft);
+    await deliverRows(ctx, [{ ...ROW, status: 'stopped' }]);
+    assert.equal(fetches(), before, `not re-read under an open ${cls} draft`);
+    assert.ok(draft.isConnected, 'the draft is kept');
+    draft.remove();
+  }
+  const end = doc.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  assert.equal(end.querySelector('.hd-stop').hidden, true, 'the bar still drops Stop');
+  assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'and Resume');
+  await deliverRows(ctx, [{ ...ROW, status: 'stopped' }]);
+  assert.ok(fetches() > before, 'with no draft open, the next row refresh re-reads the page');
+});
 
 // The tab can learn of a run before the restarted server's hello (this tab's own resume POST
 // answered while the socket was down): the hello lists it, so it stays the pipeline's live run.
@@ -1844,4 +1950,72 @@ test('Archive confirms with a toast; a refused archive raises an error toast wit
   assert.equal(deletes, 2);
   assert.equal(lastToast(doc).title, 'Run archived');
   assert.equal(lastToast(doc).tone, 'ok');
+});
+
+// Uses the file's own bootDetail / openTab / DETAIL. Fixture: one agent execution whose only rows are
+// worca's Away mode reviews (an OLD "Night decider" row + a NEW stopped one), a second execution with an
+// ordinary sub-agent that reported tokens but no cost, and the preflight bookend's two Auto workflow
+// rounds + the run-title row.
+const AW_MANIFEST = {
+  version: 2, template: { id: 'wf', name: 'WF' },
+  graph: { nodes: [{ id: 'n_impl', kind: 'agent', key: 'implementer', label: 'Implementer', color: 'blue', x: 0, y: 0, ports: { inputs: [], outputs: [], await: true } }], wires: [] },
+  // The bookend cells every v2 manifest carries (buildGraphManifest): the preflight group's label comes from here.
+  steps: [{ kind: 'preflight', nodes: [{ id: 'preflight', label: 'Preflight', sub: 'checks' }] }, { kind: 'done', nodes: [{ id: 'done', label: 'Done', sub: 'complete' }] }],
+};
+const AW_DETAIL = {
+  ...DETAIL,
+  state: {
+    ...DETAIL.state,
+    stepper: AW_MANIFEST,
+    steps: [
+      { key: 'x:preflight:1', executionId: 'x:preflight:1', nodeId: 'preflight', ordinal: 1, kind: 'cycle', cycle: 1, status: 'done', skills: [], graphifyCount: 0 },
+      { key: 'x:n_impl:1', executionId: 'x:n_impl:1', nodeId: 'n_impl', ordinal: 1, kind: 'cycle', cycle: 1, status: 'done', skills: [], graphifyCount: 0 },
+      { key: 'x:n_impl:2', executionId: 'x:n_impl:2', nodeId: 'n_impl', ordinal: 2, kind: 'cycle', cycle: 2, status: 'done', skills: [], graphifyCount: 0 },
+    ],
+    subAgents: [
+      { id: 'auto-classify-1', label: 'Auto workflow (round 1)', subagentType: 'auto-classify', uiPhase: 'preflight', nodeId: 'preflight', stepKey: 'x:preflight:1', status: 'finished', costUsd: 0.03, tokens: 2100, skills: [] },
+      { id: 'auto-classify-2', label: 'Auto workflow (round 2)', subagentType: 'auto-classify', uiPhase: 'preflight', nodeId: 'preflight', stepKey: 'x:preflight:1', status: 'finished', costUsd: 0.0098, tokens: 900, skills: [] },
+      { id: 'run-title-0a0b0c0d', label: 'Run title', subagentType: 'run-title', uiPhase: 'preflight', nodeId: 'preflight', stepKey: 'x:preflight:1', status: 'finished', costUsd: 0.0021, tokens: 98, skills: [] },
+      { id: 'night-decider-1', label: 'Night decider (questions)', subagentType: 'night-decider', nodeId: 'n_impl', stepKey: 'x:n_impl:1', status: 'finished', costUsd: 0.05, tokens: 4200, runModel: 'claude-opus-5-5', skills: [] },
+      { id: 'night-decider-ab12cd34', label: 'Away mode review (questions)', subagentType: 'night-decider', nodeId: 'n_impl', stepKey: 'x:n_impl:1', status: 'stopped', costUsd: null, tokens: 18400, runModel: 'claude-opus-5-5', skills: [] },
+      { id: 'sub-1', label: 'Explore repo', subagentType: 'Explore', nodeId: 'n_impl', stepKey: 'x:n_impl:2', status: 'finished', costUsd: null, tokens: 5000, skills: [] },
+    ],
+  },
+};
+
+test("Agents tab: worca's own calls are named, a stopped review shows its tokens, and none of them stop the step", async () => {
+  const ctx = await bootDetail({ detail: AW_DETAIL });
+  const sec = await openTab(ctx, 'agents');
+  assert.doesNotMatch(sec.textContent, /night[ -]decider/i, 'UI never says "night decider" (stored labels and types are mapped)');
+  const groups = [...sec.querySelectorAll('.hd-ag-group')];
+  const byHead = new Map(groups.map((g) => [g.querySelector('.hd-ag-head b').textContent, g]));
+  // The preflight bookend's group keeps its spec'd caption (Auto spec §7.5/§7.7; the "Preflight" test above).
+  assert.deepEqual([...byHead.keys()], ['Implementer #1', 'Implementer #2', 'Preflight #1']);
+  const names = (g) => [...g.querySelectorAll('.hd-ag-row .hd-ag-name')].map((n) => n.textContent);
+  const pills = (g) => [...g.querySelectorAll('.hd-ag-row .agent-type-pill')].map((n) => n.textContent);
+  // An OLD row ("Night decider (questions)", COALESCE-frozen) reads the new label; the kind survives.
+  assert.deepEqual(names(byHead.get('Implementer #1')), ['Away mode review (questions)', 'Away mode review (questions)']);
+  assert.deepEqual(pills(byHead.get('Implementer #1')), ['Away mode', 'Away mode']);
+  // The stopped review: no cost (it never reached its result frame) — '—', never a blank — its tokens, the honest state word.
+  const stopped = byHead.get('Implementer #1').querySelectorAll('.hd-ag-row')[1];
+  assert.equal(stopped.querySelector('.hd-ag-cost').textContent, '—');
+  assert.equal(stopped.querySelector('.sub-tok-pill').textContent, '18.4k tok');
+  assert.equal(stopped.querySelector('.st').textContent, 'stopped');
+  // ...but a review the user's own answer cut short never rolls the agent's group up to "stopped".
+  assert.ok(byHead.get('Implementer #1').querySelector('.hd-ag-head .subs-stat.done'), 'the step finished: the group reads done');
+  // An ordinary sub-agent with tokens and no cost keeps today's row: blank cost, no token pill.
+  assert.equal(byHead.get('Implementer #2').querySelector('.sub-tok-pill'), null);
+  assert.equal(byHead.get('Implementer #2').querySelector('.hd-ag-cost').textContent, '');
+  // The preflight bookend's rows: one group, each Auto round keeps its own label, the title row, the sum.
+  const setup = byHead.get('Preflight #1');
+  assert.deepEqual(names(setup), ['Auto workflow (round 1)', 'Auto workflow (round 2)', 'Run title']);
+  assert.deepEqual(pills(setup), ['Auto workflow', 'Auto workflow', 'Run title']);
+  assert.match(setup.querySelector('.hd-ag-meta').textContent, /\$0\.0419/);
+});
+
+test("Overview: worca's own AI calls are not counted as the run's sub-agents", async () => {
+  const ctx = await bootDetail({ detail: AW_DETAIL });
+  const sec = await openTab(ctx, 'overview');
+  // AW_DETAIL: two Auto workflow rounds, the run title and two Away mode reviews are worca's; one Explore row is the agent's.
+  assert.deepEqual([...sec.querySelectorAll('.hd-ov-tag')].map((c) => c.textContent).filter((t) => /sub-agent/.test(t)), ['1 sub-agent']);
 });

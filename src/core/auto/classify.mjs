@@ -7,6 +7,7 @@
 // mode answers from recipes.mjs without spawning.
 import { runClaude, mockEnabled } from '../claude-runner.mjs';
 import { resolveModelEnv, resolveModelCost } from '../config.mjs';
+import { bridgeCostFor, forgetBridgeTag } from '../bridge/telemetry.mjs';
 import { safeParseJson } from '../protocol.mjs';
 import { classifyError } from '../recoverable-error.mjs';
 import { normalizeShape, ShapeError, cleanText, SHAPE_LIMITS } from '../../shared/graph/assemble.mjs';
@@ -260,7 +261,7 @@ export function withCardsSignal(shape, n) {
 export async function classifyTask(input, deps = {}) {
   const {
     taskText = '', extras = [], fingerprint = '', models = [], humanInLoop = true, feedback = [], priorShape = null, registry = {}, domain = null, requireModel = false,
-    model, modelEnv, cwd = process.cwd(), bin, mock = false, signal, envScrub, envAllowlist, maxAttempts = 2, repoLook = false, timeoutMs,
+    model, modelEnv, cwd = process.cwd(), bin, mock = false, signal, envScrub, envAllowlist, maxAttempts = 2, repoLook = false, timeoutMs, bridgeTag = null,
   } = input || {};
   const timeout = Number.isFinite(timeoutMs) ? timeoutMs : (repoLook ? REPO_LOOK_TIMEOUT_MS : CLASSIFIER_TIMEOUT_MS);
   const run = deps.run || runClaude;
@@ -293,7 +294,7 @@ export async function classifyTask(input, deps = {}) {
     let text = '';
     try {
       const res = await run({
-        cwd, systemPrompt, prompt, model, modelEnv: modelEnv ?? resolveModelEnv(model),
+        cwd, systemPrompt, prompt, model, modelEnv: modelEnv ?? resolveModelEnv(model, { tag: bridgeTag || undefined }),
         effort: 'medium', permissionMode: 'acceptEdits',
         // Text-only: no built-in tools at all. Repo look: the three read-only tools, hard-capped
         // by --max-turns (the prompt budget is smaller, so a normal reply lands first).
@@ -316,14 +317,22 @@ export async function classifyTask(input, deps = {}) {
             usage.output_tokens += Number(u.output_tokens) || 0;
           }
           if (e.costUsd == null) return;
-          const c = resolveModelCost(model, Number(e.costUsd), u);
+          const up = bridgeTag ? bridgeCostFor(bridgeTag) : null;   // a bridged model: the upstream's own figure wins
+          if (up) forgetBridgeTag(bridgeTag);
+          const c = up ? up.costUsd : resolveModelCost(model, Number(e.costUsd), u);
           if (Number.isFinite(c)) costUsd += c;
         },
       });
       text = res?.text || '';
     } catch (err) {
+      // A bridged attempt cut before its `result` (a timeout, a pause, a stop, a crash) was still billed
+      // by its upstream: that figure is real spend.
+      const up = bridgeTag ? bridgeCostFor(bridgeTag) : null;
+      if (up) { forgetBridgeTag(bridgeTag); costUsd += up.costUsd; }
       if (err?.name === 'AbortError') {
-        if (signal?.aborted) throw err;                                          // the run was stopped or paused: not ours to classify
+        // The run was stopped or paused: not ours to classify — but an earlier attempt of this call was
+        // already billed, so the error carries it (the round books it, orchestrator.mjs _autoRound).
+        if (signal?.aborted) throw Object.assign(err, { costUsd, usage });
         throw new ClassifierError('CLASSIFIER_TIMEOUT', `no reply after ${Math.round(timeout / 1000)}s`, [], { costUsd, usage });
       }
       if (turnCap) {

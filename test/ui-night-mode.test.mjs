@@ -22,7 +22,7 @@ afterEach(() => {
   for (const w of wins.splice(0)) { try { w.close(); } catch { /* already closed */ } }
 });
 
-async function boot({ settings = {}, decisions = [], away, models = [] } = {}) {
+async function boot({ settings = {}, decisions = [], away, models = [], runData = null } = {}) {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
   const { window } = dom;
   wins.push(window);
@@ -58,6 +58,8 @@ async function boot({ settings = {}, decisions = [], away, models = [] } = {}) {
       return b == null ? Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'boom' }) }) : ok(b);
     }
     if (path.endsWith('/api/night-decisions')) return ok({ decisions });
+    // GET /api/runs/:id (rdLoadData): the saved run a finished run's glance reads through to.
+    if (runData && path.includes('/api/runs/')) return ok(runData);
     if (path.endsWith('/api/settings')) return ok({ nightMode: {}, nightModeToggle: 'auto', nightModeEffective: { strategy: 'mixed', criteria: {} }, ...settings });
     if (path.endsWith('/api/config')) return ok({ config: { steps: {}, customModels: [], activeWorkflowId: 'wf_default' }, models, efforts: [] });
     if (path.endsWith('/api/workflows')) return ok({ workflows: [{ id: 'wf_default', name: 'Default' }] });
@@ -135,7 +137,8 @@ test('run view: stored answers load on open; a night-decision frame appends a gr
     record: { questionId: 'gate-w-2', kind: 'gate', at: '2026-01-01T13:40:00', choice: 'continue', strategy: 'rule', confidence: null, flagged: true, rationale: 'critical remain' } });
   await settle();
   const groups = [...sec.querySelectorAll('.rd-na')];
-  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent), ['Clarifying questions · 13:12', 'Review loop · 13:40']);
+  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent),
+    ["Clarifying questions · 13:12 · agent's pick · $0.00", 'Review loop · 13:40 · rule · $0.00'], 'no review ran: how, and that it cost nothing');
   const rows = [...sec.querySelectorAll('.rd-na-row')];
   assert.deepEqual(rows.map((r) => [r.querySelector('.rd-na-q')?.textContent ?? null, r.querySelector('.rd-na-a').textContent, !!r.querySelector('.rd-na-check')]),
     [['Delivery', 'Live', true], ['Which store?', 'Redis', false], [null, 'Continued', true]]);
@@ -701,6 +704,82 @@ test('answers card: "Decided by" under an answer the review gave, never under th
   const rows = [...screen.querySelectorAll('.rd-night-sec .rd-na-row')];
   assert.deepEqual(rows.map((r) => r.querySelector('.rd-na-by')?.textContent ?? null), ['Decided by Opus 5.5', null, 'Decided by the default model', null]);
   assert.equal(rows[0].querySelector('.rd-na-by').tagName, 'SMALL', 'small secondary text');
+});
+
+// One review answers every question of its ask: the group caption names its model and cost; the heading
+// sums every booked review from the steps (a review booked after the user answered first included).
+const AWAY_STEPS = () => ([
+  { key: 'n_plan:1', executionId: 'n_plan:1', nodeId: 'n_plan', status: 'done', costUsd: 0.67, auxCosts: { away: { usd: 0.05, calls: 1 } } },
+  { key: 'n_impl:1', executionId: 'n_impl:1', nodeId: 'n_impl', status: 'start', costUsd: 1.94,
+    auxCosts: { away: { usd: 0.1, calls: 2, floorUsd: 0.0234, stopped: 1 } } },   // 0.07 answered + 0.03 booked after the user answered
+]);
+const AWAY_DECISIONS = () => ([
+  { questionId: 'c-old', kind: 'clarify', at: '2026-01-01T13:00:00', choice: 'S', strategy: 'analysis', model: 'claude-opus-5-5', flagged: false, rationale: 'r',
+    questions: [{ id: 'size', question: 'Which size?', choice: 'S', strategy: 'analysis', confidence: 75, flagged: false, rationale: 'small' }] },
+  { questionId: 'c-1', kind: 'clarify', at: '2026-01-01T14:02:00', choice: 'Redis', strategy: 'analysis', model: 'claude-opus-5-5', effort: 'high',
+    reviewId: 'night-decider-ab12cd34', reviewStatus: 'finished', costUsd: 0.05, tokens: 900, executionId: 'n_plan:1', flagged: false, rationale: 'r',
+    questions: [{ id: 'store', question: 'Which store?', choice: 'Redis', strategy: 'analysis', confidence: 80, flagged: false, rationale: 'fits' }] },
+  { questionId: 'q-2', kind: 'questions', at: '2026-01-01T14:30:00', choice: 'a | b', strategy: 'analysis', model: null,
+    reviewId: 'night-decider-0a0b0c0d', reviewStatus: 'finished', costUsd: 0.07, tokens: 1200, executionId: 'n_impl:1', flagged: true, rationale: 'r',
+    questions: [{ id: 'q1', question: 'One?', choice: 'a', strategy: 'analysis', confidence: 90, flagged: false, rationale: 'x' },
+      { id: 'q2', question: 'Two?', choice: 'b', strategy: 'analysis', confidence: 40, flagged: true, rationale: 'y' }] },
+  { questionId: 'q-3', kind: 'questions', at: '2026-01-01T14:40:00', choice: 'x', strategy: 'analysis', model: 'claude-opus-5-5',
+    reviewId: 'night-decider-11112222', reviewStatus: 'stopped', costUsd: null, tokens: 1800, floorUsd: 0.0234, executionId: 'n_impl:1', flagged: true, rationale: 'r',
+    questions: [{ id: 'q', question: 'Three?', choice: 'x', strategy: 'analysis', confidence: null, flagged: true, rationale: 'could not weigh the options (timeout)' }] },
+  { questionId: 'gate-w-2', kind: 'gate', at: '2026-01-01T14:52:00', choice: 'continue', strategy: 'rule', confidence: null, flagged: false, rationale: 'no issues' },
+]);
+
+test('answers card: each ask names the model that answered it and what that review cost; the heading adds every review\'s cost', async () => {
+  const ctx = await boot({ models: DM_MODELS, decisions: AWAY_DECISIONS() });
+  const screen = await openDetail(ctx);
+  ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 3, status: 'running', steps: AWAY_STEPS(), totalCostUsd: 2.61, night: RUN.night });
+  await settle();
+  const sec = screen.querySelector('.rd-night-sec');
+  assert.deepEqual([...sec.querySelectorAll('.rd-na .rd-slabel')].map((c) => c.textContent), [
+    'Clarifying questions · 13:00',                                   // stored before the cost was kept: nothing invented
+    'Clarifying questions · 14:02 · Opus 5.5 · $0.05',
+    'Questions mid-step · 14:30 · the default model · $0.07',
+    'Questions mid-step · 14:40 · Opus 5.5 · review stopped · ≥$0.02 · not in total',   // a lower bound, never shown as spent
+    'Review loop · 14:52 · rule · $0.00',
+  ]);
+  // From the steps, not the records: $0.05 + $0.07 answered, + $0.03 booked for an ask the user answered first.
+  assert.equal(sec.querySelector('h3').textContent, 'Answered for you · 6 answers, 2 to check · $0.15');
+  assert.ok(![...sec.querySelectorAll('.rd-na-row')].some((li) => /\$/.test(li.textContent)), 'a review\'s cost is the ask\'s, never a row\'s');
+  // A new review booked: the heading repaints (the answers did not change).
+  const more = AWAY_STEPS(); more[1].auxCosts.away = { usd: 0.14, calls: 3, floorUsd: 0.0234, stopped: 1 };
+  ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 4, status: 'running', steps: more, night: RUN.night });
+  await settle();
+  assert.equal(sec.querySelector('h3').textContent, 'Answered for you · 6 answers, 2 to check · $0.19');
+});
+
+test('answers card: an old run (no shares on its steps) keeps the plain heading; only a stopped review shows its lower bound, apart', async () => {
+  const ctx = await boot({ decisions: [{ questionId: 'gate-w-2', kind: 'gate', at: '2026-01-01T13:40:00', choice: 'continue', strategy: 'rule', flagged: false, rationale: 'r' }] });
+  const screen = await openDetail(ctx);
+  ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 3, status: 'running', steps: [{ key: 'n_plan:1', executionId: 'n_plan:1', costUsd: 1 }], night: RUN.night });
+  await settle();
+  const h = screen.querySelector('.rd-night-sec h3');
+  assert.equal(h.textContent, 'Answered for you · 1 answer');
+  ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 4, status: 'running', night: RUN.night,
+    steps: [{ key: 'n_plan:1', executionId: 'n_plan:1', costUsd: 1, auxCosts: { away: { usd: 0, calls: 0, floorUsd: 0.0234, stopped: 1 } } }] });
+  await settle();
+  assert.equal(h.textContent, 'Answered for you · 1 answer · ≥$0.02 · not in total');
+  ctx.dispatch({ type: 'state', runId: RUN.runId, seq: 5, status: 'running', night: RUN.night,
+    steps: [{ key: 'n_plan:1', executionId: 'n_plan:1', costUsd: 1, auxCosts: { away: { usd: 0, calls: 0, stopped: 1 } } }] });
+  await settle();
+  assert.equal(h.textContent, 'Answered for you · 1 answer', 'not priced: no figure, never "$0.00"');
+  assert.doesNotMatch(screen.querySelector('.rd-night-sec').textContent, /NaN|undefined/);
+});
+
+test('answers card: a run seen only through hello after it ended reads its reviews\' cost from the saved steps once they land', async () => {
+  const steps = [{ key: 'n_plan:1', executionId: 'n_plan:1', costUsd: 0.67, auxCosts: { away: { usd: 0.05, calls: 1 } } }];
+  const ctx = await boot({ models: DM_MODELS, decisions: [AWAY_DECISIONS()[1]], runData: { state: { status: 'done', steps, totalCostUsd: 0.67 }, results: null } });
+  ctx.dispatch({ type: 'hello', runs: [{ ...RUN, status: 'done' }] });   // hello carries no steps (ui/server.mjs summarizeRuns)
+  ctx.window.location.hash = `running/${RUN.runId}`;
+  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+  await settle(12);
+  const sec = ctx.window.document.querySelector('#run-detail .rd-night-sec');
+  assert.deepEqual([...sec.querySelectorAll('.rd-na .rd-slabel')].map((c) => c.textContent), ['Clarifying questions · 14:02 · Opus 5.5 · $0.05']);
+  assert.equal(sec.querySelector('h3').textContent, 'Answered for you · 1 answer · $0.05', 'repainted when the saved steps landed');
 });
 
 test('form: "Decided by" offers what the title-model picker offers; "Effort" the effort levels; both read back', () => {

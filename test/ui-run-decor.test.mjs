@@ -2,7 +2,7 @@
 // P6a — the pure run-decor reducer: state tables in, one decor bag out. No DOM.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decorFromState, statusOf, fmtDur, fmtUsd, manifestAgents, execBandLayout, QUIESCENCE_WARNING } from '../ui/public/graph/run-decor.mjs';
+import { decorFromState, applyDecor, statusOf, fmtDur, fmtUsd, manifestAgents, execBandLayout, QUIESCENCE_WARNING } from '../ui/public/graph/run-decor.mjs';
 
 // ── fixture builders ────────────────────────────────────────────────────────
 const agent = (id, key, over = {}) => ({
@@ -354,4 +354,86 @@ test('the live line: an ACTIVE script node with a captured line gets footers[nod
   assert.equal(d.footers.n_tests.live, '  ✓ 212 passing');
   assert.equal(d.footers.n_plan.live, undefined);
   assert.equal(decorFromState({ ...st, status: 'done', active: [] }, { live: false, now: 0, lastLines }).footers.n_tests.live, undefined, 'a frozen run shows none');
+});
+
+// ── Away mode: worca's own review spend on the graph (Expert) ────────────────
+const OPUS = (id) => (id === 'claude-opus-5-5' ? 'Opus 5.5' : id);
+// The review rows as the harness writes them (subagentType 'night-decider', stepKey === executionId,
+// runModel = the model the review ran on). The Explore row is an ordinary sub-agent of execution 2: its
+// model must never name a review.
+const REVIEW_SUBS = [
+  { id: 'night-decider-0a0b0c0d', subagentType: 'night-decider', nodeId: 'n_impl', stepKey: 'x:n_impl:1', status: 'finished', runModel: 'claude-opus-5-5', costUsd: 0.07 },
+  { id: 'night-decider-1a2b3c4d', subagentType: 'night-decider', nodeId: 'n_impl', stepKey: 'x:n_impl:1', status: 'stopped', runModel: 'claude-opus-5-5', costUsd: null },
+  { id: 'night-decider-2b3c4d5e', subagentType: 'night-decider', nodeId: 'n_impl', stepKey: 'x:n_impl:2', status: 'finished', runModel: 'claude-sonnet-5-5', costUsd: 0.03 },
+  { id: 'a1', subagentType: 'Explore', nodeId: 'n_impl', stepKey: 'x:n_impl:2', status: 'finished', runModel: 'claude-haiku-4-5' },
+];
+const awayDecor = () => decorFromState(S({ status: 'done', steps: [
+  impl(1, { costUsd: 1.91, auxCosts: { away: { usd: 0.07, calls: 1, floorUsd: 0.0234, stopped: 1 } } }),
+  impl(2, { costUsd: 0.71, auxCosts: { away: { usd: 0.03, calls: 1 } } }),
+  impl(3, { costUsd: 0.4 }),
+] }), { live: false, subsOf: (id) => (id === 'n_impl' ? REVIEW_SUBS : []), modelLabel: OPUS });
+function fakeView() {
+  const chrome = {}, feet = {};
+  return { chrome, feet, setStatus() {}, setNodeChrome(id, c) { chrome[id] = c; }, setFooter(id, b) { feet[id] = b; }, setWireBadge() {}, setWireLive() {} };
+}
+const awayOnly = (bands) => bands.filter((b) => b.kind === 'away').map(({ executionId, variant, label, title, right }) => ({ executionId, variant, label, title, right }));
+
+test('away share: the node chip sums its executions; each execution names its own review model; stopped kept apart', () => {
+  const d = awayDecor();
+  assert.equal(d.totals.n_impl.cost, '$3.02', 'the step cost already holds the review: the share is never added twice');
+  const t = d.totals.n_impl.away;
+  assert.deepEqual([t.calls, t.stopped, t.text, t.title], [2, 1, '$0.10', 'Away mode · 2 reviews · 1 stopped']);
+  assert.equal(t.floorUsd, 0.0234, 'the lower bound rides apart, never in text');
+  assert.deepEqual(d.footers.n_impl.rows[0].away, { usd: 0.07, calls: 1, floorUsd: 0.0234, stopped: 1, model: 'claude-opus-5-5', modelText: 'Opus 5.5' });
+  assert.deepEqual(d.footers.n_impl.rows[1].away, { usd: 0.03, calls: 1, floorUsd: null, stopped: 0, model: 'claude-sonnet-5-5', modelText: 'claude-sonnet-5-5' },
+    "execution 2's own review row — not execution 1's, and never the Explore sub-agent's model");
+  assert.equal('away' in d.footers.n_impl.rows[2], false, 'an execution with no review carries no away key');
+  assert.equal(d.footers.n_impl.summary, '3 runs · $3.02', 'the strip summary is unchanged (the chip lives in the header)');
+});
+
+test('old runs (no auxCosts) keep the exact totals and rows they had', () => {
+  const d = decorFromState(S({ status: 'done', steps: [impl(1, { costUsd: 0.5 })] }), { subsOf: () => REVIEW_SUBS });
+  assert.deepEqual(d.totals.n_impl, { durMs: 1000, dur: '1s', costUsd: 0.5, cost: '$0.50', hasStep: true });
+  assert.equal('away' in d.footers.n_impl.rows[0], false, 'a review row without a booked share invents no band ($0.00 / NaN never appear)');
+});
+
+test('a node whose only review was stopped shows its lower bound, not in total; unpriced or {free} shows no chip, never $0.00', () => {
+  const away = (aux) => decorFromState(S({ status: 'done', steps: [impl(1, { costUsd: 0.4, auxCosts: { away: aux } })] })).totals.n_impl.away;
+  assert.deepEqual([away({ usd: 0, calls: 0, floorUsd: 0.0234, stopped: 1 }).text, away({ usd: 0, calls: 0, floorUsd: 0.0234, stopped: 1 }).title],
+    ['≥$0.02', 'Away mode · 1 stopped · not in total']);
+  assert.equal(away({ usd: 0, calls: 0, stopped: 1 }).text, '', 'not priced');
+  assert.equal(away({ usd: 0, calls: 0, floorUsd: 0, stopped: 1 }).text, '', 'a {free} model');
+});
+
+test('applyDecor: away bands sit right under their execution, booked then stopped — expanded node, Expert only', () => {
+  const d = awayDecor();
+  const v = fakeView();
+  applyDecor(v, { ...d, expanded: 'n_impl', detail: true });
+  assert.deepEqual(v.feet.n_impl.map((b) => b.kind), ['fan', 'strip', 'exec', 'away', 'away', 'exec', 'away', 'exec']);
+  assert.deepEqual(awayOnly(v.feet.n_impl), [
+    { executionId: 'x:n_impl:1', variant: 'booked', label: '1 review · Opus 5.5', title: 'Away mode · 1 review · Opus 5.5', right: '$0.07' },
+    { executionId: 'x:n_impl:1', variant: 'stopped', label: 'review stopped', title: 'Away mode · review stopped · not in total', right: '≥$0.02' },
+    { executionId: 'x:n_impl:2', variant: 'booked', label: '1 review · claude-sonnet-5-5', title: 'Away mode · 1 review · claude-sonnet-5-5', right: '$0.03' },
+  ]);
+  assert.equal(v.chrome.n_impl.totals.away.text, '$0.10', 'the header chip rides the totals');
+  const collapsed = fakeView();
+  applyDecor(collapsed, { ...d, expanded: null, detail: true });
+  assert.deepEqual(collapsed.feet.n_impl.map((b) => b.kind), ['fan', 'strip'], 'away bands are execution detail: collapsed shows none');
+  const simple = fakeView();
+  applyDecor(simple, { ...d, expanded: 'n_impl', detail: false });
+  assert.deepEqual(simple.feet.n_impl, [], 'Simple/Advanced: no footer, so no band');
+  assert.equal(simple.chrome.n_impl.totals, null, 'and no header chip (the run breakdown carries the spend there)');
+});
+
+test('a $0 review (mock / free model) keeps its chip and band at $0.00; several stopped reviews say how many', () => {
+  const zero = decorFromState(S({ status: 'done', steps: [impl(1, { costUsd: 0, auxCosts: { away: { usd: 0, calls: 1 } } })] }), { live: false });
+  assert.equal(zero.totals.n_impl.away.text, '$0.00');
+  const v = fakeView();
+  applyDecor(v, { ...zero, expanded: 'n_impl', detail: true });
+  assert.deepEqual(awayOnly(v.feet.n_impl).map((b) => [b.variant, b.label, b.right]), [['booked', '1 review', '$0.00']]);
+  const two = decorFromState(S({ status: 'done', steps: [impl(1, { costUsd: 0.2, auxCosts: { away: { usd: 0, calls: 0, stopped: 2 } } })] }), { live: false });
+  const w = fakeView();
+  applyDecor(w, { ...two, expanded: 'n_impl', detail: true });
+  assert.deepEqual(awayOnly(w.feet.n_impl).map((b) => [b.variant, b.label, b.right, b.title]), [['stopped', '2 reviews stopped', '', 'Away mode · 2 reviews stopped']],
+    'no booked band for a review that never booked; an unpriced lower bound stays blank');
 });
