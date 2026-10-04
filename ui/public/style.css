@@ -3063,20 +3063,25 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .spend-ind.over .spend-ind-meter{background:var(--red-bg);}
 .spend-ind.over .spend-ind-meter-fill{background:var(--red-ink);}
 .spend-ind.over .spend-ind-sub{color:var(--red-ink);}
-/* No total limit: one line, "Oct  $163 spent · $3,591 saved", on one shared baseline. The
-   month leads in ink. Spent is small, regular and --ink-2 (--ink-3 is 2.58:1 on --field).
+/* No total limit: one line, "Oct   $163 spent   $3,591 saved", on one shared baseline. The
+   month, spent and saved are siblings on ONE flex level spread space-between: the month flush
+   left, saved (or "net") flush right, spent between them with equal gaps — no " · ", the
+   spacing does its job. With no saved figure, spent goes flush right. The month leads in
+   ink. Spent is small, regular and --ink-2 (--ink-3 is 2.58:1 on --field).
    Saved is a size up and semibold; a gain is green — --green-ink-strong, since --green-ink
    measures 4.44:1 on this card's hover fill, under verify:theme's 4.5:1. A loss ("−$40 net")
    keeps neutral ink (--red-ink fails there too); its "−" carries it. The line never wraps:
-   the figures ellipsize as a safety net. Width budget: the card's content box is 235 px;
-   "$99,999 spent · $99,999 saved" fits after "Oct" (11 px spare at May) and "Week" (3 px) —
-   "This week" ran 22 px over, so a size or gap bump here needs a re-measure. New class names only — the OpenRouter block below
+   each figure ellipsizes as a safety net (min-width:0 lets it shrink; the month never does).
+   Width budget: the card's content box is 235 px; with the old " · " between the figures,
+   "$99,999 spent · $99,999 saved" fit after "Oct" (11 px spare at May) and "Week" (3 px) —
+   the 10 px minimum gap now stands where the dot was, so the budget is about the same, and
+   "This week" ran 22 px over: a size or gap bump here needs a re-measure. New class names only — the OpenRouter block below
    reuses .spend-ind-row, -label and -amt, so the amount overrides are scoped to a segment. */
-.spend-ind-line{display:flex;align-items:baseline;gap:10px;min-width:0;white-space:nowrap;}
+.spend-ind-line{display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0;white-space:nowrap;}
 .spend-ind-period{flex:none;font-size:12px;font-weight:600;color:var(--ink);}
-.spend-ind-figs{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:11px;color:var(--ink-2);}
+.spend-ind-spent{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:11px;color:var(--ink-2);}
 .spend-ind-spent .spend-ind-amt{font-size:11px;font-weight:400;color:var(--ink-2);}
-.spend-ind-saved{font-size:11px;font-weight:600;color:var(--ink);}
+.spend-ind-saved{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:11px;font-weight:600;color:var(--ink);}
 .spend-ind-saved .spend-ind-amt{font-size:12px;}
 .spend-ind-saved.pos,.spend-ind-saved.pos .spend-ind-amt{color:var(--green-ink-strong);}
 /* OpenRouter free-model requests (openrouter-free-view.mjs): a second block under the spend block. */

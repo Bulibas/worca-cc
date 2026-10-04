@@ -319,8 +319,8 @@ function indFigure(doc, cls, amount, word) {
 
 /** Sidebar spend indicator (whole block navigates to #stats). With a total limit: Spent +
  *  meter. Without one there is no meter to show, so the card is one line instead — "Oct
- *  $163 spent · $3,591 saved", whole dollars — and the exact figures move to the title and
- *  the accessible name. */
+ *  $163 spent  $3,591 saved", whole dollars, spread evenly across the card — and the exact
+ *  figures move to the title and the accessible name. */
 export function renderBudgetIndicator(budget, { doc = globalThis.document, fmt = DEFAULT_FMT } = {}) {
   const b = budget || {};
   const btn = h(doc, 'button', 'spend-ind');
@@ -343,20 +343,19 @@ export function renderBudgetIndicator(budget, { doc = globalThis.document, fmt =
   }
   btn.setAttribute('aria-label', `Spent this ${periodWord(b)}: ${fmt.usd(b.windowSpendUsd)}` +
     (saved != null ? ` · Saved this ${periodWord(b)}: ${signedUsd(fmt, saved)}` : ''));
+  // Period, spent and saved are siblings on one flex level, spread space-between: month
+  // flush left, saved flush right, spent centred between equal gaps — no separator.
   const line = h(doc, 'span', 'spend-ind-line');
   line.appendChild(h(doc, 'span', 'spend-ind-period', periodLabel(b)));
-  const figs = h(doc, 'span', 'spend-ind-figs');
-  figs.appendChild(indFigure(doc, 'spend-ind-spent', lineUsd(b.windowSpendUsd), 'spent'));
+  line.appendChild(indFigure(doc, 'spend-ind-spent', lineUsd(b.windowSpendUsd), 'spent'));
   if (saved != null) {
-    figs.appendChild(h(doc, 'span', 'spend-ind-sep', ' · '));
     // A gain is green (.pos → --green-ink-strong, which clears verify:theme's 4.5:1 on the
     // card's hover fill). A loss stays neutral ink — --red-ink is 4.07:1 there — and reads
     // "−$40 net": its "−" carries it, and "−$40 saved" would contradict itself.
     const seg = indFigure(doc, 'spend-ind-saved', lineUsd(saved), saved < 0 ? 'net' : 'saved');
     if (saved >= 0) seg.classList.add('pos');
-    figs.appendChild(seg);
+    line.appendChild(seg);
   }
-  line.appendChild(figs);
   btn.appendChild(line);
   return btn;
 }

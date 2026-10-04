@@ -367,19 +367,25 @@ test('the one line: month in ink and semibold, Spent small/thin/grey, Saved bigg
     assert.ok(body, `${sel} must exist`);
     for (const p of pats) assert.match(body, p, `${sel} lost ${p}`);
   };
-  // One row that never wraps; the mixed sizes share a baseline; the figures ellipsize as a net.
-  mark('.spend-ind-line', /display:\s*flex/, /align-items:\s*baseline/, /white-space:\s*nowrap/);
-  mark('.spend-ind-figs', /min-width:\s*0/, /overflow:\s*hidden/, /text-overflow:\s*ellipsis/);
-  mark('.spend-ind-period', /color:\s*var\(--ink\)/, /font-weight:\s*600/);
+  // One row that never wraps; the mixed sizes share a baseline; month, spent and saved spread
+  // space-between on that one flex level (equal gaps); each figure ellipsizes as a net.
+  mark('.spend-ind-line', /display:\s*flex/, /align-items:\s*baseline/, /white-space:\s*nowrap/,
+    /justify-content:\s*space-between/);
+  mark('.spend-ind-period', /color:\s*var\(--ink\)/, /font-weight:\s*600/, /flex:\s*none/);
+  for (const sel of ['.spend-ind-spent', '.spend-ind-saved']) {
+    mark(sel, /min-width:\s*0/, /overflow:\s*hidden/, /text-overflow:\s*ellipsis/);
+  }
+  // The figs wrapper and the " · " separator are gone: the spacing does their job.
+  assert.doesNotMatch(css, /\.spend-ind-(?:figs|sep)\b/);
   // Spent: ~11px, regular, --ink-2 (--ink-3 is 2.58:1 on --field, under verify:theme's 4.5:1).
-  mark('.spend-ind-figs', /font-size:\s*11px/, /color:\s*var\(--ink-2\)/);
+  mark('.spend-ind-spent', /font-size:\s*11px/, /color:\s*var\(--ink-2\)/);
   mark('.spend-ind-spent .spend-ind-amt', /font-size:\s*11px/, /font-weight:\s*400/, /color:\s*var\(--ink-2\)/);
   // Saved: semibold, the word at the spent size and the amount one step up (~12px).
   mark('.spend-ind-saved', /font-size:\s*11px/, /font-weight:\s*600/, /color:\s*var\(--ink\)/);
   mark('.spend-ind-saved .spend-ind-amt', /font-size:\s*12px/);
   // A gain greens the word too, in --green-ink-strong (--green-ink is 4.44:1 on the hover fill).
   mark('.spend-ind-saved.pos,.spend-ind-saved.pos .spend-ind-amt', /color:\s*var\(--green-ink-strong\)/);
-  for (const sel of ['.spend-ind-line', '.spend-ind-period', '.spend-ind-figs',
+  for (const sel of ['.spend-ind-line', '.spend-ind-period', '.spend-ind-spent',
     '.spend-ind-spent .spend-ind-amt', '.spend-ind-saved', '.spend-ind-saved .spend-ind-amt']) {
     assert.doesNotMatch(ruleBody(sel), /--ink-3|--green-ink\b|--red-ink/, `${sel}: a colour that fails 4.5:1`);
   }
