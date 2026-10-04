@@ -43,6 +43,8 @@ const state = {
   scriptsList: [],   // GET /api/scripts cache; dropped on every scripts-changed frame
   mockWriterRoles: [], // closed mock-role list from /api/agents (drives the agent form)
   historyAll: [],    // full /api/history dataset; client-side filter cache
+  historyArchived: null, // GET /api/history?archived=1 rows, lazy per Archived-chip activation (null = never loaded)
+  historyArchivedError: '', // the last archived-feed load error, shown in the Runs list while it has no rows
   historyPerson: '', // active "Started by" filter (lower-cased name); '' === everyone. Shared deployments only.
   historyError: '',  // the last /api/history load error, shown in the Runs list while it has no rows
   ghAvailable: false,// gh CLI availability, from the last /api/history load
@@ -321,6 +323,7 @@ const el = {
   runsSearchRow: $('#runs-search-row'),
   runsFilter: $('#runs-filter'),
   runsGroupBtn: $('#runs-group-btn'),
+  runsArchivedBtn: $('#runs-archived-btn'),
   runsGroupMenu: $('#runs-group-menu'),
 
   // Target selector (New Pipeline)
@@ -1111,6 +1114,11 @@ function handleServerMessage(msg) {
     refreshAllCounts();
     refreshBudget();
     if (inRunsView()) loadHistoryView({ force: true });
+    // The Archived feed, once loaded, goes stale on the same change: refetch it while
+    // the Runs page is open, else drop it so the next Archived paint fetches afresh.
+    if (state.historyArchived !== null) {
+      if (inRunsView()) void loadHistoryArchived(); else state.historyArchived = null;
+    }
     if (currentView() === 'stats') loadStatsView();
     return;
   }
@@ -12420,6 +12428,8 @@ el.form.addEventListener('submit', async (e) => {
   if (scheduling) {
     const { sync: schedSync, ...schedRest } = pendingSchedule;
     Object.assign(body, schedRest);
+    // branchGone is a form hint (openAfterForNew), never part of the wire's { kind, id, title }.
+    if (body.after && 'branchGone' in body.after) { const { branchGone: _bg, ...a } = body.after; body.after = a; }
     if (schedSync && typeof schedSync.beforeRun === 'boolean') body.syncBeforeStart = schedSync.beforeRun;
     if (schedSync && (schedSync.onDiverged === 'origin' || schedSync.onDiverged === 'fail')) body.syncOnDiverged = schedSync.onDiverged;
   }
@@ -12582,7 +12592,8 @@ function setPendingSchedule(pick) {
   if (!pendingSchedule) { syncPreviousBranchEverywhere(); return; }
   if (pendingSchedule.after) {
     el.newSchedBadge.textContent = 'After run';
-    el.newSchedText.textContent = `Starts when ‘${pendingSchedule.after.title || 'the run before it'}’ finishes`;
+    el.newSchedText.textContent = `Starts when ‘${pendingSchedule.after.title || 'the run before it'}’ finishes`
+      + (pendingSchedule.after.branchGone ? ' · its branch is gone, so pick a source branch' : '');
   } else if (pendingSchedule.repeat) {
     el.newSchedBadge.textContent = 'Repeats';
     el.newSchedText.textContent = describeRule(pendingSchedule.repeat.rule);
@@ -12611,7 +12622,7 @@ el.newSchedClear?.addEventListener('click', () => setPendingSchedule(null));
 // single select becomes in workspace mode — the switch below carries the flag there.
 function syncPreviousBranchOption(select) {
   if (!select || select.classList.contains('ws-src-select')) return;
-  const want = !!(pendingSchedule && pendingSchedule.after) && state.runTarget !== 'workspace';
+  const want = !!(pendingSchedule && pendingSchedule.after && !pendingSchedule.after.branchGone) && state.runTarget !== 'workspace';
   const has = [...select.options].find((o) => o.value === PREVIOUS_BRANCH);
   if (want && !has) {
     const opt = document.createElement('option');
@@ -12636,7 +12647,7 @@ function syncPreviousBranchEverywhere() {
     if (el.sourceBranch.value === PREVIOUS_BRANCH || (state.sync.block && state.sync.block.base === effectiveBase())) paintSyncRowNow();
     else void refreshSyncStatusQuiet();
   }
-  const wsPick = !!(pendingSchedule && pendingSchedule.after) && state.runTarget === 'workspace';
+  const wsPick = !!(pendingSchedule && pendingSchedule.after && !pendingSchedule.after.branchGone) && state.runTarget === 'workspace';
   if (el.wsSourcePreviousRow) el.wsSourcePreviousRow.classList.toggle('hidden', !wsPick);
   // ON by default with a pick in workspace mode; a deliberate OFF (the click handler marks it) survives
   // member re-renders and target switches, and the FRESH member selects follow whichever it is — every
@@ -12706,7 +12717,9 @@ async function openAfterForNew(ref) {
   } else { setFormMsg('That run’s project is not registered.', 'err'); return; }
   // A predecessor that already ended badly can only be waited for under the any policy
   // (resolveAfterRef refuses it under done) — preset the switch the sheet would need.
-  setPendingSchedule({ after: { kind: r.kind, id: r.id, title: r.title || null }, afterPolicy: ENDED_BADLY.includes(r.status) ? 'any' : 'done' });
+  // branchGone: the predecessor finished but its feature branch no longer resolves (an archived
+  // or restored run) — syncPreviousBranchOption then leaves "Branch of the run before it" out.
+  setPendingSchedule({ after: { kind: r.kind, id: r.id, title: r.title || null, branchGone: !!r.branchGone }, afterPolicy: ENDED_BADLY.includes(r.status) ? 'any' : 'done' });
   try { el.prompt?.focus(); } catch { /* jsdom */ }
 }
 function closeStartMenu() {
@@ -18609,9 +18622,16 @@ async function loadHistoryView({ force = false } = {}) {
 }
 
 // Loading affordance: the Runs list is aria-busy while History (re)loads.
-function setHistoryLoading(on) {
-  if (el.runsList) el.runsList.setAttribute('aria-busy', on ? 'true' : 'false');
+// The list is aria-busy while EITHER feed loads: the active history (setHistoryLoading,
+// through Phase 2) or the Archived toggle's (setArchivedLoading) — one finishing must not
+// clear the other's busy state.
+let historyBusy = false;
+let archivedBusy = false;
+function paintRunsBusy() {
+  if (el.runsList) el.runsList.setAttribute('aria-busy', historyBusy || archivedBusy ? 'true' : 'false');
 }
+function setHistoryLoading(on) { historyBusy = !!on; paintRunsBusy(); }
+function setArchivedLoading(on) { archivedBusy = !!on; paintRunsBusy(); }
 
 // Phase-2 trigger + WS handler. The spinner stays on through PR enrichment and is
 // cleared by the final batch, a failed/!ok POST, or the per-token watchdog — so it
@@ -19397,6 +19417,11 @@ function routeHistoryDetail(param, { instant = false } = {}) {
 function histRecordFor(parsed) {
   const hit = (state.historyAll || []).find((r) => r && r.id === parsed.id && r.projectKey === parsed.projectKey);
   if (hit) return hit;
+  // The Archived feed is its own source of truth (archived rows never enter
+  // historyAll): without this an archived run opens as the stub below — no
+  // projectDir, no title — and the glance head prints "(no project)".
+  const arch = (state.historyArchived || []).find((r) => r && r.id === parsed.id && r.projectKey === parsed.projectKey);
+  if (arch) return arch;
   // Deep link before the list loaded: a minimal record is enough for the keyed
   // detail/log/diff URL builders (they only read projectKey/target). It has NO
   // pauseReason and NO retainedWork — neither lives in the detail payload — so
@@ -19552,9 +19577,17 @@ async function loadHistDetailScreen(screen, record, parsed, ship = null) {
   // continuation runs first — the list paint happens while this screen's `data`
   // is still null, and nothing else would re-resolve the record afterwards. The
   // minimal {id, projectKey} stub would then stick for the life of the screen.
-  const row = (state.historyAll || []).find(
-    (r) => r && r.id === parsed.id && r.projectKey === parsed.projectKey);
+  const matchRow = (r) => r && r.id === parsed.id && r.projectKey === parsed.projectKey;
+  const row = (state.historyAll || []).find(matchRow)
+    // An ARCHIVED deep link resolves from the Archived feed when it has loaded;
+    // an archived row never appears in historyAll, so without this the stub —
+    // no projectDir, no title — sticks and the glance head prints "(no project)".
+    || (state.historyArchived || []).find(matchRow);
   if (row) histDetailState.record = row;
+  // A deep-linked ARCHIVED run on a cold feed: the payload's stamp says the row
+  // lives in the archived feed, so fetch that feed now (its lazy load runs
+  // refreshHdFromRow at the end, which repairs the stub record and repaints).
+  if (!row && data.state.archivedAt) loadHistoryArchived();
   const rec = histDetailState.record;
 
   // (3) PAINT — deliberately OUTSIDE the fetch try. A painter bug must not be
@@ -20110,9 +20143,13 @@ function paintHdGlance(screen, record, data) {
 function paintHdAfter(screen, record, data = null) {
   const btn = screen.querySelector('.hd-after');
   if (!btn) return;
+  // An ARCHIVED run is a read-only record: the chain gate deliberately refuses an
+  // archived predecessor ("was archived", spec D9), so hide the follow-up until the
+  // run is restored — hiding beats a late failure in the New-pipeline form.
+  const archived = !!(data && data.state && data.state.archivedAt);
   const id = record && record.id ? record.id : null;
-  btn.hidden = !id;
-  btn.onclick = id ? () => { location.hash = `#new/after/${id}`; } : null;   // never a handler over a null record
+  btn.hidden = !id || archived;
+  btn.onclick = (id && !archived) ? () => { location.hash = `#new/after/${id}`; } : null;   // never a handler over a null record
   const status = (record && record.status) || (data && data.state && data.state.status) || '';
   const title = runAfterTitle(String(status).toLowerCase());
   btn.title = title;
@@ -20186,8 +20223,12 @@ function paintHdLive(screen, record, data) {
   // No live run but a pipeline run in this tab: its newest run ended (resumed elsewhere, then
   // finished), so the load-time pause is stale and the pipeline is over.
   const over = !live && !!hdPipelineRun(record);
-  const resumable = live ? isPaused(live)
-    : !over && HD_RESUMABLE.has(String(st.status || '').toLowerCase()) && st.resumable !== false;
+  // An ARCHIVED run has no run dir to resume from (archive reclaimed it); a restored one
+  // keeps its resume_point but the detail read has already dropped st.resumable for the
+  // same reason — hide the split either way instead of failing deep in the engine.
+  const archived = !!st.archivedAt;
+  const resumable = !archived && (live ? isPaused(live)
+    : !over && HD_RESUMABLE.has(String(st.status || '').toLowerCase()) && st.resumable !== false);
   split.hidden = !resumable;
   resumeBtn.hidden = !resumable;
   const resumeMore = screen.querySelector('.hd-resume-more');
@@ -20780,8 +20821,12 @@ function setupHdActions(screen, record, data) {
 
   // Archive: honest copy (D2), confirmModal (not window.confirm). Deletability is
   // judged on the AUTHORITATIVE detail status (a deep link's minimal record has none).
+  // An ARCHIVED run flips the menu to Restore instead: Archive must not re-run over a
+  // row whose FS was already reclaimed (the server would only stamp a second archive).
   const archiveBtn = screen.querySelector('.hd-archive');
-  if (isDeletableEntry({ ...record, status: st.status })) {
+  const restoreBtn = screen.querySelector('.hd-restore');
+  const archived = !!st.archivedAt;
+  if (!archived && isDeletableEntry({ ...record, status: st.status })) {
     archiveBtn.hidden = false;
     hdSetArchiveGate(archiveBtn, retained);
     archiveBtn.addEventListener('click', async () => {
@@ -20795,10 +20840,12 @@ function setupHdActions(screen, record, data) {
       delete archiveBtn.dataset.archiveState; archiveBtn.disabled = false;
       // Spec §5.2/D2 fixes this copy VERBATIM — do not paraphrase (only the
       // run-title context line above it is ours; only the page name changed when
-      // History merged into Runs). `.confirm-message` already
+      // History merged into Runs). The title says "run", matching the Runs page's
+      // own naming; the message body below is the spec's, untouched.
+      // `.confirm-message` already
       // declares white-space:pre-line, so the blank line renders as a paragraph.
       const ok = await confirmModal({
-        title: 'Archive this pipeline?',
+        title: 'Archive this run?',
         message: `${r.title || r.id}\n\nIt moves out of Runs. The local branch, worktree, and run artifacts (logs, results, diff) are removed. The remote branch and any open PR stay untouched.${chainNote}`,
         confirmLabel: 'Archive',
         danger: true,
@@ -20814,6 +20861,12 @@ function setupHdActions(screen, record, data) {
         const dd = await safeJson(res);
         if (!res.ok) throw new Error((dd && dd.error) || `HTTP ${res.status}`);
         state.historyAll = state.historyAll.filter((x) => !(x && x.id === r.id && x.projectKey === r.projectKey));
+        // The archived feed too, so a revisit of the Archived toggle does not show the
+        // just-archived run as still archived.
+        if (state.historyArchived) {
+          state.historyArchived = state.historyArchived.filter((x) => !(x && x.id === r.id && x.projectKey === r.projectKey));
+          paintRunsList();
+        }
         // The same guard loadHistoryView uses ("never cache empty/error"):
         // archiving the LAST pipeline would otherwise persist `{pipelines: []}`
         // and the next boot would paint an empty History from cache before the
@@ -20836,6 +20889,47 @@ function setupHdActions(screen, record, data) {
     });
   }
 
+  // Restore (the Archived list's inverse): shown only when the AUTHORITATIVE detail says
+  // the run is archived. Same confirmModal pattern as Archive; the server clears
+  // archived_at, and nothing on disk comes back — the restored run is a read-only record
+  // with a working PR link, its audit timeline and its Statistics cost.
+  if (archived && restoreBtn) {
+    restoreBtn.hidden = false;
+    restoreBtn.addEventListener('click', async () => {
+      if (restoreBtn.disabled) return;
+      const r = hdCurrentRecord(record);              // never the load-time object
+      const ok = await confirmModal({
+        title: 'Restore this run?',
+        message: `${r.title || r.id}\n\nIt moves back into Runs with its PR link, Q&A, review verdicts and audit timeline. The run artifacts (logs, results, diff), branch and worktree were reclaimed by the archive and are not rebuilt.`,
+        confirmLabel: 'Restore',
+      });
+      if (!ok) return;
+      const label = btnLabelEl(restoreBtn);
+      restoreBtn.disabled = true;
+      label.textContent = 'Restoring…';
+      try {
+        const qs = runActionQuery(r.projectDir || null, r);
+        const res = await fetch(`/api/runs/${encodeURIComponent(r.id)}/restore?${qs.toString()}`, { method: 'POST' });
+        const dd = await safeJson(res);
+        if (!res.ok) throw new Error((dd && dd.error) || `HTTP ${res.status}`);
+        // The archived feed loses the row, and the plain list refreshes so the run
+        // re-enters Finished (its status is terminal).
+        state.historyArchived = (state.historyArchived || []).filter((x) => !(x && x.id === r.id && x.projectKey === r.projectKey));
+        loadHistoryView({ force: true });
+        // Back to the list under the SAME chip: from Archived, that is the rest of the
+        // archive (restoring several in a row), so the toast carries the way to the run.
+        goRunsList();
+        notify({ tone: 'ok', title: 'Run restored', key: `restore-${r.id}`,
+          action: { label: 'Open', run: () => { location.hash = `history/${r.projectKey}/${r.id}`; } } });
+      } catch (err) {
+        restoreBtn.disabled = false;
+        label.textContent = 'Restore';
+        notify({ tone: 'err', title: 'Could not restore the run', detail: err.message, key: `restore-${r.id}`,
+          action: { label: 'Retry', run: () => restoreBtn.isConnected && restoreBtn.click() } });
+      }
+    });
+  }
+
   const reportBtn = screen.querySelector('.hd-report');
   // `{ ...record, status: st.status }`, exactly like the .hd-archive gate above —
   // NOT isDeletableEntry(record). That predicate is a DENY-list, so a deep link's
@@ -20854,11 +20948,12 @@ function setupHdActions(screen, record, data) {
   // that goes terminal while the screen is open offers the button on the next visit,
   // exactly like Archive.
 
-  // The ⋯ trigger, gated on its own contents: a live run can be neither archived nor
-  // reported, and a trigger that opens onto an empty menu is worse than no trigger.
+  // The ⋯ trigger, gated on its own contents: a live run can be neither archived,
+  // restored nor reported, and a trigger that opens onto an empty menu is worse than
+  // no trigger.
   const moreBtn = screen.querySelector('.hd-more');
   const moreMenu = screen.querySelector('.hd-menu');
-  moreBtn.hidden = archiveBtn.hidden && reportBtn.hidden;
+  moreBtn.hidden = archiveBtn.hidden && reportBtn.hidden && (!restoreBtn || restoreBtn.hidden);
   moreBtn.addEventListener('click', () => {
     const opening = moreMenu.hidden;
     moreMenu.hidden = !opening;
@@ -20916,9 +21011,13 @@ document.addEventListener('click', (e) => {
 
 function refreshHdFromRow() {
   if (!histDetailState || !histDetailState.screen || !histDetailState.data) return;
-  const row = (state.historyAll || []).find(
-    (r) => r && r.id === histDetailState.id && r.projectKey === histDetailState.key);
-  if (!row) return;                       // archived / filtered out of the model entirely
+  const match = (r) => r && r.id === histDetailState.id && r.projectKey === histDetailState.key;
+  // historyAll first, then the Archived feed: an open ARCHIVED run's row lives
+  // only there, and without this lookup its stub deep-link record (no
+  // projectDir, no title) is never repaired once the feed lands.
+  const row = (state.historyAll || []).find(match)
+    || (state.historyArchived || []).find(match);
+  if (!row) return;                       // filtered out of the model entirely
   histDetailState.record = row;
   const { screen, data } = histDetailState;
   paintHdHeaderMeta(screen, row, data);
@@ -20928,6 +21027,7 @@ function refreshHdFromRow() {
   paintHdPr(screen, row, data);                         // idempotent; re-binds btn.onclick
   paintHdAfter(screen, row, data);
   paintHdLive(screen, row, data);
+  paintHdGlance(screen, row, data);   // the head's project/day/clock line re-reads the record
   refreshHdOverviewTab();   // the one tab body that reads mutable record fields
 }
 
@@ -25922,6 +26022,7 @@ function runsHistItem(p) {
     id: p.id, projectKey: p.projectKey, title: p.title, status: p.status, pauseReason: p.pauseReason,
     startedAt: p.startedAt, mtime: p.mtime, groupName: histGroupName(p), by: runsPersonKey(p.startedBy),
     pr: glancePrInput(p),
+    archived: !!p.archived,
     checks: typeof p.checks === 'number' ? p.checks : null,
     files: typeof p.files === 'number' ? p.files : null,
   };
@@ -25953,14 +26054,23 @@ function runsFocusTarget(host, { key, slot, pid, group }) {
 function paintRunsList() {
   const host = el.runsList;
   if (!host) return;
+  // The Archived toggle reads its own lazy-loaded feed: archived rows never enter
+  // state.historyAll (that keeps meaning "active history").
+  const archivedView = runsUi.filter === 'archived';
+  const histSource = archivedView ? (state.historyArchived || []) : (state.historyAll || []);
   const model = buildRunsModel({
     live: overviewRuns().map(runsLiveItem),
-    history: (Array.isArray(state.historyAll) ? state.historyAll : []).filter(Boolean).map(runsHistItem),
+    history: histSource.filter(Boolean).map(runsHistItem),
     scheduled: schedulesView.upcoming(SCHEDULED_GROUP_WINDOW_MS).map(runsSchedItem),
     person: viewer.shared ? state.historyPerson : '',
     query: runsUi.query, filter: runsUi.filter, groupBy: runsUi.groupBy, collapsed: runsUi.collapsed, now: Date.now(),
   });
-  const note = state.historyError && !(state.historyAll || []).length ? `Could not load finished runs: ${state.historyError}` : '';
+  const note = archivedView
+    ? (state.historyArchivedError && !histSource.length ? `Could not load archived runs: ${state.historyArchivedError}` : '')
+    : (state.historyError && !(state.historyAll || []).length ? `Could not load finished runs: ${state.historyError}` : '');
+  // The filter survives a reload: a first paint under the Archived toggle fetches its
+  // feed without a click.
+  if (archivedView && state.historyArchived === null) loadHistoryArchived();
   const sig = JSON.stringify([
     model.needs.map(runsRowSig),
     model.groups.map((g) => [g.key, g.name, g.count, g.collapsed, g.collapsed ? [] : g.rows.map(runsRowSig)]),
@@ -26064,16 +26174,64 @@ function paintRunsFilter() {
     b.classList.toggle('on', on);
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
   }
+  // The header's Archived toggle: no chip is pressed while it is on (it swaps the list's
+  // source). docs/ui-levels.md rule 2: the Advanced toggle stays on screen below Advanced
+  // while it is the stored pick — otherwise the list shows only archived runs with no way out.
+  const arch = el.runsArchivedBtn;
+  if (arch) {
+    const on = runsUi.filter === 'archived';
+    arch.classList.toggle('on', on);
+    arch.setAttribute('aria-pressed', on ? 'true' : 'false');
+    keepVisible(arch, on);
+  }
+}
+function setRunsFilter(f) {
+  if (f === runsUi.filter) return;
+  runsUi.filter = f;
+  try { localStorage.setItem(RUNS_FILTER_KEY, runsUi.filter); } catch { /* private mode */ }
+  // Each Archived activation refetches its feed; a never-loaded one is fetched by the
+  // paint below (state.historyArchived === null), so it is not asked for twice.
+  if (runsUi.filter === 'archived' && state.historyArchived !== null) void loadHistoryArchived();
+  paintRunsFilter();
+  paintRunsList();
 }
 el.runsFilter?.addEventListener('click', (e) => {
   const b = e.target.closest && e.target.closest('button[data-filter]');
-  if (!b || b.dataset.filter === runsUi.filter) return;
-  runsUi.filter = b.dataset.filter;
-  try { localStorage.setItem(RUNS_FILTER_KEY, runsUi.filter); } catch { /* private mode */ }
-  paintRunsFilter();
-  paintRunsList();
+  if (b) setRunsFilter(b.dataset.filter);
 });
+el.runsArchivedBtn?.addEventListener('click', () => setRunsFilter(runsUi.filter === 'archived' ? 'all' : 'archived'));
 paintRunsFilter();
+
+// The Archived toggle's feed (issue #575): fetched lazily on activation, and again on
+// every pipelines-changed once loaded (an archive or restore here, in another tab or from
+// the CLI). Deliberately NOT the Phase-2 PR enrichment: an archived run's branch is gone,
+// so there is nothing to enrich. One fetch at a time; a call that lands mid-flight queues
+// exactly one re-fetch, so the last change is never dropped.
+let historyArchivedLoading = false;
+let historyArchivedAgain = false;
+async function loadHistoryArchived() {
+  if (historyArchivedLoading) { historyArchivedAgain = true; return; }
+  historyArchivedLoading = true;
+  setArchivedLoading(true);
+  try {
+    const res = await fetch('/api/history?archived=1');
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
+    state.historyArchived = Array.isArray(data.pipelines) ? data.pipelines.filter(Boolean) : [];
+    state.historyArchivedError = '';
+  } catch (e) {
+    state.historyArchived = state.historyArchived || [];
+    state.historyArchivedError = e.message;
+  } finally {
+    historyArchivedLoading = false;
+    setArchivedLoading(false);
+  }
+  if (historyArchivedAgain) { historyArchivedAgain = false; void loadHistoryArchived(); return; }
+  paintRunsList();
+  // An archived run opened by deep link (before the feed loaded) carries a stub
+  // record — no projectDir, no title. Now that the feed landed, repair it.
+  refreshHdFromRow();
+}
 
 // "Group by" menu: opens under its header button; a pick, Escape or a click elsewhere closes it.
 function paintRunsGroupBy() {

@@ -277,6 +277,49 @@ export async function archivePipeline({ projectDir = null, key = null, workspace
 }
 
 /**
+ * The inverse of archivePipeline: clear a soft-deleted row's `archived_at` so the run
+ * is listed (and chain-gated) again. Nothing on disk comes back — the archive contract
+ * reclaimed the run dir, the branch and the artifacts, so a restored run is a read-only
+ * record with a working PR link and its audit timeline — never resumable (its resume
+ * point is cleared; a paused row comes back interrupted). Mirrors the archive preamble
+ * (same store-key resolution, same lookupRow, same guards) so the two routes stay
+ * symmetrical.
+ * @param {{ projectDir?:string, key?:string, workspaceKey?:string, id:string }} args
+ * @returns {Promise<null | { ok, id, restored, warnings } | { ok, id, alreadyActive, warnings }>}
+ *          null => no pipeline with that id (404). Throws err(code:'RUNNING') for the
+ *          defensive active-status guard (an archived run cannot be live, so this only
+ *          fires on a corrupt row — the HTTP route refuses live runs earlier anyway).
+ *          An active (never-archived, or already restored) row short-circuits to
+ *          { alreadyActive: true } — idempotent, like archive's alreadyArchived.
+ */
+export async function restorePipeline({ projectDir = null, key = null, workspaceKey = null, id } = {}) {
+  if (!id || typeof id !== 'string') throw err('id is required', 'BAD_REQUEST');
+
+  const storeKey = workspaceKey
+    ? `workspaces/${workspaceKey}`
+    : (key || (projectDir ? projectKey(projectDir) : null));
+  if (!storeKey) throw err('projectKey, projectDir or workspaceKey is required', 'BAD_REQUEST');
+
+  const row = lookupRow(storeKey, id);
+  if (!row) return null;
+  if (ACTIVE.has(String(row.status || '').toLowerCase())) {
+    throw err('cannot restore a running pipeline', 'RUNNING');
+  }
+  if (!row.archived_at) {
+    return { ok: true, id: row.id, alreadyActive: true, warnings: [] };
+  }
+  // Archive reclaimed the run dir a resume runs out of, so the resume point is dead
+  // weight: drop it, and a PAUSED row becomes interrupted (the db.mjs v2-upgrade idiom;
+  // Statistics buckets the two together). Left paused it would sit in Needs you for
+  // good, offering a Resume that can only fail.
+  const wasPaused = String(row.status || '').toLowerCase() === 'paused';
+  tx(() => {
+    getDb().prepare(`UPDATE pipelines SET archived_at = NULL, resume_point = NULL${wasPaused ? ", status = 'interrupted'" : ''} WHERE id = ?`).run(row.id);
+  });
+  return { ok: true, id: row.id, restored: true, ...(wasPaused ? { wasPaused: true } : {}), warnings: [] };
+}
+
+/**
  * Explicitly reclaim worktrees retained after a teardown commit failure while
  * preserving the pipeline row and artifact directory. Every live checkout is
  * snapshotted first; any snapshot failure aborts before removal.

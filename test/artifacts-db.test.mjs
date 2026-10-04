@@ -4,7 +4,7 @@
 // singleton reset so getDb() reopens against it (mirrors 01-db-foundation.md).
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, writeFile, stat } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, readFile, writeFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,7 +15,7 @@ import { recordArtifact, listArtifacts } from '../src/core/artifacts.mjs';
 import { writeReview, readReviewRow, readPipelineExtras, readPipelineByKey, writeClarify } from '../src/core/artifacts.mjs';
 import { readRunLogText } from '../src/core/artifacts.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
-import { projectKey } from '../src/core/store.mjs';
+import { projectKey, projectStorePath } from '../src/core/store.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { writeSeedGraph } from './helpers/graph-templates.mjs';
 
@@ -489,9 +489,13 @@ test('readPipelineByKey surfaces the artifacts index (so History can show the Li
 // P8a: History decides whether to OFFER Resume from this flag, and the v2 upgrade
 // NULLs every retired v1 resume point — so it must be read from the row, never
 // inferred from the status (an interrupted run may or may not still carry one).
+// The fixture creates the run dir: a real resumable run always has one, and
+// readPipelineByKey gates `resumable` on it (an archived-then-restored run keeps
+// its resume_point but its dir was reclaimed — no dir, no resume).
 test('rowToState reports `resumable` from the row\'s resume_point, not its status', async () => {
   seedPipelineRow({ id: 'rsm00001', projectKey: 'proj-00000001', status: 'paused' });
   const key = 'proj-00000001';
+  await mkdir(join(projectStorePath(key), 'pipelines', 'rsm00001'), { recursive: true });
   const noPoint = await readPipelineByKey(key, 'rsm00001');
   assert.equal(noPoint.state.resumable, false, 'a NULLed (retired) point is not resumable');
 

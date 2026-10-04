@@ -208,7 +208,7 @@ test('renderRunsList: Needs you on top, foldable heads, rows as links with a tit
 });
 
 test('filters: Live keeps what has not ended, Finished what has, Needs you only its group', () => {
-  assert.deepEqual(RUNS_FILTERS, ['all', 'live', 'finished', 'needs']);
+  assert.deepEqual(RUNS_FILTERS, ['all', 'live', 'finished', 'needs', 'archived']);
   const live = [liveIt('run'), liveIt('ask', { ask: { kind: 'clarify', step: 'Plan' } }),
     liveIt('ended', { status: 'done', pipelineId: 'p-ended' })];
   const history = [histIt('h-done'), histIt('h-stop', { status: 'stopped' }), histIt('h-int', { status: 'interrupted' })];
@@ -231,6 +231,35 @@ test('filters: each has its own empty note; a search keeps the search note', () 
   assert.equal(note({ live: [liveIt('r')], filter: 'finished' }).includes('No finished runs yet.'), true);
   assert.equal(note({ live: [liveIt('r')], filter: 'needs' }), 'Nothing needs you.');
   assert.equal(note({ live: [liveIt('r')], filter: 'needs', query: 'zzz' }), 'No runs match your search.');
+});
+
+test('filters: Archived keeps only rows flagged archived, with its own empty note', () => {
+  const live = [liveIt('run')];
+  const history = [histIt('h-live'), histIt('h-arch', { archived: true })];
+  const titles = (filter) => buildRunsModel({ live, history, filter, now: NOW }).groups.flatMap((g) => g.rows.map((r) => r.title)).sort();
+  assert.deepEqual(titles('archived'), ['h-arch'], 'the flag decides, not the row kind');
+  assert.equal(rowInFilter({ kind: 'hist' }, 'archived'), false, 'an unflagged row is out even in the archived feed');
+  assert.equal(rowInFilter({ kind: 'hist', archived: true }, 'archived'), true);
+  assert.equal(rowInFilter({ kind: 'live', archived: true }, 'archived'), true);
+  const doc = new JSDOM('').window.document;
+  const note = (opts) => renderRunsList(doc, buildRunsModel({ now: NOW, ...opts })).map((n) => n.textContent).join('|');
+  assert.equal(note({ live: [liveIt('r')], filter: 'archived' }), 'No archived runs.');
+});
+
+test('an archived row says "Archived" on its status line and keeps its terminal icon', () => {
+  assert.deepEqual(histRowState({ status: 'done', pr: 'MERGED', archived: true }),
+    { icon: 'done', word: 'Archived', detail: '' }, 'the word replaces the glance headline');
+  assert.deepEqual(histRowState({ status: 'stopped', archived: true }), { icon: 'stop', word: 'Archived', detail: '' });
+  assert.deepEqual(histRowState({ status: 'paused', pauseReason: 'cost_pipeline', archived: true }),
+    { icon: 'paused', word: 'Archived', detail: '' }, 'even a parked row reads Archived once it is archived');
+  assert.equal(histRowState({ status: 'done', pr: 'MERGED' }).word, 'Merged', 'an active row is untouched');
+  const m = buildRunsModel({ history: [histIt('h-arch', { archived: true })], filter: 'archived', now: NOW });
+  const row = m.groups[0].rows[0];
+  assert.equal(row.icon, 'done', 'the terminal icon stays');
+  assert.equal(rowSub(row), 'Archived · 11:17', 'the word leads the subline');
+  // Search finds it by its word.
+  const hit = buildRunsModel({ history: [histIt('h-arch', { archived: true })], filter: 'archived', query: 'archived', now: NOW });
+  assert.deepEqual(hit.groups[0].rows.map((r) => r.title), ['h-arch']);
 });
 
 test('dateBucket: local midnights, the finish time for History, now for live, Upcoming for scheduled', () => {
