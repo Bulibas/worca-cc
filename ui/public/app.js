@@ -323,6 +323,7 @@ const el = {
   runsSearchRow: $('#runs-search-row'),
   runsFilter: $('#runs-filter'),
   runsGroupBtn: $('#runs-group-btn'),
+  runsArchivedBtn: $('#runs-archived-btn'),
   runsGroupMenu: $('#runs-group-menu'),
 
   // Target selector (New Pipeline)
@@ -18622,7 +18623,7 @@ async function loadHistoryView({ force = false } = {}) {
 
 // Loading affordance: the Runs list is aria-busy while History (re)loads.
 // The list is aria-busy while EITHER feed loads: the active history (setHistoryLoading,
-// through Phase 2) or the Archived chip's (setArchivedLoading) — one finishing must not
+// through Phase 2) or the Archived toggle's (setArchivedLoading) — one finishing must not
 // clear the other's busy state.
 let historyBusy = false;
 let archivedBusy = false;
@@ -20860,7 +20861,7 @@ function setupHdActions(screen, record, data) {
         const dd = await safeJson(res);
         if (!res.ok) throw new Error((dd && dd.error) || `HTTP ${res.status}`);
         state.historyAll = state.historyAll.filter((x) => !(x && x.id === r.id && x.projectKey === r.projectKey));
-        // The archived feed too, so a revisit of the Archived chip does not show the
+        // The archived feed too, so a revisit of the Archived toggle does not show the
         // just-archived run as still archived.
         if (state.historyArchived) {
           state.historyArchived = state.historyArchived.filter((x) => !(x && x.id === r.id && x.projectKey === r.projectKey));
@@ -20888,7 +20889,7 @@ function setupHdActions(screen, record, data) {
     });
   }
 
-  // Restore (the Archived chip's inverse): shown only when the AUTHORITATIVE detail says
+  // Restore (the Archived list's inverse): shown only when the AUTHORITATIVE detail says
   // the run is archived. Same confirmModal pattern as Archive; the server clears
   // archived_at, and nothing on disk comes back — the restored run is a read-only record
   // with a working PR link, its audit timeline and its Statistics cost.
@@ -26053,7 +26054,7 @@ function runsFocusTarget(host, { key, slot, pid, group }) {
 function paintRunsList() {
   const host = el.runsList;
   if (!host) return;
-  // The Archived chip reads its own lazy-loaded feed: archived rows never enter
+  // The Archived toggle reads its own lazy-loaded feed: archived rows never enter
   // state.historyAll (that keeps meaning "active history").
   const archivedView = runsUi.filter === 'archived';
   const histSource = archivedView ? (state.historyArchived || []) : (state.historyAll || []);
@@ -26067,7 +26068,7 @@ function paintRunsList() {
   const note = archivedView
     ? (state.historyArchivedError && !histSource.length ? `Could not load archived runs: ${state.historyArchivedError}` : '')
     : (state.historyError && !(state.historyAll || []).length ? `Could not load finished runs: ${state.historyError}` : '');
-  // The filter survives a reload: a first paint under the Archived chip fetches its
+  // The filter survives a reload: a first paint under the Archived toggle fetches its
   // feed without a click.
   if (archivedView && state.historyArchived === null) loadHistoryArchived();
   const sig = JSON.stringify([
@@ -26172,25 +26173,36 @@ function paintRunsFilter() {
     const on = b.dataset.filter === runsUi.filter;
     b.classList.toggle('on', on);
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
-    // docs/ui-levels.md rule 2: the Advanced Archived chip stays on screen below Advanced while it
-    // is the stored pick — otherwise the list shows only archived runs with no chip to leave by.
-    if (b.dataset.filter === 'archived') keepVisible(b, on);
+  }
+  // The header's Archived toggle: no chip is pressed while it is on (it swaps the list's
+  // source). docs/ui-levels.md rule 2: the Advanced toggle stays on screen below Advanced
+  // while it is the stored pick — otherwise the list shows only archived runs with no way out.
+  const arch = el.runsArchivedBtn;
+  if (arch) {
+    const on = runsUi.filter === 'archived';
+    arch.classList.toggle('on', on);
+    arch.setAttribute('aria-pressed', on ? 'true' : 'false');
+    keepVisible(arch, on);
   }
 }
-el.runsFilter?.addEventListener('click', (e) => {
-  const b = e.target.closest && e.target.closest('button[data-filter]');
-  if (!b || b.dataset.filter === runsUi.filter) return;
-  runsUi.filter = b.dataset.filter;
+function setRunsFilter(f) {
+  if (f === runsUi.filter) return;
+  runsUi.filter = f;
   try { localStorage.setItem(RUNS_FILTER_KEY, runsUi.filter); } catch { /* private mode */ }
   // Each Archived activation refetches its feed; a never-loaded one is fetched by the
   // paint below (state.historyArchived === null), so it is not asked for twice.
   if (runsUi.filter === 'archived' && state.historyArchived !== null) void loadHistoryArchived();
   paintRunsFilter();
   paintRunsList();
+}
+el.runsFilter?.addEventListener('click', (e) => {
+  const b = e.target.closest && e.target.closest('button[data-filter]');
+  if (b) setRunsFilter(b.dataset.filter);
 });
+el.runsArchivedBtn?.addEventListener('click', () => setRunsFilter(runsUi.filter === 'archived' ? 'all' : 'archived'));
 paintRunsFilter();
 
-// The Archived chip's feed (issue #575): fetched lazily on chip activation, and again on
+// The Archived toggle's feed (issue #575): fetched lazily on activation, and again on
 // every pipelines-changed once loaded (an archive or restore here, in another tab or from
 // the CLI). Deliberately NOT the Phase-2 PR enrichment: an archived run's branch is gone,
 // so there is nothing to enrich. One fetch at a time; a call that lands mid-flight queues
@@ -26273,9 +26285,9 @@ function openRunsForProject(key) {
 }
 
 // ── The Runs page's two panes: layout, which detail shows, focus ────────────
-// Two panes need the list (308-320px) beside the glance card (544px + 64px padding); below
+// Two panes need the list (260-320px) beside the glance card (544px + 64px padding); below
 // that the page falls back to the slide the old screens used (D7).
-const RUNS_SPLIT_MIN = 928;
+const RUNS_SPLIT_MIN = 880;
 function runsLayout() {
   return el.runsShell && el.runsShell.dataset.layout === 'slide' ? 'slide' : 'split';
 }

@@ -165,7 +165,7 @@ test('narrow (slide) layout: the back button slides the run away and hands focus
   assert.equal(doc.getElementById('run-detail').innerHTML, '', 'emptied after the slide');
 });
 
-// The page's width decides the layout (D7): below 928px the panes slide instead.
+// The page's width decides the layout (D7): below 880px the panes slide instead.
 // jsdom has no layout, so the shell's width is stubbed, and ResizeObserver is captured.
 function sized(width) {
   const box = { width, resize: null };
@@ -185,17 +185,17 @@ test('entering Runs measures the page: narrow slides, wide splits, an unmeasured
   const { window, doc } = await boot({ setup });
   const layout = () => doc.getElementById('runs-shell').dataset.layout;
   go(window, 'runs'); await settle(window);
-  assert.equal(layout(), 'slide', '700px < 928px');
+  assert.equal(layout(), 'slide', '700px < 880px');
   go(window, 'new'); await settle(window);
-  box.width = 928;
+  box.width = 880;
   go(window, 'runs'); await settle(window);
-  assert.equal(layout(), 'split', '928px is wide enough');
+  assert.equal(layout(), 'split', '880px is wide enough');
   go(window, 'new'); await settle(window);
   box.width = 0;
   go(window, 'runs'); await settle(window);
   assert.equal(layout(), 'split', '0px (a hidden section) keeps the last layout');
   go(window, 'new'); await settle(window);
-  box.width = 927;
+  box.width = 879;
   go(window, 'runs'); await settle(window);
   assert.equal(layout(), 'slide');
 });
@@ -513,7 +513,7 @@ test('the Group by menu switches to date sections, closes on a pick or a click o
 
 // ── Archived Runs view (issue #575) ──────────────────────────────────────────
 
-test('the Archived chip fetches the archived feed only when picked, and lists its rows', async () => {
+test('the Archived toggle fetches the archived feed only when picked, and lists its rows', async () => {
   const { window, doc } = await boot();
   go(window, 'runs'); await settle(window);
   let archivedFetches = 0;
@@ -525,10 +525,14 @@ test('the Archived chip fetches the archived feed only when picked, and lists it
   window.fetch = wrapped; globalThis.fetch = wrapped;
   assert.equal(archivedFetches, 0, 'nothing archived is fetched until the chip is picked');
   const chip = (f) => doc.querySelector(`#runs-filter [data-filter="${f}"]`);
-  assert.ok(chip('archived'), 'the chip is in the filter row');
-  click(window, chip('archived')); await settle(window);
+  const archBtn = doc.getElementById('runs-archived-btn');
+  assert.ok(archBtn.closest('.runs-head-tools'), 'the toggle sits in the Runs header, not the chip row');
+  assert.equal(chip('archived'), null, 'no fifth chip: the row keeps fitting the pane at its 260px floor');
+  click(window, archBtn); await settle(window);
   assert.equal(archivedFetches, 1, 'one archived fetch per activation');
-  assert.equal(chip('archived').getAttribute('aria-pressed'), 'true');
+  assert.equal(archBtn.getAttribute('aria-pressed'), 'true');
+  assert.ok([...doc.querySelectorAll('#runs-filter button')].every((b) => b.getAttribute('aria-pressed') === 'false'),
+    'no chip is pressed while the archived list shows');
   const titles = () => [...doc.querySelectorAll('#runs-list .runs-group .runs-row-title')].map((n) => n.textContent);
   assert.deepEqual(titles(), ['Archived thing']);
   const row = doc.querySelector('#runs-list .runs-row[data-pipeline-id="cccc0009"]');
@@ -539,14 +543,16 @@ test('the Archived chip fetches the archived feed only when picked, and lists it
   assert.deepEqual(titles().sort(), ['Merged thing', 'Stopped thing'],
     'All shows the active history only (the archived feed is a separate array)');
   assert.equal(archivedFetches, 1, 'switching back does not re-fetch');
-  click(window, chip('archived')); await settle(window);
+  click(window, archBtn); await settle(window);
   assert.equal(archivedFetches, 2, 'each activation re-fetches (cheap, stays fresh)');
+  click(window, archBtn); await settle(window);
+  assert.equal(window.localStorage.getItem('worca-cc.runs.filter'), 'all', 'the toggle turns back off to All');
 });
 
 test('an archived run’s detail offers Restore, not Archive, and hides Resume and follow-up', async () => {
   const { window, doc } = await boot();
   go(window, 'runs'); await settle(window);
-  click(window, doc.querySelector('#runs-filter [data-filter="archived"]')); await settle(window);
+  click(window, doc.getElementById('runs-archived-btn')); await settle(window);
   const posts = [];
   const inner = window.fetch;
   const wrapped = (u, init) => {
@@ -582,20 +588,20 @@ test('a remembered Archived filter fetches its feed on the first paint, chip hid
   window.fetch = wrapped; globalThis.fetch = wrapped;
   go(window, 'runs'); await settle(window);
   assert.ok(archivedFetches >= 1, 'the feed loads without a chip click');
-  assert.equal(doc.querySelector('#runs-filter [data-filter="archived"]').classList.contains('on'), true);
+  assert.equal(doc.getElementById('runs-archived-btn').classList.contains('on'), true);
   const titles = () => [...doc.querySelectorAll('#runs-list .runs-group .runs-row-title')].map((n) => n.textContent);
   assert.deepEqual(titles(), ['Archived thing']);
 });
 
-test('docs/ui-levels.md rule 2: the Archived chip stays on screen below Advanced while it is the pick', async () => {
+test('docs/ui-levels.md rule 2: the Archived toggle stays on screen below Advanced while it is the pick', async () => {
   const { window, doc } = await boot({ storage: { 'worca-cc.runs.filter': 'archived' } });
   go(window, 'runs'); await settle(window);
-  const chip = (f) => doc.querySelector(`#runs-filter [data-filter="${f}"]`);
-  assert.equal(chip('archived').dataset.minLevel, 'advanced');
-  assert.equal(chip('archived').dataset.levelKeep, '1',
-    'kept visible: otherwise a Simple list shows only archived runs with no chip to leave by');
-  click(window, chip('all')); await settle(window);
-  assert.equal(chip('archived').dataset.levelKeep, undefined, 'once left, the chip is Advanced-only again');
+  const archBtn = doc.getElementById('runs-archived-btn');
+  assert.equal(archBtn.dataset.minLevel, 'advanced');
+  assert.equal(archBtn.dataset.levelKeep, '1',
+    'kept visible: otherwise a Simple list shows only archived runs with no way out');
+  click(window, doc.querySelector('#runs-filter [data-filter="all"]')); await settle(window);
+  assert.equal(archBtn.dataset.levelKeep, undefined, 'once left, the toggle is Advanced-only again');
 });
 
 test('pipelines-changed refreshes a loaded Archived feed, and a mid-flight change queues one more fetch', async () => {
@@ -614,7 +620,7 @@ test('pipelines-changed refreshes a loaded Archived feed, and a mid-flight chang
   go(window, 'runs'); await settle(window);
   recv({ type: 'pipelines-changed' }); await settle(window);
   assert.equal(archivedFetches, 0, 'a never-loaded feed is not fetched on a change');
-  click(window, doc.querySelector('#runs-filter [data-filter="archived"]')); await settle(window);
+  click(window, doc.getElementById('runs-archived-btn')); await settle(window);
   assert.equal(archivedFetches, 1);
   // Restored elsewhere (another tab, the CLI): the broadcast drops it from the open view.
   archived = [];
@@ -632,7 +638,7 @@ test('an archived run opened from the loaded feed shows its project in the glanc
   // projectDir, no title — and the glance head printed "(no project)".
   const { window, doc } = await boot();
   go(window, 'runs'); await settle(window);
-  click(window, doc.querySelector('#runs-filter [data-filter="archived"]')); await settle(window);
+  click(window, doc.getElementById('runs-archived-btn')); await settle(window);
   click(window, doc.querySelector('#runs-list .runs-row[data-pipeline-id="cccc0009"]')); await settle(window);
   assert.equal(window.location.hash, `#history/${KEY}/cccc0009`);
   const meta = doc.querySelector('#hist-detail .hd-glance .rd-page-meta');
