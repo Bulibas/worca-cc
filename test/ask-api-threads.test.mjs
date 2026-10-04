@@ -564,3 +564,28 @@ test('bootMaintenance sweeps streaming messages and reports the ask summary', as
   assert.equal(row.status, 'error');
   assert.ok(row.blocks.some((b) => b.kind === 'notice' && /interrupted by restart/.test(b.text)));
 });
+
+test('PATCH agentMode (#574): a boolean alone is not the title error; GET returns it; a non-boolean is 400; a message carries it', async () => {
+  await idle();
+  const { thread } = await (await post('/api/ask/threads', { title: 'Kept' })).json();
+  const url = `/api/ask/threads/${thread.id}`;
+  assert.equal((await (await fetch(`${base}${url}`)).json()).thread.agentMode, true, 'on by default');
+  let r = await patch(url, { agentMode: false });
+  assert.equal(r.status, 200, 'an { agentMode }-only PATCH is not answered with the title error');
+  await r.json();
+  const got = (await (await fetch(`${base}${url}`)).json()).thread;
+  assert.equal(got.agentMode, false);
+  assert.equal(got.title, 'Kept');
+  r = await patch(url, { agentMode: 'no' });
+  assert.equal(r.status, 400);
+  await r.json();
+  assert.equal((await (await fetch(`${base}${url}`)).json()).thread.agentMode, false, 'a refused PATCH writes nothing');
+  r = await post(`${url}/messages`, { text: 'hi', model: 'claude-opus-5-5', effort: 'high', agentMode: 'yes' });
+  assert.equal(r.status, 400);
+  await r.json();
+  r = await post(`${url}/messages`, { text: 'hi', model: 'claude-opus-5-5', effort: 'high', agentMode: true });
+  assert.equal(r.status, 202);
+  await r.json();
+  assert.equal((await (await fetch(`${base}${url}`)).json()).thread.agentMode, true, 'the message stores it');
+  await idle();
+});

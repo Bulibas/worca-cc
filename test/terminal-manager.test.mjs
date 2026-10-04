@@ -126,3 +126,53 @@ test('a session row that cannot be written kills the shell and leaves nothing li
   assert.deepEqual(m.list(), []);
   assert.equal(m.live().length, 0);
 });
+
+test('runCommand: types into the idle shell, resolves with the block seq; source and runBy stick', { skip: !BASH }, async () => {
+  const s = await mgr.open({ cwd: work, scope: 'project', by: 'ask:ask_0000aaaa', baseEnv, agent: true });
+  const { seq } = await mgr.runCommand(s.id, 'echo hi-574', { by: 'ask:ask_0000aaaa', source: 'ask' });
+  assert.equal(seq, 1);
+  await waitFor(() => blocks.some((b) => b.sessionId === s.id && b.seq === 1 && b.status === 'done'));
+  const rec = getBlock(s.id, 1);
+  assert.equal(rec.source, 'ask');
+  assert.equal(rec.runBy, 'ask:ask_0000aaaa');
+  assert.match(rec.output, /hi-574/);
+  await waitFor(() => mgr.free(s.id));
+  await mgr.close(s.id, 'test');
+});
+
+test('runCommand refuses a busy session; liveBlock shows the running output', { skip: !BASH }, async () => {
+  const s = await mgr.open({ cwd: work, scope: 'project', by: 'ask:x', baseEnv, agent: true });
+  await mgr.runCommand(s.id, 'echo building-574; sleep 5', { by: 'ask:x' });
+  await waitFor(() => /building-574/.test(mgr.liveBlock(s.id)?.out || ''));
+  const lb = mgr.liveBlock(s.id);
+  assert.equal(lb.seq, 1); assert.equal(lb.command, 'echo building-574; sleep 5'); assert.equal(lb.source, 'ask');
+  assert.equal(mgr.free(s.id), false);
+  await assert.rejects(mgr.runCommand(s.id, 'ls', { by: 'ask:x' }), { code: 'BUSY' });
+  mgr.interrupt(s.id, 'test');
+  await waitFor(() => mgr.liveBlock(s.id) === null);
+  await mgr.close(s.id, 'test');
+});
+
+test('runCommand times out when no command starts (a comment-only line); the session is free again', { skip: !BASH }, async () => {
+  const s = await mgr.open({ cwd: work, scope: 'project', by: 'ask:x', baseEnv, agent: true });
+  await assert.rejects(mgr.runCommand(s.id, '# nothing', { by: 'ask:x', ackMs: 300 }), { code: 'NOT_STARTED' });
+  assert.equal(mgr.free(s.id), true);                         // the pending start was cleared
+  await mgr.close(s.id, 'test');
+});
+
+test('a cd persists in the shell: cwdOf follows it, and runCommand with the open folder says MOVED', { skip: !BASH }, async () => {
+  mkdirSync(join(work, 'sub-574'), { recursive: true });
+  const s = await mgr.open({ cwd: work, scope: 'project', by: 'ask:x', baseEnv, agent: true });
+  await mgr.runCommand(s.id, 'cd sub-574', { by: 'ask:x', cwd: work });
+  await waitFor(() => mgr.free(s.id) && /sub-574$/.test(mgr.cwdOf(s.id) || ''));
+  await assert.rejects(mgr.runCommand(s.id, 'ls', { by: 'ask:x', cwd: work }), { code: 'MOVED' });
+  assert.equal(mgr.free(s.id), true);                         // nothing was typed
+  await mgr.close(s.id, 'test');
+});
+
+test('runCommand refuses a shell without block marks', async () => {
+  const m = new TerminalManager({ ptyInfo: () => ({ pty: null }), shell: () => ({ file: '/bin/sh', kind: 'other', platform: process.platform }),
+    spawnImpl: () => ({ pid: null, mode: 'pipes', write() {}, resize() {}, signal() {}, onData() {}, onExit() {} }) });
+  const s = await m.open({ cwd: work, scope: 'project', by: 'ask:x', baseEnv });
+  await assert.rejects(m.runCommand(s.id, 'ls', { by: 'ask:x' }), { code: 'NO_BLOCKS' });
+});

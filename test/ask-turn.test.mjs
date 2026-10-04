@@ -1609,3 +1609,69 @@ test('MCP §9.1 D17: a hung join notice is bounded — the turn still completes,
   assert.equal((await turn.run()).status, 'done');
   assert.ok(!(getMessage(s.asst.id).blocks || []).some((b) => b.kind === 'notice'));
 });
+
+// ── Agent mode (#574) ─────────────────────────────────────────────────────────────────────────────
+test('agent mode: the bridge URL rides the mcp json, the token only spawnEnv; disposed when the turn ends', async () => {
+  const s = seed();
+  let raw = null; let spawnEnv = null; let note = null; const asked = []; let disposed = 0;
+  const { turn } = makeTurn(s, { agentMode: true }, {
+    commandBridge: (o) => { asked.push(o); return { url: 'http://127.0.0.1:4317/api/ask/commands', token: 'TOKEN-574-xyz', dispose: () => { disposed += 1; } }; },
+    runClaudeImpl: async (opts) => {
+      raw = readFileSync(opts.mcpConfigPath, 'utf8');
+      spawnEnv = opts.spawnEnv; note = opts.appendSubagentSystemPrompt;
+      throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+    },
+  });
+  await turn.run();
+  assert.deepEqual(asked, [{ threadId: s.thread.id }]);
+  assert.equal(JSON.parse(JSON.parse(raw).mcpServers.worca.env.WORCA_ASK_COMMANDS).url, 'http://127.0.0.1:4317/api/ask/commands');
+  assert.ok(!raw.includes('TOKEN-574-xyz'), 'the token never lands on disk');
+  assert.equal(spawnEnv.ASK_COMMAND_TOKEN, 'TOKEN-574-xyz');
+  assert.match(note, /never call run_command or stop_command/);
+  assert.equal(disposed, 1);
+});
+
+test('agent mode off, or relay mode: the bridge is never asked and the mcp json has no command key', async () => {
+  for (const [over, deps] of [[{ agentMode: false }, {}],
+    [{}, { agentRelay: () => ({ url: 'http://127.0.0.1:1/api/ask/relay', token: 'r', dispose() {} }) }]]) {
+    const s = seed();
+    let cfg = null; let called = 0;
+    const { turn } = makeTurn(s, over, {
+      ...deps,
+      commandBridge: () => { called += 1; return { url: 'u', token: 't', dispose() {} }; },
+      runClaudeImpl: async (opts) => {
+        cfg = JSON.parse(readFileSync(opts.mcpConfigPath, 'utf8'));
+        throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+      },
+    });
+    await turn.run();
+    assert.equal(called, 0);
+    assert.ok(!('WORCA_ASK_COMMANDS' in cfg.mcpServers.worca.env));
+  }
+});
+
+test('run_command result mints one command card; an error result mints nothing', async () => {
+  const s = seed();
+  const runner = (frames) => async (opts) => {
+    for (const [id, name, input, text, isError] of frames) {
+      push(opts.onEvent, { type: 'assistant', parent_tool_use_id: null, message: { id: 'msg_1', content: [{ type: 'tool_use', id, name, input }] } });
+      push(opts.onEvent, { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: id, content: text, ...(isError ? { is_error: true } : {}) }] } });
+    }
+    await new Promise((r) => setImmediate(r)); await new Promise((r) => setImmediate(r));
+    push(opts.onEvent, RESULT());
+    return { text: '', exitCode: 0 };
+  };
+  const ok = JSON.stringify({ ok: true, blockId: 't-0000000001:1', sessionId: 't-0000000001', seq: 1, command: 'npm test', cwd: '/w/p', folder: 'p · main', warning: null });
+  const { turn, frames } = makeTurn(s, {}, {
+    runClaudeImpl: runner([
+      ['toolu_1', 'mcp__worca__run_command', { command: 'npm test' }, ok, false],
+      ['toolu_2', 'mcp__worca__run_command', { command: 'git push --force' }, 'error: run_command: blocked', true],
+    ]),
+  });
+  await turn.run();
+  const cards = getMessage(s.asst.id).blocks.filter((b) => b.kind === 'card');
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].state, 'command');
+  assert.deepEqual(cards[0].card, { type: 'command', blockId: 't-0000000001:1', sessionId: 't-0000000001', seq: 1, command: 'npm test', folder: 'p · main', cwd: '/w/p', warning: null });
+  assert.ok(frames.some((f) => f.type === 'ask-card' && f.block.card.type === 'command'));
+});

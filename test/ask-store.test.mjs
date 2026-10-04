@@ -36,8 +36,9 @@ test('createThread / getThread / updateThread / setThreadTitle', () => {
   const t = createThread({ model: 'claude-opus-5-5', effort: 'high' });
   assert.match(t.id, /^ask_[0-9a-f]{8}$/);
   assert.deepEqual(Object.keys(t).sort(),
-    ['context', 'contexts', 'createdAt', 'createdBy', 'effort', 'id', 'mcpOff', 'model', 'sessionId', 'title', 'totals', 'updatedAt']);
+    ['agentMode', 'context', 'contexts', 'createdAt', 'createdBy', 'effort', 'id', 'mcpOff', 'model', 'sessionId', 'title', 'totals', 'updatedAt']);
   assert.equal(t.mcpOff, null, 'no MCP picker choices yet (v45)');
+  assert.equal(t.agentMode, true, 'agent mode is on by default (v51, #574)');
   assert.equal(t.createdBy, null, 'ownerless unless created with an owner');
   assert.equal(t.title, null);
   assert.equal(t.sessionId, null);
@@ -511,4 +512,13 @@ test('addThreadTotals: usage.ctxWindow REPLACES the stored window; a turn withou
   tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 3000, ctxWindow: 200000 } });
   assert.equal(tot.ctxWindow, 200000, 'a model switch replaces it');
   assert.equal(getThread(t.id).totals.ctxWindow, 200000, 'rowToThread surfaces it');
+});
+
+test('agentMode (#574): on by default; a patch stores false and true (0/1, never a raw boolean)', () => {
+  const t = createThread();
+  assert.equal(t.agentMode, true);
+  assert.equal(updateThread(t.id, { agentMode: false }).agentMode, false);
+  assert.equal(getDb().prepare('SELECT agent_mode FROM ask_threads WHERE id = ?').get(t.id).agent_mode, 0);
+  assert.equal(updateThread(t.id, { agentMode: true }).agentMode, true);
+  assert.equal(updateThread(t.id, { title: 'x' }).agentMode, true, 'other patches leave it alone');
 });

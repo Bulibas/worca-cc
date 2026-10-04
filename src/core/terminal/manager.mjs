@@ -11,6 +11,7 @@ import { pickShell, shellLaunch, ensureZshDir } from './shell.mjs';
 import { spawnTerminal, loadPty, killDescendants, descendantPids, signalPids, signalDescendants } from './pty.mjs';
 import { terminalEnv } from './context.mjs';
 import * as store from './store.mjs';
+import { sameDir } from './same-dir.mjs';
 
 export const MAX_SESSIONS = 16;
 export const REPLAY_CHARS = 512 * 1024;        // live output kept per session for a reload's replay
@@ -22,6 +23,8 @@ const STOP_ESCALATE_MS = 3000;
 const CLOSE_GRACE_MS = 1000;
 const FOLDER_CHECK_MS = 5000;
 const ENDED_KEEP = 20;                          // ended sessions kept in memory (their replay); the DB keeps all
+const READY_MS = 5000;                          // runCommand: a fresh shell's first prompt
+const ACK_MS = 5000;                            // runCommand: the C mark after a typed command
 
 const iso = (ms) => new Date(ms).toISOString();
 const clamp = (n, lo, hi, dflt) => { const v = Math.round(Number(n)); return Number.isFinite(v) ? Math.min(Math.max(v, lo), hi) : dflt; };
@@ -64,7 +67,7 @@ export class TerminalManager extends EventEmitter {
   }
 
   async open({ cwd, scope, label = null, runId = null, member = null, projectKey = null, branch = null, workspace = false,
-    runLive = false, by = 'local', cols = 100, rows = 30, actionSnaps = [], baseEnv = process.env }) {
+    runLive = false, by = 'local', cols = 100, rows = 30, actionSnaps = [], baseEnv = process.env, agent = false }) {
     if (this.live().length >= MAX_SESSIONS) throw codeError('TOO_MANY_SESSIONS', `At most ${MAX_SESSIONS} terminals can be open at once. Close one first.`);
     let ino;
     try { const st = statSync(cwd); if (!st.isDirectory()) throw new Error('not a folder'); ino = st.ino; }
@@ -77,7 +80,7 @@ export class TerminalManager extends EventEmitter {
     const size = { cols: clamp(cols, 2, 500, 100), rows: clamp(rows, 1, 300, 30) };
     const spawnAs = (pty) => this.spawnImpl({ file: shell.file, args: launch.args, cwd, ...size, platform: this.platform, pty,
       env: terminalEnv({ base: baseEnv, sessionId: id, mode: pty ? 'pty' : 'pipes', runId, member, projectKey, branch, cwd, workspace,
-        actionSnaps, shellEnv: launch.env }) });
+        actionSnaps, shellEnv: launch.env, agent }) });
     const pty = this.ptyError ? null : this.ptyInfo().pty;
     let proc;
     try {
@@ -97,6 +100,7 @@ export class TerminalManager extends EventEmitter {
         runLive: !!runLive, folder: 'ok' },
       proc, parser: new MarkerParser({ nonce }), chunks: [], chunkChars: 0, seq: 0, pendingOut: '', flushTimer: null,
       block: null, blockSeq: 0, lastInputBy: by, cwdNow: cwd, ino, stopTimer: null, closing: null, exitWaiters: [],
+      atPrompt: false, pendingRun: null, readyWaiters: [], startWaiters: [],   // runCommand (#574)
     };
     try {
       store.insertSession(s.snap);
@@ -124,6 +128,53 @@ export class TerminalManager extends EventEmitter {
     if (/[\r\n]/.test(text)) s.lastInputBy = by;
     s.proc.write(text);
     return true;
+  }
+
+  /** Running, no command in it and none being typed by a program. Not the prompt mark: it lands a few ms after
+   *  the block's end, and runCommand waits for it anyway. */
+  free(id) {
+    const s = this.sessions.get(id);
+    return !!s && s.snap.status === 'running' && !s.block && !s.pendingRun;
+  }
+
+  /** The shell's current folder (the W mark's $PWD after every command; the open cwd before the first one). A
+   *  `cd` inside one command line persists in the shell, so this is NOT `snap.cwd` (which stays the open folder). */
+  cwdOf(id) {
+    const s = this.sessions.get(id);
+    return s ? s.cwdNow : null;
+  }
+
+  /** The running block's live output (the tail kept in memory), or null. */
+  liveBlock(id) {
+    const s = this.sessions.get(id);
+    const b = s && s.block;
+    return b ? { sessionId: id, seq: b.seq, command: b.command, startedAt: iso(b.startedAt), out: b.out, bytes: b.bytes,
+      truncated: b.truncated, runBy: b.runBy, source: b.source } : null;
+  }
+
+  /**
+   * Type one command line for a program (Ask, #574) and resolve with its block once the shell's start
+   * mark arrives. Only into an idle shell with block marks: a person's half-typed line or a running
+   * program would otherwise receive it.
+   */
+  async runCommand(id, command, { by, source = 'ask', cwd = null, readyMs = READY_MS, ackMs = ACK_MS } = {}) {
+    const s = this.sessions.get(id);
+    if (!s || s.snap.status !== 'running') throw codeError('NO_SESSION', 'That terminal is not running.');
+    if (s.snap.shellKind === 'other') throw codeError('NO_BLOCKS', 'This shell does not record commands (bash or zsh is needed).');
+    if (s.block || s.pendingRun) throw codeError('BUSY', 'A command is already running in this terminal.');
+    if (!s.atPrompt) await this._waitFor(s.readyWaiters, readyMs, 'NO_BLOCKS', 'The shell did not reach its prompt.');
+    if (s.block || s.pendingRun) throw codeError('BUSY', 'A command is already running in this terminal.');
+    // The W mark (cwd) is printed in the same printf as the A mark, before it: at the prompt, cwdNow is current.
+    // A shell that a previous line `cd`-ed elsewhere must not run the next command there (the caller's command
+    // check reasoned about `cwd`).
+    if (cwd && !sameDir(s.cwdNow, cwd)) throw codeError('MOVED', 'The shell is in another folder.');
+    s.pendingRun = { by, source };
+    const started = this._waitFor(s.startWaiters, ackMs, 'NOT_STARTED', 'The shell did not start the command.')
+      .finally(() => { s.pendingRun = null; });
+    // Under a PTY: Ctrl+U first clears anything a person left half-typed on the line, then Enter (\r). Over pipes
+    // there is no line editor and bash reads a line only at \n.
+    s.proc.write(s.snap.mode === 'pty' ? `\x15${command}\r` : `${command}\n`);
+    return started;
   }
 
   resize(id, cols, rows) {
@@ -239,16 +290,31 @@ export class TerminalManager extends EventEmitter {
       return;
     }
     if (ev.type === 'end') { this._endBlock(s, 'done', ev.exitCode); return; }
+    if (ev.type === 'prompt') { s.atPrompt = true; for (const w of s.readyWaiters.splice(0)) w.res(); return; }
     if (ev.type === 'start') {
       const at = this.now();
+      s.atPrompt = false;
       s.blockSeq += 1;
-      s.block = { seq: s.blockSeq, command: ev.command, startedAt: at, out: '', bytes: 0, truncated: false, runBy: s.lastInputBy, stopRequestedBy: null };
+      // A program's line (runCommand) is its own; anything else belongs to whoever last pressed Enter.
+      const runBy = s.pendingRun ? s.pendingRun.by : s.lastInputBy;
+      const source = s.pendingRun ? s.pendingRun.source : 'person';
+      s.block = { seq: s.blockSeq, command: ev.command, startedAt: at, out: '', bytes: 0, truncated: false, runBy, source, stopRequestedBy: null };
       const rec = store.startBlock({ sessionId: s.snap.id, seq: s.blockSeq, command: ev.command, cwd: s.cwdNow,
-        runId: s.snap.runId, member: s.snap.member, runBy: s.lastInputBy, now: at });
-      store.recordAudit({ sessionId: s.snap.id, blockSeq: s.blockSeq, runId: s.snap.runId, actor: s.lastInputBy, action: 'command', detail: ev.command, now: at });
+        runId: s.snap.runId, member: s.snap.member, runBy, source, now: at });
+      store.recordAudit({ sessionId: s.snap.id, blockSeq: s.blockSeq, runId: s.snap.runId, actor: runBy, action: 'command', detail: ev.command, now: at });
+      for (const w of s.startWaiters.splice(0)) w.res({ seq: s.blockSeq });
       this.emit('block', rec);
       this.emit('status', snapshot(s));
     }
+  }
+
+  _waitFor(list, ms, code, message) {
+    return new Promise((res, rej) => {
+      const w = { res: (v) => { clearTimeout(t); res(v); }, rej: (e) => { clearTimeout(t); rej(e); } };
+      const t = setTimeout(() => { const i = list.indexOf(w); if (i >= 0) list.splice(i, 1); rej(codeError(code, message)); }, ms);
+      t.unref?.();
+      list.push(w);
+    });
   }
 
   _endBlock(s, status, exitCode) {
@@ -281,6 +347,8 @@ export class TerminalManager extends EventEmitter {
     this._evictEnded();
     this.emit('status', snapshot(s));
     for (const w of s.exitWaiters.splice(0)) w();
+    // runCommand callers waiting for a prompt or a start mark that will never come.
+    for (const w of [...s.readyWaiters.splice(0), ...s.startWaiters.splice(0)]) w.rej(codeError('NO_SESSION', 'That terminal is not running.'));
   }
 
   _evictEnded() {

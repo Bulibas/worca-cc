@@ -187,6 +187,7 @@ test('scope pill lives in the composer row: header is logo → title → spacer 
   assert.ok(scope && scope.hasAttribute('data-ask-scope-btn'), 'the scope pill sits right after the "+" attach button');
   assert.ok(scope.classList.contains('ask-scope-btn'));
   assert.ok(scope.nextElementSibling.hasAttribute('data-ask-mcp-btn'), 'then the MCP picker chip (MCP registry §9.4)');
-  assert.equal(scope.nextElementSibling.nextElementSibling.className, 'ask-composer-spacer', 'and before the spacer');
+  assert.ok(scope.nextElementSibling.nextElementSibling.hasAttribute('data-ask-agent-btn'), 'then the Agent mode switch (#574)');
+  assert.equal(scope.nextElementSibling.nextElementSibling.nextElementSibling.className, 'ask-composer-spacer', 'and before the spacer');
   assert.equal(row.querySelector('[data-ask-scope-btn]').textContent.trim(), 'Auto');
 });

@@ -33,6 +33,13 @@ test('PEM private key blocks collapse to a placeholder (any key type, multi-line
     'lazy match: the text between two key blocks survives');
 });
 
+test('every GitHub token prefix is redacted (gh auth token prints gho_)', () => {
+  for (const pre of ['ghp', 'gho', 'ghs', 'ghu', 'ghr']) {
+    assert.equal(redactAskText(`token ${pre}_abcdefghijklmnopqrstuvwxyz0123456789 end`), `token ${pre}_<redacted> end`, pre);
+  }
+  assert.equal(redactAskText('github_pat_11ABCDEFG0123456789_abcdefghijklmnop'), 'github_pat_<redacted>');
+});
+
 test('composes with chat/redact.mjs (messenger patterns still apply)', () => {
   assert.equal(redactAskText('Authorization: Bearer abc.def.ghi'), 'Authorization: Bearer <redacted>');
   assert.equal(redactAskText('xoxb-123-abc'), 'xox<redacted>');

@@ -73,7 +73,7 @@ test('ui-ask-style: the transcript scrollport keeps scroll anchoring', () => {
 
 test('ui-ask-style: hidden twins exist for the hideable ask elements', () => {
   for (const sel of ['.ask-sheet[hidden]', '.ask-pill[hidden]', '.ask-jump[hidden]', '.ask-composer-msg[hidden]', '.ask-chips[hidden]',
-    '.ask-mcp-btn[hidden]']) {   // shares display:inline-flex from .ask-scope-btn, so without the twin it never hides (jsdom cannot catch it)
+    '.ask-mcp-btn[hidden]', '.ask-agent-btn[hidden]']) {   // shares display:inline-flex from .ask-scope-btn, so without the twin it never hides (jsdom cannot catch it)
     const body = ruleBody(sel);
     assert.ok(body, `${sel} twin exists`);
     assert.match(body, /display:none/);

@@ -634,3 +634,12 @@ test('hiding and reopening the pane after the shell exited starts one new shell 
   assert.equal(posts(calls).length, 1);
   assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-2');
 });
+
+test('an Ask session on this run (agent mode, #574) is an ordinary tab with its own label', async () => {
+  const { pane, doc } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
+  await pane.open();
+  await tick();
+  pane.onFrame({ type: 'term-status', snapshot: { ...SNAP, id: 't-a', label: 'Ask · Fix tests · demo · main', createdBy: 'ask:ask_0000aaaa',
+    createdAt: '2026-10-03T11:00:00.000Z' } });
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'Ask · Fix tests · demo · main', 'New terminal']);
+});

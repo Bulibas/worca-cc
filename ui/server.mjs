@@ -154,7 +154,8 @@ import { TerminalManager, MAX_SESSIONS as TERMINAL_MAX_SESSIONS } from '../src/c
 import { terminalPidFile, zshDotDir } from '../src/core/terminal/paths.mjs';
 import { terminalTargets } from '../src/core/terminal/context.mjs';
 import { getSession as getTerminalSession, listBlocks as listTerminalBlocks, countBlocks as countTerminalBlocks, getBlock as getTerminalBlock,
-  listAudit as listTerminalAudit, listBranchWorktrees, findBranchWorktree, markInterruptedSessions } from '../src/core/terminal/store.mjs';
+  listAudit as listTerminalAudit, listBranchWorktrees, findBranchWorktree, markInterruptedSessions, listRecentBlocks as listRecentTerminalBlocks } from '../src/core/terminal/store.mjs';
+import { createAskCommands, terminalEventPrompt, terminalNoticeText } from '../src/core/ask/commands.mjs';
 import { openBranchWorktree, removeBranchWorktree, releaseBranchWorktree, enforceBranchWorktreeCap, sweepBranchWorktrees } from '../src/core/terminal/worktrees.mjs';
 import { pidAlive, killDescendants } from '../src/core/terminal/pty.mjs';
 import { createTerminalFanout } from '../src/core/terminal/fanout.mjs';
@@ -5530,6 +5531,99 @@ function terminalError(res, e) {
 }
 const activeActionSnaps = (runId) => actions.listFor(runId).filter((s) => ['starting', 'running', 'ready'].includes(s.status));
 
+// ── Ask agent mode (#574) ─────────────────────────────────────────────────────────────────────────
+/** Agent mode exists only where a person's terminal does, and never under agent isolation (Ask then runs as an
+ *  agent user, and a server-user shell would undo that). terminalEnabledHere(null) skips its agent-caller part
+ *  and keeps only the hosted gate; per-request callers (the status route) add their req checks. */
+const askCommandsEnabled = () => !agentIdentity() && terminalEnabledHere();
+
+const askCommands = createAskCommands({
+  terminals,
+  store: { getBlock: getTerminalBlock, listRecentBlocks: listRecentTerminalBlocks },
+  hostPid: process.pid,
+  serverPort: () => server.address()?.port || Number(PORT) || null,
+  home: () => worcaHome(),                                   // lazily: tests set WORCA_HOME after importing this module
+  threadTitle: (id) => askGetThread(id)?.title || '',
+  resolveTarget: askCommandTarget,
+  // broadcast (not terminalFanout.toAllowed): its askFrameOwner filter keeps one person's command output in
+  // their own chat; app.js routes ask-* frames to the Ask panel.
+  onUpdate: (threadId, command) => broadcast({ type: 'ask-command', threadId, command }),
+  onOpen: (threadId, target) => {
+    if (target.runId) appendAuditById(target.runId, `Terminal opened by Ask Worca in ${target.projectName || target.projectKey}.`, { actor: `ask:${threadId}` });
+  },
+  onFinish: (threadId, block) => { startTerminalEventTurn(threadId, block).catch((e) => console.warn(`[worca-ui] ask: terminal event for ${threadId}: ${e?.message || e}`)); },
+});
+
+/** The folder an Ask command runs in: a run member's terminal target, a project's own folder, or the pinned
+ *  project. The person routes' logic without their `res`; no folder ever comes from the model. */
+async function askCommandTarget(threadId, { runId = null, member = null, projectKey = null } = {}) {
+  const notFound = (msg) => Object.assign(new Error(msg), { code: 'NOT_FOUND' });
+  if (runId) {
+    const row = findPipelineRowById(runId);
+    if (!row || row.archived_at) throw notFound('run not found');
+    const t = terminalTargets(row, { isLive: isLiveRun });
+    const m = member ? t.members.find((x) => x.projectKey === member) : (t.members.length === 1 ? t.members[0] : null);
+    if (!m) throw new Error(member ? 'that project is not part of this run' : 'this run has several projects: pass member');
+    if (!m.cwd) {
+      throw new Error(m.state === 'needs-checkout'
+        ? 'this finished run has no checkout yet: ask the user to check it out (Actions), then try again'
+        : (m.reason || 'this run has no folder'));
+    }
+    return { cwd: m.cwd, scope: 'run', label: `${row.title || row.id} · ${m.projectName}`, runId: row.id, member: m.projectKey,
+      projectKey: m.projectKey, projectName: m.projectName, branch: m.branch, workspace: t.workspace, runLive: t.live,
+      warning: m.warning || null, actionSnaps: activeActionSnaps(row.id) };
+  }
+  const thread = askGetThread(threadId);
+  const ctx = thread?.context || {};
+  const key = projectKey || (ctx.pinned === true && typeof ctx.projectKey === 'string' ? ctx.projectKey : null);
+  if (!key) throw new Error('name a runId or a projectKey (this chat has no pinned project)');
+  if (!TM_PROJECT_KEY_RE.test(key)) throw new Error(`no project ${key}`);
+  const p = (await listProjects()).find((x) => x.key === key);
+  if (!p) throw notFound(`no project ${key}`);
+  const branch = await currentBranch(p.path);
+  return { cwd: p.path, scope: 'project', label: branch ? `${p.name} · ${branch}` : p.name, projectKey: p.key, branch, warning: null };
+}
+
+// The command bridge (classic mode only: relay mode is agent isolation, where agent mode is off).
+const askCommandBridges = new Map();   // token -> threadId (one per turn, dropped when the turn ends)
+
+function askCommandBridge({ threadId }) {
+  if (!askCommandsEnabled()) return null;                    // hosted rule + agent isolation: no commands
+  const token = randomBytes(24).toString('base64url');
+  askCommandBridges.set(token, threadId);
+  const port = server.address()?.port || PORT;
+  return { url: `http://127.0.0.1:${port}/api/ask/commands`, token, dispose: () => askCommandBridges.delete(token) };
+}
+
+app.post('/api/ask/commands', async (req, res) => {
+  if (!isInContainer(req)) return res.status(403).json({ error: 'commands: loopback callers only' });   // the /api/ask/relay gate
+  const threadId = askCommandBridges.get(String(req.headers['x-worca-ask-command'] || ''));
+  if (!threadId) return res.status(403).json({ error: 'commands: unknown or finished turn' });
+  if (!askCommandsEnabled()) return res.status(403).json({ error: 'The terminal is turned off on this Worca.' });
+  const op = req.body && req.body.op;
+  const input = (req.body && typeof req.body.input === 'object' && req.body.input) || {};
+  const fn = { run: askCommands.run, read: askCommands.read, wait: askCommands.wait, stop: askCommands.stop, list: askCommands.list }[op];
+  if (!fn) return badRequest(res, 'commands: unknown op');
+  try { res.json({ result: await fn(threadId, input) }); }
+  catch (e) { res.status(e?.code === 'NOT_FOUND' ? 404 : 409).json({ error: e?.message || String(e), code: e?.code || null }); }
+});
+
+/** The panel's Agent switch: shown only where agent mode can work. Same-origin, like GET /api/terminal. */
+app.get('/api/ask/commands/status', (req, res) => {
+  res.json({ enabled: terminalSameOrigin(req) && !agentMayBeCaller(req) && askCommandsEnabled() });
+});
+
+/** A command card's state after a reload (requireTerminal: same origin, not an agent, not hosted-off). */
+app.get('/api/ask/threads/:id/commands/:blockId', (req, res) => {
+  if (!requireTerminal(req, res)) return;
+  const id = askIdParam(res, req.params.id, 'thread');
+  if (!id) return;
+  if (!askGetThread(id)) return res.status(404).json({ error: 'thread not found' });
+  const view = askCommands.view(req.params.blockId);
+  if (!view) return res.status(404).json({ error: 'block not found' });
+  res.json(view);
+});
+
 // Frames go out through the fan-out (fanout.mjs): a socket that falls behind skips term-data and gets one
 // term-replay once its send buffer drains, so a `yes` in a terminal never grows this server's memory.
 function terminalReplayFrame(sessionId) {
@@ -8812,7 +8906,8 @@ async function drainAskDeferred(threadId) {
     let r = null;
     try { r = await next(); } catch (e) { r = { ok: false, error: e && e.message ? e.message : String(e) }; }
     if (r && r.ok) return;                                        // its settleJob continues the chain
-    postAskSystemNotice(threadId, `Ask Worca could not reply to the workflow card: ${(r && r.error) || 'unknown error'}`);
+    if (r && r.skipped) continue;                                 // #574: the model already saw that end
+    postAskSystemNotice(threadId, `Ask Worca could not reply to an event: ${(r && r.error) || 'unknown error'}`);
   }
 }
 
@@ -9042,7 +9137,7 @@ app.patch('/api/ask/threads/:id', async (req, res) => {
     const pick = body.model !== undefined || body.effort !== undefined;
     // Title keeps its original contract exactly: a PATCH that names none of the
     // fields still earns the title error, so pre-#397 callers see identical behaviour.
-    if (body.title !== undefined || (body.scope === undefined && body.mcpOff === undefined && !pick)) {
+    if (body.title !== undefined || (body.scope === undefined && body.mcpOff === undefined && body.agentMode === undefined && !pick)) {
       const raw = body.title;
       if (typeof raw !== 'string' || !raw.trim() || raw.length > 120) {
         return badRequest(res, 'title must be a non-empty string of at most 120 characters');
@@ -9054,6 +9149,10 @@ app.patch('/api/ask/threads/:id', async (req, res) => {
       const mo = validateMcpOff(body.mcpOff);
       if (!mo.ok) return badRequest(res, mo.error);
       patch.mcpOff = mo.value;
+    }
+    if (body.agentMode !== undefined) {
+      if (typeof body.agentMode !== 'boolean') return badRequest(res, 'agentMode must be true or false');
+      patch.agentMode = body.agentMode;
     }
     if (pick) {
       // The same check as the message POST. Awaited BEFORE the scope branch, so its
@@ -9097,6 +9196,7 @@ async function deleteAskThreadFully(id) {
   // Outside the `if (job)` block below: a thread deleted while it had a queued
   // event turn but no live job entry would otherwise keep its queue forever.
   askDeferred.delete(id);
+  await askCommands.closeThread(id).catch(() => {});        // #574: its Ask terminal sessions
   try {
     const stopJob = () => {
       const job = askJobs.get(id);
@@ -9287,8 +9387,8 @@ function askWebAccessFor(threadId, ctx) {
  *  actually has (the python probe, cached 60 s); plus the web section when `web` (askWebAccess()
  *  for this turn) is on, and the MCP servers section when the turn has registry copies (`mcp`,
  *  askMcpPromptInput()). Memory is mounted, not rendered. */
-async function askSystemPromptFor(catalog, { web = null, mcp = null } = {}) {
-  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT, web, mcp });
+async function askSystemPromptFor(catalog, { web = null, mcp = null, commands = false } = {}) {
+  return askBuildSystemPrompt(catalog, { scripts: await askScriptPromptInput(), deployment: DEPLOYMENT, web, mcp, commands });
 }
 
 /** "scheduled Sat Sep 19, 02:00 (run 1a2b…)" / "repeats: Every weekday at 02:00 (sch_…)" / "proposes: …" — or ''. */
@@ -9521,7 +9621,7 @@ function askSignedIn(req) {
   return who.source === 'local' ? null : who.name;
 }
 
-async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, files = [], synthetic = null, signedIn = null, reader = null, mcpOff = undefined }) {
+async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, files = [], synthetic = null, signedIn = null, reader = null, mcpOff = undefined, agentMode = undefined }) {
   // §6.2.2 ATOMIC re-check + slot reservation. Today every await between the
   // top 409/429 pair and here resolves in microtasks (validateModelEffort ->
   // composeCatalog; askBuildCatalog -> three synchronous better-sqlite3
@@ -9553,7 +9653,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // Writes. Store the LAST context + model/effort on the thread (§6.5 tail, D8).
     // `ctx` (pin-merged) rather than cv.context: the stored row is what restores
     // the selector on reopen and what the MCP child reads for tool defaulting.
-    askUpdateThread(id, { context: ctx, model, effort, ...(mcpOff !== undefined ? { mcpOff } : {}) });
+    askUpdateThread(id, { context: ctx, model, effort, ...(mcpOff !== undefined ? { mcpOff } : {}), ...(agentMode !== undefined ? { agentMode } : {}) });
     // §7.4 — NOTHING is stamped on the row before the 202: the thread stays
     // untitled (the header reads "Ask Worca") until the D13 background title
     // announces itself. titleWasAuto gates that call: a title given at THREAD
@@ -9607,7 +9707,9 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // MCP registry §9.1–9.3: General + the targets in play (the tagged dropdown fallback excluded), minus the chat's
     // picker choices — resolved ONCE per turn, so the per-turn file, the spawn and the prompt section agree.
     const mcp = await resolveAskMcp({ ctx, threadId: id, off: mcpOff !== undefined ? mcpOff : thread.mcpOff, model });
-    const systemPrompt = await askSystemPromptFor(catalog, { web, mcp: await askMcpPromptInput(mcp) });
+    // Agent mode (#574): this chat's switch, where agent mode exists at all; a message's own value wins.
+    const agentOn = askCommandsEnabled() && (agentMode !== undefined ? agentMode : thread.agentMode) !== false;
+    const systemPrompt = await askSystemPromptFor(catalog, { web, mcp: await askMcpPromptInput(mcp), commands: agentOn });
     const header = askBuildContextHeader(headerCtx);
     const prompt = askBuildTurnPrompt(header, text, inline);
     const prior = askListMessages(id).filter((m) => m.seq < userMsg.seq);
@@ -9630,6 +9732,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
       pinnedScope: pinned,                          // #397: proposal defaulting + mismatch flag
       web,
       mcp: mcp.result,
+      agentMode: agentOn,
       timeZone: ctx.timeZone || (thread.context && thread.context.timeZone) || null,   // scheduled runs: the user's clock
       memoryProject: headerCtx.project ? { key: headerCtx.project.key, name: headerCtx.project.name || '' } : null,   // native-rules revision: the turn mounts global + this project through --add-dir
       mock: mockEnabled({}) ? { card: mockAskCard(ctx, text) } : null, // R-F
@@ -9638,6 +9741,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         // Agents under their own users (agent-pool.mjs): the chat runs as the person's agent
         // user and its worca tools run here, through the relay. null = the classic MCP child.
         agentRelay: agentIdentity() ? askAgentRelay : null,
+        commandBridge: askCommandBridge,                     // #574: null unless agent mode can work here
         onFrame: stampAskFrames(id, job),
         onOutOfTurn: (f) => broadcast({ ...f, threadId: id }),
         onCommentMutation: ({ runId }) => { emitDiffCommentsChanged(runId); },
@@ -9730,6 +9834,7 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
     // MCP registry §9.4: the composer sends the picker's choices with every message; they decide this turn and are stored.
     const mo = body.mcpOff === undefined ? { ok: true, value: undefined } : validateMcpOff(body.mcpOff);
     if (!mo.ok) return badRequest(res, mo.error);
+    if (body.agentMode !== undefined && typeof body.agentMode !== 'boolean') return badRequest(res, 'agentMode must be true or false');
     // #397: explicit pin beats page context, per field. A context carrying its own
     // `pinned` verdict is authoritative — the selector-aware client already merged
     // (true) or explicitly chose Auto (false). A context WITHOUT one comes from a
@@ -9784,7 +9889,7 @@ app.post('/api/ask/threads/:id/messages', async (req, res) => {
       }
     }
 
-    const r = await startAskTurn({ threadId: id, thread, ctx, model: mv.model, effort: mv.effort, text, files, signedIn: askSignedIn(req), reader: askViewer(req), mcpOff: mo.value });
+    const r = await startAskTurn({ threadId: id, thread, ctx, model: mv.model, effort: mv.effort, text, files, signedIn: askSignedIn(req), reader: askViewer(req), mcpOff: mo.value, agentMode: body.agentMode });
     if (!r.ok) return res.status(r.status).json({ error: r.error, ...(r.budget ? { budget: r.budget } : {}) });
     // `attachments` carries the store-minted ids so the sender's own echo can key
     // image thumbnails and the thread budget off them (the ask-message broadcast
@@ -9911,7 +10016,7 @@ async function saveWorkflowCard(threadId, block, body = {}) {
  * keeps `turn.error` for API clients.
  */
 function failedEventTurn(threadId, turn) {
-  postAskSystemNotice(threadId, `Ask Worca could not reply to the workflow card: ${turn.error || 'unknown error'}`);
+  postAskSystemNotice(threadId, `Ask Worca could not reply to an event: ${turn.error || 'unknown error'}`);
   return turn;
 }
 
@@ -9950,6 +10055,36 @@ async function startWorkflowEventTurn(threadId, block, { declined = false, thenR
 
 /** The metrics / policy / schedule card's event turn: the synthetic notice row + the
  *  "[worca event] <type> card …" prompt (same queueing as workflow cards). */
+/** A command Ask ran ended (#574): "[worca event] terminal block <id> exited <code>" — queued while a turn runs,
+ *  skipped at start time when a wait_for/read_output already showed the model the end. */
+async function startTerminalEventTurn(threadId, block) {
+  const thread = askGetThread(threadId);
+  if (!thread) return null;
+  const id = `${block.sessionId}:${block.seq}`;
+  const text = terminalEventPrompt(block);
+  const notice = terminalNoticeText(block);
+  let mv = await validateModelEffort(thread.model, thread.effort);
+  if (!mv.ok) {
+    const d = (await askCatalog({ withSecrets: false })).default;
+    if (!d) return failedEventTurn(threadId, { error: 'no model available', status: 503 });
+    mv = { ok: true, ...d };
+  }
+  const start = async () => {
+    if (askCommands.seen(id)) return { ok: false, skipped: true };
+    return startAskTurn({ threadId, thread: askGetThread(threadId) || thread, ctx: thread.context || {},
+      model: mv.model, effort: mv.effort, text, synthetic: { notice } });
+  };
+  if (askInFlight(threadId)) {
+    if (!askDeferred.has(threadId)) askDeferred.set(threadId, []);
+    askDeferred.get(threadId).push(start);
+    return { deferred: true };
+  }
+  const r = await start();
+  if (r.ok) return { assistantMessageId: r.assistantMessageId };
+  if (r.skipped) return { skipped: true };
+  return failedEventTurn(threadId, { error: r.error, status: r.status, ...(r.budget ? { budget: r.budget } : {}) });
+}
+
 async function startMetricsEventTurn(threadId, block) {
   const thread = askGetThread(threadId);
   if (!thread) return null;
@@ -12162,4 +12297,5 @@ export const _testing = {
   broadcast, askFilesRunDir,
   validateResumeTarget, resumeTargetOf, fireResumeTicket, cancelScheduledResumes, stopPausedPipeline,
   trackHeartbeat, heartbeatTick, BOOT_ID,
+  askCommandBridge, askCommands, askCommandsEnabled, drainAskDeferred,
 };

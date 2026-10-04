@@ -127,6 +127,47 @@ time. Blocks and audit rows are kept. `GET /api/terminal/audit?runId=<id>` lists
   server, or a service an Action started) is refused with `403 TERMINAL_CROSS_ORIGIN` and sees no terminal
   traffic.
 
+## Ask Worca (agent mode)
+
+With the **Agent** switch on (in the Ask composer, on by default for every chat), Ask Worca can run shell
+commands in Worca terminals to check and finish work: tests, builds, linters, `git status`, and file
+changes through commands when you ask for them. It runs in a run's folder, a project's own folder, or the
+chat's pinned project. Turn the switch off and the next turn has no command tools; a command that is
+already running keeps running and still reports.
+
+- **Shared tabs.** Ask opens its own terminals, labeled `Ask · <chat title> · <folder>`. They are ordinary
+  tabs in this pane, with the same live output, and you can type in them. Ask never types into a terminal
+  you opened. An Ask terminal closes after 10 idle minutes and when the chat is deleted. Each command
+  starts in the target folder: a `cd` in one command does not carry over to the next.
+- **In the chat.** Each command shows as a card with its live output and a **Stop** button. When a command
+  ends, the chat wakes with `[worca event] terminal block <id> exited <code>`, unless Ask already saw the
+  end while it waited. Ask can also list and read the commands you ran here (`list_blocks`), so "why did
+  this fail?" works on your own commands.
+- **Environment.** Ask's shells start from a cleaned environment: `PATH`, `HOME`, locale, proxy and CA
+  variables and `SSH_AUTH_SOCK`, and nothing else from the server. No model, GitHub or server tokens. Your
+  shell rc files (`.bashrc`, `.zshrc`, `.zshenv`) are not loaded, so tools put on `PATH` only there (nvm,
+  pyenv) come from the server's own `PATH` instead. Pagers are off and git never asks for a password.
+- **The command check.** Before anything is typed, Worca refuses a command that names its own files or
+  credential paths (`~/.worca-cc`, the database, `.env*`, `~/.ssh`, `~/.aws`, `~/.claude`, …), calls
+  Worca's own HTTP API, or is hard to undo (`git push --force`/`--delete`, `rm -r` outside the folder,
+  `sudo`/`doas`, `mkfs`, `dd` to a device, `shutdown`). The check follows `cd` between steps, looks
+  through wrappers (`xargs`, `nice`, `timeout`, `env`, …), `bash -c "…"`/`eval`, and git's global
+  options, and treats an `rm -r` target built from `$(…)` or piped into `xargs` as outside the folder.
+  It also refuses `gh auth token` (and `gh auth status --show-token`), and a command with a newline.
+  Command lines and output that reach the model or the card are redacted. This check
+  is a rail against mistakes and naive prompt injection, **not a sandbox**: an obfuscated command (a path
+  built from variables, a `../../..` walk out of a run's checkout) can get around it.
+- **Limits.** At most 3 commands run at once per chat. A command is stopped after 30 minutes
+  (`stopped_by: ask:cap`). `wait_for` waits at most 240 seconds; longer work ends the reply and waits for
+  the event.
+- **Audit.** Ask's commands are recorded like yours, with `actor: ask:<chat id>` in the audit log and
+  `source: ask` on the block. Opening an Ask terminal on a run adds "Terminal opened by Ask Worca" to the
+  run's audit.
+- **Where it is off.** On a hosted Worca, agent mode follows the terminal: off unless
+  `WORCA_TERMINAL_REMOTE=1`. With agent isolation on, agent mode is off (and the switch is hidden): the
+  shell would run as the server user, not the agent user. Only bash and zsh record commands, so a terminal
+  with another shell (sh, fish, cmd.exe) cannot run Ask's commands.
+
 ## Without node-pty
 
 The terminal uses `node-pty`, an optional native module: prebuilt on macOS and Windows, compiled on

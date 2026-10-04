@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import {
   ASK_SYSTEM_RULES, ASK_HOSTING_RULE, buildSystemPrompt, validateClientContext, buildContextHeader,
   selectInlineAttachments, buildTurnPrompt, buildRestoredPrompt,
-  renderScriptsSection, SCRIPTS_SECTION_MAX_BYTES, renderWebSection,
+  renderScriptsSection, SCRIPTS_SECTION_MAX_BYTES, renderWebSection, renderCommandsSection,
 } from '../src/core/ask/prompt.mjs';
 import { SANDBOX_NOTE } from '../src/core/ask/spawn.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
@@ -692,7 +692,7 @@ test('rule 1 enumerates the script readers; the sandbox note keeps sub-agents ou
   assert.equal(ASK_SYSTEM_RULES.includes('save_script'), false, 'the writers are named by the SECTION, which W20 can remove');
   assert.ok(SANDBOX_NOTE.includes('Never call save_script or test_script'), 'a sub-agent never writes or runs a script');
   const server = readFileSync(new URL('../ui/server.mjs', import.meta.url), 'utf8');
-  assert.match(server, /askBuildSystemPrompt\(catalog, \{ scripts: await askScriptPromptInput\(\), deployment: DEPLOYMENT, web, mcp \}\)/, 'the turn gets the gated sections');
+  assert.match(server, /askBuildSystemPrompt\(catalog, \{ scripts: await askScriptPromptInput\(\), deployment: DEPLOYMENT, web, mcp, commands \}\)/, 'the turn gets the gated sections');
 });
 
 // ── where worca runs (src/core/deployment.mjs, docs/deploy-railway.md) ──────
@@ -880,4 +880,17 @@ test('#527 branches: rule 1 lists list_branches; rule 7 says what fetches and ho
   assert.ok(rule7.includes('nothing else you can run mutates the repository; push, pull and commits are impossible.'));
   assert.ok(lines.find((l) => l.startsWith('9.')), 'rule 9 is still one line of its own');
   assert.equal(lines.filter((l) => l.startsWith('7.')).length, 1);
+});
+
+// ── agent mode (#574) ────────────────────────────────────────────────────────
+
+test('agent mode: the commands section is appended last, only with commands', () => {
+  const cat = { projects: [], workspaces: [], workflows: [] };
+  const plain = buildSystemPrompt(cat);
+  assert.equal(buildSystemPrompt(cat, { commands: false }), plain);
+  const on = buildSystemPrompt(cat, { commands: true });
+  assert.equal(on, `${plain}\n\n${renderCommandsSection()}`);
+  assert.match(renderCommandsSection(), /^## Commands \(agent mode\)/);
+  assert.match(renderCommandsSection(), /\[worca event\] terminal block <id> exited <code>/);
+  assert.match(renderCommandsSection(), /never try to get around the check/);
 });
