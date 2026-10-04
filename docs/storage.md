@@ -24,6 +24,11 @@ project's working tree, so nothing is ever committed to your repo.
                          rows (diff_comments), never files; ask_card_comments carries
                          a proposal's comment ids from propose_run through to launch.
                          Archiving a run deletes its comments with its artifacts.
+                         The pipelines row itself is only soft-deleted (`archived_at`):
+                         the run stays viewable under Runs › Archived and can be
+                         restored there, minus the reclaimed artifacts. A restored run
+                         never resumes (its resume point is dropped; a paused one comes
+                         back interrupted).
   store/workspaces/<workspaceId>/       a workspace's runs, laid out like a project's store, plus
                                         workspace-graph.json — the last scan's merged cross-project
                                         graph (see workspace-map.md); the map itself and its reviews

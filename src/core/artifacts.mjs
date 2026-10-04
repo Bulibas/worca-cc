@@ -2166,16 +2166,18 @@ export async function listPipelines(projectDir, opts = {}, workspaceKey) {
  *  projectName, projectDir}; workspace rows tag {projectKey:"workspaces/<wk>",
  *  projectName, workspaceName, projectDir:primaryPath, target:'workspace'}.
  *  `opts.limit` (positive integer) bounds the rows in SQL; `opts.lite` skips ALL git
- *  enrichment (survived/added/removed stay false/0/0). Both default off, so existing
- *  callers see exactly what they saw before. */
+ *  enrichment (survived/added/removed stay false/0/0); `opts.archived` flips the
+ *  soft-delete filter to `archived_at IS NOT NULL` and stamps each entry
+ *  {archived: true, archivedAt} — the Runs page's Archived feed. The default lists
+ *  active rows only, so existing callers see exactly what they saw before. */
 export async function listAllPipelines(opts = {}, { batchSize = 16 } = {}) {
   const rows = getDb().prepare(`
     SELECT id, project_key, workspace_key, target, title, status, started_at, updated_at,
-           total_cost_usd, total_active_ms, branch, workspace_meta, guardrails_id, started_by, pr_url,
+           total_cost_usd, total_active_ms, branch, workspace_meta, guardrails_id, started_by, pr_url, archived_at,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pauseReason') AS pause_reason,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pauseDetail') AS pause_detail
     FROM pipelines
-    WHERE archived_at IS NULL
+    WHERE archived_at IS ${opts.archived ? 'NOT NULL' : 'NULL'}
     ORDER BY COALESCE(updated_at, started_at) DESC, project_key, id
     LIMIT ?
   `).all(Number.isInteger(opts.limit) && opts.limit > 0 ? opts.limit : -1); // -1 = unlimited (SQLite)
@@ -2235,6 +2237,7 @@ export async function listAllPipelines(opts = {}, { batchSize = 16 } = {}) {
       if (!idx) { idx = await runDirIndex(t.pipelinesDir); dirIndexCache.set(t.pipelinesDir, idx); }
       t.row.dir = idx.get(t.row.id) || join(t.pipelinesDir, t.row.id);
       const e = await rowToHistoryEntry(t.row, t.repoDir, opts);
+      if (opts.archived) { e.archived = true; e.archivedAt = t.row.archived_at || null; }
       return Object.assign(e, t.tag); // same tag fields as before; tag has no `pr` key
     }));
     out.push(...built);
@@ -2370,6 +2373,9 @@ function rowToState(row) {
     // v31 provenance: set when a schedule started this run (NULL = started by hand).
     scheduledFor: row.scheduled_for ?? null,
     scheduleId: row.schedule_id ?? null,
+    // The soft-delete stamp (pipeline-delete.mjs): NULL = an active run. By-id reads
+    // never filtered on it, so a deep-linked archived run's detail knows it is archived.
+    archivedAt: row.archived_at ?? null,
     // A retired v1 resume point was NULLed by the v2 upgrade: the run stays in
     // History with an honest status, but it can never be resumed again.
     resumable: row.resume_point != null,
@@ -2644,10 +2650,15 @@ export async function readPipelineByKey(key, id) {
   // File-name literals inlined (not imported from results.mjs) to avoid a load-order
   // cycle: results.mjs imports recordArtifact/resolvePipelineId from this module.
   const dir = await runDirForRow(row);
+  const state = rowToState(row);
+  // A resume runs out of the run dir (its session + stepper state live there). Restore
+  // clears a reclaimed run's resume_point (pipeline-delete.mjs), but a dir wiped by hand
+  // keeps one — gate it on the dir actually existing (no dir, no resume; archive or not).
+  if (state.resumable && !(dir && existsSync(dir))) state.resumable = false;
   const results = await readJsonFile(join(dir, 'results.json'));
   const overview = await readJsonFile(join(dir, 'overview.json'));
   return {
-    state: rowToState(row),
+    state,
     auditMarkdown: buildAuditMarkdown(row),
     artifacts: await listArtifacts(row.id), // [{kind, relPath}] — drives the Live-logs dropdown (project + workspace)
     results,

@@ -7,7 +7,8 @@
 //   live:  { runId, pipelineId, title, status, ask: {kind, step}|null, pauseReason, unread,
 //            step, failedStep, startedAt, groupKey, groupName, by, pr, checks, files }
 //   hist:  { id, projectKey, title, status, pauseReason, startedAt, mtime, groupName, by,
-//            pr (a glance input: glancePrInput's output), checks, files }
+//            pr (a glance input: glancePrInput's output), checks, files,
+//            archived, archivedAt (archived-feed rows only) }
 //   sched: { id, scheduleId, title (may be null), status, after, queued, retryAt, runAt, groupKey, groupName, by }
 import { glanceCopy } from './run-glance.mjs';
 
@@ -103,12 +104,17 @@ export function liveRowState(it) {
 /** A History row's state. A row still "running" here belongs to a run this tab does not know. */
 export function histRowState(p) {
   const s = String((p && p.status) || '').toLowerCase();
-  if (PARKED.has(s)) return parkedState(s, p.pauseReason);
-  if (FAILED.has(s)) return { icon: 'fail', word: 'Failed', detail: '' };
-  if (STOPPED.has(s)) return { icon: 'stop', word: 'Stopped', detail: '' };
-  if (DONE.has(s)) return { icon: 'done', word: doneWord(p), detail: '' };
-  if (s === 'running' || s === 'starting' || s === 'created') return { icon: 'run', word: 'Running', detail: '' };
-  return { icon: 'stop', word: s ? `${s.charAt(0).toUpperCase()}${s.slice(1)}` : 'Unknown', detail: '' };
+  let st;
+  if (PARKED.has(s)) st = parkedState(s, p.pauseReason);
+  else if (FAILED.has(s)) st = { icon: 'fail', word: 'Failed', detail: '' };
+  else if (STOPPED.has(s)) st = { icon: 'stop', word: 'Stopped', detail: '' };
+  else if (DONE.has(s)) st = { icon: 'done', word: doneWord(p), detail: '' };
+  else if (s === 'running' || s === 'starting' || s === 'created') st = { icon: 'run', word: 'Running', detail: '' };
+  else st = { icon: 'stop', word: s ? `${s.charAt(0).toUpperCase()}${s.slice(1)}` : 'Unknown', detail: '' };
+  // An archived run keeps its terminal icon (it did finish that way) but its word says
+  // where it lives now — the glance headline ("Merged") would hide the soft delete.
+  if (p && p.archived) st = { ...st, word: 'Archived', detail: '' };
+  return st;
 }
 
 /** A schedule ticket's state, in schedules-view.mjs ticketRow's order: missed, firing, chained
@@ -169,6 +175,7 @@ export function histRow(p, now = Date.now()) {
     runId: '', pipelineId: String(p.id), projectKey: key,
     title: String(p.title || p.id || '(untitled)'), status,
     groupKey: key, groupName: String(p.groupName || key || '(unknown project)'), by: String(p.by || ''),
+    archived: !!(p && p.archived),
     unread: false, needs: needsYou({ kind: 'hist', status }),
     activityMs: Number.isFinite(timeMs(p.mtime, now)) ? timeMs(p.mtime, now) : timeMs(p.startedAt, now),
   }, { at: p.startedAt || p.mtime }, now);
@@ -210,17 +217,20 @@ export function rowSub(row, { inNeeds = false, bucket = '' } = {}) {
 
 /** The list's filter chips. Finished = the run ended (done, stopped, failed, and every History
  *  row, which covers interrupted); Live = the rest (running, waiting, paused, scheduled). A
- *  run that ended but still lingers as a live row counts as finished: its icon says so. */
-export const RUNS_FILTERS = Object.freeze(['all', 'live', 'finished', 'needs']);
+ *  run that ended but still lingers as a live row counts as finished: its icon says so.
+ *  Archived shows only rows flagged archived (the Runs page feeds them from a separate
+ *  lazy-loaded array; the flag is the belt-and-braces check). */
+export const RUNS_FILTERS = Object.freeze(['all', 'live', 'finished', 'needs', 'archived']);
 const ENDED_ICONS = new Set(['done', 'stop', 'fail']);
 const isFinishedRow = (r) => r.kind === 'hist' || (r.kind === 'live' && ENDED_ICONS.has(r.icon));
 export function rowInFilter(row, filter) {
   if (filter === 'live') return !isFinishedRow(row);
   if (filter === 'finished') return isFinishedRow(row);
   if (filter === 'needs') return !!row.needs;
+  if (filter === 'archived') return !!row.archived;
   return true;
 }
-const FILTER_EMPTY = Object.freeze({ live: 'No live runs.', finished: 'No finished runs yet.', needs: 'Nothing needs you.' });
+const FILTER_EMPTY = Object.freeze({ live: 'No live runs.', finished: 'No finished runs yet.', needs: 'Nothing needs you.', archived: 'No archived runs.' });
 
 /** "Group by" for the list: per project/workspace (the default), or by when the run last moved. */
 export const RUNS_GROUPINGS = Object.freeze(['project', 'date']);

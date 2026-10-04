@@ -55,6 +55,9 @@ async function boot(hash, { withSync = false, runReply = null, seedProject = '' 
     if (u.includes('/api/projects')) return slow({ projects: PROJECTS });
     if (u.includes('/api/workspaces')) return json({ workspaces: WORKSPACES });
     if (u.includes('/api/schedules/after/p1')) return json({ kind: 'pipeline', id: 'p1', title: 'Refactor', status: 'running', projectDir: '/a/svc-iam', workspaceId: null });
+    // A finished run whose branch archive deleted (then restored): the server says branchGone.
+    if (u.includes('/api/schedules/after/g1')) return json({ kind: 'pipeline', id: 'g1', title: 'Restored', status: 'done', projectDir: '/a/svc-iam', workspaceId: null, branchGone: true });
+    if (u.includes('/api/schedules/after/g2')) return json({ kind: 'pipeline', id: 'g2', title: 'Restored ws', status: 'done', projectDir: null, workspaceId: 'ws_1', branchGone: true });
     if (u.includes('/api/schedules/after/e1')) return json({ kind: 'pipeline', id: 'e1', title: 'Broken', status: 'error', projectDir: '/a/svc-iam', workspaceId: null });
     if (u.includes('/api/schedules/after/w2')) return json({ kind: 'pipeline', id: 'w2', title: 'Empty run', status: 'done', projectDir: null, workspaceId: 'ws_2' });
     if (u.includes('/api/schedules/after/w1')) return json({ kind: 'pipeline', id: 'w1', title: 'Ws run', status: 'done', projectDir: null, workspaceId: 'ws_1' });
@@ -139,6 +142,37 @@ test('Start now instead drops the pick and the previous-run option', async () =>
   assert.equal([...sel.options].some((o) => o.value === '__previous__'), false);
   assert.equal(sel.value, 'main', 'back to the current branch');
   assert.equal(doc.getElementById('start-btn-label').textContent, 'Start run');
+});
+
+test('#new/after/g1: a predecessor whose branch is gone leaves "Branch of the run before it" out and submits a real source branch', async () => {
+  const { window, runBodies } = await boot('#new/after/g1');
+  const doc = window.document;
+  await branchesReady(doc);
+  assert.equal(doc.getElementById('new-sched-text').textContent, 'Starts when ‘Restored’ finishes · its branch is gone, so pick a source branch');
+  const sel = doc.getElementById('sourceBranch');
+  assert.equal([...sel.options].some((o) => o.value === '__previous__'), false, 'no option that can only fail at fire time');
+  assert.equal(sel.value, 'main', 'HEAD’s branch stays selected');
+  doc.getElementById('prompt').value = 'Follow up';
+  doc.getElementById('start-btn').click();
+  await tick(3);
+  assert.equal(runBodies.length, 1);
+  assert.deepEqual(runBodies[0].after, { kind: 'pipeline', id: 'g1', title: 'Restored' }, 'the form hint never reaches the wire');
+  assert.equal(runBodies[0].sourceFromPrevious, undefined);
+  assert.equal(runBodies[0].sourceBranch, 'main');
+});
+
+test('#new/after/g2: a workspace predecessor whose branches are gone keeps the switch hidden and off', async () => {
+  const { window, runBodies } = await boot('#new/after/g2');
+  const doc = window.document;
+  await tick(30);
+  assert.equal(doc.getElementById('ws-source-previous-row').classList.contains('hidden'), true);
+  assert.equal(doc.getElementById('ws-source-previous').classList.contains('on'), false);
+  assert.ok([...doc.querySelectorAll('#ws-source-branches select.ws-src-select')].every((s) => !s.disabled), 'the member picks stay the person’s');
+  doc.getElementById('prompt').value = 'Follow up';
+  doc.getElementById('start-btn').click();
+  await tick(3);
+  assert.equal(runBodies.length, 1);
+  assert.equal(runBodies[0].sourceFromPrevious, undefined);
 });
 
 test('#new/after/w1: a workspace predecessor shows the switch, disables the member selects, and submits the flag', async () => {
