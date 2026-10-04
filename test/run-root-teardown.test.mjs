@@ -12,7 +12,7 @@
 // JSON, so the teardown/rescue machinery is fully testable now.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, mkdir, readFile, realpath } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, mkdir, readFile, realpath, utimes } from 'node:fs/promises';
 import { existsSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -28,6 +28,7 @@ import {
   readRunManifest, updateRunManifest, claudeMdFenceBegin, CLAUDE_MD_FENCE_END,
 } from '../src/core/run-manifest.mjs';
 import { RUN_LOG_FILE } from '../src/core/run-log.mjs';
+import { STALE_INDEX_LOCK_MS } from '../src/core/git-lock.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 
 useTempHome(after);
@@ -775,6 +776,60 @@ test('detached: a hook-failing commit is retried with hooks bypassed even on the
     assert.match(log, /retried with hooks bypassed/);
     assert.ok(treeOf(repo, st.branch.feature).includes('src/feature.mjs'), 'the agent work reached the kept branch');
   });
+});
+
+/** Plant an index.lock aged `ageMs` — what a git killed mid-write leaves behind. */
+async function plantIndexLock(repo, ageMs) {
+  const lock = join(repo, '.git', 'index.lock');
+  await writeFile(lock, '');
+  const t = (Date.now() - ageMs) / 1000;
+  await utimes(lock, t, t);
+  return lock;
+}
+
+test('a stale index.lock left by a killed git is removed and the commit goes through', async () => {
+  const repo = await freshRepo();
+  await writeFile(join(repo, 'feature.mjs'), 'export {};\n');
+  const lock = await plantIndexLock(repo, STALE_INDEX_LOCK_MS + 60_000);
+  const orch = createOrchestrator({
+    projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
+  });
+  const res = await orch._commitWork({ worktreeDir: repo, branch: 'main' });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(res.committed, true);
+  assert.equal(existsSync(lock), false);
+  assert.ok(treeOf(repo, 'main').includes('feature.mjs'));
+});
+
+test('per-step staging clears a stale index.lock and records a run warning', async () => {
+  const repo = await freshRepo();
+  await writeFile(join(repo, 'feature.mjs'), 'export {};\n');
+  const lock = await plantIndexLock(repo, STALE_INDEX_LOCK_MS + 60_000);
+  const orch = createOrchestrator({
+    projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
+  });
+  orch.workDirs = new Map([['k', repo]]);
+  const warnings = [];
+  orch._recordRunWarning = async (text) => { warnings.push(text); };
+  await orch._stageWorkingTree();
+  assert.equal(existsSync(lock), false);
+  assert.match(spawnSync('git', ['-C', repo, 'diff', '--name-only'], { encoding: 'utf8' }).stdout, /feature\.mjs/,
+    'the new file is intent-to-added, so the reviewer diff sees it');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /removed a stale git index lock/);
+});
+
+test('a fresh index.lock is left alone: a live git may own it', async () => {
+  const repo = await freshRepo();
+  await writeFile(join(repo, 'feature.mjs'), 'export {};\n');
+  const lock = await plantIndexLock(repo, 1_000);
+  const orch = createOrchestrator({
+    projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
+  });
+  const res = await orch._commitWork({ worktreeDir: repo, branch: 'main' });
+  assert.equal(res.ok, false);
+  assert.equal(res.step, 'add');
+  assert.equal(existsSync(lock), true);
 });
 
 test('a worktree that vanished mid-run is not retained (nothing to retain)', async () => {

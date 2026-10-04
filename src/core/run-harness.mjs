@@ -28,6 +28,7 @@ import {
   clearPipelineOwnership, HEARTBEAT_INTERVAL_MS, upsertSubAgent, listRunArtifacts,
 } from './artifacts.mjs';
 import { diffNameStatus, diffNumstat, diffPatch, untrackedFiles, untrackedPatch } from './git-info.mjs';
+import { clearStaleIndexLock, staleIndexLockNote } from './git-lock.mjs';
 import { claimPipelineCommand, discardPendingPipelineCommands, CONTROL_CHECK_INTERVAL_MS } from './pipeline-commands.mjs';
 import {
   assembleResults, persistResults, persistDiffPatch, buildPerProject, rollupSummary,
@@ -3235,6 +3236,7 @@ export class RunHarness extends EventEmitter {
     if (!pipelineDir || !info?.worktreeDir) return;
     const name = retainedWorkPatchName(this.isWorkspace ? key : null);
     const snap = await snapshotWorktreePatch(info.worktreeDir, join(pipelineDir, name));
+    if (snap.clearedLock) await this._recordRunWarning(staleIndexLockNote(snap.clearedLock));
     if (snap.ok && snap.file) {
       recordArtifact(this.pipeline.id, 'retained-work-patch', name);
       this._log('git', 'info', `Retained-work recovery patch saved: ${name}`);
@@ -3409,12 +3411,12 @@ export class RunHarness extends EventEmitter {
     // then refuse the mount for the rest of the run. Drop the exclusion set from the index first —
     // a no-op (exit 0) when nothing under it is staged, thanks to --ignore-unmatch.
     if (excludePathspecs.length) {
-      await this._git(['rm', '-r', '--cached', '-q', '--ignore-unmatch', '--',
+      await this._gitIndexWrite(['rm', '-r', '--cached', '-q', '--ignore-unmatch', '--',
         ...excludePathspecs.map((s) => s.replace(/^:\(exclude\)/, ''))], gitOpts);
     }
     const add = excludePathspecs.length
-      ? await this._git(['add', '-A', '--', '.', ...excludePathspecs], gitOpts)
-      : await this._git(['add', '-A'], gitOpts);
+      ? await this._gitIndexWrite(['add', '-A', '--', '.', ...excludePathspecs], gitOpts)
+      : await this._gitIndexWrite(['add', '-A'], gitOpts);
     if (!add.ok) {
       const message = add.stderr.trim() || `exit ${add.code}`;
       this._log('git', 'warn', `commit skipped: git add failed: ${message}`, errStreamAttr(add.stderr));
@@ -3435,7 +3437,7 @@ export class RunHarness extends EventEmitter {
     // Plain commit first (uses the repo's configured identity); fall back to a
     // local identity so a repo with no user.name/email still commits — mirrors
     // _ensureGitCheckpoint's belt-and-braces.
-    let commit = await this._git(['commit', '-m', msg], gitOpts);
+    let commit = await this._gitIndexWrite(['commit', '-m', msg], gitOpts);
     if (!commit.ok) {
       commit = await this._git(
         ['-c', 'user.email=orchestrator@local', '-c', 'user.name=orchestrator', 'commit', '-m', msg],
@@ -4336,7 +4338,7 @@ export class RunHarness extends EventEmitter {
     // Is there any commit yet?
     const head = await this._git(['rev-parse', 'HEAD'], { cwd: dir });
     if (!head.ok) {
-      await this._git(['add', '-A'], { cwd: dir });
+      await this._gitIndexWrite(['add', '-A'], { cwd: dir });
       const commit = await this._git([
         '-c',
         'user.email=orchestrator@local',
@@ -4600,9 +4602,10 @@ export class RunHarness extends EventEmitter {
       // detached); an empty set (a refused mount) reproduces the bare argv.
       const ex = this._excludePathspecs(key);
       const args = ex.length ? ['add', '-A', '-N', '--', '.', ...ex] : ['add', '-A', '-N'];
-      const res = await this._git(args, { cwd: dir, ignoreAbort });
+      const res = await this._gitIndexWrite(args, { cwd: dir, ignoreAbort });
       if (!res.ok && res.stderr && res.stderr.trim()) {
-        this._log('git', 'debug', `git add -A -N (${dir}): ${res.stderr.trim()}`, ERR_STREAM);
+        // warn, not debug: a failed staging hides the agent's new files from the reviewer's diff.
+        this._log('git', 'warn', `git add -A -N (${dir}): ${res.stderr.trim()}`, ERR_STREAM);
       }
     }
   }
@@ -4625,6 +4628,21 @@ export class RunHarness extends EventEmitter {
     return entries
       .filter((e) => e && e.path && e.kind !== 'claudeMdSection')
       .map((e) => `:(exclude)${e.path}`);
+  }
+
+  /**
+   * `_git` for a command that writes the index (add / rm --cached / commit). When git refuses
+   * because `index.lock` exists and the lock is stale — a leftover from a killed git, not a live
+   * one — remove it, record a run warning, and retry once. Without this one leftover lock fails
+   * every later staging and then the teardown commit, retaining the whole run.
+   */
+  async _gitIndexWrite(args, opts) {
+    const res = await this._git(args, opts);
+    if (res.ok) return res;
+    const cleared = await clearStaleIndexLock(opts?.cwd || this.projectDir);
+    if (!cleared) return res;
+    await this._recordRunWarning(staleIndexLockNote(cleared));
+    return this._git(args, opts);
   }
 
   /**
