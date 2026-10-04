@@ -2934,6 +2934,27 @@ app.get('/api/schedules/after-candidates', (req, res) => {
   }
 });
 
+// A FINISHED pipeline predecessor whose feature branch no longer resolves (archive deletes
+// the local branch, and a restore does not bring it back): "Branch of the run before it"
+// would only fail at fire time (fireTicket: "branch … no longer exists"), so the form leaves
+// it out. A live or paused predecessor still owns its branch, and a ticket has none yet.
+const BRANCH_SETTLED = new Set(['done', 'stopped', 'error', 'interrupted']);
+async function predecessorBranchGone(ref, projectDir) {
+  if (!ref || ref.kind !== 'pipeline' || !BRANCH_SETTLED.has(String(ref.status || ''))) return false;
+  const prev = previousBranchesOf(ref.id);
+  if (!prev) return false;
+  try {
+    if (prev.sourceBranch) return !!projectDir && !(await isValidSourceRef(projectDir, prev.sourceBranch));
+    const ws = ref.workspaceId ? await readWorkspace(ref.workspaceId) : null;
+    if (!ws) return false;
+    for (const dir of ws.projectPaths) {
+      const br = prev.sourceBranchByKey[projectKey(dir)];
+      if (br && !(await isValidSourceRef(dir, br))) return true;
+    }
+  } catch { /* best-effort: an unreadable repo keeps the option; fire time still checks */ }
+  return false;
+}
+
 // GET /api/schedules/after/:id -> one predecessor and its target (the #new/after/<id> deep link).
 // async (listProjects is async) — and therefore wrapped: Express 4 does not catch a rejected
 // handler, and the deep link's fetch would hang instead of showing an error line.
@@ -2949,7 +2970,8 @@ app.get('/api/schedules/after/:id', async (req, res) => {
       const projects = await listProjects();
       projectDir = (projects.find((p) => projectKey(p.path) === ref.projectKey) || {}).path || null;
     }
-    res.json({ kind: ref.kind, id: ref.id, title: ref.title, status: ref.status, projectDir, workspaceId: ref.workspaceId || null });
+    res.json({ kind: ref.kind, id: ref.id, title: ref.title, status: ref.status, projectDir, workspaceId: ref.workspaceId || null,
+      branchGone: await predecessorBranchGone(ref, projectDir) });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -5072,7 +5094,8 @@ app.post('/api/runs/:id/restore', async (req, res) => {
     if (!report) return res.status(404).json({ error: 'pipeline not found' });
     if (report.restored) {
       const restBy = actorOf(req);
-      appendAuditById(report.id, `Run restored${byActor(restBy)}.`, { actor: restBy });
+      const note = report.wasPaused ? ' It was paused; archive removed its run directory, so it can no longer resume.' : '';
+      appendAuditById(report.id, `Run restored${byActor(restBy)}.${note}`, { actor: restBy });
     }
     emitChanged('pipelines-changed', 'restored');
     res.json({ ok: true, ...report });

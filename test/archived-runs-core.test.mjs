@@ -89,10 +89,16 @@ test('readPipelineByKey: archivedAt rides the detail state; resumable dies with 
   assert.ok(st.archivedAt, 'the archive stamp reaches the detail payload');
   assert.equal(st.resumable, false, 'an archived run has no run dir to resume from');
 
-  await restorePipeline({ projectDir, id });
+  assert.deepEqual(await restorePipeline({ projectDir, id }),
+    { ok: true, id, restored: true, wasPaused: true, warnings: [] }, 'the report says it came back unparked');
   const restored = (await readPipelineByKey(key, id)).state;
   assert.equal(restored.archivedAt, null, 'restored: the stamp is cleared');
   assert.equal(restored.resumable, false, 'the run dir was reclaimed: a restored run is not resumable');
+  // Left paused it would sit in Needs you forever behind a Resume that can only fail:
+  // restore drops the dead resume point and the row comes back interrupted.
+  const row = getDb().prepare('SELECT status, resume_point FROM pipelines WHERE id = ?').get(id);
+  assert.equal(row.status, 'interrupted', 'a paused row is unparked');
+  assert.equal(row.resume_point, null, 'the dead resume point is dropped');
 
   // The dir-gate is about the FS, not the stamp: a never-archived row whose run dir
   // vanished loses resumable too, and an intact one keeps it.

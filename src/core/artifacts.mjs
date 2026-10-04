@@ -2591,9 +2591,9 @@ export async function readPipelineByKey(key, id) {
   // cycle: results.mjs imports recordArtifact/resolvePipelineId from this module.
   const dir = await runDirForRow(row);
   const state = rowToState(row);
-  // A resume runs out of the run dir (its session + stepper state live there). Archive
-  // reclaims the dir but keeps resume_point, so a restored run still says resumable
-  // here — gate it on the dir actually existing (no dir, no resume; archive or not).
+  // A resume runs out of the run dir (its session + stepper state live there). Restore
+  // clears a reclaimed run's resume_point (pipeline-delete.mjs), but a dir wiped by hand
+  // keeps one — gate it on the dir actually existing (no dir, no resume; archive or not).
   if (state.resumable && !(dir && existsSync(dir))) state.resumable = false;
   const results = await readJsonFile(join(dir, 'results.json'));
   const overview = await readJsonFile(join(dir, 'overview.json'));

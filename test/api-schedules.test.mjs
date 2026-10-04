@@ -389,7 +389,7 @@ test('after-candidates, after/:id, dependents and the enriched ticket list', asy
   assert.equal(cands.tickets.some((t) => t.id === m.runId), false, 'a missed ticket is not a candidate');
   assert.deepEqual(cands.runs.find((r) => r.pipelineId === 'c0000001'), { pipelineId: 'c0000001', runId: null, title: 'Parked', status: 'paused' });
   const ref = await get(`/api/schedules/after/${a.runId}`);
-  assert.deepEqual(ref, { kind: 'ticket', id: a.runId, title: 'A', status: 'scheduled', projectDir: dir, workspaceId: null });
+  assert.deepEqual(ref, { kind: 'ticket', id: a.runId, title: 'A', status: 'scheduled', projectDir: dir, workspaceId: null, branchGone: false });
   assert.equal((await fetch(`${base}/api/schedules/after/nope`)).status, 404);
   assert.equal((await fetch(`${base}/api/schedules/after/sch_deadbeef`)).status, 400);
   const deps = await get(`/api/schedules/dependents?ticketId=${a.runId}`);
@@ -398,6 +398,23 @@ test('after-candidates, after/:id, dependents and the enriched ticket list', asy
   const tb = list.tickets.find((t) => t.id === b.runId);
   assert.deepEqual(tb.after, { kind: 'ticket', id: a.runId, policy: 'done', title: 'A', status: 'scheduled', pipelineId: null });
   assert.equal(tb.sourceFromPrevious, false);
+});
+
+test('GET /api/schedules/after/:id says branchGone for a finished run whose branch is gone (archived, then restored)', async () => {
+  const { addProject } = await import('../src/core/projects.mjs');
+  await addProject({ name: 'sched-api-branch-gone', path: dir });
+  seedPipelineRow({ id: 'g0000001', title: 'Reclaimed', status: 'done', projectKey: projectKey(dir),
+    branch: { feature: 'worca/reclaimed-branch', source: 'main' }, startedAt: '2026-09-21T10:00:00.000Z' });
+  let ref = await get('/api/schedules/after/g0000001');
+  assert.equal(ref.projectDir, dir);
+  assert.equal(ref.branchGone, true, 'the local branch is gone: the form must not default to it');
+  execFileSync('git', ['branch', 'worca/reclaimed-branch'], { cwd: dir });
+  ref = await get('/api/schedules/after/g0000001');
+  assert.equal(ref.branchGone, false, 'a branch that still resolves keeps "Branch of the run before it"');
+  // A paused predecessor still owns its branch (and a ticket has none yet): never gone.
+  seedPipelineRow({ id: 'g0000002', title: 'Parked', status: 'paused', projectKey: projectKey(dir),
+    branch: { feature: 'worca/not-made-yet', source: 'main' }, startedAt: '2026-09-21T11:00:00.000Z' });
+  assert.equal((await get('/api/schedules/after/g0000002')).branchGone, false);
 });
 
 test('PATCH switches a ticket between a time and a predecessor, and validates the chain', async () => {

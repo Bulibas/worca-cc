@@ -1113,6 +1113,11 @@ function handleServerMessage(msg) {
     refreshAllCounts();
     refreshBudget();
     if (inRunsView()) loadHistoryView({ force: true });
+    // The Archived feed, once loaded, goes stale on the same change: refetch it while
+    // the Runs page is open, else drop it so the next Archived paint fetches afresh.
+    if (state.historyArchived !== null) {
+      if (inRunsView()) void loadHistoryArchived(); else state.historyArchived = null;
+    }
     if (currentView() === 'stats') loadStatsView();
     return;
   }
@@ -12422,6 +12427,8 @@ el.form.addEventListener('submit', async (e) => {
   if (scheduling) {
     const { sync: schedSync, ...schedRest } = pendingSchedule;
     Object.assign(body, schedRest);
+    // branchGone is a form hint (openAfterForNew), never part of the wire's { kind, id, title }.
+    if (body.after && 'branchGone' in body.after) { const { branchGone: _bg, ...a } = body.after; body.after = a; }
     if (schedSync && typeof schedSync.beforeRun === 'boolean') body.syncBeforeStart = schedSync.beforeRun;
     if (schedSync && (schedSync.onDiverged === 'origin' || schedSync.onDiverged === 'fail')) body.syncOnDiverged = schedSync.onDiverged;
   }
@@ -12584,7 +12591,8 @@ function setPendingSchedule(pick) {
   if (!pendingSchedule) { syncPreviousBranchEverywhere(); return; }
   if (pendingSchedule.after) {
     el.newSchedBadge.textContent = 'After run';
-    el.newSchedText.textContent = `Starts when ‘${pendingSchedule.after.title || 'the run before it'}’ finishes`;
+    el.newSchedText.textContent = `Starts when ‘${pendingSchedule.after.title || 'the run before it'}’ finishes`
+      + (pendingSchedule.after.branchGone ? ' · its branch is gone, so pick a source branch' : '');
   } else if (pendingSchedule.repeat) {
     el.newSchedBadge.textContent = 'Repeats';
     el.newSchedText.textContent = describeRule(pendingSchedule.repeat.rule);
@@ -12613,7 +12621,7 @@ el.newSchedClear?.addEventListener('click', () => setPendingSchedule(null));
 // single select becomes in workspace mode — the switch below carries the flag there.
 function syncPreviousBranchOption(select) {
   if (!select || select.classList.contains('ws-src-select')) return;
-  const want = !!(pendingSchedule && pendingSchedule.after) && state.runTarget !== 'workspace';
+  const want = !!(pendingSchedule && pendingSchedule.after && !pendingSchedule.after.branchGone) && state.runTarget !== 'workspace';
   const has = [...select.options].find((o) => o.value === PREVIOUS_BRANCH);
   if (want && !has) {
     const opt = document.createElement('option');
@@ -12638,7 +12646,7 @@ function syncPreviousBranchEverywhere() {
     if (el.sourceBranch.value === PREVIOUS_BRANCH || (state.sync.block && state.sync.block.base === effectiveBase())) paintSyncRowNow();
     else void refreshSyncStatusQuiet();
   }
-  const wsPick = !!(pendingSchedule && pendingSchedule.after) && state.runTarget === 'workspace';
+  const wsPick = !!(pendingSchedule && pendingSchedule.after && !pendingSchedule.after.branchGone) && state.runTarget === 'workspace';
   if (el.wsSourcePreviousRow) el.wsSourcePreviousRow.classList.toggle('hidden', !wsPick);
   // ON by default with a pick in workspace mode; a deliberate OFF (the click handler marks it) survives
   // member re-renders and target switches, and the FRESH member selects follow whichever it is — every
@@ -12708,7 +12716,9 @@ async function openAfterForNew(ref) {
   } else { setFormMsg('That run’s project is not registered.', 'err'); return; }
   // A predecessor that already ended badly can only be waited for under the any policy
   // (resolveAfterRef refuses it under done) — preset the switch the sheet would need.
-  setPendingSchedule({ after: { kind: r.kind, id: r.id, title: r.title || null }, afterPolicy: ENDED_BADLY.includes(r.status) ? 'any' : 'done' });
+  // branchGone: the predecessor finished but its feature branch no longer resolves (an archived
+  // or restored run) — syncPreviousBranchOption then leaves "Branch of the run before it" out.
+  setPendingSchedule({ after: { kind: r.kind, id: r.id, title: r.title || null, branchGone: !!r.branchGone }, afterPolicy: ENDED_BADLY.includes(r.status) ? 'any' : 'done' });
   try { el.prompt?.focus(); } catch { /* jsdom */ }
 }
 function closeStartMenu() {
@@ -18611,9 +18621,16 @@ async function loadHistoryView({ force = false } = {}) {
 }
 
 // Loading affordance: the Runs list is aria-busy while History (re)loads.
-function setHistoryLoading(on) {
-  if (el.runsList) el.runsList.setAttribute('aria-busy', on ? 'true' : 'false');
+// The list is aria-busy while EITHER feed loads: the active history (setHistoryLoading,
+// through Phase 2) or the Archived chip's (setArchivedLoading) — one finishing must not
+// clear the other's busy state.
+let historyBusy = false;
+let archivedBusy = false;
+function paintRunsBusy() {
+  if (el.runsList) el.runsList.setAttribute('aria-busy', historyBusy || archivedBusy ? 'true' : 'false');
 }
+function setHistoryLoading(on) { historyBusy = !!on; paintRunsBusy(); }
+function setArchivedLoading(on) { archivedBusy = !!on; paintRunsBusy(); }
 
 // Phase-2 trigger + WS handler. The spinner stays on through PR enrichment and is
 // cleared by the final batch, a failed/!ok POST, or the per-token watchdog — so it
@@ -20898,8 +20915,11 @@ function setupHdActions(screen, record, data) {
         // re-enters Finished (its status is terminal).
         state.historyArchived = (state.historyArchived || []).filter((x) => !(x && x.id === r.id && x.projectKey === r.projectKey));
         loadHistoryView({ force: true });
-        goRunsList();                               // the list itself: the restored run is there
-        notify({ tone: 'ok', title: 'Run restored' });
+        // Back to the list under the SAME chip: from Archived, that is the rest of the
+        // archive (restoring several in a row), so the toast carries the way to the run.
+        goRunsList();
+        notify({ tone: 'ok', title: 'Run restored', key: `restore-${r.id}`,
+          action: { label: 'Open', run: () => { location.hash = `history/${r.projectKey}/${r.id}`; } } });
       } catch (err) {
         restoreBtn.disabled = false;
         label.textContent = 'Restore';
@@ -26047,8 +26067,8 @@ function paintRunsList() {
   const note = archivedView
     ? (state.historyArchivedError && !histSource.length ? `Could not load archived runs: ${state.historyArchivedError}` : '')
     : (state.historyError && !(state.historyAll || []).length ? `Could not load finished runs: ${state.historyError}` : '');
-  // The filter survives a reload (and a level change can hide the chip that set it):
-  // a first paint under the Archived chip fetches its feed without a click.
+  // The filter survives a reload: a first paint under the Archived chip fetches its
+  // feed without a click.
   if (archivedView && state.historyArchived === null) loadHistoryArchived();
   const sig = JSON.stringify([
     model.needs.map(runsRowSig),
@@ -26152,6 +26172,9 @@ function paintRunsFilter() {
     const on = b.dataset.filter === runsUi.filter;
     b.classList.toggle('on', on);
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    // docs/ui-levels.md rule 2: the Advanced Archived chip stays on screen below Advanced while it
+    // is the stored pick — otherwise the list shows only archived runs with no chip to leave by.
+    if (b.dataset.filter === 'archived') keepVisible(b, on);
   }
 }
 el.runsFilter?.addEventListener('click', (e) => {
@@ -26159,37 +26182,39 @@ el.runsFilter?.addEventListener('click', (e) => {
   if (!b || b.dataset.filter === runsUi.filter) return;
   runsUi.filter = b.dataset.filter;
   try { localStorage.setItem(RUNS_FILTER_KEY, runsUi.filter); } catch { /* private mode */ }
+  // Each Archived activation refetches its feed; a never-loaded one is fetched by the
+  // paint below (state.historyArchived === null), so it is not asked for twice.
+  if (runsUi.filter === 'archived' && state.historyArchived !== null) void loadHistoryArchived();
   paintRunsFilter();
   paintRunsList();
-  if (runsUi.filter === 'archived') loadHistoryArchived();
 });
 paintRunsFilter();
 
-// The Archived chip's feed (issue #575): fetched lazily, once per chip activation — cheap,
-// and it keeps the view fresh after archives/restores done elsewhere. Deliberately NOT the
-// Phase-2 PR enrichment: an archived run's branch is gone, so there is nothing to enrich.
-let historyArchivedInFlight = 0;
-let historyArchivedLoading = false;   // one fetch at a time; the newest token wins the paint
+// The Archived chip's feed (issue #575): fetched lazily on chip activation, and again on
+// every pipelines-changed once loaded (an archive or restore here, in another tab or from
+// the CLI). Deliberately NOT the Phase-2 PR enrichment: an archived run's branch is gone,
+// so there is nothing to enrich. One fetch at a time; a call that lands mid-flight queues
+// exactly one re-fetch, so the last change is never dropped.
+let historyArchivedLoading = false;
+let historyArchivedAgain = false;
 async function loadHistoryArchived() {
-  if (historyArchivedLoading) return;
+  if (historyArchivedLoading) { historyArchivedAgain = true; return; }
   historyArchivedLoading = true;
-  const token = ++historyArchivedInFlight;
-  setHistoryLoading(true);
+  setArchivedLoading(true);
   try {
     const res = await fetch('/api/history?archived=1');
     const data = await safeJson(res);
-    if (token !== historyArchivedInFlight) return;   // a newer activation owns the feed
     if (!res.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
     state.historyArchived = Array.isArray(data.pipelines) ? data.pipelines.filter(Boolean) : [];
     state.historyArchivedError = '';
   } catch (e) {
-    if (token !== historyArchivedInFlight) return;
     state.historyArchived = state.historyArchived || [];
     state.historyArchivedError = e.message;
   } finally {
-    if (token === historyArchivedInFlight) setHistoryLoading(false);
     historyArchivedLoading = false;
+    setArchivedLoading(false);
   }
+  if (historyArchivedAgain) { historyArchivedAgain = false; void loadHistoryArchived(); return; }
   paintRunsList();
   // An archived run opened by deep link (before the feed loaded) carries a stub
   // record — no projectDir, no title. Now that the feed landed, repair it.

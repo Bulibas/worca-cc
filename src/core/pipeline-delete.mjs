@@ -279,7 +279,8 @@ export async function archivePipeline({ projectDir = null, key = null, workspace
  * The inverse of archivePipeline: clear a soft-deleted row's `archived_at` so the run
  * is listed (and chain-gated) again. Nothing on disk comes back — the archive contract
  * reclaimed the run dir, the branch and the artifacts, so a restored run is a read-only
- * record with a working PR link and its audit timeline. Mirrors the archive preamble
+ * record with a working PR link and its audit timeline — never resumable (its resume
+ * point is cleared; a paused row comes back interrupted). Mirrors the archive preamble
  * (same store-key resolution, same lookupRow, same guards) so the two routes stay
  * symmetrical.
  * @param {{ projectDir?:string, key?:string, workspaceKey?:string, id:string }} args
@@ -306,10 +307,15 @@ export async function restorePipeline({ projectDir = null, key = null, workspace
   if (!row.archived_at) {
     return { ok: true, id: row.id, alreadyActive: true, warnings: [] };
   }
+  // Archive reclaimed the run dir a resume runs out of, so the resume point is dead
+  // weight: drop it, and a PAUSED row becomes interrupted (the db.mjs v2-upgrade idiom;
+  // Statistics buckets the two together). Left paused it would sit in Needs you for
+  // good, offering a Resume that can only fail.
+  const wasPaused = String(row.status || '').toLowerCase() === 'paused';
   tx(() => {
-    getDb().prepare('UPDATE pipelines SET archived_at = NULL WHERE id = ?').run(row.id);
+    getDb().prepare(`UPDATE pipelines SET archived_at = NULL, resume_point = NULL${wasPaused ? ", status = 'interrupted'" : ''} WHERE id = ?`).run(row.id);
   });
-  return { ok: true, id: row.id, restored: true, warnings: [] };
+  return { ok: true, id: row.id, restored: true, ...(wasPaused ? { wasPaused: true } : {}), warnings: [] };
 }
 
 /**

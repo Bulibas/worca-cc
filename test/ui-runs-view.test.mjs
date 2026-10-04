@@ -587,6 +587,45 @@ test('a remembered Archived filter fetches its feed on the first paint, chip hid
   assert.deepEqual(titles(), ['Archived thing']);
 });
 
+test('docs/ui-levels.md rule 2: the Archived chip stays on screen below Advanced while it is the pick', async () => {
+  const { window, doc } = await boot({ storage: { 'worca-cc.runs.filter': 'archived' } });
+  go(window, 'runs'); await settle(window);
+  const chip = (f) => doc.querySelector(`#runs-filter [data-filter="${f}"]`);
+  assert.equal(chip('archived').dataset.minLevel, 'advanced');
+  assert.equal(chip('archived').dataset.levelKeep, '1',
+    'kept visible: otherwise a Simple list shows only archived runs with no chip to leave by');
+  click(window, chip('all')); await settle(window);
+  assert.equal(chip('archived').dataset.levelKeep, undefined, 'once left, the chip is Advanced-only again');
+});
+
+test('pipelines-changed refreshes a loaded Archived feed, and a mid-flight change queues one more fetch', async () => {
+  let archived = [ARCH];
+  let archivedFetches = 0;
+  const { window, doc, recv } = await boot({ setup: () => {} });
+  const inner = window.fetch;
+  const wrapped = (u, init) => {
+    if (String(u).includes('/api/history?archived=1')) {
+      archivedFetches += 1;
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines: archived, ghAvailable: true }) });
+    }
+    return inner(u, init);
+  };
+  window.fetch = wrapped; globalThis.fetch = wrapped;
+  go(window, 'runs'); await settle(window);
+  recv({ type: 'pipelines-changed' }); await settle(window);
+  assert.equal(archivedFetches, 0, 'a never-loaded feed is not fetched on a change');
+  click(window, doc.querySelector('#runs-filter [data-filter="archived"]')); await settle(window);
+  assert.equal(archivedFetches, 1);
+  // Restored elsewhere (another tab, the CLI): the broadcast drops it from the open view.
+  archived = [];
+  recv({ type: 'pipelines-changed' }); await settle(window);
+  assert.equal(archivedFetches, 2, 'the change refetches the loaded feed');
+  assert.equal(doc.querySelector('#runs-list .runs-row[data-pipeline-id="cccc0009"]'), null, 'the restored row is gone');
+  // Two changes in one tick: the second lands mid-flight and must not be dropped.
+  recv({ type: 'pipelines-changed' }); recv({ type: 'pipelines-changed' }); await settle(window);
+  assert.equal(archivedFetches, 4, 'one fetch plus exactly one queued re-fetch');
+});
+
 test('an archived run opened from the loaded feed shows its project in the glance head', async () => {
   // Regression (issue #575 review): histRecordFor used to search only historyAll,
   // so the clicked archived row fell through to the {id, projectKey} stub — no
