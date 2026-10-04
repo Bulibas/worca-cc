@@ -1316,9 +1316,11 @@ export class GraphOrchestrator extends RunHarness {
         ...node,
         key: nc.key,
         fanOut: engineOpts.fanOut,
-        // The engine has no grantable sub-agent tool: the workspace directive asks the
-        // agent to do its per-project work itself (executor.mjs#buildAgentPrompt).
-        ...(engineOpts.subagents ? {} : { noSubagents: true }),
+        engine: engineOpts.engine,
+        // The workspace directive's per-project dispatch names Claude's Task tool and agent types: on another
+        // engine (and on one with no sub-agent tool at all) the agent does that work itself, one unit at a
+        // time (executor.mjs#buildAgentPrompt). Research fan-out still runs on Codex (fanOutDirective).
+        ...(engineOpts.subagents && engineOpts.engine === 'claude' ? {} : { noSubagents: true }),
         subagentModel: nc.subagentModel || '',
         subagentEffort: nc.subagentEffort || '',
         // Same fallback as claudeOpts.model below: the flag must describe the

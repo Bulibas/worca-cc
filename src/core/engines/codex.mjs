@@ -16,7 +16,9 @@
 // - A failed turn ends with `error` + `turn.failed`, and codex may still exit 0. A
 //   top-level `error` alone is not a failure: codex also reports its stream retries
 //   that way ("Reconnecting... 1/5 (…)") and may go on to complete the turn.
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, symlinkSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
 import { worcaHome } from '../projects.mjs';
@@ -41,12 +43,16 @@ export function codexThreadOf(sessionId) {
 }
 
 /** What the adapter can do for worca (design §10.3). Only a literal false degrades:
- *  codex has no per-spawn tool allowlist, hook stream, per-tool permission rules,
- *  Skill tool over .claude/skills, grantable sub-agent tool, sub-agent-only prompt
- *  or native turn and spend cap (the adapter counts tool calls against maxTurns
- *  itself; a spend cap has nothing to stop mid-turn). MCP servers attach through
- *  `-c mcp_servers.*` (stdio only). */
-const CODEX_FALSE = new Set(['allowedTools', 'hookTelemetry', 'permissionRules', 'skills', 'subagentSystemPrompt', 'subagents', 'turnBudget']);
+ *  codex has no per-spawn tool allowlist, no hook stream (its hooks run only once a person
+ *  has reviewed and trusted them) and no native turn or spend cap (the adapter counts tool
+ *  calls against maxTurns itself; a spend cap has nothing to stop mid-turn).
+ *  - MCP servers attach through `-c mcp_servers.*` (stdio only).
+ *  - Permission rules: the deny rules codex can hold become command rules (codexRulePlan);
+ *    the rest are reported by unenforcedRules, and the run gate refuses them unless allowed.
+ *  - Sub-agents: codex's own spawn_agent, with worca's investigator defined as an agent role
+ *    that carries the memory block (codexInvestigatorRole).
+ *  - Skills: codex loads `.agents/skills` from the cwd, where the run context mounts them. */
+const CODEX_FALSE = new Set(['allowedTools', 'hookTelemetry', 'turnBudget']);
 
 /** The model a codex spawn runs when worca names none: codex-cli 0.146's own built-in default under
  *  --ignore-user-config (seen in the session log of an unnamed-model exec). Naming it changes nothing codex
@@ -66,7 +72,102 @@ export const CODEX_ASK_LOCKDOWN = null;
  *  file into its answer. Verified to remove the shell on codex-cli 0.146 (plans/ask-on-codex-spike.md (a)). An Ask
  *  lockdown list replaces these flags and must carry them itself. */
 export const CODEX_SHELL_OFF = Object.freeze(['--disable', 'shell_tool', '--disable', 'unified_exec']);
-export const CODEX_MCP_TOOL_TIMEOUT_SEC = 1800;   // the Ask turn's own 30-minute clock bounds it (propose_workflow classifies, test_script runs)
+export const CODEX_MCP_TOOL_TIMEOUT_SEC = 1800;
+
+// ── permission rules ─────────────────────────────────────────────────────────
+
+/** A deny rule's command prefix (`Bash(git push)`, `Bash(git push:*)`, `Bash(npm run *)`), or null when it is
+ *  not a plain command prefix (a glob or quote inside, or not a Bash rule). */
+function bashPrefix(rule) {
+  const m = /^Bash\((.+)\)$/.exec(String(rule).trim());
+  if (!m) return null;
+  const body = m[1].trim().replace(/(?::\*| \*)$/, '').trim();
+  if (!body || /[*?"'`$\\()|;&<>]/.test(body)) return null;
+  return body.split(/\s+/);
+}
+
+/**
+ * What codex can hold of a run's permission rules. Only DENY rules are worca policy (allow / ask are never
+ * lifted, and codex exec never asks). A `Bash(cmd…)` prefix becomes a codex command rule (decision forbidden):
+ * codex checks it on the command itself, an absolute path to it and each command of a `&&` chain — like
+ * Claude Code's prefix rules, a command run inside `bash -c` or `env` is not checked. A bare `Bash` turns the
+ * shell off; `WebSearch` turns codex's web search off; `WebFetch` has no codex tool to deny. Path rules
+ * (`Read(…)`, `Edit(…)`, `Write(…)`), MCP tool rules and globs cannot be held: they are `unenforced`.
+ * @returns {{prefixes:string[][], shellOff:boolean, webSearchOff:boolean, enforced:string[], unenforced:string[]}}
+ */
+export function codexRulePlan(permissionRules) {
+  const out = { prefixes: [], shellOff: false, webSearchOff: false, enforced: [], unenforced: [] };
+  const deny = Array.isArray(permissionRules?.deny) ? permissionRules.deny : [];
+  for (const raw of deny) {
+    const rule = String(raw).trim();
+    if (!rule) continue;
+    if (rule === 'Bash') { out.shellOff = true; out.enforced.push(rule); continue; }
+    if (rule === 'WebSearch') { out.webSearchOff = true; out.enforced.push(rule); continue; }
+    if (rule === 'WebFetch') { out.enforced.push(rule); continue; }
+    const prefix = bashPrefix(rule);
+    if (prefix) {
+      if (!out.prefixes.some((p) => p.join(' ') === prefix.join(' '))) out.prefixes.push(prefix);
+      out.enforced.push(rule);
+    } else out.unenforced.push(rule);
+  }
+  return out;
+}
+
+/** The deny rules codex cannot hold (the run gate's question). */
+export function unenforcedRules(permissionRules) { return codexRulePlan(permissionRules).unenforced; }
+
+/** The codex execpolicy file for `prefixes` (Starlark; a JSON string is a valid Starlark string). */
+export function codexRulesFile(prefixes) {
+  return prefixes.map((p) => `prefix_rule(pattern=${JSON.stringify(p)}, decision="forbidden", justification=${JSON.stringify(`worca guardrail: Bash(${p.join(' ')}:*)`)})`).join('\n') + '\n';
+}
+
+/** The user's own codex home: where codex keeps its sign-in. */
+export const userCodexHome = (env = process.env) => (env.CODEX_HOME && env.CODEX_HOME.trim()) || join(homedir(), '.codex');
+
+/**
+ * A worca-managed CODEX_HOME holding `rules`. codex reads command rules only from its home's `rules/` folder,
+ * so a guarded spawn runs under one home per rule set (the same rules always get the same home, so a resumed
+ * thread is found where it was written); its sign-in is the user's own auth.json, linked in. Never throws.
+ */
+export function guardedCodexHome(rulesText, { base = join(worcaHome(), 'engines', 'codex', 'homes'), userHome = userCodexHome() } = {}) {
+  const dir = join(base, createHash('sha256').update(rulesText).digest('hex').slice(0, 12));
+  try {
+    mkdirSync(join(dir, 'rules'), { recursive: true });
+    const file = join(dir, 'rules', 'worca.rules');
+    let cur = null;
+    try { cur = readFileSync(file, 'utf8'); } catch { /* new home */ }
+    if (cur !== rulesText) writeFileSync(file, rulesText);
+    const auth = join(dir, 'auth.json');
+    if (!existsSync(auth) && existsSync(join(userHome, 'auth.json'))) symlinkSync(join(userHome, 'auth.json'), auth);
+  } catch { /* the spawn then fails on its sign-in and says so */ }
+  return dir;
+}
+
+// ── sub-agents ───────────────────────────────────────────────────────────────
+
+/** The codex agent role worca's fan-out dispatches (`spawn_agent` with this `agent_type`). */
+export const CODEX_INVESTIGATOR_ROLE = 'worca_investigator';
+const CODEX_EFFORTS = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh']);
+const DEFAULT_INVESTIGATOR_PROMPT = 'You are a read-only investigator dispatched by a worca pipeline agent. Investigate exactly what you were asked, in the directories you were given. Never edit, write, commit, branch or spawn sub-agents. Report concrete findings with file paths, then stop.';
+
+/**
+ * The investigator role of a fan-out spawn: the `--agents` definition worca would hand Claude (its prompt,
+ * model and effort; a Claude model or effort codex cannot run is dropped), plus the memory block, which
+ * Claude's sub-agents get through --append-subagent-system-prompt. codex roles inherit the parent's sandbox,
+ * so read-only is the role's instruction, as it is for Claude's investigator (which keeps Bash).
+ * @returns {{description:string, toml:string}}
+ */
+export function codexInvestigatorRole({ agents, subagentSystemPrompt } = {}) {
+  const def = agents && typeof agents === 'object' ? Object.values(agents)[0] : null;
+  const prompt = [typeof def?.prompt === 'string' && def.prompt.trim() ? def.prompt.trim() : DEFAULT_INVESTIGATOR_PROMPT,
+    typeof subagentSystemPrompt === 'string' ? subagentSystemPrompt.trim() : ''].filter(Boolean).join('\n\n');
+  const lines = [`developer_instructions = ${tomlString(prompt)}`];
+  if (codexModelPriced(def?.model) && def?.model) lines.push(`model = ${tomlString(def.model)}`);
+  const effort = def?.effort === 'max' ? 'xhigh' : def?.effort;
+  if (CODEX_EFFORTS.includes(effort)) lines.push(`model_reasoning_effort = ${tomlString(effort)}`);
+  return { description: typeof def?.description === 'string' && def.description ? def.description : 'Read-only investigator for one area; reports its findings to the agent that dispatched it.',
+    toml: `${lines.join('\n')}\n` };
+}   // the Ask turn's own 30-minute clock bounds it (propose_workflow classifies, test_script runs)
 const MCP_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const ENV_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 
@@ -440,6 +541,7 @@ export async function runCodexProcess({
   cwd = process.cwd(), systemPrompt = '', prompt = '', model: namedModel, effort, onEvent = () => {}, signal,
   bin = CODEX_DEFAULT_BIN, resumeSessionId, addDirs, writableDirs, sandbox, envScrub, envAllowlist, asAgent, usageDir = defaultUsageDir(),
   mcpConfigPath, spawnEnv: runSpawnEnv, redactValues, maxTurns, images, askLockdown,
+  permissionRules, allowedTools, agents, appendSubagentSystemPrompt,
 } = {}) {
   if (signal?.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
   const model = namedModel || CODEX_DEFAULT_MODEL;
@@ -491,13 +593,32 @@ export async function runCodexProcess({
   const serverEnv = codexMcpOverrides(mcpServers).env;
   const normalizer = createCodexNormalizer({ model, priorUsage: thread ? loadUsage(usageDir, thread) : null });
   const { env } = composeSpawnEnv({ ...envOpts, ...(Object.keys(serverEnv).length ? { runEnv: serverEnv } : {}) });
+  // Guardrails: the deny rules codex can hold (codexRulePlan). Command rules live in a worca-managed CODEX_HOME.
+  const plan = codexRulePlan(permissionRules);
+  if (plan.prefixes.length) env.CODEX_HOME = guardedCodexHome(codexRulesFile(plan.prefixes));
+  const extra = [];
+  if (plan.shellOff && sandbox !== 'read-only' && !askLockdown) extra.push(...CODEX_SHELL_OFF);
+  if (plan.webSearchOff) extra.push('-c', 'web_search="disabled"');
+  // Fan-out (the runner granted the sub-agent tool): worca's investigator becomes a codex agent role for this call.
+  let roleFile = null;
+  if (Array.isArray(allowedTools) && allowedTools.some((t) => t === 'Agent' || t === 'Task') && !askLockdown) {
+    const role = codexInvestigatorRole({ agents, subagentSystemPrompt: appendSubagentSystemPrompt });
+    try {
+      const dir = join(worcaHome(), 'tmp', 'codex-roles');
+      mkdirSync(dir, { recursive: true });
+      roleFile = join(dir, `${CODEX_INVESTIGATOR_ROLE}-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.toml`);
+      writeFileSync(roleFile, role.toml, { mode: 0o600 });
+      extra.push('-c', `agents.${CODEX_INVESTIGATOR_ROLE}.description=${tomlString(role.description)}`,
+        '-c', `agents.${CODEX_INVESTIGATOR_ROLE}.config_file=${tomlString(roleFile)}`);
+    } catch { roleFile = null; /* no role: the agent's sub-agents run as codex's default */ }
+  }
   // codex hands an MCP server only a short default env plus `env_vars`: name every variable of codex's own env, so the
   // worca server gets what a Claude chat's child inherits (proxy, CA bundle, WORCA_CODEX_BIN, codex's own keys…).
   const mcp = codexMcpOverrides(mcpServers, { passEnv: Object.keys(env) });
   // The sandbox writes only the cwd: the memory mount and the node's output dirs
   // become writable roots (--add-dir fresh, writable_roots on resume).
   const dirs = [...new Set([...(addDirs || []), ...(writableDirs || [])])];
-  const args = buildCodexArgs({ systemPrompt: sys, model, effort, resumeThreadId: thread, addDirs: dirs, sandbox, mcp: mcp.args,
+  const args = buildCodexArgs({ systemPrompt: sys, model, effort, resumeThreadId: thread, addDirs: dirs, sandbox, mcp: [...mcp.args, ...extra],
     ...(askLockdown ? { lockdown, images } : {}) });
   let sawThread = thread;
   // maxTurns: the main agent's tool calls, counted as the Ask watchdog counts them (sub-agent calls do not count).
@@ -506,7 +627,8 @@ export async function runCodexProcess({
   let toolCalls = 0; let capped = false;
   const spawnSignal = cap ? (signal ? AbortSignal.any([signal, capCtrl.signal]) : capCtrl.signal) : signal;
   const res = await superviseSpawn({
-    file: bin, args, displayBin: bin, cwd, env, stdin, signal: spawnSignal, asAgent, stagedDir: null, cleanup: () => {}, onEvent,
+    file: bin, args, displayBin: bin, cwd, env, stdin, signal: spawnSignal, asAgent, stagedDir: null, onEvent,
+    cleanup: () => { if (roleFile) rmSync(roleFile, { force: true }); },
     stdoutErrorDetail: () => normalizer.finish().error || '',
     classify: (m) => classifyCodexError(m),
     spawnError: (err, pfx) => Object.assign(new Error(`${pfx}: ${err.message}`), { errorClass: /ENOENT|EINVAL/.test(String(err.code || err.message)) ? 'network' : null }),

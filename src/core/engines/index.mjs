@@ -6,7 +6,7 @@ import { runClaudeAdapter, claudeCapabilities } from './claude.mjs';
 import { runMock } from './mock.mjs';
 import { normalizingOnEvent } from './claude-events.mjs';
 import { classifyError } from '../recoverable-error.mjs';
-import { runCodexProcess, codexCapabilities, classifyCodexError, codexPreflight } from './codex.mjs';
+import { runCodexProcess, codexCapabilities, classifyCodexError, codexPreflight, unenforcedRules } from './codex.mjs';
 
 export { CAPABILITY_KEYS, CAPABILITY_FALLBACKS } from './capabilities.mjs';
 
@@ -34,7 +34,9 @@ const claudeAdapter = Object.freeze({ name: 'claude', capabilities: claudeCapabi
 // codex emits the normalized vocabulary itself (engines/codex.mjs). `preflight` is the
 // optional run-start check (the binary runs and is signed in); the Claude adapter has
 // its own (preflight.mjs).
-const codexAdapter = Object.freeze({ name: 'codex', capabilities: codexCapabilities, run: runCodexProcess, classifyError: classifyCodexError, preflight: codexPreflight });
+// `unenforcedRules(rules)`: the deny rules this engine cannot hold (the run gate refuses those unless allowed);
+// an engine without it holds every rule its `permissionRules` capability says it can.
+const codexAdapter = Object.freeze({ name: 'codex', capabilities: codexCapabilities, run: runCodexProcess, classifyError: classifyCodexError, preflight: codexPreflight, unenforcedRules });
 // The mock stands in for Claude in tests and smokes, so it declares Claude's map.
 const mockAdapter = Object.freeze({ name: 'mock', capabilities: claudeCapabilities, run: normalized(runMock), classifyError });
 

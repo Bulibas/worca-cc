@@ -51,7 +51,7 @@ import {
   scanStrayEntries, copyRunManifestTo, removeInjectedPaths, stripClaudeMdFence,
   RETAIN_REASONS,
 } from './run-manifest.mjs';
-import { assembleRunContext, renderContextAudit, MCP_GRANT_MODE, discoverProjectSettings } from './run-context.mjs';
+import { assembleRunContext, renderContextAudit, MCP_GRANT_MODE, discoverProjectSettings, skillsRelFor } from './run-context.mjs';
 import { createRunLogWriter, RUN_LOG_FILE, RUN_LOG_KIND } from './run-log.mjs';
 import {
   detectTools, detectToolsPerProject, runGraphifyUpdate, worktreeGraphInstruction,
@@ -77,6 +77,7 @@ import { SYNC_EXECUTION_ID } from '../shared/graph/constants.mjs';
 import { readPluginsLock, pluginCurrentDir } from './plugins-lock.mjs'; // §9.4 disabled-plugin hint
 import { classifyError, rateLimitHint, brokerHint, freeDailyHint } from './recoverable-error.mjs';
 import { CODEX_DEFAULT_MODEL, codexUnattachableMcp } from './engines/codex.mjs';
+import { hostGuardEnabled } from './host-guard.mjs';
 import { isNormalized } from './engines/events.mjs';
 import { createClaudeNormalizer } from './engines/claude-events.mjs';
 import { cachedFreeDailyCounts } from './openrouter-free.mjs';
@@ -178,6 +179,11 @@ function engineRefusal(name, why) {
 function ruleList(rules) {
   const all = Object.values(rules || {}).flat().filter((r) => typeof r === 'string');
   return all.slice(0, 3).join(', ') + (all.length > 3 ? ` (+${all.length - 3} more)` : '');
+}
+
+/** A list of rules for a log line: the first three, then how many more. */
+function ruleNames(list) {
+  return list.slice(0, 3).join(', ') + (list.length > 3 ? ` (+${list.length - 3} more)` : '');
 }
 
 /** Whether a permission-rules object carries any rule at all. */
@@ -1418,7 +1424,7 @@ export class RunHarness extends EventEmitter {
           // user's working tree.
           const candidates = this.isWorkspace ? [...this.workDirs.values()] : [this.workDir];
           const worktrees = candidates.filter((d) => d && d !== this.projectDir);
-          const injected = await injectSkills(resolvedSkills, { targets: worktrees });
+          const injected = await injectSkills(resolvedSkills, { targets: worktrees, rel: skillsRelFor(this.claude.engine) });
           if (injected.length) {
             await appendAudit(
               this.pipeline.dir,
@@ -2318,6 +2324,18 @@ export class RunHarness extends EventEmitter {
     if (caps.permissionRules === false && hasPermissionRules(projectRules)) {
       lines.push(`engine ${name}: the project's .claude/settings.json deny rules NOT enforced on ${name} (--allow-unguarded-engine): ${ruleList(projectRules)}`);
     }
+    if (caps.permissionRules !== false) {
+      // An engine that holds part of the rules: say which it holds and which it does not (those passed the
+      // gate only with --allow-unguarded-engine).
+      const held = (r) => (Array.isArray(r?.deny) ? r.deny : []).filter((x) => !this._engineUnenforced(r).includes(x));
+      const enforced = [...new Set([...held(this.guardrailPermissionRules), ...held(projectRules)])];
+      if (enforced.length) lines.push(`engine ${name}: deny rules enforced on ${name} as command rules: ${ruleNames(enforced)}`);
+      const gSkip = this._engineUnenforced(this.guardrailPermissionRules);
+      if (gSkip.length) lines.push(`engine ${name}: guardrail set "${this.guardrailsId}": rules NOT enforced on ${name} (--allow-unguarded-engine): ${ruleNames(gSkip)}`);
+      const pSkip = this._engineUnenforced(projectRules);
+      if (pSkip.length) lines.push(`engine ${name}: the project's .claude/settings.json deny rules NOT enforced on ${name} (--allow-unguarded-engine): ${ruleNames(pSkip)}`);
+      if (hostGuardEnabled()) lines.push(`engine ${name}: the host-guard hook does not run on ${name} (its preamble still does)`);
+    }
     for (const m of this._engineGateModels(nodes).filter((id) => engineOfModel(id, { projectDir: this.projectDir }) === 'claude')) {
       lines.push(name === 'codex'
         ? `engine ${name}: model "${m}" is a Claude model — the nodes that name it run on ${name}'s default model, ${CODEX_DEFAULT_MODEL}`
@@ -2347,14 +2365,37 @@ export class RunHarness extends EventEmitter {
     if (caps.permissionRules === false && hasPermissionRules(projectRules) && !allowed) {
       return `the project's .claude/settings.json denies ${ruleList(projectRules)}, which this engine cannot enforce — pass --allow-unguarded-engine to run it without them`;
     }
+    const gSkip = caps.permissionRules === false ? [] : this._engineUnenforced(rules);
+    if (gSkip.length && !allowed) {
+      return `guardrail set "${guardrailsId}" has permission rules this engine cannot enforce (${ruleNames(gSkip)}) — run it with the Permissive set, or pass --allow-unguarded-engine to run it without them`;
+    }
+    const pSkip = caps.permissionRules === false ? [] : this._engineUnenforced(projectRules);
+    if (pSkip.length && !allowed) {
+      return `the project's .claude/settings.json denies ${ruleNames(pSkip)}, which this engine cannot enforce — pass --allow-unguarded-engine to run it without them`;
+    }
     if (caps.mcpTools === false) {
       const n = nodes.find((nc) => Array.isArray(nc?.tools) && nc.tools.some((t) => String(t).startsWith('mcp__')));
       if (n) return `node "${n.key || n.nodeId}" needs MCP tools, which this engine cannot attach`;
     }
+    // A model routed to a custom endpoint or through the model bridge speaks the Anthropic API for Claude Code.
+    // A Claude model never runs on another engine anyway (_engineModel drops it, and the audit says so), so
+    // only a routed model this engine itself owns is refused.
     for (const m of this._engineGateModels(nodes)) {
-      if (modelHasBaseUrlRouting(m) || bridgedModelInfo(m)) return `model "${m}" is routed to a custom endpoint for Claude Code and cannot run on ${name}`;
+      if ((modelHasBaseUrlRouting(m) || bridgedModelInfo(m)) && engineOfModel(m, { projectDir: this.projectDir }) === name) {
+        return `model "${m}" is routed to a custom endpoint for Claude Code and cannot run on ${name}`;
+      }
     }
     return null;
+  }
+
+  /** The deny rules of `rules` this run's engine cannot hold: all of them on an engine without permission
+   *  rules, the adapter's answer on one that holds part (codex: command prefixes), none on Claude. */
+  _engineUnenforced(rules) {
+    const name = this.claude.engine || 'claude';
+    if (name === 'claude' || !hasPermissionRules(rules)) return [];
+    const adapter = getEngine(name);
+    if (adapter.capabilities.permissionRules === false) return Object.values(rules).flat().filter((r) => typeof r === 'string');
+    return typeof adapter.unenforcedRules === 'function' ? adapter.unenforcedRules(rules) : [];
   }
 
   /** The distinct models a run names: the run's own, then each node's. */
@@ -2636,6 +2677,7 @@ export class RunHarness extends EventEmitter {
       honorByKey: this.guardrailHonorByKey,
       agentIsolated: !!agentIdentity(),
       settingsScope: this._settingsScope(),
+      engine: this.claude.engine || 'claude',
       registry: async (taken) => (reg = await this._resolveMcp(taken)),
     });
     this.runContext = rc;
@@ -2894,7 +2936,7 @@ export class RunHarness extends EventEmitter {
    *  mounted scope. Depends on dirs + mount only (never on file contents), so one render per mount. */
   _refreshMemoryBlock() {
     if (!this.memory) { this.memoryBlock = ''; return; }
-    this.memoryBlock = renderMemoryBlock(this.memory.dirs.map((d) => ({ label: d.label, dir: join(this.memory.mount, d.rel) })));
+    this.memoryBlock = renderMemoryBlock(this.memory.dirs.map((d) => ({ label: d.label, dir: join(this.memory.mount, d.rel) })), { engine: this.claude.engine });
   }
 
   /** The `onError` every memory listing gets. A junk NAME is not an I/O failure — phrasing it

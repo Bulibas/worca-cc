@@ -30,7 +30,8 @@ afterEach(() => { if (prevMock === undefined) delete process.env.WORCA_MOCK; els
 
 const orch = (claude = {}) => createOrchestrator({ projectDir: '/tmp/gate-proj', claude: { mock: true, ...claude } });
 const withNodes = (o, nodes) => { o.resolved = { nodeCtx: nodes }; return o; };
-const RULES = { deny: ['Bash(curl:*)'] };
+const RULES = { deny: ['Bash(curl:*)', 'Read(.env*)'] };   // a command codex can hold, a path it cannot
+const CMD_RULES = { deny: ['Bash(curl:*)', 'Bash(git push)', 'WebSearch'] };
 
 test('an unknown engine fails at construction', () => {
   assert.throws(() => orch({ engine: 'codx' }), /unknown engine "codx"/);
@@ -47,16 +48,25 @@ test('claude (the default) passes the gate with nothing to say', () => {
 
 test('codex: every missing capability is one audit line with its fallback', () => {
   const lines = withNodes(orch({ engine: 'codex' }), {})._engineGate();
-  assert.deepEqual(lines.map((l) => l.split(':')[1].trim().split(' ')[1]).sort(),
-    ['allowedTools', 'hookTelemetry', 'permissionRules', 'skills', 'subagentSystemPrompt', 'subagents', 'turnBudget']);
-  assert.ok(lines.every((l) => /^engine codex: no \w+ — .{10,}$/.test(l)), lines.join('\n'));
+  const caps = lines.filter((l) => /^engine codex: no \w+ — /.test(l));
+  assert.deepEqual(caps.map((l) => l.split(':')[1].trim().split(' ')[1]).sort(), ['allowedTools', 'hookTelemetry', 'turnBudget']);
+  assert.ok(caps.every((l) => /^engine codex: no \w+ — .{10,}$/.test(l)), caps.join('\n'));
 });
 
 test('codex refuses a run whose guardrail set has permission rules it cannot enforce', () => {
   const o = withNodes(orch({ engine: 'codex' }), {});
   o.guardrailPermissionRules = RULES;
   o.guardrailsId = 'strict';
-  assert.throws(() => o._engineGate(), /engine codex: guardrail set "strict" has permission rules this engine cannot enforce/);
+  assert.throws(() => o._engineGate(), /engine codex: guardrail set "strict" has permission rules this engine cannot enforce \(Read\(\.env\*\)\)/);
+});
+
+test('codex runs a guardrail set whose deny rules are all commands: they become codex command rules, and the audit says so', () => {
+  const o = withNodes(orch({ engine: 'codex' }), {});
+  o.guardrailPermissionRules = CMD_RULES;
+  o.guardrailsId = 'cmds';
+  const lines = o._engineGate();
+  assert.ok(lines.includes('engine codex: deny rules enforced on codex as command rules: Bash(curl:*), Bash(git push), WebSearch'), lines.join('\n'));
+  assert.equal(lines.some((l) => /NOT enforced/.test(l)), false);
 });
 
 test('--allow-unguarded-engine runs it anyway and says so in the audit', () => {
@@ -64,7 +74,8 @@ test('--allow-unguarded-engine runs it anyway and says so in the audit', () => {
   o.guardrailPermissionRules = RULES;
   o.guardrailsId = 'strict';
   const lines = o._engineGate();
-  assert.ok(lines.some((l) => /guardrail set "strict": permission rules NOT enforced on codex \(--allow-unguarded-engine\)/.test(l)));
+  assert.ok(lines.includes('engine codex: guardrail set "strict": rules NOT enforced on codex (--allow-unguarded-engine): Read(.env*)'), lines.join('\n'));
+  assert.ok(lines.includes('engine codex: deny rules enforced on codex as command rules: Bash(curl:*)'));
 });
 
 test('codex runs a node that needs MCP tools: it attaches the run\'s servers', () => {
@@ -106,14 +117,16 @@ test('codex attaches a registry layer\'s stdio copies and refuses its remote one
   assert.equal(claude._engineMcpRefusal({ copies: [{ name: 'pg' }], servers: { pg: HTTP } }), null);
 });
 
-test('codex refuses a model routed to a custom endpoint (the model bridge included)', async () => {
+test('a Claude model routed to a custom endpoint is dropped on codex like any Claude model, not refused', async () => {
   const home = tmp();
   const prev = { HOME: process.env.HOME, ALLOW: process.env.WORCA_TEST_ALLOW_HOME_FALLBACK };
   process.env.HOME = home; process.env.WORCA_TEST_ALLOW_HOME_FALLBACK = '1';
   try {
     await addGlobalModel({ id: 'gate-onprem', env: { ANTHROPIC_BASE_URL: 'https://p' } });
     const o = withNodes(orch({ engine: 'codex' }), { n1: { key: 'planner', tools: [], model: 'gate-onprem' } });
-    assert.throws(() => o._engineGate(), /model "gate-onprem" is routed to a custom endpoint/);
+    const lines = o._engineGate();
+    assert.ok(lines.some((l) => /model "gate-onprem" is a Claude model — the nodes that name it run on codex's default model/.test(l)), lines.join('\n'));
+    assert.equal(o._engineModel('gate-onprem'), undefined);
   } finally {
     process.env.HOME = prev.HOME;
     if (prev.ALLOW === undefined) delete process.env.WORCA_TEST_ALLOW_HOME_FALLBACK; else process.env.WORCA_TEST_ALLOW_HOME_FALLBACK = prev.ALLOW;
@@ -163,10 +176,10 @@ test('the run title runs on the run\'s engine: codex gets no model, Claude keeps
   assert.equal(t({}).runModel, null);
 });
 
-test('the node ctx on codex: engine named, fan-out off (no grantable sub-agent tool)', () => {
+test('the node ctx on codex: engine named, fan-out on (codex\'s own spawn_agent, worca\'s investigator role)', () => {
   const o = orch({ engine: 'codex' });
   const c = o._engineNodeOpts({ fanOut: true });
-  assert.deepEqual(c, { engine: 'codex', subagents: false, fanOut: false });
+  assert.deepEqual(c, { engine: 'codex', subagents: true, fanOut: true });
   assert.deepEqual(orch()._engineNodeOpts({ fanOut: true }), { engine: 'claude', subagents: true, fanOut: true });
 });
 
@@ -334,11 +347,13 @@ test("the project's own .claude/settings.json deny rules refuse a codex run too,
   const o = mk({});
   o._engineProjectRules = await o._engineChecks(() => true);
   assert.deepEqual(o._engineProjectRules, { deny: ['Bash(rm:*)', 'Read(.env)'] }, 'deny only: allow is never lifted');
-  assert.throws(() => o._engineGate(), /the project's \.claude\/settings\.json denies Bash\(rm:\*\), Read\(\.env\), which this engine cannot enforce/);
+  assert.throws(() => o._engineGate(), /the project's \.claude\/settings\.json denies Read\(\.env\), which this engine cannot enforce/);
   assert.equal(await o._engineChecks(() => false), null, 'a set that does not honor project settings reads none');
   const allowed = mk({ allowUnguardedEngine: true });
   allowed._engineProjectRules = await allowed._engineChecks(() => true);
-  assert.ok(allowed._engineGate().some((l) => l === "engine codex: the project's .claude/settings.json deny rules NOT enforced on codex (--allow-unguarded-engine): Bash(rm:*), Read(.env)"));
+  const lines = allowed._engineGate();
+  assert.ok(lines.includes("engine codex: the project's .claude/settings.json deny rules NOT enforced on codex (--allow-unguarded-engine): Read(.env)"), lines.join('\n'));
+  assert.ok(lines.includes('engine codex: deny rules enforced on codex as command rules: Bash(rm:*)'));
 });
 
 test("a real (non-mock) codex run checks the engine's binary and sign-in before anything else", POSIX, async () => {
@@ -361,7 +376,7 @@ test('engineStartRefusal answers before a run exists, and says when the consent 
 
   const strict = make({ engine: 'codex' }, { guardrailsId: 'normal' });
   assert.deepEqual(await strict.engineStartRefusal(), {
-    error: 'engine codex: guardrail set "normal" has permission rules this engine cannot enforce — run it with the Permissive set, or pass --allow-unguarded-engine to run it without them',
+    error: 'engine codex: guardrail set "normal" has permission rules this engine cannot enforce (Read(.env*), Edit(.env*), Read(*.pem) (+13 more)) — run it with the Permissive set, or pass --allow-unguarded-engine to run it without them',
     overridable: true,
   });
   assert.equal(await make({ engine: 'codex', allowUnguardedEngine: true }, { guardrailsId: 'normal' }).engineStartRefusal(), null);

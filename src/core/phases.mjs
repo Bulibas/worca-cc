@@ -314,8 +314,9 @@ function relRepo(p) {
  * promised — it is inherited env and remains true. Single mode (both run-root modes)
  * and legacy workspace runs keep today's byte-identical sentence.
  */
-export function fanOutDirective(fanOut, { omitProjectAgents = false, subagentModel = '', endpointRouted = false, investigator = false } = {}) {
+export function fanOutDirective(fanOut, { omitProjectAgents = false, subagentModel = '', endpointRouted = false, investigator = false, engine = 'claude' } = {}) {
   if (!fanOut) return '';
+  if (engine && engine !== 'claude') return codexFanOutDirective();
   // Endpoint-routed: the usual "prefer a purpose-built agent" steering would
   // walk the agent straight into frontmatter-pinned definitions whose model the
   // custom endpoint cannot serve — swap the sentence AND the model block.
@@ -359,6 +360,29 @@ export function fanOutDirective(fanOut, { omitProjectAgents = false, subagentMod
     'Sub-agents are strictly READ-ONLY investigators: YOU write every artifact. Skip fan-out only for a ' +
     'trivial, single-file change.\n\n' +
     (endpointRouted ? sameEndpointSubagentDirective() : subagentModelDirective(subagentModel))
+  );
+}
+
+/**
+ * fanOutDirective on Codex: its own spawn_agent tool, and worca's investigator defined as the codex agent role
+ * `worca_investigator` (engines/codex.mjs codexInvestigatorRole: read-only instructions, the pinned model and
+ * effort, the memory pointers). No model block: the role carries the model. Skills come from `.agents/skills`,
+ * which codex lists for the agent itself. Pure + exported for testing.
+ */
+export function codexFanOutDirective() {
+  return (
+    '## Fan-out ENABLED — parallelize your research\n\n' +
+    'You can spawn sub-agents this run (`spawn_agent`, then `wait` for them). For any non-trivial task that ' +
+    'spans more than one file or area, DISPATCH parallel read-only research sub-agents NOW — one per distinct ' +
+    'area (e.g. UI vs. server vs. store vs. tests) — let them explore concurrently, then synthesize their ' +
+    'reports yourself. Do NOT investigate every area serially when the work splits into independent areas.\n\n' +
+    'Spawn EVERY sub-agent with `agent_type: "worca_investigator"` and WITHOUT forking your history — the operator ' +
+    'defined it for this run (read-only instructions, its model, and this run\'s memory pointers). Give each one a ' +
+    'self-contained task: the area, the question, and the directories to look in.\n\n' +
+    'Skills are available too: the skills listed for you (this run\'s `.agents/skills`) — read a skill\'s ' +
+    '`SKILL.md` and use any that fit (e.g. design, framework-pattern, knowledge-graph) instead of guessing conventions.\n\n' +
+    'Sub-agents are strictly READ-ONLY investigators: YOU write every artifact. Skip fan-out only for a ' +
+    'trivial, single-file change.\n\n'
   );
 }
 
@@ -855,7 +879,12 @@ export function taskHeader(ctx, title) {
   // project + root skills are COPIED into `<cwd>/.claude/skills` for the run (§5.7);
   // legacy delivers neither (skills.mjs copies bundle/plugin entries only), so the
   // legacy sentence stays exactly as today.
-  const skillsHint = detached
+  const onCodex = !!(ctx.node?.engine && ctx.node.engine !== 'claude');
+  const skillsHint = onCodex
+    ? `Project, root and your personal skills are mounted at .agents/skills for this run and are listed for ` +
+      `you — read a skill's SKILL.md and use any that fit (e.g. design, framework-pattern, or knowledge-graph ` +
+      `skills) rather than guessing conventions.\n\n`
+    : detached
     ? `Project and root skills are mounted at .claude/skills for this run (in addition to your ` +
       `personal ~/.claude/skills) and are available via the Skill tool — invoke any that fit ` +
       `(e.g. design, framework-pattern, or knowledge-graph skills) rather than guessing ` +
@@ -964,7 +993,7 @@ export function buildClarifyPrompt(ctx, opts = {}) {
     'pad, and never split one decision. For low-impact details, pick a sensible default rather ' +
     'than asking. If you have no material open questions, write { "questions": [] } to that ' +
     'same path.\n\n' +
-    fanOutDirective(ctxFanOut(ctx), { omitProjectAgents: isDetachedWorkspace(ctx), subagentModel: ctxSubagentModel(ctx), endpointRouted: ctxEndpointRouted(ctx) }) +
+    fanOutDirective(ctxFanOut(ctx), { omitProjectAgents: isDetachedWorkspace(ctx), subagentModel: ctxSubagentModel(ctx), endpointRouted: ctxEndpointRouted(ctx), engine: ctx?.node?.engine || ctx?.engine }) +
     `Write the clarify JSON to: ${outPath}\n\n` +
     answered +
     mockMarkers({

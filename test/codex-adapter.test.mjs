@@ -190,7 +190,7 @@ test('parseLoginStatus: logged in / not / unknown', () => {
 test('capabilities: the design §10.3 map', () => {
   assert.deepEqual(Object.keys(codexCapabilities).sort(), [...CAPABILITY_KEYS].sort());
   const off = Object.entries(codexCapabilities).filter(([, v]) => v === false).map(([k]) => k).sort();
-  assert.deepEqual(off, ['allowedTools', 'hookTelemetry', 'permissionRules', 'skills', 'subagentSystemPrompt', 'subagents', 'turnBudget']);
+  assert.deepEqual(off, ['allowedTools', 'hookTelemetry', 'turnBudget']);
 });
 
 // ── spawn (fake codex) ────────────────────────────────────────────────────────
