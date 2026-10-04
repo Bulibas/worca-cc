@@ -150,9 +150,11 @@ jobs:
           npm pack --silent --pack-destination docker/.pack
           echo "tarball=$(ls docker/.pack/worca-app-*.tgz)" >> "$GITHUB_OUTPUT"
           echo "claude_code=$(cat docker/CLAUDE_CODE_VERSION)" >> "$GITHUB_OUTPUT"
-          # ISO week: rebuilds the cached apt layer weekly so new Debian security
+          # The UTC date: rebuilds the cached apt layer daily so new Debian security
           # fixes land (the layer text never changes, so the gha cache kept it forever).
-          echo "apt_refresh=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+          # Weekly was too slow: a fix published mid-week failed the Trivy scan of
+          # every build until the next Monday.
+          echo "apt_refresh=$(date -u +%F)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 

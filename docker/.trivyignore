@@ -6,7 +6,7 @@
 # 2026-10-01 bookworm-security serves deb12u4 for arm64 only — amd64 (the CI
 # and published image arch) still gets deb12u3, so nothing installable fixes
 # them yet. Remove these once `apt-cache policy libexpat1` on amd64 shows u4;
-# the weekly APT_REFRESH rebuild then picks it up.
+# the daily APT_REFRESH rebuild then picks it up.
 CVE-2024-28757
 CVE-2025-59375
 CVE-2026-25210
