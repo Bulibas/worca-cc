@@ -380,13 +380,14 @@ On a Codex run the helper jobs (titles, the run overview, the PR description, th
 
 - Codex takes stdio servers only. A remote (HTTP/SSE) server from the MCP registry refuses the run; one from a project's `.mcp.json` is skipped with a warning.
 - Servers Claude Code loads on its own (user scope, plugins) are not attached on Codex, and the run says which.
-- Codex gives all of a run's servers one shared environment, so two servers may not declare the same variable with different values.
+- Codex gives all of a run's servers one shared environment. Copies of a registry server, such as two GitHub copies with their own `GITHUB_TOKEN`, each get their own variable names there, so they attach side by side. Two other servers may not declare the same variable with different values.
 
-**Guardrails on Codex.** Codex holds the command rules of a guardrail set, but not its file rules.
+**Guardrails on Codex.** Codex holds a guardrail set's command rules only in part, and not its file rules.
 
-- A deny rule for a command, such as `Bash(git push:*)` or `Bash(curl)`, becomes a Codex command rule. Codex blocks the command when it is run directly, through its full path, or inside a `&&` chain. Like Claude Code's prefix rules, it does not catch the command inside `bash -c` or `env`.
-- A bare `Bash` rule turns Codex's shell off, and `WebSearch` turns its web search off.
-- File rules (`Read(…)`, `Edit(…)`, and the protected paths of the Normal and Secure sets) and MCP tool rules cannot be held on Codex. A run whose set has any of them needs **Allow unguarded** (`--allow-unguarded-engine`). The run log lists the rules that are held and the ones that are not.
+- A deny rule for a command, such as `Bash(git push:*)` or `Bash(curl)`, becomes a Codex command rule. These rules catch a command run directly, by full path or in an `&&` chain, but not one with a redirect, a substitution or a variable. Codex checks the commands of a shell line only when the line is plain words. Add `2>&1`, `> file`, `$(…)`, `$VAR` or `VAR=x` and the rule no longer sees the command, so `curl -sI https://example.com 2>&1` runs under a `Bash(curl)` rule. Nor do they catch a command inside `bash -c` or `env`.
+- Because of that, a run with command rules needs **Allow unguarded** (`--allow-unguarded-engine`), the same as a run with rules Codex cannot hold at all. The rules still apply to the run as a partial guard. This applies to the set's rules and to the deny rules in the project's own `.claude/settings.json`.
+- A bare `Bash` rule turns Codex's shell off, and `WebSearch` turns its web search off. These hold fully.
+- File rules (`Read(…)`, `Edit(…)`, and the protected paths of the Normal and Secure sets) and MCP tool rules cannot be held on Codex. A run whose set has any of them needs **Allow unguarded** too. The run log lists the rules that are held fully, the ones held only in part, and the ones that are not held.
 - worca keeps the command rules in a Codex home of its own under `~/.worca-cc/engines/codex/homes/`, one per rule set, linked to your Codex sign-in (`auth.json`). If you sign in to Codex some other way, a guarded run cannot find your sign-in.
 - The host guard's kill-check hook does not run on Codex; its instructions to the agent still apply. (Codex hooks run only after you review and trust them in Codex itself.)
 

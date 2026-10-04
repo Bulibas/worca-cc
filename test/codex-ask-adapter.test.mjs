@@ -157,6 +157,25 @@ test('runCodexProcess: a pipeline spawn attaches its stdio servers, fills ${VAR}
   assert.equal(JSON.stringify(events).includes('tok-SECRET'), false, 'so is every event');
 });
 
+test('runCodexProcess: two registry copies of one server (one env name, two values) both attach, each reading its own', POSIX, async () => {
+  const dir = tmp();
+  const fake = fakeCodex(dir, 'ok');
+  const cfg = join(dir, 'mcp.json');
+  const copy = (name, ref) => ({ type: 'stdio', command: process.execPath, args: ['/w/src/core/mcp/launch.mjs', '--copy', name, '--env', 'GITHUB_TOKEN', '--', 'npx', 'gh'],
+    env: { MCPCHILD_GITHUB_TOKEN: `\${${ref}}` } });
+  writeFileSync(cfg, JSON.stringify({ mcpServers: { github_work: copy('github_work', 'MCPSECRET_W'), github_personal: copy('github_personal', 'MCPSECRET_P') } }));
+  await runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', mcpConfigPath: cfg, spawnEnv: { MCPSECRET_W: 'tok-work', MCPSECRET_P: 'tok-personal' },
+    redactValues: ['tok-work', 'tok-personal'], usageDir: dir });
+  const args = fake.args(); const env = fake.env();
+  const prefixOf = (name) => { const a = JSON.parse(args.find((x) => x.startsWith(`mcp_servers.${name}.args=`)).split('=').slice(1).join('=')); return a[a.indexOf('--env-prefix') + 1]; };
+  const w = prefixOf('github_work'); const p = prefixOf('github_personal');
+  assert.notEqual(w, p);
+  assert.equal(env[`${w}GITHUB_TOKEN`], 'tok-work');
+  assert.equal(env[`${p}GITHUB_TOKEN`], 'tok-personal');
+  assert.ok(args.includes(`mcp_servers.github_work.env_vars=["${w}GITHUB_TOKEN"`) || args.some((x) => x.startsWith(`mcp_servers.github_work.env_vars=["${w}GITHUB_TOKEN"`)));
+  assert.equal(args.join(' ').includes('tok-'), false, 'values never ride argv');
+});
+
 test('codexMcpOverrides: one server never gets another\'s env, and a clash in the shared env is refused', () => {
   const two = { a: { command: 'x', env: { A_KEY: '1' } }, b: { command: 'y', env: { B_KEY: '2' } } };
   const { args } = codexMcpOverrides(two, { passEnv: ['PATH', 'A_KEY', 'B_KEY'] });

@@ -76,7 +76,7 @@ import { syncBaseForRun, ensureLocalBranch, fetchRemote, isSafeBranchName, runSy
 import { SYNC_EXECUTION_ID } from '../shared/graph/constants.mjs';
 import { readPluginsLock, pluginCurrentDir } from './plugins-lock.mjs'; // §9.4 disabled-plugin hint
 import { classifyError, rateLimitHint, brokerHint, freeDailyHint } from './recoverable-error.mjs';
-import { CODEX_DEFAULT_MODEL, codexUnattachableMcp } from './engines/codex.mjs';
+import { CODEX_DEFAULT_MODEL, CODEX_COMMAND_RULE_REACH, codexUnattachableMcp } from './engines/codex.mjs';
 import { hasCodexEndpoint } from './engines/codex-endpoint.mjs';
 import { hostGuardEnabled } from './host-guard.mjs';
 import { isNormalized } from './engines/events.mjs';
@@ -2326,11 +2326,13 @@ export class RunHarness extends EventEmitter {
       lines.push(`engine ${name}: the project's .claude/settings.json deny rules NOT enforced on ${name} (--allow-unguarded-engine): ${ruleList(projectRules)}`);
     }
     if (caps.permissionRules !== false) {
-      // An engine that holds part of the rules: say which it holds and which it does not (those passed the
-      // gate only with --allow-unguarded-engine).
-      const held = (r) => (Array.isArray(r?.deny) ? r.deny : []).filter((x) => !this._engineUnenforced(r).includes(x));
-      const enforced = [...new Set([...held(this.guardrailPermissionRules), ...held(projectRules)])];
-      if (enforced.length) lines.push(`engine ${name}: deny rules enforced on ${name} as command rules: ${ruleNames(enforced)}`);
+      // An engine that holds part of the rules: say which it holds, which it holds only in part and which it does
+      // not (those two passed the gate only with --allow-unguarded-engine).
+      const both = (f) => [...new Set([...f(this.guardrailPermissionRules), ...f(projectRules)])];
+      const partial = both((r) => this._enginePartial(r));
+      const enforced = both((r) => (Array.isArray(r?.deny) ? r.deny : []).filter((x) => !this._engineUnenforced(r).includes(x) && !this._enginePartial(r).includes(x)));
+      if (enforced.length) lines.push(`engine ${name}: deny rules enforced on ${name}: ${ruleNames(enforced)}`);
+      if (partial.length) lines.push(`engine ${name}: deny rules held on ${name} only in part, as command rules — ${CODEX_COMMAND_RULE_REACH} (--allow-unguarded-engine): ${ruleNames(partial)}`);
       const gSkip = this._engineUnenforced(this.guardrailPermissionRules);
       if (gSkip.length) lines.push(`engine ${name}: guardrail set "${this.guardrailsId}": rules NOT enforced on ${name} (--allow-unguarded-engine): ${ruleNames(gSkip)}`);
       const pSkip = this._engineUnenforced(projectRules);
@@ -2374,6 +2376,15 @@ export class RunHarness extends EventEmitter {
     if (pSkip.length && !allowed) {
       return `the project's .claude/settings.json denies ${ruleNames(pSkip)}, which this engine cannot enforce — pass --allow-unguarded-engine to run it without them`;
     }
+    // Command rules hold only in part (CODEX_COMMAND_RULE_REACH): running on them is a choice, like running without a rule.
+    const gPart = caps.permissionRules === false ? [] : this._enginePartial(rules);
+    if (gPart.length && !allowed) {
+      return `guardrail set "${guardrailsId}" has command rules this engine holds only in part (${ruleNames(gPart)}): ${CODEX_COMMAND_RULE_REACH} — run it with the Permissive set, or pass --allow-unguarded-engine to run it with them as a partial guard`;
+    }
+    const pPart = caps.permissionRules === false ? [] : this._enginePartial(projectRules);
+    if (pPart.length && !allowed) {
+      return `the project's .claude/settings.json denies ${ruleNames(pPart)}, which this engine holds only in part: ${CODEX_COMMAND_RULE_REACH} — pass --allow-unguarded-engine to run it with them as a partial guard`;
+    }
     if (caps.mcpTools === false) {
       const n = nodes.find((nc) => Array.isArray(nc?.tools) && nc.tools.some((t) => String(t).startsWith('mcp__')));
       if (n) return `node "${n.key || n.nodeId}" needs MCP tools, which this engine cannot attach`;
@@ -2399,6 +2410,14 @@ export class RunHarness extends EventEmitter {
     const adapter = getEngine(name);
     if (adapter.capabilities.permissionRules === false) return Object.values(rules).flat().filter((r) => typeof r === 'string');
     return typeof adapter.unenforcedRules === 'function' ? adapter.unenforcedRules(rules) : [];
+  }
+
+  /** The deny rules of `rules` this run's engine holds only in part (codex: command rules, CODEX_COMMAND_RULE_REACH). */
+  _enginePartial(rules) {
+    const name = this.claude.engine || 'claude';
+    if (name === 'claude' || !hasPermissionRules(rules)) return [];
+    const adapter = getEngine(name);
+    return adapter.capabilities.permissionRules !== false && typeof adapter.partialRules === 'function' ? adapter.partialRules(rules) : [];
   }
 
   /** The distinct models a run names: the run's own, then each node's. */
@@ -2603,6 +2622,16 @@ export class RunHarness extends EventEmitter {
    *  (the gate says so at run start). */
   _engineModel(model) {
     return modelForEngine(model, this.claude.engine || 'claude', { projectDir: this.projectDir });
+  }
+
+  /** The permission rules a node's spawn carries. Claude Code reads each checkout's .claude/settings.json itself;
+   *  another engine does not, so there the members' own deny rules (_engineChecks) join the guardrail set's — on a
+   *  workspace run the run context has merged them already, on a single-project or legacy run nothing else does. */
+  _spawnPermissionRules() {
+    const rules = (this.claude.engine || 'claude') === 'claude'
+      ? this.guardrailPermissionRules
+      : mergePermissionRules(this.guardrailPermissionRules, this._engineProjectRules);
+    return rules || undefined;
   }
 
   _nodeModelPair(nc) {

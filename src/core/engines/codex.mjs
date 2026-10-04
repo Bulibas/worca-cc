@@ -30,6 +30,7 @@ import { strongestClass } from '../recoverable-error.mjs';
 import { ARGV_INLINE_LIMIT } from './claude.mjs';
 import { CODEX_PRICES } from '../list-prices.mjs';
 import { codexEndpointSpawn, findCodexEndpointEntry } from './codex-endpoint.mjs';
+import { scopeLauncherEnv } from '../mcp/launch.mjs';
 
 export const CODEX_DEFAULT_BIN = process.env.WORCA_CODEX_BIN || 'codex';
 
@@ -87,17 +88,23 @@ function bashPrefix(rule) {
   return body.split(/\s+/);
 }
 
+/** How far a codex command rule reaches (plans/harness-bridge-design.md §10.3; verified on codex-cli 0.146). codex
+ *  splits a shell script into commands only when it is plain words: a redirect, a `$(…)`, a `$VAR` or a `VAR=x cmd`
+ *  makes it match the whole `bash -lc …` argv instead, so the rule never sees the command. The gate and the run log
+ *  say so in these words. */
+export const CODEX_COMMAND_RULE_REACH = 'they catch a command run directly, by full path or in an && chain, but not one with a redirect, a substitution or a variable';
+
 /**
  * What codex can hold of a run's permission rules. Only DENY rules are worca policy (allow / ask are never
- * lifted, and codex exec never asks). A `Bash(cmd…)` prefix becomes a codex command rule (decision forbidden):
- * codex checks it on the command itself, an absolute path to it and each command of a `&&` chain — like
- * Claude Code's prefix rules, a command run inside `bash -c` or `env` is not checked. A bare `Bash` turns the
- * shell off; `WebSearch` turns codex's web search off; `WebFetch` has no codex tool to deny. Path rules
- * (`Read(…)`, `Edit(…)`, `Write(…)`), MCP tool rules and globs cannot be held: they are `unenforced`.
- * @returns {{prefixes:string[][], shellOff:boolean, webSearchOff:boolean, enforced:string[], unenforced:string[]}}
+ * lifted, and codex exec never asks). A `Bash(cmd…)` prefix becomes a codex command rule (decision forbidden),
+ * which is only a PARTIAL guard (CODEX_COMMAND_RULE_REACH): such rules are `partial`, and the run gate treats
+ * them like the rules codex cannot hold (they need --allow-unguarded-engine) while the spawn still writes them.
+ * A bare `Bash` turns the shell off; `WebSearch` turns codex's web search off; `WebFetch` has no codex tool to
+ * deny. Path rules (`Read(…)`, `Edit(…)`, `Write(…)`), MCP tool rules and globs cannot be held: they are `unenforced`.
+ * @returns {{prefixes:string[][], shellOff:boolean, webSearchOff:boolean, enforced:string[], partial:string[], unenforced:string[]}}
  */
 export function codexRulePlan(permissionRules) {
-  const out = { prefixes: [], shellOff: false, webSearchOff: false, enforced: [], unenforced: [] };
+  const out = { prefixes: [], shellOff: false, webSearchOff: false, enforced: [], partial: [], unenforced: [] };
   const deny = Array.isArray(permissionRules?.deny) ? permissionRules.deny : [];
   for (const raw of deny) {
     const rule = String(raw).trim();
@@ -108,7 +115,7 @@ export function codexRulePlan(permissionRules) {
     const prefix = bashPrefix(rule);
     if (prefix) {
       if (!out.prefixes.some((p) => p.join(' ') === prefix.join(' '))) out.prefixes.push(prefix);
-      out.enforced.push(rule);
+      out.partial.push(rule);
     } else out.unenforced.push(rule);
   }
   return out;
@@ -116,6 +123,9 @@ export function codexRulePlan(permissionRules) {
 
 /** The deny rules codex cannot hold (the run gate's question). */
 export function unenforcedRules(permissionRules) { return codexRulePlan(permissionRules).unenforced; }
+
+/** The deny rules codex holds only in part, as command rules (CODEX_COMMAND_RULE_REACH). */
+export function partialRules(permissionRules) { return codexRulePlan(permissionRules).partial; }
 
 /** The codex execpolicy file for `prefixes` (Starlark; a JSON string is a valid Starlark string). */
 export function codexRulesFile(prefixes) {
@@ -156,7 +166,7 @@ const DEFAULT_INVESTIGATOR_PROMPT = 'You are a read-only investigator dispatched
  * model and effort; a Claude model or effort codex cannot run is dropped), plus the memory block, which
  * Claude's sub-agents get through --append-subagent-system-prompt. codex roles inherit the parent's sandbox,
  * so read-only is the role's instruction, as it is for Claude's investigator (which keeps Bash).
- * @returns {{description:string, toml:string}}
+ * @returns {{description:string, toml:string, model:string|null}} `model`: the role's own, null when it inherits the parent's
  */
 export function codexInvestigatorRole({ agents, subagentSystemPrompt, inheritModel = false } = {}) {
   const def = agents && typeof agents === 'object' ? Object.values(agents)[0] : null;
@@ -164,11 +174,12 @@ export function codexInvestigatorRole({ agents, subagentSystemPrompt, inheritMod
     typeof subagentSystemPrompt === 'string' ? subagentSystemPrompt.trim() : ''].filter(Boolean).join('\n\n');
   const lines = [`developer_instructions = ${tomlString(prompt)}`];
   // On a custom endpoint the role inherits the parent's model with its provider: a built-in id would go to the endpoint.
-  if (!inheritModel && codexModelPriced(def?.model) && def?.model) lines.push(`model = ${tomlString(def.model)}`);
+  const model = !inheritModel && codexModelPriced(def?.model) && def?.model ? def.model : null;
+  if (model) lines.push(`model = ${tomlString(model)}`);
   const effort = def?.effort === 'max' ? 'xhigh' : def?.effort;
   if (CODEX_EFFORTS.includes(effort)) lines.push(`model_reasoning_effort = ${tomlString(effort)}`);
   return { description: typeof def?.description === 'string' && def.description ? def.description : 'Read-only investigator for one area; reports its findings to the agent that dispatched it.',
-    toml: `${lines.join('\n')}\n` };
+    toml: `${lines.join('\n')}\n`, model };
 }   // the Ask turn's own 30-minute clock bounds it (propose_workflow classifies, test_script runs)
 const MCP_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const ENV_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
@@ -351,9 +362,10 @@ const text = (v) => (typeof v === 'string' ? v : '');
  * is only a warning.
  * `unpriced`: the model runs on a custom endpoint, so no list price applies (cost stays unknown here;
  * worca's per-model price override still applies on top, config.mjs#resolveModelCost).
- * @param {{model?:string, priorUsage?:object|null, unpriced?:boolean}} [o]
+ * `subagent`: the agent role and model this spawn's sub-agents run as (a fan-out's investigator role), for their rows.
+ * @param {{model?:string, priorUsage?:object|null, unpriced?:boolean, subagent?:{type?:string|null, model?:string|null}}} [o]
  */
-export function createCodexNormalizer({ model, priorUsage = null, unpriced = false } = {}) {
+export function createCodexNormalizer({ model, priorUsage = null, unpriced = false, subagent = null } = {}) {
   const texts = [];
   const collab = new Set();
   const startedTools = new Set();
@@ -362,13 +374,22 @@ export function createCodexNormalizer({ model, priorUsage = null, unpriced = fal
   let turnCompleted = false;
   let lastUsage = priorUsage ? { ...ZERO_USAGE, ...priorUsage } : null;
 
+  // A collab_tool_call carries little on codex-cli 0.146: `exec --json` streams only the parent's `wait` on its
+  // sub-agents (test/fixtures/codex/collab-wait.jsonl: no prompt, no receivers, no agent type), never the
+  // spawn_agent call. The row is labelled from what the item has (its prompt, else its tool), and typed and
+  // modelled from the role the spawn defined (codexInvestigatorRole), else the parent's model.
   function collabEvents(item, completed) {
     const out = [];
     if (!collab.has(item.id)) {
       collab.add(item.id);
-      const prompt = text(item.prompt) || undefined;
-      const agents = Array.isArray(item.receiver_agents) ? item.receiver_agents.filter(Boolean).join(',') : '';
-      out.push({ type: 'subagent', event: 'spawn', toolUseId: item.id, label: prompt, description: prompt, ...(agents ? { subagentType: agents } : {}) });
+      const prompt = text(item.prompt);
+      const tool = text(item.tool);
+      const label = prompt || (tool === 'wait' || tool === 'wait_agent' ? 'Codex sub-agents' : `Codex sub-agents: ${tool.replace(/_/g, ' ') || 'call'}`);
+      const named = text(item.agent_type) || (Array.isArray(item.receiver_agents) ? item.receiver_agents.filter(Boolean).join(',') : '');
+      const type = named || subagent?.type || null;
+      const runModel = subagent?.model || model || null;
+      out.push({ type: 'subagent', event: 'spawn', toolUseId: item.id, label, description: prompt || label,
+        ...(type ? { subagentType: type } : {}), ...(runModel ? { model: runModel } : {}) });
     }
     if (completed) {
       const states = Array.isArray(item.agents_states) ? item.agents_states : Object.values(item.agents_states || {});
@@ -602,10 +623,15 @@ export async function runCodexProcess({
     // `${VAR}` references expand from what Claude Code would expand them from: this spawn's env plus the run's spawn env
     // (the registry copies' MCPSECRET_* values), which reaches the servers only through those references.
     const from = composeSpawnEnv({ ...envOpts, runEnv: cleanRunEnv(runSpawnEnv) }).env;
-    mcpServers = expandMcpEnvRefs(Object.fromEntries(Object.entries(all).filter(([n]) => !unattachable.has(n))), from);
+    // Two registry copies of one server would share a launcher env name in codex's one env: each copy reads its own.
+    mcpServers = expandMcpEnvRefs(Object.fromEntries(Object.entries(all).filter(([n]) => !unattachable.has(n)).map(([n, srv]) => [n, scopeLauncherEnv(srv)])), from);
   }
   const serverEnv = codexMcpOverrides(mcpServers).env;
-  const normalizer = createCodexNormalizer({ model, priorUsage: thread ? loadUsage(usageDir, thread) : null, unpriced: !!endpoint });
+  // Fan-out (the runner granted the sub-agent tool): worca's investigator becomes a codex agent role for this call.
+  const role = Array.isArray(allowedTools) && allowedTools.some((t) => t === 'Agent' || t === 'Task') && !askLockdown
+    ? codexInvestigatorRole({ agents, subagentSystemPrompt: appendSubagentSystemPrompt, inheritModel: !!endpoint }) : null;
+  const normalizer = createCodexNormalizer({ model, priorUsage: thread ? loadUsage(usageDir, thread) : null, unpriced: !!endpoint,
+    subagent: role ? { type: CODEX_INVESTIGATOR_ROLE, model: role.model } : null });
   const { env } = composeSpawnEnv({ ...envOpts, ...(Object.keys(serverEnv).length ? { runEnv: serverEnv } : {}) });
   // Guardrails: the deny rules codex can hold (codexRulePlan). Command rules live in a worca-managed CODEX_HOME.
   const plan = codexRulePlan(permissionRules);
@@ -613,10 +639,8 @@ export async function runCodexProcess({
   const extra = [];
   if (plan.shellOff && sandbox !== 'read-only' && !askLockdown) extra.push(...CODEX_SHELL_OFF);
   if (plan.webSearchOff) extra.push('-c', 'web_search="disabled"');
-  // Fan-out (the runner granted the sub-agent tool): worca's investigator becomes a codex agent role for this call.
   let roleFile = null;
-  if (Array.isArray(allowedTools) && allowedTools.some((t) => t === 'Agent' || t === 'Task') && !askLockdown) {
-    const role = codexInvestigatorRole({ agents, subagentSystemPrompt: appendSubagentSystemPrompt, inheritModel: !!endpoint });
+  if (role) {
     try {
       const dir = join(worcaHome(), 'tmp', 'codex-roles');
       mkdirSync(dir, { recursive: true });

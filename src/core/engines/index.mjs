@@ -6,7 +6,7 @@ import { runClaudeAdapter, claudeCapabilities } from './claude.mjs';
 import { runMock } from './mock.mjs';
 import { normalizingOnEvent } from './claude-events.mjs';
 import { classifyError } from '../recoverable-error.mjs';
-import { runCodexProcess, codexCapabilities, classifyCodexError, codexPreflight, unenforcedRules } from './codex.mjs';
+import { runCodexProcess, codexCapabilities, classifyCodexError, codexPreflight, unenforcedRules, partialRules } from './codex.mjs';
 
 export { CAPABILITY_KEYS, CAPABILITY_FALLBACKS } from './capabilities.mjs';
 
@@ -36,7 +36,9 @@ const claudeAdapter = Object.freeze({ name: 'claude', capabilities: claudeCapabi
 // its own (preflight.mjs).
 // `unenforcedRules(rules)`: the deny rules this engine cannot hold (the run gate refuses those unless allowed);
 // an engine without it holds every rule its `permissionRules` capability says it can.
-const codexAdapter = Object.freeze({ name: 'codex', capabilities: codexCapabilities, run: runCodexProcess, classifyError: classifyCodexError, preflight: codexPreflight, unenforcedRules });
+// `partialRules(rules)`: the deny rules it holds only in part (codex: command rules); the gate refuses those
+// unless allowed too, and the spawn still applies them.
+const codexAdapter = Object.freeze({ name: 'codex', capabilities: codexCapabilities, run: runCodexProcess, classifyError: classifyCodexError, preflight: codexPreflight, unenforcedRules, partialRules });
 // The mock stands in for Claude in tests and smokes, so it declares Claude's map.
 const mockAdapter = Object.freeze({ name: 'mock', capabilities: claudeCapabilities, run: normalized(runMock), classifyError });
 

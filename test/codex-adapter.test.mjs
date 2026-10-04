@@ -142,6 +142,25 @@ test('collab_tool_call items are flat sub-agent spawn and finish, never tools', 
   assert.deepEqual(failed.map((e) => e.event), ['spawn', 'error']);
 });
 
+test('a real fan-out stream (collab-wait.jsonl): the bare wait item still gets a label, the role\'s type and a model', () => {
+  // codex-cli 0.146 streams only the parent's `wait`: no prompt, no receivers, no agent type.
+  const { events } = replay('collab-wait.jsonl', { model: 'gpt-5.6-sol', subagent: { type: 'worca_investigator', model: null } });
+  const sub = events.filter((e) => e.type === 'subagent');
+  assert.deepEqual(sub, [
+    { type: 'subagent', event: 'spawn', toolUseId: 'item_0', label: 'Codex sub-agents', description: 'Codex sub-agents', subagentType: 'worca_investigator', model: 'gpt-5.6-sol' },
+    { type: 'subagent', event: 'finish', toolUseId: 'item_0' },
+  ]);
+  // The role's own model wins over the parent's; no role: the parent's model, no type.
+  const own = replay('collab-wait.jsonl', { model: 'gpt-5.6-sol', subagent: { type: 'worca_investigator', model: 'gpt-5.6-luna' } }).events.find((e) => e.type === 'subagent');
+  assert.equal(own.model, 'gpt-5.6-luna');
+  const bare = replay('collab-wait.jsonl', { model: 'gpt-5.6-sol' }).events.find((e) => e.type === 'subagent');
+  assert.equal(bare.subagentType, undefined);
+  assert.equal(bare.model, 'gpt-5.6-sol');
+  // Another collab tool names itself.
+  const msg = createCodexNormalizer().push({ type: 'item.started', item: { id: 'c9', type: 'collab_tool_call', tool: 'send_message', prompt: null } });
+  assert.equal(msg[0].label, 'Codex sub-agents: send message');
+});
+
 test('file_change and mcp_tool_call items become tool + toolResult', () => {
   const n = createCodexNormalizer();
   const fc = n.push({ type: 'item.completed', item: { id: 'f1', type: 'file_change', status: 'completed', changes: [{ path: '/w/a.js', kind: 'update' }] } });

@@ -60,13 +60,24 @@ test('codex refuses a run whose guardrail set has permission rules it cannot enf
   assert.throws(() => o._engineGate(), /engine codex: guardrail set "strict" has permission rules this engine cannot enforce \(Read\(\.env\*\)\)/);
 });
 
-test('codex runs a guardrail set whose deny rules are all commands: they become codex command rules, and the audit says so', () => {
+const REACH = 'they catch a command run directly, by full path or in an && chain, but not one with a redirect, a substitution or a variable';
+
+test('codex holds command rules only in part: a set of them needs --allow-unguarded-engine, then runs on them and says how far they reach', () => {
   const o = withNodes(orch({ engine: 'codex' }), {});
   o.guardrailPermissionRules = CMD_RULES;
   o.guardrailsId = 'cmds';
-  const lines = o._engineGate();
-  assert.ok(lines.includes('engine codex: deny rules enforced on codex as command rules: Bash(curl:*), Bash(git push), WebSearch'), lines.join('\n'));
+  assert.throws(() => o._engineGate(), new RegExp(`guardrail set "cmds" has command rules this engine holds only in part \\(Bash\\(curl:\\*\\), Bash\\(git push\\)\\): ${REACH.replace(/&/g, '&')} — run it with the Permissive set, or pass --allow-unguarded-engine to run it with them as a partial guard`));
+  const allowed = withNodes(orch({ engine: 'codex', allowUnguardedEngine: true }), {});
+  allowed.guardrailPermissionRules = CMD_RULES;
+  allowed.guardrailsId = 'cmds';
+  const lines = allowed._engineGate();
+  assert.ok(lines.includes('engine codex: deny rules enforced on codex: WebSearch'), lines.join('\n'));
+  assert.ok(lines.includes(`engine codex: deny rules held on codex only in part, as command rules — ${REACH} (--allow-unguarded-engine): Bash(curl:*), Bash(git push)`), lines.join('\n'));
   assert.equal(lines.some((l) => /NOT enforced/.test(l)), false);
+  // A set that only turns the shell or web search off is fully held: no consent needed.
+  const off = withNodes(orch({ engine: 'codex' }), {});
+  off.guardrailPermissionRules = { deny: ['Bash', 'WebSearch'] };
+  assert.deepEqual(off._engineGate().filter((l) => /deny rules/.test(l)), ['engine codex: deny rules enforced on codex: Bash, WebSearch']);
 });
 
 test('--allow-unguarded-engine runs it anyway and says so in the audit', () => {
@@ -75,7 +86,7 @@ test('--allow-unguarded-engine runs it anyway and says so in the audit', () => {
   o.guardrailsId = 'strict';
   const lines = o._engineGate();
   assert.ok(lines.includes('engine codex: guardrail set "strict": rules NOT enforced on codex (--allow-unguarded-engine): Read(.env*)'), lines.join('\n'));
-  assert.ok(lines.includes('engine codex: deny rules enforced on codex as command rules: Bash(curl:*)'));
+  assert.ok(lines.includes(`engine codex: deny rules held on codex only in part, as command rules — ${REACH} (--allow-unguarded-engine): Bash(curl:*)`));
 });
 
 test('codex runs a node that needs MCP tools: it attaches the run\'s servers', () => {
@@ -415,7 +426,37 @@ test("the project's own .claude/settings.json deny rules refuse a codex run too,
   allowed._engineProjectRules = await allowed._engineChecks(() => true);
   const lines = allowed._engineGate();
   assert.ok(lines.includes("engine codex: the project's .claude/settings.json deny rules NOT enforced on codex (--allow-unguarded-engine): Read(.env)"), lines.join('\n'));
-  assert.ok(lines.includes('engine codex: deny rules enforced on codex as command rules: Bash(rm:*)'));
+  assert.ok(lines.includes(`engine codex: deny rules held on codex only in part, as command rules — ${REACH} (--allow-unguarded-engine): Bash(rm:*)`));
+});
+
+test("a single-project codex run's project deny rules reach every codex spawn and its rules file; Claude's spawns stay as they were", POSIX, async () => {
+  const engine = ENGINES[0];
+  const dir = tmp();
+  execSync('git init -q -b main && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', { cwd: dir });
+  execSync('mkdir -p .claude', { cwd: dir });
+  writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify({ permissions: { deny: ['Bash(git push:*)'] } }));
+  const make = (claude) => engine.create({ projectDir: dir, prompt: 'x', auto: true, branch: { source: 'main' }, claude: { mock: true, ...claude } });
+  // Without the consent the Permissive set's run is refused: the command rule holds only in part.
+  assert.deepEqual(await make({ engine: 'codex' }).engineStartRefusal(), {
+    error: `engine codex: the project's .claude/settings.json denies Bash(git push:*), which this engine holds only in part: ${REACH} — pass --allow-unguarded-engine to run it with them as a partial guard`,
+    overridable: true,
+  });
+  const o = make({ engine: 'codex', allowUnguardedEngine: true });
+  const seen = [];
+  engine.spyCtx(o, seen);
+  assert.equal((await o.run()).status, 'done');
+  assert.ok(seen.length >= 3, 'several nodes ran');
+  for (const { key, claudeOpts: c } of seen) assert.deepEqual(c.permissionRules, { deny: ['Bash(git push:*)'] }, key);
+  // What the spawn gets lands in the managed CODEX_HOME's rules file.
+  const fake = fakeCodex(dir, 'ok');
+  await runClaude({ engine: 'codex', bin: fake.bin, cwd: dir, prompt: 'P', permissionRules: seen[0].claudeOpts.permissionRules, onEvent: () => {} });
+  assert.match(readFileSync(join(fake.env().CODEX_HOME, 'rules', 'worca.rules'), 'utf8'), /pattern=\["git","push"\], decision="forbidden"/);
+  // Claude Code reads the project's file itself: its spawns carry no copy.
+  const c = make({});
+  const claudeSeen = [];
+  engine.spyCtx(c, claudeSeen);
+  assert.equal((await c.run()).status, 'done');
+  for (const { key, claudeOpts: co } of claudeSeen) assert.equal(co.permissionRules, undefined, key);
 });
 
 test("a real (non-mock) codex run checks the engine's binary and sign-in before anything else", POSIX, async () => {

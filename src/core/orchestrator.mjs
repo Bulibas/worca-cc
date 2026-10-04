@@ -1368,7 +1368,7 @@ export class GraphOrchestrator extends RunHarness {
         engine: this.claude.engine,
         permissionMode: this.claude.permissionMode,
         ...this._nodeModelPair(nc),
-        permissionRules: this.guardrailPermissionRules || undefined,
+        permissionRules: this._spawnPermissionRules(),
         envScrub: this.guardrails?.envScrub || undefined,
         // §5.5.1: a scrubbed spawn with a registry stdio copy keeps the launcher's keep-list.
         envAllowlist: this.guardrails?.envScrub

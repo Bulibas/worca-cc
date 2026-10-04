@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { fakeCodex } from './helpers/fake-codex.mjs';
 import {
-  codexRulePlan, codexRulesFile, unenforcedRules, guardedCodexHome, codexInvestigatorRole, runCodexProcess, CODEX_INVESTIGATOR_ROLE,
+  codexRulePlan, codexRulesFile, unenforcedRules, partialRules, guardedCodexHome, codexInvestigatorRole, runCodexProcess, CODEX_INVESTIGATOR_ROLE,
 } from '../src/core/engines/codex.mjs';
 import { fanOutDirective } from '../src/core/phases.mjs';
 import { assembleSkills, skillsRelFor } from '../src/core/run-context.mjs';
@@ -21,14 +21,17 @@ const dirs = [];
 after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
 const tmp = () => { const d = realpathSync(mkdtempSync(join(tmpdir(), 'codex-g-'))); dirs.push(d); return d; };
 
-test('codexRulePlan: command prefixes, a bare Bash and WebSearch are held; paths, MCP tools and globs are not', () => {
+test('codexRulePlan: a bare Bash and WebSearch are held, command prefixes only in part; paths, MCP tools and globs are not', () => {
   const p = codexRulePlan({ deny: ['Bash(git push)', 'Bash(git push:*)', 'Bash(npm run *)', 'Bash', 'WebSearch', 'WebFetch', 'Read(.env*)', 'Edit(*.pem)', 'mcp__pg__drop', 'Bash(rm *foo*)', 'Bash(echo "x")'], allow: ['Bash(ls:*)'] });
   assert.deepEqual(p.prefixes, [['git', 'push'], ['npm', 'run']]);
   assert.equal(p.shellOff, true);
   assert.equal(p.webSearchOff, true);
   assert.deepEqual(p.unenforced, ['Read(.env*)', 'Edit(*.pem)', 'mcp__pg__drop', 'Bash(rm *foo*)', 'Bash(echo "x")']);
+  assert.deepEqual(p.enforced, ['Bash', 'WebSearch', 'WebFetch']);
+  assert.deepEqual(p.partial, ['Bash(git push)', 'Bash(git push:*)', 'Bash(npm run *)']);
   assert.deepEqual(unenforcedRules({ deny: ['Bash(curl:*)'] }), []);
-  assert.deepEqual(codexRulePlan(null), { prefixes: [], shellOff: false, webSearchOff: false, enforced: [], unenforced: [] });
+  assert.deepEqual(partialRules({ deny: ['Bash(curl:*)'] }), ['Bash(curl:*)']);
+  assert.deepEqual(codexRulePlan(null), { prefixes: [], shellOff: false, webSearchOff: false, enforced: [], partial: [], unenforced: [] });
 });
 
 test('codexRulesFile: one forbidden prefix rule per command, quoted as Starlark strings', () => {
@@ -81,6 +84,19 @@ test('runCodexProcess: a fan-out spawn (the sub-agent tool granted) defines the 
   assert.equal(existsSync(JSON.parse(cfg.split('=')[1])), false, 'the role file lives only as long as the spawn');
   await runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', usageDir: dir, allowedTools: ['Read'] });
   assert.equal(fake.args().some((a) => a.startsWith('agents.')), false, 'no fan-out: no role');
+});
+
+test('runCodexProcess: a fan-out\'s sub-agent rows carry the role and its model (the stream itself names neither)', POSIX, async () => {
+  const dir = tmp();
+  const lines = readFileSync(new URL('./fixtures/codex/collab-wait.jsonl', import.meta.url), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const fake = fakeCodex(dir, null, { lines });
+  const events = [];
+  await runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', usageDir: dir, allowedTools: ['Read', 'Task'], onEvent: (e) => events.push(e),
+    agents: { 'worca-investigator': { prompt: 'Investigate.', model: 'gpt-5.6-luna' } } });
+  const spawn = events.find((e) => e.type === 'subagent' && e.event === 'spawn');
+  assert.equal(spawn.label, 'Codex sub-agents');
+  assert.equal(spawn.subagentType, CODEX_INVESTIGATOR_ROLE);
+  assert.equal(spawn.model, 'gpt-5.6-luna');
 });
 
 test('fanOutDirective on codex: spawn_agent with the investigator role, skills from .agents/skills, no Claude model block', () => {
