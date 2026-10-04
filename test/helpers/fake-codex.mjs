@@ -17,17 +17,17 @@ export function codexReplyLines(text) {
 /**
  * @param {string} dir where the bin, its argv record and its canned output are written
  * @param {string|null} reply the agent_message text (ignored with `fail`)
- * @param {{fail?: string|null, exit?: number}} [o]
+ * @param {{fail?: string|null, exit?: number, lines?: object[]|null}} [o] `lines`: the whole stream, verbatim
  * @returns {{bin: string, args: () => (string[]|null), env: () => (Record<string,string>|null)}}
  */
-export function fakeCodex(dir, reply, { fail = null, exit = 0 } = {}) {
+export function fakeCodex(dir, reply, { fail = null, exit = 0, lines: given = null } = {}) {
   const bin = join(dir, 'codex');
   const argsOut = join(dir, 'codex-args.json');
   const envOut = join(dir, 'codex-env.json');
   const out = join(dir, 'codex-out.jsonl');
-  const lines = fail
+  const lines = given || (fail
     ? [{ type: 'thread.started', thread_id: '00000000-0000-4000-8000-0000000000ab' }, { type: 'turn.failed', error: { message: fail } }]
-    : codexReplyLines(reply);
+    : codexReplyLines(reply));
   writeFileSync(out, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
   writeFileSync(bin, `#!/bin/sh\nnode -e 'require("fs").writeFileSync(${JSON.stringify(argsOut)}, JSON.stringify(process.argv.slice(1))); require("fs").writeFileSync(${JSON.stringify(envOut)}, JSON.stringify(process.env))' -- "$@"\ncat > /dev/null\ncat ${JSON.stringify(out)}\nexit ${exit}\n`);
   chmodSync(bin, 0o755);

@@ -370,7 +370,34 @@ worca can run pipelines and Ask Worca chats on OpenAI's Codex CLI.
 2. Sign in once in a terminal: `codex login`. `codex login status` must say you are logged in.
 3. Pick Codex per run on New pipeline, or as a default in Settings › Models (Engines). For Ask Worca, Settings › Ask Worca › Engine & models.
 
-On a Codex run the helper jobs (titles, the run overview, the PR description, the Auto workflow classifier) run read-only with codex's shell switched off, because they read text worca did not write. So the classifier on Codex sizes a task from its text alone; on Claude it may also look into the repository. These jobs need a codex that knows `--disable shell_tool` and `--disable unified_exec` (`codex-cli 0.146` does).
+On a Codex run the helper jobs (titles, the run overview, the PR description, the Auto workflow classifier, and Away mode's night decider) run on Codex too, read-only with codex's shell switched off, because they read text worca did not write. These jobs need a codex that knows `--disable shell_tool` and `--disable unified_exec` (`codex-cli 0.146` does).
+
+- **The classifier and the night decider still look into the repository.** With no shell, they read it through worca's own `read_file`, `grep` and `glob`, limited to the run's checkout (and, for the night decider, its plan files), under the same protected-file rules as Ask Worca. Their tool calls are capped as on Claude: 10 for the classifier, 12 for the night decider.
+- **The night decider uses Codex models on a Codex run.** Away mode's "Decided by" model is used when it is a Codex model; otherwise the run's own Codex model, otherwise Codex's default.
+- **Every Codex call is priced.** When no Codex model is set, worca runs Codex's own default, GPT-5.6 Sol, by name, so its cost shows instead of $0.00.
+
+**MCP servers on Codex.** A pipeline's MCP servers attach to its Codex nodes, with these limits:
+
+- Codex takes stdio servers only. A remote (HTTP/SSE) server from the MCP registry refuses the run; one from a project's `.mcp.json` is skipped with a warning.
+- Servers Claude Code loads on its own (user scope, plugins) are not attached on Codex, and the run says which.
+- Codex gives all of a run's servers one shared environment, so two servers may not declare the same variable with different values.
+
+**Guardrails on Codex.** Codex holds the command rules of a guardrail set, but not its file rules.
+
+- A deny rule for a command, such as `Bash(git push:*)` or `Bash(curl)`, becomes a Codex command rule. Codex blocks the command when it is run directly, through its full path, or inside a `&&` chain. Like Claude Code's prefix rules, it does not catch the command inside `bash -c` or `env`.
+- A bare `Bash` rule turns Codex's shell off, and `WebSearch` turns its web search off.
+- File rules (`Read(…)`, `Edit(…)`, and the protected paths of the Normal and Secure sets) and MCP tool rules cannot be held on Codex. A run whose set has any of them needs **Allow unguarded** (`--allow-unguarded-engine`). The run log lists the rules that are held and the ones that are not.
+- worca keeps the command rules in a Codex home of its own under `~/.worca-cc/engines/codex/homes/`, one per rule set, linked to your Codex sign-in (`auth.json`). If you sign in to Codex some other way, a guarded run cannot find your sign-in.
+- The host guard's kill-check hook does not run on Codex; its instructions to the agent still apply. (Codex hooks run only after you review and trust them in Codex itself.)
+
+**Sub-agents and skills on Codex.**
+
+- Research fan-out runs on Codex through its own sub-agents. worca defines its read-only investigator as a Codex agent role for each call, carrying the node's sub-agent model and effort (Codex models only) and the run's memory pointers. Codex sub-agents share the node's sandbox, so read-only is an instruction to them, as it is for Claude's investigators.
+- A workspace run's per-project dispatch stays one-at-a-time on Codex.
+- Skills are mounted where Codex reads them, the run checkout's `.agents/skills`. That covers the project's and the root layer's `.claude/skills`, your own `~/.claude/skills`, and the skills a workflow requires. They never reach the run's diff or commit.
+- Codex does not load worca's memory rules on its own, so its agents are told to read them from the memory folders.
+
+**Custom endpoints.** A Claude model routed to a custom endpoint or through the model bridge no longer refuses a Codex run. Like any Claude model, it is dropped on Codex, and its nodes run on Codex's model.
 
 > **Ask Worca on Codex is not available yet.** A chat on Codex starts only when worca can switch off every Codex tool that reaches the disk or other agents. `codex-cli 0.146` cannot switch off `view_image` (it reads any image file) or its sub-agents, so on that version Codex models are not offered in Ask Worca and a Codex chat refuses to start. Pipelines on Codex are unaffected.
 

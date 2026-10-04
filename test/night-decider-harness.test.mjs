@@ -161,12 +161,28 @@ test('mock mode is unchanged: no spawn, the recommended-else-first answer, $0', 
   assert.deepEqual(booked, [0]);
 });
 
-test('a Codex run: the decider stays on Claude — the run\'s Codex model is dropped, and a Codex Decided by pick is not used', async () => {
+test('a Codex run: the decider runs on Codex — a Codex Decided by pick is used, read-only, with the file tools over the checkout', async () => {
   await setNightMode({ enabled: true, strategy: 'analysis', graceMinutes: 1, deciderModel: 'gpt-5.5' });
   await setNightModeToggle('on');
   const clock = fakeClock();
   const { run, seen } = recordingRun();
-  const orch = createOrchestrator({ projectDir: '/tmp/night-dm-codex', nightClock: clock, nightRunClaude: run, claude: { model: 'gpt-5.5', engine: 'codex' } });
+  const orch = createOrchestrator({ projectDir: '/tmp/night-dm-codex', nightClock: clock, nightRunClaude: run, claude: { model: 'gpt-5.6-sol', engine: 'codex' } });
   await answerOne(orch, clock, 'cx1');
-  assert.equal(seen[0].model, null, 'the CLI default, never a Codex id handed to Claude');
+  assert.equal(seen[0].model, 'gpt-5.5');
+  assert.equal(seen[0].engine, 'codex');
+  assert.equal(seen[0].sandbox, 'read-only');
+  assert.equal(seen[0].modelEnv, undefined, 'no Claude routing env');
+  assert.ok(seen[0].mcpConfigPath, 'its repo look is worca\'s read_file/grep/glob');
+  assert.match(seen[0].systemPrompt, /read_file, grep and glob/);
+});
+
+test('a Codex run: a Claude Decided by pick reads as stale, and the run\'s Codex model weighs the options', async () => {
+  await setNightMode({ enabled: true, strategy: 'analysis', graceMinutes: 1, deciderModel: 'claude-sonnet-5' });
+  await setNightModeToggle('on');
+  const clock = fakeClock();
+  const { run, seen } = recordingRun();
+  const orch = createOrchestrator({ projectDir: '/tmp/night-dm-codex2', nightClock: clock, nightRunClaude: run, claude: { model: 'gpt-5.6-sol', engine: 'codex' } });
+  await answerOne(orch, clock, 'cx2');
+  assert.equal(seen[0].model, 'gpt-5.6-sol');
+  assert.equal(seen[0].engine, 'codex');
 });

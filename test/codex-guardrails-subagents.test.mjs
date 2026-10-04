@@ -1,0 +1,118 @@
+// test/codex-guardrails-subagents.test.mjs — what a Codex spawn holds of worca's guardrails (command rules in a
+// worca-managed CODEX_HOME), worca's investigator as a codex agent role, the Codex fan-out and skills prompts,
+// the skills mount folder and the memory block intro on an engine that does not load `.claude/rules`.
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, lstatSync, readlinkSync, rmSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { useTempHome } from './helpers/temp-home.mjs';
+import { fakeCodex } from './helpers/fake-codex.mjs';
+import {
+  codexRulePlan, codexRulesFile, unenforcedRules, guardedCodexHome, codexInvestigatorRole, runCodexProcess, CODEX_INVESTIGATOR_ROLE,
+} from '../src/core/engines/codex.mjs';
+import { fanOutDirective } from '../src/core/phases.mjs';
+import { assembleSkills, skillsRelFor } from '../src/core/run-context.mjs';
+import { renderMemoryBlock, MEMORY_BLOCK_INTRO } from '../src/core/memory-store.mjs';
+
+useTempHome(after);
+const POSIX = { skip: process.platform === 'win32' };
+const dirs = [];
+after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
+const tmp = () => { const d = realpathSync(mkdtempSync(join(tmpdir(), 'codex-g-'))); dirs.push(d); return d; };
+
+test('codexRulePlan: command prefixes, a bare Bash and WebSearch are held; paths, MCP tools and globs are not', () => {
+  const p = codexRulePlan({ deny: ['Bash(git push)', 'Bash(git push:*)', 'Bash(npm run *)', 'Bash', 'WebSearch', 'WebFetch', 'Read(.env*)', 'Edit(*.pem)', 'mcp__pg__drop', 'Bash(rm *foo*)', 'Bash(echo "x")'], allow: ['Bash(ls:*)'] });
+  assert.deepEqual(p.prefixes, [['git', 'push'], ['npm', 'run']]);
+  assert.equal(p.shellOff, true);
+  assert.equal(p.webSearchOff, true);
+  assert.deepEqual(p.unenforced, ['Read(.env*)', 'Edit(*.pem)', 'mcp__pg__drop', 'Bash(rm *foo*)', 'Bash(echo "x")']);
+  assert.deepEqual(unenforcedRules({ deny: ['Bash(curl:*)'] }), []);
+  assert.deepEqual(codexRulePlan(null), { prefixes: [], shellOff: false, webSearchOff: false, enforced: [], unenforced: [] });
+});
+
+test('codexRulesFile: one forbidden prefix rule per command, quoted as Starlark strings', () => {
+  assert.equal(codexRulesFile([['git', 'push']]),
+    'prefix_rule(pattern=["git","push"], decision="forbidden", justification="worca guardrail: Bash(git push:*)")\n');
+});
+
+test('guardedCodexHome: one home per rule set, the rules written, the user\'s sign-in linked in', POSIX, () => {
+  const base = tmp(); const user = tmp();
+  writeFileSync(join(user, 'auth.json'), '{}');
+  const a = guardedCodexHome('A\n', { base, userHome: user });
+  assert.equal(guardedCodexHome('A\n', { base, userHome: user }), a, 'the same rules: the same home (a resumed thread is found)');
+  assert.notEqual(guardedCodexHome('B\n', { base, userHome: user }), a);
+  assert.equal(readFileSync(join(a, 'rules', 'worca.rules'), 'utf8'), 'A\n');
+  assert.ok(lstatSync(join(a, 'auth.json')).isSymbolicLink());
+  assert.equal(readlinkSync(join(a, 'auth.json')), join(user, 'auth.json'));
+});
+
+test('runCodexProcess: deny rules put codex under the guarded home and turn web search off; no rules leave CODEX_HOME alone', POSIX, async () => {
+  const dir = tmp();
+  const fake = fakeCodex(dir, 'ok');
+  await runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', usageDir: dir, permissionRules: { deny: ['Bash(git push:*)', 'WebSearch', 'Read(.env)'] } });
+  const home = fake.env().CODEX_HOME;
+  assert.match(readFileSync(join(home, 'rules', 'worca.rules'), 'utf8'), /pattern=\["git","push"\]/);
+  assert.ok(fake.args().includes('web_search="disabled"'));
+  const prev = process.env.CODEX_HOME; delete process.env.CODEX_HOME;
+  try {
+    await runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', usageDir: dir, permissionRules: { deny: ['Read(.env)'] } });
+    assert.equal(fake.env().CODEX_HOME, undefined);
+  } finally { if (prev !== undefined) process.env.CODEX_HOME = prev; }
+});
+
+test('codexInvestigatorRole: worca\'s prompt plus the memory block; a Codex model and effort kept, a Claude one dropped', () => {
+  const r = codexInvestigatorRole({ agents: { 'worca-investigator': { description: 'D', prompt: 'Investigate.', model: 'gpt-5.6-luna', effort: 'max' } }, subagentSystemPrompt: '## Worca memory\nx' });
+  assert.equal(r.description, 'D');
+  assert.equal(r.toml, 'developer_instructions = "Investigate.\\n\\n## Worca memory\\nx"\nmodel = "gpt-5.6-luna"\nmodel_reasoning_effort = "xhigh"\n');
+  const c = codexInvestigatorRole({ agents: { x: { prompt: 'P', model: 'sonnet', effort: 'medium' } } });
+  assert.equal(c.toml.includes('model = '), false, 'a Claude alias means nothing to codex: the role inherits the node\'s model');
+  assert.match(codexInvestigatorRole({}).toml, /read-only investigator/);
+});
+
+test('runCodexProcess: a fan-out spawn (the sub-agent tool granted) defines the investigator role for the call, then removes its file', POSIX, async () => {
+  const dir = tmp();
+  const fake = fakeCodex(dir, 'ok');
+  await runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', usageDir: dir, allowedTools: ['Read', 'Task', 'Agent'], appendSubagentSystemPrompt: '## Worca memory\nm' });
+  const args = fake.args();
+  assert.ok(args.includes(`agents.${CODEX_INVESTIGATOR_ROLE}.description="Read-only investigator for one area; reports its findings to the agent that dispatched it."`));
+  const cfg = args.find((a) => a.startsWith(`agents.${CODEX_INVESTIGATOR_ROLE}.config_file=`));
+  assert.ok(cfg);
+  assert.equal(existsSync(JSON.parse(cfg.split('=')[1])), false, 'the role file lives only as long as the spawn');
+  await runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', usageDir: dir, allowedTools: ['Read'] });
+  assert.equal(fake.args().some((a) => a.startsWith('agents.')), false, 'no fan-out: no role');
+});
+
+test('fanOutDirective on codex: spawn_agent with the investigator role, skills from .agents/skills, no Claude model block', () => {
+  const t = fanOutDirective(true, { engine: 'codex', subagentModel: 'auto', investigator: true });
+  assert.match(t, /agent_type: "worca_investigator"/);
+  assert.match(t, /WITHOUT forking your history/);
+  assert.match(t, /\.agents\/skills/);
+  assert.equal(/Task\/Agent|subagent_type|sonnet/.test(t), false);
+  assert.equal(fanOutDirective(false, { engine: 'codex' }), '');
+  assert.match(fanOutDirective(true, {}), /Task\/Agent tool/, 'Claude unchanged');
+});
+
+test('skills mount where the engine reads them: codex gets .agents/skills, plus the user\'s ~/.claude/skills', async () => {
+  const proj = tmp(); const home = tmp(); const target = join(tmp(), '.agents', 'skills');
+  for (const [root, name] of [[proj, 'lint'], [home, 'mine']]) {
+    mkdirSync(join(root, '.claude', 'skills', name), { recursive: true });
+    writeFileSync(join(root, '.claude', 'skills', name, 'SKILL.md'), `---\nname: ${name}\n---\n`);
+  }
+  assert.equal(skillsRelFor('codex'), join('.agents', 'skills'));
+  assert.equal(skillsRelFor('claude'), join('.claude', 'skills'));
+  const out = await assembleSkills({ target, members: [{ projectKey: 'p-1', projectName: 'p', projectDir: proj }], homeDir: home, rel: skillsRelFor('codex') });
+  assert.deepEqual(out.names.sort(), ['lint', 'mine']);
+  assert.deepEqual(out.records.map((r) => r.path).sort(), [join('.agents', 'skills', 'lint'), join('.agents', 'skills', 'mine')]);
+  const claude = await assembleSkills({ target: join(tmp(), '.claude', 'skills'), members: [{ projectKey: 'p-1', projectName: 'p', projectDir: proj }], homeDir: home });
+  assert.deepEqual(claude.names, ['lint'], 'Claude Code reads ~/.claude/skills itself');
+});
+
+test('the memory block on codex says to read the rules (nothing loads them), and keeps one intro line', () => {
+  const codex = renderMemoryBlock([{ label: 'Project', dir: '/m/p' }], { engine: 'codex' });
+  const claude = renderMemoryBlock([{ label: 'Project', dir: '/m/p' }]);
+  assert.ok(claude.includes(MEMORY_BLOCK_INTRO));
+  assert.equal(codex.includes('Claude Code has already loaded'), false);
+  assert.match(codex, /Nothing has loaded them for you: before you start, read the files/);
+  assert.equal(codex.split('\n').length, claude.split('\n').length);
+});

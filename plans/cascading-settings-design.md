@@ -163,12 +163,15 @@ resolver.
 | Auto-workflow classifier | `auto/classify.mjs` via `orchestrator.mjs` | run start (`--workflow auto`) |
 | Run overview | `overview-agent.mjs` via `ui/server.mjs` | on demand, run page |
 | PR description | `pr-description.mjs` via `ui/server.mjs` | on demand, "Ship it?" |
+| Night decider | `night/analysis.mjs` via `run-harness.mjs` `_nightAnalyze` | Away mode, per ask |
 
 - Each job reads the engine from the **run's state**, never from settings, so an overview or PR
   description made later matches the run even after the default changed.
 - It passes `engine` to `runClaude` (which already routes by `engine` to the adapter) and the
   model from `models.<engine>.utility.<job>`: project > user > team > default (§3.1). For Codex an
-  empty slot sends no `-m`.
+  empty slot runs `CODEX_DEFAULT_MODEL` (codex.mjs), named with `-m` so the call is priced.
+- The night decider has no utility slot: its model is Away mode's "Decided by" when the run's engine
+  owns it, else the run's model on that engine, else that engine's default.
 - Memory defragment and workspace scan are runs of their own: they follow their own run's engine
   and its `memoryDefrag` / `workspaceScan` slot.
 - Ask Worca chats and their titles follow the chat's engine (§4.6), not a run's.
@@ -176,7 +179,9 @@ resolver.
   generation, so they need no rule the gate can refuse.
 - **Read-only on Codex (D11).** Utility jobs pass `sandbox: 'read-only'` and no `writableDirs`;
   the codex adapter maps it to `--sandbox read-only` (it always used `workspace-write`). The
-  classifier's repo look has no turn cap on Codex; its `timeoutMs` bounds it.
+  classifier's repo look and the night decider read the checkout through worca's `read_file` /
+  `grep` / `glob` (`engines/codex-files-mcp.mjs`, the run-read deny rules); the adapter caps their
+  tool calls at `maxTurns`.
 - **Routing env** (`resolveModelEnv`) is skipped for a non-Claude engine; the bridged-provider
   readiness check never fires for Codex.
 - **No silent fallback to Claude.** A failing Codex utility job: the title falls back to the
@@ -370,11 +375,12 @@ shown with its own text (`classifyCodexError`); it is never retried on Claude.
 | New pipeline agent rows | full catalog | run engine only, heal on switch |
 | Settings utility pickers | full catalog | inside each engine card |
 | Composer inspector, project step models | full catalog | grouped Claude / Codex |
-| Sub-agent select, away analysis, agent gen | Claude | unchanged (Claude by design) |
+| Sub-agent select, agent gen | Claude | unchanged (Claude by design) |
+| Away analysis (night decider) | Claude | run's engine (follow-up to #577) |
 | Ask Worca turn (`ask/turn.mjs`, `spawn.mjs`) | Claude | chat's engine (Plan 2, §4.6) |
 | Ask chat title | Claude | chat's engine (Plan 2) |
 | Ask tools (`tools.mjs`, `mcp-stdio.mjs`) | 69 worca MCP tools | same + `read_file` / `grep` / `glob` for Codex chats |
-| Codex adapter MCP | none (`mcpTools:false`) | per-call `mcp_servers.*` overrides, result unwrap |
+| Codex adapter MCP | none (`mcpTools:false`) | per-call `mcp_servers.*` overrides, result unwrap; later every spawn's stdio servers (`mcpTools:true`) |
 | Ask prompt (`prompt.mjs`) | Claude tool names | Claude text unchanged; Codex variant |
 | Ask stream (`events.mjs`, codex normalizer) | codex text dropped (no `messageId`) | `messageId` per message, deltas if present |
 | Ask caps | Claude `--max-turns` / `--max-budget-usd` | Codex: worca watchdog |

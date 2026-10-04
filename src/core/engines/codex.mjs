@@ -16,13 +16,16 @@
 // - A failed turn ends with `error` + `turn.failed`, and codex may still exit 0. A
 //   top-level `error` alone is not a failure: codex also reports its stream retries
 //   that way ("Reconnecting... 1/5 (…)") and may go on to complete the turn.
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, symlinkSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
 import { worcaHome } from '../projects.mjs';
 import { hostGuardEnabled, hostGuardSystemPrompt } from '../host-guard.mjs';
 import { CAPABILITY_KEYS } from './capabilities.mjs';
-import { superviseSpawn, composeSpawnEnv, safeEmit } from './spawn.mjs';
+import { superviseSpawn, composeSpawnEnv, cleanRunEnv, safeEmit } from './spawn.mjs';
+import { createRedactor } from '../redact.mjs';
 import { strongestClass } from '../recoverable-error.mjs';
 import { ARGV_INLINE_LIMIT } from './claude.mjs';
 import { CODEX_PRICES } from '../list-prices.mjs';
@@ -40,10 +43,21 @@ export function codexThreadOf(sessionId) {
 }
 
 /** What the adapter can do for worca (design §10.3). Only a literal false degrades:
- *  codex has no per-spawn tool allowlist, hook stream, MCP attach, per-tool
- *  permission rules, Skill tool over .claude/skills, grantable sub-agent tool,
- *  sub-agent-only prompt or turn cap. */
-const CODEX_FALSE = new Set(['allowedTools', 'hookTelemetry', 'mcpTools', 'permissionRules', 'skills', 'subagentSystemPrompt', 'subagents', 'turnBudget']);
+ *  codex has no per-spawn tool allowlist, no hook stream (its hooks run only once a person
+ *  has reviewed and trusted them) and no native turn or spend cap (the adapter counts tool
+ *  calls against maxTurns itself; a spend cap has nothing to stop mid-turn).
+ *  - MCP servers attach through `-c mcp_servers.*` (stdio only).
+ *  - Permission rules: the deny rules codex can hold become command rules (codexRulePlan);
+ *    the rest are reported by unenforcedRules, and the run gate refuses them unless allowed.
+ *  - Sub-agents: codex's own spawn_agent, with worca's investigator defined as an agent role
+ *    that carries the memory block (codexInvestigatorRole).
+ *  - Skills: codex loads `.agents/skills` from the cwd, where the run context mounts them. */
+const CODEX_FALSE = new Set(['allowedTools', 'hookTelemetry', 'turnBudget']);
+
+/** The model a codex spawn runs when worca names none: codex-cli 0.146's own built-in default under
+ *  --ignore-user-config (seen in the session log of an unnamed-model exec). Naming it changes nothing codex
+ *  runs, and keeps every Codex call priced (CODEX_PRICES) instead of a $0.00 "cost unknown". */
+export const CODEX_DEFAULT_MODEL = 'gpt-5.6-sol';
 export const codexCapabilities = Object.freeze(Object.fromEntries(CAPABILITY_KEYS.map((k) => [k, !CODEX_FALSE.has(k)])));
 
 /** Ask Worca on Codex (cascading-settings-design.md D13): the flags that leave codex no shell, no native web search,
@@ -58,8 +72,124 @@ export const CODEX_ASK_LOCKDOWN = null;
  *  file into its answer. Verified to remove the shell on codex-cli 0.146 (plans/ask-on-codex-spike.md (a)). An Ask
  *  lockdown list replaces these flags and must carry them itself. */
 export const CODEX_SHELL_OFF = Object.freeze(['--disable', 'shell_tool', '--disable', 'unified_exec']);
-export const CODEX_MCP_TOOL_TIMEOUT_SEC = 1800;   // the Ask turn's own 30-minute clock bounds it (propose_workflow classifies, test_script runs)
+export const CODEX_MCP_TOOL_TIMEOUT_SEC = 1800;
+
+// ── permission rules ─────────────────────────────────────────────────────────
+
+/** A deny rule's command prefix (`Bash(git push)`, `Bash(git push:*)`, `Bash(npm run *)`), or null when it is
+ *  not a plain command prefix (a glob or quote inside, or not a Bash rule). */
+function bashPrefix(rule) {
+  const m = /^Bash\((.+)\)$/.exec(String(rule).trim());
+  if (!m) return null;
+  const body = m[1].trim().replace(/(?::\*| \*)$/, '').trim();
+  if (!body || /[*?"'`$\\()|;&<>]/.test(body)) return null;
+  return body.split(/\s+/);
+}
+
+/**
+ * What codex can hold of a run's permission rules. Only DENY rules are worca policy (allow / ask are never
+ * lifted, and codex exec never asks). A `Bash(cmd…)` prefix becomes a codex command rule (decision forbidden):
+ * codex checks it on the command itself, an absolute path to it and each command of a `&&` chain — like
+ * Claude Code's prefix rules, a command run inside `bash -c` or `env` is not checked. A bare `Bash` turns the
+ * shell off; `WebSearch` turns codex's web search off; `WebFetch` has no codex tool to deny. Path rules
+ * (`Read(…)`, `Edit(…)`, `Write(…)`), MCP tool rules and globs cannot be held: they are `unenforced`.
+ * @returns {{prefixes:string[][], shellOff:boolean, webSearchOff:boolean, enforced:string[], unenforced:string[]}}
+ */
+export function codexRulePlan(permissionRules) {
+  const out = { prefixes: [], shellOff: false, webSearchOff: false, enforced: [], unenforced: [] };
+  const deny = Array.isArray(permissionRules?.deny) ? permissionRules.deny : [];
+  for (const raw of deny) {
+    const rule = String(raw).trim();
+    if (!rule) continue;
+    if (rule === 'Bash') { out.shellOff = true; out.enforced.push(rule); continue; }
+    if (rule === 'WebSearch') { out.webSearchOff = true; out.enforced.push(rule); continue; }
+    if (rule === 'WebFetch') { out.enforced.push(rule); continue; }
+    const prefix = bashPrefix(rule);
+    if (prefix) {
+      if (!out.prefixes.some((p) => p.join(' ') === prefix.join(' '))) out.prefixes.push(prefix);
+      out.enforced.push(rule);
+    } else out.unenforced.push(rule);
+  }
+  return out;
+}
+
+/** The deny rules codex cannot hold (the run gate's question). */
+export function unenforcedRules(permissionRules) { return codexRulePlan(permissionRules).unenforced; }
+
+/** The codex execpolicy file for `prefixes` (Starlark; a JSON string is a valid Starlark string). */
+export function codexRulesFile(prefixes) {
+  return prefixes.map((p) => `prefix_rule(pattern=${JSON.stringify(p)}, decision="forbidden", justification=${JSON.stringify(`worca guardrail: Bash(${p.join(' ')}:*)`)})`).join('\n') + '\n';
+}
+
+/** The user's own codex home: where codex keeps its sign-in. */
+export const userCodexHome = (env = process.env) => (env.CODEX_HOME && env.CODEX_HOME.trim()) || join(homedir(), '.codex');
+
+/**
+ * A worca-managed CODEX_HOME holding `rules`. codex reads command rules only from its home's `rules/` folder,
+ * so a guarded spawn runs under one home per rule set (the same rules always get the same home, so a resumed
+ * thread is found where it was written); its sign-in is the user's own auth.json, linked in. Never throws.
+ */
+export function guardedCodexHome(rulesText, { base = join(worcaHome(), 'engines', 'codex', 'homes'), userHome = userCodexHome() } = {}) {
+  const dir = join(base, createHash('sha256').update(rulesText).digest('hex').slice(0, 12));
+  try {
+    mkdirSync(join(dir, 'rules'), { recursive: true });
+    const file = join(dir, 'rules', 'worca.rules');
+    let cur = null;
+    try { cur = readFileSync(file, 'utf8'); } catch { /* new home */ }
+    if (cur !== rulesText) writeFileSync(file, rulesText);
+    const auth = join(dir, 'auth.json');
+    if (!existsSync(auth) && existsSync(join(userHome, 'auth.json'))) symlinkSync(join(userHome, 'auth.json'), auth);
+  } catch { /* the spawn then fails on its sign-in and says so */ }
+  return dir;
+}
+
+// ── sub-agents ───────────────────────────────────────────────────────────────
+
+/** The codex agent role worca's fan-out dispatches (`spawn_agent` with this `agent_type`). */
+export const CODEX_INVESTIGATOR_ROLE = 'worca_investigator';
+const CODEX_EFFORTS = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh']);
+const DEFAULT_INVESTIGATOR_PROMPT = 'You are a read-only investigator dispatched by a worca pipeline agent. Investigate exactly what you were asked, in the directories you were given. Never edit, write, commit, branch or spawn sub-agents. Report concrete findings with file paths, then stop.';
+
+/**
+ * The investigator role of a fan-out spawn: the `--agents` definition worca would hand Claude (its prompt,
+ * model and effort; a Claude model or effort codex cannot run is dropped), plus the memory block, which
+ * Claude's sub-agents get through --append-subagent-system-prompt. codex roles inherit the parent's sandbox,
+ * so read-only is the role's instruction, as it is for Claude's investigator (which keeps Bash).
+ * @returns {{description:string, toml:string}}
+ */
+export function codexInvestigatorRole({ agents, subagentSystemPrompt } = {}) {
+  const def = agents && typeof agents === 'object' ? Object.values(agents)[0] : null;
+  const prompt = [typeof def?.prompt === 'string' && def.prompt.trim() ? def.prompt.trim() : DEFAULT_INVESTIGATOR_PROMPT,
+    typeof subagentSystemPrompt === 'string' ? subagentSystemPrompt.trim() : ''].filter(Boolean).join('\n\n');
+  const lines = [`developer_instructions = ${tomlString(prompt)}`];
+  if (codexModelPriced(def?.model) && def?.model) lines.push(`model = ${tomlString(def.model)}`);
+  const effort = def?.effort === 'max' ? 'xhigh' : def?.effort;
+  if (CODEX_EFFORTS.includes(effort)) lines.push(`model_reasoning_effort = ${tomlString(effort)}`);
+  return { description: typeof def?.description === 'string' && def.description ? def.description : 'Read-only investigator for one area; reports its findings to the agent that dispatched it.',
+    toml: `${lines.join('\n')}\n` };
+}   // the Ask turn's own 30-minute clock bounds it (propose_workflow classifies, test_script runs)
 const MCP_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const ENV_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+
+/** The servers of an --mcp-config document that codex cannot attach: it takes stdio servers only. */
+export function codexUnattachableMcp(servers) {
+  return Object.entries(servers && typeof servers === 'object' ? servers : {})
+    .filter(([name, srv]) => !MCP_NAME_RE.test(name) || !srv || typeof srv.command !== 'string').map(([name]) => name);
+}
+
+/** `${VAR}` references in a server's env values, filled from `from` the way Claude Code expands an --mcp-config
+ *  (the MCP registry writes `${MCPSECRET_…}` references; the values ride the spawn env). An unknown name
+ *  becomes empty, as in a shell. */
+export function expandMcpEnvRefs(servers, from = {}) {
+  const out = {};
+  for (const [name, srv] of Object.entries(servers && typeof servers === 'object' ? servers : {})) {
+    if (!srv || typeof srv !== 'object' || !srv.env || typeof srv.env !== 'object') { out[name] = srv; continue; }
+    const env = {};
+    for (const [k, v] of Object.entries(srv.env)) env[k] = typeof v === 'string' ? v.replace(ENV_REF_RE, (_, n) => (typeof from[n] === 'string' ? from[n] : '')) : v;
+    out[name] = { ...srv, env };
+  }
+  return out;
+}
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
@@ -71,16 +201,21 @@ const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export function codexMcpOverrides(servers, { passEnv = [] } = {}) {
   const args = [];
   const env = {};
-  for (const [name, srv] of Object.entries(servers && typeof servers === 'object' ? servers : {})) {
+  const all = Object.entries(servers && typeof servers === 'object' ? servers : {});
+  // Every server's env shares the ONE codex process env: a name another server declares is never passed on here.
+  const declared = new Set(all.flatMap(([, srv]) => Object.keys(srv?.env && typeof srv.env === 'object' ? srv.env : {})));
+  for (const [name, srv] of all) {
     if (!MCP_NAME_RE.test(name) || !srv || typeof srv.command !== 'string') continue;   // stdio servers only
     const key = `mcp_servers.${name}`;
     args.push('-c', `${key}.command=${tomlString(srv.command)}`);
     args.push('-c', `${key}.args=[${(Array.isArray(srv.args) ? srv.args : []).map((a) => tomlString(String(a))).join(',')}]`);
     const names = [];
     for (const [k, v] of Object.entries(srv.env && typeof srv.env === 'object' ? srv.env : {})) {
-      if (ENV_NAME_RE.test(k) && typeof v === 'string') { env[k] = v; names.push(k); }
+      if (!ENV_NAME_RE.test(k) || typeof v !== 'string') continue;
+      if (Object.hasOwn(env, k) && env[k] !== v) throw new Error(`MCP servers declare ${k} with different values — codex hands its servers one shared environment`);
+      env[k] = v; names.push(k);
     }
-    for (const k of passEnv) if (ENV_NAME_RE.test(k) && !names.includes(k)) names.push(k);
+    for (const k of passEnv) if (ENV_NAME_RE.test(k) && !names.includes(k) && !declared.has(k)) names.push(k);
     if (names.length) args.push('-c', `${key}.env_vars=[${names.map(tomlString).join(',')}]`);
     args.push('-c', `${key}.required=true`, '-c', `${key}.startup_timeout_sec=30`,
       '-c', `${key}.tool_timeout_sec=${CODEX_MCP_TOOL_TIMEOUT_SEC}`, '-c', `${key}.default_tools_approval_mode="approve"`);
@@ -96,8 +231,12 @@ export function mcpResultText(result) {
   return JSON.stringify(result ?? '');
 }
 
-/** True when worca can price `model` on Codex (CODEX_PRICES) — a cost cap needs it (D14). */
-export function codexModelPriced(model) { return typeof model === 'string' && Object.hasOwn(CODEX_PRICES, model); }
+/** True when worca can price `model` on Codex (CODEX_PRICES) — a cost cap needs it (D14). No model is
+ *  CODEX_DEFAULT_MODEL, which the adapter names on every spawn. */
+export function codexModelPriced(model) {
+  const m = model == null || model === '' ? CODEX_DEFAULT_MODEL : model;
+  return typeof m === 'string' && Object.hasOwn(CODEX_PRICES, m);
+}
 
 /** codex's answer to `exec resume <unknown thread>` (plans/ask-on-codex-spike.md (g)). */
 export const CODEX_RESUME_NOT_FOUND_RE = /no rollout found for (?:thread|conversation) id/i;
@@ -124,7 +263,7 @@ export function tomlString(s) {
  * `codex exec` argv. The prompt always travels on stdin (`-`).
  *   fresh:  exec [-i IMG]… --json --skip-git-repo-check --ignore-user-config --sandbox workspace-write [lockdown… | read-only: shell off] [mcp…] [-m M] [-c effort] [-c developer_instructions] [--add-dir D]… -
  *   resume: exec resume <thread> [-i IMG]… --json --skip-git-repo-check --ignore-user-config -c sandbox_mode="workspace-write" [-c writable_roots] [lockdown…] [mcp…] [-m M] [-c effort] [-c developer_instructions] -
- * images / lockdown / mcp: an Ask Worca spawn only (runCodexProcess askLockdown).
+ * images / lockdown: an Ask Worca spawn only (runCodexProcess askLockdown). mcp: any spawn handed an --mcp-config.
  * @param {{systemPrompt?:string, model?:string, effort?:string, resumeThreadId?:string|null, addDirs?:string[], sandbox?:string, images?:string[], lockdown?:string[], mcp?:string[]}} o
  */
 export function buildCodexArgs({ systemPrompt, model, effort, resumeThreadId, addDirs, sandbox, images, lockdown, mcp } = {}) {
@@ -393,15 +532,27 @@ function storeUsage(dir, thread, usage) {
  * Run one codex turn. Same resolved value and rejection contract as the Claude
  * adapter: {text, exitCode}; an Error with `errorClass` on failure.
  * Options a codex spawn has no lever for (allowedTools, permissionRules,
- * mcpConfigPath, appendSubagentSystemPrompt, maxTurns, …) are ignored; the run
- * start logs each of them as a degradation (the capability map).
+ * appendSubagentSystemPrompt, maxBudgetUsd, …) are ignored; the run start logs
+ * each of them as a degradation (the capability map). `maxTurns` caps the main
+ * agent's tool calls (the Ask watchdog's count, turn.mjs): the call past it stops
+ * the turn with an error.
  */
 export async function runCodexProcess({
-  cwd = process.cwd(), systemPrompt = '', prompt = '', model, effort, onEvent = () => {}, signal,
+  cwd = process.cwd(), systemPrompt = '', prompt = '', model: namedModel, effort, onEvent = () => {}, signal,
   bin = CODEX_DEFAULT_BIN, resumeSessionId, addDirs, writableDirs, sandbox, envScrub, envAllowlist, asAgent, usageDir = defaultUsageDir(),
-  mcpConfigPath, images, askLockdown,
+  mcpConfigPath, spawnEnv: runSpawnEnv, redactValues, maxTurns, images, askLockdown,
+  permissionRules, allowedTools, agents, appendSubagentSystemPrompt,
 } = {}) {
   if (signal?.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
+  const model = namedModel || CODEX_DEFAULT_MODEL;
+  // MCP registry §5.5.3: with registry secrets in this spawn's env, every emit, the result text and the error leave redacted.
+  const redactor = Array.isArray(redactValues) && redactValues.length ? createRedactor(redactValues) : null;
+  if (redactor) { const emit = onEvent; onEvent = (e) => emit(redactor.deep(e)); }
+  const redacted = (err) => {
+    if (redactor && err && typeof err.message === 'string') err.message = redactor.text(err.message);
+    if (redactor && err && typeof err.stack === 'string') err.stack = redactor.text(err.stack);
+    return err;
+  };
   let thread = codexThreadOf(resumeSessionId);
   if (resumeSessionId && !thread) {
     safeEmit(onEvent, { type: 'stderr', stream: 'err', text: `[worca] codex: stored session ${JSON.stringify(String(resumeSessionId).slice(0, 12))}… is not a codex thread — starting a fresh one` });
@@ -415,39 +566,69 @@ export async function runCodexProcess({
     stdin = `=== SYSTEM ===\n${sys}\n=== END SYSTEM ===\n\n${stdin}`;
     sys = '';
   }
-  // Ask Worca on Codex (spec §4.6): the per-turn worca MCP server and the lockdown ride this spawn only.
-  // A pipeline spawn never translates an MCP config (its capability map still says mcpTools: false).
-  // askLockdown is true (use CODEX_ASK_LOCKDOWN) or an explicit, verified flag list.
+  // Ask Worca on Codex (spec §4.6): the lockdown rides an Ask spawn only. askLockdown is true (use
+  // CODEX_ASK_LOCKDOWN) or an explicit, verified flag list.
   const lockdown = Array.isArray(askLockdown) ? askLockdown : CODEX_ASK_LOCKDOWN;
-  let mcpServers = null;
-  if (askLockdown) {
-    // An empty list is no lockdown at all: refused exactly like none.
-    if (!Array.isArray(lockdown) || !lockdown.length) throw new Error(`${bin}: this codex cannot be locked down for a chat (its image viewer and sub-agents stay on) — Ask on Codex is unavailable`);
-    if (mcpConfigPath) {
-      let doc;
-      try { doc = JSON.parse(readFileSync(mcpConfigPath, 'utf8')); } catch (err) { throw new Error(`${bin}: cannot read the MCP config ${mcpConfigPath}: ${err.message}`); }
-      mcpServers = doc && doc.mcpServers;
-    }
-  }
-  const serverEnv = codexMcpOverrides(mcpServers).env;
-  const normalizer = createCodexNormalizer({ model, priorUsage: thread ? loadUsage(usageDir, thread) : null });
+  // An empty list is no lockdown at all: refused exactly like none.
+  if (askLockdown && (!Array.isArray(lockdown) || !lockdown.length)) throw new Error(`${bin}: this codex cannot be locked down for a chat (its image viewer and sub-agents stay on) — Ask on Codex is unavailable`);
+  // Any spawn's --mcp-config (a pipeline node's servers, a helper job's file tools, Ask's worca server) becomes
+  // per-call `-c mcp_servers.*` overrides. The run-start gate refuses a run whose servers codex cannot attach.
   // A read-only spawn is a utility job over untrusted input (a diff, a task text — D11): codex's
   // read-only sandbox still lets its shell read the environment, so it gets the scrubbed base env
   // (plus codex's own CODEX_/OPENAI_ keys), never the host's cloud or model credentials.
   const scrub = envScrub || sandbox === 'read-only';
-  const { env } = composeSpawnEnv({ envScrub: scrub, envAllowlist, prefixes: ['CODEX_', 'OPENAI_'], hostPid: guardOn ? process.pid : null,
-    ...(Object.keys(serverEnv).length ? { runEnv: serverEnv } : {}) });
+  const envOpts = { envScrub: scrub, envAllowlist, prefixes: ['CODEX_', 'OPENAI_'], hostPid: guardOn ? process.pid : null };
+  let mcpServers = null;
+  if (mcpConfigPath) {
+    let doc;
+    try { doc = JSON.parse(readFileSync(mcpConfigPath, 'utf8')); } catch (err) { throw new Error(`${bin}: cannot read the MCP config ${mcpConfigPath}: ${err.message}`); }
+    const all = doc && typeof doc.mcpServers === 'object' ? doc.mcpServers : {};
+    const unattachable = new Set(codexUnattachableMcp(all));
+    if (unattachable.size) safeEmit(onEvent, { type: 'stderr', stream: 'err', text: `[worca] codex attaches stdio MCP servers only — not attached: ${[...unattachable].join(', ')}` });
+    // `${VAR}` references expand from what Claude Code would expand them from: this spawn's env plus the run's spawn env
+    // (the registry copies' MCPSECRET_* values), which reaches the servers only through those references.
+    const from = composeSpawnEnv({ ...envOpts, runEnv: cleanRunEnv(runSpawnEnv) }).env;
+    mcpServers = expandMcpEnvRefs(Object.fromEntries(Object.entries(all).filter(([n]) => !unattachable.has(n))), from);
+  }
+  const serverEnv = codexMcpOverrides(mcpServers).env;
+  const normalizer = createCodexNormalizer({ model, priorUsage: thread ? loadUsage(usageDir, thread) : null });
+  const { env } = composeSpawnEnv({ ...envOpts, ...(Object.keys(serverEnv).length ? { runEnv: serverEnv } : {}) });
+  // Guardrails: the deny rules codex can hold (codexRulePlan). Command rules live in a worca-managed CODEX_HOME.
+  const plan = codexRulePlan(permissionRules);
+  if (plan.prefixes.length) env.CODEX_HOME = guardedCodexHome(codexRulesFile(plan.prefixes));
+  const extra = [];
+  if (plan.shellOff && sandbox !== 'read-only' && !askLockdown) extra.push(...CODEX_SHELL_OFF);
+  if (plan.webSearchOff) extra.push('-c', 'web_search="disabled"');
+  // Fan-out (the runner granted the sub-agent tool): worca's investigator becomes a codex agent role for this call.
+  let roleFile = null;
+  if (Array.isArray(allowedTools) && allowedTools.some((t) => t === 'Agent' || t === 'Task') && !askLockdown) {
+    const role = codexInvestigatorRole({ agents, subagentSystemPrompt: appendSubagentSystemPrompt });
+    try {
+      const dir = join(worcaHome(), 'tmp', 'codex-roles');
+      mkdirSync(dir, { recursive: true });
+      roleFile = join(dir, `${CODEX_INVESTIGATOR_ROLE}-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.toml`);
+      writeFileSync(roleFile, role.toml, { mode: 0o600 });
+      extra.push('-c', `agents.${CODEX_INVESTIGATOR_ROLE}.description=${tomlString(role.description)}`,
+        '-c', `agents.${CODEX_INVESTIGATOR_ROLE}.config_file=${tomlString(roleFile)}`);
+    } catch { roleFile = null; /* no role: the agent's sub-agents run as codex's default */ }
+  }
   // codex hands an MCP server only a short default env plus `env_vars`: name every variable of codex's own env, so the
   // worca server gets what a Claude chat's child inherits (proxy, CA bundle, WORCA_CODEX_BIN, codex's own keys…).
   const mcp = codexMcpOverrides(mcpServers, { passEnv: Object.keys(env) });
   // The sandbox writes only the cwd: the memory mount and the node's output dirs
   // become writable roots (--add-dir fresh, writable_roots on resume).
   const dirs = [...new Set([...(addDirs || []), ...(writableDirs || [])])];
-  const args = buildCodexArgs({ systemPrompt: sys, model, effort, resumeThreadId: thread, addDirs: dirs, sandbox,
-    ...(askLockdown ? { lockdown, mcp: mcp.args, images } : {}) });
+  const args = buildCodexArgs({ systemPrompt: sys, model, effort, resumeThreadId: thread, addDirs: dirs, sandbox, mcp: [...mcp.args, ...extra],
+    ...(askLockdown ? { lockdown, images } : {}) });
   let sawThread = thread;
+  // maxTurns: the main agent's tool calls, counted as the Ask watchdog counts them (sub-agent calls do not count).
+  const cap = Number.isInteger(maxTurns) && maxTurns > 0 ? maxTurns : null;
+  const capCtrl = new AbortController();
+  let toolCalls = 0; let capped = false;
+  const spawnSignal = cap ? (signal ? AbortSignal.any([signal, capCtrl.signal]) : capCtrl.signal) : signal;
   const res = await superviseSpawn({
-    file: bin, args, displayBin: bin, cwd, env, stdin, signal, asAgent, stagedDir: null, cleanup: () => {}, onEvent,
+    file: bin, args, displayBin: bin, cwd, env, stdin, signal: spawnSignal, asAgent, stagedDir: null, onEvent,
+    cleanup: () => { if (roleFile) rmSync(roleFile, { force: true }); },
     stdoutErrorDetail: () => normalizer.finish().error || '',
     classify: (m) => classifyCodexError(m),
     spawnError: (err, pfx) => Object.assign(new Error(`${pfx}: ${err.message}`), { errorClass: /ENOENT|EINVAL/.test(String(err.code || err.message)) ? 'network' : null }),
@@ -455,6 +636,9 @@ export async function runCodexProcess({
     onStdoutLine: (line) => {
       for (const e of normalizer.push(line)) {
         safeEmit(onEvent, e);
+        if (cap && !capped && e.type === 'tool' && (e.parentId ?? null) === null && (toolCalls += Array.isArray(e.calls) ? e.calls.length : 1) > cap) {
+          capped = true; capCtrl.abort();
+        }
         if (e.type === 'session') {
           sawThread = codexThreadOf(e.sessionId);
           // Pause/Resume: the runner's own session event (no `init`) is the one the
@@ -466,6 +650,7 @@ export async function runCodexProcess({
   }).catch((err) => {
     const f = normalizer.finish();
     if (sawThread && f.cumulativeUsage) storeUsage(usageDir, sawThread, f.cumulativeUsage);
+    if (capped && !signal?.aborted) throw redacted(Object.assign(new Error(`${bin}: stopped after ${cap} tool calls (the turn cap)`), { turnCap: true }));
     // codex writes tracing lines to stderr for recoverable tool errors (a rejected
     // patch), so a non-zero exit's stderr detail and class can miss the failure the
     // turn reported on stdout (a usage limit, a 429): that one leads, and its class
@@ -474,14 +659,16 @@ export async function runCodexProcess({
       err.message = `${bin}: ${f.error} — ${err.message}`;
       err.errorClass = strongestClass(err.errorClass ?? null, classifyCodexError(f.error));
     }
-    throw err;
+    throw redacted(err);
   });
   const final = normalizer.finish();
   if (sawThread && final.cumulativeUsage) storeUsage(usageDir, sawThread, final.cumulativeUsage);
+  // The cap tripped while codex was already finishing: the turn still went past it.
+  if (capped && !signal?.aborted) throw redacted(Object.assign(new Error(`${bin}: stopped after ${cap} tool calls (the turn cap)`), { turnCap: true }));
   if (final.error) {
     const err = new Error(`${bin}: ${final.error}`);
     err.errorClass = classifyCodexError(final.error);
-    throw err;
+    throw redacted(err);
   }
-  return { text: final.text, exitCode: res.code };
+  return { text: redactor ? redactor.text(final.text) : final.text, exitCode: res.code };
 }

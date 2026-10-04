@@ -109,9 +109,11 @@ function whichRuns(doc, level, own, inh, inhSrc) {
 }
 
 const byLabel = (a, b) => (a.label || a.id).localeCompare(b.label || b.id, undefined, { sensitivity: 'base' });
-/** The models "Decided by" offers, filtered and grouped like the Settings title-model picker
- *  (app.js buildTitleModelOptions): no legacy per-project entries; hidden built-ins and models that
- *  need a sign-in only when one IS the stored pick. @returns {Array<[string, object[]]>} non-empty groups */
+/** The models "Decided by" offers, grouped like the Settings title-model picker (app.js
+ *  buildTitleModelOptions): no legacy per-project entries; hidden built-ins and models that need a
+ *  sign-in only when one IS the stored pick. Both engines' models are offered: the review runs on the
+ *  run's engine and uses the pick only on a run of that engine (run-harness.mjs _nightDeciderPair).
+ *  @returns {Array<[string, object[]]>} non-empty groups */
 function pickerGroups(models, stored) {
   const ms = (Array.isArray(models) ? models : [])
     .filter((m) => m && typeof m.id === 'string' && m.custom !== 'project' && (!m.hidden || m.id === stored) && (!m.needsSignIn || m.id === stored));
