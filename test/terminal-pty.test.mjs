@@ -41,12 +41,19 @@ test('pipes: stdout and stderr both arrive; CR becomes LF on the way in; exit co
 
 test('pipes: a lone Ctrl+D closes stdin, so the program reading it sees end-of-input', async () => {
   const h = spawnTerminal({ file: '/bin/sh', args: [], cwd: tmpdir(), env: { PATH: process.env.PATH }, pty: null });
+  // A shell reading a pipe may take the next line with this one (dash does), and then run it itself
+  // ("hello: not found", exit 127). The whole line is parsed before it runs, so once "ready" is out the
+  // shell is not reading, and what comes next goes to cat.
+  let seen = '';
+  const ready = new Promise((resolve) => h.onData((d) => { seen += d; if (seen.includes('ready')) resolve(); }));
   const done = collect(h);
-  h.write('cat; echo "cat-done"\r');
+  h.write('echo ready; cat; echo "cat-done"\r');
+  await ready;
   h.write('hello\r');
   h.write('\x04');
   const r = await done;
   assert.match(r.out, /hello/);
+  assert.doesNotMatch(r.out, /not found/, 'cat read the line, not the shell');
   assert.match(r.out, /cat-done/, 'cat ended on EOF and the rest of the line ran');
   assert.equal(r.exitCode, 0, 'the shell then ends too, as at a tty prompt');
 });
