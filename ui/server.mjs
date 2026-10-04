@@ -22,6 +22,7 @@ import { preflightNode } from '../src/core/preflight-node.mjs';
 import { preflightDeps } from '../src/core/preflight-deps.mjs';
 import { createOrchestratorFor } from '../src/core/engine-select.mjs';
 import { selectRunEngine } from '../src/core/engines/index.mjs';
+import { stopPausedRun, StopPausedError } from '../src/core/stop-paused.mjs';
 import {
   listPipelines, readPipeline, listAllPipelines, readPipelineByKey,
   enrichPipelinesPr, reconcileStaleRunning, foreignActiveWorkspaceRuns, readPipelineForResume, persistPrState, readPrState,
@@ -155,6 +156,14 @@ import { agentIdentity } from '../src/core/agent-user.mjs';
 import { spawn } from 'node:child_process';
 import { ActionRegistry, instanceIdFor, reapOrphans, busyRunIdsFromPidFile, actionsPidFile, actionsStateFile } from '../src/core/actions/registry.mjs';
 import { runStack, stopStack } from '../src/core/actions/stack.mjs';
+import { TerminalManager, MAX_SESSIONS as TERMINAL_MAX_SESSIONS } from '../src/core/terminal/manager.mjs';
+import { terminalPidFile, zshDotDir } from '../src/core/terminal/paths.mjs';
+import { terminalTargets } from '../src/core/terminal/context.mjs';
+import { getSession as getTerminalSession, listBlocks as listTerminalBlocks, countBlocks as countTerminalBlocks, getBlock as getTerminalBlock,
+  listAudit as listTerminalAudit, listBranchWorktrees, findBranchWorktree, markInterruptedSessions } from '../src/core/terminal/store.mjs';
+import { openBranchWorktree, removeBranchWorktree, releaseBranchWorktree, enforceBranchWorktreeCap, sweepBranchWorktrees } from '../src/core/terminal/worktrees.mjs';
+import { pidAlive, killDescendants } from '../src/core/terminal/pty.mjs';
+import { createTerminalFanout } from '../src/core/terminal/fanout.mjs';
 import { detectBuiltins, builtinLaunch, copyCommandText, findOnPath } from '../src/core/actions/builtins.mjs';
 import { buildLauncherCommand, launchAndWatch, installedLaunchers, launcherExamples, launcherWarning, lineForPickedApp } from '../src/core/actions/launcher.mjs';
 import { assertNoRawCommand, normalizeStacks, memberAliases, SETUP_ACTION_ID, ActionConfigError } from '../src/core/actions/model.mjs';
@@ -246,7 +255,7 @@ import {
 import { mapWithCap, fanoutCap } from '../src/core/fanout.mjs';
 import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, listRemoteBranches, sameRepo, branchPushedTo } from '../src/core/git-info.mjs';
 import { isSyntacticRef } from '../src/core/ask/proposal.mjs';
-import { archivePipeline, discardRetainedWorktrees } from '../src/core/pipeline-delete.mjs';
+import { archivePipeline, restorePipeline, discardRetainedWorktrees } from '../src/core/pipeline-delete.mjs';
 import {
   listWorkspaces, readWorkspace, checkNewWorkspace, scanMemberProblems,
   updateWorkspace, deleteWorkspace, isGitRepo, WORKSPACE_KEY_RE, countWorkspaces,
@@ -439,11 +448,11 @@ const ASK_VENDOR_ASSETS = {
 // An explicit allow-list per prefix — never a directory listing — and an
 // unresolvable package leaves its routes unregistered (the /vendor 404 answers;
 // the mic then reports "voice activity detection unavailable").
-function resolveVendorDir(spec, resolve = (s) => import.meta.resolve(s), warn = (msg) => console.warn(msg)) {
+function resolveVendorDir(spec, resolve = (s) => import.meta.resolve(s), warn = (msg) => console.warn(msg), what = 'voice') {
   try {
     return path.dirname(fileURLToPath(resolve(spec)));
   } catch (err) {
-    warn(`[worca-ui] voice asset unavailable (${spec}): ${err?.message || err}`);
+    warn(`[worca-ui] ${what} asset unavailable (${spec}): ${err?.message || err}`);
     return null;
   }
 }
@@ -628,10 +637,17 @@ wss.on('connection', (ws, req) => {
     try { ws.close(1008, 'forbidden'); } catch { /* already closing */ }
     return;
   }
+  // A paused run this server holds may have been stopped from a terminal since: settle its entry
+  // before this tab's hello (and, through the frames, in every open tab), so a reload reads it stopped.
+  settleStaleParkedEntries();
   sockets.add(ws);
   trackHeartbeat(ws);
   // Whose Ask threads this socket may see (a shared sign-in's name, else null = all).
   ws.worcaViewer = askViewer(req);
+  // Terminal (#573, D13): whether this socket may see and drive terminals, and who its keystrokes belong to.
+  ws.terminalAllowed = terminalSameOrigin(req) && terminalEnabledHere(req);
+  ws.terminalActor = actorOf(req);
+  ws.termAttached = new Set();
   // Optional ?runId=... (or ?genId=/?benchId=) -> replay that entry's buffered
   // events so a reconnecting client immediately sees the full state. Agentgen and
   // bench entries live in the SAME runs Map keyed by genId/benchId, so a single id
@@ -679,6 +695,7 @@ wss.on('connection', (ws, req) => {
     } catch {
       return;
     }
+    if (msg && typeof msg.type === 'string' && msg.type.startsWith('term-')) { handleTerminalMessage(ws, msg); return; }
     const subId = msg && msg.type === 'subscribe' ? (msg.runId || msg.genId || msg.benchId || msg.instanceId) : null;
     if (subId && runs.has(subId)) {
       replayEntry(ws, runs.get(subId));
@@ -1368,6 +1385,29 @@ for (const { prefix, dir, files } of VOICE_VENDOR) {
       res.sendFile(file, (err) => { if (!err) return; if (res.headersSent) return next(err); next(); });
     });
   }
+}
+
+// The terminal pane (issue #573): xterm.js and its fit addon, served from node_modules on an explicit
+// allow-list like the voice assets above. resolveVendorDir answers the folder of the package's `main`
+// (`<pkg>/lib` for both). A missing package leaves its routes unregistered (the /vendor 404 answers
+// and the pane says the terminal could not load).
+function terminalVendorFiles(resolveDir = (spec) => resolveVendorDir(spec, undefined, undefined, 'terminal')) {
+  const xterm = resolveDir('@xterm/xterm');
+  const fit = resolveDir('@xterm/addon-fit');
+  return [
+    ...(xterm ? [['/vendor/xterm/xterm.mjs', path.join(xterm, 'xterm.mjs'), 'text/javascript'],
+      ['/vendor/xterm/xterm.css', path.join(xterm, '..', 'css', 'xterm.css'), 'text/css']] : []),
+    ...(fit ? [['/vendor/xterm/addon-fit.mjs', path.join(fit, 'addon-fit.mjs'), 'text/javascript']] : []),
+  ];
+}
+for (const [route, file, type] of terminalVendorFiles()) {
+  if (!fs.existsSync(file)) { console.warn(`[worca-ui] terminal asset missing: ${file}`); continue; }
+  app.get(route, (_req, res, next) => {
+    res.type(type);
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.sendFile(file, (err) => { if (!err) return; if (res.headersSent) return next(err); next(); });
+  });
 }
 
 // The in-browser speech engines (docs/speech.md): pinned runtime + model files,
@@ -2359,8 +2399,9 @@ const startRunHandler = async (req, res) => {
     }
     announceRun(entry);
 
-    // Fire-and-forget; all progress is surfaced through events.
-    Promise.resolve()
+    // Fire-and-forget; all progress is surfaced through events. Kept on the entry: a Stop of the
+    // run once it paused waits for its pause to finish unwinding (stopPausedPipelineOnce).
+    entry.launch = Promise.resolve()
       .then(() => orch.run())
       .catch((err) => {
         const event = { runId, type: 'error', message: err && err.message ? err.message : String(err) };
@@ -2795,6 +2836,8 @@ export async function schedulerTick({ now = Date.now() } = {}) {
     const sig = scheduleSignature();
     if (_lastScheduleSig !== null && sig !== _lastScheduleSig && !out.fired.length) emitChanged('schedules-changed', 'external');
     _lastScheduleSig = sig;
+    // ...and `worca stop` settles paused runs from ITS process: settle the entries this server holds for them.
+    settleStaleParkedEntries();
     return out;
   } catch (err) {
     console.error(`[worca-ui] scheduler tick failed: ${err && err.message ? err.message : err}`);
@@ -2980,6 +3023,27 @@ app.get('/api/schedules/after-candidates', (req, res) => {
   }
 });
 
+// A FINISHED pipeline predecessor whose feature branch no longer resolves (archive deletes
+// the local branch, and a restore does not bring it back): "Branch of the run before it"
+// would only fail at fire time (fireTicket: "branch … no longer exists"), so the form leaves
+// it out. A live or paused predecessor still owns its branch, and a ticket has none yet.
+const BRANCH_SETTLED = new Set(['done', 'stopped', 'error', 'interrupted']);
+async function predecessorBranchGone(ref, projectDir) {
+  if (!ref || ref.kind !== 'pipeline' || !BRANCH_SETTLED.has(String(ref.status || ''))) return false;
+  const prev = previousBranchesOf(ref.id);
+  if (!prev) return false;
+  try {
+    if (prev.sourceBranch) return !!projectDir && !(await isValidSourceRef(projectDir, prev.sourceBranch));
+    const ws = ref.workspaceId ? await readWorkspace(ref.workspaceId) : null;
+    if (!ws) return false;
+    for (const dir of ws.projectPaths) {
+      const br = prev.sourceBranchByKey[projectKey(dir)];
+      if (br && !(await isValidSourceRef(dir, br))) return true;
+    }
+  } catch { /* best-effort: an unreadable repo keeps the option; fire time still checks */ }
+  return false;
+}
+
 // GET /api/schedules/after/:id -> one predecessor and its target (the #new/after/<id> deep link).
 // async (listProjects is async) — and therefore wrapped: Express 4 does not catch a rejected
 // handler, and the deep link's fetch would hang instead of showing an error line.
@@ -2995,7 +3059,8 @@ app.get('/api/schedules/after/:id', async (req, res) => {
       const projects = await listProjects();
       projectDir = (projects.find((p) => projectKey(p.path) === ref.projectKey) || {}).path || null;
     }
-    res.json({ kind: ref.kind, id: ref.id, title: ref.title, status: ref.status, projectDir, workspaceId: ref.workspaceId || null });
+    res.json({ kind: ref.kind, id: ref.id, title: ref.title, status: ref.status, projectDir, workspaceId: ref.workspaceId || null,
+      branchGone: await predecessorBranchGone(ref, projectDir) });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
@@ -3253,6 +3318,11 @@ const chatActions = {
     return postDirection(entry ? (entry.pipelineId || entry.id) : runId, text, `chat:${platform || 'chat'}`);
   },
   stop: (runId, by) => stopRun(runId, by || 'local'),
+  // A paused run (chat `/stop *<ref>` on a History row): the same stop the UI's button runs.
+  stopPaused: async (pipelineId, by) => {
+    try { return await stopPausedPipeline(pipelineId, by || 'local'); }
+    catch (err) { return { ok: false, code: err?.code || null, error: err?.message || String(err) }; }
+  },
   pause: (runId, by) => pauseRun(runId, by || 'local'),
   // The long chain of budget/worktree/double-resume guards lives in resumeRun();
   // call it in-process. (It used to be reached by POSTing to 127.0.0.1:PORT — a
@@ -3385,15 +3455,23 @@ function answerRun(runId, id, payload, by = 'local') {
   entry.orch.answer(id, payload, by || 'local');
   resolvePending(entry, { id, reason: 'answered' });
 }
-/** `by` = who asked (identity.mjs actorOf / chatActor); recorded on the entry and the run state. */
-function stopRun(runId, by = 'local') {
+/** `by` = who asked (identity.mjs actorOf / chatActor); recorded on the entry and the run state.
+ *  A PAUSED entry has no run loop to abort — orch.stop() would flip its status in memory only
+ *  (no done, no persist, no teardown) — so it settles from its saved row (stopPausedPipeline).
+ *  An interrupted one is never stopped: it stays resumable. */
+async function stopRun(runId, by = 'local') {
   const entry = runs.get(runId);
   if (!entry) throw new Error('unknown runId');
+  if (entry.status === 'paused' && entry.pipelineId) return stopPausedPipeline(entry.pipelineId, by);
+  if (entry.status === 'interrupted') {
+    throw new StopPausedError('INTERRUPTED', 'pipeline is interrupted — it stays resumable; only a paused run can be stopped');
+  }
   entry.lastAction = { kind: 'stop', by: by || 'local', at: new Date().toISOString() };
   entry.orch.stop(entry.lastAction.by);
   entry.status = 'stopped';
   if (entry.pipelineId) cancelScheduledResumes(entry.pipelineId, { by, reason: `the run was stopped${byActor(by || 'local')}` });
   resolvePending(entry, { reason: 'stopped' });
+  return { ok: true };
 }
 function pauseRun(runId, by = 'local') {
   const entry = runs.get(runId);
@@ -3403,6 +3481,137 @@ function pauseRun(runId, by = 'local') {
   entry.lastAction = { kind: 'pause', by: by || 'local', at: new Date().toISOString() };
   entry.status = 'pausing';
   resolvePending(entry, { reason: 'paused' });
+}
+
+/** In-process stops in flight, by pipeline id. A second click, tab or chat command for the same
+ *  run joins the stop that is already running: it would otherwise lose the claim (NOT_PAUSED) and
+ *  settleStaleParked would tell the tabs "stopped" while the first stop is still tearing down. */
+const STOPS_IN_FLIGHT = new Map();
+
+/**
+ * Stop a PAUSED run (stop-paused.mjs) — behind POST /api/stop, a paused entry's Stop
+ * (stopRun) and chat `/stop *<ref>`. Awaited to the end, so callers report what happened.
+ * A run this server paused in this boot keeps its runId: the stopping orchestrator is wired
+ * to that entry, so every tab holding it gets state(stopped) + done(stopped) and settles it
+ * like a live stop. Otherwise (a restart since, or the CLI paused it) chat and Ask cards are
+ * told directly, and the tabs learn from `pipelines-changed`. A second click, tab or chat
+ * command for the same run joins the stop already in flight (STOPS_IN_FLIGHT).
+ * @returns {Promise<{ok:true, pipelineId:string, runId:string|null, status:'stopped'}>}
+ * @throws {StopPausedError}
+ */
+async function stopPausedPipeline(pipelineId, by = 'local') {
+  const running = STOPS_IN_FLIGHT.get(pipelineId);
+  if (running) return running;
+  const p = stopPausedPipelineOnce(pipelineId, by);
+  STOPS_IN_FLIGHT.set(pipelineId, p);
+  try { return await p; } finally { STOPS_IN_FLIGHT.delete(pipelineId); }
+}
+
+/** One stop of a paused run. Called only through stopPausedPipeline, which joins concurrent stops. */
+async function stopPausedPipelineOnce(pipelineId, by = 'local') {
+  const parked = () => [...runs.values()].find((e) => e.pipelineId === pipelineId && e.status === 'paused') || null;
+  // A pause still unwinding: its state(paused) frame is out, so the entry reads paused, but its
+  // harness is still finishing the pause (the persist, the audit, a forced pause's diff and task-source
+  // write-back, then done(paused) and its finally). Let it finish first: two harnesses must never work
+  // one run, and its late done(paused) would turn the stopped entry back to paused.
+  const unwinding = parked();
+  if (unwinding && !unwinding.settled && unwinding.launch) await unwinding.launch.catch(() => {});
+  let entry = null;
+  let prev = null;
+  let out;
+  try {
+    out = await stopPausedRun(pipelineId, {
+      by: by || 'local',
+      agentsDir: AGENTS_DIR,
+      // A run started with a per-request mock on a real server stays a mock run (no team metrics).
+      claude: { mock: serverMockMode() || !!parked()?.orch?.claude?.mock },
+      projectDirFor: projectDirForKey,
+      beforeStop: (orch) => {
+        // Synchronous with the claim (stopPausedRun's contract), and resumeRun re-reads the row
+        // right before its runs.set: either a resume that went live meanwhile is seen here and
+        // wins, or the resume sees the stopped row and refuses.
+        for (const e of runs.values()) {
+          if (e.pipelineId === pipelineId && !SETTLED_RUN.has(String(e.status || ''))) {
+            throw new StopPausedError('LIVE', 'pipeline is live — stop its run instead');
+          }
+        }
+        // Read before the entry is re-pointed: nothing that can throw runs after the swap below.
+        const links = askFindRunLinksByPipeline(pipelineId);
+        entry = parked();
+        if (entry) {
+          prev = { orch: entry.orch, lastAction: entry.lastAction };   // restored unless the stop lands
+          entry.orch = orch;
+          entry.lastAction = { kind: 'stop', by: by || 'local', at: new Date().toISOString() };
+          // The pause latched both (its done frame): re-arm them so wireRun records the stop on
+          // a scheduled run's ticket feed and opens a waiting run chain at once.
+          entry._outcomeRecorded = false;
+          entry._chainNudged = false;
+          wireRun(entry);                     // tab frames + chat notifier, on the same runId
+        } else {
+          try { chatNotifier.attach(orch, { runId: pipelineId }); }
+          catch (err) { console.error(`[worca-ui] chat notifier attach failed: ${err && err.message ? err.message : err}`); }
+        }
+        for (const link of links) {
+          try { attachAskFollower(orch, { threadId: link.threadId, runId: link.runId, cardId: link.cardId }); }
+          catch (err) { console.error(`[worca-ui] ask follower attach failed: ${err && err.message ? err.message : err}`); }
+        }
+      },
+    });
+  } catch (err) {
+    // The claim lost (NOT_PAUSED) or never ran (a throw before it, e.g. the database locked past its
+    // busy timeout): put the paused orchestrator back on the entry, which a reload snapshots. The
+    // stop's own was never rehydrated. A stop whose claim landed has settled it as stopped, and keeps it.
+    if (entry && prev && entry.orch?.state?.status !== 'stopped') { entry.orch = prev.orch; entry.lastAction = prev.lastAction; }
+    if (['NOT_PAUSED', 'NOT_FOUND'].includes(err?.code)) settleStaleParked(pipelineId);
+    throw err;
+  }
+  cancelScheduledResumes(pipelineId, { by, reason: `the run was stopped${byActor(by || 'local')}` });
+  emitChanged('pipelines-changed', 'stopped');
+  // Run chains without a wired entry: a run waiting on this one decides now, not at the next
+  // 30 s tick (a wired entry's done frame nudges them through wireRun).
+  if (!entry) {
+    try { if (dependentsOfRun({ pipelineId }).length) setTimeout(() => { void schedulerTick(); }, 0); }
+    catch (err) { console.error(`[worca-ui] chain nudge failed: ${err && err.message ? err.message : err}`); }
+  }
+  return { ...out, runId: entry ? entry.id : null };
+}
+
+/** A paused entry this server still holds for a run that was settled ELSEWHERE (`worca stop`
+ *  from a terminal, another server, an archive): its row is no longer parked, so tell the tabs —
+ *  state + done on the entry's own runId, the frames a live stop sends — and drop it from
+ *  "Needs you", instead of offering a Stop and a Resume the row refuses forever. */
+function settleStaleParked(pipelineId) {
+  const row = findPipelineRowById(pipelineId);
+  const status = row ? row.status : 'stopped';
+  if (!['done', 'stopped', 'error'].includes(status)) return;   // still parked, or live elsewhere: not ours to settle
+  for (const e of runs.values()) {
+    if (e.pipelineId !== pipelineId || e.status !== 'paused') continue;
+    e.status = status;
+    e.pauseReason = null;
+    e.pauseDetail = null;
+    // A later subscribe snapshots the entry's orchestrator (sendStateSnapshot): it must read the same.
+    if (e.orch && e.orch.state) e.orch.state.status = status;
+    broadcast(bufferEvent(e, { type: 'state', status, id: pipelineId }));
+    broadcast(bufferEvent(e, { type: 'done', status, pipelineDir: null }));
+  }
+}
+
+/** The paused entries this server holds whose rows another process settled meanwhile (`worca stop`
+ *  from a terminal): settle them for the tabs (settleStaleParked). Run before each new tab's hello
+ *  and on each scheduler tick, so neither a reload nor an open tab keeps offering a Stop and a
+ *  Resume the row refuses. This server's own stop in flight is left alone: its row reads stopped
+ *  from the claim on, and its own state + done frames settle the entry. Never throws. */
+function settleStaleParkedEntries() {
+  try {
+    const ids = new Set();
+    for (const e of runs.values()) {
+      if (e.status === 'paused' && e.pipelineId && !STOPS_IN_FLIGHT.has(e.pipelineId)) ids.add(e.pipelineId);
+    }
+    for (const id of ids) {
+      const row = findPipelineRowById(id);
+      if (row && ['done', 'stopped', 'error'].includes(row.status)) settleStaleParked(id);
+    }
+  } catch (err) { console.error(`[worca-ui] stale paused entries: ${err && err.message ? err.message : err}`); }
 }
 
 // ---------------------------------------------------------------------------
@@ -3428,16 +3637,26 @@ app.post('/api/answer', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/stop  -> abort a run
-// body: { runId }
+// POST /api/stop  -> abort a live run, or stop a paused one for good
+// body: { runId } | { pipelineId } | { runId, pipelineId }
+// A known runId acts on that entry (stopRun routes a paused one to stopPausedPipeline).
+// A pipelineId alone — or with a runId this server does not know (a tab from before a
+// restart) — stops the paused run from its saved row.
 // ---------------------------------------------------------------------------
-app.post('/api/stop', (req, res) => {
-  const { runId } = req.body || {};
-  if (!runId || !runs.has(runId)) return badRequest(res, 'unknown runId');
+app.post('/api/stop', async (req, res) => {
+  const { runId, pipelineId } = req.body || {};
   try {
-    stopRun(runId, actorOf(req));
-    res.json({ ok: true });
+    if (runId && runs.has(runId)) return res.json(await stopRun(runId, actorOf(req)));
+    if (pipelineId && typeof pipelineId === 'string') {
+      // A tab from before a restart may still show the run paused while this server already
+      // resumed it: stop the run that is live now, rather than refusing a stale runId.
+      const live = liveRunEntry(pipelineId);
+      if (live && !SETTLED_RUN.has(String(live.status || ''))) return res.json(await stopRun(live.id, actorOf(req)));
+      return res.json(await stopPausedPipeline(pipelineId, actorOf(req)));
+    }
+    return badRequest(res, 'unknown runId');
   } catch (err) {
+    if (err instanceof StopPausedError) return res.status(err.status).json({ error: err.message, code: err.code });
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
 });
@@ -3595,7 +3814,13 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
   const engineOpts = resumeEngineOpts(engine, allowUnguardedEngine);
   const saved = readPipelineForResume(pipelineId);
   if (!saved) throw new ResumeError(404, { error: 'pipeline not found' });
-  if (saved.row.status !== 'paused' && saved.row.status !== 'interrupted') throw new ResumeError(400, { error: `pipeline is "${saved.row.status}", not resumable` });
+  if (saved.row.status !== 'paused' && saved.row.status !== 'interrupted') {
+    // A paused entry this server still holds for a run settled elsewhere (`worca stop` from a
+    // terminal) offers a Resume the row refuses: settle it for its tabs (settleStaleParked). Not
+    // while this server's own stop of it is in flight: that stop sends its tabs the frames itself.
+    if (!STOPS_IN_FLIGHT.has(pipelineId)) settleStaleParked(pipelineId);
+    throw new ResumeError(400, { error: `pipeline is "${saved.row.status}", not resumable` });
+  }
   if (!saved.resumePoint) throw new ResumeError(400, { error: 'pipeline has no resume point' });
   if (saved.resumePoint.version !== 2) {
     throw new ResumeError(409, { code: 'ENGINE_RETIRED', error: V1_RUN_RETIRED });
@@ -3731,6 +3956,14 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
 
   // A scheduled resume for this run is moot the moment any resume is committed.
   cancelScheduledResumes(pipelineId, { by, reason: `the run was resumed${byActor(by || 'local')}` });
+  // A stop may have claimed the row while the gates above awaited (claimPausedForStop flips
+  // it to stopped atomically). Re-read it with NOTHING awaited between here and runs.set, so
+  // either the stop sees this entry (stopPausedPipeline's beforeStop, and refuses) or this
+  // resume sees the stopped row (and refuses).
+  const fresh = readPipelineForResume(pipelineId);
+  if (!fresh || (fresh.row.status !== 'paused' && fresh.row.status !== 'interrupted')) {
+    throw new ResumeError(409, { error: `pipeline is "${fresh ? fresh.row.status : 'gone'}", not resumable` });
+  }
   const entry = {
     id: runId,
     orch,
@@ -3784,8 +4017,9 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     }
   }
 
-  // Fire-and-forget; all progress is surfaced through events (same idiom as /api/run).
-  Promise.resolve()
+  // Fire-and-forget; all progress is surfaced through events (same idiom as /api/run). Kept on
+  // the entry: a Stop of the run once it paused again waits for its pause to finish unwinding.
+  entry.launch = Promise.resolve()
     .then(() => orch.resume())
     .catch((err) => {
       const event = { runId, type: 'error', message: err && err.message ? err.message : String(err) };
@@ -4242,8 +4476,14 @@ app.post('/api/runs/:id/overview', async (req, res) => {
 // ---------------------------------------------------------------------------
 // GET /api/history  -> machine-wide history across every onboarded project
 // ---------------------------------------------------------------------------
-app.get('/api/history', async (_req, res) => {
+app.get('/api/history', async (req, res) => {
   try {
+    // The Runs page's Archived chip (?archived=1): the soft-deleted rows, same wire
+    // shape as the active list. They cannot be stale-running, so no self-heal here —
+    // and `lite` (no git/gh fans), since an archived run's branch and worktree are gone.
+    if (req.query.archived === '1' || req.query.archived === 'true') {
+      return res.json({ pipelines: (await listAllPipelines({ archived: true, lite: true })) || [], ghAvailable: await hasGh() });
+    }
     // Self-heal records left 'running' by a dead process before listing, so History
     // never shows a phantom Running run and its Delete button appears (see
     // pipeline-delete ACTIVE / app.js isDeletableEntry — both allow 'interrupted').
@@ -5143,6 +5383,58 @@ app.delete('/api/runs/:id', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/runs/:id/restore?projectKey=...  (or ?projectDir=... / ?workspaceId=...)
+// RESTORE an ARCHIVED pipeline: clear its `archived_at` so it is listed (and
+// chain-gated) again. The inverse of DELETE /api/runs/:id above — same query
+// scoping, same guards, same status codes. Nothing on disk comes back (the run
+// dir, branch and worktree stay reclaimed), so the restored run is a read-only
+// record with a working PR link. Mirrors the DELETE route's shape throughout.
+// ---------------------------------------------------------------------------
+app.post('/api/runs/:id/restore', async (req, res) => {
+  const id = req.params.id;
+  const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId.trim() : '';
+  const projectKey = typeof req.query.projectKey === 'string' ? req.query.projectKey.trim() : '';
+  const projectDir = resolveProjectDir(req.query.projectDir);
+  if (workspaceId && !WORKSPACE_KEY_RE.test(workspaceId)) {
+    return res.status(404).json({ error: 'pipeline not found' });
+  }
+  if (projectKey && !/^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/.test(projectKey)) {
+    return res.status(404).json({ error: 'pipeline not found' });
+  }
+  if (!workspaceId && !projectKey && !projectDir) {
+    return badRequest(res, 'workspaceId, projectKey or projectDir is required');
+  }
+
+  // Mirror of the DELETE route's guard: never restore while the pipeline is live
+  // in this process (defensive — an archived run cannot be live).
+  const liveActive = [...runs.values()].some((r) =>
+    (r.pipelineId === id || r.id === id) &&
+    ['running', 'starting', 'created', 'pausing'].includes(String(r.status || '').toLowerCase()));
+  if (liveActive) return res.status(409).json({ error: 'cannot restore a running pipeline' });
+
+  try {
+    const report = await restorePipeline({
+      workspaceKey: workspaceId || null,
+      key: workspaceId ? null : (projectKey || null),
+      projectDir: (workspaceId || projectKey) ? null : projectDir,
+      id,
+    });
+    if (!report) return res.status(404).json({ error: 'pipeline not found' });
+    if (report.restored) {
+      const restBy = actorOf(req);
+      const note = report.wasPaused ? ' It was paused; archive removed its run directory, so it can no longer resume.' : '';
+      appendAuditById(report.id, `Run restored${byActor(restBy)}.${note}`, { actor: restBy });
+    }
+    emitChanged('pipelines-changed', 'restored');
+    res.json({ ok: true, ...report });
+  } catch (e) {
+    if (e && e.code === 'RUNNING') return res.status(409).json({ error: e.message });
+    if (e && e.code === 'BAD_REQUEST') return badRequest(res, e.message);
+    res.status(500).json({ error: e && e.message ? e.message : String(e) });
+  }
+});
+
 // Reclaim only worktrees retained after a teardown commit failure. Unlike
 // Archive, this keeps the pipeline in History and saves recovery patches first.
 app.post('/api/runs/:id/discard-worktree', async (req, res) => {
@@ -5225,7 +5517,9 @@ function noRawCommand(req, res) {
 }
 /** D12: live actions of this server plus any other process that shares the pid file. */
 const busyActionRunIds = (extra = []) =>
-  new Set([...actions.running().map((s) => s.runId), ...busyRunIdsFromPidFile(actionsPidFileNow()), ...extra]);
+  new Set([...actions.running().map((s) => s.runId), ...busyRunIdsFromPidFile(actionsPidFileNow()),
+    // #573: open terminals too. `terminals` is declared below; this only runs at request/boot time.
+    ...terminals.busyRunIds(), ...busyRunIdsFromPidFile(terminalPidFileNow()), ...extra]);
 
 // ── registry → runs Map entry + frames (wireScriptBench's ring buffer, D15) ──────
 function actionEntry(instanceId) {
@@ -5281,9 +5575,11 @@ const isLiveRun = (id) => liveRunIds().includes(id);
  * D30: this process is still inside the run's orch.run()/orch.resume() promise. liveRunIds() drops a run
  * the moment its status reads 'done', and that happens BEFORE the harness's finally (teardown + keep
  * policy). `settled` is set by the .finally at each launch site, so a run torn down long ago, or one whose
- * teardown skipped the worktreeRemoved stamp, never reads as finishing.
+ * teardown skipped the worktreeRemoved stamp, never reads as finishing. A paused run being stopped
+ * (STOPS_IN_FLIGHT) is finishing too: its entry settled long ago, its row and its done frame read
+ * stopped, and its teardown is still committing and removing the worktree.
  */
-const isFinishingRun = (id) => [...runs.values()].some((r) => r.kind !== 'action' && r.kind !== 'scriptbench' && r.pipelineId === id && !r.settled);
+const isFinishingRun = (id) => STOPS_IN_FLIGHT.has(id) || [...runs.values()].some((r) => r.kind !== 'action' && r.kind !== 'scriptbench' && r.pipelineId === id && !r.settled);
 const memberFor = (row, key) => { const ms = membersOfRow(row); return key ? ms.find((m) => m.projectKey === key) : (ms.length === 1 ? ms[0] : null); };
 const checkoutRecOf = (runId, pk) => checkoutRecordsFor(findPipelineRowById(runId))?.members.find((x) => x.projectKey === pk) || null;
 async function stopMemberServices(runId, projectKey) {
@@ -5291,9 +5587,237 @@ async function stopMemberServices(runId, projectKey) {
   // stop() awaits a pending spawn, so a stack step that was mid-launch is caught here too.
   await actions.stopWhere((s) => s.runId === runId && (!projectKey || s.member === projectKey));
   for (const [k, st] of stackStates) if (st.runId === runId) stackStates.delete(k);
+  await terminals.closeWhere((s) => s.runId === runId && (!projectKey || s.member === projectKey), 'system', 'checkout discarded');
 }
 /** The discardCheckout callback: (projectKey, runId) of the run being discarded, never the caller's run. */
 const stopCheckoutServices = (pk, runId) => stopMemberServices(runId, pk);
+
+// ---------------------------------------------------------------------------
+// Terminal (issue #573): worca-owned shells in the right-side pane. Sessions live in a TerminalManager;
+// their output rides /ws as term-* frames to the sockets that attached (D1). Gated like Actions:
+// local, or a hosted worca that set WORCA_TERMINAL_REMOTE; never a possible agent; and only for
+// pages served by this server (D13).
+// ---------------------------------------------------------------------------
+const terminalPidFileNow = () => terminalPidFile(worcaHome());
+const terminals = new TerminalManager({ runLive: (id) => isLiveRun(id) });
+Object.defineProperty(terminals, 'pidFile', { get: terminalPidFileNow, set: () => {} });
+Object.defineProperty(terminals, 'zshDir', { get: () => zshDotDir(worcaHome()), set: () => {} });
+
+// D13: isLocalRequest checks the Origin's hostname only, so a page on another localhost port (a dev
+// server, an Action service running agent-written code) passes it. The terminal runs commands, so a
+// browser Origin must name this server exactly. No Origin = not a browser page (the agent gate applies).
+function terminalSameOrigin(req) {
+  const origin = req?.headers?.origin;
+  if (!origin) return true;
+  try { return new URL(origin).host.toLowerCase() === String(req.headers.host || '').toLowerCase(); } catch { return false; }
+}
+function terminalOriginOk(req, res) {
+  if (terminalSameOrigin(req)) return true;
+  res.status(403).json({ error: 'The terminal only answers pages served by this Worca.', code: 'TERMINAL_CROSS_ORIGIN' });
+  return false;
+}
+const terminalEnabledHere = (req = null) =>
+  !agentMayBeCaller(req) && (!REMOTE_MODE || isTruthy(process.env.WORCA_TERMINAL_REMOTE));
+/** Same origin and not a possible agent: what even Stop and Close need (they skip only the hosted gate). */
+function terminalCallerOk(req, res) {
+  if (!terminalOriginOk(req, res)) return false;
+  if (!agentMayBeCaller(req)) return true;
+  res.status(403).json({ error: 'The terminal cannot be used from inside the container while agent isolation is on. Open Worca through its published address.', code: 'TERMINAL_AGENT_BLOCKED' });
+  return false;
+}
+function requireTerminal(req, res) {
+  if (!terminalCallerOk(req, res)) return false;
+  if (terminalEnabledHere(req)) return true;
+  res.status(403).json({ error: 'The terminal is turned off on this hosted deployment. An administrator can enable it with WORCA_TERMINAL_REMOTE=1.', code: 'TERMINAL_DISABLED' });
+  return false;
+}
+const TERMINAL_RAW_FIELDS = ['cwd', 'dir', 'path', 'shell', 'env', 'args', 'command', 'cmd'];
+function rejectRawTerminalFields(req, res) {
+  const bad = TERMINAL_RAW_FIELDS.find((k) => req.body && Object.hasOwn(req.body, k));
+  if (!bad) return true;
+  res.status(400).json({ error: `A terminal opens in the folder Worca picks; "${bad}" cannot be sent.`, code: 'RAW_FIELD' });
+  return false;
+}
+const TERMINAL_ERROR_STATUS = { TOO_MANY_SESSIONS: 409, NO_FOLDER: 409, WORKTREE_FAILED: 409, BAD_BRANCH: 400, BAD_PROJECT: 400, NO_BRANCH: 404 };
+function terminalError(res, e) {
+  const status = TERMINAL_ERROR_STATUS[e?.code];
+  if (status) return res.status(status).json({ error: e.message, code: e.code });
+  console.error(`[worca-ui] terminal: ${e?.message || e}`);
+  return res.status(500).json({ error: e?.message || 'terminal failed' });
+}
+const activeActionSnaps = (runId) => actions.listFor(runId).filter((s) => ['starting', 'running', 'ready'].includes(s.status));
+
+// Frames go out through the fan-out (fanout.mjs): a socket that falls behind skips term-data and gets one
+// term-replay once its send buffer drains, so a `yes` in a terminal never grows this server's memory.
+function terminalReplayFrame(sessionId) {
+  const r = terminals.replay(sessionId);
+  return r ? { type: 'term-replay', sessionId, data: r.data, seq: r.seq, snapshot: terminals.get(sessionId) } : null;
+}
+const terminalFanout = createTerminalFanout({ sockets, replayFrame: terminalReplayFrame });
+terminals.on('data', (f) => terminalFanout.toAttached(f.sessionId, { type: 'term-data', ...f }));
+terminals.on('block', (block) => terminalFanout.toAttached(block.sessionId, { type: 'term-block', sessionId: block.sessionId, block }));
+terminals.on('status', (snapshot) => {
+  terminalFanout.toAllowed({ type: 'term-status', snapshot });
+  if (snapshot.status !== 'running' && snapshot.scope === 'branch') {
+    // busyDirs as a getter: git work runs async, and a terminal may reopen the folder meanwhile.
+    releaseBranchWorktree(snapshot.cwd, { keep: actionsSettings().keep, busyDirs: () => terminals.busyDirs(), projectDirOf: projectDirForKey })
+      .catch((e) => console.warn(`[worca-ui] terminal: could not release ${snapshot.cwd}: ${e?.message || e}`));
+  }
+});
+
+function handleTerminalMessage(ws, msg) {
+  if (!ws.terminalAllowed) return;
+  const id = typeof msg.sessionId === 'string' ? msg.sessionId : '';
+  if (!terminals.get(id)) return;
+  if (msg.type === 'term-attach') {
+    ws.termAttached.add(id);
+    ws.termLagging?.delete(id);                    // a fresh replay supersedes any pending resync
+    const frame = terminalReplayFrame(id);
+    if (frame) send(ws, frame);
+    return;
+  }
+  if (msg.type === 'term-detach') { ws.termAttached.delete(id); return; }
+  if (!ws.termAttached.has(id)) return;
+  if (msg.type === 'term-input' && typeof msg.data === 'string') terminals.write(id, msg.data, ws.terminalActor);
+  else if (msg.type === 'term-resize') terminals.resize(id, msg.cols, msg.rows);
+}
+
+app.get('/api/terminal', (req, res) => {
+  const enabled = terminalSameOrigin(req) && terminalEnabledHere(req);
+  res.json({ enabled, pty: terminals.ptyStatus(), maxSessions: TERMINAL_MAX_SESSIONS, sessions: enabled ? terminals.list() : [] });
+});
+
+app.get('/api/runs/:id/terminal', (req, res) => {
+  if (!requireTerminal(req, res)) return;
+  const row = runRowForScope(req, res); if (!row) return;
+  res.json({ enabled: true, ...terminalTargets(row, { isLive: isLiveRun }), sessions: terminals.list().filter((s) => s.runId === row.id) });
+});
+
+app.post('/api/runs/:id/terminal', async (req, res) => {
+  if (!requireTerminal(req, res) || !rejectRawTerminalFields(req, res)) return;
+  try {
+    const row = runRowForScope(req, res); if (!row) return;
+    const t = terminalTargets(row, { isLive: isLiveRun });
+    const want = typeof req.body?.member === 'string' ? req.body.member : null;
+    const m = want ? t.members.find((x) => x.projectKey === want) : (t.members.length === 1 ? t.members[0] : null);
+    if (!m) return res.status(400).json({ error: want ? 'That project is not part of this run.' : 'Pick a project: this run has more than one.', code: 'MEMBER_REQUIRED' });
+    if (!m.cwd) {
+      const code = m.state === 'needs-checkout' ? 'NOT_CHECKED_OUT' : 'NO_FOLDER';
+      return res.status(409).json({ error: code === 'NOT_CHECKED_OUT' ? 'Check out this run first.' : (m.reason || 'This run has no folder.'), code });
+    }
+    const by = actorOf(req);
+    const session = await terminals.open({ cwd: m.cwd, scope: 'run', label: `${row.title || row.id} · ${m.projectName}`, runId: row.id,
+      member: m.projectKey, projectKey: m.projectKey, branch: m.branch, workspace: t.workspace, runLive: t.live, by,
+      cols: req.body?.cols, rows: req.body?.rows, actionSnaps: activeActionSnaps(row.id) });
+    appendAuditById(row.id, `Terminal opened${byActor(by)} in ${m.projectName}.`, { actor: by });
+    res.status(201).json({ session, warning: m.warning || null });
+  } catch (e) { terminalError(res, e); }
+});
+
+app.get('/api/projects/:key/terminal', async (req, res) => {
+  if (!requireTerminal(req, res)) return;
+  try {
+    const p = await tmProject(req, res); if (!p) return;
+    const [branches, current] = await Promise.all([listLocalBranches(p.path), currentBranch(p.path)]);
+    res.json({ enabled: true, projectKey: p.key, dir: p.path, branches, current, worktrees: listBranchWorktrees(p.key),
+      sessions: terminals.list().filter((s) => (s.scope === 'project' || s.scope === 'branch') && s.projectKey === p.key) });
+  } catch (e) { terminalError(res, e); }
+});
+
+// No `branch`: a shell in the project's own folder, on whatever is checked out there (scope 'project').
+// That folder is the person's: nothing here, nor the branch-folder release, sweep or cap, ever removes it.
+// With `branch`: a Worca-owned worktree of that branch (scope 'branch'; the pane no longer asks for one).
+app.post('/api/projects/:key/terminal', async (req, res) => {
+  if (!requireTerminal(req, res) || !rejectRawTerminalFields(req, res)) return;
+  try {
+    const p = await tmProject(req, res); if (!p) return;
+    const by = actorOf(req);
+    if (req.body?.branch == null) {
+      const branch = await currentBranch(p.path);
+      const session = await terminals.open({ cwd: p.path, scope: 'project', label: branch ? `${p.name} · ${branch}` : p.name, projectKey: p.key,
+        branch, by, cols: req.body?.cols, rows: req.body?.rows });
+      return res.status(201).json({ session, warning: null });
+    }
+    const wt = await openBranchWorktree({ projectKey: p.key, projectDir: p.path, branch: req.body?.branch, by });
+    let session;
+    try {
+      session = await terminals.open({ cwd: wt.dir, scope: 'branch', label: `${p.name} · ${wt.branch}`, projectKey: p.key,
+        branch: wt.branch, by, cols: req.body?.cols, rows: req.body?.rows });
+    } catch (e) {
+      // A folder made for this terminal, which never started, is not left behind (it is clean: just made).
+      if (!wt.reused) {
+        await removeBranchWorktree(wt.dir, { projectDirOf: projectDirForKey, isBusy: () => terminals.busyDirs().has(wt.dir) })
+          .catch((err) => console.warn(`[worca-ui] terminal: could not remove ${wt.dir}: ${err?.message || err}`));
+      }
+      throw e;
+    }
+    const { maxCheckouts } = actionsSettings();
+    if (maxCheckouts) await enforceBranchWorktreeCap({ max: maxCheckouts, busyDirs: () => terminals.busyDirs(), projectDirOf: projectDirForKey });
+    res.status(201).json({ session, warning: wt.warning || null });
+  } catch (e) { terminalError(res, e); }
+});
+
+app.delete('/api/projects/:key/terminal/worktrees', async (req, res) => {
+  if (!requireTerminal(req, res)) return;
+  if (typeof req.body?.branch !== 'string') return res.status(400).json({ error: 'That is not a branch name worca can open.', code: 'BAD_BRANCH' });
+  try {
+    const p = await tmProject(req, res); if (!p) return;
+    const w = findBranchWorktree(p.key, req.body.branch);
+    if (!w) return res.status(404).json({ error: 'No worca folder for that branch.', code: 'NOT_FOUND' });
+    if (terminals.busyDirs().has(w.dir)) return res.status(409).json({ error: 'A terminal is still open in this folder. Close it first.', code: 'IN_USE' });
+    const r = await removeBranchWorktree(w.dir, { force: req.body?.force === true, projectDirOf: projectDirForKey,
+      isBusy: () => terminals.busyDirs().has(w.dir) });
+    if (r.removed) return res.json({ removed: true });
+    const WORKTREE_REMOVE_REASON = { dirty: ['DIRTY', 'This folder has uncommitted changes.'],
+      'in-use': ['IN_USE', 'A terminal is still open in this folder. Close it first.'],
+      'unpushed-commits': ['UNPUSHED_COMMITS', 'This folder has commits that are not on any branch. Removing it would lose them.'] };
+    const [code, msg] = WORKTREE_REMOVE_REASON[r.reason] || ['NOT_REMOVED', `The folder could not be removed (${r.reason}).`];
+    res.status(409).json({ error: msg, code });
+  } catch (e) { terminalError(res, e); }
+});
+
+const terminalSessionOf = (id) => terminals.get(id) || getTerminalSession(id);
+
+app.get('/api/terminal/sessions/:id', (req, res) => {
+  if (!requireTerminal(req, res)) return;
+  const session = terminalSessionOf(req.params.id);
+  if (!session) return res.status(404).json({ error: 'terminal not found' });
+  // The newest blocks (oldest first): a session with more than the limit shows its recent end, and
+  // totalBlocks (> blocks.length) says older ones were left out.
+  const afterSeq = Number(req.query.after) || 0;
+  res.json({ session, blocks: listTerminalBlocks({ sessionId: session.id, afterSeq, newest: true }),
+    totalBlocks: countTerminalBlocks(session.id, afterSeq) });
+});
+
+app.get('/api/terminal/sessions/:id/blocks/:seq', (req, res) => {
+  if (!requireTerminal(req, res)) return;
+  const block = getTerminalBlock(req.params.id, Number(req.params.seq));
+  if (!block) return res.status(404).json({ error: 'block not found' });
+  res.json(block);
+});
+
+app.get('/api/terminal/audit', (req, res) => {
+  if (!requireTerminal(req, res)) return;
+  const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : null;
+  const runId = typeof req.query.runId === 'string' ? req.query.runId : null;
+  res.json({ audit: listTerminalAudit({ sessionId, runId, limit: Number(req.query.limit) || 200 }) });
+});
+
+// Stop and Close are not behind the hosted gate (like actions stop): a person can always end what is
+// running. They still refuse a page from another origin (D13) and a possible agent.
+app.post('/api/terminal/sessions/:id/stop', (req, res) => {
+  if (!terminalCallerOk(req, res)) return;
+  const r = terminals.interrupt(req.params.id, actorOf(req));
+  if (!r) return res.status(404).json({ error: 'No running terminal with that id.' });
+  res.json({ ok: true, blockSeq: r.blockSeq });
+});
+
+app.delete('/api/terminal/sessions/:id', async (req, res) => {
+  if (!terminalCallerOk(req, res)) return;
+  const ok = await terminals.close(req.params.id, actorOf(req), 'closed in the pane');
+  if (!ok) return res.status(404).json({ error: 'No running terminal with that id.' });
+  res.json({ ok: true });
+});
 
 /**
  * D25: one setup per checked-out member. Concurrent callers share the promise.
@@ -6490,13 +7014,17 @@ function markResumedRescan(entry) {
   broadcast({ type: 'workspaces-changed', action: 'rescan-resumed', workspaceId: entry.workspaceId, runId: entry.id });
 }
 
-/** Stop the automatic re-scan still owning a workspace: its member set is out of date. */
-function supersedeRescans(id) {
+/** Stop the automatic re-scan still owning a workspace: its member set is out of date.
+ *  Awaited: a PAUSED re-scan settles only when its teardown ends, and until then it still
+ *  owns the workspace — the new re-scan would be refused. */
+async function supersedeRescans(id) {
+  const stops = [];
   for (const r of runs.values()) {
     if (r.workspaceId !== id || !r.autoRescan || !ownsWorkspaceTarget(r)) continue;
     r.superseded = true;
-    try { stopRun(r.id, 'worca'); } catch { /* best-effort: its save refuses a changed set anyway */ }
+    stops.push(stopRun(r.id, 'worca').catch(() => { /* best-effort: its save refuses a changed set anyway */ }));
   }
+  await Promise.all(stops);
 }
 
 /**
@@ -6543,7 +7071,7 @@ async function afterMembersChanged(workspace, added = []) {
     discoverProject(dir, { force: true }).then(() => emitChanged('team-metrics-changed', 'discovered')).catch(() => { /* retried hourly */ });
     discoverPolicy(dir, { force: true }).then(() => emitChanged('team-policy-changed', 'discovered')).catch(() => { /* retried hourly */ });
   }
-  supersedeRescans(workspace.id);
+  await supersedeRescans(workspace.id);
   try { return await startAutoRescan(workspace); }
   catch (err) { return { skipped: err && err.message ? err.message : String(err) }; }
 }
@@ -11596,6 +12124,25 @@ export async function bootMaintenance({ log } = {}) {
     console.error(`[worca-ui] legacy worktree sweep failed: ${err && err.message ? err.message : err} — nothing was removed`);
   }
 
+  // Terminal (#573): kill shells a crashed server left (and the jobs under them), mark their rows
+  // interrupted, and sweep the branch worktrees under the keep policy and cap. Before Actions: its keep
+  // policy and checkout cap read the terminal pid file, which must not still hold the last server's rows.
+  try {
+    const orphans = await reapOrphans({ pidFile: terminalPidFileNow(),
+      kill: (pid) => { killDescendants(pid); try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } } });
+    // reapOrphans keeps rows stamped with this pid; a restarted container reuses the old server's pid, so
+    // such rows would keep their runs "busy" for ever. Nothing is live here yet: rewrite the file.
+    terminals.writePidFile();
+    const interrupted = markInterruptedSessions({ isAlive: pidAlive, liveIds: new Set(terminals.live().map((t) => t.snap.id)) });
+    const { keep, maxCheckouts } = actionsSettings();
+    const swept = await sweepBranchWorktrees({ keep, maxCheckouts, busyDirs: () => terminals.busyDirs(), projectDirOf: projectDirForKey });
+    summary.terminal = { orphans, interrupted, ...swept };
+    if (orphans) console.log(`[worca-ui] terminal: stopped ${orphans} orphaned shell(s) from a previous server`);
+  } catch (err) {
+    summary.terminal = { orphans: 0, interrupted: 0, removed: 0, evicted: 0 };
+    console.error(`[worca-ui] terminal boot maintenance failed: ${err?.message || err}`);
+  }
+
   // Actions (issue #529): reap orphaned action processes, mark interrupted setups, release
   // until-pr checkouts whose PR closed (D11) and apply the checkout cap (D12).
   try {
@@ -11734,7 +12281,7 @@ if (isMain) {
   const shutdown = (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    Promise.allSettled([channelHost.stop(), actions.stopAll()]).finally(() => process.exit(exitCodeFor(signal)));
+    Promise.allSettled([channelHost.stop(), actions.stopAll(), terminals.closeAll()]).finally(() => process.exit(exitCodeFor(signal)));
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -11809,6 +12356,6 @@ export const _testing = {
   askTrackRun, liveRunEntry, liveDefragRun, memoryScopeKey, startRunHandler, emitMemoryChanged, askSystemPromptFor,
   uiControl, bearerMatches,
   broadcast, askFilesRunDir,
-  validateResumeTarget, resumeTargetOf, fireResumeTicket, cancelScheduledResumes,
+  validateResumeTarget, resumeTargetOf, fireResumeTicket, cancelScheduledResumes, stopPausedPipeline,
   trackHeartbeat, heartbeatTick, BOOT_ID,
 };

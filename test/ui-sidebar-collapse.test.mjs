@@ -634,7 +634,8 @@ test('no total limit: the rail mounts the Spent/Saved stack, and expanding resto
   assert.equal(doc.querySelector('#side-spend .spend-stack'), null);
   const lines = [...doc.querySelectorAll('#side-spend .spend-ind-line')];
   assert.equal(lines.length, 1, 'one line, not two rows');
-  assert.equal(lines[0].querySelector('.spend-ind-figs').textContent, '$10,605 spent · $42,315 saved');
+  assert.deepEqual([...lines[0].children].map((c) => c.textContent),
+    ['Oct', '$10,605 spent', '$42,315 saved'], 'month, spent, saved: three siblings, no separator');
   assert.equal(doc.querySelector('#side-spend .spend-ind').getAttribute('aria-label'),
     'Spent this month: $10,604.70 · Saved this month: $42,315.30');
   assert.doesNotMatch(doc.querySelector('#side-spend').textContent, /no total limit/i);

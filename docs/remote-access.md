@@ -279,3 +279,4 @@ Access.
   on, callers inside the box (which could be an agent) can never run or edit actions. Enabling
   actions means the branch's code, which agents wrote, runs as the server user whenever a person
   clicks Run. That is the point of the feature, but know it before you turn it on.
+- The [terminal](terminal.md) is refused (403 TERMINAL_DISABLED) unless the server starts with WORCA_TERMINAL_REMOTE=1. Enabling it lets anyone signed in run commands as the server user. With agent isolation on, callers inside the box can never use it. It also requires the page's Origin to match the Host exactly, so a proxy in front of Worca must forward Host unchanged.

@@ -75,6 +75,11 @@ test('assistant usage -> usage{phase:message}', () => {
   assert.deepEqual(norm()(env(raw)), [{ type: 'usage', messageId: 'm1', parentId: null, usage: { input_tokens: 3 }, phase: 'message' }]);
 });
 
+test('assistant usage carries the message model when it names one', () => {
+  const raw = { type: 'assistant', message: { id: 'm1', model: 'claude-x', usage: { input_tokens: 3 }, content: [] } };
+  assert.deepEqual(norm()(env(raw)), [{ type: 'usage', messageId: 'm1', parentId: null, usage: { input_tokens: 3 }, phase: 'message', model: 'claude-x' }]);
+});
+
 test('main-stream Agent tool_use -> subagent spawn before the tool event; a child Agent does not spawn', () => {
   const n = norm();
   const raw = { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'a1', name: 'Agent', input: { description: 'd', subagent_type: 'Explore', model: 'haiku' } }] } };

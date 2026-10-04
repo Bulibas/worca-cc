@@ -139,9 +139,9 @@ test('the run page Stop pill opens #stop-modal with the run identity and POSTs n
   assert.equal(modal.classList.contains('hidden'), false, 'Stop opens the modal');
   assert.equal(modal.dataset.runId, RUN_ID, 'the opener stamps the target runId');
   assert.equal(modal.querySelector('.stop-title').textContent, 'Stop this pipeline?');
-  assert.match(
+  assert.equal(
     modal.querySelector('.stop-body').textContent,
-    /^Agents in flight are cancelled at their next checkpoint\. The run is kept in Runs as stopped; its worktree and branch stay in place so you can resume from there\.$/,
+    "A stopped run can't be resumed. Its work so far stays on its branch.",
   );
   assert.equal(modal.querySelector('.stop-ident-title').textContent, 'Implement Chat Connectivity Follow-ups');
   assert.equal(modal.querySelector('.stop-ident-branch').textContent, BRANCH);
@@ -368,4 +368,91 @@ test('leaving Runs tears down a modal opened from the run page', async () => {
   esc(ctx.window);
   assert.ok(modal.classList.contains('hidden'), 'and stays down');
   assert.equal(ctx.window.location.hash, '#new', 'Escape did not route anywhere through the dead modal');
+});
+
+// A paused run: a seed of its own (status paused, a pipeline id) — the run page still offers Stop.
+function seedPaused(ctx, { status = 'paused' } = {}) {
+  ctx.wsBox.ws.dispatch('open', {});
+  ctx.dispatch({
+    type: 'hello',
+    runs: [{ runId: RUN_ID, title: 'Parked work', projectDir: '/tmp/p', status,
+      startedAt: '2026-01-01T00:00:00Z', kind: 'run', pipelineId: 'p1' }],
+  });
+  // What a tab really holds for a paused run: it went through done(paused) — finishRun marked
+  // it _finished — like every paused run a tab learns of (a live frame or the backfill replay).
+  if (status === 'paused') ctx.dispatch({ type: 'done', runId: RUN_ID, status: 'paused' });
+  ctx.showRunning();
+}
+
+test('a PAUSED run: Stop reads "Keep paused" and POSTs its pipeline id with the runId', async () => {
+  const ctx = await boot({
+    fetchHandler: (url) => (url.includes('/api/stop')
+      ? Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, pipelineId: 'p1', runId: RUN_ID, status: 'stopped' }) })
+      : null),
+  });
+  seedPaused(ctx);
+  const rdStop = await openStop(ctx);
+  assert.equal(rdStop.hidden, false, 'a paused run offers Stop on its page');
+  const modal = ctx.window.document.getElementById('stop-modal');
+  assert.equal(modal.querySelector('.stop-cancel').textContent, 'Keep paused');
+  click(ctx.window, modal.querySelector('.stop-confirm'));
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(stopPosts(ctx).map((c) => JSON.parse(c.opts.body)), [{ runId: RUN_ID, pipelineId: 'p1' }]);
+  assert.ok(modal.classList.contains('hidden'), 'closed on success');
+});
+
+test('a paused run the server no longer holds (runId: null back): the page settles it locally', async () => {
+  const ctx = await boot({
+    fetchHandler: (url) => (url.includes('/api/stop')
+      ? Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, pipelineId: 'p1', runId: null, status: 'stopped' }) })
+      : null),
+  });
+  seedPaused(ctx);
+  const rdStop = await openStop(ctx);
+  const modal = ctx.window.document.getElementById('stop-modal');
+  click(ctx.window, modal.querySelector('.stop-confirm'));
+  for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.equal(rdStop.hidden, true, 'the run is stopped: no more Stop on its page');
+});
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+test('a paused run stopped on the same runId finishes like a live stop: Needs you drops it at once', async () => {
+  const rows = [{ id: 'p1', projectKey: 'proj-alpha-abcd1234', projectDir: '/tmp/p', title: 'Parked work',
+    status: 'paused', startedAt: '2026-01-01T00:00:00Z', mtime: 1 }];
+  const okj = (b) => Promise.resolve({ ok: true, status: 200, json: async () => b });
+  const ctx = await boot({ fetchHandler: (url) => (url.endsWith('/api/history/pr') ? okj({ ok: true })
+    : url.endsWith('/api/history') ? okj({ pipelines: rows, ghAvailable: false }) : null) });
+  seedPaused(ctx);
+  openDetail(ctx);
+  for (let i = 0; i < 6; i++) await tick();
+  const needs = ctx.window.document.getElementById('nav-needs-count');
+  assert.equal(needs.hidden, false, 'paused: it needs you');
+  // The frames the server sends on the run's own runId: no POST answer will finish it here.
+  ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'stopped', id: 'p1' });
+  ctx.dispatch({ type: 'done', runId: RUN_ID, status: 'stopped' });
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(needs.hidden, true, 'stopped: nothing needs you (not the stale paused History row)');
+  assert.ok(JSON.parse(ctx.window.localStorage.getItem('worca-cc.lingerRuns') || '[]').includes(RUN_ID),
+    'it lingers like a pipeline stopped live');
+});
+
+test('a stray error frame after a pause leaves the run paused', async () => {
+  const ctx = await boot();
+  seedPaused(ctx);
+  ctx.dispatch({ type: 'error', runId: RUN_ID, message: 'late' });
+  openDetail(ctx);
+  await tick();
+  const scr = ctx.window.document.querySelector('#run-detail');
+  assert.equal(scr.querySelector('.rd-status-word').textContent, 'Paused');
+  assert.equal(scr.querySelector('.rd-stop').hidden, false);
+});
+
+test('an INTERRUPTED run offers no Stop on its page (it stays resumable)', async () => {
+  const ctx = await boot();
+  seedPaused(ctx, { status: 'interrupted' });
+  openDetail(ctx);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(ctx.window.document.querySelector('#run-detail .rd-stop').hidden, true);
 });

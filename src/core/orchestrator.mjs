@@ -404,6 +404,8 @@ export class GraphOrchestrator extends RunHarness {
       signal: AbortSignal.any([this.abort.signal, this.pauseAbort.signal]),
       envScrub: this.guardrails?.envScrub || undefined,
       envAllowlist: this.guardrails?.envScrub ? this.guardrails.envAllowlist : undefined,
+      // A bridged Auto model: the upstream's own cost comes back under this tag (classify.mjs).
+      bridgeTag: `auto-classify:${this.pipeline?.id || 'run'}:${round}`,
     };
     const startedAt = new Date().toISOString();
     let classified = null;
@@ -432,7 +434,10 @@ export class GraphOrchestrator extends RunHarness {
       // book it before the shell parks the run, or the caps never see it (D14). No cap
       // check here — the error pause is happening anyway; the next round checks.
       const spent = (Number(classified?.costUsd) || 0) + (Number(err?.costUsd) || 0);
-      if (spent > 0 || err?.usage) this._recordAutoCost(round, { costUsd: spent, usage: sumUsage(classified?.usage, err?.usage) }, startedAt, model, { checkCaps: false });
+      // A round a pause or stop cut short is booked as `stopped`, never as a finished call.
+      if (spent > 0 || err?.usage) this._recordAutoCost(round, { costUsd: spent, usage: sumUsage(classified?.usage, err?.usage) }, startedAt, model,
+        // A pause during the 429 backoff rethrows the earlier attempt's ClassifierError: the signal says it was cut.
+        { checkCaps: false, status: err?.name === 'AbortError' || input.signal?.aborted ? 'stopped' : 'finished' });
       throw err;
     }
     // B4: keep this round's shape (and the classifier's warnings) from here on — a cost cap raised
@@ -620,12 +625,12 @@ export class GraphOrchestrator extends RunHarness {
 
   /** Cost of one classifier round: a sub-agent row (state list + table + delta) + the preflight ledger + the caps (spec §5.7).
    *  `checkCaps: false` books the spend of a round that FAILED without raising a cost pause on top of the error pause. */
-  _recordAutoCost(round, classified, startedAt, model, { checkCaps = true } = {}) {
+  _recordAutoCost(round, classified, startedAt, model, { checkCaps = true, status = 'finished' } = {}) {
     const costUsd = Number.isFinite(Number(classified?.costUsd)) ? Number(classified.costUsd) : 0;
     const usage = classified?.usage || {};
     this._auto.costUsd = Math.round((this._auto.costUsd + costUsd) * 1e6) / 1e6;
     const rec = {
-      id: `auto-classify-${round}`, label: `Auto workflow (round ${round})`, status: 'finished',
+      id: `auto-classify-${round}`, label: `Auto workflow (round ${round})`, status,
       startedAt, finishedAt: new Date().toISOString(), costUsd,
       tokens: (Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0),
       subagentType: 'auto-classify', uiPhase: 'preflight', nodeId: 'preflight', stepKey: 'x:preflight:1',
@@ -646,7 +651,7 @@ export class GraphOrchestrator extends RunHarness {
     // attributes a cost whose stepKey names a ledger row (state.steps + totalCostUsd —
     // no else branch; the DB spend ledger is written regardless), and
     // _checkCostLimits reads that total: without the row the pipeline cap could never trip.
-    this._recordCost(costUsd, 'x:preflight:1');
+    this._recordCost(costUsd, 'x:preflight:1', { aux: 'auto' });
     if (checkCaps) this._checkCostLimits();   // a cost cap pauses here (_capReached → pauseErr()); the resume re-enters the decision
   }
 
@@ -1409,6 +1414,7 @@ export class GraphOrchestrator extends RunHarness {
     const now = new Date().toISOString();
     const terminal = status === 'done' || status === 'error' || status === 'stopped' || status === 'paused';
     let step = this.state.steps.find((s) => s.key === key);
+    const reentry = !!step;                 // a retry or a resume re-enters its own row
     if (!step) {
       step = {
         key,
@@ -1445,6 +1451,11 @@ export class GraphOrchestrator extends RunHarness {
       if (status === 'start') step.endedAt = null;
     }
     if (terminal) step.endedAt = now;
+    // Turns this execution's spawn never closed with a `result` (a pause, a stop, a crash, a retried
+    // attempt): counted apart on the row (run-harness _closeOpenTurns). A result already cleared them.
+    // At 'start' only on RE-entry (a retry, a resume): a fresh execution has nothing of its own to
+    // close, and its bridge tag (a bare execution id) may hold another live run's in-flight spend.
+    if (terminal || (status === 'start' && reentry)) this._closeOpenTurns(key);
     if (terminal && ctx.human) {
       step.humanHours = ctx.human.hours;
       step.humanSignals = ctx.human.signals;
@@ -1519,6 +1530,34 @@ export class GraphOrchestrator extends RunHarness {
       const est = estimateStepHours(evidence, resolveConstants(humanEstimateOverrides()));
       ctx.human = { hours: est.hours, signals: { ...est.signals, method: est.method } };
     }).catch(() => { ctx.human = null; });
+  }
+
+  /**
+   * Engine hook (stopPaused): the executions a pause parked end for good at the stop. A pause
+   * skips their estimate (_execute's finally) because the resume credits it at their real
+   * terminal, from the cursor the resume point carries, and a stop is that terminal. Credit the
+   * pre-pause work as _execute's finally would have: the code delta since that cursor (the
+   * checkouts are re-attached and still live) under the agent's estimate overrides. Their md/json
+   * outputs are not read: the process that paused allocated their paths. Never throws.
+   * @param {object} rp the resume point
+   * @param {Set<string>} keys the ledger keys (execution ids) of the parked executions
+   */
+  async _engineCreditParked(rp, keys) {
+    if (!rp?.humanCursor) return;   // no agent or script ever started: nothing was parked mid-work
+    let nodes;
+    try { nodes = resolvedFromManifest(rp.manifest || this.state.stepper, this.registry || loadAgentRegistry(this.agentsDir)).nodes; } catch { return; }
+    this._humanCursor = rp.humanCursor;
+    for (const step of this.state.steps || []) {
+      const nc = keys.has(step.key) ? nodes[step.nodeId] : null;
+      // Agents only: nothing runs after a stop, so a parked script advancing the cursor would only hand the
+      // agents' code to an execution that earns no hours (a live stop unwinds the agent first).
+      if (!nc || nc.kind !== 'agent') continue;
+      // _execute's finally for an agent execution that ends here.
+      const ctx = { node: { id: step.nodeId, kind: nc.kind, key: nc.key }, meta: nc.meta || {} };
+      await this._humanEstimate(ctx);
+      if (ctx.human) { step.humanHours = ctx.human.hours; step.humanSignals = ctx.human.signals; }
+    }
+    this.state.humanHours = sumStepHours(this.state.steps);
   }
 
   /** The retry loop around ONE execution — the NODE site of failure-policy.mjs.

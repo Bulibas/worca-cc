@@ -288,7 +288,7 @@ Subcommands:
                               (any unique prefix; --json for machines). See: worca runs help
   logs <id> [-f]              Tail a run's live log (--tail N, --component, --level,
                               --json). -f follows; Ctrl-C detaches, the run continues. See: worca logs help
-  stop <id>                   Abort a live run (any unique prefix). See: worca stop help
+  stop <id>                   Stop a live or paused run (any unique prefix). See: worca stop help
   pause <id>                  Gracefully pause a live run; resume with: worca resume <id>
   doctor                      Reconcile crashed runs and sweep leftover run roots.
   plugin <cmd> [...]          Manage plugins: add|install|list|update|remove|purge|enable|

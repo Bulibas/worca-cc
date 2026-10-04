@@ -58,7 +58,7 @@ const OPEN_BACKOFF_MS = 15;
 /** Latest schema version. Bump + append a new migration step when the DDL grows.
  *  Exported so migration tests assert "reached the module's current version"
  *  instead of hardcoding the number — a schema bump then touches no test file. */
-export const SCHEMA_VERSION = 49;
+export const SCHEMA_VERSION = 50;
 
 /** Absolute path to the database file: <worcaHome>/worca-cc.db. */
 export function dbPath() {
@@ -950,6 +950,36 @@ CREATE TABLE IF NOT EXISTS pipeline_commands (
 CREATE INDEX IF NOT EXISTS idx_pipeline_commands_pending ON pipeline_commands (pipeline_id, consumed_at);
 `;
 
+// v50 (issue #573): the built-in terminal. Sessions (scope: run, project = the project's own folder, or
+// branch), one row per recorded command (a block), an audit log (who opened, ran, stopped, closed) and
+// the worca-owned worktrees opened for a project branch.
+// No FK to pipelines: blocks and audit rows are kept even after a run is deleted.
+const TERMINAL_DDL = `
+CREATE TABLE IF NOT EXISTS terminal_sessions (
+  id TEXT PRIMARY KEY, scope TEXT NOT NULL, label TEXT, run_id TEXT, member TEXT, project_key TEXT, branch TEXT,
+  cwd TEXT NOT NULL, shell TEXT NOT NULL, shell_kind TEXT NOT NULL, mode TEXT NOT NULL,
+  integration INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, exit_code INTEGER, pid INTEGER, owner_pid INTEGER,
+  created_by TEXT, created_at TEXT NOT NULL, ended_at TEXT, closed_by TEXT );
+CREATE INDEX IF NOT EXISTS idx_terminal_sessions_run ON terminal_sessions (run_id);
+CREATE INDEX IF NOT EXISTS idx_terminal_sessions_status ON terminal_sessions (status);
+CREATE TABLE IF NOT EXISTS terminal_blocks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, seq INTEGER NOT NULL,
+  source TEXT NOT NULL DEFAULT 'person', run_id TEXT, member TEXT, command TEXT NOT NULL, cwd TEXT,
+  status TEXT NOT NULL, exit_code INTEGER, started_at TEXT NOT NULL, ended_at TEXT, duration_ms INTEGER,
+  output TEXT NOT NULL DEFAULT '', output_bytes INTEGER NOT NULL DEFAULT 0, output_truncated INTEGER NOT NULL DEFAULT 0,
+  run_by TEXT, stopped_by TEXT, UNIQUE (session_id, seq) );
+CREATE INDEX IF NOT EXISTS idx_terminal_blocks_run ON terminal_blocks (run_id, started_at);
+CREATE TABLE IF NOT EXISTS terminal_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, session_id TEXT NOT NULL, block_seq INTEGER,
+  run_id TEXT, actor TEXT, action TEXT NOT NULL, detail TEXT );
+CREATE INDEX IF NOT EXISTS idx_terminal_audit_session ON terminal_audit (session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_terminal_audit_run ON terminal_audit (run_id, ts);
+CREATE TABLE IF NOT EXISTS terminal_worktrees (
+  dir TEXT PRIMARY KEY, project_key TEXT NOT NULL, branch TEXT NOT NULL, detached INTEGER NOT NULL DEFAULT 0,
+  created_by TEXT, created_at TEXT NOT NULL, last_used_at TEXT NOT NULL );
+CREATE INDEX IF NOT EXISTS idx_terminal_worktrees_branch ON terminal_worktrees (project_key, branch);
+`;
+
 const INCREMENTAL_TABLES = {
   config_workflow_wires: CONFIG_WORKFLOW_WIRES_DDL,
   step_questions:    STEP_QUESTIONS_DDL,
@@ -971,6 +1001,10 @@ const INCREMENTAL_TABLES = {
   pipeline_commands: PIPELINE_COMMANDS_DDL,
   notification_reads: NOTIFICATION_READS_DDL,
   night_decisions:   NIGHT_DECISIONS_DDL,
+  terminal_sessions:  TERMINAL_DDL,
+  terminal_blocks:    TERMINAL_DDL,
+  terminal_audit:     TERMINAL_DDL,
+  terminal_worktrees: TERMINAL_DDL,
 };
 
 /**
@@ -1990,6 +2024,7 @@ export function migrate(db) {
     // (v47: workspaces.actions_json arrives through the same repair — additive column only, issue #529.)
     if (current < 48) applySchemaV48(db);            // Away mode: one row per answered ask
     if (current < 49) db.exec(PIPELINE_COMMANDS_DDL); // run-control mailbox (#513) — IF NOT EXISTS, reconcile-safe
+    if (current < 50) db.exec(TERMINAL_DDL);         // built-in terminal (#573) — IF NOT EXISTS, reconcile-safe
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {

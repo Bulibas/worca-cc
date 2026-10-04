@@ -98,7 +98,7 @@ log(`seeded 3 global + 1 project file · project ${project.key}`);
 // ---- chrome + cdp
 profile = await mkdtemp(path.join(tmpdir(), 'worca-mem-profile-'));
 chrome = spawn(CHROME, ['--headless=new', ...SANDBOX, `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`,
-  '--window-size=1280,900', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check',
+  '--window-size=1280,900', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check', '--use-mock-keychain',
   '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank'],
 { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...REAL_ENV } });
 // Keep Chrome's last stderr lines: when no DevTools target ever appears, its own

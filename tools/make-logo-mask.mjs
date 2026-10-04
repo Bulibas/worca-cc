@@ -45,7 +45,7 @@ window.__done = new Promise((resolve) => {
 </script></body>`);
 const profile = await mkdtemp(path.join(tmpdir(), 'worca-logo-mask-profile-'));
 const chrome = spawn(CHROME, ['--headless=new', ...SANDBOX, `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`,
-  '--allow-file-access-from-files', '--no-first-run', '--no-default-browser-check', pathToFileURL(path.join(work, 'gen.html')).href], { stdio: 'ignore' });
+  '--allow-file-access-from-files', '--no-first-run', '--no-default-browser-check', '--use-mock-keychain', pathToFileURL(path.join(work, 'gen.html')).href], { stdio: 'ignore' });
 let code = 1;
 try {
   let wsUrl = null;

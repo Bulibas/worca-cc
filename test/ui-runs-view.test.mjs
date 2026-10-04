@@ -25,6 +25,12 @@ const HIST = [
 const windows = [];
 afterEach(() => { while (windows.length) windows.pop().close(); });
 
+// An archived row as GET /api/history?archived=1 serves it: the row is flagged, the
+// stamp rides along, and the branch/worktree behind it are gone.
+const ARCH = { id: 'cccc0009', projectKey: KEY, projectName: 'proj', projectDir: PROJECT,
+  title: 'Archived thing', status: 'done', startedAt: '2026-09-01T09:00:00Z', mtime: 1,
+  archived: true, archivedAt: '2026-09-01T10:00:00Z' };
+
 async function settle(window, n = 4) { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); }
 function go(window, hash) { window.location.hash = hash; window.dispatchEvent(new window.Event('hashchange')); }
 const click = (window, node) => node.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
@@ -33,7 +39,7 @@ const live = (runId, extra = {}) => ({ runId, title: runId, projectDir: PROJECT,
   startedAt: '10:00:00', pendingQuestion: null, ...extra });
 
 // `setup(window)` runs before app.js loads: a stub its module-load wiring must see goes there.
-async function boot({ url = 'http://localhost:4317/', storage = {}, projects = [{ name: 'proj', path: PROJECT, exists: true }], history = HIST, setup } = {}) {
+async function boot({ url = 'http://localhost:4317/', storage = {}, projects = [{ name: 'proj', path: PROJECT, exists: true }], history = HIST, archived = [ARCH], setup } = {}) {
   const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url }));
   const { window } = dom;
   windows.push(window);
@@ -50,9 +56,13 @@ async function boot({ url = 'http://localhost:4317/', storage = {}, projects = [
     const s = String(u);
     if (s.includes('/api/projects')) return ok({ projects });
     // `history` may be a function: a test that reloads History can answer differently each time.
+    if (s.includes('/api/history?archived=1')) return ok({ pipelines: archived, ghAvailable: true });
     if (s.endsWith('/api/history')) return ok({ pipelines: typeof history === 'function' ? history() : history, ghAvailable: true });
     // The detail itself only: a looser match would answer its /log, /diff and /comments with a state body.
     if (/\/api\/history\/[^/]+\/aaaa000[12]$/.test(s)) return ok({ state: { title: 'Merged thing', status: 'done', steps: [], stepper: null } });
+    // An archived run's detail: the stamp is what flips the header to Restore.
+    if (/\/api\/history\/[^/]+\/cccc0009$/.test(s)) return ok({ state: { title: 'Archived thing', status: 'done', steps: [], stepper: null, archivedAt: ARCH.archivedAt } });
+    if (s.includes('/api/runs/cccc0009/restore')) return ok({ ok: true, id: 'cccc0009', restored: true, warnings: [] });
     if (s.includes('/api/workspaces')) return ok({ workspaces: [] });
     if (s.endsWith('/api/schedules')) return ok({ schedules: [], tickets: [], counts: {} });
     return ok({ config: { steps: {}, customModels: [] }, models: [], efforts: [], pipelines: 0, projects: 0, workspaces: 0 });
@@ -499,4 +509,156 @@ test('the Group by menu switches to date sections, closes on a pick or a click o
   go(second.window, 'runs'); await settle(second.window);
   assert.equal(second.doc.getElementById('runs-group-btn').classList.contains('on'), true);
   assert.ok(second.doc.querySelector('#runs-list .runs-group[data-group-key^="date:"]'), 'date sections after a reload');
+});
+
+// ── Archived Runs view (issue #575) ──────────────────────────────────────────
+
+test('the Archived toggle fetches the archived feed only when picked, and lists its rows', async () => {
+  const { window, doc } = await boot();
+  go(window, 'runs'); await settle(window);
+  let archivedFetches = 0;
+  const inner = window.fetch;
+  const wrapped = (u, init) => {
+    if (String(u).includes('/api/history?archived=1')) archivedFetches += 1;
+    return inner(u, init);
+  };
+  window.fetch = wrapped; globalThis.fetch = wrapped;
+  assert.equal(archivedFetches, 0, 'nothing archived is fetched until the chip is picked');
+  const chip = (f) => doc.querySelector(`#runs-filter [data-filter="${f}"]`);
+  const archBtn = doc.getElementById('runs-archived-btn');
+  assert.ok(archBtn.closest('.runs-head-tools'), 'the toggle sits in the Runs header, not the chip row');
+  assert.equal(chip('archived'), null, 'no fifth chip: the row keeps fitting the pane at its 260px floor');
+  click(window, archBtn); await settle(window);
+  assert.equal(archivedFetches, 1, 'one archived fetch per activation');
+  assert.equal(archBtn.getAttribute('aria-pressed'), 'true');
+  assert.ok([...doc.querySelectorAll('#runs-filter button')].every((b) => b.getAttribute('aria-pressed') === 'false'),
+    'no chip is pressed while the archived list shows');
+  const titles = () => [...doc.querySelectorAll('#runs-list .runs-group .runs-row-title')].map((n) => n.textContent);
+  assert.deepEqual(titles(), ['Archived thing']);
+  const row = doc.querySelector('#runs-list .runs-row[data-pipeline-id="cccc0009"]');
+  assert.equal(row.querySelector('.runs-row-sub').textContent, 'Archived · Sep 1', 'the word says where the run lives');
+  assert.equal(row.dataset.icon, 'done', 'the terminal icon stays');
+  assert.equal(window.localStorage.getItem('worca-cc.runs.filter'), 'archived');
+  click(window, chip('all')); await settle(window);
+  assert.deepEqual(titles().sort(), ['Merged thing', 'Stopped thing'],
+    'All shows the active history only (the archived feed is a separate array)');
+  assert.equal(archivedFetches, 1, 'switching back does not re-fetch');
+  click(window, archBtn); await settle(window);
+  assert.equal(archivedFetches, 2, 'each activation re-fetches (cheap, stays fresh)');
+  click(window, archBtn); await settle(window);
+  assert.equal(window.localStorage.getItem('worca-cc.runs.filter'), 'all', 'the toggle turns back off to All');
+});
+
+test('an archived run’s detail offers Restore, not Archive, and hides Resume and follow-up', async () => {
+  const { window, doc } = await boot();
+  go(window, 'runs'); await settle(window);
+  click(window, doc.getElementById('runs-archived-btn')); await settle(window);
+  const posts = [];
+  const inner = window.fetch;
+  const wrapped = (u, init) => {
+    if (String(u).includes('/restore')) posts.push({ url: String(u), method: (init && init.method) || 'GET' });
+    return inner(u, init);
+  };
+  window.fetch = wrapped; globalThis.fetch = wrapped;
+  click(window, doc.querySelector('#runs-list .runs-row[data-pipeline-id="cccc0009"]')); await settle(window);
+  assert.equal(window.location.hash, `#history/${KEY}/cccc0009`);
+  const archiveBtn = doc.querySelector('#hist-detail .hd-archive');
+  const restoreBtn = doc.querySelector('#hist-detail .hd-restore');
+  assert.equal(archiveBtn.hidden, true, 'no Archive over an archived run');
+  assert.equal(restoreBtn.hidden, false, 'Restore is offered in the ⋯ menu');
+  assert.equal(doc.querySelector('#hist-detail .hd-after').hidden, true, 'no follow-up off an archived run');
+  assert.equal(doc.querySelector('#hist-detail .hd-resume-split').hidden, true, 'no resume either');
+  click(window, restoreBtn); await settle(window);
+  assert.equal(doc.getElementById('confirm-title').textContent, 'Restore this run?');
+  click(window, doc.getElementById('confirm-ok')); await settle(window);
+  assert.deepEqual(posts, [{ url: `/api/runs/cccc0009/restore?projectKey=${KEY}`, method: 'POST' }],
+    'the restore posts the runActionQuery-scoped URL');
+  assert.equal(window.location.hash, '#runs', 'back to the Runs list');
+  assert.ok(doc.getElementById('confirm-modal').classList.contains('hidden'), 'the modal is down');
+});
+
+test('a remembered Archived filter fetches its feed on the first paint, chip hidden or not', async () => {
+  const { window, doc } = await boot({ storage: { 'worca-cc.runs.filter': 'archived' } });
+  let archivedFetches = 0;
+  const inner = window.fetch;
+  const wrapped = (u, init) => {
+    if (String(u).includes('/api/history?archived=1')) archivedFetches += 1;
+    return inner(u, init);
+  };
+  window.fetch = wrapped; globalThis.fetch = wrapped;
+  go(window, 'runs'); await settle(window);
+  assert.ok(archivedFetches >= 1, 'the feed loads without a chip click');
+  assert.equal(doc.getElementById('runs-archived-btn').classList.contains('on'), true);
+  const titles = () => [...doc.querySelectorAll('#runs-list .runs-group .runs-row-title')].map((n) => n.textContent);
+  assert.deepEqual(titles(), ['Archived thing']);
+});
+
+test('docs/ui-levels.md rule 2: the Archived toggle stays on screen below Advanced while it is the pick', async () => {
+  const { window, doc } = await boot({ storage: { 'worca-cc.runs.filter': 'archived' } });
+  go(window, 'runs'); await settle(window);
+  const archBtn = doc.getElementById('runs-archived-btn');
+  assert.equal(archBtn.dataset.minLevel, 'advanced');
+  assert.equal(archBtn.dataset.levelKeep, '1',
+    'kept visible: otherwise a Simple list shows only archived runs with no way out');
+  click(window, doc.querySelector('#runs-filter [data-filter="all"]')); await settle(window);
+  assert.equal(archBtn.dataset.levelKeep, undefined, 'once left, the toggle is Advanced-only again');
+});
+
+test('pipelines-changed refreshes a loaded Archived feed, and a mid-flight change queues one more fetch', async () => {
+  let archived = [ARCH];
+  let archivedFetches = 0;
+  const { window, doc, recv } = await boot({ setup: () => {} });
+  const inner = window.fetch;
+  const wrapped = (u, init) => {
+    if (String(u).includes('/api/history?archived=1')) {
+      archivedFetches += 1;
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines: archived, ghAvailable: true }) });
+    }
+    return inner(u, init);
+  };
+  window.fetch = wrapped; globalThis.fetch = wrapped;
+  go(window, 'runs'); await settle(window);
+  recv({ type: 'pipelines-changed' }); await settle(window);
+  assert.equal(archivedFetches, 0, 'a never-loaded feed is not fetched on a change');
+  click(window, doc.getElementById('runs-archived-btn')); await settle(window);
+  assert.equal(archivedFetches, 1);
+  // Restored elsewhere (another tab, the CLI): the broadcast drops it from the open view.
+  archived = [];
+  recv({ type: 'pipelines-changed' }); await settle(window);
+  assert.equal(archivedFetches, 2, 'the change refetches the loaded feed');
+  assert.equal(doc.querySelector('#runs-list .runs-row[data-pipeline-id="cccc0009"]'), null, 'the restored row is gone');
+  // Two changes in one tick: the second lands mid-flight and must not be dropped.
+  recv({ type: 'pipelines-changed' }); recv({ type: 'pipelines-changed' }); await settle(window);
+  assert.equal(archivedFetches, 4, 'one fetch plus exactly one queued re-fetch');
+});
+
+test('an archived run opened from the loaded feed shows its project in the glance head', async () => {
+  // Regression (issue #575 review): histRecordFor used to search only historyAll,
+  // so the clicked archived row fell through to the {id, projectKey} stub — no
+  // projectDir, no title — and the glance head printed "(no project)".
+  const { window, doc } = await boot();
+  go(window, 'runs'); await settle(window);
+  click(window, doc.getElementById('runs-archived-btn')); await settle(window);
+  click(window, doc.querySelector('#runs-list .runs-row[data-pipeline-id="cccc0009"]')); await settle(window);
+  assert.equal(window.location.hash, `#history/${KEY}/cccc0009`);
+  const meta = doc.querySelector('#hist-detail .hd-glance .rd-page-meta');
+  assert.ok(meta, 'the glance head carries a meta line');
+  assert.doesNotMatch(meta.textContent, /\(no project\)/);
+  assert.match(meta.textContent, /proj/, 'the project name comes from the archived row');
+  assert.equal(doc.querySelector('#hist-detail .rd-page-title').textContent, 'Archived thing',
+    'the title comes from the archived row, not the raw id');
+});
+
+test('a deep-linked archived run on a cold feed repairs its stub record once the feed lands', async () => {
+  // The deep link opens the detail BEFORE any archived fetch: the record is the
+  // minimal stub. The payload's archivedAt stamp kicks the lazy feed load, whose
+  // refreshHdFromRow pass repairs the record and repaints the head.
+  const { window, doc } = await boot({ url: `http://localhost:4317/#history/${KEY}/cccc0009` });
+  await settle(window, 8);
+  assert.equal(window.location.hash, `#history/${KEY}/cccc0009`);
+  const meta = doc.querySelector('#hist-detail .hd-glance .rd-page-meta');
+  assert.ok(meta, 'the glance head carries a meta line');
+  assert.doesNotMatch(meta.textContent, /\(no project\)/, 'the stub never sticks');
+  assert.match(meta.textContent, /proj/);
+  assert.equal(doc.querySelector('#hist-detail .rd-page-title').textContent, 'Archived thing');
 });

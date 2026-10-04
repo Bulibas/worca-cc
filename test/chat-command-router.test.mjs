@@ -50,6 +50,7 @@ function fixture(overrideActions = {}) {
     answer: async (runId, id, payload) => calls.push(['answer', runId, id, payload]),
     stop: async (runId) => calls.push(['stop', runId]),
     pause: async (runId) => calls.push(['pause', runId]),
+    stopPaused: async (pipelineId) => { calls.push(['stopPaused', pipelineId]); return { ok: true, pipelineId, status: 'stopped' }; },
     resume: async (pipelineId) => { calls.push(['resume', pipelineId]); return { ok: true }; },
     history: async () => state.rows,
     listProjects: async () => [{ name: 'worca', path: '/x/worca' }, { name: 'other', path: '/x/other' }],
@@ -147,6 +148,49 @@ test('control: /pause /stop live-only; /resume resolves paused history rows', as
   assert.deepEqual(calls.at(-1), ['resume', 'pipe-cccc3333']);
   const single = text(await send('/resume'));
   assert.match(single, /Resuming `\*3333`/, 'single paused row is the no-arg default');
+});
+
+test('/stop *ref reaches a PAUSED run (History row or a run this server holds) by explicit ref only; interrupted points at /resume', async () => {
+  const { send, calls, state } = fixture();
+  state.rows.push({ id: 'pipe-dddd4444', title: 'Crashed run', status: 'interrupted' });
+  const stopped = text(await send('/stop *3333'));
+  assert.match(stopped, /Stopped `\*3333`/);
+  assert.deepEqual(calls.at(-1), ['stopPaused', 'pipe-cccc3333']);
+  const crashed = text(await send('/stop *4444'));
+  assert.match(crashed, /interrupted — it stays resumable: `\/resume \*4444`/);
+  assert.ok(!calls.some((c) => c[0] === 'stopPaused' && c[1] === 'pipe-dddd4444'), 'an interrupted run is never stopped');
+  assert.match(text(await send('/stop *2222')), /No live run matches/, 'a done row is still refused');
+  // A paused run this server holds: `/runs` prints its RUN ref — that ref stops it too.
+  state.live.push({ runId: 'run-eeee5555', pipelineId: 'pipe-ffff6666', title: 'Parked here', status: 'paused', kind: 'run', projectDir: '/x/worca' });
+  assert.match(text(await send('/stop *5555')), /Stopped `\*6666`/);
+  assert.deepEqual(calls.at(-1), ['stopPaused', 'pipe-ffff6666']);
+  const before = calls.length;
+  await send('/stop');
+  assert.deepEqual(calls.slice(before), [['stop', 'run-aaaa1111']], 'a bare /stop never reaches past the live runs');
+  // `/stop *` is a bare /stop, and a ref two live runs match gets the choice: neither
+  // ever falls through to stopping a paused run for good.
+  state.live.length = 0;
+  const quiet = calls.length;
+  assert.match(text(await send('/stop *')), /No live runs/);
+  state.live.push(
+    { runId: 'run-gggg3333', pipelineId: 'pipe-gggg3333', title: 'Live A', status: 'running', kind: 'run', projectDir: '/x/worca' },
+    { runId: 'run-hhhh3333', pipelineId: 'pipe-hhhh3333', title: 'Live B', status: 'running', kind: 'run', projectDir: '/x/worca' },
+  );
+  assert.match(text(await send('/stop *3333')), /Ambiguous/);
+  assert.deepEqual(calls.slice(quiet), [], 'nothing was stopped');
+  // `/use <project>` scopes the paused History rows too: another project's run is out of reach.
+  state.rows.push({ id: 'pipe-kkkk9999', title: 'Other project', status: 'paused', projectDir: '/x/other' });
+  await send('/use worca');
+  assert.match(text(await send('/stop *9999')), /No live run/);
+  assert.deepEqual(calls.slice(quiet), [], 'out of scope: nothing was stopped');
+  // …while the project's own paused rows stay in reach: its single-project runs, and a workspace run it is a member of.
+  state.rows.push(
+    { id: 'pipe-mmmm8888', title: 'Same project', status: 'paused', projectDir: '/x/worca' },
+    { id: 'pipe-wwww7777', title: 'Workspace run', status: 'paused', projectDir: '/x/other', projectNames: ['other', 'worca'] },
+  );
+  assert.match(text(await send('/stop *8888')), /Stopped `\*8888`/);
+  assert.match(text(await send('/stop *7777')), /Stopped `\*7777`/);
+  assert.deepEqual(calls.slice(quiet), [['stopPaused', 'pipe-mmmm8888'], ['stopPaused', 'pipe-wwww7777']]);
 });
 
 test('approvals: gate continue/another, recovery retry/abort, guardrails between kinds', async () => {

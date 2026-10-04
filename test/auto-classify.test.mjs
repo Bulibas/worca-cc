@@ -345,3 +345,15 @@ test('on Claude the classifier spawn is unchanged: no engine, no sandbox', async
   assert.equal('engine' in calls[0], false);
   assert.equal('sandbox' in calls[0], false);
 });
+
+test('a pause or stop during the second attempt keeps the first attempt\'s billed reply on the AbortError', async () => {
+  const ctrl = new AbortController();
+  const two = fakeRun(['no shape here', (o) => {
+    setImmediate(() => ctrl.abort());                                   // the run is paused mid attempt 2
+    return new Promise((_r, rej) => o.signal.addEventListener('abort', () => { const e = new Error('aborted'); e.name = 'AbortError'; rej(e); }));
+  }]);
+  const err = await classifyTask(base({ signal: ctrl.signal }), { run: two.run }).catch((e) => e);
+  assert.equal(err.name, 'AbortError', 'still the pause/stop itself');
+  assert.equal(err.costUsd, 0.01, 'attempt 1 was billed: _autoRound books it before the run parks');
+  assert.deepEqual(err.usage, { input_tokens: 10, output_tokens: 5 });
+});

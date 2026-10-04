@@ -376,6 +376,34 @@ test('resume(): the REAL call site syncs the interrupted mount back before remou
     'resume() captured the interrupted execution write into the store');
 });
 
+test('stopPaused(): a paused run stopped for good still captures what the interrupted execution wrote', { timeout: 120000 }, async () => {
+  const dir = gitDir('mem');
+  let orchRef = null;
+  const runners = {
+    producer: async (ctx) => {
+      if (ctx.node.key === 'implementer') {
+        await writeFile(join(ctx.memoryMount, 'project', 'midstop.md'), 'Written before the pause.\n');
+        queueMicrotask(() => orchRef.pause());
+        return new Promise((_r, rej) => {
+          const onAbort = () => { const e = new Error('aborted'); e.name = 'AbortError'; rej(e); };
+          if (ctx.signal.aborted) onAbort(); else ctx.signal.addEventListener('abort', onAbort, { once: true });
+        });
+      }
+      return runAgentExecution(ctx);
+    },
+  };
+  const orch1 = createOrchestrator({
+    projectDir: dir, workflowId: 'wf_default', prompt: 'demo task', claude: { mock: true }, auto: true, runners,
+  });
+  orchRef = orch1;
+  assert.equal((await orch1.run()).status, 'paused');
+  const pk = orch1.members[0].projectKey;
+  const orch2 = createOrchestrator({ projectDir: dir, claude: { mock: true }, auto: true, resume: readPipelineForResume(orch1.state.id) });
+  assert.equal((await orch2.stopPaused('ada')).status, 'stopped');
+  assert.ok(await readMemory(memoryRoot(), projectScope(pk), 'midstop'),
+    'the stop captured the interrupted execution write into the store');
+});
+
 test('two executions finishing together sync ONCE: one change entry, one store write', { timeout: 120000 }, async () => {
   const { orch } = await pausedRun();
   const mount = orch.getState().memoryMount;

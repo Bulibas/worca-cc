@@ -136,3 +136,124 @@ test('a run paused mid-implementation credits the pre-pause code at the real ter
   assert.equal(impl.human_hours, codeExpect(1, 200), 'the file written BEFORE the pause is credited (no re-baseline on resume)');
   assert.equal(runHours(id), Math.round((1.25 + codeExpect(1, 200)) * 100) / 100);
 });
+
+test('a run paused mid-implementation and then stopped for good credits the pre-pause code at the stop', { timeout: 120000 }, async () => {
+  await writeGraphWorkflow(G);
+  const dir = gitDir('human-4');
+  let orch;
+  orch = createOrchestrator({
+    projectDir: dir, workflowId: G.id, prompt: 'demo', auto: true, claude: { mock: true },
+    runners: {
+      producer: async (ctx) => {
+        if (ctx.node.key === 'planner') {
+          await writeFile(ctx.outputs.plan.path, 'word '.repeat(500), 'utf8');
+          await writeFile(join(ctx.projectDir, 'pre.js'), 'early\n', 'utf8');   // credited to the planner, never to the parked implementer
+        }
+        if (ctx.node.key === 'implementer') {
+          await codeFile(ctx);
+          queueMicrotask(() => orch.pause());
+          return new Promise((_r, rej) => {
+            const onAbort = () => { const e = new Error('aborted'); e.name = 'AbortError'; rej(e); };
+            if (ctx.signal.aborted) onAbort(); else ctx.signal.addEventListener('abort', onAbort, { once: true });
+          });
+        }
+        return ok(ctx);
+      },
+    },
+  });
+  assert.equal((await orch.run()).status, 'paused');
+  const id = orch.pipeline.id;
+  assert.equal(stepRows(id).find((r) => r.agent_key === 'implementer').human_hours, null, 'a paused execution is not estimated');
+  const orch2 = createOrchestrator({ projectDir: dir, workflowId: G.id, auto: true, claude: { mock: true }, resume: readPipelineForResume(id) });
+  assert.equal((await orch2.stopPaused('ada')).status, 'stopped');
+  const impl = stepRows(id).find((r) => r.agent_key === 'implementer');
+  assert.equal(impl.status, 'stopped');
+  assert.equal(impl.human_hours, codeExpect(1, 200), 'the stop is the real terminal of the parked execution: its pre-pause code, and only that, is credited');
+  assert.equal(JSON.parse(impl.human_signals).code, codeExpect(1, 200));
+  const plan = stepRows(id).find((r) => r.agent_key === 'planner').human_hours;
+  assert.ok(plan > 1.25, 'the finished planner keeps its credit, its own code included');
+  assert.equal(runHours(id), Math.round((plan + codeExpect(1, 200)) * 100) / 100);
+});
+
+test('a paused script next to a paused agent never takes the agent\'s code at the stop (a script earns no hours)', { timeout: 120000 }, async (t) => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { existsSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  // A script layer with one program: it writes 300 lines into its cwd (the run's checkout), then
+  // waits until the pause kills it. Outside the repo, so its own files are never code.
+  const scriptsDir = await mkdtemp(join(tmpdir(), 'worca-hh-scripts-'));
+  t.after(() => rm(scriptsDir, { recursive: true, force: true }));
+  await writeFile(join(scriptsDir, 'slowWrite.mjs'), [
+    "import { writeFileSync } from 'node:fs';",
+    "import { join } from 'node:path';",
+    'export default async function () {',
+    "  writeFileSync(join(process.cwd(), 'script-out.js'), Array.from({ length: 300 }, (_, i) => 's ' + i).join('\\n') + '\\n');",
+    '  await new Promise((r) => setTimeout(r, 60000));',
+    "  return { summary: 'ok' };",
+    '}',
+    '',
+  ].join('\n'), 'utf8');
+  await writeFile(join(scriptsDir, 'slowWrite.meta.json'), JSON.stringify({
+    key: 'slowWrite', metaVersion: 2, displayName: 'Slow write', runtime: 'node', file: 'slowWrite.mjs', params: [],
+    inputs: [{ id: 'plan', type: 'md', required: false }], outputs: [{ id: 'pass', type: 'void', when: 'always' }],
+  }), 'utf8');
+  // task → planner → (script || implementer) → end. The script's id sorts BEFORE the implementer's,
+  // so its ledger row comes first: the order the stop walks the parked executions in.
+  const GS = {
+    id: 'wf_test_human_script', name: 'human-script', version: 2,
+    nodes: [
+      { id: 'n_task', kind: 'task', x: 0, y: 0, config: {} },
+      { id: 'n_plan', kind: 'agent', key: 'planner', x: 200, y: 0, config: {} },
+      { id: 'n_a_s', kind: 'script', key: 'slowWrite', x: 400, y: 200, config: {} },
+      { id: 'n_impl', kind: 'agent', key: 'implementer', x: 400, y: 0, config: {} },
+      { id: 'n_end', kind: 'end', x: 600, y: 0, config: {} },
+    ],
+    wires: [
+      { id: 'w1', from: { node: 'n_task', port: 'task' }, to: { node: 'n_plan', port: 'task' } },
+      { id: 'w2s', from: { node: 'n_plan', port: 'plan' }, to: { node: 'n_a_s', port: 'plan' } },
+      { id: 'w2', from: { node: 'n_plan', port: 'plan' }, to: { node: 'n_impl', port: 'plan' } },
+      { id: 'w3', from: { node: 'n_impl', port: 'done' }, to: { node: 'n_end', port: 'result' } },
+    ],
+  };
+  await writeGraphWorkflow(GS);
+  const dir = gitDir('human-5');
+  let orch;
+  orch = createOrchestrator({
+    projectDir: dir, workflowId: GS.id, prompt: 'demo', auto: true, claude: { mock: true }, scriptsDir,
+    runners: {
+      producer: async (ctx) => {
+        if (ctx.node.key === 'planner') {
+          await writeFile(ctx.outputs.plan.path, 'word '.repeat(500), 'utf8');
+          return ok(ctx);
+        }
+        await codeFile(ctx);                                       // feature.js, 200 lines
+        // Deterministic: the pause lands only once the script has written its file.
+        const scriptOut = join(ctx.projectDir, 'script-out.js');
+        for (let i = 0; i < 600 && !existsSync(scriptOut); i++) await new Promise((r) => setTimeout(r, 50));
+        assert.ok(existsSync(scriptOut), 'precondition: the script wrote its file before the pause');
+        queueMicrotask(() => orch.pause());
+        return new Promise((_r, rej) => {
+          const onAbort = () => { const e = new Error('aborted'); e.name = 'AbortError'; rej(e); };
+          if (ctx.signal.aborted) onAbort(); else ctx.signal.addEventListener('abort', onAbort, { once: true });
+        });
+      },
+    },
+  });
+  assert.equal((await orch.run()).status, 'paused');
+  const id = orch.pipeline.id;
+  const parked = stepRows(id).filter((r) => r.status === 'paused').map((r) => r.node_id);
+  assert.deepEqual(parked, ['n_a_s', 'n_impl'], 'precondition: both are parked, the script\'s row first');
+  const orch2 = createOrchestrator({ projectDir: dir, workflowId: GS.id, auto: true, claude: { mock: true }, scriptsDir, resume: readPipelineForResume(id) });
+  assert.equal((await orch2.stopPaused('ada')).status, 'stopped');
+  const rows = stepRows(id);
+  assert.equal(rows.find((r) => r.node_id === 'n_a_s').human_hours, null, 'a script carries no estimate');
+  const impl = rows.find((r) => r.node_id === 'n_impl');
+  assert.equal(impl.status, 'stopped');
+  // A live stop unwinds the agent first (the script waits for its child to die), so the agent is
+  // credited every file the checkout gained since the cursor: its 200 lines and the script's 300.
+  assert.equal(impl.human_hours, codeExpect(2, 500), 'the agent keeps the code: a script ahead of it in the ledger must not swallow the delta');
+  assert.equal(JSON.parse(impl.human_signals).code, codeExpect(2, 500));
+  const plan = rows.find((r) => r.agent_key === 'planner').human_hours;
+  assert.equal(plan, 1.25, 'planner: 0.25 + 500/500, no code of its own');
+  assert.equal(runHours(id), Math.round((plan + codeExpect(2, 500)) * 100) / 100);
+});

@@ -713,3 +713,60 @@ test('a script card: node-script class, sidecar tint, ƒ glyph when no icon, the
   assert.equal(head.querySelector('.tt').textContent, 'Tests');
   assert.equal(head.querySelector('svg').innerHTML, '<path d="M2 2"></path>', 'a non-builtin icon goes through the shared sanitizer');
 });
+
+test('Away mode: the header chip, and away bands that bill one line each and are written in place', async () => {
+  const { doc, host } = boot();
+  const { createGraphView } = await import(viewPath);
+  const view = createGraphView(host, { doc, mode: 'monitor', portsFn, agents: AGENTS });
+  view.render(fixture(), {});
+  const card = view.nodeEl('n_agent');
+  view.setNodeChrome('n_agent', { totals: { dur: '4m', cost: '$2.62', away: { text: '$0.07', title: 'Away mode · 1 review' } } });
+  const chip = card.querySelector(':scope > .nrun > .away');
+  assert.equal(chip.textContent, '$0.07');
+  assert.equal(chip.title, 'Away mode · 1 review');
+  view.setNodeChrome('n_agent', { totals: { dur: '4m', cost: '$2.62', away: { text: '$0.12', title: 'Away mode · 2 reviews' } } });
+  assert.equal(card.querySelector(':scope > .nrun > .away'), chip, 'the chip is updated in place');
+  assert.equal(chip.textContent, '$0.12');
+  view.setNodeChrome('n_agent', { totals: { dur: '4m', cost: '$2.62' } });
+  assert.equal(card.querySelector(':scope > .nrun > .away'), null, 'a node with no review carries no chip');
+
+  const h0 = parseFloat(card.style.height);
+  const strip = { kind: 'strip', leds: ['done', 'done'], summary: '2 runs · $2.62', expanded: true };
+  const exec = (n) => ({ kind: 'exec', executionId: `x:n_agent:${n}`, led: 'done', label: `cycle ${n}`, right: '4m · $1.31' });
+  const booked = (n, label, right) => ({ kind: 'away', executionId: `x:n_agent:${n}`, variant: 'booked', label, title: `Away mode · ${label}`, right });
+  const stopped = (n, right) => ({ kind: 'away', executionId: `x:n_agent:${n}`, variant: 'stopped', label: 'review stopped', title: `Away mode · review stopped${right ? ' · not in total' : ''}`, right });
+  view.setFooter('n_agent', [strip, exec(1), booked(1, '1 review · Opus 5.5', '$0.07'), stopped(1, '≥$0.02'), exec(2), booked(2, '1 review · Sonnet 5.5', '$0.03')]);
+  assert.equal(parseFloat(card.style.height), h0 + 26 + 5 * 22, 'every away band bills exactly one EXEC_ROW_H line');
+  const kids = [...card.querySelectorAll(':scope > .xfoot > *')];
+  assert.deepEqual(kids.map((k) => k.className), ['xtoggle', 'xrow is-done', 'xaway is-booked', 'xaway is-stopped', 'xrow is-done', 'xaway is-booked']);
+  assert.ok(kids[2].querySelector(':scope > .xaway-ico > svg'), 'the band leads with the Away mode glyph');
+  assert.deepEqual([kids[2].querySelector('.xl').textContent, kids[2].querySelector('.xr').textContent, kids[2].title, kids[2].dataset.executionId],
+    ['1 review · Opus 5.5', '$0.07', 'Away mode · 1 review · Opus 5.5', 'x:n_agent:1']);
+  assert.deepEqual([kids[3].querySelector('.xr').textContent, kids[3].title], ['≥$0.02', 'Away mode · review stopped · not in total']);
+
+  // A repaint with new texts writes into the SAME elements (MAJ-20), per execution and per variant.
+  view.setFooter('n_agent', [strip, exec(1), booked(1, '2 reviews · Opus 5.5', '$0.12'), stopped(1, ''), exec(2), booked(2, '1 review · Sonnet 5.5', '$0.04')]);
+  const again = [...card.querySelectorAll(':scope > .xfoot > *')];
+  assert.equal(again.length, kids.length);
+  again.forEach((k, i) => assert.equal(k, kids[i], `band ${i} was rebuilt`));
+  assert.deepEqual([again[2].querySelector('.xl').textContent, again[2].querySelector('.xr').textContent, again[2].title],
+    ['2 reviews · Opus 5.5', '$0.12', 'Away mode · 2 reviews · Opus 5.5']);
+  assert.deepEqual([again[3].querySelector('.xr').textContent, again[3].title], ['', 'Away mode · review stopped'], 'an unpriced stopped review shows no figure');
+  assert.equal(again[5].querySelector('.xr').textContent, '$0.04');
+
+  view.setFooter('n_agent', [strip, exec(1), exec(2)]);
+  assert.equal(card.querySelector('.xaway'), null, 'bands leave with their share');
+  assert.equal(parseFloat(card.style.height), h0 + 26 + 2 * 22);
+});
+
+test('Away mode CSS: one --gv-exec-row-h line, an amber wash and no edge line', async () => {
+  const { readFileSync } = await import('node:fs');
+  const css = readFileSync(new URL('../ui/public/style.css', import.meta.url), 'utf8');
+  const rule = (sel) => (css.match(new RegExp(`${sel.replace(/[.*+?^${}()|[\]\\>]/g, '\\$&')}\\{[^}]*\\}`)) || [''])[0];
+  assert.match(rule('.gv-world .xfoot>.xaway'), /height:var\(--gv-exec-row-h\)/, 'the height nodeSize bills for one footer line');
+  assert.match(rule('.gv-world .xfoot>.xaway'), /background:var\(--amber-wash\)/);
+  assert.match(rule('.gv-world .nrun .away'), /background:var\(--amber-wash\)/);
+  for (const m of css.matchAll(/([^{}]*(?:xaway|\.nrun \.away)[^{}]*)\{([^}]*)\}/g)) {
+    assert.doesNotMatch(m[2], /border-left/, `${m[1].trim()}: no coloured edge line`);
+  }
+});

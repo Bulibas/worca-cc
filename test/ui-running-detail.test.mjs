@@ -1841,3 +1841,77 @@ test('a refused Away-mode change puts the select back and raises a toast', async
   assert.ok(window.__np.getRun(ID).logLines.some((l) => /Away mode: run is over/.test(String(l.text))),
     'the run-log line stays');
 });
+
+test('Escape typed in the terminal pane belongs to the shell: the run screen stays (#573)', async () => {
+  const ctx = await bootRunning();
+  const { window } = ctx;
+  const rd = await openGlance(ctx);
+  click(window, rd.querySelector('.rd-result [data-rd-tab="workflow"]'));
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle(window, 4);
+  assert.equal(window.location.hash, '#running/r1/details/workflow');
+  const pane = window.document.querySelector('body > .term-pane');
+  assert.ok(pane, 'the terminal pane is mounted');
+  const input = window.document.createElement('textarea');            // xterm's hidden input is a textarea
+  pane.appendChild(input);
+  input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle(window, 4);
+  assert.equal(window.location.hash, '#running/r1/details/workflow');
+  assert.equal(rd.dataset.mode, 'details');
+});
+
+// The REAL live path: WS state frame -> run model -> Details › Agents (rdAgentsBody). The implementer is
+// still RUNNING; its only rows are a finished Away mode review and one the user's answer stopped.
+test("Agents (live): a stopped Away mode review is named, shows its tokens, and the running step still reads running", async () => {
+  const ctx = await bootRunning();
+  await openRun(ctx, {
+    stepper: V2_MANIFEST,
+    steps: [{ key: 'x:n_impl:1', executionId: 'x:n_impl:1', nodeId: 'n_impl', ordinal: 1, kind: 'cycle', cycle: 1, status: 'start', activeMs: 500, costUsd: 0.4 }],
+    subAgents: [
+      { id: 'night-decider-1', label: 'Night decider (questions)', subagentType: 'night-decider', nodeId: 'n_impl', stepKey: 'x:n_impl:1', status: 'finished', costUsd: 0.05, tokens: 4200, runModel: 'claude-opus-5-5' },
+      { id: 'night-decider-ab12cd34', label: 'Away mode review (questions)', subagentType: 'night-decider', nodeId: 'n_impl', stepKey: 'x:n_impl:1', status: 'stopped', tokens: 18400, runModel: 'claude-opus-5-5' },
+    ],
+  });
+  const { window } = ctx;
+  click(window, tabOf(window, 'agents'));
+  await settle(window);
+  const sec = secOf(window, 'agents');
+  assert.doesNotMatch(sec.textContent, /night[ -]decider/i);
+  const rows = [...sec.querySelectorAll('.rd-ag-row')];
+  assert.deepEqual(rows.map((r) => r.querySelector('.rd-ag-label').textContent), ['Away mode review (questions)', 'Away mode review (questions)']);
+  assert.deepEqual(rows.map((r) => r.querySelector('.agent-type-pill').textContent), ['Away mode', 'Away mode']);
+  assert.equal(rows[1].querySelector('.rd-ag-cost').textContent, '—');
+  assert.equal(rows[1].querySelector('.sub-tok-pill').textContent, '18.4k tok');
+  assert.equal(rows[1].querySelector('.rd-ag-state').textContent, 'stopped');
+  assert.equal(rows[0].querySelector('.sub-tok-pill'), null, 'a priced review shows its cost, not tokens');
+  assert.ok(sec.querySelector('.rd-ag-head .subs-stat.run'), 'the implementer is still running: worca rows never decide the group status');
+});
+
+test("Overview (live): worca's own AI calls are not counted as the run's sub-agents", async () => {
+  const ctx = await bootRunning();
+  await openRun(ctx, { subAgents: [...SUBS(),
+    { id: 'run-title-0a0b0c0d', label: 'Run title', subagentType: 'run-title', nodeId: 'preflight', stepKey: 'x:preflight:1', status: 'finished', costUsd: 0.0021 },
+    { id: 'night-decider-ab12cd34', label: 'Away mode review (questions)', subagentType: 'night-decider', nodeId: 'implement', status: 'finished', costUsd: 0.05 },
+  ] });
+  const { window } = ctx;
+  click(window, tabOf(window, 'overview'));
+  await settle(window);
+  assert.deepEqual([...secOf(window, 'overview').querySelectorAll('.hd-ov-tag')].map((c) => c.textContent),
+    ['proj', 'main', '2 sub-agents'], 'the run title and the Away mode review are worca\'s, not the agents\'');
+});
+
+test('Agents (live): a sub-agent type named like an Object member keeps its own type pill', async () => {
+  const ctx = await bootRunning();
+  const row = (id, subagentType) => ({ id, label: id, subagentType, nodeId: 'n_impl', stepKey: 'x:n_impl:1', status: 'finished' });
+  await openRun(ctx, {
+    stepper: V2_MANIFEST,
+    steps: [{ key: 'x:n_impl:1', executionId: 'x:n_impl:1', nodeId: 'n_impl', ordinal: 1, kind: 'cycle', cycle: 1, status: 'done', activeMs: 500, costUsd: 0.4 }],
+    subAgents: [row('s1', 'constructor'), row('s2', 'toString'), row('s3', '__proto__')],
+  });
+  const { window } = ctx;
+  click(window, tabOf(window, 'agents'));
+  await settle(window);
+  assert.deepEqual([...secOf(window, 'agents').querySelectorAll('.rd-ag-row .agent-type-pill')].map((p) => p.textContent),
+    ['constructor', 'toString', '__proto__']);
+});

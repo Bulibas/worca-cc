@@ -80,7 +80,7 @@ async function workspaceStacks(id) {
 /** Why Check out is refused for this row, or null when it is offered (checkout.mjs assertEligible's words). */
 function checkoutBlocked(row) {
   if (row.archived_at) return 'the run is archived';
-  if (!FINISHED.has(row.status)) return 'Check out is available once the run has finished. Resume or stop it first';
+  if (!FINISHED.has(row.status)) return 'Check out is available once the run has finished';
   if (retainedWorkFor(row)) return 'the run kept uncommitted work in its worktree; recover or discard it first';
   return null;
 }

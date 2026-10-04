@@ -334,6 +334,7 @@ Every finished run keeps its full record, one tab each in **Runs**: **Overview**
   stored config; Ask Worca can read and propose actions but never runs one; a
   hosted Worca runs nothing unless `WORCA_ACTIONS_REMOTE=1`. See
   [`docs/actions.md`](docs/actions.md).
+- **A terminal for runs and projects** — a shell in the run's or the project's folder, run by the Worca server; each command is recorded with output, exit code, duration and who ran it. A hosted Worca runs none unless WORCA_TERMINAL_REMOTE=1. See [docs/terminal.md](docs/terminal.md).
 
 ![A finished nimbus-crm run's Actions tab: the checked-out branch and folder, the Run, Test, Terminal, Finder, Copy command and Discard buttons, and the log of an npm test that passed](docs/screenshots/actions.png)
 
@@ -733,7 +734,7 @@ worca runs <pipelineId>    # one run in detail (any unique prefix; --json for ma
 worca logs <pipelineId>
 worca logs <pipelineId> -f
 
-# stop or pause a live run from the terminal — even one started in another terminal
+# stop a live or paused run, or pause a live one — even one started in another terminal
 worca stop <pipelineId>
 worca pause <pipelineId>   # resume later with: worca resume <pipelineId>
 

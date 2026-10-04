@@ -42,7 +42,8 @@ export function createClaudeNormalizer() {
     // all-zero usage is no model call, so it emits none.
     const synthetic = msg.model === '<synthetic>';
     if (text) out.push(defined({ type: 'text', text, parentId, from: synthetic ? 'cli' : 'assistant', blocks, messageId }));
-    if (!synthetic && msg.usage && typeof msg.usage === 'object') out.push({ type: 'usage', messageId: messageId ?? null, parentId, usage: msg.usage, phase: 'message' });
+    // `model`: the id the message names, when it names one (the price of a turn no `result` closes).
+    if (!synthetic && msg.usage && typeof msg.usage === 'object') out.push({ type: 'usage', messageId: messageId ?? null, parentId, usage: msg.usage, phase: 'message', ...(str(msg.model) ? { model: msg.model } : {}) });
     if (calls.length) out.push(defined({ type: 'tool', parentId, messageId, calls }));
     return out;
   }

@@ -151,6 +151,7 @@ export function lastPathSegment(p) {
  *          now?:()=>number}} deps
  * actions: listRuns(), runState(runId), pendingQuestion(runId),
  *          answer(runId, id, payload), stop(runId), pause(runId),
+ *          stopPaused(pipelineId) -> {ok:true}|{ok:false, error},
  *          resume(pipelineId), history({limit}), listProjects(),
  *          listScheduled?() -> [{id, title, runAt, status, projectDir, workspaceName?}] (optional)
  */
@@ -298,10 +299,47 @@ export function createCommandRouter({ actions, chatContext, logger = () => {}, o
     },
 
     stop: async ({ chatKey, args, actor }) => {
-      const t = resolveTarget(args[0], scopedRuns(chatKey), [], { wantLive: true });
-      if (t.error) return t.error;
-      await actions.stop(t.run.runId, actor);
-      return reply(`⏹ Stopping \`${runRef(t.run.runId)}\` (${String(t.run.title || '').slice(0, 50)}).`, 'warning');
+      const live = scopedRuns(chatKey);
+      const t = resolveTarget(args[0], live, [], { wantLive: true });
+      if (!t.error) {
+        await actions.stop(t.run.runId, actor);
+        return reply(`⏹ Stopping \`${runRef(t.run.runId)}\` (${String(t.run.title || '').slice(0, 50)}).`, 'warning');
+      }
+      // Not live: a PAUSED run is stopped through its saved row — by an explicit ref only, so
+      // a bare /stop never reaches past the live runs to discard parked work. An interrupted
+      // run is never stopped: it stays resumable.
+      const suffix = String(args[0] || '').replace(/^\*/, '').trim();
+      if (!suffix) return t.error;                     // `/stop` and `/stop *` are both bare
+      // A ref several live runs match is answered with the choice, never with a paused run.
+      if (live.some((r) => LIVE.has(String(r.status || ''))
+        && (String(r.runId).endsWith(suffix) || String(r.pipelineId || '').endsWith(suffix)))) return t.error;
+      // Candidates by pipeline id: a paused run this server holds (`/runs` lists it by its RUN
+      // ref, so match that too), then the History rows (paused and interrupted).
+      const byId = new Map();
+      for (const r of live) {
+        if (r.status !== 'paused' || !r.pipelineId) continue;
+        if (String(r.runId).endsWith(suffix) || String(r.pipelineId).endsWith(suffix)) {
+          byId.set(r.pipelineId, { id: r.pipelineId, title: r.title, status: 'paused' });
+        }
+      }
+      // A History row is in reach only inside the chat's `/use` scope, as the live runs are.
+      const scope = projectOf(chatKey);
+      const inScope = (r) => !scope || lastPathSegment(r.projectDir) === scope || (r.projectNames || []).includes(scope);
+      for (const r of await actions.history({ limit: 50 })) {
+        if ((r.status === 'paused' || r.status === 'interrupted') && inScope(r) && String(r.id).endsWith(suffix) && !byId.has(r.id)) {
+          byId.set(r.id, { id: r.id, title: r.title, status: r.status });
+        }
+      }
+      const rows = [...byId.values()];
+      if (!rows.length) return t.error;
+      if (rows.length > 1) return disambiguate(rows.map((r) => ({ id: r.id, title: r.title, status: r.status })));
+      const row = rows[0];
+      if (row.status === 'interrupted') {
+        return reply(`\`${runRef(row.id)}\` is interrupted — it stays resumable: \`/resume ${runRef(row.id)}\`.`, 'warning');
+      }
+      const out = await actions.stopPaused(row.id, actor);
+      if (out?.ok) return reply(`⏹ Stopped \`${runRef(row.id)}\` (${String(row.title || '').slice(0, 50)}).`, 'warning');
+      return reply(`Could not stop \`${runRef(row.id)}\`: ${out?.error || 'unknown error'}`, 'error');
     },
 
     resume: async ({ args, actor }) => {

@@ -167,7 +167,7 @@ function memberCard(model, m, { doc, handlers, logs, queued }) {
 
   if (state === 'no-branch') return sec;
   if (model.finished === false) {
-    sec.append(h(doc, 'p', 'hint', 'Check out is available once the run has finished. Resume or stop the run first.'));
+    sec.append(h(doc, 'p', 'hint', 'Check out is available once the run has finished.'));
     return sec;
   }
   if (!model.enabled) sec.append(h(doc, 'p', 'hint', 'Actions are turned off on this hosted deployment. Check out and Copy command still work.'));

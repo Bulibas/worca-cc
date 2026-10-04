@@ -60,3 +60,12 @@ the package):
 - ISC: `isexe`, `once`, `which`, `wrappy`, `zod-to-json-schema`
 - BSD-2-Clause: `json-schema-typed`
 - BSD-3-Clause: `fast-uri`
+
+## Terminal pane
+
+The terminal pane (`ui/public/terminal-pane.mjs`) draws the shell with xterm.js, `@xterm/xterm 6.0.0` and
+`@xterm/addon-fit 0.11.0` (MIT, Copyright (c) 2017-2024 The xterm.js authors), served from
+`node_modules`. The server runs shells under `node-pty 1.1.0` (MIT, Copyright (c) Microsoft Corporation),
+an optional dependency. Each is installed from npm under its own license (the text ships in the package):
+
+- MIT: `@xterm/xterm`, `@xterm/addon-fit`, `node-pty`, `node-addon-api`

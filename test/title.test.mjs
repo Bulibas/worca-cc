@@ -1,5 +1,5 @@
 // test/title.test.mjs
-import { test } from 'node:test';
+import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { sanitizeTitle, generateTitle, isRefusalTitle } from '../src/core/title.mjs';
 import { mkdtempSync } from 'node:fs';
@@ -181,4 +181,41 @@ test('a failing codex title keeps the provisional title and says which engine fa
   assert.equal(errors.length, 1);
   assert.match(errors[0].error.message, /401 Unauthorized/);
   assert.equal(errors[0].model, "codex's default model");
+});
+
+test('generateTitle reports each priced result through onCost, re-priced as the title model', async () => {
+  const seen = [];
+  const run = async (o) => { o.onEvent({ type: 'result', costUsd: 0.0021, raw: { type: 'result', usage: { input_tokens: 90, output_tokens: 8 } } }); return { text: 'Add rate limiting' }; };
+  // bin: before the `run` seam existed this fell through to runClaude — a bogus bin keeps that red phase offline.
+  const t = await generateTitle('add rate limiting to the api', { model: 'claude-haiku-4-5', run, onCost: (c) => seen.push(c), bin: '/nonexistent/claude-must-not-spawn', mock: false });
+  assert.equal(t, 'Add rate limiting');
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].costUsd, 0.0021);
+  assert.equal(seen[0].model, 'claude-haiku-4-5');
+});
+
+describe('the title call is priced as its model (a {free} title model books $0, not the CLI figure)', () => {
+  let home; const prev = {};
+  before(async () => {
+    const { mkdtemp } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { addGlobalModel } = await import('../src/core/settings.mjs');
+    home = await mkdtemp(join(tmpdir(), 'worca-title-free-'));
+    for (const k of ['HOME', 'USERPROFILE', 'WORCA_TEST_ALLOW_HOME_FALLBACK']) prev[k] = process.env[k];
+    process.env.HOME = home; process.env.USERPROFILE = home;
+    process.env.WORCA_TEST_ALLOW_HOME_FALLBACK = '1';            // the catalog reads the sandboxed settings.json
+    await addGlobalModel({ id: 'title-free', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { free: true } });
+  });
+  after(async () => {
+    const { rm } = await import('node:fs/promises');
+    for (const k of Object.keys(prev)) { if (prev[k] === undefined) delete process.env[k]; else process.env[k] = prev[k]; }
+    await rm(home, { recursive: true, force: true, maxRetries: 3 });
+  });
+  test('onCost reports the re-priced figure', async () => {
+    const seen = [];
+    const run = async (o) => { o.onEvent({ type: 'result', costUsd: 0.0021, raw: { type: 'result', usage: { input_tokens: 90, output_tokens: 8 } } }); return { text: 'Add rate limiting' }; };
+    await generateTitle('add rate limiting to the api', { model: 'title-free', run, onCost: (c) => seen.push(c), bin: '/nonexistent/claude-must-not-spawn', mock: false });
+    assert.deepEqual(seen.map((c) => [c.costUsd, c.model]), [[0, 'title-free']]);
+  });
 });

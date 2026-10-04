@@ -539,6 +539,7 @@ export function resolveModelCost(modelId, cliCostUsd, usage, costCfg = undefined
 // shape is pinned (test/config-models-global.test.mjs:205). The table itself lives
 // in the zero-import leaf list-prices.mjs (the credential broker prices budgets from
 // it too) and is re-exported here for existing importers.
+// A second display-only reader: the "≥$x" LOWER BOUND (floorUsd) of a run's AI call cut off before its result.
 export { PREDEFINED_LIST_PRICES };
 
 const FREE_RATES = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 });

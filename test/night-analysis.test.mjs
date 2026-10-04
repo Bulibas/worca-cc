@@ -120,3 +120,40 @@ test('runNightAnalysis normalizes a raw Claude envelope handed to its onEvent (a
   assert.deepEqual(r.usage, { input_tokens: 700, output_tokens: 9 });
   assert.ok(r.costUsd > 0);
 });
+
+test('an aborted analysis attaches the per-message usage it saw (deduped by message id), unpriced', async () => {
+  const run = async (o) => {
+    o.onEvent({ type: 'assistant', raw: { type: 'assistant', message: { id: 'a', usage: { input_tokens: 10, output_tokens: 1 } } } });
+    o.onEvent({ type: 'assistant', raw: { type: 'assistant', message: { id: 'a', usage: { input_tokens: 10, output_tokens: 1 } } } });
+    o.onEvent({ type: 'assistant', raw: { type: 'assistant', message: { id: 'b', usage: { input_tokens: 20, output_tokens: 2, cache_read_input_tokens: 5 } } } });
+    throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+  };
+  const err = await runNightAnalysis({ questions: [{ id: 'q', question: 'Q?', options: ['x', 'y'] }], run, model: 'claude-sonnet-5-5' }).catch((e) => e);
+  assert.deepEqual(err.turnUsage, { input_tokens: 30, output_tokens: 3, cache_read_input_tokens: 5, cache_creation_input_tokens: 0 });
+  assert.deepEqual([err.costUsd, err.priced, err.notStarted], [0, false, undefined]);
+});
+
+test('priced: a result that carries a cost (even $0) is priced; no result, or a result with no cost, is not', async () => {
+  const qs = [{ id: 'q', question: 'Q?', options: ['x'] }];
+  const reply = { text: '{"decisions":[]}' };
+  const withCost = await runNightAnalysis({ questions: qs, run: async (o) => { o.onEvent({ type: 'result', costUsd: 0, raw: { type: 'result', usage: {} } }); return reply; } });
+  const noCost = await runNightAnalysis({ questions: qs, run: async (o) => { o.onEvent({ type: 'result', raw: { type: 'result', usage: {} } }); return reply; } });
+  const noResult = await runNightAnalysis({ questions: qs, run: async () => reply });
+  const mock = await runNightAnalysis({ mock: true, questions: [{ id: 'q', options: ['x'] }] });
+  assert.deepEqual([withCost.priced, noCost.priced, noResult.priced, mock.priced], [true, false, false, true]);
+});
+
+test('an already-aborted signal spawns nothing and says so (notStarted)', async () => {
+  let called = false;
+  const ctrl = new AbortController(); ctrl.abort();
+  const err = await runNightAnalysis({ questions: [{ id: 'q', question: 'Q?', options: ['x'] }], signal: ctrl.signal,
+    run: async () => { called = true; return { text: '' }; } }).catch((e) => e);
+  assert.equal(called, false);
+  assert.deepEqual([err.name, err.notStarted, err.priced], ['AbortError', true, false]);
+});
+
+test('a call that produced no frame at all never reached the API: notStarted, nothing priced', async () => {
+  const err = await runNightAnalysis({ questions: [{ id: 'q', question: 'Q?', options: ['x'] }],
+    run: async () => { throw Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' }); } }).catch((e) => e);
+  assert.deepEqual([err.code, err.notStarted, err.priced, err.costUsd], ['ENOENT', true, false, 0]);
+});
