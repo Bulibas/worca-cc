@@ -9,7 +9,7 @@ duration, who ran it and when.
 
 ## Where it opens
 
-Open the pane with the **Terminal** tab on the right edge or Ctrl+\`. On a run or a project page it
+Open the pane with the terminal icon in the top-right corner or Ctrl+\`. On a run or a project page it
 shows a live shell right away: it reattaches the page's running terminal, or starts one.
 
 | Page | Folder |
