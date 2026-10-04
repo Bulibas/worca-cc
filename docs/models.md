@@ -397,7 +397,15 @@ On a Codex run the helper jobs (titles, the run overview, the PR description, th
 - Skills are mounted where Codex reads them, the run checkout's `.agents/skills`. That covers the project's and the root layer's `.claude/skills`, your own `~/.claude/skills`, and the skills a workflow requires. They never reach the run's diff or commit.
 - Codex does not load worca's memory rules on its own, so its agents are told to read them from the memory folders.
 
-**Custom endpoints.** A Claude model routed to a custom endpoint or through the model bridge no longer refuses a Codex run. Like any Claude model, it is dropped on Codex, and its nodes run on Codex's model.
+**Claude models with custom endpoints.** A Claude model routed to a custom endpoint or through the model bridge no longer refuses a Codex run. Like any Claude model, it is dropped on Codex, and its nodes run on Codex's model. To run Codex itself against your own endpoint, give a Codex model a connection, below.
+
+**Custom endpoints for Codex models.** A Codex model can run on any OpenAI-compatible endpoint that serves the Responses API, such as vLLM, LM Studio, Ollama or a gateway. In Settings › Models, add a model with Engine **Codex**, pick **OpenAI-compatible endpoint** under Connection, and enter the model id the endpoint expects. The base URL and API key come from the OpenAI-compatible row on the Providers card unless you override them under Advanced, where extra headers go too. A key is a `${VAR}` reference or a stored secret, as for Claude models.
+
+- Codex connects to the endpoint itself; worca's bridge is not involved. Each call names the endpoint as a Codex model provider with `-c model_providers.…` settings. The key and header values reach codex through its environment, never its command line. Like codex's own `OPENAI_API_KEY`, they are visible to commands the agent runs, because `codex-cli 0.146` does not apply a shell environment policy in `codex exec`.
+- Only the Responses API is offered: `codex-cli 0.146` refuses chat completions (`wire_api = "chat"`). The model's own effort setting is sent as-is.
+- A run whose Codex models are all on endpoints does not need `codex login`, but only if no Codex call in it falls back to Codex's default model. That means the run has a model, and so does every Codex helper job (title, overview, PR description and memory defragment in Settings › Models, and Away mode's "Decided by" when it names a Codex model). An Auto workflow run still needs the sign-in, because its classifier may pick any Codex model.
+- worca does not use OpenAI's list prices for an endpoint model, so its cost shows as unknown unless you set Pricing on the model.
+- The model's Test button checks the endpoint, and a model whose endpoint has no key shows "needs API key" in pickers, like a bridged model.
 
 > **Ask Worca on Codex is not available yet.** A chat on Codex starts only when worca can switch off every Codex tool that reaches the disk or other agents. `codex-cli 0.146` cannot switch off `view_image` (it reads any image file) or its sub-agents, so on that version Codex models are not offered in Ask Worca and a Codex chat refuses to start. Pipelines on Codex are unaffected.
 

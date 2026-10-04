@@ -95,7 +95,7 @@ const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]{0,63}$/;
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 // Zero-import leaves only: model-env for the bridged-model `upstream` validator every
 // catalog layer shares (model-bridge-design.md §6.3), night/config for the night.* rules.
-import { assertModelUpstream, upstreamEnvConflict, CODEX_EFFORTS } from '../model-env.mjs';
+import { assertModelUpstream, upstreamEnvConflict, codexUpstreamProblem, CODEX_EFFORTS } from '../model-env.mjs';
 import { fieldError as nightFieldError, NIGHT_EFFORTS } from '../night/config.mjs';
 // The MCP definition rules (MCP registry spec §4.1, §4.3): pure, shared with manual definitions.
 import { validateMcpDefinition, screenNonSecretValue, SERVER_NAME_RE } from '../mcp/definitions.mjs';
@@ -332,8 +332,8 @@ function normalizeModels(raw, warnings) {
     const efforts = Array.isArray(m.efforts) ? m.efforts.filter((e) => allowed.includes(e)) : [];
     entry.efforts = efforts.length ? efforts : (codex ? [...CODEX_EFFORTS] : ['medium', 'high']);
     if (codex) {
-      // §3.1a: codex ignores routing env and signs in with its own credentials.
-      if (m.env != null || m.upstream != null) { warnings.push(`catalogs.models: ${m.id}: a codex model takes no env or upstream — entry dropped`); continue; }
+      // §3.1a: codex ignores routing env. Its upstream (an OpenAI-compatible endpoint) is checked below.
+      if (m.env != null) { warnings.push(`catalogs.models: ${m.id}: a codex model takes no env — entry dropped`); continue; }
       entry.engine = 'codex';
     }
     if (m.env != null) {
@@ -357,6 +357,8 @@ function normalizeModels(raw, warnings) {
       try {
         upstream = assertModelUpstream(m.upstream);
         if (upstream && upstream.apiKey && !/^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(upstream.apiKey)) throw new Error('upstream.apiKey must be a ${VAR} reference');
+        const codexWhy = codex ? codexUpstreamProblem(upstream) : null;
+        if (codexWhy) throw new Error(codexWhy);
         const clash = upstream ? upstreamEnvConflict(entry.env) : null;
         if (clash) throw new Error(`env key ${clash} is set by the bridge for an upstream entry`);
       } catch (e) {

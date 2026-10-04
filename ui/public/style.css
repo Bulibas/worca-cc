@@ -3315,6 +3315,7 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .mv-conn{display:grid;gap:12px;}
 .mv-conn-modes{display:grid;gap:8px;}
 .mv-conn-mode{display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer;}
+.mv-conn-mode[hidden]{display:none;}   /* a Codex model has no env mode (bridge-view applyConnectionMode) */
 .mv-conn-mode input{margin-top:3px;}
 .mv-conn-mode-text{display:grid;gap:2px;}
 .mv-conn-mode-text .hint{margin:0;}
@@ -3331,6 +3332,7 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .mv-conn-adv-body{display:grid;gap:10px;}
 .mv-conn-adv-body .input,.mv-conn-adv-body .textarea{font-family:var(--mono);font-size:12.5px;}
 .mv-conn-caps{display:grid;gap:6px;}
+.mv-conn-caps[hidden]{display:none;}
 .mv-conn-caps-row{display:flex;gap:14px;flex-wrap:wrap;align-items:center;}
 .mv-conn-cap{display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;}
 .mv-conn-limit{display:flex;align-items:center;gap:6px;font-size:12.5px;}

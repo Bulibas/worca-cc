@@ -77,6 +77,7 @@ import { SYNC_EXECUTION_ID } from '../shared/graph/constants.mjs';
 import { readPluginsLock, pluginCurrentDir } from './plugins-lock.mjs'; // §9.4 disabled-plugin hint
 import { classifyError, rateLimitHint, brokerHint, freeDailyHint } from './recoverable-error.mjs';
 import { CODEX_DEFAULT_MODEL, codexUnattachableMcp } from './engines/codex.mjs';
+import { hasCodexEndpoint } from './engines/codex-endpoint.mjs';
 import { hostGuardEnabled } from './host-guard.mjs';
 import { isNormalized } from './engines/events.mjs';
 import { createClaudeNormalizer } from './engines/claude-events.mjs';
@@ -100,7 +101,7 @@ import { writePolicyState, hasPipelineOverride, readTotalAck } from './policy/st
 import { installedPluginsMap, WORCA_VERSION as POLICY_WORCA_VERSION } from './policy/local.mjs';
 import { readSettings as readRawSettings } from './settings.mjs';
 import { byActor } from './identity.mjs';
-import { WORKSPACE_SCAN_WORKFLOW_ID, MEMORY_DEFRAG_WORKFLOW_ID } from './graph/builtin-workflows.mjs';
+import { WORKSPACE_SCAN_WORKFLOW_ID, MEMORY_DEFRAG_WORKFLOW_ID, AUTO_WORKFLOW_ID } from './graph/builtin-workflows.mjs';
 import { agentIdentity } from './agent-user.mjs';
 import { resolveRegistry, requiredOf, toolNameLimitFor, skipReasonText } from './mcp/registry.mjs';
 import { loadCatalog } from './mcp/catalog.mjs';
@@ -2379,8 +2380,10 @@ export class RunHarness extends EventEmitter {
     }
     // A model routed to a custom endpoint or through the model bridge speaks the Anthropic API for Claude Code.
     // A Claude model never runs on another engine anyway (_engineModel drops it, and the audit says so), so
-    // only a routed model this engine itself owns is refused.
+    // only a routed model this engine itself owns is refused — except a Codex model on its own
+    // OpenAI-compatible endpoint, which codex connects to itself (engines/codex-endpoint.mjs).
     for (const m of this._engineGateModels(nodes)) {
+      if (name === 'codex' && hasCodexEndpoint(m)) continue;
       if ((modelHasBaseUrlRouting(m) || bridgedModelInfo(m)) && engineOfModel(m, { projectDir: this.projectDir }) === name) {
         return `model "${m}" is routed to a custom endpoint for Claude Code and cannot run on ${name}`;
       }
@@ -2534,6 +2537,33 @@ export class RunHarness extends EventEmitter {
   }
 
   /**
+   * Whether this Codex run needs codex's own sign-in (codexPreflight `signIn`). It does not when every
+   * Codex model its spawns can name runs on its own endpoint (engines/codex-endpoint.mjs): the run's
+   * model, each step's and workflow node's, the helper jobs' Codex models (title, overview, PR
+   * description, memory defragment) and the Away-mode decider's. A helper with no model set, like a
+   * run with none, runs codex's default model, which needs the sign-in; so does an Auto run, whose
+   * classifier may pick any Codex model. Never throws: anything unreadable counts as "needs it".
+   */
+  async _codexNeedsSignIn() {
+    try {
+      if (this.workflowId === AUTO_WORKFLOW_ID) return true;
+      const own = (m) => modelForEngine(m || undefined, 'codex', { projectDir: this.projectDir }) || null;
+      const runModel = own(this.claude.model) || CODEX_DEFAULT_MODEL;
+      const steps = this.stepModels || await resolveStepModels(this.projectDir, this.claude.model, 'codex');
+      const named = [
+        ...Object.values(steps || {}).map((s) => s?.model),
+        ...manifestModels(this.state?.stepper || []),
+        ...['title', 'overview', 'prDescription', 'memoryDefrag'].map((job) => this._utilitySlot(job).model || CODEX_DEFAULT_MODEL),
+        effectiveNightConfig(this.projectDir).config?.deciderModel,
+      ];
+      const models = new Set([runModel, ...named.filter(Boolean).map((m) => own(m) || runModel)]);
+      return ![...models].every((m) => hasCodexEndpoint(m));
+    } catch {
+      return true;
+    }
+  }
+
+  /**
    * The engine gate's async half, before its refusals: the engine's own run-start check
    * (adapter `preflight`; codex: the binary runs and is signed in), skipped by a mock run,
    * which spawns nothing; then the DENY rules of each honoring member's own
@@ -2549,7 +2579,7 @@ export class RunHarness extends EventEmitter {
     if (name === 'claude') return null;
     const adapter = getEngine(name);
     if (!this.claude.mock && typeof adapter.preflight === 'function') {
-      const r = await adapter.preflight(this.claude.bin ? { bin: this.claude.bin } : {});
+      const r = await adapter.preflight({ ...(this.claude.bin ? { bin: this.claude.bin } : {}), ...(name === 'codex' ? { signIn: await this._codexNeedsSignIn() } : {}) });
       if (r?.refusal) throw engineRefusal(name, r.refusal);
       if (r?.warning && !quiet) this._log('orchestrator', 'warn', `engine ${name}: ${r.warning}`);
     }

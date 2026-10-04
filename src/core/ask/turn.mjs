@@ -45,6 +45,7 @@ import { scheduleDefaults } from '../settings.mjs';
 import { revalidateWorkflowProposal } from './workflow-deps.mjs';
 import { askLimits, ASK_LIMITS } from './limits.mjs';
 import { codexPreflight, codexModelPriced, codexResumeNotFound, CODEX_ASK_LOCKDOWN } from '../engines/codex.mjs';
+import { hasCodexEndpoint } from '../engines/codex-endpoint.mjs';
 import { codexMemoryLine } from './prompt.mjs';
 import { resolveSetting } from '../settings-cascade.mjs';
 import { mentionedRefs } from './contexts.mjs';
@@ -157,7 +158,7 @@ class AskTurn extends EventEmitter {
     this.deps = {
       runClaudeImpl: deps.runClaudeImpl ?? runClaude,
       failedBecauseSignedOut: deps.failedBecauseSignedOut ?? failedBecauseSignedOut,
-      codexPreflight: deps.codexPreflight ?? (() => codexPreflight()),
+      codexPreflight: deps.codexPreflight ?? ((o) => codexPreflight(o)),
       codexLockdown: deps.codexLockdown ?? (() => CODEX_ASK_LOCKDOWN),
       codexModelPriced: deps.codexModelPriced ?? codexModelPriced,
       askSlot: deps.askSlot ?? askSlotOf,
@@ -939,7 +940,8 @@ class AskTurn extends EventEmitter {
     // run here would ask about the server user's codex instead. Its sign-in failure surfaces from the turn itself.
     if (this.mock || this.relay) return null;
     let pf = null;
-    try { pf = await d.codexPreflight(); } catch (err) { pf = { warning: err?.message || String(err) }; }
+    // A chat model on its own endpoint needs no codex sign-in, only the binary (codex-endpoint.mjs).
+    try { pf = await d.codexPreflight({ signIn: !hasCodexEndpoint(this.model) }); } catch (err) { pf = { warning: err?.message || String(err) }; }
     if (pf && pf.refusal) {
       this.reducer.addBlock({ kind: 'notice', text: `Codex isn't ready: ${pf.refusal}`, href: CODEX_SETUP_DOCS_URL, hrefLabel: 'Codex setup', codexSetup: true });
       return this._complete({ kind: 'error', message: pf.refusal, code: CODEX_NOT_READY_CODE });

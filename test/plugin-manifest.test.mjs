@@ -898,7 +898,12 @@ test('models: a Codex model names its engine, takes Codex efforts and refuses ro
   assert.equal('engine' in claude.manifest.models[0], false, 'a Claude model carries no engine key');
   const env = normalizeManifest({ name: 'p', models: [{ id: 'cx', engine: 'codex', env: { ANTHROPIC_BASE_URL: 'https://x' } }] });
   assert.equal(env.ok, false);
-  assert.ok(env.errors.some((e) => /"cx".*a codex model takes no env or upstream/.test(e)), JSON.stringify(env.errors));
+  assert.ok(env.errors.some((e) => /"cx".*a codex model takes no env/.test(e)), JSON.stringify(env.errors));
+  const up = normalizeManifest({ name: 'p', models: [{ id: 'cx', engine: 'codex', upstream: { provider: 'openai', api: 'openai-responses', model: 'qwen', apiKey: '${P_KEY}' } }] });
+  assert.equal(up.ok, true, JSON.stringify(up.errors));
+  assert.equal(up.manifest.models[0].upstream.model, 'qwen', 'a Codex model may ship an OpenAI-compatible Responses endpoint');
+  const chat = normalizeManifest({ name: 'p', models: [{ id: 'cx', engine: 'codex', upstream: { provider: 'openai', api: 'openai-chat', model: 'qwen' } }] });
+  assert.ok(chat.errors.some((e) => /"cx".*Responses API only/.test(e)), JSON.stringify(chat.errors));
   const bad = normalizeManifest({ name: 'p', models: [{ id: 'cx', engine: 'gemini' }] });
   assert.ok(bad.errors.some((e) => /"engine" must be "claude" or "codex"/.test(e)), JSON.stringify(bad.errors));
   const eff = normalizeManifest({ name: 'p', models: [{ id: 'cx', engine: 'codex', efforts: ['max'] }] });

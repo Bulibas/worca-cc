@@ -583,6 +583,23 @@ export function assertModelUpstream(upstream) {
   return out;
 }
 
+/** The wire protocols a Codex model's endpoint may speak. codex talks to the endpoint itself (no
+ *  bridge), and codex-cli 0.146 refuses `wire_api = "chat"`, so only the Responses API is left. */
+export const CODEX_UPSTREAM_APIS = Object.freeze(['openai-responses']);
+
+/**
+ * Why a validated `upstream` (assertModelUpstream's output) cannot sit on a Codex model, or null.
+ * codex connects to an OpenAI-compatible endpoint natively; the copilot and anthropic providers,
+ * chat completions and OpenRouter routing exist only in worca's bridge, which a Codex model never uses.
+ */
+export function codexUpstreamProblem(upstream) {
+  if (!upstream) return null;
+  if (upstream.provider !== 'openai') return 'a codex model connects to an OpenAI-compatible endpoint only (upstream.provider openai)';
+  if (!CODEX_UPSTREAM_APIS.includes(upstream.api)) return 'a codex model speaks the Responses API only (upstream.api openai-responses) — codex no longer supports chat completions';
+  if (upstream.openrouter) return 'upstream.openrouter is not available on a codex model';
+  return null;
+}
+
 /** The first env key an `upstream` entry may not also carry, or null. */
 export function upstreamEnvConflict(env) {
   for (const k of Object.keys(env || {})) if (BRIDGE_ROUTING_KEYS.includes(k)) return k;

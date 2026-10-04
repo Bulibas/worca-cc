@@ -11,7 +11,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { runOpts } from '../src/core/phases.mjs';
 import { runClaude } from '../src/core/claude-runner.mjs';
-import { addGlobalModel } from '../src/core/settings.mjs';
+import { addGlobalModel, setUtilityModels } from '../src/core/settings.mjs';
 import { readPipelineForResume } from '../src/core/artifacts.mjs';
 import { ENGINES } from './helpers/engines.mjs';
 import { fakeCodex } from './helpers/fake-codex.mjs';
@@ -131,6 +131,68 @@ test('a Claude model routed to a custom endpoint is dropped on codex like any Cl
     process.env.HOME = prev.HOME;
     if (prev.ALLOW === undefined) delete process.env.WORCA_TEST_ALLOW_HOME_FALLBACK; else process.env.WORCA_TEST_ALLOW_HOME_FALLBACK = prev.ALLOW;
   }
+});
+
+/** Run `fn` with HOME sandboxed for catalog writes (settings.json lives under $HOME). */
+async function withCatalogHome(fn) {
+  const home = tmp();
+  const prev = { HOME: process.env.HOME, ALLOW: process.env.WORCA_TEST_ALLOW_HOME_FALLBACK };
+  process.env.HOME = home; process.env.WORCA_TEST_ALLOW_HOME_FALLBACK = '1';
+  try { return await fn(home); } finally {
+    process.env.HOME = prev.HOME;
+    if (prev.ALLOW === undefined) delete process.env.WORCA_TEST_ALLOW_HOME_FALLBACK; else process.env.WORCA_TEST_ALLOW_HOME_FALLBACK = prev.ALLOW;
+  }
+}
+const ENDPOINT = { provider: 'openai', api: 'openai-responses', model: 'qwen3-coder', baseUrl: 'http://127.0.0.1:8000/v1' };
+
+test('a Codex model on its own OpenAI-compatible endpoint runs on codex: not refused, kept on the spawn', async () => {
+  await withCatalogHome(async () => {
+    await addGlobalModel({ id: 'gate-cx-local', engine: 'codex', upstream: ENDPOINT });
+    const o = withNodes(orch({ engine: 'codex', model: 'gate-cx-local' }), { n1: { key: 'planner', tools: [], model: 'gate-cx-local' } });
+    const lines = o._engineGate();
+    assert.ok(!lines.some((l) => /gate-cx-local/.test(l)), lines.join('\n'));
+    assert.equal(o._engineModel('gate-cx-local'), 'gate-cx-local');
+  });
+});
+
+test('a codex run skips the sign-in only when every Codex model it can name is on an endpoint, helpers included', async () => {
+  await withCatalogHome(async () => {
+    await addGlobalModel({ id: 'gate-cx-a', engine: 'codex', upstream: ENDPOINT });
+    await addGlobalModel({ id: 'gate-cx-b', engine: 'codex', upstream: { ...ENDPOINT, model: 'qwen3-small' } });
+    const run = (claude = {}) => createOrchestrator({ projectDir: tmp(), claude: { mock: true, engine: 'codex', ...claude } });
+    // No model named: the run, and every helper, runs codex's default model.
+    assert.equal(await run()._codexNeedsSignIn(), true);
+    // The run's model is on an endpoint, but the helper jobs (title, overview, …) have no model: codex's default.
+    assert.equal(await run({ model: 'gate-cx-a' })._codexNeedsSignIn(), true);
+    const jobs = Object.fromEntries(['title', 'overview', 'prDescription', 'memoryDefrag'].map((j) => [j, { model: 'gate-cx-b' }]));
+    await setUtilityModels({ codex: jobs });
+    assert.equal(await run({ model: 'gate-cx-a' })._codexNeedsSignIn(), false);
+    // A Claude run model is dropped on codex: the nodes run codex's default model.
+    assert.equal(await run({ model: 'claude-sonnet-5' })._codexNeedsSignIn(), true);
+    // A built-in Codex model anywhere — here a workflow node — needs the sign-in again.
+    const o = run({ model: 'gate-cx-a' });
+    o.state.stepper = { nodes: [{ id: 'n1', model: 'gpt-5.5' }] };
+    assert.equal(await o._codexNeedsSignIn(), true);
+    // An Auto run's classifier may pick any Codex model.
+    const auto = run({ model: 'gate-cx-a' });
+    auto.workflowId = 'wf_auto';
+    assert.equal(await auto._codexNeedsSignIn(), true);
+  });
+});
+
+test('a real codex run on endpoint models only checks the binary, not the sign-in', POSIX, async () => {
+  await withCatalogHome(async () => {
+    await addGlobalModel({ id: 'gate-cx-only', engine: 'codex', upstream: ENDPOINT });
+    await setUtilityModels({ codex: Object.fromEntries(['title', 'overview', 'prDescription', 'memoryDefrag'].map((j) => [j, { model: 'gate-cx-only' }])) });
+    const dir = tmp();
+    const out = join(dir, 'codex-out');
+    writeFileSync(out, '#!/bin/sh\necho "Not logged in"\nexit 1\n');
+    chmodSync(out, 0o755);
+    const real = (claude) => createOrchestrator({ projectDir: dir, claude: { engine: 'codex', bin: out, ...claude } });
+    assert.equal(await real({ model: 'gate-cx-only' })._engineChecks(() => true), null);
+    await assert.rejects(() => real({ model: 'gpt-5.5' })._engineChecks(() => true), /codex-out is not signed in/);
+    await assert.rejects(() => real({ model: 'gate-cx-only', bin: join(dir, 'missing') })._engineChecks(() => true), /cannot run .*missing \(ENOENT\)/);
+  });
 });
 
 test('a Claude model runs on codex\'s default model: dropped from the spawn, named in the audit', () => {

@@ -54,7 +54,7 @@ import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import {
   EFFORTS, CODEX_EFFORTS, effortsForEngine, MODEL_ENGINES, SUBAGENT_MODELS, isReservedModelEnvKey, assertModelCost, envFlag,
-  assertModelUpstream, upstreamEnvConflict, modelEnvRef,
+  assertModelUpstream, upstreamEnvConflict, modelEnvRef, codexUpstreamProblem,
   UPSTREAM_PROVIDERS, COPILOT_ACCOUNT_TYPES, DEFAULT_PROVIDER_CONCURRENCY, MAX_PROVIDER_CONCURRENCY,
   COPILOT_TERMS_VERSION, isUpstreamBaseUrl,
 } from './model-env.mjs';
@@ -1483,7 +1483,8 @@ function sanitizeGlobalModel(raw) {
   let upstream = sanitizeModelUpstream(raw.upstream, id);
   if (engine === 'codex') {
     for (const k of Object.keys(env)) { console.warn(`[worca] models entry ${JSON.stringify(id)}: dropping env key ${JSON.stringify(k)} — a codex model takes no routing env`); delete env[k]; }
-    if (upstream) { console.warn(`[worca] models entry ${JSON.stringify(id)}: dropping upstream — a codex model takes no connection`); upstream = undefined; }
+    const why = codexUpstreamProblem(upstream);
+    if (why) { console.warn(`[worca] models entry ${JSON.stringify(id)}: dropping upstream — ${why}`); upstream = undefined; }
   }
   if (upstream) {
     // The bridge owns the routing keys (model-env.mjs BRIDGE_ROUTING_KEYS); a
@@ -1587,7 +1588,13 @@ function assertEfforts(input, engine = 'claude') {
 }
 
 function assertModelEngine(input) { if (isClearInput(input) || input === 'claude') return 'claude'; if (input === 'codex') return input; throw new Error('engine must be one of claude | codex'); }
-function assertCodexFields(engine, env, upstream) { if (engine !== 'codex') return; if (Object.keys(env || {}).length) throw new Error('a codex model takes no env'); if (upstream) throw new Error('a codex model takes no upstream'); }
+/** A Codex model takes no routing env, and only an OpenAI-compatible Responses endpoint as its upstream (codexUpstreamProblem). */
+function assertCodexFields(engine, env, upstream) {
+  if (engine !== 'codex') return;
+  if (Object.keys(env || {}).length) throw new Error('a codex model takes no env');
+  const why = codexUpstreamProblem(upstream);
+  if (why) throw new Error(why);
+}
 function assertIdForEngine(id, engine) { if (engine === 'codex' && CLAUDE_MODEL_ID_RE.test(id)) throw new Error(`"${id}" is a Claude model id`); if (engine === 'claude' && CODEX_PRICES[id.toLowerCase()]) throw new Error(`"${id}" is a Codex built-in`); }
 
 /** @throws {Error} on a reserved key or a non-string value. `allowNull` admits

@@ -7,7 +7,7 @@ import { readFileSync, readdirSync, readlinkSync, existsSync, statSync } from 'n
 import { join, resolve, dirname, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WORCA_PLUGIN_API, WORCA_PLUGIN_APIS, WORCA_AGENT_DATA_API, WORCA_ASK_FORMS_API, WORCA_MCP_API } from './plugin-api.mjs';
-import { EFFORTS, effortsForEngine, isReservedModelEnvKey, isMcpRegistryEnvKey, assertModelCost, assertModelUpstream, upstreamEnvConflict } from './model-env.mjs';
+import { EFFORTS, effortsForEngine, isReservedModelEnvKey, isMcpRegistryEnvKey, assertModelCost, assertModelUpstream, upstreamEnvConflict, codexUpstreamProblem } from './model-env.mjs';
 import { validateMetaV2, normalizeAgentMeta, indexByKey } from '../shared/graph/agent-meta.mjs';
 import { portsFnFor } from '../shared/graph/ports.mjs';
 import { validateGraph } from '../shared/graph/validate.mjs';
@@ -543,9 +543,14 @@ export function normalizeManifest(raw, { dir = '' } = {}) {
         errors.push(`${at} ("${id}"): ${e.message}`);
         return;
       }
-      // §3.1a: codex ignores routing env and signs in with its own credentials.
-      if (engine === 'codex' && (Object.keys(env).length || upstream)) {
-        errors.push(`${at} ("${id}"): a codex model takes no env or upstream — codex ignores routing env`);
+      // §3.1a: codex ignores routing env; its upstream may only be an OpenAI-compatible Responses endpoint.
+      if (engine === 'codex' && Object.keys(env).length) {
+        errors.push(`${at} ("${id}"): a codex model takes no env — codex ignores routing env`);
+        return;
+      }
+      const codexWhy = engine === 'codex' ? codexUpstreamProblem(upstream) : null;
+      if (codexWhy) {
+        errors.push(`${at} ("${id}"): ${codexWhy}`);
         return;
       }
       models.push({

@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { listModels, CODEX_BUILTIN_MODELS, PREDEFINED_MODELS, engineOfModel, catalogHasModel } from '../src/core/config.mjs';
+import { listModels, CODEX_BUILTIN_MODELS, PREDEFINED_MODELS, engineOfModel, catalogHasModel, resolveModelEnv } from '../src/core/config.mjs';
+import { findBridgedEntry } from '../src/core/bridge/registry.mjs';
 import { addGlobalModel, updateGlobalModel, listGlobalModels, setHideBuiltinModels } from '../src/core/settings.mjs';
 import { CODEX_EFFORTS } from '../src/core/model-env.mjs';
 import { _resetForTests } from '../src/core/db.mjs';
@@ -79,20 +80,37 @@ test('"Hide built-in models" hides Claude built-ins only', async () => {
   assert.ok(cat.filter((m) => m.engine === 'codex').every((m) => m.hidden === undefined));
 });
 
-test('a Codex custom model takes Codex efforts and refuses env, upstream and a Claude id', async () => {
+test('a Codex custom model takes Codex efforts and refuses env, a non-Responses upstream and a Claude id', async () => {
   const m = await addGlobalModel({ id: 'cx-tune', engine: 'codex', efforts: ['low', 'high'] });
   assert.deepEqual(m, { id: 'cx-tune', label: 'cx-tune', efforts: ['low', 'high'], engine: 'codex' });
   assert.equal(engineOfModel('cx-tune'), 'codex', 'a custom entry names its engine');
   assert.equal((await listModels('')).find((r) => r.id === 'cx-tune').engine, 'codex');
   await assert.rejects(() => addGlobalModel({ id: 'cx-2', engine: 'codex', efforts: ['max'] }), /unknown effort "max" — must be one of minimal \| low \| medium \| high/);
   await assert.rejects(() => addGlobalModel({ id: 'cx-3', engine: 'codex', env: { ANTHROPIC_BASE_URL: 'https://x' } }), /a codex model takes no env/);
-  await assert.rejects(() => addGlobalModel({ id: 'cx-4', engine: 'codex', upstream: { provider: 'openai', api: 'openai-chat', model: 'gpt-x' } }), /a codex model takes no upstream/);
+  await assert.rejects(() => addGlobalModel({ id: 'cx-4', engine: 'codex', upstream: { provider: 'openai', api: 'openai-chat', model: 'gpt-x' } }), /a codex model speaks the Responses API only/);
+  await assert.rejects(() => addGlobalModel({ id: 'cx-4', engine: 'codex', upstream: { provider: 'copilot', api: 'openai-responses', model: 'gpt-x' } }), /OpenAI-compatible endpoint only/);
+  await assert.rejects(() => addGlobalModel({ id: 'cx-4', engine: 'codex', upstream: { provider: 'anthropic', api: 'anthropic', model: 'x' } }), /OpenAI-compatible endpoint only/);
+  await assert.rejects(() => addGlobalModel({ id: 'cx-4', engine: 'codex', upstream: { provider: 'openai', api: 'openai-responses', model: 'x', openrouter: { models: ['a/b'] } } }), /openrouter is not available on a codex model/);
   await assert.rejects(() => addGlobalModel({ id: 'claude-opus-5-5', engine: 'codex' }), /is a Claude model id/);
   await assert.rejects(() => addGlobalModel({ id: 'gpt-5.5', label: 'Claude-side' }), /"gpt-5.5" is a Codex built-in/);
   await assert.rejects(() => addGlobalModel({ id: 'cx-5', engine: 'gemini' }), /engine must be one of claude \| codex/);
   await assert.rejects(() => updateGlobalModel('cx-tune', { engine: 'claude' }), /engine cannot change/);
   await assert.rejects(() => updateGlobalModel('cx-tune', { env: { X: '1' } }), /a codex model takes no env/);
   assert.deepEqual((await updateGlobalModel('cx-tune', { efforts: ['minimal'] })).efforts, ['minimal']);
+});
+
+test('a Codex model takes an OpenAI-compatible Responses endpoint as its upstream', async () => {
+  const up = { provider: 'openai', api: 'openai-responses', model: 'qwen3-coder', baseUrl: 'http://127.0.0.1:8000/v1', apiKey: '${CX_KEY}', headers: { 'X-Team': 'blue' } };
+  const m = await addGlobalModel({ id: 'cx-local', engine: 'codex', upstream: up });
+  assert.deepEqual(m.upstream, up);
+  const row = (await listModels('')).find((r) => r.id === 'cx-local');
+  assert.equal(row.engine, 'codex');
+  assert.equal(row.bridged, 'openai', 'the row names its provider, like a bridged one');
+  assert.equal(row.upstreamModel, 'qwen3-coder');
+  assert.equal(findBridgedEntry('cx-local'), null, 'never handed to the bridge');
+  assert.equal(resolveModelEnv('cx-local'), undefined, 'no claude routing env');
+  assert.equal(engineOfModel('cx-local'), 'codex');
+  assert.equal((await updateGlobalModel('cx-local', { upstream: null })).upstream, undefined, 'the endpoint can be dropped again');
 });
 
 test('a hand-edited Codex entry with env or upstream reads without them, loudly', async () => {
@@ -107,7 +125,7 @@ test('a hand-edited Codex entry with env or upstream reads without them, loudly'
     assert.deepEqual(listGlobalModels(), [{ id: 'cx-hand', label: 'cx-hand', efforts: ['minimal'], engine: 'codex' }]);
   } finally { console.warn = orig; }
   assert.ok(warned.some((w) => /cx-hand.*ANTHROPIC_BASE_URL.*a codex model takes no routing env/.test(w)), warned.join('\n'));
-  assert.ok(warned.some((w) => /cx-hand.*dropping upstream/.test(w)));
+  assert.ok(warned.some((w) => /cx-hand.*dropping upstream — a codex model speaks the Responses API only/.test(w)));
 });
 
 test('a Claude entry is stored and read exactly as before', async () => {

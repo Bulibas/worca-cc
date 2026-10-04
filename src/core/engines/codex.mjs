@@ -29,6 +29,7 @@ import { createRedactor } from '../redact.mjs';
 import { strongestClass } from '../recoverable-error.mjs';
 import { ARGV_INLINE_LIMIT } from './claude.mjs';
 import { CODEX_PRICES } from '../list-prices.mjs';
+import { codexEndpointSpawn, findCodexEndpointEntry } from './codex-endpoint.mjs';
 
 export const CODEX_DEFAULT_BIN = process.env.WORCA_CODEX_BIN || 'codex';
 
@@ -157,12 +158,13 @@ const DEFAULT_INVESTIGATOR_PROMPT = 'You are a read-only investigator dispatched
  * so read-only is the role's instruction, as it is for Claude's investigator (which keeps Bash).
  * @returns {{description:string, toml:string}}
  */
-export function codexInvestigatorRole({ agents, subagentSystemPrompt } = {}) {
+export function codexInvestigatorRole({ agents, subagentSystemPrompt, inheritModel = false } = {}) {
   const def = agents && typeof agents === 'object' ? Object.values(agents)[0] : null;
   const prompt = [typeof def?.prompt === 'string' && def.prompt.trim() ? def.prompt.trim() : DEFAULT_INVESTIGATOR_PROMPT,
     typeof subagentSystemPrompt === 'string' ? subagentSystemPrompt.trim() : ''].filter(Boolean).join('\n\n');
   const lines = [`developer_instructions = ${tomlString(prompt)}`];
-  if (codexModelPriced(def?.model) && def?.model) lines.push(`model = ${tomlString(def.model)}`);
+  // On a custom endpoint the role inherits the parent's model with its provider: a built-in id would go to the endpoint.
+  if (!inheritModel && codexModelPriced(def?.model) && def?.model) lines.push(`model = ${tomlString(def.model)}`);
   const effort = def?.effort === 'max' ? 'xhigh' : def?.effort;
   if (CODEX_EFFORTS.includes(effort)) lines.push(`model_reasoning_effort = ${tomlString(effort)}`);
   return { description: typeof def?.description === 'string' && def.description ? def.description : 'Read-only investigator for one area; reports its findings to the agent that dispatched it.',
@@ -232,9 +234,12 @@ export function mcpResultText(result) {
 }
 
 /** True when worca can price `model` on Codex (CODEX_PRICES) — a cost cap needs it (D14). No model is
- *  CODEX_DEFAULT_MODEL, which the adapter names on every spawn. */
+ *  CODEX_DEFAULT_MODEL, which the adapter names on every spawn. A model on its own endpoint is priced
+ *  only by its catalog price override (the list prices are OpenAI's, not the endpoint's). */
 export function codexModelPriced(model) {
   const m = model == null || model === '' ? CODEX_DEFAULT_MODEL : model;
+  const endpoint = findCodexEndpointEntry(m);
+  if (endpoint) return !!endpoint.cost;
   return typeof m === 'string' && Object.hasOwn(CODEX_PRICES, m);
 }
 
@@ -344,9 +349,11 @@ const text = (v) => (typeof v === 'string' ? v : '');
  * `turn.failed`, or by the last top-level `error` when no turn completed; a
  * top-level `error` followed by `turn.completed` (a retry codex recovered from)
  * is only a warning.
- * @param {{model?:string, priorUsage?:object|null}} [o]
+ * `unpriced`: the model runs on a custom endpoint, so no list price applies (cost stays unknown here;
+ * worca's per-model price override still applies on top, config.mjs#resolveModelCost).
+ * @param {{model?:string, priorUsage?:object|null, unpriced?:boolean}} [o]
  */
-export function createCodexNormalizer({ model, priorUsage = null } = {}) {
+export function createCodexNormalizer({ model, priorUsage = null, unpriced = false } = {}) {
   const texts = [];
   const collab = new Set();
   const startedTools = new Set();
@@ -455,7 +462,7 @@ export function createCodexNormalizer({ model, priorUsage = null } = {}) {
         const cumulative = readUsage(evt.usage);
         const delta = diffUsage(cumulative, lastUsage);
         lastUsage = cumulative;
-        const cost = estimateCodexCostUsd(model, delta);
+        const cost = unpriced ? null : estimateCodexCostUsd(model, delta);
         return [{
           type: 'result', text: texts.join('\n'), isError: false, usage: claudeStyleUsage(delta),
           ...(cost != null ? { costUsd: cost } : {}),
@@ -497,9 +504,10 @@ export function parseLoginStatus({ code, stdout = '', stderr = '' } = {}) {
  * The engine's run-start check (engines/index.mjs `preflight`): the binary runs and
  * `codex login status` says it is signed in. Never rejects. Resolves `{refusal}` when
  * the run cannot start (no binary, signed out), `{warning}` when it cannot tell, and
- * `{}` when it can.
+ * `{}` when it can. `signIn: false` (every model the run uses is on its own endpoint)
+ * checks only that the binary runs.
  */
-export function codexPreflight({ bin = CODEX_DEFAULT_BIN, timeoutMs = 10000 } = {}) {
+export function codexPreflight({ bin = CODEX_DEFAULT_BIN, timeoutMs = 10000, signIn = true } = {}) {
   return new Promise((resolve) => {
     execFile(bin, ['login', 'status'], { timeout: timeoutMs }, (err, stdout, stderr) => {
       if (err && typeof err.code !== 'number') {
@@ -509,7 +517,8 @@ export function codexPreflight({ bin = CODEX_DEFAULT_BIN, timeoutMs = 10000 } = 
         return;
       }
       const signedIn = parseLoginStatus({ code: err ? err.code : 0, stdout, stderr });
-      if (signedIn === false) resolve({ refusal: `${bin} is not signed in — run \`codex login\`` });
+      if (!signIn) resolve({});
+      else if (signedIn === false) resolve({ refusal: `${bin} is not signed in — run \`codex login\`` });
       else if (signedIn === null) resolve({ warning: `could not tell whether ${bin} is signed in (\`codex login status\` said nothing recognizable)` });
       else resolve({});
     });
@@ -545,8 +554,13 @@ export async function runCodexProcess({
 } = {}) {
   if (signal?.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
   const model = namedModel || CODEX_DEFAULT_MODEL;
-  // MCP registry §5.5.3: with registry secrets in this spawn's env, every emit, the result text and the error leave redacted.
-  const redactor = Array.isArray(redactValues) && redactValues.length ? createRedactor(redactValues) : null;
+  // A model on its own OpenAI-compatible endpoint (codex-endpoint.mjs): codex connects to it directly. Throws
+  // (auth class) before any spawn when the endpoint has no usable key.
+  const endpoint = codexEndpointSpawn(model);
+  // MCP registry §5.5.3: with registry secrets in this spawn's env, every emit, the result text and the error leave
+  // redacted. The endpoint's key and header values are redacted the same way.
+  const secrets = [...(Array.isArray(redactValues) ? redactValues : []), ...(endpoint ? endpoint.secrets : [])];
+  const redactor = secrets.length ? createRedactor(secrets) : null;
   if (redactor) { const emit = onEvent; onEvent = (e) => emit(redactor.deep(e)); }
   const redacted = (err) => {
     if (redactor && err && typeof err.message === 'string') err.message = redactor.text(err.message);
@@ -591,7 +605,7 @@ export async function runCodexProcess({
     mcpServers = expandMcpEnvRefs(Object.fromEntries(Object.entries(all).filter(([n]) => !unattachable.has(n))), from);
   }
   const serverEnv = codexMcpOverrides(mcpServers).env;
-  const normalizer = createCodexNormalizer({ model, priorUsage: thread ? loadUsage(usageDir, thread) : null });
+  const normalizer = createCodexNormalizer({ model, priorUsage: thread ? loadUsage(usageDir, thread) : null, unpriced: !!endpoint });
   const { env } = composeSpawnEnv({ ...envOpts, ...(Object.keys(serverEnv).length ? { runEnv: serverEnv } : {}) });
   // Guardrails: the deny rules codex can hold (codexRulePlan). Command rules live in a worca-managed CODEX_HOME.
   const plan = codexRulePlan(permissionRules);
@@ -602,7 +616,7 @@ export async function runCodexProcess({
   // Fan-out (the runner granted the sub-agent tool): worca's investigator becomes a codex agent role for this call.
   let roleFile = null;
   if (Array.isArray(allowedTools) && allowedTools.some((t) => t === 'Agent' || t === 'Task') && !askLockdown) {
-    const role = codexInvestigatorRole({ agents, subagentSystemPrompt: appendSubagentSystemPrompt });
+    const role = codexInvestigatorRole({ agents, subagentSystemPrompt: appendSubagentSystemPrompt, inheritModel: !!endpoint });
     try {
       const dir = join(worcaHome(), 'tmp', 'codex-roles');
       mkdirSync(dir, { recursive: true });
@@ -615,10 +629,12 @@ export async function runCodexProcess({
   // codex hands an MCP server only a short default env plus `env_vars`: name every variable of codex's own env, so the
   // worca server gets what a Claude chat's child inherits (proxy, CA bundle, WORCA_CODEX_BIN, codex's own keys…).
   const mcp = codexMcpOverrides(mcpServers, { passEnv: Object.keys(env) });
+  // The endpoint's key and headers join codex's env only now, so no MCP server is handed them.
+  if (endpoint) { Object.assign(env, endpoint.env); extra.push(...endpoint.args); }
   // The sandbox writes only the cwd: the memory mount and the node's output dirs
   // become writable roots (--add-dir fresh, writable_roots on resume).
   const dirs = [...new Set([...(addDirs || []), ...(writableDirs || [])])];
-  const args = buildCodexArgs({ systemPrompt: sys, model, effort, resumeThreadId: thread, addDirs: dirs, sandbox, mcp: [...mcp.args, ...extra],
+  const args = buildCodexArgs({ systemPrompt: sys, model: endpoint ? endpoint.model : model, effort, resumeThreadId: thread, addDirs: dirs, sandbox, mcp: [...mcp.args, ...extra],
     ...(askLockdown ? { lockdown, images } : {}) });
   let sawThread = thread;
   // maxTurns: the main agent's tool calls, counted as the Ask watchdog counts them (sub-agent calls do not count).

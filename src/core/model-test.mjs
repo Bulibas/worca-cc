@@ -11,6 +11,7 @@ import { AUX_EFFORT } from './model-env.mjs';
 import { classifyError, isFreeDailyLimit, freeDailyHint } from './recoverable-error.mjs';
 import { failedBecauseSignedOut } from './claude-auth.mjs';
 import { bridgeEvents } from './bridge/telemetry.mjs';
+import { hasCodexEndpoint } from './engines/codex-endpoint.mjs';
 
 const TEST_TIMEOUT_MS = 60_000;
 const REPLY_CAP = 100;
@@ -34,6 +35,8 @@ export function hintFor(errorClass) {
 
 export const CLAUDE_SIGNED_OUT_HINT = "Claude Code isn't signed in — run `claude` in a terminal and type /login";
 export const CODEX_SIGNED_OUT_HINT = "codex isn't signed in — run `codex login` in a terminal";
+/** A Codex model on its own endpoint that the endpoint did not answer. */
+export const CODEX_ENDPOINT_NETWORK_HINT = "endpoint unreachable — check this model's Base URL, or the OpenAI-compatible provider's";
 
 /** Actionable hint for a bridge readiness failure (config.mjs resolveModelEnv). Pure. */
 export function bridgeHintFor(reason, provider = 'the provider') {
@@ -122,6 +125,7 @@ export async function testModel(id, { signal, bin, run = runClaude, signedOut = 
     const hint = err && err.bridgeReason ? bridgeHintFor(err.bridgeReason, err.bridgeProvider)
       : bridgeFailure && bridgeFailure.message && errorClass === 'network' ? ''
       : cliSignedOut ? CLAUDE_SIGNED_OUT_HINT
+      : !onClaude && hasCodexEndpoint(id) ? (errorClass === 'network' ? CODEX_ENDPOINT_NETWORK_HINT : hintFor(errorClass))
       : !onClaude && errorClass === 'auth' ? CODEX_SIGNED_OUT_HINT
       : isFreeDailyLimit(message) ? freeDailyHint(message)
       : hintFor(errorClass);

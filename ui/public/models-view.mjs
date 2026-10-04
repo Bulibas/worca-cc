@@ -474,8 +474,8 @@ export function renderModelEditor(model, efforts, { doc = globalThis.document, p
   labelInput.placeholder = 'Display name (defaults to the id)';
   labelInput.value = editing ? (model.label === model.id ? '' : model.label) : '';
   grid.appendChild(field('Label', labelInput));
-  // §3.1a: which engine runs the model. Codex takes no env or connection (codex ignores routing
-  // env); the engine is part of the entry, so it is fixed once created.
+  // §3.1a: which engine runs the model. Codex takes no routing env (codex ignores it), and its connection
+  // can only be an OpenAI-compatible endpoint; the engine is part of the entry, so it is fixed once created.
   const engineSel = h(doc, 'select', 'select mv-engine');
   for (const [v, t] of [['claude', 'Claude'], ['codex', 'Codex']]) {
     const o = doc.createElement('option');
@@ -486,7 +486,7 @@ export function renderModelEditor(model, efforts, { doc = globalThis.document, p
   engineSel.disabled = editing;
   grid.appendChild(field('Engine', engineSel, editing
     ? 'Fixed once created — delete the model and add it again to change it.'
-    : 'Which harness runs this model. A Codex model takes no routing env or connection.'));
+    : 'Which harness runs this model. A Codex model takes no routing env; it connects to OpenAI or to an OpenAI-compatible endpoint.'));
 
   // ── Connection (model-bridge-design.md §8.3): direct / env / provider ──
   // Rendered first among the routing controls: it decides whether the env
@@ -564,7 +564,7 @@ export function renderModelEditor(model, efforts, { doc = globalThis.document, p
   setModelCost(root, editing ? model.cost : null); // grid is attached now — the block is reachable from root
   applyConnectionModeIn(root);                       // efforts hint + collapse follow the Connection (now reachable)
   root.dataset.engine = engineNow;
-  setModelEngine(root, engineNow);                   // hides env + connection for a Codex entry
+  setModelEngine(root, engineNow);                   // hides the env rows and narrows the Connection for a Codex entry
   const msg = h(doc, 'p', 'form-msg mv-editor-msg');
   msg.setAttribute('aria-live', 'polite');
   root.appendChild(msg);
@@ -593,7 +593,8 @@ function effortBoxes(doc, list, selected) {
 
 /**
  * Put an editor on an engine (§3.1a): the effort checkboxes become that engine's list (all
- * checked) when the engine changes, and the routing env and connection fields hide for Codex.
+ * checked) when the engine changes, the routing env hides for Codex, and the Connection offers a
+ * Codex model only its own default or an OpenAI-compatible endpoint (bridge-view applyConnectionMode).
  * The ONE place that knows the rule — the initial render, the select's change handler (app.js)
  * and "+ Add model…" from a Codex New pipeline all go through it. Safe on any editor.
  * @param {Element} rootEl the .mv-editor root
@@ -612,12 +613,12 @@ export function setModelEngine(rootEl, engine) {
     rootEl.dataset.engine = next;
   }
   const codex = next === 'codex';
-  for (const cls of ['.mv-env', '.mv-conn']) {
-    const f = rootEl.querySelector(cls)?.closest('.mv-field');
-    if (f) f.hidden = codex;
-  }
+  const envField = rootEl.querySelector('.mv-env')?.closest('.mv-field');
+  if (envField) envField.hidden = codex;
   const btns = rootEl.querySelector('.mv-env-btns');
   if (btns) btns.hidden = codex;
+  const conn = rootEl.querySelector('.mv-conn');
+  if (conn) { conn.dataset.engine = next; applyConnectionMode(conn); }
 }
 
 /**
@@ -709,7 +710,7 @@ export function collectModelEditor(rootEl) {
 
   // Connection (model-bridge-design.md §8.3): the object to store, or null to
   // clear — like 'cli' for pricing, the form shows the truth.
-  const { upstream } = engine === 'codex' ? { upstream: undefined } : collectConnection(rootEl);
+  const { upstream } = collectConnection(rootEl);
 
   const body = {
     ...(editing ? {} : { id }),

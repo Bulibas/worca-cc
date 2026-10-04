@@ -7571,12 +7571,14 @@ const maskEnvValue = (v) => (modelEnvRef(v) ? v : maskModelEnvValue(v));
 // A bridged entry's `upstream.apiKey` is masked like an env secret; the rest of
 // the block is routing config and passes through. `bridged`/`needsSignIn` are
 // the picker/card facts (model-bridge-design.md §8.5), one readiness check
-// per provider per response.
+// per provider, key and base URL per response (an entry's own key or base URL
+// can decide it, as in config.mjs composeCatalog).
 const bridgeFacts = (m, readiness) => {
   if (!m.upstream) return {};
   const p = m.upstream.provider;
-  if (!readiness.has(p)) readiness.set(p, providerReadiness(m.upstream));
-  const r = readiness.get(p);
+  const key = `${p}\n${m.upstream.apiKey || ''}\n${m.upstream.baseUrl || ''}`;
+  if (!readiness.has(key)) readiness.set(key, providerReadiness(m.upstream));
+  const r = readiness.get(key);
   return { bridged: p, needsSignIn: !r.ok, ...(r.ok ? {} : { signInReason: r.reason, signInMessage: r.message }) };
 };
 const maskedGlobalModel = (m, readiness = new Map()) => ({
