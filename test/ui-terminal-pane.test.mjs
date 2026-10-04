@@ -42,7 +42,7 @@ function makePane({ ctx, routes, url = 'http://localhost:4317/', env = {}, befor
   const sendWs = (m) => { if (!env.online) return false; sent.push(m); return true; };
   const pane = createTerminalPane({ doc: dom.window.document, win: dom.window, fetch, sendWs,
     getPageContext: () => env.ctx, storage: null, loadXterm: xt.load });
-  dom.window.document.body.append(pane.root, pane.handle);
+  dom.window.document.body.append(pane.root);
   return { pane, doc: dom.window.document, sent, calls, xt, env };
 }
 
@@ -102,6 +102,21 @@ test('the header: the title and the hide button; no Stop, Close, Open or branch 
   for (const gone of ['.term-stop', '.term-close-session', '.term-checkout', '.term-branch', '.term-sessions', '.term-wt-remove']) {
     assert.equal(doc.querySelector(gone), null, gone);
   }
+});
+
+test('the page header buttons (.term-opener) say whether the pane is open; the pane adds no opener of its own', async () => {
+  const { pane, doc } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
+  const opener = doc.createElement('button');
+  opener.className = 'term-opener';
+  opener.setAttribute('aria-expanded', 'false');
+  doc.body.append(opener);
+  assert.equal(pane.handle, undefined);
+  await pane.open();
+  await tick();
+  assert.equal(opener.getAttribute('aria-expanded'), 'true');
+  assert.equal(doc.body.getAttribute('aria-expanded'), null);   // body.term-open is not an opener
+  pane.close();
+  assert.equal(opener.getAttribute('aria-expanded'), 'false');
 });
 
 test('the pane renders no Commands control or list, and leaves recorded commands to the server', async () => {

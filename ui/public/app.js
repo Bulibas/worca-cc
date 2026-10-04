@@ -750,7 +750,7 @@ function setMobileNavOpen(open) {
   document.body.classList.toggle('nav-open', next);
   mbarMenu?.setAttribute('aria-expanded', String(next));
   if (navScrim) navScrim.hidden = !next;
-  for (const n of [$('.main'), $('#mbar'), $('body > .ask-dock'), $('body > .term-pane'), $('body > .term-handle')]) {
+  for (const n of [$('.main'), $('#mbar'), $('body > .ask-dock'), $('body > .term-pane')]) {
     if (n) n.toggleAttribute('inert', next);
   }
   if (next) $('#side-close')?.focus();
@@ -10956,6 +10956,7 @@ function openProjDetail(p, parsed, { instant = false } = {}) {
   screen.querySelector('.pd-history').addEventListener('click', () => { openRunsForProject(p.key); });
   screen.querySelector('.pd-remove').addEventListener('click', () => { void removeProjectFromPage(p.key); });
   paintProjHeader(screen, p);
+  terminalPane?.syncOpeners();             // the cloned header's terminal button says whether the pane is open
   initPdTabs(screen, p);
   activateProjTab(parsed.tab, parsed.sub);
 
@@ -29559,7 +29560,10 @@ terminalPane = createTerminalPane({
   storage: window.localStorage,
 });
 document.body.appendChild(terminalPane.root);
-document.body.appendChild(terminalPane.handle);
+// Its openers are the run and project pages' header buttons (.term-opener); a page cloned later (the
+// project page) syncs its own, see openProjDetail.
+document.addEventListener('click', (e) => { if (e.target.closest?.('.term-opener')) terminalPane?.toggle(); });
+terminalPane.syncOpeners();
 
 // ---------------------------------------------------------------------------
 // Export to Claude Code — modal wiring. Turns a saved v2 workflow into a runnable

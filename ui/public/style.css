@@ -5147,13 +5147,12 @@ body.rail-collapsed .ask-dock{left:76px;}
 body.term-open .app{margin-right:var(--term-w,460px);}
 body.term-open .ask-dock{right:var(--term-w,460px);}
 body.term-open .toasts{right:calc(var(--term-w,460px) + 20px);}
-.term-handle{position:fixed;top:16px;right:16px;z-index:39;display:flex;align-items:center;justify-content:center;
-  width:38px;height:38px;padding:0;border-radius:12px;background:var(--surface);color:var(--ink-2);border:1px solid var(--line);}
-.term-handle svg{width:20px;height:20px;}
-.term-handle:hover{color:var(--ink);background:var(--hover);}
-.term-handle:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
-body:not(.term-open) :is(.topbar,.settings-tabs,.rd-bar,.hd-bar,.pd-header){margin-right:46px;}
-body.term-open .term-handle{display:none;}
+/* The opener: an icon button in the run bar and the project page's title row, at their controls' height. */
+.term-opener{display:inline-flex;align-items:center;justify-content:center;flex:none;width:36px;height:36px;padding:0;box-sizing:border-box;color:var(--ink-2);}
+.term-opener:hover{color:var(--ink);}
+.term-opener[aria-expanded="true"]{color:var(--ink);background:var(--hover);}
+.term-opener:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.pd-row1 .term-opener{margin-left:auto;width:39px;height:39px;}   /* Back and Remove are 39px here */
 .term-resize{position:absolute;left:-3px;top:0;bottom:0;width:6px;cursor:col-resize;}
 .term-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);}
 .term-title{font:600 13px/1 var(--sans);color:var(--ink);margin-right:auto;}
@@ -5189,9 +5188,7 @@ body.term-open .term-handle{display:none;}
 @media (max-width:760px){ body.term-open .app{margin-right:0;} .term-pane{width:100vw;} body.term-open .ask-dock{right:0;} body.term-open .toasts{right:12px;}
   /* The dock (z-40) sits over the full-width pane (z-39): its pill would cover the terminal's input row. */
   body.term-open .ask-dock>.ask-pill{display:none;}
-  .term-handle{top:6px;right:10px;width:40px;height:40px;border:0;background:transparent;color:var(--ink);}
-  body:not(.term-open) :is(.topbar,.settings-tabs,.rd-bar,.hd-bar,.pd-header){margin-right:0;}
-  .mbar{padding-right:56px;} }
+ }
 
 .ask-pill{pointer-events:auto;display:flex;align-items:center;gap:10px;padding:11px 18px 11px 14px;
   border:1.5px solid var(--line-2);border-radius:999px;background:var(--panel);color:var(--ink);

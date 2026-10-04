@@ -13,6 +13,18 @@ test('opening the pane moves the Ask dock and toasts left of it, and the page co
   assert.match(css, /\.term-pane\{position:fixed;top:0;right:0;bottom:0;width:var\(--term-w,460px\);z-index:39;/);
 });
 
+test('the openers live in the run bars and the project title row, never in a corner of every page', () => {
+  const html = readFileSync(new URL('../ui/public/index.html', import.meta.url), 'utf8');
+  assert.equal(html.match(/class="term-opener btn-ghost"/g)?.length, 3);
+  for (const anchor of ['<span class="rd-btn-label">Stop</span>', '<span class="hd-btn-label">Stop</span>', '<h1 class="pd-title"></h1>']) {
+    const at = html.indexOf(anchor);
+    assert.ok(at > 0 && html.indexOf('class="term-opener', at) - at < 400, anchor);
+  }
+  assert.doesNotMatch(css + app, /term-handle/);
+  assert.doesNotMatch(css, /margin-right:46px/);
+  assert.ok(app.includes("if (e.target.closest?.('.term-opener')) terminalPane?.toggle();"));
+});
+
 test('phones: the pane overlays full width and nothing shifts', () => {
   assert.match(css, /@media \(max-width:760px\)\{[^}]*body\.term-open \.app\{margin-right:0;\}/);
 });
