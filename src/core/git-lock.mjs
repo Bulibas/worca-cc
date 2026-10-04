@@ -42,3 +42,8 @@ export async function clearStaleIndexLock(cwd, { maxAgeMs = STALE_INDEX_LOCK_MS 
   try { await unlink(path); } catch (err) { if (err.code !== 'ENOENT') return null; }
   return { path, ageMs };
 }
+
+/** The run warning / audit line for a lock clearStaleIndexLock removed. */
+export function staleIndexLockNote({ path, ageMs }) {
+  return `removed a stale git index lock (${Math.round(ageMs / 60_000)} min old, left by a killed git process): ${path}`;
+}

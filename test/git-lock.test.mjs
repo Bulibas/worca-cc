@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { clearStaleIndexLock, STALE_INDEX_LOCK_MS } from '../src/core/git-lock.mjs';
+import { clearStaleIndexLock, staleIndexLockNote, STALE_INDEX_LOCK_MS } from '../src/core/git-lock.mjs';
 import { snapshotWorktreePatch } from '../src/core/worktree.mjs';
 
 const created = [];
@@ -81,4 +81,16 @@ test('snapshotWorktreePatch saves the work past a stale lock (retained-run disca
   assert.equal(res.ok, true, JSON.stringify(res));
   assert.equal(res.file, out);
   assert.equal(existsSync(lock), false);
+  // the caller turns this into a run warning / audit line, so the removal leaves a trace
+  assert.equal(res.clearedLock?.path, lock);
+  assert.ok(res.clearedLock.ageMs >= STALE_INDEX_LOCK_MS);
+  assert.match(staleIndexLockNote(res.clearedLock), /removed a stale git index lock \(\d+ min old/);
+});
+
+test('snapshotWorktreePatch reports no clearedLock when there was no lock', async () => {
+  const { wt } = await linkedWorktree();
+  await writeFile(join(wt, 'feature.mjs'), 'export {};\n');
+  const res = await snapshotWorktreePatch(wt, join(await tmp(), 'retained.patch'));
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal('clearedLock' in res, false);
 });

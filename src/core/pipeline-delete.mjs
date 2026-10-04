@@ -25,6 +25,7 @@ import {
 import { worcaHome } from './projects.mjs';
 import { getDb, tx } from './db.mjs';
 import { removeWorktree, snapshotWorktreePatch } from './worktree.mjs';
+import { staleIndexLockNote } from './git-lock.mjs';
 import {
   rmGuarded, readRunManifest, rescueModifiedMounts, scanStrayEntries, copyRunManifestTo, RETAIN_REASONS,
 } from './run-manifest.mjs';
@@ -334,9 +335,11 @@ export async function discardRetainedWorktrees({ projectDir = null, key = null, 
   // workspace, without ever holding a whole patch in memory.
   await mkdir(runDir, { recursive: true });
   const patches = [];
+  const lockNotes = [];
   for (const target of targets) {
     const name = retainedWorkPatchName(state.target === 'workspace' ? (target.projectKey || 'member') : null);
     const snap = await snapshotWorktreePatch(target.worktreeDir, join(runDir, name));
+    if (snap.clearedLock) lockNotes.push(staleIndexLockNote(snap.clearedLock));
     if (!snap.ok) {
       throw err(
         `cannot save recovery patch for ${target.projectKey || target.worktreeDir}: git ${snap.step} failed: ${snap.message}`,
@@ -351,7 +354,7 @@ export async function discardRetainedWorktrees({ projectDir = null, key = null, 
 
   const report = {
     ok: true, id: row.id, discarded: false, remaining: 0, worktrees: [], patches,
-    runRoot: null, warnings: [],
+    runRoot: null, warnings: lockNotes,
   };
   if (existsSync(runRoot)) {
     const manifest = await readRunManifest(runRoot);
