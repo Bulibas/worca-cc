@@ -97,7 +97,7 @@ const SOURCE = [
 // ---- chrome + cdp ----------------------------------------------------------
 profile = await mkdtemp(path.join(tmpdir(), 'worca-scripts-profile-'));
 chrome = spawn(CHROME, ['--headless=new', ...SANDBOX, `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`,
-  '--window-size=1440,960', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check',
+  '--window-size=1440,960', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check', '--use-mock-keychain',
   '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank'],
 { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...REAL_ENV } });
 const chromeErr = [];

@@ -230,6 +230,7 @@ test('screenshotArgs is the audit recipe, without a fresh --user-data-dir (it ha
   const a = screenshotArgs({ htmlPath: '/p/a b.html', pngPath: '/p/a.png', width: 1600, height: 900 });
   assert.ok(a.includes('--headless=new') && a.includes('--window-size=1600,900') && a.includes('--screenshot=/p/a.png'));
   assert.ok(!a.some((x) => x.startsWith('--user-data-dir')));
+  assert.ok(a.includes('--use-mock-keychain'), 'never the login keychain, whatever HOME is');
   assert.equal(a.at(-1), 'file:///p/a%20b.html');
   assert.ok(screenshotArgs({ htmlPath: '/p/a.html', pngPath: '/p/a.png', width: 1, height: 1, noSandbox: true }).includes('--no-sandbox'));
 });

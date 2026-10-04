@@ -113,7 +113,7 @@ def main(api):
 
     if os.path.exists(out):
         os.remove(out)
-    cmd = [chrome, '--headless=new', '--disable-gpu', '--no-pdf-header-footer',
+    cmd = [chrome, '--headless=new', '--disable-gpu', '--use-mock-keychain', '--no-pdf-header-footer',
            '--virtual-time-budget=10000', '--print-to-pdf=' + out, file_url(deck)]
     try:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)

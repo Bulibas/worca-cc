@@ -122,7 +122,7 @@ await api('/api/onboarding', { method: 'POST', headers: { 'Content-Type': 'appli
 // ---- chrome + cdp ------------------------------------------------------------
 profile = await mkdtemp(path.join(tmpdir(), 'worca-theme-profile-'));
 chrome = spawn(CHROME, ['--headless=new', ...SANDBOX, `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`,
-  '--window-size=1440,900', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check', '--force-color-profile=srgb',
+  '--window-size=1440,900', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check', '--use-mock-keychain', '--force-color-profile=srgb',
   '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank'],
 { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...REAL_ENV } });
 const chromeErr = [];
