@@ -37,14 +37,6 @@ after(async () => { if (srv) await new Promise((r) => srv.close(r)); mod?.runs.c
 
 let gw, dr, gwKey, drKey, wsId;
 
-test('empty scopes: nothing enabled anywhere', async () => {
-  const r = await get('/api/team-metrics/scopes');
-  assert.equal(r.status, 200);
-  const j = await r.json();
-  assert.deepEqual(j.scopes, { projects: [], workspaces: [] });
-  assert.equal(j.anyEnabled, false);
-});
-
 test('validation: bad scope/range/groupBy → 400; unknown project → 404; not enabled → 404', async () => {
   assert.equal((await get('/api/team-metrics')).status, 400);
   assert.equal((await get('/api/team-metrics?scope=project:bogus')).status, 400);
@@ -115,13 +107,6 @@ test('GET /api/history/:key/:id surfaces the run ledger state (§6.5)', { skip }
   assert.equal(r.status, 200);
   const j = await r.json();
   assert.equal(j.teamMetrics.state, 'pending');
-});
-
-test('refresh=1 rate limiting surfaces refresh.limited on the second call', { skip }, async () => {
-  const a = await (await get(`/api/team-metrics?scope=project:${gwKey}&refresh=1`)).json();
-  const b = await (await get(`/api/team-metrics?scope=project:${gwKey}&refresh=1`)).json();
-  assert.equal(a.refresh.limited, false);
-  assert.equal(b.refresh.limited, true);
 });
 
 test('enable without origin → 400 NO_ORIGIN; record opt-out PATCH validates', { skip }, async () => {

@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createAwaySwitch } from '../src/core/ask/away-deps.mjs';
 import { resolveNightConfig } from '../src/core/night/config.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const T15 = Date.parse('2026-09-28T15:00:00Z');
 function setup({ now = T15 } = {}) {
@@ -24,26 +25,29 @@ function setup({ now = T15 } = {}) {
   return { sw, live, emitted, toggle: () => toggle };
 }
 
-test('global: sets the toggle, tells every surface and every run, and returns the new status line', async () => {
-  const s = setup();
-  const r = await s.sw({ kind: 'global', toggle: 'on' });
-  assert.equal(r.ok, true);
-  assert.equal(s.toggle(), 'on');
-  assert.deepEqual(s.emitted, ['settings-changed']);
-  assert.equal(s.live.orch.changed, 1);
-  assert.match(r.line, /^Right now you count as away because you said "I'm away now"\./);
-  assert.match(r.line, /until you click "I'm back" in Settings › Away mode\.$/, 'said in chat: the button is named where it is');
-});
-
-test('global "here" ("I\'m back") inside the away hours: counts as here until the next stretch', async () => {
-  const s = setup({ now: Date.parse('2026-09-28T23:00:00Z') });
-  await s.sw({ kind: 'global', toggle: 'on' });
-  const r = await s.sw({ kind: 'global', toggle: 'here' });
-  assert.equal(r.ok, true);
-  // The zone is named only when it differs from this machine's (a UTC CI runner shows none).
-  const tag = Intl.DateTimeFormat().resolvedOptions().timeZone === 'UTC' ? '' : ' UTC';
-  assert.equal(r.line, `Right now it is 23:00${tag}. You count as here because you said "I'm here". Your away hours apply again from 22:00.`);
-  assert.equal(s.live.orch.changed, 2, 'every run re-checks');
+test('global switch: sets the toggle, tells every surface; "I\'m back" inside the hours counts as here', async () => {
+  await checkRows([
+    { name: 'global: sets the toggle, tells every surface and every run, and returns the new status line', run: async () => {
+      const s = setup();
+      const r = await s.sw({ kind: 'global', toggle: 'on' });
+      assert.equal(r.ok, true);
+      assert.equal(s.toggle(), 'on');
+      assert.deepEqual(s.emitted, ['settings-changed']);
+      assert.equal(s.live.orch.changed, 1);
+      assert.match(r.line, /^Right now you count as away because you said "I'm away now"\./);
+      assert.match(r.line, /until you click "I'm back" in Settings › Away mode\.$/, 'said in chat: the button is named where it is');
+    } },
+    { name: 'global "here" ("I\'m back") inside the away hours: counts as here until the next stretch', run: async () => {
+      const s = setup({ now: Date.parse('2026-09-28T23:00:00Z') });
+      await s.sw({ kind: 'global', toggle: 'on' });
+      const r = await s.sw({ kind: 'global', toggle: 'here' });
+      assert.equal(r.ok, true);
+      // The zone is named only when it differs from this machine's (a UTC CI runner shows none).
+      const tag = Intl.DateTimeFormat().resolvedOptions().timeZone === 'UTC' ? '' : ' UTC';
+      assert.equal(r.line, `Right now it is 23:00${tag}. You count as here because you said "I'm here". Your away hours apply again from 22:00.`);
+      assert.equal(s.live.orch.changed, 2, 'every run re-checks');
+    } },
+  ]);
 });
 
 test('run: sets the switch as the actor and says what happens now', async () => {

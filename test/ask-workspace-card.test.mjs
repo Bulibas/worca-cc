@@ -5,16 +5,18 @@
 // event/notice text, and the route over WORCA_MOCK — decline, apply for each kind, a live run.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 import { _resetForTests as closeDbForTests } from '../src/core/db.mjs';
 import {
   createWorkspaceChangeValidator, workspaceEventPrompt, workspaceNoticeText, WORKSPACE_CHANGE_KINDS,
 } from '../src/core/ask/workspace-proposal.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { stopAndSettle } from './helpers/stop-and-settle.mjs';
 
 useTempHome(after);
 
@@ -56,21 +58,24 @@ function validator(over = {}) {
   return { v, calls };
 }
 
-test('kinds: create, add_members, remove_member, rename', () => {
-  assert.deepEqual([...WORKSPACE_CHANGE_KINDS], ['create', 'add_members', 'remove_member', 'rename']);
-});
-
-test('create: registered projects by key become a card with the member set and the change to replay', async () => {
-  const { v, calls } = validator();
-  const r = await v({ kind: 'create', name: ' Shop 2 ', projectKeys: ['ka', 'kc'], note: 'for the release' });
-  assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(r.card.type, 'workspace');
-  assert.equal(r.card.kind, 'create');
-  assert.equal(r.card.summary, 'Create workspace Shop 2 with api, docs');
-  assert.deepEqual(r.card.members, [{ key: 'ka', name: 'api', path: '/r/api' }, { key: 'kc', name: 'docs', path: '/r/docs' }]);
-  assert.equal(r.card.note, 'for the release');
-  assert.deepEqual(r.card.change, { name: 'Shop 2', projectPaths: ['/r/api', '/r/docs'] });
-  assert.deepEqual(calls[0], ['create', { name: ' Shop 2 ', projectPaths: ['/r/api', '/r/docs'] }], 'the registry\'s own checks run');
+test('kinds and create: create/add_members/remove_member/rename; registered projects by key become a create card with the change to replay', async () => {
+  await checkRows([
+    { name: 'kinds: create, add_members, remove_member, rename', run: async () => {
+      assert.deepEqual([...WORKSPACE_CHANGE_KINDS], ['create', 'add_members', 'remove_member', 'rename']);
+    } },
+    { name: 'create: registered projects by key become a card with the member set and the change to replay', run: async () => {
+      const { v, calls } = validator();
+      const r = await v({ kind: 'create', name: ' Shop 2 ', projectKeys: ['ka', 'kc'], note: 'for the release' });
+      assert.equal(r.ok, true, JSON.stringify(r));
+      assert.equal(r.card.type, 'workspace');
+      assert.equal(r.card.kind, 'create');
+      assert.equal(r.card.summary, 'Create workspace Shop 2 with api, docs');
+      assert.deepEqual(r.card.members, [{ key: 'ka', name: 'api', path: '/r/api' }, { key: 'kc', name: 'docs', path: '/r/docs' }]);
+      assert.equal(r.card.note, 'for the release');
+      assert.deepEqual(r.card.change, { name: 'Shop 2', projectPaths: ['/r/api', '/r/docs'] });
+      assert.deepEqual(calls[0], ['create', { name: ' Shop 2 ', projectPaths: ['/r/api', '/r/docs'] }], 'the registry\'s own checks run');
+    } },
+  ]);
 });
 
 test('refusals: bad kind, unknown project, missing workspace, and the registry\'s coded errors come back as errors', async () => {
@@ -85,46 +90,49 @@ test('refusals: bad kind, unknown project, missing workspace, and the registry\'
   assert.match((await v({ kind: 'remove_member', workspaceId: WS.id, projectKey: 'kc' })).errors[0], /not a member of Shop/);
 });
 
-test('add_members: a plain add names the new member, keeps the id and says it re-scans', async () => {
-  const { v } = validator();
-  const r = await v({ kind: 'add_members', workspaceId: WS.id, projectKeys: ['kc'] });
-  assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(r.card.summary, 'Add docs to Shop');
-  assert.deepEqual(r.card.added, [{ key: 'kc', name: 'docs', path: '/r/docs' }]);
-  assert.deepEqual(r.card.change, { workspaceId: WS.id, projectPaths: ['/r/docs'] });
-  assert.equal(r.card.workspaceId, WS.id);
-  assert.ok(r.card.effects.some((e) => /keeps its id/.test(e)));
-  assert.ok(r.card.effects.some((e) => /Workspace scan run.*graphify.*map.*description/.test(e)), JSON.stringify(r.card.effects));
-  assert.deepEqual(r.card.warnings, []);
-  assert.deepEqual(r.card.followUps, []);
-});
-
-test('add_members warns: a live run, a member off the metrics / policy home, schedules keyed per member', async () => {
-  const { v } = validator({
-    liveRun: async (id) => id === WS.id,
-    homeStatus: async (ws, next) => {
-      assert.deepEqual(next, ['/r/api', '/r/web', '/r/docs'], 'the status is read over the NEW member set');
-      return {
-        metrics: { home: 'acme/api', members: [{ path: '/r/api', ok: true }, { path: '/r/web', ok: true }, { path: '/r/docs', ok: false }] },
-        policy: { home: 'acme/api', members: [{ path: '/r/docs', ok: false }] },
-      };
-    },
-    scheduled: async () => [
-      { kind: 'schedule', id: 'sch_1', title: 'Nightly', sourceBranchByKey: { ka: 'dev', kb: 'dev' }, sourceFromPrevious: false },
-      { kind: 'ticket', id: 'run_2', title: 'Follow-up', sourceBranchByKey: null, sourceFromPrevious: true },
-      { kind: 'ticket', id: 'run_3', title: 'Plain', sourceBranchByKey: null, sourceFromPrevious: false },
-    ],
-  });
-  const r = await v({ kind: 'add_members', workspaceId: WS.id, projectKeys: ['kc'] });
-  assert.equal(r.ok, true);
-  const w = r.card.warnings.join('\n');
-  assert.match(w, /A run of Shop is live/);
-  assert.match(w, /docs does not record to the metrics home acme\/api/);
-  assert.match(w, /docs does not follow the policy home acme\/api/);
-  assert.match(w, /Nightly.*per-member source branches.*docs starts from the default/);
-  assert.match(w, /Follow-up.*previous run's branches.*docs starts from its default source branch/);
-  assert.doesNotMatch(w, /Plain/);
-  assert.deepEqual(r.card.followUps, ['metrics_route_members', 'policy_route_members']);
+test('add_members: names the new member, keeps the id, re-scans; warns about a live run, metrics/policy home mismatches and per-member schedules', async () => {
+  await checkRows([
+    { name: 'add_members: a plain add names the new member, keeps the id and says it re-scans', run: async () => {
+      const { v } = validator();
+      const r = await v({ kind: 'add_members', workspaceId: WS.id, projectKeys: ['kc'] });
+      assert.equal(r.ok, true, JSON.stringify(r));
+      assert.equal(r.card.summary, 'Add docs to Shop');
+      assert.deepEqual(r.card.added, [{ key: 'kc', name: 'docs', path: '/r/docs' }]);
+      assert.deepEqual(r.card.change, { workspaceId: WS.id, projectPaths: ['/r/docs'] });
+      assert.equal(r.card.workspaceId, WS.id);
+      assert.ok(r.card.effects.some((e) => /keeps its id/.test(e)));
+      assert.ok(r.card.effects.some((e) => /Workspace scan run.*graphify.*map.*description/.test(e)), JSON.stringify(r.card.effects));
+      assert.deepEqual(r.card.warnings, []);
+      assert.deepEqual(r.card.followUps, []);
+    } },
+    { name: 'add_members warns: a live run, a member off the metrics / policy home, schedules keyed per member', run: async () => {
+      const { v } = validator({
+        liveRun: async (id) => id === WS.id,
+        homeStatus: async (ws, next) => {
+          assert.deepEqual(next, ['/r/api', '/r/web', '/r/docs'], 'the status is read over the NEW member set');
+          return {
+            metrics: { home: 'acme/api', members: [{ path: '/r/api', ok: true }, { path: '/r/web', ok: true }, { path: '/r/docs', ok: false }] },
+            policy: { home: 'acme/api', members: [{ path: '/r/docs', ok: false }] },
+          };
+        },
+        scheduled: async () => [
+          { kind: 'schedule', id: 'sch_1', title: 'Nightly', sourceBranchByKey: { ka: 'dev', kb: 'dev' }, sourceFromPrevious: false },
+          { kind: 'ticket', id: 'run_2', title: 'Follow-up', sourceBranchByKey: null, sourceFromPrevious: true },
+          { kind: 'ticket', id: 'run_3', title: 'Plain', sourceBranchByKey: null, sourceFromPrevious: false },
+        ],
+      });
+      const r = await v({ kind: 'add_members', workspaceId: WS.id, projectKeys: ['kc'] });
+      assert.equal(r.ok, true);
+      const w = r.card.warnings.join('\n');
+      assert.match(w, /A run of Shop is live/);
+      assert.match(w, /docs does not record to the metrics home acme\/api/);
+      assert.match(w, /docs does not follow the policy home acme\/api/);
+      assert.match(w, /Nightly.*per-member source branches.*docs starts from the default/);
+      assert.match(w, /Follow-up.*previous run's branches.*docs starts from its default source branch/);
+      assert.doesNotMatch(w, /Plain/);
+      assert.deepEqual(r.card.followUps, ['metrics_route_members', 'policy_route_members']);
+    } },
+  ]);
 });
 
 test('a Workspace scan still running reads as one: an automatic re-scan is replaced, one the user started must end', async () => {
@@ -135,35 +143,38 @@ test('a Workspace scan still running reads as one: an automatic re-scan is repla
   assert.doesNotMatch(r.card.warnings.join('\n'), /refused until it ends/);
 });
 
-test('remove_member: clears a home it removes, and warns about schedules naming the project', async () => {
-  const { v, calls } = validator({
-    scheduled: async () => [
-      { kind: 'schedule', id: 'sch_1', title: 'Nightly', sourceBranchByKey: { ka: 'release', kb: 'dev' }, sourceFromPrevious: false },
-      { kind: 'schedule', id: 'sch_2', title: 'Other', sourceBranchByKey: { kb: 'dev' }, sourceFromPrevious: false },
-    ],
-  });
-  const r = await v({ kind: 'remove_member', workspaceId: WS.id, projectKey: 'ka' });
-  assert.equal(r.ok, true, JSON.stringify(r));
-  assert.deepEqual(calls[0], ['remove', WS.id, '/r/api']);
-  assert.equal(r.card.summary, 'Remove api from Shop');
-  assert.deepEqual(r.card.removed, { key: 'ka', name: 'api', path: '/r/api' });
-  assert.deepEqual(r.card.change, { workspaceId: WS.id, projectPath: '/r/api' });
-  const w = r.card.warnings.join('\n');
-  assert.match(w, /api is the metrics home — it is cleared/);
-  assert.match(w, /api is the policy home — it is cleared/);
-  assert.match(w, /Nightly.*api.*release/);
-  assert.ok(r.card.effects.some((e) => /Map tab drops api's edges and reviews/.test(e)), JSON.stringify(r.card.effects));
-  assert.doesNotMatch(w, /Other/);
-  assert.deepEqual(r.card.followUps, ['metrics_workspace_home', 'policy_workspace_home']);
-});
-
-test('rename: the new name, the id kept', async () => {
-  const { v } = validator();
-  const r = await v({ kind: 'rename', workspaceId: WS.id, name: ' Storefront ' });
-  assert.equal(r.ok, true);
-  assert.equal(r.card.summary, 'Rename Shop to Storefront');
-  assert.deepEqual(r.card.change, { workspaceId: WS.id, name: 'Storefront' });
-  assert.deepEqual(r.card.followUps, []);
+test('remove_member clears a home it removes and warns about schedules; rename keeps the id', async () => {
+  await checkRows([
+    { name: 'remove_member: clears a home it removes, and warns about schedules naming the project', run: async () => {
+      const { v, calls } = validator({
+        scheduled: async () => [
+          { kind: 'schedule', id: 'sch_1', title: 'Nightly', sourceBranchByKey: { ka: 'release', kb: 'dev' }, sourceFromPrevious: false },
+          { kind: 'schedule', id: 'sch_2', title: 'Other', sourceBranchByKey: { kb: 'dev' }, sourceFromPrevious: false },
+        ],
+      });
+      const r = await v({ kind: 'remove_member', workspaceId: WS.id, projectKey: 'ka' });
+      assert.equal(r.ok, true, JSON.stringify(r));
+      assert.deepEqual(calls[0], ['remove', WS.id, '/r/api']);
+      assert.equal(r.card.summary, 'Remove api from Shop');
+      assert.deepEqual(r.card.removed, { key: 'ka', name: 'api', path: '/r/api' });
+      assert.deepEqual(r.card.change, { workspaceId: WS.id, projectPath: '/r/api' });
+      const w = r.card.warnings.join('\n');
+      assert.match(w, /api is the metrics home — it is cleared/);
+      assert.match(w, /api is the policy home — it is cleared/);
+      assert.match(w, /Nightly.*api.*release/);
+      assert.ok(r.card.effects.some((e) => /Map tab drops api's edges and reviews/.test(e)), JSON.stringify(r.card.effects));
+      assert.doesNotMatch(w, /Other/);
+      assert.deepEqual(r.card.followUps, ['metrics_workspace_home', 'policy_workspace_home']);
+    } },
+    { name: 'rename: the new name, the id kept', run: async () => {
+      const { v } = validator();
+      const r = await v({ kind: 'rename', workspaceId: WS.id, name: ' Storefront ' });
+      assert.equal(r.ok, true);
+      assert.equal(r.card.summary, 'Rename Shop to Storefront');
+      assert.deepEqual(r.card.change, { workspaceId: WS.id, name: 'Storefront' });
+      assert.deepEqual(r.card.followUps, []);
+    } },
+  ]);
 });
 
 test('event and notice text: applied lists the follow-ups; failed carries the error; context tags are defused', () => {
@@ -212,13 +223,9 @@ async function waitFor(pred, ms = 10000) {
     await new Promise((r) => setTimeout(r, 25));
   }
 }
-async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-askws-repo-'));
+function freshRepo() {
+  const dir = templateRepo('askws-repo', { branch: 'main', user: true, files: { 'README.md': '# hi\n' } });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 
@@ -247,6 +254,7 @@ before(async () => {
 
 after(async () => {
   for (const [, job] of mod._testing.askJobs) { try { job.turn?.stop?.(); } catch { /* reap */ } }
+  await stopAndSettle(mod.runs);
   if (srv) {
     await Promise.race([
       new Promise((r) => { srv.close(r); srv.closeAllConnections?.(); }),
@@ -271,69 +279,75 @@ async function seedCard(card) {
 const noticeOf = async (threadId) => (await snapshot(threadId)).messages.filter((m) => m.role === 'user' && (m.blocks || []).some((b) => b.kind === 'notice' && b.synthetic)).map((m) => m.blocks[0].text);
 const readWs = async (id) => (await (await fetch(`${base}/api/workspaces/${id}`)).json()).workspace;
 
-test('route: decline changes nothing and runs the event turn; a wrong verb is a 400', async () => {
-  const { threadId, cardId } = await seedCard({ kind: 'rename', summary: 'Rename Card WS to Nope', change: { workspaceId: ws.id, name: 'Nope' } });
-  assert.equal((await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'saved' })).status, 400);
-  const r = await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'declined' });
-  assert.equal(r.status, 200, await r.clone().text());
-  assert.equal((await r.json()).block.state, 'declined');
-  assert.deepEqual(await waitFor(async () => { const n = await noticeOf(threadId); return n.length ? n : null; }), ['Declined — Rename Card WS to Nope']);
-  assert.equal((await readWs(ws.id)).name, 'Card WS');
-  assert.equal((await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied' })).status, 409);
+test('route refusals: decline changes nothing (event turn runs), a wrong verb is 400, a live run fails the card and nothing changes', async () => {
+  await checkRows([
+    { name: 'route: decline changes nothing and runs the event turn; a wrong verb is a 400', run: async () => {
+      const { threadId, cardId } = await seedCard({ kind: 'rename', summary: 'Rename Card WS to Nope', change: { workspaceId: ws.id, name: 'Nope' } });
+      assert.equal((await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'saved' })).status, 400);
+      const r = await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'declined' });
+      assert.equal(r.status, 200, await r.clone().text());
+      assert.equal((await r.json()).block.state, 'declined');
+      assert.deepEqual(await waitFor(async () => { const n = await noticeOf(threadId); return n.length ? n : null; }), ['Declined — Rename Card WS to Nope']);
+      assert.equal((await readWs(ws.id)).name, 'Card WS');
+      assert.equal((await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied' })).status, 409);
+    } },
+    { name: 'route: a live run of the workspace fails the card, and nothing changes', run: async () => {
+      const { threadId, cardId } = await seedCard({ kind: 'add_members', summary: 'Add p3', change: { workspaceId: ws.id, projectPaths: [projects[3].path] } });
+      mod.runs.set('live-ws-card', { id: 'live-ws-card', workspaceId: ws.id, status: 'running', kind: 'workspace-run' });
+      try {
+        const j = await (await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied' })).json();
+        assert.equal(j.block.state, 'failed');
+        assert.match(j.block.error, /run or scan owns it/);
+      } finally { mod.runs.delete('live-ws-card'); }
+      assert.equal((await readWs(ws.id)).projectPaths.includes(projects[3].path), false);
+    } },
+  ]);
 });
 
-test('route: apply add_members then remove_member changes the registry, keeps the id, and runs the event turn', async () => {
-  const add = await seedCard({ kind: 'add_members', summary: 'Add p2 to Card WS', change: { workspaceId: ws.id, projectPaths: [projects[2].path] } });
-  let r = await post(`/api/ask/threads/${add.threadId}/cards/${add.cardId}`, { state: 'applied' });
-  assert.equal(r.status, 200, await r.clone().text());
-  let j = await r.json();
-  assert.equal(j.block.state, 'applied', JSON.stringify(j.block));
-  assert.equal(j.block.card.result.workspaceId, ws.id);
-  assert.equal((await readWs(ws.id)).projectPaths.length, 3);
-  const notices = await waitFor(async () => { const n = await noticeOf(add.threadId); return n.length ? n : null; });
-  assert.match(notices[0], /^Applied — Add p2 to Card WS · .*re-scanning the workspace/);
-  assert.ok(mod.runs.get(j.block.card.result.rescanRunId)?.autoRescan, 'the card started the workspace re-scan');
-  for (const [rid, r] of mod.runs) if (r.autoRescan) { try { r.orch.stop(); } catch { /* reap */ } mod.runs.delete(rid); }
+test('route apply: add_members then remove_member, rename and create change the registry (id kept) and run the event turn', async () => {
+  await checkRows([
+    { name: 'route: apply add_members then remove_member changes the registry, keeps the id, and runs the event turn', run: async () => {
+      const add = await seedCard({ kind: 'add_members', summary: 'Add p2 to Card WS', change: { workspaceId: ws.id, projectPaths: [projects[2].path] } });
+      let r = await post(`/api/ask/threads/${add.threadId}/cards/${add.cardId}`, { state: 'applied' });
+      assert.equal(r.status, 200, await r.clone().text());
+      let j = await r.json();
+      assert.equal(j.block.state, 'applied', JSON.stringify(j.block));
+      assert.equal(j.block.card.result.workspaceId, ws.id);
+      assert.equal((await readWs(ws.id)).projectPaths.length, 3);
+      const notices = await waitFor(async () => { const n = await noticeOf(add.threadId); return n.length ? n : null; });
+      assert.match(notices[0], /^Applied — Add p2 to Card WS · .*re-scanning the workspace/);
+      assert.ok(mod.runs.get(j.block.card.result.rescanRunId)?.autoRescan, 'the card started the workspace re-scan');
+      await stopAndSettle(mod.runs, (e) => e.autoRescan);
 
-  const del = await seedCard({ kind: 'remove_member', summary: 'Remove p0 from Card WS', change: { workspaceId: ws.id, projectPath: projects[0].path } });
-  r = await post(`/api/ask/threads/${del.threadId}/cards/${del.cardId}`, { state: 'applied' });
-  j = await r.json();
-  assert.equal(j.block.state, 'applied', JSON.stringify(j.block));
-  const now = await readWs(ws.id);
-  assert.equal(now.id, ws.id);
-  assert.equal(now.projectPaths.includes(projects[0].path), false);
-});
+      const del = await seedCard({ kind: 'remove_member', summary: 'Remove p0 from Card WS', change: { workspaceId: ws.id, projectPath: projects[0].path } });
+      mod._testing.setAutoRescan(false);
+      try {
+        r = await post(`/api/ask/threads/${del.threadId}/cards/${del.cardId}`, { state: 'applied' });
+        j = await r.json();
+      } finally { mod._testing.setAutoRescan(true); }
+      assert.equal(j.block.state, 'applied', JSON.stringify(j.block));
+      assert.equal(j.block.card.result.rescanRunId, undefined, 'the seam skipped the re-scan');
+      assert.match(j.block.card.result.detail, /no re-scan \(automatic re-scans are off/);
+      const now = await readWs(ws.id);
+      assert.equal(now.id, ws.id);
+      assert.equal(now.projectPaths.includes(projects[0].path), false);
+    } },
+    { name: 'route: rename and create apply through the registry', run: async () => {
+      const ren = await seedCard({ kind: 'rename', summary: 'Rename Card WS to Renamed WS', change: { workspaceId: ws.id, name: 'Renamed WS' } });
+      let j = await (await post(`/api/ask/threads/${ren.threadId}/cards/${ren.cardId}`, { state: 'applied' })).json();
+      assert.equal(j.block.state, 'applied', JSON.stringify(j.block));
+      assert.equal((await readWs(ws.id)).name, 'Renamed WS');
 
-test('route: rename and create apply through the registry', async () => {
-  const ren = await seedCard({ kind: 'rename', summary: 'Rename Card WS to Renamed WS', change: { workspaceId: ws.id, name: 'Renamed WS' } });
-  let j = await (await post(`/api/ask/threads/${ren.threadId}/cards/${ren.cardId}`, { state: 'applied' })).json();
-  assert.equal(j.block.state, 'applied', JSON.stringify(j.block));
-  assert.equal((await readWs(ws.id)).name, 'Renamed WS');
-
-  const mk = await seedCard({ kind: 'create', summary: 'Create workspace Fresh', change: { name: 'Fresh', projectPaths: [projects[0].path, projects[3].path] } });
-  j = await (await post(`/api/ask/threads/${mk.threadId}/cards/${mk.cardId}`, { state: 'applied' })).json();
-  assert.equal(j.block.state, 'applied', JSON.stringify(j.block));
-  const made = await readWs(j.block.card.result.workspaceId);
-  assert.equal(made.name, 'Fresh');
-});
-
-test('route: a live run of the workspace fails the card, and nothing changes', async () => {
-  const { threadId, cardId } = await seedCard({ kind: 'add_members', summary: 'Add p3', change: { workspaceId: ws.id, projectPaths: [projects[3].path] } });
-  mod.runs.set('live-ws-card', { id: 'live-ws-card', workspaceId: ws.id, status: 'running', kind: 'workspace-run' });
-  try {
-    const j = await (await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied' })).json();
-    assert.equal(j.block.state, 'failed');
-    assert.match(j.block.error, /run or scan owns it/);
-  } finally { mod.runs.delete('live-ws-card'); }
-  assert.equal((await readWs(ws.id)).projectPaths.includes(projects[3].path), false);
-});
-
-test('the context header lists a workspace card by its summary', async () => {
-  const { threadId } = await seedCard({ kind: 'rename', summary: 'Rename for the header', change: { workspaceId: ws.id, name: 'Header' } });
-  const ctx = await mod._testing.resolveAskContext(threadId, {}, []);
-  const c = (ctx.cards || []).find((x) => x.type === 'workspace');
-  assert.ok(c, JSON.stringify(ctx.cards));
-  assert.equal(c.summary, 'Rename for the header');
+      const mk = await seedCard({ kind: 'create', summary: 'Create workspace Fresh', change: { name: 'Fresh', projectPaths: [projects[0].path, projects[3].path] } });
+      mod._testing.setAutoRescan(false);
+      try {
+        j = await (await post(`/api/ask/threads/${mk.threadId}/cards/${mk.cardId}`, { state: 'applied' })).json();
+      } finally { mod._testing.setAutoRescan(true); }
+      assert.equal(j.block.state, 'applied', JSON.stringify(j.block));
+      const made = await readWs(j.block.card.result.workspaceId);
+      assert.equal(made.name, 'Fresh');
+    } },
+  ]);
 });
 
 test('the parent validator (workspace-deps) reads the real registry and refuses a set another workspace spans', async () => {
@@ -347,96 +361,102 @@ test('the parent validator (workspace-deps) reads the real registry and refuses 
   assert.match(dup.errors[0], /exact project set already exists/);
 });
 
-test('an automatic re-scan run that ends tells its workspace page how: refreshed, failed, stopped — a superseded one says nothing', async () => {
-  const { WebSocket } = await import('ws');
-  const { EventEmitter } = await import('node:events');
-  const sock = new WebSocket(`${base.replace('http', 'ws')}/ws`, { headers: { host: '127.0.0.1', origin: 'http://127.0.0.1' } });
-  const msgs = [];
-  sock.on('message', (d) => { try { msgs.push(JSON.parse(String(d))); } catch { /* ignore */ } });
-  await new Promise((res, rej) => { sock.on('open', res); sock.on('error', rej); });
-  try {
-    const end = (id, { status, outcome = null, superseded = false }) => {
-      const orch = Object.assign(new EventEmitter(), { state: { workspaceScan: outcome ? { outcome } : null }, getState: () => ({}) });
-      const entry = { id, kind: 'workspace-run', workspaceId: 'wks-shop-0000abcd', status: 'running', autoRescan: true, superseded, orch, events: [], seq: 0 };
-      mod.runs.set(id, entry);
-      mod._testing.wireRun(entry);
-      orch.emit('done', { status });
-      mod.runs.delete(id);
-    };
-    end('auto-1', { status: 'done', outcome: 'updated' });
-    end('auto-2', { status: 'done', outcome: 'failed' });
-    end('auto-3', { status: 'stopped' });
-    end('auto-4', { status: 'stopped', superseded: true });
-    end('auto-5', { status: 'error' });
-    const seen = await waitFor(async () => {
-      const got = msgs.filter((m) => m.type === 'workspaces-changed' && m.workspaceId === 'wks-shop-0000abcd');
-      return got.length >= 4 ? got : null;
-    });
-    assert.deepEqual(seen.map((m) => [m.runId, m.action]), [
-      ['auto-1', 'description'], ['auto-2', 'rescan-failed'], ['auto-3', 'rescan-stopped'], ['auto-5', 'rescan-failed'],
-    ]);
-  } finally { sock.close(); }
+test('automatic re-scans: an ending one tells its page how (superseded says nothing); a resumed one stays automatic', async () => {
+  await checkRows([
+    { name: 'an automatic re-scan run that ends tells its workspace page how: refreshed, failed, stopped — a superseded one says nothing', run: async () => {
+      const { WebSocket } = await import('ws');
+      const { EventEmitter } = await import('node:events');
+      const sock = new WebSocket(`${base.replace('http', 'ws')}/ws`, { headers: { host: '127.0.0.1', origin: 'http://127.0.0.1' } });
+      const msgs = [];
+      sock.on('message', (d) => { try { msgs.push(JSON.parse(String(d))); } catch { /* ignore */ } });
+      await new Promise((res, rej) => { sock.on('open', res); sock.on('error', rej); });
+      try {
+        const end = (id, { status, outcome = null, superseded = false }) => {
+          const orch = Object.assign(new EventEmitter(), { state: { workspaceScan: outcome ? { outcome } : null }, getState: () => ({}) });
+          const entry = { id, kind: 'workspace-run', workspaceId: 'wks-shop-0000abcd', status: 'running', autoRescan: true, superseded, orch, events: [], seq: 0 };
+          mod.runs.set(id, entry);
+          mod._testing.wireRun(entry);
+          orch.emit('done', { status });
+          mod.runs.delete(id);
+        };
+        end('auto-1', { status: 'done', outcome: 'updated' });
+        end('auto-2', { status: 'done', outcome: 'failed' });
+        end('auto-3', { status: 'stopped' });
+        end('auto-4', { status: 'stopped', superseded: true });
+        end('auto-5', { status: 'error' });
+        const seen = await waitFor(async () => {
+          const got = msgs.filter((m) => m.type === 'workspaces-changed' && m.workspaceId === 'wks-shop-0000abcd');
+          return got.length >= 4 ? got : null;
+        });
+        assert.deepEqual(seen.map((m) => [m.runId, m.action]), [
+          ['auto-1', 'description'], ['auto-2', 'rescan-failed'], ['auto-3', 'rescan-stopped'], ['auto-5', 'rescan-failed'],
+        ]);
+      } finally { sock.close(); }
+    } },
+    { name: 'a resumed automatic re-scan stays automatic: it is tagged again and its page follows the new run', run: async () => {
+      const { WebSocket } = await import('ws');
+      const sock = new WebSocket(`${base.replace('http', 'ws')}/ws`, { headers: { host: '127.0.0.1', origin: 'http://127.0.0.1' } });
+      const msgs = [];
+      sock.on('message', (d) => { try { msgs.push(JSON.parse(String(d))); } catch { /* ignore */ } });
+      await new Promise((res, rej) => { sock.on('open', res); sock.on('error', rej); });
+      const W = 'wks-shop-0000abcd';
+      try {
+        mod.runs.set('auto-old', { id: 'auto-old', kind: 'workspace-run', workspaceId: W, pipelineId: 'feed0001', status: 'paused', autoRescan: true, events: [] });
+        mod.runs.set('user-old', { id: 'user-old', kind: 'workspace-run', workspaceId: W, pipelineId: 'feed0002', status: 'paused', events: [] });
+        const resumed = { id: 'auto-new', kind: 'workspace-run', workspaceId: W, pipelineId: 'feed0001', status: 'starting', events: [] };
+        const other = { id: 'user-new', kind: 'workspace-run', workspaceId: W, pipelineId: 'feed0002', status: 'starting', events: [] };
+        mod._testing.markResumedRescan(resumed);
+        mod._testing.markResumedRescan(other);
+        assert.equal(resumed.autoRescan, true, 'the lineage was an automatic re-scan');
+        assert.equal(other.autoRescan, undefined, 'a run the user started stays theirs');
+        const seen = await waitFor(async () => msgs.find((m) => m.type === 'workspaces-changed' && m.action === 'rescan-resumed') || null);
+        assert.deepEqual([seen.workspaceId, seen.runId], [W, 'auto-new']);
+        assert.equal(msgs.filter((m) => m.action === 'rescan-resumed').length, 1);
+      } finally {
+        sock.close();
+        mod.runs.delete('auto-old'); mod.runs.delete('user-old');
+      }
+    } },
+  ]);
 });
 
-test('the parent validator reads live runs from the pipeline rows: a running Workspace scan vs any other run', async () => {
-  const { validateWorkspaceChange } = await import('../src/core/ask/workspace-deps.mjs');
-  const { seedPipelineRow } = await import('./helpers/db-seed.mjs');
-  const { getDb } = await import('../src/core/db.mjs');
-  const cur = await readWs(ws.id);
-  const warn = async () => (await validateWorkspaceChange({ kind: 'add_members', workspaceId: ws.id, projectKeys: [projects[3].key] })).card.warnings.join('\n');
-  const row = (id, wf) => seedPipelineRow({ id, projectKey: cur.projectKeys[0], workspaceKey: ws.id, target: 'workspace', status: 'running',
-    startedAt: new Date().toISOString(), stepper: { version: 2, template: { id: wf, name: wf } } });
-  try {
-    row('5ca50001', 'wf_workspace_scan');
-    assert.match(await warn(), /A Workspace scan of .* is running/);
-    row('5ca50002', 'wf_default');
-    assert.match(await warn(), /A run of .* is live/);
-  } finally {
-    getDb().prepare("DELETE FROM pipelines WHERE id IN ('5ca50001', '5ca50002')").run();
-  }
-});
-
-test('a PAUSED Workspace scan still owns the workspace (it resumes into it): the card warns, as the apply guard refuses', async () => {
-  const { validateWorkspaceChange } = await import('../src/core/ask/workspace-deps.mjs');
-  const { seedPipelineRow } = await import('./helpers/db-seed.mjs');
-  const { getDb } = await import('../src/core/db.mjs');
-  const cur = await readWs(ws.id);
-  const warn = async () => (await validateWorkspaceChange({ kind: 'add_members', workspaceId: ws.id, projectKeys: [projects[3].key] })).card.warnings.join('\n');
-  const row = (id, wf) => seedPipelineRow({ id, projectKey: cur.projectKeys[0], workspaceKey: ws.id, target: 'workspace', status: 'paused',
-    startedAt: new Date().toISOString(), stepper: { version: 2, template: { id: wf, name: wf } } });
-  // The route tests above re-scan this workspace (mock runs): let those settle first.
-  await waitFor(async () => !getDb().prepare("SELECT 1 FROM pipelines WHERE workspace_key = ? AND status IN ('created', 'starting', 'running', 'pausing', 'paused')").get(ws.id), 120000);
-  try {
-    row('5ca50011', 'wf_default');
-    assert.doesNotMatch(await warn(), /A (Workspace scan|run) of/, 'a paused ordinary run holds nothing (ownsWorkspaceTarget)');
-    row('5ca50012', 'wf_workspace_scan');
-    assert.match(await warn(), /A Workspace scan of .* (is running|is paused)/);
-  } finally {
-    getDb().prepare("DELETE FROM pipelines WHERE id IN ('5ca50011', '5ca50012')").run();
-  }
-});
-
-test('a resumed automatic re-scan stays automatic: it is tagged again and its page follows the new run', async () => {
-  const { WebSocket } = await import('ws');
-  const sock = new WebSocket(`${base.replace('http', 'ws')}/ws`, { headers: { host: '127.0.0.1', origin: 'http://127.0.0.1' } });
-  const msgs = [];
-  sock.on('message', (d) => { try { msgs.push(JSON.parse(String(d))); } catch { /* ignore */ } });
-  await new Promise((res, rej) => { sock.on('open', res); sock.on('error', rej); });
-  const W = 'wks-shop-0000abcd';
-  try {
-    mod.runs.set('auto-old', { id: 'auto-old', kind: 'workspace-run', workspaceId: W, pipelineId: 'feed0001', status: 'paused', autoRescan: true, events: [] });
-    mod.runs.set('user-old', { id: 'user-old', kind: 'workspace-run', workspaceId: W, pipelineId: 'feed0002', status: 'paused', events: [] });
-    const resumed = { id: 'auto-new', kind: 'workspace-run', workspaceId: W, pipelineId: 'feed0001', status: 'starting', events: [] };
-    const other = { id: 'user-new', kind: 'workspace-run', workspaceId: W, pipelineId: 'feed0002', status: 'starting', events: [] };
-    mod._testing.markResumedRescan(resumed);
-    mod._testing.markResumedRescan(other);
-    assert.equal(resumed.autoRescan, true, 'the lineage was an automatic re-scan');
-    assert.equal(other.autoRescan, undefined, 'a run the user started stays theirs');
-    const seen = await waitFor(async () => msgs.find((m) => m.type === 'workspaces-changed' && m.action === 'rescan-resumed') || null);
-    assert.deepEqual([seen.workspaceId, seen.runId], [W, 'auto-new']);
-    assert.equal(msgs.filter((m) => m.action === 'rescan-resumed').length, 1);
-  } finally {
-    sock.close();
-    mod.runs.delete('auto-old'); mod.runs.delete('user-old');
-  }
+test('the parent validator reads live runs from pipeline rows: a running or PAUSED Workspace scan owns the workspace (warns), any other run does not', async () => {
+  await checkRows([
+    { name: 'the parent validator reads live runs from the pipeline rows: a running Workspace scan vs any other run', run: async () => {
+      const { validateWorkspaceChange } = await import('../src/core/ask/workspace-deps.mjs');
+      const { seedPipelineRow } = await import('./helpers/db-seed.mjs');
+      const { getDb } = await import('../src/core/db.mjs');
+      const cur = await readWs(ws.id);
+      const warn = async () => (await validateWorkspaceChange({ kind: 'add_members', workspaceId: ws.id, projectKeys: [projects[3].key] })).card.warnings.join('\n');
+      const row = (id, wf) => seedPipelineRow({ id, projectKey: cur.projectKeys[0], workspaceKey: ws.id, target: 'workspace', status: 'running',
+        startedAt: new Date().toISOString(), stepper: { version: 2, template: { id: wf, name: wf } } });
+      try {
+        row('5ca50001', 'wf_workspace_scan');
+        assert.match(await warn(), /A Workspace scan of .* is running/);
+        row('5ca50002', 'wf_default');
+        assert.match(await warn(), /A run of .* is live/);
+      } finally {
+        getDb().prepare("DELETE FROM pipelines WHERE id IN ('5ca50001', '5ca50002')").run();
+      }
+    } },
+    { name: 'a PAUSED Workspace scan still owns the workspace (it resumes into it): the card warns, as the apply guard refuses', run: async () => {
+      const { validateWorkspaceChange } = await import('../src/core/ask/workspace-deps.mjs');
+      const { seedPipelineRow } = await import('./helpers/db-seed.mjs');
+      const { getDb } = await import('../src/core/db.mjs');
+      const cur = await readWs(ws.id);
+      const warn = async () => (await validateWorkspaceChange({ kind: 'add_members', workspaceId: ws.id, projectKeys: [projects[3].key] })).card.warnings.join('\n');
+      const row = (id, wf) => seedPipelineRow({ id, projectKey: cur.projectKeys[0], workspaceKey: ws.id, target: 'workspace', status: 'paused',
+        startedAt: new Date().toISOString(), stepper: { version: 2, template: { id: wf, name: wf } } });
+      // The route tests above re-scan this workspace (mock runs): let those settle first.
+      await waitFor(async () => !getDb().prepare("SELECT 1 FROM pipelines WHERE workspace_key = ? AND status IN ('created', 'starting', 'running', 'pausing', 'paused')").get(ws.id), 120000);
+      try {
+        row('5ca50011', 'wf_default');
+        assert.doesNotMatch(await warn(), /A (Workspace scan|run) of/, 'a paused ordinary run holds nothing (ownsWorkspaceTarget)');
+        row('5ca50012', 'wf_workspace_scan');
+        assert.match(await warn(), /A Workspace scan of .* (is running|is paused)/);
+      } finally {
+        getDb().prepare("DELETE FROM pipelines WHERE id IN ('5ca50011', '5ca50012')").run();
+      }
+    } },
+  ]);
 });

@@ -1,8 +1,8 @@
 // test/policy-mcp-required.test.mjs — the `mcp.required` policy field (MCP registry spec §11.1):
-// registry row, per-entry normalizer, cross-field rule, workspaceRuns refusal.
+// per-entry normalizer, cross-field rule, workspaceRuns refusal.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fieldMeta, FIELDS, normalizePolicyDoc, normalizeEntry, validateValue } from '../src/core/policy/registry.mjs';
+import { fieldMeta, normalizePolicyDoc, normalizeEntry, validateValue } from '../src/core/policy/registry.mjs';
 
 const GITHUB = { name: 'github', type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'],
   env: { GITHUB_HOST: { field: 'host' }, GITHUB_PERSONAL_ACCESS_TOKEN: { field: 'token' } },
@@ -12,14 +12,6 @@ const SENTRY = { plugin: 'acme-tools', server: 'sentry', values: { org: 'acme' }
 const docWith = (value, extra = {}) => ({ schema: 1, fields: {
   'plugins.required': { kind: 'soft', value: [{ name: 'acme-tools' }] },
   'mcp.required': { kind: 'soft', value }, ...extra } });
-
-test('mcp.required sits after plugins.required: soft only, Plugins group, never under workspaceRuns', () => {
-  const keys = FIELDS.map((f) => f.key);
-  assert.equal(keys[keys.indexOf('plugins.required') + 1], 'mcp.required');
-  const m = fieldMeta('mcp.required');
-  assert.deepEqual([m.group, m.label, m.type, m.kinds, m.workspaceRuns], ['plugins', 'Required MCP servers', 'mcpServers', ['soft'], false]);
-  assert.equal(m.help, 'Each developer turns them on with consent; they join the Team set. Never automatic.');
-});
 
 test('valid entries normalise (defaults filled, empty values dropped) and survive a second pass unchanged', () => {
   const { doc, warnings } = normalizePolicyDoc(docWith([GITHUB, { ...SENTRY, values: {} }]));

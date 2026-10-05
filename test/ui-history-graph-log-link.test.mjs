@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -17,8 +18,9 @@ const trackDom = useDomRelease(afterEach);
 // test/ui-history-detail.test.mjs:25-93 — the suites do not import each other.
 //
 // Each test gets a fresh DOM + a fresh module import (cache-busted) so module
-// top-level state can't leak between cases. ONE boot per test: booting twice in
-// one case would rebind globalThis.window under the first context's handlers.
+// top-level state can't leak between cases. ONE boot per test, or per checkRows
+// row run one after the other: two boots alive at once in one case would rebind
+// globalThis.window under the first context's handlers.
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -232,49 +234,32 @@ test('__setLogSource picks the first candidate the run actually logged under, an
   assert.deepEqual(srcTexts(sec), ['[implementer]', '[implementer ▸ research auth]']);
 });
 
-test('__setLogSource injects an option for a source the run never logged under', async () => {
-  const ctx = await openDetail();
-  const sec = await openLogsTab(ctx.window);
-
-  sec.__setLogSource(['refiner']);
-
-  const sel = sec.querySelector('.log-f-source');
-  assert.equal(sel.value, 'refiner');
-  assert.ok([...sel.options].some((o) => o.value === 'refiner'), 'the absent source is offered, not swallowed');
-  assert.equal(sec.querySelector('.log').textContent, '(no lines match the filter)');
-});
-
 // Design Contract 3 has no toggle, so re-clicking a node is ROUTINE. Testing
 // membership against the run's facets (which never learn about an injection)
 // instead of the select's own options appends a duplicate <option> every time.
-test('re-applying an absent source does not duplicate its injected option', async () => {
+test('__setLogSource injects an option for a source never logged under, exactly once on re-apply', async () => {
   const ctx = await openDetail();
   const sec = await openLogsTab(ctx.window);
   const sel = sec.querySelector('.log-f-source');
-  const before = sel.options.length;
+  const before = sel.options.length;   // read before the first injection: every re-apply below must leave it at +1
+  await checkRows([
+    { name: '__setLogSource injects an option for a source the run never logged under', run: () => {
+      sec.__setLogSource(['refiner']);
 
-  sec.__setLogSource(['refiner']);
-  sec.__setLogSource(['refiner']);
-  sec.__setLogSource(['refiner']);
+      assert.equal(sel.value, 'refiner');
+      assert.ok([...sel.options].some((o) => o.value === 'refiner'), 'the absent source is offered, not swallowed');
+      assert.equal(sec.querySelector('.log').textContent, '(no lines match the filter)');
+    } },
+    { name: 're-applying an absent source does not duplicate its injected option', run: () => {
+      sec.__setLogSource(['refiner']);
+      sec.__setLogSource(['refiner']);
+      sec.__setLogSource(['refiner']);
 
-  assert.equal([...sel.options].filter((o) => o.value === 'refiner').length, 1, 'exactly one injected option');
-  assert.equal(sel.options.length, before + 1, 'the dropdown does not grow on re-click');
-  assert.equal(sel.value, 'refiner');
-});
-
-test('a source intent parked BEFORE the fetch resolves is applied once the panel paints', async () => {
-  const ctx = await openDetail();
-  const w = ctx.window;
-  const sec = $(w, '#hist-detail .hd-sec[data-sec="logs"]');
-  assert.equal(sec.dataset.loaded, undefined, 'the Logs tab starts unbuilt');
-
-  sec.__pendingLogSource = ['planner'];
-  click(w, $(w, '#hist-detail .hd-tab[data-sec="logs"]'));
-  await settle(w, 4);
-
-  assert.equal(sec.querySelector('.log-f-source').value, 'planner');
-  assert.deepEqual(srcTexts(sec), ['[planner]']);
-  assert.equal(sec.__pendingLogSource, null, 'the intent is drained exactly once');
+      assert.equal([...sel.options].filter((o) => o.value === 'refiner').length, 1, 'exactly one injected option');
+      assert.equal(sel.options.length, before + 1, 'the dropdown does not grow on re-click');
+      assert.equal(sel.value, 'refiner');
+    } },
+  ]);
 });
 
 // The drain lives INSIDE the try on purpose. This is what that buys: a failed
@@ -282,36 +267,56 @@ test('a source intent parked BEFORE the fetch resolves is applied once the panel
 // re-arms (app.js:9048), and the retry honors the intent that started it all.
 // The intent is parked BY HAND here: a node click is what parks it in
 // production, but this case must be satisfiable by THIS task, so it exercises the
-// setter contract alone. Same one-failure-then-success shape — and the same
+// setter contract alone. The failure row needs its own /log arm (first attempt
+// 500), so each row opens its own detail screen, one after the other.
+// Same one-failure-then-success shape — and the same
 // overview -> logs re-activation — as test/ui-history-detail.test.mjs:1524-1551.
-test('a failed log fetch keeps a parked intent alive for the retry', async () => {
-  let attempts = 0;
-  const ctx = await openDetail({
-    arms: (url) => {
-      if (!url.endsWith('/log')) return null;
-      attempts += 1;
-      return attempts === 1 ? fail(500, { error: 'boom' }) : okText(LOG_NDJSON);
-    },
-  });
-  const w = ctx.window;
-  const sec = $(w, '#hist-detail .hd-sec[data-sec="logs"]');
+test('a source intent parked before the log fetch resolves is applied on paint and survives a failed fetch for the retry', async () => {
+  await checkRows([
+    { name: 'a source intent parked BEFORE the fetch resolves is applied once the panel paints', run: async () => {
+      const ctx = await openDetail();
+      const w = ctx.window;
+      const sec = $(w, '#hist-detail .hd-sec[data-sec="logs"]');
+      assert.equal(sec.dataset.loaded, undefined, 'the Logs tab starts unbuilt');
 
-  sec.__pendingLogSource = ['planner'];
-  click(w, $(w, '#hist-detail .hd-tab[data-sec="logs"]'));
-  await settle(w, 4);
+      sec.__pendingLogSource = ['planner'];
+      click(w, $(w, '#hist-detail .hd-tab[data-sec="logs"]'));
+      await settle(w, 4);
 
-  assert.match(sec.querySelector('.log').textContent, /Could not load logs: HTTP 500/);
-  assert.equal(sec.dataset.loaded, '', 'the failed load re-arms the tab');
-  assert.deepEqual(sec.__pendingLogSource, ['planner'], 'the intent survives the failure');
+      assert.equal(sec.querySelector('.log-f-source').value, 'planner');
+      assert.deepEqual(srcTexts(sec), ['[planner]']);
+      assert.equal(sec.__pendingLogSource, null, 'the intent is drained exactly once');
+    } },
+    { name: 'a failed log fetch keeps a parked intent alive for the retry', run: async () => {
+      let attempts = 0;
+      const ctx = await openDetail({
+        arms: (url) => {
+          if (!url.endsWith('/log')) return null;
+          attempts += 1;
+          return attempts === 1 ? fail(500, { error: 'boom' }) : okText(LOG_NDJSON);
+        },
+      });
+      const w = ctx.window;
+      const sec = $(w, '#hist-detail .hd-sec[data-sec="logs"]');
 
-  click(w, $(w, '#hist-detail .hd-tab[data-sec="overview"]'));
-  click(w, $(w, '#hist-detail .hd-tab[data-sec="logs"]'));   // re-activate -> retry
-  await settle(w, 4);
+      sec.__pendingLogSource = ['planner'];
+      click(w, $(w, '#hist-detail .hd-tab[data-sec="logs"]'));
+      await settle(w, 4);
 
-  assert.equal(attempts, 2, 'switching back re-issued the fetch');
-  assert.equal(sec.querySelector('.log-f-source').value, 'planner');
-  assert.deepEqual(srcTexts(sec), ['[planner]']);
-  assert.equal(sec.__pendingLogSource, null);
+      assert.match(sec.querySelector('.log').textContent, /Could not load logs: HTTP 500/);
+      assert.equal(sec.dataset.loaded, '', 'the failed load re-arms the tab');
+      assert.deepEqual(sec.__pendingLogSource, ['planner'], 'the intent survives the failure');
+
+      click(w, $(w, '#hist-detail .hd-tab[data-sec="overview"]'));
+      click(w, $(w, '#hist-detail .hd-tab[data-sec="logs"]'));   // re-activate -> retry
+      await settle(w, 4);
+
+      assert.equal(attempts, 2, 'switching back re-issued the fetch');
+      assert.equal(sec.querySelector('.log-f-source').value, 'planner');
+      assert.deepEqual(srcTexts(sec), ['[planner]']);
+      assert.equal(sec.__pendingLogSource, null);
+    } },
+  ]);
 });
 
 // --- Task 3 -----------------------------------------------------------------
@@ -337,7 +342,3 @@ test('a failed log fetch keeps a parked intent alive for the retry', async () =>
 // same way test/ui-run-flow-css.test.mjs locks this file.
 
 // --- Task 4 -----------------------------------------------------------------
-
-
-
-

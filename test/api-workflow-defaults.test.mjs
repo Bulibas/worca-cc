@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -79,42 +80,31 @@ test('PATCH .../defaults stores per-node defaults and echoes the flattened map',
   assert.deepEqual(nodeConfig(got, 'n_a'), { model: 'claude-opus-4-8', effort: 'high', fanOut: true });
 });
 
-test('PATCH .../defaults rejects an unknown model, a bad effort, and an effort with no model', async () => {
-  const id = await makeWorkflow('Defaults Validation');
-  for (const [defaults, re] of [
-    [{ n_a: { model: 'no-such-model' } }, /unknown model/],
-    [{ n_a: { model: 'claude-opus-4-8', effort: 'ludicrous' } }, /unknown effort/],
-    [{ n_a: { effort: 'high' } }, /select a model/],
-  ]) {
-    const r = await patch(`/api/workflows/${id}/defaults`, { defaults });
-    assert.equal(r.status, 400, JSON.stringify(defaults));
-    assert.match((await r.json()).error, re);
-  }
-  // Nothing partial was written.
-  const got = await (await fetch(`${base}/api/workflows/${id}`)).json();
-  assert.deepEqual(nodeConfig(got, 'n_a'), {}, 'an untouched node keeps an EMPTY config, never a defaults key');
-});
-
-test('PATCH .../defaults: 400 on a non-object body, 404 unknown id, 400 on the built-in default', async () => {
-  const id = await makeWorkflow('Defaults Shape');
-  assert.equal((await patch(`/api/workflows/${id}/defaults`, { defaults: 'nope' })).status, 400);
-  assert.equal((await patch('/api/workflows/wf_ghost/defaults', { defaults: {} })).status, 404);
-  const frozen = await patch('/api/workflows/wf_default/defaults', { defaults: { s0_0: { fanOut: true } } });
-  assert.equal(frozen.status, 400);
-  assert.match((await frozen.json()).error, /cannot store defaults/);
-});
-
-test('POST /api/workflows validates defaults that ride along inside node config', async () => {
-  const r = await post('/api/workflows', {
-    version: 2, name: 'Smuggled', domain: 'coding',
-    nodes: [{ id: 'n_task', kind: 'task', x: 0, y: 0, config: {} },
-      { id: 'n_a', kind: 'agent', key: 'planner', x: 300, y: 0, config: { model: 'no-such-model' } },
-      { id: 'n_end', kind: 'end', x: 600, y: 0, config: {} }],
-    wires: [{ id: 'w1', from: { node: 'n_task', port: 'task' }, to: { node: 'n_a', port: 'task' } },
-      { id: 'w2', from: { node: 'n_a', port: 'plan' }, to: { node: 'n_end', port: 'result' } }],
-  });
-  assert.equal(r.status, 400);
-  assert.match((await r.json()).error, /unknown model/);
+test('PATCH .../defaults rejects an unknown model, a bad effort, an effort with no model, a non-object body (400), an unknown id (404) and the built-in default (400)', async () => {
+  const id = await makeWorkflow('Defaults Validation');   // one workflow fixture for every refused body
+  await checkRows([
+    { name: 'PATCH .../defaults rejects an unknown model, a bad effort, and an effort with no model', run: async () => {
+      for (const [defaults, re] of [
+        [{ n_a: { model: 'no-such-model' } }, /unknown model/],
+        [{ n_a: { model: 'claude-opus-4-8', effort: 'ludicrous' } }, /unknown effort/],
+        [{ n_a: { effort: 'high' } }, /select a model/],
+      ]) {
+        const r = await patch(`/api/workflows/${id}/defaults`, { defaults });
+        assert.equal(r.status, 400, JSON.stringify(defaults));
+        assert.match((await r.json()).error, re);
+      }
+      // Nothing partial was written.
+      const got = await (await fetch(`${base}/api/workflows/${id}`)).json();
+      assert.deepEqual(nodeConfig(got, 'n_a'), {}, 'an untouched node keeps an EMPTY config, never a defaults key');
+    } },
+    { name: 'PATCH .../defaults: 400 on a non-object body, 404 unknown id, 400 on the built-in default', run: async () => {
+      assert.equal((await patch(`/api/workflows/${id}/defaults`, { defaults: 'nope' })).status, 400);
+      assert.equal((await patch('/api/workflows/wf_ghost/defaults', { defaults: {} })).status, 404);
+      const frozen = await patch('/api/workflows/wf_default/defaults', { defaults: { s0_0: { fanOut: true } } });
+      assert.equal(frozen.status, 400);
+      assert.match((await frozen.json()).error, /cannot store defaults/);
+    } },
+  ]);
 });
 
 // ── DELETE /api/config/workflow ─────────────────────────────────────────────
@@ -122,25 +112,40 @@ test('POST /api/workflows validates defaults that ride along inside node config'
 const readConfigApi = async () =>
   (await (await fetch(`${base}/api/config?projectDir=${encodeURIComponent(projectDir)}`)).json()).config;
 
-test('DELETE /api/config/workflow drops that workflow\'s node + feedback overrides only', async () => {
-  const keep = await makeWorkflow('Keep Mine');
-  const drop = await makeWorkflow('Drop Mine');
-  for (const id of [keep, drop]) {
-    await patch('/api/config', {
-      projectDir, workflowId: id,
-      nodes: { n_a: { model: 'claude-opus-4-8', effort: 'high' } },
-      feedbacks: { fb: { maxCycles: 9 } },
-    });
-  }
-  const r = await fetch(
-    `${base}/api/config/workflow?projectDir=${encodeURIComponent(projectDir)}&workflowId=${encodeURIComponent(drop)}`,
-    { method: 'DELETE' },
-  );
-  assert.equal(r.status, 200);
-  const cfg = (await r.json()).config;
-  assert.equal(cfg.workflows[drop], undefined, 'reset workflow has no overrides left');
-  assert.deepEqual(cfg.workflows[keep].nodes.n_a, { model: 'claude-opus-4-8', effort: 'high' }, 'other workflow untouched');
-  assert.equal(cfg.workflows[keep].feedbacks.fb.maxCycles, 9);
+test('DELETE /api/config/workflow drops that workflow\'s node + feedback overrides only, is idempotent, and 400s without its two ids', async () => {
+  await checkRows([
+    { name: 'DELETE /api/config/workflow drops that workflow\'s node + feedback overrides only', run: async () => {
+      const keep = await makeWorkflow('Keep Mine');
+      const drop = await makeWorkflow('Drop Mine');
+      for (const id of [keep, drop]) {
+        await patch('/api/config', {
+          projectDir, workflowId: id,
+          nodes: { n_a: { model: 'claude-opus-4-8', effort: 'high' } },
+          feedbacks: { fb: { maxCycles: 9 } },
+        });
+      }
+      const r = await fetch(
+        `${base}/api/config/workflow?projectDir=${encodeURIComponent(projectDir)}&workflowId=${encodeURIComponent(drop)}`,
+        { method: 'DELETE' },
+      );
+      assert.equal(r.status, 200);
+      const cfg = (await r.json()).config;
+      assert.equal(cfg.workflows[drop], undefined, 'reset workflow has no overrides left');
+      assert.deepEqual(cfg.workflows[keep].nodes.n_a, { model: 'claude-opus-4-8', effort: 'high' }, 'other workflow untouched');
+      assert.equal(cfg.workflows[keep].feedbacks.fb.maxCycles, 9);
+    } },
+    { name: 'DELETE /api/config/workflow is idempotent and 400s without its two ids', run: async () => {
+      const again = await fetch(
+        `${base}/api/config/workflow?projectDir=${encodeURIComponent(projectDir)}&workflowId=wf_default`,
+        { method: 'DELETE' },
+      );
+      assert.equal(again.status, 200, 'resetting an already-clean project is a no-op');
+      assert.equal((await fetch(`${base}/api/config/workflow?workflowId=wf_default`, { method: 'DELETE' })).status, 400);
+      assert.equal((await fetch(
+        `${base}/api/config/workflow?projectDir=${encodeURIComponent(projectDir)}`, { method: 'DELETE' },
+      )).status, 400);
+    } },
+  ]);
 });
 
 test('resetting wf_default also clears the legacy per-role steps (where its overrides live)', async () => {
@@ -156,16 +161,4 @@ test('resetting wf_default also clears the legacy per-role steps (where its over
   const cfg = (await r.json()).config;
   assert.deepEqual(cfg.steps, {}, 'legacy steps cleared — otherwise the run would still use the old model');
   assert.equal(cfg.workflows.wf_default, undefined);
-});
-
-test('DELETE /api/config/workflow is idempotent and 400s without its two ids', async () => {
-  const again = await fetch(
-    `${base}/api/config/workflow?projectDir=${encodeURIComponent(projectDir)}&workflowId=wf_default`,
-    { method: 'DELETE' },
-  );
-  assert.equal(again.status, 200, 'resetting an already-clean project is a no-op');
-  assert.equal((await fetch(`${base}/api/config/workflow?workflowId=wf_default`, { method: 'DELETE' })).status, 400);
-  assert.equal((await fetch(
-    `${base}/api/config/workflow?projectDir=${encodeURIComponent(projectDir)}`, { method: 'DELETE' },
-  )).status, 400);
 });

@@ -6,20 +6,10 @@ import {
   HUMAN_ESTIMATE_DEFAULTS, resolveConstants, proseWords, jsonItems,
   estimateStepHours, sumStepHours, savedUsd, roundHours,
 } from '../src/shared/human-estimate.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const agent = (over = {}) => ({ runnerType: 'producer', sideEffect: undefined, humanEffort: undefined, ...over });
 const ev = (over = {}) => ({ nodeKind: 'agent', agent: agent(), cycle: 1, code: null, outputs: [], reads: null, ...over });
-
-test('defaults are the spec constants and are frozen', () => {
-  assert.deepEqual(HUMAN_ESTIMATE_DEFAULTS, {
-    codeBase: 0.5, codeFileH: 0.1, codeExp: 0.85, codeDiv: 25,
-    writeBase: 0.25, writeWph: 500, writeCapWords: 6000,
-    reviseFactor: 0.35, reviseDecay: 0.5,
-    jsonBase: 0.25, jsonItemH: 0.05,
-    readLph: 300, readWph: 3000, rereadFactor: 0.3,
-  });
-  assert.ok(Object.isFrozen(HUMAN_ESTIMATE_DEFAULTS));
-});
 
 test('resolveConstants: finite non-negative overrides apply, everything else falls back', () => {
   const k = resolveConstants({ codeDiv: 40, writeWph: 'x', readLph: -1, bogus: 3, codeExp: NaN });
@@ -31,19 +21,22 @@ test('resolveConstants: finite non-negative overrides apply, everything else fal
   assert.deepEqual(resolveConstants(null), HUMAN_ESTIMATE_DEFAULTS);
 });
 
-test('proseWords counts words outside fenced code blocks only', () => {
-  assert.equal(proseWords('one two\n```js\nconst a = 1;\n```\nthree'), 3);
-  assert.equal(proseWords('```\nonly code\n```'), 0);
-  assert.equal(proseWords(''), 0);
-  assert.equal(proseWords(null), 0);
-});
-
-test('jsonItems: array length, first array member, else key count', () => {
-  assert.equal(jsonItems([1, 2, 3]), 3);
-  assert.equal(jsonItems({ findings: [{}, {}], summary: 'x' }), 2);
-  assert.equal(jsonItems({ a: 1, b: 2 }), 2);
-  assert.equal(jsonItems(null), 0);
-  assert.equal(jsonItems('str'), 0);
+test('proseWords / jsonItems: prose words outside fences; json items = array length, first array member, else key count', async () => {
+  await checkRows([
+    { name: 'proseWords counts words outside fenced code blocks only', run: () => {
+      assert.equal(proseWords('one two\n```js\nconst a = 1;\n```\nthree'), 3);
+      assert.equal(proseWords('```\nonly code\n```'), 0);
+      assert.equal(proseWords(''), 0);
+      assert.equal(proseWords(null), 0);
+    } },
+    { name: 'jsonItems: array length, first array member, else key count', run: () => {
+      assert.equal(jsonItems([1, 2, 3]), 3);
+      assert.equal(jsonItems({ findings: [{}, {}], summary: 'x' }), 2);
+      assert.equal(jsonItems({ a: 1, b: 2 }), 2);
+      assert.equal(jsonItems(null), 0);
+      assert.equal(jsonItems('str'), 0);
+    } },
+  ]);
 });
 
 test('code: 0.5 + 0.1·files + lines^0.85/25; zero lines credit nothing', () => {

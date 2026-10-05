@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { lastToast } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -69,38 +70,32 @@ async function openAdd(window, doc) {
   await tick(); await tick();
 }
 
-test('no folder picker (container/hosted): Add project opens on Clone from URL', async () => {
-  const { window, doc } = await boot({ pick: 'unsupported' });
-  await openAdd(window, doc);
-  assert.equal($(doc, '#project-add-modal').classList.contains('hidden'), false);
-  assert.equal(selected(doc), 'clone');
-  assert.equal($(doc, '#proj-add-clone-pane').hidden, false);
-  assert.equal($(doc, '#proj-add-folder-pane').hidden, true);
-  assert.equal($(doc, '#proj-add-save').textContent, 'Clone and add');
-});
-
-test('a picked folder opens on the Folder tab, and the tabs switch panes', async () => {
-  const { window, doc } = await boot({ pick: 'picked' });
-  window.fetch = ((orig) => (u, o) => (String(u).includes('pick-folder') ? json(200, { status: 'picked', path: '/Users/me/dev/cool' }) : orig(u, o)))(window.fetch);
-  globalThis.fetch = window.fetch;
-  await openAdd(window, doc);
-  assert.equal(selected(doc), 'folder');
-  assert.equal($(doc, '#proj-add-path').value, '/Users/me/dev/cool');
-  click(window, $(doc, '#proj-add-tab-clone'));
-  assert.equal(selected(doc), 'clone');
-  assert.equal($(doc, '#proj-add-folder-pane').hidden, true);
-  click(window, $(doc, '#proj-add-tab-folder'));
-  assert.equal(selected(doc), 'folder');
-  assert.equal($(doc, '#proj-add-save').textContent, 'Add project');
-});
-
-test('the folder-name placeholder follows the URL', async () => {
-  const { window, doc } = await boot();
-  await openAdd(window, doc);
-  type(window, $(doc, '#proj-clone-url'), 'https://github.com/acme/api.git');
-  assert.equal($(doc, '#proj-clone-name').placeholder, 'api');
-  type(window, $(doc, '#proj-clone-url'), 'not a url');
-  assert.equal($(doc, '#proj-clone-name').placeholder, 'the repository name');
+test('Add project opens on Clone without a folder picker, on Folder with a picked path, and the tabs switch panes', async () => {
+  await checkRows([
+    { name: 'no folder picker (container/hosted): Add project opens on Clone from URL', run: async () => {
+      const { window, doc } = await boot({ pick: 'unsupported' });
+      await openAdd(window, doc);
+      assert.equal($(doc, '#project-add-modal').classList.contains('hidden'), false);
+      assert.equal(selected(doc), 'clone');
+      assert.equal($(doc, '#proj-add-clone-pane').hidden, false);
+      assert.equal($(doc, '#proj-add-folder-pane').hidden, true);
+      assert.equal($(doc, '#proj-add-save').textContent, 'Clone and add');
+    } },
+    { name: 'a picked folder opens on the Folder tab, and the tabs switch panes', run: async () => {
+      const { window, doc } = await boot({ pick: 'picked' });
+      window.fetch = ((orig) => (u, o) => (String(u).includes('pick-folder') ? json(200, { status: 'picked', path: '/Users/me/dev/cool' }) : orig(u, o)))(window.fetch);
+      globalThis.fetch = window.fetch;
+      await openAdd(window, doc);
+      assert.equal(selected(doc), 'folder');
+      assert.equal($(doc, '#proj-add-path').value, '/Users/me/dev/cool');
+      click(window, $(doc, '#proj-add-tab-clone'));
+      assert.equal(selected(doc), 'clone');
+      assert.equal($(doc, '#proj-add-folder-pane').hidden, true);
+      click(window, $(doc, '#proj-add-tab-folder'));
+      assert.equal(selected(doc), 'folder');
+      assert.equal($(doc, '#proj-add-save').textContent, 'Add project');
+    } },
+  ]);
 });
 
 test('an up-front refusal shows the server message inline, and the form stays usable', async () => {

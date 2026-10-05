@@ -21,6 +21,7 @@ import { _testing as prDesc, PR_BODY_MAX } from '../src/core/pr-description.mjs'
 import { setPrRemotePrefs, readPrRemotePrefs } from '../src/core/config.mjs';
 import { createTicket, markTicketFired } from '../src/core/scheduler.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let srv, base, home, prevHome, betaKey, betaId, betaRepo;
 
@@ -103,15 +104,18 @@ const REFS = [
   'refs/remotes/upstream/dev', 'refs/remotes/upstream/main',
 ].join('\n') + '\n';
 
-test('POST /api/pr -> 400 when id is missing', async () => {
-  assert.equal((await post({ projectKey: betaKey })).status, 400);
-});
-
-test('POST /api/pr -> 409 when gh is unavailable', async () => {
-  gitInfo.setRunner((cmd) => Promise.resolve(
-    cmd === 'gh' ? { ok: false, stdout: '', stderr: 'not found', code: 127 }
-                 : { ok: true, stdout: '', stderr: '', code: 0 }));
-  assert.equal((await post({ projectKey: betaKey, id: betaId })).status, 409);
+test('POST /api/pr error paths: 400 without id, 409 when gh is unavailable', async () => {
+  await checkRows([
+    { name: 'POST /api/pr -> 400 when id is missing', run: async () => {
+      assert.equal((await post({ projectKey: betaKey })).status, 400);
+    } },
+    { name: 'POST /api/pr -> 409 when gh is unavailable', run: async () => {
+      gitInfo.setRunner((cmd) => Promise.resolve(
+        cmd === 'gh' ? { ok: false, stdout: '', stderr: 'not found', code: 127 }
+                     : { ok: true, stdout: '', stderr: '', code: 0 }));
+      assert.equal((await post({ projectKey: betaKey, id: betaId })).status, 409);
+    } },
+  ]);
 });
 
 test('POST /api/pr pushes, creates the PR, returns url + mergeable', async () => {
@@ -184,44 +188,34 @@ test('GET /api/runs?projectDir still returns inline pr (per-project withPr uncha
   assert.deepEqual(row.pr, { state: 'OPEN', url: 'https://gh/r/pull/9', number: 9 });
 });
 
-test('POST /api/pr/mergeable re-reads mergeability via gh pr view (no push/create)', async () => {
-  const seen = [];
-  gitInfo.setRunner((cmd, args) => {
-    seen.push([cmd, ...args]);
-    if (cmd === 'gh' && args[0] === '--version') return Promise.resolve({ ok: true, stdout: 'gh 2.x', stderr: '', code: 0 });
-    if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'view')
-      return Promise.resolve({ ok: true, stdout: 'CONFLICTING\n', stderr: '', code: 0 });
-    return Promise.resolve({ ok: true, stdout: '', stderr: '', code: 0 });
-  });
-  const r = await fetch(`${base}/api/pr/mergeable`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ projectKey: betaKey, id: betaId }),
-  });
-  assert.equal(r.status, 200);
-  assert.equal((await r.json()).mergeable, 'CONFLICTING');
-  assert.ok(seen.some((c) => c[0] === 'gh' && c[1] === 'pr' && c[2] === 'view'), 'mergeability was re-read');
-  assert.ok(!seen.some((c) => c[0] === 'git' && c[1] === 'push'), 'no push on a re-check');
-  assert.ok(!seen.some((c) => c[0] === 'gh' && c[1] === 'pr' && c[2] === 'create'), 'no PR create on a re-check');
-});
-
-test('POST /api/pr/mergeable -> UNKNOWN (best-effort) when gh is unavailable', async () => {
-  gitInfo.setRunner((cmd) => Promise.resolve(
-    cmd === 'gh' ? { ok: false, stdout: '', stderr: 'not found', code: 127 }
-                 : { ok: true, stdout: '', stderr: '', code: 0 }));
-  const r = await fetch(`${base}/api/pr/mergeable`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ projectKey: betaKey, id: betaId }),
-  });
-  assert.equal(r.status, 200);
-  assert.equal((await r.json()).mergeable, 'UNKNOWN');
-});
-
-test('POST /api/pr/mergeable requires id -> 400 (the one hard error)', async () => {
-  const r = await fetch(`${base}/api/pr/mergeable`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ projectKey: betaKey }),   // no id
-  });
-  assert.equal(r.status, 400);
+test('POST /api/pr/mergeable error paths: 400 without id; 200 UNKNOWN when gh is missing or the key is malformed', async () => {
+  await checkRows([
+    { name: 'POST /api/pr/mergeable -> UNKNOWN (best-effort) when gh is unavailable', run: async () => {
+      gitInfo.setRunner((cmd) => Promise.resolve(
+        cmd === 'gh' ? { ok: false, stdout: '', stderr: 'not found', code: 127 }
+                     : { ok: true, stdout: '', stderr: '', code: 0 }));
+      const r = await fetch(`${base}/api/pr/mergeable`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectKey: betaKey, id: betaId }),
+      });
+      assert.equal(r.status, 200);
+      assert.equal((await r.json()).mergeable, 'UNKNOWN');
+    } },
+    { name: 'POST /api/pr/mergeable requires id -> 400 (the one hard error)', run: async () => {
+      const r = await fetch(`${base}/api/pr/mergeable`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectKey: betaKey }),   // no id
+      });
+      assert.equal(r.status, 400);
+    } },
+    { name: 'POST /api/pr/mergeable -> 200 UNKNOWN on a malformed key (best-effort, never a hard error)', run: async () => {
+      // Pins the branch at server.mjs:2351-2353 that /api/pr/remotes deliberately does NOT share.
+      stubForkRepo([]);
+      const r = await postMergeable({ projectKey: 'nope', id: betaId });
+      assert.equal(r.status, 200);
+      assert.equal((await r.json()).mergeable, 'UNKNOWN');
+    } },
+  ]);
 });
 
 test('GET /api/pr/remotes lists parsed remotes with upstream-preferred base defaults', async () => {
@@ -304,22 +298,18 @@ test('POST /api/pr without remote fields follows the remembered choice', async (
   assert.deepEqual(seen.find((c) => c[2] === 'create').slice(7, 9), ['--head', `up:${FEATURE}`], 'cross-repo the other way round');
 });
 
-test('POST /api/pr/mergeable re-reads through the persisted pr_url', async () => {
+test('POST /api/pr/mergeable re-reads via gh pr view <persisted pr_url> — no push, no create', async () => {
   persistPrState(betaId, { url: 'https://github.com/up/repo/pull/7', number: 7, state: 'OPEN' });
   const seen = [];
   stubForkRepo(seen, { view: 'CONFLICTING\n' });
   const r = await postMergeable({ projectKey: betaKey, id: betaId });
+  assert.equal(r.status, 200);
   assert.equal((await r.json()).mergeable, 'CONFLICTING');
+  assert.ok(seen.some((c) => c[0] === 'gh' && c[1] === 'pr' && c[2] === 'view'), 'mergeability was re-read');
   assert.deepEqual(seen.find((c) => c[2] === 'view'),
     ['gh', 'pr', 'view', 'https://github.com/up/repo/pull/7', '--json', 'mergeable', '-q', '.mergeable']);
-});
-
-test('POST /api/pr/mergeable -> 200 UNKNOWN on a malformed key (best-effort, never a hard error)', async () => {
-  // Pins the branch at server.mjs:2351-2353 that /api/pr/remotes deliberately does NOT share.
-  stubForkRepo([]);
-  const r = await postMergeable({ projectKey: 'nope', id: betaId });
-  assert.equal(r.status, 200);
-  assert.equal((await r.json()).mergeable, 'UNKNOWN');
+  assert.ok(!seen.some((c) => c[0] === 'git' && c[1] === 'push'), 'no push on a re-check');
+  assert.ok(!seen.some((c) => c[0] === 'gh' && c[1] === 'pr' && c[2] === 'create'), 'no PR create on a re-check');
 });
 
 // ---------------------------------------------------------------------------

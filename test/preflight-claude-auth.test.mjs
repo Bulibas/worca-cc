@@ -7,6 +7,7 @@ import {
   probeClaudeAuth, parseClaudeAuthStatus, claudeAuthFromEnv, clearClaudeAuthCache, CLAUDE_AUTH_TTL_MS,
   isClaudeSignedOutError,
 } from '../src/core/preflight.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 beforeEach(() => clearClaudeAuthCache());
 
@@ -17,17 +18,20 @@ function fakeRun(out, code = 0) {
   return { run, calls };
 }
 
-test('parseClaudeAuthStatus: the JSON form (the default output)', () => {
-  assert.equal(parseClaudeAuthStatus('{"loggedIn": true, "authMethod": "claude.ai"}'), 'signed-in');
-  assert.equal(parseClaudeAuthStatus('{\n  "loggedIn": false\n}\n'), 'signed-out');
-});
-
-test('parseClaudeAuthStatus: text forms, and anything unrecognised is unknown', () => {
-  assert.equal(parseClaudeAuthStatus('Not logged in. Run claude /login'), 'signed-out');
-  assert.equal(parseClaudeAuthStatus('Logged in as someone@example.com'), 'signed-in');
-  assert.equal(parseClaudeAuthStatus("error: unknown command 'auth'"), 'unknown');
-  assert.equal(parseClaudeAuthStatus(''), 'unknown');
-  assert.equal(parseClaudeAuthStatus(null), 'unknown');
+test('parseClaudeAuthStatus: JSON and text forms; anything unrecognised is unknown', async () => {
+  await checkRows([
+    { name: 'parseClaudeAuthStatus: the JSON form (the default output)', run: () => {
+      assert.equal(parseClaudeAuthStatus('{"loggedIn": true, "authMethod": "claude.ai"}'), 'signed-in');
+      assert.equal(parseClaudeAuthStatus('{\n  "loggedIn": false\n}\n'), 'signed-out');
+    } },
+    { name: 'parseClaudeAuthStatus: text forms, and anything unrecognised is unknown', run: () => {
+      assert.equal(parseClaudeAuthStatus('Not logged in. Run claude /login'), 'signed-out');
+      assert.equal(parseClaudeAuthStatus('Logged in as someone@example.com'), 'signed-in');
+      assert.equal(parseClaudeAuthStatus("error: unknown command 'auth'"), 'unknown');
+      assert.equal(parseClaudeAuthStatus(''), 'unknown');
+      assert.equal(parseClaudeAuthStatus(null), 'unknown');
+    } },
+  ]);
 });
 
 test('isClaudeSignedOutError: the CLI\'s signed-out failure, not other auth errors', () => {
@@ -37,19 +41,23 @@ test('isClaudeSignedOutError: the CLI\'s signed-out failure, not other auth erro
   assert.equal(isClaudeSignedOutError(null), false);
 });
 
-test('probeClaudeAuth: reads `claude auth status`, whatever its exit code', async () => {
-  const out = fakeRun('{"loggedIn": false}', 1);
-  const r = await probeClaudeAuth({ bin: 'claude', env: {}, run: out.run });
-  assert.deepEqual(r, { state: 'signed-out', source: 'cli', detail: null });
-  assert.deepEqual(out.calls, [['claude', 'auth', 'status']]);
-});
-
-test('probeClaudeAuth: a failed spawn / timeout (no result) is unknown, never signed out', async () => {
-  const r = await probeClaudeAuth({ bin: 'claude', env: {}, run: async () => null });
-  assert.equal(r.state, 'unknown');
-  clearClaudeAuthCache();
-  const t = await probeClaudeAuth({ bin: 'claude', env: {}, run: async () => { throw new Error('boom'); } });
-  assert.equal(t.state, 'unknown');
+test('probeClaudeAuth: reads `claude auth status` whatever its exit code; a failed spawn / timeout is unknown, never signed out', async () => {
+  await checkRows([
+    { name: 'probeClaudeAuth: reads `claude auth status`, whatever its exit code', run: async () => {
+      const out = fakeRun('{"loggedIn": false}', 1);
+      const r = await probeClaudeAuth({ bin: 'claude', env: {}, run: out.run });
+      assert.deepEqual(r, { state: 'signed-out', source: 'cli', detail: null });
+      assert.deepEqual(out.calls, [['claude', 'auth', 'status']]);
+    } },
+    { name: 'probeClaudeAuth: a failed spawn / timeout (no result) is unknown, never signed out', run: async () => {
+      clearClaudeAuthCache();   // the file's beforeEach, once per former test
+      const r = await probeClaudeAuth({ bin: 'claude', env: {}, run: async () => null });
+      assert.equal(r.state, 'unknown');
+      clearClaudeAuthCache();
+      const t = await probeClaudeAuth({ bin: 'claude', env: {}, run: async () => { throw new Error('boom'); } });
+      assert.equal(t.state, 'unknown');
+    } },
+  ]);
 });
 
 test('probeClaudeAuth: an auth env var counts as signed in without asking the CLI', async () => {

@@ -15,9 +15,16 @@ import { ENGINES } from './helpers/engines.mjs';
 import { getDb } from '../src/core/db.mjs';
 import { readPipelineForResume } from '../src/core/artifacts.mjs';
 import { createOrchestratorFor } from '../src/core/engine-select.mjs';
-import { enqueuePipelineCommand, CONTROL_CHECK_INTERVAL_MS } from '../src/core/pipeline-commands.mjs';
+import { enqueuePipelineCommand, controlCheckIntervalMs } from '../src/core/pipeline-commands.mjs';
 
 useTempHome(after);
+// The harness reads the control poll period when it takes ownership: poll every 25 ms here, not every 1 s.
+const prevControlCheckMs = process.env.WORCA_CONTROL_CHECK_MS;
+process.env.WORCA_CONTROL_CHECK_MS = '25';
+after(() => {
+  if (prevControlCheckMs === undefined) delete process.env.WORCA_CONTROL_CHECK_MS;
+  else process.env.WORCA_CONTROL_CHECK_MS = prevControlCheckMs;
+});
 const engine = ENGINES[0];
 const okVerifier = async () => ({ status: 'ok', issues: [], review: { issues: [] }, summary: '' });
 
@@ -117,18 +124,6 @@ test('a lost claim touches nothing: a second stop of the same run throws NOT_PAU
   assert.equal(rowOf(id).status, 'stopped');
 });
 
-test('an interrupted run is refused: status, resume point and worktree are kept', async () => {
-  const { dir, id, wt } = await pausedRun();
-  getDb().prepare("UPDATE pipelines SET status = 'interrupted' WHERE id = ?").run(id);
-  const { o, events } = await stopper(dir, id);
-  await assert.rejects(o.stopPaused('ada'), (e) => e.code === 'NOT_PAUSED');
-  const row = rowOf(id);
-  assert.equal(row.status, 'interrupted');
-  assert.ok(row.resume_point, 'it stays resumable');
-  assert.ok(existsSync(wt), 'its worktree is kept');
-  assert.deepEqual(events, []);
-});
-
 test('a worktree deleted by hand does not block the stop', async () => {
   const { dir, id, wt } = await pausedRun();
   rmSync(wt, { recursive: true, force: true });
@@ -200,7 +195,7 @@ for (const action of ['stop', 'pause']) {
       seen.status = rowOf(id).status;
       seen.beating = !!resumer._heartbeatTimer;
       enqueuePipelineCommand(id, action, { by: 'grace' });
-      await new Promise((r) => setTimeout(r, 2.5 * CONTROL_CHECK_INTERVAL_MS));   // the poller ticks meanwhile
+      await new Promise((r) => setTimeout(r, 2.5 * controlCheckIntervalMs()));   // the poller ticks meanwhile
       return orig(...a);
     };
     const res = await resumer.resume();

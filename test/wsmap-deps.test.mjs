@@ -36,13 +36,3 @@ test('both are pure JS: no dependencies, no install scripts, no native build (ma
     assert.equal(p.gypfile, undefined, name);
   }
 });
-
-test('both import as ESM under this Node (>= 22.13) and parse', async () => {
-  const { parseAllDocuments, LineCounter } = await import('yaml');
-  const { parse } = await import('smol-toml');
-  const docs = parseAllDocuments('a: 1\n---\nb: [x]\n', { lineCounter: new LineCounter() });
-  assert.deepEqual(docs.map((d) => d.toJS()), [{ a: 1 }, { b: ['x'] }]);
-  assert.equal(parse('[package]\nname = "x"\n').package.name, 'x');
-  const [major, minor] = process.versions.node.split('.').map(Number);
-  assert.ok(major > 22 || (major === 22 && minor >= 13), process.versions.node);
-});

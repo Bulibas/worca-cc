@@ -116,18 +116,12 @@ test('the history twin exists and its key is guarded', async () => {
 // font/media bytes and probe artifact paths. The typography is not worth it: the
 // PDF and the standalone embed their fonts, and only the in-app preview falls
 // back.
-test('an opaque-origin request is refused, however local it claims to be', async () => {
-  for (const rel of ['deck/poppins-400.woff2', 'deck/deck.html', 'shots/s01.png']) {
-    const res = await fetch(`${base}/api/runs/${id}/artifact-raw/${rel}`, { headers: { Origin: 'null' } });
-    assert.equal(res.status, 403, `${rel} must not be reachable from an opaque origin`);
+test('an opaque-origin or a real cross-site origin request is refused, however local it claims to be', async () => {
+  for (const [origin, rel] of [['null', 'deck/poppins-400.woff2'], ['null', 'deck/deck.html'], ['null', 'shots/s01.png'],
+    ['https://evil.example', 'deck/poppins-400.woff2']]) {
+    const res = await fetch(`${base}/api/runs/${id}/artifact-raw/${rel}`, { headers: { Origin: origin } });
+    assert.equal(res.status, 403, `${rel} must not be reachable from Origin: ${origin}`);
   }
-});
-
-test('a real cross-site origin is refused too', async () => {
-  const res = await fetch(`${base}/api/runs/${id}/artifact-raw/deck/poppins-400.woff2`, {
-    headers: { Origin: 'https://evil.example' },
-  });
-  assert.equal(res.status, 403);
 });
 
 test('no artifact response carries a wildcard allow-origin header', async () => {

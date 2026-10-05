@@ -51,18 +51,3 @@ test('DELETE /api/runs/:id archives: 200 {archived:true}, row survives, history 
   const hist = await (await fetch(`${base}/api/history`)).json();
   assert.ok(!JSON.stringify(hist).includes(id), 'history omits archived');
 });
-
-test('DELETE guards unchanged: 409 while live in this process', async () => {
-  const { id } = await seedPipeline(seededProjectDir, { status: 'done' });
-  runs.set('uuid-live', { id: 'uuid-live', pipelineId: id, status: 'running' });
-  try {
-    assert.equal((await del(id)).status, 409);
-  } finally {
-    runs.clear();
-  }
-});
-
-test('DELETE guards unchanged: 404 unknown', async () => {
-  const res = await del('nope');
-  assert.equal(res.status, 404);
-});

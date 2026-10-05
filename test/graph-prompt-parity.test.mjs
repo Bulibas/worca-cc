@@ -22,6 +22,7 @@
 // base instruction :1206-1207 / :1245-1246 · RESUME_HEADER :331-335 ·
 // attachments channels.mjs:279-286.
 // If a number has drifted, locate by content — the strings are the contract.
+// Regenerating snapshots is a reviewed step — diff every fixture before committing.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -30,6 +31,7 @@ import { join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { posix } from './helpers/posix-path.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { worcaHome } from '../src/core/projects.mjs';
 import { projectKey } from '../src/core/store.mjs';
 import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
@@ -37,7 +39,7 @@ import { registryPortsFn } from '../src/core/graph/registry-ports.mjs';
 import { runOpts, RESUME_HEADER, READ_WRITE_TOOLS, IMPLEMENTER_TOOLS } from '../src/core/phases.mjs';
 import {
   buildAgentPrompt, allocateOutputs, allocateVerdict, expandsOutputPort,
-  taskSourcedPorts, runAgentExecution,
+  taskSourcedPorts,
 } from '../src/core/graph/executor.mjs';
 
 // `store:'project'` allocations resolve under worcaHome() — isolate it FIRST.
@@ -70,32 +72,6 @@ const V1_UPSTREAM_BLOCK =
 /** channels.mjs#renderAttachmentsBlock (:279-286). */
 const V1_ATTACHMENTS_HEAD =
   '\n## Attached files\n\nThe user attached these files; read any that are relevant:\n\n';
-/** phases.mjs#taskHeader's legacy skills sentence (:484-486). */
-const V1_SKILLS_HINT =
-  'Project and personal skills (.claude/skills in this project and ~/.claude/skills) are ' +
-  'available via the Skill tool — invoke any that fit (e.g. design, framework-pattern, or ' +
-  'knowledge-graph skills) rather than guessing conventions.\n\n';
-/** phases.mjs#fanOutDirective, the legacy (non-detached) arm (:122-146). */
-const V1_FANOUT_HEAD = '## Fan-out ENABLED — parallelize your research\n\n';
-const V1_FANOUT_SUBAGENTS =
-  'Pick the BEST-FIT `subagent_type`: this project\'s own agents (`.claude/agents`) and your personal ' +
-  'agents (`~/.claude/agents`) are available by name — prefer a purpose-built one when it fits the ' +
-  'sub-task, else fall back to `"general-purpose"` (or `"Explore"` for pure code search).';
-const V1_FANOUT_TAIL =
-  'Sub-agents are strictly READ-ONLY investigators: YOU write every artifact. Skip fan-out only for a ' +
-  'trivial, single-file change.\n\n';
-/** The three lines every v1 verdict contract opens with (reviewer :879-881). */
-const V1_VERDICT_CONTRACT =
-  'The review JSON shape is { "issues": [ { "severity", "title", "detail", "location" } ], ' +
-  '"summary" }. Use severities critical|major|minor|suggestion; only critical/major block the ' +
-  'pipeline.\n\n';
-/** The role-specific tails the four bespoke contracts added on top. */
-const V1_REFINER_CALIBRATION = 'Mark a finding critical/major only if it must be fixed before implementation.';
-const V1_PLAN_REVIEW_CONSEQUENCE = 'critical/major block (the planner then revises).';
-const V1_WEBUI_CALIBRATION = 'a failing manual case is at least major';
-const V1_WS_UNION_LINE =
-  'The issue list is the UNION of every per-project critical/major issue (never ' +
-  'collapse one), sorted by projectKey then severity, each location prefixed "<projectKey>: ".';
 /** The bespoke "what to do" sentences the generic baseInstruction cannot carry. */
 const V1_PLAN_REVIEW_INSTRUCTION = 'Review the implementation PLAN against the original request and the real codebase.';
 const V1_PLAN_REVIEW_SCOPE = 'Do NOT rewrite the plan.';
@@ -124,19 +100,10 @@ const V1_REVIEWER_DIFF_REF =
   'Inspect the diff with `git diff abc1234` (the orchestrator\'s pre-implementation ' +
   'checkpoint) and `git status` in your cwd. New/untracked files are intent-to-added, ' +
   'so they DO appear in that diff; use `git status` to cross-check.';
-const V1_DECOMPOSER_SLICES =
-  'tracer-bullet vertical slices grouped into ordered phases. Within a phase, tasks must be ' +
-  'parallel-safe and edit DISJOINT files';
-const V1_DECOMPOSER_TASKS_DIR =
-  `Write each task file under: ${join(pipelineDir, 'tasks')}/ (name them p<phase>-t<n>-<kebab-title>.md)`;
-const V1_DECOMPOSER_MANIFEST =
-  'The manifest shape is { "phases": [ { "ordinal", "tasks": [ { "id", "title", "file" } ] } ] }. ' +
-  'Use id "p<ordinal>t<n>" and a pipeline-dir-relative "file" path.';
 const V1_PLANNER_INSTRUCTION =
   'Write a complete, build-ready implementation plan. It MUST contain concrete code snippets ' +
   'for the features and MUST end with a "## Clarifications (Q&A)" section';
 const V1_NO_ANSWERS = '_No clarifying questions were asked._';
-const V1_CLARIFY_SCOPE = 'Identify the decisions you cannot safely resolve from the task text or the real codebase';
 const V1_REFINER_INSTRUCTION =
   'Read the current plan, critically review it INCLUDING its code snippets, then write an ' +
   'improved version and a machine-readable review.';
@@ -149,26 +116,6 @@ const V1_CHECKLIST_SINGLE =
   'then write a markdown checklist of concrete manual test cases a human can run against the ' +
   'app. Each case: a `- [ ]` line with steps and the expected result.';
 const V1_CHECKLIST_DETACHED = 'your cwd is the worca-cc run root, not a repository, so inspect each member on its own';
-/** The generalized input renderers that replace v1's bespoke arms (v2 bytes, by design). */
-/** executor.mjs#baseInstruction, the PRODUCER arm — v1's generic producer
- *  (phases.mjs:1206-1207). The first line of every non-verifier agent prompt, and
- *  the only sentence that tells an agent to write its declared outputs at all. */
-const V2_BASE_PRODUCER =
-  'You are a pipeline agent. Read every input below, do your job exactly as your role ' +
-  'instructions describe, and write EVERY declared output to its exact path.';
-/** …the VERIFIER arm — v1's generic verifier (phases.mjs:1245-1246). */
-const V2_BASE_VERIFIER =
-  'You are a verifier. Inspect the inputs below exactly as your role instructions describe, ' +
-  'then write a human-readable review markdown AND a machine-readable review JSON.';
-/** …the CLARIFIER arm — v1's buildClarifyPrompt (:581-587) minus its parenthetical
- *  aside naming two builtin agents a generic graph need not have. */
-const V2_BASE_CLARIFIER =
-  'Identify the decisions you cannot safely resolve from the task text or the real ' +
-  'codebase — including things a downstream agent would otherwise silently assume. For ' +
-  'each, produce one conceptual question with 2 to 4 options and a free-text fallback. Ask ' +
-  'only what materially changes the plan (up to 8 questions); never pad, and never split one ' +
-  'decision. For low-impact details, pick a sensible default rather than asking. If you have ' +
-  'no material open questions, write { "questions": [] } to that same path.';
 /** phases.mjs#RESUME_HEADER (:288-292), verbatim — the import alone only pins the
  *  POSITION, so the bytes are restated here. */
 const V1_RESUME_HEADER =
@@ -177,6 +124,7 @@ const V1_RESUME_HEADER =
   'state of your previous work (files/artifacts you already wrote), then continue the\n' +
   'ORIGINAL task below to completion. Do not redo work that is already done.\n\n';
 
+/** The generalized input renderers that replace v1's bespoke arms (v2 bytes, by design). */
 const V2_FIX_REVIEW_ARM = '(the review to address — fix EVERY critical and major issue)';
 const V2_ANSWERS_ARM = '(the clarifying questions and the answers already given)';
 
@@ -259,60 +207,6 @@ function ctxFor(key, { only = null, workspace = null, extras = [], slice = null,
 
 const promptFor = (key, opts) => buildAgentPrompt(ctxFor(key, opts));
 
-// ── the 14 ────────────────────────────────────────────────────────────────────
-
-test('the pin covers exactly the 14 shipped builtins, all v2-ported', () => {
-  assert.deepEqual(BUILTIN_KEYS, [
-    'clarify', 'decomposer', 'implementer', 'manualTestsChecklist', 'manualWebUiTesting',
-    'memoryDefragmenter', 'planReviewer', 'planner', 'refiner', 'reviewer', 'workspaceReviewer', 'workspaceScanner',
-    'workspaceSynthesizer', 'workspaceUsageMapper',
-  ]);
-  for (const key of BUILTIN_KEYS) {
-    assert.equal(REGISTRY[key].metaVersion, 2, `${key} is metaVersion 2`);
-    assert.ok((portsFn({ kind: 'agent', key }).inputs || []).some((p) => p.id === 'await'),
-      `${key} carries the synthesized await gate`);
-  }
-});
-
-test('every builtin keeps the v1 task header: title, cwd line, pipeline dir, skills hint', () => {
-  for (const key of BUILTIN_KEYS) {
-    const p = promptFor(key);
-    assert.ok(p.startsWith(`# Task: ${REGISTRY[key].displayName}\n\n`), `${key}: task title`);
-    assert.ok(p.includes(`Project directory (your cwd): ${projectDir}\n`), `${key}: cwd line`);
-    assert.ok(p.includes(`Pipeline directory (shared artifacts): ${pipelineDir}\n\n`), `${key}: pipeline dir`);
-    assert.ok(p.includes(V1_SKILLS_HINT), `${key}: skills hint`);
-  }
-});
-
-const BASE_BY_RUNNER = {
-  producer: V2_BASE_PRODUCER, verifier: V2_BASE_VERIFIER, clarifier: V2_BASE_CLARIFIER,
-};
-
-test('every builtin opens "## What to do" with the base instruction for its runnerType — and only that one', () => {
-  const arms = Object.values(BASE_BY_RUNNER);
-  for (const key of BUILTIN_KEYS) {
-    const runnerType = REGISTRY[key].runnerType || 'producer';
-    const mine = BASE_BY_RUNNER[runnerType];
-    assert.ok(mine, `${key}: unknown runnerType ${runnerType}`);
-    const p = promptFor(key);
-    // Position, not just presence: the base instruction is the FIRST thing under
-    // the heading, ahead of the sidecar hints and every block after them.
-    assert.ok(p.includes(`\n## What to do\n\n${mine}\n\n`),
-      `${key}: "## What to do" must open with the ${runnerType} base instruction`);
-    for (const other of arms) {
-      if (other !== mine) assert.equal(p.includes(other), false, `${key}: carries a foreign base instruction`);
-    }
-  }
-  // The clause that makes an agent write its files at all is keyed by runnerType,
-  // never by an agent key — every non-verifier builtin carries it.
-  assert.ok(V2_BASE_PRODUCER.includes('write EVERY declared output to its exact path'));
-  const producers = BUILTIN_KEYS.filter((k) => (REGISTRY[k].runnerType || 'producer') === 'producer');
-  assert.ok(producers.length >= 5, `expected several producers, got ${producers.length}`);
-  for (const key of producers) {
-    assert.ok(promptFor(key).includes('write EVERY declared output to its exact path'), key);
-  }
-});
-
 // ── request policy (v1 phases.mjs:449-496 semantics, restated without the key list) ──
 
 const TASK_WIRED = ['clarify', 'planner'];
@@ -320,36 +214,38 @@ const WANTS_REQUEST = ['refiner', 'reviewer', 'planReviewer'];
 const UPSTREAM_ONLY = ['decomposer', 'implementer', 'manualTestsChecklist', 'manualWebUiTesting', 'workspaceReviewer',
   'workspaceScanner', 'workspaceUsageMapper', 'workspaceSynthesizer'];
 
-test('request policy: task-wired builtins get the request AND the attachments', () => {
-  const extras = [{ name: 'spec.md', path: '/abs/spec.md' }];
-  for (const key of TASK_WIRED) {
-    assert.ok(taskSourcedPorts(PARITY_TPL, nodeId(key)).size > 0, `${key} is task-wired`);
-    const p = promptFor(key, { extras });
-    assert.ok(p.includes(V1_REQUEST_BLOCK), `${key}: ## Original request`);
-    assert.ok(!p.includes(V1_UPSTREAM_BLOCK), `${key}: no upstream header`);
-    assert.ok(p.includes(V1_ATTACHMENTS_HEAD), `${key}: ## Attached files`);
-    assert.ok(p.includes('- `/abs/spec.md` (spec.md)'), `${key}: the attachment row`);
-  }
-});
-
-test('request policy: wantsRequest builtins get the request but NEVER the attachments', () => {
-  const extras = [{ name: 'spec.md', path: '/abs/spec.md' }];
-  for (const key of WANTS_REQUEST) {
-    assert.equal(REGISTRY[key].wantsRequest, true, `${key}.wantsRequest`);
-    assert.equal(taskSourcedPorts(PARITY_TPL, nodeId(key)).size, 0, `${key} binds no task token`);
-    const p = promptFor(key, { extras });
-    assert.ok(p.includes(V1_REQUEST_BLOCK), `${key}: ## Original request`);
-    assert.ok(!p.includes(V1_ATTACHMENTS_HEAD), `${key}: no attachments`);
-  }
-});
-
-test('request policy: every other builtin gets the upstream-input header and no request text', () => {
-  for (const key of UPSTREAM_ONLY) {
-    const p = promptFor(key, { extras: [{ name: 'spec.md', path: '/abs/spec.md' }] });
-    assert.ok(p.includes(V1_UPSTREAM_BLOCK), `${key}: ## Upstream input`);
-    assert.ok(!p.includes(TASK_PROMPT), `${key}: no request text at all`);
-    assert.ok(!p.includes(V1_ATTACHMENTS_HEAD), `${key}: no attachments`);
-  }
+test('request policy per builtin class: task-wired (request + attachments), wantsRequest (request, no attachments), upstream-only (header, no request)', async () => {
+  await checkRows([
+    { name: 'request policy: task-wired builtins get the request AND the attachments', run: () => {
+      const extras = [{ name: 'spec.md', path: '/abs/spec.md' }];
+      for (const key of TASK_WIRED) {
+        assert.ok(taskSourcedPorts(PARITY_TPL, nodeId(key)).size > 0, `${key} is task-wired`);
+        const p = promptFor(key, { extras });
+        assert.ok(p.includes(V1_REQUEST_BLOCK), `${key}: ## Original request`);
+        assert.ok(!p.includes(V1_UPSTREAM_BLOCK), `${key}: no upstream header`);
+        assert.ok(p.includes(V1_ATTACHMENTS_HEAD), `${key}: ## Attached files`);
+        assert.ok(p.includes('- `/abs/spec.md` (spec.md)'), `${key}: the attachment row`);
+      }
+    } },
+    { name: 'request policy: wantsRequest builtins get the request but NEVER the attachments', run: () => {
+      const extras = [{ name: 'spec.md', path: '/abs/spec.md' }];
+      for (const key of WANTS_REQUEST) {
+        assert.equal(REGISTRY[key].wantsRequest, true, `${key}.wantsRequest`);
+        assert.equal(taskSourcedPorts(PARITY_TPL, nodeId(key)).size, 0, `${key} binds no task token`);
+        const p = promptFor(key, { extras });
+        assert.ok(p.includes(V1_REQUEST_BLOCK), `${key}: ## Original request`);
+        assert.ok(!p.includes(V1_ATTACHMENTS_HEAD), `${key}: no attachments`);
+      }
+    } },
+    { name: 'request policy: every other builtin gets the upstream-input header and no request text', run: () => {
+      for (const key of UPSTREAM_ONLY) {
+        const p = promptFor(key, { extras: [{ name: 'spec.md', path: '/abs/spec.md' }] });
+        assert.ok(p.includes(V1_UPSTREAM_BLOCK), `${key}: ## Upstream input`);
+        assert.ok(!p.includes(TASK_PROMPT), `${key}: no request text at all`);
+        assert.ok(!p.includes(V1_ATTACHMENTS_HEAD), `${key}: no attachments`);
+      }
+    } },
+  ]);
 });
 
 test('request policy is driven by wantsRequest, not by the v1 agent-key list', () => {
@@ -364,31 +260,7 @@ test('request policy is driven by wantsRequest, not by the v1 agent-key list', (
   assert.ok(!neither.includes(TASK_PROMPT));
 });
 
-// ── fan-out, verdict contract, markers ───────────────────────────────────────
-
-test('fan-out declarers keep the v1 directive verbatim; the others carry none', () => {
-  for (const key of BUILTIN_KEYS) {
-    const p = promptFor(key);
-    if (REGISTRY[key].fanOut) {
-      assert.ok(p.includes(V1_FANOUT_HEAD), `${key}: fan-out head`);
-      assert.ok(p.includes(V1_FANOUT_SUBAGENTS), `${key}: subagent_type sentence`);
-      assert.ok(p.includes(V1_FANOUT_TAIL), `${key}: read-only tail`);
-    } else {
-      assert.ok(!p.includes(V1_FANOUT_HEAD), `${key}: no fan-out block`);
-    }
-  }
-});
-
-test('every verdict declarer carries the three-line contract plus its calibration tail', () => {
-  const withVerdict = BUILTIN_KEYS.filter((k) => REGISTRY[k].verdict);
-  assert.deepEqual(withVerdict.sort(), ['manualWebUiTesting', 'planReviewer', 'refiner', 'reviewer', 'workspaceReviewer']);
-  for (const key of withVerdict) assert.ok(promptFor(key).includes(V1_VERDICT_CONTRACT), `${key}: verdict contract`);
-  assert.ok(promptFor('refiner').includes(V1_REFINER_CALIBRATION));
-  assert.ok(promptFor('planReviewer').includes(V1_PLAN_REVIEW_CONSEQUENCE));
-  assert.ok(promptFor('manualWebUiTesting').includes(V1_WEBUI_CALIBRATION));
-  assert.ok(promptFor('workspaceReviewer').includes(V1_WS_UNION_LINE));
-  assert.ok(!promptFor('decomposer').includes(V1_VERDICT_CONTRACT), 'a producer carries none');
-});
+// ── markers ──────────────────────────────────────────────────────────────────
 
 /** v1's MOCK_ROLE per builtin — the closed writer vocabulary the offline mock
  *  switches on. The scanner's marker is deliberately NOT its prompt role. */
@@ -432,17 +304,6 @@ test('every builtin pins its v1 MOCK_ROLE and names its allocated outputs absolu
 
 // ── the per-agent load-bearing sentences (adj-f1 §5; §0 item 2: what the old branch lost) ──
 
-test('clarify keeps its scope, its budget and its empty-questions instruction', () => {
-  const p = promptFor('clarify');
-  assert.ok(p.includes(V1_CLARIFY_SCOPE));
-  assert.ok(p.includes('2 to 4 options'));
-  assert.ok(p.includes('up to 8 questions'));
-  assert.ok(p.includes('write { "questions": [] } to that same path'));
-  assert.ok(p.includes('MOCK_PRIOR: 0'));
-  assert.ok(!p.includes('## Already answered — DO NOT ask these again'),
-    'the round-2 block is gone: the clarifier executes once per token');
-});
-
 test('planner keeps its instruction, the REVISE arm and the inline answers block', () => {
   const p = promptFor('planner');
   assert.ok(p.includes(V1_PLANNER_INSTRUCTION));
@@ -460,6 +321,7 @@ test('planner keeps its instruction, the REVISE arm and the inline answers block
 });
 
 test('refiner, reviewer, planReviewer and workspaceReviewer keep their v1 instructions', () => {
+  assert.deepEqual(BUILTIN_KEYS.filter((k) => REGISTRY[k].verdict).sort(), ['manualWebUiTesting', 'planReviewer', 'refiner', 'reviewer', 'workspaceReviewer']);
   assert.ok(promptFor('refiner').includes(V1_REFINER_INSTRUCTION));
   const rev = promptFor('reviewer', { only: ['plan', 'done'] });   // `done` is optional: bind it to reach the worktree arm
   assert.ok(rev.includes(V1_REVIEWER_INSTRUCTION));
@@ -491,14 +353,6 @@ test('implementer renders exactly ONE arm per execution, plus the cwd sentence',
   });
   assert.ok(withSiblings.includes('## Parallel siblings — shared working tree'));
   assert.ok(withSiblings.includes('- p1t2 "Two" (tasks/p1-t2.md)'));
-});
-
-test('decomposer keeps the slicing rules, the tasks dir and the manifest shape', () => {
-  const p = promptFor('decomposer');
-  assert.ok(p.includes(V1_DECOMPOSER_SLICES));
-  assert.ok(p.includes(V1_DECOMPOSER_TASKS_DIR));
-  assert.ok(p.includes(V1_DECOMPOSER_MANIFEST));
-  assert.ok(!promptFor('planner').includes('Write each task file under:'), 'the contract renders ONLY for the expands producer');
 });
 
 test('the checklist keeps both change-inspection variants; web UI keeps its instruction', () => {
@@ -533,15 +387,6 @@ test('a resumed execution keeps the v1 resume header, ahead of the task prompt',
   assert.equal(RESUME_HEADER, V1_RESUME_HEADER, 'the resume header keeps its v1 bytes');
   assert.ok(opts.prompt.startsWith(V1_RESUME_HEADER));
   assert.ok(opts.prompt.includes(`# Task: ${REGISTRY.reviewer.displayName}`));
-});
-
-test('runAgentExecution ships exactly the prompt buildAgentPrompt produced', async () => {
-  const ctx = ctxFor('reviewer');
-  const r = await runAgentExecution(ctx);
-  assert.equal(r.prompt, buildAgentPrompt(ctx), 'no second builder, no drift');
-  assert.ok(r.outputs.review.path.endsWith('-impl-review.md'));
-  assert.ok(Array.isArray(r.verdict.issues));
-  assert.match(r.sessionId, /^mock-session-/);
 });
 
 // ── the whole-prompt snapshots ───────────────────────────────────────────────

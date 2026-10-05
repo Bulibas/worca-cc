@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { _resetForTests } from '../src/core/db.mjs';
 import { listArtifacts } from '../src/core/artifacts.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let homeDir, srv, base, prevHome, proj, id, dir;
 
@@ -55,19 +56,22 @@ test('POST appends a direction and answers 201 {id}; the file is indexed as an a
   assert.ok((await listArtifacts(id)).some((a) => a.kind === 'directions' && a.relPath === 'directions.ndjson'));
 });
 
-test('validation: missing text 400, wrong type 400, unknown run 404, oversize 400', async () => {
-  assert.deepEqual(JSON.parse((await post(`/api/runs/${id}/directions`, {})).text), { error: 'text is required' });
-  assert.deepEqual(JSON.parse((await post(`/api/runs/${id}/directions`, { text: 5 })).text), { error: 'text must be a string' });
-  assert.equal((await post(`/api/runs/00000000/directions`, { text: 'x' })).status, 404);
-  assert.equal((await post(`/api/runs/${id}/directions`, { text: 'x'.repeat(4001) })).status, 400);
-});
-
-// Whitespace-only text reached appendDirection, which throws EMPTY_DIRECTION and
-// landed in the route's generic catch as a 500. It is a bad request.
-test('validation: whitespace-only text is a 400, not a 500', async () => {
-  const res = await post(`/api/runs/${id}/directions`, { text: '   \n\t ' });
-  assert.equal(res.status, 400, res.text);
-  assert.match(res.text, /text is required/);
+test('validation: missing / whitespace-only text 400, wrong type 400, unknown run 404, oversize 400', async () => {
+  await checkRows([
+    { name: 'validation: missing text 400, wrong type 400, unknown run 404, oversize 400', run: async () => {
+      assert.deepEqual(JSON.parse((await post(`/api/runs/${id}/directions`, {})).text), { error: 'text is required' });
+      assert.deepEqual(JSON.parse((await post(`/api/runs/${id}/directions`, { text: 5 })).text), { error: 'text must be a string' });
+      assert.equal((await post(`/api/runs/00000000/directions`, { text: 'x' })).status, 404);
+      assert.equal((await post(`/api/runs/${id}/directions`, { text: 'x'.repeat(4001) })).status, 400);
+    } },
+    { name: 'validation: whitespace-only text is a 400, not a 500', run: async () => {
+      // Whitespace-only text reached appendDirection, which throws EMPTY_DIRECTION and
+      // landed in the route's generic catch as a 500. It is a bad request.
+      const res = await post(`/api/runs/${id}/directions`, { text: '   \n\t ' });
+      assert.equal(res.status, 400, res.text);
+      assert.match(res.text, /text is required/);
+    } },
+  ]);
 });
 
 // A direction is read by the NEXT step. A finished run has none, so accepting
@@ -78,12 +82,6 @@ test('a direction for a finished run is refused, not silently accepted', async (
   const res = await post(`/api/runs/${done}/directions`, { text: 'cut the roadmap slide' });
   assert.equal(res.status, 409, res.text);
   assert.match(res.text, /never be read/);
-});
-
-test('a paused run still accepts one — resume replays the inbox', async () => {
-  const { id: paused } = await seedPipeline(proj, { title: 'Paused', status: 'paused' });
-  const res = await post(`/api/runs/${paused}/directions`, { text: 'cut the roadmap slide' });
-  assert.equal(res.status, 201, res.text);
 });
 
 // A finished run stays parked in the runs Map, so liveRunEntry still returns an

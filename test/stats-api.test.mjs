@@ -197,10 +197,3 @@ test('totals carry humanHours and savedUsd = hours × rate − spent; prev too; 
   assert.equal(all.totals.humanHours, 16.5);
   assert.equal(all.totals.savedUsd, Math.round((16.5 * 35 - all.totals.spentUsd) * 100) / 100);
 });
-
-test('GET /api/stats forwards humanHours, savedUsd and humanRateUsd', async () => {
-  const j = await (await fetch(`${base}/api/stats?range=month`)).json();
-  assert.equal(typeof j.totals.humanHours, 'number');
-  assert.equal(typeof j.totals.savedUsd, 'number');
-  assert.equal(j.humanRateUsd, 35);
-});

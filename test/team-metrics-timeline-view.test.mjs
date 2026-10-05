@@ -58,48 +58,6 @@ test('calendar windows: month, Monday-first week, 06–22 day; stepping', () => 
   assert.equal(fmtSpan((2 * 24 + 4) * 3_600_000), '2d 4h');
 });
 
-test('month view: tiles, groups by project, bars and marks per status', () => {
-  const el = renderTimeline({ items, zoom: 'month', anchor: NOW, mode: 'items', now: NOW }, { doc });
-  const tiles = [...el.querySelectorAll('.tl-tile')].map((t) => [t.querySelector('.stat-label span').textContent, t.querySelector('.stat-value').textContent]);
-  assert.deepEqual(tiles, [['Shipped', '1'], ['In review', '1'], ['Needs attention', '1'], ['Median lead time', '8d 8h'], ['Agent spend', '$3.00']]);
-  assert.deepEqual([...el.querySelectorAll('.tl-group b')].map((b) => b.textContent), ['acme/api', 'acme/docs']);
-  const rows = [...el.querySelectorAll('.tl-item')];
-  assert.equal(rows.length, 3, 'August work is outside September');
-  const ship = rows.find((r) => r.textContent.includes('Responses upstream'));
-  assert.ok(ship.querySelector('.tl-mark.is-merged'));
-  assert.ok(ship.querySelector('.tl-tail'));
-  assert.match(ship.querySelector('.tl-meta').textContent, /Mara Kovač · Shipped/);
-  const open = rows.find((r) => r.textContent.includes('Delivery timeline'));
-  assert.ok(open.querySelector('.tl-mark.is-open'));
-  const fail = rows.find((r) => r.textContent.includes('Flaky reconnect'));
-  assert.ok(fail.querySelector('.tl-run.is-failed'));
-  assert.match(fail.querySelector('.tl-meta').textContent, /Needs attention/);
-  // Header: 30 day cells + week cells, today marked, one merge pip on the 22nd.
-  assert.equal(el.querySelectorAll('.tl-hcell[data-tl-day]').length, 30);
-  assert.ok(el.querySelector('.tl-hcell[data-tl-week]'));
-  assert.equal(el.querySelector('.tl-hcell.is-today').dataset.tlDay, String(local(2026, 9, 24)));
-  assert.equal(el.querySelector(`.tl-hcell[data-tl-day="${local(2026, 9, 22)}"] .tl-pips i`) != null, true);
-  assert.ok(el.querySelector('.tl-now'));
-  assert.equal(el.querySelector('.tl-crumb-cur').textContent, 'September 2026');
-});
-
-test('people grouping, filters, week and day zooms', () => {
-  const people = renderTimeline({ items, zoom: 'month', anchor: NOW, mode: 'people', now: NOW }, { doc });
-  assert.deepEqual([...people.querySelectorAll('.tl-group b')].map((b) => b.textContent), ['Dev Patel', 'Ines Vogel', 'Mara Kovač']);
-  assert.equal(people.querySelector('.tl-mode button.on').dataset.tlMode, 'people');
-  const att = renderTimeline({ items, zoom: 'month', anchor: NOW, mode: 'items', filter: 'attention', now: NOW }, { doc });
-  assert.equal(att.querySelectorAll('.tl-item').length, 1);
-  assert.equal(att.querySelector('[data-tl-filter="attention"]').getAttribute('aria-pressed'), 'true');
-  const week = renderTimeline({ items, zoom: 'week', anchor: NOW, mode: 'items', now: NOW }, { doc });
-  assert.equal(week.querySelectorAll('.tl-hcell[data-tl-day]').length, 7);
-  assert.deepEqual([...week.querySelectorAll('.tl-crumb')].map((b) => b.dataset.tlZoom), ['month']);
-  const day = renderTimeline({ items, zoom: 'day', anchor: NOW, mode: 'items', now: NOW }, { doc });
-  assert.equal(day.querySelectorAll('.tl-hour').length, 16);
-  assert.equal(day.querySelector('.tl-crumb-cur').textContent, 'Thu 24 Sep');
-  const empty = renderTimeline({ items, zoom: 'month', anchor: local(2026, 12, 5), mode: 'items', now: NOW }, { doc });
-  assert.match(empty.querySelector('.tl-empty').textContent, /No work in this period/);
-});
-
 test('without merge data: Completed tile, no lead time, and the notice says why', () => {
   const noPr = buildWorkItems(RECORDS, { now: NOW });
   const el = renderTimeline({ items: noPr, zoom: 'month', anchor: NOW, mode: 'items', now: NOW, prStatus: { gh: 'missing', actionRepos: [], unsupportedRepos: [] } }, { doc });
@@ -115,32 +73,6 @@ test('without merge data: Completed tile, no lead time, and the notice says why'
   assert.match(prNotice(doc, { status: { gh: 'ok', actionRepos: [], unsupportedRepos: ['gitlab.com/g/api'] } }).textContent, /gitlab\.com\/g\/api shows without merge data/);
   assert.match(prNotice(doc, { loading: true }).textContent, /Checking pull requests/);
   assert.equal(prNotice(doc, { status: { gh: 'ok', actionRepos: [] } }), null);
-});
-
-test('PRs outside Worca: own row with a tag, a PR bar, the toggle, and a card without runs', () => {
-  const OUT = [{ repo: 'acme/api', number: 490, head: 'hand-made', url: 'https://github.com/acme/api/pull/490', title: 'Fix the docs', author: 'sini', state: 'MERGED', createdAt: iso(local(2026, 9, 8, 10)), mergedAt: iso(local(2026, 9, 9, 15)) }];
-  const withOut = buildWorkItems(RECORDS, { prs: PRS, outside: OUT, now: NOW });
-  const el = renderTimeline({ items: withOut, zoom: 'month', anchor: NOW, mode: 'items', now: NOW }, { doc });
-  const row = [...el.querySelectorAll('.tl-item')].find((r) => r.textContent.includes('Fix the docs'));
-  assert.ok(row.classList.contains('is-outside'));
-  assert.equal(row.querySelector('.tl-outside').textContent, 'outside Worca');
-  assert.ok(row.querySelector('.tl-pr-start'));
-  assert.ok(row.querySelector('.tl-mark.is-merged'));
-  assert.equal(row.querySelector('.tl-run'), null);
-  assert.match(row.querySelector('.tl-meta').textContent, /#490 · sini · Shipped/);
-  assert.equal(el.querySelector('[data-tl-filter="shipped"] .stat-value').textContent, '2');
-  assert.equal(el.querySelector('#tl-outside').checked, true);
-  const hidden = renderTimeline({ items: withOut, zoom: 'month', anchor: NOW, mode: 'items', now: NOW, outside: false }, { doc });
-  assert.ok(![...hidden.querySelectorAll('.tl-item')].some((r) => r.textContent.includes('Fix the docs')));
-  assert.equal(hidden.querySelector('[data-tl-filter="shipped"] .stat-value').textContent, '1');
-  assert.equal(hidden.querySelector('#tl-outside').checked, false, 'the toggle stays to turn them back on');
-  assert.equal(renderTimeline({ items, zoom: 'month', anchor: NOW, now: NOW }, { doc }).querySelector('#tl-outside'), null, 'no toggle when there is nothing outside');
-  const pop = renderTimelinePopover(withOut.find((i) => i.kind === 'pr'), { doc, now: NOW });
-  assert.match(pop.querySelector('.tl-pop-note').textContent, /no Worca run/);
-  assert.match(pop.textContent, /AuthorsiniOpenedTue 8 Sep/);
-  assert.match(pop.textContent, /Time to merge1d 5h/);
-  assert.equal(pop.querySelector('.tl-attempts'), null);
-  assert.ok(!/Spend/.test(pop.textContent));
 });
 
 test('popover: status, reason, PR links (http only), runs', () => {

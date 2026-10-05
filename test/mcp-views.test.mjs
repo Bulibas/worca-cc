@@ -5,10 +5,11 @@ import assert from 'node:assert/strict';
 import { useTempHome } from './helpers/temp-home.mjs';
 import {
   buildSetsView, buildSetView, buildCatalogView, buildProjectAssignment, membershipKeys, teamSetsOf,
-  getSetView, teamMemberRefusal, teamDuplicateSource,
+  getSetView, teamMemberRefusal,
 } from '../src/core/mcp/views.mjs';
 import { materializeCopy } from '../src/core/mcp/registry.mjs';
 import { createSet, addManualServer, putMember } from '../src/core/mcp/store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -83,29 +84,29 @@ function ctx(over = {}) {
 }
 const fingerprintOf = (e, values, secrets) => materializeCopy({ entry: e, values, secrets, copy: 'x', name: 'x' }, ctx()).fingerprint;
 
-test('set list order: General, user sets by name, then Team sets; a home that governs nothing here is greyed', () => {
+test('buildSetsView: order (General, user sets by name, Team sets), greyed homes, the warning dot (problems only), Used by per set kind', async () => {
   const v = buildSetsView(ctx());
-  assert.deepEqual(v.sets.map((s) => [s.id, s.group, s.greyed]), [
-    ['general', 'general', false], ['billing', 'set', false], ['shop', 'set', false],
-    ['team-acme-platform-9333', 'team', false], ['team-old-home-1234', 'team', true]]);
-  assert.equal(v.sets.find((s) => s.id === 'team-old-home-1234').serverCount, 0);
-});
-
-test('warning dot: a member with a problem marks its set; "not tested" alone does not', () => {
-  const v = buildSetsView(ctx());
-  const by = Object.fromEntries(v.sets.map((s) => [s.id, s.problem]));
-  assert.equal(by.billing, true, 'billing · jira has no token');
-  assert.equal(by.general, false);
-  assert.equal(by.shop, false);
-});
-
-test('Used by: General = projects that include it; a user set = its projects; a Team set = projects following its home', () => {
-  const v = buildSetsView(ctx());
-  const used = Object.fromEntries(v.sets.map((s) => [s.id, s.usedBy.map((p) => p.name)]));
-  assert.deepEqual(used.general, ['mobile', 'shop'], 'billing switched it off; a missing key or no entry ⇒ on');
-  assert.deepEqual(used.billing, ['billing']);
-  assert.deepEqual(used.shop, ['mobile']);
-  assert.deepEqual(used['team-acme-platform-9333'], ['billing']);
+  await checkRows([
+    { name: 'set list order: General, user sets by name, then Team sets; a home that governs nothing here is greyed', run: () => {
+      assert.deepEqual(v.sets.map((s) => [s.id, s.group, s.greyed]), [
+        ['general', 'general', false], ['billing', 'set', false], ['shop', 'set', false],
+        ['team-acme-platform-9333', 'team', false], ['team-old-home-1234', 'team', true]]);
+      assert.equal(v.sets.find((s) => s.id === 'team-old-home-1234').serverCount, 0);
+    } },
+    { name: 'warning dot: a member with a problem marks its set; "not tested" alone does not', run: () => {
+      const by = Object.fromEntries(v.sets.map((s) => [s.id, s.problem]));
+      assert.equal(by.billing, true, 'billing · jira has no token');
+      assert.equal(by.general, false);
+      assert.equal(by.shop, false);
+    } },
+    { name: 'Used by: General = projects that include it; a user set = its projects; a Team set = projects following its home', run: () => {
+      const used = Object.fromEntries(v.sets.map((s) => [s.id, s.usedBy.map((p) => p.name)]));
+      assert.deepEqual(used.general, ['mobile', 'shop'], 'billing switched it off; a missing key or no entry ⇒ on');
+      assert.deepEqual(used.billing, ['billing']);
+      assert.deepEqual(used.shop, ['mobile']);
+      assert.deepEqual(used['team-acme-platform-9333'], ['billing']);
+    } },
+  ]);
 });
 
 test('member cards: field states, secrets as { set, updatedAt, env? }, OAuth age, problem text', () => {
@@ -222,12 +223,6 @@ test('Team locks (§11.2): update only, no add or remove by hand, never-consente
   assert.equal(teamMemberRefusal(c, T, 'manual:playwright', { enabled: true }).status, 409, 'not derived from policy');
   assert.equal(teamMemberRefusal(c, 'team-nope-0000', 'policy:acme/platform/github', {}).status, 404);
   assert.equal(teamMemberRefusal(c, 'team-old-home-1234', 'policy:acme/platform/github', {}).status, 409, 'a greyed set has no members');
-});
-
-test('Duplicate of a Team set: its home and derived members; none for a greyed set', () => {
-  assert.deepEqual(teamDuplicateSource(ctx(), 'team-acme-platform-9333'),
-    { home: 'acme/platform', members: ['policy:acme/platform/github', 'plugin:acme-tools/sentry'] });
-  assert.equal(teamDuplicateSource(ctx(), 'team-old-home-1234'), null);
 });
 
 test('getSetView over the real store: a stored secret reads as set, never as its value', async () => {

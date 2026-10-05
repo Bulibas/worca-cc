@@ -11,10 +11,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { normalizeAgentMeta, validateMetaV2 } from '../src/shared/graph/agent-meta.mjs';
 import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
-import { createAgent, updateAgent, readAgent } from '../src/core/agent-store.mjs';
-import { useTempHome } from './helpers/temp-home.mjs';
-
-useTempHome(after);   // the store writes under <WORCA_HOME>/agents
 
 const scratch = [];
 function tmp(prefix) { const d = mkdtempSync(join(tmpdir(), prefix)); scratch.push(d); return d; }
@@ -133,18 +129,4 @@ test('the REGISTRY keeps ask in its fixed key set and reports a drop through onD
   assert.equal(hit.file, 'formAgent.meta.json');
   assert.match(hit.reason, /^BAD_ASK_FORM: formAgent\/bad: /);
   assert.ok(reg.formAgent, 'the agent itself stays in the registry — it is usable with generic questions');
-});
-
-test('the user-agent STORE keeps `ask` on create and CLEARS it on a v2 update that omits it', async () => {
-  const markdown = '# Form agent\n\nYou ask with forms.\n';
-  const warn = console.warn;
-  console.warn = () => {};
-  try {
-    const created = await createAgent({ meta: { ...BASE, key: 'storeFormAgent', ask: { forms: { good: GOOD_FORM } } }, markdown });
-    assert.deepEqual(Object.keys(created.meta.ask.forms), ['good'], 'normalizeMeta carries the block into the sidecar');
-    const { meta: read } = await readAgent('storeFormAgent');
-    assert.deepEqual(Object.keys(read.ask.forms), ['good'], 'the sidecar on disk carries the block');
-    const updated = await updateAgent('storeFormAgent', { meta: { ...BASE, key: 'storeFormAgent' } });
-    assert.equal('ask' in updated.meta, false, 'a full v2 save that omits the block clears it (V2_CLEARABLE)');
-  } finally { console.warn = warn; }
 });

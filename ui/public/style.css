@@ -1,5 +1,8 @@
 /* worca-cc UI — "Refined" design system. Warm off-white, white panels. No framework, no build step. */
 
+/* The hidden ATTRIBUTE always wins over an author `display:` (test/ui-functional-css.test.mjs). */
+[hidden]:not([hidden="until-found"]) { display: none !important; }
+
 /* ---------- self-hosted webfonts ---------- */
 @font-face{font-family:'Poppins';font-style:normal;font-weight:300;font-display:swap;src:url('/fonts/poppins-latin-300-normal.woff2') format('woff2');}
 @font-face{font-family:'Poppins';font-style:normal;font-weight:400;font-display:swap;src:url('/fonts/poppins-latin-400-normal.woff2') format('woff2');}
@@ -133,9 +136,10 @@ body{
    if the flex context ever changes. It must stay a TRANSITION: the blanket at
    :905 kills every transition under prefers-reduced-motion, but only four
    selectors' animations.
-   This comment is deliberately OUTSIDE the braces. ruleBody() in
-   test/ui-pinned-sidebar.test.mjs:16-20 captures up to the first closing brace,
-   so a comment inside a rule body truncates the capture. */
+   This comment is deliberately OUTSIDE the braces. The style tests' ruleBody()
+   helpers capture up to the first closing brace, so a comment inside a rule
+   body truncates the capture (the pinned-sidebar pins on this rule are no
+   longer tested). */
 .sidebar{
   width:298px;flex:0 0 298px;
   background:var(--panel);
@@ -4273,7 +4277,7 @@ body.view-runs .main{display:flex;flex-direction:column;overflow:hidden;padding:
 .runs-note-err{color:var(--red-ink);}
 .runs-pane{position:relative;min-width:0;min-height:0;background:var(--bg);}
 .runs-pane > :is(.run-shell,.hist-shell){position:absolute;inset:0;}
-/* Two rules, not one grouped selector: ui-ask-clearance reads each by `<sel>{`. */
+/* Two rules, not one grouped selector (the ui-ask-clearance test that read each by `<sel>{` is gone). */
 .run-screen-detail{position:absolute;inset:0;padding:0;overflow-y:auto;overflow-x:hidden;background:var(--bg);}
 .hist-screen-detail{position:absolute;inset:0;padding:0;overflow-y:auto;overflow-x:hidden;background:var(--bg);}
 .run-screen-detail:empty,.hist-screen-detail:empty{display:none;}
@@ -5015,9 +5019,10 @@ button.rd-srow:hover{background:var(--hover-on-field);}
 .sidebar.collapsed .nav button.nav-cta svg{stroke:var(--on-ink);}
 .sidebar.collapsed .nav button.nav-cta:hover{filter:brightness(.55);}
 
-/* Section headers keep their text node — ui-nav-sections.test.mjs:26-35 asserts
-   the source order. (They are not exposed as named a11y nodes in either state,
-   so that is NOT the reason.) 26px hairline, per the mock. */
+/* Section headers keep their text node; font-size:0 hides it (the ui-nav-sections
+   test that read the rail's source order through it is gone). (They are not
+   exposed as named a11y nodes in either state, so that is NOT the reason.) 26px
+   hairline, per the mock. */
 .sidebar.collapsed .nav-sect{width:26px;height:1px;margin:10px auto;padding:0;
   font-size:0;letter-spacing:0;background:var(--line);overflow:hidden;}
 

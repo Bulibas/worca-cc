@@ -1,14 +1,13 @@
 // test/ask-worktree-tools.test.mjs
 // P4/T5: the worktree MCP tools over the real dep bundle in a temp home; the
-// deps-split source scan; the diff/show redaction floor.
+// diff/show redaction floor. The deps-split source scan is a row of ask-tools' write-free guard.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 import { addProject } from '../src/core/projects.mjs';
 import { createThread } from '../src/core/ask/store.mjs';
 import { createAskTools, AskToolError, splitUnifiedDiff } from '../src/core/ask/tools.mjs';
@@ -19,30 +18,16 @@ useTempHome(after);
 
 const created = [];
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true }))));
-async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-wtt-'));
+function freshRepo() {
+  const dir = templateRepo('wtt', { branch: 'main', user: true,
+    files: { 'README.md': '# hi\n', '.env': 'API_KEY=supersecret\n' } });
   created.push(dir);
-  const g = (args) => spawnSync('git', args, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  await writeFile(join(dir, '.env'), 'API_KEY=supersecret\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 
 function realTools(threadId) {
   return createAskTools({ ...defaultToolDeps({ threadId }), ...defaultWorktreeDeps({ threadId }) });
 }
-
-test('tools/list exposes the four new tools with schemas', async () => {
-  const tools = realTools('ask_00000001');
-  const names = tools.list().map((t) => t.name);
-  for (const n of ['open_worktree', 'list_worktrees', 'remove_worktree', 'git']) assert.ok(names.includes(n), n);
-  const git = tools.list().find((t) => t.name === 'git');
-  assert.deepEqual(git.inputSchema.required, ['worktreeId', 'args']);
-  assert.equal(git.inputSchema.properties.args.type, 'array');
-});
 
 test('round trip: open → list → git log/diff/checkout → remove; row ref follows navigation', async () => {
   const repo = await freshRepo();
@@ -196,20 +181,6 @@ test('git tool: grep cannot hide the path, context lines stay filtered, combined
   const stat = await git(['log', '--stat']);
   assert.ok(stat.text.includes('mainline'), 'ordinary history survives');
   assert.ok(!stat.text.includes('.env'), 'protected filename absent from the diffstat');
-});
-
-test('source scans: tools.mjs still write-free; worktree-deps.mjs holds only the worktree bundle', () => {
-  const tools = readFileSync(new URL('../src/core/ask/tools.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(tools, /from '\.\.\/db\.mjs'|getDb\(|\btx\(|node:sqlite/);
-  const deps = readFileSync(new URL('../src/core/ask/worktree-deps.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(deps, /from '\.\.\/db\.mjs'|node:sqlite|writeStoreMeta|writeFile|appendFile|rmSync/);
-  for (const m of ['./worktrees.mjs', '../worktree.mjs', './git-allowlist.mjs']) {
-    assert.ok(deps.includes(`from '${m}'`), `worktree-deps imports ${m}`);
-  }
-  const stdio = readFileSync(new URL('../src/core/ask/mcp-stdio.mjs', import.meta.url), 'utf8');
-  // Match the WIRING, not the import line — `/defaultWorktreeDeps/` alone passes
-  // even if the createAskTools spread is deleted.
-  assert.match(stdio, /createAskTools\(\{[\s\S]*?defaultWorktreeDeps/, 'the MCP child spreads the worktree bundle into createAskTools');
 });
 
 test('splitUnifiedDiff: sections carry header:true/false, incl. member headers', () => {

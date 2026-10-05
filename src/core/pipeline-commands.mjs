@@ -29,6 +29,12 @@ export const PIPELINE_COMMAND_ACTIONS = ['stop', 'pause'];
  *  Run-chain dependents already skip the 30s tick for the same reason. */
 export const CONTROL_CHECK_INTERVAL_MS = 1000;
 
+/** The control-slot poll period; WORCA_CONTROL_CHECK_MS (10 .. 60000) overrides it (tests use 25). */
+export function controlCheckIntervalMs(env = process.env) {
+  const n = Number(env.WORCA_CONTROL_CHECK_MS);
+  return Number.isFinite(n) && n >= 10 && n <= 60_000 ? n : CONTROL_CHECK_INTERVAL_MS;
+}
+
 /** The statuses under which a pipeline no longer has a live orchestrator, so any
  *  command row targeting it is garbage — reaped, never claimed. Mirrors the
  *  SETTLED_RUN notion (ui/server.mjs) minus 'error', which is not a pipelines

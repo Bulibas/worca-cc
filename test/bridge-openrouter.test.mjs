@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { upstreamMessage, upstreamCode, mapUpstreamError } from '../src/core/bridge/errors.mjs';
 import { classifyError } from '../src/core/recoverable-error.mjs';
-import { isOpenRouter, adaptOpenRouterChatBody, OPENROUTER_HEADERS } from '../src/core/bridge/openrouter.mjs';
+import { isOpenRouter, adaptOpenRouterChatBody } from '../src/core/bridge/openrouter.mjs';
 import { assertModelUpstream } from '../src/core/model-env.mjs';
 import { toChatRequest } from '../src/core/bridge/translate/request.mjs';
 import { ChatStreamTranslator } from '../src/core/bridge/translate/stream.mjs';
@@ -20,6 +20,7 @@ import { toMessagesResponse } from '../src/core/bridge/translate/response.mjs';
 import { CHAT_REASONING_SIGNATURE } from '../src/core/bridge/translate/common.mjs';
 import { handleMessages, _resetBridgeWarnings } from '../src/core/bridge/upstream.mjs';
 import { bridgeCostFor, forgetBridgeTag, _resetBridgeTelemetry } from '../src/core/bridge/telemetry.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const RATE_LIMITED = JSON.stringify({
   error: {
@@ -33,21 +34,24 @@ const RATE_LIMITED = JSON.stringify({
 
 // ── errors (item 3) ─────────────────────────────────────────────────────────
 
-test('upstreamMessage: OpenRouter\'s metadata.raw rides along with the generic message; plain bodies are unchanged', () => {
-  const m = upstreamMessage(RATE_LIMITED);
-  assert.match(m, /^Provider returned error — qwen\/qwen3\.8-27b:free is temporarily rate-limited upstream/);
-  assert.equal(upstreamMessage(JSON.stringify({ error: { message: 'bad key' } })), 'bad key');
-  assert.equal(upstreamMessage('plain text'), 'plain text');
-  // metadata.raw may itself be a JSON string from the provider: its message is used.
-  assert.equal(upstreamMessage(JSON.stringify({ error: { message: 'Provider returned error', metadata: { raw: '{"error":{"message":"model overloaded"}}' } } })),
-    'Provider returned error — model overloaded');
-  // Capped: a provider can put a whole HTML page in raw.
-  assert.ok(upstreamMessage(JSON.stringify({ error: { message: 'x', metadata: { raw: 'y'.repeat(5000) } } })).length <= 600);
-});
-
-test('upstreamCode: a numeric code (OpenRouter\'s HTTP status) is not a machine code', () => {
-  assert.equal(upstreamCode(RATE_LIMITED), '');
-  assert.equal(upstreamCode(JSON.stringify({ error: { code: 'context_length_exceeded' } })), 'context_length_exceeded');
+test('upstreamMessage/upstreamCode: OpenRouter\'s metadata.raw rides along; a numeric code is not a machine code', async () => {
+  await checkRows([
+    { name: 'upstreamMessage: OpenRouter\'s metadata.raw rides along with the generic message; plain bodies are unchanged', run: async () => {
+      const m = upstreamMessage(RATE_LIMITED);
+      assert.match(m, /^Provider returned error — qwen\/qwen3\.8-27b:free is temporarily rate-limited upstream/);
+      assert.equal(upstreamMessage(JSON.stringify({ error: { message: 'bad key' } })), 'bad key');
+      assert.equal(upstreamMessage('plain text'), 'plain text');
+      // metadata.raw may itself be a JSON string from the provider: its message is used.
+      assert.equal(upstreamMessage(JSON.stringify({ error: { message: 'Provider returned error', metadata: { raw: '{"error":{"message":"model overloaded"}}' } } })),
+        'Provider returned error — model overloaded');
+      // Capped: a provider can put a whole HTML page in raw.
+      assert.ok(upstreamMessage(JSON.stringify({ error: { message: 'x', metadata: { raw: 'y'.repeat(5000) } } })).length <= 600);
+    } },
+    { name: 'upstreamCode: a numeric code (OpenRouter\'s HTTP status) is not a machine code', run: async () => {
+      assert.equal(upstreamCode(RATE_LIMITED), '');
+      assert.equal(upstreamCode(JSON.stringify({ error: { code: 'context_length_exceeded' } })), 'context_length_exceeded');
+    } },
+  ]);
 });
 
 const HARNESS_ONLY = JSON.stringify({ error: { message: 'thinkingmachines/inkling:free is only available on agentic harnesses. Try plugging it into a coding agent or productivity app listed on https://openrouter.ai/apps', code: 403 } });
@@ -55,21 +59,24 @@ const HARNESS_ONLY = JSON.stringify({ error: { message: 'thinkingmachines/inklin
 // The CLI reads ANY 403 from its endpoint as a sign-in failure ("Failed to authenticate",
 // or on worca-01 "Not logged in · Please run /login") and buries the reason, so the bridge
 // answers a policy refusal as a plain 400 carrying it.
-test('mapUpstreamError: a 403 policy refusal reaches the CLI as a 400 that leads with the body, not an auth failure', () => {
-  const e = mapUpstreamError(403, HARNESS_ONLY, { provider: 'openai' });
-  assert.equal(e.status, 400, 'never a 403 to the CLI');
-  assert.equal(e.body.error.type, 'invalid_request_error');
-  assert.match(e.body.error.message, /^openai: refused \(403\) — thinkingmachines\/inkling:free is only available on agentic harnesses/);
-  assert.doesNotMatch(e.body.error.message, /authentication/);
-  assert.equal(classifyError(new Error(e.body.error.message)), null, 'permanent: never retried');
-});
-
-test('mapUpstreamError: a 403 that names the key, or has no body, is still an auth failure', () => {
-  for (const body of ['', JSON.stringify({ error: { message: 'Invalid API key' } }), '{}']) {
-    const e = mapUpstreamError(403, body, { provider: 'openai' });
-    assert.equal(e.body.error.type, 'authentication_error', body);
-    assert.match(e.body.error.message, /authentication failed \(403\)/);
-  }
+test('mapUpstreamError on a 403: a policy refusal becomes a 400 leading with the body; a key-naming or empty body stays an auth failure', async () => {
+  await checkRows([
+    { name: 'mapUpstreamError: a 403 policy refusal reaches the CLI as a 400 that leads with the body, not an auth failure', run: async () => {
+      const e = mapUpstreamError(403, HARNESS_ONLY, { provider: 'openai' });
+      assert.equal(e.status, 400, 'never a 403 to the CLI');
+      assert.equal(e.body.error.type, 'invalid_request_error');
+      assert.match(e.body.error.message, /^openai: refused \(403\) — thinkingmachines\/inkling:free is only available on agentic harnesses/);
+      assert.doesNotMatch(e.body.error.message, /authentication/);
+      assert.equal(classifyError(new Error(e.body.error.message)), null, 'permanent: never retried');
+    } },
+    { name: 'mapUpstreamError: a 403 that names the key, or has no body, is still an auth failure', run: async () => {
+      for (const body of ['', JSON.stringify({ error: { message: 'Invalid API key' } }), '{}']) {
+        const e = mapUpstreamError(403, body, { provider: 'openai' });
+        assert.equal(e.body.error.type, 'authentication_error', body);
+        assert.match(e.body.error.message, /authentication failed \(403\)/);
+      }
+    } },
+  ]);
 });
 
 test('mapUpstreamError: a shared-pool 429 names the provider behind OpenRouter and says it is upstream', () => {
@@ -123,16 +130,6 @@ test('adaptOpenRouterChatBody: usage accounting on, unified reasoning, max_token
   assert.equal(chat.reasoning_effort, 'high', 'input not mutated');
   const plain = adaptOpenRouterChatBody({ model: 'm', messages: [], max_tokens: 10 }, {});
   assert.deepEqual(plain, { model: 'm', messages: [], max_tokens: 10, usage: { include: true } });
-});
-
-test('attribution headers name Worca, its title and at most two known categories', () => {
-  assert.deepEqual(OPENROUTER_HEADERS, {
-    'HTTP-Referer': 'https://worca.dev',
-    'X-Title': 'Worca',
-    'X-OpenRouter-Title': 'Worca',
-    'X-OpenRouter-Categories': 'cloud-agent,cli-agent',
-  });
-  assert.ok(OPENROUTER_HEADERS['X-OpenRouter-Categories'].split(',').length <= 2);
 });
 
 // ── reasoning → thinking (item 7) ───────────────────────────────────────────

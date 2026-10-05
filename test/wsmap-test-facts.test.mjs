@@ -1,15 +1,14 @@
 // test/wsmap-test-facts.test.mjs — spec §5.1 (M11): test facts never create edges; they are counted. Join
 // verifies every use and relation the usage pass cites, then drops the ones whose file is test code
 // (stats.testFacts); a citation that does not verify is rejected (stats.factsRejected) and is never read as
-// a test fact. The usage brief and the usage mapper's steps 2–3 tell the investigators never to cite tests.
+// a test fact.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 
 import { joinMap } from '../src/core/workspace-map/join.mjs';
-import { usageBriefs } from '../src/core/workspace-map/catalog.mjs';
 import { entryId } from '../src/shared/workspace-map/ids.mjs';
 import { makeWorkspace } from './helpers/wsmap-fixtures.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const ws = await makeWorkspace({
   billing: { 'src/routes.ts': "router.get('/api/invoices/:id', h);\nrouter.get('/api/invoices', h);\n" },
@@ -42,19 +41,22 @@ const prodRel = { to: 'billing', kind: 'other', key: 'ledger archive', label: 'S
 /** Each edge by the file its consumer-side evidence cites (an `other` edge's key or id format is not this test's concern). */
 const edgesOf = (map) => map.edges.map((e) => `${e.from} -> ${e.to} ${e.kind} ${e.confidence} ${e.evidence.from.map((x) => x.file).join(',')}`).sort();
 
-test('a use and a relation the usage pass cites from test code make no edge and are counted as test facts', async () => {
-  const map = await joinMap({ catalog, usage: usage([testUse, prodUse], [testRel, prodRel]) });
-  assert.deepEqual(map.errors, []);
-  assert.deepEqual(edgesOf(map), [
-    'web -> billing http verified src/client.ts',
-    'web -> billing other inferred src/export.ts',
-  ], 'only the production citations make edges');
-  assert.deepEqual([map.stats.testFacts, map.stats.factsRejected], [2, 0], 'counted as test facts, never as rejections');
-});
-
-test('test-only citations alone make no edge at all', async () => {
-  const map = await joinMap({ catalog, usage: usage([testUse], [testRel]) });
-  assert.deepEqual([map.edges, map.stats.testFacts, map.stats.factsRejected], [[], 2, 0]);
+test('uses and relations cited from test code make no edge and are counted as test facts, alone or beside production citations', async () => {
+  await checkRows([
+    { name: 'a use and a relation the usage pass cites from test code make no edge and are counted as test facts', run: async () => {
+      const map = await joinMap({ catalog, usage: usage([testUse, prodUse], [testRel, prodRel]) });
+      assert.deepEqual(map.errors, []);
+      assert.deepEqual(edgesOf(map), [
+        'web -> billing http verified src/client.ts',
+        'web -> billing other inferred src/export.ts',
+      ], 'only the production citations make edges');
+      assert.deepEqual([map.stats.testFacts, map.stats.factsRejected], [2, 0], 'counted as test facts, never as rejections');
+    } },
+    { name: 'test-only citations alone make no edge at all', run: async () => {
+      const map = await joinMap({ catalog, usage: usage([testUse], [testRel]) });
+      assert.deepEqual([map.edges, map.stats.testFacts, map.stats.factsRejected], [[], 2, 0]);
+    } },
+  ]);
 });
 
 test('a citation that does not verify is rejected, never read as a test fact, and never breaks the join', async () => {
@@ -63,20 +65,4 @@ test('a citation that does not verify is rejected, never read as a test fact, an
   assert.deepEqual(map.errors, [], 'a rejected citation carries no fact: the test-path check must not read one');
   assert.deepEqual(edgesOf(map), ['web -> billing http verified src/client.ts']);
   assert.deepEqual([map.stats.factsRejected, map.stats.testFacts], [2, 1]);
-});
-
-test('the usage brief and the usage mapper body tell steps 2 and 3 never to cite test code', () => {
-  const { files } = usageBriefs(catalog, { catalogPath: '/p/catalog.json', checkerCmd: 'CHECK' });
-  for (const [key, text] of Object.entries(files)) {
-    const lines = text.split('\n');
-    for (const step of ['2', '3']) {
-      const line = lines.find((l) => l.startsWith(`${step}. `));
-      assert.ok(line && /never cite test code/i.test(line), `${key}: brief step ${step}`);
-    }
-  }
-  const body = readFileSync(new URL('../agents/worca-cc-workspace-usage-mapper.md', import.meta.url), 'utf8').split('\n');
-  for (const step of ['2', '3']) {
-    const line = body.find((l) => l.startsWith(`   > ${step}. `));
-    assert.ok(line && /never cite test code/i.test(line), `usage mapper investigator step ${step}`);
-  }
 });

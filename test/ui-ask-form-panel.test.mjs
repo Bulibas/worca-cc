@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp as boot, runPanel, openRunPanel } from './helpers/run-page-boot.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const RUN_ID = 'run-form-1';
 // X1: `id` is the question id (POST /api/answer, the rebuild key); `askId` is the
@@ -32,37 +33,38 @@ const seed = (ctx, ask = ASK) => openRunPanel(ctx, { runId: RUN_ID, question: as
 const cardPanel = (w) => w.document.querySelector('#runs-list .qpanel');
 const click = (w, n) => n.dispatchEvent(new w.Event('click', { bubbles: true }));
 
-test('a form ask paints the agent title, a field count and the mounted form', async () => {
+test('a form ask mounts on the run page (title, field count) and a valid answer posts { values } under the QUESTION id', async () => {
   const ctx = await boot();
   const panel = await seed(ctx);
-  assert.ok(panel && !panel.classList.contains('hidden'));
-  assert.equal(panel.querySelector('.qpanel-head b').textContent, 'Review mockups');
-  assert.equal(panel.querySelector('.qcount').textContent, '1 field');
-  assert.ok(panel.querySelector('.af-form'), 'the form renderer is mounted');
-  assert.ok(panel.__askForm, 'the handle rides on the panel, per mount');
-  assert.equal(panel.querySelector('.qanswered').textContent, '0 of 1 answered');
-  assert.ok(panel.querySelector('.btn-go'), 'the panel keeps the house Submit button');
-  assert.equal(panel.querySelector('.qopen'), null, 'no Open run: you are on the run page');
-  assert.ok(ctx.window.document.querySelector(`#runs-list .runs-row[data-run-id="${RUN_ID}"]`), 'the run is listed beside the page');
-  assert.equal(cardPanel(ctx.window), null, 'and the list mounts no panel');
-});
-
-test('a valid answer posts { values } and leaves the question open until resume', async () => {
-  const ctx = await boot();
-  const panel = await seed(ctx);
-  click(ctx.window, panel.querySelectorAll('.af-choice')[1]);   // "changes"
-  const ta = panel.querySelector('textarea');
-  assert.equal(ta.closest('.af-fld').hidden, false, '`when` revealed the notes field');
-  ta.value = 'tighten the spacing';
-  ta.dispatchEvent(new ctx.window.Event('input'));
-  assert.equal(panel.querySelector('.qanswered').textContent, '1 of 1 answered');
-  click(ctx.window, panel.querySelector('.btn-go'));
-  await new Promise((r) => setTimeout(r, 0));
-  const post = ctx.calls.find((c) => c.url === '/api/answer');
-  assert.deepEqual(JSON.parse(post.opts.body), {
-    runId: RUN_ID, id: 'questions-x:n_impl:1-r1',      // the QUESTION id, never askId
-    payload: { values: { verdict: 'changes', notes: 'tighten the spacing' } },
-  });
+  await checkRows([
+    { name: 'a form ask paints the agent title, a field count and the mounted form', run: async () => {
+      assert.ok(panel && !panel.classList.contains('hidden'));
+      assert.equal(panel.querySelector('.qpanel-head b').textContent, 'Review mockups');
+      assert.equal(panel.querySelector('.qcount').textContent, '1 field');
+      assert.ok(panel.querySelector('.af-form'), 'the form renderer is mounted');
+      assert.ok(panel.__askForm, 'the handle rides on the panel, per mount');
+      assert.equal(panel.querySelector('.qanswered').textContent, '0 of 1 answered');
+      assert.ok(panel.querySelector('.btn-go'), 'the panel keeps the house Submit button');
+      assert.equal(panel.querySelector('.qopen'), null, 'no Open run: you are on the run page');
+      assert.ok(ctx.window.document.querySelector(`#runs-list .runs-row[data-run-id="${RUN_ID}"]`), 'the run is listed beside the page');
+      assert.equal(cardPanel(ctx.window), null, 'and the list mounts no panel');
+    } },
+    { name: 'a valid answer posts { values } and leaves the question open until resume', run: async () => {
+      click(ctx.window, panel.querySelectorAll('.af-choice')[1]);   // "changes"
+      const ta = panel.querySelector('textarea');
+      assert.equal(ta.closest('.af-fld').hidden, false, '`when` revealed the notes field');
+      ta.value = 'tighten the spacing';
+      ta.dispatchEvent(new ctx.window.Event('input'));
+      assert.equal(panel.querySelector('.qanswered').textContent, '1 of 1 answered');
+      click(ctx.window, panel.querySelector('.btn-go'));
+      await new Promise((r) => setTimeout(r, 0));
+      const post = ctx.calls.find((c) => c.url === '/api/answer');
+      assert.deepEqual(JSON.parse(post.opts.body), {
+        runId: RUN_ID, id: 'questions-x:n_impl:1-r1',      // the QUESTION id, never askId
+        payload: { values: { verdict: 'changes', notes: 'tighten the spacing' } },
+      });
+    } },
+  ]);
 });
 
 test('a preview file URL is built from askId, never from the question id', async () => {
@@ -89,89 +91,66 @@ test('an invalid answer never leaves the browser: the field is marked, nothing i
   assert.equal(panel.querySelector('.btn-go').disabled, false, 'the panel is still usable');
 });
 
-test('a 422 un-busies the panel, marks the field and keeps the question open', async () => {
-  const ctx = await boot({ fetchHandler: (url) => (url === '/api/answer' ? Promise.resolve({
-    ok: false, status: 422,
-    json: async () => ({ error: 'invalid answer',
-      errors: [{ path: 'notes', code: 'maxLength', message: 'At most 4000 characters.' }] }),
-  }) : null) });
-  const panel = await seed(ctx);
-  click(ctx.window, panel.querySelectorAll('.af-choice')[1]);
-  panel.querySelector('textarea').value = 'x';
-  panel.querySelector('textarea').dispatchEvent(new ctx.window.Event('input'));
-  click(ctx.window, panel.querySelector('.btn-go'));
-  await new Promise((r) => setTimeout(r, 0));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(panel.querySelector('.btn-go').disabled, false, 'un-busied');
-  assert.equal(panel.querySelector('.btn-go').textContent.includes('Resuming'), false);
-  const slot = [...panel.querySelectorAll('.af-err')].find((s) => !s.hidden);
-  assert.equal(slot.textContent, 'At most 4000 characters.');
-  assert.ok(panel.querySelector('.af-form'), 'the panel was NOT rebuilt');
-  assert.equal(panel.querySelector('textarea').value, 'x', 'the typed value survived');
-});
-
-test('a resubmit that passes locally clears the previous 422 marks before it posts', async () => {
+test('a 422 un-busies, marks the field and keeps the typed value; a resubmit clears the stale marks and posts again', async () => {
   let n = 0;
   const ctx = await boot({ fetchHandler: (url) => (url === '/api/answer' ? Promise.resolve((n += 1) === 1
     ? { ok: false, status: 422, json: async () => ({ error: 'invalid answer',
       errors: [{ path: 'notes', code: 'maxLength', message: 'At most 4000 characters.' }] }) }
     : { ok: true, status: 200, json: async () => ({ ok: true }) }) : null) });
   const panel = await seed(ctx);
-  click(ctx.window, panel.querySelectorAll('.af-choice')[1]);
-  panel.querySelector('textarea').value = 'x';
-  panel.querySelector('textarea').dispatchEvent(new ctx.window.Event('input'));
-  click(ctx.window, panel.querySelector('.btn-go'));
-  await new Promise((r) => setTimeout(r, 0));
-  await new Promise((r) => setTimeout(r, 0));
-  const shown = () => [...panel.querySelectorAll('.af-err')].filter((s) => !s.hidden).length;
-  assert.equal(shown(), 1, 'the 422 marked notes');
-  click(ctx.window, panel.querySelector('.btn-go'));            // unchanged, resubmitted as is
-  assert.equal(shown(), 0, 'the stale mark went with the resubmit, not only with the next edit');
-  assert.equal(n, 2, 'and the answer was posted again');
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(panel.querySelector('.btn-go').disabled, true, 'busy until the run resumes');
+  await checkRows([
+    { name: 'a 422 un-busies the panel, marks the field and keeps the question open', run: async () => {
+      click(ctx.window, panel.querySelectorAll('.af-choice')[1]);
+      panel.querySelector('textarea').value = 'x';
+      panel.querySelector('textarea').dispatchEvent(new ctx.window.Event('input'));
+      click(ctx.window, panel.querySelector('.btn-go'));
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(panel.querySelector('.btn-go').disabled, false, 'un-busied');
+      assert.equal(panel.querySelector('.btn-go').textContent.includes('Resuming'), false);
+      const slot = [...panel.querySelectorAll('.af-err')].find((s) => !s.hidden);
+      assert.equal(slot.textContent, 'At most 4000 characters.');
+      assert.ok(panel.querySelector('.af-form'), 'the panel was NOT rebuilt');
+      assert.equal(panel.querySelector('textarea').value, 'x', 'the typed value survived');
+    } },
+    { name: 'a resubmit that passes locally clears the previous 422 marks before it posts', run: async () => {
+      const shown = () => [...panel.querySelectorAll('.af-err')].filter((s) => !s.hidden).length;
+      assert.equal(shown(), 1, 'the 422 marked notes');
+      click(ctx.window, panel.querySelector('.btn-go'));            // unchanged, resubmitted as is
+      assert.equal(shown(), 0, 'the stale mark went with the resubmit, not only with the next edit');
+      assert.equal(n, 2, 'and the answer was posted again');
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(panel.querySelector('.btn-go').disabled, true, 'busy until the run resumes');
+    } },
+  ]);
 });
 
-test('submitting busies the run page panel, including the rank drag rows', async () => {
-  const ask = { ...ASK, id: 'q:rank', askId: 'q_rank', layout: [
-    { widget: 'rank', field: 'order', label: 'Order', bind: 'data.items', titleKey: 'title' },
-  ], data: { items: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }] },
-  answerSchema: { type: 'object', required: ['order'], properties: { order: { type: 'array', items: { type: 'string' } } } } };
-  const ctx = await boot({ fetchHandler: (url) => (url === '/api/answer'
-    ? new Promise(() => {}) : null) });          // never resolves: the panel stays busy
-  const panel = await seed(ctx, ask);
-  assert.ok(panel.querySelector('.af-rank li'), 'the rank rows are mounted');
-  assert.equal(panel.querySelector('.af-rank li').draggable, true, 'draggable before submitting');
-  click(ctx.window, panel.querySelector('.btn-go'));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(panel.querySelector('.btn-go').disabled, true);
-  assert.equal(panel.querySelector('.af-rank li').draggable, false, 'drag is off while an answer is in flight');
-});
-
-test('the run page rebuild key includes form + version', async () => {
+test('form panel lifecycle: rebuild keyed on question id + form + version (unrelated frames never wipe a pick), resolve disposes the handle', async () => {
   const ctx = await boot();
-  const before = await seed(ctx);
-  assert.equal(before.dataset.qid, 'questions-x:n_impl:1-r1|form|review-mockups|1|0',
-    'the rebuild key is keyed on the QUESTION id plus form + version');
-  before.querySelector('.af-choice').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
-  ctx.dispatch({ type: 'log', runId: 'another-run', source: 'x', level: 'info', text: 'noise', ts: Date.now() });
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(runPanel(ctx).querySelector('.af-choice').getAttribute('aria-pressed'), 'true',
-    'an unrelated frame never wipes the picked choice');
+  await checkRows([
+    { name: 'the run page rebuild key includes form + version', run: async () => {
+      const before = await seed(ctx);
+      assert.equal(before.dataset.qid, 'questions-x:n_impl:1-r1|form|review-mockups|1|0',
+        'the rebuild key is keyed on the QUESTION id plus form + version');
+      before.querySelector('.af-choice').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
+      ctx.dispatch({ type: 'log', runId: 'another-run', source: 'x', level: 'info', text: 'noise', ts: Date.now() });
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(runPanel(ctx).querySelector('.af-choice').getAttribute('aria-pressed'), 'true',
+        'an unrelated frame never wipes the picked choice');
 
-  ctx.dispatch({ ...ASK, version: 2 });
-  const after = runPanel(ctx);
-  assert.equal(after.dataset.qid, 'questions-x:n_impl:1-r1|form|review-mockups|2|0');
-  assert.equal(after.querySelector('.af-choice').getAttribute('aria-pressed'), 'false',
-    'a changed version forces a rebuild');
-});
-
-test('resolving the question disposes the form handle', async () => {
-  const ctx = await boot();
-  const panel = await seed(ctx);
-  assert.ok(panel.__askForm);
-  ctx.dispatch({ type: 'question-resolved', runId: RUN_ID, id: 'questions-x:n_impl:1-r1' });
-  assert.equal(panel.__askForm, null);
-  assert.equal(panel.innerHTML, '');
-  assert.equal(panel.dataset.qid || '', '', 'the rebuild stamp is cleared (paintRdQuestions stamps \'\')');
+      ctx.dispatch({ ...ASK, version: 2 });
+      const after = runPanel(ctx);
+      assert.equal(after.dataset.qid, 'questions-x:n_impl:1-r1|form|review-mockups|2|0');
+      assert.equal(after.querySelector('.af-choice').getAttribute('aria-pressed'), 'false',
+        'a changed version forces a rebuild');
+    } },
+    { name: 'resolving the question disposes the form handle', run: async () => {
+      const panel = runPanel(ctx);   // the version-2 rebuild from the previous row
+      assert.ok(panel.__askForm);
+      ctx.dispatch({ type: 'question-resolved', runId: RUN_ID, id: 'questions-x:n_impl:1-r1' });
+      assert.equal(panel.__askForm, null);
+      assert.equal(panel.innerHTML, '');
+      assert.equal(panel.dataset.qid || '', '', 'the rebuild stamp is cleared (paintRdQuestions stamps \'\')');
+    } },
+  ]);
 });

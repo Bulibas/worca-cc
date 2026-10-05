@@ -10,6 +10,7 @@ import {
   setPipelineCostLimitUsd, setTotalCostLimitUsd, setCostLimitResetPeriod,
   COST_RESET_PERIODS, DEFAULT_COST_RESET_PERIOD, settingsFile,
 } from '../src/core/settings.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // settings sandbox: settingsFile() resolves under HOME, not WORCA_HOME.
 // WORCA_HOME (set by useTempHome / npm test) is deliberately left untouched
@@ -29,21 +30,32 @@ after(async () => {
   await rm(sandboxHome, { recursive: true, force: true });
 });
 
-test('unset limits read as null; period defaults to monthly', () => {
-  assert.equal(pipelineCostLimitUsd(), null);
-  assert.equal(totalCostLimitUsd(), null);
-  assert.equal(costLimitResetPeriod(), 'monthly');
-  assert.equal(DEFAULT_COST_RESET_PERIOD, 'monthly');
-  assert.deepEqual(COST_RESET_PERIODS, ['weekly', 'monthly']);
-});
-
-test('set/read roundtrip: fractional USD allowed; period enum', async () => {
-  assert.deepEqual(await setPipelineCostLimitUsd(2.5), { pipelineCostLimitUsd: 2.5 });
-  assert.deepEqual(await setTotalCostLimitUsd(100), { totalCostLimitUsd: 100 });
-  assert.deepEqual(await setCostLimitResetPeriod('weekly'), { costLimitResetPeriod: 'weekly' });
-  assert.equal(pipelineCostLimitUsd(), 2.5);
-  assert.equal(totalCostLimitUsd(), 100);
-  assert.equal(costLimitResetPeriod(), 'weekly');
+test('cost limit settings lifecycle: unset → null/monthly, set/read round-trip, empty clears', async () => {
+  await checkRows([
+    { name: 'unset limits read as null; period defaults to monthly', run: () => {
+      assert.equal(pipelineCostLimitUsd(), null);
+      assert.equal(totalCostLimitUsd(), null);
+      assert.equal(costLimitResetPeriod(), 'monthly');
+      assert.equal(DEFAULT_COST_RESET_PERIOD, 'monthly');
+      assert.deepEqual(COST_RESET_PERIODS, ['weekly', 'monthly']);
+    } },
+    { name: 'set/read roundtrip: fractional USD allowed; period enum', run: async () => {
+      assert.deepEqual(await setPipelineCostLimitUsd(2.5), { pipelineCostLimitUsd: 2.5 });
+      assert.deepEqual(await setTotalCostLimitUsd(100), { totalCostLimitUsd: 100 });
+      assert.deepEqual(await setCostLimitResetPeriod('weekly'), { costLimitResetPeriod: 'weekly' });
+      assert.equal(pipelineCostLimitUsd(), 2.5);
+      assert.equal(totalCostLimitUsd(), 100);
+      assert.equal(costLimitResetPeriod(), 'weekly');
+    } },
+    { name: 'empty input clears the key (back to unlimited / default)', run: async () => {
+      await setTotalCostLimitUsd(9);
+      assert.deepEqual(await setTotalCostLimitUsd(''), { totalCostLimitUsd: null });
+      assert.equal(totalCostLimitUsd(), null);
+      await setCostLimitResetPeriod('weekly');
+      await setCostLimitResetPeriod('');
+      assert.equal(costLimitResetPeriod(), 'monthly');
+    } },
+  ]);
 });
 
 test('setters throw on invalid input; readers never throw', async () => {
@@ -52,15 +64,6 @@ test('setters throw on invalid input; readers never throw', async () => {
   await assert.rejects(() => setPipelineCostLimitUsd('5'), /positive number/);
   await assert.rejects(() => setPipelineCostLimitUsd(NaN), /positive number/);
   await assert.rejects(() => setCostLimitResetPeriod('daily'), /weekly \| monthly/);
-});
-
-test('empty input clears the key (back to unlimited / default)', async () => {
-  await setTotalCostLimitUsd(9);
-  assert.deepEqual(await setTotalCostLimitUsd(''), { totalCostLimitUsd: null });
-  assert.equal(totalCostLimitUsd(), null);
-  await setCostLimitResetPeriod('weekly');
-  await setCostLimitResetPeriod('');
-  assert.equal(costLimitResetPeriod(), 'monthly');
 });
 
 test('corrupt stored values fall back loudly (null / default), never throw', () => {

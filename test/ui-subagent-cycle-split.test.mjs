@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -48,31 +49,33 @@ test('subsByNodeCycleArrays splits a node\'s subs by cycle', async () => {
   assert.deepEqual(keys.map((k) => g[k].length).sort(), [1, 2], 'two subs in cycle 1, one in cycle 2');
 });
 
-test('cycleAwareLabel adds "· cycle N" only for multi-cycle nodes', async () => {
+test('cycleAwareLabel adds "· cycle N" only for multi-cycle nodes and falls back to uiPhase when the stepper lacks the nodeId', async () => {
   const { window } = await boot();
-  const subs = [
-    { id: 'p', nodeId: 's0_0', uiPhase: 'plan', cycle: 1, status: 'finished' },
-    { id: 'r0', nodeId: 's1_0', uiPhase: 'refine', cycle: 1, status: 'finished' },
-    { id: 'r1', nodeId: 's1_0', uiPhase: 'refine', cycle: 2, status: 'running' },
-  ];
-  const label = window.__np.cycleAwareLabel(STEPPER, subs);
-  assert.equal(label(`s0_0${SEP}1`), 'Plan', 'single-cycle node → no suffix');
-  assert.equal(label(`s1_0${SEP}1`), 'Refine Plan · cycle 1');
-  assert.equal(label(`s1_0${SEP}2`), 'Refine Plan · cycle 2');
-});
-
-test('cycleAwareLabel falls back to uiPhase when the stepper lacks the nodeId', async () => {
-  const { window } = await boot();
-  const subs = [{ id: 'x', nodeId: 's1_0', uiPhase: 'refine', cycle: 1, status: 'running' }];
-  // A FROZEN v1 manifest (the only kind that still carries uiPhase). There is no
-  // built-in legacy default any more: manifestFor(null) is an EMPTY manifest.
-  const v1 = { version: 1, feedbacks: [], steps: [
-    { kind: 'agents', nodes: [{ id: 'refine', uiPhase: 'refine', label: 'Refine' }] },
-  ] };
-  const label = window.__np.cycleAwareLabel(v1, subs);
-  assert.equal(label(`s1_0${SEP}1`), 'Refine', 'resolved via uiPhase against the frozen manifest');
-  assert.equal(window.__np.cycleAwareLabel(null, subs)(`s1_0${SEP}1`), 's1_0',
-    'with no manifest at all there is nothing to resolve against');
+  await checkRows([
+    { name: 'cycleAwareLabel adds "· cycle N" only for multi-cycle nodes', run: async () => {
+      const subs = [
+        { id: 'p', nodeId: 's0_0', uiPhase: 'plan', cycle: 1, status: 'finished' },
+        { id: 'r0', nodeId: 's1_0', uiPhase: 'refine', cycle: 1, status: 'finished' },
+        { id: 'r1', nodeId: 's1_0', uiPhase: 'refine', cycle: 2, status: 'running' },
+      ];
+      const label = window.__np.cycleAwareLabel(STEPPER, subs);
+      assert.equal(label(`s0_0${SEP}1`), 'Plan', 'single-cycle node → no suffix');
+      assert.equal(label(`s1_0${SEP}1`), 'Refine Plan · cycle 1');
+      assert.equal(label(`s1_0${SEP}2`), 'Refine Plan · cycle 2');
+    } },
+    { name: 'cycleAwareLabel falls back to uiPhase when the stepper lacks the nodeId', run: async () => {
+      const subs = [{ id: 'x', nodeId: 's1_0', uiPhase: 'refine', cycle: 1, status: 'running' }];
+      // A FROZEN v1 manifest (the only kind that still carries uiPhase). There is no
+      // built-in legacy default any more: manifestFor(null) is an EMPTY manifest.
+      const v1 = { version: 1, feedbacks: [], steps: [
+        { kind: 'agents', nodes: [{ id: 'refine', uiPhase: 'refine', label: 'Refine' }] },
+      ] };
+      const label = window.__np.cycleAwareLabel(v1, subs);
+      assert.equal(label(`s1_0${SEP}1`), 'Refine', 'resolved via uiPhase against the frozen manifest');
+      assert.equal(window.__np.cycleAwareLabel(null, subs)(`s1_0${SEP}1`), 's1_0',
+        'with no manifest at all there is nothing to resolve against');
+    } },
+  ]);
 });
 
 

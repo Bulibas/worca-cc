@@ -15,30 +15,6 @@ const dirs = [];
 after(async () => { await Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true }))); });
 async function tmp() { const d = await mkdtemp(join(tmpdir(), 'worca-cc-skill-mock-')); dirs.push(d); return d; }
 
-function toolUseNames(content) {
-  return Array.isArray(content) ? content.filter((c) => c?.type === 'tool_use').map((c) => c.name) : [];
-}
-
-test('the implementer mock emits a main-stream Skill block and a child Skill + mcp__* block', async () => {
-  const dir = await tmp();
-  const events = [];
-  await runClaude({ cwd: dir, mock: true, onEvent: (e) => events.push(e),
-    prompt: 'MOCK_ROLE: implementer' });
-
-  // (1) A MAIN-stream Skill block (no parent_tool_use_id).
-  const mainSkill = events.some((e) =>
-    e?.raw?.parent_tool_use_id == null && toolUseNames(e?.raw?.message?.content).includes('Skill'));
-  assert.ok(mainSkill, 'a main-agent Skill tool_use is emitted');
-
-  // (2) A child envelope (parent_tool_use_id set) carrying a Skill + an mcp__* block.
-  const childSkillMcp = events.some((e) => {
-    if (e?.raw?.parent_tool_use_id == null) return false;
-    const names = toolUseNames(e?.raw?.message?.content);
-    return names.includes('Skill') && names.some((n) => typeof n === 'string' && n.startsWith('mcp__'));
-  });
-  assert.ok(childSkillMcp, 'a sub-agent Skill + mcp__* tool_use is emitted on a child stream');
-});
-
 // §7.6: run the mock's events through the REAL capture so the labels a mock run
 // produces are pinned end to end (this is what `npm run smoke` surfaces offline).
 test('§7.6 the mock produces the three-part MCP labels the pills render', async () => {

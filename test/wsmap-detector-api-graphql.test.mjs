@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeWorkspace, runDetector, keysOf, assertEvidence } from './helpers/wsmap-fixtures.mjs';
 import detector from '../src/core/workspace-map/detectors/api-graphql.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const SDL = `"""
 type Query { fake: Int }   <- inside a description, not a type
@@ -65,11 +66,26 @@ test('api-graphql SDL (CRLF): root fields provided; args, directives, descriptio
   assertEvidence(member('billing'), r);
 });
 
-test('api-graphql operations: root fields consumed per operation kind; aliases resolved; fragments are not roots', async () => {
+test('api-graphql (web member): operations, `type` field, braces in defaults, minified skip, test files, unterminated template', async () => {
   const r = await runDetector(detector, member('web'), ws.members);
-  const doc = r.facts.filter((f) => f.file === 'src/queries.graphql');
-  assert.deepEqual(doc.map((f) => [f.key, f.detail, f.line]), [['Query.invoice', 'query GetInvoice', 2], ['Mutation.payInvoice', 'mutation Pay', 8]]);
-  assertEvidence(member('web'), r);
+  await checkRows([
+    { name: 'api-graphql operations: root fields consumed per operation kind; aliases resolved; fragments are not roots', run: () => {
+      const doc = r.facts.filter((f) => f.file === 'src/queries.graphql');
+      assert.deepEqual(doc.map((f) => [f.key, f.detail, f.line]), [['Query.invoice', 'query GetInvoice', 2], ['Mutation.payInvoice', 'mutation Pay', 8]]);
+      assertEvidence(member('web'), r);
+    } },
+    { name: 'api-graphql: a selected field named `type` is no SDL; variable defaults and directive arguments may hold braces; a minified bundle is skipped', run: () => {
+      const at = (file) => r.facts.filter((f) => f.file === file).map((f) => [f.key, f.detail, f.line]);
+      assert.deepEqual(at('src/payments.graphql'), [['Query.payments', 'query Payments', 2]]);
+      assert.deepEqual(at('src/events.ts'), [['Query.events', 'query', 1]]);
+      assert.deepEqual(at('src/orders.graphql'), [['Query.orders', 'query Orders', 2], ['Query.carts', 'query Cached', 6]]);
+      assert.deepEqual(at('public/app.js'), [], 'a JS file whose first 4 KiB holds a line over 1 000 chars is a bundle');
+    } },
+    { name: 'api-graphql: test files still emit (marked test); an unterminated template never throws', run: () => {
+      assert.equal(r.facts.find((f) => f.file === 'src/__tests__/q.test.ts').test, true);
+      assert.deepEqual(detector.detect({ rel: 'a.ts', text: 'const q = gql`query { a ' }, {}), { facts: [] });
+    } },
+  ]);
 });
 
 test('api-graphql code templates: gql`…` and graphql(`…`) operations consume; typeDefs SDL provides; Python gql("""…""")', async () => {
@@ -79,19 +95,4 @@ test('api-graphql code templates: gql`…` and graphql(`…`) operations consume
   assert.deepEqual(keysOf(orders, 'graphql', 'provides'), ['Query.orders']);
   assert.deepEqual(keysOf(orders, 'graphql', 'consumes'), ['Subscription.invoicePaid']);
   assertEvidence(member('orders'), orders);
-});
-
-test('api-graphql: a selected field named `type` is no SDL; variable defaults and directive arguments may hold braces; a minified bundle is skipped', async () => {
-  const r = await runDetector(detector, member('web'), ws.members);
-  const at = (file) => r.facts.filter((f) => f.file === file).map((f) => [f.key, f.detail, f.line]);
-  assert.deepEqual(at('src/payments.graphql'), [['Query.payments', 'query Payments', 2]]);
-  assert.deepEqual(at('src/events.ts'), [['Query.events', 'query', 1]]);
-  assert.deepEqual(at('src/orders.graphql'), [['Query.orders', 'query Orders', 2], ['Query.carts', 'query Cached', 6]]);
-  assert.deepEqual(at('public/app.js'), [], 'a JS file whose first 4 KiB holds a line over 1 000 chars is a bundle');
-});
-
-test('api-graphql: test files still emit (marked test); an unterminated template never throws', async () => {
-  const r = await runDetector(detector, member('web'), ws.members);
-  assert.equal(r.facts.find((f) => f.file === 'src/__tests__/q.test.ts').test, true);
-  assert.deepEqual(detector.detect({ rel: 'a.ts', text: 'const q = gql`query { a ' }, {}), { facts: [] });
 });

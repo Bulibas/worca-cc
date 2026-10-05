@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { planExport, applyExport } from '../src/core/workflow-export.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { writeKeyGraph } from './helpers/export-fixtures.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -34,14 +35,28 @@ test('re-export of an unchanged workflow is an all-no-op (guards the stamp round
   assert.equal('sha256:' + createHash('sha256').update(stripped, 'utf8').digest('hex'), stampHash);
 });
 
-test('a hand-written (unstamped) target is a conflict, not overwritten by default', async () => {
+// REGRESSION GUARD: 'cancel' is a whole-export abort, never a per-file choice, so it must NOT be
+// offered as a per-conflict option (a per-file radio would misrepresent its semantics). 'keep' and
+// 'overwrite' are always offered; 'namespace' only for a namespaceable target.
+test("an unstamped SKILL.md is a conflict (unmanaged file) offering keep + overwrite, never 'cancel'", async () => {
   const dest = await tmp();
   await mkdir(join(dest, '.claude/skills/default'), { recursive: true });
   await writeFile(join(dest, '.claude/skills/default/SKILL.md'), '---\nname: default\n---\nforeign\n', 'utf8');
   const plan = await planExport({ workflowId: 'wf_default', destination: 'project', projectDir: dest });
-  const skillConflict = plan.conflicts.find((c) => c.path.endsWith(join('skills', 'default', 'SKILL.md')));
-  assert.ok(skillConflict, 'unstamped SKILL.md must be a conflict');
-  assert.match(skillConflict.reason, /unmanaged file/);
+  await checkRows([
+    { name: 'a hand-written (unstamped) target is a conflict, not overwritten by default', run: () => {
+      const skillConflict = plan.conflicts.find((c) => c.path.endsWith(join('skills', 'default', 'SKILL.md')));
+      assert.ok(skillConflict, 'unstamped SKILL.md must be a conflict');
+      assert.match(skillConflict.reason, /unmanaged file/);
+    } },
+    { name: "classify never offers 'cancel' as a per-conflict option", run: () => {
+      assert.ok(plan.conflicts.length > 0, 'the unstamped SKILL.md is a conflict');
+      for (const cf of plan.conflicts) {
+        assert.equal(cf.options.includes('cancel'), false, `'cancel' must not be a per-conflict option for ${cf.path}`);
+        assert.ok(cf.options.includes('keep') && cf.options.includes('overwrite'), 'keep + overwrite always offered');
+      }
+    } },
+  ]);
 });
 
 test('dry-run/Plan writes nothing', async () => {
@@ -277,19 +292,4 @@ test("a 'keep'-resolved conflict is not reported as outstanding (no apply loop)"
   assert.ok(res.skipped.includes(plannerPath), 'kept file is skipped (not written)');
   assert.equal(res.written.includes(plannerPath), false);
   assert.match(await readFile(plannerPath, 'utf8'), /LOCAL EDIT/, 'kept file left exactly as the user had it');
-});
-
-// REGRESSION GUARD: 'cancel' is a whole-export abort, never a per-file choice, so it must NOT be
-// offered as a per-conflict option (a per-file radio would misrepresent its semantics). 'keep' and
-// 'overwrite' are always offered; 'namespace' only for a namespaceable target.
-test("classify never offers 'cancel' as a per-conflict option", async () => {
-  const dest = await tmp();
-  await mkdir(join(dest, '.claude/skills/default'), { recursive: true });
-  await writeFile(join(dest, '.claude/skills/default/SKILL.md'), '---\nname: default\n---\nforeign\n', 'utf8');
-  const plan = await planExport({ workflowId: 'wf_default', destination: 'project', projectDir: dest });
-  assert.ok(plan.conflicts.length > 0, 'the unstamped SKILL.md is a conflict');
-  for (const cf of plan.conflicts) {
-    assert.equal(cf.options.includes('cancel'), false, `'cancel' must not be a per-conflict option for ${cf.path}`);
-    assert.ok(cf.options.includes('keep') && cf.options.includes('overwrite'), 'keep + overwrite always offered');
-  }
 });

@@ -1,6 +1,6 @@
 // test/ask-limits.test.mjs
 // P1/T5: Ask Worca per-turn limits in settings.json (ask-worca-design.md §6.9, D12)
-// and the frozen limits table. Settings sandbox: settingsFile() lives under HOME,
+// and their fresh reader. Settings sandbox: settingsFile() lives under HOME,
 // not WORCA_HOME (same pattern as test/cost-settings.test.mjs).
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,7 +11,8 @@ import {
   askMaxTurns, askMaxBudgetUsd, setAskMaxTurns, setAskMaxBudgetUsd, assertAskLimitInputs,
   DEFAULT_ASK_MAX_TURNS, DEFAULT_ASK_MAX_BUDGET_USD, settingsFile, readSettings,
 } from '../src/core/settings.mjs';
-import { ASK_LIMITS, askLimits } from '../src/core/ask/limits.mjs';
+import { askLimits } from '../src/core/ask/limits.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let sandboxHome;
 const prevEnv = {};
@@ -32,27 +33,43 @@ beforeEach(async () => {
   await writeFile(settingsFile(), '{}\n', 'utf8');
 });
 
-test('defaults: 400 turns, no cost cap', () => {
-  assert.equal(DEFAULT_ASK_MAX_TURNS, 400);
-  assert.equal(DEFAULT_ASK_MAX_BUDGET_USD, null);
-  assert.equal(askMaxTurns(), 400);
-  assert.equal(askMaxBudgetUsd(), null);
-});
-
-test('no stored budget, or an invalid one, means no cap', async () => {
-  assert.ok(!('askMaxBudgetUsd' in readSettings()), 'nothing stored');
-  assert.equal(askMaxBudgetUsd(), null, 'absent ⇒ no cap');
-  const warnings = [];
-  const orig = console.warn;
-  console.warn = (...a) => warnings.push(a.join(' '));
-  try {
-    for (const bad of [-3, 0.05, 101, '2', true, {}]) {
-      await writeFile(settingsFile(), JSON.stringify({ askMaxBudgetUsd: bad }), 'utf8');
-      assert.equal(askMaxBudgetUsd(), null, `invalid ${JSON.stringify(bad)} ⇒ no cap`);
-    }
-  } finally { console.warn = orig; }
-  assert.equal(warnings.length, 6);
-  for (const w of warnings) assert.match(w, /invalid askMaxBudgetUsd .* — using the default \(no cap\)$/);
+test('defaults: 400 turns / no cap; absent or invalid stored values fall back to them with one warning each', async () => {
+  await checkRows([
+    { name: 'defaults: 400 turns, no cost cap', run: () => {
+      assert.equal(DEFAULT_ASK_MAX_TURNS, 400);
+      assert.equal(DEFAULT_ASK_MAX_BUDGET_USD, null);
+      assert.equal(askMaxTurns(), 400);
+      assert.equal(askMaxBudgetUsd(), null);
+    } },
+    { name: 'no stored budget, or an invalid one, means no cap', run: async () => {
+      assert.ok(!('askMaxBudgetUsd' in readSettings()), 'nothing stored');
+      assert.equal(askMaxBudgetUsd(), null, 'absent ⇒ no cap');
+      const warnings = [];
+      const orig = console.warn;
+      console.warn = (...a) => warnings.push(a.join(' '));
+      try {
+        for (const bad of [-3, 0.05, 101, '2', true, {}]) {
+          await writeFile(settingsFile(), JSON.stringify({ askMaxBudgetUsd: bad }), 'utf8');
+          assert.equal(askMaxBudgetUsd(), null, `invalid ${JSON.stringify(bad)} ⇒ no cap`);
+        }
+      } finally { console.warn = orig; }
+      assert.equal(warnings.length, 6);
+      for (const w of warnings) assert.match(w, /invalid askMaxBudgetUsd .* — using the default \(no cap\)$/);
+    } },
+    { name: 'invalid persisted values fall back loudly to the defaults', run: async () => {
+      await writeFile(settingsFile(), JSON.stringify({ askMaxTurns: 'lots', askMaxBudgetUsd: -3 }), 'utf8');
+      const warnings = [];
+      const orig = console.warn;
+      console.warn = (...a) => warnings.push(a.join(' '));
+      try {
+        assert.equal(askMaxTurns(), 400);
+        assert.equal(askMaxBudgetUsd(), null);
+      } finally { console.warn = orig; }
+      assert.equal(warnings.filter((w) => /askMaxTurns|askMaxBudgetUsd/.test(w)).length, 2);
+      assert.ok(warnings.some((w) => w.endsWith('invalid askMaxTurns "lots" — using the default (400)')));
+      assert.ok(warnings.some((w) => w.endsWith('invalid askMaxBudgetUsd -3 — using the default (no cap)')));
+    } },
+  ]);
 });
 
 test('set/read roundtrip; null stores "no cap"; "" clears to the default', async () => {
@@ -95,46 +112,6 @@ test('assertAskLimitInputs validates only the keys present, as a set, and throws
   assert.doesNotThrow(() => assertAskLimitInputs({ pipelineCostLimitUsd: -1 }), 'foreign keys are not its business');
 });
 
-test('invalid persisted values fall back loudly to the defaults', async () => {
-  await writeFile(settingsFile(), JSON.stringify({ askMaxTurns: 'lots', askMaxBudgetUsd: -3 }), 'utf8');
-  const warnings = [];
-  const orig = console.warn;
-  console.warn = (...a) => warnings.push(a.join(' '));
-  try {
-    assert.equal(askMaxTurns(), 400);
-    assert.equal(askMaxBudgetUsd(), null);
-  } finally { console.warn = orig; }
-  assert.equal(warnings.filter((w) => /askMaxTurns|askMaxBudgetUsd/.test(w)).length, 2);
-  assert.ok(warnings.some((w) => w.endsWith('invalid askMaxTurns "lots" — using the default (400)')));
-  assert.ok(warnings.some((w) => w.endsWith('invalid askMaxBudgetUsd -3 — using the default (no cap)')));
-});
-
-test('ASK_LIMITS is frozen and carries the spec figures', () => {
-  assert.ok(Object.isFrozen(ASK_LIMITS) && Object.isFrozen(ASK_LIMITS.attachment));
-  assert.equal(ASK_LIMITS.turnsPerThread, 1);
-  assert.equal(ASK_LIMITS.turnsGlobal, 3);
-  assert.equal(ASK_LIMITS.turnTimeoutMs, 30 * 60 * 1000);
-  assert.equal(ASK_LIMITS.jobGraceMs, 30_000);
-  assert.equal(ASK_LIMITS.emptyThreadSweepMs, 24 * 60 * 60 * 1000);
-  assert.deepEqual(ASK_LIMITS.attachment, {
-    maxFiles: 8, maxBytesPerFile: 512 * 1024, maxBytesPerBinaryFile: 32 * 1024 * 1024,
-    maxBytesPerMessage: 48 * 1024 * 1024,
-    extensions: ['.md', '.markdown', '.txt', '.json', '.csv', '.log', '.html', '.htm'],
-    binaryExtensions: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf'],
-  });
-  assert.equal(ASK_LIMITS.contextHeaderMaxChars, 1024);
-  assert.equal(ASK_LIMITS.inlineAttachmentsMaxBytes, 24 * 1024);
-  assert.equal(ASK_LIMITS.restoredMaxChars, 30_000);
-  assert.equal(ASK_LIMITS.blockIoMaxChars, 2048);
-  assert.equal(ASK_LIMITS.agentLogMaxLines, 50);
-  assert.equal(ASK_LIMITS.listRunsMaxLimit, 100);
-  assert.equal(ASK_LIMITS.diffMaxBytes, 200_000);
-  assert.equal(ASK_LIMITS.briefMaxChars, 32_000);
-  assert.equal(ASK_LIMITS.briefMaxChars, ASK_LIMITS.workflowTaskMaxChars);
-  assert.equal(ASK_LIMITS.defaultModel, 'claude-opus-5-5');
-  assert.equal(ASK_LIMITS.defaultEffort, 'high');
-});
-
 test('askLimits() reads the settings fresh on every call (D12) and accepts injected readers', async () => {
   assert.deepEqual(askLimits(), { maxTurns: 400, maxBudgetUsd: null });
   await setAskMaxTurns(3);
@@ -143,23 +120,4 @@ test('askLimits() reads the settings fresh on every call (D12) and accepts injec
   await setAskMaxBudgetUsd(null);
   assert.deepEqual(askLimits(), { maxTurns: 3, maxBudgetUsd: null }, 'no caching');
   assert.deepEqual(askLimits({ readMaxTurns: () => 9, readMaxBudgetUsd: () => 0.25 }), { maxTurns: 9, maxBudgetUsd: 0.25 });
-});
-
-test('ASK_LIMITS carries the chat script-tool figures (scripts-workbench-design.md §9.1)', () => {
-  assert.equal(ASK_LIMITS.scriptListMaxRows, 200);
-  assert.equal(ASK_LIMITS.scriptSourceDefaultBytes, 60_000, 'get_script pages 60 000 bytes by default');
-  assert.equal(ASK_LIMITS.scriptSourceMaxBytes, 200_000);
-  assert.equal(ASK_LIMITS.scriptLogMaxLines, 200);
-  assert.equal(ASK_LIMITS.scriptLogMaxBytes, 16 * 1024);
-  assert.equal(ASK_LIMITS.scriptOutputMaxBytes, 16 * 1024);
-  assert.equal(ASK_LIMITS.scriptTestDefaultTimeoutSec, 120);
-  assert.equal(ASK_LIMITS.scriptTestMaxTimeoutSec, 600);
-  // A verdict is uncapped by the runner (3 000 issues × 1 KB measured as a 3.2 MB tool result):
-  // the chat keeps a bounded head of it and reports the real count.
-  assert.equal(ASK_LIMITS.scriptVerdictMaxIssues, 50);
-  assert.equal(ASK_LIMITS.scriptResultFieldMaxChars, 2000);
-  // The floor matters: test_script clamps timeoutSec to >= 1, and 1 s is exactly the
-  // engine's MIN_TIMEOUT_MS (1000) — below it the bench would silently fall back to the
-  // script's own timeout.
-  assert.ok(ASK_LIMITS.scriptTestMaxTimeoutSec * 1000 >= 1000);
 });

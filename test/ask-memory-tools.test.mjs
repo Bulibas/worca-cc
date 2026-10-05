@@ -1,8 +1,9 @@
 // test/ask-memory-tools.test.mjs — the four memory tools over fake deps (scope matrix, modes, errors),
-// the real bundle on a temp home, and the read-only source scans (agent-memory-design.md §9.1, B3, B24).
+// the real bundle on a temp home (agent-memory-design.md §9.1, B3, B24). The read-only source scans are
+// rows of ask-tools' write-free guard.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createAskTools } from '../src/core/ask/tools.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
@@ -14,6 +15,7 @@ import { gitDir } from './helpers/git-dir.mjs';
 import { memoryRoot, GLOBAL_SCOPE, projectScope, readMemory, listSnapshots, MemoryError } from '../src/core/memory-store.mjs';
 import { addProject, worcaHome } from '../src/core/projects.mjs';
 import { createThread, updateThread } from '../src/core/ask/store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -43,21 +45,6 @@ function fakeTools({ pin = { projectKey: 'demo-00000001' }, context = null, stor
   });
   return { tools, calls, store };
 }
-
-test('list(): the four memory tools come right before the schedule tools, with JSON-Schema inputs and no forbidden words', () => {
-  const { tools } = fakeTools();
-  const names = tools.list().map((d) => d.name);
-  const at = names.indexOf('list_memory');
-  assert.deepEqual(names.slice(at, at + 4), ['list_memory', 'read_memory', 'remember', 'forget']);
-  assert.equal(names[at + 4], 'list_schedules', 'the scheduled-runs tools follow memory');
-  for (const d of tools.list().slice(at, at + 4)) {
-    assert.ok(d.description.length > 20 && d.inputSchema.type === 'object' && d.inputSchema.additionalProperties === false, d.name);
-  }
-  assert.deepEqual(tools.list().find((d) => d.name === 'remember').inputSchema.required, ['scope', 'name', 'body']);
-  assert.deepEqual(tools.list().find((d) => d.name === 'forget').inputSchema.required, ['scope', 'name']);
-  assert.deepEqual(tools.list().find((d) => d.name === 'read_memory').inputSchema.required, ['scope', 'name']);
-  assert.equal(tools.list().find((d) => d.name === 'list_memory').inputSchema.required, undefined);
-});
 
 test('scope resolution: explicit projectKey → pinned project → page project → a pointed error; every key goes through the registry; a pinned workspace is not a project', async () => {
   const explicit = fakeTools({ pin: null });
@@ -140,66 +127,54 @@ test('list_memory / read_memory / forget over the fake store: B24 shapes, every 
   await assert.rejects(() => tools.call('forget', { scope: 'project', name: 'conv' }), /forget: no memory file "conv" in project/);
 });
 
-test('the REAL bundle on a temp home: remember writes through the store with an ask: source and a snapshot; forget removes; the mount refreshes by scope', async () => {
-  const p = (await addProject({ name: 'realmem', path: process.cwd() })).find((x) => x.name === 'realmem');
-  const threadId = 'ask_0000abcd';
-  const tools = createAskTools({ ...defaultToolDeps({ threadId }), ...defaultMemoryDeps({ threadId }) });
-  assert.equal(await refreshAskMemoryMount({}), null, 'B33: an empty store mounts NOTHING (the spawn stays byte-identical)');
-  const r = await tools.call('remember', { scope: 'project', projectKey: p.key, name: 'conventions', body: 'kebab-case files.\n', description: 'Naming rules' });
-  assert.equal(r.created, true);
-  const f = await readMemory(memoryRoot(), projectScope(p.key), 'conventions');
-  assert.equal(f.meta.source, `ask:${threadId}`);
-  assert.equal(f.meta.description, 'Naming rules');
-  await tools.call('remember', { scope: 'project', projectKey: p.key, name: 'conventions', body: 'And tests next to sources.', mode: 'append' });
-  const f2 = await readMemory(memoryRoot(), projectScope(p.key), 'conventions');
-  assert.equal(f2.body, 'kebab-case files.\n\nAnd tests next to sources.\n');
-  assert.equal(f2.meta.description, 'Naming rules', 'kept across an append that named no description');
-  assert.ok((await listSnapshots(memoryRoot(), projectScope(p.key))).length >= 1, 'every store write snapshots');
-  await tools.call('remember', { scope: 'global', name: 'style', body: 'Terse commits.\n' });
-  const mount = await refreshAskMemoryMount({ projectKey: p.key, projectName: 'realmem' });
-  assert.equal(mount, join(worcaHome(), 'ask', 'memory', p.key));
-  assert.equal(existsSync(join(mount, '.claude', 'rules', 'worca', 'global', 'style.md')), true);
-  assert.equal(existsSync(join(mount, '.claude', 'rules', 'worca', 'project', 'conventions.md')), true);
-  const globalOnly = await refreshAskMemoryMount({});
-  assert.equal(globalOnly, join(worcaHome(), 'ask', 'memory', 'global'));
-  assert.equal(existsSync(join(globalOnly, '.claude', 'rules', 'worca', 'project')), false, 'no project ⇒ global only');
-  await assert.rejects(() => refreshAskMemoryMount({ projectKey: 'not a key' }), /invalid projectKey/,
-    'a key that is not a registry key never reaches mkdir — and the guard REJECTS (async), so a .catch() caller sees it too');
-  assert.deepEqual(await tools.call('forget', { scope: 'global', name: 'style' }), { scope: 'global', projectKey: null, scopeKey: 'global', name: 'style', removed: true });
-  assert.equal(await readMemory(memoryRoot(), GLOBAL_SCOPE, 'style'), null);
-});
-
-test('the REAL bundle follows the PAGE project through the thread context: projectDir resolves like resolveAskContext, a pinned workspace does not', async () => {
-  const p = (await addProject({ name: 'pagemem', path: gitDir('pagemem') })).find((x) => x.name === 'pagemem');
-  // What ask-panel.mjs sends on the New / Running / Projects pages: a projectDir, no projectKey.
-  const page = createThread();
-  updateThread(page.id, { context: { view: 'new', projectDir: p.path, pinned: false } });
-  const tools = createAskTools({ ...defaultToolDeps({ threadId: page.id }), ...defaultMemoryDeps({ threadId: page.id }) });
-  const r = await tools.call('remember', { scope: 'project', name: 'pagefollow', body: 'From the page.\n' });
-  assert.equal(r.projectKey, p.key, 'B30: the page project is resolved from projectDir');
-  // MCP registry §9.1: the generic dropdown fallback is not the page's project — memory never defaults to it.
-  const fallback = createThread();
-  updateThread(fallback.id, { context: { view: 'settings', projectDir: p.path, projectSource: 'fallback', pinned: false } });
-  assert.equal(await defaultMemoryDeps({ threadId: fallback.id }).memory.contextProjectKey(), null);
-  assert.ok(await readMemory(memoryRoot(), projectScope(p.key), 'pagefollow'));
-  const pinnedWs = createThread();
-  updateThread(pinnedWs.id, { context: { view: 'new', workspaceId: 'wks-team-0000abcd', pinned: true } });
-  const wsTools = createAskTools({ ...defaultToolDeps({ threadId: pinnedWs.id }), ...defaultMemoryDeps({ threadId: pinnedWs.id }) });
-  await assert.rejects(() => wsTools.call('remember', { scope: 'project', name: 'x', body: 'y' }),
-    /remember: the pinned scope is a workspace — pass projectKey for the member project this belongs to/);
-});
-
-test('source scans: tools.mjs still has no imports and no SQL verbs; memory-deps.mjs is the ONE Ask module that imports the store; the MCP child spreads it', () => {
-  const tools = readFileSync(new URL('../src/core/ask/tools.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(tools, /^import /m, 'tools.mjs imports nothing');
-  assert.doesNotMatch(tools, /\b(INSERT|UPDATE|DELETE)\b/);
-  const deps = readFileSync(new URL('../src/core/ask/memory-deps.mjs', import.meta.url), 'utf8');
-  assert.match(deps, /from '\.\.\/memory-store\.mjs'/);
-  assert.doesNotMatch(deps, /from 'node:fs/, 'no direct fs — the store owns every write');
-  assert.match(deps, /export async function refreshAskMemoryMount[\s\S]*?withStoreLock\(memoryRoot\(\), async \(\) =>[\s\S]*?await refreshMount\(/,
-    'the mount refresh is serialised with every other in-process store writer (anchored on the function: remember() takes the same lock)');
-  const toolDeps = readFileSync(new URL('../src/core/ask/tool-deps.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(toolDeps, /memory-store/, 'tool-deps stays store-free');
-  const stdio = readFileSync(new URL('../src/core/ask/mcp-stdio.mjs', import.meta.url), 'utf8');
-  assert.match(stdio, /createAskTools\(\{[\s\S]*?defaultMemoryDeps/, 'the MCP child spreads the memory bundle into createAskTools');
+test('the REAL memory bundle: remember/forget through the store (ask: source, snapshot, mount refresh) and the page-project resolution', async () => {
+  await checkRows([
+    { name: 'the REAL bundle on a temp home: remember writes through the store with an ask: source and a snapshot; forget removes; the mount refreshes by scope', run: async () => {
+      const p = (await addProject({ name: 'realmem', path: process.cwd() })).find((x) => x.name === 'realmem');
+      const threadId = 'ask_0000abcd';
+      const tools = createAskTools({ ...defaultToolDeps({ threadId }), ...defaultMemoryDeps({ threadId }) });
+      assert.equal(await refreshAskMemoryMount({}), null, 'B33: an empty store mounts NOTHING (the spawn stays byte-identical)');
+      const r = await tools.call('remember', { scope: 'project', projectKey: p.key, name: 'conventions', body: 'kebab-case files.\n', description: 'Naming rules' });
+      assert.equal(r.created, true);
+      const f = await readMemory(memoryRoot(), projectScope(p.key), 'conventions');
+      assert.equal(f.meta.source, `ask:${threadId}`);
+      assert.equal(f.meta.description, 'Naming rules');
+      await tools.call('remember', { scope: 'project', projectKey: p.key, name: 'conventions', body: 'And tests next to sources.', mode: 'append' });
+      const f2 = await readMemory(memoryRoot(), projectScope(p.key), 'conventions');
+      assert.equal(f2.body, 'kebab-case files.\n\nAnd tests next to sources.\n');
+      assert.equal(f2.meta.description, 'Naming rules', 'kept across an append that named no description');
+      assert.ok((await listSnapshots(memoryRoot(), projectScope(p.key))).length >= 1, 'every store write snapshots');
+      await tools.call('remember', { scope: 'global', name: 'style', body: 'Terse commits.\n' });
+      const mount = await refreshAskMemoryMount({ projectKey: p.key, projectName: 'realmem' });
+      assert.equal(mount, join(worcaHome(), 'ask', 'memory', p.key));
+      assert.equal(existsSync(join(mount, '.claude', 'rules', 'worca', 'global', 'style.md')), true);
+      assert.equal(existsSync(join(mount, '.claude', 'rules', 'worca', 'project', 'conventions.md')), true);
+      const globalOnly = await refreshAskMemoryMount({});
+      assert.equal(globalOnly, join(worcaHome(), 'ask', 'memory', 'global'));
+      assert.equal(existsSync(join(globalOnly, '.claude', 'rules', 'worca', 'project')), false, 'no project ⇒ global only');
+      await assert.rejects(() => refreshAskMemoryMount({ projectKey: 'not a key' }), /invalid projectKey/,
+        'a key that is not a registry key never reaches mkdir — and the guard REJECTS (async), so a .catch() caller sees it too');
+      assert.deepEqual(await tools.call('forget', { scope: 'global', name: 'style' }), { scope: 'global', projectKey: null, scopeKey: 'global', name: 'style', removed: true });
+      assert.equal(await readMemory(memoryRoot(), GLOBAL_SCOPE, 'style'), null);
+    } },
+    { name: 'the REAL bundle follows the PAGE project through the thread context: projectDir resolves like resolveAskContext, a pinned workspace does not', run: async () => {
+      const p = (await addProject({ name: 'pagemem', path: gitDir('pagemem') })).find((x) => x.name === 'pagemem');
+      // What ask-panel.mjs sends on the New / Running / Projects pages: a projectDir, no projectKey.
+      const page = createThread();
+      updateThread(page.id, { context: { view: 'new', projectDir: p.path, pinned: false } });
+      const tools = createAskTools({ ...defaultToolDeps({ threadId: page.id }), ...defaultMemoryDeps({ threadId: page.id }) });
+      const r = await tools.call('remember', { scope: 'project', name: 'pagefollow', body: 'From the page.\n' });
+      assert.equal(r.projectKey, p.key, 'B30: the page project is resolved from projectDir');
+      // MCP registry §9.1: the generic dropdown fallback is not the page's project — memory never defaults to it.
+      const fallback = createThread();
+      updateThread(fallback.id, { context: { view: 'settings', projectDir: p.path, projectSource: 'fallback', pinned: false } });
+      assert.equal(await defaultMemoryDeps({ threadId: fallback.id }).memory.contextProjectKey(), null);
+      assert.ok(await readMemory(memoryRoot(), projectScope(p.key), 'pagefollow'));
+      const pinnedWs = createThread();
+      updateThread(pinnedWs.id, { context: { view: 'new', workspaceId: 'wks-team-0000abcd', pinned: true } });
+      const wsTools = createAskTools({ ...defaultToolDeps({ threadId: pinnedWs.id }), ...defaultMemoryDeps({ threadId: pinnedWs.id }) });
+      await assert.rejects(() => wsTools.call('remember', { scope: 'project', name: 'x', body: 'y' }),
+        /remember: the pinned scope is a workspace — pass projectKey for the member project this belongs to/);
+    } },
+  ]);
 });

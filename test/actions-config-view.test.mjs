@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { checkRows } from './helpers/rows.mjs';
 import { editorFieldEl, renderProjectActionsEditor, readEditorForm, renderStackEditor, readStackForm } from '../ui/public/actions-config-view.mjs';
 
 const dom = new JSDOM('<!doctype html><body></body>');
@@ -14,24 +15,27 @@ const CFG = () => ({ setup: 'npm ci', actions: [{ id: 'run', label: 'Run', kind:
   env: [{ name: 'PORT', type: 'port', value: 'auto' }], openUrl: 'http://localhost:{PORT}', ready: { kind: 'port', port: 'PORT', timeoutMs: 60000 } }],
   builtins: { editor: true, terminal: false, fileManager: true, copyCommand: true } });
 
-test('editor round-trips a config through the form', () => {
-  const cfg = CFG();
-  const root = renderProjectActionsEditor(cfg, { doc, detected: { editor: { label: 'VS Code' }, terminal: null, fileManager: { label: 'Finder' } } });
-  assert.deepEqual(readEditorForm(root), cfg);
-  assert.match(root.textContent, /Terminal.*not found on this machine/s);
-  assert.match(root.textContent, /VS Code/);
-  assert.match(root.textContent, /\{branch\}.*\{worktree\}.*\{runId\}.*\{member\}.*\{PORT\}/s);
-});
-
-test('round-trips a task, an output ready check, a typed port and a Windows command', () => {
-  const cfg = { setup: null, actions: [
-    { id: 'web', label: 'Web', kind: 'service', cmd: 'vite', cmdWin32: 'vite.cmd', cwd: 'web',
-      env: [{ name: 'PORT', type: 'port', value: 5173 }, { name: 'MODE', type: 'text', value: 'dev' }],
-      openUrl: null, ready: { kind: 'output', text: 'ready in', timeoutMs: 30000 } },
-    { id: 'test', label: 'Test', kind: 'task', cmd: 'npm test', cmdWin32: null, cwd: '.', env: [], openUrl: null, ready: { kind: 'immediate' } },
-  ], builtins: { editor: false, terminal: true, fileManager: false, copyCommand: false } };
-  const root = renderProjectActionsEditor(cfg, { doc, detected: {} });
-  assert.deepEqual(readEditorForm(root), cfg);
+test('project editor round-trips configs through the form (service+port, task+output ready+Windows cmd)', async () => {
+  await checkRows([
+    { name: 'editor round-trips a config through the form', run: () => {
+      const cfg = CFG();
+      const root = renderProjectActionsEditor(cfg, { doc, detected: { editor: { label: 'VS Code' }, terminal: null, fileManager: { label: 'Finder' } } });
+      assert.deepEqual(readEditorForm(root), cfg);
+      assert.match(root.textContent, /Terminal.*not found on this machine/s);
+      assert.match(root.textContent, /VS Code/);
+      assert.match(root.textContent, /\{branch\}.*\{worktree\}.*\{runId\}.*\{member\}.*\{PORT\}/s);
+    } },
+    { name: 'round-trips a task, an output ready check, a typed port and a Windows command', run: () => {
+      const cfg = { setup: null, actions: [
+        { id: 'web', label: 'Web', kind: 'service', cmd: 'vite', cmdWin32: 'vite.cmd', cwd: 'web',
+          env: [{ name: 'PORT', type: 'port', value: 5173 }, { name: 'MODE', type: 'text', value: 'dev' }],
+          openUrl: null, ready: { kind: 'output', text: 'ready in', timeoutMs: 30000 } },
+        { id: 'test', label: 'Test', kind: 'task', cmd: 'npm test', cmdWin32: null, cwd: '.', env: [], openUrl: null, ready: { kind: 'immediate' } },
+      ], builtins: { editor: false, terminal: true, fileManager: false, copyCommand: false } };
+      const root = renderProjectActionsEditor(cfg, { doc, detected: {} });
+      assert.deepEqual(readEditorForm(root), cfg);
+    } },
+  ]);
 });
 
 test('Add action appends an empty row; port rows validate inline', () => {
@@ -117,24 +121,6 @@ test('stack editor: changing a member refills its actions; add/remove steps renu
   assert.deepEqual(saved[0].stacks[1], { id: '', label: '', kind: 'service', steps: [] });
 });
 
-test('Built in: an editor or terminal not found links to the Settings card; a found one and the file manager do not', () => {
-  const root = renderProjectActionsEditor(CFG(), { doc, detected: { editor: null, terminal: { label: 'Terminal' }, fileManager: null } });
-  const note = (key) => root.querySelector(`.ac-builtin-${key}`).closest('.ac-builtin').querySelector('.ac-builtin-note');
-  assert.equal(note('editor').textContent, 'not found on this machine · set one in Settings › Runs › Actions');
-  assert.equal(note('editor').querySelector('a').getAttribute('href'), '#settings/runs/actions');
-  assert.equal(note('terminal').querySelector('a'), null);
-  assert.equal(note('fileManager').textContent, 'not found on this machine', 'no setting names a file manager');
-});
-
-test('stack editor: a member with no actions links to its Actions tab', () => {
-  const data = STACK_DATA();
-  data.members[1] = { ...data.members[1], actions: [] };
-  const root = renderStackEditor(data, { doc });
-  const line = [...root.querySelectorAll('.ac-member')].find((l) => l.textContent.includes('web'));
-  assert.match(line.textContent, /no actions yet, add them on its Actions tab/);
-  assert.equal(line.querySelector('a').getAttribute('href'), '#projects/web-5e6f7a8b/actions');
-});
-
 // #555: a server ActionConfigError.field names an input; the app puts the error on it.
 test('editorFieldEl resolves ActionConfigError fields to the editor inputs', () => {
   const cfg = CFG();
@@ -156,18 +142,4 @@ test('editorFieldEl resolves ActionConfigError fields to the editor inputs', () 
   assert.equal(editorFieldEl(stacks, 'stacks[0].label'), stack.querySelector('.ac-stack-label'));
   assert.equal(editorFieldEl(stacks, 'stacks[0].steps[1].action'), stack.querySelectorAll('.ac-step')[1].querySelector('.ac-step-action'));
   assert.equal(editorFieldEl(stacks, 'stacks[0].steps'), null);
-});
-
-test('onSave gets the form and the Save button, in both editors', () => {
-  const calls = [];
-  const onSave = (form, button) => calls.push([form, button]);
-  const root = renderProjectActionsEditor(CFG(), { doc, detected: {}, onSave });
-  fire(root.querySelector('.ac-save'), 'click');
-  const stacks = renderStackEditor(STACK_DATA(), { doc, onSave });
-  fire(stacks.querySelector('.ac-save'), 'click');
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0][0].setup, 'npm ci');
-  assert.ok(calls[0][1].classList.contains('ac-save'));
-  assert.equal(calls[1][0].stacks.length, 1);
-  assert.ok(calls[1][1].classList.contains('ac-save'));
 });

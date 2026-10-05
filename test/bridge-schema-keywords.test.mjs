@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { unsupportedSchemaKeyword, dropSchemaKeywords, withToolSchemaKeywordsDropped, refusedToolName, withoutTools } from '../src/core/bridge/translate/schema-keywords.mjs';
+import { unsupportedSchemaKeyword, dropSchemaKeywords, withToolSchemaKeywordsDropped, withoutTools } from '../src/core/bridge/translate/schema-keywords.mjs';
 import { handleMessages, _resetBridgeWarnings, _resetSchemaKeywordDrops } from '../src/core/bridge/upstream.mjs';
 import { _resetBridgeTelemetry } from '../src/core/bridge/telemetry.mjs';
 
@@ -128,12 +128,6 @@ test('handleMessages: a keyword refusal that repeats after the drop is answered,
 // tool: `args` takes any JSON value — "more than one JSON reading of the same
 // emitted value"): no keyword to drop, so that tool is left out for the model.
 const AMBIGUOUS = 'failed to translate request: folding the request grammar: tool "Workflow" parameter schema: parameter "args": more than one JSON reading of the same emitted value';
-
-test('refusedToolName: names the tool a grammar refusal is about; null for anything else', () => {
-  assert.equal(refusedToolName(AMBIGUOUS), 'Workflow');
-  assert.equal(refusedToolName(REFUSAL), 'ListAgents');
-  assert.equal(refusedToolName('request rejected (400) — bad request'), null);
-});
 
 test('withoutTools: chat and Responses shapes; input untouched', () => {
   const chat = { tools: [{ type: 'function', function: { name: 'Workflow', parameters: {} } }, { type: 'function', function: { name: 'Read', parameters: {} } }] };

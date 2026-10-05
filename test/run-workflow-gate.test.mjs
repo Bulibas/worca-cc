@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { getDb, prepare } from '../src/core/db.mjs';
 import { writeGraphWorkflow } from '../src/core/workflows.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Boot preamble lifted VERBATIM from test/api-workflows.test.mjs:1-36 (only the
 // mkdtemp prefix differs).
@@ -69,33 +70,29 @@ const runDir = async () => {
 };
 after(() => Promise.all(projects.map((d) => rm(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }))));
 
-test('POST /api/run accepts a graph row: it dispatches to the graph engine', async () => {
-  await writeGraphWorkflow({ id: 'wf_graph', name: 'G', ...MINIMAL });
-  const r = await api('POST', '/api/run',
-    { projectDir: await runDir(), prompt: 'hi', workflowId: 'wf_graph', mock: true });
-  assert.equal(r.status, 200);
-  assert.equal(typeof r.body.runId, 'string');
-});
-
-test('POST /api/run: unknown id 400, archived id 400 with the archive message', async () => {
-  const unknown = await api('POST', '/api/run',
-    { projectDir: await runDir(), prompt: 'hi', workflowId: 'wf_nope', mock: true });
-  assert.equal(unknown.status, 400);
-  assert.equal(unknown.body.error, 'unknown workflowId "wf_nope"');
-  await writeGraphWorkflow({ id: 'wf_arch2', name: 'A', ...MINIMAL });
-  getDb();
-  prepare('UPDATE workflows SET archived_at = ? WHERE id = ?').run('2026-08-27T00:00:00Z', 'wf_arch2');
-  const arch = await api('POST', '/api/run',
-    { projectDir: await runDir(), prompt: 'hi', workflowId: 'wf_arch2', mock: true });
-  assert.equal(arch.status, 400);
-  assert.match(arch.body.error, /was archived by the v2 upgrade/);
-});
-
-test('a v1 row still runs (the gate is not a wall)', async () => {
-  const r = await api('POST', '/api/run',
-    { projectDir: await runDir(), prompt: 'hi', workflowId: 'wf_default', mock: true });
-  assert.equal(r.status, 200);
-  assert.ok(r.body.runId);
+test('POST /api/run workflow gate: a graph row dispatches (200); unknown id 400, archived id 400 with the archive message', async () => {
+  await checkRows([
+    { name: 'POST /api/run accepts a graph row: it dispatches to the graph engine', run: async () => {
+      await writeGraphWorkflow({ id: 'wf_graph', name: 'G', ...MINIMAL });
+      const r = await api('POST', '/api/run',
+        { projectDir: await runDir(), prompt: 'hi', workflowId: 'wf_graph', mock: true });
+      assert.equal(r.status, 200);
+      assert.equal(typeof r.body.runId, 'string');
+    } },
+    { name: 'POST /api/run: unknown id 400, archived id 400 with the archive message', run: async () => {
+      const unknown = await api('POST', '/api/run',
+        { projectDir: await runDir(), prompt: 'hi', workflowId: 'wf_nope', mock: true });
+      assert.equal(unknown.status, 400);
+      assert.equal(unknown.body.error, 'unknown workflowId "wf_nope"');
+      await writeGraphWorkflow({ id: 'wf_arch2', name: 'A', ...MINIMAL });
+      getDb();
+      prepare('UPDATE workflows SET archived_at = ? WHERE id = ?').run('2026-08-27T00:00:00Z', 'wf_arch2');
+      const arch = await api('POST', '/api/run',
+        { projectDir: await runDir(), prompt: 'hi', workflowId: 'wf_arch2', mock: true });
+      assert.equal(arch.status, 400);
+      assert.match(arch.body.error, /was archived by the v2 upgrade/);
+    } },
+  ]);
 });
 
 // The CLI arm. Without this the whole `if (flags.workflow) { … }` block can be

@@ -18,7 +18,6 @@ const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
-const cssPath = fileURLToPath(new URL('../ui/public/style.css', import.meta.url));
 
 const json = (body, status = 200) =>
   Promise.resolve({ ok: status < 400, status, json: async () => body });
@@ -204,15 +203,4 @@ test('a rejected profile Remove is reported inside the Settings modal', async ()
     'the in-modal error line carries hint+err so it picks up the error colour');
   assert.ok(modalOpen(doc, 'plugin-modal'));
   assert.equal(doc.getElementById('plugins-msg').textContent, '', 'nothing posted behind the modal');
-});
-
-// jsdom does not apply the stylesheet, so the colours are asserted by reading
-// style.css directly: the shared confirm message must have an error tone, and the
-// in-modal error line's classes must map to an existing red-ink rule.
-test('the error colour rules exist in style.css', () => {
-  const css = readFileSync(cssPath, 'utf8').replace(/\s+/g, ' ');
-  assert.match(css, /\.confirm-message\.err\s*\{[^}]*color:\s*var\(--red-ink\)/,
-    '.confirm-message.err is coloured with --red-ink');
-  assert.match(css, /\.hint\.err\s*\{[^}]*color:\s*var\(--red-ink\)/,
-    '.hint.err (used by .pl-settings-err) is coloured with --red-ink');
 });

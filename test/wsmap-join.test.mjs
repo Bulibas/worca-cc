@@ -11,6 +11,7 @@ import npm from '../src/core/workspace-map/detectors/pkg-npm.mjs';
 import { entryId, edgeId } from '../src/shared/workspace-map/ids.mjs';
 import { LIMITS } from '../src/shared/workspace-map/limits.mjs';
 import { makeRepos } from './helpers/wsmap-p1-repos.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const ws = await makeRepos({
   api: { 'src/routes.ts': "router.get('/invoices/:id', h)\n" },
@@ -86,70 +87,68 @@ const NOW = () => new Date('2026-09-25T10:00:00.000Z');
 const map = await joinMap({ catalog: catalog(), usage: usage(), runId: 'r1', now: NOW });
 const find = (from, to, kind, norm) => map.edges.find((e) => e.id === edgeId(from, to, kind, norm));
 
-test('the edge set: every rule, one edge per (from, to, kind, norm), sorted; a topic glob fans out', () => {
-  assert.deepEqual(map.edges.map((e) => [e.from, e.to, e.kind, e.norm, e.confidence, e.sources.join('+')]), [
-    ['api', 'lib', 'other', 'other:the lib callback thing', 'inferred', 'usage'],
-    ['lib', 'api', 'topic', 'topic:orders.created', 'heuristic', 'candidate'],
-    ['web', 'api', 'http', 'http:GET /invoices/{}', 'verified', 'static+usage'],
-    ['web', 'api', 'http', 'http:POST /invoices', 'verified', 'candidate+usage'],
-    ['web', 'lib', 'pkg', 'pkg:npm:@acme/lib', 'exact', 'static'],
-    ['web', 'lib', 'service', 'service:lib', 'exact', 'static'],
-    ['web', 'worker', 'topic', 'topic:jobs', 'inferred', 'usage'],
-    ['worker', 'api', 'http', 'http:GET /invoices/{}', 'verified', 'survey'],
-    ['worker', 'api', 'topic', 'topic:orders.created', 'heuristic', 'static'],
-    ['worker', 'api', 'topic', 'topic:orders.deleted', 'heuristic', 'static'],
-    ['worker', 'lib', 'other', 'other:s3 bucket', 'inferred', 'survey'],   // M14: an other edge is keyed by its label
+test('the shared fixture map: edge set, merge by id, rejected candidate, distinctive fallback, unkeyable relation, test facts, order/members/stats', async () => {
+  await checkRows([
+    { name: 'the edge set: every rule, one edge per (from, to, kind, norm), sorted; a topic glob fans out', run: () => {
+      assert.deepEqual(map.edges.map((e) => [e.from, e.to, e.kind, e.norm, e.confidence, e.sources.join('+')]), [
+        ['api', 'lib', 'other', 'other:the lib callback thing', 'inferred', 'usage'],
+        ['lib', 'api', 'topic', 'topic:orders.created', 'heuristic', 'candidate'],
+        ['web', 'api', 'http', 'http:GET /invoices/{}', 'verified', 'static+usage'],
+        ['web', 'api', 'http', 'http:POST /invoices', 'verified', 'candidate+usage'],
+        ['web', 'lib', 'pkg', 'pkg:npm:@acme/lib', 'exact', 'static'],
+        ['web', 'lib', 'service', 'service:lib', 'exact', 'static'],
+        ['web', 'worker', 'topic', 'topic:jobs', 'inferred', 'usage'],
+        ['worker', 'api', 'http', 'http:GET /invoices/{}', 'verified', 'survey'],
+        ['worker', 'api', 'topic', 'topic:orders.created', 'heuristic', 'static'],
+        ['worker', 'api', 'topic', 'topic:orders.deleted', 'heuristic', 'static'],
+        ['worker', 'lib', 'other', 'other:s3 bucket', 'inferred', 'survey'],   // M14: an other edge is keyed by its label
+      ]);
+      for (const e of map.edges) assert.equal(e.id, edgeId(e.from, e.to, e.kind, e.norm));
+    } },
+    { name: 'duplicates merge by edge id: strongest confidence, union of sources and evidence (re-anchored)', run: () => {
+      const e = find('web', 'api', 'http', 'http:GET /invoices/{}');
+      assert.equal(e.display, 'GET /invoices/{id}');
+      assert.deepEqual(e.evidence.from, [{ file: 'src/a.ts', line: 4, match: "fetch('/v1/invoices/'" }], 'fuzzy + use at the same line collapse');
+      assert.deepEqual(e.evidence.to, GET.evidence);
+      assert.equal(find('worker', 'lib', 'other', 'other:s3 bucket').display, 'S3 bucket');
+    } },
+    { name: 'a candidate the usage pass rejected never becomes an edge (killer: rejected candidate)', run: () => {
+      assert.equal(find('lib', 'api', 'topic', 'topic:orders.deleted'), undefined, 'lib failed, but it rejected this candidate');
+      assert.equal(find('web', 'api', 'topic', 'topic:orders.created'), undefined);
+    } },
+    { name: 'failed usage falls back to DISTINCTIVE candidates only; investigated members never (killer: fallback)', run: () => {
+      assert.ok(find('lib', 'api', 'topic', 'topic:orders.created'), 'distinctive topic candidate of a failed member');
+      assert.equal(find('lib', 'api', 'http', 'http:GET /invoices/{}'), undefined, 'a path candidate is not distinctive');
+      assert.equal(find('web', 'api', 'topic', 'topic:orders.deleted'), undefined, 'web was investigated: its unconfirmed candidates stay candidates');
+    } },
+    { name: 'a relation whose key cannot be keyed for its kind is an inferred edge of kind other (review focus)', run: () => {
+      const e = find('api', 'lib', 'other', 'other:the lib callback thing');
+      assert.ok(e, 'kept, re-kinded as other');
+      assert.equal(e.display, 'the lib callback thing');
+      assert.equal(map.edges.filter((x) => x.from === 'api' && x.kind === 'http').length, 0, 'never a mis-kinded http edge');
+    } },
+    { name: 'test facts never create edges; unverifiable uses are dropped and counted', run: () => {
+      assert.equal(map.edges.filter((e) => e.from === 'web' && e.kind === 'http').length, 2);
+      assert.equal(map.stats.testFacts, 1);
+      assert.equal(map.stats.factsRejected, 1);
+      assert.equal(map.members.find((m) => m.key === 'web').coverage.rejected, 1);
+    } },
+    { name: 'order, members, coverage and stats', run: () => {
+      assert.deepEqual(map.order, [['api', 'lib'], ['worker'], ['web']], 'api and lib use each other: one group');
+      assert.deepEqual(map.cycles, [['api', 'lib']]);
+      assert.equal(map.version, 1);
+      assert.equal(map.runId, 'r1');
+      assert.equal(map.scannedAt, '2026-09-25T10:00:00.000Z');
+      assert.deepEqual(map.workspace, { name: 'Shop' });
+      assert.deepEqual(map.graph, { mode: 'none', file: null, nodes: 0, bridges: 0 });
+      const api = map.members.find((m) => m.key === 'api');
+      assert.deepEqual(api, { key: 'api', name: 'API', role: 'Serves invoices', roleSource: 'static', roleFrom: null, aliases: ['api'], stack: ['node'],
+        coverage: { level: 'rich', files: 2, scannedFiles: 2, truncated: false, factsStatic: 3, factsLlm: 0, unresolved: 0, rejected: 0,
+          surveyed: 'skipped', usageStatus: 'failed', graph: null } }, 'a failed usage member keeps its verified relations');
+      assert.deepEqual(map.stats, { edges: 11, byKind: { other: 2, topic: 4, http: 3, pkg: 1, service: 1 },
+        byConfidence: { inferred: 3, heuristic: 3, verified: 3, exact: 2 }, candidates: 6, candidatesConfirmed: 1, factsRejected: 1, testFacts: 1 });
+    } },
   ]);
-  for (const e of map.edges) assert.equal(e.id, edgeId(e.from, e.to, e.kind, e.norm));
-});
-
-test('duplicates merge by edge id: strongest confidence, union of sources and evidence (re-anchored)', () => {
-  const e = find('web', 'api', 'http', 'http:GET /invoices/{}');
-  assert.equal(e.display, 'GET /invoices/{id}');
-  assert.deepEqual(e.evidence.from, [{ file: 'src/a.ts', line: 4, match: "fetch('/v1/invoices/'" }], 'fuzzy + use at the same line collapse');
-  assert.deepEqual(e.evidence.to, GET.evidence);
-  assert.equal(find('worker', 'lib', 'other', 'other:s3 bucket').display, 'S3 bucket');
-});
-
-test('a candidate the usage pass rejected never becomes an edge (killer: rejected candidate)', () => {
-  assert.equal(find('lib', 'api', 'topic', 'topic:orders.deleted'), undefined, 'lib failed, but it rejected this candidate');
-  assert.equal(find('web', 'api', 'topic', 'topic:orders.created'), undefined);
-});
-
-test('failed usage falls back to DISTINCTIVE candidates only; investigated members never (killer: fallback)', () => {
-  assert.ok(find('lib', 'api', 'topic', 'topic:orders.created'), 'distinctive topic candidate of a failed member');
-  assert.equal(find('lib', 'api', 'http', 'http:GET /invoices/{}'), undefined, 'a path candidate is not distinctive');
-  assert.equal(find('web', 'api', 'topic', 'topic:orders.deleted'), undefined, 'web was investigated: its unconfirmed candidates stay candidates');
-});
-
-test('a relation whose key cannot be keyed for its kind is an inferred edge of kind other (review focus)', () => {
-  const e = find('api', 'lib', 'other', 'other:the lib callback thing');
-  assert.ok(e, 'kept, re-kinded as other');
-  assert.equal(e.display, 'the lib callback thing');
-  assert.equal(map.edges.filter((x) => x.from === 'api' && x.kind === 'http').length, 0, 'never a mis-kinded http edge');
-});
-
-test('test facts never create edges; unverifiable uses are dropped and counted', () => {
-  assert.equal(map.edges.filter((e) => e.from === 'web' && e.kind === 'http').length, 2);
-  assert.equal(map.stats.testFacts, 1);
-  assert.equal(map.stats.factsRejected, 1);
-  assert.equal(map.members.find((m) => m.key === 'web').coverage.rejected, 1);
-});
-
-test('order, members, coverage and stats', () => {
-  assert.deepEqual(map.order, [['api', 'lib'], ['worker'], ['web']], 'api and lib use each other: one group');
-  assert.deepEqual(map.cycles, [['api', 'lib']]);
-  assert.equal(map.version, 1);
-  assert.equal(map.runId, 'r1');
-  assert.equal(map.scannedAt, '2026-09-25T10:00:00.000Z');
-  assert.deepEqual(map.workspace, { name: 'Shop' });
-  assert.deepEqual(map.graph, { mode: 'none', file: null, nodes: 0, bridges: 0 });
-  const api = map.members.find((m) => m.key === 'api');
-  assert.deepEqual(api, { key: 'api', name: 'API', role: 'Serves invoices', roleSource: 'static', roleFrom: null, aliases: ['api'], stack: ['node'],
-    coverage: { level: 'rich', files: 2, scannedFiles: 2, truncated: false, factsStatic: 3, factsLlm: 0, unresolved: 0, rejected: 0,
-      surveyed: 'skipped', usageStatus: 'failed', graph: null } }, 'a failed usage member keeps its verified relations');
-  assert.deepEqual(map.stats, { edges: 11, byKind: { other: 2, topic: 4, http: 3, pkg: 1, service: 1 },
-    byConfidence: { inferred: 3, heuristic: 3, verified: 3, exact: 2 }, candidates: 6, candidatesConfirmed: 1, factsRejected: 1, testFacts: 1 });
 });
 
 test('enrich hook: receives (map, {catalog}); its map is returned; a throw is recorded, never raised', async () => {
@@ -163,17 +162,29 @@ test('enrich hook: receives (map, {catalog}); its map is returned; a throw is re
   assert.equal(failed.edges.length, 11);
 });
 
-test('an edge is never more confident than its static facts on either end (X9, X12)', async () => {
-  const cat = catalog();
-  cat.consumes.web[0] = { ...cat.consumes.web[0], confidence: 'heuristic' };
-  cat.consumes.web[2] = { ...cat.consumes.web[2], confidence: 'heuristic' };
-  cat.entries = cat.entries.map((e) => (e.id === POST.id ? { ...e, confidence: 'heuristic' } : e));
-  const m = await joinMap({ catalog: cat, usage: usage(), now: NOW });
-  const conf = (from, to, kind, norm) => m.edges.find((e) => e.id === edgeId(from, to, kind, norm))?.confidence;
-  assert.equal(conf('web', 'lib', 'pkg', 'pkg:npm:@acme/lib'), 'heuristic', 'consume side: a resolved heuristic consume');
-  assert.equal(conf('web', 'lib', 'service', 'service:lib'), 'heuristic', 'consume side: a heuristic consume resolved by alias');
-  assert.equal(conf('web', 'api', 'http', 'http:POST /invoices'), 'heuristic', 'provide side: a verified use of a heuristic provide');
-  assert.equal(conf('web', 'api', 'http', 'http:GET /invoices/{}'), 'verified', 'a provide without a heuristic fact keeps its verified use');
+test('an edge is never more confident than its static facts on either end, static and survey consumes alike (X9, X12)', async () => {
+  await checkRows([
+    { name: 'an edge is never more confident than its static facts on either end (X9, X12)', run: async () => {
+      const cat = catalog();
+      cat.consumes.web[0] = { ...cat.consumes.web[0], confidence: 'heuristic' };
+      cat.consumes.web[2] = { ...cat.consumes.web[2], confidence: 'heuristic' };
+      cat.entries = cat.entries.map((e) => (e.id === POST.id ? { ...e, confidence: 'heuristic' } : e));
+      const m = await joinMap({ catalog: cat, usage: usage(), now: NOW });
+      const conf = (from, to, kind, norm) => m.edges.find((e) => e.id === edgeId(from, to, kind, norm))?.confidence;
+      assert.equal(conf('web', 'lib', 'pkg', 'pkg:npm:@acme/lib'), 'heuristic', 'consume side: a resolved heuristic consume');
+      assert.equal(conf('web', 'lib', 'service', 'service:lib'), 'heuristic', 'consume side: a heuristic consume resolved by alias');
+      assert.equal(conf('web', 'api', 'http', 'http:POST /invoices'), 'heuristic', 'provide side: a verified use of a heuristic provide');
+      assert.equal(conf('web', 'api', 'http', 'http:GET /invoices/{}'), 'verified', 'a provide without a heuristic fact keeps its verified use');
+    } },
+    { name: 'rule (a) is capped by a heuristic provide too, static and survey consumes alike (X12)', run: async () => {
+      const cat = catalog();
+      cat.entries = cat.entries.map((e) => (e.id === LIB.id || e.id === GET.id ? { ...e, confidence: 'heuristic' } : e));
+      const m = await joinMap({ catalog: cat, usage: usage(), now: NOW });
+      const conf = (from, to, kind, norm) => m.edges.find((e) => e.id === edgeId(from, to, kind, norm))?.confidence;
+      assert.equal(conf('web', 'lib', 'pkg', 'pkg:npm:@acme/lib'), 'heuristic', 'rule (a), static consume, heuristic provide');
+      assert.equal(conf('worker', 'api', 'http', 'http:GET /invoices/{}'), 'heuristic', 'rule (a), survey consume, heuristic provide');
+    } },
+  ]);
 });
 
 test('a public dotted host never yields an edge to a member named like its first label (X6, end to end)', async () => {
@@ -228,15 +239,6 @@ test('a rejection cited with a non-canonical path (./src/l.ts) still suppresses 
   u.members.lib.rejected = [{ entry: DELETED.id, file: './src/l.ts', line: 3, reason: 'dead code' }];
   const m = await joinMap({ catalog: catalog(), usage: u, now: NOW });
   assert.equal(m.edges.find((e) => e.id === edgeId('lib', 'api', 'topic', 'topic:orders.deleted')), undefined);
-});
-
-test('rule (a) is capped by a heuristic provide too, static and survey consumes alike (X12)', async () => {
-  const cat = catalog();
-  cat.entries = cat.entries.map((e) => (e.id === LIB.id || e.id === GET.id ? { ...e, confidence: 'heuristic' } : e));
-  const m = await joinMap({ catalog: cat, usage: usage(), now: NOW });
-  const conf = (from, to, kind, norm) => m.edges.find((e) => e.id === edgeId(from, to, kind, norm))?.confidence;
-  assert.equal(conf('web', 'lib', 'pkg', 'pkg:npm:@acme/lib'), 'heuristic', 'rule (a), static consume, heuristic provide');
-  assert.equal(conf('worker', 'api', 'http', 'http:GET /invoices/{}'), 'heuristic', 'rule (a), survey consume, heuristic provide');
 });
 
 test('rule (b) never joins a norm the consuming member provides itself (C22)', async () => {

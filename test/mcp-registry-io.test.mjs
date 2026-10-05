@@ -11,6 +11,7 @@ import { resolveRegistry, requiredOf, cachedTeamFor, cachedTeams, toolNameLimitF
 import { addManualServer, putMember, mcpDir } from '../src/core/mcp/store.mjs';
 import { addGlobalModel } from '../src/core/settings.mjs';
 import { projectKey } from '../src/core/store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 const sandbox = mkdtempSync(join(tmpdir(), 'worca-mcp-io-'));
@@ -26,9 +27,18 @@ after(() => {
 const ENTRY = { plugin: 'acme-tools', server: 'sentry' };
 const doc = (required) => ({ fields: required === undefined ? {} : { 'mcp.required': { kind: 'soft', value: required } } });
 
-test('requiredOf: the mcp.required entries of a policy doc, [] for anything else', () => {
-  assert.deepEqual(requiredOf(doc([ENTRY])), [ENTRY]);
-  for (const d of [null, undefined, doc(), doc('x'), { fields: { 'mcp.required': null } }]) assert.deepEqual(requiredOf(d), []);
+test('requiredOf / cachedTeams: the mcp.required entries of a policy doc ([] for anything else); every cached home with ≥1 entry', async () => {
+  await checkRows([
+    { name: 'requiredOf: the mcp.required entries of a policy doc, [] for anything else', run: () => {
+      assert.deepEqual(requiredOf(doc([ENTRY])), [ENTRY]);
+      for (const d of [null, undefined, doc(), doc('x'), { fields: { 'mcp.required': null } }]) assert.deepEqual(requiredOf(d), []);
+    } },
+    { name: 'cachedTeams: every cached home with ≥1 mcp.required entry', run: () => {
+      const homes = [{ slug: 'acme/a', doc: doc([ENTRY]) }, { slug: 'acme/b', doc: doc([]) }, { slug: 'acme/c', doc: doc() }];
+      assert.deepEqual(cachedTeams(homes), [{ home: 'acme/a', required: [ENTRY], doc: homes[0].doc }]);
+      assert.deepEqual(cachedTeams(), [], 'the real cache is empty');
+    } },
+  ]);
 });
 
 test('cachedTeamFor: a project\'s cached policy; a workspace\'s policy home only while it is still a member; null without entries', async () => {
@@ -53,12 +63,6 @@ test('cachedTeamFor: a project\'s cached policy; a workspace\'s policy home only
     assert.equal(await cachedTeamFor({ workspaceId: 'gone' }, deps), null);
     assert.equal(await cachedTeamFor({ projectKey: 'no-such-00000000' }), null, 'the real cache: nothing cached');
   } finally { rmSync(homeDir, { recursive: true, force: true }); }
-});
-
-test('cachedTeams: every cached home with ≥1 mcp.required entry', () => {
-  const homes = [{ slug: 'acme/a', doc: doc([ENTRY]) }, { slug: 'acme/b', doc: doc([]) }, { slug: 'acme/c', doc: doc() }];
-  assert.deepEqual(cachedTeams(homes), [{ home: 'acme/a', required: [ENTRY], doc: homes[0].doc }]);
-  assert.deepEqual(cachedTeams(), [], 'the real cache is empty');
 });
 
 test('toolNameLimitFor: 64 when any model is translated by the bridge, else 128', async () => {

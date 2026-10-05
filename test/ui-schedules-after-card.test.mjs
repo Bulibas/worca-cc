@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -43,33 +44,37 @@ async function boot(tickets = [AFTER_T]) {
   return { doc, view, window, calls };
 }
 
-test('an after-ticket card names the run it waits for and offers Schedule next…', async () => {
-  const { doc, view, window } = await boot();
-  const card = doc.querySelector('#once .sched-item');
-  assert.equal(card.querySelector('.rc-status-word').textContent, 'Waiting for a run');
-  assert.equal(card.querySelector('.sched-when').textContent, 'After ‘Refactor’ · running');
-  assert.equal(card.querySelector('.sched-when').getAttribute('data-at'), '', 'no countdown for a predecessor');
-  assert.match(card.querySelector('.sched-target').textContent, /from the run before it/);
-  const kv = Object.fromEntries([...card.querySelectorAll('.sched-kv')].map((r) => [r.querySelector('.sched-k').textContent, r.querySelector('.sched-v').textContent]));
-  assert.equal(kv.After, 'Refactor · running');
-  assert.equal(kv['If it fails'], 'Start anyway');
-  assert.equal(kv['Source branch'], 'the run before it');
-  assert.equal(kv['If Worca is not running'], undefined);
-  const next = [...card.querySelectorAll('button')].find((b) => b.textContent === 'Schedule next…');
-  assert.ok(next);
-  next.click();
-  assert.equal(window.location.hash, `#new/after/t:${AFTER_T.id}`);
-  assert.deepEqual(view.upcoming(60_000).map((t) => t.id), [AFTER_T.id], 'Running › Scheduled shows it');
-});
-
-test('a MISSED after-ticket keeps the predecessor word, shows its fail_reason, and offers no Schedule next…', async () => {
-  const { doc } = await boot([MISSED_T]);
-  const card = doc.querySelector('#once .sched-item');
-  assert.equal(card.querySelector('.rc-status-word').textContent, 'Missed');
-  assert.equal(card.querySelector('.sched-when').textContent, 'After ‘Refactor’ · ended with an error', 'the word after the dot is the PREDECESSOR\'s');
-  assert.equal(card.querySelector('.sched-when').getAttribute('data-at'), '');
-  assert.equal(card.querySelector('.sched-reason').textContent, 'The run before it ended with an error.');
-  assert.equal([...card.querySelectorAll('button')].some((b) => b.textContent === 'Schedule next…'), false, 'a dead link: resolveAfterRef refuses a missed ticket');
+test('an after-ticket card names the run it waits for (no countdown) and offers Schedule next…; a MISSED one keeps the predecessor word, shows its fail_reason and offers no Schedule next…', async () => {
+  // Each row boots the pure view on its own ticket.
+  await checkRows([
+    { name: 'an after-ticket card names the run it waits for and offers Schedule next…', run: async () => {
+      const { doc, view, window } = await boot();
+      const card = doc.querySelector('#once .sched-item');
+      assert.equal(card.querySelector('.rc-status-word').textContent, 'Waiting for a run');
+      assert.equal(card.querySelector('.sched-when').textContent, 'After ‘Refactor’ · running');
+      assert.equal(card.querySelector('.sched-when').getAttribute('data-at'), '', 'no countdown for a predecessor');
+      assert.match(card.querySelector('.sched-target').textContent, /from the run before it/);
+      const kv = Object.fromEntries([...card.querySelectorAll('.sched-kv')].map((r) => [r.querySelector('.sched-k').textContent, r.querySelector('.sched-v').textContent]));
+      assert.equal(kv.After, 'Refactor · running');
+      assert.equal(kv['If it fails'], 'Start anyway');
+      assert.equal(kv['Source branch'], 'the run before it');
+      assert.equal(kv['If Worca is not running'], undefined);
+      const next = [...card.querySelectorAll('button')].find((b) => b.textContent === 'Schedule next…');
+      assert.ok(next);
+      next.click();
+      assert.equal(window.location.hash, `#new/after/t:${AFTER_T.id}`);
+      assert.deepEqual(view.upcoming(60_000).map((t) => t.id), [AFTER_T.id], 'Running › Scheduled shows it');
+    } },
+    { name: 'a MISSED after-ticket keeps the predecessor word, shows its fail_reason, and offers no Schedule next…', run: async () => {
+      const { doc } = await boot([MISSED_T]);
+      const card = doc.querySelector('#once .sched-item');
+      assert.equal(card.querySelector('.rc-status-word').textContent, 'Missed');
+      assert.equal(card.querySelector('.sched-when').textContent, 'After ‘Refactor’ · ended with an error', 'the word after the dot is the PREDECESSOR\'s');
+      assert.equal(card.querySelector('.sched-when').getAttribute('data-at'), '');
+      assert.equal(card.querySelector('.sched-reason').textContent, 'The run before it ended with an error.');
+      assert.equal([...card.querySelectorAll('button')].some((b) => b.textContent === 'Schedule next…'), false, 'a dead link: resolveAfterRef refuses a missed ticket');
+    } },
+  ]);
 });
 
 test('the Running group row reads After ‘X’, never a countdown to the year 9999', async () => {
@@ -90,33 +95,8 @@ test('Cancel: the dependents read holds the button, so a double-click sends ONE 
   assert.equal(calls.filter((c) => c.method === 'DELETE').length, 1);
 });
 
-// The entry points are hidden by the `hidden` PROPERTY; jsdom cannot see that the run page
-// bar's `.rd-after{display:flex}` beats the UA [hidden]{display:none}. Pin the CSS by
-// source (the test/ui-running-pause-fixes.test.mjs idiom) and the two buttons by markup.
-test('style.css and index.html carry the run-chain entry points', () => {
-  const css = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8');
-  const html = readFileSync(fileURLToPath(new URL('../ui/public/index.html', import.meta.url)), 'utf8');
-  // The saved run's bar button shares every rule of the run page's (one look, no copy).
-  assert.match(css, /\.hd-after\[hidden\],\.rd-after\[hidden\]\{display:none;\}/);
-  // The skin, the hover and the focus ring: without them the button is a borderless
-  // square with no hover and no keyboard ring beside Pause/Stop, which have all three.
-  assert.match(css, /\.hd-after,\.rd-after\{[^}]*border:1\.5px solid var\(--line\);[^}]*color:var\(--ink-2\);/);
-  assert.match(css, /\.hd-after:hover,\.rd-after:hover\{/);
-  assert.match(css, /\.hd-after:focus-visible,\.rd-after:focus-visible\{/);
-  // The live run's button lives in the run page bar (the list card that carried .rc-after is gone).
-  const tpl = html.match(/<template id="run-detail-tpl">[\s\S]*?<\/template>/);
-  assert.ok(tpl, '#run-detail-tpl exists');
-  assert.match(tpl[0], /class="rd-after"[^>]*data-min-level="advanced"[^>]*hidden/);
-  // The saved run's lives in its page bar, too.
-  const hist = html.match(/<template id="hist-detail-tpl">[\s\S]*?<\/template>/);
-  assert.ok(hist, '#hist-detail-tpl exists');
-  const bar = hist[0].match(/<div class="hd-bar">[\s\S]*?<div class="hd-error"/);
-  assert.ok(bar, 'the saved run page has its bar');
-  assert.match(bar[0], /class="hd-after"[^>]*data-min-level="advanced"[^>]*hidden/);
-});
-
 // The run page's button, the History-detail button and the Archive note, driven through window.__np —
-// the app's own jsdom hooks (the test/ui-running-pause-fixes.test.mjs harness). Task 7's
+// the app's own jsdom hooks (the test/ui-running-resume.test.mjs harness). Task 7's
 // dependents route is stubbed; nothing else in this file boots app.js.
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));

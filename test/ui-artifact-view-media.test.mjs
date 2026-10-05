@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { renderArtifact, rawArtifactUrl, groupArtifactsByKind } from '../ui/public/artifact-view-media.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // The real mount shape: app.js's showViewerHost() puts a <div class="artifact-view">
 // inside <div id="viewer-body">, and renderArtifact renders into that host.
@@ -31,25 +32,28 @@ test('html renders in an iframe sandboxed to allow-scripts ONLY', async () => {
   assert.equal(frame.getAttribute('referrerpolicy'), 'no-referrer');
 });
 
-test('image renders an <img> against the raw url and toggles natural size on click', async () => {
-  const mount = mountIn();
-  await renderArtifact({ kind: 'extra', relPath: 'shots/s01.png', url: '/x/s01.png' }, mount);
-  const img = mount.querySelector('img');
-  assert.equal(img.getAttribute('src'), '/x/s01.png');
-  assert.equal(img.getAttribute('alt'), 'shots/s01.png');
-  assert.ok(mount.classList.contains('kind-image'), 'the mount carries the class style.css keys on');
-  img.dispatchEvent(new (mount.ownerDocument.defaultView.Event)('click', { bubbles: true }));
-  assert.ok(mount.classList.contains('zoomed'));
-});
-
-test('pdf renders <embed type="application/pdf">; binary offers a download link only', async () => {
-  const pdf = mountIn();
-  await renderArtifact({ kind: 'extra', relPath: 'a.pdf', url: '/p' }, pdf);
-  assert.equal(pdf.querySelector('embed').getAttribute('type'), 'application/pdf');
-  const bin = mountIn();
-  await renderArtifact({ kind: 'extra', relPath: 'deck.pptx', url: '/b' }, bin);
-  assert.equal(bin.querySelector('iframe, img, embed'), null);
-  assert.equal(bin.querySelector('a').getAttribute('download'), 'deck.pptx');
+test('byte kinds: image <img> (zoom toggle), pdf <embed>, binary download link only', async () => {
+  await checkRows([
+    { name: 'image renders an <img> against the raw url and toggles natural size on click', run: async () => {
+      const mount = mountIn();
+      await renderArtifact({ kind: 'extra', relPath: 'shots/s01.png', url: '/x/s01.png' }, mount);
+      const img = mount.querySelector('img');
+      assert.equal(img.getAttribute('src'), '/x/s01.png');
+      assert.equal(img.getAttribute('alt'), 'shots/s01.png');
+      assert.ok(mount.classList.contains('kind-image'), 'the mount carries the class style.css keys on');
+      img.dispatchEvent(new (mount.ownerDocument.defaultView.Event)('click', { bubbles: true }));
+      assert.ok(mount.classList.contains('zoomed'));
+    } },
+    { name: 'pdf renders <embed type="application/pdf">; binary offers a download link only', run: async () => {
+      const pdf = mountIn();
+      await renderArtifact({ kind: 'extra', relPath: 'a.pdf', url: '/p' }, pdf);
+      assert.equal(pdf.querySelector('embed').getAttribute('type'), 'application/pdf');
+      const bin = mountIn();
+      await renderArtifact({ kind: 'extra', relPath: 'deck.pptx', url: '/b' }, bin);
+      assert.equal(bin.querySelector('iframe, img, embed'), null);
+      assert.equal(bin.querySelector('a').getAttribute('download'), 'deck.pptx');
+    } },
+  ]);
 });
 
 test('text kinds render a <pre> with textContent (never innerHTML)', async () => {
@@ -91,25 +95,27 @@ test('rawArtifactUrl encodes each segment', () => {
   assert.equal(rawArtifactUrl('/api/runs/abc', 'deck/a b.html'), '/api/runs/abc/artifact-raw/deck/a%20b.html');
 });
 
-test('groupArtifactsByKind keeps kinds in first-appearance order and flags the bulky one', () => {
-  const shots = Array.from({ length: 6 }, (_, i) => ({ kind: 'deck-shot', relPath: `shots/s0${i + 1}.png` }));
-  const groups = groupArtifactsByKind([
-    { kind: 'deck-audit', relPath: 'deck-audit-cycle1.md' },
-    ...shots,
-    { kind: 'deck-audit', relPath: 'deck-audit-cycle2.md' },
-  ], { threshold: 5 });
-  assert.deepEqual(groups.map((g) => [g.kind, g.collapsed, g.items.length]),
-    [['deck-audit', false, 2], ['deck-shot', true, 6]]);
-  assert.equal(groups[1].items[0].relPath, 'shots/s01.png', 'members keep their arrival order');
-});
-
-test('groupArtifactsByKind leaves a kind exactly at the threshold flat', () => {
-  const five = Array.from({ length: 5 }, (_, i) => ({ kind: 'deck-shot', relPath: `shots/s0${i + 1}.png` }));
-  assert.equal(groupArtifactsByKind(five, { threshold: 5 })[0].collapsed, false);
-  assert.equal(groupArtifactsByKind([...five, { kind: 'deck-shot', relPath: 'shots/s06.png' }], { threshold: 5 })[0].collapsed, true);
-});
-
-test('groupArtifactsByKind on an empty list is an empty list', () => {
-  assert.deepEqual(groupArtifactsByKind([]), []);
-  assert.deepEqual(groupArtifactsByKind(), []);
+test('groupArtifactsByKind: first-appearance order, collapse strictly above threshold, empty in/out', async () => {
+  await checkRows([
+    { name: 'groupArtifactsByKind keeps kinds in first-appearance order and flags the bulky one', run: async () => {
+      const shots = Array.from({ length: 6 }, (_, i) => ({ kind: 'deck-shot', relPath: `shots/s0${i + 1}.png` }));
+      const groups = groupArtifactsByKind([
+        { kind: 'deck-audit', relPath: 'deck-audit-cycle1.md' },
+        ...shots,
+        { kind: 'deck-audit', relPath: 'deck-audit-cycle2.md' },
+      ], { threshold: 5 });
+      assert.deepEqual(groups.map((g) => [g.kind, g.collapsed, g.items.length]),
+        [['deck-audit', false, 2], ['deck-shot', true, 6]]);
+      assert.equal(groups[1].items[0].relPath, 'shots/s01.png', 'members keep their arrival order');
+    } },
+    { name: 'groupArtifactsByKind leaves a kind exactly at the threshold flat', run: async () => {
+      const five = Array.from({ length: 5 }, (_, i) => ({ kind: 'deck-shot', relPath: `shots/s0${i + 1}.png` }));
+      assert.equal(groupArtifactsByKind(five, { threshold: 5 })[0].collapsed, false);
+      assert.equal(groupArtifactsByKind([...five, { kind: 'deck-shot', relPath: 'shots/s06.png' }], { threshold: 5 })[0].collapsed, true);
+    } },
+    { name: 'groupArtifactsByKind on an empty list is an empty list', run: async () => {
+      assert.deepEqual(groupArtifactsByKind([]), []);
+      assert.deepEqual(groupArtifactsByKind(), []);
+    } },
+  ]);
 });

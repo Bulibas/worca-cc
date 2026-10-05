@@ -4,9 +4,9 @@
 // scheduled workspace run never overrides a member's own onDiverged / beforeRun.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { checkRows } from './helpers/rows.mjs';
 
 const sheetPath = fileURLToPath(new URL('../ui/public/schedule-sheet.mjs', import.meta.url));
 const tick = (n = 1) => new Promise((r) => setTimeout(r, n));
@@ -67,44 +67,52 @@ test('reopening: initial.sync wins over the form and is carried again', async ()
   assert.deepEqual((await done).sync, { beforeRun: true, onDiverged: 'fail' });
 });
 
-test('without the option: no Sync block and no sync key (every result shape unchanged)', async () => {
-  const { doc, done } = await open({ mode: 'create', initial: { scheduledFor: later() } });
-  assert.equal(doc.getElementById('sched-sync-auto'), null);
-  assert.equal(doc.getElementById('sched-sync-diverged'), null);
-  doc.querySelector('.sched-ok').click();
-  assert.equal('sync' in (await done), false);
+test('no Sync block and no sync key without the option or with show:false', async () => {
+  // Each row opens its own sheet.
+  await checkRows([
+    { name: 'without the option: no Sync block and no sync key (every result shape unchanged)', run: async () => {
+      const { doc, done } = await open({ mode: 'create', initial: { scheduledFor: later() } });
+      assert.equal(doc.getElementById('sched-sync-auto'), null);
+      assert.equal(doc.getElementById('sched-sync-diverged'), null);
+      doc.querySelector('.sched-ok').click();
+      assert.equal('sync' in (await done), false);
+    } },
+    { name: 'show:false (Simple level / hidden row): no block, no key', run: async () => {
+      const { doc, done } = await open({ mode: 'create', initial: { scheduledFor: later() }, sync: { ...SINGLE, show: false, beforeRun: false } });
+      assert.equal(doc.getElementById('sched-sync-auto'), null);
+      doc.querySelector('.sched-ok').click();
+      assert.equal('sync' in (await done), false);
+    } },
+  ]);
 });
 
-test('show:false (Simple level / hidden row): no block, no key', async () => {
-  const { doc, done } = await open({ mode: 'create', initial: { scheduledFor: later() }, sync: { ...SINGLE, show: false, beforeRun: false } });
-  assert.equal(doc.getElementById('sched-sync-auto'), null);
-  doc.querySelector('.sched-ok').click();
-  assert.equal('sync' in (await done), false);
-});
-
-test('workspace (onDiverged null), sheet untouched: select opens on Project setting, result has no sync key', async () => {
-  const { doc, done } = await open({ mode: 'create', initial: { scheduledFor: later() },
-    sync: { show: true, beforeRun: null, shownBeforeRun: true, onDiverged: null } });
-  const sel = doc.getElementById('sched-sync-diverged');
-  assert.deepEqual(options(sel), ['', 'origin', 'fail']);
-  assert.equal(sel.value, '');
-  assert.equal(sel.options[0].textContent, 'Project setting');
-  doc.querySelector('.sched-ok').click();
-  assert.equal('sync' in (await done), false);
-});
-
-test('workspace: picking a policy carries it; picking Project setting again carries nothing', async () => {
-  const a = await open({ mode: 'create', initial: { scheduledFor: later() }, sync: { show: true, beforeRun: null, shownBeforeRun: true, onDiverged: null } });
-  const sel = a.doc.getElementById('sched-sync-diverged');
-  sel.value = 'origin'; sel.dispatchEvent(new a.window.Event('change', { bubbles: true }));
-  a.doc.querySelector('.sched-ok').click();
-  assert.deepEqual((await a.done).sync, { onDiverged: 'origin' });
-  const b = await open({ mode: 'create', initial: { scheduledFor: later() }, sync: { show: true, beforeRun: null, shownBeforeRun: true, onDiverged: null } });
-  const s2 = b.doc.getElementById('sched-sync-diverged');
-  s2.value = 'fail'; s2.dispatchEvent(new b.window.Event('change', { bubbles: true }));
-  s2.value = ''; s2.dispatchEvent(new b.window.Event('change', { bubbles: true }));
-  b.doc.querySelector('.sched-ok').click();
-  assert.equal('sync' in (await b.done), false);
+test('workspace sync (onDiverged null): untouched opens on Project setting with no key; picking a policy carries it; picking Project setting again carries nothing', async () => {
+  // Each row opens its own sheet.
+  await checkRows([
+    { name: 'workspace (onDiverged null), sheet untouched: select opens on Project setting, result has no sync key', run: async () => {
+      const { doc, done } = await open({ mode: 'create', initial: { scheduledFor: later() },
+        sync: { show: true, beforeRun: null, shownBeforeRun: true, onDiverged: null } });
+      const sel = doc.getElementById('sched-sync-diverged');
+      assert.deepEqual(options(sel), ['', 'origin', 'fail']);
+      assert.equal(sel.value, '');
+      assert.equal(sel.options[0].textContent, 'Project setting');
+      doc.querySelector('.sched-ok').click();
+      assert.equal('sync' in (await done), false);
+    } },
+    { name: 'workspace: picking a policy carries it; picking Project setting again carries nothing', run: async () => {
+      const a = await open({ mode: 'create', initial: { scheduledFor: later() }, sync: { show: true, beforeRun: null, shownBeforeRun: true, onDiverged: null } });
+      const sel = a.doc.getElementById('sched-sync-diverged');
+      sel.value = 'origin'; sel.dispatchEvent(new a.window.Event('change', { bubbles: true }));
+      a.doc.querySelector('.sched-ok').click();
+      assert.deepEqual((await a.done).sync, { onDiverged: 'origin' });
+      const b = await open({ mode: 'create', initial: { scheduledFor: later() }, sync: { show: true, beforeRun: null, shownBeforeRun: true, onDiverged: null } });
+      const s2 = b.doc.getElementById('sched-sync-diverged');
+      s2.value = 'fail'; s2.dispatchEvent(new b.window.Event('change', { bubbles: true }));
+      s2.value = ''; s2.dispatchEvent(new b.window.Event('change', { bubbles: true }));
+      b.doc.querySelector('.sched-ok').click();
+      assert.equal('sync' in (await b.done), false);
+    } },
+  ]);
 });
 
 test('a recurring result carries sync too', async () => {
@@ -116,20 +124,4 @@ test('a recurring result carries sync too', async () => {
   const out = await done;
   assert.ok(out.repeat);
   assert.deepEqual(out.sync, { beforeRun: false });
-});
-
-test('the Auto-sync switch row beats `.field > label` (flex, not a block label)', async () => {
-  const { doc, window, done } = await open({ mode: 'create', initial: { scheduledFor: later() }, sync: SINGLE });
-  const row = doc.getElementById('sched-sync-auto').closest('label');
-  assert.ok(row.classList.contains('switch-row'));
-  assert.ok(row.parentElement.classList.contains('field'), 'a direct child of .field, so `.field > label` claims it');
-  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
-  await done;
-  // `.field > label` (0,1,1) sets display:block and beats `.switch-row` (0,1,0): the switch
-  // span then collapses (no track) and its knob lands on the text. A qualified rule must win.
-  const css = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
-  const rule = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].find(([, sel]) => sel.split(',').some((x) => x.trim() === '.field > label.switch-row'));
-  assert.ok(rule, 'a `.field > label.switch-row` rule exists');
-  assert.match(rule[2], /display:\s*flex/);
-  assert.match(rule[2], /margin-bottom:\s*0/);
 });

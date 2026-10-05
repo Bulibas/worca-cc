@@ -13,6 +13,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import {
   buildRunReport, countIssues, workflowShape, cyclesByNode, renderIssueBody,
 } from '../src/core/run-report.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Module top level, like the other 169 files: WORCA_HOME must be set before any
 // lazy getDb() can migrate the developer's real ~/.worca-cc.
@@ -467,12 +468,22 @@ test('a run whose dir was deleted still builds; files is null, nothing throws', 
 });
 
 // ── pure helpers ──────────────────────────────────────────────────────────────
-test('countIssues tallies the four severities and folds unknowns to minor', () => {
-  assert.deepEqual(
-    countIssues([{ issues: [{ severity: 'critical' }, { severity: 'WAT' }, { severity: 'major' }] }]),
-    { critical: 1, major: 1, minor: 1, suggestion: 0 },
-    'an unknown severity is folded to minor by normalizeSeverity, never dropped');
-  assert.deepEqual(countIssues(null), { critical: 0, major: 0, minor: 0, suggestion: 0 });
+test('pure helpers: countIssues folds unknown severities to minor; cyclesByNode takes the max cycle per node', async () => {
+  await checkRows([
+    { name: 'countIssues tallies the four severities and folds unknowns to minor', run: () => {
+      assert.deepEqual(
+        countIssues([{ issues: [{ severity: 'critical' }, { severity: 'WAT' }, { severity: 'major' }] }]),
+        { critical: 1, major: 1, minor: 1, suggestion: 0 },
+        'an unknown severity is folded to minor by normalizeSeverity, never dropped');
+      assert.deepEqual(countIssues(null), { critical: 0, major: 0, minor: 0, suggestion: 0 });
+    } },
+    { name: 'cyclesByNode takes the max cycle per node and ignores untagged steps', run: () => {
+      assert.deepEqual(
+        cyclesByNode([{ nodeId: 'a', cycle: 1 }, { nodeId: 'a', cycle: 3 },
+                      { nodeId: 'b', cycle: 2 }, { cycle: 9 }]),
+        { a: 3, b: 2 });
+    } },
+  ]);
 });
 
 test('workflowShape reads a LEGACY v1 stepper without a graph key', () => {
@@ -495,25 +506,49 @@ test('workflowShape reads a LEGACY v1 stepper without a graph key', () => {
   assert.equal(shape.wires[0].maxCycles, 3);
 });
 
-test('workflowShape classifies the template id: stock ships, minted and user-saved wait', () => {
-  const shape = (template, auto) => workflowShape(
-    { version: 2, template, auto, graph: { nodes: [{ id: 'n', kind: 'agent', key: 'planner' }], wires: [] } },
-    {}).template;
+test('workflowShape: stock ids ship canonical names, minted/user-saved names are classified, and a missing stepper yields null', async () => {
+  await checkRows([
+    { name: 'workflowShape classifies the template id: stock ships, minted and user-saved wait', run: () => {
+      const shape = (template, auto) => workflowShape(
+        { version: 2, template, auto, graph: { nodes: [{ id: 'n', kind: 'agent', key: 'planner' }], wires: [] } },
+        {}).template;
 
-  assert.deepEqual(shape({ id: 'wf_default', name: 'Default' }),
-    { builtin: true, id: 'wf_default', name: 'Default' }, 'the shipping builtin');
-  assert.deepEqual(shape({ id: 'wf_quick-fix', name: 'Quick Fix' }),
-    { builtin: true, id: 'wf_quick-fix', name: 'Quick Fix' }, 'a V17 seed recipe is stock too');
-  assert.deepEqual(shape({ id: 'wf_acme-secrets', name: 'ACME secrets' }),
-    { builtin: false, id: 'wf_acme-secrets', name: 'ACME secrets' },
-    'a user-saved template names itself; only the builtin DISCRIMINATOR is derived');
-  // mintAutoWorkflowId avoids the two reserved ids but not a seed id, and on a fresh
-  // home no seed row exists at all — so `via: 'created'` is the authority, not the slug.
-  assert.deepEqual(shape({ id: 'wf_quick-fix', name: 'Quick Fix' }, { status: 'decided', via: 'created' }),
-    { builtin: false, id: 'wf_quick-fix', name: 'Quick Fix' },
-    'a template minted THIS run is never stock, whatever it slugs to');
-  assert.deepEqual(shape({ id: 'wf_quick-fix', name: 'Quick Fix' }, { status: 'decided', via: 'reused' }),
-    { builtin: true, id: 'wf_quick-fix', name: 'Quick Fix' }, 'Auto REUSING a stock recipe still names it');
+      assert.deepEqual(shape({ id: 'wf_default', name: 'Default' }),
+        { builtin: true, id: 'wf_default', name: 'Default' }, 'the shipping builtin');
+      assert.deepEqual(shape({ id: 'wf_quick-fix', name: 'Quick Fix' }),
+        { builtin: true, id: 'wf_quick-fix', name: 'Quick Fix' }, 'a V17 seed recipe is stock too');
+      assert.deepEqual(shape({ id: 'wf_acme-secrets', name: 'ACME secrets' }),
+        { builtin: false, id: 'wf_acme-secrets', name: 'ACME secrets' },
+        'a user-saved template names itself; only the builtin DISCRIMINATOR is derived');
+      // mintAutoWorkflowId avoids the two reserved ids but not a seed id, and on a fresh
+      // home no seed row exists at all — so `via: 'created'` is the authority, not the slug.
+      assert.deepEqual(shape({ id: 'wf_quick-fix', name: 'Quick Fix' }, { status: 'decided', via: 'created' }),
+        { builtin: false, id: 'wf_quick-fix', name: 'Quick Fix' },
+        'a template minted THIS run is never stock, whatever it slugs to');
+      assert.deepEqual(shape({ id: 'wf_quick-fix', name: 'Quick Fix' }, { status: 'decided', via: 'reused' }),
+        { builtin: true, id: 'wf_quick-fix', name: 'Quick Fix' }, 'Auto REUSING a stock recipe still names it');
+    } },
+    { name: 'a RENAMED stock workflow ships its canonical name, never the one the user typed', run: () => {
+      const shape = (template, auto) => workflowShape(
+        { version: 2, template, auto, graph: { nodes: [{ id: 'n', kind: 'agent', key: 'planner' }], wires: [] } },
+        {}).template;
+
+      assert.deepEqual(shape({ id: 'wf_full', name: 'PZ_RENAMED_BY_USER' }),
+        { builtin: true, id: 'wf_full', name: 'Full' },
+        'the name is keyed off the id in the shipped constants, not read from the manifest');
+      assert.deepEqual(shape({ id: 'wf_default', name: 'ACME internal pipeline' }),
+        { builtin: true, id: 'wf_default', name: 'Default' });
+      assert.deepEqual(
+        shape({ id: 'wf_quick-fix', name: 'ACME internal pipeline' }, { status: 'decided', via: 'reused' }),
+        { builtin: true, id: 'wf_quick-fix', name: 'Quick Fix' },
+        'the auto REUSED path reads the same constants');
+    } },
+    { name: 'workflowShape survives a run with no stepper at all', run: () => {
+      assert.equal(workflowShape(null), null);
+      assert.equal(workflowShape({}), null);
+      assert.equal(workflowShape('not json'), null);
+    } },
+  ]);
 });
 
 // Only the stock IDS are fixed vocabulary. The NAMES on the manifest are the workflow
@@ -521,22 +556,6 @@ test('workflowShape classifies the template id: stock ships, minted and user-sav
 // seed id is an ordinary renameable row whose upsert does `SET name = excluded.name`
 // (workflows.mjs:295-345). So a composer Save over `wf_full` keeps the id and replaces
 // the name with whatever the user typed.
-test('a RENAMED stock workflow ships its canonical name, never the one the user typed', () => {
-  const shape = (template, auto) => workflowShape(
-    { version: 2, template, auto, graph: { nodes: [{ id: 'n', kind: 'agent', key: 'planner' }], wires: [] } },
-    {}).template;
-
-  assert.deepEqual(shape({ id: 'wf_full', name: 'PZ_RENAMED_BY_USER' }),
-    { builtin: true, id: 'wf_full', name: 'Full' },
-    'the name is keyed off the id in the shipped constants, not read from the manifest');
-  assert.deepEqual(shape({ id: 'wf_default', name: 'ACME internal pipeline' }),
-    { builtin: true, id: 'wf_default', name: 'Default' });
-  assert.deepEqual(
-    shape({ id: 'wf_quick-fix', name: 'ACME internal pipeline' }, { status: 'decided', via: 'reused' }),
-    { builtin: true, id: 'wf_quick-fix', name: 'Quick Fix' },
-    'the auto REUSED path reads the same constants');
-});
-
 test('a renamed stock workflow does not leak through the payload or the issue body', async () => {
   const renamed = await seedPipeline(join(home, 'renamed'), {
     status: 'done', phase: 'done', cycle: 1,
@@ -554,17 +573,4 @@ test('a renamed stock workflow does not leak through the payload or the issue bo
   assert.doesNotMatch(body, /PZ_RENAMED_BY_USER/, 'nor the prefilled issue body');
   assert.match(body, /\| workflow \| Full \(manifest v2, 1 nodes\) \|/,
     'the body names the recipe worca ships, which is the fact a maintainer needs');
-});
-
-test('workflowShape survives a run with no stepper at all', () => {
-  assert.equal(workflowShape(null), null);
-  assert.equal(workflowShape({}), null);
-  assert.equal(workflowShape('not json'), null);
-});
-
-test('cyclesByNode takes the max cycle per node and ignores untagged steps', () => {
-  assert.deepEqual(
-    cyclesByNode([{ nodeId: 'a', cycle: 1 }, { nodeId: 'a', cycle: 3 },
-                  { nodeId: 'b', cycle: 2 }, { cycle: 9 }]),
-    { a: 3, b: 2 });
 });

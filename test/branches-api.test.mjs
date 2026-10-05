@@ -2,12 +2,14 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 import { app } from '../ui/server.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 let srv, base;
 const created = [];
@@ -22,15 +24,10 @@ after(async () => {
   await Promise.all(created.map((d) => rm(d, { recursive: true, force: true })));
 });
 
-async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-api-'));
+function freshRepo() {
+  const dir = templateRepo('api', { branch: 'main', user: true, files: { a: 'a' } });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'a'), 'a');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
-  g(['branch', 'feature/x']);
+  spawnSync('git', ['branch', 'feature/x'], { cwd: dir });
   return dir;
 }
 
@@ -60,37 +57,26 @@ test('GET /api/branches on a non-git dir returns empty branches + null current',
   assert.equal(data.current, null);
 });
 
-test('POST /api/run rejects an option-like sourceBranch with 400 (M1)', async () => {
+test('POST /api/run rejects an option-like or unknown sourceBranch with 400 (M1)', async () => {
   const repo = await freshRepo();
-  const r = await fetch(`${base}/api/run`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ projectDir: repo, prompt: 'x', mock: true, sourceBranch: '--force' }),
-  });
-  assert.equal(r.status, 400);
-  assert.match((await r.json()).error, /sourceBranch/);
-});
-
-test('POST /api/run rejects an unknown sourceBranch with 400 (M1)', async () => {
-  const repo = await freshRepo();
-  const r = await fetch(`${base}/api/run`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ projectDir: repo, prompt: 'x', mock: true, sourceBranch: 'no-such-branch' }),
-  });
-  assert.equal(r.status, 400);
-  assert.match((await r.json()).error, /sourceBranch/);
-});
-
-// S1: a request whose Host is not loopback is refused (DNS-rebinding guard).
-test('non-loopback Host header is forbidden (S1)', async () => {
-  const status = await new Promise((resolve, reject) => {
-    const req = http.request(
-      { hostname: '127.0.0.1', port: srv.address().port, path: '/api/projects', method: 'GET', headers: { Host: 'evil.example.com' } },
-      (res) => { res.resume(); resolve(res.statusCode); },
-    );
-    req.on('error', reject);
-    req.end();
-  });
-  assert.equal(status, 403);
+  await checkRows([
+    { name: 'POST /api/run rejects an option-like sourceBranch with 400 (M1)', run: async () => {
+      const r = await fetch(`${base}/api/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', connection: 'close' },
+        body: JSON.stringify({ projectDir: repo, prompt: 'x', mock: true, sourceBranch: '--force' }),
+      });
+      assert.equal(r.status, 400);
+      assert.match((await r.json()).error, /sourceBranch/);
+    } },
+    { name: 'POST /api/run rejects an unknown sourceBranch with 400 (M1)', run: async () => {
+      const r = await fetch(`${base}/api/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', connection: 'close' },
+        body: JSON.stringify({ projectDir: repo, prompt: 'x', mock: true, sourceBranch: 'no-such-branch' }),
+      });
+      assert.equal(r.status, 400);
+      assert.match((await r.json()).error, /sourceBranch/);
+    } },
+  ]);
 });

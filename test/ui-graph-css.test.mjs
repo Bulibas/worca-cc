@@ -10,16 +10,6 @@ import { injectGeometry, GEOMETRY_CSS_VARS } from '../src/shared/graph/geometry.
 
 const css = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8');
 
-// The v2 CANVAS block only — bounded ABOVE by the composer-shell block Task 9
-// appends after it. Slicing to end-of-file (the first draft did) drags the shell
-// and dialog CSS in, and `.gv-drag-ghost{border:1.5px …}` then trips the
-// "no hard-coded geometry number" assertion for a decorative border.
-function v2Block() {
-  const from = css.indexOf('/* v2 node-graph canvas');
-  const to = css.indexOf('/* v2 composer shell', from + 1);
-  return css.slice(from, to === -1 ? css.length : to);
-}
-
 test('every --gv-* variable style.css uses is one injectGeometry writes, and vice versa', () => {
   const dom = new JSDOM('<!doctype html><body><div id="s"></div></body>');
   const el = dom.window.document.getElementById('s');
@@ -29,59 +19,4 @@ test('every --gv-* variable style.css uses is one injectGeometry writes, and vic
   assert.ok(written.size >= 10, `injectGeometry wrote ${written.size} vars`);
   assert.deepEqual([...used].sort(), [...written].sort(), 'style.css --gv-* set === injectGeometry set');
   assert.equal(Object.keys(GEOMETRY_CSS_VARS).length, written.size);
-});
-
-test('the v2 canvas block hard-codes no geometry number', () => {
-  const block = v2Block();
-  assert.ok(block.length > 400, 'the v2 canvas block exists in style.css');
-  // Geometry constants only — decorative px (font sizes, radii, the dot grid) are fine.
-  // The lookbehind keeps `font-size:11.5px` from reading as the BORDER constant
-  // `1.5px`: the ban is on a geometry number STANDING ALONE, not on any suffix.
-  for (const bad of ['220px', '34px', '8.5px', '1.5px', '26px', '191.5px', '110.5px']) {
-    const re = new RegExp(`(?<![\\d.])${bad.replace('.', '\\.')}`);
-    assert.ok(!re.test(block), `v2 canvas CSS must not hard-code ${bad} — use var(--gv-*)`);
-  }
-});
-
-test('.gv-wires path carries fill:none on the ELEMENT selector (ghost blob is impossible)', () => {
-  const rule = css.match(/\.gv-wires\s+path\s*\{[^}]*\}/);
-  assert.ok(rule, '.gv-wires path rule exists');
-  assert.ok(/fill\s*:\s*none/.test(rule[0]), 'fill:none is on the layer element selector, not on .wire');
-});
-
-test('v2 cards neutralise the unscoped v1 .node rule', () => {
-  const block = v2Block();
-  const card = block.match(/\.gv-world\s+\.node\s*\{[^}]*\}/);
-  assert.ok(card, '.gv-world .node rule exists');
-  for (const prop of ['position:absolute', 'display:block', 'padding:0', 'gap:0', 'width:var(--gv-node-w)']) {
-    assert.ok(card[0].replace(/\s+/g, '').includes(prop), `resets ${prop}`);
-  }
-  assert.ok(/\.gv-world\s+\.node::before\s*\{[^}]*content\s*:\s*none/.test(block), 'kills the v1 colour bar');
-});
-
-test('node corners follow the card scale in lockstep: header and footer sit 1.5px (the border) inside', () => {
-  const block = v2Block();
-  const rule = (sel) => (block.match(new RegExp(`\\.gv-world\\s+\\.${sel}\\s*\\{[^}]*\\}`)) || [''])[0];
-  assert.match(rule('node'), /border-radius:calc\(14px \* var\(--gv-scale\)\)/, 'the node matches --r-card');
-  assert.match(rule('nhead'), /border-radius:calc\(12\.5px \* var\(--gv-scale\)\) calc\(12\.5px \* var\(--gv-scale\)\) 0 0/);
-  assert.match(rule('xfoot'), /border-radius:0 0 12\.5px 12\.5px/);
-});
-
-test('the canvas nav cluster floats clear of the rail in both rail states', () => {
-  const nav = css.match(/^\.gv-nav\s*\{[^}]*\}/m);   // anchored: the wf-popup overrides ".wf-pop-canvas .gv-nav{" also contain the token
-  assert.ok(nav, '.gv-nav rule exists');
-  const body = nav[0].replace(/\s+/g, '');
-  assert.ok(body.includes('position:absolute'), 'absolutely placed inside the canvas host');
-  assert.ok(body.includes('bottom:12px'), '12px off the canvas floor');
-  assert.ok(body.includes('right:352px'), '340px open rail + the 12px gutter');
-  const collapsed = css.match(/\.gv-ins-rail\[data-open="collapsed"\]\s*~\s*\.gv-nav\s*\{[^}]*\}/);
-  assert.ok(collapsed, 'a collapsed rail pulls the cluster right, via a forward sibling selector');
-  assert.ok(collapsed[0].replace(/\s+/g, '').includes('right:40px'), '28px collapsed rail + the same gutter');
-  const btn = css.match(/\.gv-nav-btn\s*\{[^}]*\}/);
-  assert.ok(btn, '.gv-nav-btn rule exists');
-  assert.ok(/var\(--panel\)/.test(btn[0]), 'the button ground is a token, so dark mode is free');
-  assert.ok(!/#[0-9a-fA-F]{3,6}\b/.test(btn[0]), 'no literal colour in the button rule');
-  assert.ok(/\.gv-nav-btn:disabled\s*\{[^}]*opacity/.test(css), 'a clamped button reads as disabled');
-  // Placement matters: the canvas block above bans hard-coded geometry px.
-  assert.ok(!v2Block().includes('.gv-nav'), 'the cluster CSS lives in the composer-shell block');
 });

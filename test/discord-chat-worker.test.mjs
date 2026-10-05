@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDiscordWorker, validateConfig, renderToMarkdown } from '../plugins/discord-chat/channel/worker.mjs';
 import { createGatewayClient, INTENTS } from '../plugins/discord-chat/channel/gateway.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const json = (obj, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => obj });
 
@@ -208,36 +209,44 @@ test('validateConfig: ok, 401 pins botToken, gateway failure reported', async ()
   assert.match(gw.errors[0].message, /gateway\/bot failed: HTTP 500/);
 });
 
-test('start(): /gateway/bot 502 throws (supervisor retries)', async () => {
-  const { ctx, events } = workerCtx();
-  const fetchFn = async (url) => {
-    if (url.endsWith('/users/@me')) return json({ id: '1', username: 'bot' });
-    if (url.endsWith('/gateway/bot')) return json({}, 502);
-    throw new Error(`unexpected ${url}`);
-  };
-  const w = createDiscordWorker(ctx, { fetchFn, WebSocketImpl: FakeWebSocket, _sleep: async () => {} });
-  await assert.rejects(() => w.start(), (e) => /gateway\/bot failed: HTTP 502/.test(e.message) && e.kind === 'network');
-  assert.equal(events.status.at(-1).state, 'disconnected');
-});
-
-test('start(): gateway session limit exhausted throws instead of dying silently', async () => {
-  const { ctx } = workerCtx();
-  const fetchFn = async (url) => {
-    if (url.endsWith('/users/@me')) return json({ id: '1', username: 'bot' });
-    if (url.endsWith('/gateway/bot')) return json({ url: 'wss://gw.test', session_start_limit: { remaining: 0, reset_after: 120000 } });
-    throw new Error(`unexpected ${url}`);
-  };
-  const w = createDiscordWorker(ctx, { fetchFn, WebSocketImpl: FakeWebSocket, _sleep: async () => {} });
-  await assert.rejects(() => w.start(), (e) => /session limit exhausted — resets in 2min/.test(e.message) && e.kind === 'rate-limit');
-});
-
-test('start(): 401 on /users/@me does NOT throw (definitive degrade)', async () => {
-  const { ctx, events } = workerCtx();
-  const w = createDiscordWorker(ctx, { fetchFn: async () => json({}, 401), WebSocketImpl: FakeWebSocket, _sleep: async () => {} });
-  const r = await w.start();
-  assert.equal(r.identity, null);
-  assert.equal(events.status.at(-1).state, 'disconnected');
-  assert.match(events.status.at(-1).detail, /check botToken/);
+test('start() failure modes: 401 degrades without throwing; 503 /users/@me, 502 /gateway/bot and an exhausted session limit throw with the right kind', async () => {
+  await checkRows([
+    { name: 'start(): /gateway/bot 502 throws (supervisor retries)', run: async () => {
+      const { ctx, events } = workerCtx();
+      const fetchFn = async (url) => {
+        if (url.endsWith('/users/@me')) return json({ id: '1', username: 'bot' });
+        if (url.endsWith('/gateway/bot')) return json({}, 502);
+        throw new Error(`unexpected ${url}`);
+      };
+      const w = createDiscordWorker(ctx, { fetchFn, WebSocketImpl: FakeWebSocket, _sleep: async () => {} });
+      await assert.rejects(() => w.start(), (e) => /gateway\/bot failed: HTTP 502/.test(e.message) && e.kind === 'network');
+      assert.equal(events.status.at(-1).state, 'disconnected');
+    } },
+    { name: 'start(): gateway session limit exhausted throws instead of dying silently', run: async () => {
+      const { ctx } = workerCtx();
+      const fetchFn = async (url) => {
+        if (url.endsWith('/users/@me')) return json({ id: '1', username: 'bot' });
+        if (url.endsWith('/gateway/bot')) return json({ url: 'wss://gw.test', session_start_limit: { remaining: 0, reset_after: 120000 } });
+        throw new Error(`unexpected ${url}`);
+      };
+      const w = createDiscordWorker(ctx, { fetchFn, WebSocketImpl: FakeWebSocket, _sleep: async () => {} });
+      await assert.rejects(() => w.start(), (e) => /session limit exhausted — resets in 2min/.test(e.message) && e.kind === 'rate-limit');
+    } },
+    { name: 'start(): 401 on /users/@me does NOT throw (definitive degrade)', run: async () => {
+      const { ctx, events } = workerCtx();
+      const w = createDiscordWorker(ctx, { fetchFn: async () => json({}, 401), WebSocketImpl: FakeWebSocket, _sleep: async () => {} });
+      const r = await w.start();
+      assert.equal(r.identity, null);
+      assert.equal(events.status.at(-1).state, 'disconnected');
+      assert.match(events.status.at(-1).detail, /check botToken/);
+    } },
+    { name: 'start(): a non-401 /users/@me failure throws and is not relabelled "network error"', run: async () => {
+      const { ctx, events } = workerCtx();
+      const w = createDiscordWorker(ctx, { fetchFn: async () => json({}, 503), WebSocketImpl: FakeWebSocket, _sleep: async () => {} });
+      await assert.rejects(() => w.start(), /users\/@me failed: HTTP 503/);
+      assert.ok(!/network error/.test(events.status.at(-1)?.detail || ''), 'HTTP failure must not be relabelled "network error"');
+    } },
+  ]);
 });
 
 test('send(): every message body disables mention parsing', async () => {
@@ -250,13 +259,6 @@ test('send(): every message body disables mention parsing', async () => {
   await w.send('123', { title: null, body: [{ kind: 'text', value: 'hi @everyone <@42>' }], severity: 'info' });
   assert.equal(bodies.length, 1);
   assert.deepEqual(bodies[0].allowed_mentions, { parse: [] });
-});
-
-test('start(): a non-401 /users/@me failure throws and is not relabelled "network error"', async () => {
-  const { ctx, events } = workerCtx();
-  const w = createDiscordWorker(ctx, { fetchFn: async () => json({}, 503), WebSocketImpl: FakeWebSocket, _sleep: async () => {} });
-  await assert.rejects(() => w.start(), /users\/@me failed: HTTP 503/);
-  assert.ok(!/network error/.test(events.status.at(-1)?.detail || ''), 'HTTP failure must not be relabelled "network error"');
 });
 
 // Gateway timer hygiene: the INVALID_SESSION delayed close must stay bound to
@@ -275,34 +277,44 @@ class BeatWS extends FakeWebSocket {
   }
 }
 
-test('gateway: INVALID_SESSION close timer never fires on a replacement socket', async (t) => {
-  FakeWebSocket.instances = [];
-  // random:()=>0 → the delayed close lands at exactly 1000ms.
-  const { client } = gatewayFixtureWith({ WebSocketImpl: RecordingWS, random: () => 0 });
-  t.after(() => client.stop()); // a failing assert must not leave timers alive
-  client.start();
-  const s1 = await waitFor(() => FakeWebSocket.instances[0]);
-  s1.frame({ op: 10, d: { heartbeat_interval: 100000 } });
-  s1.frame({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess', user: { username: 'bot' } } });
-  s1.frame({ op: 9, d: true });          // INVALID_SESSION arms the delayed close on s1
-  s1.close(4900);                        // client reconnects → s2
-  const s2 = await waitFor(() => FakeWebSocket.instances[1]);
-  await new Promise((r) => setTimeout(r, 1300)); // past the 1000ms timer
-  assert.equal(s2.closedWith, undefined, 'stale timer must not kill the replacement');
-  await client.stop();
-});
-
-test('gateway: INVALID_SESSION still closes the socket that received it', async (t) => {
-  FakeWebSocket.instances = [];
-  const { client } = gatewayFixtureWith({ WebSocketImpl: RecordingWS, random: () => 0 });
-  t.after(() => client.stop());
-  client.start();
-  const s1 = await waitFor(() => FakeWebSocket.instances[0]);
-  s1.frame({ op: 10, d: { heartbeat_interval: 100000 } });
-  s1.frame({ op: 9, d: true });
-  await waitFor(() => s1.closedWith !== undefined);
-  assert.equal(s1.closedWith, 4901);
-  await client.stop();
+test('gateway: the INVALID_SESSION delayed close hits only the socket that received it', async () => {
+  // Two clients run concurrently, so the 1 s delayed-close timer is paid once.
+  // Each records its own sockets (FakeWebSocket.instances is shared by both) and
+  // stops in its own finally: a failing assert must not leave timers alive.
+  const clientRun = async (body) => {
+    const sockets = [];
+    class OwnWS extends RecordingWS { constructor(url) { super(url); sockets.push(this); } }
+    // random:()=>0 → the delayed close lands at exactly 1000ms.
+    const { client } = gatewayFixtureWith({ WebSocketImpl: OwnWS, random: () => 0 });
+    try { await body(client, sockets); } finally { await client.stop(); }
+  };
+  const replacement = clientRun(async (client, sockets) => {
+    client.start();
+    const s1 = await waitFor(() => sockets[0]);
+    s1.frame({ op: 10, d: { heartbeat_interval: 100000 } });
+    s1.frame({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess', user: { username: 'bot' } } });
+    s1.frame({ op: 9, d: true });          // INVALID_SESSION arms the delayed close on s1
+    s1.close(4900);                        // client reconnects → s2
+    const s2 = await waitFor(() => sockets[1]);
+    await new Promise((r) => setTimeout(r, 1300)); // past the 1000ms timer
+    assert.equal(s2.closedWith, undefined, 'stale timer must not kill the replacement');
+  });
+  const received = clientRun(async (client, sockets) => {
+    client.start();
+    const s1 = await waitFor(() => sockets[0]);
+    s1.frame({ op: 10, d: { heartbeat_interval: 100000 } });
+    s1.frame({ op: 9, d: true });
+    await waitFor(() => s1.closedWith !== undefined);
+    assert.equal(s1.closedWith, 4901);
+  });
+  // The rows await these in order; a run that fails before its row is reached
+  // must not surface as an unhandled rejection.
+  replacement.catch(() => {});
+  received.catch(() => {});
+  await checkRows([
+    { name: 'gateway: INVALID_SESSION close timer never fires on a replacement socket', run: () => replacement },
+    { name: 'gateway: INVALID_SESSION still closes the socket that received it', run: () => received },
+  ]);
 });
 
 test('gateway: heartbeat interval starts AFTER the jittered first beat, not in parallel', async (t) => {

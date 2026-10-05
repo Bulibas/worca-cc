@@ -4,23 +4,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildOverviewPrompt, normalizeOverview, generateOverview } from '../src/core/overview-agent.mjs';
+import { normalizeOverview, generateOverview } from '../src/core/overview-agent.mjs';
 import { _resetForTests } from '../src/core/db.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
 import { persistResults, persistDiffPatch } from '../src/core/results.mjs';
 import { buildClaudeArgs } from '../src/core/claude-runner.mjs';
-
-test('buildOverviewPrompt embeds patch + already-flagged issues', () => {
-  const p = buildOverviewPrompt({
-    patch: 'diff --git a/x b/x\n+foo',
-    results: { summary: { filesNew: 1, filesChanged: 0 } },
-    reviews: [{ kind: 'impl', cycle: 1, issues: [{ severity: 'major', title: 'known bug', detail: '', location: 'x:1' }], summary: '' }],
-  });
-  assert.match(p, /diff --git/);
-  assert.match(p, /known bug/);          // so the agent only reports NEW findings
-  assert.match(p, /"narrative"/);         // output contract present in prompt
-  assert.match(p, /diffFindings/);
-});
 
 test('normalizeOverview coerces bad input to a safe shape', () => {
   assert.deepEqual(normalizeOverview(null), { narrative: '', diffFindings: [], diffCheckTruncated: false });

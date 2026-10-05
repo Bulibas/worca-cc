@@ -10,6 +10,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { loadAgentRegistry, pluginAgentLayers } from '../src/core/agent-registry.mjs';
 import { readPluginsLock, writePluginsLock, pluginDir, pluginCurrentDir } from '../src/core/plugins-lock.mjs';
 
@@ -65,65 +66,59 @@ test('a plugin agent joins the registry with origin plugin:<name> and agentPath 
     'agentPath resolves THROUGH the current/ symlink, never a versions/ path');
 });
 
-test('a plugin key colliding with a built-in is SKIPPED with a warning (builtin > plugin)', () => {
+test('plugin key precedence: builtin > user > plugin (skip with warning); among plugins the lexicographically first name wins', async () => {
   const builtin = tmp('worca-cc-pbuiltin-');
   writeAgent(builtin, 'sharedKey', { order: 1, displayName: 'Builtin Wins' });
+  writeAgent(builtin, 'alpha', { order: 2 });
+  const user = tmp('worca-cc-puser-');
+  writeAgent(user, 'userKey', { order: 2, displayName: 'User Wins' });
   installFakePlugin('collider-a', [['sharedKey', { displayName: 'EVIL SHADOW' }]]);
+  installFakePlugin('collider-b', [['userKey', { displayName: 'plugin copy' }]]);
+  installFakePlugin('bbb-plugin', [['duped', { displayName: 'From BBB' }]]); // installed first…
+  installFakePlugin('aaa-plugin', [['duped', { displayName: 'From AAA' }]]); // …but aaa sorts first
   const warned = [];
   const orig = console.warn;
   console.warn = (...a) => warned.push(a.join(' '));
-  try {
-    const reg = loadAgentRegistry(builtin, { userAgentsDir: null });
-    assert.equal(reg.sharedKey.displayName, 'Builtin Wins');
-    assert.equal(reg.sharedKey.origin, 'builtin');
-    assert.ok(warned.some((w) => /sharedKey/.test(w) && /collider-a/.test(w) && /skip/i.test(w)), warned.join('; '));
-  } finally { console.warn = orig; }
+  let reg;
+  try { reg = loadAgentRegistry(builtin, { userAgentsDir: user }); } finally { console.warn = orig; }
+  await checkRows([
+    { name: 'a plugin key colliding with a built-in is SKIPPED with a warning (builtin > plugin)', run: () => {
+      assert.equal(reg.sharedKey.displayName, 'Builtin Wins');
+      assert.equal(reg.sharedKey.origin, 'builtin');
+      assert.ok(warned.some((w) => /sharedKey/.test(w) && /collider-a/.test(w) && /skip/i.test(w)), warned.join('; '));
+    } },
+    { name: 'a plugin key colliding with a user agent is skipped (user > plugin)', run: () => {
+      assert.equal(reg.userKey.displayName, 'User Wins');
+      assert.equal(reg.userKey.origin, 'user');
+    } },
+    { name: 'two plugins shipping the same key: lexicographically FIRST plugin name wins', run: () => {
+      assert.equal(reg.duped.origin, 'plugin:aaa-plugin', 'lock-insertion order is irrelevant; name order decides');
+      assert.equal(reg.duped.displayName, 'From AAA');
+    } },
+  ]);
 });
 
-test('a plugin key colliding with a user agent is skipped (user > plugin)', () => {
-  const builtin = tmp('worca-cc-pbuiltin-');
-  const user = tmp('worca-cc-puser-');
-  writeAgent(builtin, 'alpha2', { order: 1 });
-  writeAgent(user, 'userKey', { order: 2, displayName: 'User Wins' });
-  installFakePlugin('collider-b', [['userKey', { displayName: 'plugin copy' }]]);
-  const reg = loadAgentRegistry(builtin, { userAgentsDir: user });
-  assert.equal(reg.userKey.displayName, 'User Wins');
-  assert.equal(reg.userKey.origin, 'user');
-});
-
-test('two plugins shipping the same key: lexicographically FIRST plugin name wins', () => {
-  const builtin = tmp('worca-cc-pbuiltin-');
-  writeAgent(builtin, 'alpha3', { order: 1 });
-  installFakePlugin('bbb-plugin', [['duped', { displayName: 'From BBB' }]]); // installed first…
-  installFakePlugin('aaa-plugin', [['duped', { displayName: 'From AAA' }]]); // …but aaa sorts first
-  const reg = loadAgentRegistry(builtin, { userAgentsDir: null });
-  assert.equal(reg.duped.origin, 'plugin:aaa-plugin', 'lock-insertion order is irrelevant; name order decides');
-  assert.equal(reg.duped.displayName, 'From AAA');
-});
-
-test('a disabled plugin contributes no agents (and no layer)', () => {
-  const builtin = tmp('worca-cc-pbuiltin-');
-  writeAgent(builtin, 'alpha4', { order: 1 });
-  installFakePlugin('sleepy', [['sleepyAgent', {}]], { enabled: false });
-  assert.equal(loadAgentRegistry(builtin, { userAgentsDir: null }).sleepyAgent, undefined);
-  assert.ok(!pluginAgentLayers().some((l) => l.plugin === 'sleepy'));
-});
-
-test('a broken plugin (no current/ symlink) is silently ignored, never fatal', () => {
+test('plugins that contribute nothing: disabled (no layer), broken (no current/, never fatal), includePlugins:false escape hatch', async () => {
   const builtin = tmp('worca-cc-pbuiltin-');
   writeAgent(builtin, 'alpha5', { order: 1 });
-  installFakePlugin('broken-one', [['brokenAgent', {}]], { broken: true });
-  const reg = loadAgentRegistry(builtin, { userAgentsDir: null });
-  assert.equal(reg.brokenAgent, undefined);
-  assert.ok(reg.alpha5, 'the rest of the registry loads normally');
-});
-
-test('opts.includePlugins:false is the escape hatch that hides every plugin agent', () => {
-  const builtin = tmp('worca-cc-pbuiltin-');
-  writeAgent(builtin, 'alpha6', { order: 1 });
-  installFakePlugin('esc-hatch', [['escAgent', {}]]);
-  assert.equal(loadAgentRegistry(builtin, { userAgentsDir: null, includePlugins: false }).escAgent, undefined);
-  assert.ok(loadAgentRegistry(builtin, { userAgentsDir: null }).escAgent, 'default (true) includes plugins');
+  await checkRows([
+    { name: 'a disabled plugin contributes no agents (and no layer)', run: () => {
+      installFakePlugin('sleepy', [['sleepyAgent', {}]], { enabled: false });
+      assert.equal(loadAgentRegistry(builtin, { userAgentsDir: null }).sleepyAgent, undefined);
+      assert.ok(!pluginAgentLayers().some((l) => l.plugin === 'sleepy'));
+    } },
+    { name: 'a broken plugin (no current/ symlink) is silently ignored, never fatal', run: () => {
+      installFakePlugin('broken-one', [['brokenAgent', {}]], { broken: true });
+      const reg = loadAgentRegistry(builtin, { userAgentsDir: null });
+      assert.equal(reg.brokenAgent, undefined);
+      assert.ok(reg.alpha5, 'the rest of the registry loads normally');
+    } },
+    { name: 'opts.includePlugins:false is the escape hatch that hides every plugin agent', run: () => {
+      installFakePlugin('esc-hatch', [['escAgent', {}]]);
+      assert.equal(loadAgentRegistry(builtin, { userAgentsDir: null, includePlugins: false }).escAgent, undefined);
+      assert.ok(loadAgentRegistry(builtin, { userAgentsDir: null }).escAgent, 'default (true) includes plugins');
+    } },
+  ]);
 });
 
 test('agent-store refuses Update/Delete on plugin-origin agents (code PLUGIN)', async () => {

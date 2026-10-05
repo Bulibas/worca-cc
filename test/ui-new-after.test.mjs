@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { lastToast, fieldErrorText, cardAlertOf } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -115,33 +116,33 @@ test('#new/after/p1: the pick waits on the form, the branch select leads with th
   assert.equal('sourceBranch' in runBodies[0], false);
 });
 
-test('the Branches row follows the value the pick sets without a change event: the run before it, then back to HEAD (#527)', async () => {
+test('the Branches row follows the pick without a change event, and Start now instead drops the pick and the previous-run option (#527)', async () => {
   const { window } = await boot('#new/after/p1', { withSync: true });
   const doc = window.document;
   await branchesReady(doc);
   await tick(40);
-  const mode = doc.getElementById('branches-mode-wrap');
-  const text = () => doc.querySelector('#bt-project-outcome .bt-text')?.textContent || '';
-  assert.equal(doc.getElementById('sourceBranch').value, '__previous__');
-  assert.equal(mode.hidden, true, 'the previous run\'s branch is not HEAD\'s: nothing to sync');
-  assert.equal(text(), 'Starts from the branch of the run before it');
-  doc.getElementById('new-sched-clear').click();
-  for (let i = 0; i < 100 && mode.hidden; i++) await tick(5);
-  assert.equal(doc.getElementById('sourceBranch').value, 'main');
-  assert.equal(mode.hidden, false, 'back on HEAD\'s branch: the choice returns');
-  assert.equal(text(), 'Gets 2 new commits from origin first');
-});
-
-test('Start now instead drops the pick and the previous-run option', async () => {
-  const { window } = await boot('#new/after/p1');
-  const doc = window.document;
-  await branchesReady(doc);
-  doc.getElementById('new-sched-clear').click();
-  await tick();
-  const sel = doc.getElementById('sourceBranch');
-  assert.equal([...sel.options].some((o) => o.value === '__previous__'), false);
-  assert.equal(sel.value, 'main', 'back to the current branch');
-  assert.equal(doc.getElementById('start-btn-label').textContent, 'Start run');
+  await checkRows([
+    { name: 'the Branches row follows the value the pick sets without a change event: the run before it, then back to HEAD (#527)', run: async () => {
+      const mode = doc.getElementById('branches-mode-wrap');
+      const text = () => doc.querySelector('#bt-project-outcome .bt-text')?.textContent || '';
+      assert.equal(doc.getElementById('sourceBranch').value, '__previous__');
+      assert.equal(mode.hidden, true, 'the previous run\'s branch is not HEAD\'s: nothing to sync');
+      assert.equal(text(), 'Starts from the branch of the run before it');
+      doc.getElementById('new-sched-clear').click();
+      for (let i = 0; i < 100 && mode.hidden; i++) await tick(5);
+      assert.equal(doc.getElementById('sourceBranch').value, 'main');
+      assert.equal(mode.hidden, false, 'back on HEAD\'s branch: the choice returns');
+      assert.equal(text(), 'Gets 2 new commits from origin first');
+    } },
+    { name: 'Start now instead drops the pick and the previous-run option', run: async () => {
+      // The row above clicked "Start now instead"; click it here only if that row stopped before it.
+      if (!doc.getElementById('new-sched').hidden) { doc.getElementById('new-sched-clear').click(); await tick(); }
+      const sel = doc.getElementById('sourceBranch');
+      assert.equal([...sel.options].some((o) => o.value === '__previous__'), false);
+      assert.equal(sel.value, 'main', 'back to the current branch');
+      assert.equal(doc.getElementById('start-btn-label').textContent, 'Start run');
+    } },
+  ]);
 });
 
 test('#new/after/g1: a predecessor whose branch is gone leaves "Branch of the run before it" out and submits a real source branch', async () => {
@@ -161,18 +162,30 @@ test('#new/after/g1: a predecessor whose branch is gone leaves "Branch of the ru
   assert.equal(runBodies[0].sourceBranch, 'main');
 });
 
-test('#new/after/g2: a workspace predecessor whose branches are gone keeps the switch hidden and off', async () => {
-  const { window, runBodies } = await boot('#new/after/g2');
-  const doc = window.document;
-  await tick(30);
-  assert.equal(doc.getElementById('ws-source-previous-row').classList.contains('hidden'), true);
-  assert.equal(doc.getElementById('ws-source-previous').classList.contains('on'), false);
-  assert.ok([...doc.querySelectorAll('#ws-source-branches select.ws-src-select')].every((s) => !s.disabled), 'the member picks stay the person’s');
-  doc.getElementById('prompt').value = 'Follow up';
-  doc.getElementById('start-btn').click();
-  await tick(3);
-  assert.equal(runBodies.length, 1);
-  assert.equal(runBodies[0].sourceFromPrevious, undefined);
+test('a workspace predecessor never puts the previous-run option on a disabled or hidden control (g2 branches gone, w2 no members)', async () => {
+  await checkRows([
+    { name: '#new/after/g2: a workspace predecessor whose branches are gone keeps the switch hidden and off', run: async () => {
+      const { window, runBodies } = await boot('#new/after/g2');
+      const doc = window.document;
+      await tick(30);
+      assert.equal(doc.getElementById('ws-source-previous-row').classList.contains('hidden'), true);
+      assert.equal(doc.getElementById('ws-source-previous').classList.contains('on'), false);
+      assert.ok([...doc.querySelectorAll('#ws-source-branches select.ws-src-select')].every((s) => !s.disabled), 'the member picks stay the person’s');
+      doc.getElementById('prompt').value = 'Follow up';
+      doc.getElementById('start-btn').click();
+      await tick(3);
+      assert.equal(runBodies.length, 1);
+      assert.equal(runBodies[0].sourceFromPrevious, undefined);
+    } },
+    { name: '#new/after/w2: a workspace without members keeps the previous-run option OFF the disabled stand-in select', run: async () => {
+      const { window } = await boot('#new/after/w2');
+      const doc = window.document;
+      await tick(30);
+      assert.equal(doc.getElementById('new-sched-badge').textContent, 'After run');
+      assert.equal(doc.getElementById('ws-source-previous-row').classList.contains('hidden'), false, 'the switch row is the workspace-mode control');
+      assert.equal([...doc.getElementById('sourceBranch').options].some((o) => o.value === '__previous__'), false, 'never on the stand-in the single select becomes in workspace mode');
+    } },
+  ]);
 });
 
 test('#new/after/w1: a workspace predecessor shows the switch, disables the member selects, and submits the flag', async () => {
@@ -224,12 +237,17 @@ test('the previous-run option survives a branch rebuild for another project', as
   assert.equal(sel.value, '__previous__');
 });
 
-test('#new/after/t:t9: a predecessor in a project this worca does not know is refused', async () => {
-  const { window } = await boot('#new/after/t:t9');
-  const doc = window.document;
-  await tick(30);
-  assert.equal(doc.getElementById('new-sched').hidden, true, 'no pick is made');
-  assert.equal(doc.getElementById('form-msg').textContent, 'That run’s project is not registered.');
+test('a predecessor that cannot be waited on is refused (t9 unregistered project, t8 already-ended ticket)', async () => {
+  await checkRows([
+    { name: '#new/after/t:t9: a predecessor in a project this worca does not know is refused', hash: '#new/after/t:t9', msg: 'That run’s project is not registered.' },
+    { name: '#new/after/t:t8: a ticket predecessor that already ended is refused — nothing to wait for', hash: '#new/after/t:t8', msg: '‘Gone’ was canceled — nothing to wait for.' },
+  ].map(({ name, hash, msg }) => ({ name, run: async () => {
+    const { window } = await boot(hash);
+    const doc = window.document;
+    await tick(30);
+    assert.equal(doc.getElementById('new-sched').hidden, true, 'no pick is made');
+    assert.equal(doc.getElementById('form-msg').textContent, msg);
+  } })));
 });
 
 test('#new/after/e1: a predecessor that already ended badly is picked with the any policy', async () => {
@@ -241,14 +259,6 @@ test('#new/after/e1: a predecessor that already ended badly is picked with the a
   doc.getElementById('start-btn').click();
   await tick(3);
   assert.equal(runBodies[0].afterPolicy, 'any', 'resolveAfterRef would refuse done for an errored run');
-});
-
-test('#new/after/t:t8: a ticket predecessor that already ended is refused — nothing to wait for', async () => {
-  const { window } = await boot('#new/after/t:t8');
-  const doc = window.document;
-  await tick(30);
-  assert.equal(doc.getElementById('new-sched').hidden, true, 'no pick is made');
-  assert.equal(doc.getElementById('form-msg').textContent, '‘Gone’ was canceled — nothing to wait for.');
 });
 
 test('#new/after/w1: turning the switch off survives a member re-render', async () => {
@@ -264,15 +274,6 @@ test('#new/after/w1: turning the switch off survives a member re-render', async 
   assert.ok([...doc.querySelectorAll('#ws-source-branches select.ws-src-select')].every((s) => !s.disabled), '…and the fresh member selects stay enabled');
 });
 
-test('#new/after/w2: a workspace without members keeps the previous-run option OFF the disabled stand-in select', async () => {
-  const { window } = await boot('#new/after/w2');
-  const doc = window.document;
-  await tick(30);
-  assert.equal(doc.getElementById('new-sched-badge').textContent, 'After run');
-  assert.equal(doc.getElementById('ws-source-previous-row').classList.contains('hidden'), false, 'the switch row is the workspace-mode control');
-  assert.equal([...doc.getElementById('sourceBranch').options].some((o) => o.value === '__previous__'), false, 'never on the stand-in the single select becomes in workspace mode');
-});
-
 // #555 §7.4: the Start flow reports through #start-btn, refusals through a card alert above the
 // form's own action row, and "Run started" is a toast — never a line on a page the user has left (D6).
 async function bootNew(runReply) {
@@ -282,18 +283,33 @@ async function bootNew(runReply) {
 }
 const settle = async (doc) => { for (let i = 0; i < 200 && doc.getElementById('start-btn').dataset.fbState === 'busy'; i++) await tick(5); };
 
-test('D6: a started run raises a "Run started" toast with Open run, and leaves no line on #form-msg', async () => {
-  const { window, runBodies } = await bootNew(() => ({ data: { runId: 'r-9' }, status: 200 }));
+test('a started run toasts "Run started" with Open run, and repeated Starts each post and never leave the form stuck', async () => {
+  const { window, runBodies } = await bootNew((body, n) => ({ data: { runId: `r-${n}` }, status: 200 }));
   const doc = window.document;
-  doc.getElementById('prompt').value = 'Add tests';
-  doc.getElementById('start-btn').click();
-  await settle(doc);
-  assert.equal(runBodies.length, 1);
-  assert.match(window.location.hash, /^#running\/r-9/);
-  assert.equal(doc.getElementById('form-msg').textContent, '');
-  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Run started', detail: '', action: 'Open run' });
-  assert.equal(doc.getElementById('start-btn').dataset.fbState, 'done');
-  assert.equal(doc.getElementById('start-btn').textContent.trim(), 'Started');
+  const btn = doc.getElementById('start-btn');
+  await checkRows([
+    { name: 'D6: a started run raises a "Run started" toast with Open run, and leaves no line on #form-msg', run: async () => {
+      doc.getElementById('prompt').value = 'Add tests';
+      doc.getElementById('start-btn').click();
+      await settle(doc);
+      assert.equal(runBodies.length, 1);
+      assert.match(window.location.hash, /^#running\/r-1/);   // the first call's runId
+      assert.equal(doc.getElementById('form-msg').textContent, '');
+      assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Run started', detail: '', action: 'Open run' });
+      assert.equal(doc.getElementById('start-btn').dataset.fbState, 'done');
+      assert.equal(doc.getElementById('start-btn').textContent.trim(), 'Started');
+    } },
+    { name: 'a second Start while the first still reads "Started" posts again and never leaves the form stuck', run: async () => {
+      // The first Start is the row above's click.
+      assert.equal(btn.dataset.fbState, 'done');
+      doc.getElementById('run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+      await settle(doc);
+      assert.equal(runBodies.length, 2, 'the second submit was not skipped');
+      doc.getElementById('run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+      await settle(doc);
+      assert.equal(runBodies.length, 3, 'nor the third');
+    } },
+  ]);
 });
 
 test('a failed start never shows Started: a "Run not started" card alert sits directly above the form\'s own action row', async () => {
@@ -361,20 +377,4 @@ test('a cancelled sync dialog never shows Started: a "Start cancelled" warn toas
   assert.deepEqual(lastToast(doc), { tone: 'warn', title: 'Start cancelled', detail: '', action: '' });
   assert.equal(cardAlertOf(doc.getElementById('run-form')), null);
   assert.equal(doc.getElementById('form-msg').textContent, '');
-});
-
-test('a second Start while the first still reads "Started" posts again and never leaves the form stuck', async () => {
-  const { window, runBodies } = await bootNew((body, n) => ({ data: { runId: `r-${n}` }, status: 200 }));
-  const doc = window.document;
-  const btn = doc.getElementById('start-btn');
-  doc.getElementById('prompt').value = 'Add tests';
-  btn.click();
-  await settle(doc);
-  assert.equal(btn.dataset.fbState, 'done');
-  doc.getElementById('run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await settle(doc);
-  assert.equal(runBodies.length, 2, 'the second submit was not skipped');
-  doc.getElementById('run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await settle(doc);
-  assert.equal(runBodies.length, 3, 'nor the third');
 });

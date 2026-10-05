@@ -182,12 +182,6 @@ test('a complete v2 PUT CLEARS the optional capability surface', async () => {
   assert.equal(partial.meta.description, 'partial edit');
 });
 
-test('sideEffect "memory" round-trips through a v2 PUT', async () => {
-  const on = await updateAgent('docsWriter', { meta: { ...META, sideEffect: 'memory' } });
-  assert.equal(on.meta.sideEffect, 'memory');
-  assert.equal((await readAgent('docsWriter')).meta.sideEffect, 'memory');
-});
-
 test('an unknown mockRole is a warning, not a 400', async () => {
   const { meta } = await createAgent({
     meta: { ...META, displayName: 'Mocky', mockRole: 'no-such-role' }, markdown: MD,

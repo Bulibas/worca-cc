@@ -10,6 +10,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { validatePluginDir, ASK_NEEDS_API_4 } from '../src/core/plugin-manifest.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const scratch = [];
 function mkPluginDir(files) {
@@ -55,43 +56,27 @@ function plugin(ask, { range = '>=4 <5' } = {}) {
   });
 }
 
-test('a valid form on an API-4 plugin validates clean, strict included', () => {
-  const dir = plugin({ forms: { 'pick-one': GOOD_FORM } });
-  const v = validatePluginDir(dir, { strict: true });
-  assert.deepEqual(errs(v), []);
-  assert.deepEqual(warns(v), []);
-  assert.equal(v.ok, true);
-});
-
-test('a form that fails gate 1 is a WARNING, and an ERROR under --strict', () => {
-  const bad = { ...GOOD_FORM, layout: [{ widget: 'grid', bind: 'data.summary' }, { widget: 'select', field: 'verdict', label: 'Verdict' }] };
-  const dir = plugin({ forms: { 'pick-one': bad } });
-
-  const lax = validatePluginDir(dir);
-  assert.deepEqual(errs(lax), [], 'a bad form never blocks an install — the host degrades to generic questions');
-  assert.ok(warns(lax).includes(
-    'agents/helper.meta.json: ask.forms."pick-one" layout#1: "grid" is not in the catalog and has no usable fallback'),
-    warns(lax).join('\n'));
-  assert.equal(lax.ok, true);
-
-  const strict = validatePluginDir(dir, { strict: true });
-  assert.ok(errs(strict).some((e) => e.includes('ask.forms."pick-one"') && e.includes('grid')), errs(strict).join('\n'));
-  assert.equal(strict.ok, false);
-});
-
-test('a bad form id is reported against that id, with P1\u2019s own sentence', () => {
-  const dir = plugin({ forms: { 'Not An Id': GOOD_FORM } });
-  const v = validatePluginDir(dir);
-  assert.ok(warns(v).includes(
-    'agents/helper.meta.json: ask.forms."Not An Id": form id "Not An Id" must match /^[a-z][a-z0-9-]{0,47}$/'),
-    warns(v).join('\n'));
-  assert.deepEqual(errs(v), []);
-});
-
-test('a whole-block refusal is ONE line against `ask`, with no per-form noise', () => {
-  const dir = plugin({ notForms: {} });
-  const v = validatePluginDir(dir);
-  assert.deepEqual(warns(v), ['agents/helper.meta.json: ask: "ask" is { forms: { <id>: <form> } }']);
+test('clean cases validate strict with no problems (valid form at API 4, no ask block, empty forms below API 4); a non-object ask is ONE line', async () => {
+  const NO_ASK = 'an agent with no ask block is untouched, and a non-object ask is ONE line';
+  await checkRows([
+    ...[
+      ['a valid form on an API-4 plugin validates clean, strict included', () => plugin({ forms: { 'pick-one': GOOD_FORM } })],
+      [NO_ASK, () => plugin(null)],
+      ['an EMPTY forms map below API 4 is silent: it loads as "no forms" and the host ignores nothing', () => plugin({ forms: {} }, { range: '>=3 <4' })],
+    ].map(([name, dir]) => ({ name, run: () => {
+      const v = validatePluginDir(dir(), { strict: true });
+      assert.deepEqual(v.problems, []);
+      assert.equal(v.ok, true);
+    } })),
+    { name: `${NO_ASK}: a non-object ask`, run: () => {
+      // Level is deliberately NOT pinned here: if P2's meta gate also rejects a
+      // non-object `ask`, that is an error there and a warning here \u2014 what matters
+      // is that the author gets exactly ONE line naming `ask`, never a cascade.
+      const v = validatePluginDir(plugin('yes please'));
+      const lines = v.problems.map((p) => p.message).filter((m) => m.includes('helper.meta.json') && m.includes('ask'));
+      assert.equal(lines.length, 1, v.problems.map((p) => `${p.level}: ${p.message}`).join('\n'));
+    } },
+  ]);
 });
 
 test('every failed rule is reported, not just the first', () => {
@@ -115,19 +100,4 @@ test('forms without API 4: one warning naming the API, never promoted by --stric
     assert.ok(warns(v).includes(`agents/helper.meta.json: ${ASK_NEEDS_API_4}`), warns(v).join('\n'));
     assert.deepEqual(errs(v), [], 'declaring an older API is a choice, not a defect');
   }
-});
-
-test('an agent with no ask block is untouched, and a non-object ask is ONE line', () => {
-  assert.deepEqual(validatePluginDir(plugin(null), { strict: true }).problems, []);
-  // Level is deliberately NOT pinned here: if P2's meta gate also rejects a
-  // non-object `ask`, that is an error there and a warning here \u2014 what matters
-  // is that the author gets exactly ONE line naming `ask`, never a cascade.
-  const v = validatePluginDir(plugin('yes please'));
-  const lines = v.problems.map((p) => p.message).filter((m) => m.includes('helper.meta.json') && m.includes('ask'));
-  assert.equal(lines.length, 1, v.problems.map((p) => `${p.level}: ${p.message}`).join('\n'));
-});
-
-test('an EMPTY forms map below API 4 is silent: it loads as "no forms" and the host ignores nothing', () => {
-  const v = validatePluginDir(plugin({ forms: {} }, { range: '>=3 <4' }), { strict: true });
-  assert.deepEqual(v.problems, []);
 });

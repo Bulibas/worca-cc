@@ -3,9 +3,9 @@
 // (the run's projectDir, on `dev`) and a teammate clone B that pushes. Sync is OFF unless
 // opts.sync.members[projectKey].enabled (D4). The diff base (checkpointRefs) moves to the
 // run's start only when the run moved its start (C3/D17).
-import { test, after, afterEach } from 'node:test';
+import { test, before, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, mkdirSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -15,7 +15,10 @@ import { readPipelineForResume } from '../src/core/artifacts.mjs';
 import { projectKey } from '../src/core/store.mjs';
 import { _testing as gitSync } from '../src/core/git-sync.mjs';
 import { getDb } from '../src/core/db.mjs';
+import { writeGraphWorkflow } from '../src/core/workflows.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateWorld } from './helpers/git-dir.mjs';
 
 useTempHome(after);
 
@@ -58,12 +61,10 @@ function git(cwd, args) {
 const sha = (cwd, ref) => git(cwd, ['rev-parse', ref]);
 let n = 0;
 
-/** bare origin + clone A (projectDir, on dev) + teammate clone B. */
-function world() {
-  const root = mkdtempSync(join(scratch, `w${++n}-`));
+/** The template: bare origin + clone A (`proj`, on dev) + teammate clone B. */
+function buildWorld(root) {
   const origin = join(root, 'origin.git');
-  const a = join(root, `proj${n}`);
-  const b = join(root, 'teammate');
+  const a = join(root, 'proj');
   git(root, ['init', '-q', '--bare', '-b', 'dev', origin]);
   mkdirSync(a);
   git(a, ['init', '-q', '-b', 'dev']);
@@ -71,8 +72,17 @@ function world() {
   git(a, ['add', '-A']); git(a, ['commit', '-qm', 'seed']);
   git(a, ['remote', 'add', 'origin', origin]);
   git(a, ['push', '-q', '-u', 'origin', 'dev']);
-  git(root, ['clone', '-q', origin, b]);
-  return { root, origin, a, b, key: projectKey(a) };
+  git(root, ['clone', '-q', origin, join(root, 'teammate')]);
+}
+const worlds = [];
+after(() => { for (const d of worlds) rmSync(d, { recursive: true, force: true, maxRetries: 3 }); });
+/** bare origin + clone A (projectDir `proj<n>`, on dev) + teammate clone B, copied from the template. */
+function world() {
+  const root = templateWorld('run-harness-sync', buildWorld, 'rhs');
+  worlds.push(root);
+  const a = join(root, `proj${++n}`);
+  renameSync(join(root, 'proj'), a); // nothing in git metadata names A's own path
+  return { root, origin: join(root, 'origin.git'), a, b: join(root, 'teammate'), key: projectKey(a) };
 }
 /** Teammate commits `files` on `branch` (created off dev when new) and pushes. */
 function teammate(w, files, branch = 'dev') {
@@ -91,8 +101,23 @@ function localCommit(dir, file) {
   git(dir, ['add', '-A']); git(dir, ['commit', '-qm', `local ${file}`]);
 }
 const on = (key, extra = {}) => ({ members: { [key]: { enabled: true, ...extra } } });
+/** Task -> implementer -> End. Sync, the checkpoint and the diff base are setup work, the same
+ *  under any graph; the mock implementer still writes files, so every run has a real diff. */
+const SYNC_WF = {
+  id: 'wf_rhs_sync', name: 'Sync demo', domain: 'coding',
+  nodes: [
+    { id: 'n_task', kind: 'task', x: 0, y: 0, config: {} },
+    { id: 'n_impl', kind: 'agent', key: 'implementer', x: 200, y: 0, config: {} },
+    { id: 'n_end', kind: 'end', x: 400, y: 0, config: {} },
+  ],
+  wires: [
+    { id: 'w1', from: { node: 'n_task', port: 'task' }, to: { node: 'n_impl', port: 'plan' } },
+    { id: 'w2', from: { node: 'n_impl', port: 'done' }, to: { node: 'n_end', port: 'result' } },
+  ],
+};
+before(() => writeGraphWorkflow(SYNC_WF));
 function orchFor(w, extra = {}) {
-  return createOrchestrator({ projectDir: w.a, prompt: 'sync demo', auto: true, claude: { mock: true }, ...extra });
+  return createOrchestrator({ projectDir: w.a, prompt: 'sync demo', auto: true, claude: { mock: true }, workflowId: SYNC_WF.id, ...extra });
 }
 /** Everything the run persisted as its diff (results.json + diff-patch.patch), as one string. */
 function diffText(pipelineDir) {
@@ -119,10 +144,11 @@ async function upToSetup(orch) {
 const auditText = (id) => getDb().prepare('SELECT text FROM pipeline_events WHERE pipeline_id = ?').all(id).map((r) => r.text).join('\n');
 
 // ── single project ──────────────────────────────────────────────────────────
-test('behind + sync on: fast-forwards dev, moves the diff base, records the sync, keeps preflight ticking', { timeout: 60000 }, async () => {
+test('behind + sync on: fast-forwards dev, moves the diff base, records the sync (fetch time charged to x:sync:1), keeps preflight ticking', { timeout: 60000 }, async () => {
   const w = world();
   const pre = sha(w.a, 'HEAD');
   const tip = teammate(w, ['mate1.txt', 'mate2.txt']);
+  fetchDelayMs = 300;
   const orch = orchFor(w, { sync: on(w.key) });
   let seen = null;
   const real = orch._setupRunRoot.bind(orch);
@@ -143,30 +169,28 @@ test('behind + sync on: fast-forwards dev, moves the diff base, records the sync
     }
   });
   const res = await orch.run();
-  assert.equal(res.status, 'done', JSON.stringify(res));
-  const st = orch.getState();
-  assert.equal(st.branch.sync.result, 'fast-forwarded');
-  assert.equal(st.branch.sync.commits, 2);
-  assert.equal(st.branch.baseSha, tip);
-  assert.equal(sha(w.a, 'dev'), tip, 'local dev fast-forwarded to origin/dev');
-  assert.notEqual(pre, tip);
-  assert.equal(st.checkpointRef, st.branch.baseSha, 'C3: the diff base is the start');
-  const diff = diffText(res.pipelineDir);
-  assert.doesNotMatch(diff, /mate1\.txt|mate2\.txt/, 'no teammate file in the run\'s diff');
-  assert.equal(syncRow(orch)?.status, 'done');
-  assert.deepEqual(seen, { status: 'start', ticking: true, stage: 'Creating the worktree' });
-  assert.equal(preflightAfterSync, true, 'the first state after Sync turns done shows preflight running');
-  assert.ok(fetches >= 1);
-});
-
-test('sync row time: the fetch is charged to x:sync:1', { timeout: 60000 }, async () => {
-  const w = world();
-  teammate(w, ['m.txt']);
-  fetchDelayMs = 300;
-  const orch = orchFor(w, { sync: on(w.key) });
-  const res = await orch.run();
-  assert.equal(res.status, 'done', JSON.stringify(res));
-  assert.ok(syncRow(orch).activeMs >= 250, `activeMs ${syncRow(orch).activeMs}`);
+  await checkRows([
+    { name: 'behind + sync on: fast-forwards dev, moves the diff base, records the sync, keeps preflight ticking', run: () => {
+      assert.equal(res.status, 'done', JSON.stringify(res));
+      const st = orch.getState();
+      assert.equal(st.branch.sync.result, 'fast-forwarded');
+      assert.equal(st.branch.sync.commits, 2);
+      assert.equal(st.branch.baseSha, tip);
+      assert.equal(sha(w.a, 'dev'), tip, 'local dev fast-forwarded to origin/dev');
+      assert.notEqual(pre, tip);
+      assert.equal(st.checkpointRef, st.branch.baseSha, 'C3: the diff base is the start');
+      const diff = diffText(res.pipelineDir);
+      assert.doesNotMatch(diff, /mate1\.txt|mate2\.txt/, 'no teammate file in the run\'s diff');
+      assert.equal(syncRow(orch)?.status, 'done');
+      assert.deepEqual(seen, { status: 'start', ticking: true, stage: 'Creating the worktree' });
+      assert.equal(preflightAfterSync, true, 'the first state after Sync turns done shows preflight running');
+      assert.ok(fetches >= 1);
+    } },
+    { name: 'sync row time: the fetch is charged to x:sync:1', run: () => {
+      assert.equal(res.status, 'done', JSON.stringify(res));
+      assert.ok(syncRow(orch).activeMs >= 250, `activeMs ${syncRow(orch).activeMs}`);
+    } },
+  ]);
 });
 
 test('up to date + sync on: no Sync row, result up-to-date, baseSha set', { timeout: 60000 }, async () => {
@@ -282,30 +306,34 @@ test('source first seen by the Sync fetch: result created, diff base at origin/f
   assert.doesNotMatch(diffText(res.pipelineDir), /late\.txt/);
 });
 
-test('remote start keeps the feature != source guard (terminal)', { timeout: 60000 }, async () => {
-  const w = world();
-  teammate(w, ['mate.txt']);
-  localCommit(w.a, 'local.txt');
-  const before = sha(w.a, 'dev');
-  const orch = orchFor(w, { branch: { source: 'dev', feature: 'dev' }, sync: on(w.key, { onDiverged: 'origin' }) });
-  const res = await orch.run();
-  assert.equal(res.status, 'error', JSON.stringify(res));
-  assert.match(res.error, /must differ/);
-  assert.equal(sha(w.a, 'dev'), before);
-  const list = git(w.a, ['worktree', 'list', '--porcelain']);
-  assert.equal((list.match(/branch refs\/heads\/dev$/gm) || []).length, 1, 'dev is checked out only in the project dir');
-});
-
-test('feature == source + sync on + behind: refused before the sync (0 fetches, dev not moved)', { timeout: 60000 }, async () => {
-  const w = world();
-  teammate(w, ['mate.txt']);
-  const before = sha(w.a, 'dev');
-  const orch = orchFor(w, { branch: { source: 'dev', feature: 'dev' }, sync: on(w.key) });
-  const res = await orch.run();
-  assert.equal(res.status, 'error', JSON.stringify(res));
-  assert.match(res.error, /must differ/);
-  assert.equal(sha(w.a, 'dev'), before);
-  assert.equal(fetches, 0);
+test('feature == source is refused: before any fetch when behind, and on the remote-start path (terminal, dev untouched)', { timeout: 60000 }, async () => {
+  await checkRows([
+    { name: 'remote start keeps the feature != source guard (terminal)', run: async () => {
+      const w = world();
+      teammate(w, ['mate.txt']);
+      localCommit(w.a, 'local.txt');
+      const before = sha(w.a, 'dev');
+      const orch = orchFor(w, { branch: { source: 'dev', feature: 'dev' }, sync: on(w.key, { onDiverged: 'origin' }) });
+      const res = await orch.run();
+      assert.equal(res.status, 'error', JSON.stringify(res));
+      assert.match(res.error, /must differ/);
+      assert.equal(sha(w.a, 'dev'), before);
+      const list = git(w.a, ['worktree', 'list', '--porcelain']);
+      assert.equal((list.match(/branch refs\/heads\/dev$/gm) || []).length, 1, 'dev is checked out only in the project dir');
+    } },
+    { name: 'feature == source + sync on + behind: refused before the sync (0 fetches, dev not moved)', run: async () => {
+      gitSync.reset(); fetches = 0; fetchDelayMs = 0; installRunner();   // the file's afterEach, once per former test
+      const w = world();
+      teammate(w, ['mate.txt']);
+      const before = sha(w.a, 'dev');
+      const orch = orchFor(w, { branch: { source: 'dev', feature: 'dev' }, sync: on(w.key) });
+      const res = await orch.run();
+      assert.equal(res.status, 'error', JSON.stringify(res));
+      assert.match(res.error, /must differ/);
+      assert.equal(sha(w.a, 'dev'), before);
+      assert.equal(fetches, 0);
+    } },
+  ]);
 });
 
 test('reused feature branch + behind + sync on: base moves, diff base does not', { timeout: 60000 }, async () => {
@@ -357,16 +385,34 @@ test('no remote + sync on: no Sync row, no record, no audit line', { timeout: 60
   assert.doesNotMatch(auditText(orch.getState().id), /Sync `/);
 });
 
-test('memory-defrag run with sync enabled: no fetch', { timeout: 60000 }, async () => {
-  const w = world();
-  teammate(w, ['m.txt']);
-  const orch = orchFor(w, { sync: on(w.key) });
-  orch.memoryScope = 'project';
-  await upToSetup(orch);
-  const r = await orch._syncMemberBase(orch.members[0], 'dev');
-  assert.deepEqual(r, {});
-  await orch._ensureLocalSource(orch.members[0], 'feat/none');
-  assert.equal(fetches, 0);
+test('memory-defrag and scan runs never fetch or create branches even with the member enabled', { timeout: 60000 }, async () => {
+  await checkRows([
+    { name: 'memory-defrag run with sync enabled: no fetch', run: async () => {
+      const w = world();
+      teammate(w, ['m.txt']);
+      const orch = orchFor(w, { sync: on(w.key) });
+      orch.memoryScope = 'project';
+      await upToSetup(orch);
+      const r = await orch._syncMemberBase(orch.members[0], 'dev');
+      assert.deepEqual(r, {});
+      await orch._ensureLocalSource(orch.members[0], 'feat/none');
+      assert.equal(fetches, 0);
+    } },
+    { name: 'scan run: no fetch and no branch creation even with the member enabled', run: async () => {
+      gitSync.reset(); fetches = 0; fetchDelayMs = 0; installRunner();   // the file's afterEach, once per former test
+      const w1 = world();
+      teammate(w1, ['late.txt'], 'feat/late');
+      git(w1.a, ['fetch', '-q', 'origin']);
+      const orch = createOrchestrator({ ...wsOpts([w1.a]), prompt: 'x', auto: true, claude: { mock: true }, sync: on(w1.key) });
+      orch._isWorkspaceScan = () => true;
+      await upToSetup(orch);
+      const m = orch.members[0];
+      assert.deepEqual(await orch._syncMemberBase(m, 'dev'), {});
+      await orch._ensureLocalSource(m, 'feat/late');
+      assert.equal(fetches, 0);
+      assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', 'refs/heads/feat/late'], { cwd: w1.a }).status, 1);
+    } },
+  ]);
 });
 
 // ── paused setup and replay ─────────────────────────────────────────────────
@@ -471,34 +517,32 @@ function wsOpts(dirs, { branch = { source: 'dev' } } = {}) {
   const projects = dirs.map((d) => ({ projectDir: d, projectKey: projectKey(d), projectName: basename(d) }))
     .sort((x, y) => (x.projectKey < y.projectKey ? -1 : x.projectKey > y.projectKey ? 1 : 0));
   const id = `wks-sync-${projects.map((p) => p.projectKey).join('').slice(0, 8)}`;
-  return { workspace: { id, key: id, name: 'Sync WS', description: '', projects: projects.map((p) => ({ ...p, branch })) }, branch };
+  return { workspace: { id, key: id, name: 'Sync WS', description: '', projects: projects.map((p) => ({ ...p, branch })) }, branch, workflowId: SYNC_WF.id };
 }
 
-test('workspace: two members behind, both enabled → both fast-forwarded, one Sync row', { timeout: 90000 }, async () => {
-  const w1 = world(); const w2 = world();
-  teammate(w1, ['a1.txt']); teammate(w2, ['b1.txt']);
-  const orch = createOrchestrator({ ...wsOpts([w1.a, w2.a]), prompt: 'x', auto: true, claude: { mock: true },
+test('workspace: per-member Sync — enabled members behind are fast-forwarded under ONE Sync row; a disabled member is untouched', { timeout: 90000 }, async () => {
+  const w1 = world(); const w2 = world(); const w3 = world();
+  teammate(w1, ['a1.txt']); teammate(w2, ['b1.txt']); teammate(w3, ['c1.txt']);
+  const before3 = sha(w3.a, 'dev');
+  const orch = createOrchestrator({ ...wsOpts([w1.a, w2.a, w3.a]), prompt: 'x', auto: true, claude: { mock: true },
     sync: { members: { [w1.key]: { enabled: true }, [w2.key]: { enabled: true } } } });
   const res = await orch.run();
-  assert.equal(res.status, 'done', JSON.stringify(res));
   const st = orch.getState();
-  assert.equal(st.branches[w1.key].sync.result, 'fast-forwarded');
-  assert.equal(st.branches[w2.key].sync.result, 'fast-forwarded');
-  assert.equal(st.steps.filter((s) => s.key === 'x:sync:1').length, 1);
-  assert.equal(syncRow(orch).status, 'done');
-});
-
-test('workspace: one member enabled, one not → only the enabled one syncs', { timeout: 90000 }, async () => {
-  const w1 = world(); const w2 = world();
-  teammate(w1, ['a1.txt']); teammate(w2, ['b1.txt']);
-  const before2 = sha(w2.a, 'dev');
-  const orch = createOrchestrator({ ...wsOpts([w1.a, w2.a]), prompt: 'x', auto: true, claude: { mock: true }, sync: on(w1.key) });
-  const res = await orch.run();
-  assert.equal(res.status, 'done', JSON.stringify(res));
-  const st = orch.getState();
-  assert.equal(st.branches[w1.key].sync.result, 'fast-forwarded');
-  assert.equal('sync' in st.branches[w2.key], false);
-  assert.equal(sha(w2.a, 'dev'), before2);
+  await checkRows([
+    { name: 'workspace: two members behind, both enabled → both fast-forwarded, one Sync row', run: () => {
+      assert.equal(res.status, 'done', JSON.stringify(res));
+      assert.equal(st.branches[w1.key].sync.result, 'fast-forwarded');
+      assert.equal(st.branches[w2.key].sync.result, 'fast-forwarded');
+      assert.equal(st.steps.filter((s) => s.key === 'x:sync:1').length, 1);
+      assert.equal(syncRow(orch).status, 'done');
+    } },
+    { name: 'workspace: one member enabled, one not → only the enabled one syncs', run: () => {
+      assert.equal(res.status, 'done', JSON.stringify(res));
+      assert.equal(st.branches[w1.key].sync.result, 'fast-forwarded');
+      assert.equal('sync' in st.branches[w3.key], false);
+      assert.equal(sha(w3.a, 'dev'), before3);
+    } },
+  ]);
 });
 
 test('workspace: a terminal member failure wins over a pausable one', { timeout: 90000 }, async () => {
@@ -546,18 +590,4 @@ test('scheduled workspace member source pushed after a fresh fetch: fetched once
   const m = orch.members[0];
   await orch._ensureLocalSource(m, 'feat/other', { replay: true });
   assert.equal(fetches, 0);
-});
-
-test('scan run: no fetch and no branch creation even with the member enabled', { timeout: 60000 }, async () => {
-  const w1 = world();
-  teammate(w1, ['late.txt'], 'feat/late');
-  git(w1.a, ['fetch', '-q', 'origin']);
-  const orch = createOrchestrator({ ...wsOpts([w1.a]), prompt: 'x', auto: true, claude: { mock: true }, sync: on(w1.key) });
-  orch._isWorkspaceScan = () => true;
-  await upToSetup(orch);
-  const m = orch.members[0];
-  assert.deepEqual(await orch._syncMemberBase(m, 'dev'), {});
-  await orch._ensureLocalSource(m, 'feat/late');
-  assert.equal(fetches, 0);
-  assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', 'refs/heads/feat/late'], { cwd: w1.a }).status, 1);
 });

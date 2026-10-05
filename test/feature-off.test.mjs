@@ -15,32 +15,39 @@ import { listTaskSources } from '../src/core/sources.mjs';
 import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
 import { createPipeline } from '../src/core/artifacts.mjs';
 import { prepare } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
 const scratch = [];
 after(() => Promise.all(scratch.map((d) => rm(d, { recursive: true, force: true }))));
 
-test('listTaskSources with zero plugins is exactly prompt + markdown', () => {
-  assert.deepEqual(listTaskSources(), [
-    { type: 'prompt', displayName: 'Prompt' },
-    { type: 'markdown', displayName: 'Markdown' },
+test('with zero plugins: prompt + markdown sources, no plugin agents, prompt pipelines stamp source_type=prompt', async () => {
+  await checkRows([
+    { name: 'with zero plugins: sources are exactly prompt + markdown and no plugin-origin agent loads', run: async () => {
+      await checkRows([
+        { name: 'listTaskSources with zero plugins is exactly prompt + markdown', run: async () => {
+          assert.deepEqual(listTaskSources(), [
+            { type: 'prompt', displayName: 'Prompt' },
+            { type: 'markdown', displayName: 'Markdown' },
+          ]);
+        } },
+        { name: 'loadAgentRegistry with zero plugins serves no plugin-origin agents', run: async () => {
+          const registry = loadAgentRegistry();
+          const metas = Object.values(registry);
+          assert.ok(metas.length > 0, 'built-in agents must load');
+          assert.equal(registry.planner?.origin, 'builtin');
+          assert.deepEqual(metas.filter((m) => String(m.origin).startsWith('plugin:')).map((m) => m.key), []);
+        } },
+      ]);
+    } },
+    { name: "createPipeline({prompt}) stamps source_type='prompt', source_ref NULL", run: async () => {
+      const proj = await mkdtemp(join(tmpdir(), 'worca-cc-featoff-'));
+      scratch.push(proj);
+      const { id } = await createPipeline(proj, { prompt: 'plain prompt run' });
+      const row = prepare('SELECT source_type, source_ref FROM pipelines WHERE id = ?').get(id);
+      assert.equal(row.source_type, 'prompt');
+      assert.equal(row.source_ref, null);
+    } },
   ]);
-});
-
-test('loadAgentRegistry with zero plugins serves no plugin-origin agents', () => {
-  const registry = loadAgentRegistry();
-  const metas = Object.values(registry);
-  assert.ok(metas.length > 0, 'built-in agents must load');
-  assert.equal(registry.planner?.origin, 'builtin');
-  assert.deepEqual(metas.filter((m) => String(m.origin).startsWith('plugin:')).map((m) => m.key), []);
-});
-
-test("createPipeline({prompt}) stamps source_type='prompt', source_ref NULL", async () => {
-  const proj = await mkdtemp(join(tmpdir(), 'worca-cc-featoff-'));
-  scratch.push(proj);
-  const { id } = await createPipeline(proj, { prompt: 'plain prompt run' });
-  const row = prepare('SELECT source_type, source_ref FROM pipelines WHERE id = ?').get(id);
-  assert.equal(row.source_type, 'prompt');
-  assert.equal(row.source_ref, null);
 });

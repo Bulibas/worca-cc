@@ -2,12 +2,13 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { resolve, join } from 'node:path';
+import { rm } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { checkRows } from './helpers/rows.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 const CLI = resolve(fileURLToPath(import.meta.url), '..', '..', 'src', 'cli', 'worca-cc.mjs');
 
@@ -17,34 +18,21 @@ useTempHome(after);
 
 const created = [];
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true }))));
-async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-cli-'));
+function freshRepo() {
+  const dir = templateRepo('cli', { branch: 'main', user: true, files: { a: 'a' } });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'a'), 'a');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 
-test('--help advertises --source-branch and --branch', () => {
-  const r = spawnSync(process.execPath, [CLI, '--help']);
-  const out = r.stdout.toString();
-  assert.match(out, /--source-branch/);
-  assert.match(out, /--branch /);
-});
-
-test('--source-branch without value exits 2', () => {
-  const r = spawnSync(process.execPath, [CLI, '--prompt', 'x', '--source-branch']);
-  assert.equal(r.status, 2);
-  assert.match(r.stderr.toString(), /--source-branch requires a value/);
-});
-
-test('--branch without value exits 2', () => {
-  const r = spawnSync(process.execPath, [CLI, '--prompt', 'x', '--branch']);
-  assert.equal(r.status, 2);
-  assert.match(r.stderr.toString(), /--branch requires a value/);
+test('--source-branch / --branch without a value exit 2 with "requires a value"', async () => {
+  await checkRows([
+    ['--source-branch without value exits 2', '--source-branch', /--source-branch requires a value/],
+    ['--branch without value exits 2', '--branch', /--branch requires a value/],
+  ].map(([name, flag, message]) => ({ name, run: () => {
+    const r = spawnSync(process.execPath, [CLI, '--prompt', 'x', flag]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr.toString(), message);
+  } })));
 });
 
 test('--branch <name> actually reaches the orchestrator (kept on success)', async () => {

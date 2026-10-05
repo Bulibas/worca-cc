@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { lastToast, fieldErrorText, edit } from './helpers/feedback.mjs';
 
 const trackDom = useDomRelease(afterEach);
@@ -49,33 +50,37 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 const settle = async (n = 6) => { for (let i = 0; i < n; i++) await tick(); };
 const click = (window, node) => node.dispatchEvent(new window.Event('click', { bubbles: true }));
 
-test('Save starts disabled; a 400 naming actions[0].cmd puts the error on that input, with no .act-save-msg line', async () => {
-  const { window, doc, puts } = await boot(() => json(400, { error: 'a command is required', field: 'actions[0].cmd' }));
-  const editor = doc.querySelector('.pd-sec-actions .actions-config');
-  assert.ok(editor, 'the editor rendered');
-  const save = editor.querySelector('.ac-save');
-  assert.equal(save.disabled, true, 'a clean editor: Save is disabled');
-  const cmd = editor.querySelector('.ac-action .ac-f-cmd');
-  edit(window, cmd, '');
-  assert.equal(save.disabled, false, 'an edit enables Save');
-  click(window, save);
-  await settle();
-  assert.equal(puts.length, 1);
-  assert.equal(cmd.getAttribute('aria-invalid'), 'true');
-  assert.equal(fieldErrorText(cmd), 'A command is required');
-  assert.equal(doc.querySelector('.act-save-msg'), null);
-});
-
-test('a 200 shows Saved on the button and a toast naming the project', async () => {
-  const { window, doc, puts } = await boot(() => json(200, { ok: true }));
-  const editor = doc.querySelector('.pd-sec-actions .actions-config');
-  const save = editor.querySelector('.ac-save');
-  edit(window, editor.querySelector('.ac-action .ac-f-cmd'), 'npm run dev');
-  click(window, save);
-  await settle();
-  assert.equal(puts.length, 1);
-  assert.equal(puts[0].actions[0].cmd, 'npm run dev');
-  assert.equal(save.textContent.trim(), 'Saved');
-  assert.equal(lastToast(doc)?.title, 'Actions saved for svc-iam');
-  assert.equal(doc.querySelector('.act-save-msg'), null);
+test('Actions editor Save: disabled until an edit; a 400 naming actions[0].cmd marks that input; a 200 PUTs the edited actions, reads Saved and toasts the project', async () => {
+  // Two boots (a 400 PUT stub, then a 200 one): one test, one row per former test.
+  await checkRows([
+    { name: 'Save starts disabled; a 400 naming actions[0].cmd puts the error on that input, with no .act-save-msg line', run: async () => {
+      const { window, doc, puts } = await boot(() => json(400, { error: 'a command is required', field: 'actions[0].cmd' }));
+      const editor = doc.querySelector('.pd-sec-actions .actions-config');
+      assert.ok(editor, 'the editor rendered');
+      const save = editor.querySelector('.ac-save');
+      assert.equal(save.disabled, true, 'a clean editor: Save is disabled');
+      const cmd = editor.querySelector('.ac-action .ac-f-cmd');
+      edit(window, cmd, '');
+      assert.equal(save.disabled, false, 'an edit enables Save');
+      click(window, save);
+      await settle();
+      assert.equal(puts.length, 1);
+      assert.equal(cmd.getAttribute('aria-invalid'), 'true');
+      assert.equal(fieldErrorText(cmd), 'A command is required');
+      assert.equal(doc.querySelector('.act-save-msg'), null);
+    } },
+    { name: 'a 200 shows Saved on the button and a toast naming the project', run: async () => {
+      const { window, doc, puts } = await boot(() => json(200, { ok: true }));
+      const editor = doc.querySelector('.pd-sec-actions .actions-config');
+      const save = editor.querySelector('.ac-save');
+      edit(window, editor.querySelector('.ac-action .ac-f-cmd'), 'npm run dev');
+      click(window, save);
+      await settle();
+      assert.equal(puts.length, 1);
+      assert.equal(puts[0].actions[0].cmd, 'npm run dev');
+      assert.equal(save.textContent.trim(), 'Saved');
+      assert.equal(lastToast(doc)?.title, 'Actions saved for svc-iam');
+      assert.equal(doc.querySelector('.act-save-msg'), null);
+    } },
+  ]);
 });

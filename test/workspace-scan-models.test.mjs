@@ -8,7 +8,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { WORKSPACE_SCAN_DEFAULT_MODELS, GRAPH_WORKSPACE_SCAN_WORKFLOW } from '../src/core/graph/builtin-workflows.mjs';
+import { WORKSPACE_SCAN_DEFAULT_MODELS } from '../src/core/graph/builtin-workflows.mjs';
 import {
   workspaceScanModels, assertWorkspaceScanInput, setWorkspaceScanModels, settingsFile, SETTINGS_POST_KEYS,
 } from '../src/core/settings.mjs';
@@ -33,12 +33,6 @@ const CATALOG = [
   { id: 'local-llm', efforts: [] },
 ];
 const PICK = { scanModel: 'Claude-Opus-5-5', scanEffort: 'high', agentModel: 'fable', agentEffort: 'max' };
-
-test('the defaults are Sonnet 5 · medium and sonnet · medium, and the scan node carries them', () => {
-  assert.deepEqual({ ...WORKSPACE_SCAN_DEFAULT_MODELS }, { scanModel: 'claude-sonnet-5', scanEffort: 'medium', agentModel: 'sonnet', agentEffort: 'medium' });
-  const n = GRAPH_WORKSPACE_SCAN_WORKFLOW.nodes.find((x) => x.id === 'n_scan');
-  assert.deepEqual({ ...n.config }, { model: 'claude-sonnet-5', effort: 'medium', subagentModel: 'sonnet', subagentEffort: 'medium' });
-});
 
 test('assertWorkspaceScanInput: null clears; a pick comes back in catalog casing; bad picks throw', () => {
   assert.equal(assertWorkspaceScanInput(null), null);

@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 
 import { createThreadModel } from '../ui/public/ask-model.mjs';
 import { replayFixture, stampFrames } from './helpers/ask-frames.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const TID = 'ask_11111111';
 const MID = 'askm_00000001';
@@ -23,11 +24,37 @@ function doneRow(id, seq, text = 'earlier answer') {
   return { id, threadId: TID, seq, role: 'assistant', text, blocks: [], status: 'done', reason: null, model: 'm', effort: 'high', usage: null, costUsd: 0, durationMs: 5, createdAt: 't1' };
 }
 
-test('ask-model: frames for another thread are dropped', () => {
-  const m = createThreadModel({ threadId: TID });
-  const r = m.apply({ type: 'ask-delta', text: 'x', threadId: 'ask_ffffffff', messageId: MID, seq: 1 });
-  assert.deepEqual(r, { dropped: 'other-thread' });
-  assert.equal(m.messages().length, 0);
+test('ask-model drops: another thread, a terminal message, no live turn/inFlight, and a re-delivered same-seq frame', async () => {
+  await checkRows([
+    { name: 'ask-model: frames for another thread are dropped', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const r = m.apply({ type: 'ask-delta', text: 'x', threadId: 'ask_ffffffff', messageId: MID, seq: 1 });
+      assert.deepEqual(r, { dropped: 'other-thread' });
+      assert.equal(m.messages().length, 0);
+    } },
+    { name: 'ask-model: job frames for a terminal message are ignored', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      m.load(snapshot({ messages: [doneRow(MID, 2)] }));
+      const r = m.apply({ type: 'ask-delta', text: 'late', threadId: TID, messageId: MID, seq: 9 });
+      assert.deepEqual(r, { dropped: 'terminal-message' });
+      assert.equal(m.messages()[0].text, 'earlier answer');
+    } },
+    { name: 'ask-model: frames with no live turn and no inFlight are dropped', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const r = m.apply({ type: 'ask-delta', text: 'orphan', threadId: TID, messageId: MID, seq: 7 });
+      assert.deepEqual(r, { dropped: 'no-live' });
+    } },
+    { name: 'ask-model: a frame re-delivered at the SAME seq is dropped, not applied twice', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const stamped = stampFrames([
+        { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
+        { type: 'ask-delta', text: 'once' },
+      ], { threadId: TID, messageId: MID });
+      for (const f of stamped) m.apply(f);
+      assert.deepEqual(m.apply(stamped[1]), { dropped: 'stale-seq' }, 'seq === lastSeq is stale');
+      assert.equal(m.live().text, 'once');
+    } },
+  ]);
 });
 
 test('ask-model: plain-text fixture replay builds one done assistant row', () => {
@@ -54,85 +81,76 @@ test('ask-model: replaying the same stamped frames is a no-op (seq dedupe)', () 
   assert.equal(JSON.stringify(m.messages()), before);
 });
 
-test('ask-model: job frames for a terminal message are ignored', () => {
-  const m = createThreadModel({ threadId: TID });
-  m.load(snapshot({ messages: [doneRow(MID, 2)] }));
-  const r = m.apply({ type: 'ask-delta', text: 'late', threadId: TID, messageId: MID, seq: 9 });
-  assert.deepEqual(r, { dropped: 'terminal-message' });
-  assert.equal(m.messages()[0].text, 'earlier answer');
+test('ask-model seq: a gap is reported and not applied; after load(inFlight) the first frame is adopted at any seq', async () => {
+  await checkRows([
+    { name: 'ask-model: a seq gap is reported and the frame is not applied', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const [start] = stampFrames([{ type: 'ask-start', userMessageId: 'askm_u0000001', model: 'm', effort: 'high', startedAt: 't' }], { threadId: TID, messageId: MID });
+      assert.deepEqual(m.apply(start), { ok: true });
+      const r = m.apply({ type: 'ask-delta', text: 'skipped ahead', threadId: TID, messageId: MID, seq: 3 });
+      assert.deepEqual(r, { gap: true });
+      assert.equal(m.live().text, '');
+      // seq 2 still applies afterwards — the gap report did not consume the counter
+      assert.deepEqual(m.apply({ type: 'ask-delta', text: 'ok', threadId: TID, messageId: MID, seq: 2 }), { ok: true });
+      assert.equal(m.live().text, 'ok');
+    } },
+    { name: 'ask-model: adoption — after load(inFlight) the first frame is accepted at any seq', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      m.load(snapshot({ inFlight: { messageId: MID } }));
+      const r = m.apply({ type: 'ask-delta', text: 'tail of the answer', threadId: TID, messageId: MID, seq: 41 });
+      assert.deepEqual(r, { ok: true });
+      assert.equal(m.live().text, 'tail of the answer');
+      // ask-done heals the missing prefix: payload text replaces the accumulation
+      m.apply({ type: 'ask-done', text: 'the whole answer', blocks: [], usage: { input: 1, output: 2, cacheRead: 0, cacheCreation: 0 }, costUsd: 0.01, durationMs: 9, model: 'm', status: 'done', threadTotals: { costUsd: 0.01, turns: 1 }, threadId: TID, messageId: MID, seq: 42 });
+      assert.equal(m.messages()[0].text, 'the whole answer');
+      assert.deepEqual(m.thread().totals, { costUsd: 0.01, turns: 1 });
+    } },
+  ]);
 });
 
-test('ask-model: a seq gap is reported and the frame is not applied', () => {
-  const m = createThreadModel({ threadId: TID });
-  const [start] = stampFrames([{ type: 'ask-start', userMessageId: 'askm_u0000001', model: 'm', effort: 'high', startedAt: 't' }], { threadId: TID, messageId: MID });
-  assert.deepEqual(m.apply(start), { ok: true });
-  const r = m.apply({ type: 'ask-delta', text: 'skipped ahead', threadId: TID, messageId: MID, seq: 3 });
-  assert.deepEqual(r, { gap: true });
-  assert.equal(m.live().text, '');
-  // seq 2 still applies afterwards — the gap report did not consume the counter
-  assert.deepEqual(m.apply({ type: 'ask-delta', text: 'ok', threadId: TID, messageId: MID, seq: 2 }), { ok: true });
-  assert.equal(m.live().text, 'ok');
-});
-
-test('ask-model: adoption — after load(inFlight) the first frame is accepted at any seq', () => {
-  const m = createThreadModel({ threadId: TID });
-  m.load(snapshot({ inFlight: { messageId: MID } }));
-  const r = m.apply({ type: 'ask-delta', text: 'tail of the answer', threadId: TID, messageId: MID, seq: 41 });
-  assert.deepEqual(r, { ok: true });
-  assert.equal(m.live().text, 'tail of the answer');
-  // ask-done heals the missing prefix: payload text replaces the accumulation
-  m.apply({ type: 'ask-done', text: 'the whole answer', blocks: [], usage: { input: 1, output: 2, cacheRead: 0, cacheCreation: 0 }, costUsd: 0.01, durationMs: 9, model: 'm', status: 'done', threadTotals: { costUsd: 0.01, turns: 1 }, threadId: TID, messageId: MID, seq: 42 });
-  assert.equal(m.messages()[0].text, 'the whole answer');
-  assert.deepEqual(m.thread().totals, { costUsd: 0.01, turns: 1 });
-});
-
-test('ask-model: frames with no live turn and no inFlight are dropped', () => {
-  const m = createThreadModel({ threadId: TID });
-  const r = m.apply({ type: 'ask-delta', text: 'orphan', threadId: TID, messageId: MID, seq: 7 });
-  assert.deepEqual(r, { dropped: 'no-live' });
-});
-
-test('ask-model: out-of-turn ask-message upserts by id and replaces the optimistic row', () => {
-  const m = createThreadModel({ threadId: TID });
-  m.noteLocalUserMessage({ id: 'askm_u0000001', text: 'hello', attachments: [{ name: 'a.md', bytes: 10 }] });
-  assert.equal(m.messages().length, 1);
-  assert.equal(m.messages()[0].blocks[0].kind, 'attachment');
-  const persisted = { id: 'askm_u0000001', threadId: TID, seq: 1, role: 'user', text: 'hello', blocks: [{ kind: 'attachment', id: 'att_00000001', name: 'a.md', bytes: 10 }], status: null, reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't1' };
-  assert.deepEqual(m.apply({ type: 'ask-message', threadId: TID, message: persisted }), { ok: true });
-  assert.equal(m.messages().length, 1);
-  assert.equal(m.messages()[0].seq, 1);
-  assert.equal(m.messages()[0].blocks[0].id, 'att_00000001');
-});
-
-// #398: the sender's own tab — the broadcast (persisted row, store-minted ids)
-// lands before the 202 resolves, then the echo ran and REPLACED it with id-less
-// blocks, so buildAttachmentPill fell back from thumbnail to name pill.
-test('ask-model: the local echo never replaces an already-received canonical row', () => {
-  const m = createThreadModel({ threadId: TID });
-  const persisted = { id: 'askm_u0000001', threadId: TID, seq: 1, role: 'user', text: 'hello', blocks: [{ kind: 'attachment', id: 'att_00000001', name: 'shot.png', bytes: 2048, attKind: 'image', mime: 'image/png' }], status: null, reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't1' };
-  m.apply({ type: 'ask-message', threadId: TID, message: persisted });
-  m.noteLocalUserMessage({ id: 'askm_u0000001', text: 'hello', attachments: [{ name: 'shot.png', bytes: 2048, attKind: 'image', mime: 'image/png' }] });
-  assert.equal(m.messages().length, 1);
-  assert.deepEqual(m.messages()[0], persisted, 'the canonical row (ids, seq, createdAt) is kept whole');
-  assert.ok(m.takeDirty().messages.has('askm_u0000001'), 'the echo still marks the row for a repaint');
-});
-
-test('ask-model (#398): the attachment ledger learns in-session uploads from the broadcast and the echo, each id once', () => {
-  const m = createThreadModel({ threadId: TID });
-  const bytes = () => m.attachments().reduce((n, a) => n + a.bytes, 0);
-  m.load({ thread: { id: TID, title: null, totals: {} }, messages: [], attachments: [{ id: 'att_00000000', name: 'old.md', bytes: 100 }], runLinks: [], inFlight: null });
-  assert.equal(bytes(), 100, 'seeded by the snapshot');
-  const att1 = { kind: 'attachment', id: 'att_00000001', name: 'a.pdf', bytes: 50, attKind: 'binary', mime: 'application/pdf' };
-  m.apply({ type: 'ask-message', threadId: TID, message: { id: 'askm_u0000001', threadId: TID, seq: 1, role: 'user', text: 'x', blocks: [att1], status: null, reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't' } });
-  assert.equal(bytes(), 150, 'the broadcast row counts');
-  m.noteLocalUserMessage({ id: 'askm_u0000001', text: 'x', attachments: [{ id: 'att_00000001', name: 'a.pdf', bytes: 50, attKind: 'binary' }] });
-  assert.equal(bytes(), 150, 'the echo of the same row does not double-count');
-  m.noteLocalUserMessage({ id: 'askm_u0000002', text: 'y', attachments: [{ id: 'att_00000002', name: 'b.png', bytes: 25, attKind: 'image' }] });
-  assert.equal(bytes(), 175, 'an echo that arrives first counts (ids from the 202 body)');
-  m.apply({ type: 'ask-message', threadId: TID, message: { id: 'askm_u0000002', threadId: TID, seq: 3, role: 'user', text: 'y', blocks: [{ ...att1, id: 'att_00000002', bytes: 25 }], status: null, reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't' } });
-  assert.equal(bytes(), 175, 'its later broadcast does not double-count either');
-  m.noteLocalUserMessage({ id: 'askm_u0000003', text: 'z', attachments: [{ name: 'noid.md', bytes: 999 }] });
-  assert.equal(bytes(), 175, 'an id-less echo (older server) is not counted — it cannot be deduped');
+test('ask-model echo vs canonical: out-of-turn ask-message replaces the optimistic row, the echo never replaces a canonical row, the attachment ledger counts each id once', async () => {
+  await checkRows([
+    { name: 'ask-model: out-of-turn ask-message upserts by id and replaces the optimistic row', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      m.noteLocalUserMessage({ id: 'askm_u0000001', text: 'hello', attachments: [{ name: 'a.md', bytes: 10 }] });
+      assert.equal(m.messages().length, 1);
+      assert.equal(m.messages()[0].blocks[0].kind, 'attachment');
+      const persisted = { id: 'askm_u0000001', threadId: TID, seq: 1, role: 'user', text: 'hello', blocks: [{ kind: 'attachment', id: 'att_00000001', name: 'a.md', bytes: 10 }], status: null, reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't1' };
+      assert.deepEqual(m.apply({ type: 'ask-message', threadId: TID, message: persisted }), { ok: true });
+      assert.equal(m.messages().length, 1);
+      assert.equal(m.messages()[0].seq, 1);
+      assert.equal(m.messages()[0].blocks[0].id, 'att_00000001');
+    } },
+    // #398: the sender's own tab — the broadcast (persisted row, store-minted ids)
+    // lands before the 202 resolves, then the echo ran and REPLACED it with id-less
+    // blocks, so buildAttachmentPill fell back from thumbnail to name pill.
+    { name: 'ask-model: the local echo never replaces an already-received canonical row', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const persisted = { id: 'askm_u0000001', threadId: TID, seq: 1, role: 'user', text: 'hello', blocks: [{ kind: 'attachment', id: 'att_00000001', name: 'shot.png', bytes: 2048, attKind: 'image', mime: 'image/png' }], status: null, reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't1' };
+      m.apply({ type: 'ask-message', threadId: TID, message: persisted });
+      m.noteLocalUserMessage({ id: 'askm_u0000001', text: 'hello', attachments: [{ name: 'shot.png', bytes: 2048, attKind: 'image', mime: 'image/png' }] });
+      assert.equal(m.messages().length, 1);
+      assert.deepEqual(m.messages()[0], persisted, 'the canonical row (ids, seq, createdAt) is kept whole');
+      assert.ok(m.takeDirty().messages.has('askm_u0000001'), 'the echo still marks the row for a repaint');
+    } },
+    { name: 'ask-model (#398): the attachment ledger learns in-session uploads from the broadcast and the echo, each id once', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const bytes = () => m.attachments().reduce((n, a) => n + a.bytes, 0);
+      m.load({ thread: { id: TID, title: null, totals: {} }, messages: [], attachments: [{ id: 'att_00000000', name: 'old.md', bytes: 100 }], runLinks: [], inFlight: null });
+      assert.equal(bytes(), 100, 'seeded by the snapshot');
+      const att1 = { kind: 'attachment', id: 'att_00000001', name: 'a.pdf', bytes: 50, attKind: 'binary', mime: 'application/pdf' };
+      m.apply({ type: 'ask-message', threadId: TID, message: { id: 'askm_u0000001', threadId: TID, seq: 1, role: 'user', text: 'x', blocks: [att1], status: null, reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't' } });
+      assert.equal(bytes(), 150, 'the broadcast row counts');
+      m.noteLocalUserMessage({ id: 'askm_u0000001', text: 'x', attachments: [{ id: 'att_00000001', name: 'a.pdf', bytes: 50, attKind: 'binary' }] });
+      assert.equal(bytes(), 150, 'the echo of the same row does not double-count');
+      m.noteLocalUserMessage({ id: 'askm_u0000002', text: 'y', attachments: [{ id: 'att_00000002', name: 'b.png', bytes: 25, attKind: 'image' }] });
+      assert.equal(bytes(), 175, 'an echo that arrives first counts (ids from the 202 body)');
+      m.apply({ type: 'ask-message', threadId: TID, message: { id: 'askm_u0000002', threadId: TID, seq: 3, role: 'user', text: 'y', blocks: [{ ...att1, id: 'att_00000002', bytes: 25 }], status: null, reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't' } });
+      assert.equal(bytes(), 175, 'its later broadcast does not double-count either');
+      m.noteLocalUserMessage({ id: 'askm_u0000003', text: 'z', attachments: [{ name: 'noid.md', bytes: 999 }] });
+      assert.equal(bytes(), 175, 'an id-less echo (older server) is not counted — it cannot be deduped');
+    } },
+  ]);
 });
 
 test('ask-model: ask-message inserts new rows in seq order', () => {
@@ -142,150 +160,206 @@ test('ask-model: ask-message inserts new rows in seq order', () => {
   assert.deepEqual(m.messages().map((r) => r.id), ['askm_00000001', 'askm_00000002']);
 });
 
-test('ask-model: ask-title and ask-run-status upsert; null run-status fields mean no change', () => {
-  const m = createThreadModel({ threadId: TID });
-  m.load(snapshot({ title: 'first title' }));
-  m.apply({ type: 'ask-title', threadId: TID, title: 'A better title' });
-  assert.equal(m.thread().title, 'A better title');
-  m.apply({ type: 'ask-run-status', threadId: TID, runId: 'r1', pipelineId: 'abcd1234', cardId: 'card_00000001', status: 'running', phase: 'plan' });
-  m.apply({ type: 'ask-run-status', threadId: TID, runId: 'r1', pipelineId: null, cardId: null, status: null, phase: null });
-  assert.deepEqual(m.runLinks().get('r1'), { pipelineId: 'abcd1234', cardId: 'card_00000001', status: 'running', phase: 'plan' });
+test('ask-model run links: ask-title/ask-run-status upsert (null = no change); runLinkByPipeline/runLinkForCard find by stable ids, newest runId wins', async () => {
+  await checkRows([
+    { name: 'ask-model: ask-title and ask-run-status upsert; null run-status fields mean no change', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      m.load(snapshot({ title: 'first title' }));
+      m.apply({ type: 'ask-title', threadId: TID, title: 'A better title' });
+      assert.equal(m.thread().title, 'A better title');
+      m.apply({ type: 'ask-run-status', threadId: TID, runId: 'r1', pipelineId: 'abcd1234', cardId: 'card_00000001', status: 'running', phase: 'plan' });
+      m.apply({ type: 'ask-run-status', threadId: TID, runId: 'r1', pipelineId: null, cardId: null, status: null, phase: null });
+      assert.deepEqual(m.runLinks().get('r1'), { pipelineId: 'abcd1234', cardId: 'card_00000001', status: 'running', phase: 'plan' });
+    } },
+    { name: 'ask-model: runLinkByPipeline / runLinkForCard find a link by its stable ids and carry the runId', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      m.load(snapshot());
+      m.apply({ type: 'ask-run-status', threadId: TID, runId: 'r1', pipelineId: 'abcd1234', cardId: 'card_00000001', status: 'running', phase: 'plan' });
+      assert.deepEqual(m.runLinkByPipeline('abcd1234'), { runId: 'r1', pipelineId: 'abcd1234', cardId: 'card_00000001', status: 'running', phase: 'plan' });
+      assert.deepEqual(m.runLinkForCard('card_00000001').runId, 'r1');
+      assert.equal(m.runLinkByPipeline('nope'), null);
+      assert.equal(m.runLinkForCard(null), null);
+      // a resume: the SAME pipeline under a new runId wins by recency (the newer frame lands later)
+      m.apply({ type: 'ask-run-status', threadId: TID, runId: 'r2', pipelineId: 'abcd1234', cardId: 'card_00000001', status: 'running', phase: null });
+      assert.equal(m.runLinkByPipeline('abcd1234').runId, 'r2');
+    } },
+  ]);
 });
 
-test('ask-model: load() round-trips the snapshot', () => {
-  const m = createThreadModel({ threadId: TID });
-  const rows = [doneRow('askm_00000001', 1), doneRow('askm_00000002', 2)];
-  m.load(snapshot({ messages: rows, title: 'T', totals: { costUsd: 1, turns: 2 } }));
-  assert.deepEqual(m.messages(), rows);
-  assert.equal(m.thread().title, 'T');
-  assert.deepEqual(m.totals(), { costUsd: 1, turns: 2, live: null });
+test('ask-model: load() round-trips the snapshot; totals() overlays live usage and a finite estimatedCostUsd (else null)', async () => {
+  await checkRows([
+    { name: 'ask-model: load() round-trips the snapshot', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const rows = [doneRow('askm_00000001', 1), doneRow('askm_00000002', 2)];
+      m.load(snapshot({ messages: rows, title: 'T', totals: { costUsd: 1, turns: 2 } }));
+      assert.deepEqual(m.messages(), rows);
+      assert.equal(m.thread().title, 'T');
+      assert.deepEqual(m.totals(), { costUsd: 1, turns: 2, live: null });
+    } },
+    { name: 'ask-model: totals() overlays the live turn usage', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const bare = [
+        { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
+        { type: 'ask-usage', usage: { input: 5, output: 7, cacheRead: 0, cacheCreation: 0 }, costUsd: null },
+      ];
+      for (const f of stampFrames(bare, { threadId: TID, messageId: MID })) m.apply(f);
+      const t = m.totals();
+      assert.deepEqual(t.live, { usage: { input: 5, output: 7, cacheRead: 0, cacheCreation: 0 }, costUsd: null, estimatedCostUsd: null });
+    } },
+    { name: 'ask-model: estimatedCostUsd rides the live row; absent or non-finite → null', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const u = { input: 5, output: 7, cacheRead: 0, cacheCreation: 0 };
+      const frames = stampFrames([
+        { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
+        { type: 'ask-usage', usage: u, costUsd: null, estimatedCostUsd: 0.0123 },
+        { type: 'ask-usage', usage: u, costUsd: 0.02, estimatedCostUsd: null },
+        { type: 'ask-usage', usage: u, costUsd: null, estimatedCostUsd: 'nope' },
+      ], { threadId: TID, messageId: MID });
+      m.apply(frames[0]); m.apply(frames[1]);
+      assert.deepEqual(m.totals().live, { usage: u, costUsd: null, estimatedCostUsd: 0.0123 });
+      m.apply(frames[2]);
+      assert.equal(m.totals().live.costUsd, 0.02);
+      assert.equal(m.totals().live.estimatedCostUsd, null);
+      m.apply(frames[3]);
+      assert.equal(m.totals().live.estimatedCostUsd, null, 'garbage is not a number');
+    } },
+  ]);
 });
 
-test('ask-model: totals() overlays the live turn usage', () => {
-  const m = createThreadModel({ threadId: TID });
-  const bare = [
-    { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
-    { type: 'ask-usage', usage: { input: 5, output: 7, cacheRead: 0, cacheCreation: 0 }, costUsd: null },
-  ];
-  for (const f of stampFrames(bare, { threadId: TID, messageId: MID })) m.apply(f);
-  const t = m.totals();
-  assert.deepEqual(t.live, { usage: { input: 5, output: 7, cacheRead: 0, cacheCreation: 0 }, costUsd: null, estimatedCostUsd: null });
+test('ask-model fixture replays: tool block upserts, agent block hydrates (running→done), propose-run card is findable, max-turns ends stopped with the notice', async () => {
+  await checkRows([
+    { name: 'ask-model: tool blocks upsert in place through the tool-list-runs fixture', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const { frames } = replayFixture('tool-list-runs', { threadId: TID, messageId: MID });
+      for (const f of frames) m.apply(f);
+      const row = m.messages()[0];
+      const tools = row.blocks.filter((b) => b.kind === 'tool');
+      assert.ok(tools.length >= 1);
+      assert.equal(tools[0].status, 'done');
+      assert.equal(tools[0].name, 'mcp__worca__list_runs');
+    } },
+    { name: 'ask-model: agent block hydrates by id through the task-subagent fixture', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const { frames } = replayFixture('task-subagent', { threadId: TID, messageId: MID });
+      let sawRunningAgent = false;
+      for (const f of frames) {
+        m.apply(f);
+        const row = m.messages()[0];
+        const agent = row && (row.blocks || []).find((b) => b.kind === 'agent');
+        if (agent && agent.status === 'running') sawRunningAgent = true;
+      }
+      const agent = m.messages()[0].blocks.find((b) => b.kind === 'agent');
+      assert.ok(sawRunningAgent, 'agent block streamed as running before finishing');
+      assert.equal(agent.status, 'done');
+      assert.equal(agent.tokens, 5321);
+      assert.equal(agent.estimated, true);
+      assert.ok(Array.isArray(agent.log) && agent.log.length >= 2);
+    } },
+    { name: 'ask-model: propose-run fixture with a card yields a proposed card block; findCard sees it', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const card = { target: 'project', projectKey: 'proj-00000001', projectName: 'proj', projectDir: '/tmp/proj', workflowId: 'wf_default', workflowName: 'Default', guardrailsId: 'normal', brief: 'do it', title: 'Do it', sourceBranch: '', featureBranch: 'worca/do-it', sourceBranchByKey: null, workspaceId: null, workspaceName: null, members: null };
+      const { frames } = replayFixture('propose-run', { threadId: TID, messageId: MID, card, cardId: 'card_00000001' });
+      assert.ok(frames.some((f) => f.type === 'ask-card'));
+      for (const f of frames) m.apply(f);
+      const found = m.findCard('card_00000001');
+      assert.ok(found);
+      assert.equal(found.block.state, 'proposed');
+      assert.equal(found.block.card.brief, 'do it');
+      assert.equal(found.message.id, MID);
+    } },
+    { name: 'ask-model: max-turns fixture ends stopped with the limit notice appended', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const { frames } = replayFixture('max-turns', { threadId: TID, messageId: MID });
+      for (const f of frames) m.apply(f);
+      const row = m.messages()[0];
+      assert.equal(row.status, 'stopped');
+      assert.equal(row.reason, 'max_turns');
+      const notice = row.blocks.find((b) => b.kind === 'notice');
+      assert.match(notice.text, /^Stopped: reached the 40-turn limit/);
+    } },
+  ]);
 });
 
-test('ask-model: tool blocks upsert in place through the tool-list-runs fixture', () => {
-  const m = createThreadModel({ threadId: TID });
-  const { frames } = replayFixture('tool-list-runs', { threadId: TID, messageId: MID });
-  for (const f of frames) m.apply(f);
-  const row = m.messages()[0];
-  const tools = row.blocks.filter((b) => b.kind === 'tool');
-  assert.ok(tools.length >= 1);
-  assert.equal(tools[0].status, 'done');
-  assert.equal(tools[0].name, 'mcp__worca__list_runs');
+test('ask-model: ask-error finalizes with the partial text, keeps the frame code and lands the frame blocks on the row', async () => {
+  await checkRows([
+    { name: 'ask-model: ask-error finalizes with the accumulated partial text', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const bare = [
+        { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
+        { type: 'ask-delta', text: 'partial ' },
+        { type: 'ask-delta', text: 'answer' },
+        { type: 'ask-error', message: 'claude exited with code 1: boom', errorClass: null },
+      ];
+      for (const f of stampFrames(bare, { threadId: TID, messageId: MID })) m.apply(f);
+      const row = m.messages()[0];
+      assert.equal(row.status, 'error');
+      assert.equal(row.text, 'partial answer');
+      assert.equal(row.errorMessage, 'claude exited with code 1: boom');
+      assert.equal(row.errorCode, null);
+      assert.equal(m.live(), null);
+    } },
+    { name: 'ask-model: ask-error keeps the frame code (claude-signed-out)', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const bare = [
+        { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
+        { type: 'ask-error', message: 'claude exited with code 1: Not logged in', errorClass: 'auth', code: 'claude-signed-out' },
+      ];
+      for (const f of stampFrames(bare, { threadId: TID, messageId: MID })) m.apply(f);
+      assert.equal(m.messages()[0].errorCode, 'claude-signed-out');
+    } },
+    { name: 'ask-model: ask-error blocks land on the row, so the classified notice renders live', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const notice = { id: 'blk_00000001', kind: 'notice', text: 'The endpoint was unreachable — check your connection and retry.', errorClass: 'network', detail: 'connection reset' };
+      const bare = [
+        { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
+        { type: 'ask-error', message: 'claude exited with code 1: connection reset', errorClass: 'network', blocks: [notice] },
+      ];
+      for (const f of stampFrames(bare, { threadId: TID, messageId: MID })) m.apply(f);
+      const row = m.messages()[0];
+      assert.equal(row.status, 'error');
+      assert.ok(row.blocks.some((b) => b && b.kind === 'notice' && b.errorClass === 'network'),
+        'the frame blocks reach the row like on ask-done');
+    } },
+  ]);
 });
 
-test('ask-model: agent block hydrates by id through the task-subagent fixture', () => {
-  const m = createThreadModel({ threadId: TID });
-  const { frames } = replayFixture('task-subagent', { threadId: TID, messageId: MID });
-  let sawRunningAgent = false;
-  for (const f of frames) {
-    m.apply(f);
-    const row = m.messages()[0];
-    const agent = row && (row.blocks || []).find((b) => b.kind === 'agent');
-    if (agent && agent.status === 'running') sawRunningAgent = true;
-  }
-  const agent = m.messages()[0].blocks.find((b) => b.kind === 'agent');
-  assert.ok(sawRunningAgent, 'agent block streamed as running before finishing');
-  assert.equal(agent.status, 'done');
-  assert.equal(agent.tokens, 5321);
-  assert.equal(agent.estimated, true);
-  assert.ok(Array.isArray(agent.log) && agent.log.length >= 2);
-});
-
-test('ask-model: propose-run fixture with a card yields a proposed card block; findCard sees it', () => {
-  const m = createThreadModel({ threadId: TID });
-  const card = { target: 'project', projectKey: 'proj-00000001', projectName: 'proj', projectDir: '/tmp/proj', workflowId: 'wf_default', workflowName: 'Default', guardrailsId: 'normal', brief: 'do it', title: 'Do it', sourceBranch: '', featureBranch: 'worca/do-it', sourceBranchByKey: null, workspaceId: null, workspaceName: null, members: null };
-  const { frames } = replayFixture('propose-run', { threadId: TID, messageId: MID, card, cardId: 'card_00000001' });
-  assert.ok(frames.some((f) => f.type === 'ask-card'));
-  for (const f of frames) m.apply(f);
-  const found = m.findCard('card_00000001');
-  assert.ok(found);
-  assert.equal(found.block.state, 'proposed');
-  assert.equal(found.block.card.brief, 'do it');
-  assert.equal(found.message.id, MID);
-});
-
-test('ask-model: max-turns fixture ends stopped with the limit notice appended', () => {
-  const m = createThreadModel({ threadId: TID });
-  const { frames } = replayFixture('max-turns', { threadId: TID, messageId: MID });
-  for (const f of frames) m.apply(f);
-  const row = m.messages()[0];
-  assert.equal(row.status, 'stopped');
-  assert.equal(row.reason, 'max_turns');
-  const notice = row.blocks.find((b) => b.kind === 'notice');
-  assert.match(notice.text, /^Stopped: reached the 40-turn limit/);
-});
-
-test('ask-model: ask-error finalizes with the accumulated partial text', () => {
-  const m = createThreadModel({ threadId: TID });
-  const bare = [
-    { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
-    { type: 'ask-delta', text: 'partial ' },
-    { type: 'ask-delta', text: 'answer' },
-    { type: 'ask-error', message: 'claude exited with code 1: boom', errorClass: null },
-  ];
-  for (const f of stampFrames(bare, { threadId: TID, messageId: MID })) m.apply(f);
-  const row = m.messages()[0];
-  assert.equal(row.status, 'error');
-  assert.equal(row.text, 'partial answer');
-  assert.equal(row.errorMessage, 'claude exited with code 1: boom');
-  assert.equal(row.errorCode, null);
-  assert.equal(m.live(), null);
-});
-
-test('ask-model: ask-error keeps the frame code (claude-signed-out)', () => {
-  const m = createThreadModel({ threadId: TID });
-  const bare = [
-    { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
-    { type: 'ask-error', message: 'claude exited with code 1: Not logged in', errorClass: 'auth', code: 'claude-signed-out' },
-  ];
-  for (const f of stampFrames(bare, { threadId: TID, messageId: MID })) m.apply(f);
-  assert.equal(m.messages()[0].errorCode, 'claude-signed-out');
-});
-
-test('ask-model: ask-error blocks land on the row, so the classified notice renders live', () => {
-  const m = createThreadModel({ threadId: TID });
-  const notice = { id: 'blk_00000001', kind: 'notice', text: 'The endpoint was unreachable — check your connection and retry.', errorClass: 'network', detail: 'connection reset' };
-  const bare = [
-    { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
-    { type: 'ask-error', message: 'claude exited with code 1: connection reset', errorClass: 'network', blocks: [notice] },
-  ];
-  for (const f of stampFrames(bare, { threadId: TID, messageId: MID })) m.apply(f);
-  const row = m.messages()[0];
-  assert.equal(row.status, 'error');
-  assert.ok(row.blocks.some((b) => b && b.kind === 'notice' && b.errorClass === 'network'),
-    'the frame blocks reach the row like on ask-done');
-});
-
-test('ask-model: dirty tracking drains once and is per-kind', () => {
-  const m = createThreadModel({ threadId: TID });
-  const bare = [
-    { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
-    { type: 'ask-label', label: 'Finding runs' },
-    { type: 'ask-delta', text: 'x' },
-    { type: 'ask-block', block: { kind: 'tool', id: 'toolu_1', name: 'mcp__worca__list_runs', input: {}, status: 'running', durationMs: null } },
-    { type: 'ask-usage', usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }, costUsd: null },
-  ];
-  for (const f of stampFrames(bare, { threadId: TID, messageId: MID })) m.apply(f);
-  const d = m.takeDirty();
-  assert.equal(d.structure, true);           // the streaming row appeared
-  assert.equal(d.label, true);
-  assert.equal(d.meters, true);
-  assert.ok(d.answer.has(MID));
-  assert.ok(d.blocks.get(MID).has('toolu_1'));
-  const d2 = m.takeDirty();
-  assert.equal(d2.structure, false);
-  assert.equal(d2.answer.size, 0);
-  assert.equal(d2.blocks.size, 0);
+test('ask-model: dirty tracking drains once per kind; unknown ask-* frames consume their seq silently', async () => {
+  await checkRows([
+    { name: 'ask-model: dirty tracking drains once and is per-kind', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const bare = [
+        { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
+        { type: 'ask-label', label: 'Finding runs' },
+        { type: 'ask-delta', text: 'x' },
+        { type: 'ask-block', block: { kind: 'tool', id: 'toolu_1', name: 'mcp__worca__list_runs', input: {}, status: 'running', durationMs: null } },
+        { type: 'ask-usage', usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }, costUsd: null },
+      ];
+      for (const f of stampFrames(bare, { threadId: TID, messageId: MID })) m.apply(f);
+      const d = m.takeDirty();
+      assert.equal(d.structure, true);           // the streaming row appeared
+      assert.equal(d.label, true);
+      assert.equal(d.meters, true);
+      assert.ok(d.answer.has(MID));
+      assert.ok(d.blocks.get(MID).has('toolu_1'));
+      const d2 = m.takeDirty();
+      assert.equal(d2.structure, false);
+      assert.equal(d2.answer.size, 0);
+      assert.equal(d2.blocks.size, 0);
+    } },
+    { name: 'ask-model: unknown ask-* job frame types consume their seq silently', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      const bare = [
+        { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
+        { type: 'ask-future-frame', payload: 1 },
+        { type: 'ask-delta', text: 'still fine' },
+      ];
+      const stamped = stampFrames(bare, { threadId: TID, messageId: MID });
+      assert.deepEqual(m.apply(stamped[0]), { ok: true });
+      assert.deepEqual(m.apply(stamped[1]), { ok: true });
+      assert.deepEqual(m.apply(stamped[2]), { ok: true });
+      assert.equal(m.live().text, 'still fine');
+    } },
+  ]);
 });
 
 test('ask-model: a replayed ask-start after progress is stale, not a reset', () => {
@@ -299,62 +373,39 @@ test('ask-model: a replayed ask-start after progress is stale, not a reset', () 
   assert.equal(m.live().text, before);
 });
 
-test('ask-model: unknown ask-* job frame types consume their seq silently', () => {
-  const m = createThreadModel({ threadId: TID });
-  const bare = [
-    { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
-    { type: 'ask-future-frame', payload: 1 },
-    { type: 'ask-delta', text: 'still fine' },
-  ];
-  const stamped = stampFrames(bare, { threadId: TID, messageId: MID });
-  assert.deepEqual(m.apply(stamped[0]), { ok: true });
-  assert.deepEqual(m.apply(stamped[1]), { ok: true });
-  assert.deepEqual(m.apply(stamped[2]), { ok: true });
-  assert.equal(m.live().text, 'still fine');
-});
-
 function userRow(id, seq, text) {
   return { id, threadId: TID, seq, role: 'user', text, blocks: [], status: null, reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't2' };
 }
 
-test('ask-model: a canonical user ask-message lands after seq-less live rows, not at the top', () => {
-  const m = createThreadModel({ threadId: TID });
-  // Turn 1 in a never-reloaded thread: the echo and the streamed answer carry no seq.
-  m.noteLocalUserMessage({ id: 'askm_u0000001', text: 'first question', attachments: [] });
-  const { frames } = replayFixture('plain-text', { threadId: TID, messageId: MID });
-  for (const f of frames) m.apply(f);
-  // Turn 2: the POST-side broadcast delivers the persisted user row BEFORE the local echo runs.
-  m.apply({ type: 'ask-message', threadId: TID, message: userRow('askm_u0000002', 3, 'second question') });
-  assert.deepEqual(m.messages().map((r) => r.id), ['askm_u0000001', MID, 'askm_u0000002']);
-});
-
-test('ask-model: the local echo keeps the seq of an already-received canonical row', () => {
-  const m = createThreadModel({ threadId: TID });
-  m.apply({ type: 'ask-message', threadId: TID, message: userRow('askm_u0000001', 1, 'hello') });
-  m.noteLocalUserMessage({ id: 'askm_u0000001', text: 'hello', attachments: [] });
-  assert.equal(m.messages().length, 1);
-  assert.equal(m.messages()[0].seq, 1);
-});
-
-test('ask-model: a newer canonical user row never slots above the previous seq-less answer', () => {
-  const m = createThreadModel({ threadId: TID });
-  m.noteLocalUserMessage({ id: 'askm_u0000001', text: 'first question', attachments: [] });
-  m.apply({ type: 'ask-message', threadId: TID, message: userRow('askm_u0000001', 1, 'first question') });
-  const { frames } = replayFixture('plain-text', { threadId: TID, messageId: MID });
-  for (const f of frames) m.apply(f); // assistant row stays seq-less until a reload
-  m.apply({ type: 'ask-message', threadId: TID, message: userRow('askm_u0000002', 3, 'second question') });
-  assert.deepEqual(m.messages().map((r) => r.id), ['askm_u0000001', MID, 'askm_u0000002']);
-});
-
-test('ask-model: a frame re-delivered at the SAME seq is dropped, not applied twice', () => {
-  const m = createThreadModel({ threadId: TID });
-  const stamped = stampFrames([
-    { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
-    { type: 'ask-delta', text: 'once' },
-  ], { threadId: TID, messageId: MID });
-  for (const f of stamped) m.apply(f);
-  assert.deepEqual(m.apply(stamped[1]), { dropped: 'stale-seq' }, 'seq === lastSeq is stale');
-  assert.equal(m.live().text, 'once');
+test('ask-model ordering: canonical user rows land after seq-less live rows, keep their seq against the echo, never slot above the previous answer', async () => {
+  await checkRows([
+    { name: 'ask-model: a canonical user ask-message lands after seq-less live rows, not at the top', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      // Turn 1 in a never-reloaded thread: the echo and the streamed answer carry no seq.
+      m.noteLocalUserMessage({ id: 'askm_u0000001', text: 'first question', attachments: [] });
+      const { frames } = replayFixture('plain-text', { threadId: TID, messageId: MID });
+      for (const f of frames) m.apply(f);
+      // Turn 2: the POST-side broadcast delivers the persisted user row BEFORE the local echo runs.
+      m.apply({ type: 'ask-message', threadId: TID, message: userRow('askm_u0000002', 3, 'second question') });
+      assert.deepEqual(m.messages().map((r) => r.id), ['askm_u0000001', MID, 'askm_u0000002']);
+    } },
+    { name: 'ask-model: the local echo keeps the seq of an already-received canonical row', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      m.apply({ type: 'ask-message', threadId: TID, message: userRow('askm_u0000001', 1, 'hello') });
+      m.noteLocalUserMessage({ id: 'askm_u0000001', text: 'hello', attachments: [] });
+      assert.equal(m.messages().length, 1);
+      assert.equal(m.messages()[0].seq, 1);
+    } },
+    { name: 'ask-model: a newer canonical user row never slots above the previous seq-less answer', run: async () => {
+      const m = createThreadModel({ threadId: TID });
+      m.noteLocalUserMessage({ id: 'askm_u0000001', text: 'first question', attachments: [] });
+      m.apply({ type: 'ask-message', threadId: TID, message: userRow('askm_u0000001', 1, 'first question') });
+      const { frames } = replayFixture('plain-text', { threadId: TID, messageId: MID });
+      for (const f of frames) m.apply(f); // assistant row stays seq-less until a reload
+      m.apply({ type: 'ask-message', threadId: TID, message: userRow('askm_u0000002', 3, 'second question') });
+      assert.deepEqual(m.messages().map((r) => r.id), ['askm_u0000001', MID, 'askm_u0000002']);
+    } },
+  ]);
 });
 
 // Review of PR #376: adopting an out-of-turn delta seeded lastSeq to that frame's
@@ -426,35 +477,4 @@ test('ask-model: an agent ask-block bumps totals().agents live and marks meters 
   m.apply(frames[6]);
   assert.equal(m.totals().agents, 4, 'ask-done: the server total replaces, live is null — no double count');
   assert.equal(m.totals().live, null);
-});
-
-test('ask-model: estimatedCostUsd rides the live row; absent or non-finite → null', () => {
-  const m = createThreadModel({ threadId: TID });
-  const u = { input: 5, output: 7, cacheRead: 0, cacheCreation: 0 };
-  const frames = stampFrames([
-    { type: 'ask-start', userMessageId: 'u', model: 'm', effort: 'high', startedAt: 't' },
-    { type: 'ask-usage', usage: u, costUsd: null, estimatedCostUsd: 0.0123 },
-    { type: 'ask-usage', usage: u, costUsd: 0.02, estimatedCostUsd: null },
-    { type: 'ask-usage', usage: u, costUsd: null, estimatedCostUsd: 'nope' },
-  ], { threadId: TID, messageId: MID });
-  m.apply(frames[0]); m.apply(frames[1]);
-  assert.deepEqual(m.totals().live, { usage: u, costUsd: null, estimatedCostUsd: 0.0123 });
-  m.apply(frames[2]);
-  assert.equal(m.totals().live.costUsd, 0.02);
-  assert.equal(m.totals().live.estimatedCostUsd, null);
-  m.apply(frames[3]);
-  assert.equal(m.totals().live.estimatedCostUsd, null, 'garbage is not a number');
-});
-
-test('ask-model: runLinkByPipeline / runLinkForCard find a link by its stable ids and carry the runId', () => {
-  const m = createThreadModel({ threadId: TID });
-  m.load(snapshot());
-  m.apply({ type: 'ask-run-status', threadId: TID, runId: 'r1', pipelineId: 'abcd1234', cardId: 'card_00000001', status: 'running', phase: 'plan' });
-  assert.deepEqual(m.runLinkByPipeline('abcd1234'), { runId: 'r1', pipelineId: 'abcd1234', cardId: 'card_00000001', status: 'running', phase: 'plan' });
-  assert.deepEqual(m.runLinkForCard('card_00000001').runId, 'r1');
-  assert.equal(m.runLinkByPipeline('nope'), null);
-  assert.equal(m.runLinkForCard(null), null);
-  // a resume: the SAME pipeline under a new runId wins by recency (the newer frame lands later)
-  m.apply({ type: 'ask-run-status', threadId: TID, runId: 'r2', pipelineId: 'abcd1234', cardId: 'card_00000001', status: 'running', phase: null });
-  assert.equal(m.runLinkByPipeline('abcd1234').runId, 'r2');
 });

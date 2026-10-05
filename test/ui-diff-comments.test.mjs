@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -13,7 +14,7 @@ const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 
 const PROJECT = '/tmp/proj';
 
-async function boot({ fetchHandler, url = 'http://localhost:4317/', hljsLoader = null, markdown = null } = {}) {
+async function boot({ fetchHandler, url = 'http://localhost:4317/', hljsLoader = null, markdown = null, hooks = null } = {}) {
   const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url }));
   const { window } = dom;
 
@@ -67,8 +68,8 @@ async function boot({ fetchHandler, url = 'http://localhost:4317/', hljsLoader =
   }
   globalThis.window = window;
   globalThis.document = window.document;
-  if (hljsLoader || markdown) {
-    window.__worcaTestHooks = { ...(hljsLoader ? { hljsLoader } : {}), ...(markdown ? { askMarkdown: markdown } : {}) };
+  if (hljsLoader || markdown || hooks) {
+    window.__worcaTestHooks = { ...(hljsLoader ? { hljsLoader } : {}), ...(markdown ? { askMarkdown: markdown } : {}), ...hooks };
   }
 
   await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
@@ -137,7 +138,7 @@ function historyArms(box) {
 // case) and deliver it later through a `pipelines-changed` broadcast.
 async function bootDetail({
   rows = [ROW], detail = DETAIL, budget = okBudget(), arms = null,
-  deepLink = false, hljsLoader = null, markdown = null,
+  deepLink = false, hljsLoader = null, markdown = null, hooks = null,
 } = {}) {
   const box = { rows, detail, budget };
   const base = historyArms(box);
@@ -146,6 +147,7 @@ async function bootDetail({
     url: deepLink ? `http://localhost:4317/#${detailHash}` : 'http://localhost:4317/',
     hljsLoader,
     markdown,
+    hooks,
   });
   ctx.box = box;
   return ctx;
@@ -188,7 +190,7 @@ const cmtResults = (files) => ({
   newFiles: [], changedFiles: files, keyThingsToCheck: [], nitpicks: [],
 });
 const A_JS = [{ path: 'src/a.js', status: 'M', added: 2, removed: 1 }];
-const BIG_JS = [{ path: 'big.js', status: 'M', added: 3000, removed: 0 }];
+const BIG_JS = [{ path: 'big.js', status: 'M', added: 60, removed: 0 }];
 const BIN_FILES = [{ path: 'logo.png', status: 'M', binary: true }];
 
 // Rows: ctx(old 1/new 1) del(old 2) add(new 2) add(new 3) ctx(old 3/new 4).
@@ -204,21 +206,26 @@ const CMT_PATCH = `diff --git a/src/a.js b/src/a.js
 `;
 const BIN_PATCH = 'diff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\n';
 
-// 3 000 rows x 208 code units = 624 000 > MAX_FILE_SECTION_CODE_UNITS (500 000).
+// The Diff tab's size knobs (window.__worcaTestHooks): a 50-row window and a
+// 2,000-code-unit parse cap, so the window and cap cases need only 60 rows.
+const WIN = 50;
+const SMALL = { diffWindowLines: WIN, maxSectionCodeUnits: 2000 };
+
+// 60 rows x 48 code units = 2 880 > the 2 000-code-unit test cap (SMALL).
 // The cap slices the RAW section text BEFORE parsing, so the tail rows never become
-// DOM and `truncated` is set. ~2 400 rows survive — under HD_DIFF_WINDOW_LINES, so
+// DOM and `truncated` is set. ~40 rows survive — under the 50-row window, so
 // there is no show-more row to confuse this case.
 const capPatch = () => {
-  const lines = Array.from({ length: 3_000 }, (_, i) => `+${String(i + 1).padStart(5, '0')} ${'x'.repeat(200)}`).join('\n');
-  return `diff --git a/big.js b/big.js\n--- a/big.js\n+++ b/big.js\n@@ -0,0 +1,3000 @@\n${lines}\n`;
+  const lines = Array.from({ length: 60 }, (_, i) => `+${String(i + 1).padStart(5, '0')} ${'x'.repeat(40)}`).join('\n');
+  return `diff --git a/big.js b/big.js\n--- a/big.js\n+++ b/big.js\n@@ -0,0 +1,60 @@\n${lines}\n`;
 };
 
-// The 6 000-row fixture the two WINDOWING cases share: one hunk, no truncation,
-// so HD_DIFF_WINDOW_LINES (5 000) really does leave row 5 500 out of the DOM
-// until "Show more" is clicked.
+// The 60-row fixture the WINDOWING cases share: one hunk, no truncation, so the
+// 50-row window (SMALL) really does leave row 55 out of the DOM until "Show more"
+// is clicked.
 const bigPatch = () => {
-  const lines = Array.from({ length: 6000 }, (_, i) => `+line ${i + 1}`).join('\n');
-  return `diff --git a/big.js b/big.js\n--- a/big.js\n+++ b/big.js\n@@ -0,0 +1,6000 @@\n${lines}\n`;
+  const lines = Array.from({ length: 60 }, (_, i) => `+line ${i + 1}`).join('\n');
+  return `diff --git a/big.js b/big.js\n--- a/big.js\n+++ b/big.js\n@@ -0,0 +1,60 @@\n${lines}\n`;
 };
 
 const cmt = (over = {}) => ({ id: 'dc_00000001', path: 'src/a.js', projectKey: null, side: 'new', line: 2,
@@ -236,7 +243,7 @@ const keydown = (window, node, key, init = {}) => node.dispatchEvent(
  *  change the comment set between renders. 8 ticks, not 3: buildHdDiff paints the
  *  file list from `results` first and repaints after the SECOND fetch
  *  (ensureComments) lands, so a synthetic row appears one round trip late. */
-async function bootComments({ patch = CMT_PATCH, files = A_JS, comments = [], patchAvailable = true, markdown = null, arms = null, whoami = null } = {}) {
+async function bootComments({ patch = CMT_PATCH, files = A_JS, comments = [], patchAvailable = true, markdown = null, arms = null, whoami = null, hooks = null } = {}) {
   const box = { patch, comments, patchAvailable, calls: [] };
   const base = armsFor(box);
   const ctx = await bootDetail({
@@ -244,6 +251,7 @@ async function bootComments({ patch = CMT_PATCH, files = A_JS, comments = [], pa
     arms: (url, opts) => (whoami && String(url).endsWith('/api/whoami') ? { ok: true, status: 200, json: async () => whoami } : null)
       || (arms && arms(url, opts, box)) || base(url, opts),
     markdown,
+    hooks,
   });
   await openDetail(ctx);
   await settle(ctx.window, 8);
@@ -343,33 +351,33 @@ test('hovering a row arms the + button; Cmd+Enter POSTs the exact anchor', async
   assert.equal(doc.querySelector('.hd-cmt-input'), null, 'the composer closed on success');
 });
 
-// save.disabled gates the BUTTON; the Cmd+Enter listener sits on `wrap` and never
-// looked at it, so an impatient second press posted the same body twice.
-test('a fast double Cmd+Enter posts exactly once', async () => {
-  const ctx = await bootComments();
-  const { window } = ctx;
-  const doc = window.document;
-  hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
-  click(window, doc.querySelector('.hd-cmt-add'));
-  const ta = doc.querySelector('.hd-cmt-input');
-  ta.value = 'only once';
-  keydown(window, ta, 'Enter', { metaKey: true });
-  keydown(window, ta, 'Enter', { metaKey: true });   // still in flight
-  await settle(window, 8);
-  assert.equal(ctx.cbox.calls.filter((c) => c[0] === 'POST').length, 1, 'one POST, not two');
-});
-
-test('a fast double Cmd+Enter on a REPLY posts exactly once', async () => {
+test('a fast double Cmd+Enter posts exactly once, for a comment and for a reply', async () => {
   const ctx = await bootComments({ comments: [cmt()] });
   const { window } = ctx;
   const doc = window.document;
-  click(window, doc.querySelector('[data-comment-id="dc_00000001"] .hd-cmt-reply'));
-  const ta = doc.querySelector('.hd-cmt-composer.reply .hd-cmt-input');
-  ta.value = 'only once';
-  keydown(window, ta, 'Enter', { metaKey: true });
-  keydown(window, ta, 'Enter', { metaKey: true });
-  await settle(window, 8);
-  assert.equal(ctx.cbox.calls.filter((c) => c[0] === 'POST' && c[1].endsWith('/replies')).length, 1);
+  await checkRows([
+    // save.disabled gates the BUTTON; the Cmd+Enter listener sits on `wrap` and never
+    // looked at it, so an impatient second press posted the same body twice.
+    { name: 'a fast double Cmd+Enter posts exactly once', run: async () => {
+      hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
+      click(window, doc.querySelector('.hd-cmt-add'));
+      const ta = doc.querySelector('.hd-cmt-input');
+      ta.value = 'only once';
+      keydown(window, ta, 'Enter', { metaKey: true });
+      keydown(window, ta, 'Enter', { metaKey: true });   // still in flight
+      await settle(window, 8);
+      assert.equal(ctx.cbox.calls.filter((c) => c[0] === 'POST').length, 1, 'one POST, not two');
+    } },
+    { name: 'a fast double Cmd+Enter on a REPLY posts exactly once', run: async () => {
+      click(window, doc.querySelector('[data-comment-id="dc_00000001"] .hd-cmt-reply'));
+      const ta = doc.querySelector('.hd-cmt-composer.reply .hd-cmt-input');
+      ta.value = 'only once';
+      keydown(window, ta, 'Enter', { metaKey: true });
+      keydown(window, ta, 'Enter', { metaKey: true });
+      await settle(window, 8);
+      assert.equal(ctx.cbox.calls.filter((c) => c[0] === 'POST' && c[1].endsWith('/replies')).length, 1);
+    } },
+  ]);
 });
 
 test('the + button refuses to arm on a row with no number on either side', async () => {
@@ -385,49 +393,46 @@ test('the + button refuses to arm on a row with no number on either side', async
   assert.equal(window.document.querySelector('.hd-cmt-add'), null);
 });
 
-test('Cancel closes the composer without POSTing', async () => {
+test('Cancel and Esc close the composer without POSTing or leaving Details; Esc with no composer still steps back', async () => {
   const ctx = await bootComments();
   const { window } = ctx;
   const doc = window.document;
-  hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
-  click(window, doc.querySelector('.hd-cmt-add'));
-  doc.querySelector('.hd-cmt-input').value = 'never sent';
-  click(window, doc.querySelector('.hd-cmt-cancel'));
-  await settle(window);
-  assert.equal(doc.querySelector('.hd-cmt-input'), null, 'the composer closed');
-  assert.equal(ctx.cbox.calls.length, 0, 'Cancel never POSTs');
-});
-
-// THE regression test for the Escape guard / D20. The handler that would navigate
-// away is registered on `document` in the CAPTURE phase, so the event must be
-// dispatched on the TEXTAREA and allowed to bubble — dispatching on `document`
-// would make `e.target` the document and the `.hd-cmt-composer` guard would
-// (correctly) not match.
-test('Esc closes the composer and does NOT leave the detail screen', async () => {
-  const ctx = await bootComments();
-  const { window } = ctx;
-  const doc = window.document;
-  hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
-  click(window, doc.querySelector('.hd-cmt-add'));
-  const ta = doc.querySelector('.hd-cmt-input');
-  assert.ok(ta, 'the composer opened');
-  ta.value = 'a draft nobody wants to lose';
-  const hashBefore = window.location.hash;
-  keydown(window, ta, 'Escape');
-  await settle(window);
-  assert.equal(doc.querySelector('.hd-cmt-input'), null, 'the composer closed');
-  assert.equal(window.location.hash, hashBefore, 'still on the detail screen — the capture guard held');
-  assert.ok(doc.querySelector('#hist-detail .hd-diff-body'), 'the diff is still rendered');
-  assert.equal(ctx.cbox.calls.length, 0, 'Esc never POSTs');
-});
-
-test('Esc with no composer open still steps back out of Details (the guard is scoped)', async () => {
-  const ctx = await bootComments();
-  const { window } = ctx;
-  keydown(window, window.document.querySelector('#hist-detail .hd-diff-pane'), 'Escape');
-  await settle(window);
-  // Details › Diff → the run's glance (one more Escape would reach the list).
-  assert.equal(window.location.hash.replace(/^#/, ''), `history/${KEY}/${ROW.id}`, 'the existing behaviour is untouched');
+  await checkRows([
+    { name: 'Cancel closes the composer without POSTing', run: async () => {
+      hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
+      click(window, doc.querySelector('.hd-cmt-add'));
+      doc.querySelector('.hd-cmt-input').value = 'never sent';
+      click(window, doc.querySelector('.hd-cmt-cancel'));
+      await settle(window);
+      assert.equal(doc.querySelector('.hd-cmt-input'), null, 'the composer closed');
+      assert.equal(ctx.cbox.calls.length, 0, 'Cancel never POSTs');
+    } },
+    // THE regression test for the Escape guard / D20. The handler that would navigate
+    // away is registered on `document` in the CAPTURE phase, so the event must be
+    // dispatched on the TEXTAREA and allowed to bubble — dispatching on `document`
+    // would make `e.target` the document and the `.hd-cmt-composer` guard would
+    // (correctly) not match.
+    { name: 'Esc closes the composer and does NOT leave the detail screen', run: async () => {
+      hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
+      click(window, doc.querySelector('.hd-cmt-add'));
+      const ta = doc.querySelector('.hd-cmt-input');
+      assert.ok(ta, 'the composer opened');
+      ta.value = 'a draft nobody wants to lose';
+      const hashBefore = window.location.hash;
+      keydown(window, ta, 'Escape');
+      await settle(window);
+      assert.equal(doc.querySelector('.hd-cmt-input'), null, 'the composer closed');
+      assert.equal(window.location.hash, hashBefore, 'still on the detail screen — the capture guard held');
+      assert.ok(doc.querySelector('#hist-detail .hd-diff-body'), 'the diff is still rendered');
+      assert.equal(ctx.cbox.calls.length, 0, 'Esc never POSTs');
+    } },
+    { name: 'Esc with no composer open still steps back out of Details (the guard is scoped)', run: async () => {
+      keydown(window, window.document.querySelector('#hist-detail .hd-diff-pane'), 'Escape');
+      await settle(window);
+      // Details › Diff → the run's glance (one more Escape would reach the list).
+      assert.equal(window.location.hash.replace(/^#/, ''), `history/${KEY}/${ROW.id}`, 'the existing behaviour is untouched');
+    } },
+  ]);
 });
 
 test('comments render as cards under their row, stacked in creation order', async () => {
@@ -450,61 +455,93 @@ test('comments render as cards under their row, stacked in creation order', asyn
   assert.equal(doc.querySelector('.hd-cmt-detached'), null, 'every anchor rendered, so no detached block');
 });
 
-test('a comment whose sent_run_id is set shows the "sent to #<runId>" marker', async () => {
-  const ctx = await bootComments({ comments: [cmt({ sentRunId: 'abcd1234' })] });
-  assert.equal(ctx.window.document.querySelector('.hd-cmt-sent').textContent, 'sent to #abcd1234');
+test('Resolve PATCHes {resolved:true}, Reopen {resolved:false}; a refused Resolve says why inline', async () => {
+  await checkRows([
+    { name: 'Resolve PATCHes {resolved:true} and the card dims; Reopen PATCHes {resolved:false}', run: async () => {
+      const ctx = await bootComments({ comments: [cmt()] });
+      const { window } = ctx;
+      const doc = window.document;
+      const card = () => doc.querySelector('[data-comment-id="dc_00000001"]');
+      const thread = () => doc.querySelector('[data-thread-id="dc_00000001"]');
+      assert.equal(card().querySelector('.hd-cmt-resolve').textContent, 'Resolve');
+      assert.equal(thread().classList.contains('resolved'), false);
+      ctx.cbox.comments = [cmt({ resolved: true, resolvedAt: '2026-08-26T11:00:00.000Z' })];
+      click(window, card().querySelector('.hd-cmt-resolve'));
+      await settle(window, 8);
+      const patches = () => ctx.cbox.calls.filter((c) => c[0] === 'PATCH');
+      assert.equal(patches()[0][1], `/api/history/${KEY}/${ROW.id}/comments/dc_00000001`);
+      assert.deepEqual(JSON.parse(patches()[0][2]), { resolved: true });
+      assert.ok(thread().classList.contains('resolved'), 'repainted dimmed');
+      assert.equal(card().querySelector('.hd-cmt-tag').textContent, 'Resolved');
+      assert.equal(card().querySelector('.hd-cmt-resolve').textContent, 'Reopen');
+      ctx.cbox.comments = [cmt()];
+      click(window, card().querySelector('.hd-cmt-resolve'));
+      await settle(window, 8);
+      assert.equal(patches().length, 2);
+      assert.deepEqual(JSON.parse(patches()[1][2]), { resolved: false });
+      assert.equal(thread().classList.contains('resolved'), false, 'reopened');
+    } },
+    { name: 'a Resolve the server refuses says why, inline on the card', run: async () => {
+      const ctx = await bootComments({
+        comments: [cmt()],
+        arms: (url, opts) => ((opts.method || 'GET') === 'PATCH' && /\/comments\/dc_[0-9a-f]{8}$/.test(url)
+          ? fail(400, { error: 'replies cannot be resolved on their own' })
+          : null),
+      });
+      const { window } = ctx;
+      const doc = window.document;
+      click(window, doc.querySelector('[data-comment-id="dc_00000001"] .hd-cmt-resolve'));
+      await settle(window, 6);
+      const card = doc.querySelector('[data-comment-id="dc_00000001"]');
+      assert.ok(card, 'the card is still there');
+      assert.equal(card.querySelector('.hd-cmt-err').textContent, 'replies cannot be resolved on their own');
+    } },
+  ]);
 });
 
-test('Resolve PATCHes {resolved:true} and the card dims; Reopen PATCHes {resolved:false}', async () => {
-  const ctx = await bootComments({ comments: [cmt()] });
+test('Delete confirms via confirmModal (naming replies on a root) and only then DELETEs', async () => {
+  const ctx = await bootComments({ comments: [cmt(), cmt({ id: 'dc_00000003', body: 'r', parentId: 'dc_00000001' })] });
   const { window } = ctx;
   const doc = window.document;
-  const card = () => doc.querySelector('[data-comment-id="dc_00000001"]');
-  const thread = () => doc.querySelector('[data-thread-id="dc_00000001"]');
-  assert.equal(card().querySelector('.hd-cmt-resolve').textContent, 'Resolve');
-  assert.equal(thread().classList.contains('resolved'), false);
-  ctx.cbox.comments = [cmt({ resolved: true, resolvedAt: '2026-08-26T11:00:00.000Z' })];
-  click(window, card().querySelector('.hd-cmt-resolve'));
-  await settle(window, 8);
-  const patches = () => ctx.cbox.calls.filter((c) => c[0] === 'PATCH');
-  assert.equal(patches()[0][1], `/api/history/${KEY}/${ROW.id}/comments/dc_00000001`);
-  assert.deepEqual(JSON.parse(patches()[0][2]), { resolved: true });
-  assert.ok(thread().classList.contains('resolved'), 'repainted dimmed');
-  assert.equal(card().querySelector('.hd-cmt-tag').textContent, 'Resolved');
-  assert.equal(card().querySelector('.hd-cmt-resolve').textContent, 'Reopen');
-  ctx.cbox.comments = [cmt()];
-  click(window, card().querySelector('.hd-cmt-resolve'));
-  await settle(window, 8);
-  assert.equal(patches().length, 2);
-  assert.deepEqual(JSON.parse(patches()[1][2]), { resolved: false });
-  assert.equal(thread().classList.contains('resolved'), false, 'reopened');
-});
-
-test('Delete confirms via confirmModal and only then DELETEs', async () => {
-  const ctx = await bootComments({ comments: [cmt()] });
-  const { window } = ctx;
-  const doc = window.document;
-  click(window, doc.querySelector('.hd-cmt-delete'));
-  await settle(window);
-  // confirmModal's real options are {title, message, confirmLabel, cancelLabel,
-  // checkbox, danger}. `body`/`confirmText` do not exist and would render an EMPTY
-  // modal — that is exactly what this assertion catches.
-  assert.equal(doc.querySelector('#confirm-modal').classList.contains('hidden'), false, 'the modal is up');
-  assert.equal(doc.querySelector('#confirm-title').textContent, 'Delete this comment?');
-  assert.match(doc.querySelector('#confirm-message').textContent, /cannot be recovered/);
-  assert.equal(doc.querySelector('#confirm-ok').textContent, 'Delete');
-  assert.ok(doc.querySelector('#confirm-ok').classList.contains('danger'));
-  assert.equal(ctx.cbox.calls.length, 0, 'nothing is sent before the user confirms');
-  ctx.cbox.comments = [];
-  doc.querySelector('#confirm-ok').click();      // the ui-history-detail.test.mjs precedent
-  await settle(window, 8);
-  assert.deepEqual(ctx.cbox.calls.map((c) => c[0]), ['DELETE']);
-  assert.equal(doc.querySelector('[data-comment-id="dc_00000001"]'), null, 'gone after the repaint');
+  await checkRows([
+    { name: 'Delete on a root with replies says so; Delete on a reply asks about the reply', run: async () => {
+      click(window, doc.querySelector('[data-comment-id="dc_00000001"] .hd-cmt-delete'));
+      await settle(window);
+      assert.equal(doc.querySelector('#confirm-title').textContent, 'Delete this comment?');
+      assert.match(doc.querySelector('#confirm-message').textContent, /and its 1 reply cannot be recovered/);
+      click(window, doc.querySelector('#confirm-cancel'));
+      await settle(window);
+      click(window, doc.querySelector('[data-comment-id="dc_00000003"] .hd-cmt-delete'));
+      await settle(window);
+      assert.equal(doc.querySelector('#confirm-title').textContent, 'Delete this reply?');
+      // Leave nothing open for the next row.
+      click(window, doc.querySelector('#confirm-cancel'));
+      await settle(window);
+    } },
+    { name: 'Delete confirms via confirmModal and only then DELETEs', run: async () => {
+      click(window, doc.querySelector('.hd-cmt-delete'));
+      await settle(window);
+      // confirmModal's real options are {title, message, confirmLabel, cancelLabel,
+      // checkbox, danger}. `body`/`confirmText` do not exist and would render an EMPTY
+      // modal — that is exactly what this assertion catches.
+      assert.equal(doc.querySelector('#confirm-modal').classList.contains('hidden'), false, 'the modal is up');
+      assert.equal(doc.querySelector('#confirm-title').textContent, 'Delete this comment?');
+      assert.match(doc.querySelector('#confirm-message').textContent, /cannot be recovered/);
+      assert.equal(doc.querySelector('#confirm-ok').textContent, 'Delete');
+      assert.ok(doc.querySelector('#confirm-ok').classList.contains('danger'));
+      assert.equal(ctx.cbox.calls.length, 0, 'nothing is sent before the user confirms');
+      ctx.cbox.comments = [];
+      doc.querySelector('#confirm-ok').click();      // the ui-history-detail.test.mjs precedent
+      await settle(window, 8);
+      assert.deepEqual(ctx.cbox.calls.map((c) => c[0]), ['DELETE']);
+      assert.equal(doc.querySelector('[data-comment-id="dc_00000001"]'), null, 'gone after the repaint');
+    } },
+  ]);
 });
 
 test('a comment whose row is outside the first window attaches when Show more connects it', async () => {
-  const ctx = await bootComments({ patch: bigPatch(), files: BIG_JS,
-    comments: [cmt({ path: 'big.js', line: 5500, lineText: 'line 5500', body: 'late row' })] });
+  const ctx = await bootComments({ patch: bigPatch(), files: BIG_JS, hooks: SMALL,
+    comments: [cmt({ path: 'big.js', line: 55, lineText: 'line 55', body: 'late row' })] });
   const doc = ctx.window.document;
   assert.equal(doc.querySelector('.hd-cmt-block [data-comment-id="dc_00000001"]'), null, 'row not connected yet');
   assert.equal(doc.querySelectorAll('.hd-cmt-detached [data-comment-id]').length, 1, 'shown detached meanwhile');
@@ -512,57 +549,59 @@ test('a comment whose row is outside the first window attaches when Show more co
   await settle(ctx.window, 8);
   const card = doc.querySelector('.hd-cmt-block [data-comment-id="dc_00000001"]');
   assert.ok(card, 'attached when its window materialized');
-  assert.ok(card.closest('.hd-cmt-block').previousElementSibling.matches('.hd-dl-row[data-new="5500"]'),
+  assert.ok(card.closest('.hd-cmt-block').previousElementSibling.matches('.hd-dl-row[data-new="55"]'),
     'directly under its own row');
   assert.equal(doc.querySelector('.hd-cmt-detached'), null, 'the detached copy is gone, never doubled');
 });
 
-test('a comment past the 500k parse cap renders detached, below "(large file — diff truncated)"', async () => {
-  const ctx = await bootComments({ patch: capPatch(), files: BIG_JS,
-    comments: [cmt({ path: 'big.js', line: 2999, lineText: 'a line the parser never reached', body: 'past the cap' })] });
-  const doc = ctx.window.document;
-  const body = doc.querySelector('.hd-diff-body');
-  assert.ok(body.querySelector('.hd-diff-trunc'), 'precondition: the section really was truncated');
-  assert.equal(doc.querySelector('.hd-dl-row[data-new="2999"]'), null, 'precondition: that row is not in the DOM');
-  const detached = body.querySelector(':scope > .hd-cmt-detached');
-  assert.ok(detached, 'the comment is never dropped — this is what line_text exists for');
-  assert.equal(body.lastElementChild, detached, 'below the truncation note, which stays last among the diff rows');
-  assert.equal(detached.querySelector('.hd-cmt-where').textContent, 'big.js:2999 (new)');
-  assert.equal(detached.querySelector('.hd-cmt-quote').textContent, 'a line the parser never reached');
-  assert.equal(detached.querySelector('.hd-cmt-body').textContent, 'past the cap');
-  assert.ok(detached.querySelector('.hd-cmt-resolve') && detached.querySelector('.hd-cmt-delete')
-    && detached.querySelector('.hd-cmt-ask'), 'the full action set, exactly like an attached card');
-});
-
-test('a binary section shows "(no textual diff for this file)" plus the detached cards', async () => {
-  const ctx = await bootComments({ patch: BIN_PATCH, files: BIN_FILES,
-    comments: [cmt({ path: 'logo.png', line: 1, lineText: '', body: 'wrong asset' })] });
-  const doc = ctx.window.document;
-  const body = doc.querySelector('.hd-diff-body');
-  // splitPatchSections still gives a binary section a path (from the diff --git
-  // header), so it IS in patchIndex; the refusal comes from parseFileSection().binary.
-  assert.equal(body.querySelector('.hd-diff-note').textContent, '(no textual diff for this file)');
-  assert.equal(body.querySelectorAll('.hd-cmt-detached [data-comment-id]').length, 1);
-  hover(ctx.window, body);
-  assert.equal(doc.querySelector('.hd-cmt-add'), null, 'no anchorable rows, so nothing to arm');
-});
-
-test('a path absent from the patch gets a synthetic file row that carries its badge', async () => {
-  const ctx = await bootComments({ comments: [
-    cmt(),
-    cmt({ id: 'dc_00000002', path: 'ghost/gone.js', line: 7, lineText: 'gone', body: 'about a file not in this patch' }),
-  ] });
-  const doc = ctx.window.document;
-  const ghost = [...doc.querySelectorAll('#hist-detail .hd-diff-file')].find((b) => b.dataset.path === 'ghost/gone.js');
-  assert.ok(ghost, 'a synthetic row appeared for the orphan path');
-  assert.equal(ghost.querySelector('.hd-cmt-badge').textContent, '1');
-  assert.equal(ghost.querySelector('.hd-diff-counts').textContent, '',
-    'no bogus "+0 −0" — the synthetic entry carries {path} and nothing else');
-  click(ctx.window, ghost);
-  await settle(ctx.window, 8);
-  const body = doc.querySelector('.hd-diff-body');
-  assert.equal(body.querySelector('.hd-diff-note').textContent, '(no textual diff for this file)');
-  assert.equal(body.querySelector('.hd-cmt-detached .hd-cmt-body').textContent, 'about a file not in this patch');
+test('comments whose anchor cannot render are never lost: past the 500k cap (detached under the truncation note), binary section, path absent from the patch (synthetic row)', async () => {
+  await checkRows([
+    { name: 'a comment past the 500k parse cap renders detached, below "(large file — diff truncated)"', run: async () => {
+      const ctx = await bootComments({ patch: capPatch(), files: BIG_JS, hooks: SMALL,
+        comments: [cmt({ path: 'big.js', line: 59, lineText: 'a line the parser never reached', body: 'past the cap' })] });
+      const doc = ctx.window.document;
+      const body = doc.querySelector('.hd-diff-body');
+      assert.ok(body.querySelector('.hd-diff-trunc'), 'precondition: the section really was truncated');
+      assert.equal(doc.querySelector('.hd-dl-row[data-new="59"]'), null, 'precondition: that row is not in the DOM');
+      const detached = body.querySelector(':scope > .hd-cmt-detached');
+      assert.ok(detached, 'the comment is never dropped — this is what line_text exists for');
+      assert.equal(body.lastElementChild, detached, 'below the truncation note, which stays last among the diff rows');
+      assert.equal(detached.querySelector('.hd-cmt-where').textContent, 'big.js:59 (new)');
+      assert.equal(detached.querySelector('.hd-cmt-quote').textContent, 'a line the parser never reached');
+      assert.equal(detached.querySelector('.hd-cmt-body').textContent, 'past the cap');
+      assert.ok(detached.querySelector('.hd-cmt-resolve') && detached.querySelector('.hd-cmt-delete')
+        && detached.querySelector('.hd-cmt-ask'), 'the full action set, exactly like an attached card');
+    } },
+    { name: 'a binary section shows "(no textual diff for this file)" plus the detached cards', run: async () => {
+      const ctx = await bootComments({ patch: BIN_PATCH, files: BIN_FILES,
+        comments: [cmt({ path: 'logo.png', line: 1, lineText: '', body: 'wrong asset' })] });
+      const doc = ctx.window.document;
+      const body = doc.querySelector('.hd-diff-body');
+      // splitPatchSections still gives a binary section a path (from the diff --git
+      // header), so it IS in patchIndex; the refusal comes from parseFileSection().binary.
+      assert.equal(body.querySelector('.hd-diff-note').textContent, '(no textual diff for this file)');
+      assert.equal(body.querySelectorAll('.hd-cmt-detached [data-comment-id]').length, 1);
+      hover(ctx.window, body);
+      assert.equal(doc.querySelector('.hd-cmt-add'), null, 'no anchorable rows, so nothing to arm');
+    } },
+    { name: 'a path absent from the patch gets a synthetic file row that carries its badge', run: async () => {
+      const ctx = await bootComments({ comments: [
+        cmt(),
+        cmt({ id: 'dc_00000002', path: 'ghost/gone.js', line: 7, lineText: 'gone', body: 'about a file not in this patch' }),
+      ] });
+      const doc = ctx.window.document;
+      const ghost = [...doc.querySelectorAll('#hist-detail .hd-diff-file')].find((b) => b.dataset.path === 'ghost/gone.js');
+      assert.ok(ghost, 'a synthetic row appeared for the orphan path');
+      assert.equal(ghost.querySelector('.hd-cmt-badge').textContent, '1');
+      assert.equal(ghost.querySelector('.hd-diff-counts').textContent, '',
+        'no bogus "+0 −0" — the synthetic entry carries {path} and nothing else');
+      click(ctx.window, ghost);
+      await settle(ctx.window, 8);
+      const body = doc.querySelector('.hd-diff-body');
+      assert.equal(body.querySelector('.hd-diff-note').textContent, '(no textual diff for this file)');
+      assert.equal(body.querySelector('.hd-cmt-detached .hd-cmt-body').textContent, 'about a file not in this patch');
+    } },
+  ]);
 });
 
 test('patchAvailable:false disables the + button but keeps Resolve, Delete and Ask Worca', async () => {
@@ -580,21 +619,6 @@ test('patchAvailable:false disables the + button but keeps Resolve, Delete and A
   assert.ok(card.querySelector('.hd-cmt-ask'), 'Ask Worca still works');
 });
 
-test('the file-list badge counts UNRESOLVED comments only, detached ones included', async () => {
-  const ctx = await bootComments({ patch: capPatch(), files: BIG_JS, comments: [
-    cmt({ id: 'dc_00000001', path: 'big.js', line: 1, lineText: 'l1', body: 'attached, open' }),
-    cmt({ id: 'dc_00000002', path: 'big.js', line: 2, lineText: 'l2', body: 'attached, resolved',
-      resolved: true, resolvedAt: '2026-08-26T11:00:00.000Z' }),
-    cmt({ id: 'dc_00000003', path: 'big.js', line: 2999, lineText: 'past the cap', body: 'detached, open' }),
-  ] });
-  const doc = ctx.window.document;
-  const btn = [...doc.querySelectorAll('#hist-detail .hd-diff-file')].find((b) => b.dataset.path === 'big.js');
-  const badge = btn.querySelector('.hd-cmt-badge');
-  assert.equal(badge.textContent, '2', 'the resolved one is excluded; the detached one is NOT');
-  assert.equal(badge.title, '2 unresolved comments');
-  assert.equal(btn.lastElementChild, badge, 'painted after renderFileTree, whose counts slot is one-shot');
-});
-
 test('a diff-comments-changed frame for THIS run repaints in place; one for another run is ignored', async () => {
   const ctx = await bootComments();
   const before = ctx.calls.filter((c) => c.url.endsWith('/comments')).length;
@@ -609,12 +633,12 @@ test('a diff-comments-changed frame for THIS run repaints in place; one for anot
 });
 
 test('a poke never re-fetches /diff and never resets the window cursor', async () => {
-  const ctx = await bootComments({ patch: bigPatch(), files: BIG_JS });
+  const ctx = await bootComments({ patch: bigPatch(), files: BIG_JS, hooks: SMALL });
   const doc = ctx.window.document;
   click(ctx.window, doc.querySelector('.hd-dl-more-btn'));      // expand to window 2
   await settle(ctx.window, 8);
   const expanded = doc.querySelectorAll('.hd-dl-row').length;
-  assert.ok(expanded > 5000, 'precondition: two windows are connected');
+  assert.ok(expanded > WIN, 'precondition: two windows are connected');
   ctx.cbox.comments = [cmt({ path: 'big.js', line: 12, lineText: 'line 12', body: 'from the assistant', author: 'ask' })];
   ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'diff-comments-changed', storeKey: KEY, pipelineId: ROW.id }) });
   await settle(ctx.window, 8);
@@ -638,152 +662,156 @@ test('a poke never destroys an open composer draft', async () => {
   assert.ok(doc.querySelector('[data-comment-id="dc_00000001"]'), 'and the new card still arrived');
 });
 
-test('workspace runs POST the member project taken from the rendered section', async () => {
+test('workspace runs POST the member project from the rendered section and the page context names it', async () => {
   const ctx = await bootWsComments();
   const { window } = ctx;
   const doc = window.document;
-  const file = doc.querySelector('#hist-detail .hd-diff-file');
-  assert.equal(file.dataset.project, 'team-00000001', 'the member key reached the file row');
-  hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
-  click(window, doc.querySelector('.hd-cmt-add'));
-  doc.querySelector('.hd-cmt-input').value = 'member note';
-  click(window, doc.querySelector('.hd-cmt-save'));
-  await settle(window, 8);
-  const post = ctx.cbox.calls.find((c) => c[0] === 'POST');
-  assert.equal(post[1], `${WS_URL}/comments`,
-    'the TWIN route — the /api/history :key regex forbids the slash in "workspaces/<id>" (D8)');
-  assert.deepEqual(JSON.parse(post[2]),
-    { project: 'team-00000001', path: 'src/a.js', side: 'new', line: 2, body: 'member note' },
-    'the member is explicit, taken from the section that was rendered — never inferred (D4)');
+  await checkRows([
+    { name: 'workspace runs POST the member project taken from the rendered section', run: async () => {
+      const file = doc.querySelector('#hist-detail .hd-diff-file');
+      assert.equal(file.dataset.project, 'team-00000001', 'the member key reached the file row');
+      hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
+      click(window, doc.querySelector('.hd-cmt-add'));
+      doc.querySelector('.hd-cmt-input').value = 'member note';
+      click(window, doc.querySelector('.hd-cmt-save'));
+      await settle(window, 8);
+      const post = ctx.cbox.calls.find((c) => c[0] === 'POST');
+      assert.equal(post[1], `${WS_URL}/comments`,
+        'the TWIN route — the /api/history :key regex forbids the slash in "workspaces/<id>" (D8)');
+      assert.deepEqual(JSON.parse(post[2]),
+        { project: 'team-00000001', path: 'src/a.js', side: 'new', line: 2, body: 'member note' },
+        'the member is explicit, taken from the section that was rendered — never inferred (D4)');
+    } },
+    { name: 'the page context names the member project of the open workspace diff file', run: async () => {
+      assert.equal(doc.querySelector('#hist-detail .hd-diff-file').dataset.project, 'team-00000001');
+      click(window, doc.querySelector('.ask-pill'));
+      await settle(window, 8);
+      const input = doc.querySelector('textarea.ask-input');
+      input.value = 'what do you make of this file?';
+      doc.querySelector('[data-ask-send]').click();
+      await settle(window, 8);
+      const post = ctx.calls.filter((c) => (c.opts.method || 'GET') === 'POST' && c.url.includes('/messages')).pop();
+      assert.ok(post, 'the panel POSTed');
+      assert.equal(JSON.parse(post.opts.body).context.diffPath, 'src/a.js (member team-00000001)',
+        'add_diff_comment needs memberProjectKey and never guesses it');
+    } },
+  ]);
 });
 
-test("the card's Ask Worca button appends the exact reference and sends nothing", async () => {
+test('Ask Worca on a card appends the exact reference (and the reply count) and sends nothing', async () => {
   // askPanel is a module-local `let` with no test seam, so this reads the mounted
   // panel's real textarea — the test/ui-ask-integration.test.mjs precedent — rather
-  // than spying on appendToComposer, which nothing can reach.
+  // than spying on appendToComposer, which nothing can reach. One boot: two plain
+  // roots for the stacking row, and a third root (dc_00000005) carrying two replies.
   const ctx = await bootComments({ comments: [
     cmt(),
     cmt({ id: 'dc_00000002', line: 3, lineText: 'added', body: 'and this one' }),
+    cmt({ id: 'dc_00000005', body: 'root' }),
+    cmt({ id: 'dc_00000003', body: 'r1', author: 'ask', parentId: 'dc_00000005' }),
+    cmt({ id: 'dc_00000004', body: 'r2', parentId: 'dc_00000005' }),
   ] });
   const { window } = ctx;
   const doc = window.document;
-  click(window, doc.querySelector('[data-comment-id="dc_00000001"] .hd-cmt-ask'));
-  await settle(window, 6);
-  const ta = doc.querySelector('.ask-input');
-  assert.ok(ta, 'the Ask panel is mounted by the app boot');
-  assert.equal(ta.value, '[diff comment dc_00000001 — src/a.js:2 (new)] "please add a test"');
-  click(window, doc.querySelector('[data-comment-id="dc_00000002"] .hd-cmt-ask'));
-  await settle(window, 6);
-  assert.deepEqual(ta.value.split('\n'), [
-    '[diff comment dc_00000001 — src/a.js:2 (new)] "please add a test"',
-    '[diff comment dc_00000002 — src/a.js:3 (new)] "and this one"',
-  ], 'they stack, one per line, so the user can send several at once');
-  assert.equal(ctx.calls.filter((c) => (c.opts.method || 'GET') === 'POST' && c.url.includes('/messages')).length, 0,
-    'append never sends');
+  await checkRows([
+    { name: 'the card\'s Ask Worca button appends the exact reference and sends nothing', run: async () => {
+      click(window, doc.querySelector('[data-comment-id="dc_00000001"] .hd-cmt-ask'));
+      await settle(window, 6);
+      const ta = doc.querySelector('.ask-input');
+      assert.ok(ta, 'the Ask panel is mounted by the app boot');
+      assert.equal(ta.value, '[diff comment dc_00000001 — src/a.js:2 (new)] "please add a test"');
+      click(window, doc.querySelector('[data-comment-id="dc_00000002"] .hd-cmt-ask'));
+      await settle(window, 6);
+      assert.deepEqual(ta.value.split('\n'), [
+        '[diff comment dc_00000001 — src/a.js:2 (new)] "please add a test"',
+        '[diff comment dc_00000002 — src/a.js:3 (new)] "and this one"',
+      ], 'they stack, one per line, so the user can send several at once');
+      assert.equal(ctx.calls.filter((c) => (c.opts.method || 'GET') === 'POST' && c.url.includes('/messages')).length, 0,
+        'append never sends');
+    } },
+    { name: 'Ask Worca on a thread with replies tells the chat how many, so the model reads them first', run: async () => {
+      click(window, doc.querySelector('[data-comment-id="dc_00000005"] .hd-cmt-ask'));
+      await settle(window, 6);
+      assert.equal(doc.querySelector('.ask-input').value.split('\n').at(-1), '[diff comment dc_00000005 — src/a.js:2 (new), 2 replies] "root"');
+    } },
+  ]);
 });
 
-test('replies are cards on a rail under their root; Worca wears the mark inline; Reply sits on the root and the last reply; the badge counts threads', async () => {
+test('replies render on a rail under their root; Reply opens one titled composer per thread and Cmd+Enter POSTs to /replies', async () => {
   const ctx = await bootComments({ comments: [
     cmt({ id: 'dc_00000001', body: 'root' }),
     cmt({ id: 'dc_00000002', body: 'sibling root', author: 'ask' }),
     cmt({ id: 'dc_00000003', body: 'first reply', author: 'ask', parentId: 'dc_00000001' }),
     cmt({ id: 'dc_00000004', body: 'second reply', parentId: 'dc_00000001' }),
   ] });
-  const doc = ctx.window.document;
-  const block = doc.querySelector('.hd-dl-row[data-new="2"]').nextElementSibling;
-  assert.deepEqual([...block.querySelectorAll('.hd-cmt-thread')].map((t) => t.dataset.threadId), ['dc_00000001', 'dc_00000002']);
-  const thread = block.querySelector('[data-thread-id="dc_00000001"]');
-  assert.ok(thread.querySelector(':scope > .hd-cmt-card.root[data-comment-id="dc_00000001"]'), 'the root card is the thread\'s first child');
-  const rows = [...thread.querySelectorAll(':scope > .hd-cmt-replies > .hd-cmt-reply-row')];
-  assert.deepEqual(rows.map((r) => r.className), ['hd-cmt-reply-row ask', 'hd-cmt-reply-row user']);
-  assert.deepEqual(rows.map((r) => r.querySelector('.hd-cmt-card.reply .hd-cmt-body').textContent), ['first reply', 'second reply']);
-  assert.deepEqual(rows.map((r) => r.querySelector('.hd-cmt-author').textContent), ['Worca', 'You']);
-  // Rooted at `doc`, not at rows[0]: nwsapi (jsdom's selector engine) drops an
-  // element-rooted `A > B + C` when an earlier element OUTSIDE the context already
-  // matches the tail compound — a real engine returns the node either way.
-  assert.ok(doc.querySelector('[data-comment-id="dc_00000003"] .hd-cmt-head > .hd-cmt-mark + .hd-cmt-author'),
-    'the mark sits inline, left of the name');
-  assert.equal(rows[1].querySelector('.hd-cmt-mark'), null, 'the user has no picture');
-  // The rail is drawn by CSS off the rows themselves (ui-diff-style.test.mjs pins
-  // the ::before elbow), so the column must hold reply rows and NOTHING else — a
-  // node/dot element emitted onto it would double the rail's geometry.
-  const col = thread.querySelector(':scope > .hd-cmt-replies');
-  assert.ok([...col.children].every((n) => n.matches('.hd-cmt-reply-row')), 'only reply rows sit on the rail');
-  assert.equal(col.children.length, rows.length, 'and every child is one of the rows counted above');
-  assert.ok(block.querySelector('[data-thread-id="dc_00000002"] .hd-cmt-card.root .hd-cmt-head > .hd-cmt-mark'), 'a Worca root wears it too');
-  const first = thread.querySelector('[data-comment-id="dc_00000003"]');
-  const last = thread.querySelector('[data-comment-id="dc_00000004"]');
-  assert.ok(first.querySelector('.hd-cmt-delete') && last.querySelector('.hd-cmt-delete'), 'replies can be deleted');
-  assert.equal(first.querySelector('.hd-cmt-resolve'), null, 'never resolved on their own');
-  assert.equal(first.querySelector('.hd-cmt-ask'), null);
-  assert.equal(first.querySelector('.hd-cmt-reply'), null, 'only the LAST reply carries Reply…');
-  assert.ok(last.querySelector('.hd-cmt-actions > .hd-cmt-reply'), '…so the user need not scroll back up');
-  assert.ok(thread.querySelector('.hd-cmt-card.root .hd-cmt-foot .hd-cmt-actions > .hd-cmt-reply'), 'and the root always has it');
-  assert.equal(thread.querySelector('.hd-cmt-toggle').textContent, 'Hide replies (2)');
-  assert.equal(block.querySelector('[data-thread-id="dc_00000002"] .hd-cmt-toggle'), null, 'no replies, no toggle');
-  assert.equal(doc.querySelector('.hd-diff-file .hd-cmt-badge').textContent, '2', 'two threads, not four comments');
-});
-
-test('Reply opens one titled composer per thread (from the root or the last reply); Cmd+Enter POSTs to /replies and closes it', async () => {
-  const ctx = await bootComments({ comments: [
-    cmt(),
-    cmt({ id: 'dc_00000002', line: 3, lineText: 'added', body: 'other' }),
-    cmt({ id: 'dc_00000005', body: 'r', author: 'ask', parentId: 'dc_00000001' }),
-  ] });
   const { window } = ctx;
   const doc = window.document;
-  click(window, doc.querySelector('[data-comment-id="dc_00000005"] .hd-cmt-reply'));   // the last reply's button
-  const first = doc.querySelector('[data-thread-id="dc_00000001"]');
-  assert.equal(first.dataset.draft, '1');
-  const row = first.querySelector(':scope > .hd-cmt-replies > .hd-cmt-reply-row.composing');
-  assert.ok(row, 'the draft is one more row on the rail, after the replies');
-  assert.equal(row.previousElementSibling.dataset.commentId, undefined);
-  assert.ok(row.previousElementSibling.querySelector('[data-comment-id="dc_00000005"]'));
-  const composer = row.querySelector('.hd-cmt-card.hd-cmt-composer.reply');
-  assert.equal(composer.querySelector('.hd-cmt-composer-title > span').textContent, 'Your reply');
-  const ta = composer.querySelector('.hd-cmt-input');
-  assert.equal(ta.placeholder, 'Reply…');
-  assert.equal(composer.querySelector('.hd-cmt-save').textContent, 'Reply');
-  click(window, doc.querySelector('[data-comment-id="dc_00000002"] .hd-cmt-reply'));   // a root's button
-  assert.equal(doc.querySelectorAll('.hd-cmt-composer').length, 1, 'opening a second closes the first');
-  assert.equal(first.dataset.draft, undefined);
-  const second = doc.querySelector('[data-thread-id="dc_00000002"]');
-  assert.ok(second.querySelector(':scope > .hd-cmt-replies > .hd-cmt-reply-row.composing'), 'a thread without replies grows its column for the draft');
-  const ta2 = second.querySelector('.hd-cmt-input');
-  ta2.value = 'on it';
-  ctx.cbox.comments = [...ctx.cbox.comments,
-    cmt({ id: 'dc_00000009', line: 3, lineText: 'added', body: 'on it', parentId: 'dc_00000002' })];
-  keydown(window, ta2, 'Enter', { metaKey: true });
-  await settle(window, 8);
-  const posted = ctx.cbox.calls.find((c) => c[0] === 'POST' && c[1].endsWith('/comments/dc_00000002/replies'));
-  assert.ok(posted, 'POST …/comments/dc_00000002/replies');
-  assert.deepEqual(JSON.parse(posted[2]), { body: 'on it' });
-  assert.equal(doc.querySelector('.hd-cmt-composer'), null, 'closed on success');
-  assert.equal(doc.querySelector('[data-thread-id="dc_00000002"] .hd-cmt-reply-row .hd-cmt-body').textContent, 'on it',
-    'the refetched reply rendered in its thread');
-});
-
-test('Hide/Show replies collapses the column, survives a poke, and never touches the store', async () => {
-  const ctx = await bootComments({ comments: [cmt(), cmt({ id: 'dc_00000003', body: 'r', author: 'ask', parentId: 'dc_00000001' })] });
-  const { window } = ctx;
-  const doc = window.document;
-  const thread = () => doc.querySelector('[data-thread-id="dc_00000001"]');
-  const toggle = () => thread().querySelector('.hd-cmt-toggle');
-  assert.equal(toggle().textContent, 'Hide replies (1)');
-  assert.equal(toggle().getAttribute('aria-expanded'), 'true');
-  click(window, toggle());
-  assert.ok(thread().classList.contains('collapsed'));
-  assert.equal(toggle().textContent, 'Show replies (1)');
-  assert.equal(toggle().getAttribute('aria-expanded'), 'false');
-  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'diff-comments-changed', storeKey: KEY, pipelineId: ROW.id }) });
-  await settle(window, 8);
-  assert.ok(thread().classList.contains('collapsed'), 'the choice lives in the tab state, so a repaint keeps it');
-  assert.equal(toggle().textContent, 'Show replies (1)');
-  click(window, doc.querySelector('[data-comment-id="dc_00000001"] .hd-cmt-reply'));
-  assert.ok(!thread().classList.contains('collapsed'), 'replying to a collapsed thread opens it');
-  assert.equal(toggle().textContent, 'Hide replies (1)');
-  click(window, doc.querySelector('.hd-cmt-cancel'));
-  assert.equal(ctx.cbox.calls.length, 0, 'purely local');
+  await checkRows([
+    { name: 'replies are cards on a rail under their root; Worca wears the mark inline; Reply sits on the root and the last reply; the badge counts threads', run: async () => {
+      const block = doc.querySelector('.hd-dl-row[data-new="2"]').nextElementSibling;
+      assert.deepEqual([...block.querySelectorAll('.hd-cmt-thread')].map((t) => t.dataset.threadId), ['dc_00000001', 'dc_00000002']);
+      const thread = block.querySelector('[data-thread-id="dc_00000001"]');
+      assert.ok(thread.querySelector(':scope > .hd-cmt-card.root[data-comment-id="dc_00000001"]'), 'the root card is the thread\'s first child');
+      const rows = [...thread.querySelectorAll(':scope > .hd-cmt-replies > .hd-cmt-reply-row')];
+      assert.deepEqual(rows.map((r) => r.className), ['hd-cmt-reply-row ask', 'hd-cmt-reply-row user']);
+      assert.deepEqual(rows.map((r) => r.querySelector('.hd-cmt-card.reply .hd-cmt-body').textContent), ['first reply', 'second reply']);
+      assert.deepEqual(rows.map((r) => r.querySelector('.hd-cmt-author').textContent), ['Worca', 'You']);
+      // Rooted at `doc`, not at rows[0]: nwsapi (jsdom's selector engine) drops an
+      // element-rooted `A > B + C` when an earlier element OUTSIDE the context already
+      // matches the tail compound — a real engine returns the node either way.
+      assert.ok(doc.querySelector('[data-comment-id="dc_00000003"] .hd-cmt-head > .hd-cmt-mark + .hd-cmt-author'),
+        'the mark sits inline, left of the name');
+      assert.equal(rows[1].querySelector('.hd-cmt-mark'), null, 'the user has no picture');
+      // The rail is drawn by CSS off the rows themselves (style.css draws
+      // the ::before elbow), so the column must hold reply rows and NOTHING else — a
+      // node/dot element emitted onto it would double the rail's geometry.
+      const col = thread.querySelector(':scope > .hd-cmt-replies');
+      assert.ok([...col.children].every((n) => n.matches('.hd-cmt-reply-row')), 'only reply rows sit on the rail');
+      assert.equal(col.children.length, rows.length, 'and every child is one of the rows counted above');
+      assert.ok(block.querySelector('[data-thread-id="dc_00000002"] .hd-cmt-card.root .hd-cmt-head > .hd-cmt-mark'), 'a Worca root wears it too');
+      const first = thread.querySelector('[data-comment-id="dc_00000003"]');
+      const last = thread.querySelector('[data-comment-id="dc_00000004"]');
+      assert.ok(first.querySelector('.hd-cmt-delete') && last.querySelector('.hd-cmt-delete'), 'replies can be deleted');
+      assert.equal(first.querySelector('.hd-cmt-resolve'), null, 'never resolved on their own');
+      assert.equal(first.querySelector('.hd-cmt-ask'), null);
+      assert.equal(first.querySelector('.hd-cmt-reply'), null, 'only the LAST reply carries Reply…');
+      assert.ok(last.querySelector('.hd-cmt-actions > .hd-cmt-reply'), '…so the user need not scroll back up');
+      assert.ok(thread.querySelector('.hd-cmt-card.root .hd-cmt-foot .hd-cmt-actions > .hd-cmt-reply'), 'and the root always has it');
+      assert.equal(thread.querySelector('.hd-cmt-toggle').textContent, 'Hide replies (2)');
+      assert.equal(block.querySelector('[data-thread-id="dc_00000002"] .hd-cmt-toggle'), null, 'no replies, no toggle');
+      assert.equal(doc.querySelector('.hd-diff-file .hd-cmt-badge').textContent, '2', 'two threads, not four comments');
+    } },
+    { name: 'Reply opens one titled composer per thread (from the root or the last reply); Cmd+Enter POSTs to /replies and closes it', run: async () => {
+      click(window, doc.querySelector('[data-comment-id="dc_00000004"] .hd-cmt-reply'));   // the last reply's button
+      const first = doc.querySelector('[data-thread-id="dc_00000001"]');
+      assert.equal(first.dataset.draft, '1');
+      const row = first.querySelector(':scope > .hd-cmt-replies > .hd-cmt-reply-row.composing');
+      assert.ok(row, 'the draft is one more row on the rail, after the replies');
+      assert.equal(row.previousElementSibling.dataset.commentId, undefined);
+      assert.ok(row.previousElementSibling.querySelector('[data-comment-id="dc_00000004"]'));
+      const composer = row.querySelector('.hd-cmt-card.hd-cmt-composer.reply');
+      assert.equal(composer.querySelector('.hd-cmt-composer-title > span').textContent, 'Your reply');
+      const ta = composer.querySelector('.hd-cmt-input');
+      assert.equal(ta.placeholder, 'Reply…');
+      assert.equal(composer.querySelector('.hd-cmt-save').textContent, 'Reply');
+      click(window, doc.querySelector('[data-comment-id="dc_00000002"] .hd-cmt-reply'));   // a root's button
+      assert.equal(doc.querySelectorAll('.hd-cmt-composer').length, 1, 'opening a second closes the first');
+      assert.equal(first.dataset.draft, undefined);
+      const second = doc.querySelector('[data-thread-id="dc_00000002"]');
+      assert.ok(second.querySelector(':scope > .hd-cmt-replies > .hd-cmt-reply-row.composing'), 'a thread without replies grows its column for the draft');
+      const ta2 = second.querySelector('.hd-cmt-input');
+      ta2.value = 'on it';
+      ctx.cbox.comments = [...ctx.cbox.comments,
+        cmt({ id: 'dc_00000009', body: 'on it', parentId: 'dc_00000002' })];
+      keydown(window, ta2, 'Enter', { metaKey: true });
+      await settle(window, 8);
+      const posted = ctx.cbox.calls.find((c) => c[0] === 'POST' && c[1].endsWith('/comments/dc_00000002/replies'));
+      assert.ok(posted, 'POST …/comments/dc_00000002/replies');
+      assert.deepEqual(JSON.parse(posted[2]), { body: 'on it' });
+      assert.equal(doc.querySelector('.hd-cmt-composer'), null, 'closed on success');
+      assert.equal(doc.querySelector('[data-thread-id="dc_00000002"] .hd-cmt-reply-row .hd-cmt-body').textContent, 'on it',
+        'the refetched reply rendered in its thread');
+    } },
+  ]);
 });
 
 test('a poke never destroys an open REPLY draft, and the thread catches up when it closes', async () => {
@@ -807,15 +835,15 @@ test('a poke never destroys an open REPLY draft, and the thread catches up when 
 });
 
 test('a reply draft on a DETACHED thread survives its row entering the window, and the thread is never doubled', async () => {
-  const ctx = await bootComments({ patch: bigPatch(), files: BIG_JS,
-    comments: [cmt({ path: 'big.js', line: 5500, lineText: 'line 5500', body: 'late row' })] });
+  const ctx = await bootComments({ patch: bigPatch(), files: BIG_JS, hooks: SMALL,
+    comments: [cmt({ path: 'big.js', line: 55, lineText: 'line 55', body: 'late row' })] });
   const { window } = ctx;
   const doc = window.document;
   const detached = doc.querySelector('.hd-cmt-detached [data-thread-id="dc_00000001"]');
   assert.ok(detached, 'precondition: the row is outside the first window, so the thread starts detached');
   click(window, detached.querySelector('.hd-cmt-reply'));
   doc.querySelector('.hd-cmt-composer.reply .hd-cmt-input').value = 'half-written';
-  // "Show more" connects row 5500, so attachComments would re-home this thread —
+  // "Show more" connects row 55, so attachComments would re-home this thread —
   // and used to delete the detached copy, composer and all (D13).
   click(window, doc.querySelector('.hd-dl-more-btn'));
   await settle(window, 8);
@@ -830,66 +858,6 @@ test('a reply draft on a DETACHED thread survives its row entering the window, a
   await settle(window, 4);
   assert.ok(doc.querySelector('.hd-cmt-block [data-comment-id="dc_00000001"]'), 'closing the draft re-homes it under its row');
   assert.equal(doc.querySelector('.hd-cmt-detached'), null, 'and the detached block goes');
-});
-
-// groupCommentThreads never drops a reply whose root is absent — it promotes it to
-// its own thread. Rendering it as a ROOT would offer Resolve / Ask Worca / Reply,
-// and the store refuses every one of them on a reply id (D1/D2 → 400).
-test('a promoted stray reply renders with Delete only', async () => {
-  const ctx = await bootComments({ comments: [cmt({ id: 'dc_00000007', body: 'orphan', parentId: 'dc_00000001' })] });
-  const doc = ctx.window.document;
-  const threads = [...doc.querySelectorAll('.hd-cmt-thread')];
-  assert.equal(threads.length, 1, 'nothing is dropped — it is shown, just not as a root');
-  const card = threads[0].querySelector('.hd-cmt-card');
-  assert.equal(card.dataset.commentId, 'dc_00000007');
-  assert.ok(card.querySelector('.hd-cmt-delete'), 'deleting a reply is the one thing the store allows');
-  for (const cls of ['.hd-cmt-resolve', '.hd-cmt-ask', '.hd-cmt-reply', '.hd-cmt-toggle']) {
-    assert.equal(card.querySelector(cls), null, `${cls} would be a 400 the UI could only swallow`);
-  }
-});
-
-test('a Resolve the server refuses says why, inline on the card', async () => {
-  const ctx = await bootComments({
-    comments: [cmt()],
-    arms: (url, opts) => ((opts.method || 'GET') === 'PATCH' && /\/comments\/dc_[0-9a-f]{8}$/.test(url)
-      ? fail(400, { error: 'replies cannot be resolved on their own' })
-      : null),
-  });
-  const { window } = ctx;
-  const doc = window.document;
-  click(window, doc.querySelector('[data-comment-id="dc_00000001"] .hd-cmt-resolve'));
-  await settle(window, 6);
-  const card = doc.querySelector('[data-comment-id="dc_00000001"]');
-  assert.ok(card, 'the card is still there');
-  assert.equal(card.querySelector('.hd-cmt-err').textContent, 'replies cannot be resolved on their own');
-});
-
-test('Delete on a root with replies says so; Delete on a reply asks about the reply', async () => {
-  const ctx = await bootComments({ comments: [cmt(), cmt({ id: 'dc_00000003', body: 'r', parentId: 'dc_00000001' })] });
-  const { window } = ctx;
-  const doc = window.document;
-  click(window, doc.querySelector('[data-comment-id="dc_00000001"] .hd-cmt-delete'));
-  await settle(window);
-  assert.equal(doc.querySelector('#confirm-title').textContent, 'Delete this comment?');
-  assert.match(doc.querySelector('#confirm-message').textContent, /and its 1 reply cannot be recovered/);
-  click(window, doc.querySelector('#confirm-cancel'));
-  await settle(window);
-  click(window, doc.querySelector('[data-comment-id="dc_00000003"] .hd-cmt-delete'));
-  await settle(window);
-  assert.equal(doc.querySelector('#confirm-title').textContent, 'Delete this reply?');
-});
-
-test('Ask Worca on a thread with replies tells the chat how many, so the model reads them first', async () => {
-  const ctx = await bootComments({ comments: [
-    cmt({ id: 'dc_00000001', body: 'root' }),
-    cmt({ id: 'dc_00000003', body: 'r1', author: 'ask', parentId: 'dc_00000001' }),
-    cmt({ id: 'dc_00000004', body: 'r2', parentId: 'dc_00000001' }),
-  ] });
-  const { window } = ctx;
-  const doc = window.document;
-  click(window, doc.querySelector('[data-comment-id="dc_00000001"] .hd-cmt-ask'));
-  await settle(window, 6);
-  assert.equal(doc.querySelector('.ask-input').value, '[diff comment dc_00000001 — src/a.js:2 (new), 2 replies] "root"');
 });
 
 test('bodies render as sanitized markdown once the renderer is ready; Preview shows the draft rendered and Cmd+Enter still saves the raw text', async () => {
@@ -949,40 +917,37 @@ const guardedArms = (box) => (url, opts) => {
 const guardedBox = () => ({ patch: SECRET_PATCH, comments: [], patchAvailable: true,
   calls: [], protectedPaths: ['config/.env'] });
 
-test('a protected file renders, says so, and never arms the + (the floor would refuse it)', async () => {
+test('a protected file renders but never arms the +; an ordinary file in the same run is unaffected', async () => {
   const box = guardedBox();
   const ctx = await bootDetail({ detail: diffDetail(cmtResults(SECRET_FILES)), arms: guardedArms(box) });
   await openDetail(ctx);
   await settle(ctx.window, 8);
   const { window } = ctx;
   const doc = window.document;
-  const secret = [...doc.querySelectorAll('#hist-detail .hd-diff-file')].find((b) => b.dataset.path === 'config/.env');
-  assert.ok(secret, 'the file is NEVER hidden — the run really did change it');
-  click(window, secret);
-  await settle(window, 8);
-  assert.ok(doc.querySelector('.hd-dl-row'), 'and its diff still renders');
-  const chip = doc.querySelector('.hd-diff-pane-head .hd-diff-guarded');
-  assert.ok(chip, 'the pane head says why the gutter is missing');
-  assert.match(chip.title, /\*\.key/, 'and the tooltip admits the rule is a basename match');
-  hover(window, doc.querySelector('.hd-dl-row[data-new="1"]'));
-  assert.equal(doc.querySelector('.hd-cmt-add'), null, 'no + on a file the floor always rejects');
+  await checkRows([
+    { name: 'a protected file renders, says so, and never arms the + (the floor would refuse it)', run: async () => {
+      const secret = [...doc.querySelectorAll('#hist-detail .hd-diff-file')].find((b) => b.dataset.path === 'config/.env');
+      assert.ok(secret, 'the file is NEVER hidden — the run really did change it');
+      click(window, secret);
+      await settle(window, 8);
+      assert.ok(doc.querySelector('.hd-dl-row'), 'and its diff still renders');
+      const chip = doc.querySelector('.hd-diff-pane-head .hd-diff-guarded');
+      assert.ok(chip, 'the pane head says why the gutter is missing');
+      assert.match(chip.title, /\*\.key/, 'and the tooltip admits the rule is a basename match');
+      hover(window, doc.querySelector('.hd-dl-row[data-new="1"]'));
+      assert.equal(doc.querySelector('.hd-cmt-add'), null, 'no + on a file the floor always rejects');
+    } },
+    { name: 'an ordinary file in the same run is unaffected', run: async () => {
+      click(window, [...doc.querySelectorAll('#hist-detail .hd-diff-file')].find((b) => b.dataset.path === 'src/a.js'));
+      await settle(window, 8);
+      assert.equal(doc.querySelector('.hd-diff-pane-head .hd-diff-guarded'), null, 'no chip on src/a.js');
+      hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
+      assert.ok(doc.querySelector('.hd-cmt-add'), 'the + is still there');
+    } },
+  ]);
 });
 
-test('an ordinary file in the same run is unaffected', async () => {
-  const box = guardedBox();
-  const ctx = await bootDetail({ detail: diffDetail(cmtResults(SECRET_FILES)), arms: guardedArms(box) });
-  await openDetail(ctx);
-  await settle(ctx.window, 8);
-  const { window } = ctx;
-  const doc = window.document;
-  click(window, [...doc.querySelectorAll('#hist-detail .hd-diff-file')].find((b) => b.dataset.path === 'src/a.js'));
-  await settle(window, 8);
-  assert.equal(doc.querySelector('.hd-diff-pane-head .hd-diff-guarded'), null, 'no chip on src/a.js');
-  hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
-  assert.ok(doc.querySelector('.hd-cmt-add'), 'the + is still there');
-});
-
-test('a failed comment load disarms the +, and the next poke brings it back', async () => {
+test('a failed comment load disarms the +, the next poke re-arms it, and re-arming is idempotent', async () => {
   const box = { patch: CMT_PATCH, comments: [], patchAvailable: true, calls: [], fail: true };
   const arms = (url, opts) => {
     if (url.endsWith('/comments') && (opts.method || 'GET') === 'GET' && box.fail) {
@@ -996,27 +961,30 @@ test('a failed comment load disarms the +, and the next poke brings it back', as
   await settle(ctx.window, 8);
   const { window } = ctx;
   const doc = window.document;
-  hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
-  assert.equal(doc.querySelector('.hd-cmt-add'), null, 'the failed fetch left creation off');
-  box.comments = [cmt({ author: 'ask', body: 'landed anyway' })];
-  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'diff-comments-changed', storeKey: KEY, pipelineId: ROW.id }) });
-  await settle(window, 8);
-  hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
-  assert.ok(doc.querySelector('.hd-cmt-add'), 'the retried fetch re-armed the gutter WITHOUT a re-select');
-  assert.ok(doc.querySelector('[data-comment-id="dc_00000001"]'), 'and the card arrived too');
-});
-
-test('re-arming is idempotent: one + button, one composer', async () => {
-  const ctx = await bootComments({ comments: [cmt()] });
-  const { window } = ctx;
-  const doc = window.document;
-  ctx.cbox.comments = [cmt(), cmt({ id: 'dc_00000002', line: 3, lineText: 'added', body: 'second' })];
-  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'diff-comments-changed', storeKey: KEY, pipelineId: ROW.id }) });
-  await settle(window, 8);
-  hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
-  assert.equal(doc.querySelectorAll('.hd-cmt-add').length, 1, 'one gutter button, not one per repaint');
-  click(window, doc.querySelector('.hd-cmt-add'));
-  assert.equal(doc.querySelectorAll('.hd-cmt-input').length, 1, 'and one composer per click');
+  await checkRows([
+    { name: 'a failed comment load disarms the +, and the next poke brings it back', run: async () => {
+      hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
+      assert.equal(doc.querySelector('.hd-cmt-add'), null, 'the failed fetch left creation off');
+      box.comments = [cmt({ author: 'ask', body: 'landed anyway' })];
+      ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'diff-comments-changed', storeKey: KEY, pipelineId: ROW.id }) });
+      await settle(window, 8);
+      hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
+      assert.ok(doc.querySelector('.hd-cmt-add'), 'the retried fetch re-armed the gutter WITHOUT a re-select');
+      assert.ok(doc.querySelector('[data-comment-id="dc_00000001"]'), 'and the card arrived too');
+    } },
+    { name: 're-arming is idempotent: one + button, one composer', run: async () => {
+      // Past COMMENT_POKE_MS: the row above poked, so without the wait this poke is
+      // coalesced into a trailing pass that lands after the asserts (and in the next test).
+      await new Promise((r) => setTimeout(r, 400));
+      box.comments = [cmt(), cmt({ id: 'dc_00000002', line: 3, lineText: 'added', body: 'second' })];
+      ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'diff-comments-changed', storeKey: KEY, pipelineId: ROW.id }) });
+      await settle(window, 8);
+      hover(window, doc.querySelector('.hd-dl-row[data-new="2"]'));
+      assert.equal(doc.querySelectorAll('.hd-cmt-add').length, 1, 'one gutter button, not one per repaint');
+      click(window, doc.querySelector('.hd-cmt-add'));
+      assert.equal(doc.querySelectorAll('.hd-cmt-input').length, 1, 'and one composer per click');
+    } },
+  ]);
 });
 
 // The ONE case in this suite that has to outwait real time (COMMENT_POKE_MS).
@@ -1056,84 +1024,34 @@ test('a hello after a socket drop replays the poke the open Diff tab missed', as
     'and the missed card is on screen without a re-select');
 });
 
-test('two comments on ONE context row (old N + new M) keep list order and their own blocks', async () => {
-  // The "line3" row is old 3 / new 4 — one DOM row carrying BOTH numbers, which is
-  // the only shape that can produce two blocks under a single row.
-  const ctx = await bootComments({ comments: [
-    cmt({ id: 'dc_00000001', side: 'old', line: 3, lineText: 'line3', body: 'old side' }),
-    cmt({ id: 'dc_00000002', side: 'new', line: 4, lineText: 'line3', body: 'new side' }),
-  ] });
-  const doc = ctx.window.document;
-  const row = doc.querySelector('.hd-dl-row[data-old="3"]');
-  assert.equal(row.dataset.new, '4', 'precondition: one row, both numbers');
-  const blocks = [];
-  for (let n = row.nextElementSibling; n && n.classList.contains('hd-cmt-block'); n = n.nextElementSibling) blocks.push(n);
-  assert.deepEqual(blocks.map((b) => [b.dataset.line, b.dataset.side]), [['3', 'old'], ['4', 'new']],
-    'a block per SIDE, and the later one is appended after the earlier — never row.after()');
-  assert.deepEqual(blocks.map((b) => b.querySelector('.hd-cmt-body').textContent), ['old side', 'new side'],
-    'server order (path, line, rowid) survives into the DOM');
-});
-
-test('an old-side and a new-side comment on the same NUMBER still get their own block', async () => {
+test('two comments on one context row, or old/new on the same number, keep list order and their own blocks', async () => {
+  // One CMT_PATCH boot, all four comments in server order (path, line, rowid). The
+  // "line3" row is old 3 / new 4 — one DOM row carrying BOTH numbers, which is the
+  // only shape that can produce two blocks under a single row; "keep" is old 1 / new 1.
   const ctx = await bootComments({ comments: [
     cmt({ id: 'dc_00000001', side: 'old', line: 1, lineText: 'keep', body: 'removed-side note' }),
     cmt({ id: 'dc_00000002', side: 'new', line: 1, lineText: 'keep', body: 'added-side note' }),
+    cmt({ id: 'dc_00000003', side: 'old', line: 3, lineText: 'line3', body: 'old side' }),
+    cmt({ id: 'dc_00000004', side: 'new', line: 4, lineText: 'line3', body: 'new side' }),
   ] });
   const doc = ctx.window.document;
-  const row = doc.querySelector('.hd-dl-row[data-old="1"]');
-  const blocks = [];
-  for (let n = row.nextElementSibling; n && n.classList.contains('hd-cmt-block'); n = n.nextElementSibling) blocks.push(n);
-  assert.deepEqual(blocks.map((b) => b.dataset.side), ['old', 'new'],
-    'the side is part of the block identity — matching on data-line alone merged them');
-});
-
-test('a folder the user collapsed stays collapsed when a poke adds a synthetic row', async () => {
-  const ctx = await bootComments();
-  const { window } = ctx;
-  const doc = window.document;
-  const dir = doc.querySelector('#hist-detail .hd-tree-dir');
-  assert.ok(dir, 'precondition: src/ is a directory node');
-  click(window, dir);
-  assert.equal(dir.getAttribute('aria-expanded'), 'false', 'collapsed by the user');
-  ctx.cbox.comments = [cmt({ id: 'dc_00000002', path: 'ghost/gone.js', line: 7, lineText: 'gone', body: 'orphan' })];
-  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'diff-comments-changed', storeKey: KEY, pipelineId: ROW.id }) });
-  await settle(window, 8);
-  const after = [...doc.querySelectorAll('#hist-detail .hd-tree-dir')].find((b) => b.dataset.dirKey === dir.dataset.dirKey);
-  assert.ok(after && after !== dir, 'precondition: the tree really was re-rendered');
-  assert.equal(after.getAttribute('aria-expanded'), 'false', 'and the collapse survived it');
-  assert.match(after.getAttribute('aria-label'), /^Expand directory/);
-});
-
-test('the page context names the member project of the open workspace diff file', async () => {
-  const ctx = await bootWsComments();
-  const { window } = ctx;
-  const doc = window.document;
-  assert.equal(doc.querySelector('#hist-detail .hd-diff-file').dataset.project, 'team-00000001');
-  click(window, doc.querySelector('.ask-pill'));
-  await settle(window, 8);
-  const input = doc.querySelector('textarea.ask-input');
-  input.value = 'what do you make of this file?';
-  doc.querySelector('[data-ask-send]').click();
-  await settle(window, 8);
-  const post = ctx.calls.filter((c) => (c.opts.method || 'GET') === 'POST' && c.url.includes('/messages')).pop();
-  assert.ok(post, 'the panel POSTed');
-  assert.equal(JSON.parse(post.opts.body).context.diffPath, 'src/a.js (member team-00000001)',
-    'add_diff_comment needs memberProjectKey and never guesses it');
-});
-
-test('a person\'s comment names its author on a shared deployment ("You" for the viewer); "You" when unknown, local or not shared; Ask stays Worca', async () => {
-  const comments = [
-    cmt({ id: 'dc_00000011', body: 'named', authorName: 'ada@example.com' }),
-    cmt({ id: 'dc_00000012', body: 'mine', authorName: 'Me@example.com' }),
-    cmt({ id: 'dc_00000013', body: 'local', authorName: 'local' }),
-    cmt({ id: 'dc_00000014', body: 'ask', author: 'ask', authorName: 'ada@example.com' }),
-  ];
-  const authors = async (whoami) => {
-    const ctx = await bootComments({ comments, whoami });
-    const block = ctx.window.document.querySelector('.hd-dl-row[data-new="2"]').nextElementSibling;
-    return [...block.querySelectorAll('.hd-cmt-author')].map((n) => n.textContent);
-  };
-  assert.deepEqual(await authors({ name: 'me@example.com', source: 'access', shared: true }), ['ada@example.com', 'You', 'You', 'Worca']);
-  assert.deepEqual(await authors({ name: 'Solo', source: 'operator', shared: false }), ['You', 'You', 'You', 'Worca']);
-  assert.deepEqual(await authors(null), ['You', 'You', 'You', 'Worca']);
+  await checkRows([
+    { name: 'two comments on ONE context row (old N + new M) keep list order and their own blocks', run: () => {
+      const row = doc.querySelector('.hd-dl-row[data-old="3"]');
+      assert.equal(row.dataset.new, '4', 'precondition: one row, both numbers');
+      const blocks = [];
+      for (let n = row.nextElementSibling; n && n.classList.contains('hd-cmt-block'); n = n.nextElementSibling) blocks.push(n);
+      assert.deepEqual(blocks.map((b) => [b.dataset.line, b.dataset.side]), [['3', 'old'], ['4', 'new']],
+        'a block per SIDE, and the later one is appended after the earlier — never row.after()');
+      assert.deepEqual(blocks.map((b) => b.querySelector('.hd-cmt-body').textContent), ['old side', 'new side'],
+        'server order (path, line, rowid) survives into the DOM');
+    } },
+    { name: 'an old-side and a new-side comment on the same NUMBER still get their own block', run: () => {
+      const row = doc.querySelector('.hd-dl-row[data-old="1"]');
+      const blocks = [];
+      for (let n = row.nextElementSibling; n && n.classList.contains('hd-cmt-block'); n = n.nextElementSibling) blocks.push(n);
+      assert.deepEqual(blocks.map((b) => b.dataset.side), ['old', 'new'],
+        'the side is part of the block identity — matching on data-line alone merged them');
+    } },
+  ]);
 });

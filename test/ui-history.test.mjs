@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -96,15 +97,10 @@ async function boot({ fetchHandler } = {}) {
     window.location.hash = 'runs';
     window.dispatchEvent(new window.Event('hashchange'));
   }
-  // Open the run's DETAIL screen (#history/<key>/<id>) in the Runs pane.
-  function showDetail(key, id) {
-    window.location.hash = `history/${key}/${id}`;
-    window.dispatchEvent(new window.Event('hashchange'));
-  }
   // Three macrotasks covers fetch -> safeJson -> paint for the detail load.
   const settle = async (n = 3) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); };
 
-  return { window, calls, wsBox, selectProject, showRuns, showDetail, settle };
+  return { window, calls, wsBox, selectProject, showRuns, settle };
 }
 
 function runsListResponse(pipelines, live = []) {
@@ -134,53 +130,56 @@ const row = (over) => ({ projectKey: KEY, projectName: 'Proj', projectDir: '/x/p
 const histRows = (doc) => doc.querySelectorAll('#runs-list .runs-row[data-kind="hist"]');
 const word = (r) => r.querySelector('.runs-row-sub').textContent.split(' · ')[0];
 
-test('the Runs list renders one row per finished run (no <li>): status icon + word + title', async () => {
-  const ctx = await boot({
-    fetchHandler: armsFor([
-      row({ id: 'p-done', title: 'Done run', status: 'done', startedAt: '2026-01-01T00:00:00Z' }),
-      row({ id: 'p-stop', title: 'Stopped run', status: 'stopped', startedAt: '2026-01-02T00:00:00Z' }),
-    ]),
-  });
-  ctx.showRuns();
-  await new Promise((r) => setTimeout(r, 0));
+test('Runs list rows: status icon + word + title per finished run; interrupted is amber \'Interrupted\' and not Needs you', async () => {
+  await checkRows([
+    { name: 'the Runs list renders one row per finished run (no <li>): status icon + word + title', run: async () => {
+      const ctx = await boot({
+        fetchHandler: armsFor([
+          row({ id: 'p-done', title: 'Done run', status: 'done', startedAt: '2026-01-01T00:00:00Z' }),
+          row({ id: 'p-stop', title: 'Stopped run', status: 'stopped', startedAt: '2026-01-02T00:00:00Z' }),
+        ]),
+      });
+      ctx.showRuns();
+      await new Promise((r) => setTimeout(r, 0));
 
-  const doc = ctx.window.document;
-  const rows = histRows(doc);
-  assert.equal(rows.length, 2, 'two finished rows rendered');
-  assert.equal(doc.querySelectorAll('#runs-list li').length, 0, 'no <li> emitted');
+      const doc = ctx.window.document;
+      const rows = histRows(doc);
+      assert.equal(rows.length, 2, 'two finished rows rendered');
+      assert.equal(doc.querySelectorAll('#runs-list li').length, 0, 'no <li> emitted');
 
-  // No status .badge pill: the icon carries the family, the subline's word the label.
-  assert.equal(doc.querySelectorAll('#runs-list .badge').length, 0, 'no status badge pill on a row');
-  assert.ok(rows[0].querySelector('.runs-ic').classList.contains('runs-ic-done'), 'done -> green check family');
-  // The word is the glance headline (D12): a done run with no PR and no review counts is "Finished".
-  assert.equal(word(rows[0]), 'Finished');
-  assert.ok(rows[1].querySelector('.runs-ic').classList.contains('runs-ic-stop'), 'stopped -> red square family');
-  assert.equal(word(rows[1]), 'Stopped');
-  // Exactly one glyph per row, the family's own.
-  const glyphs = [...rows[0].querySelectorAll('.runs-ic svg')];
-  assert.equal(glyphs.length, 1);
-  assert.ok(glyphs[0].classList.contains('runs-glyph-done'));
+      // No status .badge pill: the icon carries the family, the subline's word the label.
+      assert.equal(doc.querySelectorAll('#runs-list .badge').length, 0, 'no status badge pill on a row');
+      assert.ok(rows[0].querySelector('.runs-ic').classList.contains('runs-ic-done'), 'done -> green check family');
+      // The word is the glance headline (D12): a done run with no PR and no review counts is "Finished".
+      assert.equal(word(rows[0]), 'Finished');
+      assert.ok(rows[1].querySelector('.runs-ic').classList.contains('runs-ic-stop'), 'stopped -> red square family');
+      assert.equal(word(rows[1]), 'Stopped');
+      // Exactly one glyph per row, the family's own.
+      const glyphs = [...rows[0].querySelectorAll('.runs-ic svg')];
+      assert.equal(glyphs.length, 1);
+      assert.ok(glyphs[0].classList.contains('runs-glyph-done'));
 
-  // Titles surface in .runs-row-title.
-  assert.equal(rows[0].querySelector('.runs-row-title').textContent, 'Done run');
-  assert.equal(rows[1].querySelector('.runs-row-title').textContent, 'Stopped run');
-});
-
-test('interrupted lands in the amber paused family with the word "Interrupted"', async () => {
-  const ctx = await boot({
-    fetchHandler: armsFor([row({ id: 'pi', title: 'Stuck', status: 'interrupted', startedAt: '2026-06-02T00:00:00Z' })]),
-  });
-  ctx.showRuns();
-  await new Promise((r) => setTimeout(r, 0));
-  const doc = ctx.window.document;
-  const r = doc.querySelector('#runs-list .runs-row[data-kind="hist"]');
-  // The icon column answers "can this be resumed?", so interrupted is amber, not red.
-  assert.ok(r.querySelector('.runs-ic').classList.contains('runs-ic-paused'));
-  assert.equal(word(r), 'Interrupted');
-  // The glyph is decorative: the word is in the row link's own text, which names it.
-  assert.equal(r.querySelector('.runs-ic').getAttribute('aria-hidden'), 'true');
-  assert.match(r.textContent, /Interrupted/);
-  assert.equal(doc.querySelector('#runs-list .runs-needs'), null, 'an interrupted run is not Needs you (D5)');
+      // Titles surface in .runs-row-title.
+      assert.equal(rows[0].querySelector('.runs-row-title').textContent, 'Done run');
+      assert.equal(rows[1].querySelector('.runs-row-title').textContent, 'Stopped run');
+    } },
+    { name: 'interrupted lands in the amber paused family with the word "Interrupted"', run: async () => {
+      const ctx = await boot({
+        fetchHandler: armsFor([row({ id: 'pi', title: 'Stuck', status: 'interrupted', startedAt: '2026-06-02T00:00:00Z' })]),
+      });
+      ctx.showRuns();
+      await new Promise((r) => setTimeout(r, 0));
+      const doc = ctx.window.document;
+      const r = doc.querySelector('#runs-list .runs-row[data-kind="hist"]');
+      // The icon column answers "can this be resumed?", so interrupted is amber, not red.
+      assert.ok(r.querySelector('.runs-ic').classList.contains('runs-ic-paused'));
+      assert.equal(word(r), 'Interrupted');
+      // The glyph is decorative: the word is in the row link's own text, which names it.
+      assert.equal(r.querySelector('.runs-ic').getAttribute('aria-hidden'), 'true');
+      assert.match(r.textContent, /Interrupted/);
+      assert.equal(doc.querySelector('#runs-list .runs-needs'), null, 'an interrupted run is not Needs you (D5)');
+    } },
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -215,118 +214,43 @@ test('clicking the title opens the run page like the rest of the row (no viewer 
 });
 
 
-test('empty history renders a .runs-note (no <li>)', async () => {
-  const ctx = await boot({
-    fetchHandler: (url) => {
-      if (url.includes('/api/history')) return runsListResponse([], []);
-      return null;
-    },
-  });
-  ctx.showRuns();
-  await new Promise((r) => setTimeout(r, 0));
+test('empty history renders a .runs-note, a load error a .runs-note-err', async () => {
+  await checkRows([
+    { name: 'empty history renders a .runs-note (no <li>)', run: async () => {
+      const ctx = await boot({
+        fetchHandler: (url) => {
+          if (url.includes('/api/history')) return runsListResponse([], []);
+          return null;
+        },
+      });
+      ctx.showRuns();
+      await new Promise((r) => setTimeout(r, 0));
 
-  const doc = ctx.window.document;
-  const empty = doc.querySelector('#runs-list .runs-note');
-  assert.ok(empty, '.runs-note present');
-  assert.match(empty.textContent, /No runs yet/);
-  assert.equal(empty.classList.contains('runs-note-err'), false, 'an empty list is not an error');
-  assert.equal(histRows(doc).length, 0);
-  assert.equal(doc.querySelectorAll('#runs-list li').length, 0, 'no <li> in empty state');
-});
+      const doc = ctx.window.document;
+      const empty = doc.querySelector('#runs-list .runs-note');
+      assert.ok(empty, '.runs-note present');
+      assert.match(empty.textContent, /No runs yet/);
+      assert.equal(empty.classList.contains('runs-note-err'), false, 'an empty list is not an error');
+      assert.equal(histRows(doc).length, 0);
+      assert.equal(doc.querySelectorAll('#runs-list li').length, 0, 'no <li> in empty state');
+    } },
+    { name: 'history load error renders a .runs-note-err (no <li>)', run: async () => {
+      const ctx = await boot({
+        fetchHandler: (url) => {
+          if (url.includes('/api/history')) {
+            return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'boom' }) });
+          }
+          return null;
+        },
+      });
+      ctx.showRuns();
+      await new Promise((r) => setTimeout(r, 0));
 
-test('history load error renders a .runs-note-err (no <li>)', async () => {
-  const ctx = await boot({
-    fetchHandler: (url) => {
-      if (url.includes('/api/history')) {
-        return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'boom' }) });
-      }
-      return null;
-    },
-  });
-  ctx.showRuns();
-  await new Promise((r) => setTimeout(r, 0));
-
-  const doc = ctx.window.document;
-  const err = doc.querySelector('#runs-list .runs-note-err');
-  assert.ok(err, '.runs-note-err present on error');
-  assert.match(err.textContent, /Could not load finished runs: boom/);
-  assert.equal(doc.querySelectorAll('#runs-list li').length, 0, 'no <li> in error state');
-});
-
-// ---------------------------------------------------------------------------
-// The stepper the detail screen paints from the saved manifest
-// ---------------------------------------------------------------------------
-
-
-
-test('a pipelines-changed reload marks the list aria-busy, cleared by the final history-pr batch', async () => {
-  // The Refresh button is gone (D14): the app force-reloads History on a
-  // {type:'pipelines-changed'} frame while the Runs page is shown (app.js:1076).
-  const ctx = await boot({
-    fetchHandler: (url) => (url.includes('/api/history') && !url.endsWith('/api/history/pr')
-      ? runsListResponse([{ id: 'p1', title: 'Feat', status: 'done', startedAt: '2026-01-01T00:00:00Z', projectKey: 'k1', projectName: 'K1' }])
-      : null),
-  });
-  ctx.showRuns();
-  await new Promise((r) => setTimeout(r, 0));
-
-  const doc = ctx.window.document;
-  const list = doc.querySelector('#runs-list');
-  const gets = () => ctx.calls.filter((c) => c.url.endsWith('/api/history') && !c.opts.method).length;
-  const lastToken = () => JSON.parse(ctx.calls.filter((c) => c.url.endsWith('/api/history/pr') && c.opts.body).at(-1).opts.body).token;
-  // Settle the entry load first, so the busy state below is the reload's own.
-  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'history-pr', token: lastToken(), done: true, items: [] }) });
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(list.getAttribute('aria-busy'), 'false', 'the entry load settled');
-  const before = gets();
-  const firstToken = lastToken();
-
-  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'pipelines-changed' }) }); // force reload
-  await new Promise((r) => setTimeout(r, 0));
-
-  assert.equal(gets(), before + 1, 'the frame re-fetched /api/history');
-  assert.notEqual(lastToken(), firstToken, 'the reload asked for Phase 2 under a new token');
-  assert.equal(list.getAttribute('aria-busy'), 'true', 'list marked aria-busy while loading');
-
-  // The final Phase-2 batch (done:true) for the current token clears the affordance.
-  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'history-pr', token: lastToken(), done: true, items: [] }) });
-  await new Promise((r) => setTimeout(r, 0));
-
-  assert.equal(list.getAttribute('aria-busy'), 'false', 'aria-busy cleared');
-});
-
-
-
-test('History never renders review sections, even when the payload carries them', async () => {
-  // The server still sends `reviews`; History is a record of the run, not a
-  // review surface, so nothing paints them anywhere on the detail screen.
-  const detailPayload = {
-    state: { phase: 'done', status: 'done', cycle: 2, steps: [] },
-    auditMarkdown: '',
-    clarify: {
-      questions: [{ id: 'q1', question: 'Postgres or SQLite?', options: ['pg', 'sqlite', ''], allowFreeText: true }],
-      answers: [{ id: 'q1', question: 'Postgres or SQLite?', choice: 'sqlite' }],
-    },
-    reviews: [
-      { kind: 'impl', cycle: 1, issues: [{ severity: 'major', title: 'Missing null-check', detail: 'guard input', location: 'src/x.mjs:10' }], summary: 'one issue' },
-      { kind: 'impl', cycle: 2, issues: [], summary: 'resolved' },
-    ],
-    results: null, overview: null, stepQuestions: [], artifacts: [],
-  };
-  const ctx = await boot({
-    fetchHandler: armsFor([row({ id: 'p-ex', title: 'Run', status: 'done', startedAt: '2026-01-01T00:00:00Z' })],
-      { 'p-ex': detailPayload }),
-  });
-  ctx.showRuns();
-  await new Promise((r) => setTimeout(r, 0));
-  ctx.showDetail(KEY, 'p-ex');
-  await ctx.settle();
-
-  const hd = ctx.window.document.querySelector('#hist-detail .hd');
-  assert.equal(hd.querySelector('.hist-reviews'), null, 'reviews section is not rendered');
-  assert.equal(hd.querySelector('.hist-cycle-tag'), null, 'no review cycle tags rendered');
-  assert.doesNotMatch(hd.textContent, /Missing null-check/, 'no review issue leaks onto the screen');
-  // The clarify answer, by contrast, IS reachable — through its own tab.
-  const clarifyTab = [...hd.querySelectorAll('.hd-tab')].find((t) => t.dataset.sec === 'clarify');
-  assert.ok(clarifyTab, 'a Clarify tab is offered when the run has Q&A');
+      const doc = ctx.window.document;
+      const err = doc.querySelector('#runs-list .runs-note-err');
+      assert.ok(err, '.runs-note-err present on error');
+      assert.match(err.textContent, /Could not load finished runs: boom/);
+      assert.equal(doc.querySelectorAll('#runs-list li').length, 0, 'no <li> in error state');
+    } },
+  ]);
 });

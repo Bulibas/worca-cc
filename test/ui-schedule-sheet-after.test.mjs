@@ -5,9 +5,9 @@
 // kinds; a stored pick that is no longer a candidate is kept.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { checkRows } from './helpers/rows.mjs';
 
 const sheetPath = fileURLToPath(new URL('../ui/public/schedule-sheet.mjs', import.meta.url));
 const tick = (n = 1) => new Promise((r) => setTimeout(r, n));
@@ -99,26 +99,30 @@ test('while the candidates are still loading OK is disabled, no error line is sh
   mod.closeScheduleSheet(); await done;
 });
 
-test('Change… on an after-ticket opens on the After side and can switch to a time', async () => {
-  const { doc, done } = await open({ mode: 'ticket', candidates: CANDS, initial: { after: { kind: 'pipeline', id: 'p1', title: 'Refactor' }, afterPolicy: 'done' } });
-  assert.equal(doc.getElementById('sched-title').textContent, 'Change when it starts');
-  assert.deepEqual(kinds(doc), ['time', 'after']);
-  assert.equal(kindOn(doc), 'after');
-  assert.equal(doc.querySelector('.sched-presets'), null, 'ticket mode never shows presets');
-  assert.equal(doc.getElementById('sched-after').value, 'pipeline:p1');
-  doc.querySelector('button[data-kind="time"]').click();
-  await tick();
-  assert.equal(doc.querySelector('.sched-once').hidden, false);
-  doc.querySelector('.sched-ok').click();
-  const out = await done;
-  assert.ok(out.scheduledFor && !out.after, 'a time, no predecessor');
-});
-
-test('Change time without candidates is today\'s sheet: no switch, the old heading', async () => {
-  const { doc, mod, done } = await open({ mode: 'ticket', initial: { scheduledFor: new Date(Date.now() + 3600_000).toISOString(), ifMissed: 'run', graceMin: 360 } });
-  assert.equal(doc.getElementById('sched-title').textContent, 'Change time');
-  assert.equal(doc.querySelector('.sched-kind'), null);
-  mod.closeScheduleSheet(); await done;
+test('ticket mode: Change… on an after-ticket opens on the After side and can switch to a time; without candidates it is today\'s Change time sheet', async () => {
+  // Each row opens its own sheet.
+  await checkRows([
+    { name: 'Change… on an after-ticket opens on the After side and can switch to a time', run: async () => {
+      const { doc, done } = await open({ mode: 'ticket', candidates: CANDS, initial: { after: { kind: 'pipeline', id: 'p1', title: 'Refactor' }, afterPolicy: 'done' } });
+      assert.equal(doc.getElementById('sched-title').textContent, 'Change when it starts');
+      assert.deepEqual(kinds(doc), ['time', 'after']);
+      assert.equal(kindOn(doc), 'after');
+      assert.equal(doc.querySelector('.sched-presets'), null, 'ticket mode never shows presets');
+      assert.equal(doc.getElementById('sched-after').value, 'pipeline:p1');
+      doc.querySelector('button[data-kind="time"]').click();
+      await tick();
+      assert.equal(doc.querySelector('.sched-once').hidden, false);
+      doc.querySelector('.sched-ok').click();
+      const out = await done;
+      assert.ok(out.scheduledFor && !out.after, 'a time, no predecessor');
+    } },
+    { name: 'Change time without candidates is today\'s sheet: no switch, the old heading', run: async () => {
+      const { doc, mod, done } = await open({ mode: 'ticket', initial: { scheduledFor: new Date(Date.now() + 3600_000).toISOString(), ifMissed: 'run', graceMin: 360 } });
+      assert.equal(doc.getElementById('sched-title').textContent, 'Change time');
+      assert.equal(doc.querySelector('.sched-kind'), null);
+      mod.closeScheduleSheet(); await done;
+    } },
+  ]);
 });
 
 test('Change… on a ticket waiting for a FINISHED pipeline keeps that predecessor', async () => {
@@ -133,14 +137,4 @@ test('Change… on a ticket waiting for a FINISHED pipeline keeps that predecess
   assert.equal(doc.querySelector('.sched-sentence b').textContent, 'After ‘Old’ finishes');
   doc.querySelector('.sched-ok').click();
   assert.deepEqual(await done, { after: { kind: 'pipeline', id: 'p9', title: 'Old' }, afterPolicy: 'done' });
-});
-
-// JSDOM reads the `hidden` PROPERTY, not the cascade — it cannot see that an author display rule
-// (`.sched-presets{display:flex}`, `.sched-after{display:grid}`) beats the UA [hidden]{display:none}
-// and leaves both blocks visible in a real browser. Pin the restatement by source, the
-// test/ui-running-pause-fixes.test.mjs idiom.
-test('style.css restates [hidden] for the presets seg and the After block', () => {
-  const css = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8');
-  assert.match(css, /\.sched-presets\[hidden\],\.sched-after\[hidden\]\{display:none;\}/);
-  assert.match(css, /\.sched-kind\{display:flex;/);
 });

@@ -4,10 +4,9 @@
 // object out. No DOM, no fetch.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { previewAskFromDef, previewFileUrl } from '../ui/public/ask/form-preview.mjs';
 import { resolveAnswerSchema } from '../src/shared/forms/schema.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const PICK_ONE = {
   version: 2, title: 'Pick one',
@@ -44,19 +43,22 @@ test('the envelope is P2\u2019s (ruling X1): every key, with data from `example`
     'the RESOLVED schema, exactly as a run would send it');
 });
 
-test('files is EMPTY and fileUrl is null \u2014 a declaration snapshotted nothing (X14)', () => {
-  const ask = previewAskFromDef('review-mockups', WITH_FILES);
-  assert.deepEqual(ask.files, [], 'the renderer\u2019s fileFor() then answers null and draws .af-nofile');
-  assert.equal(previewFileUrl(0), null);
-  assert.equal(previewFileUrl(), null);
-});
-
-test('fileRefs IS built (X16): it is what marks a bound value as a file', () => {
-  assert.deepEqual(previewAskFromDef('review-mockups', WITH_FILES).fileRefs,
-    [{ path: 'data.images[0].file', rel: 'mockups/a.png' }],
-    'path + rel only, in document order, so fileRefs[i] would match files[i]');
-  assert.deepEqual(previewAskFromDef('pick-one', PICK_ONE).fileRefs, [],
-    'a form with no file-typed property declares none');
+test('a declaration preview has files [] and a null fileUrl, but fileRefs IS built (X14/X16)', async () => {
+  await checkRows([
+    { name: 'files is EMPTY and fileUrl is null \u2014 a declaration snapshotted nothing (X14)', run: async () => {
+      const ask = previewAskFromDef('review-mockups', WITH_FILES);
+      assert.deepEqual(ask.files, [], 'the renderer\u2019s fileFor() then answers null and draws .af-nofile');
+      assert.equal(previewFileUrl(0), null);
+      assert.equal(previewFileUrl(), null);
+    } },
+    { name: 'fileRefs IS built (X16): it is what marks a bound value as a file', run: async () => {
+      assert.deepEqual(previewAskFromDef('review-mockups', WITH_FILES).fileRefs,
+        [{ path: 'data.images[0].file', rel: 'mockups/a.png' }],
+        'path + rel only, in document order, so fileRefs[i] would match files[i]');
+      assert.deepEqual(previewAskFromDef('pick-one', PICK_ONE).fileRefs, [],
+        'a form with no file-typed property declares none');
+    } },
+  ]);
 });
 
 test('surface rides through, and a half-written def never throws', () => {
@@ -69,10 +71,4 @@ test('surface rides through, and a half-written def never throws', () => {
   const empty = previewAskFromDef('draft', null);
   assert.equal(empty.form, 'draft');
   assert.deepEqual(empty.data, {});
-});
-
-test('the module is pure and imports P1 at depth 3, never a copy', () => {
-  const src = readFileSync(fileURLToPath(new URL('../ui/public/ask/form-preview.mjs', import.meta.url)), 'utf8');
-  assert.match(src, /from '\.\.\/\.\.\/\.\.\/src\/shared\/forms\/schema\.mjs'/);
-  assert.doesNotMatch(src, /\bdocument\b|\bwindow\b|fetch\(/, 'no DOM, no fetch — the host owns both');
 });

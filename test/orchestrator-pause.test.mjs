@@ -131,5 +131,10 @@ test(`[${engine.id}] stop while pausing: stop wins and no resume_point is persis
   const row = getDb().prepare('SELECT status, resume_point FROM pipelines WHERE id = ?').get(orch.state.id);
   assert.equal(row.status, 'stopped');
   assert.equal(row.resume_point, null, 'stopped row carries no resume point');
+  // A stopped run also has NULL owner columns (folded from the deleted orchestrator-heartbeat test).
+  const cols = getDb().prepare('SELECT owner_pid, owner_host, heartbeat_at FROM pipelines WHERE id = ?').get(orch.state.id);
+  assert.equal(cols.owner_pid, null);
+  assert.equal(cols.owner_host, null);
+  assert.equal(cols.heartbeat_at, null);
 });
 }

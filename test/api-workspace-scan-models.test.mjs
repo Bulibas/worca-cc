@@ -3,11 +3,12 @@
 // the stored pick. settings.json lives under HOME: HOME sandboxed, the runner's HOME guard lifted.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 useTempHome(after);
 
@@ -17,13 +18,9 @@ const created = [];
 const JSONH = { 'Content-Type': 'application/json' };
 const post = (p, b) => fetch(`${base}${p}`, { method: 'POST', headers: JSONH, body: JSON.stringify(b ?? {}) });
 const readSettingsJson = async () => JSON.parse(await readFile(join(sandboxHome, '.worca-cc', 'settings.json'), 'utf8'));
-async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-wsm-repo-'));
+function freshRepo() {
+  const dir = templateRepo('wsm-repo', { branch: 'main', user: true, files: { 'README.md': '# hi\n' } });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 async function untilSettled(runId, ms = 60000) {
@@ -59,28 +56,31 @@ after(async () => {
 
 const PICK = { scanModel: 'claude-opus-5-5', scanEffort: 'high', agentModel: 'opus', agentEffort: 'xhigh' };
 
-test('GET /api/settings: workspaceScan unset + the default pair', async () => {
-  const j = await (await fetch(`${base}/api/settings`)).json();
-  assert.equal(j.workspaceScan, null);
-  assert.deepEqual(j.workspaceScanDefault, { scanModel: 'claude-sonnet-5', scanEffort: 'medium', agentModel: 'sonnet', agentEffort: 'medium' });
-});
-
-test('POST /api/settings workspaceScan: round trip, 400 on a bad pick (nothing written), null clears, root untouched', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'worca-cc-wsm-root-'));
-  created.push(root);
-  assert.equal((await (await post('/api/settings', { root })).json()).root, root);
-  const ok = await (await post('/api/settings', { workspaceScan: PICK })).json();
-  assert.deepEqual(ok.workspaceScan, PICK);
-  assert.equal(ok.root, root, 'a workspaceScan-only save leaves the root');
-  assert.deepEqual((await readSettingsJson()).workspaces.scan, PICK);
-  const bad = await post('/api/settings', { workspaceScan: { ...PICK, agentModel: 'haiku' } });
-  assert.equal(bad.status, 400);
-  const badBody = await bad.json();
-  assert.match(badBody.error, /Project agents/);
-  assert.equal(badBody.field, 'workspaceScan.agentModel');
-  assert.deepEqual((await readSettingsJson()).workspaces.scan, PICK, 'nothing written on a 400');
-  assert.equal((await (await post('/api/settings', { workspaceScan: null })).json()).workspaceScan, null);
-  await post('/api/settings', { root: '' });
+test('workspaceScan settings: unset + default pair, round trip, 400 on a bad pick (nothing written), null clears, root untouched', async () => {
+  await checkRows([
+    { name: 'GET /api/settings: workspaceScan unset + the default pair', run: async () => {
+      const j = await (await fetch(`${base}/api/settings`)).json();
+      assert.equal(j.workspaceScan, null);
+      assert.deepEqual(j.workspaceScanDefault, { scanModel: 'claude-sonnet-5', scanEffort: 'medium', agentModel: 'sonnet', agentEffort: 'medium' });
+    } },
+    { name: 'POST /api/settings workspaceScan: round trip, 400 on a bad pick (nothing written), null clears, root untouched', run: async () => {
+      const root = await mkdtemp(join(tmpdir(), 'worca-cc-wsm-root-'));
+      created.push(root);
+      assert.equal((await (await post('/api/settings', { root })).json()).root, root);
+      const ok = await (await post('/api/settings', { workspaceScan: PICK })).json();
+      assert.deepEqual(ok.workspaceScan, PICK);
+      assert.equal(ok.root, root, 'a workspaceScan-only save leaves the root');
+      assert.deepEqual((await readSettingsJson()).workspaces.scan, PICK);
+      const bad = await post('/api/settings', { workspaceScan: { ...PICK, agentModel: 'haiku' } });
+      assert.equal(bad.status, 400);
+      const badBody = await bad.json();
+      assert.match(badBody.error, /Project agents/);
+      assert.equal(badBody.field, 'workspaceScan.agentModel');
+      assert.deepEqual((await readSettingsJson()).workspaces.scan, PICK, 'nothing written on a 400');
+      assert.equal((await (await post('/api/settings', { workspaceScan: null })).json()).workspaceScan, null);
+      await post('/api/settings', { root: '' });
+    } },
+  ]);
 });
 
 test('Re-scan starts on the stored pick', async () => {

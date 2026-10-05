@@ -16,6 +16,7 @@ import { WebSocket } from 'ws';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
 import { _resetForTests as closeDbForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -128,132 +129,138 @@ async function actOnCard(threadId, cardId, state) {
   return { status: r.status, body };
 }
 
-test('"schedule …" proposes a run card carrying its schedule, read in the browser\'s timezone', async () => {
-  const t = await newThread();
-  const t0 = Date.now();
-  const { cards } = await turn(t.id, 'schedule a dependency upgrade for this project');
-  assert.equal(cards.length, 1);
-  const s = cards[0].card.schedule;
-  assert.equal(cards[0].state, 'proposed');
-  assert.equal(s.kind, 'once');
-  assert.equal(s.timeZone, TZ, 'the thread context carried the zone to the proposal');
-  const at = Date.parse(s.runAt);
-  assert.ok(at >= t0 + 110_000 && at <= Date.now() + 125_000, 'the mock asked for +2m');
-  assert.match(s.when, /^[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2}$/);
-  // The thread stored the zone, so the MCP child reads it too.
-  assert.equal((await snapshot(t.id)).thread.context.timeZone, TZ);
+test('"schedule …" proposes a one-off card in the browser zone; "… every …" becomes a series it follows (delete hands it back)', async () => {
+  await checkRows([
+    { name: '"schedule …" proposes a run card carrying its schedule, read in the browser\'s timezone', run: async () => {
+      const t = await newThread();
+      const t0 = Date.now();
+      const { cards } = await turn(t.id, 'schedule a dependency upgrade for this project');
+      assert.equal(cards.length, 1);
+      const s = cards[0].card.schedule;
+      assert.equal(cards[0].state, 'proposed');
+      assert.equal(s.kind, 'once');
+      assert.equal(s.timeZone, TZ, 'the thread context carried the zone to the proposal');
+      const at = Date.parse(s.runAt);
+      assert.ok(at >= t0 + 110_000 && at <= Date.now() + 125_000, 'the mock asked for +2m');
+      assert.match(s.when, /^[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2}$/);
+      // The thread stored the zone, so the MCP child reads it too.
+      assert.equal((await snapshot(t.id)).thread.context.timeZone, TZ);
 
-  // Schedule → the card waits as a ticket; its line reaches the next turn's context block.
-  const made = await post('/api/run', runBody(t, cards[0], { scheduledFor: s.runAt }));
-  assert.equal(made.status, 202);
-  const { runId } = await made.json();
-  const block = (await blocksOf(t.id)).find((b) => b.id === cards[0].id);
-  assert.equal(block.state, 'scheduled');
-  assert.equal(block.runId, runId);
+      // Schedule → the card waits as a ticket; its line reaches the next turn's context block.
+      const made = await post('/api/run', runBody(t, cards[0], { scheduledFor: s.runAt }));
+      assert.equal(made.status, 202);
+      const { runId } = await made.json();
+      const block = (await blocksOf(t.id)).find((b) => b.id === cards[0].id);
+      assert.equal(block.state, 'scheduled');
+      assert.equal(block.runId, runId);
+    } },
+    { name: '"schedule … every …": the card becomes a repeating schedule it follows; deleting the series hands it back', run: async () => {
+      const t = await newThread();
+      const { cards } = await turn(t.id, 'schedule a nightly audit every weekday');
+      const card = cards[0];
+      assert.equal(card.card.schedule.kind, 'repeat');
+      assert.equal(card.card.schedule.sentence, 'Every weekday at 02:00');
+      assert.equal(card.card.schedule.rule.tz, TZ);
+      assert.equal(card.card.schedule.next.length, 3);
+      const s = card.card.schedule;
+      const made = await post('/api/run', runBody(t, card, { repeat: { rule: s.rule, overlap: s.overlap, maxFailures: s.maxFailures } }));
+      assert.equal(made.status, 202, 'an Ask card may now start a repeating schedule');
+      const out = await made.json();
+      assert.match(out.scheduleId, /^sch_[0-9a-f]{8}$/);
+      let block = (await blocksOf(t.id)).find((b) => b.id === card.id);
+      assert.equal(block.state, 'scheduled');
+      assert.equal(block.scheduleId, out.scheduleId);
+      assert.equal(block.sentence, 'Every weekday at 02:00');
+      assert.equal(block.runId ?? null, null, 'a series card follows the schedule, not one run of it');
+      const detail = await (await fetch(`${base}/api/schedules/${out.scheduleId}`)).json();
+      assert.equal(detail.item.askCardId, card.id, 'the series remembers the card that made it');
+
+      // The next turn's context block names it, so the model never proposes it again.
+      const next = await turn(t.id, 'thanks');
+      assert.equal(next.cards.length, 0);
+
+      const del = await fetch(`${base}/api/schedules/${out.scheduleId}`, { method: 'DELETE' });
+      assert.equal(del.status, 200);
+      block = (await blocksOf(t.id)).find((b) => b.id === card.id);
+      assert.equal(block.state, 'proposed', 'deleting the series hands the card back');
+      assert.equal(block.scheduleId ?? null, null);
+    } },
+  ]);
 });
 
-test('"schedule … every …": the card becomes a repeating schedule it follows; deleting the series hands it back', async () => {
-  const t = await newThread();
-  const { cards } = await turn(t.id, 'schedule a nightly audit every weekday');
-  const card = cards[0];
-  assert.equal(card.card.schedule.kind, 'repeat');
-  assert.equal(card.card.schedule.sentence, 'Every weekday at 02:00');
-  assert.equal(card.card.schedule.rule.tz, TZ);
-  assert.equal(card.card.schedule.next.length, 3);
-  const s = card.card.schedule;
-  const made = await post('/api/run', runBody(t, card, { repeat: { rule: s.rule, overlap: s.overlap, maxFailures: s.maxFailures } }));
-  assert.equal(made.status, 202, 'an Ask card may now start a repeating schedule');
-  const out = await made.json();
-  assert.match(out.scheduleId, /^sch_[0-9a-f]{8}$/);
-  let block = (await blocksOf(t.id)).find((b) => b.id === card.id);
-  assert.equal(block.state, 'scheduled');
-  assert.equal(block.scheduleId, out.scheduleId);
-  assert.equal(block.sentence, 'Every weekday at 02:00');
-  assert.equal(block.runId ?? null, null, 'a series card follows the schedule, not one run of it');
-  const detail = await (await fetch(`${base}/api/schedules/${out.scheduleId}`)).json();
-  assert.equal(detail.item.askCardId, card.id, 'the series remembers the card that made it');
+test('schedule cards: decline/apply on a one-off; edit/delete on a series', async () => {
+  await checkRows([
+    { name: 'schedule card: propose → decline (nothing changes) and propose → apply (the change happens, the event turn answers)', run: async () => {
+      // A one-off scheduled run made by hand, an hour out.
+      const at = new Date(Date.now() + 3600_000).toISOString();
+      const r = await post('/api/run', { projectDir, prompt: 'Upgrade deps', title: 'Upgrade deps', scheduledFor: at });
+      assert.equal(r.status, 202);
+      const { runId } = await r.json();
+      const t = await newThread();
 
-  // The next turn's context block names it, so the model never proposes it again.
-  const next = await turn(t.id, 'thanks');
-  assert.equal(next.cards.length, 0);
+      // move → a card with before/after; decline leaves the ticket alone.
+      let { cards } = await turn(t.id, `move ${runId} a bit later`);
+      assert.equal(cards.length, 1);
+      let sc = cards[0];
+      assert.equal(sc.card.type, 'schedule');
+      assert.equal(sc.card.action, 'move');
+      assert.equal(sc.card.before.at, at);
+      assert.ok(Date.parse(sc.card.after.at) > Date.now(), 'the mock asked for +5m');
+      assert.match(sc.card.summary, /^Move "Upgrade deps" from .+ to .+$/);
+      let res = await actOnCard(t.id, sc.id, 'declined');
+      assert.equal(res.status, 200);
+      assert.equal(res.body.block.state, 'declined');
+      assert.equal((await (await fetch(`${base}/api/schedules/${runId}`)).json()).item.runAt, at, 'decline changed nothing');
+      let snap = await snapshot(t.id);
+      assert.ok(snap.messages.some((m) => (m.blocks || []).some((b) => b.kind === 'notice' && /^Declined — Move "Upgrade deps"/.test(b.text))), 'the notice row');
 
-  const del = await fetch(`${base}/api/schedules/${out.scheduleId}`, { method: 'DELETE' });
-  assert.equal(del.status, 200);
-  block = (await blocksOf(t.id)).find((b) => b.id === card.id);
-  assert.equal(block.state, 'proposed', 'deleting the series hands the card back');
-  assert.equal(block.scheduleId ?? null, null);
-});
+      // move again → apply: the ticket moves, the card says so, the event turn answers.
+      ({ cards } = await turn(t.id, `move ${runId} a bit later`));
+      sc = cards[0];
+      res = await actOnCard(t.id, sc.id, 'applied');
+      assert.equal(res.status, 200);
+      assert.equal(res.body.block.state, 'applied');
+      assert.match(res.body.block.card.result.detail, /^now at /);
+      assert.equal((await (await fetch(`${base}/api/schedules/${runId}`)).json()).item.runAt, sc.card.after.at, 'the ticket moved');
+      // Applying twice is refused.
+      assert.equal((await post(`/api/ask/threads/${t.id}/cards/${sc.id}`, { state: 'applied' })).status, 409);
+      snap = await snapshot(t.id);
+      assert.ok(snap.messages.some((m) => m.role === 'assistant' && /Done\./.test(m.text || '')), 'the event turn confirmed');
 
-test('schedule card: propose → decline (nothing changes) and propose → apply (the change happens, the event turn answers)', async () => {
-  // A one-off scheduled run made by hand, an hour out.
-  const at = new Date(Date.now() + 3600_000).toISOString();
-  const r = await post('/api/run', { projectDir, prompt: 'Upgrade deps', title: 'Upgrade deps', scheduledFor: at });
-  assert.equal(r.status, 202);
-  const { runId } = await r.json();
-  const t = await newThread();
+      // cancel → apply: the ticket is canceled.
+      ({ cards } = await turn(t.id, `cancel ${runId} please`));
+      res = await actOnCard(t.id, cards[0].id, 'applied');
+      assert.equal(res.body.block.state, 'applied');
+      assert.equal((await (await fetch(`${base}/api/schedules/${runId}`)).json()).item.status, 'canceled');
 
-  // move → a card with before/after; decline leaves the ticket alone.
-  let { cards } = await turn(t.id, `move ${runId} a bit later`);
-  assert.equal(cards.length, 1);
-  let sc = cards[0];
-  assert.equal(sc.card.type, 'schedule');
-  assert.equal(sc.card.action, 'move');
-  assert.equal(sc.card.before.at, at);
-  assert.ok(Date.parse(sc.card.after.at) > Date.now(), 'the mock asked for +5m');
-  assert.match(sc.card.summary, /^Move "Upgrade deps" from .+ to .+$/);
-  let res = await actOnCard(t.id, sc.id, 'declined');
-  assert.equal(res.status, 200);
-  assert.equal(res.body.block.state, 'declined');
-  assert.equal((await (await fetch(`${base}/api/schedules/${runId}`)).json()).item.runAt, at, 'decline changed nothing');
-  let snap = await snapshot(t.id);
-  assert.ok(snap.messages.some((m) => (m.blocks || []).some((b) => b.kind === 'notice' && /^Declined — Move "Upgrade deps"/.test(b.text))), 'the notice row');
+      // A change the rows no longer allow is a failed card, never a silent success.
+      ({ cards } = await turn(t.id, `run now ${runId}`));
+      assert.equal(cards.length, 0, 'the parent re-validation refuses a canceled run: no card');
+      snap = await snapshot(t.id);
+      assert.ok(snap.messages.some((m) => (m.blocks || []).some((b) => b.kind === 'notice' && /^Schedule change rejected: this run is canceled/.test(b.text))));
+    } },
+    { name: 'schedule card on a series: edit replaces the rule; delete removes it', run: async () => {
+      const rule = { freq: 'daily', interval: 1, time: '04:00', tz: 'UTC' };
+      const made = await (await post('/api/run', { projectDir, prompt: 'Nightly', title: 'Nightly', repeat: { rule } })).json();
+      const t = await newThread();
+      let { cards } = await turn(t.id, `edit ${made.scheduleId} to weekdays`);
+      const edit = cards[0];
+      assert.equal(edit.card.action, 'edit');
+      assert.equal(edit.card.before.sentence, 'Every day at 04:00');
+      assert.equal(edit.card.after.sentence, 'Every weekday at 03:00');
+      assert.equal(edit.card.patch.rule.tz, 'UTC', 'an edit keeps the series\' own zone');
+      let res = await actOnCard(t.id, edit.id, 'applied');
+      assert.equal(res.body.block.state, 'applied');
+      assert.match(res.body.block.card.result.detail, /^next run [A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2}, 03:00$/);
+      const s = (await (await fetch(`${base}/api/schedules/${made.scheduleId}`)).json()).item;
+      assert.equal(s.sentence, 'Every weekday at 03:00');
 
-  // move again → apply: the ticket moves, the card says so, the event turn answers.
-  ({ cards } = await turn(t.id, `move ${runId} a bit later`));
-  sc = cards[0];
-  res = await actOnCard(t.id, sc.id, 'applied');
-  assert.equal(res.status, 200);
-  assert.equal(res.body.block.state, 'applied');
-  assert.match(res.body.block.card.result.detail, /^now at /);
-  assert.equal((await (await fetch(`${base}/api/schedules/${runId}`)).json()).item.runAt, sc.card.after.at, 'the ticket moved');
-  // Applying twice is refused.
-  assert.equal((await post(`/api/ask/threads/${t.id}/cards/${sc.id}`, { state: 'applied' })).status, 409);
-  snap = await snapshot(t.id);
-  assert.ok(snap.messages.some((m) => m.role === 'assistant' && /Done\./.test(m.text || '')), 'the event turn confirmed');
-
-  // cancel → apply: the ticket is canceled.
-  ({ cards } = await turn(t.id, `cancel ${runId} please`));
-  res = await actOnCard(t.id, cards[0].id, 'applied');
-  assert.equal(res.body.block.state, 'applied');
-  assert.equal((await (await fetch(`${base}/api/schedules/${runId}`)).json()).item.status, 'canceled');
-
-  // A change the rows no longer allow is a failed card, never a silent success.
-  ({ cards } = await turn(t.id, `run now ${runId}`));
-  assert.equal(cards.length, 0, 'the parent re-validation refuses a canceled run: no card');
-  snap = await snapshot(t.id);
-  assert.ok(snap.messages.some((m) => (m.blocks || []).some((b) => b.kind === 'notice' && /^Schedule change rejected: this run is canceled/.test(b.text))));
-});
-
-test('schedule card on a series: edit replaces the rule; delete removes it', async () => {
-  const rule = { freq: 'daily', interval: 1, time: '04:00', tz: 'UTC' };
-  const made = await (await post('/api/run', { projectDir, prompt: 'Nightly', title: 'Nightly', repeat: { rule } })).json();
-  const t = await newThread();
-  let { cards } = await turn(t.id, `edit ${made.scheduleId} to weekdays`);
-  const edit = cards[0];
-  assert.equal(edit.card.action, 'edit');
-  assert.equal(edit.card.before.sentence, 'Every day at 04:00');
-  assert.equal(edit.card.after.sentence, 'Every weekday at 03:00');
-  assert.equal(edit.card.patch.rule.tz, 'UTC', 'an edit keeps the series\' own zone');
-  let res = await actOnCard(t.id, edit.id, 'applied');
-  assert.equal(res.body.block.state, 'applied');
-  assert.match(res.body.block.card.result.detail, /^next run [A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2}, 03:00$/);
-  const s = (await (await fetch(`${base}/api/schedules/${made.scheduleId}`)).json()).item;
-  assert.equal(s.sentence, 'Every weekday at 03:00');
-
-  ({ cards } = await turn(t.id, `delete ${made.scheduleId}`));
-  res = await actOnCard(t.id, cards[0].id, 'applied');
-  assert.equal(res.body.block.state, 'applied');
-  assert.equal((await fetch(`${base}/api/schedules/${made.scheduleId}`)).status, 404);
+      ({ cards } = await turn(t.id, `delete ${made.scheduleId}`));
+      res = await actOnCard(t.id, cards[0].id, 'applied');
+      assert.equal(res.body.block.state, 'applied');
+      assert.equal((await fetch(`${base}/api/schedules/${made.scheduleId}`)).status, 404);
+    } },
+  ]);
 });
 
 test('the real tool bundle: list, get, preview, pause / resume / skip, mark read — and the child\'s writes repaint the page', async () => {

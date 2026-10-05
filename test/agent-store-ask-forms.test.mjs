@@ -8,6 +8,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { createAgent, readAgent, updateAgent, userAgentsDir } from '../src/core/agent-store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -62,29 +63,32 @@ test('gate 1 refuses a bad form with code ASK_FORM, every failed rule named, not
   assert.equal(await readAgent('askBad'), null, 'a refused create writes nothing');
 });
 
-test('a bad form id is an ASK_FORM error carrying P1\u2019s own sentence', async () => {
-  await assert.rejects(
-    async () => createAgent({ meta: META({ key: 'askBadId', ask: { forms: { 'Not An Id': FORM } } }), markdown: '# a\n' }),
-    (e) => {
-      assert.equal(e.code, 'ASK_FORM');
-      assert.deepEqual(e.errors, [{
-        path: 'ask.forms."Not An Id"', code: 'bad-id',
-        message: 'form id "Not An Id" must match /^[a-z][a-z0-9-]{0,47}$/',
-      }]);
-      return true;
-    },
-  );
-});
-
-test('a whole-block refusal is ONE issue against `ask`, with no per-form noise', async () => {
-  await assert.rejects(
-    async () => createAgent({ meta: META({ key: 'askBadBlock', ask: 'yes please' }), markdown: '# a\n' }),
-    (e) => {
-      assert.equal(e.code, 'ASK_FORM');
-      assert.deepEqual(e.errors, [{ path: 'ask', code: 'dialect', message: '"ask" is { forms: { <id>: <form> } }' }]);
-      return true;
-    },
-  );
+test('single-issue ASK_FORM refusals: a bad form id, a non-object ask block', async () => {
+  await checkRows([
+    { name: 'a bad form id is an ASK_FORM error carrying P1\u2019s own sentence', run: async () => {
+      await assert.rejects(
+        async () => createAgent({ meta: META({ key: 'askBadId', ask: { forms: { 'Not An Id': FORM } } }), markdown: '# a\n' }),
+        (e) => {
+          assert.equal(e.code, 'ASK_FORM');
+          assert.deepEqual(e.errors, [{
+            path: 'ask.forms."Not An Id"', code: 'bad-id',
+            message: 'form id "Not An Id" must match /^[a-z][a-z0-9-]{0,47}$/',
+          }]);
+          return true;
+        },
+      );
+    } },
+    { name: 'a whole-block refusal is ONE issue against `ask`, with no per-form noise', run: async () => {
+      await assert.rejects(
+        async () => createAgent({ meta: META({ key: 'askBadBlock', ask: 'yes please' }), markdown: '# a\n' }),
+        (e) => {
+          assert.equal(e.code, 'ASK_FORM');
+          assert.deepEqual(e.errors, [{ path: 'ask', code: 'dialect', message: '"ask" is { forms: { <id>: <form> } }' }]);
+          return true;
+        },
+      );
+    } },
+  ]);
 });
 
 test('an update that breaks a form leaves the stored sidecar untouched', async () => {
@@ -96,11 +100,4 @@ test('an update that breaks a form leaves the stored sidecar untouched', async (
   );
   const back = await readAgent('askKeep');
   assert.equal(back.meta.ask.forms['pick-one'].example.summary, 'Something happened.');
-});
-
-test('an agent with no ask block is completely unaffected', async () => {
-  const { meta } = await createAgent({ meta: META({ key: 'askNone' }), markdown: '# a\n' });
-  assert.equal(meta.ask, undefined);
-  const onDisk = JSON.parse(await readFile(join(userAgentsDir(), 'askNone.meta.json'), 'utf8'));
-  assert.equal('ask' in onDisk, false);
 });

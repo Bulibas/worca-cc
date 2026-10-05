@@ -10,6 +10,7 @@ import {
   PARAMS_CAPTION,
   PARAM_EDITOR_LANGUAGE, paramEditorLanguage, paramEditorHook,
 } from '../ui/public/script-forms.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const doc = new JSDOM('<!doctype html><body></body>').window.document;
 const mount = (el) => { const host = doc.createElement('div'); host.appendChild(el); return host; };
@@ -74,33 +75,54 @@ test('paramEditorLanguage: command is a shell, code follows its declared languag
   assert.equal(paramEditorLanguage(null), 'javascript');
 });
 
-test('paramEditorHook builds ONE editor per command/code param and hands the handle back', async () => {
-  const editors = [];
-  const host = mount(renderParamsForm(META, { params: { source: 'const a = 1;' } },
-    { doc, editorFor: paramEditorHook({ doc, highlight: async (t) => t, editors }) }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(editors.length, 1);
-  assert.equal(host.querySelectorAll('.code-editor').length, 1);
-  assert.equal(host.querySelector('.code-editor').dataset.language, 'javascript');
-  assert.equal(host.querySelector('.code-editor textarea').dataset.field, 'param:source');
-  assert.equal(host.querySelector('.code-editor textarea').rows, 8);
-  assert.equal(host.querySelectorAll('textarea.ins-textarea').length, 0);
-  assert.equal(host.querySelectorAll('.ins-caption').length, 1);
-  editors.forEach((e) => e.destroy());
-  const none = mount(renderParamsForm(META, {}, { doc, editorFor: paramEditorHook({ doc, highlight: null, editors: [] }) }));
-  assert.equal(none.querySelector('.code-editor'), null, 'no highlighter, no editor');
-  assert.ok(none.querySelector('textarea.ins-textarea[data-field="param:source"]'));
-});
-
-test('paramEditorHook gives a command param three rows of bash', async () => {
-  const editors = [];
-  const meta = { params: [{ id: 'command', type: 'command', label: 'Command', default: 'npm test' }] };
-  const host = mount(renderParamsForm(meta, {}, { doc, editorFor: paramEditorHook({ doc, highlight: async (t) => t, editors }) }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(host.querySelector('.code-editor').dataset.language, 'bash');
-  assert.equal(host.querySelector('.code-editor textarea').rows, 3);
-  assert.equal(host.querySelector('.code-editor textarea').value, 'npm test');
-  editors.forEach((e) => e.destroy());
+// One row per param kind: a js code param (and the no-highlighter fallback), a command param, a python code param.
+test('paramEditorHook builds ONE code editor per command/code param with the right grammar (javascript, bash with 3 rows, python) and hands the handle back; no highlighter, no editor', async () => {
+  await checkRows([
+    { name: 'paramEditorHook builds ONE editor per command/code param and hands the handle back', run: async () => {
+      const editors = [];
+      const host = mount(renderParamsForm(META, { params: { source: 'const a = 1;' } },
+        { doc, editorFor: paramEditorHook({ doc, highlight: async (t) => t, editors }) }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(editors.length, 1);
+      assert.equal(host.querySelectorAll('.code-editor').length, 1);
+      assert.equal(host.querySelector('.code-editor').dataset.language, 'javascript');
+      assert.equal(host.querySelector('.code-editor textarea').dataset.field, 'param:source');
+      assert.equal(host.querySelector('.code-editor textarea').rows, 8);
+      assert.equal(host.querySelectorAll('textarea.ins-textarea').length, 0);
+      assert.equal(host.querySelectorAll('.ins-caption').length, 1);
+      editors.forEach((e) => e.destroy());
+      const none = mount(renderParamsForm(META, {}, { doc, editorFor: paramEditorHook({ doc, highlight: null, editors: [] }) }));
+      assert.equal(none.querySelector('.code-editor'), null, 'no highlighter, no editor');
+      assert.ok(none.querySelector('textarea.ins-textarea[data-field="param:source"]'));
+    } },
+    { name: 'paramEditorHook gives a command param three rows of bash', run: async () => {
+      const editors = [];
+      const meta = { params: [{ id: 'command', type: 'command', label: 'Command', default: 'npm test' }] };
+      const host = mount(renderParamsForm(meta, {}, { doc, editorFor: paramEditorHook({ doc, highlight: async (t) => t, editors }) }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(host.querySelector('.code-editor').dataset.language, 'bash');
+      assert.equal(host.querySelector('.code-editor textarea').rows, 3);
+      assert.equal(host.querySelector('.code-editor textarea').value, 'npm test');
+      editors.forEach((e) => e.destroy());
+    } },
+    { name: 'paramEditorHook mounts a python code param with the python grammar (workbench §7)', run: async () => {
+      // The shape the built-in `py` card ships: type code, language python, 8 rows.
+      const editors = [];
+      const meta = { key: 'py', displayName: 'Python', runtime: 'python',
+        params: [{ id: 'source', type: 'code', language: 'python', label: 'Source', required: true }] };
+      const host = mount(renderParamsForm(meta, { params: { source: 'def main(api):\n    return {}\n' } },
+        { doc, editorFor: paramEditorHook({ doc, highlight: async (t) => t, editors }) }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(host.querySelector('.code-editor').dataset.language, 'python');
+      assert.equal(host.querySelector('.code-editor textarea').dataset.field, 'param:source');
+      assert.equal(host.querySelector('.code-editor textarea').value, 'def main(api):\n    return {}\n');
+      assert.equal(host.querySelector('.code-editor textarea').rows, 8);
+      assert.equal(host.querySelectorAll('textarea.ins-textarea').length, 0, 'the plain textarea is replaced');
+      assert.equal(host.querySelectorAll('.ins-caption').length, 1, 'the privileges caption still rides with it');
+      assert.equal(paramEditorLanguage(meta.params[0]), PARAM_EDITOR_LANGUAGE.python);
+      editors.forEach((e) => e.destroy());
+    } },
+  ]);
 });
 
 test('collectParams: types, blanks, and the two error sources', () => {
@@ -167,22 +189,4 @@ test('applyPortEdit is pure and mints the composer`s ids and filenames', () => {
   assert.deepEqual(applyPortEdit(twice, { remove: 'outputs:0' }).outputs.map((p) => p.id), ['out2']);
   assert.deepEqual(applyPortEdit(twice, { remove: 'outputs:9' }).outputs.map((p) => p.id), ['out', 'out2'], 'an unknown index is a no-op');
   assert.deepEqual(applyPortEdit(undefined, { add: 'inputs' }), { inputs: [{ id: 'in', type: 'md', required: false }], outputs: [] });
-});
-
-test('paramEditorHook mounts a python code param with the python grammar (workbench §7)', async () => {
-  // The shape the built-in `py` card ships: type code, language python, 8 rows.
-  const editors = [];
-  const meta = { key: 'py', displayName: 'Python', runtime: 'python',
-    params: [{ id: 'source', type: 'code', language: 'python', label: 'Source', required: true }] };
-  const host = mount(renderParamsForm(meta, { params: { source: 'def main(api):\n    return {}\n' } },
-    { doc, editorFor: paramEditorHook({ doc, highlight: async (t) => t, editors }) }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(host.querySelector('.code-editor').dataset.language, 'python');
-  assert.equal(host.querySelector('.code-editor textarea').dataset.field, 'param:source');
-  assert.equal(host.querySelector('.code-editor textarea').value, 'def main(api):\n    return {}\n');
-  assert.equal(host.querySelector('.code-editor textarea').rows, 8);
-  assert.equal(host.querySelectorAll('textarea.ins-textarea').length, 0, 'the plain textarea is replaced');
-  assert.equal(host.querySelectorAll('.ins-caption').length, 1, 'the privileges caption still rides with it');
-  assert.equal(paramEditorLanguage(meta.params[0]), PARAM_EDITOR_LANGUAGE.python);
-  editors.forEach((e) => e.destroy());
 });

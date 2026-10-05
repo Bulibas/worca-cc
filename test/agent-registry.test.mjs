@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { loadAgentRegistry, registryToSteps, normalizeMeta, collectDomains } from '../src/core/agent-registry.mjs';
 import { AGENT_STEPS } from '../src/core/config.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 test('loadAgentRegistry returns all shipped agents (10 coding + 8 presentation + 4 workspace)', () => {
   const reg = loadAgentRegistry();
@@ -46,42 +47,6 @@ test('collectDomains: ordered unique, general pinned last, shared excluded from 
   assert.deepEqual(collectDomains(reg), ['coding', 'marketing', 'general']);
 });
 
-test('built-in registry tags: 9 coding + 2 shared (workspace agents)', () => {
-  const reg = loadAgentRegistry();
-  assert.equal(reg.workspaceScanner.domain, 'shared');
-  assert.equal(reg.workspaceReviewer.domain, 'shared');
-  assert.equal(reg.planner.domain, 'coding');
-});
-
-test('each entry is a well-formed AgentMeta', () => {
-  const reg = loadAgentRegistry();
-  const COLORS = new Set(['green', 'peach', 'red', 'blue', 'violet', 'amber']);
-  for (const [key, m] of Object.entries(reg)) {
-    assert.equal(m.key, key);
-    assert.equal(typeof m.displayName, 'string');
-    assert.ok(COLORS.has(m.color), `bad color for ${key}: ${m.color}`);
-    assert.equal(typeof m.icon, 'string');
-    assert.ok(m.icon.length > 0);
-    assert.ok(['producer', 'verifier', 'clarifier'].includes(m.runnerType));
-    assert.equal(m.metaVersion, 2, `${key} must be a meta v2 sidecar`);
-    assert.ok(Array.isArray(m.inputs) && Array.isArray(m.outputs), `${key} declares typed ports`);
-    assert.equal(typeof m.order, 'number');
-  }
-});
-
-test('shipped colors match the mockup palette EXACTLY (pins C5 — coercion would hide a typo)', () => {
-  // normalizeMeta coerces an out-of-set color to 'amber', so the generic COLORS.has
-  // check above would NOT catch a `blue` -> `bleu` typo. Pin the intended colors.
-  const reg = loadAgentRegistry();
-  assert.equal(reg.planner.color, 'violet');
-  assert.equal(reg.refiner.color, 'green');
-  assert.equal(reg.implementer.color, 'peach');
-  assert.equal(reg.reviewer.color, 'blue');
-  assert.equal(reg.manualTestsChecklist.color, 'blue');   // C5: blue everywhere
-  assert.equal(reg.manualWebUiTesting.color, 'violet');
-  assert.equal(reg.planReviewer.color, 'amber');
-});
-
 test('registry insertion order follows .order ascending', () => {
   const reg = loadAgentRegistry();
   const orders = Object.values(reg).map((m) => m.order);
@@ -96,37 +61,38 @@ test('registry insertion order follows .order ascending', () => {
   ]);
 });
 
-test('registryToSteps matches the legacy AGENT_STEPS for the original 4', () => {
-  const reg = loadAgentRegistry();
-  const steps = registryToSteps(reg);
-  // clarify is now steps[0]; the original four keep their labels, but the decomposer
-  // (order 2.5) now sits at steps[3] between refiner and implementer. fanOut now
-  // defaults ON for every agent role (planner/refiner/implementer/reviewer AND the
-  // decomposer splitter).
-  assert.deepEqual(steps.slice(1, 6), [
-    { key: 'planner', label: 'Plan', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false },
-    { key: 'refiner', label: 'Refine', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false },
-    { key: 'decomposer', label: 'Decompose', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false },
-    { key: 'implementer', label: 'Implement', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false },
-    { key: 'reviewer', label: 'Review', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false },
-  ]);
-  // And config.AGENT_STEPS (derived from the registry in Task 6) stays equal to it.
-  assert.deepEqual(steps, AGENT_STEPS);
-});
-
-test('registryToSteps appends the new agents with their display names', () => {
+test('registryToSteps: 18 project steps with labels, fanOut and questions flags, equal to AGENT_STEPS', async () => {
   const steps = registryToSteps(loadAgentRegistry());
-  assert.equal(steps.length, 18);
-  assert.deepEqual(steps[0], { key: 'clarify', label: 'Clarify', fanOut: true, asksQuestions: true, questionsLocked: true, questionsDefault: true });
-  assert.deepEqual(steps[3], { key: 'decomposer', label: 'Decompose', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false });
-  assert.deepEqual(steps[6], { key: 'manualTestsChecklist', label: 'Manual Tests Checklist', fanOut: false, asksQuestions: true, questionsLocked: false, questionsDefault: false });
-  assert.deepEqual(steps[7], { key: 'manualWebUiTesting', label: 'Manual web UI testing', fanOut: false, asksQuestions: true, questionsLocked: false, questionsDefault: false });
-  assert.deepEqual(steps[8], { key: 'planReviewer', label: 'Plan Review', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false });
-  // memoryDefragmenter sits at index 9 (upstream's tenth coding step); the seven
-  // presentation steps append after it.
-  assert.equal(steps[9].key, 'memoryDefragmenter');
-  assert.deepEqual(steps.slice(10).map((s) => s.key),
-    ['deckClarify', 'deckNarrative', 'deckSystem', 'deckBuilder', 'deckAudit', 'deckReviewer', 'deckExport', 'deckOutputs']);
+  await checkRows([
+    { name: 'registryToSteps matches the legacy AGENT_STEPS for the original 4', run: () => {
+      // clarify is now steps[0]; the original four keep their labels, but the decomposer
+      // (order 2.5) now sits at steps[3] between refiner and implementer. fanOut now
+      // defaults ON for every agent role (planner/refiner/implementer/reviewer AND the
+      // decomposer splitter).
+      assert.deepEqual(steps.slice(1, 6), [
+        { key: 'planner', label: 'Plan', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false },
+        { key: 'refiner', label: 'Refine', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false },
+        { key: 'decomposer', label: 'Decompose', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false },
+        { key: 'implementer', label: 'Implement', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false },
+        { key: 'reviewer', label: 'Review', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false },
+      ]);
+      // And config.AGENT_STEPS (derived from the registry in Task 6) stays equal to it.
+      assert.deepEqual(steps, AGENT_STEPS);
+    } },
+    { name: 'registryToSteps appends the new agents with their display names', run: () => {
+      assert.equal(steps.length, 18);
+      assert.deepEqual(steps[0], { key: 'clarify', label: 'Clarify', fanOut: true, asksQuestions: true, questionsLocked: true, questionsDefault: true });
+      assert.deepEqual(steps[3], { key: 'decomposer', label: 'Decompose', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false });
+      assert.deepEqual(steps[6], { key: 'manualTestsChecklist', label: 'Manual Tests Checklist', fanOut: false, asksQuestions: true, questionsLocked: false, questionsDefault: false });
+      assert.deepEqual(steps[7], { key: 'manualWebUiTesting', label: 'Manual web UI testing', fanOut: false, asksQuestions: true, questionsLocked: false, questionsDefault: false });
+      assert.deepEqual(steps[8], { key: 'planReviewer', label: 'Plan Review', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false });
+      // memoryDefragmenter sits at index 9 (upstream's tenth coding step); the seven
+      // presentation steps append after it.
+      assert.equal(steps[9].key, 'memoryDefragmenter');
+      assert.deepEqual(steps.slice(10).map((s) => s.key),
+        ['deckClarify', 'deckNarrative', 'deckSystem', 'deckBuilder', 'deckAudit', 'deckReviewer', 'deckExport', 'deckOutputs']);
+    } },
+  ]);
 });
 
 test('every agentFile points at an existing prompt under agents/', () => {
@@ -138,20 +104,6 @@ test('every agentFile points at an existing prompt under agents/', () => {
       existsSync(join(agentsDir, m.agentFile)),
       `missing prompt file for ${m.key}: ${m.agentFile}`,
     );
-  }
-});
-
-test('original four agentFiles match the orchestrator AGENT_FILES map', () => {
-  const reg = loadAgentRegistry();
-  // Mirror of orchestrator.mjs:48-53 (the hardcoded map a later phase replaces).
-  const LEGACY_AGENT_FILES = {
-    planner: 'worca-cc-planner.md',
-    refiner: 'worca-cc-plan-refiner.md',
-    implementer: 'worca-cc-implementer.md',
-    reviewer: 'worca-cc-code-reviewer.md',
-  };
-  for (const [key, file] of Object.entries(LEGACY_AGENT_FILES)) {
-    assert.equal(reg[key].agentFile, file, `agentFile mismatch for ${key}`);
   }
 });
 

@@ -6,6 +6,7 @@ import { effectiveItem, childrenOf, walkLayout, whenOk, visibleFields, widgetsUs
 import { autoAnswer, collectAnswer, checkAskData, fileRefs, fileAccepts } from '../src/shared/forms/answer.mjs';
 import { resolveAnswerSchema } from '../src/shared/forms/schema.mjs';
 import { reviewForm, planForm, releaseForm } from './helpers/ask-form-fixtures.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const codes = (r) => r.errors.map((e) => `${e.path}:${e.code}`);
 const collect = (form, data, raw) => collectAnswer(form, resolveAnswerSchema(form.answer, data), raw);
@@ -75,10 +76,20 @@ test('collectAnswer: nested rows are stripped to declared keys and validated', (
   assert.deepEqual(codes(collect(plan, plan.example, { steps: [{ id: 'nope', verdict: 'keep' }], order: ['s1', 's1'], scope: 'minimal' })), ['steps[0].id:enum', 'order:unique']);
 });
 
-test('collectAnswer reads only `.layout` of its first argument (a persisted ask has no `answer`)', () => {
-  const f = reviewForm();
-  const schema = resolveAnswerSchema(f.answer, f.example);
-  assert.deepEqual(collectAnswer({ layout: f.layout }, schema, { picked: 'b', verdict: 'build' }), { values: { picked: 'b', verdict: 'build' }, errors: [] });
+test('collectAnswer reads only `.layout` of its first argument and never mutates its input', async () => {
+  await checkRows([
+    { name: 'collectAnswer reads only `.layout` of its first argument (a persisted ask has no `answer`)', run: async () => {
+      const f = reviewForm();
+      const schema = resolveAnswerSchema(f.answer, f.example);
+      assert.deepEqual(collectAnswer({ layout: f.layout }, schema, { picked: 'b', verdict: 'build' }), { values: { picked: 'b', verdict: 'build' }, errors: [] });
+    } },
+    { name: 'collectAnswer does not mutate its input', run: async () => {
+      const f = reviewForm();
+      const raw = { picked: 'a', verdict: 'build', notes: 'x' };
+      collect(f, f.example, raw);
+      assert.deepEqual(raw, { picked: 'a', verdict: 'build', notes: 'x' });
+    } },
+  ]);
 });
 
 test('checkAskData (gate 2 core): the data schema, then "could --yes answer THIS data?"', () => {
@@ -94,30 +105,26 @@ test('checkAskData (gate 2 core): the data schema, then "could --yes answer THIS
   assert.deepEqual(checkAskData(rel, { suggested_version: 'not semver' }).errors.map((e) => `${e.path}:${e.code}`), ['answer.version:bad-auto'], 'defaultFrom fed a value the pattern refuses');
 });
 
-test('collectAnswer does not mutate its input', () => {
-  const f = reviewForm();
-  const raw = { picked: 'a', verdict: 'build', notes: 'x' };
-  collect(f, f.example, raw);
-  assert.deepEqual(raw, { picked: 'a', verdict: 'build', notes: 'x' });
-});
-
-test('fileRefs: every file value, with its concrete path and accept list', () => {
-  const f = reviewForm();
-  assert.deepEqual(fileRefs(f.data, f.example), [
-    { path: 'data.images[0].file', rel: 'mockups/a.png', accept: ['image/*'] },
-    { path: 'data.images[1].file', rel: 'mockups/b.png', accept: ['image/*'] }]);
-  const rel = releaseForm();
-  assert.deepEqual(fileRefs(rel.data, rel.example), [{ path: 'data.report', rel: 'reports/q3.pdf', accept: ['application/pdf'] }]);
-  assert.deepEqual(fileRefs(rel.data, { suggested_version: '1.0.0' }), [], 'an absent optional file is no ref');
-});
-
-test('fileAccepts: what a form may display, from the schema alone', () => {
-  assert.deepEqual(fileAccepts(reviewForm().data), ['image/*']);
-  assert.deepEqual(fileAccepts(releaseForm().data), ['application/pdf']);
-  assert.deepEqual(fileAccepts(planForm().data), [], 'a form with no file shows none');
-  const mixed = { type: 'object', properties: { a: { type: 'file' }, rows: { type: 'array', items: { type: 'object', properties: {
-    f: { type: 'file', accept: ['image/png', 'application/pdf'] }, g: { type: 'file', accept: ['application/pdf'] } } } } } };
-  assert.deepEqual(fileAccepts(mixed), ['*/*', 'application/pdf', 'image/png'], 'deduped, sorted; no accept means anything');
+test('fileRefs and fileAccepts: every file value with its path, and the accept set from the schema', async () => {
+  await checkRows([
+    { name: 'fileRefs: every file value, with its concrete path and accept list', run: async () => {
+      const f = reviewForm();
+      assert.deepEqual(fileRefs(f.data, f.example), [
+        { path: 'data.images[0].file', rel: 'mockups/a.png', accept: ['image/*'] },
+        { path: 'data.images[1].file', rel: 'mockups/b.png', accept: ['image/*'] }]);
+      const rel = releaseForm();
+      assert.deepEqual(fileRefs(rel.data, rel.example), [{ path: 'data.report', rel: 'reports/q3.pdf', accept: ['application/pdf'] }]);
+      assert.deepEqual(fileRefs(rel.data, { suggested_version: '1.0.0' }), [], 'an absent optional file is no ref');
+    } },
+    { name: 'fileAccepts: what a form may display, from the schema alone', run: async () => {
+      assert.deepEqual(fileAccepts(reviewForm().data), ['image/*']);
+      assert.deepEqual(fileAccepts(releaseForm().data), ['application/pdf']);
+      assert.deepEqual(fileAccepts(planForm().data), [], 'a form with no file shows none');
+      const mixed = { type: 'object', properties: { a: { type: 'file' }, rows: { type: 'array', items: { type: 'object', properties: {
+        f: { type: 'file', accept: ['image/png', 'application/pdf'] }, g: { type: 'file', accept: ['application/pdf'] } } } } } };
+      assert.deepEqual(fileAccepts(mixed), ['*/*', 'application/pdf', 'image/png'], 'deduped, sorted; no accept means anything');
+    } },
+  ]);
 });
 
 test('hostile answer keys: inherited names are dropped like any unknown key; `__proto__` sets no prototype', () => {

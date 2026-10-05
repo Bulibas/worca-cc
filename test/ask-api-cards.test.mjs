@@ -16,6 +16,8 @@ import http from 'node:http';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 import { _resetForTests as closeDbForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { holdMockTurn, isToolResult } from './helpers/ask-hold.mjs';
 
 useTempHome(after);
 
@@ -296,57 +298,64 @@ test('/api/run pair validation: 400 on half a pair, unknown thread, unknown card
   assert.equal(mod.runs.size, n, 'the 409 also creates no run entry');
 });
 
-test('dismiss: {block} on success, 400 on other states, 404 unknown, 409 when not proposed; other tabs get the ask-message refresh', async () => {
-  const { thread, card } = await proposeCard({ projectKey }, 'propose one more');
-  assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'started' })).status, 400);
-  assert.equal((await post(`/api/ask/threads/${thread.id}/cards/card_ffffffff`, { state: 'dismissed' })).status, 404);
-  const w = openWs();
-  await w.opened;
-  const ok = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'dismissed' });
-  assert.equal(ok.status, 200);
-  assert.equal((await ok.json()).block.state, 'dismissed');
-  // The card's turn is already over — no live reducer took the flip, so the
-  // whole message re-broadcasts as an out-of-turn ask-message (§6.6 upsert key).
-  await waitFor(() => frames(w.msgs, thread.id, 'ask-message').find((m) =>
-    (m.message.blocks || []).some((b) => b.kind === 'card' && b.id === card.id && b.state === 'dismissed')));
-  assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'dismissed' })).status, 409);
-  w.ws.close();
+test('dismiss: {block} on success, 400 other states, 404 unknown, 409 not proposed; other tabs refresh; the card\'s pending comment ids are cleared', async () => {
+  await checkRows([
+    { name: 'dismiss: {block} on success, 400 on other states, 404 unknown, 409 when not proposed; other tabs get the ask-message refresh', run: async () => {
+      const { thread, card } = await proposeCard({ projectKey }, 'propose one more');
+      assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'started' })).status, 400);
+      assert.equal((await post(`/api/ask/threads/${thread.id}/cards/card_ffffffff`, { state: 'dismissed' })).status, 404);
+      const w = openWs();
+      await w.opened;
+      const ok = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'dismissed' });
+      assert.equal(ok.status, 200);
+      assert.equal((await ok.json()).block.state, 'dismissed');
+      // The card's turn is already over — no live reducer took the flip, so the
+      // whole message re-broadcasts as an out-of-turn ask-message (§6.6 upsert key).
+      await waitFor(() => frames(w.msgs, thread.id, 'ask-message').find((m) =>
+        (m.message.blocks || []).some((b) => b.kind === 'card' && b.id === card.id && b.state === 'dismissed')));
+      assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'dismissed' })).status, 409);
+      w.ws.close();
+    } },
+    { name: "dismiss clears the card's pending comment ids (the launch path's only other consumer)", run: async () => {
+      // m3: dismiss is terminal — the card's parked comment ids can never reach a run,
+      // so the route drops them exactly where the launch path does (ui/server.mjs:1155).
+      // Nothing reads ask_card_comments back through the API, so assert via the store.
+      const { seedPipeline } = await import('./helpers/db-seed.mjs');
+      const { addDiffComment, setPendingCardComments, peekPendingCardComments } =
+        await import('../src/core/diff-comments.mjs');
+      const { writeFile } = await import('node:fs/promises');
+      const PATCH = 'diff --git a/a.js b/a.js\n--- a/a.js\n+++ b/a.js\n@@ -1 +1 @@\n-a\n+b\n';
+      const seeded = await seedPipeline(projectDir, { title: 'Prior run', status: 'done' });
+      await writeFile(join(seeded.dir, 'diff-patch.patch'), PATCH, 'utf8');
+      const comment = addDiffComment({ storeKey: seeded.key, pipelineId: seeded.id, patchText: PATCH,
+        path: 'a.js', side: 'new', line: 1, body: 'fix me', author: 'user' });
+
+      const { thread, card } = await proposeCard({ projectKey }, 'propose one to dismiss');
+      assert.ok(card);
+      assert.equal(setPendingCardComments(card.id, [comment.id]), 1);
+      const res = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'dismissed' });
+      assert.equal(res.status, 200);
+      assert.equal((await res.json()).block.state, 'dismissed');
+      assert.deepEqual(peekPendingCardComments(card.id), [], 'dismiss reclaimed the parked rows');
+    } },
+  ]);
 });
 
-// m3: dismiss is terminal — the card's parked comment ids can never reach a run,
-// so the route drops them exactly where the launch path does (ui/server.mjs:1155).
-// Nothing reads ask_card_comments back through the API, so assert via the store.
-test("dismiss clears the card's pending comment ids (the launch path's only other consumer)", async () => {
-  const { seedPipeline } = await import('./helpers/db-seed.mjs');
-  const { addDiffComment, setPendingCardComments, peekPendingCardComments } =
-    await import('../src/core/diff-comments.mjs');
-  const { writeFile } = await import('node:fs/promises');
-  const PATCH = 'diff --git a/a.js b/a.js\n--- a/a.js\n+++ b/a.js\n@@ -1 +1 @@\n-a\n+b\n';
-  const seeded = await seedPipeline(projectDir, { title: 'Prior run', status: 'done' });
-  await writeFile(join(seeded.dir, 'diff-patch.patch'), PATCH, 'utf8');
-  const comment = addDiffComment({ storeKey: seeded.key, pipelineId: seeded.id, patchText: PATCH,
-    path: 'a.js', side: 'new', line: 1, body: 'fix me', author: 'user' });
-
-  const { thread, card } = await proposeCard({ projectKey }, 'propose one to dismiss');
-  assert.ok(card);
-  assert.equal(setPendingCardComments(card.id, [comment.id]), 1);
-  const res = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'dismissed' });
-  assert.equal(res.status, 200);
-  assert.equal((await res.json()).block.state, 'dismissed');
-  assert.deepEqual(peekPendingCardComments(card.id), [], 'dismiss reclaimed the parked rows');
-});
-
-test('R-B: dismissing WHILE the turn still streams survives finishMessage (live reducer re-emits)', async () => {
+test('R-B: dismissing WHILE the turn still streams survives finishMessage (live reducer re-emits)', async (tc) => {
+  const release = holdMockTurn(tc, isToolResult);
   const t = await newThread();
   const w = openWs(`?threadId=${t.id}`);
   await w.opened;
   await post(`/api/ask/threads/${t.id}/messages`, { text: 'MOCK_SLOW propose something', ...MODEL, context: { projectKey } });
   const cardFrame = await waitFor(() => frames(w.msgs, t.id, 'ask-card')[0]);
   assert.equal(cardFrame.block.state, 'proposed');
+  await waitFor(() => release.reached() >= 1);
+  assert.equal(frames(w.msgs, t.id, 'ask-done').length, 0, 'the held turn still streams');
   const flip = await post(`/api/ask/threads/${t.id}/cards/${cardFrame.block.id}`, { state: 'dismissed' });
   assert.equal(flip.status, 200);
   const reEmit = await waitFor(() => frames(w.msgs, t.id, 'ask-card').find((f) => f.block.state === 'dismissed'));
   assert.ok(reEmit.seq > cardFrame.seq, 'the live reducer re-emitted the flipped card as a job frame');
+  release();
   await waitFor(() => frames(w.msgs, t.id, 'ask-done').length >= 1);
   const snap = await snapshot(t.id);
   const block = snap.messages.flatMap((m) => m.blocks || []).find((b) => b.kind === 'card');
@@ -354,31 +363,61 @@ test('R-B: dismissing WHILE the turn still streams survives finishMessage (live 
   w.ws.close();
 });
 
-test('resolveAskContext: the workspace members line carries the member names (§6.5)', async () => {
-  // Pins the C1 fresh-eyes fix: readWorkspace has NO `projects` field — members
-  // come from projectPaths basenames. Without the fix this is always [].
-  const t = await newThread();
-  const ctx = await mod._testing.resolveAskContext(t.id, { workspaceId }, []);
-  assert.equal(ctx.workspace.id, workspaceId);
-  assert.ok(ctx.workspace.members.length >= 2, 'both member names resolved');
-  for (const m of ctx.workspace.members) assert.equal(typeof m, 'string');
+test('resolveAskContext: workspace members line carries names; no deployment line locally, a container adds it; signedIn only from the caller', async () => {
+  await checkRows([
+    { name: 'resolveAskContext: the workspace members line carries the member names (§6.5)', run: async () => {
+      // Pins the C1 fresh-eyes fix: readWorkspace has NO `projects` field — members
+      // come from projectPaths basenames. Without the fix this is always [].
+      const t = await newThread();
+      const ctx = await mod._testing.resolveAskContext(t.id, { workspaceId }, []);
+      assert.equal(ctx.workspace.id, workspaceId);
+      assert.ok(ctx.workspace.members.length >= 2, 'both member names resolved');
+      for (const m of ctx.workspace.members) assert.equal(typeof m, 'string');
+    } },
+    { name: 'resolveAskContext: no deployment line locally; a container adds it; signedIn comes only from the caller', run: async () => {
+      const t = await newThread();
+      const local = await mod._testing.resolveAskContext(t.id, {}, []);
+      assert.equal(local.deployment, undefined, 'a local install: the header is unchanged');
+      assert.equal(local.signedIn, undefined);
+      const prev = process.env.WORCA_CONTAINER;
+      process.env.WORCA_CONTAINER = '1';
+      try {
+        const c = await mod._testing.resolveAskContext(t.id, { signedIn: 'forged@example.com' }, [], null, { signedIn: 'ada@example.com' });
+        assert.equal(c.deployment.deployment, 'container');
+        assert.equal(typeof c.deployment.projectsRoot, 'string');
+        assert.equal(c.signedIn, 'ada@example.com', 'the verified identity, not a client context key');
+      } finally {
+        if (prev === undefined) delete process.env.WORCA_CONTAINER; else process.env.WORCA_CONTAINER = prev;
+      }
+    } },
+  ]);
 });
 
-test('resolveAskContext: no deployment line locally; a container adds it; signedIn comes only from the caller', async () => {
-  const t = await newThread();
-  const local = await mod._testing.resolveAskContext(t.id, {}, []);
-  assert.equal(local.deployment, undefined, 'a local install: the header is unchanged');
-  assert.equal(local.signedIn, undefined);
-  const prev = process.env.WORCA_CONTAINER;
-  process.env.WORCA_CONTAINER = '1';
-  try {
-    const c = await mod._testing.resolveAskContext(t.id, { signedIn: 'forged@example.com' }, [], null, { signedIn: 'ada@example.com' });
-    assert.equal(c.deployment.deployment, 'container');
-    assert.equal(typeof c.deployment.projectsRoot, 'string');
-    assert.equal(c.signedIn, 'ada@example.com', 'the verified identity, not a client context key');
-  } finally {
-    if (prev === undefined) delete process.env.WORCA_CONTAINER; else process.env.WORCA_CONTAINER = prev;
-  }
+// The whitelist in ui/server.mjs resolveAskContext: every summary-typed card is listed by type, state
+// and summary (one row per type; the four per-file "the context header lists a <type> card" tests were
+// copies of it). One thread per row: the header keeps only the last ASK_LIMITS.headerCards cards.
+test('resolveAskContext: every summary-typed card (metrics, policy, clone, web, workspace, actions, away, schedule) is listed by type + summary', async () => {
+  const store = await import('../src/core/ask/store.mjs');
+  const SUMMARIES = {
+    metrics: 'Turn "Include my runs" off for demo',
+    policy: 'Publish the team policy for Team',
+    clone: 'Clone acme/headered as project headered',
+    web: 'Read headered.example',
+    workspace: 'Rename for the header',
+    actions: 'Change the actions of p',
+    away: 'Which runs: All runs',
+    schedule: 'Run Daily triage every weekday at 09:00',
+  };
+  await checkRows(Object.entries(SUMMARIES).map(([type, summary], i) => ({
+    name: `the context header lists ${/^[aeiou]/.test(type) ? 'an' : 'a'} ${type} card by its summary`,
+    run: async () => {
+      const t = await newThread();
+      const id = `card_0000aa0${i}`;
+      store.appendMessage(t.id, { role: 'assistant', text: '', status: 'done', blocks: [{ kind: 'card', id, state: 'proposed', card: { type, summary } }] });
+      const ctx = await mod._testing.resolveAskContext(t.id, {}, []);
+      assert.deepEqual((ctx.cards || []).find((c) => c.id === id), { id, type, state: 'proposed', summary }, JSON.stringify(ctx.cards));
+    },
+  })));
 });
 
 test('rejected proposal (no valid target in context) → notice, no card', async () => {

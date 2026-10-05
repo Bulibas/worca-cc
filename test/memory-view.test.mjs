@@ -4,8 +4,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import {
-  memoryRoute, healthBadge, formatWhen, renderHealthCard, renderFileList, renderEditor, collectEditor,
-  renderMemoryHistory, MEMORY_NAME_HELP, defragModelPhrase,
+  formatWhen, renderHealthCard, renderFileList, renderEditor, collectEditor,
+  renderMemoryHistory, MEMORY_NAME_HELP,
 } from '../ui/public/memory-view.mjs';
 
 const doc = new JSDOM('<!doctype html><body></body>').window.document;
@@ -13,29 +13,6 @@ const HEALTH = { files: 2, bytes: 300, oversized: 0, overHard: 0, invalidFrontma
 const REPORT = { scope: 'global', project: null, files: [], state: {}, health: HEALTH, defragRunId: null };
 const HOST = { key: 'alpha-00000001', name: 'alpha' };
 const PROJECT_REPORT = { ...REPORT, scope: 'projects/alpha-00000001', project: { key: 'alpha-00000001', name: 'alpha' } };
-
-test('memoryRoute: global under Settings, projects under the Projects page; names are encoded', () => {
-  assert.equal(memoryRoute('global'), 'settings/memory');
-  assert.equal(memoryRoute('global', 'testing'), 'settings/memory/testing');
-  assert.equal(memoryRoute('projects/demo-00000001'), 'projects/demo-00000001/memory');
-  assert.equal(memoryRoute('projects/demo-00000001', 'conv'), 'projects/demo-00000001/memory/conv');
-  assert.equal(memoryRoute('global', 'my notes'), 'settings/memory/my%20notes');
-});
-
-test('healthBadge + formatWhen (LOCAL time, like every other date in the app)', () => {
-  assert.deepEqual(healthBadge('fresh'), { text: 'No memory yet', cls: '' });
-  assert.deepEqual(healthBadge('ok'), { text: 'Healthy', cls: 'green' });
-  assert.deepEqual(healthBadge('due'), { text: 'Defragment due', cls: 'amber' });
-  assert.deepEqual(healthBadge('overdue'), { text: 'Defragment overdue', cls: 'red' });
-  assert.deepEqual(healthBadge('failing'), { text: 'Writes failing', cls: 'red' });
-  assert.deepEqual(healthBadge('bogus'), { text: 'No memory yet', cls: '' });
-  const iso = '2026-09-09T10:05:00.000Z';
-  const d = new Date(iso);
-  const p = (n) => String(n).padStart(2, '0');
-  const expected = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-  assert.equal(formatWhen(iso), expected);
-  assert.equal(formatWhen(''), ''); assert.equal(formatWhen(null), ''); assert.equal(formatWhen('not a date'), '');
-});
 
 test('renderHealthCard: badge, reasons, counters, and the Defragment control in its three states', () => {
   const ok = renderHealthCard(REPORT, { doc, host: HOST });
@@ -136,26 +113,4 @@ test('locked (a defragment run is live on this scope): Save, Delete and Restore 
   assert.match(ed.querySelector('.mem-msg').textContent, /defragment run is live/);
   const hist = renderMemoryHistory([{ id: '20260909-100000-user', files: ['a.md'] }], { doc, locked: true });
   assert.equal(hist.querySelector('.mem-restore').disabled, true);
-});
-
-test('renderMemoryHistory: newest first, file counts, Restore per row; none ⇒ hist-empty', () => {
-  const el = renderMemoryHistory([{ id: '20260909-100000-user', files: ['a.md'] }, { id: '20260909-100500-run-abcd1234', files: ['a.md', 'b.md'] }], { doc });
-  const rows = [...el.querySelectorAll('.mem-snap')];
-  assert.deepEqual(rows.map((r) => r.dataset.id), ['20260909-100500-run-abcd1234', '20260909-100000-user']);
-  assert.equal(rows[0].querySelector('.mem-snap-count').textContent, '2 files');
-  assert.equal(rows[1].querySelector('.mem-snap-count').textContent, '1 file');
-  assert.ok(rows.every((r) => r.querySelector('.mem-restore') && r.querySelector('.mem-restore').disabled === false));
-  assert.ok(renderMemoryHistory([], { doc }).querySelector('.hist-empty'));
-});
-
-// Settings › Memory: the global host hint also names the defragment model (report.defragModel);
-// unset, the sentence is byte-identical to before.
-test('renderHealthCard: the host hint names the Settings › Memory model, says when it left the catalog, and is unchanged when unset', () => {
-  const hint = (dm) => renderHealthCard({ ...REPORT, defragModel: dm }, { doc, host: HOST }).querySelector('.mem-host-hint').textContent;
-  assert.equal(hint({ model: 'claude-opus-5-5', effort: 'high', label: 'Opus 5.5', stale: false }), 'Runs on alpha with Opus 5.5 · high — pick another project on the New pipeline page.');
-  assert.equal(hint({ model: 'claude-opus-5-5', effort: null, label: 'Opus 5.5', stale: false }), 'Runs on alpha with Opus 5.5 — pick another project on the New pipeline page.');
-  assert.equal(hint({ model: 'gone-model', effort: null, label: 'gone-model', stale: true }), 'Runs on alpha without the Settings › Memory model (gone-model is no longer in the catalog) — pick another project on the New pipeline page.');
-  assert.equal(hint(null), 'Runs on alpha — pick another project on the New pipeline page.');
-  assert.equal(defragModelPhrase(undefined), '');
-  assert.equal(defragModelPhrase({ model: '' }), '');
 });

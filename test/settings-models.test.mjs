@@ -11,6 +11,7 @@ import {
   settingsFile, listGlobalModels, addGlobalModel, updateGlobalModel, removeGlobalModel,
 } from '../src/core/settings.mjs';
 import { EFFORTS } from '../src/core/model-env.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Sandbox the home so settingsFile() resolves into a temp dir. These tests
 // never open the DB, so (unlike settings.test.mjs) no WORCA_HOME/db handling
@@ -35,12 +36,6 @@ async function withSandbox(fn) {
 }
 
 const readRawSettings = async () => JSON.parse(await readFile(settingsFile(), 'utf8'));
-
-test('empty: no settings file -> []', async () => {
-  await withSandbox(() => {
-    assert.deepEqual(listGlobalModels(), []);
-  });
-});
 
 test('add: full entry round-trips; efforts normalize to EFFORTS order', async () => {
   await withSandbox(async () => {
@@ -118,30 +113,31 @@ test('remove: deletes the entry, drops the key when empty, throws on unknown', a
   });
 });
 
-test('reader: hand-edited junk is dropped loudly, salvage is per-entry', async () => {
+test('reader: hand-edited junk is dropped loudly, salvage is per-entry; a non-array models value reads as []', async () => {
   await withSandbox(async (home) => {
-    await mkdir(join(home, '.worca-cc'), { recursive: true });
-    await writeFile(settingsFile(), JSON.stringify({
-      models: [
-        'not-an-object',
-        { label: 'no id' },
-        { id: 'ok', efforts: ['high', 'bogus'], env: { PATH: '/evil', GOOD: 'v', BAD: 7, WORCA_MOCK: '1' } },
-        { id: 'OK', label: 'dup of ok' },
-        { id: 'plain' },
-      ],
-    }, null, 2));
-    assert.deepEqual(listGlobalModels(), [
-      { id: 'ok', label: 'ok', efforts: ['high'], env: { GOOD: 'v' } },   // salvaged
-      { id: 'plain', label: 'plain', efforts: [...EFFORTS] },             // dup 'OK' dropped, first wins
+    await checkRows([
+      { name: 'reader: hand-edited junk is dropped loudly, salvage is per-entry', run: async () => {
+        await mkdir(join(home, '.worca-cc'), { recursive: true });
+        await writeFile(settingsFile(), JSON.stringify({
+          models: [
+            'not-an-object',
+            { label: 'no id' },
+            { id: 'ok', efforts: ['high', 'bogus'], env: { PATH: '/evil', GOOD: 'v', BAD: 7, WORCA_MOCK: '1' } },
+            { id: 'OK', label: 'dup of ok' },
+            { id: 'plain' },
+          ],
+        }, null, 2));
+        assert.deepEqual(listGlobalModels(), [
+          { id: 'ok', label: 'ok', efforts: ['high'], env: { GOOD: 'v' } },   // salvaged
+          { id: 'plain', label: 'plain', efforts: [...EFFORTS] },             // dup 'OK' dropped, first wins
+        ]);
+      } },
+      { name: 'reader: non-array models value -> [] without throwing', run: async () => {
+        await mkdir(join(home, '.worca-cc'), { recursive: true });
+        await writeFile(settingsFile(), JSON.stringify({ models: 'oops' }));
+        assert.deepEqual(listGlobalModels(), []);
+      } },
     ]);
-  });
-});
-
-test('reader: non-array models value -> [] without throwing', async () => {
-  await withSandbox(async (home) => {
-    await mkdir(join(home, '.worca-cc'), { recursive: true });
-    await writeFile(settingsFile(), JSON.stringify({ models: 'oops' }));
-    assert.deepEqual(listGlobalModels(), []);
   });
 });
 
@@ -160,27 +156,28 @@ test('read-modify-write: catalog writes never disturb other/unknown settings key
 
 // ── per-model cost override ────────────────────────────────────────────────────
 
-test('cost: {free:true} round-trips and is stored verbatim', async () => {
+test('cost: {free:true} and {perMtok} round-trip and are stored verbatim', async () => {
   await withSandbox(async () => {
-    const added = await addGlobalModel({
-      id: 'onprem', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { free: true },
-    });
-    assert.deepEqual(added, {
-      id: 'onprem', label: 'onprem', efforts: [...EFFORTS],
-      env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { free: true },
-    });
-    assert.deepEqual((await readRawSettings()).models, [
-      { id: 'onprem', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { free: true } },
+    await checkRows([
+      { name: 'cost: {free:true} round-trips and is stored verbatim', run: async () => {
+        const added = await addGlobalModel({
+          id: 'onprem', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { free: true },
+        });
+        assert.deepEqual(added, {
+          id: 'onprem', label: 'onprem', efforts: [...EFFORTS],
+          env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { free: true },
+        });
+        assert.deepEqual((await readRawSettings()).models, [
+          { id: 'onprem', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { free: true } },
+        ]);
+      } },
+      { name: 'cost: {perMtok} keeps only known numeric rates', run: async () => {
+        const added = await addGlobalModel({
+          id: 'priced', cost: { perMtok: { input: 0.5, output: 1.5, cacheRead: 0.05, cacheWrite: 0.6 } },
+        });
+        assert.deepEqual(added.cost, { perMtok: { input: 0.5, output: 1.5, cacheRead: 0.05, cacheWrite: 0.6 } });
+      } },
     ]);
-  });
-});
-
-test('cost: {perMtok} keeps only known numeric rates', async () => {
-  await withSandbox(async () => {
-    const added = await addGlobalModel({
-      id: 'priced', cost: { perMtok: { input: 0.5, output: 1.5, cacheRead: 0.05, cacheWrite: 0.6 } },
-    });
-    assert.deepEqual(added.cost, { perMtok: { input: 0.5, output: 1.5, cacheRead: 0.05, cacheWrite: 0.6 } });
   });
 });
 

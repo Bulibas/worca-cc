@@ -11,6 +11,7 @@ import { join } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 import { gitDir } from './helpers/git-dir.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { _resetForTests as closeDbForTests } from '../src/core/db.mjs';
 
 useTempHome(after);
@@ -75,12 +76,24 @@ async function seedCard(card) {
 }
 const realCard = async (input) => { const r = await validateAwayChange(input); assert.equal(r.ok, true, JSON.stringify(r)); return r.card; };
 
-test('Keep as is (declined) leaves the settings untouched', async () => {
-  const { threadId, cardId } = await seedCard(await realCard({ level: 'user', set: { graceMinutes: 12 } }));
-  const r = await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'declined' });
-  assert.equal(r.status, 200, await r.clone().text());
-  assert.equal((await r.json()).block.state, 'declined');
-  assert.equal((await get('/api/away-mode')).user.graceMinutes, undefined);
+test('declined, or applied with an unknown project: the card does not apply and nothing is written', async () => {
+  await checkRows([
+    { name: 'Keep as is (declined) leaves the settings untouched', run: async () => {
+      const { threadId, cardId } = await seedCard(await realCard({ level: 'user', set: { graceMinutes: 12 } }));
+      const r = await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'declined' });
+      assert.equal(r.status, 200, await r.clone().text());
+      assert.equal((await r.json()).block.state, 'declined');
+      assert.equal((await get('/api/away-mode')).user.graceMinutes, undefined);
+    } },
+    { name: 'a project card with an unknown project fails, and nothing is written', run: async () => {
+      const before = await get('/api/away-mode');
+      const { threadId, cardId } = await seedCard({ type: 'away', level: 'project', projectKey: 'nope-00000000', projectName: null, set: { enabled: true }, unset: [], changes: [], summary: 'Which runs: All runs', before: [], after: [], note: '' });
+      const j = await (await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied' })).json();
+      assert.equal(j.block.state, 'failed');
+      assert.match(j.block.error, /unknown project "nope-00000000"/);
+      assert.deepEqual((await get('/api/away-mode')).user, before.user);
+    } },
+  ]);
 });
 
 test('a user-level card applied writes the user layer; GET /api/away-mode shows it', async () => {
@@ -91,15 +104,6 @@ test('a user-level card applied writes the user layer; GET /api/away-mode shows 
   assert.equal(j.block.state, 'applied');
   assert.match(j.block.card.result.detail, /^(Right now|No away hours)/);
   assert.equal((await get('/api/away-mode')).config.enabled, true);
-});
-
-test('a project card with an unknown project fails, and nothing is written', async () => {
-  const before = await get('/api/away-mode');
-  const { threadId, cardId } = await seedCard({ type: 'away', level: 'project', projectKey: 'nope-00000000', projectName: null, set: { enabled: true }, unset: [], changes: [], summary: 'Which runs: All runs', before: [], after: [], note: '' });
-  const j = await (await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied' })).json();
-  assert.equal(j.block.state, 'failed');
-  assert.match(j.block.error, /unknown project "nope-00000000"/);
-  assert.deepEqual((await get('/api/away-mode')).user, before.user);
 });
 
 test('a project-level card writes under the key the reader uses', async () => {

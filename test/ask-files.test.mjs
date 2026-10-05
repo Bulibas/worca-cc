@@ -14,6 +14,7 @@ import {
   ASK_FILE_MIMES, sniffMime, refusePathShape, mimeMatchesAccept, isInside,
   snapshotAskFiles, readAskFileEntry,
 } from '../src/core/ask-files.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const dirs = [];
 async function tmp() { const d = await mkdtemp(join(tmpdir(), 'worca-cc-askfiles-')); dirs.push(d); return d; }
@@ -25,44 +26,87 @@ const PDF = Buffer.from('%PDF-1.7\n1 0 obj\n', 'latin1');
 const SVG = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>', 'utf8');
 const HTML = Buffer.from('<!doctype html><html><script>alert(1)</script></html>', 'utf8');
 
-test('sniffMime: magic bytes decide, the extension never does', () => {
-  assert.equal(sniffMime(PNG), 'image/png');
-  assert.equal(sniffMime(GIF), 'image/gif');
-  assert.equal(sniffMime(PDF), 'application/pdf');
-  assert.equal(sniffMime(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16])), 'image/jpeg');
-  assert.equal(sniffMime(Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP')])), 'image/webp');
+test('sniffMime binary probes: magic bytes decide (never the extension); only MP4-family ISO-BMFF is video/mp4; MPEG audio needs a Layer III frame sync', async () => {
+  await checkRows([
+    { name: 'sniffMime: magic bytes decide, the extension never does', run: () => {
+      assert.equal(sniffMime(PNG), 'image/png');
+      assert.equal(sniffMime(GIF), 'image/gif');
+      assert.equal(sniffMime(PDF), 'application/pdf');
+      assert.equal(sniffMime(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16])), 'image/jpeg');
+      assert.equal(sniffMime(Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP')])), 'image/webp');
+    } },
+    { name: 'sniffMime: ISO-BMFF — only MP4-family brands are video/mp4; HEIC, QuickTime and M4A are refused', run: () => {
+      const bmff = (brand) => Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from(`ftyp${brand}`, 'latin1'), Buffer.alloc(8)]);
+      for (const ok of ['isom', 'iso2', 'mp41', 'mp42', 'avc1', 'dash', 'M4V ']) assert.equal(sniffMime(bmff(ok)), 'video/mp4', ok);
+      for (const no of ['heic', 'heix', 'mif1', 'qt  ', 'M4A ', '3gp4', 'zzzz']) assert.equal(sniffMime(bmff(no)), null, no);
+      assert.equal(sniffMime(bmff('avif')), 'image/avif');
+    } },
+    { name: 'sniffMime: MPEG audio needs a Layer III frame sync — a UTF-16 BOM or an FF-FF run is not an mp3 (F25)', run: () => {
+      for (const ok of [[0xff, 0xfb, 0x90], [0xff, 0xf3, 0x90], [0xff, 0xe3, 0x90], [0xff, 0xfa, 0x90]]) {
+        assert.equal(sniffMime(Buffer.from([...ok, 0, 0, 0, 0, 0])), 'audio/mpeg', ok.map((b) => b.toString(16)).join(' '));
+      }
+      assert.equal(sniffMime(Buffer.from('ID3', 'latin1')), 'audio/mpeg', 'an ID3v2 tag still is');
+      assert.equal(sniffMime(Buffer.from([0xff, 0xfe, 0x68, 0x00, 0x69, 0x00, 0x0a, 0x00])), null,
+        'a UTF-16LE BOM is neither text worca reads (not UTF-8) nor audio — it was labelled audio/mpeg by the bare sync');
+      assert.equal(sniffMime(Buffer.from([0xff, 0xff, 0xff, 0xff, 0, 0])), null, 'an FF run has no layer bits');
+      assert.equal(sniffMime(Buffer.from([0xff, 0xfe, 0x90, 0, 0, 0, 0, 0])), null, 'Layer I is not a type worca plays');
+      assert.equal(sniffMime(Buffer.from([0xff, 0xfb, 0xf0, 0, 0, 0, 0, 0])), null, 'bitrate index 1111 is invalid');
+      assert.equal(sniffMime(Buffer.from([0xff, 0xfb, 0x9c, 0, 0, 0, 0, 0])), null, 'sampling-rate index 11 is reserved');
+    } },
+  ]);
 });
 
-test('sniffMime: the TEXT probes (E9) — svg, json, diff, plain; MARKUP is refused', () => {
-  assert.equal(sniffMime(SVG), 'image/svg+xml');
-  assert.equal(sniffMime(Buffer.from('<?xml version="1.0"?><svg/>', 'utf8')), 'image/svg+xml');
-  assert.equal(sniffMime(Buffer.from('{"a":1}', 'utf8')), 'application/json');
-  assert.equal(sniffMime(Buffer.from('diff --git a/x b/x\n--- a/x\n+++ b/x\n', 'utf8')), 'text/x-diff');
-  assert.equal(sniffMime(Buffer.from('# Title\n\nsome prose\n', 'utf8')), 'text/plain');
-  assert.equal(sniffMime(HTML), null, 'scriptable markup is REFUSED (§7 "Refused" row)');
-  assert.equal(sniffMime(Buffer.from('<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"/>', 'utf8')), null,
-    'an XML prolog is not a licence: xhtml is markup, not an image');
-  assert.equal(sniffMime(Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0])), 'video/webm', 'EBML magic');
-  assert.equal(sniffMime(Buffer.from([0x00, 0x01, 0x02, 0x03, 0x04, 0x05])), null, 'binary with no known magic');
-});
-
-test('sniffMime: SVG is decided by the ROOT element, through any prelude (F23)', () => {
-  const svg = 'image/svg+xml';
-  assert.equal(sniffMime(Buffer.from('<!-- Generator: Adobe Illustrator -->\n<svg xmlns="http://www.w3.org/2000/svg"/>', 'utf8')), svg,
-    'a comment before the root is how most exporters open a file');
-  assert.equal(sniffMime(Buffer.from('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" '
-    + '"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" [\n <!ENTITY ns_flows "http://ns.adobe.com/Flows/1.0/">\n]>\n<svg/>', 'utf8')), svg,
-    'a prolog, a DOCTYPE with an internal subset, then the root');
-  assert.equal(sniffMime(Buffer.from('<?xml version="1.0"?>\n<!-- x -->\n<svg:svg xmlns:svg="http://www.w3.org/2000/svg"/>', 'utf8')), svg,
-    'a prefixed root is still svg');
-  assert.equal(sniffMime(Buffer.from('<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><svg/></body></html>', 'utf8')), null,
-    'an XHTML document that merely CONTAINS an svg is markup — §7 refuses xhtml, whatever prolog it wears');
-  assert.equal(sniffMime(Buffer.from('<!DOCTYPE html><svg/>', 'utf8')), null, 'an html DOCTYPE names the document, whatever follows');
-  assert.equal(sniffMime(Buffer.from('<!-- open --><html/>', 'utf8')), null, 'a comment is not a licence either');
-  assert.equal(sniffMime(Buffer.from('<?xml version="1.0"?>', 'utf8')), null, 'a prolog with no root is unrecognized');
-  assert.equal(sniffMime(Buffer.from('42', 'utf8')), 'text/plain', 'a body shorter than any magic number is still text');
-  assert.equal(sniffMime(Buffer.alloc(0)), null, 'an empty body is unrecognized');
-  assert.equal(sniffMime(Buffer.from('  \n', 'utf8')), null, 'so is a blank one');
+test('sniffMime text probes: svg by ROOT element through any prelude, json/diff/plain, markup refused, a comment/prolog before prose is text', async () => {
+  await checkRows([
+    { name: 'sniffMime: the TEXT probes (E9) — svg, json, diff, plain; MARKUP is refused', run: () => {
+      assert.equal(sniffMime(SVG), 'image/svg+xml');
+      assert.equal(sniffMime(Buffer.from('<?xml version="1.0"?><svg/>', 'utf8')), 'image/svg+xml');
+      assert.equal(sniffMime(Buffer.from('{"a":1}', 'utf8')), 'application/json');
+      assert.equal(sniffMime(Buffer.from('diff --git a/x b/x\n--- a/x\n+++ b/x\n', 'utf8')), 'text/x-diff');
+      assert.equal(sniffMime(Buffer.from('# Title\n\nsome prose\n', 'utf8')), 'text/plain');
+      assert.equal(sniffMime(HTML), null, 'scriptable markup is REFUSED (§7 "Refused" row)');
+      assert.equal(sniffMime(Buffer.from('<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"/>', 'utf8')), null,
+        'an XML prolog is not a licence: xhtml is markup, not an image');
+      assert.equal(sniffMime(Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0])), 'video/webm', 'EBML magic');
+      assert.equal(sniffMime(Buffer.from([0x00, 0x01, 0x02, 0x03, 0x04, 0x05])), null, 'binary with no known magic');
+    } },
+    { name: 'sniffMime: SVG is decided by the ROOT element, through any prelude (F23)', run: () => {
+      const svg = 'image/svg+xml';
+      assert.equal(sniffMime(Buffer.from('<!-- Generator: Adobe Illustrator -->\n<svg xmlns="http://www.w3.org/2000/svg"/>', 'utf8')), svg,
+        'a comment before the root is how most exporters open a file');
+      assert.equal(sniffMime(Buffer.from('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" '
+        + '"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" [\n <!ENTITY ns_flows "http://ns.adobe.com/Flows/1.0/">\n]>\n<svg/>', 'utf8')), svg,
+        'a prolog, a DOCTYPE with an internal subset, then the root');
+      assert.equal(sniffMime(Buffer.from('<?xml version="1.0"?>\n<!-- x -->\n<svg:svg xmlns:svg="http://www.w3.org/2000/svg"/>', 'utf8')), svg,
+        'a prefixed root is still svg');
+      assert.equal(sniffMime(Buffer.from('<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><svg/></body></html>', 'utf8')), null,
+        'an XHTML document that merely CONTAINS an svg is markup — §7 refuses xhtml, whatever prolog it wears');
+      assert.equal(sniffMime(Buffer.from('<!DOCTYPE html><svg/>', 'utf8')), null, 'an html DOCTYPE names the document, whatever follows');
+      assert.equal(sniffMime(Buffer.from('<!-- open --><html/>', 'utf8')), null, 'a comment is not a licence either');
+      assert.equal(sniffMime(Buffer.from('<?xml version="1.0"?>', 'utf8')), null, 'a prolog with no root is unrecognized');
+      assert.equal(sniffMime(Buffer.from('42', 'utf8')), 'text/plain', 'a body shorter than any magic number is still text');
+      assert.equal(sniffMime(Buffer.alloc(0)), null, 'an empty body is unrecognized');
+      assert.equal(sniffMime(Buffer.from('  \n', 'utf8')), null, 'so is a blank one');
+    } },
+    { name: 'sniffMime: a comment or prolog before PROSE is text, not markup — a markdown file may open with an HTML comment (F24)', run: async () => {
+      assert.equal(sniffMime(Buffer.from('<!-- markdownlint-disable -->\n# Notes\n\nprose\n', 'utf8')), 'text/plain');
+      assert.equal(sniffMime(Buffer.from('<!-- a -->\n<!-- b -->\nplain\n', 'utf8')), 'text/plain', 'any number of comments');
+      assert.equal(sniffMime(Buffer.from('<!-- a -->\n<p>markup</p>', 'utf8')), null, 'an element after the prelude is still markup');
+      assert.equal(sniffMime(Buffer.from('<!-- a -->\n<?php echo 1; ?>', 'utf8')), null, 'a non-element after the prelude is not prose');
+      assert.equal(sniffMime(Buffer.from('<!-- only a comment -->', 'utf8')), null, 'a prelude with nothing after it is unrecognized');
+      assert.equal(sniffMime(Buffer.from('<3 this design\n', 'utf8')), null, 'a bare "<" that opens no element is not classified either way');
+      // The on-disk path: the head-only binary pass must not pre-empt the full-body text probe.
+      const work = await tmp();
+      const pipe = await tmp();
+      await writeFile(join(work, 'NOTES.md'), '<!-- generated -->\n# Title\n\nbody\n', 'utf8');
+      const { files, errors } = await snapshotAskFiles({
+        refs: [{ path: 'data.notes', rel: 'NOTES.md', accept: ['text/*'] }], roots: [work], destDir: join(pipe, 'ask-files', 'a'),
+      });
+      assert.deepEqual(errors, []);
+      assert.equal(files[0].mime, 'text/plain');
+      assert.equal(files[0].stored, '0.txt');
+    } },
+  ]);
 });
 
 test('ASK_FILE_MIMES: every §7 trust class is represented and every entry has an extension', () => {
@@ -77,21 +121,32 @@ test('ASK_FILE_MIMES: every §7 trust class is represented and every entry has a
   }
 });
 
-test('refusePathShape: WINDOWS semantics, enforced on EVERY platform (E10)', () => {
-  assert.equal(refusePathShape('mockups/a.png'), null);
-  assert.equal(refusePathShape('mockups\\a.png'), null, 'a backslash separator is accepted and normalized');
-  for (const bad of [
-    '', '   ',
-    '/etc/passwd', 'C:\\Windows\\win.ini', 'C:mockups/a.png', '\\\\server\\share\\a.png',
-    '../outside.png', 'a/../../outside.png',
-    'CON', 'con.png', 'nul/a.png', 'a/AUX.txt', 'COM1', 'lpt9.png',
-    'a<b.png', 'a>b.png', 'a|b.png', 'a"b.png', 'a?b.png', 'a*b.png', 'a:b.png',
-    'trailing./a.png', 'trailing /a.png', 'a.png ', 'a.png.',
-    `nul${String.fromCharCode(0)}byte.png`,
-  ]) {
-    assert.ok(refusePathShape(bad), `expected "${bad}" to be refused`);
-    assert.equal(typeof refusePathShape(bad), 'string');
-  }
+test('refusePathShape: Windows semantics on every platform; a control character anywhere is refused and never echoed raw', async () => {
+  await checkRows([
+    { name: 'refusePathShape: WINDOWS semantics, enforced on EVERY platform (E10)', run: () => {
+      assert.equal(refusePathShape('mockups/a.png'), null);
+      assert.equal(refusePathShape('mockups\\a.png'), null, 'a backslash separator is accepted and normalized');
+      for (const bad of [
+        '', '   ',
+        '/etc/passwd', 'C:\\Windows\\win.ini', 'C:mockups/a.png', '\\\\server\\share\\a.png',
+        '../outside.png', 'a/../../outside.png',
+        'CON', 'con.png', 'nul/a.png', 'a/AUX.txt', 'COM1', 'lpt9.png',
+        'a<b.png', 'a>b.png', 'a|b.png', 'a"b.png', 'a?b.png', 'a*b.png', 'a:b.png',
+        'trailing./a.png', 'trailing /a.png', 'a.png ', 'a.png.',
+        `nul${String.fromCharCode(0)}byte.png`,
+      ]) {
+        assert.ok(refusePathShape(bad), `expected "${bad}" to be refused`);
+        assert.equal(typeof refusePathShape(bad), 'string');
+      }
+    } },
+    { name: 'refusePathShape: a CONTROL character anywhere is refused, and the reason never carries it raw', run: () => {
+      for (const bad of ['a\tb.png', 'a\nb.png', 'a.png\r', `a${String.fromCharCode(127)}b.png`, `nul${String.fromCharCode(0)}byte.png`]) {
+        const why = refusePathShape(bad);
+        assert.equal(typeof why, 'string', JSON.stringify(bad));
+        assert.doesNotMatch(why, /[\t\n\r]/, 'the audit line the reason lands on must stay one line');
+      }
+    } },
+  ]);
 });
 
 test('mimeMatchesAccept: globs, exacts, and text/plain standing in for any text/* (E9)', () => {
@@ -234,21 +289,6 @@ test('readAskFileEntry: the route reader — index only, no path input, unknown 
   assert.equal(await readAskFileEntry(dest, 0), null, 'stored must match ^\\d{1,2}\\.[a-z0-9]{1,5}$');
 });
 
-test('refusePathShape: a CONTROL character anywhere is refused, and the reason never carries it raw', () => {
-  for (const bad of ['a\tb.png', 'a\nb.png', 'a.png\r', `a${String.fromCharCode(127)}b.png`, `nul${String.fromCharCode(0)}byte.png`]) {
-    const why = refusePathShape(bad);
-    assert.equal(typeof why, 'string', JSON.stringify(bad));
-    assert.doesNotMatch(why, /[\t\n\r]/, 'the audit line the reason lands on must stay one line');
-  }
-});
-
-test('sniffMime: ISO-BMFF — only MP4-family brands are video/mp4; HEIC, QuickTime and M4A are refused', () => {
-  const bmff = (brand) => Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from(`ftyp${brand}`, 'latin1'), Buffer.alloc(8)]);
-  for (const ok of ['isom', 'iso2', 'mp41', 'mp42', 'avc1', 'dash', 'M4V ']) assert.equal(sniffMime(bmff(ok)), 'video/mp4', ok);
-  for (const no of ['heic', 'heix', 'mif1', 'qt  ', 'M4A ', '3gp4', 'zzzz']) assert.equal(sniffMime(bmff(no)), null, no);
-  assert.equal(sniffMime(bmff('avif')), 'image/avif');
-});
-
 test('snapshotAskFiles: a BACKSLASH-separated rel resolves on every platform (the segments are joined natively)', async () => {
   const work = await tmp();
   const pipe = await tmp();
@@ -261,25 +301,6 @@ test('snapshotAskFiles: a BACKSLASH-separated rel resolves on every platform (th
   assert.equal(files[0].rel, 'mockups\\a.png', 'the agent\'s own string is what the envelope carries');
   assert.equal(files[0].name, 'a.png');
   assert.equal(files[0].stored, '0.png');
-});
-
-test('sniffMime: a comment or prolog before PROSE is text, not markup — a markdown file may open with an HTML comment (F24)', async () => {
-  assert.equal(sniffMime(Buffer.from('<!-- markdownlint-disable -->\n# Notes\n\nprose\n', 'utf8')), 'text/plain');
-  assert.equal(sniffMime(Buffer.from('<!-- a -->\n<!-- b -->\nplain\n', 'utf8')), 'text/plain', 'any number of comments');
-  assert.equal(sniffMime(Buffer.from('<!-- a -->\n<p>markup</p>', 'utf8')), null, 'an element after the prelude is still markup');
-  assert.equal(sniffMime(Buffer.from('<!-- a -->\n<?php echo 1; ?>', 'utf8')), null, 'a non-element after the prelude is not prose');
-  assert.equal(sniffMime(Buffer.from('<!-- only a comment -->', 'utf8')), null, 'a prelude with nothing after it is unrecognized');
-  assert.equal(sniffMime(Buffer.from('<3 this design\n', 'utf8')), null, 'a bare "<" that opens no element is not classified either way');
-  // The on-disk path: the head-only binary pass must not pre-empt the full-body text probe.
-  const work = await tmp();
-  const pipe = await tmp();
-  await writeFile(join(work, 'NOTES.md'), '<!-- generated -->\n# Title\n\nbody\n', 'utf8');
-  const { files, errors } = await snapshotAskFiles({
-    refs: [{ path: 'data.notes', rel: 'NOTES.md', accept: ['text/*'] }], roots: [work], destDir: join(pipe, 'ask-files', 'a'),
-  });
-  assert.deepEqual(errors, []);
-  assert.equal(files[0].mime, 'text/plain');
-  assert.equal(files[0].stored, '0.txt');
 });
 
 test('snapshotAskFiles: a body with no signature over 1 MiB is refused by SIZE, naming the cap — not as an unknown type (F28)', async () => {
@@ -295,17 +316,4 @@ test('snapshotAskFiles: a body with no signature over 1 MiB is refused by SIZE, 
   assert.match(errors[0].message, /1048576/, 'the cap is named');
   assert.match(errors[0].message, /1048577 bytes/, 'so is the size');
   assert.doesNotMatch(errors[0].message, /not a file type/, 'the agent must learn it is the SIZE, so it can pick a smaller file');
-});
-
-test('sniffMime: MPEG audio needs a Layer III frame sync — a UTF-16 BOM or an FF-FF run is not an mp3 (F25)', () => {
-  for (const ok of [[0xff, 0xfb, 0x90], [0xff, 0xf3, 0x90], [0xff, 0xe3, 0x90], [0xff, 0xfa, 0x90]]) {
-    assert.equal(sniffMime(Buffer.from([...ok, 0, 0, 0, 0, 0])), 'audio/mpeg', ok.map((b) => b.toString(16)).join(' '));
-  }
-  assert.equal(sniffMime(Buffer.from('ID3', 'latin1')), 'audio/mpeg', 'an ID3v2 tag still is');
-  assert.equal(sniffMime(Buffer.from([0xff, 0xfe, 0x68, 0x00, 0x69, 0x00, 0x0a, 0x00])), null,
-    'a UTF-16LE BOM is neither text worca reads (not UTF-8) nor audio — it was labelled audio/mpeg by the bare sync');
-  assert.equal(sniffMime(Buffer.from([0xff, 0xff, 0xff, 0xff, 0, 0])), null, 'an FF run has no layer bits');
-  assert.equal(sniffMime(Buffer.from([0xff, 0xfe, 0x90, 0, 0, 0, 0, 0])), null, 'Layer I is not a type worca plays');
-  assert.equal(sniffMime(Buffer.from([0xff, 0xfb, 0xf0, 0, 0, 0, 0, 0])), null, 'bitrate index 1111 is invalid');
-  assert.equal(sniffMime(Buffer.from([0xff, 0xfb, 0x9c, 0, 0, 0, 0, 0])), null, 'sampling-rate index 11 is reserved');
 });

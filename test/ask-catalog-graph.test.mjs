@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shapeWorkflow } from '../src/core/ask/catalog.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const REG = {
   planner: { key: 'planner', displayName: 'Plan', description: 'plans',
@@ -20,22 +21,25 @@ const V2 = { id: 'wf_g', name: 'G', version: 2, domain: 'coding', origin: null,
     { id: 'w3', from: { node: 'n_rev', port: 'review' }, to: { node: 'n_plan', port: 'revise' }, config: { maxCycles: 3 } },
     { id: 'w4', from: { node: 'n_rev', port: 'pass' }, to: { node: 'n_end', port: 'result' } }] };
 
-test('a v2 row shapes into the SAME catalog contract as a v1 one', () => {
-  const s = shapeWorkflow(V2, REG);
-  assert.deepEqual(Object.keys(s), ['id', 'name', 'domain', 'origin', 'steps', 'feedbacks']);
-  assert.deepEqual(s.steps, [
-    [{ nodeId: 'n_plan', key: 'planner', displayName: 'Plan', description: 'plans' }],
-    [{ nodeId: 'n_rev', key: 'reviewer', displayName: 'Review', description: 'reviews' }],
-  ], 'agent nodes only, one group per rank — flow cards are engine plumbing');
-  assert.deepEqual(s.feedbacks, [{ id: 'w3', from: 'n_rev', to: 'n_plan' }]);
-});
-
-test('a v1 row is untouched', () => {
-  const v1 = { id: 'wf_v1', name: 'V1', version: 1, domain: 'coding', origin: null,
-    steps: [[{ id: 's0_0', key: 'planner' }]], feedbacks: [{ id: 'fb_0', from: 's1_0', to: 's0_0', maxCycles: 3 }] };
-  assert.deepEqual(shapeWorkflow(v1, REG), { id: 'wf_v1', name: 'V1', domain: 'coding', origin: null,
-    steps: [[{ nodeId: 's0_0', key: 'planner', displayName: 'Plan', description: 'plans' }]],
-    feedbacks: [{ id: 'fb_0', from: 's1_0', to: 's0_0' }] });
+test('a v2 row shapes into the same catalog contract as a v1 row; a v1 row is untouched', async () => {
+  await checkRows([
+    { name: 'a v2 row shapes into the SAME catalog contract as a v1 one', run: () => {
+      const s = shapeWorkflow(V2, REG);
+      assert.deepEqual(Object.keys(s), ['id', 'name', 'domain', 'origin', 'steps', 'feedbacks']);
+      assert.deepEqual(s.steps, [
+        [{ nodeId: 'n_plan', key: 'planner', displayName: 'Plan', description: 'plans' }],
+        [{ nodeId: 'n_rev', key: 'reviewer', displayName: 'Review', description: 'reviews' }],
+      ], 'agent nodes only, one group per rank — flow cards are engine plumbing');
+      assert.deepEqual(s.feedbacks, [{ id: 'w3', from: 'n_rev', to: 'n_plan' }]);
+    } },
+    { name: 'a v1 row is untouched', run: () => {
+      const v1 = { id: 'wf_v1', name: 'V1', version: 1, domain: 'coding', origin: null,
+        steps: [[{ id: 's0_0', key: 'planner' }]], feedbacks: [{ id: 'fb_0', from: 's1_0', to: 's0_0', maxCycles: 3 }] };
+      assert.deepEqual(shapeWorkflow(v1, REG), { id: 'wf_v1', name: 'V1', domain: 'coding', origin: null,
+        steps: [[{ nodeId: 's0_0', key: 'planner', displayName: 'Plan', description: 'plans' }]],
+        feedbacks: [{ id: 'fb_0', from: 's1_0', to: 's0_0' }] });
+    } },
+  ]);
 });
 
 test('a malformed node or wire never throws the whole catalog', () => {

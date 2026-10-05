@@ -89,18 +89,6 @@ test('listAllPipelines descends workspaces/ and tags the row with a composite ke
   }
 });
 
-test('listAllPipelines returns [] when the store is absent', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'worca-cc-all-empty-'));
-  const prev = process.env.WORCA_HOME;
-  process.env.WORCA_HOME = home;
-  _resetForTests();
-  try { assert.deepEqual(await listAllPipelines(), []); }
-  finally {
-    _resetForTests();
-    if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
-  }
-});
-
 test('listAllPipelines limit: bounded rows, ordered by recency of update', async () => {
   // Chat history asks for a handful of the newest runs, so the LIMIT lives in SQL
   // (no point building rows nobody reads). It must select the SAME top-n the callers

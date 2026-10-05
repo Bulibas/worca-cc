@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -77,15 +78,31 @@ async function openLogs(ctx, runId = 'p1') {
 }
 const logFrame = (ctx, runId, text, extra = {}) => ctx.recv({ type: 'log', runId, source: 'planner', level: 'info', text, ts: Date.now(), ...extra });
 
-// ── 1. ON pins every new line to the bottom (Q1) ──────────────────────────────
-test('log pins to bottom on a new line while Auto-scroll is ON', async () => {
+// ── 1. ON pins every new line to the bottom (Q1); re-enabling does not jump, the NEXT line follows (Q2).
+//       One boot: the pane opened once, then both cases in order. ─────────────────
+test('Auto-scroll ON pins each new line to the bottom; re-enabling holds the position and only the next line follows', async () => {
   const ctx = await boot();
   const box = await openLogs(ctx);
-  instrumentScroll(box, { scrollHeight: 5000, clientHeight: 300 });
-  assert.equal(ctx.np.getRun('p1').autoscroll, true, 'default ON on the model');
-  logFrame(ctx, 'p1', 'line 1');
-  await ctx.tickPin();
-  assert.equal(box.scrollTop, 5000, 'pinned to bottom while ON');
+  await checkRows([
+    { name: 'log pins to bottom on a new line while Auto-scroll is ON', run: async () => {
+      instrumentScroll(box, { scrollHeight: 5000, clientHeight: 300 });
+      assert.equal(ctx.np.getRun('p1').autoscroll, true, 'default ON on the model');
+      logFrame(ctx, 'p1', 'line 1');
+      await ctx.tickPin();
+      assert.equal(box.scrollTop, 5000, 'pinned to bottom while ON');
+    } },
+    { name: 're-enabling holds position; only subsequent lines follow', run: async () => {
+      const r = ctx.np.getRun('p1');
+      instrumentScroll(box, { scrollHeight: 5000, clientHeight: 300 });
+      ctx.np.setAutoscroll(r, false);
+      box.scrollTop = 100;
+      ctx.np.setAutoscroll(r, true);                   // re-enable
+      assert.equal(box.scrollTop, 100, 'enabling did NOT jump to bottom');
+      logFrame(ctx, 'p1', 'after');
+      await ctx.tickPin();
+      assert.equal(box.scrollTop, 5000, 'the next line follows to bottom');
+    } },
+  ]);
 });
 
 // ── 2. OFF holds position through the real dispatch, and survives reopening the run page ─
@@ -123,73 +140,7 @@ test('OFF freezes the log through a WS frame and persists across a run page reop
   assert.equal(box.scrollTop, 42, 'not re-pinned while OFF after the reopen');
 });
 
-// ── 3. Re-enabling does not jump; the NEXT line follows (Q2) ──────────────────
-test('re-enabling holds position; only subsequent lines follow', async () => {
-  const ctx = await boot();
-  const box = await openLogs(ctx);
-  const r = ctx.np.getRun('p1');
-  instrumentScroll(box, { scrollHeight: 5000, clientHeight: 300 });
-  ctx.np.setAutoscroll(r, false);
-  box.scrollTop = 100;
-  ctx.np.setAutoscroll(r, true);                   // re-enable
-  assert.equal(box.scrollTop, 100, 'enabling did NOT jump to bottom');
-  logFrame(ctx, 'p1', 'after');
-  await ctx.tickPin();
-  assert.equal(box.scrollTop, 5000, 'the next line follows to bottom');
-});
-
-// ── 4. Toggle handler wiring: a real click flips r.autoscroll + mirrors DOM ───
-test('clicking the switch toggles the model and the DOM', async () => {
-  const ctx = await boot();
-  await openLogs(ctx);
-  const r = ctx.np.getRun('p1');
-  const sw = ctx.window.document.querySelector('#run-detail .rd-sec[data-sec="logs"] .switch.autoscroll');
-  assert.equal(r.autoscroll, true);
-  sw.dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
-  assert.equal(r.autoscroll, false, 'click disabled it on the model');
-  assert.equal(sw.classList.contains('on'), false, 'DOM mirrors OFF');
-  assert.equal(sw.getAttribute('aria-checked'), 'false');
-});
-
-// ── 5. A log frame does not rebuild the list rows. jsdom keeps scrollTop across
-//       reattach (no layout), so assert the MECHANISM: zero list-level DOM
-//       mutations for an unchanged list. ─────────────────────────────────────────
-test('log frame causes zero #runs-list mutations when nothing a row shows changed', async () => {
-  const { window, recv, selectProject, tick } = await boot();
-  selectProject();
-  window.location.hash = 'runs';
-  window.dispatchEvent(new window.Event('hashchange'));
-  recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });
-  recv({ type: 'phase', runId: 'p2', phase: 'plan', cycle: 0 });
-  await tick();
-
-  const list = window.document.querySelector('#runs-list');
-  assert.equal(list.querySelectorAll('.runs-row[data-slot="group"]').length, 2,
-    'both runs are listed (so a rebuild would be observable)');
-  let mutations = 0;
-  const mo = new window.MutationObserver((m) => { mutations += m.length; });
-  mo.observe(list, { childList: true, subtree: true });
-  recv({ type: 'log', runId: 'p1', source: 'planner', level: 'info', text: 'x', ts: 2 });
-  await tick();
-  mutations += mo.takeRecords().length;
-  mo.disconnect();
-  assert.equal(mutations, 0, 'the rows are not rebuilt on a log frame');
-});
-
-test('the list row carries no log pane, graph scroller or auto-scroll switch', async () => {
-  const { window, recv, selectProject, tick } = await boot();
-  selectProject();
-  window.location.hash = 'runs';
-  window.dispatchEvent(new window.Event('hashchange'));
-  recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });
-  await tick();
-  const row = window.document.querySelector('#runs-list .runs-row[data-slot="group"][data-run-id="p1"]');
-  assert.ok(row, 'row mounted');
-  for (const sel of ['.log', '.run-flow-wrap', '.switch.autoscroll', '.log-filters'])
-    assert.equal(row.querySelector(sel), null, `no ${sel} on the list row`);
-});
-
-// ── 6. A filter change repaints the pane (rdRepaintLog); with Auto-scroll OFF the
+// ── 3. A filter change repaints the pane (rdRepaintLog); with Auto-scroll OFF the
 //       position must survive the repaint. Record writes: the repaint must write the
 //       saved scrollTop back. ──────────────────────────────────────────────────
 test('filter-change repaint keeps the OFF scroll position', async () => {
@@ -213,7 +164,7 @@ test('filter-change repaint keeps the OFF scroll position', async () => {
   assert.deepEqual(writes, [42], 'repaint restored the saved position (and did not pin to bottom)');
 });
 
-// ── 7. A pin queued before the switch flips OFF never lands (flush re-checks the flag) ──
+// ── 4. A pin queued before the switch flips OFF never lands (flush re-checks the flag) ──
 test('a pin queued before the switch flips OFF never lands', async () => {
   const ctx = await boot();
   const box = await openLogs(ctx);

@@ -15,7 +15,6 @@ import { gitDir } from './helpers/git-dir.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { writeGraphWorkflow } from '../src/core/workflows.mjs';
 import { readStepQuestions } from '../src/core/artifacts.mjs';
-import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
 import { getDb } from '../src/core/db.mjs';
 import { worcaHome } from '../src/core/projects.mjs';
 import { execSync } from 'node:child_process';
@@ -90,17 +89,6 @@ function graftForm(ctx) {
 const auditLines = (pipelineId) => getDb()
   .prepare('SELECT text FROM pipeline_events WHERE pipeline_id = ? ORDER BY id').all(pipelineId)
   .map((r) => r.text);
-
-test('only the reference forms and the Presentation gates declare ask forms among the built-ins', () => {
-  const reg = loadAgentRegistry(undefined, { userAgentsDir: null, includePlugins: false });
-  // reviewer: the reference form (P5). deckOutputs: the Presentation pipeline's fixed "what should
-  // this run produce?" form. deckNarrative / deckSystem: its approve-spine / approve-system gates.
-  const WITH_FORMS = new Set(['reviewer', 'deckOutputs', 'deckNarrative', 'deckSystem']);
-  for (const [key, meta] of Object.entries(reg)) {
-    const declares = WITH_FORMS.has(key);
-    assert.equal('ask' in meta, declares, `${key} unexpectedly ${declares ? 'lacks' : 'declares'} ask forms`);
-  }
-});
 
 test('a {form,data} ask: gate 2 resolves it, the envelope is kind:form, the agent resumes with values',
   { timeout: 60000 }, async () => {

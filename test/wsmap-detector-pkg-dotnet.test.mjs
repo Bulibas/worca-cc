@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeWorkspace, runDetector, keysOf, assertEvidence } from './helpers/wsmap-fixtures.mjs';
 import detector from '../src/core/workspace-map/detectors/pkg-dotnet.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const WEB = `<Project Sdk="Microsoft.NET.Sdk.Web">
   <PropertyGroup>
@@ -51,17 +52,19 @@ test('pkg-dotnet: PackageId beats AssemblyName; AssemblyName beats the file name
   assertEvidence(member('billing'), billing);
 });
 
-test('pkg-dotnet: PackageReference in any attribute order and nested Version; Update= and comments ignored; packages.config', async () => {
+test('pkg-dotnet (member web): PackageReference forms and ProjectReference targets', async () => {
   const r = await runDetector(detector, member('web'), ws.members);
-  assert.deepEqual(keysOf(r, 'pkg', 'consumes'), ['nuget:Acme.Money', 'nuget:Billing.Client', 'nuget:EntityFramework', 'nuget:Newtonsoft.Json', 'nuget:Serilog']);
-  assert.equal(r.facts.find((f) => f.key === 'nuget:Acme.Money').line, 9, 'the Include= line of a multi-line tag');
-});
-
-test('pkg-dotnet: ProjectReference into another member (backslashes) targets it; intra-member references are not facts', async () => {
-  const r = await runDetector(detector, member('web'), ws.members);
-  const ref = r.facts.find((f) => f.detail === 'project reference');
-  assert.deepEqual([ref.key, ref.target, ref.line], ['nuget:Billing.Client', 'billing', 18]);
-  assert.ok(!r.facts.some((f) => f.dir === 'consumes' && f.key === 'nuget:Acme.Web.Core'));
+  await checkRows([
+    { name: 'pkg-dotnet: PackageReference in any attribute order and nested Version; Update= and comments ignored; packages.config', run: () => {
+      assert.deepEqual(keysOf(r, 'pkg', 'consumes'), ['nuget:Acme.Money', 'nuget:Billing.Client', 'nuget:EntityFramework', 'nuget:Newtonsoft.Json', 'nuget:Serilog']);
+      assert.equal(r.facts.find((f) => f.key === 'nuget:Acme.Money').line, 9, 'the Include= line of a multi-line tag');
+    } },
+    { name: 'pkg-dotnet: ProjectReference into another member (backslashes) targets it; intra-member references are not facts', run: () => {
+      const ref = r.facts.find((f) => f.detail === 'project reference');
+      assert.deepEqual([ref.key, ref.target, ref.line], ['nuget:Billing.Client', 'billing', 18]);
+      assert.ok(!r.facts.some((f) => f.dir === 'consumes' && f.key === 'nuget:Acme.Web.Core'));
+    } },
+  ]);
 });
 
 test('pkg-dotnet: an MSBuild property name is unresolved; test projects are facts marked test', async () => {

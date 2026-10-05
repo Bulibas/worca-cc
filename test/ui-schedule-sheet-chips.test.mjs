@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { checkRows } from './helpers/rows.mjs';
 
 const sheetPath = fileURLToPath(new URL('../ui/public/schedule-sheet.mjs', import.meta.url));
 const { zonedToUtc, zonedParts } = await import('../src/shared/schedule/recurrence.mjs');
@@ -33,22 +34,24 @@ async function sheetAt(localHour) {
   return { chips, nowMs };
 }
 
-test('before 22:00: In 1 hour, Today 22:00, Tomorrow 02:00, Monday 06:00 — chronological', async () => {
-  const { chips, nowMs } = await sheetAt(9);
-  assert.deepEqual(chips.map((c) => c.label), ['In 1 hour', 'Today 22:00', 'Tomorrow 02:00', 'Monday 06:00']);
-  for (let i = 1; i < chips.length; i++) assert.ok(chips[i].at > chips[i - 1].at, `${chips[i - 1].label} < ${chips[i].label}`);
-  assert.ok(chips.every((c) => c.at > nowMs), 'every chip is in the future');
-});
-
-test('after 22:00: the 22:00 chip is tomorrow\'s and sorts after Tomorrow 02:00; In 1 hour stays first', async () => {
-  const { chips } = await sheetAt(22);
-  assert.deepEqual(chips.map((c) => c.label), ['In 1 hour', 'Tomorrow 02:00', 'Tomorrow 22:00', 'Monday 06:00'].filter((l, i, all) => all.indexOf(l) === i)
-    .sort((a, b) => chips.findIndex((c) => c.label === a) - chips.findIndex((c) => c.label === b)));
-  assert.ok(chips.some((c) => c.label === 'Tomorrow 22:00'), 'a 22:00 chip is always offered');
-  for (let i = 1; i < chips.length; i++) assert.ok(chips[i].at > chips[i - 1].at, `${chips[i - 1].label} < ${chips[i].label}`);
-});
-
-test('at 21:30 "In 1 hour" (22:30) sorts AFTER Today 22:00', async () => {
-  const { chips } = await sheetAt(21);
-  assert.deepEqual(chips.slice(0, 2).map((c) => c.label), ['Today 22:00', 'In 1 hour']);
+test('quick chips stay chronological and in the future at 09:30, 21:30 and 22:30 local', async () => {
+  await checkRows([
+    { name: 'before 22:00: In 1 hour, Today 22:00, Tomorrow 02:00, Monday 06:00 — chronological', run: async () => {
+      const { chips, nowMs } = await sheetAt(9);
+      assert.deepEqual(chips.map((c) => c.label), ['In 1 hour', 'Today 22:00', 'Tomorrow 02:00', 'Monday 06:00']);
+      for (let i = 1; i < chips.length; i++) assert.ok(chips[i].at > chips[i - 1].at, `${chips[i - 1].label} < ${chips[i].label}`);
+      assert.ok(chips.every((c) => c.at > nowMs), 'every chip is in the future');
+    } },
+    { name: 'after 22:00: the 22:00 chip is tomorrow\'s and sorts after Tomorrow 02:00; In 1 hour stays first', run: async () => {
+      const { chips } = await sheetAt(22);
+      assert.deepEqual(chips.map((c) => c.label), ['In 1 hour', 'Tomorrow 02:00', 'Tomorrow 22:00', 'Monday 06:00'].filter((l, i, all) => all.indexOf(l) === i)
+        .sort((a, b) => chips.findIndex((c) => c.label === a) - chips.findIndex((c) => c.label === b)));
+      assert.ok(chips.some((c) => c.label === 'Tomorrow 22:00'), 'a 22:00 chip is always offered');
+      for (let i = 1; i < chips.length; i++) assert.ok(chips[i].at > chips[i - 1].at, `${chips[i - 1].label} < ${chips[i].label}`);
+    } },
+    { name: 'at 21:30 "In 1 hour" (22:30) sorts AFTER Today 22:00', run: async () => {
+      const { chips } = await sheetAt(21);
+      assert.deepEqual(chips.slice(0, 2).map((c) => c.label), ['Today 22:00', 'In 1 hour']);
+    } },
+  ]);
 });

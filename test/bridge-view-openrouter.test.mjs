@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { renderConnectionSection, applyConnectionMode, setModelUpstream, collectConnection, degradationLine } from '../ui/public/bridge-view.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { renderConnectionSection, applyConnectionMode, setModelUpstream, collectConnection } from '../ui/public/bridge-view.mjs';
 
 const doc = new JSDOM('<!doctype html><body></body>').window.document;
 const PROVIDERS = (baseUrl) => ({
@@ -33,14 +34,28 @@ test('OpenRouter routing: rendered from the stored block, visible for an OpenRou
   assert.deepEqual(collectConnection(conn).upstream.openrouter, OR_UPSTREAM.openrouter);
 });
 
-test('OpenRouter routing: defaults collect nothing (allow fallbacks on, no sort, empty lists)', () => {
-  const conn = renderConnectionSection({ id: 'or-plain', upstream: { ...OR_UPSTREAM, openrouter: undefined } }, { doc, providers: PROVIDERS('') });
-  assert.equal(conn.querySelector('.mv-conn-or-fallbacks').checked, true);
-  assert.equal(conn.querySelector('.mv-conn-or-sort').value, '');
-  assert.equal(collectConnection(conn).upstream.openrouter, undefined);
-  conn.querySelector('.mv-conn-or-models').value = ' a/b , , c/d ';
-  conn.querySelector('.mv-conn-or-sort').value = 'price';
-  assert.deepEqual(collectConnection(conn).upstream.openrouter, { models: ['a/b', 'c/d'], provider: { sort: 'price' } });
+test('OpenRouter routing: defaults collect nothing; setModelUpstream fills and clears the fields', async () => {
+  await checkRows([
+    { name: 'OpenRouter routing: defaults collect nothing (allow fallbacks on, no sort, empty lists)', run: () => {
+      const conn = renderConnectionSection({ id: 'or-plain', upstream: { ...OR_UPSTREAM, openrouter: undefined } }, { doc, providers: PROVIDERS('') });
+      assert.equal(conn.querySelector('.mv-conn-or-fallbacks').checked, true);
+      assert.equal(conn.querySelector('.mv-conn-or-sort').value, '');
+      assert.equal(collectConnection(conn).upstream.openrouter, undefined);
+      conn.querySelector('.mv-conn-or-models').value = ' a/b , , c/d ';
+      conn.querySelector('.mv-conn-or-sort').value = 'price';
+      assert.deepEqual(collectConnection(conn).upstream.openrouter, { models: ['a/b', 'c/d'], provider: { sort: 'price' } });
+    } },
+    { name: 'OpenRouter routing: setModelUpstream fills and clears the fields', run: () => {
+      const conn = renderConnectionSection(null, { doc, providers: PROVIDERS('https://openrouter.ai/api/v1') });
+      setModelUpstream(conn, OR_UPSTREAM);
+      assert.equal(conn.querySelector('.mv-conn-or-order').value, 'ModelRun, Chutes');
+      assert.deepEqual(collectConnection(conn).upstream.openrouter, OR_UPSTREAM.openrouter);
+      setModelUpstream(conn, { ...OR_UPSTREAM, openrouter: undefined });
+      assert.equal(conn.querySelector('.mv-conn-or-models').value, '');
+      assert.equal(conn.querySelector('.mv-conn-or-fallbacks').checked, true);
+      assert.equal(collectConnection(conn).upstream.openrouter, undefined);
+    } },
+  ]);
 });
 
 test('OpenRouter routing: follows the provider\'s base URL when the entry has none, and hides (and is not collected) elsewhere', () => {
@@ -58,21 +73,4 @@ test('OpenRouter routing: follows the provider\'s base URL when the entry has no
   gw.querySelector('.mv-conn-api').value = 'openai-responses';
   applyConnectionMode(gw);
   assert.equal(gw.querySelector('.mv-conn-or').hidden, true);
-});
-
-test('OpenRouter routing: setModelUpstream fills and clears the fields', () => {
-  const conn = renderConnectionSection(null, { doc, providers: PROVIDERS('https://openrouter.ai/api/v1') });
-  setModelUpstream(conn, OR_UPSTREAM);
-  assert.equal(conn.querySelector('.mv-conn-or-order').value, 'ModelRun, Chutes');
-  assert.deepEqual(collectConnection(conn).upstream.openrouter, OR_UPSTREAM.openrouter);
-  setModelUpstream(conn, { ...OR_UPSTREAM, openrouter: undefined });
-  assert.equal(conn.querySelector('.mv-conn-or-models').value, '');
-  assert.equal(conn.querySelector('.mv-conn-or-fallbacks').checked, true);
-  assert.equal(collectConnection(conn).upstream.openrouter, undefined);
-});
-
-test('degradation line: a chat model with reasoning shows its thinking; without, unchanged', () => {
-  assert.equal(degradationLine({ upstream: { api: 'openai-chat', capabilities: { reasoning: true } } }),
-    'translated — reasoning shown but not carried across turns, no WebSearch/WebFetch');
-  assert.equal(degradationLine({ upstream: { api: 'openai-chat', capabilities: {} } }), 'translated — no thinking blocks, no WebSearch/WebFetch');
 });

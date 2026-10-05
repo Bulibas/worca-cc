@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  readConfig, readRunConfig, listModels, resolveStepModels,
+  readConfig, readRunConfig, listModels,
   setStep, addCustomModel, removeCustomModel,
   setNodeModel, setFeedbackCycles, setActiveWorkflow, resolveRunConfig,
   readPrRemotePrefs, setPrRemotePrefs,
@@ -20,6 +20,7 @@ import {
 import { PREDEFINED_MODELS } from '../src/core/config.mjs';
 import { getDb, _resetForTests } from '../src/core/db.mjs';
 import { projectKey } from '../src/core/store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const homes = [];
 const projects = [];
@@ -42,56 +43,51 @@ after(async () => {
   await Promise.all([...homes, ...projects].map((d) => rm(d, { recursive: true, force: true })));
 });
 
-test('readConfig on a fresh project returns the empty default {steps:{},customModels:[]}', async () => {
+test('a fresh project: readConfig empty default, readRunConfig empty workflows on wf_auto, listModels = predefined only', async () => {
   const p = await freshProject();
-  assert.deepEqual(await readConfig(p), { steps: {}, customModels: [] });
+  await checkRows([
+    { name: 'readConfig on a fresh project returns the empty default {steps:{},customModels:[]}', run: async () => {
+      assert.deepEqual(await readConfig(p), { steps: {}, customModels: [] });
+    } },
+    { name: 'readRunConfig on a fresh project returns empty workflows + no active id', run: async () => {
+      const rc = await readRunConfig(p);
+      assert.deepEqual(rc.workflows, {});
+      assert.equal(rc.activeWorkflowId, 'wf_auto', 'D16: a fresh project starts on Auto');
+      assert.deepEqual(rc.steps, {});
+      assert.deepEqual(rc.customModels, []);
+    } },
+    { name: 'listModels returns predefined + custom (custom flagged), even on a fresh project', run: async () => {
+      const models = await listModels(p);
+      assert.equal(models.length, PREDEFINED_MODELS.length, 'all predefined present');
+      assert.ok(models.every((m) => m.custom === false), 'all predefined flagged custom:false');
+    } },
+  ]);
 });
 
-test('readRunConfig on a fresh project returns empty workflows + no active id', async () => {
-  const p = await freshProject();
-  const rc = await readRunConfig(p);
-  assert.deepEqual(rc.workflows, {});
-  assert.equal(rc.activeWorkflowId, 'wf_auto', 'D16: a fresh project starts on Auto');
-  assert.deepEqual(rc.steps, {});
-  assert.deepEqual(rc.customModels, []);
-});
-
-test('listModels returns predefined + custom (custom flagged), even on a fresh project', async () => {
-  const p = await freshProject();
-  const models = await listModels(p);
-  assert.equal(models.length, PREDEFINED_MODELS.length, 'all predefined present');
-  assert.ok(models.every((m) => m.custom === false), 'all predefined flagged custom:false');
-});
-
-test('readRunConfig rebuilds the nested workflows map from normalized rows', async () => {
+test('readRunConfig rebuilds the nested workflows map from normalized rows and surfaces activeWorkflowId + extra keys', async () => {
   const p = await freshProject();
   const key = projectKey(p);
   const db = getDb();
-  // Seed normalized rows directly to prove readRunConfig REBUILDS the nested shape.
+  // Seed normalized rows directly to prove readRunConfig REBUILDS the nested shape,
+  // and the project_config row whose active id + extra keys it surfaces; one read.
   db.prepare('INSERT INTO config_workflow_nodes (project_key, workflow_id, node_id, model, effort, fan_out) VALUES (?, ?, ?, ?, ?, ?)')
     .run(key, 'wf_x', 's0_0', 'claude-opus-4-8', 'high', null);
   db.prepare('INSERT INTO config_workflow_feedbacks (project_key, workflow_id, fb_id, max_cycles) VALUES (?, ?, ?, ?)')
     .run(key, 'wf_x', 'fb_0', 4);
-  const rc = await readRunConfig(p);
-  assert.deepEqual(rc.workflows.wf_x.nodes.s0_0, { model: 'claude-opus-4-8', effort: 'high' });
-  assert.deepEqual(rc.workflows.wf_x.feedbacks.fb_0, { maxCycles: 4 });
-});
-
-test('readRunConfig surfaces activeWorkflowId + webUiTesting from project_config (extra)', async () => {
-  const p = await freshProject();
-  const key = projectKey(p);
-  getDb().prepare(
+  db.prepare(
     'INSERT INTO project_config (project_key, steps, custom_models, active_workflow_id, extra) VALUES (?, ?, ?, ?, ?)'
   ).run(key, '{}', '[]', 'wf_active', JSON.stringify({ webUiTesting: { startCommand: 'npm run dev' } }));
   const rc = await readRunConfig(p);
-  assert.equal(rc.activeWorkflowId, 'wf_active');
-  assert.equal(rc.webUiTesting.startCommand, 'npm run dev');
-});
-
-test('resolveStepModels folds in the global fallback per role', async () => {
-  const p = await freshProject();
-  const r = await resolveStepModels(p, 'claude-opus-4-8');
-  assert.deepEqual(r.planner, { model: 'claude-opus-4-8', effort: undefined });
+  await checkRows([
+    { name: 'readRunConfig rebuilds the nested workflows map from normalized rows', run: () => {
+      assert.deepEqual(rc.workflows.wf_x.nodes.s0_0, { model: 'claude-opus-4-8', effort: 'high' });
+      assert.deepEqual(rc.workflows.wf_x.feedbacks.fb_0, { maxCycles: 4 });
+    } },
+    { name: 'readRunConfig surfaces activeWorkflowId + webUiTesting from project_config (extra)', run: () => {
+      assert.equal(rc.activeWorkflowId, 'wf_active');
+      assert.equal(rc.webUiTesting.startCommand, 'npm run dev');
+    } },
+  ]);
 });
 
 // ── Task 2.5: legacy write path (setStep / addCustomModel / removeCustomModel) ──
@@ -161,41 +157,46 @@ test('removeCustomModel clears legacy steps AND normalized node rows referencing
 
 // ── Task 2.6: run-config write path (setNodeModel / setFeedbackCycles / setActiveWorkflow) ──
 
-test('setNodeModel upserts a normalized config_workflow_nodes row', async () => {
-  const p = await freshProject();
-  await setNodeModel(p, 'wf_quickfix', 's1_0', { model: 'claude-opus-4-8', effort: 'high' });
-  const rc = await readRunConfig(p);
-  assert.deepEqual(rc.workflows.wf_quickfix.nodes.s1_0, { model: 'claude-opus-4-8', effort: 'high' });
-  // Stored as a real row, not nested JSON.
-  const key = projectKey(p);
-  const row = getDb().prepare(
-    'SELECT model, effort FROM config_workflow_nodes WHERE project_key = ? AND workflow_id = ? AND node_id = ?'
-  ).get(key, 'wf_quickfix', 's1_0');
-  assert.equal(row.model, 'claude-opus-4-8');
-  assert.equal(row.effort, 'high');
+test('setNodeModel upserts a normalized row, and a blank model+effort clears it', async () => {
+  await checkRows([
+    { name: 'setNodeModel upserts a normalized config_workflow_nodes row', run: async () => {
+      const p = await freshProject();
+      await setNodeModel(p, 'wf_quickfix', 's1_0', { model: 'claude-opus-4-8', effort: 'high' });
+      const rc = await readRunConfig(p);
+      assert.deepEqual(rc.workflows.wf_quickfix.nodes.s1_0, { model: 'claude-opus-4-8', effort: 'high' });
+      // Stored as a real row, not nested JSON.
+      const key = projectKey(p);
+      const row = getDb().prepare(
+        'SELECT model, effort FROM config_workflow_nodes WHERE project_key = ? AND workflow_id = ? AND node_id = ?'
+      ).get(key, 'wf_quickfix', 's1_0');
+      assert.equal(row.model, 'claude-opus-4-8');
+      assert.equal(row.effort, 'high');
+    } },
+    { name: 'setNodeModel clears the row when model+effort are both blank', run: async () => {
+      const p = await freshProject();
+      await setNodeModel(p, 'wf_x', 's0_0', { model: 'claude-opus-4-8', effort: 'high' });
+      await setNodeModel(p, 'wf_x', 's0_0', { model: '', effort: '' });
+      assert.equal((await readRunConfig(p)).workflows.wf_x?.nodes?.s0_0, undefined);
+    } },
+  ]);
 });
 
-test('setNodeModel clears the row when model+effort are both blank', async () => {
+test('setNodeModel fanOut: stored, preserved across a model-only change, explicit override; fanOut=false alone keeps the row', async () => {
   const p = await freshProject();
-  await setNodeModel(p, 'wf_x', 's0_0', { model: 'claude-opus-4-8', effort: 'high' });
-  await setNodeModel(p, 'wf_x', 's0_0', { model: '', effort: '' });
-  assert.equal((await readRunConfig(p)).workflows.wf_x?.nodes?.s0_0, undefined);
-});
-
-test('setNodeModel fanOut: stored, preserved across a model-only change, explicit override', async () => {
-  const p = await freshProject();
-  await setNodeModel(p, 'wf_x', 's0_0', { fanOut: true });
-  assert.equal((await resolveRunConfig(p, 'wf_x')).nodes.s0_0.fanOut, true);
-  await setNodeModel(p, 'wf_x', 's0_0', { model: 'claude-opus-4-8', effort: '' }); // omits fanOut
-  assert.deepEqual((await resolveRunConfig(p, 'wf_x')).nodes.s0_0, { model: 'claude-opus-4-8', fanOut: true });
-  await setNodeModel(p, 'wf_x', 's0_0', { fanOut: false });
-  assert.equal((await resolveRunConfig(p, 'wf_x')).nodes.s0_0.fanOut, false);
-});
-
-test('setNodeModel with only fanOut=false keeps the row', async () => {
-  const p = await freshProject();
-  await setNodeModel(p, 'wf_x', 's2_0', { fanOut: false });
-  assert.deepEqual((await resolveRunConfig(p, 'wf_x')).nodes.s2_0, { fanOut: false });
+  await checkRows([
+    { name: 'setNodeModel fanOut: stored, preserved across a model-only change, explicit override', run: async () => {
+      await setNodeModel(p, 'wf_x', 's0_0', { fanOut: true });
+      assert.equal((await resolveRunConfig(p, 'wf_x')).nodes.s0_0.fanOut, true);
+      await setNodeModel(p, 'wf_x', 's0_0', { model: 'claude-opus-4-8', effort: '' }); // omits fanOut
+      assert.deepEqual((await resolveRunConfig(p, 'wf_x')).nodes.s0_0, { model: 'claude-opus-4-8', fanOut: true });
+      await setNodeModel(p, 'wf_x', 's0_0', { fanOut: false });
+      assert.equal((await resolveRunConfig(p, 'wf_x')).nodes.s0_0.fanOut, false);
+    } },
+    { name: 'setNodeModel with only fanOut=false keeps the row', run: async () => {
+      await setNodeModel(p, 'wf_x', 's2_0', { fanOut: false });
+      assert.deepEqual((await resolveRunConfig(p, 'wf_x')).nodes.s2_0, { fanOut: false });
+    } },
+  ]);
 });
 
 test('setFeedbackCycles upserts maxCycles coerced to an integer >= 1', async () => {

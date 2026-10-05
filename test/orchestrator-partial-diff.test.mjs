@@ -7,9 +7,8 @@
 // right after — except on a pause, where the checkout is KEPT for the resume).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { existsSync, writeFileSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -17,6 +16,7 @@ import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { ENGINES } from './helpers/engines.mjs';
 import { listArtifacts, readPipelineForResume } from '../src/core/artifacts.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 import { writeGraphWorkflow } from '../src/core/workflows.mjs';
 
 useTempHome(after);
@@ -25,15 +25,8 @@ const created = [];
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true }))));
 
 async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-partial-diff-'));
+  const dir = templateRepo('partial-diff', { branch: 'main', user: true, files: { 'seed.txt': 'seed\n' } });
   created.push(dir);
-  const g = (args) => spawnSync('git', args, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'seed.txt'), 'seed\n');
-  g(['add', '-A']);
-  g(['commit', '-qm', 'init']);
   return dir;
 }
 

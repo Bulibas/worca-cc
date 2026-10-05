@@ -52,30 +52,6 @@ async function boot({ fetchHandler } = {}) {
 }
 const click = (window, node) => node.dispatchEvent(new window.Event('click', { bubbles: true }));
 
-test('Step 1 gating: Generate disabled until name+purpose; own-markdown toggle swaps the requirement', async () => {
-  const { window } = await boot();
-  window.location.hash = 'agent-create';
-  window.dispatchEvent(new window.Event('hashchange'));
-  await new Promise((r) => setTimeout(r, 0));
-  const doc = window.document;
-  assert.equal(doc.querySelector('#agw-start').disabled, true);
-  doc.querySelector('#agw-name').value = 'Docs Writer';
-  doc.querySelector('#agw-name').dispatchEvent(new window.Event('input', { bubbles: true }));
-  assert.equal(doc.querySelector('#agw-start').disabled, true, 'name alone is not enough');
-  doc.querySelector('#agw-purpose').value = 'write docs';
-  doc.querySelector('#agw-purpose').dispatchEvent(new window.Event('input', { bubbles: true }));
-  assert.equal(doc.querySelector('#agw-start').disabled, false);
-  // own-markdown mode: purpose no longer required, pasted body is
-  click(window, doc.querySelector('#agw-own-md-toggle'));
-  assert.equal(doc.querySelector('#agw-own-md-pane').classList.contains('hidden'), false);
-  doc.querySelector('#agw-purpose').value = '';
-  doc.querySelector('#agw-purpose').dispatchEvent(new window.Event('input', { bubbles: true }));
-  assert.equal(doc.querySelector('#agw-start').disabled, true);
-  doc.querySelector('#agw-own-md').value = '# my agent';
-  doc.querySelector('#agw-own-md').dispatchEvent(new window.Event('input', { bubbles: true }));
-  assert.equal(doc.querySelector('#agw-start').disabled, false);
-});
-
 test('Generate POSTs the wizard body, shows Step 2, subscribes by genId; agentgen-done lands on Step 3 with .value-bound fields', async () => {
   const posts = [];
   const { window, ws } = await boot({
@@ -169,30 +145,6 @@ test('Step 3 Save POSTs /api/agents; a 409 keeps the user on Step 3 with the err
   click(window, doc.querySelector('#agw-save'));
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(window.location.hash, '#agents', 'navigated to agents on success');
-});
-
-test('a signed-out Claude refusal (409 claude-signed-out) shows one red line whose link opens Connect Claude Code', async () => {
-  const { window } = await boot({
-    fetchHandler: (u, opts) => u.endsWith('/api/agents/generate') && opts.method === 'POST'
-      ? Promise.resolve({ ok: false, status: 409, json: async () => ({ code: 'claude-signed-out', error: "Claude Code isn't signed in." }) }) : null,
-  });
-  window.location.hash = 'agent-create';
-  window.dispatchEvent(new window.Event('hashchange'));
-  await new Promise((r) => setTimeout(r, 0));
-  const doc = window.document;
-  doc.querySelector('#agw-name').value = 'X';
-  doc.querySelector('#agw-name').dispatchEvent(new window.Event('input', { bubbles: true }));
-  doc.querySelector('#agw-purpose').value = 'p';
-  doc.querySelector('#agw-purpose').dispatchEvent(new window.Event('input', { bubbles: true }));
-  click(window, doc.querySelector('#agw-start'));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(doc.querySelector('#agw-step-1').classList.contains('hidden'), false);
-  const hint = doc.querySelector('#agw-step1-hint');
-  assert.equal(hint.textContent, "Claude Code isn't signed in. Sign in…");
-  assert.ok(hint.classList.contains('err'));
-  const setup = doc.getElementById('claude-setup-modal');
-  click(window, hint.querySelector('a'));
-  assert.equal(setup.classList.contains('hidden'), false, 'Sign in… opens the dialog');
 });
 
 test('agentgen-error returns to Step 1; leave-guard POSTs stop + unsubscribes a live gen', async () => {

@@ -10,22 +10,26 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { renderIndexHtml, INDEX_THEME_ANCHOR } from '../src/core/index-html.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const indexPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 
-test('index.html carries the anchor exactly once, plus the color-scheme meta', () => {
-  const html = readFileSync(indexPath, 'utf8');
-  assert.equal(html.split(INDEX_THEME_ANCHOR).length - 1, 1, 'exactly one anchor');
-  assert.equal(INDEX_THEME_ANCHOR, '<html lang="en" data-theme="system">');
-  assert.match(html, /<meta name="color-scheme" content="light dark" \/>/);
-  assert.match(html, /<meta name="theme-color" content="#ffffff" \/>/, 'the light default stays; JS keeps it current');
-});
-
-test('renderIndexHtml replaces the anchor and nothing else; throws without it', () => {
-  const html = '<!DOCTYPE html>\n<html lang="en" data-theme="system">\n<head></head><body>x</body></html>';
-  assert.equal(renderIndexHtml(html, 'dark'), '<!DOCTYPE html>\n<html lang="en" data-theme="dark">\n<head></head><body>x</body></html>');
-  assert.equal(renderIndexHtml(html, 'system'), html);
-  assert.throws(() => renderIndexHtml('<html lang="en">', 'dark'), /index\.html theme anchor missing/);
+test('index.html carries the theme anchor once (+ color-scheme meta) and renderIndexHtml replaces only the anchor, throwing without it', async () => {
+  await checkRows([
+    { name: 'index.html carries the anchor exactly once, plus the color-scheme meta', run: () => {
+      const html = readFileSync(indexPath, 'utf8');
+      assert.equal(html.split(INDEX_THEME_ANCHOR).length - 1, 1, 'exactly one anchor');
+      assert.equal(INDEX_THEME_ANCHOR, '<html lang="en" data-theme="system">');
+      assert.match(html, /<meta name="color-scheme" content="light dark" \/>/);
+      assert.match(html, /<meta name="theme-color" content="#ffffff" \/>/, 'the light default stays; JS keeps it current');
+    } },
+    { name: 'renderIndexHtml replaces the anchor and nothing else; throws without it', run: () => {
+      const html = '<!DOCTYPE html>\n<html lang="en" data-theme="system">\n<head></head><body>x</body></html>';
+      assert.equal(renderIndexHtml(html, 'dark'), '<!DOCTYPE html>\n<html lang="en" data-theme="dark">\n<head></head><body>x</body></html>');
+      assert.equal(renderIndexHtml(html, 'system'), html);
+      assert.throws(() => renderIndexHtml('<html lang="en">', 'dark'), /index\.html theme anchor missing/);
+    } },
+  ]);
 });
 
 let home, srv, base, prev;

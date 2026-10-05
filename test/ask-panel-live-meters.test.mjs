@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 
 import { makePanel } from './helpers/ask-panel-harness.mjs';
 import { stampFrames } from './helpers/ask-frames.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const TID = 'ask_00000001';
 const MID = 'askm_00000001';
@@ -32,68 +33,48 @@ async function openLoaded(body, overrides = {}) {
   return ctx;
 }
 
-test('ask-panel-live-meters: an agent ask-block bumps the Agents count before ask-done; ask-done does not double count', async () => {
-  const ctx = await openLoaded(snap({ costUsd: 0.5, turns: 1, agents: 1 }));
-  ctx.doc.querySelector('[data-ask-ctx-btn]').click();
-  const label = () => ctx.doc.querySelector('.ask-pop-ctx .ask-ctx-agents .ask-pop-caption-meter').textContent;
-  assert.equal(label(), '', 'the list counts the agents it shows: none loaded');
-  const frames = stampFrames([
-    start,
-    { type: 'ask-block', block: agent('toolu_a1', 'running') },
-    { type: 'ask-block', block: agent('toolu_a1', 'running') },
-    { type: 'ask-block', block: agent('toolu_a2', 'running') },
-    { type: 'ask-done', text: 'ok', blocks: [agent('toolu_a1', 'done'), agent('toolu_a2', 'done')], usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }, costUsd: 0.1, durationMs: 5, model: 'm', status: 'done',
-      threadTotals: { costUsd: 0.6, input: 1, output: 1, cacheRead: 0, cacheCreation: 0, turns: 2, agents: 3 } },
-  ], { threadId: TID, messageId: MID });
-  ctx.panel.pushServerFrame(frames[0]); ctx.panel.pushServerFrame(frames[1]); ctx.flush();
-  assert.match(label(), /^1 · /, 'counted the moment its block streams');
-  ctx.panel.pushServerFrame(frames[2]); ctx.panel.pushServerFrame(frames[3]); ctx.flush();
-  assert.match(label(), /^2 · /, 'a re-emitted block counts once');
-  ctx.panel.pushServerFrame(frames[4]); ctx.flush();
-  assert.match(label(), /^2 · /, 'the finished blocks replace the live ones — no double count');
-});
-
-test('ask-panel-live-meters: the cost meter shows "≈" total+estimate while streaming, then the authoritative figure', async () => {
-  const ctx = await openLoaded(snap({ costUsd: 0.25, turns: 1, agents: 0 }));
-  const cost = () => ctx.doc.querySelector('.ask-meter-cost').textContent;
-  assert.equal(cost(), '$0.25');
-  const u = (output) => ({ input: 12, output, cacheRead: 0, cacheCreation: 0, ctx: 12 + output });
-  const frames = stampFrames([
-    start,
-    { type: 'ask-usage', usage: u(300), costUsd: null, estimatedCostUsd: null },
-    { type: 'ask-usage', usage: u(600), costUsd: null, estimatedCostUsd: 0.0151 },
-    { type: 'ask-usage', usage: u(600), costUsd: 0.02, estimatedCostUsd: null },
-    { type: 'ask-done', text: 'ok', blocks: [], usage: u(600), costUsd: 0.02, durationMs: 5, model: 'm', status: 'done',
-      threadTotals: { costUsd: 0.27, input: 12, output: 600, cacheRead: 0, cacheCreation: 0, ctx: 612, turns: 2, agents: 0 } },
-  ], { threadId: TID, messageId: MID });
-  ctx.panel.pushServerFrame(frames[0]); ctx.panel.pushServerFrame(frames[1]); ctx.flush();
-  assert.equal(cost(), '$0.25', 'no estimate yet (unknown model) → the stored total, no ≈');
-  ctx.panel.pushServerFrame(frames[2]); ctx.flush();
-  assert.equal(cost(), '≈$0.27', 'stored total + live estimate, marked approximate');
-  ctx.panel.pushServerFrame(frames[3]); ctx.flush();
-  assert.equal(cost(), '≈$0.27', 'the CLI figure for the turn — still an in-progress total');
-  ctx.panel.pushServerFrame(frames[4]); ctx.flush();
-  assert.equal(cost(), '$0.27', 'ask-done: the authoritative thread total, no ≈');
-});
-
-test('ask-panel-live-meters: an open context popover\'s Agents section follows agent blocks in place', async () => {
-  const ctx = await openLoaded(snap({ costUsd: 0, turns: 0, agents: 0 }));
-  ctx.doc.querySelector('[data-ask-ctx-btn]').click();
-  await ctx.tick();
-  const pop = ctx.doc.querySelector('.ask-pop-ctx');
-  assert.match(pop.querySelector('.ask-ctx-agents').textContent, /No agents spawned yet\./);
-  const frames = stampFrames([
-    start,
-    { type: 'ask-block', block: agent('toolu_a1', 'running') },
-    { type: 'ask-block', block: { ...agent('toolu_a1', 'done'), costUsd: 0.62, ctx: 11600 } },
-  ], { threadId: TID, messageId: MID });
-  ctx.panel.pushServerFrame(frames[0]); ctx.panel.pushServerFrame(frames[1]); ctx.flush();
-  assert.equal(ctx.doc.querySelector('.ask-pop-ctx'), pop, 'same panel — rebuilt in place, not reopened');
-  assert.match(pop.textContent, /count runs/);
-  assert.ok(pop.querySelector('.ask-dot-run'), 'running dot');
-  ctx.panel.pushServerFrame(frames[2]); ctx.flush();
-  assert.ok(pop.querySelector('.ask-dot-done'), 'done dot');
-  assert.equal(pop.querySelector('.ask-ctx-agents .ask-pop-caption-meter').textContent, '1 · ≈$0.62');
+test('ask-panel-live-meters: an agent ask-block bumps the Agents count (and an open popover\'s section) before ask-done; ask-done does not double count', async () => {
+  await checkRows([
+    { name: 'ask-panel-live-meters: an agent ask-block bumps the Agents count before ask-done; ask-done does not double count', run: async () => {
+      const ctx = await openLoaded(snap({ costUsd: 0.5, turns: 1, agents: 1 }));
+      ctx.doc.querySelector('[data-ask-ctx-btn]').click();
+      const label = () => ctx.doc.querySelector('.ask-pop-ctx .ask-ctx-agents .ask-pop-caption-meter').textContent;
+      assert.equal(label(), '', 'the list counts the agents it shows: none loaded');
+      const frames = stampFrames([
+        start,
+        { type: 'ask-block', block: agent('toolu_a1', 'running') },
+        { type: 'ask-block', block: agent('toolu_a1', 'running') },
+        { type: 'ask-block', block: agent('toolu_a2', 'running') },
+        { type: 'ask-done', text: 'ok', blocks: [agent('toolu_a1', 'done'), agent('toolu_a2', 'done')], usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }, costUsd: 0.1, durationMs: 5, model: 'm', status: 'done',
+          threadTotals: { costUsd: 0.6, input: 1, output: 1, cacheRead: 0, cacheCreation: 0, turns: 2, agents: 3 } },
+      ], { threadId: TID, messageId: MID });
+      ctx.panel.pushServerFrame(frames[0]); ctx.panel.pushServerFrame(frames[1]); ctx.flush();
+      assert.match(label(), /^1 · /, 'counted the moment its block streams');
+      ctx.panel.pushServerFrame(frames[2]); ctx.panel.pushServerFrame(frames[3]); ctx.flush();
+      assert.match(label(), /^2 · /, 'a re-emitted block counts once');
+      ctx.panel.pushServerFrame(frames[4]); ctx.flush();
+      assert.match(label(), /^2 · /, 'the finished blocks replace the live ones — no double count');
+    } },
+    { name: 'ask-panel-live-meters: an open context popover\'s Agents section follows agent blocks in place', run: async () => {
+      const ctx = await openLoaded(snap({ costUsd: 0, turns: 0, agents: 0 }));
+      ctx.doc.querySelector('[data-ask-ctx-btn]').click();
+      await ctx.tick();
+      const pop = ctx.doc.querySelector('.ask-pop-ctx');
+      assert.match(pop.querySelector('.ask-ctx-agents').textContent, /No agents spawned yet\./);
+      const frames = stampFrames([
+        start,
+        { type: 'ask-block', block: agent('toolu_a1', 'running') },
+        { type: 'ask-block', block: { ...agent('toolu_a1', 'done'), costUsd: 0.62, ctx: 11600 } },
+      ], { threadId: TID, messageId: MID });
+      ctx.panel.pushServerFrame(frames[0]); ctx.panel.pushServerFrame(frames[1]); ctx.flush();
+      assert.equal(ctx.doc.querySelector('.ask-pop-ctx'), pop, 'same panel — rebuilt in place, not reopened');
+      assert.match(pop.textContent, /count runs/);
+      assert.ok(pop.querySelector('.ask-dot-run'), 'running dot');
+      ctx.panel.pushServerFrame(frames[2]); ctx.flush();
+      assert.ok(pop.querySelector('.ask-dot-done'), 'done dot');
+      assert.equal(pop.querySelector('.ask-ctx-agents .ask-pop-caption-meter').textContent, '1 · ≈$0.62');
+    } },
+  ]);
 });
 
 test('ask-panel-live-meters: an out-of-turn frame mid-turn (ask-title arrives early now) never resets the elapsed clock', async () => {

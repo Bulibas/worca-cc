@@ -12,6 +12,7 @@ import { join, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { gitDir } from './helpers/git-dir.mjs';
+import { seedQuickFix } from './helpers/engines.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { runAgentExecution } from '../src/core/graph/executor.mjs';
 import { memoryRoot, writeMemory, readMemory, listMemory, readScopeState, GLOBAL_SCOPE, projectScope, bumpScopeState, listSnapshots } from '../src/core/memory-store.mjs';
@@ -34,6 +35,7 @@ before(async () => {
   process.env.WORCA_TEST_ALLOW_HOME_FALLBACK = '1';
   process.env.WORCA_PROJECTS_ROOT = HERMETIC_ROOT;
   delete process.env.WORCA_RUN_ROOT;
+  await seedQuickFix();   // the shared helpers run wf_quick-fix, which a fresh home does not hold
 });
 after(async () => {
   for (const k of Object.keys(prevEnv)) { if (prevEnv[k] === undefined) delete process.env[k]; else process.env[k] = prevEnv[k]; }
@@ -46,9 +48,10 @@ const NOW = '2026-09-09T10:00:00.000Z';
 
 /** A producer runner that records what every producer execution saw (`runners.producer`
  *  intercepts producer nodes only — planner, refiner x2, implementer x2 under mock
- *  wf_default; the reviewer is runnerType verifier and clarify is clarifier, and they
- *  still get the block through _execCtx) and, on the FIRST implementer execution, writes
- *  one memory file into the mount before delegating to the real (mock) execution.
+ *  wf_default, planner + implementer x2 under wf_quick-fix; the reviewer is runnerType
+ *  verifier and clarify is clarifier, and they still get the block through _execCtx) and, on
+ *  the FIRST implementer execution, writes one memory file into the mount before delegating
+ *  to the real (mock) execution.
  *  `ctx.memoryMount` is null when the mount failed — the producer must still run. */
 function recordingProducer(seen) {
   let wrote = false;
@@ -68,7 +71,9 @@ function recordingProducer(seen) {
   };
 }
 
-async function runOnce({ seed = true } = {}) {
+/** One full mock run with the recording producer. wf_quick-fix (planner, implementer x2,
+ *  reviewer x2) unless a test needs wf_default's clarify/refiner executions. */
+async function runOnce({ seed = true, workflowId = 'wf_quick-fix' } = {}) {
   const dir = gitDir('mem');
   // useTempHome gives ONE home (and one store) to the whole file, so the GLOBAL
   // scope carries over between tests: an "empty store" run must wipe the root
@@ -77,7 +82,7 @@ async function runOnce({ seed = true } = {}) {
   else await rm(memoryRoot(), { recursive: true, force: true });
   const seen = [];
   const orch = createOrchestrator({
-    projectDir: dir, workflowId: 'wf_default', prompt: 'demo task', claude: { mock: true }, auto: true,
+    projectDir: dir, workflowId, prompt: 'demo task', claude: { mock: true }, auto: true,
     runners: { producer: recordingProducer(seen) },
   });
   const res = await orch.run();
@@ -85,7 +90,7 @@ async function runOnce({ seed = true } = {}) {
   return { dir, orch, seen };
 }
 
-/** Run wf_default under mock until the FIRST implementer execution pauses the run. The mount now
+/** Run wf_quick-fix under mock until the FIRST implementer execution pauses the run. The mount now
  *  lives INSIDE the run cwd, which teardown removes — but a PAUSE keeps the checkout (and the
  *  mount in it), so a live-mount assertion runs against the still-live orchestrator instead of
  *  reading a directory that is already gone. `mkRunners` is handed back for the resuming twin
@@ -109,7 +114,7 @@ async function pausedRun({ seed = true, onPause } = {}) {
     },
   });
   const orch = createOrchestrator({
-    projectDir: dir, workflowId: 'wf_default', prompt: 'demo task', claude: { mock: true }, auto: true, runners: mkRunners(),
+    projectDir: dir, workflowId: 'wf_quick-fix', prompt: 'demo task', claude: { mock: true }, auto: true, runners: mkRunners(),
   });
   orchRef = orch;
   assert.equal((await orch.run()).status, 'paused');
@@ -117,7 +122,7 @@ async function pausedRun({ seed = true, onPause } = {}) {
 }
 
 test('detached (default): writable copy at <pipelineDir>/memory, rules copy at <worktree>/.claude/rules/worca, pointer block names the writable dirs, sync after the writing execution refreshes the rules copy, summary + ledger, nothing memory in the commit', { timeout: 120000 }, async () => {
-  const { dir, orch, seen } = await runOnce();
+  const { dir, orch, seen } = await runOnce({ workflowId: 'wf_default' });
   const st = orch.getState();
   const pipelineDir = st.pipelineDir;
   assert.equal(st.memoryMount, memoryWorkPath(pipelineDir), 'the writable copy = the sync mount, under the pipeline dir');
@@ -169,6 +174,8 @@ test('detached (default): writable copy at <pipelineDir>/memory, rules copy at <
   assert.equal(detail.memory.changes.length, 1);
   assert.equal(detail.memory.mount, st.memoryMount);
   assert.deepEqual(detail.memory.totals, results.memory.totals, 'the detail and results.json agree');
+  // (folded) the detail exposes only mount + changes + totals — never the baseline
+  assert.deepEqual(Object.keys(detail.memory).sort(), ['changes', 'mount', 'totals']);
   // Run log carries the audit line.
   assert.match(detail.auditMarkdown, /Memory: \+2 ~0 -0 by implementer/);
 });
@@ -176,7 +183,7 @@ test('detached (default): writable copy at <pipelineDir>/memory, rules copy at <
 test('legacy (pinned): mount in the legacy worktree, the ONE legacy exclusion pathspec, nothing memory in the commit', { timeout: 120000 }, async () => {
   process.env.WORCA_RUN_ROOT = 'legacy';
   try {
-    const { dir, orch } = await runOnce();
+    const { dir, orch } = await runOnce({ workflowId: 'wf_default' });
     const st = orch.getState();
     assert.equal(st.memoryMount, memoryWorkPath(st.pipelineDir));
     assert.equal(st.memoryRules, memoryRulesPath(st.branch.worktreeDir));
@@ -305,12 +312,6 @@ test('resume: a file written by an interrupted execution is synced BEFORE the re
 });
 
 // ── survivor-killing additions found by the mutation audit ───────────────────
-
-test('the detail exposes only mount + changes + totals — never the baseline', { timeout: 120000 }, async () => {
-  const { orch } = await runOnce();
-  const detail = await readPipelineByKey(orch.members[0].projectKey, orch.pipeline.id);
-  assert.deepEqual(Object.keys(detail.memory).sort(), ['changes', 'mount', 'totals']);
-});
 
 test('a run that changed no memory writes no results.json memory key', { timeout: 120000 }, async () => {
   const dir = gitDir('mem');

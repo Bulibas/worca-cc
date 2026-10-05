@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { _resetForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let homeDir, srv, base, wsBase, runs, prevHome, bootMaintenance, benchRoot;
 const JSONH = { 'Content-Type': 'application/json' };
@@ -91,26 +92,44 @@ function waitFor(pred, timeoutMs = 20000) {
   });
 }
 
-test('POST /api/scripts/bench -> {benchId}; a kind:scriptbench entry streams lines and one done', async () => {
+test('POST /api/scripts/bench -> {benchId}; the entry streams lines and one done with a monotonic seq, and never shows up as a run', async () => {
+  // One bench run feeds both rows.
   const { ws, msgs, opened } = openWs();
   await opened;
   const r = await post('/api/scripts/bench', { key: 'echoes', params: { tag: 'alpha' }, inputs: { done: { fired: true } } });
   assert.equal(r.status, 200);
   const { benchId } = await r.json();
-  assert.match(benchId, /^bench_[0-9a-f-]{36}$/);
-  const entry = runs.get(benchId);
-  assert.equal(entry.kind, 'scriptbench');
-  assert.equal(entry.title, 'bench: echoes');
-  await waitFor(() => ['done', 'error'].includes(entry.status));
-  assert.equal(entry.status, 'done');
-  assert.equal(entry.result.status, 'clean');
-  assert.equal(entry.result.summary, 'echoed alpha');
-  await waitFor(() => msgs.some((m) => m.type === 'scriptbench-done' && m.benchId === benchId));
-  const line = msgs.find((m) => m.type === 'scriptbench-line' && m.benchId === benchId);
-  assert.equal(line.text, 'bench line alpha');
-  assert.equal(line.stream, 'out');
-  assert.equal(line.caseId, null);
-  ws.close();
+  try {
+    await checkRows([
+      { name: 'POST /api/scripts/bench -> {benchId}; a kind:scriptbench entry streams lines and one done', run: async () => {
+        assert.match(benchId, /^bench_[0-9a-f-]{36}$/);
+        const entry = runs.get(benchId);
+        assert.equal(entry.kind, 'scriptbench');
+        assert.equal(entry.title, 'bench: echoes');
+        await waitFor(() => ['done', 'error'].includes(entry.status));
+        assert.equal(entry.status, 'done');
+        assert.equal(entry.result.status, 'clean');
+        assert.equal(entry.result.summary, 'echoed alpha');
+        await waitFor(() => msgs.some((m) => m.type === 'scriptbench-done' && m.benchId === benchId));
+        const line = msgs.find((m) => m.type === 'scriptbench-line' && m.benchId === benchId);
+        assert.equal(line.text, 'bench line alpha');
+        assert.equal(line.stream, 'out');
+        assert.equal(line.caseId, null);
+      } },
+      { name: 'frames carry a monotonic seq (the page de-duplicates live + replayed with it); a bench never shows up as a run', run: async () => {
+        await waitFor(() => msgs.some((m) => m.type === 'scriptbench-done' && m.benchId === benchId));
+        const seqs = msgs.filter((m) => m.benchId === benchId).map((m) => m.seq);
+        assert.ok(seqs.length >= 2 && seqs.every((n, i) => Number.isInteger(n) && (i === 0 || n > seqs[i - 1])), `monotonic: ${seqs}`);
+        // W15: the hello snapshot lists RUNS. A bench shares the runs Map for the replay plumbing only.
+        const fresh = openWs();
+        await fresh.opened;
+        await waitFor(() => fresh.msgs.some((m) => m.type === 'hello'));
+        const hello = fresh.msgs.find((m) => m.type === 'hello');
+        assert.equal((hello.runs || []).some((r) => r.kind === 'scriptbench'), false);
+        fresh.ws.close();
+      } },
+    ]);
+  } finally { ws.close(); }
 });
 
 test('WS ?benchId= and {type:"subscribe",benchId} both replay the buffer', async () => {
@@ -170,23 +189,6 @@ test('POST /api/scripts/bench: a bad key shape is 404; an unknown key is a WS er
   await waitFor(() => msgs.some((m) => m.type === 'scriptbench-error' && m.benchId === proto.benchId));
   assert.equal(msgs.find((m) => m.type === 'scriptbench-error' && m.benchId === proto.benchId).message, 'script not found: constructor');
   ws.close();
-});
-
-test('frames carry a monotonic seq (the page de-duplicates live + replayed with it); a bench never shows up as a run', async () => {
-  const { ws, msgs, opened } = openWs();
-  await opened;
-  const { benchId } = await (await post('/api/scripts/bench', { key: 'echoes', params: { tag: 'seq' } })).json();
-  await waitFor(() => msgs.some((m) => m.type === 'scriptbench-done' && m.benchId === benchId));
-  const seqs = msgs.filter((m) => m.benchId === benchId).map((m) => m.seq);
-  assert.ok(seqs.length >= 2 && seqs.every((n, i) => Number.isInteger(n) && (i === 0 || n > seqs[i - 1])), `monotonic: ${seqs}`);
-  ws.close();
-  // W15: the hello snapshot lists RUNS. A bench shares the runs Map for the replay plumbing only.
-  const fresh = openWs();
-  await fresh.opened;
-  await waitFor(() => fresh.msgs.some((m) => m.type === 'hello'));
-  const hello = fresh.msgs.find((m) => m.type === 'hello');
-  assert.equal((hello.runs || []).some((r) => r.kind === 'scriptbench'), false);
-  fresh.ws.close();
 });
 
 test('finished bench entries are evicted past the newest 8', async () => {

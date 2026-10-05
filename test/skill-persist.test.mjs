@@ -8,6 +8,7 @@ import { upsertSubAgent, listSubAgents, readPipeline } from '../src/core/artifac
 import { _resetForTests } from '../src/core/db.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const homes = [];
 beforeEach(async () => {
@@ -22,41 +23,43 @@ after(async () => {
   await Promise.all(homes.map((d) => rm(d, { recursive: true, force: true })));
 });
 
-test('sub_agents.skills round-trips as a JSON array; NULL -> []', async () => {
-  const proj = await mkdtemp(join(tmpdir(), 'worca-cc-skill-proj-'));
-  const { id: pid } = await seedPipeline(proj, { title: 'Run', status: 'running' });
+test('sub_agents.skills round-trips verbatim (legacy, three-part, 64 labels + sentinel); NULL -> []', async () => {
+  await checkRows([
+    { name: 'sub_agents.skills round-trips as a JSON array; NULL -> []', run: async () => {
+      const proj = await mkdtemp(join(tmpdir(), 'worca-cc-skill-proj-'));
+      const { id: pid } = await seedPipeline(proj, { title: 'Run', status: 'running' });
 
-  upsertSubAgent(pid, { id: 'a1', label: 'AR sheet', nodeId: 'n1', stepIndex: 0, cycle: 1,
-    status: 'finished', startedAt: '2026-06-20T00:00:00Z', skills: ['skill:graphify', 'mcp:playwright'] });
-  upsertSubAgent(pid, { id: 'a2', label: 'AR items', nodeId: 'n1', stepIndex: 0, cycle: 1,
-    status: 'finished', startedAt: '2026-06-20T00:00:01Z' }); // no skills
+      upsertSubAgent(pid, { id: 'a1', label: 'AR sheet', nodeId: 'n1', stepIndex: 0, cycle: 1,
+        status: 'finished', startedAt: '2026-06-20T00:00:00Z', skills: ['skill:graphify', 'mcp:playwright'] });
+      upsertSubAgent(pid, { id: 'a2', label: 'AR items', nodeId: 'n1', stepIndex: 0, cycle: 1,
+        status: 'finished', startedAt: '2026-06-20T00:00:01Z' }); // no skills
 
-  const subs = listSubAgents(pid);
-  assert.deepEqual(subs.find((s) => s.id === 'a1').skills, ['skill:graphify', 'mcp:playwright']);
-  assert.deepEqual(subs.find((s) => s.id === 'a2').skills, [], 'absent skills surface as []');
-});
-
-// §7.2: the new label shapes are just more opaque strings in the same V6 column —
-// three-part MCP tags AND §7.1's overflow sentinel round-trip beside legacy
-// two-part rows, with no migration.
-test('§7.2 three-part MCP tags, the overflow sentinel, and legacy tags coexist in one row', async () => {
-  const proj = await mkdtemp(join(tmpdir(), 'worca-cc-skill-proj-'));
-  const { id: pid } = await seedPipeline(proj, { title: 'Run', status: 'running' });
-  const skills = ['skill:graphify', 'mcp:playwright:browser_navigate', 'mcp:playwright', 'overflow:6'];
-  upsertSubAgent(pid, { id: 'a1', status: 'finished', startedAt: '2026-06-20T00:00:00Z', skills });
-  assert.deepEqual(listSubAgents(pid)[0].skills, skills, 'verbatim, order preserved, sentinel last');
-});
-
-// The brief's assertion (b), sub-agent half: 64 pills + a `+6 more` that SURVIVES a reload.
-test('§7.1 (b) a 64-label + overflow:6 array survives listSubAgents intact (65 entries)', async () => {
-  const proj = await mkdtemp(join(tmpdir(), 'worca-cc-skill-proj-'));
-  const { id: pid } = await seedPipeline(proj, { title: 'Run', status: 'running' });
-  const skills = [...Array.from({ length: 64 }, (_, i) => `mcp:srv:tool_${i}`), 'overflow:6'];
-  upsertSubAgent(pid, { id: 'a1', status: 'finished', startedAt: '2026-06-20T00:00:00Z', skills });
-  const back = listSubAgents(pid)[0].skills;
-  assert.equal(back.length, 65);
-  assert.equal(back.at(-1), 'overflow:6', 'the sentinel survived the reload, still last');
-  assert.deepEqual(back, skills);
+      const subs = listSubAgents(pid);
+      assert.deepEqual(subs.find((s) => s.id === 'a1').skills, ['skill:graphify', 'mcp:playwright']);
+      assert.deepEqual(subs.find((s) => s.id === 'a2').skills, [], 'absent skills surface as []');
+    } },
+    { name: '§7.2 three-part MCP tags, the overflow sentinel, and legacy tags coexist in one row', run: async () => {
+      // §7.2: the new label shapes are just more opaque strings in the same V6 column —
+      // three-part MCP tags AND §7.1's overflow sentinel round-trip beside legacy
+      // two-part rows, with no migration.
+      const proj = await mkdtemp(join(tmpdir(), 'worca-cc-skill-proj-'));
+      const { id: pid } = await seedPipeline(proj, { title: 'Run', status: 'running' });
+      const skills = ['skill:graphify', 'mcp:playwright:browser_navigate', 'mcp:playwright', 'overflow:6'];
+      upsertSubAgent(pid, { id: 'a1', status: 'finished', startedAt: '2026-06-20T00:00:00Z', skills });
+      assert.deepEqual(listSubAgents(pid)[0].skills, skills, 'verbatim, order preserved, sentinel last');
+    } },
+    { name: '§7.1 (b) a 64-label + overflow:6 array survives listSubAgents intact (65 entries)', run: async () => {
+      // The brief's assertion (b), sub-agent half: 64 pills + a `+6 more` that SURVIVES a reload.
+      const proj = await mkdtemp(join(tmpdir(), 'worca-cc-skill-proj-'));
+      const { id: pid } = await seedPipeline(proj, { title: 'Run', status: 'running' });
+      const skills = [...Array.from({ length: 64 }, (_, i) => `mcp:srv:tool_${i}`), 'overflow:6'];
+      upsertSubAgent(pid, { id: 'a1', status: 'finished', startedAt: '2026-06-20T00:00:00Z', skills });
+      const back = listSubAgents(pid)[0].skills;
+      assert.equal(back.length, 65);
+      assert.equal(back.at(-1), 'overflow:6', 'the sentinel survived the reload, still last');
+      assert.deepEqual(back, skills);
+    } },
+  ]);
 });
 
 // The brief's assertion (b), STEP half, end to end: the array is produced by the

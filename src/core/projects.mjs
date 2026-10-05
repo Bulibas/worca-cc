@@ -182,6 +182,13 @@ export async function addProjects(items) {
   return { results, projects: await listProjects() };
 }
 
+/** How long removeProject waits for the metrics-worktree prune before answering. A test passes a
+ *  small `pruneWaitMs`; WORCA_PRUNE_WAIT_MS (1 .. 600000) overrides the 10 s default. */
+export function pruneWaitMsFrom(env = process.env) {
+  const n = Number(env.WORCA_PRUNE_WAIT_MS);
+  return Number.isFinite(n) && n > 0 && n <= 600_000 ? n : 10_000;
+}
+
 /**
  * Remove a project by name (case-insensitive). Absent name is a no-op. Also prunes any metrics
  * worktree that belonged to this project's repository, waiting up to ~10s for it: the wait is
@@ -189,7 +196,7 @@ export async function addProjects(items) {
  * @param {string} name
  * @returns {Promise<Array<{key:string, name:string, path:string, exists:boolean}>>}
  */
-export async function removeProject(name) {
+export async function removeProject(name, { pruneWaitMs = pruneWaitMsFrom() } = {}) {
   const key = (typeof name === 'string' ? name : '').trim();
   let removedPath = null;
   if (key) {
@@ -222,7 +229,7 @@ export async function removeProject(name) {
       // Bounded: each removal waits for the slug lock, and a running flush can hold it for minutes.
       // The DELETE request must not hang on that; the prune finishes in the background.
       const prune = pruneMetricsWorktreesFor(removedPath).catch(() => []);
-      await Promise.race([prune, new Promise((r) => setTimeout(r, 10_000).unref?.())]);
+      await Promise.race([prune, new Promise((r) => setTimeout(r, pruneWaitMs).unref?.())]);
     } catch { /* best-effort: a leftover worktree is harmless and re-pruned by git */ }
   }
   return listProjects();

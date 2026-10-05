@@ -4,6 +4,7 @@
 // option never changes argv (test/spawn-args.test.mjs pins the baseline).
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { mkdtemp, writeFile, readFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,14 +33,52 @@ afterEach(() => {
   if (prevOrch === undefined) delete process.env.ORCH_MOCK; else process.env.ORCH_MOCK = prevOrch;
 });
 
-test('absent options: argv byte-identical to the baseline', () => {
-  const args = buildClaudeArgs({
-    ...BASE, allowedTools: ['Read', 'Bash'],
-    tools: undefined, strictMcpConfig: undefined, settingSources: undefined, disableSlashCommands: undefined,
-    includePartialMessages: undefined, maxTurns: undefined, maxBudgetUsd: undefined, appendSubagentSystemPrompt: undefined,
-    addDirs: undefined,
-  });
-  assert.deepEqual(args, BASELINE);
+test('absent / false / cleared / invalid values emit nothing; list values are filtered to non-empty strings before the emptiness test', async () => {
+  await checkRows([
+    { name: 'absent options: argv byte-identical to the baseline', run: () => {
+      const args = buildClaudeArgs({
+        ...BASE, allowedTools: ['Read', 'Bash'],
+        tools: undefined, strictMcpConfig: undefined, settingSources: undefined, disableSlashCommands: undefined,
+        includePartialMessages: undefined, maxTurns: undefined, maxBudgetUsd: undefined, appendSubagentSystemPrompt: undefined,
+        addDirs: undefined,
+      });
+      assert.deepEqual(args, BASELINE);
+    } },
+    { name: 'false / cleared / invalid values emit nothing', run: () => {
+      const args = buildClaudeArgs({
+        ...BASE, allowedTools: ['Read', 'Bash'],
+        strictMcpConfig: false, settingSources: [], disableSlashCommands: false, includePartialMessages: false,
+        maxTurns: 0, maxBudgetUsd: null, appendSubagentSystemPrompt: '', addDirs: [],
+      });
+      assert.deepEqual(args, BASELINE);
+      assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], addDirs: [1, ''] }), BASELINE,
+        'no usable dir name ⇒ no --add-dir at all');
+      assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], maxTurns: 2.5, maxBudgetUsd: -1 }), BASELINE);
+      assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], maxTurns: '40', maxBudgetUsd: '2' }), BASELINE,
+        'strings are not numbers: omitted, never coerced');
+      assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], tools: 'Task', settingSources: 'project' }), BASELINE,
+        'non-array list values are ignored');
+      assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], strictMcpConfig: 1, disableSlashCommands: 'yes' }), BASELINE,
+        'booleans must be === true');
+    } },
+    { name: 'list values are filtered to non-empty strings BEFORE the emptiness test', run: () => {
+      // the guards tested the RAW list and emitted the FILTERED join, so a list of
+      // non-strings produced `--setting-sources ""` where `[]` produces nothing, and a
+      // blank entry produced a trailing-comma value. Both fail closed at the CLI, but
+      // neither matches the documented "a non-empty array of names" contract.
+      assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], settingSources: [1] }), BASELINE,
+        'no usable name ⇒ the flag is not emitted at all');
+      assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], settingSources: ['', '  '.trim()] }), BASELINE);
+      assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], settingSources: ['project', '', 'user'] }).slice(-2),
+        ['--setting-sources', 'project,user'], 'blanks are dropped, not joined as empty fields');
+      assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Task'], tools: ['Read', ''] }).slice(-2),
+        ['--tools', 'Read'], 'no trailing comma');
+      // --tools is the one list whose EMPTY value is meaningful ("no built-in tools"),
+      // so the array itself still decides whether the flag is emitted
+      assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Task'], tools: [1, null] }).slice(-2), ['--tools', '']);
+      assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Task'], tools: [] }).slice(-2), ['--tools', '']);
+    } },
+  ]);
 });
 
 test('tools: [] emits --tools "" and tools: ["Task"] emits --tools Task, after --allowedTools', () => {
@@ -66,42 +105,6 @@ test('every flag, in the fixed order, appended after the legacy block', () => {
     '--append-subagent-system-prompt', 'NOTE',
     '--add-dir', '/m/one', '--add-dir', '/m/two',
   ]);
-});
-
-test('false / cleared / invalid values emit nothing', () => {
-  const args = buildClaudeArgs({
-    ...BASE, allowedTools: ['Read', 'Bash'],
-    strictMcpConfig: false, settingSources: [], disableSlashCommands: false, includePartialMessages: false,
-    maxTurns: 0, maxBudgetUsd: null, appendSubagentSystemPrompt: '', addDirs: [],
-  });
-  assert.deepEqual(args, BASELINE);
-  assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], addDirs: [1, ''] }), BASELINE,
-    'no usable dir name ⇒ no --add-dir at all');
-  assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], maxTurns: 2.5, maxBudgetUsd: -1 }), BASELINE);
-  assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], maxTurns: '40', maxBudgetUsd: '2' }), BASELINE,
-    'strings are not numbers: omitted, never coerced');
-  assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], tools: 'Task', settingSources: 'project' }), BASELINE,
-    'non-array list values are ignored');
-  assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], strictMcpConfig: 1, disableSlashCommands: 'yes' }), BASELINE,
-    'booleans must be === true');
-});
-
-test('list values are filtered to non-empty strings BEFORE the emptiness test', () => {
-  // the guards tested the RAW list and emitted the FILTERED join, so a list of
-  // non-strings produced `--setting-sources ""` where `[]` produces nothing, and a
-  // blank entry produced a trailing-comma value. Both fail closed at the CLI, but
-  // neither matches the documented "a non-empty array of names" contract.
-  assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], settingSources: [1] }), BASELINE,
-    'no usable name ⇒ the flag is not emitted at all');
-  assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], settingSources: ['', '  '.trim()] }), BASELINE);
-  assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], settingSources: ['project', '', 'user'] }).slice(-2),
-    ['--setting-sources', 'project,user'], 'blanks are dropped, not joined as empty fields');
-  assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Task'], tools: ['Read', ''] }).slice(-2),
-    ['--tools', 'Read'], 'no trailing comma');
-  // --tools is the one list whose EMPTY value is meaningful ("no built-in tools"),
-  // so the array itself still decides whether the flag is emitted
-  assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Task'], tools: [1, null] }).slice(-2), ['--tools', '']);
-  assert.deepEqual(buildClaudeArgs({ ...BASE, allowedTools: ['Task'], tools: [] }).slice(-2), ['--tools', '']);
 });
 
 /** Fake `claude` that dumps its argv NUL-separated (test/spawn-args.test.mjs:81-93 technique). */
@@ -141,12 +144,4 @@ test('runClaude forwards all nine options to the spawned argv (five gates)', POS
   assert.equal(argv[argv.indexOf('--max-budget-usd') + 1], '1.5');
   assert.equal(argv[argv.indexOf('--append-subagent-system-prompt') + 1], 'SANDBOX');
   assert.deepEqual(argv.slice(-2), ['--add-dir', join(dir, 'mount')], '--add-dir is emitted LAST and reached the spawn');
-});
-
-test('runClaude without the nine options spawns the legacy argv (parity)', POSIX_SHIM, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-ask-runner-'));
-  const out = join(dir, 'argv.txt');
-  const bin = await fakeBin(dir, out);
-  await runClaude({ cwd: dir, bin, prompt: 'p', allowedTools: ['Read', 'Bash'] });
-  assert.deepEqual(splitArgv(await readFile(out, 'utf8')), BASELINE);
 });

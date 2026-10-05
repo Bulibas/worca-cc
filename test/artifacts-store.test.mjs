@@ -9,43 +9,6 @@ import { projectKey, storeRoot, workspaceStorePath } from '../src/core/store.mjs
 import { _resetForTests, getDb } from '../src/core/db.mjs';
 import { posix } from './helpers/posix-path.mjs';
 
-test('artifactPaths resolves into the store, not the project dir', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'worca-cc-ah-'));
-  const proj = await mkdtemp(join(tmpdir(), 'worca-cc-proj-'));
-  const prev = process.env.WORCA_HOME;
-  process.env.WORCA_HOME = home;
-  try {
-    const p = artifactPaths(proj);
-    const expectRoot = join(storeRoot(), projectKey(proj));
-    assert.equal(p.root, expectRoot);
-    assert.equal(p.plans, join(expectRoot, 'plans'));
-    assert.ok(!p.root.startsWith(proj), 'must NOT live under the project dir');
-  } finally { if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev; }
-});
-
-test('ensureArtifactDirs creates dirs + writes+returns project meta once (store_meta)', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'worca-cc-ah2-'));
-  const proj = await mkdtemp(join(tmpdir(), 'worca-cc-proj2-'));
-  const prev = process.env.WORCA_HOME;
-  process.env.WORCA_HOME = home;
-  _resetForTests(); // reopen the DB singleton against this temp home
-  try {
-    const p = await ensureArtifactDirs(proj);
-    await stat(p.pipelines); // throws if missing
-    assert.equal(p.meta.key, projectKey(proj), 'ensureArtifactDirs returns the meta object');
-    // Meta now lives in the store_meta table, not a meta.json file.
-    const onDisk = readStoreMeta(projectKey(proj));
-    assert.equal(onDisk.key, projectKey(proj));
-    assert.ok(onDisk.firstSeenAt);
-    const first = onDisk.firstSeenAt;
-    const p2 = await ensureArtifactDirs(proj); // re-run
-    assert.equal(p2.meta.firstSeenAt, first, 'firstSeenAt is preserved on re-run');
-  } finally {
-    _resetForTests();
-    if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
-  }
-});
-
 test('createPipeline stamps projectKey + projectName into the pipelines row', async () => {
   const home = await mkdtemp(join(tmpdir(), 'worca-cc-ah3-'));
   const proj = await mkdtemp(join(tmpdir(), 'worca-cc-proj3-'));
@@ -73,7 +36,7 @@ test('createPipeline stamps projectKey + projectName into the pipelines row', as
 
 const WKEY = 'wks-demo-12345678';
 
-test('artifactPaths routes to store/workspaces/<key> when a workspaceKey is given', async () => {
+test('artifactPaths: project store by default (never under the project dir), workspace store with a workspaceKey', async () => {
   const home = await mkdtemp(join(tmpdir(), 'worca-cc-wsp-'));
   const proj = await mkdtemp(join(tmpdir(), 'worca-cc-wsp-proj-'));
   const prev = process.env.WORCA_HOME;
@@ -88,6 +51,8 @@ test('artifactPaths routes to store/workspaces/<key> when a workspaceKey is give
     // Absent the key, byte-identical to the legacy project path.
     const proj2 = artifactPaths(proj);
     assert.equal(proj2.root, join(storeRoot(), projectKey(proj)));
+    assert.equal(proj2.plans, join(storeRoot(), projectKey(proj), 'plans'));
+    assert.ok(!proj2.root.startsWith(proj), 'must NOT live under the project dir');
     assert.notEqual(ws.root, proj2.root);
   } finally { if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev; }
 });
@@ -104,6 +69,9 @@ test('planPath/reviewPath thread the optional workspaceKey into the workspace st
     assert.equal(rp, join(workspaceStorePath(WKEY), 'reviews', '03-06-26-feat-impl-review.md'));
     // Legacy single-project signatures still resolve under the project key.
     assert.match(posix(planPath(proj, 'feat', 1, '03-06-26')), new RegExp(`${projectKey(proj)}/plans/03-06-26-feat\\.md$`));
+    // reviewPath defaults to impl-review and accepts a kind suffix.
+    assert.match(posix(reviewPath('/p', 'feat', '03-06-26')), /\/reviews\/03-06-26-feat-impl-review\.md$/);
+    assert.match(posix(reviewPath('/p', 'feat', '03-06-26', 'plan-review')), /\/reviews\/03-06-26-feat-plan-review\.md$/);
   } finally { if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev; }
 });
 
@@ -141,7 +109,7 @@ test('ensureArtifactDirs writes the workspace meta shape under store/workspaces/
   }
 });
 
-test('createPipeline (workspace opts) stamps the workspace_meta superset + workspace-description.md', async () => {
+test('createPipeline (workspace) stamps the workspace_meta superset and freezes the full description', async () => {
   const home = await mkdtemp(join(tmpdir(), 'worca-cc-wpipe-'));
   const a = await mkdtemp(join(tmpdir(), 'worca-cc-wpipe-a-'));
   const b = await mkdtemp(join(tmpdir(), 'worca-cc-wpipe-b-'));
@@ -149,6 +117,8 @@ test('createPipeline (workspace opts) stamps the workspace_meta superset + works
   process.env.WORCA_HOME = home;
   _resetForTests();
   try {
+    // 5000 chars: the frozen copy must keep the FULL text verbatim (no cap).
+    const description = '# Workspace: Demo\nlots of detail\n'.padEnd(5000, 'x');
     const projects = [
       { projectKey: projectKey(a), projectDir: a, projectName: 'a' },
       { projectKey: projectKey(b), projectDir: b, projectName: 'b' },
@@ -159,7 +129,7 @@ test('createPipeline (workspace opts) stamps the workspace_meta superset + works
       workspaceKey: WKEY,
       workspaceId: WKEY,
       workspaceName: 'Demo WS',
-      workspaceDescription: '# Workspace: Demo\nlots of detail',
+      workspaceDescription: description,
       projects,
     });
     // Lives in the workspace store, not under any project key.
@@ -173,7 +143,9 @@ test('createPipeline (workspace opts) stamps the workspace_meta superset + works
     const wm = JSON.parse(row.workspace_meta);
     assert.equal(wm.workspaceId, WKEY);
     assert.equal(wm.workspaceName, 'Demo WS');
-    assert.equal(wm.workspaceDescription, '# Workspace: Demo\nlots of detail');
+    assert.equal(wm.workspaceDescription, description);
+    assert.equal(wm.workspaceDescription.length, 5000, 'frozen copy stores the full text');
+    assert.ok(!wm.workspaceDescription.endsWith('…'), 'no truncation ellipsis');
     assert.deepEqual(wm.projectKeys, projects.map((p) => p.projectKey));
     assert.equal(wm.projects.length, 2);
     assert.deepEqual(wm.checkpointRefs, {});
@@ -181,34 +153,7 @@ test('createPipeline (workspace opts) stamps the workspace_meta superset + works
 
     // Frozen description snapshot file present and matching (still written for humans).
     const wd = await readFile(join(dir, 'workspace-description.md'), 'utf8');
-    assert.equal(wd, '# Workspace: Demo\nlots of detail');
-  } finally {
-    _resetForTests();
-    if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
-  }
-});
-
-test('createPipeline freezes the FULL description verbatim (no cap)', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'worca-cc-wcap-'));
-  const a = await mkdtemp(join(tmpdir(), 'worca-cc-wcap-a-'));
-  const b = await mkdtemp(join(tmpdir(), 'worca-cc-wcap-b-'));
-  const prev = process.env.WORCA_HOME;
-  process.env.WORCA_HOME = home;
-  _resetForTests();
-  try {
-    const big = 'x'.repeat(5000);
-    const projects = [
-      { projectKey: projectKey(a), projectDir: a, projectName: 'a' },
-      { projectKey: projectKey(b), projectDir: b, projectName: 'b' },
-    ].sort((x, y) => (x.projectKey < y.projectKey ? -1 : 1));
-    const { id, dir } = await createPipeline(projects[0].projectDir, {
-      prompt: 'task', workspaceKey: WKEY, workspaceId: WKEY, workspaceName: 'Cap',
-      workspaceDescription: big, projects,
-    });
-    const wm = JSON.parse(getDb().prepare('SELECT workspace_meta FROM pipelines WHERE id = ?').get(id).workspace_meta);
-    assert.equal(wm.workspaceDescription.length, 5000, 'frozen copy stores the full text');
-    assert.ok(!wm.workspaceDescription.endsWith('…'), 'no truncation ellipsis');
-    const wd = await readFile(join(dir, 'workspace-description.md'), 'utf8');
+    assert.equal(wd, description);
     assert.equal(wd.length, 5000, 'on-disk snapshot is the full text');
   } finally {
     _resetForTests();

@@ -2,6 +2,7 @@
 // home; ids are minted by the store and read back from the returned objects.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
@@ -32,86 +33,88 @@ test('ids: prefix + 8 hex, matching ASK_ID_RE; askRoot under the worca home', ()
   assert.equal(attachmentsDir('ask_00000001'), join(worcaHome(), 'ask', 'ask_00000001', 'att'));
 });
 
-test('createThread / getThread / updateThread / setThreadTitle', () => {
-  const t = createThread({ model: 'claude-opus-5-5', effort: 'high' });
-  assert.match(t.id, /^ask_[0-9a-f]{8}$/);
-  assert.deepEqual(Object.keys(t).sort(),
-    ['context', 'contexts', 'createdAt', 'createdBy', 'effort', 'id', 'mcpOff', 'model', 'sessionId', 'title', 'totals', 'updatedAt']);
-  assert.equal(t.mcpOff, null, 'no MCP picker choices yet (v45)');
-  assert.equal(t.createdBy, null, 'ownerless unless created with an owner');
-  assert.equal(t.title, null);
-  assert.equal(t.sessionId, null);
-  assert.equal(t.context, null);
-  assert.deepEqual(t.contexts, []);
-  assert.deepEqual(t.totals, { costUsd: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, turns: 0, agents: 0 });
-  assert.deepEqual(getThread(t.id), t);
-  assert.equal(getThread('ask_ffffffff'), null);
+test('threads: create/get/update/setThreadTitle; listThreads newest-first with runLinks and limit; counts and id lists ignore the list cap', async () => {
+  await checkRows([
+    { name: 'createThread / getThread / updateThread / setThreadTitle', run: () => {
+      const t = createThread({ model: 'claude-opus-5-5', effort: 'high' });
+      assert.match(t.id, /^ask_[0-9a-f]{8}$/);
+      assert.deepEqual(Object.keys(t).sort(),
+        ['context', 'contexts', 'createdAt', 'createdBy', 'effort', 'id', 'mcpOff', 'model', 'sessionId', 'title', 'totals', 'updatedAt']);
+      assert.equal(t.mcpOff, null, 'no MCP picker choices yet (v45)');
+      assert.equal(t.createdBy, null, 'ownerless unless created with an owner');
+      assert.equal(t.title, null);
+      assert.equal(t.sessionId, null);
+      assert.equal(t.context, null);
+      assert.deepEqual(t.contexts, []);
+      assert.deepEqual(t.totals, { costUsd: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, turns: 0, agents: 0 });
+      assert.deepEqual(getThread(t.id), t);
+      assert.equal(getThread('ask_ffffffff'), null);
 
-  const u = updateThread(t.id, { sessionId: 'sess-1', context: { view: 'history', projectKey: 'p-00000001' }, title: 'First' });
-  assert.equal(u.sessionId, 'sess-1');
-  assert.deepEqual(u.context, { view: 'history', projectKey: 'p-00000001' });
-  assert.equal(u.title, 'First');
-  assert.equal(u.model, 'claude-opus-5-5', 'untouched keys survive');
-  assert.ok(u.updatedAt >= t.updatedAt);
-  assert.equal(updateThread(t.id, { context: null }).context, null);
-  // MCP registry §9.4: the picker's choices round-trip as JSON like `context`; null clears.
-  assert.deepEqual(updateThread(t.id, { mcpOff: { sets: ['billing'], members: ['shop|manual:pg'] } }).mcpOff, { sets: ['billing'], members: ['shop|manual:pg'] });
-  assert.equal(getThread(t.id).context, null, 'an mcpOff patch leaves the context alone');
-  assert.equal(updateThread(t.id, { mcpOff: null }).mcpOff, null);
-  assert.equal(updateThread('ask_ffffffff', { title: 'x' }), null);
-  assert.equal(getThread(t.id).title, 'First');
-  updateThread(t.id, { bogus: 1 });
-  assert.equal(getThread(t.id).title, 'First', 'unknown keys in the patch are ignored');
+      const u = updateThread(t.id, { sessionId: 'sess-1', context: { view: 'history', projectKey: 'p-00000001' }, title: 'First' });
+      assert.equal(u.sessionId, 'sess-1');
+      assert.deepEqual(u.context, { view: 'history', projectKey: 'p-00000001' });
+      assert.equal(u.title, 'First');
+      assert.equal(u.model, 'claude-opus-5-5', 'untouched keys survive');
+      assert.ok(u.updatedAt >= t.updatedAt);
+      assert.equal(updateThread(t.id, { context: null }).context, null);
+      // MCP registry §9.4: the picker's choices round-trip as JSON like `context`; null clears.
+      assert.deepEqual(updateThread(t.id, { mcpOff: { sets: ['billing'], members: ['shop|manual:pg'] } }).mcpOff, { sets: ['billing'], members: ['shop|manual:pg'] });
+      assert.equal(getThread(t.id).context, null, 'an mcpOff patch leaves the context alone');
+      assert.equal(updateThread(t.id, { mcpOff: null }).mcpOff, null);
+      assert.equal(updateThread('ask_ffffffff', { title: 'x' }), null);
+      assert.equal(getThread(t.id).title, 'First');
+      updateThread(t.id, { bogus: 1 });
+      assert.equal(getThread(t.id).title, 'First', 'unknown keys in the patch are ignored');
 
-  // D13: the background title replaces the deterministic one UNLESS the user renamed it meanwhile
-  assert.equal(setThreadTitle(t.id, 'Generated', { onlyIf: 'First' }), true);
-  assert.equal(getThread(t.id).title, 'Generated');
-  assert.equal(setThreadTitle(t.id, 'Generated 2', { onlyIf: 'First' }), false, 'title moved on; not replaced');
-  assert.equal(getThread(t.id).title, 'Generated');
-  assert.equal(setThreadTitle(t.id, 'Renamed'), true, 'unconditional rename');
-  assert.equal(setThreadTitle('ask_ffffffff', 'x'), false);
-  const fresh = createThread();
-  assert.equal(setThreadTitle(fresh.id, 'From null', { onlyIf: null }), true, 'IS NULL matches');
-});
-
-test('listThreads: newest updated first, runLinks count, limit', () => {
-  const a = createThread({ title: 'a' });
-  const b = createThread({ title: 'b' });
-  getDb().prepare("UPDATE ask_threads SET updated_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(a.id);
-  linkRun(b.id, { runId: 'run-1' });
-  linkRun(b.id, { runId: 'run-2' });
-  const list = listThreads();
-  const ids = list.map((x) => x.id);
-  assert.ok(ids.indexOf(b.id) < ids.indexOf(a.id), 'b (newer) before a');
-  assert.equal(list.find((x) => x.id === b.id).runLinks, 2);
-  assert.equal(list.find((x) => x.id === a.id).runLinks, 0);
-  assert.equal(listThreads({ limit: 1 }).length, 1);
-});
-
-// The History popover shows the TOTAL, not the capped page; the bulk delete
-// walks EVERY id. Neither may go through listThreads (LIMIT 50/200).
-test('countThreads / listThreadIds ignore the list cap; countWorktrees / countAttachments are global', () => {
-  const before = countThreads();
-  const made = [];
-  for (let i = 0; i < 3; i += 1) made.push(createThread().id);
-  assert.equal(countThreads(), before + 3);
-  const ids = listThreadIds();
-  assert.equal(ids.length, before + 3);
-  for (const id of made) assert.ok(ids.includes(id));
-  assert.ok(ids.every((id) => ASK_ID_RE.test(id)));
-  const wtBefore = countWorktrees();
-  getDb().prepare(`INSERT INTO ask_worktrees (id, thread_id, project_key, project_dir, ref, resolved_commit, worktree_dir, created_at, updated_at)
+      // D13: the background title replaces the deterministic one UNLESS the user renamed it meanwhile
+      assert.equal(setThreadTitle(t.id, 'Generated', { onlyIf: 'First' }), true);
+      assert.equal(getThread(t.id).title, 'Generated');
+      assert.equal(setThreadTitle(t.id, 'Generated 2', { onlyIf: 'First' }), false, 'title moved on; not replaced');
+      assert.equal(getThread(t.id).title, 'Generated');
+      assert.equal(setThreadTitle(t.id, 'Renamed'), true, 'unconditional rename');
+      assert.equal(setThreadTitle('ask_ffffffff', 'x'), false);
+      const fresh = createThread();
+      assert.equal(setThreadTitle(fresh.id, 'From null', { onlyIf: null }), true, 'IS NULL matches');
+    } },
+    { name: 'listThreads: newest updated first, runLinks count, limit', run: () => {
+      const a = createThread({ title: 'a' });
+      const b = createThread({ title: 'b' });
+      getDb().prepare("UPDATE ask_threads SET updated_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(a.id);
+      linkRun(b.id, { runId: 'run-1' });
+      linkRun(b.id, { runId: 'run-2' });
+      const list = listThreads();
+      const ids = list.map((x) => x.id);
+      assert.ok(ids.indexOf(b.id) < ids.indexOf(a.id), 'b (newer) before a');
+      assert.equal(list.find((x) => x.id === b.id).runLinks, 2);
+      assert.equal(list.find((x) => x.id === a.id).runLinks, 0);
+      assert.equal(listThreads({ limit: 1 }).length, 1);
+    } },
+    // The History popover shows the TOTAL, not the capped page; the bulk delete
+    // walks EVERY id. Neither may go through listThreads (LIMIT 50/200).
+    { name: 'countThreads / listThreadIds ignore the list cap; countWorktrees / countAttachments are global', run: () => {
+      const before = countThreads();
+      const made = [];
+      for (let i = 0; i < 3; i += 1) made.push(createThread().id);
+      assert.equal(countThreads(), before + 3);
+      const ids = listThreadIds();
+      assert.equal(ids.length, before + 3);
+      for (const id of made) assert.ok(ids.includes(id));
+      assert.ok(ids.every((id) => ASK_ID_RE.test(id)));
+      const wtBefore = countWorktrees();
+      getDb().prepare(`INSERT INTO ask_worktrees (id, thread_id, project_key, project_dir, ref, resolved_commit, worktree_dir, created_at, updated_at)
                    VALUES ('wt_00000001', ?, 'p', '/p', 'main', 'abc', '/tmp/wt', 't', 't')`).run(made[0]);
-  assert.equal(countWorktrees(), wtBefore + 1);
-  const attBefore = countAttachments();
-  const m = appendMessage(made[1], { role: 'user', text: 'x' });
-  addAttachment(made[1], m.id, { name: 'a.md', text: 'a' });
-  addAttachment(made[1], m.id, { name: 'b.md', text: 'b' });
-  assert.equal(countAttachments(), attBefore + 2);
-  for (const id of made) deleteThread(id);
-  assert.equal(countThreads(), before);
-  assert.equal(countWorktrees(), wtBefore, 'the worktree row cascaded with its thread');
-  assert.equal(countAttachments(), attBefore);
+      assert.equal(countWorktrees(), wtBefore + 1);
+      const attBefore = countAttachments();
+      const m = appendMessage(made[1], { role: 'user', text: 'x' });
+      addAttachment(made[1], m.id, { name: 'a.md', text: 'a' });
+      addAttachment(made[1], m.id, { name: 'b.md', text: 'b' });
+      assert.equal(countAttachments(), attBefore + 2);
+      for (const id of made) deleteThread(id);
+      assert.equal(countThreads(), before);
+      assert.equal(countWorktrees(), wtBefore, 'the worktree row cascaded with its thread');
+      assert.equal(countAttachments(), attBefore);
+    } },
+  ]);
 });
 
 // db.mjs:44 designs for a second writing process (the CLI running a pipeline, a
@@ -217,47 +220,76 @@ test('cards: findCard / updateCardBlock patch only state, runId, error', () => {
   assert.deepEqual(chained.after, { kind: 'pipeline', id: 'p1', title: 'Refactor' });
 });
 
-test('addThreadTotals sums every turn; null cost adds 0 but counts the turn', () => {
-  const t = createThread();
-  let tot = addThreadTotals(t.id, { costUsd: 0.25, usage: { input: 10, output: 20, cacheRead: 30, cacheCreation: 40 }, agents: 2 });
-  assert.deepEqual(tot, { costUsd: 0.25, input: 10, output: 20, cacheRead: 30, cacheCreation: 40, turns: 1, agents: 2 });
-  tot = addThreadTotals(t.id, { costUsd: null, usage: null });
-  assert.deepEqual(tot, { costUsd: 0.25, input: 10, output: 20, cacheRead: 30, cacheCreation: 40, turns: 2, agents: 2 });
-  tot = addThreadTotals(t.id, { costUsd: 0.1, usage: { input: 1 } });
-  assert.equal(tot.costUsd, 0.35);
-  assert.equal(tot.input, 11);
-  assert.deepEqual(getThread(t.id).totals, tot);
-  assert.equal(addThreadTotals('ask_ffffffff', {}), null);
+test('addThreadTotals: sums every turn (null cost adds 0 but counts), usage.ctx and ctxWindow REPLACE the stored values, garbage leaves them', async () => {
+  await checkRows([
+    { name: 'addThreadTotals sums every turn; null cost adds 0 but counts the turn', run: () => {
+      const t = createThread();
+      let tot = addThreadTotals(t.id, { costUsd: 0.25, usage: { input: 10, output: 20, cacheRead: 30, cacheCreation: 40 }, agents: 2 });
+      assert.deepEqual(tot, { costUsd: 0.25, input: 10, output: 20, cacheRead: 30, cacheCreation: 40, turns: 1, agents: 2 });
+      tot = addThreadTotals(t.id, { costUsd: null, usage: null });
+      assert.deepEqual(tot, { costUsd: 0.25, input: 10, output: 20, cacheRead: 30, cacheCreation: 40, turns: 2, agents: 2 });
+      tot = addThreadTotals(t.id, { costUsd: 0.1, usage: { input: 1 } });
+      assert.equal(tot.costUsd, 0.35);
+      assert.equal(tot.input, 11);
+      assert.deepEqual(getThread(t.id).totals, tot);
+      assert.equal(addThreadTotals('ask_ffffffff', {}), null);
+    } },
+    { name: 'addThreadTotals: usage.ctx OVERWRITES the thread ctx (context fill, never summed); a turn without ctx leaves it', run: () => {
+      const t = createThread();
+      let tot = addThreadTotals(t.id, { costUsd: 0.1, usage: { input: 10, output: 20, cacheRead: 0, cacheCreation: 0, ctx: 55000 } });
+      assert.equal(tot.ctx, 55000);
+      assert.equal(tot.input, 10, 'the cumulative buckets ignore ctx');
+      tot = addThreadTotals(t.id, { costUsd: 0.1, usage: { input: 1, output: 2, cacheRead: 0, cacheCreation: 0, ctx: 68400 } });
+      assert.equal(tot.ctx, 68400, 'the later turn replaces');
+      tot = addThreadTotals(t.id, { costUsd: null, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: null } });
+      assert.equal(tot.ctx, 68400, 'a ctx-less turn (killed before any call) keeps the last figure');
+      assert.equal(getThread(t.id).totals.ctx, 68400);
+      const legacy = createThread();
+      const legacyTot = addThreadTotals(legacy.id, { costUsd: 0.1, usage: { input: 5, output: 5 } });
+      assert.ok(!('ctx' in legacyTot), 'no ctx ever supplied → the key stays absent (legacy threads render no fill)');
+    } },
+    { name: 'addThreadTotals: usage.ctxWindow REPLACES the stored window; a turn without one, or a garbage one, leaves it', run: () => {
+      const t = createThread({});
+      let tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 1000 } });
+      assert.equal('ctxWindow' in tot, false, 'never reported: absent');
+      tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 2000, ctxWindow: 1000000 } });
+      assert.equal(tot.ctxWindow, 1000000);
+      tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 3000 } });
+      assert.equal(tot.ctxWindow, 1000000, 'a turn with no result keeps the last known window');
+      tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 3000, ctxWindow: 0 } });
+      assert.equal(tot.ctxWindow, 1000000, 'garbage is ignored');
+      tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 3000, ctxWindow: 200000 } });
+      assert.equal(tot.ctxWindow, 200000, 'a model switch replaces it');
+      assert.equal(getThread(t.id).totals.ctxWindow, 200000, 'rowToThread surfaces it');
+    } },
+  ]);
 });
 
-test('addThreadTotals: usage.ctx OVERWRITES the thread ctx (context fill, never summed); a turn without ctx leaves it', () => {
-  const t = createThread();
-  let tot = addThreadTotals(t.id, { costUsd: 0.1, usage: { input: 10, output: 20, cacheRead: 0, cacheCreation: 0, ctx: 55000 } });
-  assert.equal(tot.ctx, 55000);
-  assert.equal(tot.input, 10, 'the cumulative buckets ignore ctx');
-  tot = addThreadTotals(t.id, { costUsd: 0.1, usage: { input: 1, output: 2, cacheRead: 0, cacheCreation: 0, ctx: 68400 } });
-  assert.equal(tot.ctx, 68400, 'the later turn replaces');
-  tot = addThreadTotals(t.id, { costUsd: null, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: null } });
-  assert.equal(tot.ctx, 68400, 'a ctx-less turn (killed before any call) keeps the last figure');
-  assert.equal(getThread(t.id).totals.ctx, 68400);
-  const legacy = createThread();
-  const legacyTot = addThreadTotals(legacy.id, { costUsd: 0.1, usage: { input: 5, output: 5 } });
-  assert.ok(!('ctx' in legacyTot), 'no ctx ever supplied → the key stays absent (legacy threads render no fill)');
-});
-
-test('sweepStreamingMessages marks streaming rows error with a notice; others untouched', () => {
-  sweepStreamingMessages();               // the sweep is GLOBAL: drain rows earlier tests in this file left streaming
-  const t = createThread();
-  const s1 = appendMessage(t.id, { role: 'assistant', status: 'streaming', blocks: [{ kind: 'tool', id: 'x', name: 'n', input: {}, status: 'running' }] });
-  const s2 = appendMessage(t.id, { role: 'assistant', status: 'streaming' });
-  const d = appendMessage(t.id, { role: 'assistant', status: 'done' });
-  assert.equal(sweepStreamingMessages(), 2);
-  assert.equal(getMessage(s1.id).status, 'error');
-  assert.deepEqual(getMessage(s1.id).blocks.at(-1), { kind: 'notice', text: 'interrupted by restart' });
-  assert.equal(getMessage(s1.id).blocks.length, 2);
-  assert.deepEqual(getMessage(s2.id).blocks, [{ kind: 'notice', text: 'interrupted by restart' }]);
-  assert.equal(getMessage(d.id).status, 'done');
-  assert.equal(sweepStreamingMessages(), 0, 'idempotent');
+test('sweepStreamingMessages marks streaming rows error with a notice (others untouched) and fails a building workflow card with the sweep text', async () => {
+  await checkRows([
+    { name: 'sweepStreamingMessages marks streaming rows error with a notice; others untouched', run: () => {
+      sweepStreamingMessages();               // the sweep is GLOBAL: drain rows earlier tests in this file left streaming
+      const t = createThread();
+      const s1 = appendMessage(t.id, { role: 'assistant', status: 'streaming', blocks: [{ kind: 'tool', id: 'x', name: 'n', input: {}, status: 'running' }] });
+      const s2 = appendMessage(t.id, { role: 'assistant', status: 'streaming' });
+      const d = appendMessage(t.id, { role: 'assistant', status: 'done' });
+      assert.equal(sweepStreamingMessages(), 2);
+      assert.equal(getMessage(s1.id).status, 'error');
+      assert.deepEqual(getMessage(s1.id).blocks.at(-1), { kind: 'notice', text: 'interrupted by restart' });
+      assert.equal(getMessage(s1.id).blocks.length, 2);
+      assert.deepEqual(getMessage(s2.id).blocks, [{ kind: 'notice', text: 'interrupted by restart' }]);
+      assert.equal(getMessage(d.id).status, 'done');
+      assert.equal(sweepStreamingMessages(), 0, 'idempotent');
+    } },
+    { name: 'boot sweep: a streaming row\'s building workflow card turns failed with the sweep text', run: () => {
+      const t = createThread();
+      const m = appendMessage(t.id, { role: 'assistant', text: '', status: 'streaming' });
+      setMessageBlocks(m.id, [{ kind: 'card', id: 'card_0000aa02', state: 'building', card: { type: 'workflow', mode: 'task' } }, { kind: 'card', id: 'card_0000aa03', state: 'proposed', card: { type: 'workflow' } }]);
+      assert.equal(sweepStreamingMessages(), 1);
+      const blocks = getMessage(m.id).blocks;
+      assert.deepEqual(blocks.map((b) => [b.kind, b.state ?? null, b.error ?? null]), [['card', 'failed', 'interrupted by restart'], ['card', 'proposed', null], ['notice', null, null]]);
+    } },
+  ]);
 });
 
 test('a non-array blocks column cannot brick the sweep or the card lookup', () => {
@@ -279,53 +311,56 @@ test('a non-array blocks column cannot brick the sweep or the card lookup', () =
   assert.equal(updateCardBlock(t2.id, 'card_00000001', { state: 'started' }), null);
 });
 
-test('attachments: file under askRoot/<thread>/att/<id>.txt, thread-scoped reads, byte totals', () => {
-  const t = createThread();
-  const m = appendMessage(t.id, { role: 'user', text: 'see file' });
-  const a = addAttachment(t.id, m.id, { name: '../../evil/notes.md', text: 'héllo' });
-  assert.match(a.id, /^att_[0-9a-f]{8}$/);
-  assert.equal(a.name, 'notes.md', 'display name reduced to a basename');
-  assert.equal(a.bytes, 6, 'UTF-8 byte length');
-  assert.equal(a.messageId, m.id);
-  const file = join(attachmentsDir(t.id), `${a.id}.txt`);
-  assert.ok(existsSync(file));
-  assert.equal(readFileSync(file, 'utf8'), 'héllo');
-  assert.deepEqual(readAttachmentText(t.id, a.id), { ...a, text: 'héllo' });
-  assert.equal(readAttachmentText(createThread().id, a.id), null, 'another thread cannot read it');
-  assert.equal(getAttachment(t.id, 'att_ffffffff'), null);
-  addAttachment(t.id, m.id, { name: 'b.txt', text: 'xx' });
-  assert.equal(listAttachments(t.id).length, 2);
-  assert.throws(() => addAttachment('ask_ffffffff', null, { name: 'x', text: 'y' }), /unknown thread/);
-});
-
-test('binary attachments (#398): raw bytes under <id>.<ext>, kind/mime on the row, text readers refuse them', () => {
-  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0xfe, 0xff]);
-  const t = createThread();
-  const m = appendMessage(t.id, { role: 'user', text: 'see shot' });
-  const a = addAttachment(t.id, m.id, { name: 'shot.png', kind: 'image', mime: 'image/png', data: png });
-  assert.equal(a.kind, 'image');
-  assert.equal(a.mime, 'image/png');
-  assert.equal(a.bytes, png.length);
-  const file = join(attachmentsDir(t.id), `${a.id}.png`);
-  assert.ok(existsSync(file), 'body stored with the mime extension, not .txt');
-  assert.deepEqual(readFileSync(file), png, 'bytes round-trip with no utf8 coercion');
-  assert.equal(attachmentPath(t.id, a.id), file);
-  assert.equal(attachmentPath(createThread().id, a.id), null, 'path is thread-scoped');
-  assert.equal(readAttachmentText(t.id, a.id), null, 'a binary body is never served as text');
-  const raw = readAttachmentRaw(t.id, a.id);
-  assert.deepEqual(raw.buffer, png);
-  assert.equal(raw.kind, 'image');
-  // text rows still read raw too (the download route uses one reader for both)
-  const txt = addAttachment(t.id, m.id, { name: 'n.txt', text: 'hey' });
-  assert.equal(txt.kind, 'text');
-  assert.equal(readAttachmentRaw(t.id, txt.id).buffer.toString('utf8'), 'hey');
-  assert.throws(() => addAttachment(t.id, m.id, { name: 'x.png', kind: 'image', mime: 'image/png' }),
-    /Buffer/, 'a non-text attachment without a Buffer body is refused');
-  // a row that outlived its body must not hand out a dangling pointer
-  unlinkSync(file);
-  assert.equal(attachmentPath(t.id, a.id), null, 'no path for a body that is gone');
-  assert.equal(readAttachmentRaw(t.id, a.id), null);
-  assert.ok(getAttachment(t.id, a.id), 'the row itself is still there');
+test('attachments: text under askRoot/<thread>/att/<id>.txt, binary raw under <id>.<ext> with kind/mime; thread-scoped reads, byte totals, text readers refuse binaries', async () => {
+  await checkRows([
+    { name: 'attachments: file under askRoot/<thread>/att/<id>.txt, thread-scoped reads, byte totals', run: () => {
+      const t = createThread();
+      const m = appendMessage(t.id, { role: 'user', text: 'see file' });
+      const a = addAttachment(t.id, m.id, { name: '../../evil/notes.md', text: 'héllo' });
+      assert.match(a.id, /^att_[0-9a-f]{8}$/);
+      assert.equal(a.name, 'notes.md', 'display name reduced to a basename');
+      assert.equal(a.bytes, 6, 'UTF-8 byte length');
+      assert.equal(a.messageId, m.id);
+      const file = join(attachmentsDir(t.id), `${a.id}.txt`);
+      assert.ok(existsSync(file));
+      assert.equal(readFileSync(file, 'utf8'), 'héllo');
+      assert.deepEqual(readAttachmentText(t.id, a.id), { ...a, text: 'héllo' });
+      assert.equal(readAttachmentText(createThread().id, a.id), null, 'another thread cannot read it');
+      assert.equal(getAttachment(t.id, 'att_ffffffff'), null);
+      addAttachment(t.id, m.id, { name: 'b.txt', text: 'xx' });
+      assert.equal(listAttachments(t.id).length, 2);
+      assert.throws(() => addAttachment('ask_ffffffff', null, { name: 'x', text: 'y' }), /unknown thread/);
+    } },
+    { name: 'binary attachments (#398): raw bytes under <id>.<ext>, kind/mime on the row, text readers refuse them', run: () => {
+      const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0xfe, 0xff]);
+      const t = createThread();
+      const m = appendMessage(t.id, { role: 'user', text: 'see shot' });
+      const a = addAttachment(t.id, m.id, { name: 'shot.png', kind: 'image', mime: 'image/png', data: png });
+      assert.equal(a.kind, 'image');
+      assert.equal(a.mime, 'image/png');
+      assert.equal(a.bytes, png.length);
+      const file = join(attachmentsDir(t.id), `${a.id}.png`);
+      assert.ok(existsSync(file), 'body stored with the mime extension, not .txt');
+      assert.deepEqual(readFileSync(file), png, 'bytes round-trip with no utf8 coercion');
+      assert.equal(attachmentPath(t.id, a.id), file);
+      assert.equal(attachmentPath(createThread().id, a.id), null, 'path is thread-scoped');
+      assert.equal(readAttachmentText(t.id, a.id), null, 'a binary body is never served as text');
+      const raw = readAttachmentRaw(t.id, a.id);
+      assert.deepEqual(raw.buffer, png);
+      assert.equal(raw.kind, 'image');
+      // text rows still read raw too (the download route uses one reader for both)
+      const txt = addAttachment(t.id, m.id, { name: 'n.txt', text: 'hey' });
+      assert.equal(txt.kind, 'text');
+      assert.equal(readAttachmentRaw(t.id, txt.id).buffer.toString('utf8'), 'hey');
+      assert.throws(() => addAttachment(t.id, m.id, { name: 'x.png', kind: 'image', mime: 'image/png' }),
+        /Buffer/, 'a non-text attachment without a Buffer body is refused');
+      // a row that outlived its body must not hand out a dangling pointer
+      unlinkSync(file);
+      assert.equal(attachmentPath(t.id, a.id), null, 'no path for a body that is gone');
+      assert.equal(readAttachmentRaw(t.id, a.id), null);
+      assert.ok(getAttachment(t.id, a.id), 'the row itself is still there');
+    } },
+  ]);
 });
 
 test('run links: insert, update, list', () => {
@@ -359,59 +394,62 @@ test('deleteThread cascades rows and removes the attachment directory', () => {
   assert.equal(deleteThread(t.id), false);
 });
 
-test('deleteThread refuses an id the store never minted — the rm -rf can never leave askRoot()', () => {
-  // The attachment root is join(askRoot(), id). A row no store call created (raw
-  // SQL, a foreign writer, a future import) with id `..` aimed that rmSync at the
-  // whole worca home; the boot sweep would then run it unattended.
-  const home = worcaHome();
-  const keeper = createThread();
-  const km = appendMessage(keeper.id, { role: 'user', text: 'keep me' });
-  addAttachment(keeper.id, km.id, { name: 'k.md', text: 'keep' });
-  const db = getDb();
-  const old = '2000-01-01T00:00:00.000Z';
-  for (const bad of ['..', '', '../..']) {
-    db.prepare('INSERT INTO ask_threads (id, created_at, updated_at) VALUES (?, ?, ?)').run(bad, old, old);
-  }
-  assert.equal(deleteThread('..'), false, 'a traversal id is refused outright');
-  assert.equal(deleteThread(''), false);
-  assert.equal(sweepEmptyThreads({ olderThanMs: 24 * 60 * 60 * 1000 }), 0, 'the sweep counts only rows it really deleted');
-  assert.ok(existsSync(home), 'the worca home survives');
-  assert.ok(existsSync(join(home, 'worca-cc.db')), 'and so does the database');
-  assert.ok(existsSync(join(askRoot(), keeper.id)), "another thread's attachment root survives");
-  assert.ok(getThread(keeper.id), 'and its rows');
-  db.prepare('DELETE FROM ask_threads WHERE id IN (?, ?, ?)').run('..', '', '../..');
-});
+test('an id the store never minted is refused by deleteThread (rm -rf never leaves askRoot) and by the attachment write/read paths', async () => {
+  await checkRows([
+    { name: 'deleteThread refuses an id the store never minted — the rm -rf can never leave askRoot()', run: () => {
+      // The attachment root is join(askRoot(), id). A row no store call created (raw
+      // SQL, a foreign writer, a future import) with id `..` aimed that rmSync at the
+      // whole worca home; the boot sweep would then run it unattended.
+      const home = worcaHome();
+      const keeper = createThread();
+      const km = appendMessage(keeper.id, { role: 'user', text: 'keep me' });
+      addAttachment(keeper.id, km.id, { name: 'k.md', text: 'keep' });
+      const db = getDb();
+      const old = '2000-01-01T00:00:00.000Z';
+      for (const bad of ['..', '', '../..']) {
+        db.prepare('INSERT INTO ask_threads (id, created_at, updated_at) VALUES (?, ?, ?)').run(bad, old, old);
+      }
+      assert.equal(deleteThread('..'), false, 'a traversal id is refused outright');
+      assert.equal(deleteThread(''), false);
+      assert.equal(sweepEmptyThreads({ olderThanMs: 24 * 60 * 60 * 1000 }), 0, 'the sweep counts only rows it really deleted');
+      assert.ok(existsSync(home), 'the worca home survives');
+      assert.ok(existsSync(join(home, 'worca-cc.db')), 'and so does the database');
+      assert.ok(existsSync(join(askRoot(), keeper.id)), "another thread's attachment root survives");
+      assert.ok(getThread(keeper.id), 'and its rows');
+      db.prepare('DELETE FROM ask_threads WHERE id IN (?, ?, ?)').run('..', '', '../..');
+    } },
+    { name: 'the attachment WRITE and READ paths refuse an id the store never minted', run: () => {
+      // Same precondition as deleteThread above — a row no store call created — on the
+      // other two sides of the same path build. `addAttachment('..')` wrote its body to
+      // <home>/.worca-cc/att/, `addAttachment('../../etc')` outside the worca home
+      // entirely, and a foreign ask_attachments row let readAttachmentText return a file
+      // from anywhere on disk.
+      const home = worcaHome();
+      const db = getDb();
+      const old = '2000-01-01T00:00:00.000Z';
+      const badThreads = ['..', '../../etc'];
+      for (const bad of badThreads) {
+        db.prepare('INSERT INTO ask_threads (id, created_at, updated_at) VALUES (?, ?, ?)').run(bad, old, old);
+        assert.throws(() => attachmentsDir(bad), /thread id/, `attachmentsDir refuses ${bad}`);
+        assert.throws(() => addAttachment(bad, null, { name: 'x.txt', text: 'SECRET' }), /thread id/, `addAttachment refuses ${bad}`);
+      }
+      assert.ok(!existsSync(join(askRoot(), '..', 'att')), 'nothing was written next to the ask root');
+      assert.ok(!existsSync(join(home, '..', 'etc', 'att')), 'and nothing outside the worca home');
 
-test('the attachment WRITE and READ paths refuse an id the store never minted', () => {
-  // Same precondition as deleteThread above — a row no store call created — on the
-  // other two sides of the same path build. `addAttachment('..')` wrote its body to
-  // <home>/.worca-cc/att/, `addAttachment('../../etc')` outside the worca home
-  // entirely, and a foreign ask_attachments row let readAttachmentText return a file
-  // from anywhere on disk.
-  const home = worcaHome();
-  const db = getDb();
-  const old = '2000-01-01T00:00:00.000Z';
-  const badThreads = ['..', '../../etc'];
-  for (const bad of badThreads) {
-    db.prepare('INSERT INTO ask_threads (id, created_at, updated_at) VALUES (?, ?, ?)').run(bad, old, old);
-    assert.throws(() => attachmentsDir(bad), /thread id/, `attachmentsDir refuses ${bad}`);
-    assert.throws(() => addAttachment(bad, null, { name: 'x.txt', text: 'SECRET' }), /thread id/, `addAttachment refuses ${bad}`);
-  }
-  assert.ok(!existsSync(join(askRoot(), '..', 'att')), 'nothing was written next to the ask root');
-  assert.ok(!existsSync(join(home, '..', 'etc', 'att')), 'and nothing outside the worca home');
+      // a legitimate thread carrying a foreign attachment row: the id is what builds the
+      // file path, so it is shape-checked before the read, not just looked up
+      const t = createThread();
+      const m = appendMessage(t.id, { role: 'user', text: 'hi' });
+      const good = addAttachment(t.id, m.id, { name: 'k.md', text: 'keep' });
+      db.prepare('INSERT INTO ask_attachments (id, thread_id, message_id, name, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run('../../../../etc/hosts', t.id, m.id, 'hosts', 0, old);
+      assert.equal(readAttachmentText(t.id, '../../../../etc/hosts'), null, 'a traversal attachment id reads nothing');
+      assert.deepEqual(readAttachmentText(t.id, good.id), { ...good, text: 'keep' }, 'a real attachment still reads');
 
-  // a legitimate thread carrying a foreign attachment row: the id is what builds the
-  // file path, so it is shape-checked before the read, not just looked up
-  const t = createThread();
-  const m = appendMessage(t.id, { role: 'user', text: 'hi' });
-  const good = addAttachment(t.id, m.id, { name: 'k.md', text: 'keep' });
-  db.prepare('INSERT INTO ask_attachments (id, thread_id, message_id, name, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run('../../../../etc/hosts', t.id, m.id, 'hosts', 0, old);
-  assert.equal(readAttachmentText(t.id, '../../../../etc/hosts'), null, 'a traversal attachment id reads nothing');
-  assert.deepEqual(readAttachmentText(t.id, good.id), { ...good, text: 'keep' }, 'a real attachment still reads');
-
-  db.prepare('DELETE FROM ask_attachments WHERE id = ?').run('../../../../etc/hosts');
-  db.prepare('DELETE FROM ask_threads WHERE id IN (?, ?)').run(...badThreads);
+      db.prepare('DELETE FROM ask_attachments WHERE id = ?').run('../../../../etc/hosts');
+      db.prepare('DELETE FROM ask_threads WHERE id IN (?, ?)').run(...badThreads);
+    } },
+  ]);
 });
 
 test('sweepEmptyThreads removes only message-less threads older than the cutoff', () => {
@@ -436,50 +474,43 @@ test('sweepEmptyThreads removes only message-less threads older than the cutoff'
     'nor does the sweep touch the ledger (D1)');
 });
 
-test('workflow card: updateCardBlock keeps workflowId and shallow-merges a `card` sub-patch; run cards stay immutable; unknown keys dropped', () => {
-  const t = createThread();
-  const m = appendMessage(t.id, { role: 'assistant', text: '', status: 'done' });
-  setMessageBlocks(m.id, [
-    { kind: 'card', id: 'card_0000aa01', state: 'proposed', card: { type: 'workflow', name: 'Old', match: null, nodes: { n1: { model: 'a' } }, thenRun: false } },
-    { kind: 'card', id: 'card_0000aa09', state: 'proposed', card: { target: 'project', projectKey: 'p-00000001', workflowId: 'wf_default', guardrailsId: 'normal', brief: 'b', title: 't' } },
+test('updateCardBlock: workflow/metrics/policy cards shallow-merge a `card` sub-patch (workflowId kept); run cards stay immutable; unknown keys dropped', async () => {
+  await checkRows([
+    { name: 'workflow card: updateCardBlock keeps workflowId and shallow-merges a `card` sub-patch; run cards stay immutable; unknown keys dropped', run: () => {
+      const t = createThread();
+      const m = appendMessage(t.id, { role: 'assistant', text: '', status: 'done' });
+      setMessageBlocks(m.id, [
+        { kind: 'card', id: 'card_0000aa01', state: 'proposed', card: { type: 'workflow', name: 'Old', match: null, nodes: { n1: { model: 'a' } }, thenRun: false } },
+        { kind: 'card', id: 'card_0000aa09', state: 'proposed', card: { target: 'project', projectKey: 'p-00000001', workflowId: 'wf_default', guardrailsId: 'normal', brief: 'b', title: 't' } },
+      ]);
+      const b = updateCardBlock(t.id, 'card_0000aa01', { state: 'saved', workflowId: 'wf_new', bogus: 1, card: { name: 'New', match: { id: 'wf_new', name: 'New' }, adopted: false } });
+      assert.equal(b.state, 'saved');
+      assert.equal(b.workflowId, 'wf_new');
+      assert.equal(b.bogus, undefined, 'unknown block keys are dropped');
+      assert.deepEqual(b.card, { type: 'workflow', name: 'New', match: { id: 'wf_new', name: 'New' }, nodes: { n1: { model: 'a' } }, thenRun: false, adopted: false }, 'the card sub-patch is SHALLOW-merged');
+      assert.deepEqual(findCard(t.id, 'card_0000aa01').block, b, 'persisted');
+      assert.equal(updateCardBlock(t.id, 'card_0000aa01', { card: 'nope' }).card.name, 'New', 'a non-object card patch is ignored');
+      const run = updateCardBlock(t.id, 'card_0000aa09', { state: 'started', runId: 'run-1', workflowId: 'wf_x', card: { brief: 'hacked' } });
+      assert.equal(run.card.brief, 'b', 'a RUN card never takes a card sub-patch');
+      assert.equal(run.workflowId, 'wf_x', 'workflowId is a block key for both kinds (harmless on a run card)');
+    } },
+    { name: 'metrics card: updateCardBlock shallow-merges a `card` sub-patch (the apply result lands there)', run: () => {
+      const t = createThread();
+      const m = appendMessage(t.id, { role: 'assistant', text: '', status: 'done' });
+      setMessageBlocks(m.id, [{ kind: 'card', id: 'card_0000bb01', state: 'proposed', card: { type: 'metrics', kind: 'record', projectKey: 'p-00000001', record: false, summary: 'Turn "Include my runs" off for p', effects: ['x'] } }]);
+      const b = updateCardBlock(t.id, 'card_0000bb01', { state: 'applied', card: { result: { ok: true, detail: '"Include my runs" is now off' } } });
+      assert.equal(b.state, 'applied');
+      assert.deepEqual(b.card, { type: 'metrics', kind: 'record', projectKey: 'p-00000001', record: false, summary: 'Turn "Include my runs" off for p', effects: ['x'], result: { ok: true, detail: '"Include my runs" is now off' } });
+      assert.deepEqual(findCard(t.id, 'card_0000bb01').block, b, 'persisted');
+    } },
+    { name: 'policy card: the same shallow `card` sub-patch as a metrics card', run: () => {
+      const t = createThread();
+      const m = appendMessage(t.id, { role: 'assistant', text: '', status: 'done' });
+      setMessageBlocks(m.id, [{ kind: 'card', id: 'card_0000bb02', state: 'proposed', card: { type: 'policy', kind: 'edit', home: 'acme/gateway', summary: 'Edit', changes: [] } }]);
+      const b = updateCardBlock(t.id, 'card_0000bb02', { state: 'applied', card: { result: { ok: true, detail: 'published abc1234 to acme/gateway' } } });
+      assert.deepEqual(b.card, { type: 'policy', kind: 'edit', home: 'acme/gateway', summary: 'Edit', changes: [], result: { ok: true, detail: 'published abc1234 to acme/gateway' } });
+    } },
   ]);
-  const b = updateCardBlock(t.id, 'card_0000aa01', { state: 'saved', workflowId: 'wf_new', bogus: 1, card: { name: 'New', match: { id: 'wf_new', name: 'New' }, adopted: false } });
-  assert.equal(b.state, 'saved');
-  assert.equal(b.workflowId, 'wf_new');
-  assert.equal(b.bogus, undefined, 'unknown block keys are dropped');
-  assert.deepEqual(b.card, { type: 'workflow', name: 'New', match: { id: 'wf_new', name: 'New' }, nodes: { n1: { model: 'a' } }, thenRun: false, adopted: false }, 'the card sub-patch is SHALLOW-merged');
-  assert.deepEqual(findCard(t.id, 'card_0000aa01').block, b, 'persisted');
-  assert.equal(updateCardBlock(t.id, 'card_0000aa01', { card: 'nope' }).card.name, 'New', 'a non-object card patch is ignored');
-  const run = updateCardBlock(t.id, 'card_0000aa09', { state: 'started', runId: 'run-1', workflowId: 'wf_x', card: { brief: 'hacked' } });
-  assert.equal(run.card.brief, 'b', 'a RUN card never takes a card sub-patch');
-  assert.equal(run.workflowId, 'wf_x', 'workflowId is a block key for both kinds (harmless on a run card)');
-});
-
-test('metrics card: updateCardBlock shallow-merges a `card` sub-patch (the apply result lands there)', () => {
-  const t = createThread();
-  const m = appendMessage(t.id, { role: 'assistant', text: '', status: 'done' });
-  setMessageBlocks(m.id, [{ kind: 'card', id: 'card_0000bb01', state: 'proposed', card: { type: 'metrics', kind: 'record', projectKey: 'p-00000001', record: false, summary: 'Turn "Include my runs" off for p', effects: ['x'] } }]);
-  const b = updateCardBlock(t.id, 'card_0000bb01', { state: 'applied', card: { result: { ok: true, detail: '"Include my runs" is now off' } } });
-  assert.equal(b.state, 'applied');
-  assert.deepEqual(b.card, { type: 'metrics', kind: 'record', projectKey: 'p-00000001', record: false, summary: 'Turn "Include my runs" off for p', effects: ['x'], result: { ok: true, detail: '"Include my runs" is now off' } });
-  assert.deepEqual(findCard(t.id, 'card_0000bb01').block, b, 'persisted');
-});
-
-test('policy card: the same shallow `card` sub-patch as a metrics card', () => {
-  const t = createThread();
-  const m = appendMessage(t.id, { role: 'assistant', text: '', status: 'done' });
-  setMessageBlocks(m.id, [{ kind: 'card', id: 'card_0000bb02', state: 'proposed', card: { type: 'policy', kind: 'edit', home: 'acme/gateway', summary: 'Edit', changes: [] } }]);
-  const b = updateCardBlock(t.id, 'card_0000bb02', { state: 'applied', card: { result: { ok: true, detail: 'published abc1234 to acme/gateway' } } });
-  assert.deepEqual(b.card, { type: 'policy', kind: 'edit', home: 'acme/gateway', summary: 'Edit', changes: [], result: { ok: true, detail: 'published abc1234 to acme/gateway' } });
-});
-
-test('boot sweep: a streaming row\'s building workflow card turns failed with the sweep text', () => {
-  const t = createThread();
-  const m = appendMessage(t.id, { role: 'assistant', text: '', status: 'streaming' });
-  setMessageBlocks(m.id, [{ kind: 'card', id: 'card_0000aa02', state: 'building', card: { type: 'workflow', mode: 'task' } }, { kind: 'card', id: 'card_0000aa03', state: 'proposed', card: { type: 'workflow' } }]);
-  assert.equal(sweepStreamingMessages(), 1);
-  const blocks = getMessage(m.id).blocks;
-  assert.deepEqual(blocks.map((b) => [b.kind, b.state ?? null, b.error ?? null]), [['card', 'failed', 'interrupted by restart'], ['card', 'proposed', null], ['notice', null, null]]);
 });
 
 test('addThreadContexts accumulates; updateThread/scope writes never touch contexts', () => {
@@ -496,19 +527,4 @@ test('addThreadContexts accumulates; updateThread/scope writes never touch conte
   assert.deepEqual(listThreads().find((x) => x.id === t.id).contexts, [p, s], 'the list carries them too');
   assert.equal(addThreadContexts('ask_ffffffff', [p]), null);
   assert.deepEqual(addThreadContexts(t.id, []), [p, s], 'an empty turn is a no-op');
-});
-
-test('addThreadTotals: usage.ctxWindow REPLACES the stored window; a turn without one, or a garbage one, leaves it', () => {
-  const t = createThread({});
-  let tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 1000 } });
-  assert.equal('ctxWindow' in tot, false, 'never reported: absent');
-  tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 2000, ctxWindow: 1000000 } });
-  assert.equal(tot.ctxWindow, 1000000);
-  tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 3000 } });
-  assert.equal(tot.ctxWindow, 1000000, 'a turn with no result keeps the last known window');
-  tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 3000, ctxWindow: 0 } });
-  assert.equal(tot.ctxWindow, 1000000, 'garbage is ignored');
-  tot = addThreadTotals(t.id, { costUsd: 0, usage: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, ctx: 3000, ctxWindow: 200000 } });
-  assert.equal(tot.ctxWindow, 200000, 'a model switch replaces it');
-  assert.equal(getThread(t.id).totals.ctxWindow, 200000, 'rowToThread surfaces it');
 });

@@ -1,6 +1,7 @@
 // test/ask-track-run.test.mjs — askTrackRun (plan D5/D6/D22): link a run to a thread once per pipeline, follow a live one once.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { EventEmitter } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -30,48 +31,93 @@ function makeEntry(overrides = {}) {
   return { id: 'uuid-AAAA', orch: new EventEmitter(), projectDir: '/tmp/x', title: 't', status: 'starting', startedAt: new Date().toISOString(), events: [], pendingQuestion: null, ...overrides };
 }
 
-test('askTrackRun: a finished run links once under its pipeline id, returns the card identity, attaches no follower', async () => {
-  const dir = await makeProjectDir();
-  const { id } = await seedPipeline(dir, { title: 'Old run', status: 'done', steps: [] });
-  const t = createThread();
-  const r1 = mod._testing.askTrackRun(t.id, { id }, null);
-  assert.equal(r1.ok, true);
-  assert.deepEqual(r1.card, { type: 'progress', pipelineId: id, runId: null, projectKey: projectKey(dir), workspaceId: null, title: 'Old run', label: basename(dir), status: 'done' });
-  const links = listRunLinks(t.id);
-  assert.equal(links.length, 1);
-  assert.equal(links[0].runId, id, 'no live UUID: the pipeline id keys the row (D5)');
-  assert.equal(links[0].pipelineId, id);
-  assert.equal(links[0].cardId, null);
-  mod._testing.askTrackRun(t.id, { id }, null);
-  assert.equal(listRunLinks(t.id).length, 1, 'idempotent per (thread, pipeline) — app-level: the PK is (thread, run_id) and linkRun throws on a collision');
-  assert.equal(mod._testing.askFollowers.get(t.id), undefined);
+test('askTrackRun: a finished run, or a settled runs-Map entry, links once and is never followed', async () => {
+  await checkRows([
+    { name: 'askTrackRun: a finished run links once under its pipeline id, returns the card identity, attaches no follower', run: async () => {
+      const dir = await makeProjectDir();
+      const { id } = await seedPipeline(dir, { title: 'Old run', status: 'done', steps: [] });
+      const t = createThread();
+      const r1 = mod._testing.askTrackRun(t.id, { id }, null);
+      assert.equal(r1.ok, true);
+      assert.deepEqual(r1.card, { type: 'progress', pipelineId: id, runId: null, projectKey: projectKey(dir), workspaceId: null, title: 'Old run', label: basename(dir), status: 'done' });
+      const links = listRunLinks(t.id);
+      assert.equal(links.length, 1);
+      assert.equal(links[0].runId, id, 'no live UUID: the pipeline id keys the row (D5)');
+      assert.equal(links[0].pipelineId, id);
+      assert.equal(links[0].cardId, null);
+      mod._testing.askTrackRun(t.id, { id }, null);
+      assert.equal(listRunLinks(t.id).length, 1, 'idempotent per (thread, pipeline) — app-level: the PK is (thread, run_id) and linkRun throws on a collision');
+      assert.equal(mod._testing.askFollowers.get(t.id), undefined);
+    } },
+    { name: 'askTrackRun: a settled runs-Map entry links but is never followed (a finished orchestrator emits nothing again)', run: async () => {
+      const dir = await makeProjectDir();
+      const { id } = await seedPipeline(dir, { title: 'Settled', status: 'done', steps: [] });
+      const t = createThread();
+      const entry = makeEntry({ id: 'uuid-SETTLED', pipelineId: id, status: 'done', projectDir: dir, title: 'Settled' });
+      mod.runs.set(entry.id, entry);
+      try {
+        const r = mod._testing.askTrackRun(t.id, { id }, null);
+        assert.equal(r.ok, true);
+        assert.equal(r.card.runId, 'uuid-SETTLED', 'the entry still names the lineage the card opens');
+        assert.equal(listRunLinks(t.id).length, 1);
+        assert.equal(mod._testing.askFollowers.get(t.id), undefined, 'no zombie follower on a settled entry the server never prunes');
+        assert.equal(entry.orch.listenerCount('done'), 0);
+      } finally {
+        for (const f of mod._testing.askFollowers.get(t.id) || []) f.detach();
+        mod.runs.delete(entry.id);
+      }
+    } },
+  ]);
 });
 
-test('askTrackRun: a live run links under its UUID, attaches ONE follower, and takes over a pipeline-keyed row', async () => {
-  const dir = await makeProjectDir();
-  const { id } = await seedPipeline(dir, { title: 'Live', status: 'running', steps: [] });
-  const t = createThread();
-  mod._testing.askTrackRun(t.id, { id }, null);                         // tracked while nobody had it live
-  const orch = new EventEmitter(); orch.state = {}; orch.getState = () => ({ ...orch.state });
-  const entry = makeEntry({ id: 'uuid-LIVE', orch, pipelineId: id, status: 'running', projectDir: dir, title: 'Live' });
-  mod.runs.set(entry.id, entry);
-  try {
-    const r = mod._testing.askTrackRun(t.id, { id: 'uuid-LIVE' }, null);
-    assert.equal(r.ok, true);
-    assert.equal(r.card.runId, 'uuid-LIVE');
-    assert.equal(r.card.pipelineId, id);
-    const links = listRunLinks(t.id);
-    assert.equal(links.length, 1, 'the pipeline-keyed row was MOVED, not duplicated');
-    assert.equal(links[0].runId, 'uuid-LIVE');
-    assert.equal(mod._testing.askFollowers.get(t.id).size, 1);
-    mod._testing.askTrackRun(t.id, { id }, null);
-    assert.equal(mod._testing.askFollowers.get(t.id).size, 1, 'a second track never double-follows (D6)');
-    // a null-cardId follower never flips a card: an error only posts the notice + the status frame, then detaches
-    orch.emit('error', { message: 'boom' });
-    assert.ok(listMessages(t.id).some((m) => /^Run failed: boom/.test(m.text)));
-    assert.equal(mod._testing.askFollowers.get(t.id), undefined, 'detached on error');
-    assert.equal(listRunLinks(t.id)[0].status, 'error');
-  } finally { mod.runs.delete(entry.id); }
+test('askTrackRun live links: under its UUID with one follower, taking over a pipeline row; an orphan proposal link is adopted, never duplicated', async () => {
+  await checkRows([
+    { name: 'askTrackRun: a live run links under its UUID, attaches ONE follower, and takes over a pipeline-keyed row', run: async () => {
+      const dir = await makeProjectDir();
+      const { id } = await seedPipeline(dir, { title: 'Live', status: 'running', steps: [] });
+      const t = createThread();
+      mod._testing.askTrackRun(t.id, { id }, null);                         // tracked while nobody had it live
+      const orch = new EventEmitter(); orch.state = {}; orch.getState = () => ({ ...orch.state });
+      const entry = makeEntry({ id: 'uuid-LIVE', orch, pipelineId: id, status: 'running', projectDir: dir, title: 'Live' });
+      mod.runs.set(entry.id, entry);
+      try {
+        const r = mod._testing.askTrackRun(t.id, { id: 'uuid-LIVE' }, null);
+        assert.equal(r.ok, true);
+        assert.equal(r.card.runId, 'uuid-LIVE');
+        assert.equal(r.card.pipelineId, id);
+        const links = listRunLinks(t.id);
+        assert.equal(links.length, 1, 'the pipeline-keyed row was MOVED, not duplicated');
+        assert.equal(links[0].runId, 'uuid-LIVE');
+        assert.equal(mod._testing.askFollowers.get(t.id).size, 1);
+        mod._testing.askTrackRun(t.id, { id }, null);
+        assert.equal(mod._testing.askFollowers.get(t.id).size, 1, 'a second track never double-follows (D6)');
+        // a null-cardId follower never flips a card: an error only posts the notice + the status frame, then detaches
+        orch.emit('error', { message: 'boom' });
+        assert.ok(listMessages(t.id).some((m) => /^Run failed: boom/.test(m.text)));
+        assert.equal(mod._testing.askFollowers.get(t.id), undefined, 'detached on error');
+        assert.equal(listRunLinks(t.id)[0].status, 'error');
+      } finally { mod.runs.delete(entry.id); }
+    } },
+    { name: 'askTrackRun: an orphan proposal link (uuid row, pipeline id never filled) is adopted, never duplicated, never a throw', run: async () => {
+      const dir = await makeProjectDir();
+      const { id } = await seedPipeline(dir, { title: 'Orphan', status: 'running', steps: [] });
+      const t = createThread();
+      linkRun(t.id, { runId: 'uuid-ORPHAN', cardId: 'card_00000009', status: 'running' });   // what POST /api/run inserts before the first state
+      const entry = makeEntry({ id: 'uuid-ORPHAN', pipelineId: id, status: 'running', projectDir: dir, title: 'Orphan' });
+      mod.runs.set(entry.id, entry);
+      try {
+        const r = mod._testing.askTrackRun(t.id, { id }, null);
+        assert.equal(r.ok, true);
+        const links = listRunLinks(t.id);
+        assert.equal(links.length, 1, 'the uuid row is adopted, not duplicated (the PK is (thread, run_id))');
+        assert.equal(links[0].pipelineId, id, 'and it learns its pipeline id');
+        assert.equal(links[0].cardId, 'card_00000009', 'the proposal card keeps its link');
+      } finally {
+        for (const f of mod._testing.askFollowers.get(t.id) || []) f.detach();
+        mod.runs.delete(entry.id);
+      }
+    } },
+  ]);
 });
 
 test('askTrackRun: unknown id → {ok:false}; a live entry without a pipeline id yet is reported; the pinned scope is tried first', async () => {
@@ -85,45 +131,6 @@ test('askTrackRun: unknown id → {ok:false}; a live entry without a pipeline id
   const { id } = await seedPipeline(dir, { title: 'Scoped', status: 'done', steps: [] });
   assert.equal(mod._testing.askTrackRun(t.id, { id }, { projectKey: projectKey(dir) }).ok, true, 'pinned project scope resolves');
   assert.equal(mod._testing.askTrackRun(t.id, { id, projectKey: 'other-00000003' }, null).ok, true, 'a wrong explicit scope still falls back to the id-only lookup (get_run in the child already rejected a real mismatch)');
-});
-
-test('askTrackRun: an orphan proposal link (uuid row, pipeline id never filled) is adopted, never duplicated, never a throw', async () => {
-  const dir = await makeProjectDir();
-  const { id } = await seedPipeline(dir, { title: 'Orphan', status: 'running', steps: [] });
-  const t = createThread();
-  linkRun(t.id, { runId: 'uuid-ORPHAN', cardId: 'card_00000009', status: 'running' });   // what POST /api/run inserts before the first state
-  const entry = makeEntry({ id: 'uuid-ORPHAN', pipelineId: id, status: 'running', projectDir: dir, title: 'Orphan' });
-  mod.runs.set(entry.id, entry);
-  try {
-    const r = mod._testing.askTrackRun(t.id, { id }, null);
-    assert.equal(r.ok, true);
-    const links = listRunLinks(t.id);
-    assert.equal(links.length, 1, 'the uuid row is adopted, not duplicated (the PK is (thread, run_id))');
-    assert.equal(links[0].pipelineId, id, 'and it learns its pipeline id');
-    assert.equal(links[0].cardId, 'card_00000009', 'the proposal card keeps its link');
-  } finally {
-    for (const f of mod._testing.askFollowers.get(t.id) || []) f.detach();
-    mod.runs.delete(entry.id);
-  }
-});
-
-test('askTrackRun: a settled runs-Map entry links but is never followed (a finished orchestrator emits nothing again)', async () => {
-  const dir = await makeProjectDir();
-  const { id } = await seedPipeline(dir, { title: 'Settled', status: 'done', steps: [] });
-  const t = createThread();
-  const entry = makeEntry({ id: 'uuid-SETTLED', pipelineId: id, status: 'done', projectDir: dir, title: 'Settled' });
-  mod.runs.set(entry.id, entry);
-  try {
-    const r = mod._testing.askTrackRun(t.id, { id }, null);
-    assert.equal(r.ok, true);
-    assert.equal(r.card.runId, 'uuid-SETTLED', 'the entry still names the lineage the card opens');
-    assert.equal(listRunLinks(t.id).length, 1);
-    assert.equal(mod._testing.askFollowers.get(t.id), undefined, 'no zombie follower on a settled entry the server never prunes');
-    assert.equal(entry.orch.listenerCount('done'), 0);
-  } finally {
-    for (const f of mod._testing.askFollowers.get(t.id) || []) f.detach();
-    mod.runs.delete(entry.id);
-  }
 });
 
 test('askTrackRun: an uppercase or dir-name id finds the LIVE entry, not just the row (the DB lookup canonicalises, the Map scan does not)', async () => {

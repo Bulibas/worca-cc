@@ -14,6 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
 import { _resetForTests, getDb } from '../src/core/db.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 const prev = { WORCA_HOME: process.env.WORCA_HOME, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
 const created = [];
@@ -22,15 +23,9 @@ const JSONH = { 'Content-Type': 'application/json' };
 const NODE = `"${process.execPath}"`;
 const git = (cwd, args) => spawnSync('git', args, { cwd, encoding: 'utf8' });
 
-async function freshRepo(prefix = 'worca-cc-apiact-') {
-  const dir = await mkdtemp(join(tmpdir(), prefix));
+function freshRepo(prefix = 'worca-cc-apiact-') {
+  const dir = templateRepo('apiact', { branch: 'main', user: true, files: { 'README.md': '# hi\n' }, prefix });
   created.push(dir);
-  git(dir, ['init', '-q', '-b', 'main']);
-  git(dir, ['config', 'user.email', 't@t']);
-  git(dir, ['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  git(dir, ['add', '-A']);
-  git(dir, ['commit', '-qm', 'init']);
   return dir;
 }
 

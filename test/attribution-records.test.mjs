@@ -4,18 +4,22 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { actorForRecord, buildRunRecord } from '../src/core/metrics/record.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
-test('actorForRecord: a person wins; local, empty and non-strings fall back', () => {
-  assert.equal(actorForRecord('ada@example.com'), 'ada@example.com');
-  for (const v of ['local', '', '  ', null, undefined, 7]) assert.equal(actorForRecord(v), null, String(v));
-});
-
-test('attribution:none still drops the actor, whoever started the run', () => {
-  const snap = { id: 'abcd0001', status: 'done', actor: 'ada@example.com', steps: [] };
-  assert.equal(buildRunRecord(snap, { attribution: 'none' }).actor, null);
-  assert.equal(buildRunRecord(snap, { attribution: 'git-user' }).actor, 'ada@example.com');
+test('actorForRecord and attribution:none decide the recorded actor', async () => {
+  await checkRows([
+    { name: 'actorForRecord: a person wins; local, empty and non-strings fall back', run: async () => {
+      assert.equal(actorForRecord('ada@example.com'), 'ada@example.com');
+      for (const v of ['local', '', '  ', null, undefined, 7]) assert.equal(actorForRecord(v), null, String(v));
+    } },
+    { name: 'attribution:none still drops the actor, whoever started the run', run: async () => {
+      const snap = { id: 'abcd0001', status: 'done', actor: 'ada@example.com', steps: [] };
+      assert.equal(buildRunRecord(snap, { attribution: 'none' }).actor, null);
+      assert.equal(buildRunRecord(snap, { attribution: 'git-user' }).actor, 'ada@example.com');
+    } },
+  ]);
 });
 
 test('a team pipeline-cap override records who continued, next to the reason', async () => {

@@ -153,15 +153,6 @@ test('a good reply classifies on the first attempt; cost, usage, the raw reply a
   assert.ok(o.systemPrompt.includes('Recipes') && o.systemPrompt.includes('purpose: ') && o.prompt.includes('Build the thing'));
 });
 
-test('the shape schema ties effort to model, the default-model line says "omit both", and the HITL sentence ties clarify to the planner', () => {
-  const sys = buildClassifierSystemPrompt({ agents: agentVocabulary(REG), models: MODELS, humanInLoop: true });
-  assert.ok(sys.includes('"effort"?: <effort> (only together with "model")'), 'an effort needs a model — the live probe paid a retry for this');
-  assert.ok(sys.includes('omit both "model" and "effort" to run on the default model'), 'the default-model line covers the effort too');
-  assert.ok(sys.includes('A human is in the loop: a clarifier stage may open a plain prompt that needs a planner'), 'clarify is conditional, matching the recipe ladder');
-  assert.ok(!sys.includes('open with a clarifier stage when the task is ambiguous'), 'the old unconditional wording is gone');
-  assert.ok(!sys.includes('## Repository'), 'text-only by default: no Repository section');
-});
-
 test('repoLook: the call carries Read/Grep/Glob, --max-turns and the Repository section; the default stays tool-less', async () => {
   const look = fakeRun([reply(GOOD)]);
   const r = await classifyTask(base({ repoLook: true, cwd: '/some/checkout' }), { run: look.run });

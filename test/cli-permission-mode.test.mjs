@@ -16,17 +16,11 @@ import { fileURLToPath } from 'node:url';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 import { ASK_PERMISSION_MODE } from '../src/core/ask/spawn.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const CLI = resolve(fileURLToPath(import.meta.url), '..', '..', 'src', 'cli', 'worca-cc.mjs');
 
 useTempHome(after);
-
-test('--help lists the permission modes the CLI accepts', () => {
-  const out = spawnSync(process.execPath, [CLI, '--help']).stdout.toString();
-  assert.match(out, /--permission-mode <m>\s+Claude permission mode/);
-  assert.match(out, /acceptEdits/);
-  assert.ok(!out.includes(ASK_PERMISSION_MODE), 'the ask runner`s internal mode is not offered');
-});
 
 // `dontAsk` is a legitimate headless mode for a REAL run (`--allowedTools` decide
 // what runs); rejecting it outright was a regression against the pre-#376 CLI,
@@ -34,14 +28,25 @@ test('--help lists the permission modes the CLI accepts', () => {
 // so `--help` (handled after parseArgs, and the one flag that starts no run) is
 // enough to observe acceptance — and a red run of this test cannot spawn a
 // pipeline in the developer's cwd.
-test('--permission-mode dontAsk is accepted for a real run, in both flag spellings', () => {
-  for (const argv of [
-    ['--permission-mode', ASK_PERMISSION_MODE],
-    [`--permission-mode=${ASK_PERMISSION_MODE}`],
-  ]) {
-    const r = spawnSync(process.execPath, [CLI, ...argv, '--help'], { encoding: 'utf8' });
-    assert.equal(r.status, 0, `${argv.join(' ')}: accepted (${r.stderr})`);
-  }
+test('the real permission modes (incl. dontAsk, both flag spellings) still parse', async () => {
+  await checkRows([
+    { name: '--permission-mode dontAsk is accepted for a real run, in both flag spellings', run: async () => {
+      for (const argv of [
+        ['--permission-mode', ASK_PERMISSION_MODE],
+        [`--permission-mode=${ASK_PERMISSION_MODE}`],
+      ]) {
+        const r = spawnSync(process.execPath, [CLI, ...argv, '--help'], { encoding: 'utf8' });
+        assert.equal(r.status, 0, `${argv.join(' ')}: accepted (${r.stderr})`);
+      }
+    } },
+    { name: 'the real permission modes still parse', run: async () => {
+      for (const mode of ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'dontAsk']) {
+        const r = spawnSync(process.execPath, [CLI, '--permission-mode', mode, '--help'], { encoding: 'utf8' });
+        assert.equal(r.status, 0, `${mode}: accepted (${r.stderr})`);
+        assert.match(r.stdout, /--permission-mode/);
+      }
+    } },
+  ]);
 });
 
 // The MOCK runner is the one place dontAsk means "the Ask Worca recipe"
@@ -79,12 +84,4 @@ test('an unknown --permission-mode value is rejected too', () => {
   const r = spawnSync(process.execPath, [CLI, '--permission-mode', 'acceptedits', '--help'], { encoding: 'utf8' });
   assert.equal(r.status, 2);
   assert.match(r.stderr, /acceptedits/, 'the rejected value is echoed back');
-});
-
-test('the real permission modes still parse', () => {
-  for (const mode of ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'dontAsk']) {
-    const r = spawnSync(process.execPath, [CLI, '--permission-mode', mode, '--help'], { encoding: 'utf8' });
-    assert.equal(r.status, 0, `${mode}: accepted (${r.stderr})`);
-    assert.match(r.stdout, /--permission-mode/);
-  }
 });
