@@ -39,6 +39,7 @@ test('a command becomes a block attributed to whoever pressed Enter', { skip: !B
   assert.equal(done.runBy, 'bob');
   assert.match(getBlock(s.id, done.seq).output, /hi/);
   assert.equal(mgr.get(s.id).integration, true);
+  assert.equal(mgr.get(s.id).commands, 1, 'the pane asks before closing a terminal that ran a command');
   assert.deepEqual(listAudit({ sessionId: s.id }).map((a) => [a.action, a.actor]), [['open', 'ada'], ['command', 'bob']]);
   assert.match(mgr.replay(s.id).data, /hi/);
   const live = JSON.parse(readFileSync(pidFile, 'utf8'));
@@ -115,6 +116,21 @@ test('a PTY that cannot spawn falls back to pipes, says why, and stays on pipes'
   assert.match(m.ptyStatus().reason, /posix_spawnp failed/);
   await m.open({ cwd: work, scope: 'run', by: 'ada', baseEnv });
   assert.deepEqual(calls, [['pty', 'xterm-256color'], ['pipes', 'dumb'], ['pipes', 'dumb']]);
+});
+
+test('a shell without blocks counts submitted lines as commands, and says so once', async () => {
+  const m = new TerminalManager({ ptyInfo: () => ({ pty: null }), shell: () => ({ file: '/bin/sh', kind: 'other', platform: process.platform }),
+    spawnImpl: () => ({ pid: null, mode: 'pipes', write() {}, resize() {}, signal() {}, onData() {}, onExit() {} }) });
+  const s = await m.open({ cwd: work, scope: 'run', by: 'ada', baseEnv });
+  const statuses = [];
+  m.on('status', (x) => statuses.push(x.commands));
+  assert.equal(s.commands, 0);
+  m.write(s.id, 'ls', 'ada');
+  assert.equal(m.get(s.id).commands, 0, 'no line end, no command');
+  m.write(s.id, '\r', 'ada');
+  m.write(s.id, 'pwd\r', 'ada');
+  assert.equal(m.get(s.id).commands, 2);
+  assert.deepEqual(statuses, [1]);
 });
 
 test('a session row that cannot be written kills the shell and leaves nothing live', async () => {

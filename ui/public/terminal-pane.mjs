@@ -46,7 +46,8 @@ export function defaultLoadXterm(doc) {
   return xtermPromise;
 }
 
-export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, storage = null, loadXterm = null }) {
+/** `confirm({ title, message, confirmLabel })` resolves true to go ahead (app.js passes its confirmModal). */
+export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, confirm = null, storage = null, loadXterm = null }) {
   const load = loadXterm || (() => defaultLoadXterm(doc));
   const st = { open: false, enabled: true, pty: { available: true, reason: null }, sessions: new Map(), current: null, lastSeq: 0,
     target: { kind: 'other' }, targetKey: '', ctx: null, ctxGen: 0, term: null,
@@ -54,6 +55,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
     warnings: new Map(),         // session id → the warning its open returned (a detached branch copy): shown while attached
     tried: new Set(),            // start keys auto-started since the pane opened: each at most once (D3)
     starting: null,              // the start key whose shell is being made
+    closing: new Set(),          // session ids whose close (a tab's ×) is under way
     restartKey: null,            // Enter starts a new shell for this start key (the last one exited, or never started)
     why: null, focusNext: false, pendingTimer: null };
   const drawn = { tabs: '', context: '' };     // what the tabs and the context bar show: unchanged → not rebuilt (an open select stays open)
@@ -325,6 +327,37 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
   function stopCurrent() {
     if (st.current) api('POST', `/api/terminal/sessions/${encodeURIComponent(st.current)}/stop`).catch(showError);
   }
+  /**
+   * A tab's ×: closes that terminal (an ended one just leaves). One that has run a command asks first. The
+   * attached one then hands over to the page's next open terminal, or to the Enter line.
+   */
+  async function closeTab(id, name) {
+    const x = st.sessions.get(id);
+    if (!x || st.closing.has(id)) return;
+    if (x.status === 'running') {
+      if (x.commands > 0) {
+        const n = x.commands === 1 ? 'A command has' : `${x.commands} commands have`;
+        const busy = x.currentBlock ? ` ${x.currentBlock.command} is still running and stops.` : '';
+        const ask = { title: 'Close this terminal?', message: `${n} run in ${name}. Closing it ends the shell.${busy}`,
+          confirmLabel: 'Close terminal' };
+        const ok = confirm ? await confirm(ask) : win.confirm(`${ask.title}\n${ask.message}`);
+        if (!ok || st.sessions.get(id)?.status !== 'running') return;
+      }
+      st.closing.add(id);                                // a second click while it closes does nothing
+      const done = await api('DELETE', `/api/terminal/sessions/${encodeURIComponent(id)}`).catch(showError).finally(() => st.closing.delete(id));
+      if (!done) return;
+      const now = st.sessions.get(id);                  // its 'closed' status usually came first
+      if (now?.status === 'running') st.sessions.set(id, { ...now, status: 'closed' });
+    }
+    if (id !== st.current) { render(); return; }
+    detachCurrent();
+    const next = tabSessions().find((s) => s.status === 'running');
+    if (next) { st.focusNext = true; await attach(next.id); return; }
+    const key = startKey();
+    st.restartKey = null;
+    if (key) promptRestart(key, 'terminal closed');
+    render();
+  }
   /** The (+) tab: another shell for this page, next to the ones it has. */
   function addShell() {
     const key = startKey();
@@ -468,12 +501,18 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
       const n = (seen.get(base) || 0) + 1;
       seen.set(base, n);
       const text = n > 1 ? `${base} ${n}` : base;
+      // The tab and its × are sibling buttons in one frame: a button cannot hold another.
+      const item = make('span', 'term-tab-item');
       const t = button(text, 'term-tab', () => { if (x.id !== st.current) { st.focusNext = true; attach(x.id); } else focusTerm(); }, '');
       t.setAttribute('role', 'tab');
       t.setAttribute('aria-selected', String(x.id === st.current));
       t.title = x.status === 'running' ? text : `${text} — ${x.status}`;
-      if (x.status !== 'running') t.classList.add('term-tab-ended');
-      tabs.append(t);
+      if (x.status !== 'running') item.classList.add('term-tab-ended');
+      const shut = button('×', 'term-tab-close', () => closeTab(x.id, text), '');
+      shut.setAttribute('aria-label', `Close ${text}`);
+      shut.title = x.status === 'running' ? 'Close this terminal' : 'Remove this tab';
+      item.append(t, shut);
+      tabs.append(item);
     }
     if (canAdd) {
       const add = button('+', 'term-tab term-tab-add', () => addShell(), '');

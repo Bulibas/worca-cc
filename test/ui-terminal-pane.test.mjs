@@ -22,7 +22,7 @@ function fakeXterm() {
   return { load: async () => ({ Terminal, FitAddon }), writes, made, type: (d) => onKeys(d) };
 }
 
-function makePane({ ctx, routes, url = 'http://localhost:4317/', env = {}, beforeCreate = null }) {
+function makePane({ ctx, routes, url = 'http://localhost:4317/', env = {}, beforeCreate = null, confirm = null }) {
   const dom = new JSDOM('<!doctype html><body></body>', { url });
   if (beforeCreate) beforeCreate(dom.window);
   env.ctx ??= ctx;
@@ -41,7 +41,7 @@ function makePane({ ctx, routes, url = 'http://localhost:4317/', env = {}, befor
   // Like app.js: false while /ws is down, and then nothing is sent.
   const sendWs = (m) => { if (!env.online) return false; sent.push(m); return true; };
   const pane = createTerminalPane({ doc: dom.window.document, win: dom.window, fetch, sendWs,
-    getPageContext: () => env.ctx, storage: null, loadXterm: xt.load });
+    getPageContext: () => env.ctx, confirm, storage: null, loadXterm: xt.load });
   dom.window.document.body.append(pane.root);
   return { pane, doc: dom.window.document, sent, calls, xt, env };
 }
@@ -354,6 +354,72 @@ test('the tabs: this page\'s open terminals, then a small (+) tab; other pages\'
   assert.deepEqual(tabTexts(doc), ['r1 · app', 'r1 · app 2', 'New terminal'], 'a second shell of the folder: numbered, on the right');
   pane.onFrame({ type: 'term-status', snapshot: { ...SNAP, id: 't-3', createdAt: '2026-10-03T11:00:00.000Z', status: 'exited' } });
   assert.deepEqual(tabTexts(doc), ['r1 · app', 'New terminal'], 'an ended terminal that is not attached leaves');
+});
+
+const deletes = (calls) => calls.filter((c) => c.method === 'DELETE').map((c) => c.url);
+
+test('a tab\'s × closes an unused terminal without asking and hands over to the page\'s next one', async () => {
+  const T2 = { ...SNAP, id: 't-2', commands: 0, createdAt: '2026-10-03T11:00:00.000Z' };
+  const asked = [];
+  const { pane, doc, sent, calls } = makePane({ ctx: RUN_CTX, confirm: async (o) => { asked.push(o); return true; }, routes: attachedRoutes({
+    'GET /api/terminal': { ...INFO, sessions: [SNAP, T2] },
+    'DELETE /api/terminal/sessions/t-2': { ok: true },
+  }) });
+  await pane.open();
+  await tick();
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-2', 'the newest is attached');
+  assert.deepEqual([...doc.querySelectorAll('.term-tab-close')].map((b) => b.getAttribute('aria-label')), ['Close r1 · app', 'Close r1 · app 2']);
+  doc.querySelectorAll('.term-tab-close')[1].click();
+  await tick();
+  assert.equal(asked.length, 0, 'no command ran there: no question');
+  assert.deepEqual(deletes(calls), ['/api/terminal/sessions/t-2']);
+  assert.ok(sent.some((m) => m.type === 'term-detach' && m.sessionId === 't-2'));
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-1');
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'New terminal']);
+  pane.onFrame({ type: 'term-status', snapshot: { ...T2, status: 'closed' } });
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'New terminal']);
+});
+
+test('a tab\'s × on a terminal that ran a command asks first; No keeps it, Yes closes it and offers Enter', async () => {
+  const used = { ...SNAP, commands: 2, currentBlock: { seq: 2, command: 'npm test' } };
+  let answer = false;
+  const asked = [];
+  const { pane, doc, calls, xt } = makePane({ ctx: RUN_CTX, confirm: async (o) => { asked.push(o); return answer; }, routes: attachedRoutes({
+    'GET /api/terminal': { ...INFO, sessions: [used] },
+    'GET /api/runs/r1/terminal': { enabled: true, live: true, workspace: false, sessions: [used], members: MEMBERS },
+    'DELETE /api/terminal/sessions/t-1': { ok: true },
+  }) });
+  await pane.open();
+  await tick();
+  doc.querySelector('.term-tab-close').click();
+  await tick();
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].danger, undefined, 'nothing is lost: a plain button, not a red one');
+  assert.match(asked[0].message, /2 commands have run in r1 · app/);
+  assert.match(asked[0].message, /npm test is still running/);
+  assert.deepEqual(deletes(calls), [], 'No: nothing is closed');
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'New terminal']);
+  answer = true;
+  doc.querySelector('.term-tab-close').click();
+  await tick();
+  assert.deepEqual(deletes(calls), ['/api/terminal/sessions/t-1']);
+  assert.deepEqual(tabTexts(doc), ['New terminal']);
+  assert.match(xt.writes.join(''), /terminal closed — press Enter for a new one/);
+  assert.equal(posts(calls).length, 0, 'no new shell unasked');
+});
+
+test('a failed close keeps the tab attached and says why', async () => {
+  const { pane, doc, sent } = makePane({ ctx: RUN_CTX, routes: attachedRoutes({
+    'DELETE /api/terminal/sessions/t-1': { __status: 404, error: 'No running terminal with that id.' },
+  }) });
+  await pane.open();
+  await tick();
+  doc.querySelector('.term-tab-close').click();
+  await tick();
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'New terminal']);
+  assert.equal(doc.querySelector('.term-tab[aria-selected="true"]').textContent, 'r1 · app');
+  assert.ok(!sent.some((m) => m.type === 'term-detach'));
+  assert.match(doc.querySelector('.term-error').textContent, /No running terminal/);
 });
 
 test('the (+) tab starts another shell in the same folder and attaches it; a tab click switches back', async () => {

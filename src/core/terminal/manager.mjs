@@ -94,7 +94,7 @@ export class TerminalManager extends EventEmitter {
     const s = {
       snap: { id, scope, label, runId, member, projectKey, branch, cwd, shell: shell.file, shellKind: shell.kind, mode, integration: false,
         status: 'running', exitCode: null, pid: proc.pid ?? null, createdBy: by, createdAt: iso(at), endedAt: null, closedBy: null,
-        runLive: !!runLive, folder: 'ok' },
+        runLive: !!runLive, folder: 'ok', commands: 0 },
       proc, parser: new MarkerParser({ nonce }), chunks: [], chunkChars: 0, seq: 0, pendingOut: '', flushTimer: null,
       block: null, blockSeq: 0, lastInputBy: by, cwdNow: cwd, ino, stopTimer: null, closing: null, exitWaiters: [],
     };
@@ -121,7 +121,11 @@ export class TerminalManager extends EventEmitter {
     const s = this.sessions.get(id);
     if (!s || s.snap.status !== 'running' || typeof data !== 'string') return false;
     const text = data.slice(0, MAX_INPUT);
-    if (/[\r\n]/.test(text)) s.lastInputBy = by;
+    if (/[\r\n]/.test(text)) {
+      s.lastInputBy = by;
+      // A shell without blocks (sh, fish, cmd.exe) never says when a command ran: a submitted line counts.
+      if (!s.snap.integration && s.snap.commands++ === 0) this.emit('status', snapshot(s));
+    }
     s.proc.write(text);
     return true;
   }
@@ -242,6 +246,7 @@ export class TerminalManager extends EventEmitter {
     if (ev.type === 'start') {
       const at = this.now();
       s.blockSeq += 1;
+      s.snap.commands = s.blockSeq;
       s.block = { seq: s.blockSeq, command: ev.command, startedAt: at, out: '', bytes: 0, truncated: false, runBy: s.lastInputBy, stopRequestedBy: null };
       const rec = store.startBlock({ sessionId: s.snap.id, seq: s.blockSeq, command: ev.command, cwd: s.cwdNow,
         runId: s.snap.runId, member: s.snap.member, runBy: s.lastInputBy, now: at });

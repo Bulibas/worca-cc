@@ -23,7 +23,10 @@ any page. On a run or a project page it shows a live shell right away: it reatta
 The header holds the title and **×**, which hides the pane: the shell keeps running, and opening the
 pane again on the same page reattaches it. Below it is a tab for each open terminal of the page, then a
 small **+** tab that starts another shell in the same folder (a second shell of a folder is numbered,
-like `demo · main 2`). Click a tab to switch; `exit` in a shell closes it. Below it is the terminal's folder, with a warning or the member select when they apply. Worca starts a shell for a page at
+like `demo · main 2`). Click a tab to switch. The **×** on a tab closes that terminal, or type `exit` in
+it. A terminal that has run a command asks first; one that has not closes at once. In a shell without
+recorded commands (sh, fish, cmd.exe) any line you submitted counts. Closing the shown terminal switches
+to the page's next one, or leaves the line that starts a new one on Enter. Below it is the terminal's folder, with a warning or the member select when they apply. Worca starts a shell for a page at
 most once each time you open the pane. When the shell ends (you typed `exit`, or it died) or Worca
 restarts, the terminal says so and starts a new one only when you press Enter.
 
@@ -43,7 +46,7 @@ remote or tag reaches, is never removed automatically; the DELETE needs `force: 
 
 Each terminal has an id, a folder, a status (`running`, `exited`, `closed`, `interrupted`), an exit
 code and its output. It survives a page reload: the pane replays the last 512 KB. It ends when the
-shell exits (type `exit`), when `DELETE /api/terminal/sessions/<id>` closes it, or when Worca stops. A terminal left running by a
+shell exits (type `exit`), when its tab's **×** or `DELETE /api/terminal/sessions/<id>` closes it, or when Worca stops. A terminal left running by a
 Worca that crashed is stopped on the next start and shows as `interrupted`. At most 16 run at once.
 
 When a run finishes, its worktree is removed (and re-created if a keep policy keeps it). A terminal
@@ -104,7 +107,7 @@ at, so the first Ctrl+C also reaches those background jobs. A stop through the A
 stopped it. In a shell without blocks (sh, fish, cmd.exe), Worca cannot tell when a command ends, so
 the stop API sends Ctrl+C only and never escalates.
 
-To end a terminal, type `exit`; `DELETE /api/terminal/sessions/<id>` closes it from outside. The stop
+To end a terminal, type `exit` or press its tab's **×**; `DELETE /api/terminal/sessions/<id>` closes it from outside. The stop
 and close APIs always work, even when the terminal is turned off. Discarding a run's checkout closes
 the terminals open in it, as it stops the run's Actions.
 
