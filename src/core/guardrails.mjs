@@ -51,6 +51,28 @@ const NORMAL_DENY = [
   'Bash(pnpm publish)', 'Bash(pnpm publish:*)',
 ];
 
+// Worca's own state (Read+Edit protected): the DB, MCP/plugin secrets, settings
+// and the MCP registry. `//` = absolute from the fs root (a bare `**/x` would
+// anchor to cwd — same convention as ASK_DENY_RULES in ask/spawn.mjs). Only the
+// conventional `.worca-cc` home basename is matched; a custom WORCA_HOME (e.g.
+// Docker's /worca) is not, same as Ask. runs/ and store/ are deliberately NOT
+// denied: agents' worktrees live in <home>/runs/<id>/ and artifacts in <home>/store/.
+const WORCA_STATE_PROTECTED = [
+  '//**/worca-cc.db*', '//**/worca.db*',
+  '//**/.worca-cc/**/secrets.json',
+  '//**/.worca-cc/settings.json',
+  '//**/.worca-cc/mcp/**',
+];
+
+// Code the Worca server later loads: Edit-only denies (agents may still READ
+// plugin skills etc.), so a prompt-injected agent can't plant host code or
+// tamper with guardrail policy.
+const WORCA_STATE_DENY = [
+  'Edit(//**/.worca-cc/plugins/**)', 'Edit(//**/.worca-cc/scripts/**)',
+  'Edit(//**/.worca-cc/agents/**)', 'Edit(//**/.worca-cc/workflows/**)',
+  'Edit(//**/.worca-cc/policy/**)',
+];
+
 /**
  * The built-in levels. `custom` is not here — it resolves from storage.
  * permissive IS DEFAULT_GUARDRAILS (same object): an unconfigured project and a
@@ -68,8 +90,8 @@ export const GUARDRAIL_PRESETS = deepFreeze({
     honorProjectSettings: true,
     envScrub: false,
     envAllowlist: [],
-    protectedPaths: [...NORMAL_PROTECTED],
-    deny: [...NORMAL_DENY],
+    protectedPaths: [...NORMAL_PROTECTED, ...WORCA_STATE_PROTECTED],
+    deny: [...NORMAL_DENY, ...WORCA_STATE_DENY],
   },
   secure: {
     honorProjectSettings: true,
@@ -77,6 +99,7 @@ export const GUARDRAIL_PRESETS = deepFreeze({
     envAllowlist: [],
     protectedPaths: [
       ...NORMAL_PROTECTED,
+      ...WORCA_STATE_PROTECTED,
       '.npmrc', '.netrc',            // token-bearing rc files (project-level)
       '*.tfstate*',                  // terraform state embeds raw secrets
       '*.keystore', '*.jks',
@@ -85,9 +108,11 @@ export const GUARDRAIL_PRESETS = deepFreeze({
       '~/.git-credentials',          // git credential-store: plaintext https://user:token@ lines
       '~/.ssh/**', '~/.aws/**', '~/.config/gcloud/**', '~/.kube/**', '~/.config/gh/**',  // gh hosts.yml holds the OAuth token
       '~/.npmrc', '~/.netrc', '~/.docker/config.json',
+      '~/.claude/.credentials.json', '~/.gnupg/**',  // NOT ~/.claude/**: agents load skills from ~/.claude/skills
     ],
     deny: [
       ...NORMAL_DENY,
+      ...WORCA_STATE_DENY,
       'Bash(curl)', 'Bash(curl:*)', 'Bash(wget)', 'Bash(wget:*)',
       'Bash(nc)', 'Bash(nc:*)', 'Bash(ncat)', 'Bash(ncat:*)', 'Bash(netcat)', 'Bash(netcat:*)',
       'Bash(telnet)', 'Bash(telnet:*)',

@@ -244,8 +244,8 @@ Every finished run keeps its full record, one tab each in **Runs**: **Overview**
   **New pipeline › Advanced** offers the built-in **Permissive / Normal /
   Strict** tiers plus your own sets; Permissive, the default, adds no rules.
   Normal protects credential files (`.env*`, keys, cert stores, container
-  secrets) and blocks publication commands (`git push`,
-  `npm`/`yarn`/`pnpm publish`); Strict adds an environment scrub on agent spawn, denies
+  secrets, Worca's own DB and settings) and blocks publication commands
+  (`git push`, `npm`/`yarn`/`pnpm publish`); Strict adds an environment scrub on agent spawn, denies
   network-egress tools, `gh`, `docker push`, cloud CLIs and
   `WebFetch`/`WebSearch`, and protects home-dir credential stores. A team
   policy can preset the picker and warn when a run's set ranks below its

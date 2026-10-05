@@ -108,12 +108,19 @@ test('preset table snapshot — changing a preset is a deliberate, release-noted
     honorProjectSettings: true,
     envScrub: false,
     envAllowlist: [],
-    protectedPaths: ['.env*', '*.pem', '*.key', 'id_rsa', 'id_ed25519', '*.p12', '*.pfx', '//run/secrets/**'],
+    protectedPaths: [
+      '.env*', '*.pem', '*.key', 'id_rsa', 'id_ed25519', '*.p12', '*.pfx', '//run/secrets/**',
+      '//**/worca-cc.db*', '//**/worca.db*', '//**/.worca-cc/**/secrets.json',
+      '//**/.worca-cc/settings.json', '//**/.worca-cc/mcp/**',
+    ],
     deny: [
       'Bash(git push)', 'Bash(git push:*)',
       'Bash(npm publish)', 'Bash(npm publish:*)',
       'Bash(yarn publish)', 'Bash(yarn publish:*)',
       'Bash(pnpm publish)', 'Bash(pnpm publish:*)',
+      'Edit(//**/.worca-cc/plugins/**)', 'Edit(//**/.worca-cc/scripts/**)',
+      'Edit(//**/.worca-cc/agents/**)', 'Edit(//**/.worca-cc/workflows/**)',
+      'Edit(//**/.worca-cc/policy/**)',
     ],
   });
   assert.deepEqual(GUARDRAIL_PRESETS.secure, {
@@ -122,16 +129,22 @@ test('preset table snapshot — changing a preset is a deliberate, release-noted
     envAllowlist: [],
     protectedPaths: [
       '.env*', '*.pem', '*.key', 'id_rsa', 'id_ed25519', '*.p12', '*.pfx', '//run/secrets/**',
+      '//**/worca-cc.db*', '//**/worca.db*', '//**/.worca-cc/**/secrets.json',
+      '//**/.worca-cc/settings.json', '//**/.worca-cc/mcp/**',
       '.npmrc', '.netrc', '*.tfstate*', '*.keystore', '*.jks',
       '**/secrets/**', '**/.git/config', '~/.git-credentials',
       '~/.ssh/**', '~/.aws/**', '~/.config/gcloud/**', '~/.kube/**', '~/.config/gh/**',
       '~/.npmrc', '~/.netrc', '~/.docker/config.json',
+      '~/.claude/.credentials.json', '~/.gnupg/**',
     ],
     deny: [
       'Bash(git push)', 'Bash(git push:*)',
       'Bash(npm publish)', 'Bash(npm publish:*)',
       'Bash(yarn publish)', 'Bash(yarn publish:*)',
       'Bash(pnpm publish)', 'Bash(pnpm publish:*)',
+      'Edit(//**/.worca-cc/plugins/**)', 'Edit(//**/.worca-cc/scripts/**)',
+      'Edit(//**/.worca-cc/agents/**)', 'Edit(//**/.worca-cc/workflows/**)',
+      'Edit(//**/.worca-cc/policy/**)',
       'Bash(curl)', 'Bash(curl:*)', 'Bash(wget)', 'Bash(wget:*)',
       'Bash(nc)', 'Bash(nc:*)', 'Bash(ncat)', 'Bash(ncat:*)', 'Bash(netcat)', 'Bash(netcat:*)',
       'Bash(telnet)', 'Bash(telnet:*)',
@@ -149,6 +162,25 @@ test('preset table snapshot — changing a preset is a deliberate, release-noted
   }
   // Presets are deep-frozen — mutation attempts throw or no-op, never corrupt the table.
   assert.throws(() => { GUARDRAIL_PRESETS.normal.deny.push('Bash(x)'); }, TypeError);
+});
+
+test('worca state: DB/secrets/MCP are Read+Edit denied; plugins etc. are Edit-only', () => {
+  const rules = guardrailsToPermissionRules(GUARDRAIL_PRESETS.normal).deny;
+  for (const r of ['Read(//**/worca-cc.db*)', 'Edit(//**/.worca-cc/mcp/**)', 'Edit(//**/.worca-cc/plugins/**)']) {
+    assert.ok(rules.includes(r), `${r} present`);
+  }
+  assert.ok(!rules.some((r) => r.startsWith('Read(') && r.includes('.worca-cc/plugins')), 'plugins stay readable');
+});
+
+test('worca state: runs/store/memory and ~/.claude/** are deliberately not denied', () => {
+  for (const level of ['normal', 'secure']) {
+    const rules = guardrailsToPermissionRules(GUARDRAIL_PRESETS[level]).deny;
+    for (const r of rules) {
+      assert.ok(!/\.worca-cc\/(runs|store|memory)/.test(r), `${level}: ${r}`);
+      assert.notEqual(r, '~/.claude/**');
+      assert.notEqual(r, 'Read(~/.claude/**)');
+    }
+  }
 });
 
 test('legacy-parity chain: unset and permissive both resolve to the empty policy', () => {
