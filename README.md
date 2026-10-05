@@ -246,8 +246,8 @@ Every finished run keeps its full record, one tab each in **Runs**: **Overview**
   Normal protects credential files (`.env*`, keys, cert stores, container
   secrets) and blocks publication commands (`git push`,
   `npm`/`yarn`/`pnpm publish`); Strict adds an environment scrub on agent spawn, denies
-  network-egress tools, `gh`, `docker push`, cloud CLIs and
-  `WebFetch`/`WebSearch`, and protects home-dir credential stores. A team
+  network-egress tools (including git clone/fetch/pull, DNS and download
+  CLIs), `gh`, `docker push`, cloud CLIs and `WebFetch`/`WebSearch`, and protects home-dir credential stores. A team
   policy can preset the picker and warn when a run's set ranks below its
   minimum tier.
 - **Managed in Settings › Guardrails** — the tab (Advanced) lists every set

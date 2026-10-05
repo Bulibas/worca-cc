@@ -140,6 +140,13 @@ test('preset table snapshot — changing a preset is a deliberate, release-noted
       'Bash(gh)', 'Bash(gh:*)',
       'Bash(docker push)', 'Bash(docker push:*)',
       'Bash(aws)', 'Bash(aws:*)', 'Bash(gcloud)', 'Bash(gcloud:*)', 'Bash(az)', 'Bash(az:*)',
+      'Bash(git clone)', 'Bash(git clone:*)', 'Bash(git fetch)', 'Bash(git fetch:*)',
+      'Bash(git pull)', 'Bash(git pull:*)', 'Bash(git ls-remote)', 'Bash(git ls-remote:*)',
+      'Bash(git remote add)', 'Bash(git remote add:*)', 'Bash(git remote set-url)', 'Bash(git remote set-url:*)',
+      'Bash(dig)', 'Bash(dig:*)', 'Bash(nslookup)', 'Bash(nslookup:*)',
+      'Bash(socat)', 'Bash(socat:*)',
+      'Bash(openssl s_client)', 'Bash(openssl s_client:*)',
+      'Bash(aria2c)', 'Bash(aria2c:*)', 'Bash(lynx)', 'Bash(lynx:*)', 'Bash(w3m)', 'Bash(w3m:*)',
       'WebFetch', 'WebSearch',
     ],
   });
@@ -149,6 +156,25 @@ test('preset table snapshot — changing a preset is a deliberate, release-noted
   }
   // Presets are deep-frozen — mutation attempts throw or no-op, never corrupt the table.
   assert.throws(() => { GUARDRAIL_PRESETS.normal.deny.push('Bash(x)'); }, TypeError);
+});
+
+test('Strict denies the extra egress commands (exact+prefix); Normal denies none', () => {
+  const cmds = [
+    'git clone', 'git fetch', 'git pull', 'git ls-remote', 'git remote add', 'git remote set-url',
+    'dig', 'nslookup', 'socat', 'openssl s_client', 'aria2c', 'lynx', 'w3m',
+  ];
+  for (const c of cmds) {
+    assert.ok(GUARDRAIL_PRESETS.secure.deny.includes(`Bash(${c})`), `secure denies Bash(${c})`);
+    assert.ok(GUARDRAIL_PRESETS.secure.deny.includes(`Bash(${c}:*)`), `secure denies Bash(${c}:*)`);
+    assert.ok(!GUARDRAIL_PRESETS.normal.deny.includes(`Bash(${c})`), `normal must not deny Bash(${c})`);
+    assert.ok(!GUARDRAIL_PRESETS.normal.deny.includes(`Bash(${c}:*)`), `normal must not deny Bash(${c}:*)`);
+  }
+});
+
+test('Strict leaves local git, interpreters and installs usable', () => {
+  for (const r of ['Bash(git)', 'Bash(git:*)', 'Bash(node:*)', 'Bash(python:*)', 'Bash(npm install:*)']) {
+    assert.ok(!GUARDRAIL_PRESETS.secure.deny.includes(r), `secure must not deny ${r}`);
+  }
 });
 
 test('legacy-parity chain: unset and permissive both resolve to the empty policy', () => {
